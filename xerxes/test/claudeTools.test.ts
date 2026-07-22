@@ -284,7 +284,7 @@ test('agent creation schemas require concise titles for single and batch delegat
   expect(properties.title?.maxLength).toBe(48)
   expect(spawnProperties.agents?.type).toBe('array')
   expect(spawnProperties.agents?.minItems).toBe(1)
-  expect(spawnProperties.agents?.maxItems).toBeUndefined()
+  expect(spawnProperties.agents?.maxItems).toBe(32)
   expect(properties.run_in_background?.default).toBe(false)
   expect(properties.wait?.default).toBe(true)
   expect(spawnProperties.wait?.default).toBe(true)
@@ -313,19 +313,18 @@ test('agent creation schemas require concise titles for single and batch delegat
   expect(accepted).toMatchObject({ accepted_count: 9, omitted_count: 1, shown_count: 8 })
   expect(manager.listHandles()).toHaveLength(9)
 
-  const oversized = Array.from({ length: 1_001 }, (_, index) => ({
+  const oversized = Array.from({ length: 33 }, (_, index) => ({
     prompt: `oversized task ${index}`,
     title: `Oversized ${index}`,
   }))
-  const acceptedOversized = JSON.parse(await registry.execute(toolCall('SpawnAgents', {
+  await expect(registry.execute(toolCall('SpawnAgents', {
     agents: oversized,
     wait: false,
-  }), { metadata: {} })) as Record<string, unknown>
-  expect(acceptedOversized).toMatchObject({ accepted_count: 1_001 })
-  expect(manager.listHandles().length).toBeGreaterThan(1_000)
+  }), { metadata: {} })).rejects.toThrow('at most 32')
+  expect(manager.listHandles()).toHaveLength(9)
 })
 
-test('SpawnAgents spawns the full batch concurrently while preserving batch order', async () => {
+test('SpawnAgents runs registrations through a bounded concurrency pool while preserving batch order', async () => {
   const snapshots: SpawnedAgentSnapshot[] = []
   let activeSpawns = 0
   let peakSpawns = 0
@@ -357,12 +356,46 @@ test('SpawnAgents spawns the full batch concurrently while preserving batch orde
     omitted_count: number
   }
 
-  expect(peakSpawns).toBe(24)
+  expect(peakSpawns).toBe(8)
   expect(result.agents.map(snapshot => snapshot.name)).toEqual(agents.slice(0, 8).map(agent => agent.name))
   expect(result.omitted_count).toBe(16)
 })
 
-test('SpawnAgents accepts exactly 1000 registrations at the documented boundary', async () => {
+test('SpawnAgents honors a configured spawn concurrency override', async () => {
+  const snapshots: SpawnedAgentSnapshot[] = []
+  let activeSpawns = 0
+  let peakSpawns = 0
+  const manager: SpawnedAgentManagerPort = {
+    close: id => ({ ...agentSnapshot(id, 'closed'), previousStatus: 'running' }),
+    listHandles: () => snapshots,
+    resume: id => agentSnapshot(id),
+    sendInput: async id => agentSnapshot(id ?? 'missing'),
+    spawn: async options => {
+      activeSpawns += 1
+      peakSpawns = Math.max(peakSpawns, activeSpawns)
+      await Bun.sleep(5)
+      const snapshot = agentSnapshot(options?.nickname ?? `agent-${snapshots.length}`)
+      snapshots.push(snapshot)
+      activeSpawns -= 1
+      return snapshot
+    },
+    wait: async () => ({ completed: [], pending: snapshots }),
+  }
+  const tools = new ClaudeAgentTools({ manager, spawnConcurrency: 2 })
+  const agents = Array.from({ length: 6 }, (_, index) => ({
+    name: `pool-${index}`,
+    prompt: `task ${index}`,
+    title: `Pool task ${index}`,
+  }))
+
+  await tools.execute('SpawnAgents', { agents, wait: false }, { metadata: {} })
+
+  expect(peakSpawns).toBe(2)
+  expect(snapshots).toHaveLength(6)
+  expect(() => new ClaudeAgentTools({ manager, spawnConcurrency: 0 })).toThrow('positive integer')
+})
+
+test('SpawnAgents accepts exactly 32 registrations at the documented batch boundary', async () => {
   let registered = 0
   const snapshots: SpawnedAgentSnapshot[] = []
   const manager: SpawnedAgentManagerPort = {
@@ -379,7 +412,7 @@ test('SpawnAgents accepts exactly 1000 registrations at the documented boundary'
     wait: async () => ({ completed: [], pending: [] }),
   }
   const tools = new ClaudeAgentTools({ manager })
-  const agents = Array.from({ length: 1_000 }, (_, index) => ({
+  const agents = Array.from({ length: 32 }, (_, index) => ({
     name: `boundary-${index}`,
     prompt: `task ${index}`,
     title: `Boundary task ${index}`,
@@ -388,15 +421,24 @@ test('SpawnAgents accepts exactly 1000 registrations at the documented boundary'
 
   const result = await tools.execute('SpawnAgents', { agents, wait: false }, { metadata })
 
-  expect(registered).toBe(1_000)
+  expect(registered).toBe(32)
   expect(result).toMatchObject({
-    accepted_count: 1_000,
-    agent_count: 1_000,
+    accepted_count: 32,
+    agent_count: 32,
     shown_count: 8,
-    omitted_count: 992,
+    omitted_count: 24,
   })
   expect(JSON.stringify(result).length).toBeLessThan(5_000)
-  expect(persistedSubagentSnapshotValues(metadata)).toHaveLength(1_000)
+  expect(persistedSubagentSnapshotValues(metadata)).toHaveLength(32)
+
+  const overBoundary = Array.from({ length: 33 }, (_, index) => ({
+    name: `over-${index}`,
+    prompt: `task ${index}`,
+    title: `Over task ${index}`,
+  }))
+  await expect(tools.execute('SpawnAgents', { agents: overBoundary, wait: false }, { metadata: {} }))
+    .rejects.toThrow('at most 32')
+  expect(registered).toBe(32)
 })
 
 test('TaskListTool pages compact rows and large AwaitAgents results stay bounded', async () => {
@@ -482,19 +524,20 @@ test('SpawnAgents abort stops claiming new registrations and closes in-flight su
     wait: async () => ({ completed: [], pending: [] }),
   }
   const tools = new ClaudeAgentTools({ manager })
-  const agents = Array.from({ length: 200 }, (_, index) => ({
+  const agents = Array.from({ length: 16 }, (_, index) => ({
     name: `abort-${index}`,
     prompt: `task ${index}`,
     title: `Abort task ${index}`,
   }))
 
   const pending = tools.execute('SpawnAgents', { agents, wait: false }, { metadata: {} }, controller.signal)
-  await waitUntil(() => started.length === agents.length)
+  // With the bounded pool, only the in-flight registrations have started.
+  await waitUntil(() => started.length === 8)
   controller.abort(new Error('stop registration'))
   release.resolve()
 
   await expect(pending).rejects.toThrow('stop registration')
-  expect(started).toHaveLength(200)
+  expect(started).toHaveLength(8)
   expect(closed.sort()).toEqual([...started].sort())
 })
 
@@ -527,20 +570,20 @@ test('SpawnAgents first failure stops claiming new registrations and closes part
     wait: async () => ({ completed: [], pending: [] }),
   }
   const tools = new ClaudeAgentTools({ manager })
-  const agents = Array.from({ length: 200 }, (_, index) => ({
+  const agents = Array.from({ length: 16 }, (_, index) => ({
     name: `failure-${index}`,
     prompt: `task ${index}`,
     title: `Failure task ${index}`,
   }))
 
   const pending = tools.execute('SpawnAgents', { agents, wait: false }, { metadata: {} })
-  await waitUntil(() => started.length === agents.length)
+  await waitUntil(() => started.length === 8)
   fail.resolve()
   await Bun.sleep(0)
   release.resolve()
 
   await expect(pending).rejects.toThrow('registration failed')
-  expect(started).toHaveLength(200)
+  expect(started).toHaveLength(8)
   expect(closed.sort()).toEqual(started.filter(name => name !== 'failure-0').sort())
 })
 
@@ -856,6 +899,45 @@ test('SpawnAgents closes partial work when one parallel spawn fails', async () =
   }])
 })
 
+test('subagent outputs crossing the parent boundary are truncated with an explicit marker', async () => {
+  const huge = 'y'.repeat(20_000)
+  const snapshots = [{
+    ...agentSnapshot('loud-task', 'completed', 'loud-session'),
+    error: `E${huge}`,
+    lastOutput: huge,
+  }]
+  const manager: SpawnedAgentManagerPort = {
+    close: id => ({ ...snapshots.find(snapshot => snapshot.id === id)!, closed: true, previousStatus: 'completed', status: 'closed' }),
+    listHandles: () => snapshots,
+    resume: id => snapshots.find(snapshot => snapshot.id === id)!,
+    sendInput: async id => snapshots.find(snapshot => snapshot.id === id)!,
+    spawn: async () => snapshots[0]!,
+    wait: async () => ({ completed: [], pending: [] }),
+  }
+  const tools = new ClaudeAgentTools({ manager })
+  const context = { metadata: {}, sessionId: 'loud-session' }
+
+  const output = await tools.execute('TaskOutputTool', { task_id: 'loud-task' }, context) as string
+  expect(output.length).toBeLessThan(9_000)
+  expect(output).toContain('[truncated 12000 chars]')
+
+  const wire = await tools.execute('TaskGetTool', { task_id: 'loud-task' }, context) as {
+    error: string
+    last_output: string
+  }
+  expect(wire.last_output).toContain('[truncated 12000 chars]')
+  expect(wire.last_output.length).toBeLessThan(9_000)
+  expect(wire.error).toContain('[truncated')
+  expect(wire.error.length).toBeLessThan(9_000)
+
+  const messages = await tools.execute('CheckAgentMessages', { peek: true }, context) as {
+    events: Array<{ event: string; output?: string }>
+  }
+  const outputEvent = messages.events.find(event => event.event === 'agent_output')
+  expect(outputEvent?.output).toContain('[truncated 12000 chars]')
+  expect(outputEvent?.output?.length).toBeLessThan(9_000)
+})
+
 test('Claude workflow tools preserve session todos/modes, bridge questions, and run injected plans', async () => {
   const prompts = new UserPromptManager({ idFactory: () => 'question' })
   const manager = new SpawnedAgentManager({
@@ -949,6 +1031,45 @@ test('Claude MCP tools call native MCP clients and enumerate resources', async (
   })
 })
 
+test('Claude MCP tools bound oversized content and resource listings with truncation markers', async () => {
+  const client = new MCPClient({ name: 'demo', command: 'unused' })
+  const huge = 'z'.repeat(40_000)
+  client.callTool = async () => ({
+    content: [{ type: 'text', text: huge }],
+    structuredContent: { blob: huge },
+  })
+  client.listResources = async () => Array.from({ length: 600 }, (_, index) => ({
+    description: `Resource ${index}`,
+    mimeType: 'text/plain',
+    name: `res-${index}`,
+    serverName: 'demo',
+    uri: `memo://res-${index}`,
+  }))
+  client.readResource = async () => ({ contents: [{ mimeType: 'text/plain', text: huge, uri: 'memo://big' }] })
+  const clients = new MCPClientRegistry()
+  clients.register(client)
+  const registry = new ToolRegistry()
+  registerClaudeMcpTools(registry, { clients })
+
+  const tool = await executeJson(registry, 'MCPTool', { server_name: 'demo', tool_name: 'big' }) as {
+    content: Array<{ text: string }>
+    structured_content: Record<string, unknown>
+  }
+  expect(tool.content[0]?.text).toContain('[truncated 8000 chars]')
+  expect(tool.content[0]?.text.length).toBeLessThan(33_000)
+  expect(tool.structured_content).toMatchObject({ truncated: true })
+
+  const listing = await executeJson(registry, 'ListMcpResourcesTool', {}) as Array<Record<string, unknown>>
+  expect(listing).toHaveLength(501)
+  expect(listing.at(-1)).toMatchObject({ omitted_count: 100, truncated: true })
+
+  const read = await executeJson(registry, 'ReadMcpResourceTool', { server_name: 'demo', uri: 'memo://big' }) as {
+    contents: Array<{ text: string }>
+  }
+  expect(read.contents[0]?.text).toContain('[truncated 8000 chars]')
+  expect(read.contents[0]?.text.length).toBeLessThan(33_000)
+})
+
 test('Claude remote tools enforce configured endpoints and persist cron jobs', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'xerxes-claude-tools-'))
   try {
@@ -969,12 +1090,34 @@ test('Claude remote tools enforce configured endpoints and persist cron jobs', a
     expect(payloads).toEqual(['done', ''])
     await expect(executeJson(registry, 'RemoteTriggerTool', { trigger_name: 'missing' }))
       .rejects.toThrow('is not configured')
-    const job = await executeJson(registry, 'ScheduleCronTool', { schedule: '0 9 * * *', prompt: 'daily report', name: 'daily' }) as {
+    const cronStore = new JobStore(join(directory, 'cron-jobs.json'))
+    const cronRegistry = new ToolRegistry()
+    registerClaudeRemoteTools(cronRegistry, { cronStore })
+    const job = await executeJson(cronRegistry, 'ScheduleCronTool', { schedule: '0 9 * * *', prompt: 'daily report', name: 'daily' }) as {
       id: string
+      name: string | null
       next_run_at: string
     }
-    expect(job.id).toBe('daily')
+    // Job ids are minted server-side; the caller name is only a label.
+    expect(job.id).not.toBe('daily')
+    expect(job.id).toMatch(/^[0-9a-f]{12}$/)
+    expect(job.name).toBe('daily')
     expect(job.next_run_at).toContain('T')
+
+    // A second schedule with the same name creates a new job instead of
+    // overwriting the first one through a caller-chosen id.
+    const second = await executeJson(cronRegistry, 'ScheduleCronTool', { schedule: '0 10 * * *', prompt: 'other report', name: 'daily' }) as {
+      id: string
+    }
+    expect(second.id).not.toBe(job.id)
+    expect(cronStore.listJobs()).toHaveLength(2)
+
+    // Over-limit prompts are rejected before anything is persisted.
+    await expect(executeJson(cronRegistry, 'ScheduleCronTool', {
+      schedule: '0 9 * * *',
+      prompt: 'x'.repeat(4_001),
+    })).rejects.toThrow('at most 4000 characters')
+    expect(cronStore.listJobs()).toHaveLength(2)
 
     const unconfigured = new ToolRegistry()
     registerClaudeRemoteTools(unconfigured, { cronStore: new JobStore(join(directory, 'unconfigured-jobs.json')) })

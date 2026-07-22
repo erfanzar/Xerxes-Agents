@@ -203,6 +203,11 @@ export class GeminiClient implements LlmClient {
         ...(signal === undefined ? {} : { signal }),
       })
     } catch (error) {
+      // Cancellation must surface unchanged so callers classify it as a user
+      // interrupt instead of a provider failure.
+      if (isAbortError(error)) {
+        throw error
+      }
       throw new ProviderError('gemini', 'completion request failed before receiving a response', error)
     }
     if (!response.ok) {
@@ -260,6 +265,9 @@ export class GeminiClient implements LlmClient {
         ...(signal === undefined ? {} : { signal }),
       })
     } catch (error) {
+      if (isAbortError(error)) {
+        throw error
+      }
       throw new ProviderError('gemini', 'stream request failed before receiving a response', error)
     }
     if (!response.ok) {
@@ -398,6 +406,13 @@ function geminiContentPart(part: ContentPart): GeminiPart[] {
   }
   const inlineData = inlineDataFromUrl(part.image_url.url)
   return inlineData === undefined ? [{ text: `[Image: ${part.image_url.url}]` }] : [{ inlineData }]
+}
+
+/** Detect fetch aborts by their DOMException name so cancellation is never wrapped. */
+function isAbortError(error: unknown): boolean {
+  return typeof error === 'object'
+    && error !== null
+    && (error as { readonly name?: unknown }).name === 'AbortError'
 }
 
 function inlineDataFromUrl(value: string): GeminiInlineData | undefined {

@@ -339,7 +339,8 @@ export class SecurityConfig {
       rate_limit_per_minute: this.rateLimitPerMinute,
       rate_limit_per_hour: this.rateLimitPerHour,
       enable_authentication: this.enableAuthentication,
-      api_key: this.apiKey ?? null,
+      // Secrets are redacted from serialization; only the env-var pointer persists.
+      api_key: null,
       api_key_env_var: this.apiKeyEnvVar,
     }
   }
@@ -405,7 +406,9 @@ export class LLMConfig {
     this.provider = values.provider
     this.model = values.model
     this.apiKeyEnvVar = values.apiKeyEnvVar
-    this.apiKey = values.apiKey ?? environment[this.apiKeyEnvVar]
+    // Blank or whitespace-only environment credentials are treated as absent.
+    const environmentKey = environment[this.apiKeyEnvVar]?.trim()
+    this.apiKey = values.apiKey ?? (environmentKey || undefined)
     this.baseUrl = values.baseUrl
     this.temperature = values.temperature
     this.maxTokens = values.maxTokens
@@ -425,7 +428,8 @@ export class LLMConfig {
     return {
       provider: this.provider,
       model: this.model,
-      api_key: this.apiKey ?? null,
+      // Secrets are redacted from serialization; only the env-var pointer persists.
+      api_key: null,
       api_key_env_var: this.apiKeyEnvVar,
       base_url: this.baseUrl ?? null,
       temperature: this.temperature,
@@ -535,7 +539,9 @@ export class ObservabilityConfig {
       traceEndpoint: optionalStringField(['trace_endpoint']),
       metricsEndpoint: optionalStringField(['metrics_endpoint']),
       serviceName: stringField('xerxes', ['service_name']),
-      serviceVersion: stringField('0.2.6', ['service_version']),
+      // Keep in sync with xerxes/package.json "version"; the bundled runtime
+      // cannot read package.json at module load time.
+      serviceVersion: stringField('0.3.0', ['service_version']),
       enableRequestLogging: booleanField(true, ['enable_request_logging']),
       enableResponseLogging: booleanField(false, ['enable_response_logging']),
       enableFunctionLogging: booleanField(true, ['enable_function_logging']),
@@ -779,13 +785,24 @@ export function deepMerge(
 
 function readConfigFile(path: string): Record<string, unknown> {
   const extension = configExtension(path)
-  const content = readFileSync(path, 'utf8')
+  let content: string
+  try {
+    content = readFileSync(path, 'utf8')
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    throw new ConfigurationError(path, `cannot be read: ${message}`, {}, { cause: error })
+  }
   let parsed: unknown
   try {
     parsed = extension === '.json' ? JSON.parse(content) : Bun.YAML.parse(content)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    throw new ConfigurationError(path, `contains invalid ${extension.slice(1).toUpperCase()}: ${message}`)
+    throw new ConfigurationError(
+      path,
+      `contains invalid ${extension.slice(1).toUpperCase()}: ${message}`,
+      {},
+      { cause: error },
+    )
   }
   return plainRecord(parsed, path)
 }

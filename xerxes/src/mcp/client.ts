@@ -3,12 +3,14 @@
 
 import type { JsonObject, JsonSchema } from '../types/toolCalls.js'
 import { MCPHttpClientTransport } from './http.js'
+import { mcpConfigSecrets, scrubCredentials } from './reconnect.js'
 import {
   MCP_PROTOCOL_VERSION,
   MCP_STREAMABLE_HTTP_PROTOCOL_VERSION,
   MCPConnectionError,
   MCPProtocolError,
   MCPRemoteError,
+  MCPSessionExpiredError,
   type MCPCapabilities,
   type MCPClientOptions,
   type MCPContent,
@@ -39,6 +41,9 @@ import {
 
 const DEFAULT_TIMEOUT_MS = 30_000
 const MAX_STDERR_CHARS = 16_384
+const MAX_STDERR_DETAIL_CHARS = 1_024
+const MAX_STDOUT_BUFFER_CHARS = 1_048_576
+const PROCESS_KILL_GRACE_MS = 250
 
 interface PendingRequest {
   readonly detach?: () => void
@@ -80,6 +85,7 @@ export class MCPClient {
   private readonly pending = new Map<MCPJsonRpcId, PendingRequest>()
   private httpTransport: MCPHttpClientTransport | undefined
   private process: Bun.PipedSubprocess | undefined
+  private sessionRecovery: Promise<void> | undefined
   private stderrOutput = ''
   private stdoutReader: ReadableStreamDefaultReader<Uint8Array> | undefined
 
@@ -107,23 +113,29 @@ export class MCPClient {
         throw new MCPConnectionError(`MCP transport ${String(transport)} is not supported`)
       }
 
-      const result = await this.request('initialize', {
-        capabilities: this.config.clientCapabilities ?? {},
-        clientInfo: this.config.clientInfo ?? { name: 'xerxes', version: '0.3.0' },
-        protocolVersion: this.config.protocolVersion ?? defaultProtocolVersion(transport),
-      }, true)
-      this.initializeResult = parseInitializeResult(result)
-      this.serverCapabilities = this.initializeResult.capabilities
-      this.serverInfo = this.initializeResult.serverInfo
-      this.httpTransport?.setProtocolVersion(this.initializeResult.protocolVersion)
-      this.sessionId = this.httpTransport?.getSessionId()
-      this.connected = true
-      await this.notify('notifications/initialized')
+      await this.performHandshake()
       await this.refreshCapabilities()
     } catch (error) {
       await this.disconnect()
       throw error
     }
+  }
+
+  /** Run the MCP initialize handshake against the active transport. */
+  private async performHandshake(): Promise<void> {
+    const transport = this.config.transport ?? 'stdio'
+    const result = await this.request('initialize', {
+      capabilities: this.config.clientCapabilities ?? {},
+      clientInfo: this.config.clientInfo ?? { name: 'xerxes', version: '0.3.0' },
+      protocolVersion: this.config.protocolVersion ?? defaultProtocolVersion(transport),
+    }, true)
+    this.initializeResult = parseInitializeResult(result)
+    this.serverCapabilities = this.initializeResult.capabilities
+    this.serverInfo = this.initializeResult.serverInfo
+    this.httpTransport?.setProtocolVersion(this.initializeResult.protocolVersion)
+    this.sessionId = this.httpTransport?.getSessionId()
+    this.connected = true
+    await this.notify('notifications/initialized')
   }
 
   /** Close the active transport and reject every request still awaiting a response. */
@@ -155,10 +167,12 @@ export class MCPClient {
       if (process.exitCode === null) {
         process.kill('SIGTERM')
       }
-      await Promise.race([process.exited, sleep(250)])
+      await Promise.race([process.exited, sleep(PROCESS_KILL_GRACE_MS)])
       if (process.exitCode === null) {
         process.kill('SIGKILL')
-        await process.exited
+        // A wedged process must not hang disconnect forever; bound the wait
+        // the same way the SIGTERM path is bounded.
+        await Promise.race([process.exited, sleep(PROCESS_KILL_GRACE_MS)])
       }
     }
     this.closing = false
@@ -333,7 +347,7 @@ export class MCPClient {
         this.rejectPendingRequest(id, new MCPConnectionError(`MCP request ${method} was aborted`))
         return
       }
-      void this.send(frame).then(
+      void this.sendWithSessionRecovery(frame).then(
         () => {
           if (httpTransport?.expectsResponseInBody && this.pending.has(id)) {
             this.rejectPendingRequest(
@@ -352,6 +366,33 @@ export class MCPClient {
       ? { jsonrpc: '2.0', method }
       : { jsonrpc: '2.0', method, params }
     await this.send(notification)
+  }
+
+  /**
+   * Send a frame, and when a Streamable HTTP server reports that the active
+   * session is gone (HTTP 404), re-run the initialize handshake once and
+   * retry the frame against the fresh session.
+   */
+  private async sendWithSessionRecovery(
+    frame: MCPJsonRpcNotification | MCPJsonRpcRequest | MCPJsonRpcResponse,
+  ): Promise<void> {
+    try {
+      await this.send(frame)
+    } catch (error) {
+      if (!(error instanceof MCPSessionExpiredError) || isInitializeFrame(frame)) {
+        throw error
+      }
+      await this.recoverHttpSession()
+      await this.send(frame)
+    }
+  }
+
+  /** Re-initialize an expired HTTP session, deduplicating concurrent recoveries. */
+  private recoverHttpSession(): Promise<void> {
+    this.sessionRecovery ??= this.performHandshake().finally(() => {
+      this.sessionRecovery = undefined
+    })
+    return this.sessionRecovery
   }
 
   private async send(frame: MCPJsonRpcNotification | MCPJsonRpcRequest | MCPJsonRpcResponse): Promise<void> {
@@ -382,6 +423,25 @@ export class MCPClient {
         }
         buffer += decoder.decode(value, { stream: true })
         buffer = this.consumeLines(buffer)
+        if (buffer.length > MAX_STDOUT_BUFFER_CHARS) {
+          // A server that streams an unterminated line would otherwise grow
+          // this buffer without bound. Fail the pending requests and close
+          // the transport rather than letting memory balloon.
+          const overflow = new MCPConnectionError(
+            `MCP server ${this.config.name} exceeded the ${MAX_STDOUT_BUFFER_CHARS} character stdout buffer without a complete line`,
+          )
+          this.connected = false
+          this.rejectPending(overflow)
+          try {
+            await reader.cancel()
+          } catch {
+            // The stream may already be closed.
+          }
+          if (this.process === process && process.exitCode === null) {
+            process.kill('SIGKILL')
+          }
+          return
+        }
       }
       buffer += decoder.decode()
       if (buffer.trim()) {
@@ -519,7 +579,10 @@ export class MCPClient {
       return
     }
     this.connected = false
-    const stderr = this.stderrOutput.trim()
+    // Subprocess stderr can echo configured env or header values; redact them
+    // and keep only the most recent excerpt before embedding it in an error.
+    const redacted = scrubCredentials(this.stderrOutput.trim(), mcpConfigSecrets(this.config))
+    const stderr = redacted.slice(-MAX_STDERR_DETAIL_CHARS)
     const detail = stderr ? `: ${stderr}` : ''
     this.rejectPending(new MCPConnectionError(`MCP server ${this.config.name} exited with code ${exitCode}${detail}`))
   }
@@ -714,6 +777,10 @@ function asMcpError(error: unknown): Error {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function isInitializeFrame(frame: MCPJsonRpcNotification | MCPJsonRpcRequest | MCPJsonRpcResponse): boolean {
+  return 'method' in frame && frame.method === 'initialize'
 }
 
 /** Register a one-shot abort listener and return a detach callback. */

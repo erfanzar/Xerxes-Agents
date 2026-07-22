@@ -76,8 +76,16 @@ export function normalizeDaemonTranscript(raw: unknown, options: TranscriptLoadO
     return undefined
   }
   const messages = raw.messages
-  if (!Array.isArray(messages) || !messages.every(isRecord)) {
+  if (!Array.isArray(messages)) {
     return undefined
+  }
+  // One malformed entry must not destroy the whole transcript: drop it and
+  // keep the rest, since load() returning undefined would let the next save
+  // atomically overwrite the persisted history.
+  const validMessages = messages.filter(isRecord)
+  const droppedMessages = messages.length - validMessages.length
+  if (droppedMessages > 0) {
+    console.warn(`Skipping ${droppedMessages} malformed message(s) in transcript ${stringValue(raw.session_id) || options.requestedSessionKey}`)
   }
   const rawSessionId = stringValue(raw.session_id) || options.requestedSessionKey
   if (!rawSessionId) {
@@ -97,7 +105,7 @@ export function normalizeDaemonTranscript(raw: unknown, options: TranscriptLoadO
     options.currentProjectDirectory,
     options.workspaceRoot,
   )
-  const repair = repairResumedTranscript(messages)
+  const repair = repairResumedTranscript(validMessages)
   const totalApiCalls = optionalIntegerValue(raw.total_api_calls)
   return {
     format,
@@ -230,7 +238,7 @@ export class DaemonTranscriptStore {
     )
     return transcripts
       .filter((transcript): transcript is DaemonTranscript => transcript !== undefined && transcriptHasHistory(transcript))
-      .sort((left, right) => Date.parse(right.updatedAt || '1970-01-01') - Date.parse(left.updatedAt || '1970-01-01'))
+      .sort((left, right) => timestampMillis(right.updatedAt) - timestampMillis(left.updatedAt))
   }
 
   /** Remove one persisted transcript by its canonical resume id. */
@@ -299,6 +307,12 @@ function functionName(value: unknown): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** Malformed timestamps sort as the epoch instead of producing NaN orderings. */
+function timestampMillis(value: string): number {
+  const parsed = Date.parse(value)
+  return Number.isFinite(parsed) ? parsed : 0
 }
 
 function stringValue(value: unknown): string {

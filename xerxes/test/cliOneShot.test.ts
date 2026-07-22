@@ -198,6 +198,63 @@ test('one-shot CLI waits for detached subagents and synthesizes their delivered 
   }
 })
 
+test('one-shot CLI exits non-zero when the provider turn fails terminally', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-bun-cli-oneshot-fail-'))
+  const home = join(root, 'home')
+  const project = join(root, 'project')
+  const server = Bun.serve({
+    hostname: '127.0.0.1',
+    port: 0,
+    fetch() {
+      return new Response(JSON.stringify({ error: { message: 'invalid api key' } }), {
+        headers: { 'Content-Type': 'application/json' },
+        status: 401,
+      })
+    },
+  })
+  try {
+    await Promise.all([
+      mkdir(join(home, 'daemon'), { recursive: true }),
+      mkdir(project, { recursive: true }),
+    ])
+    await writeFile(
+      join(home, 'daemon', 'config.json'),
+      JSON.stringify({
+        project_directory: project,
+        runtime: {
+          model: 'gpt-4o',
+          provider: 'openai',
+          base_url: `${server.url}v1`,
+          api_key: 'test-key',
+          permission_mode: 'accept-all',
+        },
+      }),
+      'utf8',
+    )
+
+    const child = Bun.spawn([process.execPath, CLI, 'say hello'], {
+      cwd: project,
+      env: { ...process.env, XERXES_HOME: home },
+      stderr: 'pipe',
+      stdout: 'pipe',
+    })
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ])
+
+    // Scripts and CI must observe the failure through the exit code.
+    expect(exitCode).toBe(1)
+    expect(stderr).toContain('Provider error:')
+    expect(stderr).toContain('401')
+    expect(stdout).toContain('[Error:')
+  } finally {
+    server.stop(true)
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 function completionResponse(content: string): Response {
   return sseResponse([{
     choices: [{ delta: { content }, finish_reason: 'stop' }],

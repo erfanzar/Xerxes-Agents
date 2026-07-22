@@ -16,7 +16,10 @@ export const EXEC_COMMAND_DEFINITION: ToolDefinition = {
   type: 'function',
   function: {
     name: 'exec_command',
-    description: 'Run one non-interactive argv command in the workspace. The command is never interpreted by a shell.',
+    description: 'Run one non-interactive argv command with a workspace-relative working directory. '
+      + 'The command is never interpreted by a shell. The working directory is contained by the '
+      + 'workspace; the executable itself may be any installed binary and is authorized by the '
+      + 'upstream tool-policy/approval gate, not by this tool.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -60,6 +63,16 @@ export function registerProcessTools(registry: ToolRegistry, paths: WorkspacePat
   registry.register(EXEC_COMMAND_DEFINITION, (inputs, _context, signal) => executeCommand(inputs, paths, signal))
 }
 
+/**
+ * Execute one direct-argv command.
+ *
+ * Policy boundary (intentional): the charset check below blocks shell
+ * metacharacters so the command can never be reinterpreted by a shell, and
+ * `workdir` is contained by the workspace resolver. The `cmd` executable
+ * itself may still be an absolute or `../`-relative path — constraining which
+ * binaries may run is the job of the upstream tool-policy/approval gate, not
+ * of this executor, so the behavior is deliberately left unchanged here.
+ */
 export async function executeCommand(
   inputs: JsonObject,
   paths: WorkspacePathResolver,

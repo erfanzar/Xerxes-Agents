@@ -109,7 +109,10 @@ export class CompactionAgent {
 
     if (!provision.compacted || compactable === undefined) return original
     const summary = await this.summarizeContext(renderMessagesForSummary(compactable))
-    return provision.messages.map(message => replaceSummaryPlaceholder(message, summary))
+    if (!summary.trim()) return original
+    const replaced = provision.messages.map(message => replaceSummaryPlaceholder(message, summary))
+    if (this.tokenCounter.countTokens(replaced) >= currentTokens) return original
+    return replaced
   }
 }
 

@@ -43,6 +43,72 @@ test('daemon transcript normalizer repairs only orphaned contiguous tool calls',
   ])
 })
 
+test('normalizer drops malformed messages instead of rejecting the whole transcript', async () => {
+  const normalized = normalizeDaemonTranscript({
+    session_id: 'a1b2c3d4',
+    messages: [
+      { role: 'user', content: 'kept' },
+      'garbage',
+      null,
+      42,
+      ['array-is-not-a-message'],
+      { role: 'assistant', content: 'also kept' },
+    ],
+    turn_count: 2,
+  }, { currentProjectDirectory: '/project', requestedSessionKey: 'a1b2c3d4' })
+
+  expect(normalized).toBeDefined()
+  expect(normalized?.messages).toEqual([
+    { role: 'user', content: 'kept' },
+    { role: 'assistant', content: 'also kept' },
+  ])
+
+  // A persisted transcript with one corrupt entry still loads through the store:
+  // returning undefined here would let the next save overwrite all history.
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-transcript-corrupt-'))
+  try {
+    const sessionId = 'deadbeefdeadbeef'
+    const store = new DaemonTranscriptStore({ directory, currentProjectDirectory: '/project' })
+    await Bun.write(store.pathFor(sessionId), JSON.stringify({
+      session_id: sessionId,
+      messages: [{ role: 'user', content: 'survives' }, 'corrupt-entry', 12345],
+      turn_count: 1,
+      updated_at: '2026-01-01T00:00:00.000Z',
+    }))
+    const loaded = await store.load(sessionId)
+    expect(loaded?.messages).toEqual([
+      { role: 'user', content: 'survives' },
+    ])
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('list sorts malformed updated_at timestamps as the epoch instead of NaN', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-transcript-list-'))
+  try {
+    const store = new DaemonTranscriptStore({ directory, currentProjectDirectory: '/project' })
+    const make = (sessionId: string, updatedAt: string) => {
+      const transcript = normalizeDaemonTranscript({
+        session_id: sessionId,
+        updated_at: updatedAt,
+        messages: [{ role: 'user', content: 'hi' }],
+        turn_count: 1,
+      }, { requestedSessionKey: sessionId, currentProjectDirectory: '/project' })
+      if (!transcript) throw new Error('expected transcript to normalize')
+      return transcript
+    }
+    await store.save(make('aaaa1111', '2026-01-01T00:00:00.000Z'))
+    await store.save(make('bbbb2222', 'not-a-date'))
+    await store.save(make('cccc3333', '2026-06-01T00:00:00.000Z'))
+
+    const listed = await store.list()
+    expect(listed.map(transcript => transcript.sessionId)).toEqual(['cccc3333', 'aaaa1111', 'bbbb2222'])
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
 test('store writes Python-readable v2 supersets and resumes only explicit IDs', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'xerxes-transcript-'))
   const sessionId = 'a1b2c3d4e5f6a7b8'

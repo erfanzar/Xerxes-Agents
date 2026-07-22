@@ -75,3 +75,29 @@ test('ToolOutputCache supports targeted path/tool invalidation and full invalida
   expect(cache.size).toBe(0)
   expect(() => cache.invalidate({ filePath: '' })).toThrow(ToolOutputCacheError)
 })
+
+test('ToolOutputCache skips oversized entries instead of pinning unbounded results', async () => {
+  let calls = 0
+  const cache = new ToolOutputCache({
+    fileStat: () => undefined,
+    maxEntryBytes: 16,
+    monotonicNow: () => 0,
+  })
+  const executor = cache.wrap(async () => `result:${++calls}`)
+
+  // A result under the byte cap is cached and served from the cache.
+  expect(await executor('ReadFile', { file_path: 'a' })).toBe('result:1')
+  expect(await executor('ReadFile', { file_path: 'a' })).toBe('result:1')
+
+  // An over-cap result still executes but is never stored, so repeated calls
+  // re-execute and the cache cannot grow past its per-entry byte budget.
+  cache.put('ReadFile', { file_path: 'big' }, 'x'.repeat(17))
+  expect(cache.get('ReadFile', { file_path: 'big' })).toBeUndefined()
+  expect(cache.size).toBe(1)
+
+  // Multi-byte results are measured in UTF-8 bytes, not string length.
+  cache.put('ReadFile', { file_path: 'unicode' }, '€'.repeat(6)) // 18 bytes
+  expect(cache.get('ReadFile', { file_path: 'unicode' })).toBeUndefined()
+
+  expect(() => new ToolOutputCache({ maxEntryBytes: 0 })).toThrow(ToolOutputCacheError)
+})

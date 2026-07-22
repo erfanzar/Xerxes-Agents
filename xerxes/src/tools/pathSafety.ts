@@ -51,6 +51,24 @@ export class WorkspacePathResolver {
     return relative(workspaceRoot, target) || '.'
   }
 
+  /**
+   * Best-effort re-validation immediately before a mutation. resolve() checks
+   * containment at resolution time; a symlink swapped in afterwards can still
+   * redirect the mutation outside the workspace. Callers re-check the already
+   * resolved target right before write/delete/move and operate on the returned
+   * physical path. Residual race: a path component can still be swapped between
+   * this check and the kernel operation — closing it fully needs dirfd-relative
+   * syscalls, which the runtime does not expose.
+   */
+  async recheck(resolved: string): Promise<string> {
+    const workspaceRoot = await this.canonicalRoot()
+    const physicalTarget = await resolveExistingAncestor(resolved)
+    if (!isWithin(workspaceRoot, physicalTarget)) {
+      throw new WorkspacePathError(resolved, `resolves outside workspace root ${workspaceRoot}`)
+    }
+    return physicalTarget
+  }
+
   private async canonicalRoot(): Promise<string> {
     try {
       return await realpath(this.root)

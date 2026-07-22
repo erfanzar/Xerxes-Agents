@@ -94,6 +94,19 @@ test('Bun update plans require a caller-provided package or source spec', () => 
   })
 })
 
+test('an invalid explicit spec fails loudly instead of falling back to the environment spec', () => {
+  const environment = { XERXES_PACKAGE: 'github:example/xerxes#stable' }
+
+  for (const invalid of ['--unsafe', '', '   ', 'bad\nspec']) {
+    expect(() => planBunUpdate({ bunExecutable: 'bun', environment, packageSpec: invalid }))
+      .toThrow(UpdateCommandError)
+  }
+  // The environment spec is consulted only when no explicit spec was given.
+  expect(planBunUpdate({ bunExecutable: 'bun', environment }).spec).toBe('github:example/xerxes#stable')
+  expect(planBunUpdate({ bunExecutable: 'bun', environment, packageSpec: 'file:./release' }).source)
+    .toBe('argument')
+})
+
 test('named registry checks use the supplied fetch boundary and do not guess an installed version', async () => {
   const urls: string[] = []
   const available = await checkBunPackageUpdate({

@@ -1,7 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { createHmac } from 'node:crypto'
+import { createHmac, generateKeyPairSync, sign, type KeyObject } from 'node:crypto'
 
 import { expect, test } from 'bun:test'
 
@@ -326,7 +326,8 @@ test('Slack adapter verifies raw signatures, answers URL verification, and posts
   expect(calls[0]?.body).toEqual({ channel: 'C1', text: 'answer', thread_ts: '1.23' })
   expect(calls[0]?.headers.get('authorization')).toBe('Bearer xoxb-token')
 
-  const unsigned = new SlackChannel({ botToken: 'xoxb-token' })
+  // Explicit opt-out: unsigned delivery is accepted only when requireSignature is disabled.
+  const unsigned = new SlackChannel({ botToken: 'xoxb-token', requireSignature: false })
   const unsignedReceived: ChannelMessage[] = []
   await unsigned.start(async message => { unsignedReceived.push(message) })
   expect(await unsigned.handleWebhook({}, body)).toEqual({ status: 200, body: 'ok' })
@@ -339,10 +340,12 @@ test('Slack adapter verifies raw signatures, answers URL verification, and posts
 
 test('Discord webhook adapter applies routing and chunks REST replies without unexpected mentions', async () => {
   const outbound: Array<{ readonly body: Record<string, unknown>; readonly url: string }> = []
+  const { privateKey, publicKeyHex } = discordKeyPair()
   const channel = new DiscordChannel({
     token: 'discord-token',
     apiBaseUrl: 'https://discord.test/api/v10/',
     botUserId: 'bot-id',
+    publicKey: publicKeyHex,
     requireMention: true,
     addressNames: 'xerxes',
     instanceName: 'worker-a',
@@ -355,7 +358,7 @@ test('Discord webhook adapter applies routing and chunks REST replies without un
   const received: ChannelMessage[] = []
   await channel.start(async message => { received.push(message) })
 
-  await channel.handleWebhook({}, encoder.encode(JSON.stringify({
+  const firstBody = encoder.encode(JSON.stringify({
     t: 'MESSAGE_CREATE',
     d: {
       id: 'M1',
@@ -366,7 +369,8 @@ test('Discord webhook adapter applies routing and chunks REST replies without un
       mentions: [{ id: 'bot-id' }],
       channel_name: 'ops',
     },
-  })))
+  }))
+  await channel.handleWebhook(discordSignedHeaders(privateKey, firstBody), firstBody)
   expect(received).toHaveLength(1)
   expect(received[0]).toMatchObject({
     text: 'status',
@@ -375,9 +379,10 @@ test('Discord webhook adapter applies routing and chunks REST replies without un
     metadata: { guild_id: 'G1', channel_name: 'ops', chat_type: 'group' },
   })
 
-  await channel.handleWebhook({}, encoder.encode(JSON.stringify({
+  const secondBody = encoder.encode(JSON.stringify({
     channel_id: 'C1', guild_id: 'G1', content: 'unmentioned', author: { id: 'U2' },
-  })))
+  }))
+  await channel.handleWebhook(discordSignedHeaders(privateKey, secondBody), secondBody)
   expect(received).toHaveLength(1)
 
   await channel.send(createChannelMessage({
@@ -403,4 +408,20 @@ function slackSignature(secret: string, timestamp: string, body: Uint8Array): st
   return `v0=${createHmac('sha256', secret)
     .update(Buffer.concat([Buffer.from(`v0:${timestamp}:`), Buffer.from(body)]))
     .digest('hex')}`
+}
+
+function discordKeyPair(): { readonly privateKey: KeyObject; readonly publicKeyHex: string } {
+  const { publicKey, privateKey } = generateKeyPairSync('ed25519')
+  const der = publicKey.export({ format: 'der', type: 'spki' })
+  return { privateKey, publicKeyHex: Buffer.from(der).subarray(der.length - 32).toString('hex') }
+}
+
+function discordSignedHeaders(privateKey: KeyObject, body: Uint8Array): WebhookHeaders {
+  const timestamp = String(Date.now())
+  const signature = sign(
+    null,
+    Buffer.concat([Buffer.from(timestamp, 'utf8'), Buffer.from(body)]),
+    privateKey,
+  ).toString('hex')
+  return { 'x-signature-ed25519': signature, 'x-signature-timestamp': timestamp }
 }

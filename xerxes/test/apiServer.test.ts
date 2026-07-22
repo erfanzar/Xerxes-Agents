@@ -196,7 +196,6 @@ test('streaming chat completions use OpenAI SSE framing and retain tool calls', 
       created: 1_700_000_000,
       model: 'gpt-4o',
       choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
-      usage: { prompt_tokens: 7, completion_tokens: 2, total_tokens: 9 },
     },
   ])
 })
@@ -692,6 +691,176 @@ test('rate limiter evicts the idlest keys once the tracked-key bound is exceeded
 
   // The earliest key was evicted to keep the map bounded, so it is allowed again.
   expect((await server.fetch(request(), '198.51.100.1')).status).toBe(200)
+})
+
+test('rate limiter stays bounded under a flood of unique denied keys', async () => {
+  let currentTime = 1_000
+  const server = new OpenAiApiServer({
+    llm: new RecordingClient([]),
+    models: ['gpt-4o'],
+    now: () => currentTime,
+    rateLimit: { maxRequests: 1, windowMs: 60_000 },
+  })
+  const request = () => new Request('http://xerxes.test/health')
+
+  expect((await server.fetch(request(), '198.51.100.1')).status).toBe(200)
+  expect((await server.fetch(request(), '198.51.100.1')).status).toBe(429)
+
+  // Each unique caller consumes its window and is then denied: the denial
+  // path must not grow the tracked-key map past its bound either.
+  for (let index = 0; index < 10_001; index += 1) {
+    currentTime += 1
+    const key = `203.0.113.${index}`
+    expect((await server.fetch(request(), key)).status).toBe(200)
+    expect((await server.fetch(request(), key)).status).toBe(429)
+  }
+
+  // The earliest key was evicted to keep the map bounded, so it is allowed again.
+  expect((await server.fetch(request(), '198.51.100.1')).status).toBe(200)
+}, 30_000)
+
+test('streaming provider failures emit one error frame and log the original error', async () => {
+  const warn = spyOn(console, 'warn').mockImplementation(() => {})
+  const failingClient: LlmClient = {
+    async *stream(): AsyncGenerator<LlmDelta> {
+      yield { content: 'partial' }
+      throw new Error('provider exploded')
+    },
+  }
+  const server = new OpenAiApiServer({
+    llm: failingClient,
+    models: ['gpt-4o'],
+    now: fixedNow,
+    responseId: () => 'chatcmpl-fail',
+  })
+  try {
+    const response = await server.fetch(new Request('http://xerxes.test/v1/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify({
+        model: 'gpt-4o',
+        messages: [{ role: 'user', content: 'Hi.' }],
+        stream: true,
+      }),
+    }))
+    expect(response.status).toBe(200)
+    const body = await response.text()
+    expect(body).toContain('"content":"partial"')
+    expect(body).toContain('data: {"error":{"message":"Internal server error.","type":"api_error","param":null,"code":null}}')
+    expect(body).toContain('data: [DONE]')
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(String(warn.mock.calls[0]?.[0])).toContain('provider exploded')
+  } finally {
+    warn.mockRestore()
+  }
+})
+
+test('streaming client aborts close the stream without an error frame or warning', async () => {
+  const warn = spyOn(console, 'warn').mockImplementation(() => {})
+  const controller = new AbortController()
+  const waitingClient: LlmClient = {
+    async *stream(_request: CompletionRequest, signal?: AbortSignal): AsyncGenerator<LlmDelta> {
+      yield { content: 'start' }
+      await new Promise<void>((resolve) => {
+        if (signal?.aborted) return resolve()
+        signal?.addEventListener('abort', () => resolve(), { once: true })
+      })
+      throw signal?.reason ?? new Error('expected client abort')
+    },
+  }
+  const server = new OpenAiApiServer({ llm: waitingClient, models: ['gpt-4o'] })
+  try {
+    const response = await server.fetch(new Request('http://xerxes.test/v1/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify({
+        model: 'gpt-4o',
+        messages: [{ role: 'user', content: 'Hi.' }],
+        stream: true,
+      }),
+      signal: controller.signal,
+    }))
+    controller.abort()
+    const body = await response.text()
+    expect(body).toContain('"content":"start"')
+    expect(body).not.toContain('api_error')
+    expect(warn).not.toHaveBeenCalled()
+  } finally {
+    warn.mockRestore()
+  }
+})
+
+test('stream_options.include_usage true emits a dedicated usage-only final chunk', async () => {
+  const server = new OpenAiApiServer({
+    llm: new RecordingClient([{
+      content: 'done',
+      finishReason: 'stop',
+      usage: { inputTokens: 5, outputTokens: 1 },
+    }]),
+    models: ['gpt-4o'],
+    now: fixedNow,
+    responseId: () => 'chatcmpl-usage',
+  })
+
+  const response = await server.fetch(new Request('http://xerxes.test/v1/chat/completions', {
+    method: 'POST',
+    body: JSON.stringify({
+      model: 'gpt-4o',
+      messages: [{ role: 'user', content: 'Hi.' }],
+      stream: true,
+      stream_options: { include_usage: true },
+    }),
+  }))
+  const frames = parseSseFrames(await response.text()) as Array<Record<string, unknown>>
+  const finish = frames[frames.length - 2]
+  expect(finish).toMatchObject({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })
+  expect(finish).not.toHaveProperty('usage')
+  expect(frames[frames.length - 1]).toEqual({
+    id: 'chatcmpl-usage',
+    object: 'chat.completion.chunk',
+    created: 1_700_000_000,
+    model: 'gpt-4o',
+    choices: [],
+    usage: { prompt_tokens: 5, completion_tokens: 1, total_tokens: 6 },
+  })
+})
+
+test('non-streaming client aborts propagate instead of becoming a 500', async () => {
+  const controller = new AbortController()
+  const waitingClient: LlmClient = {
+    async *stream(_request: CompletionRequest, signal?: AbortSignal): AsyncGenerator<LlmDelta> {
+      await new Promise<void>((resolve) => {
+        if (signal?.aborted) return resolve()
+        signal?.addEventListener('abort', () => resolve(), { once: true })
+      })
+      throw signal?.reason ?? new Error('expected client abort')
+    },
+  }
+  const server = new OpenAiApiServer({ llm: waitingClient, models: ['gpt-4o'] })
+
+  const pending = server.fetch(new Request('http://xerxes.test/v1/chat/completions', {
+    method: 'POST',
+    body: JSON.stringify({ model: 'gpt-4o', messages: [{ role: 'user', content: 'Hi.' }] }),
+    signal: controller.signal,
+  }))
+  controller.abort()
+  await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+})
+
+test('non-streaming provider failures still return an OpenAI-shaped 500', async () => {
+  const failingClient: LlmClient = {
+    async *stream(): AsyncGenerator<LlmDelta> {
+      throw new Error('provider exploded')
+    },
+  }
+  const server = new OpenAiApiServer({ llm: failingClient, models: ['gpt-4o'] })
+
+  const response = await server.fetch(new Request('http://xerxes.test/v1/chat/completions', {
+    method: 'POST',
+    body: JSON.stringify({ model: 'gpt-4o', messages: [{ role: 'user', content: 'Hi.' }] }),
+  }))
+  expect(response.status).toBe(500)
+  expect(await response.json()).toEqual({
+    error: { message: 'Internal server error.', type: 'api_error', param: null, code: null },
+  })
 })
 
 test('listen binds loopback without warnings and warns on unauthenticated public binds', async () => {

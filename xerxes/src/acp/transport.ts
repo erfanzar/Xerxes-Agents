@@ -15,6 +15,9 @@ import {
 
 export type AcpStdioWriter = (line: string) => void | Promise<void>
 
+/** Matches the daemon socket frame cap: one NDJSON frame may not exceed 16 MiB. */
+export const MAX_ACP_FRAME_BYTES = 16 * 1024 * 1024
+
 interface ParsedRequest {
   readonly canReply: boolean
   readonly id: AcpJsonRpcId
@@ -50,7 +53,27 @@ export class StdioJsonRpcServer {
           break
         }
         buffer += decoder.decode(value, { stream: true })
+        if (exceedsFrameLimit(buffer)) {
+          await send(acpJsonRpcFailure(
+            null,
+            ACP_JSON_RPC_ERRORS.invalidRequest,
+            `frame exceeds maximum size of ${MAX_ACP_FRAME_BYTES} bytes`,
+          ))
+          this.running = false
+          await reader.cancel().catch(() => undefined)
+          break
+        }
         buffer = await this.handleCompleteLines(buffer, send)
+        if (buffer.length > MAX_ACP_FRAME_BYTES) {
+          await send(acpJsonRpcFailure(
+            null,
+            ACP_JSON_RPC_ERRORS.invalidRequest,
+            `frame exceeds maximum size of ${MAX_ACP_FRAME_BYTES} bytes`,
+          ))
+          this.running = false
+          await reader.cancel().catch(() => undefined)
+          break
+        }
       }
       buffer += decoder.decode()
       if (this.running && buffer.trim()) {
@@ -269,6 +292,16 @@ export async function serveACPStdio(
   write: AcpStdioWriter,
 ): Promise<void> {
   await new StdioJsonRpcServer(server).serve(input, write)
+}
+
+/**
+ * A peer that never terminates a frame with `\n` would grow the read buffer
+ * without bound, so the incomplete head of the buffer is capped. `length`
+ * counts UTF-16 code units, which makes the byte bound conservative.
+ */
+function exceedsFrameLimit(buffer: string): boolean {
+  const newline = buffer.indexOf('\n')
+  return newline < 0 ? buffer.length > MAX_ACP_FRAME_BYTES : newline > MAX_ACP_FRAME_BYTES
 }
 
 function recordParameter(value: unknown): Record<string, unknown> | undefined {

@@ -10,7 +10,11 @@ import { tmpdir } from 'node:os'
 import { InMemoryDaemonRuntime } from '../src/daemon/runtime.js'
 import { DaemonInteractionBoard } from '../src/daemon/interactions.js'
 import { DaemonServer } from '../src/daemon/server.js'
-import { websocketOriginAllowed, websocketRequestAuthorized } from '../src/daemon/websocketGateway.js'
+import {
+  DaemonWebSocketGateway,
+  websocketOriginAllowed,
+  websocketRequestAuthorized,
+} from '../src/daemon/websocketGateway.js'
 import type { DaemonEvent, DaemonSession, TurnRunner } from '../src/daemon/runtime.js'
 import type { PermissionRequest } from '../src/streaming/events.js'
 
@@ -188,6 +192,38 @@ test('daemon WebSocket transport closes oversized requests', async () => {
     client.close()
     await daemon.stop()
     await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('daemon WebSocket transport closes a client that floods the inbound handler queue', async () => {
+  const gate = Promise.withResolvers<void>()
+  let handled = 0
+  const gateway = new DaemonWebSocketGateway(
+    { host: '127.0.0.1', maxInboundQueueBytes: 4096, maxMessageBytes: 2048, port: 0 },
+    async () => {
+      handled += 1
+      await gate.promise
+    },
+  )
+  gateway.start()
+  const endpoint = gateway.url
+  if (!endpoint) {
+    throw new Error('WebSocket gateway did not start')
+  }
+  const client = await WebSocketTestClient.connect(endpoint)
+  try {
+    for (let index = 0; index < 50; index += 1) {
+      client.send({ jsonrpc: '2.0', id: index, method: 'slow.method', params: { padding: 'x'.repeat(512) } })
+      await Bun.sleep(1)
+    }
+    // The blocked handler cannot drain, so the queued inbound bytes cross the
+    // configured cap and the gateway stops the sender with 1013.
+    expect((await client.waitForClose()).code).toBe(1013)
+    expect(handled).toBeLessThan(50)
+  } finally {
+    gate.resolve()
+    client.close()
+    await gateway.stop()
   }
 })
 

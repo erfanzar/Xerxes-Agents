@@ -12,8 +12,18 @@ const SAMPLING_PARAMS = new Set([
   'thinking', 'reasoning_effort', 'thinking_budget',
 ])
 
-const INTEGER_SAMPLING_PARAMS = new Set(['max_tokens', 'top_k'])
 const THINKING_LEVELS = new Set(['off', 'low', 'medium', 'high'])
+const SENSITIVE_CONFIG_NAME = /api[_-]?key|token|secret|password/iu
+const BOOLEAN_SAMPLING_VALUES: ReadonlyMap<string, boolean> = new Map([
+  ['1', true],
+  ['0', false],
+  ['true', true],
+  ['false', false],
+  ['on', true],
+  ['off', false],
+  ['yes', true],
+  ['no', false],
+])
 const PERMISSION_MODES = ['auto', 'accept-all', 'manual'] as const
 const SKILL_NAME = /^[A-Za-z0-9_-]+$/
 const ROUTED_COMMANDS = new Set([
@@ -264,8 +274,16 @@ export class BridgeSlashRouter {
       if (models === undefined) {
         return unavailable(parsed.name, 'Model switching requires a configured model host.')
       }
+      const previousModel = configString(this.config, 'model')
       await models.switchModel(requested)
-      const updateError = await this.updateConfig(config => { config.model = requested })
+      const updateError = await this.updateConfig(
+        config => { config.model = requested },
+        // The host switch already happened; keep the host and the local
+        // config from diverging when the runtime rejects the commit.
+        previousModel
+          ? async () => { await models.switchModel(previousModel) }
+          : undefined,
+      )
       return updateError === undefined
         ? result(parsed.name, `Model set to: ${requested}`, 'handled')
         : result(parsed.name, updateError, 'unavailable')
@@ -301,11 +319,19 @@ export class BridgeSlashRouter {
     }
     const requested = parsed.args.trim()
     if (requested) {
+      const previousProfile = await providers.active()
       const profile = await providers.select(requested)
       if (profile === undefined) {
         return result(parsed.name, `Could not switch to '${requested}'.`, 'unknown')
       }
-      const updateError = await this.updateConfig(config => applyProfile(config, profile))
+      const updateError = await this.updateConfig(
+        config => applyProfile(config, profile),
+        // Re-select the previously active host profile when the runtime
+        // rejects the commit so host and router state cannot diverge.
+        previousProfile !== undefined && previousProfile.name !== profile.name
+          ? async () => { await providers.select(previousProfile.name) }
+          : undefined,
+      )
       return updateError === undefined
         ? result(parsed.name, `Switched to '${profile.name}'  (model: ${profile.model})`, 'handled')
         : result(parsed.name, updateError, 'unavailable')
@@ -509,6 +535,14 @@ export class BridgeSlashRouter {
     this.state.thinkingContent.length = 0
     this.state.toolExecutions.length = 0
     this.state.turnCount = 0
+    // Usage counters belong to the cleared conversation too; leaving them
+    // would make /usage and /context report stale cumulative cost.
+    this.state.totalApiCalls = 0
+    this.state.totalCacheCreationTokens = 0
+    this.state.totalCacheReadTokens = 0
+    this.state.totalInputTokens = 0
+    this.state.totalOutputTokens = 0
+    this.state.usageComplete = true
     return result(parsed.name, 'Conversation cleared.', 'handled')
   }
 
@@ -641,7 +675,16 @@ export class BridgeSlashRouter {
     return result(parsed.name, output || `Running skill '${invocation.name}'...`, 'handled')
   }
 
-  private async updateConfig(mutator: (config: BridgeSlashConfig) => void): Promise<string | undefined> {
+  /**
+   * Apply a config mutation and commit it through the host port. When the
+   * commit fails the local config is restored, and an already-applied host
+   * transition (model switch, profile select) is reverted through
+   * `revertHost` so the router and runtime cannot stay permanently diverged.
+   */
+  private async updateConfig(
+    mutator: (config: BridgeSlashConfig) => void,
+    revertHost?: () => Promise<void> | void,
+  ): Promise<string | undefined> {
     const previous = { ...this.config }
     mutator(this.config)
     const changed = this.host.configChanged
@@ -651,7 +694,15 @@ export class BridgeSlashRouter {
       return undefined
     } catch (error) {
       replaceConfig(this.config, previous)
-      return `Could not apply configuration: ${errorMessage(error)}`
+      let message = `Could not apply configuration: ${errorMessage(error)}`
+      if (revertHost !== undefined) {
+        try {
+          await revertHost()
+        } catch (revertError) {
+          message += ` Host state could not be restored: ${errorMessage(revertError)}`
+        }
+      }
+      return message
     }
   }
 }
@@ -679,7 +730,15 @@ function configText(config: BridgeSlashConfig): string {
   const entries = Object.entries(config)
     .filter(([name]) => !name.startsWith('_'))
     .sort(([left], [right]) => left.localeCompare(right))
-  return entries.length ? entries.map(([name, value]) => `  ${name}: ${String(value)}`).join('\n') : '(empty config)'
+  if (!entries.length) return '(empty config)'
+  return entries
+    .map(([name, value]) => `  ${name}: ${SENSITIVE_CONFIG_NAME.test(name) ? redactSecret(value) : String(value)}`)
+    .join('\n')
+}
+
+function redactSecret(value: unknown): string {
+  const text = typeof value === 'string' ? value : String(value ?? '')
+  return text ? '********' : '(not set)'
 }
 
 function configString(config: BridgeSlashConfig, name: string): string {
@@ -687,12 +746,56 @@ function configString(config: BridgeSlashConfig, name: string): string {
   return typeof value === 'string' ? value : ''
 }
 
-function parseSamplingValue(parameter: string, raw: string): number | undefined {
-  if (INTEGER_SAMPLING_PARAMS.has(parameter) && !/^[+-]?\d+$/u.test(raw)) {
+function parseSamplingValue(parameter: string, raw: string): unknown {
+  switch (parameter) {
+    case 'reasoning_effort': {
+      const level = raw.trim().toLowerCase()
+      return THINKING_LEVELS.has(level) ? level : undefined
+    }
+    case 'thinking':
+      return BOOLEAN_SAMPLING_VALUES.get(raw.trim().toLowerCase())
+    case 'thinking_budget':
+      return numericSamplingValue(raw, { integer: true, min: 0 })
+    case 'max_tokens':
+      return numericSamplingValue(raw, { integer: true, min: 1 })
+    case 'top_k':
+      return numericSamplingValue(raw, { integer: true, min: 0 })
+    case 'temperature':
+      return numericSamplingValue(raw, { max: 2, min: 0 })
+    case 'top_p':
+      return numericSamplingValue(raw, { exclusiveMin: true, max: 1, min: 0 })
+    case 'min_p':
+      return numericSamplingValue(raw, { max: 1, min: 0 })
+    case 'frequency_penalty':
+    case 'presence_penalty':
+      return numericSamplingValue(raw, { max: 2, min: -2 })
+    case 'repetition_penalty':
+      return numericSamplingValue(raw, { exclusiveMin: true, min: 0 })
+    default:
+      return undefined
+  }
+}
+
+function numericSamplingValue(
+  raw: string,
+  options: {
+    readonly exclusiveMin?: boolean
+    readonly integer?: boolean
+    readonly max?: number
+    readonly min?: number
+  },
+): number | undefined {
+  if (options.integer === true && !/^[+-]?\d+$/u.test(raw)) {
     return undefined
   }
   const value = Number(raw)
-  if (!Number.isFinite(value) || (INTEGER_SAMPLING_PARAMS.has(parameter) && !Number.isSafeInteger(value))) {
+  if (!Number.isFinite(value) || (options.integer === true && !Number.isSafeInteger(value))) {
+    return undefined
+  }
+  if (options.min !== undefined && (options.exclusiveMin === true ? value <= options.min : value < options.min)) {
+    return undefined
+  }
+  if (options.max !== undefined && value > options.max) {
     return undefined
   }
   return value

@@ -1,10 +1,12 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { checkUrl } from '../security/urlSafety.js'
 import { SSEParser, type SSEEvent } from '../streaming/sse.js'
 import {
   MCPConnectionError,
   MCPProtocolError,
+  MCPSessionExpiredError,
   type MCPClientOptions,
   type MCPFetch,
   type MCPHttpTransportKind,
@@ -69,7 +71,7 @@ export class MCPHttpClientTransport {
   ) {
     this.kind = kind
     this.expectsResponseInBody = kind === 'streamable_http'
-    this.endpoint = parseHttpUrl(config.url, `MCP ${kind} server ${config.name}`)
+    this.endpoint = parseHttpUrl(config, `MCP ${kind} server ${config.name}`)
     this.fetchImpl = options.fetch ?? fetch
     this.onMessage = onMessage
     this.onClosed = onClosed
@@ -262,7 +264,13 @@ export class MCPHttpClientTransport {
       })
       if (!response.ok) {
         if (response.status === 404 && this.sessionId !== undefined) {
+          // The server no longer recognizes the issued session. Clear it and
+          // raise a typed error so MCPClient can re-run initialize and retry
+          // instead of failing every subsequent request with a bare 404.
           this.sessionId = undefined
+          throw new MCPSessionExpiredError(
+            `MCP Streamable HTTP server ${this.serverName} returned HTTP 404 for the active session`,
+          )
         }
         throw httpStatusError(this.serverName, response, 'sending a Streamable HTTP message')
       }
@@ -410,7 +418,8 @@ async function consumeSse(
   }
 }
 
-function parseHttpUrl(value: string | undefined, label: string): URL {
+function parseHttpUrl(config: MCPServerConfig, label: string): URL {
+  const value = config.url
   if (!value) {
     throw new MCPConnectionError(`${label} requires a URL`)
   }
@@ -431,6 +440,19 @@ function parseHttpUrl(value: string | undefined, label: string): URL {
   }
   if (url.hash) {
     throw new MCPConnectionError(`${label} URL must not include a fragment`)
+  }
+  // SSRF guard: reject loopback, private, and link-local address literals
+  // (for example http://169.254.169.254) unless the operator explicitly opted
+  // in via allowPrivateNetwork. Only literal IPs and localhost names are
+  // classified here; hostnames are never resolved, so a public-looking DNS
+  // name can still resolve to a private address at dial time (DNS rebinding).
+  // Pinning the dialed connection to validated DNS answers is a larger change
+  // and remains a documented residual risk.
+  if (!config.allowPrivateNetwork) {
+    const verdict = checkUrl(value)
+    if (!verdict.allowed) {
+      throw new MCPConnectionError(`${label} URL rejected by network safety policy: ${verdict.reason}`)
+    }
   }
   return url
 }

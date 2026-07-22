@@ -3,6 +3,7 @@
 
 import {
   taskContext,
+  validateContextTaskReferences,
   validateTaskGraph,
   type CortexAgent,
   type CortexMemoryWriter,
@@ -21,9 +22,23 @@ export const CortexProcess = {
 
 export type CortexProcess = (typeof CortexProcess)[keyof typeof CortexProcess]
 
+/**
+ * Finite default concurrency cap for parallel batches. Callers may opt into
+ * unbounded parallelism explicitly with Number.POSITIVE_INFINITY.
+ */
+export const DEFAULT_MAX_PARALLEL = 4
+
+export type CortexRunStatus = 'failed' | 'partial' | 'succeeded'
+
 export interface CortexOrchestratorOptions {
   readonly agents?: readonly CortexAgent[]
   readonly executor?: CortexTaskExecutor
+  /** Stop the run with CortexRunFailedError as soon as any task fails. */
+  readonly failFast?: boolean
+  /**
+   * Maximum concurrent tasks in PARALLEL mode. Defaults to DEFAULT_MAX_PARALLEL;
+   * pass Number.POSITIVE_INFINITY to opt into unbounded parallelism.
+   */
   readonly maxParallel?: number
   readonly memory?: CortexMemoryWriter
   readonly now?: () => Date
@@ -32,14 +47,44 @@ export interface CortexOrchestratorOptions {
 }
 
 export interface CortexRunOptions {
+  /** Stop the run with CortexRunFailedError as soon as any task fails. */
+  readonly failFast?: boolean
   readonly inputs?: Readonly<Record<string, unknown>>
   readonly process?: CortexProcess
+  readonly signal?: AbortSignal
 }
 
 export interface CortexRunOutput {
   readonly executionTimeMs: number
+  readonly failedCount: number
   readonly rawOutput: string
+  readonly skippedCount: number
+  readonly status: CortexRunStatus
+  readonly succeededCount: number
   readonly taskOutputs: readonly CortexTaskOutput[]
+}
+
+/** Raised when a caller-supplied signal cancels an in-flight run between task executions. */
+export class CortexRunAbortedError extends Error {
+  constructor(reason?: unknown) {
+    super(reason === undefined
+      ? 'Cortex run was cancelled'
+      : `Cortex run was cancelled: ${errorMessage(reason)}`)
+    this.name = 'CortexRunAbortedError'
+  }
+}
+
+/** Raised in fail-fast mode when a task failure must stop the run instead of being recorded. */
+export class CortexRunFailedError extends Error {
+  readonly failures: readonly CortexTaskOutput[]
+
+  constructor(failures: readonly CortexTaskOutput[]) {
+    super(`Cortex run failed for ${failures.length} task(s): ${failures
+      .map(output => `${output.taskId}: ${output.error ?? 'unknown error'}`)
+      .join('; ')}`)
+    this.name = 'CortexRunFailedError'
+    this.failures = Object.freeze([...failures])
+  }
 }
 
 /**
@@ -52,6 +97,7 @@ export interface CortexRunOutput {
 export class CortexOrchestrator {
   private readonly agents = new Map<string, CortexAgent>()
   private readonly executor: CortexTaskExecutor | undefined
+  private readonly failFast: boolean
   private readonly maxParallel: number
   private readonly memory: CortexMemoryWriter | undefined
   private readonly now: () => Date
@@ -64,7 +110,8 @@ export class CortexOrchestrator {
     this.memory = options.memory
     this.now = options.now ?? (() => new Date())
     this.process = options.process ?? CortexProcess.SEQUENTIAL
-    this.maxParallel = options.maxParallel ?? Number.POSITIVE_INFINITY
+    this.failFast = options.failFast ?? false
+    this.maxParallel = options.maxParallel ?? DEFAULT_MAX_PARALLEL
     if (!Number.isInteger(this.maxParallel) && this.maxParallel !== Number.POSITIVE_INFINITY) {
       throw new Error('maxParallel must be a positive integer')
     }
@@ -94,6 +141,7 @@ export class CortexOrchestrator {
 
   setTasks(tasks: readonly CortexTask[]): void {
     validateTaskGraph(tasks)
+    validateContextTaskReferences(tasks)
     this.tasks = [...tasks]
   }
 
@@ -101,11 +149,15 @@ export class CortexOrchestrator {
     const startedAt = this.now()
     const process = options.process ?? this.process
     const inputs = options.inputs ?? {}
+    const signal = options.signal
+    const failFast = options.failFast ?? this.failFast
     validateTaskGraph(this.tasks)
+    throwIfRunAborted(signal)
     const states = new Map<string, CortexTaskStatus>(this.tasks.map(task => [task.id, 'pending']))
     const outputs = new Map<string, CortexTaskOutput>()
 
     while ([...states.values()].some(status => status === 'pending')) {
+      throwIfRunAborted(signal)
       if (skipBlockedTasks(this.tasks, states, outputs, this.now)) continue
       const ready = this.tasks.filter(task => states.get(task.id) === 'pending'
         && (task.dependencies ?? []).every(dependency => states.get(dependency) === 'succeeded'))
@@ -128,15 +180,24 @@ export class CortexOrchestrator {
         }
         runnable.push(task)
       }
+      if (failFast) throwIfRunFailed(outputs)
       if (runnable.length === 0) continue
 
       const execute = async (task: CortexTask): Promise<void> => {
-        const output = await this.executeTask(task, outputs, inputs)
+        throwIfRunAborted(signal)
+        const output = await this.executeTask(task, outputs, inputs, signal)
         outputs.set(task.id, output)
         states.set(task.id, output.status)
       }
-      if (process === CortexProcess.PARALLEL) await mapConcurrent(runnable, this.maxParallel, execute)
-      else for (const task of runnable) await execute(task)
+      if (process === CortexProcess.PARALLEL) {
+        await mapConcurrent(runnable, this.maxParallel, execute)
+        if (failFast) throwIfRunFailed(outputs)
+      } else {
+        for (const task of runnable) {
+          await execute(task)
+          if (failFast) throwIfRunFailed(outputs)
+        }
+      }
     }
 
     const completedAt = this.now()
@@ -144,8 +205,20 @@ export class CortexOrchestrator {
       const output = outputs.get(task.id)
       return output ? [output] : []
     })
+    const failedCount = taskOutputs.filter(output => output.status === 'failed').length
+    const skippedCount = taskOutputs.filter(output => output.status === 'skipped').length
+    const succeededCount = taskOutputs.filter(output => output.status === 'succeeded').length
+    const status: CortexRunStatus = failedCount === 0
+      ? 'succeeded'
+      : succeededCount === 0 && skippedCount === 0
+        ? 'failed'
+        : 'partial'
     const result: CortexRunOutput = {
       taskOutputs,
+      status,
+      failedCount,
+      skippedCount,
+      succeededCount,
       rawOutput: taskOutputs.filter(output => output.status === 'succeeded').at(-1)?.output ?? '',
       executionTimeMs: Math.max(0, completedAt.getTime() - startedAt.getTime()),
     }
@@ -161,6 +234,7 @@ export class CortexOrchestrator {
     task: CortexTask,
     outputs: ReadonlyMap<string, CortexTaskOutput>,
     inputs: Readonly<Record<string, unknown>>,
+    signal: AbortSignal | undefined,
   ): Promise<CortexTaskOutput> {
     const startedAt = this.now()
     const agent = task.agentId ? this.agents.get(task.agentId) : undefined
@@ -178,6 +252,7 @@ export class CortexOrchestrator {
         inputs,
         context: taskContext(task, outputs),
         dependencyOutputs,
+        ...(signal === undefined ? {} : { signal }),
       })
       const normalized = normalizeResult(result)
       const completedAt = this.now()
@@ -214,6 +289,15 @@ export class CortexOrchestrator {
       // Memory persistence is intentionally non-critical to the execution result.
     }
   }
+}
+
+function throwIfRunAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw new CortexRunAbortedError(signal.reason)
+}
+
+function throwIfRunFailed(outputs: ReadonlyMap<string, CortexTaskOutput>): void {
+  const failures = [...outputs.values()].filter(output => output.status === 'failed')
+  if (failures.length > 0) throw new CortexRunFailedError(failures)
 }
 
 function skipBlockedTasks(

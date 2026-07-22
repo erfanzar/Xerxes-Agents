@@ -3023,3 +3023,173 @@ test('a reset falls back to the current generation once its original generation 
     await host.manager.shutdown()
   }
 })
+
+class GatedChildClient implements LlmClient {
+  streamCount = 0
+  private gateOpen = false
+  private readonly waiters: Array<() => void> = []
+
+  release(): void {
+    this.gateOpen = true
+    for (const resolve of this.waiters.splice(0)) resolve()
+  }
+
+  async *stream(): AsyncGenerator<LlmDelta> {
+    this.streamCount += 1
+    if (!this.gateOpen) {
+      await new Promise<void>(resolve => this.waiters.push(resolve))
+    }
+    yield { content: 'gated worker complete' }
+  }
+}
+
+function gatedHost(client: GatedChildClient, registry: ToolRegistry) {
+  return createNativeSubagentHost({
+    agentDefinitions: new Map([['coder', agentDefinition('coder')]]),
+    cwd: process.cwd(),
+    eventBus: new DaemonSubagentEventBus(),
+    llm: client,
+    model: 'test-model',
+    permissionMode: 'accept-all',
+    toolExecutor: registry,
+    tools: registry.definitions(),
+  })
+}
+
+test('concurrent same-profile children keep independent depth entries for their grandchildren', async () => {
+  const client = new GatedChildClient()
+  const registry = new ToolRegistry()
+  const host = gatedHost(client, registry)
+
+  try {
+    const parent = await host.managerPort.spawn({
+      message: 'run the parent worker',
+      nickname: 'depth-parent',
+      promptProfile: 'coder',
+      title: 'Depth parent',
+    })
+    await waitFor(() => client.streamCount === 1, 5_000)
+
+    // A single running 'coder' task resolves the shared profile key unambiguously.
+    const onlyChild = await host.managerPort.spawn({
+      message: 'run the only grandchild',
+      parentAgentId: 'coder',
+      promptProfile: 'coder',
+      title: 'Only grandchild',
+    })
+    expect(host.manager.tasks.get(onlyChild.id)?.depth).toBe(1)
+
+    await waitFor(() => client.streamCount === 2, 5_000)
+
+    // With two running same-profile tasks the profile key is ambiguous and
+    // must not credit the grandchild with either sibling's depth.
+    const ambiguous = await host.managerPort.spawn({
+      message: 'run the ambiguous grandchild',
+      parentAgentId: 'coder',
+      promptProfile: 'coder',
+      title: 'Ambiguous grandchild',
+    })
+    expect(host.manager.tasks.get(ambiguous.id)?.depth).toBe(0)
+
+    // Each parent remains addressable by its unique task id even while a
+    // same-profile sibling is running.
+    const byParentId = await host.managerPort.spawn({
+      message: 'run the addressed grandchild',
+      parentAgentId: parent.id,
+      promptProfile: 'coder',
+      title: 'Addressed grandchild',
+    })
+    expect(host.manager.tasks.get(byParentId.id)?.depth).toBe(1)
+    const nested = await host.managerPort.spawn({
+      message: 'run the nested grandchild',
+      parentAgentId: onlyChild.id,
+      promptProfile: 'coder',
+      title: 'Nested grandchild',
+    })
+    expect(host.manager.tasks.get(nested.id)?.depth).toBe(2)
+  } finally {
+    client.release()
+    await host.manager.shutdown()
+  }
+})
+
+function recoveredSnapshot(id: string, name: string, sourceId: string): SpawnedAgentSnapshot {
+  return {
+    agentId: 'coder',
+    closed: false,
+    createdAt: '2026-07-16T00:00:00.000Z',
+    id,
+    lastInput: `inspect ${name}`,
+    name,
+    promptProfile: 'coder',
+    queueSize: 0,
+    sourceAgentId: sourceId,
+    status: 'running',
+    title: `${name} title`,
+    updatedAt: '2026-07-16T00:01:00.000Z',
+  }
+}
+
+test('a recovered tombstone reserves its nickname and never shadows a live task', async () => {
+  const client = new GatedChildClient()
+  const registry = new ToolRegistry()
+  const host = gatedHost(client, registry)
+  const sourceId = 'restart-source'
+
+  try {
+    expect(host.turnCoordinator.restore?.(sourceId, [recoveredSnapshot('interrupted-hunter', 'hunter', sourceId)])).toBe(1)
+
+    // The interrupted record still owns its nickname until it is reset or closed.
+    await expect(host.managerPort.spawn({
+      message: 'reuse the interrupted nickname',
+      nickname: 'hunter',
+      promptProfile: 'coder',
+    })).rejects.toThrow(/already identifies a spawned agent/u)
+
+    const live = await host.managerPort.spawn({
+      message: 'run the live hunter',
+      nickname: 'live-hunter',
+      promptProfile: 'coder',
+    })
+    // A stale record may share the live task's name; live handles still win.
+    expect(host.turnCoordinator.restore?.(sourceId, [recoveredSnapshot('stale-hunter', 'live-hunter', sourceId)])).toBe(1)
+
+    await waitFor(() => client.streamCount === 1, 5_000)
+    const closed = host.managerPort.close('live-hunter')
+    expect(closed.id).toBe(live.id)
+
+    const resumed = host.managerPort.resume('stale-hunter')
+    expect(resumed.id).toBe('stale-hunter')
+  } finally {
+    client.release()
+    await host.manager.shutdown()
+  }
+})
+
+test('awaiting a live agent by nickname resolves through the live manager', async () => {
+  const client = new ToolCapturingParentClient()
+  const registry = new ToolRegistry()
+  const host = createNativeSubagentHost({
+    agentDefinitions: new Map([['coder', agentDefinition('coder')]]),
+    cwd: process.cwd(),
+    eventBus: new DaemonSubagentEventBus(),
+    llm: client,
+    model: 'test-model',
+    permissionMode: 'accept-all',
+    toolExecutor: registry,
+    tools: registry.definitions(),
+  })
+
+  try {
+    const task = await host.managerPort.spawn({
+      message: 'finish quickly',
+      nickname: 'awaitable',
+      promptProfile: 'coder',
+    })
+    const result = await host.managerPort.wait(['awaitable'], 1_000)
+    expect(result.completed.map(snapshot => snapshot.id)).toEqual([task.id])
+    expect(result.pending).toEqual([])
+  } finally {
+    await host.manager.shutdown()
+  }
+})

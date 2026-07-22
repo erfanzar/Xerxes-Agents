@@ -13,16 +13,36 @@ import {
 import { RAGStorage, SQLiteStorage, type MemoryStorage } from './storage.js'
 
 export interface LongTermMemoryOptions {
+  /**
+   * Number of access-state touches batched before one persistence flush.
+   * Higher values reduce write amplification at the cost of losing recent
+   * access counts on an unflushed crash. Call `flushAccessState()` on a
+   * graceful shutdown to make every touch durable.
+   */
+  readonly accessFlushThreshold?: number
   readonly dbPath?: string
   readonly enableEmbeddings?: boolean
   readonly maxItems?: number
+  /**
+   * Tenant identity for tiers over a shared backend. When set, hydration and
+   * search only admit records owned by this id (matching `agent_id`,
+   * `user_id`, or the stamped `metadata.owner_id`), so two instances over one
+   * database cannot read each other's memories. Saved records are stamped
+   * with `metadata.owner_id` so a later instance with the same owner
+   * re-hydrates them.
+   */
+  readonly ownerId?: string
   readonly retentionDays?: number
   readonly storage?: MemoryStorage
 }
 
 /** Durable memory tier scored by lexical relevance, recency, and importance. */
 export class LongTermMemory extends Memory {
+  readonly ownerId: string | undefined
   readonly retentionDays: number
+  private readonly accessDirty = new Set<MemoryItem>()
+  private readonly accessFlushThreshold: number
+  private pendingAccessWrites = 0
 
   constructor(options: LongTermMemoryOptions = {}) {
     const enableEmbeddings = options.enableEmbeddings ?? true
@@ -31,6 +51,9 @@ export class LongTermMemory extends Memory {
       : new SQLiteStorage({ ...(options.dbPath ? { dbPath: options.dbPath } : {}) }))
     super(storage, options.maxItems ?? 10_000, enableEmbeddings)
     this.retentionDays = options.retentionDays ?? 365
+    this.ownerId = options.ownerId?.trim() || undefined
+    const threshold = options.accessFlushThreshold ?? 25
+    this.accessFlushThreshold = Number.isInteger(threshold) && threshold >= 1 ? threshold : 25
     this.hydrate()
   }
 
@@ -38,6 +61,8 @@ export class LongTermMemory extends Memory {
     for (const item of this.items) this.storage?.delete(storageKey(item.memoryId))
     this.items.length = 0
     this.index.clear()
+    this.accessDirty.clear()
+    this.pendingAccessWrites = 0
   }
 
   consolidate(mergeSimilar = true, similarityThreshold = 0.8): string {
@@ -69,25 +94,35 @@ export class LongTermMemory extends Memory {
       : filters ? this.items.filter(item => this.matchesFilters(item, filters)) : []
     for (const item of targets) {
       this.remove(item)
+      this.accessDirty.delete(item)
       this.storage?.delete(storageKey(item.memoryId))
     }
     return targets.length
   }
 
+  /**
+   * Persist every batched access-state update. Touches are debounced to
+   * avoid one storage rewrite per retrieve/search hit; call this on a
+   * graceful shutdown when recent access counts must survive a restart.
+   */
+  flushAccessState(): void {
+    if (this.accessDirty.size === 0) {
+      this.pendingAccessWrites = 0
+      return
+    }
+    for (const item of this.accessDirty) this.persist(item)
+    this.accessDirty.clear()
+    this.pendingAccessWrites = 0
+  }
+
   retrieve(memoryId?: string, filters?: MemoryFilters, limit = 10): MemoryItem | MemoryItem[] | undefined {
     if (memoryId) {
       const item = this.index.get(memoryId)
-      if (item) {
-        item.touch()
-        this.persist(item)
-      }
+      if (item) this.touchAndTrack(item)
       return item
     }
     const matches = this.items.filter(item => this.matchesFilters(item, filters)).slice(0, limit)
-    for (const item of matches) {
-      item.touch()
-      this.persist(item)
-    }
+    for (const item of matches) this.touchAndTrack(item)
     return matches
   }
 
@@ -96,7 +131,14 @@ export class LongTermMemory extends Memory {
     const item = new MemoryItem({
       content,
       memoryType: 'long_term',
-      metadata: { ...metadata, importance: options.importance ?? 0.5 },
+      metadata: {
+        ...metadata,
+        importance: options.importance ?? 0.5,
+        // Stamp the tenant so a later instance with the same owner can
+        // re-hydrate this record from a shared backend without also
+        // admitting every other tenant's records.
+        ...(this.ownerId ? { owner_id: metadata.owner_id ?? this.ownerId } : {}),
+      },
       ...(options.agentId ? { agentId: options.agentId } : {}),
       ...(options.taskId ? { taskId: options.taskId } : {}),
       ...(options.userId ? { userId: options.userId } : {}),
@@ -114,11 +156,13 @@ export class LongTermMemory extends Memory {
       for (const result of semantic) {
         if (!result.key.startsWith('ltm_') || !isRecord(result.data)) continue
         const decoded = MemoryItem.fromRecord(result.data)
-        const item = this.index.get(decoded.memoryId) ?? decoded
-        if (!this.matchesFilters(item, filters)) continue
+        // Only items this instance owns may match: admitting raw decoded
+        // records here would leak every other tenant's memories from a
+        // shared backend.
+        const item = this.index.get(decoded.memoryId)
+        if (!item || !this.matchesFilters(item, filters)) continue
         item.relevanceScore = result.similarity
-        item.touch()
-        this.persist(item)
+        this.touchAndTrack(item)
         matches.push(item)
         if (matches.length >= limit) break
       }
@@ -133,8 +177,7 @@ export class LongTermMemory extends Memory {
       const recency = Math.max(0, 1 - ageDays / this.retentionDays)
       item.relevanceScore = relevance * 0.5 + recency * 0.3 + importance(item) * 0.2
       if (item.relevanceScore <= 0) continue
-      item.touch()
-      this.persist(item)
+      this.touchAndTrack(item)
       matches.push(item)
     }
     return matches.sort((left, right) => right.relevanceScore - left.relevanceScore).slice(0, limit)
@@ -144,6 +187,7 @@ export class LongTermMemory extends Memory {
     const item = this.index.get(memoryId)
     if (!item) return false
     this.updateItem(item, updates)
+    this.accessDirty.delete(item)
     this.persist(item)
     return true
   }
@@ -160,6 +204,7 @@ export class LongTermMemory extends Memory {
     }
     for (const item of new Set(targets)) {
       this.remove(item)
+      this.accessDirty.delete(item)
       this.storage?.delete(storageKey(item.memoryId))
     }
   }
@@ -174,7 +219,12 @@ export class LongTermMemory extends Memory {
         console.warn(`Skipping corrupt long-term memory record ${key}:`, error)
         continue
       }
-      if (isRecord(record)) this.append(MemoryItem.fromRecord(record))
+      if (!isRecord(record)) continue
+      const item = MemoryItem.fromRecord(record)
+      // Tenant filter: over a shared backend, only restore this owner's
+      // records instead of every `ltm_*` row in the database.
+      if (this.ownerId && !this.owns(item)) continue
+      this.append(item)
     }
   }
 
@@ -202,14 +252,38 @@ export class LongTermMemory extends Memory {
         current.content = `${current.content}\n${other.content}`
         current.metadata = { ...current.metadata, merged: true }
         this.remove(other)
+        this.accessDirty.delete(other)
         this.storage?.delete(storageKey(other.memoryId))
       }
+      this.accessDirty.delete(current)
       this.persist(current)
     }
   }
 
+  /** Return whether a hydrated record belongs to this instance's tenant. */
+  private owns(item: MemoryItem): boolean {
+    if (!this.ownerId) return true
+    return item.agentId === this.ownerId
+      || item.userId === this.ownerId
+      || item.metadata.owner_id === this.ownerId
+  }
+
   private persist(item: MemoryItem): void {
     this.storage?.save(storageKey(item.memoryId), item.toRecord())
+  }
+
+  /**
+   * Record one access hit and batch its persistence. Immediate per-hit
+   * rewrites caused heavy write amplification and last-writer-wins clobbering
+   * between instances sharing a backend; hits flush every
+   * `accessFlushThreshold` touches or on `flushAccessState()`.
+   */
+  private touchAndTrack(item: MemoryItem): void {
+    item.touch()
+    if (!this.storage) return
+    this.accessDirty.add(item)
+    this.pendingAccessWrites += 1
+    if (this.pendingAccessWrites >= this.accessFlushThreshold) this.flushAccessState()
   }
 }
 

@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
 import { OAuthClient, anthropicPreset, copilotPreset, githubPatPreset, openaiPreset } from '../src/auth/oauth.js'
-import { CredentialStorage } from '../src/auth/storage.js'
+import { CredentialStorage, CredentialTamperedError } from '../src/auth/storage.js'
 import {
   OAuthToken,
   buildAuthorizeUrl,
@@ -148,6 +148,74 @@ test('credential storage propagates real filesystem errors instead of masking th
     // A directory where the credential file belongs is a real error (EISDIR) and must surface.
     await mkdir(join(root, 'credentials', 'github.json'), { recursive: true })
     await expect(storage.load('github')).rejects.toMatchObject({ code: 'EISDIR' })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('credential storage raises CredentialTamperedError on decrypt failure instead of reporting logged-out', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-oauth-tamper-'))
+  try {
+    const directory = join(root, 'credentials')
+    const storage = new CredentialStorage(directory, { credentialKey: 'key-one' })
+    await storage.save('github', new OAuthToken({ accessToken: 'real-token' }))
+
+    // Wrong key: GCM auth-tag failure must be distinguishable from "not logged in".
+    const wrongKey = new CredentialStorage(directory, { credentialKey: 'key-two' })
+    const wrongKeyError = await wrongKey.load('github').catch((error: unknown) => error)
+    expect(wrongKeyError).toBeInstanceOf(CredentialTamperedError)
+    expect((wrongKeyError as CredentialTamperedError).provider).toBe('github')
+
+    // Tampered ciphertext under the correct key must also fail loudly.
+    const path = join(directory, 'github.json')
+    const envelope = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>
+    envelope.ciphertext = `AAAA${String(envelope.ciphertext)}`
+    await writeFile(path, JSON.stringify(envelope), 'utf8')
+    await expect(storage.load('github')).rejects.toBeInstanceOf(CredentialTamperedError)
+
+    // A structurally invalid envelope (encryption markers but no valid shape) is not
+    // treated as trusted legacy plaintext either.
+    await writeFile(path, JSON.stringify({ algorithm: 'aes-256-gcm', ciphertext: 42 }), 'utf8')
+    await expect(storage.load('github')).rejects.toBeInstanceOf(CredentialTamperedError)
+
+    // Only structurally unparseable content collapses to "no usable credential".
+    await writeFile(path, 'not json at all', 'utf8')
+    expect(await storage.load('github')).toBeUndefined()
+    await writeFile(path, JSON.stringify({ unexpected: 'shape' }), 'utf8')
+    expect(await storage.load('github')).toBeUndefined()
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('credential storage migrates legacy plaintext records to encrypted form on read', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-oauth-migrate-'))
+  try {
+    const directory = join(root, 'credentials')
+    await mkdir(directory, { recursive: true })
+    const storage = new CredentialStorage(directory, { credentialKey: 'test-only-key' })
+    const path = join(directory, 'legacy.json')
+    await writeFile(path, JSON.stringify({
+      access_token: 'legacy-secret', refresh_token: null, token_type: 'Bearer', expires_at: null, scopes: ['read'],
+    }), 'utf8')
+
+    const token = await storage.load('legacy')
+    expect(token?.accessToken).toBe('legacy-secret')
+    expect(token?.scopes).toEqual(['read'])
+
+    // The plaintext record was re-saved through the encrypted save path.
+    const rewritten = await readFile(path, 'utf8')
+    expect(rewritten).toContain('aes-256-gcm')
+    expect(rewritten).not.toContain('legacy-secret')
+    if (process.platform !== 'win32') {
+      expect((await stat(path)).mode & 0o777).toBe(0o600)
+    }
+
+    // The migrated record loads through the normal encrypted path and cannot be
+    // opened without the key.
+    expect((await storage.load('legacy'))?.accessToken).toBe('legacy-secret')
+    const wrongKey = new CredentialStorage(directory, { credentialKey: 'other-key' })
+    await expect(wrongKey.load('legacy')).rejects.toBeInstanceOf(CredentialTamperedError)
   } finally {
     await rm(root, { recursive: true, force: true })
   }

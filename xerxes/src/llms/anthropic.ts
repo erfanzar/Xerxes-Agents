@@ -39,8 +39,21 @@ export interface AnthropicMessagePayload {
   readonly system?: string
 }
 
+/** Options controlling how neutral messages are converted for one Anthropic request. */
+export interface AnthropicConversionOptions {
+  /**
+   * Re-emit signed thinking blocks only when the current request enables
+   * extended thinking; replaying them otherwise is a provider-side rejection.
+   */
+  readonly thinkingEnabled?: boolean
+}
+
 /** Convert neutral Xerxes messages to Anthropic's content-block protocol. */
-export function messagesToAnthropic(messages: readonly ChatMessage[]): AnthropicMessagePayload {
+export function messagesToAnthropic(
+  messages: readonly ChatMessage[],
+  options: AnthropicConversionOptions = {},
+): AnthropicMessagePayload {
+  const thinkingEnabled = options.thinkingEnabled ?? false
   const converted: AnthropicMessage[] = []
   const systems: string[] = []
   let index = 0
@@ -61,7 +74,7 @@ export function messagesToAnthropic(messages: readonly ChatMessage[]): Anthropic
     }
     if (message.role === 'assistant') {
       const blocks: AnthropicContentBlock[] = []
-      if (message.thinking && message.thinking_signature) {
+      if (thinkingEnabled && message.thinking && message.thinking_signature) {
         blocks.push({ type: 'thinking', thinking: message.thinking, signature: message.thinking_signature })
       }
       if (messageText(message)) {
@@ -70,7 +83,12 @@ export function messagesToAnthropic(messages: readonly ChatMessage[]): Anthropic
       for (const call of message.tool_calls ?? []) {
         blocks.push({ type: 'tool_use', id: call.id, name: call.function.name, input: call.function.arguments })
       }
-      converted.push({ role: 'assistant', content: blocks })
+      // Anthropic rejects an assistant turn with an empty content array, so a
+      // message whose only block was a non-replayable thinking trace is
+      // dropped rather than sent as `content: []`.
+      if (blocks.length) {
+        converted.push({ role: 'assistant', content: blocks })
+      }
       index += 1
       continue
     }
@@ -118,7 +136,7 @@ export class AnthropicMessagesClient implements LlmClient {
   }
 
   async complete(request: CompletionRequest, signal?: AbortSignal): Promise<LlmCompletion> {
-    const converted = messagesToAnthropic(request.messages)
+    const converted = messagesToAnthropic(request.messages, { thinkingEnabled: request.thinking !== undefined })
     if (!converted.messages.length) {
       throw new ConfigurationError('messages', 'Anthropic requires at least one user or assistant message')
     }
@@ -185,7 +203,7 @@ export class AnthropicMessagesClient implements LlmClient {
   }
 
   async *stream(request: CompletionRequest, signal?: AbortSignal): AsyncGenerator<LlmDelta> {
-    const converted = messagesToAnthropic(request.messages)
+    const converted = messagesToAnthropic(request.messages, { thinkingEnabled: request.thinking !== undefined })
     if (!converted.messages.length) {
       throw new ConfigurationError('messages', 'Anthropic requires at least one user or assistant message')
     }
@@ -205,6 +223,7 @@ export class AnthropicMessagesClient implements LlmClient {
     }
 
     const pendingToolCalls = new Map<number, PendingToolCall>()
+    const streamUsage: AnthropicStreamUsage = {}
     let emittedToolCalls = false
     for await (const data of internalSseData(response.body)) {
       if (data === '[DONE]') {
@@ -212,7 +231,7 @@ export class AnthropicMessagesClient implements LlmClient {
       }
       const event = parseEvent(data)
       const type = stringAt(event, 'type')
-      const eventUsage = anthropicUsage(event)
+      const eventUsage = trackAnthropicUsage(streamUsage, event)
       if (type === 'error') {
         const error = asRecord(event.error)
         const errorType = stringAt(error, 'type')
@@ -233,10 +252,18 @@ export class AnthropicMessagesClient implements LlmClient {
         const blockType = stringAt(block, 'type')
         const index = numberAt(event, 'index')
         if (blockType === 'tool_use' && index !== undefined) {
+          const snapshot = isJsonObject(block.input) && Object.keys(block.input).length
+            ? JSON.stringify(block.input)
+            : ''
           pendingToolCalls.set(index, {
             id: stringAt(block, 'id') || undefined,
             name: stringAt(block, 'name'),
-            arguments: isJsonObject(block.input) && Object.keys(block.input).length ? JSON.stringify(block.input) : '',
+            arguments: snapshot,
+            // The start block's `input` snapshot is only a fallback for
+            // providers that never stream `input_json_delta` partials. Once a
+            // partial arrives it carries the full argument text itself, so the
+            // snapshot seed must be discarded rather than appended to.
+            seededFromSnapshot: snapshot !== '',
           })
         }
         if (blockType === 'thinking') {
@@ -264,7 +291,12 @@ export class AnthropicMessagesClient implements LlmClient {
           const current = index === undefined ? undefined : pendingToolCalls.get(index)
           const partial = stringAt(delta, 'partial_json')
           if (current && partial) {
-            current.arguments += partial
+            if (current.seededFromSnapshot) {
+              current.arguments = partial
+              current.seededFromSnapshot = false
+            } else {
+              current.arguments += partial
+            }
           }
         }
         if (eventUsage) {
@@ -302,6 +334,8 @@ interface PendingToolCall {
   arguments: string
   readonly id: string | undefined
   readonly name: string
+  /** True while `arguments` holds the start-block input snapshot instead of streamed partials. */
+  seededFromSnapshot?: boolean
 }
 
 function anthropicRequestPayload(
@@ -455,6 +489,62 @@ function anthropicUsage(event: Record<string, unknown>): TokenUsage | undefined 
     outputTokens: outputTokens ?? 0,
     ...(cacheReadTokens === undefined ? {} : { cacheReadTokens }),
     ...(cacheCreationTokens === undefined ? {} : { cacheCreationTokens }),
+  }
+}
+
+/** Last-known usage counters for one stream; every field stays absent until reported. */
+interface AnthropicStreamUsage {
+  cacheCreationTokens?: number
+  cacheReadTokens?: number
+  inputTokens?: number
+  outputTokens?: number
+}
+
+/**
+ * Fold one SSE event's usage fragment into the running stream totals and
+ * return a cumulative snapshot, or `undefined` when the event reports nothing.
+ *
+ * Anthropic's `message_delta` events carry only `output_tokens`, so each
+ * per-event snapshot must be merged with the `message_start` totals instead of
+ * fabricating `inputTokens: 0` — a fabricated zero otherwise overwrites the
+ * real prompt-token count downstream.
+ */
+function trackAnthropicUsage(
+  accumulator: AnthropicStreamUsage,
+  event: Record<string, unknown>,
+): TokenUsage | undefined {
+  const messageUsage = asRecord(asRecord(event.message).usage)
+  const deltaUsage = asRecord(event.usage)
+  const inputTokens = numberAt(messageUsage, 'input_tokens') ?? numberAt(deltaUsage, 'input_tokens')
+  const outputTokens = numberAt(messageUsage, 'output_tokens') ?? numberAt(deltaUsage, 'output_tokens')
+  const cacheReadTokens = numberAt(messageUsage, 'cache_read_input_tokens') ?? numberAt(deltaUsage, 'cache_read_input_tokens')
+  const cacheCreationTokens = numberAt(messageUsage, 'cache_creation_input_tokens')
+    ?? numberAt(deltaUsage, 'cache_creation_input_tokens')
+  if (
+    inputTokens === undefined
+    && outputTokens === undefined
+    && cacheReadTokens === undefined
+    && cacheCreationTokens === undefined
+  ) {
+    return undefined
+  }
+  if (inputTokens !== undefined) {
+    accumulator.inputTokens = inputTokens
+  }
+  if (outputTokens !== undefined) {
+    accumulator.outputTokens = outputTokens
+  }
+  if (cacheReadTokens !== undefined) {
+    accumulator.cacheReadTokens = cacheReadTokens
+  }
+  if (cacheCreationTokens !== undefined) {
+    accumulator.cacheCreationTokens = cacheCreationTokens
+  }
+  return {
+    inputTokens: accumulator.inputTokens ?? 0,
+    outputTokens: accumulator.outputTokens ?? 0,
+    ...(accumulator.cacheReadTokens === undefined ? {} : { cacheReadTokens: accumulator.cacheReadTokens }),
+    ...(accumulator.cacheCreationTokens === undefined ? {} : { cacheCreationTokens: accumulator.cacheCreationTokens }),
   }
 }
 

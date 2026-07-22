@@ -1,8 +1,8 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { existsSync, readdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, readdirSync, statSync } from 'node:fs'
+import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 import { DependencyResolver, parseDependency, VersionConstraint } from './dependency.js'
@@ -98,6 +98,16 @@ export interface XerxesPluginModule {
   readonly register?: (registry: PluginRegistry) => void | Promise<void>
 }
 
+/** Explicit host trust decisions for dynamic plugin execution. */
+export interface PluginDiscoveryOptions {
+  /**
+   * Explicit host opt-in per module: file names relative to the plugin directory or absolute
+   * module paths that are permitted to execute. When supplied, every other module is skipped
+   * with a warning instead of being imported.
+   */
+  readonly allowedModules?: readonly string[]
+}
+
 /** Point-in-time view of every capability index, used to roll back a failed plugin registration. */
 interface PluginRegistrationSnapshot {
   readonly channels: ReadonlySet<string>
@@ -116,6 +126,8 @@ export class PluginRegistry {
   private readonly tools = new Map<string, { readonly owner: string; readonly value: PluginTool }>()
   private readonly failures: string[] = []
   private readonly loadedModules = new Set<string>()
+  /** Module path currently executing register(), plus the plugin names it has registered. */
+  private activeDiscovery: { readonly names: Set<string>; readonly path: string } | undefined
 
   get pluginNames(): string[] {
     return [...this.plugins.keys()]
@@ -126,22 +138,40 @@ export class PluginRegistry {
     return [...this.failures]
   }
 
-  async discover(directory: string): Promise<string[]> {
+  async discover(directory: string, options: PluginDiscoveryOptions = {}): Promise<string[]> {
     if (!existsSync(directory)) return []
+    if (isWorldWritableDirectory(directory)) {
+      // A world-writable plugin directory lets any local user swap in arbitrary code; refuse to execute it.
+      console.warn(`Plugin discovery skipped: directory is world-writable: ${directory}`)
+      return []
+    }
+    const allowedModules = options.allowedModules === undefined
+      ? undefined
+      : new Set(options.allowedModules.map(entry => resolve(directory, entry)))
     const discovered: string[] = []
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       if (!entry.isFile() || entry.name.startsWith('_') || !/\.(?:[cm]?js|ts)$/.test(entry.name)) continue
       const path = join(directory, entry.name)
+      if (allowedModules !== undefined && !allowedModules.has(resolve(path))) {
+        console.warn(`Plugin discovery skipped module without explicit host opt-in: ${path}`)
+        continue
+      }
       const href = pathToFileURL(path).href
       // An already-loaded module must not re-execute; its registrations would conflict with themselves.
       if (this.loadedModules.has(href)) continue
       const snapshot = this.registrationSnapshot()
       try {
         const module = await import(href) as XerxesPluginModule
-        await module.register?.(this)
+        this.activeDiscovery = { names: new Set(), path }
+        try {
+          await module.register?.(this)
+        } finally {
+          this.activeDiscovery = undefined
+        }
         this.loadedModules.add(href)
         for (const name of this.plugins.keys()) if (!snapshot.plugins.has(name)) discovered.push(name)
       } catch (error) {
+        this.activeDiscovery = undefined
         this.rollbackRegistrations(snapshot)
         const message = `${path}: ${errorMessage(error)}`
         this.failures.push(message)
@@ -205,6 +235,7 @@ export class PluginRegistry {
 
   registerPlugin(meta: PluginMeta): RegisteredPlugin {
     if (this.plugins.has(meta.name)) throw new PluginConflictError(meta.name, meta.name)
+    this.activeDiscovery?.names.add(meta.name)
     const plugin: RegisteredPlugin = {
       meta: normalizeMeta(meta), tools: new Map(), hooks: new Map(), channels: new Map(), provider: undefined,
     }
@@ -325,9 +356,27 @@ export class PluginRegistry {
   }
 
   private resolveOwner(meta: PluginMeta | undefined, explicitOwner: string | undefined): string {
-    const owner = explicitOwner ?? meta?.name ?? '__standalone__'
-    if (meta && !this.plugins.has(owner)) this.registerPlugin(meta)
+    if (meta && !this.plugins.has(meta.name)) this.registerPlugin(meta)
+    let owner = explicitOwner ?? meta?.name ?? '__standalone__'
+    const discovery = this.activeDiscovery
+    if (discovery !== undefined && owner !== '__standalone__' && !discovery.names.has(owner)) {
+      // A module must not attribute its capabilities to a plugin it did not register itself.
+      const rebound = discovery.names.size === 1 ? [...discovery.names][0]! : '__standalone__'
+      console.warn(
+        `Plugin module ${discovery.path} cannot register under foreign plugin '${owner}'; attributing to '${rebound}' instead`,
+      )
+      owner = rebound
+    }
     return owner
+  }
+}
+
+/** World-writable directories must never be a source of executable plugin code. */
+function isWorldWritableDirectory(directory: string): boolean {
+  try {
+    return (statSync(directory).mode & 0o002) !== 0
+  } catch {
+    return false
   }
 }
 

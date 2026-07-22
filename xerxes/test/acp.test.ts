@@ -10,7 +10,7 @@ import { AcpEventKind, toAcpEvent } from '../src/acp/events.js'
 import { AcpPermissionBoard, routePermission } from '../src/acp/permissions.js'
 import { ACP_REGISTRY_METADATA, writeAcpRegistryFile } from '../src/acp/registry.js'
 import { AcpServer, ServerCapabilities } from '../src/acp/server.js'
-import { AcpSessionStore } from '../src/acp/session.js'
+import { AcpSessionConflictError, AcpSessionStore } from '../src/acp/session.js'
 
 test('ACP registry manifest preserves IDE discovery metadata', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'xerxes-acp-registry-'))
@@ -64,6 +64,24 @@ test('ACP session store creates, mutates, and removes isolated sessions', () => 
   expect(session.cancelled).toBe(true)
   expect(sessions.drop(session.sessionId)).toBe(true)
   expect(sessions.get(session.sessionId)).toBeUndefined()
+})
+
+test('ACP session store rejects duplicate attachExisting instead of dropping state', () => {
+  const sessions = new AcpSessionStore()
+  const session = sessions.create('/workspace', { model: 'gpt-4o', title: 'Keep me' })
+  sessions.cancel(session.sessionId)
+
+  expect(() => sessions.attachExisting({ sessionId: session.sessionId }, '/elsewhere'))
+    .toThrow(AcpSessionConflictError)
+  const retained = sessions.get(session.sessionId)
+  expect(retained).toBe(session)
+  expect(retained?.title).toBe('Keep me')
+  expect(retained?.modelOverride).toBe('gpt-4o')
+  expect(retained?.cancelled).toBe(true)
+
+  const attached = sessions.attachExisting({ sessionId: 'external-session-1' }, '/elsewhere')
+  expect(attached.sessionId).toBe('external-session-1')
+  expect(sessions.get('external-session-1')).toBe(attached)
 })
 
 test('ACP permission board resolves pending decisions and cleans up aborted waits', async () => {
@@ -131,7 +149,64 @@ test('ACP server exposes capabilities, live sessions, prompts, and approval resp
   expect(server.respondPermission(permissionId, true)).toEqual({ ok: true })
   expect(server.pendingPermissions()).toEqual([])
   expect(server.cancel(sessionId)).toEqual({ ok: true })
-  expect(closedSessions).toEqual([sessionId])
+  // Cancellation keeps the session alive and promptable: onSessionClose must
+  // fire only from closeSession or shutdown.
+  expect(closedSessions).toEqual([])
   expect(server.closeSession(sessionId)).toEqual({ ok: true })
   expect(closedSessions).toEqual([sessionId])
+})
+
+test('ACP server serializes prompts per session while keeping sessions concurrent', async () => {
+  const order: string[] = []
+  const gates = new Map<string, () => void>()
+  const server = new AcpServer({
+    promptHandler: async ({ session, text }) => {
+      order.push(`start:${session.sessionId}:${text}`)
+      await new Promise<void>(resolve => gates.set(`${session.sessionId}:${text}`, resolve))
+      order.push(`end:${session.sessionId}:${text}`)
+      return { ok: true }
+    },
+  })
+  const firstSession = String(server.openSession('/workspace').session_id)
+  const secondSession = String(server.openSession('/workspace').session_id)
+
+  const first = server.prompt(firstSession, 'one')
+  const queued = server.prompt(firstSession, 'two')
+  const otherSession = server.prompt(secondSession, 'parallel')
+  await Bun.sleep(20)
+
+  // The second prompt for the same session waits, but another session runs.
+  expect(order).toEqual([
+    `start:${firstSession}:one`,
+    `start:${secondSession}:parallel`,
+  ])
+  gates.get(`${secondSession}:parallel`)?.()
+  await otherSession
+  gates.get(`${firstSession}:one`)?.()
+  await first
+  await Bun.sleep(20)
+  expect(order).toContain(`start:${firstSession}:two`)
+  gates.get(`${firstSession}:two`)?.()
+  await queued
+  expect(order).toEqual([
+    `start:${firstSession}:one`,
+    `start:${secondSession}:parallel`,
+    `end:${secondSession}:parallel`,
+    `end:${firstSession}:one`,
+    `start:${firstSession}:two`,
+    `end:${firstSession}:two`,
+  ])
+
+  // A rejected prompt does not wedge the per-session queue.
+  const failing = new AcpServer({
+    promptHandler: ({ text }) => {
+      if (text === 'fail') {
+        throw new Error('handler exploded')
+      }
+      return { ok: true }
+    },
+  })
+  const failingSession = String(failing.openSession('/workspace').session_id)
+  await expect(failing.prompt(failingSession, 'fail')).rejects.toThrow('handler exploded')
+  await expect(failing.prompt(failingSession, 'after')).resolves.toEqual({ ok: true })
 })

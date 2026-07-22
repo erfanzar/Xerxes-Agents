@@ -16,7 +16,14 @@ const SHADOW_EXCLUDE_PATTERNS = [
   '*.pem',
   '*.key',
   '*credentials*',
+  '*secret*',
   'id_rsa*',
+  '.ssh/**',
+  '.npmrc',
+  '.netrc',
+  '*.p12',
+  '*.keystore',
+  'kubeconfig*',
 ] as const
 
 export interface SnapshotRecord {
@@ -51,7 +58,19 @@ export class SnapshotManager {
   }
 
   get(ref: string): SnapshotRecord | undefined {
-    return this.list().find(record => record.id === ref || record.label === ref || record.commitSha.startsWith(ref))
+    if (ref.length === 0) return undefined
+    const records = this.list()
+    const exact = records.find(record => record.id === ref || record.label === ref)
+    if (exact) return exact
+    // Empty or short SHA prefixes silently matched the first record, letting
+    // rollback('') restore an arbitrary snapshot. Require enough entropy and
+    // refuse ambiguous prefixes instead.
+    if (ref.length < 4) return undefined
+    const matches = records.filter(record => record.commitSha.startsWith(ref))
+    if (matches.length > 1) {
+      throw new Error(`ambiguous snapshot ref: ${ref} matches ${matches.length} snapshots`)
+    }
+    return matches[0]
   }
 
   list(): SnapshotRecord[] {
@@ -104,12 +123,18 @@ export class SnapshotManager {
   async rollback(ref: string): Promise<SnapshotRecord> {
     const record = this.get(ref)
     if (!record) throw new Error(`snapshot not found: ${ref}`)
+    // checkout-index overwrites modified files without a backup, so capture
+    // the current tree first; the pre-rollback snapshot can itself be
+    // rolled back to undo a mistaken restore.
+    await this.snapshot(`pre-rollback:${record.id}`)
     // Full-tree restore: point the index at the snapshot tree, rewrite every
-    // tracked file, then delete files the snapshot does not track. Paths
-    // excluded in the shadow repo (secrets, Xerxes state) survive the clean.
+    // tracked file, then delete files the snapshot does not track. `-x` also
+    // removes ignored build outputs created after the snapshot (plain `-fd`
+    // would honor the workspace .gitignore and leave a mixed tree), while the
+    // explicit `-e` patterns keep shadow-excluded secrets and Xerxes state.
     await this.runGit(['read-tree', record.commitSha])
     await this.runGit(['checkout-index', '-f', '-a'])
-    await this.runGit(['clean', '-fd'])
+    await this.runGit(['clean', '-fdx', ...SHADOW_EXCLUDE_PATTERNS.flatMap(pattern => ['-e', pattern])])
     return record
   }
 

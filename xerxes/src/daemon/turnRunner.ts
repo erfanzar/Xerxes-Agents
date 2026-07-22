@@ -320,7 +320,18 @@ export class AgentTurnRunner implements TurnRunner {
       .map(tool => tool.function.name)
       .sort()
       .join('\u0001')
-    const key = [session.cwd, model, session.agentId, agentId, toolSignature].join('\u0000')
+    // The provider receives the whole session, so every session-scoped input
+    // the prompt can reflect — plan mode and the trusted addendum, alongside
+    // workspace, model, agent, and tool surface — must stay in the cache key.
+    const key = [
+      session.cwd,
+      model,
+      session.agentId,
+      agentId,
+      toolSignature,
+      session.planMode === true ? 'plan' : '',
+      systemPromptAddendum(session),
+    ].join('\u0000')
     const existing = this.bootstrapPrompts.get(key)
     if (existing) return existing
     const prompt = Promise.resolve(provider({ agentId, session, model, tools })).catch(error => {
@@ -448,8 +459,15 @@ async function* multiplexTurnEvents(
     }
   } finally {
     wake = undefined
-    unsubscribe()
+    // Close the turn iterator while still subscribed so events published
+    // during its cleanup land in the queue, then stop listening and drain
+    // the remainder; nothing a child emitted may be silently dropped.
     await iterator.return?.()
+    unsubscribe()
+    while (queued.length) {
+      const event = queued.shift()
+      if (event) yield { event, kind: 'subagent' }
+    }
   }
 }
 

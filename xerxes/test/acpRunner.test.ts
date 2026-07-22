@@ -257,7 +257,7 @@ test('ACP cancellation aborts a pending approval without leaving the turn blocke
   expect(server.pendingPermissions()).toEqual([])
 })
 
-test('ACP session accepts a new prompt after a cancellation', async () => {
+test('ACP prompt start honors a cancellation that arrived before the turn', async () => {
   const runner = new AcpAgentRunner({ llm: new TextClient(), model: 'gpt-4o' })
   const server = new AcpServer({ runner })
   const sessionId = String(server.openSession('/workspace').session_id)
@@ -269,6 +269,14 @@ test('ACP session accepts a new prompt after a cancellation', async () => {
   expect(server.cancel(sessionId)).toEqual({ ok: true })
   expect(session.cancelled).toBe(true)
 
+  // The pending cancellation is consumed and fails the prompt instead of
+  // being silently dropped while the turn runs anyway.
+  const rejected = await runner.runPrompt({ session, text: 'prompt after cancel' })
+  expect(rejected).toMatchObject({ ok: false, cancelled: true })
+  expect(session.cancelled).toBe(false)
+  expect(runner.stateFor(sessionId)).toBeUndefined()
+
+  // The cancellation is consumed: the session accepts prompts again.
   const events: Record<string, unknown>[] = []
   const result = await runner.runPrompt({
     session,

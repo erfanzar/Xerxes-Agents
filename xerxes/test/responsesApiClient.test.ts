@@ -65,7 +65,7 @@ test('Responses API client maps request tools and streamed events into neutral d
   expect(events).toEqual([
     { content: 'Inspecting.' },
     {
-      finishReason: 'completed',
+      finishReason: 'tool_calls',
       usage: { inputTokens: 8, outputTokens: 3 },
       toolCalls: [{
         id: 'call_1',

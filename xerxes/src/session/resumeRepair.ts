@@ -111,7 +111,9 @@ export async function replayPendingToolCalls(
     try {
       const arguments_ = replayArguments(replay.arguments)
       try {
-        message.content = await executor.execute(replay.name, arguments_) ?? ''
+        // A null/undefined executor result is not a successful empty reply;
+        // recording it as one would feed the model a fabricated tool result.
+        message.content = await executor.execute(replay.name, arguments_) ?? '[replay error: empty result]'
       } catch (error) {
         message.content = `[replay error: ${errorMessage(error)}]`
       }

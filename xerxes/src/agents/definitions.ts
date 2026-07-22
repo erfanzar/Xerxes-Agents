@@ -175,10 +175,14 @@ function loadReferencedSubagentDefinitions(
           const loaded = definitionFromSpec(loadAgentSpec(reference.path, options), creator.source)
           const definition = loaded.name === alias ? loaded : freezeDefinition({ ...loaded, name: alias })
           const existing = definitions.get(alias)
-          profileKey = existing && !sameDefinition(existing, definition)
-            ? catalogDefinitionKey(alias, reference.path)
-            : alias
-          definitions.set(profileKey, definition)
+          // Referenced-only profiles never claim the plain alias: that would make a
+          // nested-only agent globally spawnable and let map iteration order decide
+          // which creator wins the alias. Reuse the plain alias only when an
+          // identical definition already owns it.
+          profileKey = existing !== undefined && sameDefinition(existing, definition)
+            ? alias
+            : catalogDefinitionKey(alias, reference.path)
+          if (profileKey !== alias) definitions.set(profileKey, definition)
           loadedPaths.set(referenceKey, profileKey)
           queue.push([profileKey, definition])
         }

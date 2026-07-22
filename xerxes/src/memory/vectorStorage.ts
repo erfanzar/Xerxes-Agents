@@ -11,6 +11,10 @@ import type { MemoryStorage, SemanticSearchResult } from './storage.js'
 
 const DEFAULT_DATABASE_PATH = '.xerxes_memory/vectors.db'
 const BYTE_MARKER_TYPE = 'bytes'
+/** Default upper bound on rows scanned by one semantic search. */
+const DEFAULT_MAX_SCAN_ROWS = 10_000
+/** Default upper bound on one serialized payload or embedded text, in bytes. */
+const DEFAULT_MAX_PAYLOAD_BYTES = 65_536
 
 interface ByteMarker {
   readonly [key: string]: JsonValue
@@ -32,6 +36,18 @@ export interface SQLiteVectorStorageOptions {
   readonly dbPath?: string
   /** Encoder used for stored text and semantic-search queries. */
   readonly embedder?: Embedder
+  /**
+   * Maximum serialized payload size accepted by `save`, in bytes. Oversized
+   * values are rejected so one huge write cannot stall the event loop or
+   * bloat the database. Default: 64 KiB.
+   */
+  readonly maxPayloadBytes?: number
+  /**
+   * Maximum rows one semantic search will load and score. Bounds the
+   * otherwise O(store) CPU and memory cost of the deterministic cosine scan.
+   * Default: 10000.
+   */
+  readonly maxScanRows?: number
 }
 
 /**
@@ -45,6 +61,8 @@ export interface SQLiteVectorStorageOptions {
 export class SQLiteVectorStorage implements MemoryStorage {
   readonly dbPath: string
   readonly embedder: Embedder
+  readonly maxPayloadBytes: number
+  readonly maxScanRows: number
   private closed = false
   private readonly database: Database
 
@@ -56,6 +74,8 @@ export class SQLiteVectorStorage implements MemoryStorage {
       : { ...(optionsOrPath ?? {}), ...(positionalEmbedder === undefined ? {} : { embedder: positionalEmbedder }) }
     this.dbPath = expandHome(options.dbPath ?? DEFAULT_DATABASE_PATH)
     this.embedder = options.embedder ?? getDefaultEmbedder()
+    this.maxPayloadBytes = positiveInteger(options.maxPayloadBytes, DEFAULT_MAX_PAYLOAD_BYTES)
+    this.maxScanRows = positiveInteger(options.maxScanRows, DEFAULT_MAX_SCAN_ROWS)
     if (this.dbPath !== ':memory:') mkdirSync(dirname(this.dbPath), { recursive: true })
     this.database = new Database(this.dbPath)
     try {
@@ -117,6 +137,9 @@ export class SQLiteVectorStorage implements MemoryStorage {
     } catch {
       return false
     }
+    // Reject oversized payloads before hashing and persistence so one huge
+    // value cannot stall the loop or bloat the database.
+    if (Buffer.byteLength(payload, 'utf8') > this.maxPayloadBytes) return false
 
     const embedding = this.embeddingFor(data)
     try {
@@ -145,9 +168,11 @@ export class SQLiteVectorStorage implements MemoryStorage {
     if (queryVector.length === 0) return []
 
     const results: SemanticSearchResult[] = []
+    // The deterministic cosine scan is O(store); bound every query to a
+    // configurable row budget instead of loading and parsing the full table.
     const rows = this.database
-      .query('SELECT key, data, embedding FROM vectors ORDER BY key ASC')
-      .all() as unknown as VectorRow[]
+      .query('SELECT key, data, embedding FROM vectors ORDER BY key ASC LIMIT ?')
+      .all(this.maxScanRows) as unknown as VectorRow[]
     for (const row of rows) {
       if (typeof row.key !== 'string') continue
       const embedding = parseEmbedding(row.embedding)
@@ -168,8 +193,10 @@ export class SQLiteVectorStorage implements MemoryStorage {
   private embeddingFor(data: unknown): number[] {
     const text = embeddingText(data)
     if (text.length === 0) return zeroVector(this.embedder)
+    // Bound the per-token hashing cost of the embedder on oversized values.
+    const bounded = truncateToBytes(text, this.maxPayloadBytes)
     try {
-      return validVector(this.embedder.embed(text)) ?? zeroVector(this.embedder)
+      return validVector(this.embedder.embed(bounded)) ?? zeroVector(this.embedder)
     } catch {
       return zeroVector(this.embedder)
     }
@@ -263,6 +290,24 @@ function isJsonObject(value: JsonValue): value is JsonObject {
 
 function numberCount(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0
+}
+
+function positiveInteger(value: number | undefined, fallback: number): number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 1 ? value : fallback
+}
+
+/** Truncate to a byte budget without splitting multi-byte UTF-8 sequences. */
+function truncateToBytes(text: string, maxBytes: number): string {
+  if (Buffer.byteLength(text, 'utf8') <= maxBytes) return text
+  let bytes = 0
+  let end = 0
+  for (const character of text) {
+    const width = Buffer.byteLength(character, 'utf8')
+    if (bytes + width > maxBytes) break
+    bytes += width
+    end += character.length
+  }
+  return text.slice(0, end)
 }
 
 function parseEmbedding(value: unknown): number[] | undefined {

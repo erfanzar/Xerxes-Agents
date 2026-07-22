@@ -85,6 +85,11 @@ export interface BrowserManagerOptions {
   readonly urlSafety?: UrlSafetyOptions
 }
 
+/** Cap on tracked page links so a hostile DOM cannot flood transcripts or memory. */
+const MAX_BROWSER_LINKS = 200
+/** Bound on a model-requested post-navigation wait so a turn cannot stall for days. */
+const MAX_WAIT_MS = 60_000
+
 /** Lazy browser session manager backed by an optional typed driver adapter. */
 export class BrowserManager {
   private adapter: BrowserAdapter | undefined
@@ -96,7 +101,10 @@ export class BrowserManager {
     this.urlSafety = options.urlSafety ?? {}
   }
 
-  setAdapter(adapter: BrowserAdapter | undefined): void {
+  /** Swap the adapter after closing the previous one so sockets and timers never leak. */
+  async setAdapter(adapter: BrowserAdapter | undefined): Promise<void> {
+    const previous = this.adapter
+    if (previous !== undefined && previous !== adapter) await previous.close?.()
     this.adapter = adapter
     this.pages.clear()
   }
@@ -339,6 +347,9 @@ export function registerBrowserManagerTools(
 function normalizeWait(value: number | undefined): number {
   const wait = value ?? 500
   if (!Number.isInteger(wait) || wait < 0) throw new ValidationError('wait_ms', 'must be a non-negative integer', wait)
+  if (wait > MAX_WAIT_MS) {
+    throw new ValidationError('wait_ms', `must be at most ${MAX_WAIT_MS} (60 seconds)`, wait)
+  }
   return wait
 }
 
@@ -346,6 +357,7 @@ function normalizeLinks(links: readonly BrowserLink[] | undefined): BrowserLink[
   const normalized: BrowserLink[] = []
   const usedIds = new Set<number>()
   for (const source of links ?? []) {
+    if (normalized.length >= MAX_BROWSER_LINKS) break
     const url = source.url.trim()
     if (!url) continue
     let id = source.id

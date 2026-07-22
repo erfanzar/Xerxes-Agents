@@ -3,12 +3,17 @@
 
 export type ErrorDetails = Readonly<Record<string, unknown>>
 
+/** Standard error options forwarded to the native `Error` cause chain. */
+export interface XerxesErrorOptions {
+  readonly cause?: unknown
+}
+
 /** Base error for failures with structured information safe to expose to callers. */
 export class XerxesError extends Error {
   readonly details: ErrorDetails
 
-  constructor(message: string, details: Record<string, unknown> = {}) {
-    super(message)
+  constructor(message: string, details: Record<string, unknown> = {}, options: XerxesErrorOptions = {}) {
+    super(message, options)
     this.name = new.target.name
     this.details = Object.freeze({ ...details })
   }
@@ -25,7 +30,6 @@ export class AgentError extends XerxesError {
 
 export class FunctionExecutionError extends XerxesError {
   readonly functionName: string
-  readonly cause: unknown
 
   constructor(
     functionName: string,
@@ -33,9 +37,8 @@ export class FunctionExecutionError extends XerxesError {
     cause: unknown = undefined,
     details: Record<string, unknown> = {},
   ) {
-    super(`Function ${functionName}: ${message}`, details)
+    super(`Function ${functionName}: ${message}`, details, { cause })
     this.functionName = functionName
-    this.cause = cause
   }
 }
 
@@ -96,7 +99,6 @@ export class XerxesMemoryError extends XerxesError {
 
 export class ClientError extends XerxesError {
   readonly clientType: string
-  readonly cause: unknown
 
   constructor(
     clientType: string,
@@ -104,17 +106,21 @@ export class ClientError extends XerxesError {
     cause: unknown = undefined,
     details: Record<string, unknown> = {},
   ) {
-    super(`Client ${clientType}: ${message}`, details)
+    super(`Client ${clientType}: ${message}`, details, { cause })
     this.clientType = clientType
-    this.cause = cause
   }
 }
 
 export class ConfigurationError extends XerxesError {
   readonly configKey: string
 
-  constructor(configKey: string, message: string, details: Record<string, unknown> = {}) {
-    super(`Configuration ${configKey}: ${message}`, details)
+  constructor(
+    configKey: string,
+    message: string,
+    details: Record<string, unknown> = {},
+    options: XerxesErrorOptions = {},
+  ) {
+    super(`Configuration ${configKey}: ${message}`, details, options)
     this.configKey = configKey
   }
 }

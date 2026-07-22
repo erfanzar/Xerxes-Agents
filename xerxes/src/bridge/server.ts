@@ -1120,10 +1120,15 @@ function rawMessage(message: ChatMessage): Record<string, unknown> {
   }
 }
 
+/**
+ * Serialized profile payloads are served to bridge clients, so the raw API
+ * key never leaves this process. Selection resolves the real key server-side
+ * through the profile store.
+ */
 function profilePayload(profile: ProviderProfile & { readonly active?: boolean }): BridgeProviderProfile {
   return {
     name: profile.name,
-    api_key: profile.api_key,
+    api_key: profile.api_key ? '********' : '',
     base_url: profile.base_url,
     model: profile.model,
     provider: profile.provider,

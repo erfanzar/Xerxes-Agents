@@ -81,7 +81,7 @@ export function createNativeSubagentHost(options: NativeSubagentHostOptions): Na
   const generationOptions = new Map<number, NativeSubagentHostOptions>([[activeGeneration, options]])
   const conversations = new SubagentConversationPersistence(options.transcriptStore)
   const historySessionIds = new Map<string, string>()
-  /** Child depth advertised by the manager for each in-flight run, keyed by the agent id its tools see. */
+  /** Child depth advertised by the manager for each in-flight run, keyed by the unique running task id. */
   const runningChildDepths = new Map<string, { readonly childDepth: number, readonly taskId: string }>()
   const manager = new SubAgentManager({
     idFactory: () => {
@@ -254,9 +254,7 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
     const toolsets = subagentTools(this.availableTools, config).map(tool => tool.function.name)
     const rules = nativeRuleLabels(permissionMode, definition.isolation)
     const parentKey = options.parentAgentId ?? options.creatorAgentId
-    const childDepth = parentKey === undefined
-      ? undefined
-      : this.runningChildDepths.get(parentKey)?.childDepth
+    const childDepth = parentKey === undefined ? undefined : this.parentRunningChildDepth(parentKey)
     const task = await this.manager.spawn({
       prompt,
       ...(options.title ? { title: options.title } : {}),
@@ -285,6 +283,28 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
       sourceAgentId: options.sourceAgentId,
     })
     return this.snapshot(task)
+  }
+
+  /**
+   * The parent's tools advertise its task id, nickname, or shared profile
+   * name as their agent id. Depth entries are keyed by the unique task id,
+   * so a nickname or profile key resolves only when exactly one running task
+   * matches it; concurrent siblings sharing a profile never inherit each
+   * other's depth entry.
+   */
+  private parentRunningChildDepth(parentKey: string): number | undefined {
+    const direct = this.runningChildDepths.get(parentKey)
+    if (direct) return direct.childDepth
+    const runningTaskIds = new Set<string>()
+    for (const entry of this.runningChildDepths.values()) runningTaskIds.add(entry.taskId)
+    const candidates = new Set<string>()
+    for (const task of this.manager.listTasks()) {
+      if (!runningTaskIds.has(task.id)) continue
+      if (task.name === parentKey || task.agentDefName === parentKey) candidates.add(task.id)
+    }
+    if (candidates.size !== 1) return undefined
+    const [taskId] = candidates
+    return taskId === undefined ? undefined : this.runningChildDepths.get(taskId)?.childDepth
   }
 
   /** Cancel handles whose delegated policy grants capabilities absent from the new parent policy. */
@@ -524,6 +544,13 @@ class RecoverableSubagentManagerPort implements SpawnedAgentManagerPort {
   }
 
   async spawn(options: SpawnAgentOptions = {}): Promise<SpawnedAgentSnapshot> {
+    // Recovered tombstones reserve their nicknames just like live tasks do:
+    // reusing one would make every name-based lookup ambiguous between the
+    // fresh task and the stale restart record.
+    const nickname = options.nickname?.trim()
+    if (nickname && [...this.recovered.values()].some(snapshot => !snapshot.closed && snapshot.name === nickname)) {
+      throw new ValidationError('nickname', 'already identifies a spawned agent', nickname)
+    }
     return this.live.spawn(options)
   }
 
@@ -531,6 +558,7 @@ class RecoverableSubagentManagerPort implements SpawnedAgentManagerPort {
     handleId: string | undefined,
     options: SendAgentInputOptions,
   ): Promise<SpawnedAgentSnapshot> {
+    if (this.findLive(handleId)) return this.live.sendInput(handleId, options)
     const recovered = this.findRecovered(handleId)
     if (!recovered) return this.live.sendInput(handleId, options)
     if (!this.pendingRestart.delete(recovered.id)) {
@@ -565,12 +593,14 @@ class RecoverableSubagentManagerPort implements SpawnedAgentManagerPort {
     readonly completed: readonly SpawnedAgentSnapshot[]
     readonly pending: readonly SpawnedAgentSnapshot[]
   }> {
-    const liveIds = new Set(this.live.listHandles().map(snapshot => snapshot.id))
     const active: string[] = []
     const archived: SpawnedAgentSnapshot[] = []
     for (const target of targets) {
-      if (liveIds.has(target)) {
-        active.push(target)
+      // Live handles accept nicknames as well as ids, so resolve both before
+      // a target is treated as a restart tombstone.
+      const live = this.findLive(target)
+      if (live) {
+        active.push(live.id)
         continue
       }
       const recovered = this.findRecovered(target)
@@ -587,6 +617,7 @@ class RecoverableSubagentManagerPort implements SpawnedAgentManagerPort {
   }
 
   resume(handleId: string): SpawnedAgentSnapshot {
+    if (this.findLive(handleId)) return this.live.resume(handleId)
     const recovered = this.findRecovered(handleId)
     if (!recovered) return this.live.resume(handleId)
     this.pendingRestart.add(recovered.id)
@@ -594,6 +625,7 @@ class RecoverableSubagentManagerPort implements SpawnedAgentManagerPort {
   }
 
   close(handleId: string): SpawnedAgentSnapshot & { readonly previousStatus: SpawnedAgentStatus } {
+    if (this.findLive(handleId)) return this.live.close(handleId)
     const recovered = this.findRecovered(handleId)
     if (!recovered) return this.live.close(handleId)
     const closed = Object.freeze({
@@ -623,6 +655,13 @@ class RecoverableSubagentManagerPort implements SpawnedAgentManagerPort {
 
   invalidateHandlesExceeding(nextMode: PermissionMode): number {
     return this.live.invalidateHandlesExceeding(nextMode)
+  }
+
+  /** Live handles win over restart tombstones so a reused name never misroutes to a stale record. */
+  private findLive(idOrName: string | undefined): SpawnedAgentSnapshot | undefined {
+    const target = idOrName?.trim()
+    if (!target) return undefined
+    return this.live.listHandles().find(snapshot => snapshot.id === target || snapshot.name === target)
   }
 
   private findRecovered(idOrName: string | undefined): SpawnedAgentSnapshot | undefined {
@@ -688,8 +727,9 @@ async function runNativeSubagent(
   state.metadata.project_root = options.cwd
   // The run request carries the depth children of this task must be spawned at
   // (the manager precomputes task.depth + 1); publish it while the turn runs.
-  const depthKey = request.task.agentDefName || request.task.id
-  runningChildDepths.set(depthKey, { childDepth: request.depth, taskId: request.task.id })
+  // Key by the unique task id, never the shared profile name, so concurrent
+  // siblings with one profile cannot overwrite each other's depth entry.
+  runningChildDepths.set(request.task.id, { childDepth: request.depth, taskId: request.task.id })
   let output = ''
   const previousMessageCount = state.messages.length
   const previousTurnCount = state.turnCount
@@ -807,8 +847,7 @@ async function runNativeSubagent(
     }
     return { content: latestAssistantText(state.messages) || output }
   } finally {
-    const tracked = runningChildDepths.get(depthKey)
-    if (tracked?.taskId === request.task.id) runningChildDepths.delete(depthKey)
+    runningChildDepths.delete(request.task.id)
     releaseConversation()
   }
 }

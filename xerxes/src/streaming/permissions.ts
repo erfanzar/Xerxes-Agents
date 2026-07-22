@@ -12,6 +12,38 @@ export type PermissionDisposition = 'allow' | 'deny' | 'prompt'
 /** Xerxes starts in YOLO mode unless an embedding host explicitly chooses a stricter policy. */
 export const DEFAULT_PERMISSION_MODE: PermissionMode = 'accept-all'
 
+/**
+ * Tools that always require an explicit user approval, in every permission
+ * mode including the default `accept-all` (YOLO) mode.
+ *
+ * These calls have durable or externally visible side effects that outlive the
+ * current turn: `send_message` delivers outbound channel messages and
+ * attachments to third parties, `RemoteTriggerTool` fires configured webhooks,
+ * and `ScheduleCronTool` persists a prompt that re-executes later. Auto-
+ * approving them under YOLO would let one prompt-injected turn exfiltrate data
+ * or plant persistent re-execution without the user ever seeing a prompt.
+ *
+ * `computer_use` is deliberately NOT in this tier: it is a documented baseline
+ * desktop surface that hosts opt into explicitly, and gating it here would
+ * break that contracted behavior.
+ *
+ * Escape hatch: an embedding host that has made a deliberate, informed decision
+ * to restore legacy zero-prompt behavior may pass
+ * `{ bypassAlwaysApprove: true }` (the `bypassAlwaysApprove` gate option). No
+ * in-tree caller sets it, so the daemon, TUI, ACP, and API paths enforce this
+ * tier unconditionally.
+ */
+export const ALWAYS_APPROVAL_TOOLS = new Set(['send_message', 'RemoteTriggerTool', 'ScheduleCronTool'])
+
+export interface PermissionGateOptions {
+  /**
+   * Explicit host escape hatch for {@link ALWAYS_APPROVAL_TOOLS}. When true,
+   * the always-approval tier is skipped and the permission mode alone decides.
+   * Defaults to false; hosts must opt in consciously.
+   */
+  readonly bypassAlwaysApprove?: boolean
+}
+
 export interface ToolPolicy {
   check(toolName: string, agentId?: string): PolicyAction
 }
@@ -139,10 +171,16 @@ export function permissionDisposition(
   mode: PermissionMode = DEFAULT_PERMISSION_MODE,
   policy?: ToolPolicy,
   agentId?: string,
+  options?: PermissionGateOptions,
 ): PermissionDisposition {
   const name = call.function.name
   if (policy?.check(name, agentId) === 'deny') {
     return 'deny'
+  }
+  // The always-approval tier is consulted before the mode shortcut, so these
+  // tools prompt even under `accept-all`. See ALWAYS_APPROVAL_TOOLS.
+  if (ALWAYS_APPROVAL_TOOLS.has(name) && options?.bypassAlwaysApprove !== true) {
+    return 'prompt'
   }
   if (mode === 'accept-all') {
     return 'allow'
@@ -175,8 +213,9 @@ export function checkPermission(
   mode: PermissionMode = DEFAULT_PERMISSION_MODE,
   policy?: ToolPolicy,
   agentId?: string,
+  options?: PermissionGateOptions,
 ): boolean {
-  return permissionDisposition(call, mode, policy, agentId) === 'allow'
+  return permissionDisposition(call, mode, policy, agentId, options) === 'allow'
 }
 
 export function permissionDescription(call: Pick<ToolCall, 'function'>): string {

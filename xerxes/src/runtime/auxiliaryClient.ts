@@ -12,6 +12,21 @@ const SUMMARY_INSTRUCTION = [
 
 const TITLE_INSTRUCTION = 'Generate a short, descriptive title (max 8 words) for this conversation. Output only the title.'
 
+/**
+ * Character ceiling for a rendered transcript sent to the auxiliary model.
+ * Compaction exists to shrink long sessions; sending the whole transcript
+ * would defeat it with a cost blowout or an overflow of the small auxiliary
+ * model's context. Oversized renders keep the head and tail with an explicit
+ * marker so the model knows the middle was omitted.
+ */
+export const MAX_RENDERED_TRANSCRIPT_CHARS = 120_000
+
+const TRANSCRIPT_TRUNCATION_MARKER = [
+  '',
+  '[... transcript truncated: middle portion omitted to fit the auxiliary-model context ...]',
+  '',
+].join('\n')
+
 export interface AuxiliaryMessage {
   readonly content?: unknown
   readonly role?: string
@@ -233,11 +248,14 @@ function copyMetadata(metadata: Readonly<Record<string, unknown>> | undefined): 
   return Object.freeze({ ...metadata })
 }
 
-function renderMessages(messages: readonly AuxiliaryMessage[]): string {
+function renderMessages(
+  messages: readonly AuxiliaryMessage[],
+  maximumChars: number = MAX_RENDERED_TRANSCRIPT_CHARS,
+): string {
   if (!Array.isArray(messages)) {
     throw new TypeError('auxiliary messages must be an array')
   }
-  return messages.map((message, index) => {
+  const rendered = messages.map((message, index) => {
     if (!isRecord(message)) {
       throw new TypeError(`auxiliary message ${index} must be an object`)
     }
@@ -248,6 +266,25 @@ function renderMessages(messages: readonly AuxiliaryMessage[]): string {
     const content = message.content === undefined ? '' : message.content
     return `[${role}] ${typeof content === 'string' ? content : String(content)}`
   }).join('\n')
+  return clipRenderedTranscript(rendered, maximumChars)
+}
+
+/**
+ * Bound a rendered transcript to a character budget, keeping the head and
+ * tail (newest turns are usually the most relevant) joined by an explicit
+ * truncation marker. A non-positive or non-finite budget disables clipping.
+ */
+function clipRenderedTranscript(rendered: string, maximumChars: number): string {
+  if (!Number.isFinite(maximumChars) || maximumChars <= 0 || rendered.length <= maximumChars) {
+    return rendered
+  }
+  if (maximumChars <= TRANSCRIPT_TRUNCATION_MARKER.length + 2) {
+    return rendered.slice(0, maximumChars)
+  }
+  const available = maximumChars - TRANSCRIPT_TRUNCATION_MARKER.length
+  const headLength = Math.ceil(available / 2)
+  const tailLength = available - headLength
+  return rendered.slice(0, headLength) + TRANSCRIPT_TRUNCATION_MARKER + rendered.slice(rendered.length - tailLength)
 }
 
 function stripTitleDelimiters(text: string): string {

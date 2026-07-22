@@ -137,6 +137,11 @@ if (argument === "--help" || argument === "-h") {
 } else if (argument === "export") {
   await runExport(argumentsAfterCommand);
 } else if (argument === "daemon") {
+  assertKnownOptions(argumentsAfterCommand, "daemon", [
+    "--pid-file",
+    "--project-dir",
+    "--socket",
+  ]);
   const projectDirectory = optionValue(argumentsAfterCommand, "--project-dir");
   const config = loadSystemDaemonConfig({
     ...(projectDirectory ? { projectDirectory } : {}),
@@ -148,6 +153,14 @@ if (argument === "--help" || argument === "-h") {
   await runDaemon(config, projectDirectory, socketPath, pidPath);
   process.exit(0);
 } else if (argument === "telegram") {
+  assertKnownOptions(argumentsAfterCommand, "telegram", [
+    "--host",
+    "--pid-file",
+    "--port",
+    "--project-dir",
+    "--socket",
+    "--token",
+  ]);
   const token =
     optionValue(argumentsAfterCommand, "--token") ??
     process.env.TELEGRAM_BOT_TOKEN?.trim();
@@ -172,7 +185,13 @@ if (argument === "--help" || argument === "-h") {
   await runAcp(argumentsAfterCommand);
 } else if (argument === "-r" || argument === "--resume") {
   const sessionId = argumentsAfterCommand[0]?.trim();
-  if (!sessionId) throw new Error("The --resume option requires a session ID");
+  if (!sessionId || sessionId.startsWith("-")) {
+    throw new Error(
+      sessionId
+        ? `The --resume option requires a session ID, not the flag ${sessionId}`
+        : "The --resume option requires a session ID",
+    );
+  }
   const prompt = argumentsAfterCommand.slice(1).join(" ").trim();
   if (prompt) {
     await runResumedOneShot(sessionId, prompt);
@@ -199,6 +218,31 @@ function optionValue(
   const index = args.indexOf(flag);
   const value = index >= 0 ? args[index + 1] : undefined;
   return value && !value.startsWith("-") ? value : undefined;
+}
+
+/**
+ * Reject misspelled or unsupported subcommand flags instead of silently
+ * ignoring them, and reject flag-like values so `--socket --pid-file` fails
+ * loudly instead of dropping the socket path.
+ */
+function assertKnownOptions(
+  args: readonly string[],
+  command: string,
+  valueFlags: readonly string[],
+): void {
+  const known = new Set(valueFlags);
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    if (argument === undefined || !argument.startsWith("-")) continue;
+    if (!known.has(argument)) {
+      throw new Error(`Unknown ${command} option: ${argument}`);
+    }
+    const value = args[index + 1];
+    if (value === undefined || value.startsWith("-")) {
+      throw new Error(`${command} option ${argument} requires a value`);
+    }
+    index += 1;
+  }
 }
 
 async function runDaemon(
@@ -1048,6 +1092,7 @@ async function runOneShot(prompt: string): Promise<void> {
   const state = createAgentState();
   const subagentCohort = subagentHost.turnCoordinator.begin(sessionId);
   let wroteText = false;
+  let terminalProviderError: string | undefined;
   try {
     for await (const event of runTurn(
       {
@@ -1079,6 +1124,7 @@ async function runOneShot(prompt: string): Promise<void> {
         wroteText = true;
         process.stdout.write(event.text);
       } else if (event.type === "provider_retry" && event.final) {
+        terminalProviderError = event.error;
         console.error(`Provider error: ${event.error}`);
       }
     }
@@ -1087,6 +1133,9 @@ async function runOneShot(prompt: string): Promise<void> {
     await subagentHost.manager.shutdown();
   }
   if (wroteText) process.stdout.write("\n");
+  // A terminal provider failure still yields a text event, so scripts and CI
+  // must learn about it through the exit code rather than stdout alone.
+  if (terminalProviderError !== undefined) process.exitCode = 1;
 }
 
 /**
@@ -1104,6 +1153,7 @@ async function runResumedOneShot(
   const config = loadSystemDaemonConfig({ projectDirectory });
   const runtime = daemonRuntime(config, projectDirectory, new ProfileStore());
   let wroteText = false;
+  let turnFailed = false;
   try {
     runtime.reload({ permission_mode: "accept-all" });
     const session = await runtime.openSession(sessionId, undefined, {
@@ -1123,6 +1173,7 @@ async function runResumedOneShot(
         return;
       }
       if (event.type === "notification" && event.payload.level === "error") {
+        turnFailed = true;
         const message = stringSetting(event.payload.message);
         if (message) {
           console.error(`Provider error: ${message}`);
@@ -1133,6 +1184,9 @@ async function runResumedOneShot(
     await runtime.shutdown();
   }
   if (wroteText) process.stdout.write("\n");
+  // Turn failures surface as error-level notification events only; without a
+  // failing exit code a broken resumed run looks successful to scripts.
+  if (turnFailed) process.exitCode = 1;
 }
 
 function agentToolDefinitions(

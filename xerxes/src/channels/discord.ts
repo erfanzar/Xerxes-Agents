@@ -1,7 +1,10 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { createPublicKey, verify as ed25519Verify, type KeyObject } from 'node:crypto'
+
 import { postJson, providerUrl, type ChannelFetch } from './http.js'
+import { scanContextContent } from '../security/promptScanner.js'
 import {
   type DiscordApplicationCommand,
   type DiscordApplicationRestPort,
@@ -21,10 +24,21 @@ import {
   parseJsonBody,
   WebhookChannel,
   type WebhookHeaders,
+  type WebhookResponse,
 } from './webhooks.js'
 
 const DISCORD_API_BASE = 'https://discord.com/api/v10/'
 export const DISCORD_MESSAGE_LIMIT = 2_000
+/** DER prefix wrapping a raw 32-byte Ed25519 public key into SPKI form. */
+const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex')
+
+/** Raised when Discord webhook delivery must fail closed without a verifiable signature. */
+export class DiscordSignatureError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = new.target.name
+  }
+}
 
 type StringList = string | readonly string[] | ReadonlySet<string> | undefined
 
@@ -57,6 +71,12 @@ export interface DiscordChannelOptions {
   readonly maxMessageChars?: number | string
   /** Request Discord's privileged message-content intent during Gateway identify. */
   readonly messageContentIntent?: boolean | string
+  /**
+   * Discord application public key (32 bytes, hex) used to verify the
+   * Ed25519 `X-Signature-Ed25519` interaction signature on raw webhooks.
+   * Webhook delivery fails closed when it is absent.
+   */
+  readonly publicKey?: string
   /** Register `/ask`, `/skills`, `/skill`, and `/status` after the Gateway READY event. */
   readonly registerCommands?: boolean | string
   readonly requireMention?: boolean | string
@@ -86,6 +106,7 @@ export class DiscordChannel extends WebhookChannel {
   private readonly instanceName: string
   private readonly maxMessageChars: number
   private readonly messageContentIntent: boolean
+  private readonly publicKey: KeyObject | undefined
   private readonly registerCommands: boolean
   private readonly requireMention: boolean
   private readonly suppressMentions: boolean
@@ -117,6 +138,7 @@ export class DiscordChannel extends WebhookChannel {
     this.instanceName = String(options.instanceName || options.deviceName || '').trim()
     this.maxMessageChars = messageLimit(options.maxMessageChars)
     this.messageContentIntent = asBoolean(options.messageContentIntent, true)
+    this.publicKey = discordPublicKey(options.publicKey)
     this.registerCommands = asBoolean(options.registerCommands, true)
     this.requireMention = asBoolean(options.requireMention, false)
     this.suppressMentions = asBoolean(options.suppressMentions, true)
@@ -158,6 +180,27 @@ export class DiscordChannel extends WebhookChannel {
     } finally {
       await super.stop()
     }
+  }
+
+  /**
+   * Raw HTTP deliveries must carry Discord's Ed25519 interaction signature.
+   * Gateway dispatches arrive over the authenticated socket and bypass this
+   * method entirely, so a missing application public key fails closed here.
+   */
+  override async handleWebhook(
+    headers: WebhookHeaders,
+    body: Uint8Array,
+  ): Promise<WebhookResponse> {
+    const publicKey = this.publicKey
+    if (!publicKey) {
+      throw new DiscordSignatureError(
+        'Discord webhook delivery requires the application publicKey for Ed25519 signature verification',
+      )
+    }
+    if (!verifyDiscordInteractionSignature(publicKey, headers, body)) {
+      return { status: 401, body: 'unauthorized' }
+    }
+    return super.handleWebhook(headers, body)
   }
 
   protected parseInbound(
@@ -231,7 +274,10 @@ export class DiscordChannel extends WebhookChannel {
       return
     }
     if (dispatch.type !== 'MESSAGE_CREATE') return
-    await this.handleWebhook({}, new TextEncoder().encode(JSON.stringify({ t: dispatch.type, d: dispatch.data })))
+    // Gateway dispatches arrive over Discord's authenticated socket, so they
+    // bypass the webhook-only Ed25519 verification in handleWebhook.
+    const message = this.messageFromPayload(dispatch.data)
+    if (message) await this.dispatchInbound(message)
   }
 
   private async syncApplicationCommands(guildIds: ReadonlySet<string>): Promise<void> {
@@ -318,7 +364,7 @@ export class DiscordChannel extends WebhookChannel {
       direction: MessageDirection.INBOUND,
       platformMessageId: '',
       roomId: channelId,
-      text: command,
+      text: scanContextContent(command, 'discord:inbound'),
       metadata: {
         guild_id: guildId,
         guild_name: stringOrEmpty(guild.name)
@@ -359,7 +405,7 @@ export class DiscordChannel extends WebhookChannel {
     }
     return createChannelMessage({
       channel: this.name,
-      text,
+      text: scanContextContent(text, 'discord:inbound'),
       direction: MessageDirection.INBOUND,
       channelUserId: stringOrEmpty(author.id),
       roomId: channelId,
@@ -569,6 +615,62 @@ export function discordApplicationCommands(): readonly DiscordApplicationCommand
       type: 1,
     },
   ]
+}
+
+/** Verify Discord's Ed25519 interaction signature against the untouched request body. */
+export function verifyDiscordSignature(
+  publicKey: string,
+  headers: WebhookHeaders,
+  body: Uint8Array,
+): boolean {
+  const hex = publicKey.trim()
+  if (!/^[0-9a-fA-F]{64}$/.test(hex)) {
+    return false
+  }
+  const key = discordPublicKey(hex)
+  return key !== undefined && verifyDiscordInteractionSignature(key, headers, body)
+}
+
+function discordPublicKey(publicKey: string | undefined): KeyObject | undefined {
+  const hex = publicKey?.trim() ?? ''
+  if (!hex) {
+    return undefined
+  }
+  if (!/^[0-9a-fA-F]{64}$/.test(hex)) {
+    throw new TypeError('Discord publicKey must be the 32-byte application public key in hexadecimal')
+  }
+  return createPublicKey({
+    key: Buffer.concat([ED25519_SPKI_PREFIX, Buffer.from(hex, 'hex')]),
+    format: 'der',
+    type: 'spki',
+  })
+}
+
+function verifyDiscordInteractionSignature(
+  publicKey: KeyObject,
+  headers: WebhookHeaders,
+  body: Uint8Array,
+): boolean {
+  const signature = headerValue(headers, 'x-signature-ed25519')
+  const timestamp = headerValue(headers, 'x-signature-timestamp')
+  if (!/^[0-9a-fA-F]{128}$/.test(signature) || !timestamp) {
+    return false
+  }
+  return ed25519Verify(
+    null,
+    Buffer.concat([Buffer.from(timestamp, 'utf8'), Buffer.from(body)]),
+    publicKey,
+    Buffer.from(signature, 'hex'),
+  )
+}
+
+function headerValue(headers: WebhookHeaders, wanted: string): string {
+  for (const [name, value] of Object.entries(headers)) {
+    if (name.toLowerCase() === wanted) {
+      return value
+    }
+  }
+  return ''
 }
 
 function messagePayload(payload: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> {

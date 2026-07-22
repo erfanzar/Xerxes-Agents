@@ -94,10 +94,14 @@ export function debugPrint(debug: boolean, output: DebugOutput, ...args: readonl
  * Non-string scalar values, arrays, and null values are deliberately ignored,
  * matching streaming-delta merge semantics in the Python runtime.
  */
+/** Keys that must never be merged, because assigning them mutates object prototypes. */
+const UNSAFE_MERGE_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
+
 export function mergeFields(target: MutableRecord, source: Readonly<Record<string, unknown>>): void {
   assertPlainRecord(target, 'target')
   assertPlainRecord(source, 'source')
   for (const [key, value] of Object.entries(source)) {
+    if (UNSAFE_MERGE_KEYS.has(key)) continue
     if (typeof value === 'string') {
       const existing = target[key]
       if (typeof existing !== 'string') {
@@ -129,7 +133,7 @@ export function mergeChunk(finalResponse: MutableRecord, delta: Readonly<Record<
 
   const fields: MutableRecord = {}
   for (const [key, value] of Object.entries(delta)) {
-    if (key !== 'role' && key !== 'tool_calls') fields[key] = value
+    if (key !== 'role' && key !== 'tool_calls') defineOwnField(fields, key, value)
   }
   mergeFields(finalResponse, fields)
 
@@ -150,7 +154,7 @@ export function mergeChunk(finalResponse: MutableRecord, delta: Readonly<Record<
   }
   const toolFields: MutableRecord = {}
   for (const [key, value] of Object.entries(toolCall)) {
-    if (key !== 'index') toolFields[key] = value
+    if (key !== 'index') defineOwnField(toolFields, key, value)
   }
   mergeFields(finalToolCall, toolFields)
 }
@@ -358,7 +362,9 @@ function copyJsonValue(value: unknown, ancestors: Set<object>): JsonValue {
     if (ancestors.has(value)) throw new TypeError('circular JSON values are not supported')
     ancestors.add(value)
     const copied: JsonObject = {}
-    for (const [key, item] of Object.entries(value)) copied[key] = copyJsonValue(item, ancestors)
+    for (const [key, item] of Object.entries(value)) {
+      defineOwnField(copied, key, copyJsonValue(item, ancestors))
+    }
     ancestors.delete(value)
     return copied
   }
@@ -379,6 +385,19 @@ function deepFreezeJson(value: JsonValue): JsonValue {
 
 function isJsonObject(value: JsonValue): value is JsonObject {
   return isPlainRecord(value)
+}
+
+/**
+ * Assign `key` as a real own property so hostile names such as `__proto__`
+ * are stored as data instead of silently mutating the target's prototype.
+ */
+function defineOwnField(target: MutableRecord, key: string, value: unknown): void {
+  Object.defineProperty(target, key, {
+    configurable: true,
+    enumerable: true,
+    value,
+    writable: true,
+  })
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {

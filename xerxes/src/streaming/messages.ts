@@ -338,8 +338,10 @@ export function messagesFromAnthropic(messages: readonly AnthropicWireMessage[])
         continue
       }
       if (block.type === 'thinking') {
-        thinking = block.thinking
-        thinkingSignature = block.signature
+        // A message may carry several thinking blocks; keep all reasoning and
+        // retain the latest signature for replay.
+        thinking = thinking ? `${thinking}\n${block.thinking}` : block.thinking
+        thinkingSignature = block.signature || thinkingSignature
         continue
       }
       if (block.type === 'tool_use') {

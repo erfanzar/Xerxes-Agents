@@ -51,6 +51,12 @@ export interface MCPServerConfig {
   /** Additional HTTP headers, such as Authorization. Protocol-controlled headers are rejected. */
   readonly headers?: Readonly<Record<string, string>>
   readonly enabled?: boolean
+  /**
+   * Explicit operator opt-in for loopback, private, and link-local HTTP
+   * endpoints (for example a local development server on 127.0.0.1). Private
+   * URL literals are rejected unless this is set.
+   */
+  readonly allowPrivateNetwork?: boolean
   readonly timeoutMs?: number
   readonly protocolVersion?: string
   readonly clientInfo?: MCPImplementation
@@ -188,6 +194,18 @@ export class MCPConnectionError extends Error {
   constructor(message: string) {
     super(message)
     this.name = 'MCPConnectionError'
+  }
+}
+
+/**
+ * Raised when a Streamable HTTP server answers a session-scoped request with
+ * HTTP 404, meaning the issued session is gone. MCPClient re-runs the
+ * initialize handshake and retries the request once when it sees this error.
+ */
+export class MCPSessionExpiredError extends MCPConnectionError {
+  constructor(message: string) {
+    super(message)
+    this.name = 'MCPSessionExpiredError'
   }
 }
 

@@ -151,11 +151,13 @@ export class RepoMapper {
       }
       sourceTexts.push([file.displayPath, source])
       const cached = this.fileCache.get(file.absolutePath)
+      // Cap at extraction time so one symbol-dense file cannot inflate the cache,
+      // reference counting, or scoring work on every build.
       const relativeSymbols = !options.force
         && cached?.mtimeMs === file.mtimeMs
         && cached.size === file.size
         ? cached.symbols
-        : extractSymbols(source, file.relativePath)
+        : extractSymbols(source, file.relativePath).slice(0, this.config.maxSymbolsPerFile)
       if (!cached || options.force || cached.mtimeMs !== file.mtimeMs || cached.size !== file.size) {
         this.fileCache.set(file.absolutePath, {
           mtimeMs: file.mtimeMs,
@@ -234,9 +236,12 @@ async function collectSourceFiles(roots: readonly string[], config: RepoMapConfi
   const labels = rootLabels(roots)
   const filesByPath = new Map<string, SourceFile>()
   for (const root of roots) {
+    if (filesByPath.size >= config.maxFiles) {
+      break
+    }
     const patterns = await gitignorePatterns(root)
     const label = labels.get(root) ?? basename(root)
-    const candidates = await walkRoot(root, patterns)
+    const candidates = await walkRoot(root, patterns, config.maxFiles)
     for (const candidate of candidates) {
       const displayPath = roots.length === 1 ? candidate.relativePath : `${label}/${candidate.relativePath}`
       if (!filesByPath.has(candidate.absolutePath)) {
@@ -252,13 +257,15 @@ async function collectSourceFiles(roots: readonly string[], config: RepoMapConfi
   return files.slice(0, config.maxFiles)
 }
 
-async function walkRoot(root: string, patterns: readonly string[]): Promise<Omit<SourceFile, 'displayPath'>[]> {
+async function walkRoot(root: string, patterns: readonly string[], maxFiles: number): Promise<Omit<SourceFile, 'displayPath'>[]> {
   const files: Array<Omit<SourceFile, 'displayPath'>> = []
   const pending: Array<{ readonly absolutePath: string; readonly relativePath: string }> = [{
     absolutePath: root,
     relativePath: '',
   }]
-  while (pending.length) {
+  // Stop once enough candidates are gathered: huge repositories must not pay a full
+  // O(repo) stat scan when only the first maxFiles entries can ever be used.
+  while (pending.length && files.length < maxFiles) {
     const current = pending.pop()
     if (!current) {
       continue
@@ -271,6 +278,9 @@ async function walkRoot(root: string, patterns: readonly string[]): Promise<Omit
     }
     entries.sort((left, right) => compareText(left.name, right.name))
     for (const entry of entries) {
+      if (files.length >= maxFiles) {
+        break
+      }
       const relativePath = current.relativePath ? `${current.relativePath}/${entry.name}` : entry.name
       const absolutePath = resolve(current.absolutePath, entry.name)
       if (entry.isSymbolicLink() || ignoredPath(relativePath, entry.name, entry.isDirectory(), patterns)) {

@@ -55,6 +55,18 @@ export interface MemoryToolContext {
   readonly now?: () => Date
 }
 
+/** A privileged host decision on whether a cross-agent memory operation may proceed. */
+export interface CrossAgentMemoryRequest {
+  /** The execution-context agent making the call, when known. */
+  readonly callingAgentId: string | undefined
+  /** The model-supplied target agent that differs from the calling agent. */
+  readonly requestedAgentId: string
+  /** The memory operation being attempted. */
+  readonly operation: MemoryOperation
+}
+
+export type CrossAgentMemoryAccess = (request: CrossAgentMemoryRequest) => boolean
+
 export interface MemoryToolsOptions {
   /** A shared memory tier, suitable for a single embedded runtime. */
   readonly context?: MemoryToolContext
@@ -62,6 +74,12 @@ export interface MemoryToolsOptions {
   readonly resolveContext?: (
     context: ToolExecutionContext,
   ) => MemoryToolContext | undefined | Promise<MemoryToolContext | undefined>
+  /**
+   * Explicit privileged host port that authorizes a model-supplied `agent_id`
+   * targeting another agent's memories. Without it, memory tools always scope
+   * to the execution-context agent and reject cross-agent `agent_id` values.
+   */
+  readonly allowCrossAgent?: CrossAgentMemoryAccess
 }
 
 export interface SaveMemoryInput {
@@ -110,7 +128,10 @@ export const SAVE_MEMORY_DEFINITION = definition(
     memory_type: { type: 'string', enum: MEMORY_TYPES, default: 'short_term' },
     tags: { type: 'array', items: { type: 'string' } },
     metadata: { type: 'object', additionalProperties: true },
-    agent_id: { type: 'string' },
+    agent_id: {
+      type: 'string',
+      description: 'Memory owner. Defaults to the calling agent; other agents require host-granted cross-agent access.',
+    },
   },
   ['content'],
 )
@@ -123,7 +144,10 @@ export const SEARCH_MEMORY_DEFINITION = definition(
     memory_types: { type: 'array', items: { type: 'string', enum: MEMORY_TYPES } },
     tags: { type: 'array', items: { type: 'string' } },
     limit: { type: 'integer', minimum: 1, maximum: MAX_TOOL_LIMIT, default: DEFAULT_SEARCH_LIMIT },
-    agent_id: { type: 'string' },
+    agent_id: {
+      type: 'string',
+      description: 'Memory owner. Defaults to the calling agent; other agents require host-granted cross-agent access.',
+    },
     time_range: {
       type: 'object',
       additionalProperties: false,
@@ -152,7 +176,10 @@ export const DELETE_MEMORY_DEFINITION = definition(
   {
     memory_id: { type: 'string' },
     tags: { type: 'array', items: { type: 'string' } },
-    agent_id: { type: 'string' },
+    agent_id: {
+      type: 'string',
+      description: 'Memory owner. Defaults to the calling agent; other agents require host-granted cross-agent access.',
+    },
     older_than: { type: 'string', format: 'date-time' },
   },
 )
@@ -183,22 +210,22 @@ export function registerMemoryTools(registry: ToolRegistry, options: MemoryTools
   registry.register(SAVE_MEMORY_DEFINITION, (inputs, execution) => executeWithContext(
     execution,
     options,
-    memory => saveMemory(parseSaveMemoryInput(inputs), memory),
+    memory => saveMemory(parseSaveMemoryInput(inputs), memory, options.allowCrossAgent),
   ))
   registry.register(SEARCH_MEMORY_DEFINITION, (inputs, execution) => executeWithContext(
     execution,
     options,
-    memory => searchMemory(parseSearchMemoryInput(inputs), memory),
+    memory => searchMemory(parseSearchMemoryInput(inputs), memory, options.allowCrossAgent),
   ))
   registry.register(CONSOLIDATE_AGENT_MEMORIES_DEFINITION, (inputs, execution) => executeWithContext(
     execution,
     options,
-    memory => consolidateAgentMemories(parseConsolidateInput(inputs), memory),
+    memory => consolidateAgentMemories(parseConsolidateInput(inputs), memory, options.allowCrossAgent),
   ))
   registry.register(DELETE_MEMORY_DEFINITION, (inputs, execution) => executeWithContext(
     execution,
     options,
-    memory => deleteMemory(parseDeleteMemoryInput(inputs), memory),
+    memory => deleteMemory(parseDeleteMemoryInput(inputs), memory, options.allowCrossAgent),
   ))
   registry.register(GET_MEMORY_STATISTICS_DEFINITION, (inputs, execution) => executeWithContext(
     execution,
@@ -208,17 +235,21 @@ export function registerMemoryTools(registry: ToolRegistry, options: MemoryTools
   registry.register(GET_MEMORY_TAGS_AND_TERMS_DEFINITION, (inputs, execution) => executeWithContext(
     execution,
     options,
-    memory => getMemoryTagsAndTerms(parseStatisticsInput(inputs), memory),
+    memory => getMemoryTagsAndTerms(parseStatisticsInput(inputs), memory, options.allowCrossAgent),
   ))
 }
 
 /** Store an entry while retaining its legacy memory category in metadata. */
-export function saveMemory(input: SaveMemoryInput, context: MemoryToolContext | undefined): JsonObject {
+export function saveMemory(
+  input: SaveMemoryInput,
+  context: MemoryToolContext | undefined,
+  allowCrossAgent?: CrossAgentMemoryAccess,
+): JsonObject {
   if (!context) return unavailable()
   try {
     const content = stringInput(input.content, 'content')
     const memoryType = normalizeMemoryType(input.memoryType ?? 'short_term')
-    const agentId = agentIdFor(input.agentId, context)
+    const agentId = agentIdFor(input.agentId, context, MemoryOperation.SAVE, allowCrossAgent)
     const tags = normalizeTags(input.tags)
     const now = nowFor(context)
     const metadata: MemoryMetadata = {
@@ -240,12 +271,16 @@ export function saveMemory(input: SaveMemoryInput, context: MemoryToolContext | 
 }
 
 /** Search durable and working memory with the legacy memory_tool.py result shape. */
-export function searchMemory(input: SearchMemoryInput, context: MemoryToolContext | undefined): JsonObject {
+export function searchMemory(
+  input: SearchMemoryInput,
+  context: MemoryToolContext | undefined,
+  allowCrossAgent?: CrossAgentMemoryAccess,
+): JsonObject {
   if (!context) return unavailable()
   try {
     const query = textInput(input.query, 'query')
     const limit = positiveLimit(input.limit ?? DEFAULT_SEARCH_LIMIT, 'limit')
-    const agentId = agentIdFor(input.agentId, context)
+    const agentId = agentIdFor(input.agentId, context, MemoryOperation.SEARCH, allowCrossAgent)
     const tags = normalizeTags(input.tags)
     const memoryTypes = normalizeMemoryTypes(input.memoryTypes)
     const timeRange = parseTimeRange(input.timeRange)
@@ -276,10 +311,11 @@ export function searchMemory(input: SearchMemoryInput, context: MemoryToolContex
 export function consolidateAgentMemories(
   input: ConsolidateAgentMemoriesInput,
   context: MemoryToolContext | undefined,
+  allowCrossAgent?: CrossAgentMemoryAccess,
 ): JsonObject {
   if (!context) return unavailable()
   try {
-    const agentId = stringInput(input.agentId, 'agent_id')
+    const agentId = agentIdFor(stringInput(input.agentId, 'agent_id'), context, MemoryOperation.CONSOLIDATE, allowCrossAgent)
     const maxItems = positiveLimit(input.maxItems ?? DEFAULT_CONSOLIDATION_LIMIT, 'max_items')
     const memories = retrieveItems(context.memory, { agent_id: agentId }, maxItems)
       .sort((left, right) => timestampFor(right).valueOf() - timestampFor(left).valueOf())
@@ -296,23 +332,43 @@ export function consolidateAgentMemories(
 }
 
 /** Delete entries selected by ID or one or more supplied criteria. */
-export function deleteMemory(input: DeleteMemoryInput, context: MemoryToolContext | undefined): JsonObject {
+export function deleteMemory(
+  input: DeleteMemoryInput,
+  context: MemoryToolContext | undefined,
+  allowCrossAgent?: CrossAgentMemoryAccess,
+): JsonObject {
   if (!context) return unavailable()
   try {
     const memoryId = optionalText(input.memoryId, 'memory_id')
     const tags = normalizeTags(input.tags)
-    const agentId = optionalText(input.agentId, 'agent_id')
+    const requestedAgentId = optionalText(input.agentId, 'agent_id')
     const olderThan = parseTimestamp(input.olderThan, 'older_than')
-    if (!memoryId && tags.length === 0 && !agentId && !olderThan) {
+    if (!memoryId && tags.length === 0 && !requestedAgentId && !olderThan) {
       throw new ValidationError('delete_memory', 'requires memory_id, tags, agent_id, or older_than')
     }
+    // Deletion is always scoped to the calling agent — including bulk tag and
+    // older_than criteria — unless a privileged host port explicitly
+    // authorizes the cross-agent target.
+    const agentId = agentIdFor(requestedAgentId, context, MemoryOperation.DELETE, allowCrossAgent)
 
     let deletedCount = 0
     if (memoryId) {
+      const owned = allItems(context.memory).find(item => item.memoryId === memoryId)
+      if (owned !== undefined && owned.agentId !== agentId && !allowCrossAgent?.({
+        callingAgentId: context.agentId,
+        operation: MemoryOperation.DELETE,
+        requestedAgentId: owned.agentId ?? DEFAULT_AGENT_ID,
+      })) {
+        throw new ValidationError(
+          'memory_id',
+          'belongs to another agent; cross-agent memory deletion requires an explicit privileged host port',
+          memoryId,
+        )
+      }
       deletedCount = context.memory.delete(memoryId)
     } else {
       const items = allItems(context.memory)
-        .filter(item => !agentId || item.agentId === agentId)
+        .filter(item => item.agentId === agentId)
         .filter(item => matchesTags(item, tags))
         .filter(item => !olderThan || timestampFor(item).valueOf() < olderThan.valueOf())
       for (const item of items) deletedCount += context.memory.delete(item.memoryId)
@@ -332,10 +388,11 @@ export function deleteMemory(input: DeleteMemoryInput, context: MemoryToolContex
 export function getMemoryTagsAndTerms(
   input: MemoryStatisticsInput,
   context: MemoryToolContext | undefined,
+  allowCrossAgent?: CrossAgentMemoryAccess,
 ): JsonObject {
   if (!context) return unavailable()
   try {
-    const agentId = agentIdFor(input.agentId, context)
+    const agentId = agentIdFor(input.agentId, context, MemoryOperation.RETRIEVE, allowCrossAgent)
     const tagsByType = Object.fromEntries(MEMORY_TYPES.map(type => [type, new Set<string>()])) as Record<
       ManagedMemoryType,
       Set<string>
@@ -733,8 +790,28 @@ function nowFor(context: MemoryToolContext): Date {
   return now
 }
 
-function agentIdFor(value: unknown, context: MemoryToolContext): string {
-  return optionalText(value, 'agent_id') ?? context.agentId ?? DEFAULT_AGENT_ID
+/**
+ * Resolve the memory owner for one operation. The execution-context agent
+ * always wins over a model-supplied `agent_id`; a cross-agent target is only
+ * honored when an explicit privileged host port authorizes it.
+ */
+function agentIdFor(
+  value: unknown,
+  context: MemoryToolContext,
+  operation: MemoryOperation,
+  allowCrossAgent: CrossAgentMemoryAccess | undefined,
+): string {
+  const callingAgentId = context.agentId ?? DEFAULT_AGENT_ID
+  const requested = optionalText(value, 'agent_id')
+  if (requested === undefined || requested === callingAgentId) return callingAgentId
+  if (allowCrossAgent?.({ callingAgentId: context.agentId, operation, requestedAgentId: requested })) {
+    return requested
+  }
+  throw new ValidationError(
+    'agent_id',
+    'targets memories owned by another agent; cross-agent memory access requires an explicit privileged host port',
+    requested,
+  )
 }
 
 function optionalText(value: unknown, field: string): string | undefined {

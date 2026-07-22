@@ -20,6 +20,14 @@ export interface ExistingAcpSessionRecord {
   readonly sessionId: string
 }
 
+/** Raised when attaching a session id that is already live in the store. */
+export class AcpSessionConflictError extends Error {
+  constructor(readonly sessionId: string) {
+    super(`ACP session already exists: ${sessionId}`)
+    this.name = 'AcpSessionConflictError'
+  }
+}
+
 /** In-memory registry for live ACP sessions. */
 export class AcpSessionStore {
   private readonly sessions = new Map<string, AcpSession>()
@@ -38,6 +46,11 @@ export class AcpSessionStore {
   }
 
   attachExisting(record: ExistingAcpSessionRecord, cwd: string): AcpSession {
+    if (this.sessions.has(record.sessionId)) {
+      // Silently replacing the live record would drop its model override,
+      // title, cancellation state, and metadata.
+      throw new AcpSessionConflictError(record.sessionId)
+    }
     const session: AcpSession = {
       sessionId: record.sessionId,
       cwd,

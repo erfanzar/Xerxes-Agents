@@ -123,6 +123,40 @@ test('replay makes invalid arguments and executor failures explicit without fabr
   expect(replayed.pendingReplays).toEqual([])
 })
 
+test('replay records an explicit error instead of a fabricated empty result', async () => {
+  const repair = repairResumedTranscript([
+    {
+      role: 'assistant',
+      content: '',
+      tool_calls: [
+        { id: 'call-null', name: 'ReturnsNull', input: {} },
+        { id: 'call-undefined', name: 'ReturnsUndefined', input: {} },
+      ],
+    },
+  ])
+  const executor: ResumeReplayExecutor = {
+    execute(name) {
+      return name === 'ReturnsNull' ? null : undefined
+    },
+  }
+
+  const replayed = await replayPendingToolCalls(repair, { executor })
+
+  expect(replayed.messages).toEqual([
+    {
+      role: 'assistant',
+      content: '',
+      tool_calls: [
+        { id: 'call-null', name: 'ReturnsNull', input: {} },
+        { id: 'call-undefined', name: 'ReturnsUndefined', input: {} },
+      ],
+    },
+    { role: 'tool', tool_call_id: 'call-null', content: '[replay error: empty result]' },
+    { role: 'tool', tool_call_id: 'call-undefined', content: '[replay error: empty result]' },
+  ])
+  expect(replayed.pendingReplays).toEqual([])
+})
+
 test('daemon transcript loading adopts repaired messages and exposes pending replay descriptors', () => {
   const normalized = normalizeDaemonTranscript({
     session_id: 'a1b2c3d4',

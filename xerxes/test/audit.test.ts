@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -326,7 +326,7 @@ test("emitter covers failure, policy, loop, sandbox, hook, error, and skill audi
   expect((events[8] as SkillFeedbackEvent).reason).toBe("useful");
 });
 
-test("collectors preserve ordering, bound memory, fan out, and write valid JSON Lines", () => {
+test("collectors preserve ordering, bound memory, fan out, and write valid JSON Lines", async () => {
   const directory = mkdtempSync(join(tmpdir(), "xerxes-audit-"));
   try {
     const path = join(directory, "nested", "audit.jsonl");
@@ -337,7 +337,7 @@ test("collectors preserve ordering, bound memory, fan out, and write valid JSON 
     collector.emit(new TurnEndEvent({ turnId: "one" }));
     collector.emit(new ErrorEvent({ errorType: "E" }));
     collector.flush();
-    jsonl.close();
+    await jsonl.close();
 
     expect(memory.size).toBe(2);
     expect(memory.getEvents().map((event) => event.eventType)).toEqual([
@@ -360,7 +360,7 @@ test("collectors preserve ordering, bound memory, fan out, and write valid JSON 
   }
 });
 
-test("collectors return detached snapshots and leave caller-owned text sinks usable", () => {
+test("collectors return detached snapshots and leave caller-owned text sinks usable", async () => {
   const memory = new InMemoryCollector();
   memory.emit(new TurnStartEvent({ turnId: "snapshot" }));
   const snapshot = memory.getEvents();
@@ -382,7 +382,7 @@ test("collectors return detached snapshots and leave caller-owned text sinks usa
   const jsonl = new JSONLSinkCollector(sink);
   jsonl.emit(new ErrorEvent({ errorMessage: "streamed", errorType: "E" }));
   jsonl.flush();
-  jsonl.close();
+  await jsonl.close();
   sink.write("caller-still-owns-this-sink\n");
 
   expect(flushCount).toBe(2);
@@ -443,6 +443,118 @@ test("OTel collector records a no-op fallback without dependencies and attaches 
   );
   expect(tracer.spans[2]?.name).toBe("hook_mutation");
   expect(tracer.spans[2]?.ended).toBeTrue();
+});
+
+test("JSONL file sink writes owner-only files inside a private directory", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "xerxes-audit-perms-"));
+  try {
+    const path = join(directory, "nested", "audit.jsonl");
+    const collector = new JSONLSinkCollector(path);
+    collector.emit(new ErrorEvent({ errorType: "E", errorMessage: "perm" }));
+    await collector.close();
+
+    if (process.platform !== "win32") {
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+      expect(statSync(join(directory, "nested")).mode & 0o777).toBe(0o700);
+    }
+    expect(readFileSync(path, "utf8")).toContain('"error_type"');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("JSONL file sink rotates at maxBytes and retains only the newest segments", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "xerxes-audit-rotate-"));
+  try {
+    const path = join(directory, "audit.jsonl");
+    const collector = new JSONLSinkCollector(path, {
+      maxBytes: 256,
+      maxFiles: 2,
+      flushIntervalMs: 60_000,
+    });
+    for (let index = 0; index < 12; index += 1) {
+      collector.emit(
+        new ErrorEvent({
+          errorType: "E",
+          errorMessage: `payload-${index}-${"x".repeat(80)}`,
+        }),
+      );
+      // Drain each batch so rotation decisions are exercised deterministically.
+      await collector.drain();
+    }
+    await collector.close();
+
+    const active = readFileSync(path, "utf8");
+    expect(active).toContain("payload-11");
+    // The oldest events rotated out of the active file entirely.
+    expect(active).not.toContain("payload-0");
+    const segments = readdirSync(directory).filter((name) =>
+      name.startsWith("audit.jsonl."),
+    );
+    expect(segments.sort()).toEqual(["audit.jsonl.1", "audit.jsonl.2"]);
+    // The oldest rotations were discarded; every retained line is valid JSON.
+    for (const segment of segments) {
+      for (const line of readFileSync(join(directory, segment), "utf8").trim().split("\n")) {
+        expect(() => JSON.parse(line)).not.toThrow();
+      }
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("JSONL file sink drops and counts events once the bounded queue is full", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "xerxes-audit-drop-"));
+  try {
+    const path = join(directory, "audit.jsonl");
+    const collector = new JSONLSinkCollector(path, {
+      maxQueueSize: 3,
+      flushIntervalMs: 60_000,
+    });
+    for (let index = 0; index < 10; index += 1) {
+      collector.emit(new ErrorEvent({ errorType: "E", errorMessage: `e${index}` }));
+    }
+    expect(collector.droppedEvents).toBe(7);
+    expect(collector.pendingCount).toBe(3);
+    await collector.close();
+
+    const rows = readFileSync(path, "utf8").trim().split("\n");
+    expect(rows).toHaveLength(3);
+    expect(collector.failedWriteBatches).toBe(0);
+    expect(() => collector.emit(new ErrorEvent({ errorType: "E" }))).toThrow(
+      "closed",
+    );
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("OTel collector evicts stale open turns and bounds the fallback log with counters", () => {
+  const tracer = new RecordingTracer();
+  const collector = new OTelCollector({
+    maxFallbackEntries: 3,
+    maxOpenTurns: 2,
+    tracer,
+  });
+  for (let index = 0; index < 5; index += 1) {
+    collector.emit(new TurnStartEvent({ turnId: `turn-${index}` }));
+  }
+  expect(collector.openTurnCount).toBe(2);
+  expect(collector.evictedTurnCount).toBe(3);
+  // Evicted spans are ended so exporters do not leak unfinished spans.
+  expect(tracer.spans.filter((span) => span.ended)).toHaveLength(3);
+
+  const fallback = new OTelCollector({ maxFallbackEntries: 4 });
+  for (let index = 0; index < 10; index += 1) {
+    fallback.emit(new ErrorEvent({ errorType: "E", errorMessage: `m${index}` }));
+  }
+  expect(fallback.fallbackLog).toHaveLength(4);
+  expect(fallback.evictedFallbackCount).toBe(6);
+  expect(fallback.fallbackLog[0]?.attributes.error_message).toBe("m6");
+
+  expect(() => new OTelCollector({ maxOpenTurns: 0 })).toThrow(
+    "positive integer",
+  );
 });
 
 class RecordingSpan implements OTelSpan {

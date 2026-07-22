@@ -234,3 +234,29 @@ test('Anthropic decoding restores thinking, tool results, and multimodal data UR
     },
   ])
 })
+
+test('Anthropic decoding concatenates multiple thinking blocks and keeps the last signature', () => {
+  const decoded = messagesFromAnthropic([
+    {
+      role: 'assistant',
+      content: [
+        { type: 'thinking', thinking: 'First step.', signature: 'signature-1' },
+        { type: 'text', text: 'Working.' },
+        { type: 'thinking', thinking: 'Second step.', signature: 'signature-2' },
+        { type: 'tool_use', id: 'call-1', name: 'ReadFile', input: { path: 'README.md' } },
+      ],
+    },
+  ])
+
+  expect(decoded).toEqual([{
+    role: 'assistant',
+    content: 'Working.',
+    thinking: 'First step.\nSecond step.',
+    thinking_signature: 'signature-2',
+    tool_calls: [{
+      id: 'call-1',
+      type: 'function',
+      function: { name: 'ReadFile', arguments: { path: 'README.md' } },
+    }],
+  }])
+})

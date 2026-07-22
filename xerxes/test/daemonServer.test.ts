@@ -18,12 +18,14 @@ import {
   type InboundHandler,
 } from "../src/channels/index.js";
 import { CronJob, JobStore } from "../src/cron/jobs.js";
+import { DaemonTranscriptStore } from "../src/session/daemonTranscript.js";
 import { SnapshotManager } from "../src/session/snapshots.js";
 import type { FetchImplementation } from "../src/llms/client.js";
 import type { PermissionRequest } from "../src/streaming/events.js";
 import type {
   DaemonEvent,
   DaemonSession,
+  SubmitTurnOptions,
   TurnRunControls,
   TurnRunner,
 } from "../src/daemon/runtime.js";
@@ -1383,6 +1385,155 @@ test("daemon saves named sessions and routes the advertised btw alias", async ()
     expect(
       (await client.next(eventFrame("notification"))).params?.payload,
     ).toMatchObject({ category: "slash", body: "Steer accepted." });
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("daemon compact uses the active provider to summarize instead of the naive dev summarizer", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-compact-llm-"));
+  const socketPath = join(directory, "daemon.sock");
+  const profileStore = new ProfileStore(join(directory, "profiles.json"));
+  profileStore.save({
+    name: "openai-test",
+    apiKey: "fake-api-key",
+    baseUrl: "https://api.openai.test",
+    model: "gpt-4",
+    provider: "openai",
+    setActive: true,
+  });
+  const server = new DaemonServer({
+    socketPath,
+    runtime: new InMemoryDaemonRuntime(undefined, {
+      currentProjectDirectory: directory,
+      model: "gpt-4",
+      sessionDirectory: join(directory, "sessions"),
+    }),
+    profileStore,
+  });
+  const nativeFetch = globalThis.fetch;
+  const requests: unknown[] = [];
+  const modelFetch: FetchImplementation = async (input, init) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (!url.includes("/chat/completions")) {
+      return new Response(
+        JSON.stringify({ error: "unexpected endpoint" }),
+        { status: 404 },
+      );
+    }
+    const body = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
+    requests.push(body);
+    return new Response(
+      JSON.stringify({
+        choices: [{ message: { content: "durable compact summary" } }],
+      }),
+    );
+  };
+  globalThis.fetch = modelFetch as typeof globalThis.fetch;
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "compact-llm", project_dir: directory },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    for (let i = 0; i < 4; i += 1) {
+      client.send({
+        jsonrpc: "2.0",
+        id: 2 + i,
+        method: "turn.submit",
+        params: { text: `message ${i + 1}` },
+      });
+      await client.next((frame) => frame.id === 2 + i);
+      await client.next(eventFrame("turn_begin"));
+      await client.next(eventFrame("text_part"));
+      await client.next(eventFrame("turn_end"));
+    }
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 10,
+      method: "session.compress",
+      params: {},
+    });
+    const result = (await client.next((frame) => frame.id === 10)).result;
+    expect(result).toMatchObject({ ok: true, compacted: true });
+    expect(requests.length).toBeGreaterThan(0);
+    const prompt = String(
+      (requests[0] as { messages?: Array<{ content?: unknown }> })?.messages?.[0]
+        ?.content ?? "",
+    );
+    expect(prompt).toContain("CONTEXT TO SUMMARIZE");
+    expect(prompt).toContain("message 1");
+  } finally {
+    globalThis.fetch = nativeFetch;
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("daemon refuses to compact while a turn is running", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-compact-running-"));
+  const socketPath = join(directory, "daemon.sock");
+  const runner = new AbortGateRunner();
+  const runtime = new InMemoryDaemonRuntime(runner, {
+    currentProjectDirectory: directory,
+    model: "gate-model",
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const server = new DaemonServer({ runtime, socketPath });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "compact-running", project_dir: directory },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "turn.submit",
+      params: { text: "hold the turn open" },
+    });
+    await client.next((frame) => frame.id === 2);
+    await client.next(eventFrame("turn_begin"));
+    await waitFor(() => runner.runs === 1);
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "session.compress",
+      params: {},
+    });
+    expect((await client.next((frame) => frame.id === 3)).result).toEqual({
+      ok: false,
+      error: "turn is running",
+    });
+    // The in-flight transcript must be untouched.
+    expect(
+      runtime.sessionStatus("compact-running")?.metadata.last_compaction,
+    ).toBeUndefined();
+
+    client.send({ jsonrpc: "2.0", id: 4, method: "turn.cancel", params: {} });
+    await client.next((frame) => frame.id === 4);
+    await waitFor(
+      () => runtime.sessionStatus("compact-running")?.activeTurnId === "",
+    );
   } finally {
     client.close();
     await server.stop();
@@ -2973,6 +3124,13 @@ class SocketTestClient {
     this.socket.write(`${JSON.stringify(frame)}\n`);
   }
 
+  /** Write several frames in one chunk so the server parses them back-to-back. */
+  sendBatch(frames: ReadonlyArray<Record<string, unknown>>): void {
+    this.socket.write(
+      frames.map((frame) => `${JSON.stringify(frame)}\n`).join(""),
+    );
+  }
+
   private receive(chunk: string): void {
     this.buffer += chunk;
     let newline = this.buffer.indexOf("\n");
@@ -3309,6 +3467,661 @@ test("resuming a saved session evicts its live session registered under another 
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("requests on one connection dispatch serially so a queued turn lands in the newly opened session", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-serial-dispatch-"));
+  const socketPath = join(directory, "daemon.sock");
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: directory,
+    model: "serial-model",
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const server = new DaemonServer({ runtime, socketPath });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "serial-start" },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    // Parsed in one chunk: session.open must fully dispatch before
+    // turn.submit reads the connection's active session key.
+    client.sendBatch([
+      {
+        jsonrpc: "2.0",
+        id: 2,
+        method: "session.open",
+        params: { session_key: "serial-target" },
+      },
+      {
+        jsonrpc: "2.0",
+        id: 3,
+        method: "turn.submit",
+        params: { text: "serialized dispatch" },
+      },
+    ]);
+    expect((await client.next((frame) => frame.id === 2)).result).toMatchObject({
+      ok: true,
+      session: { key: "serial-target" },
+    });
+    expect((await client.next((frame) => frame.id === 3)).result).toEqual({
+      ok: true,
+    });
+    await client.next(eventFrame("turn_end"));
+
+    expect(
+      runtime.sessionStatus("serial-target")?.messages.map((message) => message.role),
+    ).toEqual(["user", "assistant"]);
+    expect(runtime.sessionStatus("serial-start")?.messages).toHaveLength(0);
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("initialize adopts a live session with an active turn and reports ultra mode", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-init-adopt-"));
+  const socketPath = join(directory, "daemon.sock");
+  const runner = new AbortGateRunner();
+  const runtime = new InMemoryDaemonRuntime(runner, {
+    currentProjectDirectory: directory,
+    model: "adopt-model",
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const server = new DaemonServer({ runtime, socketPath });
+  await server.start();
+  const owner = await SocketTestClient.connect(socketPath);
+  const adopter = await SocketTestClient.connect(socketPath);
+  try {
+    owner.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "adopt-shared" },
+    });
+    const initialized = await owner.next((frame) => frame.id === 1);
+    await owner.next(eventFrame("init_done"));
+    await owner.next(eventFrame("status_update"));
+    expect(initialized.result).toMatchObject({ ok: true, ultra_mode: false });
+    const sessionId = String(
+      (initialized.result?.session as { id?: string } | undefined)?.id ?? "",
+    );
+    expect(sessionId).not.toBe("");
+
+    owner.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "slash",
+      params: { command: "/ultra" },
+    });
+    expect((await owner.next((frame) => frame.id === 2)).result).toEqual({
+      ok: true,
+      ultra_mode: true,
+    });
+    await owner.next(eventFrame("status_update"));
+
+    owner.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "turn.submit",
+      params: { session_key: "adopt-shared", text: "long adopt work" },
+    });
+    await owner.next((frame) => frame.id === 3);
+    await owner.next(eventFrame("turn_begin"));
+    await waitFor(() => runner.runs === 1);
+
+    // A second initialize on the busy key must adopt, not evict, the live
+    // session another connection is using.
+    adopter.send({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "initialize",
+      params: { session_key: "adopt-shared" },
+    });
+    const adopted = await adopter.next((frame) => frame.id === 4);
+    expect(adopted.result).toMatchObject({
+      ok: true,
+      ultra_mode: true,
+      session: { id: sessionId, status: "working" },
+    });
+    expect(runtime.sessionStatus("adopt-shared")?.activeTurnId).not.toBe("");
+    expect(runtime.sessionStatus("adopt-shared")?.cancelRequested).toBe(false);
+
+    owner.send({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "turn.cancel",
+      params: { session_key: "adopt-shared" },
+    });
+    await owner.next((frame) => frame.id === 5);
+    await owner.next(eventFrame("turn_end"));
+    await waitFor(
+      () => runtime.sessionStatus("adopt-shared")?.activeTurnId === "",
+    );
+
+    // Once the session is idle again, initialize resets the key to a fresh
+    // session as before.
+    adopter.send({
+      jsonrpc: "2.0",
+      id: 6,
+      method: "initialize",
+      params: { session_key: "adopt-shared" },
+    });
+    const reset = await adopter.next((frame) => frame.id === 6);
+    expect(reset.result).toMatchObject({ ok: true, ultra_mode: false });
+    const resetId = String(
+      (reset.result?.session as { id?: string } | undefined)?.id ?? "",
+    );
+    expect(resetId).not.toBe(sessionId);
+    expect(runtime.sessionStatus("adopt-shared")?.messages).toHaveLength(0);
+  } finally {
+    owner.close();
+    adopter.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("slash-submitted image turns are tracked so disconnect cancels them", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-image-tracked-"));
+  const socketPath = join(directory, "daemon.sock");
+  const runner = new AbortGateRunner();
+  const runtime = new InMemoryDaemonRuntime(runner, {
+    currentProjectDirectory: directory,
+    model: "image-model",
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const server = new DaemonServer({
+    cronStoreFactory: () => new JobStore(join(directory, "cron", "jobs.json")),
+    runtime,
+    socketPath,
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "image-tracked" },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "slash",
+      params: { command: "/image a tiny moon" },
+    });
+    expect((await client.next((frame) => frame.id === 2)).result).toEqual({
+      ok: true,
+      queued: true,
+    });
+    await client.next(eventFrame("turn_begin"));
+    await waitFor(() => runner.runs === 1);
+    expect(runtime.sessionStatus("image-tracked")?.activeTurnId).not.toBe("");
+
+    client.close();
+    await waitFor(
+      () => runtime.sessionStatus("image-tracked")?.activeTurnId === "",
+    );
+    expect(runtime.sessionStatus("image-tracked")?.cancelRequested).toBe(true);
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("daemon stop drains slash-submitted turns so their final state reaches disk", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-slash-drain-"));
+  const socketPath = join(directory, "daemon.sock");
+  const sessionDirectory = join(directory, "sessions");
+  const runner = new AbortGateRunner();
+  const runtime = new InMemoryDaemonRuntime(runner, {
+    currentProjectDirectory: directory,
+    model: "slash-drain-model",
+    sessionDirectory,
+  });
+  const server = new DaemonServer({
+    cronStoreFactory: () => new JobStore(join(directory, "cron", "jobs.json")),
+    runtime,
+    socketPath,
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "slash-drain" },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "slash",
+      params: { command: "/image drain my slash turn" },
+    });
+    await client.next((frame) => frame.id === 2);
+    await client.next(eventFrame("turn_begin"));
+    await waitFor(() => runner.runs === 1);
+
+    await server.stop();
+
+    const files = await readdir(sessionDirectory);
+    expect(files).toHaveLength(1);
+    const saved = JSON.parse(
+      await readFile(join(sessionDirectory, String(files[0])), "utf8"),
+    ) as { messages: Array<{ content?: unknown; role?: string }> };
+    expect(saved.messages).toContainEqual(
+      expect.objectContaining({
+        role: "assistant",
+        content: expect.stringContaining("turn drained"),
+      }),
+    );
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("daemon stop drains scheduled cron turns before flushing sessions", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-cron-drain-"));
+  const socketPath = join(directory, "daemon.sock");
+  const sessionDirectory = join(directory, "sessions");
+  const store = new JobStore(join(directory, "cron", "jobs.json"));
+  store.add(
+    new CronJob({
+      id: "gated-job",
+      prompt: "gated cron work",
+      nextRunAt: new Date(Date.now() - 1_000).toISOString(),
+      oneshot: true,
+    }),
+  );
+  const runner = new AbortGateRunner();
+  const runtime = new InMemoryDaemonRuntime(runner, {
+    currentProjectDirectory: directory,
+    model: "cron-drain-model",
+    sessionDirectory,
+  });
+  const server = new DaemonServer({
+    cronArchiveDirectory: join(directory, "cron", "archive"),
+    cronPollInterval: 5,
+    cronStoreFactory: () => store,
+    runtime,
+    socketPath,
+  });
+  await server.start();
+  try {
+    await waitFor(() => runner.runs === 1);
+    await server.stop();
+
+    const files = await readdir(sessionDirectory);
+    expect(files).toHaveLength(1);
+    const saved = JSON.parse(
+      await readFile(join(sessionDirectory, String(files[0])), "utf8"),
+    ) as { messages: Array<{ content?: unknown; role?: string }> };
+    expect(saved.messages).toContainEqual(
+      expect.objectContaining({ role: "user", content: "gated cron work" }),
+    );
+    expect(saved.messages).toContainEqual(
+      expect.objectContaining({
+        role: "assistant",
+        content: expect.stringContaining("turn drained"),
+      }),
+    );
+  } finally {
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a failed resume leaves the connection on its current session", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-resume-fail-"));
+  const projectDirectory = join(directory, "project-a");
+  const sessionDirectory = join(directory, "sessions");
+  const socketPath = join(directory, "daemon.sock");
+  await mkdir(sessionDirectory, { recursive: true });
+  await writeFile(
+    join(sessionDirectory, "cafebabe0001.json"),
+    JSON.stringify({
+      format: "xerxes-daemon-session",
+      schema_version: 2,
+      session_id: "cafebabe0001",
+      key: "cafebabe0001",
+      agent_id: "default",
+      cwd: projectDirectory,
+      workspace: "",
+      updated_at: "2026-07-17T00:02:00.000Z",
+      messages: [
+        { role: "user", content: "saved request" },
+        { role: "assistant", content: "saved response" },
+      ],
+      turn_count: 1,
+      interaction_mode: "code",
+      plan_mode: false,
+      total_input_tokens: 1,
+      total_output_tokens: 1,
+      metadata: { project_root: projectDirectory },
+      thinking_content: [],
+      tool_executions: [],
+    }),
+    "utf8",
+  );
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: projectDirectory,
+    model: "resume-model",
+    transcriptStore: new FailingLoadTranscriptStore({
+      currentProjectDirectory: projectDirectory,
+      directory: sessionDirectory,
+    }),
+  });
+  const server = new DaemonServer({ runtime, socketPath });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { project_dir: projectDirectory, session_key: "resume-state" },
+    });
+    const initialized = await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+    const sessionId = String(
+      (initialized.result?.session as { id?: string } | undefined)?.id ?? "",
+    );
+    expect(sessionId).not.toBe("");
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "turn.submit",
+      params: { session_key: "resume-state", text: "stay here" },
+    });
+    await client.next((frame) => frame.id === 2);
+    await client.next(eventFrame("turn_end"));
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "slash",
+      params: { command: "/resume cafebabe0001" },
+    });
+    const failed = await client.next((frame) => frame.id === 3);
+    expect(failed.error?.message ?? "").toContain("transcript store exploded");
+
+    // The failed resume must not have evicted the live session or moved the
+    // connection's active session key.
+    expect(runtime.sessionStatus("resume-state")?.id).toBe(sessionId);
+    expect(runtime.sessionStatus("resume-state")?.messages).toHaveLength(2);
+    expect(runtime.sessionStatus("cafebabe0001")).toBeUndefined();
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "turn.submit",
+      params: { text: "still home" },
+    });
+    await client.next((frame) => frame.id === 4);
+    const turnBegin = await client.next(eventFrame("turn_begin"));
+    expect(turnBegin.params?.payload).toMatchObject({ session_id: sessionId });
+    await client.next(eventFrame("turn_end"));
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a failed retry restores the discarded user turn", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-retry-restore-"));
+  const socketPath = join(directory, "daemon.sock");
+  const runtime = new FlakySubmitRuntime(undefined, {
+    currentProjectDirectory: directory,
+    model: "retry-model",
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const server = new DaemonServer({ runtime, socketPath });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "retry-restore" },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "turn.submit",
+      params: { session_key: "retry-restore", text: "keep this prompt" },
+    });
+    await client.next((frame) => frame.id === 2);
+    await client.next(eventFrame("turn_end"));
+    const session = runtime.sessionStatus("retry-restore");
+    expect(session?.messages.map((message) => message.role)).toEqual([
+      "user",
+      "assistant",
+    ]);
+    expect(session?.turnCount).toBe(1);
+
+    runtime.failSubmits = true;
+    client.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "slash",
+      params: { command: "/retry" },
+    });
+    expect((await client.next((frame) => frame.id === 3)).result).toEqual({
+      ok: true,
+      retried: true,
+    });
+    const failure = await client.next(
+      (frame) =>
+        frame.method === "event" &&
+        frame.params?.type === "notification" &&
+        String(frame.params?.payload?.body ?? "").includes("Retry failed"),
+    );
+    expect(failure.params?.payload).toMatchObject({ severity: "error" });
+
+    const restored = runtime.sessionStatus("retry-restore");
+    expect(restored?.messages).toHaveLength(2);
+    expect(restored?.messages[0]).toMatchObject({
+      role: "user",
+      content: "keep this prompt",
+    });
+    expect(restored?.messages[1]).toMatchObject({ role: "assistant" });
+    expect(restored?.turnCount).toBe(1);
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("daemon advertises /ultra in catalog, completion, and slash handling", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-ultra-command-"));
+  const socketPath = join(directory, "daemon.sock");
+  const server = new DaemonServer({
+    socketPath,
+    runtime: new InMemoryDaemonRuntime(undefined, {
+      currentProjectDirectory: directory,
+      sessionDirectory: join(directory, "sessions"),
+    }),
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "ultra-command" },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    client.send({ jsonrpc: "2.0", id: 2, method: "commands.catalog", params: {} });
+    const catalog = await client.next((frame) => frame.id === 2);
+    expect(catalog.result?.pairs).toContainEqual(["/ultra", "Toggle ultra mode"]);
+    expect(catalog.result?.canon).toMatchObject({ "/ultra": "/ultra" });
+    expect(catalog.result?.categories).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "daemon",
+          pairs: expect.arrayContaining([["/ultra", "Toggle ultra mode"]]),
+        }),
+      ]),
+    );
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "complete",
+      params: { text: "/ult" },
+    });
+    expect(
+      (await client.next((frame) => frame.id === 3)).result?.completions,
+    ).toEqual([
+      { value: "/ultra", label: "ultra", meta: "Toggle ultra mode" },
+    ]);
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "slash",
+      params: { command: "/ultra" },
+    });
+    expect((await client.next((frame) => frame.id === 4)).result).toEqual({
+      ok: true,
+      ultra_mode: true,
+    });
+    await client.next(eventFrame("status_update"));
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "slash",
+      params: { command: "/ultra off" },
+    });
+    expect((await client.next((frame) => frame.id === 5)).result).toEqual({
+      ok: true,
+      ultra_mode: false,
+    });
+    await client.next(eventFrame("status_update"));
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("turn completion releases approval ownership so late replies are not blocked", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-owner-cleanup-"));
+  const socketPath = join(directory, "daemon.sock");
+  const interactions = new DaemonInteractionBoard();
+  const runtime = new InMemoryDaemonRuntime(new ReplyRunner(interactions), {
+    currentProjectDirectory: directory,
+    interactions,
+    model: "cleanup-model",
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const server = new DaemonServer({ socketPath, runtime, interactions });
+  await server.start();
+  const owner = await SocketTestClient.connect(socketPath);
+  const late = await SocketTestClient.connect(socketPath);
+  try {
+    owner.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "owner-cleanup" },
+    });
+    await owner.next((frame) => frame.id === 1);
+    await owner.next(eventFrame("init_done"));
+    await owner.next(eventFrame("status_update"));
+    owner.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "turn.submit",
+      params: { session_key: "owner-cleanup", text: "wait for approval" },
+    });
+    await owner.next((frame) => frame.id === 2);
+    await owner.next(eventFrame("turn_begin"));
+    await owner.next(eventFrame("approval_request"));
+
+    // Cancel the turn without answering; once the turn settles, its approval
+    // ownership entry must not block other connections.
+    owner.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "turn.cancel",
+      params: { session_key: "owner-cleanup" },
+    });
+    await owner.next((frame) => frame.id === 3);
+    await owner.next(eventFrame("turn_end"));
+    await waitFor(
+      () => runtime.sessionStatus("owner-cleanup")?.activeTurnId === "",
+    );
+
+    late.send({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "permission_response",
+      params: { request_id: "approval-1", response: "approve" },
+    });
+    expect((await late.next((frame) => frame.id === 4)).result).toEqual({
+      ok: false,
+    });
+  } finally {
+    owner.close();
+    late.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+class FailingLoadTranscriptStore extends DaemonTranscriptStore {
+  override load(): Promise<never> {
+    throw new Error("transcript store exploded");
+  }
+}
+
+class FlakySubmitRuntime extends InMemoryDaemonRuntime {
+  failSubmits = false;
+
+  override async submitTurn(
+    sessionKey: string,
+    text: string,
+    emit: (event: DaemonEvent) => void,
+    options: SubmitTurnOptions = {},
+  ): Promise<void> {
+    if (this.failSubmits) {
+      throw new Error("provider submit exploded");
+    }
+    return super.submitTurn(sessionKey, text, emit, options);
+  }
+}
 
 class AbortGateRunner implements TurnRunner {
   runs = 0;

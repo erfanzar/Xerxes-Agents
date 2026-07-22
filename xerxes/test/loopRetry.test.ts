@@ -108,10 +108,14 @@ test('auth and validation failures fail immediately while 5xx failures retry', a
   expect(authEvents.filter(event => event.type === 'provider_retry')).toEqual([
     expect.objectContaining({ attempt: 1, final: true }),
   ])
-  expect(authState.messages.at(-1)).toMatchObject({
-    role: 'assistant',
-    content: '[Error: stream request failed (401): invalid api key]',
-  })
+  // Terminal failures surface as an explicit error event, not as a persisted
+  // assistant message that would pollute the durable transcript.
+  expect(authEvents.filter(event => event.type === 'text').map(event => event.text)).toEqual([
+    '[Error: stream request failed (401): invalid api key]',
+  ])
+  expect(authState.messages.some(message => String(message.content).includes('[Error:'))).toBe(false)
+  expect(authState.messages.at(-1)).toMatchObject({ role: 'user', content: 'hi' })
+  expect(authEvents.at(-1)).toMatchObject({ type: 'turn_done' })
 
   const validation = new StatusClient(['stream request failed (400): malformed request'])
   const validationEvents = await collect(runTurn(
@@ -228,8 +232,12 @@ test('a permanently stalled stream fails the round with a visible timeout error'
   ])
   const texts = events.filter(event => event.type === 'text').map(event => event.text)
   expect(texts.at(-1)).toContain('stream inactivity timeout')
-  expect(state.messages.at(-1)).toMatchObject({ role: 'assistant' })
-  expect(String(state.messages.at(-1)?.content)).toContain('stream inactivity timeout')
+  // The partial round and the terminal error are not persisted as assistant
+  // content; the turn ends cleanly with the error carried by the final
+  // provider_retry and text events.
+  expect(state.messages.some(message => message.role === 'assistant')).toBe(false)
+  expect(state.messages.at(-1)).toMatchObject({ role: 'user', content: 'stall forever' })
+  expect(events.at(-1)).toMatchObject({ type: 'turn_done' })
 })
 
 test('plugin hooks fire in turn order and before_tool_call mutates tool arguments', async () => {

@@ -1,6 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { scanContextContent } from '../security/promptScanner.js'
 import {
   Memory,
   type MemoryFilters,
@@ -10,6 +11,7 @@ import {
   type MemorySearchOptions,
   type MemoryUpdate,
 } from './base.js'
+import { buildMemoryContextBlock } from './contextFencing.js'
 import { LongTermMemory, type LongTermMemoryOptions } from './longTermMemory.js'
 import { ShortTermMemory } from './shortTermMemory.js'
 import type { MemoryStorage } from './storage.js'
@@ -82,7 +84,12 @@ export class ContextualMemory extends Memory {
       lines.push('\nImportant memories:')
       for (const item of important) lines.push(`  - ${item.content.slice(0, 100)}`)
     }
-    return lines.length === 0 ? 'No context available.' : lines.join('\n')
+    if (lines.length === 0) return 'No context available.'
+    // Recalled context frames and memory contents are derived from
+    // untrusted tool/web output and flow into prompts (e.g. via
+    // UserMemory.getUserContext). Neutralise embedded hostile instructions
+    // and fence the summary as data, not instructions.
+    return buildMemoryContextBlock(scanContextContent(lines.join('\n'), 'contextual memory summary'))
   }
 
   popContext(): ContextFrame | undefined {

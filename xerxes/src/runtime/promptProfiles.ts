@@ -74,8 +74,11 @@ function fullConfig(): PromptProfileConfig {
     includeUserProfile: true,
     includeRepoMap: true,
     includeGitInfo: true,
-    maxSkillInstructionsLength: undefined,
-    maxToolsListed: undefined,
+    // The FULL profile keeps generous-but-finite caps so one oversized skill
+    // body or an unbounded tool list cannot grow every turn's prompt without
+    // limit. Callers can still resolve an explicit config with wider caps.
+    maxSkillInstructionsLength: 8_000,
+    maxToolsListed: 100,
     maxMemoriesInjected: 5,
   })
 }

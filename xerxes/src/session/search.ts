@@ -310,8 +310,11 @@ export class SessionIndex {
            ORDER BY rank LIMIT ?`,
         ).all(...params) as unknown as IndexedFtsRow[]
         if (rows.length > 0) return rows.map(indexedFtsRow)
-      } catch {
-        // Raw FTS expressions can be malformed. The LIKE path below remains available.
+      } catch (error) {
+        // Only malformed user-supplied FTS expressions degrade to LIKE, as in
+        // SessionFTSIndex.search; I/O and corruption failures must surface
+        // instead of silently changing search semantics.
+        if (!isFtsSyntaxError(error)) throw error
       }
     }
     return this.likeCandidates(query, k, options)
@@ -517,7 +520,12 @@ function escapeLike(value: string): string {
 
 function isFtsSyntaxError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error)
-  return /fts5|syntax error|unterminated string/i.test(message)
+  // Match only the exact SQLite diagnostics a malformed MATCH expression can
+  // produce for these static schemas. A bare /fts5/ heuristic would also
+  // classify genuine storage failures that merely mention fts5 as user error.
+  return /fts5:\s*syntax error/i.test(message)
+    || /^unterminated string/i.test(message)
+    || /^no such column:/i.test(message)
 }
 
 function indexedFtsRow(row: IndexedFtsRow): IndexedTurnRow {

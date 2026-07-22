@@ -457,6 +457,7 @@ export async function collectLlmCompletion(stream: AsyncIterable<LlmDelta>): Pro
   const content: string[] = []
   const thinking: string[] = []
   const toolCalls = new Map<string, ToolCall>()
+  const toolCallOccurrences = new Map<string, number>()
   let finishReason: string | undefined
   let thinkingSignature: string | undefined
   let usage: TokenUsage | undefined
@@ -478,7 +479,12 @@ export async function collectLlmCompletion(stream: AsyncIterable<LlmDelta>): Pro
       usage = mergeTokenUsage(usage, delta.usage)
     }
     for (const toolCall of delta.toolCalls ?? []) {
-      toolCalls.set(toolCall.id, toolCall)
+      // Id-less calls get a deterministic id derived from name+arguments, so
+      // two identical id-less calls share one key. Keying by raw id would
+      // silently drop the second call, so repeats get an occurrence suffix.
+      const occurrence = toolCallOccurrences.get(toolCall.id) ?? 0
+      toolCallOccurrences.set(toolCall.id, occurrence + 1)
+      toolCalls.set(occurrence === 0 ? toolCall.id : `${toolCall.id}#${occurrence}`, toolCall)
     }
   }
 
@@ -849,10 +855,28 @@ function mergeToolDeltas(target: Map<number, PendingToolCall>, values: unknown[]
   for (const value of values) {
     const delta = asRecord(value) as OpenAiToolCallDelta
     // Providers may omit `index` on continuation chunks; append those to the
-    // most recent tool call instead of opening a nameless new entry.
-    const index = typeof delta.index === 'number'
+    // most recent tool call instead of opening a nameless new entry. An
+    // index-less delta that introduces a *different* id or function name is
+    // not a continuation, though: a provider streaming parallel calls without
+    // indices would otherwise merge every call into one entry, concatenating
+    // argument fragments into invalid JSON and overwriting the first name.
+    let index = typeof delta.index === 'number'
       ? delta.index
       : lastIndex ?? (target.size ? Math.max(...target.keys()) : 0)
+    if (typeof delta.index !== 'number') {
+      const candidate = target.get(index)
+      const announcedId = typeof delta.id === 'string' && delta.id ? delta.id : undefined
+      const announcedName = typeof delta.function?.name === 'string' && delta.function.name
+        ? delta.function.name
+        : undefined
+      const startsNewCall = candidate !== undefined
+        && (candidate.id !== undefined || candidate.name !== '')
+        && ((announcedId !== undefined && announcedId !== candidate.id)
+          || (announcedName !== undefined && announcedName !== candidate.name))
+      if (startsNewCall) {
+        index = Math.max(...target.keys()) + 1
+      }
+    }
     const existing: PendingToolCall = target.get(index) ?? { id: undefined, name: '', arguments: '' }
     const functionDelta = delta.function
     target.set(index, {
@@ -889,11 +913,14 @@ function openAiUsage(value: Record<string, unknown>): TokenUsage | undefined {
   if (inputTokens === undefined && outputTokens === undefined) {
     return undefined
   }
+  const inputDetails = asRecord(value.prompt_tokens_details)
   const outputDetails = asRecord(value.completion_tokens_details)
+  const cacheReadTokens = numberAt(inputDetails, 'cached_tokens')
   const reasoningTokens = numberAt(outputDetails, 'reasoning_tokens')
   return {
     inputTokens: inputTokens ?? 0,
     outputTokens: outputTokens ?? 0,
+    ...(cacheReadTokens === undefined ? {} : { cacheReadTokens }),
     ...(reasoningTokens === undefined ? {} : { reasoningTokens }),
   }
 }

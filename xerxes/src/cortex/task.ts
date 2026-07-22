@@ -48,6 +48,8 @@ export interface TaskExecutionContext {
   readonly context: string
   readonly dependencyOutputs: ReadonlyMap<string, CortexTaskOutput>
   readonly inputs: Readonly<Record<string, unknown>>
+  /** Optional cancellation propagated from the engine or orchestrator to in-flight executors. */
+  readonly signal?: AbortSignal
   readonly task: CortexTask
 }
 
@@ -82,6 +84,33 @@ export function validateTaskGraph(tasks: readonly CortexTask[]): void {
 /** Return task batches that may execute once all prior batches have completed. */
 export function taskDependencyLayers(tasks: readonly CortexTask[]): CortexTask[][] {
   return dependencyLayers(tasks, task => task.id, task => task.dependencies ?? [], 'task')
+}
+
+/**
+ * Require every contextTaskId to resolve from an earlier dependency layer.
+ * A same-layer reference may execute concurrently with its source, which
+ * would make the injected context silently empty or nondeterministic.
+ */
+export function validateContextTaskReferences(tasks: readonly CortexTask[]): void {
+  const layers = taskDependencyLayers(tasks)
+  const layerOf = new Map<string, number>()
+  layers.forEach((layer, index) => {
+    for (const task of layer) layerOf.set(task.id, index)
+  })
+  for (const task of tasks) {
+    const taskLayer = layerOf.get(task.id) ?? 0
+    for (const contextId of task.contextTaskIds ?? []) {
+      const contextLayer = layerOf.get(contextId)
+      if (contextLayer === undefined) {
+        throw new TaskGraphError(`task ${task.id} references unknown context task ${contextId}`)
+      }
+      if (contextLayer >= taskLayer) {
+        throw new TaskGraphError(
+          `task ${task.id} references context task ${contextId} from a concurrent or later dependency layer; declare a dependency instead`,
+        )
+      }
+    }
+  }
 }
 
 /** Return a stable topological order preserving declaration order within each ready batch. */

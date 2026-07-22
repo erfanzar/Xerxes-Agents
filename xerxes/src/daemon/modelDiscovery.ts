@@ -156,6 +156,13 @@ export async function discoverModelCatalog(
         );
       }
     }
+    // Residual DNS-rebinding risk: Bun's fetch performs its own fresh
+    // resolution for this request and exposes neither a dispatcher to pin
+    // the validated address nor the response's remote address to re-verify
+    // it. The exposure window is therefore bounded to this single
+    // non-redirecting request: redirects are refused (`redirect: "error"`),
+    // so the profile credential can only be sent to the directly resolved
+    // endpoint, never forwarded to an attacker-chosen location.
     const response = await fetchImplementation(endpoint, {
       headers: modelDiscoveryHeaders(provider, apiKey),
       redirect: "error",

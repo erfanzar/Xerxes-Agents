@@ -408,8 +408,14 @@ test('scheduler isolates a failing job, always reschedules, and runs later jobs'
     expect(store.get('broken')?.nextRunAt).toBe('2026-05-15T12:01:00.000Z')
     expect(store.get('broken')?.lastRunAt).toBe('2026-05-15T12:00:30.000Z')
     expect(store.get('healthy')?.nextRunAt).toBe('2026-05-15T12:01:00.000Z')
-    // A failing one-shot is retired rather than retried on every tick.
-    expect(store.get('once-broken')).toBeUndefined()
+    // A failing one-shot is retained with a bounded retry instead of being lost.
+    const onceBroken = store.get('once-broken')
+    expect(onceBroken?.nextRunAt).toBe('2026-05-15T12:01:30.000Z')
+    expect(onceBroken?.metadata).toMatchObject({
+      last_error: 'runner exploded',
+      last_error_at: '2026-05-15T12:00:30.000Z',
+      retry_count: 1,
+    })
     expect(errors.map(entry => entry[0])).toEqual([
       'CronScheduler job broken failed',
       'CronScheduler job once-broken failed',

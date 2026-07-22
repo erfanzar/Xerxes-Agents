@@ -25,7 +25,11 @@ import {
 
 import { PathEscape, resolveWithin } from "../security/pathSecurity.js";
 import { isJsonObject, type JsonObject } from "../types/toolCalls.js";
-import { BUNDLED_SKILLS_DIRECTORY, parseSkillMarkdown } from "./skills.js";
+import {
+  BUNDLED_SKILLS_DIRECTORY,
+  MAX_SKILL_FILE_BYTES,
+  parseSkillMarkdown,
+} from "./skills.js";
 import {
   HUB_DIR as DEFAULT_HUB_DIR,
   SKILLS_DIR as DEFAULT_SKILLS_DIR,
@@ -134,7 +138,7 @@ export class LocalSkillSource implements SkillSource {
       identifier,
       "local skill",
     );
-    const content = await readFile(skillMarkdown, "utf8");
+    const content = await readBoundedSkillFile(skillMarkdown, "local skill");
     const parsed = parseSkillMarkdown(content, skillMarkdown);
     return {
       name: parsed.metadata.name,
@@ -183,7 +187,7 @@ export class OfficialSkillSource implements SkillSource {
     );
     return {
       name,
-      content: await readFile(skillMarkdown, "utf8"),
+      content: await readBoundedSkillFile(skillMarkdown, "official SKILL.md"),
       files: {},
       metadata: { official: true },
     };
@@ -308,9 +312,12 @@ export class SkillsHub {
         bundle.content,
         "installed SKILL.md",
       );
-      const scan = await scanSkill(target, {
-        trustedHashes: await loadTrustedHashes(this.guardPaths),
-      });
+      const trustedHashes = await loadTrustedHashes(this.guardPaths);
+      // An empty hash database means no trust anchors are configured; a non-empty database fails closed.
+      const scan = await scanSkill(
+        target,
+        Object.keys(trustedHashes).length ? { trustedHashes } : {},
+      );
       if (!scan.isSafe) {
         // Failing content is quarantined for operator review instead of activated.
         await quarantineSkill(target, this.guardPaths);
@@ -600,6 +607,7 @@ async function collectSearchResults(
       continue;
     }
     if (!metadata.isFile() || name !== "SKILL.md") continue;
+    if (metadata.size > MAX_SKILL_FILE_BYTES) continue;
     try {
       const content = await readFile(candidate, "utf8");
       if (content.toLowerCase().includes(query)) {
@@ -768,6 +776,18 @@ async function requireChildFile(
   const file = await existingFile(root, name, label);
   if (file === undefined) throw new Error(`${label} not found`);
   return file;
+}
+
+/** Read one SKILL.md only after confirming it stays below the per-file size ceiling. */
+async function readBoundedSkillFile(path: string, label: string): Promise<string> {
+  const metadata = await lstat(path);
+  if (!metadata.isFile() || metadata.size > MAX_SKILL_FILE_BYTES) {
+    throw new SkillHubPathError(
+      path,
+      `${label} exceeds the ${MAX_SKILL_FILE_BYTES}-byte limit`,
+    );
+  }
+  return readFile(path, "utf8");
 }
 
 async function requireRegularFile(

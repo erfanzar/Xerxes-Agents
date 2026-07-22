@@ -4,6 +4,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto'
 
 import { postJson, type ChannelFetch } from './http.js'
+import { scanContextContent } from '../security/promptScanner.js'
 import { createChannelMessage, MessageDirection, type ChannelMessage } from './types.js'
 import {
   parseJsonBody,
@@ -31,7 +32,11 @@ export interface SlackChannelOptions {
   readonly fetchImplementation?: ChannelFetch
   readonly installId?: string
   readonly now?: () => number
-  /** Reject inbound events when a signing secret has not been configured. */
+  /**
+   * Reject inbound events when a signing secret has not been configured.
+   * Defaults to true (fail closed); set false only as an explicit opt-out
+   * for tests or a separately authenticated relay.
+   */
   readonly requireSignature?: boolean
   readonly signingSecret?: string
   readonly tokenProvider?: SlackTokenProvider
@@ -94,7 +99,7 @@ export class SlackChannel extends WebhookChannel {
     this.fetchImplementation = options.fetchImplementation
     this.installId = options.installId ?? 'default'
     this.now = options.now ?? (() => Date.now() / 1000)
-    this.requireSignature = options.requireSignature ?? false
+    this.requireSignature = options.requireSignature ?? true
     this.signingSecret = options.signingSecret ?? ''
     this.tokenProvider = options.tokenProvider
   }
@@ -142,7 +147,7 @@ export class SlackChannel extends WebhookChannel {
       : ''
     return [createChannelMessage({
       channel: this.name,
-      text: stringOrEmpty(event.text),
+      text: scanContextContent(stringOrEmpty(event.text), 'slack:inbound'),
       direction: MessageDirection.INBOUND,
       channelUserId: stringOrEmpty(event.user),
       roomId: stringOrEmpty(event.channel),

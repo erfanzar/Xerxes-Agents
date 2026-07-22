@@ -47,10 +47,20 @@ export function createToolCallParser(
  * stream adapters.
  */
 export function normalizeParsedToolCalls(calls: readonly ParsedToolCall[]): ToolCall[] {
+  const generatedIdOccurrences = new Map<string, number>()
   return calls.map((candidate, index) => {
     const call = validateParsedToolCall(candidate, index)
+    let id = call.rawId
+    if (!id) {
+      const generated = deterministicToolCallId(call.name, call.arguments)
+      const occurrence = generatedIdOccurrences.get(generated) ?? 0
+      generatedIdOccurrences.set(generated, occurrence + 1)
+      // Identical raw-text calls hash to the same fallback ID; suffix later
+      // occurrences so tool_use/tool_result correlation IDs stay unique.
+      id = occurrence === 0 ? generated : `${generated}#${occurrence + 1}`
+    }
     return {
-      id: call.rawId || deterministicToolCallId(call.name, call.arguments),
+      id,
       type: 'function',
       function: {
         name: call.name,

@@ -5,7 +5,7 @@ import { expect, test } from 'bun:test'
 
 import { ProviderError } from '../src/core/errors.js'
 import { AnthropicMessagesClient, messagesToAnthropic } from '../src/llms/anthropic.js'
-import type { CompletionRequest } from '../src/llms/client.js'
+import { collectLlmCompletion, type CompletionRequest } from '../src/llms/client.js'
 
 test('Anthropic conversion preserves signed thinking and error tool results', () => {
   const converted = messagesToAnthropic([
@@ -18,7 +18,7 @@ test('Anthropic conversion preserves signed thinking and error tool results', ()
       tool_calls: [{ id: 'call-1', type: 'function', function: { name: 'ReadFile', arguments: { path: 'README.md' } } }],
     },
     { role: 'tool', tool_call_id: 'call-1', name: 'ReadFile', content: 'permission denied', is_error: true },
-  ])
+  ], { thinkingEnabled: true })
 
   expect(converted).toEqual({
     system: 'Be concise.',
@@ -63,7 +63,9 @@ test('Anthropic SSE adapter normalizes text, thinking, usage, and tool calls', a
   expect(events).toContainEqual({ thinking: 'Inspect.' })
   expect(events).toContainEqual({ content: 'Calling tool.' })
   expect(events).toContainEqual({ usage: { inputTokens: 11, outputTokens: 0 } })
-  expect(events).toContainEqual({ finishReason: 'tool_calls', usage: { inputTokens: 0, outputTokens: 7 } })
+  // message_delta only reports output_tokens; the cumulative snapshot must
+  // carry the message_start input tokens forward instead of fabricating 0.
+  expect(events).toContainEqual({ finishReason: 'tool_calls', usage: { inputTokens: 11, outputTokens: 7 } })
   expect(events).toContainEqual({
     toolCalls: [{ id: 'tool-1', type: 'function', function: { name: 'ReadFile', arguments: { path: 'README.md' } } }],
   })
@@ -226,6 +228,130 @@ test('Anthropic tool choice none disables tool use in the request payload', asyn
   }))
 
   expect(payload?.tool_choice).toEqual({ type: 'none' })
+})
+
+test('Anthropic conversion drops non-replayable thinking and never sends empty assistant content', () => {
+  const converted = messagesToAnthropic([
+    { role: 'user', content: 'hi' },
+    {
+      role: 'assistant',
+      content: '',
+      thinking: 'Need a file read.',
+      thinking_signature: 'signature-1',
+    },
+    {
+      role: 'assistant',
+      content: 'answer',
+      thinking: 'Kept only when thinking is enabled.',
+      thinking_signature: 'signature-2',
+    },
+    { role: 'user', content: 'next' },
+  ])
+
+  expect(converted.messages).toEqual([
+    { role: 'user', content: 'hi' },
+    // Thinking disabled for this request: the first assistant turn had no
+    // other blocks and must not be sent as `content: []`; the second keeps
+    // only its text.
+    { role: 'assistant', content: [{ type: 'text', text: 'answer' }] },
+    { role: 'user', content: 'next' },
+  ])
+
+  const enabled = messagesToAnthropic([
+    { role: 'user', content: 'hi' },
+    {
+      role: 'assistant',
+      content: '',
+      thinking: 'Need a file read.',
+      thinking_signature: 'signature-1',
+    },
+  ], { thinkingEnabled: true })
+  expect(enabled.messages).toEqual([
+    { role: 'user', content: 'hi' },
+    {
+      role: 'assistant',
+      content: [{ type: 'thinking', thinking: 'Need a file read.', signature: 'signature-1' }],
+    },
+  ])
+})
+
+test('Anthropic requests omit replayed thinking blocks unless the request enables thinking', async () => {
+  const payloads: Record<string, unknown>[] = []
+  const client = new AnthropicMessagesClient({
+    apiKey: 'test-key',
+    fetchImplementation: async (_input, init) => {
+      payloads.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+      return sseResponse([{ type: 'message_stop' }])
+    },
+  })
+  const messages: CompletionRequest['messages'] = [
+    { role: 'user', content: 'hi' },
+    { role: 'assistant', content: 'answer', thinking: 'trace', thinking_signature: 'sig-1' },
+  ]
+
+  await collect(client.stream({ model: 'claude-sonnet-4-6', messages }))
+  await collect(client.stream({ model: 'claude-sonnet-4-6', messages, thinking: { budgetTokens: 2_048 } }))
+
+  expect(payloads[0]?.messages).toEqual([
+    { role: 'user', content: 'hi' },
+    { role: 'assistant', content: [{ type: 'text', text: 'answer' }] },
+  ])
+  expect(payloads[1]?.messages).toEqual([
+    { role: 'user', content: 'hi' },
+    {
+      role: 'assistant',
+      content: [
+        { type: 'thinking', thinking: 'trace', signature: 'sig-1' },
+        { type: 'text', text: 'answer' },
+      ],
+    },
+  ])
+})
+
+test('Anthropic streamed tool arguments come from input_json_delta partials only', async () => {
+  const client = new AnthropicMessagesClient({
+    apiKey: 'test-key',
+    fetchImplementation: async () => sseResponse([
+      // A non-empty input snapshot on the start block must not be seeded into
+      // the accumulated arguments; the deltas below carry the real JSON.
+      {
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'tool_use', id: 'tool-1', name: 'ReadFile', input: { path: 'README.md' } },
+      },
+      { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"path":"READ' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: 'ME.md"}' } },
+      { type: 'message_stop' },
+    ]),
+  })
+
+  const events = await collect(client.stream({
+    model: 'claude-sonnet-4-6',
+    messages: [{ role: 'user', content: 'read file' }],
+  }))
+
+  expect(events).toContainEqual({
+    toolCalls: [{ id: 'tool-1', type: 'function', function: { name: 'ReadFile', arguments: { path: 'README.md' } } }],
+  })
+})
+
+test('Anthropic collected completions keep message_start input tokens after message_delta', async () => {
+  const client = new AnthropicMessagesClient({
+    apiKey: 'test-key',
+    fetchImplementation: async () => sseResponse([
+      { type: 'message_start', message: { usage: { input_tokens: 123, cache_read_input_tokens: 40 } } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'done' } },
+      { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 9 } },
+      { type: 'message_stop' },
+    ]),
+  })
+
+  const completion = await collectLlmCompletion(client.stream({
+    model: 'claude-sonnet-4-6',
+    messages: [{ role: 'user', content: 'hi' }],
+  }))
+
+  expect(completion.usage).toEqual({ inputTokens: 123, outputTokens: 9, cacheReadTokens: 40 })
 })
 
 test('Anthropic HTTP failures cap quoted provider error bodies', async () => {

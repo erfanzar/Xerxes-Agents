@@ -1,12 +1,20 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { timingSafeEqual } from 'node:crypto'
+
 import type { WebhookCapableChannel, WebhookHeaders } from './webhooks.js'
 import type { ChannelManager } from './manager.js'
 
 const DEFAULT_MAX_BODY_BYTES = 1_048_576
 
 export interface ChannelWebhookServerOptions {
+  /**
+   * Bearer token required for the channel list endpoint. When omitted the
+   * list endpoint is unauthenticated and safe only because the default bind
+   * is loopback (127.0.0.1); configure a token before binding publicly.
+   */
+  readonly authToken?: string
   readonly host?: string
   readonly manager: ChannelManager
   readonly maxBodyBytes?: number
@@ -18,10 +26,13 @@ export interface ChannelWebhookServerOptions {
  * Bun-native HTTP receiver for configured webhook-capable channel adapters.
  *
  * It intentionally exposes only a list endpoint and POST delivery to known
- * host-configured channel names. Authentication and provider signature checks
- * remain the responsibility of each channel adapter.
+ * host-configured channel names. Provider signature checks remain the
+ * responsibility of each channel adapter. The list endpoint enumerates
+ * configured channels, so it requires `authToken` whenever one is configured;
+ * without a token it relies on the loopback default bind.
  */
 export class ChannelWebhookServer {
+  readonly authToken: string
   readonly host: string
   readonly manager: ChannelManager
   readonly maxBodyBytes: number
@@ -31,6 +42,7 @@ export class ChannelWebhookServer {
 
   constructor(options: ChannelWebhookServerOptions) {
     this.manager = options.manager
+    this.authToken = options.authToken?.trim() ?? ''
     this.host = nonBlank(options.host) ?? '127.0.0.1'
     this.port = portValue(options.port ?? 0)
     this.maxBodyBytes = bodyLimit(options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES)
@@ -65,6 +77,9 @@ export class ChannelWebhookServer {
     const url = new URL(request.url)
     if (url.pathname === this.pathPrefix) {
       if (request.method !== 'GET') return methodNotAllowed('GET')
+      if (this.authToken && !bearerMatches(request.headers.get('authorization'), this.authToken)) {
+        return new Response('unauthorized', { status: 401 })
+      }
       return json({ ok: true, channels: this.manager.list() })
     }
     const name = webhookName(url.pathname, this.pathPrefix)
@@ -148,6 +163,14 @@ function webhookName(pathname: string, prefix: string): string | undefined {
   } catch {
     return undefined
   }
+}
+
+function bearerMatches(headerValue: string | null, expected: string): boolean {
+  const match = /^Bearer\s+(\S+)\s*$/.exec(headerValue ?? '')
+  if (!match) return false
+  const supplied = Buffer.from(match[1] ?? '', 'utf8')
+  const wanted = Buffer.from(expected, 'utf8')
+  return supplied.byteLength === wanted.byteLength && timingSafeEqual(supplied, wanted)
 }
 
 function methodNotAllowed(allowed: string): Response {

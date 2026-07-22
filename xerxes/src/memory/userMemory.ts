@@ -1,6 +1,9 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { createHash } from 'node:crypto'
+
+import { scanContextContent } from '../security/promptScanner.js'
 import {
   ContextualMemory,
   type ContextualSaveOptions,
@@ -60,8 +63,12 @@ export class UserMemory {
     if (existing) return existing
 
     // Persist under a per-user key namespace so tiers over a shared backend
-    // only hydrate, search, and clear their own user's records.
-    const storage = this.storage ? new NamespacedStorage(this.storage, `user_${userId}_`) : undefined
+    // only hydrate, search, and clear their own user's records. The namespace
+    // segment is a hash of the user id, never the raw id: with raw ids the
+    // prefix `user_a_` also matches user `a_b`'s keys, letting one user's
+    // clear()/listKeys() delete or expose another user's records. The raw id
+    // stays on the records themselves (metadata.user_id / options.userId).
+    const storage = this.storage ? new NamespacedStorage(this.storage, userNamespace(userId)) : undefined
     const memory = new ContextualMemory({
       ...(storage ? { longTermStorage: storage } : {}),
     })
@@ -80,10 +87,15 @@ export class UserMemory {
     const entityMemory = this.userEntities.get(userId)
     const parts: string[] = []
     const preferences = this.getUserPreferences(userId)
-    if (Object.keys(preferences).length > 0) parts.push(`User preferences: ${JSON.stringify(preferences)}`)
+    // Preference values and entity names are user- or tool-influenced data
+    // recalled into prompts; neutralise embedded hostile instructions.
+    if (Object.keys(preferences).length > 0) {
+      parts.push(`User preferences: ${scanContextContent(JSON.stringify(preferences), `user preferences for ${userId}`)}`)
+    }
     parts.push(memory.getContextSummary())
     if (entityMemory && Object.keys(entityMemory.entities).length > 0) {
-      parts.push(`Known entities: ${Object.keys(entityMemory.entities).slice(0, 10).join(', ')}`)
+      const names = Object.keys(entityMemory.entities).slice(0, 10).join(', ')
+      parts.push(`Known entities: ${scanContextContent(names, `known entities for ${userId}`)}`)
     }
     return parts.join('\n\n')
   }
@@ -181,6 +193,16 @@ function defaultPreferences(): UserPreferences {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * Collision-proof per-user storage namespace. Hashing the user id removes
+ * prefix ambiguity between ids such as `a` and `a_b` and keeps raw ids out
+ * of backend keys.
+ */
+function userNamespace(userId: string): string {
+  const digest = createHash('sha256').update(userId, 'utf8').digest('hex').slice(0, 16)
+  return `user_${digest}_`
 }
 
 function relationshipCount(memory: EntityMemory): number {

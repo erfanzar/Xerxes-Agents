@@ -5,6 +5,7 @@ import type { JsonObject } from '../types/toolCalls.js'
 import { MCPClient } from './client.js'
 import {
   MCPReconnectError,
+  mcpConfigSecrets,
   reconnectWithBackoff,
   scrubCredentials,
   type ReconnectWithBackoffOptions,
@@ -122,7 +123,7 @@ export class MCPManager {
         this.failures.delete(normalized.name)
         return true
       } catch (error) {
-        this.recordFailure(normalized.name, 'connect', error)
+        this.recordFailure(normalized.name, 'connect', error, undefined, mcpConfigSecrets(normalized))
         return false
       }
     })
@@ -149,7 +150,7 @@ export class MCPManager {
         await client.disconnect()
         this.failures.delete(normalized)
       } catch (error) {
-        this.recordFailure(normalized, 'disconnect', error)
+        this.recordFailure(normalized, 'disconnect', error, undefined, mcpConfigSecrets(client.config))
       }
       return true
     })
@@ -163,39 +164,63 @@ export class MCPManager {
   /**
    * Replace an active server with a fresh client candidate, retrying failed
    * connection attempts according to the configured backoff policy.
+   *
+   * Only the registry delete and swap are serialized through the lifecycle
+   * queue. The backoff sleep loop runs outside the queue so a long retry
+   * schedule cannot block addServer, removeServer, or disconnectAll for
+   * every other server.
    */
-  reconnect(name: string): Promise<boolean> {
+  async reconnect(name: string): Promise<boolean> {
     const normalized = normalizeName(name)
-    return this.enqueue(async () => {
-      const previous = this.servers.get(normalized)
-      if (!previous) {
-        return false
+    const previous = await this.enqueue(() => {
+      const client = this.servers.get(normalized)
+      if (client) {
+        this.servers.delete(normalized)
       }
-      const config = previous.config
-      this.servers.delete(normalized)
-      try {
-        await previous.disconnect()
-      } catch (error) {
-        this.recordFailure(normalized, 'disconnect', error)
-      }
+      return Promise.resolve(client)
+    })
+    if (!previous) {
+      return false
+    }
+    const config = previous.config
+    const secrets = mcpConfigSecrets(config)
+    try {
+      await previous.disconnect()
+    } catch (error) {
+      this.recordFailure(normalized, 'disconnect', error, undefined, secrets)
+    }
 
-      try {
-        const client = await reconnectWithBackoff(
-          () => this.connectClient(config),
-          this.optionsForReconnect(normalized),
-        )
-        this.servers.set(normalized, client)
-        this.failures.delete(normalized)
+    let candidate: MCPClientPort
+    try {
+      candidate = await reconnectWithBackoff(
+        () => this.connectClient(config),
+        this.optionsForReconnect(normalized, secrets),
+      )
+    } catch (error) {
+      this.recordFailure(
+        normalized,
+        'reconnect',
+        error,
+        error instanceof MCPReconnectError ? error.attempts : undefined,
+        secrets,
+      )
+      return false
+    }
+
+    return this.enqueue(async () => {
+      if (this.servers.has(normalized)) {
+        // A concurrent registration claimed the name while backoff ran; keep
+        // the newer client and tear down this superseded candidate.
+        try {
+          await candidate.disconnect()
+        } catch (error) {
+          this.recordFailure(normalized, 'disconnect', error, undefined, secrets)
+        }
         return true
-      } catch (error) {
-        this.recordFailure(
-          normalized,
-          'reconnect',
-          error,
-          error instanceof MCPReconnectError ? error.attempts : undefined,
-        )
-        return false
       }
+      this.servers.set(normalized, candidate)
+      this.failures.delete(normalized)
+      return true
     })
   }
 
@@ -209,7 +234,7 @@ export class MCPManager {
           await client.disconnect()
           this.failures.delete(name)
         } catch (error) {
-          this.recordFailure(name, 'disconnect', error)
+          this.recordFailure(name, 'disconnect', error, undefined, mcpConfigSecrets(client.config))
         }
       }
     })
@@ -305,22 +330,25 @@ export class MCPManager {
     return prompts
   }
 
-  /** Route a tool call to the first active server that published its name. */
-  async callTool(name: string, arguments_: JsonObject = {}): Promise<MCPToolCallResult> {
-    const client = this.findTool(name)
-    return client.callTool(name, arguments_)
+  /**
+   * Route a tool call to the first active server that published its name.
+   *
+   * Lookup and dispatch run inside the lifecycle queue so a concurrent
+   * reconnect or removeServer cannot swap or drop the client between the
+   * capability lookup and the call.
+   */
+  callTool(name: string, arguments_: JsonObject = {}): Promise<MCPToolCallResult> {
+    return this.enqueue(() => this.findTool(name).callTool(name, arguments_))
   }
 
   /** Route a resource read to the active server that published its URI. */
-  async readResource(uri: string): Promise<MCPResourceContentsResult> {
-    const client = this.findResource(uri)
-    return client.readResource(uri)
+  readResource(uri: string): Promise<MCPResourceContentsResult> {
+    return this.enqueue(() => this.findResource(uri).readResource(uri))
   }
 
   /** Route a prompt request to the first active server that published its name. */
-  async getPrompt(name: string, arguments_: JsonObject = {}): Promise<MCPPromptResult> {
-    const client = this.findPrompt(name)
-    return client.getPrompt(name, arguments_)
+  getPrompt(name: string, arguments_: JsonObject = {}): Promise<MCPPromptResult> {
+    return this.enqueue(() => this.findPrompt(name).getPrompt(name, arguments_))
   }
 
   /** Return Python-compatible per-server counts for live MCP capabilities. */
@@ -351,13 +379,13 @@ export class MCPManager {
     }
   }
 
-  private optionsForReconnect(name: string): ReconnectWithBackoffOptions {
+  private optionsForReconnect(name: string, secrets: readonly string[]): ReconnectWithBackoffOptions {
     const configured = this.reconnectOptions
     return {
       ...(configured?.policy === undefined ? {} : { policy: configured.policy }),
       ...(configured?.sleep === undefined ? {} : { sleep: configured.sleep }),
       onError: async (attempt, error) => {
-        this.recordFailure(name, 'reconnect', error, attempt)
+        this.recordFailure(name, 'reconnect', error, attempt, secrets)
         await configured?.onError?.(attempt, error)
       },
     }
@@ -404,11 +432,12 @@ export class MCPManager {
     operation: MCPServerLifecycleOperation,
     error: unknown,
     attempt?: number,
+    secrets: readonly string[] = [],
   ): void {
     const failure: MCPServerFailure = {
       name,
       operation,
-      error: scrubCredentials(errorMessage(error)),
+      error: scrubCredentials(errorMessage(error), secrets),
       ...(attempt === undefined ? {} : { attempt }),
     }
     this.failures.set(name, failure)

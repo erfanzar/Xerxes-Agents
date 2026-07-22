@@ -13,6 +13,10 @@ import {
   type CommandDefinition,
 } from "../bridge/commands.js";
 import {
+  createCompactionAgent,
+  type CompactionCompletionPort,
+} from "../agents/compactionAgent.js";
+import {
   listAgentDefinitions,
   type AgentDefinition,
 } from "../agents/definitions.js";
@@ -29,7 +33,6 @@ import {
   ChannelWebhookServer,
   type ChannelWebhookServerOptions,
 } from "../channels/webhookServer.js";
-import { ContextCompressor, naiveSummarizer } from "../context/compressor.js";
 import { estimateContextTokens } from "../context/windowUsage.js";
 import {
   createChannelMessage,
@@ -67,7 +70,13 @@ import {
   DEFAULT_TEMPERATURE,
   DEFAULT_TOP_K,
 } from "../llms/samplingDefaults.js";
-import { requireConfiguredModel } from "../llms/client.js";
+import {
+  closeLlmClient,
+  completeLlm,
+  createLlmClient,
+  requireConfiguredModel,
+  type LlmClient,
+} from "../llms/client.js";
 import { formatDoctorReport, runAllDoctorChecks } from "../runtime/doctor.js";
 import { formatGitUpdateStatus, gitUpdateStatus } from "../runtime/update.js";
 import {
@@ -104,9 +113,11 @@ import { SkillCreateFlow, type SkillCreateTransition } from "./skillCreate.js";
 import {
   BUN_DAEMON_BUILD_ID,
   DAEMON_PROTOCOL_VERSION,
+  type DaemonEvent,
   type DaemonRuntime,
   type DaemonSession,
   type SavedDaemonSession,
+  type SubmitTurnOptions,
   InMemoryDaemonRuntime,
 } from "./runtime.js";
 import { resolveProjectDirectory, xerxesHome } from "./paths.js";
@@ -229,6 +240,12 @@ const DAEMON_EXTENSION_COMMANDS: readonly DaemonSlashCommand[] = Object.freeze([
     aliases: Object.freeze([]),
     category: "daemon",
     description: "Toggle plan mode",
+  }),
+  Object.freeze({
+    name: "ultra",
+    aliases: Object.freeze([]),
+    category: "daemon",
+    description: "Toggle ultra mode",
   }),
 ]);
 
@@ -424,6 +441,8 @@ export interface DaemonServerOptions {
 interface Connection extends DaemonTransportConnection {
   activeSessionKey: string;
   buffer: string;
+  /** Serializes request dispatch so interleaved handlers cannot race on shared state. */
+  queue: Promise<void>;
   readonly socket: Socket;
 }
 
@@ -694,6 +713,7 @@ export class DaemonServer {
     const connection: Connection = {
       socket,
       buffer: "",
+      queue: Promise.resolve(),
       activeSessionKey: `tui:${newConnectionKey()}`,
       send: (frame) => {
         if (!socket.destroyed) {
@@ -727,7 +747,15 @@ export class DaemonServer {
       const line = connection.buffer.slice(0, newline);
       connection.buffer = connection.buffer.slice(newline + 1);
       if (line.trim()) {
-        void this.handleLine(connection, line);
+        // Serialize dispatch per connection: concurrent handlers would
+        // interleave at awaits and race on shared mutable state such as
+        // activeSessionKey. turn.submit returns while its turn runs in the
+        // background, so a queued permission_response is never blocked
+        // behind the turn it answers.
+        connection.queue = connection.queue.then(
+          () => this.handleLine(connection, line),
+          () => this.handleLine(connection, line),
+        );
       }
       newline = connection.buffer.indexOf("\n");
     }
@@ -1030,29 +1058,18 @@ export class DaemonServer {
         (typeof params.display_text === "string"
           ? params.display_text.trim()
           : "") || text;
-      // A duplicate submit while a turn is active fails in submitTurn; keep
-      // the running turn's owner so its submitter stays the cancellation tie.
-      if (!this.turnOwners.has(key)) {
-        this.turnOwners.set(key, connection);
-      }
-      const turnPromise: Promise<void> = this.runtime
-        .submitTurn(key, text, (event) =>
-          this.emit(connection, event.type, event.payload),
-          { displayText },
-        )
-        .catch((error) =>
-          this.emit(connection, "notification", {
-            level: "error",
-            message: errorMessage(error),
-          }),
-        );
-      this.inFlightTurns.add(turnPromise);
-      void turnPromise.then(() => {
-        this.inFlightTurns.delete(turnPromise);
-        if (this.turnOwners.get(key) === connection) {
-          this.turnOwners.delete(key);
-        }
-      });
+      void this.submitTrackedTurn(
+        key,
+        text,
+        (event) => this.emit(connection, event.type, event.payload),
+        connection,
+        { displayText },
+      ).catch((error) =>
+        this.emit(connection, "notification", {
+          level: "error",
+          message: errorMessage(error),
+        }),
+      );
       return { ok: true };
     }
     if (method === "turn.cancel" || method === "cancel") {
@@ -1430,16 +1447,17 @@ export class DaemonServer {
       this.emitSlash(connection, transition.draft.announcement);
       const sessionKey = connection.activeSessionKey;
       queueMicrotask(() => {
-        void this.runtime
-          .submitTurn(sessionKey, transition.draft.prompt, (event) =>
-            this.emit(connection, event.type, event.payload),
-          )
-          .catch((error) =>
-            this.emit(connection, "notification", {
-              level: "error",
-              message: errorMessage(error),
-            }),
-          );
+        void this.submitTrackedTurn(
+          sessionKey,
+          transition.draft.prompt,
+          (event) => this.emit(connection, event.type, event.payload),
+          connection,
+        ).catch((error) =>
+          this.emit(connection, "notification", {
+            level: "error",
+            message: errorMessage(error),
+          }),
+        );
       });
     }
     if (consumedPrompt) {
@@ -2260,11 +2278,20 @@ export class DaemonServer {
       skillPromptSection(skill),
       ...(argumentsText ? ["", "## User request", argumentsText] : []),
     ].join("\n");
-    await this.runtime.submitTurn(sessionKey, prompt, (event) =>
-      this.emit(connection, event.type, event.payload),
+    void this.submitTrackedTurn(
+      sessionKey,
+      prompt,
+      (event) => this.emit(connection, event.type, event.payload),
+      connection,
+    ).catch((error) =>
+      this.emit(connection, "notification", {
+        level: "error",
+        message: errorMessage(error),
+      }),
     );
     return {
       ok: true,
+      queued: true,
       skill: skill.metadata.name,
       ...(subcommand ? { subcommand } : {}),
     };
@@ -2570,24 +2597,33 @@ export class DaemonServer {
       connection,
       `Starting native project initialization for \`${projectDirectory}\`.`,
     );
-    await this.runtime.submitTurn(
+    const turn = this.submitTrackedTurn(
       key,
       projectInitializationPrompt(projectDirectory, args),
       (event) => this.emit(connection, event.type, event.payload),
-    );
-    const active = this.runtime.sessionStatus(key);
-    await this.refreshSkills(active);
-    const workspace = await loadProjectAgentWorkspace(projectDirectory);
-    this.emitSlash(
       connection,
-      `Project initialization turn finished. Loaded ${workspace.loadedFiles.length} project workspace file(s) and ${this.skillRegistry.all().length} native skill(s).`,
     );
+    void turn
+      .then(async () => {
+        const active = this.runtime.sessionStatus(key);
+        await this.refreshSkills(active);
+        const workspace = await loadProjectAgentWorkspace(projectDirectory);
+        this.emitSlash(
+          connection,
+          `Project initialization turn finished. Loaded ${workspace.loadedFiles.length} project workspace file(s) and ${this.skillRegistry.all().length} native skill(s).`,
+        );
+      })
+      .catch((error) =>
+        this.emit(connection, "notification", {
+          level: "error",
+          message: errorMessage(error),
+        }),
+      );
     return {
       ok: true,
+      queued: true,
       project_directory: projectDirectory,
-      agents_directory: workspace.agentsDir,
-      loaded_files: workspace.loadedFiles,
-      skills: this.skillRegistry.all().length,
+      agents_directory: projectAgentsDir(projectDirectory),
     };
   }
 
@@ -2647,10 +2683,16 @@ export class DaemonServer {
       "",
       prompt,
     ].join("\n");
-    await this.runtime.submitTurn(
+    void this.submitTrackedTurn(
       connection.activeSessionKey,
       synthetic,
       (event) => this.emit(connection, event.type, event.payload),
+      connection,
+    ).catch((error) =>
+      this.emit(connection, "notification", {
+        level: "error",
+        message: errorMessage(error),
+      }),
     );
     return { ok: true, queued: true };
   }
@@ -2875,45 +2917,77 @@ export class DaemonServer {
       }
       return { ok: false, error: "no active session" };
     }
+    if (session.activeTurnId) {
+      if (notify) {
+        this.emitSlash(
+          connection,
+          "Cannot compact while a turn is running. Use `/stop` first.",
+          "warning",
+        );
+      }
+      return { ok: false, error: "turn is running" };
+    }
     const model = session.model || stringValue(this.runtime.status().model);
     if (!model) {
       const error = "model is not configured; select a provider model before compacting";
       if (notify) this.emitSlash(connection, error, "warning");
       return { ok: false, error };
     }
-    const compressor = new ContextCompressor({
-      contextWindow: this.contextLimit(model),
-      model,
-      summarizer: naiveSummarizer,
-      threshold: 0.000_001,
-    });
-    const result = compressor.compress(session.messages);
-    if (!result.compressed) {
-      if (notify) {
-        this.emitSlash(connection, "Nothing to compact.");
+    let client: LlmClient | undefined;
+    try {
+      const profile = this.profileStore?.active();
+      client = createCompactionClient(model, profile, this.runtime.status());
+      const agent = createCompactionAgent({
+        model,
+        completion: compactionCompletionPort(client, model),
+      });
+      const originalCount = session.messages.length;
+      const compacted = await agent.summarizeMessages(session.messages);
+      const unchanged =
+        compacted.length === originalCount &&
+        compacted.every(
+          (message, index) =>
+            JSON.stringify(message) === JSON.stringify(session.messages[index]),
+        );
+      if (unchanged) {
+        if (notify) {
+          this.emitSlash(connection, "Nothing to compact.");
+        }
+        return { ok: true, compacted: false };
       }
-      return { ok: true, compacted: false };
+      const tokensBefore = estimateContextTokens(session.messages, { model });
+      const tokensAfter = estimateContextTokens(compacted, { model });
+      session.messages = compacted as DaemonSession["messages"];
+      session.metadata.last_compaction = {
+        tokens_before: tokensBefore,
+        tokens_after: tokensAfter,
+      };
+      await this.runtime.flushSessions();
+      if (notify) {
+        this.emitSlash(
+          connection,
+          `Compacted ${originalCount - compacted.length} message(s): ${tokensBefore} → ${tokensAfter} tokens.`,
+        );
+      }
+      this.emitStatus(connection, session);
+      return {
+        ok: true,
+        compacted: true,
+        tokens_before: tokensBefore,
+        tokens_after: tokensAfter,
+      };
+    } catch (error) {
+      if (notify) {
+        this.emitSlash(
+          connection,
+          `Compaction failed: ${errorMessage(error)}`,
+          "error",
+        );
+      }
+      return { ok: false, error: errorMessage(error) };
+    } finally {
+      if (client !== undefined) await closeLlmClient(client);
     }
-    session.messages = result.messages as DaemonSession["messages"];
-    session.metadata.last_compaction = {
-      ...result.metadata,
-      tokens_before: result.tokensBefore,
-      tokens_after: result.tokensAfter,
-    };
-    await this.runtime.flushSessions();
-    if (notify) {
-      this.emitSlash(
-        connection,
-        `Compacted ${result.compressedCount} message(s): ${result.tokensBefore} → ${result.tokensAfter} tokens.`,
-      );
-    }
-    this.emitStatus(connection, session);
-    return {
-      ok: true,
-      compacted: true,
-      tokens_before: result.tokensBefore,
-      tokens_after: result.tokensAfter,
-    };
   }
 
   private showSessionBudget(
@@ -3204,16 +3278,23 @@ export class DaemonServer {
       return { ok: false, error: "saved session not found" };
     }
     await this.runtime.flushSessions();
-    // Live sessions are keyed by sessionKey, not session id; resolve the key
-    // like deleteSavedSession does before evicting.
-    const activeKey = this.runtime
-      .listSessions()
-      .find((candidate) => candidate.id === target.id)?.sessionKey;
-    this.runtime.evictSession(activeKey ?? target.id);
-    connection.activeSessionKey = target.id;
+    // Open the resume target first: a failed resume must leave the
+    // connection and every live session untouched.
     const session = await this.runtime.openSession(target.id, undefined, {
       resume: true,
     });
+    // Live sessions are keyed by sessionKey, not session id; evict a stale
+    // duplicate registered under another key like deleteSavedSession does.
+    const activeKey = this.runtime
+      .listSessions()
+      .find(
+        (candidate) =>
+          candidate.id === target.id && candidate.sessionKey !== target.id,
+      )?.sessionKey;
+    if (activeKey) {
+      this.runtime.evictSession(activeKey);
+    }
+    connection.activeSessionKey = target.id;
     this.emitInitDone(connection, session);
     this.emitStatus(connection, session);
     this.replaySessionHistory(connection, session);
@@ -3365,22 +3446,24 @@ export class DaemonServer {
       this.emitSlash(connection, "No prior user message to retry.");
       return { ok: true, retried: false };
     }
+    // Capture the discarded turn so a failed resubmit can restore it instead
+    // of permanently losing the user's prompt.
+    const priorMessages = session.messages.slice();
+    const priorTurnCount = session.turnCount;
     discardLastUserTurn(session.messages);
     session.turnCount = Math.max(0, session.turnCount - 1);
     this.emitSlash(connection, "Retrying the last prompt…");
     const key = connection.activeSessionKey;
-    this.turnOwners.set(key, connection);
-    try {
-      await this.runtime.submitTurn(
-        key,
-        prompt,
-        (event) => this.emit(connection, event.type, event.payload),
-      );
-    } finally {
-      if (this.turnOwners.get(key) === connection) {
-        this.turnOwners.delete(key);
-      }
-    }
+    void this.submitTrackedTurn(
+      key,
+      prompt,
+      (event) => this.emit(connection, event.type, event.payload),
+      connection,
+    ).catch((error) => {
+      session.messages.splice(0, session.messages.length, ...priorMessages);
+      session.turnCount = priorTurnCount;
+      this.emitSlash(connection, `Retry failed: ${errorMessage(error)}`, "error");
+    });
     return { ok: true, retried: true };
   }
 
@@ -3604,7 +3687,9 @@ export class DaemonServer {
     const sessionKey = job.workspaceId || fallbackSessionKey;
     await this.runtime.openSession(sessionKey);
     const parts: string[] = [];
-    await this.runtime.submitTurn(sessionKey, job.prompt, (event) => {
+    // Cron turns have no owning connection, but they are still tracked in
+    // inFlightTurns so stop() awaits them before flushing sessions.
+    await this.submitTrackedTurn(sessionKey, job.prompt, (event) => {
       if (event.type === "text_part") {
         const text = optionalString(event.payload.text);
         if (text) {
@@ -3612,7 +3697,7 @@ export class DaemonServer {
         }
       }
       emit(event);
-    });
+    }, undefined);
     return {
       sessionKey,
       output: parts.join("").trim() || "(No text response was produced.)",
@@ -3910,7 +3995,13 @@ export class DaemonServer {
       this.runtime.reload(runtimeOverrides);
     }
     if (!resumeId) {
-      this.runtime.evictSession(key);
+      // Evicting a session with an active turn would hijack work another
+      // connection may still own; adopt the live session instead of
+      // resetting it.
+      const live = this.runtime.sessionStatus(key);
+      if (!live?.activeTurnId) {
+        this.runtime.evictSession(key);
+      }
     }
     const modelOverride = optionalString(params.model);
     const openOptions = {
@@ -3937,6 +4028,7 @@ export class DaemonServer {
       agent_name: session.agentId,
       mode: session.interactionMode,
       plan_mode: session.planMode,
+      ultra_mode: session.ultraMode === true,
       reasoning_effort:
         stringValue(this.runtime.status().reasoning_effort) || "off",
       permission_mode: runtimePermissionMode(
@@ -4096,6 +4188,76 @@ export class DaemonServer {
       }
     }
     connection.send(daemonEvent(type, payload));
+  }
+
+  /**
+   * Submit a turn with the same tracking as the turn.submit RPC branch:
+   * every runtime turn is registered in inFlightTurns so stop() drains it
+   * before flushing sessions, and — when an owning connection is supplied —
+   * in turnOwners so disconnect() cancels it. The returned promise is the
+   * raw submitTurn promise for caller-specific error handling; the tracked
+   * view never rejects.
+   */
+  private submitTrackedTurn(
+    sessionKey: string,
+    text: string,
+    emit: (event: DaemonEvent) => void,
+    owner: DaemonTransportConnection | undefined,
+    options: SubmitTurnOptions = {},
+  ): Promise<void> {
+    // A duplicate submit while a turn is active fails in submitTurn; keep
+    // the running turn's owner so its submitter stays the cancellation tie.
+    if (owner && !this.turnOwners.has(sessionKey)) {
+      this.turnOwners.set(sessionKey, owner);
+    }
+    const interactionIds = new Set<string>();
+    const turnPromise = this.runtime.submitTurn(
+      sessionKey,
+      text,
+      (event) => {
+        this.rememberTurnInteraction(event, interactionIds);
+        emit(event);
+      },
+      options,
+    );
+    const tracked = turnPromise.catch(() => undefined);
+    this.inFlightTurns.add(tracked);
+    void tracked.then(() => {
+      this.inFlightTurns.delete(tracked);
+      if (owner && this.turnOwners.get(sessionKey) === owner) {
+        this.turnOwners.delete(sessionKey);
+      }
+      // A turn that ends or is cancelled without an answer must not leak its
+      // approval/question ownership entries into later requests.
+      this.releaseTurnInteractions(interactionIds);
+    });
+    return turnPromise;
+  }
+
+  private rememberTurnInteraction(
+    event: DaemonEvent,
+    ids: Set<string>,
+  ): void {
+    if (event.type === "approval_request") {
+      const requestId =
+        optionalString(event.payload.id) ??
+        optionalString(event.payload.request_id);
+      if (requestId) {
+        ids.add(requestId);
+      }
+    } else if (event.type === "question_request") {
+      const requestId = optionalString(event.payload.id);
+      if (requestId) {
+        ids.add(requestId);
+      }
+    }
+  }
+
+  private releaseTurnInteractions(ids: Set<string>): void {
+    for (const requestId of ids) {
+      this.approvalOwners.delete(requestId);
+      this.questionOwners.delete(requestId);
+    }
   }
 
   private dropConnectionRequests(connection: DaemonTransportConnection): void {
@@ -4628,6 +4790,39 @@ function messageText(message: DaemonSession["messages"][number]): string {
   return isRecord(content)
     ? stringValue(content.text) || stringValue(content.content)
     : "";
+}
+
+function createCompactionClient(
+  model: string,
+  profile: ProviderProfile | undefined,
+  status: JsonRpcPayload,
+): LlmClient {
+  return createLlmClient(model, {
+    ...(profile?.api_key ? { api_key: profile.api_key } : {}),
+    ...(profile?.base_url ? { base_url: profile.base_url } : {}),
+    ...(profile?.provider ? { provider: profile.provider } : {}),
+    ...(typeof status.base_url === "string" && status.base_url
+      ? { base_url: status.base_url }
+      : {}),
+    ...(typeof status.provider === "string" && status.provider
+      ? { provider: status.provider }
+      : {}),
+  });
+}
+
+function compactionCompletionPort(
+  client: LlmClient,
+  model: string,
+): CompactionCompletionPort {
+  return async (request) => {
+    const result = await completeLlm(client, {
+      model,
+      messages: [{ role: "user", content: request.prompt }],
+      maxTokens: request.maxTokens,
+      temperature: request.temperature,
+    });
+    return result.content;
+  };
 }
 
 function errorMessage(error: unknown): string {

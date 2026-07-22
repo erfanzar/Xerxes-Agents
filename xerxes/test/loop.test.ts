@@ -268,9 +268,10 @@ test('agent loop emits and persists an identical cross-tool-round sentinel only 
   expect(events.filter(event => event.type === 'text').map(event => event.text)).toEqual([
     'Inspecting the file.',
   ])
+  // The fully duplicated round leaves no new content, so no empty assistant
+  // message is persisted for providers that reject empty assistant content.
   expect(state.messages.filter(message => message.role === 'assistant').map(message => message.content)).toEqual([
     'Inspecting the file.',
-    '',
   ])
   expect(state.totalApiCalls).toBe(2)
   expect(state.apiCallsComplete).toBe(true)

@@ -123,9 +123,17 @@ export class AcpAgentRunner {
       return { ok: false, error: `prompt already active for session: ${session.sessionId}` }
     }
 
-    // A cancellation targets the turn that was active when it arrived; a new
-    // prompt for the same session must not inherit the stale cancelled flag.
-    session.cancelled = false
+    if (session.cancelled) {
+      // A cancellation that arrived before this prompt started (when
+      // runner.cancel found no active prompt to abort) must not be silently
+      // dropped: consume the flag and fail the prompt instead of running.
+      session.cancelled = false
+      return {
+        ok: false,
+        cancelled: true,
+        error: `prompt cancelled before it started for session: ${session.sessionId}`,
+      }
+    }
     const controller = new AbortController()
     const emit = request.emit ?? (() => undefined)
     const active: ActivePrompt = { session, controller, emit }
@@ -181,12 +189,15 @@ export class AcpAgentRunner {
         cancelled: session.cancelled || controller.signal.aborted,
       }
     } finally {
+      // A mid-turn cancellation was honored by aborting this turn; clear the
+      // flag so it does not leak into the next prompt for the session.
+      session.cancelled = false
       subagentCohort?.close()
       this.activePrompts.delete(session.sessionId)
       this.resolveQuestionsForSession(session.sessionId, '')
     }
 
-    summary.cancelled = session.cancelled || controller.signal.aborted
+    summary.cancelled = controller.signal.aborted
     return summary
   }
 

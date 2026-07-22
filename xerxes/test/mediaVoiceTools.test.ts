@@ -9,6 +9,7 @@ import { expect, test } from 'bun:test'
 
 import { ConfigurationError } from '../src/core/errors.js'
 import { ToolRegistry } from '../src/executors/toolRegistry.js'
+import { HttpMediaClient } from '../src/tools/mediaHttp.js'
 import {
   OpenAiCompatibleImageGenerationPort,
   writeGeneratedImage,
@@ -209,6 +210,78 @@ test('voice mode requires an injected recorder and coordinates it with a real tr
   })
   expect(calls).toEqual(['push-to-talk.wav:4'])
   expect(controller.recording).toBe(false)
+})
+
+test('media HTTP client rejects response bodies over the configured byte caps', async () => {
+  const oversized = (bytes: number) => new Response(new Uint8Array(bytes), { status: 200 })
+  const binary = new HttpMediaClient({
+    apiKey: 'key',
+    baseUrl: 'https://media.test/v1',
+    fetchImplementation: async () => oversized(17),
+    maxBinaryResponseBytes: 16,
+    maxJsonResponseBytes: 16,
+  })
+  await expect(binary.postBinary('audio/speech', { input: 'hello' }))
+    .rejects.toThrow('exceeded the 16-byte limit')
+
+  const json = new HttpMediaClient({
+    apiKey: 'key',
+    baseUrl: 'https://media.test/v1',
+    fetchImplementation: async () => jsonResponse({ text: 'x'.repeat(32) }),
+    maxJsonResponseBytes: 16,
+  })
+  await expect(json.postJson('audio/transcriptions', {}))
+    .rejects.toThrow('exceeded the 16-byte limit')
+
+  // A declared content-length over the cap fails before the body is read.
+  // The 4-byte body can never trip the 16-byte streaming cap, so a rejection
+  // here proves the content-length pre-check fired without consuming it.
+  const declared = new HttpMediaClient({
+    apiKey: 'key',
+    baseUrl: 'https://media.test/v1',
+    fetchImplementation: async () =>
+      new Response(new ReadableStream({
+        pull(controller) {
+          controller.enqueue(new Uint8Array(4))
+          controller.close()
+        },
+      }), { status: 200, headers: { 'Content-Length': '64' } }),
+    maxBinaryResponseBytes: 16,
+  })
+  await expect(declared.postBinary('audio/speech', {})).rejects.toThrow('exceeded the 16-byte limit')
+
+  // Bodies within the cap still decode normally.
+  const within = new HttpMediaClient({
+    apiKey: 'key',
+    baseUrl: 'https://media.test/v1',
+    fetchImplementation: async () => oversized(3),
+    maxBinaryResponseBytes: 16,
+  })
+  expect(await within.postBinary('audio/speech', {})).toEqual(new Uint8Array(3))
+  expect(() => new HttpMediaClient({
+    apiKey: 'key',
+    baseUrl: 'https://media.test/v1',
+    maxBinaryResponseBytes: 0,
+  })).toThrow(ConfigurationError)
+})
+
+test('media HTTP client rejects parent-directory segments that escape the API path prefix', async () => {
+  let endpoint = ''
+  const client = new HttpMediaClient({
+    apiKey: 'key',
+    baseUrl: 'https://media.test/v1',
+    fetchImplementation: async input => {
+      endpoint = input.toString()
+      return jsonResponse({ ok: true })
+    },
+  })
+
+  await expect(client.postJson('../admin', {})).rejects.toThrow('parent-directory')
+  await expect(client.postJson('images/../../admin', {})).rejects.toThrow('parent-directory')
+  expect(endpoint).toBe('')
+
+  await client.postJson('images/generations', {})
+  expect(endpoint).toBe('https://media.test/v1/images/generations')
 })
 
 function jsonResponse(value: unknown): Response {

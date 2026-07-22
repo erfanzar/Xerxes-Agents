@@ -79,6 +79,8 @@ export function loadAgentSpec(path: string, options: AgentSpecLoadOptions = {}):
     allowedTools: raw.allowedTools === INHERIT || raw.allowedTools === null ? null : Object.freeze([...raw.allowedTools]),
     excludeTools: Object.freeze(raw.excludeTools === INHERIT || raw.excludeTools === null ? [] : [...raw.excludeTools]),
     subagents: Object.freeze({ ...(raw.subagents === INHERIT ? {} : raw.subagents) }),
+    // Infinity marks "unset": consumers must treat it as absent and fall back
+    // to (never widen) the manager-level depth ceiling.
     maxDepth: raw.maxDepth === INHERIT ? Number.POSITIVE_INFINITY : raw.maxDepth,
     isolation: raw.isolation === INHERIT ? '' : raw.isolation,
     source: 'yaml' as const,

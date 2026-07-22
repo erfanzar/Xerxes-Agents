@@ -71,7 +71,7 @@ function turn(
   })
 }
 
-test('session models, stores, and manager retain the Python persistence lifecycle contracts', () => {
+test('session models, stores, and manager retain the Python persistence lifecycle contracts', async () => {
   const defaults = ToolCallRecord.fromRecord({ call_id: 'call', tool_name: 'search', arguments: {} })
   expect(defaults.status).toBe('success')
   expect(defaults.error).toBeNull()
@@ -111,14 +111,14 @@ test('session models, stores, and manager retain the Python persistence lifecycl
 
   const manager = new SessionManager(memoryStore)
   const session = manager.startSession({ sessionId: 'explicit', workspaceId: 'workspace', agentId: 'agent-a' })
-  manager.recordTurn(session.sessionId, turn('t1'))
-  manager.recordAgentTransition(session.sessionId, new AgentTransitionRecord({
+  await manager.recordTurn(session.sessionId, turn('t1'))
+  await manager.recordAgentTransition(session.sessionId, new AgentTransitionRecord({
     fromAgent: 'agent-a',
     toAgent: 'agent-b',
     turnId: 't1',
     timestamp: '2026-01-01T00:00:05.000Z',
   }))
-  manager.endSession(session.sessionId)
+  await manager.endSession(session.sessionId)
   expect(manager.getSession(session.sessionId)).toMatchObject({
     workspaceId: 'workspace',
     agentId: 'agent-a',
@@ -126,11 +126,11 @@ test('session models, stores, and manager retain the Python persistence lifecycl
   })
   expect(manager.getSession(session.sessionId)?.turns).toHaveLength(1)
   expect(manager.getSession(session.sessionId)?.agentTransitions).toHaveLength(1)
-  expect(() => manager.recordTurn('missing', turn('missing'))).toThrow('Session not found')
-  expect(() => manager.recordAgentTransition('missing', new AgentTransitionRecord({ toAgent: 'agent-b' }))).toThrow(
+  await expect(manager.recordTurn('missing', turn('missing'))).rejects.toThrow('Session not found')
+  await expect(manager.recordAgentTransition('missing', new AgentTransitionRecord({ toAgent: 'agent-b' }))).rejects.toThrow(
     'Session not found',
   )
-  expect(() => manager.endSession('missing')).toThrow('Session not found')
+  await expect(manager.endSession('missing')).rejects.toThrow('Session not found')
 })
 
 test('file sessions retain flat and workspace layouts while applying forward migrations atomically', () => {

@@ -206,11 +206,11 @@ export function useSubmission(opts: UseSubmissionOptions) {
   )
 
   // Honors `display.busy_input_mode` from config.yaml (CLI parity):
+  //   - 'steer'     (default): inject into the current turn via session.steer;
+  //                   falls back to queue when steer is rejected (no agent /
+  //                   no tool window). Never cancels the live turn.
   //   - 'queue'     (legacy): append to queueRef; drains on busy → false
-  //   - 'steer'     : inject into the current turn via session.steer; falls
-  //                   back to queue when steer is rejected (no agent / no
-  //                   tool window).
-  //   - 'interrupt' (default): queue the text + interrupt; the busy→false
+  //   - 'interrupt' (opt-in): queue the text + interrupt; the busy→false
   //                   settle edge drains it once (desktop parity).
   //                   No optimistic send → no duplicate bubble / race note.
   //
