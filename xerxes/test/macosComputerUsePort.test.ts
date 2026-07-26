@@ -83,7 +83,7 @@ test('macOS port reports availability only on darwin with all system tools prese
   expect(makePort(fake, { fileExists: path => !path.includes('sips') }).isAvailable()).toBe(false)
 })
 
-test('capture downscales to logical points capped at the max edge and cleans up', async () => {
+test('capture downscales to logical points capped at the max edge, re-encodes as JPEG, and cleans up', async () => {
   const fake = fakeRunner()
   const removed: string[] = []
   const port = makePort(fake, { removeFile: async path => { removed.push(path) } })
@@ -92,16 +92,25 @@ test('capture downscales to logical points capped at the max edge and cleans up'
   expect(capture.mode).toBe('vision')
   expect(capture.width).toBe(1568)
   expect(capture.height).toBe(1018)
+  expect(capture.mediaType).toBe('image/jpeg')
+  expect(capture.warning).toBeUndefined()
   expect(capture.pngB64).toBe(PNG_B64)
   expect(capture.pngBytesLength).toBe(PNG_BYTES.length)
   expect(capture.elements).toEqual([])
 
-  const [shot, dims, , resize] = fake.calls
+  const [shot, dims, , convert] = fake.calls
   expect(shot?.[0]).toBe('/usr/sbin/screencapture')
   expect(shot).toContain('/tmp/xerxes-cua-test.png')
   expect(dims?.[0]).toBe('/usr/bin/sips')
-  expect(resize).toEqual(['/usr/bin/sips', '-z', '1018', '1568', '/tmp/xerxes-cua-test.png'])
-  expect(removed).toEqual(['/tmp/xerxes-cua-test.png'])
+  expect(convert).toEqual([
+    '/usr/bin/sips',
+    '-s', 'format', 'jpeg',
+    '-s', 'formatOptions', '70',
+    '-z', '1018', '1568',
+    '/tmp/xerxes-cua-test.png',
+    '--out', '/tmp/xerxes-cua-test.jpg',
+  ])
+  expect(removed).toEqual(['/tmp/xerxes-cua-test.png', '/tmp/xerxes-cua-test.jpg'])
 })
 
 test('capture mode ax performs no screenshot work', async () => {

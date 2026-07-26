@@ -2,6 +2,10 @@
 // Licensed under the Apache License, Version 2.0.
 
 import {
+  isScreenshotToolResult,
+  supersedeScreenshotToolResults,
+} from '../context/screenshotSuperseder.js'
+import {
   errorMessage,
   type ToolExecutor,
   type ToolExecutionContext,
@@ -14,7 +18,7 @@ import {
   objectiveGuardRetryLimit,
   type ObjectiveToolExecutionEvidence,
 } from '../runtime/objectiveGuard.js'
-import type { ChatMessage } from '../types/messages.js'
+import type { ChatMessage, MessageContent } from '../types/messages.js'
 import { isJsonObject, type ToolCall, type ToolDefinition } from '../types/toolCalls.js'
 import type {
   AgentState,
@@ -75,7 +79,8 @@ export interface TurnRequest {
   readonly topK?: number
   readonly topP?: number
   readonly tools?: readonly ToolDefinition[]
-  readonly userMessage: string
+  /** Plain text, or a structured part list when the turn carries image attachments. */
+  readonly userMessage: MessageContent
 }
 
 export interface TurnDependencies {
@@ -908,6 +913,12 @@ function appendToolResult(
     name: result.name,
     tool_call_id: result.toolCallId,
   })
+  // A fresh screenshot supersedes every earlier one: screenshots are the
+  // largest payloads that ever enter the transcript, so only the latest
+  // capture stays inline and the rest collapse to compact markers.
+  if (isScreenshotToolResult(result.result)) {
+    supersedeScreenshotToolResults(state.messages)
+  }
   const execution = {
     name: result.name,
     inputs: call.function.arguments,

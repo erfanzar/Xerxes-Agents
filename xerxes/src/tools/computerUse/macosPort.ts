@@ -36,13 +36,24 @@ import {
   KEY_CODES,
   MODIFIER_ALIASES,
 } from './macosScripts.js'
+import { ConfigurationError, ValidationError } from '../../core/errors.js'
 import type { ComputerUseToolsOptions } from './tool.js'
 
 // Vision models are billed per image token and lose click precision on very
 // large screenshots, so captures are capped at a longest edge that current
 // vision models ingest natively. 1568 keeps UI text legible while bounding
-// per-turn token cost.
+// per-turn token cost. Overridable via XERXES_COMPUTER_USE_MAX_EDGE or the
+// computer_use_max_edge runtime setting.
 const DEFAULT_MAX_CAPTURE_EDGE = 1568
+const MIN_CAPTURE_EDGE = 256
+const MAX_CAPTURE_EDGE = 8_192
+// Screenshots are re-encoded as baseline JPEG at a capped quality: a desktop
+// PNG is several times larger than an equivalent JPEG for zero model-visible
+// gain. Overridable via XERXES_COMPUTER_USE_JPEG_QUALITY or the
+// computer_use_jpeg_quality runtime setting.
+const DEFAULT_JPEG_QUALITY = 70
+const MIN_JPEG_QUALITY = 1
+const MAX_JPEG_QUALITY = 100
 // Absolute paths for the three system binaries are pinned so the backend
 // never depends on (or gets hijacked through) the caller's PATH.
 const DEFAULT_SCREENCAPTURE = '/usr/sbin/screencapture'
@@ -79,6 +90,7 @@ export type MacOSCommandRunner = (argv: readonly string[], signal?: AbortSignal)
 
 export interface MacOSComputerUsePortOptions {
   readonly fileExists?: (path: string) => boolean
+  readonly jpegQuality?: number
   readonly maxCaptureEdge?: number
   readonly osascriptPath?: string
   readonly platform?: string
@@ -164,6 +176,7 @@ export class MacOSComputerUsePort implements ComputerUsePort {
   private screenInfoCache: ScreenInfo | undefined
 
   private readonly fileExists: (path: string) => boolean
+  private readonly jpegQuality: number
   private readonly maxCaptureEdge: number
   private readonly osascript: string
   private readonly platform: string
@@ -178,7 +191,8 @@ export class MacOSComputerUsePort implements ComputerUsePort {
 
   constructor(options: MacOSComputerUsePortOptions = {}) {
     this.fileExists = options.fileExists ?? existsSync
-    this.maxCaptureEdge = options.maxCaptureEdge ?? DEFAULT_MAX_CAPTURE_EDGE
+    this.jpegQuality = boundedOption(options.jpegQuality ?? DEFAULT_JPEG_QUALITY, 'jpegQuality', MIN_JPEG_QUALITY, MAX_JPEG_QUALITY)
+    this.maxCaptureEdge = boundedOption(options.maxCaptureEdge ?? DEFAULT_MAX_CAPTURE_EDGE, 'maxCaptureEdge', MIN_CAPTURE_EDGE, MAX_CAPTURE_EDGE)
     this.osascript = options.osascriptPath ?? DEFAULT_OSASCRIPT
     this.platform = options.platform ?? process.platform
     this.readFile = options.readFile ?? defaultReadFile
@@ -207,6 +221,7 @@ export class MacOSComputerUsePort implements ComputerUsePort {
     // Unique temp name per capture so concurrent turns cannot clobber each
     // other's screenshot file.
     const path = join(this.tmpDir, `xerxes-cua-${this.uniqueId()}.png`)
+    const jpegPath = join(this.tmpDir, `xerxes-cua-${this.uniqueId()}.jpg`)
     // Pipeline step 1: grab the raw framebuffer with screencapture (`-x`
     // silences the shutter sound). Requires the Screen Recording
     // permission; on Retina displays the PNG is backingScale times larger
@@ -226,32 +241,55 @@ export class MacOSComputerUsePort implements ComputerUsePort {
       const scale = Math.min(1, this.maxCaptureEdge / Math.max(logicalWidth, logicalHeight))
       const targetWidth = Math.max(1, Math.round(logicalWidth * scale))
       const targetHeight = Math.max(1, Math.round(logicalHeight * scale))
-      // Pipeline step 2: downscale in place with sips. When the target
-      // already equals the raw size (small non-Retina screen) the resize is
-      // skipped to avoid paying a second process spawn for an identity
-      // transform.
-      if (targetWidth !== pixels.width || targetHeight !== pixels.height) {
-        await this.mustRun([this.sips, '-z', String(targetHeight), String(targetWidth), path], signal)
+      // Pipeline step 2: downscale and re-encode as quality-capped JPEG in
+      // one sips pass. A raw Retina PNG is several megabytes of base64; the
+      // JPEG carries the same model-visible detail in a small fraction of
+      // the bytes, which is what keeps screenshot-heavy sessions from
+      // exploding the transcript.
+      let mediaType = 'image/jpeg'
+      let warning: string | undefined
+      let capturePath = jpegPath
+      try {
+        const resize = targetWidth !== pixels.width || targetHeight !== pixels.height
+          ? ['-z', String(targetHeight), String(targetWidth)]
+          : []
+        await this.mustRun(
+          [this.sips, '-s', 'format', 'jpeg', '-s', 'formatOptions', String(this.jpegQuality), ...resize, path, '--out', jpegPath],
+          signal,
+        )
+      } catch (error) {
+        // Honest degradation: if the local re-encode path fails, keep the
+        // original PNG but mark the result so the unbounded size is visible
+        // instead of silently pretending the capture was bounded.
+        mediaType = 'image/png'
+        capturePath = path
+        warning = `screenshot could not be downscaled/recompressed (${errorMessage(error)}); full-size ${pixels.width}x${pixels.height} PNG kept inline`
       }
-      // Pipeline step 3: base64-encode the (now bounded) PNG into the wire
+      // Pipeline step 3: base64-encode the (now bounded) image into the wire
       // format the model consumes.
-      const bytes = await this.readFile(path)
-      // Record the image-px -> logical-point ratio for this exact image so
-      // click coordinates quoted in image pixels land on the right logical
-      // point; see logicalPoint().
-      this.coordinateScale = targetWidth / logicalWidth
+      const bytes = await this.readFile(capturePath)
+      const shownWidth = mediaType === 'image/jpeg' ? targetWidth : pixels.width
+      const shownHeight = mediaType === 'image/jpeg' ? targetHeight : pixels.height
+      // Record the image-px -> logical-point ratio for the exact image the
+      // model was shown (downscaled JPEG, or the raw PNG on the honest
+      // fallback path) so click coordinates quoted in image pixels land on
+      // the right logical point; see logicalPoint().
+      this.coordinateScale = shownWidth / logicalWidth
       return {
         elements: [],
-        height: targetHeight,
+        height: shownHeight,
+        mediaType,
         mode: request.mode,
         pngB64: Buffer.from(bytes).toString('base64'),
         pngBytesLength: bytes.length,
-        width: targetWidth,
+        width: shownWidth,
+        ...(warning === undefined ? {} : { warning }),
       }
     } finally {
       // A screenshot contains the user's screen contents; never leave it on
       // disk past the turn that needed it.
       await this.removeFile(path)
+      await this.removeFile(jpegPath)
     }
   }
 
@@ -572,6 +610,13 @@ function unavailable(action: string, message: string): ActionResult {
   return { action, message, ok: false }
 }
 
+function boundedOption(value: number, name: string, minimum: number, maximum: number): number {
+  if (!Number.isInteger(value) || value < minimum || value > maximum) {
+    throw new ValidationError(name, `must be an integer between ${minimum} and ${maximum}`, value)
+  }
+  return value
+}
+
 // Map macOS's many phrasings of "permission denied" onto a single hint
 // naming the exact System Settings pane. Without this, the model (and the
 // user) would see raw CoreGraphics/osascript errors with no path to a fix.
@@ -598,6 +643,7 @@ export function createMacOSComputerUseToolOptions(
   environment: Readonly<Record<string, string | undefined>> = process.env,
   hostAvailable?: () => boolean,
 ): ComputerUseToolsOptions | undefined {
+  const bounds = resolveComputerUseCaptureBounds(settings, environment)
   const flag = environment['XERXES_COMPUTER_USE']?.trim().toLowerCase()
   // Opt-out wins over everything: a user who said "no desktop control" must
   // never have the tool registered, regardless of host capability or any
@@ -617,5 +663,55 @@ export function createMacOSComputerUseToolOptions(
   // registers even on an unsupported host so calls fail loudly with an
   // unavailability error instead of the tool silently going missing.
   if (!explicitlyEnabled && !available) return undefined
-  return { session: new ComputerUseSession({ port: new MacOSComputerUsePort() }) }
+  return { session: new ComputerUseSession({ port: new MacOSComputerUsePort(bounds) }) }
+}
+
+export interface ComputerUseCaptureBounds {
+  readonly jpegQuality: number
+  readonly maxCaptureEdge: number
+}
+
+/**
+ * Resolve screenshot bounding knobs from runtime settings and environment.
+ *
+ * Environment variables win over settings, matching the XERXES_COMPUTER_USE
+ * flag precedence. Invalid values are a typed configuration failure, never a
+ * silently ignored knob: a mistyped bound would otherwise re-admit
+ * unbounded screenshots into the transcript.
+ */
+export function resolveComputerUseCaptureBounds(
+  settings: Readonly<Record<string, unknown>>,
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+): ComputerUseCaptureBounds {
+  return {
+    jpegQuality: boundedConfig(
+      environment['XERXES_COMPUTER_USE_JPEG_QUALITY'] ?? settings['computer_use_jpeg_quality'],
+      DEFAULT_JPEG_QUALITY,
+      'computer_use_jpeg_quality',
+      MIN_JPEG_QUALITY,
+      MAX_JPEG_QUALITY,
+    ),
+    maxCaptureEdge: boundedConfig(
+      environment['XERXES_COMPUTER_USE_MAX_EDGE'] ?? settings['computer_use_max_edge'],
+      DEFAULT_MAX_CAPTURE_EDGE,
+      'computer_use_max_edge',
+      MIN_CAPTURE_EDGE,
+      MAX_CAPTURE_EDGE,
+    ),
+  }
+}
+
+function boundedConfig(
+  raw: unknown,
+  fallback: number,
+  key: string,
+  minimum: number,
+  maximum: number,
+): number {
+  if (raw === undefined || raw === null || raw === '') return fallback
+  const value = typeof raw === 'number' ? raw : Number(String(raw).trim())
+  if (!Number.isInteger(value) || value < minimum || value > maximum) {
+    throw new ConfigurationError(key, `must be an integer between ${minimum} and ${maximum}; got ${JSON.stringify(raw)}`)
+  }
+  return value
 }
