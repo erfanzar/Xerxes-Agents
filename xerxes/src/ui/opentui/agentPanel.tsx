@@ -379,8 +379,12 @@ export function AgentPanelOverlay({ history, liveAgents, onClose, t }: AgentPane
   const scrollRef = useRef<ScrollBoxRenderable | null>(null)
   const { height, width } = useTerminalDimensions()
   const gateway = useOptionalGateway()
-  const page = Math.max(4, height - 10)
-  const panelHeight = Math.max(1, height - 2)
+  // Preferred vertical breathing room for the overlay (user request: 30 rows
+  // top and bottom). On short terminals the margin shrinks toward the old 1-2
+  // rows so the panel keeps ~20 usable rows instead of collapsing.
+  const marginY = Math.min(30, Math.max(1, Math.floor((height - 20) / 2)))
+  const panelHeight = Math.max(1, height - marginY * 2)
+  const page = Math.max(4, panelHeight - 8)
   const panelWidth = Math.max(1, Math.min(96, width - 2))
   const records = useMemo(() => collectAgentPanelRecords(liveAgents, history), [history, liveAgents])
   const [selectedId, setSelectedId] = useState<null | string>(null)
