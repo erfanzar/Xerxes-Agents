@@ -5,6 +5,7 @@ import type { TranscriptRow } from '../app/gatewayState.js'
 import type { Msg } from '../types.js'
 
 import { transcriptBodyWidth } from './inputMetrics.js'
+import { stringWidth } from './terminalRuntime.opentui.js'
 
 const hashText = (text: string) => {
   let h = 5381
@@ -46,17 +47,22 @@ const MAX_ESTIMATE_LINES = 800
 
 export const wrappedLines = (text: string, width: number, maxLines: number = MAX_ESTIMATE_LINES) => {
   const w = Math.max(1, width)
-  // Worst case: every cell is its own row at width=1, plus a small
-  // slack for the trailing partial line. Walking past this byte budget
-  // cannot increase n any further once n is already past maxLines, so
-  // bail. Saves O(text) walks on multi-megabyte single-line messages.
-  const budget = Math.min(text.length, maxLines * w + maxLines)
+  // Worst case: every walked cell is its own row at width=1, and each
+  // UTF-16 unit occupies at least half a display cell (zero-width runs
+  // aside), so walking past this budget cannot increase n any further
+  // once n is already past maxLines — bail. Saves O(text) walks on
+  // multi-megabyte single-line messages.
+  const budget = Math.min(text.length, maxLines * w * 2 + maxLines)
   let n = 0
   let start = 0
 
   for (let i = 0; i <= budget; i++) {
     if (i === text.length || i === budget || text.charCodeAt(i) === 10) {
-      const rows = Math.max(1, Math.ceil((i - start) / w))
+      // Display cells, not UTF-16 units: CJK ideographs and emoji are
+      // 2 cells each, and the renderer word-wraps on cells. Counting
+      // units under-estimated CJK rows by 2×, which drifted the virtual
+      // transcript's offset math away from the Yoga-measured heights.
+      const rows = Math.max(1, Math.ceil(stringWidth(text.slice(start, i)) / w))
       n += rows >= maxLines - n ? maxLines - n : rows
       start = i + 1
 
@@ -99,6 +105,7 @@ export const estimatedMsgHeight = (
     compact,
     details,
     leadGap = false,
+    thinkingExpanded = false,
     thinkingVisible = details,
     toolsVisible = details,
     userPrompt = '',
@@ -108,6 +115,7 @@ export const estimatedMsgHeight = (
     details: boolean
     leadGap?: boolean
     subagentsVisible?: boolean
+    thinkingExpanded?: boolean
     thinkingVisible?: boolean
     toolsVisible?: boolean
     userPrompt?: string
@@ -149,9 +157,12 @@ export const estimatedMsgHeight = (
     const hasVisibleDetails = hasVisibleTools || hasVisibleThinking
 
     if (hasVisibleDetails) {
+      // Thinking renders collapsed by default: a single `▸ thinking` header
+      // row. Only a per-row toggle (or the global Ctrl+T) expands it to the
+      // full wrapped trace — mirror that so virtual offsets track the paint.
       h +=
         (hasVisibleTools ? (msg.tools?.length ?? 0) : 0) +
-        (hasVisibleThinking ? wrappedLines(msg.thinking ?? '', bodyWidth) : 0)
+        (hasVisibleThinking ? 1 + (thinkingExpanded ? wrappedLines(msg.thinking ?? '', bodyWidth) : 0) : 0)
 
       if (msg.role === 'assistant' && /\S/.test(msg.text)) {
         h += 2

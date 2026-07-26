@@ -9,9 +9,10 @@ export const SECTION_NAMES = ['thinking', 'tools', 'subagents', 'activity'] as c
 // Out-of-the-box per-section defaults — applied when the user hasn't pinned
 // an explicit override and layered ABOVE the global details_mode:
 //
-//   - thinking / tools: expanded — stream open so the turn reads like a
-//     live transcript (reasoning + tool calls side by side) instead of a
-//     wall of chevrons the user has to click every turn.
+//   - thinking / tools: expanded (visible) — thinking renders as a
+//     collapsed one-line `▸ thinking` indicator per block (Ctrl+T or a
+//     click on the header unfolds it); tool steps stay open so the turn
+//     reads like a live transcript.
 //   - activity: hidden — ambient meta (gateway hints, terminal-parity
 //     nudges, background notifications) is noise for typical use.  Tool
 //     failures still render inline on the failing tool row, and ambient

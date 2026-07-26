@@ -5,6 +5,7 @@ import { testRender } from '@opentui/react/test-utils'
 import { act, useState } from 'react'
 import { afterEach, describe, expect, it } from 'vitest'
 
+import { resetThinkingVisibility, toggleAllThinking } from '../app/thinkingVisibilityStore.js'
 import { patchUiState, resetUiState } from '../app/uiStore.js'
 import { buildToolTrailLine } from '../lib/text.js'
 import { MessageLine } from '../opentui/messageLine.js'
@@ -13,10 +14,16 @@ import { DEFAULT_THEME, themeForMode } from '../theme.js'
 const theme = themeForMode(DEFAULT_THEME, 'code')
 
 describe('OpenTUI message lifecycle', () => {
-  afterEach(resetUiState)
+  afterEach(() => {
+    resetUiState()
+    resetThinkingVisibility()
+  })
 
   it('keeps chronological thinking/tool phases while native markdown updates in place', async () => {
     let finishMarkdown = () => {}
+
+    // Thinking is collapsed by default; expand all so the phases render.
+    toggleAllThinking()
 
     function Harness() {
       const [markdown, setMarkdown] = useState('# Partial heading')
@@ -135,9 +142,19 @@ describe('OpenTUI message lifecycle', () => {
       await setup.flush()
       const expanded = setup.captureCharFrame()
 
-      expect(expanded).toContain('private reasoning detail')
+      // The section gate reveals the collapsed thinking header; the trace
+      // itself stays folded until the user toggles it.
+      expect(expanded).toContain('▸ thinking')
+      expect(expanded).not.toContain('private reasoning detail')
       expect(expanded).toContain('Read File src/hidden.ts')
       expect(expanded).not.toContain('hidden agent detail')
+
+      act(() => toggleAllThinking())
+      await setup.flush()
+      const unfolded = setup.captureCharFrame()
+
+      expect(unfolded).toContain('private reasoning detail')
+      expect(unfolded).toContain('▾ thinking')
     } finally {
       act(() => setup.renderer.destroy())
     }
