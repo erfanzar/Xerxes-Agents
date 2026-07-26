@@ -192,13 +192,17 @@ export function formatCaptureResult(capture: CaptureResult, maxElements = DEFAUL
     lines.push('')
     lines.push('No interactable elements detected.')
   }
+  if (capture.warning) {
+    lines.push('')
+    lines.push('Warning: ' + capture.warning)
+  }
   const textSummary = lines.join('\n')
   if (capture.pngB64 === undefined) return { result: textSummary }
   return {
     _multimodal: true,
     content: [
       { type: 'text', text: textSummary },
-      { type: 'image_url', image_url: { url: 'data:image/png;base64,' + capture.pngB64 } },
+      { type: 'image_url', image_url: { url: 'data:' + (capture.mediaType ?? 'image/png') + ';base64,' + capture.pngB64 } },
     ],
     text_summary: textSummary,
   }

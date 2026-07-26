@@ -1,12 +1,16 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { Buffer } from 'node:buffer'
+
 import { ClientError, ConfigurationError } from '../../core/errors.js'
+import { sniffImageMediaType } from '../../core/multimodal.js'
 import type { JsonObject, JsonValue } from '../../types/toolCalls.js'
 
 const MAX_CAPTURE_DIMENSION = 100_000
 const MAX_CAPTURE_ELEMENTS = 10_000
 const MAX_PNG_BASE64_CHARACTERS = 32 * 1024 * 1024
+const SUPPORTED_CAPTURE_MEDIA_TYPES = ['image/gif', 'image/jpeg', 'image/png', 'image/webp'] as const
 
 export type ComputerCaptureMode = 'ax' | 'som' | 'vision'
 export type ComputerMouseButton = 'left' | 'middle' | 'right'
@@ -28,9 +32,20 @@ export interface CaptureResult {
   readonly app?: string
   readonly elements?: readonly UIElement[]
   readonly height: number
+  /**
+   * Image media type of pngB64 (png/jpeg/gif/webp). Backends that recompress
+   * screenshots (e.g. JPEG) declare it here so the data URL is honest.
+   */
+  readonly mediaType?: string
   readonly mode: ComputerCaptureMode
   readonly pngB64?: string
   readonly pngBytesLength?: number
+  /**
+   * Honesty marker set when a capture could not be bounded (no downscale
+   * path on the backend). Surfaced to the model instead of silently
+   * pretending the screenshot is small.
+   */
+  readonly warning?: string
   readonly width: number
   readonly windowTitle?: string
 }
@@ -345,20 +360,24 @@ export function normalizeCaptureResult(source: CaptureResult): CaptureResult {
   if (pngBytesLength !== undefined && pngBytesLength > MAX_PNG_BASE64_CHARACTERS) {
     throw new ClientError('computer_use', 'ComputerUsePort returned an oversized screenshot byte length')
   }
+  const mediaType = pngB64 === undefined ? undefined : captureMediaType(source.mediaType, pngB64)
   const elements = source.elements === undefined
     ? []
     : normalizeElements(source.elements)
   const app = source.app === undefined ? undefined : portString(source.app, 'capture app')
   const windowTitle = source.windowTitle === undefined ? undefined : portString(source.windowTitle, 'capture window title')
+  const warning = source.warning === undefined ? undefined : portString(source.warning, 'capture warning')
   return Object.freeze({
     mode,
     width: captureDimension(source.width, 'capture width'),
     height: captureDimension(source.height, 'capture height'),
     ...(pngB64 === undefined ? {} : { pngB64 }),
     ...(pngBytesLength === undefined ? {} : { pngBytesLength }),
+    ...(mediaType === undefined ? {} : { mediaType }),
     elements: Object.freeze(elements),
     ...(app === undefined ? {} : { app }),
     ...(windowTitle === undefined ? {} : { windowTitle }),
+    ...(warning === undefined ? {} : { warning }),
   })
 }
 
@@ -494,6 +513,40 @@ function pngBase64(value: unknown): string {
     throw new ClientError('computer_use', 'ComputerUsePort returned invalid or oversized PNG base64 data')
   }
   return base64
+}
+
+/**
+ * Resolve the declared/screenshot media type, rejecting non-image payloads.
+ *
+ * Only the first bytes are decoded for the sniff (the base64 may be tens of
+ * megabytes); a payload whose magic bytes are not a real image is a typed
+ * boundary failure, never a silently-passed blob.
+ */
+function captureMediaType(declared: unknown, base64: string): string {
+  const declaredType = declared === undefined
+    ? undefined
+    : portString(declared, 'capture media type').toLowerCase()
+  if (declaredType !== undefined && !(SUPPORTED_CAPTURE_MEDIA_TYPES as readonly string[]).includes(declaredType)) {
+    throw new ClientError('computer_use', 'ComputerUsePort returned an unsupported capture media type')
+  }
+  const sniffed = sniffCaptureImageType(base64)
+  if (sniffed === undefined) {
+    throw new ClientError('computer_use', 'ComputerUsePort returned screenshot bytes that are not a recognized image format')
+  }
+  if (declaredType !== undefined && declaredType !== sniffed) {
+    throw new ClientError('computer_use', 'ComputerUsePort capture media type does not match the screenshot bytes')
+  }
+  return declaredType ?? sniffed
+}
+
+function sniffCaptureImageType(base64: string): string | undefined {
+  try {
+    // 32 base64 characters decode to 24 bytes, enough for every supported
+    // magic header (PNG 8, JPEG 3, GIF 6, WEBP 12).
+    return sniffImageMediaType(new Uint8Array(Buffer.from(base64.slice(0, 32), 'base64')))
+  } catch {
+    return undefined
+  }
 }
 
 function jsonObject(value: unknown, label: string): JsonObject {

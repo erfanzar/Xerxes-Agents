@@ -44,7 +44,7 @@ test('computer_use delegates every privileged action only through the injected p
   expect(capture._multimodal).toBe(true)
   expect(capture.text_summary).toContain('Screen capture: 1280x720')
   expect(capture.text_summary).toContain('Elements (1 shown+):')
-  expect(JSON.stringify(capture)).toContain('data:image/png;base64,UE5H')
+  expect(JSON.stringify(capture)).toContain('data:image/png;base64,iVBORw0KGgo=')
 
   const action = await execute(registry, {
     action: 'click',
@@ -399,7 +399,7 @@ function capture(): CaptureResult {
     mode: 'som',
     width: 1280,
     height: 720,
-    pngB64: 'UE5H',
+    pngB64: 'iVBORw0KGgo=',
     elements: [
       { index: 1, role: 'AXTextField', label: 'Search' },
       { index: 2, role: 'AXButton', label: 'Submit' },
@@ -418,6 +418,9 @@ function result(action: string, message: string, captureAfter = false): ActionRe
 
 function png640x480(): string {
   const bytes = Buffer.alloc(24)
+  // Real PNG magic header followed by a synthetic IHDR-sized block carrying
+  // the dimensions the parser under test reads.
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(bytes, 0)
   bytes.writeUInt32BE(640, 16)
   bytes.writeUInt32BE(480, 20)
   return bytes.toString('base64')

@@ -28,6 +28,12 @@ const CUA_DRIVER_INSTALL_HINT = [
   'The Bun runtime never downloads or auto-installs desktop automation software.',
 ].join(' ')
 
+// The MCP driver boundary has no local image pipeline, so driver captures
+// arrive at whatever size the driver produced. Past this decoded-byte
+// threshold the result is marked with an honest size warning instead of
+// silently admitting an unbounded screenshot into the transcript.
+const UNDOWNSCALED_CAPTURE_WARNING_BYTES = 1_000_000
+
 const WINDOW_LINE = /^-\s+(.+?)\s+\(pid\s+(\d+)\)\s+.*\[window_id:\s+(\d+)\]/gm
 const ELEMENT_LINE = /^\s*(?:-\s+)?\[(\d+)\]\s+(\w+)(?:\s+"([^"]*)"|(?:\s+\(\d+\))?\s+id=([^\s\[\]]*))?/gm
 
@@ -126,11 +132,15 @@ export class CuaBackend implements ComputerUseBackend {
     const result = await this.call('capture', arguments_, signal)
     const pngB64 = firstPng(result)
     const dimensions = pngB64 === undefined ? { width: 0, height: 0 } : pngDimensions(pngB64)
+    const byteLength = pngB64 === undefined ? 0 : decodedLength(pngB64)
     return {
       mode: request.mode,
       width: dimensions.width,
       height: dimensions.height,
-      ...(pngB64 === undefined ? {} : { pngB64, pngBytesLength: decodedLength(pngB64) }),
+      ...(pngB64 === undefined ? {} : { pngB64, pngBytesLength: byteLength }),
+      ...(byteLength > UNDOWNSCALED_CAPTURE_WARNING_BYTES
+        ? { warning: `screenshot is ${byteLength} bytes and was not downscaled; this backend has no local image pipeline, so large captures enter the transcript at full size` }
+        : {}),
       elements: parseCuaElements(textFromResult(result)),
     }
   }
