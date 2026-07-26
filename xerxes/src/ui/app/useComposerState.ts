@@ -26,6 +26,44 @@ import { getUiState } from './uiStore.js'
 const PASTE_SNIP_MAX_COUNT = 32
 const PASTE_SNIP_MAX_TOTAL_BYTES = 4 * 1024 * 1024
 
+/**
+ * Read clipboard text for a paste hotkey, preferring OSC52 on remote shells.
+ *
+ * Returns usable text or null. Text strictly wins: the caller only falls back
+ * to a clipboard-image attach when this returns null, so a text-carrying
+ * clipboard never triggers the image path. Readers are injectable for tests.
+ */
+export async function readHotkeyClipboardText(
+  querier: Parameters<typeof readOsc52Clipboard>[0],
+  env: NodeJS.ProcessEnv = process.env,
+  readText: typeof readClipboardText = readClipboardText,
+  readOsc52: typeof readOsc52Clipboard = readOsc52Clipboard
+): Promise<null | string> {
+  const preferOsc52 = isRemoteShellSession(env)
+
+  if (preferOsc52) {
+    const osc52Text = await readOsc52(querier)
+
+    if (isUsableClipboardText(osc52Text)) {
+      return osc52Text
+    }
+
+    const text = await readText()
+
+    return isUsableClipboardText(text) ? text : null
+  }
+
+  const text = await readText()
+
+  if (isUsableClipboardText(text)) {
+    return text
+  }
+
+  const osc52Text = await readOsc52(querier)
+
+  return isUsableClipboardText(osc52Text) ? osc52Text : null
+}
+
 const trimSnips = (snips: PasteSnippet[]): PasteSnippet[] => {
   let total = 0
   const out: PasteSnippet[] = []
@@ -194,25 +232,7 @@ export function useComposerState({
       value
     }: PasteEvent): MaybePromise<null | { cursor: number; value: string }> => {
       if (hotkey) {
-        const preferOsc52 = isRemoteShellSession(process.env)
-
-        const readPreferredText = preferOsc52
-          ? readOsc52Clipboard(querier).then(async osc52Text => {
-              if (isUsableClipboardText(osc52Text)) {
-                return osc52Text
-              }
-
-              return readClipboardText()
-            })
-          : readClipboardText().then(async clipText => {
-              if (isUsableClipboardText(clipText)) {
-                return clipText
-              }
-
-              return readOsc52Clipboard(querier)
-            })
-
-        return readPreferredText.then(async preferredText => {
+        return readHotkeyClipboardText(querier).then(async preferredText => {
           if (isUsableClipboardText(preferredText)) {
             return handleResolvedPaste({ bracketed: false, cursor, text: preferredText, value })
           }

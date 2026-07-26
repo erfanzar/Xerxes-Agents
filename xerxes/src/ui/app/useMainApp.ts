@@ -43,6 +43,7 @@ import { buildToolTrailLine, formatAbandonedClarify, sameToolTrailGroup, toolTra
 import { estimatedMsgHeight, messageHeightKey } from '../lib/virtualHeights.js'
 import type { Msg, PanelSection, SlashCatalog } from '../types.js'
 
+import { attachClipboardImage } from './clipboardPaste.js'
 import { createGatewayEventHandler } from './createGatewayEventHandler.js'
 import { createSlashHandler } from './createSlashHandler.js'
 import { planGatewayRecovery } from './gatewayRecovery.js'
@@ -721,13 +722,16 @@ export function useMainApp(gw: GatewayClient) {
 
   const paste = useCallback(
     (quiet = false) => {
-      if (!quiet) {
-        sys(
-          'clipboard image attachment is unavailable in the native Bun daemon; paste text or provide a file path in your prompt.'
-        )
-      }
+      void attachClipboardImage({ sessionId: ui.sid }).then(outcome => {
+        // Success is always confirmed; failure details stay quiet for the
+        // bracketed-paste fallback (the terminal may simply have delivered
+        // nothing) and surface for explicit Cmd+V / /paste invocations.
+        if (outcome.attached || !quiet) {
+          sys(outcome.message)
+        }
+      })
     },
-    [sys]
+    [sys, ui.sid]
   )
 
   clipboardPasteRef.current = paste
