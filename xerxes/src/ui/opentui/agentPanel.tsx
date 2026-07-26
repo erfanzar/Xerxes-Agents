@@ -4,10 +4,12 @@
 
 import type { KeyEvent, ScrollBoxRenderable } from '@opentui/core'
 import { useKeyboard, useTerminalDimensions } from '@opentui/react'
-import { type MutableRefObject, memo, useMemo, useRef } from 'react'
+import { type MutableRefObject, memo, useMemo, useRef, useState } from 'react'
 
+import { useOptionalGateway } from '../app/gatewayContext.js'
 import type { SpawnSnapshot } from '../app/spawnHistoryStore.js'
 export { AGENT_SIDEBAR_BREAKPOINT, shouldShowAgentSidebar } from '../domain/agentPanelLayout.js'
+import { retrySubagent, subagentFailed, subagentRetryable } from '../lib/agentRetry.js'
 import { subagentElapsedSeconds } from '../lib/subagentElapsed.js'
 import { fmtDuration, fmtTokens } from '../lib/subagentTree.js'
 import type { Theme } from '../theme.js'
@@ -37,6 +39,12 @@ export interface AgentPanelRecord {
 interface AgentPanelProps {
   history: readonly SpawnSnapshot[]
   liveAgents: readonly SubagentProgress[]
+  /** Show retry affordances; false when no daemon gateway is connected. */
+  retryEnabled?: boolean
+  /** Per-agent retry feedback keyed by agent id. */
+  retryNotes?: ReadonlyMap<string, string>
+  /** Keyboard-selected agent id (overlay only). */
+  selectedId?: null | string
   t: Theme
   variant: 'overlay' | 'sidebar'
 }
@@ -165,7 +173,17 @@ function metricLine(item: SubagentProgress, now: number): string {
   return parts.join(' · ')
 }
 
-function AgentCardView({ record, t }: { record: AgentPanelRecord; t: Theme }) {
+function AgentCardView({
+  record,
+  retryNote,
+  selected,
+  t
+}: {
+  record: AgentPanelRecord
+  retryNote?: string
+  selected?: boolean
+  t: Theme
+}) {
   const { item } = record
   const now = Date.now()
   const status = statusPresentation(item.status, t)
@@ -180,7 +198,7 @@ function AgentCardView({ record, t }: { record: AgentPanelRecord; t: Theme }) {
 
   return (
     <Box
-      backgroundColor={t.color.completionCurrentBg}
+      backgroundColor={selected ? t.color.selectionBg : t.color.completionCurrentBg}
       flexDirection="row"
       flexShrink={0}
       marginBottom={1}
@@ -188,7 +206,7 @@ function AgentCardView({ record, t }: { record: AgentPanelRecord; t: Theme }) {
       paddingRight={1}
       paddingY={1}
     >
-      <Box backgroundColor={status.color} flexShrink={0} width={1} />
+      <Box backgroundColor={selected ? t.color.accent : status.color} flexShrink={0} width={1} />
       <Box flexDirection="column" flexGrow={1} flexShrink={1} paddingLeft={1}>
         <Text color={t.color.text} wrap="truncate-end">
           <Span color={status.color}>{status.glyph} </Span>
@@ -225,6 +243,15 @@ function AgentCardView({ record, t }: { record: AgentPanelRecord; t: Theme }) {
             history · {record.snapshotLabel}
           </Text>
         ) : null}
+        {retryNote ? (
+          <Text color={retryNote.startsWith('↻') ? t.color.accent : t.color.error} wrap="truncate-end">
+            {compactLine(retryNote, 140)}
+          </Text>
+        ) : selected && subagentRetryable(item.status) ? (
+          <Text color={t.color.accent} dimColor wrap="truncate-end">
+            {subagentFailed(item.status) ? '↻ press r to retry this agent' : '↻ press r to run this agent again'}
+          </Text>
+        ) : null}
       </Box>
     </Box>
   )
@@ -234,6 +261,8 @@ const AgentCard = memo(
   AgentCardView,
   (previous, next) =>
     previous.t === next.t &&
+    previous.retryNote === next.retryNote &&
+    previous.selected === next.selected &&
     previous.record.item === next.record.item &&
     previous.record.archived === next.record.archived &&
     previous.record.childCount === next.record.childCount &&
@@ -245,7 +274,10 @@ const AgentCard = memo(
 function AgentPanelBody({
   history,
   liveAgents,
+  retryEnabled,
+  retryNotes,
   scrollRef,
+  selectedId,
   t,
   variant
 }: AgentPanelProps & {
@@ -255,6 +287,12 @@ function AgentPanelBody({
   const activeCount = records.filter(
     record => record.item.status === 'running' || record.item.status === 'queued'
   ).length
+  const footer =
+    variant === 'overlay'
+      ? retryEnabled
+        ? '←→ select · r retry dead agent · ↑↓ scroll · F6/Esc close'
+        : '↑↓ scroll · PgUp/PgDn · F6/Esc close'
+      : 'F6 expand · /agents'
 
   return (
     <Box
@@ -283,7 +321,13 @@ function AgentPanelBody({
         <Box flexDirection="column" flexShrink={0}>
           {records.length ? (
             records.map(record => (
-              <AgentCard key={`${record.archived ? 'past' : 'live'}:${record.item.id}`} record={record} t={t} />
+              <AgentCard
+                key={`${record.archived ? 'past' : 'live'}:${record.item.id}`}
+                record={record}
+                {...(retryNotes?.get(record.item.id) ? { retryNote: retryNotes.get(record.item.id) } : {})}
+                selected={record.item.id === selectedId}
+                t={t}
+              />
             ))
           ) : (
             <Box alignItems="center" flexDirection="column" flexGrow={1} justifyContent="center" minHeight={5}>
@@ -296,7 +340,7 @@ function AgentPanelBody({
         </Box>
       </scrollbox>
       <Text color={t.color.muted} dimColor>
-        {variant === 'overlay' ? '↑↓ scroll · PgUp/PgDn · F6/Esc close' : 'F6 expand · /agents'}
+        {footer}
       </Text>
     </Box>
   )
@@ -334,13 +378,82 @@ export function AgentPanelHotkey({
 export function AgentPanelOverlay({ history, liveAgents, onClose, t }: AgentPanelOverlayProps) {
   const scrollRef = useRef<ScrollBoxRenderable | null>(null)
   const { height, width } = useTerminalDimensions()
+  const gateway = useOptionalGateway()
   const page = Math.max(4, height - 10)
   const panelHeight = Math.max(1, height - 2)
   const panelWidth = Math.max(1, Math.min(96, width - 2))
+  const records = useMemo(() => collectAgentPanelRecords(liveAgents, history), [history, liveAgents])
+  const [selectedId, setSelectedId] = useState<null | string>(null)
+  const [retryNotes, setRetryNotes] = useState<ReadonlyMap<string, string>>(new Map())
+  const pendingRetries = useRef(new Set<string>())
+
+  // Default the selection to the first retryable (dead) agent — the rows a
+  // user most likely opened the overlay to act on — else the first row.
+  const selectedRecord = useMemo(() => {
+    if (!records.length) return undefined
+    const explicit = selectedId ? records.find(record => record.item.id === selectedId) : undefined
+    return explicit ?? records.find(record => subagentFailed(record.item.status)) ?? records[0]
+  }, [records, selectedId])
+
+  const setRetryNote = (id: string, note: string) => {
+    setRetryNotes(previous => {
+      const next = new Map(previous)
+      next.set(id, note)
+      return next
+    })
+  }
+
+  const moveSelection = (delta: number) => {
+    if (!records.length) return
+    const currentIndex = selectedRecord ? records.indexOf(selectedRecord) : 0
+    const nextIndex = Math.min(records.length - 1, Math.max(0, currentIndex + delta))
+    const next = records[nextIndex]
+    if (next) setSelectedId(next.item.id)
+  }
+
+  const retrySelected = () => {
+    const record = selectedRecord
+    if (!record) return
+    const item = record.item
+    if (!gateway) {
+      setRetryNote(item.id, 'retry unavailable: not connected to the daemon')
+      return
+    }
+    if (!subagentRetryable(item.status)) {
+      setRetryNote(item.id, `cannot retry: agent is still ${item.status} — wait or stop it first`)
+      return
+    }
+    // One in-flight retry per agent; the daemon additionally deduplicates a
+    // retry of an already-running task, so a double-press never double-spawns.
+    if (pendingRetries.current.has(item.id)) return
+    pendingRetries.current.add(item.id)
+    setRetryNote(item.id, '↻ retry requested — resuming agent with its prior conversation…')
+    retrySubagent(gateway.rpc, item.name?.trim() || item.id)
+      .then(response => {
+        if (response.ok === false) {
+          setRetryNote(item.id, `retry failed: ${response.error?.trim() || 'the daemon rejected the retry'}`)
+          return
+        }
+        const status = response.agent?.status?.trim() || 'running'
+        setRetryNote(item.id, `↻ retry accepted — same agent resumed (${status}); watch for live progress`)
+      })
+      .catch((error: unknown) => {
+        setRetryNote(item.id, `retry failed: ${error instanceof Error && error.message ? error.message : 'request failed'}`)
+      })
+      .finally(() => {
+        pendingRetries.current.delete(item.id)
+      })
+  }
 
   useKeyboard(event => {
     if (event.name === 'escape' || event.name === 'f6' || event.sequence === 'q') {
       onClose()
+    } else if (event.name === 'left') {
+      moveSelection(-1)
+    } else if (event.name === 'right') {
+      moveSelection(1)
+    } else if (event.sequence === 'r') {
+      retrySelected()
     } else if (event.name === 'up') {
       scrollRef.current?.scrollBy(-1)
     } else if (event.name === 'down') {
@@ -374,7 +487,16 @@ export function AgentPanelOverlay({ history, liveAgents, onClose, t }: AgentPane
       zIndex={180}
     >
       <Box flexDirection="column" height={panelHeight} maxWidth={96} minWidth={panelWidth} width={panelWidth}>
-        <AgentPanelBody history={history} liveAgents={liveAgents} scrollRef={scrollRef} t={t} variant="overlay" />
+        <AgentPanelBody
+          history={history}
+          liveAgents={liveAgents}
+          retryEnabled={Boolean(gateway)}
+          retryNotes={retryNotes}
+          scrollRef={scrollRef}
+          selectedId={selectedRecord?.item.id ?? null}
+          t={t}
+          variant="overlay"
+        />
       </Box>
     </box>
   )

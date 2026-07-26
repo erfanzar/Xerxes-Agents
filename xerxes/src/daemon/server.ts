@@ -95,6 +95,7 @@ import { MCPManager } from "../mcp/manager.js";
 import { BrowserManager } from "../operators/browser.js";
 import { SnapshotManager, type SnapshotRecord } from "../session/snapshots.js";
 import { processAtMentions } from "./atMentions.js";
+import { validateTurnImages, type TurnImage } from "./images.js";
 import { DaemonInteractionBoard } from "./interactions.js";
 import {
   discoverModelCatalog,
@@ -1050,6 +1051,14 @@ export class DaemonServer {
       if (!text) {
         return { ok: false, error: "text is required" };
       }
+      // Optional v35-compatible image attachments. Validation failures reject
+      // the submit outright instead of silently dropping or truncating data.
+      let images: readonly TurnImage[];
+      try {
+        images = validateTurnImages(params.images);
+      } catch (error) {
+        return { ok: false, error: errorMessage(error) };
+      }
       const session = this.runtime.sessionStatus(key);
       requireConfiguredModel(
         session?.model || stringValue(this.runtime.status().model),
@@ -1063,7 +1072,7 @@ export class DaemonServer {
         text,
         (event) => this.emit(connection, event.type, event.payload),
         connection,
-        { displayText },
+        { displayText, ...(images.length ? { images } : {}) },
       ).catch((error) =>
         this.emit(connection, "notification", {
           level: "error",
@@ -1077,6 +1086,30 @@ export class DaemonServer {
     }
     if (method === "cancel_all") {
       return { ok: true, cancelled: this.runtime.cancelAllTurns() };
+    }
+    if (method === "subagent.retry") {
+      const task =
+        optionalString(params.task) ??
+        optionalString(params.agent) ??
+        optionalString(params.name);
+      if (!task) {
+        return {
+          ok: false,
+          error: "subagent.retry requires a task id or stable name",
+        };
+      }
+      if (!this.runtime.retrySubagent) {
+        return {
+          ok: false,
+          error: "subagent retry is not available on this daemon runtime",
+        };
+      }
+      const message = optionalString(params.message);
+      return this.runtime.retrySubagent({
+        sessionKey: sessionKey(connection, params),
+        task,
+        ...(message ? { message } : {}),
+      });
     }
     if (method === "turn.steer" || method === "steer") {
       const content =
