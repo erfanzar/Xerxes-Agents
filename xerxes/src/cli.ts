@@ -811,11 +811,12 @@ function daemonRuntime(
       subagentHost?.cancelSource(sessionId);
       memoryToolContext.prune(sessionId);
     },
-    onSessionModeChange: (sessionId, mode) => {
-      if (mode === "plan" || mode === "researcher") {
-        subagentHost?.cancelSource(sessionId);
-      }
-    },
+    // An interaction-mode change (set_mode / set_plan_mode /
+    // SetInteractionModeTool) must never cancel this session's running
+    // subagents: mode only re-scopes the parent turn's next tool surface,
+    // while delegated children keep the permission ceiling they were
+    // spawned with. Children are reclaimed only when their owning session
+    // is evicted (above) or the daemon shuts down.
     turnRunnerFactory: runnerFactory,
     ...(interactions ? { interactions } : {}),
   });

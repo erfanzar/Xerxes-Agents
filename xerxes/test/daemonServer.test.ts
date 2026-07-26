@@ -2884,6 +2884,173 @@ test("daemon applies queued steering at a native runner boundary", async () => {
   }
 });
 
+test("mid-turn steer and mode changes never cancel the active turn", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-steer-mode-"));
+  const socketPath = join(directory, "daemon.sock");
+  const modeChanges: Array<{ id: string; mode: string }> = [];
+  const runner = new SteerRunner();
+  const server = new DaemonServer({
+    socketPath,
+    runtime: new InMemoryDaemonRuntime(runner, {
+      currentProjectDirectory: directory,
+      model: "steer-model",
+      onSessionModeChange: (id, mode) => {
+        modeChanges.push({ id, mode });
+      },
+      sessionDirectory: join(directory, "sessions"),
+    }),
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "steer-mode" },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "turn.submit",
+      params: { session_key: "steer-mode", text: "start" },
+    });
+    await client.next((frame) => frame.id === 2);
+    await client.next(eventFrame("turn_begin"));
+    await client.next(eventFrame("text_part"));
+
+    // A mid-turn user message steers the live turn instead of cancelling it.
+    client.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "steer",
+      params: { session_key: "steer-mode", content: "keep going" },
+    });
+    expect((await client.next((frame) => frame.id === 3)).result).toEqual({
+      ok: true,
+    });
+    await client.next(eventFrame("steer_input"));
+
+    // Interaction-mode changes mid-turn re-scope future turns only; they
+    // must not cancel the running turn (or any subagents it owns).
+    client.send({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "set_mode",
+      params: { mode: "plan" },
+    });
+    expect(
+      (await client.next((frame) => frame.id === 4)).result,
+    ).toMatchObject({ ok: true, mode: "plan", plan_mode: true });
+    client.send({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "set_plan_mode",
+      params: { enabled: false },
+    });
+    expect(
+      (await client.next((frame) => frame.id === 5)).result,
+    ).toMatchObject({ ok: true, plan_mode: false });
+
+    runner.release();
+    expect(
+      (await client.next(eventFrame("text_part"))).params?.payload,
+    ).toEqual({ text: "steer:keep going" });
+    const turnEnd = await client.next(eventFrame("turn_end"));
+    expect(turnEnd.params?.payload?.cancelled).toBe(false);
+    expect(modeChanges.map((change) => change.mode)).toEqual([
+      "plan",
+      "code",
+    ]);
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("an explicit cancel still stops the owning turn and only that turn", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-cancel-scope-"));
+  const socketPath = join(directory, "daemon.sock");
+  const first = new SteerRunner();
+  const second = new SteerRunner();
+  const runners = new Map([
+    ["cancel-a", first],
+    ["cancel-b", second],
+  ]);
+  const runner: TurnRunner = {
+    async *run(session, text, signal, controls) {
+      const delegated = runners.get(session.sessionKey) ?? first;
+      yield* delegated.run(session, text, signal, controls);
+    },
+  };
+  const server = new DaemonServer({
+    socketPath,
+    runtime: new InMemoryDaemonRuntime(runner, {
+      currentProjectDirectory: directory,
+      model: "cancel-model",
+      sessionDirectory: join(directory, "sessions"),
+    }),
+  });
+  await server.start();
+  const clientA = await SocketTestClient.connect(socketPath);
+  const clientB = await SocketTestClient.connect(socketPath);
+  try {
+    for (const [key, client] of [
+      ["cancel-a", clientA],
+      ["cancel-b", clientB],
+    ] as const) {
+      client.send({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: { session_key: key },
+      });
+      await client.next((frame) => frame.id === 1);
+      await client.next(eventFrame("init_done"));
+      await client.next(eventFrame("status_update"));
+      client.send({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "turn.submit",
+        params: { session_key: key, text: "start" },
+      });
+      await client.next((frame) => frame.id === 2);
+      await client.next(eventFrame("turn_begin"));
+      await client.next(eventFrame("text_part"));
+    }
+
+    // Cancelling session A's turn must leave session B's turn running.
+    clientA.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "cancel",
+      params: { session_key: "cancel-a" },
+    });
+    expect((await clientA.next((frame) => frame.id === 3)).result).toEqual({
+      ok: true,
+    });
+    first.release();
+    const cancelledEnd = await clientA.next(eventFrame("turn_end"));
+    expect(cancelledEnd.params?.payload?.cancelled).toBe(true);
+
+    second.release();
+    expect(
+      (await clientB.next(eventFrame("text_part"))).params?.payload,
+    ).toEqual({ text: "steer:" });
+    const survivingEnd = await clientB.next(eventFrame("turn_end"));
+    expect(survivingEnd.params?.payload?.cancelled).toBe(false);
+  } finally {
+    clientA.close();
+    clientB.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("daemon exposes only host-configured channel lifecycle controls", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-channels-"));
   const socketPath = join(directory, "daemon.sock");
