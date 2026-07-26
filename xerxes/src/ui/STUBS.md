@@ -14,7 +14,6 @@ document records the remaining unsupported control surfaces for that path.
 - `shell.exec`: bang-command execution is not exposed through daemon slash.
   The UI reports an explicit nonzero result instead of a false successful
   exit; use an agent turn with the native process tool surface instead.
-- `image.attach`: needs a file/image attachment endpoint.
 - `clipboard.paste`, `paste.collapse`, `input.detect_drop`: local TUI helpers only.
 - `voice.toggle`, `voice.record`: needs voice capture/transcription endpoints.
 - `plugins.manage`: needs plugin install/enable/disable RPCs.
@@ -31,7 +30,13 @@ document records the remaining unsupported control surfaces for that path.
 ## Supported by the Bun v35 Cutover
 
 - `session.create`, `session.resume`, `session.activate` map to `initialize`.
-- `prompt.submit` maps to `turn.submit`.
+- `prompt.submit` maps to `turn.submit`. Pending `/image <path>` attachments
+  ride the same frame as an optional `images` array of
+  `{ media_type, data(base64) }` entries, validated at the daemon boundary
+  (strict base64, magic-byte sniff, 10MB per image, 20MB per turn) and carried
+  into the user message as `image_url` data-URL content parts.
+- `image.attach` is a local TUI operation: it reads, sniffs, and caps one
+  image file and returns its base64 payload for the next `prompt.submit`.
 - `session.interrupt` maps to `cancel`.
 - `session.active_list`, `session.list`, and `session.status` use their v35
   daemon methods directly.

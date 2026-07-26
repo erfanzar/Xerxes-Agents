@@ -25,6 +25,7 @@ import {
   usageFromStatus
 } from './gatewayAdapter.js'
 import type { AnyEvent, GatewayTranscriptMessage } from './gatewayTypes.js'
+import { ImageAttachmentError, loadImageAttachment, resolveAttachmentPath } from './lib/imageAttachment.js'
 import type { SessionInfo, Usage } from './types.js'
 
 const MAX_GATEWAY_LOG_LINES = 200
@@ -700,7 +701,11 @@ export class GatewayClient extends EventEmitter {
         return this.rawRequest<T>('turn.submit', {
           session_key: this.keyFor(params.session_id),
           text: String(params.text ?? ''),
-          ...(typeof params.display_text === 'string' ? { display_text: params.display_text } : {})
+          ...(typeof params.display_text === 'string' ? { display_text: params.display_text } : {}),
+          // Validated PendingAttachment entries from the /image command. The
+          // daemon re-validates at the turn.submit boundary; a missing or
+          // empty list keeps the frame identical to a plain-text submit.
+          ...(Array.isArray(params.images) && params.images.length ? { images: params.images } : {})
         })
 
       case 'slash.exec':
@@ -725,8 +730,10 @@ export class GatewayClient extends EventEmitter {
       case 'complete.slash':
         return this.complete(method, params) as Promise<T>
 
-      case 'terminal.resize':
       case 'image.attach':
+        return this.imageAttach(params) as Promise<T>
+
+      case 'terminal.resize':
       case 'clipboard.paste':
       case 'paste.collapse':
       case 'input.detect_drop':
@@ -1215,6 +1222,29 @@ export class GatewayClient extends EventEmitter {
   private async shellExec(params: Record<string, unknown>): Promise<RpcObject> {
     const result = await this.rawRequest('slash', { command: `!${String(params.command ?? '')}` })
     return shellResultFromSlashResponse(result as Record<string, unknown>)
+  }
+
+  /**
+   * `image.attach` is a local TUI operation, not a daemon RPC: the file is
+   * read, magic-byte-sniffed, and capped here, and the resulting base64 rides
+   * the `images` param of the next `turn.submit` (where the daemon validates
+   * it again). Params: `{ path, cwd? }`.
+   */
+  private async imageAttach(params: Record<string, unknown>): Promise<RpcObject> {
+    const rawPath = String(params.path ?? '').trim()
+    if (!rawPath) {
+      throw new ImageAttachmentError('image.attach requires a path')
+    }
+    const cwd = typeof params.cwd === 'string' && params.cwd.trim() ? params.cwd : process.cwd()
+    const loaded = await loadImageAttachment(resolveAttachmentPath(rawPath, cwd))
+    return {
+      attached: true,
+      data: loaded.data,
+      media_type: loaded.mediaType,
+      name: loaded.name,
+      path: loaded.path,
+      size: loaded.size
+    }
   }
 
   private approvalRespond(params: Record<string, unknown>): Promise<unknown> {

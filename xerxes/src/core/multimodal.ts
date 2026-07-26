@@ -134,7 +134,8 @@ function normalizeImageMediaType(value: string | null): string | undefined {
     : undefined
 }
 
-function sniffImageMediaType(bytes: Uint8Array): string | undefined {
+/** Identify png/jpeg/gif/webp payloads from magic bytes; returns undefined for anything else. */
+export function sniffImageMediaType(bytes: Uint8Array): string | undefined {
   if (bytes.length >= 8
     && bytes[0] === 0x89
     && bytes[1] === 0x50

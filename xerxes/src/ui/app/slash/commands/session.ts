@@ -155,11 +155,9 @@ export const sessionCommands: SlashCommand[] = [
     }
   },
 
-  {
-    help: 'generate an image through the native runtime',
-    name: 'image',
-    run: (arg, ctx) => runNativeSlash(ctx, `image${arg.trim() ? ` ${arg.trim()}` : ''}`, 'Image')
-  },
+  // NOTE: `/image` lives in commands/attach.ts — it attaches existing image
+  // files to the next message and forwards non-file prompts to the daemon's
+  // native generation command.
 
   {
     help: 'switch personality for this session',

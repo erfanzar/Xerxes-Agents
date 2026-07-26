@@ -409,10 +409,26 @@ export interface TerminalResizeResponse {
 
 // ── Image attach ─────────────────────────────────────────────────────
 
+/** One validated image ready to ride the `images` param of `prompt.submit`. */
+export interface PromptSubmitImage {
+  /** Canonical base64 of the decoded image bytes. */
+  data: string
+  /** Magic-byte-sniffed mime (image/png, image/jpeg, image/gif, image/webp). */
+  media_type: string
+}
+
 export interface ImageAttachResponse {
+  attached?: boolean
+  /** Canonical base64 payload for the next prompt.submit `images` entry. */
+  data?: string
   height?: number
+  /** Magic-byte-sniffed mime, never extension-derived. */
+  media_type?: string
   name?: string
+  path?: string
   remainder?: string
+  /** Decoded byte size of the attached image. */
+  size?: number
   token_estimate?: number
   width?: number
 }

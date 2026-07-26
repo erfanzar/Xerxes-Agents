@@ -31,6 +31,8 @@ import {
   type ToolPolicy,
 } from '../streaming/permissions.js'
 import type { ChatMessage, MessageContent } from '../types/messages.js'
+import { messageText } from '../types/messages.js'
+import { imageUrlContentParts } from './images.js'
 import type { ToolCall, ToolDefinition } from '../types/toolCalls.js'
 import type { DaemonInteractionBoard, DaemonQuestion } from './interactions.js'
 import type { DaemonEvent, DaemonSession, TurnRunControls, TurnRunner } from './runtime.js'
@@ -224,6 +226,13 @@ export class AgentTurnRunner implements TurnRunner {
       prompt: text,
       ultraMode: session.ultraMode === true,
     })
+    // Validated attachments become image_url data-URL parts on the user
+    // message so every existing provider mapping (OpenAI parts, Anthropic
+    // image blocks) works unchanged. Text-only turns keep string content.
+    const images = controls.images ?? []
+    const userMessage: MessageContent = images.length
+      ? [{ type: 'text', text }, ...imageUrlContentParts(images)]
+      : text
     try {
       const turnEvents = withActiveSession(session, runTurn({
         agentId: promptAgent?.name ?? session.agentId,
@@ -231,7 +240,7 @@ export class AgentTurnRunner implements TurnRunner {
         model,
         sessionId: session.id,
         state,
-        userMessage: text,
+        userMessage,
         ...(this.options.maxTokens !== undefined ? { maxTokens: this.options.maxTokens } : {}),
         permissionMode,
         ...(this.options.temperature !== undefined ? { temperature: this.options.temperature } : {}),
@@ -714,7 +723,9 @@ function recordLatestUserDisplayText(state: AgentState, providerText: string, di
   if (providerText === displayText) return
   for (let index = state.messages.length - 1; index >= 0; index -= 1) {
     const message = state.messages[index]
-    if (message?.role !== 'user' || message.content !== providerText) continue
+    // Content may be a structured part list (image attachments); compare on
+    // the extracted text so displayText is still recorded for those turns.
+    if (message?.role !== 'user' || messageText(message) !== providerText) continue
     state.messages[index] = { ...message, displayText }
     return
   }
