@@ -346,10 +346,30 @@ function notificationEvents(payload: Record<string, unknown>): AnyEvent[] {
 
   if (category === 'history') {
     if (kind === 'replay_assistant') {
-      const thinking = str(payload.thinking)
+      // The daemon nests persisted thinking under the notification's payload
+      // sub-object; keep the top-level read as a fallback for older emitters.
+      const nested = asRecord(payload.payload)
+      const thinking = str(nested.thinking) || str(payload.thinking)
       return [{
         type: 'transcript.append',
         payload: { role: 'assistant', text: body, ...(thinking ? { thinking } : {}) }
+      }]
+    }
+    if (kind === 'replay_tool') {
+      const toolPayload = asRecord(payload.payload)
+      const ok = bool(toolPayload.ok, true)
+      const durationMs = optionalNum(toolPayload.duration_ms)
+      const context = str(toolPayload.context)
+      const error = str(toolPayload.preview) || 'Tool execution failed.'
+      return [{
+        type: 'transcript.append',
+        payload: {
+          role: 'tool',
+          name: str(toolPayload.name, 'tool'),
+          ...(context ? { context } : {}),
+          ...(ok ? {} : { error }),
+          ...(durationMs === undefined ? {} : { duration_s: durationMs / 1000 })
+        }
       }]
     }
     if (kind === 'replay_user') {
