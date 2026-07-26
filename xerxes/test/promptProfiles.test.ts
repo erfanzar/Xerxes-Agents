@@ -120,6 +120,84 @@ test('prompt-profile rendering preserves full defaults and exact instruction and
   expect(cappedTools).not.toContain('  - three')
 })
 
+test('full profile renders orchestration engagement rules only with agent tools', async () => {
+  const host = {
+    captureRuntimeInfo: () => ({
+      platform: 'test',
+      runtimeVersion: 'Bun test',
+      timestamp: '2026-07-13T12:00:00.000Z',
+      timezone: 'UTC',
+      workingDirectory: '/workspace',
+      workspaceName: 'workspace',
+      xerxesVersion: '0.3.0',
+    }),
+  }
+  const builder = new PromptContextBuilder({ host })
+  const agentTools = ['SpawnAgents', 'AwaitAgents', 'TaskListTool', 'ReadFile']
+
+  const withAgents = await builder.assembleSystemPromptPrefix({ toolNames: agentTools })
+  expect(withAgents).toContain('[Orchestration]')
+  // Active supervision: cadence, interleaved work, and proactive management.
+  expect(withAgents).toContain('every two minutes of wall time')
+  expect(withAgents).toContain('interleave useful local work')
+  expect(withAgents).toContain('inventory and peek tools rather than blind waiting')
+  expect(withAgents).toContain('Nudge stuck agents, stop irrelevant or superseded ones')
+  // Await-all semantics for required results stay honored.
+  expect(withAgents).toContain('prefer await-all joins for required results')
+
+  const withoutAgents = await builder.assembleSystemPromptPrefix({ toolNames: ['ReadFile'] })
+  expect(withoutAgents).not.toContain('[Orchestration]')
+
+  // Sub-agent profiles stay slim even when agent tools are listed.
+  const compact = await builder.assembleSystemPromptPrefix({
+    profile: PromptProfile.COMPACT,
+    toolNames: agentTools,
+  })
+  expect(compact).not.toContain('[Orchestration]')
+  const minimal = await builder.assembleSystemPromptPrefix({
+    profile: PromptProfile.MINIMAL,
+    toolNames: agentTools,
+  })
+  expect(minimal).not.toContain('[Orchestration]')
+})
+
+test('orchestration block does not weaken full-profile caps', async () => {
+  const oversizedSkill = parseSkillMarkdown([
+    '---',
+    'name: oversized',
+    'description: Oversized skill',
+    '---',
+    's'.repeat(20_000),
+  ].join('\n'), '/workspace/skills/oversized/SKILL.md')
+  const host = {
+    captureRuntimeInfo: () => ({
+      platform: 'test',
+      runtimeVersion: 'Bun test',
+      timestamp: '2026-07-13T12:00:00.000Z',
+      timezone: 'UTC',
+      workingDirectory: '/workspace',
+      workspaceName: 'workspace',
+      xerxesVersion: '0.3.0',
+    }),
+  }
+  const builder = new PromptContextBuilder({ host })
+  const toolNames = ['SpawnAgents', ...Array.from({ length: 150 }, (_, index) => 'tool-' + index)]
+  const prefix = await builder.assembleSystemPromptPrefix({
+    profile: PromptProfile.FULL,
+    enabledSkills: [oversizedSkill],
+    toolNames,
+  })
+
+  expect(prefix).toContain('[Orchestration]')
+  // Skill-body and tool-list caps still hold with agent tools present.
+  const skillSection = skillPromptSection(oversizedSkill)
+  expect(prefix).toContain(skillSection.slice(0, 8_000) + '...')
+  expect(prefix).not.toContain(skillSection.slice(0, 8_001))
+  expect(prefix).toContain('  - tool-98')
+  expect(prefix).not.toContain('  - tool-99')
+  expect(prefix).toContain('  ... and 51 more')
+})
+
 test('full profile caps oversized skill bodies and long tool lists at finite bounds', async () => {
   const oversizedSkill = parseSkillMarkdown([
     '---',
