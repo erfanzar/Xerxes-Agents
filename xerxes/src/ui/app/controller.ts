@@ -114,7 +114,10 @@ export function executePlan(
     }
 
     case 'interrupt':
-      void client.request('cancel_all').catch(() => {})
+      // Scope the cancel to this connection's own session. An unscoped
+      // `cancel_all` aborts every session on the daemon — including other
+      // clients' turns and the parent turns that own running subagents.
+      void client.request('cancel', { session_key: client.sessionKey }).catch(() => {})
       dispatch(ev('__notice', { text: 'interrupted' }))
       return { exit: false }
 

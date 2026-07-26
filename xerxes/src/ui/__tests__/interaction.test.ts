@@ -110,9 +110,10 @@ describe('executePlan (fake client)', () => {
     expect(calls).toHaveLength(0)
     expect(dispatched.some(e => e.type === '__enqueue')).toBe(true)
   })
-  it('interrupt calls cancel_all', () => {
+  it('interrupt cancels only the owning session turn', () => {
     executePlan(client, dispatch, { do: 'interrupt' }, { queue: [] })
-    expect(calls[0]!.method).toBe('cancel_all')
+    expect(calls[0]!.method).toBe('cancel')
+    expect(calls[0]!.params).toMatchObject({ session_key: 'tui:test' })
   })
   it('drain sends the head of the queue', () => {
     executePlan(client, dispatch, { do: 'drain' }, { queue: ['first', 'second'] })

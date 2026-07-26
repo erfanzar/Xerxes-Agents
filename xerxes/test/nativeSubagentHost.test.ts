@@ -2656,6 +2656,142 @@ test('background agents keep the parent turn live and deliver one joined result 
   }
 })
 
+test('mid-turn steer and interaction-mode changes keep background subagents running', async () => {
+  const sessionDirectory = await mkdtemp(join(tmpdir(), 'xerxes-steer-mode-bg-'))
+  const childRelease = Promise.withResolvers<void>()
+  const parentWaiting = Promise.withResolvers<void>()
+  const parentRequests: CompletionRequest[] = []
+  const definitions = new Map<string, AgentDefinition>([
+    ['default', creatorDefinition('researcher')],
+    ['researcher', agentDefinition('researcher')],
+  ])
+  const client: LlmClient = {
+    async *stream(request): AsyncGenerator<LlmDelta> {
+      const userText = request.messages
+        .filter(message => message.role === 'user')
+        .map(message => String(message.content))
+        .join('\n')
+      if (userText.includes('background child task')) {
+        await childRelease.promise
+        yield { content: 'child final report' }
+        return
+      }
+
+      parentRequests.push(request)
+      if (userText.includes('[sub-agent events]')) {
+        yield { content: 'Integrated the child report.' }
+        return
+      }
+      if (request.messages.some(message => message.role === 'tool' && message.name === 'SpawnAgents')) {
+        parentWaiting.resolve()
+        yield { content: 'The delegated review is still running.' }
+        return
+      }
+      yield {
+        toolCalls: [{
+          id: 'spawn-background-child',
+          type: 'function',
+          function: {
+            name: 'SpawnAgents',
+            arguments: {
+              agents: [
+                { name: 'child', prompt: 'background child task', subagent_type: 'researcher', title: 'Child review' },
+              ],
+              wait: false,
+            },
+          },
+        }],
+      }
+    },
+  }
+  const eventBus = new DaemonSubagentEventBus()
+  const registry = new ToolRegistry()
+  const host = createNativeSubagentHost({
+    agentDefinitions: definitions,
+    cwd: process.cwd(),
+    eventBus,
+    llm: client,
+    model: 'test-model',
+    permissionMode: 'accept-all',
+    toolExecutor: registry,
+    tools: [],
+  })
+  registerClaudeAgentTools(registry, {
+    backgroundAgents: host.turnCoordinator,
+    manager: host.managerPort,
+  })
+  const runner = new AgentTurnRunner({
+    agentDefinitions: definitions,
+    llm: client,
+    model: 'test-model',
+    permissionMode: 'accept-all',
+    subagentCoordinator: host.turnCoordinator,
+    subagentEvents: eventBus,
+    toolExecutor: registry,
+    tools: registry.definitions(),
+  })
+  // Mirrors the production cli.ts wiring: eviction reclaims a session's
+  // children, but no hook cancels them on interaction-mode changes.
+  const runtime = new InMemoryDaemonRuntime(runner, {
+    currentProjectDirectory: process.cwd(),
+    model: 'test-model',
+    onSessionEvict: sessionId => {
+      host.cancelSource(sessionId)
+    },
+    sessionDirectory,
+  })
+  const events: DaemonEvent[] = []
+
+  try {
+    const turn = runtime.submitTurn('steer-mode-bg', 'delegate the review', event => events.push(event))
+    await parentWaiting.promise
+
+    const session = runtime.sessionStatus('steer-mode-bg')
+    if (!session) throw new Error('expected a live parent session')
+    await waitFor(() => host.manager.listTasks().some(task => task.status === 'running'))
+    const childTask = host.manager.listTasks().find(task => task.status === 'running')
+    if (!childTask) throw new Error('expected a running background child')
+
+    // A mid-turn user message steers the live turn; an interaction-mode
+    // change re-scopes future turns. Neither may cancel the parent turn or
+    // the running child.
+    expect(runtime.steerTurn('steer-mode-bg', 'focus on the summary')).toBe(true)
+    const changed = await runtime.setSessionMode('steer-mode-bg', 'plan')
+    expect(changed).toMatchObject({ interactionMode: 'plan', planMode: true })
+    await runtime.setSessionMode('steer-mode-bg', 'code')
+
+    expect(host.manager.listTasks().find(task => task.id === childTask.id)?.status).toBe('running')
+    expect(host.managerPort.listHandles().find(handle => handle.id === childTask.id)).toMatchObject({
+      closed: false,
+      status: 'running',
+    })
+    expect(runtime.sessionStatus('steer-mode-bg')).toMatchObject({
+      activeTurnId: expect.any(String),
+      status: 'working',
+    })
+    expect(events.some(event => event.type === 'turn_end')).toBe(false)
+
+    childRelease.resolve()
+    await turn
+
+    expect(host.manager.listTasks().find(task => task.id === childTask.id)?.status).toBe('completed')
+    const turnEnds = events.filter(event => event.type === 'turn_end')
+    expect(turnEnds).toHaveLength(1)
+    expect(turnEnds[0]?.payload.cancelled).toBe(false)
+    const joinedContext = parentRequests.at(-1)?.messages
+      .filter(message => message.role === 'user')
+      .map(message => String(message.content))
+      .join('\n') ?? ''
+    expect(joinedContext).toContain('[sub-agent events]')
+    expect(joinedContext).toContain('child final report')
+    expect(joinedContext).toContain('[steer from user]\nfocus on the summary')
+  } finally {
+    childRelease.resolve()
+    await host.manager.shutdown()
+    await rm(sessionDirectory, { force: true, recursive: true })
+  }
+})
+
 function nestedEventType(event: DaemonEvent): unknown {
   return nestedEvent(event)?.type
 }
