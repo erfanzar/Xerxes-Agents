@@ -96,6 +96,7 @@ export interface OverlayState {
   clarify: ClarifyReq | null
   confirm: ConfirmReq | null
   copyPicker: CopyPickerState | null
+  diff: boolean
   modelPicker: boolean
   pager: null | PagerState
   pluginsHub: boolean

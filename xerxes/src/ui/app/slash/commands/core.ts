@@ -466,6 +466,18 @@ export const coreCommands: SlashCommand[] = [
   },
 
   {
+    help: 'open the git diff viewer (F7)',
+    name: 'diff',
+    run: (arg, ctx) => {
+      if (arg) {
+        return ctx.transcript.sys('usage: /diff')
+      }
+
+      patchOverlayState({ diff: true })
+    }
+  },
+
+  {
     help: 'configure IDE terminal keybindings for multiline + undo/redo',
     name: 'terminal-setup',
     run: (arg, ctx) => {

@@ -15,6 +15,7 @@ import { registerComposerFocusTarget } from '../app/composerFocus.js'
 import { setInputSelection } from '../app/inputSelectionStore.js'
 import { isLiveTailActive, liveTailScrollKey, shouldAutoScrollLiveTail } from '../app/liveTailScroll.js'
 import { $isBlocked, $overlayState, patchOverlayState } from '../app/overlayStore.js'
+import { $panelWidthDelta, withPanelWidthDelta } from '../app/panelSizeStore.js'
 import { $uiState, $uiTheme } from '../app/uiStore.js'
 import { useTurnSelector } from '../app/turnStore.js'
 import { $spawnHistory, spawnHistoryForSession } from '../app/spawnHistoryStore.js'
@@ -52,6 +53,7 @@ import type { Theme } from '../theme.js'
 import { AgentPanel, AgentPanelHotkey, AgentPanelOverlay, collectAgentPanelRecords } from './agentPanel.js'
 import { displayModeLabel, SessionHeader, WorkspaceFooter } from './appChrome.js'
 import { CopyPicker } from './copyPicker.js'
+import { DiffPanelHotkey, DiffPanelOverlay } from './diffPanel.js'
 import { MessageLine } from './messageLine.js'
 import { ModelPicker } from './modelPicker.js'
 import { Box, Span, Text } from './primitives.js'
@@ -1440,12 +1442,15 @@ export function AppLayout({
     [liveAgents, spawnHistory]
   )
   const showAgentSidebar = shouldShowAgentSidebar(width, agentCount)
-  const sidebarWidth = agentSidebarWidth(width)
+  const panelWidthDelta = useStore($panelWidthDelta)
+  const sidebarWidth = withPanelWidthDelta(agentSidebarWidth(width), width)
+  void panelWidthDelta
   const agentHotkeyBlocked = Boolean(
     overlay.approval ||
     overlay.clarify ||
     overlay.confirm ||
     overlay.copyPicker ||
+    overlay.diff ||
     overlay.modelPicker ||
     overlay.pager ||
     overlay.pluginsHub ||
@@ -1454,7 +1459,7 @@ export function AppLayout({
     overlay.skillsHub ||
     overlay.sudo
   )
-  const footerAgentHint = showAgentSidebar ? undefined : 'F6 agents'
+  const footerAgentHint = showAgentSidebar ? undefined : 'F6 agents · F7 diff'
   const welcomeRightLabel = [footerAgentHint, ui.info?.version ? `v${ui.info.version}` : undefined]
     .filter(Boolean)
     .join(' · ')
@@ -1483,6 +1488,12 @@ export function AppLayout({
         disabled={agentHotkeyBlocked}
         onToggle={agents => patchOverlayState({ agents })}
         open={overlay.agents}
+        resizeEnabled={overlay.agents || showAgentSidebar}
+      />
+      <DiffPanelHotkey
+        disabled={agentHotkeyBlocked || overlay.agents}
+        onToggle={diff => patchOverlayState({ diff })}
+        open={overlay.diff}
       />
       <Box flexDirection="row" flexGrow={1} minHeight={0} width="100%">
         <Box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} minWidth={0}>
@@ -1575,6 +1586,9 @@ export function AppLayout({
       {overlay.modelPicker ? <ModelPicker onSelect={actions.onModelSelect} /> : null}
       {overlay.sessions ? <SessionPicker actions={actions} /> : null}
       {overlay.copyPicker ? <CopyPicker onCopied={actions.sys} /> : null}
+      {overlay.diff ? (
+        <DiffPanelOverlay cwd={ui.info?.cwd} onClose={() => patchOverlayState({ diff: false })} t={t} />
+      ) : null}
       {overlay.agents ? (
         <AgentPanelOverlay
           history={spawnHistory}
