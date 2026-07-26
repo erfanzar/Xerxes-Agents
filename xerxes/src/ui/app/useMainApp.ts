@@ -52,6 +52,7 @@ import { isLiveTailActive } from './liveTailScroll.js'
 import { $overlayState, clearApprovalOverlay, clearClarifyOverlay, patchOverlayState } from './overlayStore.js'
 import { scrollWithSelectionBy } from './scroll.js'
 import { $spawnHistory } from './spawnHistoryStore.js'
+import { $thinkingVisibility, thinkingRowExpanded } from './thinkingVisibilityStore.js'
 import { turnController } from './turnController.js'
 import { patchTurnState, useTurnSelector } from './turnStore.js'
 import { $uiState, $uiTheme, getUiState, patchUiState } from './uiStore.js'
@@ -267,8 +268,7 @@ export function useMainApp(gw: GatewayClient) {
     catalog,
     gw,
     onClipboardPaste: quiet => clipboardPasteRef.current(quiet),
-    onDroppedPath: path =>
-      sys(`file attachment is unavailable in the native Bun daemon; kept the path as prompt text: ${path}`),
+    onDroppedPath: path => sys(`kept the path as prompt text — attach it to your next message with /image ${path}`),
     submitRef
   })
 
@@ -366,6 +366,7 @@ export function useMainApp(gw: GatewayClient) {
   // too. -1 when no user message exists yet (no row will gate true).
   const firstUserIdx = useMemo(() => virtualRows.findIndex(r => r.msg.role === 'user'), [virtualRows])
 
+  const thinkingVisibility = useStore($thinkingVisibility)
   const estimateRowHeight = useCallback(
     (index: number) =>
       estimatedMsgHeight(virtualRows[index]!.msg, cols, {
@@ -380,6 +381,7 @@ export function useMainApp(gw: GatewayClient) {
           virtualRows[index]!.msg
         ),
         subagentsVisible: subagentsDetailsVisible,
+        thinkingExpanded: thinkingRowExpanded(thinkingVisibility, virtualRows[index]!.key),
         thinkingVisible: thinkingDetailsVisible,
         toolsVisible: toolsDetailsVisible,
         userPrompt: ui.theme.brand.prompt,
@@ -391,6 +393,7 @@ export function useMainApp(gw: GatewayClient) {
       firstUserIdx,
       subagentsDetailsVisible,
       thinkingDetailsVisible,
+      thinkingVisibility,
       toolsDetailsVisible,
       ui.compact,
       ui.detailsMode,
@@ -772,6 +775,7 @@ export function useMainApp(gw: GatewayClient) {
       die,
       dispatchQueuedSubmission,
       dispatchSubmission,
+      getHistoryItems: () => historyItemsRef.current,
       guardBusySessionSwitch: session.guardBusySessionSwitch,
       newSession: session.newSession,
       sys
@@ -1121,7 +1125,8 @@ export function useMainApp(gw: GatewayClient) {
 
         session.resumeById(id)
       },
-      setStickyPrompt
+      setStickyPrompt,
+      sys
     }),
     [
       answerApproval,
@@ -1135,7 +1140,8 @@ export function useMainApp(gw: GatewayClient) {
       session.activateLiveSession,
       session.guardBusySessionSwitch,
       session.newLiveSession,
-      session.resumeById
+      session.resumeById,
+      sys
     ]
   )
 

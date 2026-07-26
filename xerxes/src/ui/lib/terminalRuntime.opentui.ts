@@ -387,6 +387,18 @@ function controllerOwnsTextareaKey(input: string, key: ControllerKey): boolean {
     return true
   }
 
+  // Ctrl+O is the global "copy last assistant message" chord in
+  // useInputHandlers; the focused textarea must not also see it.
+  if (ch === 'o' && key.ctrl) {
+    return true
+  }
+
+  // Ctrl+T is the global "expand/collapse thinking blocks" chord in
+  // useInputHandlers; the focused textarea must not also see it.
+  if (ch === 't' && key.ctrl) {
+    return true
+  }
+
   // These are unconditional action shortcuts in useInputHandlers. Alt+G is
   // also the documented VS Code/Cursor fallback for opening $EDITOR.
   if ((ch === 'd' || ch === 'l') && actionModifier) {

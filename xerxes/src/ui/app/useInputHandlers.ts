@@ -12,6 +12,7 @@ import type {
   SudoRespondResponse,
   VoiceRecordResponse
 } from '../gatewayTypes.js'
+import { copyLatestAssistantMessage } from '../lib/copyText.js'
 import { isAction, isCopyShortcut, isMac, isVoiceToggleKey } from '../lib/platform.js'
 import { computePrecisionWheelStep, initPrecisionWheel } from '../lib/precisionWheel.js'
 import { forceRedraw, useInput } from '../lib/terminalRuntime.opentui.js'
@@ -21,6 +22,7 @@ import { refocusComposerOnDoubleSpace } from './composerFocus.js'
 import { getInputSelection } from './inputSelectionStore.js'
 import type { InputHandlerContext, InputHandlerResult } from './interfaces.js'
 import { $isBlocked, $overlayState, clearApprovalOverlay, patchOverlayState } from './overlayStore.js'
+import { toggleAllThinking } from './thinkingVisibilityStore.js'
 import { turnController } from './turnController.js'
 import { patchTurnState } from './turnStore.js'
 import { getUiState, patchUiState } from './uiStore.js'
@@ -164,6 +166,10 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
       return gateway
         .rpc<SecretRespondResponse>('secret.respond', { request_id: overlay.secret.requestId, value: '' })
         .then(r => r && (patchOverlayState({ secret: null }), actions.sys('secret entry cancelled')))
+    }
+
+    if (overlay.copyPicker) {
+      return patchOverlayState({ copyPicker: null })
     }
 
     if (overlay.modelPicker) {
@@ -339,6 +345,8 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
         cancelOverlayFromCtrlC()
       } else if (key.escape && overlay.sessions) {
         patchOverlayState({ sessions: false })
+      } else if (key.escape && overlay.copyPicker) {
+        patchOverlayState({ copyPicker: null })
       }
 
       // When a prompt overlay is up and the user pressed a scroll key, fall
@@ -518,6 +526,25 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
 
     if (isCtrl(key, ch, 'x')) {
       return patchOverlayState({ sessions: true })
+    }
+
+    // Ctrl+O copies the newest assistant message through the same native →
+    // OSC52 chain as /copy. Ctrl+Y was the first choice but /help documents
+    // it as input-edit redo, so 'O' (copy Output) avoids the clash.
+    if (isCtrl(key, ch, 'o')) {
+      void copyLatestAssistantMessage(actions.getHistoryItems()).then(actions.sys)
+
+      return
+    }
+
+    // Ctrl+T expands/collapses every thinking block at once (shift+O was the
+    // first choice, but a bare shifted letter would swallow capital-O typing
+    // in the focused composer — the global key handler runs before the
+    // textarea). Clicking a thinking header toggles just that block.
+    if (isCtrl(key, ch, 't')) {
+      toggleAllThinking()
+
+      return
     }
 
     if (key.ctrl && ch.toLowerCase() === 'c') {

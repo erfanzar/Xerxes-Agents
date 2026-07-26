@@ -9,9 +9,14 @@
 import { useStore } from '@nanostores/react'
 import { memo } from 'react'
 
+import {
+  $thinkingVisibility,
+  thinkingRowExpanded,
+  toggleThinkingRow
+} from '../app/thinkingVisibilityStore.js'
 import { $uiDetailVisibility } from '../app/uiStore.js'
 import { messageHasVisibleDetails, trailHasRenderableContent } from '../lib/liveProgress.js'
-import { fmtK, inlineToolDisplay, parseToolTrailResultLine } from '../lib/text.js'
+import { estimateTokensRough, fmtK, inlineToolDisplay, parseToolTrailResultLine } from '../lib/text.js'
 import type { Theme } from '../theme.js'
 import type { Msg } from '../types.js'
 
@@ -240,33 +245,69 @@ const detailVisibility = (snapshot: string): DetailVisibility => {
   return { subagents: subagents === 'true', thinking: thinking === 'true', tools: tools === 'true' }
 }
 
-function ToolTrail({ msg, t, visibility }: { msg: Msg; t: Theme; visibility: DetailVisibility }) {
-  const thinking = msg.thinking?.trim()
-  const tools = msg.tools ?? []
-  const tokenLabel = msg.thinkingTokens && msg.thinkingTokens > 0 ? `  ~${fmtK(msg.thinkingTokens)} tokens` : ''
+// Stable per-message identity for thinking toggles when the caller has no
+// row key (direct MessageLine consumers). Settled transcript rows should
+// pass their virtual row key so the toggle survives virtualization; live
+// stream segments pass their segment key so it survives per-delta Msg
+// object replacement.
+const fallbackRowIds = new WeakMap<Msg, string>()
+let fallbackRowIdSeq = 0
+
+const thinkingRowId = (msg: Msg, msgKey?: string): string => {
+  if (msgKey) {
+    return msgKey
+  }
+
+  let id = fallbackRowIds.get(msg)
+
+  if (!id) {
+    id = `thinking:${++fallbackRowIdSeq}`
+    fallbackRowIds.set(msg, id)
+  }
+
+  return id
+}
+
+function ThinkingBlock({ msg, rowId, t }: { msg: Msg; rowId: string; t: Theme }) {
+  const visibility = useStore($thinkingVisibility)
+  const expanded = thinkingRowExpanded(visibility, rowId)
+  const thinking = msg.thinking?.trim() ?? ''
+  const tokens = msg.thinkingTokens && msg.thinkingTokens > 0 ? msg.thinkingTokens : estimateTokensRough(thinking)
+  const tokenLabel = tokens > 0 ? `  ~${fmtK(tokens)} tokens` : ''
 
   return (
-    <Box flexDirection="column" flexShrink={0} marginTop={1} paddingLeft={3}>
-      {thinking && visibility.thinking ? (
-        <Box flexDirection="column" flexShrink={0}>
-          <Text color={t.color.muted} dimColor>
-            ◇ Thinking{tokenLabel}
-          </Text>
-          {thinking.split('\n').map((line, i) => (
+    <Box flexDirection="column" flexShrink={0}>
+      <Box flexShrink={0} onClick={() => toggleThinkingRow(rowId)}>
+        <Text color={t.color.muted} dimColor>
+          {expanded ? '▾' : '▸'} thinking{tokenLabel}
+        </Text>
+      </Box>
+      {expanded
+        ? thinking.split('\n').map((line, i) => (
             <Text color={t.color.muted} dimColor key={i} wrap="wrap">
               {'  '}
               {line || ' '}
             </Text>
-          ))}
-        </Box>
-      ) : null}
+          ))
+        : null}
+    </Box>
+  )
+}
+
+function ToolTrail({ msg, msgKey, t, visibility }: { msg: Msg; msgKey?: string; t: Theme; visibility: DetailVisibility }) {
+  const thinking = msg.thinking?.trim()
+  const tools = msg.tools ?? []
+
+  return (
+    <Box flexDirection="column" flexShrink={0} marginTop={1} paddingLeft={3}>
+      {thinking && visibility.thinking ? <ThinkingBlock msg={msg} rowId={thinkingRowId(msg, msgKey)} t={t} /> : null}
 
       {visibility.tools ? tools.map((line, i) => <ToolStep key={i} line={line} t={t} />) : null}
     </Box>
   )
 }
 
-function MessageLineView({ msg, t }: { msg: Msg; t: Theme }) {
+function MessageLineView({ msg, msgKey, t }: { msg: Msg; msgKey?: string; t: Theme }) {
   const visibility = detailVisibility(useStore($uiDetailVisibility))
   const hasVisibleDetails = messageHasVisibleDetails(msg, visibility)
 
@@ -279,7 +320,7 @@ function MessageLineView({ msg, t }: { msg: Msg; t: Theme }) {
       return null
     }
 
-    return <ToolTrail msg={msg} t={t} visibility={visibility} />
+    return <ToolTrail msg={msg} msgKey={msgKey} t={t} visibility={visibility} />
   }
 
   if (msg.role === 'user') {
@@ -289,7 +330,7 @@ function MessageLineView({ msg, t }: { msg: Msg; t: Theme }) {
   if (msg.role === 'assistant') {
     return hasVisibleDetails ? (
       <Box flexDirection="column" flexShrink={0}>
-        <ToolTrail msg={msg} t={t} visibility={visibility} />
+        <ToolTrail msg={msg} msgKey={msgKey} t={t} visibility={visibility} />
         {msg.text ? <AssistantMessage msg={msg} t={t} /> : null}
       </Box>
     ) : (
@@ -303,7 +344,7 @@ function MessageLineView({ msg, t }: { msg: Msg; t: Theme }) {
 
   return hasVisibleDetails ? (
     <Box flexDirection="column" flexShrink={0}>
-      <ToolTrail msg={msg} t={t} visibility={visibility} />
+      <ToolTrail msg={msg} msgKey={msgKey} t={t} visibility={visibility} />
       {msg.text ? <SystemMessage msg={msg} t={t} /> : null}
     </Box>
   ) : (

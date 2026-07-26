@@ -10,6 +10,7 @@ import { useStore } from '@nanostores/react'
 import { type MutableRefObject, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import type { AppLayoutProps, Notice } from '../app/interfaces.js'
+import { $attachments, attachmentsTotalBytes } from '../app/attachmentsStore.js'
 import { registerComposerFocusTarget } from '../app/composerFocus.js'
 import { setInputSelection } from '../app/inputSelectionStore.js'
 import { isLiveTailActive, liveTailScrollKey, shouldAutoScrollLiveTail } from '../app/liveTailScroll.js'
@@ -39,6 +40,7 @@ import {
   providerPromptTitle
 } from '../domain/providerPrompt.js'
 import { ctxBarColor, sessionDisplayTitle, usageCounts } from '../domain/statusFormat.js'
+import { formatBytes } from '../lib/imageAttachment.js'
 import { unarchivedToolLines } from '../lib/liveProgress.js'
 import { compactProgressRows, type CompactProgressRow } from '../lib/progressRows.js'
 import { isYoloEnabled } from '../lib/statusSnapshot.js'
@@ -49,6 +51,7 @@ import type { Theme } from '../theme.js'
 
 import { AgentPanel, AgentPanelHotkey, AgentPanelOverlay, collectAgentPanelRecords } from './agentPanel.js'
 import { displayModeLabel, SessionHeader, WorkspaceFooter } from './appChrome.js'
+import { CopyPicker } from './copyPicker.js'
 import { MessageLine } from './messageLine.js'
 import { ModelPicker } from './modelPicker.js'
 import { Box, Span, Text } from './primitives.js'
@@ -84,7 +87,7 @@ function StreamingAssistant() {
   return (
     <Box flexDirection="column" flexShrink={0}>
       {segments.map((segment, index) => (
-        <MessageLine key={`segment:${index}`} msg={segment} t={t} />
+        <MessageLine key={`segment:${index}`} msg={segment} msgKey={`live-segment:${index}`} t={t} />
       ))}
 
       {unsettledTools.length ? (
@@ -830,6 +833,26 @@ function QueuePanel({ composer }: Pick<AppLayoutProps, 'composer'>) {
   )
 }
 
+/** Pending /image attachments indicator: one muted line above the textarea. */
+function AttachmentsPanel() {
+  const attachments = useStore($attachments)
+  const t = useStore($uiTheme)
+
+  if (!attachments.length) {
+    return null
+  }
+
+  return (
+    <Box backgroundColor={t.color.completionBg} flexDirection="column" flexShrink={0} paddingX={2}>
+      <Text color={t.color.muted} wrap="truncate-end">
+        {'📎 '}
+        {attachments.map(item => item.name).join(', ')}
+        {` · ${formatBytes(attachmentsTotalBytes(attachments))} · next message only · /image clear to drop`}
+      </Text>
+    </Box>
+  )
+}
+
 function Composer({ composer }: Pick<AppLayoutProps, 'composer'>) {
   const ui = useStore($uiState)
   const isBlocked = useStore($isBlocked)
@@ -949,6 +972,7 @@ function Composer({ composer }: Pick<AppLayoutProps, 'composer'>) {
   return (
     <Box backgroundColor={t.color.completionBg} flexDirection="column" flexShrink={0} width="100%">
       <QueuePanel composer={composer} />
+      <AttachmentsPanel />
       <CompletionMenu composer={composer} />
       <Box
         alignItems="flex-start"
@@ -1391,6 +1415,7 @@ export function AppLayout({
     overlay.approval ||
     overlay.clarify ||
     overlay.confirm ||
+    overlay.copyPicker ||
     overlay.modelPicker ||
     overlay.pager ||
     overlay.pluginsHub ||
@@ -1479,7 +1504,7 @@ export function AppLayout({
                         key={row.key}
                         ref={transcript.virtualHistory.measureRef(row.key)}
                       >
-                        <MessageLine msg={row.msg} t={t} />
+                        <MessageLine msg={row.msg} msgKey={row.key} t={t} />
                       </box>
                     ))}
                     <StreamingAssistant />
@@ -1519,6 +1544,7 @@ export function AppLayout({
 
       {overlay.modelPicker ? <ModelPicker onSelect={actions.onModelSelect} /> : null}
       {overlay.sessions ? <SessionPicker actions={actions} /> : null}
+      {overlay.copyPicker ? <CopyPicker onCopied={actions.sys} /> : null}
       {overlay.agents ? (
         <AgentPanelOverlay
           history={spawnHistory}

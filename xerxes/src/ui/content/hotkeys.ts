@@ -19,6 +19,8 @@ const copyHotkeys: [string, string][] = isMac
 
 export const HOTKEYS: [string, string][] = [
   ...copyHotkeys,
+  ['Ctrl+O / /copy', 'copy last assistant message; /copy picks any message (user or Xerxes)'],
+  ['Ctrl+T', 'expand / collapse all thinking blocks (click a thinking header to toggle one)'],
   [action + '+D', 'exit'],
   [action + '+G / Alt+G', 'open $EDITOR (Alt+G fallback for VSCode/Cursor)'],
   [action + '+L', 'redraw / repaint'],
