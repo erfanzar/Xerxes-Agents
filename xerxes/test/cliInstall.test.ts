@@ -85,3 +85,29 @@ test('Bun CLI exposes the companion installer without starting Python', async ()
   expect(stderr).toBe('')
   expect(stdout).toBe('Would run: ' + process.execPath + ' add --global --force ' + CLAUDE_CODE_PACKAGE + '\n')
 })
+
+test('Bun CLI renders install option errors as one clean line without a stack dump', async () => {
+  const child = Bun.spawn([
+    process.execPath,
+    join(import.meta.dir, '../src/cli.ts'),
+    'install',
+    '--node',
+  ], {
+    stderr: 'pipe',
+    stdout: 'pipe',
+  })
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ])
+
+  expect(exitCode).toBe(1)
+  expect(stdout).toBe('')
+  const lines = stderr.trim().split('\n')
+  expect(lines).toHaveLength(2)
+  expect(lines[0]).toStartWith('error: ')
+  expect(lines[1]).toBe("run 'xerxes install --help' for usage.")
+  expect(stderr).not.toContain('at ')
+  expect(stderr).not.toContain('cli.js')
+})

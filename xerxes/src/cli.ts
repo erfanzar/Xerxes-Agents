@@ -51,7 +51,11 @@ import {
   BrowserManager,
   registerBrowserManagerTools,
 } from "./operators/browser.js";
-import { INSTALL_HELP, runInstallCommand } from "./runtime/companionInstall.js";
+import {
+  INSTALL_HELP,
+  InstallCommandError,
+  runInstallCommand,
+} from "./runtime/companionInstall.js";
 import { bootstrap, bootstrapSubagentsForAgent } from "./runtime/bootstrap.js";
 import {
   formatDoctorReport,
@@ -61,7 +65,11 @@ import {
 import { resolveTuiEntry } from "./runtime/distribution.js";
 import { registerInteractionModeTool } from "./runtime/interactionModeTool.js";
 import { DaemonTranscriptStore } from "./session/daemonTranscript.js";
-import { UPDATE_HELP, runUpdateCommand } from "./runtime/update.js";
+import {
+  UPDATE_HELP,
+  UpdateCommandError,
+  runUpdateCommand,
+} from "./runtime/update.js";
 import { withTerminalWatchdog } from "./ui/lib/terminalModes.js";
 import {
   DEFAULT_EXPORT_FORMAT,
@@ -93,7 +101,7 @@ Usage:
   xerxes telegram --token <token>
   xerxes install --cloud-code [--force] [--dry-run]
   xerxes doctor
-  xerxes update [--check] [--dry-run] [--apply]
+  xerxes update [--check] [--git] [--dry-run] [--apply]
   xerxes export [session]
   xerxes skill <skill> [arguments]
   xerxes --help
@@ -103,6 +111,13 @@ One-shot, daemon, ACP, API, and the interactive TypeScript TUI run on Bun.
 Browser tools attach only to an explicitly supplied Chromium CDP endpoint; use /browser in the TUI or the daemon browser command to connect.`;
 
 const [argument, ...argumentsAfterCommand] = Bun.argv.slice(2);
+
+/** Render a typed command error as two clean stderr lines and exit; never dump a stack. */
+function reportCommandUsageError(error: Error, helpCommand: string): never {
+  console.error(`error: ${error.message}`);
+  console.error(`run '${helpCommand}' for usage.`);
+  process.exit(1);
+}
 
 if (argument === "--help" || argument === "-h") {
   console.log(HELP);
@@ -123,7 +138,14 @@ if (argument === "--help" || argument === "-h") {
   ) {
     console.log(INSTALL_HELP);
   } else {
-    await runInstallCommand(argumentsAfterCommand);
+    try {
+      await runInstallCommand(argumentsAfterCommand);
+    } catch (error) {
+      if (error instanceof InstallCommandError) {
+        reportCommandUsageError(error, "xerxes install --help");
+      }
+      throw error;
+    }
   }
 } else if (argument === "update") {
   if (
@@ -132,7 +154,14 @@ if (argument === "--help" || argument === "-h") {
   ) {
     console.log(UPDATE_HELP);
   } else {
-    await runUpdateCommand(argumentsAfterCommand);
+    try {
+      await runUpdateCommand(argumentsAfterCommand);
+    } catch (error) {
+      if (error instanceof UpdateCommandError) {
+        reportCommandUsageError(error, "xerxes update --help");
+      }
+      throw error;
+    }
   }
 } else if (argument === "export") {
   await runExport(argumentsAfterCommand);
