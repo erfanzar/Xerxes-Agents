@@ -88,10 +88,15 @@ export async function workspaceWrite(
   await ensureParent(target, options.createDirs ?? true)
   await Bun.write(target, content)
   return {
-    path: await paths.relative(target),
+    path: await relativePosix(paths, target),
     bytes: utf8Length(content),
     created: existing === undefined,
   }
+}
+
+/** Workspace-tool paths follow the cross-platform POSIX-separator contract. */
+async function relativePosix(paths: WorkspacePathResolver, target: string): Promise<string> {
+  return (await paths.relative(target)).replaceAll('\\', '/')
 }
 
 /** Append content to a workspace file, optionally inserting exactly one separator newline. */
@@ -116,7 +121,7 @@ export async function workspaceAppend(
   }
   await appendFile(target, prefix + content, 'utf8')
   return {
-    path: await paths.relative(target),
+    path: await relativePosix(paths, target),
     appendedBytes: utf8Length(prefix + content),
     created: existing === undefined,
   }

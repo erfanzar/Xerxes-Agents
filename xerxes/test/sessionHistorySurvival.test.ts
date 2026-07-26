@@ -1,7 +1,11 @@
-// Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
+﻿// Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from 'bun:test'
+
+// Raw Unix-socket client tests: the v35 filesystem socket transport does not
+// bind on native Windows, where the daemon runs the WebSocket transport.
+const testUnixSocket = test.skipIf(process.platform === "win32");
 import { mkdtemp, rm } from 'node:fs/promises'
 import { connect, type Socket } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -258,7 +262,7 @@ async function listSavedIds(client: HistoryTestClient, id: number): Promise<read
   return sessions.map(session => String((session as Record<string, unknown>).session_id ?? ''))
 }
 
-test('daemon undo of the last remaining turn removes the transcript explicitly but keeps the session usable', async () => {
+testUnixSocket('daemon undo of the last remaining turn removes the transcript explicitly but keeps the session usable', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'xerxes-history-undo-'))
   const socketPath = join(directory, 'daemon.sock')
   const server = new DaemonServer({
@@ -297,7 +301,7 @@ test('daemon undo of the last remaining turn removes the transcript explicitly b
   }
 })
 
-test('daemon partial undo keeps the persisted transcript and its remaining history', async () => {
+testUnixSocket('daemon partial undo keeps the persisted transcript and its remaining history', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'xerxes-history-partial-undo-'))
   const socketPath = join(directory, 'daemon.sock')
   const server = new DaemonServer({

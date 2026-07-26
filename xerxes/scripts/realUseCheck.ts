@@ -710,7 +710,7 @@ async function checkAcp(): Promise<string> {
   const initialized = server.initialize()
   const capabilities = initialized.capabilities
   require(isRecord(capabilities) && capabilities.streaming === true, 'ACP server did not advertise streaming')
-  const opened = server.openSession('/tmp/xerxes-real-use', { model: 'gpt-4o' })
+  const opened = server.openSession(join(tmpdir(), 'xerxes-real-use'), { model: 'gpt-4o' })
   const sessionId = stringField(opened, 'session_id')
   const prompt = await server.prompt(sessionId, 'native ACP prompt')
   require(isRecord(prompt) && prompt.ok === true, 'ACP prompt handler did not respond')
@@ -859,7 +859,7 @@ async function checkFileSync(): Promise<string> {
   require(result[0]?.status === 'copied', 'small file was not synced')
   const oversized = result[1]
   require(oversized !== undefined && oversized.status === 'skipped' && oversized.reason === 'max_bytes_exceeded', 'oversized file was not filtered')
-  require(copied.length === 1 && copied[0]?.includes('/host/workspace/small.txt'), 'file sync copied an unexpected source')
+  require(copied.length === 1 && copied[0]?.replaceAll('\\', '/').includes('/host/workspace/small.txt'), 'file sync copied an unexpected source')
   return 'file sync copied one 4-byte input and skipped one oversized input through injected ports'
 }
 
@@ -1027,7 +1027,7 @@ async function checkBridgeCommands(): Promise<string> {
 async function checkDoctor(): Promise<string> {
   const report = runAllDoctorChecks({
     environment: {},
-    home: '/tmp/xerxes-real-use-doctor-home',
+    home: join(tmpdir(), 'xerxes-real-use-doctor-home'),
     fileExists: () => false,
   })
   require(report.some(diagnosis => diagnosis.name === 'bun' && diagnosis.severity === 'ok'), 'Bun doctor did not confirm the active runtime')
@@ -1089,7 +1089,8 @@ async function checkSecurity(context: RealUseContext): Promise<string> {
   require(!checkUrl('http://127.0.0.1/private').allowed, 'loopback URL was not rejected')
   return await context.withTemporaryDirectory('security', async directory => {
     const resolved = await resolveWithin(directory, '/escape.txt')
-    require(resolved !== '/escape.txt' && resolved.endsWith('/escape.txt'), 'absolute/re-rooted path contract changed')
+    const resolvedPosix = resolved.replaceAll('\\', '/')
+    require(resolved !== '/escape.txt' && resolvedPosix.endsWith('/escape.txt'), 'absolute/re-rooted path contract changed')
     const approvalPath = join(directory, 'approvals.json')
     const approvals = new ApprovalStore({ persistencePath: approvalPath })
     approvals.add({ toolName: 'rm', scope: ApprovalScope.ALWAYS, granted: true })
@@ -1161,7 +1162,7 @@ async function checkPricingInsights(): Promise<string> {
 async function checkInteractiveRuntime(): Promise<string> {
   const state = createAgentState([{ role: 'user', content: 'hello native runtime' }])
   const router = new BridgeSlashRouter({
-    cwd: '/tmp/xerxes-real-use',
+    cwd: join(tmpdir(), 'xerxes-real-use'),
     config: { model: 'gpt-4o' },
     state,
   })

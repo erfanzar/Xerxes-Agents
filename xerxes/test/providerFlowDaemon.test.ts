@@ -1,7 +1,11 @@
-// Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
+﻿// Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from "bun:test";
+
+// Raw Unix-socket client tests: the v35 filesystem socket transport does not
+// bind on native Windows, where the daemon runs the WebSocket transport.
+const testUnixSocket = test.skipIf(process.platform === "win32");
 import { mkdtemp, rm } from "node:fs/promises";
 import { connect, type Socket } from "node:net";
 import { tmpdir } from "node:os";
@@ -28,7 +32,7 @@ interface ProviderPrompt {
   readonly requestId: string;
 }
 
-test("daemon routes interactive provider setup through native question replies without credential echoing", async () => {
+testUnixSocket("daemon routes interactive provider setup through native question replies without credential echoing", async () => {
   const directory = await mkdtemp(
     join(tmpdir(), "xerxes-bun-provider-daemon-"),
   );

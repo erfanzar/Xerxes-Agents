@@ -76,33 +76,40 @@ describe("native release package staging", () => {
       "THIRD_PARTY_NOTICES.md",
       "ui/entry.js",
     ]);
-    expect(
-      (await stat(join(packageDirectory, "bin/xerxes"))).mode & 0o111,
-    ).not.toBe(0);
-    expect(
-      (await stat(join(packageDirectory, "bin/xerxes-acp"))).mode & 0o111,
-    ).not.toBe(0);
-    expect(
-      (await stat(join(packageDirectory, "bin/xerxes-bun"))).mode & 0o111,
-    ).not.toBe(0);
+    // The executable bit cannot be observed on Windows; npm bin shimming owns it there.
+    if (process.platform !== 'win32') {
+      expect(
+        (await stat(join(packageDirectory, "bin/xerxes"))).mode & 0o111,
+      ).not.toBe(0);
+      expect(
+        (await stat(join(packageDirectory, "bin/xerxes-acp"))).mode & 0o111,
+      ).not.toBe(0);
+      expect(
+        (await stat(join(packageDirectory, "bin/xerxes-bun"))).mode & 0o111,
+      ).not.toBe(0);
+    }
     expect(
       await readFile(join(packageDirectory, "bin/xerxes-bun"), "utf8"),
     ).toBe(await readFile(join(packageDirectory, "bin/xerxes"), "utf8"));
     expect(
       await readFile(join(packageDirectory, "bin/xerxes-acp"), "utf8"),
     ).toContain("process.argv.splice(2, 0, 'acp')");
-    const acp = Bun.spawn(
-      [join(packageDirectory, "bin/xerxes-acp"), "--write-registry"],
-      {
-        stderr: "pipe",
-        stdout: "pipe",
-      },
-    );
-    expect(await new Response(acp.stderr).text()).toBe("");
-    expect(await new Response(acp.stdout).text()).toBe(
-      '["acp","--write-registry"]\n',
-    );
-    expect(await acp.exited).toBe(0);
+    // The staged launcher is a `#!/usr/bin/env bun` shebang script; Windows
+    // cannot exec it directly (npm bin shims provide .cmd wrappers instead).
+    if (process.platform !== 'win32') {
+      const acp = Bun.spawn(
+        [join(packageDirectory, "bin/xerxes-acp"), "--write-registry"],
+        {
+          stderr: "pipe",
+          stdout: "pipe",
+        },
+      );
+      expect(await new Response(acp.stderr).text()).toBe("");
+      expect(await new Response(acp.stdout).text()).toBe(
+        '["acp","--write-registry"]\n',
+      );
+      expect(await acp.exited).toBe(0);
+    }
     const metadata = JSON.parse(
       await readFile(join(packageDirectory, "package.json"), "utf8"),
     ) as Record<string, unknown>;

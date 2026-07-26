@@ -26,7 +26,11 @@ test('Bun CLI exposes a no-mutation update dry-run surface', async () => {
   expect(stderr).toBe('')
   expect(stdout).toContain('Git: ')
   expect(stdout).toContain('Package registry: not checked')
-  expect(stdout).toContain(`Would run: ${process.execPath} add --global file:./release-preview`)
+  // The dry-run printer shell-quotes argv; Windows exec paths contain
+  // backslashes and are therefore JSON-quoted (doubled backslashes).
+  // Compare quote-insensitively with backslashes collapsed.
+  const unquoted = stdout.replaceAll('"', '').replaceAll('\\\\', '\\')
+  expect(unquoted).toContain(`Would run: ${process.execPath} add --global file:./release-preview`)
 })
 
 test('Bun CLI renders update option errors as one clean line without a stack dump', async () => {

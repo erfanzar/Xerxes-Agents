@@ -1,7 +1,11 @@
-// Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
+﻿// Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from 'bun:test'
+
+// Raw Unix-socket client tests: the v35 filesystem socket transport does not
+// bind on native Windows, where the daemon runs the WebSocket transport.
+const testUnixSocket = test.skipIf(process.platform === "win32");
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { connect, type Socket } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -12,7 +16,7 @@ import { DaemonInteractionBoard } from '../src/daemon/interactions.js'
 import { InMemoryDaemonRuntime, type DaemonEvent, type DaemonSession, type TurnRunControls, type TurnRunner } from '../src/daemon/runtime.js'
 import { DaemonServer } from '../src/daemon/server.js'
 
-test('daemon completion preserves command and path semantics while native skills remain invocable by slash', async () => {
+testUnixSocket('daemon completion preserves command and path semantics while native skills remain invocable by slash', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'xerxes-daemon-completion-parity-'))
   const socketPath = join(directory, 'daemon.sock')
   const runtime = new InMemoryDaemonRuntime(undefined, {
@@ -96,7 +100,7 @@ test('daemon completion preserves command and path semantics while native skills
   }
 })
 
-test('daemon question interactions emit a request, resolve matching answers, and fail safely when unwired or cancelled', async () => {
+testUnixSocket('daemon question interactions emit a request, resolve matching answers, and fail safely when unwired or cancelled', async () => {
   const board = new DaemonInteractionBoard()
   await expect(board.ask('missing-session', { question: 'What should happen?' })).rejects.toThrow(
     'outside an active daemon turn',
@@ -134,7 +138,7 @@ test('daemon question interactions emit a request, resolve matching answers, and
   }
 })
 
-test('slash steering stays on the issuing connection session and queues at the active turn boundary', async () => {
+testUnixSocket('slash steering stays on the issuing connection session and queues at the active turn boundary', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'xerxes-daemon-slash-steer-parity-'))
   const socketPath = join(directory, 'daemon.sock')
   const runner = new SteerBoundaryRunner()
@@ -194,7 +198,7 @@ test('slash steering stays on the issuing connection session and queues at the a
   }
 })
 
-test('slash compact rewrites and persists the active native session without submitting a model turn', async () => {
+testUnixSocket('slash compact rewrites and persists the active native session without submitting a model turn', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'xerxes-daemon-compact-parity-'))
   const sessionDirectory = join(directory, 'sessions')
   const socketPath = join(directory, 'daemon.sock')

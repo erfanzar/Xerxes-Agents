@@ -373,6 +373,11 @@ export class PluginRegistry {
 
 /** World-writable directories must never be a source of executable plugin code. */
 function isWorldWritableDirectory(directory: string): boolean {
+  // POSIX mode bits do not exist on Windows: Node synthesizes mode from the
+  // read-only attribute, which makes every writable directory look
+  // world-writable (0o666). ACLs cannot be evaluated through stat, so this
+  // check is POSIX-only; Windows plugin directories rely on NTFS ACLs.
+  if (process.platform === 'win32') return false
   try {
     return (statSync(directory).mode & 0o002) !== 0
   } catch {

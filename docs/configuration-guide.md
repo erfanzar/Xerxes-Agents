@@ -36,6 +36,7 @@ Useful process-level overrides include:
 | `XERXES_DAEMON_PORT` | WebSocket control port. |
 | `XERXES_DAEMON_SOCKET` | Local daemon socket path. |
 | `XERXES_DAEMON_TOKEN` | Control-plane token. |
+| `XERXES_DAEMON_TRANSPORT` | Local control transport: `unix` (POSIX default) or `websocket` (Windows default). |
 | `XERXES_MAX_TURNS` | Maximum concurrent daemon turns. |
 | `XERXES_MODEL` | Runtime model override. |
 | `XERXES_BASE_URL` | Runtime provider base URL. |

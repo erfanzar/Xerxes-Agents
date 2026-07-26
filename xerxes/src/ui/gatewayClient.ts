@@ -7,13 +7,15 @@
 // JSON-RPC 2.0, and demuxes responses (carry `id`) from streaming events
 // (`method === "event"`). See `xerxes/src/ui/PROTOCOL.md` for the frozen contract.
 //
-// The transport is a Unix socket (Node `net`) rather than child stdio.
+// The transport is a Unix socket (Node `net`) on POSIX hosts and the
+// token-authenticated WebSocket gateway (per-project endpoint file) on native
+// Windows, selected by `resolveDaemonTransport` / XERXES_DAEMON_TRANSPORT.
 
 import { type ChildProcess, execFileSync, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { existsSync, readFileSync, realpathSync } from 'node:fs'
-import { connect, type Socket } from 'node:net'
+import { connect } from 'node:net'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -80,13 +82,137 @@ export function resolveProjectDir(projectDir?: string): string {
  * Per-project socket + pid paths. `XERXES_DAEMON_SOCKET` overrides the socket
  * while retaining the deterministic per-project pid path.
  */
-export function daemonPaths(projectDir: string): { socketPath: string; pidPath: string } {
+export function daemonPaths(projectDir: string): { socketPath: string; pidPath: string; endpointPath: string } {
   const digest = createHash('sha256').update(projectDir, 'utf8').digest('hex').slice(0, 16)
   const base = join(xerxesHome(), 'daemon', 'projects')
   const override = (process.env.XERXES_DAEMON_SOCKET ?? '').trim()
   return {
     socketPath: override || join(base, `${digest}.sock`),
-    pidPath: join(base, `${digest}.pid`)
+    pidPath: join(base, `${digest}.pid`),
+    endpointPath: join(base, `${digest}.endpoint.json`)
+  }
+}
+
+export type DaemonTransport = 'unix' | 'websocket'
+
+/**
+ * Mirror of `daemon/paths.ts` `daemonTransport`: native Windows cannot bind
+ * the filesystem `.sock` path, so the WebSocket gateway is the default there.
+ */
+export function resolveDaemonTransport(
+  environment: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform
+): DaemonTransport {
+  const configured = environment.XERXES_DAEMON_TRANSPORT?.trim().toLowerCase()
+  if (configured === 'unix' || configured === 'websocket') return configured
+  return platform === 'win32' ? 'websocket' : 'unix'
+}
+
+/** Coordinates published by the daemon in websocket transport mode. */
+interface DaemonEndpointFile {
+  readonly transport: 'ws'
+  readonly url: string
+  readonly token: string
+  readonly pid: number
+  readonly protocol: number
+}
+
+/** Read and validate the per-project endpoint file; `null` when absent or stale. */
+export function readDaemonEndpoint(endpointPath: string): DaemonEndpointFile | null {
+  try {
+    if (!existsSync(endpointPath)) {
+      return null
+    }
+    const parsed = JSON.parse(readFileSync(endpointPath, 'utf8')) as Partial<DaemonEndpointFile>
+    if (
+      parsed.transport !== 'ws' ||
+      typeof parsed.url !== 'string' ||
+      !parsed.url.startsWith('ws') ||
+      typeof parsed.token !== 'string' ||
+      !parsed.token ||
+      parsed.protocol !== 35
+    ) {
+      return null
+    }
+    return parsed as DaemonEndpointFile
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The socket shape GatewayClient needs from a transport. `net.Socket`
+ * satisfies it structurally; `WebSocketGatewaySocket` adapts a Bun WebSocket
+ * to the same NDJSON line stream.
+ */
+export interface GatewaySocket {
+  readonly destroyed: boolean
+  setEncoding(encoding: BufferEncoding): unknown
+  write(data: string, callback?: (error?: Error | null) => void): unknown
+  end(): void
+  destroy(): void
+  on(event: 'data', listener: (chunk: string) => void): unknown
+  on(event: 'error', listener: (error: Error) => void): unknown
+  on(event: 'close', listener: () => void): unknown
+  once(event: 'close', listener: () => void): unknown
+}
+
+/** Bun WebSocket adapted to the NDJSON `GatewaySocket` contract. */
+class WebSocketGatewaySocket extends EventEmitter implements GatewaySocket {
+  private closed = false
+
+  constructor(private readonly ws: WebSocket) {
+    super()
+    ws.addEventListener('message', event => {
+      const data = event.data
+      // The gateway sends one complete JSON-RPC frame per WebSocket message
+      // without the NDJSON terminator the line parser expects; restore it.
+      const text = typeof data === 'string' ? data : Buffer.from(data as ArrayBuffer).toString('utf8')
+      this.emit('data', text.endsWith('\n') ? text : text + '\n')
+    })
+    ws.addEventListener('error', () => this.emit('error', new Error('daemon websocket transport error')))
+    ws.addEventListener('close', () => {
+      this.closed = true
+      this.emit('close')
+    })
+  }
+
+  get destroyed(): boolean {
+    return this.closed
+  }
+
+  setEncoding(_encoding: BufferEncoding): void {
+    // WebSocket messages are already decoded strings.
+  }
+
+  end(): void {
+    this.destroy()
+  }
+
+  write(data: string, callback?: (error?: Error | null) => void): boolean {
+    try {
+      this.ws.send(data)
+      callback?.(null)
+      return true
+    } catch (error) {
+      callback?.(error instanceof Error ? error : new Error(String(error)))
+      return false
+    }
+  }
+
+  destroy(): void {
+    if (this.closed) {
+      // net.Socket emits 'close' even when destroy() races an already-dead
+      // socket; detachSocketSilently waits for it.
+      queueMicrotask(() => this.emit('close'))
+      return
+    }
+    this.closed = true
+    try {
+      this.ws.close()
+    } catch {
+      queueMicrotask(() => this.emit('close'))
+    }
   }
 }
 
@@ -322,7 +448,7 @@ export class GatewayClient extends EventEmitter {
   private readonly bunBinary: string | undefined
   private readonly bunDaemonPath: string | undefined
   private readonly expectedDaemonBuildId: string
-  private socket: Socket | null = null
+  private socket: GatewaySocket | null = null
   private proc: ChildProcess | null = null
   private nextId = 1
   private readonly pending = new Map<number, Pending>()
@@ -335,7 +461,7 @@ export class GatewayClient extends EventEmitter {
   private activeSessionKey: string
   private readonly sessionKeys = new Map<string, string>()
   private lastApprovalRequestId = ''
-  private readonly silentSockets = new WeakSet<Socket>()
+  private readonly silentSockets = new WeakSet<GatewaySocket>()
 
   constructor(opts: GatewayClientOptions = {}) {
     super()
@@ -354,9 +480,9 @@ export class GatewayClient extends EventEmitter {
     if (this.socket) {
       return
     }
-    const { socketPath, pidPath } = daemonPaths(this.projectDir)
+    const { socketPath, pidPath, endpointPath } = daemonPaths(this.projectDir)
 
-    if (await this.tryConnect(socketPath)) {
+    if (await this.tryConnect(socketPath, endpointPath)) {
       if (await this.ensureConnectedDaemonCurrent(socketPath, pidPath)) {
         this.emitClient('gateway.ready', { socketPath, spawned: false })
         return
@@ -373,7 +499,7 @@ export class GatewayClient extends EventEmitter {
       if (this.proc && this.proc.exitCode !== null) {
         throw new Error(`daemon exited (code ${this.proc.exitCode}) before becoming ready:\n${this.stderrSnapshot()}`)
       }
-      if (await this.tryConnect(socketPath)) {
+      if (await this.tryConnect(socketPath, endpointPath)) {
         if (!(await this.ensureConnectedDaemonCurrent(socketPath, pidPath))) {
           throw new Error('newly spawned Bun daemon reported an unexpected build identity')
         }
@@ -385,7 +511,10 @@ export class GatewayClient extends EventEmitter {
     throw new Error(`daemon did not become ready within ${STARTUP_TIMEOUT_MS}ms:\n${this.stderrSnapshot()}`)
   }
 
-  private tryConnect(socketPath: string): Promise<boolean> {
+  private tryConnect(socketPath: string, endpointPath?: string): Promise<boolean> {
+    if (resolveDaemonTransport() === 'websocket') {
+      return this.tryConnectWebSocket(endpointPath ?? daemonPaths(this.projectDir).endpointPath)
+    }
     return new Promise<boolean>(res => {
       const sock = connect({ path: socketPath })
       const onError = () => {
@@ -397,6 +526,58 @@ export class GatewayClient extends EventEmitter {
         sock.removeListener('error', onError)
         this.attachSocket(sock)
         res(true)
+      })
+    })
+  }
+
+  /** Attach to the daemon's WebSocket gateway using the per-project endpoint file. */
+  private tryConnectWebSocket(endpointPath: string): Promise<boolean> {
+    const endpoint = readDaemonEndpoint(endpointPath)
+    if (!endpoint) {
+      return Promise.resolve(false)
+    }
+    let url: URL
+    try {
+      url = new URL(endpoint.url)
+    } catch {
+      return Promise.resolve(false)
+    }
+    url.searchParams.set('token', endpoint.token)
+    return new Promise<boolean>(res => {
+      let settled = false
+      const finish = (ok: boolean) => {
+        if (!settled) {
+          settled = true
+          res(ok)
+        }
+      }
+      let ws: WebSocket
+      try {
+        ws = new WebSocket(url)
+      } catch {
+        finish(false)
+        return
+      }
+      const timeout = setTimeout(() => {
+        try {
+          ws.close()
+        } catch {
+          // Best effort; the connect attempt is already abandoned.
+        }
+        finish(false)
+      }, DAEMON_IDENTITY_TIMEOUT_MS)
+      ws.addEventListener('open', () => {
+        clearTimeout(timeout)
+        this.attachSocket(new WebSocketGatewaySocket(ws))
+        finish(true)
+      })
+      ws.addEventListener('error', () => {
+        clearTimeout(timeout)
+        finish(false)
+      })
+      ws.addEventListener('close', () => {
+        clearTimeout(timeout)
+        finish(false)
       })
     })
   }
@@ -511,7 +692,7 @@ export class GatewayClient extends EventEmitter {
     })
   }
 
-  private attachSocket(sock: Socket): void {
+  private attachSocket(sock: GatewaySocket): void {
     this.socket = sock
     // A partial line buffered from a dead socket must not prefix the first
     // frame decoded on its replacement.
@@ -1505,6 +1686,19 @@ function pidFromFile(path: string): number | undefined {
 
 function daemonProcessCommand(pid: number): string {
   try {
+    if (process.platform === 'win32') {
+      // `ps` does not exist on Windows; CIM exposes the same command line.
+      return execFileSync(
+        'powershell',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`
+        ],
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }
+      ).trim()
+    }
     return execFileSync('ps', ['-p', String(pid), '-o', 'command='], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore']

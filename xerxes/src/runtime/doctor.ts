@@ -4,6 +4,7 @@
 import { existsSync } from 'node:fs'
 
 import { xerxesHome } from '../core/paths.js'
+import { daemonTransport } from '../daemon/paths.js'
 import { PROVIDERS } from '../llms/providerRegistry.js'
 
 export type DiagnosisSeverity = 'fail' | 'ok' | 'warn'
@@ -80,15 +81,19 @@ export function checkXerxesHome(options: DoctorOptions = {}): Diagnosis {
 /** Identify hosts where the Unix-socket daemon needs an alternate transport. */
 export function checkPlatform(options: DoctorOptions = {}): Diagnosis {
   const platform = options.platform ?? process.platform
-  if (platform === 'win32') {
+  const transport = daemonTransport(options.environment ?? process.env, platform)
+  if (platform === 'win32' && transport === 'unix') {
     return diagnosis(
       'platform',
       'warn',
-      'Native Windows lacks the Unix-socket daemon transport used by default',
-      'Use WSL2 or configure the WebSocket control transport.',
+      'The Unix-socket daemon transport is forced on native Windows, which cannot bind it',
+      'Unset XERXES_DAEMON_TRANSPORT so the WebSocket control transport is used.',
     )
   }
-  return diagnosis('platform', 'ok', platform + ' host')
+  if (platform === 'win32') {
+    return diagnosis('platform', 'ok', 'win32 host (daemon transport: websocket)')
+  }
+  return diagnosis('platform', 'ok', platform + ' host (daemon transport: ' + transport + ')')
 }
 
 const MACOS_COMPUTER_USE_BINARIES = ['/usr/sbin/screencapture', '/usr/bin/sips', '/usr/bin/osascript'] as const

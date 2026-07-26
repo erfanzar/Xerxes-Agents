@@ -1,7 +1,11 @@
-// Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
+﻿// Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from "bun:test";
+
+// Raw Unix-socket client tests: the v35 filesystem socket transport does not
+// bind on native Windows, where the daemon runs the WebSocket transport.
+const testUnixSocket = test.skipIf(process.platform === "win32");
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { connect, type Socket } from "node:net";
 import { tmpdir } from "node:os";
@@ -80,7 +84,7 @@ test("validateTurnImages enforces per-image and per-turn byte caps without trunc
   ).toThrow(/combined turn limit/);
 });
 
-test("daemon turn.submit rejects invalid images at the RPC boundary", async () => {
+testUnixSocket("daemon turn.submit rejects invalid images at the RPC boundary", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-turn-images-"));
   const socketPath = join(directory, "daemon.sock");
   const server = new DaemonServer({
@@ -124,7 +128,7 @@ test("daemon turn.submit rejects invalid images at the RPC boundary", async () =
   }
 });
 
-test("turn.submit images reach the provider as image_url parts and round-trip the transcript", async () => {
+testUnixSocket("turn.submit images reach the provider as image_url parts and round-trip the transcript", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-turn-images-e2e-"));
   const socketPath = join(directory, "daemon.sock");
   const llm = new CapturingClient();

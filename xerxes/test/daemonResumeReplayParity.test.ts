@@ -1,7 +1,11 @@
-// Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
+﻿// Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from 'bun:test'
+
+// Raw Unix-socket client tests: the v35 filesystem socket transport does not
+// bind on native Windows, where the daemon runs the WebSocket transport.
+const testUnixSocket = test.skipIf(process.platform === "win32");
 import { mkdtemp, rm } from 'node:fs/promises'
 import { connect, type Socket } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -11,7 +15,7 @@ import { InMemoryDaemonRuntime } from '../src/daemon/runtime.js'
 import { DaemonServer } from '../src/daemon/server.js'
 import { DaemonTranscriptStore } from '../src/session/daemonTranscript.js'
 
-test('explicit daemon resume replays visible turns but filters internal prompts and tool output', async () => {
+testUnixSocket('explicit daemon resume replays visible turns but filters internal prompts and tool output', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'xerxes-daemon-replay-parity-'))
   const sessionDirectory = join(directory, 'sessions')
   const socketPath = join(directory, 'daemon.sock')
@@ -87,11 +91,11 @@ test('explicit daemon resume replays visible turns but filters internal prompts 
       && frame.params.payload?.category === 'history')
       .map(frame => ({ body: frame.params?.payload?.body, type: frame.params?.payload?.type }))
     expect(history).toEqual([
-      { type: 'replay_user', body: '✨ visible question' },
+      { type: 'replay_user', body: 'âœ¨ visible question' },
       { type: 'replay_assistant', body: 'visible answer\nwith a second line' },
-      { type: 'replay_user', body: '✨ visible follow up' },
+      { type: 'replay_user', body: 'âœ¨ visible follow up' },
       { type: 'replay_assistant', body: 'visible final answer' },
-      { type: 'resumed', body: `── resumed session ${sessionId} (4 messages) ──` },
+      { type: 'resumed', body: `â”€â”€ resumed session ${sessionId} (4 messages) â”€â”€` },
     ])
     expect(resumed.params?.payload?.body).toContain('(4 messages)')
     expect(JSON.stringify(history)).not.toContain('private instructions')

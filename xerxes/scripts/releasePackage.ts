@@ -302,11 +302,15 @@ export async function validateReleasePackage(
       );
   }
 
-  for (const launcher of ["xerxes", "xerxes-acp", "xerxes-bun"]) {
-    const launcherMode = (await stat(join(packageDirectory, "bin", launcher)))
-      .mode;
-    if ((launcherMode & 0o111) === 0)
-      throw new Error(`Release launcher must be executable: bin/${launcher}`);
+  // The executable bit cannot be observed on Windows (Node reports a
+  // synthesized mode); npm's bin shimming owns launchers there.
+  if (process.platform !== 'win32') {
+    for (const launcher of ["xerxes", "xerxes-acp", "xerxes-bun"]) {
+      const launcherMode = (await stat(join(packageDirectory, "bin", launcher)))
+        .mode;
+      if ((launcherMode & 0o111) === 0)
+        throw new Error(`Release launcher must be executable: bin/${launcher}`);
+    }
   }
 
   if (options.archivePath !== undefined) {

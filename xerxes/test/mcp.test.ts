@@ -111,13 +111,20 @@ test('MCPClient completes stdio initialization, discovery, tool calls, resources
       },
     ])
 
-    await expect(client.callTool('echo', { value: 'hi' })).resolves.toEqual({
+    // NOTE: these assertions use direct awaits instead of `.resolves`: on
+    // Windows, expect().resolves changes microtask scheduling just enough to
+    // hit a Bun stream race where the child's response chunk is never
+    // delivered to the client's read loop.
+    const echoResult = await client.callTool('echo', { value: 'hi' })
+    expect(echoResult).toEqual({
       content: [{ type: 'text', text: 'echo:hi' }],
     })
-    await expect(client.readResource('memo://welcome')).resolves.toEqual({
+    const resource = await client.readResource('memo://welcome')
+    expect(resource).toEqual({
       contents: [{ uri: 'memo://welcome', mimeType: 'text/plain', text: 'hello resource' }],
     })
-    await expect(client.getPrompt('greet', { name: 'Ada' })).resolves.toEqual({
+    const prompt = await client.getPrompt('greet', { name: 'Ada' })
+    expect(prompt).toEqual({
       messages: [{ role: 'user', content: { type: 'text', text: 'hello Ada' } }],
     })
   } finally {
@@ -204,13 +211,22 @@ test('MCPClient survives garbage stdout lines, malformed frames, and throwing no
     expect(client.connected).toBeTrue()
     expect(client.serverInfo).toEqual({ name: 'chatty-mcp', version: '0.0.1' })
 
-    await expect(client.callTool('echo')).resolves.toEqual({
+    // Direct awaits instead of `.resolves` (see the note above).
+    const echoResult = await client.callTool('echo')
+    expect(echoResult).toEqual({
       content: [{ type: 'text', text: 'echo:ok' }],
     })
 
     // A malformed frame rejects only the request it implicates.
-    await expect(client.callTool('poison')).rejects.toBeInstanceOf(MCPProtocolError)
-    await expect(client.callTool('echo')).resolves.toEqual({
+    let protocolError: unknown
+    try {
+      await client.callTool('poison')
+    } catch (error) {
+      protocolError = error
+    }
+    expect(protocolError).toBeInstanceOf(MCPProtocolError)
+    const secondEcho = await client.callTool('echo')
+    expect(secondEcho).toEqual({
       content: [{ type: 'text', text: 'echo:ok' }],
     })
     expect(client.connected).toBeTrue()
@@ -242,7 +258,9 @@ test('MCPClient.callTool aborts through an AbortSignal and discards the pending 
     await expect(held).rejects.toBeInstanceOf(MCPConnectionError)
 
     // The connection stays healthy after a discarded in-flight request.
-    await expect(client.callTool('echo')).resolves.toEqual({
+    // (Direct await instead of `.resolves`; see the note in the first test.)
+    const echoResult = await client.callTool('echo')
+    expect(echoResult).toEqual({
       content: [{ type: 'text', text: 'echo:ok' }],
     })
   } finally {

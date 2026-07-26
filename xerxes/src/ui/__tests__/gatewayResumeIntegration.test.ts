@@ -14,7 +14,9 @@ import { GatewayClient } from '../gatewayClient.js'
 import type { SessionResumeResponse } from '../gatewayTypes.js'
 
 describe('GatewayClient resumed transcript integration', () => {
-  it('hydrates persisted daemon history once through the real socket protocol', async () => {
+  // Raw Unix-socket attach: on native Windows the daemon runs the WebSocket
+  // transport and no filesystem socket exists to connect().
+  it.skipIf(process.platform === 'win32')('hydrates persisted daemon history once through the real socket protocol', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'xerxes-gateway-resume-'))
     const sessionDirectory = join(directory, 'sessions')
     const socketPath = join(directory, 'daemon.sock')

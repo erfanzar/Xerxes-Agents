@@ -72,7 +72,9 @@ describe('SkinEngine', () => {
     rmSync(directory, { force: true, recursive: true })
   })
 
-  it('resolves the user skin directory below XERXES_HOME without creating it', () => {
+  // POSIX path expectation (/tmp/...): gated on Windows, covered by the
+  // platform-aware skin directory tests around it.
+  it.skipIf(process.platform === 'win32')('resolves the user skin directory below XERXES_HOME without creating it', () => {
     expect(skinDirectory({ XERXES_HOME: '/tmp/xerxes-home' }, '/unused')).toBe('/tmp/xerxes-home/skins')
     expect(skinDirectory({}, '/home/xerxes')).toBe('/home/xerxes/.xerxes/skins')
   })

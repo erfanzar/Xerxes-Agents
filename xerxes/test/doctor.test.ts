@@ -44,9 +44,16 @@ test('computer_use doctor check reports platform fit, missing tools, and permiss
   expect(ready.message).toContain('Accessibility')
 })
 
-test('Bun doctor warns for absent optional setup and Windows Unix-socket limitations', () => {
+test('Bun doctor warns for absent optional setup and reports the win32 daemon transport', () => {
   expect(checkXerxesOnPath({ findExecutable: () => null }).severity).toBe('warn')
   expect(checkProviderKeys({ environment: {} }).severity).toBe('warn')
   expect(checkXerxesHome({ home: '/missing', fileExists: () => false }).severity).toBe('warn')
-  expect(checkPlatform({ platform: 'win32' }).message).toContain('Unix-socket')
+  // Native Windows runs the WebSocket control transport by default; forcing
+  // the Unix socket there is the only warned configuration.
+  expect(checkPlatform({ platform: 'win32' }).severity).toBe('ok')
+  expect(checkPlatform({ platform: 'win32' }).message).toContain('websocket')
+  expect(
+    checkPlatform({ platform: 'win32', environment: { XERXES_DAEMON_TRANSPORT: 'unix' } }).severity,
+  ).toBe('warn')
+  expect(checkPlatform({ platform: 'linux' }).severity).toBe('ok')
 })

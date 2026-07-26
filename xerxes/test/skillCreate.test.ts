@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from 'bun:test'
+import { join, resolve } from 'node:path'
 
 import { SKILL_CREATE_AUTO, SkillCreateFlow, sanitizeSkillSlug } from '../src/daemon/skillCreate.js'
 
@@ -20,7 +21,8 @@ test('skill-create flow validates a deferred slug, creates only its bounded dire
   expect(transition).toEqual(expect.objectContaining({ kind: 'prompt', message: expect.stringContaining("doesn't look like a valid slug") }))
 
   transition = await requiredTransition(flow.answer('session-a', 'Commit Helper!'))
-  expect(ensured).toEqual(['/skills/commithelper'])
+  // The flow resolves the target with node:path, which is platform-specific.
+  expect(ensured).toEqual([resolve('/skills', 'commithelper')])
   expect(transition).toEqual(expect.objectContaining({ kind: 'prompt', message: expect.stringContaining('What should this skill do?') }))
 
   transition = await requiredTransition(flow.answer('session-a', 'Prepare clean commits.'))
@@ -33,7 +35,7 @@ test('skill-create flow validates a deferred slug, creates only its bounded dire
   if (transition.kind !== 'draft') throw new Error('Expected a final skill draft')
   expect(transition.draft).toMatchObject({
     name: 'commithelper',
-    targetPath: '/skills/commithelper/SKILL.md',
+    targetPath: join(resolve('/skills'), 'commithelper', 'SKILL.md'),
     announcement: expect.stringContaining('Drafting skill `commithelper`'),
   })
   expect(transition.draft.prompt).toContain('Prepare clean commits.')

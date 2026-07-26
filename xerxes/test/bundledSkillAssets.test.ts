@@ -240,7 +240,9 @@ test("build asset copier preserves the built-in agent family for installed runti
   }
 });
 
-test("build asset copier rejects executable bundled skill files", async () => {
+// The executable-bit check is POSIX-only: chmod cannot mark a file executable
+// on Windows, so the rejection has nothing to observe there.
+test.skipIf(process.platform === 'win32')("build asset copier rejects executable bundled skill files", async () => {
   const root = await mkdtemp(join(tmpdir(), "xerxes-bundled-skill-mode-"));
   const sourceDirectory = join(root, "source");
   try {

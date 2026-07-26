@@ -46,7 +46,9 @@ const VALID_PATCH = [
   "",
 ].join("\n");
 
-test("PTY manager preserves interactive stdin, shell expressions, and asynchronous polling", async () => {
+// POSIX-shell PTY through Bun.Terminal; the ConPTY backend is covered by
+// ptyConpty.test.ts on Windows.
+test.skipIf(process.platform === 'win32')("PTY manager preserves interactive stdin, shell expressions, and asynchronous polling", async () => {
   const shell = Bun.which("sh") ?? "/bin/sh";
   const manager = new PtySessionManager();
   const interactive = await manager.createSession(
@@ -570,7 +572,7 @@ test("operator subagent tools accept task-description and target aliases through
   }
 });
 
-test("terminal operator tools keep a session visible through polling, interruption, and close", async () => {
+test.skipIf(process.platform === 'win32')("terminal operator tools keep a session visible through polling, interruption, and close", async () => {
   const state = new OperatorState({
     config: createOperatorRuntimeConfig({
       enabled: true,

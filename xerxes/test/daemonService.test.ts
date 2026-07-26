@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from 'bun:test'
+import { join } from 'node:path'
 
 import {
   DAEMON_SERVICE_LABEL,
@@ -88,13 +89,16 @@ function host(platform: string, filesystem = new MemoryFilesystem(), process = n
 
 test('service renderers preserve launchd and systemd units with Bun CLI commands', () => {
   const paths = daemonServicePaths('/home/agent', '/home/agent/.xerxes')
+  // Paths derive through node:path joins, which are platform-specific.
+  const xerxesHome = join('/home/agent/.xerxes')
+  const agentHome = join('/home/agent')
   expect(paths).toEqual({
-    defaultLogDirectory: '/home/agent/.xerxes/daemon/logs',
-    defaultPidPath: '/home/agent/.xerxes/daemon/daemon.pid',
-    launchdDirectory: '/home/agent/Library/LaunchAgents',
-    launchdPlistPath: '/home/agent/Library/LaunchAgents/com.xerxes.daemon.plist',
-    systemdDirectory: '/home/agent/.config/systemd/user',
-    systemdUnitPath: '/home/agent/.config/systemd/user/xerxes-daemon.service',
+    defaultLogDirectory: join(xerxesHome, 'daemon', 'logs'),
+    defaultPidPath: join(xerxesHome, 'daemon', 'daemon.pid'),
+    launchdDirectory: join(agentHome, 'Library', 'LaunchAgents'),
+    launchdPlistPath: join(agentHome, 'Library', 'LaunchAgents', 'com.xerxes.daemon.plist'),
+    systemdDirectory: join(agentHome, '.config', 'systemd', 'user'),
+    systemdUnitPath: join(agentHome, '.config', 'systemd', 'user', 'xerxes-daemon.service'),
   })
 
   const plist = renderLaunchdPlist(COMMAND, '/workspace/xerxes', '/var/log/xerxes')

@@ -5,6 +5,7 @@ import { stat } from 'node:fs/promises'
 
 import { ValidationError } from '../core/errors.js'
 import { ToolRegistry } from '../executors/toolRegistry.js'
+import { resolveWindowsSpawn } from '../security/winSpawn.js'
 import type { JsonObject, ToolDefinition } from '../types/toolCalls.js'
 import { optionalInteger, optionalString, optionalStringArray, requireRange, requiredString } from './inputs.js'
 import { WorkspacePathResolver } from './pathSafety.js'
@@ -113,7 +114,10 @@ export async function executeCommand(
   }, timeout)
 
   try {
-    const process = Bun.spawn([command, ...args], {
+    // On Windows, `.cmd`/`.bat` shims (npm, npx, tsc, …) cannot be spawned
+    // without a shell; resolveWindowsSpawn wraps only those in cmd.exe.
+    const spawnTarget = resolveWindowsSpawn(command, args)
+    const process = Bun.spawn([spawnTarget.command, ...spawnTarget.args], {
       cwd,
       stdin: 'ignore',
       stdout: 'pipe',

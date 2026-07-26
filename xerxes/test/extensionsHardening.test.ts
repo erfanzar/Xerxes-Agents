@@ -72,7 +72,9 @@ export function register(registry) {
   })
 })
 
-test('plugin discovery refuses to execute code from a world-writable directory', async () => {
+// The world-writable mode check is POSIX-only: Windows has no stat mode bits,
+// so NTFS ACLs (not observable through Node) own this protection there.
+test.skipIf(process.platform === 'win32')('plugin discovery refuses to execute code from a world-writable directory', async () => {
   await inTemporaryDirectory(async directory => {
     await writeFile(join(directory, 'payload.mjs'), `
 globalThis.__xerxesWorldWritableExecuted = (globalThis.__xerxesWorldWritableExecuted ?? 0) + 1

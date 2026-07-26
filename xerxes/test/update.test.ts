@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from 'bun:test'
+import { resolve } from 'node:path'
 
 import {
   UpdateCommandError,
@@ -301,10 +302,11 @@ test('--git --dry-run prints the step plan and runs nothing', async () => {
     write: line => output.push(line),
   })
   expect(result.applied).toBe(false)
-  expect(result.gitPlan?.checkout).toBe('/workspace')
+  // The checkout is canonicalized with node:path (drive letters on Windows).
+  expect(result.gitPlan?.checkout).toBe(resolve('/workspace'))
   expect(result.gitPlan?.upstream).toBe('origin/main')
   expect(mutationCalls(calls)).toEqual([])
-  expect(output).toContain('Git update plan for /workspace (upstream origin/main):')
+  expect(output).toContain(`Git update plan for ${resolve('/workspace')} (upstream origin/main):`)
   expect(output).toContain('Would run (fetch): git fetch --quiet --no-tags origin')
   expect(output).toContain('Would run (merge): git merge --ff-only origin/main')
   expect(output).toContain('Would run (install): bun install --frozen-lockfile')
@@ -323,7 +325,7 @@ test('--git --apply runs fetch, merge, install, and build in order through the i
   })
   expect(result.applied).toBe(true)
   expect(result.gitExecution).toEqual({
-    checkout: '/workspace',
+    checkout: resolve('/workspace'),
     completedSteps: ['fetch', 'merge', 'install', 'build'],
     ok: true,
   })

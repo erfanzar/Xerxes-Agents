@@ -225,6 +225,8 @@ test('git_apply_patch rejects patch paths that escape the workspace through an i
       await git(workspace, ['init'])
       await git(workspace, ['config', 'user.email', 'test@example.invalid'])
       await git(workspace, ['config', 'user.name', 'Xerxes Test'])
+      // Keep the test hermetic on hosts with a global core.autocrlf=true.
+      await git(workspace, ['config', 'core.autocrlf', 'false'])
       await Bun.write(join(workspace, 'tracked.txt'), 'before\n')
       await git(workspace, ['add', 'tracked.txt'])
       await git(workspace, ['commit', '-m', 'initial'])

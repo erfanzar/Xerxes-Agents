@@ -286,11 +286,16 @@ async function atomicJsonWrite(path: string, value: Record<string, unknown>): Pr
       await handle.close()
     }
     await rename(temporaryPath, path)
-    const directoryHandle = await open(dirname(path), 'r')
-    try {
-      await directoryHandle.sync()
-    } finally {
-      await directoryHandle.close()
+    // Directory fsync flushes the rename's directory entry on POSIX. Windows
+    // cannot fsync a directory handle (EPERM); the rename itself is already
+    // durable enough there, so the best-effort flush is POSIX-only.
+    if (process.platform !== 'win32') {
+      const directoryHandle = await open(dirname(path), 'r')
+      try {
+        await directoryHandle.sync()
+      } finally {
+        await directoryHandle.close()
+      }
     }
   } catch (error) {
     await rm(temporaryPath, { force: true })

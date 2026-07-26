@@ -109,9 +109,13 @@ describe('readClipboardImage', () => {
 
     expect(result.kind).toBe('image')
 
-    const mode = statSync(clipboardPasteDir('sess-b', tmpBase)).mode & 0o777
+    // Directory permission hardening is POSIX-only: chmod maps to the
+    // read-only attribute on Windows, so 0o700 cannot be observed there.
+    if (process.platform !== 'win32') {
+      const mode = statSync(clipboardPasteDir('sess-b', tmpBase)).mode & 0o777
 
-    expect(mode).toBe(0o700)
+      expect(mode).toBe(0o700)
+    }
   })
 
   it('falls back to osascript when pngpaste is missing', async () => {

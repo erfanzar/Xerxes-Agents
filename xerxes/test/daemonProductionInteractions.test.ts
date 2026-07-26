@@ -1,4 +1,4 @@
-// Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
+﻿// Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from "bun:test";
@@ -39,7 +39,9 @@ test("production interaction boards persist Always allow under XERXES_HOME acros
 
     const path = daemonApprovalsPath(environment);
     expect(path).toBe(join(directory, "approvals.json"));
-    expect((await stat(path)).mode & 0o777).toBe(0o600);
+    if (process.platform !== 'win32') {
+      expect((await stat(path)).mode & 0o777).toBe(0o600);
+    }
     expect(await readFile(path, "utf8")).not.toContain("do-not-persist");
     expect(await readFile(path, "utf8")).not.toContain("/private/path");
 

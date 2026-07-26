@@ -3,7 +3,7 @@
 
 import { existsSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 
 import { expect, test } from 'bun:test'
 
@@ -28,9 +28,10 @@ test('core home helpers honor default, blank, and tilde XERXES_HOME values witho
 })
 
 test('core subdirectory helpers retain independent Xerxes and agents homes', () => {
-  expect(xerxesSubdirFor({ XERXES_HOME: '/tmp/custom-xerxes' })).toBe('/tmp/custom-xerxes')
+  // Helpers resolve through node:path, which is platform-specific.
+  expect(xerxesSubdirFor({ XERXES_HOME: '/tmp/custom-xerxes' })).toBe(resolve('/tmp/custom-xerxes'))
   expect(xerxesSubdirFor({ XERXES_HOME: '/tmp/custom-xerxes' }, 'daemon', 'logs'))
-    .toBe('/tmp/custom-xerxes/daemon/logs')
-  expect(agentsHome('/tmp/home')).toBe('/tmp/home/.agents')
-  expect(agentsSubdirFor('/tmp/home', 'skills')).toBe('/tmp/home/.agents/skills')
+    .toBe(join(resolve('/tmp/custom-xerxes'), 'daemon', 'logs'))
+  expect(agentsHome('/tmp/home')).toBe(join(resolve('/tmp/home'), '.agents'))
+  expect(agentsSubdirFor('/tmp/home', 'skills')).toBe(join(resolve('/tmp/home'), '.agents', 'skills'))
 })

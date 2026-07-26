@@ -6,7 +6,11 @@ Guidance for agents working in Xerxes. Read this before changing the repository.
 
 Xerxes (`xerxes-agents` v0.3.0) is a Bun-native TypeScript multi-agent runtime. It provides a
 terminal UI, JSON-RPC daemon, OpenAI-compatible API, provider routing, tool execution, MCP,
-subagents, channels, persistent sessions, and tiered memory.
+subagents, channels, persistent sessions, and tiered memory. POSIX (macOS/Linux) and native
+Windows are supported hosts: on Windows the TUI↔daemon control plane uses the
+token-authenticated WebSocket transport (per-project endpoint file) instead of the Unix socket,
+and interactive PTY sessions run on ConPTY through the `bun-pty` package instead of
+`Bun.Terminal`. `XERXES_DAEMON_TRANSPORT=unix|websocket` forces a transport.
 
 - Runtime: Bun 1.3+
 - Language: TypeScript (strict)
@@ -63,6 +67,7 @@ xerxes/
 ├── src/
 │   ├── cli.ts              # CLI entry point
 │   ├── xerxes.ts           # Embedded facade
+│   ├── core/shell.ts       # Cross-platform shell resolution (cmd/powershell/POSIX)
 │   ├── daemon/             # v35 JSON-RPC daemon and session bridge
 │   ├── streaming/          # Async turn loop and stream events
 │   ├── llms/               # Provider routing and transports
@@ -70,7 +75,7 @@ xerxes/
 │   ├── tools/              # Built-in and Claude-compatible tools
 │   ├── agents/, cortex/    # Agent specs and orchestration
 │   ├── session/, memory/   # Durable state, FTS, replay, retrieval
-│   ├── security/           # Policies, scanning, sandbox routing
+│   ├── security/           # Policies, scanning, sandbox routing, Windows spawn shims
 │   ├── mcp/, acp/          # MCP and Agent Client Protocol surfaces
 │   ├── channels/           # Messaging adapters and gateways
 │   ├── api-server/         # OpenAI-compatible HTTP service
@@ -81,7 +86,8 @@ xerxes/
 
 docs/                       # Markdown documentation and Bun docs output
 examples/                   # Bun/TypeScript examples
-scripts/install.sh           # Bun installer and launcher setup
+scripts/install.sh           # Bun installer and launcher setup (POSIX)
+scripts/install.ps1          # Bun installer and launcher setup (Windows PowerShell)
 ```
 
 ## How a turn works
@@ -125,6 +131,11 @@ boundaries that stream, persist, call a provider, or execute a tool.
 Run the narrowest relevant test while iterating, then run the full root gate before handing over a
 cross-cutting change. Inspect `git diff --check` after generated or bulk asset work. Do not edit
 generated `dist/` output manually; use the owning Bun build command.
+
+CI runs the gate on `ubuntu-latest` and `windows-latest`. Keep tests portable: use
+`mkdtemp(join(tmpdir(), ...))` for scratch paths and gate POSIX-only cases with
+`test.skipIf(process.platform === 'win32')` (or the vitest `it.skipIf` equivalent in the TUI
+suite).
 
 For live-provider, browser, channel, email, or cloud tests, keep credentials outside the repository
 and make the external call opt-in. Offline tests must use a deterministic injected port or fixture.

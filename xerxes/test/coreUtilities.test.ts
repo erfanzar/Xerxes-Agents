@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from 'bun:test'
+import { join, resolve } from 'node:path'
 
 import {
   PromptSection,
@@ -30,9 +31,10 @@ test('prompt templates preserve canonical ordering while rendering only populate
 })
 
 test('core path helpers retain explicit home/environment routing without creating paths', () => {
+  // Helpers resolve through node:path, which is platform-specific.
   expect(xerxesSubdirFor({ XERXES_HOME: '/tmp/xerxes-home' }, 'sessions', 'one.json'))
-    .toBe('/tmp/xerxes-home/sessions/one.json')
-  expect(agentsSubdirFor('/tmp/home', 'skills', 'demo')).toBe('/tmp/home/.agents/skills/demo')
+    .toBe(join(resolve('/tmp/xerxes-home'), 'sessions', 'one.json'))
+  expect(agentsSubdirFor('/tmp/home', 'skills', 'demo')).toBe(join(resolve('/tmp/home'), '.agents', 'skills', 'demo'))
 })
 
 test('multimodal helpers serialize binary images and bound HTTP downloads', async () => {

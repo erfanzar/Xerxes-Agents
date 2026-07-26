@@ -355,7 +355,9 @@ export async function globFiles(inputs: JsonObject, paths: WorkspacePathResolver
     if (!resolvedMatch) {
       continue
     }
-    matches.push(await paths.relative(resolvedMatch))
+    // Tool results use POSIX separators on every host so model-visible paths
+    // round-trip through search/replace and patch tooling unchanged.
+    matches.push((await paths.relative(resolvedMatch)).replaceAll('\\', '/'))
   }
   matches.sort((left, right) => left.localeCompare(right))
   if (truncated) {
@@ -426,7 +428,7 @@ export async function grepFiles(inputs: JsonObject, paths: WorkspacePathResolver
       continue
     }
 
-    const relativePath = await paths.relative(file)
+    const relativePath = (await paths.relative(file)).replaceAll('\\', '/')
     if (outputMode === 'files_with_matches') {
       results.push(relativePath)
       continue

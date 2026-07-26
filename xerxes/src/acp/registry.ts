@@ -36,7 +36,12 @@ export const REGISTRY_METADATA = ACP_REGISTRY_METADATA
 export function defaultAcpRegistryDirectory(
   environment: Readonly<Record<string, string | undefined>> = process.env,
   homeDirectory = homedir(),
+  platform: NodeJS.Platform = process.platform,
 ): string {
+  if (platform === 'win32') {
+    // XDG does not exist on Windows; %APPDATA% is the roaming-config root.
+    return join(environment.APPDATA ?? join(homeDirectory, 'AppData', 'Roaming'), 'agent-registry')
+  }
   return join(environment.XDG_CONFIG_HOME ?? join(homeDirectory, '.config'), 'agent-registry')
 }
 

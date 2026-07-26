@@ -575,8 +575,9 @@ function extractPatchFilePaths(patch: string): string[] {
       continue
     }
     for (const raw of [line.slice(4), next.slice(4)]) {
-      // Strip a trailing timestamp tab, then the default a/ b/ prefix.
-      const withoutTimestamp = raw.split('\t')[0] ?? raw
+      // Strip a trailing timestamp tab and CRLF carriage return, then the
+      // default a/ b/ prefix.
+      const withoutTimestamp = (raw.split('\t')[0] ?? raw).replace(/\r$/, '')
       if (withoutTimestamp.startsWith('"')) {
         throw new ValidationError(
           'patch_content',
@@ -717,8 +718,12 @@ export function createDiff(inputs: JsonObject): string {
 export function applyDiff(inputs: JsonObject): string {
   const original = requiredText(inputs, 'original')
   const diff = requiredText(inputs, 'diff')
-  const source = splitTextLines(original)
-  const hunks = parseUnifiedDiff(diff)
+  // Tolerate CRLF on either side: hunk context lines are compared without
+  // line-ending bytes, and the result preserves the original's dominant EOL
+  // so Windows checkouts are not rewritten to LF.
+  const originalEol = dominantEol(original)
+  const source = splitTextLines(normalizeLineEndings(original))
+  const hunks = parseUnifiedDiff(normalizeLineEndings(diff))
   const output: SourceLine[] = []
   let sourceIndex = 0
 
@@ -753,7 +758,18 @@ export function applyDiff(inputs: JsonObject): string {
     }
   }
   output.push(...source.slice(sourceIndex))
-  return joinSourceLines(output)
+  const result = joinSourceLines(output)
+  return originalEol === '\r\n' ? result.replaceAll('\n', '\r\n') : result
+}
+
+/** Dominant line ending of a text blob: CRLF when any CRLF pair exists, else LF. */
+function dominantEol(value: string): '\r\n' | '\n' {
+  return value.includes('\r\n') ? '\r\n' : '\n'
+}
+
+/** Fold CRLF pairs to LF so line-oriented parsing/compare is EOL-agnostic. */
+function normalizeLineEndings(value: string): string {
+  return value.replaceAll('\r\n', '\n')
 }
 
 /**
@@ -1139,16 +1155,28 @@ export async function findAndReplace(inputs: JsonObject, paths: WorkspacePathRes
     // A function replacer keeps $-sequences in the replacement literal,
     // consistent with the literal search modes below.
     updated = content.replace(pattern, () => replacement)
-  } else if (caseSensitive) {
-    count = content.split(search).length - 1
-    updated = content.replaceAll(search, () => replacement)
   } else {
-    const literalPattern = new RegExp(escapeRegularExpression(search), 'gi')
-    count = 0
-    updated = content.replace(literalPattern, () => {
-      count += 1
-      return replacement
-    })
+    // Literal modes: a model supplies LF-only search text even for CRLF
+    // files. Retry with the file's dominant EOL, and write the replacement
+    // back in that EOL so Windows checkouts are not converted to LF.
+    const fileEol = dominantEol(content)
+    const effectiveSearch =
+      fileEol === '\r\n' && search.includes('\n') && !content.includes(search)
+        ? normalizeLineEndings(search).replaceAll('\n', fileEol)
+        : search
+    const effectiveReplacement =
+      fileEol === '\r\n' ? normalizeLineEndings(replacement).replaceAll('\n', fileEol) : replacement
+    if (caseSensitive) {
+      count = content.split(effectiveSearch).length - 1
+      updated = content.replaceAll(effectiveSearch, () => effectiveReplacement)
+    } else {
+      const literalPattern = new RegExp(escapeRegularExpression(effectiveSearch), 'gi')
+      count = 0
+      updated = content.replace(literalPattern, () => {
+        count += 1
+        return effectiveReplacement
+      })
+    }
   }
   if (count > 0) {
     await Bun.write(target, updated)

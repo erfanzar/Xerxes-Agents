@@ -36,7 +36,7 @@ test('evaluation isolation creates private home/workspace paths and only copies 
       runId: 'run-test-isolation',
     })
     expect(await readFile(join(isolation.homeDirectory, 'profiles.json'), 'utf8')).toContain('"test"')
-    expect(isolation.workspaceDirectory).toContain('run-test-isolation/workspace')
+    expect(isolation.workspaceDirectory).toContain(join('run-test-isolation', 'workspace'))
     expect(process.env.XERXES_HOME).toBe(originalHome)
     await expect(createEvaluationIsolation({
       rootDirectory: join(root, 'runs'),

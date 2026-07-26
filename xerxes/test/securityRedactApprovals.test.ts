@@ -1,4 +1,4 @@
-// Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
+﻿// Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
 import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
@@ -64,7 +64,9 @@ test('always approvals persist atomically in the Python-readable snake-case form
     expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual([{
       tool_name: 'WriteFile', scope: 'always', granted: true, session_id: '', args_hash: '', created_at: '2026-07-13T00:00:00.000Z',
     }])
-    expect(statSync(path).mode & 0o777).toBe(0o600)
+    if (process.platform !== 'win32') {
+      expect(statSync(path).mode & 0o777).toBe(0o600)
+    }
     expect(new ApprovalStore({ persistencePath: path }).check('WriteFile', 'fresh')).toBeTrue()
   } finally {
     rmSync(directory, { force: true, recursive: true })
@@ -83,7 +85,9 @@ test('always approvals merge with the on-disk file so concurrent daemons cannot 
 
     const persisted = JSON.parse(readFileSync(path, 'utf8')) as Array<{ tool_name: string }>
     expect(persisted.map(record => record.tool_name).sort()).toEqual(['Bash', 'WriteFile'])
-    expect(statSync(path).mode & 0o777).toBe(0o600)
+    if (process.platform !== 'win32') {
+      expect(statSync(path).mode & 0o777).toBe(0o600)
+    }
 
     // Re-adding an identical decision stays deduplicated after the merge.
     second.add({ toolName: 'Bash', scope: ApprovalScope.ALWAYS, granted: false })

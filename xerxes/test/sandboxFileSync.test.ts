@@ -1,4 +1,4 @@
-// Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
+﻿// Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from 'bun:test'
@@ -12,7 +12,11 @@ import {
 } from '../src/security/index.js'
 import type { FileSyncCopyRequest, FileSyncPorts, FileSyncStatRequest } from '../src/security/index.js'
 
-test('credential files stay inside caller-supplied roots and environment selection is explicit', () => {
+// The fake in-memory filesystems below are keyed by POSIX absolute paths,
+// which node:path cannot reproduce on Windows.
+const testPosix = test.skipIf(process.platform === 'win32')
+
+testPosix('credential files stay inside caller-supplied roots and environment selection is explicit', () => {
   const registry = new CredentialFileRegistry({
     allowedRoots: ['/host/credentials', '/home/agent/.config'],
     baseDirectory: '/host/credentials',
@@ -48,7 +52,7 @@ test('credential files stay inside caller-supplied roots and environment selecti
   expect(registry.allowedPaths()).toEqual([])
 })
 
-test('push sync reports byte caps, missing, failed, and escaped files without aborting the batch', async () => {
+testPosix('push sync reports byte caps, missing, failed, and escaped files without aborting the batch', async () => {
   const copyRequests: FileSyncCopyRequest[] = []
   const statRequests: FileSyncStatRequest[] = []
   const sizes = new Map<string, number>([
@@ -159,7 +163,7 @@ test('push sync reports byte caps, missing, failed, and escaped files without ab
   ])
 })
 
-test('pull sync uses remote source paths and continues after a transfer failure', async () => {
+testPosix('pull sync uses remote source paths and continues after a transfer failure', async () => {
   const copyRequests: FileSyncCopyRequest[] = []
   const ports: FileSyncPorts = {
     copy: async request => {

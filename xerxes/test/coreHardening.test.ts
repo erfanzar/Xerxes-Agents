@@ -4,7 +4,7 @@
 import { expect, test } from 'bun:test'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 
 import { LLMConfig, SecurityConfig, XerxesConfig } from '../src/core/config.js'
 import {
@@ -91,14 +91,17 @@ test('LLMConfig treats blank environment API keys as absent', () => {
 
 test('home subdir helpers reject traversal and absolute segments', () => {
   const environment = { XERXES_HOME: '/tmp/xerxes-core-traversal' }
-  expect(xerxesSubdirFor(environment, 'daemon', 'logs')).toBe('/tmp/xerxes-core-traversal/daemon/logs')
-  expect(xerxesSubdirFor(environment, 'a/b')).toBe('/tmp/xerxes-core-traversal/a/b')
+  // Helpers resolve through node:path, which is platform-specific.
+  const home = resolve('/tmp/xerxes-core-traversal')
+  expect(xerxesSubdirFor(environment, 'daemon', 'logs')).toBe(join(home, 'daemon', 'logs'))
+  expect(xerxesSubdirFor(environment, 'a/b')).toBe(join(home, 'a', 'b'))
   expect(() => xerxesSubdirFor(environment, '..')).toThrow(/unsafe path segment/)
   expect(() => xerxesSubdirFor(environment, 'a', '..')).toThrow(/unsafe path segment/)
   expect(() => xerxesSubdirFor(environment, 'a/../../b')).toThrow(/unsafe path segment/)
   expect(() => xerxesSubdirFor(environment, '/etc/passwd')).toThrow(/unsafe path segment/)
 
-  expect(agentsSubdirFor('/tmp/xerxes-core-home', 'skills')).toBe('/tmp/xerxes-core-home/.agents/skills')
+  const agentsHome = resolve('/tmp/xerxes-core-home')
+  expect(agentsSubdirFor('/tmp/xerxes-core-home', 'skills')).toBe(join(agentsHome, '.agents', 'skills'))
   expect(() => agentsSubdirFor('/tmp/xerxes-core-home', '..')).toThrow(/unsafe path segment/)
   expect(() => agentsSubdirFor('/tmp/xerxes-core-home', '/absolute')).toThrow(/unsafe path segment/)
 })

@@ -53,9 +53,12 @@ bun run xerxes daemon --project-dir /path/to/workspace
 bun run xerxes acp --project-dir /path/to/workspace
 ```
 
-The local daemon uses the v35 Unix-socket path on supported hosts. On native Windows, use WSL2 or
-configure the WebSocket control transport. Start with `bun run xerxes doctor` to verify the host
-and provider setup.
+The local daemon uses the v35 Unix-socket path on POSIX hosts. On native Windows it
+automatically uses the loopback WebSocket control transport instead: the daemon binds an
+OS-assigned port with a generated token and publishes both in a per-project endpoint file
+(`%USERPROFILE%\.xerxes\daemon\projects\<digest>.endpoint.json`) that the TUI reads. Set
+`XERXES_DAEMON_TRANSPORT=unix|websocket` to force a transport. Start with
+`bun run xerxes doctor` to verify the host and provider setup.
 
 ## Container daemon
 

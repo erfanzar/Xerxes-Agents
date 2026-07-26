@@ -490,7 +490,11 @@ test('shadow git snapshots exclude secrets, stay private, and rollback removes p
     expect(tracked).not.toContain('.env')
     expect(tracked).not.toContain('id_rsa')
     expect(tracked).not.toContain('service.key')
-    expect(statSync(snapshots.shadowDirectory).mode & 0o777).toBe(0o700)
+    // Directory permission hardening is POSIX-only: Node's chmod maps to the
+    // read-only attribute on Windows, so 0o700 can never be observed there.
+    if (process.platform !== 'win32') {
+      expect(statSync(snapshots.shadowDirectory).mode & 0o777).toBe(0o700)
+    }
 
     writeFileSync(join(workspace, 'a.txt'), 'changed version', 'utf8')
     writeFileSync(join(workspace, 'created-later.txt'), 'new file', 'utf8')

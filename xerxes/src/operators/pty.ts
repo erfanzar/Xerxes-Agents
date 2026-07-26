@@ -2,10 +2,12 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { stat } from 'node:fs/promises'
-import { basename, resolve } from 'node:path'
+import { resolve } from 'node:path'
 
+import { exitShellInput, interruptTerminalInput, resolveDefaultShell, shellInvocation } from '../core/shell.js'
 import { ValidationError } from '../core/errors.js'
 import { WorkspacePathResolver } from '../tools/pathSafety.js'
+import type { IPty } from 'bun-pty'
 
 const DEFAULT_MAX_PENDING_OUTPUT_CHARS = 1_000_000
 const DEFAULT_MAX_OUTPUT_CHARS = 4_000
@@ -33,6 +35,8 @@ export interface PtySessionManagerOptions {
   readonly maxPendingOutputChars?: number
   /** Restrict `workdir` to this root, including existing symlinks. */
   readonly workspaceRoot?: string
+  /** Platform override for tests; defaults to `process.platform`. */
+  readonly platform?: NodeJS.Platform
 }
 
 export interface CreatePtySessionOptions {
@@ -56,25 +60,182 @@ export interface WritePtySessionOptions {
 
 interface PtySession {
   readonly command: string
-  readonly decoder: TextDecoder
+  readonly driver: PtyDriver
   readonly id: string
   readonly output: OutputBuffer
-  readonly process: Bun.Subprocess
-  readonly terminal: Bun.Terminal
   readonly waiters: Set<() => void>
   readonly workdir: string
 }
 
+interface PtyDriverOptions {
+  readonly cwd: string
+  readonly env: Record<string, string>
+  readonly cols: number
+  readonly rows: number
+  readonly onData: (text: string) => void
+  readonly onExit: () => void
+}
+
 /**
- * Owns persistent, interactive Bun PTYs scoped to one Xerxes session.
+ * The slice of a pseudo-terminal the session manager needs. POSIX sessions run
+ * on `Bun.Terminal`; native Windows sessions run on ConPTY through `bun-pty`,
+ * because `Bun.Terminal` has no Windows support (oven-sh/bun#25565).
+ */
+interface PtyDriver {
+  readonly exitCode: number | null
+  readonly exited: Promise<number>
+  write(data: string): void
+  interrupt(): void
+  terminate(): void
+  forceKill(): void
+  sendEof(): void
+  closeTerminal(): void
+}
+
+/** POSIX driver: current `Bun.Terminal` + `Bun.spawn` behavior, unchanged. */
+class BunTerminalPtyDriver implements PtyDriver {
+  private readonly decoder = new TextDecoder()
+  private readonly process: Bun.Subprocess
+  private readonly terminal: Bun.Terminal
+
+  constructor(args: string[], options: PtyDriverOptions) {
+    this.terminal = new Bun.Terminal({
+      cols: options.cols,
+      rows: options.rows,
+      data: (_terminal, bytes) => {
+        options.onData(this.decoder.decode(bytes, { stream: true }))
+      },
+      exit: () => options.onExit(),
+    })
+    try {
+      this.process = Bun.spawn(args, {
+        cwd: options.cwd,
+        detached: true,
+        env: options.env,
+        terminal: this.terminal,
+      })
+    } catch (error) {
+      this.terminal.close()
+      throw error
+    }
+  }
+
+  get exitCode(): number | null {
+    return this.process.exitCode
+  }
+
+  get exited(): Promise<number> {
+    return this.process.exited
+  }
+
+  write(data: string): void {
+    this.terminal.write(data)
+  }
+
+  interrupt(): void {
+    if (this.process.exitCode === null) this.process.kill('SIGINT')
+  }
+
+  terminate(): void {
+    if (this.process.exitCode === null) this.process.kill('SIGTERM')
+  }
+
+  forceKill(): void {
+    if (this.process.exitCode === null) this.process.kill('SIGKILL')
+  }
+
+  sendEof(): void {
+    this.terminal.write(exitShellInput('linux'))
+  }
+
+  closeTerminal(): void {
+    if (!this.terminal.closed) this.terminal.close()
+  }
+}
+
+/** Native Windows driver: ConPTY via the `bun-pty` (Rust portable-pty) FFI. */
+class ConPtyDriver implements PtyDriver {
+  private exitCodeValue: number | null = null
+  private readonly pty: IPty
+  readonly exited: Promise<number>
+
+  constructor(spawnPty: typeof import('bun-pty').spawn, args: string[], options: PtyDriverOptions) {
+    const file = args[0]
+    if (!file) throw new ValidationError('command', 'PTY argv must not be empty', args.join(' '))
+    this.pty = spawnPty(file, args.slice(1), {
+      name: 'xterm-256color',
+      cols: options.cols,
+      rows: options.rows,
+      cwd: options.cwd,
+      env: options.env,
+    })
+    this.pty.onData((data) => options.onData(data))
+    this.exited = new Promise<number>((resolveExit) => {
+      this.pty.onExit(({ exitCode }) => {
+        this.exitCodeValue = exitCode
+        options.onExit()
+        resolveExit(exitCode)
+      })
+    })
+  }
+
+  get exitCode(): number | null {
+    return this.exitCodeValue
+  }
+
+  write(data: string): void {
+    this.pty.write(data)
+  }
+
+  interrupt(): void {
+    // ConPTY delivers the Ctrl+C control character to the console's foreground
+    // process group; Windows has no cross-process SIGINT.
+    if (this.exitCodeValue === null) this.pty.write(interruptTerminalInput('win32'))
+  }
+
+  terminate(): void {
+    if (this.exitCodeValue === null) this.pty.kill('SIGTERM')
+  }
+
+  forceKill(): void {
+    if (this.exitCodeValue === null) this.pty.kill('SIGKILL')
+  }
+
+  sendEof(): void {
+    this.write(exitShellInput('win32'))
+  }
+
+  closeTerminal(): void {
+    // Killing the child tears the ConPTY session down with it.
+    if (this.exitCodeValue === null) this.pty.kill()
+  }
+}
+
+async function createPtyDriver(
+  platform: NodeJS.Platform,
+  args: string[],
+  options: PtyDriverOptions,
+): Promise<PtyDriver> {
+  if (platform === 'win32') {
+    // Lazy: bun-pty loads its native Rust library through Bun FFI, which is a
+    // genuine startup cost and only resolvable where prebuilt binaries exist.
+    const { spawn: spawnPty } = await import('bun-pty')
+    return new ConPtyDriver(spawnPty, args, options)
+  }
+  return new BunTerminalPtyDriver(args, options)
+}
+
+/**
+ * Owns persistent, interactive PTYs scoped to one Xerxes session.
  *
- * Bun's terminal callback consumes output immediately, so this manager retains
+ * The terminal driver consumes output immediately, so this manager retains
  * unread output itself. A capped response does not throw away the remainder;
  * the next `write` call can drain it.
  */
 export class PtySessionManager {
   private readonly maxPendingOutputChars: number
   private readonly paths: WorkspacePathResolver | undefined
+  private readonly platform: NodeJS.Platform
   private readonly sessions = new Map<string, PtySession>()
 
   constructor(options: PtySessionManagerOptions = {}) {
@@ -83,40 +244,38 @@ export class PtySessionManager {
       'maxPendingOutputChars',
     )
     this.paths = options.workspaceRoot === undefined ? undefined : new WorkspacePathResolver(options.workspaceRoot)
+    this.platform = options.platform ?? process.platform
   }
 
   async createSession(command: string, options: CreatePtySessionOptions = {}): Promise<PtyOutput> {
     const workdir = await this.resolveWorkdir(options.workdir)
-    const shell = options.shell ?? process.env.SHELL ?? '/bin/sh'
-    const args = shellArguments(shell, command, options.login ?? true)
+    const shell = options.shell ?? resolveDefaultShell(process.env, this.platform)
+    const argv = shellInvocation(shell, command, options.login ?? true, this.platform)
     const id = `pty_${crypto.randomUUID().replaceAll('-', '').slice(0, 10)}`
     const output = new OutputBuffer(this.maxPendingOutputChars)
     const waiters = new Set<() => void>()
-    const decoder = new TextDecoder()
-    const terminal = new Bun.Terminal({
+    const env: Record<string, string> = {}
+    for (const [key, value] of Object.entries(process.env)) {
+      if (value !== undefined) env[key] = value
+    }
+    for (const [key, value] of Object.entries(options.env ?? {})) {
+      if (value === undefined) delete env[key]
+      else env[key] = value
+    }
+    const driver = await createPtyDriver(this.platform, argv, {
+      cwd: workdir,
+      env,
       cols: options.cols ?? 80,
       rows: options.rows ?? 24,
-      data: (_terminal, bytes) => {
-        output.append(decoder.decode(bytes, { stream: true }))
+      onData: (text) => {
+        output.append(text)
         resolveWaiters(waiters)
       },
-      exit: () => resolveWaiters(waiters),
+      onExit: () => resolveWaiters(waiters),
     })
-    let childProcess: Bun.Subprocess
-    try {
-      childProcess = Bun.spawn(args, {
-        cwd: workdir,
-        detached: true,
-        env: { ...process.env, ...options.env },
-        terminal,
-      })
-    } catch (error) {
-      terminal.close()
-      throw error
-    }
-    const session: PtySession = { id, command, workdir, process: childProcess, terminal, output, waiters, decoder }
+    const session: PtySession = { id, command, workdir, driver, output, waiters }
     this.sessions.set(id, session)
-    void childProcess.exited.then(() => resolveWaiters(waiters))
+    void driver.exited.then(() => resolveWaiters(waiters))
     return this.read(session, options.yieldTimeMs, options.maxOutputChars)
   }
 
@@ -124,17 +283,17 @@ export class PtySessionManager {
     const session = this.requireSession(sessionId)
     const yieldTimeMs = options.yieldTimeMs ?? DEFAULT_YIELD_MS
     requireNonnegativeInteger(yieldTimeMs, 'yieldTimeMs')
-    if (options.interrupt && session.process.exitCode === null) {
-      session.process.kill('SIGINT')
+    if (options.interrupt && session.driver.exitCode === null) {
+      session.driver.interrupt()
     }
-    if (options.chars) session.terminal.write(options.chars)
+    if (options.chars) session.driver.write(options.chars)
     if (options.closeStdin) {
-      session.terminal.write('\u0004')
+      session.driver.sendEof()
       // A terminal echoes the typed input before the child reacts to EOF. Give
       // a short-lived command the requested window to flush its final output
       // so one write_stdin call observes the complete request/response pair.
-      if (session.process.exitCode === null && yieldTimeMs > 0) {
-        await waitForExit(session.process, yieldTimeMs)
+      if (session.driver.exitCode === null && yieldTimeMs > 0) {
+        await waitForExit(session.driver, yieldTimeMs)
       }
     }
     return this.read(session, options.yieldTimeMs, options.maxOutputChars)
@@ -142,17 +301,17 @@ export class PtySessionManager {
 
   async close(sessionId: string): Promise<{ readonly closed: true; readonly exitCode: number | null; readonly sessionId: string }> {
     const session = this.requireSession(sessionId)
-    if (session.process.exitCode === null) {
-      session.process.kill('SIGTERM')
-      await waitForExit(session.process, 2_000)
-      if (session.process.exitCode === null) {
-        session.process.kill('SIGKILL')
-        await session.process.exited
+    if (session.driver.exitCode === null) {
+      session.driver.terminate()
+      await waitForExit(session.driver, 2_000)
+      if (session.driver.exitCode === null) {
+        session.driver.forceKill()
+        await session.driver.exited
       }
     }
-    if (!session.terminal.closed) session.terminal.close()
+    session.driver.closeTerminal()
     this.sessions.delete(sessionId)
-    return { sessionId, closed: true, exitCode: session.process.exitCode }
+    return { sessionId, closed: true, exitCode: session.driver.exitCode }
   }
 
   listSessions(): PtySessionSummary[] {
@@ -172,14 +331,14 @@ export class PtySessionManager {
   ): Promise<PtyOutput> {
     const normalizedYield = requireNonnegativeInteger(yieldTimeMs, 'yieldTimeMs')
     const normalizedMax = requireNonnegativeInteger(maxOutputChars, 'maxOutputChars')
-    if (!session.output.hasData() && session.process.exitCode === null && normalizedYield > 0) {
+    if (!session.output.hasData() && session.driver.exitCode === null && normalizedYield > 0) {
       await waitForSessionActivity(session, normalizedYield)
     }
     // A short settle period lets a one-shot shell command reach its exit event
     // after its first stdout chunk, while long-running sessions still return
     // promptly with their initial output and a pollable running state.
-    if (session.output.hasData() && session.process.exitCode === null && normalizedYield > 0) {
-      await waitForExit(session.process, Math.min(normalizedYield, OUTPUT_SETTLE_MS))
+    if (session.output.hasData() && session.driver.exitCode === null && normalizedYield > 0) {
+      await waitForExit(session.driver, Math.min(normalizedYield, OUTPUT_SETTLE_MS))
     }
     const drained = session.output.take(normalizedMax)
     const summary = this.summary(session)
@@ -198,8 +357,8 @@ export class PtySessionManager {
       sessionId: session.id,
       command: session.command,
       workdir: session.workdir,
-      running: session.process.exitCode === null,
-      exitCode: session.process.exitCode,
+      running: session.driver.exitCode === null,
+      exitCode: session.driver.exitCode,
     })
   }
 
@@ -283,13 +442,6 @@ class OutputBuffer {
   }
 }
 
-function shellArguments(shell: string, command: string, login: boolean): string[] {
-  const name = basename(shell)
-  const supportsLogin = login && (name.endsWith('bash') || name.endsWith('zsh'))
-  if (!command.trim()) return [shell, ...(supportsLogin ? ['-l'] : [])]
-  return [shell, ...(supportsLogin ? ['-l'] : []), '-c', command]
-}
-
 function resolveWaiters(waiters: Set<() => void>): void {
   for (const resolve of waiters) resolve()
   waiters.clear()
@@ -306,13 +458,13 @@ function waitForSessionActivity(session: PtySession, timeoutMs: number): Promise
       resolve()
     }
     session.waiters.add(wake)
-    if (session.output.hasData() || session.process.exitCode !== null) wake()
+    if (session.output.hasData() || session.driver.exitCode !== null) wake()
   })
 }
 
-async function waitForExit(process: Bun.Subprocess, timeoutMs: number): Promise<void> {
+async function waitForExit(driver: PtyDriver, timeoutMs: number): Promise<void> {
   await Promise.race([
-    process.exited.then(() => undefined),
+    driver.exited.then(() => undefined),
     new Promise<void>(resolve => setTimeout(resolve, timeoutMs)),
   ])
 }

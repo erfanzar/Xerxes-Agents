@@ -1,7 +1,11 @@
-// Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
+﻿// Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from 'bun:test'
+
+// Raw Unix-socket client tests: the v35 filesystem socket transport does not
+// bind on native Windows, where the daemon runs the WebSocket transport.
+const testUnixSocket = test.skipIf(process.platform === "win32");
 import { mkdtemp, rm } from 'node:fs/promises'
 import { connect, type Socket } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -438,7 +442,7 @@ class SocketTestClient {
   }
 }
 
-test('daemon socket exposes subagent.retry and validates the task argument', async () => {
+testUnixSocket('daemon socket exposes subagent.retry and validates the task argument', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'xerxes-retry-rpc-'))
   const socketPath = join(directory, 'daemon.sock')
   const received: Array<{
@@ -496,7 +500,7 @@ test('daemon socket exposes subagent.retry and validates the task argument', asy
   }
 })
 
-test('daemon socket reports honestly when the runtime has no subagent retry port', async () => {
+testUnixSocket('daemon socket reports honestly when the runtime has no subagent retry port', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'xerxes-retry-rpc-off-'))
   const socketPath = join(directory, 'daemon.sock')
   const server = new DaemonServer({

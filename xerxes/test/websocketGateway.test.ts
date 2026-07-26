@@ -104,6 +104,9 @@ test('closing a WebSocket client cancels its pending interaction turn', async ()
     interactions,
     runtime,
     socketPath: join(directory, 'daemon.sock'),
+    // Optional-gateway mode: an unauthenticated tokenless gateway is only
+    // started alongside the primary Unix transport.
+    transport: 'unix',
     websocket: { host: '127.0.0.1', port: 0 },
   })
   await daemon.start()
@@ -151,6 +154,7 @@ test('daemon keeps its Unix v35 service alive when an optional WebSocket port is
   }
   const daemon = new DaemonServer({
     socketPath: join(directory, 'daemon.sock'),
+    transport: 'unix',
     runtime: new InMemoryDaemonRuntime(undefined, {
       currentProjectDirectory: directory,
       sessionDirectory: join(directory, 'sessions'),
@@ -177,6 +181,7 @@ test('daemon WebSocket transport closes oversized requests', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'xerxes-bun-websocket-limit-'))
   const daemon = new DaemonServer({
     socketPath: join(directory, 'daemon.sock'),
+    transport: 'unix',
     websocket: { host: '127.0.0.1', maxMessageBytes: 1024, port: 0 },
   })
   await daemon.start()
@@ -245,6 +250,7 @@ test('daemon WebSocket transport rejects cross-origin browser upgrades with 403'
   const directory = await mkdtemp(join(tmpdir(), 'xerxes-bun-websocket-origin-'))
   const daemon = new DaemonServer({
     socketPath: join(directory, 'daemon.sock'),
+    transport: 'unix',
     websocket: { host: '127.0.0.1', path: '/rpc', port: 0 },
   })
   await daemon.start()

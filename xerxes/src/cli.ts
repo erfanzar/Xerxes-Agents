@@ -27,7 +27,7 @@ import {
 } from "./daemon/channels.js";
 import { loadSystemDaemonConfig, type DaemonConfig } from "./daemon/config.js";
 import type { DaemonInteractionBoard } from "./daemon/interactions.js";
-import { daemonPaths, xerxesHome } from "./daemon/paths.js";
+import { daemonPaths, daemonTransport, xerxesHome } from "./daemon/paths.js";
 import { createProductionInteractionBoard } from "./daemon/productionInteractions.js";
 import { runtimeConnection } from "./daemon/runtimeConnection.js";
 import { InMemoryDaemonRuntime } from "./daemon/runtime.js";
@@ -315,8 +315,11 @@ async function runDaemon(
     finishDaemon = resolveLifetime;
   });
   const finish = () => finishDaemon?.();
+  const transport = daemonTransport();
   const daemon = new DaemonServer({
     socketPath,
+    transport,
+    endpointPath: daemonPaths(projectDirectory).endpointPath,
     runtime,
     interactions,
     browserManager,
@@ -324,7 +327,7 @@ async function runDaemon(
     skillRegistry,
     onRestart: finish,
     onShutdown: finish,
-    websocket: websocketOptions(config),
+    websocket: websocketOptions(config, transport === "websocket"),
     ...(channelManager.hasConfiguredChannels ? { channelManager } : {}),
     ...(channelManager.hasWebhookChannels()
       ? { channelWebhook: daemonChannelWebhookOptions(config) }
@@ -339,7 +342,11 @@ async function runDaemon(
     await daemon.stop();
     throw error;
   }
-  console.error("Xerxes Bun daemon listening on " + socketPath);
+  console.error(
+    transport === "websocket"
+      ? `Xerxes Bun daemon listening on ${daemon.websocketUrl?.toString() ?? "websocket"}`
+      : "Xerxes Bun daemon listening on " + socketPath,
+  );
   process.once("SIGINT", finish);
   process.once("SIGTERM", finish);
   try {
@@ -874,8 +881,15 @@ function daemonRuntime(
 
 function websocketOptions(
   config: DaemonConfig,
+  primary = false,
 ): import("./daemon/websocketGateway.js").DaemonWebSocketGatewayOptions {
-  const port = numericSetting(config.control.websocket_port, 11996);
+  // As the primary local transport each per-project daemon needs its own
+  // port; without an explicit user setting the OS assigns one (0) instead of
+  // colliding on the shared remote-access default.
+  const port =
+    primary && config.control.websocket_port === undefined
+      ? 0
+      : numericSetting(config.control.websocket_port, 11996);
   return {
     host: stringSetting(config.control.websocket_host) || "127.0.0.1",
     port,

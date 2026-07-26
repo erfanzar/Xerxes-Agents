@@ -9,6 +9,34 @@ import { join, resolve } from 'node:path'
 export interface DaemonPaths {
   readonly pidPath: string
   readonly socketPath: string
+  readonly endpointPath: string
+}
+
+/** Local control-plane transport used between the TUI and the per-project daemon. */
+export type DaemonTransport = 'unix' | 'websocket'
+
+/**
+ * Pick the daemon control-plane transport for this host. Native Windows cannot
+ * bind the filesystem `.sock` path used by the Unix transport, so the
+ * token-authenticated WebSocket gateway is the default there. An explicit
+ * `XERXES_DAEMON_TRANSPORT` (`unix` | `websocket`) always wins.
+ */
+export function daemonTransport(
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+  platform: NodeJS.Platform = process.platform,
+): DaemonTransport {
+  const configured = environment.XERXES_DAEMON_TRANSPORT?.trim().toLowerCase()
+  if (configured === 'unix' || configured === 'websocket') return configured
+  return platform === 'win32' ? 'websocket' : 'unix'
+}
+
+/** Contents of the per-project endpoint file published in websocket transport mode. */
+export interface DaemonEndpoint {
+  readonly transport: 'ws'
+  readonly url: string
+  readonly token: string
+  readonly pid: number
+  readonly protocol: 35
 }
 
 export function xerxesHome(environment = process.env): string {
@@ -39,5 +67,6 @@ export function daemonPaths(projectDirectory = process.cwd(), environment = proc
   return {
     socketPath: configuredSocket || join(base, `${digest}.sock`),
     pidPath: join(base, `${digest}.pid`),
+    endpointPath: join(base, `${digest}.endpoint.json`),
   }
 }

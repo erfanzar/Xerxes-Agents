@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from 'bun:test'
+import { join } from 'node:path'
 
 import {
   daemonChannels,
@@ -183,14 +184,16 @@ test('loader safely falls back to defaults for unreadable or malformed explicit 
     },
   })
 
+  // Default control paths derive from `home` through node:path joins.
+  const isolatedHome = join('/isolated/home')
   expect(config.control).toEqual({
-    log_dir: '/isolated/home/daemon/logs',
-    pid_file: '/isolated/home/daemon/daemon.pid',
-    unix_socket: '/isolated/home/daemon/xerxes.sock',
+    log_dir: join(isolatedHome, 'daemon', 'logs'),
+    pid_file: join(isolatedHome, 'daemon', 'daemon.pid'),
+    unix_socket: join(isolatedHome, 'daemon', 'xerxes.sock'),
     websocket_host: '127.0.0.1',
     websocket_port: 11996,
   })
-  expect(config.workspace).toEqual({ default_agent_id: 'default', root: '/isolated/home/agents' })
+  expect(config.workspace).toEqual({ default_agent_id: 'default', root: join(isolatedHome, 'agents') })
   expect(config.channels.discord).toEqual({
     enabled: true,
     settings: { require_mention: true, token_env: 'DISCORD_TOKEN', transport: 'gateway' },
@@ -210,6 +213,6 @@ test('loader safely falls back to defaults for unreadable or malformed explicit 
     channels: {},
     control: { websocket_host: '127.0.0.1', websocket_port: 11996 },
     projectDirectory: '/malformed/project',
-    workspace: { default_agent_id: 'default', root: '/malformed/home/agents' },
+    workspace: { default_agent_id: 'default', root: join('/malformed/home', 'agents') },
   })
 })

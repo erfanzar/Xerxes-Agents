@@ -3,7 +3,7 @@
 
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 
 import { expect, test } from 'bun:test'
 
@@ -62,6 +62,6 @@ test('workflow-memory note validation resolves project context without hidden st
   expect(formatWorkflowMemoryNote('Keep this note.', {
     clock: () => new Date('2026-07-13T00:00:00.000Z'),
     projectRoot: '/tmp/example',
-  })).toContain('**Project root:** `/tmp/example`')
+  })).toContain(`**Project root:** \`${resolve('/tmp/example')}\``)
   expect(() => formatWorkflowMemoryNote('   ')).toThrow('workflow instruction')
 })

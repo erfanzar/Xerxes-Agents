@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import type { JsonObject, JsonSchema } from '../types/toolCalls.js'
+import { resolveWindowsSpawn } from '../security/winSpawn.js'
 import { MCPHttpClientTransport } from './http.js'
 import { mcpConfigSecrets, scrubCredentials } from './reconnect.js'
 import {
@@ -184,7 +185,11 @@ export class MCPClient {
     }
     let child: Bun.PipedSubprocess
     try {
-      child = Bun.spawn([this.config.command, ...(this.config.args ?? [])], {
+      // Windows cannot CreateProcess a `.cmd`/`.bat` shim (the conventional
+      // `npx -y <server>` config); resolveWindowsSpawn wraps those in cmd.exe
+      // and passes real executables through unchanged.
+      const spawnTarget = resolveWindowsSpawn(this.config.command, this.config.args ?? [])
+      child = Bun.spawn([spawnTarget.command, ...spawnTarget.args], {
         env: { ...process.env, ...this.config.env },
         stderr: 'pipe',
         stdin: 'pipe',
@@ -399,7 +404,9 @@ export class MCPClient {
     const stdin = this.process?.stdin
     if (stdin) {
       stdin.write(`${JSON.stringify(frame)}\n`)
-      stdin.flush()
+      // Await the flush: on Windows an un-awaited flush can leave a
+      // back-to-back write queued indefinitely, silently dropping the frame.
+      await stdin.flush()
       return
     }
     const httpTransport = this.httpTransport

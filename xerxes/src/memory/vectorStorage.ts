@@ -269,7 +269,7 @@ function escapeLike(value: string): string {
 
 function expandHome(path: string): string {
   if (path === '~') return homedir()
-  return path.startsWith('~/') ? join(homedir(), path.slice(2)) : path
+  return path.startsWith('~/') || path.startsWith('~\\') ? join(homedir(), path.slice(2)) : path
 }
 
 function isByteMarker(value: JsonValue): value is ByteMarker {

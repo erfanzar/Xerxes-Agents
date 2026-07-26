@@ -19,6 +19,35 @@ const MAX_TIMER_DELAY_MS = 2_147_483_647
 const MAX_ARGUMENT_BYTES = 64 * 1024
 const MAX_OUTPUT_CHARS = 1_000_000
 const SAFE_PARENT_ENVIRONMENT_NAMES = ['PATH', 'HOME', 'LANG', 'LC_ALL', 'TERM'] as const
+/**
+ * Windows executables fail or misbehave without these (missing `SystemRoot`
+ * breaks DLL loading and process creation; `PATHEXT`/`COMSPEC` drive command
+ * resolution; `TEMP`/`TMP` are required by most runtimes).
+ */
+const SAFE_PARENT_ENVIRONMENT_NAMES_WINDOWS = [
+  ...SAFE_PARENT_ENVIRONMENT_NAMES,
+  'SystemRoot',
+  'SystemDrive',
+  'COMSPEC',
+  'PATHEXT',
+  'TEMP',
+  'TMP',
+  'USERPROFILE',
+  'HOMEDRIVE',
+  'HOMEPATH',
+  'APPDATA',
+  'LOCALAPPDATA',
+  'PROGRAMDATA',
+  'ProgramFiles',
+  'ProgramFiles(x86)',
+  'NUMBER_OF_PROCESSORS',
+  'OS',
+] as const
+
+/** Parent-environment names forwarded to sandboxed children on this host. */
+export function safeParentEnvironmentNames(platform: NodeJS.Platform = process.platform): readonly string[] {
+  return platform === 'win32' ? SAFE_PARENT_ENVIRONMENT_NAMES_WINDOWS : SAFE_PARENT_ENVIRONMENT_NAMES
+}
 const BLOCKED_ENVIRONMENT_NAMES = new Set(['BUN_INSTALL', 'BUN_OPTIONS', 'NODE_OPTIONS', 'NODE_PATH', 'PYTHONPATH'])
 const ENVIRONMENT_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
 const UNSAFE_EXECUTABLE = /[;&|`$<>\0]/
@@ -351,7 +380,7 @@ function normalizeOptionalPositiveInteger(value: number | undefined, name: strin
 
 function sanitizeEnvironment(values: Readonly<Record<string, string>> | undefined): Readonly<Record<string, string>> {
   const environment: Record<string, string> = {}
-  for (const name of SAFE_PARENT_ENVIRONMENT_NAMES) {
+  for (const name of safeParentEnvironmentNames()) {
     const value = process.env[name]
     if (value !== undefined) {
       environment[name] = value

@@ -65,6 +65,20 @@ curl -fsSL https://raw.githubusercontent.com/erfanzar/Xerxes-Agents/main/scripts
 xerxes
 ```
 
+On Windows (PowerShell 5.1+ or PowerShell 7):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/erfanzar/Xerxes-Agents/main/scripts/install.ps1 | iex"
+# Open a new terminal after installation, then:
+xerxes
+```
+
+Native Windows is a first-class host: the TUI talks to the per-project daemon
+through the token-authenticated WebSocket control transport (published in a
+per-project endpoint file under `%USERPROFILE%\.xerxes\daemon\projects`) and the
+interactive terminal tool runs on ConPTY. WSL2 is not required. Set
+`XERXES_DAEMON_TRANSPORT=unix` only on POSIX hosts.
+
 The installer uses the locked workspace, builds the runtime and TUI, and writes
 `xerxes` and `xerxes-acp` to `${XERXES_BIN_DIRECTORY:-$HOME/.local/bin}`. Repeat
 the same curl command to safely fast-forward and rebuild a managed install. It

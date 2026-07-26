@@ -25,7 +25,10 @@ import {
 } from '../gatewayClient.js'
 import { isResponseFrame, normalizeEventType } from '../gatewayTypes.js'
 
-describe('daemonPaths', () => {
+// POSIX path expectations (/tmp/xh, /Users/me/proj): node:path resolves and
+// joins differently on Windows; win32 path coverage lives in
+// gatewayTransport.test.ts.
+describe.skipIf(process.platform === 'win32')('daemonPaths', () => {
   const prevHome = process.env.XERXES_HOME
   const prevSock = process.env.XERXES_DAEMON_SOCKET
 

@@ -28,13 +28,14 @@
     "swarm": "bun ./scripts/swarmIntegration.ts",
     "test": "bun run test:runtime && bun run test:ui",
     "test:runtime": "bun test ./test",
-    "test:ui": "bunx --bun --no-install vitest run --config vitest.ui.config.ts",
-    "test:ui:watch": "bunx --bun --no-install vitest --config vitest.ui.config.ts"
+    "test:ui": "bun ./node_modules/vitest/vitest.mjs run --config vitest.ui.config.ts",
+    "test:ui:watch": "bun ./node_modules/vitest/vitest.mjs --config vitest.ui.config.ts"
   },
   "dependencies": {
     "@nanostores/react": "^1.1.0",
     "@opentui/core": "0.4.3",
     "@opentui/react": "0.4.3",
+    "bun-pty": "^0.4.10",
     "nanostores": "^1.2.0",
     "react": "^19.2.4"
   },

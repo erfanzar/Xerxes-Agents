@@ -8,7 +8,10 @@ import { join, resolve } from "node:path";
 
 const PROJECT_ROOT = resolve(import.meta.dir, "../..");
 
-test("native installer validates as shell and identifies a local Bun checkout", async () => {
+// The POSIX installer requires `sh`; it cannot run on native Windows.
+const testPosix = test.skipIf(process.platform === "win32");
+
+testPosix("native installer validates as shell and identifies a local Bun checkout", async () => {
   const syntax = await execute(["sh", "-n", "scripts/install.sh"]);
   expect(syntax.exitCode).toBe(0);
   expect(syntax.stderr).toBe("");
@@ -35,7 +38,7 @@ test("native installer validates as shell and identifies a local Bun checkout", 
   expect(source).toContain("xerxes/dist/cli.js");
 });
 
-test("native installer writes Bun and ACP launchers against an explicit local source", async () => {
+testPosix("native installer writes Bun and ACP launchers against an explicit local source", async () => {
   const temporaryRoot = await mkdtemp(join(tmpdir(), "xerxes-bun-installer-"));
   try {
     const binDirectory = join(temporaryRoot, "bin");
@@ -94,7 +97,7 @@ test("native installer writes Bun and ACP launchers against an explicit local so
   }
 }, 30_000);
 
-test("native installer persists an idempotent PATH entry for common user shells", async () => {
+testPosix("native installer persists an idempotent PATH entry for common user shells", async () => {
   const temporaryRoot = await mkdtemp(join(tmpdir(), "xerxes-shell-paths-"));
   try {
     const zshHome = join(temporaryRoot, "zsh-home");
@@ -183,7 +186,7 @@ test("native installer persists an idempotent PATH entry for common user shells"
   }
 });
 
-test("native installer shell-quotes custom launcher and PATH directories", async () => {
+testPosix("native installer shell-quotes custom launcher and PATH directories", async () => {
   const temporaryHome = await mkdtemp(join(tmpdir(), "xerxes-quoted-path-"));
   try {
     const binDirectory = join(temporaryHome, "bin ' quote $(touch SHOULD_NOT_EXIST)");
@@ -237,7 +240,7 @@ test("native installer shell-quotes custom launcher and PATH directories", async
   }
 });
 
-test("native installer rejects launcher directories unsafe for PATH", async () => {
+testPosix("native installer rejects launcher directories unsafe for PATH", async () => {
   const temporaryHome = await mkdtemp(join(tmpdir(), "xerxes-invalid-bin-"));
   try {
     const invalidDirectories = [
@@ -265,7 +268,7 @@ test("native installer rejects launcher directories unsafe for PATH", async () =
   }
 });
 
-test("remote installer clones and safely fast-forwards its managed checkout", async () => {
+testPosix("remote installer clones and safely fast-forwards its managed checkout", async () => {
   const temporaryRoot = await mkdtemp(join(tmpdir(), "xerxes-managed-installer-"));
   try {
     const seed = join(temporaryRoot, "seed");
@@ -332,7 +335,7 @@ test("remote installer clones and safely fast-forwards its managed checkout", as
   }
 }, 30_000);
 
-test("remote installer refuses an unrelated existing directory", async () => {
+testPosix("remote installer refuses an unrelated existing directory", async () => {
   const temporaryRoot = await mkdtemp(join(tmpdir(), "xerxes-invalid-installer-"));
   try {
     const installDirectory = join(temporaryRoot, "managed");
@@ -349,7 +352,7 @@ test("remote installer refuses an unrelated existing directory", async () => {
   }
 });
 
-test("native installer removes the retired Xerxes alias without changing other shell settings", async () => {
+testPosix("native installer removes the retired Xerxes alias without changing other shell settings", async () => {
   const temporaryHome = await mkdtemp(join(tmpdir(), "xerxes-shell-home-"));
   const zshrc = join(temporaryHome, ".zshrc");
   try {
@@ -384,7 +387,7 @@ test("native installer removes the retired Xerxes alias without changing other s
   }
 });
 
-test("native installer warns when an earlier build is still running", async () => {
+testPosix("native installer warns when an earlier build is still running", async () => {
   const cliEntry = join(PROJECT_ROOT, "xerxes", "dist", "cli.js");
   const uiEntry = join(PROJECT_ROOT, "xerxes", "dist", "ui", "entry.js");
   const running = await execute(

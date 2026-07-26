@@ -54,8 +54,13 @@ export function setupGracefulExit({ cleanups = [], failsafeMs = 4000, onError, o
     }
   }
 
-  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
-    process.on(sig, () => exit(SIGNAL_EXIT_CODE[sig], sig))
+  // Windows never delivers SIGHUP (registration is a harmless no-op) and only
+  // delivers SIGINT to console processes, so graceful teardown there relies on
+  // Ctrl+C alone; keep the registration explicit about that difference.
+  const signals: readonly NodeJS.Signals[] =
+    process.platform === 'win32' ? ['SIGINT', 'SIGTERM'] : ['SIGINT', 'SIGTERM', 'SIGHUP']
+  for (const sig of signals) {
+    process.on(sig, () => exit(SIGNAL_EXIT_CODE[sig as keyof typeof SIGNAL_EXIT_CODE], sig))
   }
 
   process.on('uncaughtException', err => fatal('uncaughtException', err))

@@ -3,7 +3,7 @@
 
 import { expect, test } from 'bun:test'
 import { mkdtemp, rm } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 
 import {
@@ -132,7 +132,8 @@ test('store writes Python-readable v2 supersets and resumes only explicit IDs', 
   expect(loaded).toMatchObject({
     format: 'bun-v2',
     key: sessionId,
-    cwd: '/projects/current',
+    // The stored cwd is canonicalized with node:path, which is platform-specific.
+    cwd: resolve('/projects/current'),
     extra: { extra_future_field: { preserve: true } },
   })
   expect(await store.load('tui:default')).toBeUndefined()

@@ -1,7 +1,8 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { mkdir, readdir, rm, writeFile } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
+import { chmod, mkdir, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server, type Socket } from "node:net";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -121,7 +122,13 @@ import {
   type SubmitTurnOptions,
   InMemoryDaemonRuntime,
 } from "./runtime.js";
-import { resolveProjectDirectory, xerxesHome } from "./paths.js";
+import {
+  daemonTransport,
+  resolveProjectDirectory,
+  xerxesHome,
+  type DaemonEndpoint,
+  type DaemonTransport,
+} from "./paths.js";
 import { searchProjectFileMentions } from "./projectFileMentions.js";
 import type { DaemonTransportConnection } from "./transport.js";
 import {
@@ -429,6 +436,10 @@ export interface DaemonServerOptions {
     workspaceDirectory: string,
   ) => SnapshotManager;
   readonly socketPath: string;
+  /** Local control-plane transport; defaults to `daemonTransport()` (websocket on win32). */
+  readonly transport?: DaemonTransport;
+  /** Endpoint-file path published in websocket transport mode. */
+  readonly endpointPath?: string;
   /** Max buffered inbound bytes per Unix connection before the client is dropped. */
   readonly maxSocketFrameBytes?: number;
   /** Tool inventory port for `/tools`; omit only when the runtime owns no visible tool registry. */
@@ -508,7 +519,11 @@ export class DaemonServer {
     workspaceDirectory: string,
   ) => SnapshotManager;
   private server: Server | undefined;
+  private started = false;
   private readonly socketPath: string;
+  private readonly transport: DaemonTransport;
+  private readonly endpointPath: string;
+  private endpointToken: string | undefined;
   private readonly toolCatalog: DaemonToolCatalogPort | undefined;
   private readonly turnOwners = new Map<string, DaemonTransportConnection>();
   private readonly uiControl: DaemonUiControlPort | undefined;
@@ -517,6 +532,11 @@ export class DaemonServer {
 
   constructor(options: DaemonServerOptions) {
     this.socketPath = options.socketPath;
+    this.transport = options.transport ?? daemonTransport();
+    // Tests and embedders that only supply a socket path still get a stable
+    // endpoint-file location when the websocket transport is active.
+    this.endpointPath =
+      options.endpointPath ?? `${options.socketPath.replace(/\.sock$/, "")}.endpoint.json`;
     this.pidPath = options.pidPath;
     this.channelManager = options.channelManager;
     this.channelWebhookServer =
@@ -599,31 +619,35 @@ export class DaemonServer {
   }
 
   async start(): Promise<void> {
-    if (this.server) {
+    if (this.started) {
       return;
     }
-    await mkdir(dirname(this.socketPath), { recursive: true });
-    await rm(this.socketPath, { force: true });
-    this.server = createServer((socket) => this.attach(socket));
-    await new Promise<void>((resolve, reject) => {
-      const server = this.server;
-      if (!server) {
-        reject(new Error("Daemon server was not initialized"));
-        return;
-      }
-      server.once("error", reject);
-      server.listen(this.socketPath, () => {
-        server.off("error", reject);
-        // A listening server without an "error" listener crashes the process
-        // on any asynchronous transport failure; log it instead.
-        server.on("error", (error) => {
-          console.error("Xerxes daemon socket server error:", error);
+    if (this.transport === "websocket") {
+      await this.startWebSocketPrimary();
+    } else {
+      await mkdir(dirname(this.socketPath), { recursive: true });
+      await rm(this.socketPath, { force: true });
+      this.server = createServer((socket) => this.attach(socket));
+      await new Promise<void>((resolve, reject) => {
+        const server = this.server;
+        if (!server) {
+          reject(new Error("Daemon server was not initialized"));
+          return;
+        }
+        server.once("error", reject);
+        server.listen(this.socketPath, () => {
+          server.off("error", reject);
+          // A listening server without an "error" listener crashes the process
+          // on any asynchronous transport failure; log it instead.
+          server.on("error", (error) => {
+            console.error("Xerxes daemon socket server error:", error);
+          });
+          resolve();
         });
-        resolve();
       });
-    });
-    try {
       this.startWebSocketGateway();
+    }
+    try {
       this.channelWebhookServer?.start();
       if (this.pidPath) {
         await mkdir(dirname(this.pidPath), { recursive: true });
@@ -631,6 +655,7 @@ export class DaemonServer {
       }
       this.cronScheduler.start();
       this.cronSchedulerStarted = true;
+      this.started = true;
     } catch (error) {
       this.cronScheduler.stop();
       this.cronSchedulerStarted = false;
@@ -639,10 +664,63 @@ export class DaemonServer {
       this.websocketGateway = undefined;
       await closeServer(this.server);
       this.server = undefined;
-      await rm(this.socketPath, { force: true });
+      this.started = false;
+      if (this.transport === "websocket") {
+        await rm(this.endpointPath, { force: true });
+      } else {
+        await rm(this.socketPath, { force: true });
+      }
       await this.shutdownRuntime();
       throw error;
     }
+  }
+
+  /**
+   * Bind the WebSocket gateway as the primary local control plane (native
+   * Windows default) and publish its coordinates in the per-project endpoint
+   * file the TUI reads. A bind failure is fatal here — unlike the optional
+   * remote gateway, this transport has no fallback.
+   */
+  private async startWebSocketPrimary(): Promise<void> {
+    this.endpointToken =
+      this.websocketOptions?.authToken?.trim() ||
+      process.env.XERXES_DAEMON_TOKEN?.trim() ||
+      randomBytes(24).toString("base64url");
+    const gateway = new DaemonWebSocketGateway(
+      {
+        ...(this.websocketOptions ?? { port: 0 }),
+        authToken: this.endpointToken,
+      },
+      (connection, line) => this.handleLine(connection, line),
+      (connection) => this.disconnect(connection),
+    );
+    try {
+      gateway.start();
+    } catch (error) {
+      void gateway.stop();
+      throw new Error(
+        `Daemon websocket transport failed to bind: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    this.websocketGateway = gateway;
+    const url = gateway.url;
+    if (!url) {
+      await gateway.stop();
+      this.websocketGateway = undefined;
+      throw new Error("Daemon websocket transport did not report a bound URL");
+    }
+    const endpoint: DaemonEndpoint = {
+      transport: "ws",
+      url: url.toString(),
+      token: this.endpointToken,
+      pid: process.pid,
+      protocol: DAEMON_PROTOCOL_VERSION as 35,
+    };
+    await mkdir(dirname(this.endpointPath), { recursive: true });
+    const temporary = `${this.endpointPath}.${process.pid}.tmp`;
+    await writeFile(temporary, `${JSON.stringify(endpoint, null, 2)}\n`, "utf8");
+    await rename(temporary, this.endpointPath);
+    await chmod(this.endpointPath, 0o600).catch(() => undefined);
   }
 
   private startWebSocketGateway(): void {
@@ -694,7 +772,11 @@ export class DaemonServer {
         );
       }
       this.server = undefined;
-      await rm(this.socketPath, { force: true });
+      if (this.transport === "websocket") {
+        await rm(this.endpointPath ?? this.socketPath, { force: true });
+      } else {
+        await rm(this.socketPath, { force: true });
+      }
       if (this.pidPath) {
         await rm(this.pidPath, { force: true });
       }

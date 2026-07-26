@@ -1,7 +1,10 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
+import { homedir } from 'node:os'
+
 export const shortCwd = (cwd: string, max = 28) => {
-  const h = process.env.HOME
+  // `HOME` is unset on native Windows; os.homedir() is correct on every host.
+  const h = process.env.HOME || homedir()
   const p = h && cwd.startsWith(h) ? `~${cwd.slice(h.length)}` : cwd
 
   return p.length <= max ? p : `…${p.slice(-(max - 1))}`

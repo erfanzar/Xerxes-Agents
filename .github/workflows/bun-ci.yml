@@ -32,9 +32,13 @@ env:
 
 jobs:
   native:
-    name: Native Bun verification
-    runs-on: ubuntu-latest
+    name: Native Bun verification (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -67,6 +71,7 @@ jobs:
         run: bun run docs:build
 
       - name: Stage and validate the native release package
+        if: matrix.os == 'ubuntu-latest'
         env:
           PACKAGE_DIRECTORY: ${{ runner.temp }}/xerxes-bun-package
           ARTIFACT_DIRECTORY: ${{ runner.temp }}/xerxes-bun-artifacts
@@ -82,6 +87,7 @@ jobs:
           bun run release:smoke -- "$ARTIFACT_DIRECTORY/xerxes-bun.tgz"
 
       - name: Validate and build the container distribution
+        if: matrix.os == 'ubuntu-latest'
         run: |
           XERXES_DAEMON_TOKEN=ci-compose-config-only docker compose config
           docker build --build-arg XERXES_UID="$(id -u)" -t xerxes:ci .
@@ -91,6 +97,7 @@ jobs:
             'probe=/workspace/.xerxes-write-probe-$$; test -w /workspace && : > "$probe" && rm "$probe"'
 
       - name: Upload native package artifact
+        if: matrix.os == 'ubuntu-latest'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: xerxes-bun-package

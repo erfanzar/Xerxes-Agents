@@ -19,7 +19,9 @@ import {
 } from '../src/runtime/bootstrap.js'
 import { registerCoreTools } from '../src/tools/index.js'
 
-test('bootstrap assembles safe context and registers real commands and tools through injected host ports', async () => {
+// POSIX path fixtures: the fake host is keyed by /workspace and /home paths,
+// while bootstrap canonicalizes through node:path (drive letters on Windows).
+test.skipIf(process.platform === 'win32')('bootstrap assembles safe context and registers real commands and tools through injected host ports', async () => {
   const result = await bootstrap({
     host: fakeHost({
       gitInfo: async () => 'Branch: main\nStatus:\n M src/app.ts',

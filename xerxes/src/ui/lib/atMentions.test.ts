@@ -103,7 +103,9 @@ describe('parseAtMentionToken', () => {
 })
 
 describe('completeAtMention', () => {
-  it('completes triggers, contained file/folder paths, and host-provided git refs', async () => {
+  // POSIX path fixtures: the fake filesystem below is keyed by /workspace
+  // paths, which node:path cannot reproduce on Windows.
+  it.skipIf(process.platform === 'win32')('completes triggers, contained file/folder paths, and host-provided git refs', async () => {
     const configured = options()
 
     expect(await completeAtMention('say @fi', configured)).toEqual(
@@ -149,7 +151,7 @@ describe('completeAtMention', () => {
 })
 
 describe('expandAtMention', () => {
-  it('expands file, folder, git, staged, diff, and URL mentions through injected ports', async () => {
+  it.skipIf(process.platform === 'win32')('expands file, folder, git, staged, diff, and URL mentions through injected ports', async () => {
     const git = createGit()
     const configured = options(git)
 
@@ -192,7 +194,7 @@ describe('expandAtMention', () => {
     expect(git.logOne).toHaveBeenCalledWith(ROOT, 'feature/mentions')
   })
 
-  it('returns explicit containment and unavailable-port errors without reading outside content', async () => {
+  it.skipIf(process.platform === 'win32')('returns explicit containment and unavailable-port errors without reading outside content', async () => {
     const fileSystem = createFileSystem()
     const readTextFile = vi.spyOn(fileSystem, 'readTextFile')
     const configured = { ...options(), fileSystem }

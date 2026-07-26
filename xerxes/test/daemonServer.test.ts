@@ -1,7 +1,11 @@
-// Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
+﻿// Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from "bun:test";
+
+// Raw Unix-socket client tests: the v35 filesystem socket transport does not
+// bind on native Windows, where the daemon runs the WebSocket transport.
+const testUnixSocket = test.skipIf(process.platform === "win32");
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { connect, type Socket } from "node:net";
 import { join } from "node:path";
@@ -30,7 +34,7 @@ import type {
   TurnRunner,
 } from "../src/daemon/runtime.js";
 
-test("daemon preserves JSON-RPC v35 NDJSON responses and stream event framing", async () => {
+testUnixSocket("daemon preserves JSON-RPC v35 NDJSON responses and stream event framing", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-daemon-"));
   const socketPath = join(directory, "daemon.sock");
   const server = new DaemonServer({
@@ -125,7 +129,7 @@ test("daemon preserves JSON-RPC v35 NDJSON responses and stream event framing", 
   }
 });
 
-test("unconfigured daemon status is neutral and turn submission rejects model inference", async () => {
+testUnixSocket("unconfigured daemon status is neutral and turn submission rejects model inference", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-unconfigured-"));
   const socketPath = join(directory, "daemon.sock");
   const server = new DaemonServer({
@@ -186,7 +190,7 @@ test("unconfigured daemon status is neutral and turn submission rejects model in
   }
 });
 
-test("daemon context limits follow the active provider and live model metadata", async () => {
+testUnixSocket("daemon context limits follow the active provider and live model metadata", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-context-limit-"));
   const socketPath = join(directory, "daemon.sock");
   const profileStore = new ProfileStore(join(directory, "profiles.json"));
@@ -291,7 +295,7 @@ test("daemon context limits follow the active provider and live model metadata",
   }
 });
 
-test("session.list scopes history to the active project and exposes additive subagent hierarchy fields", async () => {
+testUnixSocket("session.list scopes history to the active project and exposes additive subagent hierarchy fields", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-session-list-"));
   const projectDirectory = join(directory, "project-a");
   const otherProjectDirectory = join(directory, "project-b");
@@ -505,7 +509,7 @@ test("session.list scopes history to the active project and exposes additive sub
   }
 });
 
-test("shutdown RPC notifies the process host so its daemon lifetime can finish", async () => {
+testUnixSocket("shutdown RPC notifies the process host so its daemon lifetime can finish", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-shutdown-"));
   const socketPath = join(directory, "daemon.sock");
   let shutdowns = 0;
@@ -530,7 +534,7 @@ test("shutdown RPC notifies the process host so its daemon lifetime can finish",
   }
 });
 
-test("daemon shutdown cancels active turns before flushing session state", async () => {
+testUnixSocket("daemon shutdown cancels active turns before flushing session state", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-stop-order-"));
   const socketPath = join(directory, "daemon.sock");
   let childHostShutdowns = 0;
@@ -553,7 +557,7 @@ test("daemon shutdown cancels active turns before flushing session state", async
   }
 });
 
-test("daemon stop releases its runtime even when the transport was never started", async () => {
+testUnixSocket("daemon stop releases its runtime even when the transport was never started", async () => {
   let shutdowns = 0;
   const runtime = new InMemoryDaemonRuntime(undefined, {
     shutdown: () => {
@@ -571,7 +575,7 @@ test("daemon stop releases its runtime even when the transport was never started
   expect(shutdowns).toBe(1);
 });
 
-test("daemon derives slash discovery from implemented canonical commands and rejects unsupported definitions", async () => {
+testUnixSocket("daemon derives slash discovery from implemented canonical commands and rejects unsupported definitions", async () => {
   const directory = await mkdtemp(
     join(tmpdir(), "xerxes-bun-command-registry-"),
   );
@@ -711,7 +715,7 @@ test("daemon derives slash discovery from implemented canonical commands and rej
   }
 });
 
-test("daemon history reports active session counters over the socket", async () => {
+testUnixSocket("daemon history reports active session counters over the socket", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-history-"));
   const socketPath = join(directory, "daemon.sock");
   const server = new DaemonServer({
@@ -816,7 +820,7 @@ test("daemon history reports active session counters over the socket", async () 
   }
 });
 
-test("daemon usage marks imported counters unknown instead of fabricating cumulative API calls", async () => {
+testUnixSocket("daemon usage marks imported counters unknown instead of fabricating cumulative API calls", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-imported-usage-"));
   const socketPath = join(directory, "daemon.sock");
   const runtime = new InMemoryDaemonRuntime(undefined, {
@@ -875,7 +879,7 @@ test("daemon usage marks imported counters unknown instead of fabricating cumula
   }
 });
 
-test("daemon lists and controls persistent cron jobs through slash commands", async () => {
+testUnixSocket("daemon lists and controls persistent cron jobs through slash commands", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-cron-command-"));
   const socketPath = join(directory, "daemon.sock");
   const store = new JobStore(join(directory, "cron", "jobs.json"));
@@ -954,7 +958,7 @@ test("daemon lists and controls persistent cron jobs through slash commands", as
       (await client.next(eventFrame("notification"))).params?.payload,
     ).toMatchObject({
       category: "slash",
-      body: "Cron jobs (2):\n  `active-job` — `0 9 * * 1` (active)\n  `paused-job` — `30 17 * * 5` (paused)",
+      body: "Cron jobs (2):\n  `active-job` â€” `0 9 * * 1` (active)\n  `paused-job` â€” `30 17 * * 5` (paused)",
     });
 
     client.send({
@@ -1047,7 +1051,7 @@ test("daemon lists and controls persistent cron jobs through slash commands", as
   }
 });
 
-test("daemon automatically runs due cron jobs, archives output, and delivers through a configured native channel", async () => {
+testUnixSocket("daemon automatically runs due cron jobs, archives output, and delivers through a configured native channel", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-cron-lifecycle-"));
   const socketPath = join(directory, "daemon.sock");
   const store = new JobStore(join(directory, "cron", "jobs.json"));
@@ -1101,7 +1105,7 @@ test("daemon automatically runs due cron jobs, archives output, and delivers thr
   }
 });
 
-test("daemon exposes a read-only native update status contract", async () => {
+testUnixSocket("daemon exposes a read-only native update status contract", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-update-status-"));
   const socketPath = join(directory, "daemon.sock");
   const server = new DaemonServer({
@@ -1149,7 +1153,7 @@ test("daemon exposes a read-only native update status contract", async () => {
   }
 });
 
-test("daemon exposes real browser management state without fabricating a browser session", async () => {
+testUnixSocket("daemon exposes real browser management state without fabricating a browser session", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-browser-manage-"));
   const socketPath = join(directory, "daemon.sock");
   const server = new DaemonServer({
@@ -1197,7 +1201,7 @@ test("daemon exposes real browser management state without fabricating a browser
   }
 });
 
-test("daemon supplies real direct session controls used by the native TUI", async () => {
+testUnixSocket("daemon supplies real direct session controls used by the native TUI", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-direct-session-"));
   const socketPath = join(directory, "daemon.sock");
   const server = new DaemonServer({
@@ -1302,7 +1306,7 @@ test("daemon supplies real direct session controls used by the native TUI", asyn
   }
 });
 
-test("daemon saves named sessions and routes the advertised btw alias", async () => {
+testUnixSocket("daemon saves named sessions and routes the advertised btw alias", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-save-command-"));
   const socketPath = join(directory, "daemon.sock");
   const server = new DaemonServer({
@@ -1392,7 +1396,7 @@ test("daemon saves named sessions and routes the advertised btw alias", async ()
   }
 });
 
-test("daemon compact uses the active provider to summarize instead of the naive dev summarizer", async () => {
+testUnixSocket("daemon compact uses the active provider to summarize instead of the naive dev summarizer", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-compact-llm-"));
   const socketPath = join(directory, "daemon.sock");
   const profileStore = new ProfileStore(join(directory, "profiles.json"));
@@ -1481,7 +1485,7 @@ test("daemon compact uses the active provider to summarize instead of the naive 
   }
 });
 
-test("daemon refuses to compact while a turn is running", async () => {
+testUnixSocket("daemon refuses to compact while a turn is running", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-compact-running-"));
   const socketPath = join(directory, "daemon.sock");
   const runner = new AbortGateRunner();
@@ -1541,7 +1545,7 @@ test("daemon refuses to compact while a turn is running", async () => {
   }
 });
 
-test("daemon persists /model selection to the active provider profile", async () => {
+testUnixSocket("daemon persists /model selection to the active provider profile", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-model-persist-"));
   const socketPath = join(directory, "daemon.sock");
   const profileStore = new ProfileStore(join(directory, "profiles.json"));
@@ -1594,7 +1598,7 @@ test("daemon persists /model selection to the active provider profile", async ()
   }
 });
 
-test("daemon replays persisted thinking traces on resume", async () => {
+testUnixSocket("daemon replays persisted thinking traces on resume", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-replay-thinking-"));
   const socketPath = join(directory, "daemon.sock");
   const runtime = new InMemoryDaemonRuntime(undefined, {
@@ -1656,7 +1660,7 @@ test("daemon replays persisted thinking traces on resume", async () => {
   }
 });
 
-test("daemon snapshots, lists, and rolls back the active session workspace", async () => {
+testUnixSocket("daemon snapshots, lists, and rolls back the active session workspace", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-snapshots-"));
   const workspace = join(directory, "workspace");
   const socketPath = join(directory, "daemon.sock");
@@ -1780,7 +1784,7 @@ test("daemon snapshots, lists, and rolls back the active session workspace", asy
     ).toMatchObject({
       category: "slash",
       body: expect.stringContaining(
-        `Snapshots (2):\n  \`${firstId}\` — \`first\``,
+        `Snapshots (2):\n  \`${firstId}\` â€” \`first\``,
       ),
     });
 
@@ -1834,7 +1838,7 @@ test("daemon snapshots, lists, and rolls back the active session workspace", asy
     ).toMatchObject({
       category: "slash",
       severity: "warning",
-      body: "Usage: `/rollback <snapshot-id>` — list with `/snapshots`.",
+      body: "Usage: `/rollback <snapshot-id>` â€” list with `/snapshots`.",
     });
   } finally {
     client.close();
@@ -1843,7 +1847,7 @@ test("daemon snapshots, lists, and rolls back the active session workspace", asy
   }
 });
 
-test("daemon resumes only initialize resume IDs and lists saved sessions separately from live sessions", async () => {
+testUnixSocket("daemon resumes only initialize resume IDs and lists saved sessions separately from live sessions", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-resume-"));
   const socketPath = join(directory, "daemon.sock");
   const runtime = new InMemoryDaemonRuntime(undefined, {
@@ -1958,7 +1962,7 @@ test("daemon resumes only initialize resume IDs and lists saved sessions separat
         frame.params?.type === "notification" &&
         frame.params.payload?.type === "replay_user",
     );
-    expect(replayedUser.params?.payload?.body).toBe("✨ saved question");
+    expect(replayedUser.params?.payload?.body).toBe("âœ¨ saved question");
     await client.next(
       (frame) =>
         frame.method === "event" &&
@@ -2002,7 +2006,7 @@ test("daemon resumes only initialize resume IDs and lists saved sessions separat
   }
 });
 
-test("daemon implements native completion, slash, steering, mode, and provider controls", async () => {
+testUnixSocket("daemon implements native completion, slash, steering, mode, and provider controls", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-controls-"));
   const socketPath = join(directory, "daemon.sock");
   const profileStore = new ProfileStore(join(directory, "profiles.json"));
@@ -2321,7 +2325,7 @@ test("daemon implements native completion, slash, steering, mode, and provider c
   }
 });
 
-test("daemon yolo toggles the live permission mode in both directions", async () => {
+testUnixSocket("daemon yolo toggles the live permission mode in both directions", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-yolo-"));
   const socketPath = join(directory, "daemon.sock");
   const server = new DaemonServer({
@@ -2408,7 +2412,7 @@ test("daemon yolo toggles the live permission mode in both directions", async ()
   }
 });
 
-test("daemon slash config, sampling, agents, and platforms use native backing state", async () => {
+testUnixSocket("daemon slash config, sampling, agents, and platforms use native backing state", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-slash-parity-"));
   const socketPath = join(directory, "daemon.sock");
   const rebuiltSettings: Array<Readonly<Record<string, unknown>>> = [];
@@ -2649,7 +2653,7 @@ test("daemon slash config, sampling, agents, and platforms use native backing st
   }
 });
 
-test("daemon routes approval and question replies through the active connection", async () => {
+testUnixSocket("daemon routes approval and question replies through the active connection", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-replies-"));
   const socketPath = join(directory, "daemon.sock");
   const interactions = new DaemonInteractionBoard();
@@ -2739,7 +2743,7 @@ test("daemon routes approval and question replies through the active connection"
   }
 });
 
-test("disconnecting an interaction owner cancels approval and question waits", async () => {
+testUnixSocket("disconnecting an interaction owner cancels approval and question waits", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-disconnect-"));
   const socketPath = join(directory, "daemon.sock");
   const interactions = new DaemonInteractionBoard();
@@ -2825,7 +2829,7 @@ test("disconnecting an interaction owner cancels approval and question waits", a
   }
 });
 
-test("daemon applies queued steering at a native runner boundary", async () => {
+testUnixSocket("daemon applies queued steering at a native runner boundary", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-steer-"));
   const socketPath = join(directory, "daemon.sock");
   const runner = new SteerRunner();
@@ -2884,7 +2888,7 @@ test("daemon applies queued steering at a native runner boundary", async () => {
   }
 });
 
-test("mid-turn steer and mode changes never cancel the active turn", async () => {
+testUnixSocket("mid-turn steer and mode changes never cancel the active turn", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-steer-mode-"));
   const socketPath = join(directory, "daemon.sock");
   const modeChanges: Array<{ id: string; mode: string }> = [];
@@ -2972,7 +2976,7 @@ test("mid-turn steer and mode changes never cancel the active turn", async () =>
   }
 });
 
-test("an explicit cancel still stops the owning turn and only that turn", async () => {
+testUnixSocket("an explicit cancel still stops the owning turn and only that turn", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-cancel-scope-"));
   const socketPath = join(directory, "daemon.sock");
   const first = new SteerRunner();
@@ -3051,7 +3055,7 @@ test("an explicit cancel still stops the owning turn and only that turn", async 
   }
 });
 
-test("daemon exposes only host-configured channel lifecycle controls", async () => {
+testUnixSocket("daemon exposes only host-configured channel lifecycle controls", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-channels-"));
   const socketPath = join(directory, "daemon.sock");
   const channel = new DaemonRecordingChannel("telegram");
@@ -3168,7 +3172,7 @@ test("daemon exposes only host-configured channel lifecycle controls", async () 
   }
 });
 
-test("daemon returns explicit channel-manager errors when no host adapters are configured", async () => {
+testUnixSocket("daemon returns explicit channel-manager errors when no host adapters are configured", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-no-channels-"));
   const socketPath = join(directory, "daemon.sock");
   const server = new DaemonServer({
@@ -3440,7 +3444,7 @@ class SocketTestClient {
   }
 }
 
-test("disconnect cancels only the turn submitted by the disconnecting connection", async () => {
+testUnixSocket("disconnect cancels only the turn submitted by the disconnecting connection", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-turn-owner-"));
   const socketPath = join(directory, "daemon.sock");
   const runner = new AbortGateRunner();
@@ -3517,7 +3521,7 @@ test("disconnect cancels only the turn submitted by the disconnecting connection
   }
 });
 
-test("daemon stop drains in-flight turns so their final state reaches disk", async () => {
+testUnixSocket("daemon stop drains in-flight turns so their final state reaches disk", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-stop-drain-"));
   const socketPath = join(directory, "daemon.sock");
   const sessionDirectory = join(directory, "sessions");
@@ -3577,7 +3581,7 @@ test("daemon stop drains in-flight turns so their final state reaches disk", asy
   }
 });
 
-test("daemon drops a Unix client whose buffered request exceeds the frame limit", async () => {
+testUnixSocket("daemon drops a Unix client whose buffered request exceeds the frame limit", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-frame-limit-"));
   const socketPath = join(directory, "daemon.sock");
   const server = new DaemonServer({
@@ -3633,7 +3637,7 @@ test("daemon drops a Unix client whose buffered request exceeds the frame limit"
   }
 });
 
-test("session.list without an active session refuses to silently scope to the daemon cwd", async () => {
+testUnixSocket("session.list without an active session refuses to silently scope to the daemon cwd", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-list-scope-"));
   const socketPath = join(directory, "daemon.sock");
   const server = new DaemonServer({
@@ -3687,7 +3691,7 @@ test("session.list without an active session refuses to silently scope to the da
   }
 });
 
-test("resuming a saved session evicts its live session registered under another key", async () => {
+testUnixSocket("resuming a saved session evicts its live session registered under another key", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-resume-evict-"));
   const socketPath = join(directory, "daemon.sock");
   const runtime = new InMemoryDaemonRuntime(undefined, {
@@ -3750,7 +3754,7 @@ test("resuming a saved session evicts its live session registered under another 
   }
 });
 
-test("requests on one connection dispatch serially so a queued turn lands in the newly opened session", async () => {
+testUnixSocket("requests on one connection dispatch serially so a queued turn lands in the newly opened session", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-serial-dispatch-"));
   const socketPath = join(directory, "daemon.sock");
   const runtime = new InMemoryDaemonRuntime(undefined, {
@@ -3808,7 +3812,7 @@ test("requests on one connection dispatch serially so a queued turn lands in the
   }
 });
 
-test("initialize adopts a live session with an active turn and reports ultra mode", async () => {
+testUnixSocket("initialize adopts a live session with an active turn and reports ultra mode", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-init-adopt-"));
   const socketPath = join(directory, "daemon.sock");
   const runner = new AbortGateRunner();
@@ -3911,7 +3915,7 @@ test("initialize adopts a live session with an active turn and reports ultra mod
   }
 });
 
-test("slash-submitted image turns are tracked so disconnect cancels them", async () => {
+testUnixSocket("slash-submitted image turns are tracked so disconnect cancels them", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-image-tracked-"));
   const socketPath = join(directory, "daemon.sock");
   const runner = new AbortGateRunner();
@@ -3963,7 +3967,7 @@ test("slash-submitted image turns are tracked so disconnect cancels them", async
   }
 });
 
-test("daemon stop drains slash-submitted turns so their final state reaches disk", async () => {
+testUnixSocket("daemon stop drains slash-submitted turns so their final state reaches disk", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-slash-drain-"));
   const socketPath = join(directory, "daemon.sock");
   const sessionDirectory = join(directory, "sessions");
@@ -4020,7 +4024,7 @@ test("daemon stop drains slash-submitted turns so their final state reaches disk
   }
 });
 
-test("daemon stop drains scheduled cron turns before flushing sessions", async () => {
+testUnixSocket("daemon stop drains scheduled cron turns before flushing sessions", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-cron-drain-"));
   const socketPath = join(directory, "daemon.sock");
   const sessionDirectory = join(directory, "sessions");
@@ -4071,7 +4075,7 @@ test("daemon stop drains scheduled cron turns before flushing sessions", async (
   }
 });
 
-test("a failed resume leaves the connection on its current session", async () => {
+testUnixSocket("a failed resume leaves the connection on its current session", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-resume-fail-"));
   const projectDirectory = join(directory, "project-a");
   const sessionDirectory = join(directory, "sessions");
@@ -4170,7 +4174,7 @@ test("a failed resume leaves the connection on its current session", async () =>
   }
 });
 
-test("a failed retry restores the discarded user turn", async () => {
+testUnixSocket("a failed retry restores the discarded user turn", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-retry-restore-"));
   const socketPath = join(directory, "daemon.sock");
   const runtime = new FlakySubmitRuntime(undefined, {
@@ -4240,7 +4244,7 @@ test("a failed retry restores the discarded user turn", async () => {
   }
 });
 
-test("daemon advertises /ultra in catalog, completion, and slash handling", async () => {
+testUnixSocket("daemon advertises /ultra in catalog, completion, and slash handling", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-ultra-command-"));
   const socketPath = join(directory, "daemon.sock");
   const server = new DaemonServer({
@@ -4318,7 +4322,7 @@ test("daemon advertises /ultra in catalog, completion, and slash handling", asyn
   }
 });
 
-test("turn completion releases approval ownership so late replies are not blocked", async () => {
+testUnixSocket("turn completion releases approval ownership so late replies are not blocked", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-owner-cleanup-"));
   const socketPath = join(directory, "daemon.sock");
   const interactions = new DaemonInteractionBoard();

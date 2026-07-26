@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from 'bun:test'
+import { join } from 'node:path'
 
 import { ComputerUseUnavailableError } from '../src/tools/computerUse/backend.js'
 import {
@@ -99,18 +100,21 @@ test('capture downscales to logical points capped at the max edge, re-encodes as
   expect(capture.elements).toEqual([])
 
   const [shot, dims, , convert] = fake.calls
+  // The port joins tmpDir with node:path, which is separator-platform-specific.
+  const screenshotPath = join('/tmp', 'xerxes-cua-test.png')
+  const jpegPath = join('/tmp', 'xerxes-cua-test.jpg')
   expect(shot?.[0]).toBe('/usr/sbin/screencapture')
-  expect(shot).toContain('/tmp/xerxes-cua-test.png')
+  expect(shot).toContain(screenshotPath)
   expect(dims?.[0]).toBe('/usr/bin/sips')
   expect(convert).toEqual([
     '/usr/bin/sips',
     '-s', 'format', 'jpeg',
     '-s', 'formatOptions', '70',
     '-z', '1018', '1568',
-    '/tmp/xerxes-cua-test.png',
-    '--out', '/tmp/xerxes-cua-test.jpg',
+    screenshotPath,
+    '--out', jpegPath,
   ])
-  expect(removed).toEqual(['/tmp/xerxes-cua-test.png', '/tmp/xerxes-cua-test.jpg'])
+  expect(removed).toEqual([screenshotPath, jpegPath])
 })
 
 test('capture mode ax performs no screenshot work', async () => {

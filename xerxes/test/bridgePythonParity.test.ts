@@ -4,7 +4,7 @@
 import { expect, test } from 'bun:test'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 
 import {
   CATEGORIES,
@@ -381,7 +381,7 @@ test('bridge initialization applies a project directory and restores a saved ses
     method: 'init',
     params: { model: 'gpt-4.1', resume_session_id: 'saved-session' },
   })).toEqual({ accepted: true })
-  expect(server.session.cwd).toBe('/persisted-project')
+  expect(server.session.cwd).toBe(resolve('/persisted-project'))
 })
 
 test('the bridge preserves every documented legacy wire-name pair in both directions', () => {

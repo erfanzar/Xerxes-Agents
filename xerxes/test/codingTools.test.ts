@@ -133,6 +133,8 @@ test('git status, add, diff, and log run with direct argv inside a contained rep
     await git(workspace, ['init'])
     await git(workspace, ['config', 'user.email', 'test@example.invalid'])
     await git(workspace, ['config', 'user.name', 'Xerxes Test'])
+    // Keep the test hermetic on hosts with a global core.autocrlf=true.
+    await git(workspace, ['config', 'core.autocrlf', 'false'])
     await Bun.write(join(workspace, 'tracked.txt'), 'before\n')
     expect(await gitAdd({ files: ['tracked.txt'] }, paths)).toContain('Successfully staged')
     await git(workspace, ['commit', '-m', 'initial'])

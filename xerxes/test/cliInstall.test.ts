@@ -83,7 +83,11 @@ test('Bun CLI exposes the companion installer without starting Python', async ()
 
   expect(exitCode).toBe(0)
   expect(stderr).toBe('')
-  expect(stdout).toBe('Would run: ' + process.execPath + ' add --global --force ' + CLAUDE_CODE_PACKAGE + '\n')
+  // The dry-run printer shell-quotes argv; Windows exec paths contain
+  // backslashes and are therefore JSON-quoted (doubled backslashes).
+  // Compare quote-insensitively with backslashes collapsed.
+  const unquoted = stdout.replaceAll('"', '').replaceAll('\\\\', '\\')
+  expect(unquoted).toBe('Would run: ' + process.execPath + ' add --global --force ' + CLAUDE_CODE_PACKAGE + '\n')
 })
 
 test('Bun CLI renders install option errors as one clean line without a stack dump', async () => {

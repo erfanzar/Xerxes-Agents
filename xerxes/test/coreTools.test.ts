@@ -115,14 +115,16 @@ test('exec_command uses direct argv and returns bounded structured output', asyn
     const registry = new ToolRegistry()
     registerCoreTools(registry, { workspaceRoot: workspace })
     const context = { metadata: {} }
-    const executable = Bun.which('printf') ?? 'printf'
+    // process.execPath (Bun) exists on every host; printf is POSIX-only.
+    const executable = process.execPath
+    const args = ['-e', 'process.stdout.write("hello")']
 
     const result = JSON.parse(await registry.execute(call('exec_command', {
       cmd: executable,
-      args: ['hello'],
+      args,
       workdir: '.',
     }), context)) as { command: string[]; cwd: string; exitCode: number; stdout: string; timedOut: boolean }
-    expect(result.command).toEqual([executable, 'hello'])
+    expect(result.command).toEqual([executable, ...args])
     expect(result.cwd).toBe('.')
     expect(result.exitCode).toBe(0)
     expect(result.stdout).toBe('hello')
