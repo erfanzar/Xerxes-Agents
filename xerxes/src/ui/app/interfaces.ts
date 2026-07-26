@@ -7,6 +7,7 @@ import type { SessionCloseResponse } from '../gatewayTypes.js'
 import type { QueuedMessage } from '../domain/queuedMessage.js'
 import type { ParsedVoiceRecordKey } from '../lib/platform.js'
 import type { RpcResult } from '../lib/rpc.js'
+import type { CopyableMessage } from '../lib/copyText.js'
 import type { MouseTrackingMode, ScrollBoxHandle } from '../lib/terminalTypes.js'
 import type { PasteEvent } from '../protocol/paste.js'
 import type { Theme } from '../theme.js'
@@ -94,6 +95,7 @@ export interface OverlayState {
   approval: ApprovalReq | null
   clarify: ClarifyReq | null
   confirm: ConfirmReq | null
+  copyPicker: CopyPickerState | null
   modelPicker: boolean
   pager: null | PagerState
   pluginsHub: boolean
@@ -101,6 +103,11 @@ export interface OverlayState {
   sessions: boolean
   skillsHub: boolean
   sudo: null | SudoReq
+}
+
+/** Snapshot of copyable transcript messages taken when bare /copy opens the picker. */
+export interface CopyPickerState {
+  items: CopyableMessage[]
 }
 
 export interface PagerState {
@@ -219,6 +226,7 @@ export interface InputHandlerActions {
   die: () => void
   dispatchQueuedSubmission: (message: QueuedMessage) => void
   dispatchSubmission: (full: string) => void
+  getHistoryItems: () => Msg[]
   guardBusySessionSwitch: (what?: string) => boolean
   newSession: (msg?: string, title?: string) => void
   sys: (text: string) => void
@@ -350,6 +358,7 @@ export interface AppLayoutActions {
   onModelSelect: (value: string) => void
   resumeById: (id: string) => void
   setStickyPrompt: (value: string) => void
+  sys: (text: string) => void
 }
 
 export interface AppLayoutComposerProps {
