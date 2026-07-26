@@ -19,3 +19,12 @@ export function useGateway() {
 
   return value
 }
+
+/**
+ * Gateway access for components that must also render outside a provider
+ * (tests, embedded previews). Returns null instead of throwing; callers
+ * degrade honestly by hiding gateway-dependent actions.
+ */
+export function useOptionalGateway(): GatewayServices | null {
+  return useContext(GatewayContext)
+}

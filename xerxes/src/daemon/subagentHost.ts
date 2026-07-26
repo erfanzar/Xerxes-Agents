@@ -56,6 +56,27 @@ export interface NativeSubagentHostOptions {
   readonly transcriptStore?: DaemonTranscriptStore
 }
 
+export interface SubagentRetryOptions {
+  /**
+   * Optional replacement instruction for the new attempt. Defaults to a
+   * continuation nudge when the task's conversation persisted, otherwise the
+   * task's original prompt.
+   */
+  readonly message?: string
+}
+
+/**
+ * Instruction sent as the retry attempt's user message when the dead task's
+ * conversation was persisted: the earlier user prompt and partial progress
+ * are already in that conversation, so resubmitting the original prompt
+ * would duplicate it.
+ */
+export const SUBAGENT_RETRY_CONTINUATION_PROMPT = [
+  '[Retry] Your previous attempt ended before completion (connection failure, cancellation, or an internal error).',
+  'Your earlier progress is preserved in this conversation.',
+  'Review what is already done, finish the remaining work, and return the final summary.',
+].join(' ')
+
 export interface NativeSubagentHost {
   readonly manager: SubAgentManager
   readonly managerPort: SpawnedAgentManagerPort
@@ -64,6 +85,13 @@ export interface NativeSubagentHost {
   invalidateAll(): number
   /** Cancel and invalidate every child owned by one parent session. */
   cancelSource(sourceAgentId: string): number
+  /**
+   * Start a new attempt for a dead (failed/cancelled) task under its stable
+   * identity. The persisted conversation continues when one survives;
+   * retrying a live task returns its current snapshot instead of starting a
+   * duplicate, so the operation is idempotent against repeated invocations.
+   */
+  retry(task: string, options?: SubagentRetryOptions): Promise<SpawnedAgentSnapshot>
   /**
    * Apply the latest daemon/provider generation without discarding delegated
    * task handles. Existing tasks keep the execution generation they were
@@ -132,6 +160,7 @@ export function createNativeSubagentHost(options: NativeSubagentHostOptions): Na
     turnCoordinator,
     invalidateAll: () => managerPort.invalidateAll(),
     cancelSource: sourceAgentId => managerPort.invalidateSource(sourceAgentId),
+    retry: (task, retryOptions) => managerPort.retry(task, retryOptions ?? {}),
     reconfigure(nextOptions) {
       if (nextOptions.eventBus !== options.eventBus) {
         throw new Error('A native subagent host cannot be moved to a different event bus')
@@ -172,6 +201,7 @@ interface HandleMetadata {
 /** Adapt the richer native manager to the Claude-compatible tool contract. */
 class RichSubagentManagerPort implements SpawnedAgentManagerPort {
   private availableTools: readonly ToolDefinition[]
+  private cwd: string
   private definitions: ReadonlyMap<string, AgentDefinition>
   private fallbackModel: string
   private fallbackPermissionMode: PermissionMode
@@ -179,6 +209,7 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
   private readonly handles = new Map<string, HandleMetadata>()
   private readonly invalidatedHandles = new Set<string>()
   private readonly pendingResume = new Set<string>()
+  private transcripts: DaemonTranscriptStore | undefined
 
   constructor(
     private readonly manager: SubAgentManager,
@@ -188,18 +219,22 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
     private readonly runningChildDepths: ReadonlyMap<string, { readonly childDepth: number, readonly taskId: string }>,
   ) {
     this.availableTools = options.tools
+    this.cwd = options.cwd
     this.definitions = options.agentDefinitions
     this.fallbackModel = options.model
     this.fallbackPermissionMode = options.permissionMode
     this.generation = generation
+    this.transcripts = options.transcriptStore
   }
 
   reconfigure(options: NativeSubagentHostOptions, generation: number): void {
     this.availableTools = options.tools
+    this.cwd = options.cwd
     this.definitions = options.agentDefinitions
     this.fallbackModel = options.model
     this.fallbackPermissionMode = options.permissionMode
     this.generation = generation
+    this.transcripts = options.transcriptStore
   }
 
   listHandles(): SpawnedAgentSnapshot[] {
@@ -241,6 +276,35 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
     const permissionMode = delegatedPermissionExceeds(requestedPermissionMode, this.fallbackPermissionMode)
       ? this.fallbackPermissionMode
       : requestedPermissionMode
+    const task = await this.spawnResolved({
+      definition,
+      input: prompt,
+      model,
+      permissionMode,
+      ...(options.title ? { title: options.title } : {}),
+      ...(name ? { name } : {}),
+      ...(options.sourceAgentId ? { sourceAgentId: options.sourceAgentId } : {}),
+      ...(options.creatorAgentId ? { creatorAgentId: options.creatorAgentId } : {}),
+      ...(options.parentAgentId ? { parentAgentId: options.parentAgentId } : {}),
+    })
+    return this.snapshot(task)
+  }
+
+  /** Shared spawn core used by fresh spawns and identity-preserving retry respawns. */
+  private async spawnResolved(resolved: {
+    readonly creatorAgentId?: string
+    readonly definition: AgentDefinition
+    readonly historySessionId?: string
+    readonly input: string
+    readonly model: string
+    readonly name?: string
+    readonly parentAgentId?: string
+    readonly permissionMode: PermissionMode
+    readonly sourceAgentId?: string
+    readonly taskId?: string
+    readonly title?: string
+  }): Promise<SubAgentTask> {
+    const { definition, model, permissionMode } = resolved
     const config = {
       model,
       permissionMode,
@@ -253,17 +317,24 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
     }
     const toolsets = subagentTools(this.availableTools, config).map(tool => tool.function.name)
     const rules = nativeRuleLabels(permissionMode, definition.isolation)
-    const parentKey = options.parentAgentId ?? options.creatorAgentId
+    const parentKey = resolved.parentAgentId ?? resolved.creatorAgentId
     const childDepth = parentKey === undefined ? undefined : this.parentRunningChildDepth(parentKey)
+    // An identity-preserving respawn must register its persisted history
+    // before the first turn starts so the runner continues that conversation
+    // instead of opening a fresh one under the task id.
+    if (resolved.taskId && resolved.historySessionId && this.transcripts) {
+      this.historySessionIds.set(resolved.taskId, resolved.historySessionId)
+    }
     const task = await this.manager.spawn({
-      prompt,
-      ...(options.title ? { title: options.title } : {}),
-      ...(name ? { name } : {}),
+      prompt: resolved.input,
+      ...(resolved.title ? { title: resolved.title } : {}),
+      ...(resolved.name ? { name: resolved.name } : {}),
       agentDefinition: definition,
-      ...(options.sourceAgentId ? { sourceId: options.sourceAgentId } : {}),
-      ...(options.creatorAgentId ? { creatorId: options.creatorAgentId } : {}),
-      ...(options.parentAgentId ? { parentId: options.parentAgentId } : {}),
+      ...(resolved.sourceAgentId ? { sourceId: resolved.sourceAgentId } : {}),
+      ...(resolved.creatorAgentId ? { creatorId: resolved.creatorAgentId } : {}),
+      ...(resolved.parentAgentId ? { parentId: resolved.parentAgentId } : {}),
       ...(childDepth === undefined ? {} : { depth: childDepth }),
+      ...(resolved.taskId ? { id: resolved.taskId } : {}),
       model,
       rules,
       toolsets,
@@ -273,16 +344,117 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
       agentId: definition.name,
       closed: false,
       createdAt: new Date().toISOString(),
-      creatorAgentId: options.creatorAgentId,
+      creatorAgentId: resolved.creatorAgentId,
       generation: this.generation,
       historySessionId: this.historySessionIds.get(task.id),
-      lastInput: prompt,
-      parentAgentId: options.parentAgentId ?? options.creatorAgentId,
+      lastInput: resolved.input,
+      parentAgentId: resolved.parentAgentId ?? resolved.creatorAgentId,
       permissionMode,
       promptProfile: definition.name,
-      sourceAgentId: options.sourceAgentId,
+      sourceAgentId: resolved.sourceAgentId,
+    })
+    return task
+  }
+
+  /**
+   * Retry a terminal task under its stable identity. A live task returns its
+   * current snapshot unchanged (idempotent double-click). The new attempt
+   * continues the persisted conversation when one survives, otherwise it
+   * resubmits the original prompt.
+   */
+  async retry(handleId: string | undefined, options: SubagentRetryOptions = {}): Promise<SpawnedAgentSnapshot> {
+    const value = handleId?.trim()
+    if (!value) throw new ValidationError('handle_id', 'spawned agent id or name is required', handleId)
+    const info = this.manager.findTask(value)
+    if (info === undefined) throw new ValidationError('handle_id', 'spawned agent not found', value)
+    if (this.invalidatedHandles.has(info.id)) {
+      throw new ValidationError(
+        'handle_id',
+        'was invalidated when permissions were tightened; spawn a new agent under the current policy',
+        info.id,
+      )
+    }
+    // Idempotent fast path: a live task returns its current snapshot without
+    // starting (or even planning) another attempt.
+    if (info.status === 'pending' || info.status === 'running') {
+      const live = this.manager.listTasks().find(candidate => candidate.id === info.id)
+      if (live) return this.snapshot(live)
+    }
+    // Any terminal status may be retried. Provider connection failures end
+    // a turn with `[Error: …]` output in the completed state, so rejecting
+    // "completed" tasks would refuse exactly the dead agents retry exists for.
+    const metadata = this.handles.get(info.id)
+    const historySessionId = this.historySessionIds.get(info.id) ?? metadata?.historySessionId
+    // Restore the persisted history link before the attempt starts so the
+    // runner resumes the prior conversation rather than opening a fresh one.
+    if (historySessionId && this.transcripts) this.historySessionIds.set(info.id, historySessionId)
+    const input = options.message?.trim()
+      || await this.continuationInput(historySessionId, metadata?.lastInput ?? '')
+    const task = await this.manager.retry(info.id, input)
+    if (task === undefined) {
+      throw new ValidationError(
+        'handle_id',
+        'could not be retried because its runtime state never started or is gone; spawn a new agent instead',
+        info.id,
+      )
+    }
+    this.pendingResume.delete(task.id)
+    if (metadata) {
+      metadata.closed = false
+      metadata.lastInput = input
+    }
+    return this.snapshot(task)
+  }
+
+  /**
+   * Respawn a task recovered from a persisted parent transcript after a
+   * daemon restart, keeping its stable task id, name, and history link.
+   */
+  async respawnRecovered(snapshot: SpawnedAgentSnapshot, input: string): Promise<SpawnedAgentSnapshot> {
+    const definition = this.resolveChildDefinition(snapshot.creatorAgentId, snapshot.promptProfile)
+    if (!definition) {
+      throw new ValidationError(
+        'subagent_type',
+        `is not a registered agent profile; available profiles: ${visibleDefinitionNames(this.definitions).join(', ') || '(none)'}`,
+        snapshot.promptProfile,
+      )
+    }
+    const model = snapshot.model?.trim() || stringConfig(definition.model) || this.fallbackModel
+    const requestedMode = snapshot.rules?.length ? permissionModeFromRules(snapshot.rules) : this.fallbackPermissionMode
+    const permissionMode = delegatedPermissionExceeds(requestedMode, this.fallbackPermissionMode)
+      ? this.fallbackPermissionMode
+      : requestedMode
+    const task = await this.spawnResolved({
+      definition,
+      input,
+      model,
+      permissionMode,
+      taskId: snapshot.id,
+      ...(snapshot.historySessionId ? { historySessionId: snapshot.historySessionId } : {}),
+      ...(snapshot.name ? { name: snapshot.name } : {}),
+      ...(snapshot.title ? { title: snapshot.title } : {}),
+      ...(snapshot.creatorAgentId ? { creatorAgentId: snapshot.creatorAgentId } : {}),
+      ...(snapshot.parentAgentId ? { parentAgentId: snapshot.parentAgentId } : {}),
+      ...(snapshot.sourceAgentId ? { sourceAgentId: snapshot.sourceAgentId } : {}),
     })
     return this.snapshot(task)
+  }
+
+  /**
+   * Choose the retry attempt's input: a continuation nudge when the task's
+   * conversation persisted, otherwise the recorded original prompt so a task
+   * that died before its first checkpoint still gets its instructions.
+   */
+  async continuationInput(historySessionId: string | undefined, fallbackInput: string): Promise<string> {
+    const store = this.transcripts
+    if (!historySessionId || !store) return fallbackInput
+    try {
+      const transcript = await store.load(historySessionId, { currentProjectDirectory: this.cwd })
+      if (transcript && transcript.messages.length > 0) return SUBAGENT_RETRY_CONTINUATION_PROMPT
+    } catch {
+      // An unreadable history falls back to resubmitting the original prompt.
+    }
+    return fallbackInput
   }
 
   /**
@@ -622,6 +794,33 @@ class RecoverableSubagentManagerPort implements SpawnedAgentManagerPort {
     if (!recovered) return this.live.resume(handleId)
     this.pendingRestart.add(recovered.id)
     return Object.freeze({ ...recovered, closed: false, status: 'idle' })
+  }
+
+  /**
+   * Retry a dead task under its stable identity. Live tasks delegate to the
+   * rich port; restart tombstones respawn with the recovered task id, name,
+   * profile, parentage, and persisted history so a dead agent stays
+   * resumable in a later session after a daemon restart.
+   */
+  async retry(handleId: string | undefined, options: SubagentRetryOptions = {}): Promise<SpawnedAgentSnapshot> {
+    if (this.findLive(handleId)) return this.live.retry(handleId, options)
+    const recovered = this.findRecovered(handleId)
+    if (!recovered) return this.live.retry(handleId, options)
+    const input = options.message?.trim()
+      || await this.live.continuationInput(recovered.historySessionId, recovered.lastInput ?? '')
+    if (!input.trim()) {
+      throw new ValidationError(
+        'handle_id',
+        'has no recorded input or persisted conversation to resume from',
+        recovered.id,
+      )
+    }
+    const replacement = await this.live.respawnRecovered(recovered, input)
+    // The respawned task reuses the recovered identity, so the tombstone is
+    // superseded by a live handle rather than tombstoned forever.
+    this.recovered.delete(recovered.id)
+    this.pendingRestart.delete(recovered.id)
+    return replacement
   }
 
   close(handleId: string): SpawnedAgentSnapshot & { readonly previousStatus: SpawnedAgentStatus } {
@@ -1145,4 +1344,23 @@ function numberValue(value: unknown): number {
 function latestAssistantText(messages: readonly { readonly content: unknown; readonly role: string }[]): string {
   const message = messages.slice().reverse().find(candidate => candidate.role === 'assistant')
   return typeof message?.content === 'string' ? message.content : ''
+}
+
+/** Serializable v35 wire view of a retried subagent for the `subagent.retry` response. */
+export function subagentRetryWirePayload(snapshot: SpawnedAgentSnapshot): Record<string, unknown> {
+  return {
+    id: snapshot.id,
+    name: snapshot.name,
+    title: snapshot.title,
+    status: snapshot.status,
+    prompt_profile: snapshot.promptProfile,
+    closed: snapshot.closed,
+    updated_at: snapshot.updatedAt,
+    ...(snapshot.historySessionId ? { history_session_id: snapshot.historySessionId } : {}),
+    ...(snapshot.error ? { error: snapshot.error } : {}),
+    ...(snapshot.model ? { model: snapshot.model } : {}),
+    ...(snapshot.sourceAgentId ? { source_agent_id: snapshot.sourceAgentId } : {}),
+    ...(snapshot.creatorAgentId ? { creator_agent_id: snapshot.creatorAgentId } : {}),
+    ...(snapshot.parentAgentId ? { parent_agent_id: snapshot.parentAgentId } : {}),
+  }
 }

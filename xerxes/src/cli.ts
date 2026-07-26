@@ -33,7 +33,7 @@ import { runtimeConnection } from "./daemon/runtimeConnection.js";
 import { InMemoryDaemonRuntime } from "./daemon/runtime.js";
 import { daemonBuildIdForEntry } from "./daemon/sourceBuild.js";
 import { DaemonSubagentEventBus } from "./daemon/subagentEvents.js";
-import { createNativeSubagentHost } from "./daemon/subagentHost.js";
+import { createNativeSubagentHost, subagentRetryWirePayload } from "./daemon/subagentHost.js";
 import { AgentTurnRunner, formatSubagentResults } from "./daemon/turnRunner.js";
 import {
   defaultSkillDiscoveryDirectories,
@@ -810,6 +810,26 @@ function daemonRuntime(
     onSessionEvict: sessionId => {
       subagentHost?.cancelSource(sessionId);
       memoryToolContext.prune(sessionId);
+    },
+    // First-class retry of a dead subagent under its stable identity
+    // (`subagent.retry` RPC, `/agents retry`, agents-panel `r` key). The host
+    // continues the persisted conversation when one survives; without an
+    // active provider connection there is no runner to resume with.
+    subagentRetry: async ({ task, message }) => {
+      const host = subagentHost;
+      if (!host) {
+        return {
+          ok: false,
+          error:
+            "subagent retry requires an active provider connection; configure a profile and try again",
+        };
+      }
+      try {
+        const snapshot = await host.retry(task, message ? { message } : {});
+        return { ok: true, agent: subagentRetryWirePayload(snapshot) };
+      } catch (error) {
+        return { ok: false, error: errorMessage(error) };
+      }
     },
     // An interaction-mode change (set_mode / set_plan_mode /
     // SetInteractionModeTool) must never cancel this session's running

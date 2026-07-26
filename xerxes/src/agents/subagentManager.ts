@@ -319,6 +319,11 @@ export interface SpawnSubAgentOptions {
   readonly config?: Readonly<Record<string, unknown>>
   readonly creatorId?: string
   readonly depth?: number
+  /**
+   * Explicit stable task id. Retry paths reuse the dead task's identity so
+   * the same agent (not a lookalike) continues; collisions are rejected.
+   */
+  readonly id?: string
   readonly isolation?: string
   readonly model?: string
   readonly name?: string
@@ -363,12 +368,60 @@ interface TaskRuntime {
   readonly systemPrompt: string
   readonly toolInputs: Map<string, Readonly<Record<string, unknown>>>
   readonly worktree: SubagentWorktree | undefined
+  /**
+   * Monotonic attempt counter. Retry increments it synchronously so a
+   * superseded attempt's settling runner or monitor can never clobber the
+   * state of the new attempt.
+   */
+  attempt: number
   cleanup: Promise<void> | undefined
   emittedSpawn: boolean
   monitor: Promise<void> | undefined
   /** In-flight runner turn; cancellation is cooperative so monitors await it before terminal bookkeeping. */
   run: Promise<string> | undefined
 }
+
+/**
+ * Everything needed to rebuild a task evicted from live state so its stable
+ * identity can be retried while its persisted conversation survives.
+ */
+interface ArchivedSubagentTask {
+  readonly agentDefinition: AgentDefinition | undefined
+  readonly apiCalls: number | undefined
+  readonly config: Readonly<Record<string, unknown>>
+  readonly creatorId: string
+  readonly depth: number
+  readonly error: string
+  readonly id: string
+  readonly inputTokens: number | undefined
+  readonly isolation: string
+  readonly model: string
+  readonly name: string
+  readonly originalPrompt: string
+  readonly originalSystemPrompt: string
+  readonly outputTokens: number | undefined
+  readonly parentId: string
+  readonly readFiles: readonly string[]
+  readonly reasoningTokens: number | undefined
+  readonly result: string | undefined
+  readonly rules: readonly string[]
+  readonly sourceId: string
+  readonly status: SubAgentStatus
+  readonly title: string
+  readonly toolCallsCount: number
+  readonly toolsets: readonly string[]
+  readonly writtenFiles: readonly string[]
+}
+
+export interface SubAgentTaskRef {
+  readonly archived: boolean
+  readonly id: string
+  readonly name: string
+  readonly status: SubAgentStatus
+}
+
+/** Evicted terminal tasks kept retryable by id or name before the oldest archive entries drop. */
+export const DEFAULT_MAX_ARCHIVED_TERMINAL_TASKS = 256
 
 interface ThinkingBurst {
   readonly timer: ReturnType<typeof setTimeout>
@@ -387,6 +440,7 @@ export class SubAgentManager {
   readonly maxDepth: number
   readonly maxSpawnedAgents: number
   maxConcurrent: number
+  private readonly archivedTerminalTasks = new Map<string, ArchivedSubagentTask>()
   private readonly eventSink: (event: SubAgentEvent) => void
   private readonly gate: ConcurrencyGate
   private readonly handleManager: SpawnedAgentManager
@@ -461,7 +515,7 @@ export class SubAgentManager {
     const parentTask = this.resolveTask(options.parentId ?? options.creatorId ?? '')
     const depth = parentTask !== undefined ? parentTask.depth + 1 : (options.depth ?? 0)
     const depthLimit = effectiveMaxDepth(options.agentDefinition, this.maxDepth)
-    const taskId = this.nextTaskId()
+    const taskId = options.id === undefined ? this.nextTaskId() : this.claimTaskId(options.id)
     const isolation = options.isolation?.trim() || options.agentDefinition?.isolation || ''
     const config = effectiveConfig(options.config ?? {}, options.agentDefinition)
     const systemPrompt = effectiveSystemPrompt(options.systemPrompt ?? '', options.agentDefinition)
@@ -518,6 +572,7 @@ export class SubAgentManager {
       systemPrompt,
       toolInputs: new Map(),
       worktree,
+      attempt: 0,
       cleanup: undefined,
       emittedSpawn: false,
       monitor: undefined,
@@ -541,7 +596,7 @@ export class SubAgentManager {
         toolsets: task.toolsets,
       })
       const runtime = this.runtimes.get(task.id)
-      if (runtime !== undefined) runtime.monitor = this.monitor(task)
+      if (runtime !== undefined) runtime.monitor = this.monitor(task, runtime.attempt)
     } catch (error) {
       this.fail(task, errorMessage(error))
       await this.cleanupWorktree(task)
@@ -648,6 +703,92 @@ export class SubAgentManager {
       toolsets: task.toolsets,
       ...(runtime.agentDefinition === undefined ? {} : { agentDefinition: runtime.agentDefinition }),
     })
+  }
+
+  /**
+   * Start a new attempt for a terminal task while keeping its stable
+   * identity: the same task id, name, profile, parentage, and delegated
+   * policy. The caller supplies the attempt input — a continuation nudge
+   * when the host persisted prior conversation, otherwise the original
+   * prompt. Retrying a task that is already pending or running returns the
+   * current task without starting anything, so duplicate retry requests
+   * (double-clicks, repeated RPCs) can never double-start one agent.
+   */
+  async retry(taskIdOrName: string, input = ''): Promise<SubAgentTask | undefined> {
+    let task = this.resolveTask(taskIdOrName)
+    if (task === undefined) task = this.rebuildArchivedTask(taskIdOrName)
+    if (task === undefined) return undefined
+    if (!TERMINAL_STATUSES.has(task.status)) return task
+    const runtime = this.runtimes.get(task.id)
+    // Tasks that failed before their runtime was registered (depth ceiling,
+    // worktree setup) have nothing coherent to resume; say so honestly.
+    if (runtime === undefined) return undefined
+    const previousError = task.error
+    const previousResult = task.result
+    const previousStatus = task.status
+    // Transition synchronously so a concurrent retry observes a non-terminal
+    // status and joins this attempt instead of starting a duplicate.
+    task.status = 'pending'
+    task.error = ''
+    task.result = undefined
+    task.currentTool = ''
+    task.lastActivityAt = this.now().valueOf()
+    runtime.attempt += 1
+    runtime.emittedSpawn = false
+    const attempt = runtime.attempt
+    const message = input.trim() || runtime.originalPrompt
+    try {
+      // A cancelled attempt may still be settling its runner turn; two turns
+      // of one identity must never write the same conversation concurrently.
+      const settling = runtime.run
+      if (settling !== undefined) await settling.then(() => undefined, () => undefined)
+      const handle = this.handleManager.listHandles().find(candidate => candidate.id === task.id)
+      if (handle === undefined) {
+        // The handle manager lost this identity (for example after a process
+        // restart respawn path rebuilt the task first); open a fresh handle
+        // under the same id.
+        await this.handleManager.spawn({
+          nickname: task.id,
+          message,
+          agent: {
+            id: task.id,
+            name: task.name,
+            ...(task.model ? { model: task.model } : {}),
+            ...(runtime.systemPrompt ? { systemPrompt: runtime.systemPrompt } : {}),
+          },
+          title: task.title,
+          ...(task.creatorId ? { creatorAgentId: task.creatorId } : {}),
+          ...(task.parentId ? { parentAgentId: task.parentId } : {}),
+          rules: task.rules,
+          toolsets: task.toolsets,
+        })
+      } else {
+        if (handle.closed) this.handleManager.resume(task.id)
+        await this.handleManager.sendInput(task.id, { message })
+      }
+      runtime.monitor = this.monitor(task, attempt)
+      this.postEvent(task, 'retry', { attempt, inputPreview: message.slice(0, 200) })
+      return task
+    } catch (error) {
+      task.status = previousStatus
+      task.error = previousError
+      task.result = previousResult
+      throw error
+    }
+  }
+
+  /** Resolve a live or evicted-but-archived terminal task by id or name. */
+  findTask(taskIdOrName: string): SubAgentTaskRef | undefined {
+    const value = taskIdOrName.trim()
+    if (!value) return undefined
+    const live = this.resolveTask(value)
+    if (live !== undefined) {
+      return Object.freeze({ archived: false, id: live.id, name: live.name, status: live.status })
+    }
+    const archived = this.resolveArchivedTask(value)
+    return archived === undefined
+      ? undefined
+      : Object.freeze({ archived: true, id: archived.id, name: archived.name, status: archived.status })
   }
 
   listTasks(): SubAgentTask[] {
@@ -814,7 +955,7 @@ export class SubAgentManager {
 
   private runTaskInput(handleId: string, input: string, signal: AbortSignal): Promise<string> {
     const runtime = this.runtimes.get(handleId)
-    const promise = this.executeTaskInput(handleId, input, signal)
+    const promise = this.executeTaskInput(handleId, input, signal, runtime?.attempt ?? 0)
     if (runtime !== undefined) {
       runtime.run = promise
       const clear = (): void => {
@@ -825,13 +966,14 @@ export class SubAgentManager {
     return promise
   }
 
-  private async executeTaskInput(handleId: string, input: string, signal: AbortSignal): Promise<string> {
+  private async executeTaskInput(handleId: string, input: string, signal: AbortSignal, attempt: number): Promise<string> {
     const task = this.tasks.get(handleId)
     const runtime = this.runtimes.get(handleId)
     if (task === undefined || runtime === undefined) throw new Error(`Unknown subagent task '${handleId}'`)
     const release = await this.gate.acquire(signal)
     try {
       if (signal.aborted) throw abortError(signal)
+      if (runtime.attempt !== attempt) throw new Error(`Subagent task '${handleId}' attempt was superseded by a retry`)
       task.status = 'running'
       task.lastActivityAt = this.now().valueOf()
       if (!runtime.emittedSpawn) {
@@ -867,6 +1009,9 @@ export class SubAgentManager {
       return content
     } catch (error) {
       this.flushThinkingBurst(task)
+      // A superseded attempt's late failure belongs to the dead attempt; the
+      // retried task's pending/running state must survive it.
+      if (this.runtimes.get(handleId)?.attempt !== attempt) throw error
       if (signal.aborted || task.status === 'cancelled') {
         task.status = 'cancelled'
         task.result ??= '[Sub-agent was cancelled.]'
@@ -884,12 +1029,16 @@ export class SubAgentManager {
     }
   }
 
-  private async monitor(task: SubAgentTask): Promise<void> {
+  private async monitor(task: SubAgentTask, attempt: number): Promise<void> {
     while (!TERMINAL_STATUSES.has(task.status)) {
       const result = await this.handleManager.wait([task.id], 60_000)
+      // A retry bumps the attempt synchronously; a superseded monitor must
+      // never synchronize a stale snapshot over the new attempt's state.
+      if (this.runtimes.get(task.id)?.attempt !== attempt) return
       const snapshot = result.completed[0] ?? result.pending[0]
       if (snapshot !== undefined) this.synchronize(task, snapshot)
     }
+    if (this.runtimes.get(task.id)?.attempt !== attempt) return
     // Cancellation is cooperative: never post `done` or clean up while the
     // runner turn is still settling, so late report events precede `done`.
     const inFlight = this.runtimes.get(task.id)?.run
@@ -961,6 +1110,9 @@ export class SubAgentManager {
     for (const [id, task] of this.tasks) {
       if (terminal <= this.maxRetainedTerminalTasks) return
       if (!TERMINAL_STATUSES.has(task.status)) continue
+      // Keep a bounded descriptor so a dead agent stays retryable by its
+      // stable id or name after live-state eviction.
+      this.archiveTerminalTask(task)
       const burst = this.thinkingBurst.get(id)
       if (burst !== undefined) clearTimeout(burst.timer)
       this.thinkingBurst.delete(id)
@@ -972,6 +1124,104 @@ export class SubAgentManager {
       this.tasks.delete(id)
       terminal -= 1
     }
+  }
+
+  private archiveTerminalTask(task: SubAgentTask): void {
+    const runtime = this.runtimes.get(task.id)
+    if (runtime === undefined) return
+    this.archivedTerminalTasks.delete(task.id)
+    if (this.archivedTerminalTasks.size >= DEFAULT_MAX_ARCHIVED_TERMINAL_TASKS) {
+      const oldest = this.archivedTerminalTasks.keys().next().value
+      if (oldest !== undefined) this.archivedTerminalTasks.delete(oldest)
+    }
+    this.archivedTerminalTasks.set(task.id, {
+      agentDefinition: runtime.agentDefinition,
+      apiCalls: task.apiCalls,
+      config: runtime.config,
+      creatorId: task.creatorId,
+      depth: task.depth,
+      error: task.error,
+      id: task.id,
+      inputTokens: task.inputTokens,
+      isolation: runtime.isolation,
+      model: task.model,
+      name: task.name,
+      originalPrompt: runtime.originalPrompt,
+      originalSystemPrompt: runtime.originalSystemPrompt,
+      outputTokens: task.outputTokens,
+      parentId: task.parentId,
+      readFiles: Object.freeze([...task.readFiles].sort().slice(0, 100)),
+      reasoningTokens: task.reasoningTokens,
+      result: task.result,
+      rules: task.rules,
+      sourceId: task.sourceId,
+      status: task.status,
+      title: task.title,
+      toolCallsCount: task.toolCallsCount,
+      toolsets: task.toolsets,
+      writtenFiles: Object.freeze([...task.writtenFiles].sort().slice(0, 100)),
+    })
+  }
+
+  /** Name collisions resolve to the most recently archived generation. */
+  private resolveArchivedTask(taskIdOrName: string): ArchivedSubagentTask | undefined {
+    const direct = this.archivedTerminalTasks.get(taskIdOrName)
+    if (direct !== undefined) return direct
+    let match: ArchivedSubagentTask | undefined
+    for (const archived of this.archivedTerminalTasks.values()) {
+      if (archived.name === taskIdOrName) match = archived
+    }
+    return match
+  }
+
+  private rebuildArchivedTask(taskIdOrName: string): SubAgentTask | undefined {
+    const archived = this.resolveArchivedTask(taskIdOrName)
+    if (archived === undefined) return undefined
+    this.archivedTerminalTasks.delete(archived.id)
+    const task = new SubAgentTask({
+      id: archived.id,
+      prompt: archived.originalPrompt,
+      depth: archived.depth,
+      title: archived.title,
+      model: archived.model,
+      rules: archived.rules,
+      toolsets: archived.toolsets,
+      ...(archived.name ? { name: archived.name } : {}),
+      ...(archived.agentDefinition === undefined ? {} : { agentDefName: archived.agentDefinition.name }),
+      ...(archived.sourceId ? { sourceId: archived.sourceId } : {}),
+      ...(archived.creatorId ? { creatorId: archived.creatorId } : {}),
+      ...(archived.parentId ? { parentId: archived.parentId } : {}),
+    })
+    task.apiCalls = archived.apiCalls
+    task.error = archived.error
+    task.inputTokens = archived.inputTokens
+    task.outputTokens = archived.outputTokens
+    task.reasoningTokens = archived.reasoningTokens
+    task.result = archived.result
+    task.status = archived.status
+    task.toolCallsCount = archived.toolCallsCount
+    for (const path of archived.readFiles) task.readFiles.add(path)
+    for (const path of archived.writtenFiles) task.writtenFiles.add(path)
+    this.tasks.set(task.id, task)
+    if (task.name) this.tasksByName.set(task.name, task.id)
+    this.runtimes.set(task.id, {
+      agentDefinition: archived.agentDefinition,
+      config: archived.config,
+      isolation: archived.isolation,
+      originalPrompt: archived.originalPrompt,
+      originalSystemPrompt: archived.originalSystemPrompt,
+      systemPrompt: effectiveSystemPrompt(archived.originalSystemPrompt, archived.agentDefinition),
+      toolInputs: new Map(),
+      // The original worktree was already cleaned up when the task went
+      // terminal; a retried attempt runs in the regular workspace.
+      worktree: undefined,
+      attempt: 0,
+      cleanup: undefined,
+      emittedSpawn: false,
+      monitor: undefined,
+      run: undefined,
+    })
+    return task
   }
 
   private reportText(task: SubAgentTask, text: string): void {
@@ -1121,6 +1371,13 @@ export class SubAgentManager {
 
   private nextTaskId(): string {
     const id = this.idFactory()
+    if (!id || this.tasks.has(id)) throw new Error(`Subagent id '${id}' is unavailable`)
+    return id
+  }
+
+  /** Adopt a caller-supplied stable identity (retry paths only); duplicates are rejected. */
+  private claimTaskId(raw: string): string {
+    const id = raw.trim()
     if (!id || this.tasks.has(id)) throw new Error(`Subagent id '${id}' is unavailable`)
     return id
   }

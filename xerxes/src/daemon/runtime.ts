@@ -13,6 +13,7 @@ import {
 } from "../session/daemonTranscript.js";
 import type { JsonRpcPayload } from "../protocol/jsonRpc.js";
 import { processAtMentions } from "./atMentions.js";
+import { imageUrlContentParts, type TurnImage } from "./images.js";
 import { xerxesHome } from "./paths.js";
 import type { DaemonInteractionBoard } from "./interactions.js";
 import {
@@ -135,16 +136,42 @@ export interface TurnRunControls {
   drainSteer?(): readonly string[];
   /** Text authored by the user before hidden attachment expansion. */
   readonly displayText?: string;
+  /** Validated image attachments carried into the user message as content parts. */
+  readonly images?: readonly TurnImage[];
 }
 
 export interface SubmitTurnOptions {
   /** Transcript text retained separately from the provider-facing prompt. */
   readonly displayText?: string;
+  /** Validated image attachments for this turn's user message. */
+  readonly images?: readonly TurnImage[];
+}
+
+export interface SubagentRetryRequest {
+  /** Optional replacement instruction for the new attempt. */
+  readonly message?: string;
+  /** Connection session that requested the retry; informational. */
+  readonly sessionKey?: string;
+  /** Stable task id or name of the dead subagent to resume. */
+  readonly task: string;
+}
+
+export interface SubagentRetryResult {
+  readonly agent?: Readonly<Record<string, unknown>>;
+  readonly error?: string;
+  readonly ok: boolean;
+  readonly [key: string]: unknown;
 }
 
 export interface DaemonRuntime {
   cancelAllTurns(): number;
   cancelTurn(sessionKey: string): boolean;
+  /**
+   * Optional first-class retry of a terminal subagent task under its stable
+   * identity. Kept optional so test fakes and custom hosts stay
+   * source-compatible; the server rejects `subagent.retry` when absent.
+   */
+  retrySubagent?(request: SubagentRetryRequest): Promise<SubagentRetryResult>;
   /** Optional persistent-session removal capability for hosts with native transcript storage. */
   deleteSavedSession?(sessionId: string): Promise<boolean>;
   /**
@@ -208,6 +235,10 @@ export interface InMemoryDaemonRuntimeOptions {
   readonly sessionDirectory?: string;
   /** Cancel resources owned exclusively by a session before it is evicted. */
   readonly onSessionEvict?: (sessionId: string) => void;
+  /** Host-owned subagent retry port wired to the daemon's subagent host. */
+  readonly subagentRetry?: (
+    request: SubagentRetryRequest,
+  ) => Promise<SubagentRetryResult>;
   /** Reconcile session-owned resources after an interaction-policy change. */
   readonly onSessionModeChange?: (sessionId: string, mode: string) => void;
   /** Release resources captured by the host that constructed this runtime. */
@@ -283,6 +314,17 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
       }
     }
     return cancelled;
+  }
+
+  retrySubagent(request: SubagentRetryRequest): Promise<SubagentRetryResult> {
+    const port = this.options.subagentRetry;
+    if (!port) {
+      return Promise.resolve({
+        ok: false,
+        error: "This daemon runtime does not expose subagent retry.",
+      });
+    }
+    return port(request);
   }
 
   cancelTurn(sessionKey: string): boolean {
@@ -659,11 +701,19 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     const displayText = options.displayText?.trim() || text;
     const processed = await processAtMentions(text, session.cwd);
     const providerText = processed.enhancedMessage;
+    const images = options.images ?? [];
+    // Attachments ride the same ContentPart channel the provider mappings
+    // already understand; plain-text turns keep their string content so
+    // legacy transcripts and downstream string consumers are untouched.
+    const providerContent =
+      images.length > 0
+        ? [{ type: "text" as const, text: providerText }, ...imageUrlContentParts(images)]
+        : providerText;
     if (!runnerManagesState) {
       session.messages.push({
         role: "user",
-        content: providerText,
-        ...(displayText === providerText ? {} : { text: displayText }),
+        content: providerContent,
+        ...(displayText === providerText && !images.length ? {} : { text: displayText }),
       });
       session.turnCount += 1;
     }
@@ -691,6 +741,7 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
         {
           drainSteer: () => this.drainSteers(sessionKey),
           displayText,
+          ...(images.length ? { images } : {}),
         },
       )) {
         emit(event);
