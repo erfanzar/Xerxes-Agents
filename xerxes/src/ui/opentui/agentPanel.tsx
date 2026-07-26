@@ -7,6 +7,7 @@ import { useKeyboard, useTerminalDimensions } from '@opentui/react'
 import { type MutableRefObject, memo, useMemo, useRef, useState } from 'react'
 
 import { useOptionalGateway } from '../app/gatewayContext.js'
+import { adjustPanelWidth, PANEL_WIDTH_STEP, withPanelWidthDelta } from '../app/panelSizeStore.js'
 import type { SpawnSnapshot } from '../app/spawnHistoryStore.js'
 export { AGENT_SIDEBAR_BREAKPOINT, shouldShowAgentSidebar } from '../domain/agentPanelLayout.js'
 import { retrySubagent, subagentFailed, subagentRetryable } from '../lib/agentRetry.js'
@@ -15,6 +16,7 @@ import { fmtDuration, fmtTokens } from '../lib/subagentTree.js'
 import type { Theme } from '../theme.js'
 import type { SubagentProgress } from '../types.js'
 
+import { isPanelResizeKey } from './diffPanel.js'
 import { Box, Span, Text } from './primitives.js'
 
 export const AGENT_TITLE_MAX_LENGTH = 24
@@ -360,13 +362,21 @@ const consumeKey = (event: KeyEvent) => {
 export function AgentPanelHotkey({
   disabled,
   open,
-  onToggle
+  onToggle,
+  resizeEnabled = false
 }: {
   disabled: boolean
   open: boolean
   onToggle: (open: boolean) => void
+  /** Allow Shift+Cmd/Ctrl/Option+←/→ panel-width chords (sidebar or overlay visible). */
+  resizeEnabled?: boolean
 }) {
   useKeyboard(event => {
+    if (!disabled && resizeEnabled && isPanelResizeKey(event)) {
+      adjustPanelWidth(event.name === 'right' ? PANEL_WIDTH_STEP : -PANEL_WIDTH_STEP)
+      consumeKey(event)
+      return
+    }
     if (disabled || event.name !== 'f6') return
     onToggle(!open)
     consumeKey(event)
@@ -385,7 +395,7 @@ export function AgentPanelOverlay({ history, liveAgents, onClose, t }: AgentPane
   const marginY = Math.min(30, Math.max(1, Math.floor((height - 20) / 2)))
   const panelHeight = Math.max(1, height - marginY * 2)
   const page = Math.max(4, panelHeight - 8)
-  const panelWidth = Math.max(1, Math.min(96, width - 2))
+  const panelWidth = withPanelWidthDelta(Math.max(1, Math.min(96, width - 2)), width)
   const records = useMemo(() => collectAgentPanelRecords(liveAgents, history), [history, liveAgents])
   const [selectedId, setSelectedId] = useState<null | string>(null)
   const [retryNotes, setRetryNotes] = useState<ReadonlyMap<string, string>>(new Map())
@@ -450,7 +460,9 @@ export function AgentPanelOverlay({ history, liveAgents, onClose, t }: AgentPane
   }
 
   useKeyboard(event => {
-    if (event.name === 'escape' || event.name === 'f6' || event.sequence === 'q') {
+    if (isPanelResizeKey(event)) {
+      adjustPanelWidth(event.name === 'right' ? PANEL_WIDTH_STEP : -PANEL_WIDTH_STEP)
+    } else if (event.name === 'escape' || event.name === 'f6' || event.sequence === 'q') {
       onClose()
     } else if (event.name === 'left') {
       moveSelection(-1)
