@@ -1864,6 +1864,10 @@ export class DaemonServer {
         );
         return { ok: true };
       case "new": {
+        // Flush before evicting so unpersisted edits survive the reset; for
+        // a hex resume key openSession then re-adopts the persisted history
+        // instead of overwriting it with an empty session.
+        await this.runtime.flushSessions();
         this.runtime.evictSession(key);
         const fresh = await this.runtime.openSession(key);
         this.emitSlash(connection, `New session \`${fresh.id}\` started.`);
@@ -3423,6 +3427,13 @@ export class DaemonServer {
     }
     session.turnCount = Math.max(0, session.turnCount - 1);
     await this.runtime.flushSessions();
+    if (session.messages.length === 0 && session.turnCount === 0) {
+      // The store's empty-save path used to delete the transcript here
+      // implicitly. Routine saves never delete anymore, so removing the
+      // last remaining turn removes the persisted record explicitly while
+      // the live (now empty) session stays usable.
+      await this.runtime.removeSavedTranscript?.(session.id);
+    }
     if (notify) {
       this.emitSlash(
         connection,
@@ -4007,6 +4018,10 @@ export class DaemonServer {
       // resetting it.
       const live = this.runtime.sessionStatus(key);
       if (!live?.activeTurnId) {
+        // Eviction drops every mutation not yet persisted (idle steers,
+        // title and mode edits); flush first so a reconnect cannot silently
+        // lose them.
+        await this.runtime.flushSessions();
         this.runtime.evictSession(key);
       }
     }
