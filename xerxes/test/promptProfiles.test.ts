@@ -161,6 +161,33 @@ test('full profile renders orchestration engagement rules only with agent tools'
   expect(minimal).not.toContain('[Orchestration]')
 })
 
+test('verification rules render for main and sub-agent profiles, never for NONE', async () => {
+  const host = {
+    captureRuntimeInfo: () => ({
+      platform: 'test',
+      runtimeVersion: 'Bun test',
+      timestamp: '2026-07-13T12:00:00.000Z',
+      timezone: 'UTC',
+      workingDirectory: '/workspace',
+      workspaceName: 'workspace',
+      xerxesVersion: '0.3.0',
+    }),
+  }
+  const builder = new PromptContextBuilder({ host })
+
+  for (const profile of [PromptProfile.FULL, PromptProfile.COMPACT, PromptProfile.MINIMAL]) {
+    const prefix = await builder.assembleSystemPromptPrefix({ profile, toolNames: ['ReadFile'] })
+    expect(prefix).toContain('[Verification]')
+    expect(prefix).toContain('fresh evidence from this session')
+    expect(prefix).toContain('a claim without a tool result is a guess')
+    expect(prefix).toContain('Verify the environment before blaming it')
+    expect(prefix).toContain('correct it explicitly and immediately')
+  }
+
+  const none = await builder.assembleSystemPromptPrefix({ profile: PromptProfile.NONE })
+  expect(none).not.toContain('[Verification]')
+})
+
 test('orchestration block does not weaken full-profile caps', async () => {
   const oversizedSkill = parseSkillMarkdown([
     '---',
