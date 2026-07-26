@@ -234,6 +234,11 @@ export function useComposerState({
       if (hotkey) {
         return readHotkeyClipboardText(querier).then(async preferredText => {
           if (isUsableClipboardText(preferredText)) {
+            // Clipboards can carry BOTH text and an image (browser copies):
+            // paste the text and quietly attach the image when present —
+            // the user gets a 📎 confirmation only when an image attaches.
+            void onClipboardPaste(true)
+
             return handleResolvedPaste({ bracketed: false, cursor, text: preferredText, value })
           }
 
