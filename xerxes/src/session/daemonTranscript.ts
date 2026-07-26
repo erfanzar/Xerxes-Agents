@@ -204,7 +204,13 @@ export class DaemonTranscriptStore {
   async save(transcript: DaemonTranscript): Promise<void> {
     const path = this.pathFor(transcript.sessionId)
     if (!transcriptHasHistory(transcript)) {
-      await rm(path, { force: true })
+      // Never delete a persisted transcript as a side effect of saving an
+      // empty in-memory session. Several paths can briefly hold an empty
+      // session bound to a persisted id (a failed or skipped resume, a stale
+      // duplicate copy, an undo down to zero turns), and one routine save —
+      // after a turn, on `/save`, or during the shutdown flush — would
+      // otherwise erase the on-disk history silently. Deletion stays
+      // explicit through remove().
       return
     }
     await atomicJsonWrite(path, daemonTranscriptRecord(transcript))

@@ -147,6 +147,12 @@ export interface DaemonRuntime {
   cancelTurn(sessionKey: string): boolean;
   /** Optional persistent-session removal capability for hosts with native transcript storage. */
   deleteSavedSession?(sessionId: string): Promise<boolean>;
+  /**
+   * Optional persisted-transcript removal that leaves any live in-memory
+   * session untouched. Explicit history-clearing flows (for example undoing
+   * the last remaining turn) use it because routine saves never delete.
+   */
+  removeSavedTranscript?(sessionId: string): Promise<boolean>;
   evictSession(sessionKey: string): void;
   flushSessions(): Promise<void>;
   listSavedSessions(
@@ -307,6 +313,10 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     return deleted || active !== undefined;
   }
 
+  async removeSavedTranscript(sessionId: string): Promise<boolean> {
+    return this.transcriptStore.remove(sessionId);
+  }
+
   evictSession(sessionKey: string): void {
     const sessionId = this.sessions.get(sessionKey)?.id ?? sessionKey;
     // Abort any in-flight turn so its orphaned controller cannot block a
@@ -421,9 +431,10 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
         key,
       );
     }
-    const session = transcript
+    let effectiveTranscript = transcript;
+    let session = effectiveTranscript
       ? sessionFromTranscript(
-          transcript,
+          effectiveTranscript,
           key,
           options.model ?? this.model(),
           this.workspaceRoot,
@@ -435,8 +446,44 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
           options.model ?? this.model(),
           this.workspaceRoot,
         );
-    const releaseSubagentClaim = transcript && transcriptIsSubagent(transcript)
-      ? claimDirectSubagentConversation(transcript.sessionId)
+    // A live copy of the same persisted id may still be registered under a
+    // stale key (for example a `tui:` slot that predates a resume). Two
+    // in-memory sessions sharing one id race on every save — flushSessions
+    // persists both concurrently and the stale copy silently overwrites
+    // newer history — so fold the live copy in before registering this one.
+    const duplicate = [...this.sessions.entries()].find(
+      ([otherKey, other]) => otherKey !== key && other.id === session.id,
+    );
+    if (duplicate) {
+      const [otherKey, other] = duplicate;
+      if (other.activeTurnId) {
+        throw new ValidationError(
+          "session_id",
+          "is still running a turn under another connection; wait for it to finish before resuming it here",
+          key,
+        );
+      }
+      // The live copy can hold state newer than the transcript loaded above
+      // (idle steers, title or mode edits); persist it before dropping the
+      // stale key, then re-read so the adopted session loses nothing.
+      await this.saveSession(other);
+      this.evictSession(otherKey);
+      const reloaded = await this.transcriptStore.load(key, {
+        currentProjectDirectory: cwd,
+        workspaceRoot: this.workspaceRoot,
+      });
+      if (reloaded) {
+        effectiveTranscript = reloaded;
+        session = sessionFromTranscript(
+          reloaded,
+          key,
+          options.model ?? this.model(),
+          this.workspaceRoot,
+        );
+      }
+    }
+    const releaseSubagentClaim = effectiveTranscript && transcriptIsSubagent(effectiveTranscript)
+      ? claimDirectSubagentConversation(effectiveTranscript.sessionId)
       : undefined;
     applySystemPromptAddendum(session, options.systemPromptAddendum);
     this.sessions.set(key, session);
