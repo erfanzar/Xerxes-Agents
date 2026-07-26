@@ -14,8 +14,7 @@ import type {
   SessionTitleResponse,
   SessionUndoResponse
 } from '../../../gatewayTypes.js'
-import { writeClipboardText } from '../../../lib/clipboard.js'
-import { writeOsc52Clipboard } from '../../../lib/osc52.js'
+import { COPY_USAGE, copyableMessages, copyTextToClipboard, formatCopyOutcome, resolveCopyArg } from '../../../lib/copyText.js'
 import { forceRedraw } from '../../../lib/terminalRuntime.opentui.js'
 import { configureDetectedTerminalKeybindings, configureTerminalKeybindings } from '../../../lib/terminalSetup.js'
 import type { MouseTrackingMode } from '../../../lib/terminalTypes.js'
@@ -415,43 +414,41 @@ export const coreCommands: SlashCommand[] = [
   },
 
   {
-    help: 'copy selection or assistant message',
+    help: 'copy transcript text: /copy [n] · user [n] · last · all (bare = message picker)',
     name: 'copy',
     run: async (arg, ctx) => {
       const { sys } = ctx.transcript
 
-      if (!arg && ctx.composer.hasSelection) {
+      if (!arg.trim() && ctx.composer.hasSelection) {
         const text = await ctx.composer.selection.copySelection()
 
         if (text) {
           return sys(`copied ${text.length} characters`)
-        } else {
-          return sys('clipboard copy failed — try XERXES_TUI_FORCE_OSC52=1 to force the escape sequence')
         }
+
+        return sys(`clipboard copy failed — ${COPY_USAGE}`)
       }
 
-      if (arg && Number.isNaN(parseInt(arg, 10))) {
-        return sys('usage: /copy [number]')
+      const resolution = resolveCopyArg(arg, copyableMessages(ctx.local.getHistoryItems()))
+
+      if (resolution.kind === 'usage') {
+        return sys(COPY_USAGE)
       }
 
-      const all = ctx.local.getHistoryItems().filter(m => m.role === 'assistant')
-      const target = all[arg ? Math.min(parseInt(arg, 10), all.length) - 1 : all.length - 1]
-
-      if (!target) {
-        return sys('nothing to copy — start a conversation first')
+      if (resolution.kind === 'empty') {
+        return sys(resolution.message)
       }
 
-      void writeClipboardText(target.text)
-        .then(nativeOk => {
-          if (ctx.stale()) {
-            return
-          }
+      if (resolution.kind === 'picker') {
+        return patchOverlayState({ copyPicker: { items: resolution.items } })
+      }
 
-          if (nativeOk) {
-            sys('copied to clipboard')
-          } else {
-            writeOsc52Clipboard(target.text)
-            sys('sent OSC52 copy sequence (terminal support required)')
+      const text = resolution.text
+
+      void copyTextToClipboard(text)
+        .then(outcome => {
+          if (!ctx.stale()) {
+            sys(formatCopyOutcome(outcome))
           }
         })
         .catch(error => {
