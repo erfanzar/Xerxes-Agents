@@ -13,6 +13,7 @@ import { PASTE_SNIPPET_RE } from '../protocol/paste.js'
 import type { Msg } from '../types.js'
 
 import type { ComposerActions, ComposerRefs, ComposerState, PasteSnippet } from './interfaces.js'
+import { promptSubmitImages, restoreAttachments, takeAttachments } from './attachmentsStore.js'
 import { decideSubmit } from './queue.js'
 import { turnController } from './turnController.js'
 import { getUiState, patchUiState } from './uiStore.js'
@@ -89,6 +90,10 @@ export function useSubmission(opts: UseSubmissionOptions) {
         return sys('session not ready yet')
       }
 
+      // Pending /image attachments apply to exactly this submit: take them
+      // out of the store now, and only restore them when the daemon never
+      // accepted the turn (session-busy rollback re-queues the text).
+      const images = takeAttachments()
       const userMessage = queuedUserMessage(message)
 
       turnController.clearStatusTimer()
@@ -102,7 +107,8 @@ export function useSubmission(opts: UseSubmissionOptions) {
       gw.request<PromptSubmitResponse>('prompt.submit', {
         session_id: sid,
         text: message.submitText,
-        display_text: message.displayText
+        display_text: message.displayText,
+        ...(images.length ? { images: promptSubmitImages(images) } : {})
       }).catch(
         (e: Error) => {
           if (isSessionBusyError(e)) {
@@ -110,6 +116,7 @@ export function useSubmission(opts: UseSubmissionOptions) {
             // optimistic bubble and restore only the queue preview; the next
             // settle edge will dispatch it and append one fresh user bubble.
             removeMessage(userMessage)
+            restoreAttachments(images)
             composerActions.enqueue(message.submitText, message.displayText)
             patchUiState({ busy: true, status: 'queued for next turn' })
 
@@ -128,9 +135,9 @@ export function useSubmission(opts: UseSubmissionOptions) {
     (text: string) => {
       const submitText = expandSnips(composerState.pasteSnips)(text)
 
-      // Native Bun accepts prompt text directly. File/image attachments need
-      // an explicit native transport and must not fall through to the retired
-      // drop-detection compatibility RPC.
+      // Native Bun accepts prompt text directly; pending /image attachments
+      // are taken from the attachments store inside submitPrompt and ride the
+      // same prompt.submit frame as `images`.
       submitPrompt(queuedMessage(text, submitText))
     },
     [composerState.pasteSnips, submitPrompt]
