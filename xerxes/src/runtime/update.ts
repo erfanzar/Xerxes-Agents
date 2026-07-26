@@ -1,12 +1,16 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { resolve } from 'node:path'
+import { existsSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
 
 /** Environment variable containing a release-approved Bun package or source spec. */
 export const BUN_PACKAGE_SPEC_ENV = 'XERXES_PACKAGE'
 export const DEFAULT_GIT_TIMEOUT = 1_000
+export const DEFAULT_GIT_FETCH_TIMEOUT = 60_000
+export const DEFAULT_GIT_MERGE_TIMEOUT = 30_000
 export const DEFAULT_BUN_UPDATE_TIMEOUT = 120_000
+export const DEFAULT_BUN_BUILD_TIMEOUT = 300_000
 export const DEFAULT_PACKAGE_REGISTRY = 'https://registry.npmjs.org'
 
 /** A completed child-process invocation supplied by the host or Bun runtime. */
@@ -49,6 +53,42 @@ export interface GitUpdateStatusOptions {
   readonly cwd?: string
   readonly runner?: UpdateProcessRunner
   readonly timeout?: number
+}
+
+/** One named step of an explicitly requested managed-checkout (git) update. */
+export interface GitUpdateStep {
+  readonly argv: readonly string[]
+  readonly name: 'fetch' | 'merge' | 'install' | 'build'
+  readonly timeout: number
+}
+
+/** A validated git-checkout update plan. Planning is read-only; nothing here has run yet. */
+export interface GitUpdatePlan {
+  readonly checkout: string
+  readonly remote: string
+  readonly steps: readonly GitUpdateStep[]
+  readonly upstream: string
+}
+
+export interface GitUpdatePlanOptions {
+  readonly bunExecutable?: string
+  readonly cwd?: string
+  readonly runner?: UpdateProcessRunner
+  /** An already-computed status for the same checkout, to avoid probing git twice. */
+  readonly status?: GitUpdateStatus
+  readonly timeout?: number
+}
+
+export interface GitUpdateExecutionOptions {
+  readonly runner?: UpdateProcessRunner
+  readonly timeout?: number
+}
+
+/** Result of a git-checkout update the caller explicitly chose to execute. */
+export interface GitUpdateExecutionResult {
+  readonly checkout: string
+  readonly completedSteps: readonly string[]
+  readonly ok: boolean
 }
 
 /** A no-side-effect Bun global-package command plan. */
@@ -100,6 +140,7 @@ export interface UpdateCommandOptions {
   readonly currentVersion: string | undefined
   readonly cwd: string | undefined
   readonly dryRun: boolean
+  readonly git: boolean
   readonly packageName: string | undefined
   readonly packageSpec: string | undefined
 }
@@ -118,6 +159,8 @@ export interface UpdateCommandResult {
   readonly applied: boolean
   readonly execution?: BunUpdateExecutionResult
   readonly git: GitUpdateStatus
+  readonly gitExecution?: GitUpdateExecutionResult
+  readonly gitPlan?: GitUpdatePlan
   readonly packageCheck?: BunPackageUpdateCheck
   readonly plan?: BunUpdatePlan
 }
@@ -135,15 +178,31 @@ export const UPDATE_HELP = `Inspect or explicitly run a Bun Xerxes update.
 
 Usage:
   xerxes update
+  xerxes update --git
+  xerxes update --git --dry-run [--cwd <checkout>]
+  xerxes update --git --apply [--cwd <checkout>]
   xerxes update --check [--package <npm-package> --current-version <version>]
   xerxes update --dry-run [--spec <package-or-source-spec>]
   xerxes update --apply [--spec <package-or-source-spec>]
 
 Without flags, this only inspects local git tracking state. --check may fetch
 the git upstream and, only with --package, query that named npm registry entry.
---dry-run prints a Bun command but never runs it. --apply is required to run a
-planned command. A package/source spec must be supplied with --spec or through
-${BUN_PACKAGE_SPEC_ENV}; Xerxes does not assume a published package name.`
+--dry-run prints the planned commands but never runs them. --apply is required
+to run a planned command.
+
+--git targets the managed git checkout that owns the running CLI (for an
+installed copy that is the clone scripts/install.sh created, for example
+~/.xerxes-bun; override with --cwd). --git alone reports status and a hint.
+--git --apply runs, in order: git fetch --quiet --no-tags <remote>, a
+fast-forward divergence check, git merge --ff-only <upstream>,
+bun install --frozen-lockfile, and bun run build. A diverged checkout is
+refused; Xerxes never forces and never resets. A git update requires a real
+checkout with an upstream; installs from XERXES_SOURCE_DIRECTORY must be
+updated at their source.
+
+A package/source spec must be supplied with --spec or through
+${BUN_PACKAGE_SPEC_ENV}; Xerxes does not assume a published package name.
+--git cannot be combined with --spec.`
 
 /** Run a command through Bun without a shell, applying a caller-provided timeout. */
 export async function runUpdateProcess(
@@ -290,6 +349,133 @@ export function formatGitUpdateStatus(status: GitUpdateStatus): string {
   return `current (${head})`
 }
 
+/**
+ * Resolve the repository checkout that owns the running CLI by walking up from this module,
+ * matching the markers scripts/install.sh uses (package.json, bun.lock, xerxes/). For an
+ * installed copy this is the managed clone (default ~/.xerxes-bun); for a bundled build the
+ * module lives in <checkout>/xerxes/dist and for a source run in <checkout>/xerxes/src.
+ */
+export function resolveUpdateCheckoutDirectory(startDirectory?: string): string {
+  let directory = resolve(startDirectory ?? import.meta.dir)
+  for (;;) {
+    if (
+      existsSync(join(directory, 'package.json')) &&
+      existsSync(join(directory, 'bun.lock')) &&
+      existsSync(join(directory, 'xerxes'))
+    ) {
+      return directory
+    }
+    const parent = dirname(directory)
+    if (parent === directory) return process.cwd()
+    directory = parent
+  }
+}
+
+/**
+ * Plan an explicit update of a managed git checkout. Planning only probes local git state;
+ * it never fetches, merges, installs, or builds. Honest failures: a directory that is not a
+ * git checkout (for example an install from XERXES_SOURCE_DIRECTORY) or a checkout without
+ * an upstream ref cannot be planned.
+ */
+export async function planGitUpdate(options: GitUpdatePlanOptions = {}): Promise<GitUpdatePlan> {
+  const checkout = resolve(options.cwd ?? resolveUpdateCheckoutDirectory())
+  const timeout = validateTimeout(options.timeout ?? DEFAULT_GIT_TIMEOUT)
+  const status = options.status ?? await gitUpdateStatus({
+    cwd: checkout,
+    timeout,
+    ...(options.runner === undefined ? {} : { runner: options.runner }),
+  })
+  if (!status.isGit) {
+    throw new UpdateCommandError(
+      `${checkout} is not a git checkout; a git update requires the managed clone ` +
+      '(installs from XERXES_SOURCE_DIRECTORY must be updated at their source).',
+    )
+  }
+  if (!status.upstream) {
+    throw new UpdateCommandError(
+      `git checkout at ${checkout} has no upstream ref; cannot plan a fast-forward update.`,
+    )
+  }
+  const remote = status.upstream.split('/', 1)[0] || 'origin'
+  const bunExecutable = options.bunExecutable === undefined
+    ? process.execPath
+    : normalizeExecutable(options.bunExecutable)
+  return {
+    checkout,
+    remote,
+    upstream: status.upstream,
+    steps: [
+      {
+        name: 'fetch',
+        argv: ['git', 'fetch', '--quiet', '--no-tags', remote],
+        timeout: Math.max(timeout, DEFAULT_GIT_FETCH_TIMEOUT),
+      },
+      {
+        name: 'merge',
+        argv: ['git', 'merge', '--ff-only', status.upstream],
+        timeout: Math.max(timeout, DEFAULT_GIT_MERGE_TIMEOUT),
+      },
+      {
+        name: 'install',
+        argv: [bunExecutable, 'install', '--frozen-lockfile'],
+        timeout: DEFAULT_BUN_UPDATE_TIMEOUT,
+      },
+      {
+        name: 'build',
+        argv: [bunExecutable, 'run', 'build'],
+        timeout: DEFAULT_BUN_BUILD_TIMEOUT,
+      },
+    ],
+  }
+}
+
+/**
+ * Execute a caller-approved git-checkout update plan: fetch, refuse on divergence (never
+ * force, never reset), merge --ff-only, bun install --frozen-lockfile, bun run build. Steps
+ * run sequentially and the first non-zero exit aborts with a typed error naming the step.
+ */
+export async function executeGitUpdate(
+  plan: GitUpdatePlan,
+  options: GitUpdateExecutionOptions = {},
+): Promise<GitUpdateExecutionResult> {
+  const runner = options.runner ?? runUpdateProcess
+  const gitTimeout = validateTimeout(options.timeout ?? DEFAULT_GIT_TIMEOUT)
+  const steps = {
+    fetch: requiredGitStep(plan, 'fetch'),
+    merge: requiredGitStep(plan, 'merge'),
+    install: requiredGitStep(plan, 'install'),
+    build: requiredGitStep(plan, 'build'),
+  }
+  const completedSteps: string[] = []
+  const runStep = async (step: GitUpdateStep): Promise<void> => {
+    const result = await runner(step.argv, { cwd: plan.checkout, timeout: step.timeout })
+    if (result.exitCode !== 0 || result.timedOut) {
+      throw new UpdateCommandError(`git update step "${step.name}" failed: ${processFailure(result)}`)
+    }
+    completedSteps.push(step.name)
+  }
+
+  await runStep(steps.fetch)
+  const counts = await runner(
+    ['git', 'rev-list', '--left-right', '--count', `HEAD...${plan.upstream}`],
+    { cwd: plan.checkout, timeout: gitTimeout },
+  )
+  if (counts.exitCode !== 0 || counts.timedOut) {
+    throw new UpdateCommandError('git update divergence check failed: ' + processFailure(counts))
+  }
+  const [aheadCount, behindCount] = parseGitCounts(counts.stdout)
+  if (aheadCount > 0 && behindCount > 0) {
+    throw new UpdateCommandError(
+      `local checkout has diverged from ${plan.upstream} (${aheadCount} ahead, ${behindCount} behind); ` +
+      'refusing to merge --ff-only. Resolve the divergence manually; Xerxes never forces or resets.',
+    )
+  }
+  await runStep(steps.merge)
+  await runStep(steps.install)
+  await runStep(steps.build)
+  return { checkout: plan.checkout, completedSteps, ok: true }
+}
+
 /** Construct a Bun global-install command only from an explicit package or source spec. */
 export function planBunUpdate(options: BunUpdatePlanOptions = {}): BunUpdatePlan {
   const environment = options.environment ?? process.env
@@ -405,6 +591,7 @@ export function parseUpdateCommandOptions(args: readonly string[]): UpdateComman
   let currentVersion: string | undefined
   let cwd: string | undefined
   let dryRun = false
+  let git = false
   let packageName: string | undefined
   let packageSpec: string | undefined
 
@@ -427,13 +614,15 @@ export function parseUpdateCommandOptions(args: readonly string[]): UpdateComman
       case '--dry-run':
         dryRun = true
         break
+      case '--git':
+        git = true
+        break
       case '--package':
         packageName = requiredOptionValue(args, ++index, argument)
         break
       case '--spec':
         packageSpec = requiredOptionValue(args, ++index, argument)
         break
-      case '--git':
       case '--force':
         throw new UpdateCommandError(`${argument} is not supported by the Bun update command.`)
       default:
@@ -441,11 +630,14 @@ export function parseUpdateCommandOptions(args: readonly string[]): UpdateComman
     }
   }
   if (apply && dryRun) throw new UpdateCommandError('--apply and --dry-run cannot be used together.')
+  if (git && packageSpec !== undefined) {
+    throw new UpdateCommandError('--git updates the managed checkout and cannot be combined with --spec.')
+  }
   if (packageName !== undefined && !check) throw new UpdateCommandError('--package requires --check.')
   if (currentVersion !== undefined && packageName === undefined) {
     throw new UpdateCommandError('--current-version requires --package.')
   }
-  return { apply, check, currentVersion, cwd, dryRun, packageName, packageSpec }
+  return { apply, check, currentVersion, cwd, dryRun, git, packageName, packageSpec }
 }
 
 /** Run the CLI update surface: status by default, network checking and process execution only with explicit flags. */
@@ -456,7 +648,9 @@ export async function runUpdateCommand(
   const options = parseUpdateCommandOptions(args)
   const write = host.write ?? console.log
   const runner = host.runner ?? runUpdateProcess
-  const cwd = resolve(host.cwd ?? options.cwd ?? process.cwd())
+  const cwd = resolve(
+    host.cwd ?? options.cwd ?? (options.git ? resolveUpdateCheckoutDirectory() : process.cwd()),
+  )
   const gitTimeout = validateTimeout(host.timeout ?? DEFAULT_GIT_TIMEOUT)
   const updateTimeout = validateTimeout(host.timeout ?? DEFAULT_BUN_UPDATE_TIMEOUT)
   const git = await gitUpdateStatus({ cwd, fetch: options.check, runner, timeout: gitTimeout })
@@ -478,33 +672,58 @@ export async function runUpdateCommand(
 
   let plan: BunUpdatePlan | undefined
   let execution: BunUpdateExecutionResult | undefined
-  if (options.dryRun || options.apply) {
+  let gitPlan: GitUpdatePlan | undefined
+  let gitExecution: GitUpdateExecutionResult | undefined
+  if (options.git) {
+    if (options.dryRun || options.apply) {
+      gitPlan = await planGitUpdate({
+        cwd,
+        runner,
+        status: git,
+        timeout: gitTimeout,
+        ...(host.bunExecutable === undefined ? {} : { bunExecutable: host.bunExecutable }),
+      })
+    }
+    if (options.dryRun && gitPlan !== undefined) {
+      write(`Git update plan for ${gitPlan.checkout} (upstream ${gitPlan.upstream}):`)
+      for (const step of gitPlan.steps) write(`Would run (${step.name}): ` + shellCommand(step.argv))
+      write('Dry run only; re-run with --git --apply to execute these steps.')
+    } else if (options.apply && gitPlan !== undefined) {
+      gitExecution = await executeGitUpdate(gitPlan, { runner, timeout: gitTimeout })
+      for (const name of gitExecution.completedSteps) write(`git update step "${name}" completed.`)
+      write('Git update completed; restart running Xerxes processes to use the new build.')
+    } else {
+      write('Git update: not run; use --git --dry-run to review the plan or --git --apply to execute it.')
+    }
+  } else if (options.dryRun || options.apply) {
     plan = planBunUpdate({
       ...(host.bunExecutable === undefined ? {} : { bunExecutable: host.bunExecutable }),
       ...(host.environment === undefined ? {} : { environment: host.environment }),
       ...(options.packageSpec === undefined ? {} : { packageSpec: options.packageSpec }),
     })
-  }
-  if (options.dryRun && plan !== undefined) {
-    write('Would run: ' + shellCommand(plan.argv))
-  } else if (options.apply && plan !== undefined) {
-    execution = await executeBunUpdate(plan, { cwd, runner, timeout: updateTimeout })
-    if (!execution.ok) {
-      throw new UpdateCommandError('Bun update command failed: ' + processFailure(execution))
+    if (options.dryRun) {
+      write('Would run: ' + shellCommand(plan.argv))
+    } else {
+      execution = await executeBunUpdate(plan, { cwd, runner, timeout: updateTimeout })
+      if (!execution.ok) {
+        throw new UpdateCommandError('Bun update command failed: ' + processFailure(execution))
+      }
+      if (execution.stdout.trim()) write(execution.stdout.trim())
+      if (execution.stderr.trim()) write('Bun update stderr: ' + oneLine(execution.stderr))
+      write('Bun update command exited successfully.')
     }
-    if (execution.stdout.trim()) write(execution.stdout.trim())
-    if (execution.stderr.trim()) write('Bun update stderr: ' + oneLine(execution.stderr))
-    write('Bun update command exited successfully.')
   } else {
     write('No Bun update command was run. Use --dry-run to review a spec or --apply to execute one.')
   }
 
   return {
-    applied: execution !== undefined,
+    applied: execution !== undefined || gitExecution !== undefined,
     git,
     ...(packageCheck === undefined ? {} : { packageCheck }),
     ...(plan === undefined ? {} : { plan }),
     ...(execution === undefined ? {} : { execution }),
+    ...(gitPlan === undefined ? {} : { gitPlan }),
+    ...(gitExecution === undefined ? {} : { gitExecution }),
   }
 }
 
@@ -571,6 +790,12 @@ function gitStatus(values: Partial<GitUpdateStatus> & Pick<GitUpdateStatus, 'isG
     upstream: values.upstream ?? '',
     upstreamHash: values.upstreamHash ?? '',
   }
+}
+
+function requiredGitStep(plan: GitUpdatePlan, name: GitUpdateStep['name']): GitUpdateStep {
+  const step = plan.steps.find(candidate => candidate.name === name)
+  if (step === undefined) throw new UpdateCommandError(`git update plan is missing the "${name}" step`)
+  return step
 }
 
 function parseGitCounts(raw: string): readonly [number, number] {
