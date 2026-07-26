@@ -20,6 +20,7 @@ import {
   listAgentDefinitions,
   type AgentDefinition,
 } from "../agents/definitions.js";
+import { persistedSubagentSnapshotValues } from "../agents/subagentPersistence.js";
 import {
   ProfileStore,
   SAMPLING_PARAMS,
@@ -4672,11 +4673,15 @@ function sessionPayload(
   const calls = exactSessionApiCalls(session);
   const hierarchy = sessionHierarchyPayload(session.metadata);
   const title = optionalString(session.metadata.title);
+  const subagentSnapshots = subagentSnapshotPanelPayloads(session.metadata);
   return {
     id: session.id,
     key: session.sessionKey,
     ...hierarchy,
     ...(title ? { title } : {}),
+    ...(subagentSnapshots.length
+      ? { subagent_snapshots: subagentSnapshots }
+      : {}),
     agent_id: session.agentId,
     workspace: session.workspace,
     cwd: session.cwd,
@@ -4723,6 +4728,63 @@ function sessionHierarchyPayload(
     ...(rootSessionId ? { root_session_id: rootSessionId } : {}),
     ...(subagentId ? { subagent_id: subagentId } : {}),
   };
+}
+
+/**
+ * Project the persisted subagent manifest into bounded panel rows. Identity,
+ * hierarchy, status, and persisted usage metadata only: `last_input` and
+ * `last_output` are child conversation content and stay out of the parent
+ * session payload so a resumed transcript never receives a subagent dump.
+ */
+function subagentSnapshotPanelPayloads(
+  metadata: Readonly<Record<string, unknown>>,
+): JsonRpcPayload[] {
+  const rows: JsonRpcPayload[] = [];
+  for (const value of persistedSubagentSnapshotValues(metadata)) {
+    const id = optionalString(value.id);
+    const status = optionalString(value.status);
+    if (!id || !status) continue;
+    const row: JsonRpcPayload = { id, status };
+    for (const key of [
+      "name",
+      "title",
+      "agent_id",
+      "creator_id",
+      "parent_id",
+      "source_agent_id",
+      "model",
+      "prompt_profile",
+      "summary",
+      "error",
+      "history_session_id",
+      "created_at",
+      "updated_at",
+    ] as const) {
+      const field = value[key];
+      if (typeof field === "string" && field) row[key] = field;
+      else if (field === null) row[key] = null;
+    }
+    for (const key of [
+      "api_calls",
+      "tool_count",
+      "input_tokens",
+      "output_tokens",
+      "reasoning_tokens",
+      "queue_size",
+    ] as const) {
+      const field = value[key];
+      if (typeof field === "number" && Number.isFinite(field)) row[key] = field;
+    }
+    for (const key of ["files_read", "files_written", "rules", "toolsets"] as const) {
+      const field = value[key];
+      if (Array.isArray(field)) {
+        row[key] = field.filter((item): item is string => typeof item === "string");
+      }
+    }
+    if (value.closed === true) row.closed = true;
+    rows.push(row);
+  }
+  return rows;
 }
 
 function sessionUsagePayload(
