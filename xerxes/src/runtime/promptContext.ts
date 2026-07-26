@@ -218,6 +218,7 @@ export class PromptContextBuilder {
     return [
       identityBlock(profile),
       toolingBlock(context),
+      orchestrationBlock(profile, options.toolNames ?? []),
       safetyBlock(context),
       skillsBlock(context),
       trimSection(context.userProfileSection),
@@ -550,6 +551,42 @@ function toolingBlock(context: PromptContext): string {
     '- Search snippets and result titles are leads, not verification unless the source was opened and confirmed.',
   )
   return lines.join('\n')
+}
+
+/**
+ * Main-agent (FULL) supervision rules, rendered only when agent-spawning
+ * tools are actually exposed. Keeps the orchestrator engaged during long
+ * sub-agent waits instead of idling, while preserving await-all semantics
+ * for required results.
+ */
+function orchestrationBlock(
+  profile: PromptProfileConfig,
+  toolNames: readonly string[],
+): string {
+  if (profile.profile !== PromptProfile.FULL) return ''
+  if (!hasAgentOrchestrationTools(toolNames)) return ''
+  return [
+    '[Orchestration]',
+    'Orchestration rules:',
+    '- Supervise spawned sub-agents actively; stay in control of the workflow instead of waiting idle.',
+    '- While agents run, interleave useful local work between checks; idle waiting is wasted turns.',
+    '- Check the cohort between your own actions — about every two minutes of wall time, not a literal sleep — using the agent inventory and peek tools rather than blind waiting.',
+    '- Nudge stuck agents, stop irrelevant or superseded ones, and collect omitted results before any final answer.',
+    '- Still prefer await-all joins for required results; never final-answer while required agents are queued or running.',
+  ].join('\n')
+}
+
+function hasAgentOrchestrationTools(toolNames: readonly string[]): boolean {
+  return toolNames.some((name) => {
+    const lowered = name.trim().toLowerCase()
+    return (
+      lowered === 'agent' ||
+      lowered === 'agenttool' ||
+      lowered === 'delegate_task' ||
+      lowered.includes('spawnagents') ||
+      lowered.includes('awaitagents')
+    )
+  })
 }
 
 function safetyBlock(context: PromptContext): string {
