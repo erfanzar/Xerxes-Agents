@@ -399,6 +399,13 @@ function controllerOwnsTextareaKey(input: string, key: ControllerKey): boolean {
     return true
   }
 
+  // Ctrl+V is the Composer's smart-paste chord (clipboard text paste, or
+  // clipboard-image attach); the focused textarea must not insert a literal
+  // ^V control character.
+  if (ch === 'v' && key.ctrl) {
+    return true
+  }
+
   // These are unconditional action shortcuts in useInputHandlers. Alt+G is
   // also the documented VS Code/Cursor fallback for opening $EDITOR.
   if ((ch === 'd' || ch === 'l') && actionModifier) {

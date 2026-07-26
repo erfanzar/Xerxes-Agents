@@ -853,7 +853,7 @@ function AttachmentsPanel() {
   )
 }
 
-function Composer({ composer }: Pick<AppLayoutProps, 'composer'>) {
+export function Composer({ composer }: Pick<AppLayoutProps, 'composer'>) {
   const ui = useStore($uiState)
   const isBlocked = useStore($isBlocked)
   const t = useStore($uiTheme)
@@ -962,6 +962,36 @@ function Composer({ composer }: Pick<AppLayoutProps, 'composer'>) {
 
     void Promise.resolve(
       composer.handleTextPaste({ bracketed: true, cursor, hotkey: false, text: decodePaste(event.bytes), value })
+    ).then(result => {
+      if (result) {
+        applyDraft(result.value, result.cursor)
+      }
+    })
+  })
+
+  // Ctrl+V smart paste: terminals only deliver Cmd+V / bracketed paste when
+  // the clipboard carries TEXT — an image-only clipboard produces no event at
+  // all, so a chord the TUI can actually receive is the only way to paste
+  // images. The hotkey path pastes clipboard text normally and attaches a
+  // clipboard image (with visible feedback) when there is no usable text.
+  useKeyboard(event => {
+    if (event.name !== 'v' || !event.ctrl || event.meta || event.super || event.shift) {
+      return
+    }
+
+    const textarea = ref.current
+
+    if (isBlocked || !textarea) {
+      return
+    }
+
+    event.preventDefault()
+
+    const value = textarea.plainText
+    const cursor = textarea.cursorOffset
+
+    void Promise.resolve(
+      composer.handleTextPaste({ bracketed: false, cursor, hotkey: true, text: '', value })
     ).then(result => {
       if (result) {
         applyDraft(result.value, result.cursor)
