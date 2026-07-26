@@ -4129,6 +4129,22 @@ export class DaemonServer {
     connection: DaemonTransportConnection,
     session: DaemonSession,
   ): void {
+    // Persisted tool executions form a flat list keyed by tool_call_id while
+    // assistant messages carry the matching tool_calls, so replay each tool
+    // row right after the assistant turn that requested it. Executions whose
+    // call is no longer present in the retained messages (e.g. trimmed
+    // history) flush afterwards in recorded order.
+    const executionsByToolCallId = new Map<string, Record<string, unknown>>();
+    for (const execution of session.toolExecutions) {
+      if (!isRecord(execution)) {
+        continue;
+      }
+      const toolCallId = toolExecutionCallId(execution);
+      if (toolCallId && !executionsByToolCallId.has(toolCallId)) {
+        executionsByToolCallId.set(toolCallId, execution);
+      }
+    }
+    const replayedToolCallIds = new Set<string>();
     let count = 0;
     for (const message of session.messages) {
       const role = message.role.toLowerCase();
@@ -4136,25 +4152,55 @@ export class DaemonServer {
         continue;
       }
       const text = messageText(message);
-      if (!text || (role === "user" && looksLikeInternalReplayMessage(text))) {
+      if (text && !(role === "user" && looksLikeInternalReplayMessage(text))) {
+        // Persisted thinking traces ride the replay payload so a reopened TUI
+        // can render them exactly like live thinking instead of dropping them.
+        const thinking =
+          role === "assistant" && typeof message.thinking === "string" && message.thinking.trim()
+            ? message.thinking
+            : undefined;
+        this.emit(connection, "notification", {
+          id: newConnectionKey(),
+          category: "history",
+          type: `replay_${role}`,
+          severity: "info",
+          title: "",
+          body: role === "user" ? `✨ ${text}` : text,
+          payload: thinking === undefined ? {} : { thinking },
+        });
+        count += 1;
+      }
+      if (role !== "assistant" || !Array.isArray(message.tool_calls)) {
         continue;
       }
-      // Persisted thinking traces ride the replay payload so a reopened TUI
-      // can render them exactly like live thinking instead of dropping them.
-      const thinking =
-        role === "assistant" && typeof message.thinking === "string" && message.thinking.trim()
-          ? message.thinking
-          : undefined;
-      this.emit(connection, "notification", {
-        id: newConnectionKey(),
-        category: "history",
-        type: `replay_${role}`,
-        severity: "info",
-        title: "",
-        body: role === "user" ? `✨ ${text}` : text,
-        payload: thinking === undefined ? {} : { thinking },
-      });
-      count += 1;
+      for (const call of message.tool_calls) {
+        if (!isRecord(call)) {
+          continue;
+        }
+        const toolCallId = stringValue(call.id);
+        const functionRecord = isRecord(call.function) ? call.function : {};
+        this.emitToolReplay(connection, {
+          argumentsPreview: replayPreviewText(
+            functionRecord.arguments,
+            REPLAY_ARGUMENTS_PREVIEW_CHARS,
+          ),
+          execution: toolCallId ? executionsByToolCallId.get(toolCallId) : undefined,
+          fallbackName: stringValue(functionRecord.name),
+        });
+        if (toolCallId) {
+          replayedToolCallIds.add(toolCallId);
+        }
+      }
+    }
+    for (const execution of session.toolExecutions) {
+      if (!isRecord(execution)) {
+        continue;
+      }
+      const toolCallId = toolExecutionCallId(execution);
+      if (toolCallId && replayedToolCallIds.has(toolCallId)) {
+        continue;
+      }
+      this.emitToolReplay(connection, { argumentsPreview: "", execution, fallbackName: "" });
     }
     this.emit(connection, "notification", {
       id: newConnectionKey(),
@@ -4164,6 +4210,48 @@ export class DaemonServer {
       title: "",
       body: `── resumed session ${session.id} (${count} message${count === 1 ? "" : "s"}) ──`,
       payload: {},
+    });
+  }
+
+  /** Emit one bounded replay_tool row so a resumed transcript shows tool calls like a live session. */
+  private emitToolReplay(
+    connection: DaemonTransportConnection,
+    input: {
+      argumentsPreview: string;
+      execution?: Record<string, unknown> | undefined;
+      fallbackName: string;
+    },
+  ): void {
+    const { execution } = input;
+    const name =
+      input.fallbackName || (execution ? toolExecutionName(execution) : "") || "tool";
+    const ok = execution ? execution.permitted !== false : true;
+    const durationMs = execution ? toolExecutionDurationMs(execution) : undefined;
+    const context =
+      input.argumentsPreview ||
+      (execution ? replayPreviewText(execution.inputs, REPLAY_ARGUMENTS_PREVIEW_CHARS) : "");
+    // Failed calls keep one compact diagnostic line; successful calls settle
+    // to a single semantic row exactly like the live transcript.
+    const note = ok
+      ? ""
+      : replayPreviewText(
+          stringValue(execution?.result) || stringValue(execution?.return_value),
+          REPLAY_RESULT_PREVIEW_CHARS,
+        );
+    this.emit(connection, "notification", {
+      id: newConnectionKey(),
+      category: "history",
+      type: "replay_tool",
+      severity: ok ? "info" : "warning",
+      title: "",
+      body: `${ok ? "✓" : "✗"} ${name}`,
+      payload: {
+        name,
+        ok,
+        ...(context ? { context } : {}),
+        ...(durationMs === undefined ? {} : { duration_ms: durationMs }),
+        ...(note ? { preview: note } : {}),
+      },
     });
   }
 
@@ -4395,6 +4483,41 @@ function toolExecutionName(value: unknown): string {
   return isRecord(functionValue)
     ? (optionalString(functionValue.name) ?? "")
     : "";
+}
+
+/** Bounds for replay_tool previews: enough context to recognize a call, never a raw dump. */
+const REPLAY_ARGUMENTS_PREVIEW_CHARS = 200;
+const REPLAY_RESULT_PREVIEW_CHARS = 160;
+
+/** Executions persist either wire spelling (tool_call_id or legacy-normalized toolCallId). */
+function toolExecutionCallId(value: Record<string, unknown>): string {
+  return optionalString(value.tool_call_id) ?? optionalString(value.toolCallId) ?? "";
+}
+
+/** Executions persist either duration spelling (duration_ms or legacy-normalized durationMs). */
+function toolExecutionDurationMs(value: Record<string, unknown>): number | undefined {
+  const raw = value.duration_ms ?? value.durationMs;
+  return typeof raw === "number" && Number.isFinite(raw) ? raw : undefined;
+}
+
+/** Compact an arguments/result payload into one bounded single-line preview. */
+function replayPreviewText(value: unknown, limit: number): string {
+  const raw =
+    typeof value === "string"
+      ? value
+      : value === undefined || value === null
+        ? ""
+        : safeJsonStringify(value);
+  const compact = raw.replace(/\s+/g, " ").trim();
+  return compact.length > limit ? `${compact.slice(0, limit - 1)}…` : compact;
+}
+
+function safeJsonStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? "";
+  } catch {
+    return "";
+  }
 }
 
 function tokenizeSlashArguments(input: string): string[] | undefined {

@@ -19,6 +19,8 @@ export interface GatewayCompletionItem {
 
 export interface GatewayTranscriptMessage {
   context?: string
+  duration_s?: number
+  error?: string
   name?: string
   role: 'assistant' | 'system' | 'tool' | 'user'
   text?: string

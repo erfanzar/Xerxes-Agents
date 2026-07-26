@@ -202,14 +202,91 @@ describe('gatewayAdapter', () => {
       })
     ).toEqual([{ payload: { role: 'user', text: 'old prompt' }, type: 'transcript.append' }])
 
+    // The daemon nests persisted thinking inside the notification's payload
+    // sub-object; a top-level field only exists as a tolerance fallback.
     expect(
       adaptDaemonEvent('notification', {
         body: 'old answer',
         category: 'history',
-        thinking: 'old trace',
+        payload: { thinking: 'old trace' },
         type: 'replay_assistant'
       })
     ).toEqual([{ payload: { role: 'assistant', text: 'old answer', thinking: 'old trace' }, type: 'transcript.append' }])
+
+    expect(
+      adaptDaemonEvent('notification', {
+        body: 'old answer',
+        category: 'history',
+        thinking: 'legacy trace',
+        type: 'replay_assistant'
+      })
+    ).toEqual([{ payload: { role: 'assistant', text: 'old answer', thinking: 'legacy trace' }, type: 'transcript.append' }])
+  })
+
+  it('maps replay_tool notifications to tool transcript rows like live completions', () => {
+    expect(
+      adaptDaemonEvent('notification', {
+        body: '✓ ReadFile',
+        category: 'history',
+        payload: {
+          context: '{"path":"src/auth.ts"}',
+          duration_ms: 250,
+          name: 'ReadFile',
+          ok: true
+        },
+        type: 'replay_tool'
+      })
+    ).toEqual([
+      {
+        payload: {
+          context: '{"path":"src/auth.ts"}',
+          duration_s: 0.25,
+          name: 'ReadFile',
+          role: 'tool'
+        },
+        type: 'transcript.append'
+      }
+    ])
+
+    expect(
+      adaptDaemonEvent('notification', {
+        body: '✗ ExecCommand',
+        category: 'history',
+        payload: {
+          name: 'ExecCommand',
+          ok: false,
+          preview: 'Tool execution denied.'
+        },
+        type: 'replay_tool'
+      })
+    ).toEqual([
+      {
+        payload: {
+          error: 'Tool execution denied.',
+          name: 'ExecCommand',
+          role: 'tool'
+        },
+        type: 'transcript.append'
+      }
+    ])
+
+    expect(
+      adaptDaemonEvent('notification', {
+        body: '✗ GrepTool',
+        category: 'history',
+        payload: { name: 'GrepTool', ok: false },
+        type: 'replay_tool'
+      })
+    ).toEqual([
+      {
+        payload: {
+          error: 'Tool execution failed.',
+          name: 'GrepTool',
+          role: 'tool'
+        },
+        type: 'transcript.append'
+      }
+    ])
   })
 
   it('keeps clarify responses addressable by daemon request id and question id', () => {

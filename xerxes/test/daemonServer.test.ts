@@ -1656,6 +1656,165 @@ test("daemon replays persisted thinking traces on resume", async () => {
   }
 });
 
+test("daemon replays persisted tool executions interleaved on resume", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-replay-tools-"));
+  const socketPath = join(directory, "daemon.sock");
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: directory,
+    model: "replay-model",
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const server = new DaemonServer({ socketPath, runtime });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "tool-origin", project_dir: directory },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    const session = runtime.sessionStatus("tool-origin");
+    if (!session) throw new Error("expected live session");
+    session.messages.push(
+      { role: "user", content: "inspect auth" },
+      {
+        role: "assistant",
+        content: "Let me read the file.",
+        thinking: "reasoning trace",
+        tool_calls: [
+          {
+            id: "call_1",
+            type: "function",
+            function: { name: "ReadFile", arguments: { path: "src/auth.ts" } },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        content: "file body",
+        name: "ReadFile",
+        tool_call_id: "call_1",
+      },
+      { role: "assistant", content: "The flow starts in auth.ts." },
+    );
+    session.toolExecutions.push(
+      {
+        name: "ReadFile",
+        result: "file body",
+        return_value: "file body",
+        permitted: true,
+        tool_call_id: "call_1",
+        duration_ms: 250,
+        display_blocks: [],
+      },
+      // Unmatched execution (call evicted from retained messages): replays in
+      // recorded order after the interleaved rows.
+      {
+        name: "GrepTool",
+        result: "3 matches",
+        return_value: "3 matches",
+        permitted: true,
+        tool_call_id: "call_orphaned",
+        duration_ms: 40,
+        display_blocks: [],
+      },
+    );
+    const sessionId = session.id;
+    await runtime.flushSessions();
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "initialize",
+      params: {
+        resume_session_id: sessionId,
+        session_key: "ignored-slot",
+        project_dir: directory,
+      },
+    });
+    await client.next((frame) => frame.id === 2);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    const historyType = (frame: Frame): string | undefined => {
+      if (frame.method !== "event" || frame.params?.type !== "notification") {
+        return undefined;
+      }
+      const payload = frame.params.payload as
+        | { category?: unknown; type?: unknown }
+        | undefined;
+      return payload?.category === "history" && typeof payload.type === "string"
+        ? payload.type
+        : undefined;
+    };
+
+    const replayUser = await client.next(
+      (frame) => historyType(frame) === "replay_user",
+    );
+    expect(
+      (replayUser.params?.payload as Record<string, unknown>).body,
+    ).toBe("✨ inspect auth");
+
+    const replayAssistant = await client.next(
+      (frame) => historyType(frame) === "replay_assistant",
+    );
+    const assistantNotification = replayAssistant.params
+      ?.payload as Record<string, unknown>;
+    expect(assistantNotification.body).toBe("Let me read the file.");
+    expect(
+      (assistantNotification.payload as Record<string, unknown>).thinking,
+    ).toBe("reasoning trace");
+
+    // The tool row lands right after the assistant message that requested it.
+    const replayTool = await client.next(
+      (frame) => historyType(frame) === "replay_tool",
+    );
+    const toolNotification = replayTool.params?.payload as Record<
+      string,
+      unknown
+    >;
+    expect(toolNotification.body).toBe("✓ ReadFile");
+    expect(toolNotification.payload).toMatchObject({
+      name: "ReadFile",
+      ok: true,
+      duration_ms: 250,
+    });
+    expect(
+      (toolNotification.payload as Record<string, unknown>).context,
+    ).toBe('{"path":"src/auth.ts"}');
+
+    const replayFinal = await client.next(
+      (frame) => historyType(frame) === "replay_assistant",
+    );
+    expect(
+      (replayFinal.params?.payload as Record<string, unknown>).body,
+    ).toBe("The flow starts in auth.ts.");
+
+    const replayOrphan = await client.next(
+      (frame) => historyType(frame) === "replay_tool",
+    );
+    expect(
+      (replayOrphan.params?.payload as Record<string, unknown>).payload,
+    ).toMatchObject({ name: "GrepTool", ok: true, duration_ms: 40 });
+
+    const resumed = await client.next(
+      (frame) => historyType(frame) === "resumed",
+    );
+    expect(
+      (resumed.params?.payload as Record<string, unknown>).body,
+    ).toContain("resumed session");
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("daemon snapshots, lists, and rolls back the active session workspace", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-snapshots-"));
   const workspace = join(directory, "workspace");
