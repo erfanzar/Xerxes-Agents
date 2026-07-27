@@ -1,7 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { mkdir, open, readdir, readFile, rename, rm } from 'node:fs/promises'
+import { appendFile, mkdir, open, readdir, readFile, rename, rm, stat } from 'node:fs/promises'
 import { basename, dirname, resolve, sep } from 'node:path'
 
 import { ValidationError } from '../core/errors.js'
@@ -17,6 +17,21 @@ export const DAEMON_SESSION_SCHEMA_VERSION = 2
 export const INTERRUPTED_TOOL_RESULT = RESUME_REPLAY_SENTINEL
 
 export type RawMessage = Record<string, unknown>
+
+/**
+ * Bytes read from the front of a transcript when only its summary fields are
+ * wanted. Everything a listing renders is serialized before `messages`, so a
+ * bounded head read answers the question without paying for the history.
+ */
+const TRANSCRIPT_HEAD_BYTES = 32 * 1024
+
+/**
+ * `JSON.stringify(record, null, 2)` writes every top-level key behind a newline
+ * and exactly two spaces. A real newline can never appear inside a JSON string
+ * literal, so this sequence identifies the top-level `messages` key and not a
+ * nested field or a transcript that merely talks about messages.
+ */
+const MESSAGES_KEY_MARKER = '\n  "messages": ['
 
 export interface DaemonTranscript {
   readonly agentId: string
@@ -94,6 +109,7 @@ export function normalizeDaemonTranscript(raw: unknown, options: TranscriptLoadO
   const format = raw.format === DAEMON_SESSION_FORMAT ? 'bun-v2' : 'legacy-v1'
   const knownKeys = new Set([
     'format', 'schema_version', 'session_id', 'key', 'agent_id', 'cwd', 'project_dir', 'workspace', 'updated_at', 'messages',
+    'message_count',
     'turn_count', 'interaction_mode', 'mode', 'plan_mode', 'api_calls_complete', 'total_api_calls', 'total_input_tokens',
     'total_output_tokens',
     'usage_complete', 'metadata',
@@ -139,7 +155,14 @@ export function repairToolPairs(messages: readonly RawMessage[]): RawMessage[] {
   return [...repairResumedTranscript(messages).messages]
 }
 
-/** Serialize v2 as a Python-readable superset of the legacy transcript shape. */
+/**
+ * Serialize v2 as a Python-readable superset of the legacy transcript shape.
+ *
+ * Every field a session listing renders is emitted before `messages` so a
+ * reader that only wants the summary can stop at the head of the file. The
+ * order is the only thing that changed for existing readers: they look fields
+ * up by key, and `message_count` is additive.
+ */
 export function daemonTranscriptRecord(transcript: DaemonTranscript): Record<string, unknown> {
   return {
     ...transcript.extra,
@@ -152,8 +175,8 @@ export function daemonTranscriptRecord(transcript: DaemonTranscript): Record<str
     cwd: transcript.cwd,
     workspace: transcript.workspace,
     updated_at: transcript.updatedAt || new Date().toISOString(),
-    messages: transcript.messages,
     turn_count: transcript.turnCount,
+    message_count: transcript.messages.length,
     interaction_mode: transcript.interactionMode,
     plan_mode: transcript.planMode,
     ...(transcript.totalApiCalls === undefined ? {} : { total_api_calls: transcript.totalApiCalls }),
@@ -161,10 +184,48 @@ export function daemonTranscriptRecord(transcript: DaemonTranscript): Record<str
     total_output_tokens: transcript.totalOutputTokens,
     ...(transcript.usageComplete === undefined ? {} : { usage_complete: transcript.usageComplete }),
     metadata: transcript.metadata,
+    messages: transcript.messages,
     thinking_content: transcript.thinkingContent.slice(-32),
     tool_executions: transcript.toolExecutions.slice(-200),
   }
 }
+
+/** Summary fields of one transcript, read without parsing its message history. */
+export interface DaemonTranscriptHeader {
+  readonly agentId: string
+  readonly cwd: string
+  readonly key: string
+  readonly messageCount: number
+  readonly metadata: Readonly<Record<string, unknown>>
+  readonly sessionId: string
+  readonly turnCount: number
+  readonly updatedAt: string
+}
+
+/**
+ * Outcome of a head read.
+ *
+ * `truncated` is not a failure: the record is well-formed but its summary
+ * fields do not all fit in the head — a transcript written before the field
+ * reorder, or one whose unknown-field prefix is unusually wide. The caller
+ * falls back to a full load for those. `unreadable` means the bytes on disk
+ * are not a transcript at all.
+ */
+export type DaemonTranscriptHeaderResult =
+  | { readonly header: DaemonTranscriptHeader; readonly kind: 'header' }
+  | { readonly kind: 'truncated' }
+  | { readonly kind: 'unreadable' }
+
+/** One transcript file as seen by `stat` alone. */
+export interface DaemonTranscriptEntry {
+  readonly modifiedAtMillis: number
+  readonly path: string
+  readonly sessionId: string
+  readonly sizeBytes: number
+}
+
+/** Record one persisted message in the crash journal. Never throws. */
+export type TranscriptMessageJournalAppend = (message: RawMessage, index: number) => void
 
 export function transcriptHasHistory(transcript: Pick<DaemonTranscript, 'messages' | 'turnCount'>): boolean {
   return transcript.messages.length > 0 || transcript.turnCount > 0
@@ -193,12 +254,100 @@ export class DaemonTranscriptStore {
     } catch {
       return undefined
     }
+    // Replay before normalization so journalled messages go through the same
+    // resume repair as persisted ones: a crash between two tool calls leaves
+    // an unanswered call in the journal exactly as it would in the snapshot.
+    await this.replayMessageJournal(sessionKey, raw)
     const workspaceRoot = options.workspaceRoot ?? this.workspaceRoot
     return normalizeDaemonTranscript(raw, {
       currentProjectDirectory: options.currentProjectDirectory ?? this.currentProjectDirectory,
       requestedSessionKey: sessionKey,
       ...(workspaceRoot ? { workspaceRoot } : {}),
     })
+  }
+
+  /**
+   * Read only the fields a listing renders, without parsing the history.
+   *
+   * Reports why it could not answer rather than returning undefined: a caller
+   * that cannot tell "wide record" from "corrupt file" either drops real
+   * sessions or reloads every file to be safe.
+   */
+  async readHeader(sessionId: string): Promise<DaemonTranscriptHeaderResult> {
+    let head: string
+    try {
+      const handle = await open(this.pathFor(sessionId), 'r')
+      try {
+        const buffer = Buffer.allocUnsafe(TRANSCRIPT_HEAD_BYTES)
+        const { bytesRead } = await handle.read(buffer, 0, TRANSCRIPT_HEAD_BYTES, 0)
+        head = buffer.toString('utf8', 0, bytesRead)
+      } finally {
+        await handle.close()
+      }
+    } catch {
+      return { kind: 'unreadable' }
+    }
+    return this.parseHeader(head, sessionId)
+  }
+
+  /** Enumerate transcript files by `stat` alone, newest modification first. */
+  async listEntries(): Promise<DaemonTranscriptEntry[]> {
+    let entries: string[]
+    try {
+      entries = await readdir(this.directory)
+    } catch {
+      return []
+    }
+    const stats = await Promise.all(
+      entries
+        .filter(entry => entry.endsWith('.json') && looksLikeSessionId(basename(entry, '.json')))
+        .map(async (entry): Promise<DaemonTranscriptEntry | undefined> => {
+          const sessionId = basename(entry, '.json')
+          const path = this.pathFor(sessionId)
+          try {
+            const info = await stat(path)
+            return { modifiedAtMillis: info.mtimeMs, path, sessionId, sizeBytes: info.size }
+          } catch {
+            return undefined
+          }
+        }),
+    )
+    return stats
+      .filter((entry): entry is DaemonTranscriptEntry => entry !== undefined)
+      .sort((left, right) => right.modifiedAtMillis - left.modifiedAtMillis)
+  }
+
+  /** Sidecar holding messages persisted since the last full save. */
+  journalPathFor(sessionId: string): string {
+    return `${this.pathFor(sessionId)}l`
+  }
+
+  /**
+   * Append one message to the crash journal.
+   *
+   * A plain append with no fsync: the point is to survive a process crash for
+   * the price of a `write(2)`, not to survive power loss. A torn final line is
+   * expected and is discarded on replay.
+   */
+  async appendMessage(sessionId: string, message: RawMessage, index: number): Promise<void> {
+    const path = this.journalPathFor(sessionId)
+    await mkdir(dirname(path), { recursive: true })
+    await appendFile(path, `${JSON.stringify({ index, message })}\n`, 'utf8')
+  }
+
+  /**
+   * A journal-append callback for a message-producing loop.
+   *
+   * Handed out as a plain function so the streaming library never imports
+   * daemon storage, and swallowing so a failing sidecar can never abort the
+   * turn whose durability it exists to improve.
+   */
+  journalAppender(sessionId: string): TranscriptMessageJournalAppend {
+    return (message, index) => {
+      void this.appendMessage(sessionId, message, index).catch((error: unknown) => {
+        console.warn(`Could not journal message ${index} of session ${sessionId}: ${errorText(error)}`)
+      })
+    }
   }
 
   async save(transcript: DaemonTranscript): Promise<void> {
@@ -214,34 +363,45 @@ export class DaemonTranscriptStore {
       return
     }
     await atomicJsonWrite(path, daemonTranscriptRecord(transcript))
+    // The snapshot now covers everything the journal held. Only a message
+    // appended during the write itself can be lost, which is the same window
+    // the unjournalled save already had.
+    await rm(this.journalPathFor(transcript.sessionId), { force: true })
   }
 
-  async list(): Promise<DaemonTranscript[]> {
-    let entries: string[]
+  /**
+   * Load one transcript the way a listing needs it: bound to the slot key
+   * stored on disk rather than to a caller's resume id.
+   *
+   * `load` deliberately does the opposite, because a resume must never adopt a
+   * stale slot key.
+   */
+  async loadForListing(sessionId: string): Promise<DaemonTranscript | undefined> {
+    let raw: unknown
     try {
-      entries = await readdir(this.directory)
+      raw = JSON.parse(await readFile(this.pathFor(sessionId), 'utf8')) as unknown
     } catch {
-      return []
+      return undefined
     }
-    const transcripts = await Promise.all(
-      entries
-        .filter(entry => entry.endsWith('.json') && looksLikeSessionId(basename(entry, '.json')))
-        .map(async entry => {
-          const sessionId = basename(entry, '.json')
-          let raw: unknown
-          try {
-            raw = JSON.parse(await readFile(this.pathFor(sessionId), 'utf8')) as unknown
-          } catch {
-            return undefined
-          }
-          const workspaceRoot = this.workspaceRoot
-          return normalizeDaemonTranscript(raw, {
-            currentProjectDirectory: this.currentProjectDirectory,
-            requestedSessionKey: isRecord(raw) ? stringValue(raw.key) || sessionId : sessionId,
-            ...(workspaceRoot ? { workspaceRoot } : {}),
-          })
-        }),
-    )
+    await this.replayMessageJournal(sessionId, raw)
+    const workspaceRoot = this.workspaceRoot
+    return normalizeDaemonTranscript(raw, {
+      currentProjectDirectory: this.currentProjectDirectory,
+      requestedSessionKey: isRecord(raw) ? stringValue(raw.key) || sessionId : sessionId,
+      ...(workspaceRoot ? { workspaceRoot } : {}),
+    })
+  }
+
+  /**
+   * Fully parse every transcript in the directory.
+   *
+   * Costs one full read, parse and resume repair per file, so callers that
+   * only render a bounded number of rows should walk `listEntries` and
+   * `readHeader` instead.
+   */
+  async list(): Promise<DaemonTranscript[]> {
+    const entries = await this.listEntries()
+    const transcripts = await Promise.all(entries.map(entry => this.loadForListing(entry.sessionId)))
     return transcripts
       .filter((transcript): transcript is DaemonTranscript => transcript !== undefined && transcriptHasHistory(transcript))
       .sort((left, right) => timestampMillis(right.updatedAt) - timestampMillis(left.updatedAt))
@@ -250,6 +410,9 @@ export class DaemonTranscriptStore {
   /** Remove one persisted transcript by its canonical resume id. */
   async remove(sessionId: string): Promise<boolean> {
     const path = this.pathFor(sessionId)
+    // An orphaned journal would resurrect the deleted history the next time
+    // this id is opened, so it goes with the snapshot.
+    await rm(this.journalPathFor(sessionId), { force: true })
     try {
       await rm(path)
       return true
@@ -265,6 +428,90 @@ export class DaemonTranscriptStore {
     }
     return resolve(this.directory, `${sessionId}.json`)
   }
+
+  private parseHeader(head: string, sessionId: string): DaemonTranscriptHeaderResult {
+    if (!head.trimStart().startsWith('{')) {
+      return { kind: 'unreadable' }
+    }
+    const marker = head.indexOf(MESSAGES_KEY_MARKER)
+    if (marker < 0) {
+      return { kind: 'truncated' }
+    }
+    // The cut always lands right after a `{` or a `,`, so one synthetic member
+    // closes the object into parseable JSON.
+    let raw: unknown
+    try {
+      raw = JSON.parse(`${head.slice(0, marker)}\n  "message_count_probe": 0\n}`) as unknown
+    } catch {
+      return { kind: 'unreadable' }
+    }
+    if (!isRecord(raw) || typeof raw.message_count !== 'number') {
+      // Written before the summary fields were hoisted above `messages`: the
+      // metadata and turn count are still behind the history.
+      return { kind: 'truncated' }
+    }
+    return {
+      kind: 'header',
+      header: {
+        agentId: stringValue(raw.agent_id) || 'default',
+        cwd: normalizeProjectDirectory(
+          stringValue(raw.cwd) || stringValue(raw.project_dir) || this.currentProjectDirectory,
+          this.currentProjectDirectory,
+          this.workspaceRoot,
+        ),
+        key: stringValue(raw.key) || sessionId,
+        messageCount: integerValue(raw.message_count),
+        metadata: isRecord(raw.metadata) ? raw.metadata : {},
+        sessionId: stringValue(raw.session_id) || sessionId,
+        turnCount: integerValue(raw.turn_count),
+        updatedAt: stringValue(raw.updated_at),
+      },
+    }
+  }
+
+  /** Splice journalled messages onto a freshly parsed record, in place. */
+  private async replayMessageJournal(sessionId: string, raw: unknown): Promise<void> {
+    if (!isRecord(raw) || !Array.isArray(raw.messages)) {
+      return
+    }
+    let contents: string
+    try {
+      contents = await readFile(this.journalPathFor(sessionId), 'utf8')
+    } catch {
+      return
+    }
+    const pending = new Map<number, RawMessage>()
+    for (const line of contents.split('\n')) {
+      if (!line.trim()) continue
+      let entry: unknown
+      try {
+        entry = JSON.parse(line) as unknown
+      } catch {
+        // A crash mid-append leaves a partial final line. Everything before it
+        // is intact, so stop here instead of discarding the whole journal.
+        break
+      }
+      if (!isRecord(entry) || typeof entry.index !== 'number' || !isRecord(entry.message)) continue
+      pending.set(entry.index, entry.message)
+    }
+    // Indexes are absolute positions in the message list, so entries the saved
+    // snapshot already covers are ignored and a gap stops the replay rather
+    // than reordering the transcript around a lost write.
+    let next = raw.messages.length
+    let replayed = 0
+    for (let message = pending.get(next); message !== undefined; message = pending.get(next)) {
+      raw.messages.push(message)
+      replayed += 1
+      next += 1
+    }
+    if (replayed > 0) {
+      console.warn(`Recovered ${replayed} unsaved message(s) for session ${sessionId} from its crash journal`)
+    }
+  }
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
 
 function isMissing(error: unknown): boolean {

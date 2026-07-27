@@ -1,6 +1,8 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { resolveToolCapabilities, type ToolCapabilities } from '../executors/toolRegistry.js'
+
 export const EntryKind = Object.freeze({
   COMMAND: 'command',
   TOOL: 'tool',
@@ -26,19 +28,33 @@ export type EntryHandler = (
 ) => unknown | Promise<unknown>
 
 export interface RegistryEntry {
+  /**
+   * Full capability record. Optional only so that code which rebuilds an entry
+   * literal (runtime/toolPool.ts) still type-checks; every entry this registry
+   * creates carries one.
+   */
+  readonly capabilities?: ToolCapabilities
   readonly category: string
   readonly description: string
   readonly handler: EntryHandler | undefined
   readonly kind: EntryKind
   readonly name: string
+  /** Projection of {@link capabilities}: read-only and non-destructive. Not stored separately. */
   readonly safe: boolean
   readonly schema: Readonly<Record<string, unknown>> | undefined
   readonly sourceHint: string
 }
 
 export interface RegistryEntryOptions {
+  /** Full capability record; wins over the legacy `safe` shorthand below. */
+  readonly capabilities?: Partial<ToolCapabilities>
   readonly category?: string
   readonly description?: string
+  /**
+   * Legacy shorthand kept for existing call sites. It now only seeds the
+   * capability record (`readOnly`, non-destructive, re-entrant); `safe` on the
+   * resulting entry is computed back out of that record.
+   */
   readonly safe?: boolean
   readonly schema?: Readonly<Record<string, unknown>>
   readonly sourceHint?: string
@@ -203,7 +219,14 @@ export class ExecutionRegistry {
     this.tools.set(entry.name, entry)
   }
 
-  /** Ingest duck-compatible agent functions or OpenAI-style function definitions. */
+  /**
+   * Ingest duck-compatible agent functions or OpenAI-style function definitions.
+   *
+   * Metadata beyond the description is carried through when the source object
+   * offers it: registering everything with a bare description made `safe`,
+   * `category`, and `sourceHint` constant defaults, so nothing downstream could
+   * distinguish a read-only lookup from a shell call.
+   */
   registerFromAgentFunctions(functions: readonly unknown[]): void {
     for (const value of functions) {
       const record = objectValue(value)
@@ -219,8 +242,24 @@ export class ExecutionRegistry {
       const handler = callable === undefined
         ? undefined
         : (inputs: Readonly<Record<string, unknown>>) => callable(inputs)
-      this.registerTool(name, handler, { description })
+      const capabilities = capabilityFields(objectValue(record?.capabilities))
+      this.registerTool(name, handler, {
+        description,
+        ...(capabilities === undefined ? {} : { capabilities }),
+        ...(record?.safe === true ? { safe: true } : {}),
+        ...(stringField(record?.category) === undefined ? {} : { category: record?.category as string }),
+        ...(sourceHintField(record) === undefined ? {} : { sourceHint: sourceHintField(record) as string }),
+      })
     }
+  }
+
+  /**
+   * Resolved capabilities for a registered tool, falling back to the fail-closed
+   * defaults for unknown names so a gate can never read a permissive record for
+   * a tool the catalog does not have.
+   */
+  toolCapabilities(name: string): ToolCapabilities {
+    return this.tools.get(name)?.capabilities ?? resolveToolCapabilities(name)
   }
 
   getCommand(name: string): RegistryEntry | undefined {
@@ -644,16 +683,34 @@ function makeEntry(
   handler: EntryHandler | undefined,
   options: RegistryEntryOptions,
 ): RegistryEntry {
+  const entryName = requiredText(name, 'name')
+  const capabilities = entryCapabilities(entryName, options)
   return Object.freeze({
-    name: requiredText(name, 'name'),
+    name: entryName,
     kind,
     description: options.description ?? '',
     handler,
+    capabilities,
     category: options.category ?? '',
-    safe: options.safe ?? false,
+    safe: isSafe(capabilities),
     sourceHint: options.sourceHint ?? '',
     schema: options.schema === undefined ? undefined : freezeRecord(options.schema),
   })
+}
+
+function entryCapabilities(name: string, options: RegistryEntryOptions): ToolCapabilities {
+  if (options.capabilities !== undefined) return resolveToolCapabilities(name, options.capabilities)
+  // `safe: true` historically meant exactly "read-only, nothing to undo"; keep that
+  // one bit of information rather than dropping these call sites to the fail-closed
+  // defaults, which would flip listTools({ safeOnly: true }) to empty.
+  if (options.safe === true) {
+    return resolveToolCapabilities(name, { concurrencySafe: true, destructive: false, readOnly: true })
+  }
+  return resolveToolCapabilities(name)
+}
+
+function isSafe(capabilities: ToolCapabilities): boolean {
+  return capabilities.readOnly && !capabilities.destructive
 }
 
 function copyEntry(entry: RegistryEntry): RegistryEntry {
@@ -792,4 +849,24 @@ function objectValue(value: unknown): Record<string, unknown> | undefined {
 
 function stringField(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value : undefined
+}
+
+function sourceHintField(record: Record<string, unknown> | undefined): string | undefined {
+  return stringField(record?.sourceHint) ?? stringField(record?.source_hint)
+}
+
+/** Accept only well-typed axes; a malformed field falls back to the fail-closed default. */
+function capabilityFields(record: Record<string, unknown> | undefined): Partial<ToolCapabilities> | undefined {
+  if (record === undefined) return undefined
+  const fields: Partial<ToolCapabilities> = {
+    ...(typeof record.concurrencySafe === 'boolean' ? { concurrencySafe: record.concurrencySafe } : {}),
+    ...(typeof record.defer === 'boolean' ? { defer: record.defer } : {}),
+    ...(typeof record.destructive === 'boolean' ? { destructive: record.destructive } : {}),
+    ...(typeof record.openWorld === 'boolean' ? { openWorld: record.openWorld } : {}),
+    ...(typeof record.readOnly === 'boolean' ? { readOnly: record.readOnly } : {}),
+    ...(typeof record.maxResultBytes === 'number' && Number.isFinite(record.maxResultBytes) && record.maxResultBytes > 0
+      ? { maxResultBytes: Math.trunc(record.maxResultBytes) }
+      : {}),
+  }
+  return fields
 }

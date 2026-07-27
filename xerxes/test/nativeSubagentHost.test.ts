@@ -1508,6 +1508,47 @@ test('removing a parent session cancels and invalidates its background children'
   }
 })
 
+test('interrupting a parent session stops only its children and keeps them usable', async () => {
+  const client = new ReloadGenerationChildClient('interrupt-provider', true)
+  const registry = new ToolRegistry()
+  const host = createNativeSubagentHost({
+    agentDefinitions: new Map([['coder', agentDefinition('coder')]]),
+    cwd: process.cwd(),
+    eventBus: new DaemonSubagentEventBus(),
+    llm: client,
+    model: 'test-model',
+    permissionMode: 'accept-all',
+    toolExecutor: registry,
+    tools: registry.definitions(),
+  })
+
+  try {
+    const task = await host.managerPort.spawn({
+      message: 'keep working in the background',
+      promptProfile: 'coder',
+      sourceAgentId: 'session-a',
+      title: 'Background worker',
+    })
+    await client.started.promise
+
+    expect(host.interruptSource('session-b')).toBe(0)
+    expect(host.interruptSource('session-a')).toBe(1)
+    expect(host.managerPort.listHandles()).toContainEqual(expect.objectContaining({
+      closed: false,
+      id: task.id,
+      status: 'cancelled',
+    }))
+    // An interrupt is a pause the user may undo, so unlike eviction it must
+    // leave the handle open for resume and retry.
+    expect(host.managerPort.resume(task.id)).toMatchObject({ id: task.id })
+    // Already terminal: a second interrupt is a no-op rather than a re-cancel.
+    expect(host.interruptSource('session-a')).toBe(0)
+  } finally {
+    client.release()
+    await host.manager.shutdown()
+  }
+})
+
 test('tightening auto permissions to plan also cancels broader-policy children', async () => {
   const client = new ReloadGenerationChildClient('auto-provider', true)
   const eventBus = new DaemonSubagentEventBus()
@@ -3327,5 +3368,104 @@ test('awaiting a live agent by nickname resolves through the live manager', asyn
     expect(result.pending).toEqual([])
   } finally {
     await host.manager.shutdown()
+  }
+})
+
+/**
+ * A child provider that answers compaction requests separately from turns, and
+ * records what the persisted conversation looked like when a turn began.
+ */
+class CompactingChildClient implements LlmClient {
+  compactionCalls = 0
+  turnCalls = 0
+  transcriptAtTurnStart: string[] = []
+
+  constructor(private readonly readTranscript: () => Promise<string>) {}
+
+  async *stream(request: CompletionRequest): AsyncGenerator<LlmDelta> {
+    const prompt = request.messages
+      .map(message => (typeof message.content === 'string' ? message.content : ''))
+      .join('\n')
+    if (prompt.includes('CONTEXT TO SUMMARIZE')) {
+      this.compactionCalls += 1
+      yield { content: 'CHILD SUMMARY' }
+      return
+    }
+    this.turnCalls += 1
+    this.transcriptAtTurnStart.push(await this.readTranscript())
+    yield { content: `child answer ${this.turnCalls}` }
+  }
+}
+
+test('a retried child compacts and persists its conversation before the turn starts', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-child-compaction-'))
+  const transcripts = new DaemonTranscriptStore({
+    currentProjectDirectory: directory,
+    directory: join(directory, 'sessions'),
+  })
+  const registry = new ToolRegistry()
+  const bus = new DaemonSubagentEventBus()
+  const events: DaemonEvent[] = []
+  bus.subscribe('parent-session', event => events.push(event))
+  let historySessionId = ''
+  const client = new CompactingChildClient(async () => {
+    if (!historySessionId) return ''
+    return Bun.file(transcripts.pathFor(historySessionId)).text().catch(() => '')
+  })
+  const host = createNativeSubagentHost({
+    agentDefinitions: new Map([['coder', agentDefinition('coder')]]),
+    // A low threshold keeps the fixture small; the mechanism is the same one
+    // the daemon runs at 90%.
+    autoCompactThreshold: 0.01,
+    cwd: directory,
+    eventBus: bus,
+    llm: client,
+    model: 'test-model',
+    permissionMode: 'accept-all',
+    toolExecutor: registry,
+    tools: registry.definitions(),
+    transcriptStore: transcripts,
+  })
+
+  try {
+    const task = await host.managerPort.spawn({
+      message: `investigate the failure ${'context '.repeat(1_000)}`,
+      promptProfile: 'coder',
+      sourceAgentId: 'parent-session',
+      title: 'Compacting child',
+    })
+    historySessionId = task.historySessionId ?? ''
+    expect(historySessionId).not.toBe('')
+    await host.managerPort.wait([task.id], 5_000)
+    expect(client.turnCalls).toBe(1)
+    expect(client.compactionCalls).toBe(0)
+
+    // A retry continuation reloads the full conversation: previously this path
+    // had no token count at all and died as an opaque provider error.
+    await host.retry(task.id)
+    await host.managerPort.wait([task.id], 5_000)
+    expect(client.compactionCalls).toBe(1)
+
+    // Persisted before the second turn ran, not at its first checkpoint: a
+    // checkpoint would have rewritten the pre-compaction transcript back.
+    const atTurnStart = client.transcriptAtTurnStart[1] ?? ''
+    expect(atTurnStart).toContain('CHILD SUMMARY')
+    expect(atTurnStart).not.toContain('context context context')
+
+    const persisted = await transcripts.load(historySessionId, { currentProjectDirectory: directory })
+    expect(JSON.stringify(persisted?.messages ?? [])).toContain('CHILD SUMMARY')
+
+    // The replaced history survives beside the child's own transcript.
+    const archive = await Bun.file(
+      `${transcripts.pathFor(historySessionId).replace(/\.json$/u, '')}.precompact.jsonl`,
+    ).text()
+    expect(archive).toContain('context context context')
+
+    const compactionNotice = events.filter(event =>
+      JSON.stringify(event).includes('context compacted'))
+    expect(compactionNotice).toHaveLength(1)
+  } finally {
+    await host.manager.shutdown()
+    await rm(directory, { force: true, recursive: true })
   }
 })

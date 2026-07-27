@@ -12,7 +12,22 @@ import {
   PROJECT_FILE_MENTION_LIMIT,
   ProjectFileMentionIndexCache,
   resolveProjectFileMentionRoot,
+  searchProjectFileIndex,
+  type ProjectFileIndex,
 } from '../src/daemon/projectFileMentions.js'
+
+/** Build an in-memory index from relative paths; no filesystem needed. */
+function projectFileIndexFrom(paths: readonly string[]): ProjectFileIndex {
+  return {
+    files: paths.map(relativePath => ({
+      absolutePath: join('/workspace', relativePath),
+      basename: relativePath.slice(relativePath.lastIndexOf('/') + 1),
+      relativePath,
+    })),
+    rootDirectory: '/workspace',
+    source: 'filesystem',
+  }
+}
 
 const BINARY_EXTENSIONS = [
   '.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.bmp', '.tiff',
@@ -132,7 +147,7 @@ test('project mention results use fixed production ceilings and return only the 
     )
 
     const result = await new ProjectFileMentionIndexCache().search(root, 'needle')
-    expect(PROJECT_FILE_INDEX_LIMIT).toBe(5_000)
+    expect(PROJECT_FILE_INDEX_LIMIT).toBe(50_000)
     expect(PROJECT_FILE_MENTION_LIMIT).toBe(50)
     expect(PROJECT_FILE_INDEX_CACHE_TTL_MS).toBe(30_000)
     expect(result.matches).toHaveLength(50)
@@ -165,3 +180,31 @@ async function runGit(cwd: string, args: readonly string[]): Promise<void> {
     throw new Error(`git ${args.join(' ')} failed (${exitCode}): ${stderr || stdout}`)
   }
 }
+
+test('subsequence queries find a path substring matching cannot', () => {
+  const index = projectFileIndexFrom([
+    'src/daemon/turnRunner.ts',
+    'src/theQuickBrownRunner.ts',
+    'src/tools/fileTools.ts',
+    'docs/t/r/unner.md',
+  ])
+
+  const hits = searchProjectFileIndex(index, 'tRunner').map(file => file.relativePath)
+  expect(hits).toContain('src/daemon/turnRunner.ts')
+  // Denser span wins: turnRunner consumes 10 chars, theQuickBrownRunner ~19.
+  expect(hits[0]).toBe('src/daemon/turnRunner.ts')
+
+  expect(searchProjectFileIndex(index, 'fltls').map(f => f.relativePath))
+    .toContain('src/tools/fileTools.ts')
+})
+
+test('a substring match always outranks a fuzzy one', () => {
+  const index = projectFileIndexFrom(['src/aXbXcXdXrunner.ts', 'src/runner.ts'])
+  const hits = searchProjectFileIndex(index, 'runner').map(file => file.relativePath)
+  expect(hits[0]).toBe('src/runner.ts')
+})
+
+test('out-of-order characters still do not match', () => {
+  const index = projectFileIndexFrom(['src/daemon/turnRunner.ts'])
+  expect(searchProjectFileIndex(index, 'rennuRnrut')).toHaveLength(0)
+})

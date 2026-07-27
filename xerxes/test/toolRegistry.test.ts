@@ -3,7 +3,17 @@
 
 import { expect, test } from 'bun:test'
 
-import { ToolRegistry } from '../src/executors/toolRegistry.js'
+import {
+  DEFAULT_TOOL_CAPABILITIES,
+  ToolRegistry,
+  revealedToolNames,
+} from '../src/executors/toolRegistry.js'
+import {
+  CLAUDE_WORKFLOW_TOOL_CAPABILITIES,
+  CLAUDE_WORKFLOW_TOOL_DEFINITIONS,
+  registerClaudeWorkflowTools,
+} from '../src/tools/claudeTools/workflow.js'
+import type { ChatMessage } from '../src/types/messages.js'
 import type { JsonObject, ToolCall, ToolDefinition } from '../src/types/toolCalls.js'
 
 function definition(name: string): ToolDefinition {
@@ -11,6 +21,14 @@ function definition(name: string): ToolDefinition {
     type: 'function',
     function: { name, description: name + ' test double', parameters: { properties: {}, type: 'object' } },
   }
+}
+
+function toolMessage(content: string, isError = false): ChatMessage {
+  return { role: 'tool', content, tool_call_id: 'call-1', name: 'ToolSearchTool', is_error: isError }
+}
+
+function names(definitions: readonly ToolDefinition[]): string[] {
+  return definitions.map(entry => entry.function.name).sort()
 }
 
 function call(name: string, arguments_: JsonObject = {}): ToolCall {
@@ -39,4 +57,93 @@ test('agent-specific tool variants stay isolated from other agents and anonymous
   expect(registry.get('mixed', 'agent-b')?.({}, { metadata: {} })).toBe('mixed-default')
   expect(registry.get('mixed')?.({}, { metadata: {} })).toBe('mixed-default')
   expect(await registry.execute(call('mixed'), { agentId: 'agent-b', metadata: {} })).toBe('mixed-default')
+})
+
+test('capabilities fail closed, follow agent-first lookup, and seed the always-loaded core by name', () => {
+  const registry = new ToolRegistry()
+  registry.register(definition('undeclared'), () => 'x')
+  registry.register(definition('ReadFile'), () => 'x')
+  registry.register(definition('shell'), () => 'x', 'default', { destructive: true, openWorld: true })
+  registry.register(definition('shell'), () => 'x', 'agent-a', {
+    concurrencySafe: true,
+    defer: false,
+    destructive: false,
+    readOnly: true,
+  })
+
+  expect(registry.capabilities('undeclared')).toEqual(DEFAULT_TOOL_CAPABILITIES)
+  expect(registry.hasDeclaredCapabilities('undeclared')).toBe(false)
+  // An unregistered name must resolve to the same fail-closed record, not throw or open up.
+  expect(registry.capabilities('never-registered')).toEqual(DEFAULT_TOOL_CAPABILITIES)
+  // The always-loaded seed applies without a declaration; everything else defers.
+  expect(registry.capabilities('ReadFile').defer).toBe(false)
+  expect(registry.capabilities('undeclared').defer).toBe(true)
+
+  expect(registry.hasDeclaredCapabilities('shell')).toBe(true)
+  expect(registry.capabilities('shell')).toMatchObject({ destructive: true, readOnly: false })
+  expect(registry.capabilities('shell', 'agent-a')).toMatchObject({ destructive: false, readOnly: true })
+  // Agents without their own variant fall back to the default registration's record.
+  expect(registry.capabilities('shell', 'agent-b').destructive).toBe(true)
+
+  registry.replace(definition('shell'), () => 'x', 'default', { destructive: false, readOnly: true })
+  expect(registry.capabilities('shell')).toMatchObject({ destructive: false, readOnly: true })
+  registry.replace(definition('shell'), () => 'x')
+  expect(registry.hasDeclaredCapabilities('shell')).toBe(false)
+})
+
+test('every tool registered by the Claude workflow module declares an explicit capability record', () => {
+  const registry = new ToolRegistry()
+  registerClaudeWorkflowTools(registry)
+
+  for (const tool of CLAUDE_WORKFLOW_TOOL_DEFINITIONS) {
+    const name = tool.function.name
+    // A new workflow tool without a record would silently inherit the fail-closed
+    // defaults, including defer: true, and quietly vanish from deferred requests.
+    expect(CLAUDE_WORKFLOW_TOOL_CAPABILITIES[name]).toBeDefined()
+    expect(registry.hasDeclaredCapabilities(name)).toBe(true)
+  }
+  expect(registry.capabilities('TodoWriteTool').defer).toBe(false)
+  expect(registry.capabilities('ToolSearchTool')).toMatchObject({ defer: false, readOnly: true })
+  expect(registry.capabilities('ExitWorktreeTool').destructive).toBe(true)
+})
+
+test('deferred loading is opt-in and its live schema set is derived from the transcript', async () => {
+  const eager = new ToolRegistry()
+  registerClaudeWorkflowTools(eager)
+  // Default registry behavior is unchanged: every schema goes out on every request.
+  expect(names(eager.definitionsForTranscript([]))).toEqual(names(eager.definitions()))
+  expect(eager.deferredToolLoading).toBe(false)
+
+  const registry = new ToolRegistry({ deferredToolLoading: true })
+  registerClaudeWorkflowTools(registry)
+  expect(names(registry.definitionsForTranscript([]))).toEqual(['TodoWriteTool', 'ToolSearchTool'])
+  expect(registry.deferredCatalog().map(entry => entry.name)).toContain('EnterWorktreeTool')
+  expect(registry.deferredCatalog().every(entry => entry.description && !entry.description.includes('\n'))).toBe(true)
+
+  const result = await registry.execute(
+    { id: 'call-1', type: 'function', function: { name: 'ToolSearchTool', arguments: { query: 'worktree' } } },
+    { metadata: {} },
+  )
+  const matches = JSON.parse(result) as Array<{ loaded: boolean; name: string; parameters?: JsonObject }>
+  expect(matches.map(match => match.name).sort()).toEqual(['EnterWorktreeTool', 'ExitWorktreeTool'])
+  // The full schema is what makes the tool callable; a name list would be a no-op.
+  expect(matches[0]?.parameters).toEqual(
+    CLAUDE_WORKFLOW_TOOL_DEFINITIONS.find(tool => tool.function.name === 'EnterWorktreeTool')?.function
+      .parameters as JsonObject,
+  )
+
+  const transcript = [toolMessage(result)]
+  expect(names(registry.definitionsForTranscript(transcript)))
+    .toEqual(['EnterWorktreeTool', 'ExitWorktreeTool', 'TodoWriteTool', 'ToolSearchTool'])
+  // Dropping the result (compaction, resume, rewind) drops the schemas with it,
+  // so the request can never advertise a tool the model can no longer see.
+  expect(names(registry.definitionsForTranscript([]))).toEqual(['TodoWriteTool', 'ToolSearchTool'])
+})
+
+test('only successful tool results reveal schemas', () => {
+  const payload = JSON.stringify([{ loaded: true, loaded_tool: 'PlanTool', name: 'PlanTool' }])
+  expect([...revealedToolNames([toolMessage(payload)])]).toEqual(['PlanTool'])
+  expect([...revealedToolNames([toolMessage(payload, true)])]).toEqual([])
+  // User or assistant text carrying the marker must not conjure a tool into the request.
+  expect([...revealedToolNames([{ role: 'user', content: payload }])]).toEqual([])
 })

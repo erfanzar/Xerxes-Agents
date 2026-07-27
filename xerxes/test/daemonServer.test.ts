@@ -18,6 +18,8 @@ import {
   type InboundHandler,
 } from "../src/channels/index.js";
 import { CronJob, JobStore } from "../src/cron/jobs.js";
+import { readCronLease } from "../src/cron/lease.js";
+import { processCommand } from "../src/core/processLiveness.js";
 import { DaemonTranscriptStore } from "../src/session/daemonTranscript.js";
 import { SnapshotManager } from "../src/session/snapshots.js";
 import type { FetchImplementation } from "../src/llms/client.js";
@@ -1068,6 +1070,9 @@ test("daemon automatically runs due cron jobs, archives output, and delivers thr
       channels: [["recording", channel]],
     }),
     cronArchiveDirectory: join(directory, "cron", "archive"),
+    // Isolated lease: a real daemon holding the shared one would legitimately
+    // refuse this server's scheduler and the job would never fire.
+    cronLeasePath: join(directory, "cron.lease"),
     cronPollInterval: 5,
     cronStoreFactory: () => store,
     runtime: new InMemoryDaemonRuntime(undefined, {
@@ -1473,6 +1478,162 @@ test("daemon compact uses the active provider to summarize instead of the naive 
     );
     expect(prompt).toContain("CONTEXT TO SUMMARIZE");
     expect(prompt).toContain("message 1");
+  } finally {
+    globalThis.fetch = nativeFetch;
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("compaction archives the transcript it replaces beside the session file", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-compact-archive-"));
+  const sessions = join(directory, "sessions");
+  const socketPath = join(directory, "daemon.sock");
+  const profileStore = new ProfileStore(join(directory, "profiles.json"));
+  profileStore.save({
+    name: "openai-test",
+    apiKey: "fake-api-key",
+    baseUrl: "https://api.openai.test",
+    model: "gpt-4",
+    provider: "openai",
+    setActive: true,
+  });
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: directory,
+    model: "gpt-4",
+    sessionDirectory: sessions,
+  });
+  const server = new DaemonServer({
+    socketPath,
+    runtime,
+    profileStore,
+    sessionArchiveDirectory: sessions,
+  });
+  const nativeFetch = globalThis.fetch;
+  const summaryFetch: FetchImplementation = async () =>
+    new Response(
+      JSON.stringify({ choices: [{ message: { content: "archived summary" } }] }),
+    );
+  globalThis.fetch = summaryFetch as typeof globalThis.fetch;
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "compact-archive", project_dir: directory },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    for (let i = 0; i < 4; i += 1) {
+      client.send({
+        jsonrpc: "2.0",
+        id: 2 + i,
+        method: "turn.submit",
+        params: { text: `message ${i + 1}` },
+      });
+      await client.next((frame) => frame.id === 2 + i);
+      await client.next(eventFrame("turn_begin"));
+      await client.next(eventFrame("text_part"));
+      await client.next(eventFrame("turn_end"));
+    }
+    const session = runtime.sessionStatus("compact-archive");
+    const before = JSON.stringify(session?.messages ?? []);
+
+    client.send({ jsonrpc: "2.0", id: 10, method: "session.compress", params: {} });
+    const result = (await client.next((frame) => frame.id === 10)).result;
+    expect(result).toMatchObject({ ok: true, compacted: true });
+
+    const stamp = session?.metadata.last_compaction as Record<string, unknown>;
+    expect(stamp).toMatchObject({
+      messages_summarized: expect.any(Number),
+      reason: "compact",
+      tokens_after: expect.any(Number),
+      tokens_before: expect.any(Number),
+    });
+    expect(Date.parse(String(stamp.compacted_at))).toBeGreaterThan(0);
+
+    // The pre-compaction transcript survives the swap that dropped it from the
+    // session and from the single per-session JSON.
+    const archivePath = String(stamp.archive_path);
+    expect(archivePath).toBe(join(sessions, `${session?.id}.precompact.jsonl`));
+    const record = JSON.parse((await readFile(archivePath, "utf8")).trim()) as {
+      readonly messages: readonly Record<string, unknown>[];
+    };
+    expect(JSON.stringify(record.messages)).toBe(before);
+    expect(JSON.stringify(session?.messages ?? [])).toContain("archived summary");
+  } finally {
+    globalThis.fetch = nativeFetch;
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("compaction writes no archive when the daemon's transcripts are elsewhere", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-compact-noarchive-"));
+  const socketPath = join(directory, "daemon.sock");
+  const profileStore = new ProfileStore(join(directory, "profiles.json"));
+  profileStore.save({
+    name: "openai-test",
+    apiKey: "fake-api-key",
+    baseUrl: "https://api.openai.test",
+    model: "gpt-4",
+    provider: "openai",
+    setActive: true,
+  });
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: directory,
+    model: "gpt-4",
+    sessionDirectory: join(directory, "sessions"),
+  });
+  // No sessionArchiveDirectory: the server falls back to the daemon home, which
+  // holds no transcript for this session, so it must not leave an orphan
+  // archive next to nothing.
+  const server = new DaemonServer({ socketPath, runtime, profileStore });
+  const nativeFetch = globalThis.fetch;
+  const summaryFetch: FetchImplementation = async () =>
+    new Response(
+      JSON.stringify({ choices: [{ message: { content: "unarchived summary" } }] }),
+    );
+  globalThis.fetch = summaryFetch as typeof globalThis.fetch;
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "compact-noarchive", project_dir: directory },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    for (let i = 0; i < 4; i += 1) {
+      client.send({
+        jsonrpc: "2.0",
+        id: 2 + i,
+        method: "turn.submit",
+        params: { text: `message ${i + 1}` },
+      });
+      await client.next((frame) => frame.id === 2 + i);
+      await client.next(eventFrame("turn_begin"));
+      await client.next(eventFrame("text_part"));
+      await client.next(eventFrame("turn_end"));
+    }
+
+    client.send({ jsonrpc: "2.0", id: 10, method: "session.compress", params: {} });
+    const result = (await client.next((frame) => frame.id === 10)).result;
+    expect(result).toMatchObject({ ok: true, compacted: true });
+    expect(result?.archive_path).toBeUndefined();
+    const stamp = runtime.sessionStatus("compact-noarchive")?.metadata
+      .last_compaction as Record<string, unknown>;
+    expect(stamp.archive_path).toBeUndefined();
   } finally {
     globalThis.fetch = nativeFetch;
     client.close();
@@ -1993,7 +2154,7 @@ test("daemon snapshots, lists, and rolls back the active session workspace", asy
     ).toMatchObject({
       category: "slash",
       severity: "warning",
-      body: "Usage: `/rollback <snapshot-id>` — list with `/snapshots`.",
+      body: "Usage: `/rollback <snapshot-id> [path]` — list with `/snapshots`.",
     });
   } finally {
     client.close();
@@ -3508,11 +3669,11 @@ function eventFrame(type: string): (frame: Frame) => boolean {
 }
 
 async function waitFor(
-  predicate: () => boolean,
+  predicate: () => boolean | Promise<boolean>,
   timeout = 2_000,
 ): Promise<void> {
   const deadline = Date.now() + timeout;
-  while (!predicate()) {
+  while (!(await predicate())) {
     if (Date.now() >= deadline) {
       throw new Error("Timed out waiting for native daemon state");
     }
@@ -3563,6 +3724,11 @@ class SocketTestClient {
 
   send(frame: Record<string, unknown>): void {
     this.socket.write(`${JSON.stringify(frame)}\n`);
+  }
+
+  /** Whether any buffered frame matched, for asserting that nothing was emitted. */
+  seen(predicate: (frame: Frame) => boolean): boolean {
+    return this.frames.some(predicate);
   }
 
   /** Write several frames in one chunk so the server parses them back-to-back. */
@@ -4200,6 +4366,9 @@ test("daemon stop drains scheduled cron turns before flushing sessions", async (
   });
   const server = new DaemonServer({
     cronArchiveDirectory: join(directory, "cron", "archive"),
+    // Isolated lease: a real daemon holding the shared one would legitimately
+    // refuse this server's scheduler and the job would never fire.
+    cronLeasePath: join(directory, "cron.lease"),
     cronPollInterval: 5,
     cronStoreFactory: () => store,
     runtime,
@@ -4584,3 +4753,774 @@ class AbortGateRunner implements TurnRunner {
     yield { type: "text_part", payload: { text: "turn drained" } };
   }
 }
+
+/** A turn that ignores its abort signal, as a wedged provider stream does. */
+class NeverSettlingRunner implements TurnRunner {
+  runs = 0;
+
+  async *run(): AsyncGenerator<DaemonEvent> {
+    this.runs += 1;
+    yield { type: "text_part", payload: { text: "started" } };
+    await new Promise<void>(() => undefined);
+  }
+}
+
+test("daemon stop persists sessions even when an in-flight turn never settles", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-stop-wedged-"));
+  const socketPath = join(directory, "daemon.sock");
+  const sessionDirectory = join(directory, "sessions");
+  const runner = new NeverSettlingRunner();
+  const runtime = new InMemoryDaemonRuntime(runner, {
+    currentProjectDirectory: directory,
+    model: "wedged-model",
+    sessionDirectory,
+  });
+  const server = new DaemonServer({
+    cronLeasePath: join(directory, "cron.lease"),
+    cronStoreFactory: () => new JobStore(join(directory, "cron", "jobs.json")),
+    runtime,
+    socketPath,
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "wedged-session" },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "turn.submit",
+      params: { session_key: "wedged-session", text: "wedge the drain" },
+    });
+    await client.next((frame) => frame.id === 2);
+    await client.next(eventFrame("turn_begin"));
+    await waitFor(() => runner.runs === 1);
+
+    // The prompt is durable before the turn ends: the transcript itself is
+    // only written in the turn's `finally`, which a crash never reaches.
+    await waitFor(async () =>
+      (await readdir(sessionDirectory)).some((file) => file.endsWith(".jsonl")),
+    );
+    const journal = (await readdir(sessionDirectory)).find((file) =>
+      file.endsWith(".jsonl"),
+    );
+    expect(
+      await readFile(join(sessionDirectory, String(journal)), "utf8"),
+    ).toContain("wedge the drain");
+
+    // Regression: the only session flush sat behind an unbounded await on the
+    // drain, so one turn that never settles parked the daemon with the
+    // transcript unwritten.
+    const startedAt = Date.now();
+    await server.stop();
+    expect(Date.now() - startedAt).toBeLessThan(4_000);
+
+    const files = await readdir(sessionDirectory);
+    expect(files).toHaveLength(1);
+    const saved = JSON.parse(
+      await readFile(join(sessionDirectory, String(files[0])), "utf8"),
+    ) as { messages: Array<{ content?: unknown; role?: string }> };
+    expect(saved.messages).toContainEqual(
+      expect.objectContaining({ role: "user", content: "wedge the drain" }),
+    );
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("session listing renders rows from transcript headers and surfaces unreadable files", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-list-tiers-"));
+  const sessionDirectory = join(directory, "sessions");
+  const store = new DaemonTranscriptStore({
+    directory: sessionDirectory,
+    currentProjectDirectory: directory,
+  });
+  await mkdir(sessionDirectory, { recursive: true });
+  // A record whose header is intact but whose message array is unparseable: it
+  // can only be listed by a reader that stops at the head of the file.
+  await writeFile(
+    join(sessionDirectory, "aaaabbbbccc1.json"),
+    [
+      "{",
+      '  "session_id": "aaaabbbbccc1",',
+      '  "key": "aaaabbbbccc1",',
+      '  "agent_id": "default",',
+      `  "cwd": ${JSON.stringify(directory)},`,
+      '  "updated_at": "2026-05-05T00:00:00.000Z",',
+      '  "turn_count": 4,',
+      '  "message_count": 8,',
+      `  "metadata": {"title": "head-only row", "project_root": ${JSON.stringify(directory)}},`,
+      '  "messages": [ not json at all',
+    ].join("\n"),
+    "utf8",
+  );
+  await writeFile(join(sessionDirectory, "ddddeeeefff2.json"), "totally corrupt", "utf8");
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: directory,
+    model: "list-model",
+    transcriptStore: store,
+  });
+  try {
+    const listed = await runtime.listSavedSessions(10, {
+      projectDirectory: directory,
+    });
+    expect(listed.map((session) => session.title)).toContain("head-only row");
+    expect(listed.find((session) => session.id === "aaaabbbbccc1")).toMatchObject({
+      turnCount: 4,
+      messageCount: 8,
+    });
+    // A corrupt file used to vanish from every listing, so it could never be
+    // seen or deleted.
+    expect(listed.find((session) => session.id === "ddddeeeefff2")).toMatchObject({
+      resumable: false,
+      status: "unreadable",
+    });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a daemon refused the cron lease never fires the shared job store", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-cron-lease-"));
+  const socketPath = join(directory, "daemon.sock");
+  const leasePath = join(directory, "cron.lease");
+  const jobsPath = join(directory, "cron", "jobs.json");
+  // A live holder running this very command, recorded against a different
+  // project: exactly the shape of a second project's daemon owning cron.
+  await writeFile(
+    leasePath,
+    `${JSON.stringify({
+      acquired_at: new Date().toISOString(),
+      command: processCommand(process.pid),
+      owner_key: join(directory, "some-other-project"),
+      pid: process.pid,
+    })}\n`,
+    "utf8",
+  );
+  const store = new JobStore(jobsPath);
+  store.add(
+    new CronJob({
+      id: "leased-job",
+      prompt: "should never run",
+      schedule: "* * * * *",
+      nextRunAt: new Date(Date.now() - 60_000).toISOString(),
+    }),
+  );
+  const server = new DaemonServer({
+    cronLeasePath: leasePath,
+    cronPollInterval: 5,
+    cronStoreFactory: () => new JobStore(jobsPath),
+    runtime: new InMemoryDaemonRuntime(undefined, {
+      currentProjectDirectory: directory,
+      model: "cron-model",
+      sessionDirectory: join(directory, "sessions"),
+    }),
+    socketPath,
+  });
+  await server.start();
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(new JobStore(jobsPath).get("leased-job")?.lastRunAt).toBeUndefined();
+    // The foreign lease is left exactly as it was found.
+    expect(readCronLease(leasePath)?.ownerKey).toBe(
+      join(directory, "some-other-project"),
+    );
+  } finally {
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+/** A runtime whose session flush can be held open, to observe shutdown mid-flight. */
+class BlockedFlushRuntime extends InMemoryDaemonRuntime {
+  private gate: Promise<void> | undefined;
+  private open: (() => void) | undefined;
+
+  blockFlush(): void {
+    this.gate = new Promise<void>((resolve) => {
+      this.open = resolve;
+    });
+  }
+
+  releaseFlush(): void {
+    this.open?.();
+    this.gate = undefined;
+  }
+
+  override async flushSessions(): Promise<void> {
+    await this.gate;
+    await super.flushSessions();
+  }
+}
+
+test("shutdown arms a hard-exit signal handler and hands back its process handlers", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-stop-signals-"));
+  const socketPath = join(directory, "daemon.sock");
+  const runtime = new BlockedFlushRuntime(undefined, {
+    currentProjectDirectory: directory,
+    model: "signal-model",
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const baselineSigterm = process.listenerCount("SIGTERM");
+  const baselineCrash = process.listenerCount("uncaughtException");
+  const server = new DaemonServer({
+    crashHandlers: true,
+    cronLeasePath: join(directory, "cron.lease"),
+    cronStoreFactory: () => new JobStore(join(directory, "cron", "jobs.json")),
+    runtime,
+    socketPath,
+  });
+  try {
+    await server.start();
+    expect(process.listenerCount("uncaughtException")).toBe(baselineCrash + 1);
+    expect(process.listenerCount("unhandledRejection")).toBeGreaterThan(0);
+
+    runtime.blockFlush();
+    const stopping = server.stop();
+    // A second SIGTERM has to reach something: the host consumed the first one
+    // with `process.once`, so without this handler it is silently dropped and
+    // only SIGKILL is left.
+    await waitFor(() => process.listenerCount("SIGTERM") === baselineSigterm + 1);
+    runtime.releaseFlush();
+    await stopping;
+
+    expect(process.listenerCount("SIGTERM")).toBe(baselineSigterm);
+    expect(process.listenerCount("uncaughtException")).toBe(baselineCrash);
+  } finally {
+    runtime.releaseFlush();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("an opted-in daemon snapshots the workspace before every turn and links it to the turn", async () => {
+  if (!Bun.which("git")) return;
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-turn-snapshot-"));
+  const workspace = join(directory, "workspace");
+  const socketPath = join(directory, "daemon.sock");
+  await mkdir(workspace);
+  await writeFile(join(workspace, "state.txt"), "before turn zero", "utf8");
+  const snapshots = new SnapshotManager(workspace, {
+    shadowRoot: join(directory, "shadow"),
+  });
+  const server = new DaemonServer({
+    socketPath,
+    autoSnapshotTurns: true,
+    runtime: new InMemoryDaemonRuntime(undefined, {
+      currentProjectDirectory: workspace,
+      model: "snapshot-model",
+      sessionDirectory: join(directory, "sessions"),
+    }),
+    snapshotManagerFactory: () => snapshots,
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "snap-turns", project_dir: workspace },
+    });
+    const initialized = await client.next((frame) => frame.id === 1);
+    const sessionId = String(
+      (initialized.result?.session as Record<string, unknown>).id,
+    );
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "turn.submit",
+      params: { session_key: "snap-turns", text: "first" },
+    });
+    await client.next((frame) => frame.id === 2);
+    await client.next(eventFrame("turn_end"));
+    await waitFor(() => snapshots.getForTurn(sessionId, 0) !== undefined);
+
+    await writeFile(join(workspace, "state.txt"), "before turn one", "utf8");
+    client.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "turn.submit",
+      params: { session_key: "snap-turns", text: "second" },
+    });
+    await client.next((frame) => frame.id === 3);
+    await client.next(eventFrame("turn_end"));
+    await waitFor(() => snapshots.getForTurn(sessionId, 1) !== undefined);
+
+    const first = snapshots.getForTurn(sessionId, 0);
+    expect(first).toMatchObject({ sessionId, turnIndex: 0, label: "turn-0" });
+    // "Take me back to before turn 1" is now expressible from the record alone.
+    await writeFile(join(workspace, "state.txt"), "agent damage", "utf8");
+    const target = snapshots.getForTurn(sessionId, 1);
+    await snapshots.rollback(String(target?.id));
+    expect(await readFile(join(workspace, "state.txt"), "utf8")).toBe(
+      "before turn one",
+    );
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a daemon that was not opted in never snapshots a turn", async () => {
+  if (!Bun.which("git")) return;
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-no-turn-snapshot-"));
+  const workspace = join(directory, "workspace");
+  const socketPath = join(directory, "daemon.sock");
+  await mkdir(workspace);
+  const snapshots = new SnapshotManager(workspace, {
+    shadowRoot: join(directory, "shadow"),
+  });
+  const server = new DaemonServer({
+    socketPath,
+    runtime: new InMemoryDaemonRuntime(undefined, {
+      currentProjectDirectory: workspace,
+      model: "snapshot-model",
+      sessionDirectory: join(directory, "sessions"),
+    }),
+    snapshotManagerFactory: () => snapshots,
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "no-snap", project_dir: workspace },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "turn.submit",
+      params: { session_key: "no-snap", text: "first" },
+    });
+    await client.next((frame) => frame.id === 2);
+    await client.next(eventFrame("turn_end"));
+
+    expect(snapshots.list()).toEqual([]);
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a turn snapshot failure never fails the turn", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-snapshot-fail-"));
+  const socketPath = join(directory, "daemon.sock");
+  const server = new DaemonServer({
+    socketPath,
+    autoSnapshotTurns: true,
+    runtime: new InMemoryDaemonRuntime(undefined, {
+      currentProjectDirectory: directory,
+      model: "snapshot-model",
+      sessionDirectory: join(directory, "sessions"),
+    }),
+    snapshotManagerFactory: () => {
+      throw new Error("shadow repository unavailable");
+    },
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "snap-fail", project_dir: directory },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "turn.submit",
+      params: { session_key: "snap-fail", text: "still runs" },
+    });
+    expect((await client.next((frame) => frame.id === 2)).result).toEqual({
+      ok: true,
+    });
+    const end = await client.next(eventFrame("turn_end"));
+    expect(end.params?.payload).toMatchObject({ cancelled: false });
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a single-file rollback restores one path and leaves the rest of the tree", async () => {
+  if (!Bun.which("git")) return;
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-restore-file-"));
+  const workspace = join(directory, "workspace");
+  const socketPath = join(directory, "daemon.sock");
+  await mkdir(workspace);
+  await writeFile(join(workspace, "damaged.txt"), "good version", "utf8");
+  await writeFile(join(workspace, "keep.txt"), "original", "utf8");
+  const server = new DaemonServer({
+    socketPath,
+    runtime: new InMemoryDaemonRuntime(undefined, {
+      currentProjectDirectory: workspace,
+      sessionDirectory: join(directory, "sessions"),
+    }),
+    snapshotManagerFactory: (workspaceDirectory) =>
+      new SnapshotManager(workspaceDirectory, {
+        shadowRoot: join(directory, "shadow"),
+      }),
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "restore", project_dir: workspace },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "slash",
+      params: { command: "/snapshot base" },
+    });
+    const taken = await client.next((frame) => frame.id === 2);
+    const snapshotId = String(
+      (taken.result?.snapshot as Record<string, unknown>).id,
+    );
+    await client.next(eventFrame("notification"));
+
+    await writeFile(join(workspace, "damaged.txt"), "agent damage", "utf8");
+    await writeFile(join(workspace, "keep.txt"), "later edit", "utf8");
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "slash",
+      params: { command: `/rollback ${snapshotId} damaged.txt` },
+    });
+    const restored = await client.next((frame) => frame.id === 3);
+    expect(restored.result).toMatchObject({ ok: true, path: "damaged.txt" });
+    await client.next(eventFrame("notification"));
+
+    expect(await readFile(join(workspace, "damaged.txt"), "utf8")).toBe(
+      "good version",
+    );
+    // A single-file restore is not a rollback of everything else.
+    expect(await readFile(join(workspace, "keep.txt"), "utf8")).toBe("later edit");
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "slash",
+      params: { command: `/rollback ${snapshotId} ../escape.txt` },
+    });
+    expect((await client.next((frame) => frame.id === 4)).result).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("escapes the snapshot workspace"),
+    });
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("resume reports what loading the transcript changed instead of losing messages quietly", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-resume-repair-"));
+  const sessionDirectory = join(directory, "sessions");
+  const socketPath = join(directory, "daemon.sock");
+  await mkdir(sessionDirectory, { recursive: true });
+  await writeFile(
+    join(sessionDirectory, "aaaabbbbccc1.json"),
+    JSON.stringify({
+      session_id: "aaaabbbbccc1",
+      key: "aaaabbbbccc1",
+      agent_id: "default",
+      cwd: directory,
+      updated_at: "2026-05-05T00:00:00.000Z",
+      turn_count: 2,
+      message_count: 5,
+      metadata: { title: "repaired", project_root: directory },
+      messages: [
+        { role: "user", content: "hello" },
+        "this entry is not a message",
+        {
+          role: "assistant",
+          content: "working",
+          tool_calls: [{ id: "call-a", name: "ReadFile", input: {} }],
+        },
+        { role: "tool", tool_call_id: "orphan", content: "no matching call" },
+      ],
+    }),
+    "utf8",
+  );
+  const server = new DaemonServer({
+    socketPath,
+    runtime: new InMemoryDaemonRuntime(undefined, {
+      currentProjectDirectory: directory,
+      model: "resume-model",
+      sessionDirectory,
+    }),
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "tui:live", project_dir: directory },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "slash",
+      params: { command: "/resume aaaabbbbccc1" },
+    });
+    await client.next((frame) => frame.id === 2);
+    const notice = await client.next(
+      (frame) =>
+        frame.method === "event" &&
+        frame.params?.type === "notification" &&
+        String(
+          (frame.params.payload as Record<string, unknown> | undefined)?.body ??
+            "",
+        ).startsWith("Resume repaired"),
+    );
+    const body = String(
+      (notice.params?.payload as Record<string, unknown>).body,
+    );
+    expect(body).toContain("dropped 1 malformed message");
+    expect(body).toContain("dropped 1 orphaned tool reply");
+    expect(body).toContain("inserted 1 interrupted-call placeholder");
+    expect((notice.params?.payload as Record<string, unknown>).severity).toBe(
+      "warning",
+    );
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a clean resume says nothing about repairs", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-resume-clean-"));
+  const sessionDirectory = join(directory, "sessions");
+  const socketPath = join(directory, "daemon.sock");
+  await mkdir(sessionDirectory, { recursive: true });
+  await writeFile(
+    join(sessionDirectory, "aaaabbbbccc2.json"),
+    JSON.stringify({
+      session_id: "aaaabbbbccc2",
+      key: "aaaabbbbccc2",
+      agent_id: "default",
+      cwd: directory,
+      updated_at: "2026-05-05T00:00:00.000Z",
+      turn_count: 1,
+      message_count: 2,
+      metadata: { title: "clean", project_root: directory },
+      messages: [
+        { role: "user", content: "hello" },
+        { role: "assistant", content: "hi" },
+      ],
+    }),
+    "utf8",
+  );
+  const server = new DaemonServer({
+    socketPath,
+    runtime: new InMemoryDaemonRuntime(undefined, {
+      currentProjectDirectory: directory,
+      model: "resume-model",
+      sessionDirectory,
+    }),
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "tui:live", project_dir: directory },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "slash",
+      params: { command: "/resume aaaabbbbccc2" },
+    });
+    await client.next((frame) => frame.id === 2);
+    const resumed = await client.next(
+      (frame) =>
+        frame.method === "event" &&
+        frame.params?.type === "notification" &&
+        String(
+          (frame.params.payload as Record<string, unknown> | undefined)?.body ??
+            "",
+        ).startsWith("Resumed session"),
+    );
+    expect(resumed.params?.payload).toBeDefined();
+    // Nothing further: a clean load must not manufacture a warning.
+    await Bun.sleep(50);
+    expect(
+      client.seen((frame) =>
+        String(
+          (frame.params?.payload as Record<string, unknown> | undefined)?.body ??
+            "",
+        ).startsWith("Resume repaired"),
+      ),
+    ).toBe(false);
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("transcript search spans saved sessions and reports what it could not index", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-search-"));
+  const sessionDirectory = join(directory, "sessions");
+  const socketPath = join(directory, "daemon.sock");
+  await mkdir(sessionDirectory, { recursive: true });
+  await writeFile(
+    join(sessionDirectory, "aaaabbbbccc3.json"),
+    JSON.stringify({
+      session_id: "aaaabbbbccc3",
+      key: "aaaabbbbccc3",
+      agent_id: "default",
+      cwd: directory,
+      updated_at: "2026-05-05T00:00:00.000Z",
+      turn_count: 1,
+      message_count: 3,
+      metadata: { title: "older", project_root: directory },
+      messages: [
+        { role: "user", content: "why does the retry backoff regress" },
+        { role: "assistant", content: "because the timer is reset" },
+        { role: "tool", content: 42 },
+      ],
+    }),
+    "utf8",
+  );
+  const server = new DaemonServer({
+    socketPath,
+    runtime: new InMemoryDaemonRuntime(undefined, {
+      currentProjectDirectory: directory,
+      model: "search-model",
+      sessionDirectory,
+    }),
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "tui:live", project_dir: directory },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    // A live turn feeds the index incrementally, next to the cold read.
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "turn.submit",
+      params: { session_key: "tui:live", text: "retry backoff in the daemon" },
+    });
+    await client.next((frame) => frame.id === 2);
+    await client.next(eventFrame("turn_end"));
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "session.search",
+      params: { query: "retry backoff" },
+    });
+    const found = await client.next((frame) => frame.id === 3);
+    const results = found.result?.results as Array<Record<string, unknown>>;
+    expect(found.result).toMatchObject({ ok: true });
+    expect(results.map((row) => row.session_id)).toContain("aaaabbbbccc3");
+    expect(results.length).toBeGreaterThanOrEqual(2);
+    expect(String(results[0]?.excerpt)).toContain("retry backoff");
+    // The row the indexer does not model is counted, not serialized.
+    expect(found.result?.stats).toMatchObject({ unrecognized_messages: 1 });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "session.search",
+      params: { query: "retry backoff", session_id: "aaaabbbbccc3" },
+    });
+    const scoped = await client.next((frame) => frame.id === 4);
+    expect(
+      (scoped.result?.results as Array<Record<string, unknown>>).every(
+        (row) => row.session_id === "aaaabbbbccc3",
+      ),
+    ).toBe(true);
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "slash",
+      params: { command: "/search nothingmatchesthisatall" },
+    });
+    expect((await client.next((frame) => frame.id === 5)).result).toMatchObject({
+      ok: true,
+      results: [],
+    });
+    expect(
+      (await client.next(eventFrame("notification"))).params?.payload,
+    ).toMatchObject({
+      category: "slash",
+      body: expect.stringContaining("No transcript matches"),
+    });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 6,
+      method: "session.search",
+      params: { query: "   " },
+    });
+    expect((await client.next((frame) => frame.id === 6)).result).toEqual({
+      ok: false,
+      error: "search query is required",
+    });
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});

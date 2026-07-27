@@ -5,6 +5,14 @@ import type { JsonObject, JsonSchema } from '../types/toolCalls.js'
 
 /** Outcome of checking a model-emitted tool call against its declared JSON Schema subset. */
 export interface ToolArgumentValidationResult {
+  /**
+   * The arguments as they were actually validated: provider JSON strings decoded
+   * and literal string forms repaired by `coerceDeclared`. Executors must hand
+   * this to the handler; passing the raw payload instead would let an accepted
+   * `offset: "0"` reach the tool as a string again. Undefined only when the
+   * payload was not an object at all.
+   */
+  readonly coerced: JsonObject | undefined
   readonly error: string
   readonly missing: readonly string[]
   readonly ok: boolean
@@ -17,6 +25,10 @@ export interface ToolArgumentValidationResult {
  * This intentionally covers required fields, declared-property types, enum
  * values, and `additionalProperties: false` without adding a schema runtime.
  * It is a pre-execution boundary, not a general JSON Schema implementation.
+ *
+ * Providers hand arguments over as a JSON string often enough that decoding one
+ * here is cheaper than a burnt turn; the decoded object is reported back through
+ * `coerced` so the caller never has to parse it a second time.
  */
 export function validateToolArguments(
   toolName: string,
@@ -24,24 +36,34 @@ export function validateToolArguments(
   schema: JsonSchema | undefined,
 ): ToolArgumentValidationResult {
   const name = requiredToolName(toolName)
-  if (!schema || !Object.keys(schema).length) return valid(name)
-  if (!isRecord(argumentsValue)) {
-    return invalid(name, `${name}: expected arguments to be an object, got ${typeName(argumentsValue)}`)
+  let payload = argumentsValue
+  if (typeof argumentsValue === 'string') {
+    try {
+      payload = JSON.parse(argumentsValue) as unknown
+    } catch {
+      return invalid(name, `${name}: arguments are not valid JSON: ${argumentsValue.slice(0, 200)}`)
+    }
+  }
+  if (!schema || !Object.keys(schema).length) return valid(name, isRecord(payload) ? payload : undefined)
+  if (!isRecord(payload)) {
+    return invalid(name, `${name}: expected arguments to be an object, got ${typeName(payload)}`)
   }
 
   const required = stringArray(schema.required)
   const properties = isRecord(schema.properties) ? schema.properties : {}
-  const missing = required.filter(key => !(key in argumentsValue))
+  const missing = required.filter(key => !(key in payload))
   if (missing.length) {
     return {
       ok: false,
       toolName: name,
+      coerced: undefined,
       missing,
       error: `${name}: missing required parameter(s): ${missing.join(', ')}`,
     }
   }
 
-  for (const [key, value] of Object.entries(argumentsValue)) {
+  let repaired: Record<string, unknown> | undefined
+  for (const [key, rawValue] of Object.entries(payload)) {
     const property = properties[key]
     if (!isRecord(property)) {
       if (schema.additionalProperties === false) {
@@ -50,6 +72,11 @@ export function validateToolArguments(
       continue
     }
     const expectedType = typeof property.type === 'string' ? property.type : undefined
+    const value = expectedType === undefined ? rawValue : coerceDeclared(rawValue, expectedType)
+    if (!Object.is(value, rawValue)) {
+      repaired ??= { ...payload }
+      repaired[key] = value
+    }
     if (expectedType && !matchesType(value, expectedType)) {
       return invalid(name, `${name}: parameter '${key}' expected ${expectedType}, got ${typeName(value)}`)
     }
@@ -58,38 +85,49 @@ export function validateToolArguments(
       return invalid(name, `${name}: parameter '${key}' must be ${formatEnumRequirement(values)}, got ${formatValue(value)}`)
     }
   }
-  return valid(name)
+  return valid(name, repaired ?? payload)
 }
+
+const INTEGER_LITERAL = /^-?\d+$/
+const NUMBER_LITERAL = /^-?\d+(\.\d+)?$/
 
 /**
- * Return a model-facing validation error, accepting raw provider JSON strings.
+ * Repair the exact literal string forms providers emit for typed parameters —
+ * `"0"` for an integer, `"true"` for a boolean — so a well-formed call is not
+ * thrown away over a quoting artifact.
  *
- * A return value of undefined means the call is safe to hand to the executor.
+ * The accepted set is deliberately far narrower than `Number()` or `JSON.parse`
+ * semantics: '', null, 'yes' and 'on' are left alone, and '0' never becomes a
+ * boolean. Widening any of those would convert a loud rejection into a tool run
+ * with a silently wrong argument, which costs far more than the rejected turn
+ * this repairs. Non-string values and undeclared types pass through untouched.
  */
-export function validateAndFormatToolArgumentError(
-  toolName: string,
-  argumentsValue: JsonObject | string | unknown,
-  schema: JsonSchema | undefined,
-): string | undefined {
-  let parsed = argumentsValue
-  if (typeof argumentsValue === 'string') {
-    try {
-      parsed = JSON.parse(argumentsValue) as unknown
-    } catch {
-      return `${requiredToolName(toolName)}: arguments are not valid JSON: ${argumentsValue.slice(0, 200)}`
-    }
+export function coerceDeclared(value: unknown, expectedType: string): unknown {
+  if (typeof value !== 'string') return value
+  if (expectedType === 'boolean') {
+    if (value === 'true') return true
+    if (value === 'false') return false
+    return value
   }
-  if (!isRecord(parsed)) return `${requiredToolName(toolName)}: arguments must be a JSON object.`
-  const result = validateToolArguments(toolName, parsed, schema)
-  return result.ok ? undefined : result.error
+  if (expectedType === 'integer' && INTEGER_LITERAL.test(value)) {
+    const parsed = Number(value)
+    // Past the safe range the parse rounds to a different integer, so keep the
+    // string and let the declared-type check reject it rather than run the wrong one.
+    return Number.isSafeInteger(parsed) ? parsed : value
+  }
+  if (expectedType === 'number' && NUMBER_LITERAL.test(value)) {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : value
+  }
+  return value
 }
 
-function valid(toolName: string): ToolArgumentValidationResult {
-  return { ok: true, toolName, error: '', missing: [] }
+function valid(toolName: string, coerced: Record<string, unknown> | undefined): ToolArgumentValidationResult {
+  return { ok: true, toolName, coerced: coerced as JsonObject | undefined, error: '', missing: [] }
 }
 
 function invalid(toolName: string, error: string): ToolArgumentValidationResult {
-  return { ok: false, toolName, error, missing: [] }
+  return { ok: false, toolName, coerced: undefined, error, missing: [] }
 }
 
 function requiredToolName(value: string): string {

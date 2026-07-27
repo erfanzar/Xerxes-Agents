@@ -5,8 +5,10 @@ import { expect, test } from 'bun:test'
 
 import {
   RESUME_REPLAY_SENTINEL,
+  describeTranscriptRepair,
   repairResumedTranscript,
   replayPendingToolCalls,
+  summarizeTranscriptRepair,
   type ResumeReplayExecutor,
 } from '../src/session/resumeRepair.js'
 import { normalizeDaemonTranscript } from '../src/session/daemonTranscript.js'
@@ -43,6 +45,66 @@ test('resume repair strips assistant markers, retains matching replies, and remo
     { tool_call_id: 'call-search', name: 'GrepTool', arguments: '{"pattern":"TODO"}' },
   ])
   expect(source[0]?.content).toContain('ASSISTANT_TOOL_CALLS')
+  // The orphan drop used to report nothing at all.
+  expect(repair.stats).toEqual({
+    assistantMarkersStripped: 1,
+    orphanedToolRepliesDropped: 2,
+    replaySentinelsInserted: 1,
+  })
+})
+
+test('a load that changes nothing reports nothing', () => {
+  const summary = summarizeTranscriptRepair([
+    { role: 'user', content: 'hello' },
+    { role: 'assistant', content: 'hi' },
+  ])
+
+  expect(summary).toEqual({
+    malformedMessagesDropped: 0,
+    stats: {
+      assistantMarkersStripped: 0,
+      orphanedToolRepliesDropped: 0,
+      replaySentinelsInserted: 0,
+    },
+  })
+  expect(describeTranscriptRepair(summary)).toBe('')
+})
+
+test('a load that drops messages says so in one line covering every category', () => {
+  const summary = summarizeTranscriptRepair([
+    'not a message',
+    42,
+    {
+      role: 'assistant',
+      content: 'go ASSISTANT_TOOL_CALLS: {"name":"x","input":{}}',
+      tool_calls: [{ id: 'c1', name: 'X', input: {} }],
+    },
+    { role: 'tool', tool_call_id: 'orphan', content: 'no matching call' },
+  ])
+
+  expect(summary).toEqual({
+    malformedMessagesDropped: 2,
+    stats: {
+      assistantMarkersStripped: 1,
+      orphanedToolRepliesDropped: 1,
+      replaySentinelsInserted: 1,
+    },
+  })
+  expect(describeTranscriptRepair(summary)).toBe(
+    'Resume repaired this transcript: dropped 2 malformed messages, dropped 1 orphaned tool reply, '
+    + 'inserted 1 interrupted-call placeholder, stripped tool-call markers from 1 assistant message.',
+  )
+})
+
+test('the repair summary pluralizes orphaned tool replies correctly', () => {
+  const summary = summarizeTranscriptRepair([
+    { role: 'tool', tool_call_id: 'a', content: 'x' },
+    { role: 'tool', tool_call_id: 'b', content: 'y' },
+  ])
+
+  expect(describeTranscriptRepair(summary)).toBe(
+    'Resume repaired this transcript: dropped 2 orphaned tool replies.',
+  )
 })
 
 test('resume repair flushes unresolved calls before a subsequent assistant message', () => {

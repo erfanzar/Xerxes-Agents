@@ -5,6 +5,7 @@ import { existsSync } from 'node:fs'
 
 import { xerxesHome } from '../core/paths.js'
 import { PROVIDERS } from '../llms/providerRegistry.js'
+import { formatConfigProvenance, getConfigProvenance } from '../core/config.js'
 
 export type DiagnosisSeverity = 'fail' | 'ok' | 'warn'
 
@@ -116,6 +117,31 @@ export function checkComputerUse(options: DoctorOptions = {}): Diagnosis {
   )
 }
 
+/**
+ * Report which layer supplied every non-default setting.
+ *
+ * Config resolves across defaults, the user file, an opt-in workspace file, the
+ * environment and CLI overrides, and once merged a value used to carry no memory
+ * of where it came from — so "why is my model set to that" had no answer short of
+ * reading five sources by hand. Values are redacted by the formatter.
+ */
+export function checkConfigProvenance(_options: DoctorOptions = {}): Diagnosis {
+  let report: string
+  try {
+    report = formatConfigProvenance(getConfigProvenance(), { changedOnly: true })
+  } catch (error) {
+    return diagnosis(
+      'config-provenance',
+      'warn',
+      'Config provenance is unavailable',
+      error instanceof Error ? error.message : String(error),
+    )
+  }
+  return report.trim()
+    ? diagnosis('config-provenance', 'ok', 'Config sources resolved', report)
+    : diagnosis('config-provenance', 'ok', 'Every setting is at its built-in default')
+}
+
 export const DEFAULT_DOCTOR_CHECKS: readonly DoctorCheck[] = Object.freeze([
   checkBunRuntime,
   checkPlatform,
@@ -123,6 +149,7 @@ export const DEFAULT_DOCTOR_CHECKS: readonly DoctorCheck[] = Object.freeze([
   checkProviderKeys,
   checkXerxesHome,
   checkComputerUse,
+  checkConfigProvenance,
 ])
 
 export const MINIMAL_DOCTOR_CHECKS: readonly DoctorCheck[] = Object.freeze([

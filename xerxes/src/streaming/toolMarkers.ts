@@ -63,6 +63,22 @@ export function stripAssistantToolCallMarkers(text: string): string {
   return extractAssistantToolCallMarkers(text).text
 }
 
+/**
+ * Defang `<system-reminder>` tags found in inbound content before it reaches the model.
+ *
+ * The default system prompt tells the agent that system-reminder content is authoritative,
+ * so any file, web page, or command output that happens to contain the tag would otherwise
+ * promote itself to instruction status. The delimiters are rewritten rather than dropped:
+ * the body stays byte-for-byte visible, so someone grepping a transcript for the offending
+ * text still finds it, while the tag itself becomes a channel only the runtime can write.
+ */
+export function neutralizeSystemReminders(text: string): string {
+  return text.replace(/<(\/?)system-reminder\b([^>]*)>/gi, (_match, closing: string, attributes: string) => {
+    const rest = attributes.replace(/\/\s*$/, '').trimEnd()
+    return '[' + closing + 'untrusted-system-reminder' + rest + ']'
+  })
+}
+
 function normalizeMarkerPayload(value: unknown, idPrefix: string, startIndex: number): MarkerToolCall[] {
   const items = Array.isArray(value) ? value : [value]
   return items.flatMap((item, index) => {

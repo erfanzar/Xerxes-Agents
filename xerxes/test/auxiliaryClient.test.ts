@@ -6,6 +6,7 @@ import { expect, test } from 'bun:test'
 import {
   AuxiliaryClient,
   DEFAULT_AUXILIARY_MAX_TOKENS,
+  DEFAULT_AUXILIARY_QUERY_SOURCE,
   MAX_RENDERED_TRANSCRIPT_CHARS,
   type AuxiliaryBackendRequest,
   type AuxiliaryMessage,
@@ -32,6 +33,7 @@ test('auxiliary client delivers a resolved typed request to a synchronous inject
   expect(response).toEqual({
     text: 'summary text',
     purpose: 'summary',
+    querySource: DEFAULT_AUXILIARY_QUERY_SOURCE,
     model: 'test-aux-model',
     durationMs: 17,
     requestTokens: 0,
@@ -39,6 +41,7 @@ test('auxiliary client delivers a resolved typed request to a synchronous inject
   })
   expect(captured).toEqual({
     purpose: 'summary',
+    querySource: DEFAULT_AUXILIARY_QUERY_SOURCE,
     messages: [{ role: 'user', content: 'hi' }],
     maxTokens: DEFAULT_AUXILIARY_MAX_TOKENS,
     temperature: 0,
@@ -169,6 +172,46 @@ test('short transcripts pass through to the auxiliary model unclipped', async ()
   await client.summarize([{ role: 'user', content: 'small' }])
 
   expect(captured?.messages[1]).toMatchObject({ role: 'user', content: '[user] small' })
+})
+
+test('every built-in helper tags its backend request with its own housekeeping source', async () => {
+  const requests: AuxiliaryBackendRequest[] = []
+  const client = new AuxiliaryClient({
+    backend: request => {
+      requests.push(request)
+      return 'ok'
+    },
+  })
+
+  await client.summarize([{ role: 'user', content: 'hi' }])
+  await client.title([{ role: 'user', content: 'hi' }])
+  await client.extract('body', { instruction: 'Extract' })
+  // Purpose-specific overrides let one helper serve a different budget line.
+  await client.summarize([{ role: 'user', content: 'hi' }], { querySource: 'tool_result_summary' })
+
+  expect(requests.map(request => request.querySource)).toEqual([
+    'compaction',
+    'session_title',
+    'memory_extraction',
+    'tool_result_summary',
+  ])
+  // No auxiliary call may be billed as the user's own turn.
+  expect(requests.every(request => request.querySource !== 'main')).toBe(true)
+})
+
+test('an auxiliary client cannot be configured or called as the main loop', async () => {
+  expect(() => new AuxiliaryClient({ backend: () => 'x', defaultQuerySource: 'main' })).toThrow("must not be 'main'")
+
+  const client = new AuxiliaryClient({ backend: () => 'x', defaultQuerySource: 'speculation' })
+  expect(client.querySource).toBe('speculation')
+  await expect(client.call({
+    purpose: 'draft',
+    querySource: 'main',
+    messages: [{ role: 'user', content: 'hi' }],
+  })).rejects.toThrow("must not be 'main'")
+  await expect(client.call({ purpose: 'draft', messages: [] })).resolves.toMatchObject({
+    querySource: 'speculation',
+  })
 })
 
 test('backend failures propagate without a fallback response', async () => {

@@ -1,8 +1,24 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import type { QuerySource } from '../llms/client.js'
+
 export const DEFAULT_AUXILIARY_MODEL = 'claude-haiku-4-5'
 export const DEFAULT_AUXILIARY_MAX_TOKENS = 1_000
+
+/**
+ * Query source for a free-form auxiliary call that names no purpose of its own.
+ *
+ * Auxiliary work is never the user's turn, so the fallback must still be a
+ * housekeeping source: defaulting to the main loop would hide exactly the
+ * spend this dimension exists to expose.
+ */
+export const DEFAULT_AUXILIARY_QUERY_SOURCE: QuerySource = 'classification'
+
+/** Query source each built-in helper tags its own call with. */
+const SUMMARIZE_QUERY_SOURCE: QuerySource = 'compaction'
+const TITLE_QUERY_SOURCE: QuerySource = 'session_title'
+const EXTRACT_QUERY_SOURCE: QuerySource = 'memory_extraction'
 
 const SUMMARY_INSTRUCTION = [
   'You are a context-compaction assistant. Summarize the following conversation concisely,',
@@ -39,16 +55,25 @@ export interface AuxiliaryRequest {
   readonly messages: readonly AuxiliaryMessage[]
   readonly metadata?: Readonly<Record<string, unknown>>
   readonly purpose: string
+  /** Overrides the client's default source; built-in helpers set their own. */
+  readonly querySource?: QuerySource
   readonly temperature?: number
 }
 
-/** Fully resolved request delivered to an injected auxiliary backend. */
+/**
+ * Fully resolved request delivered to an injected auxiliary backend.
+ *
+ * `querySource` is required rather than optional: tagging happens during
+ * normalization, so a backend can forward it to the completion request and the
+ * cost ledger without every call site remembering to attach it.
+ */
 export interface AuxiliaryBackendRequest {
   readonly maxTokens: number
   readonly messages: readonly AuxiliaryMessage[]
   readonly metadata: Readonly<Record<string, unknown>>
   readonly model: string
   readonly purpose: string
+  readonly querySource: QuerySource
   readonly temperature: number
 }
 
@@ -67,6 +92,8 @@ export interface AuxiliaryResponse {
   readonly durationMs: number
   readonly model: string
   readonly purpose: string
+  /** Source the call was billed under, so callers can attribute cost without re-deriving it. */
+  readonly querySource: QuerySource
   readonly requestTokens: number
   readonly responseTokens: number
   readonly text: string
@@ -76,6 +103,8 @@ export interface AuxiliaryClientOptions {
   /** Required host-owned model invocation. This module never creates provider clients. */
   readonly backend: AuxiliaryBackend
   readonly defaultMaxTokens?: number
+  /** Source applied to calls that name none; defaults to a housekeeping source, never `main`. */
+  readonly defaultQuerySource?: QuerySource
   readonly model?: string
   /** Injectable monotonic clock for deterministic accounting and tests. */
   readonly monotonicNow?: () => number
@@ -84,6 +113,8 @@ export interface AuxiliaryClientOptions {
 export interface AuxiliarySummarizeOptions {
   readonly budgetTokens?: number
   readonly metadata?: Readonly<Record<string, unknown>>
+  /** Overrides the compaction default, e.g. `tool_result_summary` for shrinking one tool reply. */
+  readonly querySource?: QuerySource
   readonly temperature?: number
 }
 
@@ -91,6 +122,8 @@ export interface AuxiliaryExtractOptions {
   readonly instruction: string
   readonly maxTokens?: number
   readonly metadata?: Readonly<Record<string, unknown>>
+  /** Overrides the memory-extraction default for other extraction purposes. */
+  readonly querySource?: QuerySource
   readonly temperature?: number
 }
 
@@ -105,6 +138,8 @@ export class AuxiliaryClient {
   private readonly defaultMaxTokens: number
   private readonly monotonicNow: () => number
   readonly model: string
+  /** Source applied to calls that do not name one; always a housekeeping source. */
+  readonly querySource: QuerySource
 
   constructor(options: AuxiliaryClientOptions) {
     if (typeof options.backend !== 'function') {
@@ -113,12 +148,13 @@ export class AuxiliaryClient {
     this.backend = options.backend
     this.model = nonEmptyString(options.model ?? DEFAULT_AUXILIARY_MODEL, 'auxiliary model')
     this.defaultMaxTokens = tokenBudget(options.defaultMaxTokens ?? DEFAULT_AUXILIARY_MAX_TOKENS, 'defaultMaxTokens')
+    this.querySource = auxiliaryQuerySource(options.defaultQuerySource ?? DEFAULT_AUXILIARY_QUERY_SOURCE)
     this.monotonicNow = options.monotonicNow ?? (() => performance.now())
   }
 
   /** Dispatch a typed request through the injected backend. */
   async call(request: AuxiliaryRequest): Promise<AuxiliaryResponse> {
-    const backendRequest = normalizeRequest(request, this.model, this.defaultMaxTokens)
+    const backendRequest = normalizeRequest(request, this.model, this.defaultMaxTokens, this.querySource)
     const startedAt = this.monotonicNow()
     const output = await this.backend(backendRequest)
     const durationMs = Math.max(0, this.monotonicNow() - startedAt)
@@ -126,6 +162,7 @@ export class AuxiliaryClient {
     return Object.freeze({
       text: response.text,
       purpose: backendRequest.purpose,
+      querySource: backendRequest.querySource,
       model: this.model,
       durationMs,
       requestTokens: response.requestTokens,
@@ -140,6 +177,7 @@ export class AuxiliaryClient {
   ): Promise<string> {
     const response = await this.call({
       purpose: 'summarize',
+      querySource: options.querySource ?? SUMMARIZE_QUERY_SOURCE,
       messages: [
         { role: 'system', content: SUMMARY_INSTRUCTION },
         { role: 'user', content: renderMessages(messages) },
@@ -155,6 +193,7 @@ export class AuxiliaryClient {
   async title(firstTurns: readonly AuxiliaryMessage[]): Promise<string> {
     const response = await this.call({
       purpose: 'title',
+      querySource: TITLE_QUERY_SOURCE,
       messages: [
         { role: 'system', content: TITLE_INSTRUCTION },
         { role: 'user', content: renderMessages(firstTurns) },
@@ -172,6 +211,7 @@ export class AuxiliaryClient {
     }
     const response = await this.call({
       purpose: 'extract',
+      querySource: options.querySource ?? EXTRACT_QUERY_SOURCE,
       messages: [
         { role: 'system', content: instruction },
         { role: 'user', content: text },
@@ -188,11 +228,13 @@ function normalizeRequest(
   request: AuxiliaryRequest,
   model: string,
   defaultMaxTokens: number,
+  defaultQuerySource: QuerySource,
 ): AuxiliaryBackendRequest {
   if (!isRecord(request)) {
     throw new TypeError('auxiliary request must be an object')
   }
   const purpose = nonEmptyString(request.purpose, 'auxiliary request purpose')
+  const querySource = auxiliaryQuerySource(request.querySource ?? defaultQuerySource)
   if (!Array.isArray(request.messages)) {
     throw new TypeError('auxiliary request messages must be an array')
   }
@@ -204,12 +246,32 @@ function normalizeRequest(
     : nonNegativeFiniteNumber(request.temperature, 'auxiliary request temperature')
   return Object.freeze({
     purpose,
+    querySource,
     messages: Object.freeze(request.messages.map((message, index) => copyMessage(message, index))),
     maxTokens,
     temperature,
     metadata: copyMetadata(request.metadata),
     model,
   })
+}
+
+/**
+ * Reject the main-loop source on an auxiliary call.
+ *
+ * Auxiliary work is housekeeping by definition; billing it as `main` would
+ * hide it inside the user's turn, which is exactly the blindness the source
+ * dimension exists to remove. The literal is compared locally rather than via
+ * the llms helper so this module keeps its type-only dependency on the
+ * provider layer and never pulls provider adapters into its module graph.
+ */
+function auxiliaryQuerySource(value: QuerySource): QuerySource {
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new TypeError('auxiliary query source must be a non-empty string')
+  }
+  if (value === 'main') {
+    throw new RangeError("auxiliary query source must not be 'main'; auxiliary calls are housekeeping")
+  }
+  return value
 }
 
 function normalizeBackendOutput(output: AuxiliaryBackendOutput): {

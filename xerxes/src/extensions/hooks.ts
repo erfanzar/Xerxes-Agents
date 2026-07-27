@@ -3,6 +3,7 @@
 
 export const HOOK_POINTS = [
   'before_tool_call',
+  'tool_permission_check',
   'after_tool_call',
   'tool_result_persist',
   'bootstrap_files',
@@ -16,7 +17,27 @@ export type HookPoint = (typeof HOOK_POINTS)[number]
 export type HookPayload = Record<string, unknown>
 export type HookCallback = (payload: HookPayload) => unknown | Promise<unknown>
 
+/**
+ * Hook point at which an extension may refuse a tool call outright.
+ *
+ * `before_tool_call` cannot do this: it is a mutation hook, so its return value
+ * is threaded back as the tool's arguments and a throw is swallowed while the
+ * loop proceeds — an extension had no way to say no. This point is deliberately
+ * kept out of {@link MUTATION_HOOKS} so the collect-results branch returns the
+ * full ordered list of verdicts instead of one threaded value.
+ */
+export const TOOL_PERMISSION_HOOK = 'tool_permission_check'
+
 const MUTATION_HOOKS = new Set<HookPoint>(['before_tool_call', 'after_tool_call', 'tool_result_persist'])
+
+/**
+ * Points where a callback failure must produce a denial rather than silence.
+ *
+ * Everywhere else an isolated hook failure is the safe outcome. Here it is the
+ * dangerous one: a permission hook that throws has expressed no opinion, and
+ * treating "no opinion" as consent lets a crashing guard wave a call through.
+ */
+const FAIL_CLOSED_HOOKS = new Set<HookPoint>([TOOL_PERMISSION_HOOK])
 
 /** Safe hook dispatcher: observer failures are isolated from agent execution. */
 export class HookRunner {
@@ -70,6 +91,7 @@ export class HookRunner {
         if (result !== undefined && result !== null) results.push(result)
       } catch (error) {
         reportHookFailure(point, error)
+        if (FAIL_CLOSED_HOOKS.has(point)) results.push(denialFromFailure(point, error))
       }
     }
     return results
@@ -88,6 +110,77 @@ export class HookRunner {
     callbacks.splice(index, 1)
     return true
   }
+}
+
+/** One extension's opinion on whether a tool call may proceed. */
+export interface ToolPermissionVerdict {
+  readonly allow: boolean
+  /** Surfaced to the model and the user on a denial; ignored when the verdict allows. */
+  readonly reason?: string
+  /** Optional extension or rule identifier, so a denial can be traced to its author. */
+  readonly source?: string
+}
+
+/** Collapsed result of every registered permission hook for one tool call. */
+export interface ToolPermissionDecision {
+  readonly allowed: boolean
+  /** Every denial in registration order; a host may log all of them, not just the first. */
+  readonly denials: readonly ToolPermissionVerdict[]
+  /** Empty when allowed, otherwise the first denial's reason. */
+  readonly reason: string
+}
+
+/**
+ * Ask every registered permission hook whether one tool call may run.
+ *
+ * Resolution rule: no verdicts means allow (the point is opt-in, and an agent
+ * with no guards installed must keep working), any deny wins regardless of
+ * position, and a hook that throws or returns something that is not a verdict
+ * is counted as a denial. A guard that cannot answer is not a guard that
+ * consents — an exception thrown by a policy extension used to vanish into
+ * `reportHookFailure` and the call ran anyway.
+ */
+export async function resolveToolPermission(
+  hooks: HookRunner,
+  input: { readonly arguments?: HookPayload; readonly toolName: string },
+): Promise<ToolPermissionDecision> {
+  const payload: HookPayload = { toolName: input.toolName, arguments: input.arguments ?? {} }
+  const results = await hooks.run(TOOL_PERMISSION_HOOK, payload)
+  const denials: ToolPermissionVerdict[] = []
+  for (const result of Array.isArray(results) ? results : [results]) {
+    const verdict = asPermissionVerdict(result)
+    if (verdict === undefined) {
+      denials.push({
+        allow: false,
+        source: TOOL_PERMISSION_HOOK,
+        reason: `a ${TOOL_PERMISSION_HOOK} hook returned a value that is not a permission verdict`,
+      })
+      continue
+    }
+    if (!verdict.allow) denials.push(verdict)
+  }
+  const first = denials[0]
+  return {
+    denials,
+    allowed: first === undefined,
+    reason: first === undefined ? '' : first.reason?.trim() || `tool '${input.toolName}' denied by a permission hook`,
+  }
+}
+
+function asPermissionVerdict(value: unknown): ToolPermissionVerdict | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const candidate = value as { allow?: unknown; reason?: unknown; source?: unknown }
+  if (typeof candidate.allow !== 'boolean') return undefined
+  return {
+    allow: candidate.allow,
+    ...(typeof candidate.reason === 'string' ? { reason: candidate.reason } : {}),
+    ...(typeof candidate.source === 'string' ? { source: candidate.source } : {}),
+  }
+}
+
+function denialFromFailure(point: HookPoint, error: unknown): ToolPermissionVerdict {
+  const detail = error instanceof Error ? error.message : String(error)
+  return { allow: false, source: point, reason: `permission hook failed: ${detail}` }
 }
 
 /** Keep a hook failure observable without letting it prevent a tool call or persistence operation. */

@@ -44,7 +44,14 @@ export const SYSTEM_INFO_DEFINITION: ToolDefinition = {
   type: 'function',
   function: {
     name: 'SystemInfo',
-    description: 'Inspect local operating-system, CPU, memory, filesystem, network, and Bun process metadata.',
+    description: 'Report the host machine\'s own state: OS and kernel, CPU model and load average, RAM, free space, '
+      + 'network interface addresses, and this Bun process\'s pid, cwd, and heap. Read-only and entirely local — it '
+      + 'reads no workspace file and makes no network request, and there is nothing here that can be changed. '
+      + 'The default info_type="all" returns every group in one call; name a single group only to keep the result '
+      + 'small. The disk group measures the filesystem holding the daemon\'s working directory, not a path you '
+      + 'choose, and degrades to {available:false, error} rather than failing the call when statfs is refused. '
+      + 'load_average is always zeros on Windows. For installed tool versions, git state, or anything about other '
+      + 'processes, run exec_command instead — none of that is here.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -59,7 +66,15 @@ export const ENVIRONMENT_MANAGER_DEFINITION: ToolDefinition = {
   type: 'function',
   function: {
     name: 'EnvironmentManager',
-    description: 'Inspect non-sensitive process environment settings. Sensitive keys are hidden like unset keys.',
+    description: 'Read process environment variables through a fixed allowlist: BUN_VERSION, CI, COLORTERM, HOME, '
+      + 'LANG, NODE_ENV, PATH, PWD, SHELL, TERM, TMPDIR, TZ, USER, and any LC_* name. Every other variable — every '
+      + 'API key, token, and credential — answers exists:false with value null, byte-for-byte identical to a '
+      + 'genuinely unset variable, so that the response cannot be used to probe which secrets exist. Never report '
+      + 'that a variable is unset based on this tool; it can only confirm the allowlisted ones. operation="list" '
+      + 'reuses `key` as a prefix filter over that same allowlist, so an empty list means the prefix matched nothing '
+      + 'allowlisted, not that the environment is empty. There is no set or remove — this tool cannot mutate '
+      + 'anything; pass per-invocation variables to a child process through exec_command. The `redacted` field is '
+      + 'always false and carries no information.',
     parameters: {
       type: 'object',
       additionalProperties: false,

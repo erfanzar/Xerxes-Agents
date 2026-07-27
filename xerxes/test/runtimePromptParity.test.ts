@@ -53,13 +53,14 @@ test('bootstrap prompt retains guidance only for the supplied terminal, mode, an
   expect(prompt).toContain(
     'Do not final-answer in objective mode while acceptance criteria are unmet',
   )
-  expect(prompt).toContain(
-    'Oversized tool results are stored in project agent memory',
-  )
-  expect(prompt).toContain(
-    '`[Large tool result stored outside model context]` as a valid tool result',
-  )
-  expect(prompt).toContain('Read stored-result pointers with agent_memory_read')
+  // These assertions previously pinned a claim the runtime did not honor —
+  // nothing constructed the store, so every agent was told its large results
+  // were preserved when they were simply sent whole. The prompt now describes
+  // the envelope the turn runner actually emits.
+  expect(prompt).toContain('`<persisted-output>` envelope carrying a bounded preview')
+  expect(prompt).toContain('absolute path of the full output on disk')
+  expect(prompt).toContain('successful result, not a failure')
+  expect(prompt).not.toContain('stored in project agent memory')
   expect(prompt).not.toContain('apply_patch')
 })
 

@@ -7,6 +7,7 @@ import { type QueuedMessage, queuedMessage, queuedUserMessage } from '../domain/
 import { completionToApplyOnSubmit, looksLikeSlashCommand } from '../domain/slash.js'
 import type { GatewayClient } from '../gatewayClient.js'
 import type { PromptSubmitResponse, SessionSteerResponse, ShellExecResponse } from '../gatewayTypes.js'
+import { pasteTokenHash, readPasteSnippet } from '../lib/pasteStore.js'
 import { asRpcResult } from '../lib/rpc.js'
 import { hasInterpolation, INTERPOLATION_RE } from '../protocol/interpolation.js'
 import { PASTE_SNIPPET_RE } from '../protocol/paste.js'
@@ -22,7 +23,15 @@ const SESSION_BUSY_RE = /session busy|waiting for model response/i
 
 const isSessionBusyError = (e: unknown) => e instanceof Error && SESSION_BUSY_RE.test(e.message)
 
-const expandSnips = (snips: PasteSnippet[]) => {
+/**
+ * Resolve collapsed paste tokens back to their text.
+ *
+ * Live composer snippets win because they need no disk read, but a token whose
+ * snippet is gone — recalled from history, replayed from the queue, evicted by
+ * `trimSnips` — still resolves through the hash stamped inside the token. Only
+ * a token with neither backing survives into the prompt verbatim.
+ */
+export const expandSnips = (snips: PasteSnippet[]) => {
   const byLabel = new Map<string, string[]>()
 
   for (const { label, text } of snips) {
@@ -30,7 +39,18 @@ const expandSnips = (snips: PasteSnippet[]) => {
     hit ? hit.push(text) : byLabel.set(label, [text])
   }
 
-  return (value: string) => value.replace(PASTE_SNIPPET_RE, tok => byLabel.get(tok)?.shift() ?? tok)
+  return (value: string) =>
+    value.replace(PASTE_SNIPPET_RE, tok => {
+      const live = byLabel.get(tok)?.shift()
+
+      if (live !== undefined) {
+        return live
+      }
+
+      const hash = pasteTokenHash(tok)
+
+      return (hash ? readPasteSnippet(hash) : null) ?? tok
+    })
 }
 
 const spliceMatches = (text: string, matches: RegExpMatchArray[], results: string[]) =>

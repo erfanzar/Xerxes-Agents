@@ -356,10 +356,14 @@ function backgroundLuminance(raw: string): null | number {
   return (0.2126 * rgb[0]! + 0.7152 * rgb[1]! + 0.0722 * rgb[2]!) / 255
 }
 
-export function detectLightMode(
-  env: NodeJS.ProcessEnv = process.env,
-  lightDefaultTermPrograms: ReadonlySet<string> = LIGHT_DEFAULT_TERM_PROGRAMS
-): boolean {
+/**
+ * The user's explicit palette choice, or null when nothing was pinned.
+ *
+ * Only the XERXES_TUI_* variables count as explicit: they are set deliberately
+ * and must outrank the terminal's own answer. COLORFGBG and TERM_PROGRAM are
+ * guesses, so the live probe is allowed to overrule them.
+ */
+export function explicitLightMode(env: NodeJS.ProcessEnv = process.env): boolean | null {
   const lightFlag = (env.XERXES_TUI_LIGHT ?? '').trim().toLowerCase()
   if (TRUE_RE.test(lightFlag)) {
     return true
@@ -377,6 +381,17 @@ export function detectLightMode(
   const bgHint = backgroundLuminance(env.XERXES_TUI_BACKGROUND ?? '')
   if (bgHint !== null) {
     return bgHint >= LUMA_LIGHT_THRESHOLD
+  }
+  return null
+}
+
+export function detectLightMode(
+  env: NodeJS.ProcessEnv = process.env,
+  lightDefaultTermPrograms: ReadonlySet<string> = LIGHT_DEFAULT_TERM_PROGRAMS
+): boolean {
+  const pinned = explicitLightMode(env)
+  if (pinned !== null) {
+    return pinned
   }
   const colorfgbg = (env.COLORFGBG ?? '').trim()
   if (colorfgbg) {
@@ -419,13 +434,120 @@ export function normalizeThemeForAnsiLightTerminal(
   return { ...theme, color }
 }
 
+const themeForLightMode = (isLight: boolean, env: NodeJS.ProcessEnv = process.env): Theme =>
+  normalizeThemeForAnsiLightTerminal(isLight ? LIGHT_THEME : DARK_THEME, env, isLight)
+
 const DEFAULT_LIGHT_MODE = detectLightMode()
 
-export const DEFAULT_THEME: Theme = normalizeThemeForAnsiLightTerminal(
-  DEFAULT_LIGHT_MODE ? LIGHT_THEME : DARK_THEME,
-  process.env,
-  DEFAULT_LIGHT_MODE
-)
+/**
+ * Pre-probe seed. The environment can only be sniffed, so this is the palette
+ * used for the frames rendered before the terminal answers the OSC background
+ * query; `subscribeTerminalThemeMode` replaces it with the real answer.
+ */
+export const DEFAULT_THEME: Theme = themeForLightMode(DEFAULT_LIGHT_MODE)
+
+export type TerminalThemeMode = 'dark' | 'light'
+
+/**
+ * The renderer's live theme-mode surface (structurally satisfied by OpenTUI's
+ * `CliRenderer`), kept minimal so this module never imports the renderer.
+ */
+export interface TerminalThemeModeSource {
+  on(event: 'theme_mode', listener: (mode: TerminalThemeMode) => void): unknown
+  off(event: 'theme_mode', listener: (mode: TerminalThemeMode) => void): unknown
+  readonly themeMode: TerminalThemeMode | null
+  waitForThemeMode(timeoutMs?: number): Promise<TerminalThemeMode | null>
+}
+
+const THEME_PROBE_TIMEOUT_MS = 250
+
+let liveLightMode = DEFAULT_LIGHT_MODE
+let liveBaseTheme = DEFAULT_THEME
+
+/** The palette every later derivation (skins, mode overlays) builds on. */
+export const currentBaseTheme = (): Theme => liveBaseTheme
+
+export const currentLightMode = (): boolean => liveLightMode
+
+/**
+ * Adopt a terminal-reported light/dark mode. Returns the new base theme when
+ * the mode actually flipped, and null when nothing changed — so callers never
+ * push a redundant re-render.
+ */
+export function applyTerminalThemeMode(mode: TerminalThemeMode, env: NodeJS.ProcessEnv = process.env): null | Theme {
+  const isLight = mode === 'light'
+
+  if (isLight === liveLightMode) {
+    return null
+  }
+
+  liveLightMode = isLight
+  liveBaseTheme = themeForLightMode(isLight, env)
+
+  return liveBaseTheme
+}
+
+/** Re-seed from the environment. Exists so tests start from a known palette. */
+export function resetTerminalThemeMode(env: NodeJS.ProcessEnv = process.env): Theme {
+  liveLightMode = detectLightMode(env)
+  liveBaseTheme = themeForLightMode(liveLightMode, env)
+
+  return liveBaseTheme
+}
+
+/**
+ * Consume the renderer's probed background colour and keep following it.
+ *
+ * Without this the palette is whatever the environment implied at module load,
+ * frozen for the process: switching the terminal to a light profile mid-session
+ * leaves dark-on-light text unreadable until restart. `apply` receives the new
+ * base theme; the returned function unsubscribes.
+ */
+export function subscribeTerminalThemeMode(
+  source: TerminalThemeModeSource,
+  apply: (theme: Theme) => void,
+  { env = process.env, probeTimeoutMs = THEME_PROBE_TIMEOUT_MS }: TerminalThemeModeOptions = {}
+): () => void {
+  // An explicitly pinned palette is a user decision; the probe must not fight it.
+  if (explicitLightMode(env) !== null) {
+    return () => void 0
+  }
+
+  const adopt = (mode: null | TerminalThemeMode) => {
+    if (!mode) {
+      return
+    }
+
+    const next = applyTerminalThemeMode(mode, env)
+
+    if (next) {
+      apply(next)
+    }
+  }
+
+  const onThemeMode = (mode: TerminalThemeMode) => adopt(mode)
+
+  source.on('theme_mode', onThemeMode)
+
+  const probed = source.themeMode
+
+  if (probed) {
+    adopt(probed)
+  } else {
+    // The query may still be in flight when the app mounts; adopting late is
+    // fine because `applyTerminalThemeMode` is idempotent per mode.
+    void Promise.resolve(source.waitForThemeMode(probeTimeoutMs)).then(adopt, () => void 0)
+  }
+
+  return () => {
+    source.off('theme_mode', onThemeMode)
+  }
+}
+
+export interface TerminalThemeModeOptions {
+  env?: NodeJS.ProcessEnv
+  probeTimeoutMs?: number
+}
 
 export type InteractionPaletteMode = 'code' | 'objective' | 'plan' | 'researcher'
 
@@ -498,7 +620,9 @@ export function fromSkin(
   toolPrefix = '',
   helpHeader = ''
 ): Theme {
-  const d = DEFAULT_THEME
+  // Live base, not the boot seed: a skin merged after a theme flip must inherit
+  // the palette the terminal is actually showing.
+  const d = currentBaseTheme()
   const r = (k: string) => roles[k]
   const primary = r('primary') ?? d.color.primary
   const accent = r('accent') ?? d.color.accent
@@ -559,6 +683,6 @@ export function fromSkin(
       bannerHero
     },
     process.env,
-    DEFAULT_LIGHT_MODE
+    currentLightMode()
   )
 }

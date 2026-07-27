@@ -4,7 +4,13 @@
 import { readdir } from 'node:fs/promises'
 import { relative, resolve } from 'node:path'
 
-export const PROJECT_FILE_INDEX_LIMIT = 5_000
+/**
+ * Ceiling on indexed paths. Above this a real file is simply unfindable by
+ * `@`-mention, and the cut is alphabetical, so it silently swallows whole
+ * subtrees near the end of the alphabet. Raised now that building the index no
+ * longer costs one filesystem stat per entry.
+ */
+export const PROJECT_FILE_INDEX_LIMIT = 50_000
 export const PROJECT_FILE_MENTION_LIMIT = 50
 export const PROJECT_FILE_INDEX_CACHE_TTL_MS = 30_000
 
@@ -156,13 +162,29 @@ export function searchProjectFileIndex(
 
   for (const file of index.files) {
     const normalizedPath = file.relativePath.toLowerCase()
-    if (!normalizedPath.includes(normalizedQuery)) continue
     const normalizedBasename = file.basename.toLowerCase()
-    scored.push({
-      file,
-      normalizedPath,
-      rank: matchRank(normalizedPath, normalizedBasename, normalizedQuery),
-    })
+    if (normalizedPath.includes(normalizedQuery)) {
+      scored.push({
+        file,
+        normalizedPath,
+        rank: matchRank(normalizedPath, normalizedBasename, normalizedQuery),
+      })
+      continue
+    }
+    // Substring alone cannot answer `@tRunner` for `turnRunner.ts`, which is how
+    // people actually type a path they already know. Subsequence matches rank
+    // strictly below every substring tier, so nothing that used to be offered
+    // moves and the fuzzy hits only fill the remaining slots.
+    const inBasename = subsequenceScore(normalizedBasename, normalizedQuery)
+    const fuzzy = inBasename === undefined
+      ? subsequenceScore(normalizedPath, normalizedQuery)
+      : inBasename
+    if (fuzzy === undefined) continue
+    // A hit spread across directory separators is almost never what was meant:
+    // `docs/t/r/unner.md` technically contains `trunner`, but nobody typing it
+    // wanted that file. Path hits sit in a band strictly below basename hits.
+    const band = inBasename === undefined ? FUZZY_PATH_RANK_BASE : FUZZY_RANK_BASE
+    scored.push({ file, normalizedPath, rank: band + fuzzy })
   }
 
   scored.sort(compareScoredFiles)
@@ -205,6 +227,11 @@ async function listGitProjectFiles(
   ])
   if (output === undefined) return undefined
 
+  // Tracked-but-deleted paths must not be offered, but proving that with one
+  // `exists()` per entry cost a serial filesystem round-trip per file every
+  // time the 30s index expired — ~1,300 of them on this repo. `ls-files
+  // --deleted` answers the same question for the whole tree in one process.
+  const deleted = await deletedPaths(gitRoot)
   const files: ProjectFileMention[] = []
   const seen = new Set<string>()
   for (const rawPath of output.split('\0')) {
@@ -214,11 +241,17 @@ async function listGitProjectFiles(
     if (isBinaryPath(relativePath)) continue
     if (seen.has(relativePath)) continue
     seen.add(relativePath)
-    const file = projectFile(gitRoot, relativePath)
-    if (!await Bun.file(file.absolutePath).exists()) continue
-    files.push(file)
+    if (deleted.has(relativePath)) continue
+    files.push(projectFile(gitRoot, relativePath))
   }
   return files
+}
+
+/** Paths git still tracks whose working-tree copy is gone. */
+async function deletedPaths(gitRoot: string): Promise<ReadonlySet<string>> {
+  const output = await runGit(gitRoot, ['ls-files', '--deleted', '-z'])
+  if (!output) return new Set()
+  return new Set(output.split('\0').map(normalizeRelativePath).filter(Boolean))
 }
 
 async function runGit(cwd: string, args: readonly string[]): Promise<string | undefined> {
@@ -299,6 +332,43 @@ function normalizeQuery(query: string): string {
 function isBinaryPath(path: string): boolean {
   const extension = path.lastIndexOf('.')
   return extension >= 0 && BINARY_EXTENSIONS.has(path.slice(extension).toLowerCase())
+}
+
+/**
+ * Floor for subsequence hits. Above every substring tier (0-4) so an exact or
+ * prefix match is never displaced by a fuzzy one, whatever its density.
+ */
+const FUZZY_RANK_BASE = 10
+/** Floor for a subsequence found only by crossing directory separators. */
+const FUZZY_PATH_RANK_BASE = 1_000
+
+/**
+ * Score a subsequence match, lower being better, or undefined when the query's
+ * characters do not appear in order.
+ *
+ * Density is what makes a match feel right: `tRunner` should prefer
+ * `turnRunner.ts` over `theQuickBrownRunner.ts`, and both over a path where the
+ * same letters are scattered across directory names. The span actually consumed
+ * is therefore the score, with a small bonus for starting at the beginning.
+ */
+function subsequenceScore(haystack: string, query: string): number | undefined {
+  if (!query) return undefined
+  let cursor = 0
+  let first = -1
+  let consecutive = 0
+  let previous = -2
+  for (const character of query) {
+    const found = haystack.indexOf(character, cursor)
+    if (found === -1) return undefined
+    if (first === -1) first = found
+    if (found === previous + 1) consecutive += 1
+    previous = found
+    cursor = found + 1
+  }
+  // Span is the cost, contiguity the discount: `tRunner` should land on
+  // `turnRunner.ts`, where five of its characters are adjacent, ahead of a name
+  // where the same letters are merely present in order.
+  return Math.max(0, cursor - first - consecutive) + (first === 0 ? 0 : 1)
 }
 
 function matchRank(path: string, basename: string, query: string): number {

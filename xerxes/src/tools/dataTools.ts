@@ -20,7 +20,15 @@ export const JSON_PROCESSOR_DEFINITION: ToolDefinition = {
   type: 'function',
   function: {
     name: 'JSONProcessor',
-    description: 'Load, save, validate, query, and inspect JSON inside the current workspace.',
+    description: 'Five unrelated JSON operations, only two of which touch disk. load parses one workspace file; save '
+      + 'writes `data` to file_path, creating parent directories and refusing an existing path unless '
+      + 'overwrite=true (pretty, the default, means two-space indent plus a trailing newline). validate, query, and '
+      + 'transform ignore file_path entirely and act on the inline `data` argument — query does NOT read a file, so '
+      + 'load first and pass the result back in. query walks dot keys and numeric brackets only, as in '
+      + 'users[0].name: no wildcards, filters, slices, or negative indices, and a missing key or out-of-range index '
+      + 'is an error rather than a null result. validate can only detect malformed JSON when `data` is a string; '
+      + 'any other value was already parsed before it arrived, so valid:true is vacuous there. transform transforms '
+      + 'nothing — it reports the value\'s type, length, and top-level keys, plus a formatted copy when pretty.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -41,7 +49,18 @@ export const CSV_PROCESSOR_DEFINITION: ToolDefinition = {
   type: 'function',
   function: {
     name: 'CSVProcessor',
-    description: 'Read, write, analyze, and convert CSV files inside the current workspace.',
+    description: 'Whole-file CSV in and out of the workspace with RFC-4180 quoting. The file is parsed entirely in '
+      + 'memory — there is no streaming — and every cell comes back as a string: numbers, booleans, and '
+      + 'empty-versus-absent are never inferred, so do the arithmetic and the comparisons yourself. read returns '
+      + 'header-keyed records under `data`, convert returns the same records under `json`. analyze ignores '
+      + 'has_header, headers, and max_rows and always treats row 0 as the header row, so its total_rows counts that '
+      + 'row too and sample_data is the first five data rows. `headers` is honoured only when has_header=false; '
+      + 'with a header row present the file wins and the value you passed is silently discarded. max_rows=0 means '
+      + 'unlimited, not zero. write refuses an existing file unless overwrite=true, derives columns from the union '
+      + 'of every object key unless `headers` is given — supplied headers both order and select columns, silently '
+      + 'dropping fields not listed — serializes non-string values as JSON, writes null and missing as empty, and '
+      + 'always emits LF endings with a trailing newline. delimiter must be exactly one character and cannot be a '
+      + 'quote or a newline. One unbalanced quote fails the entire parse, not just its row.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -64,7 +83,18 @@ export const TEXT_PROCESSOR_DEFINITION: ToolDefinition = {
   type: 'function',
   function: {
     name: 'TextProcessor',
-    description: 'Compute text statistics and apply safe JavaScript regular-expression transformations.',
+    description: 'Statistics and regex work on the inline `text` argument only — it never opens a file, so the '
+      + 'content has to be pasted in and the whole subject counts against a '
+      + `${MAX_REGEX_SUBJECT_CHARACTERS}-character ceiling for the regex operations (exceeding it is an error, `
+      + 'because a catastrophic backtrack would freeze the single-threaded daemon and a synchronous regex cannot be '
+      + 'timed out). Patterns are JavaScript RegExp compiled with /u and always /g: unicode mode rejects some '
+      + 'escapes that are legal elsewhere, and case_sensitive=false merely adds /i. extract accepts four shortcut '
+      + 'names in place of a pattern — emails, urls, phones, numbers — and returns whole matches only, never '
+      + 'capture groups. replace expands $1, $&, and $$ inside `replacement`, so a literal dollar must be written '
+      + '$$. split without a pattern splits on whitespace runs. format overloads `pattern` as the format name '
+      + '(title, upper, lower, sentence, no_punctuation) and returns the text unchanged for anything else, which '
+      + 'looks exactly like a successful no-op. stats counts words as runs of letters, digits, and underscore, and '
+      + 'measures length in code points rather than UTF-16 units.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -84,7 +114,16 @@ export const DATA_CONVERTER_DEFINITION: ToolDefinition = {
   type: 'function',
   function: {
     name: 'DataConverter',
-    description: 'Convert JSON, UTF-8 text, Base64, and hexadecimal data without external dependencies.',
+    description: 'Re-encode or digest one value: from_format decodes the input, to_format encodes the result. '
+      + 'Everything routes through a JavaScript string, so this is text-safe but not byte-safe — decoding base64 or '
+      + 'hex whose bytes are not valid text in `encoding` substitutes replacement characters and the original bytes '
+      + 'are then unrecoverable. Use encoding="latin1" for a lossless byte round trip; utf-8 (the default), '
+      + 'utf16le, and ascii are the other choices and nothing else is accepted. Non-string inputs are '
+      + 'JSON.stringify-d before encoding, so from_format="json" with to_format="base64" encodes the compact JSON '
+      + 'text and not any binary payload. base64 input is not validated: stray characters are dropped and you get a '
+      + 'shorter but plausible-looking result rather than an error, whereas hex input must be even-length hex. '
+      + 'to_format="hash" returns all four digests at once under `output` — md5, sha1, sha256, sha512 — which suits '
+      + 'checksum matching, not security decisions. to_format="json" only pretty-prints.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -103,7 +142,16 @@ export const DATE_TIME_PROCESSOR_DEFINITION: ToolDefinition = {
   type: 'function',
   function: {
     name: 'DateTimeProcessor',
-    description: 'Parse, format, offset, and inspect dates with a dependency-free ISO and strftime subset.',
+    description: 'Dependency-free date math with one trap that dominates the rest: `timezone` only changes how a '
+      + 'result is rendered, never how input is parsed. Bare dates (2026-07-27, 2026/07/27) and every fmt-driven '
+      + 'parse are interpreted in the host machine\'s local zone, so a UTC-looking answer can be off by the host '
+      + 'offset — put an explicit offset or a Z in date_string when it matters. dd/mm/yyyy is read as '
+      + 'day/month/year, so 03/04/2026 is 3 April; US m/d/yyyy silently misparses, or throws once the day exceeds '
+      + '12. Timestamps in and out are seconds, not milliseconds, and the `iso` field is always UTC while its '
+      + 'siblings are rendered in `timezone`. parse understands only %Y %m %d %H %M %S; format also understands %y '
+      + '%I %p %B %b %A %a %% and passes any other percent directive through unchanged instead of erroring. delta '
+      + 'adds only days, hours, and minutes — never months or years — and works in absolute time, so a span '
+      + 'crossing a DST boundary moves the wall clock by an hour.',
     parameters: {
       type: 'object',
       additionalProperties: false,

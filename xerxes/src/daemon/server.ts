@@ -1,7 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { mkdir, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer, type Server, type Socket } from "node:net";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -12,10 +12,6 @@ import {
   resolveCommand,
   type CommandDefinition,
 } from "../bridge/commands.js";
-import {
-  createCompactionAgent,
-  type CompactionCompletionPort,
-} from "../agents/compactionAgent.js";
 import {
   listAgentDefinitions,
   type AgentDefinition,
@@ -42,6 +38,11 @@ import {
 } from "../channels/types.js";
 import { routeOutput } from "../cron/delivery.js";
 import { CronJob, JobStore, nextFireAt } from "../cron/jobs.js";
+import {
+  acquireCronLease,
+  readCronLease,
+  releaseCronLease,
+} from "../cron/lease.js";
 import { CronScheduler } from "../cron/scheduler.js";
 import {
   defaultSkillDiscoveryDirectories,
@@ -65,6 +66,7 @@ import {
 } from "../protocol/jsonRpc.js";
 import {
   calcCost,
+  effectiveContextLimit,
   getContextLimit,
 } from "../llms/providerRegistry.js";
 import {
@@ -73,7 +75,6 @@ import {
 } from "../llms/samplingDefaults.js";
 import {
   closeLlmClient,
-  completeLlm,
   createLlmClient,
   requireConfiguredModel,
   type LlmClient,
@@ -94,8 +95,25 @@ import {
 } from "../memory/agentMemory.js";
 import { MCPManager } from "../mcp/manager.js";
 import { BrowserManager } from "../operators/browser.js";
+import { looksLikeSessionId } from "../session/daemonTranscript.js";
+import {
+  describeTranscriptRepair,
+  summarizeTranscriptRepair,
+} from "../session/resumeRepair.js";
 import { SnapshotManager, type SnapshotRecord } from "../session/snapshots.js";
+import {
+  TranscriptSearchIndex,
+  type TranscriptSearchHit,
+} from "../session/transcriptSearch.js";
 import { processAtMentions } from "./atMentions.js";
+import {
+  compactMessagesIfNeeded,
+  compactionCompletionPort,
+  compactionThresholdTokens,
+  DEFAULT_AUTO_COMPACT_THRESHOLD,
+  normalizeCompactionThreshold,
+  precompactArchivePathFor,
+} from "./compactionRunner.js";
 import { validateTurnImages, type TurnImage } from "./images.js";
 import { DaemonInteractionBoard } from "./interactions.js";
 import {
@@ -135,6 +153,73 @@ export const MIGRATED_ERROR =
 
 /** Matches the WebSocket gateway default so both transports cap inbound frames. */
 const DEFAULT_MAX_SOCKET_FRAME_BYTES = 16 * 1024 * 1024;
+
+/**
+ * Compaction mechanics — thresholds, summary budgets, retry policy and the
+ * pre-compaction archive — live in `compactionRunner` so delegated children
+ * run the identical routine. `compactionCompletionPort` is re-exported
+ * because hosts import it from this module.
+ */
+export { compactionCompletionPort } from "./compactionRunner.js";
+
+/**
+ * Consecutive auto-compaction failures after which the session stops trying.
+ *
+ * Nothing about a failed compaction is persisted, so the next turn re-evaluates
+ * the identical condition and pays for another full-window summarization call —
+ * every turn, forever. Several of those failures surface as "Nothing to
+ * compact", which reads as benign.
+ */
+const MAX_AUTO_COMPACT_FAILURES = 3;
+
+/**
+ * Fraction of the prompt budget at which a daemon with auto-compaction turned
+ * off says so. Disabling the threshold is a valid choice; walking into a
+ * provider 400 without one word of warning is not.
+ */
+const AUTO_COMPACT_DISABLED_WARNING_FRACTION = 0.9;
+
+/**
+ * How long shutdown waits for in-flight turns before persisting anyway. A
+ * generator that never settles is a bug; losing the transcript because of it
+ * is a worse one.
+ */
+const TURN_DRAIN_TIMEOUT_MS = 2_000;
+
+/**
+ * Snapshots retained per workspace. A per-turn snapshot makes the shadow repo
+ * grow with the conversation, so the daemon prunes it once on start rather
+ * than letting a long-lived project accumulate history forever.
+ */
+const DEFAULT_SNAPSHOT_RETENTION = 200;
+
+/** Transcripts read from disk the first time a cross-session search runs. */
+const SEARCH_HYDRATION_SESSION_LIMIT = 200;
+/** Rows one `/search` renders; the RPC returns the same bounded set. */
+const SEARCH_RESULT_LIMIT = 20;
+
+/** Resolve when `work` settles or the timer fires, whichever comes first. */
+async function raceWithTimeout(
+  work: Promise<unknown>,
+  timeoutMs: number,
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      work.then(
+        () => undefined,
+        () => undefined,
+      ),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, timeoutMs);
+        // The timer must never be the reason the process stays alive.
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
 
 interface DaemonSlashCommand {
   readonly aliases: readonly string[];
@@ -248,6 +333,12 @@ const DAEMON_EXTENSION_COMMANDS: readonly DaemonSlashCommand[] = Object.freeze([
     aliases: Object.freeze([]),
     category: "daemon",
     description: "Toggle ultra mode",
+  }),
+  Object.freeze({
+    name: "search",
+    aliases: Object.freeze([]),
+    category: "daemon",
+    description: "Search every saved transcript",
   }),
 ]);
 
@@ -387,6 +478,20 @@ export interface DaemonToolCatalogPort {
 export interface DaemonServerOptions {
   /** Resolve real native agent definitions for `/agents`; injectable for embedding hosts. */
   readonly agentDefinitionLoader?: (cwd: string) => readonly AgentDefinition[];
+  /**
+   * Capture a workspace snapshot before every turn, so an agent-made mess is
+   * recoverable without the user having remembered to run `/snapshot`.
+   *
+   * Opt-in: each snapshot spawns git over the whole workspace, which a host
+   * embedding the daemon in a large or non-git tree may not want per turn.
+   */
+  readonly autoSnapshotTurns?: boolean;
+  /**
+   * Context-usage fraction that triggers provider-backed auto-compaction
+   * before a turn is submitted. Defaults to 0.9; a runtime setting of
+   * `auto_compact_threshold` overrides it per daemon, and 0 disables it.
+   */
+  readonly autoCompactThreshold?: number;
   /** Browser state shared with native operator tools; `/browser` never invents a browser backend. */
   readonly browserManager?: BrowserManager;
   /** Host-owned adapter registry. No channel transport is synthesized when absent. */
@@ -395,8 +500,22 @@ export interface DaemonServerOptions {
   readonly channelWebhook?: Omit<ChannelWebhookServerOptions, "manager">;
   /** Directory used to archive every automatic and manually-run cron result. */
   readonly cronArchiveDirectory?: string;
+  /**
+   * Exclusive-lease file deciding which daemon fires cron jobs. Every project's
+   * daemon shares one job store, so without the lease each of them runs every
+   * job. Defaults to a path under the Xerxes home.
+   */
+  readonly cronLeasePath?: string;
+  /** How often a daemon refused the cron lease re-probes for it. Defaults to a minute. */
+  readonly cronLeaseRetryInterval?: number;
   /** Testable native scheduler cadence; production defaults to 30 seconds. */
   readonly cronPollInterval?: number;
+  /**
+   * Install process-level `uncaughtException` / `unhandledRejection` handlers
+   * that flush sessions before exiting. Off by default: only a host that owns
+   * the whole process may claim those handlers.
+   */
+  readonly crashHandlers?: boolean;
   /** Shared approval/question state passed to the native agent turn runner. */
   readonly interactions?: DaemonInteractionBoard;
   /** Opens the persistent native cron job store used by `/cron list`. */
@@ -417,6 +536,13 @@ export interface DaemonServerOptions {
   /** Optional host-owned model catalogue lookup for interactive `/provider` setup. */
   readonly providerModelDiscovery?: ProviderModelDiscoveryPort;
   readonly runtime?: DaemonRuntime;
+  /**
+   * Directory holding persisted transcripts, where compaction archives the
+   * history it is about to replace. Must match the runtime's transcript
+   * directory for archives to land beside their session; defaults to the
+   * daemon's own session directory, which is what the production host uses.
+   */
+  readonly sessionArchiveDirectory?: string;
   /** Directories re-scanned by `/skills` and `/reload`; defaults to all native discovery roots. */
   readonly skillDirectories?: readonly string[];
   /** Writable user-owned root used by the interactive `/skill-create` flow. */
@@ -429,6 +555,8 @@ export interface DaemonServerOptions {
   readonly snapshotManagerFactory?: (
     workspaceDirectory: string,
   ) => SnapshotManager;
+  /** Snapshots retained per workspace when the store is pruned on start. */
+  readonly snapshotRetention?: number;
   readonly socketPath: string;
   /** Max buffered inbound bytes per Unix connection before the client is dropped. */
   readonly maxSocketFrameBytes?: number;
@@ -463,15 +591,28 @@ export class DaemonServer {
     string,
     DaemonTransportConnection
   >();
+  private readonly autoCompactions = new Map<string, Promise<void>>();
+  /** Consecutive auto-compaction failures per session; reset by any deliberate history change. */
+  private readonly autoCompactFailures = new Map<string, number>();
+  /** Sessions already told that auto-compaction is off while their window fills. */
+  private readonly autoCompactDisabledWarned = new Set<string>();
+  private readonly autoCompactThreshold: number;
   private readonly browserManager: BrowserManager;
   private readonly channelManager: ChannelManager | undefined;
   private readonly channelWebhookServer: ChannelWebhookServer | undefined;
   private readonly connections = new Set<Connection>();
   private readonly cronArchiveDirectory: string;
+  private cronLeaseProbe: ReturnType<typeof setInterval> | undefined;
+  private readonly cronLeaseOwnerKey: string;
+  private readonly cronLeasePath: string;
+  private cronLeaseRefusalLogged = false;
+  private readonly cronLeaseRetryInterval: number;
   private readonly cronScheduler: CronScheduler;
   private cronSchedulerStarted = false;
   private readonly cronStore: JobStore;
   private readonly cronStoreFactory: () => JobStore;
+  private crashHandler: ((error: unknown) => void) | undefined;
+  private readonly crashHandlersEnabled: boolean;
   private readonly interactions: DaemonInteractionBoard;
   private readonly inFlightTurns = new Set<Promise<void>>();
   private readonly mcpManager: MCPManager | undefined;
@@ -497,6 +638,9 @@ export class DaemonServer {
   >();
   private readonly runtime: DaemonRuntime;
   private runtimeShutdown = false;
+  private readonly sessionArchiveDirectory: string;
+  /** True when a host named the transcript directory, so archives are unconditional. */
+  private readonly sessionArchiveDirectoryConfigured: boolean;
   private readonly skillDirectories: readonly string[] | undefined;
   private readonly skillRegistry: SkillRegistry;
   private readonly skillCreates = new Map<
@@ -508,8 +652,13 @@ export class DaemonServer {
   private readonly snapshotManagerFactory: (
     workspaceDirectory: string,
   ) => SnapshotManager;
+  private readonly autoSnapshotTurns: boolean;
+  private readonly snapshotRetention: number;
   private server: Server | undefined;
   private readonly socketPath: string;
+  private readonly transcriptSearch = new TranscriptSearchIndex();
+  /** One cold read of the transcript directory, shared by concurrent searches. */
+  private transcriptSearchHydration: Promise<void> | undefined;
   private readonly toolCatalog: DaemonToolCatalogPort | undefined;
   private readonly turnOwners = new Map<string, DaemonTransportConnection>();
   private readonly uiControl: DaemonUiControlPort | undefined;
@@ -519,6 +668,9 @@ export class DaemonServer {
   constructor(options: DaemonServerOptions) {
     this.socketPath = options.socketPath;
     this.pidPath = options.pidPath;
+    this.autoCompactThreshold = normalizeCompactionThreshold(
+      options.autoCompactThreshold ?? DEFAULT_AUTO_COMPACT_THRESHOLD,
+    );
     this.channelManager = options.channelManager;
     this.channelWebhookServer =
       options.channelManager && options.channelWebhook
@@ -528,14 +680,30 @@ export class DaemonServer {
           })
         : undefined;
     this.runtime = options.runtime ?? new InMemoryDaemonRuntime();
+    this.sessionArchiveDirectory =
+      options.sessionArchiveDirectory ?? join(xerxesHome(), "sessions");
+    this.sessionArchiveDirectoryConfigured =
+      options.sessionArchiveDirectory !== undefined;
     this.agentDefinitionLoader =
       options.agentDefinitionLoader ?? ((cwd) => listAgentDefinitions({ cwd }));
     this.interactions = options.interactions ?? new DaemonInteractionBoard();
     this.maxSocketFrameBytes =
       options.maxSocketFrameBytes ?? DEFAULT_MAX_SOCKET_FRAME_BYTES;
+    this.crashHandlersEnabled = options.crashHandlers === true;
+    this.cronLeaseOwnerKey = resolveProjectDirectory(process.cwd());
+    this.cronLeasePath = resolve(
+      options.cronLeasePath ?? join(xerxesHome(), "cron", "scheduler.lease"),
+    );
+    this.cronLeaseRetryInterval = options.cronLeaseRetryInterval ?? 60_000;
     this.cronStoreFactory =
       options.cronStoreFactory ??
-      (() => new JobStore(join(xerxesHome(), "cron", "jobs.json")));
+      // Stamp the owning project onto every job this store creates: the file is
+      // shared across projects, so a job that does not name its repo can never
+      // be attributed to one afterwards.
+      (() =>
+        new JobStore(join(xerxesHome(), "cron", "jobs.json"), {
+          projectRoot: this.cronLeaseOwnerKey,
+        }));
     this.cronStore = this.cronStoreFactory();
     this.cronArchiveDirectory = resolve(
       options.cronArchiveDirectory ?? join(xerxesHome(), "cron", "archive"),
@@ -544,6 +712,9 @@ export class DaemonServer {
       this.cronStore,
       (job) => this.runScheduledCronJob(job),
       {
+        // The lease is re-checked on every tick, not just at start: a daemon
+        // that loses or releases it mid-run must stop firing immediately.
+        holdsLease: () => this.cronSchedulerStarted && this.holdsCronLease(),
         onComplete: async (job, output) => {
           await this.deliverCronOutput(job, output);
         },
@@ -583,6 +754,12 @@ export class DaemonServer {
     this.snapshotManagerFactory =
       options.snapshotManagerFactory ??
       ((workspaceDirectory) => new SnapshotManager(workspaceDirectory));
+    this.autoSnapshotTurns = options.autoSnapshotTurns === true;
+    this.snapshotRetention =
+      Number.isInteger(options.snapshotRetention) &&
+      (options.snapshotRetention ?? -1) >= 0
+        ? (options.snapshotRetention ?? DEFAULT_SNAPSHOT_RETENTION)
+        : DEFAULT_SNAPSHOT_RETENTION;
     this.websocketOptions = options.websocket;
     this.browserManager = options.browserManager ?? new BrowserManager();
     this.toolCatalog = options.toolCatalog;
@@ -630,11 +807,12 @@ export class DaemonServer {
         await mkdir(dirname(this.pidPath), { recursive: true });
         await writeFile(this.pidPath, `${process.pid}\n`, "utf8");
       }
-      this.cronScheduler.start();
-      this.cronSchedulerStarted = true;
+      this.installCrashHandlers();
+      this.startCronSchedulerIfOwned();
+      this.pruneSnapshotStore();
     } catch (error) {
-      this.cronScheduler.stop();
-      this.cronSchedulerStarted = false;
+      this.stopCronScheduler();
+      this.removeCrashHandlers();
       await this.channelWebhookServer?.stop();
       await this.websocketGateway?.stop();
       this.websocketGateway = undefined;
@@ -644,6 +822,177 @@ export class DaemonServer {
       await this.shutdownRuntime();
       throw error;
     }
+  }
+
+  /**
+   * Trim this project's shadow snapshot repository once per daemon start.
+   *
+   * Pruning re-anchors the retained history and garbage-collects the rest,
+   * which is git work: it is fire-and-forget so it can never delay the socket
+   * becoming available, and a failure is not worth a daemon that refuses to
+   * start. A workspace that was never snapshotted has no record log, so this
+   * is a no-op that creates nothing.
+   */
+  private pruneSnapshotStore(): void {
+    const workspaceDirectory = resolveProjectDirectory(process.cwd());
+    void (async () => {
+      const removed = await this.snapshotManagerFactory(workspaceDirectory).prune({
+        keep: this.snapshotRetention,
+      });
+      if (removed > 0) {
+        console.info(
+          `Pruned ${removed} old workspace snapshot${removed === 1 ? "" : "s"} for ${workspaceDirectory}`,
+        );
+      }
+    })().catch((error: unknown) => {
+      console.warn(`Could not prune workspace snapshots: ${errorMessage(error)}`);
+    });
+  }
+
+  /**
+   * Capture the workspace as it stands before a turn runs.
+   *
+   * Fire-and-forget with the rejection swallowed: a snapshot is a safety net,
+   * and a net that can fail the turn it protects is worse than no net. The
+   * record carries the session id and the index of the turn it precedes, which
+   * is what makes "take me back to before turn 7" answerable at all.
+   */
+  private captureTurnSnapshot(sessionKey: string): void {
+    if (!this.autoSnapshotTurns) {
+      return;
+    }
+    const session = this.runtime.sessionStatus(sessionKey);
+    if (!session) {
+      return;
+    }
+    const { cwd, id, turnCount } = session;
+    // The factory itself can throw, and it runs on the submit path: without
+    // this the turn would fail before it ever reached the runtime.
+    void (async () =>
+      this.snapshotManagerFactory(cwd).snapshot(`turn-${turnCount}`, {
+        sessionId: id,
+        turnIndex: turnCount,
+      }))().catch((error: unknown) => {
+      console.warn(`Could not snapshot the workspace before a turn: ${errorMessage(error)}`);
+    });
+  }
+
+  /**
+   * Start cron only while this daemon holds the lease.
+   *
+   * The job store is one file shared by every project's daemon, so an
+   * unconditional start had each open project firing the same job as its own
+   * agent turn. A refusal is not an error — another daemon owns cron — but it
+   * has to be recoverable without a restart, hence the unref'd probe: it can
+   * never be the reason the process stays alive.
+   */
+  private startCronSchedulerIfOwned(): void {
+    if (this.cronSchedulerStarted) {
+      return;
+    }
+    if (this.acquireCronLease()) {
+      this.cronScheduler.start();
+      this.cronSchedulerStarted = true;
+      return;
+    }
+    if (this.cronLeaseProbe) {
+      return;
+    }
+    this.cronLeaseProbe = setInterval(() => {
+      if (this.cronSchedulerStarted) return;
+      this.startCronSchedulerIfOwned();
+    }, this.cronLeaseRetryInterval);
+    this.cronLeaseProbe.unref?.();
+  }
+
+  private holdsCronLease(): boolean {
+    const holder = readCronLease(this.cronLeasePath);
+    return (
+      holder !== undefined &&
+      holder.pid === process.pid &&
+      holder.ownerKey === this.cronLeaseOwnerKey
+    );
+  }
+
+  private acquireCronLease(): boolean {
+    try {
+      const outcome = acquireCronLease(this.cronLeasePath, {
+        ownerKey: this.cronLeaseOwnerKey,
+      });
+      if (!outcome.held && !this.cronLeaseRefusalLogged) {
+        // Once per daemon: a refused lease is the normal state for every
+        // project but the one that owns cron, and logging it on every probe
+        // would bury the daemon log.
+        this.cronLeaseRefusalLogged = true;
+        console.error(
+          `Cron scheduling is owned by pid ${outcome.holder?.pid ?? "unknown"}`
+            + ` (${outcome.holder?.ownerKey ?? "unknown project"}); this daemon will not fire jobs.`,
+        );
+      }
+      return outcome.held;
+    } catch (error) {
+      console.error(`Could not take the cron lease: ${errorMessage(error)}`);
+      return false;
+    }
+  }
+
+  private releaseCronLease(): void {
+    if (this.cronLeaseProbe !== undefined) {
+      clearInterval(this.cronLeaseProbe);
+      this.cronLeaseProbe = undefined;
+    }
+    try {
+      releaseCronLease(this.cronLeasePath, { ownerKey: this.cronLeaseOwnerKey });
+    } catch (error) {
+      console.error(`Could not release the cron lease: ${errorMessage(error)}`);
+    }
+  }
+
+  private stopCronScheduler(): void {
+    this.cronScheduler.stop();
+    this.cronSchedulerStarted = false;
+    this.releaseCronLease();
+  }
+
+  /**
+   * Turn an unhandled failure into a saved transcript.
+   *
+   * Sessions are written once per turn, in the turn's `finally`, so a crash
+   * anywhere else discards everything since the last boundary. Opt-in because
+   * installing process-global handlers from a constructor-owned object would
+   * change the semantics of every host that embeds a DaemonServer.
+   */
+  private installCrashHandlers(): void {
+    if (!this.crashHandlersEnabled || this.crashHandler) {
+      return;
+    }
+    const handler = (error: unknown): void => {
+      console.error("Xerxes daemon crashed:", error);
+      void this.flushBeforeExit();
+    };
+    this.crashHandler = handler;
+    process.on("uncaughtException", handler);
+    process.on("unhandledRejection", handler);
+  }
+
+  private removeCrashHandlers(): void {
+    const handler = this.crashHandler;
+    if (!handler) {
+      return;
+    }
+    this.crashHandler = undefined;
+    process.off("uncaughtException", handler);
+    process.off("unhandledRejection", handler);
+  }
+
+  private async flushBeforeExit(): Promise<void> {
+    await raceWithTimeout(
+      this.runtime.flushSessions().catch((error: unknown) => {
+        console.error(`Could not flush sessions while crashing: ${errorMessage(error)}`);
+      }),
+      TURN_DRAIN_TIMEOUT_MS,
+    );
+    process.exit(1);
   }
 
   private startWebSocketGateway(): void {
@@ -671,19 +1020,38 @@ export class DaemonServer {
     const gateway = this.websocketGateway;
     const channelWebhook = this.channelWebhookServer;
     if (!server && !gateway && !channelWebhook && !this.cronSchedulerStarted) {
+      // Still ours to give back: a start() that failed after taking the lease,
+      // or a probe armed while cron was refused, both land here.
+      this.releaseCronLease();
+      this.removeCrashHandlers();
       await this.shutdownRuntime();
       return;
     }
+    // An operator who sends a second SIGTERM has decided this daemon is stuck
+    // and wants it gone. Node's default handler is gone once the first signal
+    // was consumed with `process.once`, so without this the second signal is
+    // swallowed and the only way out is SIGKILL.
+    const hardExit = (): void => {
+      console.error("Second SIGTERM during shutdown — exiting immediately.");
+      process.exit(143);
+    };
+    process.once("SIGTERM", hardExit);
     try {
-      this.cronScheduler.stop();
-      this.cronSchedulerStarted = false;
+      this.stopCronScheduler();
+      this.runtime.cancelAllTurns();
+      // Let cancelled turns land their final state sync and saveSession, but
+      // never wait on them forever: one generator that fails to settle used to
+      // park the daemon here with the transcript still unwritten, because the
+      // only flush sat behind this await.
+      await raceWithTimeout(
+        Promise.all([...this.inFlightTurns]),
+        TURN_DRAIN_TIMEOUT_MS,
+      );
+      // Persist before any transport teardown can fail: a channel that hangs
+      // on stop must not be able to cost the user their session history.
+      await this.runtime.flushSessions();
       await channelWebhook?.stop();
       await this.channelManager?.stopAll();
-      this.runtime.cancelAllTurns();
-      // Let cancelled turns land their final state sync and saveSession before
-      // the flush below persists the last known state for every session.
-      await Promise.all([...this.inFlightTurns]);
-      await this.runtime.flushSessions();
       for (const connection of this.connections) {
         connection.socket.destroy();
       }
@@ -700,6 +1068,8 @@ export class DaemonServer {
         await rm(this.pidPath, { force: true });
       }
     } finally {
+      process.off("SIGTERM", hardExit);
+      this.removeCrashHandlers();
       await this.shutdownRuntime();
     }
   }
@@ -923,6 +1293,23 @@ export class DaemonServer {
     if (method === "session.compress") {
       connection.activeSessionKey = sessionKey(connection, params);
       return this.compactSession(connection, false);
+    }
+    if (method === "session.search") {
+      const query = optionalString(params.query) ?? optionalString(params.text) ?? "";
+      if (!query.trim()) {
+        return { ok: false, error: "search query is required" };
+      }
+      await this.hydrateTranscriptSearch();
+      const scopedSessionId = optionalString(params.session_id);
+      const results = this.transcriptSearch.search(query, {
+        limit: integerOption(params.limit) ?? SEARCH_RESULT_LIMIT,
+        ...(scopedSessionId ? { sessionId: scopedSessionId } : {}),
+      });
+      return {
+        ok: true,
+        results: results.map(searchHitPayload),
+        stats: searchStatsPayload(this.transcriptSearch.stats()),
+      };
     }
     if (method === "session.save") {
       const key = sessionKey(connection, params);
@@ -1750,6 +2137,22 @@ export class DaemonServer {
     });
   }
 
+  /**
+   * Tokens a prompt may actually occupy: the window less the reply the
+   * provider is still allowed to emit. Both the auto-compaction trigger and
+   * the `/budget` display read it here so they cannot drift apart, and so
+   * neither of them measures a prompt against a ceiling the request as a whole
+   * has to fit under.
+   */
+  private promptBudget(model: string): number {
+    if (!model.trim()) return 0;
+    const status = this.runtime.status();
+    return effectiveContextLimit(model, {
+      contextLimit: this.contextLimit(model),
+      overrides: { provider: status.provider, base_url: status.base_url },
+    });
+  }
+
   private async handleSlash(
     connection: DaemonTransportConnection,
     raw: string,
@@ -1889,6 +2292,7 @@ export class DaemonServer {
       case "browser":
         return this.manageBrowserSlash(connection, args);
       case "clear":
+        this.clearAutoCompactFailures(key);
         this.emitSlash(connection, "Cleared. Scrollback is owned by the TUI.");
         return { ok: true };
       case "feedback":
@@ -1903,6 +2307,7 @@ export class DaemonServer {
         // instead of overwriting it with an empty session.
         await this.runtime.flushSessions();
         this.runtime.evictSession(key);
+        this.clearAutoCompactFailures(key);
         const fresh = await this.runtime.openSession(key);
         this.emitSlash(connection, `New session \`${fresh.id}\` started.`);
         this.emitInitDone(connection, fresh);
@@ -2056,6 +2461,8 @@ export class DaemonServer {
         return this.showUpdate(connection, session);
       case "resume":
         return this.resumeSavedSession(connection, args);
+      case "search":
+        return this.searchTranscripts(connection, args);
       case "branches":
         return this.listSavedSessionBranches(connection);
       case "branch":
@@ -2955,17 +3362,43 @@ export class DaemonServer {
     connection: DaemonTransportConnection,
     notify = true,
   ): Promise<JsonRpcPayload> {
-    const session = this.runtime.sessionStatus(connection.activeSessionKey);
+    const result = await this.compactSessionByKey(
+      connection.activeSessionKey,
+      notify ? connection : undefined,
+    );
+    if (result.ok === true && result.compacted === true) {
+      const session = this.runtime.sessionStatus(connection.activeSessionKey);
+      if (session) {
+        this.emitStatus(connection, session);
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Provider-backed compaction of one session's transcript. Notifications go
+   * to `notify` when a connection is supplied; cron and auto-compaction paths
+   * without an owning connection run silently. Messages appended while the
+   * summary is generated (for example an idle steer) are preserved.
+   */
+  private async compactSessionByKey(
+    sessionKey: string,
+    notify: DaemonTransportConnection | undefined,
+    verb = "Compacted",
+    /** Recorded in the archive and the metadata stamp; who asked for this pass. */
+    reason = "compact",
+  ): Promise<JsonRpcPayload> {
+    const session = this.runtime.sessionStatus(sessionKey);
     if (!session) {
       if (notify) {
-        this.emitSlash(connection, "No active session to compact.", "warning");
+        this.emitSlash(notify, "No active session to compact.", "warning");
       }
       return { ok: false, error: "no active session" };
     }
     if (session.activeTurnId) {
       if (notify) {
         this.emitSlash(
-          connection,
+          notify,
           "Cannot compact while a turn is running. Use `/stop` first.",
           "warning",
         );
@@ -2975,56 +3408,75 @@ export class DaemonServer {
     const model = session.model || stringValue(this.runtime.status().model);
     if (!model) {
       const error = "model is not configured; select a provider model before compacting";
-      if (notify) this.emitSlash(connection, error, "warning");
+      if (notify) this.emitSlash(notify, error, "warning");
       return { ok: false, error };
     }
     let client: LlmClient | undefined;
     try {
       const profile = this.profileStore?.active();
       client = createCompactionClient(model, profile, this.runtime.status());
-      const agent = createCompactionAgent({
-        model,
+      const archivePath = await this.precompactArchivePath(session.id);
+      const outcome = await compactMessagesIfNeeded({
+        ...(archivePath === undefined ? {} : { archivePath }),
         completion: compactionCompletionPort(client, model),
+        messages: session.messages,
+        model,
+        reason,
       });
-      const originalCount = session.messages.length;
-      const compacted = await agent.summarizeMessages(session.messages);
-      const unchanged =
-        compacted.length === originalCount &&
-        compacted.every(
-          (message, index) =>
-            JSON.stringify(message) === JSON.stringify(session.messages[index]),
-        );
-      if (unchanged) {
-        if (notify) {
-          this.emitSlash(connection, "Nothing to compact.");
+      if (!outcome.compacted) {
+        if (outcome.reason === "unchanged") {
+          if (notify) {
+            this.emitSlash(notify, "Nothing to compact.");
+          }
+          return { ok: true, compacted: false };
         }
-        return { ok: true, compacted: false };
+        const failure = outcome.error ?? outcome.reason;
+        if (notify) {
+          this.emitSlash(notify, `Compaction failed: ${failure}`, "error");
+        }
+        return { ok: false, error: failure };
       }
-      const tokensBefore = estimateContextTokens(session.messages, { model });
-      const tokensAfter = estimateContextTokens(compacted, { model });
-      session.messages = compacted as DaemonSession["messages"];
-      session.metadata.last_compaction = {
-        tokens_before: tokensBefore,
-        tokens_after: tokensAfter,
-      };
+      // Anything appended while the summary was in flight is newer than the
+      // compacted window and must survive the swap.
+      const appended = session.messages.slice(outcome.originalCount);
+      session.messages = [
+        ...outcome.messages,
+        ...appended,
+      ] as DaemonSession["messages"];
+      session.metadata.last_compaction = outcome.stamp;
+      // A compaction that worked — by hand or automatically — retires the
+      // failure evidence, so `/compact` is a way back from the bail-out.
+      this.clearAutoCompactFailures(sessionKey);
       await this.runtime.flushSessions();
       if (notify) {
+        const replaced = outcome.originalCount - outcome.messages.length;
         this.emitSlash(
-          connection,
-          `Compacted ${originalCount - compacted.length} message(s): ${tokensBefore} → ${tokensAfter} tokens.`,
+          notify,
+          `${verb} ${replaced} message(s): ${outcome.stamp.tokens_before} → ${outcome.stamp.tokens_after} tokens.`,
         );
+        if (outcome.stamp.archive_error !== undefined) {
+          // The user never asked for auto-compaction, so a silently
+          // unrecoverable transcript is not an acceptable outcome of it.
+          this.emitSlash(
+            notify,
+            `Pre-compaction transcript could not be archived: ${outcome.stamp.archive_error}`,
+            "warning",
+          );
+        }
       }
-      this.emitStatus(connection, session);
       return {
         ok: true,
         compacted: true,
-        tokens_before: tokensBefore,
-        tokens_after: tokensAfter,
+        tokens_before: outcome.stamp.tokens_before,
+        tokens_after: outcome.stamp.tokens_after,
+        ...(outcome.stamp.archive_path === undefined
+          ? {}
+          : { archive_path: outcome.stamp.archive_path }),
       };
     } catch (error) {
       if (notify) {
         this.emitSlash(
-          connection,
+          notify,
           `Compaction failed: ${errorMessage(error)}`,
           "error",
         );
@@ -3033,6 +3485,176 @@ export class DaemonServer {
     } finally {
       if (client !== undefined) await closeLlmClient(client);
     }
+  }
+
+  /**
+   * Where this session's pre-compaction transcript is archived.
+   *
+   * Compaction replaces `session.messages` and the very next flush overwrites
+   * the single per-session JSON, so without this sidecar the original history
+   * leaves memory and disk on the same tick — for an auto-compaction the user
+   * never asked for.
+   *
+   * An archive is only written beside a transcript that is actually there:
+   * a host whose transcripts live in a directory this server was not told
+   * about (it is configured on the runtime, not here) would otherwise
+   * accumulate orphan archives under the default home, next to nothing.
+   */
+  private async precompactArchivePath(
+    sessionId: string,
+  ): Promise<string | undefined> {
+    if (!looksLikeSessionId(sessionId)) return undefined;
+    const directory = this.sessionArchiveDirectory;
+    if (!this.sessionArchiveDirectoryConfigured) {
+      const transcript = join(directory, `${sessionId}.json`);
+      const found = await stat(transcript).then(
+        (entry) => entry.isFile(),
+        () => false,
+      );
+      if (!found) return undefined;
+    }
+    return precompactArchivePathFor(directory, sessionId);
+  }
+
+  private resolvedAutoCompactThreshold(): number {
+    const status = this.runtime.status();
+    if (status.auto_compact_threshold !== undefined) {
+      return normalizeCompactionThreshold(
+        numberValue(status.auto_compact_threshold),
+      );
+    }
+    return this.autoCompactThreshold;
+  }
+
+  /**
+   * Compact the session before a turn when the estimated context usage has
+   * reached the configured threshold. Concurrent submissions join the same
+   * compaction, and a compaction failure only warns — the turn still runs.
+   */
+  private autoCompactIfDue(
+    sessionKey: string,
+    owner: DaemonTransportConnection | undefined,
+  ): Promise<void> {
+    const existing = this.autoCompactions.get(sessionKey);
+    if (existing) {
+      return existing;
+    }
+    const session = this.runtime.sessionStatus(sessionKey);
+    if (!session || session.activeTurnId || session.messages.length < 2) {
+      return Promise.resolve();
+    }
+    const model = session.model || stringValue(this.runtime.status().model);
+    if (!model) {
+      return Promise.resolve();
+    }
+    // The prompt budget, not the raw window: a prompt that fills the window
+    // leaves the reply nowhere to go, and the request fails as a 400 that no
+    // local meter predicted.
+    const limit = this.promptBudget(model);
+    if (!limit) {
+      return Promise.resolve();
+    }
+    const used = sessionContextTokens(session, model);
+    // One threshold source for main sessions and delegated children alike.
+    const due = compactionThresholdTokens(
+      limit,
+      this.resolvedAutoCompactThreshold(),
+    );
+    if (due <= 0) {
+      this.warnAutoCompactDisabled(sessionKey, owner, used, limit);
+      return Promise.resolve();
+    }
+    if (used < due) {
+      return Promise.resolve();
+    }
+    const failures = this.autoCompactFailures.get(sessionKey) ?? 0;
+    if (failures >= MAX_AUTO_COMPACT_FAILURES) {
+      // Silent from here on: the actionable line was emitted on the attempt
+      // that reached the limit, and repeating it every turn is the same noise
+      // the retry loop was.
+      return Promise.resolve();
+    }
+    if (owner) {
+      this.emitSlash(
+        owner,
+        `Context at ${((used / limit) * 100).toFixed(0)}% — auto-compacting before this turn…`,
+      );
+    }
+    const task = this
+      .compactSessionByKey(sessionKey, owner, "Auto-compacted", "auto-compact")
+      .then((result) => {
+        // `compacted: false` counts as a failure. It leaves the window exactly
+        // as full as it was, so the next turn would re-run the same
+        // full-window summarization call and reach the same conclusion.
+        if (result.ok === true && result.compacted === true) {
+          return;
+        }
+        const reason = stringValue(result.error) || "nothing to compact";
+        this.recordAutoCompactFailure(sessionKey, owner, reason);
+      })
+      .catch((error: unknown) => {
+        this.recordAutoCompactFailure(sessionKey, owner, errorMessage(error));
+      });
+    this.autoCompactions.set(sessionKey, task);
+    void task.then(() => {
+      if (this.autoCompactions.get(sessionKey) === task) {
+        this.autoCompactions.delete(sessionKey);
+      }
+    });
+    return task;
+  }
+
+  private recordAutoCompactFailure(
+    sessionKey: string,
+    owner: DaemonTransportConnection | undefined,
+    reason: string,
+  ): void {
+    const failures = (this.autoCompactFailures.get(sessionKey) ?? 0) + 1;
+    this.autoCompactFailures.set(sessionKey, failures);
+    if (!owner) {
+      return;
+    }
+    if (failures < MAX_AUTO_COMPACT_FAILURES) {
+      this.emitSlash(owner, `Auto-compaction skipped: ${reason}.`, "warning");
+      return;
+    }
+    this.emitSlash(
+      owner,
+      `Auto-compaction failed ${failures} times in a row (${reason}) and is now off for this session. `
+        + "Run `/compact` to see the error, or `/new` to start a fresh session.",
+      "error",
+    );
+  }
+
+  /** Reset after a deliberate history change so the session gets a clean slate. */
+  private clearAutoCompactFailures(sessionKey: string): void {
+    this.autoCompactFailures.delete(sessionKey);
+    this.autoCompactDisabledWarned.delete(sessionKey);
+  }
+
+  private warnAutoCompactDisabled(
+    sessionKey: string,
+    owner: DaemonTransportConnection | undefined,
+    used: number,
+    limit: number,
+  ): void {
+    if (used < Math.floor(limit * AUTO_COMPACT_DISABLED_WARNING_FRACTION)) {
+      // Drop the latch once the window is comfortable again, so a session that
+      // is manually compacted and then refills is warned a second time.
+      this.autoCompactDisabledWarned.delete(sessionKey);
+      return;
+    }
+    if (!owner || this.autoCompactDisabledWarned.has(sessionKey)) {
+      return;
+    }
+    this.autoCompactDisabledWarned.add(sessionKey);
+    this.emitSlash(
+      owner,
+      `Context at ${((used / limit) * 100).toFixed(0)}% of the ${limit.toLocaleString()}-token prompt budget `
+        + "and auto-compaction is disabled (`auto_compact_threshold` is 0). Run `/compact` before the provider "
+        + "rejects the next request.",
+      "warning",
+    );
   }
 
   private showSessionBudget(
@@ -3045,25 +3667,31 @@ export class DaemonServer {
     }
     const model = session.model || stringValue(this.runtime.status().model);
     const contextLimit = this.contextLimit(model);
-    const used = estimateContextTokens(session.messages, {
-      model,
-    });
-    const remaining = Math.max(0, contextLimit - used);
-    const percent = contextLimit ? (used / contextLimit) * 100 : 0;
+    // The same measurement and the same limit the auto-compaction trigger
+    // uses. Reading them from two different estimates is how `/context` and
+    // the status bar came to disagree about one session.
+    const promptBudget = this.promptBudget(model);
+    const used = sessionContextTokens(session, model);
+    const remaining = Math.max(0, promptBudget - used);
+    const percent = promptBudget ? (used / promptBudget) * 100 : 0;
     this.emitSlash(
       connection,
       [
         model
           ? `Context window: ${contextLimit.toLocaleString()} tokens for \`${model}\``
           : "Context window: unknown (model not configured)",
-        contextLimit
+        promptBudget && promptBudget < contextLimit
+          ? `Prompt budget: ${promptBudget.toLocaleString()} (window minus the reply this model may emit)`
+          : "",
+        promptBudget
           ? `Used: ${used.toLocaleString()} (${percent.toFixed(1)}%) · Remaining: ${remaining.toLocaleString()}`
           : `Used: ${used.toLocaleString()} · Remaining: unknown`,
-      ].join("\n"),
+      ].filter(Boolean).join("\n"),
     );
     return {
       ok: true,
       context_limit: contextLimit,
+      prompt_budget: promptBudget,
       used_tokens: used,
       remaining_tokens: remaining,
     };
@@ -3344,6 +3972,8 @@ export class DaemonServer {
     this.emitStatus(connection, session);
     this.replaySessionHistory(connection, session);
     this.emitSlash(connection, `Resumed session \`${session.id}\`.`);
+    await this.reportResumeRepair(connection, session.id);
+    this.indexSessionForSearch(target.id);
     return {
       ok: true,
       session: sessionPayload(session, this.contextLimit(session.model)),
@@ -3460,6 +4090,9 @@ export class DaemonServer {
       return { ok: true, dropped: 0 };
     }
     session.turnCount = Math.max(0, session.turnCount - 1);
+    // The window just shrank, so the condition that kept failing is no longer
+    // the one the counter was recording.
+    this.clearAutoCompactFailures(session.sessionKey);
     await this.runtime.flushSessions();
     if (session.messages.length === 0 && session.turnCount === 0) {
       // The store's empty-save path used to delete the transcript here
@@ -3600,6 +4233,9 @@ export class DaemonServer {
           schedule: parsed.schedule ?? "",
           nextRunAt,
           oneshot: Boolean(parsed.at),
+          // The project the job was created from, so a listing can say which
+          // repo owns it instead of leaving every daemon to assume it is theirs.
+          projectRoot: this.cronProjectRoot(connection),
           ...(parsed.deliver ? { deliver: parsed.deliver } : {}),
           ...(parsed.recipient ? { recipient: parsed.recipient } : {}),
           ...(parsed.workspaceId ? { workspaceId: parsed.workspaceId } : {}),
@@ -3615,6 +4251,16 @@ export class DaemonServer {
       this.emitSlash(connection, `Cron add failed: \`${message}\``, "error");
       return { ok: false, error: message };
     }
+  }
+
+  /** The repo a `/cron add` belongs to: the caller's session, not the daemon's cwd. */
+  private cronProjectRoot(connection: DaemonTransportConnection): string {
+    const session = this.runtime.sessionStatus(connection.activeSessionKey);
+    return resolveProjectDirectory(
+      optionalString(session?.metadata.project_root) ||
+        session?.cwd ||
+        this.cronLeaseOwnerKey,
+    );
   }
 
   private removeCronJob(
@@ -3817,6 +4463,160 @@ export class DaemonServer {
     }
   }
 
+  /** Feed one live session's transcript into the cross-session search index. */
+  private indexSessionForSearch(sessionKey: string): void {
+    const session = this.runtime.sessionStatus(sessionKey);
+    if (!session || !session.messages.length) {
+      return;
+    }
+    const title = stringValue(session.metadata.title);
+    this.transcriptSearch.index({
+      messages: session.messages,
+      sessionId: session.id,
+      ...(title ? { title } : {}),
+      updatedAt: new Date().toISOString(),
+    });
+  }
+
+  /**
+   * Load persisted transcripts into the search index once per daemon.
+   *
+   * Sessions this daemon has already opened or run a turn for are fed
+   * incrementally and skipped here; the cold read exists only so a search can
+   * reach conversations from earlier runs. Bounded to the most recent
+   * transcripts because the point is to answer a query, not to page every
+   * session a project has ever had into memory.
+   */
+  private hydrateTranscriptSearch(): Promise<void> {
+    const existing = this.transcriptSearchHydration;
+    if (existing) {
+      return existing;
+    }
+    const hydration = (async () => {
+      const saved = await this.runtime.listSavedSessions(
+        SEARCH_HYDRATION_SESSION_LIMIT,
+      );
+      for (const candidate of saved) {
+        if (this.transcriptSearch.has(candidate.id)) {
+          continue;
+        }
+        let raw: unknown;
+        try {
+          raw = JSON.parse(await readFile(candidate.path, "utf8")) as unknown;
+        } catch {
+          continue;
+        }
+        if (!isRecord(raw) || !Array.isArray(raw.messages)) {
+          continue;
+        }
+        this.transcriptSearch.index({
+          messages: raw.messages,
+          sessionId: candidate.id,
+          title: candidate.title,
+          updatedAt: candidate.updatedAt,
+        });
+      }
+    })();
+    // A failed cold read must not poison every later search with the same
+    // rejected promise; drop the memo so the next search can retry.
+    this.transcriptSearchHydration = hydration.catch((error: unknown) => {
+      this.transcriptSearchHydration = undefined;
+      console.warn(`Could not hydrate transcript search: ${errorMessage(error)}`);
+    });
+    return this.transcriptSearchHydration;
+  }
+
+  private async searchTranscripts(
+    connection: DaemonTransportConnection,
+    query: string,
+  ): Promise<JsonRpcPayload> {
+    const needle = query.trim();
+    if (!needle) {
+      this.emitSlash(
+        connection,
+        "Usage: `/search <text>` — searches every saved transcript.",
+        "warning",
+      );
+      return { ok: false, error: "search query is required" };
+    }
+    await this.hydrateTranscriptSearch();
+    const hits = this.transcriptSearch.search(needle, {
+      limit: SEARCH_RESULT_LIMIT,
+    });
+    const stats = this.transcriptSearch.stats();
+    if (!hits.length) {
+      // An empty answer is exactly where a silent under-count does the most
+      // damage: it reads as "not in any transcript".
+      const blindSpot =
+        stats.unrecognizedMessages > 0
+          ? ` (${stats.unrecognizedMessages} message${stats.unrecognizedMessages === 1 ? "" : "s"} could not be indexed and were searched as empty)`
+          : "";
+      this.emitSlash(
+        connection,
+        `No transcript matches \`${needle}\` across ${stats.sessions} session${stats.sessions === 1 ? "" : "s"}.${blindSpot}`,
+      );
+      return { ok: true, results: [], stats: searchStatsPayload(stats) };
+    }
+    const lines = [
+      `Transcript matches for \`${needle}\` (${hits.length}):`,
+      ...hits.map(
+        (hit) =>
+          `  \`${hit.sessionId}\` #${hit.messageIndex} ${hit.role || "?"} — ${hit.excerpt}`,
+      ),
+    ];
+    // Say out loud how much of the corpus the index could not read. A silent
+    // under-count reads exactly like "your text is not in any transcript".
+    if (stats.unrecognizedMessages > 0) {
+      lines.push(
+        `  (${stats.unrecognizedMessages} message${stats.unrecognizedMessages === 1 ? "" : "s"} could not be indexed and were searched as empty)`,
+      );
+    }
+    this.emitSlash(connection, lines.join("\n"));
+    return {
+      ok: true,
+      results: hits.map(searchHitPayload),
+      stats: searchStatsPayload(stats),
+    };
+  }
+
+  /**
+   * Report what loading this transcript changed before the user starts typing
+   * into it. Repair is cheap — a parse and one linear pass — so the resume
+   * path re-derives the counts from the file rather than staying silent about
+   * messages the load dropped.
+   */
+  private async reportResumeRepair(
+    connection: DaemonTransportConnection,
+    sessionId: string,
+  ): Promise<void> {
+    // A resume that already succeeded must not fail because its diagnostic
+    // could not be computed.
+    await this.emitResumeRepairNotice(connection, sessionId).catch(
+      (error: unknown) => {
+        console.warn(`Could not summarize resume repair: ${errorMessage(error)}`);
+      },
+    );
+  }
+
+  private async emitResumeRepairNotice(
+    connection: DaemonTransportConnection,
+    sessionId: string,
+  ): Promise<void> {
+    const saved = await this.runtime.listSavedSessions();
+    const path = saved.find((candidate) => candidate.id === sessionId)?.path;
+    if (!path) {
+      return;
+    }
+    const raw: unknown = JSON.parse(await readFile(path, "utf8")) as unknown;
+    if (!isRecord(raw) || !Array.isArray(raw.messages)) {
+      return;
+    }
+    const line = describeTranscriptRepair(summarizeTranscriptRepair(raw.messages));
+    if (line) {
+      this.emitSlash(connection, line, "warning");
+    }
+  }
+
   private listSnapshots(
     connection: DaemonTransportConnection,
     session: DaemonSession | undefined,
@@ -3856,24 +4656,47 @@ export class DaemonServer {
     }
   }
 
+  /**
+   * Roll the workspace back to a snapshot, or — with a path — only that one
+   * file. Restoring a whole tree to recover a single damaged file also throws
+   * away every unrelated edit made since, which is rarely what was meant.
+   */
   private async rollbackSnapshot(
     connection: DaemonTransportConnection,
     session: DaemonSession | undefined,
-    ref: string,
+    argument: string,
   ): Promise<JsonRpcPayload> {
     if (!session) {
       this.emitSlash(connection, "No active session yet.", "warning");
       return { ok: false, error: "no active session" };
     }
+    const [ref = "", ...pathParts] = argument.split(/\s+/).filter(Boolean);
+    const filePath = pathParts.join(" ");
     if (!ref) {
       this.emitSlash(
         connection,
-        "Usage: `/rollback <snapshot-id>` — list with `/snapshots`.",
+        "Usage: `/rollback <snapshot-id> [path]` — list with `/snapshots`.",
         "warning",
       );
       return { ok: false, error: "snapshot reference is required" };
     }
     try {
+      if (filePath) {
+        const restored = await this.snapshotManagerFactory(session.cwd).restoreFile(
+          ref,
+          filePath,
+        );
+        this.emitSlash(
+          connection,
+          `Restored \`${restored.path}\` from snapshot \`${ref}\` (undo with \`/rollback ${restored.previous.id}\`).`,
+        );
+        return {
+          ok: true,
+          path: restored.path,
+          snapshot: snapshotPayload(restored.snapshot),
+          previous: snapshotPayload(restored.previous),
+        };
+      }
       const snapshot = await this.snapshotManagerFactory(session.cwd).rollback(ref);
       this.emitSlash(connection, `Rolled back to snapshot \`${ref}\`.`);
       return { ok: true, snapshot: snapshotPayload(snapshot) };
@@ -4115,6 +4938,10 @@ export class DaemonServer {
     );
     if (session.messages.length) {
       this.replaySessionHistory(connection, session);
+      this.indexSessionForSearch(key);
+    }
+    if (resumeId && session.messages.length) {
+      await this.reportResumeRepair(connection, session.id);
     }
     return {
       ...this.runtimeStatusWithChannels(),
@@ -4361,15 +5188,21 @@ export class DaemonServer {
       this.turnOwners.set(sessionKey, owner);
     }
     const interactionIds = new Set<string>();
-    const turnPromise = this.runtime.submitTurn(
-      sessionKey,
-      text,
-      (event) => {
-        this.rememberTurnInteraction(event, interactionIds);
-        emit(event);
-      },
-      options,
-    );
+    // Before compaction, so the capture reflects the tree the user is looking
+    // at rather than one an auto-compaction turn may already have edited.
+    this.captureTurnSnapshot(sessionKey);
+    const turnPromise = (async () => {
+      await this.autoCompactIfDue(sessionKey, owner);
+      return this.runtime.submitTurn(
+        sessionKey,
+        text,
+        (event) => {
+          this.rememberTurnInteraction(event, interactionIds);
+          emit(event);
+        },
+        options,
+      );
+    })();
     const tracked = turnPromise.catch(() => undefined);
     this.inFlightTurns.add(tracked);
     void tracked.then(() => {
@@ -4380,6 +5213,9 @@ export class DaemonServer {
       // A turn that ends or is cancelled without an answer must not leak its
       // approval/question ownership entries into later requests.
       this.releaseTurnInteractions(interactionIds);
+      // The runtime persists the session as the turn ends, so this is the
+      // incremental feed: the index tracks the transcript that was just saved.
+      this.indexSessionForSearch(sessionKey);
     });
     return turnPromise;
   }
@@ -4433,6 +5269,10 @@ export class DaemonServer {
         this.runtime.cancelTurn(key);
       }
     }
+    // Slot keys are minted per connection, so without this the compaction
+    // bookkeeping grows for the lifetime of the daemon. A session that outlives
+    // its client and refills simply re-earns the count.
+    this.clearAutoCompactFailures(connection.activeSessionKey);
     this.dropConnectionRequests(connection);
   }
 }
@@ -4887,6 +5727,31 @@ function snapshotPayload(snapshot: SnapshotRecord): JsonRpcPayload {
     commit_sha: snapshot.commitSha,
     created_at: snapshot.createdAt,
     workspace_dir: snapshot.workspaceDir,
+    ...(snapshot.sessionId === undefined ? {} : { session_id: snapshot.sessionId }),
+    ...(snapshot.turnIndex === undefined ? {} : { turn_index: snapshot.turnIndex }),
+  };
+}
+
+function searchHitPayload(hit: TranscriptSearchHit): JsonRpcPayload {
+  return {
+    session_id: hit.sessionId,
+    message_index: hit.messageIndex,
+    role: hit.role,
+    excerpt: hit.excerpt,
+    title: hit.title,
+    updated_at: hit.updatedAt,
+  };
+}
+
+function searchStatsPayload(
+  stats: ReturnType<TranscriptSearchIndex["stats"]>,
+): JsonRpcPayload {
+  return {
+    sessions: stats.sessions,
+    indexed_messages: stats.indexedMessages,
+    searchable_messages: stats.searchableMessages,
+    truncated_messages: stats.truncatedMessages,
+    unrecognized_messages: stats.unrecognizedMessages,
   };
 }
 
@@ -4948,14 +5813,26 @@ function statusUpdatePayload(
   };
 }
 
+/**
+ * Price the live provider request, not a lossy copy of it.
+ *
+ * The messages go through as they are: mapping them to `{role, content}` threw
+ * away `tool_calls`, whose serialized arguments are usually the largest thing
+ * in a tool-heavy window — and the summarizer prompt puts them back, so a
+ * session could pass the compaction threshold and then overflow the window on
+ * the very call meant to shrink it. The system prompt and tool schemas ride
+ * every request without ever appearing in the transcript, so they are priced
+ * too whenever the turn runner has cached them on the session.
+ */
 function sessionContextTokens(session: DaemonSession, model: string): number {
-  return estimateContextTokens(
-    session.messages.map((message) => ({
-      role: message.role,
-      content: message.content ?? message.text ?? "",
-    })),
-    { model },
-  );
+  const systemPrompt =
+    session.requestScaffold?.systemPrompt ?? session.systemPromptAddendum;
+  const toolSchemas = session.requestScaffold?.toolSchemas;
+  return estimateContextTokens(session.messages, {
+    model,
+    ...(systemPrompt ? { systemPrompt } : {}),
+    ...(toolSchemas?.length ? { toolSchemas } : {}),
+  });
 }
 
 function configuredContextLimit(
@@ -5056,21 +5933,6 @@ function createCompactionClient(
   });
 }
 
-function compactionCompletionPort(
-  client: LlmClient,
-  model: string,
-): CompactionCompletionPort {
-  return async (request) => {
-    const result = await completeLlm(client, {
-      model,
-      messages: [{ role: "user", content: request.prompt }],
-      maxTokens: request.maxTokens,
-      temperature: request.temperature,
-    });
-    return result.content;
-  };
-}
-
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -5092,6 +5954,13 @@ function newConnectionKey(): string {
 
 function optionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+/** A positive whole count from the wire, or undefined so a default applies. */
+function integerOption(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value > 0
+    ? value
+    : undefined;
 }
 
 function normalizeProviderIdentity(value: string): string {

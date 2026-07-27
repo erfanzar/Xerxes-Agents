@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { ValidationError } from '../core/errors.js'
+import { coerceDeclared } from '../runtime/argumentValidation.js'
 import type { JsonObject } from '../types/toolCalls.js'
 
 export function requiredString(inputs: JsonObject, name: string): string {
@@ -23,8 +24,13 @@ export function optionalString(inputs: JsonObject, name: string): string | undef
   return value
 }
 
+/**
+ * Handlers reached without a declared schema — MCP passthroughs, direct calls —
+ * miss the registry's coercion pass, so repeat the same narrow literal repair here
+ * rather than let `"true"` fail differently depending on how the tool was invoked.
+ */
 export function optionalBoolean(inputs: JsonObject, name: string, defaultValue: boolean): boolean {
-  const value = inputs[name]
+  const value = coerceDeclared(inputs[name], 'boolean')
   if (value === undefined) {
     return defaultValue
   }
@@ -35,7 +41,7 @@ export function optionalBoolean(inputs: JsonObject, name: string, defaultValue: 
 }
 
 export function optionalInteger(inputs: JsonObject, name: string, defaultValue: number): number {
-  const value = inputs[name]
+  const value = coerceDeclared(inputs[name], 'integer')
   if (value === undefined) {
     return defaultValue
   }

@@ -379,7 +379,20 @@ export const WEB_SCRAPER_DEFINITION: ToolDefinition = {
   type: 'function',
   function: {
     name: 'WebScraper',
-    description: 'Fetch a public static HTML page and extract bounded text, metadata, links, or images.',
+    description: 'Fetch one URL over plain HTTP and pull text out of the HTML that came back. There is no browser: '
+      + 'no JavaScript ever runs, so a single-page app returns its empty shell and `content` comes back nearly '
+      + 'blank — that is the page as served, not a tool failure, and retrying will not change it. Extracted content '
+      + `is capped at ${MAX_SCRAPED_CONTENT_CHARS} characters (whitespace-collapsed text with script and style `
+      + `stripped, or raw HTML when clean_text=false) and the response body itself at ${DEFAULT_MAX_RESPONSE_BYTES} `
+      + 'bytes, which is an error rather than a truncation. Passing a `selector` (Bun HTMLRewriter CSS syntax — no '
+      + ':has, no XPath) replaces `content` with `selectedContent`, one entry per match, and a selector that '
+      + 'matches nothing yields an empty array rather than an error, so an empty result means the markup differs '
+      + `from what you assumed. extract_links and extract_images default off and cap at ${MAX_LINKS} and `
+      + `${MAX_IMAGES} absolute http(s) URLs. Any non-2xx status throws, so a 404 or a bot-block 403 arrives as an `
+      + 'error carrying the status. Private, loopback, and link-local targets are refused before the request, '
+      + 'including when a public name resolves to one, and every redirect hop is re-checked, capped at '
+      + `${DEFAULT_MAX_REDIRECTS}, with HTTPS-to-HTTP downgrades refused. \`timeout\` is in SECONDS, not `
+      + 'milliseconds.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -400,7 +413,19 @@ export const API_CLIENT_DEFINITION: ToolDefinition = {
   type: 'function',
   function: {
     name: 'APIClient',
-    description: 'Make a public HTTP API request with bounded responses and no private-network access.',
+    description: 'Issue one HTTP request to a public endpoint and get the parsed body back. It is not a session: no '
+      + 'cookie jar, no credential store, no retries, and Set-Cookie is redacted out of the response headers, so '
+      + 'anything that needs a login flow cannot be driven from here. A non-2xx response is a normal successful '
+      + 'call carrying `statusCode` — inspect it instead of assuming the tool failed. Redirects are followed only '
+      + 'for GET and HEAD: a POST that receives a 301 returns the 301 itself, without the body you wanted. Once a '
+      + 'redirect crosses origins your headers and body are dropped for every remaining hop, even if a later hop '
+      + 'returns to the original origin. json_data and data are mutually exclusive, and json_data sets '
+      + 'content-type unless you set it yourself. params values must be string, number, boolean, or null, where '
+      + 'null deletes the parameter. connection, content-length, host, transfer-encoding, and upgrade cannot be '
+      + `set. The body is capped at ${DEFAULT_MAX_RESPONSE_BYTES} bytes and exceeding that is an error; a JSON body `
+      + `is parsed into \`json\`, anything else lands in \`text\` truncated to ${MAX_SCRAPED_CONTENT_CHARS} `
+      + 'characters, so a long HTML or NDJSON reply comes back silently short. Private, loopback, and '
+      + 'DNS-resolving-to-private targets are refused. `timeout` is in SECONDS, not milliseconds.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -422,7 +447,16 @@ export const RSS_READER_DEFINITION: ToolDefinition = {
   type: 'function',
   function: {
     name: 'RSSReader',
-    description: 'Read a public RSS 2.0 or Atom feed without executing feed content.',
+    description: 'Read a public RSS 2.0 or Atom feed. feed_url must be the feed document itself — there is no '
+      + 'autodiscovery, and pointing this at an ordinary HTML page returns a feed with a blank title and zero items '
+      + 'rather than an error. Parsing is regex-based over a non-DTD XML subset, not a real XML parser: CDATA and '
+      + 'the common entities are handled, but unusual nesting degrades to blank fields instead of failing, so an '
+      + 'empty `author` or `published` usually means the feed shaped it differently, not that the tool broke. Items '
+      + 'are taken in document order and only then capped at max_items — that is publisher order, which is usually '
+      + 'but not reliably newest-first, so sort on `published` yourself before making a recency claim. Item content '
+      + `is stripped of tags and truncated at ${MAX_RSS_CONTENT_CHARS} characters; set include_content=false when `
+      + 'headlines are enough. A non-2xx status throws. The response-size cap, the private-network refusal, and the '
+      + 'SECONDS-based `timeout` behave exactly as in the other web tools.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -441,7 +475,16 @@ export const URL_ANALYZER_DEFINITION: ToolDefinition = {
   type: 'function',
   function: {
     name: 'URLAnalyzer',
-    description: 'Parse a URL and, when requested, check only its public HTTP availability and metadata.',
+    description: 'Split a URL into scheme, host, path, query, and fragment, and say whether the other web tools '
+      + 'would be permitted to fetch it. By default it makes NO network request, which makes it the cheap way to '
+      + 'pre-flight a URL or to explain a refusal: `isFetchable` reflects the private-network policy and '
+      + '`safetyReason` names the block. With check_availability=true it sends a HEAD, retries as GET only on 405 '
+      + 'or 501, and then — unless extract_metadata=false — performs a full page scrape for title, description, and '
+      + 'og: tags, which is a second request and the expensive path. Network problems do not throw here: they come '
+      + 'back as isAvailable:false with `availabilityError`, which conflates DNS failure, timeout, and refusal, so '
+      + 'read the message rather than the flag. Domain parsing is a naive last-two-labels split, so multi-part '
+      + 'public suffixes are simply wrong — bbc.co.uk reports tld "uk" and domainName "co.uk" — never use it for '
+      + 'registrable-domain or same-site decisions. `timeout` is in SECONDS.',
     parameters: {
       type: 'object',
       additionalProperties: false,

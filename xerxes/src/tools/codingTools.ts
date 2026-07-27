@@ -1,12 +1,21 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { writeFileSync } from 'node:fs'
 import { cp, lstat, mkdir, readdir, rename, rm, stat, unlink } from 'node:fs/promises'
 import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path'
 
 import { ValidationError } from '../core/errors.js'
 import { ToolRegistry } from '../executors/toolRegistry.js'
 import type { JsonObject, ToolDefinition } from '../types/toolCalls.js'
+import type { FileToolContext } from './fileState.js'
+import { guardedCreate, guardedWrite, recordFileRead, withStaleNotice } from './fileState.js'
+import {
+  DEFAULT_MAX_READ_FILE_BYTES,
+  enforceReadWindowCeiling,
+  MAX_READ_WINDOW_CHARS,
+  resolveMaxReadFileBytes,
+} from './fileTools.js'
 import {
   optionalBoolean,
   optionalInteger,
@@ -22,7 +31,6 @@ const DEFAULT_GIT_TIMEOUT = 30_000
 const MAX_GIT_OUTPUT = 200_000
 const MAX_DIRECTORY_DEPTH = 100
 const MAX_DIRECTORY_RESULTS = 10_000
-const MAX_READ_FILE_BYTES = 10_000_000
 const MAX_DIFF_LINES = 1_000
 const MAX_DIFF_BYTES = 500_000
 const MAX_REGEX_SUBJECT_BYTES = 1_000_000
@@ -30,13 +38,24 @@ const MAX_REGEX_PATTERN_CHARS = 256
 
 export const CODING_READ_FILE_DEFINITION = codingDefinition(
   'read_file',
-  'Read a workspace file with one-indexed line numbers and bounded line ranges.',
+  'Read an inclusive, one-indexed line range of one UTF-8 text file. file_path is workspace-relative; an absolute '
+    + 'path inside the workspace also resolves, anything outside it is refused. Every returned line is prefixed with '
+    + 'its right-aligned line number, a space, a pipe, and a space ("   12 | code"); strip that prefix before reusing '
+    + 'the text as a search string or as replacement content. Defaults to '
+    + DEFAULT_READ_LINE_LIMIT + ' lines from start_line and reports the start_line to continue from; end_line=-1 '
+    + 'means a deliberate whole-file read. One call returns at most ' + MAX_READ_WINDOW_CHARS + ' characters and '
+    + 'files over ' + DEFAULT_MAX_READ_FILE_BYTES + ' bytes are refused outright; both are errors, not truncation. '
+    + 'A file with very long lines (minified bundles, single-line JSON, lockfiles) can exceed the character ceiling '
+    + 'on a single line, so locate what you need with GrepTool instead of paging. A missing file is a normal '
+    + 'recoverable outcome — confirm the path with list_directory rather than retrying the same read. A directory is '
+    + 'not readable here; use list_directory.',
   {
     file_path: { type: 'string', description: 'Workspace-relative file path.' },
     start_line: { type: 'integer', default: 1, description: 'First one-indexed line to include.' },
     end_line: {
       type: 'integer',
-      description: 'Last inclusive line. Omit for a 400-line chunk; use -1 for a full read.',
+      description: 'Last inclusive line. Omit for a ' + DEFAULT_READ_LINE_LIMIT + '-line chunk; use -1 for a full '
+        + 'read, which is still subject to the character ceiling.',
     },
   },
   ['file_path'],
@@ -44,7 +63,13 @@ export const CODING_READ_FILE_DEFINITION = codingDefinition(
 
 export const CODING_WRITE_FILE_DEFINITION = codingDefinition(
   'write_file',
-  'Write UTF-8 text within the workspace and return a capped unified diff (skipped for oversized files).',
+  'Write one workspace file from complete UTF-8 content and return a capped unified diff of what changed (the diff '
+    + 'is skipped, but the write still happens, once the change exceeds the diff limits). content is the whole file, '
+    + 'never a patch, so replacing an existing file requires overwrite=true and discards everything not repeated in '
+    + 'content — for a targeted change to a file that already exists, use find_and_replace after reading it. '
+    + 'file_path is workspace-relative; an absolute path inside the workspace also resolves, anything outside it is '
+    + 'refused. Missing parent directories are created unless create_dirs=false, and an existing directory at the '
+    + 'target path is an error rather than an overwrite.',
   {
     file_path: { type: 'string', description: 'Workspace-relative destination path.' },
     content: { type: 'string', description: 'Complete UTF-8 content to write.' },
@@ -172,7 +197,13 @@ export const APPLY_DIFF_DEFINITION = codingDefinition(
 
 export const FIND_AND_REPLACE_DEFINITION = codingDefinition(
   'find_and_replace',
-  'Replace literal text or JavaScript regular-expression matches in one workspace file.',
+  'Replace literal text (default) or JavaScript regular-expression matches in one workspace file. Read the file '
+    + 'first: search must match what is on disk right now, with the "   12 | " line-number prefix that read_file adds '
+    + 'stripped off. Unlike an exact-edit tool this replaces EVERY occurrence and never refuses an ambiguous match, '
+    + 'so include enough surrounding text to select only what you meant. replace is inserted literally in both modes '
+    + '— $&, $1, and friends are not expanded. A .bak copy is written next to the file unless backup=false. '
+    + 'file_path must be an existing regular file inside the workspace; a missing file is a normal recoverable '
+    + 'outcome, so confirm the path with list_directory rather than retrying.',
   {
     file_path: { type: 'string' },
     search: { type: 'string' },
@@ -216,8 +247,8 @@ export const CODING_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
 
 /** Register the lower-case compatibility surface used by the universal coding agent. */
 export function registerCodingTools(registry: ToolRegistry, paths: WorkspacePathResolver): void {
-  registry.register(CODING_READ_FILE_DEFINITION, inputs => readFile(inputs, paths))
-  registry.register(CODING_WRITE_FILE_DEFINITION, inputs => writeFile(inputs, paths))
+  registry.register(CODING_READ_FILE_DEFINITION, (inputs, context) => readFile(inputs, paths, context))
+  registry.register(CODING_WRITE_FILE_DEFINITION, (inputs, context) => writeFile(inputs, paths, context))
   registry.register(LIST_DIRECTORY_DEFINITION, inputs => listDirectory(inputs, paths))
   registry.register(COPY_FILE_DEFINITION, inputs => copyFile(inputs, paths))
   registry.register(MOVE_FILE_DEFINITION, inputs => moveFile(inputs, paths))
@@ -229,7 +260,7 @@ export function registerCodingTools(registry: ToolRegistry, paths: WorkspacePath
   registry.register(GIT_ADD_DEFINITION, inputs => gitAdd(inputs, paths))
   registry.register(CREATE_DIFF_DEFINITION, createDiff)
   registry.register(APPLY_DIFF_DEFINITION, applyDiff)
-  registry.register(FIND_AND_REPLACE_DEFINITION, inputs => findAndReplace(inputs, paths))
+  registry.register(FIND_AND_REPLACE_DEFINITION, (inputs, context) => findAndReplace(inputs, paths, context))
   registry.register(ANALYZE_CODE_STRUCTURE_DEFINITION, inputs => analyzeCodeStructure(inputs, paths))
 }
 
@@ -255,7 +286,11 @@ function codingDefinition(
 }
 
 /** Read a line-numbered, bounded chunk of one regular file. */
-export async function readFile(inputs: JsonObject, paths: WorkspacePathResolver): Promise<string> {
+export async function readFile(
+  inputs: JsonObject,
+  paths: WorkspacePathResolver,
+  context?: FileToolContext,
+): Promise<string> {
   const filePath = requiredString(inputs, 'file_path')
   const startLine = Math.max(1, optionalNullableInteger(inputs, 'start_line', 1))
   const requestedEnd = optionalNullableInteger(inputs, 'end_line', Number.NaN)
@@ -266,11 +301,14 @@ export async function readFile(inputs: JsonObject, paths: WorkspacePathResolver)
   const target = await paths.resolve(filePath)
   await requireRegularFile(target, filePath)
   const fileInfo = await stat(target)
-  if (fileInfo.size > MAX_READ_FILE_BYTES) {
+  // Shares ReadFile's ceiling on purpose: this lower-case surface is registered
+  // alongside it, so a laxer cap here would just be the bypass a model finds first.
+  const maxBytes = resolveMaxReadFileBytes()
+  if (fileInfo.size > maxBytes) {
     throw new ValidationError(
       'file_path',
-      'is ' + fileInfo.size + ' bytes, exceeding the ' + MAX_READ_FILE_BYTES
-        + '-byte read_file limit; search it with grep or split it into smaller files first',
+      'is ' + fileInfo.size + ' bytes, exceeding the ' + maxBytes
+        + '-byte read_file limit; search it with GrepTool or split it into smaller files first',
       filePath,
     )
   }
@@ -289,6 +327,17 @@ export async function readFile(inputs: JsonObject, paths: WorkspacePathResolver)
   if (!output) {
     return 'No content in specified range'
   }
+  enforceReadWindowCeiling(output, {
+    filePath,
+    lineParameter: 'end_line',
+    lineParameterBase: startLine - 1,
+    toolName: 'read_file',
+  })
+  recordFileRead(context, target, text, {
+    mtimeMs: fileInfo.mtimeMs,
+    partialView: startLine > 1 || endLine < lines.length,
+    size: fileInfo.size,
+  })
   if (!fullFile && endLine < lines.length) {
     return output + '\n\n[read_file] Showing lines ' + startLine + '-' + endLine + ' of ' + lines.length + '. '
       + 'Continue with start_line=' + (endLine + 1) + '. '
@@ -298,7 +347,11 @@ export async function readFile(inputs: JsonObject, paths: WorkspacePathResolver)
 }
 
 /** Write UTF-8 text, preserving Python compatibility while constraining writes to the workspace. */
-export async function writeFile(inputs: JsonObject, paths: WorkspacePathResolver): Promise<string> {
+export async function writeFile(
+  inputs: JsonObject,
+  paths: WorkspacePathResolver,
+  context?: FileToolContext,
+): Promise<string> {
   const filePath = requiredString(inputs, 'file_path')
   const content = requiredText(inputs, 'content')
   const createDirs = optionalBoolean(inputs, 'create_dirs', true)
@@ -317,12 +370,25 @@ export async function writeFile(inputs: JsonObject, paths: WorkspacePathResolver
     throw new ValidationError('file_path', 'parent directory does not exist and create_dirs is false', filePath)
   }
 
-  const previous = exists ? await Bun.file(target).text() : ''
+  const relativePath = await paths.relative(target)
   // Re-validate containment immediately before mutating; resolve() ran earlier
   // and a swapped symlink could redirect the write (best-effort; see recheck).
+  // This is also the last await: the freshness check, the read of the bytes about
+  // to be lost, and the write itself all run synchronously after it.
   const checkedTarget = await paths.recheck(target)
-  await Bun.write(checkedTarget, content)
-  const relativePath = await paths.relative(target)
+  let previous = ''
+  if (!exists) {
+    guardedCreate({ absolutePath: checkedTarget, content, displayPath: filePath, sessionId: context?.sessionId })
+  } else {
+    previous = guardedWrite({
+      absolutePath: checkedTarget,
+      displayPath: filePath,
+      mode: 'overwrite',
+      sessionId: context?.sessionId,
+      toolName: 'write_file',
+      transform: () => content,
+    }).previous
+  }
   const lineCount = content.length === 0 ? 0 : content.split('\n').length
   const summary = 'Successfully wrote ' + content.length + ' characters (' + lineCount + ' lines) to ' + relativePath
   if (previous === content) {
@@ -1090,7 +1156,11 @@ function annotateOperations(operations: readonly DiffOperation[]): AnnotatedOper
 }
 
 /** Find and replace text in one workspace file, optionally preserving a sibling backup. */
-export async function findAndReplace(inputs: JsonObject, paths: WorkspacePathResolver): Promise<string> {
+export async function findAndReplace(
+  inputs: JsonObject,
+  paths: WorkspacePathResolver,
+  context?: FileToolContext,
+): Promise<string> {
   const filePath = requiredString(inputs, 'file_path')
   const search = requiredString(inputs, 'search')
   const replacement = requiredText(inputs, 'replace')
@@ -1115,46 +1185,55 @@ export async function findAndReplace(inputs: JsonObject, paths: WorkspacePathRes
     assertSafeRegexPattern(search)
   }
 
-  const content = await Bun.file(target).text()
-  if (pattern !== undefined && content.length > MAX_REGEX_SUBJECT_BYTES) {
-    // A synchronous regex cannot be timed out; cap the subject size so catastrophic
-    // backtracking cannot freeze the single-threaded daemon.
-    throw new ValidationError(
-      'file_path',
-      'is ' + content.length + ' characters, exceeding the ' + MAX_REGEX_SUBJECT_BYTES
-        + '-character regex subject limit; use literal mode or a smaller file',
-      filePath,
-    )
-  }
-
   const backupPath = backup ? await paths.resolve(filePath + '.bak') : undefined
-  if (backupPath !== undefined) {
-    await Bun.write(backupPath, content)
-  }
+  const relativePath = await paths.relative(target)
+  // Last await before the guarded region; the backup, the substitution and the write
+  // all see the same bytes, so the backup can never record a state that was not replaced.
+  const checkedTarget = await paths.recheck(target)
 
-  let count: number
-  let updated: string
-  if (pattern !== undefined) {
-    count = [...content.matchAll(pattern)].length
-    // A function replacer keeps $-sequences in the replacement literal,
-    // consistent with the literal search modes below.
-    updated = content.replace(pattern, () => replacement)
-  } else if (caseSensitive) {
-    count = content.split(search).length - 1
-    updated = content.replaceAll(search, () => replacement)
-  } else {
-    const literalPattern = new RegExp(escapeRegularExpression(search), 'gi')
-    count = 0
-    updated = content.replace(literalPattern, () => {
-      count += 1
-      return replacement
-    })
-  }
-  if (count > 0) {
-    await Bun.write(target, updated)
-  }
+  let count = 0
+  const written = guardedWrite({
+    absolutePath: checkedTarget,
+    displayPath: filePath,
+    mode: 'targeted',
+    sessionId: context?.sessionId,
+    toolName: 'find_and_replace',
+    transform: content => {
+      if (pattern !== undefined && content.length > MAX_REGEX_SUBJECT_BYTES) {
+        // A synchronous regex cannot be timed out; cap the subject size so catastrophic
+        // backtracking cannot freeze the single-threaded daemon.
+        throw new ValidationError(
+          'file_path',
+          'is ' + content.length + ' characters, exceeding the ' + MAX_REGEX_SUBJECT_BYTES
+            + '-character regex subject limit; use literal mode or a smaller file',
+          filePath,
+        )
+      }
+      if (backupPath !== undefined) {
+        writeFileSync(backupPath, content)
+      }
+      if (pattern !== undefined) {
+        count = [...content.matchAll(pattern)].length
+        // A function replacer keeps $-sequences in the replacement literal,
+        // consistent with the literal search modes below.
+        return content.replace(pattern, () => replacement)
+      }
+      if (caseSensitive) {
+        count = content.split(search).length - 1
+        return content.replaceAll(search, () => replacement)
+      }
+      const literalPattern = new RegExp(escapeRegularExpression(search), 'gi')
+      return content.replace(literalPattern, () => {
+        count += 1
+        return replacement
+      })
+    },
+  })
   const backupMessage = backupPath === undefined ? '' : ' (backup saved as ' + basename(backupPath) + ')'
-  return 'Replaced ' + count + ' occurrence(s) in ' + (await paths.relative(target)) + backupMessage
+  return withStaleNotice(
+    written.staleNotice,
+    'Replaced ' + count + ' occurrence(s) in ' + relativePath + backupMessage,
+  )
 }
 
 /**

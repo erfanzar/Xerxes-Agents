@@ -20,6 +20,19 @@ export const DEFAULT_COMPACTION_THRESHOLD_RATIO = 0.75
 export const DEFAULT_COMPACTION_SUMMARY_MAX_TOKENS = 8_192
 export const DEFAULT_COMPACTION_SUMMARY_TEMPERATURE = 0.2
 
+/** Delimiters of the model's private scratchpad; `stripCompactionAnalysis` removes it before storage. */
+export const COMPACTION_ANALYSIS_OPEN_TAG = '<analysis>'
+export const COMPACTION_ANALYSIS_CLOSE_TAG = '</analysis>'
+
+/** How dense each section of the compaction template should be. */
+export const COMPACTION_LENGTH_INSTRUCTIONS = Object.freeze({
+  brief: 'Keep every section to its shortest useful form: one clause per bullet, no narration.',
+  concise: 'Keep bullets to one or two lines and drop anything the next turn will not act on.',
+  detailed: 'Keep full detail in every section: exact values, identifiers, and the reasoning behind each decision.',
+})
+
+export type CompactionTargetLength = keyof typeof COMPACTION_LENGTH_INSTRUCTIONS
+
 /** Caller-supplied summary function; no provider client is constructed by context code. */
 export type CompactionSummaryAgent = (
   messages: readonly ContextMessage[],
@@ -254,7 +267,7 @@ export class CompactionProvisioner {
     let summaryCalled = false
     let summaryFailure: unknown
     let summaryWasEmpty = false
-    const compressor = this.compressor(protectedTail, (compactableMessages, _budgetTokens) => {
+    const compressor = this.compressor(protectedTail, options.force === true, (compactableMessages, _budgetTokens) => {
       summaryCalled = true
       try {
         const summary = options.previousSummary === undefined
@@ -305,9 +318,10 @@ export class CompactionProvisioner {
     }
   }
 
-  private compressor(protectLast: number, summarizer: Summarizer): ContextCompressor {
+  private compressor(protectLast: number, forceSummarize: boolean, summarizer: Summarizer): ContextCompressor {
     return new ContextCompressor({
       contextWindow: this.maxContextTokens,
+      forceSummarize,
       model: this.model,
       protectFirst: 0,
       protectLast,
@@ -353,31 +367,142 @@ export function messageContentToText(content: unknown): string {
   return content === undefined || content === null ? '' : String(content)
 }
 
-/** Render full messages into the explicit, deterministic prompt input supplied to a model port. */
+/**
+ * Render full messages into the explicit, deterministic prompt input supplied to a model port.
+ *
+ * Tool traffic collapses into one `called name(args) -> outcome` line per call. Dumping raw
+ * `tool_calls` JSON next to a separate result message spent most of the summarizer's input on
+ * argument scaffolding and call ids — the budget the summary needs for file state and decisions.
+ */
 export function renderMessagesForSummary(messages: readonly ContextMessage[]): string {
-  return messages.map((message, index) => {
+  const resultsById = toolResultsById(messages)
+  const folded = new Set<string>()
+  const rendered: string[] = []
+  for (const message of messages) {
     const role = typeof message.role === 'string' ? message.role.toUpperCase() : 'UNKNOWN'
-    const lines = [`Message ${index + 1} [${role}]`]
+    const callLines = renderToolCalls(message.tool_calls, resultsById, folded)
+    const identifier = typeof message.tool_call_id === 'string' ? message.tool_call_id : ''
+    // The result already appears inside its caller's line; repeating it here would restore
+    // exactly the duplication this rendering exists to remove.
+    if (role === 'TOOL' && folded.has(identifier)) continue
+    const lines = [`Message ${rendered.length + 1} [${role}]`]
     const content = messageContentToText(message.content)
     if (content) lines.push(content)
-    if (message.tool_calls) lines.push(`tool_calls=${stableJson(message.tool_calls)}`)
+    lines.push(...callLines)
     if (message.tool_call_id) lines.push(`tool_call_id=${String(message.tool_call_id)}`)
-    return lines.join('\n')
-  }).join('\n\n')
+    rendered.push(lines.join('\n'))
+  }
+  return rendered.join('\n\n')
+}
+
+export interface CompactionPromptOptions {
+  readonly context: string
+  readonly preserveTopics?: readonly string[]
+  readonly previousSummary?: string
+  readonly targetLength?: string
+}
+
+/**
+ * The single compaction template.
+ *
+ * Two templates used to exist — this one and a shorter set of generic bullets in the agent — and
+ * only the weaker one was reachable from the daemon. Both entry points now render through here so
+ * an edit to the wording cannot improve a prompt nobody runs.
+ */
+export function buildCompactionPromptFromText(options: CompactionPromptOptions): string {
+  const lengthInstruction = COMPACTION_LENGTH_INSTRUCTIONS[options.targetLength as CompactionTargetLength]
+    ?? COMPACTION_LENGTH_INSTRUCTIONS.concise
+  const topics = (options.preserveTopics ?? []).filter(topic => typeof topic === 'string' && topic.trim())
+  const prior = options.previousSummary?.trim()
+  return [
+    'You are the context-compaction engine for a long-running coding session. Rewrite the slice of',
+    'transcript below into the only record of it that survives: the raw messages are dropped once you',
+    'answer, so whatever you leave out is gone for the rest of the session.',
+    '',
+    'WHERE YOUR OUTPUT LANDS',
+    'The summary is inserted between the preserved opening of the session and a preserved live tail of',
+    'the most recent messages, which the agent still reads verbatim. Cover the slice below and nothing',
+    'else: do not restate the system prompt, and do not re-describe the recent turns that follow you.',
+    '',
+    `FIRST, THINK IN ${COMPACTION_ANALYSIS_OPEN_TAG}`,
+    `Open with an ${COMPACTION_ANALYSIS_OPEN_TAG} block and use it to list every user turn in the slice, the task in`,
+    'flight, the files touched, and anything you are unsure about. That block is stripped before the',
+    `summary is stored, so it costs the agent nothing. Close it with ${COMPACTION_ANALYSIS_CLOSE_TAG}, then write the`,
+    'summary.',
+    '',
+    'THEN WRITE THE SUMMARY, USING EXACTLY THESE SECTIONS',
+    '',
+    '## User requests',
+    'Every non-tool user message in the slice, in order, one bullet each — including asks that were',
+    'refused, deferred, corrected, or already satisfied. Never merge two requests into one bullet and',
+    'never drop one because it looks handled. Quote the operative wording of each ask.',
+    '',
+    '## Current task',
+    'The instruction being worked on where the slice ends, quoted VERBATIM, then how far it got.',
+    'Do not paraphrase the instruction itself.',
+    '',
+    '## Files touched',
+    'One bullet per file: absolute path, what was done to it (read, created, edited, deleted), and its',
+    'state now — saved, half-edited, reverted, or only inspected. Reproduce paths exactly.',
+    '',
+    '## Decisions',
+    'Each decision with the reason behind it, so it is not reopened and re-argued.',
+    '',
+    '## Errors and fixes',
+    'Each failure — error text, failing test, wrong output — its cause, and whether the fix landed.',
+    '',
+    '## Open questions',
+    'Unresolved questions, unverified assumptions, and anything waiting on the user.',
+    '',
+    '## Next step',
+    'The single concrete action to take next. If the slice ends mid-edit, name the file and the change.',
+    '',
+    'RULES',
+    `- ${lengthInstruction}`,
+    '- Reproduce identifiers exactly: paths, function names, commands, flags, versions, error strings.',
+    '- Record outcomes, not narration. Drop chatter, restated plans, and duplicated text.',
+    '- Never invent progress the slice does not show; write "unknown" rather than guessing.',
+    '- Keep every section header, and write "none" under a section the slice leaves empty.',
+    ...(topics.length ? [`- Ensure these topics are covered: ${topics.join(', ')}`] : []),
+    '',
+    ...(prior
+      ? ['EXISTING SUMMARY TO REFRESH (fold it into the sections above; do not append to it):', prior, '']
+      : []),
+    'CONTEXT TO SUMMARIZE:',
+    options.context,
+    '',
+    `Begin with ${COMPACTION_ANALYSIS_OPEN_TAG}.`,
+  ].join('\n')
 }
 
 /** Build the durable-memory instruction used by ProviderCompactionAgent's injected model port. */
 export function buildCompactionPrompt(messages: readonly ContextMessage[], previousSummary?: string): string {
-  const prior = previousSummary?.trim()
-  return [
-    'Rewrite the following conversation history into a compact, durable memory for the next model turn.',
-    'Preserve concrete facts, user instructions, decisions, file paths, tool results, errors, fixes,',
-    'open questions, and current task state. Drop chatter and duplicate text. Output only the summary.',
-    '',
-    ...(prior ? ['Existing summary to refresh:', prior, ''] : []),
-    'Conversation history to compact:',
-    renderMessagesForSummary(messages),
-  ].join('\n')
+  return buildCompactionPromptFromText({
+    context: renderMessagesForSummary(messages),
+    ...(previousSummary === undefined ? {} : { previousSummary }),
+  })
+}
+
+/**
+ * Remove the model's scratchpad from a summary before it is stored.
+ *
+ * Storing the reasoning would spend the compacted window on notes the next turn cannot use, and a
+ * response truncated inside an unterminated block would otherwise persist as a half-written thought.
+ */
+export function stripCompactionAnalysis(summary: string): string {
+  if (typeof summary !== 'string') return ''
+  let text = summary
+  for (;;) {
+    const open = text.indexOf(COMPACTION_ANALYSIS_OPEN_TAG)
+    if (open < 0) break
+    const close = text.indexOf(COMPACTION_ANALYSIS_CLOSE_TAG, open + COMPACTION_ANALYSIS_OPEN_TAG.length)
+    if (close < 0) {
+      text = text.slice(0, open)
+      break
+    }
+    text = `${text.slice(0, open)}${text.slice(close + COMPACTION_ANALYSIS_CLOSE_TAG.length)}`
+  }
+  return text.trim()
 }
 
 function unchanged(messages: readonly ContextMessage[], tokens: number, reason: string): CompactionProvision {
@@ -400,6 +525,72 @@ function failure(
   error: unknown,
 ): CompactionProvision {
   return { ...unchanged(messages, tokens, reason), error: errorMessage(error) }
+}
+
+const TOOL_ARGUMENT_PREVIEW_LIMIT = 200
+const TOOL_OUTCOME_PREVIEW_LIMIT = 400
+
+function toolResultsById(messages: readonly ContextMessage[]): Map<string, ContextMessage> {
+  const results = new Map<string, ContextMessage>()
+  for (const message of messages) {
+    if (message.role !== 'tool') continue
+    const identifier = typeof message.tool_call_id === 'string' ? message.tool_call_id : ''
+    if (!identifier || results.has(identifier)) continue
+    results.set(identifier, message)
+  }
+  return results
+}
+
+function renderToolCalls(
+  toolCalls: unknown,
+  resultsById: ReadonlyMap<string, ContextMessage>,
+  folded: Set<string>,
+): string[] {
+  if (toolCalls === undefined || toolCalls === null) return []
+  // Unknown shapes still have to reach the summarizer; falling back to the old dump is lossy
+  // in prompt budget but never lossy in content.
+  if (!Array.isArray(toolCalls)) return [`tool_calls=${stableJson(toolCalls)}`]
+  return toolCalls.map(call => {
+    if (!isRecord(call)) return `called ${truncatePreview(String(call), TOOL_ARGUMENT_PREVIEW_LIMIT)}`
+    const fn = isRecord(call.function) ? call.function : undefined
+    const name = firstText(fn?.name, call.name, call.tool_name) || 'unknown_tool'
+    const identifier = firstText(call.id, call.tool_call_id)
+    const result = identifier ? resultsById.get(identifier) : undefined
+    if (identifier && result !== undefined) folded.add(identifier)
+    return `called ${name}(${shortArguments(fn?.arguments ?? call.arguments ?? call.input ?? call.args)}) `
+      + `-> ${toolOutcome(result)}`
+  })
+}
+
+function toolOutcome(result: ContextMessage | undefined): string {
+  if (result === undefined) return '(no result in this slice)'
+  const failed = result.is_error === true || result.isError === true || result.status === 'error'
+  const text = collapseWhitespace(messageContentToText(result.content))
+  if (!text) return failed ? 'error (no output)' : 'ok (no output)'
+  const preview = truncatePreview(text, TOOL_OUTCOME_PREVIEW_LIMIT)
+  return failed ? `error: ${preview}` : preview
+}
+
+function shortArguments(value: unknown): string {
+  if (value === undefined || value === null) return ''
+  const text = collapseWhitespace(typeof value === 'string' ? value : stableJson(value))
+  return truncatePreview(text, TOOL_ARGUMENT_PREVIEW_LIMIT)
+}
+
+function collapseWhitespace(text: string): string {
+  return text.replace(/\s+/g, ' ').trim()
+}
+
+function truncatePreview(text: string, limit: number): string {
+  if (text.length <= limit) return text
+  return `${text.slice(0, limit)}… (+${text.length - limit} chars)`
+}
+
+function firstText(...candidates: readonly unknown[]): string {
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim()) return candidate.trim()
+  }
+  return ''
 }
 
 function stableJson(value: unknown): string {

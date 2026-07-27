@@ -1,11 +1,12 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { utimesSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { expect, test } from 'bun:test'
+import { afterEach, expect, test } from 'bun:test'
 
 import { ToolRegistry } from '../src/executors/toolRegistry.js'
 import {
@@ -27,6 +28,8 @@ import {
   registerCodingTools,
   writeFile,
 } from '../src/tools/codingTools.js'
+import { fileStateTracker } from '../src/tools/fileState.js'
+import { DEFAULT_MAX_READ_FILE_BYTES, MAX_READ_WINDOW_CHARS } from '../src/tools/fileTools.js'
 import { WorkspacePathResolver } from '../src/tools/pathSafety.js'
 import type { JsonObject, ToolCall } from '../src/types/toolCalls.js'
 
@@ -51,6 +54,10 @@ async function git(cwd: string, arguments_: readonly string[]): Promise<string> 
   }
   return stdout
 }
+
+afterEach(() => {
+  fileStateTracker.clear()
+})
 
 function call(name: string, arguments_: JsonObject): ToolCall {
   return {
@@ -185,8 +192,27 @@ test('write_file defaults to no overwrite and skips the diff preview for oversiz
 
 test('read_file rejects files beyond the byte cap with an actionable error', async () => {
   await inWorkspace(async (workspace, paths) => {
-    await Bun.write(join(workspace, 'huge.txt'), 'x'.repeat(10_000_001))
-    await expect(readFile({ file_path: 'huge.txt' }, paths)).rejects.toThrow('read_file limit')
+    await Bun.write(join(workspace, 'huge.txt'), 'x'.repeat(DEFAULT_MAX_READ_FILE_BYTES + 1))
+    await expect(readFile({ file_path: 'huge.txt' }, paths)).rejects.toThrow(
+      String(DEFAULT_MAX_READ_FILE_BYTES) + '-byte read_file limit',
+    )
+  })
+})
+
+test('read_file refuses a window over the character ceiling instead of dumping a generated file', async () => {
+  await inWorkspace(async (workspace, paths) => {
+    // One line, so the line window cannot bound the return and no truncation notice fires.
+    await Bun.write(join(workspace, 'bundle.min.js'), 'a'.repeat(MAX_READ_WINDOW_CHARS + 1))
+    const minified = readFile({ file_path: 'bundle.min.js' }, paths)
+    await expect(minified).rejects.toThrow(String(MAX_READ_WINDOW_CHARS) + '-character read_file window ceiling')
+    await expect(minified).rejects.toThrow('GrepTool')
+
+    const wide = ('y'.repeat(49) + '\n').repeat(2_000)
+    await Bun.write(join(workspace, 'wide.txt'), wide)
+    // The suggested end_line is absolute, so it must be offset by start_line.
+    await expect(readFile({ end_line: -1, file_path: 'wide.txt', start_line: 101 }, paths))
+      .rejects.toThrow('retry with end_line=')
+    expect(await readFile({ file_path: 'wide.txt' }, paths)).toContain('Continue with start_line=401')
   })
 })
 
@@ -230,5 +256,38 @@ test('find_and_replace refuses regex mode beyond the subject-size cap but allows
       replace: 'yyy',
       search: 'xxx',
     }, paths)).toContain('Replaced')
+  })
+})
+
+test('the coding surface enforces the same read-before-write rule as the upper-case tools', async () => {
+  await inWorkspace(async (workspace, paths) => {
+    const path = join(workspace, 'module.ts')
+    await Bun.write(path, 'export const value = 1\n')
+    const context = { sessionId: 'session-coding' }
+
+    await expect(findAndReplace(
+      { backup: false, file_path: 'module.ts', replace: '2', search: '1' },
+      paths,
+      context,
+    )).rejects.toThrow('has not been read in this session')
+    expect(await Bun.file(path).text()).toBe('export const value = 1\n')
+
+    await readFile({ file_path: 'module.ts' }, paths, context)
+    expect(await findAndReplace(
+      { backup: false, file_path: 'module.ts', replace: '2', search: '1' },
+      paths,
+      context,
+    )).toContain('Replaced 1 occurrence(s)')
+
+    // Another writer lands between the read and the whole-file rewrite.
+    await Bun.write(path, 'export const value = 99\nexport const extra = true\n')
+    const future = new Date(Date.now() + 5_000)
+    utimesSync(path, future, future)
+    await expect(writeFile(
+      { content: 'export const value = 3\n', file_path: 'module.ts', overwrite: true },
+      paths,
+      context,
+    )).rejects.toThrow('a whole-file write would discard those changes')
+    expect(await Bun.file(path).text()).toContain('export const extra = true')
   })
 })

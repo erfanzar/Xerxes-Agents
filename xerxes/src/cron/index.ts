@@ -3,4 +3,5 @@
 
 export * from './delivery.js'
 export * from './jobs.js'
+export * from './lease.js'
 export * from './scheduler.js'

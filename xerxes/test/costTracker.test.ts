@@ -125,3 +125,57 @@ test('cost events are immutable, unknown models cost zero, and invalid accountin
   expect(tracker.eventCount).toBe(0)
   expect(tracker.totalCost).toBe(0)
 })
+
+test('source breakdown separates housekeeping spend from the user turn within one session', () => {
+  const tracker = new CostTracker({
+    costCalculator: (_model, inputTokens, outputTokens) => (inputTokens + outputTokens) / 1_000,
+  })
+
+  tracker.recordTurn('big', 4_000, 1_000, 'turn_1', { sessionId: 's1', source: 'main' })
+  tracker.recordTurn('small', 2_000, 500, 'compact', { sessionId: 's1', source: 'compaction' })
+  tracker.recordTurn('small', 400, 100, 'title', { sessionId: 's1', source: 'session_title' })
+  // Another session's housekeeping must not leak into this session's answer.
+  tracker.recordTurn('small', 9_000, 1_000, 'compact', { sessionId: 's2', source: 'compaction' })
+  // Events from call sites that predate the dimension stay unknown, not housekeeping.
+  tracker.recordTurn('big', 1_000, 0, 'legacy', { sessionId: 's1' })
+
+  const breakdown = tracker.sourceBreakdown({ sessionId: 's1' })
+  expect(breakdown.total.costUsd).toBeCloseTo(9, 12)
+  expect(breakdown.main.costUsd).toBeCloseTo(5, 12)
+  expect(breakdown.housekeeping.costUsd).toBeCloseTo(3, 12)
+  expect(breakdown.housekeeping.turns).toBe(2)
+  expect(breakdown.untagged.costUsd).toBeCloseTo(1, 12)
+  expect(breakdown.housekeepingCostShare).toBeCloseTo(3 / 9, 12)
+  expect(breakdown.bySource).toMatchObject({
+    main: { turns: 1, costUsd: 5 },
+    compaction: { turns: 1, costUsd: 2.5 },
+    session_title: { turns: 1, costUsd: 0.5 },
+    [UNSCOPED_COST_SCOPE]: { turns: 1, costUsd: 1 },
+  })
+
+  expect(tracker.bySource()).toMatchObject({ compaction: { turns: 2, costUsd: 12.5 } })
+  expect(tracker.forSource('session_title')).toMatchObject({ turns: 1, costUsd: 0.5 })
+  expect(tracker.forSource('speculation')).toMatchObject({ turns: 0, costUsd: 0 })
+  expect(tracker.sourceBreakdown().total.costUsd).toBeCloseTo(19, 12)
+  expect(tracker.asRecords()[1]).toMatchObject({ source: 'compaction' })
+  // Whole-ledger summary: 13 of 19 dollars are housekeeping across both sessions.
+  expect(tracker.summary()).toContain('Housekeeping share: 68.4%')
+})
+
+test('an untagged ledger keeps its existing totals, records, and summary shape', () => {
+  const tracker = new CostTracker({ now: () => new Date('2026-07-13T10:00:00.000Z') })
+  tracker.recordTurn('openai/gpt-4o', 1_000, 500, 'turn_1')
+
+  // Adding the dimension must not change what existing callers already read.
+  expect(tracker.asRecords()[0]).toMatchObject({ source: null })
+  expect(tracker.summary()).not.toContain('By Source')
+  const breakdown = tracker.sourceBreakdown()
+  expect(breakdown.untagged.turns).toBe(1)
+  expect(breakdown.housekeeping.turns).toBe(0)
+  expect(breakdown.housekeepingCostShare).toBe(0)
+
+  const scoped = new CostTracker({ sessionId: 'compactor', source: 'compaction' })
+  scoped.recordRaw('embedding', 0.02)
+  expect(scoped.events[0]?.source).toBe('compaction')
+  expect(scoped.sourceBreakdown({ sessionId: 'compactor' }).housekeepingCostShare).toBe(1)
+})
