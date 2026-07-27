@@ -11,7 +11,15 @@ export const NOTEBOOK_EDIT_TOOL_DEFINITION: ToolDefinition = {
   type: 'function',
   function: {
     name: 'NotebookEditTool',
-    description: 'Replace one Jupyter notebook cell source through the workspace-safe filesystem boundary.',
+    description: 'Replace the source of one existing .ipynb cell, addressed by zero-based index. Overwriting is all '
+      + 'it can do: cells cannot be inserted, appended, deleted, or reordered, and an index at or past the end is '
+      + 'refused with the valid range in the message. cell_type is only nominally optional — it defaults to "code" '
+      + 'and is written unconditionally, so omitting it while editing a markdown cell converts that cell to code '
+      + 'and leaves it without the outputs and execution_count keys nbformat expects; always pass the type the cell '
+      + 'should keep. Existing outputs are preserved untouched and therefore go stale against the new source. The '
+      + 'whole notebook is reserialized with one-space indentation, so even a one-line change produces a whole-file '
+      + 'diff. Read the notebook first — ReadFile shows the raw JSON — to get the index right, because there is no '
+      + 'dry run and no way to address a cell by its content.',
     parameters: {
       type: 'object',
       additionalProperties: false,

@@ -9,6 +9,7 @@ import { xerxesSubdirFor } from '../core/paths.js'
 import { scanContextContent } from '../security/promptScanner.js'
 import { ExecutionRegistry, type EntryHandler } from './executionRegistry.js'
 import { loadProjectAgentWorkspace } from './projectWorkspace.js'
+import { VERIFICATION_MANDATE_RULES } from './verificationMandate.js'
 
 export const DEFAULT_BOOTSTRAP_COMMANDS = [
   'help',
@@ -292,13 +293,11 @@ export function buildBootstrapSystemPrompt(
   sections.push(
     '',
     '# Context headroom',
-    '- Oversized tool results are stored in project agent memory outside model context and replaced with a bounded preview.',
-    '- Treat `[Large tool result stored outside model context]` as a valid tool result, not a failure.',
-    '- Do not rerun noisy commands just to recover output that is already stored.',
+    '- An oversized tool result is replaced with a `<persisted-output>` envelope carrying a bounded preview, the original character count, and the absolute path of the full output on disk.',
+    '- That envelope is a successful result, not a failure or a truncation error.',
+    '- Work from the preview. Read the path only when the preview genuinely lacks what you need, and read it narrowly rather than whole.',
+    '- Never rerun a command to recover output the envelope already stored.',
   )
-  if (toolNames.has('agent_memory_read')) {
-    sections.push('- Read stored-result pointers with agent_memory_read using its supplied schema.')
-  }
   if (toolNames.has('SetInteractionModeTool')) {
     sections.push(
       '',
@@ -333,6 +332,9 @@ export function buildBootstrapSystemPrompt(
     }
   }
   sections.push(
+    '',
+    '# Verification',
+    ...VERIFICATION_MANDATE_RULES,
     '',
     '# Critical',
     '- Be concise and direct.',

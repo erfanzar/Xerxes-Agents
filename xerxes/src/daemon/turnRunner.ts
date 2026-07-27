@@ -3,6 +3,8 @@
 
 import type { AgentDefinition } from '../agents/definitions.js'
 import type { AuditEmitter } from '../audit/emitter.js'
+import { compressToolResult } from '../context/headroom.js'
+import { ToolResultStorage } from '../context/toolResultStorage.js'
 import { estimateContextTokens } from '../context/windowUsage.js'
 import { ValidationError } from '../core/errors.js'
 import type { ToolExecutor } from '../executors/toolRegistry.js'
@@ -19,11 +21,14 @@ import type { SpawnedAgentSnapshot } from '../operators/subagents.js'
 import type { LlmClient } from '../llms/client.js'
 import { getContextLimit } from '../llms/providerRegistry.js'
 import { agentNameForMode, modeSwitchHint, normalizeInteractionMode } from '../runtime/interactionModes.js'
+import { beginEditDiagnosticsTurn, reportEditDiagnostics } from '../runtime/editDiagnostics.js'
 import { withActiveSession } from '../runtime/sessionContext.js'
 import { resolveTurnThinking } from '../runtime/thinkingLevels.js'
 import { captureUserWorkflowMemory } from '../runtime/workflowMemory.js'
 import { createAgentState, type AgentState, type StreamEvent } from '../streaming/events.js'
-import { runTurn } from '../streaming/loop.js'
+import { runTurn, type ContextReducer } from '../streaming/loop.js'
+import type { SystemPromptSegment } from '../streaming/promptCaching.js'
+import { fileStateTracker } from '../tools/fileState.js'
 import {
   DEFAULT_PERMISSION_MODE,
   type PermissionBroker,
@@ -67,6 +72,12 @@ export interface AgentTurnRunnerOptions {
   readonly permissionMode?: PermissionMode
   readonly policy?: ToolPolicy
   /**
+   * Relieve a mid-turn context overflow. The loop detects the overflow and can
+   * retry the round, but owns no compaction policy — without this the turn can
+   * only report the failure and stop.
+   */
+  readonly reduceContext?: ContextReducer
+  /**
    * Session default effort hint for reasoning APIs. This is only the base
    * layer of per-turn resolution: ultra mode and escalation keywords in the
    * prompt override it for that turn, so a value here never forces a
@@ -89,6 +100,23 @@ export interface AgentTurnRunnerOptions {
   /** Joins explicitly detached child work back into the creating parent turn. */
   readonly subagentCoordinator?: SubagentTurnCoordinator
   readonly toolExecutor?: ToolExecutor
+  /** Per-tool execution axes, normally `registry.capabilities` bound to the tool registry. */
+  readonly toolCapabilities?: (toolName: string, agentId?: string) => {
+    readonly concurrencySafe: boolean
+    readonly interruptBehavior: 'block' | 'cancel'
+  }
+  /**
+   * Run the workspace type-checker at turn end and report only the diagnostics
+   * this turn introduced. Off by default because it spawns a real subprocess:
+   * a host that has not opted in must never pay a typecheck per turn.
+   */
+  readonly editDiagnostics?: boolean
+  /**
+   * Root for off-transcript tool-result spill. Absent it, oversized results
+   * stay inline — the previous behavior — so a host that has nowhere to write
+   * is not silently degraded into losing output.
+   */
+  readonly toolResultDirectory?: string
   readonly temperature?: number
   readonly tools?: readonly ToolDefinition[]
   readonly topK?: number
@@ -113,6 +141,7 @@ export class AgentTurnRunner implements TurnRunner {
 
   private readonly bootstrapPrompts = new Map<string, Promise<string>>()
   private readonly states = new Map<string, AgentState>()
+  private readonly toolResultStores = new Map<string, ToolResultStorage>()
 
   constructor(private readonly options: AgentTurnRunnerOptions) {}
 
@@ -134,6 +163,9 @@ export class AgentTurnRunner implements TurnRunner {
     }
     this.states.set(session.id, state)
     const projectRoot = sessionProjectRoot(session)
+    // Anchor the pre-mutation baseline before any tool runs. Non-blocking:
+    // a whole-project typecheck costs seconds and read-only turns must not pay it.
+    if (this.options.editDiagnostics) beginEditDiagnosticsTurn(projectRoot)
     state.metadata.project_root = projectRoot
     state.metadata.interaction_mode = session.interactionMode
     state.metadata.plan_mode = session.planMode
@@ -170,7 +202,14 @@ export class AgentTurnRunner implements TurnRunner {
     )
     const memory = this.options.agentMemory ? await this.options.agentMemory(session) : undefined
     await captureUserWorkflowMemory(displayText, memory, { projectRoot })
-    const memoryPrompt = memory ? await memory.toPromptSection() : ''
+    // Rank the memory manifest against this turn rather than emitting every
+    // topic in path order. Without a query the selector is inert, so calling
+    // it with no arguments — as this did — left the ranking permanently off.
+    const memoryPrompt = memory ? await memory.toPromptSection({
+      query: displayText,
+      alreadySurfaced: recentTranscriptText(session),
+      recentSuccessfulTools: recentSuccessfulToolNames(session),
+    }) : ''
     const selfMemory = this.options.agentSelfMemory ? await this.options.agentSelfMemory(session) : undefined
     const selfMemoryPrompt = selfMemory ? await selfMemory.systemPromptAddendum() : ''
     const recoveredSubagents = this.options.subagentCoordinator
@@ -182,26 +221,48 @@ export class AgentTurnRunner implements TurnRunner {
       : []
     const restoredSubagentCount = this.options.subagentCoordinator
       ?.restore?.(session.id, recoveredSubagents) ?? 0
-    const systemPrompt = [
-      bootstrapPrompt,
-      promptAgent?.systemPrompt,
-      modeSwitchHint(
-        session.interactionMode,
-        tools?.some(tool => tool.function.name === 'SetInteractionModeTool') ?? false,
-      ),
-      this.options.subagentCoordinator
-        ? 'Background subagents are joined before the parent turn ends. Integrate their delivered results in this turn; do not promise synthesis in a later turn.'
-        : '',
-      restoredSubagentCount
-        ? `${restoredSubagentCount} delegated task handle(s) were recovered from this resumed transcript after their daemon process ended. TaskListTool, TaskGetTool, PeekAgent, and AwaitAgents expose honest terminal snapshots: completed output is preserved, while work last seen active is marked interrupted and must be explicitly restarted with ResetAgent or respawned. Do not retry stale ids as if they were still running.`
-        : '',
-      memoryPrompt,
-      selfMemoryPrompt,
-      systemPromptAddendum(session),
-    ]
-      .filter(Boolean)
-      .join('\n\n')
+    // Kept as named, ordered segments rather than one joined string: the
+    // provider caches a prefix, and a single drifting byte invalidates that
+    // block and everything after it. Memory is rewritten by the agent on most
+    // substantive turns, so joining it into the prefix meant following our own
+    // instructions busted the whole system cache on the very next request.
+    const systemSegments: SystemPromptSegment[] = [
+      { name: 'bootstrap', text: bootstrapPrompt },
+      { name: 'agent', text: promptAgent?.systemPrompt ?? '' },
+      {
+        name: 'mode_hint',
+        text: modeSwitchHint(
+          session.interactionMode,
+          tools?.some(tool => tool.function.name === 'SetInteractionModeTool') ?? false,
+        ),
+      },
+      {
+        name: 'subagent_join',
+        text: this.options.subagentCoordinator
+          ? 'Background subagents are joined before the parent turn ends. Integrate their delivered results in this turn; do not promise synthesis in a later turn.'
+          : '',
+      },
+      {
+        name: 'recovered_subagents',
+        text: restoredSubagentCount
+          ? `${restoredSubagentCount} delegated task handle(s) were recovered from this resumed transcript after their daemon process ended. TaskListTool, TaskGetTool, PeekAgent, and AwaitAgents expose honest terminal snapshots: completed output is preserved, while work last seen active is marked interrupted and must be explicitly restarted with ResetAgent or respawned. Do not retry stale ids as if they were still running.`
+          : '',
+        volatile: true,
+      },
+      { name: 'memory', text: memoryPrompt, volatile: true },
+      { name: 'self_memory', text: selfMemoryPrompt, volatile: true },
+      { name: 'addendum', text: systemPromptAddendum(session), volatile: true },
+    ].filter(segment => segment.text)
+    const systemPrompt = systemSegments.map(segment => segment.text).join('\n\n')
     const permissionBroker = this.options.interactions?.permissionBroker(session.id) ?? this.options.permissionBroker
+    // Publish the request scaffolding the daemon's context meter cannot see.
+    // Pricing the window from `session.messages` alone omits the system prompt
+    // and every tool schema — the largest fixed cost in the request — which is
+    // why auto-compaction fired late on tool-heavy sessions.
+    session.requestScaffold = {
+      ...(systemPrompt ? { systemPrompt } : {}),
+      ...(tools ? { toolSchemas: tools.map(tool => tool as unknown as Readonly<Record<string, unknown>>) } : {}),
+    }
     const toolExecutor = interactiveToolExecutor(this.options.toolExecutor, this.options.interactions, session.id)
     const auditContext = {
       sessionId: session.id,
@@ -241,6 +302,7 @@ export class AgentTurnRunner implements TurnRunner {
         sessionId: session.id,
         state,
         userMessage,
+        querySource: 'main',
         ...(this.options.maxTokens !== undefined ? { maxTokens: this.options.maxTokens } : {}),
         permissionMode,
         ...(this.options.temperature !== undefined ? { temperature: this.options.temperature } : {}),
@@ -248,6 +310,7 @@ export class AgentTurnRunner implements TurnRunner {
         ...(this.options.topK !== undefined ? { topK: this.options.topK } : {}),
         ...(tools ? { tools } : {}),
         ...(systemPrompt ? { systemPrompt } : {}),
+        ...(systemSegments.length ? { systemSegments } : {}),
         ...(this.options.topP !== undefined ? { topP: this.options.topP } : {}),
       }, {
         ...(subagentCohort ? {
@@ -262,6 +325,17 @@ export class AgentTurnRunner implements TurnRunner {
         ...(permissionBroker ? { permissionBroker } : {}),
         ...(this.options.policy ? { policy: this.options.policy } : {}),
         ...(toolExecutor ? { toolExecutor } : {}),
+        ...(this.options.reduceContext ? { reduceContext: this.options.reduceContext } : {}),
+        persistToolResult: this.toolResultPersister(session),
+        // Declared per tool at registration. Absent, the loop stays strictly
+        // sequential, so an undeclared tool can never be run concurrently by
+        // accident.
+        ...(this.options.toolCapabilities ? { capabilities: this.options.toolCapabilities } : {}),
+        // Without this the denial guard still stops a refusal loop, but the
+        // audit event that records why stays at zero production callers.
+        ...(this.options.auditEmitter
+          ? { auditToolLoopBlock: (input) => this.options.auditEmitter?.emitToolLoopBlock(input) }
+          : {}),
       }, signal))
       for await (const item of multiplexTurnEvents(turnEvents, this.options.subagentEvents, session.id)) {
         if (item.kind === 'subagent') {
@@ -304,6 +378,15 @@ export class AgentTurnRunner implements TurnRunner {
           { agentId: session.agentId, response: latestAssistantContent(state) },
         )
       }
+      // Deliver the checker's verdict as a fact rather than leaving the model
+      // to claim the edit compiled. Only paths this turn actually mutated are
+      // reported, so a repo with pre-existing errors stays quiet.
+      if (this.options.editDiagnostics && turnMutatedFiles(state)) {
+        const diagnostics = await reportEditDiagnostics(projectRoot).catch(() => '')
+        if (diagnostics) {
+          state.messages.push({ role: 'user', content: diagnostics })
+        }
+      }
       recordLatestUserDisplayText(state, text, displayText)
       synchronizeSessionState(session, state)
     }
@@ -315,7 +398,45 @@ export class AgentTurnRunner implements TurnRunner {
 
   dropSession(sessionId: string): void {
     this.states.delete(sessionId)
+    this.toolResultStores.delete(sessionId)
+    // Otherwise only the tracker's LRU bounds a long-lived daemon, and a file
+    // read in an evicted session keeps pinning a freshness entry forever.
+    fileStateTracker.clearSession(sessionId)
   }
+
+  /**
+   * Bounded provider view of an oversized tool result.
+   *
+   * The bootstrap prompt has always told every agent that large results are
+   * stored outside model context and replaced with a preview. Nothing built
+   * the store, so that was a promise the runtime did not keep: a single
+   * `exec_command` with a raised output cap, or any MCP result (which is
+   * truncated nowhere), could put a megabyte into the window. Both halves —
+   * the previewer and the off-transcript store — were written and tested
+   * already; this is the call site they were missing.
+   */
+  private toolResultPersister(session: DaemonSession): (toolName: string, content: string) => string {
+    const directory = this.options.toolResultDirectory
+    if (!directory) return (_toolName, content) => content
+    return (toolName, content) => {
+      if (content.length <= TOOL_RESULT_INLINE_LIMIT_CHARS) return content
+      let store = this.toolResultStores.get(session.id)
+      if (!store) {
+        try {
+          store = new ToolResultStorage(directory, { inlineLimit: TOOL_RESULT_INLINE_LIMIT_CHARS, sessionId: session.id })
+        } catch {
+          // An unwritable spill directory must never fail a tool call; the
+          // preview below is still worth applying on its own.
+          return boundedToolResultPreview(toolName, content, undefined)
+        }
+        this.toolResultStores.set(session.id, store)
+      }
+      const stored = store.maybeStore(toolName, content)
+      const reference = typeof stored === 'string' ? ToolResultStorage.parseRef(stored) : undefined
+      return boundedToolResultPreview(toolName, content, reference ? store.pathFor(reference) : undefined)
+    }
+  }
+
 
   private async bootstrapSystemPrompt(
     session: DaemonSession,
@@ -350,6 +471,69 @@ export class AgentTurnRunner implements TurnRunner {
     this.bootstrapPrompts.set(key, prompt)
     return prompt
   }
+}
+
+/**
+ * Inline ceiling for a single tool result. Above this the provider sees a
+ * preview and a path instead of the bytes. Chosen to sit well under the
+ * smallest provider window while still passing ordinary file reads and test
+ * output through untouched.
+ */
+const TOOL_RESULT_INLINE_LIMIT_CHARS = 16_000
+const TOOL_RESULT_PREVIEW_CHARS = 4_000
+
+/**
+ * Render the stand-in the provider sees. The envelope is a tag rather than the
+ * historical `[tool-result-ref:…]` handle because that handle was resolvable
+ * only by the host: the model was handed an opaque id and no way to act on it.
+ */
+function boundedToolResultPreview(toolName: string, content: string, path: string | undefined): string {
+  const compressed = compressToolResult(toolName, content, { maxChars: TOOL_RESULT_PREVIEW_CHARS })
+  const attributes = [
+    `tool=${JSON.stringify(toolName)}`,
+    `chars=${content.length}`,
+    `shown=${compressed.compressed.length}`,
+    ...(path ? [`path=${JSON.stringify(path)}`] : []),
+  ].join(' ')
+  const recovery = path
+    ? 'The full output is on disk at the path above; read it only if the preview is insufficient.'
+    : 'The full output was not retained.'
+  return `<persisted-output ${attributes}>\n${compressed.compressed}\n${recovery}\n</persisted-output>`
+}
+
+/** Tools whose success means a file on disk changed and a checker could disagree. */
+const MUTATING_TOOL_NAMES = new Set([
+  'AppendFile', 'Edit', 'FileEditTool', 'NotebookEditTool', 'Write', 'WriteFile',
+  'append_file', 'edit_file', 'write_file',
+])
+
+/** True when this turn wrote to the workspace, so a diagnostics pass can earn its latency. */
+function turnMutatedFiles(state: AgentState): boolean {
+  return state.toolExecutions.some(execution => {
+    if (typeof execution !== 'object' || execution === null) return false
+    const record = execution as { name?: unknown; permitted?: unknown }
+    return record.permitted === true && typeof record.name === 'string' && MUTATING_TOOL_NAMES.has(record.name)
+  })
+}
+
+/** Recent transcript text used to suppress memories the conversation already covered. */
+function recentTranscriptText(session: DaemonSession, turns = 12): string {
+  return session.messages
+    .slice(-turns)
+    .map(message => (typeof message.content === 'string' ? message.content : ''))
+    .filter(Boolean)
+    .join('\n')
+}
+
+/** Tools that recently succeeded; their reference topics rank down, their gotchas do not. */
+function recentSuccessfulToolNames(session: DaemonSession, limit = 24): readonly string[] {
+  const names = new Set<string>()
+  for (const execution of session.toolExecutions.slice(-limit)) {
+    if (typeof execution !== 'object' || execution === null) continue
+    const record = execution as { name?: unknown; permitted?: unknown }
+    if (record.permitted === true && typeof record.name === 'string') names.add(record.name)
+  }
+  return [...names]
 }
 
 const MAX_SUBAGENT_RESULT_CHARS = 64_000

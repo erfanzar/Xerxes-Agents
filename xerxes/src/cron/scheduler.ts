@@ -10,6 +10,13 @@ export type JobCompletion = (
 ) => void | Promise<void>
 
 export interface CronSchedulerOptions {
+  /**
+   * Ownership gate consulted at the top of every tick. The job store is shared
+   * by every project's daemon, so without it each open project fires the same
+   * job as its own agent turn. Defaults to always-true, which is the correct
+   * answer for a single process.
+   */
+  readonly holdsLease?: () => boolean
   readonly onComplete?: JobCompletion
   readonly pollInterval?: number
   /** Per-job execution timeout in milliseconds; 0 disables it. Defaults to 5 minutes. */
@@ -26,6 +33,7 @@ const DEFAULT_ONESHOT_RETRY_BASE_MS = 60_000
 
 /** Polling Bun scheduler with deterministic `tick` support for tests and daemon control. */
 export class CronScheduler {
+  private readonly holdsLease: (() => boolean) | undefined
   private interval: ReturnType<typeof setInterval> | undefined
   private readonly jobTimeout: number
   private readonly maxOneShotRetries: number
@@ -39,6 +47,7 @@ export class CronScheduler {
     private readonly runJob: JobRunner,
     options: CronSchedulerOptions = {},
   ) {
+    this.holdsLease = options.holdsLease
     this.onComplete = options.onComplete
     this.pollInterval = options.pollInterval ?? 30_000
     this.jobTimeout = options.jobTimeout ?? DEFAULT_JOB_TIMEOUT_MS
@@ -65,6 +74,10 @@ export class CronScheduler {
 
   async tick(now = new Date()): Promise<string[]> {
     if (this.ticking) return []
+    // Nothing at all, not even the bookkeeping in `isDue`: a process without
+    // the lease that advanced `next_run_at` would consume the lease holder's
+    // fire time and the job would silently never run.
+    if (!this.owns()) return []
     this.ticking = true
     try {
       const current = new Date(now)
@@ -80,6 +93,21 @@ export class CronScheduler {
       return outcomes.flatMap((id) => (id ? [id] : []))
     } finally {
       this.ticking = false
+    }
+  }
+
+  /**
+   * A predicate that throws (an unreadable lease file, say) is treated as "not
+   * ours" so a transient filesystem failure skips one tick instead of letting
+   * every daemon fall back to running the shared store.
+   */
+  private owns(): boolean {
+    if (!this.holdsLease) return true
+    try {
+      return this.holdsLease()
+    } catch (error) {
+      this.reportWarning('lease check failed; skipping tick', error)
+      return false
     }
   }
 

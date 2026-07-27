@@ -31,6 +31,7 @@ import {
   resolveProvider,
 } from './providerRegistry.js'
 import { DEFAULT_TEMPERATURE } from './samplingDefaults.js'
+import type { SystemPromptSegment } from '../streaming/promptCaching.js'
 
 export interface TokenUsage {
   readonly cacheCreationTokens?: number
@@ -39,6 +40,49 @@ export interface TokenUsage {
   readonly outputTokens: number
   /** Provider-reported reasoning tokens; absent when the provider does not expose them. */
   readonly reasoningTokens?: number
+}
+
+/**
+ * Why a completion was requested.
+ *
+ * Without this dimension every call looks like the user's own turn, so
+ * housekeeping work (compaction, titling, memory extraction) is invisible in
+ * cost accounting and cannot be routed to a cheaper model. `main` is the only
+ * value that represents the user-facing agent loop; everything else is
+ * housekeeping by definition, which is what {@link isHousekeepingQuerySource}
+ * relies on so new sources never have to be added to a second list.
+ */
+export type QuerySource =
+  | 'main'
+  | 'compaction'
+  | 'session_title'
+  | 'memory_extraction'
+  | 'tool_result_summary'
+  | 'classification'
+  | 'speculation'
+
+/** The user-facing agent loop; the one query source that is not housekeeping. */
+export const MAIN_QUERY_SOURCE: QuerySource = 'main'
+
+/** Every known query source, for validating values restored from persistence. */
+export const QUERY_SOURCES: readonly QuerySource[] = Object.freeze([
+  'main',
+  'compaction',
+  'session_title',
+  'memory_extraction',
+  'tool_result_summary',
+  'classification',
+  'speculation',
+])
+
+/** Narrow an untrusted value (config, stored ledger, wire payload) to a query source. */
+export function isQuerySource(value: unknown): value is QuerySource {
+  return typeof value === 'string' && (QUERY_SOURCES as readonly string[]).includes(value)
+}
+
+/** True for every source except the main agent loop, i.e. spend the user did not ask for directly. */
+export function isHousekeepingQuerySource(value: QuerySource): boolean {
+  return value !== MAIN_QUERY_SOURCE
 }
 
 export interface CompletionRequest {
@@ -50,6 +94,20 @@ export interface CompletionRequest {
   readonly minP?: number
   readonly model: string
   readonly presencePenalty?: number
+  /**
+   * Local routing/accounting annotation naming why the call was made. Never
+   * sent on the wire: payload builders copy known fields explicitly, and a
+   * stray `querySource` key would be rejected by providers that reject
+   * unknown body fields. Optional so existing callers keep compiling.
+   */
+  readonly querySource?: QuerySource
+  /**
+   * Named system-prompt sources, ordered stable-first. Adapters that support
+   * prefix caching place the breakpoint between the stable and volatile halves
+   * instead of caching one joined string, whose most volatile byte would
+   * otherwise decide the hit rate for all of it.
+   */
+  readonly systemSegments?: readonly SystemPromptSegment[]
   /** Provider-neutral extended-thinking request; adapters map it to their wire shape. */
   readonly thinking?: ThinkingRequest
   readonly repetitionPenalty?: number

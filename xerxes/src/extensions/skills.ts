@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 
 import { xerxesHome } from "../daemon/paths.js";
 import { scanContextContent } from "../security/promptScanner.js";
+import { hashSkillFile, loadTrustedHashes, type SkillGuardPaths } from "./skillsGuard.js";
 
 export interface SkillMetadata {
   readonly author: string;
@@ -29,12 +30,61 @@ export interface SkillMetadata {
 export interface Skill {
   readonly instructions: string;
   readonly metadata: SkillMetadata;
+  /** Set when frontmatter declared no `name:` and the containing directory name was used instead. */
+  readonly nameFromDirectory?: boolean;
   readonly resourcesDirectory?: string;
   readonly sourcePath: string;
 }
 
 export interface SkillDependencyLookup {
   hasTool(name: string): boolean;
+}
+
+/** Why one candidate SKILL.md did not become a usable skill during a discovery pass. */
+export type SkillDiscoveryNoteKind =
+  | "budget-exhausted"
+  | "injection-blocked"
+  | "oversize"
+  | "parse-error"
+  | "shadowed"
+  | "unnamed-fallback"
+  | "untrusted-workspace";
+
+export interface SkillDiscoveryNote {
+  readonly detail: string;
+  readonly kind: SkillDiscoveryNoteKind;
+  /** Skill name, when the document parsed far enough to have one. */
+  readonly name?: string;
+  readonly path: string;
+}
+
+/** A discovery root plus whether its contents arrived with the working directory. */
+export interface SkillDiscoveryRoot {
+  readonly path: string;
+  /** Roots a cloned repository can populate; their skills go through {@link WorkspaceSkillTrust}. */
+  readonly workspace?: boolean;
+}
+
+export type SkillDiscoveryRootInput = SkillDiscoveryRoot | string;
+
+export interface WorkspaceSkillCandidate {
+  readonly name: string;
+  /** Discovery root the candidate was found under. */
+  readonly root: string;
+  readonly skillPath: string;
+}
+
+/** Host decision about admitting a workspace-sourced skill into the registry. */
+export interface WorkspaceSkillTrust {
+  isTrusted(candidate: WorkspaceSkillCandidate): boolean | Promise<boolean>;
+}
+
+export interface SkillRegistryOptions {
+  /**
+   * Consulted for skills under workspace-sourced roots. Absent means every workspace skill is
+   * admitted, which is what every host did before this predicate existed.
+   */
+  readonly workspaceTrust?: WorkspaceSkillTrust;
 }
 
 const activeSkills = new Set<string>();
@@ -109,8 +159,9 @@ export function parseSkillMarkdown(content: string, sourcePath: string): Skill {
   );
   const fields = frontmatter ? parseFrontmatter(frontmatter[1] ?? "") : {};
   const sourceDirectory = dirname(sourcePath);
+  const declaredName = scalar(fields.name);
   const name =
-    scalar(fields.name) ||
+    declaredName ||
     sourceDirectory.split(/[\\/]/).filter(Boolean).at(-1) ||
     "skill";
   const explicitSubcommands = stringList(fields.subcommands);
@@ -136,6 +187,7 @@ export function parseSkillMarkdown(content: string, sourcePath: string): Skill {
     metadata,
     instructions: (frontmatter?.[2] ?? content).trim(),
     sourcePath,
+    ...(declaredName ? {} : { nameFromDirectory: true }),
     ...(metadata.resources.length
       ? { resourcesDirectory: sourceDirectory }
       : {}),
@@ -217,7 +269,8 @@ function canonicalExistingPath(path: string): string | undefined {
   }
 }
 
-function isStrictDescendant(root: string, target: string): boolean {
+/** Whether `target` sits strictly below `root`, the containment rule prompt resources must satisfy. */
+export function isStrictDescendant(root: string, target: string): boolean {
   const pathFromRoot = relative(root, target);
   const firstSegment = pathFromRoot.split(sep, 1)[0];
   return Boolean(pathFromRoot) && firstSegment !== ".." && !isAbsolute(pathFromRoot);
@@ -242,29 +295,45 @@ function assertOperationalSkillDocument(content: string, sourcePath: string): vo
 /** In-memory skill index with first-root-wins discovery precedence. */
 export class SkillRegistry {
   private discoveryQueue: Promise<void> = Promise.resolve();
+  private notes: readonly SkillDiscoveryNote[] = [];
   private readonly registeredSkills = new Map<string, Skill>();
   private skills = new Map<string, Skill>();
+  private readonly workspaceTrust: WorkspaceSkillTrust | undefined;
+
+  constructor(options: SkillRegistryOptions = {}) {
+    this.workspaceTrust = options.workspaceTrust;
+  }
 
   get names(): string[] {
     return [...this.skills.keys()];
   }
 
-  async discover(...directories: readonly string[]): Promise<string[]> {
+  /**
+   * Everything the last discovery pass dropped or renamed, in discovery order.
+   *
+   * Replaced rather than accumulated: the skill index is a snapshot of the roots as they are
+   * now, so a note about a file that has since been fixed would be a lie.
+   */
+  get discoveryNotes(): readonly SkillDiscoveryNote[] {
+    return this.notes;
+  }
+
+  async discover(...roots: readonly SkillDiscoveryRootInput[]): Promise<string[]> {
     return this.enqueueDiscovery(async () => {
       const next = new Map(this.skills);
-      const discovered = await discoverInto(next, directories);
-      this.commitSnapshot(next);
-      return discovered;
+      const outcome = await discoverInto(next, roots, this.workspaceTrust);
+      this.commitSnapshot(next, outcome.notes);
+      return outcome.discovered;
     });
   }
 
   /** Re-read discovery roots while retaining explicitly registered host skills. */
-  async refresh(...directories: readonly string[]): Promise<string[]> {
+  async refresh(...roots: readonly SkillDiscoveryRootInput[]): Promise<string[]> {
     return this.enqueueDiscovery(async () => {
       const next = new Map(this.registeredSkills);
-      const discovered = await discoverInto(next, directories);
-      this.commitSnapshot(next);
-      return discovered;
+      const outcome = await discoverInto(next, roots, this.workspaceTrust);
+      this.commitSnapshot(next, outcome.notes);
+      return outcome.discovered;
     });
   }
 
@@ -290,11 +359,15 @@ export class SkillRegistry {
     return [...this.skills.values()];
   }
 
-  private commitSnapshot(next: Map<string, Skill>): void {
+  private commitSnapshot(
+    next: Map<string, Skill>,
+    notes: readonly SkillDiscoveryNote[],
+  ): void {
     for (const [name, skill] of this.registeredSkills) {
       next.set(name, skill);
     }
     this.skills = next;
+    this.notes = Object.freeze([...notes]);
   }
 
   private enqueueDiscovery<T>(operation: () => Promise<T>): Promise<T> {
@@ -406,67 +479,176 @@ function skillIndexOmissionMarker(count: number): string {
   return `  ... ${count} more skills omitted; use SkillTool to search the complete registry`;
 }
 
+interface DiscoveryOutcome {
+  readonly discovered: string[];
+  readonly notes: SkillDiscoveryNote[];
+}
+
 async function discoverInto(
   skills: Map<string, Skill>,
-  directories: readonly string[],
-): Promise<string[]> {
+  roots: readonly SkillDiscoveryRootInput[],
+  workspaceTrust: WorkspaceSkillTrust | undefined,
+): Promise<DiscoveryOutcome> {
   const discovered: string[] = [];
+  const notes: SkillDiscoveryNote[] = [];
   let totalBytes = 0;
-  for (const directory of directories) {
+  let budgetExhausted = false;
+  for (const root of roots) {
+    const { path: directory, workspace = false } = normalizeDiscoveryRoot(root);
     for await (const skillPath of skillFiles(directory)) {
       if (totalBytes >= MAX_SKILL_DISCOVERY_TOTAL_BYTES) {
         // A hostile tree of large files must not exhaust memory through unbounded discovery reads.
+        budgetExhausted = true;
+        notes.push({
+          kind: "budget-exhausted",
+          path: skillPath,
+          detail:
+            `discovery stopped after ${totalBytes} bytes (limit ${MAX_SKILL_DISCOVERY_TOTAL_BYTES});` +
+            " this file and everything after it was not read",
+        });
         break;
       }
+      let skill: Skill;
       try {
         const metadata = await stat(skillPath);
-        if (!metadata.isFile() || metadata.size > MAX_SKILL_FILE_BYTES) {
+        if (!metadata.isFile()) {
+          notes.push({ kind: "parse-error", path: skillPath, detail: "not a regular file" });
+          continue;
+        }
+        if (metadata.size > MAX_SKILL_FILE_BYTES) {
+          notes.push({
+            kind: "oversize",
+            path: skillPath,
+            detail: `${metadata.size} bytes exceeds the ${MAX_SKILL_FILE_BYTES} byte ceiling`,
+          });
           continue;
         }
         totalBytes += metadata.size;
-        const skill = parseSkillMarkdown(
-          await readFile(skillPath, "utf8"),
-          skillPath,
-        );
-        if (!skillInstructionsAreSafe(skill)) {
-          // A hostile instruction body must never reach discovery or prompt activation.
+        skill = parseSkillMarkdown(await readFile(skillPath, "utf8"), skillPath);
+      } catch (error) {
+        // A corrupt third-party skill is isolated; remaining skills stay discoverable.
+        notes.push({ kind: "parse-error", path: skillPath, detail: errorDetail(error) });
+        continue;
+      }
+      const name = skill.metadata.name;
+      if (skill.nameFromDirectory) {
+        notes.push({
+          kind: "unnamed-fallback",
+          path: skillPath,
+          name,
+          detail: `frontmatter declared no 'name:', so the directory name '${name}' was used`,
+        });
+      }
+      if (!skillInstructionsAreSafe(skill)) {
+        // A hostile instruction body must never reach discovery or prompt activation.
+        notes.push({
+          kind: "injection-blocked",
+          path: skillPath,
+          name,
+          detail: "the instruction body was flagged by the prompt-injection scan",
+        });
+        continue;
+      }
+      if (workspace && workspaceTrust !== undefined) {
+        const trusted = await workspaceTrust.isTrusted({ name, root: directory, skillPath });
+        if (!trusted) {
+          notes.push({
+            kind: "untrusted-workspace",
+            path: skillPath,
+            name,
+            detail: `workspace root ${directory} is not trusted for this skill`,
+          });
           continue;
         }
-        if (!skills.has(skill.metadata.name)) {
-          skills.set(skill.metadata.name, skill);
-          discovered.push(skill.metadata.name);
-        }
-      } catch {
-        // A corrupt third-party skill is isolated; remaining skills stay discoverable.
       }
+      const shadowing = skills.get(name);
+      if (shadowing !== undefined) {
+        notes.push({
+          kind: "shadowed",
+          path: skillPath,
+          name,
+          detail: `a higher-priority skill named '${name}' already came from ${shadowing.sourcePath}`,
+        });
+        continue;
+      }
+      skills.set(name, skill);
+      discovered.push(name);
     }
+    if (budgetExhausted) break;
   }
-  return discovered;
+  return { discovered, notes };
+}
+
+function normalizeDiscoveryRoot(root: SkillDiscoveryRootInput): SkillDiscoveryRoot {
+  return typeof root === "string" ? { path: root } : root;
+}
+
+function errorDetail(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+export interface DefaultSkillDiscoveryOptions {
+  readonly cwd?: string;
+  readonly userSkillsDirectory?: string;
 }
 
 export function defaultSkillDiscoveryDirectories(
-  options: {
-    readonly cwd?: string;
-    readonly userSkillsDirectory?: string;
-  } = {},
+  options: DefaultSkillDiscoveryOptions = {},
 ): string[] {
+  return defaultSkillDiscoveryRoots(options).map((root) => root.path);
+}
+
+/**
+ * The same roots as {@link defaultSkillDiscoveryDirectories}, tagged with their provenance.
+ *
+ * The two working-directory roots are whatever the checked-out repository happens to contain, so
+ * a host that supplies a {@link WorkspaceSkillTrust} needs them distinguishable from the user's
+ * own and the bundled roots.
+ */
+export function defaultSkillDiscoveryRoots(
+  options: DefaultSkillDiscoveryOptions = {},
+): SkillDiscoveryRoot[] {
   const cwd = resolve(options.cwd ?? process.cwd());
-  const roots = [
-    join(cwd, ".agents", "skills"),
-    join(cwd, "skills"),
-    options.userSkillsDirectory ?? join(xerxesHome(), "skills"),
-    join(xerxesHome(), "agents", "skills"),
-    BUNDLED_SKILLS_DIRECTORY,
+  const roots: readonly SkillDiscoveryRoot[] = [
+    { path: join(cwd, ".agents", "skills"), workspace: true },
+    { path: join(cwd, "skills"), workspace: true },
+    { path: options.userSkillsDirectory ?? join(xerxesHome(), "skills") },
+    { path: join(xerxesHome(), "agents", "skills") },
+    { path: BUNDLED_SKILLS_DIRECTORY },
   ];
   const seen = new Set<string>();
   return roots.filter((root) => {
-    const canonical = canonicalSkillRoot(root);
+    const canonical = canonicalSkillRoot(root.path);
     if (seen.has(canonical)) {
       return false;
     }
     seen.add(canonical);
     return true;
   });
+}
+
+/**
+ * Admit a workspace skill only when its SKILL.md digest is already in the operator's trusted-hash
+ * database — the same database the install path writes through `saveTrustedHashes`.
+ */
+export function trustedHashWorkspaceSkills(paths: SkillGuardPaths = {}): WorkspaceSkillTrust {
+  // Read the database once per predicate: a rewrite mid-pass must not change verdicts halfway through.
+  let database: Promise<Record<string, string>> | undefined;
+  return {
+    async isTrusted(candidate: WorkspaceSkillCandidate): Promise<boolean> {
+      database ??= loadTrustedHashes(paths);
+      const expected = (await database)[candidate.skillPath];
+      if (expected === undefined) {
+        return false;
+      }
+      try {
+        return (await hashSkillFile(candidate.skillPath)) === expected;
+      } catch {
+        // An unhashable file cannot be proven trusted; withhold it rather than assume the best.
+        return false;
+      }
+    },
+  };
 }
 
 /** Canonical discovery-root key: realpath when the directory exists so symlinked roots dedup. */
@@ -546,10 +728,28 @@ function detectedSubcommands(sourceDirectory: string): string[] {
 type FrontmatterValue = string | string[];
 
 /** Frontmatter keys that must never be written to a parsed record, even on a null-prototype object. */
-const FORBIDDEN_FRONTMATTER_KEYS: ReadonlySet<string> = new Set([
+export const FORBIDDEN_FRONTMATTER_KEYS: ReadonlySet<string> = new Set([
   "__proto__",
   "constructor",
   "prototype",
+]);
+
+/** Every frontmatter key {@link parseSkillMarkdown} reads; anything else is silently ignored. */
+export const SKILL_FRONTMATTER_KEYS: ReadonlySet<string> = new Set([
+  "author",
+  "config_vars",
+  "dependencies",
+  "description",
+  "name",
+  "platforms",
+  "required_tools",
+  "resources",
+  "setup_command",
+  "source",
+  "subcommands",
+  "tags",
+  "trust_level",
+  "version",
 ]);
 
 function parseFrontmatter(content: string): Record<string, FrontmatterValue> {

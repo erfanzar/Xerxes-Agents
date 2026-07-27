@@ -13,8 +13,10 @@ import {
   PluginConflictError,
   PluginRegistry,
   PluginType,
+  TOOL_PERMISSION_HOOK,
   VersionConstraint,
   parseDependency,
+  resolveToolPermission,
 } from '../src/index.js'
 
 test('plugin dependency constraints and load order preserve compatible releases', () => {
@@ -146,5 +148,64 @@ export function register(registry) {
     expect([...registry.pluginNames].sort()).toEqual(['counted-plugin', 'healthy-plugin'])
   } finally {
     await rm(directory, { force: true, recursive: true })
+  }
+})
+
+test('a permission hook can veto a tool call, and any deny beats every allow', async () => {
+  const hooks = new HookRunner()
+  const seen: Array<Record<string, unknown>> = []
+  hooks.register(TOOL_PERMISSION_HOOK, payload => {
+    seen.push({ ...payload })
+    return { allow: true }
+  })
+  hooks.register(TOOL_PERMISSION_HOOK, async payload => {
+    const args = payload.arguments as { readonly path?: string }
+    await Bun.sleep(1)
+    return args.path === '/etc/shadow'
+      ? { allow: false, reason: 'system credential file', source: 'path-guard' }
+      : { allow: true }
+  })
+  hooks.register(TOOL_PERMISSION_HOOK, () => ({ allow: true }))
+
+  const allowed = await resolveToolPermission(hooks, { toolName: 'read_file', arguments: { path: 'src/a.ts' } })
+  expect(allowed).toEqual({ allowed: true, denials: [], reason: '' })
+
+  const denied = await resolveToolPermission(hooks, { toolName: 'read_file', arguments: { path: '/etc/shadow' } })
+  expect(denied.allowed).toBeFalse()
+  expect(denied.reason).toBe('system credential file')
+  expect(denied.denials).toEqual([{ allow: false, reason: 'system credential file', source: 'path-guard' }])
+  // The observing hook sees the real call, and the point is not a mutation hook,
+  // so its return value never becomes the tool's arguments.
+  expect(seen.at(-1)).toEqual({ toolName: 'read_file', arguments: { path: '/etc/shadow' } })
+})
+
+test('permission hooks fail closed: a throwing or malformed guard denies instead of consenting', async () => {
+  const spy = spyOn(console, 'error').mockImplementation(() => undefined)
+  try {
+    const throwing = new HookRunner()
+    throwing.register(TOOL_PERMISSION_HOOK, () => { throw new Error('policy database offline') })
+    throwing.register(TOOL_PERMISSION_HOOK, () => ({ allow: true }))
+    const failed = await resolveToolPermission(throwing, { toolName: 'exec_command' })
+    expect(failed.allowed).toBeFalse()
+    expect(failed.reason).toContain('policy database offline')
+    expect(failed.denials[0]?.source).toBe(TOOL_PERMISSION_HOOK)
+
+    const malformed = new HookRunner()
+    malformed.register(TOOL_PERMISSION_HOOK, () => 'looks fine to me')
+    const rejected = await resolveToolPermission(malformed, { toolName: 'exec_command' })
+    expect(rejected.allowed).toBeFalse()
+    expect(rejected.reason).toContain('not a permission verdict')
+
+    // No guards installed is the ordinary case and must keep the agent working.
+    expect(await resolveToolPermission(new HookRunner(), { toolName: 'exec_command' }))
+      .toEqual({ allowed: true, denials: [], reason: '' })
+
+    // A denial with no stated reason still explains itself to the model.
+    const terse = new HookRunner()
+    terse.register(TOOL_PERMISSION_HOOK, () => ({ allow: false }))
+    expect((await resolveToolPermission(terse, { toolName: 'exec_command' })).reason)
+      .toBe("tool 'exec_command' denied by a permission hook")
+  } finally {
+    spy.mockRestore()
   }
 })

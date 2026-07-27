@@ -185,6 +185,38 @@ describe('gatewayAdapter', () => {
     ])
   })
 
+  it('surfaces runtime {level, message} notices instead of showing a blank toast', () => {
+    // The Bun runtime emits turn-level notices in its own shape. Reading only
+    // body/title dropped the text and downgraded errors to info, so an
+    // interrupted turn, a failed turn, and saved steers were all silent.
+    expect(
+      adaptDaemonEvent('notification', {
+        level: 'info',
+        message: 'Interrupt stopped 2 delegated agents.'
+      })
+    ).toEqual([
+      {
+        payload: {
+          id: '',
+          key: '',
+          kind: 'ttl',
+          level: 'info',
+          text: 'Interrupt stopped 2 delegated agents.',
+          ttl_ms: 8000
+        },
+        type: 'notification.show'
+      }
+    ])
+
+    expect(adaptDaemonEvent('notification', { level: 'error', message: 'provider exploded' })[0]).toMatchObject({
+      payload: { level: 'error', text: 'provider exploded' },
+      type: 'notification.show'
+    })
+
+    // A notice with no readable text is dropped rather than flashing empty.
+    expect(adaptDaemonEvent('notification', { level: 'info' })).toEqual([])
+  })
+
   it('maps replay notifications to transcript append events instead of live streaming', () => {
     expect(
       adaptDaemonEvent('notification', {

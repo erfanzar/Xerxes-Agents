@@ -7,6 +7,17 @@ import { SmartTokenCounter } from './tokenCounter.js'
 
 export const COMPACTION_REFERENCE_PREFIX = '[CONTEXT COMPACTION — REFERENCE ONLY]'
 
+/**
+ * Typed flag identifying a summary this compressor wrote.
+ *
+ * Prefix sniffing alone misreads any message that merely quotes the marker —
+ * a transcript discussing compaction, or a tool result echoing an earlier
+ * summary — as a prior summary, and the iterative path then folds unrelated
+ * text into the next summary and drops the head message carrying it.
+ * Providers ignore message keys they do not model, so the flag rides along.
+ */
+export const COMPACTION_SUMMARY_MARKER = 'xerxes_compaction_summary'
+
 export type ContextMessage = Record<string, unknown>
 export type Summarizer = (messages: readonly ContextMessage[], budgetTokens: number) => string
 
@@ -25,6 +36,12 @@ export interface CompressionResult {
 
 export interface ContextCompressorOptions {
   readonly contextWindow?: number
+  /**
+   * Skip the under-threshold early return so an explicit compaction still
+   * summarizes the middle after tool-result pruning. Scheduled compaction
+   * keeps the default prune-only behavior for contexts that already fit.
+   */
+  readonly forceSummarize?: boolean
   readonly model?: string
   readonly protectFirst?: number
   readonly protectLast?: number
@@ -39,6 +56,7 @@ export interface ContextCompressorOptions {
 /** Pre-prunes tool data then safely folds the unprotected middle into a reference-only summary. */
 export class ContextCompressor {
   readonly contextWindow: number
+  readonly forceSummarize: boolean
   readonly protectFirst: number
   readonly protectLast: number
   readonly summaryBudgetRatio: number
@@ -58,6 +76,7 @@ export class ContextCompressor {
     this.summaryMinTokens = options.summaryMinTokens ?? 2_000
     this.summaryMaxTokens = options.summaryMaxTokens ?? 12_000
     this.summaryBudgetRatio = options.summaryBudgetRatio ?? 0.2
+    this.forceSummarize = options.forceSummarize ?? false
     this.summarizer = options.summarizer
     this.tokenCounter = options.tokenCounter ?? new SmartTokenCounter({ model: options.model ?? 'gpt-4' })
   }
@@ -67,7 +86,7 @@ export class ContextCompressor {
     if (messages.length === 0) return unchanged([], tokensBefore)
     const pruned = pruneToolMessages(messages, { protectLast: this.protectLast })
     const afterPrune = this.count(pruned.messages)
-    if (afterPrune < this.thresholdTokens()) {
+    if (afterPrune < this.thresholdTokens() && !this.forceSummarize) {
       if (pruned.prunedCount === 0) {
         // Already under threshold with nothing pruned: a scheduled compaction must not
         // lossily summarize a context that still fits the window.
@@ -123,21 +142,23 @@ export class ContextCompressor {
     }
     let prior: string | undefined
     let priorFromHead = false
-    const headLast = head.at(-1)
-    if (isPriorSummary(headLast?.content)) {
-      prior = headLast?.content as string
+    const headPrior = priorSummaryText(head.at(-1))
+    const middlePrior = priorSummaryText(middle[0])
+    if (headPrior !== undefined) {
+      prior = headPrior
       head = head.slice(0, -1)
       priorFromHead = true
-    } else if (isPriorSummary(middle[0]?.content)) {
-      prior = middle[0]?.content as string
+    } else if (middlePrior !== undefined) {
+      prior = middlePrior
       middle = middle.slice(1)
     }
     const budget = this.summaryBudget(this.count(middle))
     const wrapped = wrapSummary(prior, this.summarizer(middle, budget))
+    const summaryMessage: ContextMessage = { role: 'user', content: wrapped, [COMPACTION_SUMMARY_MARKER]: true }
     // Cutting the middle can leave the head ending in assistant tool_calls whose results
     // were summarized away, or the tail beginning with orphan tool results. Repair the
     // window here so every caller receives a provider-safe sequence.
-    const output = repairToolMessageSequence([...head, { role: 'user', content: wrapped }, ...tail])
+    const output = repairToolMessageSequence([...head, summaryMessage, ...tail])
     return {
       messages: output,
       compressed: true,
@@ -184,8 +205,29 @@ function contentToText(value: unknown): string {
   return value === undefined || value === null ? '' : JSON.stringify(value)
 }
 
-function isPriorSummary(content: unknown): content is string {
-  return typeof content === 'string' && content.startsWith(COMPACTION_REFERENCE_PREFIX)
+/**
+ * True for a summary this compressor wrote.
+ *
+ * The prefix is the fallback, not the primary test: transcripts persisted
+ * before the typed flag existed — and reloads that rebuild messages from a
+ * fixed set of provider fields — carry the prefix and nothing else.
+ */
+export function isCompactionSummaryMessage(message: ContextMessage | undefined): boolean {
+  if (message === undefined) return false
+  if (message[COMPACTION_SUMMARY_MARKER] === true) return true
+  // The fallback is deliberately narrow: only the user message this compressor
+  // writes summaries as. A tool result or assistant turn that merely opens with
+  // the marker — quoting an earlier summary — is content, not a summary, and
+  // folding it into the iterative path would drop the message carrying it.
+  return message.role === 'user'
+    && typeof message.content === 'string'
+    && message.content.startsWith(COMPACTION_REFERENCE_PREFIX)
+}
+
+/** Summary text of a prior summary message, or undefined when the message is not one. */
+function priorSummaryText(message: ContextMessage | undefined): string | undefined {
+  if (!isCompactionSummaryMessage(message)) return undefined
+  return typeof message?.content === 'string' ? message.content : undefined
 }
 
 function unchanged(messages: ContextMessage[], tokens: number): CompressionResult {

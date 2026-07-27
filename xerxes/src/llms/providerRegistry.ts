@@ -10,6 +10,12 @@ export interface ProviderConfig {
   readonly baseUrl?: string
   readonly contextLimit: number
   readonly defaultApiKey?: string
+  /**
+   * Largest completion this provider will emit for one request. The context
+   * window has to hold the prompt *and* the reply, so a prompt measured
+   * against `contextLimit` alone is already over budget by this much.
+   */
+  readonly maxOutput: number
   readonly name: string
   readonly transport: ProviderTransport
 }
@@ -26,64 +32,77 @@ export const PROVIDERS = {
     apiKeyEnv: 'ANTHROPIC_API_KEY',
     baseUrl: 'https://api.anthropic.com',
     contextLimit: 200_000,
+    maxOutput: 64_000,
   }),
   openai: provider('openai', 'openai', {
     apiKeyEnv: 'OPENAI_API_KEY',
     baseUrl: 'https://api.openai.com/v1',
     contextLimit: 128_000,
+    maxOutput: 32_000,
   }),
   openrouter: provider('openrouter', 'openai', {
     apiKeyEnv: 'OPENROUTER_API_KEY',
     baseUrl: 'https://openrouter.ai/api/v1',
     contextLimit: 1_000_000,
+    maxOutput: 32_000,
   }),
   'claude-code': provider('claude-code', 'claude-code', {
     baseUrl: 'claude-code://local',
     contextLimit: 200_000,
+    maxOutput: 64_000,
   }),
   gemini: provider('gemini', 'openai', {
     apiKeyEnv: 'GEMINI_API_KEY',
     baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai/',
     contextLimit: 1_000_000,
+    maxOutput: 65_536,
   }),
   kimi: provider('kimi', 'openai', {
     apiKeyEnv: 'MOONSHOT_API_KEY',
     baseUrl: 'https://api.moonshot.cn/v1',
     contextLimit: 128_000,
+    maxOutput: 8_192,
   }),
   'kimi-code': provider('kimi-code', 'openai', {
     apiKeyEnv: 'KIMI_CODE_API_KEY',
     baseUrl: 'https://api.kimi.com/coding/v1',
     contextLimit: 262_144,
+    maxOutput: 32_000,
   }),
   qwen: provider('qwen', 'openai', {
     apiKeyEnv: 'DASHSCOPE_API_KEY',
     baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
     contextLimit: 1_000_000,
+    maxOutput: 32_000,
   }),
   zhipu: provider('zhipu', 'openai', {
     apiKeyEnv: 'ZHIPU_API_KEY',
     baseUrl: 'https://api.z.ai/api/coding/paas/v4',
     contextLimit: 128_000,
+    maxOutput: 32_000,
   }),
   deepseek: provider('deepseek', 'openai', {
     apiKeyEnv: 'DEEPSEEK_API_KEY',
     baseUrl: 'https://api.deepseek.com/v1',
     contextLimit: 64_000,
+    maxOutput: 8_192,
   }),
   minimax: provider('minimax', 'openai', {
     apiKeyEnv: 'MINIMAX_API_KEY',
     baseUrl: 'https://api.minimax.io/v1',
     contextLimit: 128_000,
+    maxOutput: 32_000,
   }),
   ollama: provider('ollama', 'openai', {
     baseUrl: 'http://localhost:11434/v1',
     contextLimit: 128_000,
+    maxOutput: 8_192,
     defaultApiKey: 'ollama',
   }),
   lmstudio: provider('lmstudio', 'openai', {
     baseUrl: 'http://localhost:1234/v1',
     contextLimit: 128_000,
+    maxOutput: 8_192,
     defaultApiKey: 'lm-studio',
   }),
   custom: provider('custom', 'openai', {
@@ -92,6 +111,7 @@ export const PROVIDERS = {
     // `/models` metadata is authoritative; until discovery succeeds, report
     // the limit as unknown instead of pretending it is OpenAI's default.
     contextLimit: 0,
+    maxOutput: 8_192,
   }),
 } as const satisfies Record<string, ProviderConfig>
 
@@ -327,4 +347,34 @@ export function getContextLimit(model: string, overrides: ProviderOverrides = {}
     return exact
   }
   return PROVIDERS[resolveProvider(model, overrides)].contextLimit
+}
+
+/** Largest reply the routed provider will emit for one request. */
+export function getMaxOutputTokens(model: string, overrides: ProviderOverrides = {}): number {
+  return PROVIDERS[resolveProvider(model, overrides)].maxOutput
+}
+
+export interface EffectiveContextLimitOptions {
+  /** Live window discovered from provider metadata; defaults to the static registry value. */
+  readonly contextLimit?: number
+  readonly overrides?: ProviderOverrides
+}
+
+/**
+ * Prompt budget: the context window minus the reply the provider may still emit.
+ *
+ * Sizing a prompt against the raw window is how a request that every local
+ * meter calls "within limits" comes back as a provider 400 — the reply has
+ * nowhere to go. The reservation is capped at a quarter of the window so a
+ * small-window model (moonshot-v1-8k against an 8k reserve) keeps a usable
+ * budget instead of collapsing to nothing.
+ */
+export function effectiveContextLimit(model: string, options: EffectiveContextLimitOptions = {}): number {
+  const overrides = options.overrides ?? {}
+  const limit = options.contextLimit ?? getContextLimit(model, overrides)
+  if (!Number.isFinite(limit) || limit <= 0) {
+    return 0
+  }
+  const reserve = Math.min(getMaxOutputTokens(model, overrides), Math.floor(limit / 4))
+  return Math.max(1, limit - Math.max(0, reserve))
 }

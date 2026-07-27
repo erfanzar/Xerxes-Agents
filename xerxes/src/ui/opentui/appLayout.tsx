@@ -17,7 +17,7 @@ import { isLiveTailActive, liveTailScrollKey, shouldAutoScrollLiveTail } from '.
 import { $isBlocked, $overlayState, patchOverlayState } from '../app/overlayStore.js'
 import { $panelWidthDelta, withPanelWidthDelta } from '../app/panelSizeStore.js'
 import { $uiState, $uiTheme } from '../app/uiStore.js'
-import { useTurnSelector } from '../app/turnStore.js'
+import { $turnLive, getTurnPulse, getTurnState, useTurnSelector } from '../app/turnStore.js'
 import { $spawnHistory, spawnHistoryForSession } from '../app/spawnHistoryStore.js'
 import {
   DERAFSH_ANIMATION_FRAME_COUNT,
@@ -42,8 +42,10 @@ import {
 } from '../domain/providerPrompt.js'
 import { ctxBarColor, sessionDisplayTitle, usageCounts } from '../domain/statusFormat.js'
 import { formatBytes } from '../lib/imageAttachment.js'
+import { describeLiveness, type LivenessPhase, livenessGlyph, livenessLabel, livenessTokens } from '../lib/liveness.js'
 import { unarchivedToolLines } from '../lib/liveProgress.js'
 import { compactProgressRows, type CompactProgressRow } from '../lib/progressRows.js'
+import { getActiveSkin } from '../lib/skinEngine.js'
 import { isYoloEnabled } from '../lib/statusSnapshot.js'
 import { fmtK, formatToolCall, inlineToolDisplay } from '../lib/text.js'
 import { useTerminalFocus } from '../lib/terminalRuntime.opentui.js'
@@ -72,7 +74,6 @@ const decodePaste = (bytes: Uint8Array): string => new TextDecoder().decode(byte
 // ── Live streaming turn ─────────────────────────────────────────────────
 
 function StreamingAssistant() {
-  const ui = useStore($uiState)
   const t = useStore($uiTheme)
   const streaming = useTurnSelector(s => s.streaming)
   const segments = useTurnSelector(s => s.streamSegments)
@@ -83,7 +84,7 @@ function StreamingAssistant() {
   const anything = streaming || segments.length || tools.length || unsettledTools.length
 
   if (!anything) {
-    return ui.busy ? <WaitingLine /> : null
+    return <LiveIndicator />
   }
 
   return (
@@ -105,19 +106,109 @@ function StreamingAssistant() {
       ))}
 
       {streaming ? <MessageLine msg={{ role: 'assistant', text: streaming }} t={t} /> : null}
+
+      <LiveIndicator />
     </Box>
   )
 }
 
-function WaitingLine() {
+/** Fast enough to read as motion, slow enough to stay off the render budget. */
+const LIVE_INDICATOR_TICK_MS = 120
+
+/** Verb lists ride along with the skin's branding, so ask the active skin. */
+const activeSpinnerVerbs = (): string[] => {
+  try {
+    return getActiveSkin().spinnerVerbs()
+  } catch {
+    // A broken $XERXES_HOME/skins entry must cost the user their verbs, not
+    // their only proof that the turn is still alive.
+    return ['working']
+  }
+}
+
+/**
+ * The one thing on screen that says the turn is still breathing.
+ *
+ * It subscribes only to the coarse `$turnLive` gate; the verb, clock, and
+ * pulse are painted by mutating stable renderables from an interval. Driving
+ * them through React state instead would reconcile the whole live transcript
+ * eight times a second — the same trap documented on the Derafsh animation,
+ * where commits captured between native frames blanked the layout.
+ */
+function LiveIndicator() {
   const t = useStore($uiTheme)
+  const live = useStore($turnLive)
+  const glyphRef = useRef<TextRenderable | null>(null)
+  const labelRef = useRef<TextRenderable | null>(null)
+  const verbs = useMemo(activeSpinnerVerbs, [])
+  const tone = useMemo<Record<LivenessPhase, string>>(
+    () => ({ stalled: t.color.warn, streaming: t.color.accent, tool: t.color.primary }),
+    [t]
+  )
+
+  useEffect(() => {
+    if (!live) {
+      return
+    }
+
+    const paint = () => {
+      const turn = getTurnState()
+      const pulse = getTurnPulse()
+      const liveness = describeLiveness({
+        lastDeltaAt: pulse.lastDeltaAt,
+        now: Date.now(),
+        startedAt: pulse.startedAt,
+        toolCount: turn.tools.length
+      })
+      const glyph = glyphRef.current
+      const label = labelRef.current
+
+      if (glyph) {
+        glyph.content = `${livenessGlyph(liveness.phase, liveness.intensity)} `
+        glyph.fg = tone[liveness.phase]
+      }
+
+      if (label) {
+        label.content = livenessLabel(liveness, { tokens: livenessTokens(turn), verbs })
+      }
+    }
+
+    paint()
+
+    const timer = setInterval(paint, LIVE_INDICATOR_TICK_MS)
+    timer.unref?.()
+
+    return () => clearInterval(timer)
+  }, [live, tone, verbs])
+
+  if (!live) {
+    return null
+  }
 
   return (
-    <Box flexShrink={0} marginTop={1} paddingLeft={3}>
-      <Text color={t.color.muted}>
-        <Span color={t.color.accent}>◇ </Span>
-        Planning next moves
-      </Text>
+    <Box flexDirection="row" flexShrink={0} marginTop={1} paddingLeft={3}>
+      <text
+        fg={tone.streaming}
+        flexShrink={0}
+        ref={(renderable: TextRenderable | null) => {
+          glyphRef.current = renderable
+        }}
+      >
+        {'  '}
+      </text>
+      <text
+        fg={t.color.muted}
+        // flexShrink={0} for the same reason <Text> pins it: a shrinking text
+        // row collapses into its neighbour's cells when the column overflows.
+        flexShrink={0}
+        ref={(renderable: TextRenderable | null) => {
+          labelRef.current = renderable
+        }}
+        truncate
+        wrapMode="none"
+      >
+        {' '}
+      </text>
     </Box>
   )
 }

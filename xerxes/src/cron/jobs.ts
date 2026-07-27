@@ -13,6 +13,8 @@ export interface CronJobOptions {
   readonly oneshot?: boolean
   readonly paused?: boolean
   readonly prompt: string
+  /** Project directory that owns the job, so a listing can name the repo. */
+  readonly projectRoot?: string
   readonly recipient?: string
   readonly schedule?: string
   readonly workspaceId?: string
@@ -28,6 +30,7 @@ export class CronJob {
   oneshot: boolean
   paused: boolean
   readonly prompt: string
+  projectRoot: string | undefined
   recipient: string
   schedule: string
   workspaceId: string | undefined
@@ -42,6 +45,7 @@ export class CronJob {
     this.oneshot = options.oneshot ?? false
     this.lastRunAt = options.lastRunAt
     this.nextRunAt = options.nextRunAt
+    this.projectRoot = options.projectRoot
     this.workspaceId = options.workspaceId
     this.metadata = { ...(options.metadata ?? {}) }
   }
@@ -57,6 +61,7 @@ export class CronJob {
       oneshot: this.oneshot,
       last_run_at: this.lastRunAt ?? null,
       next_run_at: this.nextRunAt ?? null,
+      project_root: this.projectRoot ?? null,
       workspace_id: this.workspaceId ?? null,
       metadata: { ...this.metadata },
     }
@@ -81,12 +86,26 @@ export class CronJob {
       ...(nullableString(value.next_run_at)
         ? { nextRunAt: nullableString(value.next_run_at) as string }
         : {}),
+      // Records written before jobs carried a project root stay loadable; the
+      // field simply reads as undefined.
+      ...(nullableString(value.project_root)
+        ? { projectRoot: nullableString(value.project_root) as string }
+        : {}),
       ...(nullableString(value.workspace_id)
         ? { workspaceId: nullableString(value.workspace_id) as string }
         : {}),
       ...(isRecord(value.metadata) ? { metadata: value.metadata } : {}),
     })
   }
+}
+
+export interface JobStoreOptions {
+  /**
+   * Project directory stamped onto jobs added without one. The store file is
+   * shared by every daemon, so a job that does not name its repo cannot later
+   * be attributed to one.
+   */
+  readonly projectRoot?: string
 }
 
 /**
@@ -96,7 +115,10 @@ export class CronJob {
  * process to rename wins.
  */
 export class JobStore {
-  constructor(readonly path: string) {
+  readonly projectRoot: string | undefined
+
+  constructor(readonly path: string, options: JobStoreOptions = {}) {
+    this.projectRoot = options.projectRoot
     mkdirSync(dirname(path), { recursive: true })
     try {
       readFileSync(path, 'utf8')
@@ -106,6 +128,7 @@ export class JobStore {
   }
 
   add(job: CronJob): CronJob {
+    job.projectRoot ??= this.projectRoot
     const records = this.load().filter((record) => record.id !== job.id)
     records.push(job.toRecord())
     this.save(records)
@@ -282,6 +305,7 @@ function recordToSnakeCase(
   const aliases: Record<string, string> = {
     lastRunAt: 'last_run_at',
     nextRunAt: 'next_run_at',
+    projectRoot: 'project_root',
     workspaceId: 'workspace_id',
   }
   return Object.fromEntries(

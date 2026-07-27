@@ -17,9 +17,32 @@ export interface PendingResumeReplay {
   readonly tool_call_id: string
 }
 
+/**
+ * What a repair pass actually changed.
+ *
+ * Every category is counted, including the orphan drop that used to return
+ * nothing: a transcript silently losing messages on load should not be
+ * discoverable only by reading this file.
+ */
+export interface ResumeRepairStats {
+  /** Assistant messages whose visible content carried provider tool-call markers. */
+  readonly assistantMarkersStripped: number
+  /** Tool replies dropped because no preceding assistant call can make them valid. */
+  readonly orphanedToolRepliesDropped: number
+  /** Interrupted calls given a placeholder reply so every call keeps exactly one. */
+  readonly replaySentinelsInserted: number
+}
+
 export interface ResumeRepairResult {
   readonly messages: readonly ResumeMessage[]
   readonly pendingReplays: readonly PendingResumeReplay[]
+  readonly stats: ResumeRepairStats
+}
+
+/** A repair pass plus the entries dropped before it because they were not objects. */
+export interface TranscriptRepairSummary {
+  readonly malformedMessagesDropped: number
+  readonly stats: ResumeRepairStats
 }
 
 /** Explicit host-owned executor used only when replay is deliberately requested. */
@@ -42,6 +65,8 @@ export function repairResumedTranscript(messages: readonly ResumeMessage[]): Res
   const outstanding = new Map<string, PendingResumeReplay>()
   const repaired: ResumeMessage[] = []
   const pendingReplays: PendingResumeReplay[] = []
+  let assistantMarkersStripped = 0
+  let orphanedToolRepliesDropped = 0
 
   const flushOutstanding = (): void => {
     for (const [toolCallId, replay] of outstanding) {
@@ -60,6 +85,7 @@ export function repairResumedTranscript(messages: readonly ResumeMessage[]): Res
     if (role === 'assistant') {
       if (outstanding.size) flushOutstanding()
       const message = copyAssistantMessage(source)
+      if (message.content !== source.content) assistantMarkersStripped += 1
       repaired.push(message)
       for (const replay of toolCallReplays(message.tool_calls)) {
         outstanding.set(replay.tool_call_id, replay)
@@ -71,6 +97,8 @@ export function repairResumedTranscript(messages: readonly ResumeMessage[]): Res
       const toolCallId = stringValue(source.tool_call_id)
       if (toolCallId && outstanding.delete(toolCallId)) {
         repaired.push({ ...source })
+      } else {
+        orphanedToolRepliesDropped += 1
       }
       continue
     }
@@ -80,7 +108,46 @@ export function repairResumedTranscript(messages: readonly ResumeMessage[]): Res
   }
 
   if (outstanding.size) flushOutstanding()
-  return { messages: repaired, pendingReplays }
+  return {
+    messages: repaired,
+    pendingReplays,
+    stats: {
+      assistantMarkersStripped,
+      orphanedToolRepliesDropped,
+      replaySentinelsInserted: pendingReplays.length,
+    },
+  }
+}
+
+/**
+ * Repair a raw `messages` array the way a transcript load does, reporting what
+ * changed instead of only what survived.
+ *
+ * Entries that are not objects are dropped first, exactly as the transcript
+ * loader drops them, so the caller sees one summary covering every category.
+ */
+export function summarizeTranscriptRepair(rawMessages: readonly unknown[]): TranscriptRepairSummary {
+  const valid = rawMessages.filter(isPlainRecord)
+  return {
+    malformedMessagesDropped: rawMessages.length - valid.length,
+    stats: repairResumedTranscript(valid).stats,
+  }
+}
+
+/** One human-readable line, or the empty string when the load changed nothing. */
+export function describeTranscriptRepair(summary: TranscriptRepairSummary): string {
+  const { stats } = summary
+  const parts = [
+    phrase(summary.malformedMessagesDropped, 'malformed message', 'dropped'),
+    phrase(stats.orphanedToolRepliesDropped, 'orphaned tool reply', 'dropped', 'orphaned tool replies'),
+    phrase(stats.replaySentinelsInserted, 'interrupted-call placeholder', 'inserted'),
+    phrase(stats.assistantMarkersStripped, 'assistant message', 'stripped tool-call markers from'),
+  ].filter(part => part.length > 0)
+  return parts.length === 0 ? '' : `Resume repaired this transcript: ${parts.join(', ')}.`
+}
+
+function phrase(count: number, singular: string, verb: string, plural = `${singular}s`): string {
+  return count === 0 ? '' : `${verb} ${count} ${count === 1 ? singular : plural}`
 }
 
 /**
@@ -99,7 +166,7 @@ export async function replayPendingToolCalls(
   const pendingReplays = repair.pendingReplays.map(replay => ({ ...replay }))
   const executor = options.executor
   if (executor === undefined) {
-    return { messages, pendingReplays }
+    return { messages, pendingReplays, stats: repair.stats }
   }
 
   const byToolCallId = new Map(pendingReplays.map(replay => [replay.tool_call_id, replay]))
@@ -122,7 +189,7 @@ export async function replayPendingToolCalls(
     }
   }
 
-  return { messages, pendingReplays: [] }
+  return { messages, pendingReplays: [], stats: repair.stats }
 }
 
 function copyAssistantMessage(source: ResumeMessage): ResumeMessage {

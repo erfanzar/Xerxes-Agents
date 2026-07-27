@@ -9,9 +9,11 @@ import {
   type SubAgentTask,
   type SubagentTaskRunRequest,
 } from '../agents/subagentManager.js'
+import type { ContextMessage } from '../context/compressor.js'
 import { ValidationError } from '../core/errors.js'
 import type { ToolExecutor } from '../executors/toolRegistry.js'
 import type { LlmClient } from '../llms/client.js'
+import { effectiveContextLimit } from '../llms/providerRegistry.js'
 import type {
   SendAgentInputOptions,
   SpawnAgentOptions,
@@ -20,11 +22,20 @@ import type {
   SpawnedAgentStatus,
 } from '../operators/subagents.js'
 import { bootstrap } from '../runtime/bootstrap.js'
-import type { DaemonTranscriptStore } from '../session/daemonTranscript.js'
+import { looksLikeSessionId, type DaemonTranscriptStore } from '../session/daemonTranscript.js'
 import type { AgentState, StreamEvent } from '../streaming/events.js'
 import { runTurn } from '../streaming/loop.js'
 import type { PermissionBroker, PermissionMode } from '../streaming/permissions.js'
+import type { ChatMessage } from '../types/messages.js'
 import type { ToolDefinition } from '../types/toolCalls.js'
+import {
+  compactMessagesIfNeeded,
+  compactionCompletionPort,
+  compactionThresholdTokens,
+  DEFAULT_AUTO_COMPACT_THRESHOLD,
+  precompactArchivePath,
+  type CompactionStamp,
+} from './compactionRunner.js'
 import type { DaemonEvent } from './runtime.js'
 import {
   NativeSubagentTurnCoordinator,
@@ -39,6 +50,13 @@ import { DaemonSubagentEventBus } from './subagentEvents.js'
 
 export interface NativeSubagentHostOptions {
   readonly agentDefinitions: ReadonlyMap<string, AgentDefinition>
+  /**
+   * Fraction of a child's prompt budget at which its conversation is compacted
+   * before the turn starts. Defaults to the daemon's own auto-compaction
+   * threshold so parent and children never disagree about when a context is
+   * full; 0 disables child compaction.
+   */
+  readonly autoCompactThreshold?: number
   readonly cwd: string
   readonly eventBus: DaemonSubagentEventBus
   /** Bounded supplemental bootstrap context, such as the discovered skill catalog. */
@@ -85,6 +103,13 @@ export interface NativeSubagentHost {
   invalidateAll(): number
   /** Cancel and invalidate every child owned by one parent session. */
   cancelSource(sourceAgentId: string): number
+  /**
+   * Stop the live children of one parent session after a user interrupt,
+   * without invalidating or closing their handles. An interruption is a pause
+   * the user may undo, so every cancelled child stays inspectable in the
+   * agents panel and retryable under its stable identity.
+   */
+  interruptSource(sourceAgentId: string): number
   /**
    * Start a new attempt for a dead (failed/cancelled) task under its stable
    * identity. The persisted conversation continues when one survives;
@@ -160,6 +185,7 @@ export function createNativeSubagentHost(options: NativeSubagentHostOptions): Na
     turnCoordinator,
     invalidateAll: () => managerPort.invalidateAll(),
     cancelSource: sourceAgentId => managerPort.invalidateSource(sourceAgentId),
+    interruptSource: sourceAgentId => managerPort.interruptSource(sourceAgentId),
     retry: (task, retryOptions) => managerPort.retry(task, retryOptions ?? {}),
     reconfigure(nextOptions) {
       if (nextOptions.eventBus !== options.eventBus) {
@@ -494,6 +520,27 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
     const source = sourceAgentId.trim()
     if (!source) return 0
     return this.invalidateMatching(metadata => metadata.sourceAgentId === source)
+  }
+
+  /**
+   * Cancel the live children of one parent session on user interrupt. The
+   * handle keeps its identity, history link, and open state, so the cancelled
+   * child reports an honest terminal status and can still be retried.
+   */
+  interruptSource(sourceAgentId: string): number {
+    const source = sourceAgentId.trim()
+    if (!source) return 0
+    let cancelled = 0
+    for (const task of this.manager.listTasks()) {
+      // Fall back to the task's own recorded parent the way snapshot() does,
+      // so a child whose handle metadata was never registered still stops
+      // instead of quietly outliving the turn that owns it.
+      const owner = this.handles.get(task.id)?.sourceAgentId ?? (task.sourceId || undefined)
+      if (owner !== source) continue
+      if (task.status !== 'pending' && task.status !== 'running') continue
+      if (this.manager.cancel(task.id)) cancelled += 1
+    }
+    return cancelled
   }
 
   private invalidateMatching(predicate: (metadata: HandleMetadata) => boolean): number {
@@ -852,6 +899,15 @@ class RecoverableSubagentManagerPort implements SpawnedAgentManagerPort {
     return cancelled
   }
 
+  /**
+   * Only live children can be interrupted. Recovered tombstones already carry
+   * a terminal status from a dead daemon, so an interrupt leaves them alone
+   * rather than closing handles the user may still want to retry.
+   */
+  interruptSource(sourceAgentId: string): number {
+    return this.live.interruptSource(sourceAgentId)
+  }
+
   invalidateHandlesExceeding(nextMode: PermissionMode): number {
     return this.live.invalidateHandlesExceeding(nextMode)
   }
@@ -924,6 +980,18 @@ async function runNativeSubagent(
     throw error
   }
   state.metadata.project_root = options.cwd
+  // Before bootstrap, and before the first checkpoint: a reloaded conversation
+  // that already fills the window is exactly what a queued follow-up or a
+  // retry continuation hands us, and an uncompacted one dies as a provider
+  // error the parent can only retry blind.
+  await compactChildConversation({
+    conversation,
+    conversations,
+    model,
+    options,
+    request,
+    state,
+  })
   // The run request carries the depth children of this task must be spawned at
   // (the manager precomputes task.depth + 1); publish it while the turn runs.
   // Key by the unique task id, never the shared profile name, so concurrent
@@ -1049,6 +1117,98 @@ async function runNativeSubagent(
     runningChildDepths.delete(request.task.id)
     releaseConversation()
   }
+}
+
+interface ChildCompactionRequest {
+  readonly conversation: SubagentConversationContext
+  readonly conversations: SubagentConversationPersistence
+  readonly model: string
+  readonly options: NativeSubagentHostOptions
+  readonly request: SubagentTaskRunRequest
+  readonly state: AgentState
+}
+
+/**
+ * Compact a child's conversation before its turn starts.
+ *
+ * The rewrite is persisted here rather than left to the turn: the first
+ * tool-event checkpoint saves the whole conversation, so a compaction that had
+ * not been written yet would be recorded as the pre-compaction transcript
+ * again and the next run would reload it. Failures are warnings — an
+ * uncompacted turn may still fit, a child killed by its own housekeeping never
+ * does.
+ */
+async function compactChildConversation(input: ChildCompactionRequest): Promise<void> {
+  const { conversation, conversations, model, options, request, state } = input
+  if (state.messages.length < 2) return
+  // No profile overrides reach a delegated run, so the child prices its window
+  // from the model registry. It is the same prompt-budget rule the parent uses.
+  const thresholdTokens = compactionThresholdTokens(
+    effectiveContextLimit(model),
+    options.autoCompactThreshold ?? DEFAULT_AUTO_COMPACT_THRESHOLD,
+  )
+  if (thresholdTokens <= 0) return
+  try {
+    const archivePath = childArchivePath(options.transcriptStore, conversation.historySessionId)
+    const outcome = await compactMessagesIfNeeded({
+      ...(archivePath === undefined ? {} : { archivePath }),
+      completion: compactionCompletionPort(options.llm, model),
+      messages: state.messages as unknown as ContextMessage[],
+      model,
+      reason: 'subagent',
+      thresholdTokens,
+    })
+    if (!outcome.compacted) return
+    // Splice, not reassign: `AgentState.messages` is a shared array the turn
+    // already holds a reference to.
+    state.messages.splice(0, state.messages.length, ...(outcome.messages as unknown as ChatMessage[]))
+    state.metadata = { ...state.metadata, last_compaction: outcome.stamp }
+    await conversations.save(conversation, state, 'running')
+    publishChildCompaction(options.eventBus, request, outcome.stamp)
+  } catch (error) {
+    console.warn(`Could not compact subagent ${request.task.id}: ${errorText(error)}`)
+  }
+}
+
+/** Archive sidecar beside the child's transcript, or nothing when it has no transcript file. */
+function childArchivePath(
+  store: DaemonTranscriptStore | undefined,
+  historySessionId: string,
+): string | undefined {
+  if (!store || !looksLikeSessionId(historySessionId)) return undefined
+  return precompactArchivePath(store.pathFor(historySessionId))
+}
+
+/**
+ * Tell the agents overlay why this child's token count dropped.
+ *
+ * It rides `text_part` because that is a rendered child-progress channel the
+ * gateway already forwards; a new event type would need matching wire and UI
+ * support and would be dropped silently until it had it.
+ */
+function publishChildCompaction(
+  bus: DaemonSubagentEventBus,
+  request: SubagentTaskRunRequest,
+  stamp: CompactionStamp,
+): void {
+  const sourceId = request.task.sourceId
+  if (!sourceId) return
+  const text = `context compacted: ${stamp.tokens_before} → ${stamp.tokens_after} tokens `
+    + `(${stamp.messages_summarized} message(s) summarized)`
+  bus.publish(sourceId, {
+    type: 'subagent_event',
+    payload: {
+      agent_id: request.task.id,
+      agent_name: request.task.agentDefName || request.task.name,
+      creator_id: request.task.creatorId || null,
+      depth: request.task.depth,
+      goal: request.task.prompt,
+      parent_id: request.task.parentId || null,
+      subagent_type: request.task.agentDefName || request.task.name,
+      title: request.task.title,
+      event: { type: 'text_part', payload: { text } },
+    },
+  })
 }
 
 async function waitForTurnStart(state: AgentState, previousTurnCount: number): Promise<void> {
@@ -1213,6 +1373,26 @@ function daemonEventFromSubagent(
           },
         },
       }
+    case 'cancelled':
+      // Cancellation is decided synchronously while the runner turn is still
+      // unwinding, and the matching `done` can therefore land after the
+      // parent turn stopped listening. Publish the terminal transition now so
+      // no surface is left asserting a child still runs — or that a child
+      // stopped when nothing ever told it to.
+      return {
+        type: 'subagent_event',
+        payload: {
+          ...base,
+          event: {
+            type: 'turn_end',
+            payload: {
+              status: 'cancelled',
+              summary: event.completionSummary ?? textValue(data.reason),
+              tool_count: event.toolCalls,
+            },
+          },
+        },
+      }
     case 'done':
       return {
         type: 'subagent_event',
@@ -1331,6 +1511,10 @@ function stringConfig(value: unknown): string {
 
 function stringList(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
 
 function textValue(value: unknown): string {

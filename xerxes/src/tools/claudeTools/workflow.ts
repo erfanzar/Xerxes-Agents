@@ -6,7 +6,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { ClientError, ValidationError } from '../../core/errors.js'
-import { ToolRegistry, type ToolExecutionContext } from '../../executors/toolRegistry.js'
+import {
+  DEFAULT_MAX_TOOL_RESULT_BYTES,
+  TOOL_SEARCH_LOADED_KEY,
+  ToolRegistry,
+  type ToolCapabilities,
+  type ToolExecutionContext,
+} from '../../executors/toolRegistry.js'
 import { skillMetadataIndexLine, skillPromptSection, type SkillRegistry } from '../../extensions/skills.js'
 import { SpawnedAgentManager, type SpawnedAgentDescriptor, type SpawnedAgentSnapshot } from '../../operators/subagents.js'
 import { UserPromptManager } from '../../operators/userPrompt.js'
@@ -19,6 +25,10 @@ export type { InteractionMode } from '../../runtime/interactionModes.js'
 
 const DEFAULT_PLAN_TIMEOUT_MS = 120_000
 const DEFAULT_GIT_TIMEOUT_MS = 30_000
+const MAX_TOOL_SEARCH_RESULTS = 10
+/** Only this many matches come back with their full schema; the rest are listed by name. */
+const MAX_TOOL_SEARCH_LOADED = 5
+const TOOL_SEARCH_RESULT_BYTES = 65_536
 const MAX_SKILL_SEARCH_RESULTS = 20
 const MAX_SKILL_SEARCH_QUERY_CHARACTERS = 240
 const MAX_SKILL_SEARCH_TAGS = 12
@@ -225,15 +235,68 @@ export const CLAUDE_WORKFLOW_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     worktree_path: stringSchema('Worktree path returned by EnterWorktreeTool.'),
     force: booleanSchema('Permit removal with uncommitted changes.'),
   }, ['worktree_path']),
-  definition('ToolSearchTool', 'Search currently registered tool names and descriptions.', {
-    query: stringSchema('Tool capability query.'),
-  }, ['query']),
+  definition(
+    'ToolSearchTool',
+    'Load tool schemas by capability query. Matches come back with their full parameter schema, '
+    + 'which is what makes a deferred tool callable; tools already listed in this request need no search.',
+    { query: stringSchema('Tool capability query.') },
+    ['query'],
+  ),
   SKILL_TOOL_DEFINITION,
   definition('PlanTool', 'Generate and optionally execute a structured multi-agent plan through an attached planner.', {
     objective: stringSchema('High-level objective.'),
     execute: booleanSchema('Run the generated steps through the subagent manager.'),
   }, ['objective']),
 ]
+
+/**
+ * Explicit capability record for every tool this file registers. Nothing here may
+ * fall back to the registry defaults: an undeclared tool would be treated as
+ * unsafe and deferrable, which for TodoWriteTool or ToolSearchTool itself would
+ * quietly break the core loop. The test in test/toolRegistry.test.ts fails when a
+ * tool is added to CLAUDE_WORKFLOW_TOOL_DEFINITIONS without a record here.
+ */
+export const CLAUDE_WORKFLOW_TOOL_CAPABILITIES: Readonly<Record<string, ToolCapabilities>> = Object.freeze({
+  AskUserQuestionTool: capabilityRecord({
+    concurrencySafe: false, defer: true, destructive: false, openWorld: true, readOnly: true,
+  }),
+  EnterPlanModeTool: capabilityRecord({
+    concurrencySafe: false, defer: true, destructive: false, openWorld: false, readOnly: false,
+  }),
+  // git worktree add takes the repository index lock, so overlapping calls can fail each other.
+  EnterWorktreeTool: capabilityRecord({
+    concurrencySafe: false, defer: true, destructive: false, openWorld: true, readOnly: false,
+  }),
+  ExitPlanModeTool: capabilityRecord({
+    concurrencySafe: false, defer: true, destructive: false, openWorld: false, readOnly: false,
+  }),
+  // force removal discards uncommitted work inside the worktree.
+  ExitWorktreeTool: capabilityRecord({
+    concurrencySafe: false, defer: true, destructive: true, openWorld: true, readOnly: false,
+  }),
+  // Runs arbitrary subagents, which can do anything the parent could.
+  PlanTool: capabilityRecord({
+    concurrencySafe: false, defer: true, destructive: true, openWorld: true, readOnly: false,
+  }),
+  SetInteractionModeTool: capabilityRecord({
+    concurrencySafe: false, defer: true, destructive: false, openWorld: false, readOnly: false,
+  }),
+  // Renders untrusted third-party skill metadata and instructions from outside the workspace.
+  SkillTool: capabilityRecord({
+    concurrencySafe: true, defer: true, destructive: false, openWorld: true, readOnly: true,
+  }),
+  TodoWriteTool: capabilityRecord({
+    concurrencySafe: false, defer: false, destructive: false, openWorld: false, readOnly: false,
+  }),
+  ToolSearchTool: capabilityRecord({
+    concurrencySafe: true,
+    defer: false,
+    destructive: false,
+    maxResultBytes: TOOL_SEARCH_RESULT_BYTES,
+    openWorld: false,
+    readOnly: true,
+  }),
+})
 
 /** Register Claude-compatible workflow tools without duplicating core file/process tools. */
 export function registerClaudeWorkflowTools(
@@ -243,7 +306,13 @@ export function registerClaudeWorkflowTools(
 ): readonly ToolDefinition[] {
   const adapter = new ClaudeWorkflowTools(options, registry)
   for (const tool of CLAUDE_WORKFLOW_TOOL_DEFINITIONS) {
-    registry.replace(tool, (inputs, context, signal) => adapter.execute(tool.function.name, inputs, context, signal), agentId)
+    const name = tool.function.name
+    registry.replace(
+      tool,
+      (inputs, context, signal) => adapter.execute(name, inputs, context, signal),
+      agentId,
+      CLAUDE_WORKFLOW_TOOL_CAPABILITIES[name],
+    )
   }
   return CLAUDE_WORKFLOW_TOOL_DEFINITIONS
 }
@@ -254,8 +323,33 @@ export function registerClaudeSkillTool(
   skillRegistry: SkillRegistry,
   agentId = 'default',
 ): ToolDefinition {
-  registry.replace(SKILL_TOOL_DEFINITION, inputs => renderSkill(skillRegistry, inputs), agentId)
+  registry.replace(
+    SKILL_TOOL_DEFINITION,
+    inputs => renderSkill(skillRegistry, inputs),
+    agentId,
+    CLAUDE_WORKFLOW_TOOL_CAPABILITIES.SkillTool,
+  )
   return SKILL_TOOL_DEFINITION
+}
+
+function capabilityRecord(axes: {
+  readonly concurrencySafe: boolean
+  readonly defer: boolean
+  readonly destructive: boolean
+  readonly interruptBehavior?: 'block' | 'cancel'
+  readonly maxResultBytes?: number
+  readonly openWorld: boolean
+  readonly readOnly: boolean
+}): ToolCapabilities {
+  return Object.freeze({
+    concurrencySafe: axes.concurrencySafe,
+    defer: axes.defer,
+    destructive: axes.destructive,
+    interruptBehavior: axes.interruptBehavior ?? 'cancel',
+    maxResultBytes: axes.maxResultBytes ?? DEFAULT_MAX_TOOL_RESULT_BYTES,
+    openWorld: axes.openWorld,
+    readOnly: axes.readOnly,
+  })
 }
 
 /** Adapter that owns one session's Claude workflow state and host ports. */
@@ -271,7 +365,7 @@ export class ClaudeWorkflowTools {
   async execute(
     name: string,
     inputs: JsonObject,
-    _context: ToolExecutionContext,
+    context: ToolExecutionContext,
     signal?: AbortSignal,
   ): Promise<unknown> {
     switch (name) {
@@ -282,7 +376,7 @@ export class ClaudeWorkflowTools {
       case 'SetInteractionModeTool': return this.setInteractionMode(inputs)
       case 'EnterWorktreeTool': return this.enterWorktree(inputs)
       case 'ExitWorktreeTool': return this.exitWorktree(inputs)
-      case 'ToolSearchTool': return this.searchTools(inputs)
+      case 'ToolSearchTool': return this.searchTools(inputs, context)
       case 'SkillTool': return this.skill(inputs)
       case 'PlanTool': return this.plan(inputs, signal)
       default: throw new ValidationError('tool', 'is not handled by ClaudeWorkflowTools', name)
@@ -337,19 +431,44 @@ export class ClaudeWorkflowTools {
     return { path, removed: true }
   }
 
-  private searchTools(inputs: JsonObject): readonly Record<string, unknown>[] {
-    const query = requiredString(inputs, 'query').toLowerCase().trim()
-    const terms = query.split(/\s+/).filter(Boolean)
-    const matches = this.registry.definitions().map(tool => {
+  /**
+   * Return the FULL schema for the best matches, not just their names.
+   *
+   * The schema in the result is the whole point: with deferred loading enabled a
+   * deferred tool's schema is absent from the request until a search puts it in
+   * the transcript, and the transcript is what the registry replays to decide
+   * which schemas to send next turn. Returning names alone made this tool pure
+   * added cost, since it only ever described tools already inlined in context.
+   */
+  private searchTools(inputs: JsonObject, context: ToolExecutionContext): readonly Record<string, unknown>[] {
+    const terms = requiredString(inputs, 'query').toLowerCase().trim().split(/\s+/).filter(Boolean)
+    const ranked = this.registry.definitions(context.agentId).map(tool => {
       const name = tool.function.name
       const description = tool.function.description
       const haystack = `${name} ${description}`.toLowerCase()
-      const score = terms.reduce((total, term) => total + (name.toLowerCase().includes(term) ? 3 : haystack.includes(term) ? 1 : 0), 0)
-      return { name, description, score }
+      const score = terms.reduce(
+        (total, term) => total + (name.toLowerCase().includes(term) ? 3 : haystack.includes(term) ? 1 : 0),
+        0,
+      )
+      return { definition: tool, description, name, score }
     }).filter(match => match.score > 0)
       .sort((left, right) => right.score - left.score || left.name.localeCompare(right.name))
-      .slice(0, 10)
-    return matches
+      .slice(0, MAX_TOOL_SEARCH_RESULTS)
+    return ranked.map((match, index) => {
+      // Overflow matches stay name-only so one broad query cannot flood the turn
+      // with schemas; a narrower query loads them.
+      if (index >= MAX_TOOL_SEARCH_LOADED) {
+        return Object.freeze({ description: match.description, loaded: false, name: match.name })
+      }
+      return Object.freeze({
+        description: match.description,
+        loaded: true,
+        // Marker scanned out of the transcript to rebuild the live schema set.
+        [TOOL_SEARCH_LOADED_KEY]: match.name,
+        name: match.name,
+        parameters: match.definition.function.parameters,
+      })
+    })
   }
 
   private skill(inputs: JsonObject): string {

@@ -338,7 +338,11 @@ function clarifyRequest(payload: Record<string, unknown>): AnyEvent {
 function notificationEvents(payload: Record<string, unknown>): AnyEvent[] {
   const category = str(payload.category)
   const kind = str(payload.type)
-  const body = str(payload.body, str(payload.title))
+  // The bridge notification shape is `{category, title, body, severity}`, but
+  // the Bun runtime emits its own turn-level notices as `{level, message}`.
+  // Without the second spelling those notices — turn errors, saved steers,
+  // stopped delegated agents — reached the TUI as a blank info toast.
+  const body = firstNonEmptyStr(payload.body, payload.title, payload.message)
 
   if (category === 'subagent_stream') {
     return subagentStreamEvents(payload, body)
@@ -386,6 +390,12 @@ function notificationEvents(payload: Record<string, unknown>): AnyEvent[] {
     ]
   }
 
+  // A toast with nothing to say is noise the user cannot act on; drop it
+  // rather than flashing an empty box for eight seconds.
+  if (!body) {
+    return []
+  }
+
   return [
     {
       type: 'notification.show',
@@ -393,7 +403,7 @@ function notificationEvents(payload: Record<string, unknown>): AnyEvent[] {
         id: str(payload.id),
         key: str(payload.category),
         kind: 'ttl',
-        level: severityToLevel(str(payload.severity)),
+        level: severityToLevel(firstNonEmptyStr(payload.severity, payload.level)),
         text: body,
         ttl_ms: 8000
       }

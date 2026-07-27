@@ -292,9 +292,12 @@ test('Anthropic requests omit replayed thinking blocks unless the request enable
   await collect(client.stream({ model: 'claude-sonnet-4-6', messages }))
   await collect(client.stream({ model: 'claude-sonnet-4-6', messages, thinking: { budgetTokens: 2_048 } }))
 
+  // The trailing block also carries the conversation cache breakpoint; this
+  // test is about thinking replay, so assert that separately below.
+  const CACHE = { type: 'ephemeral' }
   expect(payloads[0]?.messages).toEqual([
     { role: 'user', content: 'hi' },
-    { role: 'assistant', content: [{ type: 'text', text: 'answer' }] },
+    { role: 'assistant', content: [{ type: 'text', text: 'answer', cache_control: CACHE }] },
   ])
   expect(payloads[1]?.messages).toEqual([
     { role: 'user', content: 'hi' },
@@ -302,10 +305,44 @@ test('Anthropic requests omit replayed thinking blocks unless the request enable
       role: 'assistant',
       content: [
         { type: 'thinking', thinking: 'trace', signature: 'sig-1' },
-        { type: 'text', text: 'answer' },
+        { type: 'text', text: 'answer', cache_control: CACHE },
       ],
     },
   ])
+})
+
+test('the conversation itself carries exactly one cache breakpoint, on its last block', async () => {
+  const payloads: { messages: { content: unknown; role: string }[] }[] = []
+  const client = new AnthropicMessagesClient({
+    apiKey: 'test-key',
+    fetchImplementation: (async (_url: unknown, init: { body: string }) => {
+      payloads.push(JSON.parse(init.body) as never)
+      return new Response('event: message_stop\ndata: {}\n\n', { status: 200 })
+    }) as never,
+  })
+
+  await collect(client.stream({
+    model: 'claude-sonnet-4-6',
+    messages: [
+      // A stale marker from a resumed transcript must not survive: four
+      // breakpoints is the account-wide budget and the system prefix plus the
+      // tool block already claim two.
+      { role: 'user', content: 'first' },
+      { role: 'assistant', content: 'second' },
+      { role: 'user', content: 'third' },
+    ],
+  }))
+
+  const messages = payloads[0]?.messages ?? []
+  const marked = messages.filter(message =>
+    Array.isArray(message.content)
+    && (message.content as { cache_control?: unknown }[]).some(block => block.cache_control !== undefined))
+  expect(marked).toHaveLength(1)
+  expect(messages.at(-1)?.content).toEqual([
+    { type: 'text', text: 'third', cache_control: { type: 'ephemeral' } },
+  ])
+  // Earlier messages keep their plain string form.
+  expect(messages[0]?.content).toBe('first')
 })
 
 test('Anthropic streamed tool arguments come from input_json_delta partials only', async () => {

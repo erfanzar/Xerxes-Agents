@@ -12,6 +12,7 @@ import {
   type RuntimeInfo,
 } from '../src/runtime/promptContext.js'
 import { PromptProfile } from '../src/runtime/promptProfiles.js'
+import { VERIFICATION_MANDATE_RULES } from '../src/runtime/verificationMandate.js'
 
 const runtimeInfo: RuntimeInfo = {
   platform: 'Darwin 25.0',
@@ -177,6 +178,18 @@ test('stored memories and user profile are injection-scanned and length-capped b
   expect(context.userProfileSection).not.toContain('system prompt override now')
   expect(context.userProfileSection).toContain('[BLOCKED:')
   expect(context.userProfileSection).not.toContain('p'.repeat(1_001))
+})
+
+test('the runtime prefix renders the shared verification mandate verbatim', async () => {
+  const builder = new PromptContextBuilder({ host: fakeHost(), workspaceRoot: runtimeInfo.workingDirectory })
+
+  const prefix = await builder.assembleSystemPromptPrefix({ profile: PromptProfile.FULL, toolNames: ['ReadFile'] })
+
+  // Asserting against the exported constant rather than copied strings is what stops this
+  // prefix and the bootstrap prompt from silently carrying different verification rules.
+  for (const rule of VERIFICATION_MANDATE_RULES) {
+    expect(prefix).toContain(rule)
+  }
 })
 
 function fakeHost(): PromptContextHost {

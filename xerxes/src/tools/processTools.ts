@@ -16,10 +16,22 @@ export const EXEC_COMMAND_DEFINITION: ToolDefinition = {
   type: 'function',
   function: {
     name: 'exec_command',
-    description: 'Run one non-interactive argv command with a workspace-relative working directory. '
-      + 'The command is never interpreted by a shell. The working directory is contained by the '
-      + 'workspace; the executable itself may be any installed binary and is authorized by the '
-      + 'upstream tool-policy/approval gate, not by this tool.',
+    description: 'Run one executable directly from an argv list. There is no shell anywhere in this path: `cmd` is '
+      + 'rejected if it contains whitespace or any of ;&|`$<>, so pipes, redirection, &&, ||, globs, quoting, ~ and '
+      + '$VAR expansion do not exist here, and every entry in `args` reaches the program literally — "*.ts" arrives '
+      + 'as the three characters, unexpanded. Express filtering with the program\'s own flags rather than piping to '
+      + 'head or grep; if a workflow genuinely needs shell semantics, invoke the interpreter as the executable and '
+      + 'note that the approval gate then only sees that interpreter. stdin is /dev/null, so a command that prompts '
+      + 'receives nothing and burns the whole timeout doing nothing — pass the non-interactive flag (--yes, '
+      + '--no-pager, --porcelain, CI mode) up front. A non-zero exitCode is a normal successful call and never an '
+      + 'exception: read stderr and decide. The tool itself only fails for shell syntax in `cmd`, a workdir that is '
+      + `not an existing directory inside the workspace, or cancellation. A timeout (default ${DEFAULT_TIMEOUT_MS}ms, `
+      + 'ceiling 120000) also returns normally, with timedOut:true and whatever output arrived before the kill, so '
+      + 'check that flag before trusting empty output. stdout and stderr are capped independently at '
+      + `max_output_chars (default ${DEFAULT_MAX_OUTPUT_CHARS}) with truncated:true set. Nothing survives the call: `
+      + 'the process is killed when it returns, and no cwd, environment variable, or shell state carries into the '
+      + 'next invocation. Keeping a live shell open across calls needs the separate PTY tool, where the host '
+      + 'enables it.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -60,7 +72,18 @@ export interface ProcessResult {
 
 /** Register a bounded, direct-argv process tool; persistent PTYs remain a separate port. */
 export function registerProcessTools(registry: ToolRegistry, paths: WorkspacePathResolver): void {
-  registry.register(EXEC_COMMAND_DEFINITION, (inputs, _context, signal) => executeCommand(inputs, paths, signal))
+  // Deciding concurrency by tool NAME alone would make every shell call a
+  // barrier, and the shipped prompt tells the model to batch independent calls —
+  // so it complies and gets serialized anyway. The read-only analyzer already
+  // gates permissions for this exact tool, so reusing it here adds no new
+  // trust surface: `git status` and `ls` may overlap, anything that writes
+  // still runs alone.
+  registry.register(
+    EXEC_COMMAND_DEFINITION,
+    (inputs, _context, signal) => executeCommand(inputs, paths, signal),
+    'default',
+    { concurrencySafe: false, defer: false, destructive: true, openWorld: true, readOnly: false },
+  )
 }
 
 /**

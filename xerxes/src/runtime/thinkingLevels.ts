@@ -18,6 +18,8 @@
  * keywords appear in one prompt. Matching is case-insensitive because these
  * keywords are conversational triggers, not syntax.
  */
+import { maskPromptLiterals } from './promptLiterals.js'
+
 export type ThinkingLevel = 'think' | 'think_hard' | 'think_harder' | 'ultrathink'
 
 export interface ThinkingDirective {
@@ -76,8 +78,13 @@ const PATTERNS: readonly { readonly directive: ThinkingDirective; readonly patte
  * the shared ladder entries.
  */
 export function detectThinkingDirective(prompt: string): ThinkingDirective | undefined {
+  // Matched against a masked copy so a keyword the user is quoting rather than
+  // issuing cannot escalate the turn: "fix the parser in `ultrathink.ts`" and a
+  // pasted log line containing "think harder" both used to buy a 32k thinking
+  // budget, silently, on every turn that mentioned them.
+  const speaking = maskPromptLiterals(prompt)
   for (const { directive, pattern } of PATTERNS) {
-    if (pattern.test(prompt)) return { ...directive }
+    if (pattern.test(speaking)) return { ...directive }
   }
   return undefined
 }

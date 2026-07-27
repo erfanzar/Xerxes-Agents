@@ -12,8 +12,10 @@ import { useCompletion } from '../hooks/useCompletion.js'
 import { useInputHistory } from '../hooks/useInputHistory.js'
 import { useQueue } from '../hooks/useQueue.js'
 import { isUsableClipboardText, readClipboardText } from '../lib/clipboard.js'
+import { takeEarlyInputText } from '../lib/earlyInput.js'
 import { resolveEditor } from '../lib/editor.js'
 import { readOsc52Clipboard } from '../lib/osc52.js'
+import { storePasteSnippet, tagPasteToken } from '../lib/pasteStore.js'
 import { useStdin, withTerminalSuspended } from '../lib/terminalRuntime.opentui.js'
 import { isRemoteShellSession } from '../lib/terminalSetup.js'
 import { pasteTokenLabel, stripTrailingPasteNewlines } from '../lib/text.js'
@@ -143,7 +145,11 @@ export function useComposerState({
   onDroppedPath,
   submitRef
 }: UseComposerStateOptions): UseComposerStateResult {
-  const [input, setInput] = useState('')
+  // Keystrokes typed during startup seed the composer and are never submitted
+  // for the user — unlike STARTUP_QUERY, which the user passed deliberately.
+  // The boot clear-screen erased the echo of this text, so it was typed blind
+  // and has to be reviewable before it can be sent.
+  const [input, setInput] = useState(takeEarlyInputText)
   const [inputBuf, setInputBuf] = useState<string[]>([])
   const [pasteSnips, setPasteSnips] = useState<PasteSnippet[]>([])
   const isBlocked = useStore($isBlocked)
@@ -213,10 +219,16 @@ export function useComposerState({
         }
       }
 
+      // Spill the text to the content-addressed store and stamp its hash into
+      // the token. The in-memory snippet stays as the fast path, but the token
+      // alone is now enough to expand — which is what keeps history recall,
+      // snippet eviction, and queue replay from submitting the placeholder.
+      const hash = storePasteSnippet(cleanedText)
       const label = pasteTokenLabel(cleanedText, lineCount)
-      const inserted = insertAtCursor(value, cursor, label)
+      const token = hash ? tagPasteToken(label, hash) : label
+      const inserted = insertAtCursor(value, cursor, token)
 
-      setPasteSnips(prev => trimSnips([...prev, { label, text: cleanedText }]))
+      setPasteSnips(prev => trimSnips([...prev, { label: token, text: cleanedText }]))
 
       return inserted
     },

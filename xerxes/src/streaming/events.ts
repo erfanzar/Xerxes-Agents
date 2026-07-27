@@ -45,6 +45,24 @@ export interface ToolResult {
   readonly toolCallId: string
 }
 
+/**
+ * Why a turn stopped, as a closed vocabulary rather than the prose the loop
+ * also streams. Three of the loop's exits used to be distinguishable only by
+ * matching the sentence the model itself re-reads, so any reword silently
+ * changed daemon, TUI, and test behavior.
+ */
+export type TurnStopReason =
+  | 'aborted'
+  | 'completed'
+  | 'context_overflow'
+  | 'objective_guard_exhausted'
+  | 'objective_verified'
+  | 'output_limit'
+  | 'provider_failed'
+  | 'tool_budget_exhausted'
+  | 'turn_failed'
+  | 'unconfigured_tools'
+
 export type StreamEvent =
   | { readonly text: string; readonly type: 'text' }
   | { readonly text: string; readonly type: 'thinking' }
@@ -55,6 +73,8 @@ export type StreamEvent =
   | {
     readonly apiCallsCount?: number
     readonly model: string
+    /** Optional so the many hand-built turn_done fixtures outside the loop stay valid. */
+    readonly reason?: TurnStopReason
     readonly toolCallsCount: number
     readonly type: 'turn_done'
     readonly usage: TokenUsage

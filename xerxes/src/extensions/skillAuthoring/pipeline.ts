@@ -51,6 +51,45 @@ export interface AuthoringResult {
   readonly verificationSteps?: readonly VerificationStep[]
 }
 
+/**
+ * A suggestion in exactly the shape of the `skill_suggestion` streaming event.
+ *
+ * The notification transport is already plumbed end to end — daemon, bridge,
+ * ACP and console all translate that event — so producing this record is the
+ * only missing half.
+ */
+export interface SkillSuggestion {
+  readonly description: string
+  readonly skillName: string
+  readonly sourcePath: string
+  readonly toolCount: number
+  readonly uniqueTools: readonly string[]
+  readonly version: string
+}
+
+/** One already-finished turn replayed into the suggestion pass. */
+export interface SkillSuggestionTurn {
+  readonly finalResponse?: string
+  readonly toolCalls: readonly ToolCallInput[]
+  readonly userPrompt?: string
+}
+
+export interface SkillSuggestionOptions {
+  /** Where a resulting skill would be written; carried through to the event verbatim. */
+  readonly sourcePath?: string
+}
+
+/**
+ * Words marking a request as being about a repeatable procedure rather than a
+ * one-off. The pre-filter exists so an ordinary turn pays one regex test
+ * instead of a candidate construction, a draft, and a verification pass.
+ */
+export const SKILL_SUGGESTION_KEYWORDS = new RegExp(
+  '\\b(?:again|always|every ?time|next time|each time|repeat|reuse|routine|workflow|procedure'
+  + '|playbook|runbook|checklist|process|pipeline|whenever|the usual|standard way)\\b',
+  'i',
+)
+
 export interface SkillAuthoringPipelineOptions {
   readonly catalog?: SkillCatalogPort
   readonly config?: SkillAuthoringConfig | SkillAuthoringConfigOptions
@@ -102,6 +141,63 @@ export class SkillAuthoringPipeline {
   /** Alias kept for event-loop integrations that describe this boundary as turn end. */
   onTurnEnd(finalResponse = ''): Promise<AuthoringResult> {
     return this.endTurn(finalResponse)
+  }
+
+  /**
+   * Read-only entry point for a host that wants to offer a skill once per user
+   * turn: replay recent turns, and return a suggestion or nothing.
+   *
+   * Two gates run before anything is allocated — the observed call count, then
+   * one keyword test over the user prompts — so the common turn costs an
+   * integer comparison. Only past both gates and the eligibility trigger does
+   * this draft and self-verify, which is also the only point at which an
+   * injected model-backed refiner can be reached.
+   *
+   * It deliberately does not touch {@link tracker}: that tracker belongs to the
+   * live turn, and `endTurn` resets it, so sharing it would erase observations
+   * the host is still collecting. Nothing is persisted here either — a
+   * suggestion is a notification, and the store path stays behind `endTurn`.
+   */
+  async suggest(
+    turns: readonly SkillSuggestionTurn[],
+    options: SkillSuggestionOptions = {},
+  ): Promise<SkillSuggestion | undefined> {
+    let totalCalls = 0
+    for (const turn of turns) totalCalls += turn.toolCalls.length
+    if (totalCalls < this.trigger.config.minToolCalls) return undefined
+
+    const userPrompt = turns.map(turn => turn.userPrompt ?? '').filter(Boolean).join('\n')
+    if (!SKILL_SUGGESTION_KEYWORDS.test(userPrompt)) return undefined
+
+    const replay = new ToolSequenceTracker()
+    replay.beginTurn({ userPrompt })
+    let candidate: SkillCandidate
+    try {
+      for (const turn of turns) {
+        for (const call of turn.toolCalls) replay.recordCall(call)
+      }
+      candidate = replay.endTurn(turns.at(-1)?.finalResponse ?? '')
+    } catch {
+      // Malformed observations are a host bug, never a reason to fail a turn.
+      return undefined
+    }
+    if (!this.trigger.evaluate(candidate).eligible) return undefined
+
+    try {
+      const proposal = await this.drafter.refine(this.drafter.create(candidate))
+      const steps = this.verifier.generate(candidate)
+      if (!this.verifier.verify(steps, candidate).passed) return undefined
+      return {
+        description: proposal.description,
+        skillName: proposal.name,
+        sourcePath: options.sourcePath ?? '',
+        toolCount: candidate.events.length,
+        uniqueTools: candidate.uniqueTools,
+        version: proposal.version,
+      }
+    } catch {
+      return undefined
+    }
   }
 
   async endTurn(finalResponse = ''): Promise<AuthoringResult> {
