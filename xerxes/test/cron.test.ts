@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from 'bun:test'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -72,6 +72,39 @@ test('job store initializes empty, persists jobs, and updates them', () => {
     })
     expect(store.update(job.id, { paused: true })?.paused).toBe(true)
     expect(store.get(job.id)?.paused).toBe(true)
+  } finally {
+    removeDirectory(directory)
+  }
+})
+
+test('job store stamps the owning project root and tolerates records without one', () => {
+  const directory = temporaryDirectory()
+  try {
+    const path = join(directory, 'jobs.json')
+    const store = new JobStore(path, { projectRoot: '/repo/alpha' })
+    store.add(new CronJob({ id: 'stamped', prompt: 'hi' }))
+    store.add(
+      new CronJob({ id: 'explicit', prompt: 'hi', projectRoot: '/repo/beta' }),
+    )
+
+    expect(store.get('stamped')?.projectRoot).toBe('/repo/alpha')
+    expect(store.get('explicit')?.projectRoot).toBe('/repo/beta')
+    expect(JSON.parse(readFileSync(path, 'utf8'))[0].project_root).toBe(
+      '/repo/alpha',
+    )
+    expect(store.update('stamped', { projectRoot: '/repo/gamma' })?.projectRoot).toBe(
+      '/repo/gamma',
+    )
+
+    // A store file written before jobs carried a project root stays readable.
+    writeFileSync(
+      path,
+      JSON.stringify([{ id: 'legacy', prompt: 'hi', workspace_id: 'ws' }]),
+      'utf8',
+    )
+    const legacy = new JobStore(path)
+    expect(legacy.get('legacy')?.projectRoot).toBeUndefined()
+    expect(legacy.get('legacy')?.workspaceId).toBe('ws')
   } finally {
     removeDirectory(directory)
   }

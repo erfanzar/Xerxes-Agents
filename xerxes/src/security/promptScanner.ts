@@ -4,6 +4,8 @@
 import { readFile } from 'node:fs/promises'
 import { basename } from 'node:path'
 
+import { REDACTED, type RedactionRule } from './redact.js'
+
 interface ThreatPattern {
   readonly id: string
   readonly pattern: RegExp
@@ -39,6 +41,76 @@ export const CONTEXT_THREAT_PATTERNS: readonly ThreatPattern[] = [
   { id: 'exfil_curl', pattern: /curl\s+[^\n]*\$\{?\w*(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|API)/gi },
   { id: 'read_secrets', pattern: /cat\s+[^\n]*(\.env|credentials|\.netrc|\.pgpass)/gi },
 ]
+
+/**
+ * Credential-only subset of the redaction rules, for content a human or an
+ * agent asked to persist verbatim.
+ *
+ * This deliberately excludes the email and phone rules in
+ * DEFAULT_REDACTION_RULES: a durable USER.md exists precisely to hold the
+ * user's own contact details, and running the full rule set over memory
+ * writes would reject the one file whose whole purpose is that data.
+ *
+ * Every pattern is anchored on an issuer prefix or an explicit field label, so
+ * a match means "this is a secret", not "this looks high-entropy". Field rules
+ * capture the label in group 1 and the secret in group 2 and replace only the
+ * secret; collapsing the whole match rewrites the surrounding prose, turning
+ * `API key: stored in Vault as api_key=<value>` into a sentence the user never
+ * wrote.
+ */
+export const CREDENTIAL_REDACTION_RULES: readonly RedactionRule[] = Object.freeze([
+  Object.freeze({ name: 'anthropic_token', pattern: /\bsk-ant-[A-Za-z0-9_-]{16,}\b/g, replacement: REDACTED }),
+  Object.freeze({ name: 'openai_token', pattern: /\bsk-[A-Za-z0-9_-]{16,}\b/g, replacement: REDACTED }),
+  Object.freeze({ name: 'aws_access_key', pattern: /\bAKIA[0-9A-Z]{16}\b/g, replacement: REDACTED }),
+  Object.freeze({ name: 'github_pat', pattern: /\bghp_[A-Za-z0-9]{20,}\b/g, replacement: REDACTED }),
+  Object.freeze({ name: 'github_fine_grained_pat', pattern: /\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, replacement: REDACTED }),
+  Object.freeze({ name: 'slack_token', pattern: /\bxox[abprs]-[A-Za-z0-9-]{10,}\b/g, replacement: REDACTED }),
+  Object.freeze({ name: 'google_api_key', pattern: /\bAIza[0-9A-Za-z_-]{35}\b/g, replacement: REDACTED }),
+  Object.freeze({
+    name: 'jwt_token',
+    pattern: /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g,
+    replacement: REDACTED,
+  }),
+  Object.freeze({
+    name: 'bearer_token',
+    pattern: /(\bbearer\s+)([A-Za-z0-9._~+/-]{16,}={0,2})/gi,
+    replacement: '$1' + REDACTED,
+  }),
+  Object.freeze({
+    name: 'credential_field',
+    // The value threshold keeps prose such as `api key: ask Erfan` inert, and
+    // the lookahead keeps an environment-variable reference — the correct way
+    // to record where a key lives — from being treated as the key itself.
+    pattern: /((?:api[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret)["']?\s*[:=]\s*["']?)(?!process\.env|os\.environ|import\.meta)([A-Za-z0-9._~+/-]{16,}={0,2})/gi,
+    replacement: '$1' + REDACTED,
+  }),
+])
+
+/** Names of the credential rules that match somewhere in the text, in rule order. */
+export function findCredentialPatterns(content: string): string[] {
+  const found: string[] = []
+  for (const rule of CREDENTIAL_REDACTION_RULES) {
+    rule.pattern.lastIndex = 0
+    if (rule.pattern.test(content)) found.push(rule.name)
+    rule.pattern.lastIndex = 0
+  }
+  return found
+}
+
+/** Whether the text carries something that must never be written to durable storage. */
+export function containsCredential(content: string): boolean {
+  return findCredentialPatterns(content).length > 0
+}
+
+/** Replace credential values while leaving field labels, emails, and phone numbers intact. */
+export function redactCredentials(content: string): string {
+  let result = content
+  for (const rule of CREDENTIAL_REDACTION_RULES) {
+    rule.pattern.lastIndex = 0
+    result = result.replace(rule.pattern, rule.replacement)
+  }
+  return result
+}
 
 /** Invisible directional and joiner codepoints that can conceal context instructions. */
 export const CONTEXT_INVISIBLE_CHARS: ReadonlySet<string> = new Set([

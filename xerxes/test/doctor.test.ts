@@ -25,7 +25,10 @@ test('Bun doctor checks use injected host facts and do not expose credential val
   }
   const report = runAllDoctorChecks(options)
 
-  expect(report.map(item => item.severity)).toEqual(['ok', 'ok', 'ok', 'ok', 'ok', 'ok'])
+  // Asserted as a property rather than a positional list of severities: the old
+  // form broke whenever a check was added and never said which one regressed.
+  expect(report.filter(item => item.severity !== 'ok')).toEqual([])
+  expect(report.length).toBeGreaterThanOrEqual(6)
   expect(formatDoctorReport(report)).toContain('OPENAI_API_KEY')
   expect(formatDoctorReport(report)).not.toContain('secret-value')
   expect(hasDoctorFailures(report)).toBe(false)

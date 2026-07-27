@@ -156,7 +156,7 @@ export class DaemonInteractionBoard {
     pending.signal?.removeEventListener('abort', pending.abort)
     if (resolution.decision === 'approve_for_session') {
       const tools = this.approvedTools.get(pending.sessionId) ?? new Set<string>()
-      tools.add(pending.toolName)
+      tools.add(sessionGrantKey(resolution.scope ?? ApprovalScope.SESSION, pending.toolName, pending.argsHash))
       this.approvedTools.set(pending.sessionId, tools)
     }
     pending.resolve(resolution.decision)
@@ -217,12 +217,26 @@ export class DaemonInteractionBoard {
     request: PermissionRequest,
     signal?: AbortSignal,
   ): Promise<PermissionDecision> {
-    const argsHash = this.approvalStore === undefined ? '' : approvalArgumentsHash(request.toolCall.function.arguments)
-    const remembered = this.approvalStore?.check(request.toolCall.function.name, sessionId, argsHash)
+    // Hashed unconditionally: the in-memory session grants below are argument-scoped too, so a
+    // board running without a persistent store must not reuse one approval for a different argv.
+    const toolName = request.toolCall.function.name
+    const argsHash = approvalArgumentsHash(request.toolCall.function.arguments)
+    let remembered: boolean | undefined
+    let storeFailed = false
+    try {
+      remembered = this.approvalStore?.check(toolName, sessionId, argsHash)
+    } catch (error) {
+      // A corrupt or unreadable approvals file used to throw straight through the permission
+      // path and surface as a tool failure; an unanswerable store means ask the user instead.
+      this.onApprovalStoreError(error)
+      storeFailed = true
+    }
     if (remembered !== undefined) {
       return Promise.resolve(remembered ? 'approve' : 'reject')
     }
-    if (this.approvedTools.get(sessionId)?.has(request.toolCall.function.name)) {
+    // A store we could not read may hold a denial, so its failure also voids the in-session
+    // shortcut rather than letting a live grant stand in for the record we never saw.
+    if (!storeFailed && this.hasSessionGrant(sessionId, toolName, argsHash)) {
       return Promise.resolve('approve')
     }
     if (signal?.aborted) {
@@ -236,13 +250,22 @@ export class DaemonInteractionBoard {
         resolve,
         sessionId,
         signal,
-        toolName: request.toolCall.function.name,
+        toolName,
       })
       signal?.addEventListener('abort', abort, { once: true })
       if (signal?.aborted) {
         abort()
       }
     })
+  }
+
+  private hasSessionGrant(sessionId: string, toolName: string, argsHash: string): boolean {
+    const granted = this.approvedTools.get(sessionId)
+    if (!granted) {
+      return false
+    }
+    return granted.has(sessionGrantKey(ApprovalScope.SESSION, toolName, argsHash))
+      || granted.has(sessionGrantKey(ApprovalScope.ALWAYS, toolName, argsHash))
   }
 
   private finishPermission(requestId: string, decision: PermissionDecision): void {
@@ -264,6 +287,18 @@ export class DaemonInteractionBoard {
     pending.signal?.removeEventListener('abort', pending.abort)
     pending.resolve(answer)
   }
+}
+
+/**
+ * Key an in-session grant by scope, tool, and argument hash.
+ *
+ * Keying on the tool name alone let one `approve for session` click cover every later call to
+ * that tool no matter how its arguments changed. The scope is a fixed enum and the hash a
+ * fixed-width hex digest, so a NUL between the parts keeps a model-chosen tool name from
+ * spanning fields and forging a key for a tool the user never approved.
+ */
+function sessionGrantKey(scope: ApprovalScope, toolName: string, argsHash: string): string {
+  return scope + '\0' + toolName + '\0' + argsHash
 }
 
 function permissionResolution(response: string): { readonly decision: PermissionDecision; readonly scope?: ApprovalScope } {

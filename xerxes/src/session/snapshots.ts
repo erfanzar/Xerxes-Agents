@@ -3,7 +3,7 @@
 
 import { createHash, randomUUID } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 import { xerxesHome } from '../daemon/paths.js'
 
@@ -26,12 +26,29 @@ const SHADOW_EXCLUDE_PATTERNS = [
   'kubeconfig*',
 ] as const
 
+/** Number of tab-separated fields written before the session/turn link existed. */
+const LEGACY_RECORD_FIELDS = 5
+
 export interface SnapshotRecord {
   readonly commitSha: string
   readonly createdAt: string
   readonly id: string
   readonly label: string
+  /** Session that owns this snapshot; absent for manual or pre-link records. */
+  readonly sessionId?: string
+  /**
+   * Index of the turn this snapshot precedes. Without it "take me back to
+   * before turn 7" is unexpressible: a bare timestamp cannot be matched to a
+   * point in the conversation the user actually remembers.
+   */
+  readonly turnIndex?: number
   readonly workspaceDir: string
+}
+
+/** Conversation coordinates attached to an automatic snapshot. */
+export interface SnapshotLink {
+  readonly sessionId?: string
+  readonly turnIndex?: number
 }
 
 /**
@@ -73,16 +90,51 @@ export class SnapshotManager {
     return matches[0]
   }
 
+  /**
+   * Read the record log, tolerating rows written before snapshots carried a
+   * session/turn link.
+   *
+   * Those rows have five fields instead of seven. Requiring the new width
+   * would silently discard every snapshot a user had already taken, so a short
+   * row is read as an unlinked record and a longer one keeps only the fields
+   * this version understands.
+   */
   list(): SnapshotRecord[] {
     if (!existsSync(this.recordsPath)) return []
     return readFileSync(this.recordsPath, 'utf8').split(/\r?\n/).flatMap(line => {
       if (!line.trim()) return []
       const parts = line.split('\t')
-      if (parts.length !== 5) return []
-      const [id, label, commitSha, createdAt, workspaceDir] = parts
+      if (parts.length < LEGACY_RECORD_FIELDS) return []
+      const [id, label, commitSha, createdAt, workspaceDir, sessionId, turnIndex] = parts
       if (!id || label === undefined || !commitSha || !createdAt || !workspaceDir) return []
-      return [{ id, label, commitSha, createdAt, workspaceDir }]
+      const turn = parseTurnIndex(turnIndex)
+      return [{
+        id,
+        label,
+        commitSha,
+        createdAt,
+        workspaceDir,
+        ...(sessionId ? { sessionId } : {}),
+        ...(turn === undefined ? {} : { turnIndex: turn }),
+      }]
     })
+  }
+
+  /** Snapshots taken for one session, oldest first. */
+  listForSession(sessionId: string): SnapshotRecord[] {
+    if (!sessionId) return []
+    return this.list().filter(record => record.sessionId === sessionId)
+  }
+
+  /**
+   * The snapshot capturing the workspace as it stood before a given turn.
+   *
+   * The newest match wins: a retried turn snapshots the same index again, and
+   * the later capture is the one that precedes the attempt still in the
+   * transcript.
+   */
+  getForTurn(sessionId: string, turnIndex: number): SnapshotRecord | undefined {
+    return this.listForSession(sessionId).filter(record => record.turnIndex === turnIndex).at(-1)
   }
 
   async prune(options: SnapshotPruneOptions = {}): Promise<number> {
@@ -138,21 +190,48 @@ export class SnapshotManager {
     return record
   }
 
-  async snapshot(label = ''): Promise<SnapshotRecord> {
+  async snapshot(label = '', link: SnapshotLink = {}): Promise<SnapshotRecord> {
     await this.ensureRepository()
     await this.runGit(['add', '-A'])
     const message = label || `snapshot-${new Date().toISOString()}`
     await this.runGit(['commit', '--allow-empty', '-m', message])
     const commitSha = (await this.runGit(['rev-parse', 'HEAD'])).trim()
+    const turnIndex = link.turnIndex
     const record: SnapshotRecord = {
       id: randomUUID().replaceAll('-', '').slice(0, 12),
       label,
       commitSha,
       createdAt: new Date().toISOString(),
       workspaceDir: this.workspaceDirectory,
+      ...(link.sessionId ? { sessionId: link.sessionId } : {}),
+      ...(turnIndex === undefined || !Number.isInteger(turnIndex) || turnIndex < 0 ? {} : { turnIndex }),
     }
     this.appendRecord(record)
     return record
+  }
+
+  /**
+   * Restore one file from a snapshot without touching the rest of the tree.
+   *
+   * A full rollback is the wrong tool when a single file was damaged: it also
+   * discards every unrelated edit made since. Like rollback, this captures the
+   * current tree first, because `git checkout` overwrites the target with no
+   * backup of its own.
+   */
+  async restoreFile(ref: string, filePath: string): Promise<SnapshotRestoreResult> {
+    const record = this.get(ref)
+    if (!record) throw new Error(`snapshot not found: ${ref}`)
+    const path = this.workspaceRelativePath(filePath)
+    await this.ensureRepository()
+    // `cat-file -e` distinguishes "the snapshot never tracked this file" from a
+    // genuine git failure, which `checkout` alone reports as the same error.
+    const tracked = await this.runGit(['cat-file', '-e', `${record.commitSha}:${path}`]).then(() => true, () => false)
+    if (!tracked) throw new Error(`snapshot ${record.id} does not track ${path}`)
+    const previous = await this.snapshot(`pre-restore:${record.id}`)
+    // `:(literal)` keeps a filename containing glob characters from being
+    // expanded into a pathspec that would restore unrelated files.
+    await this.runGit(['checkout', record.commitSha, '--', `:(literal)${path}`])
+    return { path, previous, snapshot: record }
   }
 
   /** Run a command against the shadow repository for snapshot-diff consumers. */
@@ -173,10 +252,21 @@ export class SnapshotManager {
 
   private appendRecord(record: SnapshotRecord): void {
     const existing = existsSync(this.recordsPath) ? readFileSync(this.recordsPath, 'utf8') : ''
-    const label = record.label.replaceAll(/[\t\r\n]/g, ' ')
-    const line = [record.id, label, record.commitSha, record.createdAt, record.workspaceDir].join('\t')
-    const content = `${existing}${existing && !existing.endsWith('\n') ? '\n' : ''}${line}\n`
+    const content = `${existing}${existing && !existing.endsWith('\n') ? '\n' : ''}${recordLine(record)}\n`
     this.writeTextAtomically(this.recordsPath, content)
+  }
+
+  /** Resolve a caller-supplied path to a workspace-relative, git-usable path. */
+  private workspaceRelativePath(candidate: string): string {
+    const trimmed = candidate.trim()
+    if (!trimmed) throw new Error('a file path is required')
+    const relativePath = relative(this.workspaceDirectory, resolve(this.workspaceDirectory, trimmed))
+    // A `../` path would let a restore write anywhere the daemon can write,
+    // driven by nothing more than a snapshot ref and an attacker-chosen path.
+    if (!relativePath || relativePath === '..' || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath)) {
+      throw new Error(`path escapes the snapshot workspace: ${candidate}`)
+    }
+    return relativePath.split(sep).join('/')
   }
 
   private async ensureRepository(): Promise<void> {
@@ -205,14 +295,7 @@ export class SnapshotManager {
   }
 
   private writeRecords(records: readonly SnapshotRecord[]): void {
-    const content = records.map(record => [
-      record.id,
-      record.label.replaceAll(/[\t\r\n]/g, ' '),
-      record.commitSha,
-      record.createdAt,
-      record.workspaceDir,
-    ].join('\t')).join('\n')
-    this.writeTextAtomically(this.recordsPath, content)
+    this.writeTextAtomically(this.recordsPath, records.map(recordLine).join('\n'))
   }
 
   private writeTextAtomically(path: string, content: string): void {
@@ -234,6 +317,33 @@ export interface SnapshotManagerOptions {
 
 export interface SnapshotPruneOptions {
   readonly keep?: number
+}
+
+/** What a single-file restore replaced, and the snapshot that can undo it. */
+export interface SnapshotRestoreResult {
+  readonly path: string
+  readonly previous: SnapshotRecord
+  readonly snapshot: SnapshotRecord
+}
+
+/** One tab-separated record row; every field is scrubbed of the row separators. */
+function recordLine(record: SnapshotRecord): string {
+  return [
+    record.id,
+    record.label,
+    record.commitSha,
+    record.createdAt,
+    record.workspaceDir,
+    record.sessionId ?? '',
+    record.turnIndex === undefined ? '' : String(record.turnIndex),
+  ].map(field => field.replaceAll(/[\t\r\n]/g, ' ')).join('\t')
+}
+
+/** A turn index is only trusted when it survives a round trip as a non-negative integer. */
+function parseTurnIndex(value: string | undefined): number | undefined {
+  if (value === undefined || value.trim() === '') return undefined
+  const parsed = Number(value)
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : undefined
 }
 
 /** Run one git invocation with a hard timeout, killing the process when it overruns. */

@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { createHash } from 'node:crypto'
+import { resolve } from 'node:path'
 
 const BUILD_CONFIG_PATHS = new Set([
   '.github/workflows/ci.yml',
@@ -28,17 +29,6 @@ const CRITICAL_SOURCE_PREFIXES = [
   'xerxes/src/streaming/',
   'xerxes/src/tools/',
 ] as const
-
-const VERIFICATION_MARKERS = [
-  'git diff --check',
-  'docker build',
-  'bun test',
-  'bun run check',
-  'bun run build',
-  'bunx tsc',
-] as const
-
-const RECENT_TOOL_EXECUTIONS = 50
 
 export type ChangeSeverity = 'info' | 'warning' | 'error'
 
@@ -78,18 +68,15 @@ export interface ChangeGuardFinding {
 export interface ChangeGuardReportOptions {
   readonly findings?: readonly ChangeGuardFinding[]
   readonly statusAvailable?: boolean
-  readonly verificationCommands?: readonly string[]
 }
 
-/** Immutable change-risk classification and recent verification evidence. */
+/** Immutable change-risk classification for a working tree. */
 export class ChangeGuardReport {
   readonly findings: readonly ChangeGuardFinding[]
   readonly statusAvailable: boolean
-  readonly verificationCommands: readonly string[]
 
   constructor(options: ChangeGuardReportOptions = {}) {
     this.findings = Object.freeze((options.findings ?? []).map(finding => Object.freeze({ ...finding })))
-    this.verificationCommands = Object.freeze([...(options.verificationCommands ?? [])])
     this.statusAvailable = options.statusAvailable ?? true
     Object.freeze(this)
   }
@@ -100,16 +87,19 @@ export class ChangeGuardReport {
     return 'info'
   }
 
+  /**
+   * Only irreversible-looking damage is worth an unsolicited line in the turn report.
+   * Warnings used to fire whenever no verification command had been seen, which turned
+   * every routine edit into a chore reminder the model learned to ignore.
+   */
   get shouldNotify(): boolean {
-    if (!this.findings.length) return false
-    return this.severity === 'error' || this.verificationCommands.length === 0
+    return this.severity === 'error'
   }
 
   /** Stable SHA-1 fingerprint suitable for duplicate-notification suppression. */
   get fingerprint(): string {
     const payload = JSON.stringify({
       findings: this.findings,
-      verification_commands: this.verificationCommands,
       status_available: this.statusAvailable,
     })
     return createHash('sha1').update(payload, 'utf8').digest('hex')
@@ -119,6 +109,7 @@ export class ChangeGuardReport {
 export interface CommandResult {
   readonly exitCode: number
   readonly stdout: string
+  readonly stderr?: string
 }
 
 export type CommandRunner = (
@@ -138,29 +129,49 @@ export interface AnalyzeWorkspaceChangesOptions {
  */
 export async function analyzeWorkspaceChanges(
   cwd: string,
-  toolExecutions: readonly Readonly<Record<string, unknown>>[] = [],
   options: AnalyzeWorkspaceChangesOptions = {},
 ): Promise<ChangeGuardReport> {
   const runner = options.commandRunner ?? defaultCommandRunner
   try {
     const result = await runner(['git', 'status', '--porcelain=v1', '--untracked-files=no'], { cwd })
     if (result.exitCode !== 0) return new ChangeGuardReport({ statusAvailable: false })
-    return analyzeStatusLines(result.stdout.split(/\r?\n/), toolExecutions)
+    return analyzeStatusLines(result.stdout.split(/\r?\n/))
   } catch {
     return new ChangeGuardReport({ statusAvailable: false })
   }
 }
 
+/**
+ * Absolute paths that currently differ from HEAD, deletions excluded.
+ *
+ * Diagnostics need the set of files a turn may have touched; untracked files are
+ * included because a freshly created source file is exactly where new errors land.
+ * Porcelain paths are repo-root-relative even when git runs in a subdirectory, so
+ * they are resolved against the toplevel — resolving against cwd would silently
+ * produce paths that match nothing in a nested-package checkout.
+ */
+export async function changedWorkspacePaths(
+  cwd: string,
+  options: AnalyzeWorkspaceChangesOptions = {},
+): Promise<string[]> {
+  const runner = options.commandRunner ?? defaultCommandRunner
+  try {
+    const root = await runner(['git', 'rev-parse', '--show-toplevel'], { cwd })
+    if (root.exitCode !== 0) return []
+    const base = root.stdout.trim() || cwd
+    const result = await runner(['git', 'status', '--porcelain=v1', '--untracked-files=all'], { cwd })
+    if (result.exitCode !== 0) return []
+    return parsePorcelainStatus(result.stdout.split(/\r?\n/))
+      .filter(change => !change.deleted && change.path)
+      .map(change => resolve(base, change.path))
+  } catch {
+    return []
+  }
+}
+
 /** Classify already-collected git porcelain lines without shelling out. */
-export function analyzeStatusLines(
-  lines: readonly string[],
-  toolExecutions: readonly Readonly<Record<string, unknown>>[] = [],
-): ChangeGuardReport {
-  const changes = parsePorcelainStatus(lines)
-  return new ChangeGuardReport({
-    findings: findingsForChanges(changes),
-    verificationCommands: recentVerificationCommands(toolExecutions),
-  })
+export function analyzeStatusLines(lines: readonly string[]): ChangeGuardReport {
+  return new ChangeGuardReport({ findings: findingsForChanges(parsePorcelainStatus(lines)) })
 }
 
 /** Parse the portable subset of git status porcelain consumed by the native guard. */
@@ -184,12 +195,6 @@ export function formatChangeGuardNotification(report: ChangeGuardReport): string
   const lines = ['Risky workspace changes detected:']
   for (const finding of report.findings) {
     lines.push('- ' + finding.message + (finding.path ? ' [' + finding.path + ']' : ''))
-  }
-  if (report.verificationCommands.length) {
-    lines.push('', 'Recent verification:')
-    for (const command of report.verificationCommands.slice(0, 3)) lines.push('- ' + command)
-  } else {
-    lines.push('', 'No recent Bun test, Bun check/build, or git diff --check command was found in this session.')
   }
   return lines.join('\n')
 }
@@ -240,35 +245,14 @@ function findingsForChanges(changes: readonly WorkspaceChange[]): ChangeGuardFin
   return findings
 }
 
-function recentVerificationCommands(executions: readonly Readonly<Record<string, unknown>>[]): string[] {
-  const commands: string[] = []
-  for (const execution of executions.slice(-RECENT_TOOL_EXECUTIONS)) {
-    const command = toolExecutionCommand(execution)
-    if (!command) continue
-    const normalized = command.split(/\s+/).filter(Boolean).join(' ')
-    const lowered = normalized.toLowerCase()
-    if (VERIFICATION_MARKERS.some(marker => lowered.includes(marker))) commands.push(truncate(normalized, 180))
-  }
-  return commands.slice(-5)
-}
-
-function toolExecutionCommand(execution: Readonly<Record<string, unknown>>): string {
-  const name = typeof execution.name === 'string' ? execution.name.toLowerCase() : ''
-  const inputs = objectValue(execution.inputs)
-  if (!inputs) return ''
-  for (const key of ['cmd', 'command', 'shell_command']) {
-    const value = inputs[key]
-    if (typeof value === 'string' && value.trim()) return value
-  }
-  if (name.includes('shell') || name.includes('exec') || name.includes('bash')) {
-    for (const value of Object.values(inputs)) {
-      if (typeof value === 'string' && value.trim()) return value
-    }
-  }
-  return ''
-}
-
-async function defaultCommandRunner(
+/**
+ * Spawn a command and collect both streams.
+ *
+ * Both pipes are drained concurrently: a checker that writes a large diagnostic
+ * dump to stderr (cargo, ruff) would otherwise fill that pipe and deadlock while
+ * this side is still blocked reading stdout.
+ */
+export async function defaultCommandRunner(
   args: readonly string[],
   options: { readonly cwd: string },
 ): Promise<CommandResult> {
@@ -278,9 +262,12 @@ async function defaultCommandRunner(
     stdout: 'pipe',
     stderr: 'pipe',
   })
-  const stdout = await new Response(process.stdout).text()
+  const [stdout, stderr] = await Promise.all([
+    new Response(process.stdout).text(),
+    new Response(process.stderr).text(),
+  ])
   const exitCode = await process.exited
-  return { exitCode, stdout }
+  return { exitCode, stdout, stderr }
 }
 
 function normalizeGitPath(value: string): string {
@@ -309,16 +296,6 @@ function samplePaths(paths: readonly string[], limit = 5): string {
   return sample.join(', ') + (paths.length > limit ? ', +' + (paths.length - limit) + ' more' : '')
 }
 
-function truncate(value: string, limit: number): string {
-  return value.length <= limit ? value : value.slice(0, Math.max(0, limit - 3)) + '...'
-}
-
 function sorted(values: readonly string[]): string[] {
   return [...values].sort((left, right) => left.localeCompare(right))
-}
-
-function objectValue(value: unknown): Readonly<Record<string, unknown>> | undefined {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-    ? value as Readonly<Record<string, unknown>>
-    : undefined
 }

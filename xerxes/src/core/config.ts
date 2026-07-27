@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { extname, join, resolve } from 'node:path'
+import { extname, join, resolve, sep } from 'node:path'
 
 import { ConfigurationError } from './errors.js'
 import { xerxesSubdirFor } from './paths.js'
@@ -694,15 +694,187 @@ export interface ConfigSourceOptions {
 }
 
 export interface LoadConfigOptions extends ConfigSourceOptions {
-  /** Search this directory before the Xerxes home when no explicit config file is supplied. */
+  /**
+   * Admit this directory's `xerxes.{yaml,yml,json}` as a fallback when the Xerxes home has no
+   * config. Defaults to the `XERXES_ALLOW_WORKSPACE_CONFIG` opt-in.
+   */
+  readonly allowWorkspaceConfig?: boolean
+  /** Working directory searched for a workspace config, only once workspace configs are allowed. */
   readonly cwd?: string
-  /** Xerxes home used for the fallback `config.{yaml,yml,json}` search. */
+  /** Xerxes home searched first for `config.{yaml,yml,json}`. */
   readonly home?: string
+  /** Notified with the path of a workspace config that exists but is being ignored. */
+  readonly onIgnoredWorkspaceConfig?: (path: string) => void
   /** Explicit configuration file, which takes precedence over `XERXES_CONFIG_FILE`. */
   readonly path?: string
+  /** Values supplied on the command line, overlaid last and attributed to the override layer. */
+  readonly overrides?: Record<string, unknown>
+}
+
+/** Named layers a resolved value can come from, listed lowest precedence first. */
+export const ConfigSourceKind = {
+  DEFAULT: 'default',
+  USER_FILE: 'user-file',
+  WORKSPACE_FILE: 'workspace-file',
+  ENVIRONMENT: 'environment',
+  OVERRIDE: 'override',
+} as const
+
+export type ConfigSourceKind = (typeof ConfigSourceKind)[keyof typeof ConfigSourceKind]
+
+export interface ConfigSourceKindInfo {
+  /** Higher wins when several layers set the same key. */
+  readonly precedence: number
+  readonly label: string
+  /**
+   * Whether a `/config set` can persist into this layer. Defaults, environment variables, and
+   * command-line overrides are read-only: writing them would appear to succeed and then be
+   * silently overwritten on the next resolution.
+   */
+  readonly writable: boolean
+}
+
+export const CONFIG_SOURCE_KINDS: Readonly<Record<ConfigSourceKind, ConfigSourceKindInfo>> = Object.freeze({
+  default: { precedence: 0, label: 'built-in default', writable: false },
+  'user-file': { precedence: 1, label: 'user config file', writable: true },
+  'workspace-file': { precedence: 2, label: 'workspace config file', writable: true },
+  environment: { precedence: 3, label: 'environment variable', writable: false },
+  override: { precedence: 4, label: 'explicit override', writable: false },
+})
+
+/** Source name reported for keys no layer ever set. */
+export const BUILT_IN_DEFAULT_SOURCE = 'built-in default'
+
+/** One layer's contribution to a single key. */
+export interface ConfigContribution {
+  readonly kind: ConfigSourceKind
+  /** Absolute file path, environment variable name, or descriptive label for the layer. */
+  readonly source: string
+  readonly value: ConfigValue
+}
+
+export interface ConfigProvenanceEntry extends ConfigContribution {
+  /** Dotted path into the serialized config, e.g. `llm.model`. */
+  readonly path: string
+  /** Layers that also set this key but lost, highest precedence first. */
+  readonly shadowed: readonly ConfigContribution[]
+}
+
+export interface ConfigProvenanceLayer {
+  readonly kind: ConfigSourceKind
+  readonly source: string
+  /** Number of resolved keys this layer won outright. */
+  readonly keyCount: number
+}
+
+export interface ConfigProvenanceReport {
+  readonly layers: readonly ConfigProvenanceLayer[]
+  readonly counts: Readonly<Record<ConfigSourceKind, number>>
+  readonly entries: readonly ConfigProvenanceEntry[]
+}
+
+/**
+ * Per-key record of which layer supplied each resolved setting.
+ *
+ * Merging flattens everything into one object, so without this a value has no memory of where it
+ * came from: "why is my model X" and "which file set the permission mode" are unanswerable, and a
+ * write cannot be refused for a layer that is read-only.
+ */
+export class ConfigProvenance {
+  private readonly byPath: ReadonlyMap<string, ConfigProvenanceEntry>
+  readonly layers: readonly ConfigProvenanceLayer[]
+
+  constructor(entries: readonly ConfigProvenanceEntry[], layers: readonly ConfigProvenanceLayer[]) {
+    this.byPath = new Map(entries.map(entry => [entry.path, entry]))
+    this.layers = Object.freeze([...layers])
+    Object.freeze(this)
+  }
+
+  /** Every resolved key with its winning layer, ordered by key path. */
+  get entries(): readonly ConfigProvenanceEntry[] {
+    return Object.freeze([...this.byPath.values()])
+  }
+
+  /**
+   * Source of one dotted key path. A key no layer set reports the built-in default rather than
+   * `undefined`; `undefined` means the path is not part of the resolved configuration at all.
+   */
+  sourceOf(path: string): ConfigProvenanceEntry | undefined {
+    return this.byPath.get(path)
+  }
+
+  /** One-line explanation for a doctor check, `/config`, or an error message. */
+  explain(path: string): string {
+    const entry = this.byPath.get(path)
+    if (entry === undefined) return `${path} is not a known configuration key`
+    const shadowed = entry.shadowed.length
+      ? ` (overrides ${entry.shadowed.map(describeContribution).join(', ')})`
+      : ''
+    return `${path} = ${formatValue(entry.value)} from ${describeContribution(entry)}${shadowed}`
+  }
+
+  report(): ConfigProvenanceReport {
+    const counts: Record<ConfigSourceKind, number> = {
+      default: 0, 'user-file': 0, 'workspace-file': 0, environment: 0, override: 0,
+    }
+    for (const entry of this.byPath.values()) counts[entry.kind] += 1
+    return Object.freeze({
+      layers: this.layers,
+      counts: Object.freeze(counts),
+      entries: this.entries,
+    })
+  }
+
+  toJSON(): ConfigProvenanceReport {
+    return this.report()
+  }
+}
+
+/** Render a provenance report as text for a doctor check or `/config` view. */
+export function formatConfigProvenance(
+  provenance: ConfigProvenance,
+  options: { readonly changedOnly?: boolean } = {},
+): string {
+  const lines: string[] = []
+  for (const layer of provenance.layers) {
+    lines.push(`${CONFIG_SOURCE_KINDS[layer.kind].label}: ${layer.source} (${layer.keyCount} keys)`)
+  }
+  if (lines.length) lines.push('')
+  for (const entry of provenance.entries) {
+    if (options.changedOnly && entry.kind === ConfigSourceKind.DEFAULT) continue
+    lines.push(`${entry.path} = ${formatValue(entry.value)}  [${describeContribution(entry)}]`)
+    for (const shadowed of entry.shadowed) {
+      lines.push(`    shadowed: ${formatValue(shadowed.value)} [${describeContribution(shadowed)}]`)
+    }
+  }
+  return lines.join('\n')
+}
+
+/**
+ * Refuse a write aimed at a layer Xerxes cannot persist into, instead of writing somewhere the
+ * next resolution silently discards.
+ */
+export function assertConfigSourceWritable(entry: ConfigProvenanceEntry): void {
+  if (CONFIG_SOURCE_KINDS[entry.kind].writable) return
+  throw new ConfigurationError(
+    entry.path,
+    `is supplied by ${describeContribution(entry)}, which cannot be written`,
+  )
+}
+
+function describeContribution(contribution: ConfigContribution): string {
+  const label = CONFIG_SOURCE_KINDS[contribution.kind].label
+  return contribution.source === label || contribution.source === BUILT_IN_DEFAULT_SOURCE
+    ? label
+    : `${label}: ${contribution.source}`
+}
+
+function formatValue(value: ConfigValue): string {
+  return typeof value === 'string' ? value : JSON.stringify(value)
 }
 
 let activeConfig: XerxesConfig | undefined
+let activeProvenance: ConfigProvenance | undefined
 
 /** Return the process-wide config, lazily materialising validated defaults. */
 export function getConfig(): XerxesConfig {
@@ -710,56 +882,310 @@ export function getConfig(): XerxesConfig {
   return activeConfig
 }
 
-/** Replace the process-wide config singleton. */
-export function setConfig(config: XerxesConfig): void {
+/** Replace the process-wide config singleton, optionally with the provenance that produced it. */
+export function setConfig(config: XerxesConfig, provenance?: ConfigProvenance): void {
   if (!(config instanceof XerxesConfig)) {
     throw new ConfigurationError('config', 'must be a XerxesConfig instance')
   }
   activeConfig = config
+  activeProvenance = provenance
 }
 
 /**
- * Resolve and publish the active configuration.
+ * Provenance for the active configuration.
  *
- * The resulting precedence is defaults, then the chosen file, then recognized
- * `XERXES_*` fields. `XERXES_CONFIG_FILE` only selects a file; it is not
- * interpreted as a config field itself.
+ * A config published straight through `setConfig` carries no layer history, so it is described
+ * against the built-in defaults: unchanged keys are defaults, differing keys are programmatic
+ * overrides. That is honest about what is known instead of claiming everything is a default.
  */
-export function loadConfig(options: LoadConfigOptions | string = {}): XerxesConfig {
+export function getConfigProvenance(): ConfigProvenance {
+  const config = getConfig()
+  activeProvenance ??= provenanceFromConfig(config)
+  return activeProvenance
+}
+
+export interface ConfigResolution {
+  readonly config: XerxesConfig
+  /** Rides alongside the config; callers that ignore it see exactly the pre-provenance behavior. */
+  readonly provenance: ConfigProvenance
+}
+
+/**
+ * Resolve the configuration and the per-key provenance without publishing either.
+ *
+ * The resulting precedence is defaults, then the chosen file, then recognized `XERXES_*` fields,
+ * then explicit overrides. `XERXES_CONFIG_FILE` only selects a file; it is not interpreted as a
+ * config field itself.
+ */
+export function resolveConfig(options: LoadConfigOptions | string = {}): ConfigResolution {
   const normalized = typeof options === 'string' ? { path: options } : options
   const environment = normalized.environment ?? process.env
-  const configPath = normalized.path
-    ?? nonBlank(environment.XERXES_CONFIG_FILE)
-    ?? findDefaultConfigFile(normalized.cwd ?? process.cwd(), normalized.home ?? xerxesSubdirFor(environment))
-  const fileData = configPath ? readConfigFile(configPath) : {}
-  const environmentData = configDataFromEnvironment(environment)
-  const config = new XerxesConfig(deepMerge(fileData, environmentData), environment)
-  setConfig(config)
+  const cwd = normalized.cwd ?? process.cwd()
+  const home = normalized.home ?? xerxesSubdirFor(environment)
+  const explicitPath = normalized.path ?? nonBlank(environment.XERXES_CONFIG_FILE)
+  const fileSource = explicitPath === undefined
+    ? findDefaultConfigSource(cwd, home, {
+      environment,
+      ...(normalized.allowWorkspaceConfig === undefined
+        ? {}
+        : { allowWorkspaceConfig: normalized.allowWorkspaceConfig }),
+      ...(normalized.onIgnoredWorkspaceConfig === undefined
+        ? {}
+        : { onIgnoredWorkspaceConfig: normalized.onIgnoredWorkspaceConfig }),
+    })
+    : { kind: classifyConfigFilePath(explicitPath, cwd, home), path: explicitPath }
+
+  const layers: ResolutionLayer[] = []
+  const fileData = fileSource ? readConfigFile(fileSource.path) : {}
+  if (fileSource) layers.push({ kind: fileSource.kind, source: fileSource.path, data: fileData })
+  const { data: environmentData, keySources } = environmentLayer(environment)
+  if (keySources.size) {
+    layers.push({ kind: ConfigSourceKind.ENVIRONMENT, source: 'XERXES_*', data: environmentData, keySources })
+  }
+  let merged = deepMerge(fileData, environmentData)
+  if (normalized.overrides !== undefined) {
+    layers.push({ kind: ConfigSourceKind.OVERRIDE, source: 'command line', data: normalized.overrides })
+    merged = deepMerge(merged, normalized.overrides)
+  }
+  const config = new XerxesConfig(merged, environment)
+  return { config, provenance: buildProvenance(config, layers) }
+}
+
+/** Resolve and publish the active configuration; see {@link resolveConfig} for precedence. */
+export function loadConfig(options: LoadConfigOptions | string = {}): XerxesConfig {
+  const { config, provenance } = resolveConfig(options)
+  setConfig(config, provenance)
   return config
 }
 
-/** Search config locations in the same cwd-before-home order as the Python runtime. */
-export function findDefaultConfigFile(cwd = process.cwd(), home = xerxesSubdirFor(process.env)): string | undefined {
-  const candidates = [
-    ...['xerxes.yaml', 'xerxes.yml', 'xerxes.json'].map(filename => join(cwd, filename)),
-    ...['config.yaml', 'config.yml', 'config.json'].map(filename => join(home, filename)),
-  ]
-  for (const path of candidates) {
-    if (existsSync(path)) return path
+/** Environment opt-in that admits a working-directory `xerxes.{yaml,yml,json}` into the search. */
+export const WORKSPACE_CONFIG_OPT_IN_ENV = 'XERXES_ALLOW_WORKSPACE_CONFIG'
+
+const WORKSPACE_CONFIG_FILENAMES = ['xerxes.yaml', 'xerxes.yml', 'xerxes.json'] as const
+const HOME_CONFIG_FILENAMES = ['config.yaml', 'config.yml', 'config.json'] as const
+const WORKSPACE_CONFIG_OPT_IN_VALUES: ReadonlySet<string> = new Set(['1', 'on', 'true', 'yes'])
+/** Paths already announced, so a long-lived process reports each ignored workspace config once. */
+const announcedWorkspaceConfigs = new Set<string>()
+
+export interface DefaultConfigSearchOptions {
+  /** Admit the working directory's config. Defaults to the `XERXES_ALLOW_WORKSPACE_CONFIG` opt-in. */
+  readonly allowWorkspaceConfig?: boolean
+  /** Environment consulted for the opt-in; defaults to `process.env`. */
+  readonly environment?: ConfigEnvironment
+  /** Replaces the default warn-once notice for an ignored workspace config. */
+  readonly onIgnoredWorkspaceConfig?: (path: string) => void
+}
+
+/**
+ * Search the Xerxes home first, and the working directory only on an explicit opt-in.
+ *
+ * Cloning a repository must not silently reconfigure the daemon — model, base URL, permission
+ * mode — so the user's own config always wins and a workspace `xerxes.*` file is admitted only
+ * through `allowWorkspaceConfig` or `XERXES_ALLOW_WORKSPACE_CONFIG`. A workspace config that
+ * exists but is being ignored is announced instead of disappearing without a trace.
+ */
+export function findDefaultConfigFile(
+  cwd = process.cwd(),
+  home = xerxesSubdirFor(process.env),
+  options: DefaultConfigSearchOptions = {},
+): string | undefined {
+  return findDefaultConfigSource(cwd, home, options)?.path
+}
+
+/** A discovered config file together with the layer it belongs to. */
+export interface ConfigFileSource {
+  readonly kind: typeof ConfigSourceKind.USER_FILE | typeof ConfigSourceKind.WORKSPACE_FILE
+  readonly path: string
+}
+
+/** {@link findDefaultConfigFile} plus the layer name, so provenance can attribute the file. */
+export function findDefaultConfigSource(
+  cwd = process.cwd(),
+  home = xerxesSubdirFor(process.env),
+  options: DefaultConfigSearchOptions = {},
+): ConfigFileSource | undefined {
+  const environment = options.environment ?? process.env
+  const allowWorkspace = options.allowWorkspaceConfig
+    ?? WORKSPACE_CONFIG_OPT_IN_VALUES.has((environment[WORKSPACE_CONFIG_OPT_IN_ENV] ?? '').trim().toLowerCase())
+  const homeConfig = HOME_CONFIG_FILENAMES.map(filename => join(home, filename)).find(path => existsSync(path))
+  const workspaceConfig = WORKSPACE_CONFIG_FILENAMES.map(filename => join(cwd, filename)).find(path => existsSync(path))
+  if (workspaceConfig !== undefined && !allowWorkspace) {
+    announceIgnoredWorkspaceConfig(workspaceConfig, options)
+  }
+  // Home stays ahead of the workspace even when the opt-in is set: opting in adds a fallback, not an override.
+  if (homeConfig !== undefined) return { kind: ConfigSourceKind.USER_FILE, path: homeConfig }
+  if (allowWorkspace && workspaceConfig !== undefined) {
+    return { kind: ConfigSourceKind.WORKSPACE_FILE, path: workspaceConfig }
   }
   return undefined
 }
 
+/**
+ * Attribute an explicitly requested file to a layer by where it lives.
+ *
+ * The Xerxes home is checked before the working directory so a home that happens to sit inside the
+ * workspace is still reported as the user's own config rather than as repository-supplied.
+ */
+function classifyConfigFilePath(path: string, cwd: string, home: string): ConfigFileSource['kind'] {
+  const target = resolve(path)
+  if (isInside(target, home)) return ConfigSourceKind.USER_FILE
+  if (isInside(target, cwd)) return ConfigSourceKind.WORKSPACE_FILE
+  // Anywhere else was named by the user, not discovered inside a clone, so it is a user file.
+  return ConfigSourceKind.USER_FILE
+}
+
+function isInside(target: string, directory: string): boolean {
+  const base = resolve(directory)
+  return target === base || target.startsWith(base.endsWith(sep) ? base : base + sep)
+}
+
+function announceIgnoredWorkspaceConfig(path: string, options: DefaultConfigSearchOptions): void {
+  if (options.onIgnoredWorkspaceConfig !== undefined) {
+    options.onIgnoredWorkspaceConfig(path)
+    return
+  }
+  if (announcedWorkspaceConfigs.has(path)) return
+  announcedWorkspaceConfigs.add(path)
+  console.warn(
+    `Ignoring workspace configuration ${path}: a repository cannot reconfigure Xerxes by itself. `
+    + `Set ${WORKSPACE_CONFIG_OPT_IN_ENV}=1 or pass allowWorkspaceConfig to opt in.`,
+  )
+}
+
 /** Parse only recognized config settings from an environment mapping. */
 export function configDataFromEnvironment(environment: ConfigEnvironment = process.env, prefix = 'XERXES_'): Record<string, unknown> {
+  return environmentLayer(environment, prefix).data
+}
+
+interface EnvironmentLayer {
+  readonly data: Record<string, unknown>
+  /** Dotted key path to the exact variable that set it, so provenance can name `XERXES_LLM_MODEL`. */
+  readonly keySources: ReadonlyMap<string, string>
+}
+
+function environmentLayer(environment: ConfigEnvironment = process.env, prefix = 'XERXES_'): EnvironmentLayer {
   const output: Record<string, unknown> = {}
+  const keySources = new Map<string, string>()
   for (const [key, rawValue] of Object.entries(environment)) {
     if (!key.startsWith(prefix) || rawValue === undefined) continue
     const path = configPathFromEnvironmentKey(key.slice(prefix.length))
     if (!path) continue
     assignPath(output, path, parseEnvironmentValue(rawValue), key)
+    keySources.set(path.join('.'), key)
   }
-  return output
+  return { data: output, keySources }
+}
+
+interface ResolutionLayer {
+  readonly kind: ConfigSourceKind
+  readonly source: string
+  readonly data: Record<string, unknown>
+  readonly keySources?: ReadonlyMap<string, string>
+}
+
+/**
+ * Leaf names whose values must never reach a doctor check or a `/config` dump. The resolved config
+ * already redacts secrets in `toJSON`, but raw layer values would otherwise print them verbatim.
+ * Qualified token names only: a bare `token` substring would also redact `max_tokens`, and
+ * `api_key_env_var` names a variable rather than holding a credential.
+ */
+const SECRET_LEAF_PATTERN
+  = /^(.*_)?(api_?key|auth_token|access_token|refresh_token|secret|password|passphrase|credential)s?$/i
+
+let defaultLeaves: ReadonlyMap<string, unknown> | undefined
+
+function buildProvenance(config: XerxesConfig, layers: readonly ResolutionLayer[]): ConfigProvenance {
+  const resolved = configLeaves(config.toJSON())
+  const flattened = layers.map(layer => ({ layer, leaves: alignLeafPaths(configLeaves(layer.data), resolved) }))
+  const wins = new Map<ResolutionLayer, number>()
+  const entries: ConfigProvenanceEntry[] = []
+  for (const path of [...resolved.keys()].sort()) {
+    const contributions: ConfigContribution[] = []
+    let winner: ResolutionLayer | undefined
+    for (const { layer, leaves } of flattened) {
+      if (!leaves.has(path)) continue
+      winner = layer
+      contributions.push({
+        kind: layer.kind,
+        source: layer.keySources?.get(path) ?? layer.source,
+        value: provenanceValue(path, leaves.get(path)),
+      })
+    }
+    const won = contributions.at(-1)
+    if (winner) wins.set(winner, (wins.get(winner) ?? 0) + 1)
+    entries.push({
+      path,
+      kind: won?.kind ?? ConfigSourceKind.DEFAULT,
+      source: won?.source ?? BUILT_IN_DEFAULT_SOURCE,
+      // The winning entry reports the validated value; shadowed layers keep their raw contribution.
+      value: provenanceValue(path, resolved.get(path)),
+      shadowed: Object.freeze(contributions.slice(0, -1).reverse()),
+    })
+  }
+  const summary = layers.map(layer => ({
+    kind: layer.kind,
+    source: layer.source,
+    keyCount: wins.get(layer) ?? 0,
+  }))
+  return new ConfigProvenance(entries, summary)
+}
+
+function provenanceFromConfig(config: XerxesConfig): ConfigProvenance {
+  defaultLeaves ??= configLeaves(new XerxesConfig({}, {}).toJSON())
+  const data: Record<string, unknown> = {}
+  let differs = false
+  for (const [path, value] of configLeaves(config.toJSON())) {
+    if (sameLeaf(defaultLeaves.get(path), value)) continue
+    differs = true
+    assignPath(data, path.split('.'), value, 'programmatic')
+  }
+  return buildProvenance(
+    config,
+    differs ? [{ kind: ConfigSourceKind.OVERRIDE, source: 'programmatic', data }] : [],
+  )
+}
+
+function sameLeaf(left: unknown, right: unknown): boolean {
+  return left === right || JSON.stringify(left) === JSON.stringify(right)
+}
+
+/** Flatten a serialized config into dotted leaf paths; arrays and empty objects stay whole. */
+function configLeaves(value: unknown, prefix = '', into = new Map<string, unknown>()): Map<string, unknown> {
+  if (isPlainRecord(value) && Object.keys(value).length) {
+    for (const [key, child] of Object.entries(value)) {
+      configLeaves(child, prefix ? `${prefix}.${key}` : key, into)
+    }
+    return into
+  }
+  if (prefix) into.set(prefix, value)
+  return into
+}
+
+/**
+ * Map a layer's keys onto the resolved key paths. A file may spell a field in camelCase while
+ * `toJSON` emits snake_case, and an unaligned key would silently lose its provenance.
+ */
+function alignLeafPaths(leaves: Map<string, unknown>, resolved: ReadonlyMap<string, unknown>): Map<string, unknown> {
+  const aligned = new Map<string, unknown>()
+  for (const [path, value] of leaves) {
+    aligned.set(resolved.has(path) ? path : snakeCasePath(path), value)
+  }
+  return aligned
+}
+
+function snakeCasePath(path: string): string {
+  return path.split('.').map(part => part.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase()).join('.')
+}
+
+function provenanceValue(path: string, value: unknown): ConfigValue {
+  const leaf = path.split('.').at(-1) ?? path
+  if (value !== null && value !== undefined && SECRET_LEAF_PATTERN.test(leaf)) return '[redacted]'
+  try {
+    return deepFreezeConfigValue(value, path)
+  } catch {
+    // Provenance must never fail where loading succeeded, so an unrepresentable value is described.
+    return String(value)
+  }
 }
 
 /** Deeply overlay serializable configuration records without sharing mutable values. */

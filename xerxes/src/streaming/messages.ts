@@ -247,8 +247,26 @@ export function messagesToAnthropic(messages: readonly NeutralMessage[]): Anthro
       continue
     }
     if (message.role === 'user') {
-      result.push({ role: 'user', content: anthropicUserContent(message.content) })
-      index += 1
+      // Anthropic rejects two adjacent user messages, and an interrupt before
+      // the first token produces exactly that: the loop refuses to persist an
+      // empty assistant message, so the tail stays a user message and the next
+      // turn appends another. Coalescing here keeps the transcript honest —
+      // the alternative, a synthetic "continue where you left off" reply,
+      // fabricates assistant content the user never saw.
+      const run: MessageContent[] = []
+      while (index < messages.length) {
+        const userMessage = messages[index]
+        if (!userMessage || userMessage.role !== 'user') {
+          break
+        }
+        run.push(userMessage.content)
+        index += 1
+      }
+      const single = run.length === 1 ? run[0] : undefined
+      result.push({
+        role: 'user',
+        content: single === undefined ? coalescedUserContent(run) : anthropicUserContent(single),
+      })
       continue
     }
     if (message.role === 'assistant') {
@@ -447,6 +465,28 @@ function anthropicUserContent(content: MessageContent): string | AnthropicUserCo
     }
     return imageBlockFromUrl(part.image_url.url) ?? { type: 'text', text: contentPartText(part) }
   })
+}
+
+/**
+ * Flatten a run of user messages into one block list. Each message keeps its own
+ * text block rather than being joined with an invented separator, so the model
+ * still sees where one message ended and the next began.
+ */
+function coalescedUserContent(contents: readonly MessageContent[]): string | AnthropicUserContentBlock[] {
+  const blocks: AnthropicUserContentBlock[] = []
+  for (const content of contents) {
+    const converted = anthropicUserContent(content)
+    if (typeof converted !== 'string') {
+      blocks.push(...converted)
+      continue
+    }
+    // An empty text block is itself a request error, so a blank message
+    // contributes nothing rather than an empty block.
+    if (converted) {
+      blocks.push({ type: 'text', text: converted })
+    }
+  }
+  return blocks.length ? blocks : ''
 }
 
 function imageBlockFromUrl(url: string): AnthropicImageBlock | undefined {

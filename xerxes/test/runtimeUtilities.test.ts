@@ -3,13 +3,16 @@
 
 import { expect, test } from 'bun:test'
 
+import { DEFAULT_TOOL_CAPABILITIES } from '../src/executors/toolRegistry.js'
 import {
   ChangeGuardReport,
   analyzeStatusLines,
   analyzeWorkspaceChanges,
+  changedWorkspacePaths,
   formatChangeGuardNotification,
   parsePorcelainStatus,
 } from '../src/runtime/changeGuard.js'
+import { ExecutionRegistry } from '../src/runtime/executionRegistry.js'
 import {
   HistoryLog,
 } from '../src/runtime/history.js'
@@ -179,15 +182,12 @@ test('objective guard accepts verified outcomes or evidenced blockers and reject
   expect(inspectObjectiveResponse('still losing', { mode: 'code' }).shouldContinue).toBe(false)
 })
 
-test('change guard classifies risky porcelain rows, extracts verification evidence, and uses an injected git runner', async () => {
+test('change guard classifies porcelain rows, notifies only on damage, and uses an injected git runner', async () => {
   const report = analyzeStatusLines([
     ' D xerxes/test/standaloneTools.test.ts',
     ' M xerxes/src/tools/standalone.ts',
     ' M xerxes/src/runtime/queryEngine.ts',
-  ], [{
-    name: 'exec_command',
-    inputs: { cmd: 'bun test test/runtimeUtilities.test.ts && bun run check' },
-  }])
+  ])
 
   expect(report.severity).toBe('error')
   expect(report.shouldNotify).toBe(true)
@@ -195,23 +195,46 @@ test('change guard classifies risky porcelain rows, extracts verification eviden
     'deleted-tests',
     'runtime-critical-changed',
   ])
-  expect(report.verificationCommands).toEqual(['bun test test/runtimeUtilities.test.ts && bun run check'])
-  expect(formatChangeGuardNotification(report)).toContain('Recent verification:')
+  const notification = formatChangeGuardNotification(report)
+  expect(notification).toContain('tracked test file(s) were deleted')
+  // The "did you run a checker?" nag is gone; editDiagnostics runs one and reports the answer.
+  expect(notification).not.toContain('No recent Bun test')
   expect(report.fingerprint).toHaveLength(40)
 
   const parsed = parsePorcelainStatus(['R  tests/test_old.py -> tests/test_new.py'])
   expect(parsed[0]).toMatchObject({ oldPath: 'tests/test_old.py', path: 'tests/test_new.py' })
-  const throughRunner = await analyzeWorkspaceChanges('/workspace', [], {
+  const throughRunner = await analyzeWorkspaceChanges('/workspace', {
     commandRunner: async args => {
       expect(args).toEqual(['git', 'status', '--porcelain=v1', '--untracked-files=no'])
       return { exitCode: 0, stdout: ' M xerxes/src/security/policy.ts\n' }
     },
   })
-  expect(throughRunner).toMatchObject({ severity: 'warning', shouldNotify: true })
-  const unavailable = await analyzeWorkspaceChanges('/workspace', [], {
+  // A warning alone no longer interrupts the model — only error-severity damage does.
+  expect(throughRunner).toMatchObject({ severity: 'warning', shouldNotify: false })
+
+  // Porcelain paths are repo-root-relative, so a nested package cwd must still resolve
+  // them against the toplevel rather than against itself.
+  const changed = await changedWorkspacePaths('/repo/xerxes', {
+    commandRunner: async args => {
+      if (args[1] === 'rev-parse') return { exitCode: 0, stdout: '/repo\n' }
+      expect(args).toEqual(['git', 'status', '--porcelain=v1', '--untracked-files=all'])
+      return { exitCode: 0, stdout: ' M xerxes/src/kept.ts\n D xerxes/src/gone.ts\n?? xerxes/src/new.ts\n' }
+    },
+  })
+  expect(changed).toEqual(['/repo/xerxes/src/kept.ts', '/repo/xerxes/src/new.ts'])
+  expect(await changedWorkspacePaths('/repo', {
+    commandRunner: () => ({ exitCode: 1, stdout: '' }),
+  })).toEqual([])
+
+  const unavailable = await analyzeWorkspaceChanges('/workspace', {
     commandRunner: () => ({ exitCode: 1, stdout: '' }),
   })
   expect(unavailable.statusAvailable).toBe(false)
+  expect(await changedWorkspacePaths('/workspace', {
+    commandRunner: () => {
+      throw new Error('git missing')
+    },
+  })).toEqual([])
   expect(new ChangeGuardReport().fingerprint).toBe(new ChangeGuardReport().fingerprint)
 })
 
@@ -294,4 +317,39 @@ test('insights aggregate camel and Python-shaped cost events with time filtering
   })
   expect(report.byModel['gpt-4o']).toMatchObject({ events: 1, costUsd: 0.02 })
   expect(formatInsightsReport(report)).toContain('Top models')
+})
+
+test('execution registry entries project safety from a capability record instead of storing a loose flag', () => {
+  const registry = new ExecutionRegistry()
+  registry.registerTool('Lookup', undefined, { description: 'read a row', safe: true })
+  registry.registerTool('Wipe', undefined, {
+    description: 'delete rows',
+    capabilities: { destructive: true, readOnly: true },
+  })
+  registry.registerTool('Plain', undefined, { description: 'unclassified' })
+
+  // The legacy `safe: true` shorthand survives as a capability seed, so safeOnly filters hold.
+  expect(registry.getTool('Lookup')).toMatchObject({ safe: true })
+  expect(registry.toolCapabilities('Lookup')).toMatchObject({ destructive: false, readOnly: true })
+  // safe is now a projection: read-only is not enough when the tool can destroy work.
+  expect(registry.getTool('Wipe')?.safe).toBe(false)
+  expect(registry.listTools({ safeOnly: true }).map(entry => entry.name)).toEqual(['Lookup'])
+  expect(registry.toolCapabilities('Plain')).toEqual(DEFAULT_TOOL_CAPABILITIES)
+  expect(registry.toolCapabilities('never-registered')).toEqual(DEFAULT_TOOL_CAPABILITIES)
+
+  registry.registerFromAgentFunctions([{
+    name: 'Fetch',
+    description: 'fetch a url',
+    category: 'network',
+    source_hint: 'plugin:web',
+    capabilities: { concurrencySafe: true, openWorld: true, readOnly: true, maxResultBytes: 'nonsense' },
+  }])
+  // Metadata now survives ingestion; the malformed axis falls back to its fail-closed default.
+  expect(registry.getTool('Fetch')).toMatchObject({ category: 'network', safe: false, sourceHint: 'plugin:web' })
+  expect(registry.toolCapabilities('Fetch')).toMatchObject({
+    concurrencySafe: true,
+    destructive: true,
+    maxResultBytes: DEFAULT_TOOL_CAPABILITIES.maxResultBytes,
+    readOnly: true,
+  })
 })

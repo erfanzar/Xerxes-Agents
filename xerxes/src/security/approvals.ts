@@ -116,7 +116,13 @@ export class ApprovalStore {
     return record
   }
 
-  /** Return a matching grant/denial, or undefined when the caller must prompt the user. */
+  /**
+   * Return a matching grant/denial, or undefined when the caller must prompt the user.
+   *
+   * Every scope is compared against `argsHash`: an approval remembered for one argument payload
+   * must never authorize a different one, or a single `Always allow` on a command-running tool
+   * would hand every future argv the user's blessing.
+   */
   check(toolName: string, sessionId: string, argsHash = ''): boolean | undefined {
     const tool = requiredText(toolName, 'toolName')
     const session = optionalText(sessionId)
@@ -124,8 +130,12 @@ export class ApprovalStore {
     for (let index = this.records.length - 1; index >= 0; index -= 1) {
       const record = this.records[index]
       if (!record || record.toolName !== tool) continue
-      if (record.scope === ApprovalScope.ALWAYS) return record.granted
-      if (record.scope === ApprovalScope.SESSION && record.sessionId === session) return record.granted
+      // A stored empty hash marks a record written before approvals were scoped to arguments —
+      // including everything daemon/productionInteractions.ts persisted then — so it stays a
+      // tool-wide grant instead of silently revoking approvals users already gave.
+      const scoped = record.argsHash === '' || record.argsHash === hash
+      if (record.scope === ApprovalScope.ALWAYS && scoped) return record.granted
+      if (record.scope === ApprovalScope.SESSION && record.sessionId === session && scoped) return record.granted
       if (record.scope === ApprovalScope.ONCE && record.sessionId === session && record.argsHash === hash) {
         return record.granted
       }

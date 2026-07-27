@@ -260,3 +260,36 @@ test('Anthropic decoding concatenates multiple thinking blocks and keeps the las
     }],
   }])
 })
+
+test('Anthropic conversion coalesces adjacent user messages left by an interrupted turn', () => {
+  // An interrupt before the first token leaves the tail as a user message, and
+  // the next turn appends another; the API rejects the non-alternating pair.
+  expect(messagesToAnthropic([
+    { role: 'user', content: 'first attempt' },
+    { role: 'user', content: 'second attempt' },
+    { role: 'assistant', content: 'answering both' },
+  ])).toEqual([
+    {
+      role: 'user',
+      content: [
+        { type: 'text', text: 'first attempt' },
+        { type: 'text', text: 'second attempt' },
+      ],
+    },
+    { role: 'assistant', content: [{ type: 'text', text: 'answering both' }] },
+  ])
+
+  // A lone user message keeps its plain-string shape, and images survive the merge.
+  expect(messagesToAnthropic([{ role: 'user', content: 'only one' }])).toEqual([
+    { role: 'user', content: 'only one' },
+  ])
+  expect(messagesToAnthropic([
+    { role: 'user', content: '' },
+    { role: 'user', content: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,aGVsbG8=' } }] },
+  ])).toEqual([
+    {
+      role: 'user',
+      content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'aGVsbG8=' } }],
+    },
+  ])
+})

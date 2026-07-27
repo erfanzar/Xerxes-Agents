@@ -14,13 +14,22 @@ function rule(name: string, pattern: RegExp, replacement = REDACTED): RedactionR
   return Object.freeze({ name, pattern, replacement })
 }
 
-/** Deterministic log/audit redaction rules retained from Xerxes' Python runtime. */
+/**
+ * Deterministic log/audit redaction rules retained from Xerxes' Python runtime.
+ *
+ * Field rules capture the label in group 1 and the separator the author
+ * actually typed in group 2, and replace only group 3 — the secret. Collapsing
+ * the whole match rewrote the surrounding text: `api key: <value>` came back as
+ * `api key=[redacted]`, so a redacted log line no longer matched the line the
+ * program emitted and a reader could not tell redaction from corruption. This
+ * is the same group-preserving shape as CREDENTIAL_REDACTION_RULES.
+ */
 export const DEFAULT_REDACTION_RULES: readonly RedactionRule[] = Object.freeze([
-  rule('api_key_field', /(api[_-]?key)[\s:="']+([A-Za-z0-9._-]{8,})/gi, '$1=' + REDACTED),
+  rule('api_key_field', /(api[_-]?key)([\s:="']+)([A-Za-z0-9._-]{8,})/gi, '$1$2' + REDACTED),
   rule('openai_token', /\bsk-[A-Za-z0-9_-]{16,}\b/g, REDACTED),
   rule('anthropic_token', /\bsk-ant-[A-Za-z0-9_-]{16,}\b/g, REDACTED),
-  rule('bearer_header', /(authorization:\s*bearer)\s+([A-Za-z0-9._-]+)/gi, '$1 ' + REDACTED),
-  rule('password_field', /(password)[\s:="']+(\S+)/gi, '$1=' + REDACTED),
+  rule('bearer_header', /(authorization:\s*bearer)(\s+)([A-Za-z0-9._-]+)/gi, '$1$2' + REDACTED),
+  rule('password_field', /(password)([\s:="']+)(\S+)/gi, '$1$2' + REDACTED),
   rule('jwt_token', /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, REDACTED),
   rule('phone_us', /\b(?:\+1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b/g, REDACTED),
   rule('phone_international', /\+\d{1,3}[\s.-]?\d{4,14}\b/g, REDACTED),

@@ -10,9 +10,15 @@ import {
   type ToolExecutor,
   type ToolExecutionContext,
 } from '../executors/toolRegistry.js'
+import type { ToolLoopBlockAuditInput } from '../audit/emitter.js'
 import type { HookPoint, HookRunner } from '../extensions/hooks.js'
-import type { LlmClient, LlmDelta, ThinkingRequest, TokenUsage } from '../llms/client.js'
-import { classifyError } from '../runtime/errorClassifier.js'
+import type { LlmClient, LlmDelta, QuerySource, ThinkingRequest, TokenUsage } from '../llms/client.js'
+import {
+  DENIAL_LOOP_PATTERN,
+  DenialBudget,
+  denialBudgetStopText,
+} from '../runtime/denialBudget.js'
+import { classifyError, ErrorKind } from '../runtime/errorClassifier.js'
 import {
   inspectObjectiveResponse,
   objectiveGuardRetryLimit,
@@ -20,11 +26,13 @@ import {
 } from '../runtime/objectiveGuard.js'
 import type { ChatMessage, MessageContent } from '../types/messages.js'
 import { isJsonObject, type ToolCall, type ToolDefinition } from '../types/toolCalls.js'
+import { appendInjection } from './attachments.js'
 import type {
   AgentState,
   PermissionRequest,
   StreamEvent,
   ToolResult,
+  TurnStopReason,
 } from './events.js'
 import {
   DEFAULT_PERMISSION_MODE,
@@ -35,7 +43,9 @@ import {
   type PermissionMode,
   type ToolPolicy,
 } from './permissions.js'
+import type { SystemPromptSegment } from './promptCaching.js'
 import { ThinkingParser, type ThinkingStreamParser } from './thinkingParser.js'
+import { neutralizeSystemReminders } from './toolMarkers.js'
 
 /** Distinct productive tool rounds are unbounded unless the caller opts into a budget. */
 export const DEFAULT_MAX_TOOL_TURNS = Number.POSITIVE_INFINITY
@@ -50,20 +60,149 @@ export const MAX_SUGGESTED_RETRY_DELAY_MS = 60_000
  * loops one provider call per round forever (maxToolTurns is unbounded).
  */
 export const MAX_UNCONFIGURED_ONLY_ROUNDS = 3
+/**
+ * Output ceiling used after a first `finish_reason: length`, when the caller
+ * pinned no maxTokens of its own. A truncation means the model wanted more
+ * room than the provider default, so the retry gives it a window large enough
+ * that a second truncation is a genuinely long answer rather than a bad
+ * default.
+ */
+export const OUTPUT_LIMIT_RETRY_MAX_TOKENS = 64_000
+/**
+ * Consecutive output-token truncations tolerated before the turn stops. Without
+ * a cap a model that keeps filling the window resumes forever, one full
+ * generation per round.
+ */
+export const MAX_OUTPUT_LIMIT_ESCALATIONS = 3
+/**
+ * Resume directive pushed after a truncation that a larger window did not fix.
+ * The model has already spent a whole window, so an apology or a recap spends
+ * the next one restating text the user has already read.
+ */
+export const OUTPUT_LIMIT_RESUME_REMINDER =
+  '[Output limit]\nOutput token limit hit. Resume directly — no apology, no recap.'
+/**
+ * Terminal wording for a context overflow no reducer could relieve. The
+ * provider's own string names a token count the user cannot act on, so echoing
+ * it leaves the session repeating an identical failure; these three commands
+ * are the actual remedies.
+ */
+export const CONTEXT_OVERFLOW_STOP_TEXT =
+  '[Stopped: the conversation no longer fits in this model\'s context window. '
+  + 'Run /compact to summarize it, /clear to start over, or /branch to keep this '
+  + 'history and continue in a fresh session.]'
+
+/** Upper bound on tools executed at once, so a wide round cannot exhaust file handles or sockets. */
+export const MAX_CONCURRENT_TOOL_CALLS = 8
+
+/** A per-call verdict from the sequential permission phase, executed later in order. */
+type ToolDecision =
+  | { readonly call: ToolCall; readonly effectiveCall: ToolCall; readonly kind: 'allowed' }
+  | { readonly call: ToolCall; readonly kind: 'cancelled' }
+  | { readonly call: ToolCall; readonly kind: 'denied'; readonly reason: 'permission_rejected' | 'policy_denied' }
+
+/**
+ * Partition decisions into maximal runs of consecutive concurrency-safe calls.
+ *
+ * Consecutive is the load-bearing word: the model emits tool calls in an order
+ * it may have reasoned about, so reordering across an unsafe call could run a
+ * read before the write it was meant to observe. A run therefore never spans an
+ * unsafe call, a denial, or a cancellation — each of those is its own group of
+ * one, and the model's sequence is preserved exactly.
+ */
+export function groupToolDecisions<T extends { readonly call: ToolCall; readonly kind: string }>(
+  decisions: readonly T[],
+  capabilitiesOf: (call: ToolCall) => { readonly concurrencySafe: boolean },
+  maxConcurrent: number = MAX_CONCURRENT_TOOL_CALLS,
+): T[][] {
+  const groups: T[][] = []
+  let run: T[] = []
+  const flush = (): void => {
+    if (run.length) groups.push(run)
+    run = []
+  }
+  for (const decision of decisions) {
+    const parallelizable = decision.kind === 'allowed'
+      && capabilitiesOf(decision.call).concurrencySafe
+    if (!parallelizable) {
+      flush()
+      groups.push([decision])
+      continue
+    }
+    run.push(decision)
+    if (run.length >= maxConcurrent) flush()
+  }
+  flush()
+  return groups
+}
+
+/** Outcome of one context-reduction pass over the live turn history. */
+export interface ContextReduction {
+  readonly messages: readonly ChatMessage[]
+  readonly tokensFreed: number
+}
+
+/**
+ * Compact the turn history in place of a failed oversized request. The loop
+ * never constructs one: the daemon owns compaction policy and injects it.
+ */
+export type ContextReducer = (
+  messages: readonly ChatMessage[],
+  signal?: AbortSignal,
+) => Promise<ContextReduction>
+
+/**
+ * True when a tool result carries nothing a provider will accept as content.
+ *
+ * `[]` and `{}` are deliberately not empty: several tools return a truthful
+ * empty collection, and the model must be able to tell that apart from silence.
+ */
+export function isEffectivelyEmpty(content: string): boolean {
+  return content.trim().length === 0
+}
+
+/** Stand-in body for a tool that succeeded without producing any output. */
+export function emptyToolResult(name: string): string {
+  return `[${name} produced no output.]`
+}
+
+/**
+ * Make one tool's output safe to place in the transcript.
+ *
+ * Two failure modes are prevented here. A blank body reaches the Anthropic
+ * adapter as an empty content block and the API rejects the whole request, so
+ * reading a zero-byte file or calling a silent MCP tool would end the turn with
+ * a 400. And `<system-reminder>` is the tag our own system prompt declares
+ * authoritative, so any file, page, or command output containing it would
+ * otherwise be an instruction-injection channel.
+ */
+export function normalizeToolOutput(name: string, output: string): string {
+  const neutralized = neutralizeSystemReminders(output)
+  return isEffectivelyEmpty(neutralized) ? emptyToolResult(name) : neutralized
+}
 
 export interface TurnRequest {
   readonly agentId?: string
   /** Session interaction mode; objective mode rejects unsupported narrative stops. */
   readonly interactionMode?: string
+  /**
+   * Consecutive refused tool calls tolerated before the turn stops. Omitted
+   * takes the DenialBudget default; a non-positive value opts out entirely.
+   */
+  readonly maxConsecutiveDenials?: number
   readonly maxToolTurns?: number
   readonly maxTokens?: number
   readonly model: string
   /** Optional maximum retries for objective-mode text-only stopping attempts. */
   readonly objectiveGuardMaxRetries?: number
   readonly permissionMode?: PermissionMode
+  /** Why this completion is being made; drives cost attribution and retry policy. */
+  readonly querySource?: QuerySource
   readonly sessionId?: string
   readonly state: AgentState
   readonly systemPrompt?: string
+  /** Same prompt as `systemPrompt`, kept as named sources for prefix caching. */
+  readonly systemSegments?: readonly SystemPromptSegment[]
   readonly temperature?: number
   /**
    * Per-turn extended-thinking directive; adapters map it to provider wire
@@ -84,6 +223,15 @@ export interface TurnRequest {
 }
 
 export interface TurnDependencies {
+  /**
+   * Record that the turn stopped a runaway refusal loop.
+   *
+   * A function rather than an AuditEmitter so the loop keeps no dependency on
+   * audit construction, sinks, or redaction; hosts pass
+   * `input => emitter.emitToolLoopBlock(input)`. Absent it the guard still
+   * stops the turn — the audit trail is the only thing lost.
+   */
+  readonly auditToolLoopBlock?: (input: ToolLoopBlockAuditInput) => void
   /** Waits for explicitly backgrounded subagents before a text-only stop. */
   readonly awaitAgentEvents?: (signal?: AbortSignal) => Promise<readonly string[]>
   readonly delay?: (milliseconds: number, signal?: AbortSignal) => Promise<void>
@@ -100,8 +248,42 @@ export interface TurnDependencies {
    * those calls.
    */
   readonly onUnconfiguredToolCalls?: (calls: readonly ToolCall[]) => 'continue' | 'stop'
+  /**
+   * Per-tool execution axes. Absent it every tool is treated as unsafe to run
+   * concurrently, so the loop stays strictly sequential — the previous behavior.
+   */
+  readonly capabilities?: (
+    toolName: string,
+    agentId?: string,
+    /**
+     * The call's arguments, so a tool whose safety depends on them can answer
+     * per invocation. `exec_command` is the case that matters: deciding by name
+     * alone makes every shell call a concurrency barrier, which splits a round
+     * of five reads plus one `git status` into three serial groups.
+     */
+    args?: Readonly<Record<string, unknown>>,
+  ) => {
+    readonly concurrencySafe: boolean
+    readonly interruptBehavior: 'block' | 'cancel'
+  }
   readonly permissionBroker?: PermissionBroker
+  /**
+   * Replace an oversized tool result with a bounded, provider-facing stand-in.
+   *
+   * The loop owns no storage policy, so this is injected: the host decides
+   * where the full bytes go and what the model is told about recovering them.
+   * Returning the input unchanged is always valid. The raw text is still
+   * recorded in `state.toolExecutions` before this runs, so the objective
+   * guard's evidence and the audit trail stay lossless — only what the
+   * provider sees is reduced.
+   */
+  readonly persistToolResult?: (toolName: string, content: string) => string
   readonly policy?: ToolPolicy
+  /**
+   * Relieve a context overflow once per turn. Absent it the loop can only
+   * report the overflow, because it has no compaction policy of its own.
+   */
+  readonly reduceContext?: ContextReducer
   readonly retryDelays?: readonly number[]
   /**
    * Abort a provider attempt that yields no chunk within this budget (ms), so a
@@ -131,6 +313,9 @@ export async function* runTurn(
   const streamInactivityTimeoutMs =
     dependencies.streamInactivityTimeoutMs ?? DEFAULT_STREAM_INACTIVITY_TIMEOUT_MS
   const hookRunner = dependencies.hookRunner
+  // One instance per turn, so a subagent running under a stricter policy burns
+  // its own budget instead of the parent's.
+  const denialBudget = new DenialBudget(request.maxConsecutiveDenials)
   const toolContext: ToolExecutionContext = {
     ...(request.agentId ? { agentId: request.agentId } : {}),
     ...(request.sessionId ? { sessionId: request.sessionId } : {}),
@@ -169,25 +354,45 @@ export async function* runTurn(
   )
   /** Record one tool result, letting tool_result_persist hooks rewrite it first. */
   const recordToolResult = async (result: ToolResult, call: ToolCall): Promise<ToolResult> => {
-    if (hookRunner === undefined) {
-      appendToolResult(state, result, call, objectiveToolExecutions)
-      return result
-    }
-    const mutated = hookMutation(await dispatchHook(hookRunner, 'tool_result_persist', {
-      name: result.name,
-      permitted: result.permitted,
-      result: result.result,
-      toolCallId: result.toolCallId,
-    }), result.result)
-    const recorded = typeof mutated === 'string' && mutated !== result.result
+    const mutated = hookRunner === undefined
+      ? undefined
+      : hookMutation(await dispatchHook(hookRunner, 'tool_result_persist', {
+        name: result.name,
+        permitted: result.permitted,
+        result: result.result,
+        toolCallId: result.toolCallId,
+      }), result.result)
+    const hooked = typeof mutated === 'string' && mutated !== result.result
       ? { ...result, result: mutated }
       : result
-    appendToolResult(state, recorded, call, objectiveToolExecutions)
+    // Single normalization point for everything the provider will see, placed
+    // after the hooks so a hook that blanks or injects into a result is
+    // covered too. Persisting the same string the tool_end event carries keeps
+    // the transcript and the rendered result byte-identical.
+    const normalized = normalizeToolOutput(hooked.name, hooked.result)
+    const recorded = normalized === hooked.result ? hooked : { ...hooked, result: normalized }
+    // The provider's copy may be reduced while the human's is not. The TUI
+    // renders `tool_end`, and a user watching a build scroll past is not helped
+    // by a preview of it, so the returned result stays whole and only the
+    // transcript message carries the stand-in.
+    const providerContent = dependencies.persistToolResult?.(recorded.name, recorded.result)
+    appendToolResult(
+      state,
+      recorded,
+      call,
+      objectiveToolExecutions,
+      providerContent === recorded.result ? undefined : providerContent,
+    )
     return recorded
   }
 
   let consecutiveUnconfiguredOnlyRounds = 0
   let terminalProviderFailure = false
+  let stopReason: TurnStopReason = 'tool_budget_exhausted'
+  /** One-shot per turn: a reducer that already ran cannot free the same tokens twice. */
+  let contextReductionAttempted = false
+  let outputLimitEscalations = 0
+  let outputTokenOverride: number | undefined
   try {
     for (let toolTurn = 0; toolTurn < turnLimit; toolTurn += 1) {
       appendAgentEventMessage(state, dependencies.drainAgentEvents?.())
@@ -210,6 +415,7 @@ export async function* runTurn(
       let thinkingSignature: string | undefined
       let roundToolCalls: readonly ToolCall[] = []
       let lastUsage: TokenUsage | undefined
+      let finishReason: string | undefined
       let streamCompleted = false
       let textDeduper = new ToolRoundTextDeduper(latestToolRoundText)
 
@@ -220,6 +426,7 @@ export async function* runTurn(
         thinkingSignature = undefined
         roundToolCalls = []
         lastUsage = undefined
+        finishReason = undefined
         textDeduper = new ToolRoundTextDeduper(latestToolRoundText)
         const attemptSignal = linkAttemptSignal(signal)
         try {
@@ -230,6 +437,7 @@ export async function* runTurn(
                 request,
                 state.messages,
                 forceToolFreeSummary ? [] : request.tools,
+                outputTokenOverride,
               ),
               attemptSignal.controller.signal,
             ),
@@ -248,6 +456,11 @@ export async function* runTurn(
             }
             if (delta.usage) {
               lastUsage = mergeUsage(lastUsage, delta.usage)
+            }
+            // Every adapter normalizes its own truncation token onto 'length',
+            // so one assignment beside the usage merge is the whole detection.
+            if (delta.finishReason) {
+              finishReason = delta.finishReason
             }
           }
           for (const flushed of parser.process('')) {
@@ -275,6 +488,33 @@ export async function* runTurn(
             kind: classified.kind,
             ...(request.sessionId ? { sessionId: request.sessionId } : {}),
           })
+          // A context overflow is not a failed try at the same request, it is a
+          // request that will never fit. Reducing the history and reissuing the
+          // round is a different request, so it must not spend a retry slot —
+          // otherwise a single overflow burns the budget the next genuinely
+          // transient failure needs.
+          if (
+            classified.kind === ErrorKind.CONTEXT_OVERFLOW
+            && !contextReductionAttempted
+            && dependencies.reduceContext !== undefined
+            && signal?.aborted !== true
+          ) {
+            contextReductionAttempted = true
+            const reduction = await reduceContextSafely(dependencies.reduceContext, state.messages, signal)
+            if (reduction !== undefined && reduction.tokensFreed > 0) {
+              state.messages.splice(0, state.messages.length, ...reduction.messages)
+              yield {
+                type: 'provider_retry',
+                error: errorMessage(error),
+                attempt: attempt + 1,
+                maxAttempts: retryDelays.length + 1,
+                delay: 0,
+                final: false,
+              }
+              attempt -= 1
+              continue
+            }
+          }
           // Only transient failures earn another attempt. Auth, validation,
           // configuration, and other terminal errors fail the round at once.
           const final = attempt === retryDelays.length
@@ -298,8 +538,13 @@ export async function* runTurn(
             // polluted durable history with `[Error: ...]` messages, and the
             // objective guard could then re-call a terminally failed provider
             // (auth/config) until its retry limit.
-            yield { type: 'text', text: `[Error: ${errorMessage(error)}]` }
+            const overflow = classified.kind === ErrorKind.CONTEXT_OVERFLOW
+            yield {
+              type: 'text',
+              text: overflow ? CONTEXT_OVERFLOW_STOP_TEXT : `[Error: ${errorMessage(error)}]`,
+            }
             terminalProviderFailure = true
+            stopReason = overflow ? 'context_overflow' : 'provider_failed'
             break
           }
           await (dependencies.delay ?? defaultDelay)(delay, signal)
@@ -362,6 +607,50 @@ export async function* runTurn(
         latestToolRoundText = assistantText
       }
 
+      // A truncated round is a half-finished thought. Persisted unexamined it
+      // reads to the objective guard, and to the next turn, as a completed
+      // answer, so the loop resumes it before anything downstream sees it.
+      //
+      // A truncated round that still asked for tools keeps its ordinary path:
+      // the model continues on the next round regardless, and diverting here
+      // would leave the persisted tool_use blocks without the tool_result
+      // blocks Anthropic requires them to be paired with.
+      if (finishReason === 'length' && providerToolCalls.length === 0) {
+        if (outputLimitEscalations >= MAX_OUTPUT_LIMIT_ESCALATIONS) {
+          yield {
+            type: 'text',
+            text:
+              `\n[Stopped: the model hit the output token limit in ` +
+              `${MAX_OUTPUT_LIMIT_ESCALATIONS} consecutive rounds; ending the turn instead of ` +
+              `resuming again.]`,
+          }
+          stopReason = 'output_limit'
+          break
+        }
+        outputLimitEscalations += 1
+        // A truncation still consumed a provider call, but it produced no tool
+        // work, so charging it to the tool budget would shorten the turn the
+        // model is trying to finish. Same bookkeeping as an appended agent event.
+        if (toolTurn + 1 >= turnLimit) turnLimit += 1
+        if (outputLimitEscalations === 1 && request.maxTokens === undefined) {
+          // First truncation with no caller-pinned ceiling: the provider default
+          // was simply too small. Regenerate the round with a real window rather
+          // than asking the model to continue from a sentence it cut in half.
+          if (hasAssistantContent) {
+            state.messages.pop()
+            state.thinkingContent.pop()
+          }
+          // Deliberately not fed to the cross-round text deduper: the popped
+          // text is gone from history, so suppressing the regenerated prefix
+          // would drop it from the transcript as well as from the stream.
+          outputTokenOverride = OUTPUT_LIMIT_RETRY_MAX_TOKENS
+          continue
+        }
+        state.messages.push({ role: 'user', content: OUTPUT_LIMIT_RESUME_REMINDER })
+        yield { type: 'text', text: '\n[Output limit reached. Resuming.]' }
+        continue
+      }
+
       if (unconfigured.length) {
         toolCallsCount += unconfigured.length
         for (const call of unconfigured) {
@@ -369,9 +658,11 @@ export async function* runTurn(
           yield { type: 'tool_end', result }
         }
         if (dependencies.onUnconfiguredToolCalls?.(unconfigured) === 'stop') {
+          stopReason = 'unconfigured_tools'
           break
         }
         if (forceToolFreeSummary) {
+          stopReason = 'unconfigured_tools'
           break
         }
         if (!roundToolCalls.length) {
@@ -387,6 +678,7 @@ export async function* runTurn(
                 `${consecutiveUnconfiguredOnlyRounds} consecutive rounds; ending the turn ` +
                 `instead of looping on provider calls.]`,
             }
+            stopReason = 'unconfigured_tools'
             break
           }
           continue
@@ -403,7 +695,10 @@ export async function* runTurn(
         // becomes observable here. Persist the delivered results first so an
         // interrupted parent either synthesizes them now or receives them from
         // its durable history on the next turn.
-        if (signal?.aborted) break
+        if (signal?.aborted) {
+          stopReason = 'aborted'
+          break
+        }
         if (appendedAgentEvents) {
           if (toolTurn + 1 >= turnLimit) turnLimit += 1
           continue
@@ -425,6 +720,9 @@ export async function* runTurn(
           mode: currentInteractionMode(state, request.interactionMode),
         })
         if (!objectiveDecision.shouldContinue) {
+          // The guard states its own grounds when it has any; today an accepted
+          // answer carries an empty reason, so plain completion is the fallback.
+          stopReason = objectiveDecision.reason.trim() ? 'objective_verified' : 'completed'
           break
         }
         objectiveGuardRetries += 1
@@ -438,6 +736,7 @@ export async function* runTurn(
               objectiveDecision.reason +
               '.]',
           }
+          stopReason = 'objective_guard_exhausted'
           break
         }
         state.messages.push({ role: 'user', content: objectiveDecision.reminder })
@@ -450,52 +749,43 @@ export async function* runTurn(
       }
 
       toolCallsCount += roundToolCalls.length
-      for (let index = 0; index < roundToolCalls.length; index += 1) {
-        const call = roundToolCalls[index]
-        if (!call) {
+
+      // PHASE A — decide, sequentially, inside the generator.
+      //
+      // Permission has to stay here: it yields a `permission_request` and awaits
+      // the broker's answer, and a generator cannot yield from inside a
+      // Promise.all callback. Keeping the whole interactive half single-threaded
+      // also preserves the abort races handled below, which are the subtle part.
+      // Nothing is recorded yet — the transcript is written in phase B, in
+      // model-emitted order, so a parallel round replays byte-identically.
+      const decisions: ToolDecision[] = []
+      for (const call of roundToolCalls) {
+        if (!call) continue
+        if (signal?.aborted) {
+          decisions.push({ call, kind: 'cancelled' })
           continue
         }
-        if (signal?.aborted) {
-          for (const cancelled of roundToolCalls.slice(index)) {
-            const result = await recordToolResult(cancelledToolResult(cancelled), cancelled)
-            yield { type: 'tool_end', result }
-          }
-          break
-        }
-        const permission = permissionDisposition(
-          call,
-          permissionMode,
-          dependencies.policy,
-          request.agentId,
-        )
+        const permission = permissionDisposition(call, permissionMode, dependencies.policy, request.agentId)
         if (permission === 'deny') {
-          const result = await recordToolResult(deniedToolResult(call), call)
-          yield { type: 'tool_end', result }
+          decisions.push({ call, kind: 'denied', reason: 'policy_denied' })
           continue
         }
         if (permission === 'prompt') {
           const permissionRequest = createPermissionRequest(call)
           yield { type: 'permission_request', request: permissionRequest }
-          const decision =
-            (await dependencies.permissionBroker?.request(
-              permissionRequest,
-              signal,
-            )) ?? 'reject'
+          const decision = (await dependencies.permissionBroker?.request(permissionRequest, signal)) ?? 'reject'
           // Injected brokers are allowed to resolve asynchronously. Cancellation
           // may land while a prompt is open, so an approval that races the abort
           // must not start a privileged tool with an already-aborted signal.
           if (signal?.aborted) {
-            const result = await recordToolResult(cancelledToolResult(call), call)
-            yield { type: 'tool_end', result }
+            decisions.push({ call, kind: 'cancelled' })
             continue
           }
           if (decision === 'reject') {
-            const result = await recordToolResult(deniedToolResult(call), call)
-            yield { type: 'tool_end', result }
+            decisions.push({ call, kind: 'denied', reason: 'permission_rejected' })
             continue
           }
         }
-
         const beforeResult = await dispatchHook(hookRunner, 'before_tool_call', {
           ...(request.agentId ? { agentId: request.agentId } : {}),
           arguments: call.function.arguments,
@@ -503,23 +793,101 @@ export async function* runTurn(
           ...(request.sessionId ? { sessionId: request.sessionId } : {}),
           toolCallId: call.id,
         })
-        const effectiveCall = applyToolArgumentsMutation(
+        decisions.push({
           call,
-          hookMutation(beforeResult, call.function.arguments),
-        )
+          effectiveCall: applyToolArgumentsMutation(call, hookMutation(beforeResult, call.function.arguments)),
+          kind: 'allowed',
+        })
+      }
 
-        yield { type: 'tool_start', call: effectiveCall }
-        const startedAt = performance.now()
-        try {
-          const output = dependencies.toolExecutor
-            ? await dependencies.toolExecutor.execute(effectiveCall, toolContext, signal)
-            : `Tool ${effectiveCall.function.name} is unavailable.`
+      // PHASE B — execute in maximal runs of consecutive concurrency-safe calls,
+      // then emit strictly in model-emitted order regardless of completion order.
+      for (const group of groupToolDecisions(decisions, call => capabilitiesFor(dependencies, request, call))) {
+        if (signal?.aborted && group.some(decision => decision.kind === 'allowed')) {
+          for (const decision of group) {
+            denialBudget.record('cancelled', decision.call.function.name)
+            const result = await recordToolResult(cancelledToolResult(decision.call), decision.call)
+            yield { type: 'tool_end', result }
+          }
+          continue
+        }
+        // Starts are announced before any work begins, in model-emitted order.
+        // Consumers rely on this window: the daemon interleaves a subagent's
+        // live events between a tool's start and its result, and the child
+        // checkpointer commits a tool call while the tool is still running.
+        // Emitting starts after Promise.all would collapse that window to zero.
+        for (const decision of group) {
+          if (decision.kind === 'allowed') yield { type: 'tool_start', call: decision.effectiveCall }
+        }
+        const outcomes = await Promise.all(group.map(async (decision, member) => {
+          if (decision.kind !== 'allowed') return undefined
+          const effectiveCall = decision.effectiveCall
+          // A parallel member gets its own metadata object and its writes are
+          // replayed in block order afterwards. `metadata` is one shared mutable
+          // record handed to every handler, safe until now only because
+          // execution was serial. A lone call keeps the shared object so a
+          // single-tool round behaves exactly as it always has.
+          const memberContext = group.length === 1
+            ? toolContext
+            : { ...toolContext, metadata: { ...toolContext.metadata } }
+          const memberSignal = capabilitiesFor(dependencies, request, effectiveCall)
+            .interruptBehavior === 'block'
+            ? undefined
+            : signal
+          const startedAt = performance.now()
+          try {
+            const output = dependencies.toolExecutor
+              ? await dependencies.toolExecutor.execute(effectiveCall, memberContext, memberSignal)
+              : `Tool ${effectiveCall.function.name} is unavailable.`
+            return { context: memberContext, member, output, startedAt }
+          } catch (error) {
+            return { context: memberContext, error, member, startedAt }
+          }
+        }))
+        if (group.length > 1) {
+          // Ordered merge, so two members writing the same key resolve the way
+          // a serial round would have: the later block wins.
+          for (const outcome of outcomes) {
+            if (outcome) Object.assign(toolContext.metadata, outcome.context.metadata)
+          }
+        }
+        for (const [member, decision] of group.entries()) {
+          if (decision.kind === 'cancelled') {
+            denialBudget.record('cancelled', decision.call.function.name)
+            const result = await recordToolResult(cancelledToolResult(decision.call), decision.call)
+            yield { type: 'tool_end', result }
+            continue
+          }
+          if (decision.kind === 'denied') {
+            denialBudget.record(decision.reason, decision.call.function.name)
+            const result = await recordToolResult(deniedToolResult(decision.call), decision.call)
+            yield { type: 'tool_end', result }
+            continue
+          }
+          const effectiveCall = decision.effectiveCall
+          const outcome = outcomes[member]
+          if (!outcome || outcome.error !== undefined) {
+            const result = await recordToolResult(
+              failedToolResult(effectiveCall, outcome?.error, performance.now() - (outcome?.startedAt ?? 0)),
+              effectiveCall,
+            )
+            yield { type: 'tool_end', result }
+            continue
+          }
+          // A tool that actually ran means the model found a permitted route,
+          // so any refusals before it were search rather than a denial loop.
+          if (dependencies.toolExecutor) denialBudget.reset()
           let result: ToolResult = {
             name: effectiveCall.function.name,
-            result: output,
+            // Guarded here as well as on persist so after_tool_call hooks and the
+            // tool_end event never see the bare '' that serializeToolResult
+            // returns for a tool with nothing to report.
+            result: isEffectivelyEmpty(outcome.output ?? '')
+              ? emptyToolResult(effectiveCall.function.name)
+              : outcome.output ?? '',
             permitted: true,
             toolCallId: effectiveCall.id,
-            durationMs: performance.now() - startedAt,
+            durationMs: performance.now() - outcome.startedAt,
           }
           const afterResult = await dispatchHook(hookRunner, 'after_tool_call', {
             ...(request.agentId ? { agentId: request.agentId } : {}),
@@ -535,22 +903,31 @@ export async function* runTurn(
           }
           const recorded = await recordToolResult(result, effectiveCall)
           yield { type: 'tool_end', result: recorded }
-        } catch (error) {
-          const result = await recordToolResult(
-            failedToolResult(effectiveCall, error, performance.now() - startedAt),
-            effectiveCall,
-          )
-          yield { type: 'tool_end', result }
         }
       }
       if (signal?.aborted) {
+        stopReason = 'aborted'
+        break
+      }
+      // Checked after the whole round rather than at the refusal site: every
+      // tool_use block the assistant message carries must still get its
+      // tool_result, or the next turn replays a history Anthropic rejects.
+      // Waiting also lets a later permitted call in the same round clear the
+      // streak, which is the correct reading of "consecutive".
+      if (denialBudget.exhausted) {
+        yield { type: 'text', text: denialBudgetStopText(denialBudget) }
+        reportDenialLoop(dependencies, request, denialBudget)
+        stopReason = 'tool_budget_exhausted'
         break
       }
       let needsFinalization = false
       if (toolTurn + 1 >= turnLimit) {
         const agentEvents = await dependencies.awaitAgentEvents?.(signal) ?? []
         const appendedAgentEvents = appendAgentEventMessage(state, agentEvents)
-        if (signal?.aborted) break
+        if (signal?.aborted) {
+          stopReason = 'aborted'
+          break
+        }
         if (appendedAgentEvents) {
           forceToolFreeSummary = true
           needsFinalization = true
@@ -580,6 +957,7 @@ export async function* runTurn(
       final: true,
     }
     yield { type: 'text', text: `[Error: ${errorMessage(error)}]` }
+    stopReason = 'turn_failed'
   } finally {
     state.totalApiCalls += apiCallsCount
     state.usageComplete &&= usageComplete
@@ -597,6 +975,7 @@ export async function* runTurn(
     type: 'turn_done',
     apiCallsCount,
     model: request.model,
+    reason: stopReason,
     toolCallsCount,
     usageComplete,
     usage: {
@@ -754,48 +1133,88 @@ function stripTextEventPrefix(
   return visible
 }
 
+/**
+ * Push drained sub-agent status through the shared injection seam.
+ *
+ * First consumer of {@link appendInjection}: the visible text is unchanged, but
+ * the block is now counted, character-capped and deduplicated against the rest
+ * of the turn. A skipped injection reports false, which is the same answer the
+ * loop already handles for "nothing to say" — the round finalizes instead of
+ * spending another provider call on a reminder the model has already seen.
+ */
 function appendAgentEventMessage(
   state: AgentState,
   events: readonly string[] | undefined,
 ): boolean {
   if (!events?.length) return false
-  const lines: string[] = []
-  for (const event of events) {
-    const line = event.trim()
-    if (line) lines.push(line)
-  }
-  if (lines.length) {
-    state.messages.push({
-      role: 'user',
-      content: `[sub-agent events]\n${lines.join('\n')}`,
+  return appendInjection(state.messages, { events, kind: 'agent_events' }).status === 'ready'
+}
+
+/** Audit an exhausted denial budget without letting a failing sink break the turn. */
+function reportDenialLoop(
+  dependencies: TurnDependencies,
+  request: TurnRequest,
+  budget: DenialBudget,
+): void {
+  if (dependencies.auditToolLoopBlock === undefined) return
+  try {
+    dependencies.auditToolLoopBlock({
+      ...(request.agentId ? { agentId: request.agentId } : {}),
+      count: budget.used,
+      pattern: DENIAL_LOOP_PATTERN,
+      ...(request.sessionId ? { sessionId: request.sessionId } : {}),
+      toolName: budget.lastDenial?.toolName ?? '',
     })
-    return true
+  } catch {
+    // An audit sink is observability, never a turn-ending dependency.
   }
-  return false
 }
 
 function completionRequest(
   request: TurnRequest,
   messages: readonly ChatMessage[],
   tools: readonly ToolDefinition[] | undefined,
+  maxTokensOverride?: number,
 ) {
+  // The override only exists when the caller pinned nothing, so a user-chosen
+  // ceiling is never silently widened by truncation recovery.
+  const maxTokens = request.maxTokens ?? maxTokensOverride
   return {
     model: request.model,
     messages: [...messages],
     ...(tools?.length ? { tools } : {}),
-    ...(request.maxTokens !== undefined
-      ? { maxTokens: request.maxTokens }
+    ...(maxTokens !== undefined
+      ? { maxTokens }
       : {}),
     ...(request.temperature !== undefined
       ? { temperature: request.temperature }
       : {}),
     ...(request.topK !== undefined ? { topK: request.topK } : {}),
+    ...(request.systemSegments?.length ? { systemSegments: request.systemSegments } : {}),
+    ...(request.querySource ? { querySource: request.querySource } : {}),
     ...(request.topP !== undefined ? { topP: request.topP } : {}),
     // Passthrough, not translation: the resolved per-turn directive travels
     // untouched from the TurnRequest to the CompletionRequest so the owning
     // provider adapter (client.ts addSampling, anthropic.ts) is the single
     // place that maps it onto wire-specific fields.
     ...(request.thinking !== undefined ? { thinking: request.thinking } : {}),
+  }
+}
+
+/**
+ * Run an injected reducer without letting it replace the failure it was called
+ * about: a reducer that throws must still leave the turn reporting the overflow
+ * and its remedy, not the reducer's own internal error.
+ */
+async function reduceContextSafely(
+  reduce: ContextReducer,
+  messages: readonly ChatMessage[],
+  signal: AbortSignal | undefined,
+): Promise<ContextReduction | undefined> {
+  try {
+    return await reduce(messages, signal)
+  } catch {
+    return undefined
   }
 }
 
@@ -906,10 +1325,17 @@ function appendToolResult(
   result: ToolResult,
   call: ToolCall,
   objectiveToolExecutions: ObjectiveToolExecutionEvidence[],
+  /**
+   * Bounded stand-in for the transcript when the full result is too large to
+   * carry in context. The execution records below deliberately keep the whole
+   * text: the objective guard reasons over that evidence, and reducing it there
+   * would let a verified claim look unverified purely because its output was big.
+   */
+  providerContent?: string,
 ): void {
   state.messages.push({
     role: 'tool',
-    content: result.result,
+    content: providerContent ?? result.result,
     name: result.name,
     tool_call_id: result.toolCallId,
   })
@@ -1138,4 +1564,14 @@ function applyToolArgumentsMutation(call: ToolCall, mutated: unknown): ToolCall 
     return call
   }
   return { ...call, function: { ...call.function, arguments: mutated } }
+}
+
+/** Fail-closed capability lookup: no accessor means sequential, interruptible execution. */
+function capabilitiesFor(
+  dependencies: TurnDependencies,
+  request: TurnRequest,
+  call: ToolCall,
+): { readonly concurrencySafe: boolean; readonly interruptBehavior: 'block' | 'cancel' } {
+  return dependencies.capabilities?.(call.function.name, request.agentId, call.function.arguments)
+    ?? { concurrencySafe: false, interruptBehavior: 'cancel' }
 }

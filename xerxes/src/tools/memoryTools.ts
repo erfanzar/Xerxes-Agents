@@ -122,7 +122,15 @@ export interface MemoryStatisticsInput {
 
 export const SAVE_MEMORY_DEFINITION = definition(
   'save_memory',
-  'Save a persistent memory entry for later retrieval.',
+  'Append one entry to the agent\'s searchable recall store — the queryable tier reached through search_memory, '
+    + 'not the file-backed memory that agent_memory_write manages and that is re-injected into every prompt. '
+    + 'memory_type is recorded verbatim and also picks the tier: long_term, semantic, and procedural go to durable '
+    + 'storage, while short_term, working, and episodic land in a bounded working tier that evicts oldest-first, so '
+    + 'anything you must not lose has to be saved as long_term. Nothing is deduplicated — saving the same sentence '
+    + 'twice stores it twice. Give tags now; search_memory matches them, and an untagged entry is only findable by '
+    + 'the words it happens to contain. agent_id defaults to the calling agent and any other value is rejected '
+    + 'unless the host granted cross-agent access. Failures do not throw: the result is {status:"error", message}, '
+    + 'so check status before believing the entry landed.',
   {
     content: { type: 'string' },
     memory_type: { type: 'string', enum: MEMORY_TYPES, default: 'short_term' },
@@ -138,7 +146,16 @@ export const SAVE_MEMORY_DEFINITION = definition(
 
 export const SEARCH_MEMORY_DEFINITION = definition(
   'search_memory',
-  'Search persistent memories by query, type, tag, agent, and time range.',
+  'Literal search over the recall store, not semantic search: the query is lower-cased, split on whitespace, and an '
+    + 'entry matches when ANY single term appears as a substring of its content or of one of its tags. Embeddings, '
+    + 'stemming, and synonyms play no part, so widen a fruitless search by using fewer and shorter terms, not by '
+    + 'rephrasing it. An empty query matches everything and degenerates into "the most recent `limit` entries". The '
+    + 'other filters intersect with that: memory_types, tags (any-of within the list), and time_range must all pass. '
+    + 'Results are cut to `limit` after filtering, and their order interleaves store-ranked hits with plain '
+    + 'retrieval, so treat it as neither a relevance nor a recency ranking. count:0 is a '
+    + 'normal answer meaning nothing matched — it does not mean the store is empty, which get_memory_statistics '
+    + 'answers, nor that the tags you guessed exist, which get_memory_tags_and_terms answers. Scoped to the calling '
+    + 'agent unless the host granted cross-agent access; failures arrive as {status:"error"} rather than throwing.',
   {
     query: { type: 'string' },
     memory_types: { type: 'array', items: { type: 'string', enum: MEMORY_TYPES } },
@@ -162,7 +179,13 @@ export const SEARCH_MEMORY_DEFINITION = definition(
 
 export const CONSOLIDATE_AGENT_MEMORIES_DEFINITION = definition(
   'consolidate_agent_memories',
-  'Summarize one agent memory collection by tag.',
+  'Group one agent\'s most recent recall entries by tag and render them. This is not an LLM summary and not a '
+    + 'compaction: it retrieves up to max_items entries newest-first, buckets them by tag, and prints at most three '
+    + 'contents verbatim per tag followed by an "... and N more" tail, with untagged entries under "untagged". '
+    + 'Nothing is written back, rewritten, merged, or deleted, so it is idempotent and calling it never reclaims '
+    + 'space. Use it for a quick shape-of-what-I-know overview; use search_memory when you want specific entries. '
+    + 'agent_id is required and must be the calling agent unless the host granted cross-agent access. An agent with '
+    + 'no memories yields the plain sentence "No memories found for this agent."',
   {
     agent_id: { type: 'string' },
     max_items: { type: 'integer', minimum: 1, maximum: MAX_TOOL_LIMIT, default: DEFAULT_CONSOLIDATION_LIMIT },
@@ -172,7 +195,14 @@ export const CONSOLIDATE_AGENT_MEMORIES_DEFINITION = definition(
 
 export const DELETE_MEMORY_DEFINITION = definition(
   'delete_memory',
-  'Delete memories by ID, tag, producing agent, or ISO timestamp.',
+  'Irreversibly delete recall entries, and dangerously easy to over-match. Without memory_id this removes EVERY '
+    + 'entry the remaining criteria select for the target agent, and criteria are any-of, not all-of: supplying only '
+    + 'agent_id (including the calling agent\'s own id) matches the agent\'s entire store and wipes it. Prefer '
+    + 'memory_id; when deleting in bulk, run the same tags and older_than through search_memory first and read the '
+    + 'count as the blast radius. At least one of memory_id, tags, agent_id, or older_than is required. older_than '
+    + 'is an ISO timestamp and deletes strictly older entries. Deleting an entry owned by another agent needs '
+    + 'host-granted cross-agent access. status:"success" with deleted_count:0 means nothing matched and nothing was '
+    + 'removed; there is no undo and no confirmation step.',
   {
     memory_id: { type: 'string' },
     tags: { type: 'array', items: { type: 'string' } },
@@ -186,13 +216,22 @@ export const DELETE_MEMORY_DEFINITION = definition(
 
 export const GET_MEMORY_STATISTICS_DEFINITION = definition(
   'get_memory_statistics',
-  'Report memory counts, types, and ownership statistics.',
+  'Counts only, no content: total entries, the per-type breakdown, the capacity ceiling, and how many distinct '
+    + 'agents, users, and conversations appear across the whole store. The optional agent_id adds that agent\'s '
+    + 'entry count and is deliberately not privilege-checked, because no memory text is returned. cache_hit_rate is '
+    + 'always 0 — a compatibility field, not a measurement. Its real use is disambiguating a search_memory count:0: '
+    + 'total_items 0 means there is nothing to find, anything else means the query was wrong.',
   { agent_id: { type: 'string' } },
 )
 
 export const GET_MEMORY_TAGS_AND_TERMS_DEFINITION = definition(
   'get_memory_tags_and_terms',
-  'List persistent memory tags and their frequency for one agent.',
+  'Despite the name this returns tags only — there is no term extraction. Lists the calling agent\'s distinct tags '
+    + 'grouped by memory type, the flat sorted list, and a per-tag frequency count. It scans at most '
+    + `${TAG_SCAN_LIMIT} retrievable entries, so on a larger store the frequencies are a sample rather than a `
+    + 'census, and entries whose memory type cannot be resolved contribute nothing at all. Call it before '
+    + 'search_memory to learn which tags actually exist instead of guessing their spelling; total_unique_tags:0 '
+    + 'means entries were saved without tags, not that the store is empty.',
   { agent_id: { type: 'string' } },
 )
 

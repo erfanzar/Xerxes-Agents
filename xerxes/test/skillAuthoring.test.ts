@@ -242,3 +242,53 @@ test('telemetry lifecycle decisions require an explicit retirement port and vari
   variants.add(new SkillVariant('full', 'full-v2', 2))
   expect(variants.pick('full', 'someone')).toBe('full-v2')
 })
+
+test('the suggestion producer pre-filters cheaply and emits an event-shaped suggestion', async () => {
+  let draftCalls = 0
+  const build = (): SkillAuthoringPipeline => new SkillAuthoringPipeline({
+    config: { minToolCalls: 3, minUniqueTools: 2, skipIfSkillSignatureExists: false },
+    drafter: new SkillProposalDrafter({
+      refiner: {
+        refine: () => {
+          draftCalls += 1
+          return 'not a valid skill document'
+        },
+      },
+    }),
+  })
+  const calls = [
+    { toolName: 'Read', arguments: { path: 'ci.yml' } },
+    { toolName: 'Edit', arguments: { path: 'ci.yml' } },
+    { toolName: 'Bash', arguments: { cmd: 'bun test' } },
+  ]
+
+  // Too few observed calls: rejected on an integer comparison, before drafting.
+  expect(await build().suggest([{ userPrompt: 'do that again', toolCalls: calls.slice(0, 2) }])).toBeUndefined()
+  expect(draftCalls).toBe(0)
+
+  // Enough calls but a one-off request: the keyword pre-filter still stops it.
+  expect(await build().suggest([{ userPrompt: 'fix the yaml indentation', toolCalls: calls }])).toBeUndefined()
+  expect(draftCalls).toBe(0)
+
+  const pipeline = build()
+  const suggestion = await pipeline.suggest([
+    { userPrompt: 'set up continuous integration', toolCalls: calls.slice(0, 1) },
+    { userPrompt: 'now do the same again for releases', toolCalls: calls.slice(1), finalResponse: 'done' },
+  ], { sourcePath: '/skills/ci/SKILL.md' })
+  expect(draftCalls).toBe(1)
+  expect(suggestion).toMatchObject({
+    sourcePath: '/skills/ci/SKILL.md',
+    toolCount: 3,
+    uniqueTools: ['Read', 'Edit', 'Bash'],
+    version: '0.1.0',
+  })
+  expect(suggestion?.skillName).toBeTruthy()
+  expect(suggestion?.description).toBeTruthy()
+
+  // Suggesting must not consume the live turn the host is still recording.
+  const live = build()
+  live.beginTurn({ userPrompt: 'live turn' })
+  live.recordCall({ toolName: 'Grep', arguments: {} })
+  await live.suggest([{ userPrompt: 'again and again', toolCalls: calls }])
+  expect((await live.endTurn('finished')).candidate.signature()).toBe('Grep')
+})

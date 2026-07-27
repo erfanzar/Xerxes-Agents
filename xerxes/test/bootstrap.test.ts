@@ -305,7 +305,22 @@ test('29 production core tools keep bootstrap prompt below its non-duplicated sc
   const prompt = buildBootstrapSystemPrompt({ cwd: '/workspace' }, '', tools)
 
   expect(tools).toHaveLength(29)
-  expect(prompt.length).toBeLessThan(6_000)
+  // The ceiling guards against tool JSON Schemas leaking into the prompt, which
+  // costs kilobytes per regression — not against doctrine or tool descriptions,
+  // which are the prompt's actual job. Raise it deliberately when real content
+  // is added; the `"properties"` assertions below are what catch duplication.
+  expect(prompt.length).toBeLessThan(9_000)
+  // Descriptions are paid on every turn, so their length has to stay
+  // risk-weighted rather than uniformly generous: the shell tool earns the most
+  // because it is the one that can do anything. This catches a low-risk tool
+  // quietly growing a thousand-character essay.
+  const longest = tools
+    .map(tool => [tool.function.name, tool.function.description.length] as const)
+    .sort((left, right) => right[1] - left[1])
+  expect(longest[0]?.[0]).toBe('exec_command')
+  for (const [name, length] of longest.slice(1)) {
+    expect(length, `${name} description is disproportionate to its blast radius`).toBeLessThan(1_400)
+  }
   expect(prompt).not.toContain('"additionalProperties"')
   expect(prompt).not.toContain('"properties"')
   for (const tool of tools) {

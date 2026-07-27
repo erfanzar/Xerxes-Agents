@@ -34,7 +34,14 @@ export const LSP_TOOL_DEFINITION: ToolDefinition = {
   type: 'function',
   function: {
     name: 'LSPTool',
-    description: 'Run an LSP action through a host-provided language-server adapter.',
+    description: 'Forward one language-server request — definition, references, hover, diagnostics, and whatever '
+      + 'else the adapter supports — to a host-supplied bridge. No language server is bundled with the runtime, so '
+      + 'in most deployments there is no adapter attached and every call fails with "no LspAdapter is attached". '
+      + 'That is a configuration fact rather than a transient error: do not retry it, and fall back to GrepTool and '
+      + 'GlobTool for finding symbols and call sites. `line` and `character` are zero-based, unlike the one-based '
+      + 'line numbers ReadFile, compilers, and stack traces report — subtract one when copying a number from any of '
+      + 'those. The valid action names and the entire result shape belong to the adapter, so treat the payload as '
+      + 'opaque and do not assume any particular field is present.',
     parameters: {
       type: 'object',
       additionalProperties: false,

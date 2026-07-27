@@ -1,13 +1,14 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { AgentMemory, normalizeScope } from '../memory/agentMemory.js'
+import { AgentMemory, memoryIndexBodyIssue, normalizeScope } from '../memory/agentMemory.js'
 import {
   AgentSelfMemory,
   getAgentSelfMemory,
   type AgentSelfMemoryLearningCategory,
 } from '../memory/agentSelfMemory.js'
 import { ToolRegistry, type ToolExecutionContext } from '../executors/toolRegistry.js'
+import { findCredentialPatterns } from '../security/promptScanner.js'
 import type { JsonObject, ToolDefinition } from '../types/toolCalls.js'
 import { optionalBoolean, optionalInteger, optionalString, requiredString } from './inputs.js'
 
@@ -26,7 +27,13 @@ export interface AgentMemoryToolsOptions {
 
 export const AGENT_MEMORY_READ_DEFINITION: ToolDefinition = definition(
   'agent_memory_read',
-  'Read a persistent agent-memory file from the global or project scope.',
+  'Read one persistent memory file verbatim from the global scope (follows the agent everywhere) or the project '
+    + 'scope (this repository only, and unavailable when no project root is configured — agent_memory_status says '
+    + 'which). `path` is relative to the chosen scope root; absolute paths, paths escaping the root, and symlinks '
+    + 'leading out of it are all refused. This is the way to reach content the prompt only showed you as one index '
+    + 'line: MEMORY.md lists topics, topics/<name>.md holds the body, and long canonical files are clipped on the '
+    + 'way into the prompt. Nothing throws — a missing file returns {ok:false, error}, so confirm the path with '
+    + 'agent_memory_list rather than retrying the same read.',
   {
     scope: scopeSchema(),
     path: { type: 'string', description: 'Relative path inside the selected memory scope.' },
@@ -36,18 +43,34 @@ export const AGENT_MEMORY_READ_DEFINITION: ToolDefinition = definition(
 
 export const AGENT_MEMORY_WRITE_DEFINITION: ToolDefinition = definition(
   'agent_memory_write',
-  'Atomically replace a persistent agent-memory file in the global or project scope.',
+  'Atomically replace one memory file with `body` in full. This is a whole-file write, never a patch: everything '
+    + 'not repeated in `body` is gone, so read the file first unless you are creating it, and use '
+    + 'agent_memory_append for anything accumulative. Two classes of write are refused before disk is touched, and '
+    + 'come back as {ok:false, error} rather than throwing. First, any body matching a credential pattern — memory '
+    + 'is durable and re-injected every turn, so a secret written once is disclosed to every later provider call; '
+    + 'record where the secret lives (env var name, vault path) and never its value. Second, prose in MEMORY.md, '
+    + 'which is an index of headings and one-line entries only: put the body in topics/<name>.md with '
+    + 'name/description/type frontmatter and link it from the index. That frontmatter is what makes a topic '
+    + 'discoverable, because only canonical files are injected in full and every topic shows up as a single '
+    + 'manifest line built from its description.',
   {
     scope: scopeSchema(),
     path: { type: 'string', description: 'Relative path inside the selected memory scope.' },
-    body: { type: 'string', description: 'Complete UTF-8 text to persist.' },
+    body: { type: 'string', description: 'Complete UTF-8 text to persist. Never a credential value.' },
   },
   ['scope', 'path', 'body'],
 )
 
 export const AGENT_MEMORY_APPEND_DEFINITION: ToolDefinition = definition(
   'agent_memory_append',
-  'Append an entry to a persistent agent-memory file without losing concurrent entries.',
+  'Add an entry to a memory file without reading or rewriting it. The write goes through O_APPEND, so two writers '
+    + 'sharing the directory — daemon and CLI, or parallel agents — cannot silently lose each other\'s entries the '
+    + 'way a read-modify-write does; prefer this over agent_memory_write for anything that accumulates. The body is '
+    + 'trimmed, prefixed with an ISO timestamp comment unless timestamp=false, optionally preceded by a fresh '
+    + '"## <section>" heading (a new heading each call — it is never merged into an existing section of the same '
+    + 'name), and separated from existing content by a blank line. An empty or whitespace-only body is an error; '
+    + 'the file and its parent directories are created when missing. The same credential refusal as '
+    + 'agent_memory_write applies, and failures return {ok:false, error} instead of throwing.',
   {
     scope: scopeSchema(),
     path: { type: 'string', description: 'Relative path inside the selected memory scope.' },
@@ -60,13 +83,24 @@ export const AGENT_MEMORY_APPEND_DEFINITION: ToolDefinition = definition(
 
 export const AGENT_MEMORY_LIST_DEFINITION: ToolDefinition = definition(
   'agent_memory_list',
-  'List persistent agent-memory files in one scope or both configured scopes.',
+  'Enumerate memory files recursively in one scope, or in both when `scope` is omitted (global alone if no project '
+    + 'root is configured). Symlinked entries are skipped entirely. Each row carries the byte size plus the name, '
+    + 'description, and type parsed from the file\'s frontmatter — an empty description is the signal that a topic '
+    + 'file is not yet discoverable from the index, since the prompt manifest is built from exactly that field. '
+    + 'count:0 means the scope directory exists but is empty, which is different from memory being unconfigured; '
+    + 'agent_memory_status separates those two. Cheaper than guessing: list before reading.',
   { scope: scopeSchema() },
 )
 
 export const AGENT_MEMORY_SEARCH_DEFINITION: ToolDefinition = definition(
   'agent_memory_search',
-  'Case-insensitively search persistent agent-memory files for a short query.',
+  'Case-insensitive literal substring search across every memory file in scope. No regex, no stemming, no ranking: '
+    + 'the query is matched as one contiguous string, so a multi-word query only hits where those words appear '
+    + 'together in that order. Each hit is a roughly 120-character snippet around the match with newlines flattened '
+    + 'to " / ", and at most three hits are taken from any single file, so a common term returns three per file '
+    + 'rather than every occurrence. Hits arrive in file order and stop at `limit`. A blank query returns zero hits '
+    + 'rather than everything. count:0 means the literal string is absent — try a shorter fragment before '
+    + 'concluding nothing was recorded — and use agent_memory_read when a snippet needs its surrounding context.',
   {
     query: { type: 'string' },
     scope: scopeSchema(),
@@ -77,7 +111,12 @@ export const AGENT_MEMORY_SEARCH_DEFINITION: ToolDefinition = definition(
 
 export const AGENT_MEMORY_JOURNAL_DEFINITION: ToolDefinition = definition(
   'agent_memory_journal',
-  'Append one timestamped note to today’s project or global memory journal.',
+  'Append one bullet to journal/<today-in-UTC>.md in the chosen scope, creating that day file on first use. The '
+    + 'date and the HH:MM:SS prefix come from the clock, so do not repeat them inside `note`. This is the running '
+    + 'log of what happened, not durable knowledge: journal files are never injected into the prompt and are only '
+    + 'reachable afterwards through agent_memory_search or agent_memory_read, so anything that should change future '
+    + 'behaviour belongs in a topic file via agent_memory_write instead. The same credential refusal applies, and '
+    + 'failures return {ok:false, error}.',
   {
     scope: scopeSchema(),
     note: { type: 'string' },
@@ -87,12 +126,23 @@ export const AGENT_MEMORY_JOURNAL_DEFINITION: ToolDefinition = definition(
 
 export const AGENT_MEMORY_STATUS_DEFINITION: ToolDefinition = definition(
   'agent_memory_status',
-  'Report whether persistent agent memory is available and summarize configured files.',
+  'Report whether persistent memory is wired up at all, plus the resolved global and project directories and the '
+    + 'file count per scope. available:false means every other agent_memory_* tool in this session will answer '
+    + '"agent memory not configured" — a configuration fact, not a transient error, so stop calling them instead of '
+    + 'retrying. project_dir:null means only the global scope exists and any call with scope="project" will fail. '
+    + 'Takes no arguments.',
 )
 
 export const AGENT_MEMORY_LEARN_DEFINITION: ToolDefinition = definition(
   'agent_memory_learn',
-  'Record a durable observation about user preferences, tool patterns, skills, or self-reflection.',
+  'Record one durable observation in the agent\'s self-knowledge store, which is a separate store from the scope '
+    + 'files the other agent_memory_* tools read and write. The category decides where the observation lands and '
+    + 'the categories are not interchangeable: user_taste updates the user-preference note, tool_pattern and '
+    + 'self_reflection each append a bullet to their own file, and skill_proposal files a proposed skill whose name '
+    + 'is taken from the first sentence of the observation — so for that category, lead with a short name-like '
+    + 'sentence. `importance` is accepted and currently ignored: it affects neither storage nor ordering nor '
+    + 'retrieval, so do not try to encode urgency through it. Returns a one-line confirmation naming what was '
+    + 'recorded.',
   {
     observation: { type: 'string', description: 'The durable observation to record.' },
     category: {
@@ -107,7 +157,12 @@ export const AGENT_MEMORY_LEARN_DEFINITION: ToolDefinition = definition(
 
 export const AGENT_MEMORY_SYNC_CONTEXT_DEFINITION: ToolDefinition = definition(
   'agent_memory_sync_context',
-  'Read AGENTS.md, XERXES.md, USER.md, and SOUL.md from the project tree into self-knowledge.',
+  'Refresh the stored project brief: reads AGENTS.md, XERXES.md, USER.md, and SOUL.md from the project root only — '
+    + 'not from any subdirectory, and no other filename — clips each to its first 2000 characters, and overwrites '
+    + 'the project-context note in self-knowledge with the result. Missing files are skipped in silence, so a '
+    + 'successful call is not evidence that anything was found. It replaces the previous snapshot wholesale rather '
+    + 'than merging, which makes it worth re-running only after those files actually change. Takes no arguments and '
+    + 'returns a fixed confirmation string.',
 )
 
 export const AGENT_MEMORY_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
@@ -154,13 +209,33 @@ export async function agentMemoryWrite(
   options: AgentMemoryToolsOptions,
 ): Promise<JsonObject> {
   return withMemory(context, options, async memory => {
-    const result = await memory.write(
-      normalizeScope(requiredString(inputs, 'scope')),
-      requiredString(inputs, 'path'),
-      requiredString(inputs, 'body'),
-    )
+    const path = requiredString(inputs, 'path')
+    const body = requiredString(inputs, 'body')
+    const rejection = memoryWriteRejection(path, body)
+    if (rejection) return rejection
+    const result = await memory.write(normalizeScope(requiredString(inputs, 'scope')), path, body)
     return { ok: true, scope: result.scope, path: result.path, bytes: result.bytes }
   })
+}
+
+/**
+ * Refuse a memory write that would leak a credential or turn the index into a
+ * container. Both checks run before the file is touched: memory is durable and
+ * re-injected every turn, so a secret written once is a secret disclosed to
+ * every later provider call.
+ */
+function memoryWriteRejection(path: string, body: string): JsonObject | undefined {
+  const credentials = findCredentialPatterns(body)
+  if (credentials.length > 0) {
+    return {
+      ok: false,
+      error: 'refusing to persist credentials to memory: '
+        + `${credentials.join(', ')} detected. Record where the secret lives (env var, vault path), never its value.`,
+      credential_patterns: credentials,
+    }
+  }
+  const indexIssue = memoryIndexBodyIssue(path, body)
+  return indexIssue === undefined ? undefined : { ok: false, error: indexIssue }
 }
 
 export async function agentMemoryAppend(
@@ -174,10 +249,14 @@ export async function agentMemoryAppend(
       timestamp: optionalBoolean(inputs, 'timestamp', true),
     }
     if (section !== undefined) appendOptions.section = section
+    const path = requiredString(inputs, 'path')
+    const body = requiredString(inputs, 'body')
+    const rejection = memoryWriteRejection(path, body)
+    if (rejection) return rejection
     const result = await memory.append(
       normalizeScope(requiredString(inputs, 'scope')),
-      requiredString(inputs, 'path'),
-      requiredString(inputs, 'body'),
+      path,
+      body,
       appendOptions,
     )
     return { ok: true, scope: result.scope, path: result.path, appended_bytes: result.appendedBytes }
@@ -197,7 +276,13 @@ export async function agentMemoryList(
       ok: true,
       scope: scope ?? 'all',
       count: files.length,
-      files: files.map(file => ({ scope: file.scope, relative: file.path, bytes: file.bytes })),
+      files: files.map(file => ({
+        scope: file.scope,
+        relative: file.path,
+        bytes: file.bytes,
+        description: file.description,
+        type: file.type,
+      })),
     }
   })
 }
@@ -224,7 +309,10 @@ export async function agentMemoryJournal(
   options: AgentMemoryToolsOptions,
 ): Promise<JsonObject> {
   return withMemory(context, options, async memory => {
-    const result = await memory.journal(normalizeScope(requiredString(inputs, 'scope')), requiredString(inputs, 'note'))
+    const note = requiredString(inputs, 'note')
+    const rejection = memoryWriteRejection('journal', note)
+    if (rejection) return rejection
+    const result = await memory.journal(normalizeScope(requiredString(inputs, 'scope')), note)
     return { ok: true, scope: result.scope, path: result.path, appended_bytes: result.appendedBytes }
   })
 }

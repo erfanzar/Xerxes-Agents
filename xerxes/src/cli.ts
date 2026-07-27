@@ -32,6 +32,7 @@ import { createProductionInteractionBoard } from "./daemon/productionInteraction
 import { runtimeConnection } from "./daemon/runtimeConnection.js";
 import { InMemoryDaemonRuntime } from "./daemon/runtime.js";
 import { daemonBuildIdForEntry } from "./daemon/sourceBuild.js";
+import { compactionCompletionPort } from "./daemon/server.js";
 import { DaemonSubagentEventBus } from "./daemon/subagentEvents.js";
 import { createNativeSubagentHost, subagentRetryWirePayload } from "./daemon/subagentHost.js";
 import { AgentTurnRunner, formatSubagentResults } from "./daemon/turnRunner.js";
@@ -43,7 +44,13 @@ import {
   ToolRegistry,
   type ToolExecutionContext,
 } from "./executors/toolRegistry.js";
+import { createCompactionAgent } from "./agents/compactionAgent.js";
+import { AuditEmitter } from "./audit/emitter.js";
+import { JSONLSinkCollector } from "./audit/collector.js";
+import { estimateContextTokens } from "./context/windowUsage.js";
+import { getContextLimit } from "./llms/providerRegistry.js";
 import { createLlmClient } from "./llms/client.js";
+import type { ChatMessage } from "./types/messages.js";
 import { AgentMemory } from "./memory/agentMemory.js";
 import { getAgentSelfMemory } from "./memory/agentSelfMemory.js";
 import { ContextualMemory } from "./memory/contextualMemory.js";
@@ -109,6 +116,9 @@ Usage:
 
 One-shot, daemon, ACP, API, and the interactive TypeScript TUI run on Bun.
 Browser tools attach only to an explicitly supplied Chromium CDP endpoint; use /browser in the TUI or the daemon browser command to connect.`;
+
+/** Summary budget for a mid-turn overflow rescue: small, because the window is already full. */
+const OVERFLOW_SUMMARY_MAX_TOKENS = 2_048;
 
 const [argument, ...argumentsAfterCommand] = Bun.argv.slice(2);
 
@@ -324,6 +334,10 @@ async function runDaemon(
     skillRegistry,
     onRestart: finish,
     onShutdown: finish,
+    // Only a process-owning host may claim uncaughtException/unhandledRejection,
+    // which is why the server leaves them off by default. This IS that host, and
+    // without them a crash loses the whole in-flight turn.
+    crashHandlers: true,
     websocket: websocketOptions(config),
     ...(channelManager.hasConfiguredChannels ? { channelManager } : {}),
     ...(channelManager.hasWebhookChannels()
@@ -340,8 +354,11 @@ async function runDaemon(
     throw error;
   }
   console.error("Xerxes Bun daemon listening on " + socketPath);
-  process.once("SIGINT", finish);
-  process.once("SIGTERM", finish);
+  // `once` dropped every signal after the first, so an operator whose first
+  // SIGTERM caught a turn that would not settle had no second chance short of
+  // SIGKILL. `finish` is already idempotent; the hard exit lives in stop().
+  process.on("SIGINT", finish);
+  process.on("SIGTERM", finish);
   try {
     await daemonLifetime;
   } finally {
@@ -671,6 +688,14 @@ function daemonRuntime(
         }
       : {}),
   };
+  // Off by default: an always-on JSONL sink is a surprise disk writer. Every
+  // downstream call is optional-chained, so enabling it is purely additive —
+  // but until something constructs one the daemon emits no audit record at all.
+  const auditEmitter = process.env.XERXES_AUDIT?.trim()
+    ? new AuditEmitter({
+      collector: new JSONLSinkCollector(join(xerxesHome(), "audit", "events.jsonl")),
+    })
+    : undefined;
   const subagentEvents = new DaemonSubagentEventBus();
   let subagentHost: ReturnType<typeof createNativeSubagentHost> | undefined;
   let runtime: InMemoryDaemonRuntime | undefined;
@@ -816,6 +841,42 @@ function daemonRuntime(
       ...(connection.topK !== undefined ? { topK: connection.topK } : {}),
       tools: tools.definitions(),
       toolExecutor: tools,
+      toolCapabilities: (name, agentId) => tools.capabilities(name, agentId),
+      // Spill oversized tool results outside the user's repo. The bootstrap
+      // prompt has always claimed this happens; supplying the root is what
+      // makes the claim true.
+      toolResultDirectory: join(xerxesHome(), "tool-results"),
+      // The daemon is the one host where a per-edit typecheck earns its cost:
+      // it turns "the change compiles" from a claim into a reported fact.
+      editDiagnostics: process.env.XERXES_EDIT_DIAGNOSTICS?.trim() !== "0",
+      ...(auditEmitter ? { auditEmitter } : {}),
+      // Compaction as a mid-turn recovery, not only a between-turn chore: the
+      // loop can retry an overflowed round once, but only if something is
+      // willing to shrink the history for it.
+      reduceContext: async (messages) => {
+        const priced = messages as unknown as Readonly<Record<string, unknown>>[];
+        const before = estimateContextTokens(priced, { model: connection.model });
+        const agent = createCompactionAgent({
+          model: connection.model,
+          completion: compactionCompletionPort(llm, connection.model),
+          summaryMaxTokens: OVERFLOW_SUMMARY_MAX_TOKENS,
+        });
+        // `ContextMessage` is deliberately `Record<string, unknown>` so
+        // compaction survives provider-specific fields it does not model.
+        // It only drops or replaces whole messages, so the typed shape the
+        // loop handed in is preserved through the round trip.
+        const reduced = await agent.summarizeMessages(priced) as unknown as ChatMessage[];
+        return {
+          messages: reduced,
+          tokensFreed: Math.max(
+            0,
+            before - estimateContextTokens(
+              reduced as unknown as Readonly<Record<string, unknown>>[],
+              { model: connection.model },
+            ),
+          ),
+        };
+      },
       ...(connection.topP !== undefined ? { topP: connection.topP } : {}),
       ...(interactions ? { interactions } : {}),
     });
@@ -840,6 +901,10 @@ function daemonRuntime(
       subagentHost?.cancelSource(sessionId);
       memoryToolContext.prune(sessionId);
     },
+    // Esc/Ctrl+C stops the whole delegation tree the turn started, not just
+    // the parent's provider stream. Children stay retryable because the user
+    // asked to pause, not to discard the work.
+    onTurnCancel: sessionId => subagentHost?.interruptSource(sessionId) ?? 0,
     // First-class retry of a dead subagent under its stable identity
     // (`subagent.retry` RPC, `/agents retry`, agents-panel `r` key). The host
     // continues the persisted conversation when one survives; without an

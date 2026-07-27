@@ -4,18 +4,18 @@
 import {
   COMPACTION_SUMMARY_PREFIX,
   CompactionProvisioner,
+  DEFAULT_COMPACTION_SUMMARY_MAX_TOKENS,
+  buildCompactionPromptFromText,
   renderMessagesForSummary,
+  stripCompactionAnalysis,
   type ContextMessage,
 } from '../context/index.js'
 import { SmartTokenCounter } from '../context/tokenCounter.js'
 
-export const COMPACTION_LENGTH_INSTRUCTIONS = Object.freeze({
-  brief: 'Create an extremely brief summary in 2-3 sentences focusing only on the most critical information.',
-  concise: 'Create a concise summary that captures the key points and important details in a few paragraphs.',
-  detailed: 'Create a detailed summary that preserves important context, key decisions, and relevant details.',
-})
-
-export type CompactionTargetLength = keyof typeof COMPACTION_LENGTH_INSTRUCTIONS
+export {
+  COMPACTION_LENGTH_INSTRUCTIONS,
+  type CompactionTargetLength,
+} from '../context/index.js'
 
 export interface CompactionCompletionRequest {
   readonly maxTokens: number
@@ -44,8 +44,30 @@ export type CompactionCompletionPort = (
 export interface CompactionAgentOptions {
   readonly completion: CompactionCompletionPort
   readonly model?: string
-  readonly targetLength?: CompactionTargetLength | string
+  readonly summaryMaxTokens?: number
+  readonly targetLength?: string
   readonly tokenCounter?: SmartTokenCounter
+}
+
+/** Summary text, or the reason a host response could not be read as text. */
+export type CompactionTextResult =
+  | { readonly ok: true; readonly text: string }
+  | { readonly detail: string; readonly ok: false }
+
+/**
+ * Raised when the completion port returned successfully but in a shape holding no text.
+ *
+ * It is deliberately distinct from whatever the port throws for transport failures: a caller
+ * retrying a provider outage should not retry a response shape that will never parse.
+ */
+export class CompactionResponseShapeError extends TypeError {
+  readonly detail: string
+
+  constructor(detail: string) {
+    super(`compaction completion returned an unusable response shape: ${detail}`)
+    this.name = 'CompactionResponseShapeError'
+    this.detail = detail
+  }
 }
 
 const COMPACTION_PROMPT_PLACEHOLDER = '__XERXES_COMPACTION_SUMMARY_PLACEHOLDER__'
@@ -58,6 +80,7 @@ const COMPACTION_PROMPT_PLACEHOLDER = '__XERXES_COMPACTION_SUMMARY_PLACEHOLDER__
  */
 export class CompactionAgent {
   readonly model: string
+  readonly summaryMaxTokens: number
   readonly targetLength: string
   private readonly completion: CompactionCompletionPort
   private readonly tokenCounter: SmartTokenCounter
@@ -67,19 +90,38 @@ export class CompactionAgent {
     this.completion = options.completion
     this.model = options.model?.trim() || 'compaction'
     this.targetLength = options.targetLength?.trim() || 'concise'
+    const requestedMaxTokens = options.summaryMaxTokens ?? DEFAULT_COMPACTION_SUMMARY_MAX_TOKENS
+    if (!Number.isSafeInteger(requestedMaxTokens) || requestedMaxTokens < 1) {
+      throw new RangeError('summaryMaxTokens must be a positive integer')
+    }
+    // The template asks for eight enumerated sections including every user turn verbatim; the
+    // old 2_048-token ceiling truncated that mid-summary and stored the fragment.
+    this.summaryMaxTokens = requestedMaxTokens
     this.tokenCounter = options.tokenCounter ?? new SmartTokenCounter({ model: this.model })
   }
 
   /** Summarize a text context while preserving caller-requested topics. */
   async summarizeContext(context: string, preserveTopics: readonly string[] = []): Promise<string> {
-    if (!context || context.length < 200) return context
+    const result = await this.summarizeContextResult(context, preserveTopics)
+    if (result.ok) return result.text
+    throw new CompactionResponseShapeError(result.detail)
+  }
+
+  /** Same call as `summarizeContext`, with an unreadable response reported as data. */
+  async summarizeContextResult(
+    context: string,
+    preserveTopics: readonly string[] = [],
+  ): Promise<CompactionTextResult> {
+    if (!context || context.length < 200) return { ok: true, text: context }
     const response = await this.completion({
-      prompt: buildCompactionPrompt(context, this.targetLength, preserveTopics),
+      prompt: buildCompactionPromptFromText({ context, targetLength: this.targetLength, preserveTopics }),
       temperature: 0.3,
-      maxTokens: 2_048,
+      maxTokens: this.summaryMaxTokens,
       stream: false,
     })
-    return completionText(response)
+    const extracted = completionText(response)
+    if (!extracted.ok) return extracted
+    return { ok: true, text: stripCompactionAnalysis(extracted.text) }
   }
 
   /**
@@ -127,39 +169,26 @@ export function buildCompactionPrompt(
   targetLength: string = 'concise',
   preserveTopics: readonly string[] = [],
 ): string {
-  const lengthInstruction = COMPACTION_LENGTH_INSTRUCTIONS[
-    targetLength as CompactionTargetLength
-  ] ?? COMPACTION_LENGTH_INSTRUCTIONS.concise
-  const topicInstruction = preserveTopics.length
-    ? `\n- Ensure these topics are covered: ${preserveTopics.join(', ')}`
-    : ''
-  return [
-    'You are a context compaction specialist. Your job is to summarize conversation context while preserving the most important information.',
-    '',
-    lengthInstruction,
-    '',
-    'IMPORTANT GUIDELINES:',
-    '- Preserve key facts, decisions, and outcomes',
-    '- Maintain chronological order where relevant',
-    '- Keep technical details that are likely to be referenced later',
-    '- Remove redundant information and verbose explanations',
-    '- Use clear, direct language',
-    topicInstruction,
-    '',
-    'CONTEXT TO SUMMARIZE:',
-    context,
-    '',
-    'COMPACTED SUMMARY:',
-  ].join('\n')
+  return buildCompactionPromptFromText({ context, targetLength, preserveTopics })
 }
 
-function completionText(response: CompactionCompletion | string): string {
-  if (typeof response === 'string') return response
+/** Read summary text out of a host response, reporting an unusable shape instead of throwing. */
+export function completionText(response: CompactionCompletion | string): CompactionTextResult {
+  if (typeof response === 'string') return { ok: true, text: response }
+  if (response === null || typeof response !== 'object') return { ok: false, detail: describeShape(response) }
   const choice = response.choices?.[0]?.message?.content
-  if (typeof choice === 'string') return choice
-  if (typeof response.content === 'string') return response.content
-  if (typeof response.text === 'string') return response.text
-  throw new TypeError('compaction completion must return a string, content, text, or choices[0].message.content')
+  if (typeof choice === 'string') return { ok: true, text: choice }
+  if (typeof response.content === 'string') return { ok: true, text: response.content }
+  if (typeof response.text === 'string') return { ok: true, text: response.text }
+  return { ok: false, detail: describeShape(response) }
+}
+
+/** Name the shape only: response values can be large or carry session content into logs. */
+function describeShape(response: unknown): string {
+  if (response === null) return 'null'
+  if (typeof response !== 'object') return typeof response
+  const keys = Object.keys(response).sort().slice(0, 8)
+  return keys.length ? `object with keys ${keys.join(', ')}` : 'object with no keys'
 }
 
 function replaceSummaryPlaceholder(message: ContextMessage, summary: string): ContextMessage {

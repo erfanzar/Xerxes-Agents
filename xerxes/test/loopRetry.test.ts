@@ -7,7 +7,13 @@ import { HookRunner } from '../src/extensions/hooks.js'
 import type { CompletionRequest, LlmClient, LlmDelta } from '../src/llms/client.js'
 import { classifyError } from '../src/runtime/errorClassifier.js'
 import { createAgentState, type StreamEvent } from '../src/streaming/events.js'
-import { runTurn, StreamInactivityError } from '../src/streaming/loop.js'
+import {
+  CONTEXT_OVERFLOW_STOP_TEXT,
+  runTurn,
+  StreamInactivityError,
+  type ContextReduction,
+} from '../src/streaming/loop.js'
+import type { ChatMessage } from '../src/types/messages.js'
 import type { ToolDefinition } from '../src/types/toolCalls.js'
 
 const READ_FILE: ToolDefinition = {
@@ -336,4 +342,140 @@ test('on_error fires once for a terminal provider failure with the classified ki
 
   expect(errors).toHaveLength(1)
   expect(errors[0]).toMatchObject({ attempt: 1, kind: 'auth' })
+})
+
+class OverflowThenHealthyClient implements LlmClient {
+  readonly requests: CompletionRequest[] = []
+
+  async *stream(request: CompletionRequest): AsyncGenerator<LlmDelta> {
+    this.requests.push(request)
+    if (this.requests.length === 1) {
+      throw new Error('prompt is too long: 312000 tokens > 200000 maximum')
+    }
+    yield { content: 'recovered on the smaller prompt', usage: { inputTokens: 5, outputTokens: 4 } }
+  }
+}
+
+test('an injected reducer relieves a context overflow and retries without spending a retry slot', async () => {
+  const client = new OverflowThenHealthyClient()
+  const state = createAgentState()
+  const seen: number[] = []
+  // No retry delays at all: any recovery here proves the reduction retry is not
+  // drawn from the ordinary transient-failure budget.
+  const events = await collect(runTurn(
+    { model: 'gpt-4o', state, userMessage: 'summarize the whole session' },
+    {
+      llm: client,
+      retryDelays: [],
+      reduceContext: async (messages): Promise<ContextReduction> => {
+        seen.push(messages.length)
+        const kept: ChatMessage[] = [{ role: 'user', content: 'summarize the whole session' }]
+        return { messages: kept, tokensFreed: 120_000 }
+      },
+    },
+  ))
+
+  expect(seen).toEqual([1])
+  expect(client.requests).toHaveLength(2)
+  expect(events.filter(event => event.type === 'provider_retry')).toEqual([
+    expect.objectContaining({ attempt: 1, delay: 0, final: false }),
+  ])
+  expect(state.messages).toEqual([
+    { role: 'user', content: 'summarize the whole session' },
+    { role: 'assistant', content: 'recovered on the smaller prompt' },
+  ])
+  expect(events.at(-1)).toMatchObject({ type: 'turn_done', reason: 'completed' })
+})
+
+test('a reducer runs at most once per turn and a repeat overflow reports the remedy', async () => {
+  class AlwaysOverflowingClient implements LlmClient {
+    calls = 0
+
+    async *stream(): AsyncGenerator<LlmDelta> {
+      this.calls += 1
+      throw new Error('prompt is too long: 312000 tokens > 200000 maximum')
+    }
+  }
+
+  const client = new AlwaysOverflowingClient()
+  const state = createAgentState()
+  let reductions = 0
+  const events = await collect(runTurn(
+    { model: 'gpt-4o', state, userMessage: 'keep going' },
+    {
+      llm: client,
+      retryDelays: [],
+      reduceContext: async (messages): Promise<ContextReduction> => {
+        reductions += 1
+        return { messages, tokensFreed: 5_000 }
+      },
+    },
+  ))
+
+  expect(reductions).toBe(1)
+  expect(client.calls).toBe(2)
+  expect(events.filter(event => event.type === 'text').map(event => event.text)).toEqual([
+    CONTEXT_OVERFLOW_STOP_TEXT,
+  ])
+  expect(events.at(-1)).toMatchObject({ type: 'turn_done', reason: 'context_overflow' })
+})
+
+test('an overflow with no reducer names the remedy instead of echoing the provider string', async () => {
+  class OverflowingClient implements LlmClient {
+    async *stream(): AsyncGenerator<LlmDelta> {
+      throw new Error('prompt is too long: 312000 tokens > 200000 maximum')
+    }
+  }
+
+  const events = await collect(runTurn(
+    { model: 'gpt-4o', state: createAgentState(), userMessage: 'keep going' },
+    { llm: new OverflowingClient(), retryDelays: [] },
+  ))
+
+  const texts = events.filter(event => event.type === 'text').map(event => event.text)
+  expect(texts).toEqual([CONTEXT_OVERFLOW_STOP_TEXT])
+  expect(texts[0]).not.toContain('312000')
+  expect(events.at(-1)).toMatchObject({ type: 'turn_done', reason: 'context_overflow' })
+})
+
+test('a reducer that frees nothing falls through to the overflow remedy', async () => {
+  class OverflowingClient implements LlmClient {
+    calls = 0
+
+    async *stream(): AsyncGenerator<LlmDelta> {
+      this.calls += 1
+      throw new Error('prompt is too long: 312000 tokens > 200000 maximum')
+    }
+  }
+
+  const client = new OverflowingClient()
+  const events = await collect(runTurn(
+    { model: 'gpt-4o', state: createAgentState(), userMessage: 'keep going' },
+    {
+      llm: client,
+      retryDelays: [],
+      reduceContext: async (messages): Promise<ContextReduction> => ({ messages, tokensFreed: 0 }),
+    },
+  ))
+
+  expect(client.calls).toBe(1)
+  expect(events.filter(event => event.type === 'text').map(event => event.text)).toEqual([
+    CONTEXT_OVERFLOW_STOP_TEXT,
+  ])
+  expect(events.at(-1)).toMatchObject({ type: 'turn_done', reason: 'context_overflow' })
+})
+
+test('a terminal provider failure reports provider_failed rather than a context remedy', async () => {
+  class UnauthorizedClient implements LlmClient {
+    async *stream(): AsyncGenerator<LlmDelta> {
+      throw new Error('stream request failed (401): invalid api key')
+    }
+  }
+
+  const events = await collect(runTurn(
+    { model: 'gpt-4o', state: createAgentState(), userMessage: 'hi' },
+    { llm: new UnauthorizedClient(), retryDelays: [] },
+  ))
+
+  expect(events.at(-1)).toMatchObject({ type: 'turn_done', reason: 'provider_failed' })
 })

@@ -2,7 +2,12 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { ConfigurationError, ProviderError } from '../core/errors.js'
-import { wrapSystemWithCache, wrapToolsWithCache } from '../streaming/promptCaching.js'
+import {
+  cacheableSystemPrompt,
+  markLastMessageForCache,
+  wrapSystemSegmentsWithCache,
+  wrapToolsWithCache,
+} from '../streaming/promptCaching.js'
 import { deterministicToolCallId } from '../streaming/toolCallIds.js'
 import type { ChatMessage, ContentPart, MessageContent } from '../types/messages.js'
 import { messageText } from '../types/messages.js'
@@ -355,11 +360,30 @@ function anthropicRequestPayload(
     max_tokens: thinkingBudget === undefined
       ? request.maxTokens ?? 2048
       : Math.max(request.maxTokens ?? 0, thinkingBudget + 4_096),
-    messages: converted.messages,
+    // Cache the transcript too, not just the prelude. The system prompt and
+    // tool schemas are the part that does not grow; the conversation is the
+    // part that does, and it was being re-sent at full price every request.
+    messages: promptCaching
+      ? markLastMessageForCache(converted.messages as never) as never
+      : converted.messages,
     stream,
   }
   if (converted.system) {
-    payload.system = promptCaching ? wrapSystemWithCache(converted.system) : converted.system
+    // Prefer the segmented form so the cache breakpoint lands after the stable
+    // sources rather than after the memory section, which the agent rewrites on
+    // most substantive turns and which would otherwise invalidate the whole
+    // prefix every request.
+    //
+    // Only when the segments reproduce the converted system text exactly: the
+    // conversion also folds in any other system message in the transcript, and
+    // silently dropping one to gain a cache hit would be a bad trade.
+    const segments = request.systemSegments
+    const segmentText = segments?.map(segment => segment.text).filter(Boolean).join('\n\n')
+    payload.system = !promptCaching
+      ? converted.system
+      : segments?.length && segmentText === converted.system
+        ? wrapSystemSegmentsWithCache(segments)
+        : cacheableSystemPrompt(converted.system)
   }
   if (request.temperature !== undefined && (thinkingBudget === undefined || request.temperature === 1)) {
     // Extended thinking requires temperature exactly 1; any other value is a

@@ -9,6 +9,7 @@ import { join } from 'node:path'
 
 import { InMemoryDaemonRuntime } from '../src/daemon/runtime.js'
 import { DaemonServer } from '../src/daemon/server.js'
+import { SkillCreateFlow, type SkillCreateTransition } from '../src/daemon/skillCreate.js'
 
 interface Frame {
   readonly id?: number
@@ -71,6 +72,58 @@ test('daemon runs the native skill-create interview and submits its authored dra
     await server.stop()
     await rm(directory, { recursive: true, force: true })
   }
+})
+
+/** Read a transition's user-facing text regardless of which arm it is. */
+function say(transition: SkillCreateTransition | undefined): string {
+  if (transition?.kind === 'prompt' || transition?.kind === 'cancelled') return transition.message
+  if (transition?.kind === 'draft') return transition.draft.announcement
+  return ''
+}
+
+test('the interview asks where to save only when both roots exist, and settles the directory with it', async () => {
+  const created: string[] = []
+  const ensureDirectory = async (path: string): Promise<void> => {
+    created.push(path)
+  }
+  const flow = new SkillCreateFlow({
+    skillsDirectory: '/home/dev/.xerxes/skills',
+    projectSkillsDirectory: '/repo/.agents/skills',
+    ensureDirectory,
+  })
+
+  expect(say(await flow.start('release-notes', 'session-1'))).toContain('Where should this skill be saved?')
+  // The scope decides the directory, so nothing may be created before it is answered.
+  expect(created).toEqual([])
+  expect(say(await flow.answer('session-1', 'somewhere else'))).toContain('Answer `project` or `user`')
+  expect(say(await flow.answer('session-1', 'project'))).toContain('What should this skill do?')
+  expect(created).toEqual([join('/repo/.agents/skills', 'release-notes')])
+
+  const draft = await flow.answer('session-1', 'auto')
+  expect(draft?.kind).toBe('draft')
+  if (draft?.kind !== 'draft') throw new Error('expected a draft')
+  expect(draft.draft.scope).toBe('project')
+  expect(draft.draft.targetPath).toBe(join('/repo/.agents/skills', 'release-notes', 'SKILL.md'))
+  // Success is checkable per step, irreversible steps are called out, and the
+  // trailing section is the end-to-end signal rather than the only one.
+  expect(draft.draft.prompt).toContain('the observable signal that it worked')
+  expect(draft.draft.prompt).toContain('`**Irreversible.**`')
+  expect(draft.draft.prompt).toContain('Do not restate the per-step signals here')
+
+  // An empty answer takes the root that discovery already trusts.
+  const defaulted = new SkillCreateFlow({
+    skillsDirectory: '/home/dev/.xerxes/skills',
+    projectSkillsDirectory: '/repo/.agents/skills',
+    ensureDirectory,
+  })
+  await defaulted.start('notes', 'session-2')
+  expect(say(await defaulted.answer('session-2', ''))).toContain('What should this skill do?')
+  expect(created.at(-1)).toBe(join('/home/dev/.xerxes/skills', 'notes'))
+
+  // One writable root means there is no question to ask; the flow is unchanged.
+  const single = new SkillCreateFlow({ skillsDirectory: '/home/dev/.xerxes/skills', ensureDirectory })
+  expect(say(await single.start('solo', 'session-3'))).toContain('What should this skill do?')
+  expect(created.at(-1)).toBe(join('/home/dev/.xerxes/skills', 'solo'))
 })
 
 function eventFrame(type: string): (frame: Frame) => boolean {

@@ -7,21 +7,41 @@ import { dirname, join } from 'node:path'
 import { ValidationError } from '../core/errors.js'
 import { ToolRegistry } from '../executors/toolRegistry.js'
 import type { JsonObject, ToolDefinition } from '../types/toolCalls.js'
+import type { FileToolContext } from './fileState.js'
+import { guardedCreate, guardedWrite, recordFileRead, withStaleNotice } from './fileState.js'
 import { optionalBoolean, optionalInteger, optionalString, requireRange, requiredString } from './inputs.js'
 import { WorkspacePathError, WorkspacePathResolver } from './pathSafety.js'
 
 export const DEFAULT_READ_LINE_LIMIT = 400
 export const DEFAULT_MAX_RESULTS = 500
+/** Byte ceiling for a single read before any operator override; see resolveMaxReadFileBytes. */
+export const DEFAULT_MAX_READ_FILE_BYTES = 262_144
+/**
+ * Characters a single read may return, whichever line window produced them.
+ *
+ * The line window alone is not a bound: a minified bundle, a one-line JSON dump,
+ * or a long lockfile line is a single line, so the default limit happily returns
+ * the entire file and reports no truncation. Refusing here costs a hundred bytes
+ * and teaches the caller to narrow the read; succeeding costs the context window.
+ */
+export const MAX_READ_WINDOW_CHARS = 40_000
 const MAX_GREP_FILE_BYTES = 1_000_000
-const MAX_READ_FILE_BYTES = 10_000_000
 const MAX_TOOL_RESULTS = 5_000
 
 export const READ_FILE_DEFINITION: ToolDefinition = {
   type: 'function',
   function: {
     name: 'ReadFile',
-    description: 'Read a workspace file in line chunks. '
-      + 'Use file_path, offset, and limit=-1 only for intentional full reads.',
+    description: 'Read a window of lines from one UTF-8 text file. file_path is workspace-relative; an absolute path '
+      + 'inside the workspace also resolves, anything outside it is refused. Output is the file text verbatim with no '
+      + 'line-number prefix, so it can be pasted straight back into FileEditTool old_string. Defaults to '
+      + `${DEFAULT_READ_LINE_LIMIT} lines from offset 0 and reports the offset to continue from; limit=-1 means a `
+      + `deliberate whole-file read. One call returns at most ${MAX_READ_WINDOW_CHARS} characters and files over `
+      + `${DEFAULT_MAX_READ_FILE_BYTES} bytes are refused outright; both are errors, not truncation. A file with very `
+      + 'long lines (minified bundles, single-line JSON, lockfiles) can exceed the character ceiling even at limit=1 '
+      + 'because it is one line: locate what you need with GrepTool, or set max_chars to cap the return. A missing '
+      + 'file is a normal recoverable outcome — confirm the path with GlobTool instead of retrying the same read. '
+      + 'A directory is not readable here; use ListDir.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -31,9 +51,13 @@ export const READ_FILE_DEFINITION: ToolDefinition = {
         limit: {
           type: 'integer',
           default: DEFAULT_READ_LINE_LIMIT,
-          description: 'Line limit; -1 reads the whole file.',
+          description: 'Line limit; -1 reads the whole file, subject to the same character ceiling.',
         },
-        max_chars: { type: 'integer', description: 'Optional character cap; -1 disables the cap.' },
+        max_chars: {
+          type: 'integer',
+          description: 'Optional character cap applied to the window; -1 disables it. Use it to read part of a file '
+            + 'whose lines are too long to page through by line count.',
+        },
       },
       required: ['file_path'],
     },
@@ -44,7 +68,12 @@ export const WRITE_FILE_DEFINITION: ToolDefinition = {
   type: 'function',
   function: {
     name: 'WriteFile',
-    description: 'Create a workspace file. Existing files require overwrite=true.',
+    description: 'Create one workspace file from complete UTF-8 content. content is the whole file, never a patch, so '
+      + 'replacing an existing file requires overwrite=true and silently discards everything not repeated in content — '
+      + 'for a change to a file that already exists, prefer FileEditTool. file_path is workspace-relative; an absolute '
+      + 'path inside the workspace also resolves, anything outside it is refused. Missing parent directories are '
+      + 'created unless create_dirs=false. The target must be a regular file: an existing directory at that path is an '
+      + 'error, not an overwrite.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -150,15 +179,27 @@ export const FILE_EDIT_TOOL_DEFINITION: ToolDefinition = {
   type: 'function',
   function: {
     name: 'FileEditTool',
-    description: 'Replace exact text in a workspace file or replace its entire contents.',
+    description: 'Replace one exact span of text in a workspace file (edit_mode=search_replace) or rewrite the file '
+      + 'whole (edit_mode=whole_file). Read the file first: old_string must match what is on disk right now, copied '
+      + 'verbatim from ReadFile output — ReadFile adds no line-number prefix, but any prefix or re-indentation you add '
+      + 'yourself will stop it matching. old_string must be unique: if it occurs more than once the edit is refused '
+      + 'untouched, so extend it with neighbouring lines until it is unique, or set replace_all=true when every '
+      + 'occurrence genuinely should change. When nothing matches, one retry folds curly quotes, non-breaking spaces, '
+      + 'and CRLF line endings and the file keeps its own typography; any other mismatch (stale content, wrong '
+      + 'indentation) needs a fresh read rather than a retry. new_string must differ from old_string and is inserted '
+      + 'literally — no regex, no $-group substitution.',
     parameters: {
       type: 'object',
       additionalProperties: false,
       properties: {
         file_path: { type: 'string', description: 'Workspace-relative file path.' },
-        old_string: { type: 'string', default: '', description: 'Exact text to replace in search_replace mode.' },
+        old_string: {
+          type: 'string',
+          default: '',
+          description: 'Exact on-disk text to replace in search_replace mode; must be unique unless replace_all.',
+        },
         new_string: { type: 'string', default: '', description: 'Replacement text or complete file contents.' },
-        replace_all: { type: 'boolean', default: false, description: 'Replace every exact occurrence.' },
+        replace_all: { type: 'boolean', default: false, description: 'Replace every occurrence instead of refusing.' },
         edit_mode: { type: 'string', enum: ['search_replace', 'whole_file'], default: 'search_replace' },
       },
       required: ['file_path'],
@@ -177,17 +218,49 @@ export const FILE_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
 ]
 
 /** Register the Bun-native filesystem tools against one workspace path resolver. */
+/**
+ * Read-only workspace queries: independent by construction, so a round asking
+ * for several at once runs them together instead of paying each one's latency
+ * end to end.
+ */
+const READ_ONLY_FILE_CAPABILITIES = Object.freeze({
+  concurrencySafe: true,
+  defer: false,
+  destructive: false,
+  openWorld: false,
+  readOnly: true,
+} as const)
+
+/**
+ * Writers serialize against everything, and are deliberately NOT interruptible:
+ * aborting midway through a write leaves the workspace in a state neither the
+ * user nor the model asked for. Each is bounded by its own size ceiling, so
+ * letting one finish cannot park a turn indefinitely.
+ */
+const FILE_WRITE_CAPABILITIES = Object.freeze({
+  concurrencySafe: false,
+  defer: false,
+  destructive: true,
+  interruptBehavior: 'block',
+  openWorld: false,
+  readOnly: false,
+} as const)
+
 export function registerFileTools(registry: ToolRegistry, paths: WorkspacePathResolver): void {
-  registry.register(READ_FILE_DEFINITION, inputs => readFile(inputs, paths))
-  registry.register(WRITE_FILE_DEFINITION, inputs => writeFile(inputs, paths))
-  registry.register(APPEND_FILE_DEFINITION, inputs => appendFile(inputs, paths))
-  registry.register(LIST_DIR_DEFINITION, inputs => listDirectory(inputs, paths))
-  registry.register(GLOB_TOOL_DEFINITION, inputs => globFiles(inputs, paths))
-  registry.register(GREP_TOOL_DEFINITION, inputs => grepFiles(inputs, paths))
-  registry.register(FILE_EDIT_TOOL_DEFINITION, inputs => editFile(inputs, paths))
+  registry.register(READ_FILE_DEFINITION, (inputs, context) => readFile(inputs, paths, context), 'default', READ_ONLY_FILE_CAPABILITIES)
+  registry.register(WRITE_FILE_DEFINITION, (inputs, context) => writeFile(inputs, paths, context), 'default', FILE_WRITE_CAPABILITIES)
+  registry.register(APPEND_FILE_DEFINITION, inputs => appendFile(inputs, paths), 'default', FILE_WRITE_CAPABILITIES)
+  registry.register(LIST_DIR_DEFINITION, inputs => listDirectory(inputs, paths), 'default', READ_ONLY_FILE_CAPABILITIES)
+  registry.register(GLOB_TOOL_DEFINITION, inputs => globFiles(inputs, paths), 'default', READ_ONLY_FILE_CAPABILITIES)
+  registry.register(GREP_TOOL_DEFINITION, inputs => grepFiles(inputs, paths), 'default', READ_ONLY_FILE_CAPABILITIES)
+  registry.register(FILE_EDIT_TOOL_DEFINITION, (inputs, context) => editFile(inputs, paths, context), 'default', FILE_WRITE_CAPABILITIES)
 }
 
-export async function readFile(inputs: JsonObject, paths: WorkspacePathResolver): Promise<string> {
+export async function readFile(
+  inputs: JsonObject,
+  paths: WorkspacePathResolver,
+  context?: FileToolContext,
+): Promise<string> {
   const filePath = requiredString(inputs, 'file_path')
   const offset = requireRange(optionalNullableInteger(inputs, 'offset', 0), 'offset', 0, Number.MAX_SAFE_INTEGER)
   const limit = optionalNullableInteger(inputs, 'limit', DEFAULT_READ_LINE_LIMIT)
@@ -202,17 +275,25 @@ export async function readFile(inputs: JsonObject, paths: WorkspacePathResolver)
   const target = await paths.resolve(filePath)
   await requireRegularFile(target, filePath)
   const fileInfo = await stat(target)
-  if (fileInfo.size > MAX_READ_FILE_BYTES) {
+  const maxBytes = resolveMaxReadFileBytes()
+  if (fileInfo.size > maxBytes) {
     throw new ValidationError(
       'file_path',
-      'is ' + fileInfo.size + ' bytes, exceeding the ' + MAX_READ_FILE_BYTES
+      'is ' + fileInfo.size + ' bytes, exceeding the ' + maxBytes
         + '-byte ReadFile limit; search it with GrepTool or split it into smaller files first',
       filePath,
     )
   }
   const text = await Bun.file(target).text()
   if (limit === -1) {
-    return truncateCharacters(text, maxChars)
+    const whole = truncateCharacters(text, maxChars)
+    enforceReadWindowCeiling(whole, { charCap: 'max_chars', filePath, lineParameter: 'limit', toolName: 'ReadFile' })
+    recordFileRead(context, target, text, {
+      mtimeMs: fileInfo.mtimeMs,
+      partialView: whole !== text,
+      size: fileInfo.size,
+    })
+    return whole
   }
 
   const lines = splitLines(text)
@@ -220,16 +301,96 @@ export async function readFile(inputs: JsonObject, paths: WorkspacePathResolver)
     return `[ReadFile] Offset ${offset} is past end of file (${lines.length} lines).`
   }
   const endOffset = Math.min(offset + limit, lines.length)
-  const selected = lines.slice(offset, endOffset).join('')
+  const window = lines.slice(offset, endOffset).join('')
+  const selected = truncateCharacters(window, maxChars)
+  enforceReadWindowCeiling(selected, { charCap: 'max_chars', filePath, lineParameter: 'limit', toolName: 'ReadFile' })
+  recordFileRead(context, target, text, {
+    mtimeMs: fileInfo.mtimeMs,
+    partialView: offset > 0 || endOffset < lines.length || selected !== window,
+    size: fileInfo.size,
+  })
   const notice = endOffset < lines.length
     ? `\n\n[ReadFile] Showing lines ${offset + 1}-${endOffset} of ${lines.length}. `
       + `Continue with offset=${endOffset}, limit=${limit}. `
       + 'Use limit=-1 only when the whole file is intentionally required.'
     : ''
-  return truncateCharacters(selected, maxChars) + notice
+  return selected + notice
 }
 
-export async function writeFile(inputs: JsonObject, paths: WorkspacePathResolver): Promise<string> {
+/** Where a returned read window came from, so the refusal can name the knob that narrows it. */
+export interface ReadWindowContext {
+  /** Parameter that caps returned characters directly, when the caller exposes one. */
+  readonly charCap?: string
+  readonly filePath: string
+  /** Parameter the caller shrinks to fetch fewer lines, for example limit or end_line. */
+  readonly lineParameter: string
+  /**
+   * Value the suggested line count is added to, so an absolute parameter such as
+   * end_line is quoted back as a line number rather than a count.
+   */
+  readonly lineParameterBase?: number
+  readonly toolName: string
+}
+
+/**
+ * Refuse a read window over MAX_READ_WINDOW_CHARS instead of returning it.
+ *
+ * Truncating here would be worse than failing: the caller would receive a
+ * plausible-looking prefix of a generated file and keep reasoning from it. The
+ * message therefore has to carry enough arithmetic for the retry to be right the
+ * first time, including the case where no line count is small enough.
+ */
+export function enforceReadWindowCeiling(text: string, context: ReadWindowContext): void {
+  if (text.length <= MAX_READ_WINDOW_CHARS) {
+    return
+  }
+  const lineCount = Math.max(1, countNewlines(text) + (text.endsWith('\n') ? 0 : 1))
+  const perLine = Math.ceil(text.length / lineCount)
+  const charCapHint = context.charCap === undefined ? '' : ', or cap the return with ' + context.charCap
+  const remedy = perLine > MAX_READ_WINDOW_CHARS
+    ? 'single lines are longer than the whole ceiling, so this file is minified or generated: find what you need '
+      + 'with GrepTool' + charCapHint
+    : 'retry with ' + context.lineParameter + '='
+      + ((context.lineParameterBase ?? 0) + Math.max(1, Math.floor(MAX_READ_WINDOW_CHARS / perLine)))
+      + ' or smaller, or search the file with GrepTool instead' + charCapHint
+  throw new ValidationError(
+    'file_path',
+    'selected ' + text.length + ' characters across ' + lineCount + ' line(s) averaging ' + perLine
+      + ' characters, exceeding the ' + MAX_READ_WINDOW_CHARS + '-character ' + context.toolName
+      + ' window ceiling; ' + remedy,
+    context.filePath,
+  )
+}
+
+let configuredMaxReadFileBytes: number | undefined
+
+/**
+ * Let a host raise or lower the read ceiling once at startup.
+ *
+ * The environment variable still wins, so an operator can override a profile or
+ * bundled config they cannot edit without rebuilding.
+ */
+export function setMaxReadFileBytes(bytes: number | undefined): void {
+  if (bytes !== undefined && (!Number.isInteger(bytes) || bytes < 1)) {
+    throw new ValidationError('max_read_file_bytes', 'must be a positive integer', bytes)
+  }
+  configuredMaxReadFileBytes = bytes
+}
+
+/** Resolve the read byte ceiling as environment override, then runtime setting, then default. */
+export function resolveMaxReadFileBytes(
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+): number {
+  return positiveInteger(environment.XERXES_MAX_READ_FILE_BYTES)
+    ?? configuredMaxReadFileBytes
+    ?? DEFAULT_MAX_READ_FILE_BYTES
+}
+
+export async function writeFile(
+  inputs: JsonObject,
+  paths: WorkspacePathResolver,
+  context?: FileToolContext,
+): Promise<string> {
   const filePath = requiredString(inputs, 'file_path')
   const content = requiredContent(inputs, 'content')
   const overwrite = optionalBoolean(inputs, 'overwrite', false)
@@ -248,11 +409,24 @@ export async function writeFile(inputs: JsonObject, paths: WorkspacePathResolver
   } else if (!(await isDirectory(dirname(target)))) {
     throw new ValidationError('file_path', 'parent directory does not exist and create_dirs is false', filePath)
   }
-
-  await Bun.write(target, content)
   const relativePath = await paths.relative(target)
-  const action = existing ? 'overwrote' : 'created'
-  return `Wrote ${content.length} characters to ${relativePath} (${action}).`
+  // Last await before the guarded region: everything after this runs synchronously so
+  // the file cannot change between the freshness check and the write that trusts it.
+  const checked = await paths.recheck(target)
+
+  if (!existing) {
+    guardedCreate({ absolutePath: checked, content, displayPath: filePath, sessionId: context?.sessionId })
+    return `Wrote ${content.length} characters to ${relativePath} (created).`
+  }
+  guardedWrite({
+    absolutePath: checked,
+    displayPath: filePath,
+    mode: 'overwrite',
+    sessionId: context?.sessionId,
+    toolName: 'WriteFile',
+    transform: () => content,
+  })
+  return `Wrote ${content.length} characters to ${relativePath} (overwrote).`
 }
 
 /** Append text to a workspace file while preserving the same path-containment boundary as WriteFile. */
@@ -470,7 +644,11 @@ export async function grepFiles(inputs: JsonObject, paths: WorkspacePathResolver
   return results.join('\n')
 }
 
-export async function editFile(inputs: JsonObject, paths: WorkspacePathResolver): Promise<string> {
+export async function editFile(
+  inputs: JsonObject,
+  paths: WorkspacePathResolver,
+  context?: FileToolContext,
+): Promise<string> {
   const filePath = requiredString(inputs, 'file_path')
   const oldString = optionalString(inputs, 'old_string') ?? ''
   const newString = optionalString(inputs, 'new_string') ?? ''
@@ -479,38 +657,269 @@ export async function editFile(inputs: JsonObject, paths: WorkspacePathResolver)
   if (editMode !== 'search_replace' && editMode !== 'whole_file') {
     throw new ValidationError('edit_mode', 'must be search_replace or whole_file', editMode)
   }
+  if (editMode === 'whole_file' && !newString) {
+    throw new ValidationError('new_string', 'must not be empty in whole_file mode', newString)
+  }
+  if (editMode === 'search_replace') {
+    if (!oldString) {
+      throw new ValidationError('old_string', 'must not be empty in search_replace mode', oldString)
+    }
+    if (oldString === newString) {
+      throw new ValidationError('new_string', 'must differ from old_string', newString)
+    }
+  }
 
   const target = await paths.resolve(filePath)
   await requireRegularFile(target, filePath)
-  const content = await Bun.file(target).text()
+  const relativePath = await paths.relative(target)
+  // Last await before the guarded region; the replacement below is computed from the
+  // very bytes the freshness check inspected, not from a re-read that could differ.
+  const checked = await paths.recheck(target)
+
   if (editMode === 'whole_file') {
-    if (!newString) {
-      throw new ValidationError('new_string', 'must not be empty in whole_file mode', newString)
-    }
-    await Bun.write(target, newString)
-    return `Replaced entire file ${await paths.relative(target)}.`
-  }
-  if (!oldString) {
-    throw new ValidationError('old_string', 'must not be empty in search_replace mode', oldString)
-  }
-  if (oldString === newString) {
-    throw new ValidationError('new_string', 'must differ from old_string', newString)
+    guardedWrite({
+      absolutePath: checked,
+      displayPath: filePath,
+      mode: 'overwrite',
+      sessionId: context?.sessionId,
+      toolName: 'FileEditTool',
+      transform: () => newString,
+    })
+    return `Replaced entire file ${relativePath}.`
   }
 
-  const occurrences = countOccurrences(content, oldString)
-  if (occurrences === 0) {
-    throw new ValidationError('old_string', 'was not found exactly; re-read the file before retrying', oldString)
+  let applied: ForgivingReplacement | undefined
+  const written = guardedWrite({
+    absolutePath: checked,
+    displayPath: filePath,
+    mode: 'targeted',
+    sessionId: context?.sessionId,
+    toolName: 'FileEditTool',
+    transform: content => {
+      const occurrences = countOccurrences(content, oldString)
+      if (occurrences === 0) {
+        applied = replaceForgivingly(content, oldString, newString, replaceAll)
+        return applied.text
+      }
+      if (occurrences > 1 && !replaceAll) {
+        throw new ValidationError(
+          'old_string',
+          `appears ${occurrences} times; provide more context or set replace_all=true`,
+          oldString,
+        )
+      }
+      return replaceAll ? content.split(oldString).join(newString) : content.replace(oldString, newString)
+    },
+  })
+  const summary = applied === undefined
+    ? `Applied ${replaceAll ? countOccurrences(written.previous, oldString) : 1} replacement(s) to ${relativePath}.`
+    : `Applied ${applied.replacements} replacement(s) to ${relativePath} `
+      + `after matching on ${applied.matchedOn}; the file keeps its original characters.`
+  return withStaleNotice(written.staleNotice, summary)
+}
+
+/**
+ * Characters an editor, a chat client, or a copy-paste round trip silently swaps.
+ *
+ * Every entry maps one character to exactly one replacement character, which keeps
+ * the folded text index-aligned with the original — that alignment is what lets the
+ * replacement be spliced back into the untouched original text.
+ */
+const INVISIBLE_FOLDS: ReadonlyMap<string, string> = new Map([
+  ['‘', '\''],
+  ['’', '\''],
+  ['‚', '\''],
+  ['‛', '\''],
+  ['“', '"'],
+  ['”', '"'],
+  ['„', '"'],
+  ['‟', '"'],
+  [' ', ' '],
+  [' ', ' '],
+  [' ', ' '],
+  [' ', ' '],
+  [' ', ' '],
+  [' ', ' '],
+  [' ', ' '],
+  [' ', ' '],
+  [' ', ' '],
+  [' ', ' '],
+  [' ', ' '],
+  [' ', ' '],
+  ['　', ' '],
+])
+
+interface ForgivingReplacement {
+  /** Human-readable description of which fold made the match, for the tool result. */
+  readonly matchedOn: string
+  readonly replacements: number
+  readonly text: string
+}
+
+/**
+ * Retry a failed exact edit once against typography-folded text.
+ *
+ * A model that quotes a file back from memory, or a file that was authored in a word
+ * processor, differs from disk only in curly quotes, non-breaking spaces, or line
+ * endings. Refusing those edits sends the caller into a re-read loop that produces the
+ * same bytes it already had. The fold is only used to *locate* the span; the original
+ * text outside the match is never rewritten, and the replacement is bent back to the
+ * matched span's own characters so the file does not end up with mixed typography.
+ */
+function replaceForgivingly(
+  content: string,
+  oldString: string,
+  newString: string,
+  replaceAll: boolean,
+): ForgivingReplacement {
+  const crlfContent = usesCrlfLineEndings(content)
+  const crlfNeedle = crlfContent && oldString.includes('\n') && !oldString.includes('\r\n')
+    ? oldString.replaceAll('\n', '\r\n')
+    : undefined
+  const attempts: readonly { readonly matchedOn: string; readonly needle: string }[] = crlfNeedle === undefined
+    ? [{ matchedOn: 'normalized quotes and spaces', needle: oldString }]
+    : [
+        { matchedOn: 'CRLF line endings', needle: crlfNeedle },
+        { matchedOn: 'CRLF line endings and normalized quotes and spaces', needle: crlfNeedle },
+      ]
+
+  for (const [attemptIndex, attempt] of attempts.entries()) {
+    const exact = attemptIndex === 0 && attempt.needle !== oldString
+    const indices = exact ? indicesOf(content, attempt.needle) : foldedIndicesOf(content, attempt.needle)
+    if (indices.length === 0) {
+      continue
+    }
+    if (indices.length > 1 && !replaceAll) {
+      throw new ValidationError(
+        'old_string',
+        `appears ${indices.length} times; provide more context or set replace_all=true`,
+        oldString,
+      )
+    }
+    const chosen = replaceAll ? indices : indices.slice(0, 1)
+    return {
+      matchedOn: attempt.matchedOn,
+      replacements: chosen.length,
+      text: spliceMatches(content, chosen, attempt.needle.length, newString, crlfContent),
+    }
   }
-  if (occurrences > 1 && !replaceAll) {
-    throw new ValidationError(
-      'old_string',
-      `appears ${occurrences} times; provide more context or set replace_all=true`,
-      oldString,
-    )
+  throw new ValidationError('old_string', 'was not found exactly; re-read the file before retrying', oldString)
+}
+
+/** Offsets where the folded needle occurs in the folded haystack; the fold preserves offsets. */
+function foldedIndicesOf(content: string, needle: string): number[] {
+  const foldedNeedle = foldInvisibles(needle)
+  if (foldedNeedle === needle && !containsFoldable(content)) {
+    return []
   }
-  const next = replaceAll ? content.split(oldString).join(newString) : content.replace(oldString, newString)
-  await Bun.write(target, next)
-  return `Applied ${replaceAll ? occurrences : 1} replacement(s) to ${await paths.relative(target)}.`
+  return indicesOf(foldInvisibles(content), foldedNeedle)
+}
+
+function indicesOf(haystack: string, needle: string): number[] {
+  const found: number[] = []
+  let index = haystack.indexOf(needle)
+  while (index !== -1) {
+    found.push(index)
+    index = haystack.indexOf(needle, index + needle.length)
+  }
+  return found
+}
+
+function spliceMatches(
+  content: string,
+  indices: readonly number[],
+  length: number,
+  replacement: string,
+  crlfContent: boolean,
+): string {
+  let result = ''
+  let cursor = 0
+  for (const index of indices) {
+    const span = content.slice(index, index + length)
+    result += content.slice(cursor, index) + adaptReplacement(replacement, span, crlfContent)
+    cursor = index + length
+  }
+  return result + content.slice(cursor)
+}
+
+/**
+ * Bend the replacement toward the characters the matched span actually used.
+ *
+ * Restoration is positional and only happens when the replacement uses a folded
+ * character exactly as often as the span did. That parity requirement is what makes
+ * an opening/closing pair work — “ and ” both fold to one quote, so only their order
+ * distinguishes them — and it is also what stops a longer replacement from having
+ * plain spaces silently rewritten into the non-breaking space the span happened to
+ * contain, which would plant invisible characters in source code.
+ */
+function adaptReplacement(replacement: string, span: string, crlfContent: boolean): string {
+  const lineAdjusted = crlfContent ? replacement.replaceAll('\r\n', '\n').replaceAll('\n', '\r\n') : replacement
+  const originals = foldedOriginals(span)
+  if (originals.size === 0) {
+    return lineAdjusted
+  }
+  const characters = [...lineAdjusted]
+  const counts = new Map<string, number>()
+  for (const character of characters) {
+    const folded = INVISIBLE_FOLDS.get(character) ?? character
+    if (originals.has(folded)) {
+      counts.set(folded, (counts.get(folded) ?? 0) + 1)
+    }
+  }
+  const cursors = new Map<string, number>()
+  let adapted = ''
+  for (const character of characters) {
+    const folded = INVISIBLE_FOLDS.get(character) ?? character
+    const sequence = originals.get(folded)
+    if (sequence === undefined || counts.get(folded) !== sequence.length) {
+      adapted += character
+      continue
+    }
+    const cursor = cursors.get(folded) ?? 0
+    cursors.set(folded, cursor + 1)
+    adapted += sequence[cursor] ?? character
+  }
+  return adapted
+}
+
+/** Folded character to the original characters it stood for, in the order the span used them. */
+function foldedOriginals(span: string): Map<string, string[]> {
+  const originals = new Map<string, string[]>()
+  for (const character of span) {
+    const folded = INVISIBLE_FOLDS.get(character)
+    if (folded === undefined) {
+      continue
+    }
+    const sequence = originals.get(folded)
+    if (sequence === undefined) {
+      originals.set(folded, [character])
+      continue
+    }
+    sequence.push(character)
+  }
+  return originals
+}
+
+function foldInvisibles(text: string): string {
+  let folded = ''
+  for (const character of text) {
+    folded += INVISIBLE_FOLDS.get(character) ?? character
+  }
+  return folded
+}
+
+function containsFoldable(text: string): boolean {
+  for (const character of text) {
+    if (INVISIBLE_FOLDS.has(character)) {
+      return true
+    }
+  }
+  return false
+}
+
+/** True when every newline in the file is part of a CRLF pair, so an LF-only edit would mix endings. */
+function usesCrlfLineEndings(content: string): boolean {
+  return content.includes('\r\n') && !/(^|[^\r])\n/.test(content)
 }
 
 function requiredContent(inputs: JsonObject, name: string): string {
@@ -523,6 +932,24 @@ function requiredContent(inputs: JsonObject, name: string): string {
 
 function splitLines(text: string): string[] {
   return text.match(/[^\n]*\n|[^\n]+$/g) ?? []
+}
+
+function countNewlines(text: string): number {
+  let total = 0
+  let index = text.indexOf('\n')
+  while (index !== -1) {
+    total += 1
+    index = text.indexOf('\n', index + 1)
+  }
+  return total
+}
+
+function positiveInteger(raw: string | undefined): number | undefined {
+  if (raw === undefined) {
+    return undefined
+  }
+  const parsed = Number.parseInt(raw.trim(), 10)
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined
 }
 
 function truncateCharacters(text: string, maxChars: number): string {

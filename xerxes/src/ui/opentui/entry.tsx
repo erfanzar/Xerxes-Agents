@@ -10,6 +10,7 @@ import { writeSync } from 'node:fs'
 import { INLINE_MODE, TERMUX_TUI_MODE } from '../config/env.js'
 import { $uiSessionId, getUiState } from '../app/uiStore.js'
 import { GatewayClient } from '../gatewayClient.js'
+import { setEarlyInputText, startEarlyInputCapture } from '../lib/earlyInput.js'
 import { formatExitHint } from '../lib/exitHint.js'
 import { setupGracefulExit } from '../lib/gracefulExit.js'
 import { formatBytes, type HeapDumpResult, performHeapDump } from '../lib/memory.js'
@@ -29,6 +30,26 @@ if (!process.stdin.isTTY) {
   console.log('xerxes-tui: no TTY')
   process.exit(0)
 }
+
+// Startup is slow enough to type into: the renderer's two native-backed
+// imports must resolve first, and the clear-screen below erases the terminal's
+// echo of anything typed meanwhile. Those bytes are real and buffered — they
+// were simply never read. Capture them before both, so they can seed the
+// composer instead of vanishing.
+const earlyInput = startEarlyInputCapture({
+  // Raw mode turns off ISIG, so the tty no longer raises SIGINT. Without this
+  // Ctrl-C would be swallowed and a user could not abort a slow or wedged boot.
+  onInterrupt: () => {
+    try {
+      process.stdin.setRawMode?.(false)
+    } catch {
+      // Exiting anyway; the parent watchdog restores termios regardless.
+    }
+
+    resetTerminalModes()
+    process.exit(130)
+  }
+})
 
 resetTerminalModes()
 
@@ -140,6 +161,12 @@ process.on('beforeExit', () => {
   stopMemoryMonitor()
   destroyActiveRenderer()
 })
+
+// Hand off before the renderer imports: OpenTUI installs its own stdin
+// handling, and two readers on one tty would split keystrokes between them.
+// Raw mode stays on — the renderer takes it over immediately, and toggling it
+// back here would flicker echo and the cursor for the rest of startup.
+setEarlyInputText(earlyInput.stop())
 
 // Sequential, not Promise.all — @opentui/react's module-init touches
 // @opentui/core state that must already be evaluated, and concurrent

@@ -8,8 +8,11 @@ import { normalizeInteractionMode } from "../runtime/interactionModes.js";
 import {
   DaemonTranscriptStore,
   looksLikeSessionId,
+  transcriptHasHistory,
   type DaemonTranscript,
+  type DaemonTranscriptEntry,
   type RawMessage,
+  type TranscriptMessageJournalAppend,
 } from "../session/daemonTranscript.js";
 import type { JsonRpcPayload } from "../protocol/jsonRpc.js";
 import { processAtMentions } from "./atMentions.js";
@@ -55,6 +58,17 @@ export interface DaemonSession {
   metadata: Record<string, unknown>;
   model: string;
   planMode: boolean;
+  /**
+   * Provider-request scaffolding the turn runner assembles for this session:
+   * the system prompt and tool schemas that ride every request but never
+   * appear in the transcript. Cached here — never persisted — because pricing
+   * the window from the messages alone under-reports it by the largest fixed
+   * cost in the request, which is what drives auto-compaction too late.
+   */
+  requestScaffold?: {
+    readonly systemPrompt?: string;
+    readonly toolSchemas?: readonly Readonly<Record<string, unknown>>[];
+  };
   readonly sessionKey: string;
   status: "idle" | "starting" | "waiting" | "working";
   /** Trusted dynamic system context. Never persisted in the transcript. */
@@ -187,6 +201,13 @@ export interface DaemonRuntime {
     options?: SavedSessionListOptions,
   ): Promise<readonly SavedDaemonSession[]>;
   listSessions(): readonly DaemonSession[];
+  /**
+   * Optional per-message crash journal for a session. Kept optional so test
+   * fakes and custom hosts stay source-compatible; a producer that has it can
+   * record each persisted message as it is appended instead of relying on the
+   * once-per-turn transcript write.
+   */
+  messageJournal?(sessionId: string): TranscriptMessageJournalAppend;
   openSession(
     sessionKey: string,
     agentId?: string,
@@ -235,6 +256,12 @@ export interface InMemoryDaemonRuntimeOptions {
   readonly sessionDirectory?: string;
   /** Cancel resources owned exclusively by a session before it is evicted. */
   readonly onSessionEvict?: (sessionId: string) => void;
+  /**
+   * Stop the delegated work a session started, because the user interrupted
+   * its turn. Unlike eviction this is a pause, not a reclaim: implementations
+   * must leave the cancelled handles inspectable and retryable.
+   */
+  readonly onTurnCancel?: (sessionId: string) => number | void;
   /** Host-owned subagent retry port wired to the daemon's subagent host. */
   readonly subagentRetry?: (
     request: SubagentRetryRequest,
@@ -264,6 +291,8 @@ export interface InMemoryDaemonRuntimeOptions {
  */
 export class InMemoryDaemonRuntime implements DaemonRuntime {
   private readonly abortControllers = new Map<string, AbortController>();
+  /** Children stopped by the last interrupt, reported once on the turn's settle edge. */
+  private readonly cancelledSubagents = new Map<string, number>();
   private readonly directSubagentClaims = new Map<string, () => void>();
   private readonly currentProjectDirectory: string;
   private readonly options: InMemoryDaemonRuntimeOptions;
@@ -337,6 +366,21 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
       return false;
     }
     session.cancelRequested = true;
+    // Delegated children run on their own execution boundary: aborting the
+    // parent's signal alone leaves a detached subagent burning tokens and
+    // writing files while every surface already reports the turn stopped.
+    // Cancel them first so the turn's own teardown observes honest child
+    // state, and never let a host-side failure block the parent abort.
+    try {
+      const stopped = this.options.onTurnCancel?.(session.id);
+      if (typeof stopped === "number" && stopped > 0) {
+        this.cancelledSubagents.set(sessionKey, stopped);
+      }
+    } catch (error) {
+      console.error(
+        `Cancelling delegated children of session '${session.id}' failed: ${errorMessage(error)}`,
+      );
+    }
     controller.abort(new Error("Turn cancelled"));
     return true;
   }
@@ -371,6 +415,7 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     this.options.onSessionEvict?.(sessionId);
     this.turnRunner.dropSession?.(sessionId);
     this.steerQueues.delete(sessionKey);
+    this.cancelledSubagents.delete(sessionKey);
     this.directSubagentClaims.get(sessionKey)?.();
     this.directSubagentClaims.delete(sessionKey);
     this.sessions.delete(sessionKey);
@@ -382,27 +427,108 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     );
   }
 
+  /**
+   * List persisted sessions in three tiers: `stat` to enumerate, a bounded
+   * head read to build and filter each row, and a full parse only for the
+   * rows that are actually returned and could not supply a title from their
+   * header. Reading every transcript in full to render twenty rows cost a
+   * quarter of a second and half a gigabyte of allocation on a directory this
+   * machine already has.
+   */
   async listSavedSessions(
     limit = 0,
     options: SavedSessionListOptions = {},
   ): Promise<readonly SavedDaemonSession[]> {
-    const transcripts = await this.transcriptStore.list();
     const projectDirectory = options.projectDirectory
       ? resolve(options.projectDirectory)
       : undefined;
-    const summaries = transcripts
-      .filter(
-        (transcript) =>
-          projectDirectory === undefined ||
-          transcriptProjectDirectory(transcript) === projectDirectory,
-      )
-      .map((transcript) =>
-        savedSessionSummary(
-          transcript,
-          this.transcriptStore.pathFor(transcript.sessionId),
-        ),
+    const summaries: SavedDaemonSession[] = [];
+    for (const entry of await this.transcriptStore.listEntries()) {
+      const summary = await this.savedSessionRow(entry, projectDirectory);
+      if (summary) summaries.push(summary);
+    }
+    summaries.sort(
+      (left, right) =>
+        timestampMillis(right.updatedAt) - timestampMillis(left.updatedAt),
+    );
+    return this.titleSelectedSessions(
+      selectSavedSessionSummaries(summaries, limit, options),
+    );
+  }
+
+  private async savedSessionRow(
+    entry: DaemonTranscriptEntry,
+    projectDirectory: string | undefined,
+  ): Promise<SavedDaemonSession | undefined> {
+    const result = await this.transcriptStore.readHeader(entry.sessionId);
+    if (result.kind === "header") {
+      const header = result.header;
+      if (header.messageCount <= 0 && header.turnCount <= 0) return undefined;
+      if (
+        projectDirectory !== undefined &&
+        sourceProjectDirectory(header.metadata, header.cwd) !== projectDirectory
+      ) {
+        return undefined;
+      }
+      return savedSessionSummary({ ...header, path: entry.path });
+    }
+    if (result.kind === "truncated") {
+      // Written before the summary fields were hoisted above `messages`, so
+      // the header cannot answer; this row costs a full parse until its next
+      // save rewrites it in the new order.
+      const transcript = await this.transcriptStore.loadForListing(
+        entry.sessionId,
       );
-    return selectSavedSessionSummaries(summaries, limit, options);
+      if (!transcript) return unreadableSavedSession(entry);
+      if (!transcriptHasHistory(transcript)) return undefined;
+      if (
+        projectDirectory !== undefined &&
+        transcriptProjectDirectory(transcript) !== projectDirectory
+      ) {
+        return undefined;
+      }
+      return savedSessionSummary({
+        agentId: transcript.agentId,
+        key: transcript.key,
+        messageCount: transcript.messages.length,
+        messages: transcript.messages,
+        metadata: transcript.metadata,
+        path: entry.path,
+        sessionId: transcript.sessionId,
+        turnCount: transcript.turnCount,
+        updatedAt: transcript.updatedAt,
+      });
+    }
+    return unreadableSavedSession(entry);
+  }
+
+  /**
+   * Derive titles from message text for the returned rows only. A transcript
+   * imported without a stored title is the only case that needs it, and
+   * paying for it before the limit is applied is what made listing expensive.
+   */
+  private async titleSelectedSessions(
+    selected: readonly SavedDaemonSession[],
+  ): Promise<readonly SavedDaemonSession[]> {
+    return Promise.all(
+      selected.map(async (row) => {
+        if (row.title) return row;
+        const transcript = await this.transcriptStore.loadForListing(row.id);
+        return transcript
+          ? { ...row, title: titleFromMessages(transcript.messages) }
+          : row;
+      }),
+    );
+  }
+
+  /**
+   * Journal callback for a session's message stream, handed to a producer as
+   * a plain function so no message-producing code has to know about daemon
+   * storage. A per-turn crash otherwise loses the entire turn: the transcript
+   * is written once, in the turn's `finally`.
+   */
+  messageJournal(sessionId: string): TranscriptMessageJournalAppend {
+    return this.transcriptStore.journalAppender(sessionId);
   }
 
   listSessions(): readonly DaemonSession[] {
@@ -655,6 +781,14 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
       ...(typeof this.runtimeSettings.responses_api === "boolean"
         ? { responses_api: this.runtimeSettings.responses_api }
         : {}),
+      ...(optionalFiniteNumber(this.runtimeSettings.auto_compact_threshold) !==
+        undefined
+        ? {
+          auto_compact_threshold: optionalFiniteNumber(
+            this.runtimeSettings.auto_compact_threshold,
+          ),
+        }
+        : {}),
       ...Object.fromEntries(
         ["debug", "fast_mode", "nudge", "verbose"].flatMap((key) =>
           typeof this.runtimeSettings[key] === "boolean"
@@ -693,6 +827,9 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     this.abortControllers.set(sessionKey, controller);
     session.status = "working";
     session.cancelRequested = false;
+    // A cancel that lands during the previous turn's teardown must not have
+    // its child count reported against this turn.
+    this.cancelledSubagents.delete(sessionKey);
     session.activeTurnId = newSessionId();
     session.lastActive = Date.now();
     const runnerManagesState = this.turnRunner.managesSessionState === true;
@@ -716,6 +853,12 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
         ...(displayText === providerText && !images.length ? {} : { text: displayText }),
       });
       session.turnCount += 1;
+      // The transcript is rewritten once, in this turn's `finally`. A crash
+      // before that boundary would otherwise lose the prompt outright, so the
+      // journal carries it until the next full save subsumes it.
+      const index = session.messages.length - 1;
+      const message = session.messages[index];
+      if (message) this.messageJournal(session.id)(message, index);
     }
     emit({
       type: "turn_begin",
@@ -778,6 +921,21 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
           payload: {
             level: "info",
             message: `Saved ${pendingSteers.length} steer${pendingSteers.length === 1 ? "" : "s"} for the next turn.`,
+          },
+        });
+      }
+      // Say out loud what the interrupt reached. Delegated work stops on a
+      // boundary the transcript never shows, so without this the user only
+      // sees the parent turn end and has to guess what happened to its
+      // children.
+      const stoppedChildren = this.cancelledSubagents.get(sessionKey) ?? 0;
+      this.cancelledSubagents.delete(sessionKey);
+      if (stoppedChildren > 0) {
+        emit({
+          type: "notification",
+          payload: {
+            level: "info",
+            message: `Interrupt stopped ${stoppedChildren} delegated agent${stoppedChildren === 1 ? "" : "s"}.`,
           },
         });
       }
@@ -957,9 +1115,45 @@ function sessionFromTranscript(
   };
 }
 
+/** Everything a listing row needs, from either a header or a full transcript. */
+interface SavedSessionSource {
+  readonly agentId: string;
+  readonly key: string;
+  readonly messageCount: number;
+  /** Present only when the row came from a full parse; titles can fall back to it. */
+  readonly messages?: readonly RawMessage[];
+  readonly metadata: Readonly<Record<string, unknown>>;
+  readonly path: string;
+  readonly sessionId: string;
+  readonly turnCount: number;
+  readonly updatedAt: string;
+}
+
+/**
+ * A transcript whose bytes are not a transcript at all.
+ *
+ * It is reported rather than dropped, and deliberately survives the project
+ * filter: a corrupt file we cannot attribute to any project is one the user
+ * should be able to see and delete, and an invisible one only accumulates.
+ */
+function unreadableSavedSession(entry: DaemonTranscriptEntry): SavedDaemonSession {
+  return {
+    id: entry.sessionId,
+    key: entry.sessionId,
+    kind: "main",
+    resumable: false,
+    title: `(unreadable transcript ${entry.sessionId})`,
+    agentId: "default",
+    status: "unreadable",
+    updatedAt: new Date(entry.modifiedAtMillis).toISOString(),
+    turnCount: 0,
+    messageCount: 0,
+    path: entry.path,
+  };
+}
+
 function savedSessionSummary(
-  transcript: DaemonTranscript,
-  path: string,
+  transcript: SavedSessionSource,
 ): SavedDaemonSession {
   const metadata = transcript.metadata;
   const parentSessionId = nonemptyMetadataString(
@@ -983,9 +1177,11 @@ function savedSessionSummary(
     key: transcript.key,
     kind,
     resumable: !activeChild,
+    // Empty when only the header was read and it stored no title; the caller
+    // fills it in for the rows it actually returns.
     title:
       stringValue(metadata.title) ||
-      titleFromMessages(transcript.messages),
+      (transcript.messages ? titleFromMessages(transcript.messages) : ""),
     agentId: transcript.agentId,
     ...(model ? { model } : {}),
     ...(parentSessionId ? { parentSessionId } : {}),
@@ -996,8 +1192,8 @@ function savedSessionSummary(
     ...(subagentId ? { subagentId } : {}),
     updatedAt: transcript.updatedAt,
     turnCount: transcript.turnCount,
-    messageCount: transcript.messages.length,
-    path,
+    messageCount: transcript.messageCount,
+    path: transcript.path,
   };
 }
 
@@ -1006,8 +1202,21 @@ function transcriptIsSubagent(transcript: DaemonTranscript): boolean {
 }
 
 function transcriptProjectDirectory(transcript: DaemonTranscript): string {
-  const persisted = nonemptyMetadataString(transcript.metadata, "project_root");
-  return resolve(persisted ?? transcript.cwd);
+  return sourceProjectDirectory(transcript.metadata, transcript.cwd);
+}
+
+function sourceProjectDirectory(
+  metadata: Readonly<Record<string, unknown>>,
+  cwd: string,
+): string {
+  const persisted = nonemptyMetadataString(metadata, "project_root");
+  return resolve(persisted ?? cwd);
+}
+
+/** Malformed timestamps sort as the epoch instead of producing NaN orderings. */
+function timestampMillis(value: string): number {
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 function metadataIsSubagent(metadata: Readonly<Record<string, unknown>>): boolean {

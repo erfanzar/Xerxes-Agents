@@ -1,6 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import type { QuerySource } from '../llms/client.js'
 import { calcCost } from '../llms/providerRegistry.js'
 
 const CACHE_READ_MULTIPLIER = 0.1
@@ -9,6 +10,15 @@ const PRICING_PROBE_TOKENS = 1_000
 
 /** Bucket used by aggregate views for events without an explicit scope. */
 export const UNSCOPED_COST_SCOPE = '(unscoped)'
+
+/**
+ * The one source that is not housekeeping.
+ *
+ * Compared as a literal instead of importing the llms helper so the ledger
+ * keeps a type-only dependency on the provider layer; the constant is typed as
+ * {@link QuerySource}, so a typo or a renamed union member fails to compile.
+ */
+const MAIN_COST_SOURCE: QuerySource = 'main'
 
 export type CostCalculator = (model: string, inputTokens: number, outputTokens: number) => number
 
@@ -22,6 +32,8 @@ export interface CostEventOptions {
   readonly model: string
   readonly outputTokens: number
   readonly sessionId?: string
+  /** Why the call was made; absent on legacy events recorded before the dimension existed. */
+  readonly source?: QuerySource
   readonly timestamp?: string
 }
 
@@ -35,6 +47,7 @@ export interface CostEventRecord {
   readonly model: string
   readonly out_tokens: number
   readonly session_id: string | null
+  readonly source: string | null
   readonly timestamp: string
 }
 
@@ -52,12 +65,14 @@ export interface RecordTurnOptions {
   readonly cacheCreationTokens?: number
   readonly cacheReadTokens?: number
   readonly sessionId?: string
+  readonly source?: QuerySource
   readonly timestamp?: string
 }
 
 export interface RecordRawOptions {
   readonly agentId?: string
   readonly sessionId?: string
+  readonly source?: QuerySource
   readonly timestamp?: string
 }
 
@@ -70,6 +85,32 @@ export interface CostTrackerOptions {
   readonly now?: () => Date
   /** Default identity applied to events that omit a session ID. */
   readonly sessionId?: string
+  /** Default source applied to events that omit one, e.g. a compaction-owned tracker. */
+  readonly source?: QuerySource
+}
+
+/** Filters narrowing a source breakdown to one session and/or agent. */
+export interface CostSourceBreakdownOptions {
+  readonly agentId?: string
+  readonly sessionId?: string
+}
+
+/**
+ * Answer to "how much of this spend was housekeeping".
+ *
+ * `untagged` is kept separate from both halves rather than folded into
+ * housekeeping: events recorded before a call site was taught to pass a source
+ * are unknown, not proven housekeeping, and merging them would overstate the
+ * saving an auxiliary route appears to deliver.
+ */
+export interface CostSourceBreakdown {
+  readonly bySource: Readonly<Record<string, CostAggregate>>
+  readonly housekeeping: CostAggregate
+  /** Housekeeping share of priced spend in [0, 1]; zero when nothing cost anything. */
+  readonly housekeepingCostShare: number
+  readonly main: CostAggregate
+  readonly total: CostAggregate
+  readonly untagged: CostAggregate
 }
 
 export interface CostAggregate {
@@ -100,6 +141,7 @@ export class CostEvent {
   readonly model: string
   readonly outputTokens: number
   readonly sessionId: string | undefined
+  readonly source: QuerySource | undefined
   readonly timestamp: string
 
   constructor(options: CostEventOptions) {
@@ -113,6 +155,7 @@ export class CostEvent {
     this.cacheCreationTokens = tokenCount(options.cacheCreationTokens ?? 0, 'cacheCreationTokens')
     this.sessionId = scopeValue(options.sessionId, 'sessionId')
     this.agentId = scopeValue(options.agentId, 'agentId')
+    this.source = sourceValue(options.source)
     Object.freeze(this)
   }
 
@@ -129,6 +172,7 @@ export class CostEvent {
       cache_creation_tokens: this.cacheCreationTokens,
       session_id: this.sessionId ?? null,
       agent_id: this.agentId ?? null,
+      source: this.source ?? null,
     }
   }
 
@@ -156,6 +200,7 @@ export class CostTracker {
   private readonly clock: () => Date
   private readonly defaultAgentId: string | undefined
   private readonly defaultSessionId: string | undefined
+  private readonly defaultSource: QuerySource | undefined
   private readonly ledger: CostEvent[] = []
 
   constructor(options: CostTrackerOptions = {}) {
@@ -163,6 +208,7 @@ export class CostTracker {
     this.clock = options.now ?? (() => new Date())
     this.defaultSessionId = scopeValue(options.sessionId, 'sessionId')
     this.defaultAgentId = scopeValue(options.agentId, 'agentId')
+    this.defaultSource = sourceValue(options.source)
   }
 
   /** Snapshot event list; callers cannot mutate the underlying ledger array. */
@@ -282,6 +328,45 @@ export class CostTracker {
     return groupBy(this.ledger, event => event.agentId ?? UNSCOPED_COST_SCOPE)
   }
 
+  /** Aggregate events by call source; events recorded without one use the unscoped bucket. */
+  bySource(): Readonly<Record<string, CostAggregate>> {
+    return groupBy(this.ledger, event => event.source ?? UNSCOPED_COST_SCOPE)
+  }
+
+  /** Aggregate exactly one call source, returning zeroes when it has no events. */
+  forSource(source: QuerySource): CostAggregate {
+    return aggregate(this.ledger.filter(event => event.source === source))
+  }
+
+  /**
+   * Split spend into main-loop, housekeeping, and untagged buckets.
+   *
+   * This is the accessor that makes an auxiliary route observable: without it
+   * there is no way to tell whether compaction, titling, and memory extraction
+   * moved off the main model or are still billing at main-model rates.
+   * Housekeeping is defined as "tagged with any source other than main", so a
+   * newly added source counts immediately instead of silently landing in the
+   * main bucket until this file is updated.
+   */
+  sourceBreakdown(options: CostSourceBreakdownOptions = {}): CostSourceBreakdown {
+    const sessionId = scopeValue(options.sessionId, 'sessionId')
+    const agentId = scopeValue(options.agentId, 'agentId')
+    const scoped = this.ledger.filter(event =>
+      (sessionId === undefined || event.sessionId === sessionId)
+      && (agentId === undefined || event.agentId === agentId))
+    const total = aggregate(scoped)
+    const housekeeping = aggregate(scoped.filter(event =>
+      event.source !== undefined && event.source !== MAIN_COST_SOURCE))
+    return Object.freeze({
+      total,
+      main: aggregate(scoped.filter(event => event.source === MAIN_COST_SOURCE)),
+      housekeeping,
+      untagged: aggregate(scoped.filter(event => event.source === undefined)),
+      bySource: groupBy(scoped, event => event.source ?? UNSCOPED_COST_SCOPE),
+      housekeepingCostShare: total.costUsd > 0 ? housekeeping.costUsd / total.costUsd : 0,
+    })
+  }
+
   /** Aggregate exactly one scoped session, returning zeroes when it has no events. */
   forSession(sessionId: string): CostAggregate {
     const expected = scopeValue(sessionId, 'sessionId')
@@ -320,6 +405,18 @@ export class CostTracker {
           + ' (' + stats.turns + ' turns, ' + formatInteger(stats.tokens) + ' tokens)')
       }
     }
+    // Only ledgers that actually carry sources gain the section, so summaries
+    // from callers that have not adopted the dimension stay byte-identical.
+    const breakdown = this.sourceBreakdown()
+    if (breakdown.housekeeping.turns || breakdown.main.turns) {
+      lines.push('', '## By Source')
+      for (const [source, stats] of Object.entries(breakdown.bySource)
+        .sort(([left], [right]) => left.localeCompare(right))) {
+        lines.push('- **' + source + '**: $' + stats.costUsd.toFixed(4)
+          + ' (' + stats.turns + ' turns, ' + formatInteger(stats.tokens) + ' tokens)')
+      }
+      lines.push('Housekeeping share: ' + (breakdown.housekeepingCostShare * 100).toFixed(1) + '%')
+    }
     return lines.join('\n')
   }
 
@@ -349,12 +446,15 @@ export class CostTracker {
   private scopeOptions(options: RecordTurnOptions | RecordRawOptions): {
     readonly agentId?: string
     readonly sessionId?: string
+    readonly source?: QuerySource
   } {
     const sessionId = scopeValue(options.sessionId, 'sessionId') ?? this.defaultSessionId
     const agentId = scopeValue(options.agentId, 'agentId') ?? this.defaultAgentId
+    const source = sourceValue(options.source) ?? this.defaultSource
     return {
       ...(sessionId !== undefined ? { sessionId } : {}),
       ...(agentId !== undefined ? { agentId } : {}),
+      ...(source !== undefined ? { source } : {}),
     }
   }
 }
@@ -439,6 +539,19 @@ function tokenCount(value: unknown, name: string): number {
 
 function stringValue(value: unknown, name: string): string {
   if (typeof value !== 'string') throw new TypeError(name + ' must be a string')
+  return value
+}
+
+/**
+ * Accept a source or its absence.
+ *
+ * The union is enforced by the compiler at every typed call site, so this only
+ * has to reject the shapes a plain `string` cast could smuggle in — an empty
+ * bucket key would silently merge tagged spend into a nameless group.
+ */
+function sourceValue(value: QuerySource | undefined): QuerySource | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'string' || !value.trim()) throw new TypeError('source must be a non-empty string')
   return value
 }
 

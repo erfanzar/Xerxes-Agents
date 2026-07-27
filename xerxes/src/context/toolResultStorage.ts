@@ -139,7 +139,13 @@ export class ToolResultStorage {
     return body.split(':', 1)[0]
   }
 
-  private pathFor(referenceId: string): string {
+  /**
+   * On-disk location of a stored result. Public because the provider-facing
+   * stand-in names the path: a preview the model cannot follow up on is a
+   * dead end, and an absolute path is something it can already act on with
+   * the shell tool it has.
+   */
+  pathFor(referenceId: string): string {
     if (!referenceId || referenceId.includes('/') || referenceId.includes('\\')) {
       throw new TypeError('tool-result reference ID must not contain a path separator')
     }
