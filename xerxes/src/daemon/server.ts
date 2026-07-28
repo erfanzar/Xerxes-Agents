@@ -110,6 +110,7 @@ import { processAtMentions } from "./atMentions.js";
 import {
   compactMessagesIfNeeded,
   compactionCompletionPort,
+  lazyCompactionCompletionPort,
   compactionThresholdTokens,
   DEFAULT_AUTO_COMPACT_THRESHOLD,
   normalizeCompactionThreshold,
@@ -3429,14 +3430,18 @@ export class DaemonServer {
       if (notify) this.emitSlash(notify, error, "warning");
       return { ok: false, error };
     }
-    let client: LlmClient | undefined;
+    // Deferred on purpose: compaction often answers "nothing to compact" without
+    // consulting a provider at all, and building the client eagerly made that
+    // no-op require a constructible one. See lazyCompactionCompletionPort.
+    const completion = lazyCompactionCompletionPort(
+      () => createCompactionClient(model, this.profileStore?.active(), this.runtime.status()),
+      model,
+    );
     try {
-      const profile = this.profileStore?.active();
-      client = createCompactionClient(model, profile, this.runtime.status());
       const archivePath = await this.precompactArchivePath(session.id);
       const outcome = await compactMessagesIfNeeded({
         ...(archivePath === undefined ? {} : { archivePath }),
-        completion: compactionCompletionPort(client, model),
+        completion: completion.port,
         messages: session.messages,
         model,
         reason,
@@ -3501,7 +3506,7 @@ export class DaemonServer {
       }
       return { ok: false, error: errorMessage(error) };
     } finally {
-      if (client !== undefined) await closeLlmClient(client);
+      await completion.close();
     }
   }
 

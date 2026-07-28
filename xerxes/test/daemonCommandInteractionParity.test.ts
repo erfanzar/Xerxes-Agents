@@ -198,9 +198,20 @@ test('slash compact rewrites and persists the active native session without subm
   const directory = await mkdtemp(join(tmpdir(), 'xerxes-daemon-compact-parity-'))
   const sessionDirectory = join(directory, 'sessions')
   const socketPath = join(directory, 'daemon.sock')
+  // The provider is pinned rather than inherited. The stubbed fetch below returns
+  // an OpenAI-shaped completion, so the compaction client has to be the OpenAI
+  // transport for this test to mean anything — and with no explicit provider the
+  // daemon falls back to the built-in `claude-code` profile, which has no client
+  // adapter at all. That made the test pass only on a machine whose ambient
+  // ~/.xerxes profile happened to be OpenAI-compatible, and fail on a clean one.
   const runtime = new InMemoryDaemonRuntime(new UnexpectedTurnRunner(), {
     currentProjectDirectory: directory,
     model: 'compact-model',
+    runtimeSettings: {
+      base_url: 'https://api.openai.com/v1',
+      model: 'compact-model',
+      provider: 'openai',
+    },
     sessionDirectory,
   })
   const server = new DaemonServer({ socketPath, runtime })
