@@ -24,8 +24,10 @@ test('Bun CLI exposes a no-mutation update dry-run surface', async () => {
 
   expect(exitCode).toBe(0)
   expect(stderr).toBe('')
-  expect(stdout).toContain('Git: ')
-  expect(stdout).toContain('Package registry: not checked')
+  // The report now presents settled facts as an aligned label/value block, so
+  // the assertion targets the pairing rather than the old `Label: ` prefix.
+  expect(stdout).toMatch(/\n  Git {2,}\S/)
+  expect(stdout).toMatch(/\n  Registry {2,}not checked/)
   expect(stdout).toContain(`Would run: ${process.execPath} add --global file:./release-preview`)
 })
 
@@ -48,7 +50,9 @@ test('Bun CLI renders update option errors as one clean line without a stack dum
     expect(stdout).toBe('')
     const lines = stderr.trim().split('\n')
     expect(lines).toHaveLength(2)
-    expect(lines[0]).toStartWith('error: ')
+    // A status glyph precedes the conventional `error:` label, which is retained
+  // so the line stays greppable.
+  expect(lines[0]).toContain('error: ')
     expect(lines[1]).toBe("run 'xerxes update --help' for usage.")
     expect(stderr).not.toContain('at ')
     expect(stderr).not.toContain('cli.js')

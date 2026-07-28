@@ -17,8 +17,25 @@ import {
 import {
   compactMessagesIfNeeded,
   compactionThresholdTokens,
+  lazyCompactionCompletionPort,
   precompactArchivePathFor,
 } from '../src/daemon/compactionRunner.js'
+import type { LlmClient } from '../src/llms/client.js'
+
+/**
+ * Minimal client for the deferred-port tests: `completeLlm` prefers `complete`
+ * when present, and `closeLlmClient` calls `close` when present, so those two are
+ * the whole contract exercised here.
+ */
+function stubCompletionClient(content: string, onClose?: () => void): LlmClient {
+  return {
+    complete: async () => ({ content, toolCalls: [] }),
+    stream: () => {
+      throw new Error('the deferred port must use complete(), not stream()')
+    },
+    ...(onClose ? { close: async () => onClose() } : {}),
+  } as unknown as LlmClient
+}
 
 const COMPRESSOR_OPTIONS = {
   contextWindow: 100,
@@ -194,4 +211,62 @@ test('an unwritable archive path degrades to a stamped warning instead of blocki
     expect(outcome.stamp.archive_path).toBeUndefined()
     expect(outcome.stamp.archive_error).toBeTruthy()
   })
+})
+
+test('a deferred compaction port does not build a client until a summary is actually requested', async () => {
+  // The reason this matters: compaction answers "nothing to compact" without
+  // consulting a provider for a short transcript, so building the client up front
+  // made that no-op require a usable provider. On a fresh install the active
+  // profile is the built-in `claude-code` entry, which has no client adapter, so
+  // `/compact` and `session.compress` failed outright instead of reporting a
+  // clean no-op.
+  let constructed = 0
+  const port = lazyCompactionCompletionPort(() => {
+    constructed += 1
+    return stubCompletionClient('summary text')
+  }, 'test-model')
+
+  expect(constructed).toBe(0)
+  await port.close()
+  // Closing a port that was never used must not construct one just to release it.
+  expect(constructed).toBe(0)
+})
+
+test('a deferred compaction port builds its client once and releases only what it built', async () => {
+  let constructed = 0
+  let closed = 0
+  const port = lazyCompactionCompletionPort(() => {
+    constructed += 1
+    return stubCompletionClient('summary text', () => {
+      closed += 1
+    })
+  }, 'test-model')
+
+  expect(await port.port({ prompt: 'first', maxTokens: 32, stream: false, temperature: 0 })).toBe('summary text')
+  expect(await port.port({ prompt: 'second', maxTokens: 32, stream: false, temperature: 0 })).toBe('summary text')
+  // One client for the whole compaction, not one per summary budget attempt.
+  expect(constructed).toBe(1)
+
+  await port.close()
+  expect(closed).toBe(1)
+})
+
+test('a deferred compaction port reports an unconstructable provider without retrying construction', async () => {
+  // The retry loop walks three shrinking summary budgets. A provider that cannot
+  // be constructed is not a transient condition, so it must be attempted once and
+  // re-thrown thereafter rather than reconstructed on every budget.
+  let attempts = 0
+  const port = lazyCompactionCompletionPort(() => {
+    attempts += 1
+    throw new Error('claude-code requires its dedicated adapter.')
+  }, 'test-model')
+
+  for (const attempt of [1, 2, 3]) {
+    void attempt
+    await expect(port.port({ prompt: 'x', maxTokens: 32, stream: false, temperature: 0 }))
+      .rejects.toThrow('claude-code requires its dedicated adapter.')
+  }
+  expect(attempts).toBe(1)
+  // Nothing was built, so there is nothing to release.
+  await port.close()
 })

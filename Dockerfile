@@ -20,9 +20,12 @@ ARG XERXES_UID=1000
 # Reuse the unprivileged account supplied by the official Bun image. Matching
 # its UID to the Linux checkout owner keeps a bind-mounted /workspace writable
 # without running the daemon as root.
+# `--home` is usermod's spelling; `--home-dir` is useradd's and usermod rejects
+# it outright ("unrecognized option"), so this layer could never build. It went
+# unnoticed because CI failed at typecheck before reaching the image build.
 RUN groupmod --new-name xerxes bun \
     && usermod --login xerxes --uid "$XERXES_UID" --gid xerxes \
-      --home-dir /home/xerxes --move-home bun
+      --home /home/xerxes --move-home bun
 
 WORKDIR /app
 ENV HOME=/home/xerxes \

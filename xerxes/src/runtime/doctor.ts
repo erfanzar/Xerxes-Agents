@@ -4,6 +4,7 @@
 import { existsSync } from 'node:fs'
 
 import { xerxesHome } from '../core/paths.js'
+import { CliWriter, createCliStyle, type CliWriterOptions } from './cliStyle.js'
 import { PROVIDERS } from '../llms/providerRegistry.js'
 import { formatConfigProvenance, getConfigProvenance } from '../core/config.js'
 
@@ -78,18 +79,49 @@ export function checkXerxesHome(options: DoctorOptions = {}): Diagnosis {
   )
 }
 
-/** Identify hosts where the Unix-socket daemon needs an alternate transport. */
+/**
+ * Report the host platform and the control transport it will use.
+ *
+ * Windows is a supported host: the per-project control channel is a named pipe
+ * there rather than a Unix socket, which `node:net` reaches through the same
+ * API. This check used to warn that native Windows was unusable; it now names
+ * the transport so a user debugging a connection knows what to look for.
+ */
 export function checkPlatform(options: DoctorOptions = {}): Diagnosis {
   const platform = options.platform ?? process.platform
   if (platform === 'win32') {
+    return diagnosis('platform', 'ok', 'win32 host; daemon control channel uses a named pipe')
+  }
+  return diagnosis('platform', 'ok', platform + ' host; daemon control channel uses a Unix socket')
+}
+
+/** Windows console programs Xerxes shells out to for clipboard and process identity. */
+const WINDOWS_REQUIRED_BINARIES = ['powershell.exe', 'cmd.exe'] as const
+
+/**
+ * Verify the Windows console tools Xerxes depends on are reachable.
+ *
+ * `powershell.exe` is not optional decoration: it is how the runtime reads a
+ * process command line (there is no `ps`) and how the TUI reaches the clipboard.
+ * A stripped or PATH-broken host fails those quietly, so name it up front.
+ */
+export function checkWindowsTooling(options: DoctorOptions = {}): Diagnosis {
+  const platform = options.platform ?? process.platform
+  if (platform !== 'win32') {
+    return diagnosis('windows-tooling', 'ok', 'Windows console tooling is not applicable on ' + platform)
+  }
+  const find = options.findExecutable ?? Bun.which
+  const missing = WINDOWS_REQUIRED_BINARIES.filter(name => !find(name))
+  if (missing.length) {
     return diagnosis(
-      'platform',
+      'windows-tooling',
       'warn',
-      'Native Windows lacks the Unix-socket daemon transport used by default',
-      'Use WSL2 or configure the WebSocket control transport.',
+      'Windows console tools are not on PATH: ' + missing.join(', '),
+      'Clipboard access and daemon process-identity checks need them; add %SystemRoot%\\system32 '
+        + 'and its WindowsPowerShell\\v1.0 subdirectory to PATH.',
     )
   }
-  return diagnosis('platform', 'ok', platform + ' host')
+  return diagnosis('windows-tooling', 'ok', 'Windows console tooling available')
 }
 
 const MACOS_COMPUTER_USE_BINARIES = ['/usr/sbin/screencapture', '/usr/bin/sips', '/usr/bin/osascript'] as const
@@ -149,6 +181,7 @@ export const DEFAULT_DOCTOR_CHECKS: readonly DoctorCheck[] = Object.freeze([
   checkProviderKeys,
   checkXerxesHome,
   checkComputerUse,
+  checkWindowsTooling,
   checkConfigProvenance,
 ])
 
@@ -174,17 +207,63 @@ export function hasDoctorFailures(report: readonly Diagnosis[]): boolean {
   return report.some(diagnosis => diagnosis.severity === 'fail')
 }
 
-/** Render diagnostic results for a human terminal without exposing credentials. */
-export function formatDoctorReport(report: readonly Diagnosis[]): string {
-  const icons: Readonly<Record<DiagnosisSeverity, string>> = {
-    ok: '✓',
-    warn: '!',
-    fail: '✗',
+/**
+ * Render diagnostic results for a human terminal without exposing credentials.
+ *
+ * Kept as a pure string builder so callers can capture or compose the report.
+ * Colour arrives through the injected writer; with styling off the output is
+ * byte-identical to what this function produced before the CLI gained a
+ * presentation layer, which is what keeps it safe to pipe.
+ */
+export function formatDoctorReport(
+  report: readonly Diagnosis[],
+  writerOptions: CliWriterOptions = { style: createCliStyle('none') },
+): string {
+  const lines: string[] = []
+  const writer = new CliWriter({ ...writerOptions, write: line => lines.push(line) })
+  for (const item of report) {
+    writer.status(
+      item.severity,
+      item.name,
+      item.message,
+      item.fixHint && item.severity !== 'ok' ? item.fixHint : '',
+    )
   }
-  return report.map(item => {
-    const hint = item.fixHint && item.severity !== 'ok' ? '\n    → ' + item.fixHint : ''
-    return icons[item.severity] + ' ' + item.name + ': ' + item.message + hint
-  }).join('\n')
+  return lines.join('\n')
+}
+
+/**
+ * Print a full `xerxes doctor` run: a heading, the checks, then a verdict.
+ *
+ * The verdict line exists because a wall of nine ticks makes the one warning in
+ * the middle easy to miss; the summary states the count so the reader does not
+ * have to audit the list themselves.
+ */
+export function printDoctorReport(
+  report: readonly Diagnosis[],
+  writerOptions: CliWriterOptions = {},
+): void {
+  const writer = new CliWriter(writerOptions)
+  writer.heading('Xerxes doctor')
+  writer.line()
+  for (const item of report) {
+    writer.status(
+      item.severity,
+      item.name,
+      item.message,
+      item.fixHint && item.severity !== 'ok' ? item.fixHint : '',
+    )
+  }
+  const failures = report.filter(item => item.severity === 'fail').length
+  const warnings = report.filter(item => item.severity === 'warn').length
+  writer.line()
+  if (failures > 0) {
+    writer.status('fail', '', `${failures} check(s) failed, ${warnings} warning(s)`)
+  } else if (warnings > 0) {
+    writer.status('warn', '', `${warnings} warning(s); nothing is broken`)
+  } else {
+    writer.status('ok', '', `all ${report.length} checks passed`)
+  }
 }
 
 function diagnosis(

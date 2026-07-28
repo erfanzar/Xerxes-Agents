@@ -53,9 +53,39 @@ bun run xerxes daemon --project-dir /path/to/workspace
 bun run xerxes acp --project-dir /path/to/workspace
 ```
 
-The local daemon uses the v35 Unix-socket path on supported hosts. On native Windows, use WSL2 or
-configure the WebSocket control transport. Start with `bun run xerxes doctor` to verify the host
-and provider setup.
+The local daemon speaks the v35 control protocol over a per-project channel: a Unix socket on macOS
+and Linux, and a named pipe (`\\.\pipe\xerxes-<digest>`) on native Windows. `node:net` reaches both
+through the same API, so nothing else about the transport differs. Start with
+`bun run xerxes doctor` to verify the host and provider setup — the `platform` check names the
+transport in use, and on Windows a `windows-tooling` check confirms `powershell.exe` and `cmd.exe`
+are reachable (they back process-identity and clipboard access, where POSIX uses `ps`).
+
+## Windows hosts
+
+Native Windows is supported; WSL2 is no longer required. Install with the PowerShell script rather
+than the shell one:
+
+```powershell
+# From a checkout
+./scripts/install.ps1
+```
+
+It installs the locked Bun workspace, writes `xerxes.cmd` / `xerxes-acp.cmd` launchers into
+`%LOCALAPPDATA%\Xerxes\bin` (a `.cmd` extension is required — Windows resolves PATH entries through
+`PATHEXT`), and adds that directory to the user `PATH`. Override the locations with
+`XERXES_BIN_DIRECTORY`, `XERXES_SOURCE_DIRECTORY`, and `XERXES_INSTALL_DIRECTORY` as on POSIX.
+
+Windows-specific behaviour worth knowing:
+
+- **Shell tools.** A PTY session launches `%COMSPEC%` (`cmd.exe`) instead of `$SHELL`, and interrupts
+  are delivered as a Ctrl+C keystroke rather than SIGINT, which Windows cannot send to another
+  process without killing it.
+- **MCP servers.** A server launched as `npx …` resolves to a `.cmd` shim, which Windows cannot
+  execute directly; Xerxes wraps those in `cmd.exe /d /s /c` automatically. An argument containing
+  `%` is rejected rather than passed through, because `cmd` expands `%VAR%` even inside quotes.
+- **Test suite.** `bun test` currently expects POSIX-absolute fixture paths in roughly 53 files, so
+  the full suite does not yet pass on a Windows host. `bun test ./test/windowsSupport.test.ts` does,
+  and CI runs it on `windows-latest` alongside a typecheck and a full build.
 
 ## Container daemon
 

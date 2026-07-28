@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { ValidationError } from '../core/errors.js'
+import { defaultControlChannelPath } from '../core/hostPlatform.js'
 import { xerxesHome } from './paths.js'
 
 /** A caller-supplied snapshot or resolver-backed view of environment values. */
@@ -61,7 +62,9 @@ export function loadDaemonConfig(options: DaemonConfigLoadOptions): DaemonConfig
     control: {
       websocket_host: '127.0.0.1',
       websocket_port: 11996,
-      unix_socket: join(inputs.home, 'daemon', 'xerxes.sock'),
+      // Named `unix_socket` for compatibility with the config surface the Python
+      // daemon published; on Windows it resolves to a named pipe instead.
+      unix_socket: defaultControlChannelPath(join(inputs.home, 'daemon')),
       pid_file: join(inputs.home, 'daemon', 'daemon.pid'),
       log_dir: join(inputs.home, 'daemon', 'logs'),
     },

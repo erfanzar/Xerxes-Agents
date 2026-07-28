@@ -141,6 +141,40 @@ const flushFrames = async (setup: Awaited<ReturnType<typeof testRender>>, passes
   }
 }
 
+/**
+ * Settle frames until the transcript tail is on screen, then return that frame.
+ *
+ * A fixed frame budget is a wall-clock bet on the host being fast enough. These
+ * cases grow the transcript by thousands of wrapped lines and then wait for the
+ * virtualized history to re-measure, scroll, and repaint; twelve or thirty passes
+ * of 10ms cleared that comfortably on a developer machine and did not on a
+ * two-core CI runner, where the frame was still captured mid-layout. The
+ * assertion then reported a missing marker, which reads like a rendering bug
+ * rather than a test that stopped watching too early.
+ *
+ * Polling for the expected content instead is adaptive in both directions: it
+ * returns on the first frame that has it, so a fast host pays nothing, and it
+ * keeps waiting on a slow one. It cannot mask a real failure — content that never
+ * renders exhausts the budget and the caller's assertion still fails on the last
+ * frame observed.
+ */
+const flushUntilFrameContains = async (
+  setup: Awaited<ReturnType<typeof testRender>>,
+  marker: string,
+  passes = 120
+): Promise<string> => {
+  let frame = setup.captureCharFrame()
+  for (let i = 0; i < passes && !frame.includes(marker); i++) {
+    await act(async () => {
+      await Bun.sleep(10)
+      await setup.flush()
+    })
+    frame = setup.captureCharFrame()
+  }
+
+  return frame
+}
+
 describe('transcript after a long multi-paragraph user prompt', () => {
   it('keeps the full assistant response visible after live streaming completes', async () => {
     let advance = (_turn: Turn | ((current: Turn) => Turn)) => {}
@@ -182,8 +216,7 @@ describe('transcript after a long multi-paragraph user prompt', () => {
           ]
         })
       )
-      await flushFrames(setup)
-      const after = setup.captureCharFrame()
+      const after = await flushUntilFrameContains(setup, 'ASSISTANT_TAIL_MARKER')
 
       expect(after).toContain('ASSISTANT_TAIL_MARKER')
       // The response must fill the viewport, not collapse to one line: its
@@ -247,8 +280,7 @@ describe('transcript after a long multi-paragraph user prompt', () => {
           msgs: [...priorTurn, { role: 'user', text: longUserText }, thinkingTrail, { role: 'assistant', text: longAssistantText }]
         })
       )
-      await flushFrames(setup)
-      const after = setup.captureCharFrame()
+      const after = await flushUntilFrameContains(setup, 'ASSISTANT_TAIL_MARKER')
 
       expect(after).toContain('ASSISTANT_TAIL_MARKER')
       expect(after).toContain('implementation detail')
@@ -297,8 +329,7 @@ describe('transcript after a long multi-paragraph user prompt', () => {
           ]
         })
       )
-      await flushFrames(setup, 30)
-      const after = setup.captureCharFrame()
+      const after = await flushUntilFrameContains(setup, 'HUGE_TAIL_MARKER')
 
       expect(after).toContain('HUGE_TAIL_MARKER')
       expect(after).toContain('Closing summary')
@@ -348,8 +379,7 @@ describe('transcript after a long multi-paragraph user prompt', () => {
           ]
         })
       )
-      await flushFrames(setup)
-      const after = setup.captureCharFrame()
+      const after = await flushUntilFrameContains(setup, 'ASSISTANT_TAIL_MARKER')
 
       expect(after).toContain('ASSISTANT_TAIL_MARKER')
     } finally {
@@ -405,8 +435,7 @@ describe('transcript after a long multi-paragraph user prompt', () => {
           ]
         })
       )
-      await flushFrames(setup)
-      const after = setup.captureCharFrame()
+      const after = await flushUntilFrameContains(setup, 'ASSISTANT_TAIL_MARKER')
 
       expect(after).toContain('ASSISTANT_TAIL_MARKER')
       expect(after).toContain('implementation detail')
