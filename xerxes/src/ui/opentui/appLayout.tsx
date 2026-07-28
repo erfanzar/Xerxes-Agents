@@ -30,6 +30,7 @@ import {
   derafshKaviani
 } from '../banner.js'
 import { agentSidebarWidth, shouldMountAgentSidebar, shouldShowAgentSidebar } from '../domain/agentPanelLayout.js'
+import { busyInputLabels } from '../domain/busyInputLabels.js'
 import { sectionMode } from '../domain/details.js'
 import { completionToApplyOnSubmit } from '../domain/slash.js'
 import { shouldShowStartupWelcome, startupComposerWidth } from '../domain/startupLayout.js'
@@ -1092,6 +1093,10 @@ export function Composer({ composer }: Pick<AppLayoutProps, 'composer'>) {
     })
   })
 
+  // Say what Enter will actually do. The mode is configurable and defaults to
+  // steer, so a hardcoded "queue" label misreported the common case.
+  const busyLabels = busyInputLabels(ui.busyInputMode, composer.queuedDisplay.length)
+
   return (
     <Box backgroundColor={t.color.completionBg} flexDirection="column" flexShrink={0} width="100%">
       <QueuePanel composer={composer} />
@@ -1121,7 +1126,7 @@ export function Composer({ composer }: Pick<AppLayoutProps, 'composer'>) {
             onSubmit={onSubmit}
             placeholder={
               ui.busy
-                ? 'Queue a follow-up… (esc to interrupt)'
+                ? busyLabels.placeholder
                 : composer.empty
                   ? 'What are we building?'
                   : 'Message Xerxes…'
@@ -1156,8 +1161,8 @@ export function Composer({ composer }: Pick<AppLayoutProps, 'composer'>) {
         <Box alignItems="center" flexDirection="row" flexShrink={0} gap={1} height={1}>
           {ui.busy ? (
             <Text color={t.color.text}>
-              Enter <Span color={t.color.muted}>queue</Span> · Esc{' '}
-              <Span color={t.color.muted}>{composer.queuedDisplay.length ? 'clear queue' : 'interrupt'}</Span>
+              Enter <Span color={t.color.muted}>{busyLabels.enter}</Span> · Esc{' '}
+              <Span color={t.color.muted}>{busyLabels.escape}</Span>
             </Text>
           ) : composer.completions.length ? (
             <Text color={t.color.text}>

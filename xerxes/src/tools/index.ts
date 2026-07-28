@@ -19,6 +19,7 @@ import { registerMathTools } from './mathTools.js'
 import { registerMediaTools, type MediaToolPorts } from './mediaTools.js'
 import { registerMemoryTools, type MemoryToolsOptions } from './memoryTools.js'
 import { WorkspacePathResolver } from './pathSafety.js'
+import type { BackgroundCommandManager } from './backgroundCommands.js'
 import { registerProcessTools } from './processTools.js'
 import { registerRlTools, type RLToolsOptions } from './rlTools.js'
 import { registerSendMessageTool, type SendMessageToolOptions } from './sendMessage.js'
@@ -90,6 +91,15 @@ export interface CoreToolsOptions {
   readonly includeCodingTools?: boolean
   readonly includeMathTools?: boolean
   readonly includeProcessTools?: boolean
+  /**
+   * Owner of background commands, so a host can terminate them at session end.
+   *
+   * Passing one in is how the daemon keeps a `run_in_background` process from
+   * outliving the session that started it — after which nothing is left to read
+   * its output or notice that it failed. Omitted, each registration owns a
+   * private manager and the caller accepts that responsibility.
+   */
+  readonly backgroundCommands?: BackgroundCommandManager
   readonly includeSystemTools?: boolean
   /** Safe public HTTP tools; enabled by default and independently permission-gated. */
   readonly includeWebTools?: boolean
@@ -143,7 +153,11 @@ export function registerCoreTools(registry: ToolRegistry, options: CoreToolsOpti
     registerMathTools(registry)
   }
   if (options.includeProcessTools ?? true) {
-    registerProcessTools(registry, paths)
+    registerProcessTools(
+      registry,
+      paths,
+      ...(options.backgroundCommands ? [options.backgroundCommands] as const : [] as const),
+    )
   }
   if (options.includeSystemTools ?? true) {
     registerSystemTools(registry)
