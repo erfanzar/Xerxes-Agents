@@ -126,7 +126,10 @@ jobs:
       # rather than product defects, and porting them is tracked separately.
       # Widening this step before that work lands would only produce a red job
       # that says nothing about Windows support.
+      # `bun test` resolves its filter relative to the working directory, and the
+      # suite lives in the xerxes workspace rather than at the repository root.
       - name: Run the Windows host suite
+        working-directory: xerxes
         run: bun test ./test/windowsSupport.test.ts
 
       - name: Build the runtime and TUI on a Windows host
