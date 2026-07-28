@@ -12,7 +12,7 @@ import {
 import { DEFAULT_COMPACTION_SUMMARY_MAX_TOKENS } from "../context/compactionProvisioner.js";
 import type { ContextMessage } from "../context/compressor.js";
 import { estimateContextTokens } from "../context/windowUsage.js";
-import { completeLlm, type LlmClient } from "../llms/client.js";
+import { closeLlmClient, completeLlm, type LlmClient } from "../llms/client.js";
 import { classifyError, ErrorKind } from "../runtime/errorClassifier.js";
 
 /** Auto-compact once the estimated context usage reaches this fraction of the prompt budget. */
@@ -81,6 +81,58 @@ export function compactionCompletionPort(
     });
     return result.content;
   };
+}
+
+/**
+ * A completion port that builds its client on first use.
+ *
+ * Compaction frequently decides it has nothing to do without ever asking a
+ * provider for a summary: the agent returns the transcript untouched for fewer
+ * than two messages, and again when the provisioner finds no compactable window.
+ * Constructing the client up front therefore made `/compact` and
+ * `session.compress` require a usable provider in order to answer "nothing to
+ * compact" — so on a fresh install, where the active profile is the built-in
+ * `claude-code` entry that has no client adapter, both failed outright instead of
+ * reporting a clean no-op.
+ *
+ * Deferring means a provider that cannot be constructed surfaces only on the path
+ * that genuinely needs one, where it is reported as a compaction failure like any
+ * other provider error. The factory runs at most once; its rejection is cached so
+ * a retry loop cannot turn one misconfiguration into repeated construction.
+ */
+export function lazyCompactionCompletionPort(
+  createClient: () => LlmClient,
+  model: string,
+): LazyCompactionPort {
+  type Resolved =
+    | { readonly error: unknown; readonly ok: false }
+    | { readonly client: LlmClient; readonly ok: true };
+  let resolved: Resolved | undefined;
+  return {
+    port: async (request) => {
+      if (resolved === undefined) {
+        try {
+          resolved = { ok: true, client: createClient() };
+        } catch (error) {
+          resolved = { ok: false, error };
+        }
+      }
+      if (!resolved.ok) throw resolved.error;
+      return compactionCompletionPort(resolved.client, model)(request);
+    },
+    // Closing has to be the port's job rather than the caller's, because the
+    // caller can no longer see whether a client was ever built. A port that was
+    // never used, or whose construction failed, has nothing to release.
+    close: async () => {
+      if (resolved?.ok === true) await closeLlmClient(resolved.client);
+    },
+  };
+}
+
+/** A deferred completion port paired with the release of whatever it built. */
+export interface LazyCompactionPort {
+  close(): Promise<void>;
+  readonly port: CompactionCompletionPort;
 }
 
 /** What a completed compaction records on the session it rewrote. */

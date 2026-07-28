@@ -20,12 +20,121 @@ REPO_URL="https://github.com/erfanzar/Xerxes-Agents.git"
 INSTALL_DIRECTORY="${XERXES_INSTALL_DIRECTORY:-$HOME/.xerxes-bun}"
 BIN_DIRECTORY="${XERXES_BIN_DIRECTORY:-$HOME/.local/bin}"
 
-info() { printf '%s\n' "==> $*"; }
-ok() { printf '%s\n' "✓ $*"; }
-die() { printf '%s\n' "x $*" >&2; exit 1; }
+# Presentation. Colour is emitted only for an interactive stdout with a capable
+# TERM, and never when NO_COLOR is set; the glyphs degrade to ASCII without a
+# UTF-8 locale. Piped and CI output therefore stays plain, which matters because
+# this script's output is read by humans watching a curl|sh and by CI logs.
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != "dumb" ]; then
+    C_RESET="$(printf '\033[0m')"
+    C_BOLD="$(printf '\033[1m')"
+    C_DIM="$(printf '\033[2m')"
+    C_BLUE="$(printf '\033[38;5;69m')"
+    C_CYAN="$(printf '\033[38;5;80m')"
+    C_GREEN="$(printf '\033[38;5;71m')"
+    C_YELLOW="$(printf '\033[38;5;179m')"
+    C_RED="$(printf '\033[38;5;167m')"
+else
+    C_RESET='' C_BOLD='' C_DIM='' C_BLUE='' C_CYAN='' C_GREEN='' C_YELLOW='' C_RED=''
+fi
+
+case "${LC_ALL:-}${LC_CTYPE:-}${LANG:-}" in
+    *UTF-8*|*utf8*|*UTF8*|*utf-8*) G_OK='✓' G_RUN='▸' G_WARN='!' G_BAD='✗' G_RULE='─' ;;
+    *) G_OK='ok' G_RUN='>' G_WARN='!' G_BAD='x' G_RULE='-' ;;
+esac
+
+STEP_INDEX=0
+TOTAL_STEPS=6
+
+banner() {
+    rule=''
+    width=64
+    i=0
+    while [ "$i" -lt "$width" ]; do
+        rule="$rule$G_RULE"
+        i=$((i + 1))
+    done
+    printf '%s\n' "${C_BOLD}${C_CYAN}Xerxes installer${C_RESET} ${C_DIM}${rule}${C_RESET}"
+}
+
+# A numbered phase heading, so a reader watching a long install knows both where
+# they are and how much is left. The old output was an undifferentiated list of
+# "==>" lines with no sense of progress.
+info() {
+    STEP_INDEX=$((STEP_INDEX + 1))
+    printf '%s\n' "${C_BLUE}${G_RUN}${C_RESET} ${C_DIM}[$STEP_INDEX/$TOTAL_STEPS]${C_RESET} ${C_BOLD}$*${C_RESET}"
+}
+ok() { printf '%s\n' "  ${C_GREEN}${G_OK}${C_RESET} $*"; }
+note() { printf '%s\n' "  ${C_DIM}$*${C_RESET}"; }
+warn() { printf '%s\n' "  ${C_YELLOW}${G_WARN}${C_RESET} $*" >&2; }
+# Detail lines belonging to a warning. They follow the warning to stderr rather
+# than stdout so a caller capturing stdout still sees a clean result and gets the
+# whole diagnostic on the stream it belongs to.
+warn_note() { printf '%s\n' "    ${C_DIM}$*${C_RESET}" >&2; }
+die() {
+    printf '%s\n' "${C_RED}${G_BAD} $*${C_RESET}" >&2
+    exit 1
+}
 
 need_command() {
     command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
+}
+
+# Bun is the runtime everything else here depends on, so the installer bootstraps
+# it rather than telling the user to go install it and come back. Auto-installing
+# a language runtime is a real side effect, so it is announced and can be
+# declined with XERXES_SKIP_BUN_INSTALL=1.
+ensure_bun() {
+    if command -v bun >/dev/null 2>&1; then
+        ok "bun $(bun --version 2>/dev/null || printf 'present')"
+        return 0
+    fi
+    if [ "${XERXES_SKIP_BUN_INSTALL:-0}" = "1" ]; then
+        die "bun is not installed and XERXES_SKIP_BUN_INSTALL=1; install Bun from https://bun.sh and re-run"
+    fi
+
+    note "bun was not found; installing it from https://bun.sh"
+    # bun.sh/install is a bash script that fetches and unpacks a release archive,
+    # so all three are prerequisites even though this installer itself is POSIX sh.
+    need_command curl
+    need_command unzip
+    need_command bash
+    # Deliberately NOT `curl … | bash`: a pipeline's status is the last command's,
+    # so a failed download would be invisible — bash would receive empty input,
+    # exit 0, and the failure would surface later as a confusing "bun is not on
+    # PATH". Fetching first makes the download's own status checkable, and `sh`
+    # cannot rely on pipefail.
+    bun_install_script="$(mktemp "${TMPDIR:-/tmp}/xerxes-bun-install.XXXXXX")" \
+        || die "cannot create a temporary file for the Bun installer"
+    bun_install_log="$(mktemp "${TMPDIR:-/tmp}/xerxes-bun-install-log.XXXXXX")" \
+        || die "cannot create a temporary file for the Bun installer log"
+    if ! curl -fsSL https://bun.sh/install -o "$bun_install_script"; then
+        rm -f "$bun_install_script" "$bun_install_log"
+        die "could not download the Bun installer from https://bun.sh/install; check network access and re-run"
+    fi
+    # Output is captured so a successful install stays quiet, and replayed
+    # verbatim on failure: "the Bun installer failed" with no detail leaves the
+    # user nothing to act on.
+    if bash "$bun_install_script" >"$bun_install_log" 2>&1; then
+        rm -f "$bun_install_script" "$bun_install_log"
+    else
+        printf '%s\n' "${C_DIM}--- Bun installer output ---${C_RESET}" >&2
+        cat "$bun_install_log" >&2
+        rm -f "$bun_install_script" "$bun_install_log"
+        die "the Bun installer failed; install Bun manually from https://bun.sh and re-run"
+    fi
+
+    # The Bun installer edits shell rc files, which cannot affect this already
+    # running shell, so the new binary is put on PATH explicitly for the rest of
+    # the run.
+    BUN_INSTALL="${BUN_INSTALL:-$HOME/.bun}"
+    export BUN_INSTALL
+    PATH="$BUN_INSTALL/bin:$PATH"
+    export PATH
+
+    command -v bun >/dev/null 2>&1 \
+        || die "Bun installed to $BUN_INSTALL but is still not on PATH; open a new terminal and re-run"
+    ok "installed bun $(bun --version 2>/dev/null || printf 'unknown')"
+    note "Bun was added to PATH for this run; open a new terminal for other sessions to see it"
 }
 
 shell_single_quote() {
@@ -296,34 +405,55 @@ warn_running_xerxes_processes() {
     ')"
     [ "$running_count" -gt 0 ] || return 0
 
-    printf '%s\n' \
-        "! $running_count running Xerxes process(es) still have the previous build loaded." \
-        "! Exit open Xerxes TUI/daemon processes, then launch xerxes again to use this install." \
-        "! The installer leaves active sessions running so it cannot destroy in-progress work." >&2
+    warn "$running_count running Xerxes process(es) still have the previous build loaded."
+    warn_note "Exit open Xerxes TUI/daemon processes, then launch xerxes again to use this install."
+    warn_note "The installer leaves active sessions running so it cannot destroy in-progress work."
 }
 
 main() {
-    need_command bun
+    banner
+
+    info "checking prerequisites"
+    ensure_bun
     prepare_bin_directory
+    ok "launchers will be installed to $BIN_DIRECTORY"
+
+    info "resolving source"
     source_root="$(resolve_source)"
     [ -f "$source_root/package.json" ] || die "native package manifest is missing: $source_root/package.json"
     [ -f "$source_root/bun.lock" ] || die "native lockfile is missing: $source_root/bun.lock"
+    ok "$source_root"
 
-    info "installing locked Bun workspace dependencies"
+    info "installing locked workspace dependencies"
     (
         cd "$source_root"
         bun install --frozen-lockfile
+    ) || die "bun install failed in $source_root"
+    ok "dependencies installed from the lockfile"
+
+    info "building the runtime and terminal interface"
+    (
+        cd "$source_root"
         bun run build
-    )
+    ) || die "bun run build failed in $source_root"
     [ -f "$source_root/xerxes/dist/cli.js" ] || die "runtime build is missing: $source_root/xerxes/dist/cli.js"
     [ -f "$source_root/xerxes/dist/ui/entry.js" ] || die "TUI build is missing: $source_root/xerxes/dist/ui/entry.js"
+    ok "runtime and TUI built"
+
+    info "installing launchers"
     remove_legacy_xerxes_aliases
     write_launcher "$source_root" xerxes
     write_launcher "$source_root" xerxes-acp acp
     persist_bin_path
+
+    info "verifying the installation"
+    "$BIN_DIRECTORY/xerxes" --help >/dev/null || die "the installed launcher did not run successfully"
+    ok "launcher runs"
     warn_running_xerxes_processes "$source_root"
-    "$BIN_DIRECTORY/xerxes" --help >/dev/null
-    ok "Xerxes Bun runtime is ready; open a new terminal to invoke xerxes"
+
+    printf '\n'
+    printf '%s\n' "${C_GREEN}${C_BOLD}${G_OK} Xerxes is ready.${C_RESET}"
+    printf '%s\n' "  ${C_DIM}Open a new terminal, then run${C_RESET} ${C_CYAN}xerxes${C_RESET}"
 }
 
 if [ "${XERXES_INSTALLER_SOURCE_ONLY:-0}" != "1" ]; then

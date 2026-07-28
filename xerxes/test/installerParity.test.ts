@@ -46,7 +46,12 @@ test("native installer writes Bun and ACP launchers against an explicit local so
       XERXES_SOURCE_DIRECTORY: ".",
     });
     expect(installed.exitCode, installed.stderr).toBe(0);
-    expect(installed.stdout).toContain("Xerxes Bun runtime is ready");
+    // The installer now reports numbered phases and a final summary line.
+    expect(installed.stdout).toContain("Xerxes is ready.");
+    expect(installed.stdout).toContain("[1/6] checking prerequisites");
+    expect(installed.stdout).toContain("[6/6] verifying the installation");
+    // Colour must not appear when stdout is a pipe, as it is here.
+    expect(installed.stdout).not.toContain("[");
 
     const canonicalBinDirectory = await realpath(binDirectory);
     const discovered = await execute(

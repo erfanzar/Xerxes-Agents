@@ -97,3 +97,59 @@ jobs:
           path: ${{ runner.temp }}/xerxes-bun-artifacts/xerxes-bun.tgz
           if-no-files-found: error
           retention-days: 14
+
+  windows:
+    name: Windows host verification
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Install locked native dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      # The Windows-specific branches are platform-injected, so the POSIX job
+      # already exercises their logic. What only this job can prove is that the
+      # code compiles, builds, and runs on a real Windows host.
+      #
+      # Scoped to the Windows suite on purpose, NOT to the full suite: ~53 test
+      # files build fixtures from POSIX-absolute paths ('/tmp/...', '/project')
+      # and assert on '/'-joined results. Those are test-harness assumptions
+      # rather than product defects, and porting them is tracked separately.
+      # Widening this step before that work lands would only produce a red job
+      # that says nothing about Windows support.
+      # `bun test` resolves its filter relative to the working directory, and the
+      # suite lives in the xerxes workspace rather than at the repository root.
+      - name: Run the Windows host suite
+        working-directory: xerxes
+        run: bun test ./test/windowsSupport.test.ts
+
+      - name: Build the runtime and TUI on a Windows host
+        run: bun run build
+
+      - name: Verify the PowerShell installer parses and exposes its entry points
+        shell: pwsh
+        env:
+          XERXES_INSTALLER_SOURCE_ONLY: "1"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Parse-only: a syntax error in the installer must fail CI rather than
+          # a user's machine. Sourcing with XERXES_INSTALLER_SOURCE_ONLY=1 defines
+          # the functions without performing an install.
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path ./scripts/install.ps1), [ref]$null, [ref]$errors) | Out-Null
+          if ($errors) { throw "install.ps1 has $($errors.Count) parse error(s): $($errors[0].Message)" }
+          . ./scripts/install.ps1
+          foreach ($fn in 'Invoke-Install', 'Install-BunIfMissing', 'Write-Launcher', 'Resolve-Source', 'Add-BinDirectoryToUserPath') {
+            if (-not (Get-Command $fn -ErrorAction SilentlyContinue)) { throw "install.ps1 does not define $fn" }
+          }
+          Write-Host 'install.ps1 parsed and defines its entry points'

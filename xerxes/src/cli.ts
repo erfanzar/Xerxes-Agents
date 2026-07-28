@@ -65,10 +65,11 @@ import {
 } from "./runtime/companionInstall.js";
 import { bootstrap, bootstrapSubagentsForAgent } from "./runtime/bootstrap.js";
 import {
-  formatDoctorReport,
   hasDoctorFailures,
+  printDoctorReport,
   runAllDoctorChecks,
 } from "./runtime/doctor.js";
+import { CliWriter, createCliStyle, detectColorDepth } from "./runtime/cliStyle.js";
 import { resolveTuiEntry } from "./runtime/distribution.js";
 import { registerInteractionModeTool } from "./runtime/interactionModeTool.js";
 import { DaemonTranscriptStore } from "./session/daemonTranscript.js";
@@ -98,24 +99,71 @@ import { createAgentState } from "./streaming/events.js";
 import { runTurn } from "./streaming/loop.js";
 import { runBundledSkillCli } from "./skills/cli.js";
 
-const HELP = `Xerxes ${version} (Bun runtime)
+/**
+ * Command list for `--help`, grouped by what the reader is trying to do.
+ *
+ * Kept as data rather than a formatted blob so the renderer can align the
+ * description column and colour the invocations; a single template string could
+ * do neither, which is why the old help was a flat wall of usage lines.
+ */
+const HELP_GROUPS: readonly {
+  readonly commands: readonly (readonly [invocation: string, description: string])[];
+  readonly title: string;
+}[] = [
+  {
+    title: "Ask",
+    commands: [
+      ["xerxes", "open the interactive terminal interface"],
+      ["xerxes [prompt]", "run one turn and exit"],
+      ["xerxes --resume <session_id> [prompt]", "continue an earlier session"],
+    ],
+  },
+  {
+    title: "Serve",
+    commands: [
+      ["xerxes daemon", "run the local project daemon"],
+      ["xerxes acp", "speak the Agent Client Protocol over stdio"],
+      ["xerxes telegram --token <token>", "run the Telegram channel gateway"],
+    ],
+  },
+  {
+    title: "Maintain",
+    commands: [
+      ["xerxes doctor", "check the host, providers, and configuration"],
+      ["xerxes update [--check] [--git] [--dry-run] [--apply]", "report or apply an update"],
+      ["xerxes install --cloud-code [--force] [--dry-run]", "install a companion integration"],
+      ["xerxes export [session]", "write a session transcript to disk"],
+      ["xerxes skill <skill> [arguments]", "run a bundled skill"],
+    ],
+  },
+];
 
-Usage:
-  xerxes [prompt]
-  xerxes --resume <session_id> [prompt]
-  xerxes acp
-  xerxes daemon
-  xerxes telegram --token <token>
-  xerxes install --cloud-code [--force] [--dry-run]
-  xerxes doctor
-  xerxes update [--check] [--git] [--dry-run] [--apply]
-  xerxes export [session]
-  xerxes skill <skill> [arguments]
-  xerxes --help
-  xerxes --version
-
-One-shot, daemon, ACP, API, and the interactive TypeScript TUI run on Bun.
-Browser tools attach only to an explicitly supplied Chromium CDP endpoint; use /browser in the TUI or the daemon browser command to connect.`;
+/** Render `--help` with aligned descriptions and coloured invocations. */
+function renderHelp(writer: CliWriter): void {
+  writer.heading(`Xerxes ${version}`);
+  writer.hint("Bun-native coding agent and multi-agent runtime.");
+  const widest = Math.max(
+    ...HELP_GROUPS.flatMap((group) => group.commands.map(([invocation]) => invocation.length)),
+  );
+  for (const group of HELP_GROUPS) {
+    writer.line();
+    writer.line(writer.style.bold(group.title));
+    for (const [invocation, description] of group.commands) {
+      // Pad before colouring: escape sequences have no width, so padding a
+      // styled string would align by byte count and leave the column ragged.
+      writer.line(`  ${writer.command(invocation.padEnd(widest))}  ${writer.style.dim(description)}`);
+    }
+  }
+  writer.line();
+  writer.line(writer.style.bold("Also"));
+  writer.line(`  ${writer.command("--help".padEnd(widest))}  ${writer.style.dim("show this message")}`);
+  writer.line(`  ${writer.command("--version".padEnd(widest))}  ${writer.style.dim("print the version and exit")}`);
+  writer.line();
+  writer.hint(
+    "Browser tools attach only to an explicitly supplied Chromium CDP endpoint; use /browser in the TUI\n"
+      + "or the daemon browser command to connect.",
+  );
+}
 
 /** Summary budget for a mid-turn overflow rescue: small, because the window is already full. */
 const OVERFLOW_SUMMARY_MAX_TOKENS = 2_048;
@@ -124,13 +172,23 @@ const [argument, ...argumentsAfterCommand] = Bun.argv.slice(2);
 
 /** Render a typed command error as two clean stderr lines and exit; never dump a stack. */
 function reportCommandUsageError(error: Error, helpCommand: string): never {
-  console.error(`error: ${error.message}`);
-  console.error(`run '${helpCommand}' for usage.`);
+  // Errors go to stderr, so the styler is built against stderr's TTY state
+  // rather than stdout's: `xerxes update > log` should still colour the error a
+  // human is watching, and `2>&1 | cat` should still be plain.
+  const errorWriter = new CliWriter({
+    style: createCliStyle(detectColorDepth({ isTTY: Boolean(process.stderr.isTTY) })),
+    write: (line) => console.error(line),
+  });
+  // The literal "error" label is kept alongside the glyph: it is the
+  // conventional, greppable prefix, and a glyph alone would be invisible to
+  // anything filtering a log.
+  errorWriter.status("fail", "error", error.message);
+  errorWriter.hint(`run '${helpCommand}' for usage.`);
   process.exit(1);
 }
 
 if (argument === "--help" || argument === "-h") {
-  console.log(HELP);
+  renderHelp(new CliWriter());
   process.exit(0);
 } else if (argument === "--version" || argument === "-V") {
   console.log(version);
@@ -139,7 +197,7 @@ if (argument === "--help" || argument === "-h") {
   process.exit(await runBundledSkillCli(argumentsAfterCommand));
 } else if (argument === "doctor") {
   const report = runAllDoctorChecks();
-  console.log(formatDoctorReport(report));
+  printDoctorReport(report);
   process.exit(hasDoctorFailures(report) ? 1 : 0);
 } else if (argument === "install") {
   if (

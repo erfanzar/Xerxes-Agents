@@ -31,6 +31,7 @@ import {
   type ChannelWebhookServerOptions,
 } from "../channels/webhookServer.js";
 import { estimateContextTokens } from "../context/windowUsage.js";
+import { isNamedPipePath } from "../core/hostPlatform.js";
 import {
   createChannelMessage,
   MessageDirection,
@@ -109,6 +110,7 @@ import { processAtMentions } from "./atMentions.js";
 import {
   compactMessagesIfNeeded,
   compactionCompletionPort,
+  lazyCompactionCompletionPort,
   compactionThresholdTokens,
   DEFAULT_AUTO_COMPACT_THRESHOLD,
   normalizeCompactionThreshold,
@@ -780,8 +782,10 @@ export class DaemonServer {
     if (this.server) {
       return;
     }
-    await mkdir(dirname(this.socketPath), { recursive: true });
-    await rm(this.socketPath, { force: true });
+    if (!isNamedPipePath(this.socketPath)) {
+      await mkdir(dirname(this.socketPath), { recursive: true });
+    }
+    await this.unlinkSocketPath();
     this.server = createServer((socket) => this.attach(socket));
     await new Promise<void>((resolve, reject) => {
       const server = this.server;
@@ -818,10 +822,25 @@ export class DaemonServer {
       this.websocketGateway = undefined;
       await closeServer(this.server);
       this.server = undefined;
-      await rm(this.socketPath, { force: true });
+      await this.unlinkSocketPath();
       await this.shutdownRuntime();
       throw error;
     }
+  }
+
+  /**
+   * Drop a stale Unix socket file; a no-op for a Windows named pipe.
+   *
+   * A leftover socket file from a crashed daemon makes bind() fail with
+   * EADDRINUSE, so removing it before listen() is load-bearing on POSIX. A named
+   * pipe is a kernel object with no filesystem entry: unlink cannot address it,
+   * and the resulting rejection used to abort daemon startup on Windows before
+   * it reached listen() at all. The pipe disappears with its last handle, so
+   * there is nothing to clean up.
+   */
+  private async unlinkSocketPath(): Promise<void> {
+    if (isNamedPipePath(this.socketPath)) return;
+    await rm(this.socketPath, { force: true });
   }
 
   /**
@@ -1063,7 +1082,7 @@ export class DaemonServer {
         );
       }
       this.server = undefined;
-      await rm(this.socketPath, { force: true });
+      await this.unlinkSocketPath();
       if (this.pidPath) {
         await rm(this.pidPath, { force: true });
       }
@@ -3411,14 +3430,18 @@ export class DaemonServer {
       if (notify) this.emitSlash(notify, error, "warning");
       return { ok: false, error };
     }
-    let client: LlmClient | undefined;
+    // Deferred on purpose: compaction often answers "nothing to compact" without
+    // consulting a provider at all, and building the client eagerly made that
+    // no-op require a constructible one. See lazyCompactionCompletionPort.
+    const completion = lazyCompactionCompletionPort(
+      () => createCompactionClient(model, this.profileStore?.active(), this.runtime.status()),
+      model,
+    );
     try {
-      const profile = this.profileStore?.active();
-      client = createCompactionClient(model, profile, this.runtime.status());
       const archivePath = await this.precompactArchivePath(session.id);
       const outcome = await compactMessagesIfNeeded({
         ...(archivePath === undefined ? {} : { archivePath }),
-        completion: compactionCompletionPort(client, model),
+        completion: completion.port,
         messages: session.messages,
         model,
         reason,
@@ -3483,7 +3506,7 @@ export class DaemonServer {
       }
       return { ok: false, error: errorMessage(error) };
     } finally {
-      if (client !== undefined) await closeLlmClient(client);
+      await completion.close();
     }
   }
 

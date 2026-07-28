@@ -143,12 +143,15 @@ describe('OpenTUI agents overlay retry action', () => {
     )
 
     try {
-      await setup.flush()
+      // Two agents do not fit in 30 rows, so the selected row is only on screen
+      // after the overlay scrolls it into view — which needs the layout pass that
+      // follows the mounting commit. flushRetry settles that extra frame.
+      await flushRetry(setup)
       // The dead agent is pre-selected as the most likely retry target.
       expect(setup.captureCharFrame()).toContain('press r to retry this agent')
 
       act(() => setup.mockInput.pressKey('ARROW_LEFT'))
-      await setup.flush()
+      await flushRetry(setup)
       expect(setup.captureCharFrame()).toContain('press r to run this agent again')
 
       act(() => setup.mockInput.pressKey('r'))

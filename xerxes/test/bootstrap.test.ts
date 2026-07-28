@@ -298,18 +298,23 @@ test('creator-local catalog descriptions follow the resolved profile when aliase
   ])
 })
 
-test('29 production core tools keep bootstrap prompt below its non-duplicated schema budget', () => {
+test('32 production core tools keep bootstrap prompt below its non-duplicated schema budget', () => {
   const registry = new ToolRegistry()
   registerCoreTools(registry, { workspaceRoot: '/workspace' })
   const tools = registry.definitions()
   const prompt = buildBootstrapSystemPrompt({ cwd: '/workspace' }, '', tools)
 
-  expect(tools).toHaveLength(29)
+  // 29 -> 32: check_command, kill_command and list_commands, which give a
+  // long-running command an identity the model can poll instead of leaving it to
+  // fire-and-forget it with `nohup` and guess at the outcome.
+  expect(tools).toHaveLength(32)
   // The ceiling guards against tool JSON Schemas leaking into the prompt, which
   // costs kilobytes per regression — not against doctrine or tool descriptions,
   // which are the prompt's actual job. Raise it deliberately when real content
   // is added; the `"properties"` assertions below are what catch duplication.
-  expect(prompt.length).toBeLessThan(9_000)
+  // Raised from 9_000 for those three tools' descriptions. Measured 8_845 at the
+  // time of writing, so the headroom is deliberate rather than incidental.
+  expect(prompt.length).toBeLessThan(9_500)
   // Descriptions are paid on every turn, so their length has to stay
   // risk-weighted rather than uniformly generous: the shell tool earns the most
   // because it is the one that can do anything. This catches a low-risk tool

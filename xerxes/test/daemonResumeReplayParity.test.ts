@@ -86,9 +86,17 @@ test('explicit daemon resume replays visible turns but filters internal prompts 
       && frame.params?.type === 'notification'
       && frame.params.payload?.category === 'history')
       .map(frame => ({ body: frame.params?.payload?.body, type: frame.params?.payload?.type }))
+    // The `replay_tool` row is deliberate: since "resumed sessions replay
+    // thinking and tool-call rows" (51cb13e) a resumed transcript shows tool
+    // calls the way a live one does. This expectation predated that change and
+    // was never updated, which is why it has failed ever since.
+    //
+    // The filtering this test exists to guard is unchanged and asserted below:
+    // the row is a single semantic marker, never the tool's output.
     expect(history).toEqual([
       { type: 'replay_user', body: '✨ visible question' },
       { type: 'replay_assistant', body: 'visible answer\nwith a second line' },
+      { type: 'replay_tool', body: '✓ tool' },
       { type: 'replay_user', body: '✨ visible follow up' },
       { type: 'replay_assistant', body: 'visible final answer' },
       { type: 'resumed', body: `── resumed session ${sessionId} (4 messages) ──` },

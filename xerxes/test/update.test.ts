@@ -149,7 +149,9 @@ test('update command remains status-only until dry-run or apply is explicitly su
   })
   expect(status.applied).toBe(false)
   expect(statusCalls.every(command => command[0] === 'git')).toBe(true)
-  expect(statusOutput).toContain(
+  // Joined rather than per-line: the report now decorates its lines with status
+  // glyphs, and the assertion is about the message being reported, not its frame.
+  expect(statusOutput.join('\n')).toContain(
     'No Bun update command was run. Use --dry-run to review a spec or --apply to execute one.',
   )
 
@@ -164,7 +166,7 @@ test('update command remains status-only until dry-run or apply is explicitly su
   expect(dryRun.applied).toBe(false)
   expect(dryRun.plan?.argv).toEqual(['bun', 'add', '--global', 'file:./release'])
   expect(dryRunCalls.every(command => command[0] === 'git')).toBe(true)
-  expect(dryRunOutput).toContain('Would run: bun add --global file:./release')
+  expect(dryRunOutput.join('\n')).toContain('Would run: bun add --global file:./release')
 
   const applyCalls: string[][] = []
   const runner: UpdateProcessRunner = async argv => {
@@ -286,7 +288,7 @@ test('--git alone reports status plus a hint and runs nothing', async () => {
   expect(result.applied).toBe(false)
   expect(result.gitPlan).toBeUndefined()
   expect(mutationCalls(calls)).toEqual([])
-  expect(output).toContain(
+  expect(output.join('\n')).toContain(
     'Git update: not run; use --git --dry-run to review the plan or --git --apply to execute it.',
   )
 })
@@ -304,12 +306,15 @@ test('--git --dry-run prints the step plan and runs nothing', async () => {
   expect(result.gitPlan?.checkout).toBe('/workspace')
   expect(result.gitPlan?.upstream).toBe('origin/main')
   expect(mutationCalls(calls)).toEqual([])
-  expect(output).toContain('Git update plan for /workspace (upstream origin/main):')
-  expect(output).toContain('Would run (fetch): git fetch --quiet --no-tags origin')
-  expect(output).toContain('Would run (merge): git merge --ff-only origin/main')
-  expect(output).toContain('Would run (install): bun install --frozen-lockfile')
-  expect(output).toContain('Would run (build): bun run build')
-  expect(output).toContain('Dry run only; re-run with --git --apply to execute these steps.')
+  const plan = output.join('\n')
+  expect(plan).toContain('Git update plan for /workspace (upstream origin/main):')
+  // Each step is now a numbered row naming the step and its argv, so the reader
+  // can tell where a failed apply stopped.
+  expect(plan).toContain('1. fetch    git fetch --quiet --no-tags origin')
+  expect(plan).toContain('2. merge    git merge --ff-only origin/main')
+  expect(plan).toContain('3. install  bun install --frozen-lockfile')
+  expect(plan).toContain('4. build    bun run build')
+  expect(plan).toContain('Dry run only; re-run with --git --apply to execute these steps.')
 })
 
 test('--git --apply runs fetch, merge, install, and build in order through the injected runner', async () => {
@@ -339,7 +344,7 @@ test('--git --apply runs fetch, merge, install, and build in order through the i
   expect(fetchIndex).toBeGreaterThanOrEqual(0)
   expect(divergenceIndex).toBeGreaterThan(fetchIndex)
   expect(mergeIndex).toBeGreaterThan(divergenceIndex)
-  expect(output).toContain('Git update completed; restart running Xerxes processes to use the new build.')
+  expect(output.join('\n')).toContain('Git update completed; restart running Xerxes processes to use the new build.')
 })
 
 test('--git --apply aborts on the first failing step and names it', async () => {

@@ -5,6 +5,7 @@ import { existsSync, readdirSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
+import { isWindows } from '../core/hostPlatform.js'
 import { DependencyResolver, parseDependency, VersionConstraint } from './dependency.js'
 import type { HookCallback, HookPoint } from './hooks.js'
 import type { FetchImplementation, LlmClient } from '../llms/client.js'
@@ -371,8 +372,21 @@ export class PluginRegistry {
   }
 }
 
-/** World-writable directories must never be a source of executable plugin code. */
-function isWorldWritableDirectory(directory: string): boolean {
+/**
+ * World-writable directories must never be a source of executable plugin code.
+ *
+ * The POSIX mode bits this reads do not exist on Windows, where access is an ACL
+ * and `stat().mode` is a synthesized value: Node reports 0o666/0o777-style modes
+ * derived from the read-only attribute alone, so the other-write bit is set for
+ * essentially every directory. Evaluating it there would reject every plugin
+ * directory on the machine as unsafe. Windows containment is enforced by the
+ * discovery roots (per-user profile directories) instead, so this check reports
+ * "not world-writable" rather than pretending to an answer it cannot compute.
+ */
+function isWorldWritableDirectory(directory: string, platform: NodeJS.Platform = process.platform): boolean {
+  if (isWindows(platform)) {
+    return false
+  }
   try {
     return (statSync(directory).mode & 0o002) !== 0
   } catch {

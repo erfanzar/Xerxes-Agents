@@ -7,6 +7,7 @@ import {
   checkComputerUse,
   checkPlatform,
   checkProviderKeys,
+  checkWindowsTooling,
   checkXerxesHome,
   checkXerxesOnPath,
   formatDoctorReport,
@@ -47,9 +48,34 @@ test('computer_use doctor check reports platform fit, missing tools, and permiss
   expect(ready.message).toContain('Accessibility')
 })
 
-test('Bun doctor warns for absent optional setup and Windows Unix-socket limitations', () => {
+test('Bun doctor warns for absent optional setup', () => {
   expect(checkXerxesOnPath({ findExecutable: () => null }).severity).toBe('warn')
   expect(checkProviderKeys({ environment: {} }).severity).toBe('warn')
   expect(checkXerxesHome({ home: '/missing', fileExists: () => false }).severity).toBe('warn')
-  expect(checkPlatform({ platform: 'win32' }).message).toContain('Unix-socket')
+})
+
+test('Bun doctor reports each platform as supported and names its control transport', () => {
+  // Windows is a supported host: the control channel is a named pipe rather than
+  // a Unix socket. This check previously warned that native Windows could not run
+  // the daemon at all.
+  const windows = checkPlatform({ platform: 'win32' })
+  expect(windows.severity).toBe('ok')
+  expect(windows.message).toContain('named pipe')
+
+  const posix = checkPlatform({ platform: 'linux' })
+  expect(posix.severity).toBe('ok')
+  expect(posix.message).toContain('Unix socket')
+})
+
+test('Bun doctor flags missing Windows console tooling only on Windows', () => {
+  // powershell.exe is how the runtime reads a process command line and how the
+  // TUI reaches the clipboard; there is no `ps` to fall back to.
+  const missing = checkWindowsTooling({ platform: 'win32', findExecutable: () => null })
+  expect(missing.severity).toBe('warn')
+  expect(missing.message).toContain('powershell.exe')
+
+  const present = checkWindowsTooling({ platform: 'win32', findExecutable: () => 'C:\\Windows\\system32\\x.exe' })
+  expect(present.severity).toBe('ok')
+
+  expect(checkWindowsTooling({ platform: 'linux', findExecutable: () => null }).severity).toBe('ok')
 })

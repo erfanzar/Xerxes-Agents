@@ -6,11 +6,22 @@ import { stat } from 'node:fs/promises'
 import { ValidationError } from '../core/errors.js'
 import { ToolRegistry } from '../executors/toolRegistry.js'
 import type { JsonObject, ToolDefinition } from '../types/toolCalls.js'
-import { optionalInteger, optionalString, optionalStringArray, requireRange, requiredString } from './inputs.js'
+import { optionalBoolean, optionalInteger, optionalString, optionalStringArray, requireRange, requiredString } from './inputs.js'
 import { WorkspacePathResolver } from './pathSafety.js'
+import {
+  BackgroundCommandManager,
+  type BackgroundStartResult,
+  MAX_CHECK_WAIT_MS,
+} from './backgroundCommands.js'
+import { BoundedOutputBuffer, capOutput, drainStream, type StreamDrain } from './processOutput.js'
 
 const DEFAULT_TIMEOUT_MS = 30_000
 const DEFAULT_MAX_OUTPUT_CHARS = 20_000
+/**
+ * Grace period for output already written but still in the pipe when the child
+ * exits. Short: it is paid on every call, and it is not a wait for EOF.
+ */
+const OUTPUT_SETTLE_MS = 50
 
 export const EXEC_COMMAND_DEFINITION: ToolDefinition = {
   type: 'function',
@@ -31,7 +42,10 @@ export const EXEC_COMMAND_DEFINITION: ToolDefinition = {
       + `max_output_chars (default ${DEFAULT_MAX_OUTPUT_CHARS}) with truncated:true set. Nothing survives the call: `
       + 'the process is killed when it returns, and no cwd, environment variable, or shell state carries into the '
       + 'next invocation. Keeping a live shell open across calls needs the separate PTY tool, where the host '
-      + 'enables it.',
+      + 'enables it. For work that outlasts the timeout — a build, a server, a training run — do NOT background it '
+      + 'with `&` or nohup, whose output goes nowhere you can read and whose failure you cannot see: pass '
+      + 'run_in_background:true instead, which returns a proc_id immediately and leaves the process readable through '
+      + 'check_command.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -54,9 +68,85 @@ export const EXEC_COMMAND_DEFINITION: ToolDefinition = {
           default: DEFAULT_MAX_OUTPUT_CHARS,
           description: 'Maximum characters returned per output stream.',
         },
+        run_in_background: {
+          type: 'boolean',
+          default: false,
+          description: 'Start the command and return a proc_id at once instead of waiting for it. timeout_ms does '
+            + 'not apply — the process runs until it exits or you kill it. Read its output with check_command.',
+        },
       },
       required: ['cmd'],
     },
+  },
+}
+
+export const CHECK_COMMAND_DEFINITION: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'check_command',
+    description: 'Read the progress of a background command started by exec_command with run_in_background:true. '
+      + 'Returns running, exitCode (null while running), and the output produced since your last check — output is '
+      + 'consumed, so successive calls show new work rather than repeating from the start, and an empty stdout on a '
+      + 'running process means nothing new, not nothing at all. Only the most recent ~1M characters per stream are '
+      + 'retained; droppedOutput:true means a chatty process outran your polling and the earliest output is gone. '
+      + 'truncated:true means more is buffered than max_output_chars carried, so call again. Set wait_ms to give a '
+      + `command that is nearly done a chance to finish (ceiling ${MAX_CHECK_WAIT_MS}) rather than returning `
+      + 'running:true and being asked again immediately. A finished process stays readable until you kill_command it, '
+      + 'so its final output is never lost by checking too late.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        proc_id: { type: 'string', description: 'Identifier returned by exec_command run_in_background.' },
+        max_output_chars: {
+          type: 'integer',
+          default: DEFAULT_MAX_OUTPUT_CHARS,
+          description: 'Maximum characters returned per output stream.',
+        },
+        wait_ms: {
+          type: 'integer',
+          default: 0,
+          description: 'Block up to this long for the process to exit before answering.',
+        },
+      },
+      required: ['proc_id'],
+    },
+  },
+}
+
+export const KILL_COMMAND_DEFINITION: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'kill_command',
+    description: 'Stop a background command and stop tracking it. SIGTERM by default so it can shut down cleanly; '
+      + 'pass SIGKILL for one that ignores it. signalled:false means the process had already exited on its own, '
+      + 'which is not an error. Read any output you still want with check_command first — the buffer is released '
+      + 'here. Killing is how a background process ends; anything still running is terminated when the session ends.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        proc_id: { type: 'string', description: 'Identifier returned by exec_command run_in_background.' },
+        signal: {
+          type: 'string',
+          enum: ['SIGTERM', 'SIGKILL'],
+          default: 'SIGTERM',
+          description: 'Signal to deliver.',
+        },
+      },
+      required: ['proc_id'],
+    },
+  },
+}
+
+export const LIST_COMMANDS_DEFINITION: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'list_commands',
+    description: 'List background commands this session started that have not been killed, with their proc_id, pid, '
+      + 'command line and start time. Use it to recover a proc_id you did not record, or to confirm nothing was left '
+      + 'running.',
+    parameters: { type: 'object', additionalProperties: false, properties: {} },
   },
 }
 
@@ -71,7 +161,11 @@ export interface ProcessResult {
 }
 
 /** Register a bounded, direct-argv process tool; persistent PTYs remain a separate port. */
-export function registerProcessTools(registry: ToolRegistry, paths: WorkspacePathResolver): void {
+export function registerProcessTools(
+  registry: ToolRegistry,
+  paths: WorkspacePathResolver,
+  background: BackgroundCommandManager = new BackgroundCommandManager(),
+): void {
   // Deciding concurrency by tool NAME alone would make every shell call a
   // barrier, and the shipped prompt tells the model to batch independent calls —
   // so it complies and gets serialized anyway. The read-only analyzer already
@@ -80,10 +174,44 @@ export function registerProcessTools(registry: ToolRegistry, paths: WorkspacePat
   // still runs alone.
   registry.register(
     EXEC_COMMAND_DEFINITION,
-    (inputs, _context, signal) => executeCommand(inputs, paths, signal),
+    (inputs, _context, signal) => executeCommand(inputs, paths, signal, background),
     'default',
     { concurrencySafe: false, defer: false, destructive: true, openWorld: true, readOnly: false },
   )
+  // Checking and listing only read state that this session already owns, so they
+  // are concurrency-safe and read-only: polling three builds at once is the
+  // normal case and must not serialize behind an approval gate.
+  registry.register(
+    CHECK_COMMAND_DEFINITION,
+    async inputs => background.check(
+      requiredString(inputs, 'proc_id'),
+      requireRange(optionalInteger(inputs, 'max_output_chars', DEFAULT_MAX_OUTPUT_CHARS), 'max_output_chars', 1, 1_000_000),
+      requireRange(optionalInteger(inputs, 'wait_ms', 0), 'wait_ms', 0, MAX_CHECK_WAIT_MS),
+    ),
+    'default',
+    { concurrencySafe: true, defer: false, destructive: false, openWorld: false, readOnly: true },
+  )
+  registry.register(
+    LIST_COMMANDS_DEFINITION,
+    async () => ({ processes: background.list() }),
+    'default',
+    { concurrencySafe: true, defer: false, destructive: false, openWorld: false, readOnly: true },
+  )
+  registry.register(
+    KILL_COMMAND_DEFINITION,
+    async inputs => background.kill(
+      requiredString(inputs, 'proc_id'),
+      killSignal(optionalString(inputs, 'signal')),
+    ),
+    'default',
+    { concurrencySafe: false, defer: false, destructive: true, openWorld: false, readOnly: false },
+  )
+}
+
+function killSignal(value: string | undefined): 'SIGKILL' | 'SIGTERM' {
+  if (value === undefined || value === 'SIGTERM') return 'SIGTERM'
+  if (value === 'SIGKILL') return 'SIGKILL'
+  throw new ValidationError('signal', 'must be SIGTERM or SIGKILL', value)
 }
 
 /**
@@ -100,7 +228,8 @@ export async function executeCommand(
   inputs: JsonObject,
   paths: WorkspacePathResolver,
   signal?: AbortSignal,
-): Promise<ProcessResult> {
+  background?: BackgroundCommandManager,
+): Promise<BackgroundStartResult | ProcessResult> {
   const command = requiredString(inputs, 'cmd')
   if (/\s/.test(command) || /[;&|`$<>]/.test(command)) {
     throw new ValidationError(
@@ -126,6 +255,15 @@ export async function executeCommand(
     throw new ValidationError('exec_command', 'was cancelled before execution')
   }
 
+  if (optionalBoolean(inputs, 'run_in_background', false)) {
+    if (background === undefined) {
+      throw new ValidationError('run_in_background', 'is not enabled by this host', true)
+    }
+    // No timeout is applied on purpose: outliving the foreground ceiling is the
+    // entire reason a caller asks for this.
+    return background.start({ command, args, cwd, name: [command, ...args].join(' ').slice(0, 60) })
+  }
+
   let timedOut = false
   const controller = new AbortController()
   const cancel = () => controller.abort(signal?.reason)
@@ -135,6 +273,11 @@ export async function executeCommand(
     controller.abort(new Error(`Command timed out after ${timeout}ms`))
   }, timeout)
 
+  const stdoutBuffer = new BoundedOutputBuffer(maxOutputChars * 8)
+  const stderrBuffer = new BoundedOutputBuffer(maxOutputChars * 8)
+  let stdoutDrain: StreamDrain | undefined
+  let stderrDrain: StreamDrain | undefined
+
   try {
     const process = Bun.spawn([command, ...args], {
       cwd,
@@ -142,18 +285,30 @@ export async function executeCommand(
       stdout: 'pipe',
       stderr: 'pipe',
       signal: controller.signal,
-      maxBuffer: maxOutputChars * 8,
     })
-    const [exitCode, stdout, stderr] = await Promise.all([
-      process.exited,
-      new Response(process.stdout).text(),
-      new Response(process.stderr).text(),
-    ])
+    stdoutDrain = drainStream(process.stdout, stdoutBuffer)
+    stderrDrain = drainStream(process.stderr, stderrBuffer)
+
+    // Wait for the process, not for its pipes to reach EOF.
+    //
+    // EOF requires every holder of the write end to close it, and a command that
+    // backgrounds anything (`cmd &`, `nohup cmd`) hands a copy to a process that
+    // outlives the one we can kill. Awaiting EOF therefore made the timeout
+    // unenforceable: it fired, killed the direct child, and the call still sat
+    // forever on a read that could never finish — one stray `&` stalled a turn
+    // indefinitely. Exit status is a fact about our child alone, so that is what
+    // bounds the call.
+    const exitCode = await process.exited
+    // Give the already-buffered output a moment to land. Output written just
+    // before exit may still be in flight in the pipe, and returning without it
+    // would drop the last line of every fast command.
+    await settleDrains([stdoutDrain, stderrDrain], OUTPUT_SETTLE_MS)
+
     if (signal?.aborted && !timedOut) {
       throw new ValidationError('exec_command', 'was cancelled during execution')
     }
-    const stdoutResult = capOutput(stdout, maxOutputChars)
-    const stderrResult = capOutput(stderr, maxOutputChars)
+    const stdoutResult = capOutput(stdoutBuffer.peek(maxOutputChars + 1).text, maxOutputChars)
+    const stderrResult = capOutput(stderrBuffer.peek(maxOutputChars + 1).text, maxOutputChars)
     return {
       command: [command, ...args],
       cwd: await paths.relative(cwd),
@@ -166,14 +321,19 @@ export async function executeCommand(
   } finally {
     clearTimeout(timer)
     signal?.removeEventListener('abort', cancel)
+    // Release our end unconditionally. A grandchild may still hold the write
+    // end; that is its business, and no longer ours.
+    stdoutDrain?.cancel()
+    stderrDrain?.cancel()
   }
 }
 
-function capOutput(output: string, maxChars: number): { text: string; truncated: boolean } {
-  if (output.length <= maxChars) {
-    return { text: output, truncated: false }
-  }
-  return { text: `${output.slice(0, maxChars)}\n…[truncated]…`, truncated: true }
+/** Wait briefly for in-flight output, without ever waiting on EOF. */
+async function settleDrains(drains: readonly StreamDrain[], settleMs: number): Promise<void> {
+  await Promise.race([
+    Promise.all(drains.map(drain => drain.done)),
+    new Promise<void>(resolve => setTimeout(resolve, settleMs)),
+  ])
 }
 
 async function isDirectory(path: string): Promise<boolean> {
