@@ -4,7 +4,7 @@
 
 import type { KeyEvent, ScrollBoxRenderable } from '@opentui/core'
 import { useKeyboard, useTerminalDimensions } from '@opentui/react'
-import { type MutableRefObject, memo, useMemo, useRef, useState } from 'react'
+import { type MutableRefObject, memo, useEffect, useMemo, useRef, useState } from 'react'
 
 import { useOptionalGateway } from '../app/gatewayContext.js'
 import { adjustPanelWidth, PANEL_WIDTH_STEP, withPanelWidthDelta } from '../app/panelSizeStore.js'
@@ -175,6 +175,15 @@ function metricLine(item: SubagentProgress, now: number): string {
   return parts.join(' · ')
 }
 
+/**
+ * Renderable id for one card, so the overlay can scroll its selection into view.
+ *
+ * The overlay frame is bounded by the terminal, so ←/→ can move the selection
+ * to a row below the fold; without this the selected agent — and the retry hint
+ * that only renders on it — was simply invisible until the user scrolled by hand.
+ */
+export const agentCardRenderableId = (agentId: string): string => `agent-card:${agentId}`
+
 function AgentCardView({
   record,
   retryNote,
@@ -203,6 +212,7 @@ function AgentCardView({
       backgroundColor={selected ? t.color.selectionBg : t.color.completionCurrentBg}
       flexDirection="row"
       flexShrink={0}
+      id={agentCardRenderableId(item.id)}
       marginBottom={1}
       marginLeft={depth}
       paddingRight={1}
@@ -302,9 +312,14 @@ function AgentPanelBody({
       borderColor={variant === 'overlay' ? t.color.border : undefined}
       borderStyle={variant === 'overlay' ? 'round' : undefined}
       flexDirection="column"
-      flexGrow={variant === 'overlay' ? 1 : undefined}
-      flexShrink={0}
-      height={variant === 'sidebar' ? '100%' : undefined}
+      // Both variants fill a parent that already owns the height (the rail
+      // column, or the overlay's `panelHeight`). The overlay previously grew
+      // from its content with `flexShrink: 0` and no height, so a long agent
+      // list pushed the frame past the bottom of the terminal and the last card
+      // plus the footer were clipped off-screen. Filling the parent instead
+      // hands the overflow to the scrollbox below, which is what scrolls.
+      flexShrink={1}
+      height="100%"
       minHeight={0}
       paddingX={variant === 'sidebar' ? 2 : 1}
       paddingY={1}
@@ -332,7 +347,11 @@ function AgentPanelBody({
               />
             ))
           ) : (
-            <Box alignItems="center" flexDirection="column" flexGrow={1} justifyContent="center" minHeight={5}>
+            // Deliberately not vertically centred inside a reserved block: the
+            // frame is bounded by its parent now, so a 5-row centred placeholder
+            // on a short terminal put its first visible row in the blank padding
+            // above the text and the message read as an empty panel.
+            <Box alignItems="center" flexDirection="column" flexShrink={0}>
               <Text color={t.color.muted}>No agents yet</Text>
               <Text color={t.color.muted} dimColor>
                 Delegated work appears here.
@@ -341,7 +360,10 @@ function AgentPanelBody({
           )}
         </Box>
       </scrollbox>
-      <Text color={t.color.muted} dimColor>
+      {/* Truncate rather than wrap: on a narrow panel this hint wrapped to two
+          rows and, now that the frame is bounded, those rows came out of the
+          agent list rather than out of the terminal. */}
+      <Text color={t.color.muted} dimColor wrap="truncate-end">
         {footer}
       </Text>
     </Box>
@@ -408,6 +430,24 @@ export function AgentPanelOverlay({ history, liveAgents, onClose, t }: AgentPane
     const explicit = selectedId ? records.find(record => record.item.id === selectedId) : undefined
     return explicit ?? records.find(record => subagentFailed(record.item.status)) ?? records[0]
   }, [records, selectedId])
+
+  // Keep the selected card on screen now that the frame is bounded by the
+  // terminal instead of overflowing it.
+  //
+  // The scroll is attempted twice on purpose. On the commit that first mounts a
+  // card, Yoga has not positioned it yet — every renderable still reports y=0
+  // and height=0, so scrollChildIntoView computes a zero delta and silently
+  // does nothing. The deferred call runs after that layout pass, one frame
+  // later, which is imperceptible interactively. The list length is a dependency
+  // because adding or removing an agent shifts every offset below it.
+  const selectedCardId = selectedRecord?.item.id
+  useEffect(() => {
+    if (!selectedCardId) return
+    const target = agentCardRenderableId(selectedCardId)
+    scrollRef.current?.scrollChildIntoView(target)
+    const settle = setTimeout(() => scrollRef.current?.scrollChildIntoView(target), 0)
+    return () => clearTimeout(settle)
+  }, [records.length, selectedCardId])
 
   const setRetryNote = (id: string, note: string) => {
     setRetryNotes(previous => {
@@ -502,7 +542,10 @@ export function AgentPanelOverlay({ history, liveAgents, onClose, t }: AgentPane
       width="100%"
       zIndex={180}
     >
-      <Box flexDirection="column" height={panelHeight} maxWidth={96} minWidth={panelWidth} width={panelWidth}>
+      {/* `panelWidth` is already clamped by withPanelWidthDelta. A maxWidth of
+          96 alongside it only contradicted the resize chord — min-width wins
+          over max-width, so the cap never applied once a user widened. */}
+      <Box flexDirection="column" flexShrink={0} height={panelHeight} width={panelWidth}>
         <AgentPanelBody
           history={history}
           liveAgents={liveAgents}

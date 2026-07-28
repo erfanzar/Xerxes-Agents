@@ -106,7 +106,9 @@ test('Bun CLI renders install option errors as one clean line without a stack du
   expect(stdout).toBe('')
   const lines = stderr.trim().split('\n')
   expect(lines).toHaveLength(2)
-  expect(lines[0]).toStartWith('error: ')
+  // A status glyph precedes the conventional `error:` label, which is retained
+  // so the line stays greppable.
+  expect(lines[0]).toContain('error: ')
   expect(lines[1]).toBe("run 'xerxes install --help' for usage.")
   expect(stderr).not.toContain('at ')
   expect(stderr).not.toContain('cli.js')

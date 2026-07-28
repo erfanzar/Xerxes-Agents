@@ -4,6 +4,11 @@
 import { existsSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 
+import { CliWriter, createCliStyle } from './cliStyle.js'
+
+/** Label column width for the update report's fact block. */
+const FIELD_WIDTH = 8
+
 /** Environment variable containing a release-approved Bun package or source spec. */
 export const BUN_PACKAGE_SPEC_ENV = 'XERXES_PACKAGE'
 export const DEFAULT_GIT_TIMEOUT = 1_000
@@ -646,7 +651,13 @@ export async function runUpdateCommand(
   host: UpdateCommandHost = {},
 ): Promise<UpdateCommandResult> {
   const options = parseUpdateCommandOptions(args)
-  const write = host.write ?? console.log
+  // A caller-supplied `write` means the output is being captured rather than
+  // shown, so styling is off for it: escape sequences in captured text would be
+  // noise at best and a parsing bug at worst.
+  const writer = new CliWriter(
+    host.write === undefined ? {} : { style: createCliStyle('none'), write: host.write },
+  )
+  const write = (line: string) => writer.line(line)
   const runner = host.runner ?? runUpdateProcess
   const cwd = resolve(
     host.cwd ?? options.cwd ?? (options.git ? resolveUpdateCheckoutDirectory() : process.cwd()),
@@ -654,7 +665,13 @@ export async function runUpdateCommand(
   const gitTimeout = validateTimeout(host.timeout ?? DEFAULT_GIT_TIMEOUT)
   const updateTimeout = validateTimeout(host.timeout ?? DEFAULT_BUN_UPDATE_TIMEOUT)
   const git = await gitUpdateStatus({ cwd, fetch: options.check, runner, timeout: gitTimeout })
-  write('Git: ' + formatGitUpdateStatus(git))
+  writer.heading('Xerxes update')
+  writer.line()
+  // Settled facts go in an aligned block and outcomes go in status rows below,
+  // so "what is true" and "what happened" are visually separable. Previously
+  // every line was an undifferentiated `Label: sentence`.
+  writer.field('Checkout', writer.value(cwd), FIELD_WIDTH)
+  writer.field('Git', formatGitUpdateStatus(git), FIELD_WIDTH)
 
   let packageCheck: BunPackageUpdateCheck | undefined
   if (options.check && options.packageName !== undefined) {
@@ -663,12 +680,23 @@ export async function runUpdateCommand(
       ...(options.currentVersion === undefined ? {} : { currentVersion: options.currentVersion }),
       ...(host.fetch === undefined ? {} : { fetch: host.fetch }),
     })
-    write(formatBunPackageUpdateCheck(packageCheck))
+    writer.field('Registry', formatBunPackageUpdateCheck(packageCheck), FIELD_WIDTH)
   } else if (options.check) {
-    write('Package registry: skipped; pass --package <npm-package> to check a named registry entry.')
+    // The label already says "Registry", so the sentence does not repeat it —
+    // the guidance is what earns the space.
+    writer.field(
+      'Registry',
+      `skipped ${writer.style.dim('(pass --package <npm-package> to check a named registry entry)')}`,
+      FIELD_WIDTH,
+    )
   } else {
-    write('Package registry: not checked; use --check --package <npm-package> to opt in.')
+    writer.field(
+      'Registry',
+      `not checked ${writer.style.dim('(use --check --package <npm-package> to opt in)')}`,
+      FIELD_WIDTH,
+    )
   }
+  writer.line()
 
   let plan: BunUpdatePlan | undefined
   let execution: BunUpdateExecutionResult | undefined
@@ -685,15 +713,31 @@ export async function runUpdateCommand(
       })
     }
     if (options.dryRun && gitPlan !== undefined) {
-      write(`Git update plan for ${gitPlan.checkout} (upstream ${gitPlan.upstream}):`)
-      for (const step of gitPlan.steps) write(`Would run (${step.name}): ` + shellCommand(step.argv))
-      write('Dry run only; re-run with --git --apply to execute these steps.')
+      writer.status('pending', '', `Git update plan for ${gitPlan.checkout} (upstream ${gitPlan.upstream}):`)
+      // Numbered because these run in order and a reader needs to know where a
+      // failure stopped; the unnumbered list gave no such handle. Step names are
+      // padded before styling — escape sequences have no display width, so
+      // padding a styled string aligns by byte count and looks ragged.
+      const nameWidth = Math.max(...gitPlan.steps.map(step => step.name.length))
+      gitPlan.steps.forEach((step, index) => {
+        const name = writer.style.bold(step.name.padEnd(nameWidth))
+        writer.step(`${name}  ${writer.command(shellCommand(step.argv))}`, index + 1)
+      })
+      writer.line()
+      writer.hint('Dry run only; re-run with --git --apply to execute these steps.')
     } else if (options.apply && gitPlan !== undefined) {
       gitExecution = await executeGitUpdate(gitPlan, { runner, timeout: gitTimeout })
-      for (const name of gitExecution.completedSteps) write(`git update step "${name}" completed.`)
-      write('Git update completed; restart running Xerxes processes to use the new build.')
+      for (const name of gitExecution.completedSteps) {
+        writer.status('ok', '', `git update step "${name}" completed.`)
+      }
+      writer.line()
+      writer.status('ok', '', 'Git update completed; restart running Xerxes processes to use the new build.')
     } else {
-      write('Git update: not run; use --git --dry-run to review the plan or --git --apply to execute it.')
+      writer.status(
+        'info',
+        '',
+        'Git update: not run; use --git --dry-run to review the plan or --git --apply to execute it.',
+      )
     }
   } else if (options.dryRun || options.apply) {
     plan = planBunUpdate({
@@ -702,18 +746,20 @@ export async function runUpdateCommand(
       ...(options.packageSpec === undefined ? {} : { packageSpec: options.packageSpec }),
     })
     if (options.dryRun) {
-      write('Would run: ' + shellCommand(plan.argv))
+      writer.status('pending', '', 'Would run: ' + writer.command(shellCommand(plan.argv)))
     } else {
       execution = await executeBunUpdate(plan, { cwd, runner, timeout: updateTimeout })
       if (!execution.ok) {
         throw new UpdateCommandError('Bun update command failed: ' + processFailure(execution))
       }
+      // Bun's own output is reproduced verbatim and unstyled: it is another
+      // program's text, and re-decorating it would misattribute it to Xerxes.
       if (execution.stdout.trim()) write(execution.stdout.trim())
-      if (execution.stderr.trim()) write('Bun update stderr: ' + oneLine(execution.stderr))
-      write('Bun update command exited successfully.')
+      if (execution.stderr.trim()) writer.status('warn', '', 'Bun update stderr: ' + oneLine(execution.stderr))
+      writer.status('ok', '', 'Bun update command exited successfully.')
     }
   } else {
-    write('No Bun update command was run. Use --dry-run to review a spec or --apply to execute one.')
+    writer.status('info', '', 'No Bun update command was run. Use --dry-run to review a spec or --apply to execute one.')
   }
 
   return {

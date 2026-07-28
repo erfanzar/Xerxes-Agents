@@ -18,6 +18,8 @@ const BORDER_STYLE_MAP: Record<BorderStyle, 'double' | 'heavy' | 'rounded' | 'si
 
 export interface BoxProps {
   children?: ReactNode
+  /** Renderable id, addressable by ScrollBoxRenderable.scrollChildIntoView. */
+  id?: string
   flexDirection?: 'column' | 'row'
   flexGrow?: number
   flexShrink?: number

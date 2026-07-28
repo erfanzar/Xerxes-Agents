@@ -2,9 +2,15 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { stat } from 'node:fs/promises'
-import { basename, resolve } from 'node:path'
+import { resolve } from 'node:path'
 
 import { ValidationError } from '../core/errors.js'
+import {
+  CTRL_C,
+  defaultInteractiveShell,
+  interruptViaTerminalWrite,
+  shellCommandArgv,
+} from '../core/hostPlatform.js'
 import { WorkspacePathResolver } from '../tools/pathSafety.js'
 
 const DEFAULT_MAX_PENDING_OUTPUT_CHARS = 1_000_000
@@ -87,8 +93,8 @@ export class PtySessionManager {
 
   async createSession(command: string, options: CreatePtySessionOptions = {}): Promise<PtyOutput> {
     const workdir = await this.resolveWorkdir(options.workdir)
-    const shell = options.shell ?? process.env.SHELL ?? '/bin/sh'
-    const args = shellArguments(shell, command, options.login ?? true)
+    const shell = options.shell ?? defaultInteractiveShell()
+    const args = shellCommandArgv(shell, command, options.login ?? true)
     const id = `pty_${crypto.randomUUID().replaceAll('-', '').slice(0, 10)}`
     const output = new OutputBuffer(this.maxPendingOutputChars)
     const waiters = new Set<() => void>()
@@ -125,7 +131,17 @@ export class PtySessionManager {
     const yieldTimeMs = options.yieldTimeMs ?? DEFAULT_YIELD_MS
     requireNonnegativeInteger(yieldTimeMs, 'yieldTimeMs')
     if (options.interrupt && session.process.exitCode === null) {
-      session.process.kill('SIGINT')
+      // Windows has no SIGINT delivery to another process: Node/Bun map every
+      // signal except 0 onto TerminateProcess, so `kill('SIGINT')` would kill
+      // the shell itself and end the session instead of interrupting the command
+      // running inside it. Writing the Ctrl+C control character into the terminal
+      // is the equivalent that the console driver turns into a real interrupt and
+      // that leaves the shell alive for the next call.
+      if (interruptViaTerminalWrite()) {
+        session.terminal.write(CTRL_C)
+      } else {
+        session.process.kill('SIGINT')
+      }
     }
     if (options.chars) session.terminal.write(options.chars)
     if (options.closeStdin) {
@@ -281,13 +297,6 @@ class OutputBuffer {
     }
     return { text: values.join(''), truncated: this.length > 0 }
   }
-}
-
-function shellArguments(shell: string, command: string, login: boolean): string[] {
-  const name = basename(shell)
-  const supportsLogin = login && (name.endsWith('bash') || name.endsWith('zsh'))
-  if (!command.trim()) return [shell, ...(supportsLogin ? ['-l'] : [])]
-  return [shell, ...(supportsLogin ? ['-l'] : []), '-c', command]
 }
 
 function resolveWaiters(waiters: Set<() => void>): void {

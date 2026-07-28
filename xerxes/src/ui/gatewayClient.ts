@@ -25,6 +25,7 @@ import {
   usageFromStatus
 } from './gatewayAdapter.js'
 import type { AnyEvent, GatewayTranscriptMessage } from './gatewayTypes.js'
+import { controlChannelPath, isWindows } from './lib/hostPlatform.js'
 import { ImageAttachmentError, loadImageAttachment, resolveAttachmentPath } from './lib/imageAttachment.js'
 import type { SessionInfo, Usage } from './types.js'
 
@@ -77,15 +78,23 @@ export function resolveProjectDir(projectDir?: string): string {
 }
 
 /**
- * Per-project socket + pid paths. `XERXES_DAEMON_SOCKET` overrides the socket
- * while retaining the deterministic per-project pid path.
+ * Per-project control-channel + pid paths. `XERXES_DAEMON_SOCKET` overrides the
+ * channel address while retaining the deterministic per-project pid path.
+ *
+ * Windows gets a named pipe rather than a Unix socket; `node:net` connects to
+ * either through the same `path` option. This must derive the identical address
+ * to `daemon/paths.ts`, or the TUI looks for the daemon somewhere it never bound
+ * and starts a second one.
  */
-export function daemonPaths(projectDir: string): { socketPath: string; pidPath: string } {
+export function daemonPaths(
+  projectDir: string,
+  platform: NodeJS.Platform = process.platform
+): { socketPath: string; pidPath: string } {
   const digest = createHash('sha256').update(projectDir, 'utf8').digest('hex').slice(0, 16)
   const base = join(xerxesHome(), 'daemon', 'projects')
   const override = (process.env.XERXES_DAEMON_SOCKET ?? '').trim()
   return {
-    socketPath: override || join(base, `${digest}.sock`),
+    socketPath: override || controlChannelPath(base, digest, platform),
     pidPath: join(base, `${digest}.pid`)
   }
 }
@@ -134,7 +143,11 @@ export function daemonBuildDecision(input: DaemonBuildDecisionInput): DaemonBuil
 }
 
 /** Exact source-checkout daemon signature required before automatic restart. */
-export function daemonCommandMatches(command: string, launch: BunDaemonLaunch): boolean {
+export function daemonCommandMatches(
+  command: string,
+  launch: BunDaemonLaunch,
+  platform: NodeJS.Platform = process.platform
+): boolean {
   const [entryPath, daemon, projectFlag, projectDir, socketFlag, socketPath, pidFlag, pidPath] = launch.args
   if (
     daemon !== 'daemon' ||
@@ -153,7 +166,15 @@ export function daemonCommandMatches(command: string, launch: BunDaemonLaunch): 
   if ([entryPath, projectDir, socketPath, pidPath].some(value => /\s/.test(value))) {
     return false
   }
-  return command.includes(
+  // Windows reports a single quoted command line — `"C:\...\bun.exe"
+  // "C:\...\cli.ts" daemon --project-dir ...` — so the argv-joined expectation
+  // never appears verbatim and every Windows daemon looked unrecognized, which
+  // downgraded a routine build-change restart into "restart it explicitly".
+  // Dropping the quotes is safe here: a Windows path cannot contain `"`, and the
+  // whitespace guard above already rejected anything whose tokens could merge.
+  // POSIX matching is left byte-identical.
+  const observed = isWindows(platform) ? command.replaceAll('"', '') : command
+  return observed.includes(
     `${entryPath} daemon --project-dir ${projectDir} --socket ${socketPath} --pid-file ${pidPath}`
   )
 }
@@ -1503,11 +1524,32 @@ function pidFromFile(path: string): number | undefined {
   }
 }
 
-function daemonProcessCommand(pid: number): string {
+/**
+ * The daemon's command line, or '' when it cannot be read.
+ *
+ * Mirrors `core/processLiveness.ts`; see the note at the top of that file for
+ * why the TUI keeps its own copy. Windows has no `ps`, so the equivalent is a
+ * pid-filtered CIM query. An unreadable command line means "identity not
+ * proven", which the caller already treats as a reason not to kill anything.
+ */
+function daemonProcessCommand(pid: number, platform: NodeJS.Platform = process.platform): string {
+  const target = Number.isFinite(pid) ? Math.trunc(pid) : -1
+  const [command, args] = isWindows(platform)
+    ? ([
+        'powershell.exe',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          `(Get-CimInstance Win32_Process -Filter "ProcessId=${target}").CommandLine`
+        ]
+      ] as const)
+    : (['ps', ['-p', String(target), '-o', 'command=']] as const)
   try {
-    return execFileSync('ps', ['-p', String(pid), '-o', 'command='], {
+    return execFileSync(command, [...args], {
       encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore']
+      stdio: ['ignore', 'pipe', 'ignore'],
+      ...(isWindows(platform) ? { windowsHide: true } : {})
     }).trim()
   } catch {
     return ''

@@ -86,6 +86,21 @@ curl -fsSL https://raw.githubusercontent.com/erfanzar/Xerxes-Agents/main/scripts
   | XERXES_BIN_DIRECTORY="$HOME/bin" sh
 ```
 
+On Windows, use the PowerShell installer instead — `install.sh` needs a POSIX
+shell, and Windows PATH entries must carry an extension, so the launchers it
+writes are `xerxes.cmd` and `xerxes-acp.cmd` under `%LOCALAPPDATA%\Xerxes\bin`:
+
+```powershell
+git clone https://github.com/erfanzar/Xerxes-Agents.git
+cd Xerxes-Agents
+./scripts/install.ps1
+```
+
+Native Windows is supported and does not need WSL2: the daemon control channel is
+a named pipe there rather than a Unix socket. See
+[docs/deployment-guide.md](docs/deployment-guide.md#windows-hosts) for the
+platform differences that are worth knowing (PTY shell, MCP `.cmd` shims).
+
 Or run from source:
 
 ```bash

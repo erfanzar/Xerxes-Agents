@@ -7,7 +7,7 @@ import { act, Profiler } from 'react'
 import { describe, expect, it } from 'vitest'
 
 import type { SpawnSnapshot } from '../app/spawnHistoryStore.js'
-import { agentContentWidth, agentSidebarWidth } from '../domain/agentPanelLayout.js'
+import { agentContentWidth, agentSidebarWidth, shouldMountAgentSidebar } from '../domain/agentPanelLayout.js'
 import {
   AgentPanel,
   AgentPanelHotkey,
@@ -63,6 +63,14 @@ describe('agent panel model', () => {
     expect(rows).toHaveLength(2)
     expect(rows[0]).toMatchObject({ archived: false, childCount: 1, creatorTitle: 'Xerxes', title: 'Runtime Audit' })
     expect(rows[1]).toMatchObject({ archived: true, creatorTitle: 'Runtime Audit', title: 'Policy Review' })
+  })
+
+  it('unmounts the rail while the overlay is open so agents are not listed twice', () => {
+    expect(shouldMountAgentSidebar(160, 4, false)).toBe(true)
+    expect(shouldMountAgentSidebar(160, 4, true)).toBe(false)
+    // The "does it fit" answer the footer hint reads must not change with the
+    // overlay, or the hint flips while the overlay covers it and flips back.
+    expect(shouldShowAgentSidebar(160, 4)).toBe(true)
   })
 
   it('keeps the sidebar at zero width until an agent is actually tracked', () => {
@@ -194,6 +202,60 @@ describe('OpenTUI agent panel', () => {
       setup.mockInput.pressKey('F6')
       await setup.flush()
       expect(transitions).toEqual([true])
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
+
+  it('keeps the overlay inside the terminal and its footer on screen for a long agent list', async () => {
+    // Ten agents is far more than fits: the frame previously grew to its content
+    // height and ran off the bottom of the terminal, taking the footer — the only
+    // place the close key is advertised — with it.
+    const many = Array.from({ length: 10 }, (_, index) =>
+      agent({ id: `agent-${index}`, status: 'running', title: `Deep Read Subsystem ${index}` })
+    )
+    const setup = await testRender(
+      <AgentPanelOverlay history={[]} liveAgents={many} onClose={() => {}} t={DEFAULT_THEME} />,
+      { height: 40, width: 120 }
+    )
+
+    try {
+      await setup.flush()
+      const rows = setup.captureCharFrame().split('\n')
+
+      expect(rows.join('\n')).toContain('10 live')
+      expect(rows.join('\n')).toContain('F6/Esc close')
+      // The frame must not spill past the viewport it was given.
+      expect(rows.filter(row => row.trim()).length).toBeLessThanOrEqual(40)
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
+
+  it('scrolls the default selection into view when it sits below the fold', async () => {
+    // The failed agent is last, so it is both the default selection and far
+    // outside the initial viewport. A bounded frame that does not scroll would
+    // open on the first rows and leave the row the user came for invisible.
+    const many = [
+      ...Array.from({ length: 9 }, (_, index) =>
+        agent({ id: `ok-${index}`, status: 'completed', title: `Healthy Worker ${index}` })
+      ),
+      agent({ id: 'boom', status: 'failed', title: 'Crashed Worker' })
+    ]
+    const setup = await testRender(
+      <AgentPanelOverlay history={[]} liveAgents={many} onClose={() => {}} t={DEFAULT_THEME} />,
+      { height: 30, width: 90 }
+    )
+
+    try {
+      // One extra settle frame: cards report no position until Yoga lays them out.
+      await setup.flush()
+      await act(async () => {
+        await Bun.sleep(0)
+      })
+      await setup.flush()
+
+      expect(setup.captureCharFrame()).toContain('Crashed Worker')
     } finally {
       act(() => setup.renderer.destroy())
     }

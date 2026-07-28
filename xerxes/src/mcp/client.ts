@@ -1,6 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { planSpawn } from '../core/windowsSpawn.js'
 import type { JsonObject, JsonSchema } from '../types/toolCalls.js'
 import { MCPHttpClientTransport } from './http.js'
 import { mcpConfigSecrets, scrubCredentials } from './reconnect.js'
@@ -184,11 +185,16 @@ export class MCPClient {
     }
     let child: Bun.PipedSubprocess
     try {
-      child = Bun.spawn([this.config.command, ...(this.config.args ?? [])], {
+      // On Windows an MCP server launched as `npx …` resolves to a `.cmd` shim,
+      // which CreateProcess cannot execute at all; planSpawn produces the
+      // cmd.exe form for those and leaves POSIX argv untouched.
+      const plan = planSpawn(this.config.command, this.config.args ?? [])
+      child = Bun.spawn(plan.argv, {
         env: { ...process.env, ...this.config.env },
         stderr: 'pipe',
         stdin: 'pipe',
         stdout: 'pipe',
+        ...(plan.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
       })
     } catch (error) {
       throw asConnectionError(error)

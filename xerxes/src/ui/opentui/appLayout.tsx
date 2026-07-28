@@ -29,7 +29,7 @@ import {
   derafshGradientFrame,
   derafshKaviani
 } from '../banner.js'
-import { agentSidebarWidth, shouldShowAgentSidebar } from '../domain/agentPanelLayout.js'
+import { agentSidebarWidth, shouldMountAgentSidebar, shouldShowAgentSidebar } from '../domain/agentPanelLayout.js'
 import { sectionMode } from '../domain/details.js'
 import { completionToApplyOnSubmit } from '../domain/slash.js'
 import { shouldShowStartupWelcome, startupComposerWidth } from '../domain/startupLayout.js'
@@ -1532,7 +1532,8 @@ export function AppLayout({
     () => collectAgentPanelRecords(liveAgents, spawnHistory).length,
     [liveAgents, spawnHistory]
   )
-  const showAgentSidebar = shouldShowAgentSidebar(width, agentCount)
+  const agentSidebarFits = shouldShowAgentSidebar(width, agentCount)
+  const showAgentSidebar = shouldMountAgentSidebar(width, agentCount, overlay.agents)
   const panelWidthDelta = useStore($panelWidthDelta)
   const sidebarWidth = withPanelWidthDelta(agentSidebarWidth(width), width)
   void panelWidthDelta
@@ -1550,7 +1551,10 @@ export function AppLayout({
     overlay.skillsHub ||
     overlay.sudo
   )
-  const footerAgentHint = showAgentSidebar ? undefined : 'F6 agents · F7 diff'
+  // Keyed off whether the rail *fits*, not whether it is showing right now, so
+  // opening the overlay does not swap the footer text underneath the backdrop
+  // and swap it back on close.
+  const footerAgentHint = agentSidebarFits ? undefined : 'F6 agents · F7 diff'
   const welcomeRightLabel = [footerAgentHint, ui.info?.version ? `v${ui.info.version}` : undefined]
     .filter(Boolean)
     .join(' · ')

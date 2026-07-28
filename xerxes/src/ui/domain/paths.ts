@@ -1,8 +1,18 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
-export const shortCwd = (cwd: string, max = 28) => {
-  const h = process.env.HOME
-  const p = h && cwd.startsWith(h) ? `~${cwd.slice(h.length)}` : cwd
+import { homedir } from 'node:os'
+
+/**
+ * Abbreviate a working directory for the status line.
+ *
+ * `HOME` is unset on Windows, where the home directory comes from `USERPROFILE`
+ * — so without the fallback every Windows path rendered in full and then got
+ * truncated from the left, hiding the part the user cares about behind an
+ * ellipsis. `homedir()` covers both and matches what the rest of the runtime
+ * resolves paths against.
+ */
+export const shortCwd = (cwd: string, max = 28, home: string = homedir()) => {
+  const p = home && cwd.startsWith(home) ? `~${cwd.slice(home.length)}` : cwd
 
   return p.length <= max ? p : `…${p.slice(-(max - 1))}`
 }

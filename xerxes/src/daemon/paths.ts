@@ -6,6 +6,8 @@ import { realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 
+import { controlChannelPath } from '../core/hostPlatform.js'
+
 export interface DaemonPaths {
   readonly pidPath: string
   readonly socketPath: string
@@ -30,14 +32,28 @@ export function resolveProjectDirectory(projectDirectory = process.cwd()): strin
   }
 }
 
-/** Match the current TypeScript gateway's per-project Unix socket algorithm. */
-export function daemonPaths(projectDirectory = process.cwd(), environment = process.env): DaemonPaths {
+/**
+ * Match the current TypeScript gateway's per-project control-channel algorithm.
+ *
+ * POSIX hosts get a Unix socket under the Xerxes home. Windows has no Unix
+ * sockets in this position, so the control channel is a named pipe instead —
+ * same `node:net` API, different address form. The pid file stays on disk on
+ * both, because pipe names are not enumerable the way a directory is.
+ *
+ * `platform` is a parameter so the Windows branch is reachable from a POSIX test
+ * run; `ui/lib/hostPlatform.ts` must derive the identical address.
+ */
+export function daemonPaths(
+  projectDirectory = process.cwd(),
+  environment = process.env,
+  platform: NodeJS.Platform = process.platform,
+): DaemonPaths {
   const project = resolveProjectDirectory(projectDirectory)
   const digest = createHash('sha256').update(project, 'utf8').digest('hex').slice(0, 16)
   const base = join(xerxesHome(environment), 'daemon', 'projects')
   const configuredSocket = environment.XERXES_DAEMON_SOCKET?.trim()
   return {
-    socketPath: configuredSocket || join(base, `${digest}.sock`),
+    socketPath: configuredSocket || controlChannelPath(base, digest, platform),
     pidPath: join(base, `${digest}.pid`),
   }
 }

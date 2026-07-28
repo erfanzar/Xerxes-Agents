@@ -4,6 +4,14 @@
 import { stat } from 'node:fs/promises'
 
 import { XerxesError } from '../core/errors.js'
+import {
+  DEFAULT_PATHEXT,
+  environmentNameKey,
+  environmentNamesMatch,
+  fallbackExecutablePath,
+  isWindows,
+  safeEnvironmentNames,
+} from '../core/hostPlatform.js'
 import { WorkspacePathError, WorkspacePathResolver } from '../tools/pathSafety.js'
 import type { JsonObject } from '../types/toolCalls.js'
 import type { SandboxBackend, SandboxExecutionRequest } from './sandbox.js'
@@ -18,7 +26,6 @@ const DEFAULT_MAX_TIMEOUT_MS = 30_000
 const MAX_TIMER_DELAY_MS = 2_147_483_647
 const MAX_ARGUMENT_BYTES = 64 * 1024
 const MAX_OUTPUT_CHARS = 1_000_000
-const SAFE_PARENT_ENVIRONMENT_NAMES = ['PATH', 'HOME', 'LANG', 'LC_ALL', 'TERM'] as const
 const BLOCKED_ENVIRONMENT_NAMES = new Set(['BUN_INSTALL', 'BUN_OPTIONS', 'NODE_OPTIONS', 'NODE_PATH', 'PYTHONPATH'])
 const ENVIRONMENT_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
 const UNSAFE_EXECUTABLE = /[;&|`$<>\0]/
@@ -349,19 +356,36 @@ function normalizeOptionalPositiveInteger(value: number | undefined, name: strin
   return normalizePositiveInteger(value, name, Number.MAX_SAFE_INTEGER)
 }
 
-function sanitizeEnvironment(values: Readonly<Record<string, string>> | undefined): Readonly<Record<string, string>> {
+/**
+ * Build the minimal child environment.
+ *
+ * The allow-list is platform-specific because the Windows floor is much higher:
+ * a process spawned without `SystemRoot` cannot load system DLLs, one without
+ * `PATHEXT` cannot resolve `git` to `git.exe`, and one without `TEMP` fails
+ * inside anything that writes a scratch file. See `core/hostPlatform.ts`.
+ */
+function sanitizeEnvironment(
+  values: Readonly<Record<string, string>> | undefined,
+  platform: NodeJS.Platform = process.platform,
+): Readonly<Record<string, string>> {
   const environment: Record<string, string> = {}
-  for (const name of SAFE_PARENT_ENVIRONMENT_NAMES) {
+  for (const name of safeEnvironmentNames(platform)) {
     const value = process.env[name]
     if (value !== undefined) {
       environment[name] = value
     }
   }
   if (environment.PATH === undefined) {
-    environment.PATH = process.platform === 'win32' ? '' : '/usr/bin:/bin'
+    // Previously the Windows fallback was the empty string, which resolved
+    // nothing at all: every allow-listed command failed with ENOENT rather than
+    // running, so a strict sandbox looked healthy while executing no work.
+    environment.PATH = fallbackExecutablePath(process.env, platform)
+  }
+  if (isWindows(platform) && environment.PATHEXT === undefined) {
+    environment.PATHEXT = DEFAULT_PATHEXT
   }
   for (const [name, value] of Object.entries(values ?? {})) {
-    if (!ENVIRONMENT_NAME.test(name) || blockedEnvironmentName(name)) {
+    if (!ENVIRONMENT_NAME.test(name) || blockedEnvironmentName(name, platform)) {
       throw new SubprocessSandboxConfigurationError(`environment variable ${JSON.stringify(name)} is not allowed`)
     }
     if (typeof value !== 'string') {
@@ -372,11 +396,27 @@ function sanitizeEnvironment(values: Readonly<Record<string, string>> | undefine
   return Object.freeze(environment)
 }
 
-function blockedEnvironmentName(name: string): boolean {
-  return name === 'PATH'
-    || name.startsWith('DYLD_')
-    || name.startsWith('LD_')
-    || BLOCKED_ENVIRONMENT_NAMES.has(name)
+/**
+ * Reject names a caller must not be able to set on a sandboxed child.
+ *
+ * Matching is case-insensitive on Windows because environment blocks are:
+ * a block-list that only rejected `NODE_OPTIONS` still let `node_options`
+ * through, and Windows would have resolved the two to the same variable —
+ * re-opening exactly the injection this list exists to close.
+ */
+function blockedEnvironmentName(name: string, platform: NodeJS.Platform = process.platform): boolean {
+  const key = environmentNameKey(name, platform)
+  const blocked = isWindows(platform)
+    ? new Set([...BLOCKED_ENVIRONMENT_NAMES].map(entry => entry.toLowerCase()))
+    : BLOCKED_ENVIRONMENT_NAMES
+  return environmentNamesMatch(name, 'PATH', platform)
+    // PATHEXT decides which extension `git` resolves to on Windows, so leaving it
+    // caller-settable would hand back the executable-resolution control that
+    // blocking PATH takes away.
+    || (isWindows(platform) && environmentNamesMatch(name, 'PATHEXT', platform))
+    || key.startsWith(environmentNameKey('DYLD_', platform))
+    || key.startsWith(environmentNameKey('LD_', platform))
+    || blocked.has(key)
 }
 
 function requiredExecutable(arguments_: JsonObject, toolName: string): string {
