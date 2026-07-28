@@ -289,8 +289,15 @@ test('host retry of a cancelled task resumes the retained conversation instead o
     if (!historySessionId) throw new Error('expected a persisted child history id')
     // Wait for the cancellation to settle and persist before retrying.
     await waitFor(() => requests.length === 1 && host.manager.listTasks()[0]?.status === 'cancelled')
+    // Poll for the status this asserts, not merely for the file to appear. The
+    // manager marks the task cancelled in memory before the transcript carrying
+    // that status is written, so waiting only for existence loaded the earlier
+    // `running` snapshot and asserted against it — passing or failing on how
+    // quickly the host happened to flush. Still non-vacuous: a status that never
+    // settles exhausts the budget and the assertion below fails on the last
+    // snapshot read.
     let transcript = await transcripts.load(historySessionId, { currentProjectDirectory: process.cwd() })
-    for (let attempt = 0; attempt < 200 && transcript === undefined; attempt += 1) {
+    for (let attempt = 0; attempt < 400 && transcript?.metadata?.status !== 'cancelled'; attempt += 1) {
       await Bun.sleep(10)
       transcript = await transcripts.load(historySessionId, { currentProjectDirectory: process.cwd() })
     }
