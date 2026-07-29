@@ -18,7 +18,14 @@ import { rpcErrorMessage } from '../lib/rpc.js'
 import { formatAbandonedClarify, formatToolCall, stripAnsi } from '../lib/text.js'
 import { summarizeToolStartDisplay } from '../lib/toolStartDisplay.js'
 import { fromSkin } from '../theme.js'
-import type { Msg, SessionInfo, SlashCatalog, SubagentProgress, SubagentStatus } from '../types.js'
+import type {
+  Msg,
+  SessionInfo,
+  SlashCatalog,
+  SubagentProgress,
+  SubagentStatus,
+  SubagentToolCall
+} from '../types.js'
 
 import type { GatewayEventHandlerContext } from './interfaces.js'
 import { getOverlayState, patchOverlayState } from './overlayStore.js'
@@ -59,6 +66,60 @@ const pushUnique =
 const pushThinking = pushUnique(6)
 const pushNote = pushUnique(6)
 const pushTool = pushUnique(8)
+
+/**
+ * Tool calls retained per agent for the inspector.
+ *
+ * Deeper than the 8-line rail tail because this list is the answer to "what has
+ * this agent actually been doing", and an agent thirty calls into a refactor
+ * should not have its first twenty erased.
+ */
+const SUBAGENT_TOOL_CALL_LIMIT = 120
+
+const appendToolCall = (calls: SubagentToolCall[] | undefined, call: SubagentToolCall): SubagentToolCall[] =>
+  [...(calls ?? []), call].slice(-SUBAGENT_TOOL_CALL_LIMIT)
+
+/**
+ * Close out the call a result belongs to.
+ *
+ * Matched by id when the provider supplied one, else by the most recent
+ * unfinished call with the same name — which is what a provider that omits
+ * tool_call_id leaves us, and is right for the sequential case that produces.
+ */
+const closeToolCall = (
+  calls: SubagentToolCall[] | undefined,
+  result: { durationMs?: number; id?: string; name: string; ok: boolean; preview?: string },
+  now: number
+): SubagentToolCall[] => {
+  const list = calls ?? []
+  const index = result.id
+    ? list.findIndex(call => call.id === result.id)
+    : list.map(call => call.name === result.name && call.endedAt === undefined).lastIndexOf(true)
+
+  const closed = (call: SubagentToolCall): SubagentToolCall => ({
+    ...call,
+    endedAt: result.durationMs === undefined ? now : call.startedAt + result.durationMs,
+    ok: result.ok,
+    ...(result.preview ? { result: result.preview } : {})
+  })
+
+  if (index < 0) {
+    // A result with no matching start: the run began before this client
+    // attached, or the start event was dropped. Recording it as an
+    // already-finished call beats discarding evidence that work happened.
+    const startedAt = now - (result.durationMs ?? 0)
+    return appendToolCall(list, {
+      id: result.id || `${result.name}:${startedAt}`,
+      name: result.name,
+      startedAt,
+      endedAt: now,
+      ok: result.ok,
+      ...(result.preview ? { result: result.preview } : {})
+    })
+  }
+
+  return list.map((call, position) => (position === index ? closed(call) : call))
+}
 
 const hasSkillEntries = (skills?: Record<string, string[]>) =>
   Object.values(skills ?? {}).some(values => values.length > 0)
@@ -882,14 +943,40 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
       }
 
       case 'subagent.tool': {
-        const line = formatToolCall(
-          ev.payload.tool_name ?? 'delegate_task',
-          ev.payload.tool_preview ?? ev.payload.text ?? ''
-        )
+        const name = ev.payload.tool_name ?? 'delegate_task'
+        const preview = ev.payload.tool_preview ?? ev.payload.text ?? ''
+        const line = formatToolCall(name, preview)
+        const startedAt = Date.now()
 
         const patch: SubagentProgressPatch = c => ({
           status: keepTerminalElseRunning(c.status),
+          toolCalls: appendToolCall(c.toolCalls, {
+            id: ev.payload.tool_call_id || `${name}:${startedAt}:${c.toolCalls?.length ?? 0}`,
+            name,
+            startedAt,
+            ...(preview.trim() ? { preview: preview.trim() } : {})
+          }),
           tools: pushTool(c.tools, line)
+        })
+        turnController.upsertSubagent(ev.payload, patch, { createIfMissing: false })
+        reconcileArchived(ev.payload, patch)
+
+        return
+      }
+
+      case 'subagent.tool_result': {
+        const now = Date.now()
+        const result = {
+          name: ev.payload.tool_name ?? 'tool',
+          ok: ev.payload.tool_ok !== false,
+          ...(ev.payload.tool_call_id ? { id: ev.payload.tool_call_id } : {}),
+          ...(ev.payload.tool_duration_ms === undefined ? {} : { durationMs: ev.payload.tool_duration_ms }),
+          ...(ev.payload.tool_preview ? { preview: ev.payload.tool_preview } : {})
+        }
+
+        const patch: SubagentProgressPatch = c => ({
+          status: keepTerminalElseRunning(c.status),
+          toolCalls: closeToolCall(c.toolCalls, result, now)
         })
         turnController.upsertSubagent(ev.payload, patch, { createIfMissing: false })
         reconcileArchived(ev.payload, patch)

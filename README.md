@@ -154,8 +154,19 @@ The home screen centers the animated Derafsh and a 75-column composer. During a
 session, Xerxes switches to a compact mode/title header, a sticky transcript, and one
 integrated prompt surface for queued input, completions, model/context metadata, and
 keyboard hints. Once agent work exists, wide terminals add a live Agents rail on the
-right with concise titles, hierarchy, policy, files, tool calls, tokens, and completion summaries. On a
-narrow terminal, press `F6` or run `/agents` for the same scrollable panel.
+right, where each row reports what an agent cost — tokens, elapsed time, tool count —
+alongside its task. On a narrow terminal, press `F6` or run `/agents` for the same
+scrollable panel.
+
+Press `Enter` on a row (or click it) to inspect one agent: what it is doing right now,
+every tool call it made with how long each took, the files it touched, and the policy it
+runs under. `Esc` returns to the list, and `Esc` again to the main agent.
+
+`F8` or `/terminals` shows every shell Xerxes is driving — background commands,
+foreground runs, and interactive sessions — with a live output tail per terminal.
+Watching is non-destructive: the panel reads a mirror of the output, never the buffer the
+agent itself polls. From the detail view you can send input to an interactive session
+(`i`), interrupt it (`c`), or kill a process (`k`, or `K` to force).
 
 Useful commands:
 
@@ -166,6 +177,7 @@ Useful commands:
 /new                  start a fresh session
 /resume <id|name>     resume saved work
 /agents               inspect sub-agents
+/terminals            inspect the shells Xerxes is running
 /skills               inspect discovered skills
 /tools                inspect the active tool registry
 /permissions          inspect or change permission policy

@@ -52,6 +52,8 @@ interface AgentPanelProps {
 }
 
 interface AgentPanelOverlayProps extends Omit<AgentPanelProps, 'variant'> {
+  /** Open straight into one agent's inspector — set by clicking a rail card. */
+  initialInspectId?: null | string
   onClose: () => void
 }
 
@@ -159,20 +161,47 @@ function activitySummary(item: SubagentProgress): string {
   return item.status === 'queued' ? 'Waiting to start' : item.status === 'running' ? 'Working' : 'No summary reported'
 }
 
-function metricLine(item: SubagentProgress, now: number): string {
-  const toolCount = Math.max(item.toolCount, item.tools.length, item.outputTail?.length ?? 0)
-  const parts = [`${toolCount} tool${toolCount === 1 ? '' : 's'}`]
-  const input = item.inputTokens ?? 0
-  const output = item.outputTokens ?? 0
-  const tokens = input + output
-  const elapsed = subagentElapsedSeconds(item, now)
+const agentToolCount = (item: SubagentProgress): number =>
+  Math.max(item.toolCount, item.toolCalls?.length ?? 0, item.tools.length, item.outputTail?.length ?? 0)
 
-  if (tokens > 0) parts.push(`${fmtTokens(tokens)} tok`)
-  if ((item.reasoningTokens ?? 0) > 0) parts.push(`${fmtTokens(item.reasoningTokens!)} reasoning`)
+/**
+ * The row's one metrics line: spend, time, work done.
+ *
+ * Tokens lead because that is the number the list exists to answer — what an
+ * agent cost. What it is saying right now belongs in the inspector, not here:
+ * a rail of live chatter re-rendered every delta and still told you nothing
+ * you could compare between agents.
+ */
+function metricLine(item: SubagentProgress, now: number): string {
+  const tokens = (item.inputTokens ?? 0) + (item.outputTokens ?? 0)
+  const elapsed = subagentElapsedSeconds(item, now)
+  const toolCount = agentToolCount(item)
+  const parts = [tokens > 0 ? `${fmtTokens(tokens)} tok` : 'no tokens yet']
+
   if (elapsed != null) parts.push(fmtDuration(elapsed))
-  if ((item.apiCalls ?? 0) > 0) parts.push(`${item.apiCalls} API`)
+  parts.push(`${toolCount} tool${toolCount === 1 ? '' : 's'}`)
 
   return parts.join(' · ')
+}
+
+/** Full token breakdown, shown only in the inspector where there is room. */
+function tokenDetail(item: SubagentProgress): string {
+  const parts: string[] = []
+  if ((item.inputTokens ?? 0) > 0) parts.push(`${fmtTokens(item.inputTokens!)} in`)
+  if ((item.outputTokens ?? 0) > 0) parts.push(`${fmtTokens(item.outputTokens!)} out`)
+  if ((item.reasoningTokens ?? 0) > 0) parts.push(`${fmtTokens(item.reasoningTokens!)} reasoning`)
+  if ((item.apiCalls ?? 0) > 0) parts.push(`${item.apiCalls} API call${item.apiCalls === 1 ? '' : 's'}`)
+  if (typeof item.costUsd === 'number' && item.costUsd > 0) parts.push(`$${item.costUsd.toFixed(4)}`)
+
+  return parts.length ? parts.join(' · ') : 'no usage reported yet'
+}
+
+/** Milliseconds as "820ms" / "4.2s" / "1m 12s"; the tool-call list's whole point. */
+function fmtMillis(ms: number): string {
+  if (ms < 1_000) return `${Math.max(0, Math.round(ms))}ms`
+  if (ms < 60_000) return `${(ms / 1_000).toFixed(1)}s`
+
+  return fmtDuration(ms / 1_000)
 }
 
 /**
@@ -185,27 +214,29 @@ function metricLine(item: SubagentProgress, now: number): string {
 export const agentCardRenderableId = (agentId: string): string => `agent-card:${agentId}`
 
 function AgentCardView({
+  now,
+  onOpen,
   record,
   retryNote,
   selected,
   t
 }: {
+  now: number
+  onOpen?: (agentId: string) => void
   record: AgentPanelRecord
   retryNote?: string
   selected?: boolean
   t: Theme
 }) {
   const { item } = record
-  const now = Date.now()
   const status = statusPresentation(item.status, t)
   const role = item.agentType?.trim() || 'agent'
   const model = item.model?.trim()
-  const rules = item.rules?.length ? item.rules.join(', ') : 'inherited defaults'
-  const toolsets = item.toolsets?.length ? item.toolsets.join(', ') : 'runtime policy'
-  const read = item.filesRead ?? []
-  const written = item.filesWritten ?? []
-  const filePreview = [...written.map(path => `+${basename(path)}`), ...read.map(path => basename(path))].slice(0, 4)
   const depth = Math.min(4, Math.max(0, item.depth))
+  const task = compactLine(item.goal?.trim() || '', 120)
+  // The title is derived from the goal when nothing better exists, so repeating
+  // it as a task line would just be the same words twice.
+  const showTask = Boolean(task) && !record.title.toLowerCase().startsWith(task.slice(0, 12).toLowerCase())
 
   return (
     <Box
@@ -215,6 +246,7 @@ function AgentCardView({
       id={agentCardRenderableId(item.id)}
       marginBottom={1}
       marginLeft={depth}
+      {...(onOpen ? { onClick: () => onOpen(item.id) } : {})}
       paddingRight={1}
       paddingY={1}
     >
@@ -227,39 +259,27 @@ function AgentCardView({
           </Span>
           <Span color={t.color.muted}> · {item.status}</Span>
         </Text>
-        <Text color={t.color.muted} wrap="truncate-end">
-          ↳ {record.creatorTitle} · {role}
-          {model ? ` · ${model}` : ''}
-        </Text>
-        <Text color={TERMINAL_STATUSES.has(item.status) ? t.color.text : t.color.muted} wrap="wrap">
-          {compactLine(activitySummary(item), 180)}
-        </Text>
         <Text color={t.color.accent} wrap="truncate-end">
           {metricLine(item, now)}
           {record.childCount ? ` · ${record.childCount} child${record.childCount === 1 ? '' : 'ren'}` : ''}
         </Text>
-        <Text color={t.color.muted} wrap="truncate-end">
-          policy · {compactLine(rules, 54)}
-        </Text>
-        <Text color={t.color.muted} wrap="truncate-end">
-          access · {compactLine(toolsets, 54)}
-        </Text>
-        {read.length || written.length ? (
+        {showTask ? (
           <Text color={t.color.muted} wrap="truncate-end">
-            files · {written.length} wrote · {read.length} read
-            {filePreview.length ? ` · ${filePreview.join(', ')}` : ''}
+            task · {task}
           </Text>
         ) : null}
-        {record.archived && record.snapshotLabel ? (
-          <Text color={t.color.muted} dimColor wrap="truncate-end">
-            history · {record.snapshotLabel}
-          </Text>
-        ) : null}
+        <Text color={t.color.muted} dimColor wrap="truncate-end">
+          ↳ {record.creatorTitle} · {role}
+          {model ? ` · ${model}` : ''}
+          {record.archived && record.snapshotLabel ? ` · ${record.snapshotLabel}` : ''}
+        </Text>
         {retryNote ? (
           <Text color={retryNote.startsWith('↻') ? t.color.accent : t.color.error} wrap="truncate-end">
             {compactLine(retryNote, 140)}
           </Text>
         ) : selected && subagentRetryable(item.status) ? (
+          // An affordance, not commentary: it appears on the selected row only,
+          // and it is the one thing the list can act on directly.
           <Text color={t.color.accent} dimColor wrap="truncate-end">
             {subagentFailed(item.status) ? '↻ press r to retry this agent' : '↻ press r to run this agent again'}
           </Text>
@@ -273,6 +293,8 @@ const AgentCard = memo(
   AgentCardView,
   (previous, next) =>
     previous.t === next.t &&
+    previous.now === next.now &&
+    previous.onOpen === next.onOpen &&
     previous.retryNote === next.retryNote &&
     previous.selected === next.selected &&
     previous.record.item === next.record.item &&
@@ -283,9 +305,200 @@ const AgentCard = memo(
     previous.record.title === next.record.title
 )
 
+/**
+ * The inspector: one agent, in full.
+ *
+ * Everything the row deliberately drops lives here — what it is doing right
+ * now, every tool call it made and how long each took, the files it touched,
+ * and the policy it runs under.
+ */
+function AgentDetailView({
+  now,
+  record,
+  retryNote,
+  scrollRef,
+  t
+}: {
+  now: number
+  record: AgentPanelRecord
+  retryNote?: string
+  scrollRef?: MutableRefObject<ScrollBoxRenderable | null>
+  t: Theme
+}) {
+  const { item } = record
+  const status = statusPresentation(item.status, t)
+  const elapsed = subagentElapsedSeconds(item, now)
+  const rules = item.rules?.length ? item.rules.join(', ') : 'inherited defaults'
+  const toolsets = item.toolsets?.length ? item.toolsets.join(', ') : 'runtime policy'
+  const read = item.filesRead ?? []
+  const written = item.filesWritten ?? []
+  const calls = item.toolCalls ?? []
+  // Newest first: on a long run the call you want is the one happening now.
+  const ordered = [...calls].reverse()
+  const thinking = item.thinking.at(-1)?.trim()
+  const notes = item.notes.slice(-3).filter(note => note.trim())
+
+  return (
+    <Box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0}>
+      <Box flexDirection="column" flexShrink={0} marginBottom={1}>
+        <Text color={t.color.text} wrap="truncate-end">
+          <Span color={status.color}>{status.glyph} </Span>
+          <Span bold color={t.color.text}>
+            {record.title}
+          </Span>
+          <Span color={t.color.muted}> · {item.status}</Span>
+          {elapsed == null ? null : <Span color={t.color.muted}> · {fmtDuration(elapsed)}</Span>}
+        </Text>
+        <Text color={t.color.accent} wrap="truncate-end">
+          {tokenDetail(item)}
+        </Text>
+        <Text color={t.color.muted} wrap="truncate-end">
+          ↳ {record.creatorTitle} · {item.agentType?.trim() || 'agent'}
+          {item.model?.trim() ? ` · ${item.model.trim()}` : ''}
+          {record.childCount ? ` · ${record.childCount} child${record.childCount === 1 ? '' : 'ren'}` : ''}
+        </Text>
+      </Box>
+      <scrollbox ref={scrollRef} style={{ flexGrow: 1, flexShrink: 1, minHeight: 0 }} viewportCulling>
+        <Box flexDirection="column" flexShrink={0}>
+          <Text bold color={t.color.text}>
+            task
+          </Text>
+          <Text color={t.color.muted} wrap="wrap">
+            {item.goal?.trim() || 'no task recorded'}
+          </Text>
+
+          {TERMINAL_STATUSES.has(item.status) && item.summary?.trim() ? (
+            <>
+              <Text bold color={t.color.text}>
+                result
+              </Text>
+              <Text color={t.color.text} wrap="wrap">
+                {compactLine(item.summary.trim(), 600)}
+              </Text>
+            </>
+          ) : (
+            <>
+              <Box flexShrink={0} marginTop={1}>
+                  <Text bold color={t.color.text}>
+                    doing now
+                  </Text>
+                </Box>
+              <Text color={t.color.text} wrap="wrap">
+                {compactLine(activitySummary(item), 400)}
+              </Text>
+              {thinking ? (
+                <Text color={t.color.muted} dimColor wrap="wrap">
+                  thinking · {compactLine(thinking, 300)}
+                </Text>
+              ) : null}
+            </>
+          )}
+
+          <Box flexShrink={0} marginTop={1}>
+              <Text bold color={t.color.text}>
+                tool calls ({calls.length ? calls.length : agentToolCount(item)})
+              </Text>
+            </Box>
+          {ordered.length ? (
+            ordered.map(call => {
+              const finished = call.endedAt !== undefined
+              const took = finished ? fmtMillis(call.endedAt! - call.startedAt) : fmtMillis(now - call.startedAt)
+              const glyph = !finished ? '▸' : call.ok === false ? '✗' : '✓'
+              const color = !finished ? t.color.accent : call.ok === false ? t.color.error : t.color.muted
+
+              return (
+                <Box flexDirection="column" flexShrink={0} key={call.id}>
+                  <Text color={t.color.text} wrap="truncate-end">
+                    <Span color={color}>{glyph} </Span>
+                    {call.name}
+                    <Span color={color}> · {took}{finished ? '' : ' so far'}</Span>
+                  </Text>
+                  {call.preview?.trim() ? (
+                    <Text color={t.color.muted} dimColor wrap="truncate-end">
+                      {'   '}
+                      {compactLine(call.preview, 160)}
+                    </Text>
+                  ) : null}
+                </Box>
+              )
+            })
+          ) : (
+            <Text color={t.color.muted} dimColor wrap="wrap">
+              {agentToolCount(item)
+                ? 'this agent ran before the inspector was recording call timings'
+                : 'no tool calls yet'}
+            </Text>
+          )}
+
+          {notes.length ? (
+            <>
+              <Box flexShrink={0} marginTop={1}>
+                  <Text bold color={t.color.text}>
+                    activity
+                  </Text>
+                </Box>
+              {notes.map((note, index) => (
+                <Text color={t.color.muted} key={index} wrap="truncate-end">
+                  {compactLine(note, 200)}
+                </Text>
+              ))}
+            </>
+          ) : null}
+
+          <Box flexShrink={0} marginTop={1}>
+              <Text bold color={t.color.text}>
+                files
+              </Text>
+            </Box>
+          <Text color={t.color.muted} wrap="wrap">
+            {written.length || read.length
+              ? `${written.length} wrote · ${read.length} read${
+                  written.length || read.length
+                    ? ` · ${[...written.map(path => `+${basename(path)}`), ...read.map(basename)]
+                        .slice(0, 12)
+                        .join(', ')}`
+                    : ''
+                }`
+              : 'none touched'}
+          </Text>
+
+          <Box flexShrink={0} marginTop={1}>
+              <Text bold color={t.color.text}>
+                policy
+              </Text>
+            </Box>
+          <Text color={t.color.muted} wrap="wrap">
+            rules · {rules}
+          </Text>
+          <Text color={t.color.muted} wrap="wrap">
+            access · {toolsets}
+          </Text>
+
+          {retryNote ? (
+            <Box flexShrink={0} marginTop={1}>
+              <Text color={retryNote.startsWith('↻') ? t.color.accent : t.color.error} wrap="wrap">
+                {compactLine(retryNote, 300)}
+              </Text>
+            </Box>
+          ) : subagentRetryable(item.status) ? (
+            <Box flexShrink={0} marginTop={1}>
+              <Text color={t.color.accent} dimColor wrap="truncate-end">
+                {subagentFailed(item.status) ? '↻ press r to retry this agent' : '↻ press r to run this agent again'}
+              </Text>
+            </Box>
+          ) : null}
+        </Box>
+      </scrollbox>
+    </Box>
+  )
+}
+
 function AgentPanelBody({
   history,
   liveAgents,
+  now,
+  onOpen,
+  openRecord,
   retryEnabled,
   retryNotes,
   scrollRef,
@@ -293,18 +506,25 @@ function AgentPanelBody({
   t,
   variant
 }: AgentPanelProps & {
+  now?: number
+  onOpen?: (agentId: string) => void
+  openRecord?: AgentPanelRecord | undefined
   scrollRef?: MutableRefObject<ScrollBoxRenderable | null>
 }) {
   const records = useMemo(() => collectAgentPanelRecords(liveAgents, history), [history, liveAgents])
   const activeCount = records.filter(
     record => record.item.status === 'running' || record.item.status === 'queued'
   ).length
-  const footer =
-    variant === 'overlay'
+  const tick = now ?? Date.now()
+  const footer = openRecord
+    ? retryEnabled
+      ? '↑↓ scroll · r retry · Esc back to the list'
+      : '↑↓ scroll · PgUp/PgDn · Esc back to the list'
+    : variant === 'overlay'
       ? retryEnabled
-        ? '←→ select · r retry dead agent · ↑↓ scroll · F6/Esc close'
-        : '↑↓ scroll · PgUp/PgDn · F6/Esc close'
-      : 'F6 expand · /agents'
+        ? '↑↓ select · Enter inspect · r retry dead agent · F6/Esc close'
+        : '↑↓ select · Enter inspect · PgUp/PgDn · F6/Esc close'
+      : 'F6 inspect · /agents'
 
   return (
     <Box
@@ -328,18 +548,29 @@ function AgentPanelBody({
       <Box flexDirection="row" flexShrink={0} justifyContent="space-between" marginBottom={1}>
         <Text bold color={t.color.text}>
           <Span color={t.color.accent}>◆ </Span>
-          Agents
+          {openRecord ? 'Agent' : 'Agents'}
         </Text>
         <Text color={activeCount ? t.color.accent : t.color.muted}>
           {activeCount ? `${activeCount} live` : `${records.length} done`}
         </Text>
       </Box>
+      {openRecord ? (
+        <AgentDetailView
+          now={tick}
+          record={openRecord}
+          {...(retryNotes?.get(openRecord.item.id) ? { retryNote: retryNotes.get(openRecord.item.id) } : {})}
+          scrollRef={scrollRef}
+          t={t}
+        />
+      ) : (
       <scrollbox ref={scrollRef} style={{ flexGrow: 1, flexShrink: 1, minHeight: 0 }} viewportCulling>
         <Box flexDirection="column" flexShrink={0}>
           {records.length ? (
             records.map(record => (
               <AgentCard
                 key={`${record.archived ? 'past' : 'live'}:${record.item.id}`}
+                now={tick}
+                {...(onOpen ? { onOpen } : {})}
                 record={record}
                 {...(retryNotes?.get(record.item.id) ? { retryNote: retryNotes.get(record.item.id) } : {})}
                 selected={record.item.id === selectedId}
@@ -360,6 +591,7 @@ function AgentPanelBody({
           )}
         </Box>
       </scrollbox>
+      )}
       {/* Truncate rather than wrap: on a narrow panel this hint wrapped to two
           rows and, now that the frame is bounded, those rows came out of the
           agent list rather than out of the terminal. */}
@@ -370,10 +602,16 @@ function AgentPanelBody({
   )
 }
 
-export function AgentPanel(props: Omit<AgentPanelProps, 'variant'>) {
+export function AgentPanel({
+  onInspect,
+  ...props
+}: Omit<AgentPanelProps, 'variant'> & {
+  /** Clicking a rail card opens the overlay straight into that agent. */
+  onInspect?: (agentId: string) => void
+}) {
   if (!collectAgentPanelRecords(props.liveAgents, props.history).length) return null
 
-  return <AgentPanelBody {...props} variant="sidebar" />
+  return <AgentPanelBody {...props} {...(onInspect ? { onOpen: onInspect } : {})} variant="sidebar" />
 }
 
 const consumeKey = (event: KeyEvent) => {
@@ -407,7 +645,13 @@ export function AgentPanelHotkey({
   return null
 }
 
-export function AgentPanelOverlay({ history, liveAgents, onClose, t }: AgentPanelOverlayProps) {
+export function AgentPanelOverlay({
+  history,
+  initialInspectId,
+  liveAgents,
+  onClose,
+  t
+}: AgentPanelOverlayProps) {
   const scrollRef = useRef<ScrollBoxRenderable | null>(null)
   const { height, width } = useTerminalDimensions()
   const gateway = useOptionalGateway()
@@ -420,8 +664,17 @@ export function AgentPanelOverlay({ history, liveAgents, onClose, t }: AgentPane
   const panelWidth = withPanelWidthDelta(Math.max(1, Math.min(96, width - 2)), width)
   const records = useMemo(() => collectAgentPanelRecords(liveAgents, history), [history, liveAgents])
   const [selectedId, setSelectedId] = useState<null | string>(null)
+  const [openId, setOpenId] = useState<null | string>(initialInspectId ?? null)
   const [retryNotes, setRetryNotes] = useState<ReadonlyMap<string, string>>(new Map())
   const pendingRetries = useRef(new Set<string>())
+  // Elapsed time has to advance on its own. A queued agent publishes no events
+  // at all, and a thinking one can go a minute between them — without a clock
+  // its "running for 4s" sat frozen at 4s and read as a hung agent.
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1_000)
+    return () => clearInterval(timer)
+  }, [])
 
   // Default the selection to the first retryable (dead) agent — the rows a
   // user most likely opened the overlay to act on — else the first row.
@@ -441,13 +694,16 @@ export function AgentPanelOverlay({ history, liveAgents, onClose, t }: AgentPane
   // later, which is imperceptible interactively. The list length is a dependency
   // because adding or removing an agent shifts every offset below it.
   const selectedCardId = selectedRecord?.item.id
+  const openRecord = openId ? records.find(record => record.item.id === openId) : undefined
   useEffect(() => {
-    if (!selectedCardId) return
+    // The detail view replaces the list, so there is no card to scroll to and
+    // the scrollbox belongs to the inspector's own content.
+    if (!selectedCardId || openId) return
     const target = agentCardRenderableId(selectedCardId)
     scrollRef.current?.scrollChildIntoView(target)
     const settle = setTimeout(() => scrollRef.current?.scrollChildIntoView(target), 0)
     return () => clearTimeout(settle)
-  }, [records.length, selectedCardId])
+  }, [openId, records.length, selectedCardId])
 
   const setRetryNote = (id: string, note: string) => {
     setRetryNotes(previous => {
@@ -466,7 +722,7 @@ export function AgentPanelOverlay({ history, liveAgents, onClose, t }: AgentPane
   }
 
   const retrySelected = () => {
-    const record = selectedRecord
+    const record = openRecord ?? selectedRecord
     if (!record) return
     const item = record.item
     if (!gateway) {
@@ -500,20 +756,31 @@ export function AgentPanelOverlay({ history, liveAgents, onClose, t }: AgentPane
   }
 
   useKeyboard(event => {
+    const isEnter = event.name === 'return' || event.name === 'enter' || event.name === 'kpenter'
+
     if (isPanelResizeKey(event)) {
       adjustPanelWidth(event.name === 'right' ? PANEL_WIDTH_STEP : -PANEL_WIDTH_STEP)
     } else if (event.name === 'escape' || event.name === 'f6' || event.sequence === 'q') {
-      onClose()
+      // Esc steps back to the list before it closes the panel: the inspector is
+      // a place inside /agents, not a modal stacked on top of it. Only from the
+      // list does Esc return you to the main agent.
+      if (openId) setOpenId(null)
+      else onClose()
+    } else if (isEnter || (event.name === 'right' && !openId)) {
+      if (!openId && selectedRecord) setOpenId(selectedRecord.item.id)
     } else if (event.name === 'left') {
-      moveSelection(-1)
+      if (openId) setOpenId(null)
+      else moveSelection(-1)
     } else if (event.name === 'right') {
       moveSelection(1)
     } else if (event.sequence === 'r') {
       retrySelected()
     } else if (event.name === 'up') {
-      scrollRef.current?.scrollBy(-1)
+      if (openId) scrollRef.current?.scrollBy(-1)
+      else moveSelection(-1)
     } else if (event.name === 'down') {
-      scrollRef.current?.scrollBy(1)
+      if (openId) scrollRef.current?.scrollBy(1)
+      else moveSelection(1)
     } else if (event.name === 'pageup') {
       scrollRef.current?.scrollBy(-page)
     } else if (event.name === 'pagedown') {
@@ -549,6 +816,9 @@ export function AgentPanelOverlay({ history, liveAgents, onClose, t }: AgentPane
         <AgentPanelBody
           history={history}
           liveAgents={liveAgents}
+          now={now}
+          onOpen={setOpenId}
+          openRecord={openRecord}
           retryEnabled={Boolean(gateway)}
           retryNotes={retryNotes}
           scrollRef={scrollRef}

@@ -513,6 +513,7 @@ function subagentEvents(payload: Record<string, unknown>): AnyEvent[] {
         payload: {
           ...base,
           status: 'running',
+          ...(optionalStr(nestedPayload.id) ? { tool_call_id: str(nestedPayload.id) } : {}),
           tool_name: str(nestedPayload.name),
           tool_preview: str(nestedPayload.arguments)
         }
@@ -522,13 +523,31 @@ function subagentEvents(payload: Record<string, unknown>): AnyEvent[] {
   if (nestedType === 'tool_result') {
     const tool = str(nestedPayload.name, 'tool')
     const result = firstNonEmptyStr(nestedPayload.return_value, nestedPayload.result)
+    const permitted = nestedPayload.permitted !== false
+    const callId = optionalStr(nestedPayload.tool_call_id)
+    const durationMs = optionalNum(nestedPayload.duration_ms)
+    // Two events from one: the note keeps the live rail's running commentary,
+    // and the structured result is what the inspector pairs with its tool_call
+    // to show a duration. Dropping either one loses a surface.
     return [
+      {
+        type: 'subagent.tool_result',
+        payload: {
+          ...base,
+          status: permitted ? 'running' : 'failed',
+          ...(callId ? { tool_call_id: callId } : {}),
+          ...(durationMs === undefined ? {} : { tool_duration_ms: durationMs }),
+          tool_name: tool,
+          tool_ok: permitted,
+          ...(result ? { tool_preview: result } : {})
+        }
+      },
       {
         type: 'subagent.progress',
         payload: {
           ...base,
-          status: nestedPayload.permitted === false ? 'failed' : 'running',
-          text: `${nestedPayload.permitted === false ? '✗' : '✓'} ${tool}${result ? ` — ${firstLine(result)}` : ''}`
+          status: permitted ? 'running' : 'failed',
+          text: `${permitted ? '✓' : '✗'} ${tool}${result ? ` — ${firstLine(result)}` : ''}`
         }
       }
     ]

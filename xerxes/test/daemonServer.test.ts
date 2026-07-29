@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { InMemoryDaemonRuntime } from "../src/daemon/runtime.js";
 import { DaemonInteractionBoard } from "../src/daemon/interactions.js";
 import { DaemonServer, MIGRATED_ERROR } from "../src/daemon/server.js";
+import { TerminalRegistry } from "../src/runtime/terminalRegistry.js";
 import { ProfileStore } from "../src/bridge/profiles.js";
 import {
   ChannelManager,
@@ -5517,6 +5518,155 @@ test("transcript search spans saved sessions and reports what it could not index
     expect((await client.next((frame) => frame.id === 6)).result).toEqual({
       ok: false,
       error: "search query is required",
+    });
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("terminal RPCs list, inspect, and control the shells the agent is running", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-terminals-"));
+  const socketPath = join(directory, "daemon.sock");
+  const terminals = new TerminalRegistry();
+  const server = new DaemonServer({
+    socketPath,
+    terminalRegistry: terminals,
+    runtime: new InMemoryDaemonRuntime(undefined, {
+      currentProjectDirectory: directory,
+      sessionDirectory: join(directory, "sessions"),
+    }),
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  const written: string[] = [];
+  let killed: string | undefined;
+  const handle = terminals.open({
+    id: "pty_live",
+    kind: "pty",
+    command: "bash -i",
+    cwd: directory,
+    control: {
+      write: async (chars) => void written.push(chars),
+      kill: async (signal) => {
+        killed = signal;
+      },
+    },
+  });
+  handle.append("$ echo hi\nhi\n");
+
+  try {
+    client.send({ jsonrpc: "2.0", id: 1, method: "terminal.list", params: {} });
+    const listed = await client.next((frame) => frame.id === 1);
+    expect(listed.result?.ok).toBe(true);
+    expect(
+      (listed.result?.terminals as Array<Record<string, unknown>>)[0],
+    ).toMatchObject({
+      id: "pty_live",
+      kind: "pty",
+      running: true,
+      canWrite: true,
+      canKill: true,
+      canInterrupt: false,
+    });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "terminal.inspect",
+      params: { terminal_id: "pty_live" },
+    });
+    const inspected = await client.next((frame) => frame.id === 2);
+    expect(inspected.result?.terminal).toMatchObject({ output: "$ echo hi\nhi\n" });
+
+    // Inspecting twice returns the same tail: the viewer mirrors output rather
+    // than draining the buffer the model reads from.
+    client.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "terminal.inspect",
+      params: { terminal_id: "pty_live" },
+    });
+    expect(
+      (await client.next((frame) => frame.id === 3)).result?.terminal,
+    ).toMatchObject({ output: "$ echo hi\nhi\n" });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "terminal.control",
+      params: { terminal_id: "pty_live", action: "write", chars: "ls\n" },
+    });
+    expect((await client.next((frame) => frame.id === 4)).result?.ok).toBe(true);
+    expect(written).toEqual(["ls\n"]);
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "terminal.control",
+      params: { terminal_id: "pty_live", action: "interrupt" },
+    });
+    expect((await client.next((frame) => frame.id === 5)).result).toMatchObject({
+      ok: false,
+      error: "this terminal cannot be interrupted",
+    });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 6,
+      method: "terminal.control",
+      params: { terminal_id: "pty_live", action: "kill", signal: "SIGKILL" },
+    });
+    expect((await client.next((frame) => frame.id === 6)).result?.ok).toBe(true);
+    expect(killed).toBe("SIGKILL");
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 7,
+      method: "terminal.inspect",
+      params: { terminal_id: "nope" },
+    });
+    expect((await client.next((frame) => frame.id === 7)).result).toEqual({
+      ok: false,
+      error: "unknown terminal",
+    });
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a daemon with no terminal registry reports an empty list rather than pretending", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-no-terminals-"));
+  const socketPath = join(directory, "daemon.sock");
+  const server = new DaemonServer({
+    socketPath,
+    runtime: new InMemoryDaemonRuntime(undefined, {
+      currentProjectDirectory: directory,
+      sessionDirectory: join(directory, "sessions"),
+    }),
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+
+  try {
+    client.send({ jsonrpc: "2.0", id: 1, method: "terminal.list", params: {} });
+    expect((await client.next((frame) => frame.id === 1)).result).toEqual({
+      ok: true,
+      terminals: [],
+    });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "terminal.control",
+      params: { terminal_id: "anything", action: "kill" },
+    });
+    expect((await client.next((frame) => frame.id === 2)).result).toEqual({
+      ok: false,
+      error: "this daemon tracks no terminals",
     });
   } finally {
     client.close();

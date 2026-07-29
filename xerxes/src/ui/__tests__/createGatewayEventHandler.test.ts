@@ -6,6 +6,7 @@ import { createGatewayEventHandler } from '../app/createGatewayEventHandler.js'
 import type { GatewayEventHandlerContext } from '../app/interfaces.js'
 import { getOverlayState, patchOverlayState, resetOverlayState } from '../app/overlayStore.js'
 import { turnController } from '../app/turnController.js'
+import { getTurnState } from '../app/turnStore.js'
 import { resetUiState } from '../app/uiStore.js'
 import type { GatewayClient } from '../gatewayClient.js'
 import type { GatewayEvent } from '../gatewayTypes.js'
@@ -193,5 +194,49 @@ describe('createGatewayEventHandler', () => {
 
     expect(appended).toEqual([{ role: 'assistant', text: 'The real answer.' }])
     expect(sys).not.toHaveBeenCalled()
+  })
+
+  it('pairs a subagent tool result with its call so the inspector can show a duration', () => {
+    const { handler } = buildHarness()
+    const base = { depth: 0, goal: 'audit policy', subagent_id: 'child-1', task_index: 0 }
+
+    handler({ payload: { ...base, status: 'running' }, type: 'subagent.start' } as GatewayEvent)
+    handler({
+      payload: { ...base, tool_call_id: 'call-1', tool_name: 'ReadFile', tool_preview: 'src/auth.ts' },
+      type: 'subagent.tool'
+    } as GatewayEvent)
+    handler({
+      payload: { ...base, tool_call_id: 'call-1', tool_duration_ms: 1_250, tool_name: 'ReadFile', tool_ok: true },
+      type: 'subagent.tool_result'
+    } as GatewayEvent)
+
+    const [agent] = getTurnState().subagents
+    const [call] = agent?.toolCalls ?? []
+
+    expect(agent?.toolCalls).toHaveLength(1)
+    expect(call).toMatchObject({ id: 'call-1', name: 'ReadFile', ok: true, preview: 'src/auth.ts' })
+    // The duration is reported by the daemon, so it is used verbatim rather
+    // than measured against this client's clock.
+    expect((call?.endedAt ?? 0) - (call?.startedAt ?? 0)).toBe(1_250)
+  })
+
+  it('keeps a denied tool call visible as a failure rather than dropping it', () => {
+    const { handler } = buildHarness()
+    const base = { depth: 0, goal: 'audit policy', subagent_id: 'child-2', task_index: 0 }
+
+    handler({ payload: { ...base, status: 'running' }, type: 'subagent.start' } as GatewayEvent)
+    handler({ payload: { ...base, tool_name: 'ExecCommand' }, type: 'subagent.tool' } as GatewayEvent)
+    handler({
+      payload: { ...base, tool_name: 'ExecCommand', tool_ok: false },
+      type: 'subagent.tool_result'
+    } as GatewayEvent)
+
+    const agent = getTurnState().subagents.find(item => item.id === 'child-2')
+
+    // Matched by name when the provider sent no tool_call_id, rather than
+    // recorded twice as one call that never finished plus a stray result.
+    expect(agent?.toolCalls).toHaveLength(1)
+    expect(agent?.toolCalls?.[0]).toMatchObject({ name: 'ExecCommand', ok: false })
+    expect(agent?.toolCalls?.[0]?.endedAt).toBeDefined()
   })
 })

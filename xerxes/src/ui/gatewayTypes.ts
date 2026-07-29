@@ -567,8 +567,13 @@ export interface SubagentEventPayload {
   task_index: number
   text?: string
   title?: string
+  tool_call_id?: string
   tool_count?: number
+  /** Wall time one tool call took, reported with its result. */
+  tool_duration_ms?: number
   tool_name?: string
+  /** False when the call was denied by policy or ended in an error. */
+  tool_ok?: boolean
   tool_preview?: string
   toolsets?: string[]
 }
@@ -722,6 +727,7 @@ export type GatewayEvent =
   | { payload: SubagentEventPayload; session_id?: string; type: 'subagent.start' }
   | { payload: SubagentEventPayload; session_id?: string; type: 'subagent.thinking' }
   | { payload: SubagentEventPayload; session_id?: string; type: 'subagent.tool' }
+  | { payload: SubagentEventPayload; session_id?: string; type: 'subagent.tool_result' }
   | { payload: SubagentEventPayload; session_id?: string; type: 'subagent.progress' }
   | { payload: SubagentEventPayload; session_id?: string; type: 'subagent.complete' }
   | { payload: { rendered?: string; text?: string }; session_id?: string; type: 'message.delta' }

@@ -3,6 +3,7 @@
 
 import { ConfigurationError } from '../core/errors.js'
 import { ToolRegistry } from '../executors/toolRegistry.js'
+import type { TerminalRegistry } from '../runtime/terminalRegistry.js'
 import { registerAgentMemoryTools, type AgentMemoryToolsOptions } from './agentMemoryTools.js'
 import { registerAgentMetaTools, type AgentMetaToolsOptions } from './agentMetaTools.js'
 import { registerAiTools, type AiToolProviders } from './aiTools.js'
@@ -100,6 +101,13 @@ export interface CoreToolsOptions {
    * private manager and the caller accepts that responsibility.
    */
   readonly backgroundCommands?: BackgroundCommandManager
+  /**
+   * Mirror every command this registry runs into a host-owned terminal registry.
+   *
+   * Purely observational: the mirror is written to as output flows to the model
+   * and is never drained, so attaching one cannot change what a tool returns.
+   */
+  readonly terminals?: TerminalRegistry
   readonly includeSystemTools?: boolean
   /** Safe public HTTP tools; enabled by default and independently permission-gated. */
   readonly includeWebTools?: boolean
@@ -153,11 +161,7 @@ export function registerCoreTools(registry: ToolRegistry, options: CoreToolsOpti
     registerMathTools(registry)
   }
   if (options.includeProcessTools ?? true) {
-    registerProcessTools(
-      registry,
-      paths,
-      ...(options.backgroundCommands ? [options.backgroundCommands] as const : [] as const),
-    )
+    registerProcessTools(registry, paths, options.backgroundCommands, options.terminals)
   }
   if (options.includeSystemTools ?? true) {
     registerSystemTools(registry)
