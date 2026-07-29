@@ -150,7 +150,11 @@ export class CronScheduler {
           timer = setTimeout(() => {
             reject(new Error(`job ${jobId} timed out after ${timeout}ms`))
           }, timeout)
-          timer.unref?.()
+          // NOTE: no unref() here. On Windows, an unref'd timer that is the
+          // only pending handle never fires (the event loop sleeps), which
+          // would let a hung job wedge the scheduler forever. The timer is
+          // always cleared in `finally` once the race settles, so keeping it
+          // referenced costs nothing.
         }),
       ])
     } finally {

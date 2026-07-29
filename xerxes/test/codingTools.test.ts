@@ -140,6 +140,9 @@ test('git status, add, diff, and log run with direct argv inside a contained rep
     await git(workspace, ['init'])
     await git(workspace, ['config', 'user.email', 'test@example.invalid'])
     await git(workspace, ['config', 'user.name', 'Xerxes Test'])
+    // A Windows host default of autocrlf=true rewrites the applied file to
+    // CRLF, which has nothing to do with what this test exercises.
+    await git(workspace, ['config', 'core.autocrlf', 'false'])
     await Bun.write(join(workspace, 'tracked.txt'), 'before\n')
     expect(await gitAdd({ files: ['tracked.txt'] }, paths)).toContain('Successfully staged')
     await git(workspace, ['commit', '-m', 'initial'])

@@ -22,6 +22,7 @@ import {
   safeEnvironmentNames,
   shellCommandArgv,
 } from '../src/core/hostPlatform.js'
+import { defaultAcpRegistryDirectory } from '../src/acp/registry.js'
 import { processCommandProbe } from '../src/core/processLiveness.js'
 import { isBatchScript, planSpawn, WindowsSpawnError } from '../src/core/windowsSpawn.js'
 import { daemonPaths } from '../src/daemon/paths.js'
@@ -218,6 +219,20 @@ test('isBatchScript matches the extensions CreateProcess cannot execute', () => 
   expect(isBatchScript('C:\\tools\\run.bat')).toBe(true)
   expect(isBatchScript('C:\\Git\\git.exe')).toBe(false)
   expect(isBatchScript('/usr/bin/git')).toBe(false)
+})
+
+test('the ACP registry root follows %APPDATA% on Windows and XDG elsewhere', () => {
+  // XDG_CONFIG_HOME does not exist on Windows; writing agent.json there would
+  // strand the registry where no ACP client looks for it.
+  // `join` uses the host separator, so only the Windows branch can assert an
+  // exact literal on any host; the POSIX branch asserts the XDG selection.
+  expect(defaultAcpRegistryDirectory({ APPDATA: 'C:\\Users\\u\\AppData\\Roaming' }, 'C:\\Users\\u', 'win32'))
+    .toBe('C:\\Users\\u\\AppData\\Roaming\\agent-registry')
+  expect(defaultAcpRegistryDirectory({}, 'C:\\Users\\u', 'win32'))
+    .toBe('C:\\Users\\u\\AppData\\Roaming\\agent-registry')
+  expect(defaultAcpRegistryDirectory({ XDG_CONFIG_HOME: '/xdg' }, '/home/u', 'linux'))
+    .toBe(join('/xdg', 'agent-registry'))
+  expect(defaultAcpRegistryDirectory({}, '/home/u', 'linux')).toBe(join('/home/u', '.config', 'agent-registry'))
 })
 
 test('isWindows only reports win32', () => {
