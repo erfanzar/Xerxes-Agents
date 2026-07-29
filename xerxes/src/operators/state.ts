@@ -3,6 +3,7 @@
 
 import { ValidationError } from '../core/errors.js'
 import { ToolRegistry, type ToolExecutionContext, type ToolHandler } from '../executors/toolRegistry.js'
+import type { TerminalRegistry } from '../runtime/terminalRegistry.js'
 import type { UserMessage } from '../types/messages.js'
 import type { JsonObject, JsonValue, ToolDefinition } from '../types/toolCalls.js'
 import { BrowserManager } from './browser.js'
@@ -38,6 +39,8 @@ export interface OperatorStateOptions {
   readonly planManager?: PlanStateManager
   readonly ptyManager?: PtySessionManager
   readonly subagentManager?: SpawnedAgentManager
+  /** Mirror PTY sessions here so the TUI terminal panel can watch them. */
+  readonly terminals?: TerminalRegistry
   readonly userPromptManager?: UserPromptManager
   readonly webPort?: OperatorWebPort
 }
@@ -70,6 +73,7 @@ export class OperatorState {
     this.config = options.config ?? createOperatorRuntimeConfig()
     this.ptyManager = options.ptyManager ?? new PtySessionManager({
       ...(this.config.shellDefaultWorkdir === undefined ? {} : { workspaceRoot: this.config.shellDefaultWorkdir }),
+      ...(options.terminals === undefined ? {} : { terminals: options.terminals }),
     })
     this.browserManager = options.browserManager ?? new BrowserManager()
     this.planManager = options.planManager ?? new PlanStateManager()

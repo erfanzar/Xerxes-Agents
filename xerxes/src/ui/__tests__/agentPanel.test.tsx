@@ -84,25 +84,31 @@ describe('agent panel model', () => {
   })
 })
 
+const auditAgent = (overrides: Partial<SubagentProgress> = {}): SubagentProgress =>
+  agent({
+    apiCalls: 2,
+    durationSeconds: 12,
+    filesRead: ['src/auth/session.ts'],
+    filesWritten: ['src/auth/policy.ts'],
+    inputTokens: 1200,
+    model: 'grok-code-fast',
+    outputTokens: 340,
+    reasoningTokens: 90,
+    rules: ['read-only audit', 'no network'],
+    summary: 'Found and documented the missing policy guard.',
+    title: 'Policy audit',
+    toolsets: ['ReadFile', 'Grep'],
+    ...overrides
+  })
+
 describe('OpenTUI agent panel', () => {
-  it('renders hierarchy, policy, files, and completion usage', async () => {
-    const parent = agent({
-      apiCalls: 2,
-      durationSeconds: 12,
-      filesRead: ['src/auth/session.ts'],
-      filesWritten: ['src/auth/policy.ts'],
-      inputTokens: 1200,
-      model: 'grok-code-fast',
-      outputTokens: 340,
-      reasoningTokens: 90,
-      rules: ['read-only audit', 'no network'],
-      summary: 'Found and documented the missing policy guard.',
-      title: 'Policy audit',
-      toolsets: ['ReadFile', 'Grep']
-    })
+  it('reduces each row to what the agent cost, not what it is saying', async () => {
+    // The row answers "which agent, how much, how long" and nothing else.
+    // Policy, files, and live commentary moved into the inspector, where they
+    // do not compete with the numbers you compare agents by.
     const setup = await testRender(
       <box height="100%" width="100%">
-        <AgentPanel history={[snapshot([parent])]} liveAgents={[]} t={DEFAULT_THEME} />
+        <AgentPanel history={[snapshot([auditAgent()])]} liveAgents={[]} t={DEFAULT_THEME} />
       </box>,
       { height: 24, width: 72 }
     )
@@ -112,12 +118,117 @@ describe('OpenTUI agent panel', () => {
       const frame = setup.captureCharFrame()
 
       expect(frame).toContain('Policy Audit')
+      expect(frame).toContain('1.5k tok · 12s · 3 tools')
+      expect(frame).toContain('task · Audit authentication policy boundaries')
       expect(frame).toContain('↳ Xerxes · researcher · grok-code-fast')
-      expect(frame).toContain('policy · read-only audit, no network')
-      expect(frame).toContain('access · ReadFile, Grep')
-      expect(frame).toContain('3 tools · 1.5k tok · 90 reasoning · 12s · 2 API')
-      expect(frame).toContain('1 wrote · 1 read · +policy.ts, session.ts')
-      expect(frame).toContain('Found and documented the missing policy guard.')
+      expect(frame).not.toContain('Found and documented the missing policy guard.')
+      expect(frame).not.toContain('policy · read-only audit')
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
+
+  it('inspects one agent on Enter and returns to the list on Esc', async () => {
+    const started = Date.now() - 10_000
+    const parent = auditAgent({
+      status: 'running',
+      summary: undefined,
+      toolCalls: [
+        { endedAt: started + 2_400, id: 'call-1', name: 'ReadFile', ok: true, preview: 'src/auth/policy.ts', startedAt: started },
+        { id: 'call-2', name: 'Grep', startedAt: Date.now() - 1_000 }
+      ]
+    })
+    let closed = false
+    const setup = await testRender(
+      <AgentPanelOverlay
+        history={[]}
+        liveAgents={[parent]}
+        onClose={() => {
+          closed = true
+        }}
+        t={DEFAULT_THEME}
+      />,
+      { height: 34, width: 96 }
+    )
+
+    try {
+      await setup.flush()
+      expect(setup.captureCharFrame()).toContain('1.5k tok')
+
+      act(() => setup.mockInput.pressEnter())
+      await setup.flush()
+      const detail = setup.captureCharFrame()
+
+      expect(detail).toContain('◆ Agent')
+      expect(detail).toContain('1.2k in · 340 out · 90 reasoning · 2 API calls')
+      expect(detail).toContain('tool calls (2)')
+      // The finished call reports how long it took; the live one says it is
+      // still going rather than reporting a duration it does not have.
+      expect(detail).toContain('ReadFile · 2.4s')
+      expect(detail).toContain('so far')
+
+      // Esc backs out to the list before it closes the panel.
+      act(() => setup.mockInput.pressEscape())
+      // The renderer holds a bare ESC briefly to disambiguate escape sequences.
+      await act(async () => {
+        await Bun.sleep(50)
+      })
+      await setup.flush()
+      expect(closed).toBe(false)
+      expect(setup.captureCharFrame()).toContain('◆ Agents')
+
+      act(() => setup.mockInput.pressEscape())
+      // The renderer holds a bare ESC briefly to disambiguate escape sequences.
+      await act(async () => {
+        await Bun.sleep(50)
+      })
+      await setup.flush()
+      expect(closed).toBe(true)
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
+
+  it('opens straight into the agent a rail click named', async () => {
+    const setup = await testRender(
+      <AgentPanelOverlay
+        history={[]}
+        initialInspectId="agent-1"
+        liveAgents={[auditAgent({ status: 'running', summary: undefined })]}
+        onClose={() => undefined}
+        t={DEFAULT_THEME}
+      />,
+      { height: 30, width: 96 }
+    )
+
+    try {
+      await setup.flush()
+      const frame = setup.captureCharFrame()
+
+      expect(frame).toContain('◆ Agent ')
+      expect(frame).toContain('tool calls')
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
+
+  it('scrolls the inspector to the policy and files it keeps below the fold', async () => {
+    const setup = await testRender(
+      <AgentPanelOverlay history={[]} liveAgents={[auditAgent()]} onClose={() => undefined} t={DEFAULT_THEME} />,
+      { height: 34, width: 96 }
+    )
+
+    try {
+      await setup.flush()
+      act(() => setup.mockInput.pressEnter())
+      await setup.flush()
+      act(() => setup.mockInput.pressKey('END'))
+      await setup.flush()
+      const bottom = setup.captureCharFrame()
+
+      expect(bottom).toContain('1 wrote · 1 read · +policy.ts, session.ts')
+      expect(bottom).toContain('rules · read-only audit, no network')
+      expect(bottom).toContain('access · ReadFile, Grep')
     } finally {
       act(() => setup.renderer.destroy())
     }

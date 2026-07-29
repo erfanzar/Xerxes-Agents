@@ -127,7 +127,7 @@ export const opsCommands: SlashCommand[] = [
         return ctx.transcript.sys('usage: /agents [status]  (open /agents with no argument for the live dashboard)')
       }
 
-      patchOverlayState({ agents: true, agentsInitialHistoryIndex: 0 })
+      patchOverlayState({ agents: true, agentsInitialHistoryIndex: 0, agentsInspectId: null })
     }
   },
 
@@ -162,7 +162,7 @@ export const opsCommands: SlashCommand[] = [
         index = parsed
       }
 
-      patchOverlayState({ agents: true, agentsInitialHistoryIndex: index })
+      patchOverlayState({ agents: true, agentsInitialHistoryIndex: index, agentsInspectId: null })
     }
   },
 
@@ -193,7 +193,7 @@ export const opsCommands: SlashCommand[] = [
       }
 
       setDiffPair({ baseline, candidate })
-      patchOverlayState({ agents: true, agentsInitialHistoryIndex: 0 })
+      patchOverlayState({ agents: true, agentsInitialHistoryIndex: 0, agentsInspectId: null })
     }
   },
 

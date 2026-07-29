@@ -112,6 +112,14 @@ export interface StreamDrain {
 export function drainStream(
   stream: ReadableStream<Uint8Array> | null | undefined,
   buffer: BoundedOutputBuffer,
+  /**
+   * Notified with every decoded chunk as it is appended.
+   *
+   * `buffer` is drain-on-read, so a second consumer cannot read from it without
+   * taking output away from the first. A tee here is the only way to mirror the
+   * stream for an inspector while the model still receives all of it.
+   */
+  observer?: (text: string) => void,
 ): StreamDrain {
   if (!stream) {
     return { done: Promise.resolve(), cancel: () => {} }
@@ -119,17 +127,27 @@ export function drainStream(
   const reader = stream.getReader()
   const decoder = new TextDecoder()
   let cancelled = false
+  const emit = (text: string): void => {
+    buffer.append(text)
+    if (observer) {
+      try {
+        observer(text)
+      } catch {
+        // A failing mirror must never break the drain that feeds the model.
+      }
+    }
+  }
 
   const done = (async () => {
     try {
       for (;;) {
         const { done: finished, value } = await reader.read()
         if (finished || cancelled) break
-        if (value) buffer.append(decoder.decode(value, { stream: true }))
+        if (value) emit(decoder.decode(value, { stream: true }))
       }
       if (!cancelled) {
         const tail = decoder.decode()
-        if (tail) buffer.append(tail)
+        if (tail) emit(tail)
       }
     } catch {
       // A closed or errored pipe is a normal end of output, not a tool failure.

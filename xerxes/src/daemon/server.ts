@@ -96,6 +96,7 @@ import {
 } from "../memory/agentMemory.js";
 import { MCPManager } from "../mcp/manager.js";
 import { BrowserManager } from "../operators/browser.js";
+import type { TerminalRegistry } from "../runtime/terminalRegistry.js";
 import { looksLikeSessionId } from "../session/daemonTranscript.js";
 import {
   describeTranscriptRepair,
@@ -496,6 +497,14 @@ export interface DaemonServerOptions {
   readonly autoCompactThreshold?: number;
   /** Browser state shared with native operator tools; `/browser` never invents a browser backend. */
   readonly browserManager?: BrowserManager;
+  /**
+   * Terminals the agent is driving, shared with the tool registry that runs them.
+   *
+   * Absent, `terminal.*` reports an empty list rather than inventing a registry:
+   * a registry the tools do not write into would show nothing while claiming to
+   * be complete.
+   */
+  readonly terminalRegistry?: TerminalRegistry;
   /** Host-owned adapter registry. No channel transport is synthesized when absent. */
   readonly channelManager?: ChannelManager;
   /** Optional Bun HTTP listener that delivers provider webhooks to configured channel adapters. */
@@ -658,6 +667,7 @@ export class DaemonServer {
   private readonly snapshotRetention: number;
   private server: Server | undefined;
   private readonly socketPath: string;
+  private readonly terminalRegistry: TerminalRegistry | undefined;
   private readonly transcriptSearch = new TranscriptSearchIndex();
   /** One cold read of the transcript directory, shared by concurrent searches. */
   private transcriptSearchHydration: Promise<void> | undefined;
@@ -764,6 +774,7 @@ export class DaemonServer {
         : DEFAULT_SNAPSHOT_RETENTION;
     this.websocketOptions = options.websocket;
     this.browserManager = options.browserManager ?? new BrowserManager();
+    this.terminalRegistry = options.terminalRegistry;
     this.toolCatalog = options.toolCatalog;
     this.uiControl = options.uiControl;
   }
@@ -1415,6 +1426,15 @@ export class DaemonServer {
     }
     if (method === "browser.manage") {
       return this.manageBrowser(params);
+    }
+    if (method === "terminal.list") {
+      return { ok: true, terminals: this.terminalRegistry?.list() ?? [] };
+    }
+    if (method === "terminal.inspect") {
+      return this.inspectTerminal(params);
+    }
+    if (method === "terminal.control") {
+      return this.controlTerminal(params);
     }
     if (method === "channel.list") {
       return this.listChannels();
@@ -2856,6 +2876,66 @@ export class DaemonServer {
       ].join("\n"),
     );
     return { ok: true, sessions };
+  }
+
+  /** One terminal with the retained tail of its output; never drains the model's copy. */
+  private inspectTerminal(params: JsonRpcPayload): JsonRpcPayload {
+    const id = optionalString(params.terminal_id) ?? optionalString(params.id);
+    if (!id) return { ok: false, error: "terminal_id is required" };
+    const requested = integerOption(params.max_output_chars);
+    const maxChars =
+      requested === undefined ? undefined : Math.min(requested, 200_000);
+    const terminal = this.terminalRegistry?.inspect(
+      id,
+      ...(maxChars === undefined ? [] : ([maxChars] as const)),
+    );
+    return terminal
+      ? { ok: true, terminal }
+      : { ok: false, error: "unknown terminal" };
+  }
+
+  /**
+   * Send input to, interrupt, or kill one live terminal.
+   *
+   * Kept behind an explicit action rather than three methods so a client can
+   * discover the whole control surface from one signature, and so an
+   * unsupported action fails with the reason instead of "unknown method".
+   */
+  private async controlTerminal(
+    params: JsonRpcPayload,
+  ): Promise<JsonRpcPayload> {
+    const registry = this.terminalRegistry;
+    if (!registry) {
+      return { ok: false, error: "this daemon tracks no terminals" };
+    }
+    const id = optionalString(params.terminal_id) ?? optionalString(params.id);
+    if (!id) return { ok: false, error: "terminal_id is required" };
+    const action = (optionalString(params.action) ?? "").toLowerCase();
+    try {
+      if (action === "write") {
+        // Deliberately not `optionalString`, which trims: the trailing newline
+        // is what submits the line, and trimming it would send a command the
+        // shell then sits on waiting for Enter.
+        await registry.write(
+          id,
+          typeof params.chars === "string" ? params.chars : "",
+        );
+      } else if (action === "interrupt") {
+        await registry.interrupt(id);
+      } else if (action === "kill") {
+        const force = params.signal === "SIGKILL" || params.force === true;
+        await registry.kill(id, force ? "SIGKILL" : "SIGTERM");
+      } else {
+        return {
+          ok: false,
+          error: "terminal action must be write, interrupt, or kill",
+        };
+      }
+    } catch (error) {
+      return { ok: false, error: errorMessage(error) };
+    }
+    const terminal = registry.inspect(id);
+    return { ok: true, ...(terminal ? { terminal } : {}) };
   }
 
   private async manageBrowser(params: JsonRpcPayload): Promise<JsonRpcPayload> {

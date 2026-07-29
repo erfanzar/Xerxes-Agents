@@ -49,9 +49,30 @@ export interface SubagentProgress {
   summary?: string
   taskCount: number
   thinking: string[]
+  toolCalls?: SubagentToolCall[]
   toolCount: number
   tools: string[]
   toolsets?: string[]
+}
+
+/**
+ * One tool call an agent made, with how long it took.
+ *
+ * Separate from the `tools` string list, which is a capped tail of display
+ * lines for the live rail. This is the record the inspector reads: it pairs
+ * start with result, so a call still in flight is visibly in flight rather
+ * than indistinguishable from one that finished instantly.
+ */
+export interface SubagentToolCall {
+  /** Epoch ms; absent while the call is still running. */
+  endedAt?: number
+  id: string
+  name: string
+  /** False when the call was denied or errored. */
+  ok?: boolean
+  preview?: string
+  result?: string
+  startedAt: number
 }
 
 export interface SubagentOutputEntry {

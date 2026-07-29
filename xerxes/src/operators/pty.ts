@@ -11,6 +11,7 @@ import {
   interruptViaTerminalWrite,
   shellCommandArgv,
 } from '../core/hostPlatform.js'
+import type { TerminalHandle, TerminalRegistry } from '../runtime/terminalRegistry.js'
 import { WorkspacePathResolver } from '../tools/pathSafety.js'
 
 const DEFAULT_MAX_PENDING_OUTPUT_CHARS = 1_000_000
@@ -37,6 +38,8 @@ export interface PtyOutput extends PtySessionSummary {
 export interface PtySessionManagerOptions {
   /** Bounds unresolved output retained in memory for one terminal session. */
   readonly maxPendingOutputChars?: number
+  /** Mirror sessions here so the TUI terminal panel can watch them live. */
+  readonly terminals?: TerminalRegistry
   /** Restrict `workdir` to this root, including existing symlinks. */
   readonly workspaceRoot?: string
 }
@@ -64,6 +67,7 @@ interface PtySession {
   readonly command: string
   readonly decoder: TextDecoder
   readonly id: string
+  readonly mirror?: TerminalHandle
   readonly output: OutputBuffer
   readonly process: Bun.Subprocess
   readonly terminal: Bun.Terminal
@@ -82,6 +86,7 @@ export class PtySessionManager {
   private readonly maxPendingOutputChars: number
   private readonly paths: WorkspacePathResolver | undefined
   private readonly sessions = new Map<string, PtySession>()
+  private readonly terminals: TerminalRegistry | undefined
 
   constructor(options: PtySessionManagerOptions = {}) {
     this.maxPendingOutputChars = requirePositiveInteger(
@@ -89,6 +94,7 @@ export class PtySessionManager {
       'maxPendingOutputChars',
     )
     this.paths = options.workspaceRoot === undefined ? undefined : new WorkspacePathResolver(options.workspaceRoot)
+    this.terminals = options.terminals
   }
 
   async createSession(command: string, options: CreatePtySessionOptions = {}): Promise<PtyOutput> {
@@ -99,11 +105,31 @@ export class PtySessionManager {
     const output = new OutputBuffer(this.maxPendingOutputChars)
     const waiters = new Set<() => void>()
     const decoder = new TextDecoder()
+    // Opened before the terminal so the `data` callback can mirror from the
+    // very first byte. The controls resolve the session by id at call time,
+    // which is what lets them exist before the session does.
+    const mirror = this.terminals?.open({
+      id,
+      kind: 'pty',
+      command,
+      cwd: workdir,
+      control: {
+        write: async chars => {
+          this.requireSession(id).terminal.write(chars)
+        },
+        interrupt: async () => {
+          this.sendInterrupt(this.requireSession(id))
+        },
+        kill: async () => void (await this.close(id)),
+      },
+    })
     const terminal = new Bun.Terminal({
       cols: options.cols ?? 80,
       rows: options.rows ?? 24,
       data: (_terminal, bytes) => {
-        output.append(decoder.decode(bytes, { stream: true }))
+        const text = decoder.decode(bytes, { stream: true })
+        output.append(text)
+        mirror?.append(text)
         resolveWaiters(waiters)
       },
       exit: () => resolveWaiters(waiters),
@@ -118,11 +144,25 @@ export class PtySessionManager {
       })
     } catch (error) {
       terminal.close()
+      mirror?.close(null)
       throw error
     }
-    const session: PtySession = { id, command, workdir, process: childProcess, terminal, output, waiters, decoder }
+    const session: PtySession = {
+      id,
+      command,
+      workdir,
+      process: childProcess,
+      terminal,
+      output,
+      waiters,
+      decoder,
+      ...(mirror ? { mirror } : {}),
+    }
     this.sessions.set(id, session)
-    void childProcess.exited.then(() => resolveWaiters(waiters))
+    void childProcess.exited.then(code => {
+      resolveWaiters(waiters)
+      mirror?.close(typeof code === 'number' ? code : null)
+    })
     return this.read(session, options.yieldTimeMs, options.maxOutputChars)
   }
 
@@ -130,19 +170,7 @@ export class PtySessionManager {
     const session = this.requireSession(sessionId)
     const yieldTimeMs = options.yieldTimeMs ?? DEFAULT_YIELD_MS
     requireNonnegativeInteger(yieldTimeMs, 'yieldTimeMs')
-    if (options.interrupt && session.process.exitCode === null) {
-      // Windows has no SIGINT delivery to another process: Node/Bun map every
-      // signal except 0 onto TerminateProcess, so `kill('SIGINT')` would kill
-      // the shell itself and end the session instead of interrupting the command
-      // running inside it. Writing the Ctrl+C control character into the terminal
-      // is the equivalent that the console driver turns into a real interrupt and
-      // that leaves the shell alive for the next call.
-      if (interruptViaTerminalWrite()) {
-        session.terminal.write(CTRL_C)
-      } else {
-        session.process.kill('SIGINT')
-      }
-    }
+    if (options.interrupt) this.sendInterrupt(session)
     if (options.chars) session.terminal.write(options.chars)
     if (options.closeStdin) {
       session.terminal.write('\u0004')
@@ -167,6 +195,7 @@ export class PtySessionManager {
       }
     }
     if (!session.terminal.closed) session.terminal.close()
+    session.mirror?.close(session.process.exitCode)
     this.sessions.delete(sessionId)
     return { sessionId, closed: true, exitCode: session.process.exitCode }
   }
@@ -179,6 +208,25 @@ export class PtySessionManager {
 
   async closeAll(): Promise<void> {
     await Promise.all([...this.sessions.keys()].map(sessionId => this.close(sessionId)))
+  }
+
+  /**
+   * Deliver Ctrl+C to whatever the session is running, without killing it.
+   *
+   * Windows has no SIGINT delivery to another process: Node/Bun map every
+   * signal except 0 onto TerminateProcess, so `kill('SIGINT')` would kill the
+   * shell itself and end the session instead of interrupting the command
+   * running inside it. Writing the Ctrl+C control character into the terminal
+   * is the equivalent that the console driver turns into a real interrupt and
+   * that leaves the shell alive for the next call.
+   */
+  private sendInterrupt(session: PtySession): void {
+    if (session.process.exitCode !== null) return
+    if (interruptViaTerminalWrite()) {
+      session.terminal.write(CTRL_C)
+    } else {
+      session.process.kill('SIGINT')
+    }
   }
 
   private async read(

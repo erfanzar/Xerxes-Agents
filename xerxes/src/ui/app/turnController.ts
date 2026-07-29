@@ -59,6 +59,7 @@ const archiveSubagentAtTurnBoundary = (agent: SubagentProgress): SubagentProgres
   notes: [...agent.notes],
   status: agent.status === 'queued' || agent.status === 'running' ? 'interrupted' : agent.status,
   thinking: [...agent.thinking],
+  ...(agent.toolCalls ? { toolCalls: [...agent.toolCalls] } : {}),
   tools: [...agent.tools]
 })
 

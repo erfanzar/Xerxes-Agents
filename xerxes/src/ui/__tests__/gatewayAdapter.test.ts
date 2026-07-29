@@ -644,7 +644,24 @@ describe('gatewayAdapter', () => {
         type: 'subagent.tool'
       }
     ])
+    // Two events per result: the structured record the agent inspector pairs
+    // with its tool_call to show a duration, and the note the live rail shows.
     expect(second).toEqual([
+      {
+        payload: {
+          agent_type: 'reviewer',
+          depth: 1,
+          goal: 'run verification',
+          parent_id: 'root-agent',
+          status: 'running',
+          subagent_id: 'review-child',
+          task_index: 1,
+          tool_name: 'ExecCommand',
+          tool_ok: true,
+          tool_preview: 'checks passed\nmore output'
+        },
+        type: 'subagent.tool_result'
+      },
       {
         payload: {
           agent_type: 'reviewer',

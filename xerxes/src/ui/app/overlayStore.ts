@@ -7,6 +7,7 @@ import type { OverlayState } from './interfaces.js'
 const buildOverlayState = (): OverlayState => ({
   agents: false,
   agentsInitialHistoryIndex: 0,
+  agentsInspectId: null,
   approval: null,
   clarify: null,
   confirm: null,
@@ -18,14 +19,15 @@ const buildOverlayState = (): OverlayState => ({
   secret: null,
   sessions: false,
   skillsHub: false,
-  sudo: null
+  sudo: null,
+  terminals: false
 })
 
 export const $overlayState = atom<OverlayState>(buildOverlayState())
 
 export const $isBlocked = computed(
   $overlayState,
-  ({ agents, approval, clarify, confirm, copyPicker, diff, modelPicker, pager, pluginsHub, secret, sessions, skillsHub, sudo }) =>
+  ({ agents, approval, clarify, confirm, copyPicker, diff, modelPicker, pager, pluginsHub, secret, sessions, skillsHub, sudo, terminals }) =>
     Boolean(
       agents ||
       approval ||
@@ -39,7 +41,8 @@ export const $isBlocked = computed(
       secret ||
       sessions ||
       skillsHub ||
-      sudo
+      sudo ||
+      terminals
     )
 )
 
@@ -93,10 +96,12 @@ export const resetFlowOverlays = () =>
     ...buildOverlayState(),
     agents: $overlayState.get().agents,
     agentsInitialHistoryIndex: $overlayState.get().agentsInitialHistoryIndex,
+    agentsInspectId: $overlayState.get().agentsInspectId,
     copyPicker: $overlayState.get().copyPicker,
     diff: $overlayState.get().diff,
     modelPicker: $overlayState.get().modelPicker,
     pluginsHub: $overlayState.get().pluginsHub,
     sessions: $overlayState.get().sessions,
-    skillsHub: $overlayState.get().skillsHub
+    skillsHub: $overlayState.get().skillsHub,
+    terminals: $overlayState.get().terminals
   })

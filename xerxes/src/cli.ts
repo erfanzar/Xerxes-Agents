@@ -72,6 +72,9 @@ import {
 import { CliWriter, createCliStyle, detectColorDepth } from "./runtime/cliStyle.js";
 import { resolveTuiEntry } from "./runtime/distribution.js";
 import { registerInteractionModeTool } from "./runtime/interactionModeTool.js";
+import { ProcessRegistry } from "./runtime/processRegistry.js";
+import { TerminalRegistry } from "./runtime/terminalRegistry.js";
+import { BackgroundCommandManager } from "./tools/backgroundCommands.js";
 import { DaemonTranscriptStore } from "./session/daemonTranscript.js";
 import {
   UPDATE_HELP,
@@ -357,6 +360,10 @@ async function runDaemon(
   });
   const browserManager = new BrowserManager();
   const skillRegistry = new SkillRegistry();
+  // Shared by the tool registry that starts the processes and the RPC surface
+  // that lists them. One instance is the whole point: a second registry would
+  // be a second, permanently empty view of the same shells.
+  const terminals = new TerminalRegistry();
   const buildId = await daemonBuildIdForEntry(
     import.meta.dir,
     fileURLToPath(import.meta.url),
@@ -367,7 +374,7 @@ async function runDaemon(
     profileStore,
     interactions,
     browserManager,
-    { ...(buildId ? { buildId } : {}), skillRegistry },
+    { ...(buildId ? { buildId } : {}), skillRegistry, terminals },
   );
   const channelManager = createDaemonChannelManager(config, runtime, {
     discordApplicationRest: new FetchDiscordApplicationRestPort(),
@@ -388,6 +395,7 @@ async function runDaemon(
     runtime,
     interactions,
     browserManager,
+    terminalRegistry: terminals,
     profileStore,
     skillRegistry,
     onRestart: finish,
@@ -693,6 +701,7 @@ function daemonRuntime(
   host: {
     readonly buildId?: string;
     readonly skillRegistry?: SkillRegistry;
+    readonly terminals?: TerminalRegistry;
   } = {},
 ): InMemoryDaemonRuntime {
   const workspaceRoot = projectDirectory ?? config.projectDirectory;
@@ -755,6 +764,13 @@ function daemonRuntime(
     })
     : undefined;
   const subagentEvents = new DaemonSubagentEventBus();
+  // Built once, outside the runner factory. Every settings change rebuilds the
+  // registry, and a per-registry manager took every running background process
+  // with it — the `proc_id` the model was polling stopped resolving mid-build.
+  const backgroundCommands = new BackgroundCommandManager(
+    new ProcessRegistry(),
+    host.terminals,
+  );
   let subagentHost: ReturnType<typeof createNativeSubagentHost> | undefined;
   let runtime: InMemoryDaemonRuntime | undefined;
   let activeToolCount = 0;
@@ -775,6 +791,8 @@ function daemonRuntime(
     });
     registerCoreTools(tools, {
       workspaceRoot,
+      backgroundCommands,
+      ...(host.terminals === undefined ? {} : { terminals: host.terminals }),
       ...(computerUseTool === undefined ? {} : { computerUseTool }),
       agentMemoryTools: {
         resolveMemory: (context) => {

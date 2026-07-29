@@ -69,7 +69,7 @@ export const agentRetryCommands: SlashCommand[] = [
         return ctx.transcript.sys(AGENTS_USAGE)
       }
 
-      patchOverlayState({ agents: true, agentsInitialHistoryIndex: 0 })
+      patchOverlayState({ agents: true, agentsInitialHistoryIndex: 0, agentsInspectId: null })
     },
     usage: '/agents [status|retry <name-or-id> [message]]'
   }

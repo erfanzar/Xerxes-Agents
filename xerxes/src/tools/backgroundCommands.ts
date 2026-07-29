@@ -18,6 +18,7 @@
 
 import { ValidationError } from '../core/errors.js'
 import { ProcessRegistry, type ProcessRecord } from '../runtime/processRegistry.js'
+import type { TerminalHandle, TerminalRegistry } from '../runtime/terminalRegistry.js'
 
 import { BoundedOutputBuffer, capOutput, drainStream, type StreamDrain } from './processOutput.js'
 
@@ -61,6 +62,7 @@ interface BackgroundEntry {
   readonly process: Bun.Subprocess
   readonly stderr: BoundedOutputBuffer
   readonly stdout: BoundedOutputBuffer
+  readonly terminal?: TerminalHandle
 }
 
 /**
@@ -71,8 +73,14 @@ interface BackgroundEntry {
  */
 export class BackgroundCommandManager {
   private readonly entries = new Map<string, BackgroundEntry>()
+  private readonly terminals: TerminalRegistry | undefined
 
-  constructor(private readonly registry: ProcessRegistry = new ProcessRegistry()) {}
+  constructor(
+    private readonly registry: ProcessRegistry = new ProcessRegistry(),
+    terminals?: TerminalRegistry,
+  ) {
+    this.terminals = terminals
+  }
 
   /**
    * Spawn a detached command and return its handle immediately.
@@ -91,17 +99,31 @@ export class BackgroundCommandManager {
     })
     const stdout = new BoundedOutputBuffer(OUTPUT_CAPACITY_CHARS)
     const stderr = new BoundedOutputBuffer(OUTPUT_CAPACITY_CHARS)
-    // Drain continuously from the moment it starts. A process whose output is
-    // only read when polled fills its pipe buffer and blocks — so a build left
-    // unpolled for a minute would stall on its own logging.
-    const drains = [drainStream(child.stdout as ReadableStream<Uint8Array>, stdout),
-      drainStream(child.stderr as ReadableStream<Uint8Array>, stderr)]
     const procId = this.registry.register(child, {
       command: argv.join(' '),
       cwd: options.cwd,
       ...(options.name ? { name: options.name } : {}),
     })
-    this.entries.set(procId, { command: argv, drains, process: child, stdout, stderr })
+    const terminal = this.terminals?.open({
+      id: procId,
+      kind: 'background',
+      command: argv.join(' '),
+      cwd: options.cwd,
+      pid: child.pid,
+      ...(options.name ? { label: options.name } : {}),
+      control: { kill: async signal => void (await this.kill(procId, signal)) },
+    })
+    // Drain continuously from the moment it starts. A process whose output is
+    // only read when polled fills its pipe buffer and blocks — so a build left
+    // unpolled for a minute would stall on its own logging.
+    const drains = [
+      drainStream(child.stdout as ReadableStream<Uint8Array>, stdout, text => terminal?.append(text)),
+      drainStream(child.stderr as ReadableStream<Uint8Array>, stderr, text => terminal?.append(text)),
+    ]
+    this.entries.set(procId, { command: argv, drains, process: child, stdout, stderr, ...(terminal ? { terminal } : {}) })
+    // Close the mirror on natural exit too, not only on an explicit kill: a
+    // build that finishes on its own must stop being listed as running.
+    void child.exited.then(code => terminal?.close(typeof code === 'number' ? code : null)).catch(() => {})
     return { procId, pid: child.pid, running: true, command: argv, cwd: options.cwd }
   }
 
@@ -203,6 +225,7 @@ export class BackgroundCommandManager {
   private release(procId: string): void {
     const entry = this.entries.get(procId)
     for (const drain of entry?.drains ?? []) drain.cancel()
+    entry?.terminal?.close(normalizedExit(entry.process.exitCode))
     this.entries.delete(procId)
     this.registry.remove(procId)
   }

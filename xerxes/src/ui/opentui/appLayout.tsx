@@ -57,6 +57,7 @@ import { AgentPanel, AgentPanelHotkey, AgentPanelOverlay, collectAgentPanelRecor
 import { displayModeLabel, SessionHeader, WorkspaceFooter } from './appChrome.js'
 import { CopyPicker } from './copyPicker.js'
 import { DiffPanelHotkey, DiffPanelOverlay } from './diffPanel.js'
+import { TerminalPanelHotkey, TerminalPanelOverlay } from './terminalPanel.js'
 import { MessageLine } from './messageLine.js'
 import { ModelPicker } from './modelPicker.js'
 import { Box, Span, Text } from './primitives.js'
@@ -1554,12 +1555,13 @@ export function AppLayout({
     overlay.secret ||
     overlay.sessions ||
     overlay.skillsHub ||
-    overlay.sudo
+    overlay.sudo ||
+    overlay.terminals
   )
   // Keyed off whether the rail *fits*, not whether it is showing right now, so
   // opening the overlay does not swap the footer text underneath the backdrop
   // and swap it back on close.
-  const footerAgentHint = agentSidebarFits ? undefined : 'F6 agents · F7 diff'
+  const footerAgentHint = agentSidebarFits ? undefined : 'F6 agents · F7 diff · F8 terminals'
   const welcomeRightLabel = [footerAgentHint, ui.info?.version ? `v${ui.info.version}` : undefined]
     .filter(Boolean)
     .join(' · ')
@@ -1586,7 +1588,9 @@ export function AppLayout({
       <LiveTailFollower scrollRef={transcript.scrollRef} />
       <AgentPanelHotkey
         disabled={agentHotkeyBlocked}
-        onToggle={agents => patchOverlayState({ agents })}
+        // Clearing the inspect target on every toggle keeps a click from
+        // sticking: reopening with F6 later should land on the list.
+        onToggle={agents => patchOverlayState({ agents, agentsInspectId: null })}
         open={overlay.agents}
         resizeEnabled={overlay.agents || showAgentSidebar}
       />
@@ -1594,6 +1598,11 @@ export function AppLayout({
         disabled={agentHotkeyBlocked || overlay.agents}
         onToggle={diff => patchOverlayState({ diff })}
         open={overlay.diff}
+      />
+      <TerminalPanelHotkey
+        disabled={agentHotkeyBlocked || overlay.agents}
+        onToggle={terminals => patchOverlayState({ terminals })}
+        open={overlay.terminals}
       />
       <Box flexDirection="row" flexGrow={1} minHeight={0} width="100%">
         <Box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} minWidth={0}>
@@ -1675,7 +1684,12 @@ export function AppLayout({
             paddingTop={1}
             width={sidebarWidth}
           >
-            <AgentPanel history={spawnHistory} liveAgents={liveAgents} t={t} />
+            <AgentPanel
+              history={spawnHistory}
+              liveAgents={liveAgents}
+              onInspect={agentId => patchOverlayState({ agents: true, agentsInspectId: agentId })}
+              t={t}
+            />
           </Box>
         ) : null}
       </Box>
@@ -1692,10 +1706,14 @@ export function AppLayout({
       {overlay.agents ? (
         <AgentPanelOverlay
           history={spawnHistory}
+          initialInspectId={overlay.agentsInspectId}
           liveAgents={liveAgents}
-          onClose={() => patchOverlayState({ agents: false })}
+          onClose={() => patchOverlayState({ agents: false, agentsInspectId: null })}
           t={t}
         />
+      ) : null}
+      {overlay.terminals ? (
+        <TerminalPanelOverlay onClose={() => patchOverlayState({ terminals: false })} t={t} />
       ) : null}
       {overlay.skillsHub ? <InfoOverlay kind="skillsHub" /> : null}
       {overlay.pluginsHub ? <InfoOverlay kind="pluginsHub" /> : null}

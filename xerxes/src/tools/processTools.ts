@@ -5,6 +5,8 @@ import { stat } from 'node:fs/promises'
 
 import { ValidationError } from '../core/errors.js'
 import { ToolRegistry } from '../executors/toolRegistry.js'
+import { ProcessRegistry } from '../runtime/processRegistry.js'
+import type { TerminalRegistry } from '../runtime/terminalRegistry.js'
 import type { JsonObject, ToolDefinition } from '../types/toolCalls.js'
 import { optionalBoolean, optionalInteger, optionalString, optionalStringArray, requireRange, requiredString } from './inputs.js'
 import { WorkspacePathResolver } from './pathSafety.js'
@@ -164,8 +166,10 @@ export interface ProcessResult {
 export function registerProcessTools(
   registry: ToolRegistry,
   paths: WorkspacePathResolver,
-  background: BackgroundCommandManager = new BackgroundCommandManager(),
+  backgroundManager?: BackgroundCommandManager,
+  terminals?: TerminalRegistry,
 ): void {
+  const background = backgroundManager ?? new BackgroundCommandManager(new ProcessRegistry(), terminals)
   // Deciding concurrency by tool NAME alone would make every shell call a
   // barrier, and the shipped prompt tells the model to batch independent calls —
   // so it complies and gets serialized anyway. The read-only analyzer already
@@ -174,7 +178,7 @@ export function registerProcessTools(
   // still runs alone.
   registry.register(
     EXEC_COMMAND_DEFINITION,
-    (inputs, _context, signal) => executeCommand(inputs, paths, signal, background),
+    (inputs, _context, signal) => executeCommand(inputs, paths, signal, background, terminals),
     'default',
     { concurrencySafe: false, defer: false, destructive: true, openWorld: true, readOnly: false },
   )
@@ -229,6 +233,7 @@ export async function executeCommand(
   paths: WorkspacePathResolver,
   signal?: AbortSignal,
   background?: BackgroundCommandManager,
+  terminals?: TerminalRegistry,
 ): Promise<BackgroundStartResult | ProcessResult> {
   const command = requiredString(inputs, 'cmd')
   if (/\s/.test(command) || /[;&|`$<>]/.test(command)) {
@@ -277,6 +282,23 @@ export async function executeCommand(
   const stderrBuffer = new BoundedOutputBuffer(maxOutputChars * 8)
   let stdoutDrain: StreamDrain | undefined
   let stderrDrain: StreamDrain | undefined
+  let child: Bun.Subprocess | undefined
+  let observedExit: number | null = null
+  // Mirrored live rather than recorded at the end: a foreground command may run
+  // for two minutes, and the whole point of the terminal panel is being able to
+  // watch it during those two minutes instead of afterwards. The kill control
+  // reads `child` at call time, so it can be published before the spawn.
+  const mirror = terminals?.open({
+    id: `fg_${crypto.randomUUID().replaceAll('-', '').slice(0, 10)}`,
+    kind: 'foreground',
+    command: [command, ...args].join(' '),
+    cwd,
+    control: {
+      kill: async killSignal => {
+        child?.kill(killSignal)
+      },
+    },
+  })
 
   try {
     const process = Bun.spawn([command, ...args], {
@@ -286,8 +308,9 @@ export async function executeCommand(
       stderr: 'pipe',
       signal: controller.signal,
     })
-    stdoutDrain = drainStream(process.stdout, stdoutBuffer)
-    stderrDrain = drainStream(process.stderr, stderrBuffer)
+    child = process
+    stdoutDrain = drainStream(process.stdout, stdoutBuffer, text => mirror?.append(text))
+    stderrDrain = drainStream(process.stderr, stderrBuffer, text => mirror?.append(text))
 
     // Wait for the process, not for its pipes to reach EOF.
     //
@@ -299,6 +322,7 @@ export async function executeCommand(
     // indefinitely. Exit status is a fact about our child alone, so that is what
     // bounds the call.
     const exitCode = await process.exited
+    observedExit = typeof exitCode === 'number' ? exitCode : null
     // Give the already-buffered output a moment to land. Output written just
     // before exit may still be in flight in the pipe, and returning without it
     // would drop the last line of every fast command.
@@ -325,6 +349,9 @@ export async function executeCommand(
     // end; that is its business, and no longer ours.
     stdoutDrain?.cancel()
     stderrDrain?.cancel()
+    // Closed on the error and cancellation paths too: a foreground command the
+    // panel still listed as running after the turn moved on would be a lie.
+    mirror?.close(observedExit)
   }
 }
 

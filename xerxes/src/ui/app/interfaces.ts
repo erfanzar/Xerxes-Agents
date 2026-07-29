@@ -92,6 +92,8 @@ export interface GatewayProviderProps {
 export interface OverlayState {
   agents: boolean
   agentsInitialHistoryIndex: number
+  /** Agent the overlay should open directly into, set by clicking a rail card. */
+  agentsInspectId: null | string
   approval: ApprovalReq | null
   clarify: ClarifyReq | null
   confirm: ConfirmReq | null
@@ -104,6 +106,7 @@ export interface OverlayState {
   sessions: boolean
   skillsHub: boolean
   sudo: null | SudoReq
+  terminals: boolean
 }
 
 /** Snapshot of copyable transcript messages taken when bare /copy opens the picker. */

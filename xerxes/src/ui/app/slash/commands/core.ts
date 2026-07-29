@@ -478,6 +478,19 @@ export const coreCommands: SlashCommand[] = [
   },
 
   {
+    aliases: ['shells'],
+    help: 'open the terminal viewer (F8)',
+    name: 'terminals',
+    run: (arg, ctx) => {
+      if (arg) {
+        return ctx.transcript.sys('usage: /terminals')
+      }
+
+      patchOverlayState({ terminals: true })
+    }
+  },
+
+  {
     help: 'configure IDE terminal keybindings for multiline + undo/redo',
     name: 'terminal-setup',
     run: (arg, ctx) => {
