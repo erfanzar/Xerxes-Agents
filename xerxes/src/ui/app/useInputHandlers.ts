@@ -30,6 +30,13 @@ import { getUiState, patchUiState } from './uiStore.js'
 const isCtrl = (key: { ctrl: boolean }, ch: string, target: string) => key.ctrl && ch.toLowerCase() === target
 const MODE_CYCLE = ['code', 'researcher', 'plan', 'objective'] as const
 
+/**
+ * Idle Ctrl+C arms exit instead of killing the session: an accidental tap —
+ * usually a failed copy — must never destroy the transcript. A second press
+ * inside this window exits; anything else the user does lets it lapse.
+ */
+const CTRL_C_EXIT_WINDOW_MS = 2_000
+
 const nextInteractionMode = (current: string | undefined): string => {
   const idx = MODE_CYCLE.indexOf((current || 'code') as (typeof MODE_CYCLE)[number])
 
@@ -103,6 +110,7 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
   // panel offscreen and leaves only the dimming scrim visible.
   const pagerPageSize = Math.max(5, (terminal.stdout?.rows ?? 24) - 10)
   const scrollIdleTimer = useRef<null | ReturnType<typeof setTimeout>>(null)
+  const ctrlCExitArmedAt = useRef<null | number>(null)
 
   // Wheel accel ported from claude-code: inter-event timing drives step size,
   // direction flips reset. wheelStep (WHEEL_SCROLL_STEP) is the base; final
@@ -549,6 +557,7 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
 
     if (key.ctrl && ch.toLowerCase() === 'c') {
       if (live.busy && live.sid) {
+        ctrlCExitArmedAt.current = null
         return turnController.interruptTurn({
           gw: gateway.gw,
           sid: live.sid,
@@ -557,10 +566,20 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
       }
 
       if (cState.input || cState.inputBuf.length) {
+        ctrlCExitArmedAt.current = null
         return cActions.clearIn()
       }
 
-      return actions.die()
+      // Nothing to interrupt, clear, or copy: arm exit rather than exiting.
+      // One stray Ctrl+C used to close the whole TUI here — on Windows, where
+      // Ctrl+C is the muscle-memory copy chord, that destroyed sessions.
+      const now = Date.now()
+      if (ctrlCExitArmedAt.current !== null && now - ctrlCExitArmedAt.current < CTRL_C_EXIT_WINDOW_MS) {
+        ctrlCExitArmedAt.current = null
+        return actions.die()
+      }
+      ctrlCExitArmedAt.current = now
+      return actions.sys('Press Ctrl+C again to exit')
     }
 
     if (isAction(key, ch, 'd')) {

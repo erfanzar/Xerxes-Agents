@@ -218,4 +218,70 @@ describe('Ctrl+O copy keybinding', () => {
       act(() => setup.renderer.destroy())
     }
   })
+
+  it('a single idle Ctrl+C arms exit instead of killing the session', async () => {
+    const die = vi.fn()
+    const { ctx, sys } = makeCtx({ die })
+    const setup = await renderHarness(ctx)
+
+    try {
+      await act(async () => {
+        setup.mockInput.pressCtrlC()
+        await Bun.sleep(0)
+      })
+      await setup.flush()
+
+      // One stray Ctrl+C — usually a failed copy — must not destroy the session.
+      expect(die).not.toHaveBeenCalled()
+      expect(sys).toHaveBeenCalledWith('Press Ctrl+C again to exit')
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
+
+  it('a second idle Ctrl+C inside the window exits', async () => {
+    const die = vi.fn()
+    const { ctx } = makeCtx({ die })
+    const setup = await renderHarness(ctx)
+
+    try {
+      await act(async () => {
+        setup.mockInput.pressCtrlC()
+        await Bun.sleep(0)
+        setup.mockInput.pressCtrlC()
+        await Bun.sleep(0)
+      })
+      await setup.flush()
+
+      expect(die).toHaveBeenCalledTimes(1)
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
+
+  it('an idle Ctrl+C after the window lapses arms again instead of exiting', async () => {
+    const die = vi.fn()
+    const { ctx, sys } = makeCtx({ die })
+    const setup = await renderHarness(ctx)
+
+    try {
+      await act(async () => {
+        setup.mockInput.pressCtrlC()
+        await Bun.sleep(0)
+      })
+      // Let the 2s arming window lapse, then press once more: that is a fresh
+      // first press, not a confirmation.
+      await act(async () => {
+        await Bun.sleep(2_100)
+        setup.mockInput.pressCtrlC()
+        await Bun.sleep(0)
+      })
+      await setup.flush()
+
+      expect(die).not.toHaveBeenCalled()
+      expect(sys).toHaveBeenCalledTimes(2)
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
 })
