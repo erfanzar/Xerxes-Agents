@@ -1,0 +1,27 @@
+# Normalize line endings so Windows checkouts do not corrupt shell scripts.
+* text=auto eol=lf
+
+# Windows-native script formats must keep CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Shell scripts must always stay LF, even on Windows checkouts (WSL/Git-Bash).
+*.sh text eol=lf
+
+# Binary assets
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.icns binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary
+*.zip binary
+*.tar binary
+*.gz binary
+*.sqlite binary
+*.db binary

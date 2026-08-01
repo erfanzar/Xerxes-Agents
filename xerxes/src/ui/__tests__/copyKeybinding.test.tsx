@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { InputHandlerContext } from '../app/interfaces.js'
 import { getOverlayState, patchOverlayState, resetOverlayState } from '../app/overlayStore.js'
-import { useInputHandlers } from '../app/useInputHandlers.js'
+import { CTRL_C_EXIT_WINDOW_MS, ctrlCConfirmsExit, useInputHandlers } from '../app/useInputHandlers.js'
 import { resetUiState } from '../app/uiStore.js'
 import { copyableMessages, copyLatestAssistantMessage } from '../lib/copyText.js'
 import type { Msg } from '../types.js'
@@ -217,5 +217,49 @@ describe('Ctrl+O copy keybinding', () => {
     } finally {
       act(() => setup.renderer.destroy())
     }
+  })
+
+  it('a single idle Ctrl+C arms exit instead of killing the session', async () => {
+    const die = vi.fn()
+    const { ctx, sys } = makeCtx({ die })
+    const setup = await renderHarness(ctx)
+
+    try {
+      await act(async () => {
+        setup.mockInput.pressCtrlC()
+        await Bun.sleep(0)
+      })
+      await setup.flush()
+
+      // One stray Ctrl+C — usually a failed copy — must not destroy the session.
+      expect(die).not.toHaveBeenCalled()
+      expect(sys).toHaveBeenCalledWith('Press Ctrl+C again to exit')
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
+
+  // The confirmation half of the chord cannot be driven through the renderer:
+  // OpenTUI's test input tears down on the first Ctrl+C, so no later key —
+  // Ctrl+C or otherwise — reaches the handler. The arming press above is the
+  // end-to-end half; the window arithmetic is covered directly below.
+  it('a second idle Ctrl+C inside the window confirms exit', () => {
+    const armedAt = 10_000
+
+    expect(ctrlCConfirmsExit(armedAt, armedAt)).toBe(true)
+    expect(ctrlCConfirmsExit(armedAt, armedAt + CTRL_C_EXIT_WINDOW_MS - 1)).toBe(true)
+  })
+
+  it('an idle Ctrl+C after the window lapses arms again instead of exiting', () => {
+    const armedAt = 10_000
+
+    // Exactly at the boundary the window has closed: that press is a fresh
+    // first press, not a confirmation.
+    expect(ctrlCConfirmsExit(armedAt, armedAt + CTRL_C_EXIT_WINDOW_MS)).toBe(false)
+    expect(ctrlCConfirmsExit(armedAt, armedAt + CTRL_C_EXIT_WINDOW_MS + 100)).toBe(false)
+  })
+
+  it('an unarmed idle Ctrl+C never exits', () => {
+    expect(ctrlCConfirmsExit(null, 10_000)).toBe(false)
   })
 })

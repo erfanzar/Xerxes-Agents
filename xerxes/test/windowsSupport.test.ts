@@ -7,6 +7,9 @@
 // a branch that regresses silently between Windows CI runs.
 
 import { expect, test } from 'bun:test'
+import { mkdtemp } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import {
   controlChannelPath,
@@ -19,9 +22,13 @@ import {
   safeEnvironmentNames,
   shellCommandArgv,
 } from '../src/core/hostPlatform.js'
+import { defaultAcpRegistryDirectory } from '../src/acp/registry.js'
 import { processCommandProbe } from '../src/core/processLiveness.js'
 import { isBatchScript, planSpawn, WindowsSpawnError } from '../src/core/windowsSpawn.js'
 import { daemonPaths } from '../src/daemon/paths.js'
+import { PtySessionManager } from '../src/operators/pty.js'
+import { TerminalRegistry } from '../src/runtime/terminalRegistry.js'
+import { DaemonTranscriptStore, normalizeDaemonTranscript } from '../src/session/daemonTranscript.js'
 import { controlChannelPath as uiControlChannelPath } from '../src/ui/lib/hostPlatform.js'
 
 const DIGEST = 'a1b2c3d4e5f60718'
@@ -214,8 +221,60 @@ test('isBatchScript matches the extensions CreateProcess cannot execute', () => 
   expect(isBatchScript('/usr/bin/git')).toBe(false)
 })
 
+test('the ACP registry root follows %APPDATA% on Windows and XDG elsewhere', () => {
+  // XDG_CONFIG_HOME does not exist on Windows; writing agent.json there would
+  // strand the registry where no ACP client looks for it.
+  // The injected platform picks the joiner too, so every expectation below is
+  // an exact literal that holds on a POSIX host and a Windows host alike.
+  expect(defaultAcpRegistryDirectory({ APPDATA: 'C:\\Users\\u\\AppData\\Roaming' }, 'C:\\Users\\u', 'win32'))
+    .toBe('C:\\Users\\u\\AppData\\Roaming\\agent-registry')
+  expect(defaultAcpRegistryDirectory({}, 'C:\\Users\\u', 'win32'))
+    .toBe('C:\\Users\\u\\AppData\\Roaming\\agent-registry')
+  expect(defaultAcpRegistryDirectory({ XDG_CONFIG_HOME: '/xdg' }, '/home/u', 'linux')).toBe('/xdg/agent-registry')
+  expect(defaultAcpRegistryDirectory({}, '/home/u', 'linux')).toBe('/home/u/.config/agent-registry')
+})
+
 test('isWindows only reports win32', () => {
   expect(isWindows('win32')).toBe(true)
   expect(isWindows('linux')).toBe(false)
   expect(isWindows('darwin')).toBe(false)
 })
+
+// Real-machine end-to-end cases. The injected-platform tests above prove the
+// branching logic; these prove the branch that only a Windows host can reach.
+
+test.skipIf(process.platform !== 'win32')(
+  'a PTY session on Windows runs the command instead of dying instantly with exit 1',
+  async () => {
+    // Bun.spawn `detached` maps to DETACHED_PROCESS ("no console") on Windows,
+    // which contradicts the ConPTY pseudoconsole the terminal option attaches:
+    // the child exited with code 1 before printing a byte, so the F8 panel only
+    // ever showed dead pty rows. `detached` is POSIX session leadership only.
+    const terminals = new TerminalRegistry()
+    const manager = new PtySessionManager({ terminals })
+    const result = await manager.createSession('echo pty-windows-alive', { yieldTimeMs: 2_000 })
+    try {
+      expect(result.stdout).toContain('pty-windows-alive')
+      expect(terminals.inspect(result.sessionId)?.output).toContain('pty-windows-alive')
+    } finally {
+      await manager.closeAll()
+    }
+  },
+)
+
+test.skipIf(process.platform !== 'win32')(
+  'saving a transcript on Windows does not fsync a directory handle (EPERM)',
+  async () => {
+    // Windows cannot fsync a directory: the atomic transcript write crashed
+    // every save with EPERM after the rename had already succeeded.
+    const directory = await mkdtemp(join(tmpdir(), 'xerxes-windows-transcript-'))
+    const store = new DaemonTranscriptStore({ directory, currentProjectDirectory: directory })
+    const transcript = normalizeDaemonTranscript({
+      session_id: 'feed1234',
+      messages: [{ role: 'user', content: 'persist me' }],
+    }, { requestedSessionKey: 'feed1234', currentProjectDirectory: directory })
+    if (!transcript) throw new Error('expected transcript to normalize')
+    await store.save(transcript)
+    expect((await store.load('feed1234'))?.messages).toHaveLength(1)
+  },
+)

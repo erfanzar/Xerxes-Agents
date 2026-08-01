@@ -19,7 +19,7 @@ const MAX_PREVIEW_CHARS = 4_096
 const NO_RESPONSE_TEXT = '(no response)'
 const PREVIEW_PLACEHOLDER = '...'
 const TURN_FAILED_TEXT = '(turn failed)'
-const PATH_REDACTION = /(?:\/Users\/[^\s'"]+|\/home\/[^\s'"]+|\/private\/[^\s'"]+|\/var\/[^\s'"]+|\/tmp\/[^\s'"]+|~\/\.xerxes[^\s'"]*)/g
+const PATH_REDACTION = /(?:\/Users\/[^\s'"]+|\/home\/[^\s'"]+|\/private\/[^\s'"]+|\/var\/[^\s'"]+|\/tmp\/[^\s'"]+|~[\/\\]\.xerxes[^\s'"]*|[A-Za-z]:\\Users\\[^\s'"]+|[A-Za-z]:\\[^\s'"]*\\\.xerxes[^\s'"]*)/g
 const TRACEBACK_REDACTION = /Traceback \(most recent call last\):.*?(?=\n\n|$)/gs
 
 /** Persistent Markdown context used by channel-backed agent sessions. */
@@ -576,7 +576,7 @@ function quoteUserBlock(text: string): string {
   return '~~~user\n' + text + '\n~~~'
 }
 
-function sanitizeJournalOutput(text: string): string {
+export function sanitizeJournalOutput(text: string): string {
   return text
     .replace(TRACEBACK_REDACTION, '[traceback redacted]')
     .replace(PATH_REDACTION, '[path redacted]')
