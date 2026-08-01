@@ -623,11 +623,9 @@ test('a model reporting no levels degrades to the fallback rather than an empty 
   expect(selectableEfforts(fallbackReasoningLevels('openai')).length).toBeGreaterThan(1)
 })
 
-test('Codex harness models are excluded from what a generic client may pick', async () => {
+test('every model the plan returns is selectable, harness-flagged or not', async () => {
   const respond = (models: unknown) => (async () => Response.json({ models })) as never
   const catalogModels = [
-    // Coupled to the Codex CLI's own harness: code-mode tool protocol and
-    // multi-agent orchestration, neither of which Xerxes drives.
     { id: 'gpt-5.6-sol', tool_mode: 'code_mode_only', multi_agent_version: 'v2', use_responses_lite: true },
     { id: 'codex-auto-review', tool_mode: 'code_mode_only', multi_agent_version: 'v1', use_responses_lite: true },
     { id: 'gpt-5.5', tool_mode: null, multi_agent_version: null, use_responses_lite: false },
@@ -635,25 +633,29 @@ test('Codex harness models are excluded from what a generic client may pick', as
   ]
   const credential = { accessToken: 'tok', accountId: 'a', planType: 'pro' }
 
+  // The harness flag records how the Codex CLI drives a model; it is not a
+  // restriction on calling it, and hiding these would drop capability the
+  // subscription pays for.
   const offered = await fetchCodexModelCatalog(credential, { fetchImplementation: respond(catalogModels) })
-  expect(offered.map(model => model.id)).toEqual(['gpt-5.5', 'gpt-5.4-mini'])
-
-  const everything = await fetchCodexModelCatalog(credential, {
-    fetchImplementation: respond(catalogModels),
-    includeHarnessModels: true,
-  })
-  expect(everything.map(model => model.id)).toEqual(['gpt-5.6-sol', 'codex-auto-review', 'gpt-5.5', 'gpt-5.4-mini'])
-  expect(everything.filter(model => model.harnessCoupled).map(model => model.id))
+  expect(offered.map(model => model.id))
+    .toEqual(['gpt-5.6-sol', 'codex-auto-review', 'gpt-5.5', 'gpt-5.4-mini'])
+  expect(offered.filter(model => model.harnessCoupled).map(model => model.id))
     .toEqual(['gpt-5.6-sol', 'codex-auto-review'])
+
+  // A caller that wants only the plain-Responses subset can still ask.
+  const filtered = await fetchCodexModelCatalog(credential, {
+    fetchImplementation: respond(catalogModels),
+    excludeHarnessModels: true,
+  })
+  expect(filtered.map(model => model.id)).toEqual(['gpt-5.5', 'gpt-5.4-mini'])
 })
 
 test('harness detection keys on capability flags, not on model names', async () => {
-  // A future harness model must be excluded the day it ships, not whenever
-  // someone notices the naming pattern changed.
+  // The flag must keep describing the right models as the catalog changes,
+  // rather than tracking a naming pattern that can shift.
   const catalog = await fetchCodexModelCatalog(
     { accessToken: 'tok', accountId: 'a', planType: 'pro' },
     {
-      includeHarnessModels: true,
       fetchImplementation: (async () => Response.json({
         models: [
           { id: 'totally-innocuous-name', use_responses_lite: true },
@@ -668,10 +670,8 @@ test('harness detection keys on capability flags, not on model names', async () 
     .toEqual(['totally-innocuous-name', 'another-plain-name'])
 })
 
-test('the built-in codex profile defaults to a generally-callable model', () => {
-  // Xerxes runs its own agent loop, so the default must not be a model that
-  // expects the Codex harness around it.
-  expect(CODEX_DEFAULT_MODEL).toBe('codex/gpt-5.5')
+test('the built-in codex profile starts on the plan\'s newest model', () => {
+  expect(CODEX_DEFAULT_MODEL).toBe('codex/gpt-5.6-sol')
 })
 
 test('toggle-shaped providers offer a switch, not a fake graded scale', () => {

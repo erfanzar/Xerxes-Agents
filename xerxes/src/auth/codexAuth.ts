@@ -360,8 +360,15 @@ export const CODEX_CLIENT_VERSION = '0.144.4'
 export interface CodexModelCatalogOptions {
   readonly baseUrl?: string
   readonly fetchImplementation?: typeof fetch
-  /** Include harness-coupled models, which are excluded by default. */
-  readonly includeHarnessModels?: boolean
+  /**
+   * Drop models the Codex CLI drives through its own harness.
+   *
+   * Off by default: the flag describes how the Codex CLI uses a model, not a
+   * restriction on calling it, and these models answer ordinary Responses
+   * requests with ordinary tool calls. Hiding them would remove capability the
+   * subscription pays for.
+   */
+  readonly excludeHarnessModels?: boolean
   readonly signal?: AbortSignal
 }
 
@@ -408,20 +415,24 @@ export async function fetchCodexModelCatalog(
       reasoningLevels: reasoningLevelsFrom(record?.supported_reasoning_levels),
     })
   }
-  return options.includeHarnessModels ? models : models.filter(model => !model.harnessCoupled)
+  return options.excludeHarnessModels ? models.filter(model => !model.harnessCoupled) : models
 }
 
 /**
- * Detect a model built for the Codex CLI's own harness.
+ * Detect a model the Codex CLI drives through its own harness.
  *
- * Keyed on the capability flags the catalog publishes rather than on model
- * names, so a future harness model is excluded the day it ships instead of
- * whenever someone notices the naming pattern changed.
+ * Reported as metadata, not used to hide anything: Xerxes runs its own agent
+ * loop against the plan's entitlement, and these models serve ordinary
+ * Responses requests — verified with a normal tool call — so the flag says how
+ * the Codex CLI treats them rather than what a client is allowed to call.
  *
- * - `tool_mode: "code_mode_only"` — expects Codex's code-mode tool protocol
- *   instead of ordinary function calling.
- * - `multi_agent_version` — expects the harness's multi-agent orchestration.
- * - `use_responses_lite` — a different request shape than the one we send.
+ * Keyed on capability flags rather than model names so it keeps describing the
+ * right models as the catalog changes.
+ *
+ * - `tool_mode: "code_mode_only"` — the Codex CLI drives these with its
+ *   code-mode tool protocol.
+ * - `multi_agent_version` — participates in the harness's multi-agent flow.
+ * - `use_responses_lite` — the Codex CLI uses a lighter request shape.
  */
 function isHarnessCoupled(record: Record<string, unknown> | undefined): boolean {
   return (
