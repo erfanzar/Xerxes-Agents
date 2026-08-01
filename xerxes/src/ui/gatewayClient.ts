@@ -789,6 +789,9 @@ export class GatewayClient extends EventEmitter {
       case 'model.models':
         return this.modelModels(params) as Promise<T>
 
+      case 'reasoning.levels':
+        return this.reasoningLevels() as Promise<T>
+
       default:
         return this.rawRequest<T>(method, params)
     }
@@ -1356,6 +1359,28 @@ export class GatewayClient extends EventEmitter {
       models,
       ...(raw.source ? { source: String(raw.source) } : {}),
       ...(raw.warning ? { warning: String(raw.warning) } : {})
+    }
+  }
+
+  /**
+   * Reasoning efforts the active model accepts, as the provider reports them.
+   *
+   * The list is model-scoped rather than fixed, so the picker asks each time
+   * it opens instead of rendering a menu that may not match the model.
+   */
+  private async reasoningLevels(): Promise<RpcObject> {
+    const raw = (await this.nativeSuccess('reasoning_levels', {})) as RpcObject
+    const levels = Array.isArray(raw.levels) ? raw.levels : []
+    return {
+      current: String(raw.current ?? ''),
+      default: raw.default ? String(raw.default) : '',
+      levels: levels
+        .map((entry: RpcObject) => ({
+          description: entry.description ? String(entry.description) : '',
+          effort: String(entry.effort ?? '').trim()
+        }))
+        .filter((entry: { effort: string }) => Boolean(entry.effort)),
+      source: String(raw.source ?? '')
     }
   }
 

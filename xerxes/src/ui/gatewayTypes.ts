@@ -491,6 +491,21 @@ export interface ModelModelsResponse {
   warning?: string
 }
 
+export interface ReasoningLevelOption {
+  description?: string
+  effort: string
+}
+
+export interface ReasoningLevelsResponse {
+  /** Effort in force right now. */
+  current?: string
+  /** Effort the model applies when none is chosen. */
+  default?: string
+  levels?: ReasoningLevelOption[]
+  /** `provider` when the model reported these, `fallback` otherwise. */
+  source?: string
+}
+
 // ── MCP ──────────────────────────────────────────────────────────────
 
 export interface ReloadMcpResponse {

@@ -20,6 +20,13 @@ import { OAuthToken } from '../src/mcp/oauth.js'
 import { createLlmClient } from '../src/llms/client.js'
 import { detectProvider, getApiKey, resolveProvider } from '../src/llms/providerRegistry.js'
 import { CODEX_PROFILE_NAME, ProfileStore } from '../src/bridge/profiles.js'
+import {
+  fallbackReasoningLevels,
+  providerReasoningLevels,
+  REASONING_OFF,
+  resolveEffort,
+  selectableEfforts,
+} from '../src/llms/reasoningLevels.js'
 
 /** Build an unsigned JWT carrying the claims a Codex access token carries. */
 function accessToken(options: {
@@ -389,7 +396,16 @@ test('the Codex catalog is discovered live and plan-scoped, not hard-coded', asy
         seenHeaders = init?.headers as Record<string, string>
         return Response.json({
           models: [
-            { id: 'gpt-5.6-sol', display_name: 'GPT-5.6-Sol', context_window: 272_000 },
+            {
+              id: 'gpt-5.6-sol',
+              display_name: 'GPT-5.6-Sol',
+              context_window: 272_000,
+              default_reasoning_level: 'low',
+              supported_reasoning_levels: [
+                { effort: 'low', description: 'Fast responses' },
+                { effort: 'ultra' },
+              ],
+            },
             { slug: 'gpt-5.4', display_name: 'GPT-5.4' },
             { display_name: 'nameless entry is skipped' },
           ],
@@ -402,8 +418,23 @@ test('the Codex catalog is discovered live and plan-scoped, not hard-coded', asy
   expect(seenUrl).toContain('/models?client_version=')
   expect(seenHeaders['chatgpt-account-id']).toBe('acct-6')
   expect(catalog).toEqual([
-    { id: 'gpt-5.6-sol', displayName: 'GPT-5.6-Sol', contextLimit: 272_000 },
-    { id: 'gpt-5.4', displayName: 'GPT-5.4', contextLimit: undefined },
+    {
+      id: 'gpt-5.6-sol',
+      displayName: 'GPT-5.6-Sol',
+      contextLimit: 272_000,
+      defaultReasoningLevel: 'low',
+      reasoningLevels: [
+        { effort: 'low', description: 'Fast responses' },
+        { effort: 'ultra', description: undefined },
+      ],
+    },
+    {
+      id: 'gpt-5.4',
+      displayName: 'GPT-5.4',
+      contextLimit: undefined,
+      defaultReasoningLevel: undefined,
+      reasoningLevels: [],
+    },
   ])
 })
 
@@ -538,4 +569,53 @@ test('third-party Responses hosts are not sent a field they may reject', async (
   })
 
   expect(body).not.toHaveProperty('prompt_cache_key')
+})
+
+test('reasoning levels come from the model, not a fixed four-item menu', () => {
+  // The Codex catalog publishes different sets per model — some reach `ultra`,
+  // others stop at `xhigh` — so a fixed list rejects valid efforts.
+  const sol = providerReasoningLevels(
+    [
+      { effort: 'low', description: 'Fast responses' },
+      { effort: 'medium' },
+      { effort: 'high' },
+      { effort: 'xhigh' },
+      { effort: 'max' },
+      { effort: 'ultra' },
+    ],
+    'low',
+  )
+
+  expect(selectableEfforts(sol)).toEqual(['off', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'])
+  expect(sol.defaultEffort).toBe('low')
+  expect(sol.source).toBe('provider')
+})
+
+test('an effort is validated against the model and returned in the provider spelling', () => {
+  const set = providerReasoningLevels([{ effort: 'xhigh' }, { effort: 'ultra' }], 'xhigh')
+
+  expect(resolveEffort(set, 'ULTRA')).toBe('ultra')
+  expect(resolveEffort(set, '  xhigh ')).toBe('xhigh')
+  expect(resolveEffort(set, 'off')).toBe(REASONING_OFF)
+  // `high` is valid on other models but not on this one.
+  expect(resolveEffort(set, 'high')).toBeUndefined()
+  expect(resolveEffort(set, '')).toBeUndefined()
+})
+
+test('providers with no capability endpoint fall back per provider, not globally', () => {
+  const anthropic = fallbackReasoningLevels('anthropic')
+  const generic = fallbackReasoningLevels(undefined)
+
+  expect(anthropic.source).toBe('fallback')
+  expect(selectableEfforts(anthropic)).toEqual(['off', 'low', 'medium', 'high'])
+  // Anthropic's budget-based thinking and OpenAI's effort scale are different
+  // vocabularies; the table is keyed by provider so they can diverge.
+  expect(anthropic.levels[0]?.description).not.toBe(generic.levels[0]?.description)
+})
+
+test('a model reporting no levels degrades to the fallback rather than an empty menu', () => {
+  const empty = providerReasoningLevels([], undefined)
+
+  expect(selectableEfforts(empty)).toEqual(['off'])
+  expect(selectableEfforts(fallbackReasoningLevels('openai')).length).toBeGreaterThan(1)
 })

@@ -2807,7 +2807,7 @@ test("daemon slash config, sampling, agents, and platforms use native backing st
     );
     expect(catalog.result?.pairs).toContainEqual([
       "/reasoning",
-      "Show/set thinking effort (off|low|medium|high)",
+      "Pick thinking effort from the levels this model supports",
     ]);
 
     client.send({
@@ -2955,9 +2955,12 @@ test("daemon slash config, sampling, agents, and platforms use native backing st
       method: "slash",
       params: { command: "/reasoning high" },
     });
+    // `levels` reports what this model actually accepts, so a caller that is
+    // not the picker still learns the valid set instead of guessing.
     expect((await client.next((frame) => frame.id === 10)).result).toEqual({
       ok: true,
       reasoning_effort: "high",
+      levels: ["off", "low", "medium", "high"],
     });
     await client.next(eventFrame("status_update"));
     expect(

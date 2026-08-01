@@ -2,7 +2,8 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { COMMAND_REGISTRY, resolveCommand, type CommandDefinition } from './commands.js'
-import { calcCost, resolveProvider } from '../llms/providerRegistry.js'
+import { calcCost, resolveProvider, type ProviderName } from '../llms/providerRegistry.js'
+import { fallbackReasoningLevels, REASONING_OFF, selectableEfforts } from '../llms/reasoningLevels.js'
 import { skillMatchesPlatform, type Skill, type SkillRegistry } from '../extensions/skills.js'
 import type { CostTracker } from '../runtime/costTracker.js'
 import type { AgentState } from '../streaming/events.js'
@@ -12,7 +13,39 @@ const SAMPLING_PARAMS = new Set([
   'thinking', 'reasoning_effort', 'thinking_budget',
 ])
 
-const THINKING_LEVELS = new Set(['off', 'low', 'medium', 'high'])
+/**
+ * Efforts the configured model accepts.
+ *
+ * Resolved per model rather than from a fixed list: the accepted set is a
+ * provider capability, and the same four-item menu was simultaneously
+ * rejecting valid efforts (`xhigh`, `ultra`) and offering ones a given model
+ * does not take. The host supplies live values when it can reach the
+ * provider; otherwise a per-provider table stands in.
+ */
+function thinkingLevels(
+  config: BridgeSlashConfig,
+  host: BridgeSlashRouterHost | undefined,
+): readonly string[] {
+  const supplied = host?.reasoningLevels?.()
+  if (supplied?.length) {
+    return supplied
+  }
+  const model = configString(config, 'model')
+  if (!model) {
+    return selectableEfforts(fallbackReasoningLevels(undefined))
+  }
+  let provider: ProviderName | undefined
+  try {
+    provider = resolveProvider(model, config)
+  } catch {
+    provider = undefined
+  }
+  return selectableEfforts(fallbackReasoningLevels(provider))
+}
+
+function isThinkingLevel(levels: readonly string[], value: string): boolean {
+  return levels.some(level => level.toLowerCase() === value.toLowerCase())
+}
 const SENSITIVE_CONFIG_NAME = /api[_-]?key|token|secret|password/iu
 const BOOLEAN_SAMPLING_VALUES: ReadonlyMap<string, boolean> = new Map([
   ['1', true],
@@ -135,6 +168,8 @@ export interface BridgeSlashRouterHost {
   readonly models?: BridgeSlashModelCatalog
   plan?(objective: string): Promise<string> | string
   readonly providers?: BridgeSlashProviderPort
+  /** Live efforts for the configured model, when the host can reach the provider. */
+  reasoningLevels?(): readonly string[] | undefined
   readonly skills?: BridgeSlashSkillsPort
   tools?(): Promise<readonly BridgeSlashTool[]> | readonly BridgeSlashTool[]
 }
@@ -373,12 +408,13 @@ export class BridgeSlashRouter {
 
   private async thinking(parsed: ParsedBridgeSlashCommand): Promise<BridgeSlashResult> {
     const target = parsed.args.trim().toLowerCase()
+    const levels = thinkingLevels(this.config, this.host)
     if (!target) {
-      const effort = configString(this.config, 'reasoning_effort') || 'off'
-      return result(parsed.name, `Thinking: ${effort}  (levels: off | low | medium | high)`, 'handled')
+      const effort = configString(this.config, 'reasoning_effort') || REASONING_OFF
+      return result(parsed.name, `Thinking: ${effort}  (levels: ${levels.join(' | ')})`, 'handled')
     }
-    if (!THINKING_LEVELS.has(target)) {
-      return result(parsed.name, `Unknown thinking level: ${target}. Use off|low|medium|high.`, 'invalid')
+    if (!isThinkingLevel(levels, target)) {
+      return result(parsed.name, `Unknown thinking level: ${target}. Use ${levels.join('|')}.`, 'invalid')
     }
     const updateError = await this.updateConfig(config => {
       config.reasoning_effort = target
@@ -456,7 +492,7 @@ export class BridgeSlashRouter {
     if (!SAMPLING_PARAMS.has(name)) {
       return result(parsed.name, `Unknown param: ${name}\nValid: ${samplingNames()}`, 'invalid')
     }
-    const parsedValue = parseSamplingValue(name, value)
+    const parsedValue = parseSamplingValue(name, value, thinkingLevels(this.config, this.host))
     if (parsedValue === undefined) {
       return result(parsed.name, `Invalid value: ${value}`, 'invalid')
     }
@@ -746,11 +782,11 @@ function configString(config: BridgeSlashConfig, name: string): string {
   return typeof value === 'string' ? value : ''
 }
 
-function parseSamplingValue(parameter: string, raw: string): unknown {
+function parseSamplingValue(parameter: string, raw: string, levels: readonly string[]): unknown {
   switch (parameter) {
     case 'reasoning_effort': {
       const level = raw.trim().toLowerCase()
-      return THINKING_LEVELS.has(level) ? level : undefined
+      return isThinkingLevel(levels, level) ? level : undefined
     }
     case 'thinking':
       return BOOLEAN_SAMPLING_VALUES.get(raw.trim().toLowerCase())
