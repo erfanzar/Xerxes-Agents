@@ -1015,6 +1015,11 @@ export function useMainApp(gw: GatewayClient) {
     slashRef.current(`/model ${value}`)
   }, [])
 
+  const onReasoningSelect = useCallback((value: string) => {
+    patchOverlayState({ reasoningPicker: false })
+    slashRef.current(`/reasoning ${value}`)
+  }, [])
+
   const closeLiveSession = useCallback(
     async (id: string) => {
       patchUiState({ status: 'closing session…' })
@@ -1118,6 +1123,7 @@ export function useMainApp(gw: GatewayClient) {
       newLiveSession: () => session.newLiveSession(),
       newPromptSession,
       onModelSelect,
+      onReasoningSelect,
       // Resuming a cold session from the overlay CLOSES the current one, so it
       // must respect the busy guard just like the `/resume` slash path.
       // (Switching between live sessions and `+ new` keep the current session
@@ -1141,6 +1147,7 @@ export function useMainApp(gw: GatewayClient) {
       closeLiveSession,
       newPromptSession,
       onModelSelect,
+      onReasoningSelect,
       session.activateLiveSession,
       session.guardBusySessionSwitch,
       session.newLiveSession,

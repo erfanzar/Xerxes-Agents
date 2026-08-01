@@ -19,6 +19,14 @@ import {
 import { persistedSubagentSnapshotValues } from "../agents/subagentPersistence.js";
 import { CodexSession, fetchCodexModelCatalog } from "../auth/codexAuth.js";
 import {
+  fallbackReasoningLevels,
+  providerReasoningLevels,
+  REASONING_OFF,
+  resolveEffort,
+  selectableEfforts,
+  type ReasoningLevelSet,
+} from "../llms/reasoningLevels.js";
+import {
   ProfileStore,
   SAMPLING_PARAMS,
   type ProviderProfile,
@@ -70,6 +78,8 @@ import {
   calcCost,
   effectiveContextLimit,
   getContextLimit,
+  resolveProvider,
+  type ProviderName,
 } from "../llms/providerRegistry.js";
 import {
   DEFAULT_TEMPERATURE,
@@ -643,6 +653,8 @@ export class DaemonServer {
   private readonly providerModelDiscovery:
     ProviderModelDiscoveryPort | undefined;
   private readonly discoveredContextLimits = new Map<string, number>();
+  /** Per-model reasoning-level sets, so the picker does not refetch each open. */
+  private readonly reasoningLevelCache = new Map<string, ReasoningLevelSet>();
   private readonly profileStore: ProfileStore;
   private readonly questionOwners = new Map<
     string,
@@ -1588,6 +1600,28 @@ export class DaemonServer {
     }
     if (method === "fetch_models") {
       return this.fetchModels(params);
+    }
+    if (method === "reasoning_levels") {
+      const set = await this.reasoningLevels();
+      return {
+        ok: true,
+        current:
+          stringValue(this.runtime.status().reasoning_effort) || REASONING_OFF,
+        default: set.defaultEffort ?? null,
+        levels: [
+          {
+            effort: REASONING_OFF,
+            description: "No extended reasoning; fastest replies",
+          },
+          ...set.levels.map((level) => ({
+            effort: level.effort,
+            ...(level.description === undefined
+              ? {}
+              : { description: level.description }),
+          })),
+        ],
+        source: set.source,
+      };
     }
     if (method === "provider_list") {
       return {
@@ -2622,45 +2656,101 @@ export class DaemonServer {
     return { ok: true, config };
   }
 
-  private configureReasoning(
+  private async configureReasoning(
     connection: DaemonTransportConnection,
     raw: string,
-  ): JsonRpcPayload {
+  ): Promise<JsonRpcPayload> {
     const current =
-      stringValue(this.runtime.status().reasoning_effort) || "off";
-    const requested = raw.trim().toLowerCase();
+      stringValue(this.runtime.status().reasoning_effort) || REASONING_OFF;
+    const levels = await this.reasoningLevels();
+    const offered = selectableEfforts(levels);
+    const requested = raw.trim();
     if (!requested) {
       this.emitSlash(
         connection,
-        `Thinking: \`${current}\`\nLevels: off | low | medium | high\nSet with \`/thinking <level>\`.`,
+        `Thinking: \`${current}\`\nLevels: ${offered.join(" | ")}\nSet with \`/thinking <level>\`.`,
       );
-      return { ok: true, reasoning_effort: current };
+      return { ok: true, reasoning_effort: current, levels: offered };
     }
-    if (!["off", "low", "medium", "high"].includes(requested)) {
+    // Validated against what this model actually accepts. The efforts differ
+    // per model — some publish `ultra`, others stop at `xhigh` — so a fixed
+    // list would both reject valid levels and accept ones the backend 400s on.
+    const resolved = resolveEffort(levels, requested);
+    if (!resolved) {
       this.emitSlash(
         connection,
-        "Thinking level must be `off`, `low`, `medium`, or `high`.",
+        `Thinking level must be one of: ${offered.join(", ")}.`,
         "warning",
       );
-      return { ok: false, error: "invalid reasoning effort" };
+      return { ok: false, error: "invalid reasoning effort", levels: offered };
     }
     this.runtime.reload({
-      reasoning_effort: requested,
-      thinking: requested !== "off",
+      reasoning_effort: resolved,
+      thinking: resolved !== REASONING_OFF,
     });
     const active = this.profileStore.active();
     if (active) {
       this.profileStore.updateSampling(active.name, {
-        reasoning_effort: requested,
-        thinking: requested !== "off",
+        reasoning_effort: resolved,
+        thinking: resolved !== REASONING_OFF,
       });
     }
     const session = this.runtime.sessionStatus(connection.activeSessionKey);
     if (session) {
       this.emitStatus(connection, session);
     }
-    this.emitSlash(connection, `Thinking: \`${requested}\`.`);
-    return { ok: true, reasoning_effort: requested };
+    this.emitSlash(connection, `Thinking: \`${resolved}\`.`);
+    return { ok: true, reasoning_effort: resolved, levels: offered };
+  }
+
+  /**
+   * Reasoning efforts the active model accepts.
+   *
+   * Asked of the provider whenever it can answer, because the set is a
+   * property of the model rather than of Xerxes: the Codex catalog alone
+   * ranges from four efforts to six, with three different defaults. Providers
+   * with no capability endpoint fall back to a per-provider table.
+   */
+  private async reasoningLevels(): Promise<ReasoningLevelSet> {
+    const status = this.runtime.status();
+    const model = stringValue(status.model) ?? "";
+    const profile = this.profileStore.active();
+    const providerName = resolveProviderSafely(model, profile);
+
+    if (providerName !== "openai-codex") {
+      return fallbackReasoningLevels(providerName);
+    }
+
+    const cached = this.reasoningLevelCache.get(model);
+    if (cached) {
+      return cached;
+    }
+    try {
+      const credential = await new CodexSession().credential();
+      const catalog = await fetchCodexModelCatalog(credential, {
+        ...(profile?.base_url.trim() ? { baseUrl: profile.base_url.trim() } : {}),
+      });
+      const bare = model.includes("/") ? model.slice(model.indexOf("/") + 1) : model;
+      const entry = catalog.find((candidate) => candidate.id === bare);
+      if (!entry?.reasoningLevels.length) {
+        return fallbackReasoningLevels(providerName);
+      }
+      const resolved = providerReasoningLevels(
+        entry.reasoningLevels.map((level) => ({
+          effort: level.effort,
+          ...(level.description === undefined
+            ? {}
+            : { description: level.description }),
+        })),
+        entry.defaultReasoningLevel,
+      );
+      this.reasoningLevelCache.set(model, resolved);
+      return resolved;
+    } catch {
+      // A lapsed session or offline host must not make the level list
+      // unusable; the fallback still lets the user pick something valid.
+      return fallbackReasoningLevels(providerName);
+    }
   }
 
   private configureRuntimeToggle(
@@ -3373,10 +3463,10 @@ export class DaemonServer {
     return { ok: false, error: `Unknown slash command: /${token}` };
   }
 
-  private configureSampling(
+  private async configureSampling(
     connection: DaemonTransportConnection,
     raw: string,
-  ): JsonRpcPayload {
+  ): Promise<JsonRpcPayload> {
     const input = raw.trim();
     if (!input) {
       const sampling = samplingConfig(this.runtime.status());
@@ -3423,9 +3513,10 @@ export class DaemonServer {
       );
       return { ok: false, error: "invalid sampling command" };
     }
-    const value = parseNativeSamplingValue(name, rawValue);
+    const efforts = selectableEfforts(await this.reasoningLevels());
+    const value = parseNativeSamplingValue(name, rawValue, efforts);
     if (value === undefined) {
-      this.emitSlash(connection, invalidSamplingMessage(name), "warning");
+      this.emitSlash(connection, invalidSamplingMessage(name, efforts), "warning");
       return { ok: false, error: `invalid ${name}` };
     }
 
@@ -6124,6 +6215,30 @@ function integerOption(value: unknown): number | undefined {
     : undefined;
 }
 
+/**
+ * Resolve the routed provider without letting an unroutable model throw.
+ *
+ * `resolveProvider` rejects an unknown explicit prefix by design, but asking
+ * "which reasoning levels apply" must never break a session over a model the
+ * registry cannot place — the caller falls back to a generic set instead.
+ */
+function resolveProviderSafely(
+  model: string,
+  profile: ProviderProfile | undefined,
+): ProviderName | undefined {
+  if (!model.trim()) {
+    return undefined;
+  }
+  try {
+    return resolveProvider(model, {
+      ...(profile?.provider ? { provider: profile.provider } : {}),
+      ...(profile?.base_url ? { base_url: profile.base_url } : {}),
+    });
+  } catch {
+    return undefined;
+  }
+}
+
 function normalizeProviderIdentity(value: string): string {
   return value.trim().toLowerCase().replaceAll("_", "-");
 }
@@ -6369,6 +6484,7 @@ function isNativeSamplingKey(value: string): value is NativeSamplingKey {
 function parseNativeSamplingValue(
   key: NativeSamplingKey,
   raw: string,
+  reasoningEfforts: readonly string[],
 ): boolean | number | string | undefined {
   if (key === "thinking") {
     if (["on", "true", "1"].includes(raw.toLowerCase())) return true;
@@ -6376,9 +6492,12 @@ function parseNativeSamplingValue(
     return undefined;
   }
   if (key === "reasoning_effort") {
-    return ["off", "low", "medium", "high"].includes(raw.toLowerCase())
-      ? raw.toLowerCase()
-      : undefined;
+    // Validated against the efforts this model publishes; a fixed list would
+    // reject `xhigh`/`ultra` on models that accept them and accept `high` on
+    // models that do not.
+    return reasoningEfforts.find(
+      (effort) => effort.toLowerCase() === raw.trim().toLowerCase(),
+    );
   }
   const value = Number(raw);
   if (!Number.isFinite(value)) return undefined;
@@ -6396,7 +6515,10 @@ function parseNativeSamplingValue(
   return value >= -2 && value <= 2 ? value : undefined;
 }
 
-function invalidSamplingMessage(key: NativeSamplingKey): string {
+function invalidSamplingMessage(
+  key: NativeSamplingKey,
+  reasoningEfforts: readonly string[],
+): string {
   if (key === "temperature") {
     return "`temperature` must be a finite number from 0 to 2.";
   }
@@ -6407,7 +6529,9 @@ function invalidSamplingMessage(key: NativeSamplingKey): string {
     return "`thinking` must be `on` or `off`.";
   }
   if (key === "reasoning_effort") {
-    return "`reasoning_effort` must be `off`, `low`, `medium`, or `high`.";
+    return reasoningEfforts.length
+      ? `\`reasoning_effort\` must be one of: ${reasoningEfforts.join(", ")}.`
+      : "`reasoning_effort` is not available for this model.";
   }
   return `\`${key}\` must be a valid finite numeric value.`;
 }

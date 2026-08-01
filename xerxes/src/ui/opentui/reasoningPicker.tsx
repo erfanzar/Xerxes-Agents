@@ -1,0 +1,275 @@
+// Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
+// Licensed under the Apache License, Version 2.0.
+
+/** @jsxImportSource @opentui/react */
+import type { KeyEvent } from '@opentui/core'
+import { useKeyboard, useTerminalDimensions } from '@opentui/react'
+import { useStore } from '@nanostores/react'
+import type { ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+
+import { useGateway } from '../app/gatewayContext.js'
+import { patchOverlayState } from '../app/overlayStore.js'
+import { $uiTheme } from '../app/uiStore.js'
+import type { ReasoningLevelsResponse } from '../gatewayTypes.js'
+import { asRpcResult, rpcErrorMessage } from '../lib/rpc.js'
+import type { Theme } from '../theme.js'
+
+const MAX_VISIBLE = 10
+const MIN_PANEL_WIDTH = 44
+const MAX_PANEL_WIDTH = 90
+
+interface LevelRow {
+  readonly description: string
+  readonly effort: string
+}
+
+export interface ReasoningPickerProps {
+  onCancel?: () => void
+  onSelect: (effort: string) => void
+  t?: Theme
+}
+
+const consume = (event: KeyEvent) => {
+  event.preventDefault()
+  event.stopPropagation()
+}
+
+/**
+ * Effort selector for the active model.
+ *
+ * The rows are whatever the provider reports for the model in use — the set
+ * genuinely varies (four efforts on some models, seven including `ultra` on
+ * others), so nothing here is a fixed menu.
+ */
+export function ReasoningPicker({ onCancel, onSelect, t }: ReasoningPickerProps) {
+  const gateway = useGateway()
+  const theme = useStore($uiTheme)
+  const activeTheme = t ?? theme
+  const { height, width } = useTerminalDimensions()
+
+  const [levels, setLevels] = useState<readonly LevelRow[]>([])
+  const [current, setCurrent] = useState('')
+  const [defaultEffort, setDefaultEffort] = useState('')
+  const [source, setSource] = useState('')
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [index, setIndex] = useState(0)
+
+  const close = useCallback(() => {
+    patchOverlayState({ reasoningPicker: false })
+    onCancel?.()
+  }, [onCancel])
+
+  useEffect(() => {
+    let cancelled = false
+    void gateway
+      .rpc<ReasoningLevelsResponse>('reasoning.levels', {})
+      .then(raw => {
+        if (cancelled) return
+        const result = asRpcResult<ReasoningLevelsResponse>(raw)
+        if (!result) {
+          setError('invalid response: reasoning.levels')
+          setLoading(false)
+          return
+        }
+        const rows = (result.levels ?? []).map(level => ({
+          description: level.description ?? '',
+          effort: level.effort
+        }))
+        setLevels(rows)
+        setCurrent(result.current ?? '')
+        setDefaultEffort(result.default ?? '')
+        setSource(result.source ?? '')
+        // Open on the active effort so Enter is a no-op rather than a
+        // surprise change to whatever happens to sit at the top.
+        const activeIndex = rows.findIndex(row => row.effort === result.current)
+        setIndex(activeIndex >= 0 ? activeIndex : 0)
+        setLoading(false)
+      })
+      .catch((cause: unknown) => {
+        if (cancelled) return
+        setError(cause instanceof Error ? cause.message : String(cause))
+        setLoading(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [gateway])
+
+  const handleKey = useCallback(
+    (key: KeyEvent) => {
+      const name = key.name ?? ''
+      if (name === 'escape') {
+        consume(key)
+        close()
+        return
+      }
+      if (loading || levels.length === 0) {
+        return
+      }
+      if (name === 'up' || (key.ctrl && name === 'p')) {
+        consume(key)
+        setIndex(previous => (previous - 1 + levels.length) % levels.length)
+        return
+      }
+      if (name === 'down' || (key.ctrl && name === 'n')) {
+        consume(key)
+        setIndex(previous => (previous + 1) % levels.length)
+        return
+      }
+      if (name === 'return' || name === 'enter') {
+        consume(key)
+        const chosen = levels[index]
+        if (chosen) {
+          patchOverlayState({ reasoningPicker: false })
+          onSelect(chosen.effort)
+        }
+      }
+    },
+    [close, index, levels, loading, onSelect]
+  )
+
+  useKeyboard(handleKey)
+
+  const panelWidth = Math.max(
+    1,
+    Math.min(MAX_PANEL_WIDTH, Math.max(MIN_PANEL_WIDTH, width - 6), Math.max(1, width - 2))
+  )
+  const visible = Math.max(1, Math.min(MAX_VISIBLE, levels.length || 1, Math.max(1, height - 12)))
+  const panelHeight = Math.min(height, visible + 8)
+
+  const subtitle = useMemo(() => {
+    if (source === 'provider') return 'reported by the provider for this model'
+    if (source === 'fallback') return 'provider did not publish levels · defaults shown'
+    return ''
+  }, [source])
+
+  if (loading) {
+    return (
+      <ModalShell height={height} panelHeight={5} panelWidth={panelWidth} t={activeTheme} title="Reasoning effort" width={width}>
+        <InfoRow color={activeTheme.color.muted}>asking the provider…</InfoRow>
+        <InfoRow color={activeTheme.color.muted}>Esc close</InfoRow>
+      </ModalShell>
+    )
+  }
+
+  return (
+    <ModalShell
+      height={height}
+      panelHeight={panelHeight}
+      panelWidth={panelWidth}
+      t={activeTheme}
+      title="Reasoning effort"
+      width={width}
+    >
+      {subtitle ? <InfoRow color={activeTheme.color.muted}>{subtitle}</InfoRow> : null}
+      {error ? <InfoRow color={activeTheme.color.error}>error: {error}</InfoRow> : null}
+      <InfoRow color={activeTheme.color.muted}>↑/↓ select · Enter apply · Esc cancel</InfoRow>
+
+      {levels.length === 0 ? (
+        <InfoRow color={activeTheme.color.muted}>no reasoning levels available</InfoRow>
+      ) : (
+        levels.slice(0, visible).map((level, rowIndex) => {
+          const selected = rowIndex === index
+          const marks = [
+            level.effort === current ? 'active' : '',
+            level.effort === defaultEffort ? 'default' : ''
+          ].filter(Boolean)
+          const suffix = marks.length ? ` (${marks.join(', ')})` : ''
+          const label = level.description
+            ? `${level.effort}${suffix} · ${level.description}`
+            : `${level.effort}${suffix}`
+
+          return (
+            <box
+              backgroundColor={selected ? activeTheme.color.completionCurrentBg : undefined}
+              flexShrink={0}
+              height={1}
+              key={level.effort}
+              paddingLeft={2}
+              paddingRight={2}
+              width="100%"
+            >
+              <text
+                fg={selected ? activeTheme.color.accent : activeTheme.color.text}
+                flexShrink={0}
+                truncate
+                width="100%"
+                wrapMode="none"
+              >
+                {`${level.effort === current ? '*' : '●'} ${label}`}
+              </text>
+            </box>
+          )
+        })
+      )}
+    </ModalShell>
+  )
+}
+
+function ModalShell({
+  children,
+  height,
+  panelHeight,
+  panelWidth,
+  t,
+  title,
+  width
+}: {
+  children: ReactNode
+  height: number
+  panelHeight: number
+  panelWidth: number
+  t: Theme
+  title: string
+  width: number
+}) {
+  const top = Math.max(0, Math.floor((height - panelHeight) / 2))
+
+  return (
+    <box
+      alignItems="center"
+      backgroundColor="#000000cc"
+      flexDirection="column"
+      height={height}
+      left={0}
+      paddingTop={top}
+      position="absolute"
+      top={0}
+      width={width}
+      zIndex={200}
+    >
+      <box
+        backgroundColor={t.color.statusBg}
+        flexDirection="column"
+        flexShrink={0}
+        height={panelHeight}
+        paddingBottom={1}
+        paddingTop={1}
+        width={panelWidth}
+      >
+        <box flexDirection="row" flexShrink={0} justifyContent="space-between" paddingLeft={2} paddingRight={2}>
+          <text fg={t.color.accent} flexShrink={0}>
+            <b>{title}</b>
+          </text>
+          <text fg={t.color.muted} flexShrink={0}>
+            esc
+          </text>
+        </box>
+        {children}
+      </box>
+    </box>
+  )
+}
+
+function InfoRow({ children, color }: { children: ReactNode; color: string }) {
+  return (
+    <box flexShrink={0} paddingLeft={2} paddingRight={2}>
+      <text fg={color} flexShrink={0} truncate width="100%" wrapMode="none">
+        {children}
+      </text>
+    </box>
+  )
+}

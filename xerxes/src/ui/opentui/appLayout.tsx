@@ -60,6 +60,7 @@ import { DiffPanelHotkey, DiffPanelOverlay } from './diffPanel.js'
 import { TerminalPanelHotkey, TerminalPanelOverlay } from './terminalPanel.js'
 import { MessageLine } from './messageLine.js'
 import { ModelPicker } from './modelPicker.js'
+import { ReasoningPicker } from './reasoningPicker.js'
 import { Box, Span, Text } from './primitives.js'
 import { SessionPicker } from './sessionPicker.js'
 
@@ -1552,6 +1553,7 @@ export function AppLayout({
     overlay.modelPicker ||
     overlay.pager ||
     overlay.pluginsHub ||
+    overlay.reasoningPicker ||
     overlay.secret ||
     overlay.sessions ||
     overlay.skillsHub ||
@@ -1698,6 +1700,7 @@ export function AppLayout({
       <ProviderPromptOverlay actions={actions} />
 
       {overlay.modelPicker ? <ModelPicker onSelect={actions.onModelSelect} /> : null}
+      {overlay.reasoningPicker ? <ReasoningPicker onSelect={actions.onReasoningSelect} /> : null}
       {overlay.sessions ? <SessionPicker actions={actions} /> : null}
       {overlay.copyPicker ? <CopyPicker onCopied={actions.sys} /> : null}
       {overlay.diff ? (

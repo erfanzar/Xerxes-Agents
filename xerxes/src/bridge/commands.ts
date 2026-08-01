@@ -82,7 +82,9 @@ export const COMMAND_REGISTRY: readonly CommandDefinition[] = Object.freeze([
   command('statusbar', 'Toggle the status bar', 'config', { cliOnly: true }),
   command('verbose', 'Toggle verbose event logging', 'config', { cliOnly: true }),
   command('yolo', 'Toggle accept-all permissions mode', 'config'),
-  command('reasoning', 'Show/set thinking effort (off|low|medium|high)', 'config', {
+  // No level list in the help text: the accepted efforts are a property of the
+  // selected model, so any fixed list here would go stale per model.
+  command('reasoning', 'Pick thinking effort from the levels this model supports', 'config', {
     aliases: ['thinking'],
     argsHint: '[level]',
   }),

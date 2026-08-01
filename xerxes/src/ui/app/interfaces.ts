@@ -100,6 +100,7 @@ export interface OverlayState {
   copyPicker: CopyPickerState | null
   diff: boolean
   modelPicker: boolean
+  reasoningPicker: boolean
   pager: null | PagerState
   pluginsHub: boolean
   secret: null | SecretReq
@@ -360,6 +361,7 @@ export interface AppLayoutActions {
   newLiveSession: () => void
   newPromptSession: (prompt: string, modelArg?: string) => void
   onModelSelect: (value: string) => void
+  onReasoningSelect: (value: string) => void
   resumeById: (id: string) => void
   setStickyPrompt: (value: string) => void
   sys: (text: string) => void
@@ -424,6 +426,7 @@ export interface AppOverlaysProps {
   onActiveSessionSelect: (sessionId: string) => void
   onActiveSessionClose: (sessionId: string) => Promise<null | SessionCloseResponse>
   onModelSelect: (value: string) => void
+  onReasoningSelect: (value: string) => void
   onNewLiveSession: () => void
   onNewPromptSession: (prompt: string, modelArg?: string) => void
   onResumeSelect: (sessionId: string) => void

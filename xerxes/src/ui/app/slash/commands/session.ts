@@ -347,17 +347,14 @@ export const sessionCommands: SlashCommand[] = [
 
   {
     aliases: ['thinking'],
-    help: 'inspect or set reasoning effort (updates live agent)',
+    help: 'pick reasoning effort from the levels this model supports',
     name: 'reasoning',
     run: (arg, ctx) => {
+      // Bare `/reasoning` opens the picker rather than printing the current
+      // value: the accepted efforts vary per model, so a menu the user can
+      // read beats guessing a level the backend may reject.
       if (!arg) {
-        return ctx.gateway
-          .rpc<ConfigGetValueResponse>('config.get', { key: 'reasoning' })
-          .then(
-            ctx.guarded<ConfigGetValueResponse>(
-              r => r.value && ctx.transcript.sys(`reasoning: ${r.value} · display ${r.display || 'hide'}`)
-            )
-          )
+        return patchOverlayState({ reasoningPicker: true })
       }
 
       ctx.gateway.rpc<ConfigSetResponse>('config.set', { key: 'reasoning', session_id: ctx.sid, value: arg }).then(

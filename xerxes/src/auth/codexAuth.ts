@@ -317,11 +317,24 @@ export class CodexSession {
   }
 }
 
+/** A reasoning effort a model accepts, as the provider describes it. */
+export interface CodexReasoningLevel {
+  readonly description: string | undefined
+  readonly effort: string
+}
+
 /** One entry of the Codex backend's plan-scoped model catalog. */
 export interface CodexModel {
   readonly contextLimit: number | undefined
+  readonly defaultReasoningLevel: string | undefined
   readonly displayName: string | undefined
   readonly id: string
+  /**
+   * Efforts this specific model accepts. The set genuinely differs per model —
+   * some accept `ultra`, others stop at `xhigh` — so it is read from the
+   * catalog rather than assumed.
+   */
+  readonly reasoningLevels: readonly CodexReasoningLevel[]
 }
 
 /**
@@ -378,6 +391,8 @@ export async function fetchCodexModelCatalog(
       id,
       displayName: stringField(record, 'display_name'),
       contextLimit: typeof contextLimit === 'number' && contextLimit > 0 ? contextLimit : undefined,
+      defaultReasoningLevel: stringField(record, 'default_reasoning_level'),
+      reasoningLevels: reasoningLevelsFrom(record?.supported_reasoning_levels),
     })
   }
   return models
@@ -395,6 +410,30 @@ export function codexAuthHeaders(credential: CodexCredential, sessionId?: string
   if (credential.accountId) headers['chatgpt-account-id'] = credential.accountId
   if (sessionId) headers.session_id = sessionId
   return headers
+}
+
+/**
+ * Parse the catalog's reasoning-level list.
+ *
+ * Entries are objects carrying an effort plus a human description, but a bare
+ * string is accepted too so a leaner catalog shape does not silently drop
+ * every level and leave the model looking like it supports none.
+ */
+function reasoningLevelsFrom(value: unknown): readonly CodexReasoningLevel[] {
+  if (!Array.isArray(value)) return []
+  const levels: CodexReasoningLevel[] = []
+  for (const entry of value) {
+    if (typeof entry === 'string' && entry.trim()) {
+      levels.push({ effort: entry.trim(), description: undefined })
+      continue
+    }
+    const record = asRecord(entry)
+    const effort = stringField(record, 'effort')
+    if (effort) {
+      levels.push({ effort, description: stringField(record, 'description') })
+    }
+  }
+  return levels
 }
 
 function credentialFrom(token: OAuthToken): CodexCredential {
