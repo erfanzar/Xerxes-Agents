@@ -101,6 +101,7 @@ import type { MemoryToolContext } from "./tools/memoryTools.js";
 import { createAgentState } from "./streaming/events.js";
 import { runTurn } from "./streaming/loop.js";
 import { runBundledSkillCli } from "./skills/cli.js";
+import { AuthCommandError, runAuthCommand } from "./auth/command.js";
 
 /**
  * Command list for `--help`, grouped by what the reader is trying to do.
@@ -132,6 +133,7 @@ const HELP_GROUPS: readonly {
   {
     title: "Maintain",
     commands: [
+      ["xerxes auth login codex", "sign in to ChatGPT and use its Codex plan"],
       ["xerxes doctor", "check the host, providers, and configuration"],
       ["xerxes update [--check] [--git] [--dry-run] [--apply]", "report or apply an update"],
       ["xerxes install --cloud-code [--force] [--dry-run]", "install a companion integration"],
@@ -198,6 +200,15 @@ if (argument === "--help" || argument === "-h") {
   process.exit(0);
 } else if (argument === "skill") {
   process.exit(await runBundledSkillCli(argumentsAfterCommand));
+} else if (argument === "auth") {
+  try {
+    process.exit(await runAuthCommand(argumentsAfterCommand));
+  } catch (error) {
+    if (error instanceof AuthCommandError) {
+      reportCommandUsageError(error, "xerxes auth --help");
+    }
+    throw error;
+  }
 } else if (argument === "doctor") {
   const report = runAllDoctorChecks();
   printDoctorReport(report);

@@ -40,6 +40,13 @@ export const PROVIDERS = {
     contextLimit: 128_000,
     maxOutput: 32_000,
   }),
+  // Subscription-backed: a ChatGPT Plus/Pro/Business plan authorizes this
+  // endpoint with an OAuth session, so it has no API-key environment variable.
+  'openai-codex': provider('openai-codex', 'openai', {
+    baseUrl: 'https://chatgpt.com/backend-api/codex',
+    contextLimit: 272_000,
+    maxOutput: 128_000,
+  }),
   openrouter: provider('openrouter', 'openai', {
     apiKeyEnv: 'OPENROUTER_API_KEY',
     baseUrl: 'https://openrouter.ai/api/v1',
@@ -176,7 +183,12 @@ export const COSTS: Readonly<Record<string, readonly [number, number]>> = {
   haiku: [0, 0],
 }
 
-const PROVIDER_ALIASES: Readonly<Record<string, ProviderName>> = { 'claude_code': 'claude-code' }
+const PROVIDER_ALIASES: Readonly<Record<string, ProviderName>> = {
+  'claude_code': 'claude-code',
+  codex: 'openai-codex',
+  'chatgpt': 'openai-codex',
+  'openai_codex': 'openai-codex',
+}
 
 const PREFIX_MAP = [
   ['claude-code/', 'claude-code'],
@@ -295,6 +307,13 @@ export function resolveProvider(model: string, overrides: ProviderOverrides = {}
       : ''
   if (baseUrl.startsWith('claude-code://') || model.toLowerCase().startsWith('claude-code/')) {
     return 'claude-code'
+  }
+  // Routing to the subscription backend is explicit only — `codex/gpt-5.3-codex`
+  // or a matching base URL. A `-codex` model suffix is deliberately NOT a
+  // trigger: silently moving `openai/gpt-5.3-codex` off the metered API onto
+  // the user's ChatGPT plan changes who pays for the turn.
+  if (baseUrl.includes('/backend-api/codex')) {
+    return 'openai-codex'
   }
   if (baseUrl.includes('openrouter.ai') || model.toLowerCase().startsWith('openrouter/')) {
     return 'openrouter'
