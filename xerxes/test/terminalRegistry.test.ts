@@ -29,7 +29,8 @@ async function eventually(predicate: () => boolean, timeoutMs = 5_000): Promise<
   throw new Error('condition never became true')
 }
 
-test('inspecting a background command does not consume the output the model has not read', async () => {
+// Spawning `/bin/sh` needs a POSIX host; Windows has no /bin/sh to spawn.
+test.skipIf(process.platform === 'win32')('inspecting a background command does not consume the output the model has not read', async () => {
   // The whole reason the mirror exists. `check_command` drains its buffer so
   // successive polls show progress; a viewer reading from that same buffer
   // would silently eat the lines the model was about to receive.
@@ -49,7 +50,7 @@ test('inspecting a background command does not consume the output the model has 
   })
 })
 
-test('a background command is listed while it runs and keeps its exit code afterwards', async () => {
+test.skipIf(process.platform === 'win32')('a background command is listed while it runs and keeps its exit code afterwards', async () => {
   await inTemporaryWorkspace(async root => {
     const terminals = new TerminalRegistry()
     const background = new BackgroundCommandManager(undefined, terminals)
@@ -66,7 +67,7 @@ test('a background command is listed while it runs and keeps its exit code after
   })
 })
 
-test('killing through the registry stops a live background process', async () => {
+test.skipIf(process.platform === 'win32')('killing through the registry stops a live background process', async () => {
   await inTemporaryWorkspace(async root => {
     const terminals = new TerminalRegistry()
     const background = new BackgroundCommandManager(undefined, terminals)
@@ -79,7 +80,7 @@ test('killing through the registry stops a live background process', async () =>
   })
 })
 
-test('a foreground command is recorded with its output once it finishes', async () => {
+test.skipIf(process.platform === 'win32')('a foreground command is recorded with its output once it finishes', async () => {
   await inTemporaryWorkspace(async (_root, paths) => {
     const terminals = new TerminalRegistry()
     await executeCommand({ cmd: '/bin/sh', args: ['-c', 'echo one; echo two'] }, paths, undefined, undefined, terminals)

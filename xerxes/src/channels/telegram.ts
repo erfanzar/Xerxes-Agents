@@ -14,7 +14,7 @@ import {
 
 const TELEGRAM_API_BASE = 'https://api.telegram.org/'
 const DEFAULT_MAX_PAYLOAD_BYTES = 256 * 1024
-const PATH_REDACTION = /(?:\/Users\/[^\s'"]+|\/home\/[^\s'"]+|\/private\/[^\s'"]+|\/var\/[^\s'"]+|\/tmp\/[^\s'"]+|~\/\.xerxes[^\s'"]*)/g
+const PATH_REDACTION = /(?:\/Users\/[^\s'"]+|\/home\/[^\s'"]+|\/private\/[^\s'"]+|\/var\/[^\s'"]+|\/tmp\/[^\s'"]+|~[\/\\]\.xerxes[^\s'"]*|[A-Za-z]:\\Users\\[^\s'"]+|[A-Za-z]:\\[^\s'"]*\\\.xerxes[^\s'"]*)/g
 const TRACEBACK_REDACTION = /Traceback \(most recent call last\):.*?(?=\n\n|$)/gs
 
 type StringList = string | readonly string[] | ReadonlySet<string> | undefined
@@ -328,7 +328,7 @@ function telegramSecretMatches(headers: WebhookHeaders, expected: string): boole
   return actualBytes.byteLength === expectedBytes.byteLength && timingSafeEqual(actualBytes, expectedBytes)
 }
 
-function sanitizeTelegramOutbound(text: string): string {
+export function sanitizeTelegramOutbound(text: string): string {
   if (!text) return text
   return text
     .replace(TRACEBACK_REDACTION, '[traceback redacted]')

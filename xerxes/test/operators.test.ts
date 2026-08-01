@@ -104,7 +104,8 @@ test('spawned-agent titles normalize to one concise line and reject oversized in
   })).rejects.toBeInstanceOf(ValidationError)
 })
 
-test('Bun PTY sessions preserve terminal output across a bounded first read', async () => {
+// `sh` is a POSIX shell; Windows CI and workstations have no sh to spawn.
+test.skipIf(process.platform === 'win32')('Bun PTY sessions preserve terminal output across a bounded first read', async () => {
   const manager = new PtySessionManager()
   const shell = Bun.which('sh') ?? '/bin/sh'
   const result = await manager.createSession('printf terminal-ready', {

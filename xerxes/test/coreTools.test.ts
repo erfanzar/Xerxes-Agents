@@ -110,7 +110,8 @@ test('registered file tools read, write, edit, list, glob, and grep only within 
   })
 })
 
-test('exec_command uses direct argv and returns bounded structured output', async () => {
+// `printf` is a POSIX executable; Windows has no printf to spawn.
+test.skipIf(process.platform === 'win32')('exec_command uses direct argv and returns bounded structured output', async () => {
   await inWorkspace(async workspace => {
     const registry = new ToolRegistry()
     registerCoreTools(registry, { workspaceRoot: workspace })

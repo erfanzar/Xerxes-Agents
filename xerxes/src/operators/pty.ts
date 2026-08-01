@@ -9,6 +9,7 @@ import {
   CTRL_C,
   defaultInteractiveShell,
   interruptViaTerminalWrite,
+  isWindows,
   shellCommandArgv,
 } from '../core/hostPlatform.js'
 import type { TerminalHandle, TerminalRegistry } from '../runtime/terminalRegistry.js'
@@ -138,7 +139,12 @@ export class PtySessionManager {
     try {
       childProcess = Bun.spawn(args, {
         cwd: workdir,
-        detached: true,
+        // `detached` is POSIX session leadership (setsid), which a PTY child
+        // needs to own its controlling terminal. On Windows it maps to
+        // DETACHED_PROCESS — "no console" — which contradicts the pseudoconsole
+        // the terminal option attaches, and the child dies instantly with exit
+        // code 1 and no output. ConPTY already isolates the session there.
+        detached: !isWindows(),
         env: { ...process.env, ...options.env },
         terminal,
       })

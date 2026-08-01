@@ -1,7 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { join } from 'node:path'
+import { join, posix } from 'node:path'
 
 export const DAEMON_SERVICE_LABEL = 'com.xerxes.daemon'
 export const LAUNCHD_PLIST_NAME = `${DAEMON_SERVICE_LABEL}.plist`
@@ -157,9 +157,9 @@ ${argumentsXml}
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>${xmlText(join(logs, 'daemon-stdout.log'))}</string>
+    <string>${xmlText(posix.join(logs, 'daemon-stdout.log'))}</string>
     <key>StandardErrorPath</key>
-    <string>${xmlText(join(logs, 'daemon-stderr.log'))}</string>
+    <string>${xmlText(posix.join(logs, 'daemon-stderr.log'))}</string>
 </dict>
 </plist>
 `

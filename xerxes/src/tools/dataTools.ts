@@ -211,7 +211,7 @@ export async function processJson(inputs: JsonObject, paths: WorkspacePathResolv
     }
     await mkdir(dirname(target), { recursive: true })
     await Bun.write(target, JSON.stringify(data, null, pretty ? 2 : undefined) + (pretty ? '\n' : ''))
-    return { file_path: await paths.relative(target), success: true }
+    return { file_path: (await paths.relative(target)).replaceAll('\\', '/'), success: true }
   }
 
   if (operation === 'validate') {
@@ -304,7 +304,7 @@ export async function processCsv(inputs: JsonObject, paths: WorkspacePathResolve
     await mkdir(dirname(target), { recursive: true })
     const rows = [headers, ...data.map(row => headers.map(header => csvCell(row[header])))]
     await Bun.write(target, stringifyCsv(rows, delimiter))
-    return { file_path: await paths.relative(target), rows_written: data.length, success: true }
+    return { file_path: (await paths.relative(target)).replaceAll('\\', '/'), rows_written: data.length, success: true }
   }
 
   throw new ValidationError('operation', 'must be read, write, analyze, or convert', operation)

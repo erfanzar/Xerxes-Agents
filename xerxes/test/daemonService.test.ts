@@ -86,7 +86,9 @@ function host(platform: string, filesystem = new MemoryFilesystem(), process = n
   }
 }
 
-test('service renderers preserve launchd and systemd units with Bun CLI commands', () => {
+// POSIX-shaped fixture paths (`/home/agent`); on a Windows host `join` rewrites
+// them with backslashes, so the literal expectations only hold on POSIX.
+test.skipIf(process.platform === 'win32')('service renderers preserve launchd and systemd units with Bun CLI commands', () => {
   const paths = daemonServicePaths('/home/agent', '/home/agent/.xerxes')
   expect(paths).toEqual({
     defaultLogDirectory: '/home/agent/.xerxes/daemon/logs',
