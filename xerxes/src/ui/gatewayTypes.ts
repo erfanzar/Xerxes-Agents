@@ -502,6 +502,10 @@ export interface ReasoningLevelsResponse {
   /** Effort the model applies when none is chosen. */
   default?: string
   levels?: ReasoningLevelOption[]
+  /** Human-readable description of how this provider exposes reasoning. */
+  note?: string
+  /** `effort` (graded), `toggle` (on/off), or `inherent` (model decides). */
+  shape?: string
   /** `provider` when the model reported these, `fallback` otherwise. */
   source?: string
 }

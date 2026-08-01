@@ -22,6 +22,7 @@ import {
   fallbackReasoningLevels,
   providerReasoningLevels,
   REASONING_OFF,
+  reasoningShapeNote,
   resolveEffort,
   selectableEfforts,
   type ReasoningLevelSet,
@@ -1603,23 +1604,34 @@ export class DaemonServer {
     }
     if (method === "reasoning_levels") {
       const set = await this.reasoningLevels();
+      const selectable = selectableEfforts(set);
       return {
         ok: true,
         current:
           stringValue(this.runtime.status().reasoning_effort) || REASONING_OFF,
         default: set.defaultEffort ?? null,
-        levels: [
-          {
-            effort: REASONING_OFF,
-            description: "No extended reasoning; fastest replies",
-          },
-          ...set.levels.map((level) => ({
-            effort: level.effort,
-            ...(level.description === undefined
-              ? {}
-              : { description: level.description }),
-          })),
-        ],
+        // An `inherent` provider yields no selectable efforts at all, so the
+        // panel shows the note rather than a menu that cannot change anything.
+        levels: selectable.map((effort) =>
+          effort === REASONING_OFF
+            ? {
+                effort,
+                description: "No extended reasoning; fastest replies",
+              }
+            : {
+                effort,
+                ...(set.levels.find((level) => level.effort === effort)
+                  ?.description === undefined
+                  ? {}
+                  : {
+                      description: set.levels.find(
+                        (level) => level.effort === effort,
+                      )?.description,
+                    }),
+              },
+        ),
+        note: reasoningShapeNote(set),
+        shape: set.shape,
         source: set.source,
       };
     }

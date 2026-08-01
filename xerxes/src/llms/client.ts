@@ -4,6 +4,7 @@
 import { createHash } from 'node:crypto'
 
 import { codexAuthHeaders, codexBaseUrl, CodexSession } from '../auth/codexAuth.js'
+import { isGradedEffort } from './reasoningLevels.js'
 import { ConfigurationError, ProviderError } from '../core/errors.js'
 import { isPluginLlmProviderFactory } from '../extensions/plugins.js'
 import type {
@@ -898,7 +899,7 @@ function addResponsesSampling(
     payload.top_p = request.topP
   }
   const effort = request.thinking?.effort
-  if (effort !== undefined) {
+  if (isGradedEffort(effort)) {
     payload.reasoning = { effort }
   }
 }
@@ -935,7 +936,11 @@ function addSampling(
     // as-is under the exact wire keys profiles configure today
     // (reasoning_effort, thinking_budget). Providers that do not document a
     // field simply ignore it, which makes the passthrough safe by default.
-    if (request.thinking.effort !== undefined) {
+    //
+    // `on` is the exception: it is the switch position Xerxes uses for
+    // toggle-shaped providers, not a level any provider documents, so it is
+    // carried by `thinking` alone rather than smuggled in as an effort word.
+    if (isGradedEffort(request.thinking.effort)) {
       payload.reasoning_effort = request.thinking.effort
     }
     if (request.thinking.budgetTokens !== undefined) {

@@ -19,9 +19,10 @@ import { CredentialStorage } from '../src/auth/storage.js'
 import { OAuthToken } from '../src/mcp/oauth.js'
 import { createLlmClient } from '../src/llms/client.js'
 import { detectProvider, getApiKey, resolveProvider } from '../src/llms/providerRegistry.js'
-import { CODEX_PROFILE_NAME, ProfileStore } from '../src/bridge/profiles.js'
+import { CODEX_DEFAULT_MODEL, CODEX_PROFILE_NAME, ProfileStore } from '../src/bridge/profiles.js'
 import {
   fallbackReasoningLevels,
+  isGradedEffort,
   providerReasoningLevels,
   REASONING_OFF,
   resolveEffort,
@@ -423,6 +424,7 @@ test('the Codex catalog is discovered live and plan-scoped, not hard-coded', asy
       displayName: 'GPT-5.6-Sol',
       contextLimit: 272_000,
       defaultReasoningLevel: 'low',
+      harnessCoupled: false,
       reasoningLevels: [
         { effort: 'low', description: 'Fast responses' },
         { effort: 'ultra', description: undefined },
@@ -433,6 +435,7 @@ test('the Codex catalog is discovered live and plan-scoped, not hard-coded', asy
       displayName: 'GPT-5.4',
       contextLimit: undefined,
       defaultReasoningLevel: undefined,
+      harnessCoupled: false,
       reasoningLevels: [],
     },
   ])
@@ -618,4 +621,123 @@ test('a model reporting no levels degrades to the fallback rather than an empty 
 
   expect(selectableEfforts(empty)).toEqual(['off'])
   expect(selectableEfforts(fallbackReasoningLevels('openai')).length).toBeGreaterThan(1)
+})
+
+test('Codex harness models are excluded from what a generic client may pick', async () => {
+  const respond = (models: unknown) => (async () => Response.json({ models })) as never
+  const catalogModels = [
+    // Coupled to the Codex CLI's own harness: code-mode tool protocol and
+    // multi-agent orchestration, neither of which Xerxes drives.
+    { id: 'gpt-5.6-sol', tool_mode: 'code_mode_only', multi_agent_version: 'v2', use_responses_lite: true },
+    { id: 'codex-auto-review', tool_mode: 'code_mode_only', multi_agent_version: 'v1', use_responses_lite: true },
+    { id: 'gpt-5.5', tool_mode: null, multi_agent_version: null, use_responses_lite: false },
+    { id: 'gpt-5.4-mini' },
+  ]
+  const credential = { accessToken: 'tok', accountId: 'a', planType: 'pro' }
+
+  const offered = await fetchCodexModelCatalog(credential, { fetchImplementation: respond(catalogModels) })
+  expect(offered.map(model => model.id)).toEqual(['gpt-5.5', 'gpt-5.4-mini'])
+
+  const everything = await fetchCodexModelCatalog(credential, {
+    fetchImplementation: respond(catalogModels),
+    includeHarnessModels: true,
+  })
+  expect(everything.map(model => model.id)).toEqual(['gpt-5.6-sol', 'codex-auto-review', 'gpt-5.5', 'gpt-5.4-mini'])
+  expect(everything.filter(model => model.harnessCoupled).map(model => model.id))
+    .toEqual(['gpt-5.6-sol', 'codex-auto-review'])
+})
+
+test('harness detection keys on capability flags, not on model names', async () => {
+  // A future harness model must be excluded the day it ships, not whenever
+  // someone notices the naming pattern changed.
+  const catalog = await fetchCodexModelCatalog(
+    { accessToken: 'tok', accountId: 'a', planType: 'pro' },
+    {
+      includeHarnessModels: true,
+      fetchImplementation: (async () => Response.json({
+        models: [
+          { id: 'totally-innocuous-name', use_responses_lite: true },
+          { id: 'another-plain-name', multi_agent_version: 'v3' },
+          { id: 'ordinary' },
+        ],
+      })) as never,
+    },
+  )
+
+  expect(catalog.filter(model => model.harnessCoupled).map(model => model.id))
+    .toEqual(['totally-innocuous-name', 'another-plain-name'])
+})
+
+test('the built-in codex profile defaults to a generally-callable model', () => {
+  // Xerxes runs its own agent loop, so the default must not be a model that
+  // expects the Codex harness around it.
+  expect(CODEX_DEFAULT_MODEL).toBe('codex/gpt-5.5')
+})
+
+test('toggle-shaped providers offer a switch, not a fake graded scale', () => {
+  for (const provider of ['zhipu', 'qwen', 'kimi', 'kimi-code', 'minimax'] as const) {
+    const set = fallbackReasoningLevels(provider)
+    expect(set.shape).toBe('toggle')
+    expect(selectableEfforts(set)).toEqual(['off', 'on'])
+  }
+})
+
+test('a provider that chooses reasoning by model offers nothing to select', () => {
+  const set = fallbackReasoningLevels('deepseek')
+
+  expect(set.shape).toBe('inherent')
+  // Offering a bare `off` would imply reasoning can be disabled, which it cannot.
+  expect(selectableEfforts(set)).toEqual([])
+  expect(resolveEffort(set, 'high')).toBeUndefined()
+  expect(resolveEffort(set, 'off')).toBeUndefined()
+})
+
+test('effort-shaped providers keep a graded scale', () => {
+  for (const provider of ['openai', 'openrouter', 'anthropic', 'gemini'] as const) {
+    const set = fallbackReasoningLevels(provider)
+    expect(set.shape).toBe('effort')
+    expect(selectableEfforts(set)).toEqual(['off', 'low', 'medium', 'high'])
+  }
+})
+
+test('local and custom endpoints assume a switch rather than invent gradations', () => {
+  // The served model is whatever the user loaded, so a graded menu would be
+  // a guess the backend may not honor.
+  for (const provider of ['ollama', 'lmstudio', 'custom'] as const) {
+    expect(fallbackReasoningLevels(provider).shape).toBe('toggle')
+  }
+})
+
+test('switch positions never reach the wire as an effort word', () => {
+  // `off` and `on` are Xerxes-side states; no provider documents them as levels.
+  expect(isGradedEffort('off')).toBe(false)
+  expect(isGradedEffort('on')).toBe(false)
+  expect(isGradedEffort('ON')).toBe(false)
+  expect(isGradedEffort(undefined)).toBe(false)
+  expect(isGradedEffort('high')).toBe(true)
+  expect(isGradedEffort('ultra')).toBe(true)
+})
+
+test('enabling thinking on a toggle provider sends no reasoning_effort field', async () => {
+  let body: Record<string, unknown> = {}
+  const client = createLlmClient('glm-5', { provider: 'zhipu' }, {
+    apiKey: 'sk-test',
+    fetchImplementation: (async (_url: string, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body)) as Record<string, unknown>
+      return new Response('data: [DONE]\n\n', {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      })
+    }) as never,
+  })
+
+  for await (const _delta of client.stream({
+    model: 'glm-5',
+    messages: [{ role: 'user', content: 'hi' }],
+    thinking: { effort: 'on' },
+  })) {
+    // Drain.
+  }
+
+  expect(body).not.toHaveProperty('reasoning_effort')
 })

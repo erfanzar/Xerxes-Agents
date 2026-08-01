@@ -6,7 +6,7 @@ import type { KeyEvent } from '@opentui/core'
 import { useKeyboard, useTerminalDimensions } from '@opentui/react'
 import { useStore } from '@nanostores/react'
 import type { ReactNode } from 'react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 
 import { useGateway } from '../app/gatewayContext.js'
 import { patchOverlayState } from '../app/overlayStore.js'
@@ -38,9 +38,10 @@ const consume = (event: KeyEvent) => {
 /**
  * Effort selector for the active model.
  *
- * The rows are whatever the provider reports for the model in use — the set
- * genuinely varies (four efforts on some models, seven including `ultra` on
- * others), so nothing here is a fixed menu.
+ * The rows are whatever the provider reports for the model in use. Nothing
+ * here is a fixed menu: the set varies per model, and providers that only
+ * switch thinking on and off — or decide it themselves — render as such
+ * rather than as a graded scale that cannot be honored.
  */
 export function ReasoningPicker({ onCancel, onSelect, t }: ReasoningPickerProps) {
   const gateway = useGateway()
@@ -51,7 +52,7 @@ export function ReasoningPicker({ onCancel, onSelect, t }: ReasoningPickerProps)
   const [levels, setLevels] = useState<readonly LevelRow[]>([])
   const [current, setCurrent] = useState('')
   const [defaultEffort, setDefaultEffort] = useState('')
-  const [source, setSource] = useState('')
+  const [note, setNote] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
   const [index, setIndex] = useState(0)
@@ -80,7 +81,7 @@ export function ReasoningPicker({ onCancel, onSelect, t }: ReasoningPickerProps)
         setLevels(rows)
         setCurrent(result.current ?? '')
         setDefaultEffort(result.default ?? '')
-        setSource(result.source ?? '')
+        setNote(result.note ?? '')
         // Open on the active effort so Enter is a no-op rather than a
         // surprise change to whatever happens to sit at the top.
         const activeIndex = rows.findIndex(row => row.effort === result.current)
@@ -140,11 +141,9 @@ export function ReasoningPicker({ onCancel, onSelect, t }: ReasoningPickerProps)
   const visible = Math.max(1, Math.min(MAX_VISIBLE, levels.length || 1, Math.max(1, height - 12)))
   const panelHeight = Math.min(height, visible + 8)
 
-  const subtitle = useMemo(() => {
-    if (source === 'provider') return 'reported by the provider for this model'
-    if (source === 'fallback') return 'provider did not publish levels · defaults shown'
-    return ''
-  }, [source])
+  // Composed by the daemon: it depends on the provider's reasoning shape,
+  // not just on whether the list came back live.
+  const subtitle = note
 
   if (loading) {
     return (
@@ -169,7 +168,7 @@ export function ReasoningPicker({ onCancel, onSelect, t }: ReasoningPickerProps)
       <InfoRow color={activeTheme.color.muted}>↑/↓ select · Enter apply · Esc cancel</InfoRow>
 
       {levels.length === 0 ? (
-        <InfoRow color={activeTheme.color.muted}>no reasoning levels available</InfoRow>
+        <InfoRow color={activeTheme.color.muted}>nothing to select for this provider</InfoRow>
       ) : (
         levels.slice(0, visible).map((level, rowIndex) => {
           const selected = rowIndex === index
