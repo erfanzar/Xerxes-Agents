@@ -328,6 +328,16 @@ export interface CodexModel {
   readonly contextLimit: number | undefined
   readonly defaultReasoningLevel: string | undefined
   readonly displayName: string | undefined
+  /**
+   * True when the model is coupled to the Codex CLI's own agent harness
+   * rather than being generally callable.
+   *
+   * Xerxes uses the ChatGPT subscription as an entitlement; it is not a Codex
+   * harness host. These models expect Codex's code-mode tool protocol and its
+   * multi-agent orchestration, so driving them from a generic tool loop is
+   * using them outside what they are built for.
+   */
+  readonly harnessCoupled: boolean
   readonly id: string
   /**
    * Efforts this specific model accepts. The set genuinely differs per model —
@@ -350,6 +360,8 @@ export const CODEX_CLIENT_VERSION = '0.144.4'
 export interface CodexModelCatalogOptions {
   readonly baseUrl?: string
   readonly fetchImplementation?: typeof fetch
+  /** Include harness-coupled models, which are excluded by default. */
+  readonly includeHarnessModels?: boolean
   readonly signal?: AbortSignal
 }
 
@@ -392,10 +404,31 @@ export async function fetchCodexModelCatalog(
       displayName: stringField(record, 'display_name'),
       contextLimit: typeof contextLimit === 'number' && contextLimit > 0 ? contextLimit : undefined,
       defaultReasoningLevel: stringField(record, 'default_reasoning_level'),
+      harnessCoupled: isHarnessCoupled(record),
       reasoningLevels: reasoningLevelsFrom(record?.supported_reasoning_levels),
     })
   }
-  return models
+  return options.includeHarnessModels ? models : models.filter(model => !model.harnessCoupled)
+}
+
+/**
+ * Detect a model built for the Codex CLI's own harness.
+ *
+ * Keyed on the capability flags the catalog publishes rather than on model
+ * names, so a future harness model is excluded the day it ships instead of
+ * whenever someone notices the naming pattern changed.
+ *
+ * - `tool_mode: "code_mode_only"` — expects Codex's code-mode tool protocol
+ *   instead of ordinary function calling.
+ * - `multi_agent_version` — expects the harness's multi-agent orchestration.
+ * - `use_responses_lite` — a different request shape than the one we send.
+ */
+function isHarnessCoupled(record: Record<string, unknown> | undefined): boolean {
+  return (
+    stringField(record, 'tool_mode') === 'code_mode_only'
+    || stringField(record, 'multi_agent_version') !== undefined
+    || record?.use_responses_lite === true
+  )
 }
 
 /** Headers that authorize one Codex backend request. */

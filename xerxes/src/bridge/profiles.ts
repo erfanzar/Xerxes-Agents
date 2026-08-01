@@ -11,7 +11,10 @@ export const CLAUDE_CODE_PROFILE_NAME = 'cc'
 export const CLAUDE_CODE_DEFAULT_MODEL = 'claude-code/default'
 
 export const CODEX_PROFILE_NAME = 'codex'
-export const CODEX_DEFAULT_MODEL = 'codex/gpt-5.6-sol'
+// A generally-callable model, not one of the Codex harness models: Xerxes
+// uses the ChatGPT subscription as an entitlement and drives its own agent
+// loop, so a model expecting Codex code-mode would be used outside its design.
+export const CODEX_DEFAULT_MODEL = 'codex/gpt-5.5'
 export const CODEX_PROFILE_BASE_URL = 'https://chatgpt.com/backend-api/codex'
 
 export const SAMPLING_PARAMS = new Set([
