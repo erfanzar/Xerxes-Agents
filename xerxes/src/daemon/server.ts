@@ -17,6 +17,7 @@ import {
   type AgentDefinition,
 } from "../agents/definitions.js";
 import { persistedSubagentSnapshotValues } from "../agents/subagentPersistence.js";
+import { CodexSession, fetchCodexModelCatalog } from "../auth/codexAuth.js";
 import {
   ProfileStore,
   SAMPLING_PARAMS,
@@ -2063,6 +2064,13 @@ export class DaemonServer {
       };
     }
 
+    if (
+      profile.provider === "openai-codex" ||
+      profile.base_url.includes("/backend-api/codex")
+    ) {
+      return this.fetchCodexModels(profile, fallbackModels);
+    }
+
     const apiKey = profileDiscoveryApiKey(profile);
     try {
       const catalog = await discoverModelCatalog({
@@ -2138,6 +2146,56 @@ export class DaemonServer {
       return null;
     }
     return profile.name;
+  }
+
+  /**
+   * Discover the Codex catalog through the ChatGPT OAuth session.
+   *
+   * The generic discovery path cannot serve this provider: it authenticates
+   * with an API key the subscription backend does not accept, and the catalog
+   * lives behind a `client_version`-gated route rather than `/models`. The
+   * list is plan-scoped, so it is fetched live instead of hard-coded.
+   */
+  private async fetchCodexModels(
+    profile: ProviderProfile,
+    fallbackModels: readonly string[],
+  ): Promise<JsonRpcPayload> {
+    try {
+      const credential = await new CodexSession().credential();
+      const catalog = await fetchCodexModelCatalog(credential, {
+        ...(profile.base_url.trim() ? { baseUrl: profile.base_url.trim() } : {}),
+      });
+      this.rememberDiscoveredContextLimits(
+        profile,
+        catalog.map((model) => ({
+          id: model.id,
+          ...(model.contextLimit === undefined
+            ? {}
+            : { contextLimit: model.contextLimit }),
+        })),
+      );
+      const models = catalog.map((model) => model.id);
+      return models.length
+        ? { ok: true, models, profile: profile.name, source: "remote" }
+        : {
+            ok: true,
+            models: [...fallbackModels],
+            profile: profile.name,
+            source: "profile",
+            warning: "ChatGPT plan returned no Codex models",
+          };
+    } catch (error) {
+      // Falling back to the configured model keeps the picker usable when the
+      // session has lapsed; the warning is what tells the user to sign in
+      // rather than leaving an unexplained one-entry list.
+      return {
+        ok: true,
+        models: [...fallbackModels],
+        profile: profile.name,
+        source: "profile",
+        warning: errorMessage(error),
+      };
+    }
   }
 
   private rememberDiscoveredContextLimits(

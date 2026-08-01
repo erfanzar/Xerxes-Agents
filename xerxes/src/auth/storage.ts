@@ -260,11 +260,39 @@ async function readOrCreateKey(path: string): Promise<Buffer> {
   }
 }
 
+/**
+ * Accept a key file holding either raw key bytes or a base64/base64url text
+ * encoding of them.
+ *
+ * Fresh key files are written raw, but installations carry key files written
+ * in the encoded form. Rejecting those does not fail safe: the key is
+ * unreadable, so every stored credential decrypts to nothing and the user is
+ * silently signed out of every provider with no way back short of deleting a
+ * dotfile they have no reason to suspect.
+ */
 function validateKey(value: Buffer): Buffer {
-  if (value.length !== KEY_BYTES) {
-    throw new Error(`Credential key at rest must be exactly ${KEY_BYTES} bytes`)
+  if (value.length === KEY_BYTES) {
+    return value
   }
-  return value
+  const decoded = decodeKeyText(value)
+  if (decoded) {
+    return decoded
+  }
+  throw new Error(
+    `Credential key at rest must be ${KEY_BYTES} bytes, or a base64 encoding of ${KEY_BYTES} bytes`,
+  )
+}
+
+/** Decode a textual key file, tolerating the base64url alphabet and padding. */
+function decodeKeyText(value: Buffer): Buffer | undefined {
+  const text = value.toString('utf8').trim()
+  // Both alphabets appear in the wild, sometimes mixed with '=' padding, so
+  // the charset is checked permissively and the byte length is what decides.
+  if (!/^[A-Za-z0-9+/_-]+={0,2}$/.test(text)) {
+    return undefined
+  }
+  const decoded = Buffer.from(text, 'base64url')
+  return decoded.length === KEY_BYTES ? decoded : undefined
 }
 
 function encrypt(provider: string, plain: Buffer, key: Buffer): EncryptedCredential {
