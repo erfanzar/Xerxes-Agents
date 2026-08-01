@@ -35,7 +35,18 @@ const MODE_CYCLE = ['code', 'researcher', 'plan', 'objective'] as const
  * usually a failed copy — must never destroy the transcript. A second press
  * inside this window exits; anything else the user does lets it lapse.
  */
-const CTRL_C_EXIT_WINDOW_MS = 2_000
+export const CTRL_C_EXIT_WINDOW_MS = 2_000
+
+/**
+ * True when this idle Ctrl+C confirms a still-armed one and should exit.
+ *
+ * Split out as a pure predicate because the double press cannot be driven
+ * end-to-end: OpenTUI's test renderer tears down input handling on the first
+ * Ctrl+C, so no key after it — Ctrl+C or otherwise — reaches the handler.
+ */
+export function ctrlCConfirmsExit(armedAt: number | null, now: number): boolean {
+  return armedAt !== null && now - armedAt < CTRL_C_EXIT_WINDOW_MS
+}
 
 const nextInteractionMode = (current: string | undefined): string => {
   const idx = MODE_CYCLE.indexOf((current || 'code') as (typeof MODE_CYCLE)[number])
@@ -574,7 +585,7 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
       // One stray Ctrl+C used to close the whole TUI here — on Windows, where
       // Ctrl+C is the muscle-memory copy chord, that destroyed sessions.
       const now = Date.now()
-      if (ctrlCExitArmedAt.current !== null && now - ctrlCExitArmedAt.current < CTRL_C_EXIT_WINDOW_MS) {
+      if (ctrlCConfirmsExit(ctrlCExitArmedAt.current, now)) {
         ctrlCExitArmedAt.current = null
         return actions.die()
       }
