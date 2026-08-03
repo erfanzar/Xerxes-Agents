@@ -2692,9 +2692,13 @@ test("daemon yolo toggles the live permission mode in both directions", async ()
       method: "runtime.status",
       params: {},
     });
+    // `runtime.status` is the daemon-wide default for sessions opened later.
+    // /yolo pins the session it was typed in, so the default is deliberately
+    // unchanged — that separation is what lets two sessions run at different
+    // trust levels. The session's own mode is reported on status_update above.
     expect(
       (await client.next((frame) => frame.id === 3)).result?.permission_mode,
-    ).toBe("auto");
+    ).toBe("accept-all");
 
     client.send({
       jsonrpc: "2.0",

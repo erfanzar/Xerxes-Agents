@@ -76,6 +76,15 @@ export interface DaemonSession {
    */
   reasoningEffort?: string;
   reasoningPinned?: boolean;
+  /**
+   * Permission mode this session runs under, when it owns one.
+   *
+   * Pinned like the model and effort so two sessions can run at different
+   * trust levels — a throwaway one on accept-all while a session touching
+   * something important stays on manual.
+   */
+  permissionMode?: string;
+  permissionPinned?: boolean;
   planMode: boolean;
   /**
    * Provider-request scaffolding the turn runner assembles for this session:
@@ -252,6 +261,11 @@ export interface DaemonRuntime {
   setSessionReasoning?(
     sessionKey: string,
     effort: string,
+  ): Promise<DaemonSession | undefined>;
+  /** Pin one session to a permission mode without disturbing any other. */
+  setSessionPermissionMode?(
+    sessionKey: string,
+    mode: string,
   ): Promise<DaemonSession | undefined>;
   /**
    * Optional session-scoped ultra mode toggle. Kept optional on the
@@ -643,6 +657,7 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
           key,
           options.model ?? this.model(),
           this.workspaceRoot,
+          stringValue(this.runtimeSettings.permission_mode),
         )
       : freshSession(
           key,
@@ -729,6 +744,12 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
           session.reasoningEffort = effort;
         }
       }
+      if (!session.permissionPinned) {
+        const permission = stringValue(this.runtimeSettings.permission_mode);
+        if (permission) {
+          session.permissionMode = permission;
+        }
+      }
     }
     return this.status();
   }
@@ -784,6 +805,24 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     }
     session.reasoningEffort = chosen;
     session.reasoningPinned = true;
+    session.lastActive = Date.now();
+    return session;
+  }
+
+  async setSessionPermissionMode(
+    sessionKey: string,
+    mode: string,
+  ): Promise<DaemonSession | undefined> {
+    const session = this.sessions.get(sessionKey);
+    if (!session) {
+      return undefined;
+    }
+    const chosen = mode.trim();
+    if (!chosen) {
+      return session;
+    }
+    session.permissionMode = chosen;
+    session.permissionPinned = true;
     session.lastActive = Date.now();
     return session;
   }
@@ -1091,6 +1130,7 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
         ...session.metadata,
         model: session.model,
         ...(session.reasoningEffort ? { reasoning_effort: session.reasoningEffort } : {}),
+        ...(session.permissionMode ? { permission_mode: session.permissionMode } : {}),
       },
       pendingResumeReplays: [],
       planMode: session.planMode,
@@ -1171,15 +1211,48 @@ function applySystemPromptAddendum(
   delete session.systemPromptAddendum;
 }
 
+/**
+ * Relative strictness of a permission mode, for the resume rule below.
+ * Anything unrecognized ranks strictest so an unknown value never loosens.
+ */
+function permissionStrictness(mode: string): number {
+  if (mode === "accept-all") return 0;
+  if (mode === "auto") return 1;
+  return 2;
+}
+
+/**
+ * Permission mode to resume a transcript under.
+ *
+ * Unlike the model and the reasoning effort, a stored permission mode is only
+ * honored when it is at least as strict as the current default. Continuity is
+ * the goal for the other two, but silently re-granting a looser trust level
+ * from a file on disk is not something a resume should be able to do.
+ */
+function resumedPermissionMode(
+  stored: string,
+  current: string,
+): string | undefined {
+  if (!stored) return undefined;
+  return permissionStrictness(stored) >= permissionStrictness(current)
+    ? stored
+    : undefined;
+}
+
 function sessionFromTranscript(
   transcript: DaemonTranscript,
   sessionKey: string,
   model: string,
   workspaceRoot: string,
+  currentPermissionMode = "",
 ): DaemonSession {
   const interactionMode = normalizeInteractionMode(
     transcript.interactionMode,
     transcript.planMode,
+  );
+  const resumedPermission = resumedPermissionMode(
+    stringValue(transcript.metadata.permission_mode),
+    currentPermissionMode,
   );
   return {
     id: transcript.sessionId,
@@ -1209,6 +1282,7 @@ function sessionFromTranscript(
           reasoningPinned: true,
         }
       : {}),
+    ...(resumedPermission ? { permissionMode: resumedPermission, permissionPinned: true } : {}),
     planMode: interactionMode === "plan",
     status: "idle",
     thinkingContent: [...transcript.thinkingContent],

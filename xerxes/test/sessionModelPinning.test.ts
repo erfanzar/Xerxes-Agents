@@ -167,3 +167,72 @@ test('setting an empty effort leaves the session untouched', async () => {
     expect(runtime.sessionStatus('blank')?.reasoningEffort).toBe('high')
   })
 })
+
+test('two open sessions hold different permission modes at the same time', async () => {
+  await inRuntime(async runtime => {
+    await runtime.openSession('careful')
+    await runtime.openSession('throwaway')
+
+    await runtime.setSessionPermissionMode('careful', 'manual')
+
+    // A session touching something important can stay on manual while another
+    // runs wide open; a daemon-wide mode made that impossible.
+    expect(runtime.sessionStatus('careful')?.permissionMode).toBe('manual')
+    expect(runtime.sessionStatus('throwaway')?.permissionMode).toBeUndefined()
+  })
+})
+
+test('a global reload leaves a session that set its own permission mode alone', async () => {
+  await inRuntime(async runtime => {
+    await runtime.openSession('pinned')
+    await runtime.openSession('follower')
+    await runtime.setSessionPermissionMode('pinned', 'manual')
+
+    runtime.reload({ permission_mode: 'accept-all' })
+
+    // Loosening the daemon default must not quietly un-restrict a session the
+    // user deliberately locked down.
+    expect(runtime.sessionStatus('pinned')?.permissionMode).toBe('manual')
+    expect(runtime.sessionStatus('follower')?.permissionMode).toBe('accept-all')
+  })
+})
+
+test('resuming restores a stricter stored permission mode', async () => {
+  await inRuntime(async (runtime, directory) => {
+    const opened = await runtime.openSession('locked')
+    opened.messages.push({ role: 'user', content: 'hello' })
+    await runtime.setSessionPermissionMode('locked', 'manual')
+    await runtime.flushSessions()
+
+    const restarted = new InMemoryDaemonRuntime(undefined, {
+      currentProjectDirectory: directory,
+      model: 'claude-code/default',
+      permissionMode: 'accept-all',
+    })
+    const resumed = await restarted.openSession(opened.id, undefined, { resume: true })
+
+    expect(resumed.permissionMode).toBe('manual')
+  })
+})
+
+test('resuming never loosens permissions from a stored value', async () => {
+  await inRuntime(async (runtime, directory) => {
+    const opened = await runtime.openSession('wideopen')
+    opened.messages.push({ role: 'user', content: 'hello' })
+    await runtime.setSessionPermissionMode('wideopen', 'accept-all')
+    await runtime.flushSessions()
+
+    // The daemon is now stricter than the transcript was written under.
+    const restarted = new InMemoryDaemonRuntime(undefined, {
+      currentProjectDirectory: directory,
+      model: 'claude-code/default',
+      permissionMode: 'manual',
+    })
+    const resumed = await restarted.openSession(opened.id, undefined, { resume: true })
+
+    // Continuity is right for the model and the effort, but re-granting a
+    // looser trust level from a file on disk is not something a resume of an
+    // old transcript should be able to do.
+    expect(resumed.permissionMode).toBeUndefined()
+  })
+})
