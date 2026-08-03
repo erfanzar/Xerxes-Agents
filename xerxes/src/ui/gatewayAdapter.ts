@@ -128,20 +128,33 @@ export function transcriptFromStoredMessages(messages: unknown): GatewayTranscri
   return out
 }
 
+/**
+ * Read the usage a status payload actually carries.
+ *
+ * Absent fields are omitted rather than reported as zero. Consumers merge this
+ * over the previous usage with a spread, so a zero for a field the payload
+ * never mentioned is not a no-op — it erases the running value. That is how a
+ * mid-turn update carrying only token counts blanked the context meter, and how
+ * any status event without cache figures reset the cached total to nothing.
+ */
 export function usageFromStatus(payload: Record<string, unknown>): Usage {
   const input = num(payload.total_input_tokens ?? payload.input_tokens)
   const output = num(payload.total_output_tokens ?? payload.output_tokens)
   const total = num(payload.total_tokens, input + output)
+  const present = (...keys: string[]) => keys.some(key => payload[key] !== undefined)
+
   return {
-    cache_read: num(payload.cache_read_tokens),
-    cache_write: num(payload.cache_creation_tokens),
-    calls: num(payload.calls),
-    context_max: num(payload.context_limit ?? payload.max_context),
-    context_used: num(payload.context_tokens),
+    ...(present('cache_read_tokens') ? { cache_read: num(payload.cache_read_tokens) } : {}),
+    ...(present('cache_creation_tokens') ? { cache_write: num(payload.cache_creation_tokens) } : {}),
+    ...(present('calls') ? { calls: num(payload.calls) } : {}),
+    ...(present('context_limit', 'max_context')
+      ? { context_max: num(payload.context_limit ?? payload.max_context) }
+      : {}),
+    ...(present('context_tokens') ? { context_used: num(payload.context_tokens) } : {}),
     input,
     output,
     total
-  }
+  } as Usage
 }
 
 export function adaptDaemonEvent(type: string, payload: Record<string, unknown>): AnyEvent[] {
