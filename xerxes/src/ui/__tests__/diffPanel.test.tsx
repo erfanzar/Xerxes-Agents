@@ -18,10 +18,10 @@ const DIFF_RESULT = {
     files: 1,
     insertions: 1,
     lines: [
-      { kind: 'file' as const, text: '▌ src/a.ts' },
+      { kind: 'file' as const, text: 'src/a.ts' },
       { kind: 'hunk' as const, text: '@@ -1,1 +1,1 @@' },
-      { kind: 'del' as const, text: '-old' },
-      { kind: 'add' as const, text: '+new' }
+      { kind: 'del' as const, oldLine: 1, text: '-old' },
+      { kind: 'add' as const, newLine: 1, text: '+new' }
     ],
     truncated: false,
     untracked: ['draft.ts'],
@@ -100,9 +100,12 @@ describe('DiffPanelOverlay', () => {
 
     try {
       const frame = setup.captureCharFrame()
-      expect(frame).toContain('Git diff')
+      expect(frame).toContain('SOURCE CONTROL')
+      expect(frame).toContain('CHANGES')
       expect(frame).toContain('src/a.ts')
-      expect(frame).toContain('untracked')
+      expect(frame).toContain('OLD')
+      expect(frame).toContain('NEW')
+      expect(frame).toContain('UNTRACKED FILES')
 
       setup.mockInput.pressKey('F7')
       await setup.flush()

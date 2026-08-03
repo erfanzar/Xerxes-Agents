@@ -39,7 +39,12 @@ describe('parseUnifiedDiff', () => {
     expect(kinds).toContain('add')
     expect(kinds).toContain('del')
     expect(kinds).toContain('context')
-    expect(parsed.lines[0]).toEqual({ kind: 'file', text: '▌ src/a.ts' })
+    expect(parsed.lines[0]).toEqual({ kind: 'file', text: 'src/a.ts' })
+    expect(parsed.lines.find(line => line.text === ' context line')).toMatchObject({ oldLine: 1, newLine: 1 })
+    expect(parsed.lines.find(line => line.text === '-removed line')).toMatchObject({ oldLine: 2 })
+    expect(parsed.lines.find(line => line.text === '-removed line')?.newLine).toBeUndefined()
+    expect(parsed.lines.find(line => line.text === '+added line')).toMatchObject({ newLine: 2 })
+    expect(parsed.lines.find(line => line.text === '+added line')?.oldLine).toBeUndefined()
     // ---/+++ file markers are dropped; the diff --git row names the file.
     expect(parsed.lines.some(line => line.text.startsWith('---'))).toBe(false)
     expect(parsed.lines.some(line => line.text.startsWith('+++'))).toBe(false)
