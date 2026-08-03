@@ -195,7 +195,7 @@ export class AnthropicMessagesClient implements LlmClient {
       }
     }
 
-    const finishReason = stringAt(completion, 'stop_reason') || undefined
+    const finishReason = anthropicFinishReason(stringAt(completion, 'stop_reason')) || undefined
     const usage = anthropicUsage(completion)
     return {
       content: content.join(''),
@@ -229,7 +229,7 @@ export class AnthropicMessagesClient implements LlmClient {
 
     const pendingToolCalls = new Map<number, PendingToolCall>()
     const streamUsage: AnthropicStreamUsage = {}
-    let emittedToolCalls = false
+    let receivedMessageStop = false
     for await (const data of internalSseData(response.body)) {
       if (data === '[DONE]') {
         break
@@ -320,17 +320,17 @@ export class AnthropicMessagesClient implements LlmClient {
         continue
       }
       if (type === 'message_stop') {
+        receivedMessageStop = true
         if (pendingToolCalls.size) {
           yield { toolCalls: completeToolCalls(pendingToolCalls) }
-          emittedToolCalls = true
         }
         if (eventUsage) {
           yield { usage: eventUsage }
         }
       }
     }
-    if (!emittedToolCalls && pendingToolCalls.size) {
-      yield { toolCalls: completeToolCalls(pendingToolCalls) }
+    if (!receivedMessageStop) {
+      throw new ProviderError('anthropic', 'stream ended before message_stop')
     }
   }
 }

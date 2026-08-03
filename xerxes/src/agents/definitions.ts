@@ -332,8 +332,8 @@ function stringList(value: YamlValue | undefined, source: string): string[] {
 
 function integer(value: YamlValue, source: string): number {
   const numeric = typeof value === 'number' ? value : Number(value)
-  if (!Number.isInteger(numeric)) {
-    throw new AgentSpecError(`${source} must be an integer`)
+  if (!Number.isSafeInteger(numeric) || numeric < 0) {
+    throw new AgentSpecError(`${source} must be a non-negative safe integer`)
   }
   return numeric
 }

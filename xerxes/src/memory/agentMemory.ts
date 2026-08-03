@@ -387,10 +387,16 @@ export class AgentMemory {
     for (const name of CANONICAL_AGENT_MEMORY_FILES) {
       const target = join(directory, name)
       try {
-        await stat(target)
+        const handle = await open(target, 'wx')
+        try {
+          await handle.writeFile(DEFAULT_CONTENT[name], 'utf8')
+        } finally {
+          await handle.close()
+        }
       } catch (error) {
-        if (!isMissing(error)) throw error
-        await Bun.write(target, DEFAULT_CONTENT[name])
+        // Exclusive creation makes concurrent ensure() calls converge without
+        // either writer truncating a file created or populated by the other.
+        if (!isAlreadyExists(error)) throw error
       }
     }
   }
@@ -811,6 +817,10 @@ function isWithin(root: string, target: string): boolean {
 
 function isMissing(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT'
+}
+
+function isAlreadyExists(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === 'EEXIST'
 }
 
 /**

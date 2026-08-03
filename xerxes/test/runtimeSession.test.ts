@@ -119,11 +119,43 @@ test('runtime session JSON snapshots round-trip through explicit filesystem port
   expect(restored.context).toEqual(session.context)
   expect(restored.metadata).toEqual(session.metadata)
   expect(restored.transcript.toMessages()).toEqual(session.transcript.toMessages())
+  expect(restored.transcript.entries.map(entry => entry.timestamp)).toEqual(
+    session.transcript.entries.map(entry => entry.timestamp),
+  )
   expect(restored.history.asDicts()).toEqual(session.history.asDicts())
   expect(restored.costTracker.asRecords()).toEqual(session.costTracker.asRecords())
   expect(restored.toolExecutions).toEqual(session.toolExecutions)
   expect(restored.streamEvents).toEqual(session.streamEvents)
   expect(restored.transcript.flushed).toBe(false)
+})
+
+test('runtime session saves replace snapshots atomically and flush only after replacement succeeds', () => {
+  const fileSystem = new AtomicMemoryFileSystem()
+  const session = RuntimeSession.create({
+    contextHost: fixtureHost(),
+    sessionId: 'atomic-session',
+  })
+  session.transcript.append('user', 'persist me')
+
+  const path = session.save({ directory: '/sessions', fileSystem })
+  expect(fileSystem.readFile(path)).toContain('persist me')
+  expect(fileSystem.operations.map(operation => operation.kind)).toEqual([
+    'writeTemporaryFile',
+    'replaceFile',
+  ])
+  const temporaryWrite = fileSystem.operations[0]
+  expect(temporaryWrite?.kind).toBe('writeTemporaryFile')
+  if (temporaryWrite?.kind !== 'writeTemporaryFile') throw new Error('expected temporary write')
+  expect(temporaryWrite.path).not.toBe(path)
+  expect(fileSystem.operations[1]).toMatchObject({ kind: 'replaceFile', destination: path })
+  expect(session.transcript.flushed).toBe(true)
+
+  session.transcript.append('assistant', 'new unflushed data')
+  fileSystem.failReplacement = true
+  expect(() => session.save({ directory: '/sessions', fileSystem })).toThrow('replacement failed')
+  expect(session.transcript.flushed).toBe(false)
+  expect(fileSystem.readFile(path)).not.toContain('new unflushed data')
+  expect(fileSystem.temporaryPaths()).toEqual([])
 })
 
 test('runtime session parsing rejects malformed snapshots and unsafe file names', () => {
@@ -147,7 +179,7 @@ function fixtureHost(): RuntimeContextHost {
 
 class MemoryFileSystem implements RuntimeSessionFileSystem {
   readonly directories: string[] = []
-  private readonly files = new Map<string, string>()
+  protected readonly files = new Map<string, string>()
 
   makeDirectory(path: string): void {
     if (!this.directories.includes(path)) this.directories.push(path)
@@ -161,5 +193,37 @@ class MemoryFileSystem implements RuntimeSessionFileSystem {
 
   writeFile(path: string, contents: string): void {
     this.files.set(path, contents)
+  }
+}
+
+class AtomicMemoryFileSystem extends MemoryFileSystem {
+  readonly operations: Array<
+    | { kind: 'writeTemporaryFile'; path: string }
+    | { kind: 'replaceFile'; source: string; destination: string }
+  > = []
+  failReplacement = false
+
+  override writeFile(path: string, contents: string): void {
+    this.operations.push({ kind: 'writeTemporaryFile', path })
+    super.writeFile(path, contents)
+  }
+
+  replaceFile(source: string, destination: string): void {
+    this.operations.push({ kind: 'replaceFile', source, destination })
+    if (this.failReplacement) {
+      this.files.delete(source)
+      throw new Error('replacement failed')
+    }
+    const contents = this.readFile(source)
+    this.files.set(destination, contents)
+    this.files.delete(source)
+  }
+
+  removeFile(path: string): void {
+    this.files.delete(path)
+  }
+
+  temporaryPaths(): string[] {
+    return [...this.files.keys()].filter(path => path.endsWith('.tmp'))
   }
 }

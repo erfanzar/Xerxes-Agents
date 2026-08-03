@@ -14,6 +14,8 @@ import { createChannelMessage, MessageDirection, type ChannelMessage } from './t
 
 const DEFAULT_TYPING_INTERVAL = 8_000
 const DEFAULT_PREVIEW_INTERVAL = 1_000
+const DEFAULT_MAX_PENDING_PER_SESSION = 32
+const DEFAULT_IDLE_SESSION_TTL_MS = 24 * 60 * 60 * 1_000
 const JOURNAL_RESPONSE_MAX_CHARS = 500
 const MAX_PREVIEW_CHARS = 4_096
 const NO_RESPONSE_TEXT = '(no response)'
@@ -41,6 +43,10 @@ export interface ChannelTurnRouterOptions {
   readonly channels: ChannelManager
   /** Workspace applied when opening channel-backed daemon sessions. */
   readonly cwd?: string
+  /** Evict inactive router/session bookkeeping after this many milliseconds. */
+  readonly idleSessionTtlMs?: number
+  /** Maximum active plus queued messages retained for one conversation. */
+  readonly maxPendingPerSession?: number
   /** Receives contained delivery/turn errors without exposing channel credentials. */
   readonly onError?: (error: unknown, message: ChannelMessage) => void
   /** Minimum interval between edits sent through adapters with editable text support, in milliseconds. */
@@ -72,8 +78,11 @@ export class ChannelTurnRouter {
   private readonly channels: ChannelManager
   private readonly clock: () => Date
   private readonly cwd: string | undefined
+  private readonly idleSessionTtlMs: number
+  private readonly maxPendingPerSession: number
   private readonly onError: ((error: unknown, message: ChannelMessage) => void) | undefined
   private readonly pendingBySession = new Map<string, Promise<void>>()
+  private readonly pendingCounts = new Map<string, number>()
   private readonly previewInterval: ChannelPreviewInterval
   private readonly resetPolicy: SessionResetPolicy
   private readonly resetState = new Map<string, ChannelSessionActivity>()
@@ -87,6 +96,11 @@ export class ChannelTurnRouter {
     this.channels = options.channels
     this.clock = options.clock ?? (() => new Date())
     this.cwd = nonBlank(options.cwd)
+    this.idleSessionTtlMs = nonNegativeFinite(options.idleSessionTtlMs ?? DEFAULT_IDLE_SESSION_TTL_MS, 'idleSessionTtlMs')
+    this.maxPendingPerSession = positiveInteger(
+      options.maxPendingPerSession ?? DEFAULT_MAX_PENDING_PER_SESSION,
+      'maxPendingPerSession',
+    )
     this.onError = options.onError
     this.previewInterval = options.previewInterval ?? DEFAULT_PREVIEW_INTERVAL
     if (typeof this.previewInterval === 'number') {
@@ -109,6 +123,19 @@ export class ChannelTurnRouter {
       return
     }
     const key = channelSessionKey(message)
+    const slash = parseChannelCommand(message.text)
+    if (slash?.name === 'stop' || slash?.name === 'cancel') {
+      await this.journalInbound(message)
+      await this.handleCommand(message, key, slash)
+      return
+    }
+    this.evictIdleBookkeeping(validDate(this.clock()))
+    const pendingCount = this.pendingCounts.get(key) ?? 0
+    if (pendingCount >= this.maxPendingPerSession) {
+      this.report(new ChannelQueueFullError(message.channel, key, this.maxPendingPerSession), message)
+      return
+    }
+    this.pendingCounts.set(key, pendingCount + 1)
     const previous = this.pendingBySession.get(key) ?? Promise.resolve()
     const current = previous.catch(() => undefined).then(() => this.run(message, key))
     this.pendingBySession.set(key, current)
@@ -118,9 +145,21 @@ export class ChannelTurnRouter {
       this.report(error, message)
       throw error
     } finally {
+      const remaining = (this.pendingCounts.get(key) ?? 1) - 1
+      if (remaining > 0) this.pendingCounts.set(key, remaining)
+      else this.pendingCounts.delete(key)
       if (this.pendingBySession.get(key) === current) {
         this.pendingBySession.delete(key)
       }
+    }
+  }
+
+  private evictIdleBookkeeping(now: Date): void {
+    const cutoff = now.getTime() - this.idleSessionTtlMs
+    for (const [sessionKey, activity] of this.resetState) {
+      if (activity.lastMessageAt.getTime() >= cutoff || this.pendingCounts.has(sessionKey)) continue
+      this.resetState.delete(sessionKey)
+      this.runtime.evictSession(sessionKey)
     }
   }
 
@@ -332,6 +371,14 @@ export class ChannelTurnRouter {
     } catch {
       // Diagnostic callbacks must not alter platform delivery semantics.
     }
+  }
+}
+
+/** Raised when a conversation exceeds its bounded active-plus-queued delivery capacity. */
+export class ChannelQueueFullError extends Error {
+  constructor(channel: string, sessionKey: string, limit: number) {
+    super(`channel '${channel}' session '${sessionKey}' has reached its pending message limit (${limit})`)
+    this.name = new.target.name
   }
 }
 
@@ -611,6 +658,13 @@ function nonBlank(value: string | undefined): string | undefined {
 function positiveInteger(value: number, name: string): number {
   if (!Number.isSafeInteger(value) || value < 1) {
     throw new RangeError(name + ' must be a positive safe integer')
+  }
+  return value
+}
+
+function nonNegativeFinite(value: number, name: string): number {
+  if (!Number.isFinite(value) || value < 0) {
+    throw new RangeError(name + ' must be a non-negative finite number')
   }
   return value
 }

@@ -1079,6 +1079,20 @@ test('Claude MCP tools bound oversized content and resource listings with trunca
   expect(read.contents[0]?.text.length).toBeLessThan(33_000)
 })
 
+test('remote triggers reject private DNS answers before fetch', async () => {
+  let fetched = false
+  const triggers = new RemoteTriggerRegistry({
+    fetcher: async () => {
+      fetched = true
+      return { ok: true, status: 200, text: async () => 'unexpected' }
+    },
+    urlSafety: { dnsLookup: async () => ['127.0.0.1'] },
+  })
+  triggers.register({ name: 'rebound', url: 'https://public.example/webhook' })
+  await expect(triggers.trigger('rebound', 'payload')).rejects.toThrow('private/internal address')
+  expect(fetched).toBeFalse()
+})
+
 test('Claude remote tools enforce configured endpoints and persist cron jobs', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'xerxes-claude-tools-'))
   try {

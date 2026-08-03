@@ -72,6 +72,18 @@ test('JSONProcessor keeps JSON file operations inside the workspace and queries 
   })
 })
 
+test('JSON and CSV processors reject oversized whole-file inputs before parsing', async () => {
+  await inWorkspace(async workspace => {
+    const registry = new ToolRegistry()
+    registerDataTools(registry, new WorkspacePathResolver(workspace))
+    await Bun.write(join(workspace, 'large.json'), ' '.repeat(10_000_001))
+    await expect(registry.execute(call('JSONProcessor', {
+      operation: 'load',
+      file_path: 'large.json',
+    }), { metadata: {} })).rejects.toThrow('whole-file data limit')
+  })
+})
+
 test('CSVProcessor handles quoted cells, read limits, conversion, and analysis', async () => {
   await inWorkspace(async workspace => {
     const registry = new ToolRegistry()

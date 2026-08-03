@@ -161,6 +161,7 @@ describe('Bun daemon launcher', () => {
     try {
       const client = new GatewayClient({ projectDir: process.cwd() })
       const privateClient = client as unknown as {
+        ensureConnectedDaemonCurrent: (socketPath: string, pidPath: string) => Promise<boolean>
         spawnBunDaemon: (socketPath: string, pidPath: string) => void
         tryConnect: (socketPath: string) => Promise<boolean>
       }
@@ -173,23 +174,52 @@ describe('Bun daemon launcher', () => {
       privateClient.spawnBunDaemon = () => {
         spawns += 1
       }
+      privateClient.ensureConnectedDaemonCurrent = async () => true
 
       const starting = client.start()
-      await vi.advanceTimersByTimeAsync(0)
+      await Promise.resolve()
+      await Promise.resolve()
 
       expect(DAEMON_CONNECT_RETRY_MS).toBe(25)
       expect(attempts).toBe(2)
       expect(spawns).toBe(1)
 
-      await vi.advanceTimersByTimeAsync(DAEMON_CONNECT_RETRY_MS - 1)
+      vi.advanceTimersByTime(DAEMON_CONNECT_RETRY_MS - 1)
+      await Promise.resolve()
       expect(attempts).toBe(2)
 
-      await vi.advanceTimersByTimeAsync(1)
+      vi.advanceTimersByTime(1)
+      await Promise.resolve()
       await starting
       expect(attempts).toBe(3)
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('shares one cold-daemon startup across concurrent callers', async () => {
+    const client = new GatewayClient({ projectDir: process.cwd() })
+    const privateClient = client as unknown as {
+      ensureConnectedDaemonCurrent: (socketPath: string, pidPath: string) => Promise<boolean>
+      spawnBunDaemon: (socketPath: string, pidPath: string) => void
+      tryConnect: (socketPath: string) => Promise<boolean>
+    }
+    let attempts = 0
+    const spawn = vi.fn()
+    // The first probe is the expected cold miss; the first post-spawn probe
+    // succeeds, so this test isolates concurrent start de-duplication without
+    // relying on wall-clock sleeps.
+    privateClient.tryConnect = async () => ++attempts >= 2
+    privateClient.ensureConnectedDaemonCurrent = async () => true
+    privateClient.spawnBunDaemon = spawn
+
+    const first = client.start()
+    const second = client.start()
+    expect(second).toBe(first)
+    await Promise.all([first, second])
+
+    expect(spawn).toHaveBeenCalledTimes(1)
+    expect(attempts).toBe(2)
   })
 
   it('replaces a verified stale local daemon before reporting gateway.ready', async () => {

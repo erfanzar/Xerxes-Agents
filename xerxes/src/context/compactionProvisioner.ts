@@ -257,7 +257,6 @@ export class CompactionProvisioner {
       return unchanged(original, tokensBefore, 'no_summary_agent')
     }
 
-    const systemMessages = original.filter(message => message.role === 'system')
     const conversationMessages = original.filter(message => message.role !== 'system')
     const protectedTail = this.protectedTailCount(conversationMessages)
     if (conversationMessages.length < 2 || protectedTail >= conversationMessages.length) {
@@ -276,7 +275,7 @@ export class CompactionProvisioner {
         if (typeof summary !== 'string') {
           throw new TypeError('summaryAgent must return a string')
         }
-        const trimmed = summary.trim()
+        const trimmed = stripCompactionAnalysis(summary)
         if (!trimmed) {
           summaryWasEmpty = true
           return ''
@@ -298,7 +297,7 @@ export class CompactionProvisioner {
       return unchanged(original, tokensBefore, 'nothing_to_compact')
     }
 
-    const output = repairToolMessageSequence([...systemMessages, ...compressed.messages])
+    const output = repairToolMessageSequence(mergeSystemMessagesInOrder(original, compressed.messages))
     const tokensAfter = this.countTokens(output)
     if (tokensAfter >= tokensBefore) {
       return {
@@ -503,6 +502,31 @@ export function stripCompactionAnalysis(summary: string): string {
     text = `${text.slice(0, open)}${text.slice(close + COMPACTION_ANALYSIS_CLOSE_TAG.length)}`
   }
   return text.trim()
+}
+
+/** Reinsert system messages at their original boundaries without exposing them to summarization. */
+function mergeSystemMessagesInOrder(
+  original: readonly ContextMessage[],
+  compactedConversation: readonly ContextMessage[],
+): ContextMessage[] {
+  const output = [...compactedConversation]
+  let leadingInsert = 0
+  for (let index = 0; index < original.length; index += 1) {
+    const message = original[index]
+    if (message?.role !== 'system') continue
+    const hasEarlierConversation = original.slice(0, index).some(candidate => candidate.role !== 'system')
+    if (!hasEarlierConversation) {
+      output.splice(leadingInsert, 0, message)
+      leadingInsert += 1
+      continue
+    }
+    const nextSurvivor = original.slice(index + 1).find(candidate => (
+      candidate.role !== 'system' && compactedConversation.includes(candidate)
+    ))
+    const insertion = nextSurvivor === undefined ? output.length : output.indexOf(nextSurvivor)
+    output.splice(insertion < 0 ? output.length : insertion, 0, message)
+  }
+  return output
 }
 
 function unchanged(messages: readonly ContextMessage[], tokens: number, reason: string): CompactionProvision {

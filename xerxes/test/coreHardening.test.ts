@@ -63,20 +63,22 @@ test('LLM and security secrets are redacted from toJSON and never reach persiste
       { llm: { api_key: 'llm-secret' }, security: { api_key: 'auth-secret' } },
       {},
     )
+    const merged = config.merge(new XerxesConfig({}, {}))
+    expect(merged.llm.apiKey).toBe('llm-secret')
+    expect(merged.security.apiKey).toBe('auth-secret')
+    expect(merged.toJSON().llm.api_key).toBeNull()
+    expect(merged.toJSON().security.api_key).toBeNull()
+
     const yamlPath = join(root, 'xerxes.yaml')
     const jsonPath = join(root, 'xerxes.json')
-    config.toFile(yamlPath)
-    config.toFile(jsonPath)
+    merged.toFile(yamlPath)
+    merged.toFile(jsonPath)
     for (const path of [yamlPath, jsonPath]) {
       const content = await readFile(path, 'utf8')
       expect(content).not.toContain('llm-secret')
       expect(content).not.toContain('auth-secret')
-      expect(JSON.parse(JSON.stringify(config.toJSON())).llm.api_key).toBeNull()
+      expect(JSON.parse(JSON.stringify(merged.toJSON())).llm.api_key).toBeNull()
     }
-
-    const merged = config.merge(new XerxesConfig({}, {}))
-    expect(merged.llm.apiKey).toBeUndefined()
-    expect(merged.security.apiKey).toBeUndefined()
   } finally {
     await rm(root, { recursive: true, force: true })
   }

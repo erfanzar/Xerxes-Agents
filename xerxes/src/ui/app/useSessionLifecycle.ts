@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 import { writeFileSync } from 'node:fs'
 
-import { type RefObject, useCallback } from 'react'
+import { type RefObject, useCallback, useRef } from 'react'
 
 import { buildSetupRequiredSections, SETUP_REQUIRED_TITLE } from '../content/setup.js'
 import { introMsg, toTranscriptMessages } from '../domain/messages.js'
@@ -116,6 +116,9 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
     setVoiceRecording,
     sys
   } = opts
+  // Session switches may overlap when a user selects twice before the first
+  // RPC settles. Only the newest request is allowed to replace visible state.
+  const switchGenerationRef = useRef(0)
 
   // Native sessions are durable records rather than closeable daemon handles.
   // Keep callers' lifecycle sequencing intact without sending the retired
@@ -155,7 +158,9 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
 
   const startNewSession = useCallback(
     async (msg?: string, title?: string, keepCurrent = false) => {
+      const generation = ++switchGenerationRef.current
       const setup = await rpc<SetupStatusResponse>('setup.status', {})
+      if (generation !== switchGenerationRef.current) return null
 
       if (setup?.provider_configured === false) {
         panel(SETUP_REQUIRED_TITLE, buildSetupRequiredSections())
@@ -166,9 +171,11 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
 
       if (!keepCurrent) {
         await closeSession(getUiState().sid)
+        if (generation !== switchGenerationRef.current) return null
       }
 
       const r = await rpc<SessionCreateResponse>('session.create', { cols: colsRef.current })
+      if (generation !== switchGenerationRef.current) return null
 
       if (!r) {
         patchUiState({ status: 'ready' })
@@ -251,11 +258,13 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
 
   const activateLiveSession = useCallback(
     (id: string) => {
+      const generation = ++switchGenerationRef.current
       patchOverlayState({ sessions: false })
       patchUiState({ status: 'switching session…' })
 
       gw.request<SessionActivateResponse>('session.activate', { session_id: id })
         .then(raw => {
+          if (generation !== switchGenerationRef.current) return
           const r = asRpcResult<SessionActivateResponse>(raw)
 
           if (!r) {
@@ -283,6 +292,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
           setTimeout(() => scrollRef.current?.scrollToBottom(), 0)
         })
         .catch((e: Error) => {
+          if (generation !== switchGenerationRef.current) return
           sys(`error: ${e.message}`)
           patchUiState({ status: 'ready' })
         })
@@ -292,10 +302,12 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
 
   const resumeById = useCallback(
     (id: string) => {
+      const generation = ++switchGenerationRef.current
       patchOverlayState({ sessions: false })
       patchUiState({ status: 'resuming…' })
 
       rpc<SetupStatusResponse>('setup.status', {}).then(setup => {
+        if (generation !== switchGenerationRef.current) return
         if (setup?.provider_configured === false) {
           panel(SETUP_REQUIRED_TITLE, buildSetupRequiredSections())
           patchUiState({ status: 'setup required' })
@@ -307,6 +319,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
 
         gw.request<SessionResumeResponse>('session.resume', { cols: colsRef.current, session_id: id })
           .then(raw => {
+            if (generation !== switchGenerationRef.current) return
             const r = asRpcResult<SessionResumeResponse>(raw)
 
             if (!r) {
@@ -341,6 +354,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
             setTimeout(() => scrollRef.current?.scrollToBottom(), 0)
           })
           .catch((e: Error) => {
+            if (generation !== switchGenerationRef.current) return
             sys(`error: ${e.message}`)
             patchUiState({ status: 'ready' })
           })

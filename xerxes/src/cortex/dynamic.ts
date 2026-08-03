@@ -73,12 +73,14 @@ export class DynamicCortex {
   }
 
   executePrompt(prompt: string, taskOptions: DynamicTaskOptions = {}, runOptions: CortexRunOptions = {}): Promise<CortexRunOutput> {
-    this.orchestrator.setTasks([DynamicTaskBuilder.fromPrompt(prompt, taskOptions)])
-    return this.orchestrator.run(runOptions)
+    const tasks = [DynamicTaskBuilder.fromPrompt(prompt, taskOptions)]
+    this.orchestrator.setTasks(tasks)
+    return this.orchestrator.run({ ...runOptions, tasks })
   }
 
   executePrompts(prompts: readonly string[], runOptions: CortexRunOptions = {}): Promise<CortexRunOutput> {
-    this.orchestrator.setTasks(DynamicTaskBuilder.chainPrompts(prompts, [...this.orchestrator.registeredAgents.values()]))
-    return this.orchestrator.run(runOptions)
+    const tasks = DynamicTaskBuilder.chainPrompts(prompts, [...this.orchestrator.registeredAgents.values()])
+    this.orchestrator.setTasks(tasks)
+    return this.orchestrator.run({ ...runOptions, tasks })
   }
 }

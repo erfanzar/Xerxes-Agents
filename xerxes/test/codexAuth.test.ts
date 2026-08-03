@@ -324,10 +324,13 @@ test('codex requests carry OAuth headers and omit the parameters the backend rej
         seenUrl = String(url)
         seenHeaders = init?.headers as Record<string, string>
         seenBody = JSON.parse(String(init?.body)) as Record<string, unknown>
-        return new Response('data: [DONE]\n\n', {
-          status: 200,
-          headers: { 'Content-Type': 'text/event-stream' },
-        })
+        return new Response(
+          'data: {"type":"response.completed","response":{"status":"completed"}}\n\ndata: [DONE]\n\n',
+          {
+            status: 200,
+            headers: { 'Content-Type': 'text/event-stream' },
+          },
+        )
       }) as never,
     })
 
@@ -364,10 +367,13 @@ test('the Responses transport caps output with max_output_tokens, not max_tokens
     responsesApi: true,
     fetchImplementation: (async (_url: string, init?: RequestInit) => {
       seenBody = JSON.parse(String(init?.body)) as Record<string, unknown>
-      return new Response('data: [DONE]\n\n', {
-        status: 200,
-        headers: { 'Content-Type': 'text/event-stream' },
-      })
+      return new Response(
+        'data: {"type":"response.completed","response":{"status":"completed"}}\n\ndata: [DONE]\n\n',
+        {
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream' },
+        },
+      )
     }) as never,
   })
 
@@ -488,10 +494,13 @@ async function capturedResponsesBody(
     ...factoryOptions,
     fetchImplementation: (async (_url: string, init?: RequestInit) => {
       body = JSON.parse(String(init?.body)) as Record<string, unknown>
-      return new Response('data: [DONE]\n\n', {
-        status: 200,
-        headers: { 'Content-Type': 'text/event-stream' },
-      })
+      return new Response(
+        'data: {"type":"response.completed","response":{"status":"completed"}}\n\ndata: [DONE]\n\n',
+        {
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream' },
+        },
+      )
     }) as never,
   })
   for await (const _delta of client.stream(request as never)) {

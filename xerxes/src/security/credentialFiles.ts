@@ -1,7 +1,8 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { isAbsolute, relative, resolve, sep } from 'node:path'
+import { lstatSync, realpathSync } from 'node:fs'
+import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 
 import { ValidationError } from '../core/errors.js'
 
@@ -168,17 +169,18 @@ function resolveCredentialPath(
   allowedRoots: readonly string[],
 ): string {
   const expandedCandidate = expandHome(candidate, homeDirectory, 'credentialPath', allowedRoots)
-  const resolvedPath = isAbsolute(expandedCandidate)
+  const lexicalPath = isAbsolute(expandedCandidate)
     ? resolve(expandedCandidate)
     : resolve(baseDirectory, expandedCandidate)
-  if (!allowedRoots.some(root => isContained(root, resolvedPath))) {
+  const physicalPath = resolveExistingAncestor(lexicalPath)
+  if (!allowedRoots.some(root => isContained(resolveExistingAncestor(root), physicalPath))) {
     throw new CredentialPathError(
       candidate,
       allowedRoots,
       `path ${JSON.stringify(candidate)} must remain inside a configured credential root`,
     )
   }
-  return resolvedPath
+  return lexicalPath
 }
 
 function normalizeAbsoluteDirectory(value: string, field: string, homeDirectory: string | undefined): string {
@@ -208,6 +210,35 @@ function expandHome(
     throw new CredentialPathError(value, allowedRoots, `${field} supports only ~ or ~/ path expansion`)
   }
   return value
+}
+
+function resolveExistingAncestor(candidate: string): string {
+  let current = candidate
+  const missingSegments: string[] = []
+  while (true) {
+    try {
+      lstatSync(current)
+      return resolve(realpathSync(current), ...missingSegments)
+    } catch (error) {
+      if (!isNotFound(error)) {
+        throw new CredentialPathError(candidate, [], `cannot resolve credential path: ${errorMessage(error)}`)
+      }
+      const parent = dirname(current)
+      if (parent === current) {
+        throw new CredentialPathError(candidate, [], 'does not have an existing ancestor')
+      }
+      missingSegments.unshift(basename(current))
+      current = parent
+    }
+  }
+}
+
+function isNotFound(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT'
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
 
 function isContained(root: string, candidate: string): boolean {

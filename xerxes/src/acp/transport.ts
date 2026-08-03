@@ -18,6 +18,30 @@ export type AcpStdioWriter = (line: string) => void | Promise<void>
 /** Matches the daemon socket frame cap: one NDJSON frame may not exceed 16 MiB. */
 export const MAX_ACP_FRAME_BYTES = 16 * 1024 * 1024
 
+/** Incrementally accounts for bytes in the current NDJSON frame. */
+export class AcpFrameByteCounter {
+  private currentBytes = 0
+  private scannedBytes = 0
+
+  constructor(private readonly maxBytes = MAX_ACP_FRAME_BYTES) {}
+
+  append(chunk: Uint8Array): void {
+    for (const byte of chunk) {
+      this.scannedBytes += 1
+      this.currentBytes = byte === 0x0a ? 0 : this.currentBytes + 1
+    }
+  }
+
+  get exceedsLimit(): boolean {
+    return this.currentBytes > this.maxBytes
+  }
+
+  /** Exposed so fragmented-input tests can assert accounting remains linear. */
+  get bytesScanned(): number {
+    return this.scannedBytes
+  }
+}
+
 interface ParsedRequest {
   readonly canReply: boolean
   readonly id: AcpJsonRpcId
@@ -45,6 +69,7 @@ export class StdioJsonRpcServer {
     const reader = input.getReader()
     const decoder = new TextDecoder()
     const send = this.serializedSender(write)
+    const frameBytes = new AcpFrameByteCounter()
     let buffer = ''
     try {
       while (this.running) {
@@ -52,19 +77,10 @@ export class StdioJsonRpcServer {
         if (done) {
           break
         }
+        frameBytes.append(value)
         buffer += decoder.decode(value, { stream: true })
-        if (exceedsFrameLimit(buffer)) {
-          await send(acpJsonRpcFailure(
-            null,
-            ACP_JSON_RPC_ERRORS.invalidRequest,
-            `frame exceeds maximum size of ${MAX_ACP_FRAME_BYTES} bytes`,
-          ))
-          this.running = false
-          await reader.cancel().catch(() => undefined)
-          break
-        }
         buffer = await this.handleCompleteLines(buffer, send)
-        if (buffer.length > MAX_ACP_FRAME_BYTES) {
+        if (this.running && frameBytes.exceedsLimit) {
           await send(acpJsonRpcFailure(
             null,
             ACP_JSON_RPC_ERRORS.invalidRequest,
@@ -99,8 +115,18 @@ export class StdioJsonRpcServer {
   private async handleCompleteLines(buffer: string, send: Sender): Promise<string> {
     let newline = buffer.indexOf('\n')
     while (newline >= 0) {
-      const line = buffer.slice(0, newline).trim()
+      const rawLine = buffer.slice(0, newline)
       buffer = buffer.slice(newline + 1)
+      if (utf8ByteLength(rawLine) > MAX_ACP_FRAME_BYTES) {
+        await send(acpJsonRpcFailure(
+          null,
+          ACP_JSON_RPC_ERRORS.invalidRequest,
+          `frame exceeds maximum size of ${MAX_ACP_FRAME_BYTES} bytes`,
+        ))
+        this.running = false
+        return buffer
+      }
+      const line = rawLine.trim()
       if (line) {
         await this.handleLine(line, send)
       }
@@ -132,9 +158,14 @@ export class StdioJsonRpcServer {
       return
     }
     const id = hasId ? value.id as AcpJsonRpcId : null
-    const canReply = typeof id === 'string' || typeof id === 'number'
+    // JSON-RPC notifications are identified by an omitted id. Although null
+    // ids are discouraged by the spec, they are still requests and receive a
+    // null-id response for compatibility with clients that use them.
+    const canReply = hasId
     if (value.params !== undefined && !isAcpRecord(value.params)) {
-      await send(acpJsonRpcFailure(id, ACP_JSON_RPC_ERRORS.invalidParams, 'params must be an object'))
+      if (canReply) {
+        await send(acpJsonRpcFailure(id, ACP_JSON_RPC_ERRORS.invalidParams, 'params must be an object'))
+      }
       return
     }
     const request: ParsedRequest = {
@@ -294,14 +325,8 @@ export async function serveACPStdio(
   await new StdioJsonRpcServer(server).serve(input, write)
 }
 
-/**
- * A peer that never terminates a frame with `\n` would grow the read buffer
- * without bound, so the incomplete head of the buffer is capped. `length`
- * counts UTF-16 code units, which makes the byte bound conservative.
- */
-function exceedsFrameLimit(buffer: string): boolean {
-  const newline = buffer.indexOf('\n')
-  return newline < 0 ? buffer.length > MAX_ACP_FRAME_BYTES : newline > MAX_ACP_FRAME_BYTES
+function utf8ByteLength(value: string): number {
+  return new TextEncoder().encode(value).byteLength
 }
 
 function recordParameter(value: unknown): Record<string, unknown> | undefined {

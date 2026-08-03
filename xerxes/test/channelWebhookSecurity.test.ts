@@ -227,9 +227,13 @@ test('webhook server list endpoint requires the configured auth token', async ()
       ok: true,
       channels: [expect.objectContaining({ name: 'incoming' })],
     })
-    // Webhook delivery itself is still authenticated by each channel adapter.
     expect((await fetch(new URL('/channels/incoming/webhook', base), {
       method: 'POST',
+      body: 'raw',
+    })).status).toBe(401)
+    expect((await fetch(new URL('/channels/incoming/webhook', base), {
+      method: 'POST',
+      headers: { Authorization: 'Bearer list-token' },
       body: 'raw',
     })).status).toBe(202)
   } finally {

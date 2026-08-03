@@ -293,6 +293,96 @@ test('MCPClient re-initializes an expired Streamable HTTP session and retries th
   }
 })
 
+test('MCPClient paginates advertised tools, resources, and prompts', async () => {
+  const requests: Array<{ method: string; cursor?: unknown }> = []
+  const server = Bun.serve({
+    hostname: '127.0.0.1',
+    port: 0,
+    async fetch(request) {
+      if (request.method === 'DELETE') return new Response(null, { status: 204 })
+      const message = (await request.json()) as { id?: unknown; method?: string; params?: Record<string, unknown> }
+      requests.push({ method: String(message.method), cursor: message.params?.cursor })
+      if (message.method === 'initialize') return jsonRpc(message.id, {
+        capabilities: { tools: {}, resources: {}, prompts: {} },
+        protocolVersion: '2025-06-18',
+        serverInfo: { name: 'paged', version: '1.0.0' },
+      })
+      if (message.method === 'notifications/initialized') return new Response(null, { status: 202 })
+      const cursor = message.params?.cursor
+      if (message.method === 'tools/list') return jsonRpc(message.id, cursor === undefined
+        ? { tools: [{ name: 'one', inputSchema: { type: 'object' } }], nextCursor: 'tools-2' }
+        : { tools: [{ name: 'two', inputSchema: { type: 'object' } }] })
+      if (message.method === 'resources/list') return jsonRpc(message.id, cursor === undefined
+        ? { resources: [{ uri: 'memo://one', name: 'one' }], nextCursor: 'resources-2' }
+        : { resources: [{ uri: 'memo://two', name: 'two' }] })
+      if (message.method === 'prompts/list') return jsonRpc(message.id, cursor === undefined
+        ? { prompts: [{ name: 'one' }], nextCursor: 'prompts-2' }
+        : { prompts: [{ name: 'two' }] })
+      return new Response('not found', { status: 404 })
+    },
+  })
+  const client = new MCPClient({
+    allowPrivateNetwork: true,
+    name: 'paged',
+    transport: 'streamable_http',
+    url: `http://127.0.0.1:${server.port ?? 0}/mcp`,
+  })
+  try {
+    await client.connect()
+    expect(client.tools.map(tool => tool.name)).toEqual(['one', 'two'])
+    expect(client.resources.map(resource => resource.uri)).toEqual(['memo://one', 'memo://two'])
+    expect(client.prompts.map(prompt => prompt.name)).toEqual(['one', 'two'])
+    expect(requests.filter(item => item.method.endsWith('/list')).map(item => `${item.method}:${String(item.cursor)}`))
+      .toEqual(expect.arrayContaining([
+        'tools/list:undefined', 'tools/list:tools-2',
+        'resources/list:undefined', 'resources/list:resources-2',
+        'prompts/list:undefined', 'prompts/list:prompts-2',
+      ]))
+  } finally {
+    await client.disconnect()
+    server.stop(true)
+  }
+})
+
+test('MCPClient accepts resource-only servers and rejects pagination cursor loops', async () => {
+  let loop = false
+  const server = Bun.serve({
+    hostname: '127.0.0.1',
+    port: 0,
+    async fetch(request) {
+      if (request.method === 'DELETE') return new Response(null, { status: 204 })
+      const message = (await request.json()) as { id?: unknown; method?: string }
+      if (message.method === 'initialize') return jsonRpc(message.id, {
+        capabilities: { resources: {} },
+        protocolVersion: '2025-06-18',
+        serverInfo: { name: 'resources', version: '1.0.0' },
+      })
+      if (message.method === 'notifications/initialized') return new Response(null, { status: 202 })
+      if (message.method === 'resources/list') return jsonRpc(message.id, loop
+        ? { resources: [], nextCursor: 'same' }
+        : { resources: [{ uri: 'memo://only', name: 'only' }] })
+      return jsonRpc(message.id, { unexpectedMethod: message.method })
+    },
+  })
+  const client = new MCPClient({
+    allowPrivateNetwork: true,
+    name: 'resources',
+    transport: 'streamable_http',
+    url: `http://127.0.0.1:${server.port ?? 0}/mcp`,
+  })
+  try {
+    await client.connect()
+    expect(client.tools).toEqual([])
+    expect(client.prompts).toEqual([])
+    expect(client.resources.map(resource => resource.uri)).toEqual(['memo://only'])
+    loop = true
+    await expect(client.listResources()).rejects.toThrow(/repeated pagination cursor/)
+  } finally {
+    await client.disconnect()
+    server.stop(true)
+  }
+})
+
 test('OAuth refreshToken falls back to the original scopes when the response omits scope', async () => {
   const config: OAuthConfig = {
     authorizeUrl: 'https://oauth.example.test/authorize',

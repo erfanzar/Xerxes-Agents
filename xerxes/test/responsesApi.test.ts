@@ -63,25 +63,23 @@ test('Responses API translator streams text and thinking while assembling functi
   })
 })
 
-test('Responses API translator flushes unfinished calls when the transport truncates', () => {
+test('Responses API translator rejects truncated EOF without completing pending calls', () => {
   const translator = new ResponsesEventTranslator()
-  const deltas = [...translator.translateAll([
+
+  expect(() => [...translator.translateAll([
     {
       type: 'response.output_item.added',
       item: { type: 'tool_call', id: 'call_2', name: 'ListDir' },
     },
     { type: 'response.function_call_arguments.delta', call_id: 'call_2', delta: '{"directory":"."}' },
-  ])]
+  ])]).toThrow('Responses API stream ended before a terminal response event')
+  expect(translator.usage.toolCalls).toEqual([])
+})
 
-  expect(deltas).toEqual([{
-    finishReason: 'stop',
-    usage: { inputTokens: 0, outputTokens: 0 },
-    toolCalls: [{
-      id: 'call_2',
-      type: 'function',
-      function: { name: 'ListDir', arguments: { directory: '.' } },
-    }],
-  }])
+test('Responses API translator rejects truncated EOF even when no tool call is pending', () => {
+  expect(() => [...new ResponsesEventTranslator().translateAll([
+    { type: 'response.output_text.delta', delta: 'partial' },
+  ])]).toThrow('Responses API stream ended before a terminal response event')
 })
 
 test('Responses API translator maps completed status to neutral finish reasons', () => {

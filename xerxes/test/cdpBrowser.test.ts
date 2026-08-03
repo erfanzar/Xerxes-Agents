@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from 'bun:test'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -74,6 +74,33 @@ test('CDP browser adapter discovers an explicit endpoint and executes open, clic
   }
   expect(connection.closed).toBeTrue()
   expect(connection.commands.map(command => command.method)).toContain('Target.detachFromTarget')
+})
+
+test('CDP screenshots reject symlinked intermediate directories', async () => {
+  const screenshots = await mkdtemp(join(tmpdir(), 'xerxes-cdp-browser-symlink-'))
+  const outside = await mkdtemp(join(tmpdir(), 'xerxes-cdp-browser-outside-'))
+  const connection = new FakeCdpConnection()
+  const manager = new BrowserManager()
+  try {
+    await mkdir(join(outside, 'nested'))
+    await symlink(join(outside, 'nested'), join(screenshots, 'linked'))
+    await manager.connectCdp('ws://127.0.0.1:9222/devtools/browser/id', {
+      connectionFactory: factory(connection),
+      screenshotDirectory: screenshots,
+      sleep: async () => undefined,
+    })
+    const page = await manager.open({ url: 'https://example.test', waitMs: 0 })
+
+    await expect(manager.screenshot(page.refId, {
+      fullPage: false,
+      path: join(screenshots, 'linked', 'capture.png'),
+    })).rejects.toThrow('screenshot directory is not a real directory')
+    expect(await Bun.file(join(outside, 'nested', 'capture.png')).exists()).toBeFalse()
+  } finally {
+    await manager.disconnect()
+    await rm(screenshots, { recursive: true, force: true })
+    await rm(outside, { recursive: true, force: true })
+  }
 })
 
 test('browser manager tool registration forwards real CDP manager calls and leaves unconfigured sessions actionable', async () => {

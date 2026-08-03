@@ -303,8 +303,10 @@ export class OpenAiCompatibleClient implements LlmClient {
 
     const pendingToolCalls = new Map<number, PendingToolCall>()
     let emittedToolCalls = false
+    let terminal = false
     for await (const data of sseData(response.body)) {
       if (data === '[DONE]') {
+        terminal = true
         break
       }
       const chunk = parseJsonObject(data, this.providerName)
@@ -335,6 +337,7 @@ export class OpenAiCompatibleClient implements LlmClient {
       }
       if (finishReason) {
         event.finishReason = finishReason
+        terminal = true
       }
       if (finishReason && pendingToolCalls.size) {
         event.toolCalls = completedToolCalls(pendingToolCalls)
@@ -345,6 +348,9 @@ export class OpenAiCompatibleClient implements LlmClient {
       }
     }
 
+    if (!terminal) {
+      throw new ProviderError(this.providerName, 'stream ended before a terminal completion event')
+    }
     if (!emittedToolCalls && pendingToolCalls.size) {
       yield { toolCalls: completedToolCalls(pendingToolCalls) }
     }
@@ -435,8 +441,7 @@ export class ResponsesApiClient implements LlmClient {
       const event = parseJsonObject(data, this.providerName)
       for (const delta of translator.translate(event)) yield delta
     }
-    const final = translator.finish()
-    if (final) yield final
+    translator.finish()
   }
 }
 
@@ -1104,7 +1109,7 @@ function openAiUsage(value: Record<string, unknown>): TokenUsage | undefined {
   const cacheReadTokens = numberAt(inputDetails, 'cached_tokens')
   const reasoningTokens = numberAt(outputDetails, 'reasoning_tokens')
   return {
-    inputTokens: inputTokens ?? 0,
+    inputTokens: freshPromptTokens(inputTokens ?? 0, cacheReadTokens),
     outputTokens: outputTokens ?? 0,
     ...(cacheReadTokens === undefined ? {} : { cacheReadTokens }),
     ...(reasoningTokens === undefined ? {} : { reasoningTokens }),
@@ -1165,7 +1170,12 @@ function parseResponsesCompletion(response: Record<string, unknown>): LlmComplet
     toolCalls.push({ id, type: 'function', function: { name, arguments: arguments_ } })
   }
   const usage = responsesUsage(asRecord(response.usage))
-  const finishReason = stringAt(response, 'status') || undefined
+  const status = stringAt(response, 'status') || undefined
+  const finishReason = toolCalls.length
+    ? 'tool_calls'
+    : status === 'completed'
+      ? 'stop'
+      : status
   return {
     content: content.join(''),
     toolCalls,
@@ -1188,12 +1198,16 @@ function responsesUsage(value: Record<string, unknown>): TokenUsage | undefined 
     ?? numberAt(outputDetails, 'cache_creation_tokens')
   const reasoningTokens = numberAt(outputDetails, 'reasoning_tokens')
   return {
-    inputTokens: inputTokens ?? 0,
+    inputTokens: freshPromptTokens(inputTokens ?? 0, cacheReadTokens),
     outputTokens: outputTokens ?? 0,
     ...(cacheReadTokens === undefined ? {} : { cacheReadTokens }),
     ...(cacheCreationTokens === undefined ? {} : { cacheCreationTokens }),
     ...(reasoningTokens === undefined ? {} : { reasoningTokens }),
   }
+}
+
+function freshPromptTokens(inputTokens: number, cacheReadTokens: number | undefined): number {
+  return cacheReadTokens === undefined ? inputTokens : Math.max(0, inputTokens - cacheReadTokens)
 }
 
 function mergeTokenUsage(current: TokenUsage | undefined, next: TokenUsage): TokenUsage {

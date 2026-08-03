@@ -444,8 +444,10 @@ export async function appendFile(inputs: JsonObject, paths: WorkspacePathResolve
   } else {
     await mkdir(dirname(target), { recursive: true })
   }
-  await appendTextFile(target, lines + newline, 'utf8')
-  return 'Appended ' + lines.length + ' characters to ' + await paths.relative(target) + '.'
+  const relativePath = await paths.relative(target)
+  const checked = await paths.recheck(target)
+  await appendTextFile(checked, lines + newline, 'utf8')
+  return 'Appended ' + lines.length + ' characters to ' + relativePath + '.'
 }
 
 export async function listDirectory(inputs: JsonObject, paths: WorkspacePathResolver): Promise<string[]> {

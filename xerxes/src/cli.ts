@@ -37,8 +37,9 @@ import { DaemonSubagentEventBus } from "./daemon/subagentEvents.js";
 import { createNativeSubagentHost, subagentRetryWirePayload } from "./daemon/subagentHost.js";
 import { AgentTurnRunner, formatSubagentResults } from "./daemon/turnRunner.js";
 import {
-  defaultSkillDiscoveryDirectories,
+  defaultSkillDiscoveryRoots,
   SkillRegistry,
+  trustedHashWorkspaceSkills,
 } from "./extensions/skills.js";
 import {
   ToolRegistry,
@@ -371,7 +372,7 @@ async function runDaemon(
     },
   });
   const browserManager = new BrowserManager();
-  const skillRegistry = new SkillRegistry();
+  const skillRegistry = new SkillRegistry({ workspaceTrust: trustedHashWorkspaceSkills() });
   // Shared by the tool registry that starts the processes and the RPC surface
   // that lists them. One instance is the whole point: a second registry would
   // be a second, permanently empty view of the same shells.
@@ -1102,8 +1103,8 @@ async function acpServer(
   }
   const workspaceRoot = projectDirectory ?? config.projectDirectory;
   const tools = new ToolRegistry();
-  const skillRegistry = new SkillRegistry();
-  await skillRegistry.refresh(...defaultSkillDiscoveryDirectories({ cwd: workspaceRoot }));
+  const skillRegistry = new SkillRegistry({ workspaceTrust: trustedHashWorkspaceSkills() });
+  await skillRegistry.refresh(...defaultSkillDiscoveryRoots({ cwd: workspaceRoot }));
   const memoryToolContext = memoryToolContextResolver();
   const acpComputerUseTool = createMacOSComputerUseToolOptions(config.runtime);
   registerCoreTools(tools, {
@@ -1228,8 +1229,8 @@ async function runOneShot(prompt: string): Promise<void> {
   }
   const workspaceRoot = config.projectDirectory;
   const tools = new ToolRegistry();
-  const skillRegistry = new SkillRegistry();
-  await skillRegistry.refresh(...defaultSkillDiscoveryDirectories({ cwd: workspaceRoot }));
+  const skillRegistry = new SkillRegistry({ workspaceTrust: trustedHashWorkspaceSkills() });
+  await skillRegistry.refresh(...defaultSkillDiscoveryRoots({ cwd: workspaceRoot }));
   const memoryToolContext = memoryToolContextResolver();
   const agentMemory = new AgentMemory({ projectRoot: workspaceRoot });
   const computerUseTool = createMacOSComputerUseToolOptions(config.runtime);

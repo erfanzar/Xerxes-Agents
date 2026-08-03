@@ -231,8 +231,14 @@ export class SpawnedAgentManager implements SpawnedAgentManagerPort {
         handle.updatedAt = this.now().toISOString()
         return this.snapshot(handle)
       }
-      handle.active.controller.abort(new Error('Interrupted by parent agent'))
+      const interrupted = handle.active
+      interrupted.controller.abort(new Error('Interrupted by parent agent'))
       handle.status = 'interrupted'
+      // Cancellation is cooperative. Never overlap two turns for one identity:
+      // wait until the interrupted runner settles before dispatching replacement input.
+      await interrupted.promise
+      if (handle.closed) throw new ValidationError('handle_id', 'spawned agent is closed', id)
+      if (handle.active !== undefined) return this.sendInput(id, options)
       this.start(handle, input)
       return this.snapshot(handle)
     }

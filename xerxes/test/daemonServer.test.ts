@@ -3910,6 +3910,96 @@ test("daemon stop drains in-flight turns so their final state reaches disk", asy
   }
 });
 
+test("daemon validates the size of each complete NDJSON frame instead of the aggregate receive chunk", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-frame-batch-"));
+  const socketPath = join(directory, "daemon.sock");
+  const server = new DaemonServer({
+    cronStoreFactory: () => new JobStore(join(directory, "cron", "jobs.json")),
+    maxSocketFrameBytes: 128,
+    runtime: new InMemoryDaemonRuntime(undefined, {
+      currentProjectDirectory: directory,
+      sessionDirectory: join(directory, "sessions"),
+    }),
+    socketPath,
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.sendBatch([
+      { jsonrpc: "2.0", id: 1, method: "runtime.status", params: {} },
+      { jsonrpc: "2.0", id: 2, method: "runtime.status", params: {} },
+    ]);
+    expect((await client.next((frame) => frame.id === 1)).result).toMatchObject({ ok: true });
+    expect((await client.next((frame) => frame.id === 2)).result).toMatchObject({ ok: true });
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("daemon drops a Unix client that exceeds the pending parsed-request limit", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-pending-limit-"));
+  const socketPath = join(directory, "daemon.sock");
+  const server = new DaemonServer({
+    cronStoreFactory: () => new JobStore(join(directory, "cron", "jobs.json")),
+    maxPendingSocketRequests: 1,
+    runtime: new InMemoryDaemonRuntime(undefined, {
+      currentProjectDirectory: directory,
+      sessionDirectory: join(directory, "sessions"),
+    }),
+    socketPath,
+  });
+  await server.start();
+  const offender = connect({ path: socketPath });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      offender.once("connect", resolve);
+      offender.once("error", reject);
+    });
+    const closed = new Promise<void>((resolve) => offender.once("close", () => resolve()));
+    offender.write(
+      Array.from({ length: 3 }, (_, index) =>
+        `${JSON.stringify({ jsonrpc: "2.0", id: index + 1, method: "runtime.status", params: {} })}\n`,
+      ).join(""),
+    );
+    await closed;
+  } finally {
+    offender.destroy();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("daemon bounds buffered Unix socket output and disconnects a slow client", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-output-limit-"));
+  const socketPath = join(directory, "daemon.sock");
+  const server = new DaemonServer({
+    cronStoreFactory: () => new JobStore(join(directory, "cron", "jobs.json")),
+    maxSocketOutputBytes: 32,
+    runtime: new InMemoryDaemonRuntime(undefined, {
+      currentProjectDirectory: directory,
+      sessionDirectory: join(directory, "sessions"),
+    }),
+    socketPath,
+  });
+  await server.start();
+  const offender = connect({ path: socketPath });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      offender.once("connect", resolve);
+      offender.once("error", reject);
+    });
+    const closed = new Promise<void>((resolve) => offender.once("close", () => resolve()));
+    offender.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "runtime.status", params: {} })}\n`);
+    await closed;
+  } finally {
+    offender.destroy();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("daemon drops a Unix client whose buffered request exceeds the frame limit", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-frame-limit-"));
   const socketPath = join(directory, "daemon.sock");

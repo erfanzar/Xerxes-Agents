@@ -99,7 +99,9 @@ export class WorkspaceMemoryStore {
     const temporary = join(dirname(target), '.' + kind + '.' + crypto.randomUUID() + '.tmp')
     try {
       await Bun.write(temporary, lines.length ? lines.join('\n') + '\n' : '')
-      await rename(temporary, target)
+      const checkedTemporary = await this.paths.recheck(temporary)
+      const checkedTarget = await this.paths.recheck(target)
+      await rename(checkedTemporary, checkedTarget)
     } finally {
       await rm(temporary, { force: true })
     }

@@ -4,7 +4,7 @@
 import { CronJob, JobStore, nextFireAt } from '../../cron/index.js'
 import { ValidationError } from '../../core/errors.js'
 import { ToolRegistry, type ToolExecutionContext } from '../../executors/toolRegistry.js'
-import { checkUrl, type UrlSafetyOptions } from '../../security/urlSafety.js'
+import { checkUrl, checkUrlDns, type UrlSafetyOptions } from '../../security/urlSafety.js'
 import type { JsonObject, ToolDefinition } from '../../types/toolCalls.js'
 import { optionalString, requiredString } from '../inputs.js'
 
@@ -78,10 +78,15 @@ export class RemoteTriggerRegistry {
         name,
       )
     }
+    const safety = await checkUrlDns(endpoint.url, this.urlSafety)
+    if (!safety.allowed) {
+      throw new ValidationError('url', `is not allowed: ${safety.reason}`, endpoint.url)
+    }
     const response = await this.fetcher(endpoint.url, {
       method: endpoint.method ?? 'POST',
       headers: { 'content-type': 'text/plain; charset=utf-8', ...endpoint.headers },
       body: payload,
+      redirect: 'error',
       ...(signal === undefined ? {} : { signal }),
     })
     const body = (await response.text()).slice(0, MAX_REMOTE_RESPONSE_CHARS)

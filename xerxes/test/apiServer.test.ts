@@ -115,6 +115,65 @@ test('non-streaming chat completions aggregate LlmClient deltas without leaking 
   }])
 })
 
+test('streaming response production remains bounded by downstream pulls', async () => {
+  let produced = 0
+  const client: LlmClient = {
+    async *stream(): AsyncGenerator<LlmDelta> {
+      for (let index = 0; index < 20; index += 1) {
+        produced += 1
+        yield { content: String(index), ...(index === 19 ? { finishReason: 'stop' } : {}) }
+      }
+    },
+  }
+  const server = new OpenAiApiServer({ llm: client, models: ['gpt-4o'] })
+  const response = await server.fetch(new Request('http://xerxes.test/v1/chat/completions', {
+    method: 'POST',
+    body: JSON.stringify({
+      model: 'gpt-4o',
+      messages: [{ role: 'user', content: 'Count.' }],
+      stream: true,
+    }),
+  }))
+
+  const reader = response.body?.getReader()
+  expect(reader).toBeDefined()
+  await Bun.sleep(20)
+  expect(produced).toBeLessThanOrEqual(1)
+  await reader?.read()
+  await Bun.sleep(20)
+  expect(produced).toBeLessThanOrEqual(2)
+  await reader?.cancel()
+})
+
+test('OpenAI numeric options enforce documented ranges and safe integers', async () => {
+  const client = new RecordingClient([{ content: 'ok', finishReason: 'stop' }])
+  const server = new OpenAiApiServer({ llm: client, models: ['gpt-4o'] })
+  const cases: Array<[string, number]> = [
+    ['max_tokens', Number.MAX_SAFE_INTEGER + 1],
+    ['frequency_penalty', -2.01],
+    ['frequency_penalty', 2.01],
+    ['presence_penalty', -2.01],
+    ['presence_penalty', 2.01],
+    ['temperature', -0.01],
+    ['temperature', 2.01],
+    ['top_p', -0.01],
+    ['top_p', 1.01],
+  ]
+  for (const [parameter, value] of cases) {
+    const response = await server.fetch(new Request('http://xerxes.test/v1/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify({
+        model: 'gpt-4o',
+        messages: [{ role: 'user', content: 'Hi.' }],
+        [parameter]: value,
+      }),
+    }))
+    expect(response.status).toBe(400)
+    expect(await response.json()).toMatchObject({ error: { param: parameter } })
+  }
+  expect(client.requests).toHaveLength(0)
+})
+
 test('streaming chat completions use OpenAI SSE framing and retain tool calls', async () => {
   const client = new RecordingClient([
     { content: 'one <thi' },

@@ -65,7 +65,9 @@ export function daemonChannelWebhookOptions(
     || stringSetting(config.control.websocket_host)
     || '127.0.0.1'
   warnOnUnsignedWebhookExposure(config, host)
+  const authToken = stringSetting(config.control.auth_token)
   return {
+    ...(authToken ? { authToken } : {}),
     host,
     port: numericSetting(config.control.webhook_port, 11997),
   }

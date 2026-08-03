@@ -70,8 +70,10 @@ export async function editNotebookCell(inputs: JsonObject, paths: WorkspacePathR
   if (!isRecord(cell)) throw new ValidationError('cell_index', 'must refer to an object cell', cellIndex)
   cell.source = splitLines(newSource)
   cell.cell_type = cellType
-  await Bun.write(target, `${JSON.stringify(parsed, null, 1)}\n`)
-  return `Updated cell ${cellIndex} in ${await paths.relative(target)} (${cellType}, ${newSource.length} chars).`
+  const relativePath = await paths.relative(target)
+  const checked = await paths.recheck(target)
+  await Bun.write(checked, `${JSON.stringify(parsed, null, 1)}\n`)
+  return `Updated cell ${cellIndex} in ${relativePath} (${cellType}, ${newSource.length} chars).`
 }
 
 function requiredNonnegativeInteger(inputs: JsonObject, name: string): number {

@@ -224,19 +224,29 @@ export function useConfigSync({
   sid
 }: UseConfigSyncOptions) {
   const mtimeRef = useRef(0)
+  const generationRef = useRef(0)
 
   useEffect(() => {
     if (!sid) {
       return
     }
 
+    const generation = ++generationRef.current
+    let stopped = false
     // This native TUI has no microphone capture host port. Do not expose an
     // enabled voice badge merely because a legacy environment flag is present.
     setVoiceEnabled(false)
     quietRpc<ConfigMtimeResponse>(gw, 'config.get', { key: 'mtime' }).then(r => {
-      mtimeRef.current = Number(r?.mtime ?? 0)
+      if (!stopped && generation === generationRef.current) mtimeRef.current = Number(r?.mtime ?? 0)
     })
-    void hydrateFullConfig(gw, setBellOnComplete, setVoiceRecordKey)
+    void quietRpc<ConfigFullResponse>(gw, 'config.get', { key: 'full' }).then(cfg => {
+      if (!stopped && generation === generationRef.current) applyDisplay(cfg, setBellOnComplete, setVoiceRecordKey)
+    })
+
+    return () => {
+      stopped = true
+      generationRef.current += 1
+    }
   }, [gw, setBellOnComplete, setVoiceEnabled, setVoiceRecordKey, sid])
 
   useEffect(() => {
@@ -244,8 +254,13 @@ export function useConfigSync({
       return
     }
 
-    const id = setInterval(() => {
+    let stopped = false
+    let inFlight = false
+    const poll = () => {
+      if (inFlight) return
+      inFlight = true
       quietRpc<ConfigMtimeResponse>(gw, 'config.get', { key: 'mtime' }).then(r => {
+        if (stopped) return
         const next = Number(r?.mtime ?? 0)
 
         if (!mtimeRef.current) {
@@ -266,11 +281,19 @@ export function useConfigSync({
         // poll. Native Bun exposes that operation only through `/reload-mcp`;
         // do not fire a rejected compatibility RPC in the background.
         turnController.pushActivity('configuration changed · run /reload or /reload-mcp to apply daemon changes')
-        void hydrateFullConfig(gw, setBellOnComplete, setVoiceRecordKey)
+        void quietRpc<ConfigFullResponse>(gw, 'config.get', { key: 'full' }).then(cfg => {
+          if (!stopped) applyDisplay(cfg, setBellOnComplete, setVoiceRecordKey)
+        })
+      }).finally(() => {
+        inFlight = false
       })
-    }, MTIME_POLL_MS)
+    }
+    const id = setInterval(poll, MTIME_POLL_MS)
 
-    return () => clearInterval(id)
+    return () => {
+      stopped = true
+      clearInterval(id)
+    }
   }, [gw, setBellOnComplete, setVoiceRecordKey, sid])
 }
 

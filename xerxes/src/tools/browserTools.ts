@@ -124,9 +124,15 @@ export class BrowserSession {
     this.urlSafety = options.urlSafety ?? {}
   }
 
-  setPort(port: BrowserPort | undefined): void {
-    this.port = port
-    this.document = undefined
+  /** Replace the host port only after queued work finishes and the previous host closes cleanly. */
+  async setPort(port: BrowserPort | undefined): Promise<void> {
+    await this.exclusive(async () => {
+      const previous = this.port
+      if (previous === port) return
+      await previous?.close?.()
+      this.port = port
+      this.document = undefined
+    })
   }
 
   async navigate(url: string): Promise<BrowserDocument> {

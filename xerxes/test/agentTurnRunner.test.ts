@@ -168,6 +168,54 @@ test('agent turn runner maps portable loop events to daemon v35 event names', as
   expect(runner.stateFor('session-1')?.messages.map(message => message.role)).toEqual(['user', 'assistant'])
 })
 
+test('agent turn runner forwards tool arguments into capability refinement', async () => {
+  let providerRound = 0
+  const observed: Array<Readonly<Record<string, unknown>> | undefined> = []
+  const tool: ToolDefinition = {
+    type: 'function',
+    function: { name: 'ReadFile', description: 'Read', parameters: {} },
+  }
+  const runner = new AgentTurnRunner({
+    llm: {
+      async *stream(): AsyncGenerator<LlmDelta> {
+        providerRound += 1
+        if (providerRound === 1) {
+          yield {
+            toolCalls: [{
+              id: 'read-args',
+              type: 'function',
+              function: { name: 'ReadFile', arguments: { file_path: 'README.md' } },
+            }],
+          }
+          return
+        }
+        yield { content: 'done' }
+      },
+    },
+    model: 'gpt-4o',
+    permissionMode: 'accept-all',
+    toolCapabilities: (_name, _agentId, args) => {
+      observed.push(args)
+      return { concurrencySafe: true, interruptBehavior: 'cancel' }
+    },
+    toolExecutor: { execute: async () => 'body' },
+    tools: [tool],
+  })
+  const session: DaemonSession = {
+    activeTurnId: '', agentId: 'default', cancelRequested: false, cwd: process.cwd(), extra: {},
+    id: 'capability-args', interactionMode: 'code', sessionKey: 'capability-args', lastActive: 0,
+    messages: [], metadata: {}, model: 'gpt-4o', planMode: false, status: 'working', thinkingContent: [],
+    toolExecutions: [], totalInputTokens: 0, totalOutputTokens: 0, turnCount: 0,
+    workspace: '/tmp/agents/default',
+  }
+
+  for await (const _event of runner.run(session, 'read it', new AbortController().signal)) {
+    // Drain the complete turn.
+  }
+
+  expect(observed).toContainEqual({ file_path: 'README.md' })
+})
+
 test('agent turn runner reports a model-scheduled next-turn mode in the terminal status event', async () => {
   const activeSession: DaemonSession = {
     activeTurnId: '', agentId: 'default', cancelRequested: false, cwd: process.cwd(), extra: {}, id: 'mode-status',

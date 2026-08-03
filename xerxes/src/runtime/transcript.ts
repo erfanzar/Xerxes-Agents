@@ -74,12 +74,22 @@ export class TranscriptStore {
     return Object.freeze(this.ledger.map(copyEntry))
   }
 
-  /** Merge provider-specific metadata onto each basic role/content message. */
+  /** Merge provider-specific metadata without allowing it to replace core message fields. */
   toMessages(): ReadonlyArray<Readonly<Record<string, unknown>>> {
     return this.ledger.map(entry => Object.freeze({
+      ...cloneRecord(entry.metadata),
       role: entry.role,
       content: entry.content,
+    }))
+  }
+
+  /** Durable message records retain entry timestamps while remaining load-compatible with older messages. */
+  toRecords(): ReadonlyArray<Readonly<Record<string, unknown>>> {
+    return this.ledger.map(entry => Object.freeze({
       ...cloneRecord(entry.metadata),
+      role: entry.role,
+      content: entry.content,
+      timestamp: entry.timestamp,
     }))
   }
 

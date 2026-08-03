@@ -8,6 +8,7 @@ import { join } from 'node:path'
 
 import {
   ChannelManager,
+  ChannelQueueFullError,
   ChannelRoutingError,
   ChannelTurnRouter,
   MarkdownAgentWorkspace,
@@ -238,6 +239,104 @@ test('channel turn router serializes simultaneous deliveries for one conversatio
     turn.prompt.endsWith('\n' + (index === 0 ? 'one' : 'two'))
   ))).toEqual([true, true])
   expect(channel.sent.map(message => message.text)).toEqual(['first response', 'first response'])
+})
+
+class ControlledRuntime extends RecordingRuntime {
+  readonly releases: Array<() => void> = []
+  cancelled: string[] = []
+
+  override cancelTurn(sessionKey: string): boolean {
+    this.cancelled.push(sessionKey)
+    return true
+  }
+
+  override async submitTurn(sessionKey: string, text: string, _emit: (event: DaemonEvent) => void): Promise<void> {
+    this.submitted.push({ key: sessionKey, prompt: text })
+    await new Promise<void>(resolve => { this.releases.push(resolve) })
+  }
+}
+
+test('channel /stop bypasses a queued active turn', async () => {
+  const channel = new RecordingChannel()
+  const runtime = new ControlledRuntime()
+  const manager = new ChannelManager({ channels: [['telegram', channel]] })
+  const router = new ChannelTurnRouter({ channels: manager, runtime, streamPreviews: false })
+  manager.setInboundHandler(message => router.handle(message))
+  await manager.enable('telegram')
+  const inbound = (text: string) => createChannelMessage({
+    channel: 'telegram',
+    channelUserId: 'same-user',
+    direction: MessageDirection.INBOUND,
+    text,
+  })
+
+  const active = channel.receive(inbound('long turn'))
+  while (runtime.submitted.length === 0) await Bun.sleep(1)
+  const stop = channel.receive(inbound('/stop'))
+  await stop
+
+  expect(runtime.cancelled).toEqual(['telegram:private:same-user'])
+  expect(channel.sent.at(-1)?.text).toBe('Cancellation requested.')
+  runtime.releases[0]?.()
+  await active
+})
+
+test('channel turn router bounds queued inbound turns per session', async () => {
+  const channel = new RecordingChannel()
+  const runtime = new ControlledRuntime()
+  const errors: unknown[] = []
+  const manager = new ChannelManager({ channels: [['telegram', channel]] })
+  const router = new ChannelTurnRouter({
+    channels: manager,
+    maxPendingPerSession: 1,
+    onError: error => { errors.push(error) },
+    runtime,
+    streamPreviews: false,
+  })
+  manager.setInboundHandler(message => router.handle(message))
+  await manager.enable('telegram')
+  const inbound = (text: string) => createChannelMessage({
+    channel: 'telegram',
+    channelUserId: 'same-user',
+    direction: MessageDirection.INBOUND,
+    text,
+  })
+
+  const active = channel.receive(inbound('active'))
+  while (runtime.submitted.length === 0) await Bun.sleep(1)
+  await channel.receive(inbound('overflow'))
+
+  expect(errors[0]).toBeInstanceOf(ChannelQueueFullError)
+  expect(runtime.submitted).toHaveLength(1)
+  runtime.releases[0]?.()
+  await active
+})
+
+test('channel turn router evicts idle bookkeeping before routing new work', async () => {
+  const channel = new RecordingChannel()
+  const runtime = new RecordingRuntime()
+  let now = new Date('2026-08-03T00:00:00.000Z')
+  const manager = new ChannelManager({ channels: [['telegram', channel]] })
+  const router = new ChannelTurnRouter({
+    channels: manager,
+    clock: () => now,
+    idleSessionTtlMs: 1_000,
+    runtime,
+  })
+  manager.setInboundHandler(message => router.handle(message))
+  await manager.enable('telegram')
+  const inbound = (user: string) => createChannelMessage({
+    channel: 'telegram',
+    channelUserId: user,
+    direction: MessageDirection.INBOUND,
+    text: 'hello',
+  })
+
+  await channel.receive(inbound('old'))
+  now = new Date(now.getTime() + 1_001)
+  await channel.receive(inbound('new'))
+
+  expect(runtime.evictions).toBe(1)
 })
 
 test('channel turn router streams editable previews and replaces the placeholder with the final answer', async () => {

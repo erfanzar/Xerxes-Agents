@@ -36,6 +36,9 @@ export class ResponsesEventTranslator {
   /** Maps every observed item_id/call_id onto its pending entry's map key. */
   private readonly pendingAliases = new Map<string, string>()
 
+  /** True once the provider has sent a terminal completed/incomplete response event. */
+  private terminal = false
+
   /** Translate one decoded Responses API event into zero or more neutral deltas. */
   translate(event: Readonly<Record<string, unknown>>): LlmDelta[] {
     const type = stringValue(event.type)
@@ -67,11 +70,13 @@ export class ResponsesEventTranslator {
     }
     if (type === 'response.completed') {
       this.completeUsage(recordValue(event.response))
+      this.terminal = true
       return [this.completionDelta()]
     }
     if (type === 'response.incomplete') {
       this.completeUsage(recordValue(event.response))
       this.usage = { ...this.usage, finishReason: incompleteFinishReason(recordValue(event.response)) }
+      this.terminal = true
       return [this.completionDelta()]
     }
     if (type === 'response.failed' || type === 'error') {
@@ -80,20 +85,19 @@ export class ResponsesEventTranslator {
     return []
   }
 
-  /** Translate an ordered event sequence and flush any unfinished tool calls. */
+  /** Translate an ordered event sequence and require a provider terminal event. */
   *translateAll(events: Iterable<Readonly<Record<string, unknown>>>): Generator<LlmDelta> {
     for (const event of events) {
       for (const delta of this.translate(event)) yield delta
     }
-    const final = this.finish()
-    if (final) yield final
+    this.finish()
   }
 
-  /** Flush a truncated transport after it ends without response.completed. */
-  finish(): LlmDelta | undefined {
-    if (!this.pendingCalls.size) return undefined
-    this.completePendingCalls()
-    return this.completionDelta()
+  /** Validate that a finite transport ended after a terminal provider event. */
+  finish(): void {
+    if (!this.terminal) {
+      throw new ProviderError('responses', 'Responses API stream ended before a terminal response event')
+    }
   }
 
   private addFunctionCall(item: Readonly<Record<string, unknown>>): void {

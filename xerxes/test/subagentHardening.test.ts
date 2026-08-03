@@ -14,6 +14,7 @@ import {
   SubAgentManager,
   type SubagentWorktreePort,
 } from '../src/agents/subagentManager.js'
+import { SpawnedAgentManager } from '../src/operators/subagents.js'
 
 function deferred(): { readonly promise: Promise<void>; readonly resolve: () => void } {
   let resolve: (() => void) | undefined
@@ -72,6 +73,142 @@ agent:
     await manager.close()
   } finally {
     await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('agent max_depth rejects negative and unsafe integers in YAML and Markdown', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-hardening-invalid-depth-'))
+  try {
+    for (const [name, value] of [['negative', '-1'], ['unsafe', '9007199254740992']] as const) {
+      const yamlPath = join(root, `${name}.yaml`)
+      await writeFile(yamlPath, `version: 1\nagent:\n  name: ${name}\n  system_prompt: invalid\n  max_depth: ${value}\n`, 'utf8')
+      expect(() => loadAgentSpec(yamlPath)).toThrow(/max_depth.*non-negative safe integer/u)
+
+      const markdownPath = join(root, `${name}.md`)
+      await writeFile(markdownPath, `---\nmax_depth: ${value}\n---\ninvalid\n`, 'utf8')
+      expect(() => loadAgentDefinitions({
+        builtinDefinitions: new Map(),
+        cwd: root,
+        userDirectory: join(root, 'none'),
+        projectDirectory: root,
+      })).not.toThrow()
+      expect(loadAgentDefinitions({
+        builtinDefinitions: new Map(),
+        cwd: root,
+        userDirectory: join(root, 'none'),
+        projectDirectory: root,
+      }).has(name)).toBeFalse()
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('interrupt replacement does not overlap the interrupted spawned-agent run', async () => {
+  const firstGate = Promise.withResolvers<void>()
+  const inputs: string[] = []
+  let active = 0
+  let maxActive = 0
+  const manager = new SpawnedAgentManager({
+    idFactory: () => 'worker',
+    runner: async request => {
+      inputs.push(request.input)
+      active += 1
+      maxActive = Math.max(maxActive, active)
+      try {
+        if (inputs.length === 1) await firstGate.promise
+        return request.input
+      } finally {
+        active -= 1
+      }
+    },
+  })
+
+  const task = await manager.spawn({ message: 'original' })
+  await Bun.sleep(1)
+  const replacing = manager.sendInput(task.id, { message: 'replacement', interrupt: true })
+  await Bun.sleep(20)
+  expect(inputs).toEqual(['original'])
+  firstGate.resolve()
+  await replacing
+  await manager.wait([task.id], 1_000)
+  expect(inputs).toEqual(['original', 'replacement'])
+  expect(maxActive).toBe(1)
+})
+
+test('reset waits for an interrupted run before starting replacement work', async () => {
+  const firstGate = Promise.withResolvers<void>()
+  const runs: string[] = []
+  let active = 0
+  let maxActive = 0
+  const manager = new SubAgentManager({
+    runner: async request => {
+      runs.push(request.prompt)
+      active += 1
+      maxActive = Math.max(maxActive, active)
+      try {
+        if (runs.length === 1) await firstGate.promise
+        return request.prompt
+      } finally {
+        active -= 1
+      }
+    },
+  })
+  try {
+    const original = await manager.spawn({ prompt: 'original', name: 'worker' })
+    await manager.waitFor(() => original.status === 'running', { timeoutMs: 1_000 })
+    const resetting = manager.reset(original.id, 'replacement')
+    const duplicate = manager.reset(original.id, 'ignored duplicate')
+    await Bun.sleep(20)
+    expect(runs).toEqual(['original'])
+    firstGate.resolve()
+    const [replacement, duplicateReplacement] = await Promise.all([resetting, duplicate])
+    expect(duplicateReplacement).toBe(replacement)
+    expect(replacement).toBeDefined()
+    if (replacement) await manager.wait(replacement.id, 1_000)
+    expect(runs).toEqual(['original', 'replacement'])
+    expect(maxActive).toBe(1)
+  } finally {
+    firstGate.resolve()
+    await manager.close()
+  }
+})
+
+test('retry recreates required worktree isolation instead of downgrading to shared workspace', async () => {
+  const created: string[] = []
+  const removed: string[] = []
+  const worktree: SubagentWorktreePort = {
+    create: request => {
+      const path = `/worktrees/${request.taskId}-${created.length + 1}`
+      created.push(path)
+      return Promise.resolve({ branch: `agent/${created.length}`, path })
+    },
+    isClean: () => Promise.resolve(true),
+    remove: tree => { removed.push(tree.path); return Promise.resolve() },
+  }
+  let runs = 0
+  const seenWorktrees: string[] = []
+  const manager = new SubAgentManager({
+    worktree,
+    runner: request => {
+      runs += 1
+      if (request.worktree) seenWorktrees.push(request.worktree.path)
+      if (runs === 1) throw new Error('first failed')
+      return 'recovered'
+    },
+  })
+  try {
+    const task = await manager.spawn({ prompt: 'isolated', name: 'worker', isolation: 'worktree' })
+    await manager.wait(task.id, 1_000)
+    await manager.waitFor(() => removed.length === 1, { timeoutMs: 1_000 })
+    const retried = await manager.retry(task.id)
+    expect(retried).toBeDefined()
+    if (retried) await manager.wait(retried.id, 1_000)
+    expect(created).toHaveLength(2)
+    expect(seenWorktrees).toEqual(created)
+    expect(retried?.worktreePath).toBe(created[1])
+  } finally {
+    await manager.close()
   }
 })
 

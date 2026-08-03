@@ -52,9 +52,20 @@ export class ChannelRegistry {
     this.onFailure = options.onFailure
   }
 
-  /** Add or replace a channel under its daemon-facing name. */
-  register(name: string, channel: Channel): void {
-    this.channels.set(name, channel)
+  /** Add or replace a channel under its daemon-facing name, stopping any running predecessor first. */
+  register(name: string, channel: Channel): Promise<void> {
+    const running = this.started.get(name)
+    if (!running) {
+      this.channels.set(name, channel)
+      return Promise.resolve()
+    }
+    return this.enqueue(async () => {
+      const current = this.started.get(name)
+      if (current) {
+        await this.stopOne(name, current, true)
+      }
+      this.channels.set(name, channel)
+    })
   }
 
   /**

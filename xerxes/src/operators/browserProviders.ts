@@ -267,6 +267,7 @@ export class BrowserbaseProvider implements BrowserProvider {
   readonly #config: BrowserbaseProviderConfig | undefined
   readonly #fetcher: BrowserProviderFetcher | undefined
   readonly #idFactory: BrowserProviderSessionIdFactory
+  readonly #remoteSessionIds = new Map<string, string>()
 
   constructor(options: BrowserbaseProviderOptions = {}) {
     this.#config = options.config
@@ -283,15 +284,33 @@ export class BrowserbaseProvider implements BrowserProvider {
       'x-bb-api-key': config.apiKey,
     }, { projectId: config.projectId })
     const cdpUrl = responseConnectionUrl(payload, 'connectUrl', this.name)
+    const remoteSessionId = responseSessionId(payload, this.name)
+    const sessionId = nextSessionId(this.#idFactory, this.name)
+    this.#remoteSessionIds.set(sessionId, remoteSessionId)
     return new BrowserProviderSession({
       provider: this.name,
-      sessionId: nextSessionId(this.#idFactory, this.name),
+      sessionId,
       kind: 'remote',
       cdpUrl,
     })
   }
 
-  async close(_session: BrowserProviderSession): Promise<void> {}
+  async close(session: BrowserProviderSession): Promise<void> {
+    if (session.provider !== this.name) return
+    const remoteSessionId = this.#remoteSessionIds.get(session.sessionId)
+    if (remoteSessionId === undefined) return
+    const config = browserbaseConfig(this.#config)
+    const fetcher = requiredFetcher(this.#fetcher, this.name)
+    const sessionsUrl = endpoint(config.endpoint, BROWSERBASE_SESSIONS_URL, 'browserbase.endpoint')
+    await closeSession(this.name, fetcher, sessionResourceUrl(sessionsUrl, remoteSessionId), {
+      'content-type': 'application/json',
+      'x-bb-api-key': config.apiKey,
+    }, {
+      method: 'POST',
+      body: JSON.stringify({ status: 'REQUEST_RELEASE' }),
+    })
+    this.#remoteSessionIds.delete(session.sessionId)
+  }
 }
 
 export interface BrowserUseProviderConfig {
@@ -312,6 +331,7 @@ export class BrowserUseProvider implements BrowserProvider {
   readonly #config: BrowserUseProviderConfig | undefined
   readonly #fetcher: BrowserProviderFetcher | undefined
   readonly #idFactory: BrowserProviderSessionIdFactory
+  readonly #remoteSessionIds = new Map<string, string>()
 
   constructor(options: BrowserUseProviderOptions = {}) {
     this.#config = options.config
@@ -328,16 +348,30 @@ export class BrowserUseProvider implements BrowserProvider {
       'content-type': 'application/json',
     }, { headless: headless(options) })
     const cdpUrl = responseConnectionUrl(payload, 'cdp_url', this.name)
+    const remoteSessionId = responseSessionId(payload, this.name)
+    const sessionId = nextSessionId(this.#idFactory, this.name)
+    this.#remoteSessionIds.set(sessionId, remoteSessionId)
     return new BrowserProviderSession({
       provider: this.name,
-      sessionId: nextSessionId(this.#idFactory, this.name),
+      sessionId,
       kind: 'remote',
       cdpUrl,
       metadata: { headless: headless(options) },
     })
   }
 
-  async close(_session: BrowserProviderSession): Promise<void> {}
+  async close(session: BrowserProviderSession): Promise<void> {
+    if (session.provider !== this.name) return
+    const remoteSessionId = this.#remoteSessionIds.get(session.sessionId)
+    if (remoteSessionId === undefined) return
+    const config = browserUseConfig(this.#config)
+    const fetcher = requiredFetcher(this.#fetcher, this.name)
+    const sessionsUrl = endpoint(config.endpoint, BROWSER_USE_SESSIONS_URL, 'browser_use.endpoint')
+    await closeSession(this.name, fetcher, sessionResourceUrl(sessionsUrl, remoteSessionId), {
+      authorization: `Bearer ${config.apiKey}`,
+    })
+    this.#remoteSessionIds.delete(session.sessionId)
+  }
 }
 
 export interface FirecrawlProviderConfig {
@@ -593,6 +627,37 @@ function responseConnectionUrl(payload: Record<string, unknown>, key: string, pr
     throw new ClientError(provider, 'session response did not include a connection URL')
   }
   return value
+}
+
+function responseSessionId(payload: Record<string, unknown>, provider: BrowserProviderName): string {
+  const value = payload.id
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new ClientError(provider, 'session response did not include a provider session identifier required for closure')
+  }
+  return value
+}
+
+function sessionResourceUrl(sessionsUrl: string, sessionId: string): string {
+  const base = sessionsUrl.endsWith('/') ? sessionsUrl : `${sessionsUrl}/`
+  return new URL(encodeURIComponent(sessionId), base).toString()
+}
+
+async function closeSession(
+  provider: BrowserProviderName,
+  fetcher: BrowserProviderFetcher,
+  url: string,
+  headers: Readonly<Record<string, string>>,
+  request: Readonly<Pick<RequestInit, 'body' | 'method'>> = { method: 'DELETE' },
+): Promise<void> {
+  let response: Response
+  try {
+    response = await fetcher(url, { ...request, headers })
+  } catch {
+    throw new ClientError(provider, 'session close failed')
+  }
+  if (!response.ok) {
+    throw new ClientError(provider, `session close failed with status ${response.status}`)
+  }
 }
 
 async function externalCall<T>(provider: BrowserProviderName, message: string, operation: () => Promise<T>): Promise<T> {

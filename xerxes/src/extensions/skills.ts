@@ -94,6 +94,8 @@ export const MAX_SKILL_INDEX_ENTRIES = 128;
 export const MAX_SKILL_FILE_BYTES = 1024 * 1024;
 /** Total bytes one discovery pass will read across all candidate SKILL.md files. */
 export const MAX_SKILL_DISCOVERY_TOTAL_BYTES = 32 * 1024 * 1024;
+/** Maximum directory nesting traversed below each discovery root. */
+export const MAX_SKILL_DISCOVERY_DEPTH = 32;
 const PLATFORM_MAP: Readonly<Record<string, NodeJS.Platform>> = {
   macos: "darwin",
   linux: "linux",
@@ -523,6 +525,17 @@ async function discoverInto(
           });
           continue;
         }
+        if (metadata.size > MAX_SKILL_DISCOVERY_TOTAL_BYTES - totalBytes) {
+          budgetExhausted = true;
+          notes.push({
+            kind: "budget-exhausted",
+            path: skillPath,
+            detail:
+              `reading ${metadata.size} bytes would exceed the ${MAX_SKILL_DISCOVERY_TOTAL_BYTES} byte ` +
+              `discovery ceiling after ${totalBytes} bytes; this file and everything after it was not read`,
+          });
+          break;
+        }
         totalBytes += metadata.size;
         skill = parseSkillMarkdown(await readFile(skillPath, "utf8"), skillPath);
       } catch (error) {
@@ -675,7 +688,8 @@ export function skillMatchesPlatform(
   );
 }
 
-async function* skillFiles(directory: string): AsyncGenerator<string> {
+async function* skillFiles(directory: string, depth = 0): AsyncGenerator<string> {
+  if (depth > MAX_SKILL_DISCOVERY_DEPTH) return;
   try {
     const entries = await readdir(directory, {
       encoding: "utf8",
@@ -683,8 +697,9 @@ async function* skillFiles(directory: string): AsyncGenerator<string> {
     });
     for (const entry of entries) {
       const path = join(directory, entry.name);
+      if (entry.isSymbolicLink()) continue;
       if (entry.isDirectory()) {
-        yield* skillFiles(path);
+        yield* skillFiles(path, depth + 1);
       } else if (entry.isFile() && entry.name === "SKILL.md") {
         yield path;
       }
