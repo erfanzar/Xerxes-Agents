@@ -729,6 +729,12 @@ export class GatewayClient extends EventEmitter {
           ...(Array.isArray(params.images) && params.images.length ? { images: params.images } : {})
         })
 
+      case 'prompt.background':
+        return this.rawRequest<T>('turn.background', {
+          session_key: this.keyFor(params.session_id),
+          text: String(params.text ?? '')
+        })
+
       case 'slash.exec':
         return this.slashExec(params) as Promise<T>
 

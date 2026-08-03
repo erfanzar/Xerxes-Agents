@@ -1522,6 +1522,60 @@ export class DaemonServer {
       );
       return { ok: true };
     }
+    if (method === "turn.background") {
+      const rawText =
+        typeof params.text === "string"
+          ? params.text
+          : typeof params.user_input === "string"
+            ? params.user_input
+            : "";
+      const text = rawText.trim();
+      if (!text) {
+        return { ok: false, error: "text is required" };
+      }
+      // A background prompt runs in its own session so the foreground stays
+      // usable while it works. Deliberately not touching activeSessionKey:
+      // that is what makes this different from turn.submit, which would park
+      // the user inside the background conversation.
+      const parentKey = sessionKey(connection, params);
+      const backgroundKey = `bg-${newConnectionKey()}`;
+      const parent = this.runtime.sessionStatus(parentKey);
+      await this.runtime.openSession(backgroundKey, undefined, {
+        // Inherit the parent's model so a background prompt is answered by
+        // the model the user is actually working with, not the daemon default.
+        ...(parent?.model ? { model: parent.model } : {}),
+        ...(parent?.cwd ? { cwd: parent.cwd } : {}),
+      });
+      const background = this.runtime.sessionStatus(backgroundKey);
+      requireConfiguredModel(
+        background?.model || stringValue(this.runtime.status().model),
+      );
+      const taskId = background?.id ?? backgroundKey;
+      void this.submitTrackedTurn(
+        backgroundKey,
+        text,
+        (event) =>
+          this.emit(connection, event.type, {
+            ...event.payload,
+            background_task_id: taskId,
+          }),
+        connection,
+        { displayText: text },
+      )
+        .then(() =>
+          this.emit(connection, "notification", {
+            level: "info",
+            message: `Background task ${taskId} finished.`,
+          }),
+        )
+        .catch((error) =>
+          this.emit(connection, "notification", {
+            level: "error",
+            message: `Background task ${taskId} failed: ${errorMessage(error)}`,
+          }),
+        );
+      return { ok: true, task_id: taskId, session_key: backgroundKey };
+    }
     if (method === "turn.cancel" || method === "cancel") {
       return { ok: this.runtime.cancelTurn(sessionKey(connection, params)) };
     }
@@ -3695,6 +3749,20 @@ export class DaemonServer {
       () => createCompactionClient(model, this.profileStore?.active(), this.runtime.status()),
       model,
     );
+    // Compaction is one long provider call with nothing between the command
+    // and its result, so the screen sat dead for as long as the summary took.
+    // Announcing the work and marking the session busy gives the same feedback
+    // a turn gets; the status is restored in `finally` so a failure cannot
+    // strand the session as permanently working.
+    const previousStatus = session.status;
+    if (notify) {
+      this.emitSlash(
+        notify,
+        `Compacting ${session.messages.length} message(s) with \`${model}\`…`,
+      );
+      session.status = "working";
+      this.emitStatus(notify, session);
+    }
     try {
       const archivePath = await this.precompactArchivePath(session.id);
       const outcome = await compactMessagesIfNeeded({
@@ -3764,6 +3832,12 @@ export class DaemonServer {
       }
       return { ok: false, error: errorMessage(error) };
     } finally {
+      // Restored unconditionally: an exception mid-compaction would otherwise
+      // leave the session displaying as working with no turn behind it.
+      session.status = previousStatus;
+      if (notify) {
+        this.emitStatus(notify, session);
+      }
       await completion.close();
     }
   }
