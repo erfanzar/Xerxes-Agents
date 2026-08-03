@@ -255,6 +255,20 @@ describe('gatewayAdapter', () => {
     ).toEqual([{ payload: { role: 'assistant', text: 'old answer', thinking: 'legacy trace' }, type: 'transcript.append' }])
   })
 
+  it('keeps compaction notices as visible transcript rows', () => {
+    expect(
+      adaptDaemonEvent('notification', {
+        body: 'Auto-compacted 42 message(s): 100000 → 12000 tokens.',
+        category: 'history',
+        payload: { automatic: true, tokens_after: 12000, tokens_before: 100000 },
+        type: 'compaction'
+      })
+    ).toEqual([{
+      payload: { role: 'system', text: 'Auto-compacted 42 message(s): 100000 → 12000 tokens.' },
+      type: 'transcript.append'
+    }])
+  })
+
   it('maps replay_tool notifications to tool transcript rows like live completions', () => {
     expect(
       adaptDaemonEvent('notification', {

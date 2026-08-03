@@ -259,6 +259,9 @@ export interface SessionListItem {
   resumable?: boolean
   root_session_id?: null | string
   source?: string
+  /** Epoch seconds of the latest conversation message. */
+  last_message_at?: number
+  /** Legacy alias retained for older callers; contains last-message time. */
   started_at: number
   status?: string
   subagent_id?: null | string

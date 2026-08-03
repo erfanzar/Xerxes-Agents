@@ -1101,6 +1101,10 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
           },
         });
       }
+      // Conversation recency is distinct from file-save recency. Compaction,
+      // title changes, and shutdown flushes rewrite the transcript without a
+      // new message and must not make it look like a new chat in /resume.
+      session.metadata.last_message_at = new Date(session.lastActive).toISOString();
       try {
         await this.saveSession(session);
       } catch (error) {
@@ -1299,7 +1303,11 @@ function sessionFromTranscript(
     cwd: transcript.cwd,
     extra: { ...transcript.extra },
     interactionMode,
-    lastActive: Date.now(),
+    // Resuming/activating a chat does not create a message. Preserve the
+    // conversation clock so /resume age remains tied to its latest content.
+    lastActive: timestampMillis(
+      nonemptyMetadataString(transcript.metadata, "last_message_at") ?? transcript.updatedAt,
+    ) || Date.now(),
     messages: transcript.messages.map((message) => ({
       ...message,
       role: stringValue(message.role),
@@ -1372,6 +1380,7 @@ function savedSessionSummary(
   transcript: SavedSessionSource,
 ): SavedDaemonSession {
   const metadata = transcript.metadata;
+  const lastMessageAt = nonemptyMetadataString(metadata, "last_message_at");
   const parentSessionId = nonemptyMetadataString(
     metadata,
     "parent_session_id",
@@ -1406,7 +1415,7 @@ function savedSessionSummary(
       : {}),
     ...(status ? { status } : {}),
     ...(subagentId ? { subagentId } : {}),
-    updatedAt: transcript.updatedAt,
+    updatedAt: lastMessageAt ?? transcript.updatedAt,
     turnCount: transcript.turnCount,
     messageCount: transcript.messageCount,
     path: transcript.path,

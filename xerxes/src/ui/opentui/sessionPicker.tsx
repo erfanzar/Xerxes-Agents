@@ -253,7 +253,9 @@ function SessionListRow({
     const title = itemTitle(row.item)
     const profile = row.item.agent_id?.trim() || shortModel(row.item.model)
     const status = row.item.status?.trim() || (row.kind === 'live' ? 'idle' : 'saved')
-    const age = relativeAge(row.kind === 'live' ? row.item.last_active ?? row.item.started_at : row.item.started_at)
+    const age = relativeAge(
+      row.kind === 'live' ? row.item.last_active ?? row.item.started_at : row.item.last_message_at ?? row.item.started_at
+    )
     const messages = row.item.message_count ?? 0
     const parent = row.parentTitle || shortId(linkedParentId(row.item)) || 'main chat'
     label = agentRowLabel({ age, maxWidth: maxLabelWidth, messages, parent, profile, status, title })
@@ -268,7 +270,7 @@ function SessionListRow({
     color = current ? t.color.warn : row.item.status === 'working' ? t.color.ok : t.color.text
   } else {
     const title = itemTitle(row.item)
-    const age = relativeAge(row.item.started_at)
+    const age = relativeAge(row.item.last_message_at ?? row.item.started_at)
     const ageSuffix = age ? ` · ${age}` : ''
     label = `↻  ${shortId(row.item.id)}${ageSuffix} · ${row.item.message_count} msgs · ${title}`
   }

@@ -506,7 +506,7 @@ export interface DaemonServerOptions {
   readonly autoSnapshotTurns?: boolean;
   /**
    * Context-usage fraction that triggers provider-backed auto-compaction
-   * before a turn is submitted. Defaults to 0.9; a runtime setting of
+   * before a turn is submitted. Defaults to 0.8; a runtime setting of
    * `auto_compact_threshold` overrides it per daemon, and 0 disables it.
    */
   readonly autoCompactThreshold?: number;
@@ -2173,6 +2173,28 @@ export class DaemonServer {
       title: "",
       body,
       payload: {},
+    });
+  }
+
+  private emitCompactionLog(
+    connection: DaemonTransportConnection,
+    body: string,
+    tokensBefore: number,
+    tokensAfter: number,
+    automatic: boolean,
+  ): void {
+    this.emit(connection, "notification", {
+      id: newConnectionKey(),
+      category: "history",
+      type: "compaction",
+      severity: "info",
+      title: "Context compacted",
+      body,
+      payload: {
+        automatic,
+        tokens_before: tokensBefore,
+        tokens_after: tokensAfter,
+      },
     });
   }
 
@@ -3913,9 +3935,13 @@ export class DaemonServer {
       await this.runtime.flushSessions();
       if (notify) {
         const replaced = outcome.originalCount - outcome.messages.length;
-        this.emitSlash(
+        const body = `${verb} ${replaced} message(s): ${outcome.stamp.tokens_before} → ${outcome.stamp.tokens_after} tokens.`;
+        this.emitCompactionLog(
           notify,
-          `${verb} ${replaced} message(s): ${outcome.stamp.tokens_before} → ${outcome.stamp.tokens_after} tokens.`,
+          body,
+          outcome.stamp.tokens_before,
+          outcome.stamp.tokens_after,
+          reason === "auto-compact",
         );
         if (outcome.stamp.archive_error !== undefined) {
           // The user never asked for auto-compaction, so a silently
@@ -6017,6 +6043,9 @@ function sessionPayload(
       : {}),
     usage_complete: session.usageComplete ?? session.turnCount === 0,
     cancel_requested: session.cancelRequested,
+    // Epoch seconds of the latest conversation message. This is not session
+    // creation time and does not move for metadata-only rewrites/compaction.
+    last_active: session.lastActive / 1000,
     status: session.status,
   };
 }

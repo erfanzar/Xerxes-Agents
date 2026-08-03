@@ -399,6 +399,11 @@ function notificationEvents(payload: Record<string, unknown>): AnyEvent[] {
       // metadata, not part of the user's authored message.
       return [{ type: 'transcript.append', payload: { role: 'user', text: body.replace(/^✨\s?/, '') } }]
     }
+    if (kind === 'compaction') {
+      // Compaction changes the conversation itself, so keep a durable visible
+      // transcript row instead of an eight-second toast/status replacement.
+      return [{ type: 'transcript.append', payload: { role: 'system', text: body } }]
+    }
     return [
       {
         type: 'status.update',

@@ -1104,12 +1104,12 @@ export class GatewayClient extends EventEmitter {
       if (id && row.key) {
         this.rememberSessionKey(id, String(row.key))
       }
-      // No last_active/started_at: the daemon does not expose real values for
-      // live rows, and fabricating `now` rendered every session as brand new.
+      const lastActive = Number(row.last_active)
       return {
         ...optionalSessionLinkFields(row),
         current: this.keyFor(id) === this.activeSessionKey,
         id,
+        ...(Number.isFinite(lastActive) ? { last_active: lastActive } : {}),
         message_count: Number(row.messages ?? 0),
         model: String(row.model ?? ''),
         preview: String(row.title ?? row.key ?? id),
@@ -1136,7 +1136,10 @@ export class GatewayClient extends EventEmitter {
         message_count: Number(row.message_count ?? row.messages ?? 0),
         preview: title,
         source: 'saved',
-        started_at: Number.isFinite(updatedAt) ? updatedAt : Date.now() / 1000,
+        ...(Number.isFinite(updatedAt) ? { last_message_at: updatedAt } : {}),
+        // Compatibility for existing UI callers; never fabricate `now`, which
+        // makes an unreadable/missing timestamp look like a new conversation.
+        started_at: Number.isFinite(updatedAt) ? updatedAt : 0,
         title
       }
     })
