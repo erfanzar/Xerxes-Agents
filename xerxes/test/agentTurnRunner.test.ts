@@ -127,10 +127,9 @@ test('agent turn runner maps portable loop events to daemon v35 event names', as
   }
 
   expect(events).toEqual([
-    // Live token counts arrive as soon as the provider round lands, ahead of
-    // the text it paid for, so the footer moves during the turn rather than
-    // only at the end. It carries no context estimate: that cannot change
-    // between rounds and re-counting it per response would be pure waste.
+    // Live token and context counts arrive as soon as the provider round lands,
+    // ahead of the text it paid for, so both footer meters move during the turn
+    // rather than jumping only at the terminal event.
     {
       type: 'status_update',
       payload: {
@@ -141,6 +140,8 @@ test('agent turn runner maps portable loop events to daemon v35 event names', as
         input_tokens: 3,
         output_tokens: 5,
         total_tokens: 8,
+        context_tokens: 8,
+        max_context: 128_000,
       },
     },
     { type: 'text_part', payload: { text: 'Hello from the real loop.' } },
@@ -166,6 +167,51 @@ test('agent turn runner maps portable loop events to daemon v35 event names', as
     },
   ])
   expect(runner.stateFor('session-1')?.messages.map(message => message.role)).toEqual(['user', 'assistant'])
+})
+
+test('agent turn runner keeps live context monotonic when a later round is fully cached', async () => {
+  let round = 0
+  const runner = new AgentTurnRunner({
+    llm: {
+      async *stream(): AsyncGenerator<LlmDelta> {
+        round += 1
+        if (round === 1) {
+          yield {
+            toolCalls: [{
+              id: 'cached-read',
+              type: 'function',
+              function: { name: 'ReadFile', arguments: {} },
+            }],
+            usage: { inputTokens: 100, outputTokens: 10 },
+          }
+          return
+        }
+        yield {
+          content: 'done',
+          usage: { inputTokens: 5, outputTokens: 2, cacheReadTokens: 100 },
+        }
+      },
+    },
+    model: 'gpt-4o',
+    permissionMode: 'accept-all',
+    toolExecutor: { execute: async () => 'file contents' },
+    tools: [repeatedReadTool],
+  })
+  const session: DaemonSession = {
+    activeTurnId: '', agentId: 'default', cancelRequested: false, cwd: process.cwd(), extra: {},
+    id: 'cached-context', interactionMode: 'code', sessionKey: 'cached-context', lastActive: 0,
+    messages: [], metadata: {}, model: 'gpt-4o', planMode: false, status: 'working', thinkingContent: [],
+    toolExecutions: [], totalInputTokens: 0, totalOutputTokens: 0, turnCount: 0,
+    workspace: '/tmp/agents/default',
+  }
+  const events: DaemonEvent[] = []
+
+  for await (const event of runner.run(session, 'read it', new AbortController().signal)) events.push(event)
+
+  const liveContext = events
+    .filter(event => event.type === 'status_update' && event.payload.usage_complete === undefined)
+    .map(event => Number(event.payload.context_tokens))
+  expect(liveContext).toEqual([110, 107])
 })
 
 test('agent turn runner forwards tool arguments into capability refinement', async () => {

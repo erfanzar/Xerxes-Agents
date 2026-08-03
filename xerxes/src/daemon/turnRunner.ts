@@ -1052,11 +1052,10 @@ function daemonEventFromStream(event: StreamEvent, state: AgentState, session: D
         },
       }
     case 'usage_update':
-      // A live slice of the same shape turn_done sends, so the footer updates
-      // mid-turn instead of jumping once at the end. Context is deliberately
-      // not re-estimated here: it is a per-message figure that cannot change
-      // between provider rounds, and estimating it per round would cost a full
-      // token count on every API response.
+      // The provider's per-round input is the request context it actually saw;
+      // include the generated output so the remaining-token meter moves before
+      // the buffered visible deltas are replayed. Cumulative session usage is
+      // billing history and must not be mistaken for current-window occupancy.
       return {
         type: 'status_update',
         payload: {
@@ -1067,6 +1066,9 @@ function daemonEventFromStream(event: StreamEvent, state: AgentState, session: D
           input_tokens: state.totalInputTokens,
           output_tokens: state.totalOutputTokens,
           total_tokens: state.totalInputTokens + state.totalOutputTokens,
+          context_tokens:
+            event.usage.inputTokens + (event.usage.cacheReadTokens ?? 0) + event.usage.outputTokens,
+          max_context: getContextLimit(event.model),
           ...(state.totalCacheReadTokens ? { cache_read_tokens: state.totalCacheReadTokens } : {}),
           ...(state.totalCacheCreationTokens ? { cache_creation_tokens: state.totalCacheCreationTokens } : {}),
         },
@@ -1074,7 +1076,11 @@ function daemonEventFromStream(event: StreamEvent, state: AgentState, session: D
     case 'turn_done': {
       const contextTokens = estimateContextTokens(
         state.messages.map(message => ({ role: message.role, content: message.content })),
-        { model: event.model },
+        {
+          model: event.model,
+          ...(session.requestScaffold?.systemPrompt ? { systemPrompt: session.requestScaffold.systemPrompt } : {}),
+          ...(session.requestScaffold?.toolSchemas?.length ? { toolSchemas: session.requestScaffold.toolSchemas } : {}),
+        },
       )
       return {
         type: 'status_update',
