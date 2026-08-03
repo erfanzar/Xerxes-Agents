@@ -190,7 +190,10 @@ export class AgentTurnRunner implements TurnRunner {
     const resumedSubagent = session.metadata.session_kind === 'subagent'
     if (resumedSubagent) state.metadata.status = 'running'
     const tools = resumedSubagent ? toolsForResumedSubagent(modeTools, session.metadata) : modeTools
-    const configuredPermissionMode = permissionModeForInteraction(session.interactionMode, this.options.permissionMode)
+    // The session's own mode wins over the runner default, so the pin reaches
+    // the permission broker rather than only the status line.
+    const sessionPermissionMode = permissionModeValue(session.permissionMode) ?? this.options.permissionMode
+    const configuredPermissionMode = permissionModeForInteraction(session.interactionMode, sessionPermissionMode)
     const permissionMode = resumedSubagent
       ? permissionModeForResumedSubagent(configuredPermissionMode, session.metadata)
       : configuredPermissionMode

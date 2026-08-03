@@ -2115,7 +2115,9 @@ export class DaemonServer {
         session.reasoningEffort
         || stringValue(this.runtime.status().reasoning_effort)
         || "off",
-        runtimePermissionMode(this.runtime.status().permission_mode),
+        runtimePermissionMode(
+          session.permissionMode ?? this.runtime.status().permission_mode,
+        ),
       ),
     );
   }
@@ -2621,7 +2623,14 @@ export class DaemonServer {
           );
           return { ok: false, error: "invalid permission mode" };
         }
-        this.runtime.reload({ permission_mode: args });
+        // Scoped to this session so a second one keeps its own trust level.
+        const pinnedPermission = await this.runtime.setSessionPermissionMode?.(
+          connection.activeSessionKey,
+          args,
+        );
+        if (!pinnedPermission) {
+          this.runtime.reload({ permission_mode: args });
+        }
         const session = this.runtime.sessionStatus(connection.activeSessionKey);
         if (session) {
           this.emitStatus(connection, session);
@@ -2630,11 +2639,20 @@ export class DaemonServer {
         return { ok: true, permission_mode: args };
       }
       case "yolo": {
+        // Toggles relative to this session's own mode: keyed off the global
+        // one it would flip based on a value another session had set.
+        const active = this.runtime.sessionStatus(connection.activeSessionKey);
         const current = runtimePermissionMode(
-          this.runtime.status().permission_mode,
+          active?.permissionMode ?? this.runtime.status().permission_mode,
         );
         const next = current === "accept-all" ? "auto" : "accept-all";
-        this.runtime.reload({ permission_mode: next });
+        const pinnedYolo = await this.runtime.setSessionPermissionMode?.(
+          connection.activeSessionKey,
+          next,
+        );
+        if (!pinnedYolo) {
+          this.runtime.reload({ permission_mode: next });
+        }
         const session = this.runtime.sessionStatus(connection.activeSessionKey);
         if (session) {
           this.emitStatus(connection, session);
@@ -5288,7 +5306,7 @@ export class DaemonServer {
         || stringValue(this.runtime.status().reasoning_effort)
         || "off",
       permission_mode: runtimePermissionMode(
-        this.runtime.status().permission_mode,
+        session.permissionMode ?? this.runtime.status().permission_mode,
       ),
       skills: skills.map((skill) => skill.metadata.name),
       skill_descriptions: Object.fromEntries(
