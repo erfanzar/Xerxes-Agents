@@ -636,6 +636,10 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
           cwd,
           options.model ?? this.model(),
           this.workspaceRoot,
+          // An explicit model at creation is the caller choosing for this
+          // session — a background prompt inheriting its parent's model, for
+          // instance — so it pins against later default changes.
+          options.model !== undefined,
         );
     // A live copy of the same persisted id may still be registered under a
     // stale key (for example a `tui:` slot that predates a resume). Two
@@ -1082,6 +1086,7 @@ function freshSession(
   cwd: string,
   model: string,
   workspaceRoot: string,
+  modelPinned = false,
 ): DaemonSession {
   return {
     id: looksLikeSessionId(sessionKey) ? sessionKey : newSessionId(),
@@ -1096,6 +1101,7 @@ function freshSession(
     messages: [],
     metadata: {},
     model,
+    modelPinned,
     planMode: false,
     status: "idle",
     thinkingContent: [],
