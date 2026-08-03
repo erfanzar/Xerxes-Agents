@@ -11,6 +11,7 @@ import { afterEach, expect, test } from 'bun:test'
 import { fileStateTracker, setFileFreshnessEnforcement } from '../src/tools/fileState.js'
 import {
   DEFAULT_MAX_READ_FILE_BYTES,
+  appendFile,
   editFile,
   MAX_READ_WINDOW_CHARS,
   READ_FILE_DEFINITION,
@@ -41,6 +42,20 @@ afterEach(() => {
   setMaxReadFileBytes(undefined)
   setFileFreshnessEnforcement(undefined)
   fileStateTracker.clear()
+})
+
+test('AppendFile rechecks the destination immediately before mutation', async () => {
+  await inWorkspace(async (workspace, paths) => {
+    await Bun.write(join(workspace, 'log.txt'), 'before\n')
+    let rechecked = false
+    const original = paths.recheck.bind(paths)
+    paths.recheck = async target => {
+      rechecked = true
+      return original(target)
+    }
+    await appendFile({ file_path: 'log.txt', lines: 'after' }, paths)
+    expect(rechecked).toBeTrue()
+  })
 })
 
 test('ReadFile refuses a one-line minified window that the line limit cannot bound', async () => {

@@ -113,6 +113,66 @@ test('browser action failures remain explicit and unconfigured browser tools do 
     .rejects.toThrow('no BrowserSession is configured')
 })
 
+test('browser session serializes port replacement behind an in-flight operation and closes the old port', async () => {
+  let releaseNavigate: (() => void) | undefined
+  const events: string[] = []
+  const first: BrowserPort = {
+    async navigate(url) {
+      events.push('first:navigate:start')
+      await new Promise<void>(resolve => {
+        releaseNavigate = resolve
+      })
+      events.push('first:navigate:end')
+      return documentFor(url)
+    },
+    async close() {
+      events.push('first:close')
+    },
+  }
+  const second: BrowserPort = {
+    async snapshot() {
+      events.push('second:snapshot')
+      return documentFor('https://example.test/second')
+    },
+  }
+  const session = new BrowserSession({ port: first })
+
+  const navigation = session.navigate('https://example.test/slow')
+  await Bun.sleep(0)
+  const replacement = session.setPort(second)
+  const snapshot = session.snapshot()
+  expect(events).toEqual(['first:navigate:start'])
+  releaseNavigate?.()
+
+  await navigation
+  await replacement
+  expect((await snapshot).url).toBe('https://example.test/second')
+  expect(events).toEqual([
+    'first:navigate:start',
+    'first:navigate:end',
+    'first:close',
+    'second:snapshot',
+  ])
+})
+
+test('browser session keeps its old port when replacement close fails', async () => {
+  let snapshots = 0
+  const oldPort: BrowserPort = {
+    async snapshot() {
+      snapshots += 1
+      return documentFor('https://example.test/old')
+    },
+    async close() {
+      throw new Error('close failed')
+    },
+  }
+  const session = new BrowserSession({ port: oldPort })
+
+  await expect(session.setPort({})).rejects.toThrow('close failed')
+  expect((await session.snapshot()).url).toBe('https://example.test/old')
+  expect(snapshots).toBe(1)
+})
+
 test('browser session reports missing adapter capabilities rather than synthesizing state', async () => {
   const session = new BrowserSession({
     port: {

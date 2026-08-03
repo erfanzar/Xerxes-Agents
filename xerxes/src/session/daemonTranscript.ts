@@ -33,6 +33,9 @@ const TRANSCRIPT_HEAD_BYTES = 32 * 1024
  */
 const MESSAGES_KEY_MARKER = '\n  "messages": ['
 
+/** Journal mutations are serialized by canonical transcript path across store instances. */
+const transcriptWrites = new Map<string, Promise<void>>()
+
 export interface DaemonTranscript {
   readonly agentId: string
   /** False when imported history predates exact cumulative API-call accounting. */
@@ -330,9 +333,11 @@ export class DaemonTranscriptStore {
    * expected and is discarded on replay.
    */
   async appendMessage(sessionId: string, message: RawMessage, index: number): Promise<void> {
-    const path = this.journalPathFor(sessionId)
-    await mkdir(dirname(path), { recursive: true })
-    await appendFile(path, `${JSON.stringify({ index, message })}\n`, 'utf8')
+    await this.serializeTranscriptWrite(sessionId, async () => {
+      const path = this.journalPathFor(sessionId)
+      await mkdir(dirname(path), { recursive: true })
+      await appendFile(path, `${JSON.stringify({ index, message })}\n`, 'utf8')
+    })
   }
 
   /**
@@ -351,7 +356,6 @@ export class DaemonTranscriptStore {
   }
 
   async save(transcript: DaemonTranscript): Promise<void> {
-    const path = this.pathFor(transcript.sessionId)
     if (!transcriptHasHistory(transcript)) {
       // Never delete a persisted transcript as a side effect of saving an
       // empty in-memory session. Several paths can briefly hold an empty
@@ -362,11 +366,13 @@ export class DaemonTranscriptStore {
       // explicit through remove().
       return
     }
-    await atomicJsonWrite(path, daemonTranscriptRecord(transcript))
-    // The snapshot now covers everything the journal held. Only a message
-    // appended during the write itself can be lost, which is the same window
-    // the unjournalled save already had.
-    await rm(this.journalPathFor(transcript.sessionId), { force: true })
+    await this.serializeTranscriptWrite(transcript.sessionId, async () => {
+      await atomicJsonWrite(this.pathFor(transcript.sessionId), daemonTranscriptRecord(transcript))
+      // Appends cannot enter this critical section while covered entries are
+      // removed. Keep entries beyond this snapshot's message count: an append
+      // may have completed just before a save holding an older transcript.
+      await this.discardCoveredJournalEntries(transcript.sessionId, transcript.messages.length)
+    })
   }
 
   /**
@@ -409,17 +415,19 @@ export class DaemonTranscriptStore {
 
   /** Remove one persisted transcript by its canonical resume id. */
   async remove(sessionId: string): Promise<boolean> {
-    const path = this.pathFor(sessionId)
-    // An orphaned journal would resurrect the deleted history the next time
-    // this id is opened, so it goes with the snapshot.
-    await rm(this.journalPathFor(sessionId), { force: true })
-    try {
-      await rm(path)
-      return true
-    } catch (error) {
-      if (isMissing(error)) return false
-      throw error
-    }
+    return this.serializeTranscriptWrite(sessionId, async () => {
+      const path = this.pathFor(sessionId)
+      // An orphaned journal would resurrect the deleted history the next time
+      // this id is opened, so it goes with the snapshot.
+      await rm(this.journalPathFor(sessionId), { force: true })
+      try {
+        await rm(path)
+        return true
+      } catch (error) {
+        if (isMissing(error)) return false
+        throw error
+      }
+    })
   }
 
   pathFor(sessionId: string): string {
@@ -427,6 +435,48 @@ export class DaemonTranscriptStore {
       throw new ValidationError('session_id', 'must be an 8-32 character hexadecimal resume ID', sessionId)
     }
     return resolve(this.directory, `${sessionId}.json`)
+  }
+
+  private async discardCoveredJournalEntries(sessionId: string, messageCount: number): Promise<void> {
+    const path = this.journalPathFor(sessionId)
+    let contents: string
+    try {
+      contents = await readFile(path, 'utf8')
+    } catch (error) {
+      if (isMissing(error)) return
+      throw error
+    }
+    const retained = contents.split('\n').filter(line => {
+      if (!line.trim()) return false
+      try {
+        const entry = JSON.parse(line) as unknown
+        return isRecord(entry) && typeof entry.index === 'number' && entry.index >= messageCount
+      } catch {
+        // A torn final line carries no recoverable entry. Writers are excluded
+        // from this critical section, so dropping it cannot race live bytes.
+        return false
+      }
+    })
+    if (retained.length === 0) {
+      await rm(path, { force: true })
+      return
+    }
+    await atomicTextWrite(path, `${retained.join('\n')}\n`)
+  }
+
+  private async serializeTranscriptWrite<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
+    const key = this.pathFor(sessionId)
+    const previous = transcriptWrites.get(key) ?? Promise.resolve()
+    let release!: () => void
+    const current = new Promise<void>(resolveOperation => { release = resolveOperation })
+    transcriptWrites.set(key, current)
+    await previous.catch(() => undefined)
+    try {
+      return await operation()
+    } finally {
+      release()
+      if (transcriptWrites.get(key) === current) transcriptWrites.delete(key)
+    }
   }
 
   private parseHeader(head: string, sessionId: string): DaemonTranscriptHeaderResult {
@@ -522,12 +572,16 @@ function isMissing(error: unknown): boolean {
 }
 
 async function atomicJsonWrite(path: string, value: Record<string, unknown>): Promise<void> {
+  await atomicTextWrite(path, `${JSON.stringify(value, null, 2)}\n`)
+}
+
+async function atomicTextWrite(path: string, contents: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true })
   const temporaryPath = resolve(dirname(path), `.${basename(path)}.${crypto.randomUUID()}.tmp`)
   try {
     const handle = await open(temporaryPath, 'w')
     try {
-      await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, 'utf8')
+      await handle.writeFile(contents, 'utf8')
       await handle.sync()
     } finally {
       await handle.close()

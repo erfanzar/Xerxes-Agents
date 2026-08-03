@@ -164,9 +164,16 @@ export class AcpServer {
     // Serialize prompts per session: a bare promptHandler has no active-turn
     // guard of its own, so concurrent prompts for one session must queue.
     const previous = this.promptChains.get(sessionId) ?? Promise.resolve()
-    const run = previous.catch(() => undefined).then(() => emit === undefined
-      ? this.promptHandler({ session, text })
-      : this.promptHandler({ session, text, emit }))
+    const run = previous.catch(() => undefined).then(() => {
+      // A prompt may have waited behind another turn while closeSession removed
+      // its session. Never invoke the handler with that stale session object.
+      if (this.sessions.get(sessionId) !== session) {
+        return { error: `unknown session: ${sessionId}` }
+      }
+      return emit === undefined
+        ? this.promptHandler({ session, text })
+        : this.promptHandler({ session, text, emit })
+    })
     this.promptChains.set(sessionId, run)
     try {
       return await run

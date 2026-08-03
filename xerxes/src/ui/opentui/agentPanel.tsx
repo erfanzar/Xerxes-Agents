@@ -686,10 +686,12 @@ export function AgentPanelOverlay({
   // at all, and a thinking one can go a minute between them — without a clock
   // its "running for 4s" sat frozen at 4s and read as a hung agent.
   const [now, setNow] = useState(() => Date.now())
+  const hasRunningClock = records.some(record => record.item.status === 'running' || record.item.status === 'queued')
   useEffect(() => {
+    if (!hasRunningClock) return
     const timer = setInterval(() => setNow(Date.now()), 1_000)
     return () => clearInterval(timer)
-  }, [])
+  }, [hasRunningClock])
 
   // Default the selection to the first retryable (dead) agent — the rows a
   // user most likely opened the overlay to act on — else the first row.

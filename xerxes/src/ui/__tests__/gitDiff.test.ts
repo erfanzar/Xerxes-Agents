@@ -63,6 +63,28 @@ describe('parseUnifiedDiff', () => {
     expect(parsed.truncated).toBe(true)
     expect(parsed.lines.length).toBeLessThan(5)
   })
+
+  it('bounds a minified generated row without hiding later source files', () => {
+    const huge = 'x'.repeat(300_000)
+    const parsed = parseUnifiedDiff([
+      'diff --git a/dist/bundle.js b/dist/bundle.js',
+      '--- a/dist/bundle.js',
+      '+++ b/dist/bundle.js',
+      '@@ -1 +1 @@',
+      `-${huge}`,
+      `+${huge}`,
+      'diff --git a/src/visible.ts b/src/visible.ts',
+      '--- a/src/visible.ts',
+      '+++ b/src/visible.ts',
+      '@@ -1 +1 @@',
+      '-old',
+      '+new'
+    ].join('\n'))
+
+    expect(parsed.truncated).toBe(true)
+    expect(parsed.lines.some(line => line.kind === 'file' && line.text === 'src/visible.ts')).toBe(true)
+    expect(Math.max(...parsed.lines.map(line => line.text.length))).toBeLessThan(10_000)
+  })
 })
 
 function fakeRunner(handlers: Record<string, { code: number; stdout?: string; stderr?: string }>): GitDiffRunner {

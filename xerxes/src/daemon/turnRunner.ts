@@ -103,7 +103,11 @@ export interface AgentTurnRunnerOptions {
   readonly subagentCoordinator?: SubagentTurnCoordinator
   readonly toolExecutor?: ToolExecutor
   /** Per-tool execution axes, normally `registry.capabilities` bound to the tool registry. */
-  readonly toolCapabilities?: (toolName: string, agentId?: string) => {
+  readonly toolCapabilities?: (
+    toolName: string,
+    agentId?: string,
+    args?: Readonly<Record<string, unknown>>,
+  ) => {
     readonly concurrencySafe: boolean
     readonly interruptBehavior: 'block' | 'cancel'
   }
@@ -454,9 +458,16 @@ export class AgentTurnRunner implements TurnRunner {
         }
         this.toolResultStores.set(session.id, store)
       }
-      const stored = store.maybeStore(toolName, content)
-      const reference = typeof stored === 'string' ? ToolResultStorage.parseRef(stored) : undefined
-      return boundedToolResultPreview(toolName, content, reference ? store.pathFor(reference) : undefined)
+      try {
+        const stored = store.maybeStore(toolName, content)
+        const reference = typeof stored === 'string' ? ToolResultStorage.parseRef(stored) : undefined
+        return boundedToolResultPreview(toolName, content, reference ? store.pathFor(reference) : undefined)
+      } catch {
+        // The store may become unwritable after construction. Never send the
+        // oversized result back into model context; retain the same bounded
+        // preview while making the loss of the spill file explicit.
+        return boundedToolResultPreview(toolName, content, undefined)
+      }
     }
   }
 

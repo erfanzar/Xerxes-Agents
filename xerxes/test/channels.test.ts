@@ -275,13 +275,36 @@ test('webhook channel normalizes transport lifecycle and failure responses', asy
   })
 })
 
-test('parseJsonBody accepts only object payloads', () => {
+test('parseJsonBody rejects malformed JSON while accepting valid non-object payloads as empty', () => {
   expect(parseJsonBody(new TextEncoder().encode('{"ok":true}'))).toEqual({
     ok: true,
   })
   expect(
     parseJsonBody(new TextEncoder().encode('["not", "an", "object"]')),
   ).toEqual({})
-  expect(parseJsonBody(new TextEncoder().encode('not json'))).toEqual({})
+  expect(() => parseJsonBody(new TextEncoder().encode('not json'))).toThrow('invalid JSON webhook payload')
   expect(parseJsonBody(new Uint8Array())).toEqual({})
+})
+
+test('webhook delivery deduplicates concurrent provider retries', async () => {
+  const channel = new TestWebhookChannel()
+  const message = createChannelMessage({
+    channel: channel.name,
+    platformMessageId: 'same-id',
+    roomId: 'same-room',
+    text: 'once',
+  })
+  channel.parsedMessages = [message]
+  let deliveries = 0
+  await channel.start(async () => {
+    deliveries += 1
+    await Bun.sleep(10)
+  })
+
+  await Promise.all([
+    channel.handleWebhook({}, new Uint8Array()),
+    channel.handleWebhook({}, new Uint8Array()),
+  ])
+
+  expect(deliveries).toBe(1)
 })

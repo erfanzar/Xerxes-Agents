@@ -43,6 +43,41 @@ test('snapshot records carry the session and turn they precede', async () => {
   }
 })
 
+test('concurrent managers serialize snapshots through one shadow repository', async () => {
+  if (!Bun.which('git')) return
+  const { directory, shadow, workspace } = workspaceFixture('xerxes-snapshot-concurrent-')
+  try {
+    writeFileSync(join(workspace, 'a.txt'), 'shared content', 'utf8')
+    const managers = Array.from({ length: 8 }, () => new SnapshotManager(workspace, { shadowRoot: shadow }))
+
+    const records = await Promise.all(managers.map((manager, index) => manager.snapshot(`parallel-${index}`)))
+
+    expect(new SnapshotManager(workspace, { shadowRoot: shadow }).list()).toHaveLength(records.length)
+    expect(new Set(records.map(record => record.id)).size).toBe(records.length)
+    expect(new Set(records.map(record => record.commitSha)).size).toBe(records.length)
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test('reset waits behind an in-flight repository operation', async () => {
+  if (!Bun.which('git')) return
+  const { directory, shadow, workspace } = workspaceFixture('xerxes-snapshot-reset-race-')
+  try {
+    const snapshots = new SnapshotManager(workspace, { shadowRoot: shadow })
+    writeFileSync(join(workspace, 'a.txt'), 'content', 'utf8')
+    const snapshotting = snapshots.snapshot('in-flight')
+    const resetting = snapshots.reset()
+
+    await Promise.all([snapshotting, resetting])
+
+    expect(snapshots.list()).toEqual([])
+    expect(existsSync(snapshots.shadowDirectory)).toBeFalse()
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
 test('a retried turn resolves to its newest capture', async () => {
   if (!Bun.which('git')) return
   const { directory, shadow, workspace } = workspaceFixture('xerxes-snapshot-retry-')

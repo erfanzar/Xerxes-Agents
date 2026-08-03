@@ -353,6 +353,7 @@ export class GatewayClient extends EventEmitter {
   private spawnError: Error | null = null
   private spawnedDaemon = false
   private closed = false
+  private startPromise: Promise<void> | null = null
   private activeSessionKey: string
   private readonly sessionKeys = new Map<string, string>()
   private lastApprovalRequestId = ''
@@ -370,11 +371,25 @@ export class GatewayClient extends EventEmitter {
     this.activeSessionKey = this.sessionKey
   }
 
-  /** Connect, launching the daemon if none is reachable. Idempotent once connected. */
-  async start(): Promise<void> {
-    if (this.socket) {
-      return
-    }
+  /** Connect, launching the daemon if none is reachable. Concurrent callers share one cold-start attempt. */
+  start(): Promise<void> {
+    if (this.socket) return Promise.resolve()
+    if (this.startPromise) return this.startPromise
+
+    const attempt = this.startOnce()
+    this.startPromise = attempt
+    void attempt.then(
+      () => {
+        if (this.startPromise === attempt) this.startPromise = null
+      },
+      () => {
+        if (this.startPromise === attempt) this.startPromise = null
+      }
+    )
+    return attempt
+  }
+
+  private async startOnce(): Promise<void> {
     const { socketPath, pidPath } = daemonPaths(this.projectDir)
 
     if (await this.tryConnect(socketPath)) {
@@ -852,6 +867,7 @@ export class GatewayClient extends EventEmitter {
 
   close(): void {
     this.closed = true
+    this.startPromise = null
     const socket = this.socket
     this.socket = null
     // Reject in-flight requests immediately: nulling this.socket first makes

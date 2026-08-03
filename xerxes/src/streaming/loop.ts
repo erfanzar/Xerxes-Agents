@@ -318,6 +318,9 @@ export async function* runTurn(
   const state = request.state
   const permissionMode = request.permissionMode ?? DEFAULT_PERMISSION_MODE
   const maxToolTurns = request.maxToolTurns ?? DEFAULT_MAX_TOOL_TURNS
+  if (maxToolTurns !== Number.POSITIVE_INFINITY && (!Number.isInteger(maxToolTurns) || maxToolTurns < 1)) {
+    throw new TypeError('maxToolTurns must be a positive integer or Infinity')
+  }
   const retryDelays = dependencies.retryDelays ?? DEFAULT_RETRY_DELAYS
   const streamInactivityTimeoutMs =
     dependencies.streamInactivityTimeoutMs ?? DEFAULT_STREAM_INACTIVITY_TIMEOUT_MS
@@ -384,7 +387,15 @@ export async function* runTurn(
     // renders `tool_end`, and a user watching a build scroll past is not helped
     // by a preview of it, so the returned result stays whole and only the
     // transcript message carries the stand-in.
-    const providerContent = dependencies.persistToolResult?.(recorded.name, recorded.result)
+    let providerContent: string | undefined
+    try {
+      providerContent = dependencies.persistToolResult?.(recorded.name, recorded.result)
+    } catch {
+      // Spill storage is an optimization, never part of tool correctness. If
+      // persistence fails, keep the complete matched result inline rather than
+      // letting the exception strand the assistant tool call without a reply.
+      providerContent = undefined
+    }
     appendToolResult(
       state,
       recorded,
@@ -397,13 +408,13 @@ export async function* runTurn(
 
   let consecutiveUnconfiguredOnlyRounds = 0
   let terminalProviderFailure = false
-  let stopReason: TurnStopReason = 'tool_budget_exhausted'
+  let stopReason: TurnStopReason = signal?.aborted ? 'aborted' : 'tool_budget_exhausted'
   /** One-shot per turn: a reducer that already ran cannot free the same tokens twice. */
   let contextReductionAttempted = false
   let outputLimitEscalations = 0
   let outputTokenOverride: number | undefined
   try {
-    for (let toolTurn = 0; toolTurn < turnLimit; toolTurn += 1) {
+    for (let toolTurn = 0; !signal?.aborted && toolTurn < turnLimit; toolTurn += 1) {
       appendAgentEventMessage(state, dependencies.drainAgentEvents?.())
       for (const steer of dependencies.drainSteer?.() ?? []) {
         const content = steer.trim()

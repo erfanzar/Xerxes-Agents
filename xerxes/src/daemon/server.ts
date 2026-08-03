@@ -56,7 +56,7 @@ import {
 } from "../cron/lease.js";
 import { CronScheduler } from "../cron/scheduler.js";
 import {
-  defaultSkillDiscoveryDirectories,
+  defaultSkillDiscoveryRoots,
   skillMatchesPlatform,
   skillPromptSection,
   SkillRegistry,
@@ -168,6 +168,9 @@ export const MIGRATED_ERROR =
 
 /** Matches the WebSocket gateway default so both transports cap inbound frames. */
 const DEFAULT_MAX_SOCKET_FRAME_BYTES = 16 * 1024 * 1024;
+const DEFAULT_MAX_PENDING_SOCKET_REQUESTS = 1_024;
+const DEFAULT_MAX_PENDING_SOCKET_BYTES = 16 * 1024 * 1024;
+const DEFAULT_MAX_SOCKET_OUTPUT_BYTES = 16 * 1024 * 1024;
 
 /**
  * Compaction mechanics — thresholds, summary budgets, retry policy and the
@@ -581,8 +584,14 @@ export interface DaemonServerOptions {
   /** Snapshots retained per workspace when the store is pruned on start. */
   readonly snapshotRetention?: number;
   readonly socketPath: string;
-  /** Max buffered inbound bytes per Unix connection before the client is dropped. */
+  /** Max bytes in one inbound NDJSON frame before the Unix client is dropped. */
   readonly maxSocketFrameBytes?: number;
+  /** Max parsed requests waiting for serial dispatch on one Unix connection. */
+  readonly maxPendingSocketRequests?: number;
+  /** Max aggregate bytes of parsed requests waiting for serial dispatch. */
+  readonly maxPendingSocketBytes?: number;
+  /** Max queued outbound bytes before a slow Unix client is dropped. */
+  readonly maxSocketOutputBytes?: number;
   /** Tool inventory port for `/tools`; omit only when the runtime owns no visible tool registry. */
   readonly toolCatalog?: DaemonToolCatalogPort;
   /** Typed bridge for UI-only slash commands such as `/skin` and `/paste`. */
@@ -594,6 +603,11 @@ export interface DaemonServerOptions {
 interface Connection extends DaemonTransportConnection {
   activeSessionKey: string;
   buffer: string;
+  pendingRequestBytes: number;
+  pendingRequestCount: number;
+  queuedOutputBytes: number;
+  readonly outputQueue: string[];
+  outputBlocked: boolean;
   /** Serializes request dispatch so interleaved handlers cannot race on shared state. */
   queue: Promise<void>;
   readonly socket: Socket;
@@ -640,6 +654,9 @@ export class DaemonServer {
   private readonly inFlightTurns = new Set<Promise<void>>();
   private readonly mcpManager: MCPManager | undefined;
   private readonly maxSocketFrameBytes: number;
+  private readonly maxPendingSocketRequests: number;
+  private readonly maxPendingSocketBytes: number;
+  private readonly maxSocketOutputBytes: number;
   private readonly memoryFactory: (
     session: DaemonSession | undefined,
   ) => AgentMemory;
@@ -715,6 +732,12 @@ export class DaemonServer {
     this.interactions = options.interactions ?? new DaemonInteractionBoard();
     this.maxSocketFrameBytes =
       options.maxSocketFrameBytes ?? DEFAULT_MAX_SOCKET_FRAME_BYTES;
+    this.maxPendingSocketRequests =
+      options.maxPendingSocketRequests ?? DEFAULT_MAX_PENDING_SOCKET_REQUESTS;
+    this.maxPendingSocketBytes =
+      options.maxPendingSocketBytes ?? DEFAULT_MAX_PENDING_SOCKET_BYTES;
+    this.maxSocketOutputBytes =
+      options.maxSocketOutputBytes ?? DEFAULT_MAX_SOCKET_OUTPUT_BYTES;
     this.crashHandlersEnabled = options.crashHandlers === true;
     this.cronLeaseOwnerKey = resolveProjectDirectory(process.cwd());
     this.cronLeasePath = resolve(
@@ -1129,51 +1152,105 @@ export class DaemonServer {
     const connection: Connection = {
       socket,
       buffer: "",
+      pendingRequestBytes: 0,
+      pendingRequestCount: 0,
+      queuedOutputBytes: 0,
+      outputQueue: [],
+      outputBlocked: false,
       queue: Promise.resolve(),
       activeSessionKey: `tui:${newConnectionKey()}`,
-      send: (frame) => {
-        if (!socket.destroyed) {
-          socket.write(`${JSON.stringify(frame)}\n`);
-        }
-      },
+      send: (frame) => this.sendSocketFrame(connection, frame),
     };
     this.connections.add(connection);
     socket.on("data", (chunk) => this.receive(connection, chunk));
+    socket.on("drain", () => this.flushSocketOutput(connection));
     socket.on("error", () => socket.destroy());
     socket.on("close", () => {
+      connection.outputQueue.length = 0;
+      connection.queuedOutputBytes = 0;
       this.connections.delete(connection);
       this.disconnect(connection);
     });
   }
 
-  private receive(connection: Connection, chunk: string | Uint8Array): void {
-    connection.buffer +=
-      typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
-    if (Buffer.byteLength(connection.buffer, "utf8") > this.maxSocketFrameBytes) {
-      // Matches the WebSocket frame cap: an uncapped buffer lets one client
-      // exhaust daemon memory, so drop the offending connection.
-      console.error(
-        "Xerxes daemon dropping client: request exceeds the socket frame limit",
-      );
+  private sendSocketFrame(connection: Connection, frame: object): void {
+    if (connection.socket.destroyed) return;
+    const encoded = `${JSON.stringify(frame)}\n`;
+    const bytes = Buffer.byteLength(encoded, "utf8");
+    if (bytes > this.maxSocketOutputBytes) {
+      console.error("Xerxes daemon dropping slow client: response exceeds the socket output limit");
       connection.socket.destroy();
       return;
     }
+    if (connection.outputBlocked || connection.outputQueue.length > 0) {
+      if (connection.queuedOutputBytes + bytes > this.maxSocketOutputBytes) {
+        console.error("Xerxes daemon dropping slow client: queued output exceeds the socket output limit");
+        connection.socket.destroy();
+        return;
+      }
+      connection.outputQueue.push(encoded);
+      connection.queuedOutputBytes += bytes;
+      return;
+    }
+    connection.outputBlocked = !connection.socket.write(encoded);
+  }
+
+  private flushSocketOutput(connection: Connection): void {
+    connection.outputBlocked = false;
+    while (!connection.socket.destroyed && connection.outputQueue.length > 0) {
+      const encoded = connection.outputQueue.shift();
+      if (encoded === undefined) return;
+      connection.queuedOutputBytes -= Buffer.byteLength(encoded, "utf8");
+      if (!connection.socket.write(encoded)) {
+        connection.outputBlocked = true;
+        return;
+      }
+    }
+  }
+
+  private receive(connection: Connection, chunk: string | Uint8Array): void {
+    connection.buffer +=
+      typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
     let newline = connection.buffer.indexOf("\n");
     while (newline >= 0) {
       const line = connection.buffer.slice(0, newline);
       connection.buffer = connection.buffer.slice(newline + 1);
+      const frameBytes = Buffer.byteLength(line, "utf8");
+      if (frameBytes > this.maxSocketFrameBytes) {
+        console.error("Xerxes daemon dropping client: request exceeds the socket frame limit");
+        connection.socket.destroy();
+        return;
+      }
       if (line.trim()) {
-        // Serialize dispatch per connection: concurrent handlers would
-        // interleave at awaits and race on shared mutable state such as
-        // activeSessionKey. turn.submit returns while its turn runs in the
-        // background, so a queued permission_response is never blocked
-        // behind the turn it answers.
-        connection.queue = connection.queue.then(
-          () => this.handleLine(connection, line),
-          () => this.handleLine(connection, line),
-        );
+        const pendingBytes = frameBytes + 1;
+        if (
+          connection.pendingRequestCount + 1 > this.maxPendingSocketRequests ||
+          connection.pendingRequestBytes + pendingBytes > this.maxPendingSocketBytes
+        ) {
+          console.error("Xerxes daemon dropping client: pending requests exceed the socket queue limit");
+          connection.socket.destroy();
+          return;
+        }
+        connection.pendingRequestCount += 1;
+        connection.pendingRequestBytes += pendingBytes;
+        const handle = async (): Promise<void> => {
+          try {
+            if (!connection.socket.destroyed) {
+              await this.handleLine(connection, line);
+            }
+          } finally {
+            connection.pendingRequestCount -= 1;
+            connection.pendingRequestBytes -= pendingBytes;
+          }
+        };
+        // Serialize dispatch per connection so handlers cannot race on shared state.
+        connection.queue = connection.queue.then(handle, handle);
       }
       newline = connection.buffer.indexOf("\n");
+    }
+    if (Buffer.byteLength(connection.buffer, "utf8") > this.maxSocketFrameBytes) {
+      console.error("Xerxes daemon dropping client: request exceeds the socket frame limit");
+      connection.socket.destroy();
     }
   }
 
@@ -2953,13 +3030,13 @@ export class DaemonServer {
   private async refreshSkills(
     session: DaemonSession | undefined,
   ): Promise<void> {
-    const directories =
+    const roots =
       this.skillDirectories ??
-      defaultSkillDiscoveryDirectories({
+      defaultSkillDiscoveryRoots({
         cwd: session?.cwd ?? process.cwd(),
         userSkillsDirectory: this.skillDirectory,
       });
-    await this.skillRegistry.refresh(...directories);
+    await this.skillRegistry.refresh(...roots);
   }
 
   private async listSkills(

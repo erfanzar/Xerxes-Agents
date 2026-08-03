@@ -45,6 +45,25 @@ test('core configuration defaults preserve the Python model surface', () => {
   expect(config.features.enable_agent_switching).toBe(true)
 })
 
+test('config merge retains resolved credentials with overlay precedence without serializing them', () => {
+  const base = new XerxesConfig({
+    security: { api_key: 'base-security', api_key_env_var: 'BASE_SECURITY_KEY' },
+    llm: { api_key_env_var: 'BASE_LLM_KEY' },
+  }, { BASE_LLM_KEY: 'base-llm' })
+  const overlay = new XerxesConfig({
+    security: { api_key: 'overlay-security' },
+    llm: { api_key: 'overlay-llm', model: 'overlay-model' },
+  }, {})
+
+  const merged = base.merge(overlay)
+
+  expect(merged.security.apiKey).toBe('overlay-security')
+  expect(merged.llm.apiKey).toBe('overlay-llm')
+  expect(merged.llm.model).toBe('overlay-model')
+  expect(merged.toJSON().security.api_key).toBeNull()
+  expect(merged.toJSON().llm.api_key).toBeNull()
+})
+
 test('core configuration rejects invalid ranges, types, aliases, and unknown keys', () => {
   expect(() => new ExecutorConfig({ default_timeout: 0.5 })).toThrow('executor.defaultTimeout')
   expect(() => new MemoryConfig({ max_long_term: 99 })).toThrow('memory.maxLongTerm')

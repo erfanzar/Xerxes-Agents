@@ -23,6 +23,8 @@ export interface ContextFrame {
 }
 
 export interface ContextualMemoryOptions {
+  /** Maximum number of recent context frames retained in memory. Default: 100. */
+  readonly contextCapacity?: number
   readonly importanceThreshold?: number
   readonly longTerm?: LongTermMemory
   readonly longTermOptions?: LongTermMemoryOptions
@@ -38,6 +40,7 @@ export interface ContextualSaveOptions extends MemorySaveOptions {
 /** Composite short/long-term store with context-aware reranking and promotion. */
 export class ContextualMemory extends Memory {
   readonly contextStack: ContextFrame[] = []
+  readonly contextCapacity: number
   readonly importanceThreshold: number
   readonly longTerm: LongTermMemory
   readonly promotionThreshold: number
@@ -52,6 +55,7 @@ export class ContextualMemory extends Memory {
     })
     this.promotionThreshold = options.promotionThreshold ?? 3
     this.importanceThreshold = options.importanceThreshold ?? 0.7
+    this.contextCapacity = positiveCapacity(options.contextCapacity, 100)
   }
 
   clear(): void {
@@ -98,6 +102,9 @@ export class ContextualMemory extends Memory {
 
   pushContext(type: string, data: Readonly<Record<string, unknown>>): void {
     this.contextStack.push({ type, data: { ...data }, timestamp: new Date() })
+    if (this.contextStack.length > this.contextCapacity) {
+      this.contextStack.splice(0, this.contextStack.length - this.contextCapacity)
+    }
   }
 
   retrieve(memoryId?: string, filters?: MemoryFilters, limit = 10): MemoryItem | MemoryItem[] | undefined {
@@ -170,6 +177,10 @@ export class ContextualMemory extends Memory {
       item.relevanceScore = item.relevanceScore * 0.7 + contextMatch * 0.3
     }
   }
+}
+
+function positiveCapacity(value: number | undefined, fallback: number): number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 1 ? value : fallback
 }
 
 function importance(item: MemoryItem): number {

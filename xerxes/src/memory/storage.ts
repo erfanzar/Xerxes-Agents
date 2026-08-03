@@ -10,6 +10,7 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs'
@@ -118,10 +119,12 @@ export class NamespacedStorage implements MemoryStorage {
   }
 
   semanticSearch(query: string, limit = 10, threshold = 0): SemanticSearchResult[] {
-    // Over-fetch because the backend ranks across every tenant before the
-    // namespace filter below narrows the results back to this one.
+    // Ranking happens in the shared backend, so a fixed over-fetch factor can
+    // omit this tenant completely when another tenant has enough stronger
+    // matches. Ask for the complete backend candidate set, then scope and cap.
+    const candidateLimit = this.backend.listKeys().length
     return this.backend
-      .semanticSearch(query, limit * 4, threshold)
+      .semanticSearch(query, candidateLimit, threshold)
       .flatMap(result => result.key.startsWith(this.prefix)
         ? [{ ...result, key: result.key.slice(this.prefix.length) }]
         : [])
@@ -137,18 +140,27 @@ export class NamespacedStorage implements MemoryStorage {
   }
 }
 
+export interface FileStorageOptions {
+  readonly lockTimeoutMs?: number
+  readonly staleLockMs?: number
+}
+
 /** JSON-file key/value backend whose hashed filenames prevent key-path traversal. */
 export class FileStorage implements MemoryStorage {
   readonly directory: string
   private readonly indexFile: string
+  private readonly lockTimeoutMs: number
+  private readonly staleLockMs: number
   private index: Record<string, string>
   /** Keys this instance removed since it last read the on-disk index. */
   private readonly removed = new Set<string>()
 
-  constructor(directory = '.xerxes_memory') {
+  constructor(directory = '.xerxes_memory', options: FileStorageOptions = {}) {
     // Normalize once so every later join/slice operates on the same canonical
     // prefix; a raw './mem' or 'mem/' would desynchronize index paths.
     this.directory = resolve(directory)
+    this.lockTimeoutMs = nonNegativeInteger(options.lockTimeoutMs ?? 5_000, 'lockTimeoutMs')
+    this.staleLockMs = positiveInteger(options.staleLockMs ?? 30_000, 'staleLockMs')
     mkdirSync(this.directory, { recursive: true })
     this.indexFile = join(this.directory, '_index.json')
     this.index = this.readIndex()
@@ -218,6 +230,14 @@ export class FileStorage implements MemoryStorage {
       return true
     } catch {
       rmSync(temporary, { force: true })
+      // The payload is published before the index transaction. If that
+      // transaction cannot complete, remove it unless an existing durable
+      // index entry already owns this filename.
+      const durablyIndexed = this.readIndexFile()?.[key] === filename
+      if (!durablyIndexed) {
+        if (this.index[key] === filename) delete this.index[key]
+        rmSync(path, { force: true })
+      }
       return false
     }
   }
@@ -274,24 +294,50 @@ export class FileStorage implements MemoryStorage {
     return rebuilt
   }
 
+  private isStaleLock(lock: string): boolean {
+    try {
+      return Date.now() - statSync(lock).mtimeMs >= this.staleLockMs
+    } catch (error) {
+      if (isMissingFileError(error)) return false
+      throw error
+    }
+  }
+
   private writeIndex(): void {
-    // Re-read and merge the on-disk index so two FileStorage instances
-    // sharing one directory do not orphan each other's data files: the disk
-    // copy contributes keys this instance never saw, this instance's entries
-    // win for keys it wrote, and keys it deleted stay deleted.
-    const disk = existsSync(this.indexFile) ? this.readIndexFile() : undefined
-    const merged: Record<string, string> = { ...disk, ...this.index }
-    for (const key of this.removed) delete merged[key]
+    // Serialize the read/merge/rename transaction across processes. Atomic
+    // rename alone does not prevent two writers from reading the same old
+    // index and then replacing each other's disjoint additions.
+    const lock = `${this.indexFile}.lock`
+    const deadline = Date.now() + this.lockTimeoutMs
+    while (true) {
+      try {
+        mkdirSync(lock)
+        break
+      } catch (error) {
+        if (!isFileExistsError(error)) throw error
+        if (this.isStaleLock(lock)) {
+          rmSync(lock, { force: true, recursive: true })
+          continue
+        }
+        if (Date.now() >= deadline) throw error
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5)
+      }
+    }
+
     const temporary = `${this.indexFile}.${process.pid}.${randomUUID()}.tmp`
     try {
+      const disk = existsSync(this.indexFile) ? this.readIndexFile() : undefined
+      const merged: Record<string, string> = { ...disk, ...this.index }
+      for (const key of this.removed) delete merged[key]
       writeFileSync(temporary, JSON.stringify(merged), 'utf8')
       renameSync(temporary, this.indexFile)
+      this.index = merged
       // Deletions are durable now; drop the tombstones so a key legitimately
       // rewritten by another instance is not suppressed forever.
       this.removed.clear()
-    } catch (error) {
+    } finally {
       rmSync(temporary, { force: true })
-      throw error
+      rmSync(lock, { force: true, recursive: true })
     }
   }
 }
@@ -505,6 +551,24 @@ function dataToText(value: unknown): string {
   if (typeof value === 'string') return value
   if (isRecord(value) && typeof value.content === 'string') return value.content
   return JSON.stringify(value)
+}
+
+function isFileExistsError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === 'EEXIST'
+}
+
+function isMissingFileError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT'
+}
+
+function nonNegativeInteger(value: number, field: string): number {
+  if (!Number.isInteger(value) || value < 0) throw new RangeError(`${field} must be a non-negative integer`)
+  return value
+}
+
+function positiveInteger(value: number, field: string): number {
+  if (!Number.isInteger(value) || value < 1) throw new RangeError(`${field} must be a positive integer`)
+  return value
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

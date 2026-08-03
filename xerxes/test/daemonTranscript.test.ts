@@ -187,6 +187,59 @@ test('header reads answer a listing without parsing the message history', async 
   }
 })
 
+test('a journal append racing a save remains recoverable', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-transcript-journal-race-'))
+  try {
+    const sessionId = 'facefeedfacefeed'
+    const store = new DaemonTranscriptStore({ directory, currentProjectDirectory: '/project' })
+    const transcript = normalizeDaemonTranscript({
+      session_id: sessionId,
+      messages: [{ role: 'user', content: 'saved turn' }],
+      turn_count: 1,
+    }, { requestedSessionKey: sessionId, currentProjectDirectory: '/project' })
+    if (!transcript) throw new Error('expected transcript to normalize')
+    await store.save(transcript)
+
+    await Promise.all([
+      store.appendMessage(sessionId, { role: 'assistant', content: 'raced answer' }, 1),
+      store.save(transcript),
+    ])
+
+    expect((await store.load(sessionId))?.messages).toEqual([
+      { role: 'user', content: 'saved turn' },
+      { role: 'assistant', content: 'raced answer' },
+    ])
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('remove waits behind a journal append and cannot leave an orphaned sidecar', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-transcript-remove-race-'))
+  try {
+    const sessionId = 'deadc0dedeadc0de'
+    const first = new DaemonTranscriptStore({ directory, currentProjectDirectory: '/project' })
+    const second = new DaemonTranscriptStore({ directory, currentProjectDirectory: '/project' })
+    const transcript = normalizeDaemonTranscript({
+      session_id: sessionId,
+      messages: [{ role: 'user', content: 'saved turn' }],
+      turn_count: 1,
+    }, { requestedSessionKey: sessionId, currentProjectDirectory: '/project' })
+    if (!transcript) throw new Error('expected transcript to normalize')
+    await first.save(transcript)
+
+    await Promise.all([
+      first.appendMessage(sessionId, { role: 'assistant', content: 'raced answer' }, 1),
+      second.remove(sessionId),
+    ])
+
+    expect(await Bun.file(first.pathFor(sessionId)).exists()).toBeFalse()
+    expect(await Bun.file(first.journalPathFor(sessionId)).exists()).toBeFalse()
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
 test('journalled messages survive a crash between the append and the next save', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'xerxes-transcript-journal-'))
   try {

@@ -69,19 +69,19 @@ export function parseChatCompletionRequest(value: unknown): ParsedChatCompletion
   if (maxTokens !== undefined) {
     options.maxTokens = maxTokens
   }
-  const frequencyPenalty = optionalNumber(body.frequency_penalty, 'frequency_penalty')
+  const frequencyPenalty = optionalNumber(body.frequency_penalty, 'frequency_penalty', -2, 2)
   if (frequencyPenalty !== undefined) {
     options.frequencyPenalty = frequencyPenalty
   }
-  const presencePenalty = optionalNumber(body.presence_penalty, 'presence_penalty')
+  const presencePenalty = optionalNumber(body.presence_penalty, 'presence_penalty', -2, 2)
   if (presencePenalty !== undefined) {
     options.presencePenalty = presencePenalty
   }
-  const temperature = optionalNumber(body.temperature, 'temperature')
+  const temperature = optionalNumber(body.temperature, 'temperature', 0, 2)
   if (temperature !== undefined) {
     options.temperature = temperature
   }
-  const topP = optionalNumber(body.top_p, 'top_p')
+  const topP = optionalNumber(body.top_p, 'top_p', 0, 1)
   if (topP !== undefined) {
     options.topP = topP
   }
@@ -310,18 +310,23 @@ function optionalInteger(value: unknown, parameter: string, minimum: number): nu
   if (value === undefined || value === null) {
     return undefined
   }
-  if (typeof value !== 'number' || !Number.isInteger(value) || value < minimum) {
-    fail(`must be an integer greater than or equal to ${minimum}.`, parameter)
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < minimum) {
+    fail(`must be a safe integer greater than or equal to ${minimum}.`, parameter)
   }
   return value
 }
 
-function optionalNumber(value: unknown, parameter: string): number | undefined {
+function optionalNumber(
+  value: unknown,
+  parameter: string,
+  minimum: number,
+  maximum: number,
+): number | undefined {
   if (value === undefined || value === null) {
     return undefined
   }
-  if (typeof value !== 'number' || !Number.isFinite(value)) {
-    fail('must be a finite number.', parameter)
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < minimum || value > maximum) {
+    fail(`must be a finite number between ${minimum} and ${maximum}.`, parameter)
   }
   return value
 }

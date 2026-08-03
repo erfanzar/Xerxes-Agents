@@ -368,7 +368,11 @@ export class Cortex {
     const result = await this.planner.executePlan(
       plan,
       request => this.executePlannedStep(request, bindings, inputs, signal),
-      { parallel: this.plannedParallel },
+      {
+        parallel: this.plannedParallel,
+        ...(this.maxParallel === undefined ? {} : { maxParallel: this.maxParallel }),
+        ...(signal === undefined ? {} : { signal }),
+      },
     )
     throwIfCancelled(signal)
     return planOutputsToTasks(result.outputs, plan, bindings, this.tasks, this.now)

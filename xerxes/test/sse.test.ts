@@ -93,3 +93,16 @@ test('empty default records do not overwrite the last event id', () => {
   expect(parser.drain()).toHaveLength(1)
   expect(parser.lastEventId).toBe('saved')
 })
+
+test('SSE parser rejects a record whose buffered text exceeds its configured bound', () => {
+  const parser = new SSEParser({ maxRecordChars: 12 })
+
+  expect(() => parser.feed('data: 1234567')).toThrow('SSE record exceeded maximum size of 12 characters')
+})
+
+test('SSE parser applies the record bound across completed data lines', () => {
+  const parser = new SSEParser({ maxRecordChars: 16 })
+
+  parser.feed('data: 1234\n')
+  expect(() => parser.feed('data: 5678\n')).toThrow('SSE record exceeded maximum size of 16 characters')
+})

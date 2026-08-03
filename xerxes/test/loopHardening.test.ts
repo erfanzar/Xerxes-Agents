@@ -47,6 +47,53 @@ function defaultAbortableDelay(milliseconds: number, signal?: AbortSignal): Prom
   })
 }
 
+test('a pre-aborted turn never invokes the provider', async () => {
+  const controller = new AbortController()
+  controller.abort(new Error('cancelled before dispatch'))
+  let providerCalls = 0
+
+  const events = await collect(runTurn(
+    { model: 'gpt-4o', state: createAgentState(), userMessage: 'do not send' },
+    {
+      llm: {
+        async *stream(): AsyncGenerator<LlmDelta> {
+          providerCalls += 1
+          yield { content: 'unreachable' }
+        },
+      },
+    },
+    controller.signal,
+  ))
+
+  expect(providerCalls).toBe(0)
+  expect(events).toEqual([
+    expect.objectContaining({ type: 'turn_done', reason: 'aborted', apiCallsCount: 0 }),
+  ])
+})
+
+test.each([0, -1, 1.5, Number.NaN])('maxToolTurns rejects invalid value %p before provider dispatch', async maxToolTurns => {
+  let providerCalls = 0
+  const state = createAgentState()
+
+  await expect(collect(runTurn({
+    maxToolTurns,
+    model: 'gpt-4o',
+    state,
+    userMessage: 'do not send',
+  }, {
+    llm: {
+      async *stream(): AsyncGenerator<LlmDelta> {
+        providerCalls += 1
+        yield { content: 'unreachable' }
+      },
+    },
+  }))).rejects.toThrow('maxToolTurns must be a positive integer or Infinity')
+
+  expect(providerCalls).toBe(0)
+  expect(state.messages).toEqual([])
+  expect(state.turnCount).toBe(0)
+})
+
 test('an abort during retry backoff still completes the epilogue with exactly one turn_done', async () => {
   class TransientClient implements LlmClient {
     calls = 0
@@ -90,6 +137,53 @@ test('an abort during retry backoff still completes the epilogue with exactly on
   expect(hooks).toEqual(['on_turn_end'])
   expect(state.totalApiCalls).toBe(1)
   expect(state.usageComplete).toBe(false)
+})
+
+test('tool-result spill failure falls back inline and preserves the matched tool pair', async () => {
+  const state = createAgentState()
+  const requests: CompletionRequest[] = []
+  const events = await collect(runTurn({
+    model: 'gpt-4o',
+    permissionMode: 'accept-all',
+    state,
+    tools: [READ_FILE],
+    userMessage: 'read it',
+  }, {
+    llm: {
+      async *stream(request): AsyncGenerator<LlmDelta> {
+        requests.push(request)
+        if (requests.length === 1) {
+          yield {
+            toolCalls: [{
+              id: 'call-spill',
+              type: 'function',
+              function: { name: 'ReadFile', arguments: { path: 'large.txt' } },
+            }],
+          }
+          return
+        }
+        yield { content: 'done' }
+      },
+    },
+    persistToolResult: () => {
+      throw new Error('spill disk unavailable')
+    },
+    toolExecutor: {
+      async execute(): Promise<string> {
+        return 'full tool output'
+      },
+    },
+  }))
+
+  expect(requests).toHaveLength(2)
+  const assistant = state.messages.find(message => message.role === 'assistant' && message.tool_calls?.length)
+  const tool = state.messages.find(message => message.role === 'tool')
+  expect(assistant?.role === 'assistant' ? assistant.tool_calls?.[0]?.id : undefined).toBe('call-spill')
+  expect(tool).toMatchObject({ role: 'tool', tool_call_id: 'call-spill', content: 'full tool output' })
+  expect(events).toContainEqual(expect.objectContaining({
+    type: 'tool_end',
+    result: expect.objectContaining({ toolCallId: 'call-spill', result: 'full tool output' }),
+  }))
 })
 
 test('a rejecting permission broker still ends the turn with exactly one turn_done', async () => {

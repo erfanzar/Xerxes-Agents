@@ -670,7 +670,24 @@ export class XerxesConfig {
     if (!(other instanceof XerxesConfig)) {
       throw new ConfigurationError('config', 'can only merge another XerxesConfig')
     }
-    return new XerxesConfig(deepMerge(this.toJSON(), other.toJSON()))
+    const merged = deepMerge(this.toJSON(), other.toJSON())
+    // Portable serialization deliberately redacts secrets. Rehydrate from the already-resolved
+    // objects instead of letting construction consult process.env and either lose or replace them.
+    const securityApiKey = other.security.apiKey ?? this.security.apiKey
+    const llmApiKey = other.llm.apiKey ?? this.llm.apiKey
+    const security = deepMerge(this.security.toJSON(), other.security.toJSON())
+    const llm = deepMerge(this.llm.toJSON(), other.llm.toJSON())
+    return new XerxesConfig({
+      ...merged,
+      security: new SecurityConfig({
+        ...security,
+        ...(securityApiKey === undefined ? {} : { api_key: securityApiKey }),
+      }),
+      llm: new LLMConfig({
+        ...llm,
+        ...(llmApiKey === undefined ? {} : { api_key: llmApiKey }),
+      }, {}),
+    }, {})
   }
 
   toJSON(): XerxesConfigData {

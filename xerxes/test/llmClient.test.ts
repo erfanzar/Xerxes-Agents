@@ -111,7 +111,7 @@ test('index-less continuation deltas without id or name still append to the curr
   ])
 })
 
-test('chat-completions usage maps prompt_tokens_details.cached_tokens to cacheReadTokens', async () => {
+test('chat-completions usage reports cached prompt tokens apart from fresh input tokens', async () => {
   const usage = {
     prompt_tokens: 20,
     completion_tokens: 5,
@@ -125,7 +125,7 @@ test('chat-completions usage maps prompt_tokens_details.cached_tokens to cacheRe
   const events = await collect(streaming.stream(request()))
   expect(events).toContainEqual({
     finishReason: 'stop',
-    usage: { inputTokens: 20, outputTokens: 5, cacheReadTokens: 12, reasoningTokens: 3 },
+    usage: { inputTokens: 8, outputTokens: 5, cacheReadTokens: 12, reasoningTokens: 3 },
   })
 
   const completing = openAiClient(async () => Response.json({
@@ -133,5 +133,19 @@ test('chat-completions usage maps prompt_tokens_details.cached_tokens to cacheRe
     usage,
   }))
   const completion = await completing.complete(request())
-  expect(completion.usage).toEqual({ inputTokens: 20, outputTokens: 5, cacheReadTokens: 12, reasoningTokens: 3 })
+  expect(completion.usage).toEqual({ inputTokens: 8, outputTokens: 5, cacheReadTokens: 12, reasoningTokens: 3 })
+})
+
+test('chat-completions SSE requires an explicit terminal finish event', async () => {
+  const encoder = new TextEncoder()
+  const client = openAiClient(async () => new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'))
+      controller.close()
+    },
+  })))
+
+  await expect(collect(client.stream(request()))).rejects.toThrow(
+    'stream ended before a terminal completion event',
+  )
 })

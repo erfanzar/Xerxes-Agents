@@ -136,6 +136,22 @@ test('agent self-memory serializes concurrent patches and taste updates without 
   })
 })
 
+test('agent self-memory serializes same-key mutations across instances sharing a directory', async () => {
+  await inTemporaryDirectory(async directory => {
+    const shared = join(directory, 'memories', 'shared')
+    const first = new AgentSelfMemory({ agentId: 'shared', directory: shared, projectRoot: directory })
+    const second = new AgentSelfMemory({ agentId: 'shared', directory: shared, projectRoot: directory })
+    await first.ensure()
+
+    await Promise.all(Array.from({ length: 40 }, (_, index) =>
+      (index % 2 === 0 ? first : second).append('self_reflection', `- shared-${index}`),
+    ))
+
+    const reflection = await first.read('self_reflection')
+    for (let index = 0; index < 40; index += 1) expect(reflection).toContain(`- shared-${index}`)
+  })
+})
+
 test('process-wide self-memory cache stays bounded like a simple LRU', () => {
   clearAgentSelfMemoryCache()
   const evicted = getAgentSelfMemory('cache-agent-0')

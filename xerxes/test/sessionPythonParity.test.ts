@@ -368,7 +368,7 @@ test('summaries and snapshots preserve deterministic history inspection behavior
     await manager.snapshot('fifth')
     expect(await manager.prune({ keep: 2 })).toBe(3)
     expect(manager.list()).toHaveLength(2)
-    manager.reset()
+    await manager.reset()
     expect(manager.list()).toEqual([])
   } finally {
     rmSync(directory, { recursive: true, force: true })

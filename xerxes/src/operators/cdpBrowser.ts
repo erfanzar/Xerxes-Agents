@@ -1,7 +1,8 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { lstat, mkdir } from 'node:fs/promises'
+import { constants } from 'node:fs'
+import { lstat, mkdir, open } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
@@ -198,8 +199,16 @@ export class CdpBrowserAdapter implements BrowserAdapter {
     const path = this.screenshotPath(refId, options.path)
     await this.prepareScreenshotDirectory(path)
     try {
-      await Bun.write(path, Buffer.from(data, 'base64'))
+      const file = await open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW, 0o600)
+      try {
+        await file.writeFile(Buffer.from(data, 'base64'))
+      } finally {
+        await file.close()
+      }
     } catch (error) {
+      if ((error as { readonly code?: unknown }).code === 'ELOOP') {
+        throw new ClientError('cdp', `screenshot path must not be a symbolic link: ${path}`)
+      }
       throw new ClientError('cdp', `could not write screenshot to ${path}`, error)
     }
     return Object.freeze({ refId, path, fullPage: options.fullPage })
@@ -338,9 +347,23 @@ export class CdpBrowserAdapter implements BrowserAdapter {
     await mkdir(this.#screenshotDirectory, { recursive: true, mode: 0o700 })
     await assertRealDirectory(this.#screenshotDirectory)
     const parent = dirname(path)
-    if (parent !== this.#screenshotDirectory) {
-      await mkdir(parent, { recursive: true, mode: 0o700 })
-      await assertRealDirectory(parent)
+    const relativeParent = relative(this.#screenshotDirectory, parent)
+    if (!relativeParent) return
+    let current = this.#screenshotDirectory
+    for (const component of relativeParent.split(sep)) {
+      current = join(current, component)
+      const stats = await lstat(current).catch(error => {
+        if ((error as { readonly code?: unknown }).code === 'ENOENT') return undefined
+        throw error
+      })
+      if (stats) {
+        if (!stats.isDirectory() || stats.isSymbolicLink()) {
+          throw new ClientError('cdp', `screenshot directory is not a real directory: ${current}`)
+        }
+        continue
+      }
+      await mkdir(current, { mode: 0o700 })
+      await assertRealDirectory(current)
     }
   }
 }

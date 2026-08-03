@@ -45,6 +45,7 @@ const MAX_STDERR_CHARS = 16_384
 const MAX_STDERR_DETAIL_CHARS = 1_024
 const MAX_STDOUT_BUFFER_CHARS = 1_048_576
 const PROCESS_KILL_GRACE_MS = 250
+const MAX_PAGINATION_PAGES = 10_000
 
 interface PendingRequest {
   readonly detach?: () => void
@@ -225,33 +226,21 @@ export class MCPClient {
 
   /** Fetch and cache the server's published tool list. */
   async listTools(): Promise<readonly MCPTool[]> {
-    const result = await this.request('tools/list', {})
-    const rawTools = result.tools
-    if (!Array.isArray(rawTools)) {
-      throw new MCPProtocolError('MCP tools/list response did not include a tools array')
-    }
+    const rawTools = await this.listAllPages('tools/list', 'tools')
     this.tools.splice(0, this.tools.length, ...rawTools.map(value => parseTool(value, this.config.name)))
     return this.tools
   }
 
   /** Fetch and cache the server's published resource list. */
   async listResources(): Promise<readonly MCPResource[]> {
-    const result = await this.request('resources/list', {})
-    const rawResources = result.resources
-    if (!Array.isArray(rawResources)) {
-      throw new MCPProtocolError('MCP resources/list response did not include a resources array')
-    }
+    const rawResources = await this.listAllPages('resources/list', 'resources')
     this.resources.splice(0, this.resources.length, ...rawResources.map(value => parseResource(value, this.config.name)))
     return this.resources
   }
 
   /** Fetch and cache the server's published prompt list. */
   async listPrompts(): Promise<readonly MCPPrompt[]> {
-    const result = await this.request('prompts/list', {})
-    const rawPrompts = result.prompts
-    if (!Array.isArray(rawPrompts)) {
-      throw new MCPProtocolError('MCP prompts/list response did not include a prompts array')
-    }
+    const rawPrompts = await this.listAllPages('prompts/list', 'prompts')
     this.prompts.splice(0, this.prompts.length, ...rawPrompts.map(value => parsePrompt(value, this.config.name)))
     return this.prompts
   }
@@ -311,19 +300,53 @@ export class MCPClient {
   }
 
   private async refreshCapabilities(): Promise<void> {
-    await this.listTools()
     await Promise.all([
-      this.loadOptionalCapability(() => this.listResources(), this.resources),
-      this.loadOptionalCapability(() => this.listPrompts(), this.prompts),
+      this.loadCapability('tools', () => this.listTools(), this.tools),
+      this.loadCapability('resources', () => this.listResources(), this.resources),
+      this.loadCapability('prompts', () => this.listPrompts(), this.prompts),
     ])
   }
 
-  private async loadOptionalCapability<T>(load: () => Promise<readonly T[]>, target: T[]): Promise<void> {
+  private async loadCapability<T>(
+    capability: 'prompts' | 'resources' | 'tools',
+    load: () => Promise<readonly T[]>,
+    target: T[],
+  ): Promise<void> {
     try {
       await load()
-    } catch {
+    } catch (error) {
+      if (capability in this.serverCapabilities) {
+        throw error
+      }
       target.splice(0, target.length)
     }
+  }
+
+  private async listAllPages(method: string, resultKey: string): Promise<unknown[]> {
+    const values: unknown[] = []
+    const cursors = new Set<string>()
+    let cursor: string | undefined
+    for (let page = 0; page < MAX_PAGINATION_PAGES; page += 1) {
+      const result = await this.request(method, cursor === undefined ? {} : { cursor })
+      const items = result[resultKey]
+      if (!Array.isArray(items)) {
+        throw new MCPProtocolError(`MCP ${method} response did not include a ${resultKey} array`)
+      }
+      values.push(...items)
+      const nextCursor = result.nextCursor
+      if (nextCursor === undefined || nextCursor === null) {
+        return values
+      }
+      if (typeof nextCursor !== 'string' || !nextCursor) {
+        throw new MCPProtocolError(`MCP ${method} response has an invalid nextCursor`)
+      }
+      if (cursors.has(nextCursor)) {
+        throw new MCPProtocolError(`MCP ${method} repeated pagination cursor ${JSON.stringify(nextCursor)}`)
+      }
+      cursors.add(nextCursor)
+      cursor = nextCursor
+    }
+    throw new MCPProtocolError(`MCP ${method} exceeded the pagination page limit`)
   }
 
   private request(

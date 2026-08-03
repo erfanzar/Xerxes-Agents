@@ -149,10 +149,54 @@ test('Ollama native completion posts stream false and returns the complete respo
   expect(completion).toEqual({
     content: 'I will read it.',
     thinking: 'Inspect source.',
-    finishReason: 'stop',
+    finishReason: 'tool_calls',
     usage: { inputTokens: 13, outputTokens: 5 },
     toolCalls: [expect.objectContaining({ function: { name: 'ReadFile', arguments: { path: 'README.md' } } })],
   })
+})
+
+test('Ollama completion normalizes a tool-call finish reason', async () => {
+  const client = new OllamaClient({
+    fetchImplementation: async () => Response.json({
+      message: {
+        role: 'assistant',
+        content: '',
+        tool_calls: [{ function: { name: 'ReadFile', arguments: { path: 'README.md' } } }],
+      },
+      done: true,
+      done_reason: 'stop',
+    }),
+  })
+
+  const completion = await client.complete({
+    model: 'llama3.3',
+    messages: [{ role: 'user', content: 'Read the README.' }],
+  })
+
+  expect(completion.finishReason).toBe('tool_calls')
+})
+
+test('Ollama streaming rejects EOF without a done:true terminal record', async () => {
+  const client = new OllamaClient({
+    fetchImplementation: async () => ndjsonResponse([
+      { message: { role: 'assistant', content: 'partial' } },
+    ]),
+  })
+
+  await expect(collect(client.stream({ model: 'llama3.3', messages: [{ role: 'user', content: 'hello' }] })))
+    .rejects.toThrow('chat stream ended before done:true')
+})
+
+test('Ollama completion rejects a response without done:true', async () => {
+  const client = new OllamaClient({
+    fetchImplementation: async () => Response.json({
+      message: { role: 'assistant', content: 'partial' },
+      done: false,
+    }),
+  })
+
+  await expect(client.complete({ model: 'llama3.3', messages: [{ role: 'user', content: 'hello' }] }))
+    .rejects.toThrow('chat completion response missing done:true')
 })
 
 test('Ollama client reports direct HTTP failures without treating them as stream chunks', async () => {

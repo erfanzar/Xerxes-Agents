@@ -3,10 +3,11 @@
 
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 export const DEFAULT_TOOL_RESULT_INLINE_LIMIT_CHARS = 16_000
 export const DEFAULT_TOOL_RESULT_LRU_SIZE = 32
+export const DEFAULT_TOOL_RESULT_MAX_STORED_RESULTS = 100
 export const TOOL_RESULT_REFERENCE_PREFIX = '[tool-result-ref:'
 export const TOOL_RESULT_REFERENCE_SUFFIX = ']'
 
@@ -29,6 +30,8 @@ export interface ToolResultStorageOptions {
   readonly fileSystem?: ToolResultStorageFileSystem
   readonly inlineLimit?: number
   readonly lruSize?: number
+  /** Maximum spill files retained per session; enforced after every new spill. */
+  readonly maxStoredResults?: number
   readonly sessionId?: string
 }
 
@@ -48,18 +51,34 @@ export class ToolResultStorage {
   private readonly cache = new Map<string, unknown>()
   private readonly fileSystem: ToolResultStorageFileSystem
   private readonly lruSize: number
+  private readonly maxStoredResults: number
 
   constructor(baseDirectory: string, options: ToolResultStorageOptions = {}) {
     if (!baseDirectory) throw new TypeError('baseDirectory must be non-empty')
     const sessionId = options.sessionId ?? 'default'
     if (!sessionId) throw new TypeError('sessionId must be non-empty')
+    const base = resolve(baseDirectory)
+    const directory = resolve(base, sessionId)
+    const relativeDirectory = relative(base, directory)
+    if (
+      !relativeDirectory
+      || relativeDirectory === '..'
+      || relativeDirectory.startsWith(`..${sep}`)
+      || isAbsolute(relativeDirectory)
+    ) {
+      throw new TypeError('sessionId must identify a directory within baseDirectory')
+    }
     this.inlineLimit = nonNegativeInteger(
       options.inlineLimit ?? DEFAULT_TOOL_RESULT_INLINE_LIMIT_CHARS,
       'inlineLimit',
     )
     this.lruSize = positiveInteger(options.lruSize ?? DEFAULT_TOOL_RESULT_LRU_SIZE, 'lruSize')
+    this.maxStoredResults = positiveInteger(
+      options.maxStoredResults ?? DEFAULT_TOOL_RESULT_MAX_STORED_RESULTS,
+      'maxStoredResults',
+    )
     this.fileSystem = options.fileSystem ?? nodeFileSystem
-    this.directory = join(baseDirectory, sessionId)
+    this.directory = directory
     this.fileSystem.makeDirectory(this.directory)
   }
 
@@ -73,6 +92,9 @@ export class ToolResultStorage {
     const referenceId = toolName + '_' + digest
     const path = this.pathFor(referenceId)
     if (!this.fileSystem.exists(path)) {
+      // Prune first so a coarse or fake mtime cannot classify the file just
+      // written as the oldest and immediately delete the returned reference.
+      this.prune(this.maxStoredResults - 1)
       this.fileSystem.write(path, payload)
     }
     this.remember(referenceId, content)

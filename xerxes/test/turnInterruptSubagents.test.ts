@@ -52,6 +52,8 @@ interface Harness {
   /** Resolves true when the child's provider stream observed an abort within the window. */
   readonly childAbortedWithin: (timeoutMs: number) => Promise<boolean>
   readonly childRelease: PromiseWithResolvers<void>
+  /** Resolves only after the child provider has installed its abort listener. */
+  readonly childStarted: PromiseWithResolvers<void>
   readonly cleanup: () => Promise<void>
   readonly events: DaemonEvent[]
   readonly host: ReturnType<typeof createNativeSubagentHost>
@@ -68,6 +70,7 @@ interface Harness {
 async function harness(sessionKey: string): Promise<Harness> {
   const sessionDirectory = await mkdtemp(join(tmpdir(), `xerxes-${sessionKey}-`))
   const childRelease = Promise.withResolvers<void>()
+  const childStarted = Promise.withResolvers<void>()
   const parentWaiting = Promise.withResolvers<void>()
   const childAborted = Promise.withResolvers<boolean>()
   const parentRequests: CompletionRequest[] = []
@@ -86,6 +89,7 @@ async function harness(sessionKey: string): Promise<Harness> {
           if (signal?.aborted) return resolve(true)
           signal?.addEventListener('abort', () => resolve(true), { once: true })
         })
+        childStarted.resolve()
         const released = childRelease.promise.then(() => false)
         childAborted.resolve(await Promise.race([abortObserved, released]))
         if (signal?.aborted) throw signal.reason ?? new Error('child cancelled')
@@ -166,6 +170,7 @@ async function harness(sessionKey: string): Promise<Harness> {
       Bun.sleep(timeoutMs).then(() => false),
     ]),
     childRelease,
+    childStarted,
     cleanup: async () => {
       childRelease.resolve()
       await host.manager.shutdown()
@@ -198,7 +203,7 @@ test('interrupting a turn cancels its detached background subagents', async () =
   try {
     const turn = kit.runtime.submitTurn('interrupt-detached', 'delegate the review', event => events.push(event))
     await kit.parentWaiting.promise
-    await waitFor(() => kit.host.manager.listTasks().some(task => task.status === 'running'))
+    await kit.childStarted.promise
     const childId = runningChildId(kit.host)
 
     expect(kit.runtime.cancelTurn('interrupt-detached')).toBe(true)

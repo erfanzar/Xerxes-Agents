@@ -15,6 +15,8 @@ import {
   CortexRunFailedError,
   DEFAULT_MAX_PARALLEL,
 } from '../src/cortex/orchestrator.js'
+import { DynamicCortex } from '../src/cortex/dynamic.js'
+import { executeExecutionPlan, PlanExecutionAbortedError } from '../src/cortex/planner.js'
 import { TaskGraphError } from '../src/cortex/task.js'
 import type { CompletionRequest, LlmClient, LlmDelta } from '../src/llms/client.js'
 
@@ -71,6 +73,75 @@ test('Cortex propagates cancellation into executors so in-flight work aborts wit
   // The detached topology settles promptly because the signal reached the executor.
   await delay(10)
   expect(executorSettled).toBe(true)
+})
+
+test('CortexOrchestrator reports cancellation even when the final task resolves after abort', async () => {
+  const controller = new AbortController()
+  const orchestrator = new CortexOrchestrator({
+    executor: async () => {
+      controller.abort(new Error('cancel final task'))
+      await delay(1)
+      return 'late success'
+    },
+    tasks: [{ id: 'final', description: 'Final', expectedOutput: 'never accepted' }],
+  })
+
+  await expect(orchestrator.run({ signal: controller.signal })).rejects.toBeInstanceOf(CortexRunAbortedError)
+  expect(orchestrator.lastOutput).toBeUndefined()
+})
+
+test('execution plans propagate cancellation and cap parallel step concurrency', async () => {
+  const plan = {
+    id: 'bounded-plan',
+    objective: 'bounded cancellable work',
+    complexity: 'low' as const,
+    estimatedMinutes: 0,
+    steps: Array.from({ length: 8 }, (_value, index) => ({
+      id: String(index),
+      action: 'run',
+      description: `Step ${index}`,
+      arguments: {},
+      dependencies: [],
+    })),
+  }
+  const tracked = trackConcurrency()
+  await executeExecutionPlan(plan, tracked.executor, { parallel: true, maxParallel: 2 })
+  expect(tracked.maxActive).toBe(2)
+
+  const controller = new AbortController()
+  let started = 0
+  const pending = executeExecutionPlan(plan, async () => {
+    started += 1
+    controller.abort(new Error('stop plan'))
+    await delay(2)
+    return 'late'
+  }, { parallel: true, maxParallel: 1, signal: controller.signal })
+  await expect(pending).rejects.toBeInstanceOf(PlanExecutionAbortedError)
+  expect(started).toBe(1)
+})
+
+test('DynamicCortex concurrent prompt runs keep independent task graphs', async () => {
+  const gate = Promise.withResolvers<void>()
+  const started: string[] = []
+  const dynamic = new DynamicCortex({
+    executor: async context => {
+      started.push(context.task.description)
+      await gate.promise
+      return context.task.description
+    },
+  })
+
+  const first = dynamic.executePrompt('first')
+  await delay(1)
+  const second = dynamic.executePrompt('second')
+  await delay(1)
+  gate.resolve()
+
+  const [firstOutput, secondOutput] = await Promise.all([first, second])
+  expect(started).toEqual(['first', 'second'])
+  expect(firstOutput.taskOutputs.map(output => output.taskId)).toEqual(['dynamic-1'])
+  expect(firstOutput.rawOutput).toBe('first')
+  expect(secondOutput.rawOutput).toBe('second')
 })
 
 test('CortexOrchestrator stops scheduling new tasks once the run signal aborts', async () => {

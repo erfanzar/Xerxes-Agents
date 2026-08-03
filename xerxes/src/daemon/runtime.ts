@@ -27,6 +27,8 @@ import {
 export const DAEMON_PROTOCOL_VERSION = 35;
 export const BUN_DAEMON_BUILD_ID =
   process.env.XERXES_DAEMON_BUILD_ID?.trim() || "bun-runtime-v0.3.0";
+/** Maximum hints retained between active-turn provider/tool boundaries. */
+export const MAX_ACTIVE_TURN_STEERS = 64;
 
 export interface DaemonEvent {
   readonly payload: JsonRpcPayload;
@@ -346,6 +348,8 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
   private readonly options: InMemoryDaemonRuntimeOptions;
   private readonly runtimeSettings: JsonRpcPayload;
   private readonly sessions = new Map<string, DaemonSession>();
+  /** Coalesces async transcript loads so one key cannot initialize twice. */
+  private readonly sessionOpenPromises = new Map<string, Promise<DaemonSession>>();
   private shutdownPromise: Promise<void> | undefined;
   private readonly steerQueues = new Map<string, string[]>();
   private readonly transcriptStore: DaemonTranscriptStore;
@@ -591,6 +595,33 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     options: OpenSessionOptions = {},
   ): Promise<DaemonSession> {
     const key = sessionKey || "default";
+    const previous = this.sessionOpenPromises.get(key);
+    const opening = (async () => {
+      if (previous) {
+        try {
+          await previous;
+        } catch {
+          // A failed opener must not poison the key; this caller still gets
+          // its own validation/load attempt.
+        }
+      }
+      return this.initializeSession(key, agentId, options);
+    })();
+    this.sessionOpenPromises.set(key, opening);
+    try {
+      return await opening;
+    } finally {
+      if (this.sessionOpenPromises.get(key) === opening) {
+        this.sessionOpenPromises.delete(key);
+      }
+    }
+  }
+
+  private async initializeSession(
+    key: string,
+    agentId?: string,
+    options: OpenSessionOptions = {},
+  ): Promise<DaemonSession> {
     const existing = this.sessions.get(key);
     if (existing) {
       const existingIsSubagent = metadataIsSubagent(existing.metadata);
@@ -865,6 +896,9 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     }
     if (this.abortControllers.has(sessionKey)) {
       const queue = this.steerQueues.get(sessionKey) ?? [];
+      if (queue.length >= MAX_ACTIVE_TURN_STEERS) {
+        return false;
+      }
       queue.push(cleaned);
       this.steerQueues.set(sessionKey, queue);
       return true;

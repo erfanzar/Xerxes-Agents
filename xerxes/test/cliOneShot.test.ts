@@ -2,9 +2,11 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from 'bun:test'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+
+import { hashSkillFile, saveTrustedHashes } from '../src/extensions/skillsGuard.js'
 
 const CLI = join(import.meta.dir, '../src/cli.ts')
 
@@ -28,13 +30,19 @@ test('one-shot CLI exposes native subagents and their catalog to the main model'
       mkdir(join(home, 'daemon'), { recursive: true }),
       mkdir(join(project, '.agents', 'skills', 'demo-skill'), { recursive: true }),
     ])
-    await writeFile(join(project, '.agents', 'skills', 'demo-skill', 'SKILL.md'), [
+    const skillPath = join(project, '.agents', 'skills', 'demo-skill', 'SKILL.md')
+    await writeFile(skillPath, [
       '---',
       'name: demo-skill',
       'description: Demonstrate live skill discovery.',
       '---',
       'Follow the demo instructions.',
     ].join('\n'), 'utf8')
+    const canonicalSkillPath = await realpath(skillPath)
+    await saveTrustedHashes(
+      { [canonicalSkillPath]: await hashSkillFile(canonicalSkillPath) },
+      { skillsDirectory: join(home, 'skills') },
+    )
     await writeFile(
       join(home, 'daemon', 'config.json'),
       JSON.stringify({

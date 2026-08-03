@@ -160,6 +160,50 @@ test('file and in-memory session stores retain the shared SessionStore behavior'
   }
 })
 
+test('file session store removes stale copies when a session moves workspaces', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'xerxes-session-file-move-'))
+  try {
+    const store = new FileSessionStore(directory)
+    store.saveSession(new SessionRecord({
+      sessionId: 'moving',
+      workspaceId: 'old-workspace',
+      metadata: { revision: 'old' },
+    }))
+    store.saveSession(new SessionRecord({
+      sessionId: 'moving',
+      workspaceId: 'new-workspace',
+      metadata: { revision: 'new' },
+    }))
+
+    expect(existsSync(join(directory, 'old-workspace', 'moving.json'))).toBe(false)
+    expect(store.listSessions()).toEqual(['moving'])
+    expect(store.loadSession('moving')?.workspaceId).toBe('new-workspace')
+    expect(store.loadSession('moving')?.metadata.revision).toBe('new')
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test('file session store deduplicates legacy duplicate IDs across workspace directories', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'xerxes-session-file-duplicates-'))
+  try {
+    const store = new FileSessionStore(directory)
+    store.saveSession(new SessionRecord({ sessionId: 'duplicate', workspaceId: 'workspace-a' }))
+    mkdirSync(join(directory, 'workspace-b'), { recursive: true })
+    writeFileSync(
+      join(directory, 'workspace-b', 'duplicate.json'),
+      JSON.stringify(new SessionRecord({ sessionId: 'duplicate', workspaceId: 'workspace-b' }).toRecord()),
+      'utf8',
+    )
+
+    expect(store.listSessions()).toEqual(['duplicate'])
+    expect(store.listSessionRecords()).toHaveLength(1)
+    expect(store.loadSession('duplicate')?.workspaceId).toBe('workspace-b')
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
 test('cloneSessionRecord deep-copies nested metadata, arguments, and results', () => {
   const source = new SessionRecord({
     sessionId: 'source',
@@ -261,6 +305,23 @@ test('SessionManager serializes concurrent mutations so no turn or transition is
     store?.close()
     rmSync(directory, { recursive: true, force: true })
   }
+})
+
+test('SessionManager serializes mutations across instances sharing one store', async () => {
+  const store = new InMemorySessionStore()
+  const first = new SessionManager(store)
+  const second = new SessionManager(store)
+  const session = first.startSession({ sessionId: 'shared-manager' })
+
+  await Promise.all([
+    first.recordTurn(session.sessionId, turn('from-first')),
+    second.recordTurn(session.sessionId, turn('from-second')),
+    second.endSession(session.sessionId),
+  ])
+
+  expect(store.loadSession(session.sessionId)?.turns.map(entry => entry.turnId).sort())
+    .toEqual(['from-first', 'from-second'])
+  expect(store.loadSession(session.sessionId)?.metadata.ended).toBe(true)
 })
 
 test('SessionManager drains the per-session lock map after mutations settle, including failures', async () => {
@@ -464,7 +525,7 @@ test('shadow git snapshots restore files and produce a textual diff', async () =
     expect(diff.added).toBeGreaterThan(0)
     await snapshots.rollback(snapshot.id)
     expect(readFileSync(join(workspace, 'a.txt'), 'utf8')).toBe('first version')
-    snapshots.reset()
+    await snapshots.reset()
     expect(snapshots.list()).toEqual([])
   } finally {
     rmSync(directory, { recursive: true, force: true })

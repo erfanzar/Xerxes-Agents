@@ -2,13 +2,13 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { randomUUID } from 'node:crypto'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { detectProvider } from '../llms/providerRegistry.js'
 import { CostEvent, CostTracker, type CostEventRecord } from './costTracker.js'
 import { HistoryLog } from './history.js'
-import { TranscriptStore } from './transcript.js'
+import { TranscriptEntry, TranscriptStore } from './transcript.js'
 
 export const DEFAULT_RUNTIME_SESSION_DIRECTORY = '.xerxes_sessions'
 export const MAX_PERSISTED_STREAM_EVENTS = 100
@@ -28,6 +28,9 @@ export interface RuntimeSessionFileSystem {
   makeDirectory(path: string): void
   readFile(path: string): string
   writeFile(path: string, contents: string): void
+  /** Atomically replace destination with a previously written file when supported. */
+  replaceFile?(source: string, destination: string): void
+  removeFile?(path: string): void
 }
 
 export interface RuntimeContextOptions {
@@ -353,8 +356,23 @@ export class RuntimeSession {
     const directory = options.directory ?? DEFAULT_RUNTIME_SESSION_DIRECTORY
     if (!directory) throw new TypeError('directory must be non-empty')
     const path = runtimeSessionPath(directory, this.sessionId)
+    const contents = JSON.stringify(this.toRecord(), null, 2)
     options.fileSystem.makeDirectory(directory)
-    options.fileSystem.writeFile(path, JSON.stringify(this.toRecord(), null, 2))
+    if (options.fileSystem.replaceFile === undefined) {
+      // Retain compatibility with existing caller-owned ports. The system
+      // adapter below supplies replaceFile and therefore always takes the
+      // atomic path.
+      options.fileSystem.writeFile(path, contents)
+    } else {
+      const temporary = `${path}.${randomUUID()}.tmp`
+      try {
+        options.fileSystem.writeFile(temporary, contents)
+        options.fileSystem.replaceFile(temporary, path)
+      } catch (error) {
+        options.fileSystem.removeFile?.(temporary)
+        throw error
+      }
+    }
     this.transcript.flush()
     return path
   }
@@ -364,7 +382,7 @@ export class RuntimeSession {
       session_id: this.sessionId,
       prompt: this.prompt,
       context: this.context.toRecord(),
-      messages: this.transcript.toMessages(),
+      messages: this.transcript.toRecords(),
       history: this.history.asDicts(),
       costs: this.costTracker.asRecords(),
       tool_executions: this.toolExecutionLedger.slice().map(copyToolExecution),
@@ -413,6 +431,8 @@ export function createSystemRuntimeSessionFileSystem(): RuntimeSessionFileSystem
     makeDirectory: path => mkdirSync(path, { recursive: true }),
     readFile: path => readFileSync(path, 'utf8'),
     writeFile: (path, contents) => writeFileSync(path, contents, 'utf8'),
+    replaceFile: (source, destination) => renameSync(source, destination),
+    removeFile: path => rmSync(path, { force: true }),
   }
 }
 
@@ -437,8 +457,18 @@ function restoreTranscript(value: unknown, clock: () => Date): TranscriptStore {
   const transcript = new TranscriptStore({ now: clock })
   for (const message of arrayValue(value, 'messages')) {
     const record = objectValue(message, 'message')
-    const { role, content, ...metadata } = record
-    transcript.append(requiredText({ role }, 'role'), requiredText({ content }, 'content'), metadata)
+    const { role, content, timestamp, ...metadata } = record
+    if (timestamp === undefined) {
+      // Older persisted messages did not carry timestamps.
+      transcript.append(requiredText({ role }, 'role'), requiredText({ content }, 'content'), metadata)
+      continue
+    }
+    transcript.appendEntry(new TranscriptEntry({
+      role: requiredText({ role }, 'role'),
+      content: requiredText({ content }, 'content'),
+      timestamp: timestampValue(timestamp),
+      metadata,
+    }))
   }
   return transcript
 }

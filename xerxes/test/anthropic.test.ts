@@ -85,6 +85,7 @@ test('Anthropic requests cache stable prefixes and retain cache token usage', as
       },
     },
     { type: 'message_delta', usage: { output_tokens: 5 } },
+    { type: 'message_stop' },
   ])
   const client = new AnthropicMessagesClient({
     apiKey: 'test-key',
@@ -160,10 +161,25 @@ test('Anthropic native completion uses a non-streaming request and retains think
     content: 'I will read it.',
     thinking: 'Inspect source.',
     thinkingSignature: 'sig-1',
-    finishReason: 'tool_use',
+    finishReason: 'tool_calls',
     usage: { inputTokens: 15, outputTokens: 8, cacheReadTokens: 4, cacheCreationTokens: 2 },
     toolCalls: [{ id: 'tool-1', type: 'function', function: { name: 'ReadFile', arguments: { path: 'README.md' } } }],
   })
+})
+
+test('Anthropic streaming rejects EOF without a message_stop terminal event', async () => {
+  const client = new AnthropicMessagesClient({
+    apiKey: 'test-key',
+    fetchImplementation: async () => sseResponse([
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'partial' } },
+      { type: 'message_delta', delta: { stop_reason: 'end_turn' } },
+    ]),
+  })
+
+  await expect(collect(client.stream({
+    model: 'claude-sonnet-4-6',
+    messages: [{ role: 'user', content: 'hi' }],
+  }))).rejects.toThrow('stream ended before message_stop')
 })
 
 test('Anthropic streaming throws on in-stream error events with the provider payload', async () => {
@@ -317,7 +333,7 @@ test('the conversation itself carries exactly one cache breakpoint, on its last 
     apiKey: 'test-key',
     fetchImplementation: (async (_url: unknown, init: { body: string }) => {
       payloads.push(JSON.parse(init.body) as never)
-      return new Response('event: message_stop\ndata: {}\n\n', { status: 200 })
+      return new Response('event: message_stop\ndata: {"type":"message_stop"}\n\n', { status: 200 })
     }) as never,
   })
 

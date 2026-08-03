@@ -52,6 +52,8 @@ export interface CortexRunOptions {
   readonly inputs?: Readonly<Record<string, unknown>>
   readonly process?: CortexProcess
   readonly signal?: AbortSignal
+  /** Per-run immutable task graph, used by facades that may execute concurrently. */
+  readonly tasks?: readonly CortexTask[]
 }
 
 export interface CortexRunOutput {
@@ -151,15 +153,17 @@ export class CortexOrchestrator {
     const inputs = options.inputs ?? {}
     const signal = options.signal
     const failFast = options.failFast ?? this.failFast
-    validateTaskGraph(this.tasks)
+    const tasks = options.tasks === undefined ? this.tasks : [...options.tasks]
+    validateTaskGraph(tasks)
+    validateContextTaskReferences(tasks)
     throwIfRunAborted(signal)
-    const states = new Map<string, CortexTaskStatus>(this.tasks.map(task => [task.id, 'pending']))
+    const states = new Map<string, CortexTaskStatus>(tasks.map(task => [task.id, 'pending']))
     const outputs = new Map<string, CortexTaskOutput>()
 
     while ([...states.values()].some(status => status === 'pending')) {
       throwIfRunAborted(signal)
-      if (skipBlockedTasks(this.tasks, states, outputs, this.now)) continue
-      const ready = this.tasks.filter(task => states.get(task.id) === 'pending'
+      if (skipBlockedTasks(tasks, states, outputs, this.now)) continue
+      const ready = tasks.filter(task => states.get(task.id) === 'pending'
         && (task.dependencies ?? []).every(dependency => states.get(dependency) === 'succeeded'))
       if (ready.length === 0) throw new Error('No executable tasks remain')
 
@@ -202,8 +206,9 @@ export class CortexOrchestrator {
       }
     }
 
+    throwIfRunAborted(signal)
     const completedAt = this.now()
-    const taskOutputs = this.tasks.flatMap(task => {
+    const taskOutputs = tasks.flatMap(task => {
       const output = outputs.get(task.id)
       return output ? [output] : []
     })

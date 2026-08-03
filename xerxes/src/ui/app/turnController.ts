@@ -322,6 +322,10 @@ class TurnController {
     this.endReasoningPhase()
     this.activeTools = []
     this.streamTimer = clear(this.streamTimer)
+    // A throttled progress callback captures mutable activeTools. Cancel it at
+    // every turn/session boundary so it cannot repaint tools from the next
+    // turn (or an empty stale snapshot) after reset.
+    this.toolProgressTimer = clear(this.toolProgressTimer)
     this.bufRef = ''
     this.resetLiveReasoningFilter()
     this.liveCompletedTools = []

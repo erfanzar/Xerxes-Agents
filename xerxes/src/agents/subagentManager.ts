@@ -378,7 +378,7 @@ interface TaskRuntime {
   readonly originalSystemPrompt: string
   readonly systemPrompt: string
   readonly toolInputs: Map<string, Readonly<Record<string, unknown>>>
-  readonly worktree: SubagentWorktree | undefined
+  worktree: SubagentWorktree | undefined
   /**
    * Monotonic attempt counter. Retry increments it synchronously so a
    * superseded attempt's settling runner or monitor can never clobber the
@@ -464,6 +464,7 @@ export class SubAgentManager {
   private readonly pathResolver: (rawPath: string) => string | undefined
   private runner: SubagentTaskRunner
   private readonly runtimes = new Map<string, TaskRuntime>()
+  private readonly resets = new Map<string, Promise<SubAgentTask | undefined>>()
   private readonly tasksByName = new Map<string, string>()
   private readonly textBurst = new Map<string, string[]>()
   private readonly thinkingBurst = new Map<string, ThinkingBurst>()
@@ -697,9 +698,25 @@ export class SubAgentManager {
   /** Cancel then respawn the same definition/configuration with an optional replacement prompt. */
   async reset(taskIdOrName: string, newPrompt = ''): Promise<SubAgentTask | undefined> {
     const task = this.resolveTask(taskIdOrName)
-    const runtime = task === undefined ? undefined : this.runtimes.get(task.id)
-    if (task === undefined || runtime === undefined) return undefined
+    if (task === undefined) return undefined
+    const pending = this.resets.get(task.id)
+    if (pending !== undefined) return pending
+    const reset = this.resetUnlocked(task, newPrompt)
+    this.resets.set(task.id, reset)
+    try {
+      return await reset
+    } finally {
+      if (this.resets.get(task.id) === reset) this.resets.delete(task.id)
+    }
+  }
+
+  private async resetUnlocked(task: SubAgentTask, newPrompt: string): Promise<SubAgentTask | undefined> {
+    const runtime = this.runtimes.get(task.id)
+    if (runtime === undefined) return undefined
     this.cancel(task.id)
+    const settling = runtime.run
+    if (settling !== undefined) await settling.then(() => undefined, () => undefined)
+    await this.cleanupWorktree(task)
     return this.spawn({
       prompt: newPrompt.trim() || runtime.originalPrompt,
       config: runtime.config,
@@ -756,6 +773,7 @@ export class SubAgentManager {
       // of one identity must never write the same conversation concurrently.
       const settling = runtime.run
       if (settling !== undefined) await settling.then(() => undefined, () => undefined)
+      if (runtime.isolation === 'worktree') await this.recreateRetryWorktree(task, runtime)
       const handle = this.handleManager.listHandles().find(candidate => candidate.id === task.id)
       if (handle === undefined) {
         // The handle manager lost this identity (for example after a process
@@ -1240,8 +1258,8 @@ export class SubAgentManager {
       originalSystemPrompt: archived.originalSystemPrompt,
       systemPrompt: effectiveSystemPrompt(archived.originalSystemPrompt, archived.agentDefinition),
       toolInputs: new Map(),
-      // The original worktree was already cleaned up when the task went
-      // terminal; a retried attempt runs in the regular workspace.
+      // The original worktree was cleaned up when the task went terminal;
+      // retry recreates isolation before dispatch rather than downgrading.
       worktree: undefined,
       attempt: archived.attempt,
       cleanup: undefined,
@@ -1361,6 +1379,16 @@ export class SubAgentManager {
   private clearThinkingBurstTimers(): void {
     for (const burst of this.thinkingBurst.values()) clearTimeout(burst.timer)
     this.thinkingBurst.clear()
+  }
+
+  private async recreateRetryWorktree(task: SubAgentTask, runtime: TaskRuntime): Promise<void> {
+    if (this.worktree === undefined) throw new Error("isolation='worktree' requires a configured worktree port")
+    if (runtime.cleanup !== undefined) await runtime.cleanup
+    const worktree = await this.worktree.create({ taskId: task.id, taskName: task.name })
+    runtime.worktree = worktree
+    runtime.cleanup = undefined
+    task.worktreePath = worktree.path
+    task.worktreeBranch = worktree.branch
   }
 
   private async cleanupWorktree(task: SubAgentTask): Promise<void> {

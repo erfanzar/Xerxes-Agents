@@ -56,6 +56,9 @@ export interface CollectGitDiffOptions {
 const DEFAULT_MAX_LINES = 4000
 const DEFAULT_MAX_BYTES = 256 * 1024
 const DEFAULT_MAX_UNTRACKED = 50
+/** Keep one minified/generated row from consuming the whole panel budget. */
+const MAX_RENDERED_ROW_CHARS = 512
+const TRUNCATED_ROW_SUFFIX = ' … [line truncated]'
 /** Git's well-known empty tree, used when the repo has no HEAD commit yet. */
 const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
 
@@ -96,8 +99,18 @@ export function parseUnifiedDiff(
       truncated = true
       return false
     }
-    lines.push({ kind, text: row, ...numbers })
-    bytes += utf8Length(row) + 1
+    let rendered = row
+    if (rendered.length > MAX_RENDERED_ROW_CHARS) {
+      rendered = rendered.slice(0, MAX_RENDERED_ROW_CHARS - TRUNCATED_ROW_SUFFIX.length) + TRUNCATED_ROW_SUFFIX
+      truncated = true
+    }
+    const remainingBytes = maxBytes - bytes
+    if (utf8Length(rendered) + 1 > remainingBytes) {
+      truncated = true
+      return true
+    }
+    lines.push({ kind, text: rendered, ...numbers })
+    bytes += utf8Length(rendered) + 1
     return true
   }
 

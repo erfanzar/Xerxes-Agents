@@ -13,6 +13,7 @@ import {
   HybridRetriever,
   LongTermMemory,
   MemoryItem,
+  NamespacedStorage,
   RAGStorage,
   SQLiteVectorStorage,
   SimpleStorage,
@@ -25,6 +26,12 @@ class CountingStorage extends SimpleStorage {
   override save(key: string, data: unknown): boolean {
     this.saves += 1
     return super.save(key, data)
+  }
+}
+
+class RejectingStorage extends SimpleStorage {
+  override save(_key: string, _data: unknown): boolean {
+    return false
   }
 }
 
@@ -53,6 +60,46 @@ test('long-term memory scopes hydration and semantic search to its owner over a 
   legacy.save('unscoped restore fact')
   const legacyBackend = new LongTermMemory({ storage: new RAGStorage(backend, new HashEmbedder(64)) })
   expect(legacyBackend.size).toBe(1)
+})
+
+test('long-term memory rejects an item when its durable save fails', () => {
+  const memory = new LongTermMemory({ storage: new RejectingStorage() })
+  expect(() => memory.save('must be durable')).toThrow('Failed to persist long-term memory')
+  expect(memory.size).toBe(0)
+})
+
+test('long-term memory hydration enforces maxItems and keeps the newest records', () => {
+  const storage = new SimpleStorage()
+  const writer = new LongTermMemory({ storage })
+  for (let index = 0; index < 5; index += 1) {
+    const item = writer.save(`record ${index}`)
+    item.timestamp = new Date(`2026-01-0${index + 1}T00:00:00.000Z`)
+    expect(writer.update(item.memoryId, { timestamp: item.timestamp })).toBeTrue()
+  }
+
+  const hydrated = new LongTermMemory({ storage, maxItems: 2 })
+  expect(hydrated.size).toBe(2)
+  const records = hydrated.retrieve(undefined, undefined, 10)
+  expect(Array.isArray(records) ? records.map(item => item.content) : []).toEqual(['record 3', 'record 4'])
+})
+
+test('namespaced semantic search is complete even when other tenants dominate global ranking', () => {
+  const backend = new RAGStorage(new SimpleStorage(), new HashEmbedder(64))
+  const first = new LongTermMemory({ storage: new NamespacedStorage(backend, 'first_') })
+  const second = new LongTermMemory({ storage: new NamespacedStorage(backend, 'second_') })
+  for (let index = 0; index < 20; index += 1) first.save(`exact rare target ${index}`)
+  const wanted = second.save('rare target owned by second tenant')
+  expect(second.search('rare target', 1).at(0)?.memoryId).toBe(wanted.memoryId)
+})
+
+test('contextual memory bounds retained context frames', () => {
+  const contextual = new ContextualMemory({
+    longTerm: new LongTermMemory({ storage: new SimpleStorage() }),
+    contextCapacity: 3,
+  })
+  for (let index = 0; index < 10; index += 1) contextual.pushContext('turn', { index })
+  expect(contextual.contextStack).toHaveLength(3)
+  expect(contextual.contextStack.map(frame => frame.data.index)).toEqual([7, 8, 9])
 })
 
 test('long-term memory batches access-state persistence and never resurrects deleted items', () => {
@@ -175,6 +222,20 @@ test('agent memory appends from separate instances over one directory lose no en
     const journal = await cli.read('global', 'journal/2026-07-21.md')
     expect(journal).toContain('daemon checkpoint')
     expect(journal).toContain('cli checkpoint')
+  } finally {
+    await rm(root, { force: true, recursive: true })
+  }
+})
+
+test('concurrent canonical memory creation never truncates initialized files', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-memory-create-race-'))
+  try {
+    const globalDirectory = join(root, 'global')
+    const memories = Array.from({ length: 20 }, () => new AgentMemory({ globalDirectory }))
+    await Promise.all(memories.map(memory => memory.ensure()))
+    for (const name of ['IDENTITY.md', 'SOUL.md', 'USER.md', 'MEMORY.md', 'KNOWLEDGE.md', 'INSIGHTS.md', 'EXPERIENCES.md']) {
+      expect((await memories[0]!.read('global', name)).length).toBeGreaterThan(0)
+    }
   } finally {
     await rm(root, { force: true, recursive: true })
   }

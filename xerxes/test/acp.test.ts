@@ -156,6 +156,31 @@ test('ACP server exposes capabilities, live sessions, prompts, and approval resp
   expect(closedSessions).toEqual([sessionId])
 })
 
+test('ACP queued prompts do not run after their session closes', async () => {
+  const started = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  const calls: string[] = []
+  const server = new AcpServer({
+    promptHandler: async ({ text }) => {
+      calls.push(text)
+      if (text === 'first') {
+        started.resolve()
+        await release.promise
+      }
+      return { ok: true }
+    },
+  })
+  const sessionId = String(server.openSession('/workspace').session_id)
+  const first = server.prompt(sessionId, 'first')
+  await started.promise
+  const queued = server.prompt(sessionId, 'queued')
+  expect(server.closeSession(sessionId)).toEqual({ ok: true })
+  release.resolve()
+  await first
+  await expect(queued).resolves.toEqual({ error: `unknown session: ${sessionId}` })
+  expect(calls).toEqual(['first'])
+})
+
 test('ACP server serializes prompts per session while keeping sessions concurrent', async () => {
   const order: string[] = []
   const gates = new Map<string, () => void>()

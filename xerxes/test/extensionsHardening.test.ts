@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, spyOn, test } from 'bun:test'
-import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -69,6 +69,36 @@ export function register(registry) {
     const second = new PluginRegistry()
     expect(await second.discover(directory, { allowedModules: [join(directory, 'allowed.mjs')] }))
       .toEqual(['allowed-plugin'])
+  })
+})
+
+test('plugin discovery serializes concurrent passes so module ownership cannot race', async () => {
+  await inTemporaryDirectory(async directory => {
+    const first = join(directory, 'first')
+    const second = join(directory, 'second')
+    await mkdir(first)
+    await mkdir(second)
+    await writeFile(join(first, 'slow.mjs'), `
+export async function register(registry) {
+  registry.registerPlugin({ name: 'slow' })
+  await new Promise(resolve => setTimeout(resolve, 25))
+  registry.registerTool('slow_tool', () => 'slow', undefined, 'slow')
+}
+`, 'utf8')
+    await writeFile(join(second, 'fast.mjs'), `
+export function register(registry) {
+  registry.registerPlugin({ name: 'fast' })
+  registry.registerTool('fast_tool', () => 'fast', undefined, 'fast')
+}
+`, 'utf8')
+
+    const registry = new PluginRegistry()
+    const [slow, fast] = await Promise.all([registry.discover(first), registry.discover(second)])
+    expect(slow).toEqual(['slow'])
+    expect(fast).toEqual(['fast'])
+    registry.unregisterPlugin('slow')
+    expect(registry.getTool('slow_tool')).toBeUndefined()
+    expect(registry.getTool('fast_tool')).toBeDefined()
   })
 })
 
@@ -191,6 +221,21 @@ test('discovery and local sources reject SKILL.md files above the size ceiling',
     await expect(source.fetch('big')).rejects.toBeInstanceOf(SkillSourceError)
     const bundle = await source.fetch('small')
     expect(bundle.name).toBe('small')
+  })
+})
+
+test('skill discovery does not traverse directory symlinks outside its root', async () => {
+  await inTemporaryDirectory(async directory => {
+    const root = join(directory, 'root')
+    const outside = join(directory, 'outside')
+    await mkdir(root)
+    await mkdir(outside)
+    await writeFile(join(outside, 'SKILL.md'), '---\nname: escaped\n---\nOutside.', 'utf8')
+    await symlink(outside, join(root, 'escape'))
+
+    const registry = new SkillRegistry()
+    expect(await registry.discover(root)).toEqual([])
+    expect(registry.get('escaped')).toBeUndefined()
   })
 })
 

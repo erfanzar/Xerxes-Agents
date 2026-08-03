@@ -48,12 +48,14 @@ export class AgentSelfMemory {
   readonly agentId: string
   readonly directory: string
   readonly projectRoot: string
-  private readonly appendLocks = new Map<AgentSelfMemoryKey, Promise<void>>()
+  private readonly appendLocks: Map<AgentSelfMemoryKey, Promise<void>>
 
   constructor(options: AgentSelfMemoryOptions) {
     this.agentId = normalizeAgentId(options.agentId)
     this.directory = resolve(options.directory ?? join(xerxesHome(), 'agent_memory', this.agentId))
     this.projectRoot = resolve(options.projectRoot ?? process.cwd())
+    this.appendLocks = selfMemoryLocks.get(this.directory) ?? new Map<AgentSelfMemoryKey, Promise<void>>()
+    selfMemoryLocks.set(this.directory, this.appendLocks)
   }
 
   async ensure(): Promise<void> {
@@ -85,8 +87,7 @@ export class AgentSelfMemory {
   async write(key: AgentSelfMemoryKey | string, content: string): Promise<void> {
     const normalized = normalizeKey(key)
     if (typeof content !== 'string') throw new ValidationError('content', 'must be a string', content)
-    await this.ensure()
-    await atomicWrite(this.pathFor(normalized), content)
+    await this.withAppendLock(normalized, () => this.writeUnlocked(normalized, content))
   }
 
   async append(key: AgentSelfMemoryKey | string, content: string): Promise<void> {
@@ -94,7 +95,7 @@ export class AgentSelfMemory {
     if (typeof content !== 'string') throw new ValidationError('content', 'must be a string', content)
     await this.withAppendLock(normalized, async () => {
       const existing = await this.read(normalized)
-      await this.write(normalized, existing + '\n' + content)
+      await this.writeUnlocked(normalized, existing + '\n' + content)
     })
   }
 
@@ -103,7 +104,7 @@ export class AgentSelfMemory {
     return this.withAppendLock(normalized, async () => {
       const content = await this.read(normalized)
       if (!content.includes(oldText)) return false
-      await this.write(normalized, content.replace(oldText, newText))
+      await this.writeUnlocked(normalized, content.replace(oldText, newText))
       return true
     })
   }
@@ -172,7 +173,7 @@ export class AgentSelfMemory {
       const index = content.indexOf(header)
       if (index < 0) {
         // Inline the append so the read-modify-write stays inside this lock.
-        await this.write('user_taste', content + '\n' + entry)
+        await this.writeUnlocked('user_taste', content + '\n' + entry)
         return
       }
       const afterHeader = index + header.length
@@ -180,7 +181,7 @@ export class AgentSelfMemory {
       const updated = nextSection < 0
         ? content + entry + '\n'
         : content.slice(0, nextSection) + entry + '\n' + content.slice(nextSection)
-      await this.write('user_taste', updated)
+      await this.writeUnlocked('user_taste', updated)
     })
   }
 
@@ -192,15 +193,17 @@ export class AgentSelfMemory {
   }
 
   async markSkillImplemented(name: string): Promise<void> {
-    const content = await this.read('skill_journal')
-    const marker = '### ' + name
-    const start = content.indexOf(marker)
-    if (start < 0) return
-    const next = content.indexOf('\n### ', start + marker.length)
-    const section = next < 0 ? content.slice(start) : content.slice(start, next)
-    if (!section.includes('Status: proposed')) return
-    const updated = content.slice(0, start) + section.replace('Status: proposed', 'Status: implemented') + (next < 0 ? '' : content.slice(next))
-    await this.write('skill_journal', updated)
+    await this.withAppendLock('skill_journal', async () => {
+      const content = await this.read('skill_journal')
+      const marker = '### ' + name
+      const start = content.indexOf(marker)
+      if (start < 0) return
+      const next = content.indexOf('\n### ', start + marker.length)
+      const section = next < 0 ? content.slice(start) : content.slice(start, next)
+      if (!section.includes('Status: proposed')) return
+      const updated = content.slice(0, start) + section.replace('Status: proposed', 'Status: implemented') + (next < 0 ? '' : content.slice(next))
+      await this.writeUnlocked('skill_journal', updated)
+    })
   }
 
   async systemPromptAddendum(): Promise<string> {
@@ -220,6 +223,11 @@ export class AgentSelfMemory {
 
   private pathFor(key: AgentSelfMemoryKey): string {
     return join(this.directory, KEY_FILES[key])
+  }
+
+  private async writeUnlocked(key: AgentSelfMemoryKey, content: string): Promise<void> {
+    await this.ensure()
+    await atomicWrite(this.pathFor(key), content)
   }
 
   private async withAppendLock<T>(key: AgentSelfMemoryKey, operation: () => Promise<T>): Promise<T> {
@@ -242,6 +250,7 @@ export class AgentSelfMemory {
 const AgentSelfMemoryKeyProjectContext: AgentSelfMemoryKey = 'project_context'
 const MAX_SELF_MEMORY_CACHE_ENTRIES = 256
 const memories = new Map<string, AgentSelfMemory>()
+const selfMemoryLocks = new Map<string, Map<AgentSelfMemoryKey, Promise<void>>>()
 
 /** Return a process-local per-agent self-memory instance. */
 export function getAgentSelfMemory(agentId = 'default'): AgentSelfMemory {

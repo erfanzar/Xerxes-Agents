@@ -9,6 +9,9 @@ import { xerxesHome } from '../daemon/paths.js'
 
 const GIT_COMMAND_TIMEOUT_MS = 30_000
 
+/** Mutating shadow-Git operations share an index and record log across manager instances. */
+const repositoryOperations = new Map<string, Promise<void>>()
+
 /** Paths the shadow repository never tracks or deletes: Xerxes state and common secret files. */
 const SHADOW_EXCLUDE_PATTERNS = [
   '.xerxes/snapshots/**',
@@ -138,13 +141,17 @@ export class SnapshotManager {
   }
 
   async prune(options: SnapshotPruneOptions = {}): Promise<number> {
+    return this.serializeRepositoryOperation(() => this.pruneUnlocked(options))
+  }
+
+  private async pruneUnlocked(options: SnapshotPruneOptions): Promise<number> {
     const keep = options.keep ?? 100
     if (!Number.isInteger(keep) || keep < 0) throw new RangeError('keep must be a non-negative integer')
     const records = this.list()
     if (records.length <= keep) return 0
     const retained = keep === 0 ? [] : records.slice(-keep)
     if (retained.length === 0) {
-      this.reset()
+      this.resetUnlocked()
       return records.length
     }
     // Re-anchor retained history on a fresh root commit so the pruned commits
@@ -154,48 +161,60 @@ export class SnapshotManager {
     const rewritten: SnapshotRecord[] = []
     let parent: string | undefined
     for (const record of retained) {
-      const tree = (await this.runGit(['rev-parse', `${record.commitSha}^{tree}`])).trim()
+      const tree = (await this.runGitUnlocked(['rev-parse', `${record.commitSha}^{tree}`])).trim()
       const args = ['commit-tree', tree, '-m', record.label || `snapshot-${record.createdAt}`]
       if (parent) args.push('-p', parent)
-      parent = (await this.runGit(args)).trim()
+      parent = (await this.runGitUnlocked(args)).trim()
       rewritten.push({ ...record, commitSha: parent })
     }
-    if (parent) await this.runGit(['update-ref', 'HEAD', parent])
+    if (parent) await this.runGitUnlocked(['update-ref', 'HEAD', parent])
     // Bare repositories normally keep no reflogs; expiry is best-effort.
-    await this.runGit(['reflog', 'expire', '--expire=now', '--all']).catch(() => '')
-    await this.runGit(['gc', '--prune=now', '--quiet'])
+    await this.runGitUnlocked(['reflog', 'expire', '--expire=now', '--all']).catch(() => '')
+    await this.runGitUnlocked(['gc', '--prune=now', '--quiet'])
     this.writeRecords(rewritten)
     return records.length - retained.length
   }
 
-  reset(): void {
+  async reset(): Promise<void> {
+    await this.serializeRepositoryOperation(async () => this.resetUnlocked())
+  }
+
+  private resetUnlocked(): void {
     rmSync(this.shadowDirectory, { recursive: true, force: true })
   }
 
   async rollback(ref: string): Promise<SnapshotRecord> {
+    return this.serializeRepositoryOperation(() => this.rollbackUnlocked(ref))
+  }
+
+  private async rollbackUnlocked(ref: string): Promise<SnapshotRecord> {
     const record = this.get(ref)
     if (!record) throw new Error(`snapshot not found: ${ref}`)
     // checkout-index overwrites modified files without a backup, so capture
     // the current tree first; the pre-rollback snapshot can itself be
     // rolled back to undo a mistaken restore.
-    await this.snapshot(`pre-rollback:${record.id}`)
+    await this.snapshotUnlocked(`pre-rollback:${record.id}`)
     // Full-tree restore: point the index at the snapshot tree, rewrite every
     // tracked file, then delete files the snapshot does not track. `-x` also
     // removes ignored build outputs created after the snapshot (plain `-fd`
     // would honor the workspace .gitignore and leave a mixed tree), while the
     // explicit `-e` patterns keep shadow-excluded secrets and Xerxes state.
-    await this.runGit(['read-tree', record.commitSha])
-    await this.runGit(['checkout-index', '-f', '-a'])
-    await this.runGit(['clean', '-fdx', ...SHADOW_EXCLUDE_PATTERNS.flatMap(pattern => ['-e', pattern])])
+    await this.runGitUnlocked(['read-tree', record.commitSha])
+    await this.runGitUnlocked(['checkout-index', '-f', '-a'])
+    await this.runGitUnlocked(['clean', '-fdx', ...SHADOW_EXCLUDE_PATTERNS.flatMap(pattern => ['-e', pattern])])
     return record
   }
 
   async snapshot(label = '', link: SnapshotLink = {}): Promise<SnapshotRecord> {
+    return this.serializeRepositoryOperation(() => this.snapshotUnlocked(label, link))
+  }
+
+  private async snapshotUnlocked(label = '', link: SnapshotLink = {}): Promise<SnapshotRecord> {
     await this.ensureRepository()
-    await this.runGit(['add', '-A'])
+    await this.runGitUnlocked(['add', '-A'])
     const message = label || `snapshot-${new Date().toISOString()}`
-    await this.runGit(['commit', '--allow-empty', '-m', message])
-    const commitSha = (await this.runGit(['rev-parse', 'HEAD'])).trim()
+    await this.runGitUnlocked(['commit', '--allow-empty', '-m', message])
+    const commitSha = (await this.runGitUnlocked(['rev-parse', 'HEAD'])).trim()
     const turnIndex = link.turnIndex
     const record: SnapshotRecord = {
       id: randomUUID().replaceAll('-', '').slice(0, 12),
@@ -219,23 +238,31 @@ export class SnapshotManager {
    * backup of its own.
    */
   async restoreFile(ref: string, filePath: string): Promise<SnapshotRestoreResult> {
+    return this.serializeRepositoryOperation(() => this.restoreFileUnlocked(ref, filePath))
+  }
+
+  private async restoreFileUnlocked(ref: string, filePath: string): Promise<SnapshotRestoreResult> {
     const record = this.get(ref)
     if (!record) throw new Error(`snapshot not found: ${ref}`)
     const path = this.workspaceRelativePath(filePath)
     await this.ensureRepository()
     // `cat-file -e` distinguishes "the snapshot never tracked this file" from a
     // genuine git failure, which `checkout` alone reports as the same error.
-    const tracked = await this.runGit(['cat-file', '-e', `${record.commitSha}:${path}`]).then(() => true, () => false)
+    const tracked = await this.runGitUnlocked(['cat-file', '-e', `${record.commitSha}:${path}`]).then(() => true, () => false)
     if (!tracked) throw new Error(`snapshot ${record.id} does not track ${path}`)
-    const previous = await this.snapshot(`pre-restore:${record.id}`)
+    const previous = await this.snapshotUnlocked(`pre-restore:${record.id}`)
     // `:(literal)` keeps a filename containing glob characters from being
     // expanded into a pathspec that would restore unrelated files.
-    await this.runGit(['checkout', record.commitSha, '--', `:(literal)${path}`])
+    await this.runGitUnlocked(['checkout', record.commitSha, '--', `:(literal)${path}`])
     return { path, previous, snapshot: record }
   }
 
   /** Run a command against the shadow repository for snapshot-diff consumers. */
   async runGit(args: readonly string[]): Promise<string> {
+    return this.serializeRepositoryOperation(() => this.runGitUnlocked(args))
+  }
+
+  private async runGitUnlocked(args: readonly string[]): Promise<string> {
     return runGitProcess(args, {
       cwd: this.workspaceDirectory,
       env: {
@@ -248,6 +275,21 @@ export class SnapshotManager {
         GIT_COMMITTER_EMAIL: 'snapshots@xerxes',
       },
     })
+  }
+
+  private async serializeRepositoryOperation<T>(operation: () => Promise<T>): Promise<T> {
+    const key = this.shadowDirectory
+    const previous = repositoryOperations.get(key) ?? Promise.resolve()
+    let release!: () => void
+    const current = new Promise<void>(resolveOperation => { release = resolveOperation })
+    repositoryOperations.set(key, current)
+    await previous.catch(() => undefined)
+    try {
+      return await operation()
+    } finally {
+      release()
+      if (repositoryOperations.get(key) === current) repositoryOperations.delete(key)
+    }
   }
 
   private appendRecord(record: SnapshotRecord): void {
