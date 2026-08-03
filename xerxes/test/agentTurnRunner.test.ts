@@ -127,6 +127,22 @@ test('agent turn runner maps portable loop events to daemon v35 event names', as
   }
 
   expect(events).toEqual([
+    // Live token counts arrive as soon as the provider round lands, ahead of
+    // the text it paid for, so the footer moves during the turn rather than
+    // only at the end. It carries no context estimate: that cannot change
+    // between rounds and re-counting it per response would be pure waste.
+    {
+      type: 'status_update',
+      payload: {
+        model: 'gpt-4o',
+        usage: { inputTokens: 3, outputTokens: 5 },
+        total_input_tokens: 3,
+        total_output_tokens: 5,
+        input_tokens: 3,
+        output_tokens: 5,
+        total_tokens: 8,
+      },
+    },
     { type: 'text_part', payload: { text: 'Hello from the real loop.' } },
     {
       type: 'status_update',
@@ -474,7 +490,7 @@ test('plan and researcher modes enforce read-only tool ceilings and a non-YOLO p
     for await (const _event of runner.run(restrictedSession, 'inspect only', new AbortController().signal)) {
       // Consume the turn so state and the provider request are final.
     }
-    expect(client.requests[0]?.tools?.map(tool => tool.function.name)).toEqual(['ReadFile'])
+    expect(client.requests[0]?.tools?.map(tool => tool.function.name)).toEqual(['ReadFile', 'SetInteractionModeTool'])
     expect(restrictedSession.metadata.permission_mode).toBe('plan')
     const systemPrompt = String(client.requests[0]?.messages[0]?.content)
     expect(systemPrompt).toContain(mode === 'plan'
@@ -577,6 +593,68 @@ test('agent turn runner caches a native bootstrap prompt only for the same works
     // A different agent profile must not reuse the default agent's bootstrap prompt.
   }
   expect(bootstrapCalls).toBe(2)
+})
+
+test('agent turn runner keeps generated prompts request-only while preserving caller-owned system messages', async () => {
+  const client = new CapturingClient()
+  const runner = new AgentTurnRunner({
+    bootstrapSystemPrompt: () => 'generated daemon bootstrap',
+    llm: client,
+    model: 'gpt-4o',
+  })
+  const session: DaemonSession = {
+    activeTurnId: '', agentId: 'default', cancelRequested: false, cwd: '/workspace/request-only', extra: {},
+    id: 'request-only-session', interactionMode: 'code', sessionKey: 'request-only', lastActive: 0,
+    messages: [{ role: 'system', content: 'caller-owned system instruction' }], metadata: {}, model: 'gpt-4o',
+    planMode: false, status: 'working', thinkingContent: [], toolExecutions: [], totalInputTokens: 0,
+    totalOutputTokens: 0, turnCount: 0, workspace: '/tmp/agents/default',
+  }
+
+  for await (const _event of runner.run(session, 'first', new AbortController().signal)) {}
+  for await (const _event of runner.run(session, 'second', new AbortController().signal)) {}
+
+  expect(client.requests).toHaveLength(2)
+  for (const request of client.requests) {
+    expect(request.messages.filter(message => message.role === 'system')).toEqual([
+      { role: 'system', content: 'generated daemon bootstrap' },
+      { role: 'system', content: 'caller-owned system instruction' },
+    ])
+  }
+  expect(session.messages.filter(message => message.role === 'system')).toEqual([
+    { role: 'system', content: 'caller-owned system instruction' },
+  ])
+})
+
+test('agent turn runner preserves legacy system messages without guessing their provenance', async () => {
+  const client = new CapturingClient()
+  const runner = new AgentTurnRunner({
+    bootstrapSystemPrompt: () => 'generated daemon bootstrap',
+    llm: client,
+    model: 'gpt-4o',
+  })
+  const session: DaemonSession = {
+    activeTurnId: '', agentId: 'default', cancelRequested: false, cwd: '/workspace/legacy-prompt', extra: {},
+    id: 'legacy-prompt-session', interactionMode: 'code', sessionKey: 'legacy-prompt', lastActive: 0,
+    messages: [
+      { role: 'system', content: 'generated daemon bootstrap' },
+      { role: 'system', content: 'caller-owned system instruction' },
+      { role: 'user', content: 'old request' },
+      { role: 'assistant', content: 'old response' },
+    ], metadata: {}, model: 'gpt-4o', planMode: false, status: 'working', thinkingContent: [], toolExecutions: [],
+    totalInputTokens: 0, totalOutputTokens: 0, turnCount: 1, workspace: '/tmp/agents/default',
+  }
+
+  for await (const _event of runner.run(session, 'continue', new AbortController().signal)) {}
+
+  expect(client.requests[0]?.messages.filter(message => message.role === 'system')).toEqual([
+    { role: 'system', content: 'generated daemon bootstrap' },
+    { role: 'system', content: 'generated daemon bootstrap' },
+    { role: 'system', content: 'caller-owned system instruction' },
+  ])
+  expect(session.messages.filter(message => message.role === 'system')).toEqual([
+    { role: 'system', content: 'generated daemon bootstrap' },
+    { role: 'system', content: 'caller-owned system instruction' },
+  ])
 })
 
 test('agent turn runner invalidates its bootstrap cache when the visible tool surface changes', async () => {

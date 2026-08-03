@@ -50,19 +50,18 @@ export function agentNameForMode(mode: unknown): InteractionModeAgentName {
 
 /** Return model-facing mode guidance without advertising an unavailable switch tool. */
 export function modeSwitchHint(mode: unknown, canSwitch = true): string {
+  const transitionHint = canSwitch
+    ? ' As the main agent, you may use SetInteractionModeTool to schedule code, researcher, plan, or objective mode for the next user turn. Finish this turn under the current mode and its current tool policy.'
+    : ''
   switch (normalizeInteractionMode(mode)) {
     case 'plan':
       return '[Mode control]\n'
         + 'You are in plan mode. Produce a plan only.'
-        + (canSwitch
-          ? ' Do not use SetInteractionModeTool to leave this mode; only the user or session host may do that.'
-          : '')
+        + transitionHint
     case 'researcher':
       return '[Mode control]\n'
         + 'You are in researcher mode. Gather evidence and answer with citations.'
-        + (canSwitch
-          ? ' Do not use SetInteractionModeTool to leave this mode; only the user or session host may do that.'
-          : '')
+        + transitionHint
     case 'objective':
       return '[Mode control]\n'
         + "You are in objective mode. Treat the user's requested outcome as a hard objective with acceptance "
@@ -72,15 +71,13 @@ export function modeSwitchHint(mode: unknown, canSwitch = true): string {
         + 'only after verification proves the objective is met, the user changes modes, or you are concretely '
         + 'blocked and can name the blocker plus the exact evidence.'
         + (canSwitch
-          ? ' Do not use SetInteractionModeTool to leave this mode; report verified completion or a concrete blocker and let the user or session host switch modes.'
+          ? ' When a leave condition is met, use SetInteractionModeTool to schedule code mode or another appropriate mode for the next user turn. The user or session host may also change modes.'
           : '')
     case 'code':
       return canSwitch
         ? '[Mode control]\n'
-          + 'Use code mode for normal implementation. To schedule a different policy for the next user turn, call '
-          + 'SetInteractionModeTool(mode="researcher") or SetInteractionModeTool(mode="plan"). If the user asks for '
-          + 'a measurable outcome that requires repeated attempts until tests, benchmarks, or checks pass, call '
-          + 'SetInteractionModeTool(mode="objective").'
+          + 'Use code mode for normal implementation.'
+          + transitionHint
         : ''
   }
 }

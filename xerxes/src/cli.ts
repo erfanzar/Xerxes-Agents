@@ -51,6 +51,7 @@ import { estimateContextTokens } from "./context/windowUsage.js";
 import { getContextLimit } from "./llms/providerRegistry.js";
 import { createLlmClient } from "./llms/client.js";
 import type { ChatMessage } from "./types/messages.js";
+import type { SpawnedAgentSnapshot } from "./operators/subagents.js";
 import { AgentMemory } from "./memory/agentMemory.js";
 import { getAgentSelfMemory } from "./memory/agentSelfMemory.js";
 import { ContextualMemory } from "./memory/contextualMemory.js";
@@ -1293,6 +1294,7 @@ async function runOneShot(prompt: string): Promise<void> {
   const sessionId = `oneshot-${crypto.randomUUID()}`;
   const state = createAgentState();
   const subagentCohort = subagentHost.turnCoordinator.begin(sessionId);
+  let pendingAgentEventSnapshots: readonly SpawnedAgentSnapshot[] = [];
   let wroteText = false;
   let terminalProviderError: string | undefined;
   try {
@@ -1316,8 +1318,15 @@ async function runOneShot(prompt: string): Promise<void> {
         ...(connection.topP !== undefined ? { topP: connection.topP } : {}),
       },
       {
-        awaitAgentEvents: async (signal) =>
-          formatSubagentResults(await subagentCohort.waitForResults(signal)),
+        awaitAgentEvents: async (signal) => {
+          pendingAgentEventSnapshots = await subagentCohort.waitForResults(signal);
+          return formatSubagentResults(pendingAgentEventSnapshots);
+        },
+        acknowledgeAgentEvents: () => {
+          if (!pendingAgentEventSnapshots.length) return;
+          subagentHost.turnCoordinator.consume(pendingAgentEventSnapshots);
+          pendingAgentEventSnapshots = [];
+        },
         llm,
         toolExecutor: tools,
       },

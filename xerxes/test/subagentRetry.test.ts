@@ -95,15 +95,18 @@ test('manager retry restarts a failed task under the same identity with the supp
     const task = await manager.spawn({ name: 'worker', prompt: 'boom task' })
     await manager.wait(task.id, 1_000)
     expect(task.status).toBe('failed')
+    expect(task.snapshot().attempt).toBe(0)
 
     const retried = await manager.retry('worker', 'fixed input')
     expect(retried).toBeDefined()
     expect(retried?.id).toBe(task.id)
     expect(retried?.name).toBe('worker')
     expect(retried?.status).not.toBe('failed')
+    expect(retried?.snapshot().attempt).toBe(1)
 
     await manager.wait(task.id, 1_000)
     expect(task.status).toBe('completed')
+    expect(task.snapshot().attempt).toBe(1)
     expect(runs).toEqual(['boom task', 'fixed input'])
   } finally {
     await manager.shutdown()

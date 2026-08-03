@@ -78,6 +78,10 @@ test('a retried provider attempt drops partial text, thinking, and stale tool ca
   expect(events.filter(event => event.type === 'provider_retry')).toEqual([
     expect.objectContaining({ attempt: 1, final: false }),
   ])
+  expect(events.filter(event => event.type === 'text').map(event => event.text)).toEqual([
+    'clean response',
+  ])
+  expect(events.filter(event => event.type === 'thinking')).toEqual([])
   const assistant = state.messages.filter(message => message.role === 'assistant')
   expect(assistant).toHaveLength(1)
   expect(assistant[0]).toMatchObject({ content: 'clean response' })
@@ -320,6 +324,118 @@ test('plugin hooks fire in turn order and before_tool_call mutates tool argument
     tool_call_id: 'call-hooks',
   })
   expect(events.at(-1)).toMatchObject({ type: 'turn_done' })
+})
+
+test('before_tool_call mutation is authorized as the exact effective call', async () => {
+  const hookRunner = new HookRunner()
+  hookRunner.register('before_tool_call', payload => ({
+    ...(payload.arguments as Record<string, unknown>),
+    path: 'mutated.ts',
+  }))
+
+  const permissionInputs: unknown[] = []
+  const executedInputs: unknown[] = []
+  const events = await collect(runTurn({
+    model: 'gpt-4o',
+    permissionMode: 'manual',
+    state: createAgentState(),
+    tools: [READ_FILE],
+    userMessage: 'read the file',
+  }, {
+    hookRunner,
+    llm: new (class implements LlmClient {
+      private calls = 0
+
+      async *stream(): AsyncGenerator<LlmDelta> {
+        this.calls += 1
+        if (this.calls === 1) {
+          yield {
+            toolCalls: [{
+              id: 'call-mutated-auth',
+              type: 'function',
+              function: { name: 'ReadFile', arguments: { path: 'original.ts' } },
+            }],
+          }
+          return
+        }
+        yield { content: 'done' }
+      }
+    })(),
+    permissionBroker: {
+      async request(request): Promise<'approve'> {
+        permissionInputs.push(request.inputs)
+        expect(request.toolCall.function.arguments).toEqual({ path: 'mutated.ts' })
+        return 'approve'
+      },
+    },
+    toolExecutor: {
+      async execute(call): Promise<string> {
+        executedInputs.push(call.function.arguments)
+        return 'body'
+      },
+    },
+  }))
+
+  expect(permissionInputs).toEqual([{ path: 'mutated.ts' }])
+  expect(executedInputs).toEqual([{ path: 'mutated.ts' }])
+  expect(events.filter(event => event.type === 'permission_request')).toHaveLength(1)
+})
+
+test('tool_permission_check denial and failure prevent execution', async () => {
+  for (const scenario of [
+    {
+      expectedReason: 'extension denied this path',
+      hook: () => ({ allow: false, reason: 'extension denied this path' }),
+    },
+    {
+      expectedReason: 'permission hook failed: permission database unavailable',
+      hook: () => { throw new Error('permission database unavailable') },
+    },
+  ]) {
+    const hookRunner = new HookRunner()
+    hookRunner.register('tool_permission_check', scenario.hook)
+    let executions = 0
+    const events = await collect(runTurn({
+      maxConsecutiveDenials: 1,
+      model: 'gpt-4o',
+      permissionMode: 'accept-all',
+      state: createAgentState(),
+      tools: [READ_FILE],
+      userMessage: 'read the file',
+    }, {
+      hookRunner,
+      llm: {
+        async *stream(): AsyncGenerator<LlmDelta> {
+          yield {
+            toolCalls: [{
+              id: 'call-extension-denied',
+              type: 'function',
+              function: { name: 'ReadFile', arguments: { path: 'secret.ts' } },
+            }],
+          }
+        },
+      },
+      toolExecutor: {
+        async execute(): Promise<string> {
+          executions += 1
+          return 'unreachable'
+        },
+      },
+    }))
+
+    expect(executions).toBe(0)
+    expect(events.filter(event => event.type === 'tool_start')).toEqual([])
+    expect(events.filter(event => event.type === 'tool_end')).toHaveLength(1)
+    expect(events.filter(event => event.type === 'tool_end')[0]).toMatchObject({
+      result: { permitted: false },
+    })
+    const denialText = events
+      .filter(event => event.type === 'tool_end')
+      .map(event => event.result.result)
+      .join('')
+    expect(denialText).toContain('Permission denied for ReadFile.')
+    expect(denialText).toContain(scenario.expectedReason)
+  }
 })
 
 test('on_error fires once for a terminal provider failure with the classified kind', async () => {

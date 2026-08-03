@@ -242,8 +242,11 @@ test('agent loop pairs model tool calls with results and preserves thinking sepa
     events.push(event)
   }
 
+  // usage_update lands once per provider round, so a two-round turn carries two
+  // of them: the footer and the agents panel update while work is still running
+  // rather than jumping once at turn_done.
   expect(events.map(event => event.type)).toEqual([
-    'text', 'thinking', 'text', 'tool_start', 'tool_end', 'text', 'turn_done',
+    'usage_update', 'text', 'thinking', 'text', 'tool_start', 'tool_end', 'usage_update', 'text', 'turn_done',
   ])
   expect(state.thinkingContent).toEqual(['private rationale', ''])
   expect(state.messages.map(message => message.role)).toEqual(['user', 'assistant', 'tool', 'assistant'])
@@ -616,6 +619,9 @@ test('a first output-token truncation regenerates the round with a wider window 
   expect(client.requests).toHaveLength(2)
   expect(client.requests[0]?.maxTokens).toBeUndefined()
   expect(client.requests[1]?.maxTokens).toBe(OUTPUT_LIMIT_RETRY_MAX_TOKENS)
+  expect(events.filter(event => event.type === 'text').map(event => event.text)).toEqual([
+    'The whole answer, start to finish.',
+  ])
   // The truncated half-thought is popped, so history holds one whole answer and
   // the model was never asked to continue from a severed sentence.
   expect(state.messages).toEqual([

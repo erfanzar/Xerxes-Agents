@@ -106,3 +106,19 @@ test('window usage counts provider scaffolding separately and includes it in liv
   expect(full).toBeGreaterThan(messageOnly)
   expect(estimateContextTokens([], { model: 'gpt-4o' })).toBe(0)
 })
+
+test('window usage counts transcript system messages without guessing their provenance', () => {
+  const systemPrompt = 'generated daemon bootstrap'
+  const callerSystem = 'caller-owned system instruction'
+  const withoutTranscriptCopy = estimateContextTokens([
+    { role: 'system', content: callerSystem },
+    { role: 'user', content: 'continue' },
+  ], { model: 'gpt-4o', systemPrompt })
+  const withTranscriptCopy = estimateContextTokens([
+    { role: 'system', content: systemPrompt },
+    { role: 'system', content: callerSystem },
+    { role: 'user', content: 'continue' },
+  ], { model: 'gpt-4o', systemPrompt })
+
+  expect(withTranscriptCopy).toBeGreaterThan(withoutTranscriptCopy)
+})

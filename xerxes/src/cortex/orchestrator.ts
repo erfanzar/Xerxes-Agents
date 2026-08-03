@@ -190,7 +190,9 @@ export class CortexOrchestrator {
         states.set(task.id, output.status)
       }
       if (process === CortexProcess.PARALLEL) {
-        await mapConcurrent(runnable, this.maxParallel, execute)
+        await mapConcurrent(runnable, this.maxParallel, execute, () => (
+          failFast && [...outputs.values()].some(output => output.status === 'failed')
+        ))
         if (failFast) throwIfRunFailed(outputs)
       } else {
         for (const task of runnable) {
@@ -208,9 +210,11 @@ export class CortexOrchestrator {
     const failedCount = taskOutputs.filter(output => output.status === 'failed').length
     const skippedCount = taskOutputs.filter(output => output.status === 'skipped').length
     const succeededCount = taskOutputs.filter(output => output.status === 'succeeded').length
-    const status: CortexRunStatus = failedCount === 0
+    // An empty graph is intentionally a successful no-op. Every non-empty run
+    // must complete all tasks successfully to receive the same aggregate status.
+    const status: CortexRunStatus = taskOutputs.length === 0 || succeededCount === taskOutputs.length
       ? 'succeeded'
-      : succeededCount === 0 && skippedCount === 0
+      : failedCount === taskOutputs.length
         ? 'failed'
         : 'partial'
     const result: CortexRunOutput = {
@@ -367,11 +371,16 @@ function failedOutput(task: CortexTask, startedAt: Date, completedAt: Date, erro
   }
 }
 
-async function mapConcurrent<T>(items: readonly T[], maxParallel: number, run: (item: T) => Promise<void>): Promise<void> {
+async function mapConcurrent<T>(
+  items: readonly T[],
+  maxParallel: number,
+  run: (item: T) => Promise<void>,
+  shouldStop: () => boolean = () => false,
+): Promise<void> {
   const workerCount = Math.min(items.length, maxParallel)
   let next = 0
   const worker = async (): Promise<void> => {
-    while (next < items.length) {
+    while (next < items.length && !shouldStop()) {
       const index = next
       next += 1
       const item = items[index]

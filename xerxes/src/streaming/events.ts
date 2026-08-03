@@ -81,6 +81,20 @@ export type StreamEvent =
     /** True only when every provider round supplied exact token usage. */
     readonly usageComplete?: boolean
   }
+  | {
+    /** Running totals for the turn so far, so consumers never re-accumulate. */
+    readonly cumulative: TokenUsage
+    readonly model: string
+    /**
+     * Token usage from one provider round, emitted as soon as it lands.
+     *
+     * Without this the only usage signal is `turn_done`, so a long turn shows
+     * nothing at all until it finishes — which is exactly when the numbers
+     * stop being interesting.
+     */
+    readonly type: 'usage_update'
+    readonly usage: TokenUsage
+  }
   | { readonly description: string; readonly skillName: string; readonly sourcePath: string; readonly toolCount: number; readonly type: 'skill_suggestion'; readonly uniqueTools: readonly string[]; readonly version: string }
 
 export function createAgentState(messages: import('../types/messages.js').ChatMessage[] = []): AgentState {

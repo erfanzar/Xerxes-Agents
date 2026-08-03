@@ -6,6 +6,7 @@ import { mergePersistedSubagentSnapshots } from '../agents/subagentPersistence.j
 import type { SubagentTurnCoordinator } from '../daemon/subagentCoordinator.js'
 import { formatSubagentResults } from '../daemon/turnRunner.js'
 import type { LlmClient } from '../llms/client.js'
+import type { SpawnedAgentSnapshot } from '../operators/subagents.js'
 import { createAgentState, type AgentState, type PermissionRequest, type StreamEvent } from '../streaming/events.js'
 import { runTurn } from '../streaming/loop.js'
 import type { PermissionBroker, PermissionDecision, PermissionMode, ToolPolicy } from '../streaming/permissions.js'
@@ -145,6 +146,7 @@ export class AcpAgentRunner {
     state.metadata.permission_mode = permissionMode
     const summary: Record<string, unknown> = { ok: true, cancelled: false }
     const subagentCohort = this.options.subagentCoordinator?.begin(session.sessionId)
+    let pendingAgentEventSnapshots: readonly SpawnedAgentSnapshot[] = []
 
     try {
       const permissionBroker: PermissionBroker = {
@@ -166,9 +168,14 @@ export class AcpAgentRunner {
       }, {
         ...(subagentCohort ? {
           awaitAgentEvents: async signal => {
-            const snapshots = await subagentCohort.waitForResults(signal)
-            mergePersistedSubagentSnapshots(state.metadata, snapshots)
-            return formatSubagentResults(snapshots)
+            pendingAgentEventSnapshots = await subagentCohort.waitForResults(signal)
+            mergePersistedSubagentSnapshots(state.metadata, pendingAgentEventSnapshots)
+            return formatSubagentResults(pendingAgentEventSnapshots)
+          },
+          acknowledgeAgentEvents: () => {
+            if (!pendingAgentEventSnapshots.length) return
+            this.options.subagentCoordinator?.consume(pendingAgentEventSnapshots)
+            pendingAgentEventSnapshots = []
           },
         } : {}),
         llm: this.options.llm,

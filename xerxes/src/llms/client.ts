@@ -385,6 +385,14 @@ export class ResponsesApiClient implements LlmClient {
   }
 
   async complete(request: CompletionRequest, signal?: AbortSignal): Promise<LlmCompletion> {
+    // The ChatGPT backend serves streaming responses only and answers a
+    // non-streamed request with `400 Stream must be set to true`. Collecting
+    // our own stream keeps every non-streaming caller — /compact, session
+    // titling, memory extraction — working instead of failing on a transport
+    // detail they have no reason to know about.
+    if (this.providerName === 'openai-codex') {
+      return collectLlmCompletion(this.stream(request, signal))
+    }
     const endpoint = new URL('responses', withTrailingSlash(this.baseUrl)).toString()
     const response = await this.fetchImplementation(endpoint, {
       method: 'POST',

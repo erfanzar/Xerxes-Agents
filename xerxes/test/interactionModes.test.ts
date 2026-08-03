@@ -37,9 +37,12 @@ test('model-facing hints retain objective completion guidance and safe transitio
 
   expect(objectiveHint).toContain('acceptance criteria')
   expect(objectiveHint).toContain('Do not final-answer')
-  expect(objectiveHint).toContain('user or session host switch modes')
+  expect(objectiveHint).toContain('schedule code mode')
+  expect(objectiveHint).toContain('next user turn')
   expect(modeSwitchHint('plan')).toContain('Produce a plan only')
+  expect(modeSwitchHint('plan')).toContain('schedule code, researcher, plan, or objective mode')
   expect(modeSwitchHint('research')).toContain('Gather evidence and answer with citations')
+  expect(modeSwitchHint('research')).toContain('next user turn')
   expect(modeSwitchHint('unknown')).toContain('Use code mode for normal implementation')
   expect(modeSwitchHint('code', false)).toBe('')
   expect(modeSwitchHint('plan', false)).not.toContain('SetInteractionModeTool')

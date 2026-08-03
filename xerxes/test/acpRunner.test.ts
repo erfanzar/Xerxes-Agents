@@ -209,8 +209,11 @@ test('ACP agent runner waits for editor approval and feeds the decision back int
     tool_calls_count: 1,
     model: 'gpt-4o',
   })
+  // usage_update is surfaced to editors as its own kind, once per provider
+  // round, so a client can show live token counts instead of guessing.
   expect(events.map(event => event.kind)).toEqual([
-    'permission_request', 'tool_call_start', 'tool_call_end', 'text_delta', 'turn_end',
+    'usage_update', 'permission_request', 'tool_call_start', 'tool_call_end',
+    'usage_update', 'text_delta', 'turn_end',
   ])
   expect(runner.stateFor(sessionId)?.messages).toMatchObject([
     { role: 'user', content: 'write the note' },

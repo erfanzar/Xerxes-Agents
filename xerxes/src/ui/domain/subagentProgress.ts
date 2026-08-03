@@ -41,6 +41,8 @@ export function mergeSubagentProgress(
     outputTail,
     outputTokens: payload.output_tokens ?? base.outputTokens,
     parentId: payload.parent_id ?? base.parentId,
+    cacheReadTokens: payload.cache_read_tokens ?? base.cacheReadTokens,
+    cacheCreationTokens: payload.cache_creation_tokens ?? base.cacheCreationTokens,
     reasoningTokens: payload.reasoning_tokens ?? base.reasoningTokens,
     rules: payload.rules ?? base.rules,
     summary: payload.summary ?? base.summary,

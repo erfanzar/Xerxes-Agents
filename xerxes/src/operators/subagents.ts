@@ -36,6 +36,8 @@ export type SubagentRunner = (
 
 export interface SpawnedAgentSnapshot {
   readonly agentId: string
+  /** Zero-based execution generation, incremented for every identity-preserving retry. */
+  readonly attempt?: number
   readonly apiCalls?: number
   readonly closed: boolean
   readonly completionSummary?: string
@@ -47,6 +49,8 @@ export interface SpawnedAgentSnapshot {
   /** Canonical hex daemon transcript id used to inspect or resume this child conversation. */
   readonly historySessionId?: string
   readonly id: string
+  readonly cacheCreationTokens?: number
+  readonly cacheReadTokens?: number
   readonly inputTokens?: number
   readonly lastInput?: string
   readonly lastOutput?: string

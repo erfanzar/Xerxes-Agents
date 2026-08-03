@@ -8,7 +8,9 @@ import { join } from 'node:path'
 
 import { BUILTIN_AGENTS, type AgentDefinition } from '../src/agents/definitions.js'
 import {
+  persistedSubagentDeliveryValues,
   persistedSubagentSnapshotValues,
+  replacePersistedSubagentDeliveries,
   replacePersistedSubagentSnapshots,
 } from '../src/agents/subagentPersistence.js'
 import {
@@ -194,7 +196,10 @@ test('the next parent turn rejoins an interrupted child and delivers its result 
   }
   const resumedTurn = coordinator.begin(sourceId)
   expect(coordinator.trackedIds(sourceId)).toEqual([snapshot.id])
-  expect(await resumedTurn.waitForResults()).toEqual([snapshot])
+  const resumedResults = await resumedTurn.waitForResults()
+  expect(resumedResults).toEqual([snapshot])
+  // The parent acknowledges only after formatting/injection succeeded.
+  coordinator.consume(resumedResults)
   resumedTurn.close()
 
   const followingTurn = coordinator.begin(sourceId)
@@ -202,6 +207,78 @@ test('the next parent turn rejoins an interrupted child and delivers its result 
   expect(await followingTurn.waitForResults()).toEqual([])
   expect(waitCalls).toBe(1)
   followingTurn.close()
+})
+
+test('delivered generations persist across restart while a retried generation remains deliverable', async () => {
+  const sourceId = 'delivery-restart-parent'
+  const snapshot = (attempt: number): SpawnedAgentSnapshot => ({
+    agentId: 'researcher',
+    attempt,
+    closed: false,
+    createdAt: '2026-07-16T00:00:00.000Z',
+    id: 'stable-retry-id',
+    lastOutput: `attempt ${attempt} result`,
+    name: 'stable-retry-name',
+    promptProfile: 'researcher',
+    queueSize: 0,
+    sourceAgentId: sourceId,
+    status: 'completed',
+    title: 'Retry delivery',
+    updatedAt: `2026-07-16T00:0${attempt}:00.000Z`,
+  } as SpawnedAgentSnapshot)
+
+  const first = snapshot(1)
+  const firstCoordinator = new NativeSubagentTurnCoordinator({
+    async waitFor(predicate): Promise<boolean> { return predicate() },
+  }, () => [first])
+  firstCoordinator.consume([first])
+  const metadata: Record<string, unknown> = {}
+  replacePersistedSubagentDeliveries(metadata, firstCoordinator.deliveredState())
+
+  const restartedSameAttempt = new NativeSubagentTurnCoordinator({
+    async waitFor(predicate): Promise<boolean> { return predicate() },
+  }, () => [first])
+  restartedSameAttempt.hydrateDelivered(persistedSubagentDeliveryValues(metadata))
+  expect(restartedSameAttempt.trackedIds(sourceId)).toEqual([])
+  expect(await restartedSameAttempt.begin(sourceId).waitForResults()).toEqual([])
+
+  const retried = snapshot(2)
+  const restartedRetry = new NativeSubagentTurnCoordinator({
+    async waitFor(predicate): Promise<boolean> { return predicate() },
+  }, () => [retried])
+  restartedRetry.hydrateDelivered(persistedSubagentDeliveryValues(metadata))
+  const retryCohort = restartedRetry.begin(sourceId)
+  expect(restartedRetry.trackedIds(sourceId)).toEqual([retried.id])
+  expect(await retryCohort.waitForResults()).toEqual([retried])
+})
+
+test('coordinator does not consume joined results before parent injection succeeds', async () => {
+  const snapshot: SpawnedAgentSnapshot = {
+    agentId: 'researcher',
+    closed: false,
+    createdAt: '2026-07-16T00:00:00.000Z',
+    id: 'retry-after-injection-failure',
+    lastOutput: 'finished result',
+    name: 'retry-after-injection-failure',
+    promptProfile: 'researcher',
+    queueSize: 0,
+    sourceAgentId: 'injection-parent',
+    status: 'completed',
+    title: 'Injection retry',
+    updatedAt: '2026-07-16T00:01:00.000Z',
+  }
+  const coordinator = new NativeSubagentTurnCoordinator({
+    async waitFor(predicate): Promise<boolean> { return predicate() },
+  }, () => [snapshot])
+
+  const failedTurn = coordinator.begin('injection-parent')
+  expect(await failedTurn.waitForResults()).toEqual([snapshot])
+  failedTurn.close()
+  const retryTurn = coordinator.begin('injection-parent')
+  expect(await retryTurn.waitForResults()).toEqual([snapshot])
+  coordinator.consume([snapshot])
+  retryTurn.close()
+  expect(coordinator.trackedIds('injection-parent')).toEqual([])
 })
 
 test('resumed transcript recovery and cohort tracking have no 8-agent cap', async () => {
@@ -267,10 +344,10 @@ test('joined subagent results stay inside one hard context budget for large coho
   const thirtyThree = formatSubagentResults(snapshots.slice(0, 33))
   const thousand = formatSubagentResults(snapshots)
 
-  expect(thirtyThree.join('\n').length).toBeLessThanOrEqual(64_000)
+  expect(thirtyThree.join('\n').length).toBeLessThanOrEqual(16_000)
   expect(thirtyThree).toHaveLength(33)
   expect(thirtyThree.at(-1)).toContain('large-agent-32')
-  expect(thousand.join('\n').length).toBeLessThanOrEqual(64_000)
+  expect(thousand.join('\n').length).toBeLessThanOrEqual(16_000)
   expect(thousand).toHaveLength(65)
   expect(thousand.at(-1)).toContain('omitted count=936')
   expect(thousand.at(-1)).toContain('paged TaskListTool')
@@ -361,6 +438,7 @@ test('compact foreground batches and awaits retain one bounded coordinator deliv
 
   const joined = await largeCohort.waitForResults()
   const joinedPayload = formatSubagentResults(joined)
+  coordinator.consume(joined)
   expect(joined).toHaveLength(9)
   expect(joinedPayload.join('\n').length).toBeLessThanOrEqual(64_000)
   expect(joinedPayload.join('\n')).toContain('result from large-8')

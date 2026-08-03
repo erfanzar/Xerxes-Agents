@@ -39,7 +39,9 @@ test('Responses API translator streams text and thinking while assembling functi
     { thinking: 'Need the project file.' },
     {
       finishReason: 'tool_calls',
-      usage: { inputTokens: 12, outputTokens: 7, cacheReadTokens: 3, reasoningTokens: 2 },
+      // input_tokens 12 includes the 3 cached, so fresh is 9 and the pair
+      // still sums to the 12-token prompt the provider measured.
+      usage: { inputTokens: 9, outputTokens: 7, cacheReadTokens: 3, reasoningTokens: 2 },
       toolCalls: [{
         id: 'item_1',
         type: 'function',
@@ -48,7 +50,7 @@ test('Responses API translator streams text and thinking while assembling functi
     },
   ])
   expect(translator.usage).toEqual({
-    inputTokens: 12,
+    inputTokens: 9,
     outputTokens: 7,
     cacheReadTokens: 3,
     reasoningTokens: 2,
@@ -177,4 +179,57 @@ test('Responses API translator surfaces incomplete responses with a mapped finis
     },
   ])]
   expect(filtered).toEqual([{ finishReason: 'content_filter', usage: { inputTokens: 0, outputTokens: 0 } }])
+})
+
+test('cached prompt tokens are reported apart from fresh ones, not counted twice', () => {
+  // The Responses API reports `input_tokens` as the whole prompt with
+  // `cached_tokens` a subset of it — the opposite of Anthropic, where the two
+  // are disjoint. Consumers add the pair to size a prompt, so leaving the
+  // overlap in makes a cache hit look like extra context consumed, and the
+  // reported context then tracks cache luck instead of actual usage.
+  const [delta] = [...new ResponsesEventTranslator().translateAll([
+    {
+      type: 'response.completed',
+      response: {
+        status: 'completed',
+        usage: { input_tokens: 2_712, output_tokens: 5, input_tokens_details: { cached_tokens: 1_792 } },
+      },
+    },
+  ])]
+
+  expect(delta?.usage?.inputTokens).toBe(920)
+  expect(delta?.usage?.cacheReadTokens).toBe(1_792)
+  expect((delta?.usage?.inputTokens ?? 0) + (delta?.usage?.cacheReadTokens ?? 0)).toBe(2_712)
+})
+
+test('an identical prompt reports the same total whether or not the cache hit', () => {
+  const measure = (cached: number) => {
+    const [delta] = [...new ResponsesEventTranslator().translateAll([
+      {
+        type: 'response.completed',
+        response: {
+          status: 'completed',
+          usage: { input_tokens: 2_712, output_tokens: 5, input_tokens_details: { cached_tokens: cached } },
+        },
+      },
+    ])]
+    return (delta?.usage?.inputTokens ?? 0) + (delta?.usage?.cacheReadTokens ?? 0)
+  }
+
+  expect(measure(0)).toBe(measure(1_792))
+})
+
+test('a cached count above the input total never yields negative tokens', () => {
+  const [delta] = [...new ResponsesEventTranslator().translateAll([
+    {
+      type: 'response.completed',
+      response: {
+        status: 'completed',
+        usage: { input_tokens: 100, output_tokens: 5, input_tokens_details: { cached_tokens: 500 } },
+      },
+    },
+  ])]
+
+  // A negative count would silently corrupt every downstream sum.
+  expect(delta?.usage?.inputTokens).toBe(0)
 })

@@ -60,22 +60,61 @@ test('interaction mode tool rejects unknown modes before invoking the host', asy
   expect(called).toBeFalse()
 })
 
-test('interaction mode tool cannot let the model escape an active guarded mode', async () => {
-  const registry = new ToolRegistry()
-  let called = false
-  registerInteractionModeTool(registry, {
-    setMode() {
-      called = true
-      return { mode: 'code', planMode: false }
-    },
-  })
+test('authorized main agent can schedule transitions from every guarded mode', async () => {
+  for (const [currentMode, nextMode] of [
+    ['plan', 'researcher'],
+    ['researcher', 'objective'],
+    ['objective', 'code'],
+  ] as const) {
+    const registry = new ToolRegistry()
+    const requests: Array<Record<string, unknown>> = []
+    const metadata: Record<string, unknown> = { interaction_mode: currentMode, session_kind: 'main' }
+    registerInteractionModeTool(registry, {
+      setMode(request) {
+        requests.push(request)
+        return { mode: request.mode, planMode: request.mode === 'plan' }
+      },
+    })
 
-  await expect(registry.execute({
-    id: 'mode-guarded-exit',
-    type: 'function',
-    function: { name: 'SetInteractionModeTool', arguments: { mode: 'code' } },
-  }, { metadata: { interaction_mode: 'objective' } })).rejects.toThrow(
-    'user or session host must switch modes',
-  )
-  expect(called).toBeFalse()
+    const result = JSON.parse(await registry.execute({
+      id: `mode-${currentMode}-to-${nextMode}`,
+      type: 'function',
+      function: { name: 'SetInteractionModeTool', arguments: { mode: nextMode, reason: 'next policy' } },
+    }, { agentId: 'main-agent', metadata, sessionId: 'session-main' }))
+
+    expect(requests).toEqual([{
+      context: { agentId: 'main-agent', metadata, sessionId: 'session-main' },
+      mode: nextMode,
+      reason: 'next policy',
+    }])
+    expect(result.mode).toBe(nextMode)
+    expect(result.guidance).toContain('next user turn')
+    expect(metadata.pending_interaction_mode).toBe(nextMode)
+  }
+})
+
+test('interaction mode tool rejects subagent scheduling even if exposed by a host', async () => {
+  for (const metadata of [
+    { session_kind: 'subagent' },
+    { subagent_id: 'child-1' },
+  ]) {
+    const registry = new ToolRegistry()
+    let called = false
+    registerInteractionModeTool(registry, {
+      setMode() {
+        called = true
+        return { mode: 'plan', planMode: true }
+      },
+    })
+
+    await expect(registry.execute({
+      id: 'mode-subagent',
+      type: 'function',
+      function: { name: 'SetInteractionModeTool', arguments: { mode: 'plan' } },
+    }, { agentId: 'child-1', metadata, sessionId: 'session-child' })).rejects.toThrow(
+      'only the main agent may schedule interaction-mode transitions',
+    )
+    expect(called).toBeFalse()
+    expect(metadata).not.toHaveProperty('pending_interaction_mode')
+  }
 })

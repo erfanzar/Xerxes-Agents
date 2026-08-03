@@ -6,6 +6,7 @@
 // pulls renderer state into the native OpenTUI bundle.
 // Keep this file free of framework imports; only Theme/Usage types.
 import type { Theme } from '../theme.js'
+import { fmtK } from '../lib/text.js'
 import type { Usage } from '../types.js'
 
 export function ctxBarColor(pct: number | undefined, t: Theme) {
@@ -74,4 +75,20 @@ export function sessionDisplayTitle(sessionTitle?: null | string, firstUserMessa
   const title = explicit && !/^tui:[0-9a-f]+$/i.test(explicit) ? explicit : fallback
 
   return title.length > max ? `${title.slice(0, Math.max(1, max - 1)).trimEnd()}…` : title
+}
+
+/**
+ * Compact `in/out/cached` token row for the footer.
+ *
+ * Cached is shown separately rather than folded into input because they are
+ * priced and cached differently, and because a reader watching a long turn
+ * wants to see the cache doing its job. Zero-valued parts are omitted so an
+ * uncached provider does not carry a permanent `0c`.
+ */
+export function tokenBreakdown(usage: Usage): string {
+  const parts: string[] = []
+  if (usage.input) parts.push(`${fmtK(usage.input)} in`)
+  if (usage.output) parts.push(`${fmtK(usage.output)} out`)
+  if (usage.cache_read) parts.push(`${fmtK(usage.cache_read)} cached`)
+  return parts.join(" · ")
 }

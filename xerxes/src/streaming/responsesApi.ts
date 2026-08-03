@@ -159,7 +159,12 @@ export class ResponsesEventTranslator {
     const reasoningTokens = finiteNumber(outputDetails.reasoning_tokens)
     this.completePendingCalls()
     this.usage = {
-      inputTokens: finiteNumber(usage.input_tokens) ?? 0,
+      // `input_tokens` is the whole prompt here and `cached_tokens` is a subset
+      // of it, the opposite of Anthropic where the two are disjoint. Consumers
+      // add the pair to size a prompt, so the overlap is removed to match that
+      // convention — otherwise a cache hit inflates reported context by however
+      // much was cached, and the number tracks cache luck instead of usage.
+      inputTokens: freshInputTokens(finiteNumber(usage.input_tokens) ?? 0, cacheReadTokens),
       outputTokens: finiteNumber(usage.output_tokens) ?? 0,
       toolCalls: this.usage.toolCalls,
       finishReason: completedFinishReason(stringValue(response.status), this.usage.toolCalls.length > 0),
@@ -253,6 +258,18 @@ function tokenUsage(usage: ResponsesUsage): TokenUsage {
 
 function finiteNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+/**
+ * Prompt tokens that were not served from cache.
+ *
+ * Guarded rather than a bare subtraction: a provider reporting a cached count
+ * above its own input total would otherwise yield a negative token count that
+ * silently corrupts every downstream sum.
+ */
+function freshInputTokens(inputTokens: number, cacheReadTokens: number | undefined): number {
+  if (cacheReadTokens === undefined) return inputTokens
+  return Math.max(0, inputTokens - cacheReadTokens)
 }
 
 function recordValue(value: unknown): Readonly<Record<string, unknown>> {
