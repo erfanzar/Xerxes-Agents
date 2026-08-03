@@ -2112,7 +2112,9 @@ export class DaemonServer {
         model,
         this.contextLimit(model),
         this.channelStatusData(),
-        stringValue(this.runtime.status().reasoning_effort) || "off",
+        session.reasoningEffort
+        || stringValue(this.runtime.status().reasoning_effort)
+        || "off",
         runtimePermissionMode(this.runtime.status().permission_mode),
       ),
     );
@@ -2743,8 +2745,14 @@ export class DaemonServer {
     connection: DaemonTransportConnection,
     raw: string,
   ): Promise<JsonRpcPayload> {
+    // This session's own effort, not the daemon-wide one: with two sessions
+    // open those differ, and naming the global value would report an effort
+    // this session is not running at.
+    const active = this.runtime.sessionStatus(connection.activeSessionKey);
     const current =
-      stringValue(this.runtime.status().reasoning_effort) || REASONING_OFF;
+      active?.reasoningEffort
+      || stringValue(this.runtime.status().reasoning_effort)
+      || REASONING_OFF;
     const levels = await this.reasoningLevels();
     const offered = selectableEfforts(levels);
     const requested = raw.trim();
@@ -2767,13 +2775,24 @@ export class DaemonServer {
       );
       return { ok: false, error: "invalid reasoning effort", levels: offered };
     }
-    this.runtime.reload({
-      reasoning_effort: resolved,
-      thinking: resolved !== REASONING_OFF,
-    });
-    const active = this.profileStore.active();
-    if (active) {
-      this.profileStore.updateSampling(active.name, {
+    // Scoped to this session so a second open session keeps its own effort;
+    // only a host without the session-level setter falls back to the global
+    // reload, which moves every unpinned session at once.
+    const pinned = await this.runtime.setSessionReasoning?.(
+      connection.activeSessionKey,
+      resolved,
+    );
+    if (!pinned) {
+      this.runtime.reload({
+        reasoning_effort: resolved,
+        thinking: resolved !== REASONING_OFF,
+      });
+    }
+    // Still recorded as the default for sessions opened later; it no longer
+    // retargets sessions already running.
+    const profile = this.profileStore.active();
+    if (profile) {
+      this.profileStore.updateSampling(profile.name, {
         reasoning_effort: resolved,
         thinking: resolved !== REASONING_OFF,
       });
@@ -5263,8 +5282,11 @@ export class DaemonServer {
       mode: session.interactionMode,
       plan_mode: session.planMode,
       ultra_mode: session.ultraMode === true,
-      reasoning_effort:
-        stringValue(this.runtime.status().reasoning_effort) || "off",
+      // Session-first: with two sessions open the daemon-wide value names an
+      // effort this session may not be running at.
+      reasoning_effort: session.reasoningEffort
+        || stringValue(this.runtime.status().reasoning_effort)
+        || "off",
       permission_mode: runtimePermissionMode(
         this.runtime.status().permission_mode,
       ),

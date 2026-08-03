@@ -67,6 +67,15 @@ export interface DaemonSession {
    * last stored.
    */
   modelPinned?: boolean;
+  /**
+   * Reasoning effort this session runs at, when it owns one.
+   *
+   * Same reasoning as the model: two open sessions may legitimately want
+   * different efforts, and a resumed conversation should continue at the
+   * effort it was held at rather than adopting the daemon default.
+   */
+  reasoningEffort?: string;
+  reasoningPinned?: boolean;
   planMode: boolean;
   /**
    * Provider-request scaffolding the turn runner assembles for this session:
@@ -238,6 +247,11 @@ export interface DaemonRuntime {
   setSessionModel?(
     sessionKey: string,
     model: string,
+  ): Promise<DaemonSession | undefined>;
+  /** Pin one session to a reasoning effort without disturbing any other. */
+  setSessionReasoning?(
+    sessionKey: string,
+    effort: string,
   ): Promise<DaemonSession | undefined>;
   /**
    * Optional session-scoped ultra mode toggle. Kept optional on the
@@ -709,6 +723,12 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
       if (!session.modelPinned) {
         session.model = model;
       }
+      if (!session.reasoningPinned) {
+        const effort = stringValue(this.runtimeSettings.reasoning_effort);
+        if (effort) {
+          session.reasoningEffort = effort;
+        }
+      }
     }
     return this.status();
   }
@@ -746,6 +766,24 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     // Pinned from here on, so a later global reload cannot silently move this
     // session onto another session's model.
     session.modelPinned = true;
+    session.lastActive = Date.now();
+    return session;
+  }
+
+  async setSessionReasoning(
+    sessionKey: string,
+    effort: string,
+  ): Promise<DaemonSession | undefined> {
+    const session = this.sessions.get(sessionKey);
+    if (!session) {
+      return undefined;
+    }
+    const chosen = effort.trim();
+    if (!chosen) {
+      return session;
+    }
+    session.reasoningEffort = chosen;
+    session.reasoningPinned = true;
     session.lastActive = Date.now();
     return session;
   }
@@ -1049,7 +1087,11 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
       // Stamped so a later resume can restore the model this history was
       // written with instead of silently adopting whatever the profile last
       // stored, which could be a different provider entirely.
-      metadata: { ...session.metadata, model: session.model },
+      metadata: {
+        ...session.metadata,
+        model: session.model,
+        ...(session.reasoningEffort ? { reasoning_effort: session.reasoningEffort } : {}),
+      },
       pendingResumeReplays: [],
       planMode: session.planMode,
       schemaVersion: undefined,
@@ -1161,6 +1203,12 @@ function sessionFromTranscript(
     // model that produced it, not silently move it to another provider.
     model: stringValue(transcript.metadata.model) || model,
     modelPinned: Boolean(stringValue(transcript.metadata.model)),
+    ...(stringValue(transcript.metadata.reasoning_effort)
+      ? {
+          reasoningEffort: stringValue(transcript.metadata.reasoning_effort),
+          reasoningPinned: true,
+        }
+      : {}),
     planMode: interactionMode === "plan",
     status: "idle",
     thinkingContent: [...transcript.thinkingContent],

@@ -108,3 +108,62 @@ test('setting an empty model leaves the session untouched', async () => {
     expect(runtime.sessionStatus('blank')?.model).toBe('claude-code/default')
   })
 })
+
+test('two open sessions hold different reasoning efforts at the same time', async () => {
+  await inRuntime(async runtime => {
+    await runtime.openSession('alpha')
+    await runtime.openSession('beta')
+
+    await runtime.setSessionReasoning('alpha', 'xhigh')
+
+    // Same reasoning as the model: choosing in one session must not retarget
+    // the other, which a daemon-wide effort made unavoidable.
+    expect(runtime.sessionStatus('alpha')?.reasoningEffort).toBe('xhigh')
+    expect(runtime.sessionStatus('beta')?.reasoningEffort).toBeUndefined()
+  })
+})
+
+test('a global reload leaves a session that picked its own effort alone', async () => {
+  await inRuntime(async runtime => {
+    await runtime.openSession('pinned')
+    await runtime.openSession('follower')
+    await runtime.setSessionReasoning('pinned', 'max')
+
+    runtime.reload({ reasoning_effort: 'low' })
+
+    expect(runtime.sessionStatus('pinned')?.reasoningEffort).toBe('max')
+    expect(runtime.sessionStatus('follower')?.reasoningEffort).toBe('low')
+  })
+})
+
+test('resuming history continues at the effort it was held at', async () => {
+  await inRuntime(async (runtime, directory) => {
+    const opened = await runtime.openSession('original')
+    opened.messages.push({ role: 'user', content: 'hello' })
+    await runtime.setSessionModel('original', 'codex/gpt-5.5')
+    await runtime.setSessionReasoning('original', 'xhigh')
+    await runtime.flushSessions()
+
+    const restarted = new InMemoryDaemonRuntime(undefined, {
+      currentProjectDirectory: directory,
+      model: 'claude-sonnet-4-6',
+    })
+    const resumed = await restarted.openSession(opened.id, undefined, { resume: true })
+
+    expect(resumed.reasoningEffort).toBe('xhigh')
+
+    // And it holds when the daemon default moves afterwards.
+    restarted.reload({ reasoning_effort: 'low' })
+    expect(restarted.sessionStatus(opened.id)?.reasoningEffort).toBe('xhigh')
+  })
+})
+
+test('setting an empty effort leaves the session untouched', async () => {
+  await inRuntime(async runtime => {
+    await runtime.openSession('blank')
+    await runtime.setSessionReasoning('blank', 'high')
+    await runtime.setSessionReasoning('blank', '  ')
+
+    expect(runtime.sessionStatus('blank')?.reasoningEffort).toBe('high')
+  })
+})

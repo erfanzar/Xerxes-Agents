@@ -287,7 +287,12 @@ export class AgentTurnRunner implements TurnRunner {
       defaults: {
         ...(this.options.thinking !== undefined ? { enabled: this.options.thinking } : {}),
         ...(this.options.thinkingBudget !== undefined ? { budgetTokens: this.options.thinkingBudget } : {}),
-        ...(this.options.reasoningEffort !== undefined ? { effort: this.options.reasoningEffort } : {}),
+        // The session's own effort wins over the runner default, so two open
+        // sessions can run at different efforts and a resumed one continues at
+        // the effort it was held at.
+        ...(session.reasoningEffort ?? this.options.reasoningEffort) !== undefined
+          ? { effort: session.reasoningEffort ?? this.options.reasoningEffort }
+          : {},
       },
       prompt: text,
       ultraMode: session.ultraMode === true,
