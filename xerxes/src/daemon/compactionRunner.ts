@@ -16,7 +16,7 @@ import { closeLlmClient, completeLlm, type LlmClient } from "../llms/client.js";
 import { classifyError, ErrorKind } from "../runtime/errorClassifier.js";
 
 /** Auto-compact once the estimated context usage reaches this fraction of the prompt budget. */
-export const DEFAULT_AUTO_COMPACT_THRESHOLD = 0.9;
+export const DEFAULT_AUTO_COMPACT_THRESHOLD = 0.8;
 
 /**
  * Summary token budgets tried in order: the default, then a half, then a

@@ -276,7 +276,16 @@ test("daemon auto-compacts before submitting a turn once usage crosses the thres
     await client.next((frame) => frame.id === 2);
     const notice = await client.next(notificationWith("auto-compacting"));
     expect(String(notice.params?.payload?.body ?? "")).toContain("%");
-    await client.next(notificationWith("Auto-compacted"));
+    const completed = await client.next(notificationWith("Auto-compacted"));
+    expect(completed.params?.payload).toMatchObject({
+      category: "history",
+      type: "compaction",
+      payload: {
+        automatic: true,
+        tokens_after: expect.any(Number),
+        tokens_before: expect.any(Number),
+      },
+    });
     await client.next(eventFrame("turn_begin"));
     await client.next(eventFrame("turn_end"));
 
@@ -302,7 +311,12 @@ test("daemon auto-compacts before submitting a turn once usage crosses the thres
   }
 });
 
-test("daemon leaves small transcripts alone under the default 90% threshold", async () => {
+test("default auto-compaction threshold is 80% of the prompt budget", async () => {
+  const { DEFAULT_AUTO_COMPACT_THRESHOLD } = await import("../src/daemon/compactionRunner.js");
+  expect(DEFAULT_AUTO_COMPACT_THRESHOLD).toBe(0.8);
+});
+
+test("daemon leaves small transcripts alone under the default 80% threshold", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-autocompact-off-"));
   const socketPath = join(directory, "daemon.sock");
   const profileStore = new ProfileStore(join(directory, "profiles.json"));

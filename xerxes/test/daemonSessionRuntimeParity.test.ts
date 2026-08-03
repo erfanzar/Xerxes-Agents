@@ -62,7 +62,8 @@ test('daemon runtime persists a project-scoped session and resumes only an expli
       total_output_tokens: 5,
       metadata: { title: 'remember the native resume contract' },
     })
-    expect(await runtime.listSavedSessions()).toEqual([
+    const firstListing = await runtime.listSavedSessions()
+    expect(firstListing).toEqual([
       expect.objectContaining({
         id: session.id,
         key: 'tui:default',
@@ -71,6 +72,13 @@ test('daemon runtime persists a project-scoped session and resumes only an expli
         turnCount: 1,
       }),
     ])
+    const lastMessageAt = firstListing[0]!.updatedAt
+    // Saving metadata-only changes (including compaction) must not make an old
+    // conversation look like a newly active session in /resume.
+    session.lastActive = Date.parse(lastMessageAt) + 60_000
+    await runtime.flushSessions()
+    expect((await runtime.listSavedSessions())[0]?.updatedAt).toBe(lastMessageAt)
+
     await runtime.openSession('tui:empty')
     await runtime.flushSessions()
     expect(await runtime.listSavedSessions()).toHaveLength(1)
@@ -93,6 +101,7 @@ test('daemon runtime persists a project-scoped session and resumes only an expli
       cwd: resolve(projectDirectory),
       workspace: resolve(workspaceRoot, 'researcher'),
       interactionMode: 'researcher',
+      lastActive: Date.parse(lastMessageAt),
       turnCount: 1,
       totalInputTokens: 13,
       totalOutputTokens: 5,
