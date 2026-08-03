@@ -2504,17 +2504,31 @@ export class DaemonServer {
         );
         return { ok: steered };
       }
-      case "model":
+      case "model": {
+        const active = this.runtime.sessionStatus(connection.activeSessionKey);
         if (!args) {
+          // The session's own model, not the daemon-wide one: with two
+          // sessions open those differ, and reporting the global value would
+          // name a model this session is not using.
+          const current = active?.model || stringValue(this.runtime.status().model);
           this.emitSlash(
             connection,
-            `Active model: \`${stringValue(this.runtime.status().model) || "(not configured)"}\`.`,
+            `Active model: \`${current || "(not configured)"}\`.`,
           );
-          return { ok: true };
+          return { ok: true, model: current };
         }
-        this.runtime.reload({ model: args });
-        // Persist the choice so a TUI/daemon restart keeps it instead of
-        // falling back to the profile's stored default model.
+        // Scoped to this session so a second open session keeps its own model.
+        // Only when the host cannot do that does this fall back to the global
+        // reload, which moves every unpinned session at once.
+        const pinned = await this.runtime.setSessionModel?.(
+          connection.activeSessionKey,
+          args,
+        );
+        if (!pinned) {
+          this.runtime.reload({ model: args });
+        }
+        // Persist as the default for sessions opened later; it no longer
+        // retargets sessions that already picked for themselves.
         try {
           this.profileStore?.updateActiveModel(args);
         } catch {
@@ -2522,7 +2536,10 @@ export class DaemonServer {
         }
         this.emitSlash(connection, `Model set to \`${args}\`.`);
         await this.emitProviderInit(connection);
+        const session = this.runtime.sessionStatus(connection.activeSessionKey);
+        if (session) this.emitStatus(connection, session);
         return { ok: true, model: args };
+      }
       case "provider":
         if (!args) {
           return this.openProviderFlow(connection);

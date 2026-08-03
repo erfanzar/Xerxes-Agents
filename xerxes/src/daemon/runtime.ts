@@ -57,6 +57,16 @@ export interface DaemonSession {
   messages: DaemonTranscriptMessage[];
   metadata: Record<string, unknown>;
   model: string;
+  /**
+   * True once this session owns its model explicitly — the user picked one
+   * here, or it was restored from this session's own history.
+   *
+   * A global reload must not touch a pinned session: two open sessions are
+   * allowed to run different models, and a resumed session must keep the model
+   * its transcript was written with rather than adopting whatever the profile
+   * last stored.
+   */
+  modelPinned?: boolean;
   planMode: boolean;
   /**
    * Provider-request scaffolding the turn runner assembles for this session:
@@ -218,6 +228,16 @@ export interface DaemonRuntime {
     sessionKey: string,
     mode: string,
     planMode?: boolean,
+  ): Promise<DaemonSession | undefined>;
+  /**
+   * Pin one session to a model without disturbing any other session.
+   *
+   * Optional on the interface so existing runtimes stay source-compatible;
+   * the server falls back to a global reload when a host does not implement it.
+   */
+  setSessionModel?(
+    sessionKey: string,
+    model: string,
   ): Promise<DaemonSession | undefined>;
   /**
    * Optional session-scoped ultra mode toggle. Kept optional on the
@@ -567,7 +587,10 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
         existing.cwd = requestedCwd;
       }
       if (options.model) {
+        // An explicit model on reopen is the caller choosing for this session,
+        // so it pins: a later global reload must not undo it.
         existing.model = options.model;
+        existing.modelPinned = true;
       }
       applySystemPromptAddendum(existing, options.systemPromptAddendum);
       return existing;
@@ -677,7 +700,11 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     }
     const model = this.model();
     for (const session of this.sessions.values()) {
-      session.model = model;
+      // Only sessions that never chose for themselves follow the global
+      // default; a pinned one keeps what it was given.
+      if (!session.modelPinned) {
+        session.model = model;
+      }
     }
     return this.status();
   }
@@ -696,6 +723,26 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     session.planMode = planMode ?? normalized === "plan";
     session.lastActive = Date.now();
     this.options.onSessionModeChange?.(session.id, normalized);
+    return session;
+  }
+
+  async setSessionModel(
+    sessionKey: string,
+    model: string,
+  ): Promise<DaemonSession | undefined> {
+    const session = this.sessions.get(sessionKey);
+    if (!session) {
+      return undefined;
+    }
+    const chosen = model.trim();
+    if (!chosen) {
+      return session;
+    }
+    session.model = chosen;
+    // Pinned from here on, so a later global reload cannot silently move this
+    // session onto another session's model.
+    session.modelPinned = true;
+    session.lastActive = Date.now();
     return session;
   }
 
@@ -995,7 +1042,10 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
       interactionMode: session.interactionMode,
       key: session.sessionKey,
       messages: session.messages,
-      metadata: session.metadata,
+      // Stamped so a later resume can restore the model this history was
+      // written with instead of silently adopting whatever the profile last
+      // stored, which could be a different provider entirely.
+      metadata: { ...session.metadata, model: session.model },
       pendingResumeReplays: [],
       planMode: session.planMode,
       schemaVersion: undefined,
@@ -1100,7 +1150,11 @@ function sessionFromTranscript(
       role: stringValue(message.role),
     })),
     metadata: { ...transcript.metadata },
-    model,
+    // The model this history was written with wins over the current global
+    // default: resuming a transcript should continue the conversation on the
+    // model that produced it, not silently move it to another provider.
+    model: stringValue(transcript.metadata.model) || model,
+    modelPinned: Boolean(stringValue(transcript.metadata.model)),
     planMode: interactionMode === "plan",
     status: "idle",
     thinkingContent: [...transcript.thinkingContent],
