@@ -24,6 +24,7 @@ agent:
     - agent_memory_list
     - agent_memory_search
     - agent_memory_journal
+    - SetInteractionModeTool
   exclude_tools:
     - AgentTool
     - SpawnAgents

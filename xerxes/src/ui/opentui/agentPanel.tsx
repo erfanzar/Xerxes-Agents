@@ -184,11 +184,26 @@ function metricLine(item: SubagentProgress, now: number): string {
   return parts.join(' · ')
 }
 
+/** Row-width token summary: in/out, with cached appended when it is earning its place. */
+function tokenSummary(item: SubagentProgress): string {
+  const input = item.inputTokens ?? 0
+  const output = item.outputTokens ?? 0
+  const cached = item.cacheReadTokens ?? 0
+  if (!input && !output && !cached) {
+    return "no tokens yet"
+  }
+  const parts = [`${fmtTokens(input)} in`, `${fmtTokens(output)} out`]
+  if (cached > 0) parts.push(`${fmtTokens(cached)} cached`)
+  return parts.join("/")
+}
+
 /** Full token breakdown, shown only in the inspector where there is room. */
 function tokenDetail(item: SubagentProgress): string {
   const parts: string[] = []
   if ((item.inputTokens ?? 0) > 0) parts.push(`${fmtTokens(item.inputTokens!)} in`)
   if ((item.outputTokens ?? 0) > 0) parts.push(`${fmtTokens(item.outputTokens!)} out`)
+  if ((item.cacheReadTokens ?? 0) > 0) parts.push(`${fmtTokens(item.cacheReadTokens!)} cached`)
+  if ((item.cacheCreationTokens ?? 0) > 0) parts.push(`${fmtTokens(item.cacheCreationTokens!)} cache write`)
   if ((item.reasoningTokens ?? 0) > 0) parts.push(`${fmtTokens(item.reasoningTokens!)} reasoning`)
   if ((item.apiCalls ?? 0) > 0) parts.push(`${item.apiCalls} API call${item.apiCalls === 1 ? '' : 's'}`)
   if (typeof item.costUsd === 'number' && item.costUsd > 0) parts.push(`$${item.costUsd.toFixed(4)}`)

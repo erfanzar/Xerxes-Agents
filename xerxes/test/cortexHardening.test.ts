@@ -147,6 +147,61 @@ test('Cortex consensus caps candidate fan-out by default and allows explicit unb
   expect(unbounded.maxActive).toBe(agents.length)
 })
 
+test('Cortex high-level maxParallel allows explicit unbounded opt-in and rejects invalid values', async () => {
+  const tasks = Array.from({ length: 6 }, (_value, index) => ({
+    id: `task-${index}`,
+    description: `Task ${index}`,
+    expectedOutput: 'done',
+  }))
+  const unbounded = trackConcurrency()
+  const engine = new Cortex({
+    process: ProcessType.PARALLEL,
+    maxParallel: Number.POSITIVE_INFINITY,
+    tasks,
+    executor: unbounded.executor,
+  })
+
+  await engine.kickoff()
+  expect(unbounded.maxActive).toBe(tasks.length)
+
+  for (const invalid of [0, -1, 1.5, Number.NEGATIVE_INFINITY, Number.NaN]) {
+    expect(() => new Cortex({ maxParallel: invalid })).toThrow('maxParallel must be a positive integer')
+  }
+})
+
+test('CortexOrchestrator reports partial for non-empty skipped-only and mixed success/skipped runs', async () => {
+  const skippedOnly = new CortexOrchestrator({
+    executor: () => 'not executed',
+    tasks: [
+      { id: 'a', description: 'A', expectedOutput: 'a', runWhen: () => false },
+      { id: 'b', description: 'B', expectedOutput: 'b', runWhen: () => false },
+    ],
+  })
+  const skipped = await skippedOnly.run()
+  expect(skipped.status).toBe('partial')
+  expect(skipped.skippedCount).toBe(2)
+  expect(skipped.succeededCount).toBe(0)
+  expect(skipped.failedCount).toBe(0)
+
+  const mixed = new CortexOrchestrator({
+    executor: () => 'done',
+    tasks: [
+      { id: 'done', description: 'Done', expectedOutput: 'done' },
+      { id: 'skip', description: 'Skip', expectedOutput: 'skip', runWhen: () => false },
+    ],
+  })
+  const partial = await mixed.run()
+  expect(partial.status).toBe('partial')
+  expect(partial.succeededCount).toBe(1)
+  expect(partial.skippedCount).toBe(1)
+})
+
+test('CortexOrchestrator intentionally treats an empty graph as succeeded', async () => {
+  const output = await new CortexOrchestrator().run()
+  expect(output.status).toBe('succeeded')
+  expect(output.taskOutputs).toEqual([])
+})
+
 test('CortexOrchestrator reports aggregate status and failed counts for fully and partially failed runs', async () => {
   const failing = new CortexOrchestrator({
     executor: () => { throw new Error('boom') },

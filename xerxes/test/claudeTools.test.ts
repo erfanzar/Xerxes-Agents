@@ -569,7 +569,14 @@ test('SpawnAgents first failure stops claiming new registrations and closes part
     },
     wait: async () => ({ completed: [], pending: [] }),
   }
-  const tools = new ClaudeAgentTools({ manager })
+  const consumed: SpawnedAgentSnapshot[] = []
+  const tools = new ClaudeAgentTools({
+    backgroundAgents: {
+      consume: snapshots => consumed.push(...snapshots),
+      track: () => undefined,
+    },
+    manager,
+  })
   const agents = Array.from({ length: 16 }, (_, index) => ({
     name: `failure-${index}`,
     prompt: `task ${index}`,
@@ -585,6 +592,8 @@ test('SpawnAgents first failure stops claiming new registrations and closes part
   await expect(pending).rejects.toThrow('registration failed')
   expect(started).toHaveLength(8)
   expect(closed.sort()).toEqual(started.filter(name => name !== 'failure-0').sort())
+  expect(consumed.map(snapshot => snapshot.id).sort()).toEqual(closed.sort())
+  expect(consumed.every(snapshot => snapshot.status === 'closed')).toBeTrue()
 })
 
 test('stale subagent targets receive non-retry guidance after runtime attachment is lost', async () => {

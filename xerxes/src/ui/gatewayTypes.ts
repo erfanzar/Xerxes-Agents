@@ -577,6 +577,8 @@ export interface SubagentEventPayload {
   output_tail?: { is_error?: boolean; preview?: string; tool?: string }[]
   output_tokens?: number
   parent_id?: null | string
+  cache_creation_tokens?: number
+  cache_read_tokens?: number
   reasoning_tokens?: number
   rules?: string[]
   status?: SubagentStatus

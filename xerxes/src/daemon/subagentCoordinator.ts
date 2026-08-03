@@ -1,6 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import type { PersistedSubagentDelivery } from '../agents/subagentPersistence.js'
 import type { SubAgentManager } from '../agents/subagentManager.js'
 import type {
   SpawnedAgentSnapshot,
@@ -16,6 +17,7 @@ const TERMINAL_STATUSES = new Set<SpawnedAgentStatus>([
 ])
 
 const MAX_RECOVERED_OUTPUT_CHARS = 16_000
+const MAX_DELIVERED_GENERATIONS = 2_000
 
 const AGENT_TOOL_NAMES = new Set([
   'AgentTool',
@@ -53,6 +55,10 @@ export interface SubagentTurnCohort {
 export interface SubagentTurnCoordinator {
   begin(sourceId: string): SubagentTurnCohort
   consume(snapshots: readonly SpawnedAgentSnapshot[]): void
+  /** Rehydrate delivery markers retained in resumed session metadata. */
+  hydrateDelivered?(deliveries: readonly PersistedSubagentDelivery[]): void
+  /** Export bounded delivery markers for session metadata persistence. */
+  deliveredState?(): readonly PersistedSubagentDelivery[]
   /** Rehydrate snapshots retained in a resumed parent transcript. */
   restore?(sourceId: string, snapshots: readonly SpawnedAgentSnapshot[]): number
   track(snapshots: readonly SpawnedAgentSnapshot[]): void
@@ -62,7 +68,7 @@ export interface SubagentTurnCoordinator {
 
 export class NativeSubagentTurnCoordinator implements SubagentTurnCoordinator {
   private readonly active = new Map<string, ActiveCohort>()
-  private readonly delivered = new Set<string>()
+  private readonly delivered = new Map<string, PersistedSubagentDelivery>()
 
   constructor(
     private readonly manager: Pick<SubAgentManager, 'waitFor'>,
@@ -78,6 +84,19 @@ export class NativeSubagentTurnCoordinator implements SubagentTurnCoordinator {
     return this.restoreSnapshots(snapshots.filter(snapshot => snapshot.sourceAgentId === normalized))
   }
 
+  hydrateDelivered(deliveries: readonly PersistedSubagentDelivery[]): void {
+    for (const delivery of deliveries.slice(-MAX_DELIVERED_GENERATIONS)) {
+      const id = delivery.id.trim()
+      const generation = delivery.generation.trim()
+      if (!id || !generation) continue
+      this.rememberDelivered({ id, generation })
+    }
+  }
+
+  deliveredState(): readonly PersistedSubagentDelivery[] {
+    return Object.freeze([...this.delivered.values()])
+  }
+
   begin(sourceId: string): SubagentTurnCohort {
     const normalized = sourceId.trim()
     if (!normalized) return inertCohort()
@@ -85,9 +104,9 @@ export class NativeSubagentTurnCoordinator implements SubagentTurnCoordinator {
     const previous = this.active.get(normalized)
     if (previous) previous.closed = true
     const snapshots = this.listSnapshots()
-    const visibleIds = new Set(snapshots.map(snapshot => snapshot.id))
-    for (const id of this.delivered) {
-      if (!visibleIds.has(id)) this.delivered.delete(id)
+    const visibleGenerations = new Set(snapshots.map(snapshot => deliveryKey(snapshot)))
+    for (const key of this.delivered.keys()) {
+      if (!visibleGenerations.has(key)) this.delivered.delete(key)
     }
     const cohort: ActiveCohort = {
       deadline: this.waitTimeoutMs === undefined
@@ -100,7 +119,7 @@ export class NativeSubagentTurnCoordinator implements SubagentTurnCoordinator {
       ids: new Set(snapshots
         .filter(snapshot => (
           snapshot.sourceAgentId?.trim() === normalized
-          && !this.delivered.has(snapshot.id)
+          && !this.delivered.has(deliveryKey(snapshot))
         ))
         .map(snapshot => snapshot.id)),
       sourceId: normalized,
@@ -119,7 +138,7 @@ export class NativeSubagentTurnCoordinator implements SubagentTurnCoordinator {
       if (!sourceId) continue
       const cohort = this.active.get(sourceId)
       if (!cohort || cohort.closed) continue
-      if (this.delivered.has(snapshot.id)) continue
+      if (this.delivered.has(deliveryKey(snapshot))) continue
       cohort.ids.add(snapshot.id)
     }
   }
@@ -127,7 +146,7 @@ export class NativeSubagentTurnCoordinator implements SubagentTurnCoordinator {
   consume(snapshots: readonly SpawnedAgentSnapshot[]): void {
     for (const snapshot of snapshots) {
       if (!TERMINAL_STATUSES.has(snapshot.status)) continue
-      this.delivered.add(snapshot.id)
+      this.rememberDelivered(deliveryMarker(snapshot))
       const sourceId = snapshot.sourceAgentId?.trim()
       if (!sourceId) continue
       this.active.get(sourceId)?.ids.delete(snapshot.id)
@@ -169,9 +188,9 @@ export class NativeSubagentTurnCoordinator implements SubagentTurnCoordinator {
       const snapshot = byId.get(id)
       return snapshot === undefined ? [] : [snapshot]
     })
-    for (const snapshot of results) {
-      if (TERMINAL_STATUSES.has(snapshot.status)) this.delivered.add(snapshot.id)
-    }
+    // Do not consume here. The caller must call `consume` only after these
+    // snapshots have been injected successfully into the parent transcript.
+    // This keeps a failed formatter/provider continuation retryable.
     cohort.ids.clear()
     // An explicitly bounded wait includes unfinished snapshots so callers
     // opting into a deadline can explain partial progress.
@@ -185,6 +204,46 @@ export class NativeSubagentTurnCoordinator implements SubagentTurnCoordinator {
       return snapshot === undefined || TERMINAL_STATUSES.has(snapshot.status)
     })
   }
+
+  private rememberDelivered(delivery: PersistedSubagentDelivery): void {
+    const key = `${delivery.id}\u0000${delivery.generation}`
+    this.delivered.delete(key)
+    this.delivered.set(key, delivery)
+    while (this.delivered.size > MAX_DELIVERED_GENERATIONS) {
+      const oldest = this.delivered.keys().next().value
+      if (oldest === undefined) break
+      this.delivered.delete(oldest)
+    }
+  }
+}
+
+function deliveryGeneration(snapshot: SpawnedAgentSnapshot): string {
+  const candidate = snapshot as SpawnedAgentSnapshot & {
+    readonly attempt?: unknown
+    readonly generation?: unknown
+  }
+  if (typeof candidate.generation === 'number' && Number.isSafeInteger(candidate.generation)) {
+    return `generation:${candidate.generation}`
+  }
+  if (typeof candidate.generation === 'string' && candidate.generation.trim()) {
+    return `generation:${candidate.generation.trim()}`
+  }
+  if (typeof candidate.attempt === 'number' && Number.isSafeInteger(candidate.attempt)) {
+    return `attempt:${candidate.attempt}`
+  }
+  // Status and updatedAt change during recovery (live work becomes an
+  // interrupted tombstone), so creation time is the only restart-stable
+  // fallback for ports that do not expose an attempt/generation token.
+  return `snapshot:${snapshot.createdAt}`
+}
+
+function deliveryMarker(snapshot: SpawnedAgentSnapshot): PersistedSubagentDelivery {
+  return Object.freeze({ id: snapshot.id, generation: deliveryGeneration(snapshot) })
+}
+
+function deliveryKey(snapshot: SpawnedAgentSnapshot): string {
+  const delivery = deliveryMarker(snapshot)
+  return `${delivery.id}\u0000${delivery.generation}`
 }
 
 /**
@@ -323,8 +382,14 @@ function recoveredSnapshot(
   const reasoningTokens = nonNegativeInteger(value.reasoning_tokens ?? value.reasoningTokens) ?? previous?.reasoningTokens
   const filesRead = stringArray(value.files_read ?? value.filesRead)
   const filesWritten = stringArray(value.files_written ?? value.filesWritten)
+  const attempt = nonNegativeInteger(value.attempt)
+  const generation = typeof value.generation === 'string' || typeof value.generation === 'number'
+    ? value.generation
+    : undefined
   return Object.freeze({
     agentId: stringValue(value.agent_id) || stringValue(value.agentId) || previous?.agentId || 'coder',
+    ...(attempt === undefined ? {} : { attempt }),
+    ...(generation === undefined ? {} : { generation }),
     closed: value.closed === true || status === 'closed',
     createdAt: timestampValue(value.created_at ?? value.createdAt, previous?.createdAt),
     ...(error ? { error } : {}),

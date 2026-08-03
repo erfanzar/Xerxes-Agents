@@ -173,6 +173,29 @@ test('spawn depth derives from the tracked parent task and the spawned-agent bud
   await bounded.close()
 })
 
+test('terminal history does not permanently exhaust the live spawned-agent budget', async () => {
+  const manager = new SubAgentManager({
+    maxRetainedTerminalTasks: 10,
+    maxSpawnedAgents: 2,
+    runner: () => ({ content: 'ok' }),
+  })
+
+  const first = await manager.spawn({ prompt: 'first generation' })
+  const second = await manager.spawn({ prompt: 'second generation' })
+  await manager.waitAll([first.id, second.id], 1_000)
+  expect(manager.listTasks()).toHaveLength(2)
+
+  // Retained terminal history is inspectable, but only pending/running tasks
+  // consume the live spawn budget.
+  const third = await manager.spawn({ prompt: 'third generation' })
+  const fourth = await manager.spawn({ prompt: 'fourth generation' })
+  await manager.waitAll([third.id, fourth.id], 1_000)
+  expect(third.status).toBe('completed')
+  expect(fourth.status).toBe('completed')
+  expect(manager.listTasks()).toHaveLength(4)
+  await manager.close()
+})
+
 test('terminal tasks are evicted beyond the retention bound while live tasks survive', async () => {
   const manager = new SubAgentManager({
     maxRetainedTerminalTasks: 2,

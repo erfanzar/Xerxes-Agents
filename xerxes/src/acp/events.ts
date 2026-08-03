@@ -12,6 +12,7 @@ export enum AcpEventKind {
   TOOL_CALL_END = 'tool_call_end',
   PERMISSION_REQUEST = 'permission_request',
   TURN_END = 'turn_end',
+  USAGE_UPDATE = 'usage_update',
   SKILL_SUGGESTION = 'skill_suggestion',
   UNKNOWN = 'unknown',
 }
@@ -39,6 +40,21 @@ export function toAcpEvent(event: StreamEvent | unknown): AcpEvent {
   }
 
   switch (event.type) {
+    case 'usage_update':
+      // Mapped explicitly rather than left to fall through: an unmapped event
+      // reaches an editor client as `unknown`, which is indistinguishable from
+      // a protocol fault on the other end.
+      return new AcpEvent(AcpEventKind.USAGE_UPDATE, {
+        model: event.model,
+        input_tokens: event.cumulative.inputTokens,
+        output_tokens: event.cumulative.outputTokens,
+        ...(event.cumulative.cacheReadTokens === undefined
+          ? {}
+          : { cache_read_tokens: event.cumulative.cacheReadTokens }),
+        ...(event.cumulative.cacheCreationTokens === undefined
+          ? {}
+          : { cache_creation_tokens: event.cumulative.cacheCreationTokens }),
+      })
     case 'text':
       return new AcpEvent(AcpEventKind.TEXT_DELTA, { text: event.text })
     case 'thinking':

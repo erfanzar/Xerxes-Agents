@@ -11,7 +11,9 @@ import type { ToolExecutor } from '../executors/toolRegistry.js'
 import type { AgentMemory } from '../memory/agentMemory.js'
 import {
   mergePersistedSubagentSnapshots,
+  persistedSubagentDeliveryValues,
   persistedSubagentSnapshotValues,
+  replacePersistedSubagentDeliveries,
 } from '../agents/subagentPersistence.js'
 import { SUBAGENT_BLOCKED_TOOLS } from '../agents/subagentManager.js'
 import type { AgentSelfMemory } from '../memory/agentSelfMemory.js'
@@ -219,6 +221,9 @@ export class AgentTurnRunner implements TurnRunner {
         persistedSubagentSnapshotValues(session.metadata),
       )
       : []
+    this.options.subagentCoordinator?.hydrateDelivered?.(
+      persistedSubagentDeliveryValues(session.metadata),
+    )
     const restoredSubagentCount = this.options.subagentCoordinator
       ?.restore?.(session.id, recoveredSubagents) ?? 0
     // Kept as named, ordered segments rather than one joined string: the
@@ -294,6 +299,7 @@ export class AgentTurnRunner implements TurnRunner {
     const userMessage: MessageContent = images.length
       ? [{ type: 'text', text }, ...imageUrlContentParts(images)]
       : text
+    let pendingAgentEventSnapshots: readonly SpawnedAgentSnapshot[] = []
     try {
       const turnEvents = withActiveSession(session, runTurn({
         agentId: promptAgent?.name ?? session.agentId,
@@ -309,15 +315,24 @@ export class AgentTurnRunner implements TurnRunner {
         ...(thinking === undefined ? {} : { thinking: { budgetTokens: thinking.budgetTokens, effort: thinking.effort } }),
         ...(this.options.topK !== undefined ? { topK: this.options.topK } : {}),
         ...(tools ? { tools } : {}),
-        ...(systemPrompt ? { systemPrompt } : {}),
+        ...(systemPrompt ? { systemPrompt, systemPromptRequestOnly: true } : {}),
         ...(systemSegments.length ? { systemSegments } : {}),
         ...(this.options.topP !== undefined ? { topP: this.options.topP } : {}),
       }, {
         ...(subagentCohort ? {
           awaitAgentEvents: async signal => {
-            const snapshots = await subagentCohort.waitForResults(signal)
-            mergePersistedSubagentSnapshots(state.metadata, snapshots)
-            return formatSubagentResults(snapshots)
+            pendingAgentEventSnapshots = await subagentCohort.waitForResults(signal)
+            mergePersistedSubagentSnapshots(state.metadata, pendingAgentEventSnapshots)
+            return formatSubagentResults(pendingAgentEventSnapshots)
+          },
+          acknowledgeAgentEvents: () => {
+            if (!pendingAgentEventSnapshots.length) return
+            this.options.subagentCoordinator?.consume(pendingAgentEventSnapshots)
+            pendingAgentEventSnapshots = []
+            const delivered = this.options.subagentCoordinator?.deliveredState?.()
+            if (delivered !== undefined) {
+              replacePersistedSubagentDeliveries(state.metadata, delivered)
+            }
           },
         } : {}),
         ...(controls.drainSteer ? { drainSteer: controls.drainSteer } : {}),
@@ -536,7 +551,10 @@ function recentSuccessfulToolNames(session: DaemonSession, limit = 24): readonly
   return [...names]
 }
 
-const MAX_SUBAGENT_RESULT_CHARS = 64_000
+// Must match the shared agent-event injection block cap. Formatting a larger
+// batch here would let the injection layer truncate it after every snapshot was
+// acknowledged as delivered.
+const MAX_SUBAGENT_RESULT_CHARS = 16_000
 const MAX_SINGLE_SUBAGENT_RESULT_CHARS = 16_000
 const MAX_INLINE_SUBAGENT_RESULTS = 64
 
@@ -1012,6 +1030,26 @@ function daemonEventFromStream(event: StreamEvent, state: AgentState, session: D
           tool_call_id: event.result.toolCallId,
           duration_ms: event.result.durationMs,
           display_blocks: [],
+        },
+      }
+    case 'usage_update':
+      // A live slice of the same shape turn_done sends, so the footer updates
+      // mid-turn instead of jumping once at the end. Context is deliberately
+      // not re-estimated here: it is a per-message figure that cannot change
+      // between provider rounds, and estimating it per round would cost a full
+      // token count on every API response.
+      return {
+        type: 'status_update',
+        payload: {
+          model: event.model,
+          usage: event.cumulative,
+          total_input_tokens: state.totalInputTokens,
+          total_output_tokens: state.totalOutputTokens,
+          input_tokens: state.totalInputTokens,
+          output_tokens: state.totalOutputTokens,
+          total_tokens: state.totalInputTokens + state.totalOutputTokens,
+          ...(state.totalCacheReadTokens ? { cache_read_tokens: state.totalCacheReadTokens } : {}),
+          ...(state.totalCacheCreationTokens ? { cache_creation_tokens: state.totalCacheCreationTokens } : {}),
         },
       }
     case 'turn_done': {

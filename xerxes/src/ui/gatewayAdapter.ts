@@ -72,6 +72,8 @@ const subagentMetadata = (...sources: Record<string, unknown>[]): Partial<Subage
     ...(stringField('model') ? { model: stringField('model') } : {}),
     ...(outputTail ? { output_tail: outputTail } : {}),
     ...(numberField('output_tokens') !== undefined ? { output_tokens: numberField('output_tokens') } : {}),
+    ...(numberField('cache_read_tokens') !== undefined ? { cache_read_tokens: numberField('cache_read_tokens') } : {}),
+    ...(numberField('cache_creation_tokens') !== undefined ? { cache_creation_tokens: numberField('cache_creation_tokens') } : {}),
     ...(numberField('reasoning_tokens') !== undefined ? { reasoning_tokens: numberField('reasoning_tokens') } : {}),
     ...(listField('rules') ? { rules: listField('rules') } : {}),
     ...(stringField('summary') ? { summary: stringField('summary') } : {}),
@@ -131,6 +133,8 @@ export function usageFromStatus(payload: Record<string, unknown>): Usage {
   const output = num(payload.total_output_tokens ?? payload.output_tokens)
   const total = num(payload.total_tokens, input + output)
   return {
+    cache_read: num(payload.cache_read_tokens),
+    cache_write: num(payload.cache_creation_tokens),
     calls: num(payload.calls),
     context_max: num(payload.context_limit ?? payload.max_context),
     context_used: num(payload.context_tokens),
