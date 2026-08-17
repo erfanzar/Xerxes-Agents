@@ -109,6 +109,39 @@ export function listAgentDefinitionLoadErrors(): string[] {
   return [...lastLoadErrors]
 }
 
+/**
+ * Resolve a CLI agent reference to a definition.
+ *
+ * Exact names from the merged built-in/user/project catalog win first, so
+ * `--agent researcher` keeps working even when a same-named file exists. A
+ * reference matching no name is treated as a YAML or Markdown agent file path
+ * relative to the working directory. Unknown references fail with the list of
+ * available names so a typo is self-correcting.
+ */
+export function resolveAgentDefinition(
+  reference: string,
+  options: AgentDefinitionLoadOptions = {},
+): AgentDefinition {
+  const definitions = loadAgentDefinitions(options)
+  const named = definitions.get(reference)
+  if (named) {
+    return named
+  }
+  const candidate = resolve(resolve(options.cwd ?? process.cwd()), reference)
+  if (existsSync(candidate)) {
+    const extension = extname(candidate)
+    if (extension === '.yaml' || extension === '.yml') {
+      return definitionFromSpec(loadAgentSpec(candidate, options), 'cli')
+    }
+    if (extension === '.md') {
+      return parseAgentMarkdown(candidate, 'cli')
+    }
+    throw new AgentSpecError(`Unsupported agent file extension '${extension}': ${candidate}`)
+  }
+  const available = [...definitions.keys()].sort().join(', ')
+  throw new AgentSpecError(`Unknown agent '${reference}'. Available agents: ${available}`)
+}
+
 /** Parse a Markdown definition with optional YAML frontmatter. */
 export function parseAgentMarkdown(path: string, source = 'user'): AgentDefinition {
   const content = readFileSync(path, 'utf8')

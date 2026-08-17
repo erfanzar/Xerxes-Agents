@@ -14,7 +14,7 @@ import {
 import { writeAcpRegistryFile } from "./acp/registry.js";
 import { AcpServer } from "./acp/server.js";
 import { serveACPStdio } from "./acp/transport.js";
-import { loadAgentDefinitions } from "./agents/definitions.js";
+import { loadAgentDefinitions, resolveAgentDefinition } from "./agents/definitions.js";
 import {
   BunDiscordGatewayWebSocketPort,
   FetchDiscordGatewayRestPort,
@@ -74,6 +74,7 @@ import {
 import { CliWriter, createCliStyle, detectColorDepth } from "./runtime/cliStyle.js";
 import { resolveTuiEntry } from "./runtime/distribution.js";
 import { registerInteractionModeTool } from "./runtime/interactionModeTool.js";
+import { extractAgentOption, parseValueOptions } from "./runtime/commandOptions.js";
 import { ProcessRegistry } from "./runtime/processRegistry.js";
 import { TerminalRegistry } from "./runtime/terminalRegistry.js";
 import { BackgroundCommandManager } from "./tools/backgroundCommands.js";
@@ -121,6 +122,7 @@ const HELP_GROUPS: readonly {
     commands: [
       ["xerxes", "open the interactive terminal interface"],
       ["xerxes [prompt]", "run one turn and exit"],
+      ["xerxes --agent <name|path> [prompt]", "run one turn as a named or file-defined agent"],
       ["xerxes --resume <session_id> [prompt]", "continue an earlier session"],
     ],
   },
@@ -175,7 +177,37 @@ function renderHelp(writer: CliWriter): void {
 /** Summary budget for a mid-turn overflow rescue: small, because the window is already full. */
 const OVERFLOW_SUMMARY_MAX_TOKENS = 2_048;
 
-const [argument, ...argumentsAfterCommand] = Bun.argv.slice(2);
+const { agent: cliAgentReference, rest: cliArguments } = extractAgentOption(
+  Bun.argv.slice(2),
+);
+const [argument, ...argumentsAfterCommand] = cliArguments;
+
+/**
+ * Commands that own their runtime (or never start a turn) cannot adopt a
+ * one-shot agent; accepting the flag there would silently ignore it.
+ */
+const NON_ONESHOT_COMMANDS: ReadonlySet<string> = new Set([
+  "skill",
+  "auth",
+  "doctor",
+  "install",
+  "update",
+  "export",
+  "daemon",
+  "telegram",
+  "acp",
+  "-r",
+  "--resume",
+]);
+if (
+  cliAgentReference !== undefined &&
+  argument !== undefined &&
+  NON_ONESHOT_COMMANDS.has(argument)
+) {
+  throw new Error(
+    `The --agent option is only supported for one-shot prompts, not '${argument}'`,
+  );
+}
 
 /** Render a typed command error as two clean stderr lines and exit; never dump a stack. */
 function reportCommandUsageError(error: Error, helpCommand: string): never {
@@ -250,23 +282,22 @@ if (argument === "--help" || argument === "-h") {
 } else if (argument === "export") {
   await runExport(argumentsAfterCommand);
 } else if (argument === "daemon") {
-  assertKnownOptions(argumentsAfterCommand, "daemon", [
+  const options = parseValueOptions(argumentsAfterCommand, "daemon", [
     "--pid-file",
     "--project-dir",
     "--socket",
   ]);
-  const projectDirectory = optionValue(argumentsAfterCommand, "--project-dir");
+  const projectDirectory = options.get("--project-dir");
   const config = loadSystemDaemonConfig({
     ...(projectDirectory ? { projectDirectory } : {}),
   });
   const socketPath =
-    optionValue(argumentsAfterCommand, "--socket") ??
-    daemonPaths(projectDirectory).socketPath;
-  const pidPath = optionValue(argumentsAfterCommand, "--pid-file");
+    options.get("--socket") ?? daemonPaths(projectDirectory).socketPath;
+  const pidPath = options.get("--pid-file");
   await runDaemon(config, projectDirectory, socketPath, pidPath);
   process.exit(0);
 } else if (argument === "telegram") {
-  assertKnownOptions(argumentsAfterCommand, "telegram", [
+  const options = parseValueOptions(argumentsAfterCommand, "telegram", [
     "--host",
     "--pid-file",
     "--port",
@@ -275,23 +306,21 @@ if (argument === "--help" || argument === "-h") {
     "--token",
   ]);
   const token =
-    optionValue(argumentsAfterCommand, "--token") ??
-    process.env.TELEGRAM_BOT_TOKEN?.trim();
+    options.get("--token") ?? process.env.TELEGRAM_BOT_TOKEN?.trim();
   if (!token)
     throw new Error("telegram requires --token or TELEGRAM_BOT_TOKEN");
-  const projectDirectory = optionValue(argumentsAfterCommand, "--project-dir");
+  const projectDirectory = options.get("--project-dir");
   const config = telegramDaemonConfig(
     loadSystemDaemonConfig({
       ...(projectDirectory ? { projectDirectory } : {}),
     }),
     token,
-    optionValue(argumentsAfterCommand, "--host"),
-    optionValue(argumentsAfterCommand, "--port"),
+    options.get("--host"),
+    options.get("--port"),
   );
   const socketPath =
-    optionValue(argumentsAfterCommand, "--socket") ??
-    daemonPaths(projectDirectory).socketPath;
-  const pidPath = optionValue(argumentsAfterCommand, "--pid-file");
+    options.get("--socket") ?? daemonPaths(projectDirectory).socketPath;
+  const pidPath = options.get("--pid-file");
   await runDaemon(config, projectDirectory, socketPath, pidPath);
   process.exit(0);
 } else if (argument === "acp") {
@@ -314,48 +343,21 @@ if (argument === "--help" || argument === "-h") {
 } else if (argument === undefined) {
   const prompt = process.stdin.isTTY ? "" : await readStandardInput();
   if (prompt) {
-    await runOneShot(prompt);
+    await runOneShot(prompt, cliAgentReference);
+  } else if (cliAgentReference !== undefined) {
+    throw new Error(
+      "The --agent option requires a prompt: xerxes --agent <name|path> <prompt>",
+    );
   } else if (process.stdin.isTTY) {
     await runTui();
   } else {
     throw new Error("No prompt was provided on standard input");
   }
 } else {
-  await runOneShot([argument, ...argumentsAfterCommand].join(" "));
-}
-
-function optionValue(
-  args: readonly string[],
-  flag: string,
-): string | undefined {
-  const index = args.indexOf(flag);
-  const value = index >= 0 ? args[index + 1] : undefined;
-  return value && !value.startsWith("-") ? value : undefined;
-}
-
-/**
- * Reject misspelled or unsupported subcommand flags instead of silently
- * ignoring them, and reject flag-like values so `--socket --pid-file` fails
- * loudly instead of dropping the socket path.
- */
-function assertKnownOptions(
-  args: readonly string[],
-  command: string,
-  valueFlags: readonly string[],
-): void {
-  const known = new Set(valueFlags);
-  for (let index = 0; index < args.length; index += 1) {
-    const argument = args[index];
-    if (argument === undefined || !argument.startsWith("-")) continue;
-    if (!known.has(argument)) {
-      throw new Error(`Unknown ${command} option: ${argument}`);
-    }
-    const value = args[index + 1];
-    if (value === undefined || value.startsWith("-")) {
-      throw new Error(`${command} option ${argument} requires a value`);
-    }
-    index += 1;
-  }
+  await runOneShot(
+    [argument, ...argumentsAfterCommand].join(" "),
+    cliAgentReference,
+  );
 }
 
 async function runDaemon(
@@ -1219,7 +1221,10 @@ async function runAcp(args: readonly string[]): Promise<void> {
   }
 }
 
-async function runOneShot(prompt: string): Promise<void> {
+async function runOneShot(
+  prompt: string,
+  agentReference?: string,
+): Promise<void> {
   const config = loadSystemDaemonConfig();
   const connection = runtimeConnection(config, new ProfileStore().active());
   if (!connection) {
@@ -1246,7 +1251,16 @@ async function runOneShot(prompt: string): Promise<void> {
   });
   registerClaudeSkillTool(tools, skillRegistry);
   const definitions = loadAgentDefinitions({ cwd: workspaceRoot });
-  const agent = definitions.get("default");
+  // An explicit --agent reference swaps the session's persona, tool surface,
+  // and model for the named catalog entry or the referenced YAML/Markdown file;
+  // without one the catalog's "default" agent keeps its historical role.
+  const agent =
+    agentReference === undefined
+      ? definitions.get("default")
+      : resolveAgentDefinition(agentReference, {
+          builtinDefinitions: definitions,
+          cwd: workspaceRoot,
+        });
   const selfMemory = getAgentSelfMemory(agent?.name ?? "default");
   const model = agent?.model || connection.model;
   const llm = createLlmClient(model, {

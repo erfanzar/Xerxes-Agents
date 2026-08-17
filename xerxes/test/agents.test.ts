@@ -13,6 +13,7 @@ import {
   listAgentDefinitionLoadErrors,
   loadAgentDefinitions,
   loadBuiltinAgentDefinitions,
+  resolveAgentDefinition,
   type AgentDefinition,
 } from '../src/agents/definitions.js'
 import {
@@ -350,6 +351,60 @@ agent:
 `, 'utf8')
     expect(() => loadAgentSpec(join(root, 'missing-prompt.yaml'))).toThrow(AgentSpecError)
     expect(() => loadAgentSpec(join(root, 'missing-prompt.yaml'))).toThrow('System prompt file not found')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('resolveAgentDefinition resolves catalog names, YAML paths, and Markdown paths', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-agent-resolve-'))
+  try {
+    // Isolated user/project directories keep the host's real agents out of the
+    // catalog so the assertions only see built-ins plus these fixtures.
+    const options = {
+      cwd: root,
+      userDirectory: join(root, 'no-user-agents'),
+      projectDirectory: join(root, 'no-project-agents'),
+    }
+    await writeFile(join(root, 'qa.yaml'), `version: 1
+agent:
+  name: qa
+  when_to_use: Runs QA passes.
+  system_prompt: You are QA.
+  tools: [ReadFile]
+`, 'utf8')
+    await writeFile(join(root, 'notes.md'), `---
+description: Notes agent
+tools: [ReadFile]
+---
+You keep notes.
+`, 'utf8')
+
+    const named = resolveAgentDefinition('researcher', options)
+    expect(named.name).toBe('researcher')
+
+    const fromYaml = resolveAgentDefinition('./qa.yaml', options)
+    expect(fromYaml).toMatchObject({
+      name: 'qa',
+      description: 'Runs QA passes.',
+      systemPrompt: 'You are QA.',
+      tools: ['ReadFile'],
+      source: 'cli',
+    })
+
+    const fromMarkdown = resolveAgentDefinition('./notes.md', options)
+    expect(fromMarkdown).toMatchObject({
+      name: 'notes',
+      description: 'Notes agent',
+      systemPrompt: 'You keep notes.',
+      tools: ['ReadFile'],
+      source: 'cli',
+    })
+
+    expect(() => resolveAgentDefinition('does-not-exist', options)).toThrow(AgentSpecError)
+    expect(() => resolveAgentDefinition('does-not-exist', options)).toThrow(
+      /Unknown agent 'does-not-exist'\. Available agents: .*researcher/,
+    )
   } finally {
     await rm(root, { recursive: true, force: true })
   }
