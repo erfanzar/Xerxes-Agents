@@ -241,6 +241,13 @@ test('slash compact rewrites and persists the active native session without subm
     client.send({ jsonrpc: '2.0', id: 2, method: 'slash', params: { command: '/compact' } })
     const compacted = await client.next(frame => frame.id === 2)
     expect(compacted.result).toMatchObject({ ok: true, compacted: true, tokens_before: expect.any(Number), tokens_after: expect.any(Number) })
+    // Compaction announces itself before the provider call: it is a single
+    // long await, and without this the screen showed nothing at all until the
+    // summary came back.
+    expect((await client.next(eventFrame('notification'))).params?.payload).toMatchObject({
+      category: 'slash',
+      body: expect.stringContaining('Compacting'),
+    })
     expect((await client.next(eventFrame('notification'))).params?.payload).toMatchObject({
       category: 'slash',
       body: expect.stringContaining('Compacted'),

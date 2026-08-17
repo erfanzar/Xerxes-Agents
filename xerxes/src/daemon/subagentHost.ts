@@ -687,6 +687,7 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
     const updatedAt = new Date(task.lastActivityAt ?? Date.now()).toISOString()
     return Object.freeze({
       agentId: metadata.agentId,
+      attempt: task.attempt,
       closed: metadata.closed || status === 'closed',
       createdAt: metadata.createdAt,
       ...(task.error ? { error: task.error } : {}),
@@ -704,6 +705,8 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
       ...(task.apiCalls === undefined ? {} : { apiCalls: task.apiCalls }),
       toolCalls: task.toolCallsCount,
       ...(task.inputTokens === undefined ? {} : { inputTokens: task.inputTokens }),
+      ...(task.cacheReadTokens === undefined ? {} : { cacheReadTokens: task.cacheReadTokens }),
+      ...(task.cacheCreationTokens === undefined ? {} : { cacheCreationTokens: task.cacheCreationTokens }),
       ...(task.outputTokens === undefined ? {} : { outputTokens: task.outputTokens }),
       ...(task.reasoningTokens === undefined ? {} : { reasoningTokens: task.reasoningTokens }),
       filesRead: Object.freeze([...task.readFiles].sort()),
@@ -1033,6 +1036,7 @@ async function runNativeSubagent(
         toolExecutor: options.toolExecutor,
       }, request.cancelSignal)
       const iterator = events[Symbol.asyncIterator]()
+      let terminalFailure: Error | undefined
       try {
         const firstEventPromise = iterator.next()
         // Attach a rejection handler before the first await so a provider stream
@@ -1052,6 +1056,15 @@ async function runNativeSubagent(
             partialCheckpointed = false
           }
           const visibleText = reportNativeSubagentEvent(event, request)
+          if (event.type === 'turn_done' && (
+            event.reason === 'provider_failed' || event.reason === 'context_overflow'
+          )) {
+            terminalFailure = new Error(
+              event.reason === 'context_overflow'
+                ? 'Subagent provider context window was exhausted'
+                : 'Subagent provider request failed',
+            )
+          }
           output += visibleText
           if (event.type === 'text') partialAssistantContent += visibleText
           if (event.type === 'thinking') partialAssistantThinking += event.text
@@ -1078,6 +1091,7 @@ async function runNativeSubagent(
         const firstEvent = await firstEventPromise
         if (!firstEvent.done) await checkpoint(firstEvent.value)
         for await (const event of iterator) await checkpoint(event)
+        if (terminalFailure) throw terminalFailure
         await conversations.save(
           conversation,
           state,
@@ -1241,6 +1255,18 @@ function reportNativeSubagentEvent(event: StreamEvent, request: SubagentTaskRunR
         toolCallId: event.result.toolCallId,
       })
       return ''
+    case 'usage_update':
+      // Children report while they work, not only when they finish: a subagent
+      // running for minutes would otherwise show "no tokens yet" throughout.
+      request.report.usage({
+        model: event.model,
+        inputTokens: event.cumulative.inputTokens,
+        outputTokens: event.cumulative.outputTokens,
+        ...(event.cumulative.cacheReadTokens === undefined ? {} : { cacheReadTokens: event.cumulative.cacheReadTokens }),
+        ...(event.cumulative.cacheCreationTokens === undefined ? {} : { cacheCreationTokens: event.cumulative.cacheCreationTokens }),
+        ...(event.cumulative.reasoningTokens === undefined ? {} : { reasoningTokens: event.cumulative.reasoningTokens }),
+      })
+      return ''
     case 'turn_done':
       request.report.usage({
         ...(event.apiCallsCount === undefined ? {} : { apiCalls: event.apiCallsCount }),
@@ -1249,6 +1275,8 @@ function reportNativeSubagentEvent(event: StreamEvent, request: SubagentTaskRunR
         ...(event.usageComplete ? {
           inputTokens: event.usage.inputTokens,
           outputTokens: event.usage.outputTokens,
+          ...(event.usage.cacheReadTokens === undefined ? {} : { cacheReadTokens: event.usage.cacheReadTokens }),
+          ...(event.usage.cacheCreationTokens === undefined ? {} : { cacheCreationTokens: event.usage.cacheCreationTokens }),
           ...(event.usage.reasoningTokens === undefined ? {} : { reasoningTokens: event.usage.reasoningTokens }),
         } : {}),
       })
@@ -1328,6 +1356,8 @@ function daemonEventFromSubagent(
     ...(event.apiCalls === undefined ? {} : { api_calls: event.apiCalls }),
     ...(event.inputTokens === undefined ? {} : { input_tokens: event.inputTokens }),
     ...(event.outputTokens === undefined ? {} : { output_tokens: event.outputTokens }),
+    ...(event.cacheReadTokens === undefined ? {} : { cache_read_tokens: event.cacheReadTokens }),
+    ...(event.cacheCreationTokens === undefined ? {} : { cache_creation_tokens: event.cacheCreationTokens }),
     ...(event.reasoningTokens === undefined ? {} : { reasoning_tokens: event.reasoningTokens }),
     ...(event.completionSummary === undefined ? {} : { summary: event.completionSummary }),
     subagent_type: event.agentType || event.agent,

@@ -41,7 +41,7 @@ import {
   providerPromptIsSecret,
   providerPromptTitle
 } from '../domain/providerPrompt.js'
-import { ctxBarColor, sessionDisplayTitle, usageCounts } from '../domain/statusFormat.js'
+import { ctxBarColor, sessionDisplayTitle, tokenBreakdown, usageCounts } from '../domain/statusFormat.js'
 import { formatBytes } from '../lib/imageAttachment.js'
 import { describeLiveness, type LivenessPhase, livenessGlyph, livenessLabel, livenessTokens } from '../lib/liveness.js'
 import { unarchivedToolLines } from '../lib/liveProgress.js'
@@ -60,6 +60,7 @@ import { DiffPanelHotkey, DiffPanelOverlay } from './diffPanel.js'
 import { TerminalPanelHotkey, TerminalPanelOverlay } from './terminalPanel.js'
 import { MessageLine } from './messageLine.js'
 import { ModelPicker } from './modelPicker.js'
+import { ReasoningPicker } from './reasoningPicker.js'
 import { Box, Span, Text } from './primitives.js'
 import { SessionPicker } from './sessionPicker.js'
 
@@ -865,6 +866,19 @@ function ContextMeter() {
   )
 }
 
+/** Live in/out/cached token counts for the main session. */
+function TokenMeter() {
+  const ui = useStore($uiState)
+  const t = useStore($uiTheme)
+  const breakdown = tokenBreakdown(ui.usage)
+
+  if (!breakdown) {
+    return null
+  }
+
+  return <Text color={t.color.muted}>{breakdown}</Text>
+}
+
 function CompletionMenu({ composer }: Pick<AppLayoutProps, 'composer'>) {
   const t = useStore($uiTheme)
   const completions = composer.completions
@@ -1158,6 +1172,7 @@ export function Composer({ composer }: Pick<AppLayoutProps, 'composer'>) {
             </Text>
           ) : null}
           <ContextMeter />
+          <TokenMeter />
         </Box>
         <Box alignItems="center" flexDirection="row" flexShrink={0} gap={1} height={1}>
           {ui.busy ? (
@@ -1552,6 +1567,7 @@ export function AppLayout({
     overlay.modelPicker ||
     overlay.pager ||
     overlay.pluginsHub ||
+    overlay.reasoningPicker ||
     overlay.secret ||
     overlay.sessions ||
     overlay.skillsHub ||
@@ -1698,6 +1714,7 @@ export function AppLayout({
       <ProviderPromptOverlay actions={actions} />
 
       {overlay.modelPicker ? <ModelPicker onSelect={actions.onModelSelect} /> : null}
+      {overlay.reasoningPicker ? <ReasoningPicker onSelect={actions.onReasoningSelect} /> : null}
       {overlay.sessions ? <SessionPicker actions={actions} /> : null}
       {overlay.copyPicker ? <CopyPicker onCopied={actions.sys} /> : null}
       {overlay.diff ? (

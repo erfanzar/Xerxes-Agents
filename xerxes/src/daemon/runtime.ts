@@ -27,6 +27,8 @@ import {
 export const DAEMON_PROTOCOL_VERSION = 35;
 export const BUN_DAEMON_BUILD_ID =
   process.env.XERXES_DAEMON_BUILD_ID?.trim() || "bun-runtime-v0.3.0";
+/** Maximum hints retained between active-turn provider/tool boundaries. */
+export const MAX_ACTIVE_TURN_STEERS = 64;
 
 export interface DaemonEvent {
   readonly payload: JsonRpcPayload;
@@ -57,6 +59,34 @@ export interface DaemonSession {
   messages: DaemonTranscriptMessage[];
   metadata: Record<string, unknown>;
   model: string;
+  /**
+   * True once this session owns its model explicitly — the user picked one
+   * here, or it was restored from this session's own history.
+   *
+   * A global reload must not touch a pinned session: two open sessions are
+   * allowed to run different models, and a resumed session must keep the model
+   * its transcript was written with rather than adopting whatever the profile
+   * last stored.
+   */
+  modelPinned?: boolean;
+  /**
+   * Reasoning effort this session runs at, when it owns one.
+   *
+   * Same reasoning as the model: two open sessions may legitimately want
+   * different efforts, and a resumed conversation should continue at the
+   * effort it was held at rather than adopting the daemon default.
+   */
+  reasoningEffort?: string;
+  reasoningPinned?: boolean;
+  /**
+   * Permission mode this session runs under, when it owns one.
+   *
+   * Pinned like the model and effort so two sessions can run at different
+   * trust levels — a throwaway one on accept-all while a session touching
+   * something important stays on manual.
+   */
+  permissionMode?: string;
+  permissionPinned?: boolean;
   planMode: boolean;
   /**
    * Provider-request scaffolding the turn runner assembles for this session:
@@ -220,6 +250,26 @@ export interface DaemonRuntime {
     planMode?: boolean,
   ): Promise<DaemonSession | undefined>;
   /**
+   * Pin one session to a model without disturbing any other session.
+   *
+   * Optional on the interface so existing runtimes stay source-compatible;
+   * the server falls back to a global reload when a host does not implement it.
+   */
+  setSessionModel?(
+    sessionKey: string,
+    model: string,
+  ): Promise<DaemonSession | undefined>;
+  /** Pin one session to a reasoning effort without disturbing any other. */
+  setSessionReasoning?(
+    sessionKey: string,
+    effort: string,
+  ): Promise<DaemonSession | undefined>;
+  /** Pin one session to a permission mode without disturbing any other. */
+  setSessionPermissionMode?(
+    sessionKey: string,
+    mode: string,
+  ): Promise<DaemonSession | undefined>;
+  /**
    * Optional session-scoped ultra mode toggle. Kept optional on the
    * interface so existing DaemonRuntime implementations (test fakes, custom
    * hosts) stay source-compatible without implementing it; the server checks
@@ -298,6 +348,8 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
   private readonly options: InMemoryDaemonRuntimeOptions;
   private readonly runtimeSettings: JsonRpcPayload;
   private readonly sessions = new Map<string, DaemonSession>();
+  /** Coalesces async transcript loads so one key cannot initialize twice. */
+  private readonly sessionOpenPromises = new Map<string, Promise<DaemonSession>>();
   private shutdownPromise: Promise<void> | undefined;
   private readonly steerQueues = new Map<string, string[]>();
   private readonly transcriptStore: DaemonTranscriptStore;
@@ -543,6 +595,33 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     options: OpenSessionOptions = {},
   ): Promise<DaemonSession> {
     const key = sessionKey || "default";
+    const previous = this.sessionOpenPromises.get(key);
+    const opening = (async () => {
+      if (previous) {
+        try {
+          await previous;
+        } catch {
+          // A failed opener must not poison the key; this caller still gets
+          // its own validation/load attempt.
+        }
+      }
+      return this.initializeSession(key, agentId, options);
+    })();
+    this.sessionOpenPromises.set(key, opening);
+    try {
+      return await opening;
+    } finally {
+      if (this.sessionOpenPromises.get(key) === opening) {
+        this.sessionOpenPromises.delete(key);
+      }
+    }
+  }
+
+  private async initializeSession(
+    key: string,
+    agentId?: string,
+    options: OpenSessionOptions = {},
+  ): Promise<DaemonSession> {
     const existing = this.sessions.get(key);
     if (existing) {
       const existingIsSubagent = metadataIsSubagent(existing.metadata);
@@ -567,7 +646,10 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
         existing.cwd = requestedCwd;
       }
       if (options.model) {
+        // An explicit model on reopen is the caller choosing for this session,
+        // so it pins: a later global reload must not undo it.
         existing.model = options.model;
+        existing.modelPinned = true;
       }
       applySystemPromptAddendum(existing, options.systemPromptAddendum);
       return existing;
@@ -606,6 +688,7 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
           key,
           options.model ?? this.model(),
           this.workspaceRoot,
+          stringValue(this.runtimeSettings.permission_mode),
         )
       : freshSession(
           key,
@@ -613,6 +696,10 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
           cwd,
           options.model ?? this.model(),
           this.workspaceRoot,
+          // An explicit model at creation is the caller choosing for this
+          // session — a background prompt inheriting its parent's model, for
+          // instance — so it pins against later default changes.
+          options.model !== undefined,
         );
     // A live copy of the same persisted id may still be registered under a
     // stale key (for example a `tui:` slot that predates a resume). Two
@@ -677,7 +764,23 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     }
     const model = this.model();
     for (const session of this.sessions.values()) {
-      session.model = model;
+      // Only sessions that never chose for themselves follow the global
+      // default; a pinned one keeps what it was given.
+      if (!session.modelPinned) {
+        session.model = model;
+      }
+      if (!session.reasoningPinned) {
+        const effort = stringValue(this.runtimeSettings.reasoning_effort);
+        if (effort) {
+          session.reasoningEffort = effort;
+        }
+      }
+      if (!session.permissionPinned) {
+        const permission = stringValue(this.runtimeSettings.permission_mode);
+        if (permission) {
+          session.permissionMode = permission;
+        }
+      }
     }
     return this.status();
   }
@@ -696,6 +799,62 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     session.planMode = planMode ?? normalized === "plan";
     session.lastActive = Date.now();
     this.options.onSessionModeChange?.(session.id, normalized);
+    return session;
+  }
+
+  async setSessionModel(
+    sessionKey: string,
+    model: string,
+  ): Promise<DaemonSession | undefined> {
+    const session = this.sessions.get(sessionKey);
+    if (!session) {
+      return undefined;
+    }
+    const chosen = model.trim();
+    if (!chosen) {
+      return session;
+    }
+    session.model = chosen;
+    // Pinned from here on, so a later global reload cannot silently move this
+    // session onto another session's model.
+    session.modelPinned = true;
+    session.lastActive = Date.now();
+    return session;
+  }
+
+  async setSessionReasoning(
+    sessionKey: string,
+    effort: string,
+  ): Promise<DaemonSession | undefined> {
+    const session = this.sessions.get(sessionKey);
+    if (!session) {
+      return undefined;
+    }
+    const chosen = effort.trim();
+    if (!chosen) {
+      return session;
+    }
+    session.reasoningEffort = chosen;
+    session.reasoningPinned = true;
+    session.lastActive = Date.now();
+    return session;
+  }
+
+  async setSessionPermissionMode(
+    sessionKey: string,
+    mode: string,
+  ): Promise<DaemonSession | undefined> {
+    const session = this.sessions.get(sessionKey);
+    if (!session) {
+      return undefined;
+    }
+    const chosen = mode.trim();
+    if (!chosen) {
+      return session;
+    }
+    session.permissionMode = chosen;
+    session.permissionPinned = true;
+    session.lastActive = Date.now();
     return session;
   }
 
@@ -737,6 +896,9 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     }
     if (this.abortControllers.has(sessionKey)) {
       const queue = this.steerQueues.get(sessionKey) ?? [];
+      if (queue.length >= MAX_ACTIVE_TURN_STEERS) {
+        return false;
+      }
       queue.push(cleaned);
       this.steerQueues.set(sessionKey, queue);
       return true;
@@ -939,6 +1101,10 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
           },
         });
       }
+      // Conversation recency is distinct from file-save recency. Compaction,
+      // title changes, and shutdown flushes rewrite the transcript without a
+      // new message and must not make it look like a new chat in /resume.
+      session.metadata.last_message_at = new Date(session.lastActive).toISOString();
       try {
         await this.saveSession(session);
       } catch (error) {
@@ -995,7 +1161,15 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
       interactionMode: session.interactionMode,
       key: session.sessionKey,
       messages: session.messages,
-      metadata: session.metadata,
+      // Stamped so a later resume can restore the model this history was
+      // written with instead of silently adopting whatever the profile last
+      // stored, which could be a different provider entirely.
+      metadata: {
+        ...session.metadata,
+        model: session.model,
+        ...(session.reasoningEffort ? { reasoning_effort: session.reasoningEffort } : {}),
+        ...(session.permissionMode ? { permission_mode: session.permissionMode } : {}),
+      },
       pendingResumeReplays: [],
       planMode: session.planMode,
       schemaVersion: undefined,
@@ -1032,6 +1206,7 @@ function freshSession(
   cwd: string,
   model: string,
   workspaceRoot: string,
+  modelPinned = false,
 ): DaemonSession {
   return {
     id: looksLikeSessionId(sessionKey) ? sessionKey : newSessionId(),
@@ -1046,6 +1221,7 @@ function freshSession(
     messages: [],
     metadata: {},
     model,
+    modelPinned,
     planMode: false,
     status: "idle",
     thinkingContent: [],
@@ -1073,15 +1249,48 @@ function applySystemPromptAddendum(
   delete session.systemPromptAddendum;
 }
 
+/**
+ * Relative strictness of a permission mode, for the resume rule below.
+ * Anything unrecognized ranks strictest so an unknown value never loosens.
+ */
+function permissionStrictness(mode: string): number {
+  if (mode === "accept-all") return 0;
+  if (mode === "auto") return 1;
+  return 2;
+}
+
+/**
+ * Permission mode to resume a transcript under.
+ *
+ * Unlike the model and the reasoning effort, a stored permission mode is only
+ * honored when it is at least as strict as the current default. Continuity is
+ * the goal for the other two, but silently re-granting a looser trust level
+ * from a file on disk is not something a resume should be able to do.
+ */
+function resumedPermissionMode(
+  stored: string,
+  current: string,
+): string | undefined {
+  if (!stored) return undefined;
+  return permissionStrictness(stored) >= permissionStrictness(current)
+    ? stored
+    : undefined;
+}
+
 function sessionFromTranscript(
   transcript: DaemonTranscript,
   sessionKey: string,
   model: string,
   workspaceRoot: string,
+  currentPermissionMode = "",
 ): DaemonSession {
   const interactionMode = normalizeInteractionMode(
     transcript.interactionMode,
     transcript.planMode,
+  );
+  const resumedPermission = resumedPermissionMode(
+    stringValue(transcript.metadata.permission_mode),
+    currentPermissionMode,
   );
   return {
     id: transcript.sessionId,
@@ -1094,13 +1303,28 @@ function sessionFromTranscript(
     cwd: transcript.cwd,
     extra: { ...transcript.extra },
     interactionMode,
-    lastActive: Date.now(),
+    // Resuming/activating a chat does not create a message. Preserve the
+    // conversation clock so /resume age remains tied to its latest content.
+    lastActive: timestampMillis(
+      nonemptyMetadataString(transcript.metadata, "last_message_at") ?? transcript.updatedAt,
+    ) || Date.now(),
     messages: transcript.messages.map((message) => ({
       ...message,
       role: stringValue(message.role),
     })),
     metadata: { ...transcript.metadata },
-    model,
+    // The model this history was written with wins over the current global
+    // default: resuming a transcript should continue the conversation on the
+    // model that produced it, not silently move it to another provider.
+    model: stringValue(transcript.metadata.model) || model,
+    modelPinned: Boolean(stringValue(transcript.metadata.model)),
+    ...(stringValue(transcript.metadata.reasoning_effort)
+      ? {
+          reasoningEffort: stringValue(transcript.metadata.reasoning_effort),
+          reasoningPinned: true,
+        }
+      : {}),
+    ...(resumedPermission ? { permissionMode: resumedPermission, permissionPinned: true } : {}),
     planMode: interactionMode === "plan",
     status: "idle",
     thinkingContent: [...transcript.thinkingContent],
@@ -1156,6 +1380,7 @@ function savedSessionSummary(
   transcript: SavedSessionSource,
 ): SavedDaemonSession {
   const metadata = transcript.metadata;
+  const lastMessageAt = nonemptyMetadataString(metadata, "last_message_at");
   const parentSessionId = nonemptyMetadataString(
     metadata,
     "parent_session_id",
@@ -1190,7 +1415,7 @@ function savedSessionSummary(
       : {}),
     ...(status ? { status } : {}),
     ...(subagentId ? { subagentId } : {}),
-    updatedAt: transcript.updatedAt,
+    updatedAt: lastMessageAt ?? transcript.updatedAt,
     turnCount: transcript.turnCount,
     messageCount: transcript.messageCount,
     path: transcript.path,

@@ -1,6 +1,9 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+/** Default maximum size of one buffered SSE record. */
+export const MAX_SSE_RECORD_CHARS = 10 * 1024 * 1024
+
 /** A completed Server-Sent Events record. */
 export interface SSEEvent {
   readonly data: string
@@ -22,9 +25,18 @@ export class SSEParser {
   private currentData: string[] = []
   private currentEvent = 'message'
   private currentId = ''
+  private currentRecordChars = 0
   private currentRetry: number | undefined
+  private readonly maxRecordChars: number
 
   lastEventId = ''
+
+  constructor(options: { readonly maxRecordChars?: number } = {}) {
+    this.maxRecordChars = options.maxRecordChars ?? MAX_SSE_RECORD_CHARS
+    if (!Number.isSafeInteger(this.maxRecordChars) || this.maxRecordChars <= 0) {
+      throw new RangeError('maxRecordChars must be a positive integer')
+    }
+  }
 
   /** Buffer raw text and process every complete line. */
   feed(chunk: string): void {
@@ -45,10 +57,13 @@ export class SSEParser {
       } else {
         break
       }
+      this.ensureRecordSize(this.currentRecordChars + end + skip)
+      this.currentRecordChars += end + skip
       const line = this.buffer.slice(0, end)
       this.buffer = this.buffer.slice(end + skip)
       this.handleLine(line)
     }
+    this.ensureRecordSize(this.currentRecordChars + this.buffer.length)
   }
 
   /** Return and clear the records completed since the preceding drain. */
@@ -109,6 +124,13 @@ export class SSEParser {
     this.currentEvent = 'message'
     this.currentId = ''
     this.currentRetry = undefined
+    this.currentRecordChars = 0
+  }
+
+  private ensureRecordSize(chars: number): void {
+    if (chars > this.maxRecordChars) {
+      throw new RangeError(`SSE record exceeded maximum size of ${this.maxRecordChars} characters`)
+    }
   }
 }
 

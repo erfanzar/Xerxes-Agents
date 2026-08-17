@@ -78,22 +78,21 @@ export class FileSessionStore implements SessionStore {
   }
 
   deleteSession(sessionId: string): boolean {
-    const path = this.findSessionPath(sessionId)
-    if (!path) return false
-    rmSync(path, { force: true })
-    return true
+    const paths = this.findSessionPaths(sessionId)
+    for (const path of paths) rmSync(path, { force: true })
+    return paths.length > 0
   }
 
   listSessions(workspaceId?: string): string[] {
     const directory = workspaceId === undefined ? undefined : this.workspaceDirectory(workspaceId)
     if (directory !== undefined) return sessionIdsInDirectory(directory)
 
-    const ids = sessionIdsInDirectory(this.baseDirectory)
+    const ids = new Set(sessionIdsInDirectory(this.baseDirectory))
     for (const entry of readdirSync(this.baseDirectory, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue
-      ids.push(...sessionIdsInDirectory(join(this.baseDirectory, entry.name)))
+      for (const sessionId of sessionIdsInDirectory(join(this.baseDirectory, entry.name))) ids.add(sessionId)
     }
-    return ids
+    return [...ids]
   }
 
   loadSession(sessionId: string): SessionRecord | undefined {
@@ -108,7 +107,11 @@ export class FileSessionStore implements SessionStore {
   }
 
   saveSession(session: SessionRecord): void {
-    this.writeRecord(this.pathFor(session), session.toRecord())
+    const path = this.pathFor(session)
+    this.writeRecord(path, session.toRecord())
+    for (const stalePath of this.findSessionPaths(session.sessionId)) {
+      if (stalePath !== path) rmSync(stalePath, { force: true })
+    }
   }
 
   search(query: string, options: SearchOptions = {}): SearchHit[] {
@@ -133,15 +136,23 @@ export class FileSessionStore implements SessionStore {
   }
 
   private findSessionPath(sessionId: string): string | undefined {
+    return this.findSessionPaths(sessionId)[0]
+  }
+
+  private findSessionPaths(sessionId: string): string[] {
     const safeId = safeSegment(sessionId, 'session_id')
+    const paths: string[] = []
     const flat = join(this.baseDirectory, `${safeId}.json`)
-    if (existsSync(flat)) return flat
+    if (existsSync(flat)) paths.push(flat)
     for (const entry of readdirSync(this.baseDirectory, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue
       const candidate = join(this.baseDirectory, entry.name, `${safeId}.json`)
-      if (existsSync(candidate)) return candidate
+      if (existsSync(candidate)) paths.push(candidate)
     }
-    return undefined
+    return paths.sort((left, right) => {
+      const modified = statSync(right).mtimeMs - statSync(left).mtimeMs
+      return modified === 0 ? right.localeCompare(left) : modified
+    })
   }
 
   private migrateIfNeeded(record: SessionRecordData): SessionRecordData {
@@ -360,19 +371,21 @@ export class SQLiteSessionStore implements SessionStore {
   }
 }
 
+const storeSessionLocks = new WeakMap<SessionStore, Map<string, Promise<void>>>()
+
 /** Lifecycle helper that owns timestamps, identifiers, and durable mutations. */
 export class SessionManager {
   /**
-   * Per-session async mutex serializing load→mutate→save cycles. Without it,
-   * two in-process writers racing one session (for example a daemon client
-   * and a CLI sharing a store) each load a stale snapshot and the last save
-   * silently drops the other's appended turns or transitions. Entries are
-   * removed as soon as the chain tail settles without a queued successor, so
-   * the map cannot grow unboundedly.
+   * Per-store, per-session async mutex serializing load→mutate→save cycles.
+   * Managers sharing a store also share this lock map, preventing one manager
+   * from overwriting another manager's mutation from a stale snapshot.
    */
-  private readonly sessionLocks = new Map<string, Promise<void>>()
+  private readonly sessionLocks: Map<string, Promise<void>>
 
-  constructor(readonly store: SessionStore) {}
+  constructor(readonly store: SessionStore) {
+    this.sessionLocks = storeSessionLocks.get(store) ?? new Map<string, Promise<void>>()
+    storeSessionLocks.set(store, this.sessionLocks)
+  }
 
   endSession(sessionId: string): Promise<void> {
     return this.mutateSession(sessionId, session => {

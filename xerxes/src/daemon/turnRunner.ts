@@ -11,7 +11,9 @@ import type { ToolExecutor } from '../executors/toolRegistry.js'
 import type { AgentMemory } from '../memory/agentMemory.js'
 import {
   mergePersistedSubagentSnapshots,
+  persistedSubagentDeliveryValues,
   persistedSubagentSnapshotValues,
+  replacePersistedSubagentDeliveries,
 } from '../agents/subagentPersistence.js'
 import { SUBAGENT_BLOCKED_TOOLS } from '../agents/subagentManager.js'
 import type { AgentSelfMemory } from '../memory/agentSelfMemory.js'
@@ -101,7 +103,11 @@ export interface AgentTurnRunnerOptions {
   readonly subagentCoordinator?: SubagentTurnCoordinator
   readonly toolExecutor?: ToolExecutor
   /** Per-tool execution axes, normally `registry.capabilities` bound to the tool registry. */
-  readonly toolCapabilities?: (toolName: string, agentId?: string) => {
+  readonly toolCapabilities?: (
+    toolName: string,
+    agentId?: string,
+    args?: Readonly<Record<string, unknown>>,
+  ) => {
     readonly concurrencySafe: boolean
     readonly interruptBehavior: 'block' | 'cancel'
   }
@@ -188,7 +194,10 @@ export class AgentTurnRunner implements TurnRunner {
     const resumedSubagent = session.metadata.session_kind === 'subagent'
     if (resumedSubagent) state.metadata.status = 'running'
     const tools = resumedSubagent ? toolsForResumedSubagent(modeTools, session.metadata) : modeTools
-    const configuredPermissionMode = permissionModeForInteraction(session.interactionMode, this.options.permissionMode)
+    // The session's own mode wins over the runner default, so the pin reaches
+    // the permission broker rather than only the status line.
+    const sessionPermissionMode = permissionModeValue(session.permissionMode) ?? this.options.permissionMode
+    const configuredPermissionMode = permissionModeForInteraction(session.interactionMode, sessionPermissionMode)
     const permissionMode = resumedSubagent
       ? permissionModeForResumedSubagent(configuredPermissionMode, session.metadata)
       : configuredPermissionMode
@@ -219,6 +228,9 @@ export class AgentTurnRunner implements TurnRunner {
         persistedSubagentSnapshotValues(session.metadata),
       )
       : []
+    this.options.subagentCoordinator?.hydrateDelivered?.(
+      persistedSubagentDeliveryValues(session.metadata),
+    )
     const restoredSubagentCount = this.options.subagentCoordinator
       ?.restore?.(session.id, recoveredSubagents) ?? 0
     // Kept as named, ordered segments rather than one joined string: the
@@ -282,7 +294,12 @@ export class AgentTurnRunner implements TurnRunner {
       defaults: {
         ...(this.options.thinking !== undefined ? { enabled: this.options.thinking } : {}),
         ...(this.options.thinkingBudget !== undefined ? { budgetTokens: this.options.thinkingBudget } : {}),
-        ...(this.options.reasoningEffort !== undefined ? { effort: this.options.reasoningEffort } : {}),
+        // The session's own effort wins over the runner default, so two open
+        // sessions can run at different efforts and a resumed one continues at
+        // the effort it was held at.
+        ...(session.reasoningEffort ?? this.options.reasoningEffort) !== undefined
+          ? { effort: session.reasoningEffort ?? this.options.reasoningEffort }
+          : {},
       },
       prompt: text,
       ultraMode: session.ultraMode === true,
@@ -294,6 +311,7 @@ export class AgentTurnRunner implements TurnRunner {
     const userMessage: MessageContent = images.length
       ? [{ type: 'text', text }, ...imageUrlContentParts(images)]
       : text
+    let pendingAgentEventSnapshots: readonly SpawnedAgentSnapshot[] = []
     try {
       const turnEvents = withActiveSession(session, runTurn({
         agentId: promptAgent?.name ?? session.agentId,
@@ -309,15 +327,24 @@ export class AgentTurnRunner implements TurnRunner {
         ...(thinking === undefined ? {} : { thinking: { budgetTokens: thinking.budgetTokens, effort: thinking.effort } }),
         ...(this.options.topK !== undefined ? { topK: this.options.topK } : {}),
         ...(tools ? { tools } : {}),
-        ...(systemPrompt ? { systemPrompt } : {}),
+        ...(systemPrompt ? { systemPrompt, systemPromptRequestOnly: true } : {}),
         ...(systemSegments.length ? { systemSegments } : {}),
         ...(this.options.topP !== undefined ? { topP: this.options.topP } : {}),
       }, {
         ...(subagentCohort ? {
           awaitAgentEvents: async signal => {
-            const snapshots = await subagentCohort.waitForResults(signal)
-            mergePersistedSubagentSnapshots(state.metadata, snapshots)
-            return formatSubagentResults(snapshots)
+            pendingAgentEventSnapshots = await subagentCohort.waitForResults(signal)
+            mergePersistedSubagentSnapshots(state.metadata, pendingAgentEventSnapshots)
+            return formatSubagentResults(pendingAgentEventSnapshots)
+          },
+          acknowledgeAgentEvents: () => {
+            if (!pendingAgentEventSnapshots.length) return
+            this.options.subagentCoordinator?.consume(pendingAgentEventSnapshots)
+            pendingAgentEventSnapshots = []
+            const delivered = this.options.subagentCoordinator?.deliveredState?.()
+            if (delivered !== undefined) {
+              replacePersistedSubagentDeliveries(state.metadata, delivered)
+            }
           },
         } : {}),
         ...(controls.drainSteer ? { drainSteer: controls.drainSteer } : {}),
@@ -431,9 +458,16 @@ export class AgentTurnRunner implements TurnRunner {
         }
         this.toolResultStores.set(session.id, store)
       }
-      const stored = store.maybeStore(toolName, content)
-      const reference = typeof stored === 'string' ? ToolResultStorage.parseRef(stored) : undefined
-      return boundedToolResultPreview(toolName, content, reference ? store.pathFor(reference) : undefined)
+      try {
+        const stored = store.maybeStore(toolName, content)
+        const reference = typeof stored === 'string' ? ToolResultStorage.parseRef(stored) : undefined
+        return boundedToolResultPreview(toolName, content, reference ? store.pathFor(reference) : undefined)
+      } catch {
+        // The store may become unwritable after construction. Never send the
+        // oversized result back into model context; retain the same bounded
+        // preview while making the loss of the spill file explicit.
+        return boundedToolResultPreview(toolName, content, undefined)
+      }
     }
   }
 
@@ -536,7 +570,10 @@ function recentSuccessfulToolNames(session: DaemonSession, limit = 24): readonly
   return [...names]
 }
 
-const MAX_SUBAGENT_RESULT_CHARS = 64_000
+// Must match the shared agent-event injection block cap. Formatting a larger
+// batch here would let the injection layer truncate it after every snapshot was
+// acknowledged as delivered.
+const MAX_SUBAGENT_RESULT_CHARS = 16_000
 const MAX_SINGLE_SUBAGENT_RESULT_CHARS = 16_000
 const MAX_INLINE_SUBAGENT_RESULTS = 64
 
@@ -1014,10 +1051,36 @@ function daemonEventFromStream(event: StreamEvent, state: AgentState, session: D
           display_blocks: [],
         },
       }
+    case 'usage_update':
+      // The provider's per-round input is the request context it actually saw;
+      // include the generated output so the remaining-token meter moves before
+      // the buffered visible deltas are replayed. Cumulative session usage is
+      // billing history and must not be mistaken for current-window occupancy.
+      return {
+        type: 'status_update',
+        payload: {
+          model: event.model,
+          usage: event.cumulative,
+          total_input_tokens: state.totalInputTokens,
+          total_output_tokens: state.totalOutputTokens,
+          input_tokens: state.totalInputTokens,
+          output_tokens: state.totalOutputTokens,
+          total_tokens: state.totalInputTokens + state.totalOutputTokens,
+          context_tokens:
+            event.usage.inputTokens + (event.usage.cacheReadTokens ?? 0) + event.usage.outputTokens,
+          max_context: getContextLimit(event.model),
+          ...(state.totalCacheReadTokens ? { cache_read_tokens: state.totalCacheReadTokens } : {}),
+          ...(state.totalCacheCreationTokens ? { cache_creation_tokens: state.totalCacheCreationTokens } : {}),
+        },
+      }
     case 'turn_done': {
       const contextTokens = estimateContextTokens(
         state.messages.map(message => ({ role: message.role, content: message.content })),
-        { model: event.model },
+        {
+          model: event.model,
+          ...(session.requestScaffold?.systemPrompt ? { systemPrompt: session.requestScaffold.systemPrompt } : {}),
+          ...(session.requestScaffold?.toolSchemas?.length ? { toolSchemas: session.requestScaffold.toolSchemas } : {}),
+        },
       )
       return {
         type: 'status_update',

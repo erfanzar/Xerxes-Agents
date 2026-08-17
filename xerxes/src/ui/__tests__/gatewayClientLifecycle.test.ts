@@ -106,7 +106,14 @@ describe('GatewayClient session lifecycle', () => {
         expect(params).toEqual({ current_session_id: 'live1' })
         return {
           ok: true,
-          sessions: [{ active_turn_id: 'turn1', id: 'live1', key: 'test:sessions', messages: 3, title: 'live work' }]
+          sessions: [{
+            active_turn_id: 'turn1',
+            id: 'live1',
+            key: 'test:sessions',
+            last_active: 1_751_018_100,
+            messages: 3,
+            title: 'live work'
+          }]
         }
       }
       if (method === 'session.list') {
@@ -145,7 +152,7 @@ describe('GatewayClient session lifecycle', () => {
 
     expect(calls).toEqual(['session.active_list', 'session.list'])
     expect(active).toMatchObject({
-      sessions: [{ id: 'live1', message_count: 3, status: 'working', title: 'live work' }]
+      sessions: [{ id: 'live1', last_active: 1_751_018_100, message_count: 3, status: 'working', title: 'live work' }]
     })
     expect(saved).toMatchObject({
       sessions: [

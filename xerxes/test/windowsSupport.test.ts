@@ -224,15 +224,14 @@ test('isBatchScript matches the extensions CreateProcess cannot execute', () => 
 test('the ACP registry root follows %APPDATA% on Windows and XDG elsewhere', () => {
   // XDG_CONFIG_HOME does not exist on Windows; writing agent.json there would
   // strand the registry where no ACP client looks for it.
-  // `join` uses the host separator, so only the Windows branch can assert an
-  // exact literal on any host; the POSIX branch asserts the XDG selection.
+  // The injected platform picks the joiner too, so every expectation below is
+  // an exact literal that holds on a POSIX host and a Windows host alike.
   expect(defaultAcpRegistryDirectory({ APPDATA: 'C:\\Users\\u\\AppData\\Roaming' }, 'C:\\Users\\u', 'win32'))
     .toBe('C:\\Users\\u\\AppData\\Roaming\\agent-registry')
   expect(defaultAcpRegistryDirectory({}, 'C:\\Users\\u', 'win32'))
     .toBe('C:\\Users\\u\\AppData\\Roaming\\agent-registry')
-  expect(defaultAcpRegistryDirectory({ XDG_CONFIG_HOME: '/xdg' }, '/home/u', 'linux'))
-    .toBe(join('/xdg', 'agent-registry'))
-  expect(defaultAcpRegistryDirectory({}, '/home/u', 'linux')).toBe(join('/home/u', '.config', 'agent-registry'))
+  expect(defaultAcpRegistryDirectory({ XDG_CONFIG_HOME: '/xdg' }, '/home/u', 'linux')).toBe('/xdg/agent-registry')
+  expect(defaultAcpRegistryDirectory({}, '/home/u', 'linux')).toBe('/home/u/.config/agent-registry')
 })
 
 test('isWindows only reports win32', () => {

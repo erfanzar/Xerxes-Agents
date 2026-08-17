@@ -196,6 +196,12 @@ test('permission hooks fail closed: a throwing or malformed guard denies instead
     expect(rejected.allowed).toBeFalse()
     expect(rejected.reason).toContain('not a permission verdict')
 
+    const missingVerdict = new HookRunner()
+    missingVerdict.register(TOOL_PERMISSION_HOOK, () => undefined)
+    const missing = await resolveToolPermission(missingVerdict, { toolName: 'exec_command' })
+    expect(missing.allowed).toBeFalse()
+    expect(missing.reason).toContain('not a permission verdict')
+
     // No guards installed is the ordinary case and must keep the agent working.
     expect(await resolveToolPermission(new HookRunner(), { toolName: 'exec_command' }))
       .toEqual({ allowed: true, denials: [], reason: '' })

@@ -52,6 +52,8 @@ export interface CortexRunOptions {
   readonly inputs?: Readonly<Record<string, unknown>>
   readonly process?: CortexProcess
   readonly signal?: AbortSignal
+  /** Per-run immutable task graph, used by facades that may execute concurrently. */
+  readonly tasks?: readonly CortexTask[]
 }
 
 export interface CortexRunOutput {
@@ -151,15 +153,17 @@ export class CortexOrchestrator {
     const inputs = options.inputs ?? {}
     const signal = options.signal
     const failFast = options.failFast ?? this.failFast
-    validateTaskGraph(this.tasks)
+    const tasks = options.tasks === undefined ? this.tasks : [...options.tasks]
+    validateTaskGraph(tasks)
+    validateContextTaskReferences(tasks)
     throwIfRunAborted(signal)
-    const states = new Map<string, CortexTaskStatus>(this.tasks.map(task => [task.id, 'pending']))
+    const states = new Map<string, CortexTaskStatus>(tasks.map(task => [task.id, 'pending']))
     const outputs = new Map<string, CortexTaskOutput>()
 
     while ([...states.values()].some(status => status === 'pending')) {
       throwIfRunAborted(signal)
-      if (skipBlockedTasks(this.tasks, states, outputs, this.now)) continue
-      const ready = this.tasks.filter(task => states.get(task.id) === 'pending'
+      if (skipBlockedTasks(tasks, states, outputs, this.now)) continue
+      const ready = tasks.filter(task => states.get(task.id) === 'pending'
         && (task.dependencies ?? []).every(dependency => states.get(dependency) === 'succeeded'))
       if (ready.length === 0) throw new Error('No executable tasks remain')
 
@@ -190,7 +194,9 @@ export class CortexOrchestrator {
         states.set(task.id, output.status)
       }
       if (process === CortexProcess.PARALLEL) {
-        await mapConcurrent(runnable, this.maxParallel, execute)
+        await mapConcurrent(runnable, this.maxParallel, execute, () => (
+          failFast && [...outputs.values()].some(output => output.status === 'failed')
+        ))
         if (failFast) throwIfRunFailed(outputs)
       } else {
         for (const task of runnable) {
@@ -200,17 +206,20 @@ export class CortexOrchestrator {
       }
     }
 
+    throwIfRunAborted(signal)
     const completedAt = this.now()
-    const taskOutputs = this.tasks.flatMap(task => {
+    const taskOutputs = tasks.flatMap(task => {
       const output = outputs.get(task.id)
       return output ? [output] : []
     })
     const failedCount = taskOutputs.filter(output => output.status === 'failed').length
     const skippedCount = taskOutputs.filter(output => output.status === 'skipped').length
     const succeededCount = taskOutputs.filter(output => output.status === 'succeeded').length
-    const status: CortexRunStatus = failedCount === 0
+    // An empty graph is intentionally a successful no-op. Every non-empty run
+    // must complete all tasks successfully to receive the same aggregate status.
+    const status: CortexRunStatus = taskOutputs.length === 0 || succeededCount === taskOutputs.length
       ? 'succeeded'
-      : succeededCount === 0 && skippedCount === 0
+      : failedCount === taskOutputs.length
         ? 'failed'
         : 'partial'
     const result: CortexRunOutput = {
@@ -367,11 +376,16 @@ function failedOutput(task: CortexTask, startedAt: Date, completedAt: Date, erro
   }
 }
 
-async function mapConcurrent<T>(items: readonly T[], maxParallel: number, run: (item: T) => Promise<void>): Promise<void> {
+async function mapConcurrent<T>(
+  items: readonly T[],
+  maxParallel: number,
+  run: (item: T) => Promise<void>,
+  shouldStop: () => boolean = () => false,
+): Promise<void> {
   const workerCount = Math.min(items.length, maxParallel)
   let next = 0
   const worker = async (): Promise<void> => {
-    while (next < items.length) {
+    while (next < items.length && !shouldStop()) {
       const index = next
       next += 1
       const item = items[index]

@@ -15,6 +15,8 @@ import {
   CortexRunFailedError,
   DEFAULT_MAX_PARALLEL,
 } from '../src/cortex/orchestrator.js'
+import { DynamicCortex } from '../src/cortex/dynamic.js'
+import { executeExecutionPlan, PlanExecutionAbortedError } from '../src/cortex/planner.js'
 import { TaskGraphError } from '../src/cortex/task.js'
 import type { CompletionRequest, LlmClient, LlmDelta } from '../src/llms/client.js'
 
@@ -71,6 +73,75 @@ test('Cortex propagates cancellation into executors so in-flight work aborts wit
   // The detached topology settles promptly because the signal reached the executor.
   await delay(10)
   expect(executorSettled).toBe(true)
+})
+
+test('CortexOrchestrator reports cancellation even when the final task resolves after abort', async () => {
+  const controller = new AbortController()
+  const orchestrator = new CortexOrchestrator({
+    executor: async () => {
+      controller.abort(new Error('cancel final task'))
+      await delay(1)
+      return 'late success'
+    },
+    tasks: [{ id: 'final', description: 'Final', expectedOutput: 'never accepted' }],
+  })
+
+  await expect(orchestrator.run({ signal: controller.signal })).rejects.toBeInstanceOf(CortexRunAbortedError)
+  expect(orchestrator.lastOutput).toBeUndefined()
+})
+
+test('execution plans propagate cancellation and cap parallel step concurrency', async () => {
+  const plan = {
+    id: 'bounded-plan',
+    objective: 'bounded cancellable work',
+    complexity: 'low' as const,
+    estimatedMinutes: 0,
+    steps: Array.from({ length: 8 }, (_value, index) => ({
+      id: String(index),
+      action: 'run',
+      description: `Step ${index}`,
+      arguments: {},
+      dependencies: [],
+    })),
+  }
+  const tracked = trackConcurrency()
+  await executeExecutionPlan(plan, tracked.executor, { parallel: true, maxParallel: 2 })
+  expect(tracked.maxActive).toBe(2)
+
+  const controller = new AbortController()
+  let started = 0
+  const pending = executeExecutionPlan(plan, async () => {
+    started += 1
+    controller.abort(new Error('stop plan'))
+    await delay(2)
+    return 'late'
+  }, { parallel: true, maxParallel: 1, signal: controller.signal })
+  await expect(pending).rejects.toBeInstanceOf(PlanExecutionAbortedError)
+  expect(started).toBe(1)
+})
+
+test('DynamicCortex concurrent prompt runs keep independent task graphs', async () => {
+  const gate = Promise.withResolvers<void>()
+  const started: string[] = []
+  const dynamic = new DynamicCortex({
+    executor: async context => {
+      started.push(context.task.description)
+      await gate.promise
+      return context.task.description
+    },
+  })
+
+  const first = dynamic.executePrompt('first')
+  await delay(1)
+  const second = dynamic.executePrompt('second')
+  await delay(1)
+  gate.resolve()
+
+  const [firstOutput, secondOutput] = await Promise.all([first, second])
+  expect(started).toEqual(['first', 'second'])
+  expect(firstOutput.taskOutputs.map(output => output.taskId)).toEqual(['dynamic-1'])
+  expect(firstOutput.rawOutput).toBe('first')
+  expect(secondOutput.rawOutput).toBe('second')
 })
 
 test('CortexOrchestrator stops scheduling new tasks once the run signal aborts', async () => {
@@ -145,6 +216,61 @@ test('Cortex consensus caps candidate fan-out by default and allows explicit unb
   const unboundedOutput = await unboundedEngine.kickoff()
   expect(unboundedOutput.taskOutputs[0]?.status).toBe('succeeded')
   expect(unbounded.maxActive).toBe(agents.length)
+})
+
+test('Cortex high-level maxParallel allows explicit unbounded opt-in and rejects invalid values', async () => {
+  const tasks = Array.from({ length: 6 }, (_value, index) => ({
+    id: `task-${index}`,
+    description: `Task ${index}`,
+    expectedOutput: 'done',
+  }))
+  const unbounded = trackConcurrency()
+  const engine = new Cortex({
+    process: ProcessType.PARALLEL,
+    maxParallel: Number.POSITIVE_INFINITY,
+    tasks,
+    executor: unbounded.executor,
+  })
+
+  await engine.kickoff()
+  expect(unbounded.maxActive).toBe(tasks.length)
+
+  for (const invalid of [0, -1, 1.5, Number.NEGATIVE_INFINITY, Number.NaN]) {
+    expect(() => new Cortex({ maxParallel: invalid })).toThrow('maxParallel must be a positive integer')
+  }
+})
+
+test('CortexOrchestrator reports partial for non-empty skipped-only and mixed success/skipped runs', async () => {
+  const skippedOnly = new CortexOrchestrator({
+    executor: () => 'not executed',
+    tasks: [
+      { id: 'a', description: 'A', expectedOutput: 'a', runWhen: () => false },
+      { id: 'b', description: 'B', expectedOutput: 'b', runWhen: () => false },
+    ],
+  })
+  const skipped = await skippedOnly.run()
+  expect(skipped.status).toBe('partial')
+  expect(skipped.skippedCount).toBe(2)
+  expect(skipped.succeededCount).toBe(0)
+  expect(skipped.failedCount).toBe(0)
+
+  const mixed = new CortexOrchestrator({
+    executor: () => 'done',
+    tasks: [
+      { id: 'done', description: 'Done', expectedOutput: 'done' },
+      { id: 'skip', description: 'Skip', expectedOutput: 'skip', runWhen: () => false },
+    ],
+  })
+  const partial = await mixed.run()
+  expect(partial.status).toBe('partial')
+  expect(partial.succeededCount).toBe(1)
+  expect(partial.skippedCount).toBe(1)
+})
+
+test('CortexOrchestrator intentionally treats an empty graph as succeeded', async () => {
+  const output = await new CortexOrchestrator().run()
+  expect(output.status).toBe('succeeded')
+  expect(output.taskOutputs).toEqual([])
 })
 
 test('CortexOrchestrator reports aggregate status and failed counts for fully and partially failed runs', async () => {

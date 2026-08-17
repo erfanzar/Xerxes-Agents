@@ -105,6 +105,31 @@ const picker = async ({
 }
 
 describe('OpenTUI session picker histories', () => {
+  it('shows saved chat age from the last message rather than the legacy start field', async () => {
+    const now = Date.now() / 1000
+    const { setup } = await picker({
+      chatResponse: {
+        sessions: [{
+          id: 'aged-chat',
+          kind: 'main',
+          last_message_at: now - 120,
+          message_count: 2,
+          preview: 'Recent answer',
+          started_at: now - 86_400,
+          title: 'Recent answer'
+        }]
+      }
+    })
+
+    try {
+      const frame = setup.captureCharFrame()
+      expect(frame).toContain('2m')
+      expect(frame).not.toContain('1d')
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
+
   it('keeps chats clean by default and opens a linked child history from the Agents view', async () => {
     const { actions, request, setup } = await picker()
 

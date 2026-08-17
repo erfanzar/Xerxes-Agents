@@ -7,11 +7,13 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 import {
+  MAX_ACTIVE_TURN_STEERS,
   InMemoryDaemonRuntime,
   type DaemonEvent,
   type DaemonSession,
   type TurnRunner,
 } from '../src/daemon/runtime.js'
+import { DaemonTranscriptStore } from '../src/session/daemonTranscript.js'
 import { claimSubagentConversation } from '../src/daemon/subagentConversations.js'
 
 test('daemon runtime persists a project-scoped session and resumes only an explicit ID', async () => {
@@ -60,7 +62,8 @@ test('daemon runtime persists a project-scoped session and resumes only an expli
       total_output_tokens: 5,
       metadata: { title: 'remember the native resume contract' },
     })
-    expect(await runtime.listSavedSessions()).toEqual([
+    const firstListing = await runtime.listSavedSessions()
+    expect(firstListing).toEqual([
       expect.objectContaining({
         id: session.id,
         key: 'tui:default',
@@ -69,6 +72,13 @@ test('daemon runtime persists a project-scoped session and resumes only an expli
         turnCount: 1,
       }),
     ])
+    const lastMessageAt = firstListing[0]!.updatedAt
+    // Saving metadata-only changes (including compaction) must not make an old
+    // conversation look like a newly active session in /resume.
+    session.lastActive = Date.parse(lastMessageAt) + 60_000
+    await runtime.flushSessions()
+    expect((await runtime.listSavedSessions())[0]?.updatedAt).toBe(lastMessageAt)
+
     await runtime.openSession('tui:empty')
     await runtime.flushSessions()
     expect(await runtime.listSavedSessions()).toHaveLength(1)
@@ -91,6 +101,7 @@ test('daemon runtime persists a project-scoped session and resumes only an expli
       cwd: resolve(projectDirectory),
       workspace: resolve(workspaceRoot, 'researcher'),
       interactionMode: 'researcher',
+      lastActive: Date.parse(lastMessageAt),
       turnCount: 1,
       totalInputTokens: 13,
       totalOutputTokens: 5,
@@ -368,6 +379,57 @@ test('daemon cancellation drains queued steering, clears active state, and does 
   }
 })
 
+test('active-turn steering is bounded and rejects overflow without dropping accepted hints', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-daemon-steer-bound-'))
+  const runner = new BoundedSteerRunner()
+  const runtime = new InMemoryDaemonRuntime(runner, {
+    currentProjectDirectory: directory,
+    sessionDirectory: join(directory, 'sessions'),
+  })
+  try {
+    const session = await runtime.openSession('tui:bounded-steer')
+    const turn = runtime.submitTurn(session.sessionKey, 'begin', () => {})
+    await runner.waiting
+
+    for (let index = 0; index < MAX_ACTIVE_TURN_STEERS; index += 1) {
+      expect(runtime.steerTurn(session.sessionKey, `hint ${index}`)).toBe(true)
+    }
+    expect(runtime.steerTurn(session.sessionKey, 'overflow')).toBe(false)
+
+    runner.release()
+    await turn
+    expect(runner.drained).toEqual(
+      Array.from({ length: MAX_ACTIVE_TURN_STEERS }, (_, index) => `hint ${index}`),
+    )
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('concurrent openSession calls share one initialization and one session object', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-daemon-open-race-'))
+  const store = new CountingLoadStore({
+    directory: join(directory, 'sessions'),
+    currentProjectDirectory: directory,
+  })
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: directory,
+    transcriptStore: store,
+  })
+  try {
+    const [first, second] = await Promise.all([
+      runtime.openSession('deadbeef', undefined, { resume: true }),
+      runtime.openSession('deadbeef', undefined, { resume: true }),
+    ])
+
+    expect(first).toBe(second)
+    expect(runtime.listSessions()).toHaveLength(1)
+    expect(store.loads).toBe(1)
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
 test('interaction mode is scoped to a daemon session rather than process-global runtime settings', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'xerxes-daemon-mode-parity-'))
   const runtime = new InMemoryDaemonRuntime(undefined, {
@@ -397,6 +459,42 @@ class RecordingRunner implements TurnRunner {
     }
     yield { type: 'status_update', payload: { usage: { input_tokens: 13, output_tokens: 5 } } }
     yield { type: 'text_part', payload: { text: 'durable answer' } }
+  }
+}
+
+class BoundedSteerRunner implements TurnRunner {
+  private markWaiting: (() => void) | undefined
+  private releaseWaiting: (() => void) | undefined
+  readonly waiting = new Promise<void>(resolve => { this.markWaiting = resolve })
+  private readonly released = new Promise<void>(resolve => { this.releaseWaiting = resolve })
+  drained: readonly string[] = []
+
+  release(): void {
+    this.releaseWaiting?.()
+  }
+
+  async *run(
+    _session: DaemonSession,
+    _text: string,
+    _signal: AbortSignal,
+    controls?: { drainSteer?(): readonly string[] },
+  ): AsyncGenerator<DaemonEvent> {
+    this.markWaiting?.()
+    await this.released
+    this.drained = controls?.drainSteer?.() ?? []
+    yield { type: 'text_part', payload: { text: 'done' } }
+  }
+}
+
+class CountingLoadStore extends DaemonTranscriptStore {
+  loads = 0
+
+  override async load(
+    ...args: Parameters<DaemonTranscriptStore['load']>
+  ): ReturnType<DaemonTranscriptStore['load']> {
+    this.loads += 1
+    await new Promise(resolve => setTimeout(resolve, 10))
+    return super.load(...args)
   }
 }
 

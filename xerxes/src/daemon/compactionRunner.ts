@@ -16,7 +16,7 @@ import { closeLlmClient, completeLlm, type LlmClient } from "../llms/client.js";
 import { classifyError, ErrorKind } from "../runtime/errorClassifier.js";
 
 /** Auto-compact once the estimated context usage reaches this fraction of the prompt budget. */
-export const DEFAULT_AUTO_COMPACT_THRESHOLD = 0.9;
+export const DEFAULT_AUTO_COMPACT_THRESHOLD = 0.8;
 
 /**
  * Summary token budgets tried in order: the default, then a half, then a
@@ -229,6 +229,12 @@ export async function compactMessagesIfNeeded(
       tokens_after: tokensAfter,
       tokens_before: tokensBefore,
     });
+    // When the caller supplied an archive path, replacing the transcript is
+    // safe only after the original was durably appended. Returning the summary
+    // on an archive failure would make that history unrecoverable.
+    if (archive.error !== undefined) {
+      return { compacted: false, reason: "failed", error: archive.error };
+    }
     return {
       compacted: true,
       messages: [...compacted],
@@ -278,9 +284,8 @@ interface PreCompactionRecord {
  *
  * Append, never overwrite: a session compacts repeatedly and the second pass
  * would otherwise erase the only surviving copy of the first pass's history.
- * A failed write is reported rather than thrown — losing the archive is bad,
- * but refusing to compact leaves the session facing a provider overflow it
- * cannot recover from on its own.
+ * A failed write is reported rather than thrown so the caller can abort the
+ * replacement and return a typed compaction failure while retaining history.
  */
 async function archivePreCompaction(
   path: string | undefined,

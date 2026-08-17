@@ -192,9 +192,10 @@ test('a second compaction appends rather than overwriting the first archive', as
   })
 })
 
-test('an unwritable archive path degrades to a stamped warning instead of blocking compaction', async () => {
+test('an unwritable archive path aborts transcript replacement', async () => {
   await inTemporaryDirectory(async root => {
-    // A path whose parent is a file: mkdir and append both fail.
+    // A path whose parent is a file: mkdir and append both fail. Returning a
+    // replacement here would destroy the only copy of the original transcript.
     const archivePath = join(root, 'not-a-directory.json', 'archive.jsonl')
     await Bun.write(join(root, 'not-a-directory.json'), '{}')
     const outcome = await compactMessagesIfNeeded({
@@ -205,11 +206,10 @@ test('an unwritable archive path degrades to a stamped warning instead of blocki
       reason: 'compact',
       thresholdTokens: 1_000,
     })
-    if (!outcome.compacted) throw new Error(`expected compaction, got ${outcome.reason}`)
-    // Refusing to compact would leave the session facing a provider overflow it
-    // cannot recover from, so the failure is reported, not fatal.
-    expect(outcome.stamp.archive_path).toBeUndefined()
-    expect(outcome.stamp.archive_error).toBeTruthy()
+    expect(outcome.compacted).toBe(false)
+    if (outcome.compacted) throw new Error('archive failure must not replace the transcript')
+    expect(outcome.reason).toBe('failed')
+    expect(outcome.error).toBeTruthy()
   })
 })
 

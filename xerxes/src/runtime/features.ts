@@ -2,11 +2,18 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { statSync } from 'node:fs'
-import { isAbsolute, join, resolve } from 'node:path'
+import { isAbsolute, join, relative, resolve } from 'node:path'
 
 import { HOOK_POINTS, HookRunner, type HookPoint } from '../extensions/hooks.js'
 import { PluginRegistry } from '../extensions/plugins.js'
-import { SkillRegistry, type Skill, type SkillDependencyLookup } from '../extensions/skills.js'
+import {
+  SkillRegistry,
+  trustedHashWorkspaceSkills,
+  type Skill,
+  type SkillDependencyLookup,
+  type SkillDiscoveryRootInput,
+  type WorkspaceSkillTrust,
+} from '../extensions/skills.js'
 import {
   HIGH_POWER_OPERATOR_TOOLS,
   OperatorState,
@@ -37,6 +44,8 @@ export interface RuntimeFeaturesConfig {
   readonly policy?: ToolPolicy
   readonly sandbox?: SandboxConfig
   readonly enabledSkills?: readonly string[]
+  /** Trust decision required for workspace-provenance skill roots. Defaults to trusted hashes. */
+  readonly workspaceSkillTrust?: WorkspaceSkillTrust
   readonly operator?: OperatorRuntimeConfig
   readonly agentOverrides?: ReadonlyMap<string, AgentRuntimeOverrides> | Readonly<Record<string, AgentRuntimeOverrides>>
 }
@@ -51,7 +60,7 @@ export interface RuntimeFeatureFilesystem {
 /** Native loader boundary; callers can replace it for a different extension transport. */
 export interface RuntimeExtensionLoader {
   discoverPlugins(registry: PluginRegistry, directory: string): Promise<readonly string[]>
-  discoverSkills(registry: SkillRegistry, directories: readonly string[]): Promise<readonly string[]>
+  discoverSkills(registry: SkillRegistry, directories: readonly SkillDiscoveryRootInput[]): Promise<readonly string[]>
 }
 
 /** Dependencies supplied by a host which already owns the concrete runtime objects. */
@@ -149,7 +158,9 @@ export async function composeRuntimeFeatures(
   options: RuntimeFeatureCompositionOptions = {},
 ): Promise<RuntimeFeaturesState> {
   const pluginRegistry = options.pluginRegistry ?? new PluginRegistry()
-  const skillRegistry = options.skillRegistry ?? new SkillRegistry()
+  const skillRegistry = options.skillRegistry ?? new SkillRegistry({
+    workspaceTrust: config.workspaceSkillTrust ?? trustedHashWorkspaceSkills(),
+  })
   const hookRunner = options.hookRunner ?? new HookRunner()
   const loader = options.extensionLoader ?? createNativeRuntimeExtensionLoader()
   const directories = await resolveRuntimeExtensionDirectories(config, options.filesystem)
@@ -157,7 +168,11 @@ export async function composeRuntimeFeatures(
   for (const directory of directories.pluginDirectories) {
     pluginNames.push(...await loader.discoverPlugins(pluginRegistry, directory))
   }
-  const skillNames = await loader.discoverSkills(skillRegistry, directories.skillDirectories)
+  const skillRoots: readonly SkillDiscoveryRootInput[] = directories.skillDirectories.map(path => ({
+    path,
+    workspace: isWithinWorkspace(path, config.workspaceRoot, options.filesystem),
+  }))
+  const skillNames = await loader.discoverSkills(skillRegistry, skillRoots)
   validateDependencies(pluginRegistry, skillRegistry, options.toolLookup)
   const registeredHooks = registerPluginHooks(pluginRegistry, hookRunner)
   const effectivePolicy = policyWithOperatorAccess(config.policy, config.operator)
@@ -299,6 +314,17 @@ function normalizeWorkspaceRoot(
     throw new TypeError('workspaceRoot must be an absolute path')
   }
   return filesystem.resolve(value)
+}
+
+function isWithinWorkspace(
+  path: string,
+  workspaceRoot: string | undefined,
+  filesystem: RuntimeFeatureFilesystem | undefined,
+): boolean {
+  if (workspaceRoot === undefined) return false
+  const resolvedRoot = (filesystem ?? createRuntimeFeatureFilesystem()).resolve(workspaceRoot)
+  const pathFromRoot = relative(resolvedRoot, path)
+  return pathFromRoot === '' || (!pathFromRoot.startsWith('..') && !isAbsolute(pathFromRoot))
 }
 
 function resolveConfiguredDirectories(

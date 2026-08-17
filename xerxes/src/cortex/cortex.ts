@@ -134,6 +134,10 @@ export interface CortexOptions {
   readonly consensus?: CortexConsensusOptions
   readonly executor?: CortexTaskExecutor
   readonly hierarchy?: CortexHierarchyOptions
+  /**
+   * Maximum concurrent tasks in parallel mode. Defaults to a finite cap; pass
+   * Number.POSITIVE_INFINITY to opt into unbounded parallelism.
+   */
   readonly maxParallel?: number
   readonly memory?: CortexMemoryWriter
   readonly now?: () => Date
@@ -364,7 +368,11 @@ export class Cortex {
     const result = await this.planner.executePlan(
       plan,
       request => this.executePlannedStep(request, bindings, inputs, signal),
-      { parallel: this.plannedParallel },
+      {
+        parallel: this.plannedParallel,
+        ...(this.maxParallel === undefined ? {} : { maxParallel: this.maxParallel }),
+        ...(signal === undefined ? {} : { signal }),
+      },
     )
     throwIfCancelled(signal)
     return planOutputsToTasks(result.outputs, plan, bindings, this.tasks, this.now)
@@ -935,7 +943,7 @@ function assertProcessType(value: ProcessType): void {
 }
 
 function validateMaxParallel(value: number | undefined): number | undefined {
-  if (value === undefined) return undefined
+  if (value === undefined || value === Number.POSITIVE_INFINITY) return value
   if (!Number.isInteger(value) || value < 1) throw new Error('maxParallel must be a positive integer')
   return value
 }

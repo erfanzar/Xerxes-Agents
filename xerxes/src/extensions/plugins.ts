@@ -127,6 +127,7 @@ export class PluginRegistry {
   private readonly tools = new Map<string, { readonly owner: string; readonly value: PluginTool }>()
   private readonly failures: string[] = []
   private readonly loadedModules = new Set<string>()
+  private discoveryQueue: Promise<void> = Promise.resolve()
   /** Module path currently executing register(), plus the plugin names it has registered. */
   private activeDiscovery: { readonly names: Set<string>; readonly path: string } | undefined
 
@@ -140,6 +141,15 @@ export class PluginRegistry {
   }
 
   async discover(directory: string, options: PluginDiscoveryOptions = {}): Promise<string[]> {
+    const operation = this.discoveryQueue.then(
+      () => this.discoverPass(directory, options),
+      () => this.discoverPass(directory, options),
+    )
+    this.discoveryQueue = operation.then(() => undefined, () => undefined)
+    return operation
+  }
+
+  private async discoverPass(directory: string, options: PluginDiscoveryOptions): Promise<string[]> {
     if (!existsSync(directory)) return []
     if (isWorldWritableDirectory(directory)) {
       // A world-writable plugin directory lets any local user swap in arbitrary code; refuse to execute it.
@@ -390,7 +400,9 @@ function isWorldWritableDirectory(directory: string, platform: NodeJS.Platform =
   try {
     return (statSync(directory).mode & 0o002) !== 0
   } catch {
-    return false
+    // Dynamic imports execute arbitrary code. If permissions cannot be inspected, withhold the
+    // directory rather than treating an unknown ownership boundary as safe.
+    return true
   }
 }
 

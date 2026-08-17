@@ -4,9 +4,10 @@
 import { expect, test } from 'bun:test'
 import { Database } from 'bun:sqlite'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 import { FileStorage, SQLiteStorage } from '../src/memory/index.js'
 
@@ -66,6 +67,64 @@ test('two file storage instances on one directory merge their index writes inste
     expect(after.load('from-second')).toBeUndefined()
     expect(after.load('from-first')).toBe(1)
     expect(after.load('from-second-again')).toBe(3)
+  } finally {
+    rmSync(directory, { force: true, recursive: true })
+  }
+})
+
+test('concurrent file storage index writers preserve every disjoint entry', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'xerxes-file-concurrent-'))
+  const root = join(directory, 'store')
+  const workerPath = join(directory, 'writer.ts')
+  try {
+    const storageModule = pathToFileURL(resolve(import.meta.dir, '../src/memory/storage.ts')).href
+    writeFileSync(workerPath, `
+      import { FileStorage } from ${JSON.stringify(storageModule)}
+      const [directory, prefix] = process.argv.slice(2)
+      const storage = new FileStorage(directory)
+      for (let index = 0; index < 40; index += 1) storage.save(prefix + index, index)
+    `, 'utf8')
+    const workers = Array.from({ length: 4 }, (_, index) => Bun.spawn({
+      cmd: [process.execPath, 'run', workerPath, root, `writer-${index}-`],
+      stdout: 'pipe',
+      stderr: 'pipe',
+    }))
+    const results = await Promise.all(workers.map(async worker => ({
+      exitCode: await worker.exited,
+      stderr: await new Response(worker.stderr).text(),
+    })))
+    expect(results).toEqual(Array.from({ length: 4 }, () => ({ exitCode: 0, stderr: '' })))
+    const restored = new FileStorage(root)
+    expect(restored.listKeys()).toHaveLength(160)
+    for (let writer = 0; writer < 4; writer += 1) {
+      for (let index = 0; index < 40; index += 1) {
+        expect(restored.load(`writer-${writer}-${index}`)).toBe(index)
+      }
+    }
+  } finally {
+    rmSync(directory, { force: true, recursive: true })
+  }
+})
+
+test('file storage recovers a stale lock and cleans payloads when index persistence fails', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'xerxes-file-stale-lock-'))
+  const root = join(directory, 'store')
+  try {
+    const storage = new FileStorage(root, { lockTimeoutMs: 50, staleLockMs: 1_000 })
+    const lock = join(root, '_index.json.lock')
+    mkdirSync(lock)
+    const old = new Date(Date.now() - 60_000)
+    utimesSync(lock, old, old)
+    expect(storage.save('recovered', 1)).toBeTrue()
+    expect(new FileStorage(root).load('recovered')).toBe(1)
+
+    // A live lock cannot be stolen. The failed save must remove the payload
+    // written before index acquisition instead of leaving an orphaned record.
+    mkdirSync(lock)
+    const before = readdirSync(root).filter(entry => /^[0-9a-f]{32}\.json$/.test(entry)).sort()
+    expect(storage.save('blocked', 2)).toBeFalse()
+    expect(readdirSync(root).filter(entry => /^[0-9a-f]{32}\.json$/.test(entry)).sort()).toEqual(before)
+    expect(new FileStorage(root).load('blocked')).toBeUndefined()
   } finally {
     rmSync(directory, { force: true, recursive: true })
   }

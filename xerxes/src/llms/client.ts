@@ -1,6 +1,10 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { createHash } from 'node:crypto'
+
+import { codexAuthHeaders, codexBaseUrl, CodexSession } from '../auth/codexAuth.js'
+import { isGradedEffort } from './reasoningLevels.js'
 import { ConfigurationError, ProviderError } from '../core/errors.js'
 import { isPluginLlmProviderFactory } from '../extensions/plugins.js'
 import type {
@@ -185,10 +189,20 @@ export interface OpenAiCompatibleClientOptions {
   readonly providerName: ProviderName
   /** Use the OpenAI Responses endpoint instead of chat completions when supported by the host. */
   readonly responsesApi?: boolean
+  /**
+   * Resolve per-request authorization headers instead of a static API key.
+   *
+   * Subscription-backed providers carry a short-lived OAuth token that has to
+   * be refreshed between turns, so the credential cannot be captured once at
+   * construction the way an API key can.
+   */
+  readonly resolveAuthHeaders?: (signal?: AbortSignal) => Promise<Record<string, string>>
 }
 
 /** Options used by the native client factory, including optional plugin provider lookup. */
 export interface LlmClientFactoryOptions extends Omit<OpenAiCompatibleClientOptions, 'providerName'> {
+  /** Injected ChatGPT session; defaults to the stored one for `openai-codex`. */
+  readonly codexSession?: CodexSession
   readonly pluginRegistry?: PluginLlmProviderRegistry
 }
 
@@ -289,8 +303,10 @@ export class OpenAiCompatibleClient implements LlmClient {
 
     const pendingToolCalls = new Map<number, PendingToolCall>()
     let emittedToolCalls = false
+    let terminal = false
     for await (const data of sseData(response.body)) {
       if (data === '[DONE]') {
+        terminal = true
         break
       }
       const chunk = parseJsonObject(data, this.providerName)
@@ -321,6 +337,7 @@ export class OpenAiCompatibleClient implements LlmClient {
       }
       if (finishReason) {
         event.finishReason = finishReason
+        terminal = true
       }
       if (finishReason && pendingToolCalls.size) {
         event.toolCalls = completedToolCalls(pendingToolCalls)
@@ -331,6 +348,9 @@ export class OpenAiCompatibleClient implements LlmClient {
       }
     }
 
+    if (!terminal) {
+      throw new ProviderError(this.providerName, 'stream ended before a terminal completion event')
+    }
     if (!emittedToolCalls && pendingToolCalls.size) {
       yield { toolCalls: completedToolCalls(pendingToolCalls) }
     }
@@ -347,6 +367,9 @@ export class ResponsesApiClient implements LlmClient {
   private readonly baseUrl: string
   private readonly fetchImplementation: FetchImplementation
   private readonly providerName: ProviderName
+  private readonly resolveAuthHeaders:
+    | ((signal?: AbortSignal) => Promise<Record<string, string>>)
+    | undefined
 
   constructor(options: OpenAiCompatibleClientOptions) {
     const providerConfig = getProviderConfig(options.providerName)
@@ -354,16 +377,32 @@ export class ResponsesApiClient implements LlmClient {
     this.apiKey = options.apiKey ?? getApiKey(options.providerName)
     this.baseUrl = options.baseUrl ?? providerConfig.baseUrl ?? ''
     this.fetchImplementation = options.fetchImplementation ?? fetch
+    this.resolveAuthHeaders = options.resolveAuthHeaders
     if (!this.baseUrl) {
       throw new ConfigurationError('base_url', 'No base URL is configured for ' + options.providerName)
     }
   }
 
+  /** Static API-key headers, or freshly resolved OAuth headers when configured. */
+  private async headers(accept: string, signal?: AbortSignal): Promise<Record<string, string>> {
+    const base = responsesHeaders(this.providerName, this.apiKey, accept)
+    if (!this.resolveAuthHeaders) return base
+    return { ...base, ...(await this.resolveAuthHeaders(signal)) }
+  }
+
   async complete(request: CompletionRequest, signal?: AbortSignal): Promise<LlmCompletion> {
+    // The ChatGPT backend serves streaming responses only and answers a
+    // non-streamed request with `400 Stream must be set to true`. Collecting
+    // our own stream keeps every non-streaming caller — /compact, session
+    // titling, memory extraction — working instead of failing on a transport
+    // detail they have no reason to know about.
+    if (this.providerName === 'openai-codex') {
+      return collectLlmCompletion(this.stream(request, signal))
+    }
     const endpoint = new URL('responses', withTrailingSlash(this.baseUrl)).toString()
     const response = await this.fetchImplementation(endpoint, {
       method: 'POST',
-      headers: responsesHeaders(this.providerName, this.apiKey, 'application/json'),
+      headers: await this.headers('application/json', signal),
       body: JSON.stringify(responsesPayload(request, this.providerName, false)),
       ...(signal ? { signal } : {}),
     })
@@ -381,7 +420,7 @@ export class ResponsesApiClient implements LlmClient {
     const endpoint = new URL('responses', withTrailingSlash(this.baseUrl)).toString()
     const response = await this.fetchImplementation(endpoint, {
       method: 'POST',
-      headers: responsesHeaders(this.providerName, this.apiKey, 'text/event-stream'),
+      headers: await this.headers('text/event-stream', signal),
       body: JSON.stringify(responsesPayload(request, this.providerName, true)),
       ...(signal ? { signal } : {}),
     })
@@ -402,8 +441,7 @@ export class ResponsesApiClient implements LlmClient {
       const event = parseJsonObject(data, this.providerName)
       for (const delta of translator.translate(event)) yield delta
     }
-    const final = translator.finish()
-    if (final) yield final
+    translator.finish()
   }
 }
 
@@ -447,6 +485,17 @@ export function createLlmClient(
   }
   if (providerConfig.transport !== 'openai') {
     throw new ConfigurationError('provider', `${providerName} requires its dedicated adapter.`)
+  }
+  if (providerName === 'openai-codex') {
+    // Always the Responses transport, always OAuth: the ChatGPT backend
+    // exposes no chat-completions route and accepts no API key.
+    const session = options.codexSession ?? new CodexSession()
+    return new ResponsesApiClient({
+      ...options,
+      providerName,
+      ...(configuredBaseUrl ? { baseUrl: configuredBaseUrl } : { baseUrl: codexBaseUrl() }),
+      resolveAuthHeaders: async signal => codexAuthHeaders(await session.credential(signal)),
+    })
   }
   const useResponsesApi = options.responsesApi === true || overrides.responses_api === true
   if (useResponsesApi) {
@@ -735,12 +784,63 @@ function responsesPayload(
     input: messagesToResponsesInput(request.messages),
     stream,
   }
-  addSampling(payload, request, providerName)
+  addResponsesSampling(payload, request, providerName)
   if (request.tools?.length) {
     payload.tools = request.tools.map(responsesToolDefinition)
     if (request.toolChoice) payload.tool_choice = responsesToolChoice(request.toolChoice)
   }
+  // The Responses API has no cache_control breakpoints: it caches long
+  // prefixes automatically, but only routes a repeat to the machine holding
+  // that prefix when the request carries a stable cache key. Without one an
+  // agent loop re-reads the same system prompt at full price every turn.
+  const cacheKey = promptCacheKey(request, providerName)
+  if (cacheKey) {
+    payload.prompt_cache_key = cacheKey
+  }
+  if (providerName === 'openai-codex') {
+    // The subscription backend accepts a strict subset of the Responses
+    // schema and answers anything outside it with `400 Unsupported
+    // parameter`, never by ignoring the field. It caps output by plan rather
+    // than per request, and it is not the stateful Responses host, so both
+    // the output cap and the sampling knobs have to come back off.
+    delete payload.max_output_tokens
+    delete payload.temperature
+    delete payload.top_p
+    payload.store = false
+  }
   return payload
+}
+
+/**
+ * Stable cache key for the reusable head of a conversation.
+ *
+ * Derived from the model plus the leading system prompt — the part that is
+ * identical across every turn of a session — so repeats of the same prefix
+ * route to the same backend and hit its cache. Volatile tail messages are
+ * deliberately excluded: folding them in would mint a fresh key each turn and
+ * guarantee a miss, which is the same as sending no key at all.
+ */
+function promptCacheKey(request: CompletionRequest, providerName: ProviderName): string | undefined {
+  // Scoped to the hosts documented to accept it. `responses_api` can be turned
+  // on for third-party OpenAI-compatible endpoints, and a strict one answers an
+  // unrecognized field with a 400 rather than ignoring it — the Codex backend
+  // does exactly that. A cache hit is not worth breaking those requests.
+  if (providerName !== 'openai' && providerName !== 'openai-codex') {
+    return undefined
+  }
+  const stable = request.systemSegments?.length
+    ? request.systemSegments.map(segment => segment.text).join('\n')
+    : request.messages.find(message => message.role === 'system')?.content
+  const text = typeof stable === 'string'
+    ? stable
+    : (stable ?? []).map(part => part.type === 'text' ? part.text : '').join('')
+  if (!text.trim()) {
+    return undefined
+  }
+  const digest = createHash('sha256')
+    .update(`${providerName} ${providerModel(request.model, providerName)} ${text}`)
+    .digest('hex')
+  return `xerxes-${digest.slice(0, 32)}`
 }
 
 function responsesHeaders(providerName: ProviderName, apiKey: string, accept: string): Record<string, string> {
@@ -788,6 +888,35 @@ function openAiCompatibleHeaders(providerName: ProviderName, apiKey: string, acc
   return headers
 }
 
+/**
+ * Sampling fields for the Responses API, which is not chat-completions with a
+ * different path.
+ *
+ * It renames the output cap to `max_output_tokens`, carries reasoning effort
+ * as a nested object, and rejects the chat-completions penalty and stop
+ * parameters outright with a 400 rather than ignoring them — so the neutral
+ * request is translated here instead of reusing {@link addSampling}.
+ */
+function addResponsesSampling(
+  payload: Record<string, unknown>,
+  request: CompletionRequest,
+  providerName: ProviderName,
+): void {
+  if (request.temperature !== undefined && supportsTemperature(providerName, request.temperature)) {
+    payload.temperature = request.temperature
+  }
+  if (request.maxTokens !== undefined) {
+    payload.max_output_tokens = request.maxTokens
+  }
+  if (request.topP !== undefined) {
+    payload.top_p = request.topP
+  }
+  const effort = request.thinking?.effort
+  if (isGradedEffort(effort)) {
+    payload.reasoning = { effort }
+  }
+}
+
 function addSampling(
   payload: Record<string, unknown>,
   request: CompletionRequest,
@@ -820,7 +949,11 @@ function addSampling(
     // as-is under the exact wire keys profiles configure today
     // (reasoning_effort, thinking_budget). Providers that do not document a
     // field simply ignore it, which makes the passthrough safe by default.
-    if (request.thinking.effort !== undefined) {
+    //
+    // `on` is the exception: it is the switch position Xerxes uses for
+    // toggle-shaped providers, not a level any provider documents, so it is
+    // carried by `thinking` alone rather than smuggled in as an effort word.
+    if (isGradedEffort(request.thinking.effort)) {
       payload.reasoning_effort = request.thinking.effort
     }
     if (request.thinking.budgetTokens !== undefined) {
@@ -976,7 +1109,7 @@ function openAiUsage(value: Record<string, unknown>): TokenUsage | undefined {
   const cacheReadTokens = numberAt(inputDetails, 'cached_tokens')
   const reasoningTokens = numberAt(outputDetails, 'reasoning_tokens')
   return {
-    inputTokens: inputTokens ?? 0,
+    inputTokens: freshPromptTokens(inputTokens ?? 0, cacheReadTokens),
     outputTokens: outputTokens ?? 0,
     ...(cacheReadTokens === undefined ? {} : { cacheReadTokens }),
     ...(reasoningTokens === undefined ? {} : { reasoningTokens }),
@@ -1037,7 +1170,12 @@ function parseResponsesCompletion(response: Record<string, unknown>): LlmComplet
     toolCalls.push({ id, type: 'function', function: { name, arguments: arguments_ } })
   }
   const usage = responsesUsage(asRecord(response.usage))
-  const finishReason = stringAt(response, 'status') || undefined
+  const status = stringAt(response, 'status') || undefined
+  const finishReason = toolCalls.length
+    ? 'tool_calls'
+    : status === 'completed'
+      ? 'stop'
+      : status
   return {
     content: content.join(''),
     toolCalls,
@@ -1060,12 +1198,16 @@ function responsesUsage(value: Record<string, unknown>): TokenUsage | undefined 
     ?? numberAt(outputDetails, 'cache_creation_tokens')
   const reasoningTokens = numberAt(outputDetails, 'reasoning_tokens')
   return {
-    inputTokens: inputTokens ?? 0,
+    inputTokens: freshPromptTokens(inputTokens ?? 0, cacheReadTokens),
     outputTokens: outputTokens ?? 0,
     ...(cacheReadTokens === undefined ? {} : { cacheReadTokens }),
     ...(cacheCreationTokens === undefined ? {} : { cacheCreationTokens }),
     ...(reasoningTokens === undefined ? {} : { reasoningTokens }),
   }
+}
+
+function freshPromptTokens(inputTokens: number, cacheReadTokens: number | undefined): number {
+  return cacheReadTokens === undefined ? inputTokens : Math.max(0, inputTokens - cacheReadTokens)
 }
 
 function mergeTokenUsage(current: TokenUsage | undefined, next: TokenUsage): TokenUsage {

@@ -10,6 +10,13 @@ import { xerxesHome } from '../daemon/paths.js'
 export const CLAUDE_CODE_PROFILE_NAME = 'cc'
 export const CLAUDE_CODE_DEFAULT_MODEL = 'claude-code/default'
 
+export const CODEX_PROFILE_NAME = 'codex'
+// The plan's newest model. Xerxes uses the ChatGPT subscription as an
+// entitlement and runs its own agent loop, so every model the catalog returns
+// is selectable; this is only the starting point.
+export const CODEX_DEFAULT_MODEL = 'codex/gpt-5.6-sol'
+export const CODEX_PROFILE_BASE_URL = 'https://chatgpt.com/backend-api/codex'
+
 export const SAMPLING_PARAMS = new Set([
   'temperature', 'top_p', 'top_k', 'max_tokens', 'frequency_penalty', 'presence_penalty', 'repetition_penalty', 'min_p',
   'thinking', 'reasoning_effort', 'thinking_budget',
@@ -162,6 +169,18 @@ export class ProfileStore {
       api_key: '',
       model: CLAUDE_CODE_DEFAULT_MODEL,
       provider: 'claude-code',
+      sampling: {},
+    }
+    // Subscription-backed like `cc`: the credential is an OAuth session rather
+    // than a stored key, so the profile carries no api_key and is listed
+    // whether or not the user has signed in yet. Selecting it without a
+    // session fails with the sign-in command instead of hiding the option.
+    profiles[CODEX_PROFILE_NAME] = {
+      name: CODEX_PROFILE_NAME,
+      base_url: CODEX_PROFILE_BASE_URL,
+      api_key: '',
+      model: CODEX_DEFAULT_MODEL,
+      provider: 'openai-codex',
       sampling: {},
     }
     return profiles

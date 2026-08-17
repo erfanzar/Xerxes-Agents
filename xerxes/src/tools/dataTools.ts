@@ -15,6 +15,7 @@ const DEFAULT_CSV_DELIMITER = ','
 const DEFAULT_TIMEZONE = 'UTC'
 const HASH_ALGORITHMS = ['md5', 'sha1', 'sha256', 'sha512'] as const
 const MAX_REGEX_SUBJECT_CHARACTERS = 1_000_000
+const MAX_DATA_FILE_BYTES = 10_000_000
 
 export const JSON_PROCESSOR_DEFINITION: ToolDefinition = {
   type: 'function',
@@ -210,8 +211,10 @@ export async function processJson(inputs: JsonObject, paths: WorkspacePathResolv
       throw new ValidationError('file_path', 'already exists; pass overwrite=true to replace it', filePath)
     }
     await mkdir(dirname(target), { recursive: true })
-    await Bun.write(target, JSON.stringify(data, null, pretty ? 2 : undefined) + (pretty ? '\n' : ''))
-    return { file_path: (await paths.relative(target)).replaceAll('\\', '/'), success: true }
+    const relativePath = (await paths.relative(target)).replaceAll('\\', '/')
+    const checked = await paths.recheck(target)
+    await Bun.write(checked, JSON.stringify(data, null, pretty ? 2 : undefined) + (pretty ? '\n' : ''))
+    return { file_path: relativePath, success: true }
   }
 
   if (operation === 'validate') {
@@ -303,8 +306,10 @@ export async function processCsv(inputs: JsonObject, paths: WorkspacePathResolve
     }
     await mkdir(dirname(target), { recursive: true })
     const rows = [headers, ...data.map(row => headers.map(header => csvCell(row[header])))]
-    await Bun.write(target, stringifyCsv(rows, delimiter))
-    return { file_path: (await paths.relative(target)).replaceAll('\\', '/'), rows_written: data.length, success: true }
+    const relativePath = (await paths.relative(target)).replaceAll('\\', '/')
+    const checked = await paths.recheck(target)
+    await Bun.write(checked, stringifyCsv(rows, delimiter))
+    return { file_path: relativePath, rows_written: data.length, success: true }
   }
 
   throw new ValidationError('operation', 'must be read, write, analyze, or convert', operation)
@@ -899,8 +904,16 @@ function escapeRegex(value: string): string {
 
 async function requireFile(path: string, original: string): Promise<void> {
   try {
-    if (!(await stat(path)).isFile()) {
+    const info = await stat(path)
+    if (!info.isFile()) {
       throw new ValidationError('file_path', 'must refer to an existing regular file', original)
+    }
+    if (info.size > MAX_DATA_FILE_BYTES) {
+      throw new ValidationError(
+        'file_path',
+        `is ${info.size} bytes, exceeding the ${MAX_DATA_FILE_BYTES}-byte whole-file data limit`,
+        original,
+      )
     }
   } catch (error) {
     if (error instanceof ValidationError) throw error

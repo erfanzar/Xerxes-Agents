@@ -353,6 +353,7 @@ export class GatewayClient extends EventEmitter {
   private spawnError: Error | null = null
   private spawnedDaemon = false
   private closed = false
+  private startPromise: Promise<void> | null = null
   private activeSessionKey: string
   private readonly sessionKeys = new Map<string, string>()
   private lastApprovalRequestId = ''
@@ -370,11 +371,25 @@ export class GatewayClient extends EventEmitter {
     this.activeSessionKey = this.sessionKey
   }
 
-  /** Connect, launching the daemon if none is reachable. Idempotent once connected. */
-  async start(): Promise<void> {
-    if (this.socket) {
-      return
-    }
+  /** Connect, launching the daemon if none is reachable. Concurrent callers share one cold-start attempt. */
+  start(): Promise<void> {
+    if (this.socket) return Promise.resolve()
+    if (this.startPromise) return this.startPromise
+
+    const attempt = this.startOnce()
+    this.startPromise = attempt
+    void attempt.then(
+      () => {
+        if (this.startPromise === attempt) this.startPromise = null
+      },
+      () => {
+        if (this.startPromise === attempt) this.startPromise = null
+      }
+    )
+    return attempt
+  }
+
+  private async startOnce(): Promise<void> {
     const { socketPath, pidPath } = daemonPaths(this.projectDir)
 
     if (await this.tryConnect(socketPath)) {
@@ -729,6 +744,12 @@ export class GatewayClient extends EventEmitter {
           ...(Array.isArray(params.images) && params.images.length ? { images: params.images } : {})
         })
 
+      case 'prompt.background':
+        return this.rawRequest<T>('turn.background', {
+          session_key: this.keyFor(params.session_id),
+          text: String(params.text ?? '')
+        })
+
       case 'slash.exec':
         return this.slashExec(params) as Promise<T>
 
@@ -789,6 +810,9 @@ export class GatewayClient extends EventEmitter {
       case 'model.models':
         return this.modelModels(params) as Promise<T>
 
+      case 'reasoning.levels':
+        return this.reasoningLevels() as Promise<T>
+
       default:
         return this.rawRequest<T>(method, params)
     }
@@ -843,6 +867,7 @@ export class GatewayClient extends EventEmitter {
 
   close(): void {
     this.closed = true
+    this.startPromise = null
     const socket = this.socket
     this.socket = null
     // Reject in-flight requests immediately: nulling this.socket first makes
@@ -1079,12 +1104,12 @@ export class GatewayClient extends EventEmitter {
       if (id && row.key) {
         this.rememberSessionKey(id, String(row.key))
       }
-      // No last_active/started_at: the daemon does not expose real values for
-      // live rows, and fabricating `now` rendered every session as brand new.
+      const lastActive = Number(row.last_active)
       return {
         ...optionalSessionLinkFields(row),
         current: this.keyFor(id) === this.activeSessionKey,
         id,
+        ...(Number.isFinite(lastActive) ? { last_active: lastActive } : {}),
         message_count: Number(row.messages ?? 0),
         model: String(row.model ?? ''),
         preview: String(row.title ?? row.key ?? id),
@@ -1111,7 +1136,10 @@ export class GatewayClient extends EventEmitter {
         message_count: Number(row.message_count ?? row.messages ?? 0),
         preview: title,
         source: 'saved',
-        started_at: Number.isFinite(updatedAt) ? updatedAt : Date.now() / 1000,
+        ...(Number.isFinite(updatedAt) ? { last_message_at: updatedAt } : {}),
+        // Compatibility for existing UI callers; never fabricate `now`, which
+        // makes an unreadable/missing timestamp look like a new conversation.
+        started_at: Number.isFinite(updatedAt) ? updatedAt : 0,
         title
       }
     })
@@ -1356,6 +1384,28 @@ export class GatewayClient extends EventEmitter {
       models,
       ...(raw.source ? { source: String(raw.source) } : {}),
       ...(raw.warning ? { warning: String(raw.warning) } : {})
+    }
+  }
+
+  /**
+   * Reasoning efforts the active model accepts, as the provider reports them.
+   *
+   * The list is model-scoped rather than fixed, so the picker asks each time
+   * it opens instead of rendering a menu that may not match the model.
+   */
+  private async reasoningLevels(): Promise<RpcObject> {
+    const raw = (await this.nativeSuccess('reasoning_levels', {})) as RpcObject
+    const levels = Array.isArray(raw.levels) ? raw.levels : []
+    return {
+      current: String(raw.current ?? ''),
+      default: raw.default ? String(raw.default) : '',
+      levels: levels
+        .map((entry: RpcObject) => ({
+          description: entry.description ? String(entry.description) : '',
+          effort: String(entry.effort ?? '').trim()
+        }))
+        .filter((entry: { effort: string }) => Boolean(entry.effort)),
+      source: String(raw.source ?? '')
     }
   }
 

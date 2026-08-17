@@ -96,6 +96,18 @@ describe('turnController', () => {
     expect(getTurnState().streaming).not.toContain('<reasoning>')
   })
 
+  it('cancels a throttled tool progress repaint when the turn resets', () => {
+    vi.useFakeTimers()
+    turnController.startMessage()
+    turnController.recordToolStart('tool-1', 'exec_command', 'old')
+    turnController.recordToolProgress('exec_command', 'stale preview')
+    turnController.fullReset()
+
+    vi.runOnlyPendingTimers()
+
+    expect(getTurnState().tools).toEqual([])
+  })
+
   it('keeps every completed tool visible while later stream events arrive', () => {
     turnController.startMessage()
     turnController.recordReasoningDelta('I should inspect the workspace.', true)

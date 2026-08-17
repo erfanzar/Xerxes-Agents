@@ -122,8 +122,8 @@ test('Responses API client supports a native non-streaming completion response',
   expect(completion).toEqual({
     content: 'I will read it.',
     thinking: 'Inspect source.',
-    finishReason: 'completed',
-    usage: { inputTokens: 14, outputTokens: 6, cacheReadTokens: 3 },
+    finishReason: 'tool_calls',
+    usage: { inputTokens: 11, outputTokens: 6, cacheReadTokens: 3 },
     toolCalls: [{ id: 'call-1', type: 'function', function: { name: 'ReadFile', arguments: { path: 'README.md' } } }],
   })
 })
@@ -199,6 +199,27 @@ test('Responses API client surfaces mid-stream provider failures as errors', asy
     model: 'gpt-4o',
     messages: [{ role: 'user', content: 'hi' }],
   }))).rejects.toThrow('stream returned API error (server_error): Model exploded')
+})
+
+test('Responses API client rejects EOF without a terminal response event and never emits pending calls', async () => {
+  const encoder = new TextEncoder()
+  const client = new ResponsesApiClient({
+    providerName: 'openai',
+    apiKey: 'test-key',
+    baseUrl: 'https://example.invalid/v1',
+    fetchImplementation: async () => new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode('data: {"type":"response.output_item.added","item":{"type":"function_call","id":"call-1","name":"ReadFile"}}\n\n'))
+        controller.enqueue(encoder.encode('data: {"type":"response.function_call_arguments.delta","item_id":"call-1","delta":"{\\"path\\":\\"README.md\\"}"}\n\n'))
+        controller.close()
+      },
+    })),
+  })
+
+  await expect(collect(client.stream({
+    model: 'gpt-4o',
+    messages: [{ role: 'user', content: 'hi' }],
+  }))).rejects.toThrow('Responses API stream ended before a terminal response event')
 })
 
 async function collect(stream: AsyncIterable<LlmDelta>): Promise<LlmDelta[]> {

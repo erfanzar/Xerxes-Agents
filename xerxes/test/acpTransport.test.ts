@@ -5,7 +5,12 @@ import { expect, test } from 'bun:test'
 
 import { AcpServer } from '../src/acp/server.js'
 import { AcpAgentRunner } from '../src/acp/runner.js'
-import { MAX_ACP_FRAME_BYTES, StdioJsonRpcServer, serveACPStdio } from '../src/acp/transport.js'
+import {
+  AcpFrameByteCounter,
+  MAX_ACP_FRAME_BYTES,
+  StdioJsonRpcServer,
+  serveACPStdio,
+} from '../src/acp/transport.js'
 import type { CompletionRequest, LlmClient, LlmDelta } from '../src/llms/client.js'
 
 test('ACP stdio transport preserves NDJSON framing, aliases, streamed updates, and final result', async () => {
@@ -75,6 +80,87 @@ test('ACP respond_permission requires a strictly boolean allow parameter', async
   expect((byId.get(2)?.error as { code: number } | undefined)?.code).toBe(-32602)
   expect(byId.get(3)?.result).toEqual({ ok: false })
   expect(byId.get(4)?.result).toEqual({ ok: false })
+})
+
+test('ACP notifications with invalid params receive no response', async () => {
+  const server = new AcpServer({ promptHandler: () => ({ ok: true }) })
+  const output: string[] = []
+  const input = readableChunks([
+    '{"jsonrpc":"2.0","method":"initialize","params":[]}\n',
+    '{"jsonrpc":"2.0","method":"respond_permission","params":{"permission_id":"p1","allow":"false"}}\n',
+  ])
+
+  await serveACPStdio(server, input, line => {
+    output.push(line)
+  })
+
+  expect(output).toEqual([])
+})
+
+test('ACP treats an explicit null id as a request and omitted ids as notifications', async () => {
+  const server = new AcpServer({ promptHandler: () => ({ ok: true }) })
+  const output: string[] = []
+  const input = readableChunks([
+    '{"jsonrpc":"2.0","id":null,"method":"initialize","params":{}}\n',
+    '{"jsonrpc":"2.0","method":"initialize","params":{}}\n',
+    '{"jsonrpc":"2.0","id":null,"method":"does_not_exist","params":{}}\n',
+    '{"jsonrpc":"2.0","method":"does_not_exist","params":{}}\n',
+  ])
+
+  await serveACPStdio(server, input, line => {
+    output.push(line)
+  })
+  const frames = output.map(line => JSON.parse(line) as Record<string, unknown>)
+  expect(frames).toHaveLength(2)
+  expect(frames[0]).toMatchObject({ jsonrpc: '2.0', id: null, result: { server_name: 'xerxes' } })
+  expect(frames[1]).toMatchObject({ jsonrpc: '2.0', id: null, error: { code: -32601 } })
+})
+
+test('ACP frame cap measures UTF-8 bytes rather than UTF-16 code units', async () => {
+  const server = new AcpServer({ promptHandler: () => ({ ok: true }) })
+  const output: string[] = []
+  const prefix = '{"jsonrpc":"2.0","id":1,"method":"initialize","padding":"'
+  const input = readableChunks([`${prefix}${'😀'.repeat(Math.ceil(MAX_ACP_FRAME_BYTES / 4))}`])
+
+  await serveACPStdio(server, input, line => {
+    output.push(line)
+  })
+  const frames = output.map(line => JSON.parse(line) as { error?: { code: number; message: string } })
+  expect(frames).toHaveLength(1)
+  expect(frames[0]?.error?.code).toBe(-32600)
+  expect(frames[0]?.error?.message).toContain('maximum size')
+}, 10_000)
+
+test('ACP frame accounting scans fragmented multibyte input exactly once', async () => {
+  const request = `${JSON.stringify({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'initialize',
+    params: { client_info: { name: '编😀辑器' } },
+  })}\n`
+  const encoded = new TextEncoder().encode(request)
+  const counter = new AcpFrameByteCounter(encoded.byteLength)
+  const fragments = [...encoded].map(byte => Uint8Array.of(byte))
+
+  for (const fragment of fragments) {
+    counter.append(fragment)
+  }
+
+  expect(counter.bytesScanned).toBe(encoded.byteLength)
+  expect(counter.exceedsLimit).toBe(false)
+
+  const server = new AcpServer({ promptHandler: () => ({ ok: true }) })
+  const output: string[] = []
+  await serveACPStdio(server, readableByteChunks(fragments), line => {
+    output.push(line)
+  })
+
+  expect(output).toHaveLength(1)
+  expect(JSON.parse(output[0] ?? '{}')).toMatchObject({
+    jsonrpc: '2.0',
+    id: 1,
+    result: { server_name: 'xerxes' },
+  })
 })
 
 test('ACP stdio transport reports parse and method errors but does not answer notifications', async () => {
@@ -153,10 +239,14 @@ test('ACP stdio transport rejects an unterminated oversized frame and stops read
 
 function readableChunks(chunks: readonly string[]): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder()
+  return readableByteChunks(chunks.map(chunk => encoder.encode(chunk)))
+}
+
+function readableByteChunks(chunks: readonly Uint8Array[]): ReadableStream<Uint8Array> {
   return new ReadableStream<Uint8Array>({
     start(controller) {
       for (const chunk of chunks) {
-        controller.enqueue(encoder.encode(chunk))
+        controller.enqueue(chunk)
       }
       controller.close()
     },

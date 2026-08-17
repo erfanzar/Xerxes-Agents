@@ -2,7 +2,11 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { ValidationError } from '../../core/errors.js'
-import { replacePersistedSubagentSnapshots } from '../../agents/subagentPersistence.js'
+import {
+  replacePersistedSubagentDeliveries,
+  replacePersistedSubagentSnapshots,
+  type PersistedSubagentDelivery,
+} from '../../agents/subagentPersistence.js'
 import { ToolRegistry, type ToolExecutionContext } from '../../executors/toolRegistry.js'
 import {
   MAX_AGENT_TITLE_LENGTH,
@@ -188,6 +192,7 @@ export interface ClaudeAgentToolsOptions {
   /** Associates explicitly detached work with the active parent turn. */
   readonly backgroundAgents?: {
     consume(snapshots: readonly SpawnedAgentSnapshot[]): void
+    deliveredState?(): readonly PersistedSubagentDelivery[]
     track(snapshots: readonly SpawnedAgentSnapshot[]): void
     trackedIds?(sourceAgentId: string): readonly string[]
   }
@@ -300,6 +305,7 @@ export function registerClaudeAgentTools(
 export class ClaudeAgentTools {
   private readonly mailbox: AgentEventMailbox
   private readonly now: () => number
+  private readonly rolledBackIds = new Set<string>()
   private readonly spawnConcurrency: number
 
   constructor(private readonly options: ClaudeAgentToolsOptions) {
@@ -433,12 +439,20 @@ export class ClaudeAgentTools {
       : failures[0]?.reason) ?? new Error('Subagent spawn registration failed')
     if (registration.stopped || failures.length) {
       const cleanupErrors: unknown[] = []
+      const rolledBack: SpawnedAgentSnapshot[] = []
       for (const snapshot of snapshots) {
         try {
-          this.options.manager.close(snapshot.id)
+          rolledBack.push(this.options.manager.close(snapshot.id))
         } catch (error) {
           cleanupErrors.push(error)
         }
+      }
+      // These handles were successfully registered but their batch receipt is
+      // being rolled back. Consume their closed generations so the coordinator
+      // cannot resurrect them as detached ghosts on this or a resumed turn.
+      if (rolledBack.length) {
+        this.options.backgroundAgents?.consume(rolledBack)
+        for (const snapshot of rolledBack) this.rolledBackIds.add(snapshot.id)
       }
       this.capture()
       if (cleanupErrors.length) {
@@ -748,15 +762,19 @@ export class ClaudeAgentTools {
 
   private ownedHandles(context: ToolExecutionContext): SpawnedAgentSnapshot[] {
     const owner = contextOwnerId(context)
-    return this.options.manager.listHandles().filter(snapshot => normalizeOwnerId(snapshot.sourceAgentId) === owner)
+    return this.options.manager.listHandles().filter(snapshot => (
+      normalizeOwnerId(snapshot.sourceAgentId) === owner && !this.rolledBackIds.has(snapshot.id)
+    ))
   }
 
   private capture(): void {
-    this.mailbox.capture(this.options.manager.listHandles())
+    this.mailbox.capture(this.options.manager.listHandles().filter(snapshot => !this.rolledBackIds.has(snapshot.id)))
   }
 
   private persistContext(context: ToolExecutionContext): void {
     replacePersistedSubagentSnapshots(context.metadata, this.ownedHandles(context))
+    const delivered = this.options.backgroundAgents?.deliveredState?.()
+    if (delivered !== undefined) replacePersistedSubagentDeliveries(context.metadata, delivered)
   }
 }
 
@@ -1071,6 +1089,7 @@ function boundedOutput(value: string, limit = MAX_WIRE_OUTPUT_CHARS): string {
 function agentSnapshotWire(snapshot: SpawnedAgentSnapshot): Record<string, unknown> {
   return {
     id: snapshot.id,
+    ...(snapshot.attempt === undefined ? {} : { attempt: snapshot.attempt }),
     name: snapshot.name,
     title: snapshot.title,
     agent_id: snapshot.agentId,

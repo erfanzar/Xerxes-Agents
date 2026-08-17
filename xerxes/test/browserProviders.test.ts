@@ -121,12 +121,14 @@ test('Browserbase and Browser Use make redacted injected HTTP requests and keep 
   expect(browserbaseRequests).toEqual([{
     url: 'https://api.browserbase.com/v1/sessions',
     headers: expect.any(Headers),
+    method: 'POST',
     body: JSON.stringify({ projectId: 'project-1' }),
   }])
   expect(browserbaseRequests[0]?.headers.get('x-bb-api-key')).toBe('browserbase-api-key')
   expect(browserUseRequests).toEqual([{
     url: 'https://api.browser-use.com/v1/sessions',
     headers: expect.any(Headers),
+    method: 'POST',
     body: JSON.stringify({ headless: false }),
   }])
   expect(browserUseRequests[0]?.headers.get('authorization')).toBe('Bearer browser-use-api-key')
@@ -136,6 +138,71 @@ test('Browserbase and Browser Use make redacted injected HTTP requests and keep 
   expect(JSON.stringify(browserUseSession)).not.toContain('browser-use-api-key')
   expect(browserbaseSession.cdpUrlForHost()).toContain('browserbase-secret')
   expect(browserUseSession.cdpUrlForHost()).toContain('browser-use-secret')
+})
+
+test('managed remote providers close the exact provider session through their injected HTTP port', async () => {
+  const browserbaseRequests: RecordedRequest[] = []
+  const browserUseRequests: RecordedRequest[] = []
+  const browserbase = new BrowserbaseProvider({
+    config: { apiKey: 'browserbase-api-key', projectId: 'project-1' },
+    fetcher: async (url, init) => {
+      browserbaseRequests.push(recordedRequest(url, init))
+      if (url === 'https://api.browserbase.com/v1/sessions') {
+        return Response.json({ id: 'bb-remote-id', connectUrl: 'wss://browserbase.test/session' })
+      }
+      return new Response(null, { status: 204 })
+    },
+    idFactory: () => 'browserbase-session',
+  })
+  const browserUse = new BrowserUseProvider({
+    config: { apiKey: 'browser-use-api-key' },
+    fetcher: async (url, init) => {
+      browserUseRequests.push(recordedRequest(url, init))
+      if (init.method === 'POST') {
+        return Response.json({ id: 'bu-remote-id', cdp_url: 'wss://browser-use.test/session' })
+      }
+      return new Response(null, { status: 204 })
+    },
+    idFactory: () => 'browser-use-session',
+  })
+
+  const browserbaseSession = await browserbase.open()
+  const browserUseSession = await browserUse.open()
+  await browserbase.close(browserbaseSession)
+  await browserUse.close(browserUseSession)
+
+  expect(browserbaseRequests[1]).toMatchObject({
+    url: 'https://api.browserbase.com/v1/sessions/bb-remote-id',
+    method: 'POST',
+    body: JSON.stringify({ status: 'REQUEST_RELEASE' }),
+  })
+  expect(browserbaseRequests[1]?.headers.get('x-bb-api-key')).toBe('browserbase-api-key')
+  expect(browserUseRequests[1]).toMatchObject({
+    url: 'https://api.browser-use.com/v1/sessions/bu-remote-id',
+    method: 'DELETE',
+    body: null,
+  })
+  expect(browserUseRequests[1]?.headers.get('authorization')).toBe('Bearer browser-use-api-key')
+})
+
+test('managed provider close failures are explicit and remain retryable', async () => {
+  let closeCalls = 0
+  const provider = new BrowserbaseProvider({
+    config: { apiKey: 'browserbase-api-key', projectId: 'project-1' },
+    fetcher: async (url, _init) => {
+      if (url === 'https://api.browserbase.com/v1/sessions') {
+        return Response.json({ id: 'bb-remote-id', connectUrl: 'wss://browserbase.test/session' })
+      }
+      closeCalls += 1
+      return new Response(null, { status: closeCalls === 1 ? 503 : 204 })
+    },
+    idFactory: () => 'browserbase-session',
+  })
+  const session = await provider.open()
+
+  await expect(provider.close(session)).rejects.toThrow('session close failed with status 503')
+  await expect(provider.close(session)).resolves.toBeUndefined()
+  expect(closeCalls).toBe(2)
 })
 
 test('Firecrawl is a configured request capability, not fabricated browser automation', async () => {
@@ -179,6 +246,7 @@ test('provider failures redact external response and metadata credentials', asyn
 interface RecordedRequest {
   readonly body: string | null
   readonly headers: Headers
+  readonly method: string | undefined
   readonly url: string
 }
 
@@ -186,6 +254,7 @@ function recordedRequest(url: string, init: RequestInit): RecordedRequest {
   return {
     url,
     headers: new Headers(init.headers),
+    method: init.method,
     body: typeof init.body === 'string' ? init.body : null,
   }
 }

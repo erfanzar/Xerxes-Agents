@@ -39,7 +39,12 @@ describe('parseUnifiedDiff', () => {
     expect(kinds).toContain('add')
     expect(kinds).toContain('del')
     expect(kinds).toContain('context')
-    expect(parsed.lines[0]).toEqual({ kind: 'file', text: '▌ src/a.ts' })
+    expect(parsed.lines[0]).toEqual({ kind: 'file', text: 'src/a.ts' })
+    expect(parsed.lines.find(line => line.text === ' context line')).toMatchObject({ oldLine: 1, newLine: 1 })
+    expect(parsed.lines.find(line => line.text === '-removed line')).toMatchObject({ oldLine: 2 })
+    expect(parsed.lines.find(line => line.text === '-removed line')?.newLine).toBeUndefined()
+    expect(parsed.lines.find(line => line.text === '+added line')).toMatchObject({ newLine: 2 })
+    expect(parsed.lines.find(line => line.text === '+added line')?.oldLine).toBeUndefined()
     // ---/+++ file markers are dropped; the diff --git row names the file.
     expect(parsed.lines.some(line => line.text.startsWith('---'))).toBe(false)
     expect(parsed.lines.some(line => line.text.startsWith('+++'))).toBe(false)
@@ -57,6 +62,28 @@ describe('parseUnifiedDiff', () => {
 
     expect(parsed.truncated).toBe(true)
     expect(parsed.lines.length).toBeLessThan(5)
+  })
+
+  it('bounds a minified generated row without hiding later source files', () => {
+    const huge = 'x'.repeat(300_000)
+    const parsed = parseUnifiedDiff([
+      'diff --git a/dist/bundle.js b/dist/bundle.js',
+      '--- a/dist/bundle.js',
+      '+++ b/dist/bundle.js',
+      '@@ -1 +1 @@',
+      `-${huge}`,
+      `+${huge}`,
+      'diff --git a/src/visible.ts b/src/visible.ts',
+      '--- a/src/visible.ts',
+      '+++ b/src/visible.ts',
+      '@@ -1 +1 @@',
+      '-old',
+      '+new'
+    ].join('\n'))
+
+    expect(parsed.truncated).toBe(true)
+    expect(parsed.lines.some(line => line.kind === 'file' && line.text === 'src/visible.ts')).toBe(true)
+    expect(Math.max(...parsed.lines.map(line => line.text.length))).toBeLessThan(10_000)
   })
 })
 

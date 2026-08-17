@@ -7,7 +7,11 @@ import type { MCPTool, MCPToolCallResult } from './types.js'
 
 /** The portion of MCPManager needed to discover and asynchronously route published tools. */
 export interface MCPToolManagerPort {
-  callTool(name: string, arguments_?: JsonObject): Promise<MCPToolCallResult>
+  callTool(
+    name: string,
+    arguments_?: JsonObject,
+    options?: { readonly signal?: AbortSignal },
+  ): Promise<MCPToolCallResult>
   getAllTools(): readonly MCPTool[]
 }
 
@@ -74,7 +78,8 @@ export function mcpToolToToolHandler(tool: MCPTool, manager: MCPToolManagerPort)
       throw new MCPToolIntegrationError(identity.name, 'call was cancelled before routing', identity.serverName)
     }
     try {
-      const pending = Promise.resolve().then(() => manager.callTool(identity.name, inputs))
+      const options = signal === undefined ? {} : { signal }
+      const pending = Promise.resolve().then(() => manager.callTool(identity.name, inputs, options))
       return await awaitAbortable(pending, signal)
     } catch (error) {
       if (error instanceof MCPToolIntegrationError) throw error

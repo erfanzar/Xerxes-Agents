@@ -104,12 +104,16 @@ export class OllamaClient implements LlmClient {
     }
 
     const chunk = parseChunk(await response.text())
+    if (chunk.done !== true) {
+      throw new ProviderError('ollama', 'chat completion response missing done:true')
+    }
     const message = asRecord(chunk.message)
     const content = stringAt(message, 'content') ?? ''
     const thinking = stringAt(message, 'thinking')
     const rawToolCalls = message.tool_calls ?? chunk.tool_calls
     const toolCalls = rawToolCalls === undefined ? [] : parseToolCalls(rawToolCalls) ?? []
-    const finishReason = stringAt(chunk, 'done_reason') || (chunk.done === true ? 'stop' : undefined)
+    const rawFinishReason = stringAt(chunk, 'done_reason') || (chunk.done === true ? 'stop' : undefined)
+    const finishReason = toolCalls.length ? 'tool_calls' : rawFinishReason
     const usage = ollamaUsage(chunk)
 
     return {
@@ -141,8 +145,12 @@ export class OllamaClient implements LlmClient {
       throw new ProviderError('ollama', 'chat stream returned no response body')
     }
 
+    let receivedDone = false
     for await (const line of ndjsonLines(response.body, this.maxLineBytes)) {
       const chunk = parseChunk(line)
+      if (chunk.done === true) {
+        receivedDone = true
+      }
       const message = asRecord(chunk.message)
       const content = stringAt(message, 'content')
       const thinking = stringAt(message, 'thinking')
@@ -176,6 +184,9 @@ export class OllamaClient implements LlmClient {
       if (Object.keys(delta).length) {
         yield delta
       }
+    }
+    if (!receivedDone) {
+      throw new ProviderError('ollama', 'chat stream ended before done:true')
     }
   }
 }

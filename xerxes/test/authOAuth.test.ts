@@ -220,3 +220,33 @@ test('credential storage migrates legacy plaintext records to encrypted form on 
     await rm(root, { recursive: true, force: true })
   }
 })
+
+test('a key file written as base64 text is accepted instead of locking the store', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-credkey-'))
+  try {
+    const keyPath = join(root, '.credential_key')
+    const raw = new Uint8Array(32).fill(7)
+    // Installed key files exist in this encoding. Rejecting them does not fail
+    // safe: it silently signs the user out of every provider at once.
+    await writeFile(keyPath, Buffer.from(raw).toString('base64url'), 'utf8')
+
+    const storage = new CredentialStorage(join(root, 'credentials'), { keyPath })
+    await storage.save('example', new OAuthToken({ accessToken: 'token-value' }))
+    expect((await storage.load('example'))?.accessToken).toBe('token-value')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a key file that is neither raw nor base64 key material is still rejected', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-credkey-bad-'))
+  try {
+    const keyPath = join(root, '.credential_key')
+    await writeFile(keyPath, 'too-short', 'utf8')
+
+    const storage = new CredentialStorage(join(root, 'credentials'), { keyPath })
+    await expect(storage.save('example', new OAuthToken({ accessToken: 'x' }))).rejects.toThrow(/32 bytes/)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})

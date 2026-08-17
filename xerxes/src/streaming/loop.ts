@@ -11,7 +11,7 @@ import {
   type ToolExecutionContext,
 } from '../executors/toolRegistry.js'
 import type { ToolLoopBlockAuditInput } from '../audit/emitter.js'
-import type { HookPoint, HookRunner } from '../extensions/hooks.js'
+import { resolveToolPermission, type HookPoint, type HookRunner } from '../extensions/hooks.js'
 import type { LlmClient, LlmDelta, QuerySource, ThinkingRequest, TokenUsage } from '../llms/client.js'
 import {
   DENIAL_LOOP_PATTERN,
@@ -99,7 +99,12 @@ export const MAX_CONCURRENT_TOOL_CALLS = 8
 type ToolDecision =
   | { readonly call: ToolCall; readonly effectiveCall: ToolCall; readonly kind: 'allowed' }
   | { readonly call: ToolCall; readonly kind: 'cancelled' }
-  | { readonly call: ToolCall; readonly kind: 'denied'; readonly reason: 'permission_rejected' | 'policy_denied' }
+  | {
+    readonly call: ToolCall
+    readonly detail?: string
+    readonly kind: 'denied'
+    readonly reason: 'permission_rejected' | 'policy_denied'
+  }
 
 /**
  * Partition decisions into maximal runs of consecutive concurrency-safe calls.
@@ -201,6 +206,8 @@ export interface TurnRequest {
   readonly sessionId?: string
   readonly state: AgentState
   readonly systemPrompt?: string
+  /** Send the system prompt in a request copy without mutating durable AgentState messages. */
+  readonly systemPromptRequestOnly?: boolean
   /** Same prompt as `systemPrompt`, kept as named sources for prefix caching. */
   readonly systemSegments?: readonly SystemPromptSegment[]
   readonly temperature?: number
@@ -234,6 +241,8 @@ export interface TurnDependencies {
   readonly auditToolLoopBlock?: (input: ToolLoopBlockAuditInput) => void
   /** Waits for explicitly backgrounded subagents before a text-only stop. */
   readonly awaitAgentEvents?: (signal?: AbortSignal) => Promise<readonly string[]>
+  /** Marks the last returned subagent event batch delivered after transcript injection succeeds. */
+  readonly acknowledgeAgentEvents?: () => void
   readonly delay?: (milliseconds: number, signal?: AbortSignal) => Promise<void>
   /** Supplies passive sub-agent status lines at safe provider/tool boundaries. */
   readonly drainAgentEvents?: () => readonly string[]
@@ -309,6 +318,9 @@ export async function* runTurn(
   const state = request.state
   const permissionMode = request.permissionMode ?? DEFAULT_PERMISSION_MODE
   const maxToolTurns = request.maxToolTurns ?? DEFAULT_MAX_TOOL_TURNS
+  if (maxToolTurns !== Number.POSITIVE_INFINITY && (!Number.isInteger(maxToolTurns) || maxToolTurns < 1)) {
+    throw new TypeError('maxToolTurns must be a positive integer or Infinity')
+  }
   const retryDelays = dependencies.retryDelays ?? DEFAULT_RETRY_DELAYS
   const streamInactivityTimeoutMs =
     dependencies.streamInactivityTimeoutMs ?? DEFAULT_STREAM_INACTIVITY_TIMEOUT_MS
@@ -321,7 +333,7 @@ export async function* runTurn(
     ...(request.sessionId ? { sessionId: request.sessionId } : {}),
     metadata: state.metadata,
   }
-  ensureSystemPrompt(state.messages, request.systemPrompt)
+  if (!request.systemPromptRequestOnly) ensureSystemPrompt(state.messages, request.systemPrompt)
   state.messages.push({ role: 'user', content: request.userMessage })
   state.metadata.model = request.model
   state.turnCount += 1
@@ -375,7 +387,15 @@ export async function* runTurn(
     // renders `tool_end`, and a user watching a build scroll past is not helped
     // by a preview of it, so the returned result stays whole and only the
     // transcript message carries the stand-in.
-    const providerContent = dependencies.persistToolResult?.(recorded.name, recorded.result)
+    let providerContent: string | undefined
+    try {
+      providerContent = dependencies.persistToolResult?.(recorded.name, recorded.result)
+    } catch {
+      // Spill storage is an optimization, never part of tool correctness. If
+      // persistence fails, keep the complete matched result inline rather than
+      // letting the exception strand the assistant tool call without a reply.
+      providerContent = undefined
+    }
     appendToolResult(
       state,
       recorded,
@@ -388,13 +408,13 @@ export async function* runTurn(
 
   let consecutiveUnconfiguredOnlyRounds = 0
   let terminalProviderFailure = false
-  let stopReason: TurnStopReason = 'tool_budget_exhausted'
+  let stopReason: TurnStopReason = signal?.aborted ? 'aborted' : 'tool_budget_exhausted'
   /** One-shot per turn: a reducer that already ran cannot free the same tokens twice. */
   let contextReductionAttempted = false
   let outputLimitEscalations = 0
   let outputTokenOverride: number | undefined
   try {
-    for (let toolTurn = 0; toolTurn < turnLimit; toolTurn += 1) {
+    for (let toolTurn = 0; !signal?.aborted && toolTurn < turnLimit; toolTurn += 1) {
       appendAgentEventMessage(state, dependencies.drainAgentEvents?.())
       for (const steer of dependencies.drainSteer?.() ?? []) {
         const content = steer.trim()
@@ -418,6 +438,7 @@ export async function* runTurn(
       let finishReason: string | undefined
       let streamCompleted = false
       let textDeduper = new ToolRoundTextDeduper(latestToolRoundText)
+      let attemptEvents: IncrementalTextEvent[] = []
 
       for (let attempt = 0; attempt <= retryDelays.length; attempt += 1) {
         parser = dependencies.thinkingParserFactory?.() ?? new ThinkingParser()
@@ -428,6 +449,7 @@ export async function* runTurn(
         lastUsage = undefined
         finishReason = undefined
         textDeduper = new ToolRoundTextDeduper(latestToolRoundText)
+        attemptEvents = []
         const attemptSignal = linkAttemptSignal(signal)
         try {
           apiCallsCount += 1
@@ -446,7 +468,7 @@ export async function* runTurn(
           )) {
             const parts = processDelta(delta, parser, textParts, thinkingParts)
             for (const part of parts) {
-              for (const visible of textDeduper.push(part)) yield visible
+              attemptEvents.push(...textDeduper.push(part))
             }
             if (delta.toolCalls) {
               roundToolCalls = delta.toolCalls
@@ -466,10 +488,10 @@ export async function* runTurn(
           for (const flushed of parser.process('')) {
             if (flushed.type === 'text') {
               textParts.push(flushed.text)
-              for (const visible of textDeduper.push({ type: 'text', text: flushed.text })) yield visible
+              attemptEvents.push(...textDeduper.push({ type: 'text', text: flushed.text }))
             } else {
               thinkingParts.push(flushed.text)
-              for (const visible of textDeduper.push({ type: 'thinking', text: flushed.text })) yield visible
+              attemptEvents.push(...textDeduper.push({ type: 'thinking', text: flushed.text }))
             }
           }
           streamCompleted = true
@@ -573,10 +595,34 @@ export async function* runTurn(
         cacheCreationTokens += usage.cacheCreationTokens ?? 0
         reasoningTokens += usage.reasoningTokens ?? 0
       })
+      if (lastUsage) {
+        // Emitted per provider round rather than only at turn_done: a turn that
+        // runs for minutes across many rounds would otherwise report nothing
+        // until it ended.
+        yield {
+          type: 'usage_update',
+          model: request.model,
+          usage: lastUsage,
+          cumulative: {
+            inputTokens,
+            outputTokens,
+            ...(cacheReadTokens ? { cacheReadTokens } : {}),
+            ...(cacheCreationTokens ? { cacheCreationTokens } : {}),
+            ...(reasoningTokens ? { reasoningTokens } : {}),
+          },
+        }
+      }
 
       const rawAssistantText = textParts.join('')
       const deduplication = textDeduper.finish()
-      for (const visible of deduplication.events) yield visible
+      attemptEvents.push(...deduplication.events)
+      const discardRegeneration = finishReason === 'length'
+        && roundToolCalls.length === 0
+        && outputLimitEscalations === 0
+        && request.maxTokens === undefined
+      if (!discardRegeneration) {
+        for (const visible of attemptEvents) yield visible
+      }
       const assistantText = rawAssistantText.slice(deduplication.suppressedPrefix)
       const providerToolCalls = roundToolCalls
       const visibleTools = forceToolFreeSummary ? [] : request.tools
@@ -700,6 +746,7 @@ export async function* runTurn(
           break
         }
         if (appendedAgentEvents) {
+          dependencies.acknowledgeAgentEvents?.()
           if (toolTurn + 1 >= turnLimit) turnLimit += 1
           continue
         }
@@ -765,13 +812,29 @@ export async function* runTurn(
           decisions.push({ call, kind: 'cancelled' })
           continue
         }
-        const permission = permissionDisposition(call, permissionMode, dependencies.policy, request.agentId)
+        const beforeResult = await dispatchHook(hookRunner, 'before_tool_call', {
+          ...(request.agentId ? { agentId: request.agentId } : {}),
+          arguments: call.function.arguments,
+          name: call.function.name,
+          ...(request.sessionId ? { sessionId: request.sessionId } : {}),
+          toolCallId: call.id,
+        })
+        const effectiveCall = applyToolArgumentsMutation(
+          call,
+          hookMutation(beforeResult, call.function.arguments),
+        )
+        const permission = permissionDisposition(
+          effectiveCall,
+          permissionMode,
+          dependencies.policy,
+          request.agentId,
+        )
         if (permission === 'deny') {
           decisions.push({ call, kind: 'denied', reason: 'policy_denied' })
           continue
         }
         if (permission === 'prompt') {
-          const permissionRequest = createPermissionRequest(call)
+          const permissionRequest = createPermissionRequest(effectiveCall)
           yield { type: 'permission_request', request: permissionRequest }
           const decision = (await dependencies.permissionBroker?.request(permissionRequest, signal)) ?? 'reject'
           // Injected brokers are allowed to resolve asynchronously. Cancellation
@@ -786,23 +849,32 @@ export async function* runTurn(
             continue
           }
         }
-        const beforeResult = await dispatchHook(hookRunner, 'before_tool_call', {
-          ...(request.agentId ? { agentId: request.agentId } : {}),
-          arguments: call.function.arguments,
-          name: call.function.name,
-          ...(request.sessionId ? { sessionId: request.sessionId } : {}),
-          toolCallId: call.id,
-        })
-        decisions.push({
-          call,
-          effectiveCall: applyToolArgumentsMutation(call, hookMutation(beforeResult, call.function.arguments)),
-          kind: 'allowed',
-        })
+        if (hookRunner !== undefined) {
+          const extensionPermission = await resolveToolPermission(hookRunner, {
+            arguments: effectiveCall.function.arguments,
+            toolName: effectiveCall.function.name,
+          })
+          if (!extensionPermission.allowed) {
+            decisions.push({
+              call,
+              detail: extensionPermission.reason,
+              kind: 'denied',
+              reason: 'policy_denied',
+            })
+            continue
+          }
+        }
+        decisions.push({ call, effectiveCall, kind: 'allowed' })
       }
 
       // PHASE B — execute in maximal runs of consecutive concurrency-safe calls,
       // then emit strictly in model-emitted order regardless of completion order.
-      for (const group of groupToolDecisions(decisions, call => capabilitiesFor(dependencies, request, call))) {
+      for (const group of groupToolDecisions(
+        decisions.map(decision => decision.kind === 'allowed'
+          ? { ...decision, call: decision.effectiveCall }
+          : decision),
+        call => capabilitiesFor(dependencies, request, call),
+      )) {
         if (signal?.aborted && group.some(decision => decision.kind === 'allowed')) {
           for (const decision of group) {
             denialBudget.record('cancelled', decision.call.function.name)
@@ -860,7 +932,13 @@ export async function* runTurn(
           }
           if (decision.kind === 'denied') {
             denialBudget.record(decision.reason, decision.call.function.name)
-            const result = await recordToolResult(deniedToolResult(decision.call), decision.call)
+            const denied = deniedToolResult(decision.call)
+            const result = await recordToolResult(
+              decision.detail === undefined
+                ? denied
+                : { ...denied, result: `${denied.result} ${decision.detail}` },
+              decision.call,
+            )
             yield { type: 'tool_end', result }
             continue
           }
@@ -929,6 +1007,7 @@ export async function* runTurn(
           break
         }
         if (appendedAgentEvents) {
+          dependencies.acknowledgeAgentEvents?.()
           forceToolFreeSummary = true
           needsFinalization = true
         }
@@ -1181,7 +1260,9 @@ function completionRequest(
   const maxTokens = request.maxTokens ?? maxTokensOverride
   return {
     model: request.model,
-    messages: [...messages],
+    messages: request.systemPromptRequestOnly && request.systemPrompt
+      ? [{ role: 'system' as const, content: request.systemPrompt }, ...messages]
+      : [...messages],
     ...(tools?.length ? { tools } : {}),
     ...(maxTokens !== undefined
       ? { maxTokens }

@@ -456,97 +456,62 @@ export class OpenAiApiServer implements OpenAiApiHandler {
     const upstreamAbort = new AbortController()
     const abortUpstream = () => upstreamAbort.abort()
     requestSignal.addEventListener('abort', abortUpstream, { once: true })
-    let cancelled = false
-    const encoder = new TextEncoder()
-    const body = new ReadableStream<Uint8Array>({
-      start: async controller => {
-        const send = (payload: unknown): void => {
-          if (!cancelled) {
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`))
+    const frame = (payload: unknown): string => `data: ${JSON.stringify(payload)}\n\n`
+    const chunk = (delta: Record<string, unknown>, finishReason: string | null = null): string => frame({
+      id,
+      object: 'chat.completion.chunk',
+      created,
+      model: completion.model,
+      choices: [{ index: 0, delta, finish_reason: finishReason }],
+    })
+    const frames = async function* (): AsyncGenerator<string> {
+      const parser = new ThinkingParser()
+      let finishReason: string | undefined
+      let lastUsage: TokenUsage | undefined
+      let toolCalls: readonly ToolCall[] = []
+      try {
+        yield chunk({ role: 'assistant' })
+        for await (const delta of client.stream(completion, upstreamAbort.signal)) {
+          finishReason = delta.finishReason ?? finishReason
+          lastUsage = delta.usage ?? lastUsage
+          toolCalls = delta.toolCalls ?? toolCalls
+          for (const text of visibleText(parser, delta)) {
+            yield chunk({ content: text })
+          }
+          if (delta.toolCalls?.length) {
+            yield chunk({
+              tool_calls: toOpenAiToolCalls(delta.toolCalls).map((toolCall, index) => ({ index, ...toolCall })),
+            })
           }
         }
-        const sendDone = (): void => {
-          if (!cancelled) {
-            controller.enqueue(encoder.encode('data: [DONE]\n\n'))
-          }
+        for (const text of visibleTail(parser)) {
+          yield chunk({ content: text })
         }
-        const sendChunk = (
-          delta: Record<string, unknown>,
-          finishReason: string | null = null,
-        ): void => {
-          send({
+        yield chunk({}, resolvedFinishReason(finishReason, toolCalls))
+        if (includeUsage === true && lastUsage !== undefined) {
+          yield frame({
             id,
             object: 'chat.completion.chunk',
             created,
             model: completion.model,
-            choices: [{ index: 0, delta, finish_reason: finishReason }],
+            choices: [],
+            usage: toOpenAiUsage(lastUsage),
           })
         }
-
-        const parser = new ThinkingParser()
-        let finishReason: string | undefined
-        let lastUsage: TokenUsage | undefined
-        let toolCalls: readonly ToolCall[] = []
-        try {
-          sendChunk({ role: 'assistant' })
-          for await (const delta of client.stream(completion, upstreamAbort.signal)) {
-            finishReason = delta.finishReason ?? finishReason
-            lastUsage = delta.usage ?? lastUsage
-            toolCalls = delta.toolCalls ?? toolCalls
-            for (const text of visibleText(parser, delta)) {
-              sendChunk({ content: text })
-            }
-            if (delta.toolCalls?.length) {
-              sendChunk({
-                tool_calls: toOpenAiToolCalls(delta.toolCalls).map((toolCall, index) => ({ index, ...toolCall })),
-              })
-            }
-          }
-          for (const text of visibleTail(parser)) {
-            sendChunk({ content: text })
-          }
-          sendChunk({}, resolvedFinishReason(finishReason, toolCalls))
-          if (includeUsage === true && lastUsage !== undefined) {
-            // OpenAI emits usage only when stream_options.include_usage is
-            // set, in a dedicated chunk with an empty choices array.
-            send({
-              id,
-              object: 'chat.completion.chunk',
-              created,
-              model: completion.model,
-              choices: [],
-              usage: toOpenAiUsage(lastUsage),
-            })
-          }
-          sendDone()
-        } catch (error) {
-          if (cancelled || requestSignal.aborted || upstreamAbort.signal.aborted) {
-            // Client disconnect or request abort: nothing can be reported.
-          } else {
-            console.warn(`OpenAI streaming completion failed: ${errorMessage(error)}`)
-            try {
-              send({ error: openAiError('Internal server error.', 'api_error', null, null) })
-              sendDone()
-            } catch {
-              // The stream is already torn down; the failure is logged above.
-            }
-          }
-        } finally {
-          requestSignal.removeEventListener('abort', abortUpstream)
-          if (!cancelled) {
-            try {
-              controller.close()
-            } catch {
-              // Closing an already-errored stream is a no-op for the client.
-            }
-          }
+        yield 'data: [DONE]\n\n'
+      } catch (error) {
+        if (!requestSignal.aborted && !upstreamAbort.signal.aborted) {
+          console.warn(`OpenAI streaming completion failed: ${errorMessage(error)}`)
+          yield frame({ error: openAiError('Internal server error.', 'api_error', null, null) })
+          yield 'data: [DONE]\n\n'
         }
-      },
-      cancel: () => {
-        cancelled = true
+      } finally {
         requestSignal.removeEventListener('abort', abortUpstream)
-        upstreamAbort.abort()
-      },
+      }
+    }
+    const body = pullAwareByteStream(frames(), () => {
+      requestSignal.removeEventListener('abort', abortUpstream)
+      upstreamAbort.abort()
     })
     return new Response(body, {
       headers: {
@@ -565,44 +530,22 @@ export class OpenAiApiServer implements OpenAiApiHandler {
     const upstreamAbort = new AbortController()
     const abortUpstream = () => upstreamAbort.abort(requestSignal.reason)
     requestSignal.addEventListener('abort', abortUpstream, { once: true })
-    let cancelled = false
-    const encoder = new TextEncoder()
-    const body = new ReadableStream<Uint8Array>({
-      start: async controller => {
-        try {
-          for await (const frame of cortex.createStreamingCompletion(completion, upstreamAbort.signal)) {
-            if (!cancelled) {
-              controller.enqueue(encoder.encode(frame))
-            }
-          }
-        } catch (error) {
-          if (cancelled || requestSignal.aborted || upstreamAbort.signal.aborted) {
-            // Client disconnect or request abort: nothing can be reported.
-          } else {
-            console.warn(`OpenAI streaming Cortex completion failed: ${errorMessage(error)}`)
-            try {
-              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: openAiError('Internal server error.', 'api_error', null, null) })}\n\n`))
-              controller.enqueue(encoder.encode('data: [DONE]\n\n'))
-            } catch {
-              // The stream is already torn down; the failure is logged above.
-            }
-          }
-        } finally {
-          requestSignal.removeEventListener('abort', abortUpstream)
-          if (!cancelled) {
-            try {
-              controller.close()
-            } catch {
-              // Closing an already-errored stream is a no-op for the client.
-            }
-          }
+    const frames = async function* (): AsyncGenerator<string> {
+      try {
+        yield* cortex.createStreamingCompletion(completion, upstreamAbort.signal)
+      } catch (error) {
+        if (!requestSignal.aborted && !upstreamAbort.signal.aborted) {
+          console.warn(`OpenAI streaming Cortex completion failed: ${errorMessage(error)}`)
+          yield `data: ${JSON.stringify({ error: openAiError('Internal server error.', 'api_error', null, null) })}\n\n`
+          yield 'data: [DONE]\n\n'
         }
-      },
-      cancel: () => {
-        cancelled = true
+      } finally {
         requestSignal.removeEventListener('abort', abortUpstream)
-        upstreamAbort.abort()
-      },
+      }
+    }
+    const body = pullAwareByteStream(frames(), () => {
+      requestSignal.removeEventListener('abort', abortUpstream)
+      upstreamAbort.abort()
     })
     return new Response(body, {
       headers: {
@@ -816,6 +759,33 @@ function assertPositiveSafeInteger(value: number, label: string): void {
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0
+}
+
+function pullAwareByteStream(source: AsyncGenerator<string>, cancel: () => void): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder()
+  let pulling = false
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      if (pulling) return
+      pulling = true
+      try {
+        const next = await source.next()
+        if (next.done) {
+          controller.close()
+        } else {
+          controller.enqueue(encoder.encode(next.value))
+        }
+      } catch (error) {
+        controller.error(error)
+      } finally {
+        pulling = false
+      }
+    },
+    async cancel() {
+      cancel()
+      await source.return(undefined).catch(() => undefined)
+    },
+  }, { highWaterMark: 0 })
 }
 
 async function readJsonBody(request: Request, maxBytes: number | undefined): Promise<unknown> {

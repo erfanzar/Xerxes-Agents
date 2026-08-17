@@ -88,7 +88,11 @@ export class HookRunner {
     for (const callback of callbacks) {
       try {
         const result = await callback(payload)
-        if (result !== undefined && result !== null) results.push(result)
+        if (result !== undefined && result !== null) {
+          results.push(result)
+        } else if (FAIL_CLOSED_HOOKS.has(point)) {
+          results.push(undefined)
+        }
       } catch (error) {
         reportHookFailure(point, error)
         if (FAIL_CLOSED_HOOKS.has(point)) results.push(denialFromFailure(point, error))

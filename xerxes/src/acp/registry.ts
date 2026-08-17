@@ -3,7 +3,9 @@
 
 import { mkdir, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { join, posix, win32 } from 'node:path'
+
+import { isWindows } from '../core/hostPlatform.js'
 
 /** IDE-discovery metadata for the Bun-native `xerxes-acp` executable. */
 export const ACP_REGISTRY_METADATA = {
@@ -38,11 +40,14 @@ export function defaultAcpRegistryDirectory(
   homeDirectory = homedir(),
   platform: NodeJS.Platform = process.platform,
 ): string {
-  if (platform === 'win32') {
+  // The joiner follows the injected platform, not the host: with the bare
+  // `join` a caller that passes 'win32' from a POSIX host got a mixed
+  // `C:\Users\u\AppData\Roaming/agent-registry`.
+  if (isWindows(platform)) {
     // XDG does not exist on Windows; %APPDATA% is the roaming-config root.
-    return join(environment.APPDATA ?? join(homeDirectory, 'AppData', 'Roaming'), 'agent-registry')
+    return win32.join(environment.APPDATA ?? win32.join(homeDirectory, 'AppData', 'Roaming'), 'agent-registry')
   }
-  return join(environment.XDG_CONFIG_HOME ?? join(homeDirectory, '.config'), 'agent-registry')
+  return posix.join(environment.XDG_CONFIG_HOME ?? posix.join(homeDirectory, '.config'), 'agent-registry')
 }
 
 /** Write the standard ACP `agent.json` manifest and return its absolute path. */

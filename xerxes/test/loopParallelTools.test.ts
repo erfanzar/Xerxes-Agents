@@ -70,6 +70,29 @@ test('consecutive concurrency-safe calls run together but report in model-emitte
   expect(starts).toEqual(['a', 'b', 'c'])
 })
 
+test('capability refinement receives each effective call arguments', async () => {
+  const calls: ToolCall[] = [
+    { id: 'safe', type: 'function', function: { name: 'Read', arguments: { mode: 'read' } } },
+    { id: 'unsafe', type: 'function', function: { name: 'Read', arguments: { mode: 'write' } } },
+  ]
+  const observed: Array<Readonly<Record<string, unknown>> | undefined> = []
+
+  for await (const _ of runTurn(
+    { agentId: 'worker', model: 'm', state: createAgentState([]), userMessage: 'go', tools: TOOLS },
+    {
+      llm: client(calls),
+      capabilities: (_name, _agentId, args) => {
+        observed.push(args)
+        return args?.mode === 'read' ? SAFE : UNSAFE
+      },
+      toolExecutor: { execute: async () => 'ok' },
+    },
+  )) { /* drain */ }
+
+  expect(observed).toContainEqual({ mode: 'read' })
+  expect(observed).toContainEqual({ mode: 'write' })
+})
+
 test('an unsafe call is a barrier: neither side overlaps it', async () => {
   const calls = [call('a', 'Read'), call('w', 'Write'), call('b', 'Read')]
   const order: string[] = []

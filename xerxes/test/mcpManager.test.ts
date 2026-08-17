@@ -29,6 +29,7 @@ interface ClientFixture {
   readonly prompts?: readonly MCPPrompt[]
   readonly resources?: readonly MCPResource[]
   readonly tools?: readonly MCPTool[]
+  readonly onCallTool?: (signal?: AbortSignal) => void | Promise<void>
   readonly onConnect?: () => void | Promise<void>
   readonly onDisconnect?: () => void | Promise<void>
 }
@@ -60,8 +61,13 @@ class FakeMCPClient implements MCPClientPort {
     this.connected = false
   }
 
-  async callTool(name: string, arguments_: JsonObject = {}): Promise<MCPToolCallResult> {
+  async callTool(
+    name: string,
+    arguments_: JsonObject = {},
+    options: { readonly signal?: AbortSignal } = {},
+  ): Promise<MCPToolCallResult> {
     this.calls.push({ name, arguments_ })
+    await this.fixture.onCallTool?.(options.signal)
     return { content: [{ type: 'text', text: this.config.name + ':' + name }] }
   }
 
@@ -158,6 +164,94 @@ test('MCPManager owns multiple live clients, deduplicates tools, and routes capa
   await manager.stopAll()
   expect(manager.listServers()).toEqual([])
   expect(clients[1]?.disconnects).toBe(1)
+})
+
+test('MCPManager propagates AbortSignal and does not serialize calls to independent servers', async () => {
+  let alphaStarted!: () => void
+  let releaseAlpha!: () => void
+  const alphaStart = new Promise<void>(resolve => { alphaStarted = resolve })
+  const alphaGate = new Promise<void>(resolve => { releaseAlpha = resolve })
+  let receivedSignal: AbortSignal | undefined
+  const manager = new MCPManager({
+    clientFactory: config => new FakeMCPClient(config, config.name === 'alpha'
+      ? {
+          tools: [{ name: 'alpha_tool', inputSchema: { type: 'object' } }],
+          onCallTool: signal => {
+            receivedSignal = signal
+            alphaStarted()
+            return alphaGate
+          },
+        }
+      : { tools: [{ name: 'beta_tool', inputSchema: { type: 'object' } }] }),
+  })
+  await Promise.all([manager.addServer({ name: 'alpha' }), manager.addServer({ name: 'beta' })])
+
+  const controller = new AbortController()
+  const alphaCall = manager.callTool('alpha_tool', {}, { signal: controller.signal })
+  await alphaStart
+  await expect(Promise.race([
+    manager.callTool('beta_tool'),
+    new Promise<'timed out'>(resolve => setTimeout(() => resolve('timed out'), 100)),
+  ])).resolves.toEqual({ content: [{ type: 'text', text: 'beta:beta_tool' }] })
+  expect(receivedSignal).toBe(controller.signal)
+
+  releaseAlpha()
+  await alphaCall
+  await manager.disconnectAll()
+})
+
+test('MCPManager serializes lifecycle changes with in-flight calls on the same server', async () => {
+  let callStarted!: () => void
+  let releaseCall!: () => void
+  const started = new Promise<void>(resolve => { callStarted = resolve })
+  const gate = new Promise<void>(resolve => { releaseCall = resolve })
+  const manager = new MCPManager({
+    clientFactory: config => new FakeMCPClient(config, {
+      tools: [{ name: 'hold', inputSchema: { type: 'object' } }],
+      onCallTool: () => {
+        callStarted()
+        return gate
+      },
+    }),
+  })
+  await manager.addServer({ name: 'alpha' })
+
+  const call = manager.callTool('hold')
+  await started
+  const removal = manager.removeServer('alpha')
+  await new Promise(resolve => setTimeout(resolve, 10))
+  expect(manager.getServer('alpha')).toBeDefined()
+
+  releaseCall()
+  await call
+  await expect(removal).resolves.toBeTrue()
+})
+
+test('MCPManager bounds pending operations independently for each server', async () => {
+  let releaseAlpha!: () => void
+  const alphaGate = new Promise<void>(resolve => { releaseAlpha = resolve })
+  const manager = new MCPManager({
+    maxPendingOperationsPerServer: 2,
+    clientFactory: config => new FakeMCPClient(config, config.name === 'alpha'
+      ? { tools: [{ name: 'alpha_tool', inputSchema: { type: 'object' } }], onCallTool: () => alphaGate }
+      : { tools: [{ name: 'beta_tool', inputSchema: { type: 'object' } }] }),
+  })
+  await Promise.all([manager.addServer({ name: 'alpha' }), manager.addServer({ name: 'beta' })])
+
+  const active = manager.callTool('alpha_tool')
+  const queued = manager.callTool('alpha_tool')
+  await expect(manager.callTool('alpha_tool')).rejects.toMatchObject({
+    name: 'MCPServerQueueFullError',
+    serverName: 'alpha',
+    limit: 2,
+  })
+  await expect(manager.callTool('beta_tool')).resolves.toEqual({
+    content: [{ type: 'text', text: 'beta:beta_tool' }],
+  })
+
+  releaseAlpha()
+  await Promise.all([active, queued])
+  await manager.disconnectAll()
 })
 
 test('MCPManager reconnects through fresh factory clients with injected backoff', async () => {

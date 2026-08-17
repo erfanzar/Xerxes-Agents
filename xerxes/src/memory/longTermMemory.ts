@@ -145,7 +145,12 @@ export class LongTermMemory extends Memory {
       ...(options.conversationId ? { conversationId: options.conversationId } : {}),
     })
     this.append(item)
-    this.persist(item)
+    try {
+      this.persist(item)
+    } catch (error) {
+      this.remove(item)
+      throw error
+    }
     return item
   }
 
@@ -210,6 +215,7 @@ export class LongTermMemory extends Memory {
   }
 
   private hydrate(): void {
+    const records: MemoryItem[] = []
     for (const key of this.storage?.listKeys('ltm_') ?? []) {
       if (!key.startsWith('ltm_')) continue
       let record: unknown
@@ -224,8 +230,11 @@ export class LongTermMemory extends Memory {
       // Tenant filter: over a shared backend, only restore this owner's
       // records instead of every `ltm_*` row in the database.
       if (this.ownerId && !this.owns(item)) continue
-      this.append(item)
+      records.push(item)
     }
+    records.sort((left, right) => left.timestamp.valueOf() - right.timestamp.valueOf())
+    const retained = this.maxItems === undefined ? records : records.slice(-this.maxItems)
+    for (const item of retained) this.append(item)
   }
 
   /**
@@ -269,7 +278,9 @@ export class LongTermMemory extends Memory {
   }
 
   private persist(item: MemoryItem): void {
-    this.storage?.save(storageKey(item.memoryId), item.toRecord())
+    if (this.storage && !this.storage.save(storageKey(item.memoryId), item.toRecord())) {
+      throw new Error(`Failed to persist long-term memory ${item.memoryId}`)
+    }
   }
 
   /**

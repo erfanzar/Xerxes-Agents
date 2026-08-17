@@ -17,6 +17,8 @@ export type DiffLineKind = 'add' | 'context' | 'del' | 'file' | 'hunk' | 'meta'
 export interface DiffLine {
   readonly kind: DiffLineKind
   readonly text: string
+  readonly oldLine?: number
+  readonly newLine?: number
 }
 
 export interface GitDiffSummary {
@@ -54,6 +56,9 @@ export interface CollectGitDiffOptions {
 const DEFAULT_MAX_LINES = 4000
 const DEFAULT_MAX_BYTES = 256 * 1024
 const DEFAULT_MAX_UNTRACKED = 50
+/** Keep one minified/generated row from consuming the whole panel budget. */
+const MAX_RENDERED_ROW_CHARS = 512
+const TRUNCATED_ROW_SUFFIX = ' … [line truncated]'
 /** Git's well-known empty tree, used when the repo has no HEAD commit yet. */
 const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
 
@@ -86,14 +91,26 @@ export function parseUnifiedDiff(
   let deletions = 0
   let bytes = 0
   let truncated = false
+  let oldLine: number | undefined
+  let newLine: number | undefined
 
-  const push = (kind: DiffLineKind, row: string): boolean => {
+  const push = (kind: DiffLineKind, row: string, numbers: Pick<DiffLine, 'oldLine' | 'newLine'> = {}): boolean => {
     if (lines.length >= maxLines || bytes >= maxBytes) {
       truncated = true
       return false
     }
-    lines.push({ kind, text: row })
-    bytes += utf8Length(row) + 1
+    let rendered = row
+    if (rendered.length > MAX_RENDERED_ROW_CHARS) {
+      rendered = rendered.slice(0, MAX_RENDERED_ROW_CHARS - TRUNCATED_ROW_SUFFIX.length) + TRUNCATED_ROW_SUFFIX
+      truncated = true
+    }
+    const remainingBytes = maxBytes - bytes
+    if (utf8Length(rendered) + 1 > remainingBytes) {
+      truncated = true
+      return true
+    }
+    lines.push({ kind, text: rendered, ...numbers })
+    bytes += utf8Length(rendered) + 1
     return true
   }
 
@@ -101,10 +118,15 @@ export function parseUnifiedDiff(
     if (raw.startsWith('diff --git ')) {
       files += 1
       const path = raw.match(/^diff --git a\/.+ b\/(.+)$/)?.[1] ?? raw
-      if (!push('file', `▌ ${path}`)) break
+      oldLine = undefined
+      newLine = undefined
+      if (!push('file', path)) break
       continue
     }
     if (raw.startsWith('@@')) {
+      const range = raw.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/)
+      oldLine = range?.[1] === undefined ? undefined : Number.parseInt(range[1], 10)
+      newLine = range?.[2] === undefined ? undefined : Number.parseInt(range[2], 10)
       if (!push('hunk', raw)) break
       continue
     }
@@ -114,16 +136,20 @@ export function parseUnifiedDiff(
     }
     if (raw.startsWith('+')) {
       insertions += 1
-      if (!push('add', raw)) break
+      if (!push('add', raw, { newLine })) break
+      if (newLine !== undefined) newLine += 1
       continue
     }
     if (raw.startsWith('-')) {
       deletions += 1
-      if (!push('del', raw)) break
+      if (!push('del', raw, { oldLine })) break
+      if (oldLine !== undefined) oldLine += 1
       continue
     }
     if (raw.startsWith(' ')) {
-      if (!push('context', raw)) break
+      if (!push('context', raw, { oldLine, newLine })) break
+      if (oldLine !== undefined) oldLine += 1
+      if (newLine !== undefined) newLine += 1
       continue
     }
     if (raw.startsWith('index ') || raw.startsWith('Binary ') || raw.startsWith('new file') || raw.startsWith('deleted file') || raw.startsWith('similarity') || raw.startsWith('rename ')) {

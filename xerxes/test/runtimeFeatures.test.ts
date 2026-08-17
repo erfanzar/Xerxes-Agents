@@ -121,7 +121,11 @@ required_tools: [native_tool]
 Inspect native runtime state.
 `, 'utf8')
 
-    const state = await composeRuntimeFeatures({ workspaceRoot: workspace, enabledSkills: ['inspect'] })
+    const state = await composeRuntimeFeatures({
+      workspaceRoot: workspace,
+      enabledSkills: ['inspect'],
+      workspaceSkillTrust: { isTrusted: () => true },
+    })
     try {
       expect(state.discovery.pluginDirectories).toEqual([pluginsDirectory])
       expect(state.discovery.skillDirectories).toEqual([join(workspace, 'skills')])

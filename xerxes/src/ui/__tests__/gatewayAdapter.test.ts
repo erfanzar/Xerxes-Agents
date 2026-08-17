@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 import { describe, expect, it } from 'vitest'
 
-import { adaptDaemonEvent, sessionInfoFromInit, transcriptFromStoredMessages } from '../gatewayAdapter.js'
+import { adaptDaemonEvent, sessionInfoFromInit, transcriptFromStoredMessages , usageFromStatus } from '../gatewayAdapter.js'
 
 describe('gatewayAdapter', () => {
   it('maps init payloads into session info', () => {
@@ -253,6 +253,20 @@ describe('gatewayAdapter', () => {
         type: 'replay_assistant'
       })
     ).toEqual([{ payload: { role: 'assistant', text: 'old answer', thinking: 'legacy trace' }, type: 'transcript.append' }])
+  })
+
+  it('keeps compaction notices as visible transcript rows', () => {
+    expect(
+      adaptDaemonEvent('notification', {
+        body: 'Auto-compacted 42 message(s): 100000 → 12000 tokens.',
+        category: 'history',
+        payload: { automatic: true, tokens_after: 12000, tokens_before: 100000 },
+        type: 'compaction'
+      })
+    ).toEqual([{
+      payload: { role: 'system', text: 'Auto-compacted 42 message(s): 100000 → 12000 tokens.' },
+      type: 'transcript.append'
+    }])
   })
 
   it('maps replay_tool notifications to tool transcript rows like live completions', () => {
@@ -676,5 +690,40 @@ describe('gatewayAdapter', () => {
         type: 'subagent.progress'
       }
     ])
+  })
+})
+
+describe('usageFromStatus partial updates', () => {
+  it('omits fields the payload does not carry so a merge cannot erase them', () => {
+    const full = usageFromStatus({
+      total_input_tokens: 100,
+      total_output_tokens: 10,
+      cache_read_tokens: 5_000,
+      context_tokens: 8_000,
+      max_context: 272_000
+    })
+    // A mid-turn tick carries token counts only: context cannot change between
+    // provider rounds, and re-counting it per response would be pure waste.
+    const tick = usageFromStatus({ total_input_tokens: 120, total_output_tokens: 14 })
+
+    expect(tick).not.toHaveProperty('cache_read')
+    expect(tick).not.toHaveProperty('context_used')
+    expect(tick).not.toHaveProperty('context_max')
+
+    // Consumers merge with a spread, so a zero for an unmentioned field would
+    // blank the context meter and reset the cached total every tick.
+    const merged = { ...full, ...tick }
+    expect(merged.cache_read).toBe(5_000)
+    expect(merged.context_used).toBe(8_000)
+    expect(merged.context_max).toBe(272_000)
+    expect(merged.input).toBe(120)
+  })
+
+  it('still reports an explicit zero the payload does carry', () => {
+    const zeroed = usageFromStatus({ total_input_tokens: 5, cache_read_tokens: 0 })
+
+    // An explicit 0 is a real reading — a turn with no cache hits — and must
+    // not be confused with the field being absent.
+    expect(zeroed.cache_read).toBe(0)
   })
 })

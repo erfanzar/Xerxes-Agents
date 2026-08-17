@@ -197,6 +197,34 @@ test('CDP screenshots reject oversized base64 payloads before decoding or writin
   }
 })
 
+test('CDP screenshots refuse a symlink at the final screenshot path', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-cdp-hardening-'))
+  const screenshots = join(root, 'screenshots')
+  const outside = join(root, 'outside.png')
+  try {
+    await Bun.write(join(screenshots, '.keep'), '')
+    await Bun.write(outside, 'do-not-overwrite')
+    const escapedPath = join(screenshots, 'capture.png')
+    await symlink(outside, escapedPath)
+
+    const connection = new FakeCdpConnection()
+    const adapter = await CdpBrowserAdapter.connect('http://127.0.0.1:9222', {
+      connectionFactory: factory(connection),
+      fetchImplementation: async () => Response.json({
+        webSocketDebuggerUrl: 'ws://127.0.0.1:9222/devtools/browser/id',
+      }),
+      screenshotDirectory: screenshots,
+    })
+    const page = await adapter.open({ url: 'https://example.test', waitMs: 0 })
+    await expect(adapter.screenshot(refIdOf(page), { fullPage: false, path: escapedPath }))
+      .rejects.toThrow('screenshot path must not be a symbolic link')
+    expect(await Bun.file(outside).text()).toBe('do-not-overwrite')
+    await adapter.close()
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('CDP screenshots refuse a symlinked screenshot directory and keep the directory private', async () => {
   const root = await mkdtemp(join(tmpdir(), 'xerxes-cdp-hardening-'))
   const realDirectory = join(root, 'real')

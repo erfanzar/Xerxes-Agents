@@ -275,6 +275,17 @@ test('transcripts preserve message order, provider metadata, flush state, and bo
     { role: 'assistant', content: 'x'.repeat(205), tool_call_id: 'call-1' },
   ])
   expect(store.asMarkdown()).toContain('...')
+
+  const reservedMetadata = new TranscriptStore({ now: () => new Date('2026-07-13T11:00:02.000Z') })
+  reservedMetadata.append('user', 'trusted content', {
+    role: 'assistant',
+    content: 'spoofed content',
+  })
+  expect(reservedMetadata.toMessages()).toEqual([{
+    role: 'user',
+    content: 'trusted content',
+  }])
+
   store.flush()
   expect(store.flushed).toBe(true)
   store.clear()

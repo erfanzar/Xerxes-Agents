@@ -53,14 +53,7 @@ export function registerInteractionModeTool(
   registry.replace(INTERACTION_MODE_TOOL_DEFINITION, async (inputs, context) => {
     const mode = requiredMode(inputs)
     const reason = optionalString(inputs.reason)
-    const currentMode = resolveInteractionMode(context.metadata.interaction_mode)
-    if (currentMode && currentMode !== 'code' && mode !== currentMode) {
-      throw new ValidationError(
-        'mode',
-        `cannot be changed by the model while ${currentMode} mode is active; the user or session host must switch modes`,
-        mode,
-      )
-    }
+    assertMainAgentContext(context)
     const changed = await host.setMode({ context, mode, reason })
     context.metadata.pending_interaction_mode = changed.mode
     return {
@@ -71,6 +64,19 @@ export function registerInteractionModeTool(
       guidance: `Finish the current turn under its existing mode. ${changed.mode} mode and its enforced tool policy apply on the next user turn.`,
     }
   }, agentId)
+}
+
+/** Fail closed when a host accidentally exposes this main-session control to a child. */
+function assertMainAgentContext(context: ToolExecutionContext): void {
+  const sessionKind = optionalString(context.metadata.session_kind).toLowerCase()
+  const subagentId = optionalString(context.metadata.subagent_id)
+  if (sessionKind === 'subagent' || subagentId) {
+    throw new ValidationError(
+      'context',
+      'only the main agent may schedule interaction-mode transitions',
+      sessionKind || subagentId,
+    )
+  }
 }
 
 function requiredMode(inputs: JsonObject): InteractionMode {

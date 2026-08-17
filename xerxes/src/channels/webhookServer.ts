@@ -85,6 +85,12 @@ export class ChannelWebhookServer {
     const name = webhookName(url.pathname, this.pathPrefix)
     if (!name) return new Response('Not Found', { status: 404 })
     if (request.method !== 'POST') return methodNotAllowed('POST')
+    // This shared token authenticates the HTTP edge. Provider-specific
+    // signatures (Discord, Slack, Telegram) are additionally verified by the
+    // adapter against the untouched headers and raw body.
+    if (this.authToken && !bearerMatches(request.headers.get('authorization'), this.authToken)) {
+      return new Response('unauthorized', { status: 401 })
+    }
     const channel = this.manager.registry.get(name)
     if (!channel) return new Response('unknown channel ' + JSON.stringify(name), { status: 404 })
     if (!isWebhookCapable(channel)) {

@@ -17,6 +17,16 @@ import {
   type AgentDefinition,
 } from "../agents/definitions.js";
 import { persistedSubagentSnapshotValues } from "../agents/subagentPersistence.js";
+import { CodexSession, fetchCodexModelCatalog } from "../auth/codexAuth.js";
+import {
+  fallbackReasoningLevels,
+  providerReasoningLevels,
+  REASONING_OFF,
+  reasoningShapeNote,
+  resolveEffort,
+  selectableEfforts,
+  type ReasoningLevelSet,
+} from "../llms/reasoningLevels.js";
 import {
   ProfileStore,
   SAMPLING_PARAMS,
@@ -46,7 +56,7 @@ import {
 } from "../cron/lease.js";
 import { CronScheduler } from "../cron/scheduler.js";
 import {
-  defaultSkillDiscoveryDirectories,
+  defaultSkillDiscoveryRoots,
   skillMatchesPlatform,
   skillPromptSection,
   SkillRegistry,
@@ -69,6 +79,8 @@ import {
   calcCost,
   effectiveContextLimit,
   getContextLimit,
+  resolveProvider,
+  type ProviderName,
 } from "../llms/providerRegistry.js";
 import {
   DEFAULT_TEMPERATURE,
@@ -156,6 +168,9 @@ export const MIGRATED_ERROR =
 
 /** Matches the WebSocket gateway default so both transports cap inbound frames. */
 const DEFAULT_MAX_SOCKET_FRAME_BYTES = 16 * 1024 * 1024;
+const DEFAULT_MAX_PENDING_SOCKET_REQUESTS = 1_024;
+const DEFAULT_MAX_PENDING_SOCKET_BYTES = 16 * 1024 * 1024;
+const DEFAULT_MAX_SOCKET_OUTPUT_BYTES = 16 * 1024 * 1024;
 
 /**
  * Compaction mechanics — thresholds, summary budgets, retry policy and the
@@ -491,7 +506,7 @@ export interface DaemonServerOptions {
   readonly autoSnapshotTurns?: boolean;
   /**
    * Context-usage fraction that triggers provider-backed auto-compaction
-   * before a turn is submitted. Defaults to 0.9; a runtime setting of
+   * before a turn is submitted. Defaults to 0.8; a runtime setting of
    * `auto_compact_threshold` overrides it per daemon, and 0 disables it.
    */
   readonly autoCompactThreshold?: number;
@@ -569,8 +584,14 @@ export interface DaemonServerOptions {
   /** Snapshots retained per workspace when the store is pruned on start. */
   readonly snapshotRetention?: number;
   readonly socketPath: string;
-  /** Max buffered inbound bytes per Unix connection before the client is dropped. */
+  /** Max bytes in one inbound NDJSON frame before the Unix client is dropped. */
   readonly maxSocketFrameBytes?: number;
+  /** Max parsed requests waiting for serial dispatch on one Unix connection. */
+  readonly maxPendingSocketRequests?: number;
+  /** Max aggregate bytes of parsed requests waiting for serial dispatch. */
+  readonly maxPendingSocketBytes?: number;
+  /** Max queued outbound bytes before a slow Unix client is dropped. */
+  readonly maxSocketOutputBytes?: number;
   /** Tool inventory port for `/tools`; omit only when the runtime owns no visible tool registry. */
   readonly toolCatalog?: DaemonToolCatalogPort;
   /** Typed bridge for UI-only slash commands such as `/skin` and `/paste`. */
@@ -582,6 +603,11 @@ export interface DaemonServerOptions {
 interface Connection extends DaemonTransportConnection {
   activeSessionKey: string;
   buffer: string;
+  pendingRequestBytes: number;
+  pendingRequestCount: number;
+  queuedOutputBytes: number;
+  readonly outputQueue: string[];
+  outputBlocked: boolean;
   /** Serializes request dispatch so interleaved handlers cannot race on shared state. */
   queue: Promise<void>;
   readonly socket: Socket;
@@ -628,6 +654,9 @@ export class DaemonServer {
   private readonly inFlightTurns = new Set<Promise<void>>();
   private readonly mcpManager: MCPManager | undefined;
   private readonly maxSocketFrameBytes: number;
+  private readonly maxPendingSocketRequests: number;
+  private readonly maxPendingSocketBytes: number;
+  private readonly maxSocketOutputBytes: number;
   private readonly memoryFactory: (
     session: DaemonSession | undefined,
   ) => AgentMemory;
@@ -642,6 +671,8 @@ export class DaemonServer {
   private readonly providerModelDiscovery:
     ProviderModelDiscoveryPort | undefined;
   private readonly discoveredContextLimits = new Map<string, number>();
+  /** Per-model reasoning-level sets, so the picker does not refetch each open. */
+  private readonly reasoningLevelCache = new Map<string, ReasoningLevelSet>();
   private readonly profileStore: ProfileStore;
   private readonly questionOwners = new Map<
     string,
@@ -701,6 +732,12 @@ export class DaemonServer {
     this.interactions = options.interactions ?? new DaemonInteractionBoard();
     this.maxSocketFrameBytes =
       options.maxSocketFrameBytes ?? DEFAULT_MAX_SOCKET_FRAME_BYTES;
+    this.maxPendingSocketRequests =
+      options.maxPendingSocketRequests ?? DEFAULT_MAX_PENDING_SOCKET_REQUESTS;
+    this.maxPendingSocketBytes =
+      options.maxPendingSocketBytes ?? DEFAULT_MAX_PENDING_SOCKET_BYTES;
+    this.maxSocketOutputBytes =
+      options.maxSocketOutputBytes ?? DEFAULT_MAX_SOCKET_OUTPUT_BYTES;
     this.crashHandlersEnabled = options.crashHandlers === true;
     this.cronLeaseOwnerKey = resolveProjectDirectory(process.cwd());
     this.cronLeasePath = resolve(
@@ -1115,51 +1152,105 @@ export class DaemonServer {
     const connection: Connection = {
       socket,
       buffer: "",
+      pendingRequestBytes: 0,
+      pendingRequestCount: 0,
+      queuedOutputBytes: 0,
+      outputQueue: [],
+      outputBlocked: false,
       queue: Promise.resolve(),
       activeSessionKey: `tui:${newConnectionKey()}`,
-      send: (frame) => {
-        if (!socket.destroyed) {
-          socket.write(`${JSON.stringify(frame)}\n`);
-        }
-      },
+      send: (frame) => this.sendSocketFrame(connection, frame),
     };
     this.connections.add(connection);
     socket.on("data", (chunk) => this.receive(connection, chunk));
+    socket.on("drain", () => this.flushSocketOutput(connection));
     socket.on("error", () => socket.destroy());
     socket.on("close", () => {
+      connection.outputQueue.length = 0;
+      connection.queuedOutputBytes = 0;
       this.connections.delete(connection);
       this.disconnect(connection);
     });
   }
 
-  private receive(connection: Connection, chunk: string | Uint8Array): void {
-    connection.buffer +=
-      typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
-    if (Buffer.byteLength(connection.buffer, "utf8") > this.maxSocketFrameBytes) {
-      // Matches the WebSocket frame cap: an uncapped buffer lets one client
-      // exhaust daemon memory, so drop the offending connection.
-      console.error(
-        "Xerxes daemon dropping client: request exceeds the socket frame limit",
-      );
+  private sendSocketFrame(connection: Connection, frame: object): void {
+    if (connection.socket.destroyed) return;
+    const encoded = `${JSON.stringify(frame)}\n`;
+    const bytes = Buffer.byteLength(encoded, "utf8");
+    if (bytes > this.maxSocketOutputBytes) {
+      console.error("Xerxes daemon dropping slow client: response exceeds the socket output limit");
       connection.socket.destroy();
       return;
     }
+    if (connection.outputBlocked || connection.outputQueue.length > 0) {
+      if (connection.queuedOutputBytes + bytes > this.maxSocketOutputBytes) {
+        console.error("Xerxes daemon dropping slow client: queued output exceeds the socket output limit");
+        connection.socket.destroy();
+        return;
+      }
+      connection.outputQueue.push(encoded);
+      connection.queuedOutputBytes += bytes;
+      return;
+    }
+    connection.outputBlocked = !connection.socket.write(encoded);
+  }
+
+  private flushSocketOutput(connection: Connection): void {
+    connection.outputBlocked = false;
+    while (!connection.socket.destroyed && connection.outputQueue.length > 0) {
+      const encoded = connection.outputQueue.shift();
+      if (encoded === undefined) return;
+      connection.queuedOutputBytes -= Buffer.byteLength(encoded, "utf8");
+      if (!connection.socket.write(encoded)) {
+        connection.outputBlocked = true;
+        return;
+      }
+    }
+  }
+
+  private receive(connection: Connection, chunk: string | Uint8Array): void {
+    connection.buffer +=
+      typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
     let newline = connection.buffer.indexOf("\n");
     while (newline >= 0) {
       const line = connection.buffer.slice(0, newline);
       connection.buffer = connection.buffer.slice(newline + 1);
+      const frameBytes = Buffer.byteLength(line, "utf8");
+      if (frameBytes > this.maxSocketFrameBytes) {
+        console.error("Xerxes daemon dropping client: request exceeds the socket frame limit");
+        connection.socket.destroy();
+        return;
+      }
       if (line.trim()) {
-        // Serialize dispatch per connection: concurrent handlers would
-        // interleave at awaits and race on shared mutable state such as
-        // activeSessionKey. turn.submit returns while its turn runs in the
-        // background, so a queued permission_response is never blocked
-        // behind the turn it answers.
-        connection.queue = connection.queue.then(
-          () => this.handleLine(connection, line),
-          () => this.handleLine(connection, line),
-        );
+        const pendingBytes = frameBytes + 1;
+        if (
+          connection.pendingRequestCount + 1 > this.maxPendingSocketRequests ||
+          connection.pendingRequestBytes + pendingBytes > this.maxPendingSocketBytes
+        ) {
+          console.error("Xerxes daemon dropping client: pending requests exceed the socket queue limit");
+          connection.socket.destroy();
+          return;
+        }
+        connection.pendingRequestCount += 1;
+        connection.pendingRequestBytes += pendingBytes;
+        const handle = async (): Promise<void> => {
+          try {
+            if (!connection.socket.destroyed) {
+              await this.handleLine(connection, line);
+            }
+          } finally {
+            connection.pendingRequestCount -= 1;
+            connection.pendingRequestBytes -= pendingBytes;
+          }
+        };
+        // Serialize dispatch per connection so handlers cannot race on shared state.
+        connection.queue = connection.queue.then(handle, handle);
       }
       newline = connection.buffer.indexOf("\n");
+    }
+    if (Buffer.byteLength(connection.buffer, "utf8") > this.maxSocketFrameBytes) {
+      console.error("Xerxes daemon dropping client: request exceeds the socket frame limit");
+      connection.socket.destroy();
     }
   }
 
@@ -1508,6 +1599,60 @@ export class DaemonServer {
       );
       return { ok: true };
     }
+    if (method === "turn.background") {
+      const rawText =
+        typeof params.text === "string"
+          ? params.text
+          : typeof params.user_input === "string"
+            ? params.user_input
+            : "";
+      const text = rawText.trim();
+      if (!text) {
+        return { ok: false, error: "text is required" };
+      }
+      // A background prompt runs in its own session so the foreground stays
+      // usable while it works. Deliberately not touching activeSessionKey:
+      // that is what makes this different from turn.submit, which would park
+      // the user inside the background conversation.
+      const parentKey = sessionKey(connection, params);
+      const backgroundKey = `bg-${newConnectionKey()}`;
+      const parent = this.runtime.sessionStatus(parentKey);
+      await this.runtime.openSession(backgroundKey, undefined, {
+        // Inherit the parent's model so a background prompt is answered by
+        // the model the user is actually working with, not the daemon default.
+        ...(parent?.model ? { model: parent.model } : {}),
+        ...(parent?.cwd ? { cwd: parent.cwd } : {}),
+      });
+      const background = this.runtime.sessionStatus(backgroundKey);
+      requireConfiguredModel(
+        background?.model || stringValue(this.runtime.status().model),
+      );
+      const taskId = background?.id ?? backgroundKey;
+      void this.submitTrackedTurn(
+        backgroundKey,
+        text,
+        (event) =>
+          this.emit(connection, event.type, {
+            ...event.payload,
+            background_task_id: taskId,
+          }),
+        connection,
+        { displayText: text },
+      )
+        .then(() =>
+          this.emit(connection, "notification", {
+            level: "info",
+            message: `Background task ${taskId} finished.`,
+          }),
+        )
+        .catch((error) =>
+          this.emit(connection, "notification", {
+            level: "error",
+            message: `Background task ${taskId} failed: ${errorMessage(error)}`,
+          }),
+        );
+      return { ok: true, task_id: taskId, session_key: backgroundKey };
+    }
     if (method === "turn.cancel" || method === "cancel") {
       return { ok: this.runtime.cancelTurn(sessionKey(connection, params)) };
     }
@@ -1587,6 +1732,39 @@ export class DaemonServer {
     }
     if (method === "fetch_models") {
       return this.fetchModels(params);
+    }
+    if (method === "reasoning_levels") {
+      const set = await this.reasoningLevels();
+      const selectable = selectableEfforts(set);
+      return {
+        ok: true,
+        current:
+          stringValue(this.runtime.status().reasoning_effort) || REASONING_OFF,
+        default: set.defaultEffort ?? null,
+        // An `inherent` provider yields no selectable efforts at all, so the
+        // panel shows the note rather than a menu that cannot change anything.
+        levels: selectable.map((effort) =>
+          effort === REASONING_OFF
+            ? {
+                effort,
+                description: "No extended reasoning; fastest replies",
+              }
+            : {
+                effort,
+                ...(set.levels.find((level) => level.effort === effort)
+                  ?.description === undefined
+                  ? {}
+                  : {
+                      description: set.levels.find(
+                        (level) => level.effort === effort,
+                      )?.description,
+                    }),
+              },
+        ),
+        note: reasoningShapeNote(set),
+        shape: set.shape,
+        source: set.source,
+      };
     }
     if (method === "provider_list") {
       return {
@@ -1998,6 +2176,28 @@ export class DaemonServer {
     });
   }
 
+  private emitCompactionLog(
+    connection: DaemonTransportConnection,
+    body: string,
+    tokensBefore: number,
+    tokensAfter: number,
+    automatic: boolean,
+  ): void {
+    this.emit(connection, "notification", {
+      id: newConnectionKey(),
+      category: "history",
+      type: "compaction",
+      severity: "info",
+      title: "Context compacted",
+      body,
+      payload: {
+        automatic,
+        tokens_before: tokensBefore,
+        tokens_after: tokensAfter,
+      },
+    });
+  }
+
   private emitStatus(
     connection: DaemonTransportConnection,
     session: DaemonSession,
@@ -2011,8 +2211,12 @@ export class DaemonServer {
         model,
         this.contextLimit(model),
         this.channelStatusData(),
-        stringValue(this.runtime.status().reasoning_effort) || "off",
-        runtimePermissionMode(this.runtime.status().permission_mode),
+        session.reasoningEffort
+        || stringValue(this.runtime.status().reasoning_effort)
+        || "off",
+        runtimePermissionMode(
+          session.permissionMode ?? this.runtime.status().permission_mode,
+        ),
       ),
     );
   }
@@ -2061,6 +2265,13 @@ export class DaemonServer {
         profile: profile.name,
         source: "profile",
       };
+    }
+
+    if (
+      profile.provider === "openai-codex" ||
+      profile.base_url.includes("/backend-api/codex")
+    ) {
+      return this.fetchCodexModels(profile, fallbackModels);
     }
 
     const apiKey = profileDiscoveryApiKey(profile);
@@ -2138,6 +2349,56 @@ export class DaemonServer {
       return null;
     }
     return profile.name;
+  }
+
+  /**
+   * Discover the Codex catalog through the ChatGPT OAuth session.
+   *
+   * The generic discovery path cannot serve this provider: it authenticates
+   * with an API key the subscription backend does not accept, and the catalog
+   * lives behind a `client_version`-gated route rather than `/models`. The
+   * list is plan-scoped, so it is fetched live instead of hard-coded.
+   */
+  private async fetchCodexModels(
+    profile: ProviderProfile,
+    fallbackModels: readonly string[],
+  ): Promise<JsonRpcPayload> {
+    try {
+      const credential = await new CodexSession().credential();
+      const catalog = await fetchCodexModelCatalog(credential, {
+        ...(profile.base_url.trim() ? { baseUrl: profile.base_url.trim() } : {}),
+      });
+      this.rememberDiscoveredContextLimits(
+        profile,
+        catalog.map((model) => ({
+          id: model.id,
+          ...(model.contextLimit === undefined
+            ? {}
+            : { contextLimit: model.contextLimit }),
+        })),
+      );
+      const models = catalog.map((model) => model.id);
+      return models.length
+        ? { ok: true, models, profile: profile.name, source: "remote" }
+        : {
+            ok: true,
+            models: [...fallbackModels],
+            profile: profile.name,
+            source: "profile",
+            warning: "ChatGPT plan returned no Codex models",
+          };
+    } catch (error) {
+      // Falling back to the configured model keeps the picker usable when the
+      // session has lapsed; the warning is what tells the user to sign in
+      // rather than leaving an unexplained one-entry list.
+      return {
+        ok: true,
+        models: [...fallbackModels],
+        profile: profile.name,
+        source: "profile",
+        warning: errorMessage(error),
+      };
+    }
   }
 
   private rememberDiscoveredContextLimits(
@@ -2400,17 +2661,31 @@ export class DaemonServer {
         );
         return { ok: steered };
       }
-      case "model":
+      case "model": {
+        const active = this.runtime.sessionStatus(connection.activeSessionKey);
         if (!args) {
+          // The session's own model, not the daemon-wide one: with two
+          // sessions open those differ, and reporting the global value would
+          // name a model this session is not using.
+          const current = active?.model || stringValue(this.runtime.status().model);
           this.emitSlash(
             connection,
-            `Active model: \`${stringValue(this.runtime.status().model) || "(not configured)"}\`.`,
+            `Active model: \`${current || "(not configured)"}\`.`,
           );
-          return { ok: true };
+          return { ok: true, model: current };
         }
-        this.runtime.reload({ model: args });
-        // Persist the choice so a TUI/daemon restart keeps it instead of
-        // falling back to the profile's stored default model.
+        // Scoped to this session so a second open session keeps its own model.
+        // Only when the host cannot do that does this fall back to the global
+        // reload, which moves every unpinned session at once.
+        const pinned = await this.runtime.setSessionModel?.(
+          connection.activeSessionKey,
+          args,
+        );
+        if (!pinned) {
+          this.runtime.reload({ model: args });
+        }
+        // Persist as the default for sessions opened later; it no longer
+        // retargets sessions that already picked for themselves.
         try {
           this.profileStore?.updateActiveModel(args);
         } catch {
@@ -2418,7 +2693,10 @@ export class DaemonServer {
         }
         this.emitSlash(connection, `Model set to \`${args}\`.`);
         await this.emitProviderInit(connection);
+        const session = this.runtime.sessionStatus(connection.activeSessionKey);
+        if (session) this.emitStatus(connection, session);
         return { ok: true, model: args };
+      }
       case "provider":
         if (!args) {
           return this.openProviderFlow(connection);
@@ -2444,7 +2722,14 @@ export class DaemonServer {
           );
           return { ok: false, error: "invalid permission mode" };
         }
-        this.runtime.reload({ permission_mode: args });
+        // Scoped to this session so a second one keeps its own trust level.
+        const pinnedPermission = await this.runtime.setSessionPermissionMode?.(
+          connection.activeSessionKey,
+          args,
+        );
+        if (!pinnedPermission) {
+          this.runtime.reload({ permission_mode: args });
+        }
         const session = this.runtime.sessionStatus(connection.activeSessionKey);
         if (session) {
           this.emitStatus(connection, session);
@@ -2453,11 +2738,20 @@ export class DaemonServer {
         return { ok: true, permission_mode: args };
       }
       case "yolo": {
+        // Toggles relative to this session's own mode: keyed off the global
+        // one it would flip based on a value another session had set.
+        const active = this.runtime.sessionStatus(connection.activeSessionKey);
         const current = runtimePermissionMode(
-          this.runtime.status().permission_mode,
+          active?.permissionMode ?? this.runtime.status().permission_mode,
         );
         const next = current === "accept-all" ? "auto" : "accept-all";
-        this.runtime.reload({ permission_mode: next });
+        const pinnedYolo = await this.runtime.setSessionPermissionMode?.(
+          connection.activeSessionKey,
+          next,
+        );
+        if (!pinnedYolo) {
+          this.runtime.reload({ permission_mode: next });
+        }
         const session = this.runtime.sessionStatus(connection.activeSessionKey);
         if (session) {
           this.emitStatus(connection, session);
@@ -2564,45 +2858,118 @@ export class DaemonServer {
     return { ok: true, config };
   }
 
-  private configureReasoning(
+  private async configureReasoning(
     connection: DaemonTransportConnection,
     raw: string,
-  ): JsonRpcPayload {
+  ): Promise<JsonRpcPayload> {
+    // This session's own effort, not the daemon-wide one: with two sessions
+    // open those differ, and naming the global value would report an effort
+    // this session is not running at.
+    const active = this.runtime.sessionStatus(connection.activeSessionKey);
     const current =
-      stringValue(this.runtime.status().reasoning_effort) || "off";
-    const requested = raw.trim().toLowerCase();
+      active?.reasoningEffort
+      || stringValue(this.runtime.status().reasoning_effort)
+      || REASONING_OFF;
+    const levels = await this.reasoningLevels();
+    const offered = selectableEfforts(levels);
+    const requested = raw.trim();
     if (!requested) {
       this.emitSlash(
         connection,
-        `Thinking: \`${current}\`\nLevels: off | low | medium | high\nSet with \`/thinking <level>\`.`,
+        `Thinking: \`${current}\`\nLevels: ${offered.join(" | ")}\nSet with \`/thinking <level>\`.`,
       );
-      return { ok: true, reasoning_effort: current };
+      return { ok: true, reasoning_effort: current, levels: offered };
     }
-    if (!["off", "low", "medium", "high"].includes(requested)) {
+    // Validated against what this model actually accepts. The efforts differ
+    // per model — some publish `ultra`, others stop at `xhigh` — so a fixed
+    // list would both reject valid levels and accept ones the backend 400s on.
+    const resolved = resolveEffort(levels, requested);
+    if (!resolved) {
       this.emitSlash(
         connection,
-        "Thinking level must be `off`, `low`, `medium`, or `high`.",
+        `Thinking level must be one of: ${offered.join(", ")}.`,
         "warning",
       );
-      return { ok: false, error: "invalid reasoning effort" };
+      return { ok: false, error: "invalid reasoning effort", levels: offered };
     }
-    this.runtime.reload({
-      reasoning_effort: requested,
-      thinking: requested !== "off",
-    });
-    const active = this.profileStore.active();
-    if (active) {
-      this.profileStore.updateSampling(active.name, {
-        reasoning_effort: requested,
-        thinking: requested !== "off",
+    // Scoped to this session so a second open session keeps its own effort;
+    // only a host without the session-level setter falls back to the global
+    // reload, which moves every unpinned session at once.
+    const pinned = await this.runtime.setSessionReasoning?.(
+      connection.activeSessionKey,
+      resolved,
+    );
+    if (!pinned) {
+      this.runtime.reload({
+        reasoning_effort: resolved,
+        thinking: resolved !== REASONING_OFF,
+      });
+    }
+    // Still recorded as the default for sessions opened later; it no longer
+    // retargets sessions already running.
+    const profile = this.profileStore.active();
+    if (profile) {
+      this.profileStore.updateSampling(profile.name, {
+        reasoning_effort: resolved,
+        thinking: resolved !== REASONING_OFF,
       });
     }
     const session = this.runtime.sessionStatus(connection.activeSessionKey);
     if (session) {
       this.emitStatus(connection, session);
     }
-    this.emitSlash(connection, `Thinking: \`${requested}\`.`);
-    return { ok: true, reasoning_effort: requested };
+    this.emitSlash(connection, `Thinking: \`${resolved}\`.`);
+    return { ok: true, reasoning_effort: resolved, levels: offered };
+  }
+
+  /**
+   * Reasoning efforts the active model accepts.
+   *
+   * Asked of the provider whenever it can answer, because the set is a
+   * property of the model rather than of Xerxes: the Codex catalog alone
+   * ranges from four efforts to six, with three different defaults. Providers
+   * with no capability endpoint fall back to a per-provider table.
+   */
+  private async reasoningLevels(): Promise<ReasoningLevelSet> {
+    const status = this.runtime.status();
+    const model = stringValue(status.model) ?? "";
+    const profile = this.profileStore.active();
+    const providerName = resolveProviderSafely(model, profile);
+
+    if (providerName !== "openai-codex") {
+      return fallbackReasoningLevels(providerName);
+    }
+
+    const cached = this.reasoningLevelCache.get(model);
+    if (cached) {
+      return cached;
+    }
+    try {
+      const credential = await new CodexSession().credential();
+      const catalog = await fetchCodexModelCatalog(credential, {
+        ...(profile?.base_url.trim() ? { baseUrl: profile.base_url.trim() } : {}),
+      });
+      const bare = model.includes("/") ? model.slice(model.indexOf("/") + 1) : model;
+      const entry = catalog.find((candidate) => candidate.id === bare);
+      if (!entry?.reasoningLevels.length) {
+        return fallbackReasoningLevels(providerName);
+      }
+      const resolved = providerReasoningLevels(
+        entry.reasoningLevels.map((level) => ({
+          effort: level.effort,
+          ...(level.description === undefined
+            ? {}
+            : { description: level.description }),
+        })),
+        entry.defaultReasoningLevel,
+      );
+      this.reasoningLevelCache.set(model, resolved);
+      return resolved;
+    } catch {
+      // A lapsed session or offline host must not make the level list
+      // unusable; the fallback still lets the user pick something valid.
+      return fallbackReasoningLevels(providerName);
+    }
   }
 
   private configureRuntimeToggle(
@@ -2685,13 +3052,13 @@ export class DaemonServer {
   private async refreshSkills(
     session: DaemonSession | undefined,
   ): Promise<void> {
-    const directories =
+    const roots =
       this.skillDirectories ??
-      defaultSkillDiscoveryDirectories({
+      defaultSkillDiscoveryRoots({
         cwd: session?.cwd ?? process.cwd(),
         userSkillsDirectory: this.skillDirectory,
       });
-    await this.skillRegistry.refresh(...directories);
+    await this.skillRegistry.refresh(...roots);
   }
 
   private async listSkills(
@@ -3315,10 +3682,10 @@ export class DaemonServer {
     return { ok: false, error: `Unknown slash command: /${token}` };
   }
 
-  private configureSampling(
+  private async configureSampling(
     connection: DaemonTransportConnection,
     raw: string,
-  ): JsonRpcPayload {
+  ): Promise<JsonRpcPayload> {
     const input = raw.trim();
     if (!input) {
       const sampling = samplingConfig(this.runtime.status());
@@ -3365,9 +3732,10 @@ export class DaemonServer {
       );
       return { ok: false, error: "invalid sampling command" };
     }
-    const value = parseNativeSamplingValue(name, rawValue);
+    const efforts = selectableEfforts(await this.reasoningLevels());
+    const value = parseNativeSamplingValue(name, rawValue, efforts);
     if (value === undefined) {
-      this.emitSlash(connection, invalidSamplingMessage(name), "warning");
+      this.emitSlash(connection, invalidSamplingMessage(name, efforts), "warning");
       return { ok: false, error: `invalid ${name}` };
     }
 
@@ -3517,6 +3885,20 @@ export class DaemonServer {
       () => createCompactionClient(model, this.profileStore?.active(), this.runtime.status()),
       model,
     );
+    // Compaction is one long provider call with nothing between the command
+    // and its result, so the screen sat dead for as long as the summary took.
+    // Announcing the work and marking the session busy gives the same feedback
+    // a turn gets; the status is restored in `finally` so a failure cannot
+    // strand the session as permanently working.
+    const previousStatus = session.status;
+    if (notify) {
+      this.emitSlash(
+        notify,
+        `Compacting ${session.messages.length} message(s) with \`${model}\`…`,
+      );
+      session.status = "working";
+      this.emitStatus(notify, session);
+    }
     try {
       const archivePath = await this.precompactArchivePath(session.id);
       const outcome = await compactMessagesIfNeeded({
@@ -3553,9 +3935,13 @@ export class DaemonServer {
       await this.runtime.flushSessions();
       if (notify) {
         const replaced = outcome.originalCount - outcome.messages.length;
-        this.emitSlash(
+        const body = `${verb} ${replaced} message(s): ${outcome.stamp.tokens_before} → ${outcome.stamp.tokens_after} tokens.`;
+        this.emitCompactionLog(
           notify,
-          `${verb} ${replaced} message(s): ${outcome.stamp.tokens_before} → ${outcome.stamp.tokens_after} tokens.`,
+          body,
+          outcome.stamp.tokens_before,
+          outcome.stamp.tokens_after,
+          reason === "auto-compact",
         );
         if (outcome.stamp.archive_error !== undefined) {
           // The user never asked for auto-compaction, so a silently
@@ -3586,6 +3972,12 @@ export class DaemonServer {
       }
       return { ok: false, error: errorMessage(error) };
     } finally {
+      // Restored unconditionally: an exception mid-compaction would otherwise
+      // leave the session displaying as working with no turn behind it.
+      session.status = previousStatus;
+      if (notify) {
+        this.emitStatus(notify, session);
+      }
       await completion.close();
     }
   }
@@ -5011,10 +5403,13 @@ export class DaemonServer {
       mode: session.interactionMode,
       plan_mode: session.planMode,
       ultra_mode: session.ultraMode === true,
-      reasoning_effort:
-        stringValue(this.runtime.status().reasoning_effort) || "off",
+      // Session-first: with two sessions open the daemon-wide value names an
+      // effort this session may not be running at.
+      reasoning_effort: session.reasoningEffort
+        || stringValue(this.runtime.status().reasoning_effort)
+        || "off",
       permission_mode: runtimePermissionMode(
-        this.runtime.status().permission_mode,
+        session.permissionMode ?? this.runtime.status().permission_mode,
       ),
       skills: skills.map((skill) => skill.metadata.name),
       skill_descriptions: Object.fromEntries(
@@ -5648,6 +6043,9 @@ function sessionPayload(
       : {}),
     usage_complete: session.usageComplete ?? session.turnCount === 0,
     cancel_requested: session.cancelRequested,
+    // Epoch seconds of the latest conversation message. This is not session
+    // creation time and does not move for metadata-only rewrites/compaction.
+    last_active: session.lastActive / 1000,
     status: session.status,
   };
 }
@@ -6066,6 +6464,30 @@ function integerOption(value: unknown): number | undefined {
     : undefined;
 }
 
+/**
+ * Resolve the routed provider without letting an unroutable model throw.
+ *
+ * `resolveProvider` rejects an unknown explicit prefix by design, but asking
+ * "which reasoning levels apply" must never break a session over a model the
+ * registry cannot place — the caller falls back to a generic set instead.
+ */
+function resolveProviderSafely(
+  model: string,
+  profile: ProviderProfile | undefined,
+): ProviderName | undefined {
+  if (!model.trim()) {
+    return undefined;
+  }
+  try {
+    return resolveProvider(model, {
+      ...(profile?.provider ? { provider: profile.provider } : {}),
+      ...(profile?.base_url ? { base_url: profile.base_url } : {}),
+    });
+  } catch {
+    return undefined;
+  }
+}
+
 function normalizeProviderIdentity(value: string): string {
   return value.trim().toLowerCase().replaceAll("_", "-");
 }
@@ -6311,6 +6733,7 @@ function isNativeSamplingKey(value: string): value is NativeSamplingKey {
 function parseNativeSamplingValue(
   key: NativeSamplingKey,
   raw: string,
+  reasoningEfforts: readonly string[],
 ): boolean | number | string | undefined {
   if (key === "thinking") {
     if (["on", "true", "1"].includes(raw.toLowerCase())) return true;
@@ -6318,9 +6741,12 @@ function parseNativeSamplingValue(
     return undefined;
   }
   if (key === "reasoning_effort") {
-    return ["off", "low", "medium", "high"].includes(raw.toLowerCase())
-      ? raw.toLowerCase()
-      : undefined;
+    // Validated against the efforts this model publishes; a fixed list would
+    // reject `xhigh`/`ultra` on models that accept them and accept `high` on
+    // models that do not.
+    return reasoningEfforts.find(
+      (effort) => effort.toLowerCase() === raw.trim().toLowerCase(),
+    );
   }
   const value = Number(raw);
   if (!Number.isFinite(value)) return undefined;
@@ -6338,7 +6764,10 @@ function parseNativeSamplingValue(
   return value >= -2 && value <= 2 ? value : undefined;
 }
 
-function invalidSamplingMessage(key: NativeSamplingKey): string {
+function invalidSamplingMessage(
+  key: NativeSamplingKey,
+  reasoningEfforts: readonly string[],
+): string {
   if (key === "temperature") {
     return "`temperature` must be a finite number from 0 to 2.";
   }
@@ -6349,7 +6778,9 @@ function invalidSamplingMessage(key: NativeSamplingKey): string {
     return "`thinking` must be `on` or `off`.";
   }
   if (key === "reasoning_effort") {
-    return "`reasoning_effort` must be `off`, `low`, `medium`, or `high`.";
+    return reasoningEfforts.length
+      ? `\`reasoning_effort\` must be one of: ${reasoningEfforts.join(", ")}.`
+      : "`reasoning_effort` is not available for this model.";
   }
   return `\`${key}\` must be a valid finite numeric value.`;
 }

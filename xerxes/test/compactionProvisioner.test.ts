@@ -30,6 +30,47 @@ function messages(): Array<Record<string, unknown>> {
   ]
 }
 
+test('provisioner preserves interleaved system-message ordering during compaction', () => {
+  const history = [
+    { role: 'system', content: 'opening policy' },
+    { role: 'user', content: 'old request '.repeat(90) },
+    { role: 'system', content: 'policy update after request' },
+    { role: 'assistant', content: 'old answer '.repeat(90) },
+    { role: 'user', content: 'latest request' },
+  ]
+  const result = new CompactionProvisioner({
+    model: 'gpt-4o',
+    maxContextTokens: 240,
+    thresholdTokens: 1,
+    targetTokens: 80,
+    summaryAgent: () => 'short durable summary',
+  }).compact(history, { force: true })
+
+  expect(result.compacted).toBe(true)
+  expect(result.messages.map(message => message.content)).toEqual([
+    'opening policy',
+    expect.stringContaining('short durable summary'),
+    'policy update after request',
+    'latest request',
+  ])
+})
+
+test('synchronous summary agents cannot persist analysis scratchpads', () => {
+  const result = new CompactionProvisioner({
+    model: 'gpt-4o',
+    maxContextTokens: 240,
+    thresholdTokens: 1,
+    targetTokens: 80,
+    summaryAgent: () => '<analysis>private reasoning</analysis>\n\n## User requests\n- keep this',
+  }).compact(messages(), { force: true })
+
+  expect(result.compacted).toBe(true)
+  const stored = result.messages.map(message => String(message.content)).join('\n')
+  expect(stored).toContain('## User requests')
+  expect(stored).not.toContain('<analysis>')
+  expect(stored).not.toContain('private reasoning')
+})
+
 test('provisioner compacts through an injected model port and preserves the live tail', () => {
   const requests: CompactionModelRequest[] = []
   const provisioner = new CompactionProvisioner({

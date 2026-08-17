@@ -259,6 +259,9 @@ export interface SessionListItem {
   resumable?: boolean
   root_session_id?: null | string
   source?: string
+  /** Epoch seconds of the latest conversation message. */
+  last_message_at?: number
+  /** Legacy alias retained for older callers; contains last-message time. */
   started_at: number
   status?: string
   subagent_id?: null | string
@@ -491,6 +494,25 @@ export interface ModelModelsResponse {
   warning?: string
 }
 
+export interface ReasoningLevelOption {
+  description?: string
+  effort: string
+}
+
+export interface ReasoningLevelsResponse {
+  /** Effort in force right now. */
+  current?: string
+  /** Effort the model applies when none is chosen. */
+  default?: string
+  levels?: ReasoningLevelOption[]
+  /** Human-readable description of how this provider exposes reasoning. */
+  note?: string
+  /** `effort` (graded), `toggle` (on/off), or `inherent` (model decides). */
+  shape?: string
+  /** `provider` when the model reported these, `fallback` otherwise. */
+  source?: string
+}
+
 // ── MCP ──────────────────────────────────────────────────────────────
 
 export interface ReloadMcpResponse {
@@ -558,6 +580,8 @@ export interface SubagentEventPayload {
   output_tail?: { is_error?: boolean; preview?: string; tool?: string }[]
   output_tokens?: number
   parent_id?: null | string
+  cache_creation_tokens?: number
+  cache_read_tokens?: number
   reasoning_tokens?: number
   rules?: string[]
   status?: SubagentStatus

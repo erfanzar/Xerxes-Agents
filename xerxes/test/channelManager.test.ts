@@ -72,6 +72,25 @@ test('channel manager only enables configured adapters with a host inbound route
   await expect(manager.enable('missing')).rejects.toBeInstanceOf(ChannelNotConfiguredError)
 })
 
+test('channel manager stops a running adapter before replacing it', async () => {
+  const original = new RecordingChannel('original')
+  const replacement = new RecordingChannel('replacement')
+  const manager = new ChannelManager({
+    channels: [['telegram', original]],
+    onInbound: async () => {},
+  })
+  await manager.enable('telegram')
+
+  await manager.register('telegram', replacement)
+
+  expect(original.stops).toBe(1)
+  expect(manager.status('telegram')).toEqual({
+    name: 'telegram',
+    adapterName: 'replacement',
+    enabled: false,
+  })
+})
+
 test('channel manager reports missing host routing and concrete lifecycle failures', async () => {
   const noHandler = new ChannelManager({ channels: [['telegram', new RecordingChannel('telegram')]] })
   await expect(noHandler.enable('telegram')).rejects.toBeInstanceOf(ChannelInboundHandlerUnavailableError)

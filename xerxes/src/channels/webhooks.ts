@@ -174,15 +174,14 @@ export abstract class WebhookChannel implements WebhookCapableChannel {
 
     let failed = false
     for (const message of messages) {
-      // Provider retries repeat the same platform message id; acknowledge the
-      // duplicate without routing a second agent turn. A failed dispatch is
-      // deliberately not remembered so a later retry can still be delivered.
-      if (this.isDuplicateDelivery(message)) continue
+      // Reserve the id before awaiting dispatch so simultaneous provider
+      // retries cannot both enter the inbound handler. Failed deliveries
+      // release the reservation so a later retry can still be delivered.
+      if (!this.reserveDelivery(message)) continue
       if (!await this.dispatchInbound(message)) {
+        this.forgetDelivery(message)
         failed = true
-        continue
       }
-      this.rememberDelivery(message)
     }
     return { status: failed ? 500 : 200, body: 'ok' }
   }
@@ -195,22 +194,22 @@ export abstract class WebhookChannel implements WebhookCapableChannel {
     return `${message.roomId ?? ''} ${platformMessageId}`
   }
 
-  private isDuplicateDelivery(message: ChannelMessage): boolean {
+  private reserveDelivery(message: ChannelMessage): boolean {
     const key = this.deliveryKey(message)
-    return key !== undefined && this.deliveredPlatformIds.has(key)
-  }
-
-  private rememberDelivery(message: ChannelMessage): void {
-    const key = this.deliveryKey(message)
-    if (key === undefined) {
-      return
-    }
+    if (key === undefined) return true
+    if (this.deliveredPlatformIds.has(key)) return false
     this.deliveredPlatformIds.set(key, true)
     while (this.deliveredPlatformIds.size > WEBHOOK_DELIVERY_DEDUP_LIMIT) {
       const oldest = this.deliveredPlatformIds.keys().next()
       if (oldest.done === true) break
       this.deliveredPlatformIds.delete(oldest.value)
     }
+    return true
+  }
+
+  private forgetDelivery(message: ChannelMessage): void {
+    const key = this.deliveryKey(message)
+    if (key !== undefined) this.deliveredPlatformIds.delete(key)
   }
 
   /** Deliver one already-normalized inbound message while preserving error containment. */
@@ -245,16 +244,14 @@ export abstract class WebhookChannel implements WebhookCapableChannel {
   }
 }
 
-/** Decode a webhook body as an object, returning an empty object for non-object JSON. */
+/** Decode a webhook body as an object, rejecting malformed JSON. */
 export function parseJsonBody(body: Uint8Array): Record<string, unknown> {
-  if (!body.byteLength) {
-    return {}
-  }
+  if (!body.byteLength) return {}
   try {
     const value: unknown = JSON.parse(new TextDecoder().decode(body))
     return isRecord(value) ? value : {}
-  } catch {
-    return {}
+  } catch (error) {
+    throw new TypeError('invalid JSON webhook payload', { cause: error })
   }
 }
 

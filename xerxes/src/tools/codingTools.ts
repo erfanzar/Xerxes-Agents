@@ -484,7 +484,9 @@ export async function copyFile(inputs: JsonObject, paths: WorkspacePathResolver)
     throw new ValidationError('destination', 'already exists; pass overwrite=true to replace it', destination)
   }
   await mkdir(dirname(destinationPath), { recursive: true })
-  await cp(sourcePath, destinationPath, {
+  const checkedSource = await paths.recheck(sourcePath)
+  const checkedDestination = await paths.recheck(destinationPath)
+  await cp(checkedSource, checkedDestination, {
     dereference: false,
     errorOnExist: !overwrite,
     force: overwrite,

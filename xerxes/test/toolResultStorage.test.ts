@@ -48,6 +48,17 @@ test('tool-result storage reads JSON payloads back after LRU eviction and dedupl
   })
 })
 
+test('tool-result storage automatically prunes old spill files after writes', async () => {
+  await inTemporaryDirectory(async directory => {
+    const store = new ToolResultStorage(directory, { inlineLimit: 1, maxStoredResults: 2 })
+    for (let index = 0; index < 5; index += 1) {
+      store.maybeStore('tool_' + index, 'payload_' + index)
+    }
+
+    expect(store.listRefs()).toHaveLength(2)
+  })
+})
+
 test('tool-result storage lists, prunes, and safely ignores missing references', async () => {
   await inTemporaryDirectory(async directory => {
     const store = new ToolResultStorage(directory, { inlineLimit: 1 })
@@ -68,6 +79,15 @@ test('tool-result payload serialization and input validation are explicit', () =
   expect(serializeToolResultPayload({ key: 'value' })).toBe('{"key":"value"}')
   expect(() => new ToolResultStorage('')).toThrow('baseDirectory must be non-empty')
   expect(() => new ToolResultStorage('/tmp', { lruSize: 0 })).toThrow('lruSize must be a positive integer')
+})
+
+test('tool-result storage rejects session IDs that escape the configured base directory', () => {
+  expect(() => new ToolResultStorage('/tmp/tool-results', { sessionId: '../outside' }))
+    .toThrow('sessionId must identify a directory within baseDirectory')
+  expect(() => new ToolResultStorage('/tmp/tool-results', { sessionId: '/tmp/outside' }))
+    .toThrow('sessionId must identify a directory within baseDirectory')
+  expect(() => new ToolResultStorage('/tmp/tool-results', { sessionId: '.' }))
+    .toThrow('sessionId must identify a directory within baseDirectory')
 })
 
 async function inTemporaryDirectory(run: (directory: string) => Promise<void>): Promise<void> {

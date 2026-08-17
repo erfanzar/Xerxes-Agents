@@ -36,6 +36,9 @@ export class ResponsesEventTranslator {
   /** Maps every observed item_id/call_id onto its pending entry's map key. */
   private readonly pendingAliases = new Map<string, string>()
 
+  /** True once the provider has sent a terminal completed/incomplete response event. */
+  private terminal = false
+
   /** Translate one decoded Responses API event into zero or more neutral deltas. */
   translate(event: Readonly<Record<string, unknown>>): LlmDelta[] {
     const type = stringValue(event.type)
@@ -67,11 +70,13 @@ export class ResponsesEventTranslator {
     }
     if (type === 'response.completed') {
       this.completeUsage(recordValue(event.response))
+      this.terminal = true
       return [this.completionDelta()]
     }
     if (type === 'response.incomplete') {
       this.completeUsage(recordValue(event.response))
       this.usage = { ...this.usage, finishReason: incompleteFinishReason(recordValue(event.response)) }
+      this.terminal = true
       return [this.completionDelta()]
     }
     if (type === 'response.failed' || type === 'error') {
@@ -80,20 +85,19 @@ export class ResponsesEventTranslator {
     return []
   }
 
-  /** Translate an ordered event sequence and flush any unfinished tool calls. */
+  /** Translate an ordered event sequence and require a provider terminal event. */
   *translateAll(events: Iterable<Readonly<Record<string, unknown>>>): Generator<LlmDelta> {
     for (const event of events) {
       for (const delta of this.translate(event)) yield delta
     }
-    const final = this.finish()
-    if (final) yield final
+    this.finish()
   }
 
-  /** Flush a truncated transport after it ends without response.completed. */
-  finish(): LlmDelta | undefined {
-    if (!this.pendingCalls.size) return undefined
-    this.completePendingCalls()
-    return this.completionDelta()
+  /** Validate that a finite transport ended after a terminal provider event. */
+  finish(): void {
+    if (!this.terminal) {
+      throw new ProviderError('responses', 'Responses API stream ended before a terminal response event')
+    }
   }
 
   private addFunctionCall(item: Readonly<Record<string, unknown>>): void {
@@ -159,7 +163,12 @@ export class ResponsesEventTranslator {
     const reasoningTokens = finiteNumber(outputDetails.reasoning_tokens)
     this.completePendingCalls()
     this.usage = {
-      inputTokens: finiteNumber(usage.input_tokens) ?? 0,
+      // `input_tokens` is the whole prompt here and `cached_tokens` is a subset
+      // of it, the opposite of Anthropic where the two are disjoint. Consumers
+      // add the pair to size a prompt, so the overlap is removed to match that
+      // convention — otherwise a cache hit inflates reported context by however
+      // much was cached, and the number tracks cache luck instead of usage.
+      inputTokens: freshInputTokens(finiteNumber(usage.input_tokens) ?? 0, cacheReadTokens),
       outputTokens: finiteNumber(usage.output_tokens) ?? 0,
       toolCalls: this.usage.toolCalls,
       finishReason: completedFinishReason(stringValue(response.status), this.usage.toolCalls.length > 0),
@@ -253,6 +262,18 @@ function tokenUsage(usage: ResponsesUsage): TokenUsage {
 
 function finiteNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+/**
+ * Prompt tokens that were not served from cache.
+ *
+ * Guarded rather than a bare subtraction: a provider reporting a cached count
+ * above its own input total would otherwise yield a negative token count that
+ * silently corrupts every downstream sum.
+ */
+function freshInputTokens(inputTokens: number, cacheReadTokens: number | undefined): number {
+  if (cacheReadTokens === undefined) return inputTokens
+  return Math.max(0, inputTokens - cacheReadTokens)
 }
 
 function recordValue(value: unknown): Readonly<Record<string, unknown>> {

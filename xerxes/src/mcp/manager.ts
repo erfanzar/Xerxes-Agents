@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import type { JsonObject } from '../types/toolCalls.js'
-import { MCPClient } from './client.js'
+import { MCPClient, type MCPToolCallOptions } from './client.js'
 import {
   MCPReconnectError,
   mcpConfigSecrets,
@@ -34,7 +34,7 @@ export interface MCPClientPort {
   readonly connected?: boolean
   connect(): Promise<void>
   disconnect(): Promise<void>
-  callTool(name: string, arguments_?: JsonObject): Promise<MCPToolCallResult>
+  callTool(name: string, arguments_?: JsonObject, options?: MCPToolCallOptions): Promise<MCPToolCallResult>
   readResource(uri: string): Promise<MCPResourceContentsResult>
   getPrompt(name: string, arguments_?: JsonObject): Promise<MCPPromptResult>
 }
@@ -70,10 +70,25 @@ export interface MCPServerCapabilitiesSummary {
 export interface MCPManagerOptions {
   /** Creates one connected-client candidate for each start or reconnect attempt. */
   readonly clientFactory?: MCPClientFactory
+  /** Maximum active plus queued operations retained for one server. */
+  readonly maxPendingOperationsPerServer?: number
   /** Receives already-redacted lifecycle failures. Observer errors are contained. */
   readonly onFailure?: (failure: MCPServerFailure) => void
   /** Retry policy and deterministic hooks used by reconnect. */
   readonly reconnect?: ReconnectWithBackoffOptions
+}
+
+/** Raised when one server exceeds its bounded active-plus-queued operation capacity. */
+export class MCPServerQueueFullError extends Error {
+  readonly serverName: string
+  readonly limit: number
+
+  constructor(serverName: string, limit: number) {
+    super(`MCP server '${serverName}' has reached its pending operation limit (${limit})`)
+    this.name = new.target.name
+    this.serverName = serverName
+    this.limit = limit
+  }
 }
 
 /** Raised when a routed tool, resource, or prompt is unavailable from every active server. */
@@ -97,15 +112,22 @@ export class MCPCapabilityNotFoundError extends Error {
  * reconnect cannot leave a half-registered client visible to discovery.
  */
 export class MCPManager {
+  static readonly DEFAULT_MAX_PENDING_OPERATIONS_PER_SERVER = 1_000
   private readonly clientFactory: MCPClientFactory
   private readonly failures = new Map<string, MCPServerFailure>()
-  private lifecycle: Promise<void> = Promise.resolve()
+  private readonly serverOperations = new Map<string, Promise<void>>()
+  private readonly pendingServerOperations = new Map<string, number>()
+  private readonly maxPendingOperationsPerServer: number
   private readonly onFailure: ((failure: MCPServerFailure) => void) | undefined
   private readonly reconnectOptions: ReconnectWithBackoffOptions | undefined
   private readonly servers = new Map<string, MCPClientPort>()
 
   constructor(options: MCPManagerOptions = {}) {
     this.clientFactory = options.clientFactory ?? (config => new MCPClient(config))
+    this.maxPendingOperationsPerServer = positiveInteger(
+      options.maxPendingOperationsPerServer ?? MCPManager.DEFAULT_MAX_PENDING_OPERATIONS_PER_SERVER,
+      'maxPendingOperationsPerServer',
+    )
     this.onFailure = options.onFailure
     this.reconnectOptions = options.reconnect
   }
@@ -113,7 +135,7 @@ export class MCPManager {
   /** Build, connect, and register a server. Disabled or duplicate configurations are skipped. */
   addServer(config: MCPServerConfig): Promise<boolean> {
     const normalized = normalizeConfig(config)
-    return this.enqueue(async () => {
+    return this.enqueueServer(normalized.name, async () => {
       if (normalized.enabled === false || this.servers.has(normalized.name)) {
         return false
       }
@@ -140,7 +162,7 @@ export class MCPManager {
    */
   removeServer(name: string): Promise<boolean> {
     const normalized = normalizeName(name)
-    return this.enqueue(async () => {
+    return this.enqueueServer(normalized, async () => {
       const client = this.servers.get(normalized)
       if (!client) {
         return false
@@ -172,7 +194,7 @@ export class MCPManager {
    */
   async reconnect(name: string): Promise<boolean> {
     const normalized = normalizeName(name)
-    const previous = await this.enqueue(() => {
+    const previous = await this.enqueueServer(normalized, () => {
       const client = this.servers.get(normalized)
       if (client) {
         this.servers.delete(normalized)
@@ -207,7 +229,7 @@ export class MCPManager {
       return false
     }
 
-    return this.enqueue(async () => {
+    return this.enqueueServer(normalized, async () => {
       if (this.servers.has(normalized)) {
         // A concurrent registration claimed the name while backoff ran; keep
         // the newer client and tear down this superseded candidate.
@@ -225,19 +247,9 @@ export class MCPManager {
   }
 
   /** Disconnect every server and clear the active capability registry. */
-  disconnectAll(): Promise<void> {
-    return this.enqueue(async () => {
-      const servers = [...this.servers.entries()]
-      this.servers.clear()
-      for (const [name, client] of servers) {
-        try {
-          await client.disconnect()
-          this.failures.delete(name)
-        } catch (error) {
-          this.recordFailure(name, 'disconnect', error, undefined, mcpConfigSecrets(client.config))
-        }
-      }
-    })
+  async disconnectAll(): Promise<void> {
+    const names = this.listServers()
+    await Promise.all(names.map(name => this.removeServer(name)))
   }
 
   /** Semantic lifecycle alias for stopping every active MCP server. */
@@ -333,22 +345,28 @@ export class MCPManager {
   /**
    * Route a tool call to the first active server that published its name.
    *
-   * Lookup and dispatch run inside the lifecycle queue so a concurrent
-   * reconnect or removeServer cannot swap or drop the client between the
-   * capability lookup and the call.
+   * Calls on one server are sequenced with lifecycle changes for that server,
+   * while independent servers remain fully concurrent.
    */
-  callTool(name: string, arguments_: JsonObject = {}): Promise<MCPToolCallResult> {
-    return this.enqueue(() => this.findTool(name).callTool(name, arguments_))
+  async callTool(
+    name: string,
+    arguments_: JsonObject = {},
+    options: MCPToolCallOptions = {},
+  ): Promise<MCPToolCallResult> {
+    const client = this.findTool(name)
+    return this.enqueueServer(client.config.name, () => client.callTool(name, arguments_, options))
   }
 
   /** Route a resource read to the active server that published its URI. */
-  readResource(uri: string): Promise<MCPResourceContentsResult> {
-    return this.enqueue(() => this.findResource(uri).readResource(uri))
+  async readResource(uri: string): Promise<MCPResourceContentsResult> {
+    const client = this.findResource(uri)
+    return this.enqueueServer(client.config.name, () => client.readResource(uri))
   }
 
   /** Route a prompt request to the first active server that published its name. */
-  getPrompt(name: string, arguments_: JsonObject = {}): Promise<MCPPromptResult> {
-    return this.enqueue(() => this.findPrompt(name).getPrompt(name, arguments_))
+  async getPrompt(name: string, arguments_: JsonObject = {}): Promise<MCPPromptResult> {
+    const client = this.findPrompt(name)
+    return this.enqueueServer(client.config.name, () => client.getPrompt(name, arguments_))
   }
 
   /** Return Python-compatible per-server counts for live MCP capabilities. */
@@ -391,12 +409,27 @@ export class MCPManager {
     }
   }
 
-  private enqueue<T>(operation: () => Promise<T>): Promise<T> {
-    const pending = this.lifecycle.then(operation, operation)
-    this.lifecycle = pending.then(
+  private enqueueServer<T>(name: string, operation: () => Promise<T>): Promise<T> {
+    const count = this.pendingServerOperations.get(name) ?? 0
+    if (count >= this.maxPendingOperationsPerServer) {
+      return Promise.reject(new MCPServerQueueFullError(name, this.maxPendingOperationsPerServer))
+    }
+    this.pendingServerOperations.set(name, count + 1)
+    const previous = this.serverOperations.get(name) ?? Promise.resolve()
+    const pending = previous.then(operation, operation)
+    const settled = pending.then(
       () => undefined,
       () => undefined,
     )
+    this.serverOperations.set(name, settled)
+    void settled.finally(() => {
+      const remaining = (this.pendingServerOperations.get(name) ?? 1) - 1
+      if (remaining === 0) this.pendingServerOperations.delete(name)
+      else this.pendingServerOperations.set(name, remaining)
+      if (this.serverOperations.get(name) === settled) {
+        this.serverOperations.delete(name)
+      }
+    })
     return pending
   }
 
@@ -464,4 +497,9 @@ function normalizeName(name: string): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function positiveInteger(value: number, field: string): number {
+  if (!Number.isInteger(value) || value < 1) throw new RangeError(`${field} must be a positive integer`)
+  return value
 }

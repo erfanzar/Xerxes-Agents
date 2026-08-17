@@ -303,8 +303,8 @@ function subagents(agent: YamlMap, path: string): Inherit | Readonly<Record<stri
 
 function integer(value: YamlValue | undefined, source: string): number {
   const numeric = typeof value === 'number' ? value : Number(value)
-  if (!Number.isInteger(numeric)) {
-    throw new AgentSpecError(`${source} must be an integer`)
+  if (!Number.isSafeInteger(numeric) || numeric < 0) {
+    throw new AgentSpecError(`${source} must be a non-negative safe integer`)
   }
   return numeric
 }

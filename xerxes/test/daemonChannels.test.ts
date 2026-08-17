@@ -112,6 +112,16 @@ test('daemon channel webhook listener settings inherit control host and validate
   expect(options).toEqual({ host: '0.0.0.0', port: 11997 })
 })
 
+test('daemon channel webhook listener receives the configured control auth token', () => {
+  const config = testConfig('/workspace', {})
+  const options = daemonChannelWebhookOptions({
+    ...config,
+    control: { websocket_host: '127.0.0.1', websocket_port: 0, auth_token: '  edge-secret  ' },
+  })
+
+  expect(options).toEqual({ authToken: 'edge-secret', host: '127.0.0.1', port: 11997 })
+})
+
 test('daemon channel webhook options warn when a public host binds signature-less channels', () => {
   const warnings = captureWarnings(() => {
     const config = testConfig('/workspace', {

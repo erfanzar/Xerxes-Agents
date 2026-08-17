@@ -3,6 +3,7 @@
 
 import {
   CLAUDE_CODE_DEFAULT_MODEL,
+  CODEX_DEFAULT_MODEL,
   type ProviderProfile,
   type SaveProfileInput,
 } from '../bridge/profiles.js'
@@ -612,7 +613,9 @@ function defaultDraft(name: string, provider: ProviderKind): AddDraft {
     baseUrl: '',
     defaultApiKey: config?.defaultApiKey ?? '',
     defaultBaseUrl: config?.baseUrl ?? '',
-    defaultModel: provider === 'claude-code' ? CLAUDE_CODE_DEFAULT_MODEL : '',
+    defaultModel: provider === 'claude-code'
+      ? CLAUDE_CODE_DEFAULT_MODEL
+      : provider === 'openai-codex' ? CODEX_DEFAULT_MODEL : '',
     name,
     provider,
   }

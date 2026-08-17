@@ -569,7 +569,14 @@ test('SpawnAgents first failure stops claiming new registrations and closes part
     },
     wait: async () => ({ completed: [], pending: [] }),
   }
-  const tools = new ClaudeAgentTools({ manager })
+  const consumed: SpawnedAgentSnapshot[] = []
+  const tools = new ClaudeAgentTools({
+    backgroundAgents: {
+      consume: snapshots => consumed.push(...snapshots),
+      track: () => undefined,
+    },
+    manager,
+  })
   const agents = Array.from({ length: 16 }, (_, index) => ({
     name: `failure-${index}`,
     prompt: `task ${index}`,
@@ -585,6 +592,8 @@ test('SpawnAgents first failure stops claiming new registrations and closes part
   await expect(pending).rejects.toThrow('registration failed')
   expect(started).toHaveLength(8)
   expect(closed.sort()).toEqual(started.filter(name => name !== 'failure-0').sort())
+  expect(consumed.map(snapshot => snapshot.id).sort()).toEqual(closed.sort())
+  expect(consumed.every(snapshot => snapshot.status === 'closed')).toBeTrue()
 })
 
 test('stale subagent targets receive non-retry guidance after runtime attachment is lost', async () => {
@@ -1068,6 +1077,20 @@ test('Claude MCP tools bound oversized content and resource listings with trunca
   }
   expect(read.contents[0]?.text).toContain('[truncated 8000 chars]')
   expect(read.contents[0]?.text.length).toBeLessThan(33_000)
+})
+
+test('remote triggers reject private DNS answers before fetch', async () => {
+  let fetched = false
+  const triggers = new RemoteTriggerRegistry({
+    fetcher: async () => {
+      fetched = true
+      return { ok: true, status: 200, text: async () => 'unexpected' }
+    },
+    urlSafety: { dnsLookup: async () => ['127.0.0.1'] },
+  })
+  triggers.register({ name: 'rebound', url: 'https://public.example/webhook' })
+  await expect(triggers.trigger('rebound', 'payload')).rejects.toThrow('private/internal address')
+  expect(fetched).toBeFalse()
 })
 
 test('Claude remote tools enforce configured endpoints and persist cron jobs', async () => {

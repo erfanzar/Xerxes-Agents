@@ -42,6 +42,8 @@ export interface SubagentProgress {
   outputTail?: SubagentOutputEntry[]
   outputTokens?: number
   parentId: null | string
+  cacheCreationTokens?: number
+  cacheReadTokens?: number
   reasoningTokens?: number
   rules?: string[]
   startedAt?: number
@@ -206,6 +208,8 @@ export interface SessionInfo {
 }
 
 export interface Usage {
+  cache_read?: number
+  cache_write?: number
   calls: number
   compressions?: number
   context_max?: number

@@ -127,6 +127,23 @@ test('agent turn runner maps portable loop events to daemon v35 event names', as
   }
 
   expect(events).toEqual([
+    // Live token and context counts arrive as soon as the provider round lands,
+    // ahead of the text it paid for, so both footer meters move during the turn
+    // rather than jumping only at the terminal event.
+    {
+      type: 'status_update',
+      payload: {
+        model: 'gpt-4o',
+        usage: { inputTokens: 3, outputTokens: 5 },
+        total_input_tokens: 3,
+        total_output_tokens: 5,
+        input_tokens: 3,
+        output_tokens: 5,
+        total_tokens: 8,
+        context_tokens: 8,
+        max_context: 128_000,
+      },
+    },
     { type: 'text_part', payload: { text: 'Hello from the real loop.' } },
     {
       type: 'status_update',
@@ -150,6 +167,99 @@ test('agent turn runner maps portable loop events to daemon v35 event names', as
     },
   ])
   expect(runner.stateFor('session-1')?.messages.map(message => message.role)).toEqual(['user', 'assistant'])
+})
+
+test('agent turn runner keeps live context monotonic when a later round is fully cached', async () => {
+  let round = 0
+  const runner = new AgentTurnRunner({
+    llm: {
+      async *stream(): AsyncGenerator<LlmDelta> {
+        round += 1
+        if (round === 1) {
+          yield {
+            toolCalls: [{
+              id: 'cached-read',
+              type: 'function',
+              function: { name: 'ReadFile', arguments: {} },
+            }],
+            usage: { inputTokens: 100, outputTokens: 10 },
+          }
+          return
+        }
+        yield {
+          content: 'done',
+          usage: { inputTokens: 5, outputTokens: 2, cacheReadTokens: 100 },
+        }
+      },
+    },
+    model: 'gpt-4o',
+    permissionMode: 'accept-all',
+    toolExecutor: { execute: async () => 'file contents' },
+    tools: [repeatedReadTool],
+  })
+  const session: DaemonSession = {
+    activeTurnId: '', agentId: 'default', cancelRequested: false, cwd: process.cwd(), extra: {},
+    id: 'cached-context', interactionMode: 'code', sessionKey: 'cached-context', lastActive: 0,
+    messages: [], metadata: {}, model: 'gpt-4o', planMode: false, status: 'working', thinkingContent: [],
+    toolExecutions: [], totalInputTokens: 0, totalOutputTokens: 0, turnCount: 0,
+    workspace: '/tmp/agents/default',
+  }
+  const events: DaemonEvent[] = []
+
+  for await (const event of runner.run(session, 'read it', new AbortController().signal)) events.push(event)
+
+  const liveContext = events
+    .filter(event => event.type === 'status_update' && event.payload.usage_complete === undefined)
+    .map(event => Number(event.payload.context_tokens))
+  expect(liveContext).toEqual([110, 107])
+})
+
+test('agent turn runner forwards tool arguments into capability refinement', async () => {
+  let providerRound = 0
+  const observed: Array<Readonly<Record<string, unknown>> | undefined> = []
+  const tool: ToolDefinition = {
+    type: 'function',
+    function: { name: 'ReadFile', description: 'Read', parameters: {} },
+  }
+  const runner = new AgentTurnRunner({
+    llm: {
+      async *stream(): AsyncGenerator<LlmDelta> {
+        providerRound += 1
+        if (providerRound === 1) {
+          yield {
+            toolCalls: [{
+              id: 'read-args',
+              type: 'function',
+              function: { name: 'ReadFile', arguments: { file_path: 'README.md' } },
+            }],
+          }
+          return
+        }
+        yield { content: 'done' }
+      },
+    },
+    model: 'gpt-4o',
+    permissionMode: 'accept-all',
+    toolCapabilities: (_name, _agentId, args) => {
+      observed.push(args)
+      return { concurrencySafe: true, interruptBehavior: 'cancel' }
+    },
+    toolExecutor: { execute: async () => 'body' },
+    tools: [tool],
+  })
+  const session: DaemonSession = {
+    activeTurnId: '', agentId: 'default', cancelRequested: false, cwd: process.cwd(), extra: {},
+    id: 'capability-args', interactionMode: 'code', sessionKey: 'capability-args', lastActive: 0,
+    messages: [], metadata: {}, model: 'gpt-4o', planMode: false, status: 'working', thinkingContent: [],
+    toolExecutions: [], totalInputTokens: 0, totalOutputTokens: 0, turnCount: 0,
+    workspace: '/tmp/agents/default',
+  }
+
+  for await (const _event of runner.run(session, 'read it', new AbortController().signal)) {
+    // Drain the complete turn.
+  }
+
+  expect(observed).toContainEqual({ file_path: 'README.md' })
 })
 
 test('agent turn runner reports a model-scheduled next-turn mode in the terminal status event', async () => {
@@ -474,7 +584,7 @@ test('plan and researcher modes enforce read-only tool ceilings and a non-YOLO p
     for await (const _event of runner.run(restrictedSession, 'inspect only', new AbortController().signal)) {
       // Consume the turn so state and the provider request are final.
     }
-    expect(client.requests[0]?.tools?.map(tool => tool.function.name)).toEqual(['ReadFile'])
+    expect(client.requests[0]?.tools?.map(tool => tool.function.name)).toEqual(['ReadFile', 'SetInteractionModeTool'])
     expect(restrictedSession.metadata.permission_mode).toBe('plan')
     const systemPrompt = String(client.requests[0]?.messages[0]?.content)
     expect(systemPrompt).toContain(mode === 'plan'
@@ -577,6 +687,68 @@ test('agent turn runner caches a native bootstrap prompt only for the same works
     // A different agent profile must not reuse the default agent's bootstrap prompt.
   }
   expect(bootstrapCalls).toBe(2)
+})
+
+test('agent turn runner keeps generated prompts request-only while preserving caller-owned system messages', async () => {
+  const client = new CapturingClient()
+  const runner = new AgentTurnRunner({
+    bootstrapSystemPrompt: () => 'generated daemon bootstrap',
+    llm: client,
+    model: 'gpt-4o',
+  })
+  const session: DaemonSession = {
+    activeTurnId: '', agentId: 'default', cancelRequested: false, cwd: '/workspace/request-only', extra: {},
+    id: 'request-only-session', interactionMode: 'code', sessionKey: 'request-only', lastActive: 0,
+    messages: [{ role: 'system', content: 'caller-owned system instruction' }], metadata: {}, model: 'gpt-4o',
+    planMode: false, status: 'working', thinkingContent: [], toolExecutions: [], totalInputTokens: 0,
+    totalOutputTokens: 0, turnCount: 0, workspace: '/tmp/agents/default',
+  }
+
+  for await (const _event of runner.run(session, 'first', new AbortController().signal)) {}
+  for await (const _event of runner.run(session, 'second', new AbortController().signal)) {}
+
+  expect(client.requests).toHaveLength(2)
+  for (const request of client.requests) {
+    expect(request.messages.filter(message => message.role === 'system')).toEqual([
+      { role: 'system', content: 'generated daemon bootstrap' },
+      { role: 'system', content: 'caller-owned system instruction' },
+    ])
+  }
+  expect(session.messages.filter(message => message.role === 'system')).toEqual([
+    { role: 'system', content: 'caller-owned system instruction' },
+  ])
+})
+
+test('agent turn runner preserves legacy system messages without guessing their provenance', async () => {
+  const client = new CapturingClient()
+  const runner = new AgentTurnRunner({
+    bootstrapSystemPrompt: () => 'generated daemon bootstrap',
+    llm: client,
+    model: 'gpt-4o',
+  })
+  const session: DaemonSession = {
+    activeTurnId: '', agentId: 'default', cancelRequested: false, cwd: '/workspace/legacy-prompt', extra: {},
+    id: 'legacy-prompt-session', interactionMode: 'code', sessionKey: 'legacy-prompt', lastActive: 0,
+    messages: [
+      { role: 'system', content: 'generated daemon bootstrap' },
+      { role: 'system', content: 'caller-owned system instruction' },
+      { role: 'user', content: 'old request' },
+      { role: 'assistant', content: 'old response' },
+    ], metadata: {}, model: 'gpt-4o', planMode: false, status: 'working', thinkingContent: [], toolExecutions: [],
+    totalInputTokens: 0, totalOutputTokens: 0, turnCount: 1, workspace: '/tmp/agents/default',
+  }
+
+  for await (const _event of runner.run(session, 'continue', new AbortController().signal)) {}
+
+  expect(client.requests[0]?.messages.filter(message => message.role === 'system')).toEqual([
+    { role: 'system', content: 'generated daemon bootstrap' },
+    { role: 'system', content: 'generated daemon bootstrap' },
+    { role: 'system', content: 'caller-owned system instruction' },
+  ])
+  expect(session.messages.filter(message => message.role === 'system')).toEqual([
+    { role: 'system', content: 'generated daemon bootstrap' },
+    { role: 'system', content: 'caller-owned system instruction' },
+  ])
 })
 
 test('agent turn runner invalidates its bootstrap cache when the visible tool surface changes', async () => {

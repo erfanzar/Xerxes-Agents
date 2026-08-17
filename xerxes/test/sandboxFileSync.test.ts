@@ -1,6 +1,10 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { mkdtemp, rm, symlink } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
 import { expect, test } from 'bun:test'
 
 import {
@@ -46,6 +50,19 @@ test('credential files stay inside caller-supplied roots and environment selecti
 
   registry.clear()
   expect(registry.allowedPaths()).toEqual([])
+})
+
+test('credential registry rejects symlink escapes from an allowed root', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-credentials-'))
+  const outside = await mkdtemp(join(tmpdir(), 'xerxes-credentials-outside-'))
+  try {
+    await symlink(outside, join(root, 'escape'))
+    const registry = new CredentialFileRegistry({ allowedRoots: [root], baseDirectory: root })
+    expect(() => registry.register('escape/token')).toThrow(CredentialPathError)
+  } finally {
+    await rm(root, { force: true, recursive: true })
+    await rm(outside, { force: true, recursive: true })
+  }
 })
 
 test('push sync reports byte caps, missing, failed, and escaped files without aborting the batch', async () => {

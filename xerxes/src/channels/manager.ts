@@ -78,10 +78,10 @@ export class ChannelManager {
     this.inboundConfigured = true
   }
 
-  /** Register an adapter without starting it. Lifecycle changes are daemon RPC-driven. */
-  register(name: string, channel: Channel): void {
+  /** Register an adapter without starting it, stopping a running predecessor before replacement. */
+  register(name: string, channel: Channel): Promise<void> {
     const normalized = normalizeName(name)
-    this.registry.register(normalized, channel)
+    return this.registry.register(normalized, channel)
   }
 
   /** Return JSON-safe lifecycle facts without exposing adapter credentials. */
