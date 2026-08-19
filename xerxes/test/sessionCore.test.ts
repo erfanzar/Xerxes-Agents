@@ -277,6 +277,91 @@ test('SQLite store saves rows and turn index on one connection and indexes appen
   }
 })
 
+test('SQLite session writers wait for a concurrent connection to release its lock', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'xerxes-session-contention-'))
+  const database = join(directory, 'sessions.db')
+  let blocker: Database | undefined
+  try {
+    const initialized = new SQLiteSessionStore({ dbPath: database })
+    initialized.close()
+
+    blocker = new Database(database)
+    blocker.run('BEGIN IMMEDIATE')
+
+    const writer = Bun.spawn([
+      process.execPath,
+      '-e',
+      `import { SQLiteSessionStore } from './src/session/store.ts';
+       import { SessionRecord } from './src/session/models.ts';
+       const store = new SQLiteSessionStore({ dbPath: process.env.XERXES_CONTENTION_DB });
+       try { store.saveSession(new SessionRecord({ sessionId: 'concurrent-writer' })); }
+       finally { store.close(); }`,
+    ], {
+      cwd: join(import.meta.dir, '..'),
+      env: { ...process.env, XERXES_CONTENTION_DB: database },
+      stdin: 'ignore',
+      stdout: 'ignore',
+      stderr: 'pipe',
+    })
+
+    // Keep the independent writer contending long enough to exercise SQLite's
+    // lock policy, then release it while that writer is still in progress.
+    await Bun.sleep(100)
+    expect(writer.exitCode).toBeNull()
+    blocker.run('COMMIT')
+    blocker.close()
+    blocker = undefined
+
+    const stderr = await new Response(writer.stderr).text()
+    expect(await writer.exited, stderr).toBe(0)
+    const restored = new SQLiteSessionStore({ dbPath: database })
+    try {
+      expect(restored.loadSession('concurrent-writer')?.sessionId).toBe('concurrent-writer')
+    } finally {
+      restored.close()
+    }
+  } finally {
+    if (blocker !== undefined) {
+      try {
+        blocker.run('ROLLBACK')
+      } finally {
+        blocker.close()
+      }
+    }
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test('SQLite session store surfaces locks that outlast its configured busy timeout', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'xerxes-session-persistent-lock-'))
+  const database = join(directory, 'sessions.db')
+  let blocker: Database | undefined
+  try {
+    const initialized = new SQLiteSessionStore({ dbPath: database })
+    initialized.close()
+    blocker = new Database(database)
+    blocker.run('BEGIN IMMEDIATE')
+
+    expect(() => {
+      const writer = new SQLiteSessionStore({ dbPath: database, busyTimeoutMs: 25 })
+      try {
+        writer.saveSession(new SessionRecord({ sessionId: 'must-time-out' }))
+      } finally {
+        writer.close()
+      }
+    }).toThrow(/locked|busy/i)
+  } finally {
+    if (blocker !== undefined) {
+      try {
+        blocker.run('ROLLBACK')
+      } finally {
+        blocker.close()
+      }
+    }
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
 test('SessionManager serializes concurrent mutations so no turn or transition is lost', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'xerxes-session-race-'))
   const database = join(directory, 'sessions.db')

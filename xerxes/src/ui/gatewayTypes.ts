@@ -761,5 +761,6 @@ export type GatewayEvent =
       type: 'message.complete'
     }
   | { payload?: { message?: string }; session_id?: string; type: 'error' }
+  | { payload?: { session_id?: string; title?: string }; session_id?: string; type: 'session_title' }
 
 export type AnyEvent = GatewayEvent | { payload?: Record<string, unknown>; session_id?: string; type: string }

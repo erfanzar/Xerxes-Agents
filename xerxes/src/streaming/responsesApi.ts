@@ -36,12 +36,22 @@ export class ResponsesEventTranslator {
   /** Maps every observed item_id/call_id onto its pending entry's map key. */
   private readonly pendingAliases = new Map<string, string>()
 
+  /** Identities of function calls already committed to usage. */
+  private readonly completedCallIds = new Set<string>()
+
   /** True once the provider has sent a terminal completed/incomplete response event. */
   private terminal = false
 
   /** Translate one decoded Responses API event into zero or more neutral deltas. */
   translate(event: Readonly<Record<string, unknown>>): LlmDelta[] {
     const type = stringValue(event.type)
+    if (type === 'response.failed' || type === 'error') {
+      throw new ProviderError('responses', responsesErrorMessage(event))
+    }
+    // Some compatible providers keep sending decoded events after their
+    // terminal response. They cannot change the already-committed semantic
+    // result; accepting them would append text or launch tools after finish.
+    if (this.terminal) return []
     if (type === 'response.output_text.delta') {
       const text = stringValue(event.delta) || stringValue(event.text)
       return text ? [{ content: text }] : []
@@ -79,9 +89,6 @@ export class ResponsesEventTranslator {
       this.terminal = true
       return [this.completionDelta()]
     }
-    if (type === 'response.failed' || type === 'error') {
-      throw new ProviderError('responses', responsesErrorMessage(event))
-    }
     return []
   }
 
@@ -105,10 +112,16 @@ export class ResponsesEventTranslator {
   }
 
   private completeFunctionCall(item: Readonly<Record<string, unknown>>): void {
+    if (this.isCompletedCall(item)) return
     const upserted = this.upsertPendingCall(item)
     if (!upserted) return
     this.pendingCalls.delete(upserted.id)
-    this.recordToolCall(upserted.pending)
+    this.recordToolCall(upserted.pending, [stringValue(item.id), stringValue(item.call_id)])
+  }
+
+  private isCompletedCall(item: Readonly<Record<string, unknown>>): boolean {
+    return [stringValue(item.id), stringValue(item.call_id)]
+      .some(id => id && this.completedCallIds.has(id))
   }
 
   /**
@@ -186,8 +199,11 @@ export class ResponsesEventTranslator {
     this.pendingAliases.clear()
   }
 
-  private recordToolCall(pending: PendingFunctionCall): void {
+  private recordToolCall(pending: PendingFunctionCall, aliases: readonly string[] = []): void {
     if (!pending.name) return
+    for (const id of [pending.id, ...aliases]) {
+      if (id) this.completedCallIds.add(id)
+    }
     const call: ToolCall = {
       id: pending.id,
       type: 'function',

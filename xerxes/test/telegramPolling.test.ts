@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from 'bun:test'
+import { getEventListeners } from 'node:events'
 
 import {
   TelegramChannel,
@@ -125,6 +126,35 @@ class FlakyPollingChannel {
     return { status: 200, body: 'ok' }
   }
 }
+
+test('telegram polling retry sleep removes its abort listener when the timer wins', async () => {
+  const retryEntered = Promise.withResolvers<void>()
+  const releaseRetry = Promise.withResolvers<void>()
+  let signal: AbortSignal | undefined
+  let calls = 0
+  const channel = {
+    async getUpdates(options: TelegramUpdatesOptions = {}): Promise<Readonly<Record<string, unknown>>> {
+      calls += 1
+      signal = options.signal
+      if (calls === 1) throw new Error('retry')
+      retryEntered.resolve()
+      await releaseRetry.promise
+      throw new Error('released')
+    },
+    async handleWebhook(): Promise<WebhookResponse> {
+      return { status: 200, body: 'ok' }
+    },
+  }
+  const loop = new TelegramPollingLoop({ channel, retryDelay: 1, timeout: 0 })
+
+  await retryEntered.promise
+  expect(signal).toBeDefined()
+  expect(getEventListeners(signal!, 'abort')).toHaveLength(0)
+
+  const stopping = loop.stop()
+  releaseRetry.resolve()
+  await stopping
+})
 
 test('telegram long-poll requests forward AbortSignal through the HTTP adapter', async () => {
   let seenSignal: AbortSignal | null = null

@@ -69,11 +69,13 @@ export function createDaemonChannelManager(
 export function daemonChannelWebhookOptions(
   config: DaemonConfig,
 ): Omit<ChannelWebhookServerOptions, 'manager'> {
-  const host = stringSetting(config.control.webhook_host)
-    || stringSetting(config.control.websocket_host)
-    || '127.0.0.1'
-  warnOnUnsignedWebhookExposure(config, host)
+  // The webhook listener is an independent HTTP edge. It must not inherit a
+  // public WebSocket bind merely because the control socket is externally visible.
+  const host = stringSetting(config.control.webhook_host) || '127.0.0.1'
   const authToken = stringSetting(config.control.auth_token)
+  if (!isLoopbackHost(host) && !authToken) {
+    throw new TypeError('non-loopback webhook listeners require control.auth_token')
+  }
   return {
     ...(authToken ? { authToken } : {}),
     host,
@@ -81,45 +83,12 @@ export function daemonChannelWebhookOptions(
   }
 }
 
-const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', 'localhost'])
-
-/** Fail-open webhook auth stays silent; make a public bind without verification loud. */
-function warnOnUnsignedWebhookExposure(config: DaemonConfig, host: string): void {
-  if (LOOPBACK_HOSTS.has(host.trim().toLowerCase())) return
-  const unsigned = Object.entries(config.channels)
-    .filter(([, channel]) => enabledWithoutSignatureVerification(channel))
-    .map(([name]) => name)
-  if (unsigned.length === 0) return
-  console.warn([
-    `[xerxes] SECURITY WARNING: the channel webhook listener binds to non-loopback host '${host}'`,
-    `but these enabled channels perform no webhook signature verification: ${unsigned.join(', ')}.`,
-    'Their webhook endpoints are unauthenticated and publicly reachable.',
-    'Configure a signing secret (for example webhook_secret_token or signing_secret)',
-    "or bind webhook_host to '127.0.0.1'.",
-  ].join(' '))
-}
-
-function enabledWithoutSignatureVerification(channel: unknown): boolean {
-  if (!isRecord(channel) || channel.enabled !== true || !isRecord(channel.settings)) return false
-  const settings = channel.settings
-  const type = typeof channel.type === 'string' ? channel.type.trim().toLowerCase() : ''
-  if (type === 'telegram' && telegramPollsInsteadOfWebhook(settings)) return false
-  return !nonEmptySetting(settings, 'webhook_secret_token', 'webhookSecretToken')
-    && !nonEmptySetting(settings, 'signing_secret', 'signingSecret')
-}
-
-function telegramPollsInsteadOfWebhook(settings: Readonly<Record<string, unknown>>): boolean {
-  const transport = typeof settings.transport === 'string' ? settings.transport.trim().toLowerCase() : 'auto'
-  const webhookUrl = nonEmptySetting(settings, 'webhook_url', 'webhookUrl')
-  return transport === 'polling' || (transport === 'auto' && !webhookUrl)
-}
-
-function nonEmptySetting(settings: Readonly<Record<string, unknown>>, ...keys: readonly string[]): string {
-  for (const key of keys) {
-    const value = settings[key]
-    if (typeof value === 'string' && value.trim()) return value.trim()
-  }
-  return ''
+function isLoopbackHost(host: string): boolean {
+  const normalized = host.trim().toLowerCase()
+  return normalized === 'localhost'
+    || normalized === '::1'
+    || normalized === '[::1]'
+    || /^127(?:\.\d{1,3}){3}$/.test(normalized)
 }
 
 function numericSetting(value: unknown, fallback: number): number {

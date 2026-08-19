@@ -246,6 +246,12 @@ export class AnthropicMessagesClient implements LlmClient {
           `stream returned API error${errorType ? ` (${errorType})` : ''}: ${message || 'unknown error'}`,
         )
       }
+      if (receivedMessageStop) {
+        // Retain accounting metadata, but never accept text, thinking, finish
+        // changes, or tool mutations after the provider's terminal event.
+        if (eventUsage) yield { usage: eventUsage }
+        continue
+      }
       if (type === 'message_start') {
         if (eventUsage) {
           yield { usage: eventUsage }

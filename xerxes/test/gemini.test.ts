@@ -158,6 +158,31 @@ test('Gemini direct REST stream sends native settings and normalizes all shared 
   })
 })
 
+test('Gemini stream ignores semantic deltas after a finish reason but retains terminal metadata', async () => {
+  const client = new GeminiClient({
+    apiKey: 'test-key',
+    fetchImplementation: async () => sseResponse([
+      {
+        candidates: [{ content: { parts: [{ text: 'before' }] }, finishReason: 'STOP' }],
+        usageMetadata: { promptTokenCount: 4, candidatesTokenCount: 2 },
+      },
+      {
+        candidates: [{ content: { parts: [{ text: 'after' }] } }],
+        usageMetadata: { promptTokenCount: 4, candidatesTokenCount: 3 },
+      },
+    ]),
+  })
+
+  expect(await collect(client.stream(simpleRequest()))).toEqual([
+    {
+      content: 'before',
+      finishReason: 'stop',
+      usage: { inputTokens: 4, outputTokens: 2 },
+    },
+    { usage: { inputTokens: 4, outputTokens: 3 } },
+  ])
+})
+
 test('the native client factory selects direct Gemini and normalizes the official compatibility root', async () => {
   let endpoint = ''
   const client = createLlmClient('gemini-2.0-flash', {}, {
@@ -239,6 +264,18 @@ test('Gemini client exposes HTTP failures and malformed SSE JSON as provider err
     fetchImplementation: async () => textSseResponse('data: {not JSON}\n\n'),
   })
   await expect(collect(malformed.stream(simpleRequest()))).rejects.toThrow('invalid Gemini SSE JSON: {not JSON}')
+})
+
+test('Gemini stream rejects EOF without a finish reason or DONE sentinel', async () => {
+  const client = new GeminiClient({
+    apiKey: 'test-key',
+    fetchImplementation: async () => textSseResponse(
+      `data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: 'partial' }] } }] })}\n\n`,
+    ),
+  })
+
+  await expect(collect(client.stream(simpleRequest())))
+    .rejects.toThrow('stream ended before a finish reason or [DONE]')
 })
 
 test('Gemini fetch aborts surface unchanged instead of being wrapped as provider errors', async () => {

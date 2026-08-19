@@ -263,6 +263,11 @@ test('BlueBubbles and Signal support relay-in/API-out without owning their gatew
     handle: { address: '+15550001' },
   } })))
   expect(blueInbound[0]).toMatchObject({ text: 'iMessage hello', roomId: 'chat-guid' })
+  await blue.handleWebhook({}, encoder.encode(JSON.stringify({ data: {
+    body: 'agent echo', guid: 'self-message-guid', isFromMe: true, chats: [{ guid: 'chat-guid' }],
+    handle: { address: '+15550001' },
+  } })))
+  expect(blueInbound).toHaveLength(1)
   await blue.send(outbound('bluebubbles', { roomId: 'chat-guid' }))
   expect(new URL(requiredCall(blueCalls).url).searchParams.get('password')).toBe('secret pass')
   expect(blueCalls[0]?.body).toBe(JSON.stringify({

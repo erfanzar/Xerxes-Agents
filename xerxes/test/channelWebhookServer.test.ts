@@ -86,6 +86,18 @@ test('webhook server exposes configured channel status and forwards raw webhook 
   }
 })
 
+test('webhook server rejects unauthenticated non-loopback binds without affecting loopback defaults', () => {
+  const manager = new ChannelManager({ channels: [], onInbound: async () => undefined })
+
+  expect(() => new ChannelWebhookServer({ host: '0.0.0.0', manager, port: 0 }))
+    .toThrow('non-loopback webhook listeners require authToken')
+  expect(() => new ChannelWebhookServer({ host: '192.0.2.10', manager, port: 0 }))
+    .toThrow('non-loopback webhook listeners require authToken')
+  expect(() => new ChannelWebhookServer({ host: '0.0.0.0', authToken: 'shared-secret', manager, port: 0 }))
+    .not.toThrow()
+  expect(() => new ChannelWebhookServer({ manager, port: 0 })).not.toThrow()
+})
+
 test('webhook server enforces its body limit before a provider adapter runs', async () => {
   const channel = new TestWebhookChannel()
   const manager = new ChannelManager({

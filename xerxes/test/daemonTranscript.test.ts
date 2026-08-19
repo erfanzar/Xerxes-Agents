@@ -2,9 +2,10 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from 'bun:test'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, utimes } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { pathToFileURL } from 'node:url'
 
 import {
   DAEMON_SESSION_FORMAT,
@@ -79,6 +80,19 @@ test('normalizer drops malformed messages instead of rejecting the whole transcr
     expect(loaded?.messages).toEqual([
       { role: 'user', content: 'survives' },
     ])
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('store distinguishes a missing transcript from corrupt persisted bytes', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-transcript-load-result-'))
+  try {
+    const store = new DaemonTranscriptStore({ directory, currentProjectDirectory: '/project' })
+    expect(await store.loadResult('deadbeef')).toEqual({ kind: 'missing' })
+
+    await Bun.write(store.pathFor('deadbeef'), '{corrupt bytes')
+    expect(await store.loadResult('deadbeef')).toEqual({ kind: 'corrupt' })
   } finally {
     await rm(directory, { recursive: true, force: true })
   }
@@ -209,6 +223,196 @@ test('a journal append racing a save remains recoverable', async () => {
       { role: 'user', content: 'saved turn' },
       { role: 'assistant', content: 'raced answer' },
     ])
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('an authorized undo rewrite survives a store restart without resurrecting removed messages', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-transcript-undo-restart-'))
+  try {
+    const sessionId = '0ddba1100ddba110'
+    const first = new DaemonTranscriptStore({ directory, currentProjectDirectory: '/project' })
+    const original = normalizeDaemonTranscript({
+      session_id: sessionId,
+      messages: [
+        { role: 'user', content: 'keep' },
+        { role: 'assistant', content: 'kept answer' },
+        { role: 'user', content: 'undo me' },
+        { role: 'assistant', content: 'remove me' },
+      ],
+      turn_count: 2,
+    }, { requestedSessionKey: sessionId, currentProjectDirectory: '/project' })
+    if (!original) throw new Error('expected transcript to normalize')
+    let initial = 0
+    await first.save(original, { mode: 'rewrite', expectedGeneration: 0, onSavedGeneration: value => { initial = value } })
+
+    const resumed = await new DaemonTranscriptStore({ directory, currentProjectDirectory: '/project' }).load(sessionId)
+    if (!resumed) throw new Error('expected transcript after restart')
+    await first.save({ ...resumed, messages: resumed.messages.slice(0, 2), turnCount: 1 }, {
+      mode: 'rewrite',
+      expectedGeneration: initial,
+    })
+
+    expect((await new DaemonTranscriptStore({ directory, currentProjectDirectory: '/project' }).load(sessionId))?.messages)
+      .toEqual(original.messages.slice(0, 2))
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('an authorized compaction rewrite survives a store restart without merging old history', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-transcript-compact-restart-'))
+  try {
+    const sessionId = 'c04fac7c04fac7'
+    const store = new DaemonTranscriptStore({ directory, currentProjectDirectory: '/project' })
+    const original = normalizeDaemonTranscript({
+      session_id: sessionId,
+      messages: [
+        { role: 'user', content: 'old request' },
+        { role: 'assistant', content: 'old answer' },
+        { role: 'user', content: 'latest request' },
+      ],
+      turn_count: 2,
+    }, { requestedSessionKey: sessionId, currentProjectDirectory: '/project' })
+    if (!original) throw new Error('expected transcript to normalize')
+    let initial = 0
+    await store.save(original, { mode: 'rewrite', expectedGeneration: 0, onSavedGeneration: value => { initial = value } })
+    const compacted = [{ role: 'system', content: 'summary of old history' }, original.messages[2]!]
+    await store.save({ ...original, messages: compacted }, {
+      mode: 'rewrite',
+      expectedGeneration: initial,
+    })
+
+    expect((await new DaemonTranscriptStore({ directory, currentProjectDirectory: '/project' }).load(sessionId))?.messages)
+      .toEqual(compacted)
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('transcript locks recover stale empty and PID-reused owners but preserve active owners with bounded waits', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-transcript-locks-'))
+  try {
+    const sessionId = '10cc10cc10cc10cc'
+    const store = new DaemonTranscriptStore({
+      directory,
+      currentProjectDirectory: '/project',
+      lockStaleMs: 100,
+      lockWaitMs: 35,
+    })
+    const transcript = normalizeDaemonTranscript({
+      session_id: sessionId,
+      messages: [{ role: 'user', content: 'locked write' }],
+      turn_count: 1,
+    }, { requestedSessionKey: sessionId, currentProjectDirectory: '/project' })
+    if (!transcript) throw new Error('expected transcript to normalize')
+    const lockPath = `${store.pathFor(sessionId)}.lock`
+
+    // A creator can crash between exclusive creation and metadata write.
+    await Bun.write(lockPath, '')
+    const staleTime = new Date(Date.now() - 60_000)
+    await utimes(lockPath, staleTime, staleTime)
+    await store.save(transcript)
+    expect(await Bun.file(lockPath).exists()).toBeFalse()
+
+    // A stale PID can have been reused by an unrelated live process. Age must
+    // allow recovery; PID liveness alone would wait forever.
+    await Bun.write(lockPath, JSON.stringify({
+      pid: process.pid,
+      token: 'dead-owner-token',
+      createdAt: Date.now() - 60_000,
+    }))
+    await utimes(lockPath, staleTime, staleTime)
+    await store.save(transcript)
+    expect(await Bun.file(lockPath).exists()).toBeFalse()
+
+    // A fresh owner is never stolen, even when it names this live PID. Waiting
+    // is bounded and failure leaves the owner's token untouched.
+    const active = JSON.stringify({ pid: process.pid, token: 'active-owner-token', createdAt: Date.now() })
+    await Bun.write(lockPath, active)
+    const started = performance.now()
+    expect(store.save(transcript)).rejects.toThrow('Timed out waiting for transcript lock')
+    expect(performance.now() - started).toBeLessThan(500)
+    expect(await Bun.file(lockPath).text()).toBe(active)
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('two processes merge distinct transcript messages instead of overwriting either write', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-transcript-process-race-'))
+  try {
+    const sessionId = 'cabba9e0cabba9e0'
+    const sourceUrl = pathToFileURL(join(import.meta.dir, '../src/session/daemonTranscript.ts')).href
+    const workerPath = join(directory, 'writer.ts')
+    await Bun.write(workerPath, `
+      const [sourceUrl, directory, sessionId, label] = process.argv.slice(2)
+      const { DaemonTranscriptStore, normalizeDaemonTranscript } = await import(sourceUrl!)
+      const store = new DaemonTranscriptStore({ directory, currentProjectDirectory: '/project' })
+      const transcript = normalizeDaemonTranscript({
+        session_id: sessionId,
+        messages: [
+          { role: 'user', content: 'shared' },
+          { role: 'assistant', content: label },
+        ],
+        turn_count: 1,
+      }, { requestedSessionKey: sessionId, currentProjectDirectory: '/project' })
+      if (!transcript) throw new Error('expected transcript to normalize')
+      await Bun.write(directory + '/ready-' + label, '')
+      while (!(await Bun.file(directory + '/go').exists())) await Bun.sleep(1)
+      await store.save(transcript, { mode: 'append', expectedGeneration: 0, expectedMessageCount: 1 })
+    `)
+    const workers = ['first', 'second'].map(label => Bun.spawn([
+      process.execPath,
+      workerPath,
+      sourceUrl,
+      directory,
+      sessionId,
+      label,
+    ], { stdout: 'pipe', stderr: 'pipe' }))
+    while (!(await Bun.file(join(directory, 'ready-first')).exists())
+      || !(await Bun.file(join(directory, 'ready-second')).exists())) await Bun.sleep(1)
+    await Bun.write(join(directory, 'go'), '')
+    const exits = await Promise.all(workers.map(worker => worker.exited))
+    expect(exits).toEqual([0, 0])
+
+    const store = new DaemonTranscriptStore({ directory, currentProjectDirectory: '/project' })
+    const contents = (await store.load(sessionId))?.messages.map(message => message.content)
+    expect(contents?.[0]).toBe('shared')
+    expect(contents?.slice(1).sort()).toEqual(['first', 'second'])
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('stale append writers preserve distinct suffixes while divergent and stale rewrite conflicts fail', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-transcript-conflicts-'))
+  try {
+    const sessionId = 'd1a7e6e0d1a7e6e0'
+    const store = new DaemonTranscriptStore({ directory, currentProjectDirectory: '/project' })
+    const base = normalizeDaemonTranscript({
+      session_id: sessionId,
+      messages: [{ role: 'user', content: 'shared' }],
+      turn_count: 1,
+    }, { requestedSessionKey: sessionId, currentProjectDirectory: '/project' })
+    if (!base) throw new Error('expected transcript to normalize')
+    let generation = 0
+    await store.save(base, { mode: 'rewrite', expectedGeneration: 0, onSavedGeneration: value => { generation = value } })
+    await store.save({ ...base, messages: [...base.messages, { role: 'assistant', content: 'first' }] }, {
+      mode: 'append', expectedGeneration: generation, expectedMessageCount: 1,
+    })
+    await store.save({ ...base, messages: [...base.messages, { role: 'assistant', content: 'second' }] }, {
+      mode: 'append', expectedGeneration: generation, expectedMessageCount: 1,
+    })
+    expect((await store.load(sessionId))?.messages.map(message => message.content)).toEqual(['shared', 'first', 'second'])
+
+    expect(store.save({ ...base, messages: [{ role: 'user', content: 'different' }, { role: 'assistant', content: 'bad' }] }, {
+      mode: 'append', expectedGeneration: generation, expectedMessageCount: 1,
+    })).rejects.toThrow('divergent append conflicts')
+    expect(store.save({ ...base, messages: [{ role: 'system', content: 'stale summary' }] }, {
+      mode: 'rewrite', expectedGeneration: generation,
+    })).rejects.toThrow('stale rewrite conflicts')
   } finally {
     await rm(directory, { recursive: true, force: true })
   }

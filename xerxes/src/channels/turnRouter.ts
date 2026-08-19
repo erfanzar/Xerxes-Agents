@@ -167,8 +167,9 @@ export class ChannelTurnRouter {
     this.evictIdleBookkeeping(validDate(this.clock()))
     const pendingCount = this.pendingCounts.get(key) ?? 0
     if (pendingCount >= this.maxPendingPerSession) {
-      this.report(new ChannelQueueFullError(message.channel, key, this.maxPendingPerSession), message)
-      return
+      const error = new ChannelQueueFullError(message.channel, key, this.maxPendingPerSession)
+      this.report(error, message)
+      throw error
     }
     this.pendingCounts.set(key, pendingCount + 1)
     const previous = this.pendingBySession.get(key) ?? Promise.resolve()
@@ -277,7 +278,14 @@ export class ChannelTurnRouter {
     }
     const response = output.join('').trim() || NO_RESPONSE_TEXT
     const previewDelivered = await preview?.finish(response) ?? false
-    if (!previewDelivered) await this.reply(message, response)
+    try {
+      if (!previewDelivered) await this.reply(message, response)
+    } catch (error) {
+      // The agent turn is already durably complete. Expose the delivery failure
+      // without asking webhook transports to retry the inbound message and run
+      // its side effects again.
+      throw new ChannelTurnDeliveryError(message.channel, error)
+    }
     await this.journalAssistant(message, response)
   }
 
@@ -479,6 +487,19 @@ export class ChannelTurnRouter {
     } catch {
       // Diagnostic callbacks must not alter platform delivery semantics.
     }
+  }
+}
+
+/** Raised when a completed agent turn could not be delivered to the channel. */
+export class ChannelTurnDeliveryError extends Error {
+  readonly cause: unknown
+  readonly retryInbound = false
+  readonly turnCompleted = true
+
+  constructor(channel: string, cause: unknown) {
+    super(`completed channel '${channel}' turn could not be delivered`, { cause })
+    this.name = new.target.name
+    this.cause = cause
   }
 }
 
@@ -835,8 +856,14 @@ function validDate(value: Date): Date {
 
 async function sleepUntilAbort(milliseconds: number, signal: AbortSignal): Promise<void> {
   if (signal.aborted) return
-  await Promise.race([
-    Bun.sleep(milliseconds),
-    new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true })),
-  ])
+  let resolveAbort: () => void = () => undefined
+  const aborted = new Promise<void>(resolve => { resolveAbort = resolve })
+  const onAbort = (): void => { resolveAbort() }
+  signal.addEventListener('abort', onAbort, { once: true })
+  try {
+    if (signal.aborted) return
+    await Promise.race([Bun.sleep(milliseconds), aborted])
+  } finally {
+    signal.removeEventListener('abort', onAbort)
+  }
 }

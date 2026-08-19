@@ -5,7 +5,7 @@ import { expect, test } from 'bun:test'
 
 import { ToolRegistry } from '../src/executors/toolRegistry.js'
 import { MCPClient } from '../src/mcp/client.js'
-import { MCPToolServer, serveMCPStdio } from '../src/mcp/server.js'
+import { MAX_MCP_FRAME_BYTES, MCPToolServer, serveMCPStdio } from '../src/mcp/server.js'
 import { MCPConnectionError, MCPProtocolError, type MCPJsonRpcResponse } from '../src/mcp/types.js'
 
 const TEST_MCP_SERVER = String.raw`
@@ -339,6 +339,33 @@ test('serveMCPStdio preserves NDJSON framing and skips notification responses', 
     result: {
       tools: [{ name: 'ping', description: 'Reply with pong.', inputSchema: { type: 'object' } }],
     },
+  })
+})
+
+test('serveMCPStdio rejects an oversized unterminated frame and cancels input', async () => {
+  const server = new MCPToolServer(new ToolRegistry())
+  const encoder = new TextEncoder()
+  let cancelled = false
+  const input = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(encoder.encode('x'.repeat(MAX_MCP_FRAME_BYTES + 1)))
+    },
+    cancel() {
+      cancelled = true
+    },
+  })
+  const output: string[] = []
+
+  await serveMCPStdio(server, input, line => {
+    output.push(line)
+  })
+
+  expect(cancelled).toBeTrue()
+  expect(output).toHaveLength(1)
+  expect(JSON.parse(output[0] ?? '')).toMatchObject({
+    jsonrpc: '2.0',
+    id: null,
+    error: { code: -32600, message: `frame exceeds maximum size of ${MAX_MCP_FRAME_BYTES} bytes` },
   })
 })
 

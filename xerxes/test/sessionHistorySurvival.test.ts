@@ -262,6 +262,9 @@ test('daemon undo of the last remaining turn removes the transcript explicitly b
   const directory = await mkdtemp(join(tmpdir(), 'xerxes-history-undo-'))
   const socketPath = join(directory, 'daemon.sock')
   const server = new DaemonServer({
+    // Title generation persists in the background; it would race the undo's
+    // transcript deletion below, so these persistence assertions opt out.
+    autoTitle: false,
     socketPath,
     runtime: runtimeFor(directory, 'history-test-model'),
   })
@@ -301,6 +304,7 @@ test('daemon partial undo keeps the persisted transcript and its remaining histo
   const directory = await mkdtemp(join(tmpdir(), 'xerxes-history-partial-undo-'))
   const socketPath = join(directory, 'daemon.sock')
   const server = new DaemonServer({
+    autoTitle: false,
     socketPath,
     runtime: runtimeFor(directory, 'history-test-model'),
   })

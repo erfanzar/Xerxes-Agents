@@ -439,6 +439,22 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
   return (ev: GatewayEvent) => {
     const sid = getUiState().sid
 
+    // A generated title may name a background session the TUI is not looking
+    // at; the tab strip tracks every live session, so this one event bypasses
+    // the active-session filter.
+    if (ev.type === 'session_title') {
+      const targetId = typeof ev.payload?.session_id === 'string' ? ev.payload.session_id : ev.session_id
+      const title = typeof ev.payload?.title === 'string' ? ev.payload.title.trim() : ''
+      if (targetId && title) {
+        const state = getUiState()
+        const sessionTabs = state.sessionTabs.map(tab => (tab.id === targetId ? { ...tab, title } : tab))
+        const sessionTitle = state.sid === targetId ? title : state.sessionTitle
+        patchUiState({ sessionTabs, sessionTitle })
+      }
+
+      return
+    }
+
     if (ev.session_id && sid && ev.session_id !== sid && !ev.type.startsWith('gateway.')) {
       return
     }

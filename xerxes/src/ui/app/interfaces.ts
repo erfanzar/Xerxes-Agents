@@ -3,7 +3,7 @@
 import type { MutableRefObject, ReactNode, RefObject, SetStateAction } from 'react'
 
 import type { GatewayClient } from '../gatewayClient.js'
-import type { SessionCloseResponse } from '../gatewayTypes.js'
+import type { SessionCloseResponse, LiveSessionStatus } from '../gatewayTypes.js'
 import type { QueuedMessage } from '../domain/queuedMessage.js'
 import type { ParsedVoiceRecordKey } from '../lib/platform.js'
 import type { RpcResult } from '../lib/rpc.js'
@@ -127,6 +127,12 @@ export interface TranscriptRow {
   msg: Msg
 }
 
+export interface SessionTab {
+  id: string
+  status: LiveSessionStatus
+  title: string
+}
+
 export interface UiState {
   bgTasks: Set<string>
   busy: boolean
@@ -143,6 +149,7 @@ export interface UiState {
   pasteCollapseChars: number
 
   sections: SectionVisibility
+  sessionTabs: SessionTab[]
   sessionTitle: string
   showCost: boolean
   showReasoning: boolean

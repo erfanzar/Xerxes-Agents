@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { connect, type Socket } from "node:net";
 import { join } from "node:path";
@@ -23,7 +24,9 @@ import { readCronLease } from "../src/cron/lease.js";
 import { processCommand } from "../src/core/processLiveness.js";
 import { DaemonTranscriptStore } from "../src/session/daemonTranscript.js";
 import { SnapshotManager } from "../src/session/snapshots.js";
+import { resetTitleAttempts } from "../src/daemon/titleGenerator.js";
 import type { FetchImplementation } from "../src/llms/client.js";
+import type { LlmClient } from "../src/llms/client.js";
 import type { PermissionRequest } from "../src/streaming/events.js";
 import type {
   DaemonEvent,
@@ -121,6 +124,57 @@ test("daemon preserves JSON-RPC v35 NDJSON responses and stream event framing", 
       ok: false,
       error: MIGRATED_ERROR,
     });
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("embedded daemon defaults reject untrusted workspace skills", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-daemon-skill-trust-"));
+  const workspaceSkill = join(directory, ".agents", "skills", "workspace-only");
+  const socketPath = join(directory, "daemon.sock");
+  await mkdir(workspaceSkill, { recursive: true });
+  await writeFile(
+    join(workspaceSkill, "SKILL.md"),
+    "---\nname: workspace-only\ndescription: Untrusted workspace fixture\n---\nReview the current workspace.",
+    "utf8",
+  );
+  const server = new DaemonServer({
+    socketPath,
+    skillDirectory: join(directory, "user-skills"),
+    runtime: new InMemoryDaemonRuntime(undefined, {
+      currentProjectDirectory: directory,
+      sessionDirectory: join(directory, "sessions"),
+    }),
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "skill-trust", project_dir: directory },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "slash",
+      params: { command: "/skills" },
+    });
+    const response = await client.next((frame) => frame.id === 2);
+    expect(response.result).toMatchObject({ ok: true, skills: expect.any(Array) });
+    expect(response.result?.skills).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "workspace-only" }),
+      ]),
+    );
   } finally {
     client.close();
     await server.stop();
@@ -526,6 +580,59 @@ test("shutdown RPC notifies the process host so its daemon lifetime can finish",
       ok: true,
     });
     await waitFor(() => shutdowns === 1);
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("duplicate submit from the same owner cannot release ownership of the live turn", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-duplicate-owner-"));
+  const socketPath = join(directory, "daemon.sock");
+  const turnStarted = Promise.withResolvers<void>();
+  let aborted = false;
+  const runner: TurnRunner = {
+    async *run(_session, _text, signal): AsyncGenerator<DaemonEvent> {
+      turnStarted.resolve();
+      await new Promise<void>((resolve) => {
+        if (signal.aborted) {
+          aborted = true;
+          resolve();
+          return;
+        }
+        signal.addEventListener("abort", () => {
+          aborted = true;
+          resolve();
+        }, { once: true });
+      });
+      yield { type: "text_part", payload: { text: "stopped" } };
+    },
+  };
+  const runtime = new InMemoryDaemonRuntime(runner, {
+    currentProjectDirectory: directory,
+    model: "test-model",
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const server = new DaemonServer({ socketPath, runtime });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { session_key: "duplicate-owner" } });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    client.send({ jsonrpc: "2.0", id: 2, method: "turn.submit", params: { text: "first" } });
+    await client.next((frame) => frame.id === 2);
+    await turnStarted.promise;
+    client.send({ jsonrpc: "2.0", id: 3, method: "turn.submit", params: { text: "duplicate" } });
+    await client.next((frame) => frame.id === 3);
+    await Bun.sleep(25);
+    client.close();
+
+    await waitFor(() => aborted);
+    expect(runtime.sessionStatus("duplicate-owner")?.activeTurnId).toBe("");
   } finally {
     client.close();
     await server.stop();
@@ -1473,9 +1580,17 @@ test("daemon compact uses the active provider to summarize instead of the naive 
     const result = (await client.next((frame) => frame.id === 10)).result;
     expect(result).toMatchObject({ ok: true, compacted: true });
     expect(requests.length).toBeGreaterThan(0);
+    // A background session-title request may precede the compaction call; the
+    // compaction request is the one carrying the summarization prompt.
+    const compactionRequest = requests.find((request) =>
+      String(
+        (request as { messages?: Array<{ content?: unknown }> })?.messages?.[0]
+          ?.content ?? "",
+      ).includes("CONTEXT TO SUMMARIZE"),
+    );
     const prompt = String(
-      (requests[0] as { messages?: Array<{ content?: unknown }> })?.messages?.[0]
-        ?.content ?? "",
+      (compactionRequest as { messages?: Array<{ content?: unknown }> } | undefined)
+        ?.messages?.[0]?.content ?? "",
     );
     expect(prompt).toContain("CONTEXT TO SUMMARIZE");
     expect(prompt).toContain("message 1");
@@ -1570,6 +1685,199 @@ test("compaction archives the transcript it replaces beside the session file", a
   } finally {
     globalThis.fetch = nativeFetch;
     client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("undo rejects while another connection is compacting the same session", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-undo-compact-race-"));
+  const socketPath = join(directory, "daemon.sock");
+  const profileStore = new ProfileStore(join(directory, "profiles.json"));
+  profileStore.save({
+    name: "openai-test",
+    apiKey: "fake-api-key",
+    baseUrl: "https://api.openai.test",
+    model: "gpt-4",
+    provider: "openai",
+    setActive: true,
+  });
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: directory,
+    model: "gpt-4",
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const server = new DaemonServer({
+    socketPath,
+    runtime,
+    profileStore,
+    autoCompactThreshold: 0,
+  });
+  const nativeFetch = globalThis.fetch;
+  const summaryStarted = Promise.withResolvers<void>();
+  const releaseSummary = Promise.withResolvers<void>();
+  const summaryFetch: FetchImplementation = async () => {
+    summaryStarted.resolve();
+    await releaseSummary.promise;
+    return new Response(
+      JSON.stringify({ choices: [{ message: { content: "gated summary" } }] }),
+    );
+  };
+  globalThis.fetch = summaryFetch as typeof globalThis.fetch;
+  await server.start();
+  const compacting = await SocketTestClient.connect(socketPath);
+  const mutating = await SocketTestClient.connect(socketPath);
+  try {
+    for (const [client, id] of [[compacting, 1], [mutating, 2]] as const) {
+      client.send({
+        jsonrpc: "2.0",
+        id,
+        method: "initialize",
+        params: { session_key: "undo-compact-race", project_dir: directory },
+      });
+      await client.next((frame) => frame.id === id);
+      await client.next(eventFrame("init_done"));
+      await client.next(eventFrame("status_update"));
+    }
+    for (let i = 0; i < 4; i += 1) {
+      compacting.send({
+        jsonrpc: "2.0",
+        id: 10 + i,
+        method: "turn.submit",
+        params: { text: `message ${i + 1}` },
+      });
+      await compacting.next((frame) => frame.id === 10 + i);
+      await compacting.next(eventFrame("turn_begin"));
+      await compacting.next(eventFrame("text_part"));
+      await compacting.next(eventFrame("turn_end"));
+    }
+    const session = runtime.sessionStatus("undo-compact-race")!;
+    const before = structuredClone(session.messages);
+
+    compacting.send({ jsonrpc: "2.0", id: 20, method: "session.compress", params: {} });
+    await summaryStarted.promise;
+    mutating.send({ jsonrpc: "2.0", id: 21, method: "session.undo", params: {} });
+    expect((await mutating.next((frame) => frame.id === 21)).result).toEqual({
+      ok: false,
+      error: "session operation in progress",
+    });
+    expect(session.messages).toEqual(before);
+
+    releaseSummary.resolve();
+    expect((await compacting.next((frame) => frame.id === 20)).result).toMatchObject({
+      ok: true,
+      compacted: true,
+    });
+  } finally {
+    releaseSummary.resolve();
+    globalThis.fetch = nativeFetch;
+    compacting.close();
+    mutating.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("retry rejects while another connection has a turn pending behind compaction", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-retry-turn-race-"));
+  const socketPath = join(directory, "daemon.sock");
+  const profileStore = new ProfileStore(join(directory, "profiles.json"));
+  profileStore.save({
+    name: "openai-test",
+    apiKey: "fake-api-key",
+    baseUrl: "https://api.openai.test",
+    model: "gpt-4",
+    provider: "openai",
+    setActive: true,
+  });
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: directory,
+    model: "gpt-4",
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const server = new DaemonServer({
+    socketPath,
+    runtime,
+    profileStore,
+    autoCompactThreshold: 0,
+  });
+  const nativeFetch = globalThis.fetch;
+  const summaryStarted = Promise.withResolvers<void>();
+  const releaseSummary = Promise.withResolvers<void>();
+  const summaryFetch: FetchImplementation = async () => {
+    summaryStarted.resolve();
+    await releaseSummary.promise;
+    return new Response(
+      JSON.stringify({ choices: [{ message: { content: "gated summary" } }] }),
+    );
+  };
+  globalThis.fetch = summaryFetch as typeof globalThis.fetch;
+  await server.start();
+  const compacting = await SocketTestClient.connect(socketPath);
+  const turning = await SocketTestClient.connect(socketPath);
+  const mutating = await SocketTestClient.connect(socketPath);
+  try {
+    for (const [client, id] of [[compacting, 1], [turning, 2], [mutating, 3]] as const) {
+      client.send({
+        jsonrpc: "2.0",
+        id,
+        method: "initialize",
+        params: { session_key: "retry-turn-race", project_dir: directory },
+      });
+      await client.next((frame) => frame.id === id);
+      await client.next(eventFrame("init_done"));
+      await client.next(eventFrame("status_update"));
+    }
+    for (let i = 0; i < 4; i += 1) {
+      compacting.send({
+        jsonrpc: "2.0",
+        id: 10 + i,
+        method: "turn.submit",
+        params: { text: `message ${i + 1}` },
+      });
+      await compacting.next((frame) => frame.id === 10 + i);
+      await compacting.next(eventFrame("turn_begin"));
+      await compacting.next(eventFrame("text_part"));
+      await compacting.next(eventFrame("turn_end"));
+    }
+    const session = runtime.sessionStatus("retry-turn-race")!;
+    const before = structuredClone(session.messages);
+
+    compacting.send({ jsonrpc: "2.0", id: 20, method: "session.compress", params: {} });
+    await summaryStarted.promise;
+    turning.send({
+      jsonrpc: "2.0",
+      id: 21,
+      method: "turn.submit",
+      params: { text: "pending after compaction" },
+    });
+    mutating.send({
+      jsonrpc: "2.0",
+      id: 22,
+      method: "slash",
+      params: { command: "/retry" },
+    });
+    expect((await mutating.next((frame) => frame.id === 22)).result).toEqual({
+      ok: false,
+      error: "session operation in progress",
+    });
+    expect(session.messages).toEqual(before);
+
+    releaseSummary.resolve();
+    expect((await compacting.next((frame) => frame.id === 20)).result).toMatchObject({
+      ok: true,
+      compacted: true,
+    });
+    expect((await turning.next((frame) => frame.id === 21)).result).toMatchObject({ ok: true });
+    await turning.next(eventFrame("turn_begin"));
+    await turning.next(eventFrame("text_part"));
+    await turning.next(eventFrame("turn_end"));
+  } finally {
+    releaseSummary.resolve();
+    globalThis.fetch = nativeFetch;
+    compacting.close();
+    turning.close();
+    mutating.close();
     await server.stop();
     await rm(directory, { recursive: true, force: true });
   }
@@ -5768,6 +6076,291 @@ test("a daemon with no terminal registry reports an empty list rather than prete
   } finally {
     client.close();
     await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a completed first exchange generates a model-written session title and broadcasts it", async () => {
+  resetTitleAttempts();
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-autotitle-"));
+  const socketPath = join(directory, "daemon.sock");
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: directory,
+    model: "test-model",
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const server = new DaemonServer({
+    socketPath,
+    runtime,
+    titleClientFactory: () =>
+      ({
+        async *stream() {
+          yield { type: "text_part", payload: { text: "" } };
+        },
+        async complete() {
+          return { content: '"Greeting exchange"' } as never;
+        },
+      }) as unknown as LlmClient,
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "titled" },
+    });
+    const initialized = await client.next((frame) => frame.id === 1);
+    const sessionId = String(
+      (initialized.result?.session as { id?: unknown } | undefined)?.id ?? "",
+    );
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "turn.submit",
+      params: { session_key: "titled", text: "hello there" },
+    });
+    expect((await client.next((frame) => frame.id === 2)).result).toMatchObject({ ok: true });
+    await client.next(eventFrame("turn_end"));
+
+    // The title lands in the background after the turn; wait for its event.
+    const titled = await client.next(eventFrame("session_title"));
+    expect(titled.params?.payload).toMatchObject({
+      session_id: sessionId,
+      title: "Greeting exchange",
+    });
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+    resetTitleAttempts();
+  }
+});
+
+test("auto_title off keeps the first-message fallback with no provider call", async () => {
+  resetTitleAttempts();
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-autotitle-off-"));
+  const socketPath = join(directory, "daemon.sock");
+  let titleCalls = 0;
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: directory,
+    model: "test-model",
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const server = new DaemonServer({
+    socketPath,
+    runtime,
+    autoTitle: false,
+    titleClientFactory: () => {
+      titleCalls += 1;
+      throw new Error("title client must not be built when auto_title is off");
+    },
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "untitled" },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "turn.submit",
+      params: { session_key: "untitled", text: "hello there" },
+    });
+    expect((await client.next((frame) => frame.id === 2)).result).toMatchObject({ ok: true });
+    await client.next(eventFrame("turn_end"));
+
+    expect(titleCalls).toBe(0);
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+    resetTitleAttempts();
+  }
+});
+
+test("daemon.wipe_history removes the transcript store and reports counts while sessions stay live", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-wipe-history-"));
+  const home = join(directory, "home");
+  const socketPath = join(directory, "daemon.sock");
+  const sessionDirectory = join(directory, "sessions");
+  const priorHome = process.env.XERXES_HOME;
+  process.env.XERXES_HOME = home;
+  await mkdir(sessionDirectory, { recursive: true });
+  await mkdir(join(home, "snapshots"), { recursive: true });
+  await writeFile(join(sessionDirectory, "a.json"), "{}");
+  await writeFile(join(sessionDirectory, "b.json"), "{}");
+  await writeFile(join(home, "snapshots", "snap.json"), "{}");
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: directory,
+    model: "test-model",
+    sessionDirectory,
+  });
+  const server = new DaemonServer({
+    sessionArchiveDirectory: sessionDirectory,
+    socketPath,
+    runtime,
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "wipe-target" },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    client.send({ jsonrpc: "2.0", id: 2, method: "daemon.wipe_history", params: {} });
+    const reply = await client.next((frame) => frame.id === 2);
+    expect(reply.result).toMatchObject({ ok: true });
+    const removed = (reply.result as { removed: { bytes: number; files: number } }).removed;
+    expect(removed.files).toBe(3);
+    expect(removed.bytes).toBeGreaterThan(0);
+    expect(existsSync(sessionDirectory)).toBe(false);
+    expect(existsSync(join(home, "snapshots"))).toBe(false);
+
+    // The live session survives the wipe: its status is still answerable.
+    client.send({ jsonrpc: "2.0", id: 3, method: "session.status", params: {} });
+    const status = await client.next((frame) => frame.id === 3);
+    expect(status.result).toMatchObject({ ok: true });
+  } finally {
+    client.close();
+    await server.stop();
+    if (priorHome === undefined) {
+      delete process.env.XERXES_HOME;
+    } else {
+      process.env.XERXES_HOME = priorHome;
+    }
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("daemon.wipe_history refuses while a turn is mid-write", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-wipe-busy-"));
+  const socketPath = join(directory, "daemon.sock");
+  const sessionDirectory = join(directory, "sessions");
+  let release: (() => void) | undefined;
+  const hanging = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const runner: TurnRunner = {
+    async *run(): AsyncGenerator<DaemonEvent> {
+      yield { type: "text_part", payload: { text: "hang" } } as DaemonEvent;
+      await hanging;
+    },
+  };
+  const runtime = new InMemoryDaemonRuntime(runner, {
+    currentProjectDirectory: directory,
+    model: "test-model",
+    sessionDirectory,
+  });
+  const server = new DaemonServer({
+    sessionArchiveDirectory: sessionDirectory,
+    socketPath,
+    runtime,
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "busy-target" },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "turn.submit",
+      params: { session_key: "busy-target", text: "hang" },
+    });
+    expect((await client.next((frame) => frame.id === 2)).result).toMatchObject({ ok: true });
+    await client.next(eventFrame("text_part"));
+
+    client.send({ jsonrpc: "2.0", id: 3, method: "daemon.wipe_history", params: {} });
+    const reply = await client.next((frame) => frame.id === 3);
+    expect(reply.result).toMatchObject({ ok: false });
+    expect(String((reply.result as { error: string }).error)).toContain("mid-write");
+  } finally {
+    release?.();
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("daemon.wipe_memory removes global and project memory stores with counts", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-wipe-memory-"));
+  const home = join(directory, "home");
+  const socketPath = join(directory, "daemon.sock");
+  const priorHome = process.env.XERXES_HOME;
+  process.env.XERXES_HOME = home;
+  await mkdir(join(home, "memory"), { recursive: true });
+  await mkdir(join(home, "agent_memory"), { recursive: true });
+  await mkdir(join(home, "projects", "p1"), { recursive: true });
+  await mkdir(join(directory, ".xerxes_memory"), { recursive: true });
+  await writeFile(join(home, "memory", "notes.md"), "remember me");
+  await writeFile(join(home, "agent_memory", "self.md"), "self");
+  await writeFile(join(home, "projects", "p1", "facts.md"), "facts");
+  await writeFile(join(directory, ".xerxes_memory", "memory.db"), "sqlite");
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: directory,
+    model: "test-model",
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const server = new DaemonServer({ socketPath, runtime });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "memory-target" },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    client.send({ jsonrpc: "2.0", id: 2, method: "daemon.wipe_memory", params: {} });
+    const reply = await client.next((frame) => frame.id === 2);
+    expect(reply.result).toMatchObject({ ok: true });
+    const removed = (reply.result as { removed: { bytes: number; files: number } }).removed;
+    // Three seeded memory files are always removed; the project SQLite store joins
+    // them when the active session's cwd resolves to this directory.
+    expect(removed.files).toBeGreaterThanOrEqual(3);
+    expect(removed.bytes).toBeGreaterThan(0);
+    expect(existsSync(join(home, "memory"))).toBe(false);
+    expect(existsSync(join(home, "agent_memory"))).toBe(false);
+    expect(existsSync(join(home, "projects"))).toBe(false);
+  } finally {
+    client.close();
+    await server.stop();
+    if (priorHome === undefined) {
+      delete process.env.XERXES_HOME;
+    } else {
+      process.env.XERXES_HOME = priorHome;
+    }
     await rm(directory, { recursive: true, force: true });
   }
 });

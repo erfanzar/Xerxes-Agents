@@ -209,6 +209,96 @@ test('SQLite storage warns and returns undefined for a corrupt row instead of th
   }
 })
 
+test('SQLite access updates wait through transient migration contention and remain atomic', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'xerxes-sqlite-access-contention-'))
+  const path = join(directory, 'memory.db')
+  let blocker: Database | undefined
+  try {
+    const initialized = new SQLiteStorage({ dbPath: path, writeEnabled: true })
+    expect(initialized.save('memory', { access_count: 4, content: 'preserved' })).toBeTrue()
+    initialized.close()
+
+    blocker = new Database(path)
+    blocker.run('PRAGMA user_version = 0')
+    blocker.run('BEGIN IMMEDIATE')
+
+    const writer = Bun.spawn([
+      process.execPath,
+      '-e',
+      `import { SQLiteStorage } from './src/memory/storage.ts';
+       const storage = new SQLiteStorage({ dbPath: process.env.XERXES_CONTENTION_DB, writeEnabled: true });
+       try {
+         const result = storage.updateAccessState('memory', 3, '2026-08-03T00:00:00.000Z');
+         console.log(JSON.stringify({ result, value: storage.load('memory') }));
+       } finally { storage.close(); }`,
+    ], {
+      cwd: join(import.meta.dir, '..'),
+      env: { ...process.env, XERXES_CONTENTION_DB: path },
+      stdin: 'ignore',
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+
+    await Bun.sleep(100)
+    expect(writer.exitCode).toBeNull()
+    blocker.run('COMMIT')
+    blocker.close()
+    blocker = undefined
+
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(writer.stdout).text(),
+      new Response(writer.stderr).text(),
+      writer.exited,
+    ])
+    expect(exitCode, stderr).toBe(0)
+    expect(JSON.parse(stdout)).toEqual({
+      result: 'updated',
+      value: {
+        access_count: 7,
+        content: 'preserved',
+        last_accessed: '2026-08-03T00:00:00.000Z',
+      },
+    })
+  } finally {
+    if (blocker !== undefined) {
+      try {
+        blocker.run('ROLLBACK')
+      } finally {
+        blocker.close()
+      }
+    }
+    rmSync(directory, { force: true, recursive: true })
+  }
+})
+
+test('SQLite access updates fail atomically when contention outlasts the busy timeout', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'xerxes-sqlite-access-persistent-lock-'))
+  const path = join(directory, 'memory.db')
+  let blocker: Database | undefined
+  let storage: SQLiteStorage | undefined
+  try {
+    const initialized = new SQLiteStorage({ dbPath: path, writeEnabled: true })
+    expect(initialized.save('memory', { access_count: 4, content: 'preserved' })).toBeTrue()
+    initialized.close()
+
+    blocker = new Database(path)
+    blocker.run('BEGIN IMMEDIATE')
+    storage = new SQLiteStorage({ dbPath: path, writeEnabled: true, busyTimeoutMs: 25 })
+    expect(storage.updateAccessState('memory', 3, '2026-08-03T00:00:00.000Z')).toBe('failed')
+    expect(storage.load('memory')).toEqual({ access_count: 4, content: 'preserved' })
+  } finally {
+    storage?.close()
+    if (blocker !== undefined) {
+      try {
+        blocker.run('ROLLBACK')
+      } finally {
+        blocker.close()
+      }
+    }
+    rmSync(directory, { force: true, recursive: true })
+  }
+})
+
 test('SQLite storage applies ordered user_version migrations and skips them on reopen', () => {
   const directory = mkdtempSync(join(tmpdir(), 'xerxes-sqlite-migration-'))
   const path = join(directory, 'memory.db')

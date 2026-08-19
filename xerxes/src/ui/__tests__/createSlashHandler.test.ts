@@ -3,6 +3,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { createSlashHandler } from '../app/createSlashHandler.js'
+import { getOverlayState, resetOverlayState } from '../app/overlayStore.js'
 import { patchUiState, resetUiState } from '../app/uiStore.js'
 import type { Msg, SlashCatalog } from '../types.js'
 
@@ -87,7 +88,10 @@ function makeContext(request: ReturnType<typeof vi.fn>, catalog: null | SlashCat
 }
 
 describe('createSlashHandler', () => {
-  afterEach(() => resetUiState())
+  afterEach(() => {
+    resetOverlayState()
+    resetUiState()
+  })
 
   it.each([
     ['/stop', 'stop'],
@@ -280,5 +284,57 @@ describe('createSlashHandler', () => {
       ].join('\n')
     ])
     expect(dieWithCode).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['/remove-memory', 'daemon.wipe_memory', 'Wipe ALL Xerxes memory?'],
+    ['/remove-history', 'daemon.wipe_history', 'Wipe ALL chat history?']
+  ])('%s opens a danger confirm before calling %s', async (input, method, title) => {
+    patchUiState({ sid: 's1' })
+    const request = vi.fn().mockResolvedValue({ ok: true, removed: { bytes: 64, files: 2 } })
+    const { context, sys } = makeContext(request)
+
+    createSlashHandler(context)(input)
+    await flush()
+
+    const confirm = getOverlayState().confirm
+    expect(confirm?.danger).toBe(true)
+    expect(confirm?.title).toBe(title)
+    expect(confirm?.detail).toMatch(/cannot be undone/i)
+    expect(request).not.toHaveBeenCalled()
+    expect(sys).toEqual([])
+
+    confirm?.onConfirm()
+    await flush()
+
+    expect(request).toHaveBeenCalledWith(method, {})
+    expect(sys).toEqual([
+      `${method === 'daemon.wipe_memory' ? 'memory wiped' : 'history wiped'}: 2 file(s), 64 B removed`
+    ])
+  })
+
+  it('/remove-history without confirmation does not invoke the wipe RPC', async () => {
+    patchUiState({ sid: 's1' })
+    const request = vi.fn().mockResolvedValue({ ok: true, removed: { bytes: 0, files: 0 } })
+    const { context } = makeContext(request)
+
+    createSlashHandler(context)('/remove-history')
+    await flush()
+
+    expect(request).not.toHaveBeenCalled()
+  })
+
+  it('surfaces a daemon-side refusal instead of a success message', async () => {
+    patchUiState({ sid: 's1' })
+    const request = vi.fn().mockResolvedValue({ error: 'a turn is mid-write', ok: false })
+    const { context, sys } = makeContext(request)
+
+    createSlashHandler(context)('/remove-history')
+    await flush()
+    getOverlayState().confirm?.onConfirm()
+    await flush()
+
+    expect(request).toHaveBeenCalledWith('daemon.wipe_history', {})
+    expect(sys).toEqual(['could not history wiped: a turn is mid-write'])
   })
 })

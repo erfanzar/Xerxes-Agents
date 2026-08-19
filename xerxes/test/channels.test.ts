@@ -12,6 +12,7 @@ import type {
 } from '../src/channels/index.js'
 import {
   ChannelRegistry,
+  ChannelTurnDeliveryError,
   createChannelMessage,
   gatherInbound,
   MessageDirection,
@@ -306,5 +307,24 @@ test('webhook delivery deduplicates concurrent provider retries', async () => {
     channel.handleWebhook({}, new Uint8Array()),
   ])
 
+  expect(deliveries).toBe(1)
+})
+
+test('webhook retry after completed turn delivery failure does not repeat inbound work', async () => {
+  const channel = new TestWebhookChannel()
+  channel.parsedMessages = [createChannelMessage({
+    channel: channel.name,
+    platformMessageId: 'completed-turn',
+    roomId: 'same-room',
+    text: 'once',
+  })]
+  let deliveries = 0
+  await channel.start(async () => {
+    deliveries += 1
+    throw new ChannelTurnDeliveryError(channel.name, new Error('provider send failed'))
+  })
+
+  expect(await channel.handleWebhook({}, new Uint8Array())).toEqual({ status: 500, body: 'ok' })
+  expect(await channel.handleWebhook({}, new Uint8Array())).toEqual({ status: 200, body: 'ok' })
   expect(deliveries).toBe(1)
 })

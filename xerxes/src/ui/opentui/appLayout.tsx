@@ -9,7 +9,7 @@ import { useBlur, useFocus, useKeyboard, usePaste, useTerminalDimensions } from 
 import { useStore } from '@nanostores/react'
 import { type MutableRefObject, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
-import type { AppLayoutProps, Notice } from '../app/interfaces.js'
+import type { AppLayoutActions, AppLayoutProps, Notice, SessionTab } from '../app/interfaces.js'
 import { $attachments, attachmentsTotalBytes } from '../app/attachmentsStore.js'
 import { registerComposerFocusTarget } from '../app/composerFocus.js'
 import { setInputSelection } from '../app/inputSelectionStore.js'
@@ -54,7 +54,7 @@ import type { ScrollBoxHandle } from '../lib/terminalTypes.js'
 import type { Theme } from '../theme.js'
 
 import { AgentPanel, AgentPanelHotkey, AgentPanelOverlay, collectAgentPanelRecords } from './agentPanel.js'
-import { displayModeLabel, SessionHeader, WorkspaceFooter } from './appChrome.js'
+import { displayModeLabel, SessionHeader, SessionTabStrip, WorkspaceFooter } from './appChrome.js'
 import { CopyPicker } from './copyPicker.js'
 import { DiffPanelHotkey, DiffPanelOverlay } from './diffPanel.js'
 import { TerminalPanelHotkey, TerminalPanelOverlay } from './terminalPanel.js'
@@ -1509,6 +1509,55 @@ function InfoOverlay({ kind }: { kind: 'pluginsHub' | 'skillsHub' }) {
 
 // ── Layout root ─────────────────────────────────────────────────────────────
 
+/**
+ * Left/right arrows cycle the live-session tabs, Claude-Code style.
+ *
+ * The keys are only claimed when they have no editing job to do: the composer
+ * must be empty (a left/right at home still moves the caret in text), no
+ * overlay may own the keyboard, and there must be another tab to move to.
+ * Anything else falls through to the textarea untouched. The switch itself is
+ * delegated to `activateLiveSession`, which already serializes concurrent
+ * activations and hydrates a busy target's in-flight turn.
+ */
+export function SessionTabsHotkey({
+  actions,
+  composerEmpty,
+  disabled,
+  tabs,
+  activeId
+}: {
+  actions: Pick<AppLayoutActions, 'activateLiveSession'>
+  composerEmpty: boolean
+  disabled: boolean
+  tabs: readonly SessionTab[]
+  activeId: null | string
+}) {
+  useKeyboard(event => {
+    if (disabled || !composerEmpty || event.name !== 'left' && event.name !== 'right') {
+      return
+    }
+    if (event.ctrl || event.meta || event.super || event.shift || tabs.length < 2) {
+      return
+    }
+
+    const index = tabs.findIndex(tab => tab.id === activeId)
+    if (index < 0) {
+      return
+    }
+
+    const delta = event.name === 'right' ? 1 : -1
+    const next = tabs[(index + delta + tabs.length) % tabs.length]
+    if (!next || next.id === activeId) {
+      return
+    }
+
+    consumeKey(event)
+    actions.activateLiveSession(next.id)
+  })
+
+  return null
+}
+
 export function AppLayout({
   actions,
   composer,
@@ -1620,6 +1669,13 @@ export function AppLayout({
         onToggle={terminals => patchOverlayState({ terminals })}
         open={overlay.terminals}
       />
+      <SessionTabsHotkey
+        actions={actions}
+        activeId={ui.sid ?? ui.info?.session_id ?? null}
+        composerEmpty={composer.empty}
+        disabled={agentHotkeyBlocked}
+        tabs={ui.sessionTabs}
+      />
       <Box flexDirection="row" flexGrow={1} minHeight={0} width="100%">
         <Box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} minWidth={0}>
           {showStartupWelcome ? (
@@ -1650,6 +1706,12 @@ export function AppLayout({
                 sessionId={ui.sid ?? ui.info?.session_id}
                 sessionTitle={sessionTitle}
                 t={t}
+              />
+              <SessionTabStrip
+                activeId={ui.sid ?? ui.info?.session_id ?? null}
+                tabs={ui.sessionTabs}
+                t={t}
+                width={composer.cols}
               />
               <Box flexDirection="column" flexGrow={1} gap={1} minHeight={0} paddingX={2} paddingY={1}>
                 <scrollbox

@@ -100,6 +100,46 @@ Review native changes.`, '/workspace/skills/review/SKILL.md'))
   }
 })
 
+test('runtime composition does not execute workspace plugins unless features are explicitly enabled', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'xerxes-runtime-features-disabled-'))
+  const counterName = `__xerxesDisabledPluginExecuted_${Date.now()}_${Math.random().toString(16).slice(2)}`
+  const globalState = globalThis as unknown as Record<string, number | undefined>
+  try {
+    const pluginsDirectory = join(workspace, 'plugins')
+    const skillDirectory = join(workspace, 'skills', 'inert-skill')
+    await mkdir(pluginsDirectory, { recursive: true })
+    await mkdir(skillDirectory, { recursive: true })
+    await writeFile(join(pluginsDirectory, 'payload.mjs'), `
+globalThis[${JSON.stringify(counterName)}] = (globalThis[${JSON.stringify(counterName)}] ?? 0) + 1
+export function register(registry) {
+  registry.registerPlugin({ name: 'must-not-load' })
+}
+`, 'utf8')
+    await writeFile(join(skillDirectory, 'SKILL.md'), `---
+name: inert-skill
+---
+Inert skill content remains discoverable.
+`, 'utf8')
+
+    for (const config of [{ workspaceRoot: workspace }, { workspaceRoot: workspace, enabled: false }]) {
+      const state = await composeRuntimeFeatures({
+        ...config,
+        workspaceSkillTrust: { isTrusted: () => true },
+      })
+      try {
+        expect(globalState[counterName]).toBeUndefined()
+        expect(state.discovery.pluginNames).toEqual([])
+        expect(state.discovery.skillNames).toEqual(['inert-skill'])
+      } finally {
+        await state.close()
+      }
+    }
+  } finally {
+    delete globalState[counterName]
+    await rm(workspace, { force: true, recursive: true })
+  }
+})
+
 test('runtime composition discovers conventional extensions and validates plugin-provided tools', async () => {
   const workspace = await mkdtemp(join(tmpdir(), 'xerxes-runtime-features-'))
   try {
@@ -122,6 +162,7 @@ Inspect native runtime state.
 `, 'utf8')
 
     const state = await composeRuntimeFeatures({
+      enabled: true,
       workspaceRoot: workspace,
       enabledSkills: ['inspect'],
       workspaceSkillTrust: { isTrusted: () => true },

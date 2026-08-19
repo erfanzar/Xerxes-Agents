@@ -129,7 +129,13 @@ export class SubagentConversationPersistence {
     if (!this.transcripts) return
     const metadata = conversationMetadata(context, status, error)
     state.metadata = { ...state.metadata, ...metadata }
-    await this.transcripts.save(transcriptFromState(context, state, metadata, checkpoint))
+    const persisted = await this.transcripts.load(context.historySessionId, {
+      currentProjectDirectory: context.projectRoot,
+    })
+    await this.transcripts.save(transcriptFromState(context, state, metadata, checkpoint), {
+      mode: 'rewrite',
+      expectedGeneration: persisted?.generation ?? 0,
+    })
     // A terminal status is durable now, so drop the live copy: any follow-up
     // run reloads from the store instead of pinning the conversation in memory.
     if (TERMINAL_PERSISTED_STATUSES.has(status)) this.states.delete(context.historySessionId)
@@ -169,6 +175,7 @@ function transcriptFromState(
     cwd: context.cwd,
     extra: {},
     format: 'bun-v2',
+    generation: 0,
     interactionMode: 'code',
     key: context.historySessionId,
     messages: [

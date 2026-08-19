@@ -113,6 +113,60 @@ test('Responses API translator maps completed status to neutral finish reasons',
   }])
 })
 
+test('Responses API translator records duplicate output_item.done identities only once', () => {
+  const deltas = [...new ResponsesEventTranslator().translateAll([
+    {
+      type: 'response.output_item.done',
+      item: {
+        type: 'function_call',
+        id: 'item_duplicate',
+        call_id: 'call_duplicate',
+        name: 'ReadFile',
+        arguments: '{"path":"README.md"}',
+      },
+    },
+    {
+      type: 'response.output_item.done',
+      item: {
+        type: 'function_call',
+        id: 'item_duplicate',
+        call_id: 'call_duplicate',
+        name: 'ReadFile',
+        arguments: '{"path":"README.md"}',
+      },
+    },
+    { type: 'response.completed', response: { status: 'completed' } },
+  ])]
+
+  expect(deltas[0]?.toolCalls).toEqual([{
+    id: 'item_duplicate',
+    type: 'function',
+    function: { name: 'ReadFile', arguments: { path: 'README.md' } },
+  }])
+})
+
+test('Responses API translator ignores semantic deltas after its terminal event', () => {
+  const translator = new ResponsesEventTranslator()
+  const deltas = [...translator.translateAll([
+    {
+      type: 'response.completed',
+      response: { status: 'completed', usage: { input_tokens: 4, output_tokens: 2 } },
+    },
+    { type: 'response.output_text.delta', delta: 'must be ignored' },
+    { type: 'response.reasoning.delta', delta: 'must also be ignored' },
+    {
+      type: 'response.output_item.done',
+      item: { type: 'function_call', id: 'late-call', name: 'ReadFile', arguments: '{"path":"late"}' },
+    },
+  ])]
+
+  expect(deltas).toEqual([{
+    finishReason: 'stop',
+    usage: { inputTokens: 4, outputTokens: 2 },
+  }])
+  expect(translator.usage.toolCalls).toEqual([])
+})
+
 test('Responses API translator merges entries aliased by item_id and call_id', () => {
   const deltas = [...new ResponsesEventTranslator().translateAll([
     { type: 'response.function_call_arguments.delta', call_id: 'call_9', delta: '{"path":' },

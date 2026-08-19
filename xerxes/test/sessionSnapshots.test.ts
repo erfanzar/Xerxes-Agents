@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -55,6 +55,84 @@ test('concurrent managers serialize snapshots through one shadow repository', as
     expect(new SnapshotManager(workspace, { shadowRoot: shadow }).list()).toHaveLength(records.length)
     expect(new Set(records.map(record => record.id)).size).toBe(records.length)
     expect(new Set(records.map(record => record.commitSha)).size).toBe(records.length)
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test('separate processes serialize first snapshot initialization', async () => {
+  const realGit = Bun.which('git')
+  if (!realGit) return
+  const { directory, shadow, workspace } = workspaceFixture('xerxes-snapshot-process-race-')
+  const bin = join(directory, 'bin')
+  const gate = join(directory, 'init-gate')
+  mkdirSync(bin)
+  mkdirSync(gate)
+  try {
+    writeFileSync(join(workspace, 'a.txt'), 'shared content', 'utf8')
+    const gitWrapper = join(bin, 'git')
+    writeFileSync(gitWrapper, `#!${process.execPath}\n` + String.raw`
+import { closeSync, openSync, readdirSync } from 'node:fs'
+import { join } from 'node:path'
+const args = process.argv.slice(2)
+if (args[0] === 'init') {
+  closeSync(openSync(join(process.env.SNAPSHOT_INIT_GATE!, String(process.pid)), 'w'))
+  const deadline = Date.now() + 250
+  while (readdirSync(process.env.SNAPSHOT_INIT_GATE!).length < 2 && Date.now() < deadline) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2)
+  }
+}
+const child = Bun.spawnSync([process.env.REAL_GIT!, ...args], { cwd: process.cwd(), env: process.env, stdout: 'inherit', stderr: 'inherit' })
+process.exit(child.exitCode)
+`, 'utf8')
+    chmodSync(gitWrapper, 0o755)
+    const worker = join(directory, 'worker.ts')
+    writeFileSync(worker, `
+import { SnapshotManager } from ${JSON.stringify(join(import.meta.dir, '../src/session/snapshots.ts'))}
+const manager = new SnapshotManager(process.argv[2]!, { shadowRoot: process.argv[3]! })
+await manager.snapshot(process.argv[4]!)
+`, 'utf8')
+    const env = {
+      ...process.env,
+      PATH: `${bin}:${process.env.PATH ?? ''}`,
+      REAL_GIT: realGit,
+      SNAPSHOT_INIT_GATE: gate,
+    }
+    const children = ['process-one', 'process-two'].map(label => Bun.spawn(
+      [process.execPath, worker, workspace, shadow, label],
+      { env, stdout: 'pipe', stderr: 'pipe' },
+    ))
+    const results = await Promise.all(children.map(async child => ({
+      exitCode: await child.exited,
+      stderr: await new Response(child.stderr).text(),
+    })))
+
+    expect(results).toEqual([
+      { exitCode: 0, stderr: '' },
+      { exitCode: 0, stderr: '' },
+    ])
+    expect(new SnapshotManager(workspace, { shadowRoot: shadow }).list()).toHaveLength(2)
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test('an abandoned stale repository lock is recovered', async () => {
+  if (!Bun.which('git')) return
+  const { directory, shadow, workspace } = workspaceFixture('xerxes-snapshot-stale-lock-')
+  try {
+    writeFileSync(join(workspace, 'a.txt'), 'content', 'utf8')
+    const snapshots = new SnapshotManager(workspace, { shadowRoot: shadow })
+    mkdirSync(shadow, { recursive: true })
+    const lock = `${snapshots.shadowDirectory}.lock`
+    writeFileSync(lock, '999999999\n', 'utf8')
+    const stale = new Date(Date.now() - 120_000)
+    utimesSync(lock, stale, stale)
+
+    const record = await snapshots.snapshot('after-stale-lock')
+
+    expect(record.label).toBe('after-stale-lock')
+    expect(existsSync(lock)).toBeFalse()
   } finally {
     rmSync(directory, { recursive: true, force: true })
   }

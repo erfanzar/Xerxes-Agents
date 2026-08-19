@@ -128,8 +128,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 async function sleep(milliseconds: number, signal: AbortSignal): Promise<void> {
   if (signal.aborted || milliseconds === 0) return
-  await Promise.race([
-    Bun.sleep(milliseconds),
-    new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true })),
-  ])
+  let resolveAbort: () => void = () => undefined
+  const aborted = new Promise<void>(resolve => { resolveAbort = resolve })
+  const onAbort = (): void => { resolveAbort() }
+  signal.addEventListener('abort', onAbort, { once: true })
+  try {
+    if (signal.aborted) return
+    await Promise.race([Bun.sleep(milliseconds), aborted])
+  } finally {
+    signal.removeEventListener('abort', onAbort)
+  }
 }

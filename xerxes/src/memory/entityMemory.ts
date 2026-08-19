@@ -79,15 +79,24 @@ export class EntityMemory extends Memory {
   }
 
   clear(): void {
+    const retained = this.items.slice()
     this.items.length = 0
     this.index.clear()
-    clearRecord(this.entities)
-    clearRecord(this.relationships)
-    clearRecord(this.entityMentions)
-
-    if (!this.storage) return
-    for (const key of this.storage.listKeys('entity_')) this.storage.delete(key)
-    for (const key of this.storage.listKeys('_entity_')) this.storage.delete(key)
+    this.rebuildGraph()
+    try {
+      this.persistSnapshots()
+      this.deletePersisted(retained, 'clear entity memory')
+    } catch (error) {
+      for (const item of retained) this.append(item)
+      this.rebuildGraph()
+      try {
+        this.persistSnapshots()
+      } catch {
+        // Preserve the original storage failure; item rows remain authoritative
+        // and hydration rebuilds snapshots from them.
+      }
+      throw error
+    }
   }
 
   delete(memoryId?: string, _filters?: MemoryFilters): number {
@@ -95,8 +104,23 @@ export class EntityMemory extends Memory {
     const item = this.index.get(memoryId)
     if (!item) return 0
 
-    this.evict(item)
-    this.persistSnapshots()
+    const position = this.items.indexOf(item)
+    this.remove(item)
+    this.rebuildGraph()
+    try {
+      this.persistSnapshots()
+      this.deletePersisted([item], 'delete entity memory')
+    } catch (error) {
+      this.items.splice(position, 0, item)
+      this.index.set(item.memoryId, item)
+      this.rebuildGraph()
+      try {
+        this.persistSnapshots()
+      } catch {
+        // Preserve the original storage failure; item rows remain authoritative.
+      }
+      throw error
+    }
     return 1
   }
 
@@ -199,23 +223,31 @@ export class EntityMemory extends Memory {
       ...(options.conversationId ? { conversationId: options.conversationId } : {}),
     })
 
-    for (const entity of entities) this.updateEntity(entity, item)
-    for (const [source, relation, target] of this.extractRelationships(content, entities)) {
-      const pairs = this.relationships[relation] ?? []
-      pairs.push([source, target])
-      this.relationships[relation] = pairs
-    }
-
+    const evicted: MemoryItem[] = []
     if (this.maxItems !== undefined) {
       while (this.items.length >= this.maxItems) {
         const oldest = this.items[0]
         if (!oldest) break
-        this.evict(oldest)
+        evicted.push(oldest)
+        this.remove(oldest)
       }
     }
     this.append(item)
-    this.persist(item)
-    return item
+    this.rebuildGraph()
+    try {
+      this.persist(item)
+      for (const removed of evicted) this.storage?.delete(entityStorageKey(removed.memoryId))
+      return item
+    } catch (error) {
+      this.remove(item)
+      for (const removed of evicted.reverse()) {
+        this.items.unshift(removed)
+        this.index.set(removed.memoryId, removed)
+      }
+      this.rebuildGraph()
+      this.storage?.delete(entityStorageKey(item.memoryId))
+      throw error
+    }
   }
 
   search(query: string, limit = 10, filters?: MemoryFilters, options: EntitySearchOptions = {}): MemoryItem[] {
@@ -240,32 +272,51 @@ export class EntityMemory extends Memory {
   update(memoryId: string, updates: MemoryUpdate): boolean {
     const item = this.index.get(memoryId)
     if (!item) return false
-
-    if (updates.content !== undefined) {
-      const oldEntities = entityNames(item)
-      const newEntities = this.extractEntities(updates.content)
-      for (const entity of oldEntities) removeMention(this.entityMentions, entity, memoryId)
-      for (const entity of newEntities) {
-        const mentions = this.entityMentions[entity] ?? []
-        mentions.push(memoryId)
-        this.entityMentions[entity] = mentions
-      }
-      this.updateItem(item, {
-        ...updates,
-        metadata: { ...item.metadata, ...(updates.metadata ?? {}), entities: newEntities },
-      })
-    } else {
-      this.updateItem(item, updates)
+    const original = MemoryItem.fromRecord(item.toRecord())
+    const applied = updates.content === undefined
+      ? updates
+      : {
+          ...updates,
+          metadata: { ...item.metadata, ...(updates.metadata ?? {}), entities: this.extractEntities(updates.content) },
+        }
+    this.updateItem(item, applied)
+    this.rebuildGraph()
+    try {
+      this.persist(item)
+      return true
+    } catch (error) {
+      restoreItem(item, original)
+      this.rebuildGraph()
+      this.storage?.save(entityStorageKey(memoryId), original.toRecord())
+      throw error
     }
-
-    this.persist(item)
-    return true
   }
 
-  private evict(item: MemoryItem): void {
-    for (const entity of entityNames(item)) removeMention(this.entityMentions, entity, item.memoryId)
-    this.remove(item)
-    this.storage?.delete(entityStorageKey(item.memoryId))
+  private rebuildGraph(): void {
+    clearRecord(this.entities)
+    clearRecord(this.relationships)
+    clearRecord(this.entityMentions)
+    for (const item of this.items) {
+      const entities = entityNames(item)
+      for (const entity of entities) this.updateEntity(entity, item)
+      for (const [source, relation, target] of this.extractRelationships(item.content, entities)) {
+        const pairs = this.relationships[relation] ?? []
+        pairs.push([source, target])
+        this.relationships[relation] = pairs
+      }
+    }
+  }
+
+  private deletePersisted(targets: readonly MemoryItem[], operation: string): void {
+    if (!this.storage) return
+    const deleted: MemoryItem[] = []
+    for (const item of targets) {
+      if (!this.storage.delete(entityStorageKey(item.memoryId))) {
+        for (const removed of deleted) this.storage.save(entityStorageKey(removed.memoryId), removed.toRecord())
+        throw new Error(`Failed to ${operation} ${item.memoryId}`)
+      }
+      deleted.push(item)
+    }
   }
 
   private hydrate(): void {
@@ -284,26 +335,26 @@ export class EntityMemory extends Memory {
     const overflow = this.maxItems === undefined ? 0 : Math.max(0, records.length - this.maxItems)
     for (const item of records.slice(overflow)) this.append(item)
 
-    try {
-      restoreEntities(this.storage.load('_entity_entities'), this.entities)
-      restoreRelationships(this.storage.load('_entity_relationships'), this.relationships)
-      restoreMentions(this.storage.load('_entity_mentions'), this.entityMentions)
-    } catch (error) {
-      console.warn('Skipping corrupt entity memory snapshots:', error)
-    }
+    // The item rows are authoritative. Rebuilding prevents stale or partially
+    // persisted snapshots from resurrecting evicted or deleted graph nodes.
+    this.rebuildGraph()
   }
 
   private persist(item: MemoryItem): void {
     if (!this.storage) return
-    this.storage.save(entityStorageKey(item.memoryId), item.toRecord())
+    if (!this.storage.save(entityStorageKey(item.memoryId), item.toRecord())) {
+      throw new Error(`Failed to persist entity memory ${item.memoryId}`)
+    }
     this.persistSnapshots()
   }
 
   private persistSnapshots(): void {
     if (!this.storage) return
-    this.storage.save('_entity_entities', this.entities)
-    this.storage.save('_entity_relationships', this.relationships)
-    this.storage.save('_entity_mentions', this.entityMentions)
+    if (!this.storage.save('_entity_entities', this.entities)
+      || !this.storage.save('_entity_relationships', this.relationships)
+      || !this.storage.save('_entity_mentions', this.entityMentions)) {
+      throw new Error('Failed to persist entity memory snapshots')
+    }
   }
 
   private updateEntity(entity: string, item: MemoryItem): void {
@@ -346,50 +397,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function dateValue(value: unknown): Date | undefined {
-  if (value instanceof Date) return value
-  if (typeof value !== 'string' || !value) return undefined
-  const parsed = new Date(value)
-  return Number.isNaN(parsed.valueOf()) ? undefined : parsed
-}
-
-function restoreEntities(value: unknown, target: Record<string, EntityRecord>): void {
-  if (!isRecord(value)) return
-  for (const [entity, record] of Object.entries(value)) {
-    if (!isRecord(record)) continue
-    target[entity] = {
-      contexts: Array.isArray(record.contexts)
-        ? record.contexts.filter((context): context is string => typeof context === 'string').slice(-MAX_ENTITY_CONTEXTS)
-        : [],
-      firstSeen: dateValue(record.firstSeen) ?? new Date(),
-      frequency: typeof record.frequency === 'number' && Number.isFinite(record.frequency) ? record.frequency : 1,
-      lastSeen: dateValue(record.lastSeen) ?? new Date(),
-    }
-  }
-}
-
-function restoreRelationships(value: unknown, target: Record<string, EntityRelationPair[]>): void {
-  if (!isRecord(value)) return
-  for (const [relation, pairs] of Object.entries(value)) {
-    if (!Array.isArray(pairs)) continue
-    target[relation] = pairs.flatMap(pair =>
-      Array.isArray(pair) && typeof pair[0] === 'string' && typeof pair[1] === 'string'
-        ? [[pair[0], pair[1]] as const]
-        : [])
-  }
-}
-
-function restoreMentions(value: unknown, target: Record<string, string[]>): void {
-  if (!isRecord(value)) return
-  for (const [entity, mentions] of Object.entries(value)) {
-    if (!Array.isArray(mentions)) continue
-    target[entity] = mentions.filter((mention): mention is string => typeof mention === 'string')
-  }
-}
-
-function removeMention(mentions: Record<string, string[]>, entity: string, memoryId: string): void {
-  const values = mentions[entity]
-  if (!values) return
-  const position = values.indexOf(memoryId)
-  if (position >= 0) values.splice(position, 1)
+function restoreItem(target: MemoryItem, source: MemoryItem): void {
+  target.accessCount = source.accessCount
+  target.agentId = source.agentId
+  target.content = source.content
+  target.conversationId = source.conversationId
+  target.embedding = source.embedding ? [...source.embedding] : undefined
+  target.lastAccessed = source.lastAccessed
+  target.memoryType = source.memoryType
+  target.metadata = { ...source.metadata }
+  target.relevanceScore = source.relevanceScore
+  target.taskId = source.taskId
+  target.timestamp = source.timestamp
+  target.userId = source.userId
 }

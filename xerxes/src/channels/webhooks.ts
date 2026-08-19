@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import type { Channel, InboundHandler } from './base.js'
+import { ChannelTurnDeliveryError } from './turnRouter.js'
 import type { ChannelMessage } from './types.js'
 
 /** Headers and raw payload delivered by an HTTP webhook endpoint. */
@@ -127,6 +128,8 @@ export interface WebhookChannelOptions {
   readonly onFailure?: (failure: WebhookFailure) => void
 }
 
+type WebhookDeliveryOutcome = 'completed_delivery_failure' | 'delivered' | 'retryable_failure'
+
 /**
  * Base class for channels whose inbound transport is an HTTP webhook.
  *
@@ -175,11 +178,15 @@ export abstract class WebhookChannel implements WebhookCapableChannel {
     let failed = false
     for (const message of messages) {
       // Reserve the id before awaiting dispatch so simultaneous provider
-      // retries cannot both enter the inbound handler. Failed deliveries
-      // release the reservation so a later retry can still be delivered.
+      // retries cannot both enter the inbound handler. Failures that happen
+      // before turn completion release the reservation for a provider retry;
+      // reply delivery failures keep it because retrying would repeat the turn.
       if (!this.reserveDelivery(message)) continue
-      if (!await this.dispatchInbound(message)) {
+      const outcome = await this.dispatchInbound(message)
+      if (outcome === 'retryable_failure') {
         this.forgetDelivery(message)
+        failed = true
+      } else if (outcome === 'completed_delivery_failure') {
         failed = true
       }
     }
@@ -213,15 +220,17 @@ export abstract class WebhookChannel implements WebhookCapableChannel {
   }
 
   /** Deliver one already-normalized inbound message while preserving error containment. */
-  protected async dispatchInbound(message: ChannelMessage): Promise<boolean> {
+  protected async dispatchInbound(message: ChannelMessage): Promise<WebhookDeliveryOutcome> {
     const handler = this.handler
-    if (!handler) return false
+    if (!handler) return 'retryable_failure'
     try {
       await handler(message)
-      return true
+      return 'delivered'
     } catch (error) {
       this.report({ channel: this.name, error, source: 'inbound_handler' })
-      return false
+      return error instanceof ChannelTurnDeliveryError
+        ? 'completed_delivery_failure'
+        : 'retryable_failure'
     }
   }
 

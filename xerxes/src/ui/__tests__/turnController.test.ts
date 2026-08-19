@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { getTurnState } from '../app/turnStore.js'
 import { turnController } from '../app/turnController.js'
+import { LIVE_RENDER_MAX_CHARS } from '../config/limits.js'
 import { getUiState, patchUiState } from '../app/uiStore.js'
 import {
   clearSpawnHistory,
@@ -94,6 +95,34 @@ describe('turnController', () => {
     expect(getTurnState().streaming).toContain('after')
     expect(getTurnState().streaming).not.toContain('hidden')
     expect(getTurnState().streaming).not.toContain('<reasoning>')
+  })
+
+  it('bounds authoritative live message and reasoning buffers while preserving their newest tails', () => {
+    const oldMessage = 'm'.repeat(LIVE_RENDER_MAX_CHARS)
+    const newMessage = 'new-message-tail'
+    const oldReasoning = 'r'.repeat(LIVE_RENDER_MAX_CHARS)
+    const newReasoning = 'new-reasoning-tail'
+
+    turnController.startMessage()
+    turnController.recordMessageDelta({ text: oldMessage })
+    turnController.recordMessageDelta({ text: newMessage })
+    turnController.recordReasoningDelta(oldReasoning, true)
+    turnController.recordReasoningDelta(newReasoning, true)
+
+    const controller = turnController as unknown as {
+      activeReasoningText: string
+      bufRef: string
+      liveVisibleText: string
+      reasoningText: string
+    }
+
+    expect(controller.bufRef.length).toBeLessThanOrEqual(LIVE_RENDER_MAX_CHARS)
+    expect(controller.bufRef.endsWith(newMessage)).toBe(true)
+    expect(controller.liveVisibleText.length).toBeLessThanOrEqual(LIVE_RENDER_MAX_CHARS)
+    expect(controller.reasoningText.length).toBeLessThanOrEqual(LIVE_RENDER_MAX_CHARS)
+    expect(controller.reasoningText.endsWith(newReasoning)).toBe(true)
+    expect(controller.activeReasoningText.length).toBeLessThanOrEqual(LIVE_RENDER_MAX_CHARS)
+    expect(controller.activeReasoningText.endsWith(newReasoning)).toBe(true)
   })
 
   it('cancels a throttled tool progress repaint when the turn resets', () => {
