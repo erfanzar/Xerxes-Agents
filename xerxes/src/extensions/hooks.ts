@@ -123,6 +123,11 @@ export interface ToolPermissionVerdict {
   readonly reason?: string
   /** Optional extension or rule identifier, so a denial can be traced to its author. */
   readonly source?: string
+  /**
+   * Replacement tool arguments proposed by an allowing verdict. A verdict may
+   * tighten what runs, never loosen it: denials ignore this field entirely.
+   */
+  readonly updatedArguments?: HookPayload
 }
 
 /** Collapsed result of every registered permission hook for one tool call. */
@@ -132,6 +137,8 @@ export interface ToolPermissionDecision {
   readonly denials: readonly ToolPermissionVerdict[]
   /** Empty when allowed, otherwise the first denial's reason. */
   readonly reason: string
+  /** First allowing verdict's replacement arguments, when any verdict proposed them. */
+  readonly updatedArguments?: HookPayload
 }
 
 /**
@@ -164,21 +171,43 @@ export async function resolveToolPermission(
     if (!verdict.allow) denials.push(verdict)
   }
   const first = denials[0]
+  const allowed = first === undefined
+  const updatedArguments = allowed
+    ? firstAllowingUpdate(Array.isArray(results) ? results : [results])
+    : undefined
   return {
     denials,
-    allowed: first === undefined,
+    allowed,
     reason: first === undefined ? '' : first.reason?.trim() || `tool '${input.toolName}' denied by a permission hook`,
+    ...(updatedArguments === undefined ? {} : { updatedArguments }),
   }
+}
+
+/** The first well-formed allowing verdict carrying replacement arguments wins. */
+function firstAllowingUpdate(results: readonly unknown[]): HookPayload | undefined {
+  for (const result of results) {
+    const verdict = asPermissionVerdict(result)
+    if (verdict?.allow === true && verdict.updatedArguments !== undefined) {
+      return verdict.updatedArguments
+    }
+  }
+  return undefined
 }
 
 function asPermissionVerdict(value: unknown): ToolPermissionVerdict | undefined {
   if (typeof value !== 'object' || value === null) return undefined
-  const candidate = value as { allow?: unknown; reason?: unknown; source?: unknown }
+  const candidate = value as { allow?: unknown; reason?: unknown; source?: unknown; updatedArguments?: unknown }
   if (typeof candidate.allow !== 'boolean') return undefined
+  const updatedArguments = typeof candidate.updatedArguments === 'object'
+    && candidate.updatedArguments !== null
+    && !Array.isArray(candidate.updatedArguments)
+    ? candidate.updatedArguments as HookPayload
+    : undefined
   return {
     allow: candidate.allow,
     ...(typeof candidate.reason === 'string' ? { reason: candidate.reason } : {}),
     ...(typeof candidate.source === 'string' ? { source: candidate.source } : {}),
+    ...(updatedArguments === undefined ? {} : { updatedArguments }),
   }
 }
 

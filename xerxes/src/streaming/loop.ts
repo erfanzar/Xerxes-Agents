@@ -11,7 +11,7 @@ import {
   type ToolExecutionContext,
 } from '../executors/toolRegistry.js'
 import type { ToolLoopBlockAuditInput } from '../audit/emitter.js'
-import { resolveToolPermission, type HookPoint, type HookRunner } from '../extensions/hooks.js'
+import { TOOL_PERMISSION_HOOK, resolveToolPermission, type HookPoint, type HookRunner } from '../extensions/hooks.js'
 import type { LlmClient, LlmDelta, QuerySource, ThinkingRequest, TokenUsage } from '../llms/client.js'
 import {
   DENIAL_LOOP_PATTERN,
@@ -103,7 +103,7 @@ type ToolDecision =
     readonly call: ToolCall
     readonly detail?: string
     readonly kind: 'denied'
-    readonly reason: 'permission_rejected' | 'policy_denied'
+    readonly reason: 'hook_denied' | 'permission_rejected' | 'policy_denied'
   }
 
 /**
@@ -833,8 +833,25 @@ export async function* runTurn(
           decisions.push({ call, kind: 'denied', reason: 'policy_denied' })
           continue
         }
+        // External hook gate (for example configured user hooks). A hook may
+        // tighten a call the static policy allowed — deny it or rewrite its
+        // arguments — but it can never loosen a policy denial, which returned
+        // above. Fail-closed: a hook that errors or times out denies the call.
+        // Runs before the interactive prompt, so a hook denial never prompts.
+        let gatedCall = effectiveCall
+        if (hookRunner?.hasHooks(TOOL_PERMISSION_HOOK) === true) {
+          const gate = await resolveToolPermission(hookRunner, {
+            toolName: effectiveCall.function.name,
+            arguments: effectiveCall.function.arguments,
+          })
+          if (!gate.allowed) {
+            decisions.push({ call, detail: gate.reason, kind: 'denied', reason: 'hook_denied' })
+            continue
+          }
+          gatedCall = applyToolArgumentsMutation(effectiveCall, gate.updatedArguments)
+        }
         if (permission === 'prompt') {
-          const permissionRequest = createPermissionRequest(effectiveCall)
+          const permissionRequest = createPermissionRequest(gatedCall)
           yield { type: 'permission_request', request: permissionRequest }
           const decision = (await dependencies.permissionBroker?.request(permissionRequest, signal)) ?? 'reject'
           // Injected brokers are allowed to resolve asynchronously. Cancellation
@@ -849,22 +866,7 @@ export async function* runTurn(
             continue
           }
         }
-        if (hookRunner !== undefined) {
-          const extensionPermission = await resolveToolPermission(hookRunner, {
-            arguments: effectiveCall.function.arguments,
-            toolName: effectiveCall.function.name,
-          })
-          if (!extensionPermission.allowed) {
-            decisions.push({
-              call,
-              detail: extensionPermission.reason,
-              kind: 'denied',
-              reason: 'policy_denied',
-            })
-            continue
-          }
-        }
-        decisions.push({ call, effectiveCall, kind: 'allowed' })
+        decisions.push({ call, effectiveCall: gatedCall, kind: 'allowed' })
       }
 
       // PHASE B — execute in maximal runs of consecutive concurrency-safe calls,
@@ -1438,10 +1440,11 @@ function appendToolResult(
   objectiveToolExecutions.push(execution)
 }
 
-function deniedToolResult(call: ToolCall): ToolResult {
+function deniedToolResult(call: ToolCall, message?: string): ToolResult {
+  const detail = message?.trim()
   return {
     name: call.function.name,
-    result: deniedResult(call),
+    result: detail ? `${deniedResult(call)} ${detail}` : deniedResult(call),
     permitted: false,
     toolCallId: call.id,
     durationMs: 0,

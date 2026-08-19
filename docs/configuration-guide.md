@@ -55,6 +55,45 @@ keyword wins. Session defaults come from `thinking`, `thinking_budget`, and
 `reasoning_effort` in runtime settings or the active provider profile's
 `sampling` block. Ultra mode is session-scoped and not persisted.
 
+## User-defined hooks
+
+The daemon `runtime` section accepts a `hooks` block that runs your own commands at fixed
+lifecycle points — the same governance pattern Claude Code documents for its settings-driven
+hooks, implemented natively here. Valid events are `PreToolUse`, `PostToolUse`, `TurnStart`,
+`TurnEnd`, and `OnError`:
+
+```json
+{
+  "runtime": {
+    "hooks": {
+      "PreToolUse": [
+        { "command": "./hooks/block-destructive.sh", "matcher": "^(Bash|exec_command)$", "timeoutMs": 5000 }
+      ],
+      "TurnEnd": [{ "command": "node", "args": ["./hooks/log-turn.js"] }]
+    }
+  }
+}
+```
+
+Each definition spawns the command at the event point and passes one JSON document on stdin
+(`event`, `tool_name`, `arguments`, `cwd`, `timestamp`). With `args`, the command is spawned
+directly; otherwise it runs through the platform shell. `matcher` is a regular expression over
+the tool name; `timeoutMs` defaults to 5000 and is capped at 60000. The command answers through
+its exit code: `0` allows, `2` denies with its stderr text as the reason, and any other failure
+denies — `PreToolUse` fails closed, so a crashed guard never reads as consent. Exit `0` may
+optionally print a JSON verdict on stdout:
+
+```json
+{ "decision": "allow", "reason": "...", "updated_arguments": { } }
+```
+
+`updated_arguments` rewrites the tool call before it executes; hooks can tighten what the
+permission system allows but never loosen a policy denial or skip an interactive prompt.
+`PostToolUse`, `TurnStart`, `TurnEnd`, and `OnError` are observers: their failures are logged
+and never block the turn. Hook commands run with the daemon's own privileges — treat them as
+policy code, keep guarding hooks fast, and review hook files you did not write. The hook's
+environment carries `XERXES_HOOK_EVENT` and `XERXES_PROJECT_DIR`.
+
 ## Embedded configuration
 
 `XerxesConfig`, `ExecutorConfig`, `MemoryConfig`, `SecurityConfig`, and `LLMConfig` validate

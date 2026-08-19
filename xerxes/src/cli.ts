@@ -41,6 +41,8 @@ import {
   SkillRegistry,
   trustedHashWorkspaceSkills,
 } from "./extensions/skills.js";
+import { HookRunner } from "./extensions/hooks.js";
+import { hasUserHooks, parseUserHooksConfig, registerUserHooks } from "./extensions/userHooks.js";
 import {
   ToolRegistry,
   type ToolExecutionContext,
@@ -398,6 +400,9 @@ async function runDaemon(
       webSocket: new BunDiscordGatewayWebSocketPort(),
     },
     environment: process.env,
+    // Channel conversations can answer their own approval and question
+    // prompts; without the board a mid-turn request would park unanswered.
+    interactions,
     ...(projectDirectory === undefined ? {} : { projectDirectory }),
   });
   let finishDaemon: (() => void) | undefined;
@@ -891,6 +896,14 @@ function daemonRuntime(
       manager: subagentHost.managerPort,
     });
     activeToolCount = tools.definitions().length;
+    // Configured external hooks ride the same daemon settings reload as the
+    // rest of the runtime block; an invalid definition fails the rebuild
+    // loudly instead of silently dropping a guard.
+    const hookRunner = new HookRunner();
+    const userHooks = parseUserHooksConfig(settings.hooks);
+    if (hasUserHooks(userHooks)) {
+      registerUserHooks(hookRunner, userHooks, { cwd: workspaceRoot });
+    }
     return new AgentTurnRunner({
       agentDefinitions,
       agentMemory: (session) => memoryForProject(
@@ -912,6 +925,7 @@ function daemonRuntime(
           ...(runnerTools === undefined ? {} : { tools: runnerTools }),
         }).then((result) => result.systemPrompt),
       llm,
+      hookRunner,
       ...(connection.maxTokens !== undefined
         ? { maxTokens: connection.maxTokens }
         : {}),

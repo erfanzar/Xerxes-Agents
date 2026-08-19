@@ -13,7 +13,7 @@
 export const DEFAULT_MAX_CONSECUTIVE_DENIALS = 25
 
 /** Why a tool call never ran. Kept separate from tool failures, which are real work. */
-export type DenialKind = 'cancelled' | 'permission_rejected' | 'policy_denied'
+export type DenialKind = 'cancelled' | 'hook_denied' | 'permission_rejected' | 'policy_denied'
 
 export interface DenialRecord {
   readonly kind: DenialKind
@@ -130,6 +130,8 @@ function describeKind(kind: DenialKind): string {
       return 'a cancellation'
     case 'permission_rejected':
       return 'a rejected permission prompt'
+    case 'hook_denied':
+      return 'a hook denial'
     case 'policy_denied':
       return 'a policy denial'
   }

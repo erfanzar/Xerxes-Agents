@@ -5,6 +5,7 @@ import {
   ChannelTurnRouter,
   ConfiguredChannelManager,
   MarkdownAgentWorkspace,
+  type ChannelInteractionPort,
   type ConfiguredChannelFactory,
   type DiscordApplicationRestPort,
   type DiscordGatewayPorts,
@@ -22,6 +23,12 @@ export interface DaemonChannelManagerOptions {
   readonly environment: DaemonEnvironment
   /** Optional application-specific adapter constructor for injected transport ports. */
   readonly factory?: ConfiguredChannelFactory
+  /**
+   * Optional interaction reply port. When supplied, approval and question
+   * requests raised in channel sessions are forwarded to the conversation and
+   * answered by its next inbound message.
+   */
+  readonly interactions?: ChannelInteractionPort
   /** Workspace applied to daemon sessions created by channel conversations. */
   readonly projectDirectory?: string
   /** Optional explicit Markdown workspace used for channel journaling and system context. */
@@ -52,6 +59,7 @@ export function createDaemonChannelManager(
     runtime,
     streamPreviews: message => channelPreviewsEnabled(config, message.channel),
     workspace,
+    ...(options.interactions === undefined ? {} : { interactions: options.interactions }),
   })
   manager.setInboundHandler(message => router.handle(message))
   return manager

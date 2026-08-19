@@ -50,6 +50,21 @@ one edited preview by default; set `stream_previews` to `false` to send only the
 `preview_interval` is in seconds. Long-polling clears an existing Telegram webhook before it
 receives updates. The allowlist is fail-closed when `require_allowed_sender` is enabled.
 
+## Approvals and questions in the conversation
+
+When a channel turn raises an approval or question prompt — for example an always-approval
+tool such as `send_message`, or the ask-user question tool — the router forwards the request
+to the originating Telegram conversation and parks the turn until that conversation answers.
+The next inbound message is interpreted as the answer instead of starting a new turn:
+
+- approvals accept `yes` (approve once), `session` (approve for this session), or `no` (deny);
+  any other reply re-sends the usage line and keeps the request pending;
+- questions accept freeform text, or the 1-based number of a listed option.
+
+A request that expired before the answer arrived (aborted turn, daemon restart) is reported as
+no longer pending rather than resolved. Without this routing the prompt would park unanswered,
+because channel conversations have no terminal to prompt on.
+
 Treat inbound channel content as untrusted. The configured runtime still applies policy,
 permissions, prompt scanning, path safety, and the selected tool sandbox before executing a turn.
 Use injected transports in tests so no real Telegram credential or network call is required.

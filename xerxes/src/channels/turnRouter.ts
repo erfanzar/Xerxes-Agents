@@ -4,6 +4,23 @@
 import type { DaemonEvent, DaemonRuntime, DaemonSession } from '../daemon/runtime.js'
 import { scanContextContent } from '../security/promptScanner.js'
 import { ChannelManager } from './manager.js'
+
+/**
+ * Reply surface for human-in-the-loop requests raised during a channel turn.
+ *
+ * Structurally matches the daemon interaction board's public respond methods;
+ * the router depends only on this narrow port so tests and other hosts can
+ * inject their own answer path.
+ */
+export interface ChannelInteractionPort {
+  respondPermission(requestId: string, response: string): boolean
+  respondQuestion(requestId: string, answers: Readonly<Record<string, string>>): boolean
+}
+
+/** One outstanding approval or question a channel conversation must answer. */
+type PendingChannelInteraction =
+  | { readonly kind: 'permission'; readonly requestId: string }
+  | { readonly kind: 'question'; readonly questionId: string; readonly requestId: string; readonly options: readonly string[] }
 import {
   createSessionResetPolicy,
   shouldReset,
@@ -63,6 +80,13 @@ export interface ChannelTurnRouterOptions {
   readonly workspace?: ChannelWorkspace
   /** Injectable clock for session inactivity policy and deterministic tests. */
   readonly clock?: () => Date
+  /**
+   * Optional interaction reply port. When present, approval and question
+   * requests raised mid-turn are forwarded to the originating channel
+   * conversation and the next inbound message from that conversation is
+   * interpreted as the answer instead of starting a new turn.
+   */
+  readonly interactions?: ChannelInteractionPort
 }
 
 /**
@@ -90,6 +114,8 @@ export class ChannelTurnRouter {
   private readonly streamPreviews: ChannelPreviewPolicy
   private readonly typingInterval: number
   private readonly workspace: ChannelWorkspace | undefined
+  private readonly interactions: ChannelInteractionPort | undefined
+  private readonly pendingInteractions = new Map<string, PendingChannelInteraction>()
 
   constructor(options: ChannelTurnRouterOptions) {
     this.agentId = nonBlank(options.agentId) ?? 'default'
@@ -111,6 +137,7 @@ export class ChannelTurnRouter {
     this.streamPreviews = options.streamPreviews ?? true
     this.typingInterval = positiveInteger(options.typingInterval ?? DEFAULT_TYPING_INTERVAL, 'typingInterval')
     this.workspace = options.workspace
+    this.interactions = options.interactions
   }
 
   /** Accept one inbound message, serializing concurrent deliveries for its conversation. */
@@ -127,6 +154,14 @@ export class ChannelTurnRouter {
     if (slash?.name === 'stop' || slash?.name === 'cancel') {
       await this.journalInbound(message)
       await this.handleCommand(message, key, slash)
+      return
+    }
+    // An outstanding approval/question answer bypasses the per-conversation
+    // turn queue and its cap: the running turn is parked on exactly this
+    // answer, so queueing the reply behind that turn would deadlock the
+    // conversation.
+    if (this.pendingInteractions.has(key)) {
+      await this.answerPendingInteraction(message, key)
       return
     }
     this.evictIdleBookkeeping(validDate(this.clock()))
@@ -230,6 +265,7 @@ export class ChannelTurnRouter {
         const chunk = streamedText(event)
         if (chunk) preview?.push(chunk)
         collectOutput(output, event)
+        this.observeInteractionEvent(sessionKey, message, event)
       })
     } catch (error) {
       // Finish the placeholder (which also cancels its pending edit timer) so a
@@ -362,6 +398,78 @@ export class ChannelTurnRouter {
       this.report(error, message)
       return undefined
     }
+  }
+
+  /**
+   * Forward mid-turn approval and question requests to the conversation.
+   *
+   * The emit callback is synchronous inside the running turn, so delivery is
+   * fire-and-forget; a failed prompt send is reported without breaking the
+   * turn that is legitimately parked waiting for an answer.
+   */
+  private observeInteractionEvent(sessionKey: string, message: ChannelMessage, event: DaemonEvent): void {
+    if (this.interactions === undefined) return
+    if (event.type === 'approval_request') {
+      const requestId = eventString(event, 'id')
+      if (!requestId) return
+      this.pendingInteractions.set(sessionKey, { kind: 'permission', requestId })
+      const name = eventString(event, 'name') || 'tool'
+      const description = eventString(event, 'description')
+      void this.reply(message, [
+        `Approval needed: ${name}`,
+        ...(description ? [description] : []),
+        'Reply yes to approve once, session to approve for this session, or no to deny.',
+      ].join('\n')).catch(error => this.report(error, message))
+      return
+    }
+    if (event.type === 'question_request') {
+      const requestId = eventString(event, 'id')
+      const question = firstQuestion(event)
+      if (!requestId || question === undefined) return
+      this.pendingInteractions.set(sessionKey, {
+        kind: 'question',
+        requestId,
+        questionId: question.id,
+        options: question.options,
+      })
+      const lines = [`Question: ${question.question}`]
+      question.options.forEach((option, index) => lines.push(`${index + 1}. ${option}`))
+      lines.push(question.options.length
+        ? 'Reply with your answer or the option number.'
+        : 'Reply with your answer.')
+      void this.reply(message, lines.join('\n')).catch(error => this.report(error, message))
+    }
+  }
+
+  /** Consume one inbound message as the answer to the conversation's pending request. */
+  private async answerPendingInteraction(message: ChannelMessage, sessionKey: string): Promise<void> {
+    const pending = this.pendingInteractions.get(sessionKey)
+    const port = this.interactions
+    if (pending === undefined || port === undefined) return
+    const text = message.text.trim()
+    if (pending.kind === 'permission') {
+      const decision = permissionAnswer(text)
+      if (decision === undefined) {
+        await this.reply(message, 'Reply yes to approve once, session to approve for this session, or no to deny.')
+        return
+      }
+      if (!port.respondPermission(pending.requestId, decision)) {
+        this.pendingInteractions.delete(sessionKey)
+        await this.reply(message, 'That approval request is no longer pending.')
+        return
+      }
+      this.pendingInteractions.delete(sessionKey)
+      await this.reply(message, decision === 'reject' ? 'Denied.' : 'Approved.')
+      return
+    }
+    const answer = questionAnswer(text, pending.options)
+    if (!port.respondQuestion(pending.requestId, { [pending.questionId]: answer })) {
+      this.pendingInteractions.delete(sessionKey)
+      await this.reply(message, 'That question is no longer pending.')
+      return
+    }
+    this.pendingInteractions.delete(sessionKey)
+    await this.reply(message, 'Answer sent.')
   }
 
   private report(error: unknown, message: ChannelMessage): void {
@@ -653,6 +761,57 @@ function rawStringPayload(payload: Readonly<Record<string, unknown>>, key: strin
 function nonBlank(value: string | undefined): string | undefined {
   const normalized = value?.trim()
   return normalized || undefined
+}
+
+/** Read one string field from a daemon event payload. */
+function eventString(event: DaemonEvent, key: string): string {
+  const value = event.payload[key]
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+interface ChannelQuestionPrompt {
+  readonly id: string
+  readonly options: readonly string[]
+  readonly question: string
+}
+
+/** Extract the first question from a question_request payload; malformed payloads are ignored. */
+function firstQuestion(event: DaemonEvent): ChannelQuestionPrompt | undefined {
+  const questions = event.payload.questions
+  if (!Array.isArray(questions) || questions.length === 0) return undefined
+  const first = questions[0]
+  if (typeof first !== 'object' || first === null || Array.isArray(first)) return undefined
+  const record = first as Record<string, unknown>
+  const question = typeof record.question === 'string' ? record.question.trim() : ''
+  if (!question) return undefined
+  const options = Array.isArray(record.options)
+    ? record.options.filter((option): option is string => typeof option === 'string' && option.trim().length > 0)
+    : []
+  return {
+    question,
+    options,
+    id: typeof record.id === 'string' && record.id.trim() ? record.id.trim() : 'answer',
+  }
+}
+
+/** Map a conversational reply onto the daemon's permission decision vocabulary. */
+function permissionAnswer(text: string): 'approve' | 'approve_for_session' | 'reject' | undefined {
+  const normalized = text.trim().toLowerCase()
+  if (/^(y|yes|ok|okay|approve|allow)$/.test(normalized)) return 'approve'
+  if (/^(session|always|approve_for_session|allow session)$/.test(normalized)) return 'approve_for_session'
+  if (/^(n|no|deny|reject|cancel|stop)$/.test(normalized)) return 'reject'
+  return undefined
+}
+
+/** Numbered options accept their 1-based index; everything else is a freeform answer. */
+function questionAnswer(text: string, options: readonly string[]): string {
+  const trimmed = text.trim()
+  if (options.length > 0 && /^\d+$/.test(trimmed)) {
+    const index = Number.parseInt(trimmed, 10) - 1
+    const option = options[index]
+    if (option !== undefined) return option
+  }
+  return trimmed
 }
 
 function positiveInteger(value: number, name: string): number {

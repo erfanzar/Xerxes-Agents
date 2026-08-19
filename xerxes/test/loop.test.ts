@@ -5,6 +5,7 @@ import { expect, test } from 'bun:test'
 
 import type { ToolLoopBlockAuditInput } from '../src/audit/emitter.js'
 import { ToolRegistry } from '../src/executors/toolRegistry.js'
+import { HookRunner, TOOL_PERMISSION_HOOK } from '../src/extensions/hooks.js'
 import type { CompletionRequest, LlmClient, LlmDelta } from '../src/llms/client.js'
 import { registerInteractionModeTool } from '../src/runtime/interactionModeTool.js'
 import { scanInjections } from '../src/streaming/attachments.js'
@@ -929,4 +930,67 @@ test('an identical sub-agent batch is injected once and does not extend the turn
   expect(state.messages.filter(message => message.content === `[sub-agent events]\n${repeated[0]}`))
     .toHaveLength(1)
   expect(events.at(-1)).toMatchObject({ type: 'turn_done' })
+})
+
+test('a permission-gate hook denial blocks the call and surfaces its reason to the model', async () => {
+  const hookRunner = new HookRunner()
+  hookRunner.register(TOOL_PERMISSION_HOOK, () => ({ allow: false, reason: 'blocked by test guard', source: 'test' }))
+  const registry = new ToolRegistry()
+  let executions = 0
+  registry.register(readFile, () => { executions += 1; return 'should never run' })
+  const state = createAgentState()
+  const events = []
+
+  for await (const event of runTurn({
+    model: 'gpt-4o',
+    permissionMode: 'accept-all',
+    state,
+    tools: [readFile],
+    userMessage: 'inspect the readme',
+  }, {
+    hookRunner,
+    llm: new ToolThenTextClient(),
+    toolExecutor: registry,
+  })) {
+    events.push(event)
+  }
+
+  expect(executions).toBe(0)
+  expect(events.some(event => event.type === 'permission_request')).toBeFalse()
+  const toolEnd = events.find(event => event.type === 'tool_end')
+  expect(toolEnd).toMatchObject({
+    result: { name: 'ReadFile', permitted: false, toolCallId: 'call_1' },
+  })
+  expect(toolEnd?.result.result).toContain('blocked by test guard')
+  expect(events.at(-1)).toMatchObject({ type: 'turn_done' })
+})
+
+test('a permission-gate hook rewrite replaces the tool arguments before execution', async () => {
+  const hookRunner = new HookRunner()
+  hookRunner.register(TOOL_PERMISSION_HOOK, () => ({
+    allow: true,
+    source: 'test',
+    updatedArguments: { path: 'rewritten.ts' },
+  }))
+  const registry = new ToolRegistry()
+  const seen: unknown[] = []
+  registry.register(readFile, inputs => { seen.push(inputs.path); return 'read complete' })
+  const state = createAgentState()
+
+  for await (const _event of runTurn({
+    model: 'gpt-4o',
+    permissionMode: 'accept-all',
+    state,
+    tools: [readFile],
+    userMessage: 'inspect the readme',
+  }, {
+    hookRunner,
+    llm: new ToolThenTextClient(),
+    toolExecutor: registry,
+  })) {
+    // Drain the turn to completion.
+  }
+
+  expect(seen).toEqual(['rewritten.ts'])
+  expect(state.messages[2]).toMatchObject({ role: 'tool', tool_call_id: 'call_1', content: 'read complete' })
 })

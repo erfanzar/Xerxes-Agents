@@ -38,6 +38,7 @@ import {
   type ToolPolicy,
 } from '../streaming/permissions.js'
 import type { ChatMessage, MessageContent } from '../types/messages.js'
+import type { HookRunner } from '../extensions/hooks.js'
 import { messageText } from '../types/messages.js'
 import { imageUrlContentParts } from './images.js'
 import type { ToolCall, ToolDefinition } from '../types/toolCalls.js'
@@ -73,6 +74,11 @@ export interface AgentTurnRunnerOptions {
   readonly permissionBroker?: PermissionBroker
   readonly permissionMode?: PermissionMode
   readonly policy?: ToolPolicy
+  /**
+   * Optional hook dispatch surface for the turn loop. Hosts register plugin or
+   * configured user hooks here; absent it the turn dispatches no hooks at all.
+   */
+  readonly hookRunner?: HookRunner
   /**
    * Relieve a mid-turn context overflow. The loop detects the overflow and can
    * retry the round, but owns no compaction policy — without this the turn can
@@ -349,6 +355,7 @@ export class AgentTurnRunner implements TurnRunner {
         } : {}),
         ...(controls.drainSteer ? { drainSteer: controls.drainSteer } : {}),
         llm: this.options.llm,
+        ...(this.options.hookRunner ? { hookRunner: this.options.hookRunner } : {}),
         ...(permissionBroker ? { permissionBroker } : {}),
         ...(this.options.policy ? { policy: this.options.policy } : {}),
         ...(toolExecutor ? { toolExecutor } : {}),
