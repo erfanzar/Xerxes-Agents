@@ -347,7 +347,13 @@ class GatewayConnection implements DaemonTransportConnection {
       return false
     }
     this.queuedBytes += byteLength
-    const run = this.pending.then(task, task)
+    const runIfAttached = async (): Promise<void> => {
+      if (this.websocket?.readyState !== WEBSOCKET_OPEN) {
+        return
+      }
+      await task()
+    }
+    const run = this.pending.then(runIfAttached, runIfAttached)
     this.pending = run
     void run.then(
       () => {

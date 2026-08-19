@@ -71,6 +71,29 @@ test('Anthropic SSE adapter normalizes text, thinking, usage, and tool calls', a
   })
 })
 
+test('Anthropic streaming ignores semantic deltas after message_stop', async () => {
+  const client = new AnthropicMessagesClient({
+    apiKey: 'test-key',
+    fetchImplementation: async () => sseResponse([
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'before' } },
+      { type: 'message_stop', usage: { output_tokens: 3 } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'after' } },
+      { type: 'message_delta', delta: { stop_reason: 'max_tokens' }, usage: { output_tokens: 99 } },
+    ]),
+  })
+
+  expect(await collect(client.stream({
+    model: 'claude-sonnet-4-6',
+    messages: [{ role: 'user', content: 'hi' }],
+  }))).toEqual([
+    { content: 'before' },
+    { usage: { inputTokens: 0, outputTokens: 3 } },
+    // Usage remains valid terminal metadata even when the same late frame's
+    // semantic finish change is ignored.
+    { usage: { inputTokens: 0, outputTokens: 99 } },
+  ])
+})
+
 test('Anthropic requests cache stable prefixes and retain cache token usage', async () => {
   let payload: Record<string, unknown> | undefined
   const response = sseResponse([

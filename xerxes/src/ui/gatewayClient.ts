@@ -31,6 +31,8 @@ import type { SessionInfo, Usage } from './types.js'
 
 const MAX_GATEWAY_LOG_LINES = 200
 const MAX_LOG_LINE_BYTES = 4096
+/** Matches the daemon socket protocol cap for one newline-delimited JSON-RPC frame. */
+export const MAX_GATEWAY_FRAME_BYTES = 16 * 1024 * 1024
 const STARTUP_TIMEOUT_MS = Math.max(
   5000,
   Number.parseInt(process.env.XERXES_TUI_STARTUP_TIMEOUT_MS ?? '15000', 10) || 15000
@@ -612,11 +614,26 @@ export class GatewayClient extends EventEmitter {
     while (nl !== -1) {
       const line = this.buffer.slice(0, nl)
       this.buffer = this.buffer.slice(nl + 1)
+      if (Buffer.byteLength(line, 'utf8') > MAX_GATEWAY_FRAME_BYTES) {
+        this.closeForOversizedFrame()
+        return
+      }
       if (line.trim()) {
         this.onLine(line)
       }
       nl = this.buffer.indexOf('\n')
     }
+    if (Buffer.byteLength(this.buffer, 'utf8') > MAX_GATEWAY_FRAME_BYTES) {
+      this.closeForOversizedFrame()
+    }
+  }
+
+  private closeForOversizedFrame(): void {
+    this.buffer = ''
+    this.emitClient('gateway.protocol_error', {
+      message: `gateway frame exceeds maximum size of ${MAX_GATEWAY_FRAME_BYTES} bytes`
+    })
+    this.socket?.destroy()
   }
 
   private onLine(line: string): void {

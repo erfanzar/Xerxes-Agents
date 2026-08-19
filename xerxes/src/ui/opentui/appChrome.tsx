@@ -3,9 +3,21 @@
 /** @jsxImportSource @opentui/react */
 // Quiet session chrome: mode/title above the transcript and workspace below.
 // Context and model metadata live with the composer, where they are actionable.
+import type { SessionTab } from '../app/interfaces.js'
+import type { LiveSessionStatus } from '../gatewayTypes.js'
 import type { Theme } from '../theme.js'
 
 import { Box, Span, Text } from './primitives.js'
+
+const TAB_STATUS_GLYPH: Record<LiveSessionStatus, string> = {
+  idle: '✓',
+  starting: '…',
+  waiting: '?',
+  working: '◆'
+}
+
+const truncate = (value: string, max: number) =>
+  value.length > max ? `${value.slice(0, Math.max(1, max - 1))}…` : value
 
 export const displayModeLabel = (mode?: string): string => {
   const value = (mode || 'code').trim()
@@ -46,8 +58,66 @@ export function SessionHeader({
   )
 }
 
-export function WorkspaceFooter({ cwdLabel, rightLabel, t }: { cwdLabel: string; rightLabel?: string; t: Theme }) {
-  if (!cwdLabel && !rightLabel) {
+/**
+ * Row of live-session tabs. Hidden for a single session — one tab is just the
+ * header restated. When the strip cannot fit the terminal it collapses to a
+ * `‹ n/total ›` position indicator instead of truncated titles.
+ */
+export function SessionTabStrip({
+  activeId,
+  tabs,
+  t,
+  width
+}: {
+  activeId: null | string
+  tabs: SessionTab[]
+  t: Theme
+  width: number
+}) {
+  if (tabs.length < 2) {
+    return null
+  }
+
+  const activeIndex = tabs.findIndex(tab => tab.id === activeId)
+  // Each tab costs roughly `glyph + space + title + padding`; estimate against
+  // the terminal width and fall back to the compact indicator when over.
+  const perTab = 12
+  const fits = tabs.length * perTab + 4 <= width
+
+  if (!fits) {
+    const current = activeIndex >= 0 ? activeIndex + 1 : 1
+    return (
+      <Box flexDirection="row" flexShrink={0} paddingX={2} width="100%">
+        <Text color={t.color.muted}>{`‹ ${current}/${tabs.length} ›`}</Text>
+      </Box>
+    )
+  }
+
+  return (
+    <Box flexDirection="row" flexShrink={0} overflow="hidden" paddingX={2} width="100%">
+      {tabs.map(tab => {
+        const active = tab.id === activeId
+        const glyph = TAB_STATUS_GLYPH[tab.status] ?? '·'
+        const label = truncate(tab.title, 18)
+        return (
+          <Box
+            backgroundColor={active ? t.color.selectionBg : undefined}
+            flexShrink={0}
+            key={tab.id}
+          >
+            <Text wrap="truncate-end">
+              <Span bold={active} color={active ? t.color.accent : t.color.muted}>
+                {` ${glyph} ${label} `}
+              </Span>
+            </Text>
+          </Box>
+        )
+      })}
+    </Box>
+  )
+}
+
+export function WorkspaceFooter({ cwdLabel, rightLabel, t }: { cwdLabel: string; rightLabel?: string; t: Theme }) {  if (!cwdLabel && !rightLabel) {
     return null
   }
 

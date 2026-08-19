@@ -10,9 +10,8 @@ const DEFAULT_MAX_BODY_BYTES = 1_048_576
 
 export interface ChannelWebhookServerOptions {
   /**
-   * Bearer token required for the channel list endpoint. When omitted the
-   * list endpoint is unauthenticated and safe only because the default bind
-   * is loopback (127.0.0.1); configure a token before binding publicly.
+   * Shared bearer token required for every endpoint on a non-loopback bind.
+   * It may be omitted only when the listener is bound to loopback.
    */
   readonly authToken?: string
   readonly host?: string
@@ -27,9 +26,8 @@ export interface ChannelWebhookServerOptions {
  *
  * It intentionally exposes only a list endpoint and POST delivery to known
  * host-configured channel names. Provider signature checks remain the
- * responsibility of each channel adapter. The list endpoint enumerates
- * configured channels, so it requires `authToken` whenever one is configured;
- * without a token it relies on the loopback default bind.
+ * responsibility of each channel adapter. A non-loopback bind additionally
+ * requires shared bearer authentication for the entire HTTP edge.
  */
 export class ChannelWebhookServer {
   readonly authToken: string
@@ -44,6 +42,9 @@ export class ChannelWebhookServer {
     this.manager = options.manager
     this.authToken = options.authToken?.trim() ?? ''
     this.host = nonBlank(options.host) ?? '127.0.0.1'
+    if (!isLoopbackHost(this.host) && !this.authToken) {
+      throw new TypeError('non-loopback webhook listeners require authToken')
+    }
     this.port = portValue(options.port ?? 0)
     this.maxBodyBytes = bodyLimit(options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES)
     this.pathPrefix = normalizedPrefix(options.pathPrefix ?? '/channels')
@@ -192,6 +193,14 @@ function json(body: unknown): Response {
 function nonBlank(value: string | undefined): string | undefined {
   const normalized = value?.trim()
   return normalized || undefined
+}
+
+function isLoopbackHost(host: string): boolean {
+  const normalized = host.trim().toLowerCase()
+  return normalized === 'localhost'
+    || normalized === '::1'
+    || normalized === '[::1]'
+    || /^127(?:\.\d{1,3}){3}$/.test(normalized)
 }
 
 function normalizedPrefix(value: string): string {

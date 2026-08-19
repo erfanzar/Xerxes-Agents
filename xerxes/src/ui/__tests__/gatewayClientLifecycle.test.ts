@@ -9,7 +9,7 @@ import { join } from 'node:path'
 
 import { describe, expect, it, vi } from 'vitest'
 
-import { GatewayClient, resolveProjectDir } from '../gatewayClient.js'
+import { GatewayClient, MAX_GATEWAY_FRAME_BYTES, resolveProjectDir } from '../gatewayClient.js'
 import type { SessionActiveListResponse } from '../gatewayTypes.js'
 import type { SessionInfo } from '../types.js'
 
@@ -634,6 +634,27 @@ describe('GatewayClient session lifecycle', () => {
 
     await expect(response).resolves.toEqual({ title: 'clean' })
     expect(protocolErrors).toHaveLength(0)
+  })
+
+  it('closes with a protocol error when an unterminated frame exceeds the daemon frame cap', () => {
+    const client = new GatewayClient({ projectDir: process.cwd(), sessionKey: 'test:frame-cap' })
+    const socket = fakeSocket()
+    const protocolErrors: Array<{ payload?: { message?: string }; type?: string }> = []
+
+    client.on('gateway.protocol_error', event =>
+      protocolErrors.push(event as { payload?: { message?: string }; type?: string })
+    )
+    attachFakeSocket(client, socket)
+    socket.emit('data', 'x'.repeat(MAX_GATEWAY_FRAME_BYTES + 1))
+
+    expect(protocolErrors).toEqual([
+      {
+        payload: { message: `gateway frame exceeds maximum size of ${MAX_GATEWAY_FRAME_BYTES} bytes` },
+        type: 'gateway.protocol_error'
+      }
+    ])
+    expect(socket.destroy).toHaveBeenCalledOnce()
+    expect((client as unknown as { buffer: string }).buffer).toBe('')
   })
 
   it('commits the session key only after a successful initialize', async () => {

@@ -352,6 +352,138 @@ test('terminal tasks are evicted beyond the retention bound while live tasks sur
   await manager.close()
 })
 
+test('wait and waitAll track externally visible pending worktree setup before a handle exists', async () => {
+  const createGate = deferred()
+  const manager = new SubAgentManager({
+    idFactory: () => 'pending-worktree-wait',
+    worktree: {
+      create: async () => {
+        await createGate.promise
+        return { branch: 'agent/pending-wait', path: '/worktrees/pending-wait' }
+      },
+      isClean: () => Promise.resolve(true),
+      remove: () => Promise.resolve(),
+    },
+    runner: () => ({ content: 'finished' }),
+  })
+
+  try {
+    const spawning = manager.spawn({ prompt: 'isolated work', isolation: 'worktree' })
+    await manager.waitFor(() => manager.listTasks().length === 1, { timeoutMs: 1_000 })
+    const task = manager.listTasks()[0]!
+
+    const shortWait = await manager.wait(task.id, 10)
+    expect(shortWait).toBe(task)
+    expect(task.status).toBe('pending')
+    const shortBatch = await manager.waitAll([task.id], 10)
+    expect(shortBatch.completed).toEqual([])
+    expect(shortBatch.pending.map(snapshot => snapshot.id)).toEqual([task.id])
+
+    createGate.resolve()
+    await spawning
+    const waited = await manager.wait(task.id, 1_000)
+    expect(waited?.status).toBe('completed')
+    const batch = await manager.waitAll([task.id], 1_000)
+    expect(batch.completed.map(snapshot => snapshot.id)).toEqual([task.id])
+    expect(batch.pending).toEqual([])
+  } finally {
+    createGate.resolve()
+    await manager.close()
+  }
+})
+
+test('cancelled pending worktree setup holds the spawned-agent budget until setup settles', async () => {
+  const createGate = deferred()
+  let creates = 0
+  const manager = new SubAgentManager({
+    maxSpawnedAgents: 1,
+    worktree: {
+      create: async request => {
+        creates += 1
+        if (creates === 1) await createGate.promise
+        return { branch: `agent/${request.taskId}`, path: `/worktrees/${request.taskId}` }
+      },
+      isClean: () => Promise.resolve(true),
+      remove: () => Promise.resolve(),
+    },
+    runner: () => ({ content: 'finished' }),
+  })
+
+  try {
+    const spawning = manager.spawn({ prompt: 'first', isolation: 'worktree' })
+    await manager.waitFor(() => manager.listTasks().length === 1, { timeoutMs: 1_000 })
+    const first = manager.listTasks()[0]!
+    expect(manager.cancel(first.id)).toBeTrue()
+    expect(first.status).toBe('cancelled')
+    await expect(manager.spawn({ prompt: 'must wait', isolation: 'worktree' })).rejects.toThrow(
+      'Spawned-agent budget (1) reached',
+    )
+
+    createGate.resolve()
+    await spawning
+    const next = await manager.spawn({ prompt: 'after setup', isolation: 'worktree' })
+    await manager.wait(next.id, 1_000)
+    expect(next.status).toBe('completed')
+  } finally {
+    createGate.resolve()
+    await manager.close()
+  }
+})
+
+test('cancel during pending worktree creation prevents the agent from launching', async () => {
+  const createGate = deferred()
+  const removed: string[] = []
+  let runnerCalls = 0
+  const manager = new SubAgentManager({
+    idFactory: () => 'pending-worktree-cancel',
+    worktree: {
+      create: async () => {
+        await createGate.promise
+        return { branch: 'agent/pending', path: '/worktrees/pending' }
+      },
+      isClean: () => Promise.resolve(true),
+      remove: tree => {
+        removed.push(tree.path)
+        return Promise.resolve()
+      },
+    },
+    runner: () => {
+      runnerCalls += 1
+      return { content: 'must not run' }
+    },
+  })
+
+  try {
+    const spawning = manager.spawn({ prompt: 'isolated work', isolation: 'worktree' })
+    await manager.waitFor(() => manager.listTasks().length === 1, { timeoutMs: 1_000 })
+    const task = manager.listTasks()[0]!
+
+    let cancelResult: boolean | undefined
+    let cancelError: string | undefined
+    try {
+      cancelResult = manager.cancel(task.id)
+    } catch (error) {
+      cancelError = error instanceof Error ? error.message : String(error)
+    }
+
+    createGate.resolve()
+    await spawning
+    await Bun.sleep(25)
+
+    expect({ cancelError, cancelResult, runnerCalls, status: task.status }).toEqual({
+      cancelError: undefined,
+      cancelResult: true,
+      runnerCalls: 0,
+      status: 'cancelled',
+    })
+    await manager.waitFor(() => removed.length === 1, { timeoutMs: 1_000 })
+    expect(removed).toEqual(['/worktrees/pending'])
+  } finally {
+    createGate.resolve()
+    await manager.close()
+  }
+})
+
 test('cancel waits for the in-flight run before done events and worktree cleanup', async () => {
   const gate = deferred()
   const removed: string[] = []

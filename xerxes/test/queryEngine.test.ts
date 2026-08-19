@@ -34,6 +34,33 @@ class UsageClient implements LlmClient {
   }
 }
 
+function deferred(): { readonly promise: Promise<void>; readonly resolve: () => void } {
+  let resolve!: () => void
+  const promise = new Promise<void>(done => {
+    resolve = done
+  })
+  return { promise, resolve }
+}
+
+class OverlapClient implements LlmClient {
+  readonly firstStarted = deferred()
+  readonly releaseFirst = deferred()
+  calls = 0
+
+  async *stream(_request: CompletionRequest): AsyncGenerator<LlmDelta> {
+    this.calls += 1
+    const call = this.calls
+    if (call === 1) {
+      this.firstStarted.resolve()
+      await this.releaseFirst.promise
+    }
+    yield {
+      content: `response-${call}`,
+      usage: { inputTokens: call, outputTokens: call },
+    }
+  }
+}
+
 test('query engine applies an injected context compressor at its configured turn boundary', async () => {
   const engine = new QueryEngine({ llm: new ReplyClient() }, {
     config: { compactAfterTurns: 2, model: 'configured-test-model' },
@@ -60,6 +87,42 @@ test('query engine rejects execution without an explicitly configured model', ()
     .toThrow(ConfigurationError)
   expect(() => new QueryEngine({ llm: new ReplyClient() }))
     .toThrow('select a provider model or pass an explicit model')
+})
+
+test('query engine serializes overlapping submissions and preserves cancellation while queued', async () => {
+  const client = new OverlapClient()
+  const tracker = new CostTracker({ now: () => new Date('2026-08-03T10:00:00.000Z') })
+  const engine = new QueryEngine({ llm: client }, {
+    config: { model: 'configured-test-model' },
+    costTracker: tracker,
+  })
+
+  const first = engine.submit('first')
+  await client.firstStarted.promise
+  const second = engine.submit('second')
+  const cancelled = new AbortController()
+  const reason = new Error('cancel queued query')
+  const third = engine.submit('third', cancelled.signal).catch(error => error as unknown)
+  cancelled.abort(reason)
+
+  await Bun.sleep(0)
+  expect(client.calls).toBe(1)
+  expect(engine.state.messages).toEqual([{ role: 'user', content: 'first' }])
+
+  client.releaseFirst.resolve()
+  expect(await first).toMatchObject({ prompt: 'first', output: 'response-1' })
+  expect(await second).toMatchObject({ prompt: 'second', output: 'response-2' })
+  expect(await third).toBe(reason)
+
+  expect(client.calls).toBe(2)
+  expect(engine.state.messages).toHaveLength(4)
+  expect(engine.state.messages).toMatchObject([
+    { role: 'user', content: 'first' },
+    { role: 'assistant', content: 'response-1' },
+    { role: 'user', content: 'second' },
+    { role: 'assistant', content: 'response-2' },
+  ])
+  expect(tracker.events.map(event => event.label)).toEqual(['turn_1', 'turn_2'])
 })
 
 test('query engine records each completed provider turn in its session cost ledger', async () => {

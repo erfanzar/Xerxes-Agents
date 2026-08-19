@@ -102,14 +102,35 @@ test('daemon channel host binds configured adapters to native runtime turns and 
   }
 })
 
-test('daemon channel webhook listener settings inherit control host and validate port fallback', () => {
+test('daemon channel webhook listener uses an independent loopback host and validates port fallback', () => {
   const config = testConfig('/workspace', {})
   const options = daemonChannelWebhookOptions({
     ...config,
     control: { websocket_host: '0.0.0.0', webhook_port: 'not-a-port' },
   })
 
-  expect(options).toEqual({ host: '0.0.0.0', port: 11997 })
+  expect(options).toEqual({ host: '127.0.0.1', port: 11997 })
+})
+
+test('daemon channel webhook options reject an unauthenticated public bind even with an irrelevant channel secret', () => {
+  const config = testConfig('/workspace', {
+    relay: { type: 'generic_webhook', enabled: true, settings: { signing_secret: 'not-used-by-generic-webhook' } },
+  })
+
+  expect(() => daemonChannelWebhookOptions({
+    ...config,
+    control: { webhook_host: '0.0.0.0' },
+  })).toThrow('non-loopback webhook listeners require control.auth_token')
+})
+
+test('daemon channel webhook options allow a public bind with shared bearer authentication', () => {
+  const config = testConfig('/workspace', {})
+  const options = daemonChannelWebhookOptions({
+    ...config,
+    control: { webhook_host: '0.0.0.0', auth_token: ' edge-secret ' },
+  })
+
+  expect(options).toEqual({ authToken: 'edge-secret', host: '0.0.0.0', port: 11997 })
 })
 
 test('daemon channel webhook listener receives the configured control auth token', () => {
@@ -122,50 +143,13 @@ test('daemon channel webhook listener receives the configured control auth token
   expect(options).toEqual({ authToken: 'edge-secret', host: '127.0.0.1', port: 11997 })
 })
 
-test('daemon channel webhook options warn when a public host binds signature-less channels', () => {
-  const warnings = captureWarnings(() => {
-    const config = testConfig('/workspace', {
-      relay: { type: 'generic_webhook', enabled: true, settings: {} },
-      signed_bot: { type: 'telegram', enabled: true, settings: { transport: 'webhook', webhook_secret_token: 's3cret' } },
-      polling_bot: { type: 'telegram', enabled: true, settings: { transport: 'polling' } },
-      off_duty: { type: 'slack', enabled: false, settings: {} },
-    })
-    const options = daemonChannelWebhookOptions({
-      ...config,
-      control: { websocket_host: '127.0.0.1', webhook_host: '0.0.0.0' },
-    })
-    expect(options.host).toBe('0.0.0.0')
-  })
+test('daemon channel webhook options keep loopback unauthenticated for compatibility', () => {
+  const options = daemonChannelWebhookOptions(testConfig('/workspace', {
+    relay: { type: 'generic_webhook', enabled: true, settings: {} },
+  }))
 
-  expect(warnings).toHaveLength(1)
-  expect(warnings[0]).toContain('SECURITY WARNING')
-  expect(warnings[0]).toContain('relay')
-  expect(warnings[0]).not.toContain('signed_bot')
-  expect(warnings[0]).not.toContain('polling_bot')
-  expect(warnings[0]).not.toContain('off_duty')
+  expect(options).toEqual({ host: '127.0.0.1', port: 11997 })
 })
-
-test('daemon channel webhook options stay quiet for loopback binds', () => {
-  const warnings = captureWarnings(() => {
-    daemonChannelWebhookOptions(testConfig('/workspace', {
-      relay: { type: 'generic_webhook', enabled: true, settings: {} },
-    }))
-  })
-
-  expect(warnings).toEqual([])
-})
-
-function captureWarnings(run: () => void): string[] {
-  const warnings: string[] = []
-  const original = console.warn
-  console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(' ')) }
-  try {
-    run()
-  } finally {
-    console.warn = original
-  }
-  return warnings
-}
 
 test('configured daemon channel settings can disable streamed editable previews', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'xerxes-bun-channel-preview-config-'))

@@ -1,7 +1,8 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { expect, test } from 'bun:test'
+import { expect, spyOn, test } from 'bun:test'
+import { getEventListeners } from 'node:events'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -10,6 +11,7 @@ import {
   ChannelManager,
   ChannelQueueFullError,
   ChannelRoutingError,
+  ChannelTurnDeliveryError,
   ChannelTurnRouter,
   MarkdownAgentWorkspace,
   MessageDirection,
@@ -218,6 +220,53 @@ test('channel turn router creates durable conversation turns and replies through
   expect(channel.typing).toBeGreaterThan(0)
 })
 
+test('typing interval sleep removes its abort listener when the timer wins', async () => {
+  const secondTyping = Promise.withResolvers<void>()
+  const releaseTyping = Promise.withResolvers<void>()
+  class GatedTypingChannel extends RecordingChannel {
+    override async sendTyping(roomId: string | undefined): Promise<void> {
+      await super.sendTyping(roomId)
+      if (this.typing === 2) {
+        secondTyping.resolve()
+        await releaseTyping.promise
+      }
+    }
+  }
+  const channel = new GatedTypingChannel()
+  const runtime = new ControlledRuntime()
+  const manager = new ChannelManager({ channels: [['telegram', channel]] })
+  const observedSignals = new Set<AbortSignal>()
+  const addEventListener = AbortSignal.prototype.addEventListener
+  const listenerSpy = spyOn(AbortSignal.prototype, 'addEventListener').mockImplementation(function (
+    this: AbortSignal,
+    ...args: Parameters<AbortSignal['addEventListener']>
+  ): void {
+    if (args[0] === 'abort') observedSignals.add(this)
+    addEventListener.apply(this, args)
+  })
+  const receiving = (async () => {
+    const router = new ChannelTurnRouter({ channels: manager, runtime, streamPreviews: false, typingInterval: 1 })
+    manager.setInboundHandler(message => router.handle(message))
+    await manager.enable('telegram')
+    await channel.receive(createChannelMessage({
+      channel: 'telegram',
+      channelUserId: 'listener-user',
+      direction: MessageDirection.INBOUND,
+      text: 'wait through a typing interval',
+    }))
+  })()
+  try {
+    await secondTyping.promise
+    expect(observedSignals).toHaveLength(1)
+    expect(getEventListeners([...observedSignals][0]!, 'abort')).toHaveLength(0)
+  } finally {
+    releaseTyping.resolve()
+    runtime.releases[0]?.()
+    await receiving
+    listenerSpy.mockRestore()
+  }
+})
+
 test('channel turn router serializes simultaneous deliveries for one conversation', async () => {
   const channel = new RecordingChannel()
   const runtime = new RecordingRuntime()
@@ -281,7 +330,7 @@ test('channel /stop bypasses a queued active turn', async () => {
   await active
 })
 
-test('channel turn router bounds queued inbound turns per session', async () => {
+test('channel turn router surfaces queue overflow as retryable failure', async () => {
   const channel = new RecordingChannel()
   const runtime = new ControlledRuntime()
   const errors: unknown[] = []
@@ -304,12 +353,40 @@ test('channel turn router bounds queued inbound turns per session', async () => 
 
   const active = channel.receive(inbound('active'))
   while (runtime.submitted.length === 0) await Bun.sleep(1)
-  await channel.receive(inbound('overflow'))
+  const overflow = channel.receive(inbound('overflow'))
 
+  await expect(overflow).rejects.toBeInstanceOf(ChannelQueueFullError)
   expect(errors[0]).toBeInstanceOf(ChannelQueueFullError)
   expect(runtime.submitted).toHaveLength(1)
   runtime.releases[0]?.()
   await active
+})
+
+test('completed channel turn reports delivery failure without becoming retryable', async () => {
+  class FailingReplyChannel extends RecordingChannel {
+    override async send(_message: ChannelMessage): Promise<void> {
+      throw new Error('provider send failed')
+    }
+  }
+  const channel = new FailingReplyChannel()
+  const runtime = new RecordingRuntime()
+  const manager = new ChannelManager({ channels: [['telegram', channel]] })
+  const router = new ChannelTurnRouter({ channels: manager, runtime, streamPreviews: false })
+  manager.setInboundHandler(message => router.handle(message))
+  await manager.enable('telegram')
+  const inbound = createChannelMessage({
+    channel: 'telegram',
+    channelUserId: 'same-user',
+    direction: MessageDirection.INBOUND,
+    platformMessageId: 'completed-turn',
+    text: 'run once',
+  })
+
+  const error = await channel.receive(inbound).catch(value => value)
+
+  expect(error).toBeInstanceOf(ChannelTurnDeliveryError)
+  expect(error).toMatchObject({ retryInbound: false, turnCompleted: true })
+  expect(runtime.submitted).toHaveLength(1)
 })
 
 test('channel turn router evicts idle bookkeeping before routing new work', async () => {

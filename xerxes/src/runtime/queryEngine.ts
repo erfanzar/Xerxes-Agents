@@ -52,6 +52,7 @@ export class QueryEngine {
   private readonly contextCompressor: ContextCompressor | undefined
   private readonly dependencies: TurnDependencies
   private readonly tools: readonly ToolDefinition[]
+  private submissionTail: Promise<void> = Promise.resolve()
   private turnCount = 0
 
   constructor(
@@ -95,58 +96,70 @@ export class QueryEngine {
   }
 
   async *submitStream(prompt: string, signal?: AbortSignal): AsyncGenerator<StreamEvent, TurnResult, void> {
-    const stopped = this.stopResult(prompt)
-    if (stopped) {
-      return stopped
-    }
-    this.turnCount += 1
-    const output: string[] = []
-    const tools: string[] = []
-    let inputTokens = 0
-    let outputTokens = 0
-    for await (const event of runTurn({
-      ...(this.config.agentId ? { agentId: this.config.agentId } : {}),
-      model: this.config.model,
-      permissionMode: this.config.permissionMode,
-      state: this.state,
-      tools: this.tools,
-      userMessage: prompt,
-      ...(this.config.thinking
-        ? {
-            thinking: {
-              effort: 'medium',
-              ...(this.config.thinkingBudget !== undefined ? { budgetTokens: this.config.thinkingBudget } : {}),
-            },
-          }
-        : {}),
-      ...(this.config.systemPrompt ? { systemPrompt: this.config.systemPrompt } : {}),
-    }, this.dependencies, signal)) {
-      if (event.type === 'text') {
-        output.push(event.text)
-      } else if (event.type === 'tool_start') {
-        tools.push(event.call.function.name)
-      } else if (event.type === 'turn_done') {
-        inputTokens += event.usage.inputTokens
-        outputTokens += event.usage.outputTokens
-        this.costTracker.recordTurn(
-          this.config.model,
-          event.usage.inputTokens,
-          event.usage.outputTokens,
-          'turn_' + this.turnCount,
-          {
-            sessionId: this.sessionId,
-            ...(this.config.agentId ? { agentId: this.config.agentId } : {}),
-            ...(event.usage.cacheReadTokens === undefined ? {} : { cacheReadTokens: event.usage.cacheReadTokens }),
-            ...(event.usage.cacheCreationTokens === undefined
-              ? {}
-              : { cacheCreationTokens: event.usage.cacheCreationTokens }),
-          },
-        )
+    const previous = this.submissionTail
+    let release!: () => void
+    const completion = new Promise<void>(resolve => {
+      release = resolve
+    })
+    this.submissionTail = previous.then(() => completion)
+    try {
+      await waitForSubmission(previous, signal)
+      const stopped = this.stopResult(prompt)
+      if (stopped) {
+        return stopped
       }
-      yield event
+      this.turnCount += 1
+      const turnNumber = this.turnCount
+      const output: string[] = []
+      const tools: string[] = []
+      let inputTokens = 0
+      let outputTokens = 0
+      for await (const event of runTurn({
+        ...(this.config.agentId ? { agentId: this.config.agentId } : {}),
+        model: this.config.model,
+        permissionMode: this.config.permissionMode,
+        state: this.state,
+        tools: this.tools,
+        userMessage: prompt,
+        ...(this.config.thinking
+          ? {
+              thinking: {
+                effort: 'medium',
+                ...(this.config.thinkingBudget !== undefined ? { budgetTokens: this.config.thinkingBudget } : {}),
+              },
+            }
+          : {}),
+        ...(this.config.systemPrompt ? { systemPrompt: this.config.systemPrompt } : {}),
+      }, this.dependencies, signal)) {
+        if (event.type === 'text') {
+          output.push(event.text)
+        } else if (event.type === 'tool_start') {
+          tools.push(event.call.function.name)
+        } else if (event.type === 'turn_done') {
+          inputTokens += event.usage.inputTokens
+          outputTokens += event.usage.outputTokens
+          this.costTracker.recordTurn(
+            this.config.model,
+            event.usage.inputTokens,
+            event.usage.outputTokens,
+            'turn_' + turnNumber,
+            {
+              sessionId: this.sessionId,
+              ...(this.config.agentId ? { agentId: this.config.agentId } : {}),
+              ...(event.usage.cacheReadTokens === undefined ? {} : { cacheReadTokens: event.usage.cacheReadTokens }),
+              ...(event.usage.cacheCreationTokens === undefined
+                ? {}
+                : { cacheCreationTokens: event.usage.cacheCreationTokens }),
+            },
+          )
+        }
+        yield event
+      }
+      this.compactIfDue()
+      return { prompt, output: output.join(''), toolCalls: tools, inputTokens, outputTokens }
+    } finally {
+      release()
     }
-    this.compactIfDue()
-    return { prompt, output: output.join(''), toolCalls: tools, inputTokens, outputTokens }
   }
 
   private compactIfDue(): void {
@@ -184,6 +197,30 @@ export class QueryEngine {
     }
     return undefined
   }
+}
+
+function waitForSubmission(previous: Promise<void>, signal?: AbortSignal): Promise<void> {
+  if (!signal) return previous
+  if (signal.aborted) return Promise.reject(abortReason(signal))
+  return new Promise<void>((resolve, reject) => {
+    const onAbort = (): void => {
+      signal.removeEventListener('abort', onAbort)
+      reject(abortReason(signal))
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+    void previous.then(() => {
+      signal.removeEventListener('abort', onAbort)
+      if (signal.aborted) {
+        reject(abortReason(signal))
+      } else {
+        resolve()
+      }
+    })
+  })
+}
+
+function abortReason(signal: AbortSignal): Error {
+  return signal.reason instanceof Error ? signal.reason : new Error('Query submission was cancelled.')
 }
 
 export type { ToolExecutor }

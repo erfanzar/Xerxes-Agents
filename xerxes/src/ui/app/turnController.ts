@@ -1,5 +1,6 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
+import { LIVE_RENDER_MAX_CHARS } from '../config/limits.js'
 import {
   REASONING_PULSE_MS,
   STREAM_BATCH_MS,
@@ -125,6 +126,9 @@ const clear = (t: Timer): null => {
 
   return null
 }
+
+const liveTail = (text: string) =>
+  text.length <= LIVE_RENDER_MAX_CHARS ? text : text.slice(-LIVE_RENDER_MAX_CHARS)
 
 class TurnController {
   bufRef = ''
@@ -295,11 +299,11 @@ class TurnController {
   }
 
   private appendLiveVisibleText(text: string) {
-    this.liveVisibleText += this.liveReasoningFilter.feed(text).visible
+    this.liveVisibleText = liveTail(this.liveVisibleText + this.liveReasoningFilter.feed(text).visible)
   }
 
   private flushLiveVisibleText() {
-    this.liveVisibleText += this.liveReasoningFilter.flush().visible
+    this.liveVisibleText = liveTail(this.liveVisibleText + this.liveReasoningFilter.flush().visible)
 
     return this.visibleStreamingText()
   }
@@ -768,7 +772,7 @@ class TurnController {
     // fragment), which on every tick discarded everything streamed so far
     // — visible as overlapping coloured text and lost prose under
     // `display.final_response_markdown: render`.
-    this.bufRef += text
+    this.bufRef = liveTail(this.bufRef + text)
     this.appendLiveVisibleText(text)
 
     if (getUiState().streaming) {
@@ -806,8 +810,8 @@ class TurnController {
       return
     }
 
-    this.reasoningText = incoming
-    this.activeReasoningText = incoming
+    this.reasoningText = liveTail(incoming)
+    this.activeReasoningText = liveTail(incoming)
     this.scheduleReasoning()
     this.syncReasoningSegment()
     this.pulseReasoningStreaming()
@@ -822,12 +826,8 @@ class TurnController {
       this.flushStreamingSegment()
     }
 
-    this.reasoningText += text
-    this.activeReasoningText += text
-
-    if (this.reasoningText.length > 80_000) {
-      this.reasoningText = this.reasoningText.slice(-60_000)
-    }
+    this.reasoningText = liveTail(this.reasoningText + text)
+    this.activeReasoningText = liveTail(this.activeReasoningText + text)
 
     this.scheduleReasoning()
     this.syncReasoningSegment()
@@ -1035,7 +1035,7 @@ class TurnController {
 
   hydrateStreamingText(text: string) {
     this.streamTimer = clear(this.streamTimer)
-    this.bufRef = text
+    this.bufRef = liveTail(text)
     this.resetLiveReasoningFilter()
     this.appendLiveVisibleText(text)
     patchTurnState({ streaming: boundedLiveRenderText(this.visibleStreamingText()) })

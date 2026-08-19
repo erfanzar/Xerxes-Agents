@@ -12,6 +12,7 @@ import { InMemoryDaemonRuntime } from "../src/daemon/runtime.js";
 import { DaemonServer } from "../src/daemon/server.js";
 import { ProfileStore } from "../src/bridge/profiles.js";
 import type { FetchImplementation } from "../src/llms/client.js";
+import type { DaemonEvent, DaemonSession, TurnRunner } from "../src/daemon/runtime.js";
 
 interface Frame {
   readonly error?: {
@@ -304,6 +305,361 @@ test("daemon auto-compacts before submitting a turn once usage crosses the thres
       "durable auto-compact summary",
     );
   } finally {
+    globalThis.fetch = nativeFetch;
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("cancel during pre-turn auto-compaction prevents the admitted turn from launching", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-autocompact-cancel-"));
+  const socketPath = join(directory, "daemon.sock");
+  const profileStore = new ProfileStore(join(directory, "profiles.json"));
+  profileStore.save({
+    name: "openai-test",
+    apiKey: "fake-api-key",
+    baseUrl: "https://api.openai.test",
+    model: "gpt-4",
+    provider: "openai",
+    setActive: true,
+  });
+  const compactionStarted = Promise.withResolvers<void>();
+  const releaseCompaction = Promise.withResolvers<void>();
+  let runnerCalls = 0;
+  const runtime = new InMemoryDaemonRuntime({
+    async *run(): AsyncGenerator<DaemonEvent> {
+      runnerCalls += 1;
+      yield { type: "text_part", payload: { text: "must not run" } };
+    },
+  }, {
+    currentProjectDirectory: directory,
+    model: "gpt-4",
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const server = new DaemonServer({
+    autoCompactThreshold: 0.01,
+    socketPath,
+    runtime,
+    profileStore,
+  });
+  const nativeFetch = globalThis.fetch;
+  globalThis.fetch = Object.assign(
+    async () => {
+      compactionStarted.resolve();
+      await releaseCompaction.promise;
+      return new Response(JSON.stringify({ choices: [{ message: { content: "summary" } }] }));
+    },
+    { preconnect: globalThis.fetch.preconnect },
+  );
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "cancel-before-launch", project_dir: directory },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+    seedTranscript(runtime, "cancel-before-launch");
+
+    client.send({ jsonrpc: "2.0", id: 2, method: "turn.submit", params: { text: "hello" } });
+    await client.next((frame) => frame.id === 2);
+    await compactionStarted.promise;
+    client.send({ jsonrpc: "2.0", id: 3, method: "turn.cancel", params: {} });
+    expect((await client.next((frame) => frame.id === 3)).result).toEqual({ ok: true });
+
+    releaseCompaction.resolve();
+    await Bun.sleep(50);
+
+    expect(runnerCalls).toBe(0);
+    expect(runtime.sessionStatus("cancel-before-launch")).toMatchObject({
+      activeTurnId: "",
+      cancelRequested: true,
+      status: "idle",
+    });
+  } finally {
+    releaseCompaction.resolve();
+    globalThis.fetch = nativeFetch;
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("disconnect during pre-turn auto-compaction does not start an ownerless turn", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-autocompact-disconnect-"));
+  const socketPath = join(directory, "daemon.sock");
+  const profileStore = new ProfileStore(join(directory, "profiles.json"));
+  profileStore.save({
+    name: "openai-test",
+    apiKey: "fake-api-key",
+    baseUrl: "https://api.openai.test",
+    model: "gpt-4",
+    provider: "openai",
+    setActive: true,
+  });
+  const compactionStarted = Promise.withResolvers<void>();
+  const releaseCompaction = Promise.withResolvers<void>();
+  let runnerCalls = 0;
+  const runner: TurnRunner = {
+    async *run(_session: DaemonSession, _text: string, _signal: AbortSignal): AsyncGenerator<DaemonEvent> {
+      runnerCalls += 1;
+      yield { type: "text_part", payload: { text: "must not run" } };
+    },
+  };
+  const runtime = new InMemoryDaemonRuntime(runner, {
+    currentProjectDirectory: directory,
+    model: "gpt-4",
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const server = new DaemonServer({
+    autoCompactThreshold: 0.01,
+    socketPath,
+    runtime,
+    profileStore,
+  });
+  const nativeFetch = globalThis.fetch;
+  globalThis.fetch = Object.assign(
+    async () => {
+      compactionStarted.resolve();
+      await releaseCompaction.promise;
+      return new Response(JSON.stringify({ choices: [{ message: { content: "summary" } }] }));
+    },
+    { preconnect: globalThis.fetch.preconnect },
+  );
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "disconnecting", project_dir: directory },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+    seedTranscript(runtime, "disconnecting");
+
+    client.send({ jsonrpc: "2.0", id: 2, method: "turn.submit", params: { text: "hello" } });
+    await client.next((frame) => frame.id === 2);
+    await compactionStarted.promise;
+    client.close();
+    await Bun.sleep(25);
+    releaseCompaction.resolve();
+    await Bun.sleep(50);
+
+    expect(runnerCalls).toBe(0);
+    expect(runtime.sessionStatus("disconnecting")?.activeTurnId).toBe("");
+  } finally {
+    releaseCompaction.resolve();
+    globalThis.fetch = nativeFetch;
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a second submit cannot wait behind compaction and launch after its owner disconnects", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-autocompact-double-submit-"));
+  const socketPath = join(directory, "daemon.sock");
+  const profileStore = new ProfileStore(join(directory, "profiles.json"));
+  profileStore.save({
+    name: "openai-test",
+    apiKey: "fake-api-key",
+    baseUrl: "https://api.openai.test",
+    model: "gpt-4",
+    provider: "openai",
+    setActive: true,
+  });
+  const compactionStarted = Promise.withResolvers<void>();
+  const releaseCompaction = Promise.withResolvers<void>();
+  const submitted: string[] = [];
+  const runtime = new InMemoryDaemonRuntime({
+    async *run(_session, text): AsyncGenerator<DaemonEvent> {
+      submitted.push(text);
+      yield { type: "text_part", payload: { text } };
+    },
+  }, {
+    currentProjectDirectory: directory,
+    model: "gpt-4",
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const server = new DaemonServer({
+    autoCompactThreshold: 0.01,
+    socketPath,
+    runtime,
+    profileStore,
+  });
+  const nativeFetch = globalThis.fetch;
+  globalThis.fetch = Object.assign(
+    async () => {
+      compactionStarted.resolve();
+      await releaseCompaction.promise;
+      return new Response(JSON.stringify({ choices: [{ message: { content: "summary" } }] }));
+    },
+    { preconnect: globalThis.fetch.preconnect },
+  );
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { session_key: "double", project_dir: directory } });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+    seedTranscript(runtime, "double");
+
+    client.send({ jsonrpc: "2.0", id: 2, method: "turn.submit", params: { text: "first" } });
+    await client.next((frame) => frame.id === 2);
+    await compactionStarted.promise;
+    client.send({ jsonrpc: "2.0", id: 3, method: "turn.submit", params: { text: "second" } });
+    await client.next((frame) => frame.id === 3);
+    client.close();
+    await Bun.sleep(25);
+    releaseCompaction.resolve();
+    await Bun.sleep(50);
+
+    expect(submitted).toEqual([]);
+    expect(runtime.sessionStatus("double")?.activeTurnId).toBe("");
+  } finally {
+    releaseCompaction.resolve();
+    globalThis.fetch = nativeFetch;
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a submit serialized behind manual compaction keeps its newly appended prompt", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-compact-prompt-race-"));
+  const socketPath = join(directory, "daemon.sock");
+  const profileStore = new ProfileStore(join(directory, "profiles.json"));
+  profileStore.save({
+    name: "openai-test",
+    apiKey: "fake-api-key",
+    baseUrl: "https://api.openai.test",
+    model: "gpt-4",
+    provider: "openai",
+    setActive: true,
+  });
+  const compactionStarted = Promise.withResolvers<void>();
+  const releaseCompaction = Promise.withResolvers<void>();
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: directory,
+    model: "gpt-4",
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const server = new DaemonServer({
+    autoCompactThreshold: 0.01,
+    socketPath,
+    runtime,
+    profileStore,
+  });
+  const nativeFetch = globalThis.fetch;
+  globalThis.fetch = Object.assign(
+    async () => {
+      compactionStarted.resolve();
+      await releaseCompaction.promise;
+      return new Response(JSON.stringify({ choices: [{ message: { content: "summary" } }] }));
+    },
+    { preconnect: globalThis.fetch.preconnect },
+  );
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  const submitter = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { session_key: "prompt-race", project_dir: directory } });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+    submitter.send({ jsonrpc: "2.0", id: 10, method: "initialize", params: { session_key: "prompt-race", project_dir: directory } });
+    await submitter.next((frame) => frame.id === 10);
+    await submitter.next(eventFrame("init_done"));
+    await submitter.next(eventFrame("status_update"));
+    seedTranscript(runtime, "prompt-race");
+
+    client.send({ jsonrpc: "2.0", id: 2, method: "session.compress", params: {} });
+    await compactionStarted.promise;
+    submitter.send({ jsonrpc: "2.0", id: 3, method: "turn.submit", params: { text: "new prompt must survive" } });
+    await submitter.next((frame) => frame.id === 3);
+    releaseCompaction.resolve();
+    await client.next((frame) => frame.id === 2);
+    await submitter.next(eventFrame("turn_end"));
+
+    expect(JSON.stringify(runtime.sessionStatus("prompt-race")?.messages ?? []))
+      .toContain("new prompt must survive");
+  } finally {
+    releaseCompaction.resolve();
+    globalThis.fetch = nativeFetch;
+    client.close();
+    submitter.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("manual compaction does not restore stale idle status over a live turn", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-compact-status-race-"));
+  const socketPath = join(directory, "daemon.sock");
+  const profileStore = new ProfileStore(join(directory, "profiles.json"));
+  profileStore.save({
+    name: "openai-test",
+    apiKey: "fake-api-key",
+    baseUrl: "https://api.openai.test",
+    model: "gpt-4",
+    provider: "openai",
+    setActive: true,
+  });
+  const compactionStarted = Promise.withResolvers<void>();
+  const releaseCompaction = Promise.withResolvers<void>();
+  const releaseTurn = Promise.withResolvers<void>();
+  const runtime = new InMemoryDaemonRuntime({
+    async *run(): AsyncGenerator<DaemonEvent> {
+      await releaseTurn.promise;
+      yield { type: "text_part", payload: { text: "done" } };
+    },
+  }, {
+    currentProjectDirectory: directory,
+    model: "gpt-4",
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const server = new DaemonServer({ socketPath, runtime, profileStore });
+  const nativeFetch = globalThis.fetch;
+  globalThis.fetch = Object.assign(
+    async () => {
+      compactionStarted.resolve();
+      await releaseCompaction.promise;
+      return new Response(JSON.stringify({ choices: [{ message: { content: "summary" } }] }));
+    },
+    { preconnect: globalThis.fetch.preconnect },
+  );
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { session_key: "status-race", project_dir: directory } });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+    seedTranscript(runtime, "status-race");
+
+    client.send({ jsonrpc: "2.0", id: 2, method: "session.compress", params: {} });
+    await compactionStarted.promise;
+    const liveTurn = runtime.submitTurn("status-race", "live", () => undefined);
+    await Bun.sleep(10);
+    expect(runtime.sessionStatus("status-race")?.status).toBe("working");
+    releaseCompaction.resolve();
+    await client.next((frame) => frame.id === 2);
+
+    expect(runtime.sessionStatus("status-race")?.status).toBe("working");
+    releaseTurn.resolve();
+    await liveTurn;
+  } finally {
+    releaseCompaction.resolve();
+    releaseTurn.resolve();
     globalThis.fetch = nativeFetch;
     client.close();
     await server.stop();

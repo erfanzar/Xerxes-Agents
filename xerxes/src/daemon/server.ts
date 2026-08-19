@@ -60,6 +60,7 @@ import {
   skillMatchesPlatform,
   skillPromptSection,
   SkillRegistry,
+  trustedHashWorkspaceSkills,
 } from "../extensions/skills.js";
 import {
   getDefaultSlashPluginRegistry,
@@ -92,6 +93,11 @@ import {
   requireConfiguredModel,
   type LlmClient,
 } from "../llms/client.js";
+import {
+  attemptSessionTitleOnce,
+  generateSessionTitle,
+  type TitleClientFactory,
+} from "./titleGenerator.js";
 import { formatDoctorReport, runAllDoctorChecks } from "../runtime/doctor.js";
 import { formatGitUpdateStatus, gitUpdateStatus } from "../runtime/update.js";
 import {
@@ -156,6 +162,7 @@ import {
   InMemoryDaemonRuntime,
 } from "./runtime.js";
 import { resolveProjectDirectory, xerxesHome } from "./paths.js";
+import { formatBytes, wipeHistoryStores, wipeMemoryStores } from "./wipe.js";
 import { searchProjectFileMentions } from "./projectFileMentions.js";
 import type { DaemonTransportConnection } from "./transport.js";
 import {
@@ -412,6 +419,7 @@ function slashCompletionPrefix(text: string): string {
 
 const RUNTIME_OVERRIDE_KEYS = new Set([
   "api_key",
+  "auto_title",
   "base_url",
   "context_limit",
   "frequency_penalty",
@@ -510,6 +518,15 @@ export interface DaemonServerOptions {
    * `auto_compact_threshold` overrides it per daemon, and 0 disables it.
    */
   readonly autoCompactThreshold?: number;
+  /**
+   * Generate a model-written session title after the first exchange, replacing
+   * the first-message fallback. Defaults on; a runtime setting of `auto_title`
+   * set to false disables it. Generation is background and silent: a failure
+   * leaves the fallback in place and never surfaces in the turn.
+   */
+  readonly autoTitle?: boolean;
+  /** Test seam for title generation; production uses the real client factory. */
+  readonly titleClientFactory?: TitleClientFactory;
   /** Browser state shared with native operator tools; `/browser` never invents a browser backend. */
   readonly browserManager?: BrowserManager;
   /**
@@ -628,12 +645,15 @@ export class DaemonServer {
     string,
     DaemonTransportConnection
   >();
-  private readonly autoCompactions = new Map<string, Promise<void>>();
+  /** Serializes compaction and turn admission for each session. */
+  private readonly sessionOperations = new Map<string, Promise<void>>();
   /** Consecutive auto-compaction failures per session; reset by any deliberate history change. */
   private readonly autoCompactFailures = new Map<string, number>();
   /** Sessions already told that auto-compaction is off while their window fills. */
   private readonly autoCompactDisabledWarned = new Set<string>();
   private readonly autoCompactThreshold: number;
+  private readonly autoTitle: boolean;
+  private readonly titleClientFactory: TitleClientFactory | undefined;
   private readonly browserManager: BrowserManager;
   private readonly channelManager: ChannelManager | undefined;
   private readonly channelWebhookServer: ChannelWebhookServer | undefined;
@@ -714,6 +734,8 @@ export class DaemonServer {
     this.autoCompactThreshold = normalizeCompactionThreshold(
       options.autoCompactThreshold ?? DEFAULT_AUTO_COMPACT_THRESHOLD,
     );
+    this.autoTitle = options.autoTitle ?? true;
+    this.titleClientFactory = options.titleClientFactory;
     this.channelManager = options.channelManager;
     this.channelWebhookServer =
       options.channelManager && options.channelWebhook
@@ -797,7 +819,9 @@ export class DaemonServer {
       options.skillDirectory ?? join(homedir(), ".xerxes", "skills"),
     );
     this.skillDirectories = options.skillDirectories;
-    this.skillRegistry = options.skillRegistry ?? new SkillRegistry();
+    this.skillRegistry =
+      options.skillRegistry ??
+      new SkillRegistry({ workspaceTrust: trustedHashWorkspaceSkills() });
     this.slashPluginRegistry =
       options.slashPluginRegistry ?? getDefaultSlashPluginRegistry();
     this.snapshotManagerFactory =
@@ -1654,7 +1678,7 @@ export class DaemonServer {
       return { ok: true, task_id: taskId, session_key: backgroundKey };
     }
     if (method === "turn.cancel" || method === "cancel") {
-      return { ok: this.runtime.cancelTurn(sessionKey(connection, params)) };
+      return { ok: this.cancelTrackedTurn(sessionKey(connection, params)) };
     }
     if (method === "cancel_all") {
       return { ok: true, cancelled: this.runtime.cancelAllTurns() };
@@ -1792,6 +1816,12 @@ export class DaemonServer {
         );
       });
       return { ok: true };
+    }
+    if (method === "daemon.wipe_memory") {
+      return this.wipeMemory(connection);
+    }
+    if (method === "daemon.wipe_history") {
+      return this.wipeHistory(connection);
     }
     return { ok: false, error: `Unknown method: ${method}` };
   }
@@ -2618,7 +2648,7 @@ export class DaemonServer {
         };
       }
       case "stop": {
-        const cancelled = this.runtime.cancelTurn(key);
+        const cancelled = this.cancelTrackedTurn(key);
         this.emitSlash(
           connection,
           cancelled ? "Cancelled." : "Nothing running to cancel.",
@@ -3198,6 +3228,64 @@ export class DaemonServer {
         : {}),
       files: files.map((file) => ({ ...file })),
     };
+  }
+
+  /**
+   * Global memory wipe. Every memory scope the daemon can reach is removed:
+   * the cross-project store, per-agent self-memory, per-project stores, and
+   * the SQLite tiers. A running session re-creates empty stores on its next
+   * memory read, so wiping never leaves a session unable to write memory.
+   */
+  private async wipeMemory(
+    connection: DaemonTransportConnection,
+  ): Promise<JsonRpcPayload> {
+    try {
+      const session = this.runtime.sessionStatus(connection.activeSessionKey);
+      const result = await wipeMemoryStores(xerxesHome(), session?.cwd);
+      this.emitSlash(
+        connection,
+        `Memory wiped globally: ${result.removed.files} file(s), ${formatBytes(result.removed.bytes)} removed.`,
+      );
+      return { ...result, removed: { ...result.removed } };
+    } catch (error) {
+      return { ok: false, error: errorMessage(error) };
+    }
+  }
+
+  /**
+   * Global history wipe. Removes the persisted transcript store and snapshot
+   * shadows and drops the search index entries. Live sessions keep running;
+   * each re-saves its transcript on the next turn, so this clears saved and
+   * resumable history without killing open work.
+   */
+  private async wipeHistory(
+    connection: DaemonTransportConnection,
+  ): Promise<JsonRpcPayload> {
+    const active = this.runtime
+      .listSessions()
+      .find((session) => session.activeTurnId);
+    if (active) {
+      return {
+        ok: false,
+        error:
+          "a turn is mid-write; wait for it to finish or cancel it before wiping history",
+      };
+    }
+    try {
+      const result = await wipeHistoryStores(
+        this.sessionArchiveDirectory,
+        join(xerxesHome(), "snapshots"),
+      );
+      this.transcriptSearch.clear();
+      this.transcriptSearchHydration = undefined;
+      this.emitSlash(
+        connection,
+        `History wiped globally: ${result.removed.files} file(s), ${formatBytes(result.removed.bytes)} removed.`,
+      );
+      return { ...result, removed: { ...result.removed } };
+    } catch (error) {
+      return { ok: false, error: errorMessage(error) };
+    }
   }
 
   private showPersonality(
@@ -3829,10 +3917,18 @@ export class DaemonServer {
     connection: DaemonTransportConnection,
     notify = true,
   ): Promise<JsonRpcPayload> {
-    const result = await this.compactSessionByKey(
-      connection.activeSessionKey,
-      notify ? connection : undefined,
-    );
+    // Preserve the command's immediate refusal semantics instead of queueing a
+    // manual compaction behind a live turn.
+    const active = this.runtime.sessionStatus(connection.activeSessionKey);
+    const result = active?.activeTurnId
+      ? await this.compactSessionByKeyUnlocked(
+        connection.activeSessionKey,
+        notify ? connection : undefined,
+      )
+      : await this.compactSessionByKey(
+        connection.activeSessionKey,
+        notify ? connection : undefined,
+      );
     if (result.ok === true && result.compacted === true) {
       const session = this.runtime.sessionStatus(connection.activeSessionKey);
       if (session) {
@@ -3848,7 +3944,18 @@ export class DaemonServer {
    * without an owning connection run silently. Messages appended while the
    * summary is generated (for example an idle steer) are preserved.
    */
-  private async compactSessionByKey(
+  private compactSessionByKey(
+    sessionKey: string,
+    notify: DaemonTransportConnection | undefined,
+    verb = "Compacted",
+    reason = "compact",
+  ): Promise<JsonRpcPayload> {
+    return this.withSessionOperation(sessionKey, () =>
+      this.compactSessionByKeyUnlocked(sessionKey, notify, verb, reason)
+    );
+  }
+
+  private async compactSessionByKeyUnlocked(
     sessionKey: string,
     notify: DaemonTransportConnection | undefined,
     verb = "Compacted",
@@ -3932,7 +4039,7 @@ export class DaemonServer {
       // A compaction that worked — by hand or automatically — retires the
       // failure evidence, so `/compact` is a way back from the bail-out.
       this.clearAutoCompactFailures(sessionKey);
-      await this.runtime.flushSessions();
+      await this.runtime.flushSessions("rewrite");
       if (notify) {
         const replaced = outcome.originalCount - outcome.messages.length;
         const body = `${verb} ${replaced} message(s): ${outcome.stamp.tokens_before} → ${outcome.stamp.tokens_after} tokens.`;
@@ -3972,14 +4079,35 @@ export class DaemonServer {
       }
       return { ok: false, error: errorMessage(error) };
     } finally {
-      // Restored unconditionally: an exception mid-compaction would otherwise
-      // leave the session displaying as working with no turn behind it.
-      session.status = previousStatus;
+      // Do not overwrite state established by work that began independently
+      // while the provider call was in flight.
+      if (!session.activeTurnId) {
+        session.status = previousStatus;
+      }
       if (notify) {
         this.emitStatus(notify, session);
       }
       await completion.close();
     }
+  }
+
+  private withSessionOperation<T>(
+    sessionKey: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.sessionOperations.get(sessionKey) ?? Promise.resolve();
+    const result = previous.catch(() => undefined).then(operation);
+    const tail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.sessionOperations.set(sessionKey, tail);
+    void tail.then(() => {
+      if (this.sessionOperations.get(sessionKey) === tail) {
+        this.sessionOperations.delete(sessionKey);
+      }
+    });
+    return result;
   }
 
   /**
@@ -4026,14 +4154,10 @@ export class DaemonServer {
    * reached the configured threshold. Concurrent submissions join the same
    * compaction, and a compaction failure only warns — the turn still runs.
    */
-  private autoCompactIfDue(
+  private async autoCompactIfDue(
     sessionKey: string,
     owner: DaemonTransportConnection | undefined,
   ): Promise<void> {
-    const existing = this.autoCompactions.get(sessionKey);
-    if (existing) {
-      return existing;
-    }
     const session = this.runtime.sessionStatus(sessionKey);
     if (!session || session.activeTurnId || session.messages.length < 2) {
       return Promise.resolve();
@@ -4075,28 +4199,23 @@ export class DaemonServer {
         `Context at ${((used / limit) * 100).toFixed(0)}% — auto-compacting before this turn…`,
       );
     }
-    const task = this
-      .compactSessionByKey(sessionKey, owner, "Auto-compacted", "auto-compact")
-      .then((result) => {
-        // `compacted: false` counts as a failure. It leaves the window exactly
-        // as full as it was, so the next turn would re-run the same
-        // full-window summarization call and reach the same conclusion.
-        if (result.ok === true && result.compacted === true) {
-          return;
-        }
-        const reason = stringValue(result.error) || "nothing to compact";
-        this.recordAutoCompactFailure(sessionKey, owner, reason);
-      })
-      .catch((error: unknown) => {
-        this.recordAutoCompactFailure(sessionKey, owner, errorMessage(error));
-      });
-    this.autoCompactions.set(sessionKey, task);
-    void task.then(() => {
-      if (this.autoCompactions.get(sessionKey) === task) {
-        this.autoCompactions.delete(sessionKey);
+    try {
+      const result = await this.compactSessionByKeyUnlocked(
+        sessionKey,
+        owner,
+        "Auto-compacted",
+        "auto-compact",
+      );
+      // `compacted: false` counts as a failure. It leaves the window exactly
+      // as full as it was, so the next turn would re-run the same
+      // full-window summarization call and reach the same conclusion.
+      if (result.ok !== true || result.compacted !== true) {
+        const failure = stringValue(result.error) || "nothing to compact";
+        this.recordAutoCompactFailure(sessionKey, owner, failure);
       }
-    });
-    return task;
+    } catch (error) {
+      this.recordAutoCompactFailure(sessionKey, owner, errorMessage(error));
+    }
   }
 
   private recordAutoCompactFailure(
@@ -4125,6 +4244,74 @@ export class DaemonServer {
   private clearAutoCompactFailures(sessionKey: string): void {
     this.autoCompactFailures.delete(sessionKey);
     this.autoCompactDisabledWarned.delete(sessionKey);
+  }
+
+  /**
+   * Generate a model-written title after a session's first exchange.
+   *
+   * Fires on every turn-end edge but spends a provider call exactly once per
+   * session (`attemptSessionTitleOnce`). Everything about it is best-effort:
+   * a session the user already titled, a disabled setting, a missing provider,
+   * or a failed generation all resolve to "keep the first-message fallback"
+   * without touching the turn that triggered the attempt.
+   */
+  private maybeGenerateTitle(sessionKey: string): void {
+    const session = this.runtime.sessionStatus(sessionKey);
+    if (!session) return;
+    if (!this.resolvedAutoTitle()) return;
+    // Only a fallback-derived title (or none) may be replaced. An explicit
+    // title — set through /title or session.title — carries no marker.
+    const existing = stringValue(session.metadata.title);
+    if (existing && session.metadata.title_derived !== true) return;
+    // Titles are generated from the opening exchange, so only a session whose
+    // whole history is that first exchange qualifies. A session that already
+    // holds several turns (resumed or seeded history) keeps its fallback
+    // rather than paying a provider call for a name it has lived without.
+    const user = firstExchangeText(session, "user");
+    const assistant = firstExchangeText(session, "assistant");
+    if (!user || !assistant) return;
+    if (session.messages.length > 2) return;
+
+    const attempt = attemptSessionTitleOnce(session.id, () =>
+      generateSessionTitle({
+        userText: user,
+        assistantText: assistant,
+        sessionModel: session.model,
+        profile: this.profileStore.active(),
+        ...(this.titleClientFactory ? { clientFactory: this.titleClientFactory } : {}),
+      }));
+    if (!attempt) return;
+    void attempt.then((title) => {
+      if (!title) return;
+      // Persist through the session-operation queue: a flush outside it can
+      // land mid-compaction and lose the generation race, failing the
+      // compaction rewrite that owns the transcript.
+      void this.withSessionOperation(sessionKey, async () => {
+        // Re-read: a later turn or an explicit /title may have landed while
+        // the provider answered, and neither may be overwritten.
+        const current = this.runtime.sessionStatus(sessionKey);
+        if (!current) return;
+        const currentTitle = stringValue(current.metadata.title);
+        if (currentTitle && current.metadata.title_derived !== true) return;
+        current.metadata.title = title;
+        delete current.metadata.title_derived;
+        try {
+          await this.runtime.flushSessions();
+        } catch {
+          return;
+        }
+        this.broadcast("session_title", {
+          session_id: current.id,
+          title,
+        });
+      });
+    });
+  }
+
+  private resolvedAutoTitle(): boolean {
+    const setting = this.runtime.status().auto_title;
+    if (typeof setting === "boolean") return setting;
+    return this.autoTitle;
   }
 
   private warnAutoCompactDisabled(
@@ -4556,10 +4743,35 @@ export class DaemonServer {
     };
   }
 
-  private async undoLastTurn(
+  private undoLastTurn(
     connection: DaemonTransportConnection,
     session: DaemonSession | undefined,
     notify = true,
+  ): Promise<JsonRpcPayload> {
+    if (session && this.sessionOperations.has(session.sessionKey)) {
+      if (notify) {
+        this.emitSlash(
+          connection,
+          "Cannot undo while another session operation is in progress.",
+          "warning",
+        );
+      }
+      return Promise.resolve({
+        ok: false,
+        error: "session operation in progress",
+      });
+    }
+    return session
+      ? this.withSessionOperation(session.sessionKey, () =>
+          this.undoLastTurnUnlocked(connection, session, notify)
+        )
+      : this.undoLastTurnUnlocked(connection, session, notify);
+  }
+
+  private async undoLastTurnUnlocked(
+    connection: DaemonTransportConnection,
+    session: DaemonSession | undefined,
+    notify: boolean,
   ): Promise<JsonRpcPayload> {
     if (!session || !session.messages.length) {
       if (notify) {
@@ -4588,13 +4800,19 @@ export class DaemonServer {
     // The window just shrank, so the condition that kept failing is no longer
     // the one the counter was recording.
     this.clearAutoCompactFailures(session.sessionKey);
-    await this.runtime.flushSessions();
+    await this.runtime.flushSessions("rewrite");
     if (session.messages.length === 0 && session.turnCount === 0) {
       // The store's empty-save path used to delete the transcript here
       // implicitly. Routine saves never delete anymore, so removing the
       // last remaining turn removes the persisted record explicitly while
       // the live (now empty) session stays usable.
       await this.runtime.removeSavedTranscript?.(session.id);
+      // The persisted record is gone, so the in-memory session no longer has
+      // a generation or message boundary to be authorized against. Resetting
+      // both keeps the next turn's append from conflicting with the deleted
+      // transcript's absence.
+      session.transcriptGeneration = 0;
+      session.persistedMessageCount = 0;
     }
     if (notify) {
       this.emitSlash(
@@ -4605,7 +4823,29 @@ export class DaemonServer {
     return { ok: true, dropped };
   }
 
-  private async retryLastTurn(
+  private retryLastTurn(
+    connection: DaemonTransportConnection,
+    session: DaemonSession | undefined,
+  ): Promise<JsonRpcPayload> {
+    if (session && this.sessionOperations.has(session.sessionKey)) {
+      this.emitSlash(
+        connection,
+        "Cannot retry while another session operation is in progress.",
+        "warning",
+      );
+      return Promise.resolve({
+        ok: false,
+        error: "session operation in progress",
+      });
+    }
+    return session
+      ? this.withSessionOperation(session.sessionKey, () =>
+          this.retryLastTurnUnlocked(connection, session)
+        )
+      : this.retryLastTurnUnlocked(connection, session);
+  }
+
+  private async retryLastTurnUnlocked(
     connection: DaemonTransportConnection,
     session: DaemonSession | undefined,
   ): Promise<JsonRpcPayload> {
@@ -4640,9 +4880,11 @@ export class DaemonServer {
       (event) => this.emit(connection, event.type, event.payload),
       connection,
     ).catch((error) => {
-      session.messages.splice(0, session.messages.length, ...priorMessages);
-      session.turnCount = priorTurnCount;
-      this.emitSlash(connection, `Retry failed: ${errorMessage(error)}`, "error");
+      void this.withSessionOperation(key, async () => {
+        session.messages.splice(0, session.messages.length, ...priorMessages);
+        session.turnCount = priorTurnCount;
+        this.emitSlash(connection, `Retry failed: ${errorMessage(error)}`, "error");
+      });
     });
     return { ok: true, retried: true };
   }
@@ -5673,6 +5915,23 @@ export class DaemonServer {
    * raw submitTurn promise for caller-specific error handling; the tracked
    * view never rejects.
    */
+  private cancelTrackedTurn(sessionKey: string): boolean {
+    const owner = this.turnOwners.get(sessionKey);
+    if (!owner) {
+      return this.runtime.cancelTurn(sessionKey);
+    }
+    // Retain the stop intent while server-side setup (notably compaction) is
+    // still awaiting and no runtime controller exists yet. The admission
+    // check in submitTrackedTurn consumes the removed ownership and skips
+    // launch after setup settles.
+    this.turnOwners.delete(sessionKey);
+    if (!this.runtime.cancelTurn(sessionKey)) {
+      const session = this.runtime.sessionStatus(sessionKey);
+      if (session) session.cancelRequested = true;
+    }
+    return true;
+  }
+
   private submitTrackedTurn(
     sessionKey: string,
     text: string,
@@ -5680,17 +5939,28 @@ export class DaemonServer {
     owner: DaemonTransportConnection | undefined,
     options: SubmitTurnOptions = {},
   ): Promise<void> {
-    // A duplicate submit while a turn is active fails in submitTurn; keep
-    // the running turn's owner so its submitter stays the cancellation tie.
-    if (owner && !this.turnOwners.has(sessionKey)) {
+    // Reserve ownership before any asynchronous compaction. A second submit
+    // cannot join that wait and later become a surprise turn, nor can its
+    // cleanup release the first turn's disconnect ownership.
+    const ownsCancellation = Boolean(owner && !this.turnOwners.has(sessionKey));
+    if (owner && !ownsCancellation) {
+      return Promise.reject(new Error("a turn is already active for this session"));
+    }
+    if (owner) {
       this.turnOwners.set(sessionKey, owner);
     }
     const interactionIds = new Set<string>();
     // Before compaction, so the capture reflects the tree the user is looking
     // at rather than one an auto-compaction turn may already have edited.
     this.captureTurnSnapshot(sessionKey);
-    const turnPromise = (async () => {
+    const turnPromise = this.withSessionOperation(sessionKey, async () => {
       await this.autoCompactIfDue(sessionKey, owner);
+      // Disconnect may happen while pre-turn compaction is awaiting a provider.
+      // Its cancellation removes this ownership entry before a runtime turn
+      // exists, so do not launch work that no connection can cancel or observe.
+      if (owner && this.turnOwners.get(sessionKey) !== owner) {
+        return;
+      }
       return this.runtime.submitTurn(
         sessionKey,
         text,
@@ -5700,7 +5970,7 @@ export class DaemonServer {
         },
         options,
       );
-    })();
+    });
     const tracked = turnPromise.catch(() => undefined);
     this.inFlightTurns.add(tracked);
     void tracked.then(() => {
@@ -5714,6 +5984,8 @@ export class DaemonServer {
       // The runtime persists the session as the turn ends, so this is the
       // incremental feed: the index tracks the transcript that was just saved.
       this.indexSessionForSearch(sessionKey);
+      // Title generation rides the same edge: the first exchange just landed.
+      this.maybeGenerateTitle(sessionKey);
     });
     return turnPromise;
   }
@@ -6389,8 +6661,20 @@ function looksLikeInternalReplayMessage(text: string): boolean {
   ].some((prefix) => text.trimStart().startsWith(prefix));
 }
 
-function messageText(message: DaemonSession["messages"][number]): string {
-  if (typeof message.text === "string") {
+/** First message text of a role in the session, used as title-generation input. */
+function firstExchangeText(
+  session: DaemonSession,
+  role: "assistant" | "user",
+): string {
+  for (const message of session.messages) {
+    if (message.role.toLowerCase() !== role) continue;
+    const text = messageText(message).trim();
+    if (text) return text;
+  }
+  return "";
+}
+
+function messageText(message: DaemonSession["messages"][number]): string {  if (typeof message.text === "string") {
     return message.text.trim();
   }
   const content = message.content;

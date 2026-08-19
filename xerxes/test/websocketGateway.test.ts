@@ -195,6 +195,44 @@ test('daemon WebSocket transport closes oversized requests', async () => {
   }
 })
 
+test('queued WebSocket handlers do not execute after the client detaches', async () => {
+  const gate = Promise.withResolvers<void>()
+  const detached = Promise.withResolvers<void>()
+  const handled: string[] = []
+  const gateway = new DaemonWebSocketGateway(
+    { host: '127.0.0.1', port: 0 },
+    async (_connection, request) => {
+      handled.push(request)
+      if (handled.length === 1) {
+        await gate.promise
+      }
+    },
+    () => detached.resolve(),
+  )
+  gateway.start()
+  const endpoint = gateway.url
+  if (!endpoint) {
+    throw new Error('WebSocket gateway did not start')
+  }
+  const client = await WebSocketTestClient.connect(endpoint)
+  try {
+    client.send({ id: 1 })
+    client.send({ id: 2 })
+    await waitFor(() => handled.length === 1)
+    client.close()
+    await client.waitForClose()
+    await detached.promise
+    gate.resolve()
+    await Bun.sleep(25)
+
+    expect(handled).toEqual([JSON.stringify({ id: 1 })])
+  } finally {
+    gate.resolve()
+    client.close()
+    await gateway.stop()
+  }
+})
+
 test('daemon WebSocket transport closes a client that floods the inbound handler queue', async () => {
   const gate = Promise.withResolvers<void>()
   let handled = 0

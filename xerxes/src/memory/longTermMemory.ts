@@ -40,7 +40,7 @@ export interface LongTermMemoryOptions {
 export class LongTermMemory extends Memory {
   readonly ownerId: string | undefined
   readonly retentionDays: number
-  private readonly accessDirty = new Set<MemoryItem>()
+  private readonly accessDirty = new Map<MemoryItem, number>()
   private readonly accessFlushThreshold: number
   private pendingAccessWrites = 0
 
@@ -58,7 +58,7 @@ export class LongTermMemory extends Memory {
   }
 
   clear(): void {
-    for (const item of this.items) this.storage?.delete(storageKey(item.memoryId))
+    this.deletePersisted(this.items, 'clear long-term memory')
     this.items.length = 0
     this.index.clear()
     this.accessDirty.clear()
@@ -92,10 +92,10 @@ export class LongTermMemory extends Memory {
     const targets = memoryId
       ? this.index.get(memoryId) ? [this.index.get(memoryId) as MemoryItem] : []
       : filters ? this.items.filter(item => this.matchesFilters(item, filters)) : []
+    this.deletePersisted(targets, 'delete long-term memory')
     for (const item of targets) {
       this.remove(item)
       this.accessDirty.delete(item)
-      this.storage?.delete(storageKey(item.memoryId))
     }
     return targets.length
   }
@@ -110,7 +110,13 @@ export class LongTermMemory extends Memory {
       this.pendingAccessWrites = 0
       return
     }
-    for (const item of this.accessDirty) this.persist(item)
+    for (const [item, increment] of this.accessDirty) {
+      const lastAccessed = item.lastAccessed?.toISOString()
+      if (!lastAccessed) continue
+      const result = this.storage?.updateAccessState?.(storageKey(item.memoryId), increment, lastAccessed)
+      if (result === 'updated' || result === 'missing') continue
+      this.mergeAccessState(item, increment, lastAccessed)
+    }
     this.accessDirty.clear()
     this.pendingAccessWrites = 0
   }
@@ -127,30 +133,29 @@ export class LongTermMemory extends Memory {
   }
 
   save(content: string, metadata: MemoryMetadata = {}, options: MemorySaveOptions = {}): MemoryItem {
-    if (this.maxItems !== undefined && this.items.length >= this.maxItems) this.cleanupOldMemories()
     const item = new MemoryItem({
       content,
       memoryType: 'long_term',
       metadata: {
         ...metadata,
         importance: options.importance ?? 0.5,
-        // Stamp the tenant so a later instance with the same owner can
-        // re-hydrate this record from a shared backend without also
-        // admitting every other tenant's records.
-        ...(this.ownerId ? { owner_id: metadata.owner_id ?? this.ownerId } : {}),
+        // The configured tenant is authoritative: caller metadata must not
+        // stamp a record as belonging to another owner.
+        ...(this.ownerId ? { owner_id: this.ownerId } : {}),
       },
       ...(options.agentId ? { agentId: options.agentId } : {}),
       ...(options.taskId ? { taskId: options.taskId } : {}),
       ...(options.userId ? { userId: options.userId } : {}),
       ...(options.conversationId ? { conversationId: options.conversationId } : {}),
     })
-    this.append(item)
+    this.persist(item)
     try {
-      this.persist(item)
+      if (this.maxItems !== undefined && this.items.length >= this.maxItems) this.cleanupOldMemories()
     } catch (error) {
-      this.remove(item)
+      this.storage?.delete(storageKey(item.memoryId))
       throw error
     }
+    this.append(item)
     return item
   }
 
@@ -191,9 +196,13 @@ export class LongTermMemory extends Memory {
   update(memoryId: string, updates: MemoryUpdate): boolean {
     const item = this.index.get(memoryId)
     if (!item) return false
+    const updated = MemoryItem.fromRecord(item.toRecord())
+    this.updateItem(updated, updates)
+    if (this.ownerId) updated.metadata = { ...updated.metadata, owner_id: this.ownerId }
+    this.persist(updated)
     this.updateItem(item, updates)
+    if (this.ownerId) item.metadata = { ...item.metadata, owner_id: this.ownerId }
     this.accessDirty.delete(item)
-    this.persist(item)
     return true
   }
 
@@ -207,10 +216,23 @@ export class LongTermMemory extends Memory {
         .sort((left, right) => valueScore(left, this.retentionDays) - valueScore(right, this.retentionDays))
         .slice(0, minimumToRemove)
     }
-    for (const item of new Set(targets)) {
+    const uniqueTargets = [...new Set(targets)]
+    this.deletePersisted(uniqueTargets, 'evict long-term memory')
+    for (const item of uniqueTargets) {
       this.remove(item)
       this.accessDirty.delete(item)
-      this.storage?.delete(storageKey(item.memoryId))
+    }
+  }
+
+  private deletePersisted(targets: readonly MemoryItem[], operation: string): void {
+    if (!this.storage) return
+    const deleted: MemoryItem[] = []
+    for (const item of targets) {
+      if (!this.storage.delete(storageKey(item.memoryId))) {
+        for (const removed of deleted) this.storage.save(storageKey(removed.memoryId), removed.toRecord())
+        throw new Error(`Failed to ${operation} ${item.memoryId}`)
+      }
+      deleted.push(item)
     }
   }
 
@@ -250,22 +272,50 @@ export class LongTermMemory extends Memory {
 
   private mergeSimilar(threshold: number): void {
     const candidates = this.items.slice()
+    const merged = new Map<MemoryItem, MemoryItem>()
+    const removed = new Set<MemoryItem>()
     for (let index = 0; index < candidates.length; index += 1) {
       const current = candidates[index]
-      if (!current || !this.index.has(current.memoryId)) continue
+      if (!current || removed.has(current)) continue
+      const updated = MemoryItem.fromRecord(current.toRecord())
       const sourceTerms = terms(current.content)
       for (const other of candidates.slice(index + 1)) {
-        if (!this.index.has(other.memoryId)) continue
+        if (removed.has(other)) continue
         const overlap = overlapRatio(sourceTerms, terms(other.content))
         if (overlap < threshold) continue
-        current.content = `${current.content}\n${other.content}`
-        current.metadata = { ...current.metadata, merged: true }
-        this.remove(other)
-        this.accessDirty.delete(other)
-        this.storage?.delete(storageKey(other.memoryId))
+        updated.content = `${updated.content}\n${other.content}`
+        updated.metadata = { ...updated.metadata, merged: true }
+        removed.add(other)
       }
+      merged.set(current, updated)
+    }
+
+    if (this.storage) {
+      const originals = candidates.map(item => [storageKey(item.memoryId), item.toRecord()] as const)
+      try {
+        for (const updated of merged.values()) this.persist(updated)
+        for (const item of removed) {
+          if (!this.storage.delete(storageKey(item.memoryId))) {
+            throw new Error(`Failed to merge long-term memory ${item.memoryId}`)
+          }
+        }
+      } catch (error) {
+        const failed = originals.filter(([key, record]) => !this.storage?.save(key, record))
+        if (failed.length > 0) {
+          throw new Error('Failed to roll back long-term memory consolidation', { cause: error })
+        }
+        throw error
+      }
+    }
+
+    for (const [current, updated] of merged) {
+      current.content = updated.content
+      current.metadata = { ...updated.metadata }
       this.accessDirty.delete(current)
-      this.persist(current)
+    }
+    for (const item of removed) {
+      this.remove(item)
+      this.accessDirty.delete(item)
     }
   }
 
@@ -284,6 +334,28 @@ export class LongTermMemory extends Memory {
   }
 
   /**
+   * Compatibility fallback for custom backends without a field-update primitive.
+   * It merges against the latest row before saving, which prevents stale-field
+   * clobbering but cannot promise atomic increments across concurrent processes.
+   */
+  private mergeAccessState(item: MemoryItem, increment: number, lastAccessed: string): void {
+    const key = storageKey(item.memoryId)
+    const current = this.storage?.load(key)
+    if (current === undefined) return
+    if (!isRecord(current)) throw new Error(`Failed to persist long-term memory ${item.memoryId}`)
+    const accessCount = typeof current.access_count === 'number' && Number.isInteger(current.access_count)
+      ? current.access_count
+      : 0
+    if (!this.storage?.save(key, {
+      ...current,
+      access_count: accessCount + increment,
+      last_accessed: lastAccessed,
+    })) {
+      throw new Error(`Failed to persist long-term memory ${item.memoryId}`)
+    }
+  }
+
+  /**
    * Record one access hit and batch its persistence. Immediate per-hit
    * rewrites caused heavy write amplification and last-writer-wins clobbering
    * between instances sharing a backend; hits flush every
@@ -292,7 +364,7 @@ export class LongTermMemory extends Memory {
   private touchAndTrack(item: MemoryItem): void {
     item.touch()
     if (!this.storage) return
-    this.accessDirty.add(item)
+    this.accessDirty.set(item, (this.accessDirty.get(item) ?? 0) + 1)
     this.pendingAccessWrites += 1
     if (this.pendingAccessWrites >= this.accessFlushThreshold) this.flushAccessState()
   }
