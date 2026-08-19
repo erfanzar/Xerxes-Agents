@@ -2540,7 +2540,7 @@ test("daemon resumes only initialize resume IDs and lists saved sessions separat
           session_id: firstSessionId,
           key: "tui:first",
           messages: 2,
-          title: "saved question",
+          title: "",
         },
       ],
     });
@@ -6080,6 +6080,50 @@ test("a daemon with no terminal registry reports an empty list rather than prete
   }
 });
 
+test("background turn events are routed to their own live session", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-background-route-"));
+  const socketPath = join(directory, "daemon.sock");
+  const server = new DaemonServer({
+    socketPath,
+    runtime: new InMemoryDaemonRuntime(undefined, {
+      currentProjectDirectory: directory,
+      model: "test-model",
+      sessionDirectory: join(directory, "sessions"),
+    }),
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { session_key: "foreground" } });
+    const initialized = await client.next((frame) => frame.id === 1);
+    const foregroundId = String((initialized.result?.session as { id?: unknown } | undefined)?.id ?? "");
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "turn.background",
+      params: { session_key: "foreground", text: "work elsewhere" },
+    });
+    const started = await client.next((frame) => frame.id === 2);
+    const taskId = String((started.result as { task_id?: unknown } | undefined)?.task_id ?? "");
+    expect(taskId).not.toBe("");
+    expect(taskId).not.toBe(foregroundId);
+
+    const begin = await client.next(eventFrame("turn_begin"));
+    const delta = await client.next(eventFrame("text_part"));
+    expect(begin.params?.payload).toMatchObject({ background_task_id: taskId, session_id: taskId });
+    expect(delta.params?.payload).toMatchObject({ background_task_id: taskId, session_id: taskId });
+    const complete = await client.next(eventFrame("background.complete"));
+    expect(complete.params?.payload).toEqual({ task_id: taskId, text: "finished" });
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("a completed first exchange generates a model-written session title and broadcasts it", async () => {
   resetTitleAttempts();
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-autotitle-"));
@@ -6141,7 +6185,7 @@ test("a completed first exchange generates a model-written session title and bro
   }
 });
 
-test("auto_title off keeps the first-message fallback with no provider call", async () => {
+test("auto_title off leaves the session untitled with no provider call", async () => {
   resetTitleAttempts();
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-autotitle-off-"));
   const socketPath = join(directory, "daemon.sock");
@@ -6183,6 +6227,7 @@ test("auto_title off keeps the first-message fallback with no provider call", as
     await client.next(eventFrame("turn_end"));
 
     expect(titleCalls).toBe(0);
+    expect(runtime.sessionStatus("untitled")?.metadata.title).toBeUndefined();
   } finally {
     client.close();
     await server.stop();
@@ -6235,10 +6280,23 @@ test("daemon.wipe_history removes the transcript store and reports counts while 
     expect(existsSync(sessionDirectory)).toBe(false);
     expect(existsSync(join(home, "snapshots"))).toBe(false);
 
-    // The live session survives the wipe: its status is still answerable.
+    // The live session survives the wipe and its next turn recreates history
+    // from a zero persistence generation instead of conflicting with the
+    // deleted transcript.
     client.send({ jsonrpc: "2.0", id: 3, method: "session.status", params: {} });
     const status = await client.next((frame) => frame.id === 3);
     expect(status.result).toMatchObject({ ok: true });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "turn.submit",
+      params: { session_key: "wipe-target", text: "recreate history" },
+    });
+    expect((await client.next((frame) => frame.id === 4)).result).toMatchObject({ ok: true });
+    await client.next(eventFrame("turn_end"));
+    const recreated = JSON.parse(await readFile(join(sessionDirectory, `${String((status.result as { session?: { id?: unknown } }).session?.id ?? "")}.json`), "utf8")) as { messages?: unknown[] };
+    expect(recreated.messages?.length).toBeGreaterThanOrEqual(2);
   } finally {
     client.close();
     await server.stop();

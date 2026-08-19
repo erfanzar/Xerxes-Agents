@@ -313,28 +313,12 @@ function recordProjectDirectoryText(record: SessionRecordJson): string {
 }
 
 function recordTitle(record: SessionRecordJson): string {
-  const title = firstText(recordValue(record.metadata).title)
-  return title || titleFromMessages(record.messages)
+  const metadata = recordValue(record.metadata)
+  return metadata.title_derived === true ? '' : firstText(metadata.title)
 }
 
 function recordTurnCount(record: SessionRecordJson): number {
   return integerValue(record.turn_count)
-}
-
-function titleFromMessages(messages: unknown): string {
-  if (!Array.isArray(messages)) {
-    return ''
-  }
-  for (const message of messages) {
-    if (!isRecord(message) || firstText(message.role) !== 'user') {
-      continue
-    }
-    const text = messageText(message.content).replace(/\s+/g, ' ').trim()
-    if (text) {
-      return text.length > 80 ? text.slice(0, 77) + '...' : text
-    }
-  }
-  return ''
 }
 
 function formatJsonl(exportRecord: SessionExport): string {

@@ -7,7 +7,7 @@ import type { GatewayEventHandlerContext } from '../app/interfaces.js'
 import { getOverlayState, patchOverlayState, resetOverlayState } from '../app/overlayStore.js'
 import { turnController } from '../app/turnController.js'
 import { getTurnState } from '../app/turnStore.js'
-import { resetUiState } from '../app/uiStore.js'
+import { getUiState, patchUiState, resetUiState } from '../app/uiStore.js'
 import type { GatewayClient } from '../gatewayClient.js'
 import type { GatewayEvent } from '../gatewayTypes.js'
 import { formatAbandonedClarify } from '../lib/text.js'
@@ -81,6 +81,19 @@ describe('createGatewayEventHandler', () => {
     expect(appended).toEqual([
       { role: 'assistant', text: 'old answer', thinking: 'old trace' }
     ])
+  })
+
+  it('isolates background deltas while still clearing completed task chrome', () => {
+    const { appended, handler, sys } = buildHarness()
+    patchUiState({ bgTasks: new Set(['bg-1']), sid: 'foreground' })
+
+    handler({ payload: { text: 'background text' }, session_id: 'bg-1', type: 'message.delta' })
+    handler({ payload: { task_id: 'bg-1', text: 'finished' }, type: 'background.complete' })
+
+    expect(appended).toEqual([])
+    expect(getTurnState().streaming).toBe('')
+    expect(getUiState().bgTasks.has('bg-1')).toBe(false)
+    expect(sys).toHaveBeenCalledWith('[bg bg-1] finished')
   })
 
   it('records an abandoned clarify prompt instead of dropping it at message.complete', () => {

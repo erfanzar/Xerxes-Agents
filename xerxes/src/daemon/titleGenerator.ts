@@ -4,12 +4,10 @@
 /**
  * Background session-title generation.
  *
- * A session's title starts life as the first user message (`titleFromMessages`
- * in the runtime), which reads as a truncated fragment rather than a name.
- * Once the first exchange completes, this module asks a cheap provider for a
- * short title and replaces the fallback — in the background, never blocking or
- * failing the turn it follows. Any failure leaves the fallback in place; a
- * title the user set explicitly is never touched.
+ * A session stays untitled until the first exchange completes. This module
+ * then asks a cheap provider for a short title in the background, never
+ * blocking or failing the turn it follows. Any failure leaves the session
+ * untitled; a title the user set explicitly is never touched.
  */
 
 import { closeLlmClient, completeLlm, createLlmClient, type LlmClient } from '../llms/client.js'
@@ -94,9 +92,9 @@ export function sanitizeTitle(raw: string): string | undefined {
 /**
  * Generate a title for a session's opening exchange.
  *
- * Returns undefined instead of throwing on any provider or shape failure — the
- * caller falls back to the first-message title and the turn that triggered
- * this is long finished, so there is nowhere useful to surface an error.
+ * Returns undefined instead of throwing on any provider or shape failure. The
+ * session remains untitled and the turn that triggered this is long finished,
+ * so there is nowhere useful to surface an error.
  */
 export async function generateSessionTitle(options: TitleGenerationOptions): Promise<string | undefined> {
   const model = titleModelFor(options.sessionModel, options.profile)

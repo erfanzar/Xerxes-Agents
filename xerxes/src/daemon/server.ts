@@ -519,10 +519,10 @@ export interface DaemonServerOptions {
    */
   readonly autoCompactThreshold?: number;
   /**
-   * Generate a model-written session title after the first exchange, replacing
-   * the first-message fallback. Defaults on; a runtime setting of `auto_title`
-   * set to false disables it. Generation is background and silent: a failure
-   * leaves the fallback in place and never surfaces in the turn.
+   * Generate a model-written session title after the first exchange. Defaults
+   * on; a runtime setting of `auto_title` set to false disables it. Generation
+   * is background and silent: a failure leaves the session untitled and never
+   * surfaces in the turn.
    */
   readonly autoTitle?: boolean;
   /** Test seam for title generation; production uses the real client factory. */
@@ -1659,22 +1659,35 @@ export class DaemonServer {
           this.emit(connection, event.type, {
             ...event.payload,
             background_task_id: taskId,
+            // Route every background delta to its own live session. The TUI's
+            // active-session filter then prevents it from mutating foreground
+            // streaming, tools, usage, or approval state.
+            session_id: taskId,
           }),
         connection,
         { displayText: text },
       )
-        .then(() =>
+        .then(() => {
+          this.emit(connection, "background.complete", {
+            task_id: taskId,
+            text: "finished",
+          });
           this.emit(connection, "notification", {
             level: "info",
             message: `Background task ${taskId} finished.`,
-          }),
-        )
-        .catch((error) =>
+          });
+        })
+        .catch((error) => {
+          const message = errorMessage(error);
+          this.emit(connection, "background.complete", {
+            task_id: taskId,
+            text: `failed: ${message}`,
+          });
           this.emit(connection, "notification", {
             level: "error",
-            message: `Background task ${taskId} failed: ${errorMessage(error)}`,
-          }),
-        );
+            message: `Background task ${taskId} failed: ${message}`,
+          });
+        });
       return { ok: true, task_id: taskId, session_key: backgroundKey };
     }
     if (method === "turn.cancel" || method === "cancel") {
@@ -3239,6 +3252,16 @@ export class DaemonServer {
   private async wipeMemory(
     connection: DaemonTransportConnection,
   ): Promise<JsonRpcPayload> {
+    const active = this.runtime
+      .listSessions()
+      .find((session) => session.activeTurnId);
+    if (active) {
+      return {
+        ok: false,
+        error:
+          "a turn may be using memory; wait for it to finish or cancel it before wiping memory",
+      };
+    }
     try {
       const session = this.runtime.sessionStatus(connection.activeSessionKey);
       const result = await wipeMemoryStores(xerxesHome(), session?.cwd);
@@ -3276,6 +3299,10 @@ export class DaemonServer {
         this.sessionArchiveDirectory,
         join(xerxesHome(), "snapshots"),
       );
+      // The files no longer carry the optimistic generation/message prefix
+      // each live session was based on. Reset those baselines so the next turn
+      // can recreate its retained in-memory transcript from generation zero.
+      this.runtime.resetSavedTranscriptState?.();
       this.transcriptSearch.clear();
       this.transcriptSearchHydration = undefined;
       this.emitSlash(
@@ -4252,15 +4279,15 @@ export class DaemonServer {
    * Fires on every turn-end edge but spends a provider call exactly once per
    * session (`attemptSessionTitleOnce`). Everything about it is best-effort:
    * a session the user already titled, a disabled setting, a missing provider,
-   * or a failed generation all resolve to "keep the first-message fallback"
-   * without touching the turn that triggered the attempt.
+   * or a failed generation all leave the existing title state untouched.
    */
   private maybeGenerateTitle(sessionKey: string): void {
     const session = this.runtime.sessionStatus(sessionKey);
     if (!session) return;
     if (!this.resolvedAutoTitle()) return;
-    // Only a fallback-derived title (or none) may be replaced. An explicit
-    // title — set through /title or session.title — carries no marker.
+    // Explicit titles — set through /title or session.title — always win.
+    // `title_derived` is retained only as a migration seam for transcripts
+    // written by older builds that used the first message as a fallback.
     const existing = stringValue(session.metadata.title);
     if (existing && session.metadata.title_derived !== true) return;
     // Titles are generated from the opening exchange, so only a session whose
@@ -4270,7 +4297,9 @@ export class DaemonServer {
     const user = firstExchangeText(session, "user");
     const assistant = firstExchangeText(session, "assistant");
     if (!user || !assistant) return;
-    if (session.messages.length > 2) return;
+    // Tool-using opening exchanges contain more than two transcript rows; the
+    // completed-turn count is the stable definition of "first exchange".
+    if (session.turnCount !== 1) return;
 
     const attempt = attemptSessionTitleOnce(session.id, () =>
       generateSessionTitle({
@@ -4504,6 +4533,7 @@ export class DaemonServer {
     }
     if (title) {
       session.metadata.title = title;
+      delete session.metadata.title_derived;
     }
     try {
       await this.runtime.flushSessions();
@@ -4554,6 +4584,7 @@ export class DaemonServer {
     }
     if (title) {
       session.metadata.title = title;
+      delete session.metadata.title_derived;
       await this.runtime.flushSessions();
     }
     const current = stringValue(session.metadata.title);
@@ -6282,7 +6313,9 @@ function sessionPayload(
   const contextTokens = sessionContextTokens(session, model);
   const calls = exactSessionApiCalls(session);
   const hierarchy = sessionHierarchyPayload(session.metadata);
-  const title = optionalString(session.metadata.title);
+  const title = session.metadata.title_derived === true
+    ? undefined
+    : optionalString(session.metadata.title);
   const subagentSnapshots = subagentSnapshotPanelPayloads(session.metadata);
   return {
     id: session.id,
@@ -6301,6 +6334,16 @@ function sessionPayload(
     model: session.model,
     messages: session.messages.length,
     message_count: session.messages.length,
+    transcript: session.messages.map((message) => structuredClone(message)),
+    ...(session.activeTurnId
+      ? {
+          inflight: {
+            user: session.inflightUser ?? "",
+            assistant: session.inflightAssistant ?? "",
+            streaming: true,
+          },
+        }
+      : {}),
     turn_count: session.turnCount,
     input_tokens: session.totalInputTokens,
     output_tokens: session.totalOutputTokens,

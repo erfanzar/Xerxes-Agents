@@ -269,6 +269,24 @@ export function adaptDaemonEvent(type: string, payload: Record<string, unknown>)
     case 'notification':
       return notificationEvents(payload)
 
+    case 'background.complete':
+      return [{
+        type: 'background.complete',
+        payload: {
+          task_id: str(payload.task_id),
+          text: str(payload.text)
+        }
+      }]
+
+    case 'session_title':
+      return [{
+        type: 'session_title',
+        payload: {
+          session_id: optionalStr(payload.session_id),
+          title: optionalStr(payload.title)
+        }
+      }]
+
     case 'plan_display':
       return [
         {

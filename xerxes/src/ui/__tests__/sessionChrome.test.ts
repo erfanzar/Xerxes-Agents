@@ -17,9 +17,9 @@ describe('session chrome', () => {
     expect(displayModeLabel('')).toBe('Code')
   })
 
-  it('replaces transient TUI transport titles with the first user request', () => {
-    expect(sessionDisplayTitle('tui:400b8d876331', '  Explain\nthis repository.  ')).toBe('Explain this repository.')
-    expect(sessionDisplayTitle('Release audit', 'fallback')).toBe('Release audit')
-    expect(sessionDisplayTitle('tui:abc', 'x'.repeat(80), 12)).toBe('xxxxxxxxxxx…')
+  it('never promotes the first user request into the chat title', () => {
+    expect(sessionDisplayTitle('tui:400b8d876331')).toBe('Untitled chat')
+    expect(sessionDisplayTitle('Release audit')).toBe('Release audit')
+    expect(sessionDisplayTitle('', 8)).toBe('Untitle…')
   })
 })

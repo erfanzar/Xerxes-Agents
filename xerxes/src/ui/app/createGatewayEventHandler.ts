@@ -439,9 +439,16 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
   return (ev: GatewayEvent) => {
     const sid = getUiState().sid
 
-    // A generated title may name a background session the TUI is not looking
-    // at; the tab strip tracks every live session, so this one event bypasses
-    // the active-session filter.
+    // Generated titles and task completion can name a background session the
+    // TUI is not looking at. They update global tab/task chrome without ever
+    // entering the foreground turn controller.
+    if (ev.type === 'background.complete') {
+      dropBgTask(ev.payload.task_id)
+      sys(`[bg ${ev.payload.task_id}] ${ev.payload.text}`)
+
+      return
+    }
+
     if (ev.type === 'session_title') {
       const targetId = typeof ev.payload?.session_id === 'string' ? ev.payload.session_id : ev.session_id
       const title = typeof ev.payload?.title === 'string' ? ev.payload.title.trim() : ''
@@ -899,11 +906,6 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
 
         return
 
-      case 'background.complete':
-        dropBgTask(ev.payload.task_id)
-        sys(`[bg ${ev.payload.task_id}] ${ev.payload.text}`)
-
-        return
       case 'review.summary': {
         // Self-improvement background review emitted a persistent summary
         // of what it saved to memory/skills. Surface it as a system line

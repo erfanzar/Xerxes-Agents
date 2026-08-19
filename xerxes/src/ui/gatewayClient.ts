@@ -671,7 +671,11 @@ export class GatewayClient extends EventEmitter {
         this.lastApprovalRequestId = String(payload.id ?? payload.request_id ?? '')
       }
       for (const evt of adaptDaemonEvent(type, payload)) {
-        const sessionId = typeof payload.session_id === 'string' ? payload.session_id : ''
+        const sessionId = typeof payload.session_id === 'string'
+          ? payload.session_id
+          : typeof payload.background_task_id === 'string'
+            ? payload.background_task_id
+            : ''
         this.emitEvent(sessionId ? ({ ...evt, session_id: sessionId } as AnyEvent) : evt)
       }
       return
@@ -705,8 +709,10 @@ export class GatewayClient extends EventEmitter {
         return this.sessionCreate(params) as Promise<T>
 
       case 'session.resume':
-      case 'session.activate':
         return this.sessionResume(params) as Promise<T>
+
+      case 'session.activate':
+        return this.sessionActivate(params) as Promise<T>
 
       case 'session.active_list':
         return this.sessionActiveList(params) as Promise<T>
@@ -1113,6 +1119,43 @@ export class GatewayClient extends EventEmitter {
     }
   }
 
+  private async sessionActivate(params: Record<string, unknown>): Promise<RpcObject> {
+    const id = String(params.session_id ?? '')
+    const nextSessionKey = this.keyFor(id)
+    const raw = await this.nativeSuccess('session.status', { session_key: nextSessionKey })
+    const session = (raw.session ?? {}) as RpcObject
+    const sessionId = String(session.id ?? '').trim()
+
+    if (!sessionId) {
+      throw new Error('native daemon activation returned no session id')
+    }
+
+    this.activeSessionKey = nextSessionKey
+    this.rememberSessionKey(sessionId, nextSessionKey)
+    const inflight = session.inflight && typeof session.inflight === 'object'
+      ? session.inflight as RpcObject
+      : undefined
+    const messages = transcriptFromStoredMessages(session.transcript)
+    return {
+      info: this.sessionInfoFromInitialize(raw, session, { info: null, usage: null }),
+      inflight: inflight
+        ? {
+            assistant: String(inflight.assistant ?? ''),
+            streaming: Boolean(inflight.streaming),
+            user: String(inflight.user ?? '')
+          }
+        : null,
+      message_count: Number(session.message_count ?? session.messages ?? 0),
+      // Activation reads the already-live transcript without reopening or
+      // competing with the running turn.
+      messages,
+      running: Boolean(session.active_turn_id),
+      session_id: sessionId,
+      session_key: nextSessionKey,
+      status: session.active_turn_id ? 'working' : 'idle'
+    }
+  }
+
   private async sessionActiveList(params: Record<string, unknown>): Promise<RpcObject> {
     const raw = await this.nativeSuccess('session.active_list', params)
     const rows = Array.isArray(raw.sessions) ? raw.sessions : []
@@ -1129,9 +1172,9 @@ export class GatewayClient extends EventEmitter {
         ...(Number.isFinite(lastActive) ? { last_active: lastActive } : {}),
         message_count: Number(row.messages ?? 0),
         model: String(row.model ?? ''),
-        preview: String(row.title ?? row.key ?? id),
+        preview: String(row.title ?? 'Untitled chat'),
         status: row.active_turn_id ? 'working' : 'idle',
-        title: String(row.title ?? row.key ?? id)
+        title: String(row.title ?? 'Untitled chat')
       }
     })
     return { sessions }

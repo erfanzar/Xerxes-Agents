@@ -60,7 +60,7 @@ test('daemon runtime persists a project-scoped session and resumes only an expli
       turn_count: 1,
       total_input_tokens: 13,
       total_output_tokens: 5,
-      metadata: { title: 'remember the native resume contract' },
+      metadata: expect.not.objectContaining({ title: expect.anything() }),
     })
     const firstListing = await runtime.listSavedSessions()
     expect(firstListing).toEqual([
@@ -68,7 +68,7 @@ test('daemon runtime persists a project-scoped session and resumes only an expli
         id: session.id,
         key: 'tui:default',
         messageCount: 2,
-        title: 'remember the native resume contract',
+        title: '',
         turnCount: 1,
       }),
     ])
@@ -105,7 +105,7 @@ test('daemon runtime persists a project-scoped session and resumes only an expli
       turnCount: 1,
       totalInputTokens: 13,
       totalOutputTokens: 5,
-      metadata: { title: 'remember the native resume contract' },
+      metadata: expect.not.objectContaining({ title: expect.anything() }),
     })
     expect(resumed.messages).toEqual(session.messages)
   } finally {

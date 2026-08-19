@@ -64,15 +64,12 @@ export const modelLabel = (model: string, effort?: string, fast?: boolean) =>
 export const statusIdentity = (model: string, mode?: string, effort?: string, fast?: boolean) =>
   `${modelLabel(model, effort, fast) || 'model unset'} · ${mode || 'code'}`
 
-/** Prefer a meaningful title over the daemon's transient `tui:<id>` label. */
-export function sessionDisplayTitle(sessionTitle?: null | string, firstUserMessage?: null | string, max = 72): string {
-  const explicit = String(sessionTitle ?? '')
+/** Show only an explicit or model-generated title, never conversation text. */
+export function sessionDisplayTitle(sessionTitle?: null | string, max = 72): string {
+  const value = String(sessionTitle ?? '')
     .replace(/\s+/g, ' ')
     .trim()
-  const fallback = String(firstUserMessage ?? '')
-    .replace(/\s+/g, ' ')
-    .trim()
-  const title = explicit && !/^tui:[0-9a-f]+$/i.test(explicit) ? explicit : fallback
+  const title = value && !/^tui:[0-9a-f]+$/i.test(value) ? value : 'Untitled chat'
 
   return title.length > max ? `${title.slice(0, Math.max(1, max - 1)).trimEnd()}…` : title
 }

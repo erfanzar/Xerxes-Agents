@@ -56,6 +56,9 @@ export interface DaemonSession {
   readonly id: string;
   interactionMode: string;
   lastActive: number;
+  /** Transient visible turn state used when the TUI switches back mid-turn. */
+  inflightUser?: string;
+  inflightAssistant?: string;
   messages: DaemonTranscriptMessage[];
   metadata: Record<string, unknown>;
   /** Persisted revision and message boundary this in-memory copy was based on. */
@@ -229,6 +232,8 @@ export interface DaemonRuntime {
   removeSavedTranscript?(sessionId: string): Promise<boolean>;
   evictSession(sessionKey: string): void;
   flushSessions(mode?: 'append' | 'rewrite'): Promise<void>;
+  /** Reset optimistic persistence baselines after the saved store is wiped. */
+  resetSavedTranscriptState?(): void;
   listSavedSessions(
     limit?: number,
     options?: SavedSessionListOptions,
@@ -483,13 +488,19 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     );
   }
 
+  resetSavedTranscriptState(): void {
+    for (const session of this.sessions.values()) {
+      session.transcriptGeneration = 0;
+      session.persistedMessageCount = 0;
+    }
+  }
+
   /**
    * List persisted sessions in three tiers: `stat` to enumerate, a bounded
    * head read to build and filter each row, and a full parse only for the
-   * rows that are actually returned and could not supply a title from their
-   * header. Reading every transcript in full to render twenty rows cost a
-   * quarter of a second and half a gigabyte of allocation on a directory this
-   * machine already has.
+   * rows that genuinely require their full body. Reading every transcript in
+   * full to render twenty rows cost a quarter of a second and half a gigabyte
+   * of allocation on a directory this machine already has.
    */
   async listSavedSessions(
     limit = 0,
@@ -558,23 +569,11 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     return unreadableSavedSession(entry);
   }
 
-  /**
-   * Derive titles from message text for the returned rows only. A transcript
-   * imported without a stored title is the only case that needs it, and
-   * paying for it before the limit is applied is what made listing expensive.
-   */
-  private async titleSelectedSessions(
+  /** Keep untitled rows untitled; chat content is never a title fallback. */
+  private titleSelectedSessions(
     selected: readonly SavedDaemonSession[],
-  ): Promise<readonly SavedDaemonSession[]> {
-    return Promise.all(
-      selected.map(async (row) => {
-        if (row.title) return row;
-        const transcript = await this.transcriptStore.loadForListing(row.id);
-        return transcript
-          ? { ...row, title: titleFromMessages(transcript.messages) }
-          : row;
-      }),
-    );
+  ): readonly SavedDaemonSession[] {
+    return selected;
   }
 
   /**
@@ -1032,6 +1031,8 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     const assistantParts: string[] = [];
     const thinkingParts: string[] = [];
     const displayText = options.displayText?.trim() || text;
+    session.inflightUser = displayText;
+    session.inflightAssistant = "";
     const processed = await processAtMentions(text, session.cwd);
     if (controller.signal.aborted) {
       session.status = "idle";
@@ -1170,6 +1171,8 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
           cancelled: controller.signal.aborted,
         },
       });
+      delete session.inflightUser;
+      delete session.inflightAssistant;
       // An evicted session may already have a replacement turn registered;
       // only release the controller this turn actually owns.
       if (this.abortControllers.get(sessionKey) === controller) {
@@ -1190,15 +1193,6 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
   }
 
   private async saveSession(session: DaemonSession, mode: 'append' | 'rewrite' = 'append'): Promise<void> {
-    const title = stringValue(session.metadata.title);
-    if (!title) {
-      const derivedTitle = titleFromMessages(session.messages);
-      if (derivedTitle) {
-        // Stamped as derived so the background title generator may replace it;
-        // a title the user set explicitly carries no marker and is never touched.
-        session.metadata = { ...session.metadata, title: derivedTitle, title_derived: true };
-      }
-    }
     await this.transcriptStore.save({
       agentId: session.agentId,
       ...(session.apiCallsComplete === undefined
@@ -1464,11 +1458,8 @@ function savedSessionSummary(
     key: transcript.key,
     kind,
     resumable: !activeChild,
-    // Empty when only the header was read and it stored no title; the caller
-    // fills it in for the rows it actually returns.
-    title:
-      stringValue(metadata.title) ||
-      (transcript.messages ? titleFromMessages(transcript.messages) : ""),
+    // Empty until the user sets a title or the title model generates one.
+    title: metadata.title_derived === true ? "" : stringValue(metadata.title),
     agentId: transcript.agentId,
     ...(model ? { model } : {}),
     ...(parentSessionId ? { parentSessionId } : {}),
@@ -1593,6 +1584,7 @@ function updateFallbackSession(
     const text = stringValue(event.payload.text);
     if (text) {
       assistantParts.push(text);
+      session.inflightAssistant = assistantParts.join("");
     }
     return;
   }
@@ -1632,19 +1624,6 @@ function updateFallbackSession(
       session.usageComplete = event.payload.usage_complete;
     }
   }
-}
-
-function titleFromMessages(messages: readonly RawMessage[]): string {
-  for (const message of messages) {
-    if (message.role !== "user") {
-      continue;
-    }
-    const text = messageText(message).replaceAll(/\s+/g, " ").trim();
-    if (text) {
-      return text.length > 80 ? `${text.slice(0, 77)}...` : text;
-    }
-  }
-  return "";
 }
 
 function messageText(message: RawMessage): string {

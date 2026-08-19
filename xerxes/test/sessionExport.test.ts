@@ -28,6 +28,27 @@ interface SessionFixture {
   readonly updatedAt: string
 }
 
+test('untitled session exports never derive a title from the first user message', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-session-export-title-'))
+  const sessions = join(root, 'sessions')
+  const project = join(root, 'project')
+  try {
+    await Promise.all([mkdir(sessions), mkdir(project)])
+    await writeSession(sessions, {
+      sessionId: 'untitled1',
+      project,
+      messages: [{ role: 'user', content: 'Do not use this as the title' }],
+      metadata: { title: 'Do not use this as the title', title_derived: true },
+      updatedAt: '2026-06-27T12:00:00.000Z',
+    })
+
+    const [saved] = await listSavedSessions({ storeDir: sessions, projectDir: project })
+    expect(savedSessionSummary(saved!).title).toBe('')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('session export discovers real JSON records, filters projects, and selects exact or unique matches', async () => {
   const root = await mkdtemp(join(tmpdir(), 'xerxes-session-export-'))
   const sessions = join(root, 'sessions')

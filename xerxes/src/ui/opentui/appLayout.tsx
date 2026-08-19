@@ -1596,8 +1596,7 @@ export function AppLayout({
     [transcript.virtualHistory.setScrollHandle]
   )
   const visibleRows = transcript.virtualRows.slice(transcript.virtualHistory.start, transcript.virtualHistory.end)
-  const firstUserMessage = transcript.historyItems.find(message => message.role === 'user')?.text
-  const sessionTitle = sessionDisplayTitle(ui.sessionTitle, firstUserMessage)
+  const sessionTitle = sessionDisplayTitle(ui.sessionTitle)
   const agentCount = useMemo(
     () => collectAgentPanelRecords(liveAgents, spawnHistory).length,
     [liveAgents, spawnHistory]

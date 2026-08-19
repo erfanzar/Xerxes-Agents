@@ -60,6 +60,15 @@ describe('gatewayAdapter', () => {
     expect(adaptDaemonEvent('turn_end', {})).toEqual([{ payload: {}, type: 'message.complete' }])
   })
 
+  it('maps background completion and generated title events', () => {
+    expect(adaptDaemonEvent('background.complete', { task_id: 'bg-1', text: 'finished' })).toEqual([
+      { payload: { task_id: 'bg-1', text: 'finished' }, type: 'background.complete' }
+    ])
+    expect(adaptDaemonEvent('session_title', { session_id: 'bg-1', title: 'Audit runtime' })).toEqual([
+      { payload: { session_id: 'bg-1', title: 'Audit runtime' }, type: 'session_title' }
+    ])
+  })
+
   it('marks denied and failed tool results without exposing successful payloads as errors', () => {
     const denied = adaptDaemonEvent('tool_result', {
       name: 'ExecCommand',
