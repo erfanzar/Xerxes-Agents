@@ -28,7 +28,7 @@ export class ShortTermMemory extends Memory {
   }
 
   clear(): void {
-    for (const item of this.items) this.storage?.delete(storageKey(item.memoryId))
+    this.deletePersisted(this.items, 'clear short-term memory')
     this.items.length = 0
     this.index.clear()
   }
@@ -37,10 +37,8 @@ export class ShortTermMemory extends Memory {
     const targets = memoryId
       ? this.index.get(memoryId) ? [this.index.get(memoryId) as MemoryItem] : []
       : filters ? this.items.filter(item => this.matchesFilters(item, filters)) : []
-    for (const item of targets) {
-      this.remove(item)
-      this.storage?.delete(storageKey(item.memoryId))
-    }
+    this.deletePersisted(targets, 'delete short-term memory')
+    for (const item of targets) this.remove(item)
     return targets.length
   }
 
@@ -69,15 +67,16 @@ export class ShortTermMemory extends Memory {
       ...(options.userId ? { userId: options.userId } : {}),
       ...(options.conversationId ? { conversationId: options.conversationId } : {}),
     })
-    if (this.items.length >= (this.maxItems ?? Infinity)) {
-      const evicted = this.items.shift()
-      if (evicted) {
-        this.index.delete(evicted.memoryId)
-        this.storage?.delete(storageKey(evicted.memoryId))
-      }
+    const evicted = this.items.length >= (this.maxItems ?? Infinity) ? this.items[0] : undefined
+    if (evicted && this.storage && !this.storage.delete(storageKey(evicted.memoryId))) {
+      throw new Error(`Failed to evict short-term memory ${evicted.memoryId}`)
     }
+    if (this.storage && !this.storage.save(storageKey(item.memoryId), item.toRecord())) {
+      if (evicted) this.storage.save(storageKey(evicted.memoryId), evicted.toRecord())
+      throw new Error(`Failed to persist short-term memory ${item.memoryId}`)
+    }
+    if (evicted) this.remove(evicted)
     this.append(item)
-    this.storage?.save(storageKey(item.memoryId), item.toRecord())
     return item
   }
 
@@ -121,9 +120,25 @@ export class ShortTermMemory extends Memory {
   update(memoryId: string, updates: MemoryUpdate): boolean {
     const item = this.index.get(memoryId)
     if (!item) return false
+    const updated = MemoryItem.fromRecord(item.toRecord())
+    this.updateItem(updated, updates)
+    if (this.storage && !this.storage.save(storageKey(memoryId), updated.toRecord())) {
+      throw new Error(`Failed to persist short-term memory ${memoryId}`)
+    }
     this.updateItem(item, updates)
-    this.storage?.save(storageKey(memoryId), item.toRecord())
     return true
+  }
+
+  private deletePersisted(targets: readonly MemoryItem[], operation: string): void {
+    if (!this.storage) return
+    const deleted: MemoryItem[] = []
+    for (const item of targets) {
+      if (!this.storage.delete(storageKey(item.memoryId))) {
+        for (const removed of deleted) this.storage.save(storageKey(removed.memoryId), removed.toRecord())
+        throw new Error(`Failed to ${operation} ${item.memoryId}`)
+      }
+      deleted.push(item)
+    }
   }
 
   /** Reload the newest persisted records (bounded by capacity) after a restart. */

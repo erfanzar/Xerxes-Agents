@@ -58,6 +58,9 @@ export interface DaemonSession {
   lastActive: number;
   messages: DaemonTranscriptMessage[];
   metadata: Record<string, unknown>;
+  /** Persisted revision and message boundary this in-memory copy was based on. */
+  transcriptGeneration?: number;
+  persistedMessageCount?: number;
   model: string;
   /**
    * True once this session owns its model explicitly — the user picked one
@@ -225,7 +228,7 @@ export interface DaemonRuntime {
    */
   removeSavedTranscript?(sessionId: string): Promise<boolean>;
   evictSession(sessionKey: string): void;
-  flushSessions(): Promise<void>;
+  flushSessions(mode?: 'append' | 'rewrite'): Promise<void>;
   listSavedSessions(
     limit?: number,
     options?: SavedSessionListOptions,
@@ -409,29 +412,30 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
   }
 
   cancelTurn(sessionKey: string): boolean {
-    const session = this.sessions.get(sessionKey);
-    if (!session) {
-      return false;
-    }
     const controller = this.abortControllers.get(sessionKey);
     if (!controller) {
       return false;
     }
-    session.cancelRequested = true;
+    const session = this.sessions.get(sessionKey);
+    if (session) {
+      session.cancelRequested = true;
+    }
     // Delegated children run on their own execution boundary: aborting the
     // parent's signal alone leaves a detached subagent burning tokens and
     // writing files while every surface already reports the turn stopped.
     // Cancel them first so the turn's own teardown observes honest child
     // state, and never let a host-side failure block the parent abort.
-    try {
-      const stopped = this.options.onTurnCancel?.(session.id);
-      if (typeof stopped === "number" && stopped > 0) {
-        this.cancelledSubagents.set(sessionKey, stopped);
+    if (session) {
+      try {
+        const stopped = this.options.onTurnCancel?.(session.id);
+        if (typeof stopped === "number" && stopped > 0) {
+          this.cancelledSubagents.set(sessionKey, stopped);
+        }
+      } catch (error) {
+        console.error(
+          `Cancelling delegated children of session '${session.id}' failed: ${errorMessage(error)}`,
+        );
       }
-    } catch (error) {
-      console.error(
-        `Cancelling delegated children of session '${session.id}' failed: ${errorMessage(error)}`,
-      );
     }
     controller.abort(new Error("Turn cancelled"));
     return true;
@@ -473,9 +477,9 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     this.sessions.delete(sessionKey);
   }
 
-  async flushSessions(): Promise<void> {
+  async flushSessions(mode: 'append' | 'rewrite' = 'append'): Promise<void> {
     await Promise.all(
-      [...this.sessions.values()].map((session) => this.saveSession(session)),
+      [...this.sessions.values()].map((session) => this.saveSession(session, mode)),
     );
   }
 
@@ -664,12 +668,20 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
         key,
       );
     }
-    const transcript = shouldResume
-      ? await this.transcriptStore.load(key, {
+    const loadResult = shouldResume
+      ? await this.transcriptStore.loadResult(key, {
           currentProjectDirectory: cwd,
           workspaceRoot: this.workspaceRoot,
         })
-      : undefined;
+      : { kind: "missing" } as const;
+    if (options.resume === true && loadResult.kind === "corrupt") {
+      throw new ValidationError(
+        "session_id",
+        "persisted transcript is corrupt or unreadable",
+        key,
+      );
+    }
+    const transcript = loadResult.kind === "loaded" ? loadResult.transcript : undefined;
     if (
       transcript &&
       transcriptIsSubagent(transcript) &&
@@ -943,6 +955,9 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
       ...(typeof this.runtimeSettings.responses_api === "boolean"
         ? { responses_api: this.runtimeSettings.responses_api }
         : {}),
+      ...(typeof this.runtimeSettings.auto_title === "boolean"
+        ? { auto_title: this.runtimeSettings.auto_title }
+        : {}),
       ...(optionalFiniteNumber(this.runtimeSettings.auto_compact_threshold) !==
         undefined
         ? {
@@ -980,13 +995,32 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     emit: (event: DaemonEvent) => void,
     options: SubmitTurnOptions = {},
   ): Promise<void> {
-    const session = await this.openSession(sessionKey);
+    // Admission begins before session loading and other asynchronous setup.
+    // Otherwise cancelTurn observes no controller in that window and the
+    // supposedly stopped request proceeds to launch once setup resolves.
     if (this.abortControllers.has(sessionKey)) {
       throw new Error("A turn is already active for this session");
     }
-
     const controller = new AbortController();
     this.abortControllers.set(sessionKey, controller);
+    let session: DaemonSession;
+    try {
+      session = await this.openSession(sessionKey);
+    } catch (error) {
+      if (this.abortControllers.get(sessionKey) === controller) {
+        this.abortControllers.delete(sessionKey);
+      }
+      throw error;
+    }
+    if (controller.signal.aborted) {
+      session.status = "idle";
+      session.cancelRequested = true;
+      if (this.abortControllers.get(sessionKey) === controller) {
+        this.abortControllers.delete(sessionKey);
+      }
+      return;
+    }
+
     session.status = "working";
     session.cancelRequested = false;
     // A cancel that lands during the previous turn's teardown must not have
@@ -999,6 +1033,19 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     const thinkingParts: string[] = [];
     const displayText = options.displayText?.trim() || text;
     const processed = await processAtMentions(text, session.cwd);
+    if (controller.signal.aborted) {
+      session.status = "idle";
+      session.activeTurnId = "";
+      session.lastActive = Date.now();
+      emit({
+        type: "turn_end",
+        payload: { session_id: session.id, cancelled: true },
+      });
+      if (this.abortControllers.get(sessionKey) === controller) {
+        this.abortControllers.delete(sessionKey);
+      }
+      return;
+    }
     const providerText = processed.enhancedMessage;
     const images = options.images ?? [];
     // Attachments ride the same ContentPart channel the provider mappings
@@ -1142,12 +1189,14 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     return stringValue(this.runtimeSettings.model) || this.options.model || "";
   }
 
-  private async saveSession(session: DaemonSession): Promise<void> {
+  private async saveSession(session: DaemonSession, mode: 'append' | 'rewrite' = 'append'): Promise<void> {
     const title = stringValue(session.metadata.title);
     if (!title) {
       const derivedTitle = titleFromMessages(session.messages);
       if (derivedTitle) {
-        session.metadata = { ...session.metadata, title: derivedTitle };
+        // Stamped as derived so the background title generator may replace it;
+        // a title the user set explicitly carries no marker and is never touched.
+        session.metadata = { ...session.metadata, title: derivedTitle, title_derived: true };
       }
     }
     await this.transcriptStore.save({
@@ -1158,6 +1207,7 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
       cwd: session.cwd,
       extra: session.extra,
       format: "bun-v2",
+      generation: session.transcriptGeneration ?? 0,
       interactionMode: session.interactionMode,
       key: session.sessionKey,
       messages: session.messages,
@@ -1183,6 +1233,14 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
       ...(session.usageComplete === undefined ? {} : { usageComplete: session.usageComplete }),
       updatedAt: new Date().toISOString(),
       workspace: session.workspace,
+    }, {
+      mode,
+      expectedGeneration: session.transcriptGeneration ?? 0,
+      expectedMessageCount: session.persistedMessageCount ?? 0,
+      onSavedGeneration: generation => {
+        session.transcriptGeneration = generation;
+        session.persistedMessageCount = session.messages.length;
+      },
     });
   }
 }
@@ -1220,6 +1278,8 @@ function freshSession(
     lastActive: Date.now(),
     messages: [],
     metadata: {},
+    transcriptGeneration: 0,
+    persistedMessageCount: 0,
     model,
     modelPinned,
     planMode: false,
@@ -1313,6 +1373,8 @@ function sessionFromTranscript(
       role: stringValue(message.role),
     })),
     metadata: { ...transcript.metadata },
+    transcriptGeneration: transcript.generation ?? 0,
+    persistedMessageCount: transcript.messages.length,
     // The model this history was written with wins over the current global
     // default: resuming a transcript should continue the conversation on the
     // model that produced it, not silently move it to another provider.

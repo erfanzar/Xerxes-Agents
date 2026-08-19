@@ -14,6 +14,7 @@ import {
   LongTermMemory,
   MemoryItem,
   NamespacedStorage,
+  ShortTermMemory,
   RAGStorage,
   SQLiteVectorStorage,
   SimpleStorage,
@@ -27,6 +28,11 @@ class CountingStorage extends SimpleStorage {
     this.saves += 1
     return super.save(key, data)
   }
+
+  override updateAccessState(key: string, increment: number, lastAccessed: string) {
+    this.saves += 1
+    return super.updateAccessState(key, increment, lastAccessed)
+  }
 }
 
 class RejectingStorage extends SimpleStorage {
@@ -34,6 +40,88 @@ class RejectingStorage extends SimpleStorage {
     return false
   }
 }
+
+class ControllableStorage extends SimpleStorage {
+  rejectDeletes = false
+  rejectSaves = false
+
+  override delete(key: string): boolean {
+    return this.rejectDeletes ? false : super.delete(key)
+  }
+
+  override save(key: string, data: unknown): boolean {
+    return this.rejectSaves ? false : super.save(key, data)
+  }
+}
+
+class FailOnceStorage extends SimpleStorage {
+  deleteCalls = 0
+  failDeleteAt: number | undefined
+  failSaveAt: number | undefined
+  saveCalls = 0
+
+  override delete(key: string): boolean {
+    this.deleteCalls += 1
+    if (this.deleteCalls === this.failDeleteAt) return false
+    return super.delete(key)
+  }
+
+  override save(key: string, data: unknown): boolean {
+    this.saveCalls += 1
+    if (this.saveCalls === this.failSaveAt) return false
+    return super.save(key, data)
+  }
+}
+
+test('long-term memory configured owner cannot be overridden by caller metadata', () => {
+  const storage = new SimpleStorage()
+  const memory = new LongTermMemory({ storage, ownerId: 'agent-a' })
+  const saved = memory.save('Agent A private fact', { owner_id: 'agent-b' })
+
+  expect(saved.metadata.owner_id).toBe('agent-a')
+  expect(new LongTermMemory({ storage, ownerId: 'agent-a' }).retrieve(saved.memoryId)).toBeDefined()
+  expect(new LongTermMemory({ storage, ownerId: 'agent-b' }).retrieve(saved.memoryId)).toBeUndefined()
+})
+
+test('long-term consolidation rolls back live and durable state when a merged save fails', () => {
+  const storage = new FailOnceStorage()
+  const memory = new LongTermMemory({ storage })
+  const originals = [
+    memory.save('alpha beta'),
+    memory.save('alpha beta'),
+    memory.save('gamma delta'),
+    memory.save('gamma delta'),
+  ]
+  storage.failSaveAt = storage.saveCalls + 2
+
+  expect(() => memory.consolidate()).toThrow('Failed to persist long-term memory')
+  expect(memory.size).toBe(4)
+  expect((memory.retrieve(undefined, undefined, 10) as MemoryItem[]).map(item => item.content)).toEqual(originals.map(item => item.content))
+
+  const restored = new LongTermMemory({ storage })
+  expect(restored.size).toBe(4)
+  expect((restored.retrieve(undefined, undefined, 10) as MemoryItem[]).map(item => item.content).sort()).toEqual(originals.map(item => item.content).sort())
+})
+
+test('long-term consolidation rolls back live and durable state when a merged delete fails', () => {
+  const storage = new FailOnceStorage()
+  const memory = new LongTermMemory({ storage })
+  const originals = [
+    memory.save('shared durable fact'),
+    memory.save('shared durable fact'),
+    memory.save('another durable fact'),
+    memory.save('another durable fact'),
+  ]
+  storage.failDeleteAt = storage.deleteCalls + 2
+
+  expect(() => memory.consolidate()).toThrow('Failed to merge long-term memory')
+  expect(memory.size).toBe(4)
+  expect((memory.retrieve(undefined, undefined, 10) as MemoryItem[]).map(item => item.content)).toEqual(originals.map(item => item.content))
+
+  const restored = new LongTermMemory({ storage })
+  expect(restored.size).toBe(4)
+  expect((restored.retrieve(undefined, undefined, 10) as MemoryItem[]).map(item => item.content).sort()).toEqual(originals.map(item => item.content).sort())
+})
 
 test('long-term memory scopes hydration and semantic search to its owner over a shared backend', () => {
   const backend = new SimpleStorage()
@@ -66,6 +154,58 @@ test('long-term memory rejects an item when its durable save fails', () => {
   const memory = new LongTermMemory({ storage: new RejectingStorage() })
   expect(() => memory.save('must be durable')).toThrow('Failed to persist long-term memory')
   expect(memory.size).toBe(0)
+})
+
+test('long-term save failure at capacity preserves the old live and durable memory', () => {
+  const storage = new ControllableStorage()
+  const memory = new LongTermMemory({ storage, maxItems: 1 })
+  const retained = memory.save('retain me')
+
+  storage.rejectSaves = true
+  expect(() => memory.save('must fail')).toThrow('Failed to persist long-term memory')
+  expect(memory.size).toBe(1)
+  expect(memory.retrieve(retained.memoryId)).toBe(retained)
+
+  storage.rejectSaves = false
+  const restored = new LongTermMemory({ storage, maxItems: 1 })
+  expect(restored.retrieve(retained.memoryId)).toBeDefined()
+  expect(restored.search('retain me', 10, undefined, { useSemantic: false }).map(item => item.memoryId)).toEqual([retained.memoryId])
+})
+
+test('long-term failed update leaves the live and durable item unchanged', () => {
+  const storage = new ControllableStorage()
+  const memory = new LongTermMemory({ storage })
+  const item = memory.save('original')
+
+  storage.rejectSaves = true
+  expect(() => memory.update(item.memoryId, { content: 'rejected' })).toThrow('Failed to persist long-term memory')
+  expect(item.content).toBe('original')
+
+  storage.rejectSaves = false
+  expect((new LongTermMemory({ storage }).retrieve(item.memoryId) as MemoryItem).content).toBe('original')
+})
+
+test('long- and short-term delete and clear failures do not resurrect records', () => {
+  for (const create of [
+    (storage: ControllableStorage) => new LongTermMemory({ storage }),
+    (storage: ControllableStorage) => new ShortTermMemory({ storage }),
+  ]) {
+    const deleteStorage = new ControllableStorage()
+    const deleting = create(deleteStorage)
+    const deleted = deleting.save('delete me')
+    deleteStorage.rejectDeletes = true
+    expect(() => deleting.delete(deleted.memoryId)).toThrow('Failed to delete')
+    expect(deleting.retrieve(deleted.memoryId)).toBe(deleted)
+
+    const clearStorage = new ControllableStorage()
+    const clearing = create(clearStorage)
+    const first = clearing.save('first')
+    const second = clearing.save('second')
+    clearStorage.rejectDeletes = true
+    expect(() => clearing.clear()).toThrow('Failed to')
+    expect(clearing.retrieve(first.memoryId)).toBe(first)
+    expect(clearing.retrieve(second.memoryId)).toBe(second)
+  }
 })
 
 test('long-term memory hydration enforces maxItems and keeps the newest records', () => {
@@ -131,6 +271,42 @@ test('long-term memory batches access-state persistence and never resurrects del
   memory.flushAccessState()
   expect(storage.saves).toBe(2)
   expect(storage.exists(`ltm_${item.memoryId}`)).toBe(false)
+})
+
+test('long-term access flush preserves a newer update from another instance', () => {
+  const storage = new SimpleStorage()
+  const writer = new LongTermMemory({ storage })
+  const item = writer.save('original content')
+  const stale = new LongTermMemory({ storage })
+  const current = new LongTermMemory({ storage })
+
+  expect(current.update(item.memoryId, { content: 'newer content', metadata: { source: 'current' } })).toBeTrue()
+  stale.retrieve(item.memoryId)
+  stale.flushAccessState()
+
+  const restored = new LongTermMemory({ storage })
+  const durable = restored.retrieve(item.memoryId) as MemoryItem
+  expect(durable.content).toBe('newer content')
+  expect(durable.metadata.source).toBe('current')
+  expect(durable.accessCount).toBe(2)
+})
+
+test('long-term access flush merges increments from multiple stale instances', () => {
+  const storage = new SimpleStorage()
+  const writer = new LongTermMemory({ storage })
+  const item = writer.save('shared fact')
+  const first = new LongTermMemory({ storage })
+  const second = new LongTermMemory({ storage })
+
+  first.retrieve(item.memoryId)
+  first.retrieve(item.memoryId)
+  second.retrieve(item.memoryId)
+  first.flushAccessState()
+  second.flushAccessState()
+
+  const restored = new LongTermMemory({ storage })
+  const durable = restored.retrieve(item.memoryId) as MemoryItem
+  expect(durable.accessCount).toBe(4)
 })
 
 test('user memory namespaces cannot collide across prefix-ambiguous user ids', () => {

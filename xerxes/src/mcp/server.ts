@@ -28,6 +28,25 @@ export interface MCPToolServerOptions {
 
 export type MCPStdioWriter = (line: string) => void | Promise<void>
 
+/** Matches the daemon and ACP cap: one NDJSON frame may not exceed 16 MiB. */
+export const MAX_MCP_FRAME_BYTES = 16 * 1024 * 1024
+
+class MCPFrameByteCounter {
+  private currentBytes = 0
+  private overflowed = false
+
+  append(chunk: Uint8Array): void {
+    for (const byte of chunk) {
+      this.currentBytes = byte === 0x0a ? 0 : this.currentBytes + 1
+      this.overflowed ||= this.currentBytes > MAX_MCP_FRAME_BYTES
+    }
+  }
+
+  get exceedsLimit(): boolean {
+    return this.overflowed
+  }
+}
+
 const DEFAULT_SERVER_INFO: MCPImplementation = { name: 'xerxes', version: '0.3.0' }
 const TOOL_SERVER_CAPABILITIES: MCPServerCapabilities = { tools: { listChanged: false } }
 
@@ -169,6 +188,7 @@ export async function serveMCPStdio(
 ): Promise<void> {
   const reader = input.getReader()
   const decoder = new TextDecoder()
+  const frameBytes = new MCPFrameByteCounter()
   let buffer = ''
   try {
     while (true) {
@@ -176,8 +196,19 @@ export async function serveMCPStdio(
       if (done) {
         break
       }
+      frameBytes.append(value)
       buffer += decoder.decode(value, { stream: true })
-      buffer = await respondToLines(server, buffer, write)
+      const remaining = await respondToLines(server, buffer, write)
+      if (remaining === undefined || frameBytes.exceedsLimit) {
+        await write(`${JSON.stringify(mcpJsonRpcFailure(
+          null,
+          MCP_JSON_RPC_ERRORS.invalidRequest,
+          `frame exceeds maximum size of ${MAX_MCP_FRAME_BYTES} bytes`,
+        ))}\n`)
+        await reader.cancel().catch(() => undefined)
+        return
+      }
+      buffer = remaining
     }
     buffer += decoder.decode()
     if (buffer.trim()) {
@@ -188,11 +219,19 @@ export async function serveMCPStdio(
   }
 }
 
-async function respondToLines(server: MCPToolServer, buffer: string, write: MCPStdioWriter): Promise<string> {
+async function respondToLines(
+  server: MCPToolServer,
+  buffer: string,
+  write: MCPStdioWriter,
+): Promise<string | undefined> {
   let newline = buffer.indexOf('\n')
   while (newline >= 0) {
-    const line = buffer.slice(0, newline).trim()
+    const rawLine = buffer.slice(0, newline)
     buffer = buffer.slice(newline + 1)
+    if (new TextEncoder().encode(rawLine).byteLength > MAX_MCP_FRAME_BYTES) {
+      return undefined
+    }
+    const line = rawLine.trim()
     if (line) {
       await respond(server, line, write)
     }

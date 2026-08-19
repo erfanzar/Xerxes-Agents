@@ -148,6 +148,13 @@ export class OllamaClient implements LlmClient {
     let receivedDone = false
     for await (const line of ndjsonLines(response.body, this.maxLineBytes)) {
       const chunk = parseChunk(line)
+      if (receivedDone) {
+        // Keep valid trailing counters, but terminal means later message and
+        // tool payloads cannot extend the semantic completion.
+        const trailingUsage = ollamaUsage(chunk)
+        if (trailingUsage) yield { usage: trailingUsage }
+        continue
+      }
       if (chunk.done === true) {
         receivedDone = true
       }

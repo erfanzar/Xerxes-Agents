@@ -1,7 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { appendFile, mkdir, open, readdir, readFile, rename, rm, stat } from 'node:fs/promises'
+import { appendFile, mkdir, open, readdir, readFile, rename, rm, stat, utimes } from 'node:fs/promises'
 import { basename, dirname, resolve, sep } from 'node:path'
 
 import { ValidationError } from '../core/errors.js'
@@ -43,6 +43,8 @@ export interface DaemonTranscript {
   readonly cwd: string
   readonly extra: Readonly<Record<string, unknown>>
   readonly format: 'bun-v2' | 'legacy-v1'
+  /** Monotonic persisted revision used to authorize transcript mutations. */
+  readonly generation?: number
   readonly interactionMode: string
   readonly key: string
   readonly messages: readonly RawMessage[]
@@ -74,14 +76,36 @@ export interface TranscriptLoadOptions {
 export interface DaemonTranscriptStoreOptions {
   readonly currentProjectDirectory?: string
   readonly directory: string
+  /** Maximum age before an unverifiable lock may be recovered. */
+  readonly lockStaleMs?: number
+  /** Maximum time a writer waits for an active cross-process owner. */
+  readonly lockWaitMs?: number
   readonly workspaceRoot?: string
 }
+
+export interface TranscriptSaveOptions {
+  /** Append preserves independently-added suffixes; rewrite replaces history exactly. */
+  readonly mode: 'append' | 'rewrite'
+  /** Generation observed when the caller loaded or last saved this transcript. */
+  readonly expectedGeneration: number
+  /** Message count at that generation; append treats everything after it as the caller's suffix. */
+  readonly expectedMessageCount?: number
+  /** Receives the committed generation while the write is still serialized. */
+  readonly onSavedGeneration?: (generation: number) => void
+}
+
 
 /** Per-read overrides supplied by a daemon connection during initialization. */
 export interface DaemonTranscriptReadOptions {
   readonly currentProjectDirectory?: string
   readonly workspaceRoot?: string
 }
+
+/** Typed result that keeps absent history distinct from persisted bytes that cannot be resumed. */
+export type DaemonTranscriptLoadResult =
+  | { readonly kind: 'loaded'; readonly transcript: DaemonTranscript }
+  | { readonly kind: 'missing' }
+  | { readonly kind: 'corrupt' }
 
 /** Only explicit resume IDs may load persisted state; slot keys always start fresh. */
 export function looksLikeSessionId(value: string): boolean {
@@ -112,7 +136,7 @@ export function normalizeDaemonTranscript(raw: unknown, options: TranscriptLoadO
   const format = raw.format === DAEMON_SESSION_FORMAT ? 'bun-v2' : 'legacy-v1'
   const knownKeys = new Set([
     'format', 'schema_version', 'session_id', 'key', 'agent_id', 'cwd', 'project_dir', 'workspace', 'updated_at', 'messages',
-    'message_count',
+    'message_count', 'generation',
     'turn_count', 'interaction_mode', 'mode', 'plan_mode', 'api_calls_complete', 'total_api_calls', 'total_input_tokens',
     'total_output_tokens',
     'usage_complete', 'metadata',
@@ -129,6 +153,7 @@ export function normalizeDaemonTranscript(raw: unknown, options: TranscriptLoadO
   return {
     format,
     schemaVersion: numberValue(raw.schema_version),
+    generation: integerValue(raw.generation),
     sessionId: rawSessionId,
     // Resume always binds to the caller's requested ID, never stale slot keys stored on disk.
     key: options.requestedSessionKey,
@@ -178,6 +203,7 @@ export function daemonTranscriptRecord(transcript: DaemonTranscript): Record<str
     cwd: transcript.cwd,
     workspace: transcript.workspace,
     updated_at: transcript.updatedAt || new Date().toISOString(),
+    generation: transcript.generation ?? 0,
     turn_count: transcript.turnCount,
     message_count: transcript.messages.length,
     interaction_mode: transcript.interactionMode,
@@ -238,11 +264,15 @@ export function transcriptHasHistory(transcript: Pick<DaemonTranscript, 'message
 export class DaemonTranscriptStore {
   private readonly currentProjectDirectory: string
   private readonly directory: string
+  private readonly lockStaleMs: number
+  private readonly lockWaitMs: number
   private readonly workspaceRoot: string | undefined
 
   constructor(options: DaemonTranscriptStoreOptions) {
     this.directory = options.directory
     this.currentProjectDirectory = options.currentProjectDirectory ?? process.cwd()
+    this.lockStaleMs = positiveDuration(options.lockStaleMs, 30_000)
+    this.lockWaitMs = positiveDuration(options.lockWaitMs, 10_000)
     this.workspaceRoot = options.workspaceRoot
   }
 
@@ -267,6 +297,22 @@ export class DaemonTranscriptStore {
       requestedSessionKey: sessionKey,
       ...(workspaceRoot ? { workspaceRoot } : {}),
     })
+  }
+
+  /** Load while preserving the security-relevant distinction between absent and corrupt history. */
+  async loadResult(
+    sessionKey: string,
+    options: DaemonTranscriptReadOptions = {},
+  ): Promise<DaemonTranscriptLoadResult> {
+    const transcript = await this.load(sessionKey, options)
+    if (transcript) return { kind: 'loaded', transcript }
+    if (!looksLikeSessionId(sessionKey)) return { kind: 'missing' }
+    try {
+      await stat(this.pathFor(sessionKey))
+      return { kind: 'corrupt' }
+    } catch (error) {
+      return isMissing(error) ? { kind: 'missing' } : { kind: 'corrupt' }
+    }
   }
 
   /**
@@ -355,7 +401,14 @@ export class DaemonTranscriptStore {
     }
   }
 
-  async save(transcript: DaemonTranscript): Promise<void> {
+  async save(
+    transcript: DaemonTranscript,
+    options: TranscriptSaveOptions = {
+      mode: 'append',
+      expectedGeneration: transcript.generation ?? 0,
+      expectedMessageCount: transcript.messages.length,
+    },
+  ): Promise<void> {
     if (!transcriptHasHistory(transcript)) {
       // Never delete a persisted transcript as a side effect of saving an
       // empty in-memory session. Several paths can briefly hold an empty
@@ -366,12 +419,19 @@ export class DaemonTranscriptStore {
       // explicit through remove().
       return
     }
-    await this.serializeTranscriptWrite(transcript.sessionId, async () => {
-      await atomicJsonWrite(this.pathFor(transcript.sessionId), daemonTranscriptRecord(transcript))
+    return this.serializeTranscriptWrite(transcript.sessionId, async () => {
+      const persisted = await this.readPersistedState(transcript.sessionId)
+      const messages = this.resolveMessages(transcript, options, persisted)
+      const generation = persisted.generation + 1
+      await atomicJsonWrite(
+        this.pathFor(transcript.sessionId),
+        daemonTranscriptRecord({ ...transcript, generation, messages }),
+      )
       // Appends cannot enter this critical section while covered entries are
       // removed. Keep entries beyond this snapshot's message count: an append
       // may have completed just before a save holding an older transcript.
-      await this.discardCoveredJournalEntries(transcript.sessionId, transcript.messages.length)
+      await this.discardCoveredJournalEntries(transcript.sessionId, messages.length)
+      options.onSavedGeneration?.(generation)
     })
   }
 
@@ -437,6 +497,39 @@ export class DaemonTranscriptStore {
     return resolve(this.directory, `${sessionId}.json`)
   }
 
+  private async readPersistedState(
+    sessionId: string,
+  ): Promise<{ readonly generation: number; readonly messages: readonly RawMessage[] }> {
+    try {
+      const raw = JSON.parse(await readFile(this.pathFor(sessionId), 'utf8')) as unknown
+      return {
+        generation: isRecord(raw) ? integerValue(raw.generation) : 0,
+        messages: isRecord(raw) && Array.isArray(raw.messages) ? raw.messages.filter(isRecord) : [],
+      }
+    } catch (error) {
+      if (isMissing(error)) return { generation: 0, messages: [] }
+      throw error
+    }
+  }
+
+  private resolveMessages(
+    transcript: DaemonTranscript,
+    options: TranscriptSaveOptions,
+    persisted: { readonly generation: number; readonly messages: readonly RawMessage[] },
+  ): readonly RawMessage[] {
+    if (persisted.generation === options.expectedGeneration) return transcript.messages
+    if (options.mode === 'rewrite') {
+      throw new ValidationError('transcript_generation', 'stale rewrite conflicts with persisted history', options.expectedGeneration)
+    }
+    const baseCount = options.expectedMessageCount ?? transcript.messages.length
+    if (baseCount > transcript.messages.length || !messagesEqual(transcript.messages.slice(0, baseCount), persisted.messages.slice(0, baseCount))) {
+      throw new ValidationError('transcript_generation', 'divergent append conflicts with persisted history', options.expectedGeneration)
+    }
+    const suffix = transcript.messages.slice(baseCount)
+    if (suffix.length === 0) return persisted.messages
+    return [...persisted.messages, ...suffix]
+  }
+
   private async discardCoveredJournalEntries(sessionId: string, messageCount: number): Promise<void> {
     const path = this.journalPathFor(sessionId)
     let contents: string
@@ -472,7 +565,10 @@ export class DaemonTranscriptStore {
     transcriptWrites.set(key, current)
     await previous.catch(() => undefined)
     try {
-      return await operation()
+      return await withFileLock(`${key}.lock`, operation, {
+        staleMs: this.lockStaleMs,
+        waitMs: this.lockWaitMs,
+      })
     } finally {
       release()
       if (transcriptWrites.get(key) === current) transcriptWrites.delete(key)
@@ -560,6 +656,11 @@ export class DaemonTranscriptStore {
   }
 }
 
+function messagesEqual(left: readonly RawMessage[], right: readonly RawMessage[]): boolean {
+  return left.length === right.length
+    && left.every((message, index) => JSON.stringify(message) === JSON.stringify(right[index]))
+}
+
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
@@ -569,6 +670,138 @@ function isMissing(error: unknown): boolean {
     && error !== null
     && 'code' in error
     && (error as { readonly code?: unknown }).code === 'ENOENT'
+}
+
+interface FileLockOptions {
+  readonly staleMs: number
+  readonly waitMs: number
+}
+
+interface FileLockMetadata {
+  readonly createdAt: number
+  readonly pid: number
+  readonly token: string
+}
+
+async function withFileLock<T>(path: string, operation: () => Promise<T>, options: FileLockOptions): Promise<T> {
+  await mkdir(dirname(path), { recursive: true })
+  const deadline = performance.now() + options.waitMs
+  for (;;) {
+    const token = crypto.randomUUID()
+    let handle
+    try {
+      handle = await open(path, 'wx')
+    } catch (error) {
+      if (!isAlreadyExists(error)) throw error
+      await removeAbandonedLock(path, options.staleMs)
+      if (performance.now() >= deadline) {
+        throw new Error(`Timed out waiting for transcript lock ${path} after ${options.waitMs}ms`)
+      }
+      await Bun.sleep(Math.min(5, Math.max(1, deadline - performance.now())))
+      continue
+    }
+    const metadata: FileLockMetadata = { createdAt: Date.now(), pid: process.pid, token }
+    try {
+      await handle.writeFile(`${JSON.stringify(metadata)}\n`, 'utf8')
+    } finally {
+      await handle.close()
+    }
+    // Age is based on a heartbeat rather than PID liveness. This handles PID
+    // reuse while ensuring a genuinely active long operation is never reaped.
+    const heartbeat = setInterval(() => {
+      void refreshOwnedLock(path, token)
+    }, Math.max(10, Math.floor(options.staleMs / 3)))
+    heartbeat.unref?.()
+    try {
+      return await operation()
+    } finally {
+      clearInterval(heartbeat)
+      await removeOwnedLock(path, token)
+    }
+  }
+}
+
+function isAlreadyExists(error: unknown): boolean {
+  return typeof error === 'object'
+    && error !== null
+    && 'code' in error
+    && (error as { readonly code?: unknown }).code === 'EEXIST'
+}
+
+async function refreshOwnedLock(path: string, token: string): Promise<void> {
+  try {
+    if (lockToken(await readFile(path, 'utf8')) !== token) return
+    const now = new Date()
+    await utimes(path, now, now)
+  } catch {
+    // A heartbeat is best effort. The token check in cleanup prevents this
+    // owner from deleting a replacement if its lock was externally removed.
+  }
+}
+
+async function removeOwnedLock(path: string, token: string): Promise<void> {
+  try {
+    if (lockToken(await readFile(path, 'utf8')) === token) await rm(path)
+  } catch (error) {
+    if (!isMissing(error)) throw error
+  }
+}
+
+async function removeAbandonedLock(path: string, staleMs: number): Promise<void> {
+  let observed: string
+  let modifiedAt: number
+  try {
+    observed = await readFile(path, 'utf8')
+    modifiedAt = (await stat(path)).mtimeMs
+  } catch {
+    return
+  }
+  const metadata = lockMetadata(observed)
+  const lastEvidence = Math.max(modifiedAt, metadata?.createdAt ?? 0)
+  if (Date.now() - lastEvidence < staleMs) return
+
+  // Rename first so cleanup applies to the exact lock we inspected. If its
+  // contents changed during inspection, put it back rather than deleting a
+  // newly initialized or refreshed owner.
+  const abandonedPath = `${path}.${crypto.randomUUID()}.abandoned`
+  try {
+    await rename(path, abandonedPath)
+  } catch {
+    return
+  }
+  try {
+    if (await readFile(abandonedPath, 'utf8') !== observed) {
+      try {
+        await rename(abandonedPath, path)
+      } catch {
+        // Another contender already established a lock; retain neither a
+        // misleading lock at the canonical path nor an unbounded side file.
+        await rm(abandonedPath, { force: true })
+      }
+      return
+    }
+    await rm(abandonedPath, { force: true })
+  } catch (error) {
+    await rm(abandonedPath, { force: true })
+    if (!isMissing(error)) throw error
+  }
+}
+
+function lockMetadata(contents: string): FileLockMetadata | undefined {
+  try {
+    const value = JSON.parse(contents) as unknown
+    if (!isRecord(value)
+      || !Number.isSafeInteger(value.pid) || (value.pid as number) <= 0
+      || typeof value.createdAt !== 'number' || !Number.isFinite(value.createdAt)
+      || typeof value.token !== 'string' || value.token.length === 0) return undefined
+    return { createdAt: value.createdAt, pid: value.pid as number, token: value.token }
+  } catch {
+    return undefined
+  }
+}
+
+function lockToken(contents: string): string | undefined {
+  return lockMetadata(contents)?.token
 }
 
 async function atomicJsonWrite(path: string, value: Record<string, unknown>): Promise<void> {
@@ -633,6 +866,10 @@ function stringValue(value: unknown): string {
 
 function integerValue(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) ? Math.trunc(value) : 0
+}
+
+function positiveDuration(value: number | undefined, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.trunc(value) : fallback
 }
 
 function optionalIntegerValue(value: unknown): number | undefined {

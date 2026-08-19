@@ -5,6 +5,7 @@ import { attachCommands } from './commands/attach.js'
 import { coreCommands } from './commands/core.js'
 import { creditsCommands } from './commands/credits.js'
 import { debugCommands } from './commands/debug.js'
+import { maintenanceCommands } from './commands/maintenance.js'
 import { opsCommands } from './commands/ops.js'
 import { sessionCommands } from './commands/session.js'
 import { setupCommands } from './commands/setup.js'
@@ -14,6 +15,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   ...coreCommands,
   ...creditsCommands,
   ...sessionCommands,
+  ...maintenanceCommands,
   ...opsCommands,
   ...setupCommands,
   ...debugCommands,

@@ -186,9 +186,21 @@ export class FileSessionStore implements SessionStore {
 }
 
 export interface SQLiteSessionStoreOptions {
+  /** Maximum time SQLite waits for another connection's write lock. */
+  readonly busyTimeoutMs?: number
   readonly dbPath?: string
   readonly embedder?: Embedder
   readonly schemaVersion?: number
+}
+
+const DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 5_000
+
+function sqliteBusyTimeout(value: number | undefined): number {
+  const timeout = value ?? DEFAULT_SQLITE_BUSY_TIMEOUT_MS
+  if (!Number.isSafeInteger(timeout) || timeout < 0) {
+    throw new RangeError('busyTimeoutMs must be a non-negative safe integer')
+  }
+  return timeout
 }
 
 /**
@@ -239,6 +251,10 @@ export class SQLiteSessionStore implements SessionStore {
     if (this.dbPath !== ':memory:') mkdirSync(dirname(this.dbPath), { recursive: true })
     this.database = new Database(this.dbPath)
     try {
+      // Install the handler before WAL/schema initialization: opening another
+      // store can itself require a write lock. SQLite still surfaces the error
+      // once this bounded wait expires, so persistent lock failures stay visible.
+      this.database.run(`PRAGMA busy_timeout = ${sqliteBusyTimeout(options.busyTimeoutMs)}`)
       this.database.run('PRAGMA journal_mode = WAL')
       this.applySchemaMigrations()
       // The index shares this connection so session row writes and turn

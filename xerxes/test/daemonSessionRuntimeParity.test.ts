@@ -321,21 +321,80 @@ test('saved session listing exposes additive hierarchy metadata and limits roots
   }
 })
 
-test('a corrupt explicit resume file creates an empty native session instead of crashing', async () => {
+test('a corrupt explicit resume errors without overwriting the original bytes', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'xerxes-daemon-corrupt-resume-parity-'))
   const sessionDirectory = join(directory, 'sessions')
   const sessionId = 'deadbeef'
+  const transcriptPath = join(sessionDirectory, `${sessionId}.json`)
+  const corruptBytes = '{not valid json\nkeep these original bytes'
   await mkdir(sessionDirectory, { recursive: true })
-  await writeFile(join(sessionDirectory, `${sessionId}.json`), '{not valid json', 'utf8')
+  await writeFile(transcriptPath, corruptBytes, 'utf8')
   const runtime = new InMemoryDaemonRuntime(undefined, {
     currentProjectDirectory: directory,
     sessionDirectory,
   })
   try {
-    const session = await runtime.openSession(sessionId, undefined, { resume: true })
-
-    expect(session).toMatchObject({ id: sessionId, sessionKey: sessionId, messages: [], turnCount: 0 })
+    await expect(runtime.openSession(sessionId, undefined, { resume: true })).rejects.toThrow(
+      'persisted transcript is corrupt or unreadable',
+    )
+    expect(await readFile(transcriptPath, 'utf8')).toBe(corruptBytes)
+    expect(runtime.sessionStatus(sessionId)).toBeUndefined()
   } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('cancellation during async session admission prevents the turn runner from launching', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-daemon-admission-cancel-'))
+  const sessionDirectory = join(directory, 'sessions')
+  const sessionId = 'abcddcba1234'
+  await mkdir(sessionDirectory, { recursive: true })
+  await writeFile(join(sessionDirectory, `${sessionId}.json`), JSON.stringify({
+    format: 'bun-v2',
+    session_id: sessionId,
+    key: sessionId,
+    agent_id: 'default',
+    cwd: directory,
+    workspace: '',
+    updated_at: new Date().toISOString(),
+    turn_count: 0,
+    interaction_mode: 'code',
+    plan_mode: false,
+    total_input_tokens: 0,
+    total_output_tokens: 0,
+    metadata: {},
+    messages: [],
+    thinking_content: [],
+    tool_executions: [],
+  }), 'utf8')
+  const loadStarted = Promise.withResolvers<void>()
+  const releaseLoad = Promise.withResolvers<void>()
+  let runnerCalls = 0
+  const store = new GatedLoadStore({
+    currentProjectDirectory: directory,
+    directory: sessionDirectory,
+  }, loadStarted, releaseLoad)
+  const runtime = new InMemoryDaemonRuntime({
+    async *run(): AsyncGenerator<DaemonEvent> {
+      runnerCalls += 1
+      yield { type: 'text_part', payload: { text: 'must not run' } }
+    },
+  }, { currentProjectDirectory: directory, transcriptStore: store })
+  try {
+    const turn = runtime.submitTurn(sessionId, 'do not launch', () => {})
+    await loadStarted.promise
+    expect(runtime.cancelTurn(sessionId)).toBe(true)
+    releaseLoad.resolve()
+    await turn
+
+    expect(runnerCalls).toBe(0)
+    expect(runtime.sessionStatus(sessionId)).toMatchObject({
+      activeTurnId: '',
+      cancelRequested: true,
+      status: 'idle',
+    })
+  } finally {
+    releaseLoad.resolve()
     await rm(directory, { recursive: true, force: true })
   }
 })
@@ -483,6 +542,24 @@ class BoundedSteerRunner implements TurnRunner {
     await this.released
     this.drained = controls?.drainSteer?.() ?? []
     yield { type: 'text_part', payload: { text: 'done' } }
+  }
+}
+
+class GatedLoadStore extends DaemonTranscriptStore {
+  constructor(
+    options: ConstructorParameters<typeof DaemonTranscriptStore>[0],
+    private readonly started: PromiseWithResolvers<void>,
+    private readonly release: PromiseWithResolvers<void>,
+  ) {
+    super(options)
+  }
+
+  override async loadResult(
+    ...args: Parameters<DaemonTranscriptStore['loadResult']>
+  ): ReturnType<DaemonTranscriptStore['loadResult']> {
+    this.started.resolve()
+    await this.release.promise
+    return super.loadResult(...args)
   }
 }
 

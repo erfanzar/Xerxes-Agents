@@ -465,6 +465,8 @@ export class SubAgentManager {
   private runner: SubagentTaskRunner
   private readonly runtimes = new Map<string, TaskRuntime>()
   private readonly resets = new Map<string, Promise<SubAgentTask | undefined>>()
+  /** Pre-handle worktree setup remains live for waits and spawn-budget accounting. */
+  private readonly setups = new Map<string, Promise<void>>()
   private readonly tasksByName = new Map<string, string>()
   private readonly textBurst = new Map<string, string[]>()
   private readonly thinkingBurst = new Map<string, ThinkingBurst>()
@@ -518,7 +520,9 @@ export class SubAgentManager {
   /** Spawn one delegated task. The returned task is registered before execution begins. */
   async spawn(options: SpawnSubAgentOptions): Promise<SubAgentTask> {
     this.compactTerminalTasks()
-    const liveTasks = [...this.tasks.values()].filter(task => !TERMINAL_STATUSES.has(task.status)).length
+    const liveTasks = [...this.tasks.values()].filter(
+      task => !TERMINAL_STATUSES.has(task.status) || this.setups.has(task.id),
+    ).length
     if (liveTasks >= this.maxSpawnedAgents) {
       throw new Error(
         `Spawned-agent budget (${this.maxSpawnedAgents}) reached: cannot spawn another subagent until a live task finishes`,
@@ -560,19 +564,25 @@ export class SubAgentManager {
     }
 
     let worktree: SubagentWorktree | undefined
+    let setup: PromiseWithResolvers<void> | undefined
     let prompt = options.prompt
     if (isolation === 'worktree') {
       if (this.worktree === undefined) {
         this.fail(task, "isolation='worktree' requires a configured worktree port")
         return task
       }
+      setup = Promise.withResolvers<void>()
+      this.setups.set(task.id, setup.promise)
       try {
         worktree = await this.worktree.create({ taskId: task.id, taskName: task.name })
         task.worktreePath = worktree.path
         task.worktreeBranch = worktree.branch
         prompt = `${prompt}\n\n[Note: You are working in an isolated git worktree at ${worktree.path} (branch: ${worktree.branch}). Commit your changes before finishing so they can be reviewed and merged.]`
       } catch (error) {
-        this.fail(task, `Failed to create worktree: ${errorMessage(error)}`)
+        if (!TERMINAL_STATUSES.has(task.status)) {
+          this.fail(task, `Failed to create worktree: ${errorMessage(error)}`)
+        }
+        this.finishSetup(task.id, setup)
         return task
       }
     }
@@ -592,6 +602,11 @@ export class SubAgentManager {
       monitor: undefined,
       run: undefined,
     })
+    if (TERMINAL_STATUSES.has(task.status)) {
+      await this.cleanupWorktree(task)
+      if (setup !== undefined) this.finishSetup(task.id, setup)
+      return task
+    }
 
     try {
       await this.handleManager.spawn({
@@ -614,6 +629,8 @@ export class SubAgentManager {
     } catch (error) {
       this.fail(task, errorMessage(error))
       await this.cleanupWorktree(task)
+    } finally {
+      if (setup !== undefined) this.finishSetup(task.id, setup)
     }
     return task
   }
@@ -622,8 +639,26 @@ export class SubAgentManager {
   async wait(taskIdOrName: string, timeoutMs?: number): Promise<SubAgentTask | undefined> {
     const task = this.resolveTask(taskIdOrName)
     if (task === undefined) return undefined
+    const waitMilliseconds = timeoutMs ?? 30_000
+    if (!Number.isFinite(waitMilliseconds) || waitMilliseconds < 0) {
+      throw new TypeError('timeoutMs must be a non-negative finite number')
+    }
+    const deadline = Date.now() + waitMilliseconds
+    const setup = this.setups.get(task.id)
+    if (setup !== undefined) {
+      const remaining = Math.max(0, deadline - Date.now())
+      if (remaining === 0) return task
+      const delay = timeout(remaining)
+      await Promise.race([setup, delay.promise])
+      delay.dispose()
+      // Setup still registered means the timeout won; no spawned-agent handle
+      // exists yet, so return the externally visible pending snapshot.
+      if (this.setups.get(task.id) === setup) return task
+    }
     if (TERMINAL_STATUSES.has(task.status)) return task
-    const wait = await this.handleManager.wait([task.id], timeoutMs ?? 30_000)
+    const remaining = Math.max(0, deadline - Date.now())
+    if (remaining === 0) return task
+    const wait = await this.handleManager.wait([task.id], remaining)
     const snapshot = wait.completed[0] ?? wait.pending[0]
     if (snapshot !== undefined) this.synchronize(task, snapshot)
     return task
@@ -670,7 +705,7 @@ export class SubAgentManager {
     const task = this.resolveTask(taskIdOrName)
     if (task === undefined || TERMINAL_STATUSES.has(task.status)) return false
     this.flushThinkingBurst(task)
-    this.handleManager.close(task.id)
+    if (this.runtimes.has(task.id)) this.handleManager.close(task.id)
     task.status = 'cancelled'
     task.result ??= '[Sub-agent was cancelled.]'
     task.lastActivityAt = this.now().valueOf()
@@ -954,11 +989,12 @@ export class SubAgentManager {
     }
   }
 
-  /** Cancel active tasks and wait for their native task monitors to settle. */
+  /** Cancel active tasks and wait for setup plus native task monitors to settle. */
   async shutdown(): Promise<void> {
     this.flushAllThinkingBursts()
     this.cancelAll()
     try {
+      await Promise.all([...this.setups.values()])
       await Promise.all([...this.runtimes.values()].flatMap(runtime => runtime.monitor ? [runtime.monitor] : []))
     } finally {
       this.clearThinkingBurstTimers()
@@ -1389,6 +1425,12 @@ export class SubAgentManager {
     runtime.cleanup = undefined
     task.worktreePath = worktree.path
     task.worktreeBranch = worktree.branch
+  }
+
+  private finishSetup(taskId: string, setup: PromiseWithResolvers<void>): void {
+    if (this.setups.get(taskId) === setup.promise) this.setups.delete(taskId)
+    setup.resolve()
+    this.notifyWaiters()
   }
 
   private async cleanupWorktree(task: SubAgentTask): Promise<void> {

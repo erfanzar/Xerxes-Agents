@@ -548,7 +548,7 @@ export function useMainApp(gw: GatewayClient) {
 
   useEffect(() => {
     if (!ui.sid) {
-      patchUiState({ liveSessionCount: 0 })
+      patchUiState({ liveSessionCount: 0, sessionTabs: [] })
 
       return
     }
@@ -579,14 +579,30 @@ export function useMainApp(gw: GatewayClient) {
 
             const sessionTitle = result.sessions.find(s => s.current || s.id === currentSid)?.title?.trim() ?? ''
 
+            // The tab strip mirrors the live main sessions the daemon knows
+            // about; subagent children are deliberately not tabs.
+            const sessionTabs = result.sessions
+              .filter(s => (s.kind ?? 'main') === 'main')
+              .map(s => ({
+                id: s.id,
+                status: s.status,
+                title: s.title?.trim() || s.preview?.trim() || s.id
+              }))
+
             // Only patch when something actually changed. patchUiState always
             // produces a new state object, which notifies every $uiState
             // subscriber; patching unconditionally on each 1.5s poll re-renders
             // the whole TUI and causes idle flicker.
             const prev = getUiState()
+            const tabsChanged =
+              prev.sessionTabs.length !== sessionTabs.length ||
+              sessionTabs.some((tab, index) => {
+                const before = prev.sessionTabs[index]
+                return !before || before.id !== tab.id || before.status !== tab.status || before.title !== tab.title
+              })
 
-            if (prev.liveSessionCount !== liveSessionCount || prev.sessionTitle !== sessionTitle) {
-              patchUiState({ liveSessionCount, sessionTitle })
+            if (prev.liveSessionCount !== liveSessionCount || prev.sessionTitle !== sessionTitle || tabsChanged) {
+              patchUiState({ liveSessionCount, sessionTitle, sessionTabs })
             }
           }
         })

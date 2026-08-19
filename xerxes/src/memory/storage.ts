@@ -18,6 +18,8 @@ import { dirname, join, resolve } from 'node:path'
 
 import { cosineSimilarity, getDefaultEmbedder, type Embedder } from './embedders.js'
 
+export type AccessStateUpdateResult = 'updated' | 'missing' | 'failed'
+
 export interface MemoryStorage {
   clear(): number
   delete(key: string): boolean
@@ -27,6 +29,8 @@ export interface MemoryStorage {
   save(key: string, data: unknown): boolean
   semanticSearch(query: string, limit?: number, threshold?: number): SemanticSearchResult[]
   supportsSemanticSearch(): boolean
+  /** Add an access delta without replacing the rest of a record when the backend supports it. */
+  updateAccessState?(key: string, increment: number, lastAccessed: string): AccessStateUpdateResult
 }
 
 export interface SemanticSearchResult {
@@ -73,6 +77,16 @@ export class SimpleStorage implements MemoryStorage {
 
   supportsSemanticSearch(): boolean {
     return false
+  }
+
+  updateAccessState(key: string, increment: number, lastAccessed: string): AccessStateUpdateResult {
+    const current = this.data.get(key)
+    if (!isRecord(current)) return current === undefined ? 'missing' : 'failed'
+    const accessCount = typeof current.access_count === 'number' && Number.isInteger(current.access_count)
+      ? current.access_count
+      : 0
+    this.data.set(key, { ...current, access_count: accessCount + increment, last_accessed: lastAccessed })
+    return 'updated'
   }
 }
 
@@ -133,6 +147,10 @@ export class NamespacedStorage implements MemoryStorage {
 
   supportsSemanticSearch(): boolean {
     return this.backend.supportsSemanticSearch()
+  }
+
+  updateAccessState(key: string, increment: number, lastAccessed: string): AccessStateUpdateResult {
+    return this.backend.updateAccessState?.(this.scoped(key), increment, lastAccessed) ?? 'failed'
   }
 
   private scoped(key: string): string {
@@ -343,8 +361,20 @@ export class FileStorage implements MemoryStorage {
 }
 
 export interface SQLiteStorageOptions {
+  /** Maximum time SQLite waits for another connection's write lock. */
+  readonly busyTimeoutMs?: number
   readonly dbPath?: string
   readonly writeEnabled?: boolean
+}
+
+const DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 5_000
+
+function sqliteBusyTimeout(value: number | undefined): number {
+  const timeout = value ?? DEFAULT_SQLITE_BUSY_TIMEOUT_MS
+  if (!Number.isSafeInteger(timeout) || timeout < 0) {
+    throw new RangeError('busyTimeoutMs must be a non-negative safe integer')
+  }
+  return timeout
 }
 
 interface SQLiteMigration {
@@ -387,7 +417,16 @@ export class SQLiteStorage implements MemoryStorage {
     if (!this.writeEnabled) return
     mkdirSync(dirname(this.dbPath), { recursive: true })
     this.database = new Database(this.dbPath)
-    migrateSQLiteSchema(this.database)
+    try {
+      // Install the handler before schema inspection/migrations, which can
+      // themselves require a write lock when another process opens the store.
+      this.database.run(`PRAGMA busy_timeout = ${sqliteBusyTimeout(options.busyTimeoutMs)}`)
+      this.database.run('PRAGMA journal_mode = WAL')
+      migrateSQLiteSchema(this.database)
+    } catch (error) {
+      this.database.close()
+      throw error
+    }
   }
 
   clear(): number {
@@ -451,6 +490,38 @@ export class SQLiteStorage implements MemoryStorage {
 
   supportsSemanticSearch(): boolean {
     return false
+  }
+
+  updateAccessState(key: string, increment: number, lastAccessed: string): AccessStateUpdateResult {
+    if (!this.database) return this.fallback.updateAccessState(key, increment, lastAccessed)
+    try {
+      this.database.run('BEGIN IMMEDIATE')
+      const row = this.database.query('SELECT data FROM memory WHERE key = ?').get(key) as { data?: unknown } | null
+      if (!row || typeof row.data !== 'string') {
+        this.database.run('ROLLBACK')
+        return 'missing'
+      }
+      const current = JSON.parse(row.data) as unknown
+      if (!isRecord(current)) {
+        this.database.run('ROLLBACK')
+        return 'failed'
+      }
+      const accessCount = typeof current.access_count === 'number' && Number.isInteger(current.access_count)
+        ? current.access_count
+        : 0
+      const updated = { ...current, access_count: accessCount + increment, last_accessed: lastAccessed }
+      this.database.query('UPDATE memory SET data = ?, updated_at = ? WHERE key = ?')
+        .run(JSON.stringify(updated), new Date().toISOString(), key)
+      this.database.run('COMMIT')
+      return 'updated'
+    } catch {
+      try {
+        this.database.run('ROLLBACK')
+      } catch {
+        // No active transaction remains.
+      }
+      return 'failed'
+    }
   }
 }
 
@@ -517,6 +588,19 @@ export class RAGStorage implements MemoryStorage {
 
   supportsSemanticSearch(): boolean {
     return true
+  }
+
+  updateAccessState(key: string, increment: number, lastAccessed: string): AccessStateUpdateResult {
+    if (key.startsWith(RAGStorage.embeddingKeyPrefix)) return 'failed'
+    const result = this.backend.updateAccessState?.(key, increment, lastAccessed) ?? 'failed'
+    if (result !== 'updated') return result
+    const data = this.backend.load(key)
+    if (data !== undefined) {
+      const embedding = this.embedder.embed(dataToText(data))
+      this.embeddings.set(key, embedding)
+      this.backend.save(`${RAGStorage.embeddingKeyPrefix}${key}`, embedding)
+    }
+    return result
   }
 
   private restoreEmbeddings(): void {

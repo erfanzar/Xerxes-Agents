@@ -55,6 +55,12 @@ export class BlueBubblesChannel extends WebhookChannel {
   ): readonly ChannelMessage[] {
     const payload = parseJsonBody(body)
     const data = Object.keys(recordValue(payload.data)).length ? recordValue(payload.data) : payload
+    // BlueBubbles emits webhooks for messages sent through its own API. Feeding
+    // those back into the router creates a self-reply loop with a fresh GUID on
+    // every outbound response, so ordinary message-id deduplication cannot stop it.
+    if (data.isFromMe === true) {
+      return []
+    }
     const text = stringValue(data.text) || stringValue(data.body)
     if (!text) {
       return []

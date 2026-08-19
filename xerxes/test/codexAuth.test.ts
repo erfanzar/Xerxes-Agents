@@ -140,6 +140,11 @@ test('an adopted CLI session is persisted so it survives the CLI being removed',
 
     expect((await session.credential()).planType).toBe('plus')
     expect((await storage.load(CODEX_PROVIDER))?.refreshToken).toBe('r2')
+
+    // With the CLI gone, the adopted copy is the only session left and must
+    // keep answering on its own.
+    await rm(join(home, '.codex'), { force: true, recursive: true })
+    expect((await session.credential()).planType).toBe('plus')
   })
 })
 
@@ -231,6 +236,95 @@ test('resolution without any session names the command that fixes it', async () 
   await inTemporaryHome(async (home, storage) => {
     const session = new CodexSession({ environment: {}, homeDirectory: home, now: () => 1, storage })
     await expect(session.credential()).rejects.toThrow(/xerxes auth login codex/)
+  })
+})
+
+test('a fresher Codex CLI session is re-adopted over a stale stored one', async () => {
+  await inTemporaryHome(async (home, storage) => {
+    // Stored credential the CLI already rotated past: its refresh token is dead.
+    await storage.save(CODEX_PROVIDER, new OAuthToken({
+      accessToken: accessToken({ accountId: 'acct-old', expiresAt: 2_000 }),
+      refreshToken: 'stale-refresh',
+      expiresAt: 2_000,
+    }))
+    // The CLI holds a later link in the same chain, still valid.
+    await writeCodexCliAuth(home, {
+      tokens: { access_token: accessToken({ accountId: 'acct-new', expiresAt: 50_000, plan: 'pro' }), refresh_token: 'fresh-refresh' },
+    })
+
+    const session = new CodexSession({ environment: {}, homeDirectory: home, now: () => 1_000, storage })
+    const credential = await session.credential()
+
+    expect(credential.accountId).toBe('acct-new')
+    expect(credential.planType).toBe('pro')
+    // Re-adoption is persisted so the next resolution does not depend on the CLI.
+    expect((await storage.load(CODEX_PROVIDER))?.refreshToken).toBe('fresh-refresh')
+  })
+})
+
+test('a stale stored session does not displace a working explicit login when the CLI is absent', async () => {
+  await inTemporaryHome(async (home, storage) => {
+    await storage.save(CODEX_PROVIDER, new OAuthToken({
+      accessToken: accessToken({ accountId: 'acct-x', expiresAt: 50_000, plan: 'plus' }),
+      refreshToken: 'r',
+      expiresAt: 50_000,
+    }))
+
+    const session = new CodexSession({ environment: {}, homeDirectory: home, now: () => 1_000, storage })
+    expect((await session.credential()).planType).toBe('plus')
+  })
+})
+
+test('a refresh rejected as an invalid grant heals from a valid CLI session', async () => {
+  await inTemporaryHome(async (home, storage) => {
+    // Stored and CLI sessions carry the same expiry, so the CLI copy is not
+    // fresher and cannot win by age; only the refresh rejection re-adopts it.
+    await storage.save(CODEX_PROVIDER, new OAuthToken({
+      accessToken: accessToken({ expiresAt: 1_000 }),
+      refreshToken: 'rotated-away',
+      expiresAt: 1_000,
+    }))
+    await writeCodexCliAuth(home, {
+      tokens: { access_token: accessToken({ accountId: 'acct-heal', expiresAt: 1_000, plan: 'pro' }), refresh_token: 'cli-refresh' },
+    })
+
+    const session = new CodexSession({
+      environment: {},
+      homeDirectory: home,
+      now: () => 900,
+      storage,
+      fetchImplementation: (async () => new Response(
+        '{"error":{"message":"Your refresh token has already been used","type":"invalid_request_error","code":"refresh_token_reused"}}',
+        { status: 401 },
+      )) as never,
+    })
+
+    const credential = await session.credential()
+    expect(credential.accountId).toBe('acct-heal')
+    expect((await storage.load(CODEX_PROVIDER))?.refreshToken).toBe('cli-refresh')
+  })
+})
+
+test('a refresh failure with no usable CLI session still surfaces the provider error', async () => {
+  await inTemporaryHome(async (home, storage) => {
+    await storage.save(CODEX_PROVIDER, new OAuthToken({
+      accessToken: accessToken({ expiresAt: 1_000 }),
+      refreshToken: 'dead',
+      expiresAt: 1_000,
+    }))
+
+    const session = new CodexSession({
+      environment: {},
+      homeDirectory: home,
+      now: () => 900,
+      storage,
+      fetchImplementation: (async () => new Response(
+        '{"error":{"code":"refresh_token_reused"}}',
+        { status: 401 },
+      )) as never,
+    })
+
+    await expect(session.credential()).rejects.toThrow(/refresh failed \(401\)/)
   })
 })
 

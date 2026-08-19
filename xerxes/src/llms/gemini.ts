@@ -285,8 +285,10 @@ export class GeminiClient implements LlmClient {
     const pendingToolCalls = new Map<string, ToolCall>()
     const callIdOccurrences = new Map<string, number>()
     let emittedToolCalls = false
+    let receivedTerminalEvent = false
     for await (const data of internalSseData(response.body)) {
       if (data === '[DONE]') {
+        receivedTerminalEvent = true
         break
       }
       if (!data.trim()) {
@@ -295,6 +297,12 @@ export class GeminiClient implements LlmClient {
       const chunk = parseGeminiEvent(data)
       throwGeminiApiError(chunk)
       const usage = geminiUsage(chunk.usageMetadata)
+      if (receivedTerminalEvent) {
+        // Usage may legitimately trail a finish reason. Preserve it while
+        // refusing any later text, thinking, tool calls, or finish changes.
+        if (usage) yield { usage }
+        continue
+      }
       const candidates = geminiCandidates(chunk.candidates)
       const candidate = candidates[0]
       const delta: {
@@ -322,6 +330,7 @@ export class GeminiClient implements LlmClient {
           delta.thinkingSignature = parsed.thinkingSignature
         }
         if (parsed.finishReason) {
+          receivedTerminalEvent = true
           delta.finishReason = parsed.finishReason
           if (pendingToolCalls.size) {
             delta.toolCalls = [...pendingToolCalls.values()]
@@ -331,6 +340,7 @@ export class GeminiClient implements LlmClient {
       } else {
         const promptBlock = promptBlockReason(chunk.promptFeedback)
         if (promptBlock) {
+          receivedTerminalEvent = true
           delta.finishReason = normalizeFinishReason(promptBlock)
         }
       }
@@ -340,6 +350,9 @@ export class GeminiClient implements LlmClient {
       if (Object.keys(delta).length) {
         yield delta
       }
+    }
+    if (!receivedTerminalEvent) {
+      throw new ProviderError('gemini', 'stream ended before a finish reason or [DONE]')
     }
     if (!emittedToolCalls && pendingToolCalls.size) {
       yield { toolCalls: [...pendingToolCalls.values()] }

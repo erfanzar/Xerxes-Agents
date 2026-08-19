@@ -3,11 +3,14 @@
 
 import { createHash, randomUUID } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdir, open, readFile, rename, rm, stat } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 import { xerxesHome } from '../daemon/paths.js'
 
 const GIT_COMMAND_TIMEOUT_MS = 30_000
+const REPOSITORY_LOCK_STALE_MS = 60_000
+const REPOSITORY_LOCK_WAIT_MS = 2
 
 /** Mutating shadow-Git operations share an index and record log across manager instances. */
 const repositoryOperations = new Map<string, Promise<void>>()
@@ -285,7 +288,7 @@ export class SnapshotManager {
     repositoryOperations.set(key, current)
     await previous.catch(() => undefined)
     try {
-      return await operation()
+      return await withRepositoryLock(`${key}.lock`, operation)
     } finally {
       release()
       if (repositoryOperations.get(key) === current) repositoryOperations.delete(key)
@@ -386,6 +389,66 @@ function parseTurnIndex(value: string | undefined): number | undefined {
   if (value === undefined || value.trim() === '') return undefined
   const parsed = Number(value)
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : undefined
+}
+
+/** Serialize one shadow repository across Xerxes processes and recover abandoned locks. */
+async function withRepositoryLock<T>(path: string, operation: () => Promise<T>): Promise<T> {
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 })
+  let handle: Awaited<ReturnType<typeof open>>
+  for (;;) {
+    try {
+      handle = await open(path, 'wx', 0o600)
+      break
+    } catch (error) {
+      if (!hasErrorCode(error, 'EEXIST')) throw error
+      await recoverStaleRepositoryLock(path)
+      await Bun.sleep(REPOSITORY_LOCK_WAIT_MS)
+    }
+  }
+  try {
+    await handle.writeFile(`${process.pid}\n`, 'utf8')
+    return await operation()
+  } finally {
+    await handle.close()
+    await rm(path, { force: true })
+  }
+}
+
+async function recoverStaleRepositoryLock(path: string): Promise<void> {
+  let lockStat: Awaited<ReturnType<typeof stat>>
+  let pid: number
+  try {
+    lockStat = await stat(path)
+    pid = Number.parseInt((await readFile(path, 'utf8')).trim(), 10)
+  } catch (error) {
+    if (hasErrorCode(error, 'ENOENT')) return
+    return
+  }
+  if (Date.now() - lockStat.mtimeMs < REPOSITORY_LOCK_STALE_MS) return
+  if (Number.isSafeInteger(pid) && pid > 0) {
+    try {
+      process.kill(pid, 0)
+      return
+    } catch (error) {
+      if (!hasErrorCode(error, 'ESRCH')) return
+    }
+  }
+  // Rename first so a delayed owner cannot unlink a replacement lock created
+  // after recovery. If another waiter won the rename, simply retry normally.
+  const abandoned = `${path}.stale-${process.pid}-${randomUUID()}`
+  try {
+    await rename(path, abandoned)
+    await rm(abandoned, { force: true })
+  } catch (error) {
+    if (!hasErrorCode(error, 'ENOENT')) throw error
+  }
+}
+
+function hasErrorCode(error: unknown, code: string): boolean {
+  return typeof error === 'object'
+    && error !== null
+    && 'code' in error
+    && (error as { readonly code?: unknown }).code === code
 }
 
 /** Run one git invocation with a hard timeout, killing the process when it overruns. */

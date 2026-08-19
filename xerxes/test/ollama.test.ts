@@ -110,6 +110,35 @@ test('Ollama client posts direct chat NDJSON and normalizes content, tool, and f
   expect(events).toContainEqual({ finishReason: 'stop', usage: { inputTokens: 11, outputTokens: 7 } })
 })
 
+test('Ollama stream ignores semantic deltas after done while retaining terminal metadata', async () => {
+  const client = new OllamaClient({
+    fetchImplementation: async () => ndjsonResponse([
+      {
+        done: true,
+        done_reason: 'stop',
+        message: { role: 'assistant', content: 'before' },
+        prompt_eval_count: 4,
+        eval_count: 2,
+      },
+      {
+        message: {
+          role: 'assistant',
+          content: 'after',
+          thinking: 'late thought',
+          tool_calls: [{ function: { name: 'ReadFile', arguments: { path: 'late' } } }],
+        },
+      },
+    ]),
+  })
+
+  expect(await collect(client.stream({ model: 'llama3.3', messages: [{ role: 'user', content: 'hi' }] })))
+    .toEqual([{
+      content: 'before',
+      finishReason: 'stop',
+      usage: { inputTokens: 4, outputTokens: 2 },
+    }])
+})
+
 test('the native client factory selects direct Ollama unless the Responses API is explicitly requested', () => {
   const direct = createLlmClient('llama3.3', {}, { baseUrl: 'http://ollama.test/v1' })
   expect(direct).toBeInstanceOf(OllamaClient)

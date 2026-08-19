@@ -63,6 +63,8 @@ export const COMMAND_REGISTRY: readonly CommandDefinition[] = Object.freeze([
   command('branches', 'List branches of this session', 'session'),
   command('compact', 'Compress the conversation', 'session', { aliases: ['compress'] }),
   command('rollback', 'Restore filesystem to a snapshot', 'snapshots', { argsHint: '<id|label>' }),
+  command('remove-memory', 'Wipe ALL Xerxes agent memory (global)', 'memory'),
+  command('remove-history', 'Wipe ALL saved chat history and snapshots (global)', 'memory'),
   command('snapshot', 'Take a filesystem snapshot', 'snapshots', { argsHint: '[label]' }),
   command('snapshots', 'List filesystem snapshots', 'snapshots'),
   command('stop', 'Cancel the in-flight tool call', 'session', { aliases: ['cancel'] }),

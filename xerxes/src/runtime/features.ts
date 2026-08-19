@@ -32,7 +32,10 @@ export interface AgentRuntimeOverrides {
 
 /** Declarative, host-owned feature composition input. */
 export interface RuntimeFeaturesConfig {
-  /** Master feature switch for callers that own the turn loop. Composition remains inspectable when false. */
+  /**
+   * Master feature switch for callers that own the turn loop. Workspace plugin modules execute only
+   * when this is explicitly true; inert skill metadata remains discoverable when false or omitted.
+   */
   readonly enabled?: boolean
   /** Absolute workspace root used to resolve relative extension directories and conventional roots. */
   readonly workspaceRoot?: string
@@ -165,8 +168,10 @@ export async function composeRuntimeFeatures(
   const loader = options.extensionLoader ?? createNativeRuntimeExtensionLoader()
   const directories = await resolveRuntimeExtensionDirectories(config, options.filesystem)
   const pluginNames: string[] = []
-  for (const directory of directories.pluginDirectories) {
-    pluginNames.push(...await loader.discoverPlugins(pluginRegistry, directory))
+  if (config.enabled === true) {
+    for (const directory of directories.pluginDirectories) {
+      pluginNames.push(...await loader.discoverPlugins(pluginRegistry, directory))
+    }
   }
   const skillRoots: readonly SkillDiscoveryRootInput[] = directories.skillDirectories.map(path => ({
     path,

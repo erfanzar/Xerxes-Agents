@@ -238,7 +238,14 @@ export class CodexSession {
 
   private async resolve(signal?: AbortSignal): Promise<CodexCredential> {
     const stored = await this.storage.load(CODEX_PROVIDER)
-    const token = stored ?? (await importCodexCliTokens(this.environment, this.homeDirectory))
+    const cli = await importCodexCliTokens(this.environment, this.homeDirectory)
+
+    // OpenAI rotates the refresh token on every refresh, so two stores holding
+    // copies of one chain cannot stay valid together — whoever refreshes first
+    // kills the other's copy. When the CLI session is fresher than ours, the
+    // CLI won the last rotation and is the only chain still alive; trusting the
+    // stale copy would answer a working CLI login with refresh_token_reused.
+    const token = this.preferCliSession(stored, cli) ?? stored ?? cli
     if (!token) {
       throw new ConfigurationError(
         'codex_auth',
@@ -247,15 +254,43 @@ export class CodexSession {
     }
 
     if (!token.isExpired(CODEX_REFRESH_SKEW_SECONDS, this.now())) {
-      // A CLI-sourced token is adopted into Xerxes' own store so the next
-      // resolution does not depend on the CLI still being installed.
-      if (!stored) await this.store(token)
+      if (token !== stored) await this.store(token)
       return credentialFrom(token)
     }
 
-    const refreshed = await this.refresh(token, signal)
-    await this.store(refreshed)
-    return credentialFrom(refreshed)
+    try {
+      const refreshed = await this.refresh(token, signal)
+      await this.store(refreshed)
+      return credentialFrom(refreshed)
+    } catch (error) {
+      // The stored refresh token died under us (typically the CLI rotated the
+      // chain first). A still-valid CLI session is a newer link in the same
+      // chain, so re-adopting it heals the login without a browser round trip.
+      if (token === stored && cli && isInvalidGrantError(error) && !cli.isExpired(0, this.now())) {
+        await this.store(cli)
+        return credentialFrom(cli)
+      }
+      throw error
+    }
+  }
+
+  /**
+   * Choose the CLI session over the stored one when it is clearly fresher.
+   *
+   * Both tokens carry their expiry in the JWT, so the fresher access token is
+   * necessarily from a later link in the rotation chain. A CLI session that is
+   * not newer is ignored, keeping an explicit `xerxes auth login codex`
+   * authoritative when the CLI is absent or equally stale.
+   */
+  private preferCliSession(
+    stored: OAuthToken | undefined,
+    cli: OAuthToken | undefined,
+  ): OAuthToken | undefined {
+    if (!stored || !cli || !cli.refreshToken) return undefined
+    if (cli.isExpired(CODEX_REFRESH_SKEW_SECONDS, this.now())) return undefined
+    const cliExpiresAt = cli.expiresAt ?? 0
+    const storedExpiresAt = stored.expiresAt ?? 0
+    return cliExpiresAt > storedExpiresAt ? cli : undefined
   }
 
   private async refresh(token: OAuthToken, signal?: AbortSignal): Promise<OAuthToken> {
@@ -480,8 +515,21 @@ function reasoningLevelsFrom(value: unknown): readonly CodexReasoningLevel[] {
   return levels
 }
 
-function credentialFrom(token: OAuthToken): CodexCredential {
-  const claims = codexClaims(token.accessToken)
+/**
+ * Identify the "this refresh token is dead" failure from the token endpoint.
+ *
+ * A 401/403 with `invalid_grant` or `refresh_token_reused` means another link
+ * in the rotation chain (usually the Codex CLI) already consumed this refresh
+ * token — re-authenticating the same token cannot succeed, but a fresher CLI
+ * session can heal it. Other refresh failures (network, 5xx, quota 429) are
+ * transient or unrelated and must not trigger re-adoption.
+ */
+function isInvalidGrantError(error: unknown): boolean {
+  if (!(error instanceof ProviderError)) return false
+  return /invalid_grant|refresh_token_reused/i.test(error.message)
+}
+
+function credentialFrom(token: OAuthToken): CodexCredential {  const claims = codexClaims(token.accessToken)
   return {
     accessToken: token.accessToken,
     accountId: claims.accountId,
