@@ -118,6 +118,27 @@ describe('Ctrl+V smart paste', () => {
     }
   })
 
+  it('submits the composer value when OpenTUI reports Enter', async () => {
+    const submit = vi.fn()
+    const updateInput = vi.fn()
+    const composer = makeComposer({ submit, updateInput })
+    const setup = await testRender(<Composer composer={composer} />, { height: 12, width: 80 })
+
+    await act(async () => {
+      await setup.mockInput.typeText('steer this turn')
+    })
+    await setup.flush()
+
+    try {
+      act(() => setup.mockInput.pressEnter())
+      await setup.flush()
+
+      expect(submit).toHaveBeenCalledWith('steer this turn')
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
+
   it('documents the chord in the hotkey help', () => {
     const entry = HOTKEYS.find(([chord]) => chord.startsWith('Ctrl+V'))
 
