@@ -9,7 +9,7 @@ const DEFAULT_HOMEPAGE = "https://github.com/erfanzar/Xerxes-Agents";
 const DEFAULT_BUN_FORMULA = "oven-sh/bun/bun";
 const DEFAULT_ENTRYPOINT = "xerxes/src/cli.ts";
 
-/** Resolve the OpenTUI artifact in either a source checkout or staged release package. */
+/** Resolve the OpenTUI entry in a staged package, built workspace, or source checkout. */
 export function resolveTuiEntry(
   moduleDirectory: string,
   fileExists: (path: string) => boolean = existsSync,
@@ -18,6 +18,10 @@ export function resolveTuiEntry(
     resolve(moduleDirectory, "../ui/entry.js"),
     resolve(moduleDirectory, "ui/entry.js"),
     resolve(moduleDirectory, "../dist/ui/entry.js"),
+    // `xerxes/dist/` is generated and intentionally ignored. When cli.ts is
+    // running from a checkout, Bun can execute the canonical TSX entry
+    // directly; release packages still resolve one of the built entries above.
+    resolve(moduleDirectory, "ui/opentui/entry.tsx"),
   ];
   return candidates.find(fileExists);
 }

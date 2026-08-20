@@ -21,7 +21,8 @@ test("TUI entry resolution supports staged packages and source workspaces", () =
   const workspaceModule = "/workspace/xerxes/dist";
   const workspaceEntry = resolve(workspaceModule, "ui/entry.js");
   const sourceModule = "/workspace/xerxes/src";
-  const sourceEntry = resolve(sourceModule, "../dist/ui/entry.js");
+  const sourceBundle = resolve(sourceModule, "../dist/ui/entry.js");
+  const sourceEntry = resolve(sourceModule, "ui/opentui/entry.tsx");
 
   expect(resolveTuiEntry(packageBin, (path) => path === packagedEntry)).toBe(
     packagedEntry,
@@ -29,9 +30,18 @@ test("TUI entry resolution supports staged packages and source workspaces", () =
   expect(
     resolveTuiEntry(workspaceModule, (path) => path === workspaceEntry),
   ).toBe(workspaceEntry);
-  expect(resolveTuiEntry(sourceModule, (path) => path === sourceEntry)).toBe(
-    sourceEntry,
-  );
+  expect(
+    resolveTuiEntry(sourceModule, (path) => path === sourceBundle),
+  ).toBe(sourceBundle);
+  expect(
+    resolveTuiEntry(sourceModule, (path) => path === sourceEntry),
+  ).toBe(sourceEntry);
+  expect(
+    resolveTuiEntry(
+      sourceModule,
+      (path) => path === sourceBundle || path === sourceEntry,
+    ),
+  ).toBe(sourceBundle);
   expect(resolveTuiEntry(packageBin, () => false)).toBeUndefined();
 });
 
