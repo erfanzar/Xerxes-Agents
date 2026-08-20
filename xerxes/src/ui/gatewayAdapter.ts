@@ -1,6 +1,12 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
-import type { AnyEvent, GatewayEvent, GatewayTranscriptMessage, SubagentEventPayload } from './gatewayTypes.js'
+import {
+  normalizeEventType,
+  type AnyEvent,
+  type GatewayEvent,
+  type GatewayTranscriptMessage,
+  type SubagentEventPayload
+} from './gatewayTypes.js'
 import type { SessionInfo, Usage } from './types.js'
 
 const TOOL_RESULT_PREVIEW_CHARS = 600
@@ -138,10 +144,12 @@ export function transcriptFromStoredMessages(messages: unknown): GatewayTranscri
  * any status event without cache figures reset the cached total to nothing.
  */
 export function usageFromStatus(payload: Record<string, unknown>): Usage {
+  const present = (...keys: string[]) => keys.some(key => payload[key] !== undefined)
+  const hasInput = present('total_input_tokens', 'input_tokens')
+  const hasOutput = present('total_output_tokens', 'output_tokens')
   const input = num(payload.total_input_tokens ?? payload.input_tokens)
   const output = num(payload.total_output_tokens ?? payload.output_tokens)
   const total = num(payload.total_tokens, input + output)
-  const present = (...keys: string[]) => keys.some(key => payload[key] !== undefined)
 
   return {
     ...(present('cache_read_tokens') ? { cache_read: num(payload.cache_read_tokens) } : {}),
@@ -151,14 +159,16 @@ export function usageFromStatus(payload: Record<string, unknown>): Usage {
       ? { context_max: num(payload.context_limit ?? payload.max_context) }
       : {}),
     ...(present('context_tokens') ? { context_used: num(payload.context_tokens) } : {}),
-    input,
-    output,
-    total
+    ...(hasInput ? { input } : {}),
+    ...(hasOutput ? { output } : {}),
+    ...(present('total_tokens') || (hasInput && hasOutput) ? { total } : {})
   } as Usage
 }
 
 export function adaptDaemonEvent(type: string, payload: Record<string, unknown>): AnyEvent[] {
-  switch (type) {
+  const normalizedType = normalizeEventType(type)
+
+  switch (normalizedType) {
     case 'init_done':
       return [
         { type: 'session.info', payload: sessionInfoFromInit(payload) },
@@ -302,7 +312,7 @@ export function adaptDaemonEvent(type: string, payload: Record<string, unknown>)
       return subagentEvents(payload)
 
     default:
-      return [{ type, payload } as GatewayEvent]
+      return [{ type: normalizedType, payload } as GatewayEvent]
   }
 }
 

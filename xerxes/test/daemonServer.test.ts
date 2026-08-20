@@ -3395,7 +3395,7 @@ test("daemon routes approval and question replies through the active connection"
     ).toEqual({ request_id: "approval-1", response: "approve" });
     expect(
       (await client.next(eventFrame("text_part"))).params?.payload,
-    ).toEqual({ text: "approval:approve" });
+    ).toMatchObject({ text: "approval:approve" });
 
     const question = await client.next(eventFrame("question_request"));
     const requestId = String(question.params?.payload?.id);
@@ -3418,7 +3418,7 @@ test("daemon routes approval and question replies through the active connection"
     ).toEqual({ id: requestId, answers: { answer: "yes" } });
     expect(
       (await client.next(eventFrame("text_part"))).params?.payload,
-    ).toEqual({ text: "answer:yes" });
+    ).toMatchObject({ text: "answer:yes" });
     await client.next(eventFrame("turn_end"));
   } finally {
     client.close();
@@ -3547,7 +3547,7 @@ test("daemon applies queued steering at a native runner boundary", async () => {
     await client.next(eventFrame("turn_begin"));
     expect(
       (await client.next(eventFrame("text_part"))).params?.payload,
-    ).toEqual({ text: "waiting for steer" });
+    ).toMatchObject({ text: "waiting for steer" });
     client.send({
       jsonrpc: "2.0",
       id: 3,
@@ -3563,8 +3563,81 @@ test("daemon applies queued steering at a native runner boundary", async () => {
     runner.release();
     expect(
       (await client.next(eventFrame("text_part"))).params?.payload,
-    ).toEqual({ text: "steer:focus tests" });
+    ).toMatchObject({ text: "steer:focus tests" });
     await client.next(eventFrame("turn_end"));
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("turn events keep their session identity after the connection switches sessions", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-turn-session-route-"));
+  const socketPath = join(directory, "daemon.sock");
+  const runner = new SteerRunner();
+  const server = new DaemonServer({
+    socketPath,
+    runtime: new InMemoryDaemonRuntime(runner, {
+      currentProjectDirectory: directory,
+      model: "session-route-model",
+      sessionDirectory: join(directory, "sessions"),
+    }),
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "session-a" },
+    });
+    const initializedA = await client.next((frame) => frame.id === 1);
+    const sessionA = String(
+      (initializedA.result?.session as { id?: unknown } | undefined)?.id ?? "",
+    );
+    expect(sessionA).not.toBe("");
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "turn.submit",
+      params: { session_key: "session-a", text: "keep streaming" },
+    });
+    await client.next((frame) => frame.id === 2);
+    await client.next(eventFrame("turn_begin"));
+    expect(
+      (await client.next(eventFrame("text_part"))).params?.payload,
+    ).toMatchObject({ session_id: sessionA, text: "waiting for steer" });
+
+    // The same TUI socket can activate another live session while session A
+    // remains in flight. Late A events must not inherit the connection's new
+    // active session or arrive without a routing identity.
+    client.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "initialize",
+      params: { session_key: "session-b" },
+    });
+    const initializedB = await client.next((frame) => frame.id === 3);
+    const sessionB = String(
+      (initializedB.result?.session as { id?: unknown } | undefined)?.id ?? "",
+    );
+    expect(sessionB).not.toBe("");
+    expect(sessionB).not.toBe(sessionA);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    runner.release();
+    expect(
+      (await client.next(eventFrame("text_part"))).params?.payload,
+    ).toMatchObject({ session_id: sessionA, text: "steer:" });
+    expect(
+      (await client.next(eventFrame("turn_end"))).params?.payload,
+    ).toMatchObject({ cancelled: false, session_id: sessionA });
   } finally {
     client.close();
     await server.stop();
@@ -3646,7 +3719,7 @@ test("mid-turn steer and mode changes never cancel the active turn", async () =>
     runner.release();
     expect(
       (await client.next(eventFrame("text_part"))).params?.payload,
-    ).toEqual({ text: "steer:keep going" });
+    ).toMatchObject({ text: "steer:keep going" });
     const turnEnd = await client.next(eventFrame("turn_end"));
     expect(turnEnd.params?.payload?.cancelled).toBe(false);
     expect(modeChanges.map((change) => change.mode)).toEqual([
@@ -3728,7 +3801,7 @@ test("an explicit cancel still stops the owning turn and only that turn", async 
     second.release();
     expect(
       (await clientB.next(eventFrame("text_part"))).params?.payload,
-    ).toEqual({ text: "steer:" });
+    ).toMatchObject({ text: "steer:" });
     const survivingEnd = await clientB.next(eventFrame("turn_end"));
     expect(survivingEnd.params?.payload?.cancelled).toBe(false);
   } finally {

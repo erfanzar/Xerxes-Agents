@@ -208,6 +208,8 @@ export type LiveSessionStatus = 'idle' | 'starting' | 'waiting' | 'working'
 export type SessionKind = 'main' | 'subagent'
 
 export interface SessionActiveItem {
+  /** Current turn input, shown as activity only; never used as a chat title. */
+  activity?: string
   agent_id?: string
   current?: boolean
   id: string
@@ -246,6 +248,14 @@ export interface SessionActivateResponse {
   session_key?: string
   started_at?: number
   status?: LiveSessionStatus
+}
+
+/** Read-only live-session snapshot used by Agent View without attaching. */
+export interface SessionPeekResponse {
+  inflight?: null | SessionInflightTurn
+  messages: GatewayTranscriptMessage[]
+  session_id: string
+  status: LiveSessionStatus
 }
 
 export interface SessionListItem {

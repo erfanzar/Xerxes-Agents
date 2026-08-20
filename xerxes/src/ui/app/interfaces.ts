@@ -180,6 +180,7 @@ export interface ComposerPasteResult {
 export type MaybePromise<T> = Promise<T> | T
 
 export interface ComposerActions {
+  activateSessionQueue: (sessionId: string) => void
   clearIn: () => void
   dequeue: () => QueuedMessage | undefined
   dismissCompletions: () => void
@@ -343,6 +344,8 @@ export interface SlashHandlerContext {
   }
   slashFlightRef: MutableRefObject<number>
   transcript: {
+    /** Submit through the normal busy-mode router (send, steer, or queue). */
+    dispatch: (text: string) => void
     page: (text: string, title?: string) => void
     panel: (title: string, sections: PanelSection[]) => void
     send: (text: string) => void

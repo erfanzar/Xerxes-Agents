@@ -24,7 +24,7 @@ import {
 import type { ActiveTool, ActivityItem, Msg, SubagentProgress, TodoItem } from '../types.js'
 
 import type { Notice } from './interfaces.js'
-import { resetFlowOverlays } from './overlayStore.js'
+import { resetFlowOverlays, resetOverlayState } from './overlayStore.js'
 import { pushSnapshot } from './spawnHistoryStore.js'
 import { getTurnState, patchTurnState, resetTurnState } from './turnStore.js'
 import { getUiState, patchUiState } from './uiStore.js'
@@ -149,6 +149,7 @@ class TurnController {
   private activeReasoningText = ''
   private reasoningSegmentIndex: null | number = null
   private activityId = 0
+  private interruptRequestId = 0
   private liveReasoningFilter = new ReasoningFilter()
   // OpenTUI paints completed calls from streamPendingTools while a turn is
   // live. Keep that shelf cumulative for the whole turn: pendingSegmentTools
@@ -357,6 +358,7 @@ class TurnController {
   // mutating live state, and busy stays set so queued input drains on the
   // settle edge instead of racing the still-unwinding turn.
   interruptTurn({ gw, sid, sys }: InterruptDeps) {
+    const requestId = ++this.interruptRequestId
     this.interrupted = true
     this.clearStatusTimer()
     patchUiState({ busy: true, status: 'interrupting…' })
@@ -365,7 +367,7 @@ class TurnController {
       // The daemon never confirmed — the turn is still running. Re-arm live
       // recording and report the failure instead of a false "interrupted".
       // When the turn already settled on its own, the failure is moot.
-      if (this.interrupted) {
+      if (this.interrupted && requestId === this.interruptRequestId) {
         this.interrupted = false
         patchUiState({ status: getUiState().busy ? 'running…' : 'ready' })
         sys(`error: interrupt failed: ${error instanceof Error ? error.message : String(error)}`)
@@ -981,6 +983,10 @@ class TurnController {
   }
 
   reset() {
+    // Invalidate failures from interrupt RPCs issued for the previous turn or
+    // session. A late rejection must not re-arm recording or overwrite the
+    // status of a newer interrupt.
+    this.interruptRequestId += 1
     this.clearReasoning()
     this.clearStatusTimer()
     this.idle()
@@ -1006,6 +1012,11 @@ class TurnController {
   fullReset() {
     this.reset()
     resetTurnState()
+    // Unlike a turn-end idle reset, a session boundary must not leave a
+    // transcript- or session-specific picker open over the replacement
+    // session. `reset()` intentionally preserves those overlays for ordinary
+    // turn completion; fullReset is the hard boundary.
+    resetOverlayState()
   }
 
   scheduleReasoning() {

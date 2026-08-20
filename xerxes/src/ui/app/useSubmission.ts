@@ -8,7 +8,7 @@ import { completionToApplyOnSubmit, looksLikeSlashCommand } from '../domain/slas
 import type { GatewayClient } from '../gatewayClient.js'
 import type { PromptSubmitResponse, SessionSteerResponse, ShellExecResponse } from '../gatewayTypes.js'
 import { pasteTokenHash, readPasteSnippet } from '../lib/pasteStore.js'
-import { asRpcResult } from '../lib/rpc.js'
+import { asRpcResult, rpcErrorMessage } from '../lib/rpc.js'
 import { hasInterpolation, INTERPOLATION_RE } from '../protocol/interpolation.js'
 import { PASTE_SNIPPET_RE } from '../protocol/paste.js'
 import type { Msg } from '../types.js'
@@ -17,11 +17,12 @@ import type { ComposerActions, ComposerRefs, ComposerState, PasteSnippet } from 
 import { promptSubmitImages, restoreAttachments, takeAttachments } from './attachmentsStore.js'
 import { decideSubmit } from './queue.js'
 import { turnController } from './turnController.js'
+import { getTurnPulse } from './turnStore.js'
 import { getUiState, patchUiState } from './uiStore.js'
 
 const SESSION_BUSY_RE = /session busy|waiting for model response/i
 
-const isSessionBusyError = (e: unknown) => e instanceof Error && SESSION_BUSY_RE.test(e.message)
+const isSessionBusyError = (e: unknown) => SESSION_BUSY_RE.test(rpcErrorMessage(e))
 
 export const steerWasAccepted = (response: null | SessionSteerResponse): boolean =>
   response?.ok === true || response?.status === 'queued'
@@ -134,7 +135,14 @@ export function useSubmission(opts: UseSubmissionOptions) {
         display_text: message.displayText,
         ...(images.length ? { images: promptSubmitImages(images) } : {})
       }).catch(
-        (e: Error) => {
+        (e: unknown) => {
+          // A user can switch to another live session while this request is
+          // still settling. Never roll an old request back into the newly
+          // active transcript/queue or clear that session's busy state.
+          if (getUiState().sid !== sid) {
+            return
+          }
+
           if (isSessionBusyError(e)) {
             // The daemon has not accepted this as a turn yet. Roll back the
             // optimistic bubble and restore only the queue preview; the next
@@ -148,7 +156,12 @@ export function useSubmission(opts: UseSubmissionOptions) {
             return
           }
 
-          sys(`error: ${e.message}`)
+          // The daemon rejected the submit rather than accepting a turn.
+          // Undo the optimistic echo and return its one-shot attachments so
+          // the composer remains an honest, retryable representation.
+          removeMessage(userMessage)
+          restoreAttachments(images)
+          sys(`error: ${rpcErrorMessage(e)}`)
           patchUiState({ busy: false, status: 'ready' })
         }
       )
@@ -170,11 +183,16 @@ export function useSubmission(opts: UseSubmissionOptions) {
 
   const shellExec = useCallback(
     (cmd: string) => {
+      const sid = getUiState().sid
       appendMessage({ role: 'user', text: `!${cmd}` })
       patchUiState({ busy: true, status: 'running…' })
 
       gw.request<ShellExecResponse>('shell.exec', { command: cmd })
         .then(raw => {
+          if (getUiState().sid !== sid) {
+            return
+          }
+
           const r = asRpcResult<ShellExecResponse>(raw)
 
           if (!r) {
@@ -191,8 +209,16 @@ export function useSubmission(opts: UseSubmissionOptions) {
             sys(`exit ${r.code}`)
           }
         })
-        .catch((e: Error) => sys(`error: ${e.message}`))
-        .finally(() => patchUiState({ busy: false, status: 'ready' }))
+        .catch((e: unknown) => {
+          if (getUiState().sid === sid) {
+            sys(`error: ${rpcErrorMessage(e)}`)
+          }
+        })
+        .finally(() => {
+          if (getUiState().sid === sid) {
+            patchUiState({ busy: false, status: 'ready' })
+          }
+        })
     },
     [appendMessage, gw, sys]
   )
@@ -225,11 +251,20 @@ export function useSubmission(opts: UseSubmissionOptions) {
       }
 
       if (hasInterpolation(message.submitText)) {
+        const sid = getUiState().sid
         patchUiState({ busy: true })
 
-        return interpolate(message.submitText, submitText =>
+        return interpolate(message.submitText, submitText => {
+          // Interpolation may outlive a live-session switch. The authored
+          // prompt belongs to the session that started expansion and must
+          // never be submitted into whichever tab happens to be active when
+          // shell substitution finishes.
+          if (!sid || getUiState().sid !== sid) {
+            return
+          }
+
           submitPrompt(queuedMessage(message.displayText, submitText))
-        )
+        })
       }
 
       submitPrompt(message)
@@ -262,22 +297,45 @@ export function useSubmission(opts: UseSubmissionOptions) {
         }
       }
 
-      const fallback = (note: string) => {
-        enqueueText()
-        sys(note)
-      }
-
       if (mode === 'queue') {
         return composerActions.enqueue(message.submitText, message.displayText)
       }
 
       if (mode === 'steer' && live.sid) {
-        gw.request<SessionSteerResponse>('session.steer', { session_id: live.sid, text: message.submitText })
+        const sid = live.sid
+        const turnStartedAt = getTurnPulse().startedAt
+        const fallback = (queuedNote: string, settledNote: string) => {
+          if (getUiState().sid !== sid) {
+            return
+          }
+
+          // The turn can settle before the steer acknowledgement arrives. A
+          // queue inserted after busy became false has no settle edge left to
+          // drain it, so dispatch it immediately as the next turn instead.
+          if (!getUiState().busy) {
+            sys(settledNote)
+            sendQueued(message)
+
+            return
+          }
+
+          enqueueText()
+          sys(queuedNote)
+        }
+
+        gw.request<SessionSteerResponse>('session.steer', { session_id: sid, text: message.submitText })
           .then(raw => {
+            if (getUiState().sid !== sid) {
+              return
+            }
+
             const r = asRpcResult<SessionSteerResponse>(raw)
 
             if (!steerWasAccepted(r)) {
-              fallback('steer rejected — message queued for next turn')
+              fallback(
+                'steer rejected — message queued for next turn',
+                'steer rejected after the turn settled — sending as next turn'
+              )
 
               return
             }
@@ -285,10 +343,22 @@ export function useSubmission(opts: UseSubmissionOptions) {
             // A steer is still authored user input. The daemon intentionally
             // hides its internal replay marker, so the TUI owns this one
             // visible, standard user transcript block.
-            turnController.recordUserSteer(message.displayText)
+            if (getUiState().busy && getTurnPulse().startedAt === turnStartedAt) {
+              turnController.recordUserSteer(message.displayText)
+            } else {
+              // A same-session turn may finish (or a new one may begin)
+              // before the response frame is observed. Do not attach the
+              // acknowledged steer to that unrelated live progress buffer.
+              appendMessage(queuedUserMessage(message))
+            }
             setLastUserMsg(message.displayText)
           })
-          .catch(() => fallback('steer failed — message queued for next turn'))
+          .catch(() =>
+            fallback(
+              'steer failed — message queued for next turn',
+              'steer failed after the turn settled — sending as next turn'
+            )
+          )
 
         return
       }
@@ -301,7 +371,7 @@ export function useSubmission(opts: UseSubmissionOptions) {
         turnController.interruptTurn({ gw, sid: live.sid, sys })
       }
     },
-    [appendMessage, composerActions, composerRefs, gw, setLastUserMsg, sys]
+    [appendMessage, composerActions, composerRefs, gw, sendQueued, setLastUserMsg, sys]
   )
 
   const dispatchQueuedSubmission = useCallback(

@@ -24,7 +24,7 @@ import {
   transcriptFromStoredMessages,
   usageFromStatus
 } from './gatewayAdapter.js'
-import type { AnyEvent, GatewayTranscriptMessage } from './gatewayTypes.js'
+import type { AnyEvent, GatewayTranscriptMessage, LiveSessionStatus } from './gatewayTypes.js'
 import { controlChannelPath, isWindows } from './lib/hostPlatform.js'
 import { ImageAttachmentError, loadImageAttachment, resolveAttachmentPath } from './lib/imageAttachment.js'
 import type { SessionInfo, Usage } from './types.js'
@@ -637,13 +637,19 @@ export class GatewayClient extends EventEmitter {
   }
 
   private onLine(line: string): void {
-    let frame: { id?: unknown; method?: unknown; result?: unknown; error?: unknown; params?: unknown }
+    let parsed: unknown
     try {
-      frame = JSON.parse(line)
+      parsed = JSON.parse(line)
     } catch {
       this.emitClient('gateway.protocol_error', { line: truncate(line) })
       return
     }
+
+    if (!isRecord(parsed)) {
+      this.emitClient('gateway.protocol_error', { line: truncate(line) })
+      return
+    }
+    const frame = parsed as { id?: unknown; method?: unknown; result?: unknown; error?: unknown; params?: unknown }
 
     // Response/error: carries an `id`.
     if (frame.id !== undefined && frame.id !== null) {
@@ -654,8 +660,10 @@ export class GatewayClient extends EventEmitter {
       this.pending.delete(frame.id as number)
       clearTimeout(pending.timer)
       if (frame.error) {
-        const e = frame.error as { code: number; message: string }
-        pending.reject(new Error(`rpc ${e.code}: ${e.message}`))
+        const error = isRecord(frame.error) ? frame.error : {}
+        const code = typeof error.code === 'number' ? ` ${error.code}` : ''
+        const message = typeof error.message === 'string' && error.message ? error.message : 'unknown error'
+        pending.reject(new Error(`rpc${code}: ${message}`))
       } else {
         pending.resolve(frame.result)
       }
@@ -665,8 +673,12 @@ export class GatewayClient extends EventEmitter {
     // Event notification: `{ method: "event", params: { type, payload } }`.
     if (frame.method === 'event' && frame.params && typeof frame.params === 'object') {
       const params = frame.params as { type?: string; payload?: Record<string, unknown> }
-      const type = String(params.type ?? '')
-      const payload = (params.payload ?? {}) as Record<string, unknown>
+      const type = typeof params.type === 'string' ? params.type : ''
+      if (!type || (params.payload !== undefined && !isRecord(params.payload))) {
+        this.emitClient('gateway.protocol_error', { line: truncate(line) })
+        return
+      }
+      const payload = params.payload ?? {}
       if (type === 'approval_request') {
         this.lastApprovalRequestId = String(payload.id ?? payload.request_id ?? '')
       }
@@ -717,6 +729,9 @@ export class GatewayClient extends EventEmitter {
       case 'session.active_list':
         return this.sessionActiveList(params) as Promise<T>
 
+      case 'session.peek':
+        return this.sessionPeek(params) as Promise<T>
+
       case 'session.list':
         return this.sessionHistoryList(params) as Promise<T>
 
@@ -748,7 +763,7 @@ export class GatewayClient extends EventEmitter {
         return this.sessionUndo(params) as Promise<T>
 
       case 'session.interrupt':
-        return this.rawRequest<T>('cancel', { session_key: this.keyFor(params.session_id) })
+        return this.nativeSuccess('cancel', { session_key: this.keyFor(params.session_id) }) as Promise<T>
 
       case 'session.steer':
         return this.rawRequest<T>('steer', {
@@ -757,7 +772,7 @@ export class GatewayClient extends EventEmitter {
         })
 
       case 'prompt.submit':
-        return this.rawRequest<T>('turn.submit', {
+        return this.nativeSuccess('turn.submit', {
           session_key: this.keyFor(params.session_id),
           ...(typeof params.submission_id === 'string' && params.submission_id.trim()
             ? { submission_id: params.submission_id.trim() }
@@ -768,13 +783,13 @@ export class GatewayClient extends EventEmitter {
           // daemon re-validates at the turn.submit boundary; a missing or
           // empty list keeps the frame identical to a plain-text submit.
           ...(Array.isArray(params.images) && params.images.length ? { images: params.images } : {})
-        })
+        }) as Promise<T>
 
       case 'prompt.background':
-        return this.rawRequest<T>('turn.background', {
+        return this.nativeSuccess('turn.background', {
           session_key: this.keyFor(params.session_id),
           text: String(params.text ?? '')
-        })
+        }) as Promise<T>
 
       case 'slash.exec':
         return this.slashExec(params) as Promise<T>
@@ -1107,14 +1122,15 @@ export class GatewayClient extends EventEmitter {
       // once the daemon accepted the resume.
       this.activeSessionKey = nextSessionKey
       this.rememberSessionKey(sessionId, nextSessionKey)
+      const status = liveSessionStatus(session)
       return {
         info: this.sessionInfoFromInitialize(raw, session, captured),
         message_count: messageCount,
         messages,
         resumed: sessionId,
-        running: Boolean(session.active_turn_id),
+        running: status !== 'idle',
         session_id: sessionId,
-        status: session.active_turn_id ? 'working' : 'idle'
+        status
       }
     } catch (error) {
       finishCapture()
@@ -1125,7 +1141,20 @@ export class GatewayClient extends EventEmitter {
   private async sessionActivate(params: Record<string, unknown>): Promise<RpcObject> {
     const id = String(params.session_id ?? '')
     const nextSessionKey = this.keyFor(id)
-    const raw = await this.nativeSuccess('session.status', { session_key: nextSessionKey })
+    const statusRaw = await this.nativeSuccess('session.status', { session_key: nextSessionKey })
+    const statusSession = (statusRaw.session ?? {}) as RpcObject
+    const targetCwd = optionalTrimmedText(statusSession.cwd) || this.projectDir
+    // session.open is an idempotent attach for an already-live session and,
+    // unlike session.status, also moves the daemon connection's active key.
+    // Daemon-owned slash commands omit an explicit key, so a status-only
+    // activation made them act on the previously selected tab. Pass the
+    // target's own cwd because session.open also refreshes an existing
+    // session's cwd; using the project root would silently undo a tab-local
+    // directory change.
+    const raw = await this.nativeSuccess('session.open', {
+      project_dir: targetCwd,
+      session_key: nextSessionKey
+    })
     const session = (raw.session ?? {}) as RpcObject
     const sessionId = String(session.id ?? '').trim()
 
@@ -1139,6 +1168,7 @@ export class GatewayClient extends EventEmitter {
       ? session.inflight as RpcObject
       : undefined
     const messages = transcriptFromStoredMessages(session.transcript)
+    const status = liveSessionStatus(session)
     return {
       info: this.sessionInfoFromInitialize(raw, session, { info: null, usage: null }),
       inflight: inflight
@@ -1149,13 +1179,13 @@ export class GatewayClient extends EventEmitter {
           }
         : null,
       message_count: Number(session.message_count ?? session.messages ?? 0),
-      // Activation reads the already-live transcript without reopening or
-      // competing with the running turn.
+      // session.open returns the already-live transcript without competing
+      // with its running turn.
       messages,
-      running: Boolean(session.active_turn_id),
+      running: status !== 'idle',
       session_id: sessionId,
       session_key: nextSessionKey,
-      status: session.active_turn_id ? 'working' : 'idle'
+      status
     }
   }
 
@@ -1168,16 +1198,21 @@ export class GatewayClient extends EventEmitter {
         this.rememberSessionKey(id, String(row.key))
       }
       const lastActive = Number(row.last_active)
+      const status = liveSessionStatus(row)
+      const inflight = isRecord(row.inflight) ? row.inflight : undefined
+      const activity = optionalTrimmedText(inflight?.user)
+      const title = optionalTrimmedText(row.title) ?? 'Untitled chat'
       return {
         ...optionalSessionLinkFields(row),
+        ...(activity ? { activity } : {}),
         current: this.keyFor(id) === this.activeSessionKey,
         id,
         ...(Number.isFinite(lastActive) ? { last_active: lastActive } : {}),
         message_count: Number(row.messages ?? 0),
         model: String(row.model ?? ''),
-        preview: String(row.title ?? 'Untitled chat'),
-        status: row.active_turn_id ? 'working' : 'idle',
-        title: String(row.title ?? 'Untitled chat')
+        preview: title,
+        status,
+        title
       }
     })
     return { sessions }
@@ -1192,7 +1227,7 @@ export class GatewayClient extends EventEmitter {
         this.rememberSessionKey(id, String(row.key))
       }
       const updatedAt = Date.parse(String(row.updated_at ?? '')) / 1000
-      const title = String(row.title ?? row.key ?? id)
+      const title = optionalTrimmedText(row.title) ?? 'Untitled chat'
       return {
         ...optionalSessionLinkFields(row),
         id,
@@ -1212,6 +1247,34 @@ export class GatewayClient extends EventEmitter {
   private async sessionStatus(params: Record<string, unknown>): Promise<RpcObject> {
     const raw = await this.nativeSuccess('session.status', { session_key: this.keyFor(params.session_id) })
     return { output: JSON.stringify(raw.session ?? raw, null, 2) }
+  }
+
+  /** Inspect one live session without changing the daemon connection's active key. */
+  private async sessionPeek(params: Record<string, unknown>): Promise<RpcObject> {
+    const sessionId = String(params.session_id ?? '').trim()
+    if (!sessionId) {
+      throw new Error('session id is required')
+    }
+
+    const raw = await this.nativeSuccess('session.status', { session_key: this.keyFor(sessionId) })
+    const session = isRecord(raw.session) ? raw.session : undefined
+    if (!session) {
+      throw new Error(`live session not found: ${sessionId}`)
+    }
+    const inflight = isRecord(session.inflight) ? session.inflight : undefined
+
+    return {
+      inflight: inflight
+        ? {
+            assistant: String(inflight.assistant ?? ''),
+            streaming: Boolean(inflight.streaming),
+            user: String(inflight.user ?? '')
+          }
+        : null,
+      messages: transcriptFromStoredMessages(session.transcript),
+      session_id: String(session.id ?? sessionId),
+      status: liveSessionStatus(session)
+    }
   }
 
   private async sessionMostRecent(): Promise<RpcObject> {
@@ -1605,6 +1668,19 @@ function optionalSessionLinkFields(row: RpcObject): RpcObject {
     ...(status ? { status } : {}),
     ...(subagentId !== undefined ? { subagent_id: subagentId } : {})
   }
+}
+
+function liveSessionStatus(row: RpcObject): LiveSessionStatus {
+  const status = optionalTrimmedText(row.status)
+  if (status === 'idle' || status === 'starting' || status === 'waiting' || status === 'working') {
+    return status
+  }
+
+  return row.active_turn_id ? 'working' : 'idle'
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value))
 }
 
 function optionalTrimmedText(value: unknown): string | undefined {

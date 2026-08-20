@@ -93,6 +93,40 @@ describe('GatewayClient session lifecycle', () => {
     expect(events[0]).toMatchObject({ session_id: 'session-a', type: 'subagent.start' })
   })
 
+  it('rejects valid JSON that is not a protocol frame without throwing from the socket handler', () => {
+    const client = new GatewayClient({ projectDir: process.cwd(), sessionKey: 'test:invalid-frame' })
+    const protocolErrors: unknown[] = []
+    const privateClient = client as unknown as { onLine: (line: string) => void }
+
+    client.on('gateway.protocol_error', event => protocolErrors.push(event))
+
+    expect(() => privateClient.onLine('null')).not.toThrow()
+    expect(() => privateClient.onLine('[]')).not.toThrow()
+    expect(() =>
+      privateClient.onLine(
+        JSON.stringify({ jsonrpc: '2.0', method: 'event', params: { payload: [], type: 'text_part' } })
+      )
+    ).not.toThrow()
+    expect(protocolErrors).toHaveLength(3)
+  })
+
+  it('normalizes tolerated PascalCase bridge aliases before emitting UI events', () => {
+    const client = new GatewayClient({ projectDir: process.cwd(), sessionKey: 'test:event-alias' })
+    const events: unknown[] = []
+    const privateClient = client as unknown as { onLine: (line: string) => void }
+
+    client.on('message.delta', event => events.push(event))
+    privateClient.onLine(
+      JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'event',
+        params: { payload: { text: 'hello' }, type: 'TextPart' }
+      })
+    )
+
+    expect(events).toEqual([{ payload: { text: 'hello' }, type: 'message.delta' }])
+  })
+
   it('routes active and saved session lists to distinct daemon RPCs', async () => {
     const client = new GatewayClient({ projectDir: process.cwd(), sessionKey: 'test:sessions' })
     const calls: string[] = []
@@ -109,6 +143,7 @@ describe('GatewayClient session lifecycle', () => {
           sessions: [{
             active_turn_id: 'turn1',
             id: 'live1',
+            inflight: { assistant: 'working', streaming: true, user: 'audit session routing' },
             key: 'test:sessions',
             last_active: 1_751_018_100,
             messages: 3,
@@ -152,7 +187,14 @@ describe('GatewayClient session lifecycle', () => {
 
     expect(calls).toEqual(['session.active_list', 'session.list'])
     expect(active).toMatchObject({
-      sessions: [{ id: 'live1', last_active: 1_751_018_100, message_count: 3, status: 'working', title: 'live work' }]
+      sessions: [{
+        activity: 'audit session routing',
+        id: 'live1',
+        last_active: 1_751_018_100,
+        message_count: 3,
+        status: 'working',
+        title: 'live work'
+      }]
     })
     expect(saved).toMatchObject({
       sessions: [
@@ -171,6 +213,136 @@ describe('GatewayClient session lifecycle', () => {
           title: 'Policy review'
         }
       ]
+    })
+  })
+
+  it('attaches the daemon connection when activating a tab so following slash commands use that session', async () => {
+    const client = new GatewayClient({ projectDir: process.cwd(), sessionKey: 'test:activate' })
+    const calls: Array<{ method: string; params: Record<string, unknown> }> = []
+    const privateClient = client as unknown as {
+      rawRequest: (method: string, params?: Record<string, unknown>) => Promise<Record<string, unknown>>
+    }
+
+    privateClient.rawRequest = async (method, params = {}) => {
+      calls.push({ method, params })
+      if (method === 'session.active_list') {
+        return {
+          ok: true,
+          sessions: [{ id: 'tab-b', key: 'daemon:key-b', messages: 0, status: 'idle', title: 'Tab B' }]
+        }
+      }
+      if (method === 'session.status') {
+        return {
+          ok: true,
+          session: { cwd: '/worktrees/tab-b', id: 'tab-b', key: 'daemon:key-b', status: 'idle' }
+        }
+      }
+      if (method === 'session.open') {
+        return {
+          ok: true,
+          session: { id: 'tab-b', key: 'daemon:key-b', messages: 0, status: 'idle', transcript: [] }
+        }
+      }
+      if (method === 'slash') {
+        return { ok: true, output: 'renamed active tab' }
+      }
+      throw new Error(`unexpected ${method}`)
+    }
+
+    await client.request('session.active_list', {})
+    await client.request('session.activate', { session_id: 'tab-b' })
+    await client.request('slash.exec', { command: '/title Active tab' })
+
+    expect(calls.slice(1)).toEqual([
+      { method: 'session.status', params: { session_key: 'daemon:key-b' } },
+      {
+        method: 'session.open',
+        params: { project_dir: '/worktrees/tab-b', session_key: 'daemon:key-b' }
+      },
+      { method: 'slash', params: { command: '/title Active tab' } }
+    ])
+  })
+
+  it('preserves starting and waiting statuses even before an active turn id exists', async () => {
+    const client = new GatewayClient({ projectDir: process.cwd(), sessionKey: 'test:live-status' })
+    const privateClient = client as unknown as {
+      rawRequest: (method: string, params?: Record<string, unknown>) => Promise<Record<string, unknown>>
+    }
+
+    privateClient.rawRequest = async () => ({
+      ok: true,
+      sessions: [
+        { id: 'starting', key: 'key-starting', messages: 0, status: 'starting' },
+        { id: 'waiting', key: 'key-waiting', messages: 1, status: 'waiting' }
+      ]
+    })
+
+    const result = await client.request<SessionActiveListResponse>('session.active_list', {})
+
+    expect(result.sessions?.map(session => session.status)).toEqual(['starting', 'waiting'])
+  })
+
+  it('peeks at a live session without attaching the daemon connection', async () => {
+    const client = new GatewayClient({ projectDir: process.cwd(), sessionKey: 'test:peek' })
+    const calls: Array<{ method: string; params: Record<string, unknown> }> = []
+    const privateClient = client as unknown as {
+      rawRequest: (method: string, params?: Record<string, unknown>) => Promise<Record<string, unknown>>
+    }
+
+    privateClient.rawRequest = async (method, params = {}) => {
+      calls.push({ method, params })
+      if (method === 'session.active_list') {
+        return { ok: true, sessions: [{ id: 'other', key: 'daemon:other', messages: 1, status: 'working' }] }
+      }
+      if (method === 'session.status') {
+        return {
+          ok: true,
+          session: {
+            id: 'other',
+            inflight: { assistant: 'half done', streaming: true, user: 'keep going' },
+            key: 'daemon:other',
+            status: 'working',
+            transcript: [{ role: 'user', content: 'inspect this' }]
+          }
+        }
+      }
+      throw new Error(`unexpected ${method}`)
+    }
+
+    await client.request('session.active_list', {})
+    const result = await client.request('session.peek', { session_id: 'other' })
+
+    expect(result).toMatchObject({
+      inflight: { assistant: 'half done', streaming: true, user: 'keep going' },
+      messages: [{ role: 'user', text: 'inspect this' }],
+      session_id: 'other',
+      status: 'working'
+    })
+    expect(calls).toEqual([
+      { method: 'session.active_list', params: {} },
+      { method: 'session.status', params: { session_key: 'daemon:other' } }
+    ])
+    expect(calls.some(call => call.method === 'session.open')).toBe(false)
+  })
+
+  it('uses an untitled placeholder instead of prompt, key, or id fallbacks', async () => {
+    const client = new GatewayClient({ projectDir: process.cwd(), sessionKey: 'test:untitled' })
+    const privateClient = client as unknown as {
+      rawRequest: (method: string, params?: Record<string, unknown>) => Promise<Record<string, unknown>>
+    }
+
+    privateClient.rawRequest = async method => method === 'session.active_list'
+      ? { ok: true, sessions: [{ id: 'opaque-live-id', key: 'opaque-live-key', messages: 0, title: '   ' }] }
+      : {
+          ok: true,
+          sessions: [{ key: 'opaque-saved-key', messages: 1, session_id: 'opaque-saved-id', title: '' }]
+        }
+
+    await expect(client.request('session.active_list', {})).resolves.toMatchObject({
+      sessions: [{ preview: 'Untitled chat', title: 'Untitled chat' }]
+    })
+    await expect(client.request('session.list', {})).resolves.toMatchObject({
+      sessions: [{ preview: 'Untitled chat', title: 'Untitled chat' }]
     })
   })
 
@@ -403,6 +575,21 @@ describe('GatewayClient session lifecycle', () => {
     privateClient.rawRequest = async () => ({ error: 'turn is running', ok: false })
 
     await expect(client.request('session.undo', { session_id: 'live-1' })).rejects.toThrow('turn is running')
+  })
+
+  it.each([
+    ['prompt.submit', { session_id: 'live-1', text: 'hello' }, 'turn rejected'],
+    ['prompt.background', { session_id: 'live-1', text: 'hello' }, 'background rejected'],
+    ['session.interrupt', { session_id: 'live-1' }, 'no active turn']
+  ])('rejects native %s soft failures so the TUI can leave its optimistic state', async (method, params, error) => {
+    const client = new GatewayClient({ projectDir: process.cwd(), sessionKey: 'test:turn-rpc-failure' })
+    const privateClient = client as unknown as {
+      rawRequest: (method: string, params?: Record<string, unknown>) => Promise<Record<string, unknown>>
+    }
+
+    privateClient.rawRequest = async () => ({ error, ok: false })
+
+    await expect(client.request(method, params)).rejects.toThrow(error)
   })
 
   it('forwards authored and provider-facing prompt text separately', async () => {

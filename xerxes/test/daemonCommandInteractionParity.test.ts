@@ -156,11 +156,11 @@ test('slash steering stays on the issuing connection session and queues at the a
     target.send({ jsonrpc: '2.0', id: 3, method: 'turn.submit', params: { text: 'start a controlled turn' } })
     expect((await target.next(frame => frame.id === 3)).result).toEqual({ ok: true })
     await target.next(eventFrame('turn_begin'))
-    expect((await target.next(eventFrame('text_part'))).params?.payload).toEqual({ text: 'waiting for steer' })
+    expect((await target.next(eventFrame('text_part'))).params?.payload).toMatchObject({ text: 'waiting for steer' })
 
     target.send({ jsonrpc: '2.0', id: 4, method: 'slash', params: { command: '/steer focus @steer.md' } })
     expect((await target.next(frame => frame.id === 4)).result).toEqual({ ok: true })
-    expect((await target.next(eventFrame('steer_input'))).params?.payload).toEqual({
+    expect((await target.next(eventFrame('steer_input'))).params?.payload).toMatchObject({
       content: 'focus @steer.md',
       mentioned_files: [join(canonicalDirectory, 'steer.md')],
     })
@@ -249,8 +249,9 @@ test('slash compact rewrites and persists the active native session without subm
       body: expect.stringContaining('Compacting'),
     })
     expect((await client.next(eventFrame('notification'))).params?.payload).toMatchObject({
-      category: 'slash',
+      category: 'history',
       body: expect.stringContaining('Compacted'),
+      payload: { automatic: false },
     })
     expect((await client.next(eventFrame('status_update'))).params?.payload).toMatchObject({
       context_tokens: expect.any(Number),

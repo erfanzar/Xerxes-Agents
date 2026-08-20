@@ -94,6 +94,39 @@ describe('Ctrl+V smart paste', () => {
     }
   })
 
+  it('does not overwrite keystrokes typed while the clipboard read is pending', async () => {
+    let resolvePaste!: (value: { cursor: number; value: string }) => void
+    const handleTextPaste = vi.fn(
+      () => new Promise<{ cursor: number; value: string }>(resolve => (resolvePaste = resolve))
+    )
+    const updateInput = vi.fn()
+    const composer = makeComposer({ handleTextPaste, updateInput })
+    const setup = await testRender(<Composer composer={composer} />, { height: 12, width: 80 })
+
+    await act(async () => {
+      await Bun.sleep(0)
+    })
+    await setup.flush()
+
+    try {
+      act(() => setup.mockInput.pressKey('v', { ctrl: true }))
+      await act(async () => {
+        await setup.mockInput.typeText('later')
+      })
+      await setup.flush()
+
+      await act(async () => {
+        resolvePaste({ cursor: 6, value: 'pasted' })
+        await Bun.sleep(0)
+      })
+      await setup.flush()
+
+      expect(updateInput).toHaveBeenLastCalledWith('pastedlater')
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
+
   it('ignores plain v and meta+v so typing and terminal chords stay intact', async () => {
     const handleTextPaste = vi.fn()
     const composer = makeComposer({ handleTextPaste })

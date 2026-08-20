@@ -24,6 +24,8 @@ export function removeAtInPlace<T>(arr: T[], i: number): T[] {
 
 export function useQueue() {
   const queueRef = useRef<QueuedMessage[]>([])
+  const activeSessionRef = useRef<null | string>(null)
+  const sessionQueuesRef = useRef(new Map<string, QueuedMessage[]>())
   const [queuedDisplay, setQueuedDisplay] = useState<string[]>([])
   const queueEditRef = useRef<number | null>(null)
   const [queueEditIdx, setQueueEditIdx] = useState<number | null>(null)
@@ -34,6 +36,36 @@ export function useQueue() {
     queueEditRef.current = idx
     setQueueEditIdx(idx)
   }, [])
+
+  /**
+   * Bind the visible queue to one live session.
+   *
+   * Follow-ups are authored for the session that was active when they were
+   * queued. Switching tabs must not drain them into the newly selected
+   * session, so keep inactive queues in-memory and restore them on return.
+   * Messages entered before the first session exists remain attached to that
+   * first session, preserving startup pre-queue behavior.
+   */
+  const activateSessionQueue = useCallback(
+    (sessionId: string) => {
+      const previousSessionId = activeSessionRef.current
+
+      if (previousSessionId === sessionId) {
+        return
+      }
+
+      if (previousSessionId) {
+        sessionQueuesRef.current.set(previousSessionId, queueRef.current)
+        queueRef.current = sessionQueuesRef.current.get(sessionId) ?? []
+      }
+
+      activeSessionRef.current = sessionId
+      sessionQueuesRef.current.delete(sessionId)
+      setQueueEdit(null)
+      syncQueue()
+    },
+    [setQueueEdit, syncQueue]
+  )
 
   const enqueue = useCallback(
     (submitText: string, displayText = submitText) => {
@@ -74,6 +106,7 @@ export function useQueue() {
   )
 
   return {
+    activateSessionQueue,
     dequeue,
     enqueue,
     queueEditIdx,

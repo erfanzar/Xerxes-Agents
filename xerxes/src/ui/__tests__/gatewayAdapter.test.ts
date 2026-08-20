@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 import { describe, expect, it } from 'vitest'
 
-import { adaptDaemonEvent, sessionInfoFromInit, transcriptFromStoredMessages , usageFromStatus } from '../gatewayAdapter.js'
+import { adaptDaemonEvent, sessionInfoFromInit, transcriptFromStoredMessages, usageFromStatus } from '../gatewayAdapter.js'
 
 describe('gatewayAdapter', () => {
   it('maps init payloads into session info', () => {
@@ -58,6 +58,18 @@ describe('gatewayAdapter', () => {
       { payload: {}, type: 'message.complete' }
     ])
     expect(adaptDaemonEvent('turn_end', {})).toEqual([{ payload: {}, type: 'message.complete' }])
+  })
+
+  it('adapts tolerated PascalCase bridge event aliases through the native event path', () => {
+    expect(adaptDaemonEvent('TextPart', { text: 'hello' })).toEqual([
+      { payload: { text: 'hello' }, type: 'message.delta' }
+    ])
+    expect(adaptDaemonEvent('TurnEnd', { cancelled: true })).toEqual([
+      { payload: { interrupted: true }, type: 'message.complete' }
+    ])
+    expect(adaptDaemonEvent('FutureEvent', { value: 1 })).toEqual([
+      { payload: { value: 1 }, type: 'future_event' }
+    ])
   })
 
   it('maps background completion and generated title events', () => {
@@ -734,5 +746,13 @@ describe('usageFromStatus partial updates', () => {
     // An explicit 0 is a real reading — a turn with no cache hits — and must
     // not be confused with the field being absent.
     expect(zeroed.cache_read).toBe(0)
+  })
+
+  it('does not reset token totals when a status event carries no token fields', () => {
+    const tick = usageFromStatus({ mode: 'plan', reasoning_effort: 'high' })
+
+    expect(tick).not.toHaveProperty('input')
+    expect(tick).not.toHaveProperty('output')
+    expect(tick).not.toHaveProperty('total')
   })
 })

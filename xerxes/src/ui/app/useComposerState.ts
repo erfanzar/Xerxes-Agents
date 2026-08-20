@@ -156,6 +156,7 @@ export function useComposerState({
   const { querier } = useStdin() as { querier: Parameters<typeof readOsc52Clipboard>[0] }
 
   const {
+    activateSessionQueue,
     queueRef,
     queueEditRef,
     queuedDisplay,
@@ -299,6 +300,7 @@ export function useComposerState({
 
   const actions = useMemo(
     () => ({
+      activateSessionQueue,
       clearIn,
       dequeue,
       dismissCompletions,
@@ -317,6 +319,7 @@ export function useComposerState({
       syncQueue
     }),
     [
+      activateSessionQueue,
       clearIn,
       dequeue,
       dismissCompletions,

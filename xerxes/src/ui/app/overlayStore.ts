@@ -88,10 +88,11 @@ export const resetOverlayState = () => $overlayState.set(buildOverlayState())
 /**
  * Soft reset: drop FLOW-scoped overlays (approval / clarify / confirm / sudo
  * / secret / pager) but PRESERVE user-toggled ones — agents dashboard, model
- * picker, skills hub, sessions overlay.  Those are opened deliberately and
- * shouldn't vanish when a turn ends.  Called from turnController.idle() on
- * every turn completion / interrupt; the old "reset everything" behaviour
- * silently closed /agents the moment delegation finished.
+ * picker, reasoning picker, skills hub, sessions overlay. Those are opened
+ * deliberately and shouldn't vanish when a turn ends. Called from
+ * turnController.idle() on every turn completion / interrupt; the old "reset
+ * everything" behaviour silently closed /agents the moment delegation
+ * finished.
  */
 export const resetFlowOverlays = () =>
   $overlayState.set({
@@ -103,6 +104,7 @@ export const resetFlowOverlays = () =>
     diff: $overlayState.get().diff,
     modelPicker: $overlayState.get().modelPicker,
     pluginsHub: $overlayState.get().pluginsHub,
+    reasoningPicker: $overlayState.get().reasoningPicker,
     sessions: $overlayState.get().sessions,
     skillsHub: $overlayState.get().skillsHub,
     terminals: $overlayState.get().terminals

@@ -112,10 +112,9 @@ export async function startPromptLiveSession({
     return null
   }
 
-  // Let the backend-created session key (YYYYMMDD_HHMMSS_xxxxxx) remain
-  // the initial title. Auto-title generation can rename it after the first
-  // response; pre-queuing prompt text here causes duplicate-title errors when
-  // users dispatch common prompts like "Hello, what model are you?".
+  // Leave the session untitled until the daemon's model-written title arrives
+  // after the first completed exchange. Prompt content and opaque session keys
+  // are never used as a provisional chat title.
   const sid = (await newLiveSession('new live session started')) ?? null
 
   if (!sid) {
@@ -586,7 +585,7 @@ export function useMainApp(gw: GatewayClient) {
               .map(s => ({
                 id: s.id,
                 status: s.status,
-                title: s.title?.trim() || s.preview?.trim() || s.id
+                title: s.title?.trim() || 'Untitled chat'
               }))
 
             // Only patch when something actually changed. patchUiState always
@@ -953,7 +952,15 @@ export function useMainApp(gw: GatewayClient) {
           setSessionStartedAt
         },
         slashFlightRef,
-        transcript: { page, panel, send, setHistoryItems, sys, trimLastExchange: session.trimLastExchange },
+        transcript: {
+          dispatch: dispatchSubmission,
+          page,
+          panel,
+          send,
+          setHistoryItems,
+          sys,
+          trimLastExchange: session.trimLastExchange
+        },
         voice: { setVoiceEnabled, setVoiceRecordKey, setVoiceTts }
       }),
     [
@@ -961,6 +968,7 @@ export function useMainApp(gw: GatewayClient) {
       composerActions,
       composerRefs,
       die,
+      dispatchSubmission,
       gateway,
       hasSelection,
       maybeWarn,

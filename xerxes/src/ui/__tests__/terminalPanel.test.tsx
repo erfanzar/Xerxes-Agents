@@ -137,6 +137,45 @@ describe('OpenTUI terminal panel', () => {
     }
   })
 
+  it('keeps bracketed paste intact while composing PTY input', async () => {
+    const terminal = wireTerminal({ canInterrupt: true, canWrite: true, kind: 'pty' })
+    const rpc = vi.fn(async (method: string) =>
+      method === 'terminal.list'
+        ? { ok: true, terminals: [terminal] }
+        : method === 'terminal.inspect'
+          ? { ok: true, terminal: { ...terminal, output: '', outputTruncated: false } }
+          : { ok: true }
+    )
+    const setup = await testRender(
+      <GatewayProvider value={servicesWith(rpc as unknown as GatewayServices['rpc'])}>
+        <TerminalPanelOverlay onClose={() => undefined} t={DEFAULT_THEME} />
+      </GatewayProvider>,
+      { height: 24, width: 90 }
+    )
+
+    try {
+      await settle(setup)
+      act(() => setup.mockInput.pressEnter())
+      await settle(setup)
+      act(() => setup.mockInput.pressKey('i'))
+      await setup.flush()
+      act(() => setup.renderer.keyInput.processPaste(new TextEncoder().encode('echo alpha\nsecond line')))
+      await setup.flush()
+
+      expect(setup.captureCharFrame()).toContain('echo alpha')
+
+      act(() => setup.mockInput.pressEnter())
+      await settle(setup)
+      expect(rpc).toHaveBeenCalledWith('terminal.control', {
+        action: 'write',
+        chars: 'echo alpha\nsecond line\n',
+        terminal_id: 'proc-1'
+      })
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
+
   it('kills the selected terminal and refuses input on one that has no stdin', async () => {
     const rpc = vi.fn(async (method: string) =>
       method === 'terminal.list'

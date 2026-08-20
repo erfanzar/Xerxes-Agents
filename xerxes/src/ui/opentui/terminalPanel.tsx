@@ -3,7 +3,7 @@
 /** @jsxImportSource @opentui/react */
 import type { ScrollBoxRenderable } from '@opentui/core'
 import { useStore } from '@nanostores/react'
-import { useKeyboard, useTerminalDimensions } from '@opentui/react'
+import { useKeyboard, usePaste, useTerminalDimensions } from '@opentui/react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { useOptionalGateway } from '../app/gatewayContext.js'
@@ -484,6 +484,16 @@ export function TerminalPanelOverlay({ onClose, t }: { onClose: () => void; t: T
       else setSelectedIndex(Math.max(0, entries.length - 1))
       scroller.current?.scrollTo(Number.MAX_SAFE_INTEGER)
     }
+  })
+
+  usePaste(event => {
+    if (!typing) {
+      return
+    }
+
+    event.preventDefault()
+    event.stopPropagation()
+    setDraft(current => current + new TextDecoder().decode(event.bytes))
   })
 
   const liveCount = entries.filter(entry => entry.running).length

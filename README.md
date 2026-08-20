@@ -162,6 +162,14 @@ Press `Enter` on a row (or click it) to inspect one agent: what it is doing righ
 every tool call it made with how long each took, the files it touched, and the policy it
 runs under. `Esc` returns to the list, and `Esc` again to the main agent.
 
+Press `Left` from an empty composer, or run `/background`, to detach the current chat
+into the full-screen Agent View without stopping its turn. Independent chats are grouped
+by whether they need input, are working, or are ready to review. Type a prompt at the
+bottom to dispatch another chat, press `Space` to peek/reply without attaching, and use
+`Right` or `Enter` to attach the selected chat. Sub-agents remain inside their parent
+chat rather than becoming duplicate top-level rows. New chats show `Untitled chat` until
+the daemon generates a short model-written title after the first completed exchange.
+
 `F8` or `/terminals` shows every shell Xerxes is driving — background commands,
 foreground runs, and interactive sessions — with a live output tail per terminal.
 Watching is non-destructive: the panel reads a mirror of the output, never the buffer the
@@ -176,6 +184,7 @@ Useful commands:
 /model                choose a provider model
 /new                  start a fresh session
 /resume <id|name>     resume saved work
+/background [prompt]  optionally instruct, then detach into Agent View
 /agents               inspect sub-agents
 /terminals            inspect the shells Xerxes is running
 /skills               inspect discovered skills
@@ -183,6 +192,8 @@ Useful commands:
 /permissions          inspect or change permission policy
 /yolo                 toggle accept-all tool execution
 /cron                 manage scheduled work
+/remove-memory        wipe all Xerxes memory after confirmation
+/remove-history       wipe saved chats and snapshots after confirmation
 /status               show runtime and session status
 /quit                 exit
 ```

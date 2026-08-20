@@ -9,7 +9,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { GatewayProvider } from '../app/gatewayContext.js'
 import type { GatewayServices } from '../app/interfaces.js'
 import type { GatewayClient } from '../gatewayClient.js'
-import type { SessionActiveListResponse, SessionListResponse } from '../gatewayTypes.js'
+import type { SessionActiveListResponse, SessionListResponse, SessionPeekResponse } from '../gatewayTypes.js'
 import { SessionPicker } from '../opentui/sessionPicker.js'
 import { DEFAULT_THEME } from '../theme.js'
 
@@ -20,69 +20,82 @@ const active: SessionActiveListResponse = {
       id: 'live-main',
       message_count: 4,
       model: 'provider/main-model',
-      status: 'idle',
+      status: 'working',
       title: 'Current implementation'
+    },
+    {
+      activity: 'waiting for your answer',
+      id: 'needs-input',
+      message_count: 2,
+      model: 'provider/main-model',
+      status: 'waiting',
+      title: 'Choose release target'
     }
   ]
 }
 
-const chats: SessionListResponse = {
+const saved: SessionListResponse = {
   sessions: [
     {
-      id: 'parent123',
+      id: 'saved-main',
       kind: 'main',
+      last_message_at: Date.now() / 1000 - 120,
       message_count: 12,
-      preview: 'Authentication audit',
-      started_at: Date.now() / 1000 - 120,
+      preview: 'first authored prompt must not become a title',
+      started_at: Date.now() / 1000 - 86_400,
       title: 'Authentication audit'
-    }
-  ]
-}
-
-const agents: SessionListResponse = {
-  sessions: [
+    },
     {
       agent_id: 'researcher',
-      id: 'agent123',
+      id: 'child-agent',
       kind: 'subagent',
       message_count: 7,
-      model: 'provider/research-model',
-      parent_session_id: 'parent123',
+      parent_session_id: 'saved-main',
       preview: 'Policy review',
-      root_session_id: 'parent123',
       started_at: Date.now() / 1000 - 60,
       status: 'completed',
-      subagent_id: 'subagent_policy',
+      subagent_id: 'subagent-policy',
       title: 'Policy review'
     }
   ]
 }
 
+const peek: SessionPeekResponse = {
+  inflight: { assistant: 'Still checking the final file', streaming: true, user: 'Review the patch' },
+  messages: [
+    { role: 'user', text: 'Review the patch' },
+    { role: 'assistant', text: 'I found one issue.' }
+  ],
+  session_id: 'live-main',
+  status: 'working'
+}
+
 const picker = async ({
   activeResponse = active,
-  agentResponse = agents,
-  chatResponse = chats,
   currentSessionId = 'live-main',
-  height = 18,
-  width = 96
+  height = 16,
+  peekResponse = peek,
+  savedResponse = saved,
+  width = 100
 }: {
   activeResponse?: SessionActiveListResponse
-  agentResponse?: SessionListResponse
-  chatResponse?: SessionListResponse
   currentSessionId?: string
   height?: number
+  peekResponse?: SessionPeekResponse
+  savedResponse?: SessionListResponse
   width?: number
 } = {}) => {
   const request = vi.fn(async (method: string, params?: Record<string, unknown>) => {
     if (method === 'session.active_list') return activeResponse
-    if (method === 'session.list' && params?.kind === 'all') {
-      return { sessions: [...(chatResponse.sessions ?? []), ...(agentResponse.sessions ?? [])] }
-    }
+    if (method === 'session.list' && params?.kind === 'all') return savedResponse
+    if (method === 'session.peek') return { ...peekResponse, session_id: params?.session_id }
+    if (method === 'prompt.background') return { task_id: 'bg-new-task' }
+    if (method === 'prompt.submit') return { ok: true }
+    if (method === 'session.steer') return { ok: true, status: 'queued' }
     throw new Error(`unexpected request: ${method}`)
   })
   const actions = {
     activateLiveSession: vi.fn(),
-    newLiveSession: vi.fn(),
     resumeById: vi.fn()
   }
   const services = {
@@ -104,256 +117,144 @@ const picker = async ({
   return { actions, request, setup }
 }
 
-describe('OpenTUI session picker histories', () => {
-  it('shows saved chat age from the last message rather than the legacy start field', async () => {
-    const now = Date.now() / 1000
+describe('OpenTUI Agent View', () => {
+  it('renders a full-screen grouped manager for independent chats and keeps subagents in their parent', async () => {
+    const { request, setup } = await picker()
+
+    try {
+      const frame = setup.captureCharFrame()
+
+      expect(frame).toContain('Agent view')
+      expect(frame).toContain('NEEDS INPUT')
+      expect(frame).toContain('WORKING')
+      expect(frame).toContain('READY')
+      expect(frame).toContain('Choose release target')
+      expect(frame).toContain('Current implementation')
+      expect(frame).toContain('Authentication audit')
+      expect(frame).not.toContain('Policy review')
+      expect(frame).toContain('Subagents stay inside their parent chat')
+      expect(request).toHaveBeenCalledWith('session.list', { kind: 'all', limit: 0 })
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
+
+  it('attaches the highlighted live chat with Right without cancelling it', async () => {
+    const { actions, setup } = await picker()
+
+    try {
+      // Initial selection follows the currently attached session even after
+      // status grouping moves it away from the first row.
+      act(() => setup.mockInput.pressArrow('right'))
+      await setup.flush()
+
+      expect(actions.activateLiveSession).toHaveBeenCalledWith('live-main')
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
+
+  it('dispatches typed text as a new independent live chat while staying in Agent View', async () => {
+    const { actions, request, setup } = await picker()
+
+    try {
+      await act(async () => setup.mockInput.typeText('audit the parser'))
+      act(() => setup.mockInput.pressEnter())
+      await act(async () => Bun.sleep(0))
+      await setup.flush()
+
+      expect(request).toHaveBeenCalledWith('prompt.background', {
+        session_id: 'live-main',
+        text: 'audit the parser'
+      })
+      expect(actions.activateLiveSession).not.toHaveBeenCalled()
+      expect(setup.captureCharFrame()).toContain('dispatched bg-new-ta…')
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
+
+  it('peeks without attaching and steers a working chat from the preview', async () => {
+    const oneWorking: SessionActiveListResponse = { sessions: [active.sessions![0]!] }
+    const { actions, request, setup } = await picker({ activeResponse: oneWorking })
+
+    try {
+      await act(async () => setup.mockInput.typeText(' '))
+      await act(async () => Bun.sleep(0))
+      await setup.flush()
+
+      expect(request).toHaveBeenCalledWith('session.peek', { session_id: 'live-main' })
+      expect(setup.captureCharFrame()).toContain('assistant: I found one issue.')
+      expect(setup.captureCharFrame()).toContain('Still checking the final file')
+      expect(actions.activateLiveSession).not.toHaveBeenCalled()
+
+      await act(async () => setup.mockInput.typeText('also check cancellation'))
+      act(() => setup.mockInput.pressEnter())
+      await act(async () => Bun.sleep(0))
+
+      expect(request).toHaveBeenCalledWith('session.steer', {
+        session_id: 'live-main',
+        text: 'also check cancellation'
+      })
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
+
+  it('replies to an idle chat from peek using a targeted prompt submission', async () => {
+    const idle: SessionActiveListResponse = {
+      sessions: [{ ...active.sessions![0]!, status: 'idle' }]
+    }
+    const { request, setup } = await picker({
+      activeResponse: idle,
+      peekResponse: { ...peek, inflight: null, status: 'idle' }
+    })
+
+    try {
+      await act(async () => setup.mockInput.typeText(' '))
+      await act(async () => Bun.sleep(0))
+      await act(async () => setup.mockInput.typeText('continue'))
+      act(() => setup.mockInput.pressEnter())
+      await act(async () => Bun.sleep(0))
+
+      expect(request).toHaveBeenCalledWith('prompt.submit', {
+        session_id: 'live-main',
+        text: 'continue'
+      })
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
+
+  it('never promotes prompt preview or a session id into an untitled chat title', async () => {
     const { setup } = await picker({
-      chatResponse: {
-        sessions: [{
-          id: 'aged-chat',
-          kind: 'main',
-          last_message_at: now - 120,
-          message_count: 2,
-          preview: 'Recent answer',
-          started_at: now - 86_400,
-          title: 'Recent answer'
-        }]
+      activeResponse: {
+        sessions: [{ ...active.sessions![0]!, activity: 'secret first prompt', title: '' }]
+      },
+      savedResponse: {
+        sessions: [{ ...saved.sessions![0]!, preview: 'secret saved first prompt', title: '' }]
       }
     })
 
     try {
       const frame = setup.captureCharFrame()
-      expect(frame).toContain('2m')
-      expect(frame).not.toContain('1d')
+      expect(frame.match(/Untitled chat/g)?.length).toBe(2)
+      expect(frame).not.toContain('secret saved first prompt')
+      // Activity can describe live work, but remains separate from the title.
+      expect(frame).toContain('secret first prompt')
     } finally {
       act(() => setup.renderer.destroy())
     }
   })
 
-  it('keeps chats clean by default and opens a linked child history from the Agents view', async () => {
-    const { actions, request, setup } = await picker()
-
-    try {
-      const chatsFrame = setup.captureCharFrame()
-
-      expect(chatsFrame).toContain('[Chats 2]')
-      expect(chatsFrame).toContain('Agents 1')
-      expect(chatsFrame).toContain('Current implementation')
-      expect(chatsFrame).toContain('Authentication audit')
-      expect(chatsFrame).not.toContain('Policy review')
-      expect(request).toHaveBeenCalledWith('session.list', { kind: 'all', limit: 0 })
-
-      act(() => setup.mockInput.pressTab())
-      await setup.flush()
-
-      const agentsFrame = setup.captureCharFrame()
-      expect(agentsFrame).toContain('[Agents 1]')
-      expect(agentsFrame).toContain('Policy review')
-      expect(agentsFrame).toContain('researcher')
-      expect(agentsFrame).toContain('completed')
-      expect(agentsFrame).toContain('7 msgs')
-      expect(agentsFrame).toContain('← Authentication audit')
-      expect(agentsFrame).not.toContain('+  new session')
-
-      act(() => setup.mockInput.pressEnter())
-      await setup.flush()
-
-      expect(actions.resumeById).toHaveBeenCalledWith('agent123')
-    } finally {
-      act(() => setup.renderer.destroy())
-    }
-  })
-
-  it('opens the selected live session with right arrow from the agent view', async () => {
-    const liveAgents: SessionActiveListResponse = {
-      sessions: [
-        {
-          current: true,
-          id: 'live-main',
-          message_count: 4,
-          model: 'provider/main-model',
-          status: 'working',
-          title: 'Current implementation'
-        },
-        {
-          current: false,
-          id: 'live-review',
-          message_count: 2,
-          model: 'provider/review-model',
-          status: 'working',
-          title: 'Review session'
-        }
-      ]
-    }
-    const { actions, setup } = await picker({ activeResponse: liveAgents })
-
-    try {
-      act(() => setup.mockInput.pressArrow('down'))
-      await setup.flush()
-      act(() => setup.mockInput.pressArrow('right'))
-      await setup.flush()
-
-      expect(actions.activateLiveSession).toHaveBeenCalledWith('live-review')
-      expect(actions.newLiveSession).not.toHaveBeenCalled()
-    } finally {
-      act(() => setup.renderer.destroy())
-    }
-  })
-
-  it('windows a large agent history list and keeps the last row keyboard-accessible', async () => {
-    const manyAgents: SessionListResponse = {
-      sessions: Array.from({ length: 80 }, (_, index) => ({
-        agent_id: index % 2 ? 'coder' : 'researcher',
-        id: `agent-${index}`,
-        kind: 'subagent',
-        message_count: index + 1,
-        parent_session_id: 'parent123',
-        preview: `Agent history ${index}`,
-        started_at: Date.now() / 1000 - index,
-        status: 'completed',
-        subagent_id: `subagent-${index}`,
-        title: `Agent history ${index}`
-      }))
-    }
-    const { actions, setup } = await picker({ agentResponse: manyAgents, height: 12, width: 72 })
-
-    try {
-      act(() => setup.mockInput.pressTab())
-      await setup.flush()
-      expect(setup.captureCharFrame()).toContain('[Agents 80]')
-      expect(setup.captureCharFrame()).toContain('↓ ')
-
-      act(() => setup.mockInput.pressKey('END'))
-      await setup.flush()
-      expect(setup.captureCharFrame()).toContain('Agent history 79')
-
-      act(() => setup.mockInput.pressEnter())
-      await setup.flush()
-      expect(actions.resumeById).toHaveBeenCalledWith('agent-79')
-    } finally {
-      act(() => setup.renderer.destroy())
-    }
-  })
-
-  it('opens on Agents for a current child and keeps Tab navigation and activation usable', async () => {
-    const activeChild: SessionActiveListResponse = {
-      sessions: [
-        {
-          agent_id: 'coder',
-          current: true,
-          id: 'agent-live',
-          kind: 'subagent',
-          message_count: 5,
-          model: 'provider/code-model',
-          parent_session_id: 'parent123',
-          root_session_id: 'parent123',
-          status: 'working',
-          subagent_id: 'subagent_live',
-          title: 'Live patch review'
-        }
-      ]
-    }
-    const { actions, setup } = await picker({ activeResponse: activeChild, currentSessionId: 'agent-live' })
-
-    try {
-      expect(setup.captureCharFrame()).toContain('[Agents 2]')
-      expect(setup.captureCharFrame()).toContain('Live patch review')
-      expect(setup.captureCharFrame()).not.toContain('+  new session')
-
-      act(() => setup.mockInput.pressArrow('left'))
-      await setup.flush()
-      expect(setup.captureCharFrame()).toContain('[Chats 1]')
-
-      act(() => setup.mockInput.pressTab())
-      await setup.flush()
-      expect(setup.captureCharFrame()).toContain('[Agents 2]')
-
-      act(() => setup.mockInput.pressEnter())
-      await setup.flush()
-      expect(actions.activateLiveSession).toHaveBeenCalledWith('agent-live')
-    } finally {
-      act(() => setup.renderer.destroy())
-    }
-  })
-
-  it('retains view controls and a usable empty state in a narrow terminal', async () => {
-    const { setup } = await picker({ agentResponse: { sessions: [] }, height: 9, width: 34 })
-
-    try {
-      act(() => setup.mockInput.pressTab())
-      await setup.flush()
-
-      const frame = setup.captureCharFrame()
-      expect(frame).toContain('Sessions')
-      expect(frame).toContain('[Agents 0]')
-      expect(frame).toContain('No agent histories')
-    } finally {
-      act(() => setup.renderer.destroy())
-    }
-  })
-
-  it('uses per-tab empty copy on the Chats and Agents tabs', async () => {
-    const { setup } = await picker({
-      activeResponse: { sessions: [] },
-      agentResponse: { sessions: [] },
-      chatResponse: { sessions: [] },
-      currentSessionId: 'no-such-session'
-    })
-
-    try {
-      // Chats counts as empty when only the '+ new session' row remains.
-      const chatsFrame = setup.captureCharFrame()
-      expect(chatsFrame).toContain('[Chats 0]')
-      expect(chatsFrame).toContain('No chats yet.')
-      expect(chatsFrame).not.toContain('No agent histories yet.')
-
-      act(() => setup.mockInput.pressArrow('right'))
-      await setup.flush()
-
-      const agentsFrame = setup.captureCharFrame()
-      expect(agentsFrame).toContain('[Agents 0]')
-      expect(agentsFrame).toContain('No agent histories yet.')
-    } finally {
-      act(() => setup.renderer.destroy())
-    }
-  })
-
-  it('clamps the fixed chrome inside the modal on very short terminals', async () => {
-    const { setup } = await picker({ height: 7, width: 60 })
+  it('keeps the manager and dispatch input usable in a narrow terminal', async () => {
+    const { setup } = await picker({ height: 8, width: 34 })
 
     try {
       const frame = setup.captureCharFrame()
-      expect(frame).toContain('Sessions')
-      expect(frame).toContain('[Chats 2]')
-
-      // The footer must land inside the clamped panel rather than overflowing
-      // past the modal's bottom edge.
-      const footerLine = frame.split('\n').findIndex(line => line.includes('Tab views'))
-      expect(footerLine).toBeGreaterThanOrEqual(0)
-      expect(footerLine).toBeLessThan(6)
-    } finally {
-      act(() => setup.renderer.destroy())
-    }
-  })
-
-  it('does not resume a child transcript while its native agent still owns it', async () => {
-    const running: SessionListResponse = {
-      sessions: [{
-        ...agents.sessions[0]!,
-        resumable: false,
-        status: 'running'
-      }]
-    }
-    const { actions, setup } = await picker({ agentResponse: running })
-
-    try {
-      act(() => setup.mockInput.pressTab())
-      await setup.flush()
-      act(() => setup.mockInput.pressEnter())
-      await setup.flush()
-
-      expect(actions.resumeById).not.toHaveBeenCalled()
-      expect(setup.captureCharFrame()).toContain('still running')
+      expect(frame).toContain('Agent view')
+      expect(frame).toContain('Dispatch a ne')
+      expect(frame).not.toContain('Sessions')
     } finally {
       act(() => setup.renderer.destroy())
     }

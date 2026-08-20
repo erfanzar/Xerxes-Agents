@@ -7,6 +7,7 @@ import {
   clearClarifyOverlay,
   getOverlayState,
   patchOverlayState,
+  resetFlowOverlays,
   resetOverlayState
 } from './overlayStore.js'
 import { getUiState, patchUiState, resetUiState } from './uiStore.js'
@@ -87,5 +88,28 @@ describe('provider clarify overlay lifecycle', () => {
     expect(clearClarifyOverlay('provider-step-1')).toBe(true)
     expect(getOverlayState().clarify).toBeNull()
     expect(getUiState().status).toBe('ready')
+  })
+})
+
+describe('overlay reset boundaries', () => {
+  afterEach(() => {
+    resetOverlayState()
+    resetUiState()
+  })
+
+  it('preserves the reasoning picker at a normal turn boundary', () => {
+    patchOverlayState({
+      confirm: {
+        detail: 'flow-scoped',
+        onConfirm: () => undefined,
+        title: 'Confirm'
+      },
+      reasoningPicker: true
+    })
+
+    resetFlowOverlays()
+
+    expect(getOverlayState().confirm).toBeNull()
+    expect(getOverlayState().reasoningPicker).toBe(true)
   })
 })

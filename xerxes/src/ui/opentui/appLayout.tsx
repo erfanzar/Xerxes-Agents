@@ -60,6 +60,8 @@ import { DiffPanelHotkey, DiffPanelOverlay } from './diffPanel.js'
 import { TerminalPanelHotkey, TerminalPanelOverlay } from './terminalPanel.js'
 import { MessageLine } from './messageLine.js'
 import { ModelPicker } from './modelPicker.js'
+import { responsivePanelWidth } from './overlayLayout.js'
+import { rebasePasteResult } from './pasteRebase.js'
 import { ReasoningPicker } from './reasoningPicker.js'
 import { Box, Span, Text } from './primitives.js'
 import { SessionPicker } from './sessionPicker.js'
@@ -337,7 +339,7 @@ function ProviderPromptOverlay({ actions }: Pick<AppLayoutProps, 'actions'>) {
   const rowCount = Math.max(1, Math.min(10, height - 13, choices.length + (allowFreeform ? 1 : 0)))
   const totalRows = choices.length + (allowFreeform ? 1 : 0)
   const offset = Math.max(0, Math.min(selected - Math.floor(rowCount / 2), totalRows - rowCount))
-  const panelWidth = Math.max(34, Math.min(84, width - 4))
+  const panelWidth = responsivePanelWidth(width, { max: 84, min: 34 })
 
   useEffect(() => {
     setCustomValue(false)
@@ -481,7 +483,7 @@ function ProviderPromptOverlay({ actions }: Pick<AppLayoutProps, 'actions'>) {
               </text>
               {masked ? (
                 <text fg={t.color.text} flexShrink={0}>
-                  {'•'.repeat(Math.min(maskedValue.length, panelWidth - 8)) || 'API key'}
+                  {'•'.repeat(Math.min(maskedValue.length, Math.max(0, panelWidth - 8))) || 'API key'}
                 </text>
               ) : (
                 <textarea
@@ -1034,6 +1036,24 @@ export function Composer({ composer }: Pick<AppLayoutProps, 'composer'>) {
     [composer, syncInputSelection]
   )
 
+  const applyPasteResult = useCallback(
+    (result: null | { cursor: number; value: string }, captured: { cursor: number; value: string }) => {
+      const textarea = ref.current
+
+      if (!result || !textarea) {
+        return
+      }
+
+      const rebased = rebasePasteResult(captured, result, {
+        cursor: textarea.cursorOffset,
+        value: textarea.plainText
+      })
+
+      applyDraft(rebased.value, rebased.cursor)
+    },
+    [applyDraft]
+  )
+
   const onSubmit = () => {
     const value = ref.current?.plainText ?? ''
     const row = composer.completions[composer.compIdx]
@@ -1071,11 +1091,7 @@ export function Composer({ composer }: Pick<AppLayoutProps, 'composer'>) {
 
     void Promise.resolve(
       composer.handleTextPaste({ bracketed: true, cursor, hotkey: false, text: decodePaste(event.bytes), value })
-    ).then(result => {
-      if (result) {
-        applyDraft(result.value, result.cursor)
-      }
-    })
+    ).then(result => applyPasteResult(result, { cursor, value }))
   })
 
   // Ctrl+V smart paste: terminals only deliver Cmd+V / bracketed paste when
@@ -1101,11 +1117,7 @@ export function Composer({ composer }: Pick<AppLayoutProps, 'composer'>) {
 
     void Promise.resolve(
       composer.handleTextPaste({ bracketed: false, cursor, hotkey: true, text: '', value })
-    ).then(result => {
-      if (result) {
-        applyDraft(result.value, result.cursor)
-      }
-    })
+    ).then(result => applyPasteResult(result, { cursor, value }))
   })
 
   // Say what Enter will actually do. The mode is configurable and defaults to
@@ -1224,7 +1236,12 @@ function PagerOverlay({ composer }: Pick<AppLayoutProps, 'composer'>) {
         width="100%"
         zIndex={150}
       >
-        <Box backgroundColor={t.color.statusBg} flexDirection="column" maxWidth={110} minWidth={48} padding={2}>
+        <Box
+          backgroundColor={t.color.statusBg}
+          flexDirection="column"
+          padding={2}
+          width={responsivePanelWidth(composer.cols, { max: 110, min: 48 })}
+        >
           {pager.title ? (
             <Box justifyContent="space-between" marginBottom={1}>
               <Text bold color={t.color.primary}>
@@ -1437,8 +1454,8 @@ function openTuiScrollAdapter(scrollbox: ScrollBoxRenderable): ScrollBoxHandle {
 }
 
 function InfoOverlay({ kind }: { kind: 'pluginsHub' | 'skillsHub' }) {
-  const ui = useStore($uiState)
   const t = useStore($uiTheme)
+  const { width } = useTerminalDimensions()
   const close = () => patchOverlayState({ [kind]: false })
 
   useKeyboard(event => {
@@ -1468,9 +1485,8 @@ function InfoOverlay({ kind }: { kind: 'pluginsHub' | 'skillsHub' }) {
         backgroundColor={t.color.statusBg}
         flexDirection="column"
         flexShrink={0}
-        maxWidth={90}
-        minWidth={42}
         padding={2}
+        width={responsivePanelWidth(width, { max: 90, min: 42 })}
       >
         <box flexDirection="row" flexShrink={0} justifyContent="space-between">
           <text fg={t.color.accent} flexShrink={0}>

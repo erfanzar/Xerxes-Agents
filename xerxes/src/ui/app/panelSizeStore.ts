@@ -32,8 +32,12 @@ export const resetPanelWidth = () => $panelWidthDelta.set(0)
 
 /** Apply the shared delta to a panel's default width: delta 0 keeps the
  *  default exactly; growth is capped at the terminal width minus the overlay
- *  gutter; shrinking bottoms out at a usable 24 columns. */
-export const withPanelWidthDelta = (base: number, terminalWidth: number): number =>
-  Math.max(24, Math.min(Math.max(24, terminalWidth - 2), base + $panelWidthDelta.get()))
+ *  gutter; shrinking bottoms out at 24 columns when the terminal fits it. */
+export const withPanelWidthDelta = (base: number, terminalWidth: number): number => {
+  const available = Math.max(1, terminalWidth - 2)
+  const minimum = Math.min(24, available)
+
+  return Math.max(minimum, Math.min(available, base + $panelWidthDelta.get()))
+}
 
 export { $panelWidthDelta }

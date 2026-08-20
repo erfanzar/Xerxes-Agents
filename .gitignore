@@ -33,3 +33,5 @@ tmp-files/
 .cache/
 .ipynb_checkpoints/
 *.log
+
+xerxes/dist/

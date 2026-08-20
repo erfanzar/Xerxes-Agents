@@ -2,8 +2,9 @@
 // Licensed under the Apache License, Version 2.0.
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { getTurnState } from '../app/turnStore.js'
+import { getOverlayState, patchOverlayState } from '../app/overlayStore.js'
 import { turnController } from '../app/turnController.js'
+import { getTurnState } from '../app/turnStore.js'
 import { LIVE_RENDER_MAX_CHARS } from '../config/limits.js'
 import { getUiState, patchUiState } from '../app/uiStore.js'
 import {
@@ -51,6 +52,14 @@ describe('turnController', () => {
     turnController.fullReset()
     clearSpawnHistory()
     vi.useRealTimers()
+  })
+
+  it('clears user overlays at a full session reset', () => {
+    patchOverlayState({ agents: true, reasoningPicker: true, sessions: true })
+
+    turnController.fullReset()
+
+    expect(getOverlayState()).toMatchObject({ agents: false, reasoningPicker: false, sessions: false })
   })
 
   it('keeps TodoWriteTool state pinned instead of archiving it into the transcript', () => {
@@ -410,6 +419,31 @@ describe('turnController', () => {
 
     expect(wasInterrupted).toBe(false)
     expect(finalMessages).toEqual([{ role: 'assistant', text: 'Still finished.' }])
+  })
+
+  it('does not let an older interrupt failure cancel a newer interrupt request', async () => {
+    turnController.startMessage()
+    const first = Promise.withResolvers<never>()
+    const second = Promise.withResolvers<never>()
+    const sys = vi.fn()
+    const request = vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise)
+
+    turnController.interruptTurn({ gw: { request }, sid: 'session-race', sys })
+    turnController.interruptTurn({ gw: { request }, sid: 'session-race', sys })
+    first.reject(new Error('old interrupt failed'))
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(getUiState()).toMatchObject({ busy: true, status: 'interrupting…' })
+    expect(sys).not.toHaveBeenCalled()
+
+    second.reject(new Error('new interrupt failed'))
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(getUiState()).toMatchObject({ busy: true, status: 'running…' })
+    expect(sys).toHaveBeenCalledOnce()
+    expect(sys).toHaveBeenCalledWith('error: interrupt failed: new interrupt failed')
   })
 
   it('returns every live subagent as transcript state when the turn errors', () => {

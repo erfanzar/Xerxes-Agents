@@ -69,7 +69,11 @@ export const COMMAND_REGISTRY: readonly CommandDefinition[] = Object.freeze([
   command('snapshots', 'List filesystem snapshots', 'snapshots'),
   command('stop', 'Cancel the in-flight tool call', 'session', { aliases: ['cancel'] }),
   command('cancel-all', 'Cancel every queued action', 'session'),
-  command('background', 'Detach the session into the daemon', 'session', { cliOnly: true }),
+  command('background', 'Detach the current chat into Agent View', 'session', {
+    aliases: ['bg'],
+    argsHint: '[prompt]',
+    cliOnly: true,
+  }),
   command('btw', 'Inject side-channel context', 'session'),
   command('queue', 'Show or manage queued prompts', 'session', { cliOnly: true }),
   command('status', 'Show platform / session status', 'info'),

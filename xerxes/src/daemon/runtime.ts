@@ -1033,14 +1033,25 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     const displayText = options.displayText?.trim() || text;
     session.inflightUser = displayText;
     session.inflightAssistant = "";
+    // Every event produced by this turn must retain its owning session. One
+    // TUI connection can keep multiple native sessions alive and switch the
+    // foreground tab while an earlier turn is still streaming; unscoped text,
+    // tool, approval, or usage events would otherwise be applied to whichever
+    // session happens to be visible when they arrive.
+    const emitSessionEvent = (event: DaemonEvent): void => {
+      emit({
+        ...event,
+        payload: { ...event.payload, session_id: session.id },
+      });
+    };
     const processed = await processAtMentions(text, session.cwd);
     if (controller.signal.aborted) {
       session.status = "idle";
       session.activeTurnId = "";
       session.lastActive = Date.now();
-      emit({
+      emitSessionEvent({
         type: "turn_end",
-        payload: { session_id: session.id, cancelled: true },
+        payload: { cancelled: true },
       });
       if (this.abortControllers.get(sessionKey) === controller) {
         this.abortControllers.delete(sessionKey);
@@ -1070,10 +1081,9 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
       const message = session.messages[index];
       if (message) this.messageJournal(session.id)(message, index);
     }
-    emit({
+    emitSessionEvent({
       type: "turn_begin",
       payload: {
-        session_id: session.id,
         turn_id: session.activeTurnId,
         text: displayText,
         ...(processed.mentionedFiles.length
@@ -1084,7 +1094,7 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
 
     const releaseInteractions = this.options.interactions?.bind(
       session.id,
-      emit,
+      emitSessionEvent,
     );
     try {
       for await (const event of this.turnRunner.run(
@@ -1097,13 +1107,13 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
           ...(images.length ? { images } : {}),
         },
       )) {
-        emit(event);
+        emitSessionEvent(event);
         if (!runnerManagesState) {
           updateFallbackSession(session, event, assistantParts, thinkingParts);
         }
       }
     } catch (error) {
-      emit({
+      emitSessionEvent({
         type: "notification",
         payload: { level: "error", message: errorMessage(error) },
       });
@@ -1126,7 +1136,7 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
         });
       }
       if (pendingSteers.length) {
-        emit({
+        emitSessionEvent({
           type: "notification",
           payload: {
             level: "info",
@@ -1141,7 +1151,7 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
       const stoppedChildren = this.cancelledSubagents.get(sessionKey) ?? 0;
       this.cancelledSubagents.delete(sessionKey);
       if (stoppedChildren > 0) {
-        emit({
+        emitSessionEvent({
           type: "notification",
           payload: {
             level: "info",
@@ -1156,7 +1166,7 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
       try {
         await this.saveSession(session);
       } catch (error) {
-        emit({
+        emitSessionEvent({
           type: "notification",
           payload: {
             level: "error",
@@ -1164,10 +1174,9 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
           },
         });
       }
-      emit({
+      emitSessionEvent({
         type: "turn_end",
         payload: {
-          session_id: session.id,
           cancelled: controller.signal.aborted,
         },
       });

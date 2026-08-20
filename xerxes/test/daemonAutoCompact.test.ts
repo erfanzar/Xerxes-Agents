@@ -246,6 +246,7 @@ test("daemon auto-compacts before submitting a turn once usage crosses the thres
   });
   const server = new DaemonServer({
     autoCompactThreshold: 0.01,
+    autoTitle: false,
     socketPath,
     runtime,
     profileStore,
@@ -339,6 +340,7 @@ test("cancel during pre-turn auto-compaction prevents the admitted turn from lau
   });
   const server = new DaemonServer({
     autoCompactThreshold: 0.01,
+    autoTitle: false,
     socketPath,
     runtime,
     profileStore,
@@ -418,6 +420,7 @@ test("disconnect during pre-turn auto-compaction does not start an ownerless tur
   });
   const server = new DaemonServer({
     autoCompactThreshold: 0.01,
+    autoTitle: false,
     socketPath,
     runtime,
     profileStore,
@@ -491,6 +494,7 @@ test("a second submit cannot wait behind compaction and launch after its owner d
   });
   const server = new DaemonServer({
     autoCompactThreshold: 0.01,
+    autoTitle: false,
     socketPath,
     runtime,
     profileStore,
@@ -555,6 +559,7 @@ test("a submit serialized behind manual compaction keeps its newly appended prom
   });
   const server = new DaemonServer({
     autoCompactThreshold: 0.01,
+    autoTitle: false,
     socketPath,
     runtime,
     profileStore,
@@ -627,7 +632,7 @@ test("manual compaction does not restore stale idle status over a live turn", as
     model: "gpt-4",
     sessionDirectory: join(directory, "sessions"),
   });
-  const server = new DaemonServer({ socketPath, runtime, profileStore });
+  const server = new DaemonServer({ autoTitle: false, socketPath, runtime, profileStore });
   const nativeFetch = globalThis.fetch;
   globalThis.fetch = Object.assign(
     async () => {
@@ -689,7 +694,7 @@ test("daemon leaves small transcripts alone under the default 80% threshold", as
     model: "gpt-4",
     sessionDirectory: join(directory, "sessions"),
   });
-  const server = new DaemonServer({ socketPath, runtime, profileStore });
+  const server = new DaemonServer({ autoTitle: false, socketPath, runtime, profileStore });
   const nativeFetch = globalThis.fetch;
   const requests: unknown[] = [];
   globalThis.fetch = fakeOpenAiFetch(requests) as typeof globalThis.fetch;
@@ -772,6 +777,7 @@ async function withCompactionDaemon(
   });
   const server = new DaemonServer({
     ...(options.threshold === undefined ? {} : { autoCompactThreshold: options.threshold }),
+    autoTitle: false,
     cronLeasePath: join(directory, "cron.lease"),
     socketPath,
     runtime,
@@ -1016,6 +1022,7 @@ test("runtime setting auto_compact_threshold = 0 disables auto-compaction", asyn
   // A low constructor default must lose to the explicit runtime setting.
   const server = new DaemonServer({
     autoCompactThreshold: 0.01,
+    autoTitle: false,
     socketPath,
     runtime,
     profileStore,

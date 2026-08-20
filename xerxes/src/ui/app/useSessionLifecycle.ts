@@ -188,6 +188,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
       const info = r.info ?? null
       const requestedTitle = title?.trim() ?? ''
 
+      composerActions.activateSessionQueue(r.session_id)
       resetSession()
       setSessionStartedAt(Date.now())
 
@@ -278,6 +279,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
           const info = r.info ?? null
           const running = Boolean(r.running || r.status === 'working' || r.status === 'waiting')
 
+          composerActions.activateSessionQueue(r.session_id)
           resetSession()
           setSessionStartedAt(r.started_at ? r.started_at * 1000 : Date.now())
           const transcript = [...toTranscriptMessages(r.messages), ...liveSessionInflightMessages(r.inflight)]
@@ -333,6 +335,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
             const info = r.info ?? null
             const running = Boolean(r.running || r.status === 'working' || r.status === 'waiting')
 
+            composerActions.activateSessionQueue(r.session_id)
             resetSession()
             setSessionStartedAt(r.started_at ? r.started_at * 1000 : Date.now())
 

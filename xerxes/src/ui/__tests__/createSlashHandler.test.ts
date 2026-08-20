@@ -17,6 +17,7 @@ function makeContext(request: ReturnType<typeof vi.fn>, catalog: null | SlashCat
   const sys: string[] = []
   const page: string[] = []
   const send: string[] = []
+  const dispatch: string[] = []
   let historyItems: Msg[] = []
   const setHistoryItems = (update: Msg[] | ((items: Msg[]) => Msg[])) => {
     historyItems = typeof update === 'function' ? update(historyItems) : update
@@ -65,6 +66,7 @@ function makeContext(request: ReturnType<typeof vi.fn>, catalog: null | SlashCat
       },
       slashFlightRef: { current: 0 },
       transcript: {
+        dispatch: (text: string) => dispatch.push(text),
         page: (text: string) => page.push(text),
         panel: vi.fn(),
         send: (text: string) => send.push(text),
@@ -79,6 +81,7 @@ function makeContext(request: ReturnType<typeof vi.fn>, catalog: null | SlashCat
       }
     } as never,
     dieWithCode,
+    dispatch,
     getHistoryItems: () => historyItems,
     page,
     send,
@@ -156,6 +159,31 @@ describe('createSlashHandler', () => {
     ])
     expect(request).not.toHaveBeenCalledWith('config.set', expect.anything())
     expect(sys).toEqual([])
+  })
+
+  it('/background detaches the current chat and optionally dispatches an instruction through normal busy routing', () => {
+    patchUiState({ sid: 's1' })
+    const request = vi.fn()
+    const fixture = makeContext(request)
+
+    createSlashHandler(fixture.context)('/background keep working on the tests')
+
+    expect(fixture.dispatch).toEqual(['keep working on the tests'])
+    expect(getOverlayState().sessions).toBe(true)
+    expect(request).not.toHaveBeenCalled()
+  })
+
+  it('keeps /btw daemon-owned instead of aliasing it to /background', async () => {
+    patchUiState({ sid: 's1' })
+    const request = vi.fn().mockResolvedValue({})
+    const fixture = makeContext(request)
+
+    createSlashHandler(fixture.context)('/btw what changed?')
+    await flush()
+
+    expect(fixture.dispatch).toEqual([])
+    expect(getOverlayState().sessions).toBe(false)
+    expect(request).toHaveBeenCalledWith('slash.exec', { command: 'btw what changed?', session_id: 's1' })
   })
 
   it.each(['/agents pause', '/agents resume', '/replay list', '/replay load /tmp/tree.json', '/tools disable shell'])(

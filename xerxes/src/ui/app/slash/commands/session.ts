@@ -3,7 +3,6 @@
 import { introMsg, toTranscriptMessages } from '../../../domain/messages.js'
 import { TUI_SESSION_MODEL_FLAG } from '../../../domain/slash.js'
 import type {
-  BackgroundStartResponse,
   ConfigGetValueResponse,
   ConfigSetResponse,
   SessionBranchResponse,
@@ -40,24 +39,15 @@ const modelValueForConfigSet = (arg: string) => {
 
 export const sessionCommands: SlashCommand[] = [
   {
-    aliases: ['bg', 'btw'],
-    help: 'launch a background prompt',
+    aliases: ['bg'],
+    help: 'detach this chat into Agent View; optionally send an instruction first',
     name: 'background',
     run: (arg, ctx) => {
-      if (!arg) {
-        return ctx.transcript.sys('/background <prompt>')
+      const instruction = arg.trim()
+      if (instruction) {
+        ctx.transcript.dispatch(instruction)
       }
-
-      ctx.gateway.rpc<BackgroundStartResponse>('prompt.background', { session_id: ctx.sid, text: arg }).then(
-        ctx.guarded<BackgroundStartResponse>(r => {
-          if (!r.task_id) {
-            return
-          }
-
-          patchUiState(state => ({ ...state, bgTasks: new Set(state.bgTasks).add(r.task_id!) }))
-          ctx.transcript.sys(`bg ${r.task_id} started`)
-        })
-      )
+      patchOverlayState({ sessions: true })
     }
   },
 

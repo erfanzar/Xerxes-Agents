@@ -30,12 +30,13 @@ describe('useSessionLifecycle', () => {
       }
       return null
     }) as GatewayRpc
+    const activateSessionQueue = vi.fn()
     let lifecycle: ReturnType<typeof useSessionLifecycle> | undefined
 
     const Probe = () => {
       lifecycle = useSessionLifecycle({
         colsRef: { current: 80 },
-        composerActions: { setPasteSnips: vi.fn() } as unknown as ComposerActions,
+        composerActions: { activateSessionQueue, setPasteSnips: vi.fn() } as unknown as ComposerActions,
         gw: {} as GatewayClient,
         panel: vi.fn(),
         rpc,
@@ -64,6 +65,7 @@ describe('useSessionLifecycle', () => {
 
       expect(calls.filter(call => call === 'session.create')).toHaveLength(1)
       expect(getUiState().sid).toBe('newest')
+      expect(activateSessionQueue).toHaveBeenCalledWith('newest')
     } finally {
       act(() => setup.renderer.destroy())
       resetUiState()

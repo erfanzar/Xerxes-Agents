@@ -103,7 +103,7 @@ not a JSON-RPC error). Most handlers return `{ "ok": bool, ... }`; treat
 
 ```json
 { "jsonrpc": "2.0", "method": "event",
-  "params": { "type": "text_part", "payload": { "text": "hello" } } }
+  "params": { "type": "text_part", "payload": { "session_id": "…", "text": "hello" } } }
 ```
 
 The client must demux by presence of `id`: a frame with `id` is a
@@ -127,10 +127,12 @@ params fall back to per-connection defaults.
 | `initialize`                         | `{}` (impl-specific)                           | `{ ok, ... }` + emits `InitDone`                               | Handshake; sets up the connection session.                                        |
 | `prompt`                             | `{ user_input, mode?, plan_mode? }`            | `{ ok }`                                                       | Submit a user turn. Streams events back.                                          |
 | `turn.submit`                        | `{ session_key?, text, mode?, plan_mode?, images? }` | `{ ok }`                                              | Lower-level submit; `prompt` wraps this. Optional `images`: `[{ media_type, data(base64) }]` — validated (strict base64, png/jpeg/gif/webp magic-byte sniff, 10MB/image, 20MB/turn) and sent to the provider as `image_url` data-URL content parts. |
+| `turn.background`                    | `{ session_key?, text }`                       | `{ ok, task_id, session_key }`                               | Dispatch a new independent live session without changing the connection's attached session. Agent View uses this for its bottom prompt; `/background` itself is a local detach action. |
 | `turn.steer` / `steer`               | `{ session_key?, content }`                    | `{ ok }`                                                       | Inject steer text into the active turn.                                           |
 | `turn.cancel` / `cancel`             | `{ session_key? }`                             | `{ ok }`                                                       | Cancel this connection's turn.                                                    |
 | `cancel_all`                         | `{}`                                           | `{ ok, cancelled }`                                            | Cancel every session.                                                             |
 | `session.open`                       | `{ session_key?, agent_id?, project_dir? }`    | `{ ok, session }`                                              | Open/attach a session within the active or explicit project boundary.             |
+| `session.active_list`                | `{}`                                           | `{ ok, sessions }`                                             | List live top-level and subagent sessions. Agent View filters subagents into their parent and polls this for live state. |
 | `session.list`                       | `{}`                                           | `{ ok, sessions }`                                             | For `/resume` picker.                                                             |
 | `session.status`                     | `{ session_key? }`                             | `{ ok, session: { ..., profile_name } \| null }`                | `profile_name` is the exact matching stored profile or `null` for an overridden/unmatched runtime. |
 | `runtime.status`                     | `{}`                                           | `{ ok, runtime_ready, pid, daemon_protocol, daemon_build_id, active_subagents?, channels, ... }` | Liveness probe; `runtime_ready` reports configured-provider readiness and `active_subagents` protects live child work during upgrades. |
@@ -160,6 +162,11 @@ params fall back to per-connection defaults.
 > cron/session workflows. Unknown or unavailable operations return an explicit
 > native error; neither layer fabricates success.
 
+The TUI compatibility method `session.peek` is intentionally not a daemon RPC.
+`GatewayClient` maps it to a targeted, read-only `session.status` request so Agent
+View can preview and reply to a live chat without calling `session.open` or changing
+the connection's attached session.
+
 ---
 
 ## 3. Events (daemon → client)
@@ -170,6 +177,11 @@ discriminator. Over the **daemon socket** transport `type` is **snake_case**
 aliases for compatible external clients, so the table below lists both. **The
 TS client keys on the snake_case column** and maps the PascalCase column to the
 same handler as a tolerated alias.
+
+Every event emitted by a submitted turn also carries the owning `session_id`
+in its payload. A single TUI connection can keep several sessions live, so
+clients must route late text, reasoning, tool, interaction, status, and
+terminal turn events by that identity instead of the currently selected tab.
 
 ### Event name map
 

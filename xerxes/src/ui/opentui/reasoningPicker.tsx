@@ -35,6 +35,12 @@ const consume = (event: KeyEvent) => {
   event.stopPropagation()
 }
 
+const windowItems = <T,>(items: readonly T[], selected: number, visible: number) => {
+  const offset = Math.max(0, Math.min(selected - Math.floor(visible / 2), items.length - visible))
+
+  return { items: items.slice(offset, offset + visible), offset }
+}
+
 /**
  * Effort selector for the active model.
  *
@@ -140,6 +146,7 @@ export function ReasoningPicker({ onCancel, onSelect, t }: ReasoningPickerProps)
   )
   const visible = Math.max(1, Math.min(MAX_VISIBLE, levels.length || 1, Math.max(1, height - 12)))
   const panelHeight = Math.min(height, visible + 8)
+  const { items: visibleLevels, offset } = windowItems(levels, index, visible)
 
   // Composed by the daemon: it depends on the provider's reasoning shape,
   // not just on whether the list came back live.
@@ -170,8 +177,8 @@ export function ReasoningPicker({ onCancel, onSelect, t }: ReasoningPickerProps)
       {levels.length === 0 ? (
         <InfoRow color={activeTheme.color.muted}>nothing to select for this provider</InfoRow>
       ) : (
-        levels.slice(0, visible).map((level, rowIndex) => {
-          const selected = rowIndex === index
+        visibleLevels.map((level, rowIndex) => {
+          const selected = offset + rowIndex === index
           const marks = [
             level.effort === current ? 'active' : '',
             level.effort === defaultEffort ? 'default' : ''
