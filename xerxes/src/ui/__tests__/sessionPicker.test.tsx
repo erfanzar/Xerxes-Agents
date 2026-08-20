@@ -143,7 +143,7 @@ describe('OpenTUI session picker histories', () => {
       expect(chatsFrame).not.toContain('Policy review')
       expect(request).toHaveBeenCalledWith('session.list', { kind: 'all', limit: 0 })
 
-      act(() => setup.mockInput.pressArrow('right'))
+      act(() => setup.mockInput.pressTab())
       await setup.flush()
 
       const agentsFrame = setup.captureCharFrame()
@@ -159,6 +159,42 @@ describe('OpenTUI session picker histories', () => {
       await setup.flush()
 
       expect(actions.resumeById).toHaveBeenCalledWith('agent123')
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
+
+  it('opens the selected live session with right arrow from the agent view', async () => {
+    const liveAgents: SessionActiveListResponse = {
+      sessions: [
+        {
+          current: true,
+          id: 'live-main',
+          message_count: 4,
+          model: 'provider/main-model',
+          status: 'working',
+          title: 'Current implementation'
+        },
+        {
+          current: false,
+          id: 'live-review',
+          message_count: 2,
+          model: 'provider/review-model',
+          status: 'working',
+          title: 'Review session'
+        }
+      ]
+    }
+    const { actions, setup } = await picker({ activeResponse: liveAgents })
+
+    try {
+      act(() => setup.mockInput.pressArrow('down'))
+      await setup.flush()
+      act(() => setup.mockInput.pressArrow('right'))
+      await setup.flush()
+
+      expect(actions.activateLiveSession).toHaveBeenCalledWith('live-review')
+      expect(actions.newLiveSession).not.toHaveBeenCalled()
     } finally {
       act(() => setup.renderer.destroy())
     }
@@ -244,7 +280,7 @@ describe('OpenTUI session picker histories', () => {
     const { setup } = await picker({ agentResponse: { sessions: [] }, height: 9, width: 34 })
 
     try {
-      act(() => setup.mockInput.pressArrow('right'))
+      act(() => setup.mockInput.pressTab())
       await setup.flush()
 
       const frame = setup.captureCharFrame()
@@ -292,7 +328,7 @@ describe('OpenTUI session picker histories', () => {
 
       // The footer must land inside the clamped panel rather than overflowing
       // past the modal's bottom edge.
-      const footerLine = frame.split('\n').findIndex(line => line.includes('Tab/'))
+      const footerLine = frame.split('\n').findIndex(line => line.includes('Tab views'))
       expect(footerLine).toBeGreaterThanOrEqual(0)
       expect(footerLine).toBeLessThan(6)
     } finally {
@@ -311,7 +347,7 @@ describe('OpenTUI session picker histories', () => {
     const { actions, setup } = await picker({ agentResponse: running })
 
     try {
-      act(() => setup.mockInput.pressArrow('right'))
+      act(() => setup.mockInput.pressTab())
       await setup.flush()
       act(() => setup.mockInput.pressEnter())
       await setup.flush()

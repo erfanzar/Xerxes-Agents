@@ -502,7 +502,13 @@ export function SessionPicker({ actions, currentSessionId, onCancel, t: supplied
 
       if (name === 'right') {
         consume(event)
-        switchView('agents')
+        const row = rows[selected]
+
+        if (view === 'chats' && row && row.kind !== 'new') {
+          choose()
+        } else {
+          switchView('agents')
+        }
 
         return
       }
@@ -611,7 +617,7 @@ export function SessionPicker({ actions, currentSessionId, onCancel, t: supplied
           {offset + listRows < rows.length ? `↓ ${rows.length - offset - listRows} more` : ' '}
         </InfoRow>
       ) : null}
-      <InfoRow color={t.color.muted}>Tab/←/→ views · ↑/↓ select · Enter open · Esc/q close</InfoRow>
+      <InfoRow color={t.color.muted}>Tab views · ↑/↓ select · →/Enter open · Esc/q close</InfoRow>
     </ModalShell>
   )
 }

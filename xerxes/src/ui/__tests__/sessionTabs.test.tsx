@@ -74,6 +74,7 @@ describe('SessionTabsHotkey', () => {
       value = tabs
     } = props
     const actions = { activateLiveSession: vi.fn(), newLiveSession: vi.fn() }
+    const openAgentView = vi.fn()
     const setup = await testRender(
       <SessionTabsHotkey
         actions={actions}
@@ -81,39 +82,45 @@ describe('SessionTabsHotkey', () => {
         busy={busy}
         composerEmpty={composerEmpty}
         disabled={disabled}
+        onOpenAgentView={openAgentView}
         tabs={value}
       />,
       { height: 10, width: 80 }
     )
     await setup.flush()
-    return { actions, setup }
+    return { actions, openAgentView, setup }
   }
 
-  it('cycles to the next tab on right and wraps around', async () => {
-    const { actions, setup } = await hotkey({ activeId: 'a' })
+  it('leaves right to the agent view instead of switching or creating sessions', async () => {
+    const { actions, openAgentView, setup } = await hotkey({ activeId: 'a' })
     try {
       act(() => setup.mockInput.pressArrow('right'))
-      expect(actions.activateLiveSession).toHaveBeenCalledWith('b')
+      expect(openAgentView).not.toHaveBeenCalled()
+      expect(actions.activateLiveSession).not.toHaveBeenCalled()
+      expect(actions.newLiveSession).not.toHaveBeenCalled()
     } finally {
       act(() => setup.renderer.destroy())
     }
   })
 
-  it('cycles to the previous tab on left and wraps around', async () => {
-    const { actions, setup } = await hotkey({ activeId: 'a' })
+  it('opens the agent view on left without switching or creating sessions', async () => {
+    const { actions, openAgentView, setup } = await hotkey({ activeId: 'a' })
     try {
       act(() => setup.mockInput.pressArrow('left'))
-      expect(actions.activateLiveSession).toHaveBeenCalledWith('c')
+      expect(openAgentView).toHaveBeenCalledOnce()
+      expect(actions.activateLiveSession).not.toHaveBeenCalled()
+      expect(actions.newLiveSession).not.toHaveBeenCalled()
     } finally {
       act(() => setup.renderer.destroy())
     }
   })
 
-  it('backgrounds a busy current session by creating a fresh foreground session on left', async () => {
-    const { actions, setup } = await hotkey({ busy: true, value: [tabs[0]!] })
+  it('keeps a busy current session running when left opens the agent view', async () => {
+    const { actions, openAgentView, setup } = await hotkey({ busy: true, value: [tabs[0]!] })
     try {
       act(() => setup.mockInput.pressArrow('left'))
-      expect(actions.newLiveSession).toHaveBeenCalledOnce()
+      expect(openAgentView).toHaveBeenCalledOnce()
+      expect(actions.newLiveSession).not.toHaveBeenCalled()
       expect(actions.activateLiveSession).not.toHaveBeenCalled()
     } finally {
       act(() => setup.renderer.destroy())
@@ -140,11 +147,12 @@ describe('SessionTabsHotkey', () => {
     }
   })
 
-  it('creates a second live session on left when only one idle tab exists', async () => {
-    const { actions, setup } = await hotkey({ value: [tabs[0]!] })
+  it('opens the agent view on left when only one idle tab exists', async () => {
+    const { actions, openAgentView, setup } = await hotkey({ value: [tabs[0]!] })
     try {
       act(() => setup.mockInput.pressArrow('left'))
-      expect(actions.newLiveSession).toHaveBeenCalledOnce()
+      expect(openAgentView).toHaveBeenCalledOnce()
+      expect(actions.newLiveSession).not.toHaveBeenCalled()
       expect(actions.activateLiveSession).not.toHaveBeenCalled()
     } finally {
       act(() => setup.renderer.destroy())

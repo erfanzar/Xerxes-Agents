@@ -1510,59 +1510,37 @@ function InfoOverlay({ kind }: { kind: 'pluginsHub' | 'skillsHub' }) {
 // ── Layout root ─────────────────────────────────────────────────────────────
 
 /**
- * Left backgrounds a busy foreground turn into a new live session; while idle,
- * Left/Right cycle the existing live-session tabs Claude-Code style.
+ * Claude Code-style agent navigation: Left leaves the attached session for the
+ * session/agent view without cancelling its work. The picker owns selection and
+ * Right re-enters the highlighted session.
  *
- * The keys are only claimed when they have no editing job to do: the composer
- * must be empty (a left/right at home still moves the caret in text) and no
- * overlay may own the keyboard. Anything else falls through to the textarea
- * untouched. Session creation keeps the busy session alive, while tab switches
- * hydrate the selected session's in-flight turn.
+ * Left is only claimed when it has no editing job to do: the composer must be
+ * empty (Left still moves the caret in text) and no overlay may own the keyboard.
+ * Anything else falls through to the textarea untouched.
  */
 export function SessionTabsHotkey({
-  actions,
-  busy,
   composerEmpty,
   disabled,
-  tabs,
-  activeId
+  onOpenAgentView
 }: {
   actions: Pick<AppLayoutActions, 'activateLiveSession' | 'newLiveSession'>
+  activeId: null | string
   busy: boolean
   composerEmpty: boolean
   disabled: boolean
+  onOpenAgentView: () => void
   tabs: readonly SessionTab[]
-  activeId: null | string
 }) {
   useKeyboard(event => {
-    if (disabled || !composerEmpty || event.name !== 'left' && event.name !== 'right') {
+    if (disabled || !composerEmpty || event.name !== 'left') {
       return
     }
     if (event.ctrl || event.meta || event.super || event.shift) {
       return
     }
-    if (event.name === 'left' && (busy || tabs.length < 2)) {
-      consumeKey(event)
-      actions.newLiveSession()
-      return
-    }
-    if (tabs.length < 2) {
-      return
-    }
-
-    const index = tabs.findIndex(tab => tab.id === activeId)
-    if (index < 0) {
-      return
-    }
-
-    const delta = event.name === 'right' ? 1 : -1
-    const next = tabs[(index + delta + tabs.length) % tabs.length]
-    if (!next || next.id === activeId) {
-      return
-    }
 
     consumeKey(event)
-    actions.activateLiveSession(next.id)
+    onOpenAgentView()
   })
 
   return null
@@ -1684,6 +1662,7 @@ export function AppLayout({
         busy={ui.busy}
         composerEmpty={composer.empty}
         disabled={agentHotkeyBlocked}
+        onOpenAgentView={() => patchOverlayState({ sessions: true })}
         tabs={ui.sessionTabs}
       />
       <Box flexDirection="row" flexGrow={1} minHeight={0} width="100%">

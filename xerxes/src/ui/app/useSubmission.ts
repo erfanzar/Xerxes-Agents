@@ -23,6 +23,9 @@ const SESSION_BUSY_RE = /session busy|waiting for model response/i
 
 const isSessionBusyError = (e: unknown) => e instanceof Error && SESSION_BUSY_RE.test(e.message)
 
+export const steerWasAccepted = (response: null | SessionSteerResponse): boolean =>
+  response?.ok === true || response?.status === 'queued'
+
 /**
  * Resolve collapsed paste tokens back to their text.
  *
@@ -273,7 +276,7 @@ export function useSubmission(opts: UseSubmissionOptions) {
           .then(raw => {
             const r = asRpcResult<SessionSteerResponse>(raw)
 
-            if (r?.status !== 'queued') {
+            if (!steerWasAccepted(r)) {
               fallback('steer rejected — message queued for next turn')
 
               return

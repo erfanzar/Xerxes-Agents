@@ -350,6 +350,7 @@ export interface SessionInterruptResponse {
 }
 
 export interface SessionSteerResponse {
+  ok?: boolean
   status?: 'queued' | 'rejected'
   text?: string
 }
