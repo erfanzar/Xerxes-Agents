@@ -11,11 +11,13 @@ import type { Msg } from '../types.js'
  */
 export interface QueuedMessage {
   displayText: string
+  submissionId: string
   submitText: string
 }
 
 export const queuedMessage = (displayText: string, submitText = displayText): QueuedMessage => ({
   displayText,
+  submissionId: crypto.randomUUID(),
   submitText
 })
 

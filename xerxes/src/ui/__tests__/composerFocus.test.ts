@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import {
   COMPOSER_DOUBLE_SPACE_MS,
   focusComposer,
+  focusComposerOnPrintableInput,
   isComposerFocused,
   refocusComposerOnDoubleSpace,
   registerComposerFocusTarget,
@@ -30,6 +31,34 @@ function fakeTarget(initialFocused = false) {
 afterEach(() => {
   registerComposerFocusTarget(null)
   resetComposerFocusTracking()
+})
+
+describe('composer automatic typing focus', () => {
+  it('focuses an unfocused composer on the first printable character', () => {
+    const target = fakeTarget(false)
+    registerComposerFocusTarget(target)
+
+    expect(focusComposerOnPrintableInput('h')).toBe(true)
+    expect(target.state.focusCalls).toBe(1)
+    expect(isComposerFocused()).toBe(true)
+  })
+
+  it('leaves shortcuts and navigation keys unfocused', () => {
+    const target = fakeTarget(false)
+    registerComposerFocusTarget(target)
+
+    expect(focusComposerOnPrintableInput('h', { ctrl: true })).toBe(false)
+    expect(focusComposerOnPrintableInput('left')).toBe(false)
+    expect(target.state.focusCalls).toBe(0)
+  })
+
+  it('does not consume printable input when the composer is already focused', () => {
+    const target = fakeTarget(true)
+    registerComposerFocusTarget(target)
+
+    expect(focusComposerOnPrintableInput('h')).toBe(false)
+    expect(target.state.focusCalls).toBe(0)
+  })
 })
 
 describe('composer double-space refocus', () => {

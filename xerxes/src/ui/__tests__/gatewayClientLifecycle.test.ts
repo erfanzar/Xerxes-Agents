@@ -419,6 +419,7 @@ describe('GatewayClient session lifecycle', () => {
     await client.request('prompt.submit', {
       display_text: 'review [Pasted 20 lines] @context.md',
       session_id: 'live-attachment',
+      submission_id: 'submission-1',
       text: 'review expanded paste @context.md'
     })
 
@@ -428,6 +429,7 @@ describe('GatewayClient session lifecycle', () => {
         params: {
           display_text: 'review [Pasted 20 lines] @context.md',
           session_key: 'live-attachment',
+          submission_id: 'submission-1',
           text: 'review expanded paste @context.md'
         }
       }

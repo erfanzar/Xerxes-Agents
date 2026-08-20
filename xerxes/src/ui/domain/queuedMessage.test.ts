@@ -14,10 +14,11 @@ describe('queuedMessage', () => {
   it('keeps the authored user text separate from the expanded daemon payload', () => {
     const followUp = queuedMessage('review [Pasted 12 lines]', 'review\nconst answer = 42')
 
-    expect(followUp).toEqual({
+    expect(followUp).toMatchObject({
       displayText: 'review [Pasted 12 lines]',
       submitText: 'review\nconst answer = 42'
     })
+    expect(followUp.submissionId).toMatch(/^[0-9a-f-]{36}$/)
     expect(queuedMessageDisplays([followUp])).toEqual(['review [Pasted 12 lines]'])
   })
 

@@ -640,6 +640,56 @@ test("duplicate submit from the same owner cannot release ownership of the live 
   }
 });
 
+test("daemon deduplicates a repeated submission id after the first turn settles", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-submit-dedup-"));
+  const socketPath = join(directory, "daemon.sock");
+  const prompts: string[] = [];
+  const runner: TurnRunner = {
+    async *run(_session, text): AsyncGenerator<DaemonEvent> {
+      prompts.push(text);
+      yield { type: "text_part", payload: { text: "done" } };
+    },
+  };
+  const runtime = new InMemoryDaemonRuntime(runner, {
+    currentProjectDirectory: directory,
+    model: "test-model",
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const server = new DaemonServer({ socketPath, runtime });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { session_key: "dedup" } });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "turn.submit",
+      params: { submission_id: "submit-1", text: "only once" },
+    });
+    expect((await client.next((frame) => frame.id === 2)).result).toEqual({ ok: true });
+    await client.next(eventFrame("turn_end"));
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "turn.submit",
+      params: { submission_id: "submit-1", text: "only once" },
+    });
+    expect((await client.next((frame) => frame.id === 3)).result).toEqual({ duplicate: true, ok: true });
+    await Bun.sleep(25);
+
+    expect(prompts).toEqual(["only once"]);
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("daemon shutdown cancels active turns before flushing session state", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-stop-order-"));
   const socketPath = join(directory, "daemon.sock");
@@ -727,6 +777,8 @@ test("daemon derives slash discovery from implemented canonical commands and rej
         ["/compact", "Compress the conversation"],
         ["/cron", "Manage scheduled tasks"],
         ["/history", "Show or search conversation history"],
+        ["/remove-memory", "Wipe ALL Xerxes agent memory (global)"],
+        ["/remove-history", "Wipe ALL saved chat history and snapshots (global)"],
         ["/snapshot", "Take a filesystem snapshot"],
       ]),
     );

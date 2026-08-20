@@ -126,6 +126,7 @@ export function useSubmission(opts: UseSubmissionOptions) {
 
       gw.request<PromptSubmitResponse>('prompt.submit', {
         session_id: sid,
+        submission_id: message.submissionId,
         text: message.submitText,
         display_text: message.displayText,
         ...(images.length ? { images: promptSubmitImages(images) } : {})
@@ -137,7 +138,8 @@ export function useSubmission(opts: UseSubmissionOptions) {
             // settle edge will dispatch it and append one fresh user bubble.
             removeMessage(userMessage)
             restoreAttachments(images)
-            composerActions.enqueue(message.submitText, message.displayText)
+            composerRefs.queueRef.current.unshift(message)
+            composerActions.syncQueue()
             patchUiState({ busy: true, status: 'queued for next turn' })
 
             return
@@ -148,7 +150,7 @@ export function useSubmission(opts: UseSubmissionOptions) {
         }
       )
     },
-    [appendMessage, composerActions, gw, maybeGoodVibes, removeMessage, setLastUserMsg, sys]
+    [appendMessage, composerActions, composerRefs.queueRef, gw, maybeGoodVibes, removeMessage, setLastUserMsg, sys]
   )
 
   const send = useCallback(

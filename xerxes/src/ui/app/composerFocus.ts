@@ -70,6 +70,21 @@ export function focusComposer(): boolean {
   return true
 }
 
+interface PrintableInputModifiers {
+  readonly ctrl?: boolean
+  readonly meta?: boolean
+  readonly super?: boolean
+}
+
+/** Focus the composer before OpenTUI dispatches an ordinary printable key. */
+export function focusComposerOnPrintableInput(input: string, modifiers: PrintableInputModifiers = {}): boolean {
+  if (modifiers.ctrl || modifiers.meta || modifiers.super || input.length !== 1 || input < ' ') {
+    return false
+  }
+
+  return focusComposer()
+}
+
 /** Reset the double-space clock (tests, session switches). */
 export function resetComposerFocusTracking(): void {
   lastSpaceAt = 0

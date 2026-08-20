@@ -31,6 +31,58 @@ async function collect(events: AsyncIterable<StreamEvent>): Promise<StreamEvent[
   return result
 }
 
+test('tool calls emitted across separate deltas are assembled without duplicating cumulative batches', async () => {
+  class SplitToolCallClient implements LlmClient {
+    calls = 0
+
+    async *stream(request: CompletionRequest): AsyncGenerator<LlmDelta> {
+      this.calls += 1
+      if (request.messages.some(message => message.role === 'tool')) {
+        yield { content: 'done', usage: { inputTokens: 1, outputTokens: 1 } }
+        return
+      }
+      const first = {
+        id: 'call-first',
+        type: 'function' as const,
+        function: { name: 'ReadFile', arguments: { path: 'first.ts' } },
+      }
+      const second = {
+        id: 'call-second',
+        type: 'function' as const,
+        function: { name: 'ReadFile', arguments: { path: 'second.ts' } },
+      }
+      yield { toolCalls: [first] }
+      yield { toolCalls: [second] }
+    }
+  }
+
+  const executed: string[] = []
+  const state = createAgentState()
+  const events = await collect(runTurn({
+    model: 'gpt-4o',
+    permissionMode: 'accept-all',
+    state,
+    tools: [READ_FILE],
+    userMessage: 'read both files',
+  }, {
+    llm: new SplitToolCallClient(),
+    toolExecutor: {
+      async execute(call): Promise<string> {
+        executed.push(String(call.function.arguments.path))
+        return 'ok'
+      },
+    },
+  }))
+
+  expect(executed).toEqual(['first.ts', 'second.ts'])
+  expect(events.filter(event => event.type === 'tool_start')).toHaveLength(2)
+  const assistantToolMessage = state.messages.find(
+    message => message.role === 'assistant' && message.tool_calls !== undefined,
+  )
+  expect(assistantToolMessage?.role === 'assistant' ? assistantToolMessage.tool_calls : undefined)
+    .toHaveLength(2)
+})
+
 test('a retried provider attempt drops partial text, thinking, and stale tool calls', async () => {
   class MidStreamFailureClient implements LlmClient {
     calls = 0

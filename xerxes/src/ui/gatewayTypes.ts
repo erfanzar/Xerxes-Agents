@@ -357,6 +357,7 @@ export interface SessionSteerResponse {
 // ── Prompt / submission ──────────────────────────────────────────────
 
 export interface PromptSubmitResponse {
+  duplicate?: boolean
   ok?: boolean
 }
 

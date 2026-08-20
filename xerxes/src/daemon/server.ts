@@ -292,6 +292,8 @@ const HANDLED_CANONICAL_COMMANDS: ReadonlySet<string> = new Set([
   "queue",
   "reload",
   "reload-mcp",
+  "remove-history",
+  "remove-memory",
   "reasoning",
   "restart",
   "resume",
@@ -720,6 +722,8 @@ export class DaemonServer {
   private readonly socketPath: string;
   private readonly terminalRegistry: TerminalRegistry | undefined;
   private readonly transcriptSearch = new TranscriptSearchIndex();
+  /** Accepted client submission ids, retained for this daemon lifetime to make reconnect retries idempotent. */
+  private readonly acceptedSubmissionIds = new Set<string>();
   /** One cold read of the transcript directory, shared by concurrent searches. */
   private transcriptSearchHydration: Promise<void> | undefined;
   private readonly toolCatalog: DaemonToolCatalogPort | undefined;
@@ -1609,6 +1613,14 @@ export class DaemonServer {
         (typeof params.display_text === "string"
           ? params.display_text.trim()
           : "") || text;
+      const submissionId = optionalString(params.submission_id)?.trim();
+      const submissionKey = submissionId ? `${key}\u0000${submissionId}` : undefined;
+      if (submissionKey && this.acceptedSubmissionIds.has(submissionKey)) {
+        return { ok: true, duplicate: true };
+      }
+      if (submissionKey) {
+        this.acceptedSubmissionIds.add(submissionKey);
+      }
       void this.submitTrackedTurn(
         key,
         text,

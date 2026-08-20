@@ -759,6 +759,9 @@ export class GatewayClient extends EventEmitter {
       case 'prompt.submit':
         return this.rawRequest<T>('turn.submit', {
           session_key: this.keyFor(params.session_id),
+          ...(typeof params.submission_id === 'string' && params.submission_id.trim()
+            ? { submission_id: params.submission_id.trim() }
+            : {}),
           text: String(params.text ?? ''),
           ...(typeof params.display_text === 'string' ? { display_text: params.display_text } : {}),
           // Validated PendingAttachment entries from the /image command. The

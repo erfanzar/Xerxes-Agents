@@ -61,21 +61,24 @@ describe('SessionTabStrip', () => {
 describe('SessionTabsHotkey', () => {
   const hotkey = async (props: {
     activeId?: null | string
+    busy?: boolean
     composerEmpty?: boolean
     disabled?: boolean
     value?: SessionTab[]
   } = {}) => {
     const {
       activeId = 'a',
+      busy = false,
       composerEmpty = true,
       disabled = false,
       value = tabs
     } = props
-    const actions = { activateLiveSession: vi.fn() }
+    const actions = { activateLiveSession: vi.fn(), newLiveSession: vi.fn() }
     const setup = await testRender(
       <SessionTabsHotkey
         actions={actions}
         activeId={activeId}
+        busy={busy}
         composerEmpty={composerEmpty}
         disabled={disabled}
         tabs={value}
@@ -101,6 +104,17 @@ describe('SessionTabsHotkey', () => {
     try {
       act(() => setup.mockInput.pressArrow('left'))
       expect(actions.activateLiveSession).toHaveBeenCalledWith('c')
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
+
+  it('backgrounds a busy current session by creating a fresh foreground session on left', async () => {
+    const { actions, setup } = await hotkey({ busy: true, value: [tabs[0]!] })
+    try {
+      act(() => setup.mockInput.pressArrow('left'))
+      expect(actions.newLiveSession).toHaveBeenCalledOnce()
+      expect(actions.activateLiveSession).not.toHaveBeenCalled()
     } finally {
       act(() => setup.renderer.destroy())
     }

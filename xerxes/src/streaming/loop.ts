@@ -471,7 +471,16 @@ export async function* runTurn(
               attemptEvents.push(...textDeduper.push(part))
             }
             if (delta.toolCalls) {
-              roundToolCalls = delta.toolCalls
+              const merged = [...roundToolCalls]
+              for (const toolCall of delta.toolCalls) {
+                const existing = merged.findIndex(candidate => candidate.id === toolCall.id)
+                if (existing === -1) {
+                  merged.push(toolCall)
+                } else {
+                  merged[existing] = toolCall
+                }
+              }
+              roundToolCalls = merged
             }
             if (delta.thinkingSignature) {
               thinkingSignature = delta.thinkingSignature

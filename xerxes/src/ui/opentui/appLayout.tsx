@@ -1510,23 +1510,25 @@ function InfoOverlay({ kind }: { kind: 'pluginsHub' | 'skillsHub' }) {
 // ── Layout root ─────────────────────────────────────────────────────────────
 
 /**
- * Left/right arrows cycle the live-session tabs, Claude-Code style.
+ * Left backgrounds a busy foreground turn into a new live session; while idle,
+ * Left/Right cycle the existing live-session tabs Claude-Code style.
  *
  * The keys are only claimed when they have no editing job to do: the composer
- * must be empty (a left/right at home still moves the caret in text), no
- * overlay may own the keyboard, and there must be another tab to move to.
- * Anything else falls through to the textarea untouched. The switch itself is
- * delegated to `activateLiveSession`, which already serializes concurrent
- * activations and hydrates a busy target's in-flight turn.
+ * must be empty (a left/right at home still moves the caret in text) and no
+ * overlay may own the keyboard. Anything else falls through to the textarea
+ * untouched. Session creation keeps the busy session alive, while tab switches
+ * hydrate the selected session's in-flight turn.
  */
 export function SessionTabsHotkey({
   actions,
+  busy,
   composerEmpty,
   disabled,
   tabs,
   activeId
 }: {
-  actions: Pick<AppLayoutActions, 'activateLiveSession'>
+  actions: Pick<AppLayoutActions, 'activateLiveSession' | 'newLiveSession'>
+  busy: boolean
   composerEmpty: boolean
   disabled: boolean
   tabs: readonly SessionTab[]
@@ -1536,7 +1538,15 @@ export function SessionTabsHotkey({
     if (disabled || !composerEmpty || event.name !== 'left' && event.name !== 'right') {
       return
     }
-    if (event.ctrl || event.meta || event.super || event.shift || tabs.length < 2) {
+    if (event.ctrl || event.meta || event.super || event.shift) {
+      return
+    }
+    if (event.name === 'left' && busy) {
+      consumeKey(event)
+      actions.newLiveSession()
+      return
+    }
+    if (tabs.length < 2) {
       return
     }
 
@@ -1671,6 +1681,7 @@ export function AppLayout({
       <SessionTabsHotkey
         actions={actions}
         activeId={ui.sid ?? ui.info?.session_id ?? null}
+        busy={ui.busy}
         composerEmpty={composer.empty}
         disabled={agentHotkeyBlocked}
         tabs={ui.sessionTabs}
