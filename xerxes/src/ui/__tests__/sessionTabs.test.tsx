@@ -140,11 +140,23 @@ describe('SessionTabsHotkey', () => {
     }
   })
 
-  it('does nothing with fewer than two tabs', async () => {
+  it('creates a second live session on left when only one idle tab exists', async () => {
+    const { actions, setup } = await hotkey({ value: [tabs[0]!] })
+    try {
+      act(() => setup.mockInput.pressArrow('left'))
+      expect(actions.newLiveSession).toHaveBeenCalledOnce()
+      expect(actions.activateLiveSession).not.toHaveBeenCalled()
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
+
+  it('does nothing on right with fewer than two tabs', async () => {
     const { actions, setup } = await hotkey({ value: [tabs[0]!] })
     try {
       act(() => setup.mockInput.pressArrow('right'))
       expect(actions.activateLiveSession).not.toHaveBeenCalled()
+      expect(actions.newLiveSession).not.toHaveBeenCalled()
     } finally {
       act(() => setup.renderer.destroy())
     }

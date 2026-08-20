@@ -1541,7 +1541,7 @@ export function SessionTabsHotkey({
     if (event.ctrl || event.meta || event.super || event.shift) {
       return
     }
-    if (event.name === 'left' && busy) {
+    if (event.name === 'left' && (busy || tabs.length < 2)) {
       consumeKey(event)
       actions.newLiveSession()
       return
