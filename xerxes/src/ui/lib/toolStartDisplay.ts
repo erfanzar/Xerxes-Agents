@@ -53,6 +53,15 @@ function summarizeStructuredArgs(toolName: string, parsed: Record<string, unknow
     return compact(query)
   }
 
+  // Many tools are addressed by an identifier rather than a path or a query.
+  // Without this they fell through to the raw-blob fallback below and the
+  // transcript rendered rows like `Task Output Tool {"task_id":"r9-timeout"}`
+  // — the JSON syntax being pure noise around the one word that mattered.
+  const identifier = firstString(parsed, IDENTIFIER_KEYS)
+  if (identifier) {
+    return compact(identifier)
+  }
+
   // Patch/content/prompt payloads can be enormous or secret-bearing. Keep a
   // semantic hint for those calls without serializing their values.
   if (firstString(parsed, ['patch', 'diff'])) {
@@ -62,7 +71,53 @@ function summarizeStructuredArgs(toolName: string, parsed: Record<string, unknow
     return toolName.includes('write') ? 'write content' : ''
   }
 
-  return compact(fallbackContext)
+  // Last resort for a shape nothing above recognized: render the scalar
+  // entries as `key=value`, which stays readable at a glance. Echoing the
+  // serialized object here is what produced the JSON-in-the-transcript rows,
+  // so `fallbackContext` is only used when it is not itself a blob.
+  const entries = describeEntries(parsed)
+  if (entries) {
+    return entries
+  }
+
+  return parseObject(fallbackContext) ? '' : compact(fallbackContext)
+}
+
+/** Keys that name *what* a call addresses when there is no path or query. */
+const IDENTIFIER_KEYS = [
+  'task_id',
+  'taskId',
+  'agent_id',
+  'agentId',
+  'session_id',
+  'sessionId',
+  'terminal_id',
+  'skill',
+  'tool',
+  'name',
+  'id',
+  'key'
+]
+
+const MAX_DESCRIBED_ENTRIES = 3
+
+/** `key=value` for the scalar fields of an otherwise unrecognized payload. */
+function describeEntries(parsed: Record<string, unknown>): string {
+  const parts: string[] = []
+
+  for (const [key, value] of Object.entries(parsed)) {
+    if (value === null || typeof value === 'object') {
+      continue
+    }
+
+    parts.push(`${key}=${String(value)}`)
+
+    if (parts.length === MAX_DESCRIBED_ENTRIES) {
+      break
+    }
+  }
+
+  return compact(parts.join(' · '))
 }
 
 function commandPreview(parsed: Record<string, unknown>): string {

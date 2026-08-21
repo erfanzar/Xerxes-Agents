@@ -13,6 +13,8 @@ import type { CopyOutcome } from '../lib/copyText.js'
 import { copyPreview, copyRoleLabel, copyTextToClipboard, formatCopyOutcome } from '../lib/copyText.js'
 import type { Theme } from '../theme.js'
 
+import { windowItems } from './overlayLayout.js'
+
 const MAX_VISIBLE = 12
 const MIN_PANEL_WIDTH = 48
 const MAX_PANEL_WIDTH = 96
@@ -27,16 +29,6 @@ export interface CopyPickerProps {
 const consume = (event: KeyEvent) => {
   event.preventDefault()
   event.stopPropagation()
-}
-
-const windowItems = <T,>(items: readonly T[], selected: number, visible: number) => {
-  if (visible <= 0) {
-    return { items: [] as readonly T[], offset: 0 }
-  }
-
-  const offset = Math.max(0, Math.min(selected - Math.floor(visible / 2), items.length - visible))
-
-  return { items: items.slice(offset, offset + visible), offset }
 }
 
 /**

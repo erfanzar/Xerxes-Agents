@@ -8,7 +8,8 @@ import { applyVoiceRecordResponse, shouldFallThroughForScroll } from '../app/use
 import { liveSessionInflightMessages } from '../app/useSessionLifecycle.js'
 import { approvalAction } from '../domain/approval.js'
 import { toTranscriptMessages } from '../domain/messages.js'
-import { shouldShowStartupWelcome, startupComposerWidth } from '../domain/startupLayout.js'
+import { shouldShowStartupWelcome, contentColumnWidth } from '../domain/startupLayout.js'
+import { transcriptBodyWidth } from '../lib/inputMetrics.js'
 import { capTranscriptHistory, visibleTranscriptMessages } from '../lib/messages.js'
 
 const promptScrollKey = (patch: Partial<Parameters<typeof shouldFallThroughForScroll>[0]> = {}) => ({
@@ -34,10 +35,10 @@ describe('native OpenTUI semantic parity', () => {
   })
 
   it('uses more of ultra-wide welcome screens without overflowing narrow terminals', () => {
-    expect(startupComposerWidth(40)).toBe(36)
-    expect(startupComposerWidth(80)).toBe(75)
-    expect(startupComposerWidth(160)).toBe(88)
-    expect(startupComposerWidth(200)).toBe(104)
+    expect(contentColumnWidth(40)).toBe(36)
+    expect(contentColumnWidth(80)).toBe(75)
+    expect(contentColumnWidth(160)).toBe(88)
+    expect(contentColumnWidth(200)).toBe(104)
   })
 
   it('dispatches native approval choices without relying on Prompt Toolkit sentinels', () => {
@@ -144,5 +145,27 @@ describe('native OpenTUI semantic parity', () => {
     expect(capTranscriptHistory([intro, ...rows], 5)).toEqual([intro, ...rows.slice(-4)])
     expect(capTranscriptHistory([intro, ...rows], 1)).toEqual([intro])
     expect(capTranscriptHistory(rows, 5)).toEqual(rows.slice(-5))
+  })
+})
+
+describe('transcript reading measure', () => {
+  // The renderer caps the transcript column at `contentColumnWidth`; the
+  // estimator's `transcriptBodyWidth` must track it exactly, because width
+  // feeds wrappedLines and any mismatch mis-estimates every row in
+  // proportion — which is virtual-scroll drift, not a cosmetic difference.
+  it('matches the rendered column width minus the gutter', () => {
+    for (const cols of [80, 120, 160, 200]) {
+      expect(transcriptBodyWidth(cols, 'assistant', '❯')).toBe(contentColumnWidth(cols) - 3)
+    }
+  })
+
+  it('stops prose from running the full width of a wide terminal', () => {
+    // At 200 columns text used to wrap at ~195; it now wraps at the measure.
+    expect(transcriptBodyWidth(200, 'assistant', '❯')).toBeLessThan(110)
+  })
+
+  it('leaves narrow mobile panes uncapped', () => {
+    // Termux panes are already narrow; forcing a measure there clips words.
+    expect(transcriptBodyWidth(50, 'assistant', '❯', true)).toBe(50 - 3 - 2)
   })
 })

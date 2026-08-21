@@ -6,8 +6,6 @@ import type { CliRenderer } from '@opentui/core'
 
 import { clearActiveRenderer, setActiveRenderer } from '../opentui/rendererSingleton.js'
 import { inTmux, osc52Copy, osc52Sequence, writeOsc52Clipboard } from '../lib/osc52.js'
-import { cycleDetails, filterTranscript, resolveDetails, showThinking } from '../lib/details.js'
-import type { TranscriptRow } from '../app/gatewayState.js'
 
 describe('osc52', () => {
   it('base64-encodes into an OSC 52 sequence', () => {
@@ -45,45 +43,5 @@ describe('osc52', () => {
     expect(inTmux({ TMUX: '/tmp/tmux-1/default,1,0' } as NodeJS.ProcessEnv)).toBe(true)
     expect(inTmux({ TERM: 'tmux-256color' } as NodeJS.ProcessEnv)).toBe(true)
     expect(inTmux({ TERM: 'xterm' } as NodeJS.ProcessEnv)).toBe(false)
-  })
-})
-
-describe('details mode', () => {
-  it('cycles expanded → collapsed → hidden → expanded', () => {
-    expect(cycleDetails('expanded')).toBe('collapsed')
-    expect(cycleDetails('collapsed')).toBe('hidden')
-    expect(cycleDetails('hidden')).toBe('expanded')
-  })
-  it('resolves arguments and cycles on empty', () => {
-    expect(resolveDetails('hidden', 'expanded')).toBe('hidden')
-    expect(resolveDetails('cycle', 'expanded')).toBe('collapsed')
-    expect(resolveDetails('', 'collapsed')).toBe('hidden')
-    expect(resolveDetails('bogus', 'collapsed')).toBe('collapsed')
-  })
-  it('shows live thinking only when expanded', () => {
-    expect(showThinking('expanded')).toBe(true)
-    expect(showThinking('collapsed')).toBe(false)
-    expect(showThinking('hidden')).toBe(false)
-  })
-
-  const rows: TranscriptRow[] = [
-    { id: 1, role: 'user', text: 'hi' },
-    { id: 2, role: 'tool', text: 'exec_command' },
-    { id: 3, role: 'tool', text: '', blocks: [{ type: 'diff', diff: '+a', language: '' }] },
-    { id: 4, role: 'assistant', text: 'done' }
-  ]
-
-  it('expanded keeps everything', () => {
-    expect(filterTranscript(rows, 'expanded')).toBe(rows)
-  })
-  it('collapsed keeps tool one-liners, drops blocks', () => {
-    const out = filterTranscript(rows, 'collapsed')
-    expect(out).toHaveLength(4)
-    expect(out[2]).toMatchObject({ role: 'tool', text: 'result ⋯' })
-    expect(out[2]!.blocks).toBeUndefined()
-  })
-  it('hidden drops tool rows entirely', () => {
-    const out = filterTranscript(rows, 'hidden')
-    expect(out.map(r => r.role)).toEqual(['user', 'assistant'])
   })
 })

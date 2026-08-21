@@ -325,7 +325,7 @@ describe('GatewayClient session lifecycle', () => {
     expect(calls.some(call => call.method === 'session.open')).toBe(false)
   })
 
-  it('uses an untitled placeholder instead of prompt, key, or id fallbacks', async () => {
+  it('never fabricates a title from prompt, key, or id', async () => {
     const client = new GatewayClient({ projectDir: process.cwd(), sessionKey: 'test:untitled' })
     const privateClient = client as unknown as {
       rawRequest: (method: string, params?: Record<string, unknown>) => Promise<Record<string, unknown>>
@@ -338,11 +338,14 @@ describe('GatewayClient session lifecycle', () => {
           sessions: [{ key: 'opaque-saved-key', messages: 1, session_id: 'opaque-saved-id', title: '' }]
         }
 
+    // An unnamed session stays blank all the way to the renderer, which is
+    // what lets the header show a bare mode label and the picker show its own
+    // "not yet named" placeholder. Inventing one here hid both.
     await expect(client.request('session.active_list', {})).resolves.toMatchObject({
-      sessions: [{ preview: 'Untitled chat', title: 'Untitled chat' }]
+      sessions: [{ preview: '', title: '' }]
     })
     await expect(client.request('session.list', {})).resolves.toMatchObject({
-      sessions: [{ preview: 'Untitled chat', title: 'Untitled chat' }]
+      sessions: [{ preview: '', title: '' }]
     })
   })
 
@@ -726,9 +729,15 @@ describe('GatewayClient session lifecycle', () => {
       }
     })
 
+    let capturedKey = ''
     privateClient.rawRequest = async (method, params) => {
       expect(method).toBe('initialize')
-      expect(params).toMatchObject({ resume_session_id: 'aabbccdd', session_key: 'aabbccdd' })
+      // Resume must not alias the connection onto the raw session id: another
+      // connection resuming the same session would derive the identical key.
+      expect(params).toMatchObject({ resume_session_id: 'aabbccdd' })
+      capturedKey = String(params?.session_key ?? '')
+      expect(capturedKey).toMatch(/^tui:/)
+      expect(capturedKey).not.toBe('aabbccdd')
 
       for (const payload of [
         { body: '✨ inspect the auth flow', category: 'history', type: 'replay_user' },
@@ -738,6 +747,24 @@ describe('GatewayClient session lifecycle', () => {
           JSON.stringify({ jsonrpc: '2.0', method: 'event', params: { payload, type: 'notification' } })
         )
       }
+
+      // A replay-shaped row tagged for a *different* live session belongs to
+      // that session's stream; the resume capture must not swallow it.
+      privateClient.onLine(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          method: 'event',
+          params: {
+            payload: {
+              body: 'other session row',
+              category: 'history',
+              session_id: 'ff001122',
+              type: 'replay_assistant'
+            },
+            type: 'notification'
+          }
+        })
+      )
 
       return {
         cwd: process.cwd(),
@@ -761,7 +788,19 @@ describe('GatewayClient session lifecycle', () => {
       { role: 'user', text: 'inspect the auth flow' },
       { role: 'assistant', text: 'The flow starts in auth.ts.' }
     ])
-    expect(forwarded).toEqual([])
+    // Only the foreign-session row is forwarded; the resumed session's own
+    // replay is batched into the hydrate-once transcript.
+    expect(forwarded).toEqual(['transcript.append'])
+
+    // The minted key is remembered, so follow-up calls for the session route
+    // through it instead of the raw session id.
+    const routed: string[] = []
+    privateClient.rawRequest = async (method, params) => {
+      routed.push(`${method}:${String(params?.session_key ?? '')}`)
+      return { ok: true }
+    }
+    await client.request('session.interrupt', { session_id: 'aabbccdd' })
+    expect(routed).toEqual([`cancel:${capturedKey}`])
   })
 
   it('emits gateway.closed on an unexpected socket death but never from a deliberate kill', () => {

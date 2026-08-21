@@ -35,6 +35,15 @@ export interface BackgroundStartOptions {
   readonly name?: string
 }
 
+/**
+ * Explicit scope for callers that use the manager directly rather than through
+ * an authenticated tool execution context. Symbol identity prevents any real
+ * session ID from colliding with this compatibility scope.
+ */
+export const LEGACY_PRIVATE_BACKGROUND_SCOPE: unique symbol = Symbol('legacy-private-background-commands')
+
+export type BackgroundCommandOwner = string | typeof LEGACY_PRIVATE_BACKGROUND_SCOPE
+
 export interface BackgroundStartResult {
   readonly command: readonly string[]
   readonly cwd: string
@@ -59,6 +68,7 @@ export interface BackgroundCheckResult {
 interface BackgroundEntry {
   readonly command: readonly string[]
   readonly drains: readonly StreamDrain[]
+  readonly owner: BackgroundCommandOwner
   readonly process: Bun.Subprocess
   readonly stderr: BoundedOutputBuffer
   readonly stdout: BoundedOutputBuffer
@@ -66,7 +76,7 @@ interface BackgroundEntry {
 }
 
 /**
- * Owns background child processes for one session.
+ * Owns background child processes across isolated session scopes.
  *
  * Registration goes through {@link ProcessRegistry}, which already had the
  * lifecycle vocabulary — poll, wait, terminate, kill — and no caller at all.
@@ -90,6 +100,11 @@ export class BackgroundCommandManager {
    * interactive command wait forever for input that will never come.
    */
   start(options: BackgroundStartOptions): BackgroundStartResult {
+    return this.startForOwner(LEGACY_PRIVATE_BACKGROUND_SCOPE, options)
+  }
+
+  /** Spawn a command owned by an authenticated session scope. */
+  startForOwner(owner: BackgroundCommandOwner, options: BackgroundStartOptions): BackgroundStartResult {
     const argv = [options.command, ...(options.args ?? [])]
     const child = Bun.spawn(argv, {
       cwd: options.cwd,
@@ -104,14 +119,16 @@ export class BackgroundCommandManager {
       cwd: options.cwd,
       ...(options.name ? { name: options.name } : {}),
     })
+    const terminalOwnerSessionId = typeof owner === 'string' ? owner : 'legacy-private-background-commands'
     const terminal = this.terminals?.open({
       id: procId,
       kind: 'background',
+      ownerSessionId: terminalOwnerSessionId,
       command: argv.join(' '),
       cwd: options.cwd,
       pid: child.pid,
       ...(options.name ? { label: options.name } : {}),
-      control: { kill: async signal => void (await this.kill(procId, signal)) },
+      control: { kill: async signal => void (await this.killForOwner(owner, procId, signal)) },
     })
     // Drain continuously from the moment it starts. A process whose output is
     // only read when polled fills its pipe buffer and blocks — so a build left
@@ -120,7 +137,15 @@ export class BackgroundCommandManager {
       drainStream(child.stdout as ReadableStream<Uint8Array>, stdout, text => terminal?.append(text)),
       drainStream(child.stderr as ReadableStream<Uint8Array>, stderr, text => terminal?.append(text)),
     ]
-    this.entries.set(procId, { command: argv, drains, process: child, stdout, stderr, ...(terminal ? { terminal } : {}) })
+    this.entries.set(procId, {
+      command: argv,
+      drains,
+      owner,
+      process: child,
+      stdout,
+      stderr,
+      ...(terminal ? { terminal } : {}),
+    })
     // Close the mirror on natural exit too, not only on an explicit kill: a
     // build that finishes on its own must stop being listed as running.
     void child.exited.then(code => terminal?.close(typeof code === 'number' ? code : null)).catch(() => {})
@@ -135,8 +160,18 @@ export class BackgroundCommandManager {
    * chance to finish instead of returning "running" and being asked again
    * immediately; it is bounded so a poll cannot silently become a blocking wait.
    */
-  async check(procId: string, maxOutputChars: number, waitMs = 0): Promise<BackgroundCheckResult> {
-    const entry = this.require(procId)
+  check(procId: string, maxOutputChars: number, waitMs = 0): Promise<BackgroundCheckResult> {
+    return this.checkForOwner(LEGACY_PRIVATE_BACKGROUND_SCOPE, procId, maxOutputChars, waitMs)
+  }
+
+  /** Read a command only when it belongs to the requested owner. */
+  async checkForOwner(
+    owner: BackgroundCommandOwner,
+    procId: string,
+    maxOutputChars: number,
+    waitMs = 0,
+  ): Promise<BackgroundCheckResult> {
+    const entry = this.require(procId, owner)
     if (waitMs > 0) {
       await Promise.race([
         entry.process.exited,
@@ -176,12 +211,25 @@ export class BackgroundCommandManager {
    * the process had already exited, because claiming to have killed something
    * that was already dead would misrepresent what happened.
    */
-  async kill(procId: string, signal: 'SIGKILL' | 'SIGTERM' = 'SIGTERM'): Promise<{
+  kill(procId: string, signal: 'SIGKILL' | 'SIGTERM' = 'SIGTERM'): Promise<{
     readonly exitCode: number | null
     readonly procId: string
     readonly signalled: boolean
   }> {
-    const entry = this.require(procId)
+    return this.killForOwner(LEGACY_PRIVATE_BACKGROUND_SCOPE, procId, signal)
+  }
+
+  /** Signal and release a command only when it belongs to the requested owner. */
+  async killForOwner(
+    owner: BackgroundCommandOwner,
+    procId: string,
+    signal: 'SIGKILL' | 'SIGTERM' = 'SIGTERM',
+  ): Promise<{
+    readonly exitCode: number | null
+    readonly procId: string
+    readonly signalled: boolean
+  }> {
+    const entry = this.require(procId, owner)
     const signalled = this.registry.signal(procId, signal)
     if (signalled) {
       await Promise.race([
@@ -193,9 +241,27 @@ export class BackgroundCommandManager {
     return { procId, signalled, exitCode: normalizedExit(entry.process.exitCode) }
   }
 
-  /** Every tracked process, running or exited but not yet reaped. */
+  /** Every direct-API process in the private compatibility scope. */
   list(): readonly ProcessRecord[] {
-    return this.registry.list().filter(record => this.entries.has(record.procId))
+    return this.listForOwner(LEGACY_PRIVATE_BACKGROUND_SCOPE)
+  }
+
+  /** Every process in one owner scope, running or exited but not yet reaped. */
+  listForOwner(owner: BackgroundCommandOwner): readonly ProcessRecord[] {
+    return this.registry.list().filter(record => this.entries.get(record.procId)?.owner === owner)
+  }
+
+  /** Terminate and release only commands owned by one session. */
+  async disposeOwner(owner: BackgroundCommandOwner): Promise<void> {
+    await Promise.all([...this.entries.entries()]
+      .filter(([, entry]) => entry.owner === owner)
+      .map(async ([procId]) => {
+        try {
+          await this.killForOwner(owner, procId, 'SIGKILL')
+        } catch {
+          // Already gone; teardown must not fail on a race with natural exit.
+        }
+      }))
   }
 
   /**
@@ -207,16 +273,19 @@ export class BackgroundCommandManager {
   async disposeAll(): Promise<void> {
     await Promise.all([...this.entries.keys()].map(async procId => {
       try {
-        await this.kill(procId, 'SIGKILL')
+        const owner = this.entries.get(procId)?.owner
+        if (owner !== undefined) await this.killForOwner(owner, procId, 'SIGKILL')
       } catch {
         // Already gone; teardown must not fail on a race with natural exit.
       }
     }))
   }
 
-  private require(procId: string): BackgroundEntry {
+  private require(procId: string, owner: BackgroundCommandOwner): BackgroundEntry {
     const entry = this.entries.get(procId)
-    if (entry === undefined) {
+    if (entry === undefined || entry.owner !== owner) {
+      // Deliberately identical for a missing ID and a different owner: proc_id
+      // possession is not authorization and must not become an existence oracle.
       throw new ValidationError('proc_id', 'is not a known background command', procId)
     }
     return entry

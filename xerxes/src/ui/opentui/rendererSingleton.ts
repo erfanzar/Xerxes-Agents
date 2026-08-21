@@ -16,8 +16,8 @@ const DEFAULT_RECOVERY_HEARTBEAT_MS = 1_000
 const DEFAULT_WAKE_GAP_MS = 5_000
 
 interface ForceRepaintRenderer {
-  forceFullRepaintRequested: boolean
-  requestRender: () => void
+  forceFullRepaintRequested?: unknown
+  requestRender?: unknown
 }
 
 interface RecoverySignalSource {
@@ -61,6 +61,14 @@ export function getActiveRenderer(): CliRenderer | null {
  * sees and an ordinary diff leaves large blank/stale bands behind. OpenTUI
  * 0.4.x has the invalidation latch internally but does not expose a public
  * full-repaint method, so keep this pinned-version bridge in one place.
+ *
+ * VERSION COUPLING: the latch `forceFullRepaintRequested` is a PRIVATE field
+ * of OpenTUI 0.4.x's CliRenderer — an upgrade can rename or remove it without
+ * a semver-major warning. Both the latch and `requestRender` are therefore
+ * feature-detected at runtime: a renderer without `requestRender` is a clean
+ * no-op (returns false), and a renderer without the latch degrades to a
+ * plain re-render instead of throwing. If an upgrade drops the latch, find a
+ * public full-repaint API (or re-add the latch) here.
  */
 export function forceRendererRepaint(renderer: CliRenderer | null = active): boolean {
   if (!renderer) {
@@ -69,8 +77,15 @@ export function forceRendererRepaint(renderer: CliRenderer | null = active): boo
 
   const repaintable = renderer as unknown as ForceRepaintRenderer
 
-  repaintable.forceFullRepaintRequested = true
-  repaintable.requestRender()
+  if (typeof repaintable.requestRender !== 'function') {
+    return false
+  }
+
+  if (typeof repaintable.forceFullRepaintRequested === 'boolean') {
+    repaintable.forceFullRepaintRequested = true
+  }
+
+  ;(repaintable.requestRender as () => void).call(renderer)
 
   return true
 }

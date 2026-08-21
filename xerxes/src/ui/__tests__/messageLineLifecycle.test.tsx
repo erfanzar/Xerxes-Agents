@@ -78,9 +78,10 @@ describe('OpenTUI message lifecycle', () => {
       const partial = await waitForText('Partial heading')
 
       expect(partial).toContain('First reasoning phase')
-      expect(partial).toContain('Read File src/one.ts')
+      expect(partial).toContain('Read File  src/one.ts')
+      expect(partial).toContain('0.1s')
       expect(partial).toContain('Second reasoning phase')
-      expect(partial).toContain('Read File src/two.ts')
+      expect(partial).toContain('Read File  src/two.ts')
       expect(partial).toContain('Partial heading')
 
       act(finishMarkdown)
@@ -146,7 +147,7 @@ describe('OpenTUI message lifecycle', () => {
       // itself stays folded until the user toggles it.
       expect(expanded).toContain('▸ thinking')
       expect(expanded).not.toContain('private reasoning detail')
-      expect(expanded).toContain('Read File src/hidden.ts')
+      expect(expanded).toContain('Read File  src/hidden.ts')
       expect(expanded).not.toContain('hidden agent detail')
 
       act(() => toggleAllThinking())

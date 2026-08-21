@@ -805,7 +805,11 @@ test("daemon derives slash discovery from implemented canonical commands and rej
     });
     expect(
       (await client.next((frame) => frame.id === 3)).result?.completions,
-    ).toEqual([{ value: "/help", label: "help", meta: "Show help" }]);
+    // `category` rides along so the TUI can order the bare-slash menu by
+    // group instead of alphabetically.
+    ).toEqual([
+      { value: "/help", label: "help", meta: "Show help", category: "info" },
+    ]);
 
     client.send({
       jsonrpc: "2.0",
@@ -848,6 +852,7 @@ test("daemon derives slash discovery from implemented canonical commands and rej
         value: "/history",
         label: "history",
         meta: "Show or search conversation history",
+        category: "session",
       },
     ]);
 
@@ -5144,7 +5149,7 @@ test("daemon advertises /ultra in catalog, completion, and slash handling", asyn
     expect(
       (await client.next((frame) => frame.id === 3)).result?.completions,
     ).toEqual([
-      { value: "/ultra", label: "ultra", meta: "Toggle ultra mode" },
+      { value: "/ultra", label: "ultra", meta: "Toggle ultra mode", category: "daemon" },
     ]);
 
     client.send({
@@ -6070,11 +6075,17 @@ test("terminal RPCs list, inspect, and control the shells the agent is running",
   });
   await server.start();
   const client = await SocketTestClient.connect(socketPath);
+  client.send({ jsonrpc: "2.0", id: 0, method: "initialize", params: { session_key: "terminal-owner" } });
+  const initialized = await client.next((frame) => frame.id === 0);
+  const ownerSessionId = String((initialized.result?.session as { id?: unknown } | undefined)?.id ?? "");
+  await client.next(eventFrame("init_done"));
+  await client.next(eventFrame("status_update"));
   const written: string[] = [];
   let killed: string | undefined;
   const handle = terminals.open({
     id: "pty_live",
     kind: "pty",
+    ownerSessionId,
     command: "bash -i",
     cwd: directory,
     control: {
@@ -6090,6 +6101,9 @@ test("terminal RPCs list, inspect, and control the shells the agent is running",
     client.send({ jsonrpc: "2.0", id: 1, method: "terminal.list", params: {} });
     const listed = await client.next((frame) => frame.id === 1);
     expect(listed.result?.ok).toBe(true);
+    expect(
+      (listed.result?.terminals as Array<Record<string, unknown>>)[0],
+    ).not.toHaveProperty("ownerSessionId");
     expect(
       (listed.result?.terminals as Array<Record<string, unknown>>)[0],
     ).toMatchObject({
@@ -6161,6 +6175,18 @@ test("terminal RPCs list, inspect, and control the shells the agent is running",
       ok: false,
       error: "unknown terminal",
     });
+
+    const other = await SocketTestClient.connect(socketPath);
+    try {
+      other.send({ jsonrpc: "2.0", id: 8, method: "terminal.list", params: {} });
+      expect((await other.next((frame) => frame.id === 8)).result).toEqual({ ok: true, terminals: [] });
+      other.send({ jsonrpc: "2.0", id: 9, method: "terminal.inspect", params: { terminal_id: "pty_live" } });
+      expect((await other.next((frame) => frame.id === 9)).result).toEqual({ ok: false, error: "unknown terminal" });
+      other.send({ jsonrpc: "2.0", id: 10, method: "terminal.control", params: { terminal_id: "pty_live", action: "kill" } });
+      expect((await other.next((frame) => frame.id === 10)).result).toMatchObject({ ok: false, error: expect.stringContaining("unknown terminal") });
+    } finally {
+      other.close();
+    }
   } finally {
     client.close();
     await server.stop();

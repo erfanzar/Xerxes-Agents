@@ -3,12 +3,14 @@
 
 import { expect, test } from 'bun:test'
 
+import { ProviderError } from '../src/core/errors.js'
 import {
   OpenAiCompatibleClient,
   collectLlmCompletion,
   type CompletionRequest,
   type LlmDelta,
 } from '../src/llms/client.js'
+import { classifyError } from '../src/runtime/errorClassifier.js'
 import type { ToolCall } from '../src/types/toolCalls.js'
 
 function openAiClient(fetchImplementation: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>) {
@@ -134,6 +136,53 @@ test('chat-completions usage reports cached prompt tokens apart from fresh input
   }))
   const completion = await completing.complete(request())
   expect(completion.usage).toEqual({ inputTokens: 8, outputTokens: 5, cacheReadTokens: 12, reasoningTokens: 3 })
+})
+
+test('chat-completions propagates Retry-After delta-seconds as structured classifier metadata', async () => {
+  for (const operation of ['complete', 'stream'] as const) {
+    const client = openAiClient(async () => new Response('slow down', {
+      status: 429,
+      headers: { 'Retry-After': '2.5' },
+    }))
+    const failure = await (operation === 'complete'
+      ? client.complete(request())
+      : collect(client.stream(request()))).catch(error => error as unknown)
+
+    expect(failure).toBeInstanceOf(ProviderError)
+    expect((failure as ProviderError).details).toMatchObject({ status: 429, retryAfterSeconds: 2.5 })
+    expect(classifyError(failure)).toMatchObject({
+      kind: 'rate_limit',
+      retryable: true,
+      suggestedBackoffSeconds: 2.5,
+    })
+  }
+})
+
+test('chat-completions parses Retry-After HTTP dates and ignores malformed values', async () => {
+  const retryAt = new Date(Date.now() + 30_000).toUTCString()
+  const dated = openAiClient(async () => new Response('unavailable', {
+    status: 503,
+    headers: { 'Retry-After': retryAt },
+  }))
+  const datedFailure = await dated.complete(request()).then(
+    () => { throw new Error('expected request to fail') },
+    error => error as ProviderError,
+  )
+  expect(datedFailure.details.status).toBe(503)
+  const datedBackoff = classifyError(datedFailure).suggestedBackoffSeconds
+  expect(datedBackoff).toBeGreaterThanOrEqual(28)
+  expect(datedBackoff).toBeLessThanOrEqual(30)
+
+  const malformed = openAiClient(async () => new Response('slow down', {
+    status: 429,
+    headers: { 'Retry-After': 'next Tuesday-ish' },
+  }))
+  const malformedFailure = await collect(malformed.stream(request())).then(
+    () => { throw new Error('expected request to fail') },
+    error => error as ProviderError,
+  )
+  expect(malformedFailure.details).toEqual({ status: 429 })
+  expect(classifyError(malformedFailure).suggestedBackoffSeconds).toBeUndefined()
 })
 
 test('chat-completions SSE requires an explicit terminal finish event', async () => {

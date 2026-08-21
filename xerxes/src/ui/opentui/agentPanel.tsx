@@ -8,11 +8,12 @@ import { type MutableRefObject, memo, useEffect, useMemo, useRef, useState } fro
 
 import { useOptionalGateway } from '../app/gatewayContext.js'
 import { adjustPanelWidth, PANEL_WIDTH_STEP, withPanelWidthDelta } from '../app/panelSizeStore.js'
+
+import { OVERLAY_PANEL_SPECS, overlayPanelSize } from './overlayLayout.js'
 import type { SpawnSnapshot } from '../app/spawnHistoryStore.js'
 export { AGENT_SIDEBAR_BREAKPOINT, shouldShowAgentSidebar } from '../domain/agentPanelLayout.js'
 import { retrySubagent, subagentFailed, subagentRetryable } from '../lib/agentRetry.js'
-import { subagentElapsedSeconds } from '../lib/subagentElapsed.js'
-import { fmtDuration, fmtTokens } from '../lib/subagentTree.js'
+import { fmtDuration, fmtTokens, subagentElapsedSeconds } from '../lib/subagentElapsed.js'
 import type { Theme } from '../theme.js'
 import type { SubagentProgress } from '../types.js'
 
@@ -670,14 +671,24 @@ export function AgentPanelOverlay({
   const scrollRef = useRef<ScrollBoxRenderable | null>(null)
   const { height, width } = useTerminalDimensions()
   const gateway = useOptionalGateway()
-  // Preferred vertical breathing room for the overlay (user request: 30 rows
-  // top and bottom). On short terminals the margin shrinks toward the old 1-2
-  // rows so the panel keeps ~20 usable rows instead of collapsing.
-  const marginY = Math.min(30, Math.max(1, Math.floor((height - 20) / 2)))
-  const panelHeight = Math.max(1, height - marginY * 2)
-  const page = Math.max(4, panelHeight - 8)
-  const panelWidth = withPanelWidthDelta(Math.max(1, Math.min(96, width - 2)), width)
   const records = useMemo(() => collectAgentPanelRecords(liveAgents, history), [history, liveAgents])
+  // Shared with F7/F8 so the three overlays stop diverging. The old formula
+  // here (`marginY = min(30, floor((height - 20) / 2))`) left a 42-row
+  // terminal only 20 usable rows, which is why this panel read as a mostly
+  // empty box for a surface whose whole job is a long list. It now also
+  // shrinks to its content, so an empty dashboard is a small box rather than
+  // a large void.
+  const { height: panelHeight, width: fittedWidth } = overlayPanelSize(
+    { height, width },
+    // Shrink only when there is genuinely nothing to show. Sizing a populated
+    // panel to its row count squeezed out the footer hints and notices, and
+    // the inspector view needs the full box regardless of list length.
+    records.length
+      ? OVERLAY_PANEL_SPECS.agents
+      : { ...OVERLAY_PANEL_SPECS.agents, desiredHeight: 0 }
+  )
+  const page = Math.max(4, panelHeight - 8)
+  const panelWidth = withPanelWidthDelta(fittedWidth, width)
   const [selectedId, setSelectedId] = useState<null | string>(null)
   const [openId, setOpenId] = useState<null | string>(initialInspectId ?? null)
   const [retryNotes, setRetryNotes] = useState<ReadonlyMap<string, string>>(new Map())

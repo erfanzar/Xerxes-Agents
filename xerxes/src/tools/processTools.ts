@@ -178,7 +178,14 @@ export function registerProcessTools(
   // still runs alone.
   registry.register(
     EXEC_COMMAND_DEFINITION,
-    (inputs, _context, signal) => executeCommand(inputs, paths, signal, background, terminals),
+    (inputs, context, signal) => executeCommand(
+      inputs,
+      paths,
+      signal,
+      background,
+      terminals,
+      requiredOwnerSessionId(context.sessionId),
+    ),
     'default',
     { concurrencySafe: false, defer: false, destructive: true, openWorld: true, readOnly: false },
   )
@@ -187,7 +194,8 @@ export function registerProcessTools(
   // normal case and must not serialize behind an approval gate.
   registry.register(
     CHECK_COMMAND_DEFINITION,
-    async inputs => background.check(
+    async (inputs, context) => background.checkForOwner(
+      requiredOwnerSessionId(context.sessionId),
       requiredString(inputs, 'proc_id'),
       requireRange(optionalInteger(inputs, 'max_output_chars', DEFAULT_MAX_OUTPUT_CHARS), 'max_output_chars', 1, 1_000_000),
       requireRange(optionalInteger(inputs, 'wait_ms', 0), 'wait_ms', 0, MAX_CHECK_WAIT_MS),
@@ -197,19 +205,27 @@ export function registerProcessTools(
   )
   registry.register(
     LIST_COMMANDS_DEFINITION,
-    async () => ({ processes: background.list() }),
+    async (_inputs, context) => ({ processes: background.listForOwner(requiredOwnerSessionId(context.sessionId)) }),
     'default',
     { concurrencySafe: true, defer: false, destructive: false, openWorld: false, readOnly: true },
   )
   registry.register(
     KILL_COMMAND_DEFINITION,
-    async inputs => background.kill(
+    async (inputs, context) => background.killForOwner(
+      requiredOwnerSessionId(context.sessionId),
       requiredString(inputs, 'proc_id'),
       killSignal(optionalString(inputs, 'signal')),
     ),
     'default',
     { concurrencySafe: false, defer: false, destructive: true, openWorld: false, readOnly: false },
   )
+}
+
+function requiredOwnerSessionId(sessionId: string | undefined): string {
+  if (sessionId === undefined || sessionId.trim() === '') {
+    throw new ValidationError('sessionId', 'is required for background command tools')
+  }
+  return sessionId
 }
 
 function killSignal(value: string | undefined): 'SIGKILL' | 'SIGTERM' {
@@ -234,6 +250,7 @@ export async function executeCommand(
   signal?: AbortSignal,
   background?: BackgroundCommandManager,
   terminals?: TerminalRegistry,
+  ownerSessionId?: string,
 ): Promise<BackgroundStartResult | ProcessResult> {
   const command = requiredString(inputs, 'cmd')
   if (/\s/.test(command) || /[;&|`$<>]/.test(command)) {
@@ -266,7 +283,10 @@ export async function executeCommand(
     }
     // No timeout is applied on purpose: outliving the foreground ceiling is the
     // entire reason a caller asks for this.
-    return background.start({ command, args, cwd, name: [command, ...args].join(' ').slice(0, 60) })
+    const startOptions = { command, args, cwd, name: [command, ...args].join(' ').slice(0, 60) }
+    return ownerSessionId === undefined
+      ? background.start(startOptions)
+      : background.startForOwner(ownerSessionId, startOptions)
   }
 
   let timedOut = false
@@ -288,9 +308,10 @@ export async function executeCommand(
   // for two minutes, and the whole point of the terminal panel is being able to
   // watch it during those two minutes instead of afterwards. The kill control
   // reads `child` at call time, so it can be published before the spawn.
-  const mirror = terminals?.open({
+  const mirror = ownerSessionId === undefined ? undefined : terminals?.open({
     id: `fg_${crypto.randomUUID().replaceAll('-', '').slice(0, 10)}`,
     kind: 'foreground',
+    ownerSessionId,
     command: [command, ...args].join(' '),
     cwd,
     control: {

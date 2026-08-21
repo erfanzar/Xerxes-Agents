@@ -71,6 +71,8 @@ export interface SelectionApi {
 
 export interface CompletionItem {
   display: string
+  /** Command category; drives menu ordering. Absent for path completions. */
+  group?: string
   meta?: string
   text: string
 }
@@ -122,6 +124,12 @@ export interface PagerState {
 }
 
 export interface TranscriptRow {
+  /**
+   * Whether this row paints a leading blank line. Computed once here so the
+   * renderer and the height estimator cannot disagree — they previously
+   * derived it independently, and the renderer's margin was unconditional.
+   */
+  leadGap: boolean
   index: number
   key: string
   msg: Msg

@@ -51,10 +51,15 @@ export const messageGroup = (msg: Pick<Msg, 'kind' | 'role'>): BlockGroup => {
 // model prose, reasoning/tool trails, and notes/errors.
 const SELF_SPACED: ReadonlySet<BlockGroup> = new Set(['diff', 'intro', 'slash', 'user'])
 
-// Groups that already paint a trailing blank line beneath themselves
-// (marginBottom in MessageLine), so the block that follows must not add its
-// own leading gap or the single boundary would become a double gap.
-const PAINTS_TRAILING_GAP: ReadonlySet<BlockGroup> = new Set(['diff', 'user'])
+// Groups that already paint a trailing blank line beneath themselves, so the
+// block that follows must not add its own leading gap or the single boundary
+// would become a double gap.
+//
+// Empty on purpose: nothing paints one any more. `user` lost its
+// marginBottom so the following block owns the single boundary, and `diff`
+// was always wrong here — an AssistantMessage never had a marginBottom to
+// begin with, so a diff followed by prose silently lost its gap.
+const PAINTS_TRAILING_GAP: ReadonlySet<BlockGroup> = new Set()
 
 /**
  * Whether `cur` renders one blank line above it, given the block rendered

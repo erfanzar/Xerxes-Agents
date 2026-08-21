@@ -75,7 +75,7 @@ const CONNECTION_CODES = new Set([
 export class ErrorClassifier {
   classify(error: unknown): ClassifiedError {
     const details = describeError(error)
-    const retryAfter = parseRetryAfter(details.message)
+    const retryAfter = structuredRetryAfter(error) ?? parseRetryAfter(details.message)
 
     if (details.name === 'AbortError' || details.name === 'InterruptedError') {
       return classified(ErrorKind.FATAL, error, 'user interrupt')
@@ -150,8 +150,10 @@ function classified(
 function describeError(error: unknown): ErrorDetails {
   if (error instanceof Error) {
     const record = error as unknown as Record<string, unknown>
-    const code = stringProperty(record, 'code')
+    const structuredDetails = isRecord(record.details) ? record.details : undefined
+    const code = stringProperty(record, 'code') ?? (structuredDetails && stringProperty(structuredDetails, 'code'))
     const status = numberProperty(record, 'status', 'statusCode')
+      ?? (structuredDetails && numberProperty(structuredDetails, 'status', 'statusCode'))
     const optional: { code?: string; status?: number } = {}
     if (code !== undefined) optional.code = code
     if (status !== undefined) optional.status = status
@@ -190,6 +192,16 @@ function kindForStatus(status: number | undefined): ErrorKind | undefined {
   if (status === 408) return ErrorKind.TIMEOUT
   if (status !== undefined && ((status >= 500 && status <= 504) || status === 529)) return ErrorKind.PROVIDER_DOWN
   return undefined
+}
+
+function structuredRetryAfter(error: unknown): number | undefined {
+  if (!isRecord(error)) return undefined
+  const direct = numberProperty(error, 'retryAfterSeconds', 'retryAfter')
+  if (direct !== undefined && direct >= 0) return direct
+  const details = error.details
+  if (!isRecord(details)) return undefined
+  const nested = numberProperty(details, 'retryAfterSeconds', 'retryAfter')
+  return nested !== undefined && nested >= 0 ? nested : undefined
 }
 
 function parseRetryAfter(message: string): number | undefined {

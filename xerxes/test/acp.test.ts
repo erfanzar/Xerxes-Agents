@@ -181,6 +181,71 @@ test('ACP queued prompts do not run after their session closes', async () => {
   expect(calls).toEqual(['first'])
 })
 
+test('ACP close detaches a stale prompt chain before the session id is reattached', async () => {
+  const firstStarted = Promise.withResolvers<void>()
+  const releaseFirst = Promise.withResolvers<void>()
+  const reattachedStarted = Promise.withResolvers<void>()
+  const releaseReattached = Promise.withResolvers<void>()
+  const calls: string[] = []
+  const server = new AcpServer({
+    promptHandler: async ({ text }) => {
+      calls.push(text)
+      if (text === 'first') {
+        firstStarted.resolve()
+        await releaseFirst.promise
+      } else if (text === 'reattached') {
+        reattachedStarted.resolve()
+        await releaseReattached.promise
+      }
+      return { ok: true }
+    },
+  })
+  const sessionId = String(server.openSession('/workspace').session_id)
+  const first = server.prompt(sessionId, 'first')
+  await firstStarted.promise
+  const queued = server.prompt(sessionId, 'stale queued')
+
+  expect(server.closeSession(sessionId)).toEqual({ ok: true })
+  server.sessions.attachExisting({ sessionId }, '/reattached')
+  const reattached = server.prompt(sessionId, 'reattached')
+  await reattachedStarted.promise
+  expect(calls).toEqual(['first', 'reattached'])
+
+  releaseReattached.resolve()
+  await expect(reattached).resolves.toEqual({ ok: true })
+  releaseFirst.resolve()
+  await expect(first).resolves.toEqual({ ok: true })
+  await expect(queued).resolves.toEqual({ error: `unknown session: ${sessionId}` })
+  expect(calls).toEqual(['first', 'reattached'])
+})
+
+test('ACP shutdown clears prompt chains for still-attached sessions', async () => {
+  const firstStarted = Promise.withResolvers<void>()
+  const releaseFirst = Promise.withResolvers<void>()
+  const afterShutdownStarted = Promise.withResolvers<void>()
+  const server = new AcpServer({
+    promptHandler: async ({ text }) => {
+      if (text === 'first') {
+        firstStarted.resolve()
+        await releaseFirst.promise
+      } else {
+        afterShutdownStarted.resolve()
+      }
+      return { ok: true }
+    },
+  })
+  const sessionId = String(server.openSession('/workspace').session_id)
+  const first = server.prompt(sessionId, 'first')
+  await firstStarted.promise
+
+  expect(server.shutdown()).toBe(0)
+  const afterShutdown = server.prompt(sessionId, 'after shutdown')
+  await afterShutdownStarted.promise
+  await expect(afterShutdown).resolves.toEqual({ ok: true })
+  releaseFirst.resolve()
+  await expect(first).resolves.toEqual({ ok: true })
+})
+
 test('ACP server serializes prompts per session while keeping sessions concurrent', async () => {
   const order: string[] = []
   const gates = new Map<string, () => void>()

@@ -36,7 +36,6 @@ import {
   SkillGuardPathError,
   approveSkill as approveGuardedSkill,
   loadTrustedHashes,
-  quarantineSkill,
   scanSkill,
   type SkillGuardPaths,
 } from "./skillsGuard.js";
@@ -121,6 +120,10 @@ type ChildEntry =
   | { readonly kind: "file"; readonly path: string }
   | { readonly kind: "missing" }
   | { readonly kind: "other"; readonly path: string };
+
+// Process-local by design: this prevents lost updates between hub instances without
+// claiming cross-process coordination that the lock-file format cannot provide.
+const mutationLocks = new Map<string, Promise<void>>();
 
 /** Read a skill bundle from a local directory or direct SKILL.md path without following symlinks. */
 export class LocalSkillSource implements SkillSource {
@@ -284,68 +287,91 @@ export class SkillsHub {
       return `[Error] Invalid skill name from ${sourceName}: ${errorMessage(error)}`;
     }
 
-    let directories: HubDirectories;
     try {
-      directories = await this.ensureDirectories();
-      const existing = await inspectChild(
-        directories.skills,
-        skillName,
-        "installed skill directory",
+      const mutationKey = normalizePath(
+        this.guardPaths.skillsDirectory ?? DEFAULT_SKILLS_DIR,
       );
-      if (existing.kind === "file" || existing.kind === "other") {
-        return `[Error] Skill '${skillName}' has an unsafe existing destination.`;
-      }
-      if (existing.kind === "directory") {
-        if (!options.force)
-          return `[Error] Skill '${skillName}' already installed. Use force=true to overwrite.`;
-        await removeDirectoryTree(directories.skills, existing.path);
-      }
-
-      const target = await ensureChildDirectory(
-        directories.skills,
-        skillName,
-        "installed skill directory",
-      );
-      await writeDirectFile(
-        target,
-        "SKILL.md",
-        bundle.content,
-        "installed SKILL.md",
-      );
-      const trustedHashes = await loadTrustedHashes(this.guardPaths);
-      // An empty hash database means no trust anchors are configured; a non-empty database fails closed.
-      const scan = await scanSkill(
-        target,
-        Object.keys(trustedHashes).length ? { trustedHashes } : {},
-      );
-      if (!scan.isSafe) {
-        // Failing content is quarantined for operator review instead of activated.
-        await quarantineSkill(target, this.guardPaths);
-        await this.appendAudit(
-          directories,
-          "quarantine",
-          `${skillName} from ${sourceName}:${identifier}: ${scan.summary}`,
+      return await this.withMutationLock(mutationKey, async () => {
+        const directories = await this.ensureDirectories();
+        const existing = await inspectChild(
+          directories.skills,
+          skillName,
+          "installed skill directory",
         );
-        return `[Error] Skill '${skillName}' failed the security scan and was quarantined: ${scan.summary}`;
-      }
-      const lock = await this.loadLock(directories);
-      lock[skillName] = {
-        source: sourceName,
-        identifier,
-        installedAt: validNow(this.now()).valueOf() / 1000,
-        metadata: normalizedMetadata(bundle.metadata),
-      };
-      await this.saveLock(directories, lock);
-      await this.appendAudit(
-        directories,
-        "install",
-        `${skillName} from ${sourceName}:${identifier}`,
-      );
+        if (existing.kind === "file" || existing.kind === "other") {
+          return `[Error] Skill '${skillName}' has an unsafe existing destination.`;
+        }
+        if (existing.kind === "directory" && !options.force) {
+          return `[Error] Skill '${skillName}' already installed. Use force=true to overwrite.`;
+        }
+
+        const staging = await ensureChildDirectory(
+          directories.hub,
+          `.stage-${skillName}-${crypto.randomUUID()}`,
+          "staged skill directory",
+        );
+        try {
+          await writeDirectFile(
+            staging,
+            "SKILL.md",
+            bundle.content,
+            "staged SKILL.md",
+          );
+          const trustedHashes = await loadTrustedHashes(this.guardPaths);
+          // Trust records use the eventual active path; scan the staged bytes against that record.
+          const activeSkillFile = join(
+            directories.skills,
+            skillName,
+            "SKILL.md",
+          );
+          const expectedHash = trustedHashes[activeSkillFile];
+          const scanHashes =
+            expectedHash === undefined
+              ? trustedHashes
+              : { [join(staging, "SKILL.md")]: expectedHash };
+          // An empty hash database means no trust anchors are configured; a non-empty database fails closed.
+          const scan = await scanSkill(
+            staging,
+            Object.keys(scanHashes).length ? { trustedHashes: scanHashes } : {},
+          );
+          if (!scan.isSafe) {
+            await moveStagedSkillToQuarantine(
+              directories,
+              staging,
+              skillName,
+              this.guardPaths,
+            );
+            await this.appendAudit(
+              directories,
+              "quarantine",
+              `${skillName} from ${sourceName}:${identifier}: ${scan.summary}`,
+            );
+            return `[Error] Skill '${skillName}' failed the security scan and was quarantined: ${scan.summary}`;
+          }
+
+          // Read and validate shared state before changing the active directory.
+          const lock = await this.loadLock(directories);
+          await activateStagedSkill(directories, staging, skillName, existing);
+          lock[skillName] = {
+            source: sourceName,
+            identifier,
+            installedAt: validNow(this.now()).valueOf() / 1000,
+            metadata: normalizedMetadata(bundle.metadata),
+          };
+          await this.saveLock(directories, lock);
+          await this.appendAudit(
+            directories,
+            "install",
+            `${skillName} from ${sourceName}:${identifier}`,
+          );
+          return `Installed skill '${skillName}' from ${sourceName}:${identifier}`;
+        } finally {
+          await removeDirectoryIfPresent(directories.hub, staging);
+        }
+      });
     } catch (error) {
       return `[Error] Failed to install ${uri}: ${errorMessage(error)}`;
     }
-
-    return `Installed skill '${skillName}' from ${sourceName}:${identifier}`;
   }
 
   /** Remove one installed direct-child skill and its lock record, without following unsafe paths. */
@@ -357,29 +383,33 @@ export class SkillsHub {
       return `[Error] Invalid skill name: ${errorMessage(error)}`;
     }
 
-    let directories: HubDirectories;
     try {
-      directories = await this.ensureDirectories();
-      const installed = await inspectChild(
-        directories.skills,
-        name,
-        "installed skill directory",
+      const mutationKey = normalizePath(
+        this.guardPaths.skillsDirectory ?? DEFAULT_SKILLS_DIR,
       );
-      if (installed.kind === "missing")
-        return `[Error] Skill '${name}' is not installed.`;
-      if (installed.kind !== "directory")
-        return `[Error] Skill '${name}' has an unsafe installed path.`;
-      await removeDirectoryTree(directories.skills, installed.path);
-      const lock = await this.loadLock(directories);
-      if (lock[name] !== undefined) {
-        delete lock[name];
-        await this.saveLock(directories, lock);
-      }
-      await this.appendAudit(directories, "uninstall", name);
+      return await this.withMutationLock(mutationKey, async () => {
+        const directories = await this.ensureDirectories();
+        const installed = await inspectChild(
+          directories.skills,
+          name,
+          "installed skill directory",
+        );
+        if (installed.kind === "missing")
+          return `[Error] Skill '${name}' is not installed.`;
+        if (installed.kind !== "directory")
+          return `[Error] Skill '${name}' has an unsafe installed path.`;
+        const lock = await this.loadLock(directories);
+        await removeDirectoryTree(directories.skills, installed.path);
+        if (lock[name] !== undefined) {
+          delete lock[name];
+          await this.saveLock(directories, lock);
+        }
+        await this.appendAudit(directories, "uninstall", name);
+        return `Uninstalled skill '${name}'`;
+      });
     } catch (error) {
       return `[Error] Failed to uninstall '${name}': ${errorMessage(error)}`;
     }
-    return `Uninstalled skill '${name}'`;
   }
 
   /** Delegate contained quarantine approval to SkillsGuard, then record the hub audit event. */
@@ -479,8 +509,8 @@ export class SkillsHub {
     if (lock === undefined) return {};
     try {
       return parseLock(await readFile(lock, "utf8"));
-    } catch {
-      return {};
+    } catch (error) {
+      throw new Error(`Malformed skills hub lock file: ${errorMessage(error)}`);
     }
   }
 
@@ -523,19 +553,118 @@ export class SkillsHub {
     key: string,
     operation: () => Promise<T>,
   ): Promise<T> {
-    const previous = this.auditLocks.get(key) ?? Promise.resolve();
-    let release: (() => void) | undefined;
-    const current = new Promise<void>((resolveLock) => {
-      release = resolveLock;
-    });
-    this.auditLocks.set(key, current);
-    await previous;
-    try {
-      return await operation();
-    } finally {
-      release?.();
-      if (this.auditLocks.get(key) === current) this.auditLocks.delete(key);
+    return withInProcessLock(this.auditLocks, key, operation);
+  }
+
+  private async withMutationLock<T>(
+    key: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    return withInProcessLock(mutationLocks, key, operation);
+  }
+}
+
+async function withInProcessLock<T>(
+  locks: Map<string, Promise<void>>,
+  key: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const previous = locks.get(key) ?? Promise.resolve();
+  let release: (() => void) | undefined;
+  const current = new Promise<void>((resolveLock) => {
+    release = resolveLock;
+  });
+  locks.set(key, current);
+  await previous;
+  try {
+    return await operation();
+  } finally {
+    release?.();
+    if (locks.get(key) === current) locks.delete(key);
+  }
+}
+
+async function activateStagedSkill(
+  directories: HubDirectories,
+  staging: string,
+  skillName: string,
+  existing: ChildEntry,
+): Promise<void> {
+  const target = directChildPath(
+    directories.skills,
+    skillName,
+    "installed skill directory",
+  );
+  if (existing.kind !== "directory") {
+    await rename(staging, target);
+    return;
+  }
+
+  const backup = directChildPath(
+    directories.hub,
+    `.backup-${skillName}-${crypto.randomUUID()}`,
+    "skill replacement backup",
+  );
+  await rename(existing.path, backup);
+  try {
+    await rename(staging, target);
+  } catch (error) {
+    await rename(backup, existing.path);
+    throw error;
+  }
+  await removeDirectoryTree(directories.hub, backup);
+}
+
+async function moveStagedSkillToQuarantine(
+  directories: HubDirectories,
+  staging: string,
+  skillName: string,
+  guardPaths: SkillGuardPaths,
+): Promise<void> {
+  const quarantineRoot =
+    guardPaths.quarantineDirectory === undefined
+      ? await ensureChildDirectory(
+          directories.hub,
+          "quarantine",
+          "quarantine directory",
+        )
+      : await ensureDirectory(
+          normalizePath(guardPaths.quarantineDirectory),
+          "quarantine directory",
+        );
+  const existing = await inspectChild(
+    quarantineRoot,
+    skillName,
+    "quarantined skill directory",
+  );
+  if (existing.kind === "file" || existing.kind === "other") {
+    throw new SkillHubPathError(
+      existing.path,
+      "quarantined skill destination must be a directory",
+    );
+  }
+  if (existing.kind === "directory") {
+    await removeDirectoryTree(quarantineRoot, existing.path);
+  }
+  const destination = directChildPath(
+    quarantineRoot,
+    skillName,
+    "quarantined skill directory",
+  );
+  await rename(staging, destination);
+}
+
+async function removeDirectoryIfPresent(
+  root: string,
+  directory: string,
+): Promise<void> {
+  try {
+    const metadata = await lstat(directory);
+    if (metadata.isDirectory() && !metadata.isSymbolicLink()) {
+      await removeDirectoryTree(root, directory);
     }
+  } catch (error) {
+    if (!isMissing(error)) throw error;
   }
 }
 
@@ -1020,32 +1149,29 @@ function normalizedMetadata(
 }
 
 function parseLock(raw: string): Record<string, StoredSkillEntry> {
-  try {
-    const decoded: unknown = JSON.parse(raw);
-    if (!isJsonObject(decoded)) return {};
-    const entries: Record<string, StoredSkillEntry> = {};
-    for (const [name, value] of Object.entries(decoded)) {
-      if (!isSafeSkillName(name) || !isJsonObject(value)) continue;
-      const source = value.source;
-      const identifier = value.identifier;
-      const installedAt = value.installedAt;
-      const hasValidEntry =
-        typeof source === "string" &&
-        typeof identifier === "string" &&
-        typeof installedAt === "number" &&
-        Number.isFinite(installedAt);
-      if (!hasValidEntry) {
-        continue;
-      }
-      const metadata = normalizedMetadata(
-        isJsonObject(value.metadata) ? value.metadata : {},
-      );
-      entries[name] = { source, identifier, installedAt, metadata };
-    }
-    return entries;
-  } catch {
-    return {};
+  const decoded: unknown = JSON.parse(raw);
+  if (!isJsonObject(decoded))
+    throw new TypeError("lock root must be a JSON object");
+  const entries: Record<string, StoredSkillEntry> = {};
+  for (const [name, value] of Object.entries(decoded)) {
+    if (!isSafeSkillName(name) || !isJsonObject(value))
+      throw new TypeError(`invalid lock entry for ${JSON.stringify(name)}`);
+    const source = value.source;
+    const identifier = value.identifier;
+    const installedAt = value.installedAt;
+    const hasValidEntry =
+      typeof source === "string" &&
+      typeof identifier === "string" &&
+      typeof installedAt === "number" &&
+      Number.isFinite(installedAt);
+    if (!hasValidEntry)
+      throw new TypeError(`invalid lock entry for ${JSON.stringify(name)}`);
+    const metadata = normalizedMetadata(
+      isJsonObject(value.metadata) ? value.metadata : {},
+    );
+    entries[name] = { source, identifier, installedAt, metadata };
   }
+  return entries;
 }
 
 function parseInstallUri(

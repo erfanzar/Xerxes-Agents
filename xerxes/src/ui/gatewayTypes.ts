@@ -13,6 +13,8 @@ export interface GatewaySkin {
 
 export interface GatewayCompletionItem {
   display: string
+  /** Daemon command category, used to order the bare-slash menu. */
+  group?: string
   meta?: string
   text: string
 }

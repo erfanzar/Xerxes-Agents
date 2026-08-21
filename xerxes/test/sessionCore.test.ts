@@ -261,6 +261,23 @@ test('SQLite store saves rows and turn index on one connection and indexes appen
     expect(embeddings).toBe(2)
     expect(store.search('Kubernetes').map(hit => hit.turnId)).toEqual(['turn-1'])
 
+    // Non-content edits refresh indexed details without unnecessarily re-embedding the turn.
+    const embeddingsBeforeDetailsSave = embeddings
+    const updated = manager.getSession('incremental')!
+    const firstTurn = updated.turns[0]!
+    firstTurn.agentId = 'reviewer'
+    firstTurn.startedAt = '2026-02-03T04:05:06.000Z'
+    firstTurn.metadata = { revision: 2 }
+    store.saveSession(updated)
+    expect(embeddings).toBe(embeddingsBeforeDetailsSave)
+    expect(store.search('Kubernetes', { agentId: 'coder' })).toEqual([])
+    expect(store.search('Kubernetes', { agentId: 'reviewer' }).at(0)).toMatchObject({
+      agentId: 'reviewer',
+      metadata: { revision: 2 },
+      timestamp: '2026-02-03T04:05:06.000Z',
+      turnId: 'turn-1',
+    })
+
     // The session row and its indexed turns commit together on one connection.
     const raw = new Database(database, { readonly: true })
     try {

@@ -70,10 +70,22 @@ const peek: SessionPeekResponse = {
   status: 'working'
 }
 
+const deferred = <T,>() => {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+
+  return { promise, reject, resolve }
+}
+
 const picker = async ({
   activeResponse = active,
   currentSessionId = 'live-main',
   height = 16,
+  peekRequest,
   peekResponse = peek,
   savedResponse = saved,
   width = 100
@@ -81,14 +93,19 @@ const picker = async ({
   activeResponse?: SessionActiveListResponse
   currentSessionId?: string
   height?: number
+  peekRequest?: (sessionId: string) => Promise<SessionPeekResponse>
   peekResponse?: SessionPeekResponse
   savedResponse?: SessionListResponse
   width?: number
 } = {}) => {
   const request = vi.fn(async (method: string, params?: Record<string, unknown>) => {
     if (method === 'session.active_list') return activeResponse
-    if (method === 'session.list' && params?.kind === 'all') return savedResponse
-    if (method === 'session.peek') return { ...peekResponse, session_id: params?.session_id }
+    if (method === 'session.list' && params?.kind === 'main') return savedResponse
+    if (method === 'session.peek') {
+      const sessionId = String(params?.session_id ?? '')
+
+      return peekRequest ? peekRequest(sessionId) : { ...peekResponse, session_id: sessionId }
+    }
     if (method === 'prompt.background') return { task_id: 'bg-new-task' }
     if (method === 'prompt.submit') return { ok: true }
     if (method === 'session.steer') return { ok: true, status: 'queued' }
@@ -133,7 +150,9 @@ describe('OpenTUI Agent View', () => {
       expect(frame).toContain('Authentication audit')
       expect(frame).not.toContain('Policy review')
       expect(frame).toContain('Subagents stay inside their parent chat')
-      expect(request).toHaveBeenCalledWith('session.list', { kind: 'all', limit: 0 })
+      // Filtered server-side now: the picker is main-only, and asking for
+      // 'all' shipped 100+ subagent rows over the wire just to drop them.
+      expect(request).toHaveBeenCalledWith('session.list', { kind: 'main', limit: 0 })
     } finally {
       act(() => setup.renderer.destroy())
     }
@@ -201,6 +220,119 @@ describe('OpenTUI Agent View', () => {
     }
   })
 
+  it('ignores a deferred peek after selection changes or the picker closes', async () => {
+    const selectionPeek = deferred<SessionPeekResponse>()
+    const selection = await picker({ peekRequest: () => selectionPeek.promise })
+
+    try {
+      await act(async () => selection.setup.mockInput.typeText(' '))
+      await act(async () => selection.setup.mockInput.pressArrow('up'))
+      await act(async () => {
+        selectionPeek.resolve(peek)
+        // Several ticks, not one: this asserts an ABSENCE, so giving the
+        // stale response every chance to land is what makes the assertion
+        // meaningful. A single tick left it racing the promise chain under
+        // parallel load.
+        await Bun.sleep(0)
+        await Bun.sleep(5)
+      })
+      await selection.setup.flush()
+
+      expect(selection.setup.captureCharFrame()).not.toContain('I found one issue.')
+    } finally {
+      act(() => selection.setup.renderer.destroy())
+    }
+
+    const closePeek = deferred<SessionPeekResponse>()
+    const closed = await picker({ peekRequest: () => closePeek.promise })
+
+    try {
+      await act(async () => closed.setup.mockInput.typeText(' '))
+      await act(async () => closed.setup.mockInput.pressEscape())
+      await act(async () => {
+        closePeek.resolve(peek)
+        await Bun.sleep(0)
+        await Bun.sleep(5)
+      })
+      await closed.setup.flush()
+
+      expect(closed.setup.captureCharFrame()).not.toContain('I found one issue.')
+    } finally {
+      act(() => closed.setup.renderer.destroy())
+    }
+  })
+
+  it('only applies the latest deferred peek and retains one delayed across refresh', async () => {
+    const first = deferred<SessionPeekResponse>()
+    const second = deferred<SessionPeekResponse>()
+    const requests = [first, second]
+    const latest = await picker({ peekRequest: () => requests.shift()!.promise })
+
+    try {
+      await act(async () => latest.setup.mockInput.typeText(' '))
+      await act(async () => latest.setup.mockInput.typeText(' '))
+      await act(async () => {
+        second.resolve({ ...peek, messages: [{ role: 'assistant', text: 'new preview' }] })
+        await Bun.sleep(0)
+      })
+      await act(async () => {
+        first.resolve({ ...peek, messages: [{ role: 'assistant', text: 'stale preview' }] })
+        await Bun.sleep(0)
+      })
+      await latest.setup.flush()
+
+      const frame = latest.setup.captureCharFrame()
+      expect(frame).toContain('new preview')
+      expect(frame).not.toContain('stale preview')
+    } finally {
+      act(() => latest.setup.renderer.destroy())
+    }
+
+    const delayed = deferred<SessionPeekResponse>()
+    const refreshed = await picker({ peekRequest: () => delayed.promise })
+
+    try {
+      await act(async () => refreshed.setup.mockInput.typeText(' '))
+      await act(async () => Bun.sleep(1_600))
+      await act(async () => {
+        delayed.resolve(peek)
+        await Bun.sleep(0)
+      })
+      await refreshed.setup.flush()
+
+      expect(refreshed.setup.captureCharFrame()).toContain('I found one issue.')
+    } finally {
+      act(() => refreshed.setup.renderer.destroy())
+    }
+  })
+
+  it('invalidates a deferred peek when its selected session disappears on refresh', async () => {
+    const delayed = deferred<SessionPeekResponse>()
+    const changingActive: SessionActiveListResponse = {
+      sessions: [{ ...active.sessions![0]! }]
+    }
+    const { setup } = await picker({
+      activeResponse: changingActive,
+      peekRequest: () => delayed.promise,
+      savedResponse: { sessions: [] }
+    })
+
+    try {
+      await act(async () => setup.mockInput.typeText(' '))
+      changingActive.sessions = []
+      await act(async () => Bun.sleep(1_600))
+      await act(async () => {
+        delayed.resolve(peek)
+        await Bun.sleep(0)
+      })
+      await setup.flush()
+
+      expect(setup.captureCharFrame()).not.toContain('I found one issue.')
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
+
   it('replies to an idle chat from peek using a targeted prompt submission', async () => {
     const idle: SessionActiveListResponse = {
       sessions: [{ ...active.sessions![0]!, status: 'idle' }]
@@ -226,7 +358,7 @@ describe('OpenTUI Agent View', () => {
     }
   })
 
-  it('never promotes prompt preview or a session id into an untitled chat title', async () => {
+  it('marks an unnamed chat as not-yet-named without inventing a title', async () => {
     const { setup } = await picker({
       activeResponse: {
         sessions: [{ ...active.sessions![0]!, activity: 'secret first prompt', title: '' }]
@@ -238,7 +370,10 @@ describe('OpenTUI Agent View', () => {
 
     try {
       const frame = setup.captureCharFrame()
-      expect(frame.match(/Untitled chat/g)?.length).toBe(2)
+      // An em-dash reads as "not named yet"; a row of identical "Untitled
+      // chat" strings read as a name and made the list unnavigable.
+      expect(frame.match(/—/g)?.length).toBe(2)
+      expect(frame).not.toContain('Untitled chat')
       expect(frame).not.toContain('secret saved first prompt')
       // Activity can describe live work, but remains separate from the title.
       expect(frame).toContain('secret first prompt')

@@ -80,6 +80,7 @@ test('push sync reports byte caps, missing, failed, and escaped files without ab
         throw new Error('transfer unavailable')
       }
     },
+    resolveRemotePath: path => path,
     stat: async request => {
       statRequests.push(request)
       const size = sizes.get(request.path)
@@ -176,6 +177,79 @@ test('push sync reports byte caps, missing, failed, and escaped files without ab
   ])
 })
 
+test('file sync rejects local symlink escapes before invoking a port', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-sync-'))
+  const outside = await mkdtemp(join(tmpdir(), 'xerxes-sync-outside-'))
+  try {
+    await symlink(outside, join(root, 'escape'))
+    const requests: FileSyncStatRequest[] = []
+    const ports: FileSyncPorts = {
+      copy: () => undefined,
+      resolveRemotePath: path => path,
+      stat: request => {
+        requests.push(request)
+        return { size: 1 }
+      },
+    }
+
+    const results = await syncPush([
+      { localPath: 'escape/secret.txt', remotePath: 'secret.txt' },
+    ], ports, { localRoot: root, remoteRoot: '/sandbox/workspace' })
+
+    expect(results).toEqual([expect.objectContaining({
+      error: expect.stringContaining('path validation failed'),
+      status: 'failed',
+    })])
+    expect(requests).toEqual([])
+  } finally {
+    await rm(root, { force: true, recursive: true })
+    await rm(outside, { force: true, recursive: true })
+  }
+})
+
+test('file sync fails explicitly when remote symlink containment cannot be guaranteed', async () => {
+  const requests: FileSyncStatRequest[] = []
+  const ports: FileSyncPorts = {
+    copy: () => undefined,
+    stat: request => {
+      requests.push(request)
+      return { size: 1 }
+    },
+  }
+
+  const results = await syncPush([
+    { localPath: 'small.txt', remotePath: 'input/small.txt' },
+  ], ports, { localRoot: '/host/workspace', remoteRoot: '/sandbox/workspace' })
+
+  expect(results).toEqual([expect.objectContaining({
+    error: expect.stringContaining('resolveRemotePath port'),
+    status: 'failed',
+  })])
+  expect(requests).toEqual([])
+})
+
+test('file sync rejects remote symlink escapes reported by the transport', async () => {
+  const requests: FileSyncStatRequest[] = []
+  const ports: FileSyncPorts = {
+    copy: () => undefined,
+    resolveRemotePath: path => path.endsWith('/escape/secret.txt') ? '/outside/secret.txt' : path,
+    stat: request => {
+      requests.push(request)
+      return { size: 1 }
+    },
+  }
+
+  const results = await syncPull([
+    { localPath: 'secret.txt', remotePath: 'escape/secret.txt' },
+  ], ports, { localRoot: '/host/output', remoteRoot: '/sandbox/workspace' })
+
+  expect(results).toEqual([expect.objectContaining({
+    error: expect.stringContaining('path validation failed'),
+    status: 'failed',
+  })])
+  expect(requests).toEqual([])
+})
+
 test('pull sync uses remote source paths and continues after a transfer failure', async () => {
   const copyRequests: FileSyncCopyRequest[] = []
   const ports: FileSyncPorts = {
@@ -185,6 +259,7 @@ test('pull sync uses remote source paths and continues after a transfer failure'
         throw new Error('remote read denied')
       }
     },
+    resolveRemotePath: path => path,
     stat: async request => {
       const sizes: Readonly<Record<string, number>> = {
         '/sandbox/workspace/exports/bad.json': 3,

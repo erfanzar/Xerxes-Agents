@@ -8,8 +8,18 @@ import { join } from 'node:path'
 
 import { BackgroundCommandManager } from '../src/tools/backgroundCommands.js'
 import { BoundedOutputBuffer } from '../src/tools/processOutput.js'
+import { ToolRegistry } from '../src/executors/toolRegistry.js'
+import type { JsonObject, ToolCall } from '../src/types/toolCalls.js'
 import { WorkspacePathResolver } from '../src/tools/pathSafety.js'
-import { executeCommand } from '../src/tools/processTools.js'
+import { executeCommand, registerProcessTools } from '../src/tools/processTools.js'
+
+function call(name: string, arguments_: JsonObject): ToolCall {
+  return {
+    id: crypto.randomUUID(),
+    type: 'function',
+    function: { name, arguments: arguments_ },
+  }
+}
 
 async function inTemporaryWorkspace(body: (root: string, paths: WorkspacePathResolver) => Promise<void>): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), 'xerxes-bg-'))
@@ -142,6 +152,99 @@ test('run_in_background is refused when the host did not enable it', async () =>
   await inTemporaryWorkspace(async (_root, paths) => {
     await expect(executeCommand({ cmd: 'echo', args: ['hi'], run_in_background: true }, paths))
       .rejects.toThrow(/not enabled by this host/)
+  })
+})
+
+test('process tools isolate background commands by trusted session context', async () => {
+  await inTemporaryWorkspace(async (_root, paths) => {
+    const background = new BackgroundCommandManager()
+    const registry = new ToolRegistry()
+    registerProcessTools(registry, paths, background)
+    const ownerA = { metadata: {}, sessionId: 'owner-a' }
+    const ownerB = { metadata: {}, sessionId: 'owner-b' }
+
+    try {
+      const started = JSON.parse(await registry.execute(call('exec_command', {
+        cmd: '/bin/sh',
+        args: ['-c', 'echo OWNER_A_SECRET; sleep 30'],
+        run_in_background: true,
+      }), ownerA)) as { procId: string }
+
+      const aList = JSON.parse(await registry.execute(call('list_commands', {}), ownerA)) as {
+        processes: Array<{ procId: string }>
+      }
+      const bList = JSON.parse(await registry.execute(call('list_commands', {}), ownerB)) as {
+        processes: Array<{ procId: string }>
+      }
+      expect(aList.processes.map(process => process.procId)).toContain(started.procId)
+      expect(bList.processes).toEqual([])
+
+      await expect(registry.execute(call('check_command', {
+        proc_id: started.procId,
+        wait_ms: 500,
+      }), ownerB)).rejects.toThrow(/proc_id/)
+      await expect(registry.execute(call('kill_command', { proc_id: started.procId }), ownerB))
+        .rejects.toThrow(/proc_id/)
+
+      const checked = JSON.parse(await registry.execute(call('check_command', {
+        proc_id: started.procId,
+        wait_ms: 500,
+      }), ownerA)) as { running: boolean; stdout: string }
+      expect(checked.stdout).toContain('OWNER_A_SECRET')
+      expect(checked.running).toBeTrue()
+
+      const killed = JSON.parse(await registry.execute(call('kill_command', {
+        proc_id: started.procId,
+        signal: 'SIGKILL',
+      }), ownerA)) as { signalled: boolean }
+      expect(killed.signalled).toBeTrue()
+    } finally {
+      await background.disposeAll()
+    }
+  })
+})
+
+test('background process tools fail closed without trusted session context', async () => {
+  await inTemporaryWorkspace(async (_root, paths) => {
+    const background = new BackgroundCommandManager()
+    const registry = new ToolRegistry()
+    registerProcessTools(registry, paths, background)
+    const missingContext = { metadata: {} }
+
+    try {
+      await expect(registry.execute(call('exec_command', {
+        cmd: 'sleep',
+        args: ['30'],
+        run_in_background: true,
+      }), missingContext)).rejects.toThrow(/sessionId/)
+      await expect(registry.execute(call('list_commands', {}), missingContext)).rejects.toThrow(/sessionId/)
+      await expect(registry.execute(call('check_command', { proc_id: 'unknown' }), missingContext))
+        .rejects.toThrow(/sessionId/)
+      await expect(registry.execute(call('kill_command', { proc_id: 'unknown' }), missingContext))
+        .rejects.toThrow(/sessionId/)
+      expect(background.list()).toEqual([])
+    } finally {
+      await background.disposeAll()
+    }
+  })
+})
+
+test('owner disposal leaves other owners running', async () => {
+  await inTemporaryWorkspace(async (root) => {
+    const background = new BackgroundCommandManager()
+    try {
+      const a = background.startForOwner('owner-a', { command: 'sleep', args: ['30'], cwd: root })
+      const b = background.startForOwner('owner-b', { command: 'sleep', args: ['30'], cwd: root })
+
+      await background.disposeOwner('owner-b')
+      expect(background.listForOwner('owner-b')).toEqual([])
+      expect(background.listForOwner('owner-a').map(record => record.procId)).toEqual([a.procId])
+      expect((await background.checkForOwner('owner-a', a.procId, 100)).running).toBeTrue()
+      await expect(background.checkForOwner('owner-b', a.procId, 100)).rejects.toThrow(/proc_id/)
+      expect(b.procId).not.toBe(a.procId)
+    } finally {
+      await background.disposeAll()
+    }
   })
 })
 

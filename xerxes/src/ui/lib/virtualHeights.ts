@@ -1,7 +1,6 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 import { TERMUX_TUI_MODE } from '../config/env.js'
-import type { TranscriptRow } from '../app/gatewayState.js'
 import type { Msg } from '../types.js'
 
 import { transcriptBodyWidth } from './inputMetrics.js'
@@ -75,29 +74,6 @@ export const wrappedLines = (text: string, width: number, maxLines: number = MAX
   return n
 }
 
-export function estimateMarkdownHeight(text: string, cols: number): number {
-  const blocks = text.trim().split(/\n\s*\n/)
-  let height = 0
-
-  for (const block of blocks) {
-    const trimmed = block.trim()
-
-    if (!trimmed) {
-      continue
-    }
-
-    if (trimmed.startsWith('```')) {
-      height += Math.max(0, trimmed.split('\n').length - 2) + 4
-    } else if (/^#{1,6}\s/.test(trimmed)) {
-      height += wrappedLines(trimmed.replace(/^#{1,6}\s+/, ''), cols) + 1
-    } else {
-      height += wrappedLines(trimmed, cols)
-    }
-  }
-
-  return Math.max(1, height)
-}
-
 export const estimatedMsgHeight = (
   msg: Msg,
   cols: number,
@@ -109,7 +85,6 @@ export const estimatedMsgHeight = (
     thinkingVisible = details,
     toolsVisible = details,
     userPrompt = '',
-    withSeparator = false
   }: {
     compact: boolean
     details: boolean
@@ -119,7 +94,6 @@ export const estimatedMsgHeight = (
     thinkingVisible?: boolean
     toolsVisible?: boolean
     userPrompt?: string
-    withSeparator?: boolean
   }
 ) => {
   if (msg.kind === 'intro') {
@@ -170,9 +144,11 @@ export const estimatedMsgHeight = (
     }
   }
 
-  if (msg.role === 'user' || msg.kind === 'diff') {
-    // Top + bottom blank line.
-    h += 2
+  if (msg.role === 'user') {
+    // One blank row above the band. `diff` used to be counted here too, but
+    // it never painted a trailing gap — it takes its row from `leadGap` like
+    // every other assistant-side block.
+    h += 1
   } else if (msg.kind === 'slash') {
     h++
   }
@@ -187,66 +163,5 @@ export const estimatedMsgHeight = (
     h++
   }
 
-  // Inter-turn separator above non-first user messages (1 rule row + 1
-  // top-margin row). The render-side gate is in appLayout.tsx; we trust
-  // the caller to pass `withSeparator` only when it matches that gate.
-  if (withSeparator) {
-    h += 2
-  }
-
   return Math.max(1, h)
-}
-
-export function estimateRowHeight(row: TranscriptRow, cols: number): number {
-  const base = estimateMarkdownHeight(row.text || (row.blocks?.length ? 'result ⋯' : ' '), cols)
-
-  return row.role === 'assistant' ? base + 1 : base
-}
-
-export function buildOffsets(heights: readonly number[]): number[] {
-  const offsets = [0]
-
-  for (const height of heights) {
-    offsets.push((offsets.at(-1) ?? 0) + Math.max(1, height))
-  }
-
-  return offsets
-}
-
-export function computeVisibleWindow(
-  heights: readonly number[],
-  viewportHeight: number,
-  scrollTop: number
-): { end: number; maxScrollTop: number; padBottom: number; padTop: number; start: number; totalHeight: number } {
-  const offsets = buildOffsets(heights)
-  const totalHeight = offsets.at(-1) ?? 0
-  const maxScrollTop = Math.max(0, totalHeight - Math.max(1, viewportHeight))
-  const top = resolveScrollTop(maxScrollTop, false, scrollTop)
-
-  if (!heights.length) {
-    return { end: -1, maxScrollTop, padBottom: 0, padTop: 0, start: 0, totalHeight }
-  }
-
-  let start = 0
-  while (start < heights.length - 1 && (offsets[start + 1] ?? 0) <= top) {
-    start += 1
-  }
-
-  let end = start
-
-  while (end < heights.length - 1 && (offsets[end + 1] ?? 0) < top + Math.max(1, viewportHeight)) {
-    end += 1
-  }
-
-  const padTop = Math.max(0, top - (offsets[start] ?? 0))
-  const padBottom = Math.max(0, totalHeight - (offsets[end + 1] ?? totalHeight))
-
-  return { end, maxScrollTop, padBottom, padTop, start, totalHeight }
-}
-
-export function resolveScrollTop(maxScrollTop: number, sticky: boolean, desired: number): number {
-  if (sticky) {
-    return Math.max(0, maxScrollTop)
-  }
-  return Math.max(0, Math.min(Math.max(0, maxScrollTop), desired))
 }

@@ -72,3 +72,55 @@ export function splitStreaming(text: string, prevPrefix: string): StreamSplit {
   const stablePrefix = boundary > base.length ? text.slice(0, boundary) : base
   return { stablePrefix, unstableSuffix: text.slice(stablePrefix.length) }
 }
+
+// ── Render-ready chunk state ────────────────────────────────────────────
+
+export interface StreamingChunks {
+  /**
+   * Frozen stable blocks, oldest first, each stripped of its trailing blank
+   * line. A chunk's string never changes once appended, so a memoized
+   * markdown component keyed on it never re-parses.
+   *
+   * The trailing `\n\n` is stripped because the renderer interleaves its own
+   * one-row spacer between chunk elements (reproducing the blank line a
+   * single <markdown> document inserts between top-level blocks) — and
+   * OpenTUI preserves a trailing blank line after a heading block, which
+   * would otherwise double that spacing.
+   */
+  chunks: readonly string[]
+  /** Raw stable prefix backing `chunks`; the `splitStreaming` memo key. */
+  prefix: string
+}
+
+export const STREAMING_CHUNKS_EMPTY: StreamingChunks = { chunks: [], prefix: '' }
+
+export interface StreamingRender {
+  /** Memoizable stable chunks. */
+  chunks: readonly string[]
+  /** Unstable tail that still re-parses every delta ('' when nothing is in flight). */
+  tail: string
+  /** State to feed back in on the next delta. */
+  state: StreamingChunks
+}
+
+/**
+ * Advance the chunk split for one stream delta. Chunks only ever grow, and
+ * existing chunk strings are never mutated; a text that no longer starts
+ * with the previous prefix (a new turn reusing the component) resets the
+ * state instead of corrupting the chunk list.
+ */
+export function splitStreamingRender(text: string, prev: StreamingChunks): StreamingRender {
+  const reset = !text.startsWith(prev.prefix)
+  const base = reset ? STREAMING_CHUNKS_EMPTY : prev
+  const { stablePrefix, unstableSuffix } = splitStreaming(text, base.prefix)
+
+  if (stablePrefix === base.prefix) {
+    return { chunks: base.chunks, tail: unstableSuffix, state: base }
+  }
+
+  const fresh = stablePrefix.slice(base.prefix.length)
+  const block = fresh.endsWith('\n\n') ? fresh.slice(0, -2) : fresh
+  const chunks = [...base.chunks, block]
+
+  return { chunks, tail: unstableSuffix, state: { chunks, prefix: stablePrefix } }
+}

@@ -160,12 +160,37 @@ test('registry requires a handler and isolates adapter lifecycle failures', asyn
 
   await registry.stopAll()
   expect(healthy.stops).toBe(1)
-  expect(registry.startedNames()).toEqual([])
+  expect(registry.startedNames()).toEqual(['healthy'])
   expect(registry.lifecycleFailures()).toEqual([
     { channel: 'broken', error: failedStart, operation: 'start' },
     { channel: 'healthy', error: failedStop, operation: 'stop' },
   ])
   expect(reported).toEqual(['start:broken', 'stop:healthy'])
+})
+
+test('registry retains started state after stop failure so teardown can be retried', async () => {
+  const registry = new ChannelRegistry()
+  let stopAttempts = 0
+  const channel = new RecordingChannel('retryable')
+  channel.stop = async () => {
+    stopAttempts += 1
+    if (stopAttempts === 1) {
+      throw new Error('transient stop failure')
+    }
+    channel.stops += 1
+    channel.handler = undefined
+  }
+  registry.register('retryable', channel)
+  registry.setHandler(async () => {})
+  await registry.startAll()
+
+  await registry.stopAll()
+  expect(stopAttempts).toBe(1)
+  expect(registry.isStarted('retryable')).toBe(true)
+
+  await registry.stopAll()
+  expect(stopAttempts).toBe(2)
+  expect(registry.isStarted('retryable')).toBe(false)
 })
 
 test('gatherInbound starts independent registries concurrently', async () => {

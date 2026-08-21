@@ -169,6 +169,7 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
           session_id: getUiState().sid
         })
         .then(r => r && (clearApprovalOverlay(requestId), patchTurnState({ outcome: 'denied' })))
+        .catch(error => actions.sys(`error: ${error instanceof Error ? error.message : String(error)}`))
     }
 
     if (overlay.confirm) {
@@ -179,12 +180,14 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
       return gateway
         .rpc<SudoRespondResponse>('sudo.respond', { password: '', request_id: overlay.sudo.requestId })
         .then(r => r && (patchOverlayState({ sudo: null }), actions.sys('sudo cancelled')))
+        .catch(error => actions.sys(`error: ${error instanceof Error ? error.message : String(error)}`))
     }
 
     if (overlay.secret) {
       return gateway
         .rpc<SecretRespondResponse>('secret.respond', { request_id: overlay.secret.requestId, value: '' })
         .then(r => r && (patchOverlayState({ secret: null }), actions.sys('secret entry cancelled')))
+        .catch(error => actions.sys(`error: ${error instanceof Error ? error.message : String(error)}`))
     }
 
     if (overlay.copyPicker) {
@@ -621,6 +624,7 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
             patchUiState(state => ({ ...state, info: state.info ? { ...state.info, mode: next } : state.info }))
           }
         })
+        .catch(error => actions.sys(`error: ${error instanceof Error ? error.message : String(error)}`))
     }
 
     if (key.tab && cState.completions.length) {

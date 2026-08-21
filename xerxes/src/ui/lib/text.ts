@@ -69,10 +69,18 @@ const renderEstimateLine = (line: string) => {
     .replace(/^\s*(?:>\s*)+/, '│ ')
 }
 
+/**
+ * Collapse whitespace and clamp to one line of `max` columns.
+ *
+ * The canonical single-line clamp: pickers, the completion menu, and copy
+ * previews all route through this. `trimEnd` keeps a clamp that lands on a
+ * space from rendering as "word …", and the `max - 1` floor keeps a very
+ * narrow column from slicing to the empty string.
+ */
 export const compactPreview = (s: string, max: number) => {
   const one = s.replace(WS_RE, ' ').trim()
 
-  return !one ? '' : one.length > max ? one.slice(0, max - 1) + '…' : one
+  return !one ? '' : one.length > max ? one.slice(0, Math.max(1, max - 1)).trimEnd() + '…' : one
 }
 
 export const estimateTokensRough = (text: string) => (!text ? 0 : (text.length + 3) >> 2)
@@ -244,6 +252,33 @@ export const splitToolDuration = (call: string) => {
   const match = call.match(/^(.*?)( \(\d+(?:\.\d)?s\))$/)
 
   return match ? { label: match[1]!, duration: match[2]! } : { label: call, duration: '' }
+}
+
+export interface ToolTrailParts {
+  /** Summarized arguments; '' when the call carried no context. */
+  args: string
+  /** Bare duration such as '1.2s'; '' when the call is still in flight. */
+  duration: string
+  name: string
+}
+
+/**
+ * Decompose a persisted call into its display parts.
+ *
+ * The transcript used to render the whole thing as one muted string, so the
+ * tool's name, its arguments and how long it took were indistinguishable.
+ * They are all present in the serialized form already — this just takes it
+ * apart so each can be styled for what it is.
+ */
+export const toolTrailParts = (call: string): ToolTrailParts => {
+  const { duration, label } = splitToolDuration(call)
+  const contextual = label.match(/^(.*?)\("(.*)"\)$/)
+
+  return {
+    args: contextual ? contextual[2]!.trim() : '',
+    duration: duration.trim().replace(/^\(|\)$/g, ''),
+    name: (contextual ? contextual[1]! : label).trim()
+  }
 }
 
 /** Turn the persisted call syntax into Grok's compact inline tool label. */

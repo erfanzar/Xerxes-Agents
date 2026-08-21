@@ -26,27 +26,76 @@ const buildOverlayState = (): OverlayState => ({
 
 export const $overlayState = atom<OverlayState>(buildOverlayState())
 
-export const $isBlocked = computed(
-  $overlayState,
-  ({ agents, approval, clarify, confirm, copyPicker, diff, modelPicker, pager, pluginsHub, reasoningPicker, secret, sessions, skillsHub, sudo, terminals }) =>
-    Boolean(
-      agents ||
-      approval ||
-      clarify ||
-      confirm ||
-      copyPicker ||
-      diff ||
-      modelPicker ||
-      pager ||
-      pluginsHub ||
-      reasoningPicker ||
-      secret ||
-      sessions ||
-      skillsHub ||
-      sudo ||
-      terminals
-    )
+/**
+ * Overlay flags that gate UI behaviour. `agentsInitialHistoryIndex` and
+ * `agentsInspectId` are metadata carried alongside the `agents` flag, never
+ * gates on their own — excluding them here means a new boolean-ish overlay
+ * added to `OverlayState` automatically joins every policy table below.
+ */
+type OverlayFlagKey = Exclude<keyof OverlayState, 'agentsInitialHistoryIndex' | 'agentsInspectId'>
+
+const OVERLAY_FLAG_KEYS = [
+  'agents',
+  'approval',
+  'clarify',
+  'confirm',
+  'copyPicker',
+  'diff',
+  'modelPicker',
+  'pager',
+  'pluginsHub',
+  'reasoningPicker',
+  'secret',
+  'sessions',
+  'skillsHub',
+  'sudo',
+  'terminals'
+] as const satisfies readonly OverlayFlagKey[]
+
+export const $isBlocked = computed($overlayState, state =>
+  OVERLAY_FLAG_KEYS.some(key => Boolean(state[key]))
 )
+
+/**
+ * Per-overlay hotkey policy: does this overlay, while open, suppress the
+ * background global hotkeys (F6/F7/F8 panels, session-tab chords)?
+ *
+ * `agents` is deliberately false — F6 must stay live to CLOSE the agents
+ * overlay, the same chord that opened it. Every other overlay blocks: a
+ * background hotkey firing underneath a modal prompt would mutate state the
+ * user cannot see.
+ *
+ * Structured as a complete Record so adding a new overlay to OverlayState
+ * without a policy entry is a compile error HERE, not a silent key leak at
+ * the hotkey call sites.
+ */
+export const OVERLAY_BLOCKS_BACKGROUND_HOTKEYS: Record<OverlayFlagKey, boolean> = {
+  agents: false,
+  approval: true,
+  clarify: true,
+  confirm: true,
+  copyPicker: true,
+  diff: true,
+  modelPicker: true,
+  pager: true,
+  pluginsHub: true,
+  reasoningPicker: true,
+  secret: true,
+  sessions: true,
+  skillsHub: true,
+  sudo: true,
+  terminals: true
+}
+
+/**
+ * True while any hotkey-blocking overlay is open. Single source of truth for
+ * the `disabled` prop of the background hotkey components — call sites must
+ * never re-enumerate overlay flags by hand.
+ */
+export const overlayBlocksBackgroundHotkeys = (state: OverlayState): boolean =>
+  OVERLAY_FLAG_KEYS.some(key => OVERLAY_BLOCKS_BACKGROUND_HOTKEYS[key] && Boolean(state[key]))
+
+export const $backgroundHotkeysBlocked = computed($overlayState, overlayBlocksBackgroundHotkeys)
 
 export const getOverlayState = () => $overlayState.get()
 

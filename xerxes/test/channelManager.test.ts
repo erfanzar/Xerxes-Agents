@@ -109,3 +109,45 @@ test('channel manager reports missing host routing and concrete lifecycle failur
     lastError: 'adapter refused startup',
   })
 })
+
+test('channel manager retains a failed stop until teardown really succeeds', async () => {
+  const channel = new RecordingChannel('retryable')
+  let stopAttempts = 0
+  channel.stop = async () => {
+    stopAttempts += 1
+    if (stopAttempts === 1) {
+      throw new Error('transient stop failure')
+    }
+    channel.stops += 1
+  }
+  const manager = new ChannelManager({
+    channels: [['retryable', channel]],
+    onInbound: async () => {},
+  })
+  await manager.enable('retryable')
+
+  await expect(manager.disable('retryable')).rejects.toThrow('transient stop failure')
+  expect(manager.status('retryable')).toEqual({
+    name: 'retryable',
+    adapterName: 'retryable',
+    enabled: true,
+    lastOperation: 'stop',
+    lastError: 'transient stop failure',
+  })
+
+  expect(await manager.enable('retryable')).toEqual({
+    name: 'retryable',
+    adapterName: 'retryable',
+    enabled: true,
+    lastOperation: 'stop',
+    lastError: 'transient stop failure',
+  })
+  expect(channel.starts).toBe(1)
+
+  expect(await manager.disable('retryable')).toEqual({
+    name: 'retryable',
+    adapterName: 'retryable',
+    enabled: false,
+  })
+  expect(stopAttempts).toBe(2)
+})

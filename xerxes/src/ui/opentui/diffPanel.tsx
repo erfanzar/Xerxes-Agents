@@ -12,6 +12,8 @@ import {
   PANEL_WIDTH_STEP,
   withPanelWidthDelta
 } from '../app/panelSizeStore.js'
+
+import { OVERLAY_PANEL_SPECS, overlayPanelSize } from './overlayLayout.js'
 import { collectGitDiff, type DiffLine, type GitDiffResult } from '../lib/gitDiff.js'
 import type { Theme } from '../theme.js'
 
@@ -49,7 +51,6 @@ export function DiffPanelHotkey({
   return null
 }
 
-const HUNK_COLOR = '#56c2d6'
 const GUTTER_WIDTH = 6
 
 const lineNumber = (value: number | undefined): string =>
@@ -61,7 +62,7 @@ function DiffCodeRow({ line, t }: { line: DiffLine; t: Theme }) {
   const added = line.kind === 'add'
   const removed = line.kind === 'del'
   const foreground = added ? t.color.ok : removed ? t.color.error : t.color.text
-  const background = added ? '#14251b' : removed ? '#2a171b' : undefined
+  const background = added ? t.color.diffAddedBg : removed ? t.color.diffRemovedBg : undefined
   const marker = added ? '+' : removed ? '−' : ' '
 
   return (
@@ -97,7 +98,7 @@ function DiffRow({ line, t }: { line: DiffLine; t: Theme }) {
       return (
         <Box backgroundColor={t.color.completionMetaBg} flexDirection="row">
           <Text color={t.color.muted}>{' '.repeat((GUTTER_WIDTH + 1) * 2)}</Text>
-          <Text color={HUNK_COLOR} wrap="truncate-end">  {line.text}</Text>
+          <Text color={t.color.diffHunk} wrap="truncate-end">  {line.text}</Text>
         </Box>
       )
     case 'add':
@@ -122,9 +123,13 @@ export function DiffPanelOverlay({
   const [result, setResult] = useState<GitDiffResult | null>(null)
   const [loading, setLoading] = useState(true)
   const generation = useRef(0)
-  const { width: terminalWidth } = useTerminalDimensions()
+  const { height: terminalHeight, width: terminalWidth } = useTerminalDimensions()
   useStore($panelWidthDelta)
-  const panelWidth = withPanelWidthDelta(Math.min(120, Math.floor(terminalWidth * 0.9)), terminalWidth)
+  const { height: panelHeight, width: fittedWidth } = overlayPanelSize(
+    { height: terminalHeight, width: terminalWidth },
+    OVERLAY_PANEL_SPECS.diff
+  )
+  const panelWidth = withPanelWidthDelta(fittedWidth, terminalWidth)
 
   const reload = useCallback(() => {
     const gen = ++generation.current
@@ -202,18 +207,17 @@ export function DiffPanelOverlay({
     >
       <Box
         backgroundColor={t.color.statusBg}
-        borderColor={t.color.accent}
+        borderColor={t.color.brandGold}
         borderStyle="single"
         flexDirection="column"
-        height="80%"
-        maxWidth={150}
+        height={panelHeight}
         paddingX={2}
         paddingY={1}
         width={panelWidth}
       >
         <Box flexDirection="row" flexShrink={0} justifyContent="space-between">
           <Box flexDirection="column">
-            <Text bold color={t.color.primary}>SOURCE CONTROL</Text>
+            <Text bold color={t.color.brandGold}>SOURCE CONTROL</Text>
             <Text color={t.color.muted} wrap="truncate-end">{location}</Text>
           </Box>
           <Text color={t.color.muted}>F7  ×</Text>

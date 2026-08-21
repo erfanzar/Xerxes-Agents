@@ -179,6 +179,7 @@ export class ExecutionRegistry {
   private readonly runner: ExecutionRunner | undefined
   private sequence = 0
   private shuttingDown = false
+  private shutdownCleanupPromise: Promise<void> | undefined
   private token = 0
   private readonly tools = new Map<string, RegistryEntry>()
 
@@ -420,23 +421,29 @@ export class ExecutionRegistry {
    * Stop accepting records, cancel queued work, optionally abort running work,
    * and wait up to the configured bound for active cleanup.
    */
-  async shutdown(options: ShutdownExecutionRegistryOptions = {}): Promise<void> {
-    if (this.shuttingDown) return
+  shutdown(options: ShutdownExecutionRegistryOptions = {}): Promise<void> {
+    const timeoutMs = nonNegativeInteger(options.timeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS, 'timeoutMs')
+    const cancelRunning = options.cancelRunning ?? false
+    if (typeof cancelRunning !== 'boolean') throw new TypeError('cancelRunning must be a boolean')
+
     this.shuttingDown = true
+    if (!this.shutdownCleanupPromise) this.shutdownCleanupPromise = this.performShutdown()
+    if (cancelRunning) this.cancelRunningExecutions()
+    return waitWithTimeout(this.shutdownCleanupPromise, timeoutMs)
+  }
+
+  private async performShutdown(): Promise<void> {
     for (const record of [...this.records.values()]) {
       if (record.status === ExecutionStatus.PENDING) this.cancelExecution(record.id)
     }
-    if (options.cancelRunning) {
-      for (const record of [...this.records.values()]) {
-        if (record.status === ExecutionStatus.RUNNING) this.cancelExecution(record.id)
-      }
-    }
-    const active = [...this.active.values()].map(value => value.promise)
-    await waitWithTimeout(
-      Promise.allSettled(active).then(() => undefined),
-      nonNegativeInteger(options.timeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS, 'timeoutMs'),
-    )
+    await Promise.allSettled([...this.active.values()].map(value => value.promise))
     this.pruneCompleted()
+  }
+
+  private cancelRunningExecutions(): void {
+    for (const record of this.records.values()) {
+      if (record.status === ExecutionStatus.RUNNING) this.cancelExecution(record.id)
+    }
   }
 
   /** Return source-compatible tool schemas, auto-generating the minimal input schema when absent. */

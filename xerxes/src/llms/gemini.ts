@@ -213,9 +213,9 @@ export class GeminiClient implements LlmClient {
     if (!response.ok) {
       const body = await response.text()
       const status = response.statusText ? ` ${response.statusText}` : ''
-      throw new ProviderError(
-        'gemini',
+      throw geminiHttpError(
         `completion request failed (${response.status}${status}): ${body.slice(0, 4_096)}`,
+        response,
       )
     }
 
@@ -273,9 +273,9 @@ export class GeminiClient implements LlmClient {
     if (!response.ok) {
       const body = await response.text()
       const status = response.statusText ? ` ${response.statusText}` : ''
-      throw new ProviderError(
-        'gemini',
+      throw geminiHttpError(
         `stream request failed (${response.status}${status}): ${body.slice(0, 4_096)}`,
+        response,
       )
     }
     if (!response.body) {
@@ -358,6 +358,28 @@ export class GeminiClient implements LlmClient {
       yield { toolCalls: [...pendingToolCalls.values()] }
     }
   }
+}
+
+/** Preserve HTTP status and retry timing for runtime retry classification. */
+function geminiHttpError(message: string, response: Response): ProviderError {
+  const retryAfterSeconds = parseRetryAfterHeader(response.headers.get('retry-after'))
+  return new ProviderError('gemini', message, undefined, {
+    status: response.status,
+    ...(retryAfterSeconds === undefined ? {} : { retryAfterSeconds }),
+  })
+}
+
+/** Parse Retry-After delta-seconds or an HTTP date into a non-negative delay. */
+function parseRetryAfterHeader(value: string | null, now = Date.now()): number | undefined {
+  if (value === null) return undefined
+  const normalized = value.trim()
+  if (/^\d+(?:\.\d+)?$/.test(normalized)) {
+    const seconds = Number(normalized)
+    return Number.isFinite(seconds) ? seconds : undefined
+  }
+  const retryAt = Date.parse(normalized)
+  if (!Number.isFinite(retryAt)) return undefined
+  return Math.max(0, Math.ceil((retryAt - now) / 1_000))
 }
 
 function appendContent(contents: GeminiContent[], role: GeminiContent['role'], parts: readonly GeminiPart[]): void {
@@ -486,6 +508,17 @@ function requestGenerationConfig(
   if (request.topK !== undefined) generationConfig.topK = request.topK
   if (request.topP !== undefined) generationConfig.topP = request.topP
   if (request.stop?.length) generationConfig.stopSequences = [...request.stop]
+  if (request.thinking !== undefined) {
+    // Gemini's native API nests thinking controls inside generationConfig.
+    // The neutral effort is intentionally not translated to thinkingLevel:
+    // budgetTokens is the cross-model control, while thinkingLevel support and
+    // accepted values vary by model. Request thought parts so the adapter can
+    // expose them through the neutral thinking delta.
+    generationConfig.thinkingConfig = {
+      thinkingBudget: request.thinking.budgetTokens ?? 10_000,
+      includeThoughts: true,
+    }
+  }
   return generationConfig
 }
 
@@ -726,20 +759,29 @@ function geminiUsage(value: unknown): TokenUsage | undefined {
   if (!isRecord(value)) {
     throw new ProviderError('gemini', 'Gemini SSE usageMetadata must be an object')
   }
-  const inputTokens = tokenCount(value, 'promptTokenCount')
+  const promptTokens = tokenCount(value, 'promptTokenCount')
   const outputTokens = tokenCount(value, 'candidatesTokenCount')
-  const cacheReadTokens = tokenCount(value, 'cachedContentTokenCount')
+  const reportedCacheReadTokens = tokenCount(value, 'cachedContentTokenCount')
   const reasoningTokens = tokenCount(value, 'thoughtsTokenCount')
   if (
-    inputTokens === undefined
+    promptTokens === undefined
     && outputTokens === undefined
-    && cacheReadTokens === undefined
+    && reportedCacheReadTokens === undefined
     && reasoningTokens === undefined
   ) {
     return undefined
   }
+
+  // Gemini includes cached content in promptTokenCount. The neutral usage
+  // contract reports fresh input and cache reads separately, so subtract the
+  // cached portion once. Clamp inconsistent metadata so fresh input cannot be
+  // negative and the normalized parts never exceed the reported prompt total.
+  const cacheReadTokens = reportedCacheReadTokens === undefined
+    ? undefined
+    : Math.min(reportedCacheReadTokens, promptTokens ?? 0)
+  const inputTokens = Math.max(0, (promptTokens ?? 0) - (cacheReadTokens ?? 0))
   return {
-    inputTokens: inputTokens ?? 0,
+    inputTokens,
     outputTokens: outputTokens ?? 0,
     ...(cacheReadTokens === undefined ? {} : { cacheReadTokens }),
     ...(reasoningTokens === undefined ? {} : { reasoningTokens }),

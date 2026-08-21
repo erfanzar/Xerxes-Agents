@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 import { describe, expect, it } from 'vitest'
 
-import { fenceOpenAt, findStableBoundary, splitStreaming } from '../lib/streamingMarkdown.js'
+import { fenceOpenAt, findStableBoundary, splitStreaming, splitStreamingRender, STREAMING_CHUNKS_EMPTY } from '../lib/streamingMarkdown.js'
 
 describe('fenceOpenAt', () => {
   it('is false outside any fence', () => {
@@ -73,5 +73,85 @@ describe('splitStreaming (monotonic)', () => {
     const s = splitStreaming('brand new turn', 'old prefix\n\n')
     expect(s.stablePrefix).toBe('')
     expect(s.unstableSuffix).toBe('brand new turn')
+  })
+})
+
+describe('splitStreamingRender (render-ready chunks)', () => {
+  it('keeps everything in the tail until the first block boundary', () => {
+    const r = splitStreamingRender('still typing', STREAMING_CHUNKS_EMPTY)
+    expect(r.chunks).toEqual([])
+    expect(r.tail).toBe('still typing')
+    expect(r.state.prefix).toBe('')
+  })
+
+  it('strips the trailing blank line from stabilized chunks', () => {
+    const r = splitStreamingRender('# Heading\n\nnext', STREAMING_CHUNKS_EMPTY)
+    expect(r.chunks).toEqual(['# Heading'])
+    expect(r.tail).toBe('next')
+  })
+
+  it('appends chunks monotonically across deltas without mutating prior chunks', () => {
+    let state = STREAMING_CHUNKS_EMPTY
+    const deltas = [
+      'para one',
+      'para one\n\npara tw',
+      'para one\n\npara two\n\n- a\n- b',
+      'para one\n\npara two\n\n- a\n- b\n\ntail'
+    ]
+
+    const seen: string[][] = []
+    for (const delta of deltas) {
+      const r = splitStreamingRender(delta, state)
+      seen.push([...r.chunks])
+      state = r.state
+    }
+
+    expect(seen[0]).toEqual([])
+    expect(seen[1]).toEqual(['para one'])
+    expect(seen[2]).toEqual(['para one', 'para two'])
+    expect(seen[3]).toEqual(['para one', 'para two', '- a\n- b'])
+    // chunk identity: earlier chunk strings are never rewritten
+    expect(seen[2]![0]).toBe(seen[1]![0])
+  })
+
+  it('never splits inside an open code fence', () => {
+    let state = STREAMING_CHUNKS_EMPTY
+
+    const mid = splitStreamingRender('intro\n\n```ts\nconst x = 1\n\nconst y = 2', state)
+    state = mid.state
+    expect(mid.chunks).toEqual(['intro'])
+    expect(mid.tail).toBe('```ts\nconst x = 1\n\nconst y = 2')
+
+    const done = splitStreamingRender('intro\n\n```ts\nconst x = 1\n\nconst y = 2\n```\n\nafter', state)
+    expect(done.chunks).toEqual(['intro', '```ts\nconst x = 1\n\nconst y = 2\n```'])
+    expect(done.tail).toBe('after')
+  })
+
+  it('keeps multi-block stabilized segments as one chunk with internal spacing intact', () => {
+    const r = splitStreamingRender('a\n\nb\n\nc', STREAMING_CHUNKS_EMPTY)
+    expect(r.chunks).toEqual(['a\n\nb'])
+    expect(r.tail).toBe('c')
+  })
+
+  it('resets cleanly when a new turn reuses the component', () => {
+    let state = STREAMING_CHUNKS_EMPTY
+    state = splitStreamingRender('old reply\n\nmore', state).state
+    expect(state.chunks).toEqual(['old reply'])
+
+    const next = splitStreamingRender('new turn text', state)
+    expect(next.chunks).toEqual([])
+    expect(next.tail).toBe('new turn text')
+  })
+
+  it('chunks joined with the tail reproduce the original buffer minus stripped boundaries', () => {
+    let state = STREAMING_CHUNKS_EMPTY
+    const full = '# T\n\npara text\n\n- one\n- two\n\n```\ncode\n```\n\nlast'
+    const r = splitStreamingRender(full, state)
+    state = r.state
+    // One big delta stabilizes all complete blocks into a single chunk; the
+    // internal blank lines stay intact so inter-block spacing survives.
+    expect(r.chunks).toEqual(['# T\n\npara text\n\n- one\n- two\n\n```\ncode\n```'])
+    expect(r.tail).toBe('last')
+    expect(`${r.chunks.join('\n\n')}\n\n${r.tail}`).toBe(full)
   })
 })

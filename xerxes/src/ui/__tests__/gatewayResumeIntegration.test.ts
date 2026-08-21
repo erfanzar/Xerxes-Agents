@@ -1,6 +1,6 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, realpath, rm } from 'node:fs/promises'
 import { connect, type Socket } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -16,7 +16,10 @@ import type { SessionResumeResponse } from '../gatewayTypes.js'
 
 describe('GatewayClient resumed transcript integration', () => {
   it('hydrates persisted daemon history once through the real socket protocol', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'xerxes-gateway-resume-'))
+    // Canonicalize the temp dir: on macOS /tmp is a symlink to /private/tmp,
+    // and the daemon rejects a transcript whose stored project dir differs
+    // from the (realpath-resolved) project dir the client connects with.
+    const directory = await realpath(await mkdtemp(join(tmpdir(), 'xerxes-gateway-resume-')))
     const sessionDirectory = join(directory, 'sessions')
     const socketPath = join(directory, 'daemon.sock')
     const workspaceRoot = join(directory, 'agents')
@@ -93,7 +96,7 @@ describe('GatewayClient resumed transcript integration', () => {
   })
 
   it('hydrates persisted thinking traces and tool rows on resume', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'xerxes-gateway-resume-tools-'))
+    const directory = await realpath(await mkdtemp(join(tmpdir(), 'xerxes-gateway-resume-tools-')))
     const sessionDirectory = join(directory, 'sessions')
     const socketPath = join(directory, 'daemon.sock')
     const workspaceRoot = join(directory, 'agents')

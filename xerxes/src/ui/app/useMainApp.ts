@@ -338,10 +338,33 @@ export function useMainApp(gw: GatewayClient) {
   // resets on resize; small UX hit for a hard correctness win. Detail-only
   // rows hidden by /details never enter this list, so they cannot accumulate
   // phantom one-row spacers in long sessions.
-  const virtualRows = useMemo<TranscriptRow[]>(
-    () => virtualHistoryItems.map((msg, index) => ({ index, key: `${messageId(msg)}:c${cols}`, msg })),
-    [cols, messageId, virtualHistoryItems]
+  const detailsCtx = useMemo(
+    () => ({
+      commandOverride: ui.detailsModeCommandOverride,
+      detailsMode: ui.detailsMode,
+      sections: ui.sections
+    }),
+    [ui.detailsMode, ui.detailsModeCommandOverride, ui.sections]
   )
+
+  // `leadGap` is resolved once, here, and carried on the row. The renderer
+  // and the estimator both read it, which is the structural guarantee that
+  // painted and predicted heights cannot drift apart again. It also drops a
+  // backwards `prevRenderedMsg` walk from every single estimate call.
+  const virtualRows = useMemo<TranscriptRow[]>(() => {
+    const rows = virtualHistoryItems.map((msg, index) => ({
+      index,
+      key: `${messageId(msg)}:c${cols}`,
+      leadGap: false,
+      msg
+    }))
+
+    for (const row of rows) {
+      row.leadGap = hasLeadGap(prevRenderedMsg(i => rows[i]?.msg, row.index, detailsCtx), row.msg)
+    }
+
+    return rows
+  }, [cols, detailsCtx, messageId, virtualHistoryItems])
 
   const userPromptWidth = composerPromptWidth(ui.theme.brand.prompt)
   const heightCacheKey = `${ui.sid ?? 'draft'}:${cols}:${userPromptWidth}:${ui.compact ? '1' : '0'}:${detailsLayoutKey}`
@@ -361,36 +384,22 @@ export function useMainApp(gw: GatewayClient) {
     return cache
   }, [heightCacheKey])
 
-  // Index of the first user-role message — separator-rendering in
-  // appLayout.tsx skips this row, so the height estimator must skip it
-  // too. -1 when no user message exists yet (no row will gate true).
-  const firstUserIdx = useMemo(() => virtualRows.findIndex(r => r.msg.role === 'user'), [virtualRows])
-
   const thinkingVisibility = useStore($thinkingVisibility)
   const estimateRowHeight = useCallback(
     (index: number) =>
       estimatedMsgHeight(virtualRows[index]!.msg, cols, {
         compact: ui.compact,
         details: detailsVisible,
-        leadGap: hasLeadGap(
-          prevRenderedMsg(i => virtualRows[i]?.msg, index, {
-            commandOverride: ui.detailsModeCommandOverride,
-            detailsMode: ui.detailsMode,
-            sections: ui.sections
-          }),
-          virtualRows[index]!.msg
-        ),
+        leadGap: virtualRows[index]!.leadGap,
         subagentsVisible: subagentsDetailsVisible,
         thinkingExpanded: thinkingRowExpanded(thinkingVisibility, virtualRows[index]!.key),
         thinkingVisible: thinkingDetailsVisible,
         toolsVisible: toolsDetailsVisible,
-        userPrompt: ui.theme.brand.prompt,
-        withSeparator: virtualRows[index]!.msg.role === 'user' && firstUserIdx >= 0 && index > firstUserIdx
+        userPrompt: ui.theme.brand.prompt
       }),
     [
       cols,
       detailsVisible,
-      firstUserIdx,
       subagentsDetailsVisible,
       thinkingDetailsVisible,
       thinkingVisibility,
@@ -585,7 +594,7 @@ export function useMainApp(gw: GatewayClient) {
               .map(s => ({
                 id: s.id,
                 status: s.status,
-                title: s.title?.trim() || 'Untitled chat'
+                title: s.title?.trim() ?? ''
               }))
 
             // Only patch when something actually changed. patchUiState always

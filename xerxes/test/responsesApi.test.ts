@@ -43,7 +43,7 @@ test('Responses API translator streams text and thinking while assembling functi
       // still sums to the 12-token prompt the provider measured.
       usage: { inputTokens: 9, outputTokens: 7, cacheReadTokens: 3, reasoningTokens: 2 },
       toolCalls: [{
-        id: 'item_1',
+        id: 'call_1',
         type: 'function',
         function: { name: 'ReadFile', arguments: { path: 'README.md' } },
       }],
@@ -55,7 +55,7 @@ test('Responses API translator streams text and thinking while assembling functi
     cacheReadTokens: 3,
     reasoningTokens: 2,
     toolCalls: [{
-      id: 'item_1',
+      id: 'call_1',
       type: 'function',
       function: { name: 'ReadFile', arguments: { path: 'README.md' } },
     }],
@@ -139,7 +139,7 @@ test('Responses API translator records duplicate output_item.done identities onl
   ])]
 
   expect(deltas[0]?.toolCalls).toEqual([{
-    id: 'item_duplicate',
+    id: 'call_duplicate',
     type: 'function',
     function: { name: 'ReadFile', arguments: { path: 'README.md' } },
   }])
@@ -186,7 +186,9 @@ test('Responses API translator merges entries aliased by item_id and call_id', (
     finishReason: 'tool_calls',
     usage: { inputTokens: 0, outputTokens: 0 },
     toolCalls: [{
-      id: 'item_9',
+      // The provider's call_id is the correlation ID required by a later
+      // function_call_output; item_id only addresses streamed argument events.
+      id: 'call_9',
       type: 'function',
       function: { name: 'ReadFile', arguments: { path: 'a.txt' } },
     }],

@@ -214,6 +214,51 @@ test('detached executions honor FIFO capacity and cancellation cannot be overwri
   expect(registry.cancelExecution(second.id)).toBe(false)
 })
 
+test('shutdown memoizes physical cleanup while callers independently timeout and cancellation escalates', async () => {
+  const gate = deferred<string>()
+  let signal: AbortSignal | undefined
+  let runs = 0
+  const registry = new ExecutionRegistry({
+    runner: (_record, runnerSignal) => {
+      runs += 1
+      signal = runnerSignal
+      return gate.promise
+    },
+  })
+  registry.submit(EntryKind.TOOL, 'running', {}, { executionId: 'running' })
+  await tick()
+
+  await registry.shutdown({ timeoutMs: 0 })
+  expect(registry.runningCount).toBe(1)
+  expect(signal?.aborted).toBe(false)
+
+  const waiting = registry.shutdown({ timeoutMs: 1_000 })
+  let waitingReturned = false
+  void waiting.then(() => {
+    waitingReturned = true
+  })
+  await tick()
+  expect(waitingReturned).toBe(false)
+
+  const escalating = registry.shutdown({ cancelRunning: true, timeoutMs: 0 })
+  await escalating
+  expect(signal?.aborted).toBe(true)
+  expect(registry.getExecution('running')?.status).toBe(ExecutionStatus.CANCELLED)
+  expect(runs).toBe(1)
+
+  gate.resolve('late success')
+  await waiting
+  expect(registry.runningCount).toBe(0)
+})
+
+test('shutdown validates every caller before changing registry state', () => {
+  const registry = new ExecutionRegistry({ runner: record => record.entryName })
+
+  expect(() => registry.shutdown({ timeoutMs: -1 })).toThrow('timeoutMs must be a non-negative integer')
+  expect(() => registry.shutdown({ cancelRunning: 'yes' as unknown as boolean })).toThrow('cancelRunning must be a boolean')
+  expect(registry.submit(EntryKind.TOOL, 'still accepted', {}, { executionId: 'accepted' }).id).toBe('accepted')
+})
+
 test('retention prunes only settled terminal records and shutdown cancels pending work then rejects submissions', async () => {
   let now = 1
   const pending = deferred<string>()

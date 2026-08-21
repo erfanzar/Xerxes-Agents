@@ -5,7 +5,14 @@ import { expect, test } from 'bun:test'
 
 import { MCPClient } from '../src/mcp/client.js'
 import { MCPManager, type MCPClientPort } from '../src/mcp/manager.js'
-import { OAuthToken, refreshToken, type OAuthConfig, type OAuthFetch } from '../src/mcp/oauth.js'
+import {
+  OAuthToken,
+  buildAuthorizeUrl,
+  exchangeCode,
+  refreshToken,
+  type OAuthConfig,
+  type OAuthFetch,
+} from '../src/mcp/oauth.js'
 import { MCPConnectionError } from '../src/mcp/types.js'
 import type {
   MCPPrompt,
@@ -219,6 +226,107 @@ test('MCP HTTP transports reject private and link-local URL literals unless expl
   )
   expect(failure).toBeInstanceOf(MCPConnectionError)
   expect((failure as Error).message).not.toContain('network safety policy')
+})
+
+test('MCP OAuth rejects insecure remote authorization and token endpoints before use', async () => {
+  const insecureAuthorize: OAuthConfig = {
+    authorizeUrl: 'http://oauth.example.test/authorize',
+    clientId: 'client-id',
+    tokenUrl: 'https://oauth.example.test/token',
+  }
+  expect(() => buildAuthorizeUrl(insecureAuthorize, { codeChallenge: 'challenge', state: 'state' }))
+    .toThrow('OAuth authorizeUrl must use HTTPS')
+
+  const insecureToken: OAuthConfig = {
+    authorizeUrl: 'https://oauth.example.test/authorize',
+    clientId: 'client-id',
+    tokenUrl: 'http://oauth.example.test/token',
+  }
+  let requests = 0
+  await expect(exchangeCode(insecureToken, {
+    code: 'code',
+    codeVerifier: 'verifier',
+    fetchImplementation: async () => {
+      requests += 1
+      return new Response(JSON.stringify({ access_token: 'unexpected' }))
+    },
+  })).rejects.toThrow('OAuth tokenUrl must use HTTPS')
+  expect(requests).toBe(0)
+})
+
+test('MCP OAuth permits explicitly opted-in HTTP loopback endpoints only', async () => {
+  const loopbackConfig: OAuthConfig = {
+    allowInsecureLoopback: true,
+    authorizeUrl: 'http://localhost:8787/authorize',
+    clientId: 'client-id',
+    tokenUrl: 'http://[::1]:8787/token',
+  }
+  expect(new URL(buildAuthorizeUrl(loopbackConfig, { codeChallenge: 'challenge', state: 'state' })).protocol)
+    .toBe('http:')
+  await expect(exchangeCode(loopbackConfig, {
+    code: 'code',
+    codeVerifier: 'verifier',
+    fetchImplementation: async input => {
+      expect(String(input)).toBe('http://[::1]:8787/token')
+      return new Response(JSON.stringify({ access_token: 'loopback-token' }), {
+        headers: { 'Content-Type': 'application/json' },
+      })
+    },
+  })).resolves.toMatchObject({ accessToken: 'loopback-token' })
+
+  const privateNetworkConfig: OAuthConfig = {
+    ...loopbackConfig,
+    authorizeUrl: 'http://10.0.0.8/authorize',
+  }
+  expect(() => buildAuthorizeUrl(privateNetworkConfig, { codeChallenge: 'challenge', state: 'state' }))
+    .toThrow('OAuth authorizeUrl must use HTTPS or HTTP on a loopback host')
+})
+
+test('MCP OAuth authorization-code exchange rejects 307 redirects without forwarding credentials', async () => {
+  let requests = 0
+  const fetchImplementation: OAuthFetch = async (_input, init) => {
+    requests += 1
+    expect(init?.redirect).toBe('manual')
+    expect(init?.body).toContain('code=authorization-code')
+    return new Response(null, {
+      status: 307,
+      headers: { Location: 'https://attacker.example.test/collect' },
+    })
+  }
+
+  await expect(exchangeCode({
+    authorizeUrl: 'https://oauth.example.test/authorize',
+    clientId: 'client-id',
+    tokenUrl: 'https://oauth.example.test/token',
+  }, {
+    code: 'authorization-code',
+    codeVerifier: 'verifier',
+    fetchImplementation,
+  })).rejects.toThrow('OAuth token request failed with HTTP 307')
+  expect(requests).toBe(1)
+})
+
+test('MCP OAuth refresh rejects 308 redirects without forwarding the refresh token', async () => {
+  let requests = 0
+  const fetchImplementation: OAuthFetch = async (_input, init) => {
+    requests += 1
+    expect(init?.redirect).toBe('manual')
+    expect(init?.body).toContain('refresh_token=refresh-secret')
+    return new Response(null, {
+      status: 308,
+      headers: { Location: 'https://attacker.example.test/collect' },
+    })
+  }
+
+  await expect(refreshToken({
+    authorizeUrl: 'https://oauth.example.test/authorize',
+    clientId: 'client-id',
+    tokenUrl: 'https://oauth.example.test/token',
+  }, new OAuthToken({
+    accessToken: 'old-access-token',
+    refreshToken: 'refresh-secret',
+  }), { fetchImplementation })).rejects.toThrow('OAuth token request failed with HTTP 308')
+  expect(requests).toBe(1)
 })
 
 test('MCPClient re-initializes an expired Streamable HTTP session and retries the request', async () => {

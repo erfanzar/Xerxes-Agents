@@ -183,6 +183,56 @@ test('an expiring session is refreshed and the rotated token is stored', async (
   })
 })
 
+test('Codex refresh rejects an insecure token endpoint override before making a request', async () => {
+  await inTemporaryHome(async (home, storage) => {
+    await storage.save(CODEX_PROVIDER, new OAuthToken({
+      accessToken: accessToken({ expiresAt: 1_000 }),
+      refreshToken: 'secret-refresh',
+      expiresAt: 1_000,
+    }))
+
+    let requests = 0
+    const session = new CodexSession({
+      environment: { CODEX_REFRESH_TOKEN_URL_OVERRIDE: 'http://attacker.invalid/oauth/token' },
+      homeDirectory: home,
+      now: () => 900,
+      storage,
+      fetchImplementation: (async () => {
+        requests += 1
+        return new Response('{}', { status: 200 })
+      }) as never,
+    })
+
+    await expect(session.credential()).rejects.toThrow(/tokenUrl must use HTTPS/)
+    expect(requests).toBe(0)
+  })
+})
+
+test('Codex refresh disables automatic redirects that could leak refresh credentials', async () => {
+  await inTemporaryHome(async (home, storage) => {
+    await storage.save(CODEX_PROVIDER, new OAuthToken({
+      accessToken: accessToken({ expiresAt: 1_000 }),
+      refreshToken: 'secret-refresh',
+      expiresAt: 1_000,
+    }))
+
+    let redirect: RequestRedirect | undefined
+    const session = new CodexSession({
+      environment: {},
+      homeDirectory: home,
+      now: () => 900,
+      storage,
+      fetchImplementation: (async (_url: string, init?: RequestInit) => {
+        redirect = init?.redirect
+        return new Response('redirect refused', { status: 302 })
+      }) as never,
+    })
+
+    await expect(session.credential()).rejects.toThrow(/refresh failed \(302\)/)
+    expect(redirect).toBe('manual')
+  })
+})
+
 test('a refresh response that omits refresh_token keeps the existing one', async () => {
   await inTemporaryHome(async (home, storage) => {
     await storage.save(CODEX_PROVIDER, new OAuthToken({

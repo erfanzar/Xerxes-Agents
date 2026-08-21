@@ -144,6 +144,51 @@ test('cancellation aborts cooperative runners, retains cancelled state against l
   expect(manager.cancel(first.id)).toBe(false)
 })
 
+test('shutdown memoizes physical cleanup while callers independently timeout and cancellation escalates', async () => {
+  const gate = deferred<string>()
+  let signal: AbortSignal | undefined
+  let runs = 0
+  const manager = new BackgroundSessionManager({
+    runner: (_session, runnerSignal) => {
+      runs += 1
+      signal = runnerSignal
+      return gate.promise
+    },
+  })
+  manager.submit('running', { sessionId: 'running' })
+  await tick()
+
+  await manager.shutdown({ timeoutMs: 0 })
+  expect(manager.runningCount).toBe(1)
+  expect(signal?.aborted).toBe(false)
+
+  const waiting = manager.shutdown({ timeoutMs: 1_000 })
+  let waitingReturned = false
+  void waiting.then(() => {
+    waitingReturned = true
+  })
+  await tick()
+  expect(waitingReturned).toBe(false)
+
+  const escalating = manager.shutdown({ cancelRunning: true, timeoutMs: 0 })
+  await escalating
+  expect(signal?.aborted).toBe(true)
+  expect(manager.get('running')?.status).toBe(BackgroundStatus.CANCELLED)
+  expect(runs).toBe(1)
+
+  gate.resolve('late success')
+  await waiting
+  expect(manager.runningCount).toBe(0)
+})
+
+test('shutdown validates every caller before changing manager state', () => {
+  const manager = new BackgroundSessionManager({ runner: session => session.prompt })
+
+  expect(() => manager.shutdown({ timeoutMs: -1 })).toThrow('timeoutMs must be a non-negative integer')
+  expect(() => manager.shutdown({ cancelRunning: 'yes' as unknown as boolean })).toThrow('cancelRunning must be a boolean')
+  expect(manager.submit('still accepted', { sessionId: 'accepted' }).id).toBe('accepted')
+})
+
 test('completed retention prunes only settled terminal sessions and shutdown rejects new submissions', async () => {
   let now = 1
   const manager = new BackgroundSessionManager({

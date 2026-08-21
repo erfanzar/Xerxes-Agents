@@ -59,6 +59,7 @@ type Sender = (frame: unknown) => Promise<void>
  * processable while the prompt emits incremental `session/update` events.
  */
 export class StdioJsonRpcServer {
+  private readonly promptShutdown = new AbortController()
   private readonly workers = new Set<Promise<void>>()
   private running = true
   private writeQueue: Promise<void> = Promise.resolve()
@@ -97,7 +98,7 @@ export class StdioJsonRpcServer {
       }
     } finally {
       reader.releaseLock()
-      this.server.shutdown()
+      this.stopPrompts()
       await Promise.allSettled([...this.workers])
       await this.writeQueue
     }
@@ -267,7 +268,7 @@ export class StdioJsonRpcServer {
       case 'exit':
         this.running = false
         await this.result(request, { ok: true }, send)
-        this.server.shutdown()
+        this.stopPrompts()
         return
       default:
         if (request.canReply) {
@@ -297,21 +298,47 @@ export class StdioJsonRpcServer {
       : stringParameter(request.params.prompt)
     const worker = this.runPromptWorker(request, sessionId, text, send)
     this.workers.add(worker)
-    void worker.finally(() => this.workers.delete(worker))
+    void worker.then(
+      () => this.workers.delete(worker),
+      () => this.workers.delete(worker),
+    )
   }
 
   private async runPromptWorker(request: ParsedRequest, sessionId: string, text: string, send: Sender): Promise<void> {
-    try {
-      const result = await this.server.prompt(sessionId, text, async event => {
-        await send(sessionUpdate(sessionId, request.canReply ? request.id : null, event))
-      })
-      if (request.canReply) {
-        await send(acpJsonRpcSuccess(request.id, result))
+    let acceptsUpdates = true
+    const prompt = this.server.prompt(sessionId, text, async event => {
+      if (!acceptsUpdates) {
+        return
       }
-    } catch (error) {
-      if (request.canReply) {
-        await send(acpJsonRpcFailure(request.id, ACP_JSON_RPC_ERRORS.internalError, errorMessage(error)))
-      }
+      await send(sessionUpdate(sessionId, request.canReply ? request.id : null, event))
+    })
+    const outcome = await Promise.race([
+      prompt.then(
+        result => ({ kind: 'result' as const, result }),
+        error => ({ kind: 'error' as const, error }),
+      ),
+      aborted(this.promptShutdown.signal).then(async () => {
+        // Let an already-settling handler publish its contractual response;
+        // only detach workers that remain pending after shutdown cancellation.
+        await new Promise(resolve => setTimeout(resolve, 0))
+        return { kind: 'shutdown' as const }
+      }),
+    ])
+    acceptsUpdates = false
+    if (outcome.kind === 'shutdown' || !request.canReply) {
+      return
+    }
+    if (outcome.kind === 'result') {
+      await send(acpJsonRpcSuccess(request.id, outcome.result))
+      return
+    }
+    await send(acpJsonRpcFailure(request.id, ACP_JSON_RPC_ERRORS.internalError, errorMessage(outcome.error)))
+  }
+
+  private stopPrompts(): void {
+    this.server.shutdown()
+    if (!this.promptShutdown.signal.aborted) {
+      this.promptShutdown.abort()
     }
   }
 }
@@ -323,6 +350,13 @@ export async function serveACPStdio(
   write: AcpStdioWriter,
 ): Promise<void> {
   await new StdioJsonRpcServer(server).serve(input, write)
+}
+
+function aborted(signal: AbortSignal): Promise<void> {
+  if (signal.aborted) {
+    return Promise.resolve()
+  }
+  return new Promise(resolve => signal.addEventListener('abort', () => resolve(), { once: true }))
 }
 
 function utf8ByteLength(value: string): number {

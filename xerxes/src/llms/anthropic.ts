@@ -154,7 +154,7 @@ export class AnthropicMessagesClient implements LlmClient {
     })
     if (!response.ok) {
       const body = await response.text()
-      throw new ProviderError('anthropic', `completion request failed (${response.status}): ${body.slice(0, 4_096)}`)
+      throw anthropicHttpError(`completion request failed (${response.status}): ${body.slice(0, 4_096)}`, response)
     }
 
     const completion = parseEvent(await response.text())
@@ -221,7 +221,7 @@ export class AnthropicMessagesClient implements LlmClient {
     })
     if (!response.ok) {
       const body = await response.text()
-      throw new ProviderError('anthropic', `stream request failed (${response.status}): ${body.slice(0, 4_096)}`)
+      throw anthropicHttpError(`stream request failed (${response.status}): ${body.slice(0, 4_096)}`, response)
     }
     if (!response.body) {
       throw new ProviderError('anthropic', 'stream request returned no response body')
@@ -339,6 +339,28 @@ export class AnthropicMessagesClient implements LlmClient {
       throw new ProviderError('anthropic', 'stream ended before message_stop')
     }
   }
+}
+
+/** Preserve HTTP retry metadata without exposing provider headers in the error message. */
+function anthropicHttpError(message: string, response: Response): ProviderError {
+  const retryAfterSeconds = parseRetryAfterHeader(response.headers.get('retry-after'))
+  return new ProviderError('anthropic', message, undefined, {
+    status: response.status,
+    ...(retryAfterSeconds === undefined ? {} : { retryAfterSeconds }),
+  })
+}
+
+/** Parse Retry-After delta-seconds or an HTTP date into a non-negative delay. */
+function parseRetryAfterHeader(value: string | null, now = Date.now()): number | undefined {
+  if (value === null) return undefined
+  const normalized = value.trim()
+  if (/^\d+(?:\.\d+)?$/.test(normalized)) {
+    const seconds = Number(normalized)
+    return Number.isFinite(seconds) ? seconds : undefined
+  }
+  const retryAt = Date.parse(normalized)
+  if (!Number.isFinite(retryAt)) return undefined
+  return Math.max(0, Math.ceil((retryAt - now) / 1_000))
 }
 
 interface PendingToolCall {

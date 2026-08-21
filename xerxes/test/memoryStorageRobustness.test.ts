@@ -1,15 +1,20 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { expect, test } from 'bun:test'
+import { expect, mock, test } from 'bun:test'
 import { Database } from 'bun:sqlite'
 import { createHash } from 'node:crypto'
+import * as nodeFs from 'node:fs'
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 import { FileStorage, SQLiteStorage } from '../src/memory/index.js'
+
+// ESM module namespace objects expose live bindings, so a snapshot of the
+// original fs exports is needed so mock.module can be restored after tests.
+const originalFs = Object.fromEntries(Object.entries(nodeFs)) as typeof nodeFs
 
 function hashOf(key: string): string {
   return createHash('md5').update(key).digest('hex')
@@ -72,6 +77,43 @@ test('two file storage instances on one directory merge their index writes inste
   }
 })
 
+test('long-lived file storage instances see each other\'s writes through read operations', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'xerxes-file-stale-read-'))
+  const root = join(directory, 'store')
+  try {
+    const first = new FileStorage(root)
+    const second = new FileStorage(root)
+
+    // Each instance starts with an empty in-memory index.
+    expect(first.exists('shared')).toBeFalse()
+    expect(second.listKeys()).toEqual([])
+
+    // A write through one instance becomes visible to the other without
+    // creating a fresh FileStorage object.
+    expect(first.save('shared', { writer: 'first' })).toBeTrue()
+    expect(second.exists('shared')).toBeTrue()
+    expect(second.load('shared')).toEqual({ writer: 'first' })
+    expect(second.listKeys()).toEqual(['shared'])
+
+    // Overwriting a key through the second instance is reflected in the first.
+    expect(second.save('shared', { writer: 'second' })).toBeTrue()
+    expect(first.load('shared')).toEqual({ writer: 'second' })
+    expect(first.listKeys()).toEqual(['shared'])
+
+    // New keys and deletes are also observed on read operations.
+    expect(second.save('only-second', 2)).toBeTrue()
+    expect(first.exists('only-second')).toBeTrue()
+    expect(first.listKeys().sort()).toEqual(['only-second', 'shared'])
+
+    expect(first.delete('shared')).toBeTrue()
+    expect(second.exists('shared')).toBeFalse()
+    expect(second.load('shared')).toBeUndefined()
+    expect(second.listKeys()).toEqual(['only-second'])
+  } finally {
+    rmSync(directory, { force: true, recursive: true })
+  }
+})
+
 test('concurrent file storage index writers preserve every disjoint entry', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'xerxes-file-concurrent-'))
   const root = join(directory, 'store')
@@ -101,6 +143,48 @@ test('concurrent file storage index writers preserve every disjoint entry', asyn
         expect(restored.load(`writer-${writer}-${index}`)).toBe(index)
       }
     }
+  } finally {
+    rmSync(directory, { force: true, recursive: true })
+  }
+})
+
+test('concurrent same-key file storage saves leave one complete indexed payload', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'xerxes-file-same-key-'))
+  const root = join(directory, 'store')
+  const workerPath = join(directory, 'same-key-writer.ts')
+  const barrier = join(directory, 'start')
+  try {
+    const storageModule = pathToFileURL(resolve(import.meta.dir, '../src/memory/storage.ts')).href
+    writeFileSync(workerPath, `
+      import { existsSync } from 'node:fs'
+      import { FileStorage } from ${JSON.stringify(storageModule)}
+      const [directory, barrier, writer] = process.argv.slice(2)
+      while (!existsSync(barrier)) await Bun.sleep(1)
+      const storage = new FileStorage(directory)
+      const value = { writer, content: writer.repeat(100_000) }
+      if (!storage.save('shared-key', value)) process.exit(2)
+    `, 'utf8')
+    const writers = ['a', 'b', 'c', 'd']
+    const workers = writers.map(writer => Bun.spawn({
+      cmd: [process.execPath, 'run', workerPath, root, barrier, writer],
+      stdout: 'pipe',
+      stderr: 'pipe',
+    }))
+    writeFileSync(barrier, 'start', 'utf8')
+    const results = await Promise.all(workers.map(async worker => ({
+      exitCode: await worker.exited,
+      stderr: await new Response(worker.stderr).text(),
+    })))
+    expect(results).toEqual(writers.map(() => ({ exitCode: 0, stderr: '' })))
+
+    const restored = new FileStorage(root)
+    expect(restored.listKeys()).toEqual(['shared-key'])
+    const value = restored.load('shared-key') as { writer: string; content: string }
+    expect(writers).toContain(value.writer)
+    expect(value.content).toBe(value.writer.repeat(100_000))
+    expect(JSON.parse(readFileSync(join(root, '_index.json'), 'utf8'))).toEqual({
+      'shared-key': `${hashOf('shared-key')}.json`,
+    })
   } finally {
     rmSync(directory, { force: true, recursive: true })
   }
@@ -360,6 +444,178 @@ test('SQLite storage migrates a legacy user_version=0 database with an existing 
     const check = new Database(path)
     expect((check.query('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(1)
     check.close()
+  } finally {
+    rmSync(directory, { force: true, recursive: true })
+  }
+})
+
+test('file storage save keeps its boolean contract when finally cleanup throws', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'xerxes-file-finally-cleanup-'))
+  const root = join(directory, 'store')
+  const originalRmSync = nodeFs.rmSync
+  let cleanupAttempts = 0
+  try {
+    mock.module('node:fs', () => ({
+      ...originalFs,
+      rmSync: (path: string, options?: { force?: boolean; recursive?: boolean }) => {
+        // Target only payload temp/backup cleanup, not index persistence cleanup.
+        if (
+          typeof path === 'string' &&
+          !path.includes('_index.json') &&
+          (path.endsWith('.tmp') || path.endsWith('.replaced'))
+        ) {
+          cleanupAttempts += 1
+          throw new Error(`cleanup refused: ${path}`)
+        }
+        return originalRmSync(path, options)
+      },
+    }))
+    const storage = new FileStorage(root)
+
+    // The save must succeed (data and index are committed) and return a boolean
+    // even though the defensive finally cleanup rejects every rmSync call.
+    expect(storage.save('key', 'value')).toBeTrue()
+    expect(cleanupAttempts).toBeGreaterThan(0)
+    expect(storage.load('key')).toBe('value')
+
+    const reopened = new FileStorage(root)
+    expect(reopened.load('key')).toBe('value')
+  } finally {
+    // mock.restore() does not reset mock.module overrides; restore explicitly.
+    mock.module('node:fs', () => originalFs)
+    originalRmSync(directory, { force: true, recursive: true })
+  }
+})
+
+test('file storage delete and clear keep their committed index when backup cleanup fails', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'xerxes-file-delete-cleanup-'))
+  const root = join(directory, 'store')
+  const originalRmSync = nodeFs.rmSync
+  let cleanupAttempts = 0
+  try {
+    mock.module('node:fs', () => ({
+      ...originalFs,
+      rmSync: (path: string, options?: { force?: boolean; recursive?: boolean }) => {
+        // Target only post-commit payload backup cleanup, not index persistence.
+        if (typeof path === 'string' && path.endsWith('.deleted')) {
+          cleanupAttempts += 1
+          throw new Error(`cleanup refused: ${path}`)
+        }
+        return originalRmSync(path, options)
+      },
+    }))
+    const storage = new FileStorage(root)
+    expect(storage.save('a', 1)).toBeTrue()
+    expect(storage.save('b', 2)).toBeTrue()
+
+    // Delete must commit even though backup removal fails.
+    expect(storage.delete('a')).toBeTrue()
+    expect(cleanupAttempts).toBeGreaterThan(0)
+    expect(storage.exists('a')).toBeFalse()
+    expect(storage.load('a')).toBeUndefined()
+
+    const afterDelete = new FileStorage(root)
+    expect(afterDelete.listKeys().sort()).toEqual(['b'])
+    expect(afterDelete.load('a')).toBeUndefined()
+    expect(afterDelete.load('b')).toBe(2)
+
+    // Clear must also commit even though backup removal fails.
+    expect(storage.clear()).toBe(1)
+    expect(storage.listKeys()).toEqual([])
+    expect(storage.exists('b')).toBeFalse()
+
+    const afterClear = new FileStorage(root)
+    expect(afterClear.listKeys()).toEqual([])
+  } finally {
+    // mock.restore() does not reset mock.module overrides; restore explicitly.
+    mock.module('node:fs', () => originalFs)
+    originalRmSync(directory, { force: true, recursive: true })
+  }
+})
+
+test('file storage validates lock ownership before removing a stale-looking lock', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'xerxes-live-lock-'))
+  const root = join(directory, 'store')
+  try {
+    const storage = new FileStorage(root, { lockTimeoutMs: 2_000, staleLockMs: 100 })
+    const lock = join(root, '_index.json.lock')
+    mkdirSync(lock)
+    const old = new Date(Date.now() - 60_000)
+    utimesSync(lock, old, old)
+
+    // Simulate a live owner that keeps refreshing the lock even though its
+    // mtime started out stale. The save must wait for ownership to expire,
+    // not steal the lock and interleave with a live transaction.
+    const refresher = Bun.spawn(
+      [
+        process.execPath,
+        'run',
+        '-e',
+        `const fs = require('node:fs'); const lock = process.argv[2]; const id = setInterval(() => { try { fs.utimesSync(lock, new Date(), new Date()); } catch { process.exit(0); } }, 25); setTimeout(() => { clearInterval(id); process.exit(0); }, 300);`,
+        lock,
+      ],
+      { stdout: 'ignore', stderr: 'ignore' },
+    )
+
+    // Give the refresher a moment to start so the lock looks live during validation.
+    await Bun.sleep(20)
+
+    const before = Date.now()
+    expect(storage.save('after-live', 42)).toBeTrue()
+    const elapsed = Date.now() - before
+    expect(elapsed).toBeGreaterThanOrEqual(200)
+
+    await refresher.exited
+
+    // The lock was not stolen mid-refresh: the payload and index are consistent.
+    expect(new FileStorage(root).load('after-live')).toBe(42)
+  } finally {
+    rmSync(directory, { force: true, recursive: true })
+  }
+})
+
+test('file storage refreshes its lock during a long transaction so it is not stolen', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'xerxes-lock-heartbeat-'))
+  const root = join(directory, 'store')
+  const workerPath = join(directory, 'holder.ts')
+  try {
+    const storage = new FileStorage(root, { lockTimeoutMs: 2_000, staleLockMs: 100 })
+    const storageModule = pathToFileURL(resolve(import.meta.dir, '../src/memory/storage.ts')).href
+    writeFileSync(
+      workerPath,
+      `
+      import { FileStorage } from ${JSON.stringify(storageModule)}
+      const [root] = process.argv.slice(2)
+      const storage = new FileStorage(root, { lockTimeoutMs: 2_000, staleLockMs: 100 })
+      const lock = (storage as any).withIndexLock.bind(storage)
+      lock((touchLock: () => void) => {
+        const end = Date.now() + 350
+        while (Date.now() < end) {
+          touchLock()
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10)
+        }
+      })
+    `,
+      'utf8',
+    )
+
+    const worker = Bun.spawn(
+      [process.execPath, 'run', workerPath, root],
+      { stdout: 'pipe', stderr: 'pipe' },
+    )
+    await Bun.sleep(50)
+
+    const before = Date.now()
+    expect(storage.save('key', 1)).toBeTrue()
+    const elapsed = Date.now() - before
+    expect(elapsed).toBeGreaterThanOrEqual(250)
+
+    const [stderr, exitCode] = await Promise.all([
+      new Response(worker.stderr).text(),
+      worker.exited,
+    ])
+    expect(exitCode, stderr).toBe(0)
+    expect(new FileStorage(root).load('key')).toBe(1)
   } finally {
     rmSync(directory, { force: true, recursive: true })
   }

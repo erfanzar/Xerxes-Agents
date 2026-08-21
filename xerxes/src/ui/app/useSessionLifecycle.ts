@@ -119,6 +119,21 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
   // Session switches may overlap when a user selects twice before the first
   // RPC settles. Only the newest request is allowed to replace visible state.
   const switchGenerationRef = useRef(0)
+  // Gateway create/resume/activate calls commit the client's active session key.
+  // Serialize those calls so a stale response cannot commit its key after the
+  // newest request has already made the visible UI point at another session.
+  const clientSwitchTailRef = useRef<Promise<void>>(Promise.resolve())
+  const runClientSwitch = useCallback(<T,>(generation: number, request: () => Promise<T>): Promise<null | T> => {
+    const queued = clientSwitchTailRef.current.then(() =>
+      generation === switchGenerationRef.current ? request() : null
+    )
+    clientSwitchTailRef.current = queued.then(
+      () => undefined,
+      () => undefined
+    )
+
+    return queued
+  }, [])
 
   // Native sessions are durable records rather than closeable daemon handles.
   // Keep callers' lifecycle sequencing intact without sending the retired
@@ -176,7 +191,9 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
         if (generation !== switchGenerationRef.current) return null
       }
 
-      const r = await rpc<SessionCreateResponse>('session.create', { cols: colsRef.current })
+      const r = await runClientSwitch(generation, () =>
+        rpc<SessionCreateResponse>('session.create', { cols: colsRef.current })
+      )
       if (generation !== switchGenerationRef.current) return null
 
       if (!r) {
@@ -242,7 +259,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
 
       return r.session_id
     },
-    [closeSession, colsRef, panel, resetSession, rpc, setHistoryItems, setSessionStartedAt, sys]
+    [closeSession, colsRef, panel, resetSession, rpc, runClientSwitch, setHistoryItems, setSessionStartedAt, sys]
   )
 
   const newSession = useCallback(
@@ -265,7 +282,9 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
       patchOverlayState({ sessions: false })
       patchUiState({ status: 'switching session…' })
 
-      gw.request<SessionActivateResponse>('session.activate', { session_id: id })
+      runClientSwitch(generation, () =>
+        gw.request<SessionActivateResponse>('session.activate', { session_id: id })
+      )
         .then(raw => {
           if (generation !== switchGenerationRef.current) return
           const r = asRpcResult<SessionActivateResponse>(raw)
@@ -301,7 +320,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
           patchUiState({ status: 'ready' })
         })
     },
-    [gw, resetSession, scrollRef, setHistoryItems, setSessionStartedAt, sys]
+    [gw, resetSession, runClientSwitch, scrollRef, setHistoryItems, setSessionStartedAt, sys]
   )
 
   const resumeById = useCallback(
@@ -321,7 +340,9 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
 
         const previousSid = getUiState().sid
 
-        gw.request<SessionResumeResponse>('session.resume', { cols: colsRef.current, session_id: id })
+        runClientSwitch(generation, () =>
+          gw.request<SessionResumeResponse>('session.resume', { cols: colsRef.current, session_id: id })
+        )
           .then(raw => {
             if (generation !== switchGenerationRef.current) return
             const r = asRpcResult<SessionResumeResponse>(raw)
@@ -365,7 +386,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
           })
       })
     },
-    [closeSession, colsRef, gw, panel, resetSession, rpc, scrollRef, setHistoryItems, setSessionStartedAt, sys]
+    [closeSession, colsRef, gw, panel, resetSession, rpc, runClientSwitch, scrollRef, setHistoryItems, setSessionStartedAt, sys]
   )
 
   const guardBusySessionSwitch = useCallback(

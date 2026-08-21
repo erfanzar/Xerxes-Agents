@@ -22,7 +22,22 @@ import type { Msg, PanelSection } from '../../../types.js'
 import type { StatusBarMode } from '../../interfaces.js'
 import { patchOverlayState } from '../../overlayStore.js'
 import { patchUiState } from '../../uiStore.js'
-import type { SlashCommand } from '../types.js'
+import type { SlashCommand, SlashRunCtx } from '../types.js'
+
+/**
+ * Persist a display preference and surface daemon failures as a transcript
+ * note. A swallowed rejection leaves the daemon and the TUI believing
+ * different settings with no signal to the user.
+ */
+const persistDisplayPref = (ctx: SlashRunCtx, key: string, value: string, label: string): void => {
+  ctx.gateway.rpc<ConfigSetResponse>('config.set', { key, value }).catch(error => {
+    if (ctx.stale()) {
+      return
+    }
+    const detail = error instanceof Error ? error.message : String(error)
+    ctx.transcript.sys(`${label}: could not save preference (${detail})`)
+  })
+}
 
 const flagFromArg = (arg: string, current: boolean): boolean | null => {
   if (!arg) {
@@ -208,7 +223,7 @@ export const coreCommands: SlashCommand[] = [
       }
 
       patchUiState({ mouseTracking: next })
-      ctx.gateway.rpc<ConfigSetResponse>('config.set', { key: 'mouse', value: next }).catch(() => {})
+      persistDisplayPref(ctx, 'mouse', next, 'mouse')
 
       queueMicrotask(() => ctx.transcript.sys(`mouse tracking ${next}`))
     }
@@ -325,7 +340,7 @@ export const coreCommands: SlashCommand[] = [
       }
 
       patchUiState({ compact: next })
-      ctx.gateway.rpc<ConfigSetResponse>('config.set', { key: 'compact', value: next ? 'on' : 'off' }).catch(() => {})
+      persistDisplayPref(ctx, 'compact', next ? 'on' : 'off', 'ui-compact')
 
       queueMicrotask(() => ctx.transcript.sys(`transcript compact display ${next ? 'on' : 'off'}`))
     }
@@ -373,9 +388,7 @@ export const coreCommands: SlashCommand[] = [
         const { [first]: _drop, ...rest } = ui.sections
 
         patchUiState({ sections: mode ? { ...rest, [first]: mode } : rest })
-        gateway
-          .rpc<ConfigSetResponse>('config.set', { key: `details_mode.${first}`, value: mode ?? '' })
-          .catch(() => {})
+        persistDisplayPref(ctx, `details_mode.${first}`, mode ?? '', `details ${first}`)
         transcript.sys(`details ${first}: ${mode ?? 'reset'}`)
 
         return
@@ -390,7 +403,7 @@ export const coreCommands: SlashCommand[] = [
       const sections = Object.fromEntries(SECTION_NAMES.map(section => [section, next]))
 
       patchUiState({ detailsMode: next, detailsModeCommandOverride: true, sections })
-      gateway.rpc<ConfigSetResponse>('config.set', { key: 'details_mode', value: next }).catch(() => {})
+      persistDisplayPref(ctx, 'details_mode', next, 'details')
       transcript.sys(`details: ${next}`)
     }
   },
@@ -618,7 +631,7 @@ export const coreCommands: SlashCommand[] = [
       }
 
       patchUiState({ statusBar: next })
-      ctx.gateway.rpc<ConfigSetResponse>('config.set', { key: 'statusbar', value: next }).catch(() => {})
+      persistDisplayPref(ctx, 'statusbar', next, 'statusbar')
 
       queueMicrotask(() => ctx.transcript.sys(`status bar ${next}`))
     }
@@ -693,7 +706,7 @@ export const coreCommands: SlashCommand[] = [
             ctx.transcript.sys('nothing to undo')
           }
         })
-      )
+      ).catch(ctx.guardedErr)
     }
   },
 
@@ -720,7 +733,7 @@ export const coreCommands: SlashCommand[] = [
           ctx.transcript.setHistoryItems((prev: Msg[]) => ctx.transcript.trimLastExchange(prev))
           ctx.transcript.send(last)
         })
-      )
+      ).catch(ctx.guardedErr)
     }
   }
 ]

@@ -303,7 +303,10 @@ export function useSubmission(opts: UseSubmissionOptions) {
 
       if (mode === 'steer' && live.sid) {
         const sid = live.sid
-        const turnStartedAt = getTurnPulse().startedAt
+        // Anchor on the liveness epoch, not the wall-clock start: a turn that
+        // ends and restarts within the steer RPC window can share a
+        // `startedAt` millisecond, but never an epoch.
+        const turnEpoch = getTurnPulse().epoch
         const fallback = (queuedNote: string, settledNote: string) => {
           if (getUiState().sid !== sid) {
             return
@@ -343,7 +346,7 @@ export function useSubmission(opts: UseSubmissionOptions) {
             // A steer is still authored user input. The daemon intentionally
             // hides its internal replay marker, so the TUI owns this one
             // visible, standard user transcript block.
-            if (getUiState().busy && getTurnPulse().startedAt === turnStartedAt) {
+            if (getUiState().busy && getTurnPulse().epoch === turnEpoch) {
               turnController.recordUserSteer(message.displayText)
             } else {
               // A same-session turn may finish (or a new one may begin)

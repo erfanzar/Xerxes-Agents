@@ -213,6 +213,81 @@ test('ACP EOF aborts active runner prompts before awaiting transport workers', a
   expect(output.some(line => line.includes('ACP prompt cancelled'))).toBe(true)
 })
 
+test('ACP shutdown does not await a non-settling prompt handler', async () => {
+  const started = Promise.withResolvers<void>()
+  const neverSettles = Promise.withResolvers<unknown>()
+  const server = new AcpServer({
+    promptHandler: () => {
+      started.resolve()
+      return neverSettles.promise
+    },
+  })
+  const sessionId = String(server.openSession('/tmp').session_id)
+  const encoder = new TextEncoder()
+  let controller: ReadableStreamDefaultController<Uint8Array> | undefined
+  const input = new ReadableStream<Uint8Array>({
+    start(streamController) {
+      controller = streamController
+      streamController.enqueue(encoder.encode(`${JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'session/prompt',
+        params: { session_id: sessionId, text: 'wait forever' },
+      })}\n`))
+    },
+  })
+  const output: string[] = []
+  const serving = serveACPStdio(server, input, line => {
+    output.push(line)
+  })
+
+  await started.promise
+  controller?.enqueue(encoder.encode('{"jsonrpc":"2.0","id":2,"method":"shutdown","params":{}}\n'))
+  controller?.close()
+
+  await expect(Promise.race([
+    serving.then(() => 'done'),
+    Bun.sleep(500).then(() => 'timeout'),
+  ])).resolves.toBe('done')
+
+  const frames = output.map(line => JSON.parse(line) as Record<string, unknown>)
+  expect(frames.find(frame => frame.id === 2)?.result).toEqual({ ok: true })
+  expect(frames.some(frame => frame.id === 1)).toBe(false)
+  expect(server.sessions.get(sessionId)?.cancelled).toBe(true)
+})
+
+test('ACP prompt worker cleanup observes writer rejection', async () => {
+  const unhandled: unknown[] = []
+  const onUnhandled = (reason: unknown) => { unhandled.push(reason) }
+  process.on('unhandledRejection', onUnhandled)
+  try {
+    const server = new AcpServer({
+      promptHandler: async ({ emit }) => {
+        await emit?.({ kind: 'text_delta', text: 'update' })
+        return { ok: true }
+      },
+    })
+    const sessionId = String(server.openSession('/tmp').session_id)
+    const input = readableChunks([
+      `${JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'session/prompt',
+        params: { session_id: sessionId, text: 'write' },
+      })}\n`,
+    ])
+
+    await serveACPStdio(server, input, async () => {
+      throw new Error('writer rejected')
+    })
+    await Bun.sleep(20)
+
+    expect(unhandled).toEqual([])
+  } finally {
+    process.removeListener('unhandledRejection', onUnhandled)
+  }
+})
+
 test('ACP stdio transport rejects an unterminated oversized frame and stops reading', async () => {
   const server = new AcpServer({ promptHandler: () => ({ ok: true }) })
   const output: string[] = []

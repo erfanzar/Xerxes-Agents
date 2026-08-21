@@ -196,7 +196,20 @@ describe('turn pulse stamping', () => {
     beginTurnPulse(1_000)
     resetTurnState()
 
-    expect(getTurnPulse()).toEqual({ lastDeltaAt: 0, startedAt: 0 })
+    expect(getTurnPulse()).toMatchObject({ lastDeltaAt: 0, startedAt: 0 })
+  })
+
+  it('bumps the epoch for every new liveness window, even within one millisecond', () => {
+    beginTurnPulse(1_000)
+    const first = getTurnPulse().epoch
+
+    endTurnPulse()
+    // Same wall-clock start: only the epoch can tell this window apart from
+    // the previous one (steer anchoring relies on this).
+    beginTurnPulse(1_000)
+
+    expect(getTurnPulse().startedAt).toBe(1_000)
+    expect(getTurnPulse().epoch).toBe(first + 1)
   })
 })
 
@@ -226,7 +239,7 @@ describe('coarse liveness gate', () => {
     patchTurnState({ streaming: 'partial' })
     patchUiState({ busy: false })
 
-    expect(getTurnPulse()).toEqual({ lastDeltaAt: 0, startedAt: 0 })
+    expect(getTurnPulse()).toMatchObject({ lastDeltaAt: 0, startedAt: 0 })
   })
 
   it('does not re-notify subscribers on every delta', () => {

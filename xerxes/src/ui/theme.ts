@@ -9,6 +9,21 @@
 // terminals without truecolor. `fromSkin` lets the daemon push live skin
 // overrides later.
 
+// ── Derafsh Kaviani emblem palette ──────────────────────────────────────
+//
+// The boot mark animates a blue → purple → gold gradient. These are the
+// source constants for it, owned here so the transcript can reuse the same
+// hues: the emblem is meant to read as a legend for the voices below it.
+// `banner.ts` imports them rather than keeping a private copy.
+export const DARK_DERAFSH_BLUE = '#6ea8fe'
+export const DARK_DERAFSH_PURPLE = '#b18be8'
+export const DARK_DERAFSH_GOLD = '#d8ae58'
+export const DARK_DERAFSH_BRIDGE = '#9fb8d8'
+export const LIGHT_DERAFSH_BLUE = '#1f64b5'
+export const LIGHT_DERAFSH_PURPLE = '#7047b5'
+export const LIGHT_DERAFSH_GOLD = '#8a6200'
+export const LIGHT_DERAFSH_BRIDGE = '#466c91'
+
 export interface ThemeColors {
   primary: string
   accent: string
@@ -19,6 +34,19 @@ export interface ThemeColors {
   // Xerxes three-voice roles from the daemon skin payload.
   toolName: string
   system: string
+
+  // Transcript voices. Deliberately outside `themeForMode`'s override list:
+  // interaction mode answers "what am I doing", voice answers "who is
+  // speaking". Smearing the mode accent over these is what flattened the
+  // whole transcript to one gray.
+  userBar: string
+  userText: string
+  thinking: string
+
+  // Brand signal for chrome (panel frames, titles, the selected completion).
+  // Same reason as above — these must survive every interaction mode.
+  brandGold: string
+  brandLapis: string
 
   completionBg: string
   completionCurrentBg: string
@@ -46,6 +74,11 @@ export interface ThemeColors {
   diffRemoved: string
   diffAddedWord: string
   diffRemovedWord: string
+  /** Row backgrounds behind +/- lines in the F7 diff viewer. */
+  diffAddedBg: string
+  diffRemovedBg: string
+  /** Hunk-header accent in the F7 diff viewer. */
+  diffHunk: string
 
   shellDollar: string
 }
@@ -104,6 +137,10 @@ const ANSI_NORMALIZED_FOREGROUNDS: readonly (keyof ThemeColors)[] = [
   'accent',
   'toolName',
   'system',
+  'userBar',
+  'userText',
+  'brandGold',
+  'brandLapis',
   'statusFg',
   'statusGood',
   'statusWarn',
@@ -112,7 +149,7 @@ const ANSI_NORMALIZED_FOREGROUNDS: readonly (keyof ThemeColors)[] = [
   'shellDollar'
 ]
 
-const ANSI_MUTED_FOREGROUNDS: readonly (keyof ThemeColors)[] = ['muted', 'sessionLabel', 'sessionBorder']
+const ANSI_MUTED_FOREGROUNDS: readonly (keyof ThemeColors)[] = ['muted', 'sessionLabel', 'sessionBorder', 'thinking']
 
 function xtermEightBitRgb(colorNumber: number): [number, number, number] {
   if (colorNumber >= 232) {
@@ -236,8 +273,15 @@ export const DARK_THEME: Theme = {
     border: '#333333',
     text: '#e9e9e9',
     muted: '#737373',
-    toolName: '#c9c9c9',
+    toolName: '#7ea9e0',
     system: '#a98ad4',
+
+    userBar: DARK_DERAFSH_GOLD,
+    userText: '#f0e4cd',
+    thinking: '#8b7fa3',
+
+    brandGold: DARK_DERAFSH_GOLD,
+    brandLapis: DARK_DERAFSH_BLUE,
 
     completionBg: '#111111',
     completionCurrentBg: '#1a1a1a',
@@ -265,6 +309,9 @@ export const DARK_THEME: Theme = {
     diffRemoved: 'rgb(245,202,210)',
     diffAddedWord: 'rgb(131,201,157)',
     diffRemovedWord: 'rgb(221,124,136)',
+    diffAddedBg: '#14251b',
+    diffRemovedBg: '#2a171b',
+    diffHunk: '#56c2d6',
 
     shellDollar: '#d8ae58'
   },
@@ -283,6 +330,13 @@ export const LIGHT_THEME: Theme = {
     muted: '#526579',
     toolName: '#31526f',
     system: '#6b46b5',
+
+    userBar: LIGHT_DERAFSH_GOLD,
+    userText: '#3a2f16',
+    thinking: '#5b4f76',
+
+    brandGold: LIGHT_DERAFSH_GOLD,
+    brandLapis: LIGHT_DERAFSH_BLUE,
 
     completionBg: '#f4f7fb',
     completionCurrentBg: mix('#f4f7fb', '#006f94', 0.18),
@@ -310,6 +364,9 @@ export const LIGHT_THEME: Theme = {
     diffRemoved: 'rgb(250,207,216)',
     diffAddedWord: 'rgb(25,122,79)',
     diffRemovedWord: 'rgb(180,35,63)',
+    diffAddedBg: mix('#f4f7fb', '#197a4f', 0.14),
+    diffRemovedBg: mix('#f4f7fb', '#b4233f', 0.12),
+    diffHunk: '#0e7490',
 
     shellDollar: '#006f94'
   },
@@ -573,6 +630,18 @@ const interactionPaletteMode = (mode?: string): InteractionPaletteMode =>
  * skin. Code is deliberately neutral gray; researcher, plan, and objective
  * use blue, gold, and purple respectively. Semantic colors (success, warning,
  * error, and the amber Derafsh brand) stay stable across mode changes.
+ *
+ * Two roles are deliberately NOT overridden here, and adding them back would
+ * undo the whole voice system:
+ *
+ * - `primary` carries markdown's h2/h3 and bold, while `accent` carries h1.
+ *   Setting both to the mode accent collapsed three heading levels into one
+ *   flat gray in `code` mode.
+ * - `label` is a panel-header role; the user transcript band reads `userText`.
+ *
+ * The voice roles (`userBar`, `userText`, `toolName`, `system`, `thinking`)
+ * and the brand roles (`brandGold`, `brandLapis`) must never be listed below.
+ * Mode identity lives in `accent`, `border`, and the surfaces.
  */
 export function themeForMode(theme: Theme, mode?: string): Theme {
   const light = (backgroundLuminance(theme.color.statusBg) ?? 0) >= LUMA_LIGHT_THRESHOLD
@@ -589,14 +658,12 @@ export function themeForMode(theme: Theme, mode?: string): Theme {
     ...theme,
     color: {
       ...theme.color,
-      primary: accent,
       accent,
       border,
       completionBg: panelSurface,
       completionCurrentBg: activeSurface,
       completionMetaBg: panelSurface,
       completionMetaCurrentBg: activeSurface,
-      label: accent,
       sessionBorder: border,
       statusBg: backgroundSurface,
       selectionBg: selection,
@@ -642,6 +709,18 @@ export function fromSkin(
         toolName: r('tool_name') ?? d.color.toolName,
         system: r('system') ?? d.color.system,
 
+        // Voice + brand roles are derived rather than given their own wire
+        // keys: `ROLE_NAMES` is a daemon contract and should not grow for a
+        // client-side concern. Deriving also keeps the `mono` skin genuinely
+        // monochrome for free — it supplies gray roles, so the voices go gray
+        // with it, which is exactly what that accessibility skin promises.
+        userBar: r('warn') ?? d.color.userBar,
+        userText: r('text') ?? d.color.userText,
+        thinking: mix(muted, r('system') ?? d.color.system, 0.5),
+
+        brandGold: r('warn') ?? d.color.brandGold,
+        brandLapis: r('system') ?? d.color.brandLapis,
+
         completionBg,
         completionCurrentBg: mix(completionBg, primary, 0.25),
         completionMetaBg: completionBg,
@@ -668,6 +747,9 @@ export function fromSkin(
         diffRemoved: d.color.diffRemoved,
         diffAddedWord: d.color.diffAddedWord,
         diffRemovedWord: d.color.diffRemovedWord,
+        diffAddedBg: d.color.diffAddedBg,
+        diffRemovedBg: d.color.diffRemovedBg,
+        diffHunk: d.color.diffHunk,
 
         shellDollar: accent
       },

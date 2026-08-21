@@ -292,12 +292,19 @@ export function providerModel(model: string, providerName: ProviderName): string
 }
 
 export function resolveProvider(model: string, overrides: ProviderOverrides = {}): ProviderName {
-  const configured = typeof overrides.provider === 'string' ? overrides.provider : overrides.provider_type
-  if (typeof configured === 'string') {
+  const configKey = typeof overrides.provider === 'string' ? 'provider' : 'provider_type'
+  const configured = overrides[configKey]
+  // An empty string is an unset override (many callers default to ''), not an
+  // unknown provider name — fall through to automatic routing like `undefined`.
+  if (typeof configured === 'string' && configured.trim()) {
     const normalized = configured.toLowerCase().replaceAll('_', '-')
     const alias = PROVIDER_ALIASES[normalized]
     if (alias) return alias
     if (isProviderName(normalized)) return normalized
+    throw new ConfigurationError(
+      configKey,
+      `unknown provider '${configured}'; omit provider/provider_type to enable automatic model routing`,
+    )
   }
 
   const baseUrl = typeof overrides.base_url === 'string'

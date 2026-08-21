@@ -987,6 +987,7 @@ function daemonRuntime(
       skills: host.skillRegistry?.all().length ?? 0,
       tools: activeToolCount,
     }),
+    backgroundCommands,
     shutdown: () => subagentHost?.manager.shutdown(),
     onSessionEvict: sessionId => {
       subagentHost?.cancelSource(sessionId);

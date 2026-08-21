@@ -184,6 +184,52 @@ test('Ollama native completion posts stream false and returns the complete respo
   })
 })
 
+test('Ollama completion assigns occurrence-stable unique IDs to repeated identical id-less tool calls', async () => {
+  const client = new OllamaClient({
+    fetchImplementation: async () => Response.json({
+      message: {
+        role: 'assistant',
+        content: '',
+        tool_calls: [
+          { function: { name: 'ReadFile', arguments: { path: 'README.md' } } },
+          { function: { name: 'ReadFile', arguments: { path: 'README.md' } } },
+        ],
+      },
+      done: true,
+    }),
+  })
+
+  const completion = await client.complete({
+    model: 'llama3.3',
+    messages: [{ role: 'user', content: 'Read it twice.' }],
+  })
+
+  expect(completion.toolCalls).toHaveLength(2)
+  expect(completion.toolCalls[0]?.id).toMatch(/^call_[0-9a-f]{16}$/)
+  expect(completion.toolCalls[1]?.id).toBe(`${completion.toolCalls[0]?.id}#2`)
+})
+
+test('Ollama stream assigns unique IDs by occurrence across tool-call chunks', async () => {
+  const repeatedCall = { function: { name: 'ReadFile', arguments: { path: 'README.md' } } }
+  const client = new OllamaClient({
+    fetchImplementation: async () => ndjsonResponse([
+      { message: { role: 'assistant', content: '', tool_calls: [repeatedCall] } },
+      { message: { role: 'assistant', content: '', tool_calls: [repeatedCall] } },
+      { done: true },
+    ]),
+  })
+
+  const events = await collect(client.stream({
+    model: 'llama3.3',
+    messages: [{ role: 'user', content: 'Read it twice.' }],
+  })) as Array<{ toolCalls?: Array<{ id: string }> }>
+  const ids = events.flatMap(event => event.toolCalls?.map(call => call.id) ?? [])
+
+  expect(ids).toHaveLength(2)
+  expect(ids[0]).toMatch(/^call_[0-9a-f]{16}$/)
+  expect(ids[1]).toBe(`${ids[0]}#2`)
+})
+
 test('Ollama completion normalizes a tool-call finish reason', async () => {
   const client = new OllamaClient({
     fetchImplementation: async () => Response.json({

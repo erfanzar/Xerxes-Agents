@@ -188,6 +188,12 @@ export interface TurnRunControls {
   readonly displayText?: string;
   /** Validated image attachments carried into the user message as content parts. */
   readonly images?: readonly TurnImage[];
+  /**
+   * Per-message crash journal for state-managing runners. When a runner owns
+   * session.messages it must record each appended message so a crash between
+   * tool calls does not lose the whole turn.
+   */
+  readonly journal?: TranscriptMessageJournalAppend;
 }
 
 export interface SubmitTurnOptions {
@@ -301,7 +307,13 @@ export interface DaemonRuntime {
   ): Promise<void>;
 }
 
+export interface DaemonBackgroundCommandLifecycle {
+  disposeAll(): Promise<void>;
+  disposeOwner(owner: string): Promise<void>;
+}
+
 export interface InMemoryDaemonRuntimeOptions {
+  readonly backgroundCommands?: DaemonBackgroundCommandLifecycle;
   readonly baseUrl?: string;
   readonly buildId?: string;
   readonly currentProjectDirectory?: string;
@@ -313,7 +325,7 @@ export interface InMemoryDaemonRuntimeOptions {
   readonly runtimeSettings?: JsonRpcPayload;
   readonly sessionDirectory?: string;
   /** Cancel resources owned exclusively by a session before it is evicted. */
-  readonly onSessionEvict?: (sessionId: string) => void;
+  readonly onSessionEvict?: (sessionId: string) => unknown;
   /**
    * Stop the delegated work a session started, because the user interrupted
    * its turn. Unlike eviction this is a pause, not a reclaim: implementations
@@ -349,6 +361,8 @@ export interface InMemoryDaemonRuntimeOptions {
  */
 export class InMemoryDaemonRuntime implements DaemonRuntime {
   private readonly abortControllers = new Map<string, AbortController>();
+  /** Serializes owner cleanup before a reused persisted id can own new commands. */
+  private readonly backgroundOwnerCleanups = new Map<string, Promise<void>>();
   /** Children stopped by the last interrupt, reported once on the turn's settle edge. */
   private readonly cancelledSubagents = new Map<string, number>();
   private readonly directSubagentClaims = new Map<string, () => void>();
@@ -473,13 +487,65 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     this.options.interactions?.cancelSession(
       sessionId,
     );
-    this.options.onSessionEvict?.(sessionId);
+    this.queueBackgroundOwnerCleanup(sessionId);
+    this.observeSessionCleanup(
+      sessionId,
+      () => this.options.onSessionEvict?.(sessionId),
+    );
     this.turnRunner.dropSession?.(sessionId);
     this.steerQueues.delete(sessionKey);
     this.cancelledSubagents.delete(sessionKey);
     this.directSubagentClaims.get(sessionKey)?.();
     this.directSubagentClaims.delete(sessionKey);
     this.sessions.delete(sessionKey);
+  }
+
+  private queueBackgroundOwnerCleanup(sessionId: string): void {
+    const disposeOwner = this.options.backgroundCommands?.disposeOwner;
+    if (!disposeOwner) return;
+    const previous = this.backgroundOwnerCleanups.get(sessionId) ?? Promise.resolve();
+    const pending = previous
+      .catch(() => {})
+      .then(() => disposeOwner.call(this.options.backgroundCommands, sessionId));
+    this.backgroundOwnerCleanups.set(sessionId, pending);
+    void pending.catch((error) => {
+      console.error(
+        `Cleaning up resources for evicted session '${sessionId}' failed: ${errorMessage(error)}`,
+      );
+    }).finally(() => {
+      if (this.backgroundOwnerCleanups.get(sessionId) === pending) {
+        this.backgroundOwnerCleanups.delete(sessionId);
+      }
+    });
+  }
+
+  private async awaitBackgroundOwnerCleanup(sessionId: string): Promise<void> {
+    try {
+      await this.backgroundOwnerCleanups.get(sessionId);
+    } catch {
+      // Eviction cleanup is best-effort and already reported. A failed cleanup
+      // must not permanently prevent the owner id from being opened again.
+    }
+  }
+
+  private observeSessionCleanup(
+    sessionId: string,
+    cleanup: () => unknown,
+  ): void {
+    try {
+      const pending = cleanup();
+      if (pending && typeof (pending as { catch?: unknown }).catch === "function") {
+        void (pending as Promise<unknown>).catch((error) => {
+          console.error(
+            `Cleaning up resources for evicted session '${sessionId}' failed: ${errorMessage(error)}`,
+          );
+        });
+      }
+    } catch (error) {
+      console.error(
+        `Cleaning up resources for evicted session '${sessionId}' failed: ${errorMessage(error)}`,
+      );
+    }
   }
 
   async flushSessions(mode: 'append' | 'rewrite' = 'append'): Promise<void> {
@@ -683,12 +749,14 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     const transcript = loadResult.kind === "loaded" ? loadResult.transcript : undefined;
     if (
       transcript &&
-      transcriptIsSubagent(transcript) &&
       transcriptProjectDirectory(transcript) !== cwd
     ) {
+      const kind = transcriptIsSubagent(transcript)
+        ? "subagent history"
+        : "main session";
       throw new ValidationError(
         "session_id",
-        "belongs to a subagent history from a different project",
+        `belongs to a ${kind} from a different project`,
         key,
       );
     }
@@ -748,6 +816,12 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
         );
       }
     }
+    // evictSession must remain synchronous for callers such as channel reset,
+    // but its owner disposal is asynchronous. Do not expose a replacement
+    // session with the same persisted id until that disposal has settled: a
+    // late disposeOwner(id) could otherwise include commands the replacement
+    // starts after openSession returns.
+    await this.awaitBackgroundOwnerCleanup(session.id);
     const releaseSubagentClaim = effectiveTranscript && transcriptIsSubagent(effectiveTranscript)
       ? claimDirectSubagentConversation(effectiveTranscript.sessionId)
       : undefined;
@@ -890,7 +964,18 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
   }
 
   async shutdown(): Promise<void> {
-    this.shutdownPromise ??= Promise.resolve().then(() => this.options.shutdown?.());
+    this.shutdownPromise ??= Promise.allSettled([
+      Promise.resolve().then(() => this.options.shutdown?.()),
+      Promise.resolve().then(() => this.options.backgroundCommands?.disposeAll()),
+    ]).then((results) => {
+      const failures = results
+        .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+        .map((result) => result.reason);
+      if (failures.length === 1) throw failures[0];
+      if (failures.length > 1) {
+        throw new AggregateError(failures, "Daemon runtime shutdown cleanup failed");
+      }
+    });
     try {
       await this.shutdownPromise;
     } finally {
@@ -1104,6 +1189,7 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
         {
           drainSteer: () => this.drainSteers(sessionKey),
           displayText,
+          journal: this.messageJournal(session.id),
           ...(images.length ? { images } : {}),
         },
       )) {

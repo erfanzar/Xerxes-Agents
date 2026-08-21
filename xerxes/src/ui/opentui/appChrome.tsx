@@ -19,6 +19,13 @@ const TAB_STATUS_GLYPH: Record<LiveSessionStatus, string> = {
 const truncate = (value: string, max: number) =>
   value.length > max ? `${value.slice(0, Math.max(1, max - 1))}…` : value
 
+/**
+ * Longest tab label, and the basis of the strip's fit budget. One constant so
+ * the two cannot drift: they used to disagree (12 vs 18), which made the strip
+ * claim to fit and then clip silently.
+ */
+const TAB_LABEL_MAX = 14
+
 export const displayModeLabel = (mode?: string): string => {
   const value = (mode || 'code').trim()
 
@@ -79,9 +86,11 @@ export function SessionTabStrip({
   }
 
   const activeIndex = tabs.findIndex(tab => tab.id === activeId)
-  // Each tab costs roughly `glyph + space + title + padding`; estimate against
-  // the terminal width and fall back to the compact indicator when over.
-  const perTab = 12
+  // Each tab costs `space + glyph + space + label + space`, so derive the
+  // budget from the label cap instead of guessing. The previous estimate of
+  // 12 against an 18-char truncation under-counted by 5 per tab, so the strip
+  // claimed to fit and then silently clipped against overflow="hidden".
+  const perTab = TAB_LABEL_MAX + 5
   const fits = tabs.length * perTab + 4 <= width
 
   if (!fits) {
@@ -95,10 +104,13 @@ export function SessionTabStrip({
 
   return (
     <Box flexDirection="row" flexShrink={0} overflow="hidden" paddingX={2} width="100%">
-      {tabs.map(tab => {
+      {tabs.map((tab, index) => {
         const active = tab.id === activeId
         const glyph = TAB_STATUS_GLYPH[tab.status] ?? '·'
-        const label = truncate(tab.title, 18)
+        // An unnamed session shows its position instead. A tab needs a stable
+        // handle more than it needs a name, and a row of identical
+        // placeholders is no handle at all.
+        const label = tab.title.trim() ? truncate(tab.title, TAB_LABEL_MAX) : String(index + 1)
         return (
           <Box
             backgroundColor={active ? t.color.selectionBg : undefined}
@@ -122,11 +134,29 @@ export function WorkspaceFooter({ cwdLabel, rightLabel, t }: { cwdLabel: string;
   }
 
   return (
-    <Box flexDirection="row" flexShrink={0} justifyContent="space-between" paddingBottom={1} paddingX={2} width="100%">
-      <Text color={t.color.muted} wrap="truncate-end">
-        {cwdLabel}
-      </Text>
-      {rightLabel ? <Text color={t.color.muted}>{rightLabel}</Text> : null}
+    <Box
+      flexDirection="row"
+      flexShrink={0}
+      // Same gutter rule as the status row: `space-between` alone let the cwd
+      // butt straight into the hotkey hints ("sandbox (main)F6 agents"), and
+      // an un-truncated right label wrapped onto a second row.
+      gap={2}
+      justifyContent="space-between"
+      overflow="hidden"
+      paddingBottom={1}
+      paddingX={2}
+      width="100%"
+    >
+      <Box flexDirection="row" flexShrink={1} minWidth={0} overflow="hidden">
+        <Text color={t.color.muted} wrap="truncate-end">
+          {cwdLabel}
+        </Text>
+      </Box>
+      {rightLabel ? (
+        <Text color={t.color.muted} wrap="truncate-end">
+          {rightLabel}
+        </Text>
+      ) : null}
     </Box>
   )
 }

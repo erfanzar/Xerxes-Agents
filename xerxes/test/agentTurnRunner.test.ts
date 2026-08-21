@@ -16,6 +16,7 @@ import { registerInteractionModeTool } from '../src/runtime/interactionModeTool.
 import { BUILTIN_AGENTS, type AgentDefinition } from '../src/agents/definitions.js'
 import { AuditEmitter, InMemoryCollector } from '../src/index.js'
 import type { DaemonEvent, DaemonSession } from '../src/daemon/runtime.js'
+import type { RawMessage, TranscriptMessageJournalAppend } from '../src/session/daemonTranscript.js'
 import type { CompletionRequest, LlmClient, LlmDelta } from '../src/llms/client.js'
 import type { ToolDefinition } from '../src/types/toolCalls.js'
 
@@ -1173,4 +1174,29 @@ test('agent turn runner resolves per-turn thinking from keywords, ultra mode, an
   await drain(new AgentTurnRunner({ llm: off, model: 'gpt-4o' })
     .run(sessionFor('t-off'), 'a plain prompt', new AbortController().signal))
   expect(off.requests[0]?.thinking).toBeUndefined()
+})
+
+test('agent turn runner persists per-message journal entries for crash recovery', async () => {
+  const runner = new AgentTurnRunner({ llm: new TextClient(), model: 'gpt-4o' })
+  const session: DaemonSession = {
+    activeTurnId: '', agentId: 'default', cancelRequested: false, cwd: process.cwd(), extra: {},
+    id: 'journal-session', interactionMode: 'code', sessionKey: 'journal-session', lastActive: 0,
+    messages: [], metadata: {}, model: 'gpt-4o', planMode: false, status: 'working',
+    thinkingContent: [], toolExecutions: [], totalInputTokens: 0, totalOutputTokens: 0, turnCount: 0,
+    workspace: '/tmp/agents/default',
+  }
+  const journalEntries: Array<{ readonly index: number; readonly role: unknown }> = []
+  const journal: TranscriptMessageJournalAppend = (message: RawMessage, index: number) => {
+    journalEntries.push({ index, role: message.role })
+  }
+
+  for await (const _event of runner.run(session, 'journal this turn', new AbortController().signal, { journal })) {
+    // Consume the turn so every append has been recorded.
+  }
+
+  expect(journalEntries).toEqual([
+    { index: 0, role: 'user' },
+    { index: 1, role: 'assistant' },
+  ])
+  expect(session.messages.map(message => message.role)).toEqual(['user', 'assistant'])
 })

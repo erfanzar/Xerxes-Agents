@@ -1,7 +1,8 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { isAbsolute, posix, relative, resolve, sep } from 'node:path'
+import { realpath } from 'node:fs/promises'
+import { basename, dirname, isAbsolute, join, posix, relative, resolve, sep } from 'node:path'
 
 import { ValidationError } from '../core/errors.js'
 
@@ -45,6 +46,8 @@ export interface FileSyncCopyRequest {
 /** Transport-specific file operations; this module does not assume Docker or a cloud SDK. */
 export interface FileSyncPorts {
   readonly copy: (request: FileSyncCopyRequest) => Promise<void> | void
+  /** Resolve a remote path through sandbox symlinks before it is used. */
+  readonly resolveRemotePath?: (path: string) => Promise<string> | string
   readonly stat: (request: FileSyncStatRequest) => Promise<FileSyncStat | undefined> | FileSyncStat | undefined
 }
 
@@ -144,7 +147,7 @@ async function sync(
     throw new ValidationError('fileSyncSpecs', 'must be an array of file specifications', specs)
   }
   validatePorts(ports)
-  const normalizedOptions = normalizeOptions(options)
+  const normalizedOptions = await normalizeOptions(options)
   const results: FileSyncResult[] = []
   for (const spec of specs) {
     results.push(await syncOne(direction, spec, ports, normalizedOptions))
@@ -160,7 +163,7 @@ async function syncOne(
 ): Promise<FileSyncResult> {
   let prepared: PreparedFileSyncSpec
   try {
-    prepared = prepareSpec(spec, options)
+    prepared = await prepareSpec(spec, ports, options)
   } catch (error) {
     return failedResult(
       displayPaths(spec),
@@ -201,22 +204,30 @@ async function syncOne(
   return copiedResult(prepared, prepared.metadata, bytes, direction)
 }
 
-function prepareSpec(spec: FileSyncSpec, options: NormalizedFileSyncOptions): PreparedFileSyncSpec {
+async function prepareSpec(
+  spec: FileSyncSpec,
+  ports: FileSyncPorts,
+  options: NormalizedFileSyncOptions,
+): Promise<PreparedFileSyncSpec> {
   if (spec === null || typeof spec !== 'object' || Array.isArray(spec)) {
     throw new ValidationError('fileSyncSpec', 'must be an object containing localPath and remotePath', spec)
   }
+  const resolvedLocalPath = resolveLocalPath(options.localRoot, spec.localPath)
+  const remotePath = resolveRemotePath(options.remoteRoot, spec.remotePath)
+  const localPath = await containedLocalPath(options.localRoot, resolvedLocalPath)
+  await assertRemotePathContained(options.remoteRoot, remotePath, ports)
   return {
-    localPath: resolveLocalPath(options.localRoot, spec.localPath),
+    localPath,
     metadata: normalizeMetadata(spec.metadata),
-    remotePath: resolveRemotePath(options.remoteRoot, spec.remotePath),
+    remotePath,
   }
 }
 
-function normalizeOptions(options: FileSyncOptions): NormalizedFileSyncOptions {
+async function normalizeOptions(options: FileSyncOptions): Promise<NormalizedFileSyncOptions> {
   if (options === null || typeof options !== 'object') {
     throw new ValidationError('fileSyncOptions', 'must explicitly define localRoot and remoteRoot', options)
   }
-  const localRoot = normalizeLocalRoot(options.localRoot)
+  const localRoot = await normalizeLocalRoot(options.localRoot)
   const remoteRoot = normalizeRemoteRoot(options.remoteRoot)
   const maxBytes = options.maxBytes
   if (maxBytes !== undefined && (!Number.isSafeInteger(maxBytes) || maxBytes < 0)) {
@@ -233,12 +244,17 @@ function validatePorts(ports: FileSyncPorts): void {
   }
 }
 
-function normalizeLocalRoot(root: string): string {
+async function normalizeLocalRoot(root: string): Promise<string> {
   validatePathValue(root, 'localRoot')
   if (!isAbsolute(root)) {
     throw new FileSyncPathError('localRoot', root, root, 'localRoot must be an absolute host path')
   }
-  return resolve(root)
+  const resolvedRoot = resolve(root)
+  try {
+    return await realpath(resolvedRoot)
+  } catch {
+    return resolvedRoot
+  }
 }
 
 function normalizeRemoteRoot(root: string): string {
@@ -261,6 +277,79 @@ function resolveRemotePath(root: string, candidate: string): string {
   const resolvedPath = posix.isAbsolute(candidate) ? posix.resolve(candidate) : posix.resolve(root, candidate)
   assertContained(root, resolvedPath, 'remotePath', candidate, posix.relative)
   return resolvedPath
+}
+
+async function containedLocalPath(root: string, candidate: string): Promise<string> {
+  try {
+    await realpath(root)
+  } catch (error) {
+    if (isMissingPathError(error)) {
+      return candidate
+    }
+    throw error
+  }
+
+  try {
+    const canonicalPath = await realpath(candidate)
+    assertContained(root, canonicalPath, 'localPath', candidate, relative)
+    return canonicalPath
+  } catch (error) {
+    if (!isMissingPathError(error)) {
+      throw error
+    }
+  }
+
+  let existingAncestor = dirname(candidate)
+  const missingSegments = [basename(candidate)]
+  while (true) {
+    try {
+      const canonicalAncestor = await realpath(existingAncestor)
+      assertContained(root, canonicalAncestor, 'localPath', candidate, relative)
+      return resolve(canonicalAncestor, ...missingSegments.reverse())
+    } catch (error) {
+      if (!isMissingPathError(error)) {
+        throw error
+      }
+      const parent = dirname(existingAncestor)
+      if (parent === existingAncestor) {
+        return candidate
+      }
+      missingSegments.push(basename(existingAncestor))
+      existingAncestor = parent
+    }
+  }
+}
+
+async function assertRemotePathContained(
+  root: string,
+  candidate: string,
+  ports: FileSyncPorts,
+): Promise<void> {
+  if (ports.resolveRemotePath === undefined) {
+    throw new FileSyncPathError(
+      'remotePath',
+      candidate,
+      root,
+      'remote containment requires a resolveRemotePath port that resolves sandbox symlinks',
+    )
+  }
+  const [canonicalRoot, canonicalPath] = await Promise.all([
+    ports.resolveRemotePath(root),
+    ports.resolveRemotePath(candidate),
+  ])
+  validatePathValue(canonicalRoot, 'remoteRoot')
+  validatePathValue(canonicalPath, 'remotePath')
+  if (!posix.isAbsolute(canonicalRoot) || !posix.isAbsolute(canonicalPath)) {
+    throw new FileSyncPathError('remotePath', candidate, root, 'resolveRemotePath must return absolute POSIX paths')
+  }
+  assertContained(posix.resolve(canonicalRoot), posix.resolve(canonicalPath), 'remotePath', candidate, posix.relative)
+}
+
+function isMissingPathError(error: unknown): boolean {
+  return error !== null
+    && typeof error === 'object'
+    && 'code' in error
+    && error.code === 'ENOENT'
 }
 
 function assertContained(

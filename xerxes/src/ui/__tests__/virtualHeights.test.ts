@@ -2,16 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 import { describe, expect, it } from 'vitest'
 
-import {
-  buildOffsets,
-  computeVisibleWindow,
-  estimatedMsgHeight,
-  estimateMarkdownHeight,
-  estimateRowHeight,
-  messageHeightKey,
-  resolveScrollTop,
-  wrappedLines
-} from '../lib/virtualHeights.js'
+import { estimatedMsgHeight, messageHeightKey, wrappedLines } from '../lib/virtualHeights.js'
 
 describe('wrappedLines', () => {
   it('counts wrapped rows by width', () => {
@@ -25,24 +16,6 @@ describe('wrappedLines', () => {
   })
   it('caps very long input', () => {
     expect(wrappedLines('x'.repeat(100000), 1, 50)).toBe(50)
-  })
-})
-
-describe('estimateMarkdownHeight', () => {
-  it('sums block heights', () => {
-    // heading(2) + paragraph(1)
-    expect(estimateMarkdownHeight('# Hi\n\nshort', 80)).toBe(3)
-  })
-  it('counts fenced code lines plus chrome', () => {
-    // 2 code lines + 2 borders + 2 margin
-    expect(estimateMarkdownHeight('```\na\nb\n```', 80)).toBe(6)
-  })
-})
-
-describe('estimateRowHeight', () => {
-  it('adds a bottom margin for assistant rows', () => {
-    expect(estimateRowHeight({ role: 'assistant', text: 'hello' }, 80)).toBe(2) // 1 line + margin
-    expect(estimateRowHeight({ role: 'user', text: 'hello' }, 80)).toBe(1)
   })
 })
 
@@ -107,58 +80,42 @@ describe('estimatedMsgHeight detail visibility', () => {
   })
 })
 
-describe('buildOffsets', () => {
-  it('is a prefix sum with a trailing total', () => {
-    expect(buildOffsets([2, 3, 5])).toEqual([0, 2, 5, 10])
-    expect(buildOffsets([])).toEqual([0])
-  })
-})
+describe('transcript spacing contract', () => {
+  // These pin the renderer/estimator agreement that Phase 4 established.
+  // They previously disagreed in four places, which only showed up as
+  // scroll drift when jumping into rows that had never been mounted.
+  it('counts one leading blank row for a user turn, not two', () => {
+    const user = estimatedMsgHeight({ role: 'user', text: 'hello' }, 80, { compact: false, details: true })
+    const bare = estimatedMsgHeight({ role: 'assistant', text: 'hello' }, 80, { compact: false, details: true })
 
-describe('computeVisibleWindow', () => {
-  const heights = [3, 3, 3, 3, 3] // total 15, offsets [0,3,6,9,12,15]
-
-  it('returns the bottom window when scrolled past the end (sticky)', () => {
-    const w = computeVisibleWindow(heights, 6, Number.MAX_SAFE_INTEGER)
-    expect(w.maxScrollTop).toBe(9) // 15 - 6
-    expect(w.totalHeight).toBe(15)
-    // top=9 → rows starting at offset>=9: indices 3,4
-    expect(w.start).toBe(3)
-    expect(w.end).toBe(4)
+    expect(user - bare).toBe(1)
   })
 
-  it('returns the top window at scrollTop 0', () => {
-    const w = computeVisibleWindow(heights, 6, 0)
-    expect(w.start).toBe(0)
-    expect(w.end).toBe(1) // rows 0 (0-3) and 1 (3-6)
-    expect(w.padTop).toBe(0)
+  it('gives a diff its row from leadGap instead of a hardcoded pair', () => {
+    const withGap = estimatedMsgHeight(
+      { kind: 'diff', role: 'assistant', text: 'x' },
+      80,
+      { compact: false, details: true, leadGap: true }
+    )
+    const without = estimatedMsgHeight(
+      { kind: 'diff', role: 'assistant', text: 'x' },
+      80,
+      { compact: false, details: true, leadGap: false }
+    )
+
+    expect(withGap - without).toBe(1)
   })
 
-  it('reports padTop when the first row is partially scrolled off', () => {
-    const w = computeVisibleWindow(heights, 6, 4) // top in the middle of row 1
-    expect(w.start).toBe(1)
-    expect(w.padTop).toBe(1) // 4 - offsets[1]=3
-  })
+  it('reserves nothing for the separator that was never rendered', () => {
+    // `withSeparator` used to add 2 rows per non-first user turn for a rule
+    // no renderer ever drew. Passing the dead option must change nothing.
+    const plain = estimatedMsgHeight({ role: 'user', text: 'hello' }, 80, { compact: false, details: true })
+    const legacy = estimatedMsgHeight(
+      { role: 'user', text: 'hello' },
+      80,
+      { compact: false, details: true, withSeparator: true } as never
+    )
 
-  it('handles an empty transcript', () => {
-    const w = computeVisibleWindow([], 10, 0)
-    expect(w).toMatchObject({ start: 0, end: -1, totalHeight: 0, maxScrollTop: 0 })
-  })
-
-  it('shows everything when content fits the viewport', () => {
-    const w = computeVisibleWindow(heights, 100, 0)
-    expect(w.start).toBe(0)
-    expect(w.end).toBe(4)
-    expect(w.maxScrollTop).toBe(0)
-  })
-})
-
-describe('resolveScrollTop', () => {
-  it('pins to bottom when sticky', () => {
-    expect(resolveScrollTop(9, true, 2)).toBe(9)
-  })
-  it('clamps within range when not sticky', () => {
-    expect(resolveScrollTop(9, false, -5)).toBe(0)
-    expect(resolveScrollTop(9, false, 20)).toBe(9)
-    expect(resolveScrollTop(9, false, 4)).toBe(4)
+    expect(legacy).toBe(plain)
   })
 })

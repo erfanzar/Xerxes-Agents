@@ -90,4 +90,37 @@ describe('summarizeToolStartDisplay', () => {
       context: 'tmp/a.txt -> tmp/b.txt'
     })
   })
+
+  // The exact row that shipped in the transcript for months:
+  //   → Task Output Tool {"task_id":"r9-timeout"}
+  it('names an identifier-addressed call instead of echoing its JSON', () => {
+    expect(summarizeToolStartDisplay('Task Output Tool', '{"task_id":"r9-timeout"}')).toEqual({
+      context: 'r9-timeout'
+    })
+    expect(summarizeToolStartDisplay('subagent_status', '', JSON.stringify({ agent_id: 'reviewer-3' }))).toEqual({
+      context: 'reviewer-3'
+    })
+  })
+
+  it('renders unrecognized scalar payloads as key=value, never as a blob', () => {
+    const args = JSON.stringify({ limit: 20, offset: 5, ascending: true })
+
+    expect(summarizeToolStartDisplay('list_things', '', args)).toEqual({
+      context: 'limit=20 · offset=5 · ascending=true'
+    })
+  })
+
+  it('never carries a serialized object into the transcript', () => {
+    // An object of nothing but nested values has no readable summary; an
+    // empty row beats a wall of JSON.
+    const args = JSON.stringify({ filter: { nested: true } })
+
+    expect(summarizeToolStartDisplay('weird_tool', args, args).context).toBe('')
+  })
+
+  it('still prefers a path or query over an identifier', () => {
+    const args = JSON.stringify({ id: 'abc123', file_path: 'src/one.ts' })
+
+    expect(summarizeToolStartDisplay('read_file', '', args)).toEqual({ context: 'src/one.ts' })
+  })
 })

@@ -139,11 +139,16 @@ export class ResponsesEventTranslator {
     const callId = stringValue(item.call_id)
     let id = this.findPendingKey(itemId, callId) ?? (itemId || callId)
     if (!id) return undefined
-    let pending = this.pendingCalls.get(id) ?? this.createPendingCall(id)
-    if (itemId && pending.id !== itemId) {
+    // Keep item_id as the stream lookup key, but expose call_id as the tool
+    // correlation ID so the subsequent function_call_output can reference it.
+    let pending = this.pendingCalls.get(id) ?? this.createPendingCall(callId || itemId)
+    if (itemId && id !== itemId) {
       this.pendingCalls.delete(id)
-      pending = { ...pending, id: itemId }
       id = itemId
+    }
+    const correlationId = callId || itemId
+    if (correlationId && pending.id !== correlationId) {
+      pending = { ...pending, id: correlationId }
     }
     const name = stringValue(item.name)
     const argumentValue = argumentsText(item.arguments)

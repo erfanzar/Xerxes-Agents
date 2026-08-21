@@ -65,6 +65,15 @@ test('error classification maps built-in JavaScript failures, status codes, patt
     retryable: true,
     suggestedBackoffSeconds: 12.5,
   })
+  const structured = new Error('provider is busy') as Error & {
+    details: { status: number; retryAfterSeconds: number }
+  }
+  structured.details = { status: 429, retryAfterSeconds: 7 }
+  expect(classifyError(structured)).toMatchObject({
+    kind: ErrorKind.RATE_LIMIT,
+    retryable: true,
+    suggestedBackoffSeconds: 7,
+  })
   expect(classifyError(new Error('maximum context length is 128000'))).toMatchObject({
     kind: ErrorKind.CONTEXT_OVERFLOW,
     retryable: false,

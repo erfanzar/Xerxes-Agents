@@ -6,6 +6,7 @@ import { expect, test } from 'bun:test'
 import { ProviderError } from '../src/core/errors.js'
 import { GeminiClient, messagesToGemini } from '../src/llms/gemini.js'
 import { createLlmClient, type CompletionRequest } from '../src/llms/client.js'
+import { classifyError } from '../src/runtime/errorClassifier.js'
 
 const READ_FILE = {
   type: 'function' as const,
@@ -149,13 +150,47 @@ test('Gemini direct REST stream sends native settings and normalizes all shared 
   expect(events).toContainEqual({
     content: 'world',
     finishReason: 'stop',
-    usage: { inputTokens: 11, outputTokens: 7, cacheReadTokens: 3, reasoningTokens: 2 },
+    usage: { inputTokens: 8, outputTokens: 7, cacheReadTokens: 3, reasoningTokens: 2 },
     toolCalls: [{
       id: 'gemini-call-1',
       type: 'function',
       function: { name: 'ReadFile', arguments: { path: 'README.md' } },
     }],
   })
+})
+
+test('Gemini usage treats cached prompt tokens as cache reads without double counting and clamps malformed totals', async () => {
+  const usages = [
+    {
+      usageMetadata: {
+        promptTokenCount: 11,
+        candidatesTokenCount: 7,
+        cachedContentTokenCount: 3,
+        thoughtsTokenCount: 2,
+      },
+      expected: { inputTokens: 8, outputTokens: 7, cacheReadTokens: 3, reasoningTokens: 2 },
+    },
+    {
+      usageMetadata: {
+        promptTokenCount: 2,
+        candidatesTokenCount: 4,
+        cachedContentTokenCount: 5,
+      },
+      expected: { inputTokens: 0, outputTokens: 4, cacheReadTokens: 2 },
+    },
+  ] as const
+
+  for (const { usageMetadata, expected } of usages) {
+    const client = new GeminiClient({
+      apiKey: 'test-key',
+      fetchImplementation: async () => Response.json({
+        candidates: [{ content: { parts: [{ text: 'done' }] }, finishReason: 'STOP' }],
+        usageMetadata,
+      }),
+    })
+
+    expect((await client.complete(simpleRequest())).usage).toEqual(expected)
+  }
 })
 
 test('Gemini stream ignores semantic deltas after a finish reason but retains terminal metadata', async () => {
@@ -245,9 +280,66 @@ test('Gemini native completion sends generateContent and normalizes a complete c
     thinking: 'Inspect source.',
     thinkingSignature: 'thought-1',
     finishReason: 'stop',
-    usage: { inputTokens: 12, outputTokens: 6, cacheReadTokens: 2, reasoningTokens: 3 },
+    usage: { inputTokens: 10, outputTokens: 6, cacheReadTokens: 2, reasoningTokens: 3 },
     toolCalls: [{ id: 'call-1', type: 'function', function: { name: 'ReadFile', arguments: { path: 'README.md' } } }],
   })
+})
+
+test('Gemini complete and stream failures expose structured status and Retry-After metadata', async () => {
+  for (const operation of ['complete', 'stream'] as const) {
+    const client = new GeminiClient({
+      apiKey: 'test-key',
+      fetchImplementation: async () => new Response('quota exhausted', {
+        status: 429,
+        statusText: 'Too Many Requests',
+        headers: { 'Retry-After': '2.5' },
+      }),
+    })
+    const failure = await (operation === 'complete'
+      ? client.complete(simpleRequest())
+      : collect(client.stream(simpleRequest())))
+      .catch(error => error as unknown)
+
+    expect(failure).toBeInstanceOf(ProviderError)
+    expect((failure as ProviderError).details).toEqual({ status: 429, retryAfterSeconds: 2.5 })
+    expect(classifyError(failure)).toMatchObject({
+      kind: 'rate_limit',
+      retryable: true,
+      suggestedBackoffSeconds: 2.5,
+    })
+  }
+})
+
+test('Gemini parses Retry-After HTTP dates and ignores malformed values', async () => {
+  const retryAt = new Date(Date.now() + 30_000).toUTCString()
+  const dated = new GeminiClient({
+    apiKey: 'test-key',
+    fetchImplementation: async () => new Response('unavailable', {
+      status: 503,
+      headers: { 'Retry-After': retryAt },
+    }),
+  })
+  const datedFailure = await dated.complete(simpleRequest()).then(
+    () => { throw new Error('expected request to fail') },
+    error => error as ProviderError,
+  )
+  expect(datedFailure.details.status).toBe(503)
+  expect(datedFailure.details.retryAfterSeconds).toBeGreaterThanOrEqual(28)
+  expect(datedFailure.details.retryAfterSeconds).toBeLessThanOrEqual(30)
+
+  const malformed = new GeminiClient({
+    apiKey: 'test-key',
+    fetchImplementation: async () => new Response('slow down', {
+      status: 429,
+      headers: { 'Retry-After': 'later-ish' },
+    }),
+  })
+  const malformedFailure = await collect(malformed.stream(simpleRequest())).then(
+    () => { throw new Error('expected request to fail') },
+    error => error as ProviderError,
+  )
+  expect(malformedFailure.details).toEqual({ status: 429 })
+  expect(classifyError(malformedFailure).suggestedBackoffSeconds).toBeUndefined()
 })
 
 test('Gemini client exposes HTTP failures and malformed SSE JSON as provider errors', async () => {

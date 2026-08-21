@@ -72,6 +72,35 @@ describe('interaction mode palettes', () => {
     expect(objective.color.error).toBe(DARK_THEME.color.error)
     expect(objective.brand).toBe(DARK_THEME.brand)
   })
+
+  // Regression guard for the bug that made the whole transcript one gray: an
+  // earlier `themeForMode` smeared the mode accent over `primary` and `label`
+  // too, so in `code` mode the user band, markdown headings, and panel labels
+  // all collapsed onto '#aeb4bb'. Voice and brand roles must survive every
+  // mode; if a future edit adds one of these to the override list, this fails.
+  it('never lets an interaction mode repaint the voice or brand roles', () => {
+    for (const mode of ['code', 'researcher', 'plan', 'objective'] as const) {
+      const t = themeForMode(DARK_THEME, mode)
+
+      expect(t.color.userBar).toBe(DARK_THEME.color.userBar)
+      expect(t.color.userText).toBe(DARK_THEME.color.userText)
+      expect(t.color.toolName).toBe(DARK_THEME.color.toolName)
+      expect(t.color.system).toBe(DARK_THEME.color.system)
+      expect(t.color.thinking).toBe(DARK_THEME.color.thinking)
+      expect(t.color.brandGold).toBe(DARK_THEME.color.brandGold)
+      expect(t.color.brandLapis).toBe(DARK_THEME.color.brandLapis)
+    }
+  })
+
+  it('keeps markdown heading hierarchy and panel labels out of the mode accent', () => {
+    const code = themeForMode(DARK_THEME, 'code')
+
+    // `primary` (h2/h3, bold) must stay distinct from `accent` (h1), and
+    // `label` is a panel-header role, not the user transcript band.
+    expect(code.color.primary).toBe(DARK_THEME.color.primary)
+    expect(code.color.label).toBe(DARK_THEME.color.label)
+    expect(code.color.primary).not.toBe(code.color.accent)
+  })
 })
 
 describe('fromSkin', () => {

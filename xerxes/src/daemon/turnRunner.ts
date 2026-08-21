@@ -40,6 +40,7 @@ import {
 import type { ChatMessage, MessageContent } from '../types/messages.js'
 import { messageText } from '../types/messages.js'
 import { imageUrlContentParts } from './images.js'
+import type { RawMessage, TranscriptMessageJournalAppend } from '../session/daemonTranscript.js'
 import type { ToolCall, ToolDefinition } from '../types/toolCalls.js'
 import type { DaemonInteractionBoard, DaemonQuestion } from './interactions.js'
 import type { DaemonEvent, DaemonSession, TurnRunControls, TurnRunner } from './runtime.js'
@@ -168,6 +169,7 @@ export class AgentTurnRunner implements TurnRunner {
       state.totalCacheCreationTokens = previous.totalCacheCreationTokens
     }
     this.states.set(session.id, state)
+    installMessageJournal(state, controls.journal)
     const projectRoot = sessionProjectRoot(session)
     // Anchor the pre-mutation baseline before any tool runs. Non-blocking:
     // a whole-project typecheck costs seconds and read-only turns must not pay it.
@@ -907,6 +909,28 @@ function sessionProjectRoot(session: DaemonSession): string {
   return session.metadata.session_kind === 'subagent' && typeof persisted === 'string' && persisted.trim()
     ? persisted
     : session.cwd
+}
+
+/**
+ * Wire the per-message crash journal into the mutable state message buffer.
+ * Only messages appended after this call are recorded; existing history is
+ * already persisted in the snapshot the state was built from.
+ */
+function installMessageJournal(
+  state: AgentState,
+  journal: TranscriptMessageJournalAppend | undefined,
+): void {
+  if (!journal) return
+  const target = state.messages
+  const originalPush = target.push.bind(target)
+  target.push = function journalPush(...items: ChatMessage[]): number {
+    const startIndex = target.length
+    const result = originalPush(...items)
+    for (let index = 0; index < items.length; index += 1) {
+      journal(items[index] as unknown as RawMessage, startIndex + index)
+    }
+    return result
+  }
 }
 
 function stateFromSession(session: DaemonSession): AgentState {

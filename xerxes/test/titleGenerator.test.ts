@@ -4,7 +4,7 @@
 import { expect, test } from 'bun:test'
 
 import {
-  attemptSessionTitleOnce,
+  attemptSessionTitle,
   generateSessionTitle,
   resetTitleAttempts,
   sanitizeTitle,
@@ -96,7 +96,25 @@ test('generateSessionTitle swallows provider failures to undefined', async () =>
   expect(title).toBeUndefined()
 })
 
-test('attemptSessionTitleOnce runs one attempt per session id', async () => {
+test('attemptSessionTitle retries a failure but stays bounded', async () => {
+  resetTitleAttempts()
+  let calls = 0
+  const fail = async () => {
+    calls += 1
+    return undefined
+  }
+
+  // A transient failure used to be permanent: one miss per daemon lifetime
+  // left the session unnamed forever. It now retries, but only so far.
+  expect(await attemptSessionTitle('s1', fail)).toBeUndefined()
+  expect(await attemptSessionTitle('s1', fail)).toBeUndefined()
+  expect(await attemptSessionTitle('s1', fail)).toBeUndefined()
+  expect(attemptSessionTitle('s1', fail)).toBeUndefined()
+  expect(calls).toBe(3)
+  resetTitleAttempts()
+})
+
+test('attemptSessionTitle keeps attempts per session id', async () => {
   resetTitleAttempts()
   let calls = 0
   const run = async () => {
@@ -104,9 +122,84 @@ test('attemptSessionTitleOnce runs one attempt per session id', async () => {
     return 'Title'
   }
 
-  expect(await attemptSessionTitleOnce('s1', run)).toBe('Title')
-  expect(attemptSessionTitleOnce('s1', run)).toBeUndefined()
-  expect(await attemptSessionTitleOnce('s2', run)).toBe('Title')
+  expect(await attemptSessionTitle('s1', run)).toBe('Title')
+  expect(await attemptSessionTitle('s2', run)).toBe('Title')
   expect(calls).toBe(2)
   resetTitleAttempts()
+})
+
+test('attemptSessionTitle refuses a second concurrent attempt', async () => {
+  resetTitleAttempts()
+  let calls = 0
+  let release: (value: string | undefined) => void = () => {}
+  const pending = new Promise<string | undefined>(resolve => {
+    release = resolve
+  })
+  const run = () => {
+    calls += 1
+    return pending
+  }
+
+  const first = attemptSessionTitle('s1', run)
+
+  // A later turn can end while the first provider call is still open; without
+  // the in-flight guard the same session would pay for both.
+  expect(attemptSessionTitle('s1', run)).toBeUndefined()
+  release('Title')
+  expect(await first).toBe('Title')
+  expect(calls).toBe(1)
+  resetTitleAttempts()
+})
+
+test('generateSessionTitle asks for enough tokens to survive a reasoning preamble', async () => {
+  let seenMaxTokens = 0
+  const title = await generateSessionTitle({
+    userText: 'What does add do?',
+    assistantText: 'It sums a and b.',
+    sessionModel: 'reasoning-model',
+    profile: profile('kimi-code'),
+    clientFactory: () =>
+      ({
+        complete: async (request: { maxTokens?: number }) => {
+          seenMaxTokens = request.maxTokens ?? 0
+
+          // A reasoning model spends the budget on thinking first. Under a
+          // 40-token ceiling it returns empty content, the request succeeds,
+          // and the chat is silently never named — which is exactly how this
+          // shipped broken while looking healthy.
+          return { content: seenMaxTokens < 128 ? '' : 'Explain add function' }
+        },
+        close: async () => undefined,
+      }) as unknown as LlmClient,
+  })
+
+  expect(seenMaxTokens).toBeGreaterThanOrEqual(128)
+  expect(title).toBe('Explain add function')
+})
+
+test('generateSessionTitle falls back to the session model when the cheap tier fails', async () => {
+  const tried: string[] = []
+  const title = await generateSessionTitle({
+    userText: 'fix the socket leak',
+    assistantText: 'found it in runtime.ts',
+    sessionModel: 'gpt-5.6-sol',
+    profile: profile('openai'),
+    clientFactory: (model: string) => {
+      tried.push(model)
+
+      // An OpenAI-compatible proxy declared as `provider: "openai"` may not
+      // serve the cheap model at all — a 100% failure, not a flaky one.
+      if (model !== 'gpt-5.6-sol') {
+        throw new Error('unknown model')
+      }
+
+      return {
+        complete: async () => ({ content: 'Fix socket leak' }),
+        close: async () => undefined,
+      } as unknown as LlmClient
+    },
+  })
+
+  expect(title).toBe('Fix socket leak')
+  expect(tried).toEqual(['gpt-4o-mini', 'gpt-5.6-sol'])
 })

@@ -242,13 +242,12 @@ export class ChannelRegistry {
   private async stopOne(name: string, channel: Channel, propagateFailure: boolean): Promise<void> {
     try {
       await channel.stop()
+      this.started.delete(name)
     } catch (error) {
       this.report({ channel: name, error, operation: 'stop' })
       if (propagateFailure) {
         throw error
       }
-    } finally {
-      this.started.delete(name)
     }
   }
 

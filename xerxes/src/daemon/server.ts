@@ -94,7 +94,7 @@ import {
   type LlmClient,
 } from "../llms/client.js";
 import {
-  attemptSessionTitleOnce,
+  attemptSessionTitle,
   generateSessionTitle,
   type TitleClientFactory,
 } from "./titleGenerator.js";
@@ -210,6 +210,18 @@ const AUTO_COMPACT_DISABLED_WARNING_FRACTION = 0.9;
  * is a worse one.
  */
 const TURN_DRAIN_TIMEOUT_MS = 2_000;
+
+/**
+ * How many completed turns a still-untitled session stays eligible for
+ * automatic naming.
+ *
+ * The title is always generated from the opening exchange, so the prompt is
+ * identical whether it runs on turn 1 or turn 3. The window exists purely so
+ * a transient provider failure on the very first turn does not orphan a new
+ * session forever. It is intentionally short: this is a retry for new
+ * sessions, not a backfill for long-lived history.
+ */
+const TITLE_RETRY_TURN_WINDOW = 3;
 
 /**
  * Snapshots retained per workspace. A per-turn snapshot makes the shadow repo
@@ -1547,13 +1559,14 @@ export class DaemonServer {
       return this.manageBrowser(params);
     }
     if (method === "terminal.list") {
-      return { ok: true, terminals: this.terminalRegistry?.list() ?? [] };
+      const ownerSessionId = this.terminalOwnerSessionId(connection, params);
+      return { ok: true, terminals: this.terminalRegistry?.list(ownerSessionId) ?? [] };
     }
     if (method === "terminal.inspect") {
-      return this.inspectTerminal(params);
+      return this.inspectTerminal(connection, params);
     }
     if (method === "terminal.control") {
-      return this.controlTerminal(params);
+      return this.controlTerminal(connection, params);
     }
     if (method === "channel.list") {
       return this.listChannels();
@@ -1976,6 +1989,9 @@ export class DaemonServer {
         value: `/${command.name}`,
         label: command.name,
         meta: command.description,
+        // The UI ranks the bare-slash menu by category so a plain "/" surfaces
+        // the commands people reach for instead of an alphabetical wall.
+        category: command.category,
       }));
   }
 
@@ -3372,14 +3388,23 @@ export class DaemonServer {
     return { ok: true, sessions };
   }
 
+  private terminalOwnerSessionId(
+    connection: DaemonTransportConnection,
+    params: JsonRpcPayload,
+  ): string {
+    const key = sessionKey(connection, params);
+    return this.runtime.sessionStatus(key)?.id ?? key;
+  }
+
   /** One terminal with the retained tail of its output; never drains the model's copy. */
-  private inspectTerminal(params: JsonRpcPayload): JsonRpcPayload {
+  private inspectTerminal(connection: DaemonTransportConnection, params: JsonRpcPayload): JsonRpcPayload {
     const id = optionalString(params.terminal_id) ?? optionalString(params.id);
     if (!id) return { ok: false, error: "terminal_id is required" };
     const requested = integerOption(params.max_output_chars);
     const maxChars =
       requested === undefined ? undefined : Math.min(requested, 200_000);
     const terminal = this.terminalRegistry?.inspect(
+      this.terminalOwnerSessionId(connection, params),
       id,
       ...(maxChars === undefined ? [] : ([maxChars] as const)),
     );
@@ -3396,6 +3421,7 @@ export class DaemonServer {
    * unsupported action fails with the reason instead of "unknown method".
    */
   private async controlTerminal(
+    connection: DaemonTransportConnection,
     params: JsonRpcPayload,
   ): Promise<JsonRpcPayload> {
     const registry = this.terminalRegistry;
@@ -3405,20 +3431,22 @@ export class DaemonServer {
     const id = optionalString(params.terminal_id) ?? optionalString(params.id);
     if (!id) return { ok: false, error: "terminal_id is required" };
     const action = (optionalString(params.action) ?? "").toLowerCase();
+    const ownerSessionId = this.terminalOwnerSessionId(connection, params);
     try {
       if (action === "write") {
         // Deliberately not `optionalString`, which trims: the trailing newline
         // is what submits the line, and trimming it would send a command the
         // shell then sits on waiting for Enter.
         await registry.write(
+          ownerSessionId,
           id,
           typeof params.chars === "string" ? params.chars : "",
         );
       } else if (action === "interrupt") {
-        await registry.interrupt(id);
+        await registry.interrupt(ownerSessionId, id);
       } else if (action === "kill") {
         const force = params.signal === "SIGKILL" || params.force === true;
-        await registry.kill(id, force ? "SIGKILL" : "SIGTERM");
+        await registry.kill(ownerSessionId, id, force ? "SIGKILL" : "SIGTERM");
       } else {
         return {
           ok: false,
@@ -3428,7 +3456,7 @@ export class DaemonServer {
     } catch (error) {
       return { ok: false, error: errorMessage(error) };
     }
-    const terminal = registry.inspect(id);
+    const terminal = registry.inspect(ownerSessionId, id);
     return { ok: true, ...(terminal ? { terminal } : {}) };
   }
 
@@ -4289,7 +4317,7 @@ export class DaemonServer {
    * Generate a model-written title after a session's first exchange.
    *
    * Fires on every turn-end edge but spends a provider call exactly once per
-   * session (`attemptSessionTitleOnce`). Everything about it is best-effort:
+   * session (`attemptSessionTitle`). Everything about it is best-effort:
    * a session the user already titled, a disabled setting, a missing provider,
    * or a failed generation all leave the existing title state untouched.
    */
@@ -4311,9 +4339,16 @@ export class DaemonServer {
     if (!user || !assistant) return;
     // Tool-using opening exchanges contain more than two transcript rows; the
     // completed-turn count is the stable definition of "first exchange".
-    if (session.turnCount !== 1) return;
+    //
+    // A short window rather than exactly turn 1: the title is always built
+    // from the FIRST exchange (see `firstExchangeText` above), so it is
+    // byte-identical at turn 1 and turn 3. Insisting on turn 1 meant a single
+    // transient provider failure orphaned a brand-new session permanently,
+    // with no way back. The window is deliberately small — this is a retry
+    // for new sessions, not a backfill of long-lived history.
+    if (session.turnCount < 1 || session.turnCount > TITLE_RETRY_TURN_WINDOW) return;
 
-    const attempt = attemptSessionTitleOnce(session.id, () =>
+    const attempt = attemptSessionTitle(session.id, () =>
       generateSessionTitle({
         userText: user,
         assistantText: assistant,

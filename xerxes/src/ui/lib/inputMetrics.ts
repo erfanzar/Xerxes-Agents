@@ -1,5 +1,6 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
+import { contentColumnWidth } from '../domain/startupLayout.js'
 import type { Role } from '../types.js'
 
 import { stringWidth, wrapAnsi } from './terminalRuntime.opentui.js'
@@ -181,16 +182,20 @@ export function transcriptGutterWidth(role: Role, userPrompt: string) {
 }
 
 export function transcriptBodyWidth(totalCols: number, role: Role, userPrompt: string, termuxMode = false) {
-  const horizontalReserve = termuxMode ? 2 : 4
-  const available = Math.max(1, totalCols - transcriptGutterWidth(role, userPrompt) - horizontalReserve)
+  const gutter = transcriptGutterWidth(role, userPrompt)
 
   if (termuxMode) {
     // On narrow / unusual aspect-ratio mobile panes, forcing a wide minimum
-    // width causes right-edge clipping and chopped words.
-    return available
+    // width causes right-edge clipping and chopped words — and the reading
+    // measure below must not apply either, for the same reason.
+    return Math.max(1, totalCols - gutter - 2)
   }
 
-  return Math.max(20, available)
+  // Must track the renderer's `maxWidth` on the transcript column exactly:
+  // width feeds `wrappedLines`, so any mismatch mis-estimates every row in
+  // proportion and drifts the virtual scroll. `contentColumnWidth` already
+  // subtracts the column's own horizontal padding.
+  return Math.max(20, contentColumnWidth(totalCols) - gutter)
 }
 
 export function stableComposerColumns(totalCols: number, promptWidth: number, termuxMode = false) {

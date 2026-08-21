@@ -25,10 +25,16 @@ import type {
   SessionSteerResponse
 } from '../gatewayTypes.js'
 import { asRpcResult, rpcErrorMessage } from '../lib/rpc.js'
+import { compactPreview as compact } from '../lib/text.js'
 import type { Theme } from '../theme.js'
+import { windowItems } from './overlayLayout.js'
 
 const POLL_MS = 1_500
-const UNTITLED = 'Untitled chat'
+// The one place a per-row placeholder is genuinely needed — a column of
+// blanks is unusable. An em-dash reads as "not named yet" rather than
+// pretending to be a name, which is what seven identical "Untitled chat"
+// rows did.
+const UNTITLED = '—'
 
 export type SessionPickerActions = Pick<AppLayoutActions, 'activateLiveSession' | 'resumeById'>
 
@@ -75,12 +81,6 @@ const shortId = (id: string) => (id.length > 10 ? `${id.slice(0, 9)}…` : id)
 
 const shortModel = (model = '') => model.replace(/^.*\//, '') || 'default'
 
-const compact = (value: string, max: number) => {
-  const oneLine = value.replace(/\s+/g, ' ').trim()
-
-  return oneLine.length > max ? `${oneLine.slice(0, Math.max(1, max - 1)).trimEnd()}…` : oneLine
-}
-
 const isMainSession = (item: SessionActiveItem | SessionListItem) => {
   const kind = item.kind?.trim().toLowerCase()
 
@@ -115,14 +115,6 @@ const groupForLive = (status: LiveSessionStatus): SessionGroup => {
 const groupOrder = (group: SessionGroup) => (
   group === 'needs-input' ? 0 : group === 'working' ? 1 : 2
 )
-
-const windowItems = <T,>(items: readonly T[], selected: number, visible: number) => {
-  if (visible <= 0) return { items: [] as readonly T[], offset: 0 }
-
-  const offset = Math.max(0, Math.min(selected - Math.floor(visible / 2), items.length - visible))
-
-  return { items: items.slice(offset, offset + visible), offset }
-}
 
 function InfoRow({ children, color }: { children: ReactNode; color: string }) {
   return (
@@ -222,6 +214,13 @@ export function SessionPicker({ actions, currentSessionId, onCancel, t: supplied
   const selectedIdRef = useRef('')
   const [submitting, setSubmitting] = useState(false)
   const mountedRef = useRef(true)
+  const peekGenerationRef = useRef(0)
+  const pendingPeekRowIdRef = useRef('')
+
+  const invalidatePeek = useCallback(() => {
+    peekGenerationRef.current += 1
+    pendingPeekRowIdRef.current = ''
+  }, [])
 
   const updateDraft = useCallback((update: string | ((value: string) => string)) => {
     const next = typeof update === 'function' ? update(draftRef.current) : update
@@ -230,24 +229,26 @@ export function SessionPicker({ actions, currentSessionId, onCancel, t: supplied
   }, [])
 
   const close = useCallback(() => {
+    invalidatePeek()
     patchOverlayState({ sessions: false })
     onCancel?.()
-  }, [onCancel])
+  }, [invalidatePeek, onCancel])
 
   useEffect(() => {
     mountedRef.current = true
 
     return () => {
       mountedRef.current = false
+      invalidatePeek()
     }
-  }, [])
+  }, [invalidatePeek])
 
   const refresh = useCallback(async () => {
     const results = await Promise.allSettled([
       gw.request<SessionActiveListResponse>('session.active_list', {
         current_session_id: effectiveSessionId
       }),
-      gw.request<SessionListResponse>('session.list', { kind: 'all', limit: 0 })
+      gw.request<SessionListResponse>('session.list', { kind: 'main', limit: 0 })
     ])
     const errors: string[] = []
     let nextActive: SessionActiveItem[] = []
@@ -336,6 +337,11 @@ export function SessionPicker({ actions, currentSessionId, onCancel, t: supplied
   )
 
   useEffect(() => {
+    const selectedStillExists = !selectedIdRef.current || rows.some(row => row.id === selectedIdRef.current)
+    const pendingStillExists = !pendingPeekRowIdRef.current || rows.some(row => row.id === pendingPeekRowIdRef.current)
+    const peekStillExists = !peek || rows.some(row => row.id === peek.rowId)
+    if (!selectedStillExists || !pendingStillExists || !peekStillExists) invalidatePeek()
+
     setSelected(index => {
       const preserved = rows.findIndex(row => row.id === selectedIdRef.current)
       const next = preserved >= 0 ? preserved : Math.max(0, Math.min(index, Math.max(0, rows.length - 1)))
@@ -343,18 +349,23 @@ export function SessionPicker({ actions, currentSessionId, onCancel, t: supplied
 
       return next
     })
-    if (peek && !rows.some(row => row.id === peek.rowId)) setPeek(null)
-  }, [peek, rows])
+    if (!peekStillExists) setPeek(null)
+  }, [invalidatePeek, peek, rows])
 
   const select = useCallback((next: number | ((index: number) => number)) => {
     setSelected(index => {
       const candidate = typeof next === 'function' ? next(index) : next
       const clamped = Math.max(0, Math.min(candidate, Math.max(0, rows.length - 1)))
-      selectedIdRef.current = rows[clamped]?.id ?? ''
+      const nextId = rows[clamped]?.id ?? ''
+      if (nextId !== selectedIdRef.current) {
+        invalidatePeek()
+        setNotice('')
+      }
+      selectedIdRef.current = nextId
 
       return clamped
     })
-  }, [rows])
+  }, [invalidatePeek, rows])
 
   const attach = useCallback(() => {
     const row = rows[selected]
@@ -368,17 +379,23 @@ export function SessionPicker({ actions, currentSessionId, onCancel, t: supplied
   const openPeek = useCallback(() => {
     const row = rows[selected]
     if (!row) return
+    const generation = peekGenerationRef.current + 1
+    peekGenerationRef.current = generation
+    pendingPeekRowIdRef.current = ''
     if (row.kind === 'saved') {
       setNotice('Attach to a saved chat to inspect or reply.')
 
       return
     }
 
+    pendingPeekRowIdRef.current = row.item.id
     setNotice('loading preview…')
     void gw.request<SessionPeekResponse>('session.peek', { session_id: row.item.id })
       .then(raw => {
+        if (!mountedRef.current || generation !== peekGenerationRef.current) return
         const result = asRpcResult<SessionPeekResponse>(raw)
         if (!result?.messages || !result.status) throw new Error('invalid response: session.peek')
+        pendingPeekRowIdRef.current = ''
         setPeek({
           inflight: result.inflight,
           messages: result.messages,
@@ -387,7 +404,12 @@ export function SessionPicker({ actions, currentSessionId, onCancel, t: supplied
         })
         setNotice('')
       })
-      .catch(cause => setNotice(`preview failed: ${rpcErrorMessage(cause)}`))
+      .catch(cause => {
+        if (mountedRef.current && generation === peekGenerationRef.current) {
+          pendingPeekRowIdRef.current = ''
+          setNotice(`preview failed: ${rpcErrorMessage(cause)}`)
+        }
+      })
   }, [gw, rows, selected])
 
   const submitDraft = useCallback(() => {
@@ -448,6 +470,7 @@ export function SessionPicker({ actions, currentSessionId, onCancel, t: supplied
     if (name === 'escape') {
       consume(event)
       if (peek) {
+        invalidatePeek()
         setPeek(null)
         updateDraft('')
         setNotice('')
@@ -526,7 +549,7 @@ export function SessionPicker({ actions, currentSessionId, onCancel, t: supplied
       consume(event)
       updateDraft(value => value + sequence)
     }
-  }, [attach, close, openPeek, peek, rows.length, select, submitDraft, updateDraft])
+  }, [attach, close, invalidatePeek, openPeek, peek, rows.length, select, submitDraft, updateDraft])
 
   useKeyboard(handleKey)
   usePaste(event => {
@@ -536,8 +559,13 @@ export function SessionPicker({ actions, currentSessionId, onCancel, t: supplied
   })
 
   const chromeRows = error || notice ? 7 : 6
+  // Budget, not quota: only real rows are rendered and a flex spacer absorbs
+  // the remainder, so a three-chat list is three rows rather than three rows
+  // padded out with twenty-nine blanks.
   const listRows = Math.max(1, height - chromeRows)
-  const { items: visibleRows, offset } = windowItems(rows, selected, listRows)
+  const { items: visibleRows, offset } = windowItems(rows, selected, Math.min(listRows, rows.length))
+  const hiddenAbove = offset
+  const hiddenBelow = Math.max(0, rows.length - offset - visibleRows.length)
   const peekRows = listRows
   const peekText = peek ? previewLines(peek, width, peekRows) : []
   const peekRow = peek ? rows.find(row => row.id === peek.rowId) : undefined
@@ -569,12 +597,10 @@ export function SessionPicker({ actions, currentSessionId, onCancel, t: supplied
       ) : peek ? (
         <>
           {peekText.map((line, index) => <InfoRow color={t.color.text} key={`peek-${index}`}>{line}</InfoRow>)}
-          {Array.from({ length: Math.max(0, peekRows - peekText.length) }, (_, index) => (
-            <InfoRow color={t.color.muted} key={`peek-pad-${index}`}> </InfoRow>
-          ))}
         </>
       ) : rows.length ? (
         <>
+          {hiddenAbove > 0 ? <InfoRow color={t.color.muted}>{`  ↑ ${hiddenAbove} more`}</InfoRow> : null}
           {visibleRows.map((row, index) => {
             const absoluteIndex = offset + index
             const previous = rows[absoluteIndex - 1]
@@ -590,20 +616,19 @@ export function SessionPicker({ actions, currentSessionId, onCancel, t: supplied
               />
             )
           })}
-          {Array.from({ length: Math.max(0, listRows - visibleRows.length) }, (_, index) => (
-            <InfoRow color={t.color.muted} key={`session-pad-${index}`}> </InfoRow>
-          ))}
+          {hiddenBelow > 0 ? <InfoRow color={t.color.muted}>{`  ↓ ${hiddenBelow} more`}</InfoRow> : null}
         </>
       ) : (
         <>
           <InfoRow color={t.color.muted}>No chats yet. Type below to dispatch one.</InfoRow>
-          {Array.from({ length: Math.max(0, listRows - 1) }, (_, index) => (
-            <InfoRow color={t.color.muted} key={`empty-pad-${index}`}> </InfoRow>
-          ))}
         </>
       )}
 
-      <box borderColor={t.color.border} borderStyle="single" flexShrink={0} height={3} paddingLeft={1} paddingRight={1}>
+      {/* Directly below the list, not pinned to the terminal's last row. The
+          old layout padded the gap with blank rows and left ~32 dead rows
+          between a four-chat list and its input; a flex spacer reproduced
+          exactly the same look. Stacking is what actually fixes it. */}
+      <box borderColor={t.color.border} borderStyle="single" flexShrink={0} height={3} marginTop={1} paddingLeft={1} paddingRight={1}>
         <text fg={draft ? t.color.text : t.color.muted} flexShrink={0} truncate width="100%" wrapMode="none">
           {draft || (peek ? 'Reply or steer this chat…' : 'Dispatch a new independent chat…')}{submitting ? ' …' : ''}
         </text>

@@ -39,7 +39,20 @@ test('explicit provider overrides win over model-prefix routing for every known 
   expect(resolveProvider('claude-sonnet-4-6', { provider: 'openai' })).toBe('openai')
   expect(resolveProvider('llama3.3', { provider_type: 'openrouter' })).toBe('openrouter')
   expect(resolveProvider('sonnet', { provider: 'claude_code' })).toBe('claude-code')
-  expect(resolveProvider('gpt-4o', { provider: 'not-a-provider' })).toBe('openai')
+})
+
+test('unknown explicit provider overrides are rejected instead of enabling automatic routing', () => {
+  expect(() => resolveProvider('gpt-4o', { provider: 'not-a-provider' })).toThrow(ConfigurationError)
+  expect(() => resolveProvider('gpt-4o', { provider: 'not-a-provider' })).toThrow(
+    "Configuration provider: unknown provider 'not-a-provider'; omit provider/provider_type to enable automatic model routing",
+  )
+  expect(() => resolveProvider('claude-sonnet-4-6', { provider_type: 'legacy-missing' })).toThrow(
+    "Configuration provider_type: unknown provider 'legacy-missing'; omit provider/provider_type to enable automatic model routing",
+  )
+  expect(() => resolveProvider('gpt-4o', {
+    provider: 'not-a-provider',
+    provider_type: 'openrouter',
+  })).toThrow("Configuration provider: unknown provider 'not-a-provider'")
 })
 
 test('costs, context windows, and Kimi headers match registry behavior', () => {

@@ -9,10 +9,11 @@
 //
 // The transport is a Unix socket (Node `net`) rather than child stdio.
 
-import { type ChildProcess, execFileSync, spawn } from 'node:child_process'
+import { type ChildProcess, execFile, execFileSync, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { existsSync, readFileSync, realpathSync } from 'node:fs'
+import { promisify } from 'node:util'
 import { connect, type Socket } from 'node:net'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
@@ -42,6 +43,10 @@ const REQUEST_TIMEOUT_MS = Math.max(
   Number.parseInt(process.env.XERXES_TUI_RPC_TIMEOUT_MS ?? '120000', 10) || 120000
 )
 const DAEMON_IDENTITY_TIMEOUT_MS = Math.min(5000, STARTUP_TIMEOUT_MS)
+/** Bound a single socket connect/detach attempt so a wedged listener cannot stall startup. */
+const SOCKET_OPERATION_TIMEOUT_MS = 2000
+/** One extra identity probe absorbs a daemon that is briefly busy during startup. */
+const DAEMON_IDENTITY_ATTEMPTS = 2
 // A bundled daemon is normally ready in 85-105 ms. A 25 ms cadence reaches
 // it within one short interval without a busy loop or the old 150 ms stall.
 export const DAEMON_CONNECT_RETRY_MS = 25
@@ -60,6 +65,10 @@ function xerxesHome(): string {
 
 /** Canonical project dir: nearest git root when available, otherwise cwd. */
 export function resolveProjectDir(projectDir?: string): string {
+  // Synchronous by design: this runs exactly once per process, in the
+  // GatewayClient constructor before the renderer mounts, so the ~10ms git
+  // call can never freeze a live frame loop. Every mid-session subprocess
+  // (git head, ps identity probe) uses the async helpers instead.
   const raw = resolve(projectDir ?? process.cwd())
   try {
     const root = execFileSync('git', ['-C', raw, 'rev-parse', '--show-toplevel'], {
@@ -350,7 +359,6 @@ export class GatewayClient extends EventEmitter {
   private nextId = 1
   private readonly pending = new Map<number, Pending>()
   private buffer = ''
-  private initializeTranscriptCapture: GatewayTranscriptMessage[] | null = null
   private readonly stderrRing: string[] = []
   private spawnError: Error | null = null
   private spawnedDaemon = false
@@ -358,8 +366,13 @@ export class GatewayClient extends EventEmitter {
   private startPromise: Promise<void> | null = null
   private activeSessionKey: string
   private readonly sessionKeys = new Map<string, string>()
+  /** Most recent approval request per session id; '' key holds the last untagged request. */
+  private readonly approvalRequestIds = new Map<string, string>()
   private lastApprovalRequestId = ''
   private readonly silentSockets = new WeakSet<Socket>()
+  /** Serializes socket writes so a full kernel buffer applies backpressure instead of growing userland memory. */
+  private writeChain: Promise<void> = Promise.resolve()
+  private initializeTranscriptCapture: { rows: GatewayTranscriptMessage[]; sessionId: string | null } | null = null
 
   constructor(opts: GatewayClientOptions = {}) {
     super()
@@ -426,15 +439,27 @@ export class GatewayClient extends EventEmitter {
   private tryConnect(socketPath: string): Promise<boolean> {
     return new Promise<boolean>(res => {
       const sock = connect({ path: socketPath })
-      const onError = () => {
-        sock.destroy()
-        res(false)
+      let settled = false
+      const finish = (connected: boolean) => {
+        if (settled) {
+          return
+        }
+        settled = true
+        clearTimeout(timer)
+        if (!connected) {
+          sock.destroy()
+        }
+        res(connected)
       }
+      // A socket path that exists but never answers the connect handshake
+      // would otherwise hang startup forever.
+      const timer = setTimeout(() => finish(false), SOCKET_OPERATION_TIMEOUT_MS)
+      const onError = () => finish(false)
       sock.once('error', onError)
       sock.once('connect', () => {
         sock.removeListener('error', onError)
         this.attachSocket(sock)
-        res(true)
+        finish(true)
       })
     })
   }
@@ -452,7 +477,7 @@ export class GatewayClient extends EventEmitter {
 
     let status: RpcObject
     try {
-      status = await this.rawRequest<RpcObject>('runtime.status', {}, DAEMON_IDENTITY_TIMEOUT_MS)
+      status = await this.probeDaemonIdentity()
     } catch (error) {
       await this.detachSocketSilently()
       throw new Error(
@@ -491,7 +516,7 @@ export class GatewayClient extends EventEmitter {
       ...(this.bunBinary ? { XERXES_TUI_BUN: this.bunBinary } : {}),
       ...(this.bunDaemonPath ? { XERXES_TUI_BUN_DAEMON: this.bunDaemonPath } : {})
     })
-    const command = daemonPid === undefined ? '' : daemonProcessCommand(daemonPid)
+    const command = daemonPid === undefined ? '' : await daemonProcessCommand(daemonPid)
     const decision = daemonBuildDecision({
       activeSubagents,
       activeTurns,
@@ -537,6 +562,23 @@ export class GatewayClient extends EventEmitter {
     return false
   }
 
+  /**
+   * Probe `runtime.status` with one retry. A daemon mid-compaction or serving a
+   * large replay can miss the first short deadline without being unhealthy, and
+   * failing startup on that single timeout forced a pointless manual restart.
+   */
+  private async probeDaemonIdentity(): Promise<RpcObject> {
+    let lastError: unknown = null
+    for (let attempt = 0; attempt < DAEMON_IDENTITY_ATTEMPTS; attempt++) {
+      try {
+        return await this.rawRequest<RpcObject>('runtime.status', {}, DAEMON_IDENTITY_TIMEOUT_MS)
+      } catch (error) {
+        lastError = error
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error(String(lastError))
+  }
+
   private async detachSocketSilently(): Promise<void> {
     const socket = this.socket
     if (!socket) {
@@ -544,8 +586,20 @@ export class GatewayClient extends EventEmitter {
     }
     this.silentSockets.add(socket)
     await new Promise<void>(resolve => {
-      socket.once('close', resolve)
+      // 'close' always follows destroy() on a healthy stream, but never let a
+      // misbehaving transport wedge startup behind a listener that never fires.
+      const timer = setTimeout(resolve, SOCKET_OPERATION_TIMEOUT_MS)
+      socket.once('close', () => {
+        clearTimeout(timer)
+        resolve()
+      })
       socket.destroy()
+      // destroy() sets the flag synchronously even when 'close' is deferred to
+      // a later tick; a socket already gone needs no wait at all.
+      if (socket.destroyed) {
+        clearTimeout(timer)
+        resolve()
+      }
     })
   }
 
@@ -680,7 +734,22 @@ export class GatewayClient extends EventEmitter {
       }
       const payload = params.payload ?? {}
       if (type === 'approval_request') {
-        this.lastApprovalRequestId = String(payload.id ?? payload.request_id ?? '')
+        const requestId = String(payload.id ?? payload.request_id ?? '')
+        const sessionId = typeof payload.session_id === 'string' ? payload.session_id : ''
+        // Track per session: with several live sessions, a connection-global
+        // "last approval" can answer a prompt belonging to a different tab.
+        this.lastApprovalRequestId = requestId
+        if (sessionId && requestId) {
+          // delete+set keeps insertion order as recency for the LRU bound.
+          this.approvalRequestIds.delete(sessionId)
+          this.approvalRequestIds.set(sessionId, requestId)
+          if (this.approvalRequestIds.size > MAX_SESSION_KEYS) {
+            const oldest = this.approvalRequestIds.keys().next().value
+            if (oldest !== undefined) {
+              this.approvalRequestIds.delete(oldest)
+            }
+          }
+        }
       }
       for (const evt of adaptDaemonEvent(type, payload)) {
         const sessionId = typeof payload.session_id === 'string'
@@ -864,8 +933,7 @@ export class GatewayClient extends EventEmitter {
     params: Record<string, unknown> = {},
     timeoutMs = REQUEST_TIMEOUT_MS
   ): Promise<T> {
-    const sock = this.socket
-    if (!sock) {
+    if (!this.socket) {
       return Promise.reject(new Error('gateway not connected'))
     }
     const id = this.nextId++
@@ -876,13 +944,37 @@ export class GatewayClient extends EventEmitter {
         rej(new Error(`rpc timeout: ${method} (${timeoutMs}ms)`))
       }, timeoutMs)
       this.pending.set(id, { resolve: res as (v: unknown) => void, reject: rej, timer })
-      sock.write(frame, err => {
-        if (err) {
-          clearTimeout(timer)
-          this.pending.delete(id)
-          rej(err)
+      this.enqueueWrite(frame).catch(error => {
+        clearTimeout(timer)
+        // The response may already have settled this id; only reject when the
+        // entry is still ours.
+        if (this.pending.delete(id)) {
+          rej(error instanceof Error ? error : new Error(String(error)))
         }
       })
+    })
+  }
+
+  /**
+   * Serialize frames through a chain gated on the socket's write callback.
+   * The callback fires only once the chunk is flushed to the kernel, so when
+   * a 20MB image frame fills the buffer, later frames wait here instead of
+   * piling up in userland memory.
+   */
+  private enqueueWrite(frame: string): Promise<void> {
+    const next = this.writeChain.then(() => this.writeFrameNow(frame))
+    // A failed frame must not poison the chain for everything after it.
+    this.writeChain = next.catch(() => {})
+    return next
+  }
+
+  private writeFrameNow(frame: string): Promise<void> {
+    const sock = this.socket
+    if (!sock) {
+      return Promise.reject(new Error('gateway not connected'))
+    }
+    return new Promise<void>((resolve, reject) => {
+      sock.write(frame, error => (error ? reject(error) : resolve()))
     })
   }
 
@@ -903,7 +995,10 @@ export class GatewayClient extends EventEmitter {
 
   /** Fire-and-forget notification (no id, no response expected). */
   notify(method: string, params: Record<string, unknown> = {}): void {
-    this.socket?.write(JSON.stringify({ jsonrpc: '2.0', method, params }) + '\n')
+    if (!this.socket) {
+      return
+    }
+    void this.enqueueWrite(JSON.stringify({ jsonrpc: '2.0', method, params }) + '\n').catch(() => {})
   }
 
   close(): void {
@@ -1076,7 +1171,7 @@ export class GatewayClient extends EventEmitter {
       this.activeSessionKey = nextSessionKey
       this.rememberSessionKey(sessionId, nextSessionKey)
       return {
-        info: this.sessionInfoFromInitialize(raw, session, captured),
+        info: await this.sessionInfoFromInitialize(raw, session, captured),
         session_id: sessionId
       }
     } catch (error) {
@@ -1087,13 +1182,20 @@ export class GatewayClient extends EventEmitter {
 
   private async sessionResume(params: Record<string, unknown>): Promise<RpcObject> {
     const id = String(params.session_id ?? '')
-    const nextSessionKey = id || this.sessionKey
+    // Never bind the raw session id as this connection's session key: another
+    // connection resuming the same session would derive the identical key and
+    // the daemon would alias both connections onto one session. Reuse the key
+    // this connection already owns for the session; otherwise mint a fresh
+    // connection-scoped key, exactly like sessionCreate.
+    const nextSessionKey = id ? (this.sessionKeys.get(id) ?? `tui:${randomKey()}`) : this.sessionKey
     // `initialize` replays persisted history as notifications before its RPC
     // response. Capture those rows at the transport boundary and hydrate the
     // React transcript once: the v35 response intentionally exposes only a
     // numeric `session.messages` count, and forwarding every replay event
-    // would otherwise cause one render per historical message.
-    const finishCapture = this.captureInitializeInfo(true)
+    // would otherwise cause one render per historical message. The capture is
+    // scoped to the resumed session so tagged rows from other live sessions
+    // keep flowing to their own tabs instead of being swallowed.
+    const finishCapture = this.captureInitializeInfo(true, id || null)
 
     try {
       const raw = await this.nativeSuccess('initialize', {
@@ -1124,7 +1226,7 @@ export class GatewayClient extends EventEmitter {
       this.rememberSessionKey(sessionId, nextSessionKey)
       const status = liveSessionStatus(session)
       return {
-        info: this.sessionInfoFromInitialize(raw, session, captured),
+        info: await this.sessionInfoFromInitialize(raw, session, captured),
         message_count: messageCount,
         messages,
         resumed: sessionId,
@@ -1170,7 +1272,7 @@ export class GatewayClient extends EventEmitter {
     const messages = transcriptFromStoredMessages(session.transcript)
     const status = liveSessionStatus(session)
     return {
-      info: this.sessionInfoFromInitialize(raw, session, { info: null, usage: null }),
+      info: await this.sessionInfoFromInitialize(raw, session, { info: null, usage: null }),
       inflight: inflight
         ? {
             assistant: String(inflight.assistant ?? ''),
@@ -1201,7 +1303,7 @@ export class GatewayClient extends EventEmitter {
       const status = liveSessionStatus(row)
       const inflight = isRecord(row.inflight) ? row.inflight : undefined
       const activity = optionalTrimmedText(inflight?.user)
-      const title = optionalTrimmedText(row.title) ?? 'Untitled chat'
+      const title = optionalTrimmedText(row.title) ?? ''
       return {
         ...optionalSessionLinkFields(row),
         ...(activity ? { activity } : {}),
@@ -1227,7 +1329,7 @@ export class GatewayClient extends EventEmitter {
         this.rememberSessionKey(id, String(row.key))
       }
       const updatedAt = Date.parse(String(row.updated_at ?? '')) / 1000
-      const title = optionalTrimmedText(row.title) ?? 'Untitled chat'
+      const title = optionalTrimmedText(row.title) ?? ''
       return {
         ...optionalSessionLinkFields(row),
         id,
@@ -1432,7 +1534,13 @@ export class GatewayClient extends EventEmitter {
         : choice === 'deny' || choice === 'reject'
           ? 'reject'
           : 'approve'
-    const requestId = String(params.request_id ?? this.lastApprovalRequestId)
+    const sessionId = String(params.session_id ?? '').trim()
+    const requestId = String(
+      params.request_id || (sessionId ? this.approvalRequestIds.get(sessionId) : '') || this.lastApprovalRequestId
+    )
+    if (sessionId) {
+      this.approvalRequestIds.delete(sessionId)
+    }
 
     return this.rawRequest('permission_response', { request_id: requestId, response })
   }
@@ -1452,6 +1560,7 @@ export class GatewayClient extends EventEmitter {
     const items = Array.isArray(raw.completions)
       ? raw.completions.map((item: RpcObject) => ({
           display: String(item.label ?? item.value ?? ''),
+          group: item.category ? String(item.category) : undefined,
           meta: item.meta ? String(item.meta) : undefined,
           text: String(item.value ?? '')
         }))
@@ -1552,7 +1661,8 @@ export class GatewayClient extends EventEmitter {
   }
 
   private captureInitializeInfo(
-    captureTranscript = false
+    captureTranscript = false,
+    transcriptSessionId: string | null = null
   ): () => { info: null | SessionInfo; transcript: GatewayTranscriptMessage[]; usage: null | Usage } {
     let info: null | SessionInfo = null
     let usage: null | Usage = null
@@ -1563,7 +1673,7 @@ export class GatewayClient extends EventEmitter {
       if (this.initializeTranscriptCapture) {
         throw new Error('cannot initialize two resumed sessions concurrently')
       }
-      this.initializeTranscriptCapture = transcript
+      this.initializeTranscriptCapture = { rows: transcript, sessionId: transcriptSessionId }
     }
     const onInfo = (ev: AnyEvent) => {
       const incoming = ev.payload as SessionInfo | undefined
@@ -1584,12 +1694,13 @@ export class GatewayClient extends EventEmitter {
     }
     this.on('session.info', onInfo)
     this.on('status.update', onStatus)
+    const capture = this.initializeTranscriptCapture
     return () => {
       if (!stopped) {
         stopped = true
         this.off('session.info', onInfo)
         this.off('status.update', onStatus)
-        if (this.initializeTranscriptCapture === transcript) {
+        if (capture !== null && this.initializeTranscriptCapture === capture) {
           this.initializeTranscriptCapture = null
         }
       }
@@ -1597,11 +1708,11 @@ export class GatewayClient extends EventEmitter {
     }
   }
 
-  private sessionInfoFromInitialize(
+  private async sessionInfoFromInitialize(
     raw: RpcObject,
     session: RpcObject,
     captured: { info: null | SessionInfo; usage: null | Usage }
-  ): SessionInfo {
+  ): Promise<SessionInfo> {
     const rawInfo = sessionInfoFromInit({
       ...raw,
       cwd: raw.cwd ?? session.cwd,
@@ -1617,7 +1728,7 @@ export class GatewayClient extends EventEmitter {
     return {
       ...withUsage,
       cwd,
-      head_hash: withUsage.head_hash || localGitHead(cwd),
+      head_hash: withUsage.head_hash || (await localGitHead(cwd)),
       version: withUsage.version || localProjectVersion(cwd)
     }
   }
@@ -1628,9 +1739,17 @@ export class GatewayClient extends EventEmitter {
   }
 
   private emitEvent(evt: AnyEvent): void {
-    if (evt.type === 'transcript.append' && this.initializeTranscriptCapture) {
-      this.initializeTranscriptCapture.push({ ...(evt.payload as GatewayTranscriptMessage) })
-      return
+    const capture = this.initializeTranscriptCapture
+    if (evt.type === 'transcript.append' && capture) {
+      const eventSessionId = (evt as { session_id?: unknown }).session_id
+      // Rows tagged for a different live session belong to that session's
+      // stream; swallowing them into the resume capture would lose them.
+      const foreign =
+        capture.sessionId !== null && typeof eventSessionId === 'string' && eventSessionId !== capture.sessionId
+      if (!foreign) {
+        capture.rows.push({ ...(evt.payload as GatewayTranscriptMessage) })
+        return
+      }
     }
 
     this.emit('event', evt)
@@ -1713,6 +1832,8 @@ function pidFromFile(path: string): number | undefined {
   }
 }
 
+const execFileAsync = promisify(execFile)
+
 /**
  * The daemon's command line, or '' when it cannot be read.
  *
@@ -1720,8 +1841,10 @@ function pidFromFile(path: string): number | undefined {
  * why the TUI keeps its own copy. Windows has no `ps`, so the equivalent is a
  * pid-filtered CIM query. An unreadable command line means "identity not
  * proven", which the caller already treats as a reason not to kill anything.
+ * Async because the identity probe runs while the UI is already up: a sync
+ * `ps`/`powershell` spawn would freeze the frame loop for its full duration.
  */
-function daemonProcessCommand(pid: number, platform: NodeJS.Platform = process.platform): string {
+async function daemonProcessCommand(pid: number, platform: NodeJS.Platform = process.platform): Promise<string> {
   const target = Number.isFinite(pid) ? Math.trunc(pid) : -1
   const [command, args] = isWindows(platform)
     ? ([
@@ -1735,11 +1858,11 @@ function daemonProcessCommand(pid: number, platform: NodeJS.Platform = process.p
       ] as const)
     : (['ps', ['-p', String(target), '-o', 'command=']] as const)
   try {
-    return execFileSync(command, [...args], {
+    const { stdout } = await execFileAsync(command, [...args], {
       encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
       ...(isWindows(platform) ? { windowsHide: true } : {})
-    }).trim()
+    })
+    return stdout.trim()
   } catch {
     return ''
   }
@@ -1838,12 +1961,12 @@ function mergeSessionInfo(base: SessionInfo, incoming?: null | Partial<SessionIn
   }
 }
 
-function localGitHead(projectDir: string): string {
+async function localGitHead(projectDir: string): Promise<string> {
   try {
-    return execFileSync('git', ['-C', projectDir, 'rev-parse', '--short=12', 'HEAD'], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore']
-    }).trim()
+    const { stdout } = await execFileAsync('git', ['-C', projectDir, 'rev-parse', '--short=12', 'HEAD'], {
+      encoding: 'utf8'
+    })
+    return stdout.trim()
   } catch {
     return ''
   }

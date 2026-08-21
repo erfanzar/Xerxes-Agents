@@ -48,6 +48,7 @@ export interface PtySessionManagerOptions {
 export interface CreatePtySessionOptions {
   readonly cols?: number
   readonly env?: Readonly<Record<string, string | undefined>>
+  readonly ownerSessionId?: string
   readonly login?: boolean
   readonly maxOutputChars?: number
   readonly rows?: number
@@ -109,9 +110,10 @@ export class PtySessionManager {
     // Opened before the terminal so the `data` callback can mirror from the
     // very first byte. The controls resolve the session by id at call time,
     // which is what lets them exist before the session does.
-    const mirror = this.terminals?.open({
+    const mirror = options.ownerSessionId === undefined ? undefined : this.terminals?.open({
       id,
       kind: 'pty',
+      ownerSessionId: options.ownerSessionId,
       command,
       cwd: workdir,
       control: {

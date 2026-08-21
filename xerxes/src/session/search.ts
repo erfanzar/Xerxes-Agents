@@ -211,25 +211,63 @@ export class SessionIndex {
    */
   indexSessionIncremental(session: SessionRecord): number {
     const rows = this.database
-      .query('SELECT turn_id, prompt, response FROM session_turns WHERE session_id = ?')
-      .all(session.sessionId) as unknown as Array<{ turn_id?: unknown; prompt?: unknown; response?: unknown }>
-    const existing = new Map<string, readonly [string, string]>()
+      .query('SELECT turn_id, agent_id, prompt, response, started_at, metadata FROM session_turns WHERE session_id = ?')
+      .all(session.sessionId) as unknown as Array<{
+        agent_id?: unknown
+        metadata?: unknown
+        prompt?: unknown
+        response?: unknown
+        started_at?: unknown
+        turn_id?: unknown
+      }>
+    const existing = new Map<string, {
+      readonly agentId: string | null
+      readonly metadata: string
+      readonly prompt: string
+      readonly response: string
+      readonly startedAt: string
+    }>()
     for (const row of rows) {
-      if (typeof row.turn_id === 'string') existing.set(row.turn_id, [stringCell(row.prompt), stringCell(row.response)])
+      if (typeof row.turn_id !== 'string') continue
+      existing.set(row.turn_id, {
+        agentId: nullableStringCell(row.agent_id),
+        metadata: stringCell(row.metadata),
+        prompt: stringCell(row.prompt),
+        response: stringCell(row.response),
+        startedAt: stringCell(row.started_at),
+      })
     }
     const currentIds = new Set(session.turns.map(turn => turn.turnId))
     for (const turnId of existing.keys()) {
       if (!currentIds.has(turnId)) return this.indexSession(session)
     }
-    const pending = session.turns.filter(turn => {
+    const contentChanged: TurnRecord[] = []
+    const detailsChanged: Array<{ readonly startedAt: string; readonly turn: TurnRecord }> = []
+    for (const turn of session.turns) {
       const prior = existing.get(turn.turnId)
-      return prior === undefined || prior[0] !== turn.prompt || prior[1] !== (turn.responseContent ?? '')
-    })
-    if (pending.length === 0) return 0
+      if (prior === undefined || prior.prompt !== turn.prompt || prior.response !== (turn.responseContent ?? '')) {
+        contentChanged.push(turn)
+        continue
+      }
+      const startedAt = turn.startedAt || prior.startedAt
+      if (prior.agentId !== turn.agentId
+        || prior.startedAt !== startedAt
+        || prior.metadata !== JSON.stringify(turn.metadata)) {
+        detailsChanged.push({ turn, startedAt })
+      }
+    }
+    if (contentChanged.length === 0 && detailsChanged.length === 0) return 0
     this.transaction(() => {
-      for (const turn of pending) this.insertTurn(session.sessionId, turn)
+      for (const turn of contentChanged) this.insertTurn(session.sessionId, turn)
+      for (const { turn, startedAt } of detailsChanged) {
+        this.database.query(`
+          UPDATE session_turns
+          SET agent_id = ?, started_at = ?, metadata = ?
+          WHERE session_id = ? AND turn_id = ?
+        `).run(turn.agentId, startedAt, JSON.stringify(turn.metadata), session.sessionId, turn.turnId)
+      }
     })
-    return pending.length
+    return contentChanged.length + detailsChanged.length
   }
 
   indexTurn(sessionId: string, turn: TurnRecord): void {

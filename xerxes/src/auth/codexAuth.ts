@@ -20,7 +20,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 
 import { ConfigurationError, ProviderError } from '../core/errors.js'
-import { OAuthToken, type OAuthConfig, type OAuthFetch } from '../mcp/oauth.js'
+import { buildAuthorizeUrl, OAuthToken, type OAuthConfig, type OAuthFetch } from '../mcp/oauth.js'
 import { CredentialStorage } from './storage.js'
 
 /** Provider key under which the Codex session is stored. */
@@ -302,6 +302,9 @@ export class CodexSession {
     }
 
     const config = codexOAuthConfig('', this.environment)
+    // Resolve through the shared OAuth path before sending a refresh token so
+    // endpoint overrides receive the same HTTPS/loopback validation as login.
+    buildAuthorizeUrl(config, { codeChallenge: 'endpoint-validation', state: 'endpoint-validation' })
     const request = this.fetchImplementation ?? fetch
     const response = await request(config.tokenUrl, {
       method: 'POST',
@@ -314,6 +317,7 @@ export class CodexSession {
         grant_type: 'refresh_token',
         refresh_token: token.refreshToken,
       }).toString(),
+      redirect: 'manual',
       ...(signal ? { signal } : {}),
     })
 

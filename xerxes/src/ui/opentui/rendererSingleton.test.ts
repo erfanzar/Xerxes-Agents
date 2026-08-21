@@ -31,6 +31,25 @@ describe('active OpenTUI renderer lifecycle', () => {
     expect(renderer.requestRender).toHaveBeenCalledOnce()
   })
 
+  it('no-ops without throwing when the renderer lacks the private latch', () => {
+    // Simulates an OpenTUI upgrade that dropped `forceFullRepaintRequested`:
+    // the bridge must degrade to a plain re-render, not crash the recovery path.
+    const requestRender = vi.fn()
+    const renderer = { requestRender } as unknown as CliRenderer
+
+    expect(forceRendererRepaint(renderer)).toBe(true)
+    expect(requestRender).toHaveBeenCalledOnce()
+    expect('forceFullRepaintRequested' in renderer).toBe(false)
+  })
+
+  it('no-ops safely when neither the latch nor requestRender exists', () => {
+    const renderer = {} as unknown as CliRenderer
+
+    expect(() => forceRendererRepaint(renderer)).not.toThrow()
+    expect(forceRendererRepaint(renderer)).toBe(false)
+    expect(forceRendererRepaint(null)).toBe(false)
+  })
+
   it('recovers on focus, resize, SIGCONT, and a delayed wake heartbeat', () => {
     const events = new EventEmitter()
     const signals = new EventEmitter()

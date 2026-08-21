@@ -3,12 +3,14 @@
 
 import { expect, test } from 'bun:test'
 
+import { ProviderError } from '../src/core/errors.js'
 import {
   ResponsesApiClient,
   createLlmClient,
   type CompletionRequest,
   type LlmDelta,
 } from '../src/llms/client.js'
+import { classifyError } from '../src/runtime/errorClassifier.js'
 
 test('Responses API client maps request tools and streamed events into neutral deltas', async () => {
   let endpoint = ''
@@ -126,6 +128,97 @@ test('Responses API client supports a native non-streaming completion response',
     usage: { inputTokens: 11, outputTokens: 6, cacheReadTokens: 3 },
     toolCalls: [{ id: 'call-1', type: 'function', function: { name: 'ReadFile', arguments: { path: 'README.md' } } }],
   })
+})
+
+test('Responses API client normalizes non-streaming max-output truncation to length', async () => {
+  const client = new ResponsesApiClient({
+    providerName: 'openai',
+    apiKey: 'test-key',
+    baseUrl: 'https://example.invalid/v1',
+    fetchImplementation: async () => Response.json({
+      status: 'incomplete',
+      incomplete_details: { reason: 'max_output_tokens' },
+      output: [{ type: 'message', content: [{ type: 'output_text', text: 'cut off' }] }],
+      usage: { input_tokens: 5, output_tokens: 9 },
+    }),
+  })
+
+  await expect(client.complete({
+    model: 'gpt-4o',
+    messages: [{ role: 'user', content: 'hi' }],
+  })).resolves.toEqual({
+    content: 'cut off',
+    finishReason: 'length',
+    usage: { inputTokens: 5, outputTokens: 9 },
+    toolCalls: [],
+  })
+})
+
+test('Responses API client preserves other non-streaming incomplete reasons', async () => {
+  const client = new ResponsesApiClient({
+    providerName: 'openai',
+    apiKey: 'test-key',
+    baseUrl: 'https://example.invalid/v1',
+    fetchImplementation: async () => Response.json({
+      status: 'incomplete',
+      incomplete_details: { reason: 'content_filter' },
+      output: [],
+    }),
+  })
+
+  const completion = await client.complete({
+    model: 'gpt-4o',
+    messages: [{ role: 'user', content: 'hi' }],
+  })
+  expect(completion.finishReason).toBe('content_filter')
+})
+
+test('Responses API client rejects HTTP-200 failed and error completion responses', async () => {
+  for (const status of ['failed', 'error']) {
+    const client = new ResponsesApiClient({
+      providerName: 'openai',
+      apiKey: 'test-key',
+      baseUrl: 'https://example.invalid/v1',
+      fetchImplementation: async () => Response.json({
+        status,
+        error: { code: 'server_error', message: 'Model exploded' },
+        output: [],
+      }),
+    })
+
+    await expect(client.complete({
+      model: 'gpt-4o',
+      messages: [{ role: 'user', content: 'hi' }],
+    })).rejects.toThrow('stream returned API error (server_error): Model exploded')
+  }
+})
+
+test('Responses API propagates Retry-After metadata for completion and stream failures', async () => {
+  for (const operation of ['complete', 'stream'] as const) {
+    const client = new ResponsesApiClient({
+      providerName: 'openai',
+      apiKey: 'test-key',
+      baseUrl: 'https://example.invalid/v1',
+      fetchImplementation: async () => new Response('busy', {
+        status: 429,
+        headers: { 'Retry-After': '4' },
+      }),
+    })
+    const request: CompletionRequest = {
+      model: 'gpt-4o',
+      messages: [{ role: 'user', content: 'hi' }],
+    }
+    const failure = await (operation === 'complete'
+      ? client.complete(request)
+      : collect(client.stream(request))).then(
+      () => { throw new Error('expected request to fail') },
+      error => error as ProviderError,
+    )
+
+    expect(failure).toBeInstanceOf(ProviderError)
+    expect(failure.details).toMatchObject({ status: 429, retryAfterSeconds: 4 })
+    expect(classifyError(failure).suggestedBackoffSeconds).toBe(4)
+  }
 })
 
 test('Responses API client translates tool history into native input items', async () => {

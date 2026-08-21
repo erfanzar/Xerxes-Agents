@@ -44,6 +44,8 @@ export interface TerminalOpenOptions {
   readonly command: string
   readonly control?: TerminalControl
   readonly cwd: string
+  /** Session that created this terminal. Kept internal to avoid changing RPC rows. */
+  readonly ownerSessionId: string
   /** Stable id; the owning manager's own handle (proc_id, PTY session id). */
   readonly id: string
   readonly kind: TerminalKind
@@ -107,6 +109,7 @@ interface TerminalEntry {
   readonly control: TerminalControl
   readonly cwd: string
   endedAt: number | undefined
+  readonly ownerSessionId: string
   exitCode: number | null
   readonly id: string
   readonly kind: TerminalKind
@@ -147,11 +150,14 @@ export class TerminalRegistry {
   open(options: TerminalOpenOptions): TerminalHandle {
     const id = options.id.trim()
     if (!id) throw new TypeError('terminal id must be a non-empty string')
+    const ownerSessionId = options.ownerSessionId.trim()
+    if (!ownerSessionId) throw new TypeError('terminal ownerSessionId must be a non-empty string')
     const entry: TerminalEntry = {
       id,
       kind: options.kind,
       command: options.command,
       cwd: options.cwd,
+      ownerSessionId,
       label: options.label?.trim() || firstWords(options.command),
       control: options.control ?? {},
       mirror: new TailBuffer(this.mirrorCapacity),
@@ -194,15 +200,17 @@ export class TerminalRegistry {
     handle.close(options.exitCode)
   }
 
-  /** Every tracked terminal, oldest first. */
-  list(): TerminalSummary[] {
-    return [...this.entries.values()].map(entry => summarize(entry))
+  /** Every tracked terminal owned by one session, oldest first. */
+  list(ownerSessionId: string): TerminalSummary[] {
+    return [...this.entries.values()]
+      .filter(entry => entry.ownerSessionId === ownerSessionId)
+      .map(entry => summarize(entry))
   }
 
-  /** One terminal with the retained tail of its output, or undefined if unknown. */
-  inspect(id: string, maxChars: number = DEFAULT_INSPECT_CHARS): TerminalInspection | undefined {
+  /** One terminal with the retained tail of its output, only for its owner. */
+  inspect(ownerSessionId: string, id: string, maxChars: number = DEFAULT_INSPECT_CHARS): TerminalInspection | undefined {
     const entry = this.entries.get(id)
-    if (entry === undefined) return undefined
+    if (entry === undefined || entry.ownerSessionId !== ownerSessionId) return undefined
     const tail = entry.mirror.tail(positiveInteger(maxChars, 'maxChars'))
     return Object.freeze({
       ...summarize(entry),
@@ -212,15 +220,15 @@ export class TerminalRegistry {
   }
 
   /** Write to a live interactive terminal. Rejects when it cannot be written to. */
-  async write(id: string, chars: string): Promise<void> {
-    const control = this.liveControl(id)
+  async write(ownerSessionId: string, id: string, chars: string): Promise<void> {
+    const control = this.liveControl(ownerSessionId, id)
     if (!control.write) throw new Error('this terminal does not accept input')
     await control.write(chars)
   }
 
   /** Interrupt a live interactive terminal. */
-  async interrupt(id: string): Promise<void> {
-    const control = this.liveControl(id)
+  async interrupt(ownerSessionId: string, id: string): Promise<void> {
+    const control = this.liveControl(ownerSessionId, id)
     if (!control.interrupt) throw new Error('this terminal cannot be interrupted')
     await control.interrupt()
   }
@@ -232,8 +240,8 @@ export class TerminalRegistry {
    * process actually exits, so a kill that a process ignores does not make the
    * list claim it is gone.
    */
-  async kill(id: string, signal: TerminalSignal = 'SIGTERM'): Promise<void> {
-    const control = this.liveControl(id)
+  async kill(ownerSessionId: string, id: string, signal: TerminalSignal = 'SIGTERM'): Promise<void> {
+    const control = this.liveControl(ownerSessionId, id)
     if (!control.kill) throw new Error('this terminal cannot be killed from here')
     await control.kill(signal)
   }
@@ -243,9 +251,9 @@ export class TerminalRegistry {
     this.entries.clear()
   }
 
-  private liveControl(id: string): TerminalControl {
+  private liveControl(ownerSessionId: string, id: string): TerminalControl {
     const entry = this.entries.get(id)
-    if (entry === undefined) throw new Error(`unknown terminal: ${id}`)
+    if (entry === undefined || entry.ownerSessionId !== ownerSessionId) throw new Error(`unknown terminal: ${id}`)
     if (!entry.running) throw new Error('this terminal has already exited')
     return entry.control
   }

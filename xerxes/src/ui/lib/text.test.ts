@@ -4,12 +4,45 @@ import { describe, expect, it } from 'vitest'
 
 import {
   buildToolTrailLine,
+  compactPreview,
   formatAbandonedClarify,
   formatToolCall,
   inlineToolDisplay,
   parseToolTrailResultLine,
-  stripTrailingPasteNewlines
+  stripTrailingPasteNewlines,
+  toolTrailParts
 } from './text.js'
+import { copyPreview } from './copyText.js'
+
+describe('compactPreview', () => {
+  it('collapses whitespace onto one line', () => {
+    expect(compactPreview('  alpha \n beta\tgamma  ', 40)).toBe('alpha beta gamma')
+  })
+
+  it('returns empty for blank input', () => {
+    expect(compactPreview('   \n\t ', 10)).toBe('')
+  })
+
+  it('leaves text that already fits untouched', () => {
+    expect(compactPreview('alpha', 5)).toBe('alpha')
+  })
+
+  // Regression: clamping used to land mid-gap and render as "alpha …".
+  it('strips the trailing space before the ellipsis', () => {
+    expect(compactPreview('alpha beta', 7)).toBe('alpha…')
+  })
+
+  // Regression: a very narrow column sliced to the empty string, so a picker
+  // row rendered as a bare ellipsis with no content at all.
+  it('keeps at least one character in a very narrow column', () => {
+    expect(compactPreview('alpha', 1)).toBe('a…')
+    expect(compactPreview('alpha', 0)).toBe('a…')
+  })
+
+  it('is the single implementation behind copyPreview', () => {
+    expect(copyPreview).toBe(compactPreview)
+  })
+})
 
 describe('stripTrailingPasteNewlines', () => {
   it('removes trailing newline runs from pasted text', () => {
@@ -79,5 +112,32 @@ describe('parseToolTrailResultLine', () => {
       detail: 'command failed',
       mark: '✗'
     })
+  })
+})
+
+describe('toolTrailParts', () => {
+  it('separates the tool name, its arguments, and how long it took', () => {
+    const line = buildToolTrailLine('read_file', 'src/one.ts', false, '', 0.2)
+    const parsed = parseToolTrailResultLine(line)!
+
+    expect(toolTrailParts(parsed.call)).toEqual({
+      args: 'src/one.ts',
+      duration: '0.2s',
+      name: 'Read File'
+    })
+  })
+
+  it('handles a call with no context and no duration', () => {
+    expect(toolTrailParts('Task Output Tool')).toEqual({ args: '', duration: '', name: 'Task Output Tool' })
+  })
+
+  it('keeps arguments that themselves contain parentheses', () => {
+    const line = buildToolTrailLine('exec', 'bun test (unit)', false, '', 1.5)
+    const parsed = parseToolTrailResultLine(line)!
+    const parts = toolTrailParts(parsed.call)
+
+    expect(parts.name).toBe('Exec')
+    expect(parts.args).toBe('bun test (unit)')
+    expect(parts.duration).toBe('1.5s')
   })
 })

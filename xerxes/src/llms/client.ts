@@ -254,9 +254,10 @@ export class OpenAiCompatibleClient implements LlmClient {
     })
     if (!response.ok) {
       const body = await response.text()
-      throw new ProviderError(
+      throw openAiHttpError(
         this.providerName,
         `completion request failed (${response.status}): ${body.slice(0, 4_096)}`,
+        response,
       )
     }
 
@@ -292,9 +293,10 @@ export class OpenAiCompatibleClient implements LlmClient {
     })
     if (!response.ok) {
       const body = await response.text()
-      throw new ProviderError(
+      throw openAiHttpError(
         this.providerName,
         `stream request failed (${response.status}): ${body.slice(0, 4_096)}`,
+        response,
       )
     }
     if (!response.body) {
@@ -408,9 +410,10 @@ export class ResponsesApiClient implements LlmClient {
     })
     if (!response.ok) {
       const body = await response.text()
-      throw new ProviderError(
+      throw openAiHttpError(
         this.providerName,
         'Responses API completion request failed (' + response.status + '): ' + body.slice(0, 4_096),
+        response,
       )
     }
     return parseResponsesCompletion(parseJsonObject(await response.text(), this.providerName))
@@ -426,9 +429,10 @@ export class ResponsesApiClient implements LlmClient {
     })
     if (!response.ok) {
       const body = await response.text()
-      throw new ProviderError(
+      throw openAiHttpError(
         this.providerName,
         'Responses API stream request failed (' + response.status + '): ' + body.slice(0, 4_096),
+        response,
       )
     }
     if (!response.body) {
@@ -443,6 +447,28 @@ export class ResponsesApiClient implements LlmClient {
     }
     translator.finish()
   }
+}
+
+/** Preserve HTTP retry metadata without mixing provider headers into user-facing messages. */
+function openAiHttpError(provider: ProviderName, message: string, response: Response): ProviderError {
+  const retryAfterSeconds = parseRetryAfterHeader(response.headers.get('retry-after'))
+  return new ProviderError(provider, message, undefined, {
+    status: response.status,
+    ...(retryAfterSeconds === undefined ? {} : { retryAfterSeconds }),
+  })
+}
+
+/** Parse either Retry-After delta-seconds or an HTTP date into a non-negative delay. */
+function parseRetryAfterHeader(value: string | null, now = Date.now()): number | undefined {
+  if (value === null) return undefined
+  const normalized = value.trim()
+  if (/^\d+(?:\.\d+)?$/.test(normalized)) {
+    const seconds = Number(normalized)
+    return Number.isFinite(seconds) ? seconds : undefined
+  }
+  const retryAt = Date.parse(normalized)
+  if (!Number.isFinite(retryAt)) return undefined
+  return Math.max(0, Math.ceil((retryAt - now) / 1_000))
 }
 
 /** Build the currently supported native streaming client for a configured model. */
@@ -961,7 +987,11 @@ function addSampling(
     }
   }
   if (request.extraBody) {
-    Object.assign(payload, request.extraBody)
+    for (const [key, value] of Object.entries(request.extraBody)) {
+      if (!OPENAI_COMPATIBLE_RESERVED_BODY_FIELDS.has(key)) {
+        payload[key] = value
+      }
+    }
   }
   if (!supportsExtendedSampling(providerName)) {
     return
@@ -976,6 +1006,23 @@ function addSampling(
     payload.repetition_penalty = request.repetitionPenalty
   }
 }
+
+const OPENAI_COMPATIBLE_RESERVED_BODY_FIELDS = new Set([
+  'model',
+  'messages',
+  'stream',
+  'stream_options',
+  'temperature',
+  'max_tokens',
+  'top_p',
+  'frequency_penalty',
+  'presence_penalty',
+  'stop',
+  'tools',
+  'tool_choice',
+  'reasoning_effort',
+  'thinking_budget',
+])
 
 /** Kimi Code fixes temperature at 1 and rejects every other explicit value. */
 function supportsTemperature(providerName: ProviderName, temperature: number): boolean {
@@ -1130,6 +1177,7 @@ function openAiMessageContent(value: unknown): string {
 }
 
 function parseResponsesCompletion(response: Record<string, unknown>): LlmCompletion {
+  throwIfResponsesCompletionError(response)
   const content: string[] = []
   const thinking: string[] = []
   const toolCalls: ToolCall[] = []
@@ -1171,11 +1219,13 @@ function parseResponsesCompletion(response: Record<string, unknown>): LlmComplet
   }
   const usage = responsesUsage(asRecord(response.usage))
   const status = stringAt(response, 'status') || undefined
-  const finishReason = toolCalls.length
-    ? 'tool_calls'
-    : status === 'completed'
-      ? 'stop'
-      : status
+  const finishReason = status === 'incomplete'
+    ? responsesIncompleteFinishReason(response)
+    : toolCalls.length
+      ? 'tool_calls'
+      : status === 'completed'
+        ? 'stop'
+        : status
   return {
     content: content.join(''),
     toolCalls,
@@ -1183,6 +1233,24 @@ function parseResponsesCompletion(response: Record<string, unknown>): LlmComplet
     ...(thinking.length ? { thinking: thinking.join('') } : {}),
     ...(usage === undefined ? {} : { usage }),
   }
+}
+
+/** Map non-streaming incomplete responses onto the streaming finish vocabulary. */
+function responsesIncompleteFinishReason(response: Record<string, unknown>): string {
+  const reason = stringAt(asRecord(response.incomplete_details), 'reason')
+  return reason === 'max_output_tokens' ? 'length' : reason ?? 'incomplete'
+}
+
+/** Normalize semantic failures returned inside a successful Responses HTTP envelope. */
+function throwIfResponsesCompletionError(response: Record<string, unknown>): void {
+  const status = stringAt(response, 'status')
+  if (status !== 'failed' && status !== 'error') return
+
+  const error = asRecord(response.error)
+  const code = error.code
+  const label = typeof code === 'string' || typeof code === 'number' ? ` (${String(code)})` : ''
+  const message = stringAt(error, 'message') ?? stringAt(response, 'message') ?? 'unknown error'
+  throw new ProviderError('responses', `stream returned API error${label}: ${message}`)
 }
 
 function responsesUsage(value: Record<string, unknown>): TokenUsage | undefined {

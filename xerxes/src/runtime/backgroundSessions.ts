@@ -114,6 +114,7 @@ export class BackgroundSessionManager {
   private readonly runner: BackgroundRunFn
   private sequence = 0
   private shuttingDown = false
+  private shutdownCleanupPromise: Promise<void> | undefined
   private token = 0
 
   constructor(options: BackgroundSessionManagerOptions) {
@@ -218,21 +219,29 @@ export class BackgroundSessionManager {
    * shutdown. Running work is only aborted when cancelRunning is requested,
    * preserving the Python manager's cooperative shutdown default.
    */
-  async shutdown(options: ShutdownBackgroundSessionsOptions = {}): Promise<void> {
-    if (this.shuttingDown) return
+  shutdown(options: ShutdownBackgroundSessionsOptions = {}): Promise<void> {
+    const timeoutMs = nonNegativeInteger(options.timeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS, 'timeoutMs')
+    const cancelRunning = options.cancelRunning ?? false
+    if (typeof cancelRunning !== 'boolean') throw new TypeError('cancelRunning must be a boolean')
+
     this.shuttingDown = true
+    if (!this.shutdownCleanupPromise) this.shutdownCleanupPromise = this.performShutdown()
+    if (cancelRunning) this.cancelRunningSessions()
+    return waitWithTimeout(this.shutdownCleanupPromise, timeoutMs)
+  }
+
+  private async performShutdown(): Promise<void> {
     for (const record of [...this.sessions.values()]) {
       if (record.status === BackgroundStatus.PENDING) this.cancel(record.id)
     }
-    if (options.cancelRunning) {
-      for (const record of this.sessions.values()) {
-        if (record.status === BackgroundStatus.RUNNING) this.cancel(record.id)
-      }
-    }
-    const active = [...this.active.values()].map(entry => entry.promise)
-    const timeoutMs = nonNegativeInteger(options.timeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS, 'timeoutMs')
-    await waitWithTimeout(Promise.allSettled(active).then(() => undefined), timeoutMs)
+    await Promise.allSettled([...this.active.values()].map(entry => entry.promise))
     this.pruneCompleted()
+  }
+
+  private cancelRunningSessions(): void {
+    for (const record of this.sessions.values()) {
+      if (record.status === BackgroundStatus.RUNNING) this.cancel(record.id)
+    }
   }
 
   private drain(): void {

@@ -3,6 +3,7 @@
 import type { Msg } from '../types.js'
 import { writeClipboardText } from './clipboard.js'
 import { writeOsc52Clipboard } from './osc52.js'
+import { compactPreview } from './text.js'
 
 export type CopyBackend = 'native' | 'osc52'
 
@@ -125,12 +126,12 @@ export function formatTranscriptForCopy(items: readonly CopyableMessage[]): stri
     .join('\n\n')
 }
 
-/** Single-line picker preview: collapse whitespace, clamp to max columns. */
-export function copyPreview(text: string, max: number): string {
-  const flat = text.replace(/\s+/g, ' ').trim()
-
-  return flat.length > max ? `${flat.slice(0, Math.max(1, max - 1)).trimEnd()}…` : flat
-}
+/**
+ * Single-line picker preview: collapse whitespace, clamp to max columns.
+ * Kept as a named re-export so copy call sites read in their own vocabulary,
+ * but there is exactly one implementation — see `compactPreview`.
+ */
+export const copyPreview = compactPreview
 
 export type CopyResolution =
   | { kind: 'empty'; message: string }

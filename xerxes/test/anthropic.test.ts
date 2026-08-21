@@ -6,6 +6,7 @@ import { expect, test } from 'bun:test'
 import { ProviderError } from '../src/core/errors.js'
 import { AnthropicMessagesClient, messagesToAnthropic } from '../src/llms/anthropic.js'
 import { collectLlmCompletion, type CompletionRequest } from '../src/llms/client.js'
+import { classifyError } from '../src/runtime/errorClassifier.js'
 
 test('Anthropic conversion preserves signed thinking and error tool results', () => {
   const converted = messagesToAnthropic([
@@ -442,6 +443,66 @@ test('Anthropic HTTP failures cap quoted provider error bodies', async () => {
   }).catch(error => error)
   expect(failure).toBeInstanceOf(ProviderError)
   expect(failure.message).toBe(`Client anthropic: completion request failed (500): ${'x'.repeat(4_096)}`)
+})
+
+test('Anthropic propagates Retry-After delta-seconds as structured classifier metadata', async () => {
+  for (const operation of ['complete', 'stream'] as const) {
+    const client = new AnthropicMessagesClient({
+      apiKey: 'test-key',
+      fetchImplementation: async () => new Response('slow down', {
+        status: 429,
+        headers: { 'Retry-After': '2.5' },
+      }),
+    })
+    const failure = await (operation === 'complete'
+      ? client.complete({ model: 'claude-sonnet-4-6', messages: [{ role: 'user', content: 'hi' }] })
+      : collect(client.stream({ model: 'claude-sonnet-4-6', messages: [{ role: 'user', content: 'hi' }] })))
+      .catch(error => error as unknown)
+
+    expect(failure).toBeInstanceOf(ProviderError)
+    expect((failure as ProviderError).details).toMatchObject({ status: 429, retryAfterSeconds: 2.5 })
+    expect(classifyError(failure)).toMatchObject({
+      kind: 'rate_limit',
+      retryable: true,
+      suggestedBackoffSeconds: 2.5,
+    })
+  }
+})
+
+test('Anthropic parses Retry-After HTTP dates and ignores malformed values', async () => {
+  const request: CompletionRequest = {
+    model: 'claude-sonnet-4-6',
+    messages: [{ role: 'user', content: 'hi' }],
+  }
+  const retryAt = new Date(Date.now() + 30_000).toUTCString()
+  const dated = new AnthropicMessagesClient({
+    apiKey: 'test-key',
+    fetchImplementation: async () => new Response('unavailable', {
+      status: 503,
+      headers: { 'Retry-After': retryAt },
+    }),
+  })
+  const datedFailure = await dated.complete(request).then(
+    () => { throw new Error('expected request to fail') },
+    error => error as ProviderError,
+  )
+  expect(datedFailure.details.status).toBe(503)
+  expect(datedFailure.details.retryAfterSeconds).toBeGreaterThanOrEqual(28)
+  expect(datedFailure.details.retryAfterSeconds).toBeLessThanOrEqual(30)
+
+  const malformed = new AnthropicMessagesClient({
+    apiKey: 'test-key',
+    fetchImplementation: async () => new Response('slow down', {
+      status: 429,
+      headers: { 'Retry-After': 'next Tuesday-ish' },
+    }),
+  })
+  const malformedFailure = await collect(malformed.stream(request)).then(
+    () => { throw new Error('expected request to fail') },
+    error => error as ProviderError,
+  )
+  expect(malformedFailure.details).toEqual({ status: 429 })
+  expect(classifyError(malformedFailure).suggestedBackoffSeconds).toBeUndefined()
 })
 
 async function collect(stream: AsyncIterable<unknown>): Promise<unknown[]> {

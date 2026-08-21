@@ -10,6 +10,7 @@ import { parseSkillMarkdown, type Skill, type SkillRegistry } from '../extension
 import type { SearchHit, SearchOptions } from '../session/search.js'
 import type { JsonObject, ToolDefinition } from '../types/toolCalls.js'
 import { optionalBoolean, optionalInteger, optionalString, optionalStringArray, requiredString } from './inputs.js'
+import { WorkspacePathResolver } from './pathSafety.js'
 
 type Awaitable<T> = Promise<T> | T
 
@@ -201,10 +202,12 @@ export interface SkillBundleStoreOptions {
  */
 export class SkillBundleStore implements SkillManagementStore {
   readonly directory: string
+  private readonly paths: WorkspacePathResolver
   private readonly registry: SkillRegistry | undefined
 
   constructor(options: SkillBundleStoreOptions) {
     this.directory = resolve(options.directory)
+    this.paths = new WorkspacePathResolver(this.directory)
     this.registry = options.registry
   }
 
@@ -223,20 +226,21 @@ export class SkillBundleStore implements SkillManagementStore {
 
   async get(name: string): Promise<Skill | undefined> {
     if (!isValidSkillName(name)) return undefined
-    const path = this.pathFor(name)
+    const path = await this.paths.resolve(this.pathFor(name))
     if (!(await pathExists(path))) return undefined
     return parseSkillMarkdown(await readFile(path, 'utf8'), path)
   }
 
   async manage(request: SkillManageRequest): Promise<JsonObject> {
     assertValidSkillName(request.name)
-    const path = this.pathFor(request.name)
+    const path = await this.paths.resolve(this.pathFor(request.name))
     if (request.action === 'delete') {
       if (!(await pathExists(path))) {
         return { ok: false, name: request.name, error: 'not_found' }
       }
-      await rm(path)
-      const result: JsonObject = { ok: true, name: request.name, deleted: path, action: request.action }
+      const checkedPath = await this.paths.recheck(path)
+      await rm(checkedPath)
+      const result: JsonObject = { ok: true, name: request.name, deleted: checkedPath, action: request.action }
       if (this.registry !== undefined) {
         result.registry_updated = false
         result.registry_error = 'SkillRegistry has no public removal API; rebuild or replace the host registry to evict this skill.'
@@ -251,7 +255,7 @@ export class SkillBundleStore implements SkillManagementStore {
     }
 
     const content = skillMarkdown(request)
-    await atomicWrite(path, content)
+    await atomicWrite(await this.paths.recheck(path), content)
     const result: JsonObject = { ok: true, name: request.name, path, action: request.action }
     if (this.registry !== undefined) {
       try {
@@ -266,7 +270,7 @@ export class SkillBundleStore implements SkillManagementStore {
   }
 
   private pathFor(name: string): string {
-    return join(this.directory, name, 'SKILL.md')
+    return join(name, 'SKILL.md')
   }
 }
 

@@ -11,7 +11,7 @@ import {
   renameSync,
   rmSync,
   statSync,
-  unlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
@@ -163,15 +163,17 @@ export interface FileStorageOptions {
   readonly staleLockMs?: number
 }
 
-/** JSON-file key/value backend whose hashed filenames prevent key-path traversal. */
+/**
+ * JSON-file key/value backend whose hashed filenames prevent key-path traversal.
+ * Read operations refresh the cached index from disk, so multiple long-lived
+ * instances over the same directory observe each other's writes.
+ */
 export class FileStorage implements MemoryStorage {
   readonly directory: string
   private readonly indexFile: string
   private readonly lockTimeoutMs: number
   private readonly staleLockMs: number
   private index: Record<string, string>
-  /** Keys this instance removed since it last read the on-disk index. */
-  private readonly removed = new Set<string>()
 
   constructor(directory = '.xerxes_memory', options: FileStorageOptions = {}) {
     // Normalize once so every later join/slice operates on the same canonical
@@ -185,38 +187,87 @@ export class FileStorage implements MemoryStorage {
   }
 
   clear(): number {
-    const entries = Object.entries(this.index)
-    for (const [key, filename] of entries) {
-      const file = join(this.directory, filename)
-      if (existsSync(file)) unlinkSync(file)
-      this.removed.add(key)
-    }
-    this.index = {}
-    this.writeIndex()
-    return entries.length
+    return this.withIndexLock((touchLock) => {
+      const current = this.currentIndexUnderLock()
+      const moved: Array<{ readonly backup: string; readonly file: string }> = []
+      try {
+        for (const filename of Object.values(current)) {
+          const file = join(this.directory, filename)
+          if (!existsSync(file)) continue
+          const backup = `${file}.${process.pid}.${randomUUID()}.deleted`
+          renameSync(file, backup)
+          moved.push({ backup, file })
+          touchLock()
+        }
+        this.persistIndex({}, touchLock)
+        this.index = {}
+        return Object.keys(current).length
+      } catch (error) {
+        for (const { backup, file } of moved.reverse()) {
+          if (existsSync(backup)) renameSync(backup, file)
+        }
+        throw error
+      } finally {
+        // Backup cleanup is non-transactional: once the empty index has been
+        // committed, a cleanup failure must not resurrect cleared payloads.
+        for (const { backup } of moved) {
+          try {
+            rmSync(backup, { force: true })
+          } catch (cleanupError) {
+            console.warn(`Could not remove cleared memory backup ${backup}:`, cleanupError)
+          }
+        }
+      }
+    })
   }
 
   delete(key: string): boolean {
-    const filename = this.index[key]
-    if (!filename) return false
-    const file = join(this.directory, filename)
-    if (existsSync(file)) unlinkSync(file)
-    delete this.index[key]
-    this.removed.add(key)
-    this.writeIndex()
-    return true
+    return this.withIndexLock((touchLock) => {
+      const current = this.currentIndexUnderLock()
+      const filename = current[key]
+      if (!filename) {
+        this.index = current
+        return false
+      }
+      const file = join(this.directory, filename)
+      const backup = `${file}.${process.pid}.${randomUUID()}.deleted`
+      const moved = existsSync(file)
+      try {
+        if (moved) renameSync(file, backup)
+        delete current[key]
+        this.persistIndex(current, touchLock)
+        this.index = current
+        return true
+      } catch (error) {
+        if (moved && existsSync(backup)) renameSync(backup, file)
+        throw error
+      } finally {
+        // Backup cleanup is non-transactional: once the index commit has
+        // succeeded, a cleanup failure must not roll back the deletion.
+        if (moved) {
+          try {
+            rmSync(backup, { force: true })
+          } catch (cleanupError) {
+            console.warn(`Could not remove deleted memory backup ${backup}:`, cleanupError)
+          }
+        }
+      }
+    })
   }
 
   exists(key: string): boolean {
+    this.refreshIndex()
     return key in this.index
   }
 
   listKeys(pattern?: string): string[] {
+    this.refreshIndex()
     const keys = Object.keys(this.index)
     return pattern ? keys.filter(key => key.includes(pattern)) : keys
   }
 
   load(key: string): unknown | undefined {
+    this.refreshIndex()
     const filename = this.index[key]
     if (!filename) return undefined
     const path = join(this.directory, filename)
@@ -230,33 +281,48 @@ export class FileStorage implements MemoryStorage {
   }
 
   save(key: string, data: unknown): boolean {
-    // Store the plain basename (`<md5>.json`) rather than slicing the joined
-    // path by the raw directory length, which corrupted filenames whenever
-    // the constructor received a non-normalized directory. Indexes written
-    // before this fix already hold basenames for healthy directories, so the
-    // on-disk format is unchanged; mangled legacy entries simply miss on
-    // load exactly as they did before.
+    // The payload and index share one lock transaction. In particular, two
+    // same-key writers must not publish payloads around each other's index
+    // commits, because every value for a key uses the same hashed filename.
     const filename = this.fileNameForKey(key)
     const path = join(this.directory, filename)
     const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`
+    const backup = `${path}.${process.pid}.${randomUUID()}.replaced`
     try {
-      writeFileSync(temporary, JSON.stringify(data), 'utf8')
-      renameSync(temporary, path)
-      this.index[key] = filename
-      this.removed.delete(key)
-      this.writeIndex()
-      return true
+      return this.withIndexLock((touchLock) => {
+        const current = this.currentIndexUnderLock()
+        const replaced = existsSync(path)
+        try {
+          writeFileSync(temporary, JSON.stringify(data), 'utf8')
+          touchLock()
+          if (replaced) renameSync(path, backup)
+          renameSync(temporary, path)
+          current[key] = filename
+          this.persistIndex(current, touchLock)
+          this.index = current
+          return true
+        } catch (error) {
+          rmSync(temporary, { force: true })
+          rmSync(path, { force: true })
+          if (replaced && existsSync(backup)) renameSync(backup, path)
+          throw error
+        }
+      })
     } catch {
-      rmSync(temporary, { force: true })
-      // The payload is published before the index transaction. If that
-      // transaction cannot complete, remove it unless an existing durable
-      // index entry already owns this filename.
-      const durablyIndexed = this.readIndexFile()?.[key] === filename
-      if (!durablyIndexed) {
-        if (this.index[key] === filename) delete this.index[key]
-        rmSync(path, { force: true })
-      }
       return false
+    } finally {
+      // Cleanup is best-effort: a throwing rmSync must not escape because
+      // save() promises a boolean result rather than an exception.
+      try {
+        rmSync(temporary, { force: true })
+      } catch {
+        // ignore
+      }
+      try {
+        rmSync(backup, { force: true })
+      } catch {
+        // ignore
+      }
     }
   }
 
@@ -292,6 +358,17 @@ export class FileStorage implements MemoryStorage {
     return this.rebuildIndex()
   }
 
+  private refreshIndex(): void {
+    // Read operations must see writes from other processes or long-lived
+    // sibling instances. When the persisted index is readable, replace the
+    // cached view; if it is absent or corrupt, keep the in-memory view so
+    // records recovered from a corrupt index are not lost before the first
+    // write persists them.
+    if (!existsSync(this.indexFile)) return
+    const current = this.readIndexFile()
+    if (current) this.index = current
+  }
+
   private readIndexFile(): Record<string, string> | undefined {
     try {
       const parsed = JSON.parse(readFileSync(this.indexFile, 'utf8')) as unknown
@@ -321,10 +398,31 @@ export class FileStorage implements MemoryStorage {
     }
   }
 
-  private writeIndex(): void {
-    // Serialize the read/merge/rename transaction across processes. Atomic
-    // rename alone does not prevent two writers from reading the same old
-    // index and then replacing each other's disjoint additions.
+  private currentIndexUnderLock(): Record<string, string> {
+    // A corrupt index is renamed during construction and rebuilt only in
+    // memory, so preserve that recovered view until the first transaction
+    // persists it. For an ordinary new store this is simply an empty object.
+    if (!existsSync(this.indexFile)) return { ...this.index }
+    const current = this.readIndexFile()
+    if (!current) throw new Error(`Memory index became corrupt: ${this.indexFile}`)
+    return current
+  }
+
+  private persistIndex(index: Record<string, string>, touchLock?: () => void): void {
+    const temporary = `${this.indexFile}.${process.pid}.${randomUUID()}.tmp`
+    try {
+      writeFileSync(temporary, JSON.stringify(index), 'utf8')
+      touchLock?.()
+      renameSync(temporary, this.indexFile)
+    } finally {
+      rmSync(temporary, { force: true })
+    }
+  }
+
+  private withIndexLock<T>(transaction: (touchLock: () => void) => T): T {
+    // Serialize the complete payload+index transaction across processes.
+    // Atomic index replacement alone cannot make payload publication safe,
+    // especially when concurrent operations target the same hashed filename.
     const lock = `${this.indexFile}.lock`
     const deadline = Date.now() + this.lockTimeoutMs
     while (true) {
@@ -333,8 +431,12 @@ export class FileStorage implements MemoryStorage {
         break
       } catch (error) {
         if (!isFileExistsError(error)) throw error
-        if (this.isStaleLock(lock)) {
-          rmSync(lock, { force: true, recursive: true })
+        if (this.isStaleLock(lock) && this.validateStaleLock(lock)) {
+          try {
+            rmSync(lock, { force: true, recursive: true })
+          } catch (removeError) {
+            if (!isMissingFileError(removeError)) throw removeError
+          }
           continue
         }
         if (Date.now() >= deadline) throw error
@@ -342,20 +444,53 @@ export class FileStorage implements MemoryStorage {
       }
     }
 
-    const temporary = `${this.indexFile}.${process.pid}.${randomUUID()}.tmp`
+    const touchLock = () => {
+      const now = new Date()
+      try {
+        utimesSync(lock, now, now)
+      } catch (refreshError) {
+        if (!isMissingFileError(refreshError)) throw refreshError
+      }
+    }
+
     try {
-      const disk = existsSync(this.indexFile) ? this.readIndexFile() : undefined
-      const merged: Record<string, string> = { ...disk, ...this.index }
-      for (const key of this.removed) delete merged[key]
-      writeFileSync(temporary, JSON.stringify(merged), 'utf8')
-      renameSync(temporary, this.indexFile)
-      this.index = merged
-      // Deletions are durable now; drop the tombstones so a key legitimately
-      // rewritten by another instance is not suppressed forever.
-      this.removed.clear()
+      touchLock()
+      return transaction(touchLock)
     } finally {
-      rmSync(temporary, { force: true })
-      rmSync(lock, { force: true, recursive: true })
+      try {
+        rmSync(lock, { force: true, recursive: true })
+      } catch {
+        // Best-effort cleanup; another process may have already removed it.
+      }
+    }
+  }
+
+  private validateStaleLock(lock: string): boolean {
+    // A live owner may refresh the lock mtime at the boundary between our
+    // stale check and our removal attempt. Observe the mtime once, then wait
+    // for a full staleLockMs window while re-checking; only remove the lock
+    // if its mtime never changes and it stays stale throughout.
+    let firstMtime: number
+    let firstSeen: number
+    try {
+      const stats = statSync(lock)
+      firstMtime = stats.mtimeMs
+      firstSeen = Date.now()
+    } catch (error) {
+      return isMissingFileError(error)
+    }
+
+    while (true) {
+      let currentMtime: number
+      try {
+        currentMtime = statSync(lock).mtimeMs
+      } catch (error) {
+        return isMissingFileError(error)
+      }
+      if (currentMtime !== firstMtime) return false
+      if (Date.now() - currentMtime < this.staleLockMs) return false
+      if (Date.now() - firstSeen >= this.staleLockMs) return true
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5)
     }
   }
 }
@@ -566,11 +701,40 @@ export class RAGStorage implements MemoryStorage {
 
   save(key: string, data: unknown): boolean {
     if (key.startsWith(RAGStorage.embeddingKeyPrefix)) return this.backend.save(key, data)
-    const saved = this.backend.save(key, data)
-    if (!saved) return false
-    const embedding = this.embedder.embed(dataToText(data))
+
+    // Prepare the derived value before either durable write. Publishing the
+    // primary record first can leave it permanently unsearchable when
+    // embedding or sidecar persistence fails.
+    let embedding: number[]
+    try {
+      embedding = this.embedder.embed(dataToText(data))
+    } catch {
+      return false
+    }
+
+    const embeddingKey = `${RAGStorage.embeddingKeyPrefix}${key}`
+    let hadEmbedding = false
+    let previousEmbedding: unknown
+    let sidecarWriteAttempted = false
+    try {
+      hadEmbedding = this.backend.exists(embeddingKey)
+      previousEmbedding = hadEmbedding ? this.backend.load(embeddingKey) : undefined
+      sidecarWriteAttempted = true
+      if (!this.backend.save(embeddingKey, embedding)) return false
+      if (!this.backend.save(key, data)) {
+        this.restoreEmbeddingSidecar(embeddingKey, hadEmbedding, previousEmbedding)
+        return false
+      }
+    } catch {
+      if (sidecarWriteAttempted) {
+        this.restoreEmbeddingSidecar(embeddingKey, hadEmbedding, previousEmbedding)
+      }
+      return false
+    }
+
+    // Do not expose the new vector in-process until both durable writes have
+    // succeeded. A failed save therefore keeps the prior searchable view.
     this.embeddings.set(key, embedding)
-    this.backend.save(`${RAGStorage.embeddingKeyPrefix}${key}`, embedding)
     return true
   }
 
@@ -601,6 +765,19 @@ export class RAGStorage implements MemoryStorage {
       this.backend.save(`${RAGStorage.embeddingKeyPrefix}${key}`, embedding)
     }
     return result
+  }
+
+  private restoreEmbeddingSidecar(key: string, existed: boolean, previous: unknown): void {
+    try {
+      if (existed) {
+        this.backend.save(key, previous)
+      } else {
+        this.backend.delete(key)
+      }
+    } catch {
+      // Best-effort compensation only: MemoryStorage has no transaction or
+      // conditional-write contract, so a backend failure may be irreversible.
+    }
   }
 
   private restoreEmbeddings(): void {

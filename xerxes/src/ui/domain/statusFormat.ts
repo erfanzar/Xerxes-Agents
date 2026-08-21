@@ -64,12 +64,19 @@ export const modelLabel = (model: string, effort?: string, fast?: boolean) =>
 export const statusIdentity = (model: string, mode?: string, effort?: string, fast?: boolean) =>
   `${modelLabel(model, effort, fast) || 'model unset'} · ${mode || 'code'}`
 
-/** Show only an explicit or model-generated title, never conversation text. */
+/**
+ * Show only an explicit or model-generated title, never conversation text.
+ *
+ * Returns '' for a session that has not been named yet. That blank is load
+ * bearing: `SessionHeader` renders just the mode label for it, which is
+ * honest. Substituting a placeholder here made every chat read as "Untitled
+ * chat" and made the header's empty-title branch unreachable.
+ */
 export function sessionDisplayTitle(sessionTitle?: null | string, max = 72): string {
   const value = String(sessionTitle ?? '')
     .replace(/\s+/g, ' ')
     .trim()
-  const title = value && !/^tui:[0-9a-f]+$/i.test(value) ? value : 'Untitled chat'
+  const title = value && !/^tui:[0-9a-f]+$/i.test(value) ? value : ''
 
   return title.length > max ? `${title.slice(0, Math.max(1, max - 1)).trimEnd()}…` : title
 }

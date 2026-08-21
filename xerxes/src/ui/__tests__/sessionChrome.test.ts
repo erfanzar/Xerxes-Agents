@@ -17,9 +17,17 @@ describe('session chrome', () => {
     expect(displayModeLabel('')).toBe('Code')
   })
 
-  it('never promotes the first user request into the chat title', () => {
-    expect(sessionDisplayTitle('tui:400b8d876331')).toBe('Untitled chat')
+  it('leaves an unnamed session blank rather than inventing a title', () => {
+    // The blank is load bearing: SessionHeader renders just the mode label
+    // for it. Substituting a placeholder here made every chat read as
+    // "Untitled chat" and made that branch unreachable.
+    expect(sessionDisplayTitle('tui:400b8d876331')).toBe('')
+    expect(sessionDisplayTitle('')).toBe('')
+    expect(sessionDisplayTitle(null)).toBe('')
+  })
+
+  it('still shows and clamps a real title', () => {
     expect(sessionDisplayTitle('Release audit')).toBe('Release audit')
-    expect(sessionDisplayTitle('', 8)).toBe('Untitle…')
+    expect(sessionDisplayTitle('Release audit for the daemon', 12)).toBe('Release aud…')
   })
 })

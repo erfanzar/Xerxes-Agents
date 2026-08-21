@@ -14,7 +14,7 @@ import { $attachments, attachmentsTotalBytes } from '../app/attachmentsStore.js'
 import { registerComposerFocusTarget } from '../app/composerFocus.js'
 import { setInputSelection } from '../app/inputSelectionStore.js'
 import { isLiveTailActive, liveTailScrollKey, shouldAutoScrollLiveTail } from '../app/liveTailScroll.js'
-import { $isBlocked, $overlayState, patchOverlayState } from '../app/overlayStore.js'
+import { $isBlocked, $overlayState, overlayBlocksBackgroundHotkeys, patchOverlayState } from '../app/overlayStore.js'
 import { $panelWidthDelta, withPanelWidthDelta } from '../app/panelSizeStore.js'
 import { $uiState, $uiTheme } from '../app/uiStore.js'
 import { $turnLive, getTurnPulse, getTurnState, useTurnSelector } from '../app/turnStore.js'
@@ -32,8 +32,9 @@ import {
 import { agentSidebarWidth, shouldMountAgentSidebar, shouldShowAgentSidebar } from '../domain/agentPanelLayout.js'
 import { busyInputLabels } from '../domain/busyInputLabels.js'
 import { sectionMode } from '../domain/details.js'
+import { VOICE } from '../domain/roles.js'
 import { completionToApplyOnSubmit } from '../domain/slash.js'
-import { shouldShowStartupWelcome, startupComposerWidth } from '../domain/startupLayout.js'
+import { shouldShowStartupWelcome, contentColumnWidth } from '../domain/startupLayout.js'
 import {
   isProviderPrompt,
   providerPromptCancelAnswer,
@@ -48,19 +49,20 @@ import { unarchivedToolLines } from '../lib/liveProgress.js'
 import { compactProgressRows, type CompactProgressRow } from '../lib/progressRows.js'
 import { getActiveSkin } from '../lib/skinEngine.js'
 import { isYoloEnabled } from '../lib/statusSnapshot.js'
-import { fmtK, formatToolCall, inlineToolDisplay } from '../lib/text.js'
+import { fmtK, formatToolCall, toolTrailParts } from '../lib/text.js'
 import { useTerminalFocus } from '../lib/terminalRuntime.opentui.js'
 import type { ScrollBoxHandle } from '../lib/terminalTypes.js'
 import type { Theme } from '../theme.js'
 
 import { AgentPanel, AgentPanelHotkey, AgentPanelOverlay, collectAgentPanelRecords } from './agentPanel.js'
 import { displayModeLabel, SessionHeader, SessionTabStrip, WorkspaceFooter } from './appChrome.js'
+import { CompletionMenu } from './completionMenu.js'
 import { CopyPicker } from './copyPicker.js'
 import { DiffPanelHotkey, DiffPanelOverlay } from './diffPanel.js'
 import { TerminalPanelHotkey, TerminalPanelOverlay } from './terminalPanel.js'
-import { MessageLine } from './messageLine.js'
+import { MessageLine, StreamingMarkdown } from './messageLine.js'
 import { ModelPicker } from './modelPicker.js'
-import { responsivePanelWidth } from './overlayLayout.js'
+import { OVERLAY_PANEL_SPECS, overlayPanelWidth, responsivePanelWidth } from './overlayLayout.js'
 import { rebasePasteResult } from './pasteRebase.js'
 import { ReasoningPicker } from './reasoningPicker.js'
 import { Box, Span, Text } from './primitives.js'
@@ -102,15 +104,40 @@ function StreamingAssistant() {
         <MessageLine msg={{ kind: 'trail', role: 'system', text: '', tools: unsettledTools }} t={t} />
       ) : null}
 
-      {tools.map(tool => (
-        <Box flexShrink={0} key={tool.id} paddingLeft={3}>
-          <Text color={t.color.muted} wrap="truncate-end">
-            → {inlineToolDisplay(formatToolCall(tool.name, tool.context))}
-          </Text>
-        </Box>
-      ))}
+      {/* Same shape as a settled ToolStep so an in-flight call does not
+          restyle the moment it finishes — only the duration and mark are
+          added. It carries no mark, which is what distinguishes "running". */}
+      {tools.map(tool => {
+        const { args, name } = toolTrailParts(formatToolCall(tool.name, tool.context))
 
-      {streaming ? <MessageLine msg={{ role: 'assistant', text: streaming }} t={t} /> : null}
+        return (
+          <Box flexShrink={0} key={tool.id} paddingLeft={3}>
+            <Text color={t.color.muted} wrap="truncate-end">
+              <Span color={t.color.muted}>{`${VOICE.tool(t).glyph} `}</Span>
+              <Span bold color={t.color.toolName}>
+                {name}
+              </Span>
+              {args ? <Span color={t.color.muted}>{`  ${args}`}</Span> : null}
+            </Text>
+          </Box>
+        )
+      })}
+
+      {streaming ? (
+        // Same wrapper as a settled AssistantMessage; StreamingMarkdown keeps
+        // the growing buffer out of a full re-parse per delta. The gap is
+        // conditional for the same reason the settled block's is: it
+        // separates the prose from tool rows above it, but must not open the
+        // band with a stray blank row when the prose is all there is.
+        <Box
+          flexDirection="column"
+          flexShrink={0}
+          marginTop={segments.length || unsettledTools.length || tools.length ? 1 : 0}
+          paddingLeft={3}
+        >
+          <StreamingMarkdown text={streaming} t={t} />
+        </Box>
+      ) : null}
 
       <LiveIndicator />
     </Box>
@@ -881,43 +908,6 @@ function TokenMeter() {
   return <Text color={t.color.muted}>{breakdown}</Text>
 }
 
-function CompletionMenu({ composer }: Pick<AppLayoutProps, 'composer'>) {
-  const t = useStore($uiTheme)
-  const completions = composer.completions
-
-  if (!completions.length) {
-    return null
-  }
-
-  const windowSize = Math.min(10, completions.length)
-  const start = Math.max(0, Math.min(composer.compIdx - Math.floor(windowSize / 2), completions.length - windowSize))
-
-  return (
-    <Box backgroundColor={t.color.completionBg} flexDirection="column" flexShrink={0} paddingY={1}>
-      {completions.slice(start, start + windowSize).map((item, i) => {
-        const active = start + i === composer.compIdx
-
-        return (
-          <Box
-            backgroundColor={active ? t.color.selectionBg : t.color.completionBg}
-            flexDirection="row"
-            flexShrink={0}
-            key={`${item.text}:${item.display}`}
-            minHeight={1}
-            paddingX={2}
-          >
-            <Text bold color={active ? t.color.accent : t.color.label}>
-              {active ? '▸ ' : '  '}
-              {item.display}
-            </Text>
-            {item.meta ? <Text color={t.color.muted}> {item.meta}</Text> : null}
-          </Box>
-        )
-      })}
-    </Box>
-  )
-}
-
 function QueuePanel({ composer }: Pick<AppLayoutProps, 'composer'>) {
   const t = useStore($uiTheme)
 
@@ -980,6 +970,10 @@ export function Composer({ composer }: Pick<AppLayoutProps, 'composer'>) {
   const modeLabel = ui.info?.mode || 'code'
   const yoloEnabled = isYoloEnabled(ui.info?.permission_mode)
   const narrow = composer.cols < 76
+  // Below this the identity alone (model + YOLO + context + tokens) already
+  // fills the row, so any hint would have to eat into it. Showing nothing
+  // beats showing a hint welded onto a half-truncated token count.
+  const cramped = composer.cols < 52
 
   const syncInputSelection = useCallback(() => {
     const textarea = ref.current
@@ -1128,7 +1122,15 @@ export function Composer({ composer }: Pick<AppLayoutProps, 'composer'>) {
     <Box backgroundColor={t.color.completionBg} flexDirection="column" flexShrink={0} width="100%">
       <QueuePanel composer={composer} />
       <AttachmentsPanel />
-      <CompletionMenu composer={composer} />
+      {/* The menu renders inside the composer's reading column, not the full
+          terminal, so its column math must use the same measure — otherwise
+          it lays out for a width it does not have and the renderer truncates
+          the descriptions mid-string. */}
+      <CompletionMenu
+        compIdx={composer.compIdx}
+        completions={composer.completions}
+        width={contentColumnWidth(composer.cols)}
+      />
       <Box
         alignItems="flex-start"
         backgroundColor={t.color.completionCurrentBg}
@@ -1170,6 +1172,11 @@ export function Composer({ composer }: Pick<AppLayoutProps, 'composer'>) {
         alignItems="center"
         flexDirection="row"
         flexShrink={0}
+        // A guaranteed gutter between the identity and the hints. Without it
+        // `space-between` lets the two groups meet with no separator the
+        // moment the row is tight, which renders as "YOLO ONTab modes" —
+        // reading as corrupted text rather than as a truncation.
+        gap={2}
         height={1}
         justifyContent="space-between"
         paddingX={2}
@@ -1197,7 +1204,7 @@ export function Composer({ composer }: Pick<AppLayoutProps, 'composer'>) {
               Tab <Span color={t.color.muted}>accept</Span> · ↑↓ <Span color={t.color.muted}>navigate</Span> · Esc{' '}
               <Span color={t.color.muted}>dismiss</Span>
             </Text>
-          ) : narrow ? (
+          ) : cramped ? null : narrow ? (
             <Text color={t.color.muted}>Tab modes</Text>
           ) : (
             <Text color={t.color.text}>
@@ -1240,7 +1247,7 @@ function PagerOverlay({ composer }: Pick<AppLayoutProps, 'composer'>) {
           backgroundColor={t.color.statusBg}
           flexDirection="column"
           padding={2}
-          width={responsivePanelWidth(composer.cols, { max: 110, min: 48 })}
+          width={overlayPanelWidth(composer.cols, OVERLAY_PANEL_SPECS.pager)}
         >
           {pager.title ? (
             <Box justifyContent="space-between" marginBottom={1}>
@@ -1486,7 +1493,7 @@ function InfoOverlay({ kind }: { kind: 'pluginsHub' | 'skillsHub' }) {
         flexDirection="column"
         flexShrink={0}
         padding={2}
-        width={responsivePanelWidth(width, { max: 90, min: 42 })}
+        width={overlayPanelWidth(width, OVERLAY_PANEL_SPECS.info)}
       >
         <box flexDirection="row" flexShrink={0} justifyContent="space-between">
           <text fg={t.color.accent} flexShrink={0}>
@@ -1610,22 +1617,10 @@ export function AppLayout({
   const panelWidthDelta = useStore($panelWidthDelta)
   const sidebarWidth = withPanelWidthDelta(agentSidebarWidth(width), width)
   void panelWidthDelta
-  const agentHotkeyBlocked = Boolean(
-    overlay.approval ||
-    overlay.clarify ||
-    overlay.confirm ||
-    overlay.copyPicker ||
-    overlay.diff ||
-    overlay.modelPicker ||
-    overlay.pager ||
-    overlay.pluginsHub ||
-    overlay.reasoningPicker ||
-    overlay.secret ||
-    overlay.sessions ||
-    overlay.skillsHub ||
-    overlay.sudo ||
-    overlay.terminals
-  )
+  // Derived from the overlayStore policy table (OVERLAY_BLOCKS_BACKGROUND_HOTKEYS):
+  // every overlay blocks the background hotkeys except `agents` itself, whose
+  // F6 chord must stay live so it can also close the agents overlay.
+  const agentHotkeyBlocked = overlayBlocksBackgroundHotkeys(overlay)
   // Keyed off whether the rail *fits*, not whether it is showing right now, so
   // opening the overlay does not swap the footer text underneath the backdrop
   // and swap it back on close.
@@ -1692,7 +1687,7 @@ export function AppLayout({
                 <Box
                   flexDirection="column"
                   flexShrink={0}
-                  maxWidth={startupComposerWidth(composer.cols)}
+                  maxWidth={contentColumnWidth(composer.cols)}
                   width="100%"
                 >
                   <PromptZone actions={actions} />
@@ -1726,7 +1721,12 @@ export function AppLayout({
                   style={{ flexGrow: 1, flexShrink: 1, minHeight: 0 }}
                   viewportCulling
                 >
-                  <Box flexDirection="column">
+                  {/* One reading column for the whole transcript, shared with
+                      the composer below it. Capping only the prose would leave
+                      tool rows and the user band running to the full terminal
+                      width — a ragged right edge that reads as less designed,
+                      not more. */}
+                  <Box flexDirection="column" maxWidth={contentColumnWidth(composer.cols)}>
                     {transcript.virtualHistory.topSpacer > 0 ? (
                       <Box flexShrink={0} height={transcript.virtualHistory.topSpacer} />
                     ) : null}
@@ -1737,7 +1737,7 @@ export function AppLayout({
                         key={row.key}
                         ref={transcript.virtualHistory.measureRef(row.key)}
                       >
-                        <MessageLine msg={row.msg} msgKey={row.key} t={t} />
+                        <MessageLine leadGap={row.leadGap} msg={row.msg} msgKey={row.key} t={t} />
                       </box>
                     ))}
                     <StreamingAssistant />
@@ -1747,7 +1747,17 @@ export function AppLayout({
                     ) : null}
                   </Box>
                 </scrollbox>
-                <Box flexDirection="column" flexShrink={0}>
+                {/* Same reading column as the welcome screen, so sending the
+                    first message no longer snaps the input from 104 columns to
+                    the full terminal width. Left-aligned rather than centered:
+                    the transcript above it is left-aligned at this same
+                    padding, and centering would offset the two. */}
+                <Box
+                  flexDirection="column"
+                  flexShrink={0}
+                  maxWidth={contentColumnWidth(composer.cols)}
+                  width="100%"
+                >
                   <PromptZone actions={actions} />
                   <Composer composer={composer} />
                 </Box>

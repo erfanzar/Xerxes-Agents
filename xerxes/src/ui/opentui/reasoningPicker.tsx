@@ -5,7 +5,6 @@
 import type { KeyEvent } from '@opentui/core'
 import { useKeyboard, useTerminalDimensions } from '@opentui/react'
 import { useStore } from '@nanostores/react'
-import type { ReactNode } from 'react'
 import { useCallback, useEffect, useState } from 'react'
 
 import { useGateway } from '../app/gatewayContext.js'
@@ -14,6 +13,9 @@ import { $uiTheme } from '../app/uiStore.js'
 import type { ReasoningLevelsResponse } from '../gatewayTypes.js'
 import { asRpcResult, rpcErrorMessage } from '../lib/rpc.js'
 import type { Theme } from '../theme.js'
+
+import { windowItems } from './overlayLayout.js'
+import { InfoRow, ModalShell } from './pickerChrome.js'
 
 const MAX_VISIBLE = 10
 const MIN_PANEL_WIDTH = 44
@@ -33,12 +35,6 @@ export interface ReasoningPickerProps {
 const consume = (event: KeyEvent) => {
   event.preventDefault()
   event.stopPropagation()
-}
-
-const windowItems = <T,>(items: readonly T[], selected: number, visible: number) => {
-  const offset = Math.max(0, Math.min(selected - Math.floor(visible / 2), items.length - visible))
-
-  return { items: items.slice(offset, offset + visible), offset }
 }
 
 /**
@@ -212,70 +208,5 @@ export function ReasoningPicker({ onCancel, onSelect, t }: ReasoningPickerProps)
         })
       )}
     </ModalShell>
-  )
-}
-
-function ModalShell({
-  children,
-  height,
-  panelHeight,
-  panelWidth,
-  t,
-  title,
-  width
-}: {
-  children: ReactNode
-  height: number
-  panelHeight: number
-  panelWidth: number
-  t: Theme
-  title: string
-  width: number
-}) {
-  const top = Math.max(0, Math.floor((height - panelHeight) / 2))
-
-  return (
-    <box
-      alignItems="center"
-      backgroundColor="#000000cc"
-      flexDirection="column"
-      height={height}
-      left={0}
-      paddingTop={top}
-      position="absolute"
-      top={0}
-      width={width}
-      zIndex={200}
-    >
-      <box
-        backgroundColor={t.color.statusBg}
-        flexDirection="column"
-        flexShrink={0}
-        height={panelHeight}
-        paddingBottom={1}
-        paddingTop={1}
-        width={panelWidth}
-      >
-        <box flexDirection="row" flexShrink={0} justifyContent="space-between" paddingLeft={2} paddingRight={2}>
-          <text fg={t.color.accent} flexShrink={0}>
-            <b>{title}</b>
-          </text>
-          <text fg={t.color.muted} flexShrink={0}>
-            esc
-          </text>
-        </box>
-        {children}
-      </box>
-    </box>
-  )
-}
-
-function InfoRow({ children, color }: { children: ReactNode; color: string }) {
-  return (
-    <box flexShrink={0} paddingLeft={2} paddingRight={2}>
-      <text fg={color} flexShrink={0} truncate width="100%" wrapMode="none">
-        {children}
-      </text>
-    </box>
   )
 }

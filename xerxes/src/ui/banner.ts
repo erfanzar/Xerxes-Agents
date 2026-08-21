@@ -5,7 +5,17 @@
 // Xerxes Derafsh Kaviani glyph. Keep the original Braille-pixel payload intact
 // so the visual identity is not silently replaced by a generic ornament.
 
-import type { ThemeColors } from './theme.js'
+import {
+  DARK_DERAFSH_BLUE,
+  DARK_DERAFSH_BRIDGE,
+  DARK_DERAFSH_GOLD,
+  DARK_DERAFSH_PURPLE,
+  LIGHT_DERAFSH_BLUE,
+  LIGHT_DERAFSH_BRIDGE,
+  LIGHT_DERAFSH_GOLD,
+  LIGHT_DERAFSH_PURPLE,
+  type ThemeColors
+} from './theme.js'
 
 export type ArtLine = [color: string, text: string]
 
@@ -129,15 +139,6 @@ export const DERAFSH_KAVIANI_COMPACT_ART = Object.freeze(compactBrailleRows(DERA
 const HEX_COLOR_RE = /^#[0-9a-f]{6}$/i
 const TRUE_RE = /^(?:1|true|yes|on)$/i
 const FALSE_RE = /^(?:0|false|no|off)$/i
-
-const DARK_DERAFSH_BLUE = '#6ea8fe'
-const DARK_DERAFSH_PURPLE = '#b18be8'
-const DARK_DERAFSH_GOLD = '#d8ae58'
-const DARK_DERAFSH_BRIDGE = '#9fb8d8'
-const LIGHT_DERAFSH_BLUE = '#1f64b5'
-const LIGHT_DERAFSH_PURPLE = '#7047b5'
-const LIGHT_DERAFSH_GOLD = '#8a6200'
-const LIGHT_DERAFSH_BRIDGE = '#466c91'
 
 const positiveModulo = (value: number, divisor: number): number => ((value % divisor) + divisor) % divisor
 

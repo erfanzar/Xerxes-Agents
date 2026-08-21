@@ -80,6 +80,54 @@ test('RAG storage parity persists embeddings separately, restores them, and keep
   }
 })
 
+test('RAG save computes embeddings before committing primary data', () => {
+  class ThrowingEmbedder implements Embedder {
+    readonly dimension = 1
+    readonly name = 'throwing'
+
+    embed(_text: string): number[] {
+      throw new Error('embedding failed')
+    }
+
+    embedBatch(texts: readonly string[]): number[][] {
+      return texts.map(text => this.embed(text))
+    }
+  }
+
+  const backend = new SimpleStorage()
+  expect(backend.save('document', 'old value')).toBeTrue()
+  expect(backend.save(`${RAGStorage.embeddingKeyPrefix}document`, [1])).toBeTrue()
+  const rag = new RAGStorage(backend, new ThrowingEmbedder())
+
+  expect(rag.save('document', 'new value')).toBeFalse()
+  expect(backend.load('document')).toBe('old value')
+  expect(backend.load(`${RAGStorage.embeddingKeyPrefix}document`)).toEqual([1])
+})
+
+test('RAG save requires sidecar persistence and leaves primary and in-memory state unchanged on failure', () => {
+  class SidecarRejectingStorage extends SimpleStorage {
+    rejectSidecars = false
+
+    override save(key: string, data: unknown): boolean {
+      if (this.rejectSidecars && key.startsWith(RAGStorage.embeddingKeyPrefix)) return false
+      return super.save(key, data)
+    }
+  }
+
+  const backend = new SidecarRejectingStorage()
+  const rag = new RAGStorage(backend, new HashEmbedder(64))
+  expect(rag.save('existing', 'old searchable value')).toBeTrue()
+  const initialSidecar = backend.load(`${RAGStorage.embeddingKeyPrefix}existing`)
+  backend.rejectSidecars = true
+
+  expect(rag.save('existing', 'replacement that must not commit')).toBeFalse()
+  expect(backend.load('existing')).toBe('old searchable value')
+  expect(backend.load(`${RAGStorage.embeddingKeyPrefix}existing`)).toEqual(initialSidecar)
+  expect(rag.semanticSearch('old searchable value', 1).map(result => result.key)).toEqual(['existing'])
+  expect(rag.save('new', 'must not persist')).toBeFalse()
+  expect(backend.load('new')).toBeUndefined()
+})
+
 test('RAG storage parity semantically ranks text and structured content through the native storage protocol', () => {
   const rag = new RAGStorage(new SimpleStorage(), new HashEmbedder(64))
   expect(rag.save('fruit', 'apple banana cherry')).toBeTrue()

@@ -19,8 +19,36 @@ export const TITLE_MAX_CHARS = 60
 /** Raw conversation text fed to the title prompt is capped so a paste of a file cannot bloat the call. */
 const TITLE_SOURCE_MAX_CHARS = 2_000
 
-/** One title attempt per session; a failed attempt is not retried on every later turn. */
-const attempted = new Set<string>()
+/**
+ * Output budget for the title call.
+ *
+ * A title is a handful of words, so 40 tokens looks generous — and it is,
+ * right up until the session runs a reasoning model. Those spend the budget
+ * on thinking tokens first and return an EMPTY content string, which
+ * `sanitizeTitle` then drops. The request succeeds, nothing errors, and the
+ * chat is silently never named. That is why sessions on reasoning models were
+ * always untitled while the feature looked healthy.
+ *
+ * The Anthropic client already guards the same hazard by raising max_tokens
+ * above the thinking budget (`llms/anthropic.ts`); the OpenAI-compatible path
+ * has no such floor, so the budget has to be generous here instead. The reply
+ * is clamped by `sanitizeTitle` regardless, so a larger ceiling costs nothing.
+ */
+const TITLE_MAX_OUTPUT_TOKENS = 512
+
+/**
+ * Bounded retry per session, plus an in-flight guard.
+ *
+ * This used to be a single `Set` of "already tried" session ids, which meant
+ * one failure per daemon lifetime was permanent: a transient provider blip on
+ * the very first turn left that chat unnamed forever. A small attempt budget
+ * fixes that without the opposite failure — a session on a provider that
+ * genuinely cannot title itself would otherwise pay for a doomed call on
+ * every single turn-end.
+ */
+const TITLE_MAX_ATTEMPTS = 3
+const attempts = new Map<string, number>()
+const inflight = new Set<string>()
 
 /**
  * Cheap, fast models per provider, in preference order. Title generation is a
@@ -105,27 +133,41 @@ export async function generateSessionTitle(options: TitleGenerationOptions): Pro
       ...(profile?.base_url ? { base_url: profile.base_url } : {}),
       ...(profile?.provider ? { provider: profile.provider } : {}),
     }))
-  let client: LlmClient
-  try {
-    // Construction itself can throw (unconfigured model, unknown provider) —
-    // same "never surface in a finished turn" rule as a failed request.
-    client = factory(model, options.profile)
-  } catch {
-    return undefined
+
+  const attempt = async (candidate: string): Promise<string | undefined> => {
+    let client: LlmClient
+    try {
+      // Construction itself can throw (unconfigured model, unknown provider) —
+      // same "never surface in a finished turn" rule as a failed request.
+      client = factory(candidate, options.profile)
+    } catch {
+      return undefined
+    }
+    try {
+      const result = await completeLlm(client, {
+        model: candidate,
+        messages: [{ role: 'user', content: titlePrompt(options.userText, options.assistantText) }],
+        maxTokens: TITLE_MAX_OUTPUT_TOKENS,
+        temperature: 0.2,
+      }, options.signal)
+      return sanitizeTitle(result.content)
+    } catch {
+      return undefined
+    } finally {
+      await closeLlmClient(client).catch(() => undefined)
+    }
   }
-  try {
-    const result = await completeLlm(client, {
-      model,
-      messages: [{ role: 'user', content: titlePrompt(options.userText, options.assistantText) }],
-      maxTokens: 40,
-      temperature: 0.2,
-    }, options.signal)
-    return sanitizeTitle(result.content)
-  } catch {
-    return undefined
-  } finally {
-    await closeLlmClient(client).catch(() => undefined)
-  }
+
+  const cheap = await attempt(model)
+  if (cheap) return cheap
+
+  // The cheap tier is a guess: an OpenAI-compatible proxy declared as
+  // `provider: "openai"` may not serve gpt-4o-mini at all, which is a 100%
+  // failure rather than a flaky one. Fall back to the model the session is
+  // already known to run on before giving up.
+  const fallback = options.sessionModel.trim()
+  if (!fallback || fallback === model) return undefined
+  return attempt(fallback)
 }
 
 /**
@@ -135,16 +177,24 @@ export async function generateSessionTitle(options: TitleGenerationOptions): Pro
  * every turn-end: after the first attempt — success or failure — later turns
  * short-circuit without any provider call.
  */
-export function attemptSessionTitleOnce(
+export function attemptSessionTitle(
   sessionId: string,
   run: () => Promise<string | undefined>,
 ): Promise<string | undefined> | undefined {
-  if (attempted.has(sessionId)) return undefined
-  attempted.add(sessionId)
-  return run()
+  // A second turn can end while the first attempt's provider call is still
+  // open; without this the same session would pay twice concurrently.
+  if (inflight.has(sessionId)) return undefined
+  const used = attempts.get(sessionId) ?? 0
+  if (used >= TITLE_MAX_ATTEMPTS) return undefined
+  attempts.set(sessionId, used + 1)
+  inflight.add(sessionId)
+  return run().finally(() => {
+    inflight.delete(sessionId)
+  })
 }
 
 /** Test hook: forget prior attempts. */
 export function resetTitleAttempts(): void {
-  attempted.clear()
+  attempts.clear()
+  inflight.clear()
 }

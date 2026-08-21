@@ -49,6 +49,12 @@ export interface OperatorToolRegistrationOptions {
   readonly agentId?: string
 }
 
+function requiredOperatorSessionId(context: ToolExecutionContext): string {
+  const sessionId = context.sessionId?.trim()
+  if (!sessionId) throw new ValidationError('sessionId', 'is required for terminal tools')
+  return sessionId
+}
+
 /**
  * Session attachment point for persistent terminals, browser state, plans,
  * human prompts, and spawned-agent handles.
@@ -181,10 +187,11 @@ export class OperatorState {
           },
           ['cmd'],
         ),
-        handler: async inputs => {
+        handler: async (inputs, context) => {
           const workdir = optionalString(inputs, 'workdir') ?? this.config.shellDefaultWorkdir
           return ptyWire(await this.ptyManager.createSession(requiredString(inputs, 'cmd'), {
             ...(workdir === undefined ? {} : { workdir }),
+            ownerSessionId: requiredOperatorSessionId(context),
             yieldTimeMs: optionalInteger(inputs, 'yield_time_ms') ?? this.config.shellDefaultYieldMs,
             maxOutputChars: optionalInteger(inputs, 'max_output_chars') ?? this.config.shellDefaultMaxOutputChars,
             login: optionalBoolean(inputs, 'login') ?? true,

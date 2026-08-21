@@ -252,10 +252,10 @@ test.skipIf(process.platform !== 'win32')(
     // ever showed dead pty rows. `detached` is POSIX session leadership only.
     const terminals = new TerminalRegistry()
     const manager = new PtySessionManager({ terminals })
-    const result = await manager.createSession('echo pty-windows-alive', { yieldTimeMs: 2_000 })
+    const result = await manager.createSession('echo pty-windows-alive', { yieldTimeMs: 2_000, ownerSessionId: 'windows-test' })
     try {
       expect(result.stdout).toContain('pty-windows-alive')
-      expect(terminals.inspect(result.sessionId)?.output).toContain('pty-windows-alive')
+      expect(terminals.inspect('windows-test', result.sessionId)?.output).toContain('pty-windows-alive')
     } finally {
       await manager.closeAll()
     }

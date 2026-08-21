@@ -120,8 +120,11 @@ export class ChannelManager {
     if (!this.inboundConfigured) {
       throw new ChannelInboundHandlerUnavailableError()
     }
+    const wasStarted = this.registry.isStarted(normalized)
     await this.registry.start(normalized)
-    this.registry.clearLifecycleFailures(normalized)
+    if (!wasStarted) {
+      this.registry.clearLifecycleFailures(normalized)
+    }
     return this.requireStatus(normalized)
   }
 

@@ -7,7 +7,7 @@
 // call is always visible, while diagnostic and diff detail remains available
 // when it carries information the one-line result cannot safely summarize.
 import { useStore } from '@nanostores/react'
-import { memo } from 'react'
+import { memo, useRef } from 'react'
 
 import {
   $thinkingVisibility,
@@ -15,8 +15,10 @@ import {
   toggleThinkingRow
 } from '../app/thinkingVisibilityStore.js'
 import { $uiDetailVisibility } from '../app/uiStore.js'
+import { VOICE } from '../domain/roles.js'
 import { messageHasVisibleDetails, trailHasRenderableContent } from '../lib/liveProgress.js'
-import { estimateTokensRough, fmtK, inlineToolDisplay, parseToolTrailResultLine } from '../lib/text.js'
+import { estimateTokensRough, fmtK, parseToolTrailResultLine, toolTrailParts } from '../lib/text.js'
+import { splitStreamingRender, STREAMING_CHUNKS_EMPTY, type StreamingChunks } from '../lib/streamingMarkdown.js'
 import type { Theme } from '../theme.js'
 import type { Msg } from '../types.js'
 
@@ -44,7 +46,6 @@ function Markdown({ content, t }: { content: string; t: Theme }) {
       conceal
       content={content}
       flexShrink={0}
-      // @ts-expect-error MarkdownProps omits inherited Renderable.selectable.
       selectable
       syntaxStyle={getSyntaxStyle(t)}
       tableOptions={{ ...TABLE_OPTIONS, borderColor: t.color.border }}
@@ -52,20 +53,53 @@ function Markdown({ content, t }: { content: string; t: Theme }) {
   )
 }
 
+const MarkdownChunk = memo(Markdown)
+
+/**
+ * Live-streaming assistant text. Re-parsing the whole growing buffer into one
+ * native <markdown> element on every delta is O(total) per delta, so the
+ * fence-aware chunker (lib/streamingMarkdown) freezes completed blocks into
+ * memoized chunks that never re-parse; only the unstable tail does.
+ *
+ * Visual parity with a single whole-buffer <markdown>: a lone document
+ * inserts one blank row between top-level blocks, so chunk elements are
+ * interleaved with a one-row spacer and each chunk is stripped of its
+ * trailing blank line by the chunker (OpenTUI preserves a trailing "\n\n"
+ * after heading blocks, which would otherwise double the spacing).
+ */
+export function StreamingMarkdown({ text, t }: { text: string; t: Theme }) {
+  const stateRef = useRef<StreamingChunks>(STREAMING_CHUNKS_EMPTY)
+  const render = splitStreamingRender(text, stateRef.current)
+  stateRef.current = render.state
+
+  return (
+    <>
+      {render.chunks.map((chunk, index) => (
+        <Box flexDirection="column" flexShrink={0} key={index}>
+          <MarkdownChunk content={chunk} t={t} />
+          <Box flexShrink={0} height={1} />
+        </Box>
+      ))}
+      {render.tail ? <Markdown content={render.tail} t={t} /> : null}
+    </>
+  )
+}
+
 function UserMessage({ msg, t }: { msg: Msg; t: Theme }) {
   return (
-    <Box flexDirection="row" flexShrink={0} marginBottom={1} marginTop={1}>
-      <Box backgroundColor={t.color.accent} flexShrink={0} width={1} />
+    // One blank row above the band, none below: the next block adds its own
+    // lead gap when the voice changes. This used to paint 2 rows above and 3
+    // below every turn, and the estimator only ever predicted 2.
+    <Box flexDirection="row" flexShrink={0} marginTop={1}>
+      <Box backgroundColor={VOICE.user(t).bar} flexShrink={0} width={1} />
       <Box
         backgroundColor={t.color.completionBg}
         flexDirection="column"
         flexGrow={1}
-        paddingBottom={1}
         paddingLeft={2}
         paddingRight={1}
-        paddingTop={1}
       >
-        <Text color={t.color.label} wrap="wrap">
+        <Text color={VOICE.user(t).body} wrap="wrap">
           {msg.text}
         </Text>
       </Box>
@@ -73,9 +107,9 @@ function UserMessage({ msg, t }: { msg: Msg; t: Theme }) {
   )
 }
 
-function AssistantMessage({ msg, t }: { msg: Msg; t: Theme }) {
+function AssistantMessage({ leadGap, msg, t }: { leadGap?: boolean; msg: Msg; t: Theme }) {
   return (
-    <Box flexDirection="column" flexShrink={0} marginTop={1} paddingLeft={3}>
+    <Box flexDirection="column" flexShrink={0} marginTop={leadGap ? 1 : 0} paddingLeft={3}>
       <Markdown content={msg.text} t={t} />
     </Box>
   )
@@ -84,8 +118,9 @@ function AssistantMessage({ msg, t }: { msg: Msg; t: Theme }) {
 function SystemMessage({ msg, t }: { msg: Msg; t: Theme }) {
   return (
     <Box flexShrink={0} paddingLeft={2}>
-      <Text color={t.color.muted} wrap="wrap">
-        · {msg.text}
+      <Text color={VOICE.system(t).body} wrap="wrap">
+        <Span color={VOICE.system(t).glyphColor}>{VOICE.system(t).glyph} </Span>
+        {msg.text}
       </Text>
     </Box>
   )
@@ -187,29 +222,50 @@ function toolDetailColor(line: string, diagnostic: boolean, t: Theme): string {
 function ToolStep({ line, t }: { line: string; t: Theme }) {
   const parsed = parseToolTrailResultLine(line)
 
+  const voice = VOICE.tool(t)
+
   if (!parsed) {
-    // In-flight / transient call line ("drafting …", a bare tool name).
+    // In-flight / transient call line ("drafting …", a bare tool name). No
+    // mark and a muted glyph, so "still running" reads differently from a
+    // settled row at a glance.
     return (
-      <Text color={t.color.muted} wrap="truncate-end">
-        <Span color={t.color.muted}>→ </Span>
+      <Text color={voice.body} wrap="truncate-end">
+        <Span color={t.color.muted}>{voice.glyph} </Span>
         {line}
       </Text>
     )
   }
 
-  const label = inlineToolDisplay(parsed.call)
-  const markColor = parsed.mark === '✗' ? t.color.error : t.color.ok
-  const detail = usefulToolDetail(parsed.detail, parsed.mark === '✗')
+  const failed = parsed.mark === '✗'
+  const markColor = failed ? t.color.error : t.color.ok
+  const detail = usefulToolDetail(parsed.detail, failed)
+  const { args, duration, name } = toolTrailParts(parsed.call)
 
   return (
     <Box flexDirection="column" flexShrink={0}>
-      <Text color={t.color.muted} wrap="truncate-end">
-        <Span color={parsed.mark === '✗' ? t.color.error : t.color.muted}>→ </Span>
-        {label}
-        {parsed.mark === '✗' ? (
+      {/* One line, styled by part: the tool's name reads as a name, its
+          arguments recede, and the duration is available at a glance instead
+          of being stripped out. All three were previously flattened into a
+          single muted string. */}
+      <Text color={voice.body} wrap="truncate-end">
+        <Span color={failed ? t.color.error : voice.glyphColor}>{voice.glyph} </Span>
+        <Span bold color={failed ? t.color.error : voice.glyphColor}>
+          {name}
+        </Span>
+        {args ? <Span color={t.color.muted}>{`  ${args}`}</Span> : null}
+        {duration ? (
+          <Span color={t.color.muted} dimColor>
+            {`  · ${duration}`}
+          </Span>
+        ) : null}
+        {/* Paint the tick too. Rendering only '✗' left success visually
+            identical to a call that is still running. */}
+        {parsed.mark ? (
           <>
             {' '}
-            <Span color={markColor}>{parsed.mark}</Span>
+            <Span color={markColor} dimColor={!failed}>
+              {parsed.mark}
+            </Span>
           </>
         ) : null}
       </Text>
@@ -277,8 +333,11 @@ function ThinkingBlock({ msg, rowId, t }: { msg: Msg; rowId: string; t: Theme })
 
   return (
     <Box flexDirection="column" flexShrink={0}>
+      {/* Header carries the violet; no dimColor on top of it, or it drops
+          below readable on terminals that dim aggressively. The expanded
+          trace below stays muted — a long trace must not be violet. */}
       <Box flexShrink={0} onClick={() => toggleThinkingRow(rowId)}>
-        <Text color={t.color.muted} dimColor>
+        <Text color={t.color.thinking}>
           {expanded ? '▾' : '▸'} thinking{tokenLabel}
         </Text>
       </Box>
@@ -294,12 +353,24 @@ function ThinkingBlock({ msg, rowId, t }: { msg: Msg; rowId: string; t: Theme })
   )
 }
 
-function ToolTrail({ msg, msgKey, t, visibility }: { msg: Msg; msgKey?: string; t: Theme; visibility: DetailVisibility }) {
+function ToolTrail({
+  leadGap,
+  msg,
+  msgKey,
+  t,
+  visibility
+}: {
+  leadGap?: boolean
+  msg: Msg
+  msgKey?: string
+  t: Theme
+  visibility: DetailVisibility
+}) {
   const thinking = msg.thinking?.trim()
   const tools = msg.tools ?? []
 
   return (
-    <Box flexDirection="column" flexShrink={0} marginTop={1} paddingLeft={3}>
+    <Box flexDirection="column" flexShrink={0} marginTop={leadGap ? 1 : 0} paddingLeft={3}>
       {thinking && visibility.thinking ? <ThinkingBlock msg={msg} rowId={thinkingRowId(msg, msgKey)} t={t} /> : null}
 
       {visibility.tools ? tools.map((line, i) => <ToolStep key={i} line={line} t={t} />) : null}
@@ -307,7 +378,17 @@ function ToolTrail({ msg, msgKey, t, visibility }: { msg: Msg; msgKey?: string; 
   )
 }
 
-function MessageLineView({ msg, msgKey, t }: { msg: Msg; msgKey?: string; t: Theme }) {
+function MessageLineView({
+  leadGap,
+  msg,
+  msgKey,
+  t
+}: {
+  leadGap?: boolean
+  msg: Msg
+  msgKey?: string
+  t: Theme
+}) {
   const visibility = detailVisibility(useStore($uiDetailVisibility))
   const hasVisibleDetails = messageHasVisibleDetails(msg, visibility)
 
@@ -320,7 +401,7 @@ function MessageLineView({ msg, msgKey, t }: { msg: Msg; msgKey?: string; t: The
       return null
     }
 
-    return <ToolTrail msg={msg} msgKey={msgKey} t={t} visibility={visibility} />
+    return <ToolTrail leadGap={leadGap} msg={msg} msgKey={msgKey} t={t} visibility={visibility} />
   }
 
   if (msg.role === 'user') {
@@ -330,11 +411,13 @@ function MessageLineView({ msg, msgKey, t }: { msg: Msg; msgKey?: string; t: The
   if (msg.role === 'assistant') {
     return hasVisibleDetails ? (
       <Box flexDirection="column" flexShrink={0}>
-        <ToolTrail msg={msg} msgKey={msgKey} t={t} visibility={visibility} />
+        <ToolTrail leadGap={leadGap} msg={msg} msgKey={msgKey} t={t} visibility={visibility} />
+        {/* The trail already opened the band, so the prose inside it never
+            adds a second gap. */}
         {msg.text ? <AssistantMessage msg={msg} t={t} /> : null}
       </Box>
     ) : (
-      <AssistantMessage msg={msg} t={t} />
+      <AssistantMessage leadGap={leadGap} msg={msg} t={t} />
     )
   }
 

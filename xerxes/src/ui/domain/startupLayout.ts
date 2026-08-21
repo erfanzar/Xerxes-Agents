@@ -21,8 +21,16 @@ export const shouldShowStartupWelcome = ({
   transcriptEmpty
 }: StartupLayoutState): boolean => transcriptEmpty && !busy && !hasLiveTurn && !pendingInteraction
 
-/** Keep the normal 75-column composer, but use ultra-wide terminals better. */
-export const startupComposerWidth = (columns: number): number => {
+/**
+ * The one reading column the app composes onto.
+ *
+ * Keeps the normal 75-column measure but uses ultra-wide terminals better.
+ * Both composer branches — the welcome screen and the session view — share
+ * it, so sending your first message no longer snaps the input from 104
+ * columns to the full terminal width. The completion menu sizes its columns
+ * from the same number, since it renders inside this box.
+ */
+export const contentColumnWidth = (columns: number): number => {
   const available = Math.max(1, Math.floor(columns) - 4)
   const preferred = columns >= 160 ? Math.min(104, Math.floor(columns * 0.55)) : 75
 

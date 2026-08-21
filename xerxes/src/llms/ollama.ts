@@ -146,6 +146,7 @@ export class OllamaClient implements LlmClient {
     }
 
     let receivedDone = false
+    const generatedToolCallIdOccurrences = new Map<string, number>()
     for await (const line of ndjsonLines(response.body, this.maxLineBytes)) {
       const chunk = parseChunk(line)
       if (receivedDone) {
@@ -162,7 +163,9 @@ export class OllamaClient implements LlmClient {
       const content = stringAt(message, 'content')
       const thinking = stringAt(message, 'thinking')
       const rawToolCalls = message.tool_calls ?? chunk.tool_calls
-      const toolCalls = rawToolCalls === undefined ? undefined : parseToolCalls(rawToolCalls)
+      const toolCalls = rawToolCalls === undefined
+        ? undefined
+        : parseToolCalls(rawToolCalls, generatedToolCallIdOccurrences)
       const finishReason = chunk.done === true ? stringAt(chunk, 'done_reason') || 'stop' : undefined
       const usage = ollamaUsage(chunk)
 
@@ -271,7 +274,10 @@ function parseChunk(line: string): Record<string, unknown> {
   }
 }
 
-function parseToolCalls(value: unknown): ToolCall[] | undefined {
+function parseToolCalls(
+  value: unknown,
+  generatedIdOccurrences: Map<string, number> = new Map(),
+): ToolCall[] | undefined {
   if (value === null) {
     return undefined
   }
@@ -293,8 +299,16 @@ function parseToolCalls(value: unknown): ToolCall[] | undefined {
       throw new ProviderError('ollama', `tool call ${index} has invalid function arguments`)
     }
     const arguments_ = parseToolArguments(rawArguments as string | JsonObject | undefined)
+    const providerId = stringAt(call, 'id')
+    let id = providerId
+    if (!id) {
+      const generated = deterministicToolCallId(name, arguments_)
+      const occurrence = generatedIdOccurrences.get(generated) ?? 0
+      generatedIdOccurrences.set(generated, occurrence + 1)
+      id = occurrence === 0 ? generated : `${generated}#${occurrence + 1}`
+    }
     return {
-      id: stringAt(call, 'id') || deterministicToolCallId(name, arguments_),
+      id,
       type: 'function' as const,
       function: { name, arguments: arguments_ },
     }

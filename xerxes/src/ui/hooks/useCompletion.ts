@@ -6,6 +6,7 @@ import type { CompletionItem } from '../app/interfaces.js'
 import { looksLikeSlashCommand } from '../domain/slash.js'
 import type { GatewayClient } from '../gatewayClient.js'
 import type { CompletionResponse } from '../gatewayTypes.js'
+import { rankCompletionItems } from '../lib/completion.js'
 import { asRpcResult } from '../lib/rpc.js'
 import type { SlashCatalog } from '../types.js'
 
@@ -21,17 +22,36 @@ export function slashCompletionsFromCatalog(input: string, catalog: null | Slash
   }
 
   const prefix = commandToken(input)
+
+  // Category per command name, so the menu can rank by group. Skills are no
+  // longer hoisted to the front here — `rankCompletionItems` owns ordering,
+  // and a hoist would only fight it.
+  const groupOf = new Map<string, string>()
   const skillPairs = catalog.categories.find(category => category.name === 'project skills')?.pairs ?? []
-  const skillLabels = new Set(skillPairs.map(([name]) => name))
-  const pairs = [...skillPairs, ...catalog.pairs.filter(([name]) => !skillLabels.has(name))]
+
+  for (const category of catalog.categories) {
+    const group = category.name === 'project skills' ? 'skills' : category.name
+
+    for (const [name] of category.pairs) {
+      groupOf.set(name, group)
+    }
+  }
+
+  const seen = new Set(catalog.pairs.map(([name]) => name))
+  const pairs = [...catalog.pairs, ...skillPairs.filter(([name]) => !seen.has(name))]
 
   return pairs
     .filter(([name]) => name.replace(/^\/+/, '').toLowerCase().startsWith(prefix))
-    .map(([name, meta]) => ({
-      display: name.replace(/^\/+/, ''),
-      meta,
-      text: name.startsWith('/') ? name : `/${name}`
-    }))
+    .map(([name, meta]) => {
+      const group = groupOf.get(name)
+
+      return {
+        display: name.replace(/^\/+/, ''),
+        ...(group ? { group } : {}),
+        meta,
+        text: name.startsWith('/') ? name : `/${name}`
+      }
+    })
 }
 
 export function mergeCompletionItems(primary: CompletionItem[], secondary: CompletionItem[]): CompletionItem[] {
@@ -147,7 +167,7 @@ export function useCompletion(input: string, blocked: boolean, gw: GatewayClient
     const initialLocal = request.method === 'complete.slash' ? slashCompletionsFromCatalog(input, catalog) : []
 
     if (initialLocal.length) {
-      setCompletions(initialLocal)
+      setCompletions(rankCompletionItems(initialLocal, commandToken(input)))
       setCompIdx(0)
       setCompReplace(request.replaceFrom)
     } else {
@@ -174,7 +194,11 @@ export function useCompletion(input: string, blocked: boolean, gw: GatewayClient
           const remote = r?.items ?? []
           const local = request.method === 'complete.slash' ? slashCompletionsFromCatalog(input, catalog) : []
 
-          setCompletions(request.method === 'complete.slash' ? mergeCompletionItems(local, remote) : remote)
+          setCompletions(
+            request.method === 'complete.slash'
+              ? rankCompletionItems(mergeCompletionItems(local, remote), commandToken(input))
+              : remote
+          )
           setCompIdx(0)
           setCompReplace(request.method === 'complete.slash' ? (r?.replace_from ?? 1) : request.replaceFrom)
         })
@@ -186,7 +210,7 @@ export function useCompletion(input: string, blocked: boolean, gw: GatewayClient
           const local = request.method === 'complete.slash' ? slashCompletionsFromCatalog(input, catalog) : []
 
           if (local.length) {
-            setCompletions(local)
+            setCompletions(rankCompletionItems(local, commandToken(input)))
             setCompIdx(0)
             setCompReplace(request.replaceFrom)
             return

@@ -13,6 +13,8 @@ import {
   PANEL_WIDTH_STEP,
   withPanelWidthDelta
 } from '../app/panelSizeStore.js'
+
+import { OVERLAY_PANEL_SPECS, overlayPanelSize } from './overlayLayout.js'
 import {
   controlTerminal,
   inspectTerminal,
@@ -245,15 +247,23 @@ export function TerminalPanelOverlay({ onClose, t }: { onClose: () => void; t: T
   const outputRef = useRef<ScrollBoxRenderable | null>(null)
   const { height, width } = useTerminalDimensions()
   useStore($panelWidthDelta)
-  const panelWidth = withPanelWidthDelta(Math.min(140, Math.floor(width * 0.9)), width)
-  const page = Math.max(4, Math.floor(height * 0.6))
-
   const [entries, setEntries] = useState<readonly TerminalSummary[]>([])
   const [loading, setLoading] = useState(true)
   const [selectedIndex, setSelectedIndex] = useState(0)
   const [openId, setOpenId] = useState<null | string>(null)
   const [detail, setDetail] = useState<null | TerminalInspection>(null)
   const [notice, setNotice] = useState<null | string>(null)
+  // Shrink only when the list is empty, so "no terminals yet" is a compact
+  // box rather than a full-screen void. A populated panel keeps its full
+  // allowance so the output pane and footer hints have room.
+  const { height: panelHeight, width: fittedWidth } = overlayPanelSize(
+    { height, width },
+    entries.length
+      ? OVERLAY_PANEL_SPECS.terminals
+      : { ...OVERLAY_PANEL_SPECS.terminals, desiredHeight: 0 }
+  )
+  const panelWidth = withPanelWidthDelta(fittedWidth, width)
+  const page = Math.max(4, Math.floor(height * 0.6))
   const [typing, setTyping] = useState(false)
   const [draft, setDraft] = useState('')
   const [now, setNow] = useState(() => Date.now())
@@ -519,10 +529,10 @@ export function TerminalPanelOverlay({ onClose, t }: { onClose: () => void; t: T
     >
       <Box
         backgroundColor={t.color.statusBg}
-        borderColor={t.color.accent}
+        borderColor={t.color.brandGold}
         borderStyle="single"
         flexDirection="column"
-        height="80%"
+        height={panelHeight}
         paddingX={2}
         paddingY={1}
         width={panelWidth}

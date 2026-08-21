@@ -1,7 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { expect, test } from 'bun:test'
+import { expect, mock, spyOn, test } from 'bun:test'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -15,6 +15,109 @@ import {
 } from '../src/daemon/runtime.js'
 import { DaemonTranscriptStore } from '../src/session/daemonTranscript.js'
 import { claimSubagentConversation } from '../src/daemon/subagentConversations.js'
+
+test('daemon runtime disposes session-owned background commands on eviction', async () => {
+  const disposeOwner = mock(async (_owner: string) => {})
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    backgroundCommands: { disposeAll: async () => {}, disposeOwner },
+    currentProjectDirectory: process.cwd(),
+  })
+  const session = await runtime.openSession('tui:background-owner')
+
+  runtime.evictSession(session.sessionKey)
+  await Bun.sleep(0)
+
+  expect(disposeOwner).toHaveBeenCalledTimes(1)
+  expect(disposeOwner).toHaveBeenCalledWith(session.id)
+})
+
+test('daemon runtime waits for owner cleanup before exposing a reused session id', async () => {
+  let releaseCleanup = () => {}
+  const cleanupGate = new Promise<void>(resolve => { releaseCleanup = resolve })
+  const commands = new Set<string>(['old-command'])
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    backgroundCommands: {
+      disposeAll: async () => {},
+      disposeOwner: async () => {
+        await cleanupGate
+        commands.clear()
+      },
+    },
+    currentProjectDirectory: process.cwd(),
+  })
+  const sessionId = 'a1b2c3d4'
+  const session = await runtime.openSession(sessionId)
+
+  runtime.evictSession(session.sessionKey)
+  let reopened = false
+  const reopening = runtime.openSession(sessionId).then(next => {
+    reopened = true
+    commands.add('new-command')
+    return next
+  })
+  await Bun.sleep(0)
+
+  expect(reopened).toBeFalse()
+  expect(commands).toEqual(new Set(['old-command']))
+
+  releaseCleanup()
+  const replacement = await reopening
+  expect(replacement.id).toBe(sessionId)
+  expect(commands).toEqual(new Set(['new-command']))
+})
+
+test('daemon runtime observes rejected asynchronous eviction cleanup without blocking eviction', async () => {
+  const error = spyOn(console, 'error').mockImplementation(() => {})
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    backgroundCommands: {
+      disposeAll: async () => {},
+      disposeOwner: async () => { throw new Error('cleanup exploded') },
+    },
+    currentProjectDirectory: process.cwd(),
+  })
+  const session = await runtime.openSession('tui:background-rejection')
+
+  runtime.evictSession(session.sessionKey)
+  expect(runtime.sessionStatus(session.sessionKey)).toBeUndefined()
+  await Bun.sleep(0)
+
+  expect(error).toHaveBeenCalledWith(expect.stringContaining('cleanup exploded'))
+  error.mockRestore()
+})
+
+test('daemon runtime awaits background command disposal during idempotent shutdown', async () => {
+  let release = () => {}
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const disposeAll = mock(() => gate)
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    backgroundCommands: { disposeAll, disposeOwner: async () => {} },
+    currentProjectDirectory: process.cwd(),
+  })
+
+  let settled = false
+  const first = runtime.shutdown().then(() => { settled = true })
+  const second = runtime.shutdown()
+  await Bun.sleep(0)
+  expect(settled).toBeFalse()
+  expect(disposeAll).toHaveBeenCalledTimes(1)
+
+  release()
+  await Promise.all([first, second])
+  expect(settled).toBeTrue()
+  expect(disposeAll).toHaveBeenCalledTimes(1)
+})
+
+test('daemon runtime still awaits background disposal when another shutdown hook rejects', async () => {
+  const disposeAll = mock(async () => {})
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    backgroundCommands: { disposeAll, disposeOwner: async () => {} },
+    currentProjectDirectory: process.cwd(),
+    shutdown: async () => { throw new Error('subagent shutdown failed') },
+  })
+
+  await expect(runtime.shutdown()).rejects.toThrow('subagent shutdown failed')
+  expect(disposeAll).toHaveBeenCalledTimes(1)
+})
 
 test('daemon runtime persists a project-scoped session and resumes only an explicit ID', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'xerxes-daemon-runtime-parity-'))
@@ -315,6 +418,65 @@ test('saved session listing exposes additive hierarchy metadata and limits roots
       projectDirectory: otherProjectDirectory,
     })).toEqual([
       expect.objectContaining({ id: 'eeeeffff0001', kind: 'main' }),
+    ])
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('main session resume rejects a transcript from a different project', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-daemon-main-resume-scope-'))
+  const projectDirectory = join(directory, 'project-a')
+  const otherProjectDirectory = join(directory, 'project-b')
+  const sessionDirectory = join(directory, 'sessions')
+  const sessionId = 'aabbccdd00112233'
+  await mkdir(sessionDirectory, { recursive: true })
+  await writeFile(join(sessionDirectory, `${sessionId}.json`), JSON.stringify({
+    format: 'xerxes-daemon-session',
+    schema_version: 2,
+    session_id: sessionId,
+    key: sessionId,
+    agent_id: 'default',
+    cwd: projectDirectory,
+    workspace: '',
+    updated_at: '2026-07-17T00:00:00.000Z',
+    messages: [
+      { role: 'user', content: 'project a request' },
+      { role: 'assistant', content: 'project a response' },
+    ],
+    turn_count: 1,
+    interaction_mode: 'code',
+    plan_mode: false,
+    total_input_tokens: 1,
+    total_output_tokens: 1,
+    metadata: { project_root: projectDirectory, title: 'Project A session' },
+    thinking_content: [],
+    tool_executions: [],
+  }), 'utf8')
+
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: otherProjectDirectory,
+    sessionDirectory,
+  })
+  try {
+    await expect(runtime.openSession(sessionId, undefined, {
+      cwd: otherProjectDirectory,
+      resume: true,
+    })).rejects.toThrow('main session from a different project')
+    expect(runtime.sessionStatus(sessionId)).toBeUndefined()
+
+    const matching = new InMemoryDaemonRuntime(undefined, {
+      currentProjectDirectory: projectDirectory,
+      sessionDirectory,
+    })
+    const resumed = await matching.openSession(sessionId, undefined, {
+      cwd: projectDirectory,
+      resume: true,
+    })
+    expect(resumed.cwd).toBe(resolve(projectDirectory))
+    expect(resumed.messages).toEqual([
+      { role: 'user', content: 'project a request' },
+      { role: 'assistant', content: 'project a response' },
     ])
   } finally {
     await rm(directory, { recursive: true, force: true })

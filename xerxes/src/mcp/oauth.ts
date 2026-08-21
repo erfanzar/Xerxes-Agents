@@ -14,6 +14,8 @@ export interface OAuthConfig {
   readonly redirectUri?: string
   readonly scopes?: readonly string[]
   readonly tokenUrl: string
+  /** Allow plain HTTP OAuth endpoints only on an exact loopback host for local development. */
+  readonly allowInsecureLoopback?: boolean
 }
 
 export interface OAuthTokenInit {
@@ -269,11 +271,34 @@ function resolveConfig(config: OAuthConfig): ResolvedOAuthConfig {
   }
   return {
     clientId: config.clientId,
-    authorizeUrl: config.authorizeUrl,
-    tokenUrl: config.tokenUrl,
+    authorizeUrl: secureEndpoint(config.authorizeUrl, 'authorizeUrl', config.allowInsecureLoopback === true),
+    tokenUrl: secureEndpoint(config.tokenUrl, 'tokenUrl', config.allowInsecureLoopback === true),
     redirectUri: config.redirectUri ?? DEFAULT_REDIRECT_URI,
     scopes: Object.freeze([...(config.scopes ?? [])]),
   }
+}
+
+function secureEndpoint(value: string, field: 'authorizeUrl' | 'tokenUrl', allowInsecureLoopback: boolean): string {
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch (error) {
+    throw new OAuthError(`OAuth ${field} must be an absolute URL`, undefined, error)
+  }
+  if (url.protocol === 'https:') {
+    return url.toString()
+  }
+  if (url.protocol === 'http:' && allowInsecureLoopback && isLoopbackHostname(url.hostname)) {
+    return url.toString()
+  }
+  throw new OAuthError(
+    `OAuth ${field} must use HTTPS${allowInsecureLoopback ? ' or HTTP on a loopback host' : ''}`,
+  )
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, '')
+  return normalized === 'localhost' || normalized === '127.0.0.1' || normalized === '::1'
 }
 
 async function requestToken(
@@ -291,6 +316,7 @@ async function requestToken(
         'Content-Type': 'application/x-www-form-urlencoded',
       },
       body: new URLSearchParams(fields).toString(),
+      redirect: 'manual',
       ...(options.signal ? { signal: options.signal } : {}),
     })
   } catch (error) {

@@ -1,7 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -175,6 +175,60 @@ test('skills_list and skill_view use the injected SkillRegistry with transparent
     error: 'no skill registry configured',
     skills: [],
   })
+})
+
+test('SkillBundleStore rejects symlink escapes for get, create, update, and delete', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-agent-meta-skills-root-'))
+  const outside = await mkdtemp(join(tmpdir(), 'xerxes-agent-meta-skills-outside-'))
+  try {
+    await writeFile(join(outside, 'SKILL.md'), [
+      '---',
+      'name: "escaped"',
+      'description: "Outside bundle"',
+      'version: "0.1.0"',
+      'tags: []',
+      '---',
+      '',
+      'outside content',
+    ].join('\n'))
+    await symlink(outside, join(directory, 'escaped'))
+    const store = new SkillBundleStore({ directory })
+
+    await expect(store.get('escaped')).rejects.toThrow('workspace root')
+    for (const action of ['create', 'update'] as const) {
+      await expect(store.manage({
+        action,
+        name: 'escaped',
+        description: '',
+        instructions: 'replacement',
+        tags: [],
+        version: '0.1.0',
+      })).rejects.toThrow('workspace root')
+    }
+    await expect(store.manage({
+      action: 'delete',
+      name: 'escaped',
+      description: '',
+      instructions: '',
+      tags: [],
+      version: '0.1.0',
+    })).rejects.toThrow('workspace root')
+    expect(await readFile(join(outside, 'SKILL.md'), 'utf8')).toContain('outside content')
+
+    await mkdir(join(outside, 'created'))
+    await symlink(join(outside, 'created'), join(directory, 'created'))
+    await expect(store.manage({
+      action: 'create',
+      name: 'created',
+      description: '',
+      instructions: 'must stay contained',
+      tags: [],
+      version: '0.1.0',
+    })).rejects.toThrow('workspace root')
+  } finally {
+    await rm(directory, { force: true, recursive: true })
+    await rm(outside, { force: true, recursive: true })
+  }
 })
 
 test('skill_manage writes only through the explicit host-owned SkillBundleStore', async () => {

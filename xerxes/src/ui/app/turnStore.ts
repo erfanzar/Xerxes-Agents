@@ -54,13 +54,20 @@ export const resetTurnState = () => {
 }
 
 export interface TurnPulse {
+  /**
+   * Monotonic identifier of the current liveness window. Wall-clock
+   * `startedAt` equality cannot distinguish a turn that ended and restarted
+   * within one millisecond from the original turn still running; the epoch
+   * can.
+   */
+  epoch: number
   /** Wall clock of the most recent streaming delta; 0 before the first one. */
   lastDeltaAt: number
   /** Wall clock the current busy stretch began; 0 while idle. */
   startedAt: number
 }
 
-const $turnPulse = atom<TurnPulse>({ lastDeltaAt: 0, startedAt: 0 })
+const $turnPulse = atom<TurnPulse>({ epoch: 0, lastDeltaAt: 0, startedAt: 0 })
 
 export const getTurnPulse = () => $turnPulse.get()
 
@@ -81,13 +88,16 @@ export const beginTurnPulse = (now = Date.now()): TurnPulse => {
     return current
   }
 
-  const started = { lastDeltaAt: 0, startedAt: now }
+  const started = { epoch: current.epoch + 1, lastDeltaAt: 0, startedAt: now }
   $turnPulse.set(started)
 
   return started
 }
 
-export const endTurnPulse = () => $turnPulse.set({ lastDeltaAt: 0, startedAt: 0 })
+export const endTurnPulse = () => {
+  const current = $turnPulse.get()
+  $turnPulse.set({ ...current, lastDeltaAt: 0, startedAt: 0 })
+}
 
 // The window is opened and closed by the gate itself, not by whoever happens to
 // render the indicator: the live-turn view unmounts and remounts as the

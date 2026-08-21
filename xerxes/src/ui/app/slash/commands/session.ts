@@ -111,6 +111,7 @@ export const sessionCommands: SlashCommand[] = [
               )
             })
           )
+          .catch(ctx.guardedErr)
 
       switchModel()
     }
@@ -166,7 +167,7 @@ export const sessionCommands: SlashCommand[] = [
           ctx.transcript.sys(`personality: ${r.value || 'default'}${r.history_reset ? ' · transcript cleared' : ''}`)
           ctx.local.maybeWarn(r)
         })
-      )
+      ).catch(ctx.guardedErr)
     }
   },
 
@@ -242,7 +243,7 @@ export const sessionCommands: SlashCommand[] = [
           ctx.session.setSessionStartedAt(Date.now())
           ctx.transcript.sys(`branched → ${r.title ?? ''}`)
         })
-      )
+      ).catch(ctx.guardedErr)
     }
   },
 
@@ -274,6 +275,7 @@ export const sessionCommands: SlashCommand[] = [
       ctx.gateway
         .rpc<ConfigSetResponse>('config.set', { key: 'skin', value: arg })
         .then(ctx.guarded<ConfigSetResponse>(r => r.value && ctx.transcript.sys(`skin → ${r.value}`)))
+        .catch(ctx.guardedErr)
     }
   },
 
@@ -310,7 +312,7 @@ export const sessionCommands: SlashCommand[] = [
           patchUiState({ indicatorStyle: value as IndicatorStyle })
           ctx.transcript.sys(`indicator → ${r.value}`)
         })
-      )
+      ).catch(ctx.guardedErr)
     }
   },
 
@@ -378,7 +380,7 @@ export const sessionCommands: SlashCommand[] = [
 
           ctx.transcript.sys(`reasoning: ${r.value}`)
         })
-      )
+      ).catch(ctx.guardedErr)
     }
   },
 
@@ -468,6 +470,7 @@ export const sessionCommands: SlashCommand[] = [
       ctx.gateway
         .rpc<ConfigSetResponse>('config.set', { key: 'verbose', session_id: ctx.sid, value: arg || 'cycle' })
         .then(ctx.guarded<ConfigSetResponse>(r => r.value && ctx.transcript.sys(`verbose: ${r.value}`)))
+        .catch(ctx.guardedErr)
     }
   },
 
@@ -526,7 +529,7 @@ export const sessionCommands: SlashCommand[] = [
         }
 
         ctx.transcript.panel('Usage', sections)
-      })
+      }).catch(ctx.guardedErr)
     }
   }
 ]

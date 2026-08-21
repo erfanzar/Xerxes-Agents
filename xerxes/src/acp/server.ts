@@ -143,6 +143,7 @@ export class AcpServer {
   closeSession(sessionId: string): Record<string, boolean> {
     const closed = this.sessions.drop(sessionId)
     if (closed) {
+      this.promptChains.delete(sessionId)
       this.runner?.cancel(sessionId)
       this.runner?.resetSession?.(sessionId)
       this.releaseSession(sessionId)
@@ -229,6 +230,7 @@ export class AcpServer {
       if (this.runner?.cancel(session.sessionId)) cancelled += 1
       this.releaseSession(session.sessionId)
     }
+    this.promptChains.clear()
     return cancelled
   }
 }
