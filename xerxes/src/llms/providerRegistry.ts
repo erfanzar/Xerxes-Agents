@@ -5,6 +5,22 @@ import { ConfigurationError } from '../core/errors.js'
 
 export type ProviderTransport = 'anthropic' | 'claude-code' | 'openai'
 
+export interface ProviderRetryPolicy {
+  /** Backoff schedule in ms; a route makes `delaysMs.length + 1` attempts. */
+  readonly delaysMs: readonly number[]
+  /**
+   * Ceiling for provider-suggested Retry-After waits, so one bad hint cannot
+   * park a turn for hours.
+   */
+  readonly maxSuggestedDelayMs: number
+}
+
+/** Schedule every route without an explicit policy inherits. */
+export const DEFAULT_RETRY_POLICY: ProviderRetryPolicy = Object.freeze({
+  delaysMs: [1_000, 2_000],
+  maxSuggestedDelayMs: 60_000,
+})
+
 export interface ProviderConfig {
   readonly apiKeyEnv?: string
   readonly baseUrl?: string
@@ -17,6 +33,8 @@ export interface ProviderConfig {
    */
   readonly maxOutput: number
   readonly name: string
+  /** Route-specific transient-failure patience; absent means the default policy. */
+  readonly retry?: ProviderRetryPolicy
   readonly transport: ProviderTransport
 }
 
@@ -42,10 +60,13 @@ export const PROVIDERS = {
   }),
   // Subscription-backed: a ChatGPT Plus/Pro/Business plan authorizes this
   // endpoint with an OAuth session, so it has no API-key environment variable.
+  // Peak-hour 429s are routine and clear within seconds-to-minutes, so the
+  // route carries more patience than the default before giving up.
   'openai-codex': provider('openai-codex', 'openai', {
     baseUrl: 'https://chatgpt.com/backend-api/codex',
     contextLimit: 272_000,
     maxOutput: 128_000,
+    retry: { delaysMs: [2_000, 5_000, 10_000], maxSuggestedDelayMs: 60_000 },
   }),
   openrouter: provider('openrouter', 'openai', {
     apiKeyEnv: 'OPENROUTER_API_KEY',
@@ -105,12 +126,16 @@ export const PROVIDERS = {
     contextLimit: 128_000,
     maxOutput: 8_192,
     defaultApiKey: 'ollama',
+    // A local daemon either answers or is down; long cloud-style backoffs just
+    // stall the turn in front of a user who can see the server.
+    retry: { delaysMs: [250, 500], maxSuggestedDelayMs: 5_000 },
   }),
   lmstudio: provider('lmstudio', 'openai', {
     baseUrl: 'http://localhost:1234/v1',
     contextLimit: 128_000,
     maxOutput: 8_192,
     defaultApiKey: 'lm-studio',
+    retry: { delaysMs: [250, 500], maxSuggestedDelayMs: 5_000 },
   }),
   custom: provider('custom', 'openai', {
     apiKeyEnv: 'CUSTOM_API_KEY',
@@ -378,6 +403,11 @@ export function getContextLimit(model: string, overrides: ProviderOverrides = {}
 /** Largest reply the routed provider will emit for one request. */
 export function getMaxOutputTokens(model: string, overrides: ProviderOverrides = {}): number {
   return PROVIDERS[resolveProvider(model, overrides)].maxOutput
+}
+
+/** Transient-failure patience for the route that would serve this model. */
+export function retryPolicyForModel(model: string, overrides: ProviderOverrides = {}): ProviderRetryPolicy {
+  return PROVIDERS[resolveProvider(model, overrides)].retry ?? DEFAULT_RETRY_POLICY
 }
 
 export interface EffectiveContextLimitOptions {

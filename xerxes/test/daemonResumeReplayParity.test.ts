@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from 'bun:test'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, realpath, rm } from 'node:fs/promises'
 import { connect, type Socket } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -12,7 +12,10 @@ import { DaemonServer } from '../src/daemon/server.js'
 import { DaemonTranscriptStore } from '../src/session/daemonTranscript.js'
 
 test('explicit daemon resume replays visible turns but filters internal prompts and tool output', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'xerxes-daemon-replay-parity-'))
+  // Canonicalize the temp dir: on macOS /tmp is a symlink to /private/tmp, and
+  // the daemon rejects resuming a transcript whose stored project dir differs
+  // from the (realpath-resolved) project dir the client connects with.
+  const directory = await realpath(await mkdtemp(join(tmpdir(), 'xerxes-daemon-replay-parity-')))
   const sessionDirectory = join(directory, 'sessions')
   const socketPath = join(directory, 'daemon.sock')
   const sessionId = 'b1c2d3e4'
@@ -33,6 +36,7 @@ test('explicit daemon resume replays visible turns but filters internal prompts 
       {
         role: 'assistant',
         content: [{ text: 'visible answer' }, { content: 'with a second line' }],
+        thinking: 'persisted reasoning trace',
         tool_calls: [{ id: 'tool-1', name: 'ReadFile', input: { path: 'README.md' } }],
       },
       { role: 'tool', tool_call_id: 'tool-1', content: 'large tool payload must not reach scrollback' },
@@ -47,8 +51,16 @@ test('explicit daemon resume replays visible turns but filters internal prompts 
     planMode: false,
     schemaVersion: undefined,
     sessionId,
-    thinkingContent: [],
-    toolExecutions: [],
+    thinkingContent: ['persisted reasoning trace'],
+    toolExecutions: [
+      {
+        tool_call_id: 'tool-1',
+        name: 'ReadFile',
+        permitted: true,
+        duration_ms: 120,
+        inputs: { path: 'README.md' },
+      },
+    ],
     totalInputTokens: 0,
     totalOutputTokens: 0,
     turnCount: 2,
@@ -85,21 +97,37 @@ test('explicit daemon resume replays visible turns but filters internal prompts 
     const history = client.observed.filter(frame => frame.method === 'event'
       && frame.params?.type === 'notification'
       && frame.params.payload?.category === 'history')
-      .map(frame => ({ body: frame.params?.payload?.body, type: frame.params?.payload?.type }))
-    // The `replay_tool` row is deliberate: since "resumed sessions replay
-    // thinking and tool-call rows" (51cb13e) a resumed transcript shows tool
-    // calls the way a live one does. This expectation predated that change and
-    // was never updated, which is why it has failed ever since.
-    //
-    // The filtering this test exists to guard is unchanged and asserted below:
-    // the row is a single semantic marker, never the tool's output.
+      .map(frame => ({
+        body: frame.params?.payload?.body,
+        payload: frame.params?.payload?.payload,
+        type: frame.params?.payload?.type,
+      }))
+    // Current contract (since 51cb13e, "resumed sessions replay thinking and
+    // tool-call rows"): thinking rides the replay_assistant payload, and each
+    // tool call replays as one semantic replay_tool row reconciled with its
+    // persisted execution (name, ok, duration, compact arguments context) —
+    // never the tool's output. The filtering this test guards is unchanged and
+    // asserted below.
     expect(history).toEqual([
-      { type: 'replay_user', body: '✨ visible question' },
-      { type: 'replay_assistant', body: 'visible answer\nwith a second line' },
-      { type: 'replay_tool', body: '✓ tool' },
-      { type: 'replay_user', body: '✨ visible follow up' },
-      { type: 'replay_assistant', body: 'visible final answer' },
-      { type: 'resumed', body: `── resumed session ${sessionId} (4 messages) ──` },
+      { type: 'replay_user', body: '✨ visible question', payload: {} },
+      {
+        type: 'replay_assistant',
+        body: 'visible answer\nwith a second line',
+        payload: { thinking: 'persisted reasoning trace' },
+      },
+      {
+        type: 'replay_tool',
+        body: '✓ ReadFile',
+        payload: {
+          name: 'ReadFile',
+          ok: true,
+          context: '{"path":"README.md"}',
+          duration_ms: 120,
+        },
+      },
+      { type: 'replay_user', body: '✨ visible follow up', payload: {} },
+      { type: 'replay_assistant', body: 'visible final answer', payload: {} },
+      { type: 'resumed', body: `── resumed session ${sessionId} (4 messages) ──`, payload: {} },
     ])
     expect(resumed.params?.payload?.body).toContain('(4 messages)')
     expect(JSON.stringify(history)).not.toContain('private instructions')

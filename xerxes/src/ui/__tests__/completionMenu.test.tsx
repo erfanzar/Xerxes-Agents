@@ -53,8 +53,18 @@ const renderMenu = async ({
   return frame
 }
 
-/** Rows that actually carry a completion, ignoring the blank canvas. */
+/** Every painted row, blank canvas excluded — chrome included. */
 const contentLines = (frame: string) => frame.split('\n').filter(line => line.trim().length > 0)
+
+/**
+ * Rows that carry a completion.
+ *
+ * The menu is a bordered card with a query header now, so "non-blank row" is
+ * no longer the same question as "completion row": the frame, the header and
+ * the `+n more` footer are all non-blank and none of them is an item.
+ */
+const itemRows = (frame: string, needle: string) =>
+  contentLines(frame).filter(line => line.includes(needle))
 
 describe('completion menu', () => {
   afterEach(() => {
@@ -65,22 +75,25 @@ describe('completion menu', () => {
     const frame = await renderMenu({ completions: many(40), height: 24, width: 96 })
 
     // The whole canvas is 24 rows; the menu must occupy a bounded slice of
-    // it, not overflow. 8 rows max + 1 overflow footer.
-    expect(contentLines(frame).length).toBeLessThanOrEqual(9)
+    // it, not overflow. 8 rows max + 1 overflow footer + 3 rows of chrome
+    // (top and bottom edge, query header).
+    expect(contentLines(frame).length).toBeLessThanOrEqual(12)
   })
 
   it('shrinks its row count on a short terminal', async () => {
     const frame = await renderMenu({ completions: many(40), height: 20, width: 96 })
 
-    expect(contentLines(frame).length).toBeLessThanOrEqual(5)
+    expect(contentLines(frame).length).toBeLessThanOrEqual(8)
   })
 
   it('renders a multi-sentence skill description on a single row', async () => {
     const frame = await renderMenu({ completions: [item('/docx', SKILL_META)], height: 24, width: 96 })
-    const rows = contentLines(frame)
+    const rows = itemRows(frame, 'docx')
 
     expect(rows).toHaveLength(1)
-    expect(rows[0]).toContain('/docx')
+    // The `/` is the row's marker column, so the name is printed without one:
+    // `/ docx`, not `/ /docx`.
+    expect(rows[0]).toContain('/ docx')
     // Boilerplate prefix stripped, first sentence only, clamped.
     expect(rows[0]).not.toContain('Use this skill')
     expect(rows[0]).toContain('…')
@@ -92,7 +105,7 @@ describe('completion menu', () => {
       height: 24,
       width: 96
     })
-    const rows = contentLines(frame)
+    const rows = itemRows(frame, ' description')
 
     expect(rows).toHaveLength(2)
     expect(rows[0]!.indexOf('alpha description')).toBe(rows[1]!.indexOf('beta description'))
@@ -108,7 +121,7 @@ describe('completion menu', () => {
       height: 24,
       width: 96
     })
-    const rows = contentLines(frame)
+    const rows = itemRows(frame, ' description')
 
     expect(rows).toHaveLength(3)
     // The over-long name is clamped into the column rather than shoving its
@@ -122,9 +135,10 @@ describe('completion menu', () => {
   it('reports how much of the list is off-screen', async () => {
     const frame = await renderMenu({ compIdx: 20, completions: many(40), height: 30, width: 96 })
 
+    // Eight rows maximum, then "+n more" — a list you have to scroll is a
+    // search result, and search belongs on its own screen.
     expect(frame).toContain('21/40')
-    expect(frame).toContain('↑')
-    expect(frame).toContain('↓')
+    expect(frame).toContain('more')
   })
 
   it('drops the description column but keeps names readable when narrow', async () => {
@@ -137,7 +151,7 @@ describe('completion menu', () => {
       width: 40
     })
 
-    expect(roomy).toContain('/model')
+    expect(roomy).toContain('/ model')
     expect(roomy).toContain('switch the active model')
 
     const cramped = await renderMenu({
@@ -146,7 +160,7 @@ describe('completion menu', () => {
       width: 34
     })
 
-    expect(cramped).toContain('/eternal-army-command')
+    expect(cramped).toContain('/ eternal-army-command')
     expect(cramped).not.toContain('switch')
   })
 

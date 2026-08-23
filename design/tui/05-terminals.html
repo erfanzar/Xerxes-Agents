@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Xerxes TUI — Terminals</title>
+<style>
+/* Xerxes TUI — mockup stylesheet.
+   One grid: 13px monospace, 1ch advance, 18px line box.
+   A "screen" is exactly 150ch x 40 rows. Whitespace is blank rows,
+   never fractional padding, so the mockup stays measurable in cells. */
+
+:root{
+  /* surfaces */
+  --backdrop:#000000;
+  --panel:#0a0a0d;      /* the screen */
+  --panel-2:#0e1116;    /* raised card */
+  --panel-3:#12161d;    /* selected row / kbd cap */
+  --line:#1c2733;       /* hairline */
+  --line-2:#141c26;     /* quieter hairline */
+
+  /* text ramp — quiet by default */
+  --fg:#c6ced8;         /* body */
+  --fg-hi:#e9edf3;      /* titles, the one thing you read first */
+  --dim1:#8b95a2;       /* secondary */
+  --dim2:#5d6774;       /* captions, meta */
+  --dim3:#39424e;       /* leaders, rules, disabled */
+
+  /* voice / state — same colour means the same thing on every screen */
+  --blue:#6ea8fe;       /* brand + working */
+  --green:#83c99d;      /* done / succeeded */
+  --red:#dd7c88;        /* failed */
+  --amber:#d8ae58;      /* blocked / needs you  (warnings ONLY) */
+  --violet:#b18be8;     /* agent activity, system voice */
+  --cyan:#56c2d6;       /* hunk headers, structural markers */
+  --thinking:#8b7fa3;   /* reasoning rows */
+
+  /* tints */
+  --user-band:#10151e;
+  --blue-tint:rgba(110,168,254,.10);
+  --amber-tint:rgba(216,174,88,.09);
+  --red-tint:rgba(221,124,136,.09);
+  --green-tint:rgba(131,201,157,.09);
+  --violet-tint:rgba(177,139,232,.10);
+
+  --add-bg:#14251b;
+  --del-bg:#2a171b;
+
+  --row:18px;
+  --pad:2ch;
+}
+
+*{box-sizing:border-box;margin:0;padding:0}
+
+html{background:var(--backdrop)}
+body{
+  background:
+    radial-gradient(120% 90% at 50% -10%, #0b0e14 0%, #000 62%);
+  color:var(--fg);
+  font:13px/18px "SF Mono","SFMono-Regular",Menlo,"JetBrains Mono","Cascadia Mono",Consolas,monospace;
+  font-variant-ligatures:none;
+  -webkit-font-smoothing:antialiased;
+  padding:40px 32px 64px;
+  display:flex;flex-direction:column;align-items:flex-start;gap:22px;
+}
+
+/* ── window chrome ─────────────────────────────────────────────── */
+.win{
+  background:var(--panel);
+  border:1px solid var(--line);
+  border-radius:10px;
+  overflow:hidden;
+  box-shadow:0 0 0 1px rgba(0,0,0,.6), 0 26px 70px -20px rgba(0,0,0,.9);
+  width:max-content;
+}
+.tb{
+  height:30px;display:flex;align-items:center;gap:8px;
+  padding:0 12px;
+  background:linear-gradient(#15181e,#101318);
+  border-bottom:1px solid var(--line);
+}
+.tb i{width:11px;height:11px;border-radius:50%;display:block}
+.tb .r{background:#ff5f57}.tb .y{background:#febc2e}.tb .g{background:#28c840}
+.tbt{
+  flex:1;text-align:center;color:var(--dim2);font-size:11px;
+  margin-left:-57px;letter-spacing:.02em;
+}
+.screen{
+  width:150ch;height:calc(40 * var(--row));
+  background:var(--panel);
+  display:flex;flex-direction:column;
+  overflow:hidden;
+  position:relative;
+}
+.screen.narrow{width:70ch}
+
+/* ── generic grid helpers ──────────────────────────────────────── */
+.row{display:flex;align-items:baseline;min-height:var(--row)}
+.pad{padding:0 var(--pad)}
+.grow{flex:1 1 auto;min-height:0;min-width:0}
+.blank{height:var(--row);flex:0 0 var(--row)}
+.rt{margin-left:auto;flex:0 0 auto;font-variant-numeric:tabular-nums;white-space:nowrap}
+.nowrap{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.num{flex:0 0 auto;white-space:nowrap;font-variant-numeric:tabular-nums}
+
+/* dotted leader — the connective tissue between a label and its number */
+.ld{
+  flex:1 1 0;min-width:2ch;overflow:hidden;white-space:nowrap;
+  color:var(--dim3);margin:0 1ch;
+}
+.ld::before{content:"· · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · ·"}
+
+.hair{height:1px;background:var(--line-2);flex:0 0 1px}
+
+/* ── state dots ────────────────────────────────────────────────── */
+.d{display:inline-block;width:1ch;margin-right:1ch}
+.d::before{content:"●"}
+.blue{color:var(--blue)}.green{color:var(--green)}.red{color:var(--red)}
+.amber{color:var(--amber)}.violet{color:var(--violet)}.cyan{color:var(--cyan)}
+.dim{color:var(--dim1)}.dim2{color:var(--dim2)}.dim3{color:var(--dim3)}
+.hi{color:var(--fg-hi)}
+.b{font-weight:600;color:var(--fg-hi)}
+.think{color:var(--thinking)}
+
+/* ── captions: "NEEDS INPUT · 2" ───────────────────────────────── */
+.cap{
+  color:var(--dim2);font-size:11px;letter-spacing:.16em;text-transform:uppercase;
+  height:var(--row);display:flex;align-items:center;gap:1ch;
+}
+.cap .n{color:var(--dim3)}
+.cap.needs{color:var(--amber)}
+.cap.work{color:var(--blue)}
+.cap.review{color:var(--green)}
+
+/* ── panel head (screens + inspectors) ─────────────────────────── */
+.hdr{
+  height:calc(2 * var(--row));flex:0 0 calc(2 * var(--row));
+  display:flex;align-items:center;gap:2ch;
+  padding:0 var(--pad);
+  border-bottom:1px solid var(--line);
+  background:linear-gradient(180deg,#0d1117,#0a0a0d);
+}
+.hdr .t{color:var(--fg-hi);font-weight:600;letter-spacing:.02em}
+.hdr .sub{color:var(--dim2)}
+
+/* ── footer key hints ──────────────────────────────────────────── */
+.ftr{
+  height:calc(2 * var(--row));flex:0 0 calc(2 * var(--row));
+  display:flex;align-items:center;gap:1ch;
+  padding:0 var(--pad);
+  border-top:1px solid var(--line);
+  color:var(--dim2);font-size:12px;
+  white-space:nowrap;overflow:hidden;
+}
+kbd{
+  font:inherit;font-size:11px;
+  background:var(--panel-3);border:1px solid var(--line);
+  border-bottom-color:#0a0d12;
+  border-radius:3px;padding:1px 5px;color:var(--dim1);
+  display:inline-block;line-height:14px;
+}
+.sep{color:var(--dim3)}
+
+/* ── statusbar ─────────────────────────────────────────────────── */
+.sbar{
+  height:var(--row);flex:0 0 var(--row);
+  display:flex;align-items:center;gap:1ch;
+  padding:0 var(--pad);
+  background:#0d1117;border-top:1px solid var(--line);
+  color:var(--dim2);font-size:12px;
+  white-space:nowrap;overflow:hidden;
+}
+.sbar .mark{color:var(--blue)}
+.sbar .pipe{color:var(--dim3)}
+
+/* ── cards ─────────────────────────────────────────────────────── */
+.card{
+  border:1px solid var(--line);border-radius:6px;
+  background:var(--panel-2);
+  padding:0 2ch;
+}
+.card.sel{border-color:#2c4a70;background:#0f1520;box-shadow:inset 2px 0 0 var(--blue)}
+.card.needs{box-shadow:inset 2px 0 0 var(--amber)}
+.card.fail{box-shadow:inset 2px 0 0 var(--red)}
+.card.done{box-shadow:inset 2px 0 0 var(--green)}
+
+/* ── composer ──────────────────────────────────────────────────── */
+.composer{
+  margin:0 var(--pad);
+  border:1px solid #23384f;border-radius:6px;
+  background:#0b0f15;
+}
+.composer .line{display:flex;align-items:baseline;padding:0 2ch;min-height:var(--row)}
+.composer .p{color:var(--blue);margin-right:1ch}
+.composer .ph{color:var(--dim3)}
+.caret{display:inline-block;width:1ch;background:var(--blue);color:transparent}
+.composer .meta{
+  display:flex;align-items:center;gap:1ch;padding:0 2ch;height:var(--row);
+  border-top:1px solid var(--line-2);color:var(--dim2);font-size:11px;
+}
+.mode{color:var(--blue)}
+
+/* ── code box (verbatim commands) ──────────────────────────────── */
+.codebox{
+  background:#07090c;border:1px solid var(--line);border-left:2px solid var(--blue);
+  border-radius:4px;padding:0 2ch;color:var(--fg-hi);
+}
+
+/* ── notes under the window ────────────────────────────────────── */
+.notes{width:150ch;max-width:100%;color:var(--dim1);font-size:12px;line-height:19px}
+.notes h2{
+  font-size:11px;letter-spacing:.18em;text-transform:uppercase;
+  color:var(--dim2);font-weight:600;margin-bottom:8px;
+  border-top:1px solid var(--line);padding-top:14px;
+}
+.notes li{list-style:none;padding-left:2ch;text-indent:-2ch;margin-bottom:3px}
+.notes li::before{content:"└ ";color:var(--dim3)}
+.notes b{color:var(--fg);font-weight:600}
+.notes .k{color:var(--blue)}
+</style>
+</head>
+<body>
+<style>
+.tlist{flex:0 0 calc(19 * var(--row));border-bottom:1px solid var(--line);padding:0 2ch;overflow:hidden}
+.trm{display:flex;align-items:baseline;min-height:var(--row);padding:0 1ch;border-radius:3px}
+.trm.on{background:#0f1520;box-shadow:inset 2px 0 0 var(--blue)}
+.trm .id{flex:0 0 4ch;color:var(--dim3);font-variant-numeric:tabular-nums}
+.trm .cmd{color:var(--fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.trm .cmd .sh{color:var(--dim2)}
+.trm.on .cmd{color:var(--fg-hi)}
+.mirror{flex:1 1 auto;padding:0 2ch;overflow:hidden;background:#08090c}
+.mhead{display:flex;align-items:center;min-height:calc(2 * var(--row));margin:0 -2ch;padding:0 2ch;border-bottom:1px solid var(--line-2);background:#0b0e13}
+.out{white-space:pre;min-height:var(--row);color:var(--dim1)}
+.out.hi{color:var(--fg)}
+.danger{color:var(--red)}
+.idle{color:var(--amber)}
+</style>
+
+<div class="win">
+  <div class="tb"><i class="r"></i><i class="y"></i><i class="g"></i><span class="tbt">xerxes — ~/dev/xerxes — 150×40</span></div>
+  <div class="screen">
+
+    <div class="hdr">
+      <span class="t">TERMINALS</span><span class="dim3">·</span><span class="dim2">8</span>
+      <span class="amber" style="margin-left:2ch">1 idle 2h+</span>
+      <span class="rt dim2">pty pool 8/16 <span class="sep">·</span> 0.4% cpu <span class="sep">·</span> <kbd>F8</kbd></span>
+    </div>
+
+    <div class="tlist">
+      <div class="blank" style="height:9px"></div>
+      <div class="cap work">RUNNING <span class="n">· 3</span></div>
+      <div class="trm"><span class="id">#1</span><span class="d blue"></span><span class="cmd">bun run dev <span class="sh">· xerxes/</span></span><span class="ld"></span><span class="num dim2">up 41m · pid 41221</span></div>
+      <div class="trm"><span class="id">#4</span><span class="d blue"></span><span class="cmd">bun test --watch xerxes/src/ui <span class="sh">· 214 pass</span></span><span class="ld"></span><span class="num dim2">up 12m · pid 41904</span></div>
+      <div class="trm on"><span class="id">#5</span><span class="d blue"></span><span class="cmd">bun test daemonResumeReplayParity</span><span class="ld"></span><span class="num dim2">3.2s · pid 42077</span></div>
+
+      <div class="cap" style="margin-top:9px"><span class="amber">IDLE SHELLS</span> <span class="n">· 2</span></div>
+      <div class="trm"><span class="id">#2</span><span class="d amber"></span><span class="cmd">bash <span class="sh">· interactive · root · /</span></span><span class="ld"></span><span class="num idle">idle 2h 14m</span></div>
+      <div class="trm"><span class="id">#7</span><span class="d blue"></span><span class="cmd">zsh <span class="sh">· interactive · ~/dev/xerxes</span></span><span class="ld"></span><span class="num dim2">idle 4m</span></div>
+
+      <div class="cap" style="margin-top:9px"><span class="red">FAILED</span> <span class="n">· 1</span></div>
+      <div class="trm"><span class="id">#3</span><span class="d red"></span><span class="cmd">bun run build:bundle</span><span class="ld"></span><span class="num red">exit 2 · 9m ago</span></div>
+
+      <div class="cap" style="margin-top:9px"><span class="green">SUCCEEDED</span> <span class="n">· 2</span></div>
+      <div class="trm"><span class="id">#6</span><span class="d green"></span><span class="cmd">git status --porcelain</span><span class="ld"></span><span class="num dim2">exit 0 · 0.1s</span></div>
+      <div class="trm"><span class="id">#8</span><span class="d green"></span><span class="cmd">bunx tsc --noEmit</span><span class="ld"></span><span class="num dim2">exit 0 · 11.4s</span></div>
+    </div>
+
+    <div class="mirror">
+      <div class="mhead">
+        <span class="d blue"></span><span class="b">#5</span>
+        <span class="dim1" style="margin-left:1ch">bun test daemonResumeReplayParity</span>
+        <span class="rt dim2">live tail <span class="sep">·</span> 128 lines buffered <span class="sep">·</span> <kbd>ctrl-o</kbd> full output</span>
+      </div>
+      <div class="blank" style="height:9px"></div>
+      <div class="out dim2">$ bun test xerxes/src/daemon/__tests__/daemonResumeReplayParity.test.ts</div>
+      <div class="out">bun test v1.2.4 (a1b2c3d4)</div>
+      <div class="out"> </div>
+      <div class="out hi">xerxes/src/daemon/__tests__/daemonResumeReplayParity.test.ts:</div>
+      <div class="out"><span class="green">✓</span> replays assistant text before tool results  <span class="dim2">[41.00ms]</span></div>
+      <div class="out"><span class="green">✓</span> preserves seq across a reconnect             <span class="dim2">[12.00ms]</span></div>
+      <div class="out"><span class="green">✓</span> emits one turn ledger per turn               <span class="dim2">[ 8.00ms]</span></div>
+      <div class="out"> </div>
+      <div class="out"><span class="green">3 pass</span>  <span class="dim2">0 fail</span>  <span class="dim2">7 expect() calls</span></div>
+      <div class="out dim2">Ran 3 tests across 1 file. [3.19s]</div>
+      <div class="row" style="min-height:var(--row)"><span class="dim3">└ exit 0 · 3.2s · finished 4s ago</span></div>
+    </div>
+
+    <div class="ftr">
+      <kbd>↑↓</kbd> select <span class="sep">·</span>
+      <kbd>⏎</kbd> attach <span class="sep">·</span>
+      <kbd>o</kbd> full output <span class="sep">·</span>
+      <kbd>r</kbd> rerun <span class="sep">·</span>
+      <kbd>k</kbd> kill <span class="dim3">(SIGTERM)</span> <span class="sep">·</span>
+      <kbd>⇧K</kbd> <span class="red">force kill</span> <span class="dim3">(SIGKILL, confirms)</span> <span class="sep">·</span>
+      <kbd>esc</kbd> back
+    </div>
+
+    <div class="sbar">
+      <span class="mark">✦</span><span>~/dev/xerxes</span>
+      <span class="pipe">│</span><span>main</span><span class="amber">✱6</span>
+      <span class="pipe">│</span>
+      <span><span class="dim1">F6</span> agents</span><span class="sep">·</span>
+      <span><span class="dim1">F7</span> diff</span><span class="sep">·</span>
+      <span class="blue">F8 terminals</span>
+      <span class="rt">v0.4.1</span>
+    </div>
+
+  </div>
+</div>
+
+<section class="notes">
+  <h2>Decisions</h2>
+  <ul>
+    <li><b>List on top, one mirror below.</b> Terminals are a fleet, and a fleet needs an index; but you only ever read one at a time. A grid of tiny panes would give you eight unreadable panes instead of one readable one.</li>
+    <li><b>Idle interactive shells get their own group and their own clock.</b> A root <span class="k">bash</span> sitting at <span class="k">/</span> for 2h 14m is not "running" in any useful sense — it is a liability. It turns amber at 30 minutes, and the group count is repeated in the header so it is visible from the session screen's F8 hint too. A forgotten root shell should embarrass someone.</li>
+    <li><b>Amber here means the same thing it means on F6:</b> this one needs a human. It is never used for "in progress" — that is blue, and every running command wears it.</li>
+    <li><b>Exit codes are the sort key of the dead.</b> Failed and succeeded are separate groups because you re-run one of them and ignore the other; a merged "finished" group would make the failure a scanning problem.</li>
+    <li><b>Destructive keys are two-step and asymmetric.</b> <kbd>k</kbd> is SIGTERM, unshifted, no confirm — it is recoverable. <kbd>⇧K</kbd> is SIGKILL, shifted, and still opens a confirm card. The shift key is the first half of the confirmation.</li>
+    <li><b>The mirror closes with a ledger line</b> — <span class="k">└ exit 0 · 3.2s · finished 4s ago</span> — the same <span class="k">└</span> shape that closes a turn in the transcript. One glyph, one meaning: "this thing is over, here is its total".</li>
+  </ul>
+</section>
+</body>
+</html>

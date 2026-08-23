@@ -203,6 +203,31 @@ export function skillInstructionsAreSafe(skill: Skill): boolean {
   );
 }
 
+/**
+ * The canonical expansion of "a skill was activated": the `[Skill … activated]`
+ * header both the daemon and the TUI classify as private runtime context,
+ * followed by the scanned prompt section and an optional user request.
+ *
+ * Every activation path must build its prompt through this function so the
+ * framing stays byte-consistent — a divergent header would slip past the
+ * transcript filters that keep expanded skill instructions out of the visible
+ * history.
+ */
+export function skillActivationPrompt(
+  skill: Skill,
+  options: { readonly request?: string; readonly subcommand?: string } = {},
+): string {
+  const name = options.subcommand
+    ? `${skill.metadata.name}:${options.subcommand}`
+    : skill.metadata.name;
+  return [
+    `[Skill ${name} activated]`,
+    "",
+    skillPromptSection(skill),
+    ...(options.request ? ["", "## User request", options.request] : []),
+  ].join("\n");
+}
+
 export function skillPromptSection(skill: Skill): string {
   const manifestPath = resolve(skill.sourcePath);
   const skillRoot = dirname(manifestPath);

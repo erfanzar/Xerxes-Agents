@@ -40,9 +40,31 @@ describe('SessionTabStrip', () => {
   it('renders a tab per session with its status glyph', async () => {
     const session = await render()
     const out = session.captureCharFrame()
-    expect(out).toContain('◆ Fix auth')
-    expect(out).toContain('✓ Docs pass')
+    // v2 chrome: the active tab is a gold dot, not its status glyph — state
+    // for the chat you are looking at is already on the composer row.
+    expect(out).toContain('● Fix auth')
+    expect(out).toContain('○ Docs pass')
     expect(out).toContain('? Review PR')
+  })
+
+  it('underlines the active tab on the band row (mockup 02)', async () => {
+    const session = await render()
+    const out = session.captureCharFrame()
+    expect(out).toContain('━')
+  })
+
+  it('shows the + affordance and key hints when the width allows', async () => {
+    const session = await render({ width: 120 })
+    const out = session.captureCharFrame()
+    expect(out).toContain('+')
+    expect(out).toContain('← switch · ←← agent view')
+  })
+
+  it('drops the hints first on a medium strip while keeping every tab', async () => {
+    const session = await render({ width: 70 })
+    const out = session.captureCharFrame()
+    expect(out).toContain('Fix auth')
+    expect(out).not.toContain('switch')
   })
 
   it('collapses to a position indicator when the strip cannot fit', async () => {
@@ -103,7 +125,19 @@ describe('SessionTabsHotkey', () => {
     }
   })
 
-  it('opens the agent view on left without switching or creating sessions', async () => {
+  it('switches one tab left when a tab exists to the left', async () => {
+    const { actions, openAgentView, setup } = await hotkey({ activeId: 'b' })
+    try {
+      act(() => setup.mockInput.pressArrow('left'))
+      expect(actions.activateLiveSession).toHaveBeenCalledWith('a')
+      expect(openAgentView).not.toHaveBeenCalled()
+      expect(actions.newLiveSession).not.toHaveBeenCalled()
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
+
+  it('opens the agent view on left from the leftmost tab without switching or creating sessions', async () => {
     const { actions, openAgentView, setup } = await hotkey({ activeId: 'a' })
     try {
       act(() => setup.mockInput.pressArrow('left'))
@@ -128,10 +162,14 @@ describe('SessionTabsHotkey', () => {
   })
 
   it('does not steal arrows while the composer holds text', async () => {
-    const { actions, setup } = await hotkey({ composerEmpty: false })
+    const { actions, openAgentView, setup } = await hotkey({ activeId: 'b', composerEmpty: false })
     try {
+      // Left keeps its caret job in a non-empty composer: no tab switch, no
+      // agent view.
+      act(() => setup.mockInput.pressArrow('left'))
       act(() => setup.mockInput.pressArrow('right'))
       expect(actions.activateLiveSession).not.toHaveBeenCalled()
+      expect(openAgentView).not.toHaveBeenCalled()
     } finally {
       act(() => setup.renderer.destroy())
     }

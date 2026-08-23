@@ -110,7 +110,7 @@ describe('collapsed thinking rendering', () => {
       const frame = setup.captureCharFrame()
 
       expect(frame).toContain('▸ thinking')
-      expect(frame).toContain('~420 tokens')
+      expect(frame).toContain('~420 tok')
       expect(frame).not.toContain('SECRET_TRACE')
     } finally {
       act(() => setup.renderer.destroy())

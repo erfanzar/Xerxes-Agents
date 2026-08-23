@@ -3,7 +3,7 @@
 
 import { expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { connect, type Socket } from "node:net";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -4549,7 +4549,11 @@ test("session.list without an active session refuses to silently scope to the da
 });
 
 test("resuming a saved session evicts its live session registered under another key", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-resume-evict-"));
+  // Canonicalize the temp dir and bind the session to it: the daemon rejects
+  // resuming a transcript whose stored project dir differs from the
+  // (realpath-resolved) project dir, and the default project is the process
+  // cwd — not this fixture's temp project.
+  const directory = await realpath(await mkdtemp(join(tmpdir(), "xerxes-bun-resume-evict-")));
   const socketPath = join(directory, "daemon.sock");
   const runtime = new InMemoryDaemonRuntime(undefined, {
     currentProjectDirectory: directory,
@@ -4568,7 +4572,7 @@ test("resuming a saved session evicts its live session registered under another 
       jsonrpc: "2.0",
       id: 1,
       method: "initialize",
-      params: { session_key: "picker-key" },
+      params: { project_dir: directory, session_key: "picker-key" },
     });
     const initialized = await client.next((frame) => frame.id === 1);
     await client.next(eventFrame("init_done"));

@@ -132,9 +132,12 @@ test('SkillTool searches beyond the prompt index, bounds listings, and preserves
     skill_name: `skill-${targetIndex}`,
     args: 'Apply it now.',
   }), { metadata: {} })
-  expect(activated).toContain(`[Skill: skill-${targetIndex}]`)
+  // Canonical activation framing shared with /skill (see skillActivationPrompt):
+  // both transcript classifiers match on "[Skill … activated]".
+  expect(activated).toContain(`[Skill skill-${targetIndex} activated]`)
   expect(activated).toContain('Run the hidden needle instructions.')
-  expect(activated).toContain('User request: Apply it now.')
+  expect(activated).toContain('## User request')
+  expect(activated).toContain('Apply it now.')
 })
 
 test('Claude agent tools map task lifecycle, outputs, and mailbox events to SpawnedAgentManager', async () => {

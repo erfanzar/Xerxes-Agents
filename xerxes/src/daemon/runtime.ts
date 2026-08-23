@@ -6,6 +6,10 @@ import { join, resolve } from "node:path";
 import { ValidationError } from "../core/errors.js";
 import { normalizeInteractionMode } from "../runtime/interactionModes.js";
 import {
+  appendContextDelta,
+  contextDeltaFor,
+} from "../runtime/contextDeltas.js";
+import {
   DaemonTranscriptStore,
   looksLikeSessionId,
   transcriptHasHistory,
@@ -59,6 +63,16 @@ export interface DaemonSession {
   /** Transient visible turn state used when the TUI switches back mid-turn. */
   inflightUser?: string;
   inflightAssistant?: string;
+  /** Epoch ms the in-flight turn began; lets a reattach keep elapsed continuity. */
+  inflightStartedAt?: number;
+  /** Thinking the in-flight turn produced so far (tail-bounded). */
+  inflightThinking?: string;
+  /**
+   * Tool calls the in-flight turn produced so far, in call order. Runner-managed
+   * sessions only synchronize session.messages at turn end, so without this a
+   * mid-turn reattach would see a bare user line instead of the work so far.
+   */
+  inflightTools?: InflightToolSnapshot[];
   messages: DaemonTranscriptMessage[];
   metadata: Record<string, unknown>;
   /** Persisted revision and message boundary this in-memory copy was based on. */
@@ -127,6 +141,18 @@ export interface DaemonSession {
   /** Whether cumulative token totals cover every provider attempt in this session. */
   usageComplete?: boolean;
   workspace: string;
+}
+
+/** Bounded snapshot of one in-flight tool call for mid-turn reattach payloads. */
+export interface InflightToolSnapshot {
+  /** Compact arguments preview, never the full payload. */
+  arguments?: string;
+  duration_ms?: number;
+  /** Compact diagnostic when the call failed. */
+  error?: string;
+  id?: string;
+  name: string;
+  ok?: boolean;
 }
 
 export interface OpenSessionOptions {
@@ -852,17 +878,23 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
       // Only sessions that never chose for themselves follow the global
       // default; a pinned one keeps what it was given.
       if (!session.modelPinned) {
+        const modelDelta = contextDeltaFor(session.model, model, Date.now(), "model");
+        if (modelDelta) appendContextDelta(session.metadata, modelDelta);
         session.model = model;
       }
       if (!session.reasoningPinned) {
         const effort = stringValue(this.runtimeSettings.reasoning_effort);
         if (effort) {
+          const effortDelta = contextDeltaFor(session.reasoningEffort, effort, Date.now(), "reasoning");
+          if (effortDelta) appendContextDelta(session.metadata, effortDelta);
           session.reasoningEffort = effort;
         }
       }
       if (!session.permissionPinned) {
         const permission = stringValue(this.runtimeSettings.permission_mode);
         if (permission) {
+          const permissionDelta = contextDeltaFor(session.permissionMode, permission, Date.now(), "permission");
+          if (permissionDelta) appendContextDelta(session.metadata, permissionDelta);
           session.permissionMode = permission;
         }
       }
@@ -880,6 +912,8 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
       return undefined;
     }
     const normalized = normalizeInteractionMode(mode, planMode ?? false);
+    const modeDelta = contextDeltaFor(session.interactionMode, normalized, Date.now(), "interaction-mode");
+    if (modeDelta) appendContextDelta(session.metadata, modeDelta);
     session.interactionMode = normalized;
     session.planMode = planMode ?? normalized === "plan";
     session.lastActive = Date.now();
@@ -899,6 +933,8 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     if (!chosen) {
       return session;
     }
+    const modelDelta = contextDeltaFor(session.model, chosen, Date.now(), "model");
+    if (modelDelta) appendContextDelta(session.metadata, modelDelta);
     session.model = chosen;
     // Pinned from here on, so a later global reload cannot silently move this
     // session onto another session's model.
@@ -919,6 +955,8 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     if (!chosen) {
       return session;
     }
+    const effortDelta = contextDeltaFor(session.reasoningEffort, chosen, Date.now(), "reasoning");
+    if (effortDelta) appendContextDelta(session.metadata, effortDelta);
     session.reasoningEffort = chosen;
     session.reasoningPinned = true;
     session.lastActive = Date.now();
@@ -937,6 +975,8 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     if (!chosen) {
       return session;
     }
+    const permissionDelta = contextDeltaFor(session.permissionMode, chosen, Date.now(), "permission");
+    if (permissionDelta) appendContextDelta(session.metadata, permissionDelta);
     session.permissionMode = chosen;
     session.permissionPinned = true;
     session.lastActive = Date.now();
@@ -1118,12 +1158,19 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     const displayText = options.displayText?.trim() || text;
     session.inflightUser = displayText;
     session.inflightAssistant = "";
+    session.inflightStartedAt = Date.now();
+    delete session.inflightThinking;
+    delete session.inflightTools;
     // Every event produced by this turn must retain its owning session. One
     // TUI connection can keep multiple native sessions alive and switch the
     // foreground tab while an earlier turn is still streaming; unscoped text,
     // tool, approval, or usage events would otherwise be applied to whichever
     // session happens to be visible when they arrive.
     const emitSessionEvent = (event: DaemonEvent): void => {
+      // Recorded for BOTH state-management modes: a runner-managed session
+      // only synchronizes session.messages at turn end, and this trail is
+      // what a mid-turn session.open replays as the turn's work so far.
+      recordInflightTrail(session, event);
       emit({
         ...event,
         payload: { ...event.payload, session_id: session.id },
@@ -1268,6 +1315,9 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
       });
       delete session.inflightUser;
       delete session.inflightAssistant;
+      delete session.inflightStartedAt;
+      delete session.inflightThinking;
+      delete session.inflightTools;
       // An evicted session may already have a replacement turn registered;
       // only release the controller this turn actually owns.
       if (this.abortControllers.get(sessionKey) === controller) {
@@ -1667,6 +1717,91 @@ function limitSavedSessions(
   limit: number,
 ): SavedDaemonSession[] {
   return limit > 0 ? sessions.slice(0, limit) : [...sessions];
+}
+
+/** Bounds for the mid-turn reattach trail: recognizable context, never raw dumps. */
+const INFLIGHT_THINKING_TAIL_CHARS = 8000;
+const INFLIGHT_ARGUMENTS_PREVIEW_CHARS = 200;
+const INFLIGHT_ERROR_PREVIEW_CHARS = 160;
+const INFLIGHT_TOOL_LIMIT = 100;
+
+function inflightPreviewText(value: unknown, limit: number): string {
+  const raw = typeof value === "string" ? value : "";
+  const compact = raw.replace(/\s+/g, " ").trim();
+  return compact.length > limit ? `${compact.slice(0, limit - 1)}…` : compact;
+}
+
+/**
+ * Accumulate the in-flight turn's thinking and tool rows onto the session so
+ * sessionPayload can show a mid-turn reattach the work so far. Reads the same
+ * frozen wire vocabulary the TUI adapter consumes.
+ */
+function recordInflightTrail(session: DaemonSession, event: DaemonEvent): void {
+  if (event.type === "think_part") {
+    const think = stringValue(event.payload.think);
+    if (think) {
+      const next = (session.inflightThinking ?? "") + think;
+      session.inflightThinking =
+        next.length > INFLIGHT_THINKING_TAIL_CHARS
+          ? next.slice(next.length - INFLIGHT_THINKING_TAIL_CHARS)
+          : next;
+    }
+    return;
+  }
+  if (event.type === "tool_call") {
+    const name = stringValue(event.payload.name) || "tool";
+    const args = inflightPreviewText(
+      event.payload.arguments,
+      INFLIGHT_ARGUMENTS_PREVIEW_CHARS,
+    );
+    const id = stringValue(event.payload.id) || stringValue(event.payload.tool_call_id);
+    const tools = [...(session.inflightTools ?? [])];
+    tools.push({
+      ...(args ? { arguments: args } : {}),
+      ...(id ? { id } : {}),
+      name,
+    });
+    session.inflightTools = tools.slice(-INFLIGHT_TOOL_LIMIT);
+    return;
+  }
+  if (event.type === "tool_result") {
+    const tools = session.inflightTools;
+    if (!tools?.length) {
+      return;
+    }
+    const callId = stringValue(event.payload.tool_call_id);
+    const index = callId
+      ? tools.findIndex((tool) => tool.id === callId)
+      : -1;
+    // Without a matching id, settle the most recent unsettled call: the row
+    // belongs to the turn either way, and leaving it running forever would
+    // misreport it on every later reattach.
+    const fallbackIndex = tools.reduce(
+      (found, tool, i) => (tool.ok === undefined ? i : found),
+      -1,
+    );
+    const target = index >= 0 ? index : fallbackIndex;
+    if (target < 0) {
+      return;
+    }
+    const permitted = event.payload.permitted !== false;
+    const explicitError = stringValue(event.payload.error);
+    const durationMs = optionalFiniteNumber(event.payload.duration_ms);
+    const error = permitted
+      ? undefined
+      : explicitError ||
+        inflightPreviewText(
+          event.payload.return_value,
+          INFLIGHT_ERROR_PREVIEW_CHARS,
+        ) ||
+        "Tool execution failed.";
+    tools[target] = {
+      ...tools[target]!,
+      ...(error ? { error } : {}),
+      ...(durationMs === undefined ? {} : { duration_ms: durationMs }),
+      ok: permitted && !explicitError,
+    };
+  }
 }
 
 function updateFallbackSession(

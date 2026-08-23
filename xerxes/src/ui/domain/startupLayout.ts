@@ -24,15 +24,18 @@ export const shouldShowStartupWelcome = ({
 /**
  * The one reading column the app composes onto.
  *
- * Keeps the normal 75-column measure but uses ultra-wide terminals better.
- * Both composer branches — the welcome screen and the session view — share
- * it, so sending your first message no longer snaps the input from 104
- * columns to the full terminal width. The completion menu sizes its columns
- * from the same number, since it renders inside this box.
+ * Responsive by design: the full available session width minus a small
+ * symmetric outer gutter (2 columns per side). There is deliberately no
+ * desktop cap — on a 220-column terminal the transcript, user bands, tool
+ * rows, and composer all belong to one grid that uses the space, rather than
+ * a fixed 75/104-column strip floating in emptiness.
+ *
+ * Narrow terminals are naturally preserved: the gutter shrinks nothing that
+ * matters and the caller's own flex containers clip before overflow.
+ *
+ * `columns` should be the *session* width — `useMainApp` already subtracts
+ * the agent sidebar when it computes `composer.cols`, so every consumer of
+ * this measure (transcript column, completion menu, input metrics, tool-row
+ * leaders) narrows together when the sidebar mounts.
  */
-export const contentColumnWidth = (columns: number): number => {
-  const available = Math.max(1, Math.floor(columns) - 4)
-  const preferred = columns >= 160 ? Math.min(104, Math.floor(columns * 0.55)) : 75
-
-  return Math.min(available, preferred)
-}
+export const contentColumnWidth = (columns: number): number => Math.max(1, Math.floor(columns) - 4)

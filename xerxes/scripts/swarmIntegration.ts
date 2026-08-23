@@ -4,10 +4,6 @@
 import {
   AgentOrchestrator,
   AgentSwitchTrigger,
-  Cortex,
-  CortexAgents,
-  CortexCore,
-  CortexPlanner,
   ExecutionContext,
   PolicyAction,
   PolicyEngine,
@@ -15,7 +11,6 @@ import {
   SandboxRouter,
   ShortTermMemory,
   SubAgentManager,
-  TaskCreator,
   ToolPolicy,
   ToolRegistry,
   Xerxes,
@@ -27,6 +22,13 @@ import {
   type ToolCall,
   type ToolDefinition,
 } from '../src/index.js'
+// The cortex engine lives outside the public barrel (see src/index.ts): this
+// demo script imports the pieces it exercises directly.
+import { Cortex, type CortexEngineTaskExecutionRequest } from '../src/cortex/cortex.js'
+import { CortexPlanner } from '../src/cortex/planner.js'
+import { TaskCreator } from '../src/cortex/taskCreator.js'
+import * as CortexAgents from '../src/cortex/agents/index.js'
+import * as CortexCore from '../src/cortex/core/index.js'
 
 export interface SwarmReportEntry {
   readonly category: string
@@ -343,11 +345,11 @@ async function testCortexTopologies(log: ReportLog): Promise<void> {
       { id: 'right', description: 'Right branch', expectedOutput: 'right' },
       { id: 'join', description: 'Join branches', expectedOutput: 'joined', dependencies: ['left', 'right'] },
     ],
-    taskRunner: async context => {
+    taskRunner: async (context: CortexEngineTaskExecutionRequest) => {
       transitions.push(`start:${context.task.id}`)
       if (context.task.id === 'join') {
         requireCondition(transitions.includes('end:left') && transitions.includes('end:right'), 'Join began before both branches completed')
-        return `${context.dependencyOutputs.get('left')?.output}/${context.dependencyOutputs.get('right')?.output}`
+        return `${context.dependencyOutputs.get('left')?.output ?? ''}/${context.dependencyOutputs.get('right')?.output ?? ''}`
       }
       await Bun.sleep(1)
       transitions.push(`end:${context.task.id}`)
@@ -365,7 +367,8 @@ async function testCortexTopologies(log: ReportLog): Promise<void> {
       {
         id: 'writer',
         role: 'Writer',
-        execute: context => context.context.includes('Manager review feedback:') ? 'revised report' : 'first report',
+        execute: (context: { context?: string }) =>
+          (context.context ?? '').includes('Manager review feedback:') ? 'revised report' : 'first report',
       },
     ],
     tasks: [
@@ -379,16 +382,18 @@ async function testCortexTopologies(log: ReportLog): Promise<void> {
           { taskId: 'draft', agentId: 'missing-manager-agent', dependencies: ['research'] },
         ],
       }),
-      review: request => request.task.id === 'draft' && request.attempt === 1
-        ? { approved: false, feedback: 'Cite the collected facts.', improvementsNeeded: ['Add citations'] }
-        : { approved: true },
-      summarize: request => `manager summary: ${request.taskOutputs.map(output => output.output).join(' | ')}`,
+      review: (request: { attempt?: number; task: { id?: string } }) =>
+        request.task.id === 'draft' && request.attempt === 1
+          ? { approved: false, feedback: 'Cite the collected facts.', improvementsNeeded: ['Add citations'] }
+          : { approved: true },
+      summarize: (request: { taskOutputs: readonly { output?: string }[] }) =>
+        `manager summary: ${request.taskOutputs.map(output => output.output ?? '').join(' | ')}`,
     },
   })
   const hierarchyOutput = await hierarchy.run()
   requireCondition(hierarchyOutput.rawOutput === 'manager summary: facts | revised report', 'Hierarchical Cortex result is incorrect')
   requireCondition(
-    hierarchyOutput.diagnostics.some(diagnostic => diagnostic.code === 'hierarchy_plan_fallback'),
+    hierarchyOutput.diagnostics.some((diagnostic: { code?: string }) => diagnostic.code === 'hierarchy_plan_fallback'),
     'Unsafe hierarchy assignment was not reported as a fallback diagnostic',
   )
   log('Hierarchical topology uses typed manager planning, review, and safe fallback assignment')
@@ -403,7 +408,11 @@ async function testCortexTopologies(log: ReportLog): Promise<void> {
     tasks: [{ id: 'decide', description: 'Compare options', expectedOutput: 'Decision' }],
     consensus: {
       maxCandidatesParallel: 2,
-      synthesizer: request => ({ output: request.candidates.map(candidate => candidate.output).join(' + ') }),
+      // Explicit param type: the engine no longer reaches this script through
+      // the public barrel, so its option callbacks do not infer for free.
+      synthesizer: (request: { candidates: readonly { output?: string }[] }) => ({
+        output: request.candidates.map(candidate => candidate.output ?? '').join(' + '),
+      }),
     },
   })
   const consensusOutput = await consensus.kickoff()
@@ -419,8 +428,8 @@ async function testCortexTopologies(log: ReportLog): Promise<void> {
       {
         id: 'writer',
         role: 'Writer',
-        execute: context => {
-          plannedWriterContext = context.context
+        execute: (context: { context?: string }) => {
+          plannedWriterContext = context.context ?? ''
           return 'published report'
         },
       },
@@ -468,7 +477,10 @@ async function testCortexTopologies(log: ReportLog): Promise<void> {
     agents: [{ id: 'researcher', role: 'Researcher' }, { id: 'writer', role: 'Writer' }],
   })
   requireCondition(!created.usedFallback && created.tasks.length === 2, 'TaskCreator did not produce the declared typed tasks')
-  requireCondition(new Set(created.tasks.map(task => task.agentId)).size === 2, 'TaskCreator did not map tasks to distinct agents')
+  requireCondition(
+    new Set(created.tasks.map((task: { agentId?: string }) => task.agentId)).size === 2,
+    'TaskCreator did not map tasks to distinct agents',
+  )
   log('TaskCreator produces typed multi-agent tasks without compatibility JSON shims')
 }
 

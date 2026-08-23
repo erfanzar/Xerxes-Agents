@@ -14,6 +14,15 @@ import {
   withPanelWidthDelta
 } from '../app/panelSizeStore.js'
 
+import {
+  orderTerminals,
+  TERMINAL_GROUP_LABEL,
+  TERMINAL_GROUP_STATE,
+  terminalGroup,
+  terminalHeading
+} from '../lib/terminalGroups.js'
+import { stateSkin } from '../domain/nocturne.js'
+
 import { OVERLAY_PANEL_SPECS, overlayPanelSize } from './overlayLayout.js'
 import {
   controlTerminal,
@@ -27,6 +36,9 @@ import {
 import type { Theme } from '../theme.js'
 
 import { isPanelResizeKey } from './diffPanel.js'
+import { isPageDownKey, isPageUpKey } from '../lib/pageKeys.js'
+
+import { GroupCaption } from './nocturne.js'
 import { Box, Span, Text } from './primitives.js'
 
 /**
@@ -38,6 +50,11 @@ import { Box, Span, Text } from './primitives.js'
  * Esc comes back out, Esc again closes. Watching is read-only by construction;
  * the daemon mirrors output rather than draining the buffer the model reads,
  * so having this open cannot change what the agent sees.
+ *
+ * Destructive keys are two-step per mockup 06: the first `k`/`K` arms the
+ * kill with an inline confirm on that row, the repeat press executes it
+ * (`k` → SIGTERM, `K` → SIGKILL for the rare force case), and Esc or moving
+ * the selection steps back cleanly.
  */
 
 type KeyEvent = Parameters<Parameters<typeof useKeyboard>[0]>[0]
@@ -45,6 +62,33 @@ type KeyEvent = Parameters<Parameters<typeof useKeyboard>[0]>[0]
 /** Poll cadences. Fast enough to read as live, slow enough to stay cheap. */
 const LIST_POLL_MS = 1_200
 const OUTPUT_POLL_MS = 700
+
+/**
+ * Mockup 06: destructive keys are two-step. The first press arms the kill and
+ * shows the inline confirm on that row; the repeat inside this window
+ * executes it. The window keeps a stray arm from lurking invisibly behind
+ * scrolling output — forget it and it simply expires.
+ */
+const KILL_ARM_WINDOW_MS = 6_000
+
+/** An armed destructive action waiting for its confirming repeat press. */
+interface KillArm {
+  at: number
+  force: boolean
+  terminalId: string
+}
+
+/** The arm still valid for `terminalId` at instant `at`, or null once stale. */
+const activeKillArm = (
+  arm: null | KillArm,
+  terminalId: string | undefined,
+  at: number
+): null | KillArm =>
+  arm !== null && arm.terminalId === terminalId && at - arm.at <= KILL_ARM_WINDOW_MS ? arm : null
+
+/** The shared wording for the row hint, the detail hint and the notice. */
+const killPrompt = (label: string, force: boolean): string =>
+  `${force ? 'force kill' : 'kill'} ${label}? ${force ? 'K' : 'k'} again to confirm · esc cancel`
 
 const consumeKey = (event: KeyEvent) => {
   event.preventDefault()
@@ -101,45 +145,98 @@ function exitLabel(entry: TerminalSummary): string {
   return entry.exitCode === null ? 'ended' : `exit ${entry.exitCode}`
 }
 
+/** Right-aligned state budget for the row: what it did and how long ago. */
+function stateBudget(entry: TerminalSummary, now: number): { color: string; dim: boolean; text: string } {
+  const age = terminalAge(entry, now)
+
+  if (entry.running) {
+    return { color: 'muted', dim: true, text: `running · ${age}` }
+  }
+
+  if (entry.exitCode === 0) {
+    // No tick here: the row's state glyph is already a ✓, and printing a
+    // second one rendered as `✓ session 4a91 … ✓ exit 0 · 10s`. One mark per
+    // fact — the glyph says it succeeded, the budget says what it cost.
+    return { color: 'ok', dim: false, text: `exit 0 · ${age}` }
+  }
+
+  return {
+    color: 'error',
+    dim: false,
+    text: `${entry.exitCode === null ? 'ended' : `exit ${entry.exitCode}`} · ${age}`
+  }
+}
+
 function TerminalRow({
+  arm,
   entry,
   now,
   selected,
   t
 }: {
+  arm: null | KillArm
   entry: TerminalSummary
   now: number
   selected: boolean
   t: Theme
 }) {
   const color = stateColor(entry, t)
+  const budget = stateBudget(entry, now)
+  const budgetColor = budget.color === 'muted' ? t.color.muted : budget.color === 'ok' ? t.color.ok : t.color.error
 
   return (
-    <Box
-      backgroundColor={selected ? t.color.selectionBg : undefined}
-      flexDirection="row"
-      flexShrink={0}
-      id={terminalRowId(entry.id)}
-      paddingX={1}
-    >
-      <Box flexShrink={0} width={2}>
-        <Text color={color}>{stateGlyph(entry)}</Text>
+    <Box flexDirection="column" flexShrink={0}>
+      <Box
+        backgroundColor={selected ? t.color.selectionBg : undefined}
+        flexDirection="row"
+        flexShrink={0}
+        id={terminalRowId(entry.id)}
+        paddingX={1}
+      >
+        {/* Dot, owner, command — with the state budget hanging off the right
+            edge instead of eating a second line. Every row names its owner:
+            a shell nobody claims is a bug in the product, not a row in the
+            list. */}
+        <Box flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
+          <Text wrap="truncate-end">
+            <Span color={color}>{`${stateGlyph(entry)} `}</Span>
+            <Span bold color={t.ds.title}>
+              {entry.label}
+            </Span>
+            {entry.command ? <Span color={t.ds.meta}>{`  ${entry.command}`}</Span> : null}
+          </Text>
+        </Box>
+        <Box flexShrink={0}>
+          <Text color={budgetColor} dimColor={budget.dim}>
+            {` ${budget.text}`}
+          </Text>
+        </Box>
       </Box>
-      <Box flexDirection="column" flexGrow={1} flexShrink={1}>
-        <Text color={t.color.text} wrap="truncate-end">
-          <Span color={t.color.muted}>{KIND_LABEL[entry.kind]} </Span>
-          {entry.label}
-        </Text>
-        <Text color={t.color.muted} wrap="truncate-end">
-          {exitLabel(entry)} · {terminalAge(entry, now)} · {fmtChars(entry.outputChars)} chars
-          {entry.pid ? ` · pid ${entry.pid}` : ''}
-        </Text>
-      </Box>
+      {/* pid and cwd: the two facts that let you go find this shell yourself
+          when the panel is not enough. */}
+      {entry.pid || entry.cwd ? (
+        <Box backgroundColor={selected ? t.color.selectionBg : undefined} flexShrink={0} paddingLeft={3}>
+          <Text color={t.ds.caption} wrap="truncate-end">
+            {[entry.pid ? `pid ${entry.pid}` : '', entry.cwd].filter(Boolean).join(' · ')}
+          </Text>
+        </Box>
+      ) : null}
+      {/* Armed destructive action: the mockup's two-step confirm lives on the
+          row itself, warn-colored, until the repeat press or Esc resolves it. */}
+      {arm ? (
+        <Box backgroundColor={selected ? t.color.selectionBg : undefined} flexShrink={0} paddingLeft={2}>
+          <Text color={t.color.warn} wrap="truncate-end">
+            {killPrompt(entry.label, arm.force)}
+          </Text>
+        </Box>
+      ) : null}
     </Box>
   )
 }
 
 function TerminalListView({
+  armedKill,
+  captionWidth,
   entries,
   loading,
   now,
@@ -147,6 +244,9 @@ function TerminalListView({
   selectedId,
   t
 }: {
+  armedKill: null | KillArm
+  /** Columns a group caption's rule may run to. */
+  captionWidth: number
   entries: readonly TerminalSummary[]
   loading: boolean
   now: number
@@ -172,15 +272,37 @@ function TerminalListView({
   return (
     <scrollbox ref={scrollRef} style={{ flexGrow: 1, flexShrink: 1, minHeight: 0 }} viewportCulling>
       <Box flexDirection="column" flexShrink={0}>
-        {entries.map(entry => (
-          <TerminalRow key={entry.id} entry={entry} now={now} selected={entry.id === selectedId} t={t} />
-        ))}
+        {entries.map((entry, index) => {
+          const heading = terminalHeading(entries, index)
+
+          return (
+            <Box flexDirection="column" flexShrink={0} key={entry.id}>
+              {heading ? (
+                <GroupCaption
+                  count={entries.filter(row => terminalGroup(row) === terminalGroup(entry)).length}
+                  label={TERMINAL_GROUP_LABEL[terminalGroup(entry)]}
+                  t={t}
+                  tone={stateSkin(TERMINAL_GROUP_STATE[terminalGroup(entry)], t.ds).dot}
+                  width={captionWidth}
+                />
+              ) : null}
+              <TerminalRow
+                arm={activeKillArm(armedKill, entry.id, now)}
+                entry={entry}
+                now={now}
+                selected={entry.id === selectedId}
+                t={t}
+              />
+            </Box>
+          )
+        })}
       </Box>
     </scrollbox>
   )
 }
 
 function TerminalDetailView({
+  arm,
   detail,
   draft,
   now,
@@ -188,6 +310,7 @@ function TerminalDetailView({
   typing,
   t
 }: {
+  arm: null | KillArm
   detail: null | TerminalInspection
   draft: string
   now: number
@@ -203,19 +326,40 @@ function TerminalDetailView({
 
   return (
     <Box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0}>
+      {/* Detail head: dot + bold command, meta under it — the mirror note
+          captions the output pane, per the mockup. */}
       <Box flexDirection="column" flexShrink={0} marginBottom={1}>
-        <Text color={t.color.text} wrap="truncate-end">
-          <Span color={stateColor(detail, t)}>{stateGlyph(detail)} </Span>
-          {detail.command || detail.label}
-        </Text>
-        <Text color={t.color.muted} wrap="truncate-end">
-          {KIND_LABEL[detail.kind]} · {exitLabel(detail)} · {terminalAge(detail, now)} ·{' '}
-          {fmtChars(detail.outputChars)} chars{detail.pid ? ` · pid ${detail.pid}` : ''}
-        </Text>
-        <Text color={t.color.muted} wrap="truncate-end">
-          {detail.cwd}
+        <Box flexDirection="row" flexShrink={0}>
+          <Box flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
+            <Text wrap="truncate-end">
+              <Span color={stateColor(detail, t)}>{`${stateGlyph(detail)} `}</Span>
+              <Span bold color={t.color.text}>
+                {detail.label}
+              </Span>
+              {detail.command && detail.command !== detail.label ? (
+                <Span color={t.color.muted}>{`  ${detail.command}`}</Span>
+              ) : null}
+            </Text>
+          </Box>
+          <Box flexShrink={0}>
+            <Text color={t.color.muted} dimColor>
+              {` ${terminalAge(detail, now)}`}
+            </Text>
+          </Box>
+        </Box>
+        <Text color={t.color.muted} dimColor wrap="truncate-end">
+          {KIND_LABEL[detail.kind]} · {exitLabel(detail)} · {fmtChars(detail.outputChars)} chars
+          {detail.pid ? ` · pid ${detail.pid}` : ''} · {detail.cwd}
         </Text>
       </Box>
+      {arm ? (
+        <Text color={t.color.warn} wrap="truncate-end">
+          {killPrompt(detail.label, arm.force)}
+        </Text>
+      ) : null}
+      <Text color={t.color.muted} dimColor wrap="truncate-end">
+        {`OUTPUT — ${detail.label} (mirror)`}
+      </Text>
       <scrollbox ref={outputRef} style={{ flexGrow: 1, flexShrink: 1, minHeight: 0 }} viewportCulling>
         <Box flexDirection="column" flexShrink={0}>
           {detail.outputTruncated ? (
@@ -253,6 +397,9 @@ export function TerminalPanelOverlay({ onClose, t }: { onClose: () => void; t: T
   const [openId, setOpenId] = useState<null | string>(null)
   const [detail, setDetail] = useState<null | TerminalInspection>(null)
   const [notice, setNotice] = useState<null | string>(null)
+  // Two-step destructive keys (mockup 06): the kill is armed by the first
+  // press and only the confirming repeat sends the signal.
+  const [armedKill, setArmedKill] = useState<null | KillArm>(null)
   // Shrink only when the list is empty, so "no terminals yet" is a compact
   // box rather than a full-screen void. A populated panel keeps its full
   // allowance so the output pane and footer hints have room.
@@ -281,7 +428,10 @@ export function TerminalPanelOverlay({ onClose, t }: { onClose: () => void; t: T
     }
     void listTerminals(gateway.rpc)
       .then(next => {
-        setEntries(next)
+        // Ordered on arrival, not at render: selection, arrow keys and the
+        // detail view all index into this array, so a separate display order
+        // would drift from what the keyboard is actually moving through.
+        setEntries(orderTerminals(next))
         setLoading(false)
       })
       .catch(() => setLoading(false))
@@ -402,6 +552,13 @@ export function TerminalPanelOverlay({ onClose, t }: { onClose: () => void; t: T
 
     if (name === 'escape' || name === 'f8' || (sequence === 'q' && !event.ctrl && !event.meta)) {
       consumeKey(event)
+      // An armed kill is cancelled by the first Esc; only then does Esc back
+      // out a level. Cancelling must never take the panel down with it.
+      if (armedKill) {
+        setArmedKill(null)
+        setNotice(null)
+        return
+      }
       // Esc backs out one level before it closes: the detail view is a place
       // you can be, not a modal on top of the panel.
       if (openId) {
@@ -420,6 +577,7 @@ export function TerminalPanelOverlay({ onClose, t }: { onClose: () => void; t: T
         setOpenId(selected.id)
         setDetail(null)
         setNotice(null)
+        setArmedKill(null)
         followOutput.current = true
       }
       return
@@ -428,18 +586,48 @@ export function TerminalPanelOverlay({ onClose, t }: { onClose: () => void; t: T
     if (name === 'left' && openId) {
       consumeKey(event)
       setOpenId(null)
+      setNotice(null)
+      setArmedKill(null)
       return
     }
 
-    if (sequence === 'k' && !event.ctrl && !event.meta) {
+    // Mockup 06: "destructive keys are two-step; K exists for the rare force
+    // case." Both k and K arm on the first press and execute on the repeat —
+    // force is a different signal, not a different level of caution. Any other
+    // interaction (Esc, moving selection, opening another terminal) disarms.
+    if ((sequence === 'k' && !event.ctrl && !event.meta) || sequence === 'K') {
       consumeKey(event)
-      act('kill')
-      return
-    }
+      const target = openId ? detail : selected
+      const force = sequence === 'K'
 
-    if (sequence === 'K') {
-      consumeKey(event)
-      act('kill', true)
+      if (!target) return
+
+      if (!target.running) {
+        setArmedKill(null)
+        setNotice('that terminal has already exited')
+        return
+      }
+
+      if (!target.canKill) {
+        setArmedKill(null)
+        setNotice('this terminal cannot be killed from here')
+        return
+      }
+
+      const at = Date.now()
+      const armed =
+        armedKill !== null && armedKill.terminalId === target.id && at - armedKill.at <= KILL_ARM_WINDOW_MS
+          ? armedKill
+          : null
+
+      if (!armed || armed.force !== force) {
+        setArmedKill({ at, force, terminalId: target.id })
+        setNotice(killPrompt(target.label, force))
+        return
+      }
+
+      setArmedKill(null)
+      act('kill', force)
       return
     }
 
@@ -475,23 +663,35 @@ export function TerminalPanelOverlay({ onClose, t }: { onClose: () => void; t: T
         followOutput.current = false
         scroller.current?.scrollBy(name === 'up' ? -1 : 1)
       } else {
+        // Moving the selection abandons any armed kill along with its
+        // now-stale confirm notice.
+        setArmedKill(null)
+        setNotice(null)
         setSelectedIndex(index =>
           Math.max(0, Math.min(entries.length - 1, index + (name === 'up' ? -1 : 1)))
         )
       }
-    } else if (name === 'pageup' || name === 'pagedown') {
+    } else if (isPageUpKey(event) || isPageDownKey(event)) {
       consumeKey(event)
       if (openId) followOutput.current = false
-      scroller.current?.scrollBy(name === 'pageup' ? -page : page)
+      scroller.current?.scrollBy(isPageUpKey(event) ? -page : page)
     } else if (name === 'home') {
       consumeKey(event)
       if (openId) followOutput.current = false
-      else setSelectedIndex(0)
+      else {
+        setArmedKill(null)
+        setNotice(null)
+        setSelectedIndex(0)
+      }
       scroller.current?.scrollTo(0)
     } else if (name === 'end') {
       consumeKey(event)
       if (openId) followOutput.current = true
-      else setSelectedIndex(Math.max(0, entries.length - 1))
+      else {
+        setArmedKill(null)
+        setNotice(null)
+        setSelectedIndex(Math.max(0, entries.length - 1))
+      }
       scroller.current?.scrollTo(Number.MAX_SAFE_INTEGER)
     }
   })
@@ -511,8 +711,8 @@ export function TerminalPanelOverlay({ onClose, t }: { onClose: () => void; t: T
   const footer = typing
     ? 'type to send · Enter submit · Esc cancel'
     : openId
-      ? '↑↓ scroll · i input · c interrupt · k kill (K force) · Esc back'
-      : '↑↓ select · Enter open · k kill (K force) · r refresh · Esc close'
+      ? '↑↓ scroll · i input · c interrupt · k kill ×2 · K force ×2 · Esc back'
+      : '↑↓ select · Enter open · k kill ×2 · K force ×2 · r refresh · Esc close'
 
   return (
     <box
@@ -528,28 +728,45 @@ export function TerminalPanelOverlay({ onClose, t }: { onClose: () => void; t: T
       zIndex={186}
     >
       <Box
-        backgroundColor={t.color.statusBg}
-        borderColor={t.color.brandGold}
-        borderStyle="single"
+        backgroundColor={t.color.completionBg}
+        borderColor={t.color.border}
+        borderStyle="round"
         flexDirection="column"
         height={panelHeight}
         paddingX={2}
         paddingY={1}
         width={panelWidth}
       >
+        {/* Same header identity as the agents panel: brand mark, title, count
+            budget left; the read-only promise on the right, per the mockup. */}
         <Box flexDirection="row" flexShrink={0} justifyContent="space-between" marginBottom={1}>
-          <Text bold color={t.color.accent}>
-            ▌ {title}
-          </Text>
-          <Text color={liveCount ? t.color.accent : t.color.muted}>
-            {liveCount ? `${liveCount} running` : `${entries.length} tracked`}
-          </Text>
+          <Box flexDirection="row" flexShrink={1} minWidth={0} overflow="hidden">
+            <Text bold color={t.color.text} wrap="truncate-end">
+              <Span color={t.color.accent}>✦ </Span>
+              {title}
+            </Text>
+            {openId ? null : (
+              <Text color={t.color.muted} wrap="truncate-end">
+                {`  ${entries.length} tracked · ${liveCount} running`}
+              </Text>
+            )}
+          </Box>
+          <Box flexShrink={0}>
+            {openId ? (
+              <Text color={liveCount ? t.color.accent : t.color.muted}>{liveCount ? 'running' : 'ended'}</Text>
+            ) : (
+              <Text color={t.color.muted} dimColor>
+                read-only mirror
+              </Text>
+            )}
+          </Box>
         </Box>
         {gateway ? null : (
           <Text color={t.color.warn}>not connected to a daemon — nothing to inspect</Text>
         )}
         {openId ? (
           <TerminalDetailView
+            arm={activeKillArm(armedKill, detail?.id, now)}
             detail={detail}
             draft={draft}
             now={now}
@@ -559,6 +776,8 @@ export function TerminalPanelOverlay({ onClose, t }: { onClose: () => void; t: T
           />
         ) : (
           <TerminalListView
+            armedKill={armedKill}
+            captionWidth={Math.max(24, panelWidth - 6)}
             entries={entries}
             loading={loading}
             now={now}

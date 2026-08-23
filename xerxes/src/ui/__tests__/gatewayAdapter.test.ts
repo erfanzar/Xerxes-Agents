@@ -161,6 +161,97 @@ describe('gatewayAdapter', () => {
       { role: 'assistant', text: 'hello\nagain' }
     ])
   })
+  it('keeps thinking and reconciles stored tool calls like the replay path', () => {
+    expect(
+      transcriptFromStoredMessages([
+        { content: 'check auth', role: 'user' },
+        {
+          content: 'Let me read the file.',
+          role: 'assistant',
+          thinking: 'reasoning trace',
+          tool_calls: [
+            { function: { arguments: { path: 'src/auth.ts' }, name: 'ReadFile' }, id: 'call_1', type: 'function' },
+            { id: 'call_2', name: 'GrepTool', input: { pattern: 'token' } }
+          ]
+        },
+        { content: 'file body', name: 'ReadFile', role: 'tool', tool_call_id: 'call_1', duration_ms: 250 },
+        {
+          content: 'Tool execution failed: grep exploded',
+          is_error: true,
+          role: 'tool',
+          tool_call_id: 'call_2'
+        },
+        { content: 'The flow starts in auth.ts.', role: 'assistant' }
+      ])
+    ).toEqual([
+      { role: 'user', text: 'check auth' },
+      { role: 'assistant', text: 'Let me read the file.', thinking: 'reasoning trace' },
+      // Stored argument blobs are summarized like live tool.start rows:
+      // the path/query value, not the raw JSON.
+      { context: 'src/auth.ts', duration_s: 0.25, name: 'ReadFile', role: 'tool' },
+      {
+        context: 'token',
+        error: 'Tool execution failed: grep exploded'.replace(/\s+/g, ' '),
+        name: 'GrepTool',
+        role: 'tool'
+      },
+      { role: 'assistant', text: 'The flow starts in auth.ts.' }
+    ])
+  })
+
+  it('bounds stored tool argument previews like replayPreviewText', () => {
+    const rows = transcriptFromStoredMessages([
+      {
+        content: '',
+        role: 'assistant',
+        tool_calls: [
+          { function: { arguments: JSON.stringify({ q: 'x'.repeat(500) }), name: 'Search' }, id: 'call_9' }
+        ]
+      }
+    ])
+
+    expect(rows).toHaveLength(1)
+    const row = rows[0]!
+    expect(row.role).toBe('tool')
+    expect(row.name).toBe('Search')
+    // The summarizer keeps only the query value and bounds it well under the
+    // raw 200-char argument preview.
+    expect(String(row.context).length).toBeLessThanOrEqual(200)
+    expect(String(row.context)).toMatch(/…$/)
+  })
+
+  it('drops orphan stored tool results instead of leaking tool output', () => {
+    expect(
+      transcriptFromStoredMessages([
+        { content: 'visible', role: 'user' },
+        { content: 'x'.repeat(700), name: 'ReadFile', role: 'tool', tool_call_id: 'missing' },
+        { content: 'answer', role: 'assistant' }
+      ])
+    ).toEqual([
+      { role: 'user', text: 'visible' },
+      { role: 'assistant', text: 'answer' }
+    ])
+  })
+
+  it('filters internal user prompts from stored messages like the daemon replay', () => {
+    expect(
+      transcriptFromStoredMessages([
+        { content: 'real question', role: 'user' },
+        { content: "[Skill 'deepscan' activated]\n\n## Skill: deepscan\nprivate instructions", role: 'user' },
+        { content: '[Skill deepscan activated]\n\nprivate instructions', role: 'user' },
+        { content: '[sub-agent events]\n[Agent scan] -> ReadFile', role: 'user' },
+        { content: '[steer from user]\nfocus on tests', role: 'user' },
+        { content: '[steer from user saved for next turn]\nremember this', role: 'user' },
+        { content: 'Please compact this conversation: internal compaction prompt', role: 'user' },
+        { content: 'visible follow up', role: 'user' },
+        { content: 'answer', role: 'assistant' }
+      ])
+    ).toEqual([
+      { role: 'user', text: 'real question' },
+      { role: 'user', text: 'visible follow up' },
+      { role: 'assistant', text: 'answer' }
+    ])
+  })
 
   it('maps stream and tool events to UI events', () => {
     expect(adaptDaemonEvent('text_part', { text: 'hello' })).toEqual([
@@ -306,7 +397,7 @@ describe('gatewayAdapter', () => {
     ).toEqual([
       {
         payload: {
-          context: '{"path":"src/auth.ts"}',
+          context: 'src/auth.ts',
           duration_s: 0.25,
           name: 'ReadFile',
           role: 'tool'

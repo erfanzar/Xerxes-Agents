@@ -4,9 +4,11 @@
 
 import { testRender } from '@opentui/react/test-utils'
 import { act, Profiler } from 'react'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import type { SpawnSnapshot } from '../app/spawnHistoryStore.js'
+import { GatewayProvider } from '../app/gatewayContext.js'
+import type { GatewayServices } from '../app/interfaces.js'
 import { agentContentWidth, agentSidebarWidth, shouldMountAgentSidebar } from '../domain/agentPanelLayout.js'
 import {
   AgentPanel,
@@ -74,13 +76,14 @@ describe('agent panel model', () => {
   })
 
   it('keeps the sidebar at zero width until an agent is actually tracked', () => {
-    expect(shouldShowAgentSidebar(117, 4)).toBe(false)
-    expect(shouldShowAgentSidebar(118, 0)).toBe(false)
-    expect(shouldShowAgentSidebar(118, 1)).toBe(true)
-    expect(agentSidebarWidth(118)).toBe(38)
-    expect(agentContentWidth(118, 0)).toBe(118)
-    expect(agentContentWidth(118, 1)).toBe(80)
-    expect(agentContentWidth(100, 4)).toBe(100)
+    // Mockup 11: the rail unmounts below ~96 cols — F6 becomes the only path.
+    expect(shouldShowAgentSidebar(95, 4)).toBe(false)
+    expect(shouldShowAgentSidebar(96, 0)).toBe(false)
+    expect(shouldShowAgentSidebar(96, 1)).toBe(true)
+    expect(agentSidebarWidth(96)).toBe(38)
+    expect(agentContentWidth(96, 0)).toBe(96)
+    expect(agentContentWidth(96, 1)).toBe(58)
+    expect(agentContentWidth(100, 4)).toBe(62)
   })
 })
 
@@ -118,10 +121,11 @@ describe('OpenTUI agent panel', () => {
       const frame = setup.captureCharFrame()
 
       expect(frame).toContain('Policy Audit')
-      expect(frame).toContain('1.5k tok · 12s · 3 tools')
-      expect(frame).toContain('task · Audit authentication policy boundaries')
-      expect(frame).toContain('↳ Xerxes · researcher · grok-code-fast')
-      expect(frame).not.toContain('Found and documented the missing policy guard.')
+      expect(frame).toContain('12s · 1.5k tok')
+      // The design puts the result sentence ON the review card — "review-ready
+      // cards lead with the result, not metadata". Policy chips stay in the
+      // inspector.
+      expect(frame).toContain('Found and documented the missing policy guard.')
       expect(frame).not.toContain('policy · read-only audit')
     } finally {
       act(() => setup.renderer.destroy())
@@ -159,13 +163,15 @@ describe('OpenTUI agent panel', () => {
       await setup.flush()
       const detail = setup.captureCharFrame()
 
-      expect(detail).toContain('◆ Agent')
+      expect(detail).toContain('✦ Agent')
       expect(detail).toContain('1.2k in · 340 out · 90 reasoning · 2 API calls')
-      expect(detail).toContain('tool calls (2)')
-      // The finished call reports how long it took; the live one says it is
-      // still going rather than reporting a duration it does not have.
-      expect(detail).toContain('ReadFile · 2.4s')
-      expect(detail).toContain('so far')
+      expect(detail).toContain('TOOL CALLS · 2')
+      // The finished call reports how long it took, leader-dotted to the
+      // right edge; the live one says `running…` rather than inventing a
+      // duration it does not have.
+      expect(detail).toContain('ReadFile')
+      expect(detail).toMatch(/2\.4s/)
+      expect(detail).toContain('running…')
 
       // Esc backs out to the list before it closes the panel.
       act(() => setup.mockInput.pressEscape())
@@ -175,7 +181,7 @@ describe('OpenTUI agent panel', () => {
       })
       await setup.flush()
       expect(closed).toBe(false)
-      expect(setup.captureCharFrame()).toContain('◆ Agents')
+      expect(setup.captureCharFrame()).toContain('✦ Agent View')
 
       act(() => setup.mockInput.pressEscape())
       // The renderer holds a bare ESC briefly to disambiguate escape sequences.
@@ -205,8 +211,8 @@ describe('OpenTUI agent panel', () => {
       await setup.flush()
       const frame = setup.captureCharFrame()
 
-      expect(frame).toContain('◆ Agent ')
-      expect(frame).toContain('tool calls')
+      expect(frame).toContain('✦ Agent ')
+      expect(frame).toContain('TOOL CALLS')
     } finally {
       act(() => setup.renderer.destroy())
     }
@@ -226,7 +232,9 @@ describe('OpenTUI agent panel', () => {
       await setup.flush()
       const bottom = setup.captureCharFrame()
 
-      expect(bottom).toContain('1 wrote · 1 read · +policy.ts, session.ts')
+      expect(bottom).toContain('FILES TOUCHED')
+      expect(bottom).toContain('+policy.ts')
+      expect(bottom).toContain('session.ts')
       expect(bottom).toContain('rules · read-only audit, no network')
       expect(bottom).toContain('access · ReadFile, Grep')
     } finally {
@@ -248,7 +256,7 @@ describe('OpenTUI agent panel', () => {
       const frame = setup.captureCharFrame()
 
       expect(frame).toContain('full-width workspace')
-      expect(frame).not.toContain('Agents')
+      expect(frame).not.toContain('Agent View')
       expect(frame).not.toContain('No agents yet')
     } finally {
       act(() => setup.renderer.destroy())
@@ -267,8 +275,10 @@ describe('OpenTUI agent panel', () => {
       await setup.flush()
       const frame = setup.captureCharFrame()
 
-      expect(frame).toContain('1 done')
-      expect(frame).not.toContain('1 live')
+      // An interrupted row is not "working": it lands in the needs-input
+      // group, which is the whole point of the action ordering.
+      expect(frame).toContain('NEEDS INPUT · 1')
+      expect(frame).not.toContain('live')
       expect(frame).toContain('interrupted')
     } finally {
       act(() => setup.renderer.destroy())
@@ -334,7 +344,7 @@ describe('OpenTUI agent panel', () => {
       await setup.flush()
       const rows = setup.captureCharFrame().split('\n')
 
-      expect(rows.join('\n')).toContain('10 live')
+      expect(rows.join('\n')).toContain('10 working')
       expect(rows.join('\n')).toContain('F6/Esc close')
       // The frame must not spill past the viewport it was given.
       expect(rows.filter(row => row.trim()).length).toBeLessThanOrEqual(40)
@@ -372,6 +382,88 @@ describe('OpenTUI agent panel', () => {
     }
   })
 
+  it('presents the mockup 04 panel: ruled header, group captions, framed cards', async () => {
+    const many = [
+      agent({ id: 'wait-1', notes: ['Asks: proceed?'], status: 'waiting', title: 'Flaky Triage' }),
+      agent({ id: 'run-1', status: 'running', title: 'Migration Scripts' }),
+      agent({ id: 'done-1', status: 'completed', summary: 'Audited the cron leases.', title: 'Cron Audit' })
+    ]
+    const setup = await testRender(
+      <AgentPanelOverlay history={[]} liveAgents={many} onClose={() => {}} t={DEFAULT_THEME} />,
+      { height: 36, width: 110 }
+    )
+
+    try {
+      await setup.flush()
+      const frame = setup.captureCharFrame()
+
+      // Header bar with counts and the live/idle state on the right.
+      expect(frame).toContain('✦ Agent View')
+      expect(frame).toContain('3 chats · 1 working')
+      expect(frame).toContain('live')
+      // The action-order captions — unblock → monitor → review.
+      expect(frame).toContain('NEEDS INPUT · 1')
+      expect(frame).toContain('WORKING · 1')
+      expect(frame).toContain('READY TO REVIEW · 1')
+      // Rounded card outlines and the header/footer hairlines.
+      expect(frame).toContain('╭')
+      expect(frame).toContain('─')
+      // No gateway here, so retry is unadvertised — the no-daemon footer.
+      // ⌃b/⌃f, not PgUp/PgDn: compact laptop keyboards have no page keys, and
+      // a hint you cannot physically press is a hint that does not map to a
+      // real capability.
+      expect(frame).toContain('↑↓ select · Enter inspect · ⌃b/⌃f page · F6/Esc close')
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
+
+  it('centers the empty state inside the large panel instead of shrink-wrapping it', async () => {
+    const setup = await testRender(
+      <AgentPanelOverlay history={[]} liveAgents={[]} onClose={() => {}} t={DEFAULT_THEME} />,
+      { height: 30, width: 100 }
+    )
+
+    try {
+      await setup.flush()
+      const rows = setup.captureCharFrame().split('\n')
+      const emptyRow = rows.findIndex(row => row.includes('No agents yet'))
+      const bottomFrame = rows.findIndex(row => row.includes('╰'))
+
+      // A shrink-wrapped box would put the placeholder near the top; the
+      // design's large panel centers it, with the frame reaching the bottom.
+      expect(emptyRow).toBeGreaterThan(8)
+      expect(bottomFrame).toBeGreaterThan(emptyRow + 4)
+      expect(rows[emptyRow + 1]).toContain('Delegated work appears here.')
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
+
+  it('prints the inspector cost once even when the daemon reports dollars', async () => {
+    const setup = await testRender(
+      <AgentPanelOverlay
+        history={[]}
+        initialInspectId="agent-1"
+        liveAgents={[auditAgent({ costUsd: 0.041 })]}
+        onClose={() => undefined}
+        t={DEFAULT_THEME}
+      />,
+      { height: 34, width: 96 }
+    )
+
+    try {
+      await setup.flush()
+      act(() => setup.mockInput.pressKey('END'))
+      await setup.flush()
+      const frame = setup.captureCharFrame()
+
+      expect(frame.match(/\$0\.0410/g)).toHaveLength(1)
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
+
   it('closes the narrow overlay with its advertised F6 key', async () => {
     let closed = 0
     const setup = await testRender(
@@ -381,11 +473,143 @@ describe('OpenTUI agent panel', () => {
 
     try {
       await setup.flush()
-      expect(setup.captureCharFrame()).toContain('Agents')
+      // At 20 columns the panel is degenerate — headers and footer both clip —
+      // so assert the empty state, not header typography. The F6 contract is
+      // the point of this test.
       expect(setup.captureCharFrame()).toContain('No agents yet')
       setup.mockInput.pressKey('F6')
       await setup.flush()
       expect(closed).toBe(1)
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
+
+  it('advertises cancel in the inspector footer when a gateway is connected', async () => {
+    const services = { gw: { request: vi.fn() }, rpc: vi.fn() } as unknown as GatewayServices
+    const setup = await testRender(
+      <GatewayProvider value={services}>
+        <AgentPanelOverlay
+          history={[]}
+          initialInspectId="agent-1"
+          liveAgents={[agent({ status: 'running', summary: undefined })]}
+          onClose={() => undefined}
+          t={DEFAULT_THEME}
+        />
+      </GatewayProvider>,
+      { height: 30, width: 96 }
+    )
+
+    try {
+      await setup.flush()
+      // Mockup 05 panel-foot: space/r/c/esc. The inspector must advertise
+      // every key it actually binds — and only those.
+      const frame = setup.captureCharFrame()
+      expect(frame).toContain('r retry · c cancel · Esc back to the list')
+      expect(frame).not.toContain('space')
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
+
+  it('cancels the inspected agent through the subagent.interrupt path', async () => {
+    const rpc = vi.fn(async () => ({ found: true, subagent_id: 'agent-1' }))
+    const services = { gw: { request: vi.fn() }, rpc } as unknown as GatewayServices
+    const setup = await testRender(
+      <GatewayProvider value={services}>
+        <AgentPanelOverlay
+          history={[]}
+          initialInspectId="agent-1"
+          liveAgents={[agent({ status: 'running', summary: undefined })]}
+          onClose={() => undefined}
+          t={DEFAULT_THEME}
+        />
+      </GatewayProvider>,
+      { height: 30, width: 96 }
+    )
+
+    try {
+      await setup.flush()
+      await act(async () => setup.mockInput.typeText('c'))
+      await act(async () => {
+        await Bun.sleep(0)
+      })
+      await setup.flush()
+
+      expect(rpc).toHaveBeenCalledWith('subagent.interrupt', { task: 'agent-1' })
+      // The note lands under POLICY, below the inspector's fold.
+      act(() => setup.mockInput.pressKey('END'))
+      await setup.flush()
+      expect(setup.captureCharFrame()).toContain('cancel accepted')
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
+
+  it('refuses to cancel an agent that already reached a terminal state', async () => {
+    const rpc = vi.fn(async () => ({ found: true }))
+    const services = { gw: { request: vi.fn() }, rpc } as unknown as GatewayServices
+    const setup = await testRender(
+      <GatewayProvider value={services}>
+        <AgentPanelOverlay
+          history={[]}
+          initialInspectId="agent-1"
+          liveAgents={[auditAgent()]}
+          onClose={() => undefined}
+          t={DEFAULT_THEME}
+        />
+      </GatewayProvider>,
+      { height: 30, width: 96 }
+    )
+
+    try {
+      await setup.flush()
+      await act(async () => setup.mockInput.typeText('c'))
+      await act(async () => {
+        await Bun.sleep(0)
+      })
+      await setup.flush()
+
+      expect(rpc).not.toHaveBeenCalled()
+      act(() => setup.mockInput.pressKey('END'))
+      await setup.flush()
+      expect(setup.captureCharFrame()).toContain('cannot cancel: agent already completed')
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
+
+  it('surfaces a failed cancel request instead of inventing success', async () => {
+    const rpc = vi.fn(async () => {
+      throw new Error('Native Bun daemon does not implement subagent.interrupt.')
+    })
+    const services = { gw: { request: vi.fn() }, rpc } as unknown as GatewayServices
+    const setup = await testRender(
+      <GatewayProvider value={services}>
+        <AgentPanelOverlay
+          history={[]}
+          initialInspectId="agent-1"
+          liveAgents={[agent({ status: 'running', summary: undefined })]}
+          onClose={() => undefined}
+          t={DEFAULT_THEME}
+        />
+      </GatewayProvider>,
+      { height: 30, width: 96 }
+    )
+
+    try {
+      await setup.flush()
+      await act(async () => setup.mockInput.typeText('c'))
+      await act(async () => {
+        await Bun.sleep(0)
+      })
+      await setup.flush()
+
+      act(() => setup.mockInput.pressKey('END'))
+      await setup.flush()
+      expect(setup.captureCharFrame()).toContain(
+        'cancel unavailable: Native Bun daemon does not implement subagent.interrupt.'
+      )
     } finally {
       act(() => setup.renderer.destroy())
     }

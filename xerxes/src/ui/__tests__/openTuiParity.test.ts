@@ -34,11 +34,14 @@ describe('native OpenTUI semantic parity', () => {
     expect(shouldShowStartupWelcome({ ...idle, transcriptEmpty: false })).toBe(false)
   })
 
-  it('uses more of ultra-wide welcome screens without overflowing narrow terminals', () => {
+  it('uses the full session width minus gutters at every terminal size', () => {
+    // Responsive by design: no desktop cap. The measure is the session width
+    // (sidebar already subtracted by useMainApp) minus a 2-column gutter per
+    // side, so a 220-column terminal reads at 216 and an 80-column one at 76.
     expect(contentColumnWidth(40)).toBe(36)
-    expect(contentColumnWidth(80)).toBe(75)
-    expect(contentColumnWidth(160)).toBe(88)
-    expect(contentColumnWidth(200)).toBe(104)
+    expect(contentColumnWidth(80)).toBe(76)
+    expect(contentColumnWidth(160)).toBe(156)
+    expect(contentColumnWidth(220)).toBe(216)
   })
 
   it('dispatches native approval choices without relying on Prompt Toolkit sentinels', () => {
@@ -149,19 +152,21 @@ describe('native OpenTUI semantic parity', () => {
 })
 
 describe('transcript reading measure', () => {
-  // The renderer caps the transcript column at `contentColumnWidth`; the
-  // estimator's `transcriptBodyWidth` must track it exactly, because width
-  // feeds wrappedLines and any mismatch mis-estimates every row in
-  // proportion — which is virtual-scroll drift, not a cosmetic difference.
+  // The transcript column is `contentColumnWidth`; the estimator's
+  // `transcriptBodyWidth` must track it exactly, because width feeds
+  // wrappedLines and any mismatch mis-estimates every row in proportion —
+  // which is virtual-scroll drift, not a cosmetic difference.
   it('matches the rendered column width minus the gutter', () => {
     for (const cols of [80, 120, 160, 200]) {
       expect(transcriptBodyWidth(cols, 'assistant', '❯')).toBe(contentColumnWidth(cols) - 3)
     }
   })
 
-  it('stops prose from running the full width of a wide terminal', () => {
-    // At 200 columns text used to wrap at ~195; it now wraps at the measure.
-    expect(transcriptBodyWidth(200, 'assistant', '❯')).toBeLessThan(110)
+  it('lets prose use the whole reading column on a wide terminal', () => {
+    // The old 104-column desktop cap is gone: at 200 columns the body is the
+    // session width minus gutters and the rail gutter.
+    expect(transcriptBodyWidth(200, 'assistant', '❯')).toBe(contentColumnWidth(200) - 3)
+    expect(transcriptBodyWidth(200, 'assistant', '❯')).toBeGreaterThan(150)
   })
 
   it('leaves narrow mobile panes uncapped', () => {

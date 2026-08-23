@@ -148,7 +148,7 @@ export interface ClarifyReq {
 
 export interface Msg {
   info?: SessionInfo
-  kind?: 'diff' | 'intro' | 'panel' | 'slash' | 'trail'
+  kind?: 'config' | 'diff' | 'intro' | 'panel' | 'slash' | 'trail'
   panelData?: PanelData
   role: Role
   subagents?: SubagentProgress[]

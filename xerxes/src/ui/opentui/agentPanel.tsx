@@ -9,8 +9,28 @@ import { type MutableRefObject, memo, useEffect, useMemo, useRef, useState } fro
 import { useOptionalGateway } from '../app/gatewayContext.js'
 import { adjustPanelWidth, PANEL_WIDTH_STEP, withPanelWidthDelta } from '../app/panelSizeStore.js'
 
-import { OVERLAY_PANEL_SPECS, overlayPanelSize } from './overlayLayout.js'
+import {
+  AGENT_GROUP_LABEL,
+  AGENT_GROUP_STATE,
+  agentGroup,
+  agentHeading,
+  orderAgentRecords,
+  type AgentGroup
+} from '../lib/agentGroups.js'
+import {
+  densityFor,
+  GLYPH,
+  RAIL_DENSITY,
+  type NocturneDensity,
+  type StateSkin,
+  stateSkin
+} from '../domain/nocturne.js'
+
+import { agentSidebarWidth } from '../domain/agentPanelLayout.js'
+
+import { OVERLAY_PANEL_SPECS, overlayPanelSize, overlayPanelWidth } from './overlayLayout.js'
 import type { SpawnSnapshot } from '../app/spawnHistoryStore.js'
+import type { SubagentInterruptResponse } from '../gatewayTypes.js'
 export { AGENT_SIDEBAR_BREAKPOINT, shouldShowAgentSidebar } from '../domain/agentPanelLayout.js'
 import { retrySubagent, subagentFailed, subagentRetryable } from '../lib/agentRetry.js'
 import { fmtDuration, fmtTokens, subagentElapsedSeconds } from '../lib/subagentElapsed.js'
@@ -18,6 +38,9 @@ import type { Theme } from '../theme.js'
 import type { SubagentProgress } from '../types.js'
 
 import { isPanelResizeKey } from './diffPanel.js'
+import { isPageDownKey, isPageUpKey, PAGE_KEY_HINT } from '../lib/pageKeys.js'
+
+import { GroupCaption, LeaderRow } from './nocturne.js'
 import { Box, Span, Text } from './primitives.js'
 
 export const AGENT_TITLE_MAX_LENGTH = 24
@@ -50,6 +73,8 @@ interface AgentPanelProps {
   selectedId?: null | string
   t: Theme
   variant: 'overlay' | 'sidebar'
+  /** Drop the header counts — panels too narrow to fit them legibly. */
+  compactHeader?: boolean
 }
 
 interface AgentPanelOverlayProps extends Omit<AgentPanelProps, 'variant'> {
@@ -129,7 +154,9 @@ export function collectAgentPanelRecords(
     }
   }
 
-  return rows.map(row => ({
+  // Ordered here, at the single place records are built, so the overlay, the
+  // sidebar, keyboard selection and the inspector all walk the same sequence.
+  return orderAgentRecords(rows).map(row => ({
     ...row,
     childCount: childCounts.get(row.item.id) ?? 0,
     creatorTitle:
@@ -138,16 +165,6 @@ export function collectAgentPanelRecords(
       'Xerxes',
     title: shortAgentTitle(row.item)
   }))
-}
-
-function statusPresentation(status: SubagentProgress['status'], t: Theme): { color: string; glyph: string } {
-  if (status === 'running') return { color: t.color.accent, glyph: '●' }
-  if (status === 'queued') return { color: t.color.muted, glyph: '○' }
-  if (status === 'completed') return { color: t.color.ok, glyph: '✓' }
-  if (status === 'interrupted') return { color: t.color.warn, glyph: '■' }
-  if (status === 'timeout') return { color: t.color.warn, glyph: '⌛' }
-
-  return { color: t.color.error, glyph: '✗' }
 }
 
 const basename = (path: string): string => path.replaceAll('\\', '/').split('/').filter(Boolean).at(-1) || path
@@ -173,18 +190,6 @@ const agentToolCount = (item: SubagentProgress): number =>
  * a rail of live chatter re-rendered every delta and still told you nothing
  * you could compare between agents.
  */
-function metricLine(item: SubagentProgress, now: number): string {
-  const tokens = (item.inputTokens ?? 0) + (item.outputTokens ?? 0)
-  const elapsed = subagentElapsedSeconds(item, now)
-  const toolCount = agentToolCount(item)
-  const parts = [tokens > 0 ? `${fmtTokens(tokens)} tok` : 'no tokens yet']
-
-  if (elapsed != null) parts.push(fmtDuration(elapsed))
-  parts.push(`${toolCount} tool${toolCount === 1 ? '' : 's'}`)
-
-  return parts.join(' · ')
-}
-
 /** Row-width token summary: in/out, with cached appended when it is earning its place. */
 function tokenSummary(item: SubagentProgress): string {
   const input = item.inputTokens ?? 0
@@ -229,7 +234,67 @@ function fmtMillis(ms: number): string {
  */
 export const agentCardRenderableId = (agentId: string): string => `agent-card:${agentId}`
 
+/**
+ * The card's voice. One lookup through the Nocturne state table, which also
+ * hands back the tinted ground and edge the card is drawn on, so "needs you"
+ * and "went wrong" differ in surface as well as in dot.
+ */
+function agentCardVoice(item: SubagentProgress, t: Theme): { color: string; group: AgentGroup; skin: StateSkin } {
+  const group = agentGroup(item.status)
+  const skin = stateSkin(AGENT_GROUP_STATE[group], t.ds)
+
+  return { color: skin.dot, group, skin }
+}
+
+/**
+ * Right-aligned budget for the card's first row: elapsed time plus tokens.
+ *
+ * The same shape on every card, so a runaway agent shows up as a wide right
+ * column. `withTokens` is the first thing screen 09 gives up as the terminal
+ * narrows — the elapsed clock answers "is this stuck", which is the question
+ * you are scanning for; the token count answers "what did it cost", which
+ * can wait for a wider window.
+ */
+function cardBudget(item: SubagentProgress, now: number, withTokens = true): string {
+  const tokens = (item.inputTokens ?? 0) + (item.outputTokens ?? 0)
+  const elapsed = subagentElapsedSeconds(item, now)
+  const parts = [elapsed != null ? fmtDuration(elapsed) : item.status]
+
+  if (withTokens && tokens > 0) {
+    parts.push(`${fmtTokens(tokens)} tok`)
+  }
+
+  return parts.join(' · ')
+}
+
+/** The one line of substance under the title, per action group. */
+function cardSecondLine(item: SubagentProgress): { color: keyof Theme['color'] | undefined; text: string } | null {
+  const group = agentGroup(item.status)
+
+  if (group === 'working') {
+    const activity = activitySummary(item)
+
+    return activity ? { color: 'thinking', text: `└ ${compactLine(activity, 140)}` } : null
+  }
+
+  if (group === 'review') {
+    const summary = item.summary?.trim()
+
+    return summary ? { color: 'label', text: compactLine(summary, 140) } : null
+  }
+
+  // Needs input: the agent's last word is what you are walking into.
+  const note = item.notes.at(-1)?.trim() || item.summary?.trim()
+
+  return note
+    ? { color: 'label', text: compactLine(note, 140) }
+    : { color: 'muted', text: `waiting · ${item.status}` }
+}
+
 function AgentCardView({
+  collapseCards,
+  density,
+  framed,
   now,
   onOpen,
   record,
@@ -237,6 +302,19 @@ function AgentCardView({
   selected,
   t
 }: {
+  /**
+   * Collapse every card except the blocked one to its single-line form.
+   *
+   * Deliberately NOT `!density.goals`: the rail drops goals because a goal
+   * does not fit beside a title at 40 columns, but it still wants the one
+   * violet activity line that says what the agent is doing. Tying the two
+   * together silenced the rail entirely.
+   */
+  collapseCards: boolean
+  /** What this width can afford. See `densityFor` for the order of sacrifice. */
+  density: NocturneDensity
+  /** Overlay cards draw the mockup's rounded outline; the rail stays flat. */
+  framed?: boolean
   now: number
   onOpen?: (agentId: string) => void
   record: AgentPanelRecord
@@ -245,18 +323,62 @@ function AgentCardView({
   t: Theme
 }) {
   const { item } = record
-  const status = statusPresentation(item.status, t)
+  const voice = agentCardVoice(item, t)
   const role = item.agentType?.trim() || 'agent'
   const model = item.model?.trim()
+  const goal = item.goal?.trim() || ''
   const depth = Math.min(4, Math.max(0, item.depth))
-  const task = compactLine(item.goal?.trim() || '', 120)
-  // The title is derived from the goal when nothing better exists, so repeating
+  // The title derives from the goal when nothing better exists, so repeating
   // it as a task line would just be the same words twice.
-  const showTask = Boolean(task) && !record.title.toLowerCase().startsWith(task.slice(0, 12).toLowerCase())
+  const showGoal = Boolean(goal) && !record.title.toLowerCase().startsWith(goal.slice(0, 12).toLowerCase())
+  const second = cardSecondLine(item)
+  const secondColor = second?.color ? t.color[second.color] : undefined
+
+  // Mockup 04's accent edge: every card carries its voice colour on the
+  // left, and the card asking for attention — keyboard-selected or sitting in
+  // NEEDS INPUT — gets the thicker edge the design draws at 3px.
+  const emphasized = Boolean(selected) || voice.group === 'input'
+
+  // Two reasons a card collapses to one line.
+  //
+  // A failed run has already spent its money and does not get to spend your
+  // attention too, so it stays one dim line until you select it. And on a
+  // narrow terminal every card except the one actually blocked collapses,
+  // because six one-line agents beat three legible ones when you are
+  // scanning for the amber dot — cards shrink rather than reflowing taller.
+  const collapsed = (voice.group === 'failed' || (collapseCards && voice.group !== 'input')) && !selected
+
+  if (collapsed) {
+    return (
+      <Box
+        flexDirection="row"
+        flexShrink={0}
+        id={agentCardRenderableId(item.id)}
+        marginLeft={depth}
+        {...(onOpen ? { onClick: () => onOpen(item.id) } : {})}
+        paddingRight={1}
+        width="100%"
+      >
+        <Box flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
+          <Text wrap="truncate-end">
+            <Span color={voice.color}>{`${GLYPH.state} `}</Span>
+            <Span color={t.ds.secondary}>{record.title}</Span>
+            {density.goals && second ? (
+              <Span color={t.ds.meta}>{`  ${compactLine(second.text, 90)}`}</Span>
+            ) : null}
+          </Text>
+        </Box>
+        <Box flexShrink={0}>
+          <Text color={t.ds.numeric}>{` ${cardBudget(item, now, density.cardBudget)}`}</Text>
+        </Box>
+      </Box>
+    )
+  }
 
   return (
     <Box
-      backgroundColor={selected ? t.color.selectionBg : t.color.completionCurrentBg}
+      backgroundColor={voice.skin.ground}
+      {...(framed ? { borderColor: selected ? voice.skin.dot : voice.skin.border, borderStyle: 'round' as const } : {})}
       flexDirection="row"
       flexShrink={0}
       id={agentCardRenderableId(item.id)}
@@ -264,29 +386,45 @@ function AgentCardView({
       marginLeft={depth}
       {...(onOpen ? { onClick: () => onOpen(item.id) } : {})}
       paddingRight={1}
-      paddingY={1}
+      paddingY={framed ? 0 : 1}
     >
-      <Box backgroundColor={selected ? t.color.accent : status.color} flexShrink={0} width={1} />
+      <Box backgroundColor={selected ? t.color.accent : voice.color} flexShrink={0} width={emphasized ? 2 : 1} />
       <Box flexDirection="column" flexGrow={1} flexShrink={1} paddingLeft={1}>
-        <Text color={t.color.text} wrap="truncate-end">
-          <Span color={status.color}>{status.glyph} </Span>
-          <Span bold color={t.color.text}>
-            {record.title}
-          </Span>
-          <Span color={t.color.muted}> · {item.status}</Span>
-        </Text>
-        <Text color={t.color.accent} wrap="truncate-end">
-          {metricLine(item, now)}
-          {record.childCount ? ` · ${record.childCount} child${record.childCount === 1 ? '' : 'ren'}` : ''}
-        </Text>
-        {showTask ? (
-          <Text color={t.color.muted} wrap="truncate-end">
-            task · {task}
+        {/* Row one: status dot, voice-coloured title, muted goal — with the
+            elapsed/token budget hanging off the right edge. */}
+        <Box flexDirection="row" flexShrink={0}>
+          <Box flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
+            {/* The DOT carries the state and the TITLE stays on the ramp.
+                Colouring both said the same thing twice and left a board of
+                four amber words when one amber dot was the whole message. */}
+            <Text wrap="truncate-end">
+              <Span color={voice.color}>{`${GLYPH.state} `}</Span>
+              <Span bold color={t.ds.title}>
+                {record.title}
+              </Span>
+              {showGoal && density.goals ? <Span color={t.ds.meta}>{`  ${compactLine(goal, 90)}`}</Span> : null}
+            </Text>
+          </Box>
+          {/* Same shape on every card — `elapsed · tokens`, right-aligned —
+              so a runaway agent shows up as a wide right column rather than
+              as a number you have to go looking for. */}
+          <Box flexShrink={0}>
+            <Text color={t.ds.numeric}>{` ${cardBudget(item, now, density.cardBudget)}`}</Text>
+          </Box>
+        </Box>
+        {/* Row two: the single line of substance — violet while it works,
+            its result once it has one, its last word when it needs you. */}
+        {second ? (
+          <Text color={secondColor} wrap="truncate-end">
+            {second.text}
           </Text>
-        ) : null}
-        <Text color={t.color.muted} dimColor wrap="truncate-end">
-          ↳ {record.creatorTitle} · {role}
+        ) : (
+          <Text color={t.color.muted}> </Text>
+        )}
+        <Text color={t.ds.caption} wrap="truncate-end">
+          {GLYPH.wrap} {record.creatorTitle} · {role}
           {model ? ` · ${model}` : ''}
+          {record.childCount ? ` · ${record.childCount} child${record.childCount === 1 ? '' : 'ren'}` : ''}
           {record.archived && record.snapshotLabel ? ` · ${record.snapshotLabel}` : ''}
         </Text>
         {retryNote ? (
@@ -309,6 +447,9 @@ const AgentCard = memo(
   AgentCardView,
   (previous, next) =>
     previous.t === next.t &&
+    previous.collapseCards === next.collapseCards &&
+    previous.density === next.density &&
+    previous.framed === next.framed &&
     previous.now === next.now &&
     previous.onOpen === next.onOpen &&
     previous.retryNote === next.retryNote &&
@@ -330,19 +471,22 @@ const AgentCard = memo(
  */
 function AgentDetailView({
   now,
+  paneWidth,
   record,
   retryNote,
   scrollRef,
   t
 }: {
   now: number
+  /** Columns this pane owns; absent means it has the whole overlay. */
+  paneWidth?: number
   record: AgentPanelRecord
   retryNote?: string
   scrollRef?: MutableRefObject<ScrollBoxRenderable | null>
   t: Theme
 }) {
   const { item } = record
-  const status = statusPresentation(item.status, t)
+  const voice = agentCardVoice(item, t)
   const elapsed = subagentElapsedSeconds(item, now)
   const rules = item.rules?.length ? item.rules.join(', ') : 'inherited defaults'
   const toolsets = item.toolsets?.length ? item.toolsets.join(', ') : 'runtime policy'
@@ -353,40 +497,58 @@ function AgentDetailView({
   const ordered = [...calls].reverse()
   const thinking = item.thinking.at(-1)?.trim()
   const notes = item.notes.slice(-3).filter(note => note.trim())
+  // The inspector renders only inside the overlay, whose width this hook
+  // tracks; leaders size against it minus the frame's padding and borders.
+  const { width } = useTerminalDimensions()
+
+  /** Columns a leader row may run to inside the inspector's frame. */
+  const rowWidth = Math.max(24, (paneWidth ?? width) - 6)
 
   return (
     <Box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0}>
+      {/* Panel head: dot + title on their own row, the goal under it.
+          Sharing one row with the goal AND a right-aligned elapsed crushed
+          all three the moment this became a side pane — the title came out
+          as `● Auth Migration...to the new schema8s elapsed`. The title is
+          the handle and gets a row to itself. */}
       <Box flexDirection="column" flexShrink={0} marginBottom={1}>
-        <Text color={t.color.text} wrap="truncate-end">
-          <Span color={status.color}>{status.glyph} </Span>
-          <Span bold color={t.color.text}>
-            {record.title}
+        <Box flexDirection="row" flexShrink={0}>
+          <Box flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
+            <Text wrap="truncate-end">
+              <Span color={voice.color}>{`${GLYPH.state} `}</Span>
+              <Span bold color={t.ds.title}>
+                {record.title}
+              </Span>
+            </Text>
+          </Box>
+          <Box flexShrink={0}>
+            <Text color={t.ds.numeric}>
+              {elapsed == null ? item.status : ` ${fmtDuration(elapsed)}`}
+            </Text>
+          </Box>
+        </Box>
+        {item.goal?.trim() ? (
+          <Text color={t.ds.meta} wrap="truncate-end">
+            {compactLine(item.goal.trim(), Math.max(12, rowWidth))}
+          </Text>
+        ) : null}
+        {/* Policy is what you are actually trusting while an agent runs, so
+            identity rides directly under the title as chips. */}
+        <Text wrap="truncate-end">
+          <Span color={t.color.accent}>{`[${item.agentType?.trim() || 'agent'}]`}</Span>
+          <Span color={t.color.muted}>
+            {' '}
+            {item.model?.trim() ? `[${item.model.trim()}] ` : ''}
+            {`${agentToolCount(item)} tools`}
           </Span>
-          <Span color={t.color.muted}> · {item.status}</Span>
-          {elapsed == null ? null : <Span color={t.color.muted}> · {fmtDuration(elapsed)}</Span>}
-        </Text>
-        <Text color={t.color.accent} wrap="truncate-end">
-          {tokenDetail(item)}
-        </Text>
-        <Text color={t.color.muted} wrap="truncate-end">
-          ↳ {record.creatorTitle} · {item.agentType?.trim() || 'agent'}
-          {item.model?.trim() ? ` · ${item.model.trim()}` : ''}
-          {record.childCount ? ` · ${record.childCount} child${record.childCount === 1 ? '' : 'ren'}` : ''}
         </Text>
       </Box>
       <scrollbox ref={scrollRef} style={{ flexGrow: 1, flexShrink: 1, minHeight: 0 }} viewportCulling>
         <Box flexDirection="column" flexShrink={0}>
-          <Text bold color={t.color.text}>
-            task
-          </Text>
-          <Text color={t.color.muted} wrap="wrap">
-            {item.goal?.trim() || 'no task recorded'}
-          </Text>
-
           {TERMINAL_STATUSES.has(item.status) && item.summary?.trim() ? (
             <>
-              <Text bold color={t.color.text}>
-                result
+              <Text color={t.color.muted} dimColor>
+                RESULT
               </Text>
               <Text color={t.color.text} wrap="wrap">
                 {compactLine(item.summary.trim(), 600)}
@@ -394,48 +556,55 @@ function AgentDetailView({
             </>
           ) : (
             <>
-              <Box flexShrink={0} marginTop={1}>
-                  <Text bold color={t.color.text}>
-                    doing now
-                  </Text>
-                </Box>
+              <Text color={t.color.muted} dimColor>
+                LIVE
+              </Text>
               <Text color={t.color.text} wrap="wrap">
                 {compactLine(activitySummary(item), 400)}
               </Text>
               {thinking ? (
                 <Text color={t.color.muted} dimColor wrap="wrap">
-                  thinking · {compactLine(thinking, 300)}
+                  {`└ ${compactLine(thinking, 300)}`}
                 </Text>
               ) : null}
             </>
           )}
 
           <Box flexShrink={0} marginTop={1}>
-              <Text bold color={t.color.text}>
-                tool calls ({calls.length ? calls.length : agentToolCount(item)})
-              </Text>
+              <GroupCaption
+                count={calls.length ? calls.length : agentToolCount(item)}
+                label="TOOL CALLS"
+                t={t}
+                width={rowWidth}
+              />
             </Box>
           {ordered.length ? (
             ordered.map(call => {
               const finished = call.endedAt !== undefined
               const took = finished ? fmtMillis(call.endedAt! - call.startedAt) : fmtMillis(now - call.startedAt)
-              const glyph = !finished ? '▸' : call.ok === false ? '✗' : '✓'
-              const color = !finished ? t.color.accent : call.ok === false ? t.color.error : t.color.muted
+              const failedCall = call.ok === false
+              // Mockup toolrow: ⏺ glyph, bold name, muted summary, dotted
+              // leader, right-aligned duration — `running…` while live.
+              const duration = finished ? took : 'running…'
+              const preview = call.preview?.trim() ? compactLine(call.preview, 60) : ''
 
+              // The shared leader row: glyph, verb, target, dotted leader,
+              // right-aligned duration. Same component the transcript and the
+              // diff review stats use, so durations line up into one readable
+              // column wherever they appear.
               return (
-                <Box flexDirection="column" flexShrink={0} key={call.id}>
-                  <Text color={t.color.text} wrap="truncate-end">
-                    <Span color={color}>{glyph} </Span>
-                    {call.name}
-                    <Span color={color}> · {took}{finished ? '' : ' so far'}</Span>
-                  </Text>
-                  {call.preview?.trim() ? (
-                    <Text color={t.color.muted} dimColor wrap="truncate-end">
-                      {'   '}
-                      {compactLine(call.preview, 160)}
-                    </Text>
-                  ) : null}
-                </Box>
+                <LeaderRow
+                  glyph={GLYPH.tool}
+                  glyphColor={failedCall ? t.ds.failed : finished ? t.ds.done : t.ds.working}
+                  key={call.id}
+                  label={call.name}
+                  quiet={!finished}
+                  right={duration}
+                  rightColor={finished ? t.ds.numeric : t.color.accent}
+                  t={t}
+                  {...(preview ? { target: preview } : {})}
+                  width={rowWidth}
+                />
               )
             })
           ) : (
@@ -449,9 +618,7 @@ function AgentDetailView({
           {notes.length ? (
             <>
               <Box flexShrink={0} marginTop={1}>
-                  <Text bold color={t.color.text}>
-                    activity
-                  </Text>
+                  <GroupCaption label="ACTIVITY" t={t} width={rowWidth} />
                 </Box>
               {notes.map((note, index) => (
                 <Text color={t.color.muted} key={index} wrap="truncate-end">
@@ -462,25 +629,44 @@ function AgentDetailView({
           ) : null}
 
           <Box flexShrink={0} marginTop={1}>
-              <Text bold color={t.color.text}>
-                files
-              </Text>
-            </Box>
-          <Text color={t.color.muted} wrap="wrap">
-            {written.length || read.length
-              ? `${written.length} wrote · ${read.length} read${
-                  written.length || read.length
-                    ? ` · ${[...written.map(path => `+${basename(path)}`), ...read.map(basename)]
-                        .slice(0, 12)
-                        .join(', ')}`
-                    : ''
-                }`
-              : 'none touched'}
+            <GroupCaption label="FILES TOUCHED" t={t} width={rowWidth} />
+          </Box>
+          {written.length || read.length ? (
+            <>
+              {[...written.map(path => `+${basename(path)}`), ...read.map(basename)]
+                .slice(0, 8)
+                .map((entry, index) => (
+                  <Text color={t.color.label} key={index} wrap="truncate-end">
+                    {entry}
+                  </Text>
+                ))}
+              {written.length + read.length > 8 ? (
+                <Text color={t.color.muted} dimColor wrap="truncate-end">
+                  {`+${written.length + read.length - 8} more`}
+                </Text>
+              ) : null}
+            </>
+          ) : (
+            <Text color={t.color.muted} wrap="wrap">
+              none touched
+            </Text>
+          )}
+
+          <Box flexShrink={0} marginTop={1}>
+            <Text color={t.color.muted} dimColor>
+              COST
+            </Text>
+          </Box>
+          {/* tokenDetail already carries the dollar figure when the daemon
+              reports one; appending it again here printed the cost twice. */}
+          <Text color={t.color.muted} wrap="truncate-end">
+            {tokenDetail(item)}
+            {` · parent: ${record.creatorTitle}`}
           </Text>
 
           <Box flexShrink={0} marginTop={1}>
-              <Text bold color={t.color.text}>
-                policy
+              <Text color={t.color.muted} dimColor>
+                POLICY
               </Text>
             </Box>
           <Text color={t.color.muted} wrap="wrap">
@@ -510,6 +696,7 @@ function AgentDetailView({
 }
 
 function AgentPanelBody({
+  compactHeader,
   history,
   liveAgents,
   now,
@@ -519,6 +706,7 @@ function AgentPanelBody({
   retryNotes,
   scrollRef,
   selectedId,
+  shortFrame,
   t,
   variant
 }: AgentPanelProps & {
@@ -526,21 +714,67 @@ function AgentPanelBody({
   onOpen?: (agentId: string) => void
   openRecord?: AgentPanelRecord | undefined
   scrollRef?: MutableRefObject<ScrollBoxRenderable | null>
+  /** Too few rows for the header/footer hairlines — spend them on content. */
+  shortFrame?: boolean
 }) {
   const records = useMemo(() => collectAgentPanelRecords(liveAgents, history), [history, liveAgents])
+  // Columns a caption's rule may run to. The rail and the overlay have very
+  // different widths, so a constant here would either overshoot in the rail
+  // or stop short in the overlay.
+  const { width: terminalWidth } = useTerminalDimensions()
+  const panelWidth = Math.max(
+    24,
+    (variant === 'sidebar' ? agentSidebarWidth(terminalWidth) : overlayPanelWidth(terminalWidth, OVERLAY_PANEL_SPECS.agents)) - 6
+  )
+  // Density is measured against the PANEL, not the terminal: a 200-column
+  // terminal showing a 40-column overlay must degrade the overlay, not decide
+  // it is roomy because the screen is. The rail opts out entirely — it is a
+  // summary at every size, so its shape is a design decision rather than a
+  // sacrifice, and screen 09's order does not apply to it.
+  const density = useMemo(
+    () => (variant === 'overlay' ? densityFor(panelWidth) : RAIL_DENSITY),
+    [panelWidth, variant]
+  )
+  // Screen 03 puts the list and the inspector on screen together. A view that
+  // REPLACES the list with a detail makes you remember which agent you were
+  // on and press Esc to check — which is exactly what Enter used to do here.
+  // The threshold matches the agent view's: the inspector needs ~40 columns
+  // of its own, and taking those from a 100-column overlay leaves a list too
+  // narrow to read the titles it exists to show.
+  const twoPane = variant === 'overlay' && terminalWidth >= 120
+  const inspectorWidth = twoPane ? Math.max(34, Math.min(56, Math.floor(panelWidth * 0.42))) : 0
+  const listWidth = twoPane ? Math.max(24, panelWidth - inspectorWidth - 1) : panelWidth
+  // The inspector follows the SELECTION, so it is never empty and never
+  // disagrees with the row the arrow keys are on. An explicit `openRecord`
+  // (clicking a rail card) still wins, so F6-from-the-rail lands where you
+  // clicked.
+  const inspectRecord =
+    openRecord ?? records.find(record => record.item.id === selectedId) ?? records[0]
   const activeCount = records.filter(
     record => record.item.status === 'running' || record.item.status === 'queued'
   ).length
   const tick = now ?? Date.now()
   const footer = openRecord
     ? retryEnabled
-      ? '↑↓ scroll · r retry · Esc back to the list'
-      : '↑↓ scroll · PgUp/PgDn · Esc back to the list'
+      // Mockup 05 inspector foot: peek/cancel join retry. `space` stays
+      // unadvertised until a transcript-peek surface exists for agents.
+      ? '↑↓ scroll · r retry · c cancel · Esc back to the list'
+      : `↑↓ scroll · ${PAGE_KEY_HINT} · Esc back to the list`
     : variant === 'overlay'
       ? retryEnabled
         ? '↑↓ select · Enter inspect · r retry dead agent · F6/Esc close'
-        : '↑↓ select · Enter inspect · PgUp/PgDn · F6/Esc close'
+        : // "Enter inspect" is a promise about a pane that is already on
+          // screen once the overlay is wide enough to show both, so the wide
+          // footer says what Enter actually adds: pinning it there.
+          twoPane
+          ? `↑↓ select · Enter pin · ${PAGE_KEY_HINT} · F6/Esc close`
+          : `↑↓ select · Enter inspect · ${PAGE_KEY_HINT} · F6/Esc close`
       : 'F6 inspect · /agents'
+
+  // Mockup 04/05 panel chrome: the header bar and the footer hint row are
+  // ruled off from the content by hairlines. The sidebar rail keeps its flat
+  // treatment, and a frame too short for rules spends those rows on content.
+  const hairlines = variant === 'overlay' && !shortFrame
 
   return (
     <Box
@@ -558,19 +792,43 @@ function AgentPanelBody({
       height="100%"
       minHeight={0}
       paddingX={variant === 'sidebar' ? 2 : 1}
-      paddingY={1}
+      paddingY={variant === 'overlay' && shortFrame ? 0 : 1}
       width="100%"
     >
-      <Box flexDirection="row" flexShrink={0} justifyContent="space-between" marginBottom={1}>
-        <Text bold color={t.color.text}>
-          <Span color={t.color.accent}>◆ </Span>
-          {openRecord ? 'Agent' : 'Agents'}
-        </Text>
-        <Text color={activeCount ? t.color.accent : t.color.muted}>
-          {activeCount ? `${activeCount} live` : `${records.length} done`}
-        </Text>
-      </Box>
-      {openRecord ? (
+      <box
+        {...(hairlines ? { border: ['bottom' as const], borderColor: t.color.border } : {})}
+        flexDirection="row"
+        flexShrink={0}
+        justifyContent="space-between"
+        marginBottom={1}
+      >
+        {/* Title and counts live in separate clipped boxes rather than one
+            truncating Text: span-heavy truncate at narrow widths can blank
+            the whole run, while flex clipping degrades gracefully. */}
+        <Box flexDirection="row" flexShrink={1} minWidth={0} overflow="hidden">
+          <Text bold color={t.color.text} wrap="truncate-end">
+            <Span color={t.color.accent}>✦ </Span>
+            {openRecord ? 'Agent' : 'Agent View'}
+          </Text>
+          {openRecord || compactHeader ? null : (
+            <Text color={t.color.muted} wrap="truncate-end">
+              {`  ${records.length} chat${records.length === 1 ? '' : 's'} · ${activeCount} working`}
+            </Text>
+          )}
+        </Box>
+        {openRecord ? (
+          <Box flexShrink={0}>
+            <Text color={t.color.muted} wrap="truncate-end">
+              {openRecord.item.status}
+            </Text>
+          </Box>
+        ) : (
+          <Box flexShrink={0}>
+            <Text color={activeCount ? t.color.accent : t.color.muted}>{activeCount ? 'live' : 'idle'}</Text>
+          </Box>
+        )}
+      </box>
+      {openRecord && !twoPane ? (
         <AgentDetailView
           now={tick}
           record={openRecord}
@@ -578,42 +836,90 @@ function AgentPanelBody({
           scrollRef={scrollRef}
           t={t}
         />
-      ) : (
+      ) : records.length ? (
+      <Box flexDirection="row" flexGrow={1} minHeight={0} width="100%">
+      <Box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} minWidth={0}>
       <scrollbox ref={scrollRef} style={{ flexGrow: 1, flexShrink: 1, minHeight: 0 }} viewportCulling>
         <Box flexDirection="column" flexShrink={0}>
-          {records.length ? (
-            records.map(record => (
-              <AgentCard
+          {records.map((record, index) => {
+            const heading = agentHeading(records, index)
+
+            return (
+              <Box
+                flexDirection="column"
+                flexShrink={0}
                 key={`${record.archived ? 'past' : 'live'}:${record.item.id}`}
-                now={tick}
-                {...(onOpen ? { onOpen } : {})}
-                record={record}
-                {...(retryNotes?.get(record.item.id) ? { retryNote: retryNotes.get(record.item.id) } : {})}
-                selected={record.item.id === selectedId}
-                t={t}
-              />
-            ))
-          ) : (
-            // Deliberately not vertically centred inside a reserved block: the
-            // frame is bounded by its parent now, so a 5-row centred placeholder
-            // on a short terminal put its first visible row in the blank padding
-            // above the text and the message read as an empty panel.
-            <Box alignItems="center" flexDirection="column" flexShrink={0}>
-              <Text color={t.color.muted}>No agents yet</Text>
-              <Text color={t.color.muted} dimColor>
-                Delegated work appears here.
-              </Text>
-            </Box>
-          )}
+              >
+                {heading ? (
+                  // The action-group caption wears its group's voice, so
+                  // NEEDS INPUT is amber from across the room and a board
+                  // with nothing blocked carries no amber at all.
+                  <GroupCaption
+                    count={records.filter(row => agentGroup(row.item.status) === agentGroup(record.item.status)).length}
+                    label={AGENT_GROUP_LABEL[agentGroup(record.item.status)]}
+                    t={t}
+                    tone={stateSkin(AGENT_GROUP_STATE[agentGroup(record.item.status)], t.ds).dot}
+                    width={listWidth}
+                  />
+                ) : null}
+                <AgentCard
+                  collapseCards={variant === 'overlay' && !density.goals}
+                  density={density}
+                  framed={variant === 'overlay'}
+                  now={tick}
+                  {...(onOpen ? { onOpen } : {})}
+                  record={record}
+                  {...(retryNotes?.get(record.item.id) ? { retryNote: retryNotes.get(record.item.id) } : {})}
+                  selected={record.item.id === selectedId}
+                  t={t}
+                />
+              </Box>
+            )
+          })}
         </Box>
       </scrollbox>
+      </Box>
+      {twoPane && inspectRecord ? (
+        <>
+          {/* A filled column rather than a per-side border: OpenTUI paints an
+              edge THROUGH the text when a bordered child sits inside a framed
+              parent, and this panel has a frame. */}
+          <Box backgroundColor={t.ds.hairline} flexShrink={0} width={1} />
+          <Box flexDirection="column" flexShrink={0} minHeight={0} paddingLeft={1} width={inspectorWidth}>
+            <AgentDetailView
+              now={tick}
+              paneWidth={inspectorWidth}
+              record={inspectRecord}
+              {...(retryNotes?.get(inspectRecord.item.id) ? { retryNote: retryNotes.get(inspectRecord.item.id) } : {})}
+              t={t}
+            />
+          </Box>
+        </>
+      ) : null}
+      </Box>
+      ) : (
+        // The panel keeps its full size when empty, so the placeholder
+        // centers inside it — a tiny box shrink-wrapped around two lines
+        // was the rejected look.
+        <Box alignItems="center" flexDirection="column" flexGrow={1} flexShrink={1} justifyContent="center" minHeight={0}>
+          <Text color={t.color.muted}>No agents yet</Text>
+          <Text color={t.color.muted} dimColor>
+            Delegated work appears here.
+          </Text>
+        </Box>
       )}
       {/* Truncate rather than wrap: on a narrow panel this hint wrapped to two
           rows and, now that the frame is bounded, those rows came out of the
           agent list rather than out of the terminal. */}
-      <Text color={t.color.muted} dimColor wrap="truncate-end">
-        {footer}
-      </Text>
+      <box
+        {...(hairlines ? { border: ['top' as const], borderColor: t.color.border } : {})}
+        flexDirection="column"
+        flexShrink={0}
+      >
+        <Text color={t.color.muted} dimColor wrap="truncate-end">
+          {footer}
+        </Text>
+      </box>
     </Box>
   )
 }
@@ -672,20 +978,13 @@ export function AgentPanelOverlay({
   const { height, width } = useTerminalDimensions()
   const gateway = useOptionalGateway()
   const records = useMemo(() => collectAgentPanelRecords(liveAgents, history), [history, liveAgents])
-  // Shared with F7/F8 so the three overlays stop diverging. The old formula
-  // here (`marginY = min(30, floor((height - 20) / 2))`) left a 42-row
-  // terminal only 20 usable rows, which is why this panel read as a mostly
-  // empty box for a surface whose whole job is a long list. It now also
-  // shrinks to its content, so an empty dashboard is a small box rather than
-  // a large void.
+  // Shared with F7/F8 so the three overlays stop diverging. Mockup 04 sizes
+  // the agent view as a LARGE bounded panel — full height minus the standard
+  // gutter, diff-width — even when it is empty: the empty state centers
+  // inside the frame instead of collapsing the frame around itself.
   const { height: panelHeight, width: fittedWidth } = overlayPanelSize(
     { height, width },
-    // Shrink only when there is genuinely nothing to show. Sizing a populated
-    // panel to its row count squeezed out the footer hints and notices, and
-    // the inspector view needs the full box regardless of list length.
-    records.length
-      ? OVERLAY_PANEL_SPECS.agents
-      : { ...OVERLAY_PANEL_SPECS.agents, desiredHeight: 0 }
+    OVERLAY_PANEL_SPECS.agents
   )
   const page = Math.max(4, panelHeight - 8)
   const panelWidth = withPanelWidthDelta(fittedWidth, width)
@@ -693,6 +992,7 @@ export function AgentPanelOverlay({
   const [openId, setOpenId] = useState<null | string>(initialInspectId ?? null)
   const [retryNotes, setRetryNotes] = useState<ReadonlyMap<string, string>>(new Map())
   const pendingRetries = useRef(new Set<string>())
+  const pendingCancels = useRef(new Set<string>())
   // Elapsed time has to advance on its own. A queued agent publishes no events
   // at all, and a thinking one can go a minute between them — without a clock
   // its "running for 4s" sat frozen at 4s and read as a hung agent.
@@ -783,6 +1083,42 @@ export function AgentPanelOverlay({
       })
   }
 
+  // Mockup 05: `c` cancels the inspected agent. The only existing
+  // agent-cancel surface is the documented `subagent.interrupt` RPC, so the
+  // request routes through it and its typed failure is surfaced verbatim in
+  // the same note channel retry uses — never a fabricated success. When the
+  // daemon grows real cancellation, this binding starts working unchanged.
+  const cancelSelected = () => {
+    const record = openRecord ?? selectedRecord
+    if (!record) return
+    const item = record.item
+    if (!gateway) {
+      setRetryNote(item.id, 'cancel unavailable: not connected to the daemon')
+      return
+    }
+    if (subagentRetryable(item.status)) {
+      setRetryNote(item.id, `cannot cancel: agent already ${item.status} — nothing to stop`)
+      return
+    }
+    if (pendingCancels.current.has(item.id)) return
+    pendingCancels.current.add(item.id)
+    setRetryNote(item.id, 'cancel requested…')
+    gateway.rpc<SubagentInterruptResponse>('subagent.interrupt', { task: item.name?.trim() || item.id })
+      .then(response => {
+        if (response?.found === false) {
+          setRetryNote(item.id, 'cancel failed: the daemon no longer tracks that agent')
+          return
+        }
+        setRetryNote(item.id, '✕ cancel accepted — the daemon was asked to stop the agent')
+      })
+      .catch((error: unknown) => {
+        setRetryNote(item.id, `cancel unavailable: ${error instanceof Error && error.message ? error.message : 'request failed'}`)
+      })
+      .finally(() => {
+        pendingCancels.current.delete(item.id)
+      })
+  }
+
   useKeyboard(event => {
     const isEnter = event.name === 'return' || event.name === 'enter' || event.name === 'kpenter'
 
@@ -803,15 +1139,20 @@ export function AgentPanelOverlay({
       moveSelection(1)
     } else if (event.sequence === 'r') {
       retrySelected()
+    } else if (event.sequence === 'c') {
+      // Scoped to the inspector: a stray press while browsing the list
+      // must never stop an agent the user was only reading about.
+      if (openId) cancelSelected()
+      else return
     } else if (event.name === 'up') {
       if (openId) scrollRef.current?.scrollBy(-1)
       else moveSelection(-1)
     } else if (event.name === 'down') {
       if (openId) scrollRef.current?.scrollBy(1)
       else moveSelection(1)
-    } else if (event.name === 'pageup') {
+    } else if (isPageUpKey(event)) {
       scrollRef.current?.scrollBy(-page)
-    } else if (event.name === 'pagedown') {
+    } else if (isPageDownKey(event)) {
       scrollRef.current?.scrollBy(page)
     } else if (event.name === 'home') {
       scrollRef.current?.scrollTo(0)
@@ -842,6 +1183,7 @@ export function AgentPanelOverlay({
           over max-width, so the cap never applied once a user widened. */}
       <Box flexDirection="column" flexShrink={0} height={panelHeight} width={panelWidth}>
         <AgentPanelBody
+          compactHeader={panelWidth < 56}
           history={history}
           liveAgents={liveAgents}
           now={now}
@@ -851,6 +1193,10 @@ export function AgentPanelOverlay({
           retryNotes={retryNotes}
           scrollRef={scrollRef}
           selectedId={selectedRecord?.item.id ?? null}
+          // Below a dozen rows the hairlines and vertical padding cost more
+          // than the content they frame; a degenerate terminal keeps the
+          // list, the empty state, and the footer keys instead.
+          shortFrame={panelHeight < 12}
           t={t}
           variant="overlay"
         />

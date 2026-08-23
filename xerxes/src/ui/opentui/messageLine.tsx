@@ -6,21 +6,30 @@
 // emphasis). Tool-call trail lines stay compact like Grok's transcript: the
 // call is always visible, while diagnostic and diff detail remains available
 // when it carries information the one-line result cannot safely summarize.
+import { computed } from 'nanostores'
 import { useStore } from '@nanostores/react'
-import { memo, useRef } from 'react'
+import { memo, type ReactNode, useRef } from 'react'
 
 import {
   $thinkingVisibility,
   thinkingRowExpanded,
   toggleThinkingRow
 } from '../app/thinkingVisibilityStore.js'
-import { $uiDetailVisibility } from '../app/uiStore.js'
+import { $toolRunVisibility, toggleToolRun, toolRunExpanded } from '../app/toolRunStore.js'
+import { $uiDetailVisibility, $uiState } from '../app/uiStore.js'
+import { sectionMode } from '../domain/details.js'
+import { GLYPH, leaderRun } from '../domain/nocturne.js'
 import { VOICE } from '../domain/roles.js'
+import { contentColumnWidth } from '../domain/startupLayout.js'
 import { messageHasVisibleDetails, trailHasRenderableContent } from '../lib/liveProgress.js'
+import { subagentCardAccent, subagentCardModel } from '../lib/subagentCards.js'
+import { fmtDuration } from '../lib/subagentElapsed.js'
+import { groupToolRun, type ToolRunGroup } from '../lib/toolRun.js'
 import { estimateTokensRough, fmtK, parseToolTrailResultLine, toolTrailParts } from '../lib/text.js'
 import { splitStreamingRender, STREAMING_CHUNKS_EMPTY, type StreamingChunks } from '../lib/streamingMarkdown.js'
+import { stringWidth } from '../lib/terminalRuntime.opentui.js'
 import type { Theme } from '../theme.js'
-import type { Msg } from '../types.js'
+import type { Msg, SubagentProgress } from '../types.js'
 
 import { Box, Span, Text } from './primitives.js'
 import { getSyntaxStyle } from './syntax.js'
@@ -90,27 +99,117 @@ function UserMessage({ msg, t }: { msg: Msg; t: Theme }) {
     // One blank row above the band, none below: the next block adds its own
     // lead gap when the voice changes. This used to paint 2 rows above and 3
     // below every turn, and the estimator only ever predicted 2.
+    // The canvas marks the user's own words with the prompt glyph on a filled
+    // band, not with a left bar: `❯ …` is what you typed, and the band is
+    // what makes turn starts findable by scrolling alone. The bar was the
+    // pre-canvas treatment and put two markers on one row.
     <Box flexDirection="row" flexShrink={0} marginTop={1}>
-      <Box backgroundColor={VOICE.user(t).bar} flexShrink={0} width={1} />
       <Box
-        backgroundColor={t.color.completionBg}
-        flexDirection="column"
+        backgroundColor={t.color.userBandBg}
+        flexDirection="row"
         flexGrow={1}
-        paddingLeft={2}
+        paddingLeft={1}
         paddingRight={1}
       >
-        <Text color={VOICE.user(t).body} wrap="wrap">
-          {msg.text}
-        </Text>
+        <Box flexShrink={0}>
+          <Text color={VOICE.user(t).bar}>{`${GLYPH.prompt} `}</Text>
+        </Box>
+        <Box flexDirection="column" flexGrow={1} minWidth={0}>
+          <Text color={VOICE.user(t).body} wrap="wrap">
+            {msg.text}
+          </Text>
+        </Box>
       </Box>
     </Box>
   )
 }
 
-function AssistantMessage({ leadGap, msg, t }: { leadGap?: boolean; msg: Msg; t: Theme }) {
+/**
+ * The small ✦ that opens an assistant turn (anatomy element ②). It lives in
+ * the first column of the body indent and renders ONCE — the dim turn rail
+ * beside it still spans every row of a multi-paragraph answer.
+ */
+function TurnGlyph({ t }: { t: Theme }) {
+  const voice = VOICE.assistant(t)
+
   return (
-    <Box flexDirection="column" flexShrink={0} marginTop={leadGap ? 1 : 0} paddingLeft={3}>
-      <Markdown content={msg.text} t={t} />
+    <Box flexShrink={0} width={1}>
+      {voice.glyph ? <Text color={voice.glyphColor}>{voice.glyph}</Text> : null}
+    </Box>
+  )
+}
+
+function AssistantMessage({
+  leadGap,
+  msg,
+  rail,
+  t
+}: {
+  leadGap?: boolean
+  msg: Msg
+  rail?: TurnRail
+  t: Theme
+}) {
+  // The rail replaces the old flat `paddingLeft={3}` with bar(1) + gap(2), so
+  // the content width is unchanged and no wrapped line moves. That is what
+  // keeps this a purely visual change as far as the height estimator is
+  // concerned. The redesign's ✦ (element ②) takes over the first of those two
+  // gap columns — glyph(1) + blank(1) — so the prose still starts at exactly
+  // the x-offset the wrap estimator predicts and no line ever reflows.
+  return (
+    <Box flexDirection="row" flexShrink={0} marginTop={leadGap ? 1 : 0}>
+      <RailGutter rail={rail} t={t} />
+      <TurnGlyph t={t} />
+      <Box flexShrink={0} width={1} />
+      <Box flexDirection="column" flexGrow={1} minWidth={0}>
+        <Markdown content={msg.text} t={t} />
+      </Box>
+    </Box>
+  )
+}
+
+export type TurnRail = 'end' | 'mid' | 'none'
+
+/**
+ * One column: the turn's rail, or the blank it replaced.
+ *
+ * A filled box rather than a `│` glyph — a glyph is a single row of text and
+ * would mark only the first line of a multi-line answer, leaving the rest of
+ * the turn unrailed. The fill spans whatever height the message takes.
+ */
+function RailGutter({ rail, t }: { rail?: TurnRail; t: Theme }) {
+  const inTurn = rail === 'mid' || rail === 'end'
+
+  return <Box backgroundColor={inTurn ? t.color.turnRail : undefined} flexShrink={0} width={1} />
+}
+
+/**
+ * Closes a turn — the receipt for the rows above it.
+ *
+ * The canvas writes it `└ 6 tools · 11.4s · 18.2k tok · $0.11`. Two of those
+ * four are on the wire today; per-turn token spend and cost are not, and
+ * inventing them would make the receipt a decoration. So the row states what
+ * it can and stays the same shape for the day the other two land.
+ */
+function TurnLedger({ seconds, tools, t }: { seconds: number; tools: number; t: Theme }) {
+  const facts = [
+    tools > 0 ? `${tools} tool${tools === 1 ? '' : 's'}` : 'done',
+    seconds >= 0.05 ? `${seconds.toFixed(1)}s` : ''
+  ].filter(Boolean)
+
+  return (
+    <Box flexDirection="row" flexShrink={0}>
+      <Box flexShrink={0} width={1}>
+        <Text color={t.ds.caption}>{GLYPH.ledger}</Text>
+      </Box>
+      <Text color={t.ds.caption} wrap="truncate-end">
+        {facts.map((fact, index) => (
+          <Span key={fact}>
+            {index ? <Span color={t.ds.rule}>{` ${GLYPH.separator} `}</Span> : '  '}
+            <Span color={t.ds.caption}>{fact}</Span>
+          </Span>
+        ))}
+      </Text>
     </Box>
   )
 }
@@ -219,7 +318,58 @@ function toolDetailColor(line: string, diagnostic: boolean, t: Theme): string {
   return t.color.muted
 }
 
-function ToolStep({ line, t }: { line: string; t: Theme }) {
+/**
+ * Dotted leader between a tool call and its right-aligned cost.
+ *
+ * `cols` is the terminal width, the same measure `contentColumnWidth` caps
+ * the reading column with, minus the rail gutter (1) and the trail padding
+ * (2). `Bun.stringWidth` is exact for the mono grid, so when every part fits
+ * the duration lands flush at the column edge; when the arguments are too
+ * long the dots simply disappear (count < 2) or get truncated first by
+ * `truncate-end`, which is exactly how the row behaved before leaders.
+ */
+export function toolLeaderDots(
+  parts: { readonly args: string; readonly duration: string; readonly glyph: string; readonly mark: string; readonly name: string },
+  cols: number | undefined
+): string {
+  if (cols === undefined) {
+    return ''
+  }
+
+  const available = contentColumnWidth(cols) - 3
+  const used =
+    stringWidth(`${parts.glyph} ${parts.name}`) +
+    (parts.args ? stringWidth(`  ${parts.args}`) : 0) +
+    (parts.duration ? stringWidth(`  ${parts.duration}`) : 0) +
+    (parts.mark ? stringWidth(` ${parts.mark}`) : 0)
+  // The run stops a few columns shy of the edge on purpose: the leading
+  // separator space plus a 4-column safety margin absorbs ambiguous-width
+  // glyphs (`→` measures 1 cell but some terminals ink 2) and scrollbar
+  // gutters, so the duration is never pushed off the line. `truncate-end`
+  // remains the backstop.
+  const count = available - used - 5
+
+  return count >= 2 ? ` ${'·'.repeat(count)}` : ''
+}
+
+/**
+ * Quiet, read-only calls tint their outcome glyph faint instead of ok-green
+ * (anatomy element ④: dim=read, green=ok, red=fail) so a wall of reads never
+ * masquerades as a wall of wins. Classified from the call's leading verb —
+ * the transcript only ever sees the display name ('Read File', 'Glob').
+ */
+const QUIET_TOOL_VERBS = new Set(['cat', 'find', 'glob', 'grep', 'head', 'list', 'ls', 'read', 'search', 'tail', 'view'])
+
+export function isQuietToolName(name: string): boolean {
+  const verb = name
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean)[0]
+
+  return verb !== undefined && QUIET_TOOL_VERBS.has(verb)
+}
+
+function ToolStep({ cols, line, t }: { cols?: number; line: string; t: Theme }) {
   const parsed = parseToolTrailResultLine(line)
 
   const voice = VOICE.tool(t)
@@ -240,34 +390,44 @@ function ToolStep({ line, t }: { line: string; t: Theme }) {
   const markColor = failed ? t.color.error : t.color.ok
   const detail = usefulToolDetail(parsed.detail, failed)
   const { args, duration, name } = toolTrailParts(parsed.call)
+  // Outcome glyph FIRST (anatomy element ④): faint for quiet read-only calls,
+  // ok-green on success, error-red on failure — the verdict lands before the
+  // eye reaches any words. The name stays lapis either way.
+  const quiet = !failed && isQuietToolName(name)
+  const outcomeColor = failed ? t.color.error : quiet ? t.color.muted : t.color.ok
+  const dots = toolLeaderDots({ args, duration: duration ?? '', glyph: voice.glyph, mark: parsed.mark ?? '', name }, cols)
+  const mark = parsed.mark
 
   return (
     <Box flexDirection="column" flexShrink={0}>
-      {/* One line, styled by part: the tool's name reads as a name, its
-          arguments recede, and the duration is available at a glance instead
-          of being stripped out. All three were previously flattened into a
-          single muted string. */}
+      {/* One line, styled by part: tinted ⏺, lapis name, receding arguments,
+          then the ✓/✗ verdict right after the summary — mockup row shape
+          "⏺ Bash bun test … ✓ 42 pass ·· 1.8s" — before the dotted leader
+          carries the eye to the duration at the column edge. Every segment's
+          width is already counted by toolLeaderDots, so reordering the mark
+          ahead of the leader changes no column math. */}
+      {/* Nocturne's leader row, part by part: the disc carries the verdict,
+          the VERB sits on the ramp's secondary step, the TARGET on `title`,
+          and the duration hangs right on `numeric` so a column of tool rows
+          reads vertically as durations without reading the rows at all. The
+          verb and the disc were the same colour until the ramp was assigned
+          by role; they are different jobs and now different steps. */}
       <Text color={voice.body} wrap="truncate-end">
-        <Span color={failed ? t.color.error : voice.glyphColor}>{voice.glyph} </Span>
-        <Span bold color={failed ? t.color.error : voice.glyphColor}>
-          {name}
-        </Span>
-        {args ? <Span color={t.color.muted}>{`  ${args}`}</Span> : null}
-        {duration ? (
-          <Span color={t.color.muted} dimColor>
-            {`  · ${duration}`}
-          </Span>
-        ) : null}
+        <Span color={outcomeColor}>{voice.glyph} </Span>
+        <Span color={t.color.toolName}>{name}</Span>
+        {args ? <Span color={t.ds.title}>{`  ${args}`}</Span> : null}
         {/* Paint the tick too. Rendering only '✗' left success visually
             identical to a call that is still running. */}
-        {parsed.mark ? (
+        {mark ? (
           <>
             {' '}
             <Span color={markColor} dimColor={!failed}>
-              {parsed.mark}
+              {mark}
             </Span>
           </>
         ) : null}
+        {dots ? <Span color={t.ds.leader}>{dots}</Span> : null}
+        {duration ? <Span color={t.ds.numeric}>{`  ${duration}`}</Span> : null}
       </Text>
       {detail.lines.map((d, i) => (
         <Text
@@ -301,6 +461,15 @@ const detailVisibility = (snapshot: string): DetailVisibility => {
   return { subagents: subagents === 'true', thinking: thinking === 'true', tools: tools === 'true' }
 }
 
+// Inline agent cards (mockups 02 / 03⑥) key off the same /details machinery
+// as thinking and tools. `$uiDetailVisibility` still pins `subagents` to
+// false from the era when spawn trees lived only in the agent panel, so the
+// transcript resolves its own section mode here; useMainApp derives the same
+// value from the same inputs when filtering rows and estimating heights.
+const $subagentCardsVisible = computed($uiState, state =>
+  sectionMode('subagents', state.detailsMode, state.sections, state.detailsModeCommandOverride) !== 'hidden'
+)
+
 // Stable per-message identity for thinking toggles when the caller has no
 // row key (direct MessageLine consumers). Settled transcript rows should
 // pass their virtual row key so the toggle survives virtualization; live
@@ -324,12 +493,53 @@ const thinkingRowId = (msg: Msg, msgKey?: string): string => {
   return id
 }
 
-function ThinkingBlock({ msg, rowId, t }: { msg: Msg; rowId: string; t: Theme }) {
+/**
+ * Collapsed thinking header.
+ *
+ * Thinking is a single row by default: it is evidence, not content — one
+ * line, a dotted leader, and the token count it cost. You expand it only if
+ * you doubt the answer.
+ *
+ * The row leads with the disclosure triangle alone. It used to carry a ✻ as
+ * well, which put two marks on a row whose whole point is to be one line, and
+ * spent a glyph the vocabulary reserves for the live progress pill.
+ */
+export function thinkingHeaderLabel({
+  durationSeconds,
+  expanded
+}: {
+  durationSeconds?: number
+  expanded: boolean
+}): string {
+  const arrow = expanded ? '▾' : '▸'
+  const subject =
+    typeof durationSeconds === 'number' && Number.isFinite(durationSeconds)
+      ? `thought for ${fmtDuration(Math.max(0, durationSeconds))}`
+      : 'thinking'
+
+  return `${arrow} ${subject}`
+}
+
+function ThinkingBlock({ cols, msg, rowId, t }: { cols?: number; msg: Msg; rowId: string; t: Theme }) {
   const visibility = useStore($thinkingVisibility)
   const expanded = thinkingRowExpanded(visibility, rowId)
   const thinking = msg.thinking?.trim() ?? ''
   const tokens = msg.thinkingTokens && msg.thinkingTokens > 0 ? msg.thinkingTokens : estimateTokensRough(thinking)
-  const tokenLabel = tokens > 0 ? `  ~${fmtK(tokens)} tokens` : ''
+  const tokenLabel = tokens > 0 ? `~${fmtK(tokens)} tok` : ''
+  // Same dotted-leader treatment as tool rows: the label stays left, the
+  // token cost hangs right, the run between them fills the reading column.
+  // The count is conservative on purpose — the scrollbox can reserve a
+  // scrollbar column and nested padding varies a few columns by branch, so
+  // the run prefers stopping short over pushing `tokens` onto a wrapped
+  // second line (which would also drift the height estimator).
+  // Deliberate omission: no wire field carries a reasoning duration yet
+  // (`Msg` has only `thinking`/`thinkingTokens`), so the header reads
+  // "thinking"; pass `durationSeconds` the moment one exists.
+  const label = thinkingHeaderLabel({ expanded })
+  const dots =
+    cols !== undefined && tokenLabel
+      ? leaderRun(contentColumnWidth(cols) - 4, stringWidth(label), stringWidth(tokenLabel))
+      : ''
 
   return (
     <Box flexDirection="column" flexShrink={0}>
@@ -337,8 +547,11 @@ function ThinkingBlock({ msg, rowId, t }: { msg: Msg; rowId: string; t: Theme })
           below readable on terminals that dim aggressively. The expanded
           trace below stays muted — a long trace must not be violet. */}
       <Box flexShrink={0} onClick={() => toggleThinkingRow(rowId)}>
-        <Text color={t.color.thinking}>
-          {expanded ? '▾' : '▸'} thinking{tokenLabel}
+        <Text wrap="truncate-end">
+          <Span color={t.ds.caption}>{label.slice(0, 1)}</Span>
+          <Span color={t.color.thinking}>{label.slice(1)}</Span>
+          {dots ? <Span color={t.ds.leaderQuiet}>{dots}</Span> : null}
+          {tokenLabel ? <Span color={t.ds.numeric}>{` ${tokenLabel}`}</Span> : null}
         </Text>
       </Box>
       {expanded
@@ -353,55 +566,231 @@ function ThinkingBlock({ msg, rowId, t }: { msg: Msg; rowId: string; t: Theme })
   )
 }
 
+function ToolRun({
+  cols,
+  group,
+  runId,
+  t
+}: {
+  cols?: number
+  group: Extract<ToolRunGroup, { kind: 'run' }>
+  runId: string
+  t: Theme
+}) {
+  const visibility = useStore($toolRunVisibility)
+  const expanded = toolRunExpanded(visibility, runId)
+  const voice = VOICE.tool(t)
+  const { duration, slowest, slowestDuration, tally, total } = group.summary
+
+  if (expanded) {
+    return (
+      <Box flexDirection="column" flexShrink={0}>
+        <Box flexShrink={0} onClick={() => toggleToolRun(runId)}>
+          <Text color={t.color.muted} wrap="truncate-end">
+            {'▾ '}
+            <Span bold color={t.color.toolName}>
+              {total} tools
+            </Span>
+          </Text>
+        </Box>
+        {group.lines.map((line, i) => (
+          <ToolStep cols={cols} key={i} line={line} t={t} />
+        ))}
+      </Box>
+    )
+  }
+
+  return (
+    <Box flexDirection="column" flexShrink={0}>
+      <Box flexShrink={0} onClick={() => toggleToolRun(runId)}>
+        <Text color={t.color.muted} wrap="truncate-end">
+          {'▸ '}
+          <Span bold color={t.color.toolName}>
+            {total} tools
+          </Span>
+          {duration > 0 ? <Span dimColor>{`  · ${duration.toFixed(1)}s`}</Span> : null}
+          {tally ? <Span color={t.color.muted}>{`   ${tally}`}</Span> : null}
+        </Text>
+      </Box>
+      {/* The slowest call is the one you would have gone looking for, so it
+          survives the fold rather than being hidden with the rest. */}
+      {slowestDuration > 0 ? (
+        <Text color={t.color.muted} dimColor wrap="truncate-end">
+          {`    slowest ${slowest} ${slowestDuration.toFixed(1)}s`}
+        </Text>
+      ) : null}
+    </Box>
+  )
+}
+
+/**
+ * Compact stateless agent cards on a trail row (mockups 02/03⑥). One ≤3-line
+ * block per archived agent: tinted status dot, name, task summary, then a
+ * violet latest-activity line while it works or its result sentence once
+ * settled, with a dim token/tool budget when the wire reported one. No local
+ * state and no clock — live elapsed time stays in the agent panel — so a
+ * virtualized row can remount freely.
+ */
+function SubagentTrailCards({ items, t }: { items: readonly SubagentProgress[]; t: Theme }) {
+  return (
+    <Box flexDirection="column" flexShrink={0}>
+      {items.map(item => {
+        const model = subagentCardModel(item)
+        const accent = subagentCardAccent(item.status, t)
+
+        return (
+          <Box flexDirection="column" flexShrink={0} key={item.id}>
+            <Text wrap="truncate-end">
+              <Span color={accent}>{'● '}</Span>
+              <Span bold color={t.ds.title}>{model.headline}</Span>
+              {model.summary ? <Span color={t.color.muted}>{` — ${model.summary}`}</Span> : null}
+            </Text>
+            {model.activity ? (
+              <Text color={t.color.thinking} wrap="truncate-end">
+                {`└ ${model.activity}`}
+              </Text>
+            ) : null}
+            {model.result ? (
+              <Text color={t.color.label} wrap="truncate-end">
+                {model.result}
+              </Text>
+            ) : null}
+            {model.budget ? (
+              <Text color={t.color.muted} dimColor wrap="truncate-end">
+                {model.budget}
+              </Text>
+            ) : null}
+          </Box>
+        )
+      })}
+    </Box>
+  )
+}
+
 function ToolTrail({
+  cols,
   leadGap,
   msg,
   msgKey,
+  rail,
+  subagentsVisible,
   t,
   visibility
 }: {
+  cols?: number
   leadGap?: boolean
   msg: Msg
   msgKey?: string
+  rail?: TurnRail
+  subagentsVisible?: boolean
   t: Theme
   visibility: DetailVisibility
 }) {
   const thinking = msg.thinking?.trim()
   const tools = msg.tools ?? []
+  const cards = subagentsVisible && msg.subagents?.length ? msg.subagents : null
 
   return (
-    <Box flexDirection="column" flexShrink={0} marginTop={leadGap ? 1 : 0} paddingLeft={3}>
-      {thinking && visibility.thinking ? <ThinkingBlock msg={msg} rowId={thinkingRowId(msg, msgKey)} t={t} /> : null}
+    <Box flexDirection="row" flexShrink={0} marginTop={leadGap ? 1 : 0}>
+      <RailGutter rail={rail} t={t} />
+      <Box flexDirection="column" flexGrow={1} minWidth={0} paddingLeft={2}>
+      {thinking && visibility.thinking ? (
+        <ThinkingBlock cols={cols} msg={msg} rowId={thinkingRowId(msg, msgKey)} t={t} />
+      ) : null}
 
-      {visibility.tools ? tools.map((line, i) => <ToolStep key={i} line={line} t={t} />) : null}
+      {visibility.tools
+        ? groupToolRun(tools).map((group, i) =>
+            group.kind === 'row' ? (
+              <ToolStep cols={cols} key={i} line={group.line} t={t} />
+            ) : (
+              <ToolRun cols={cols} group={group} key={i} runId={`${thinkingRowId(msg, msgKey)}:run${i}`} t={t} />
+            )
+          )
+        : null}
+
+      {/* Archived spawn tree (mockup element ⑥): one compact card per agent,
+          painted after the turn's tool rows. Height is mirrored by the
+          estimator via lib/subagentCards.subagentCardRows. */}
+      {cards ? <SubagentTrailCards items={cards} t={t} /> : null}
+      </Box>
+    </Box>
+  )
+}
+
+/** Append the closing ledger when this row is the last of its turn. */
+function withLedger(
+  body: ReactNode,
+  rail: TurnRail | undefined,
+  tools: number,
+  seconds: number,
+  t: Theme
+) {
+  if (rail !== 'end') {
+    return body
+  }
+
+  return (
+    <Box flexDirection="column" flexShrink={0}>
+      {body}
+      <TurnLedger seconds={seconds} t={t} tools={tools} />
     </Box>
   )
 }
 
 function MessageLineView({
+  cols,
   leadGap,
   msg,
   msgKey,
-  t
+  rail,
+  t,
+  turnSeconds = 0,
+  turnTools = 0
 }: {
+  cols?: number
   leadGap?: boolean
   msg: Msg
   msgKey?: string
+  rail?: TurnRail
   t: Theme
+  turnSeconds?: number
+  turnTools?: number
 }) {
   const visibility = detailVisibility(useStore($uiDetailVisibility))
-  const hasVisibleDetails = messageHasVisibleDetails(msg, visibility)
+  // Agent cards ride the same /details gate as the other trail sections, but
+  // resolve it through $subagentCardsVisible (see above) and count as visible
+  // detail on their own — a trail carrying only a spawn tree must paint.
+  const subagentsVisible = useStore($subagentCardsVisible)
+  const hasSubagentCards = subagentsVisible && Boolean(msg.subagents?.length)
+  const hasVisibleDetails = hasSubagentCards || messageHasVisibleDetails(msg, visibility)
 
   if (msg.kind === 'intro') {
     return null
   }
 
   if (msg.kind === 'trail') {
-    if (!trailHasRenderableContent(msg) || !hasVisibleDetails) {
+    // trailHasRenderableContent predates inline agent cards and cannot see
+    // `subagents`; cards alone keep the row alive.
+    if ((!trailHasRenderableContent(msg) && !hasSubagentCards) || !hasVisibleDetails) {
       return null
     }
 
-    return <ToolTrail leadGap={leadGap} msg={msg} msgKey={msgKey} t={t} visibility={visibility} />
+    return withLedger(
+      <ToolTrail
+        cols={cols}
+        leadGap={leadGap}
+        msg={msg}
+        msgKey={msgKey}
+        rail={rail}
+        subagentsVisible={subagentsVisible}
+        t={t}
+        visibility={visibility}
+      />,
+      rail,
+      turnTools,
+      turnSeconds,
+      t
+    )
   }
 
   if (msg.role === 'user') {
@@ -409,16 +798,25 @@ function MessageLineView({
   }
 
   if (msg.role === 'assistant') {
-    return hasVisibleDetails ? (
+    return withLedger(hasVisibleDetails ? (
       <Box flexDirection="column" flexShrink={0}>
-        <ToolTrail leadGap={leadGap} msg={msg} msgKey={msgKey} t={t} visibility={visibility} />
+        <ToolTrail
+          cols={cols}
+          leadGap={leadGap}
+          msg={msg}
+          msgKey={msgKey}
+          rail={rail}
+          subagentsVisible={subagentsVisible}
+          t={t}
+          visibility={visibility}
+        />
         {/* The trail already opened the band, so the prose inside it never
             adds a second gap. */}
-        {msg.text ? <AssistantMessage msg={msg} t={t} /> : null}
+        {msg.text ? <AssistantMessage msg={msg} rail={rail} t={t} /> : null}
       </Box>
     ) : (
-      <AssistantMessage leadGap={leadGap} msg={msg} t={t} />
-    )
+      <AssistantMessage leadGap={leadGap} msg={msg} rail={rail} t={t} />
+    ), rail, turnTools, turnSeconds, t)
   }
 
   if (msg.role === 'tool') {
@@ -427,7 +825,7 @@ function MessageLineView({
 
   return hasVisibleDetails ? (
     <Box flexDirection="column" flexShrink={0}>
-      <ToolTrail msg={msg} msgKey={msgKey} t={t} visibility={visibility} />
+      <ToolTrail msg={msg} msgKey={msgKey} subagentsVisible={subagentsVisible} t={t} visibility={visibility} />
       {msg.text ? <SystemMessage msg={msg} t={t} /> : null}
     </Box>
   ) : (

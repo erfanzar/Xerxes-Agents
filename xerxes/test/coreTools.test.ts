@@ -115,7 +115,9 @@ test.skipIf(process.platform === 'win32')('exec_command uses direct argv and ret
   await inWorkspace(async workspace => {
     const registry = new ToolRegistry()
     registerCoreTools(registry, { workspaceRoot: workspace })
-    const context = { metadata: {} }
+    // Background-capable tools are session-owned: the daemon always supplies
+    // the owning session id on the execution context.
+    const context = { metadata: {}, sessionId: 'test-session' }
     const executable = Bun.which('printf') ?? 'printf'
 
     const result = JSON.parse(await registry.execute(call('exec_command', {

@@ -2,7 +2,15 @@
 // Licensed under the Apache License, Version 2.0.
 import { describe, expect, it } from 'vitest'
 
-import { DARK_THEME, detectLightMode, fromSkin, LIGHT_THEME, themeForMode } from '../theme.js'
+import {
+  DARK_THEME,
+  detectLightMode,
+  fromSkin,
+  LIGHT_THEME,
+  NOCTURNE_DARK,
+  NOCTURNE_LIGHT,
+  themeForMode
+} from '../theme.js'
 
 describe('detectLightMode', () => {
   it('honors XERXES_TUI_LIGHT boolean first', () => {
@@ -25,46 +33,75 @@ describe('detectLightMode', () => {
   })
 })
 
-describe('Night Standard palette', () => {
-  it('ships a restrained high-contrast dark terminal palette', () => {
-    expect(DARK_THEME.color.primary).toBe('#e6e6e6')
-    expect(DARK_THEME.color.accent).toBe('#d8ae58')
-    expect(DARK_THEME.color.border).toBe('#333333')
-    expect(DARK_THEME.color.statusBg).toBe('#101010')
-    expect(DARK_THEME.color.completionBg).toBe('#111111')
-    expect(DARK_THEME.color.completionCurrentBg).toBe('#1a1a1a')
-    expect(DARK_THEME.color.warn).toBe('#d8ae58')
-    expect(DARK_THEME.color.error).toBe('#dd7c88')
+describe('Nocturne palette', () => {
+  it('derives every product role from a design-system token', () => {
+    // The point of the rewrite: no role holds a hex that is not a step of
+    // the ramp or one of the six voice colours. Spot-checking the roles is
+    // how that stays true — a future edit that reaches for a nearby hex
+    // instead of a token fails here.
+    expect(DARK_THEME.color.primary).toBe(NOCTURNE_DARK.strong)
+    expect(DARK_THEME.color.text).toBe(NOCTURNE_DARK.title)
+    expect(DARK_THEME.color.muted).toBe(NOCTURNE_DARK.meta)
+    expect(DARK_THEME.color.accent).toBe('#6ea8fe')
+    expect(DARK_THEME.color.brandGold).toBe('#6ea8fe')
+    expect(DARK_THEME.color.userBar).toBe('#6ea8fe')
+    expect(DARK_THEME.color.border).toBe(NOCTURNE_DARK.hairline)
+    expect(DARK_THEME.color.statusBg).toBe(NOCTURNE_DARK.screen)
+    expect(DARK_THEME.color.completionBg).toBe(NOCTURNE_DARK.chrome)
+    expect(DARK_THEME.color.completionCurrentBg).toBe(NOCTURNE_DARK.selected)
+    expect(DARK_THEME.color.userBandBg).toBe(NOCTURNE_DARK.workingCardBg)
+    expect(LIGHT_THEME.color.userBandBg).toBe(NOCTURNE_LIGHT.workingCardBg)
     expect(DARK_THEME.brand.name).toBe('XERXES')
     expect(DARK_THEME.brand.prompt).toBe('❯')
-    expect(DARK_THEME.brand.welcome).toBe('Ready for your next command.')
+    expect(DARK_THEME.brand.welcome).toBe('Many agents, one terminal.')
   })
 
-  it('light theme keeps the same color shape with readable darker foregrounds', () => {
+  it('gives each of the six voices exactly one meaning', () => {
+    expect(DARK_THEME.color.accent).toBe(NOCTURNE_DARK.working)
+    expect(DARK_THEME.color.ok).toBe('#57ca85')
+    expect(DARK_THEME.color.error).toBe('#f47067')
+    expect(DARK_THEME.color.warn).toBe('#d8ae58')
+    expect(DARK_THEME.color.system).toBe('#b39cf0')
+    expect(DARK_THEME.color.diffHunk).toBe('#56c8d8')
+
+    // Amber means "a human is required" and nothing else, so it must not be
+    // reachable through any other role. Cyan is hunk headers and nothing
+    // else, for the same reason.
+    const dark = DARK_THEME.color as Record<string, string>
+    const amberRoles = Object.keys(dark).filter(key => dark[key] === NOCTURNE_DARK.needsInput)
+    expect(amberRoles.sort()).toEqual(['statusWarn', 'warn'])
+    const cyanRoles = Object.keys(dark).filter(key => dark[key] === NOCTURNE_DARK.structure)
+    expect(cyanRoles).toEqual(['diffHunk'])
+  })
+
+  it('light theme keeps the same role shape with an inverted ramp', () => {
     expect(Object.keys(LIGHT_THEME.color).sort()).toEqual(Object.keys(DARK_THEME.color).sort())
-    expect(LIGHT_THEME.color.primary).toBe('#172533')
-    expect(LIGHT_THEME.color.accent).toBe('#006f94')
-    expect(LIGHT_THEME.color.text).toBe('#172533')
+    expect(Object.keys(NOCTURNE_LIGHT).sort()).toEqual(Object.keys(NOCTURNE_DARK).sort())
+    expect(LIGHT_THEME.color.primary).toBe(NOCTURNE_LIGHT.strong)
+    expect(LIGHT_THEME.color.text).toBe(NOCTURNE_LIGHT.title)
+    expect(LIGHT_THEME.color.accent).toBe('#1f64b5')
   })
 })
 
 describe('interaction mode palettes', () => {
-  it('uses neutral gray for code and blue, gold, purple for the other modes', () => {
+  it('borrows mode accents from the voice colours and leaves code un-hued', () => {
     const code = themeForMode(DARK_THEME, 'code')
     const researcher = themeForMode(DARK_THEME, 'researcher')
     const plan = themeForMode(DARK_THEME, 'plan')
     const objective = themeForMode(DARK_THEME, 'objective')
 
-    expect(code.color.accent).toBe('#aeb4bb')
-    expect(code.color.statusBg).toBe('#101010')
-    expect(code.color.completionBg).toBe('#111111')
-    expect(code.color.completionCurrentBg).toBe('#1a1a1a')
-    expect(researcher.color.accent).toBe('#6ea8fe')
-    expect(plan.color.accent).toBe('#d8ae58')
-    expect(objective.color.accent).toBe('#b18be8')
+    // Between the ramp's title and secondary steps: present enough to mark a
+    // chip, colourless enough that the default mode adds no hue to a screen.
+    expect(code.color.accent).toBe('#b1b8c1')
+    expect(code.color.statusBg).toBe(NOCTURNE_DARK.screen)
+    expect(code.color.completionBg).toBe(NOCTURNE_DARK.chrome)
+    expect(code.color.completionCurrentBg).toBe(NOCTURNE_DARK.selected)
+    expect(researcher.color.accent).toBe(NOCTURNE_DARK.working)
+    expect(plan.color.accent).toBe(NOCTURNE_DARK.structure)
+    expect(objective.color.accent).toBe(NOCTURNE_DARK.activity)
   })
 
-  it('preserves semantic colors, branding, and the amber Derafsh signal', () => {
+  it('preserves semantic colors, branding, and the semantic warn signal', () => {
     const objective = themeForMode(DARK_THEME, 'objective')
 
     expect(objective.color.ok).toBe(DARK_THEME.color.ok)

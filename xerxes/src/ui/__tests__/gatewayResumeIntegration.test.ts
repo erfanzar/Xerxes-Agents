@@ -180,7 +180,8 @@ describe('GatewayClient resumed transcript integration', () => {
         { role: 'user', text: 'inspect auth' },
         { role: 'assistant', text: 'Let me read the file.', thinking: 'reasoning trace' },
         {
-          context: '{"path":"src/auth.ts"}',
+          // Argument blobs are summarized like live rows: path value, not JSON.
+          context: 'src/auth.ts',
           duration_s: 0.2,
           name: 'ReadFile',
           role: 'tool'
@@ -198,7 +199,7 @@ describe('GatewayClient resumed transcript integration', () => {
       })
       expect(hydrated[2]).toMatchObject({ role: 'assistant', text: 'The flow starts in auth.ts.' })
       expect(hydrated[2]?.tools).toHaveLength(1)
-      expect(hydrated[2]?.tools?.[0]).toContain('Read File("{"path":"src/auth.ts"}")')
+      expect(hydrated[2]?.tools?.[0]).toContain('Read File("src/auth.ts")')
       expect(hydrated[2]?.tools?.[0]).toMatch(/✓$/)
     } finally {
       client.close()

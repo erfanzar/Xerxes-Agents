@@ -6,13 +6,13 @@
 // so the visual identity is not silently replaced by a generic ornament.
 
 import {
+  DARK_DERAFSH_AZURE,
   DARK_DERAFSH_BLUE,
   DARK_DERAFSH_BRIDGE,
-  DARK_DERAFSH_GOLD,
   DARK_DERAFSH_PURPLE,
+  LIGHT_DERAFSH_AZURE,
   LIGHT_DERAFSH_BLUE,
   LIGHT_DERAFSH_BRIDGE,
-  LIGHT_DERAFSH_GOLD,
   LIGHT_DERAFSH_PURPLE,
   type ThemeColors
 } from './theme.js'
@@ -136,6 +136,50 @@ export function compactBrailleRows(lines: readonly string[]): string[] {
 
 export const DERAFSH_KAVIANI_COMPACT_ART = Object.freeze(compactBrailleRows(DERAFSH_KAVIANI_ART))
 
+/**
+ * The wordmark, in block letters.
+ *
+ * The canvas draws XERXES at 40px over 13px body text — three times the body
+ * size, dominating the screen. A terminal has exactly one font size, so the
+ * only way to say "three times bigger" is to spend three times the rows.
+ * Letter-spacing a 13px word does not read as a wordmark; it reads as a word
+ * with gaps in it, which is what the first pass shipped.
+ *
+ * Six rows, one glyph per letter. A brand name using a letter with no glyph
+ * falls back to the letter-spaced form — better a modest wordmark than a hole
+ * where a letter should be.
+ */
+const WORDMARK_GLYPHS: Readonly<Record<string, readonly string[]>> = {
+  X: ['██╗  ██╗', '╚██╗██╔╝', ' ╚███╔╝ ', ' ██╔██╗ ', '██╔╝ ██╗', '╚═╝  ╚═╝'],
+  E: ['███████╗', '██╔════╝', '█████╗  ', '██╔══╝  ', '███████╗', '╚══════╝'],
+  R: ['██████╗ ', '██╔══██╗', '██████╔╝', '██╔══██╗', '██║  ██║', '╚═╝  ╚═╝'],
+  S: ['███████╗', '██╔════╝', '███████╗', '╚════██║', '███████║', '╚══════╝']
+}
+
+export const WORDMARK_ROWS = 6
+
+/** True when every letter of `name` can be drawn in block form. */
+export const canRenderWordmark = (name: string): boolean =>
+  name.length > 0 && [...name.toUpperCase()].every(letter => letter in WORDMARK_GLYPHS)
+
+/**
+ * Render `name` as `WORDMARK_ROWS` block-letter rows.
+ *
+ * Returns [] when a letter has no glyph; callers fall back to the
+ * letter-spaced form rather than printing a gap.
+ */
+export function wordmarkRows(name: string): string[] {
+  const letters = [...name.toUpperCase()]
+
+  if (!canRenderWordmark(name)) {
+    return []
+  }
+
+  return Array.from({ length: WORDMARK_ROWS }, (_, row) =>
+    letters.map(letter => WORDMARK_GLYPHS[letter]![row]!).join('')
+  )
+}
+
 const HEX_COLOR_RE = /^#[0-9a-f]{6}$/i
 const TRUE_RE = /^(?:1|true|yes|on)$/i
 const FALSE_RE = /^(?:0|false|no|off)$/i
@@ -185,15 +229,18 @@ const isLightSurface = (color: string): boolean => {
 
 const colorOr = (color: string, fallback: string): string => (HEX_COLOR_RE.test(color) ? color : fallback)
 
-/** A cyclic, theme-aware blue → purple → gold palette for the default mark. */
+/** A cyclic, theme-aware blue → purple → deep-blue palette for the default mark. */
 export function derafshGradientPalette(colors: ThemeColors): readonly string[] {
   const light = isLightSurface(colors.statusBg)
   const blue = light ? LIGHT_DERAFSH_BLUE : DARK_DERAFSH_BLUE
   const purple = colorOr(colors.system, light ? LIGHT_DERAFSH_PURPLE : DARK_DERAFSH_PURPLE)
-  const gold = colorOr(colors.warn, light ? LIGHT_DERAFSH_GOLD : DARK_DERAFSH_GOLD)
+  // The third stop follows the brand token (v3: lapis blue). It deliberately
+  // does NOT follow `warn` any more — amber is a semantic warning colour and
+  // must not tint the emblem.
+  const azure = colorOr(colors.brandGold, light ? LIGHT_DERAFSH_AZURE : DARK_DERAFSH_AZURE)
   const bridge = light ? LIGHT_DERAFSH_BRIDGE : DARK_DERAFSH_BRIDGE
 
-  return [blue, purple, gold, bridge]
+  return [blue, purple, azure, bridge]
 }
 
 const gradientColor = (palette: readonly string[], position: number): string => {
@@ -202,6 +249,48 @@ const gradientColor = (palette: readonly string[], position: number): string => 
   const next = (index + 1) % palette.length
 
   return mixHex(palette[index]!, palette[next]!, scaled - Math.floor(scaled))
+}
+
+/**
+ * Sample the Derafsh gradient at `steps` evenly spaced, non-repeating stops for
+ * static consumers such as the per-letter home wordmark. The animated frames
+ * keep their own cyclic sampling, which is deliberately untouched.
+ *
+ * Stops are interpolated across the UNIQUE Derafsh hues only. In the shipped v3
+ * theme `brandGold` equals the lapis blue, so a naive cyclic walk revisits the
+ * opening hue mid-word; deduplicating first keeps every letter of the word on a
+ * strictly advancing blue → purple → azure blend no matter which skin is live.
+ */
+export function derafshGradientRamp(colors: ThemeColors, steps: number): string[] {
+  const count = Math.trunc(steps)
+
+  if (count <= 0) {
+    return []
+  }
+
+  const stops: string[] = []
+  for (const stop of derafshGradientPalette(colors)) {
+    if (!stops.includes(stop)) {
+      stops.push(stop)
+    }
+  }
+
+  const lastStop = stops.length - 1
+
+  return Array.from({ length: count }, (_, index) => {
+    if (count === 1 || lastStop <= 0) {
+      return stops[0]!
+    }
+
+    // `index / count` never reaches 1, mirroring the wave's cyclic convention:
+    // the final letter sits just short of the closing hue instead of repeating
+    // the first one.
+    const scaled = (index / count) * lastStop
+    const low = Math.floor(scaled)
+    const high = Math.min(low + 1, lastStop)
+
+    return mixHex(stops[low]!, stops[high]!, scaled - low)
+  })
 }
 
 const DERAFSH_WAVE_PRIMARY_TURNS = 1.35

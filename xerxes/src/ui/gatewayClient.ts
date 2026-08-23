@@ -21,11 +21,19 @@ import { fileURLToPath } from 'node:url'
 
 import {
   adaptDaemonEvent,
+  looksLikeInternalUserPrompt,
   sessionInfoFromInit,
   transcriptFromStoredMessages,
   usageFromStatus
 } from './gatewayAdapter.js'
-import type { AnyEvent, GatewayTranscriptMessage, LiveSessionStatus } from './gatewayTypes.js'
+import type {
+  AnyEvent,
+  GatewayTranscriptMessage,
+  LiveSessionStatus,
+  SessionInflightTurn,
+  SessionInflightTool,
+  SubagentSnapshotPayload
+} from './gatewayTypes.js'
 import { controlChannelPath, isWindows } from './lib/hostPlatform.js'
 import { ImageAttachmentError, loadImageAttachment, resolveAttachmentPath } from './lib/imageAttachment.js'
 import type { SessionInfo, Usage } from './types.js'
@@ -537,11 +545,20 @@ export class GatewayClient extends EventEmitter {
     await this.detachSocketSilently()
     const mismatch = `Bun daemon build mismatch (running ${actualBuildId || 'unknown'}, expected ${expectedBuildId})`
     if (decision === 'reject' || daemonPid === undefined) {
-      const reason = activeTurns || activeSubagents === undefined || activeSubagents > 0
-        ? 'Its active session or subagent state is busy or could not be verified'
-        : 'The connected process is custom or could not be proven local'
+      // Name the remedy, and name the right one. This used to end every
+      // rejection with "restart it explicitly when idle" regardless of why
+      // it was rejected — which is actively misleading for a daemon that is
+      // already idle and was only refused because its provenance could not
+      // be proven. It also never said *how*, leaving you to find the pid.
+      const busy = activeTurns || activeSubagents === undefined || activeSubagents > 0
+      const stop = daemonPid === undefined
+        ? `find its pid in ${pidPath} and stop that process`
+        : `stop it with: kill ${daemonPid}`
+
       throw new Error(
-        `${mismatch}. ${reason}, so Xerxes left it running; restart it explicitly when idle.`
+        busy
+          ? `${mismatch}. A session or subagent is still working, so Xerxes left the daemon running. Retry once it goes idle, or ${stop}, then relaunch.`
+          : `${mismatch}. The daemon was not started by this Xerxes install, so Xerxes will not stop it for you. To continue, ${stop}, then relaunch.`
       )
     }
 
@@ -1225,14 +1242,19 @@ export class GatewayClient extends EventEmitter {
       this.activeSessionKey = nextSessionKey
       this.rememberSessionKey(sessionId, nextSessionKey)
       const status = liveSessionStatus(session)
+      const subagentSnapshots = subagentSnapshotsFromSession(session)
       return {
         info: await this.sessionInfoFromInitialize(raw, session, captured),
+        // A resumed session can still be mid-turn (reattach to live work);
+        // forward the inflight snapshot exactly like session.activate.
+        inflight: inflightFromSession(session),
         message_count: messageCount,
         messages,
         resumed: sessionId,
         running: status !== 'idle',
         session_id: sessionId,
-        status
+        status,
+        ...(subagentSnapshots ? { subagent_snapshots: subagentSnapshots } : {})
       }
     } catch (error) {
       finishCapture()
@@ -1266,20 +1288,13 @@ export class GatewayClient extends EventEmitter {
 
     this.activeSessionKey = nextSessionKey
     this.rememberSessionKey(sessionId, nextSessionKey)
-    const inflight = session.inflight && typeof session.inflight === 'object'
-      ? session.inflight as RpcObject
-      : undefined
+    const inflight = inflightFromSession(session)
+    const subagentSnapshots = subagentSnapshotsFromSession(session)
     const messages = transcriptFromStoredMessages(session.transcript)
     const status = liveSessionStatus(session)
     return {
       info: await this.sessionInfoFromInitialize(raw, session, { info: null, usage: null }),
-      inflight: inflight
-        ? {
-            assistant: String(inflight.assistant ?? ''),
-            streaming: Boolean(inflight.streaming),
-            user: String(inflight.user ?? '')
-          }
-        : null,
+      inflight,
       message_count: Number(session.message_count ?? session.messages ?? 0),
       // session.open returns the already-live transcript without competing
       // with its running turn.
@@ -1287,7 +1302,8 @@ export class GatewayClient extends EventEmitter {
       running: status !== 'idle',
       session_id: sessionId,
       session_key: nextSessionKey,
-      status
+      status,
+      ...(subagentSnapshots ? { subagent_snapshots: subagentSnapshots } : {})
     }
   }
 
@@ -1302,7 +1318,10 @@ export class GatewayClient extends EventEmitter {
       const lastActive = Number(row.last_active)
       const status = liveSessionStatus(row)
       const inflight = isRecord(row.inflight) ? row.inflight : undefined
-      const activity = optionalTrimmedText(inflight?.user)
+      const activityText = optionalTrimmedText(inflight?.user)
+      // Internal prompts (skill activation, compaction, steers) are runtime
+      // scaffolding; they must never become the card's visible activity line.
+      const activity = activityText && !looksLikeInternalUserPrompt(activityText) ? activityText : undefined
       const title = optionalTrimmedText(row.title) ?? ''
       return {
         ...optionalSessionLinkFields(row),
@@ -1363,19 +1382,14 @@ export class GatewayClient extends EventEmitter {
     if (!session) {
       throw new Error(`live session not found: ${sessionId}`)
     }
-    const inflight = isRecord(session.inflight) ? session.inflight : undefined
+    const subagentSnapshots = subagentSnapshotsFromSession(session)
 
     return {
-      inflight: inflight
-        ? {
-            assistant: String(inflight.assistant ?? ''),
-            streaming: Boolean(inflight.streaming),
-            user: String(inflight.user ?? '')
-          }
-        : null,
+      inflight: inflightFromSession(session),
       messages: transcriptFromStoredMessages(session.transcript),
       session_id: String(session.id ?? sessionId),
-      status: liveSessionStatus(session)
+      status: liveSessionStatus(session),
+      ...(subagentSnapshots ? { subagent_snapshots: subagentSnapshots } : {})
     }
   }
 
@@ -1764,6 +1778,77 @@ export class GatewayClient extends EventEmitter {
       this.stderrRing.shift()
     }
   }
+}
+
+/**
+ * Map the daemon's inflight turn snapshot. The user line is filtered like the
+ * transcript: an internal prompt (skill activation, compaction request, …)
+ * is runtime scaffolding, never the chat's visible activity.
+ */
+function inflightFromSession(session: RpcObject): null | SessionInflightTurn {
+  const inflight = isRecord(session.inflight) ? session.inflight : undefined
+  if (!inflight) {
+    return null
+  }
+  const user = String(inflight.user ?? '')
+  const tools = Array.isArray(inflight.tools)
+    ? inflight.tools.flatMap((row): SessionInflightTool[] => {
+        if (!isRecord(row)) {
+          return []
+        }
+        const name = optionalTrimmedText(row.name) ?? 'tool'
+        const id = optionalTrimmedText(row.id)
+        const args = optionalTrimmedText(row.arguments)
+        const error = optionalTrimmedText(row.error)
+        const durationMs = typeof row.duration_ms === 'number' && Number.isFinite(row.duration_ms)
+          ? row.duration_ms
+          : undefined
+
+        return [{
+          ...(args ? { arguments: args } : {}),
+          ...(durationMs === undefined ? {} : { duration_ms: durationMs }),
+          ...(error ? { error } : {}),
+          ...(id ? { id } : {}),
+          name,
+          ...(typeof row.ok === 'boolean' ? { ok: row.ok } : {})
+        }]
+      })
+    : undefined
+  const startedAt = typeof inflight.started_at === 'number' && Number.isFinite(inflight.started_at)
+    ? inflight.started_at
+    : undefined
+  const thinking = optionalTrimmedText(inflight.thinking)
+
+  return {
+    assistant: String(inflight.assistant ?? ''),
+    ...(startedAt === undefined ? {} : { started_at: startedAt }),
+    streaming: Boolean(inflight.streaming),
+    ...(thinking ? { thinking } : {}),
+    ...(tools?.length ? { tools } : {}),
+    user: looksLikeInternalUserPrompt(user) ? '' : user
+  }
+}
+
+/** Forward the daemon's persisted subagent manifest rows, dropping malformed entries. */
+function subagentSnapshotsFromSession(session: RpcObject): SubagentSnapshotPayload[] | undefined {
+  const rows = Array.isArray(session.subagent_snapshots) ? session.subagent_snapshots : undefined
+  if (!rows?.length) {
+    return undefined
+  }
+  const snapshots = rows.flatMap((row): SubagentSnapshotPayload[] => {
+    if (!isRecord(row)) {
+      return []
+    }
+    const id = optionalTrimmedText(row.id)
+    const status = optionalTrimmedText(row.status)
+    if (!id || !status) {
+      return []
+    }
+
+    return [{ ...(row as Record<string, unknown>), id, status } as SubagentSnapshotPayload]
+  })
+
+  return snapshots.length ? snapshots : undefined
 }
 
 function optionalSessionLinkFields(row: RpcObject): RpcObject {

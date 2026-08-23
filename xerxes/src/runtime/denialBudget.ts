@@ -1,6 +1,8 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { renderIntervention } from './interventions.js'
+
 /**
  * Consecutive refused tool calls tolerated before a turn stops.
  *
@@ -86,17 +88,15 @@ export class DenialBudget {
  * documents that a policy denial is final, and the daemon frequently runs with
  * no interaction board attached, so turning a denial into a prompt would either
  * hang or quietly re-ask a question nobody can answer. The turn stops and says
- * which rule refused what.
+ * which rule refused what. Rendering lives in the shared intervention catalog
+ * so every loop guard stays byte-consistent.
  */
 export function denialBudgetStopText(budget: DenialBudget): string {
-  const last = budget.lastDenial
-  const detail = last === undefined
-    ? ''
-    : ` The last refusal was ${describeKind(last.kind)} on ${last.toolName}.`
-  return (
-    `\n[Stopped: ${budget.used} consecutive tool calls were refused with no successful tool `
-    + `execution in between; ending the turn instead of retrying a refusal loop.${detail}]`
-  )
+  return renderIntervention({
+    kind: 'denial-budget',
+    ...(budget.lastDenial === undefined ? {} : { lastDenial: budget.lastDenial }),
+    used: budget.used,
+  })
 }
 
 /** Stable audit pattern label for an exhausted denial budget. */
@@ -122,17 +122,6 @@ export function denialBudgetFromConfig(
     : configured
   if (raw === undefined || raw === null || raw === '') return new DenialBudget()
   return new DenialBudget(parseMaximum(raw))
-}
-
-function describeKind(kind: DenialKind): string {
-  switch (kind) {
-    case 'cancelled':
-      return 'a cancellation'
-    case 'permission_rejected':
-      return 'a rejected permission prompt'
-    case 'policy_denied':
-      return 'a policy denial'
-  }
 }
 
 /** Non-positive is an explicit opt-out; anything else must be a real integer. */

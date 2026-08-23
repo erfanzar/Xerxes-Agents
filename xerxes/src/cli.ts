@@ -96,8 +96,10 @@ import {
 } from "./runtime/sessionExport.js";
 import { createMacOSComputerUseToolOptions } from "./tools/computerUse/macosPort.js";
 import {
+  createLlmPlanGenerator,
   registerClaudeAgentTools,
   registerClaudeSkillTool,
+  registerClaudeWorkflowTools,
   registerCoreTools,
 } from "./tools/index.js";
 import type { MemoryToolContext } from "./tools/memoryTools.js";
@@ -890,8 +892,25 @@ function daemonRuntime(
       backgroundAgents: subagentHost.turnCoordinator,
       manager: subagentHost.managerPort,
     });
+    // Deterministic multi-agent orchestration: PlanTool decomposes an explicit
+    // objective into dependency-ordered steps and executes them through the
+    // same managed subagent pool (depth caps, cohort join, persistence).
+    registerClaudeWorkflowTools(tools, {
+      ...(agentDefinitions.size ? { agentDefinitions: [...agentDefinitions.values()] } : {}),
+      ...(host.skillRegistry ? { skillRegistry: host.skillRegistry } : {}),
+      planGenerator: createLlmPlanGenerator(llm, { model: connection.model }),
+      subagentManager: subagentHost.managerPort,
+    });
     activeToolCount = tools.definitions().length;
     return new AgentTurnRunner({
+      // The profile's provider, carried explicitly so nothing downstream has
+      // to infer it from the model id. An OpenRouter id like
+      // `stealth/ox-alpha` has a vendor before the slash, not a routing
+      // prefix, and inferring one threw on every turn.
+      providerOverrides: {
+        ...(connection.provider ? { provider: connection.provider } : {}),
+        ...(connection.baseUrl ? { base_url: connection.baseUrl } : {}),
+      },
       agentDefinitions,
       agentMemory: (session) => memoryForProject(
         session.metadata.session_kind === "subagent" &&
@@ -932,6 +951,8 @@ function daemonRuntime(
       ...(connection.topK !== undefined ? { topK: connection.topK } : {}),
       tools: tools.definitions(),
       toolExecutor: tools,
+      // Per-tool usage-policy sections ride with the visible tool surface.
+      toolRegistry: tools,
       toolCapabilities: (name, agentId) => tools.capabilities(name, agentId),
       // Spill oversized tool results outside the user's repo. The bootstrap
       // prompt has always claimed this happens; supplying the root is what

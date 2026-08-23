@@ -4,6 +4,7 @@ import { TERMUX_TUI_MODE } from '../config/env.js'
 import type { Msg } from '../types.js'
 
 import { transcriptBodyWidth } from './inputMetrics.js'
+import { collapsedRunHeight, groupToolRun } from './toolRun.js'
 import { stringWidth } from './terminalRuntime.opentui.js'
 
 const hashText = (text: string) => {
@@ -74,6 +75,10 @@ export const wrappedLines = (text: string, width: number, maxLines: number = MAX
   return n
 }
 
+/** Rows a settled trail paints once its runs are folded. */
+const collapsedTrailHeight = (tools: readonly string[]): number =>
+  groupToolRun(tools).reduce((rows, group) => rows + collapsedRunHeight(group), 0)
+
 export const estimatedMsgHeight = (
   msg: Msg,
   cols: number,
@@ -81,6 +86,7 @@ export const estimatedMsgHeight = (
     compact,
     details,
     leadGap = false,
+    railEnd = false,
     thinkingExpanded = false,
     thinkingVisible = details,
     toolsVisible = details,
@@ -89,6 +95,8 @@ export const estimatedMsgHeight = (
     compact: boolean
     details: boolean
     leadGap?: boolean
+    /** This row closes a turn, so it also paints the ledger row. */
+    railEnd?: boolean
     subagentsVisible?: boolean
     thinkingExpanded?: boolean
     thinkingVisible?: boolean
@@ -134,8 +142,11 @@ export const estimatedMsgHeight = (
       // Thinking renders collapsed by default: a single `▸ thinking` header
       // row. Only a per-row toggle (or the global Ctrl+T) expands it to the
       // full wrapped trace — mirror that so virtual offsets track the paint.
+      // Tool rows are not one-per-call any more: a consecutive run of settled
+      // successful calls folds to a summary. Estimate the collapsed height,
+      // which is what paints until someone clicks a run open.
       h +=
-        (hasVisibleTools ? (msg.tools?.length ?? 0) : 0) +
+        (hasVisibleTools ? collapsedTrailHeight(msg.tools ?? []) : 0) +
         (hasVisibleThinking ? 1 + (thinkingExpanded ? wrappedLines(msg.thinking ?? '', bodyWidth) : 0) : 0)
 
       if (msg.role === 'assistant' && /\S/.test(msg.text)) {
@@ -160,6 +171,12 @@ export const estimatedMsgHeight = (
   // result here so the estimate matches the rendered marginTop before Yoga
   // remeasures. user / diff / slash never set this — they own their margins.
   if (leadGap) {
+    h++
+  }
+
+  // The turn's closing ledger is one row, painted below the last message of
+  // the turn rather than as a message of its own.
+  if (railEnd) {
     h++
   }
 

@@ -49,13 +49,14 @@ describe('visibleTranscriptMessages', () => {
   it('keeps the startup intro until a real transcript message exists', () => {
     const intro = { kind: 'intro' as const, role: 'system' as const, text: '' }
     const provider = { kind: 'slash' as const, role: 'system' as const, text: '/provider' }
+    const config = { kind: 'config' as const, role: 'system' as const, text: 'model → k3-256k' }
     const user = { role: 'user' as const, text: 'hello' }
 
     expect(visibleTranscriptMessages([intro])).toEqual([intro])
-    expect(hasTranscriptContent([intro, provider])).toBe(false)
-    expect(visibleTranscriptMessages([intro, provider])).toEqual([intro])
-    expect(hasTranscriptContent([intro, provider, user])).toBe(true)
-    expect(visibleTranscriptMessages([intro, provider, user])).toEqual([provider, user])
+    expect(hasTranscriptContent([intro, provider, config])).toBe(false)
+    expect(visibleTranscriptMessages([intro, provider, config])).toEqual([intro])
+    expect(hasTranscriptContent([intro, provider, config, user])).toBe(true)
+    expect(visibleTranscriptMessages([intro, provider, config, user])).toEqual([provider, config, user])
   })
 
   it('reveals command echoes when a provider flow emits a result', () => {

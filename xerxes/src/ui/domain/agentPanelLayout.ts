@@ -1,7 +1,11 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-export const AGENT_SIDEBAR_BREAKPOINT = 118
+/**
+ * Terminal width the agents rail needs before it mounts (mockup 11: the rail
+ * lives at ≥96 cols; below it F6 is the only path).
+ */
+export const AGENT_SIDEBAR_BREAKPOINT = 96
 
 /** Show the wide-terminal rail only after delegation has produced something to inspect. */
 export const shouldShowAgentSidebar = (terminalWidth: number, agentCount = 0): boolean =>

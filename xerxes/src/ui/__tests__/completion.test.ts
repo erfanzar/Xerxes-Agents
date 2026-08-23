@@ -10,6 +10,7 @@ import {
   completionMenuRows,
   completionMeta,
   cycleIndex,
+  rankCompletionItems,
   shouldRequestCompletion
 } from '../lib/completion.js'
 
@@ -23,10 +24,10 @@ describe('completionMenuRows', () => {
   })
 
   it('shrinks with the terminal and bottoms out at zero', () => {
-    expect(completionMenuRows(40, 20)).toBe(4)
+    expect(completionMenuRows(40, 24)).toBe(5)
     // Below the chrome reserve there is no room at all; the menu hides
     // rather than shoving the composer and footer off-screen.
-    expect(completionMenuRows(40, 16)).toBe(0)
+    expect(completionMenuRows(40, 19)).toBe(0)
     expect(completionMenuRows(40, 8)).toBe(0)
   })
 })
@@ -114,5 +115,57 @@ describe('cycleIndex', () => {
     expect(cycleIndex(2, 3, 1)).toBe(0)
     expect(cycleIndex(0, 3, -1)).toBe(2)
     expect(cycleIndex(0, 0, 1)).toBe(0)
+  })
+})
+
+describe('rankCompletionItems', () => {
+  const item = (display: string, meta?: string): { display: string; group: string; meta?: string; text: string } => ({
+    display,
+    ...(meta ? { meta } : {}),
+    group: 'skills',
+    text: `/${display}`
+  })
+
+  // The mockup's ladder: "fuzzy: prefix → substring → skill body".
+  it('orders exact, then prefix, then substring, then description matches', () => {
+    const ranked = rankCompletionItems(
+      [
+        item('code-audit', 'runs a review of the tree'), // description-only hit
+        item('pre-review', 'nothing to see here'), // substring-of-name hit
+        item('review-pr', 'pull request checks'), // name-prefix hit
+        item('review', 'review things') // exact hit
+      ],
+      'review'
+    )
+
+    expect(ranked.map(entry => entry.display)).toEqual(['review', 'review-pr', 'pre-review', 'code-audit'])
+  })
+
+  it('matches descriptions case-insensitively and never ahead of names', () => {
+    const ranked = rankCompletionItems(
+      [item('model', 'switch the active model'), item('docx', 'Word DOCUMENTS and templates')],
+      'documents'
+    )
+
+    // The shouty description still lands in its tier, below nothing here but
+    // above the total non-match.
+    expect(ranked.map(entry => entry.display)).toEqual(['docx', 'model'])
+  })
+
+  it('ranks items matching neither name nor description below description matches', () => {
+    const ranked = rankCompletionItems(
+      [item('model', 'switch the active model'), item('docx', 'Word documents')],
+      'documents'
+    )
+
+    expect(ranked.map(entry => entry.display)).toEqual(['docx', 'model'])
+  })
+
+  it('keeps the bare-slash view untouched when nothing has been typed', () => {
+    const ranked = rankCompletionItems([item('undo'), item('btw', 'before the wind')], '')
+
+    // Empty query: everything sits in one tier, so the group/length/name
+    // tie-breaks still produce a scannable order — no description shuffling.
+    expect(ranked.map(entry => entry.display)).toEqual(['btw', 'undo'])
   })
 })

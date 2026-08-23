@@ -28,10 +28,10 @@ if (!body.includes('createRequire as __cr')) {
 if (!body.includes('@opentui/core')) {
   throw new Error('dist/ui/entry.js is not the OpenTUI build')
 }
-if (!body.includes('Ready for your next command.')) {
+if (!body.includes('Many agents, one terminal.')) {
   throw new Error('dist/ui/entry.js is not the current Xerxes UI build')
 }
-if (!body.includes('Choose a model with /provider')) {
+if (!body.includes('START WITH')) {
   throw new Error('dist/ui/entry.js is missing the startup welcome screen')
 }
 

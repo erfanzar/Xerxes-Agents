@@ -10,11 +10,12 @@ import {
 } from '../opentui/overlayLayout.js'
 
 describe('overlayPanelSize', () => {
-  it('gives a tall terminal most of its rows, capped by the spec', () => {
+  it('gives a tall terminal most of its rows, with no low cap on the agent view', () => {
     // The F6 panel used to compute its own margin and land on 20 rows of a
-    // 42-row terminal — a mostly empty box for a long list.
+    // 42-row terminal — a mostly empty box for a long list. Mockup 04's agent
+    // view is a large surface: it keeps the standard gutter and nothing else.
     expect(overlayPanelSize({ height: 42, width: 140 }, OVERLAY_PANEL_SPECS.agents).height).toBe(38)
-    expect(overlayPanelSize({ height: 60, width: 140 }, OVERLAY_PANEL_SPECS.agents).height).toBe(44)
+    expect(overlayPanelSize({ height: 60, width: 140 }, OVERLAY_PANEL_SPECS.agents).height).toBe(56)
   })
 
   it('keeps a gutter rather than filling the terminal edge to edge', () => {

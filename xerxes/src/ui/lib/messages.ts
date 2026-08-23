@@ -55,19 +55,25 @@ export const promoteSlashToUserMessage = (prev: readonly Msg[], command: string)
 /**
  * The intro is a startup-only screen. Keep it in local session state for
  * metadata refreshes, but omit it as soon as the transcript has real content.
- * A slash row only records a local command dispatch: it is not content on its
- * own, so opening an interactive command must leave the startup screen intact.
+ * A slash row only records a local command dispatch, while a config row is a
+ * successful local preference change. Neither is conversation content on its
+ * own, so opening a picker or selecting a model must leave the startup screen
+ * intact until the user actually starts a turn.
  */
 export const hasTranscriptContent = (items: readonly Msg[]): boolean =>
   items.some(
-    item => item.kind !== 'intro' && item.kind !== 'slash' && (item.kind !== 'trail' || trailHasRenderableContent(item))
+    item =>
+      item.kind !== 'config' &&
+      item.kind !== 'intro' &&
+      item.kind !== 'slash' &&
+      (item.kind !== 'trail' || trailHasRenderableContent(item))
   )
 
 export const visibleTranscriptMessages = (items: readonly Msg[]): Msg[] => {
   const renderable = (item: Msg) => item.kind !== 'trail' || trailHasRenderableContent(item)
 
   if (!hasTranscriptContent(items)) {
-    return items.filter(item => item.kind !== 'slash' && renderable(item))
+    return items.filter(item => item.kind !== 'config' && item.kind !== 'slash' && renderable(item))
   }
 
   return items.filter(item => item.kind !== 'intro' && renderable(item))

@@ -11,7 +11,7 @@ import {
   TaskCreator,
   getNextPlanSteps,
   parseExecutionPlan,
-} from '../src/index.js'
+} from '../src/cortex/index.js'
 
 test('Cortex planner parses constrained XML, observes dependency order, and resolves prior results', async () => {
   const plan = parseExecutionPlan(`

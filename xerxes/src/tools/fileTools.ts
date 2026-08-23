@@ -246,14 +246,23 @@ const FILE_WRITE_CAPABILITIES = Object.freeze({
   readOnly: false,
 } as const)
 
+/**
+ * The freshness gate every writer shares, stated where the model meets the
+ * tool instead of in a central prompt that can drift from the registry.
+ */
+const FILE_WRITE_GUIDANCE =
+  'Writes are checked against your last read: ReadFile the target immediately before writing or '
+    + 'editing it, and re-read after anything outside this session may have changed it — a stale '
+    + 'read is refused rather than silently overwriting newer work.'
+
 export function registerFileTools(registry: ToolRegistry, paths: WorkspacePathResolver): void {
   registry.register(READ_FILE_DEFINITION, (inputs, context) => readFile(inputs, paths, context), 'default', READ_ONLY_FILE_CAPABILITIES)
-  registry.register(WRITE_FILE_DEFINITION, (inputs, context) => writeFile(inputs, paths, context), 'default', FILE_WRITE_CAPABILITIES)
+  registry.register(WRITE_FILE_DEFINITION, (inputs, context) => writeFile(inputs, paths, context), 'default', FILE_WRITE_CAPABILITIES, FILE_WRITE_GUIDANCE)
   registry.register(APPEND_FILE_DEFINITION, inputs => appendFile(inputs, paths), 'default', FILE_WRITE_CAPABILITIES)
   registry.register(LIST_DIR_DEFINITION, inputs => listDirectory(inputs, paths), 'default', READ_ONLY_FILE_CAPABILITIES)
   registry.register(GLOB_TOOL_DEFINITION, inputs => globFiles(inputs, paths), 'default', READ_ONLY_FILE_CAPABILITIES)
   registry.register(GREP_TOOL_DEFINITION, inputs => grepFiles(inputs, paths), 'default', READ_ONLY_FILE_CAPABILITIES)
-  registry.register(FILE_EDIT_TOOL_DEFINITION, (inputs, context) => editFile(inputs, paths, context), 'default', FILE_WRITE_CAPABILITIES)
+  registry.register(FILE_EDIT_TOOL_DEFINITION, (inputs, context) => editFile(inputs, paths, context), 'default', FILE_WRITE_CAPABILITIES, FILE_WRITE_GUIDANCE)
 }
 
 export async function readFile(

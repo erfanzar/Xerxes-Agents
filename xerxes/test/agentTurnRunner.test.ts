@@ -97,6 +97,52 @@ const repeatedReadTool: ToolDefinition = {
   function: { name: 'ReadFile', description: 'Read a file.', parameters: {} },
 }
 
+test('a vendor-prefixed model id runs without being read as a routing prefix', async () => {
+  // `stealth/ox-alpha` is an OpenRouter MODEL id: the part before the slash
+  // is a vendor, not a provider prefix. `retryPolicyForModel` and
+  // `getContextLimit` used to be called with no overrides, so they inferred a
+  // provider from the id and threw `unknown provider prefix 'stealth'` on
+  // every turn that used one. The active profile knows the provider, so the
+  // runner is given it and nothing has to guess.
+  const runner = new AgentTurnRunner({
+    llm: new TextClient(),
+    model: 'stealth/ox-alpha',
+    providerOverrides: { provider: 'openrouter' },
+  })
+  const session: DaemonSession = {
+    activeTurnId: '',
+    agentId: 'default',
+    cancelRequested: false,
+    cwd: process.cwd(),
+    extra: {},
+    id: 'session-openrouter',
+    interactionMode: 'code',
+    sessionKey: 'test',
+    lastActive: 0,
+    messages: [],
+    metadata: {},
+    model: 'stealth/ox-alpha',
+    planMode: false,
+    status: 'working',
+    thinkingContent: [],
+    toolExecutions: [],
+    totalInputTokens: 0,
+    totalOutputTokens: 0,
+    turnCount: 0,
+    workspace: '/tmp/agents/default',
+  }
+  const events = []
+  for await (const event of runner.run(session, 'hi', new AbortController().signal)) {
+    events.push(event)
+  }
+
+  const status = events.find(event => event.type === 'status_update')
+
+  expect(status).toBeDefined()
+  // Resolved through the profile's provider, not guessed from the id.
+  expect((status as unknown as { payload: { max_context: number } }).payload.max_context).toBeGreaterThan(0)
+})
+
 test('agent turn runner maps portable loop events to daemon v35 event names', async () => {
   const runner = new AgentTurnRunner({ llm: new TextClient(), model: 'gpt-4o' })
   const session: DaemonSession = {

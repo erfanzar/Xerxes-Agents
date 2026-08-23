@@ -9,6 +9,7 @@ import type { ReactNode } from 'react'
 
 type TextWrap = 'truncate-end' | 'wrap' | 'wrap-trim'
 type BorderStyle = 'double' | 'round' | 'single'
+type BorderSide = 'bottom' | 'left' | 'right' | 'top'
 
 const BORDER_STYLE_MAP: Record<BorderStyle, 'double' | 'heavy' | 'rounded' | 'single'> = {
   round: 'rounded',
@@ -56,6 +57,12 @@ export interface BoxProps {
   gap?: number
   borderStyle?: BorderStyle
   borderColor?: string
+  /**
+   * Draw only some edges. Nocturne's selected row is a single left rail in
+   * the state colour rather than a full frame — a box around one row of a
+   * list reads as a button, a rail reads as "you are here".
+   */
+  borderSides?: readonly BorderSide[]
   backgroundColor?: string
   // Compatibility-only no-op. Native floating overlays own their stacking.
   opaque?: boolean
@@ -69,6 +76,7 @@ export interface BoxProps {
 }
 
 export function Box({
+  borderSides,
   borderStyle,
   flexDirection,
   flexGrow,
@@ -94,7 +102,7 @@ export function Box({
       // Xerxes' Box contract defaults to rows, while Yoga defaults to columns.
       // Keep the explicit row default so unmarked horizontal chrome remains
       // side-by-side.
-      border={Boolean(border)}
+      border={borderSides ? ([...borderSides] as never) : Boolean(border)}
       borderStyle={border}
       flexDirection={flexDirection ?? 'row'}
       flexGrow={flexGrow}

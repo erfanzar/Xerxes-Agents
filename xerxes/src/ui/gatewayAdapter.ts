@@ -7,9 +7,16 @@ import {
   type GatewayTranscriptMessage,
   type SubagentEventPayload
 } from './gatewayTypes.js'
+import { summarizeToolStartDisplay } from './lib/toolStartDisplay.js'
 import type { SessionInfo, Usage } from './types.js'
 
 const TOOL_RESULT_PREVIEW_CHARS = 600
+
+// Bounds mirroring the daemon's replay previews (REPLAY_ARGUMENTS_PREVIEW_CHARS
+// / REPLAY_RESULT_PREVIEW_CHARS in xerxes/src/daemon/server.ts): enough context
+// to recognize a call, never a raw dump.
+const STORED_ARGUMENTS_PREVIEW_CHARS = 200
+const STORED_RESULT_PREVIEW_CHARS = 160
 
 const str = (v: unknown, fallback = ''): string => (typeof v === 'string' ? v : fallback)
 const optionalStr = (v: unknown): string | undefined => (typeof v === 'string' && v ? v : undefined)
@@ -110,26 +117,145 @@ export function sessionInfoFromInit(payload: Record<string, unknown>): SessionIn
   }
 }
 
+/**
+ * Internal user prompts the transcript must never show. This list mirrors
+ * looksLikeInternalReplayMessage in xerxes/src/daemon/server.ts — keep the two
+ * in sync. The daemon filters these on the replay path; the live-reattach path
+ * (session.open transcripts, session previews) filters them here.
+ */
+export function looksLikeInternalUserPrompt(text: string): boolean {
+  const head = text.trimStart().slice(0, 64)
+  if (head.startsWith('[Skill') && head.includes('activated')) {
+    return true
+  }
+  if (
+    [
+      '[sub-agent events]',
+      '[mid-turn steer from user]',
+      '[steer from user]',
+      '[steer from user saved for next turn]',
+      '[Workspace guard]',
+      '[Objective gate]',
+      '[Previous conversation summary'
+    ].some(prefix => head.startsWith(prefix))
+  ) {
+    return true
+  }
+  return [
+    'Please compact this conversation:',
+    'Write a reusable agent skill called',
+    'Generate an image matching this brief'
+  ].some(prefix => text.trimStart().startsWith(prefix))
+}
+
+/** Compact an arguments/result payload into one bounded single-line preview (server.ts replayPreviewText semantics). */
+function storedPreviewText(value: unknown, limit: number): string {
+  const raw =
+    typeof value === 'string'
+      ? value
+      : value === undefined || value === null
+        ? ''
+        : safeJsonStringify(value)
+  const compact = raw.replace(/\s+/g, ' ').trim()
+
+  return compact.length > limit ? `${compact.slice(0, limit - 1)}…` : compact
+}
+
+function safeJsonStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? ''
+  } catch {
+    return ''
+  }
+}
+
+/** One compact diagnostic line for a failed stored tool result, '' when it succeeded. */
+function storedToolFailure(msg: Record<string, unknown>, content: string): string {
+  const first = firstLine(content)
+  if (msg.is_error === true) {
+    return storedPreviewText(content, STORED_RESULT_PREVIEW_CHARS) || 'Tool execution failed.'
+  }
+  if (msg.permitted === false) {
+    return first || 'Tool execution denied.'
+  }
+  return /^(?:tool execution failed|error|exception|failed|failure|denied|fatal)(?:\b|:)/i.test(first) ? first : ''
+}
+
+/**
+ * Map persisted raw session messages to the same rich rows the replay path
+ * renders: assistant rows keep their thinking, assistant tool_calls become
+ * tool rows carrying a compact arguments preview, and following role:"tool"
+ * results reconcile ok/error (and duration, when persisted) onto their call.
+ * Tool result CONTENT never reaches the transcript — replay parity is one
+ * semantic row per call. Internal user prompts are filtered exactly like the
+ * daemon's replay path. System rows stay hidden runtime state.
+ */
 export function transcriptFromStoredMessages(messages: unknown): GatewayTranscriptMessage[] {
   if (!Array.isArray(messages)) {
     return []
   }
 
   const out: GatewayTranscriptMessage[] = []
+  const toolRowByCallId = new Map<string, GatewayTranscriptMessage>()
   for (const raw of messages) {
     const msg = asRecord(raw)
-    const role = str(msg.role)
-    // Persisted system/tool rows are runtime state, not visible chat history.
-    // Restoring them bypasses the daemon's user/assistant-only replay contract;
-    // a full system prompt can also mount tens of thousands of hidden chars.
-    if (role !== 'assistant' && role !== 'user') {
+    const role = str(msg.role).toLowerCase()
+    if (role === 'user') {
+      const text = firstNonEmptyStr(msg.text, textFromContent(msg.content))
+      if (!text.trim() || looksLikeInternalUserPrompt(text)) {
+        continue
+      }
+      out.push({ role: 'user', text })
       continue
     }
-    const text = firstNonEmptyStr(msg.text, textFromContent(msg.content))
-    if (!text.trim()) {
+    if (role === 'assistant') {
+      const text = firstNonEmptyStr(msg.text, textFromContent(msg.content))
+      const thinking = optionalStr(msg.thinking)
+      if (text.trim()) {
+        out.push({ role: 'assistant', text, ...(thinking?.trim() ? { thinking } : {}) })
+      }
+      const calls = Array.isArray(msg.tool_calls) ? msg.tool_calls : []
+      for (const call of calls) {
+        const record = asRecord(call)
+        const fn = asRecord(record.function)
+        const name = firstNonEmptyStr(fn.name, record.name) || 'tool'
+        // OpenAI wire shape nests {name, arguments} under 'function'; legacy
+        // rows carry top-level name/input instead. Run the raw arguments through
+        // the same summarizer live tool.start events use, so a reattached row
+        // reads "directory_path=…" instead of a raw JSON blob.
+        const rawArguments = storedPreviewText(fn.arguments ?? record.input, STORED_ARGUMENTS_PREVIEW_CHARS)
+        const context = rawArguments ? summarizeToolStartDisplay(name, '', rawArguments).context : ''
+        const row: GatewayTranscriptMessage = { role: 'tool', name, ...(context ? { context } : {}) }
+        const callId = optionalStr(record.id)
+        if (callId) {
+          toolRowByCallId.set(callId, row)
+        }
+        out.push(row)
+      }
       continue
     }
-    out.push({ role, text })
+    if (role === 'tool') {
+      // Results reconcile onto their call; an orphan result (its assistant
+      // call was trimmed from retained history) is dropped, exactly like the
+      // daemon replay, which only re-emits orphans from tool_executions.
+      const callId = optionalStr(msg.tool_call_id)
+      const existing = callId ? toolRowByCallId.get(callId) : undefined
+      if (!existing) {
+        continue
+      }
+      const content = firstNonEmptyStr(msg.text, textFromContent(msg.content))
+      const failure = storedToolFailure(msg, content)
+      const durationMs = optionalNum(msg.duration_ms ?? msg.durationMs)
+      if (failure) {
+        existing.error = failure
+      }
+      if (durationMs !== undefined) {
+        existing.duration_s = durationMs / 1000
+      }
+      continue
+    }
+    // Persisted system rows are runtime state, not visible chat history; a
+    // full system prompt can also mount tens of thousands of hidden chars.
   }
   return out
 }
@@ -408,13 +534,17 @@ function notificationEvents(payload: Record<string, unknown>): AnyEvent[] {
       const toolPayload = asRecord(payload.payload)
       const ok = bool(toolPayload.ok, true)
       const durationMs = optionalNum(toolPayload.duration_ms)
-      const context = str(toolPayload.context)
+      const replayName = str(toolPayload.name, 'tool')
+      const rawContext = str(toolPayload.context)
+      // The daemon ships a bounded arguments preview; summarize JSON argument
+      // blobs into the same friendly context live rows carry.
+      const context = rawContext ? summarizeToolStartDisplay(replayName, '', rawContext).context : ''
       const error = str(toolPayload.preview) || 'Tool execution failed.'
       return [{
         type: 'transcript.append',
         payload: {
           role: 'tool',
-          name: str(toolPayload.name, 'tool'),
+          name: replayName,
           ...(context ? { context } : {}),
           ...(ok ? {} : { error }),
           ...(durationMs === undefined ? {} : { duration_s: durationMs / 1000 })

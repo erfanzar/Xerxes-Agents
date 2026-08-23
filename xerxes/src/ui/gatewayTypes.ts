@@ -204,6 +204,7 @@ export interface SessionResumeResponse {
   session_id: string
   started_at?: number
   status?: LiveSessionStatus
+  subagent_snapshots?: SubagentSnapshotPayload[]
 }
 
 export type LiveSessionStatus = 'idle' | 'starting' | 'waiting' | 'working'
@@ -234,10 +235,60 @@ export interface SessionActiveListResponse {
   sessions?: SessionActiveItem[]
 }
 
+/** One tool call from the in-flight turn, snapshotted for a mid-turn reattach. */
+export interface SessionInflightTool {
+  /** Compact arguments preview, never the full payload. */
+  arguments?: string
+  /** Milliseconds when the call already settled; absent while running. */
+  duration_ms?: number
+  /** Compact diagnostic when the call failed. */
+  error?: string
+  id?: string
+  name: string
+  /** Present once the call settled; absent/false semantics follow the daemon. */
+  ok?: boolean
+}
+
 export interface SessionInflightTurn {
   assistant?: string
+  /** Epoch seconds the in-flight turn began, so reattach keeps elapsed continuity. */
+  started_at?: number
   streaming?: boolean
+  /** Thinking the in-flight turn produced so far. */
+  thinking?: string
+  /** Tool calls the in-flight turn produced so far, in call order. */
+  tools?: SessionInflightTool[]
   user?: string
+}
+
+/** Persisted manifest row for a subagent the session spawned (daemon subagent_snapshots). */
+export interface SubagentSnapshotPayload {
+  agent_id?: string
+  api_calls?: number
+  closed?: boolean
+  created_at?: string
+  creator_id?: null | string
+  error?: string
+  files_read?: string[]
+  files_written?: string[]
+  history_session_id?: string
+  id: string
+  input_tokens?: number
+  model?: string
+  name?: string
+  output_tokens?: number
+  parent_id?: null | string
+  prompt_profile?: string
+  queue_size?: number
+  reasoning_tokens?: number
+  rules?: string[]
+  source_agent_id?: string
+  status: string
+  summary?: string
+  title?: string
+  tool_count?: number
+  toolsets?: string[]
+  updated_at?: string
 }
 
 export interface SessionActivateResponse {
@@ -250,6 +301,7 @@ export interface SessionActivateResponse {
   session_key?: string
   started_at?: number
   status?: LiveSessionStatus
+  subagent_snapshots?: SubagentSnapshotPayload[]
 }
 
 /** Read-only live-session snapshot used by Agent View without attaching. */
@@ -258,6 +310,7 @@ export interface SessionPeekResponse {
   messages: GatewayTranscriptMessage[]
   session_id: string
   status: LiveSessionStatus
+  subagent_snapshots?: SubagentSnapshotPayload[]
 }
 
 export interface SessionListItem {

@@ -5,12 +5,18 @@
 // Context and model metadata live with the composer, where they are actionable.
 import type { SessionTab } from '../app/interfaces.js'
 import type { LiveSessionStatus } from '../gatewayTypes.js'
+import { GLYPH } from '../domain/nocturne.js'
+import { ctxBarColor, ctxMeterBar } from '../domain/statusFormat.js'
+import { fmtK } from '../lib/text.js'
+import { branchLabel, type RepoPulse } from '../lib/repoPulse.js'
 import type { Theme } from '../theme.js'
 
 import { Box, Span, Text } from './primitives.js'
 
 const TAB_STATUS_GLYPH: Record<LiveSessionStatus, string> = {
-  idle: '✓',
+  // ○ reads as "nothing pending" — the ring is the v2 idle shape. The other
+  // states keep their informative glyphs.
+  idle: '○',
   starting: '…',
   waiting: '?',
   working: '◆'
@@ -32,12 +38,28 @@ export const displayModeLabel = (mode?: string): string => {
   return value ? value[0]!.toUpperCase() + value.slice(1) : 'Code'
 }
 
+/**
+ * The session header — "where am I", answered in one row.
+ *
+ * Left names the thing and its handle; right names its state and how much of
+ * the context window it has spent. The context read-out lives here rather
+ * than beside the composer because it answers "what is happening", and the
+ * composer row answers "what will ⏎ do" — two different questions that were
+ * previously sharing one line and colliding on narrow terminals.
+ */
 export function SessionHeader({
+  busy,
+  contextMax,
+  contextUsed,
   mode,
   sessionId,
   sessionTitle,
   t
 }: {
+  /** Whether a turn is in flight; drives the state dot and its verb. */
+  busy?: boolean
+  contextMax?: number
+  contextUsed?: number
   mode?: string
   sessionId?: null | string
   sessionTitle?: null | string
@@ -45,38 +67,85 @@ export function SessionHeader({
 }) {
   const title = sessionTitle?.trim()
   const id = sessionId?.trim()
+  // A short handle, not the whole id: enough to tell two chats apart at a
+  // glance, small enough that it never competes with the title.
+  const shortId = id ? id.slice(-4) : ''
+  const max = contextMax ?? 0
+  const used = contextUsed ?? 0
+  const pressure = max > 0 ? Math.min(100, (used / max) * 100) : undefined
 
   return (
-    <Box flexDirection="row" flexShrink={0} paddingX={2} paddingY={1} width="100%">
-      <Box flexGrow={1} flexShrink={1} overflow="hidden">
-        <Text bold wrap="truncate-end">
-          <Span bold color={t.color.accent}>
-            {displayModeLabel(mode)}
-          </Span>
-          {title ? <Span color={t.color.text}>: {title}</Span> : null}
+    <Box
+      flexDirection="row"
+      flexShrink={0}
+      gap={2}
+      justifyContent="space-between"
+      overflow="hidden"
+      paddingX={2}
+      paddingY={1}
+      width="100%"
+    >
+      <Box flexDirection="row" flexShrink={1} minWidth={0} overflow="hidden">
+        <Text wrap="truncate-end">
+          <Span color={t.color.brandGold}>{`${GLYPH.brand} `}</Span>
+          {/* The mode is stated once — in the composer's chip. Repeating it
+              here made the header read like a second status bar. An untitled
+              session still falls back to it as a name. */}
+          <Span color={t.ds.title}>{title || displayModeLabel(mode)}</Span>
+          {shortId ? (
+            <>
+              <Span color={t.ds.separator}>{` ${GLYPH.separator} `}</Span>
+              <Span color={t.ds.meta}>{`session ${shortId}`}</Span>
+            </>
+          ) : null}
         </Text>
       </Box>
-      {id ? (
-        <Text color={t.color.muted} wrap="truncate-end">
-          {id}
+      <Box flexDirection="row" flexShrink={0} minWidth={0} overflow="hidden">
+        <Text wrap="truncate-end">
+          <Span color={busy ? t.ds.working : t.ds.done}>{`${GLYPH.state} `}</Span>
+          <Span color={t.ds.meta}>{busy ? 'working' : 'idle'}</Span>
+          {max > 0 ? (
+            <>
+              <Span color={t.ds.rule}>{` ${GLYPH.sectionBreak} `}</Span>
+              {/* One answer to "how much context is left", in one place: the
+                  bar for the glance, the numbers for the decision. It used
+                  to be rendered beside the composer as well, on the row that
+                  answers what ⏎ will do — two places, two truncation rules,
+                  and a collision at 80 columns. */}
+              <Span color={ctxBarColor(pressure, t)}>{`${ctxMeterBar(pressure)} `}</Span>
+              <Span color={ctxBarColor(pressure, t)}>{fmtK(used)}</Span>
+              <Span color={t.ds.meta}>{` / ${fmtK(max)} ctx`}</Span>
+            </>
+          ) : null}
         </Text>
-      ) : null}
+      </Box>
     </Box>
   )
 }
 
+const NEW_TAB_LABEL = ' +'
+// Mockup 04's gesture, advertised where the tabs live: Left walks one tab
+// left, and Left from the leftmost tab backgrounds the session into the
+// agent view. Right stays the picker's re-enter key, so it is not promised
+// here.
+const HINTS_LABEL = '← switch · ←← agent view'
+
 /**
- * Row of live-session tabs. Hidden for a single session — one tab is just the
- * header restated. When the strip cannot fit the terminal it collapses to a
- * `‹ n/total ›` position indicator instead of truncated titles.
+ * Row of live-session tabs on mockup 02's darker band. Hidden for a single
+ * session — one tab is just the header restated. When the strip cannot fit
+ * the terminal it collapses to a `‹ n/total ›` position indicator instead of
+ * truncated titles.
  */
 export function SessionTabStrip({
   activeId,
+  onNewTab,
   tabs,
   t,
   width
 }: {
   activeId: null | string
+  /** Click target for the faint "+" affordance; absent renders it inert. */
+  onNewTab?: () => void
   tabs: SessionTab[]
   t: Theme
   width: number
@@ -91,45 +160,124 @@ export function SessionTabStrip({
   // 12 against an 18-char truncation under-counted by 5 per tab, so the strip
   // claimed to fit and then silently clipped against overflow="hidden".
   const perTab = TAB_LABEL_MAX + 5
-  const fits = tabs.length * perTab + 4 <= width
+  const baseCost = tabs.length * perTab + 4
+  // Mockup 02: a faint "+" affordance closes the strip and, when the width
+  // allows it, a faint right-aligned key hint. Both are disposable — the "+"
+  // spends its budget first, and the hints drop before any tab label does.
+  const NEW_TAB_CELL = 2
+  const fits = baseCost + NEW_TAB_CELL <= width
+  const showHints = fits && baseCost + NEW_TAB_CELL + 1 + HINTS_LABEL.length <= width
 
   if (!fits) {
     const current = activeIndex >= 0 ? activeIndex + 1 : 1
     return (
-      <Box flexDirection="row" flexShrink={0} paddingX={2} width="100%">
+      <Box backgroundColor={t.color.completionBg} flexDirection="row" flexShrink={0} paddingX={2} width="100%">
         <Text color={t.color.muted}>{`‹ ${current}/${tabs.length} ›`}</Text>
       </Box>
     )
   }
 
   return (
-    <Box flexDirection="row" flexShrink={0} overflow="hidden" paddingX={2} width="100%">
+    <Box
+      backgroundColor={t.color.completionBg}
+      flexDirection="row"
+      flexShrink={0}
+      height={2}
+      overflow="hidden"
+      paddingX={2}
+      width="100%"
+    >
       {tabs.map((tab, index) => {
         const active = tab.id === activeId
-        const glyph = TAB_STATUS_GLYPH[tab.status] ?? '·'
         // An unnamed session shows its position instead. A tab needs a stable
         // handle more than it needs a name, and a row of identical
         // placeholders is no handle at all.
         const label = tab.title.trim() ? truncate(tab.title, TAB_LABEL_MAX) : String(index + 1)
+
+        if (active) {
+          // The filled dot + brand colour is the whole active treatment; a
+          // selection block behind one tab made the strip read as buttons.
+          // Mockup 02 adds an underline: a one-row ─ segment drawn as the
+          // second row of the active tab's own column, so the renderer never
+          // has to mix a border into the band background.
+          const content = `● ${label}`
+          const cellWidth = content.length + 2
+
+          return (
+            <Box flexDirection="column" flexShrink={0} key={tab.id} width={cellWidth}>
+              <Text wrap="truncate-end">
+                <Span bold color={t.color.brandGold}>{` ${content} `}</Span>
+              </Text>
+              <Text color={t.color.brandGold}>{'━'.repeat(cellWidth)}</Text>
+            </Box>
+          )
+        }
+
+        const glyph = TAB_STATUS_GLYPH[tab.status] ?? '·'
+        const content = `${glyph} ${label}`
+
         return (
-          <Box
-            backgroundColor={active ? t.color.selectionBg : undefined}
-            flexShrink={0}
-            key={tab.id}
-          >
+          <Box flexDirection="column" flexShrink={0} key={tab.id} width={content.length + 2}>
             <Text wrap="truncate-end">
-              <Span bold={active} color={active ? t.color.accent : t.color.muted}>
-                {` ${glyph} ${label} `}
-              </Span>
+              <Span color={t.color.muted}>{` ${content} `}</Span>
             </Text>
+            {/* Keeps every tab column two rows tall, so the strip reads as
+                one band instead of labels floating over loose rows. */}
+            <Text>{' '.repeat(content.length + 2)}</Text>
           </Box>
         )
       })}
+      <Box flexDirection="column" flexShrink={0} onClick={onNewTab}>
+        <Text color={t.color.muted}>{NEW_TAB_LABEL}</Text>
+        <Text>{' '}</Text>
+      </Box>
+      {showHints ? (
+        <Box flexGrow={1} flexShrink={1} justifyContent="flex-end" minWidth={0} overflow="hidden">
+          <Text color={t.color.muted} wrap="truncate-end">
+            {HINTS_LABEL}
+          </Text>
+        </Box>
+      ) : null}
     </Box>
   )
 }
 
-export function WorkspaceFooter({ cwdLabel, rightLabel, t }: { cwdLabel: string; rightLabel?: string; t: Theme }) {  if (!cwdLabel && !rightLabel) {
+/**
+ * The statusbar — identical on every screen, which is what makes it readable
+ * as a fixed place rather than as more content.
+ *
+ * Left answers "which machine am I on": workspace, branch, and whether the
+ * tree owes you anything. Right answers "what can I do": the view keys and
+ * the version. `│` separates the two regions and is quieter than the `·`
+ * that separates facts inside one region — it divides regions of the same
+ * bar, not facts.
+ */
+export function WorkspaceFooter({
+  cwdLabel,
+  providerModel,
+  pulse,
+  rightLabel,
+  t
+}: {
+  cwdLabel: string
+  /** Provider health input; undefined hides the segment (info not loaded yet). */
+  providerModel?: string
+  /** Working-tree state. Omitted before the first `git` answer lands. */
+  pulse?: RepoPulse
+  rightLabel?: string
+  t: Theme
+}) {
+  const showProvider = providerModel !== undefined
+  const modelConfigured = Boolean(providerModel?.trim())
+  const branch = pulse ? branchLabel(pulse) : ''
+  // Amber appears here for exactly one reason and nowhere else on the bar:
+  // uncommitted work is unreviewed work, and unreviewed is the same "a human
+  // is required" the agents screen means by it. A clean tree earns the done
+  // green instead, so the bar is never amber when nothing is outstanding.
+  const tree = pulse?.dirty ? `● ${pulse.dirty} dirty` : branch ? '✓ clean' : ''
+  const treeColor = pulse?.dirty ? t.color.warn : t.color.statusGood
+
+  if (!cwdLabel && !rightLabel && !showProvider) {
     return null
   }
 
@@ -147,15 +295,48 @@ export function WorkspaceFooter({ cwdLabel, rightLabel, t }: { cwdLabel: string;
       paddingX={2}
       width="100%"
     >
-      <Box flexDirection="row" flexShrink={1} minWidth={0} overflow="hidden">
-        <Text color={t.color.muted} wrap="truncate-end">
-          {cwdLabel}
-        </Text>
+      {/* Shrink priority: the workspace path is the identity of this screen
+          and yields LAST. The hotkey hints are disposable, so their box
+          carries the shrink and truncates first; the path only truncates
+          when the terminal itself is genuinely too narrow for it. */}
+      <Box flexDirection="row" flexShrink={0} minWidth={0} overflow="hidden">
+        {cwdLabel ? (
+          <Text color={t.ds.secondary} wrap="truncate-end">
+            <Span color={t.color.brandGold}>{`${GLYPH.brand} `}</Span>
+            {cwdLabel}
+            {branch ? (
+              <>
+                <Span color={t.ds.rule}>{` ${GLYPH.sectionBreak} `}</Span>
+                <Span color={t.ds.caption}>{branch}</Span>
+              </>
+            ) : null}
+            {tree ? <Span color={treeColor}>{` ${tree}`}</Span> : null}
+          </Text>
+        ) : null}
       </Box>
-      {rightLabel ? (
-        <Text color={t.color.muted} wrap="truncate-end">
-          {rightLabel}
-        </Text>
+      {rightLabel || showProvider ? (
+        <Box flexDirection="row" flexShrink={1} gap={1} justifyContent="flex-end" minWidth={0} overflow="hidden">
+          {rightLabel ? (
+            <Text color={t.ds.caption} wrap="truncate-end">
+              {rightLabel}
+            </Text>
+          ) : null}
+          {showProvider ? (
+            modelConfigured ? (
+              // A green dot vouches that the next ⏎ will actually reach a model.
+              <Text wrap="truncate-end">
+                <Span color={t.ds.rule}>{`${GLYPH.sectionBreak} `}</Span>
+                <Span color={t.color.statusGood}>{`${GLYPH.state} `}</Span>
+                <Span color={t.ds.caption}>provider ready</Span>
+              </Text>
+            ) : (
+              <Text wrap="truncate-end">
+                <Span color={t.ds.rule}>{`${GLYPH.sectionBreak} `}</Span>
+                <Span color={t.color.warn}>{`${GLYPH.state} no model · /provider`}</Span>
+              </Text>
+            )
+          ) : null}
+        </Box>
       ) : null}
     </Box>
   )

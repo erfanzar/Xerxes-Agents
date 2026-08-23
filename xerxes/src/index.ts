@@ -17,7 +17,11 @@ export {
   xerxesSubdirFor,
 } from './core/paths.js'
 export * from './context/index.js'
-export * from './cortex/index.js'
+// The cortex task-graph engine stays in-tree (import './cortex/*' directly if
+// needed) but is deliberately NOT re-exported here: nothing in the runtime
+// wired it, and deterministic multi-agent decomposition is served by PlanTool
+// (tools/claudeTools/workflow.ts), which executes through the managed subagent
+// pool with depth caps, cohort join, and persistence.
 export * from './cron/index.js'
 export * from './api-server/protocol.js'
 export * from './api-server/cortexCompletionService.js'

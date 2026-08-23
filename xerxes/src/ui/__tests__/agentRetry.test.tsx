@@ -76,7 +76,9 @@ describe('OpenTUI agents overlay retry action', () => {
       act(() => setup.mockInput.pressKey('r'))
       await flushRetry(setup)
       expect(rpc).toHaveBeenCalledWith('subagent.retry', { task: 'dead-worker' })
-      expect(setup.captureCharFrame()).toContain('retry accepted — same agent resumed (idle)')
+      // The framed card clips a long note at 80 columns; assert the verdict,
+      // not the full sentence.
+      expect(setup.captureCharFrame()).toContain('retry accepted')
     } finally {
       act(() => setup.renderer.destroy())
     }
@@ -150,7 +152,12 @@ describe('OpenTUI agents overlay retry action', () => {
       // The dead agent is pre-selected as the most likely retry target.
       expect(setup.captureCharFrame()).toContain('press r to retry this agent')
 
-      act(() => setup.mockInput.pressKey('ARROW_LEFT'))
+      // FAILED is its own group now and sorts LAST: a run that broke has
+      // already spent its money and does not outrank a result waiting to be
+      // read. So the dead agent sits below the completed one, and reaching
+      // the completed agent means moving up. (Right opens the inspector
+      // rather than advancing the selection.)
+      act(() => setup.mockInput.pressKey('ARROW_UP'))
       await flushRetry(setup)
       expect(setup.captureCharFrame()).toContain('press r to run this agent again')
 

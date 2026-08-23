@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Xerxes TUI — Permission request</title>
+<style>
+/* Xerxes TUI — mockup stylesheet.
+   One grid: 13px monospace, 1ch advance, 18px line box.
+   A "screen" is exactly 150ch x 40 rows. Whitespace is blank rows,
+   never fractional padding, so the mockup stays measurable in cells. */
+
+:root{
+  /* surfaces */
+  --backdrop:#000000;
+  --panel:#0a0a0d;      /* the screen */
+  --panel-2:#0e1116;    /* raised card */
+  --panel-3:#12161d;    /* selected row / kbd cap */
+  --line:#1c2733;       /* hairline */
+  --line-2:#141c26;     /* quieter hairline */
+
+  /* text ramp — quiet by default */
+  --fg:#c6ced8;         /* body */
+  --fg-hi:#e9edf3;      /* titles, the one thing you read first */
+  --dim1:#8b95a2;       /* secondary */
+  --dim2:#5d6774;       /* captions, meta */
+  --dim3:#39424e;       /* leaders, rules, disabled */
+
+  /* voice / state — same colour means the same thing on every screen */
+  --blue:#6ea8fe;       /* brand + working */
+  --green:#83c99d;      /* done / succeeded */
+  --red:#dd7c88;        /* failed */
+  --amber:#d8ae58;      /* blocked / needs you  (warnings ONLY) */
+  --violet:#b18be8;     /* agent activity, system voice */
+  --cyan:#56c2d6;       /* hunk headers, structural markers */
+  --thinking:#8b7fa3;   /* reasoning rows */
+
+  /* tints */
+  --user-band:#10151e;
+  --blue-tint:rgba(110,168,254,.10);
+  --amber-tint:rgba(216,174,88,.09);
+  --red-tint:rgba(221,124,136,.09);
+  --green-tint:rgba(131,201,157,.09);
+  --violet-tint:rgba(177,139,232,.10);
+
+  --add-bg:#14251b;
+  --del-bg:#2a171b;
+
+  --row:18px;
+  --pad:2ch;
+}
+
+*{box-sizing:border-box;margin:0;padding:0}
+
+html{background:var(--backdrop)}
+body{
+  background:
+    radial-gradient(120% 90% at 50% -10%, #0b0e14 0%, #000 62%);
+  color:var(--fg);
+  font:13px/18px "SF Mono","SFMono-Regular",Menlo,"JetBrains Mono","Cascadia Mono",Consolas,monospace;
+  font-variant-ligatures:none;
+  -webkit-font-smoothing:antialiased;
+  padding:40px 32px 64px;
+  display:flex;flex-direction:column;align-items:flex-start;gap:22px;
+}
+
+/* ── window chrome ─────────────────────────────────────────────── */
+.win{
+  background:var(--panel);
+  border:1px solid var(--line);
+  border-radius:10px;
+  overflow:hidden;
+  box-shadow:0 0 0 1px rgba(0,0,0,.6), 0 26px 70px -20px rgba(0,0,0,.9);
+  width:max-content;
+}
+.tb{
+  height:30px;display:flex;align-items:center;gap:8px;
+  padding:0 12px;
+  background:linear-gradient(#15181e,#101318);
+  border-bottom:1px solid var(--line);
+}
+.tb i{width:11px;height:11px;border-radius:50%;display:block}
+.tb .r{background:#ff5f57}.tb .y{background:#febc2e}.tb .g{background:#28c840}
+.tbt{
+  flex:1;text-align:center;color:var(--dim2);font-size:11px;
+  margin-left:-57px;letter-spacing:.02em;
+}
+.screen{
+  width:150ch;height:calc(40 * var(--row));
+  background:var(--panel);
+  display:flex;flex-direction:column;
+  overflow:hidden;
+  position:relative;
+}
+.screen.narrow{width:70ch}
+
+/* ── generic grid helpers ──────────────────────────────────────── */
+.row{display:flex;align-items:baseline;min-height:var(--row)}
+.pad{padding:0 var(--pad)}
+.grow{flex:1 1 auto;min-height:0;min-width:0}
+.blank{height:var(--row);flex:0 0 var(--row)}
+.rt{margin-left:auto;flex:0 0 auto;font-variant-numeric:tabular-nums;white-space:nowrap}
+.nowrap{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.num{flex:0 0 auto;white-space:nowrap;font-variant-numeric:tabular-nums}
+
+/* dotted leader — the connective tissue between a label and its number */
+.ld{
+  flex:1 1 0;min-width:2ch;overflow:hidden;white-space:nowrap;
+  color:var(--dim3);margin:0 1ch;
+}
+.ld::before{content:"· · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · ·"}
+
+.hair{height:1px;background:var(--line-2);flex:0 0 1px}
+
+/* ── state dots ────────────────────────────────────────────────── */
+.d{display:inline-block;width:1ch;margin-right:1ch}
+.d::before{content:"●"}
+.blue{color:var(--blue)}.green{color:var(--green)}.red{color:var(--red)}
+.amber{color:var(--amber)}.violet{color:var(--violet)}.cyan{color:var(--cyan)}
+.dim{color:var(--dim1)}.dim2{color:var(--dim2)}.dim3{color:var(--dim3)}
+.hi{color:var(--fg-hi)}
+.b{font-weight:600;color:var(--fg-hi)}
+.think{color:var(--thinking)}
+
+/* ── captions: "NEEDS INPUT · 2" ───────────────────────────────── */
+.cap{
+  color:var(--dim2);font-size:11px;letter-spacing:.16em;text-transform:uppercase;
+  height:var(--row);display:flex;align-items:center;gap:1ch;
+}
+.cap .n{color:var(--dim3)}
+.cap.needs{color:var(--amber)}
+.cap.work{color:var(--blue)}
+.cap.review{color:var(--green)}
+
+/* ── panel head (screens + inspectors) ─────────────────────────── */
+.hdr{
+  height:calc(2 * var(--row));flex:0 0 calc(2 * var(--row));
+  display:flex;align-items:center;gap:2ch;
+  padding:0 var(--pad);
+  border-bottom:1px solid var(--line);
+  background:linear-gradient(180deg,#0d1117,#0a0a0d);
+}
+.hdr .t{color:var(--fg-hi);font-weight:600;letter-spacing:.02em}
+.hdr .sub{color:var(--dim2)}
+
+/* ── footer key hints ──────────────────────────────────────────── */
+.ftr{
+  height:calc(2 * var(--row));flex:0 0 calc(2 * var(--row));
+  display:flex;align-items:center;gap:1ch;
+  padding:0 var(--pad);
+  border-top:1px solid var(--line);
+  color:var(--dim2);font-size:12px;
+  white-space:nowrap;overflow:hidden;
+}
+kbd{
+  font:inherit;font-size:11px;
+  background:var(--panel-3);border:1px solid var(--line);
+  border-bottom-color:#0a0d12;
+  border-radius:3px;padding:1px 5px;color:var(--dim1);
+  display:inline-block;line-height:14px;
+}
+.sep{color:var(--dim3)}
+
+/* ── statusbar ─────────────────────────────────────────────────── */
+.sbar{
+  height:var(--row);flex:0 0 var(--row);
+  display:flex;align-items:center;gap:1ch;
+  padding:0 var(--pad);
+  background:#0d1117;border-top:1px solid var(--line);
+  color:var(--dim2);font-size:12px;
+  white-space:nowrap;overflow:hidden;
+}
+.sbar .mark{color:var(--blue)}
+.sbar .pipe{color:var(--dim3)}
+
+/* ── cards ─────────────────────────────────────────────────────── */
+.card{
+  border:1px solid var(--line);border-radius:6px;
+  background:var(--panel-2);
+  padding:0 2ch;
+}
+.card.sel{border-color:#2c4a70;background:#0f1520;box-shadow:inset 2px 0 0 var(--blue)}
+.card.needs{box-shadow:inset 2px 0 0 var(--amber)}
+.card.fail{box-shadow:inset 2px 0 0 var(--red)}
+.card.done{box-shadow:inset 2px 0 0 var(--green)}
+
+/* ── composer ──────────────────────────────────────────────────── */
+.composer{
+  margin:0 var(--pad);
+  border:1px solid #23384f;border-radius:6px;
+  background:#0b0f15;
+}
+.composer .line{display:flex;align-items:baseline;padding:0 2ch;min-height:var(--row)}
+.composer .p{color:var(--blue);margin-right:1ch}
+.composer .ph{color:var(--dim3)}
+.caret{display:inline-block;width:1ch;background:var(--blue);color:transparent}
+.composer .meta{
+  display:flex;align-items:center;gap:1ch;padding:0 2ch;height:var(--row);
+  border-top:1px solid var(--line-2);color:var(--dim2);font-size:11px;
+}
+.mode{color:var(--blue)}
+
+/* ── code box (verbatim commands) ──────────────────────────────── */
+.codebox{
+  background:#07090c;border:1px solid var(--line);border-left:2px solid var(--blue);
+  border-radius:4px;padding:0 2ch;color:var(--fg-hi);
+}
+
+/* ── notes under the window ────────────────────────────────────── */
+.notes{width:150ch;max-width:100%;color:var(--dim1);font-size:12px;line-height:19px}
+.notes h2{
+  font-size:11px;letter-spacing:.18em;text-transform:uppercase;
+  color:var(--dim2);font-weight:600;margin-bottom:8px;
+  border-top:1px solid var(--line);padding-top:14px;
+}
+.notes li{list-style:none;padding-left:2ch;text-indent:-2ch;margin-bottom:3px}
+.notes li::before{content:"└ ";color:var(--dim3)}
+.notes b{color:var(--fg);font-weight:600}
+.notes .k{color:var(--blue)}
+</style>
+</head>
+<body>
+<style>
+.overlay{position:absolute;inset:0;background:rgba(0,0,0,.62);display:flex;align-items:center;justify-content:center}
+.dialog{
+  width:104ch;background:var(--panel);border:1px solid #4a3c22;border-radius:8px;
+  box-shadow:0 30px 80px -20px rgba(0,0,0,.95);overflow:hidden;
+}
+.dhead{
+  display:flex;align-items:center;min-height:calc(2 * var(--row));padding:0 2ch;
+  border-bottom:1px solid #2c2416;background:var(--amber-tint);
+}
+.dbody{padding:0 2ch}
+.sec{
+  color:var(--dim2);font-size:11px;letter-spacing:.16em;text-transform:uppercase;
+  min-height:var(--row);display:flex;align-items:center;gap:1ch;
+}
+.stmt{color:var(--fg);min-height:var(--row)}
+.stmt b{color:var(--fg-hi);font-weight:600}
+.cmdbox{
+  background:#07090c;border:1px solid var(--line);border-left:2px solid var(--amber);
+  border-radius:4px;padding:0 2ch;margin:2px 0;
+}
+.cmdbox .l{white-space:pre;color:var(--fg-hi);min-height:var(--row)}
+.cmdbox .l .flag{color:var(--amber)}
+.opt{display:flex;align-items:baseline;min-height:var(--row);gap:1ch}
+.opt .key{
+  flex:0 0 auto;border:1px solid var(--line);border-radius:3px;padding:0 1ch;
+  background:var(--panel-3);color:var(--fg-hi);font-size:11px;
+}
+.opt .lbl{color:var(--fg-hi)}
+.opt.deny .lbl{color:var(--fg)}
+.opt .why{color:var(--dim2)}
+.scope{
+  border:1px solid var(--line);border-radius:4px;background:#0b0d11;
+  padding:0 2ch;margin-top:4px;color:var(--dim2);
+}
+.scope .m{color:var(--fg);white-space:pre}
+.vchip{font-size:11px;letter-spacing:.14em;padding:1px 6px;border-radius:3px;color:var(--amber);background:var(--amber-tint);border:1px solid #3a2f1a}
+.dfoot{display:flex;align-items:center;gap:1ch;min-height:calc(2 * var(--row));padding:0 2ch;border-top:1px solid #2c2416;color:var(--dim2);font-size:12px;background:#0d1219;white-space:nowrap;overflow:hidden}
+</style>
+
+<div class="win">
+  <div class="tb"><i class="r"></i><i class="y"></i><i class="g"></i><span class="tbt">xerxes — ~/dev/xerxes — 150×40</span></div>
+  <div class="screen">
+
+    <div class="hdr" style="opacity:.5">
+      <span class="t">resume replay parity</span><span class="dim3">·</span><span class="dim2">session 4f2a3c</span>
+      <span class="rt dim2">opus-5 <span class="sep">·</span> 128k/200k <span class="sep">·</span> $0.42</span>
+    </div>
+    <div class="grow" style="opacity:.32;overflow:hidden">
+      <div class="blank"></div>
+      <div class="row pad" style="background:var(--user-band);min-height:calc(2 * var(--row));align-items:center"><span class="blue" style="margin-right:1ch">❯</span>the install is wedged — nuke the modules and reinstall clean.</div>
+      <div class="blank"></div>
+      <div class="row pad dim">The lockfile is fine; the tree isn't. I'll remove node_modules and reinstall</div>
+      <div class="row pad dim">from the frozen lockfile so nothing drifts.</div>
+      <div class="blank"></div>
+      <div class="row pad"><span class="blue" style="margin-right:1ch">⏺</span><span class="dim">Read package.json</span><span class="ld"></span><span class="num dim2">6ms</span></div>
+      <div class="row pad"><span class="amber" style="margin-right:1ch">⏺</span><span class="dim">Bash <span class="amber">waiting on you</span></span><span class="ld"></span><span class="num dim2">0s</span></div>
+    </div>
+
+    <div class="overlay">
+      <div class="dialog">
+        <div class="dhead">
+          <span class="d amber"></span><span class="b">PERMISSION</span>
+          <span class="dim2" style="margin-left:1ch">Bash</span>
+          <span class="rt"><span class="vchip">POLICY · WARN</span></span>
+        </div>
+
+        <div class="dbody">
+          <div class="blank" style="height:9px"></div>
+
+          <div class="sec">what will run</div>
+          <div class="cmdbox">
+            <div class="l">rm <span class="flag">-rf</span> node_modules bun.lockb \</div>
+            <div class="l">  &amp;&amp; bun install --frozen-lockfile</div>
+          </div>
+          <div class="stmt dim2">in <span class="hi">~/dev/xerxes</span> · sh -c · no sandbox · 120s timeout</div>
+          <div class="blank" style="height:9px"></div>
+
+          <div class="sec">who asked</div>
+          <div class="stmt"><b>gateway-parity</b> <span class="dim2">— subagent, depth 1, spawned by this session 41s ago</span></div>
+          <div class="stmt dim2">worktree ~/.xerxes/wt/gateway-parity · parent: main session (you)</div>
+          <div class="blank" style="height:9px"></div>
+
+          <div class="sec">why you are being asked</div>
+          <div class="stmt">Policy <b>allows</b> this command. Interaction mode <b>ask</b> is what stops it here.</div>
+          <div class="stmt dim2">matched rule <span class="hi">allow: bash</span> · flagged <span class="amber">warn: recursive delete</span> · nothing in <span class="hi">deny</span> matched</div>
+          <div class="blank" style="height:9px"></div>
+
+          <div class="sec">your options</div>
+          <div class="opt"><span class="key">y</span><span class="lbl">run it once</span><span class="why">— asks again next time</span></div>
+          <div class="opt"><span class="key">a</span><span class="lbl">always allow this exact command shape</span><span class="why">— no prompt for a byte-identical command</span></div>
+          <div class="opt deny"><span class="key">n</span><span class="lbl">deny, and tell the agent why</span><span class="why">— opens a one-line reason field</span></div>
+          <div class="opt deny"><span class="key">esc</span><span class="lbl">deny</span><span class="why">— same as n, with no reason</span></div>
+
+          <div class="scope">
+            <div class="stmt dim2" style="min-height:var(--row)">“always” would remember exactly this, and nothing else:</div>
+            <div class="m">rm -rf node_modules bun.lockb &amp;&amp; bun install --frozen-lockfile</div>
+            <div class="stmt dim2" style="min-height:var(--row)">not the <span class="hi">Bash</span> tool, not <span class="hi">rm</span>, not <span class="hi">rm -rf *</span>. A different path or flag asks again.</div>
+          </div>
+          <div class="blank" style="height:9px"></div>
+        </div>
+
+        <div class="dfoot">
+          <kbd>y</kbd> once <span class="sep">·</span>
+          <kbd>a</kbd> always <span class="dim3">(this shape)</span> <span class="sep">·</span>
+          <kbd>n</kbd> deny + reason <span class="sep">·</span>
+          <kbd>esc</kbd> deny <span class="sep">·</span>
+          <kbd>ctrl-p</kbd> policy
+          <span class="rt dim3">blocked until you answer · 41s</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="sbar">
+      <span class="mark">✦</span><span>~/dev/xerxes</span>
+      <span class="pipe">│</span><span>main</span><span class="amber">✱6</span>
+      <span class="pipe">│</span>
+      <span><span class="dim1">F6</span> agents</span><span class="amber">(1 waiting)</span><span class="sep">·</span>
+      <span><span class="dim1">F7</span> diff</span><span class="sep">·</span>
+      <span><span class="dim1">F8</span> terminals</span>
+      <span class="rt">v0.4.1</span>
+    </div>
+
+  </div>
+</div>
+
+<section class="notes">
+  <h2>Decisions</h2>
+  <ul>
+    <li><b>Three statements, in this order: what runs, who asked, why you're being asked.</b> Every approval prompt that people learn to reflex-approve is one that answered fewer than three. The third is the one usually missing — without it, "why is this even asking" has no answer and <kbd>y</kbd> becomes muscle memory.</li>
+    <li><b>The command is verbatim, in a code box, with real line breaks.</b> No summary ("remove and reinstall dependencies"), no truncation, no reflow that could hide a second statement after a <span class="k">&amp;&amp;</span>. If it is too long to show, it is too long to approve blind.</li>
+    <li><b>The tint comes from the policy verdict, not from vibes.</b> Amber here is <span class="k">warn: recursive delete</span>, a rule that fired and is named on screen. A command that matched nothing renders in the neutral blue frame — the colour is evidence, so it has to be traceable to a rule.</li>
+    <li><b>"Who asked" names the subagent and its depth.</b> A fleet means the requester is usually not you and not the main session; approving without knowing which worktree is about to be modified is approving the wrong thing.</li>
+    <li><b>"Always" is scoped to this exact command shape and shows you the string it would store.</b> Whitelisting the <span class="k">Bash</span> tool from inside an <span class="k">rm -rf</span> prompt is how permission systems quietly turn themselves off. A changed path or flag asks again.</li>
+    <li><b>Deny is the Esc default and the cheapest key.</b> Two ways to say no (<kbd>n</kbd> with a reason the agent can act on, <kbd>esc</kbd> without), one way to say yes forever, and it costs an extra decision.</li>
+    <li><b>The statusbar shows the block</b> — <span class="k">F6 agents (1 waiting)</span> — so if you dismiss this card the stall stays visible instead of becoming a silently hung fleet.</li>
+  </ul>
+</section>
+</body>
+</html>

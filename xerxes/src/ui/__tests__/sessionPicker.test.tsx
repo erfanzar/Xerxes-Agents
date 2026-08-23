@@ -10,7 +10,7 @@ import { GatewayProvider } from '../app/gatewayContext.js'
 import type { GatewayServices } from '../app/interfaces.js'
 import type { GatewayClient } from '../gatewayClient.js'
 import type { SessionActiveListResponse, SessionListResponse, SessionPeekResponse } from '../gatewayTypes.js'
-import { SessionPicker } from '../opentui/sessionPicker.js'
+import { SessionPicker, sessionRowAccent } from '../opentui/sessionPicker.js'
 import { DEFAULT_THEME } from '../theme.js'
 
 const active: SessionActiveListResponse = {
@@ -141,10 +141,12 @@ describe('OpenTUI Agent View', () => {
     try {
       const frame = setup.captureCharFrame()
 
-      expect(frame).toContain('Agent view')
+      expect(frame).toContain('Agent View')
       expect(frame).toContain('NEEDS INPUT')
       expect(frame).toContain('WORKING')
-      expect(frame).toContain('READY')
+      // Saved chats are history, not agents awaiting review: a machine with
+      // 37 chats on disk used to open this screen to `READY TO REVIEW · 37`.
+      expect(frame).toContain('SAVED CHATS')
       expect(frame).toContain('Choose release target')
       expect(frame).toContain('Current implementation')
       expect(frame).toContain('Authentication audit')
@@ -387,9 +389,118 @@ describe('OpenTUI Agent View', () => {
 
     try {
       const frame = setup.captureCharFrame()
-      expect(frame).toContain('Agent view')
+      expect(frame).toContain('Agent View')
       expect(frame).toContain('Dispatch a ne')
       expect(frame).not.toContain('Sessions')
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
+
+  it('reserves the mockup edge column for needs-input rows only', () => {
+    // Mockup 04: needs-input cards get a thicker accent edge so the group
+    // is scannable before selection. The picker paints it as the same
+    // left-edge strip the agent-rail cards use, in the mode accent.
+    expect(sessionRowAccent('needs-input', DEFAULT_THEME)).toBe(DEFAULT_THEME.color.accent)
+    expect(sessionRowAccent('working', DEFAULT_THEME)).toBeUndefined()
+    expect(sessionRowAccent('review', DEFAULT_THEME)).toBeUndefined()
+  })
+
+  it('renders the edge column without disturbing row text or grouping', async () => {
+    const { setup } = await picker()
+
+    try {
+      const frame = setup.captureCharFrame()
+      // Every group still renders with its caption and full titles: the
+      // one-cell edge column must not shift or clip any row's content.
+      expect(frame).toContain('NEEDS INPUT · 1')
+      expect(frame).toContain('Choose release target')
+      expect(frame).toContain('Current implementation')
+      expect(frame).toContain('Authentication audit')
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
+
+  it('starts a fresh detached chat with n, leaving reply mode behind', async () => {
+    const oneWorking: SessionActiveListResponse = { sessions: [active.sessions![0]!] }
+    const { request, setup } = await picker({ activeResponse: oneWorking })
+
+    try {
+      await act(async () => setup.mockInput.typeText(' '))
+      await act(async () => Bun.sleep(0))
+      await setup.flush()
+      expect(setup.captureCharFrame()).toContain('I found one issue.')
+
+      await act(async () => setup.mockInput.typeText('n'))
+      await setup.flush()
+
+      const frame = setup.captureCharFrame()
+      expect(frame).not.toContain('I found one issue.')
+      expect(frame).toContain('Dispatch a new independent chat…')
+      // The composer meta advertises the binding from the mockup.
+      expect(frame).toContain('n new chat')
+
+      // What is typed next dispatches a NEW chat instead of steering the
+      // chat whose preview was just closed.
+      await act(async () => setup.mockInput.typeText('fresh chat task'))
+      act(() => setup.mockInput.pressEnter())
+      await act(async () => Bun.sleep(0))
+
+      expect(request).toHaveBeenCalledWith('prompt.background', {
+        session_id: 'live-main',
+        text: 'fresh chat task'
+      })
+      expect(request).not.toHaveBeenCalledWith('session.steer', expect.anything())
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
+
+  it('lets n begin a message when no preview is open', async () => {
+    const { request, setup } = await picker()
+
+    try {
+      // With the dispatch well already focused, n is a letter, not a
+      // command: messages may start with it ("now audit…").
+      await act(async () => setup.mockInput.typeText('now audit the parser'))
+      act(() => setup.mockInput.pressEnter())
+      await act(async () => Bun.sleep(0))
+
+      expect(request).toHaveBeenCalledWith('prompt.background', {
+        session_id: 'live-main',
+        text: 'now audit the parser'
+      })
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
+
+  it('anchors the header with the attached main session title', async () => {
+    const { setup } = await picker({
+      activeResponse: {
+        sessions: [{ ...active.sessions![0]!, title: 'refactor-auth' }]
+      }
+    })
+
+    try {
+      expect(setup.captureCharFrame()).toContain('main session · refactor-auth')
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
+
+  it('omits the header label while the main session has no title yet', async () => {
+    const { setup } = await picker({
+      activeResponse: {
+        sessions: [{ ...active.sessions![0]!, title: '' }]
+      }
+    })
+
+    try {
+      // An unnamed chat stays quiet: printing the not-named-yet em-dash in
+      // the header would read as a title.
+      expect(setup.captureCharFrame()).not.toContain('main session ·')
     } finally {
       act(() => setup.renderer.destroy())
     }
