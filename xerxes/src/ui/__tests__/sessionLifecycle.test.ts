@@ -5,8 +5,11 @@ import { act, createElement } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 
 import type { ComposerActions, GatewayRpc } from '../app/interfaces.js'
-import { useSessionLifecycle } from '../app/useSessionLifecycle.js'
-import { getUiState, resetUiState } from '../app/uiStore.js'
+import { turnController } from '../app/turnController.js'
+import { getTurnState, patchTurnState } from '../app/turnStore.js'
+import { getUiState, patchUiState, resetUiState } from '../app/uiStore.js'
+import { hydrateLiveSessionInflight, liveSessionInflightMessages, useSessionLifecycle } from '../app/useSessionLifecycle.js'
+import { subagentProgressFromSnapshot } from '../domain/subagentProgress.js'
 import type { GatewayClient } from '../gatewayClient.js'
 import type {
   SessionActivateResponse,
@@ -18,6 +21,60 @@ import type {
 const deferred = <T,>() => Promise.withResolvers<T>()
 
 describe('useSessionLifecycle', () => {
+  it('returns from Agent View to the attached chat without resetting its live turn', async () => {
+    resetUiState()
+    turnController.fullReset()
+    patchUiState({ busy: true, sid: 'live-main' })
+    const liveAgent = subagentProgressFromSnapshot(
+      { id: 'agent-1', name: 'structure', status: 'running', title: 'Analyze project structure' },
+      0
+    )
+    patchTurnState({ streaming: 'still working', subagents: [liveAgent] })
+    const setHistoryItems = vi.fn()
+    const setTurnStartedAt = vi.fn()
+    const gw = { request: vi.fn() } as unknown as GatewayClient
+    let lifecycle: ReturnType<typeof useSessionLifecycle> | undefined
+
+    const Probe = () => {
+      lifecycle = useSessionLifecycle({
+        colsRef: { current: 120 },
+        composerActions: { activateSessionQueue: vi.fn(), setPasteSnips: vi.fn() } as unknown as ComposerActions,
+        gw,
+        panel: vi.fn(),
+        rpc: vi.fn() as GatewayRpc,
+        scrollRef: { current: null },
+        setHistoryItems,
+        setLastUserMsg: vi.fn(),
+        setSessionStartedAt: vi.fn(),
+        setStickyPrompt: vi.fn(),
+        setTurnStartedAt,
+        setVoiceProcessing: vi.fn(),
+        setVoiceRecording: vi.fn(),
+        sys: vi.fn()
+      })
+      return null
+    }
+
+    const setup = await testRender(createElement(Probe), { height: 6, width: 40 })
+    try {
+      await setup.flush()
+      if (!lifecycle) throw new Error('lifecycle hook did not mount')
+      lifecycle.activateLiveSession('live-main')
+      await setup.flush()
+
+      expect(gw.request).not.toHaveBeenCalled()
+      expect(setHistoryItems).not.toHaveBeenCalled()
+      expect(setTurnStartedAt).not.toHaveBeenCalled()
+      expect(getTurnState().streaming).toBe('still working')
+      expect(getTurnState().subagents.map(agent => agent.id)).toEqual(['agent-1'])
+      expect(getUiState()).toMatchObject({ busy: true, sid: 'live-main' })
+    } finally {
+      act(() => setup.renderer.destroy())
+      turnController.fullReset()
+      resetUiState()
+    }
+  })
+
   it('lets only the newest overlapping new-session request replace visible state', async () => {
     resetUiState()
     const firstSetup = deferred<null | SetupStatusResponse>()
@@ -223,5 +280,76 @@ describe('useSessionLifecycle', () => {
       act(() => setup.renderer.destroy())
       resetUiState()
     }
+  })
+  it('filters internal prompts from the inflight user row on reattach', () => {
+    expect(
+      liveSessionInflightMessages({ user: "[Skill 'deepscan' activated]\n\n## Skill: deepscan\nprivate" })
+    ).toEqual([])
+    expect(liveSessionInflightMessages({ user: 'Please compact this conversation: now' })).toEqual([])
+    expect(liveSessionInflightMessages({ user: 'visible prompt' })).toEqual([{ role: 'user', text: 'visible prompt' }])
+  })
+
+  it('hydrates the mid-turn inflight trail as live tool state', () => {
+    turnController.fullReset()
+    try {
+      hydrateLiveSessionInflight({
+        // Long enough to clear the reasoning filter's 32-char lookahead tail.
+        assistant: 'partial reply that keeps streaming past the filter tail boundary',
+        started_at: 1_700_000_000,
+        streaming: true,
+        thinking: 'trace so far',
+        tools: [
+          { arguments: '{"path":"a.ts"}', duration_ms: 200, id: 'call-1', name: 'ReadFile', ok: true },
+          { arguments: '{"path":"b.ts"}', id: 'call-2', name: 'WriteFile' }
+        ],
+        user: 'go'
+      })
+
+      const turn = getTurnState()
+      // The settled call renders as a completed trail line; the call still in
+      // flight stays active so its late tool_result settles it live.
+      expect(turn.streamPendingTools.some(line => line.includes('a.ts'))).toBe(true)
+      expect(turn.tools.map(tool => tool.name)).toEqual(['WriteFile'])
+      expect(turn.streaming).toContain('partial reply that keeps')
+    } finally {
+      turnController.fullReset()
+    }
+  })
+
+  it('rehydrates persisted subagent snapshots as trail progress rows', () => {
+    const row = subagentProgressFromSnapshot(
+      {
+        agent_id: 'explorer',
+        api_calls: 3,
+        created_at: '2026-07-16T10:00:00.000Z',
+        id: 'sa-1',
+        model: 'gpt-4o',
+        name: 'scan',
+        parent_id: null,
+        status: 'completed',
+        summary: 'scanned the repo',
+        title: 'Scan repo',
+        tool_count: 5
+      },
+      0
+    )
+
+    expect(row).toMatchObject({
+      agentType: 'explorer',
+      apiCalls: 3,
+      goal: 'Scan repo',
+      id: 'sa-1',
+      index: 0,
+      model: 'gpt-4o',
+      name: 'scan',
+      parentId: null,
+      status: 'completed',
+      summary: 'scanned the repo',
+      toolCount: 5
+    })
+    expect(row.startedAt).toBe(Date.parse('2026-07-16T10:00:00.000Z'))
+    expect(subagentProgressFromSnapshot({ id: 'sa-2', status: 'cancelled' }, 1).status).toBe('interrupted')
+    expect(subagentProgressFromSnapshot({ id: 'sa-3', status: 'mystery' }, 2).status).toBe('interrupted')
+    expect(subagentProgressFromSnapshot({ closed: true, id: 'sa-4', status: 'mystery' }, 3).status).toBe('completed')
   })
 })

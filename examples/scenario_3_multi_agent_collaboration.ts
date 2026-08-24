@@ -6,11 +6,11 @@
 import {
   AgentOrchestrator,
   AgentSwitchTrigger,
-  Cortex,
   ShortTermMemory,
-  type CortexAgent,
-  type CortexOutput,
 } from '../xerxes/src/index.js'
+// The cortex engine lives outside the public barrel (see xerxes/src/index.ts).
+import { Cortex, type CortexEngineTaskExecutionRequest, type CortexOutput } from '../xerxes/src/cortex/cortex.js'
+import type { CortexAgent } from '../xerxes/src/cortex/task.js'
 import { ProcessType } from '../xerxes/src/cortex/core/enums.js'
 import { divider, runMain } from './native_demo_support.js'
 

@@ -152,7 +152,15 @@ interface RegisteredTool {
   readonly capabilities: ToolCapabilities
   readonly declaredCapabilities: boolean
   readonly definition: ToolDefinition
+  /** Usage policy shipped with this tool; rendered only while its schema is visible. */
+  readonly guidance?: string
   readonly handler: ToolHandler
+}
+
+/** One tool's usage-policy section, in the provider tool-list order of a request. */
+export interface ToolGuidanceSegment {
+  readonly name: string
+  readonly text: string
 }
 
 export interface ToolRegistryOptions {
@@ -190,6 +198,7 @@ export class ToolRegistry implements ToolExecutor {
     handler: ToolHandler,
     agentId = 'default',
     capabilities?: Partial<ToolCapabilities>,
+    guidance?: string,
   ): void {
     const name = definition.function.name
     if (!name) {
@@ -199,7 +208,7 @@ export class ToolRegistry implements ToolExecutor {
     if (tools.some(entry => entry.agentId === agentId)) {
       this.onDuplicateRegistration(name, agentId)
     }
-    tools.push(makeRegistered(definition, handler, agentId, capabilities))
+    tools.push(makeRegistered(definition, handler, agentId, capabilities, guidance))
     this.entries.set(name, tools)
   }
 
@@ -209,13 +218,14 @@ export class ToolRegistry implements ToolExecutor {
     handler: ToolHandler,
     agentId = 'default',
     capabilities?: Partial<ToolCapabilities>,
+    guidance?: string,
   ): void {
     const name = definition.function.name
     if (!name) {
       throw new ValidationError('tool.name', 'must not be empty')
     }
     const tools = [...(this.entries.get(name) ?? [])]
-    const registered = makeRegistered(definition, handler, agentId, capabilities)
+    const registered = makeRegistered(definition, handler, agentId, capabilities, guidance)
     const index = tools.findIndex(entry => entry.agentId === agentId)
     if (index >= 0) {
       tools[index] = registered
@@ -308,6 +318,27 @@ export class ToolRegistry implements ToolExecutor {
       .map(entry => entry.definition)
   }
 
+  /**
+   * Usage-policy sections for exactly the tools a request will expose.
+   *
+   * Callers pass the names of the definitions actually being sent (after agent,
+   * mode, and resumed-subagent filtering), so guidance can never outlive its
+   * schema: hiding or deferring a tool removes both from the request together.
+   * Order follows the caller's list — provider tool order, not registration
+   * order — which keeps the rendered block byte-stable for an unchanged surface.
+   */
+  guidanceForTools(
+    names: readonly string[],
+    agentId?: string,
+  ): readonly ToolGuidanceSegment[] {
+    const segments: ToolGuidanceSegment[] = []
+    for (const name of names) {
+      const text = this.pick(this.entries.get(name) ?? [], agentId)?.guidance?.trim()
+      if (text) segments.push({ name, text })
+    }
+    return segments
+  }
+
   async execute(call: ToolCall, context: ToolExecutionContext, signal?: AbortSignal): Promise<string> {
     if (signal?.aborted) {
       throw new FunctionExecutionError(call.function.name, 'cancelled before execution')
@@ -356,14 +387,29 @@ function makeRegistered(
   handler: ToolHandler,
   agentId: string,
   capabilities?: Partial<ToolCapabilities>,
+  guidance?: string,
 ): RegisteredTool {
   return {
     agentId,
     capabilities: resolveToolCapabilities(definition.function.name, capabilities),
     declaredCapabilities: capabilities !== undefined,
     definition,
+    ...(guidance === undefined ? {} : { guidance }),
     handler,
   }
+}
+
+/**
+ * Render tool guidance as one stable prompt block.
+ *
+ * Empty in, empty out — a surface with no guided tools contributes nothing to
+ * the system prompt, and an unchanged surface renders byte-identically, so the
+ * provider's prefix cache survives.
+ */
+export function renderToolGuidance(segments: readonly ToolGuidanceSegment[]): string {
+  return segments
+    .map(segment => `[Tool usage: ${segment.name}]\n${segment.text.trim()}`)
+    .join('\n\n')
 }
 
 function oneLine(description: string): string {

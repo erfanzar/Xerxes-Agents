@@ -98,9 +98,12 @@ describe('OpenTUI terminal panel', () => {
       const frame = setup.captureCharFrame()
 
       expect(frame).toContain('Terminals')
-      expect(frame).toContain('1 running')
-      expect(frame).toContain('bg bun test')
-      expect(frame).toContain('pid 4242')
+      // Header budget + the mockup's single-row entry: dot, bold label,
+      // muted command, right-aligned state budget.
+      expect(frame).toContain('1 tracked · 1 running')
+      expect(frame).toContain('bun test')
+      expect(frame).toContain('bun test ./test')
+      expect(frame).toContain('running ·')
       expect(rpc).toHaveBeenCalledWith('terminal.list', {})
     } finally {
       act(() => setup.renderer.destroy())
@@ -176,11 +179,11 @@ describe('OpenTUI terminal panel', () => {
     }
   })
 
-  it('kills the selected terminal and refuses input on one that has no stdin', async () => {
+  it('arms a two-step kill and only signals on the confirming repeat', async () => {
     const rpc = vi.fn(async (method: string) =>
       method === 'terminal.list'
         ? { ok: true, terminals: [wireTerminal()] }
-        : { ok: true, terminal: { ...wireTerminal(), output: '', outputTruncated: false } }
+        : { ok: true }
     )
     const setup = await testRender(
       <GatewayProvider value={servicesWith(rpc as unknown as GatewayServices['rpc'])}>
@@ -191,6 +194,17 @@ describe('OpenTUI terminal panel', () => {
 
     try {
       await settle(setup)
+      const controlCalls = () => rpc.mock.calls.filter(([method]) => method === 'terminal.control')
+
+      // Mockup 06: destructive keys are two-step. The first k only arms — the
+      // row shows the warn confirm line and no signal leaves the process.
+      act(() => setup.mockInput.pressKey('k'))
+      await settle(setup)
+
+      expect(setup.captureCharFrame()).toContain('kill bun test? k again to confirm · esc cancel')
+      expect(controlCalls()).toHaveLength(0)
+
+      // The repeat press executes.
       act(() => setup.mockInput.pressKey('k'))
       await settle(setup)
 
@@ -201,6 +215,132 @@ describe('OpenTUI terminal panel', () => {
       act(() => setup.mockInput.pressKey('i'))
       await settle(setup)
       expect(setup.captureCharFrame()).toContain('open a terminal first')
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
+
+  it('makes K (force) take the same two steps before sending SIGKILL', async () => {
+    const rpc = vi.fn(async (method: string) =>
+      method === 'terminal.list' ? { ok: true, terminals: [wireTerminal()] } : { ok: true }
+    )
+    const setup = await testRender(
+      <GatewayProvider value={servicesWith(rpc as unknown as GatewayServices['rpc'])}>
+        <TerminalPanelOverlay onClose={() => undefined} t={DEFAULT_THEME} />
+      </GatewayProvider>,
+      { height: 24, width: 90 }
+    )
+
+    try {
+      await settle(setup)
+
+      // Force is a different signal, not a different level of caution: K
+      // arms exactly like k, and only the repeat sends SIGKILL.
+      act(() => setup.mockInput.pressKey('K'))
+      await settle(setup)
+
+      expect(setup.captureCharFrame()).toContain('force kill bun test? K again to confirm · esc cancel')
+      expect(rpc).not.toHaveBeenCalledWith(
+        'terminal.control',
+        expect.objectContaining({ action: 'kill' })
+      )
+
+      act(() => setup.mockInput.pressKey('K'))
+      await settle(setup)
+
+      expect(rpc).toHaveBeenCalledWith('terminal.control', {
+        action: 'kill',
+        signal: 'SIGKILL',
+        terminal_id: 'proc-1'
+      })
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
+
+  it('steps back cleanly: Esc cancels an armed kill without closing the panel', async () => {
+    const rpc = vi.fn(async (method: string) =>
+      method === 'terminal.list'
+        ? { ok: true, terminals: [wireTerminal()] }
+        : method === 'terminal.inspect'
+          ? { ok: true, terminal: { ...wireTerminal(), output: 'tail', outputTruncated: false } }
+          : { ok: true }
+    )
+    const setup = await testRender(
+      <GatewayProvider value={servicesWith(rpc as unknown as GatewayServices['rpc'])}>
+        <TerminalPanelOverlay onClose={() => undefined} t={DEFAULT_THEME} />
+      </GatewayProvider>,
+      { height: 24, width: 90 }
+    )
+
+    try {
+      await settle(setup)
+
+      act(() => setup.mockInput.pressKey('k'))
+      await settle(setup)
+
+      act(() => setup.mockInput.pressEscape())
+      // The renderer holds a bare ESC briefly to disambiguate escape sequences.
+      await act(async () => {
+        await Bun.sleep(60)
+      })
+      await setup.flush()
+
+      // The cancel consumed this Esc: the confirm line is gone and the
+      // overlay is still up — the next Enter opens the detail view.
+      expect(setup.captureCharFrame()).not.toContain('again to confirm')
+
+      act(() => setup.mockInput.pressEnter())
+      await settle(setup)
+
+      expect(setup.captureCharFrame()).toContain('OUTPUT —')
+      expect(rpc).not.toHaveBeenCalledWith(
+        'terminal.control',
+        expect.objectContaining({ action: 'kill' })
+      )
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
+
+  it('disarms the pending kill when the selection moves to another terminal', async () => {
+    const rpc = vi.fn(async (method: string) =>
+      method === 'terminal.list'
+        ? {
+            ok: true,
+            terminals: [
+              wireTerminal({ id: 'live-a', label: 'alpha' }),
+              wireTerminal({ id: 'live-b', label: 'beta', startedAt: NOW - 200_000 })
+            ]
+          }
+        : { ok: true }
+    )
+    const setup = await testRender(
+      <GatewayProvider value={servicesWith(rpc as unknown as GatewayServices['rpc'])}>
+        <TerminalPanelOverlay onClose={() => undefined} t={DEFAULT_THEME} />
+      </GatewayProvider>,
+      { height: 24, width: 90 }
+    )
+
+    try {
+      await settle(setup)
+
+      act(() => setup.mockInput.pressKey('k'))
+      await settle(setup)
+      expect(setup.captureCharFrame()).toContain('kill alpha?')
+
+      // Moving the selection abandons the arm; killing now needs two fresh
+      // presses aimed at the newly selected row.
+      act(() => setup.mockInput.pressArrow('down'))
+      await settle(setup)
+      expect(setup.captureCharFrame()).not.toContain('again to confirm')
+
+      act(() => setup.mockInput.pressKey('k'))
+      await settle(setup)
+      act(() => setup.mockInput.pressKey('k'))
+      await settle(setup)
+
+      expect(rpc).toHaveBeenCalledWith('terminal.control', { action: 'kill', terminal_id: 'live-b' })
     } finally {
       act(() => setup.renderer.destroy())
     }

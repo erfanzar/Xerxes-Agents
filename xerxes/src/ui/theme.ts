@@ -2,8 +2,18 @@
 // Licensed under the Apache License, Version 2.0.
 //
 // Theme + palette for the Xerxes TUI. The shipped palette is "Night
-// Standard": neutral graphite surfaces, an amber brand signal, and
-// high-contrast text that keeps the keyboard-first interface readable.
+// Standard": neutral graphite surfaces, high-contrast text, and one brand
+// signal that keeps the keyboard-first interface readable.
+//
+// The v2 "Persepolis" retune shifted the dark surfaces a touch blue (#0f0f12
+// panel over #1d1d24 elevated), cooled the hairline to #32323b, and added a
+// warm user-band tint so input reads as input.
+//
+// The v3 pivot moves the brand family from amber to lapis blue: every role
+// that was gold/accent (header mark, active tab, composer ring, user band,
+// turn rail, leader dots) is now the blue family, matching the tool voice's
+// lapis. `warn` keeps its amber VALUE purely as a semantic warning colour —
+// it no longer carries any brand duty.
 //
 // The colour math handles light/dark detection plus ANSI down-conversion for
 // terminals without truecolor. `fromSkin` lets the daemon push live skin
@@ -11,18 +21,220 @@
 
 // ── Derafsh Kaviani emblem palette ──────────────────────────────────────
 //
-// The boot mark animates a blue → purple → gold gradient. These are the
+// The boot mark animates a blue → purple → deep-blue gradient. These are the
 // source constants for it, owned here so the transcript can reuse the same
 // hues: the emblem is meant to read as a legend for the voices below it.
-// `banner.ts` imports them rather than keeping a private copy.
+// `banner.ts` imports them rather than keeping a private copy. (The former
+// *_GOLD constants are named *_AZURE since the v3 pivot.)
 export const DARK_DERAFSH_BLUE = '#6ea8fe'
 export const DARK_DERAFSH_PURPLE = '#b18be8'
-export const DARK_DERAFSH_GOLD = '#d8ae58'
+export const DARK_DERAFSH_AZURE = '#4a82d8'
 export const DARK_DERAFSH_BRIDGE = '#9fb8d8'
 export const LIGHT_DERAFSH_BLUE = '#1f64b5'
 export const LIGHT_DERAFSH_PURPLE = '#7047b5'
-export const LIGHT_DERAFSH_GOLD = '#8a6200'
+export const LIGHT_DERAFSH_AZURE = '#275e9e'
 export const LIGHT_DERAFSH_BRIDGE = '#466c91'
+
+// ── Nocturne: the Xerxes terminal design system ─────────────────────────
+//
+// Source of truth: the "Xerxes Terminal UI Design" canvas, screen 10. The
+// whole vocabulary is six voice colours, six surfaces, three edges and an
+// eight-step text ramp — every screen is assembled from four row patterns
+// (leader row, caption, card, footer) using nothing else.
+//
+// Two rules the canvas is emphatic about, and which the roles below encode:
+//
+//  1. Each voice colour owns exactly ONE meaning on every screen. Amber is
+//     never emphasis — it means "a human is required", so a screen where
+//     nothing is blocked carries no amber at all. Cyan appears only on hunk
+//     headers, so a fold boundary is never read as a state dot.
+//  2. The text ramp does the work colour usually does. Eight greys assigned
+//     by role mean a screen can be fully legible while only two or three
+//     things are actually coloured.
+//
+// These are raw tokens. Screens read them through the `ThemeColors` roles
+// below, never directly, so a skin can repaint the product.
+export interface NocturnePalette {
+  /** Voice — same dot, same meaning, every screen. */
+  working: string
+  done: string
+  failed: string
+  needsInput: string
+  activity: string
+  structure: string
+
+  /** Softened voice text, for prose that carries a state colour. */
+  needsInputText: string
+  failedText: string
+
+  /** Surfaces — layered, never gradient. */
+  backdrop: string
+  sunken: string
+  screen: string
+  chrome: string
+  card: string
+  selected: string
+
+  /** Edges. */
+  hairline: string
+  divider: string
+  focusEdge: string
+
+  /** Text ramp — quiet by default. */
+  strong: string
+  title: string
+  prose: string
+  secondary: string
+  meta: string
+  numeric: string
+  caption: string
+  separator: string
+  /** The statusbar's `│` section break — quieter than any separator. */
+  rule: string
+
+  /** Dotted leaders: the loud one on active rows, the quiet one elsewhere. */
+  leader: string
+  leaderQuiet: string
+
+  /** Tinted card grounds, one per state. */
+  workingCardBg: string
+  needsInputCardBg: string
+  needsInputCardBorder: string
+  doneCardBg: string
+  doneCardBorder: string
+  failedCardBg: string
+  failedCardBorder: string
+
+  /** Diff surfaces: context text, row tints, word-level tints. */
+  diffContext: string
+  diffAddRow: string
+  diffDelRow: string
+  diffAddWordBg: string
+  diffDelWordBg: string
+  diffAddWordFg: string
+  diffDelWordFg: string
+  diffHunkBg: string
+  diffFoldBg: string
+}
+
+export const NOCTURNE_DARK: NocturnePalette = {
+  working: '#6ea8fe',
+  done: '#57ca85',
+  failed: '#f47067',
+  needsInput: '#d8ae58',
+  activity: '#b39cf0',
+  structure: '#56c8d8',
+
+  needsInputText: '#e4c37e',
+  failedText: '#e39a94',
+
+  backdrop: '#000000',
+  sunken: '#08080c',
+  screen: '#0a0a0d',
+  chrome: '#0d0d12',
+  card: '#101017',
+  selected: '#101725',
+
+  hairline: '#1c2733',
+  divider: '#161d27',
+  focusEdge: '#223244',
+
+  strong: '#e9e9ed',
+  title: '#d7dce3',
+  prose: '#c8cfd8',
+  secondary: '#8b949e',
+  meta: '#6b7280',
+  numeric: '#565f6b',
+  caption: '#4d5561',
+  separator: '#3f4753',
+  rule: '#26303c',
+
+  leader: '#232b36',
+  leaderQuiet: '#1e252e',
+
+  workingCardBg: '#0d1017',
+  needsInputCardBg: '#12100c',
+  needsInputCardBorder: '#3a3018',
+  doneCardBg: '#0c1210',
+  doneCardBorder: '#1b2b22',
+  failedCardBg: '#120d0d',
+  failedCardBorder: '#3a1f1d',
+
+  diffContext: '#7d8794',
+  // The canvas paints these as 7% alpha over the screen ground; a terminal
+  // cell has no alpha, so they are pre-composited here against #0a0a0d.
+  diffAddRow: '#0d1512',
+  diffDelRow: '#150e0e',
+  diffAddWordBg: '#1d3628',
+  diffDelWordBg: '#33191a',
+  diffAddWordFg: '#b7f0cd',
+  diffDelWordFg: '#ffc3bd',
+  diffHunkBg: '#0b1214',
+  diffFoldBg: '#0c0c11'
+}
+
+/**
+ * The same vocabulary on a light terminal.
+ *
+ * Roles are preserved, not hues: the ramp inverts (strong is darkest), the
+ * surfaces climb rather than fall, and each voice colour is darkened until it
+ * clears 4.5:1 on the paper ground. A light terminal is not a dark one with
+ * the background swapped, so the tinted card grounds are near-white washes
+ * rather than the dark theme's near-black ones.
+ */
+export const NOCTURNE_LIGHT: NocturnePalette = {
+  working: '#1f64b5',
+  done: '#197a4f',
+  failed: '#b4233f',
+  needsInput: '#8a5b00',
+  activity: '#7047b5',
+  structure: '#0e7490',
+
+  needsInputText: '#6d4700',
+  failedText: '#8f1c33',
+
+  backdrop: '#ffffff',
+  sunken: '#eef1f6',
+  screen: '#f7f8fa',
+  chrome: '#f1f3f5',
+  card: '#eef1f6',
+  selected: '#e3ecf9',
+
+  hairline: '#c8d1dc',
+  divider: '#dbe2ea',
+  focusEdge: '#9dbbe4',
+
+  strong: '#0d1620',
+  title: '#172533',
+  prose: '#22303e',
+  secondary: '#3f5162',
+  meta: '#526579',
+  numeric: '#647486',
+  caption: '#73869a',
+  separator: '#93a3b3',
+  rule: '#b6c2ce',
+
+  leader: '#cdd6e0',
+  leaderQuiet: '#dde3ea',
+
+  workingCardBg: '#eff4fb',
+  needsInputCardBg: '#faf3e2',
+  needsInputCardBorder: '#e0c98e',
+  doneCardBg: '#eaf6ef',
+  doneCardBorder: '#a9d6bd',
+  failedCardBg: '#fbedef',
+  failedCardBorder: '#e5b3bd',
+
+  diffContext: '#4c5c6c',
+  diffAddRow: '#eaf6ee',
+  diffDelRow: '#fceef0',
+  diffAddWordBg: '#c7ecd5',
+  diffDelWordBg: '#f7ced6',
+  diffAddWordFg: '#0d5233',
+  diffDelWordFg: '#7c1329',
+  diffHunkBg: '#e6f2f5',
+  diffFoldBg: '#eceff3'
+}
 
 export interface ThemeColors {
   primary: string
@@ -42,6 +254,13 @@ export interface ThemeColors {
   userBar: string
   userText: string
   thinking: string
+  /**
+   * The turn rail. Dimmer than `userBar` on purpose: the rail is painted as
+   * a filled column so it can span a whole answer, and a filled cell inks
+   * ~10x more than the `│` glyph it replaces. At full saturation a long
+   * reply would be a solid gold stripe.
+   */
+  turnRail: string
 
   // Brand signal for chrome (panel frames, titles, the selected completion).
   // Same reason as above — these must survive every interaction mode.
@@ -57,6 +276,13 @@ export interface ThemeColors {
   ok: string
   error: string
   warn: string
+
+  /**
+   * Warm surface behind the user transcript band. The gold bar marks whose
+   * row it is; this tint makes the whole band read as "input" without
+   * bordering or boxing it.
+   */
+  userBandBg: string
 
   prompt: string
   sessionLabel: string
@@ -77,6 +303,13 @@ export interface ThemeColors {
   /** Row backgrounds behind +/- lines in the F7 diff viewer. */
   diffAddedBg: string
   diffRemovedBg: string
+  /**
+   * Word-level backgrounds. Distinct from the row tints on purpose: the row
+   * says the line changed, the word says WHICH substring moved, and a line
+   * tint alone makes you re-read the whole line to find one renamed symbol.
+   */
+  diffAddedWordBg: string
+  diffRemovedWordBg: string
   /** Hunk-header accent in the F7 diff viewer. */
   diffHunk: string
 
@@ -94,6 +327,16 @@ export interface ThemeBrand {
 
 export interface Theme {
   color: ThemeColors
+  /**
+   * The raw Nocturne tokens `color` is derived from.
+   *
+   * `color` names the roles the product had before the design system existed
+   * (accent, muted, ok…). `ds` carries the ones it has no name for: the six
+   * surfaces, the eight-step text ramp, the dotted leaders and the tinted
+   * state cards. Screens read `ds` for those and `color` for everything else,
+   * so nothing has to hard-code a hex.
+   */
+  ds: NocturnePalette
   brand: ThemeBrand
   bannerLogo: string
   bannerHero: string
@@ -253,7 +496,11 @@ function normalizeAnsiForeground(color: string): string {
 const BRAND: ThemeBrand = {
   name: 'XERXES',
   prompt: '❯',
-  welcome: 'Ready for your next command.',
+  // The tagline under the wordmark. It says what the product IS, because
+  // the home screen's job is to answer "where am I" before it offers a way
+  // in — 'Ready for your next command.' answered a question nobody asked on
+  // a screen where nothing has happened yet.
+  welcome: 'Many agents, one terminal.',
   goodbye: 'Session closed.',
   tool: '│',
   helpHeader: 'Keyboard'
@@ -266,114 +513,91 @@ const cleanPromptSymbol = (s: string | undefined, fallback: string) => {
   return cleaned || fallback
 }
 
-export const DARK_THEME: Theme = {
-  color: {
-    primary: '#e6e6e6',
-    accent: '#d8ae58',
-    border: '#333333',
-    text: '#e9e9e9',
-    muted: '#737373',
-    toolName: '#7ea9e0',
-    system: '#a98ad4',
+/**
+ * Build the shipped palette for one ground from the Nocturne tokens.
+ *
+ * Every role below is a token, never a literal. That is the whole point of
+ * the design system: the six voice colours and the eight-step ramp are
+ * decided once, on screen 10 of the canvas, and each product role says which
+ * step it borrows rather than re-picking a hex near it.
+ */
+function nocturneTheme(ds: NocturnePalette): Theme {
+  return {
+    color: {
+      // Markdown's h1 rides `accent` and h2/h3 + bold ride `primary`, so
+      // `primary` takes the ramp's brightest step — the one the canvas
+      // reserves for "the thing you must read first".
+      primary: ds.strong,
+      accent: ds.working,
+      border: ds.hairline,
+      text: ds.title,
+      muted: ds.meta,
+      // The tool VERB, not the tool glyph. The canvas keeps verbs on the
+      // secondary step and lets the coloured ⏺ carry the state, so a column
+      // of tool rows reads as one quiet block with a few lit dots.
+      toolName: ds.secondary,
+      system: ds.activity,
 
-    userBar: DARK_DERAFSH_GOLD,
-    userText: '#f0e4cd',
-    thinking: '#8b7fa3',
+      userBar: ds.working,
+      userText: ds.title,
+      turnRail: ds.focusEdge,
+      thinking: ds.meta,
 
-    brandGold: DARK_DERAFSH_GOLD,
-    brandLapis: DARK_DERAFSH_BLUE,
+      brandGold: ds.working,
+      brandLapis: ds.working,
 
-    completionBg: '#111111',
-    completionCurrentBg: '#1a1a1a',
-    completionMetaBg: '#111111',
-    completionMetaCurrentBg: '#1a1a1a',
+      completionBg: ds.chrome,
+      completionCurrentBg: ds.selected,
+      completionMetaBg: ds.chrome,
+      completionMetaCurrentBg: ds.selected,
 
-    label: '#c9c9c9',
-    ok: '#83c99d',
-    error: '#dd7c88',
-    warn: '#d8ae58',
+      label: ds.secondary,
+      ok: ds.done,
+      error: ds.failed,
+      warn: ds.needsInput,
 
-    prompt: '#f4f4f4',
-    sessionLabel: '#858585',
-    sessionBorder: '#595959',
+      userBandBg: ds.workingCardBg,
+      prompt: ds.strong,
+      sessionLabel: ds.caption,
+      sessionBorder: ds.hairline,
 
-    statusBg: '#101010',
-    statusFg: '#d6d6d6',
-    statusGood: '#83c99d',
-    statusWarn: '#d8ae58',
-    statusBad: '#dd7c88',
-    statusCritical: '#e35d6e',
-    selectionBg: '#2a2a2a',
+      statusBg: ds.screen,
+      statusFg: ds.title,
+      statusGood: ds.done,
+      statusWarn: ds.needsInput,
+      statusBad: ds.failed,
+      // Deliberately the same red. The canvas allows six colours and each
+      // owns one meaning; a seventh hue for "worse than bad" would be a hue
+      // chosen because it looks urgent, not because it means something new.
+      statusCritical: ds.failed,
+      selectionBg: ds.selected,
 
-    diffAdded: 'rgb(190,232,204)',
-    diffRemoved: 'rgb(245,202,210)',
-    diffAddedWord: 'rgb(131,201,157)',
-    diffRemovedWord: 'rgb(221,124,136)',
-    diffAddedBg: '#14251b',
-    diffRemovedBg: '#2a171b',
-    diffHunk: '#56c2d6',
+      // Changed lines keep the prose step and let the +/- sign and the row
+      // tint carry the state, so a diff reads as code with marks on it
+      // rather than as two blocks of coloured text.
+      diffAdded: ds.prose,
+      diffRemoved: ds.prose,
+      diffAddedWord: ds.diffAddWordFg,
+      diffRemovedWord: ds.diffDelWordFg,
+      diffAddedBg: ds.diffAddRow,
+      diffRemovedBg: ds.diffDelRow,
+      diffAddedWordBg: ds.diffAddWordBg,
+      diffRemovedWordBg: ds.diffDelWordBg,
+      diffHunk: ds.structure,
 
-    shellDollar: '#d8ae58'
-  },
-  brand: BRAND,
-  bannerLogo: '',
-  bannerHero: ''
+      shellDollar: ds.working
+    },
+    ds,
+    brand: BRAND,
+    bannerLogo: '',
+    bannerHero: ''
+  }
 }
 
-// Light-terminal palette: the same hierarchy with darker foreground roles.
-export const LIGHT_THEME: Theme = {
-  color: {
-    primary: '#172533',
-    accent: '#006f94',
-    border: '#92a4b7',
-    text: '#172533',
-    muted: '#526579',
-    toolName: '#31526f',
-    system: '#6b46b5',
+export const DARK_THEME: Theme = nocturneTheme(NOCTURNE_DARK)
 
-    userBar: LIGHT_DERAFSH_GOLD,
-    userText: '#3a2f16',
-    thinking: '#5b4f76',
-
-    brandGold: LIGHT_DERAFSH_GOLD,
-    brandLapis: LIGHT_DERAFSH_BLUE,
-
-    completionBg: '#f4f7fb',
-    completionCurrentBg: mix('#f4f7fb', '#006f94', 0.18),
-    completionMetaBg: '#f4f7fb',
-    completionMetaCurrentBg: mix('#f4f7fb', '#006f94', 0.18),
-
-    label: '#31526f',
-    ok: '#197a4f',
-    error: '#b4233f',
-    warn: '#825a00',
-
-    prompt: '#172533',
-    sessionLabel: '#526579',
-    sessionBorder: '#73869a',
-
-    statusBg: '#f4f7fb',
-    statusFg: '#26384c',
-    statusGood: '#197a4f',
-    statusWarn: '#825a00',
-    statusBad: '#b4233f',
-    statusCritical: '#9f1239',
-    selectionBg: '#dbeaf3',
-
-    diffAdded: 'rgb(187,231,199)',
-    diffRemoved: 'rgb(250,207,216)',
-    diffAddedWord: 'rgb(25,122,79)',
-    diffRemovedWord: 'rgb(180,35,63)',
-    diffAddedBg: mix('#f4f7fb', '#197a4f', 0.14),
-    diffRemovedBg: mix('#f4f7fb', '#b4233f', 0.12),
-    diffHunk: '#0e7490',
-
-    shellDollar: '#006f94'
-  },
-  brand: BRAND,
-  bannerLogo: '',
-  bannerHero: ''
-}
+/** The same roles on paper: see `NOCTURNE_LIGHT` for how the ramp inverts. */
+export const LIGHT_THEME: Theme = nocturneTheme(NOCTURNE_LIGHT)
 
 // ── Light/dark detection (ported from Xerxes) ───────────────────────────
 
@@ -608,19 +832,19 @@ export interface TerminalThemeModeOptions {
 
 export type InteractionPaletteMode = 'code' | 'objective' | 'plan' | 'researcher'
 
-const DARK_MODE_ACCENTS: Record<InteractionPaletteMode, string> = {
-  code: '#aeb4bb',
-  researcher: '#6ea8fe',
-  plan: '#d8ae58',
-  objective: '#b18be8'
-}
-
-const LIGHT_MODE_ACCENTS: Record<InteractionPaletteMode, string> = {
-  code: '#45515e',
-  researcher: '#1f64b5',
-  plan: '#8a6200',
-  objective: '#7047b5'
-}
+/**
+ * Interaction mode reads off the same six voice colours as everything else —
+ * researcher borrows `working`, plan borrows `structure`, objective borrows
+ * `activity`. Code is deliberately un-hued: it sits between the ramp's title
+ * and secondary steps, so the default mode adds no colour to the screen at
+ * all.
+ */
+const modeAccents = (ds: NocturnePalette): Record<InteractionPaletteMode, string> => ({
+  code: mix(ds.title, ds.secondary, 0.5),
+  researcher: ds.working,
+  plan: ds.structure,
+  objective: ds.activity
+})
 
 const interactionPaletteMode = (mode?: string): InteractionPaletteMode =>
   mode === 'researcher' || mode === 'plan' || mode === 'objective' ? mode : 'code'
@@ -628,8 +852,8 @@ const interactionPaletteMode = (mode?: string): InteractionPaletteMode =>
 /**
  * Overlay the interaction mode's visual identity without mutating the base
  * skin. Code is deliberately neutral gray; researcher, plan, and objective
- * use blue, gold, and purple respectively. Semantic colors (success, warning,
- * error, and the amber Derafsh brand) stay stable across mode changes.
+ * use blue, teal, and purple respectively. Semantic colors (success, warning,
+ * error) stay stable across mode changes.
  *
  * Two roles are deliberately NOT overridden here, and adding them back would
  * undo the whole voice system:
@@ -644,14 +868,15 @@ const interactionPaletteMode = (mode?: string): InteractionPaletteMode =>
  * Mode identity lives in `accent`, `border`, and the surfaces.
  */
 export function themeForMode(theme: Theme, mode?: string): Theme {
-  const light = (backgroundLuminance(theme.color.statusBg) ?? 0) >= LUMA_LIGHT_THRESHOLD
+  const ds = theme.ds
+  const light = (backgroundLuminance(ds.screen) ?? 0) >= LUMA_LIGHT_THRESHOLD
   const paletteMode = interactionPaletteMode(mode)
-  const accent = (light ? LIGHT_MODE_ACCENTS : DARK_MODE_ACCENTS)[paletteMode]
-  const backgroundSurface = light ? '#f7f8fa' : '#101010'
-  const panelSurface = light ? '#f1f3f5' : '#111111'
-  const elementSurface = light ? '#e6e9ed' : '#1a1a1a'
-  const activeSurface = paletteMode === 'code' ? elementSurface : mix(elementSurface, accent, light ? 0.1 : 0.12)
-  const border = mix(panelSurface, accent, light ? 0.34 : 0.3)
+  const accent = modeAccents(ds)[paletteMode]
+  // Mode identity is a tint ON the Nocturne surfaces, never a replacement for
+  // them: the screen stays the screen, the selected row stays the selected
+  // row, and the mode only says how much of the accent they carry.
+  const activeSurface = paletteMode === 'code' ? ds.selected : mix(ds.selected, accent, light ? 0.1 : 0.12)
+  const border = mix(ds.hairline, accent, light ? 0.34 : 0.3)
   const selection = mix(activeSurface, accent, light ? 0.14 : 0.18)
 
   return {
@@ -660,12 +885,12 @@ export function themeForMode(theme: Theme, mode?: string): Theme {
       ...theme.color,
       accent,
       border,
-      completionBg: panelSurface,
+      completionBg: ds.chrome,
       completionCurrentBg: activeSurface,
-      completionMetaBg: panelSurface,
+      completionMetaBg: ds.chrome,
       completionMetaCurrentBg: activeSurface,
       sessionBorder: border,
-      statusBg: backgroundSurface,
+      statusBg: ds.screen,
       selectionBg: selection,
       shellDollar: accent
     }
@@ -711,14 +936,17 @@ export function fromSkin(
 
         // Voice + brand roles are derived rather than given their own wire
         // keys: `ROLE_NAMES` is a daemon contract and should not grow for a
-        // client-side concern. Deriving also keeps the `mono` skin genuinely
+        // client-side concern. Brand roles follow the skin's `accent` (NOT
+        // `warn` — amber is a semantic warning colour and must never repaint
+        // the chrome). Deriving also keeps the `mono` skin genuinely
         // monochrome for free — it supplies gray roles, so the voices go gray
         // with it, which is exactly what that accessibility skin promises.
-        userBar: r('warn') ?? d.color.userBar,
+        userBar: r('accent') ?? d.color.userBar,
+        turnRail: r('border') ?? d.color.turnRail,
         userText: r('text') ?? d.color.userText,
         thinking: mix(muted, r('system') ?? d.color.system, 0.5),
 
-        brandGold: r('warn') ?? d.color.brandGold,
+        brandGold: r('accent') ?? d.color.brandGold,
         brandLapis: r('system') ?? d.color.brandLapis,
 
         completionBg,
@@ -731,6 +959,9 @@ export function fromSkin(
         error,
         warn,
 
+        // Derive the cool band tint from whatever the skin says the accent
+        // is, so a re-branded skin keeps its own tint instead of Xerxes' blue.
+        userBandBg: mix(d.color.statusBg, accent, 0.09),
         prompt: r('text') ?? d.color.prompt,
         sessionLabel: muted,
         sessionBorder: muted,
@@ -749,9 +980,24 @@ export function fromSkin(
         diffRemovedWord: d.color.diffRemovedWord,
         diffAddedBg: d.color.diffAddedBg,
         diffRemovedBg: d.color.diffRemovedBg,
+        diffAddedWordBg: d.color.diffAddedWordBg,
+        diffRemovedWordBg: d.color.diffRemovedWordBg,
         diffHunk: d.color.diffHunk,
 
         shellDollar: accent
+      },
+      // Surfaces, the ramp and the leaders are structural — a skin recolours
+      // the product, it does not restack it — so only the voice colours
+      // follow the wire roles. That is also what keeps the `mono` skin
+      // genuinely monochrome for free: it supplies gray roles, so the voices
+      // go gray with it.
+      ds: {
+        ...d.ds,
+        working: accent,
+        done: r('diff_add') ?? d.ds.done,
+        failed: error,
+        needsInput: warn,
+        activity: r('system') ?? d.ds.activity
       },
       brand: {
         name: branding.agent_name ?? d.brand.name,

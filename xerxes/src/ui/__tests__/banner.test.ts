@@ -14,6 +14,7 @@ import {
   derafshCompactGradientFrame,
   derafshGradientFrame,
   derafshGradientPalette,
+  derafshGradientRamp,
   derafshKaviani,
   derafshWavePosition
 } from '../banner.js'
@@ -90,12 +91,30 @@ describe('Derafsh Kaviani terminal mark', () => {
     expect(derafshCompactGradientFrame(DARK_THEME.color, DERAFSH_ANIMATION_FRAME_COUNT)).toEqual(first)
   })
 
-  it('anchors the gradient in blue, Xerxes gold, and royal purple', () => {
+  it('anchors the gradient in lapis blue, royal purple, and deep azure', () => {
     const palette = derafshGradientPalette(DARK_THEME.color)
 
     expect(palette).toContain('#6ea8fe')
-    expect(palette).toContain(DARK_THEME.color.warn)
+    // The third stop follows the brand token, not `warn` — amber is a
+    // semantic warning colour and must not tint the emblem (v3 pivot).
+    expect(palette).toContain(DARK_THEME.color.brandGold)
     expect(palette).toContain(DARK_THEME.color.system)
+  })
+
+  it('samples a static wordmark ramp across the palette without repeating hues', () => {
+    const ramp = derafshGradientRamp(DARK_THEME.color, 6)
+
+    expect(ramp).toHaveLength(6)
+    expect(new Set(ramp).size).toBe(6)
+    expect(ramp[0]).toBe('#6ea8fe')
+    // Deterministic: same theme, same ramp — a per-letter wordmark must not flicker.
+    expect(derafshGradientRamp(DARK_THEME.color, 6)).toEqual(ramp)
+  })
+
+  it('handles degenerate wordmark lengths', () => {
+    expect(derafshGradientRamp(DARK_THEME.color, 0)).toEqual([])
+    expect(derafshGradientRamp(DARK_THEME.color, -3)).toEqual([])
+    expect(derafshGradientRamp(DARK_THEME.color, 1)).toEqual(['#6ea8fe'])
   })
 
   it('animates only in motion-capable interactive terminals', () => {

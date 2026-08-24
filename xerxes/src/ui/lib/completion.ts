@@ -28,8 +28,13 @@ export const COMPLETION_MENU_MAX_ROWS = 8
  * column padding, prompt zone, composer input, hint row, notice banner and
  * the workspace footer — plus a couple of transcript rows so the menu never
  * feels like it took over the screen.
+ *
+ * 16 → 19 when the menu became a bordered card with a query header: the frame
+ * costs a row per edge and the header one more. They come out of the chrome
+ * budget rather than the row cap, because the alternative is a menu that
+ * claims eight rows, draws eleven, and pushes the composer off-screen.
  */
-export const COMPLETION_MENU_RESERVED_ROWS = 16
+export const COMPLETION_MENU_RESERVED_ROWS = 19
 
 /** How many completion rows fit, given the item count and terminal height. */
 export function completionMenuRows(items: number, terminalRows: number): number {
@@ -131,12 +136,21 @@ const bare = (s: string) => s.replace(/^\/+/, '').toLowerCase()
 /**
  * Rank by how well the item answers what was typed, then by category.
  *
+ * The tier ladder is the one the mockup pins — "fuzzy: prefix → substring →
+ * skill body": exact name, then name prefix, then a substring hit on the name
+ * itself, and only then a hit on the item's description text (the `meta` the
+ * menu row already displays). Items matching neither name nor description rank
+ * last; nothing is dropped, the bounded window simply pushes them behind the
+ * "+n more" row. Descriptions are never searched ahead of names: typing
+ * `/scan` must not bury `deepscan` under every skill whose prose mentions a
+ * scan.
+ *
  * Must run AFTER `mergeCompletionItems`: that merge is a position-preserving
  * dedupe whose local-wins property protects a locally-known skill from a
  * daemon duplicate, and re-sorting before it would be undone by the
  * concatenation.
  */
-export function rankCompletionItems<T extends { display: string; group?: string; text?: string }>(
+export function rankCompletionItems<T extends { display: string; group?: string; meta?: string; text?: string }>(
   items: readonly T[],
   prefix: string
 ): T[] {
@@ -153,7 +167,17 @@ export function rankCompletionItems<T extends { display: string; group?: string;
       return 0
     }
 
-    return name.startsWith(want) ? 1 : 2
+    if (name.startsWith(want)) {
+      return 1
+    }
+
+    if (name.includes(want)) {
+      return 2
+    }
+
+    const body = (item.meta ?? '').toLowerCase()
+
+    return body.includes(want) ? 3 : 4
   }
 
   return [...items]

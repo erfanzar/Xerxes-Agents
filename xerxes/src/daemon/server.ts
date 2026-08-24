@@ -57,8 +57,8 @@ import {
 import { CronScheduler } from "../cron/scheduler.js";
 import {
   defaultSkillDiscoveryRoots,
+  skillActivationPrompt,
   skillMatchesPlatform,
-  skillPromptSection,
   SkillRegistry,
   trustedHashWorkspaceSkills,
 } from "../extensions/skills.js";
@@ -137,6 +137,10 @@ import {
 } from "./compactionRunner.js";
 import { validateTurnImages, type TurnImage } from "./images.js";
 import { DaemonInteractionBoard } from "./interactions.js";
+import {
+  queueSessionNotification,
+  takeSessionNotifications,
+} from "./sessionNotifications.js";
 import {
   discoverModelCatalog,
   discoverModelIds,
@@ -1360,6 +1364,15 @@ export class DaemonServer {
         { cwd },
       );
       connection.activeSessionKey = key;
+      // Drain notices that settled while no client was attached (background
+      // tasks above). At-most-once: the attaching client receives them here,
+      // never again.
+      for (const notice of takeSessionNotifications(session.metadata)) {
+        this.emit(connection, "notification", {
+          level: notice.level,
+          message: notice.message,
+        });
+      }
       return {
         ok: true,
         session: sessionPayload(session, this.contextLimit(session.model)),
@@ -1693,6 +1706,16 @@ export class DaemonServer {
         { displayText: text },
       )
         .then(() => {
+          // Queue before the live emit: the notice must survive a disconnect
+          // even if this connection is already gone when the task settles.
+          const parentSession = this.runtime.sessionStatus(parentKey);
+          if (parentSession) {
+            queueSessionNotification(parentSession.metadata, {
+              at: Date.now(),
+              level: "info",
+              message: `Background task ${taskId} finished.`,
+            });
+          }
           this.emit(connection, "background.complete", {
             task_id: taskId,
             text: "finished",
@@ -1704,6 +1727,14 @@ export class DaemonServer {
         })
         .catch((error) => {
           const message = errorMessage(error);
+          const parentSession = this.runtime.sessionStatus(parentKey);
+          if (parentSession) {
+            queueSessionNotification(parentSession.metadata, {
+              at: Date.now(),
+              level: "error",
+              message: `Background task ${taskId} failed: ${message}`,
+            });
+          }
           this.emit(connection, "background.complete", {
             task_id: taskId,
             text: `failed: ${message}`,
@@ -3201,17 +3232,19 @@ export class DaemonServer {
     const sessionKey = connection.activeSessionKey;
     await this.runtime.openSession(sessionKey);
     const argumentsText = argumentParts.join(" ").trim();
-    const prompt = [
-      `[Skill ${skill.metadata.name}${subcommand ? `:${subcommand}` : ""} activated]`,
-      "",
-      skillPromptSection(skill),
-      ...(argumentsText ? ["", "## User request", argumentsText] : []),
-    ].join("\n");
+    const prompt = skillActivationPrompt(skill, {
+      ...(subcommand ? { subcommand } : {}),
+      ...(argumentsText ? { request: argumentsText } : {}),
+    });
     void this.submitTrackedTurn(
       sessionKey,
       prompt,
       (event) => this.emit(connection, event.type, event.payload),
       connection,
+      // Preserve what the user actually typed for mid-turn tab reattachment.
+      // The expanded [Skill … activated] prompt is private runtime context and
+      // is intentionally filtered from the transcript.
+      { displayText: `/skill ${raw.trim()}` },
     ).catch((error) =>
       this.emit(connection, "notification", {
         level: "error",
@@ -6388,6 +6421,18 @@ function sessionPayload(
             user: session.inflightUser ?? "",
             assistant: session.inflightAssistant ?? "",
             streaming: true,
+            // Additive reattach fields: turn-start continuity plus the work
+            // so far, since runner-managed sessions only synchronize
+            // session.messages at turn end.
+            ...(session.inflightStartedAt
+              ? { started_at: session.inflightStartedAt / 1000 }
+              : {}),
+            ...(session.inflightThinking
+              ? { thinking: session.inflightThinking }
+              : {}),
+            ...(session.inflightTools?.length
+              ? { tools: session.inflightTools.map((tool) => ({ ...tool })) }
+              : {}),
           },
         }
       : {}),
@@ -7195,6 +7240,15 @@ function profileOverrides(
     model: profile.model,
     base_url: profile.base_url,
     api_key: profile.api_key,
+    // A profile configured by base URL alone carries no provider NAME, and
+    // `RuntimeService.reload` skips empty values — so selecting such a
+    // profile wrote no provider at all and every later resolution fell back
+    // to sniffing the model id. For an OpenRouter catalogue that means
+    // reading the vendor in `stealth/ox-alpha` as a routing prefix and
+    // throwing `unknown provider prefix 'stealth'`.
+    //
+    // Resolve it from the profile itself (its base URL already identifies
+    // the vendor) so the selected profile's provider always travels with it.
     provider: profile.provider,
   };
 }

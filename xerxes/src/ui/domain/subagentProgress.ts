@@ -1,8 +1,8 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import type { SubagentEventPayload } from '../gatewayTypes.js'
-import type { Msg, SubagentProgress } from '../types.js'
+import type { SubagentEventPayload, SubagentSnapshotPayload } from '../gatewayTypes.js'
+import type { Msg, SubagentProgress, SubagentStatus } from '../types.js'
 
 export type SubagentProgressPatch = (current: SubagentProgress) => Partial<SubagentProgress>
 
@@ -50,6 +50,70 @@ export function mergeSubagentProgress(
     toolCount: payload.tool_count ?? base.toolCount,
     toolsets: payload.toolsets ?? base.toolsets,
     ...patch(base)
+  }
+}
+
+/** Terminal/visible status for a persisted snapshot row the daemon reports. */
+const snapshotStatus = (row: SubagentSnapshotPayload): SubagentStatus => {
+  const status = (row.status || '').toLowerCase()
+  if (
+    status === 'completed' ||
+    status === 'error' ||
+    status === 'failed' ||
+    status === 'interrupted' ||
+    status === 'queued' ||
+    status === 'running' ||
+    status === 'timeout'
+  ) {
+    return status
+  }
+  if (status === 'cancelled' || status === 'canceled') {
+    return 'interrupted'
+  }
+  if (status === 'done' || status === 'success') {
+    return 'completed'
+  }
+
+  // Unknown spelling: a closed child finished, anything else went away
+  // without a terminal event and must not pose as a success.
+  return row.closed === true ? 'completed' : 'interrupted'
+}
+
+/**
+ * Rehydrate one persisted subagent manifest row (daemon subagent_snapshots)
+ * into the progress shape trail cards render, so a reattached transcript
+ * shows the session's spawned agents instead of dropping them visually.
+ */
+export const subagentProgressFromSnapshot = (row: SubagentSnapshotPayload, index: number): SubagentProgress => {
+  const startedAt = Date.parse(row.created_at ?? '')
+
+  return {
+    ...(row.agent_id ? { agentType: row.agent_id } : {}),
+    ...(row.api_calls === undefined ? {} : { apiCalls: row.api_calls }),
+    creatorId: row.creator_id ?? row.parent_id ?? null,
+    depth: 0,
+    ...(row.files_read ? { filesRead: row.files_read } : {}),
+    ...(row.files_written ? { filesWritten: row.files_written } : {}),
+    goal: row.title || row.name || row.agent_id || 'subagent',
+    id: row.id,
+    index,
+    ...(row.input_tokens === undefined ? {} : { inputTokens: row.input_tokens }),
+    ...(row.model ? { model: row.model } : {}),
+    ...(row.name ? { name: row.name } : {}),
+    notes: [],
+    ...(row.output_tokens === undefined ? {} : { outputTokens: row.output_tokens }),
+    parentId: row.parent_id ?? null,
+    ...(row.reasoning_tokens === undefined ? {} : { reasoningTokens: row.reasoning_tokens }),
+    ...(row.rules ? { rules: row.rules } : {}),
+    ...(Number.isFinite(startedAt) ? { startedAt } : {}),
+    status: snapshotStatus(row),
+    ...(row.summary || row.error ? { summary: row.summary || row.error } : {}),
+    taskCount: 1,
+    thinking: [],
+    ...(row.title ? { title: row.title } : {}),
+    toolCount: row.tool_count ?? 0,
+    tools: [],
+    ...(row.toolsets ? { toolsets: row.toolsets } : {})
   }
 }
 

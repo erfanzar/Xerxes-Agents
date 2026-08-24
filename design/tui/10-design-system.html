@@ -1,0 +1,442 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Xerxes TUI — Design system</title>
+<style>
+/* Xerxes TUI — mockup stylesheet.
+   One grid: 13px monospace, 1ch advance, 18px line box.
+   A "screen" is exactly 150ch x 40 rows. Whitespace is blank rows,
+   never fractional padding, so the mockup stays measurable in cells. */
+
+:root{
+  /* surfaces */
+  --backdrop:#000000;
+  --panel:#0a0a0d;      /* the screen */
+  --panel-2:#0e1116;    /* raised card */
+  --panel-3:#12161d;    /* selected row / kbd cap */
+  --line:#1c2733;       /* hairline */
+  --line-2:#141c26;     /* quieter hairline */
+
+  /* text ramp — quiet by default */
+  --fg:#c6ced8;         /* body */
+  --fg-hi:#e9edf3;      /* titles, the one thing you read first */
+  --dim1:#8b95a2;       /* secondary */
+  --dim2:#5d6774;       /* captions, meta */
+  --dim3:#39424e;       /* leaders, rules, disabled */
+
+  /* voice / state — same colour means the same thing on every screen */
+  --blue:#6ea8fe;       /* brand + working */
+  --green:#83c99d;      /* done / succeeded */
+  --red:#dd7c88;        /* failed */
+  --amber:#d8ae58;      /* blocked / needs you  (warnings ONLY) */
+  --violet:#b18be8;     /* agent activity, system voice */
+  --cyan:#56c2d6;       /* hunk headers, structural markers */
+  --thinking:#8b7fa3;   /* reasoning rows */
+
+  /* tints */
+  --user-band:#10151e;
+  --blue-tint:rgba(110,168,254,.10);
+  --amber-tint:rgba(216,174,88,.09);
+  --red-tint:rgba(221,124,136,.09);
+  --green-tint:rgba(131,201,157,.09);
+  --violet-tint:rgba(177,139,232,.10);
+
+  --add-bg:#14251b;
+  --del-bg:#2a171b;
+
+  --row:18px;
+  --pad:2ch;
+}
+
+*{box-sizing:border-box;margin:0;padding:0}
+
+html{background:var(--backdrop)}
+body{
+  background:
+    radial-gradient(120% 90% at 50% -10%, #0b0e14 0%, #000 62%);
+  color:var(--fg);
+  font:13px/18px "SF Mono","SFMono-Regular",Menlo,"JetBrains Mono","Cascadia Mono",Consolas,monospace;
+  font-variant-ligatures:none;
+  -webkit-font-smoothing:antialiased;
+  padding:40px 32px 64px;
+  display:flex;flex-direction:column;align-items:flex-start;gap:22px;
+}
+
+/* ── window chrome ─────────────────────────────────────────────── */
+.win{
+  background:var(--panel);
+  border:1px solid var(--line);
+  border-radius:10px;
+  overflow:hidden;
+  box-shadow:0 0 0 1px rgba(0,0,0,.6), 0 26px 70px -20px rgba(0,0,0,.9);
+  width:max-content;
+}
+.tb{
+  height:30px;display:flex;align-items:center;gap:8px;
+  padding:0 12px;
+  background:linear-gradient(#15181e,#101318);
+  border-bottom:1px solid var(--line);
+}
+.tb i{width:11px;height:11px;border-radius:50%;display:block}
+.tb .r{background:#ff5f57}.tb .y{background:#febc2e}.tb .g{background:#28c840}
+.tbt{
+  flex:1;text-align:center;color:var(--dim2);font-size:11px;
+  margin-left:-57px;letter-spacing:.02em;
+}
+.screen{
+  width:150ch;height:calc(40 * var(--row));
+  background:var(--panel);
+  display:flex;flex-direction:column;
+  overflow:hidden;
+  position:relative;
+}
+.screen.narrow{width:70ch}
+
+/* ── generic grid helpers ──────────────────────────────────────── */
+.row{display:flex;align-items:baseline;min-height:var(--row)}
+.pad{padding:0 var(--pad)}
+.grow{flex:1 1 auto;min-height:0;min-width:0}
+.blank{height:var(--row);flex:0 0 var(--row)}
+.rt{margin-left:auto;flex:0 0 auto;font-variant-numeric:tabular-nums;white-space:nowrap}
+.nowrap{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.num{flex:0 0 auto;white-space:nowrap;font-variant-numeric:tabular-nums}
+
+/* dotted leader — the connective tissue between a label and its number */
+.ld{
+  flex:1 1 0;min-width:2ch;overflow:hidden;white-space:nowrap;
+  color:var(--dim3);margin:0 1ch;
+}
+.ld::before{content:"· · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · ·"}
+
+.hair{height:1px;background:var(--line-2);flex:0 0 1px}
+
+/* ── state dots ────────────────────────────────────────────────── */
+.d{display:inline-block;width:1ch;margin-right:1ch}
+.d::before{content:"●"}
+.blue{color:var(--blue)}.green{color:var(--green)}.red{color:var(--red)}
+.amber{color:var(--amber)}.violet{color:var(--violet)}.cyan{color:var(--cyan)}
+.dim{color:var(--dim1)}.dim2{color:var(--dim2)}.dim3{color:var(--dim3)}
+.hi{color:var(--fg-hi)}
+.b{font-weight:600;color:var(--fg-hi)}
+.think{color:var(--thinking)}
+
+/* ── captions: "NEEDS INPUT · 2" ───────────────────────────────── */
+.cap{
+  color:var(--dim2);font-size:11px;letter-spacing:.16em;text-transform:uppercase;
+  height:var(--row);display:flex;align-items:center;gap:1ch;
+}
+.cap .n{color:var(--dim3)}
+.cap.needs{color:var(--amber)}
+.cap.work{color:var(--blue)}
+.cap.review{color:var(--green)}
+
+/* ── panel head (screens + inspectors) ─────────────────────────── */
+.hdr{
+  height:calc(2 * var(--row));flex:0 0 calc(2 * var(--row));
+  display:flex;align-items:center;gap:2ch;
+  padding:0 var(--pad);
+  border-bottom:1px solid var(--line);
+  background:linear-gradient(180deg,#0d1117,#0a0a0d);
+}
+.hdr .t{color:var(--fg-hi);font-weight:600;letter-spacing:.02em}
+.hdr .sub{color:var(--dim2)}
+
+/* ── footer key hints ──────────────────────────────────────────── */
+.ftr{
+  height:calc(2 * var(--row));flex:0 0 calc(2 * var(--row));
+  display:flex;align-items:center;gap:1ch;
+  padding:0 var(--pad);
+  border-top:1px solid var(--line);
+  color:var(--dim2);font-size:12px;
+  white-space:nowrap;overflow:hidden;
+}
+kbd{
+  font:inherit;font-size:11px;
+  background:var(--panel-3);border:1px solid var(--line);
+  border-bottom-color:#0a0d12;
+  border-radius:3px;padding:1px 5px;color:var(--dim1);
+  display:inline-block;line-height:14px;
+}
+.sep{color:var(--dim3)}
+
+/* ── statusbar ─────────────────────────────────────────────────── */
+.sbar{
+  height:var(--row);flex:0 0 var(--row);
+  display:flex;align-items:center;gap:1ch;
+  padding:0 var(--pad);
+  background:#0d1117;border-top:1px solid var(--line);
+  color:var(--dim2);font-size:12px;
+  white-space:nowrap;overflow:hidden;
+}
+.sbar .mark{color:var(--blue)}
+.sbar .pipe{color:var(--dim3)}
+
+/* ── cards ─────────────────────────────────────────────────────── */
+.card{
+  border:1px solid var(--line);border-radius:6px;
+  background:var(--panel-2);
+  padding:0 2ch;
+}
+.card.sel{border-color:#2c4a70;background:#0f1520;box-shadow:inset 2px 0 0 var(--blue)}
+.card.needs{box-shadow:inset 2px 0 0 var(--amber)}
+.card.fail{box-shadow:inset 2px 0 0 var(--red)}
+.card.done{box-shadow:inset 2px 0 0 var(--green)}
+
+/* ── composer ──────────────────────────────────────────────────── */
+.composer{
+  margin:0 var(--pad);
+  border:1px solid #23384f;border-radius:6px;
+  background:#0b0f15;
+}
+.composer .line{display:flex;align-items:baseline;padding:0 2ch;min-height:var(--row)}
+.composer .p{color:var(--blue);margin-right:1ch}
+.composer .ph{color:var(--dim3)}
+.caret{display:inline-block;width:1ch;background:var(--blue);color:transparent}
+.composer .meta{
+  display:flex;align-items:center;gap:1ch;padding:0 2ch;height:var(--row);
+  border-top:1px solid var(--line-2);color:var(--dim2);font-size:11px;
+}
+.mode{color:var(--blue)}
+
+/* ── code box (verbatim commands) ──────────────────────────────── */
+.codebox{
+  background:#07090c;border:1px solid var(--line);border-left:2px solid var(--blue);
+  border-radius:4px;padding:0 2ch;color:var(--fg-hi);
+}
+
+/* ── notes under the window ────────────────────────────────────── */
+.notes{width:150ch;max-width:100%;color:var(--dim1);font-size:12px;line-height:19px}
+.notes h2{
+  font-size:11px;letter-spacing:.18em;text-transform:uppercase;
+  color:var(--dim2);font-weight:600;margin-bottom:8px;
+  border-top:1px solid var(--line);padding-top:14px;
+}
+.notes li{list-style:none;padding-left:2ch;text-indent:-2ch;margin-bottom:3px}
+.notes li::before{content:"└ ";color:var(--dim3)}
+.notes b{color:var(--fg);font-weight:600}
+.notes .k{color:var(--blue)}
+</style>
+</head>
+<body>
+<style>
+.sheet{height:auto !important;padding:0 0 var(--row)}
+.sect{padding:0 var(--pad)}
+.sect h3{
+  font:inherit;font-size:11px;letter-spacing:.18em;text-transform:uppercase;
+  color:var(--dim2);font-weight:600;height:calc(2 * var(--row));display:flex;align-items:center;gap:1ch;
+  border-bottom:1px solid var(--line-2);margin-bottom:9px;
+}
+.sect h3 .n{color:var(--dim3);letter-spacing:0;text-transform:none;font-weight:400}
+.grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 6ch}
+.grid2>*{min-width:0;overflow:hidden}
+.grid3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:0 4ch}
+.grid3>*{min-width:0;overflow:hidden}
+.sw{display:flex;align-items:center;min-height:calc(1.5 * var(--row));gap:1ch}
+.sw i{width:6ch;height:16px;border-radius:3px;border:1px solid var(--line);flex:0 0 6ch;display:block}
+.sw .nm{width:14ch;flex:0 0 14ch;color:var(--fg)}
+.sw .hex{width:9ch;flex:0 0 9ch;color:var(--dim2);font-variant-numeric:tabular-nums}
+.sw .use{color:var(--dim1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gl{display:flex;align-items:baseline;min-height:var(--row);gap:1ch}
+.gl .g{width:3ch;flex:0 0 3ch;text-align:center;font-size:14px}
+.gl .nm{width:16ch;flex:0 0 16ch;color:var(--fg)}
+.gl .use{color:var(--dim1)}
+.ts{display:flex;align-items:baseline;min-height:calc(1.6 * var(--row));gap:2ch}
+.ts .sz{width:20ch;flex:0 0 20ch;color:var(--dim2)}
+.rule{color:var(--dim1);min-height:var(--row);padding-left:2ch;text-indent:-2ch;line-height:18px}
+.rule::before{content:"└ ";color:var(--dim3)}
+.rule b{color:var(--fg);font-weight:600}
+.dont{color:var(--dim1);min-height:var(--row);padding-left:2ch;text-indent:-2ch}
+.dont::before{content:"✕ ";color:var(--red)}
+.box{border:1px solid var(--line);border-radius:6px;background:var(--panel-2);padding:0 2ch}
+.cellgrid{
+  background:
+    repeating-linear-gradient(to right, rgba(110,168,254,.16) 0 1px, transparent 1px 1ch),
+    repeating-linear-gradient(to bottom, rgba(110,168,254,.16) 0 1px, transparent 1px 18px);
+  height:calc(4 * var(--row));border:1px solid var(--line);border-radius:4px;
+}
+</style>
+
+<div class="win">
+  <div class="tb"><i class="r"></i><i class="y"></i><i class="g"></i><span class="tbt">xerxes — design system</span></div>
+  <div class="screen sheet">
+
+    <div class="hdr">
+      <span class="t">XERXES TUI — DESIGN SYSTEM</span>
+      <span class="rt dim2">150 × 40 cells <span class="sep">·</span> 13px / 18px <span class="sep">·</span> v0.4.1</span>
+    </div>
+
+    <div class="sect">
+      <h3>1 · grid <span class="n">every measurement is a cell, never a pixel</span></h3>
+      <div class="grid2">
+        <div>
+          <div class="cellgrid"></div>
+          <div class="blank" style="height:6px"></div>
+          <div class="rule"><b>1 cell = 1ch × 18px.</b> Gutters are 2ch, narrow gutters 1ch.</div>
+          <div class="rule"><b>Whitespace is blank rows</b>, not fractional padding — so a mock and a render agree on line counts.</div>
+          <div class="rule"><b>Chrome heights are fixed:</b> header 2 rows, footer 2 rows, statusbar 1 row. 35 rows are left for content at 40 rows tall.</div>
+        </div>
+        <div>
+          <div class="box">
+            <div class="row"><span class="dim2" style="width:22ch">header</span><span class="dim3">2 rows</span><span class="ld"></span><span class="num dim2">title + right meta</span></div>
+            <div class="row"><span class="dim2" style="width:22ch">content</span><span class="dim3">flex</span><span class="ld"></span><span class="num dim2">the only thing that grows</span></div>
+            <div class="row"><span class="dim2" style="width:22ch">composer</span><span class="dim3">3 rows</span><span class="ld"></span><span class="num dim2">2 input + 1 mode/kbd</span></div>
+            <div class="row"><span class="dim2" style="width:22ch">footer</span><span class="dim3">2 rows</span><span class="ld"></span><span class="num dim2">kbd hints, lowercase</span></div>
+            <div class="row"><span class="dim2" style="width:22ch">statusbar</span><span class="dim3">1 row</span><span class="ld"></span><span class="num dim2">cwd · branch · views · version</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="sect">
+      <h3>2 · surfaces <span class="n">near-black panels over a true-black backdrop</span></h3>
+      <div class="grid2">
+        <div>
+          <div class="sw"><i style="background:#000000"></i><span class="nm">backdrop</span><span class="hex">#000000</span><span class="use">outside the window</span></div>
+          <div class="sw"><i style="background:#0a0a0d"></i><span class="nm">panel</span><span class="hex">#0a0a0d</span><span class="use">the screen itself</span></div>
+          <div class="sw"><i style="background:#0e1116"></i><span class="nm">panel-2</span><span class="hex">#0e1116</span><span class="use">cards, dialogs</span></div>
+        </div>
+        <div>
+          <div class="sw"><i style="background:#12161d"></i><span class="nm">panel-3</span><span class="hex">#12161d</span><span class="use">kbd caps, chips, hover</span></div>
+          <div class="sw"><i style="background:#1c2733"></i><span class="nm">line</span><span class="hex">#1c2733</span><span class="use">hairline borders</span></div>
+          <div class="sw"><i style="background:#10151e"></i><span class="nm">user-band</span><span class="hex">#10151e</span><span class="use">tint behind your own turns</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="sect">
+      <h3>3 · text ramp <span class="n">quiet by default — five greys, one job each</span></h3>
+      <div class="grid2">
+        <div>
+          <div class="sw"><i style="background:#e9edf3"></i><span class="nm">fg-hi</span><span class="hex">#e9edf3</span><span class="use">titles, the answer you came for</span></div>
+          <div class="sw"><i style="background:#c6ced8"></i><span class="nm">fg</span><span class="hex">#c6ced8</span><span class="use">body text, assistant prose</span></div>
+          <div class="sw"><i style="background:#8b95a2"></i><span class="nm">dim1</span><span class="hex">#8b95a2</span><span class="use">goals, descriptions, args</span></div>
+        </div>
+        <div>
+          <div class="sw"><i style="background:#5d6774"></i><span class="nm">dim2</span><span class="hex">#5d6774</span><span class="use">captions, numbers, kbd hints</span></div>
+          <div class="sw"><i style="background:#39424e"></i><span class="nm">dim3</span><span class="hex">#39424e</span><span class="use">leaders, rules, ledger glyphs</span></div>
+          <div class="sw"><i style="background:#8b7fa3"></i><span class="nm">thinking</span><span class="hex">#8b7fa3</span><span class="use">collapsed reasoning rows only</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="sect">
+      <h3>4 · state <span class="n">the same dot means the same thing on every screen</span></h3>
+      <div class="grid2">
+        <div>
+          <div class="sw"><i style="background:#6ea8fe"></i><span class="nm">● blue</span><span class="hex">#6ea8fe</span><span class="use">working / running · also the brand</span></div>
+          <div class="sw"><i style="background:#83c99d"></i><span class="nm">● green</span><span class="hex">#83c99d</span><span class="use">done · succeeded · added lines</span></div>
+          <div class="sw"><i style="background:#dd7c88"></i><span class="nm">● red</span><span class="hex">#dd7c88</span><span class="use">failed · nonzero exit · removed lines</span></div>
+        </div>
+        <div>
+          <div class="sw"><i style="background:#d8ae58"></i><span class="nm">● amber</span><span class="hex">#d8ae58</span><span class="use">blocked · needs you · warnings ONLY</span></div>
+          <div class="sw"><i style="background:#b18be8"></i><span class="nm">violet</span><span class="hex">#b18be8</span><span class="use">agent talking about itself (activity)</span></div>
+          <div class="sw"><i style="background:#56c2d6"></i><span class="nm">cyan</span><span class="hex">#56c2d6</span><span class="use">structure markers — hunk headers</span></div>
+        </div>
+      </div>
+      <div class="blank" style="height:9px"></div>
+      <div class="grid2">
+        <div>
+          <div class="rule"><b>Blue is both brand and "working".</b> That is deliberate: the tool's own colour is the colour of it doing its job.</div>
+          <div class="rule"><b>Amber never means "in progress".</b> If it is amber, a human is the blocker.</div>
+        </div>
+        <div>
+          <div class="dont">Never a 7th colour for a 7th state — add a glyph or a caption instead.</div>
+          <div class="dont">Never amber for emphasis, headings, or the brand mark.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="sect">
+      <h3>5 · type scale <span class="n">one family, three sizes, one line box</span></h3>
+      <div class="ts"><span class="sz dim2">13px / 18px</span><span class="hi">Body, prose, code, tool rows — everything you read.</span></div>
+      <div class="ts"><span class="sz dim2">12px / 18px</span><span>Footers, statusbar, notes — chrome you consult, not read.</span></div>
+      <div class="ts"><span class="sz dim2">11px / 18px · .16em</span><span class="cap" style="height:auto">CAPTIONS, BADGES, GROUP LABELS</span></div>
+      <div class="ts"><span class="sz dim2">weight</span><span class="dim1">400 everywhere except <b class="b">600 on titles</b> — the terminal has no italics worth using.</span></div>
+      <div class="blank" style="height:6px"></div>
+      <div class="rule">Numbers are <b>tabular</b> and <b>right-aligned</b> without exception: durations, tokens, ±counts, line numbers.</div>
+    </div>
+
+    <div class="sect">
+      <h3>6 · glyph set <span class="n">one language — a glyph earns its place by never changing meaning</span></h3>
+      <div class="grid2">
+        <div>
+          <div class="gl"><span class="g blue">●</span><span class="nm">state dot</span><span class="use">colour carries the state</span></div>
+          <div class="gl"><span class="g blue">⏺</span><span class="nm">tool call</span><span class="use">the machine did something</span></div>
+          <div class="gl"><span class="g dim3">▸</span><span class="nm">expandable</span><span class="use">there is more behind this row</span></div>
+          <div class="gl"><span class="g dim3">▾</span><span class="nm">truncated</span><span class="use">"+n more" — list was cut</span></div>
+          <div class="gl"><span class="g blue">✦</span><span class="nm">brand mark</span><span class="use">statusbar only, left edge</span></div>
+        </div>
+        <div>
+          <div class="gl"><span class="g blue">❯</span><span class="nm">prompt</span><span class="use">composer + your own turns</span></div>
+          <div class="gl"><span class="g dim3">└</span><span class="nm">ledger</span><span class="use">closes a turn, a run, a section</span></div>
+          <div class="gl"><span class="g dim3">·</span><span class="nm">leader / sep</span><span class="use">label → number, or between facts</span></div>
+          <div class="gl"><span class="g amber">?</span><span class="nm">question</span><span class="use">an agent is waiting on you</span></div>
+          <div class="gl"><span class="g dim3">↳</span><span class="nm">continuation</span><span class="use">wrapped, not truncated</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="sect">
+      <h3>7 · components <span class="n">shapes that repeat</span></h3>
+      <div class="grid3">
+        <div>
+          <div class="cap">leader row</div>
+          <div class="row"><span class="blue" style="margin-right:1ch">⏺</span><span class="dim">Read runtime.ts</span><span class="ld"></span><span class="num dim2">42ms</span></div>
+          <div class="rule">label left, number right, dots between</div>
+        </div>
+        <div>
+          <div class="cap">group caption</div>
+          <div class="cap needs">NEEDS INPUT <span class="n">· 2</span></div>
+          <div class="rule">always <b>NAME · count</b>, count is dim</div>
+        </div>
+        <div>
+          <div class="cap">kbd hint</div>
+          <div class="row"><kbd>⏎</kbd> <span class="dim2">send</span> <span class="sep">·</span> <kbd>esc</kbd> <span class="dim2">cancel</span></div>
+          <div class="rule">lowercase verbs, footers only</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="sect">
+      <h3>8 · rules <span class="n">non-negotiable</span></h3>
+      <div class="grid2">
+        <div>
+          <div class="rule">Every screen answers <b>where am I</b> (header), <b>what's happening</b> (body + state dots), <b>what can I do</b> (footer).</div>
+          <div class="rule">Overlays restore the previous screen on cancel, and name what you keep: <span class="k">esc cancel (stays on opus-5)</span>.</div>
+          <div class="rule"><b>Deny is the Esc default</b> on anything that asks permission.</div>
+          <div class="rule">Truncation is announced (<span class="k">▾ 2 more</span>), never silent.</div>
+        </div>
+        <div>
+          <div class="dont">No key or button on screen that isn't wired to a real capability.</div>
+          <div class="dont">No badge for a fact the data doesn't have — a missing price shows nothing, not "n/a".</div>
+          <div class="dont">No colour used decoratively. If it isn't state, it's grey.</div>
+          <div class="dont">No spinner without an elapsed time next to it.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="blank"></div>
+    <div class="sbar">
+      <span class="mark">✦</span><span>design/tui</span>
+      <span class="pipe">│</span><span>10 screens</span>
+      <span class="pipe">│</span><span>one grid, six state colours, ten glyphs</span>
+      <span class="rt">v0.4.1</span>
+    </div>
+
+  </div>
+</div>
+
+<section class="notes">
+  <h2>Decisions</h2>
+  <ul>
+    <li><b>Six state colours is the budget, and it is closed.</b> Blue, green, red, amber, violet, cyan — each with a single sentence of meaning. New states get a glyph or a caption; a seventh hue would break the promise that colour is readable without a legend.</li>
+    <li><b>Five greys, each with one job.</b> The ramp exists so that the eye is drawn by contrast rather than by colour: on a quiet screen, <span class="k">#e9edf3</span> on <span class="k">#0a0a0d</span> is louder than any accent, which is why titles are white and never blue.</li>
+    <li><b>The grid is measured in cells because the renderer is.</b> A mock that specifies 12px of padding is a mock that cannot be built in OpenTUI; specifying "one blank row" survives the trip into React and out to the terminal intact.</li>
+    <li><b>Chrome heights are fixed so screens are interchangeable.</b> Header 2 / footer 2 / statusbar 1 means F6, F7 and F8 swap the body without a single element moving — the eye keeps its anchors across views.</li>
+    <li><b>Numbers are tabular and right-aligned everywhere.</b> This is the single highest-leverage rule in the system: it turns every list into a column you can scan for the outlier without reading a word.</li>
+  </ul>
+</section>
+</body>
+</html>

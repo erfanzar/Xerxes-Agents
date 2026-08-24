@@ -11,19 +11,25 @@ import type { Theme } from '../theme.js'
 
 export function ModalShell({
   children,
+  footer,
+  headerRight,
   height,
   panelHeight,
   panelWidth,
   t,
   title,
+  titleDetail,
   width
 }: {
   children: ReactNode
+  footer?: ReactNode
+  headerRight?: ReactNode
   height: number
   panelHeight: number
   panelWidth: number
   t: Theme
   title: string
+  titleDetail?: ReactNode
   width: number
 }) {
   const top = Math.max(0, Math.floor((height - panelHeight) / 2))
@@ -42,7 +48,9 @@ export function ModalShell({
       zIndex={200}
     >
       <box
-        backgroundColor={t.color.statusBg}
+        backgroundColor={t.color.completionBg}
+        borderColor={t.color.border}
+        borderStyle="rounded"
         flexDirection="column"
         flexShrink={0}
         height={panelHeight}
@@ -50,15 +58,37 @@ export function ModalShell({
         paddingTop={1}
         width={panelWidth}
       >
-        <box flexDirection="row" flexShrink={0} justifyContent="space-between" paddingLeft={2} paddingRight={2}>
-          <text fg={t.color.accent} flexShrink={0}>
-            <b>{title}</b>
-          </text>
-          <text fg={t.color.muted} flexShrink={0}>
-            esc
-          </text>
+        <box flexDirection="row" flexShrink={0} paddingLeft={2} paddingRight={2}>
+          {/* The left title must yield to right-side state. A width="100%"
+              text beside another text made the latter paint over the border
+              in wide/tall terminals (the clipped `esc` seen in the picker). */}
+          <box flexDirection="row" flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
+            <text flexShrink={0} truncate width="100%" wrapMode="none">
+              <span fg={t.color.accent}>✦ </span>
+              <b>{title}</b>
+              {titleDetail ? <span fg={t.color.muted}>{'  ›  '}{titleDetail}</span> : null}
+            </text>
+          </box>
+          <box flexShrink={0}>
+            {headerRight ?? (
+              <text fg={t.color.muted} flexShrink={0}>
+                esc
+              </text>
+            )}
+          </box>
         </box>
         {children}
+        {footer ? (
+          <box
+            backgroundColor={t.color.completionMetaBg}
+            flexShrink={0}
+            marginTop={1}
+            paddingLeft={2}
+            paddingRight={2}
+          >
+            {footer}
+          </box>
+        ) : null}
       </box>
     </box>
   )

@@ -330,7 +330,8 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
           return move(1)
         }
 
-        if (key.pageUp || ch === 'b') {
+        // `b` and `ctrl-b` both page back: this laptop has no PageUp.
+        if (key.pageUp || ch === 'b' || isCtrl(key, ch, 'b')) {
           return move(-pagerPageSize)
         }
 
@@ -342,7 +343,7 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
           return move('bottom')
         }
 
-        if (key.return || ch === ' ' || key.pageDown) {
+        if (key.return || ch === ' ' || key.pageDown || isCtrl(key, ch, 'f')) {
           patchOverlayState(prev => {
             if (!prev.pager) {
               return prev

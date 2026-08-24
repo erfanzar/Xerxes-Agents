@@ -41,7 +41,16 @@ export function slashCompletionsFromCatalog(input: string, catalog: null | Slash
   const pairs = [...catalog.pairs, ...skillPairs.filter(([name]) => !seen.has(name))]
 
   return pairs
-    .filter(([name]) => name.replace(/^\/+/, '').toLowerCase().startsWith(prefix))
+    .filter(([name, meta]) => {
+      // Local candidates follow the same ladder as rankCompletionItems:
+      // name prefix → name substring → description ("skill body") hit. The
+      // ranker owns ordering; this filter only decides what reaches it.
+      const bare = name.replace(/^\/+/, '').toLowerCase()
+      if (!prefix || bare.startsWith(prefix)) {
+        return true
+      }
+      return bare.includes(prefix) || meta.toLowerCase().includes(prefix)
+    })
     .map(([name, meta]) => {
       const group = groupOf.get(name)
 

@@ -972,3 +972,71 @@ describe('GatewayClient session lifecycle', () => {
     expect(titleKeys).toEqual(['sid-4', 'key-5', 'key-204'])
   })
 })
+
+describe('stale daemon rejection message', () => {
+  // The remedy has to be executable, and it has to be the RIGHT remedy. The
+  // old text ended every rejection with "restart it explicitly when idle" —
+  // no command, and the wrong advice for a daemon that was already idle and
+  // was only refused because its provenance could not be proven.
+  const reject = async (opts: { busy: boolean; pid?: number }): Promise<string> => {
+    const client = new GatewayClient({
+      expectedDaemonBuildId: 'expected-build',
+      projectDir: process.cwd(),
+      sessionKey: 'test:stale-daemon'
+    })
+    const priv = client as unknown as {
+      detachSocketSilently: () => Promise<void>
+      ensureConnectedDaemonCurrent: (socket: string, pid: string) => Promise<boolean>
+      probeDaemonIdentity: () => Promise<Record<string, unknown>>
+      rawRequest: (method: string) => Promise<unknown>
+    }
+
+    priv.detachSocketSilently = async () => undefined
+    priv.probeDaemonIdentity = async () => ({
+      active_subagents: opts.busy ? 1 : 0,
+      daemon_build_id: 'running-build',
+      daemon_protocol: 1,
+      pid: opts.pid,
+      runtime: 'bun'
+    })
+    // Session activity comes from a separate RPC, and an unanswered one is
+    // deliberately treated as busy. Stub it, or every case looks busy and the
+    // branches stop being distinguishable.
+    priv.rawRequest = async () => ({
+      sessions: opts.busy ? [{ active_turn_id: 'turn-1', status: 'working' }] : []
+    })
+
+    try {
+      await priv.ensureConnectedDaemonCurrent('/tmp/x.sock', '/tmp/x.pid')
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error)
+    }
+
+    return ''
+  }
+
+  it('names the exact command when the daemon is idle but not ours', async () => {
+    const message = await reject({ busy: false, pid: 4242 })
+
+    expect(message).toContain('build mismatch (running running-build, expected expected-build)')
+    expect(message).toContain('not started by this Xerxes install')
+    expect(message).toContain('kill 4242')
+    // It is already idle; waiting for idleness was never the remedy.
+    expect(message).not.toContain('idle')
+  })
+
+  it('says to wait when something is genuinely still working', async () => {
+    const message = await reject({ busy: true, pid: 4242 })
+
+    expect(message).toContain('still working')
+    expect(message).toContain('goes idle')
+    expect(message).toContain('kill 4242')
+  })
+
+  it('points at the pid file when it has no pid to name', async () => {
+    const message = await reject({ busy: false })
+
+    expect(message).toContain('/tmp/x.pid')
+    expect(message).not.toContain('kill undefined')
+  })
+})

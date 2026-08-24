@@ -1,6 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { renderIntervention } from './interventions.js'
 import { normalizeInteractionMode } from './interactionModes.js'
 
 export { normalizeInteractionMode } from './interactionModes.js'
@@ -442,9 +443,7 @@ function quote(value: string): string {
 }
 
 function objectiveReminder(reason: string): string {
-  return '[Objective gate]\n'
-    + 'The previous assistant response tried to stop, but objective mode is still active: ' + reason + '.\n'
-    + 'Continue the hard-goal loop. Do not final-answer with a narrative status. Update the ledger, '
-    + 'choose the next concrete hypothesis, use tools to edit or verify, and only end after all acceptance '
-    + 'criteria pass or after you report BLOCKED: with exact evidence.'
+  // Rendering is centralized in the intervention catalog so every loop guard
+  // stays byte-consistent and prefix consumers (daemon + TUI) keep matching.
+  return renderIntervention({ kind: 'objective-reminder', reason })
 }

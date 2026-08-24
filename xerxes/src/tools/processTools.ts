@@ -188,6 +188,13 @@ export function registerProcessTools(
     ),
     'default',
     { concurrencySafe: false, defer: false, destructive: true, openWorld: true, readOnly: false },
+    // Co-located usage policy for the one tool whose shape models most often
+    // get wrong: argv-only invocation plus the batching rule the registry
+    // actually enforces (read-only commands run concurrently, writers alone).
+    'Invoke with a command name and an args array — never a single shell string. '
+      + 'Independent read-only commands (git status, ls, cat) may be batched in one round and run '
+      + 'concurrently; anything that writes runs alone, so do not batch it with calls that must '
+      + 'observe its effect.',
   )
   // Checking and listing only read state that this session already owns, so they
   // are concurrency-safe and read-only: polling three builds at once is the

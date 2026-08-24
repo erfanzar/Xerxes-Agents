@@ -92,7 +92,10 @@ export function overlayPanelWidth(terminalWidth: number, spec: OverlayPanelSpec)
  * accident nobody could see.
  */
 export const OVERLAY_PANEL_SPECS = {
-  agents: { maxHeight: 44, maxWidth: 96, minWidth: 48 },
+  // Mockup 04's agent view is a LARGE bounded surface, not a centered card:
+  // full height minus the standard gutter and diff-width, so a long grouped
+  // list and the inspector both get the room the design gives them.
+  agents: { maxWidth: 120, minWidth: 48 },
   diff: { maxWidth: 120, minWidth: 60 },
   info: { maxWidth: 90, minWidth: 42 },
   pager: { maxWidth: 110, minWidth: 48 },

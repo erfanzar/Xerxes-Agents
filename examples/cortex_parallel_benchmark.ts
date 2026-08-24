@@ -5,11 +5,9 @@
 
 import { createHash } from 'node:crypto'
 
-import {
-  Cortex,
-  type CortexOutput,
-  type LlmClient,
-} from '../xerxes/src/index.js'
+// The cortex engine lives outside the public barrel (see xerxes/src/index.ts).
+import { Cortex, type CortexOutput } from '../xerxes/src/cortex/cortex.js'
+import type { LlmClient } from '../xerxes/src/index.js'
 import { CortexAgent } from '../xerxes/src/cortex/agents/agent.js'
 import { ProcessType } from '../xerxes/src/cortex/core/enums.js'
 import {

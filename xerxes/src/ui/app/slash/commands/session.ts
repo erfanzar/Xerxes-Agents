@@ -92,7 +92,10 @@ export const sessionCommands: SlashCommand[] = [
                 return ctx.transcript.sys('error: invalid response: model switch')
               }
 
-              ctx.transcript.sys(`model → ${r.value}`)
+              // A model choice is setup, not a conversation turn. Keep it
+              // visible in established sessions, but do not dismiss the home
+              // screen when the picker is used before the first prompt.
+              ctx.transcript.config(`model → ${r.value}`)
               ctx.local.maybeWarn(r)
 
               patchUiState(state => ({
@@ -378,7 +381,7 @@ export const sessionCommands: SlashCommand[] = [
             }))
           }
 
-          ctx.transcript.sys(`reasoning: ${r.value}`)
+          ctx.transcript.config(`reasoning: ${r.value}`)
         })
       ).catch(ctx.guardedErr)
     }

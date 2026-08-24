@@ -13,8 +13,14 @@ import {
   type ToolCapabilities,
   type ToolExecutionContext,
 } from '../../executors/toolRegistry.js'
-import { skillMetadataIndexLine, skillPromptSection, type SkillRegistry } from '../../extensions/skills.js'
-import { SpawnedAgentManager, type SpawnedAgentDescriptor, type SpawnedAgentSnapshot } from '../../operators/subagents.js'
+import { skillActivationPrompt, skillMetadataIndexLine, type SkillRegistry } from '../../extensions/skills.js'
+import { completeLlm, type LlmClient } from '../../llms/client.js'
+import {
+  SpawnedAgentManager,
+  type SpawnedAgentManagerPort,
+  type SpawnedAgentDescriptor,
+  type SpawnedAgentSnapshot,
+} from '../../operators/subagents.js'
 import { UserPromptManager } from '../../operators/userPrompt.js'
 import { resolveInteractionMode, type InteractionMode } from '../../runtime/interactionModes.js'
 import type { AgentDefinition } from '../../agents/definitions.js'
@@ -176,13 +182,55 @@ export interface WorkflowPlanGenerator {
   generate(request: WorkflowPlanRequest, signal?: AbortSignal): Promise<readonly WorkflowPlanStep[] | string>
 }
 
+/**
+ * LLM-backed plan generation over the runtime's own client.
+ *
+ * The planner prompt demands the exact `<step id agent depends>` XML shape
+ * {@link parsePlanXml} consumes — the same shape the legacy Python planner
+ * emitted — so generated plans flow through the identical normalization,
+ * cycle/deadlock handling, and per-step result truncation as any other source.
+ * A model that answers prose instead of steps yields zero usable steps, which
+ * PlanTool already reports as a validation error rather than executing garbage.
+ */
+export function createLlmPlanGenerator(
+  client: LlmClient,
+  options: { readonly maxSteps?: number; readonly model: string },
+): WorkflowPlanGenerator {
+  const maxSteps = options.maxSteps ?? 8
+  return {
+    async generate(request, signal) {
+      const agentLines = request.agents.length
+        ? request.agents.map(agent => `- ${agent.name}: ${agent.description}`).join('\n')
+        : '- generic: a capable general-purpose subagent'
+      const completion = await completeLlm(client, {
+        maxTokens: 2_000,
+        messages: [{
+          role: 'user',
+          content: `Objective: ${request.objective}\n\nAvailable agents:\n${agentLines}\n\n`
+            + `Decompose this objective into at most ${maxSteps} concrete steps. Respond with ONLY the plan as XML:\n`
+            + `<step id="s1" agent="agent-name" depends=""><description>do the first thing</description></step>\n`
+            + `<step id="s2" agent="other-agent" depends="s1"><description>do the next thing</description></step>\n`
+            + `Rules: every step needs id, agent (from the list above), depends (comma-separated prior ids, empty for independent steps), and its instruction inside <description>. `
+            + `Independent steps should run in parallel; dependent steps must name every step whose output they need.`,
+        }],
+        model: options.model,
+      }, signal)
+      return completion.content
+    },
+  }
+}
+
+/** Anything that can spawn subagents and wait for them — the class or a host port. */
+type PlanSubagentManager = SpawnedAgentManager | SpawnedAgentManagerPort
+
 export interface ClaudeWorkflowToolsOptions {
   readonly agentDefinitions?: readonly AgentDefinition[]
   readonly agentResolver?: (name: string) => SpawnedAgentDescriptor | undefined
   readonly planGenerator?: WorkflowPlanGenerator
   readonly skillRegistry?: SkillRegistry
   readonly state?: WorkflowState
-  readonly subagentManager?: SpawnedAgentManager
+  /** Structural port: the daemon's recoverable manager satisfies it without owning the class. */
+  readonly subagentManager?: PlanSubagentManager
   readonly userPromptManager?: UserPromptManager
   readonly workspaceRoot?: string
   readonly worktreeManager?: WorktreeManager
@@ -312,10 +360,27 @@ export function registerClaudeWorkflowTools(
       (inputs, context, signal) => adapter.execute(name, inputs, context, signal),
       agentId,
       CLAUDE_WORKFLOW_TOOL_CAPABILITIES[name],
+      CLAUDE_WORKFLOW_TOOL_GUIDANCE[name],
     )
   }
   return CLAUDE_WORKFLOW_TOOL_DEFINITIONS
 }
+
+/**
+ * Co-located usage policies for the orchestration surface. Guidance rides with
+ * the visible schema (registry guidanceForTools), so a host that hides PlanTool
+ * loses its "only when explicitly requested" contract in the same stroke.
+ */
+export const CLAUDE_WORKFLOW_TOOL_GUIDANCE: Readonly<Record<string, string>> = Object.freeze({
+  PlanTool:
+    'Use ONLY when the user explicitly asks for a multi-agent plan or decomposition; ordinary work '
+      + 'belongs to your own tools. Steps execute as parallel subagents joined before this turn ends, '
+      + 'so every step must be self-contained and must not assume another step saw its output unless '
+      + 'it declares that dependency.',
+  TodoWriteTool:
+    'Keep the todo list current: mark items in_progress when starting and completed the moment they '
+      + 'finish, so the user can audit progress mid-turn.',
+})
 
 /** Register only the safe, read-only skill activation surface for a live registry. */
 export function registerClaudeSkillTool(
@@ -504,7 +569,7 @@ export class ClaudeWorkflowTools {
   }
 
   private async executePlan(
-    manager: SpawnedAgentManager,
+    manager: PlanSubagentManager,
     steps: readonly WorkflowPlanStep[],
     signal?: AbortSignal,
   ): Promise<readonly Record<string, unknown>[]> {
@@ -559,7 +624,9 @@ function renderSkill(registry: SkillRegistry, inputs: JsonObject): string {
     return `No installed skill has that exact name.\n${renderSkillSearch(registry, { query: skillName })}`
   }
   const args = optionalString(inputs, 'args')?.trim()
-  return `[Skill: ${skillName}]\n${skillPromptSection(skill)}${args ? `\n\nUser request: ${args}` : ''}`
+  // Same canonical framing as /skill activation, so the daemon and TUI
+  // classifiers recognize this expansion as private runtime context too.
+  return skillActivationPrompt(skill, args ? { request: args } : {})
 }
 
 function renderSkillSearch(registry: SkillRegistry, inputs: JsonObject): string {

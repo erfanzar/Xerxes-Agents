@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from 'bun:test'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -20,7 +20,10 @@ test('CLI keeps a bare --resume interactive when standard input is not a termina
 })
 
 test('CLI --resume submits a supplied prompt to the persisted native session without interactive waits', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'xerxes-bun-cli-resume-'))
+  // Canonicalize the temp root: on macOS /tmp is a symlink to /private/tmp,
+  // and the daemon rejects resuming a transcript whose stored project dir
+  // differs from the (realpath-resolved) cwd the CLI child connects with.
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'xerxes-bun-cli-resume-')))
   const home = join(root, 'home')
   const project = join(root, 'project')
   const sessions = join(home, 'sessions')
@@ -181,7 +184,7 @@ test('CLI --resume rejects a flag in place of the session ID', async () => {
 })
 
 test('CLI --resume exits non-zero when the resumed turn fails at the provider', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'xerxes-bun-cli-resume-fail-'))
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'xerxes-bun-cli-resume-fail-')))
   const home = join(root, 'home')
   const project = join(root, 'project')
   const sessions = join(home, 'sessions')

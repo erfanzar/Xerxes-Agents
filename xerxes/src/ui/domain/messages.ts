@@ -49,6 +49,12 @@ export const toTranscriptMessages = (rows: unknown): Msg[] => {
     const { context, duration_s, error, name, role, text, thinking } = row as TranscriptRow
 
     if (role === 'tool') {
+      // Bare rows (no name, no context, no diagnostic) carry nothing a folded
+      // trail line could show; named rows always render, even when the turn
+      // ended before the assistant narrated them.
+      if (!name && !context && !error) {
+        continue
+      }
       pending.push(buildToolTrailLine(name ?? 'tool', context ?? '', Boolean(error), error || undefined, duration_s))
 
       continue
@@ -67,9 +73,19 @@ export const toTranscriptMessages = (rows: unknown): Msg[] => {
       })
       pending = []
     } else if (role === 'user' || role === 'system') {
+      // Tool rows belong to the assistant turn above them; keep them as a
+      // folded trail rather than dropping them when narration never followed
+      // (e.g. the turn was interrupted right after its last tool call).
+      if (pending.length) {
+        out.push({ kind: 'trail', role: 'system', text: '', tools: pending })
+        pending = []
+      }
       out.push({ role, text })
-      pending = []
     }
+  }
+
+  if (pending.length) {
+    out.push({ kind: 'trail', role: 'system', text: '', tools: pending })
   }
 
   return out

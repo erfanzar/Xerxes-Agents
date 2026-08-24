@@ -4,10 +4,19 @@
 import type { AgentDefinition } from '../agents/definitions.js'
 import type { AuditEmitter } from '../audit/emitter.js'
 import { compressToolResult } from '../context/headroom.js'
+import {
+  assembleContextLayers,
+  layerDigests,
+  recordAssemblyProvenance,
+} from '../context/assembly.js'
 import { ToolResultStorage } from '../context/toolResultStorage.js'
 import { estimateContextTokens } from '../context/windowUsage.js'
 import { ValidationError } from '../core/errors.js'
-import type { ToolExecutor } from '../executors/toolRegistry.js'
+import {
+  renderToolGuidance,
+  type ToolExecutor,
+  type ToolRegistry,
+} from '../executors/toolRegistry.js'
 import type { AgentMemory } from '../memory/agentMemory.js'
 import {
   mergePersistedSubagentSnapshots,
@@ -21,8 +30,17 @@ import { makeTurnIndexerHook } from '../memory/turnIndexer.js'
 import type { Memory } from '../memory/base.js'
 import type { SpawnedAgentSnapshot } from '../operators/subagents.js'
 import type { LlmClient } from '../llms/client.js'
-import { getContextLimit } from '../llms/providerRegistry.js'
+import { getContextLimit, type ProviderOverrides, retryPolicyForModel } from '../llms/providerRegistry.js'
 import { agentNameForMode, modeSwitchHint, normalizeInteractionMode } from '../runtime/interactionModes.js'
+import {
+  readGoalLedger,
+  startGoalLedger,
+  updateGoalLedger,
+} from '../runtime/goalState.js'
+import {
+  renderContextDeltas,
+  takeContextDeltas,
+} from '../runtime/contextDeltas.js'
 import { beginEditDiagnosticsTurn, reportEditDiagnostics } from '../runtime/editDiagnostics.js'
 import { withActiveSession } from '../runtime/sessionContext.js'
 import { resolveTurnThinking } from '../runtime/thinkingLevels.js'
@@ -72,6 +90,17 @@ export interface AgentTurnRunnerOptions {
   readonly maxTokens?: number
   readonly model: string
   readonly permissionBroker?: PermissionBroker
+  /**
+   * The connection's provider identity, threaded from the active profile.
+   *
+   * `retryPolicyForModel` and `getContextLimit` resolve a provider from the
+   * model id when given nothing else, and an OpenRouter id like
+   * `stealth/ox-alpha` carries a VENDOR before the slash, not a routing
+   * prefix — so resolution threw `unknown provider prefix 'stealth'` on every
+   * turn that used one. The active profile already knows the answer; this
+   * carries it to the two helpers that would otherwise have to guess.
+   */
+  readonly providerOverrides?: ProviderOverrides
   readonly permissionMode?: PermissionMode
   readonly policy?: ToolPolicy
   /**
@@ -80,6 +109,12 @@ export interface AgentTurnRunnerOptions {
    * only report the failure and stop.
    */
   readonly reduceContext?: ContextReducer
+  /**
+   * The live tool registry, when the host owns one. Used only to resolve the
+   * per-tool usage-policy sections that ride with the request's visible tool
+   * surface; the runner never executes through it.
+   */
+  readonly toolRegistry?: ToolRegistry
   /**
    * Session default effort hint for reasoning APIs. This is only the base
    * layer of per-turn resolution: ultra mode and escalation keywords in the
@@ -235,38 +270,58 @@ export class AgentTurnRunner implements TurnRunner {
     )
     const restoredSubagentCount = this.options.subagentCoordinator
       ?.restore?.(session.id, recoveredSubagents) ?? 0
-    // Kept as named, ordered segments rather than one joined string: the
-    // provider caches a prefix, and a single drifting byte invalidates that
-    // block and everything after it. Memory is rewritten by the agent on most
-    // substantive turns, so joining it into the prefix meant following our own
-    // instructions busted the whole system cache on the very next request.
-    const systemSegments: SystemPromptSegment[] = [
-      { name: 'bootstrap', text: bootstrapPrompt },
-      { name: 'agent', text: promptAgent?.systemPrompt ?? '' },
-      {
-        name: 'mode_hint',
-        text: modeSwitchHint(
-          session.interactionMode,
-          tools?.some(tool => tool.function.name === 'SetInteractionModeTool') ?? false,
-        ),
-      },
-      {
-        name: 'subagent_join',
-        text: this.options.subagentCoordinator
-          ? 'Background subagents are joined before the parent turn ends. Integrate their delivered results in this turn; do not promise synthesis in a later turn.'
-          : '',
-      },
-      {
-        name: 'recovered_subagents',
-        text: restoredSubagentCount
-          ? `${restoredSubagentCount} delegated task handle(s) were recovered from this resumed transcript after their daemon process ended. TaskListTool, TaskGetTool, PeekAgent, and AwaitAgents expose honest terminal snapshots: completed output is preserved, while work last seen active is marked interrupted and must be explicitly restarted with ResetAgent or respawned. Do not retry stale ids as if they were still running.`
-          : '',
-        volatile: true,
-      },
-      { name: 'memory', text: memoryPrompt, volatile: true },
-      { name: 'self_memory', text: selfMemoryPrompt, volatile: true },
-      { name: 'addendum', text: systemPromptAddendum(session), volatile: true },
-    ].filter(segment => segment.text)
+    // Assembled through the layered pipeline: identical inputs are byte-stable,
+    // stable layers precede volatile ones for the cache breakpoint, and every
+    // layer keeps a name for provenance digests.
+    const systemSegments = assembleContextLayers({
+      addendum: systemPromptAddendum(session),
+      agentPrompt: promptAgent?.systemPrompt ?? '',
+      bootstrap: bootstrapPrompt,
+      contextDeltas: renderContextDeltas(takeContextDeltas(session.metadata)),
+      memoryRecall: memoryPrompt,
+      modeHint: modeSwitchHint(
+        session.interactionMode,
+        tools?.some(tool => tool.function.name === 'SetInteractionModeTool') ?? false,
+      ),
+      recoveredSubagents: restoredSubagentCount
+        ? `${restoredSubagentCount} delegated task handle(s) were recovered from this resumed transcript after their daemon process ended. TaskListTool, TaskGetTool, PeekAgent, and AwaitAgents expose honest terminal snapshots: completed output is preserved, while work last seen active is marked interrupted and must be explicitly restarted with ResetAgent or respawned. Do not retry stale ids as if they were still running.`
+        : '',
+      selfMemory: selfMemoryPrompt,
+      subagentJoin: this.options.subagentCoordinator
+        ? 'Background subagents are joined before the parent turn ends. Integrate their delivered results in this turn; do not promise synthesis in a later turn.'
+        : '',
+      toolGuidance: this.options.toolRegistry && tools?.length
+        ? renderToolGuidance(
+          this.options.toolRegistry.guidanceForTools(
+            tools.map(tool => tool.function.name),
+            session.agentId,
+          ),
+        )
+        : '',
+    })
+    // Objective mode gets a durable goal ledger: the turn's own prompt is the
+    // goal statement on first entry, and every guarded round is accounted for
+    // across restarts instead of living only in this turn's locals.
+    if (session.interactionMode === 'objective') {
+      const now = Date.now()
+      const existing = readGoalLedger(session.metadata)
+      const started = startGoalLedger(session.metadata, { now, text: displayText })
+      const ledger = 'created' in started ? started.created : started.existing
+      const outcome = updateGoalLedger(session.metadata, ledger.revision, { roundDelta: 1 }, now)
+      if (!outcome.ok
+        && outcome.reason === 'stale'
+        && outcome.conflictWith !== undefined) {
+        // A concurrent writer advanced the ledger; retry once against its view.
+        updateGoalLedger(session.metadata, outcome.conflictWith.revision, { roundDelta: 1 }, now)
+      }
+    }
+    // Fingerprint the assembled layers before the request fires: any later
+    // "why did this turn behave differently?" is a metadata diff, not a guess.
+    recordAssemblyProvenance(session.metadata, {
+      ...(session.activeTurnId ? { turnId: session.activeTurnId } : {}),
+      layers: layerDigests(systemSegments),
+      recordedAt: Date.now(),
+    })
     const systemPrompt = systemSegments.map(segment => segment.text).join('\n\n')
     const permissionBroker = this.options.interactions?.permissionBroker(session.id) ?? this.options.permissionBroker
     // Publish the request scaffolding the daemon's context meter cannot see.
@@ -350,6 +405,10 @@ export class AgentTurnRunner implements TurnRunner {
           },
         } : {}),
         ...(controls.drainSteer ? { drainSteer: controls.drainSteer } : {}),
+        // Retry patience is owned by the routed provider, not a global default.
+        retryDelays: retryPolicyForModel(model, this.options.providerOverrides).delaysMs,
+        maxSuggestedRetryDelayMs: retryPolicyForModel(model, this.options.providerOverrides)
+          .maxSuggestedDelayMs,
         llm: this.options.llm,
         ...(permissionBroker ? { permissionBroker } : {}),
         ...(this.options.policy ? { policy: this.options.policy } : {}),
@@ -381,7 +440,24 @@ export class AgentTurnRunner implements TurnRunner {
         const event = item.event
         auditStreamEvent(this.options.auditEmitter, event, auditContext, state)
         auditTurnEnded ||= event.type === 'turn_done'
-        yield daemonEventFromStream(event, state, session)
+        // A guard-verified completion is the ledger's terminal transition.
+        if (event.type === 'turn_done' && event.reason === 'objective_verified') {
+          const ledger = readGoalLedger(session.metadata)
+          if (ledger && ledger.phase !== 'verified') {
+            const verification = updateGoalLedger(session.metadata, ledger.revision, { phase: 'verified' }, Date.now())
+            if (!verification.ok
+              && verification.reason === 'stale'
+              && verification.conflictWith !== undefined) {
+              updateGoalLedger(
+                session.metadata,
+                verification.conflictWith.revision,
+                { phase: 'verified' },
+                Date.now(),
+              )
+            }
+          }
+        }
+        yield daemonEventFromStream(event, state, session, this.options.providerOverrides)
       }
     } catch (error) {
       if (resumedSubagent) resumedSubagentOutcome = signal.aborted ? 'cancelled' : 'error'
@@ -1031,7 +1107,13 @@ function isToolExecutionRecord(value: unknown): value is AgentState['toolExecuti
     && !Array.isArray(record.inputs)
 }
 
-function daemonEventFromStream(event: StreamEvent, state: AgentState, session: DaemonSession): DaemonEvent {
+function daemonEventFromStream(
+  event: StreamEvent,
+  state: AgentState,
+  session: DaemonSession,
+  // Passed rather than sniffed: see `TurnRunnerOptions.providerOverrides`.
+  providerOverrides?: ProviderOverrides
+): DaemonEvent {
   switch (event.type) {
     case 'text':
       return { type: 'text_part', payload: { text: event.text } }
@@ -1092,7 +1174,7 @@ function daemonEventFromStream(event: StreamEvent, state: AgentState, session: D
           total_tokens: state.totalInputTokens + state.totalOutputTokens,
           context_tokens:
             event.usage.inputTokens + (event.usage.cacheReadTokens ?? 0) + event.usage.outputTokens,
-          max_context: getContextLimit(event.model),
+          max_context: getContextLimit(event.model, providerOverrides),
           ...(state.totalCacheReadTokens ? { cache_read_tokens: state.totalCacheReadTokens } : {}),
           ...(state.totalCacheCreationTokens ? { cache_creation_tokens: state.totalCacheCreationTokens } : {}),
         },
@@ -1123,7 +1205,7 @@ function daemonEventFromStream(event: StreamEvent, state: AgentState, session: D
           output_tokens: state.totalOutputTokens,
           total_tokens: state.totalInputTokens + state.totalOutputTokens,
           context_tokens: contextTokens,
-          max_context: getContextLimit(event.model),
+          max_context: getContextLimit(event.model, providerOverrides),
           mode: session.interactionMode,
           plan_mode: session.planMode,
           ...(state.totalCacheReadTokens ? { cache_read_tokens: state.totalCacheReadTokens } : {}),

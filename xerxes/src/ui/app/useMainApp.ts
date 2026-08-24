@@ -40,6 +40,8 @@ import {
 } from '../lib/terminalRuntime.opentui.js'
 import type { ScrollBoxHandle } from '../lib/terminalTypes.js'
 import { buildToolTrailLine, formatAbandonedClarify, sameToolTrailGroup, toolTrailLabel } from '../lib/text.js'
+import { subagentCardRows } from '../lib/subagentCards.js'
+import { toolTrailSeconds } from '../lib/toolRun.js'
 import { estimatedMsgHeight, messageHeightKey } from '../lib/virtualHeights.js'
 import type { Msg, PanelSection, SlashCatalog } from '../types.js'
 
@@ -313,22 +315,43 @@ export function useMainApp(gw: GatewayClient) {
     return `${thinking}:${tools}:${subagents}`
   }, [ui.detailsMode, ui.detailsModeCommandOverride, ui.sections])
 
-  const [thinkingDetailsMode, toolsDetailsMode] = detailsLayoutKey.split(':')
+  const [thinkingDetailsMode, toolsDetailsMode, subagentsDetailsMode] = detailsLayoutKey.split(':')
   const thinkingDetailsVisible = thinkingDetailsMode !== 'hidden'
   const toolsDetailsVisible = toolsDetailsMode !== 'hidden'
-  // Agent lifecycle belongs to the dedicated sidebar/overlay. Keep the
-  // archived data for replay, but do not duplicate it as transcript rows.
-  const subagentsDetailsVisible = false
+  // Redesign mockups 02/03⑥ put one compact agent card per archived subagent
+  // on its trail row. The live tree still belongs to the sidebar/overlay;
+  // this flag only admits the SETTLED cards into the transcript, and
+  // /details hidden (or /details subagents hidden) suppresses them again.
+  const subagentsDetailsVisible = subagentsDetailsMode !== 'hidden'
   const detailsVisible = thinkingDetailsVisible || toolsDetailsVisible
-  const virtualHistoryItems = useMemo(
-    () =>
+  const virtualHistoryItems = useMemo(() => {
+    // The shared trail filters cannot see `subagents` yet: both
+    // trailHasRenderableContent and trailHasVisibleContent hard-code it off.
+    // Filter with those predicates as-is, then re-admit trails whose only
+    // payload is an archived spawn tree when cards are enabled — preserving
+    // transcript order and every other visibility decision untouched.
+    const shown = new Set(
       visibleTranscriptDetails(visibleHistoryItems, {
-        subagents: subagentsDetailsVisible,
+        subagents: false,
         thinking: thinkingDetailsVisible,
         tools: toolsDetailsVisible
-      }),
-    [subagentsDetailsVisible, thinkingDetailsVisible, toolsDetailsVisible, visibleHistoryItems]
-  )
+      })
+    )
+
+    if (!subagentsDetailsVisible) {
+      return [...shown]
+    }
+
+    const merged: Msg[] = []
+
+    for (const item of historyItems) {
+      if (shown.has(item) || (item.kind === 'trail' && item.subagents?.length)) {
+        merged.push(item)
+      }
+    }
+
+    return merged
+  }, [historyItems, subagentsDetailsVisible, thinkingDetailsVisible, toolsDetailsVisible, visibleHistoryItems])
 
   // Wrapped row heights are width-dependent. Cached layout outlives a resize
   // and lands sticky-scroll at the stale max, cutting off the tail. The
@@ -352,15 +375,69 @@ export function useMainApp(gw: GatewayClient) {
   // painted and predicted heights cannot drift apart again. It also drops a
   // backwards `prevRenderedMsg` walk from every single estimate call.
   const virtualRows = useMemo<TranscriptRow[]>(() => {
-    const rows = virtualHistoryItems.map((msg, index) => ({
+    const rows: TranscriptRow[] = virtualHistoryItems.map((msg, index) => ({
       index,
       key: `${messageId(msg)}:c${cols}`,
       leadGap: false,
-      msg
+      msg,
+      rail: 'none',
+      turnSeconds: 0,
+      turnTools: 0
     }))
 
     for (const row of rows) {
       row.leadGap = hasLeadGap(prevRenderedMsg(i => rows[i]?.msg, row.index, detailsCtx), row.msg)
+    }
+
+    // A turn opens at a user message and runs until the next one. Rows in
+    // between carry the rail; the last of them closes it. Resolved in one
+    // pass here so the renderer and the estimator read the same answer.
+    let open = false
+
+    for (const row of rows) {
+      if (row.msg.role === 'user') {
+        open = true
+        continue
+      }
+
+      row.rail = open ? 'mid' : 'none'
+    }
+
+    for (let i = 0; i < rows.length; i++) {
+      if (rows[i]!.rail !== 'mid') {
+        continue
+      }
+
+      const next = rows[i + 1]
+
+      if (!next || next.rail !== 'mid') {
+        rows[i]!.rail = 'end'
+      }
+    }
+
+    // Tally each turn's tool calls, and the seconds they reported, onto the
+    // row that closes it.
+    let tally = 0
+    let elapsed = 0
+
+    for (const row of rows) {
+      if (row.msg.role === 'user') {
+        tally = 0
+        elapsed = 0
+      }
+
+      tally += row.msg.tools?.length ?? 0
+
+      for (const line of row.msg.tools ?? []) {
+        elapsed += toolTrailSeconds(line)
+      }
+
+      if (row.rail === 'end') {
+        row.turnTools = tally
+        row.turnSeconds = elapsed
+        tally = 0
+        elapsed = 0
+      }
     }
 
     return rows
@@ -386,17 +463,44 @@ export function useMainApp(gw: GatewayClient) {
 
   const thinkingVisibility = useStore($thinkingVisibility)
   const estimateRowHeight = useCallback(
-    (index: number) =>
-      estimatedMsgHeight(virtualRows[index]!.msg, cols, {
+    (index: number) => {
+      const row = virtualRows[index]!
+      const base = estimatedMsgHeight(row.msg, cols, {
         compact: ui.compact,
         details: detailsVisible,
-        leadGap: virtualRows[index]!.leadGap,
+        leadGap: row.leadGap,
+        railEnd: row.rail === 'end',
         subagentsVisible: subagentsDetailsVisible,
-        thinkingExpanded: thinkingRowExpanded(thinkingVisibility, virtualRows[index]!.key),
+        thinkingExpanded: thinkingRowExpanded(thinkingVisibility, row.key),
         thinkingVisible: thinkingDetailsVisible,
         toolsVisible: toolsDetailsVisible,
         userPrompt: ui.theme.brand.prompt
-      }),
+      })
+
+      if (!subagentsDetailsVisible) {
+        return base
+      }
+
+      // estimatedMsgHeight deliberately knows nothing about agent cards
+      // (virtualHeights pins them to the panel), so the card rows are added
+      // here from the same model the renderer paints — keeping cold-scroll
+      // offsets aligned with what MessageLine draws.
+      const cards = subagentCardRows(row.msg.subagents)
+
+      if (!cards) {
+        return base
+      }
+
+      // A trail whose paint is ONLY cards loses the blank-body row the base
+      // estimate reserves for empty text; with any other visible content that
+      // row stays (matching today's trail convention).
+      const otherPaint =
+        Boolean(row.msg.text) ||
+        (thinkingDetailsVisible && Boolean(row.msg.thinking?.trim())) ||
+        (toolsDetailsVisible && Boolean(row.msg.tools?.length))
+
+      return base - (otherPaint ? 0 : 1) + cards
+    },
     [
       cols,
       detailsVisible,
@@ -446,6 +550,10 @@ export function useMainApp(gw: GatewayClient) {
   const removeMessage = useCallback((target: Msg) => setHistoryItems(prev => removeTranscriptMessage(prev, target)), [])
 
   const sys = useCallback((text: string) => appendMessage({ role: 'system', text }), [appendMessage])
+  const config = useCallback(
+    (text: string) => appendMessage({ kind: 'config', role: 'system', text }),
+    [appendMessage]
+  )
 
   const page = useCallback(
     (text: string, title?: string) => patchOverlayState({ pager: { lines: text.split('\n'), offset: 0, title } }),
@@ -531,6 +639,7 @@ export function useMainApp(gw: GatewayClient) {
     setLastUserMsg,
     setSessionStartedAt,
     setStickyPrompt,
+    setTurnStartedAt,
     setVoiceProcessing,
     setVoiceRecording,
     sys
@@ -962,6 +1071,7 @@ export function useMainApp(gw: GatewayClient) {
         },
         slashFlightRef,
         transcript: {
+          config,
           dispatch: dispatchSubmission,
           page,
           panel,
@@ -975,6 +1085,7 @@ export function useMainApp(gw: GatewayClient) {
     [
       catalog,
       composerActions,
+      config,
       composerRefs,
       die,
       dispatchSubmission,
@@ -1219,10 +1330,15 @@ export function useMainApp(gw: GatewayClient) {
 
   const appStatus = useMemo(
     () => ({
-      // Cap the status-bar cwd/branch label tighter than the shared default so
-      // it doesn't dominate the bar; the status rule reserves the left-side
-      // essentials and truncates this further on narrow terminals.
-      cwdLabel: fmtCwdBranch(cwd, gitBranch, 28),
+      // The path is this screen's identity: give it every column the footer
+      // can spare (session width minus the right-side hints and gutters),
+      // bounded for pathological widths. `cols` already excludes the agent
+      // sidebar, so opening the panel narrows the label honestly. The footer
+      // still truncates as the last resort on truly narrow terminals.
+      // Path only. The branch used to be glued on here as `(main)`; the
+      // statusbar now draws it as its own `⎇ main ↑2` section beside the
+      // dirty count, so gluing it here would print it twice.
+      cwdLabel: shortCwd(cwd, Math.max(24, Math.min(160, cols - 46))),
       goodVibesTick,
       lastTurnDurationMs: ui.sid ? lastTurnDurationMs : null,
       lastTurnEndedAt: ui.sid ? lastTurnEndedAt : null,
@@ -1240,6 +1356,7 @@ export function useMainApp(gw: GatewayClient) {
           : `voice ${voiceEnabled ? 'on' : 'off'}${voiceTts ? ' [tts]' : ''}`
     }),
     [
+      cols,
       cwd,
       gitBranch,
       goodVibesTick,

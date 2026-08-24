@@ -99,4 +99,31 @@ describe('slash catalog completions', () => {
     expect(merged.map(item => item.display)).toEqual(['help', 'provider', 'deepscan', 'eternal-army', 'tools'])
     expect(merged.find(item => item.display === 'help')?.meta).toBe('show help')
   })
+
+  // The mockup's lowest tier: "fuzzy: prefix → substring → skill body". The
+  // catalog pairs carry each skill's description into the row's meta, and a
+  // query hitting only that prose must rank below every name match.
+  it('ranks a description-only hit below every name hit', () => {
+    const local = slashCompletionsFromCatalog('/dee', catalog)
+    expect(local.map(item => item.display)).toEqual(['deepscan'])
+
+    const remote = [{ display: 'army', meta: 'deploys scouts deep into a repo', text: '/army' }]
+    const ranked = rankCompletionItems(mergeCompletionItems(local, remote), 'dee')
+
+    expect(ranked.map(item => item.display)).toEqual(['deepscan', 'army'])
+  })
+
+  it('surfaces a skill whose description matches but whose name does not', () => {
+    // Local candidates are no longer name-prefix only: a query that hits a
+    // skill's description reaches the ranker even when no name matches.
+    const local = slashCompletionsFromCatalog('/swarm', catalog)
+    expect(local.map(item => item.display)).toEqual(['eternal-army'])
+
+    const remote = [
+      { display: 'eternal-army', meta: 'swarm of subagents', text: '/eternal-army' },
+      { display: 'model', meta: 'pick a model', text: '/model' }
+    ]
+
+    expect(rankCompletionItems(remote, 'swarm').map(item => item.display)).toEqual(['eternal-army', 'model'])
+  })
 })

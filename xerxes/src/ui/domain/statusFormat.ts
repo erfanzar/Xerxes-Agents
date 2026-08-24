@@ -29,6 +29,42 @@ export function ctxBarColor(pct: number | undefined, t: Theme) {
   return t.color.statusGood
 }
 
+/** Cell count of the compact block-glyph context meter (mockup 02/11). */
+export const CTX_METER_CELLS = 5
+/** Filled cell of the block-glyph meter. */
+export const CTX_METER_FILLED = '▰'
+/** Empty cell of the block-glyph meter; deliberately a lighter twin of ▰. */
+export const CTX_METER_EMPTY = '▱'
+
+/**
+ * Render the small block-glyph bar that precedes the textual context read-out.
+ *
+ * Unknown pressure renders as an all-empty bar rather than guessing, and any
+ * non-zero usage earns at least one filled cell so a nearly-fresh window never
+ * reads as broken next to its own percentage.
+ */
+export function ctxMeterBar(pct: number | undefined, cells = CTX_METER_CELLS): string {
+  const safeCells = Math.trunc(cells)
+
+  if (!Number.isFinite(safeCells) || safeCells <= 0) {
+    return ''
+  }
+
+  if (pct == null || !Number.isFinite(pct)) {
+    return CTX_METER_EMPTY.repeat(safeCells)
+  }
+
+  const clamped = Math.max(0, Math.min(100, pct))
+  const filled =
+    clamped <= 0
+      ? 0
+      : clamped >= 100
+        ? safeCells
+        : Math.min(safeCells, Math.max(1, Math.round((clamped / 100) * safeCells)))
+
+  return CTX_METER_FILLED.repeat(filled) + CTX_METER_EMPTY.repeat(safeCells - filled)
+}
+
 // Shared context-budget read-out so the persistent top breadcrumb and the
 // composer-adjacent status rule never drift on what "used"/"max" mean.
 export function usageCounts(usage: Usage): { max: number; used: number } {
@@ -55,6 +91,28 @@ const shortModelLabel = (model: string) =>
 
 export const modelLabel = (model: string, effort?: string, fast?: boolean) =>
   [shortModelLabel(model), effortLabel(effort), fast ? 'fast' : ''].filter(Boolean).join(' ')
+
+/**
+ * What the next ⏎ is allowed to do to your files.
+ *
+ * The composer's second row states mode, model and write policy together
+ * because those three decide it between them — knowing the model without
+ * knowing whether it may write is not knowing what will happen.
+ */
+export const writePolicyLabel = (permissionMode?: string): string => {
+  switch (permissionMode) {
+    case 'plan':
+      return 'plan only, no writes'
+    case 'manual':
+      return 'writes need approval'
+    case 'auto':
+      return 'writes approved in repo'
+    default:
+      // 'accept-all' is the shipped default, so this is the common case and
+      // has to say so plainly rather than hiding behind the word "auto".
+      return 'writes apply without asking'
+  }
+}
 
 /**
  * The status identity keeps model and mode first because they are the

@@ -1,0 +1,121 @@
+<!--TITLE: Home-->
+<style>
+.wordmark{
+  white-space:pre;font-size:13px;line-height:18px;
+  background:linear-gradient(100deg,#6ea8fe 0%,#8fb6ff 30%,#b18be8 62%,#4a82d8 100%);
+  -webkit-background-clip:text;background-clip:text;color:transparent;
+}
+.braille{
+  white-space:pre;letter-spacing:.14em;font-size:16px;line-height:18px;
+  background:linear-gradient(90deg,rgba(110,168,254,0) 0%,#6ea8fe 32%,#b18be8 68%,rgba(74,130,216,0) 100%);
+  -webkit-background-clip:text;background-clip:text;color:transparent;
+}
+.tag{color:var(--dim1);letter-spacing:.02em}
+.chips{width:82ch;display:flex;flex-direction:column;gap:6px}
+.chip{
+  white-space:nowrap;display:flex;align-items:center;gap:1ch;text-decoration:none;
+  height:calc(2 * var(--row));padding:0 2ch;
+  border:1px solid var(--line);border-radius:6px;background:var(--panel-2);
+  color:var(--fg);
+}
+.chip:hover{border-color:#2c4a70;background:#0f1520}
+.chip .key{
+  color:var(--dim2);font-size:11px;border:1px solid var(--line);border-radius:3px;
+  padding:1px 5px;background:var(--panel-3);
+}
+.chip .cmd{color:var(--blue);width:12ch}
+.chip .txt{color:var(--fg)}
+.chip.resume{border-color:#23384f;background:#0b1119;box-shadow:inset 2px 0 0 var(--blue)}
+.chip.resume .txt{color:var(--fg-hi)}
+</style>
+
+<div class="win">
+  <div class="tb"><i class="r"></i><i class="y"></i><i class="g"></i><span class="tbt">xerxes — ~/dev/xerxes — 150×40</span></div>
+  <div class="screen">
+
+    <div class="grow" style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:0">
+      <pre class="wordmark">██╗  ██╗███████╗██████╗ ██╗  ██╗███████╗███████╗
+╚██╗██╔╝██╔════╝██╔══██╗╚██╗██╔╝██╔════╝██╔════╝
+ ╚███╔╝ █████╗  ██████╔╝ ╚███╔╝ █████╗  ███████╗
+ ██╔██╗ ██╔══╝  ██╔══██╗ ██╔██╗ ██╔══╝  ╚════██║
+██╔╝ ██╗███████╗██║  ██║██╔╝ ██╗███████╗███████║
+╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝╚══════╝</pre>
+      <div class="blank"></div>
+      <div class="braille">⣀⣄⣤⣶⣷⣿⣿⣿⣿⣿⣿⣿⣷⣶⣤⣄⣀</div>
+      <div class="blank"></div>
+      <div class="tag">multi-agent coding, resident in your terminal</div>
+      <div class="blank"></div>
+      <div class="blank"></div>
+
+      <div class="chips">
+        <a class="chip resume" href="#">
+          <span class="key">⏎</span>
+          <span class="d blue"></span>
+          <span class="txt nowrap">resume&nbsp;&nbsp;<span class="dim">daemon replays tool_result too early</span></span>
+          <span class="rt dim2">2h ago · 41 msgs</span>
+        </a>
+        <a class="chip" href="#">
+          <span class="key">1</span>
+          <span class="dim3">▸</span>
+          <span class="cmd">/agents</span>
+          <span class="txt">spawn a fleet and watch it work</span>
+          <span class="rt dim2">4 running · 2 need you</span>
+        </a>
+        <a class="chip" href="#">
+          <span class="key">2</span>
+          <span class="dim3">▸</span>
+          <span class="cmd">/diff</span>
+          <span class="txt">review what this repo owes you</span>
+          <span class="rt"><span class="green">+128</span> <span class="red">−42</span> <span class="dim2">· 6 files</span></span>
+        </a>
+        <a class="chip" href="#">
+          <span class="key">3</span>
+          <span class="dim3">▸</span>
+          <span class="cmd">/model</span>
+          <span class="txt">switch provider or model</span>
+          <span class="rt dim2">anthropic · opus-5</span>
+        </a>
+      </div>
+    </div>
+
+    <div class="composer">
+      <div class="line" style="height:calc(2 * var(--row));align-items:center">
+        <span class="p">❯</span><span class="ph">describe a task&thinsp;…&thinsp;</span><span class="caret">&nbsp;</span>
+      </div>
+      <div class="meta">
+        <span class="mode">auto</span><span class="sep">·</span><span>accept edits</span>
+        <span class="sep">·</span><span>opus-5</span>
+        <span class="rt">
+          <kbd>⏎</kbd> send <span class="sep">·</span>
+          <kbd>⇧⏎</kbd> newline <span class="sep">·</span>
+          <kbd>/</kbd> commands <span class="sep">·</span>
+          <kbd>@</kbd> files <span class="sep">·</span>
+          <kbd>ctrl-c</kbd> quit
+        </span>
+      </div>
+    </div>
+    <div class="blank"></div>
+
+    <div class="sbar">
+      <span class="mark">✦</span><span>~/dev/xerxes</span>
+      <span class="pipe">│</span><span>main</span><span class="amber">✱6</span>
+      <span class="pipe">│</span>
+      <span><span class="dim1">F6</span> agents</span><span class="sep">·</span>
+      <span><span class="dim1">F7</span> diff</span><span class="sep">·</span>
+      <span><span class="dim1">F8</span> terminals</span>
+      <span class="rt">v0.4.1</span>
+    </div>
+
+  </div>
+</div>
+
+<section class="notes">
+  <h2>Decisions</h2>
+  <ul>
+    <li><b>The chips are the entry points, not decoration.</b> Each one is a real command with a real number key, and each carries the state that makes it worth pressing — <span class="k">/diff</span> shows <span class="k">+128 −42</span>, <span class="k">/agents</span> shows <span class="k">2 need you</span>. A chip that can't show live state doesn't earn a slot.</li>
+    <li><b>Resume is a chip, not a prompt.</b> Reopening yesterday's work is the most likely first action, so it gets the <kbd>⏎</kbd> key, the blue rail, and the one sentence that says what you were doing — not just a session id.</li>
+    <li><b>Where am I / what's happening / what can I do</b> is answered by three fixed bands: wordmark (which tool), chips (what's pending), statusbar (cwd, branch, dirty count, view keys, version). The statusbar is the only place F-keys are advertised, and it stays identical on every screen.</li>
+    <li><b>Amber appears exactly once</b> — on <span class="k">✱6</span>, the uncommitted-file count. It is a warning, not brand colour, so it must not compete with the wordmark gradient.</li>
+    <li><b>The composer owns its own mode label.</b> Interaction mode ("auto · accept edits") lives against the input it governs, not in the statusbar, because it changes what pressing <kbd>⏎</kbd> will do.</li>
+  </ul>
+</section>

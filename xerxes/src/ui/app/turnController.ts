@@ -9,10 +9,11 @@ import {
   STREAM_TYPING_BATCH_MS
 } from '../config/timing.js'
 import { mergeSubagentProgress, subagentProgressId } from '../domain/subagentProgress.js'
-import type { SessionInterruptResponse, SubagentEventPayload } from '../gatewayTypes.js'
+import type { SessionInflightTool, SessionInterruptResponse, SubagentEventPayload } from '../gatewayTypes.js'
 import { appendToolShelfMessage, isToolShelfMessage } from '../lib/liveProgress.js'
 import { hasReasoningTag, splitReasoning } from '../lib/reasoning.js'
 import { ReasoningFilter } from '../lib/reasoningFilter.js'
+import { summarizeToolStartDisplay } from '../lib/toolStartDisplay.js'
 import {
   boundedLiveRenderText,
   buildToolTrailLine,
@@ -1050,6 +1051,62 @@ class TurnController {
     this.resetLiveReasoningFilter()
     this.appendLiveVisibleText(text)
     patchTurnState({ streaming: boundedLiveRenderText(this.visibleStreamingText()) })
+  }
+
+  /**
+   * Seed live turn state from a mid-turn reattach snapshot so the reattached
+   * view renders the turn's work so far exactly like rows that arrived live:
+   * thinking enters the reasoning surface, settled calls become completed
+   * trail rows, and calls still in flight stay active so their late
+   * tool_result settles them with its real duration.
+   */
+  hydrateInflightTrail(input: { thinking?: string; tools?: readonly SessionInflightTool[] }) {
+    const thinking = String(input.thinking ?? '')
+
+    // Respect the showReasoning gate exactly like live reasoning deltas.
+    if (thinking.trim()) {
+      this.recordReasoningAvailable(liveTail(thinking))
+    }
+
+    for (const tool of input.tools ?? []) {
+      const name = tool.name || 'tool'
+      // Inflight arguments are a raw JSON preview; summarize them into the
+      // same friendly context live tool.start rows carry ("path=…", not "{"path":…}").
+      const context = tool.arguments ? summarizeToolStartDisplay(name, '', tool.arguments).context : ''
+
+      if (tool.ok === undefined) {
+        const id = tool.id ?? `inflight-${name}-${this.activeTools.length}`
+
+        if (!this.activeTools.some(active => active.id === id)) {
+          this.activeTools = [...this.activeTools, { context, id, name, startedAt: Date.now() }]
+        }
+        continue
+      }
+
+      const id = tool.id
+
+      if (id) {
+        if (this.completedToolIds.has(id)) {
+          continue
+        }
+        this.completedToolIds.add(id)
+      }
+
+      const failed = tool.ok === false
+      const line = buildToolTrailLine(
+        name,
+        context,
+        failed,
+        failed ? tool.error : undefined,
+        tool.duration_ms === undefined ? undefined : tool.duration_ms / 1000
+      )
+
+      this.liveCompletedTools = [...this.liveCompletedTools, line]
+      this.pendingSegmentTools = [...this.pendingSegmentTools, line]
+    }
+
+    this.flushPendingToolsIntoLastSegment()
+    this.publishToolState()
   }
 
   startMessage() {

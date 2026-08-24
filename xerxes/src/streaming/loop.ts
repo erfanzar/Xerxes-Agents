@@ -18,6 +18,11 @@ import {
   DenialBudget,
   denialBudgetStopText,
 } from '../runtime/denialBudget.js'
+import {
+  renderContextOverflowStopGuard,
+  renderIntervention,
+  renderOutputLimitResumeDirective,
+} from '../runtime/interventions.js'
 import { classifyError, ErrorKind } from '../runtime/errorClassifier.js'
 import {
   inspectObjectiveResponse,
@@ -79,18 +84,14 @@ export const MAX_OUTPUT_LIMIT_ESCALATIONS = 3
  * The model has already spent a whole window, so an apology or a recap spends
  * the next one restating text the user has already read.
  */
-export const OUTPUT_LIMIT_RESUME_REMINDER =
-  '[Output limit]\nOutput token limit hit. Resume directly — no apology, no recap.'
+export const OUTPUT_LIMIT_RESUME_REMINDER = renderOutputLimitResumeDirective()
 /**
  * Terminal wording for a context overflow no reducer could relieve. The
  * provider's own string names a token count the user cannot act on, so echoing
  * it leaves the session repeating an identical failure; these three commands
  * are the actual remedies.
  */
-export const CONTEXT_OVERFLOW_STOP_TEXT =
-  '[Stopped: the conversation no longer fits in this model\'s context window. '
-  + 'Run /compact to summarize it, /clear to start over, or /branch to keep this '
-  + 'history and continue in a fresh session.]'
+export const CONTEXT_OVERFLOW_STOP_TEXT = renderContextOverflowStopGuard()
 
 /** Upper bound on tools executed at once, so a wide round cannot exhaust file handles or sockets. */
 export const MAX_CONCURRENT_TOOL_CALLS = 8
@@ -295,6 +296,11 @@ export interface TurnDependencies {
   readonly reduceContext?: ContextReducer
   readonly retryDelays?: readonly number[]
   /**
+   * Ceiling for provider-suggested Retry-After waits (ms). Route-owned via the
+   * provider registry; defaults to {@link MAX_SUGGESTED_RETRY_DELAY_MS}.
+   */
+  readonly maxSuggestedRetryDelayMs?: number
+  /**
    * Abort a provider attempt that yields no chunk within this budget (ms), so a
    * socket held open without data stalls one attempt instead of the whole turn.
    * Defaults to {@link DEFAULT_STREAM_INACTIVITY_TIMEOUT_MS}; non-positive or
@@ -322,6 +328,8 @@ export async function* runTurn(
     throw new TypeError('maxToolTurns must be a positive integer or Infinity')
   }
   const retryDelays = dependencies.retryDelays ?? DEFAULT_RETRY_DELAYS
+  const maxSuggestedRetryDelayMs =
+    dependencies.maxSuggestedRetryDelayMs ?? MAX_SUGGESTED_RETRY_DELAY_MS
   const streamInactivityTimeoutMs =
     dependencies.streamInactivityTimeoutMs ?? DEFAULT_STREAM_INACTIVITY_TIMEOUT_MS
   const hookRunner = dependencies.hookRunner
@@ -553,7 +561,7 @@ export async function* runTurn(
             || signal?.aborted === true
           const suggestedDelay = classified.suggestedBackoffSeconds === undefined
             ? 0
-            : Math.min(MAX_SUGGESTED_RETRY_DELAY_MS, classified.suggestedBackoffSeconds * 1_000)
+            : Math.min(maxSuggestedRetryDelayMs, classified.suggestedBackoffSeconds * 1_000)
           const delay = final ? 0 : Math.max(retryDelays[attempt] ?? 0, suggestedDelay)
           yield {
             type: 'provider_retry',
@@ -674,10 +682,11 @@ export async function* runTurn(
         if (outputLimitEscalations >= MAX_OUTPUT_LIMIT_ESCALATIONS) {
           yield {
             type: 'text',
-            text:
-              `\n[Stopped: the model hit the output token limit in ` +
-              `${MAX_OUTPUT_LIMIT_ESCALATIONS} consecutive rounds; ending the turn instead of ` +
-              `resuming again.]`,
+            text: renderIntervention({
+              kind: 'stop-guard',
+              attempts: MAX_OUTPUT_LIMIT_ESCALATIONS,
+              variant: 'output-limit-escalated',
+            }),
           }
           stopReason = 'output_limit'
           break
@@ -728,10 +737,11 @@ export async function* runTurn(
             // provider call per round forever (maxToolTurns is unbounded).
             yield {
               type: 'text',
-              text:
-                `\n[Stopped: the model requested only unconfigured tools in ` +
-                `${consecutiveUnconfiguredOnlyRounds} consecutive rounds; ending the turn ` +
-                `instead of looping on provider calls.]`,
+              text: renderIntervention({
+                kind: 'stop-guard',
+                attempts: consecutiveUnconfiguredOnlyRounds,
+                variant: 'unconfigured-tools-loop',
+              }),
             }
             stopReason = 'unconfigured_tools'
             break
@@ -768,7 +778,7 @@ export async function* runTurn(
           })
           yield {
             type: 'text',
-            text: `\n[Steer saved for next turn: ${content}]`,
+            text: renderIntervention({ kind: 'steer-note', content }),
           }
         }
         const objectiveDecision = inspectObjectiveResponse(assistantText, {
@@ -785,12 +795,12 @@ export async function* runTurn(
         if (objectiveGuardRetries > objectiveGuardLimit) {
           yield {
             type: 'text',
-            text:
-              '\n[Stopped: objective guard could not get a verified completion or concrete blocker after ' +
-              objectiveGuardLimit +
-              ' retries. The last issue was: ' +
-              objectiveDecision.reason +
-              '.]',
+            text: renderIntervention({
+              kind: 'stop-guard',
+              attempts: objectiveGuardLimit,
+              reason: objectiveDecision.reason,
+              variant: 'objective-guard-exhausted',
+            }),
           }
           stopReason = 'objective_guard_exhausted'
           break

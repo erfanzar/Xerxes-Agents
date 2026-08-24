@@ -85,19 +85,21 @@ describe('transcript voices', () => {
     resetUiState()
   })
 
-  it('paints the user turn with the Derafsh gold bar and warm body text', async () => {
+  it('marks the user turn with the prompt glyph on a filled band', async () => {
     const spans = await spansOf({ role: 'user', text: 'refactor the gateway' })
 
     // Absolute values, not `VOICE.user(theme).bar` — comparing the render to
     // the same table the renderer reads would pass even if both went gray
     // together, which is precisely the regression being guarded.
-    // The bar is a filled Box, so it lands as a background on a blank span.
-    expect(spans.some(s => s.bg === '#d8ae58')).toBe(true)
-    expect(findText(spans, 'refactor the gateway')?.fg).toBe('#f0e4cd')
-    expect(spans.some(s => s.bg === VOICE.user(theme).bar)).toBe(true)
+    // The band is marked by the prompt glyph in the brand blue, not by a
+    // filled left bar — `❯ …` is what you typed, and two markers on one row
+    // is what the canvas removed. (The band's ground is a Box background, not
+    // a span attribute, so it is not observable here; the glyph is.)
+    expect(findText(spans, '❯')?.fg).toBe(VOICE.user(theme).bar)
+    expect(findText(spans, 'refactor the gateway')?.fg).toBe('#d7dce3')
   })
 
-  it('paints the tool glyph in lapis and leaves its body muted', async () => {
+  it('opens a quiet read-only call with a faint ⏺, lapis name, green tick', async () => {
     const spans = await spansOf({
       kind: 'trail',
       role: 'system',
@@ -105,26 +107,65 @@ describe('transcript voices', () => {
       tools: [buildToolTrailLine('read_file', 'src/one.ts', false, '', 0.1)]
     })
 
-    const glyph = findText(spans, VOICE.tool(theme).glyph)
+    // Outcome glyph FIRST (anatomy element ④): dim for read-only calls…
+    expect(findText(spans, '⏺')?.fg).toBe(theme.color.muted)
+    // …the VERB sits on the ramp's secondary step…
+    expect(findText(spans, 'Read File')?.fg).toBe('#8b949e')
+    // …the verdict rides right after the summary, ok-green on success…
+    expect(findText(spans, '✓')?.fg).toBe('#57ca85')
+    // …and the TARGET is the one thing on the row you are actually reading,
+    // so it takes `title`, a step above the verb rather than below it.
+    expect(findText(spans, 'one.ts')?.fg).toBe(theme.ds.title)
+  })
 
-    expect(glyph?.fg).toBe('#7ea9e0')
-    expect(findText(spans, 'one.ts')?.fg).toBe(theme.color.muted)
-    expect(glyph?.fg).not.toBe(theme.color.accent)
+  it('tints a successful non-quiet call green from glyph through mark', async () => {
+    const spans = await spansOf({
+      kind: 'trail',
+      role: 'system',
+      text: '',
+      tools: [buildToolTrailLine('bash', 'bun run check', false, '', 22.6)]
+    })
+
+    expect(findText(spans, '⏺')?.fg).toBe('#57ca85')
+    expect(findText(spans, 'Bash')?.fg).toBe('#8b949e')
+    expect(findText(spans, '✓')?.fg).toBe('#57ca85')
+  })
+
+  it('paints failures red from glyph through mark', async () => {
+    const spans = await spansOf({
+      kind: 'trail',
+      role: 'system',
+      text: '',
+      tools: [buildToolTrailLine('bash', 'bun run test', true, '1 fail', 41)]
+    })
+
+    expect(findText(spans, '⏺')?.fg).toBe('#f47067')
+    expect(findText(spans, '✗')?.fg).toBe('#f47067')
+    // The name still reads as a name — only the outcome carries red.
+    expect(findText(spans, 'Bash')?.fg).toBe('#8b949e')
   })
 
   it('paints the system voice violet, glyph included', async () => {
     const spans = await spansOf({ role: 'system', text: 'context compacted' })
 
-    expect(findText(spans, 'context compacted')?.fg).toBe('#a98ad4')
-    expect(findText(spans, VOICE.system(theme).glyph)?.fg).toBe('#a98ad4')
+    expect(findText(spans, 'context compacted')?.fg).toBe('#b39cf0')
+    expect(findText(spans, VOICE.system(theme).glyph)?.fg).toBe('#b39cf0')
   })
 
-  it('leaves the assistant unmarked — no bar, no glyph, neutral body', async () => {
+  it('opens the assistant turn with a small accent ✦ and neutral prose', async () => {
     const assistant = VOICE.assistant(theme)
 
+    // No bar — the rail owns the left edge; the ✦ is the only marker.
     expect(assistant.bar).toBe('')
-    expect(assistant.glyph).toBe('')
-    expect(assistant.body).toBe(theme.color.text)
+    expect(assistant.glyph).toBe('✦')
+    expect(assistant.glyphColor).toBe(theme.color.accent)
+    // The ramp's `prose` step, one below the `title` the user's own words
+    // get — see the voice table for why the two must not be the same.
+    expect(assistant.body).toBe(theme.ds.prose)
+
+    const spans = await spansOf({ role: 'assistant', text: 'Release gate — three commands in order.' })
+
+    expect(findText(spans, '✦')?.fg).toBe('#b1b8c1')
   })
 
   it('keeps every voice visually distinct in code mode', async () => {

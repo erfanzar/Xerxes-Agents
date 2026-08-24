@@ -130,6 +130,20 @@ export interface TranscriptRow {
    * derived it independently, and the renderer's margin was unconditional.
    */
   leadGap: boolean
+  /**
+   * Where this row sits in its turn. 'mid' and 'end' rows carry the turn
+   * rail down their left edge; 'end' also closes it with a ledger. Resolved
+   * here for the same single-source reason as `leadGap`.
+   */
+  rail: 'end' | 'mid' | 'none'
+  /** Tool calls across the whole turn, shown on the closing ledger row. */
+  turnTools: number
+  /**
+   * Seconds those calls reported, summed. The ledger is a receipt and a
+   * receipt with only a line count is not one — this is the second fact the
+   * wire actually carries, so it is the second fact the ledger states.
+   */
+  turnSeconds: number
   index: number
   key: string
   msg: Msg
@@ -178,6 +192,8 @@ export interface VirtualHistoryState {
   setScrollHandle: (handle: ScrollBoxHandle | null) => void
   start: number
   topSpacer: number
+  /** Measured height of the whole transcript, for fit decisions only. */
+  totalHeight: number
 }
 
 export interface ComposerPasteResult {
@@ -352,6 +368,8 @@ export interface SlashHandlerContext {
   }
   slashFlightRef: MutableRefObject<number>
   transcript: {
+    /** Record a successful preference change without starting the session UI. */
+    config: (text: string) => void
     /** Submit through the normal busy-mode router (send, steer, or queue). */
     dispatch: (text: string) => void
     page: (text: string, title?: string) => void

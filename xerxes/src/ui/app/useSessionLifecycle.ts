@@ -6,7 +6,9 @@ import { type RefObject, useCallback, useRef } from 'react'
 
 import { buildSetupRequiredSections, SETUP_REQUIRED_TITLE } from '../content/setup.js'
 import { introMsg, toTranscriptMessages } from '../domain/messages.js'
+import { subagentProgressFromSnapshot } from '../domain/subagentProgress.js'
 import { ZERO } from '../domain/usage.js'
+import { looksLikeInternalUserPrompt } from '../gatewayAdapter.js'
 import { type GatewayClient } from '../gatewayClient.js'
 import type {
   SessionActivateResponse,
@@ -14,7 +16,8 @@ import type {
   SessionInflightTurn,
   SessionResumeResponse,
   SessionTitleResponse,
-  SetupStatusResponse
+  SetupStatusResponse,
+  SubagentSnapshotPayload
 } from '../gatewayTypes.js'
 import { capTranscriptHistory } from '../lib/messages.js'
 import { asRpcResult } from '../lib/rpc.js'
@@ -24,8 +27,9 @@ import type { Msg, PanelSection, SessionInfo, Usage } from '../types.js'
 
 import type { ComposerActions, GatewayRpc, StateSetter } from './interfaces.js'
 import { patchOverlayState } from './overlayStore.js'
+import { pushSnapshot } from './spawnHistoryStore.js'
 import { turnController } from './turnController.js'
-import { patchTurnState } from './turnStore.js'
+import { beginTurnPulse, patchTurnState } from './turnStore.js'
 import { getUiState, patchUiState } from './uiStore.js'
 
 const usageFrom = (info: null | SessionInfo): Usage => (info?.usage ? { ...ZERO, ...info.usage } : ZERO)
@@ -57,17 +61,62 @@ export const writeActiveSessionFile = (sessionId: null | string, file = process.
 export const liveSessionInflightMessages = (inflight?: null | SessionInflightTurn): Msg[] => {
   const user = String(inflight?.user ?? '').trim()
 
-  return user ? [{ role: 'user', text: user }] : []
+  // Internal prompts (skill activation, compaction, steers) are runtime
+  // scaffolding; the reattached transcript must not show them as user rows.
+  return user && !looksLikeInternalUserPrompt(user) ? [{ role: 'user', text: user }] : []
 }
 
 export const hydrateLiveSessionInflight = (inflight?: null | SessionInflightTurn) => {
   const assistant = String(inflight?.assistant ?? '')
+
+  if (inflight?.streaming) {
+    // Restore the turn's work so far — thinking and tool rows — before the
+    // streaming text so both live surfaces render the mid-turn state.
+    turnController.hydrateInflightTrail({ thinking: inflight.thinking, tools: inflight.tools })
+  }
 
   if (!assistant && !inflight?.streaming) {
     return
   }
 
   turnController.hydrateStreamingText(assistant)
+}
+
+/**
+ * Rehydrate the session's persisted subagent manifest as a folded trail card
+ * and a spawn-history snapshot, so a reattached transcript keeps the spawned
+ * agents it rendered live. Returns the card to append, or null.
+ */
+const subagentTrailFromSnapshots = (
+  snapshots: SubagentSnapshotPayload[] | undefined,
+  sessionId: string
+): Msg | null => {
+  if (!snapshots?.length) {
+    return null
+  }
+
+  const subagents = snapshots.map((row, index) => subagentProgressFromSnapshot(row, index))
+  pushSnapshot(subagents, { sessionId, startedAt: null })
+
+  return { kind: 'trail', role: 'system', subagents, text: '' }
+}
+
+/** Keep the live elapsed clock continuous across a mid-turn reattach. */
+const seedTurnClock = (
+  inflight: null | SessionInflightTurn | undefined,
+  running: boolean,
+  setTurnStartedAt?: StateSetter<null | number>
+) => {
+  const startedAt = inflight?.started_at
+  if (!running || typeof startedAt !== 'number' || !Number.isFinite(startedAt) || startedAt <= 0) {
+    return
+  }
+  const startedMs = startedAt * 1000
+
+  // Open the liveness window with the real turn start before busy flips true;
+  // the $turnLive listener keeps an already-open window instead of restarting it.
+  beginTurnPulse(startedMs)
+  setTurnStartedAt?.(startedMs)
 }
 
 const trimTail = (items: Msg[]) => {
@@ -95,6 +144,7 @@ export interface UseSessionLifecycleOptions {
   setLastUserMsg: StateSetter<string>
   setSessionStartedAt: StateSetter<number>
   setStickyPrompt: StateSetter<string>
+  setTurnStartedAt?: StateSetter<null | number>
   setVoiceProcessing: StateSetter<boolean>
   setVoiceRecording: StateSetter<boolean>
   sys: (text: string) => void
@@ -112,6 +162,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
     setLastUserMsg,
     setSessionStartedAt,
     setStickyPrompt,
+    setTurnStartedAt,
     setVoiceProcessing,
     setVoiceRecording,
     sys
@@ -278,8 +329,16 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
 
   const activateLiveSession = useCallback(
     (id: string) => {
-      const generation = ++switchGenerationRef.current
       patchOverlayState({ sessions: false })
+      // Agent View includes the attached chat. Entering that row is a return to
+      // the screen already in memory, not a reattach. Reinitializing it here
+      // discarded the optimistic user/skill row, live subagents, and original
+      // turn clock before session.open could provide a weaker snapshot.
+      if (id === getUiState().sid) {
+        return
+      }
+
+      const generation = ++switchGenerationRef.current
       patchUiState({ status: 'switching session…' })
 
       runClientSwitch(generation, () =>
@@ -301,7 +360,13 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
           composerActions.activateSessionQueue(r.session_id)
           resetSession()
           setSessionStartedAt(r.started_at ? r.started_at * 1000 : Date.now())
-          const transcript = [...toTranscriptMessages(r.messages), ...liveSessionInflightMessages(r.inflight)]
+          seedTurnClock(r.inflight, running, setTurnStartedAt)
+          const subagentTrail = subagentTrailFromSnapshots(r.subagent_snapshots, r.session_id)
+          const transcript = [
+            ...toTranscriptMessages(r.messages),
+            ...(subagentTrail ? [subagentTrail] : []),
+            ...liveSessionInflightMessages(r.inflight)
+          ]
           setHistoryItems(capTranscriptHistory(info ? [introMsg(info), ...transcript] : transcript))
           writeActiveSessionFile(r.session_key ?? r.session_id)
           patchUiState({
@@ -320,7 +385,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
           patchUiState({ status: 'ready' })
         })
     },
-    [gw, resetSession, runClientSwitch, scrollRef, setHistoryItems, setSessionStartedAt, sys]
+    [gw, resetSession, runClientSwitch, scrollRef, setHistoryItems, setSessionStartedAt, setTurnStartedAt, sys]
   )
 
   const resumeById = useCallback(
@@ -359,8 +424,14 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
             composerActions.activateSessionQueue(r.session_id)
             resetSession()
             setSessionStartedAt(r.started_at ? r.started_at * 1000 : Date.now())
+            seedTurnClock(r.inflight, running, setTurnStartedAt)
 
-            const resumed = [...toTranscriptMessages(r.messages), ...liveSessionInflightMessages(r.inflight)]
+            const subagentTrail = subagentTrailFromSnapshots(r.subagent_snapshots, r.session_id)
+            const resumed = [
+              ...toTranscriptMessages(r.messages),
+              ...(subagentTrail ? [subagentTrail] : []),
+              ...liveSessionInflightMessages(r.inflight)
+            ]
 
             setHistoryItems(capTranscriptHistory(info ? [introMsg(info), ...resumed] : resumed))
             writeActiveSessionFile(r.resumed ?? r.session_id)
@@ -386,7 +457,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
           })
       })
     },
-    [closeSession, colsRef, gw, panel, resetSession, rpc, runClientSwitch, scrollRef, setHistoryItems, setSessionStartedAt, sys]
+    [closeSession, colsRef, gw, panel, resetSession, rpc, runClientSwitch, scrollRef, setHistoryItems, setSessionStartedAt, setTurnStartedAt, sys]
   )
 
   const guardBusySessionSwitch = useCallback(

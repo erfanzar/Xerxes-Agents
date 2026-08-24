@@ -26,8 +26,8 @@ describe('production TUI build', () => {
 
       expect(exitCode, `${stdout}\n${stderr}`).toBe(0)
       const bundle = await readFile(output, 'utf8')
-      expect(bundle).toContain('Ready for your next command.')
-      expect(bundle).toContain('Choose a model with /provider')
+      expect(bundle).toContain('Many agents, one terminal.')
+      expect(bundle).toContain('START WITH')
       expect(bundle).toContain('createRequire as __cr')
       expect(bundle).toContain('@opentui/core')
       expect(bundle.startsWith('#!')).toBe(false)

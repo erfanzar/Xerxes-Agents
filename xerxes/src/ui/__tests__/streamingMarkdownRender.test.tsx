@@ -8,7 +8,9 @@ import { testRender } from '@opentui/react/test-utils'
 import { act, useState } from 'react'
 import { describe, expect, it } from 'vitest'
 
+import { VOICE } from '../domain/roles.js'
 import { MessageLine, StreamingMarkdown } from '../opentui/messageLine.js'
+import { Text } from '../opentui/primitives.js'
 import { DEFAULT_THEME, themeForMode } from '../theme.js'
 
 const theme = themeForMode(DEFAULT_THEME, 'code')
@@ -39,11 +41,26 @@ const settle = async (setup: Setup, marker: string): Promise<string> => {
 // Mirrors the settled AssistantMessage wrapper, so the comparison is
 // apples-to-apples. The margin is scaffolding, not the thing under test — it
 // must match whatever the settled block does (leadGap-less here) or the
-// frames differ by a blank row for no real reason.
+// frames differ by a blank row for no real reason. That now includes the
+// redesign's turn-opening ✦ column (rail gutter + glyph + blank before the
+// prose), mirroring opentui/messageLine.tsx AssistantMessage exactly.
 function StreamingBlock({ text }: { text: string }) {
+  const assistantVoice = VOICE.assistant(theme)
+
   return (
-    <box flexDirection="column" flexShrink={0} paddingLeft={3}>
-      <StreamingMarkdown text={text} t={theme} />
+    <box flexDirection="column" flexShrink={0}>
+      <box flexDirection="row" flexShrink={0}>
+        <box flexShrink={0} width={1} />
+        <box flexShrink={0} width={1}>
+          {assistantVoice.glyph ? (
+            <Text color={assistantVoice.glyphColor}>{assistantVoice.glyph}</Text>
+          ) : null}
+        </box>
+        <box flexShrink={0} width={1} />
+        <box flexDirection="column" flexGrow={1} minWidth={0}>
+          <StreamingMarkdown text={text} t={theme} />
+        </box>
+      </box>
     </box>
   )
 }

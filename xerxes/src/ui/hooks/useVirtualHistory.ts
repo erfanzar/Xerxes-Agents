@@ -581,7 +581,9 @@ export function useVirtualHistory(
     offsets,
     setScrollHandle,
     start: effStart,
-    topSpacer: offsets[effStart] ?? 0
+    topSpacer: offsets[effStart] ?? 0,
+    /** Measured height of the whole transcript, for fit decisions only. */
+    totalHeight: total
   }
 }
 

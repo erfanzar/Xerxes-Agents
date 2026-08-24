@@ -16,6 +16,7 @@ import {
   defaultSkillDiscoveryDirectories,
   defaultSkillDiscoveryRoots,
   parseSkillMarkdown,
+  skillActivationPrompt,
   skillMatchesPlatform,
   skillPromptSection,
   trustedHashWorkspaceSkills,
@@ -613,4 +614,31 @@ test("skill discovery roots dedup symlinked directories by realpath", async () =
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("skill activation framing is canonical across every activation path", () => {
+  // The daemon and the TUI classify private skill rows by this exact shape:
+  // a first line starting with `[Skill` that also contains `activated`.
+  const skill = parseSkillMarkdown(
+    `---
+name: deepscan
+description: scan things
+---
+Do the scan.`,
+    "/tmp/skills/deepscan/SKILL.md",
+  );
+
+  const plain = skillActivationPrompt(skill);
+  expect(plain.split("\n")[0]).toBe("[Skill deepscan activated]");
+  expect(plain).toContain(skillPromptSection(skill));
+
+  const withSub = skillActivationPrompt(skill, { subcommand: "quick" });
+  expect(withSub.split("\n")[0]).toBe("[Skill deepscan:quick activated]");
+
+  const withRequest = skillActivationPrompt(skill, { request: "check auth" });
+  expect(withRequest).toContain("## User request\ncheck auth");
+
+  // The old divergent header from the workflow tool path would have slipped
+  // past both transcript filters; it must never come back.
+  expect(withRequest.split("\n")[0]).not.toContain("[Skill:");
 });
