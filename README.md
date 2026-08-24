@@ -410,7 +410,7 @@ Container deployment is documented in the
 Xerxes' OpenTUI presentation was informed by
 [superagent-ai/grok-cli](https://github.com/superagent-ai/grok-cli), available under
 the MIT License. Xerxes keeps separate branding and is not affiliated with Grok or
-xAI. See [third-party notices](THIRD_PARTY_NOTICES.md).
+xAI.
 
 ## License
 

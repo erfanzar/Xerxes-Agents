@@ -73,7 +73,6 @@ describe("native release package staging", () => {
       "README.md",
       "skills/fixture-skill/references/guide.md",
       "skills/fixture-skill/SKILL.md",
-      "THIRD_PARTY_NOTICES.md",
       "ui/entry.js",
     ]);
     expect(
@@ -127,7 +126,6 @@ describe("native release package staging", () => {
         "ui",
         "LICENSE",
         "README.md",
-        "THIRD_PARTY_NOTICES.md",
         "release-manifest.json",
       ],
       homepage: "https://github.com/erfanzar/Xerxes-Agents#readme",
@@ -549,11 +547,6 @@ async function releaseFixture(): Promise<string> {
     ),
     writeFile(join(repositoryRoot, "LICENSE"), "Apache-2.0\n", "utf8"),
     writeFile(join(repositoryRoot, "README.md"), "# Xerxes\n", "utf8"),
-    writeFile(
-      join(repositoryRoot, "THIRD_PARTY_NOTICES.md"),
-      "# Third-party notices\n",
-      "utf8",
-    ),
   ]);
   await chmod(join(repositoryRoot, "xerxes/dist/cli.js"), 0o644);
   return repositoryRoot;

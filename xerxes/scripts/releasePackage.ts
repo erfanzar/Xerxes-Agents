@@ -77,11 +77,6 @@ const SOURCE_ARTIFACTS = Object.freeze([
   { destination: "LICENSE", kind: "file", source: "LICENSE" },
   { destination: "README.md", kind: "file", source: "README.md" },
   {
-    destination: "THIRD_PARTY_NOTICES.md",
-    kind: "file",
-    source: "THIRD_PARTY_NOTICES.md",
-  },
-  {
     destination: BUNDLED_SKILLS_DIRECTORY,
     kind: "directory",
     source: "xerxes/dist/skills",
@@ -95,7 +90,6 @@ const SOURCE_ARTIFACTS = Object.freeze([
 const REQUIRED_RELEASE_FILES = Object.freeze([
   "LICENSE",
   "README.md",
-  "THIRD_PARTY_NOTICES.md",
   "bin/xerxes",
   "bin/xerxes-acp",
   "bin/xerxes-bun",
@@ -561,7 +555,6 @@ async function packageMetadata(
       "ui",
       "LICENSE",
       "README.md",
-      "THIRD_PARTY_NOTICES.md",
       "release-manifest.json",
     ]),
     homepage: RELEASE_PACKAGE_HOMEPAGE,
@@ -907,7 +900,6 @@ function assertReleasePackageMetadata(value: unknown, version: string): void {
       "ui",
       "LICENSE",
       "README.md",
-      "THIRD_PARTY_NOTICES.md",
       "release-manifest.json",
     ],
     "Release package metadata files",
