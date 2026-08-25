@@ -5,6 +5,21 @@ import { ValidationError } from '../core/errors.js'
 
 export const MAX_AGENT_TITLE_LENGTH = 48
 
+/** Handles whose work can never produce another observation; they are eviction candidates once inert. */
+const TERMINAL_HANDLE_STATUSES: ReadonlySet<SpawnedAgentStatus> = new Set([
+  'cancelled',
+  'closed',
+  'completed',
+  'error',
+  'interrupted',
+])
+
+/**
+ * Terminal handles retained for inspection before the oldest are evicted,
+ * mirroring SubAgentManager's DEFAULT_MAX_RETAINED_TERMINAL_TASKS bound.
+ */
+export const DEFAULT_MAX_RETAINED_TERMINAL_HANDLES = 128
+
 export type SpawnedAgentStatus = 'cancelled' | 'closed' | 'completed' | 'error' | 'idle' | 'interrupted' | 'running'
 
 export interface SpawnedAgentDescriptor {
@@ -75,6 +90,8 @@ export interface SpawnedAgentManagerOptions {
   readonly defaultPermissionMode?: string
   readonly defaultPromptProfile?: string
   readonly idFactory?: () => string
+  /** Terminal handles retained before the oldest are evicted; defaults to DEFAULT_MAX_RETAINED_TERMINAL_HANDLES. */
+  readonly maxRetainedTerminalHandles?: number
   readonly now?: () => Date
   readonly runner: SubagentRunner
 }
@@ -157,12 +174,18 @@ export class SpawnedAgentManager implements SpawnedAgentManagerPort {
   private readonly defaultPromptProfile: string
   private readonly handles = new Map<string, SpawnedAgentHandle>()
   private readonly idFactory: () => string
+  private readonly maxRetainedTerminalHandles: number
   private readonly now: () => Date
 
   constructor(private readonly options: SpawnedAgentManagerOptions) {
     this.defaultPromptProfile = options.defaultPromptProfile ?? 'minimal'
     this.defaultPermissionMode = options.defaultPermissionMode ?? 'accept-all'
     this.idFactory = options.idFactory ?? (() => `subagent_${crypto.randomUUID().replaceAll('-', '').slice(0, 10)}`)
+    const retained = options.maxRetainedTerminalHandles ?? DEFAULT_MAX_RETAINED_TERMINAL_HANDLES
+    if (!Number.isSafeInteger(retained) || retained < 1) {
+      throw new ValidationError('maxRetainedTerminalHandles', 'must be a positive safe integer', retained)
+    }
+    this.maxRetainedTerminalHandles = retained
     this.now = options.now ?? (() => new Date())
   }
 
@@ -170,6 +193,11 @@ export class SpawnedAgentManager implements SpawnedAgentManagerPort {
     return [...this.handles.values()]
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
       .map(handle => this.snapshot(handle))
+  }
+
+  /** Whether a handle with this exact id is still retained (not yet LRU-evicted). */
+  hasHandle(handleId: string): boolean {
+    return this.handles.has(handleId)
   }
 
   async spawn(options: SpawnAgentOptions = {}): Promise<SpawnedAgentSnapshot> {
@@ -213,6 +241,8 @@ export class SpawnedAgentManager implements SpawnedAgentManagerPort {
       token: 0,
     }
     this.handles.set(id, handle)
+    // The new handle is live, so compaction can only drop settled history.
+    this.compactTerminalHandles()
     const message = options.message ?? options.taskDescription
     if (message?.trim()) await this.sendInput(id, { message })
     return this.snapshot(handle)
@@ -280,7 +310,26 @@ export class SpawnedAgentManager implements SpawnedAgentManagerPort {
     handle.closed = true
     handle.status = 'closed'
     handle.updatedAt = this.now().toISOString()
+    this.compactTerminalHandles()
     return Object.freeze({ ...this.snapshot(handle), previousStatus })
+  }
+
+  /**
+   * Evict the least recently settled inert handles beyond the retention bound.
+   *
+   * A handle is inert once its status is terminal, no run is active, and its
+   * queue is empty — it retains memory (lastInput/lastOutput) but can never
+   * progress. Callers that still own the identity re-spawn a fresh handle
+   * under the same id when a lookup misses, so eviction never loses retry
+   * ability; it only drops retained output history.
+   */
+  compactTerminalHandles(): void {
+    if (this.handles.size <= this.maxRetainedTerminalHandles) return
+    for (const [id, handle] of this.handles) {
+      if (this.handles.size <= this.maxRetainedTerminalHandles) return
+      if (!isInertTerminalHandle(handle)) continue
+      this.handles.delete(id)
+    }
   }
 
   private start(handle: SpawnedAgentHandle, input: string): void {
@@ -323,7 +372,14 @@ export class SpawnedAgentManager implements SpawnedAgentManagerPort {
       handle.active = undefined
       handle.updatedAt = this.now().toISOString()
       const next = handle.closed ? undefined : handle.queue.shift()
-      if (next !== undefined) this.start(handle, next)
+      if (next !== undefined) {
+        this.start(handle, next)
+        return
+      }
+      // Re-insertion refreshes insertion-order recency so compaction evicts
+      // the least recently settled handles first.
+      this.handles.delete(handle.id)
+      this.handles.set(handle.id, handle)
     }
   }
 
@@ -432,6 +488,13 @@ function waitForCompletion(promise: Promise<void>, timeoutMs: number): Promise<v
       resolve()
     })
   })
+}
+
+/** Whether a handle only retains output history and can never progress again. */
+function isInertTerminalHandle(handle: SpawnedAgentHandle): boolean {
+  return TERMINAL_HANDLE_STATUSES.has(handle.status)
+    && handle.active === undefined
+    && handle.queue.length === 0
 }
 
 function errorMessage(error: unknown): string {

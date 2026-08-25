@@ -31,6 +31,12 @@ export interface ContextualMemoryOptions {
   readonly longTermStorage?: MemoryStorage
   readonly promotionThreshold?: number
   readonly shortTermCapacity?: number
+  /**
+   * Durable backend for the short-term tier. Without it the tier is
+   * ephemeral even when the long-term side persists, so low-importance
+   * memories silently vanish across restarts.
+   */
+  readonly shortTermStorage?: MemoryStorage
 }
 
 export interface ContextualSaveOptions extends MemorySaveOptions {
@@ -48,7 +54,10 @@ export class ContextualMemory extends Memory {
 
   constructor(options: ContextualMemoryOptions = {}) {
     super()
-    this.shortTerm = new ShortTermMemory({ capacity: options.shortTermCapacity ?? 20 })
+    this.shortTerm = new ShortTermMemory({
+      capacity: options.shortTermCapacity ?? 20,
+      ...(options.shortTermStorage ? { storage: options.shortTermStorage } : {}),
+    })
     this.longTerm = options.longTerm ?? new LongTermMemory({
       ...(options.longTermOptions ?? {}),
       ...(options.longTermStorage ? { storage: options.longTermStorage } : {}),

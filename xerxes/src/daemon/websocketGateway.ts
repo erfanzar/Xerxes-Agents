@@ -4,7 +4,7 @@
 import { timingSafeEqual } from 'node:crypto'
 import type { ServerWebSocket } from 'bun'
 
-import { daemonEvent, jsonRpcFailure, type JsonRpcPayload } from '../protocol/jsonRpc.js'
+import { daemonEvent, jsonRpcFailure, type JsonRpcId, type JsonRpcPayload } from '../protocol/jsonRpc.js'
 import type { DaemonTransportConnection } from './transport.js'
 
 const DEFAULT_MAX_MESSAGE_BYTES = 16 * 1024 * 1024
@@ -247,10 +247,43 @@ export class DaemonWebSocketGateway {
   send(connection: GatewayConnection, frame: object): void {
     const serialized = this.serialize(frame)
     if (!serialized) {
-      connection.close(1009, 'outbound message exceeds limit')
+      this.sendOversizeFailure(connection, frame)
       return
     }
     this.sendSerialized(connection, serialized)
+  }
+
+  /**
+   * Drop an over-limit frame, telling the requester why when one exists.
+   *
+   * The Unix NDJSON transport emits a correlated `jsonRpcFailure(-32000)`
+   * before its FIN so a client can tell a dropped response apart from a dead
+   * daemon; the WebSocket surface must stay protocol-identical, so frames
+   * carrying a routable request id get the same failure frame before the
+   * 1009 close. Daemon events carry no request id — there is no caller left
+   * waiting on them and nothing to correlate an error against — so like the
+   * fan-out in `broadcast()` they are skipped silently and clients re-sync
+   * event state through initialize/replay instead of acting on per-event
+   * errors.
+   */
+  private sendOversizeFailure(connection: GatewayConnection, frame: object): void {
+    const id = (frame as { id?: unknown }).id
+    const routableId = (typeof id === 'string' && id.length > 0) || typeof id === 'number'
+    if (!routableId) {
+      return
+    }
+    console.error('Xerxes daemon dropping remote client: response exceeds the websocket message limit')
+    try {
+      const failure = jsonRpcFailure(id as JsonRpcId, -32000, 'response exceeds socket output limit')
+      const serializedFailure = JSON.stringify(failure)
+      if (serializedFailure) {
+        this.sendSerialized(connection, serializedFailure)
+      }
+    } catch {
+      // Serialization of the fixed-shape failure frame cannot realistically
+      // fail; if it ever does, fall through to the close below.
+    }
+    connection.close(1009, 'outbound message exceeds limit')
   }
 
   private sendSerialized(connection: GatewayConnection, serialized: string): void {

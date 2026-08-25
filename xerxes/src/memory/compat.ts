@@ -367,6 +367,10 @@ export class MemoryStore {
       longTerm,
       promotionThreshold: 3,
       shortTermCapacity: UNBOUNDED_TIER_CAPACITY,
+      // The short-term tier shares the durable backend so short_term/working/
+      // episodic entries survive restarts instead of silently evaporating
+      // while only long-term rows persisted.
+      shortTermStorage: setup.storage,
     })
     this.memories = createBuckets()
     this.hydratePersistedEntries()
@@ -532,15 +536,41 @@ export class MemoryStore {
   }
 
   private hydratePersistedEntries(): void {
-    // mostImportant is read-only: boot hydration must not touch access state or
-    // trigger one re-persist/re-embed write per restored entry. Reversed to
-    // ascending importance so enforceLimit evicts the least valuable entries.
-    for (const item of this.longTerm.mostImportant(UNBOUNDED_TIER_CAPACITY).reverse()) {
+    // Boot hydration bounds MEMORY, never the durable backend: over-cap rows
+    // stay persisted so a later instance with roomier caps — or an explicit
+    // runtime eviction — can still reach them, and constructing a store can
+    // never shrink history as a side effect.
+    const restored = new Map<MemoryType, MemoryItem[]>()
+    const admit = (item: MemoryItem): void => {
       const memoryType = persistedMemoryType(item)
-      if (!memoryType || !isLongTermType(memoryType)) continue
-      this.memories[memoryType].push(MemoryEntry.fromMemoryItem(item))
+      if (!memoryType) return
+      const bucket = restored.get(memoryType) ?? []
+      bucket.push(item)
+      restored.set(memoryType, bucket)
     }
-    this.enforceLimit(MemoryType.LONG_TERM)
+    // mostImportant and snapshot are read-only: boot hydration must not touch
+    // access state or trigger one re-persist/re-embed write per restored entry.
+    for (const item of this.longTerm.mostImportant(UNBOUNDED_TIER_CAPACITY)) admit(item)
+    for (const item of this.shortTerm.snapshot()) admit(item)
+
+    for (const [memoryType, items] of restored) {
+      // Deterministic total order — ascending timestamp with memoryId breaking
+      // ties — so identical timestamps cannot make two boots disagree about
+      // which entries a memory bound retains.
+      items.sort((left, right) =>
+        left.timestamp.valueOf() - right.timestamp.valueOf() || left.memoryId.localeCompare(right.memoryId))
+      for (const item of this.boundedForBucket(memoryType, items)) {
+        this.memories[memoryType].push(MemoryEntry.fromMemoryItem(item))
+      }
+    }
+  }
+
+  /** Newest entries that fit the bucket's in-memory bound, or all of them when within it. */
+  private boundedForBucket(memoryType: MemoryType, items: readonly MemoryItem[]): readonly MemoryItem[] {
+    if (memoryType === MemoryType.SHORT_TERM && items.length > this.maxShortTerm) return items.slice(-this.maxShortTerm)
+    if (memoryType === MemoryType.WORKING && items.length > this.maxWorking) return items.slice(-this.maxWorking)
+    if (memoryType === MemoryType.LONG_TERM && items.length > this.maxLongTerm) return items.slice(-this.maxLongTerm)
+    return items
   }
 
   private persistEntry(entry: MemoryEntry, memoryType: MemoryType): MemoryEntry {

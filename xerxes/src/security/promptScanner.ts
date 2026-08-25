@@ -33,13 +33,18 @@ export const CONTEXT_THREAT_PATTERNS: readonly ThreatPattern[] = [
     id: 'bypass_restrictions',
     pattern: /act\s+as\s+(if|though)\s+you\s+(have\s+no|don't\s+have)\s+(any\s+)?(restrictions|limits|rules)/gi,
   },
-  { id: 'html_comment_injection', pattern: /<!--[^>]*(?:ignore|override|system|secret|hidden)[^>]*-->/gi },
-  { id: 'hidden_div', pattern: /<\s*div\s+style\s*=\s*["'][\s\S]*?display\s*:\s*none/gi },
-  // Wildcards are bounded: stacked unbounded `.*\s+` quantifiers backtrack
-  // quadratically (ReDoS) on long attacker-controlled single lines.
+  // Bounded like translate_execute below: unbounded stacked `[^>]*` quantifiers
+  // backtrack quadratically (ReDoS) on input such as a long run of `<!--`.
+  { id: 'html_comment_injection', pattern: /<!--[^>]{0,400}?(?:ignore|override|system|secret|hidden)[^>]{0,200}?-->/gi },
+  { id: 'hidden_div', pattern: /<\s*div\s+style\s*=\s*["'][\s\S]{0,400}?display\s*:\s*none/gi },
+  // Every anchor-to-tail wildcard in this list is bounded: unbounded quantifiers
+  // backtrack quadratically (ReDoS) on long attacker-controlled lines, freezing
+  // the event loop for seconds per scan. Realistic injections sit far inside the
+  // caps; comments too wide to inspect are flagged wholesale by the
+  // oversized-comment sweep in scanContextContent instead of being trusted.
   { id: 'translate_execute', pattern: /translate\s+[^\n]{0,200}?\s+into\s+[^\n]{0,200}?\s+and\s+(execute|run|eval)/gi },
-  { id: 'exfil_curl', pattern: /curl\s+[^\n]*\$\{?\w*(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|API)/gi },
-  { id: 'read_secrets', pattern: /cat\s+[^\n]*(\.env|credentials|\.netrc|\.pgpass)/gi },
+  { id: 'exfil_curl', pattern: /curl\s+[^\n]{0,400}?\$\{?\w*(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|API)/gi },
+  { id: 'read_secrets', pattern: /cat\s+[^\n]{0,400}?(\.env|credentials|\.netrc|\.pgpass)/gi },
 ]
 
 /**
@@ -114,8 +119,52 @@ export function redactCredentials(content: string): string {
 
 /** Invisible directional and joiner codepoints that can conceal context instructions. */
 export const CONTEXT_INVISIBLE_CHARS: ReadonlySet<string> = new Set([
-  '\u200b', '\u200c', '\u200d', '\u2060', '\ufeff', '\u202a', '\u202b', '\u202c', '\u202d', '\u202e',
+  // Zero-width joiners/separators and word joiner/BOM.
+  '\u200b', '\u200c', '\u200d', '\u2060', '\ufeff',
+  // Legacy bidi embedding controls...
+  '\u202a', '\u202b', '\u202c', '\u202d', '\u202e',
+  // ...and the modern bidi isolates and directional marks (LRI/RLI/FSI/PDI, LRM/RLM).
+  '\u200e', '\u200f', '\u2066', '\u2067', '\u2068', '\u2069',
 ])
+
+/**
+ * Detector id for terminated HTML comments wider than the bounded
+ * html_comment_injection pattern can inspect.
+ */
+const OVERSIZED_HTML_COMMENT_ID = 'oversized_html_comment'
+
+/**
+ * Comments wider than this exceed every window the bounded injection pattern can
+ * reach (400 + keyword + trailing characters), so padding instructions deep inside
+ * a huge comment would otherwise slip past it. Any terminated comment wider than
+ * this many characters is flagged wholesale: length must not become a place to hide.
+ */
+const OVERSIZED_HTML_COMMENT_CHARS = 600
+
+interface RawSpan {
+  readonly end: number
+  readonly start: number
+}
+
+/**
+ * Linear sweep for terminated `<!-- ... -->` comments wider than
+ * {@link OVERSIZED_HTML_COMMENT_CHARS}. Pure `indexOf` scanning, so a flood of
+ * unterminated openers costs one pass and never backtracks.
+ */
+function oversizedHtmlCommentSpans(content: string): RawSpan[] {
+  const spans: RawSpan[] = []
+  let cursor = 0
+  while (cursor < content.length) {
+    const open = content.indexOf('<!--', cursor)
+    if (open < 0) return spans
+    const close = content.indexOf('-->', open + 4)
+    if (close < 0) return spans
+    const end = close + 3
+    if (end - open > OVERSIZED_HTML_COMMENT_CHARS) spans.push({ start: open, end })
+    cursor = end
+  }
+  return spans
+}
 
 /**
  * Neutralise detected prompt-injection spans while keeping surrounding context intact.
@@ -138,6 +187,13 @@ export function scanContextContent(content: string, filename = 'unknown'): strin
       spans.push({ start: match.index, end: match.index + match[0].length, id: threat.id })
       match = threat.pattern.exec(content)
     }
+  }
+
+  // Second pass closing the recall gap the bounded comment pattern leaves behind:
+  // an oversized comment is flagged in full even when its keywords sit past the
+  // pattern's reachable windows.
+  for (const span of oversizedHtmlCommentSpans(content)) {
+    spans.push({ start: span.start, end: span.end, id: OVERSIZED_HTML_COMMENT_ID })
   }
 
   if (spans.length === 0) {

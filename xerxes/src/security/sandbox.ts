@@ -101,13 +101,16 @@ export class SandboxRouter {
   }
 
   decide(toolName: string): ExecutionDecision {
-    if (this.config.elevatedTools.has(toolName)) {
+    // Tool names are compared case-insensitively, matching security/policy.ts:
+    // a config casing typo must not silently route a sandboxed tool to the host.
+    const normalizedName = normalizeToolName(toolName)
+    if (this.config.elevatedTools.has(normalizedName)) {
       return { context: ExecutionContext.HOST, toolName, reason: 'Tool is marked as elevated' }
     }
     if (this.config.mode === SandboxMode.OFF) {
       return { context: ExecutionContext.HOST, toolName, reason: 'Sandbox mode is off' }
     }
-    if (this.config.sandboxedTools.has(toolName)) {
+    if (this.config.sandboxedTools.has(normalizedName)) {
       if (this.config.mode === SandboxMode.WARN) {
         const decision = {
           context: ExecutionContext.HOST,
@@ -200,8 +203,8 @@ function normalizeConfig(config: SandboxConfig | undefined): RequiredSandboxConf
   const backend = source.backendConfig ?? {}
   return Object.freeze({
     mode,
-    sandboxedTools: new Set(source.sandboxedTools ?? []),
-    elevatedTools: new Set(source.elevatedTools ?? []),
+    sandboxedTools: normalizeToolSet(source.sandboxedTools),
+    elevatedTools: normalizeToolSet(source.elevatedTools),
     sandboxTimeout: timeout,
     sandboxMemoryLimitMb: memory,
     sandboxNetworkAccess: source.sandboxNetworkAccess ?? false,
@@ -230,6 +233,8 @@ function backendFromConfig(config: RequiredSandboxConfig): SandboxBackend | unde
   const maxOutputChars = optionalPositiveInteger(config.backendConfig.extraArgs, 'maxOutputChars')
   return new SubprocessSandboxBackend({
     allowedCommands,
+    // Already lowercased by normalizeToolSet; the backend compares raw request
+    // names, so a mixed-case config mismatch fails closed at its allow-list.
     allowedTools: config.sandboxedTools,
     environment: config.backendConfig.envVars,
     maxTimeoutMs: Math.ceil(config.sandboxTimeout * 1_000),
@@ -238,6 +243,15 @@ function backendFromConfig(config: RequiredSandboxConfig): SandboxBackend | unde
     ...(config.workingDirectory === undefined ? {} : { workingDirectory: config.workingDirectory }),
     ...(maxOutputChars === undefined ? {} : { maxOutputChars }),
   })
+}
+
+/** Same casing rule as security/policy.ts normalizeName: tool names compare lowercased. */
+function normalizeToolName(toolName: string): string {
+  return toolName.toLowerCase()
+}
+
+function normalizeToolSet(names: Iterable<string> | undefined): ReadonlySet<string> {
+  return new Set(names === undefined ? [] : Array.from(names, normalizeToolName))
 }
 
 function requiredStringArray(values: Readonly<Record<string, unknown>>, name: string): string[] {

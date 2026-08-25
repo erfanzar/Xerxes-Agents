@@ -5,7 +5,7 @@ import { stat } from 'node:fs/promises'
 
 import { ValidationError } from '../core/errors.js'
 import { ToolRegistry } from '../executors/toolRegistry.js'
-import { ProcessRegistry } from '../runtime/processRegistry.js'
+import { ProcessRegistry, terminateProcessSubtree, type ProcessSignal } from '../runtime/processRegistry.js'
 import type { TerminalRegistry } from '../runtime/terminalRegistry.js'
 import type { JsonObject, ToolDefinition } from '../types/toolCalls.js'
 import { optionalBoolean, optionalInteger, optionalString, optionalStringArray, requireRange, requiredString } from './inputs.js'
@@ -19,6 +19,8 @@ import { BoundedOutputBuffer, capOutput, drainStream, type StreamDrain } from '.
 
 const DEFAULT_TIMEOUT_MS = 30_000
 const DEFAULT_MAX_OUTPUT_CHARS = 20_000
+/** Process groups (and therefore whole-tree kills) exist on POSIX only. */
+const PROCESS_GROUPS_AVAILABLE = process.platform !== 'win32'
 /**
  * Grace period for output already written but still in the pipe when the child
  * exits. Short: it is paid on every call, and it is not a wait for EOF.
@@ -297,24 +299,45 @@ export async function executeCommand(
   }
 
   let timedOut = false
-  const controller = new AbortController()
-  const cancel = () => controller.abort(signal?.reason)
+  // The timeout and the caller's cancellation both terminate the whole process
+  // tree, not just the direct child: the tool description promises "Nothing
+  // survives the call", and a shell that backgrounded a grandchild would
+  // otherwise outlive its SIGTERM. Delivery is deferred until the child exists,
+  // and memoized, so a timer firing mid-spawn or duplicate requests converge on
+  // one escalation sequence.
+  let child: Bun.Subprocess | undefined
+  let cancelRequested = false
+  let termination: Promise<void> | undefined
+  const requestTermination = (initialSignal: ProcessSignal): void => {
+    const target = child
+    if (target === undefined || termination !== undefined) {
+      return
+    }
+    termination = terminateProcessSubtree(target, {
+      initialSignal,
+      processGroupLeader: PROCESS_GROUPS_AVAILABLE,
+    })
+  }
+  const cancel = (): void => {
+    cancelRequested = true
+    requestTermination('SIGTERM')
+  }
   signal?.addEventListener('abort', cancel, { once: true })
   const timer = setTimeout(() => {
     timedOut = true
-    controller.abort(new Error(`Command timed out after ${timeout}ms`))
+    requestTermination('SIGTERM')
   }, timeout)
 
   const stdoutBuffer = new BoundedOutputBuffer(maxOutputChars * 8)
   const stderrBuffer = new BoundedOutputBuffer(maxOutputChars * 8)
   let stdoutDrain: StreamDrain | undefined
   let stderrDrain: StreamDrain | undefined
-  let child: Bun.Subprocess | undefined
   let observedExit: number | null = null
   // Mirrored live rather than recorded at the end: a foreground command may run
   // for two minutes, and the whole point of the terminal panel is being able to
   // watch it during those two minutes instead of afterwards. The kill control
-  // reads `child` at call time, so it can be published before the spawn.
+  // routes through the same tree termination as timeouts, so a panel kill takes
+  // grandchildren down too.
   const mirror = ownerSessionId === undefined ? undefined : terminals?.open({
     id: `fg_${crypto.randomUUID().replaceAll('-', '').slice(0, 10)}`,
     kind: 'foreground',
@@ -323,20 +346,28 @@ export async function executeCommand(
     cwd,
     control: {
       kill: async killSignal => {
-        child?.kill(killSignal)
+        requestTermination(killSignal)
       },
     },
   })
 
   try {
+    // Detached on POSIX so the child leads its own process group; that group is
+    // what makes the tree-wide kills above possible. The cost is that the child
+    // no longer dies with us — which the normal path already accounts for by
+    // reaping via `process.exited` and cancelling the drains unconditionally.
     const process = Bun.spawn([command, ...args], {
       cwd,
       stdin: 'ignore',
       stdout: 'pipe',
       stderr: 'pipe',
-      signal: controller.signal,
+      ...(PROCESS_GROUPS_AVAILABLE ? { detached: true } : {}),
     })
     child = process
+    if (timedOut || cancelRequested || signal?.aborted) {
+      cancelRequested = true
+      requestTermination('SIGTERM')
+    }
     stdoutDrain = drainStream(process.stdout, stdoutBuffer, text => mirror?.append(text))
     stderrDrain = drainStream(process.stderr, stderrBuffer, text => mirror?.append(text))
 
@@ -385,10 +416,19 @@ export async function executeCommand(
 
 /** Wait briefly for in-flight output, without ever waiting on EOF. */
 async function settleDrains(drains: readonly StreamDrain[], settleMs: number): Promise<void> {
-  await Promise.race([
-    Promise.all(drains.map(drain => drain.done)),
-    new Promise<void>(resolve => setTimeout(resolve, settleMs)),
-  ])
+  // The losing timer must be cleared, not left to hold the event loop open for
+  // its full duration after every foreground command that finishes early.
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    await Promise.race([
+      Promise.all(drains.map(drain => drain.done)),
+      new Promise<void>(resolve => {
+        timer = setTimeout(resolve, settleMs)
+      }),
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
 }
 
 async function isDirectory(path: string): Promise<boolean> {

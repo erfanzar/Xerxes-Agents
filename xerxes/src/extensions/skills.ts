@@ -689,6 +689,34 @@ export function trustedHashWorkspaceSkills(paths: SkillGuardPaths = {}): Workspa
   };
 }
 
+/**
+ * Names of every parseable skill under one discovery root, parsed with the
+ * same rules as discovery.
+ *
+ * Trust boundaries use this to reserve native identities: a hub bundle whose
+ * declared name appears here would shadow an already-trusted skill because
+ * discovery is first-root-wins. Documents that fail to parse contribute no
+ * name — they are rejected everywhere else as well.
+ */
+export async function skillNamesUnderRoot(root: string): Promise<Set<string>> {
+  const names = new Set<string>();
+  for await (const skillPath of skillFiles(root)) {
+    try {
+      const metadata = await stat(skillPath);
+      if (!metadata.isFile() || metadata.size > MAX_SKILL_FILE_BYTES) {
+        continue;
+      }
+      names.add(
+        parseSkillMarkdown(await readFile(skillPath, "utf8"), skillPath)
+          .metadata.name,
+      );
+    } catch {
+      // An unreadable or invalid document cannot protect a name it never had.
+    }
+  }
+  return names;
+}
+
 /** Canonical discovery-root key: realpath when the directory exists so symlinked roots dedup. */
 function canonicalSkillRoot(root: string): string {
   if (!existsSync(root)) {
@@ -792,11 +820,37 @@ export const SKILL_FRONTMATTER_KEYS: ReadonlySet<string> = new Set([
   "version",
 ]);
 
+/**
+ * Raised when a SKILL.md frontmatter block repeats a known metadata key.
+ *
+ * The tolerant parser used to let the last occurrence silently win, which let a
+ * hub-installed bundle redefine its own identity (for example a second
+ * `name:` hijacking a native skill). Discovery now fails that document closed;
+ * {@link import("./skillLint.js").lintSkillMarkdown} diagnoses the same
+ * condition at authoring time as `frontmatter-duplicate-key`.
+ */
+export class DuplicateSkillFrontmatterKeyError extends Error {
+  readonly key: string;
+  /** 1-based line inside the frontmatter block where the repetition was seen. */
+  readonly line: number;
+
+  constructor(key: string, line: number) {
+    super(
+      `frontmatter line ${line} repeats '${key}'; the last occurrence would silently win, so keep one definition per key`,
+    );
+    this.name = "DuplicateSkillFrontmatterKeyError";
+    this.key = key;
+    this.line = line;
+  }
+}
+
 function parseFrontmatter(content: string): Record<string, FrontmatterValue> {
   // Null-prototype record: untrusted YAML keys must not reach Object.prototype.
   const fields: Record<string, FrontmatterValue> = Object.create(null);
+  const seenKeys = new Set<string>();
   let listKey: string | undefined;
-  for (const rawLine of content.split(/\r?\n/)) {
+  for (const [index, rawLine] of content.split(/\r?\n/).entries()) {
+    const lineNumber = index + 1;
     const line = rawLine.trim();
     if (!line || line.startsWith("#")) {
       continue;
@@ -818,6 +872,12 @@ function parseFrontmatter(content: string): Record<string, FrontmatterValue> {
       listKey = undefined;
       continue;
     }
+    // Only keys some field reads can change meaning through repetition; this
+    // mirrors exactly what the strict linter reports as a duplicate.
+    if (SKILL_FRONTMATTER_KEYS.has(key) && seenKeys.has(key)) {
+      throw new DuplicateSkillFrontmatterKeyError(key, lineNumber);
+    }
+    seenKeys.add(key);
     const value = line.slice(separator + 1).trim();
     listKey = value ? undefined : key;
     fields[key] =

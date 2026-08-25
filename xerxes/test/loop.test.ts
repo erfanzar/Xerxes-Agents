@@ -244,9 +244,10 @@ test('agent loop pairs model tool calls with results and preserves thinking sepa
 
   // usage_update lands once per provider round, so a two-round turn carries two
   // of them: the footer and the agents panel update while work is still running
-  // rather than jumping once at turn_done.
+  // rather than jumping once at turn_done. Round text streams inline as the
+  // provider emits it, so each round's deltas precede that round's usage_update.
   expect(events.map(event => event.type)).toEqual([
-    'usage_update', 'text', 'thinking', 'text', 'tool_start', 'tool_end', 'usage_update', 'text', 'turn_done',
+    'text', 'thinking', 'text', 'usage_update', 'tool_start', 'tool_end', 'text', 'usage_update', 'turn_done',
   ])
   expect(state.thinkingContent).toEqual(['private rationale', ''])
   expect(state.messages.map(message => message.role)).toEqual(['user', 'assistant', 'tool', 'assistant'])
@@ -619,7 +620,13 @@ test('a first output-token truncation regenerates the round with a wider window 
   expect(client.requests).toHaveLength(2)
   expect(client.requests[0]?.maxTokens).toBeUndefined()
   expect(client.requests[1]?.maxTokens).toBe(OUTPUT_LIMIT_RETRY_MAX_TOKENS)
+  // Text streams inline, so the truncated prefix was already delivered before
+  // `finishReason: 'length'` marked the round as regenerable. Emitted text has
+  // no supersession mechanism (see loop.ts regeneration note), so consumers see
+  // the severed prefix followed by the regenerated whole answer; history keeps
+  // only the whole answer.
   expect(events.filter(event => event.type === 'text').map(event => event.text)).toEqual([
+    'Half a thought that stops mid-',
     'The whole answer, start to finish.',
   ])
   // The truncated half-thought is popped, so history holds one whole answer and

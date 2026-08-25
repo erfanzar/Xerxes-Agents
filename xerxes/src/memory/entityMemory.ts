@@ -335,6 +335,20 @@ export class EntityMemory extends Memory {
     const overflow = this.maxItems === undefined ? 0 : Math.max(0, records.length - this.maxItems)
     for (const item of records.slice(overflow)) this.append(item)
 
+    // Overflow rows beyond the cap are pruned from the backend, not merely
+    // dropped in memory: otherwise every restart pays full reload cost for
+    // records that can never be admitted again, and the row set grows
+    // without bound (mirroring the eviction deletes save() performs).
+    for (const item of records.slice(0, overflow)) {
+      try {
+        if (!this.storage?.delete(entityStorageKey(item.memoryId))) {
+          console.warn(`Could not prune evicted entity memory ${item.memoryId}`)
+        }
+      } catch (error) {
+        console.warn(`Could not prune evicted entity memory ${item.memoryId}:`, error)
+      }
+    }
+
     // The item rows are authoritative. Rebuilding prevents stale or partially
     // persisted snapshots from resurrecting evicted or deleted graph nodes.
     this.rebuildGraph()

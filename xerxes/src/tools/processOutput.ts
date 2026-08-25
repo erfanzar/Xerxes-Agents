@@ -17,6 +17,8 @@
 // call is free to return whatever arrived without waiting for anyone to close
 // anything.
 
+import { deliverProcessSignal, sweepProcessGroupAfterExit } from '../runtime/processRegistry.js'
+
 /** Chars kept per stream before the oldest are dropped. */
 const DEFAULT_CAPACITY = 1_000_000
 
@@ -177,4 +179,132 @@ export function capOutput(output: string, maxChars: number): { readonly text: st
     return { text: output, truncated: false }
   }
   return { text: `${output.slice(0, maxChars)}\n…[truncated]…`, truncated: true }
+}
+
+/**
+ * Grace between SIGTERM and SIGKILL when a bounded child ignores termination.
+ *
+ * Long enough for a well-behaved command to flush; short enough that a
+ * timeout stays an enforceable promise.
+ */
+export const KILL_ESCALATION_GRACE_MS = 2_000
+
+/**
+ * How long output collection may keep waiting for pipe EOF after the child has
+ * already exited.
+ *
+ * EOF requires every holder of the write end to close it, and a git hook or a
+ * backgrounded helper can hold a copy long after the process we spawned is
+ * dead. Waiting unbounded turned "kill on timeout" into "kill and hang": the
+ * exit status arrived, but `.text()` on the pipe never did. Whatever landed in
+ * the buffer by the end of this window is what the caller gets.
+ */
+const OUTPUT_ABANDON_MS = 250
+
+/** The slice of Bun's piped subprocess this collector needs. */
+export interface CollectableSubprocess {
+  readonly exitCode: number | null
+  readonly exited: Promise<number>
+  readonly pid: number
+  readonly stderr: ReadableStream<Uint8Array> | null
+  readonly stdout: ReadableStream<Uint8Array> | null
+  kill(signal?: number | NodeJS.Signals): unknown
+}
+
+export interface CollectedSubprocessOutput {
+  readonly exitCode: number | null
+  readonly stderr: string
+  readonly stdout: string
+  readonly timedOut: boolean
+}
+
+/**
+ * Wait one child out while draining its pipes, so neither can wedge the call.
+ *
+ * The exit status is a fact about the child alone, so `exited` bounds the wait;
+ * the pipes are drained through readers we own into bounded buffers and are
+ * abandoned after {@link OUTPUT_ABANDON_MS} once the child is dead — a surviving
+ * holder of the write end cannot hold the result hostage. When `timeoutMs` is
+ * given, the child is SIGTERMed at the deadline and SIGKILLed after
+ * {@link KILL_ESCALATION_GRACE_MS} if it ignored that. With
+ * `processGroupLeader` (a child spawned detached on POSIX) those signals go to
+ * the whole group, and one final group sweep runs after the leader's death so a
+ * helper forked during the kill window does not outlive the call.
+ */
+export async function collectChildOutput(
+  child: CollectableSubprocess,
+  options: {
+    readonly capacityChars?: number
+    readonly processGroupLeader?: boolean
+    readonly settleMs?: number
+    readonly timeoutMs?: number
+  } = {},
+): Promise<CollectedSubprocessOutput> {
+  const capacity = options.capacityChars ?? DEFAULT_CAPACITY
+  const stdoutBuffer = new BoundedOutputBuffer(capacity)
+  const stderrBuffer = new BoundedOutputBuffer(capacity)
+  const stdoutDrain = drainStream(child.stdout, stdoutBuffer)
+  const stderrDrain = drainStream(child.stderr, stderrBuffer)
+  const groupLeader = options.processGroupLeader ?? false
+
+  let timedOut = false
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let escalateTimer: ReturnType<typeof setTimeout> | undefined
+  if (options.timeoutMs !== undefined) {
+    timer = setTimeout(() => {
+      timedOut = true
+      try {
+        deliverProcessSignal(child, 'SIGTERM', groupLeader)
+      } catch {
+        // Already gone between our check and the signal; the exit below decides.
+      }
+      escalateTimer = setTimeout(() => {
+        try {
+          if (child.exitCode === null) deliverProcessSignal(child, 'SIGKILL', groupLeader)
+        } catch {
+          // Same: nothing left to escalate against.
+        }
+      }, KILL_ESCALATION_GRACE_MS)
+    }, options.timeoutMs)
+  }
+
+  try {
+    // Wait for the process, never for the pipes to reach EOF: see the module
+    // comment. The kill above guarantees this resolves by roughly
+    // timeoutMs + grace even for a child that ignores SIGTERM.
+    const exitCode = await child.exited
+    await raceBounded(
+      Promise.all([stdoutDrain.done, stderrDrain.done]).then(() => undefined),
+      options.settleMs ?? OUTPUT_ABANDON_MS,
+    )
+    return {
+      exitCode,
+      stdout: stdoutBuffer.peek(Number.MAX_SAFE_INTEGER).text,
+      stderr: stderrBuffer.peek(Number.MAX_SAFE_INTEGER).text,
+      timedOut,
+    }
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+    if (escalateTimer !== undefined) clearTimeout(escalateTimer)
+    // Release our ends unconditionally: a holder of the write end is no longer
+    // our problem once the caller has the collected output in hand.
+    stdoutDrain.cancel()
+    stderrDrain.cancel()
+    await sweepProcessGroupAfterExit(child)
+  }
+}
+
+/** Promise.race against a timeout whose timer clears itself when it loses. */
+async function raceBounded(promise: Promise<void>, timeoutMs: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    await Promise.race([
+      promise,
+      new Promise<void>(resolve => {
+        timer = setTimeout(resolve, timeoutMs)
+      }),
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
 }

@@ -1296,13 +1296,15 @@ export function Composer({ composer }: Pick<AppLayoutProps, 'composer'>) {
             onCursorChange={syncInputSelection}
             onSubmit={onSubmit}
             placeholder={
-              // One leading space keeps the block cursor visually clear of
-              // the first placeholder character instead of painting over it.
+              // The canvas prints "reply, or ⎋ to interrupt the current turn"
+              // on a WORKING session. Showing it whenever the transcript is
+              // non-empty made an idle composer claim a turn was running and
+              // offer to interrupt something that had already finished.
               ui.busy
                 ? busyLabels.placeholder
                 : composer.empty
                   ? 'describe a task, paste a stack trace, or press / for commands'
-                  : 'reply, or ⎋ to interrupt the current turn'
+                  : 'reply, or press / for commands'
             }
             placeholderColor={t.color.muted}
             ref={ref}
@@ -2198,17 +2200,16 @@ export function AppLayout({
                       tool rows and the user band running to the full terminal
                       width — a ragged right edge that reads as less designed,
                       not more. */}
+                  {/* Top-anchored, with the composer pinned below — the
+                      canvas layout. Bottom-anchoring this was a worse trade:
+                      it moved the dead space from under the content to ABOVE
+                      it, so a tall terminal opened on a header, forty empty
+                      rows, and the conversation huddled at the bottom. The
+                      scrollbox's sticky-bottom already keeps the newest row
+                      in view once the transcript overflows. */}
                   <Box
                     flexDirection="column"
-                    flexGrow={1}
-                    // Bottom-anchored: a short conversation sits just above
-                    // the composer instead of stranding four rows at the top
-                    // of a 60-row terminal with a dead gap underneath. Once
-                    // the transcript overflows, the scrollbox's sticky-bottom
-                    // takes over and this has no effect.
-                    justifyContent="flex-end"
                     maxWidth={contentColumnWidth(composer.cols)}
-                    minHeight={0}
                   >
                     {transcript.virtualHistory.topSpacer > 0 ? (
                       <Box flexShrink={0} height={transcript.virtualHistory.topSpacer} />

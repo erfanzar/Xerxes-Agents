@@ -62,3 +62,73 @@ test('per-user tiers over one shared backend stay isolated across instances', ()
   expect(third.searchUserMemory('alice', 'prefers')).toEqual([])
   expect(third.searchUserMemory('bob', 'prefers').map(item => item.content)).toEqual(['Bob prefers Node'])
 })
+
+test('per-user preference records survive concurrent writers across instances', () => {
+  const storage = new SimpleStorage()
+  const first = new UserMemory(storage)
+  const second = new UserMemory(storage)
+
+  // The shared wholesale blob made the second save rewrite the whole map from
+  // its own stale view, erasing the first user's update.
+  first.updateUserPreferences('alice', { language: 'fr' })
+  second.updateUserPreferences('bob', { language: 'de' })
+
+  const verifier = new UserMemory(storage)
+  expect(verifier.getUserPreferences('alice').language).toBe('fr')
+  expect(verifier.getUserPreferences('bob').language).toBe('de')
+})
+
+test('legacy preference blobs migrate to per-user keys and stop being authoritative', () => {
+  const storage = new SimpleStorage()
+  storage.save('_user_preferences', { carol: { language: 'es', verbosity: 'terse' } })
+
+  const migrated = new UserMemory(storage)
+  expect(migrated.getUserPreferences('carol')).toMatchObject({ language: 'es', verbosity: 'terse' })
+  // Entries distribute once into namespaced per-user keys...
+  expect(storage.listKeys('user_preferences').filter(key => /^user_[0-9a-f]{16}_user_preferences$/.test(key)))
+    .toHaveLength(1)
+
+  // ...and are then ignored: a stale legacy blob cannot overwrite newer records.
+  storage.save('_user_preferences', { carol: { language: 'ru' } })
+  const reloaded = new UserMemory(storage)
+  expect(reloaded.getUserPreferences('carol').language).toBe('es')
+
+  // Users known only from a legacy blob still resolve.
+  storage.save('_user_preferences', { carol: { language: 'ru' }, dave: { language: 'it' } })
+  expect(new UserMemory(storage).getUserPreferences('dave').language).toBe('it')
+})
+
+test('cleared users stay cleared across restart even with a retained legacy blob', () => {
+  const storage = new SimpleStorage()
+  storage.save('_user_preferences', { carol: { language: 'es', verbosity: 'terse' } })
+
+  const first = new UserMemory(storage)
+  expect(first.getUserPreferences('carol').language).toBe('es')
+  first.clearUserMemory('carol')
+
+  // The blob must not resurrect carol on the next construction.
+  const second = new UserMemory(storage)
+  expect(second.getUserPreferences('carol').language).toBe('en')
+  expect(second.getUserPreferences('carol')).toMatchObject({ language: 'en', response_style: 'balanced' })
+
+  // Migration completed: the blob no longer advertises any distributed user.
+  const leftoverBlob = storage.load('_user_preferences') as Record<string, unknown>
+  expect(Object.keys(leftoverBlob)).toEqual([])
+})
+
+test('clearing a user scrubs their not-yet-migrated legacy entry too', () => {
+  const storage = new SimpleStorage()
+  const memory = new UserMemory(storage)
+  // Simulate an old process writing the wholesale blob after this facade
+  // already knows the user through namespaced records.
+  memory.updateUserPreferences('erin', { language: 'ja' })
+  storage.save('_user_preferences', { erin: { language: 'de' }, frank: { language: 'pt' } })
+
+  memory.clearUserMemory('erin')
+
+  const restored = new UserMemory(storage)
+  // Erin was scrubbed from the blob alongside her namespaced record...
+  expect(restored.getUserPreferences('erin').language).toBe('en')
+  // ...while frank, untouched by the clear, still migrates from the blob.
+  expect(restored.getUserPreferences('frank').language).toBe('pt')
+})

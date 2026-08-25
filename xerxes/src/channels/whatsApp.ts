@@ -1,6 +1,8 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { createHmac } from 'node:crypto'
+
 import { postJson, providerUrl, type ChannelFetch } from './http.js'
 import {
   arrayValue,
@@ -11,19 +13,32 @@ import {
   type RelayChannelTransport,
 } from './relay.js'
 import { createChannelMessage, MessageDirection, type ChannelMessage } from './types.js'
-import { parseJsonBody, WebhookChannel, type WebhookHeaders } from './webhooks.js'
+import { constantTimeEqualStrings, webhookHeaderValue } from './webhookSignatures.js'
+import { parseJsonBody, WebhookChannel, type WebhookHeaders, type WebhookResponse } from './webhooks.js'
 
 const WHATSAPP_GRAPH_API = 'https://graph.facebook.com/'
+const WHATSAPP_SIGNATURE_PREFIX = 'sha256='
+/** Warned exactly once per adapter when inbound signatures are not verified. */
+const UNVERIFIED_SIGNATURE_WARNING = 'WhatsApp webhook signature verification is DISABLED: set the'
+  + ' "app_secret" channel option so X-Hub-Signature-256 payloads can be validated; unverified'
+  + ' webhooks must not face a public network.'
 
-/** WhatsApp Cloud API webhook relay with Graph HTTP sends. */
+/** WhatsApp Cloud API webhook relay with Graph HTTP sends and optional signature checks. */
 export const WHATSAPP_TRANSPORT: RelayChannelTransport = {
   inbound: 'webhook-relay',
   outbound: 'http-api',
-  unsupported: ['webhook signature verification', 'persistent WhatsApp socket transport'],
+  unsupported: ['persistent WhatsApp socket transport'],
 }
 
 export interface WhatsAppChannelOptions {
   readonly accessToken: string
+  /**
+   * Optional Meta app secret. When set, inbound webhooks must carry a valid
+   * `X-Hub-Signature-256` header (hex HMAC-SHA256 of the raw body) or they
+   * are rejected; when omitted, signatures are accepted unverified and the
+   * adapter warns loudly once.
+   */
+  readonly appSecret?: string
   readonly apiBaseUrl?: string
   readonly apiVersion?: string
   readonly fetchImplementation?: ChannelFetch
@@ -33,9 +48,10 @@ export interface WhatsAppChannelOptions {
 /**
  * WhatsApp Business Cloud API webhook relay and text sender.
  *
- * The HTTP edge must answer Meta's GET verification challenge and validate
- * signatures. `whatsAppWebhookChallenge` is provided for the former, while
- * this adapter accepts only the delivered JSON event body.
+ * The HTTP edge must answer Meta's GET verification challenge;
+ * `whatsAppWebhookChallenge` is provided for that. POST deliveries are
+ * verified against `X-Hub-Signature-256` whenever an `appSecret` is
+ * configured.
  */
 export class WhatsAppChannel extends WebhookChannel {
   readonly name = 'whatsapp'
@@ -46,6 +62,8 @@ export class WhatsAppChannel extends WebhookChannel {
   private readonly apiVersion: string
   private readonly fetchImplementation: ChannelFetch | undefined
   private readonly phoneNumberId: string
+  private readonly appSecret: string
+  private warnedUnverifiedSignatures = false
 
   constructor(options: WhatsAppChannelOptions) {
     super()
@@ -54,6 +72,17 @@ export class WhatsAppChannel extends WebhookChannel {
     this.apiVersion = options.apiVersion ?? 'v23.0'
     this.fetchImplementation = options.fetchImplementation
     this.phoneNumberId = requiredOption(options.phoneNumberId, 'WhatsApp phoneNumberId')
+    this.appSecret = options.appSecret?.trim() ?? ''
+  }
+
+  override async handleWebhook(headers: WebhookHeaders, body: Uint8Array): Promise<WebhookResponse> {
+    if (!this.appSecret) {
+      this.warnUnverifiedSignaturesOnce()
+    } else if (!whatsAppSignatureMatches(headers, body, this.appSecret)) {
+      // Fail closed: a configured app secret makes valid signatures mandatory.
+      return { status: 401, body: 'unauthorized' }
+    }
+    return super.handleWebhook(headers, body)
   }
 
   protected parseInbound(
@@ -102,6 +131,20 @@ export class WhatsAppChannel extends WebhookChannel {
       ...(this.fetchImplementation ? { fetchImplementation: this.fetchImplementation } : {}),
     })
   }
+
+  private warnUnverifiedSignaturesOnce(): void {
+    if (this.warnedUnverifiedSignatures) return
+    this.warnedUnverifiedSignatures = true
+    console.warn(UNVERIFIED_SIGNATURE_WARNING)
+  }
+}
+
+/** Validate Meta's `X-Hub-Signature-256`: hex HMAC-SHA256 of the raw body. */
+function whatsAppSignatureMatches(headers: WebhookHeaders, body: Uint8Array, appSecret: string): boolean {
+  const provided = webhookHeaderValue(headers, 'x-hub-signature-256')
+  if (!provided || !provided.startsWith(WHATSAPP_SIGNATURE_PREFIX)) return false
+  const expected = WHATSAPP_SIGNATURE_PREFIX + createHmac('sha256', appSecret).update(body).digest('hex')
+  return constantTimeEqualStrings(provided, expected)
 }
 
 /** Return Meta's verification challenge only when its configured token matches. */

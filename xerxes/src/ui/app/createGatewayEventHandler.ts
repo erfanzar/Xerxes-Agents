@@ -1066,15 +1066,28 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
             sys('interrupted')
           }
         } else {
-          const msgs: Msg[] = finalMessages.length ? finalMessages : [{ role: 'assistant', text: finalText }]
-          msgs.forEach(appendMessage)
-
-          if (bellOnComplete && stdout?.isTTY) {
+          // The daemon marks a cancel that fired before any turn_begin or
+          // assistant content existed (`unstarted`, from a setup abort or a
+          // suppressed launch). There is nothing to record: the historical
+          // fallback row below would synthesize a phantom empty assistant
+          // message, so a content-less complete appends nothing at all —
+          // unstarted ones additionally skip the completion bell, since
+          // nothing completed. The controller teardown above still ran, so
+          // only the artifacts are suppressed, never the state settle.
+          const unstarted = (ev.payload as { unstarted?: boolean } | undefined)?.unstarted === true
+          const msgs: Msg[] = finalMessages.length
+            ? finalMessages
+            : finalText.trim()
+              ? [{ role: 'assistant', text: finalText }]
+              : []
+          if (!unstarted && bellOnComplete && stdout?.isTTY) {
             // `stdout` here is OpenTUI's guarded proxy, which swallows writes
             // to protect the renderer's cell model. BEL has no cell/cursor
             // effect, so ring it on the real stdout directly.
             process.stdout.write('\x07')
           }
+
+          msgs.forEach(appendMessage)
 
           setStatus('ready')
         }

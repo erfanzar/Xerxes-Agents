@@ -3,7 +3,7 @@
 
 import { expect, test } from 'bun:test'
 
-import { ConfigurationError, ValidationError } from '../src/core/errors.js'
+import { ConfigurationError, ValidationError, XerxesTimeoutError } from '../src/core/errors.js'
 import {
   DuckDuckGoInstantAnswerProvider,
   DuckDuckGoSearch,
@@ -243,4 +243,133 @@ test('DuckDuckGo facade filters a host-provided provider and keeps Instant Answe
     'https://example.com/xerxes', 'https://example.com/topic',
   ])
   await expect(instant.search({ query: 'xerxes', searchType: 'news' })).rejects.toBeInstanceOf(ConfigurationError)
+})
+
+/**
+ * A body that delivers one byte every `byteDelayMs` and never ends, plus the
+ * number of pulls the stream served.
+ *
+ * The delay MUST be awaited inside an async pull: a synchronous pull that
+ * schedules a delayed enqueue is re-invoked at microtask rate by the stream
+ * machinery (per spec the next pull starts once the previous returns), which
+ * floods megabytes per second and trips the byte cap long before any deadline —
+ * a fixture bug this suite shipped once. An async pull serializes invocations,
+ * so pull count is genuine wall-clock pacing.
+ */
+function slowTrickle(byteDelayMs = 25): {
+  readonly stream: ReadableStream<Uint8Array>
+  readonly pullCount: () => number
+} {
+  const encoder = new TextEncoder()
+  let pulls = 0
+  const stream = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      pulls += 1
+      await Bun.sleep(byteDelayMs)
+      try {
+        controller.enqueue(encoder.encode('x'))
+      } catch {
+        // The reader was cancelled while we slept; nothing to deliver to.
+      }
+    },
+  })
+  return { stream, pullCount: () => pulls }
+}
+
+test('a response body that trickles forever is cut off by the deadline instead of stalling the call', async () => {
+  // The bug this pins: runWithTimeout bounded only fetch() (the headers); the
+  // body was then read unbounded in text(), so a server that never finished the
+  // response held the tool call open past every configured limit.
+  const trickle = slowTrickle(25)
+  const slow = new PublicWebClient({
+    fetcher: async () => new Response(trickle.stream, { status: 200 }),
+    timeoutMs: 500,
+    urlSafety: { dnsLookup: async () => ['93.184.216.34'] },
+  })
+  const fetched = await slow.fetch('https://example.com/trickle')
+
+  const started = Date.now()
+  await expect(slow.text(fetched.response)).rejects.toBeInstanceOf(XerxesTimeoutError)
+  // Well under the old behavior, which never resolved at all.
+  expect(Date.now() - started).toBeLessThan(10_000)
+  // Proof the fixture is genuinely slow: ~500ms at ≥25ms/pull is ~20 pulls.
+  // A flood (the fixture bug) would show six-figure pull counts here.
+  expect(trickle.pullCount()).toBeLessThan(1_000)
+})
+
+test('an aborted caller signal cancels an in-flight response body promptly', async () => {
+  const aborts = new AbortController()
+  const fetched = await client(async () => new Response(slowTrickle(25).stream, { status: 200 }))
+    .fetch('https://example.com/trickle', {}, { signal: aborts.signal })
+
+  const pending = client(async () => new Response(slowTrickle(25).stream, { status: 200 }))
+    .text(fetched.response, { signal: aborts.signal })
+  setTimeout(() => aborts.abort(new Error('caller gave up')), 100)
+  const started = Date.now()
+  await expect(pending).rejects.toThrow('caller gave up')
+  expect(Date.now() - started).toBeLessThan(5_000)
+})
+
+test('a redirect hop body is cancelled instead of left pinned unread', async () => {
+  // The hop's body is never read — only its Location mattered. Leaving it
+  // un-consumed pinned each hop connection until GC noticed.
+  let hopCancelled = false
+  const hopStream = new ReadableStream<Uint8Array>({
+    cancel() {
+      hopCancelled = true
+    },
+  })
+  const redirecting = client(url => {
+    if (url.endsWith('/hop')) {
+      return Promise.resolve(new Response(hopStream, { headers: { location: '/end' }, status: 302 }))
+    }
+    return Promise.resolve(new Response('done', { status: 200 }))
+  })
+  const fetched = await redirecting.fetch('https://example.com/hop')
+  expect(fetched.url).toBe('https://example.com/end')
+  const text = await redirecting.text(fetched.response)
+  expect(text).toBe('done')
+
+  for (let attempt = 0; attempt < 50 && !hopCancelled; attempt += 1) {
+    await Bun.sleep(10)
+  }
+  expect(hopCancelled).toBe(true)
+})
+
+test('the byte cap still rejects oversized bodies rather than truncating them', async () => {
+  const capped = new PublicWebClient({
+    fetcher: async () => new Response('y'.repeat(2_000), { status: 200 }),
+    maxResponseBytes: 1_000,
+    urlSafety: { dnsLookup: async () => ['93.184.216.34'] },
+  })
+  const fetched = await capped.fetch('https://example.com/big')
+  // Declared length over the cap.
+  await expect(capped.text(fetched.response)).rejects.toThrow('response exceeds 1000 byte limit')
+
+  // Undeclared length over the cap, caught mid-stream.
+  const undeclared = new PublicWebClient({
+    fetcher: async () => new Response(slowTrickle(5).stream, {
+      headers: { 'content-type': 'text/plain' },
+      status: 200,
+    }),
+    maxResponseBytes: 50,
+    urlSafety: { dnsLookup: async () => ['93.184.216.34'] },
+  })
+  const streamed = await undeclared.fetch('https://example.com/big-stream')
+  await expect(undeclared.text(streamed.response)).rejects.toThrow('response exceeds 50 byte limit')
+})
+
+test('a body read under an explicit fresh budget times out on its own', async () => {
+  const fresh = new PublicWebClient({
+    fetcher: async () => new Response(slowTrickle(25).stream, { status: 200 }),
+    urlSafety: { dnsLookup: async () => ['93.184.216.34'] },
+  })
+  // A Response that did not come from this client's fetch carries no recorded
+  // deadline; an explicit timeoutMs must still bound the read.
+  const trickle = slowTrickle(25)
+  const started = Date.now()
+  await expect(fresh.text(await Promise.resolve(new Response(trickle.stream, { status: 200 })), { timeoutMs: 400 }))
+    .rejects.toBeInstanceOf(XerxesTimeoutError)
+  expect(Date.now() - started).toBeLessThan(10_000)
+  expect(trickle.pullCount()).toBeLessThan(1_000)
 })

@@ -13,12 +13,54 @@ import {
   type ToolDefinition,
 } from '../types/toolCalls.js'
 
+/**
+ * Named-function forcing on the provider-neutral request.
+ *
+ * `CompletionRequest` is an interface, so this module augmentation attaches the
+ * requested function name to every completion request without editing the
+ * frozen `llms/` module. The api-server forwards the whole parsed completion to
+ * the resolved `LlmClient`, so an injected (or future native) OpenAI-compatible
+ * client receives the exact name; today's stock adapters serialize only
+ * `toolChoice` and therefore force *a* tool call (`'any'`) — which is why
+ * {@link FORCED_TOOL_CHOICE_HEADER} marks the response whenever that downgrade
+ * could occur.
+ */
+declare module '../llms/client.js' {
+  interface CompletionRequest {
+    /** Function name from the OpenAI-style named `tool_choice`, when given. */
+    readonly toolChoiceFunctionName?: string
+  }
+}
+
+/**
+ * Response marker for requests that asked to force a named function via
+ * `{"type":"function","function":{"name":"X"}}`. Present exactly when a named
+ * choice was parsed and forwarded; its value is the requested name. Callers can
+ * detect a transport that honored only the neutral `'any'` approximation
+ * instead of finding the weakening invisibly in model behavior.
+ */
+export const FORCED_TOOL_CHOICE_HEADER = 'x-xerxes-forced-tool-choice'
+
 export interface ParsedChatCompletionRequest {
   readonly completion: CompletionRequest
   /** Caller preference from `stream_options.include_usage` for the final stream chunk. */
   readonly includeUsage?: boolean
   /** Extension payload preserved for a model-specific backend to interpret. */
   readonly metadata?: unknown
+  /**
+   * Function name requested by the OpenAI-style named tool choice
+   * `{"type":"function","function":{"name":"X"}}`.
+   *
+   * Mirrored onto `completion.toolChoiceFunctionName` (see the module
+   * augmentation above) so the name travels with the request into the resolved
+   * `LlmClient`. Per-transport behavior with the accompanying
+   * `toolChoice: 'any'`: OpenAI-compatible chat and Responses transports send
+   * `tool_choice: "required"` (a tool call is forced; which tool stays the
+   * provider's choice), Anthropic sends `{type: "any"}`, Gemini sets
+   * `functionCallingConfig.mode = "ANY"`, and Ollama ignores tool_choice
+   * entirely. Responses also carry {@link FORCED_TOOL_CHOICE_HEADER}.
+   */
+  readonly toolChoiceFunctionName?: string
   readonly stream: boolean
 }
 
@@ -65,7 +107,15 @@ export function parseChatCompletionRequest(value: unknown): ParsedChatCompletion
     tools?: readonly ToolDefinition[]
     topP?: number
   } = {}
-  const maxTokens = optionalInteger(body.max_tokens, 'max_tokens', 1)
+  // OpenAI precedence: max_completion_tokens supersedes the legacy max_tokens
+  // alias when both are present. Validation is identical for either field and
+  // failures name whichever one the caller actually sent.
+  const maxTokensProvided = body.max_completion_tokens !== undefined && body.max_completion_tokens !== null
+  const maxTokens = optionalInteger(
+    maxTokensProvided ? body.max_completion_tokens : body.max_tokens,
+    maxTokensProvided ? 'max_completion_tokens' : 'max_tokens',
+    1,
+  )
   if (maxTokens !== undefined) {
     options.maxTokens = maxTokens
   }
@@ -93,16 +143,27 @@ export function parseChatCompletionRequest(value: unknown): ParsedChatCompletion
   if (tools !== undefined) {
     options.tools = tools
   }
-  const toolChoice = parseToolChoice(body.tool_choice)
+  const toolChoice = parseToolChoice(
+    body.tool_choice,
+    new Set((tools ?? []).map(tool => tool.function.name)),
+  )
   if (toolChoice !== undefined) {
-    options.toolChoice = toolChoice
+    options.toolChoice = toolChoice.choice
   }
 
   return {
-    completion: { model, messages, ...options },
+    // The named-function choice rides on the completion itself (augmented
+    // field) so the resolved LlmClient receives it, not just this parsed view.
+    completion: {
+      model,
+      messages,
+      ...options,
+      ...(toolChoice?.name === undefined ? {} : { toolChoiceFunctionName: toolChoice.name }),
+    },
     stream,
     ...(includeUsage === undefined ? {} : { includeUsage }),
     ...(body.metadata === undefined ? {} : { metadata: body.metadata }),
+    ...(toolChoice?.name === undefined ? {} : { toolChoiceFunctionName: toolChoice.name }),
   }
 }
 
@@ -255,17 +316,56 @@ function parseTools(value: unknown): ToolDefinition[] | undefined {
   })
 }
 
-function parseToolChoice(value: unknown): ToolChoice | undefined {
+/** A parsed `tool_choice`: the neutral choice, plus the requested function for the object form. */
+interface ParsedToolChoice {
+  readonly choice: ToolChoice
+  /** Present only for `{"type":"function","function":{"name":...}}`. */
+  readonly name?: string
+}
+
+/**
+ * Parse an OpenAI-compatible `tool_choice`.
+ *
+ * String forms: `'auto'` and `'none'` pass through; `'required'` maps to the
+ * neutral `'any'`. The object form is validated strictly (`type === 'function'`
+ * and a non-empty `function.name`) and is accepted only when the named tool is
+ * present in the request's `tools`; it maps to the neutral `'any'` while
+ * keeping its name on {@link ParsedChatCompletionRequest.toolChoiceFunctionName}.
+ *
+ * Transport behavior for that mapping: OpenAI-compatible chat transports send
+ * `tool_choice: "required"` and Responses-API hosts `"required"` — a tool call
+ * is forced, but which tool stays the provider's choice; Anthropic sends
+ * `{type: "any"}`; Gemini sets `functionCallingConfig.mode = "ANY"`; Ollama has
+ * no tool_choice switch at all. None of them can force a *named* tool through
+ * the neutral request, which is exactly why the name is preserved on the parsed
+ * request for boundaries with a native OpenAI-compatible wire format.
+ */
+function parseToolChoice(value: unknown, toolNames: ReadonlySet<string>): ParsedToolChoice | undefined {
   if (value === undefined || value === null) {
     return undefined
   }
   if (value === 'auto' || value === 'none') {
-    return value
+    return { choice: value }
   }
   if (value === 'required') {
-    return 'any'
+    return { choice: 'any' }
   }
-  fail('tool_choice must be auto, none, or required.', 'tool_choice')
+  if (isRecord(value)) {
+    if (value.type !== 'function') {
+      fail('tool_choice.type must be "function".', 'tool_choice')
+    }
+    const functionValue = record(value.function, 'tool_choice.function')
+    const name = requiredString(functionValue.name, 'tool_choice.function.name')
+    if (!toolNames.has(name)) {
+      fail(`tool_choice names '${name}', which is not present in tools.`, 'tool_choice')
+    }
+    // Named forcing is carried, not silently dropped: see the doc comment.
+    return { choice: 'any', name }
+  }
+  fail(
+    'tool_choice must be auto, none, required, or {"type":"function","function":{"name":"..."}}.',
+    'tool_choice',
+  )
 }
 
 function parseStreamOptions(value: unknown): boolean | undefined {

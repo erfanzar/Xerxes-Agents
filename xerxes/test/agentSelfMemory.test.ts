@@ -1,9 +1,10 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 import { expect, test } from 'bun:test'
 
@@ -162,4 +163,145 @@ test('process-wide self-memory cache stays bounded like a simple LRU', () => {
   // The oldest entry was evicted past the 256-entry bound and is re-created.
   expect(getAgentSelfMemory('cache-agent-0')).not.toBe(evicted)
   clearAgentSelfMemoryCache()
+})
+
+test('concurrent processes appending to one self-memory directory keep every entry', async () => {
+  await inTemporaryDirectory(async directory => {
+    const shared = join(directory, 'memories', 'procs')
+    const sourceUrl = pathToFileURL(join(import.meta.dir, '../src/memory/agentSelfMemory.ts')).href
+    const workerPath = join(directory, 'append-worker.ts')
+    // Separate processes share no promise chain, so only O_APPEND append
+    // semantics can keep both writers' entries from clobbering each other.
+    await Bun.write(workerPath, `
+      const { AgentSelfMemory } = await import(${JSON.stringify(sourceUrl)})
+      const [shared, label] = process.argv.slice(2)
+      const memory = new AgentSelfMemory({ agentId: 'proc-' + label, directory: shared, projectRoot: shared })
+      for (let index = 0; index < 20; index += 1) {
+        await memory.append('tool_usage_patterns', '- ' + label + '-' + index)
+      }
+    `)
+    const workers = ['alpha', 'beta'].map(label => Bun.spawn({
+      cmd: [process.execPath, workerPath, shared, label],
+      stdout: 'pipe',
+      stderr: 'pipe',
+    }))
+    const results = await Promise.all(workers.map(async worker => ({
+      exitCode: await worker.exited,
+      stderr: await new Response(worker.stderr).text(),
+    })))
+    expect(results).toEqual([{ exitCode: 0, stderr: '' }, { exitCode: 0, stderr: '' }])
+
+    const reader = new AgentSelfMemory({ agentId: 'reader', directory: shared, projectRoot: directory })
+    const patterns = await reader.read('tool_usage_patterns')
+    for (const label of ['alpha', 'beta']) {
+      for (let index = 0; index < 20; index += 1) expect(patterns).toContain(`- ${label}-${index}`)
+    }
+  })
+})
+
+test('read-modify-write taste updates wait behind an OS-level lock holder', async () => {
+  await inTemporaryDirectory(async directory => {
+    const memory = new AgentSelfMemory({
+      agentId: 'rmw',
+      directory: join(directory, 'memories', 'rmw'),
+      projectRoot: directory,
+    })
+    await memory.ensure()
+
+    // Emulate another process mid-rewrite by holding the per-file mutation
+    // lock with a live owner record.
+    const lockPath = join(directory, 'memories', 'rmw', 'user_taste.md.lock')
+    await Bun.write(lockPath, `${JSON.stringify({ pid: process.pid, token: 'held-elsewhere', createdAt: Date.now() })}\n`)
+
+    let settled = false
+    const pending = memory.updateUserTaste('late preference').then(() => {
+      settled = true
+    })
+    await Bun.sleep(150)
+    expect(settled).toBeFalse()
+
+    await rm(lockPath, { force: true })
+    await pending
+    expect(await memory.read('user_taste')).toContain('- late preference')
+  })
+})
+
+test('concurrent cross-process appends and rewrites keep every appended entry', async () => {
+  await inTemporaryDirectory(async directory => {
+    const shared = join(directory, 'memories', 'race')
+    const sourceUrl = pathToFileURL(join(import.meta.dir, '../src/memory/agentSelfMemory.ts')).href
+    const workerPath = join(directory, 'append-vs-rmw.ts')
+    // One process plays the daemon auto-appending reflections; the other
+    // plays model-driven self-memory writes whose read-modify-write cycles
+    // publish via atomic rename. Before appends shared the per-file OS lock,
+    // an append landing between a rewrite's read and rename was erased.
+    await Bun.write(workerPath, `
+      const { AgentSelfMemory } = await import(${JSON.stringify(sourceUrl)})
+      const [shared, mode] = process.argv.slice(2)
+      const memory = new AgentSelfMemory({ agentId: 'race-' + mode, directory: shared, projectRoot: shared })
+      if (mode === 'append') {
+        for (let index = 0; index < 40; index += 1) {
+          await memory.append('self_reflection', '- raced-' + index)
+          await Bun.sleep(8)
+        }
+      } else {
+        const deadline = Date.now() + 4000
+        let round = 0
+        while (Date.now() < deadline) {
+          await memory.updateUserTaste('preference ' + round, round % 2 === 0 ? 'notes' : 'communication style')
+          await memory.patch('user_taste', '- preference ' + round, '- preference ' + round + ' confirmed')
+          round += 1
+        }
+      }
+    `)
+    const workers = ['append', 'rewrite'].map(mode => Bun.spawn({
+      cmd: [process.execPath, workerPath, shared, mode],
+      stdout: 'pipe',
+      stderr: 'pipe',
+    }))
+    const results = await Promise.all(workers.map(async worker => ({
+      exitCode: await worker.exited,
+      stderr: await new Response(worker.stderr).text(),
+    })))
+    expect(results).toEqual([{ exitCode: 0, stderr: '' }, { exitCode: 0, stderr: '' }])
+
+    const reader = new AgentSelfMemory({ agentId: 'reader', directory: shared, projectRoot: directory })
+    const reflection = await reader.read('self_reflection')
+    for (let index = 0; index < 40; index += 1) expect(reflection).toContain('- raced-' + index)
+  })
+})
+
+test('ensure seeds templates in one exclusive step and heals crashed creators', async () => {
+  await inTemporaryDirectory(async directory => {
+    const memory = new AgentSelfMemory({
+      agentId: 'templates',
+      directory: join(directory, 'memories', 'templates'),
+      projectRoot: directory,
+    })
+
+    // A foreign-created file is respected: no template is ever laid over it.
+    const foreign = join(memory.directory, 'project_context.md')
+    await mkdir(memory.directory, { recursive: true })
+    await Bun.write(foreign, 'CUSTOM CONTEXT')
+    await memory.ensure()
+    expect(await Bun.file(foreign).text()).toBe('CUSTOM CONTEXT')
+
+    // An empty leftover from a creator that crashed between exclusive
+    // creation and its template write heals on the next pass.
+    const reflectionPath = join(memory.directory, 'self_reflection.md')
+    await Bun.write(reflectionPath, '')
+    await memory.ensure()
+    expect(await Bun.file(reflectionPath).text()).toContain('# Self Reflection')
+
+    // Appends racing creation converge with the template ABOVE the entries:
+    // the winner lays down the complete template before any append lands.
+    await rm(reflectionPath, { force: true })
+    await Promise.all([memory.ensure(), memory.append('self_reflection', '- raced entry')])
+    const healed = await memory.read('self_reflection')
+    expect(healed.indexOf('# Self Reflection')).toBeLessThan(healed.indexOf('- raced entry'))
+
+    // No temporary template files survive a normal pass.
+    const leftovers = (await readdir(memory.directory)).filter(name => name.includes('.tmp'))
+    expect(leftovers).toEqual([])
+  })
 })

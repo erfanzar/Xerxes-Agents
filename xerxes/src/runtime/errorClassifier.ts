@@ -80,7 +80,15 @@ export class ErrorClassifier {
     if (details.name === 'AbortError' || details.name === 'InterruptedError') {
       return classified(ErrorKind.FATAL, error, 'user interrupt')
     }
-    if (details.name === 'TimeoutError' || details.name === 'StreamInactivityError' || details.code === 'ETIMEDOUT') {
+    if (
+      details.name === 'TimeoutError'
+      || details.name === 'StreamInactivityError'
+      // completeLlm's default deadline raises this class; without it the
+      // housekeeping stall looks like an unknown, non-retryable failure while
+      // its TimeoutError-named twins are retryable.
+      || details.name === 'CompletionDeadlineError'
+      || details.code === 'ETIMEDOUT'
+    ) {
       return classified(ErrorKind.TIMEOUT, error, details.message, retryAfter)
     }
     if (details.name === 'ConfigurationError') {

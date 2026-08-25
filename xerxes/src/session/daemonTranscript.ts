@@ -52,6 +52,13 @@ export interface DaemonTranscript {
   /** Interrupted calls discovered while repairing the loaded transcript. */
   readonly pendingResumeReplays: readonly PendingResumeReplay[]
   readonly planMode: boolean
+  /**
+   * Length of the raw message list — including crash-journal replays — before
+   * resume repair shrank it. Journal indexes are absolute positions against
+   * that raw list, so journal retention is judged against this count rather
+   * than the repaired length.
+   */
+  readonly rawMessageCount?: number
   readonly schemaVersion: number | undefined
   readonly sessionId: string
   readonly thinkingContent: readonly unknown[]
@@ -121,6 +128,12 @@ export function normalizeDaemonTranscript(raw: unknown, options: TranscriptLoadO
   if (!Array.isArray(messages)) {
     return undefined
   }
+  // Journal indexes are absolute positions into this raw list (load() has
+  // already spliced replayable entries onto it). Resume repair below may
+  // shrink it, so the pre-repair length is captured here for journal
+  // retention decisions; judging coverage by the repaired length would keep
+  // already-covered entries and re-splice them as duplicates on the next load.
+  const rawMessageCount = messages.length
   // One malformed entry must not destroy the whole transcript: drop it and
   // keep the rest, since load() returning undefined would let the next save
   // atomically overwrite the persisted history.
@@ -164,6 +177,7 @@ export function normalizeDaemonTranscript(raw: unknown, options: TranscriptLoadO
     updatedAt: stringValue(raw.updated_at),
     messages: repair.messages,
     pendingResumeReplays: repair.pendingReplays,
+    rawMessageCount,
     turnCount: integerValue(raw.turn_count),
     interactionMode: stringValue(raw.interaction_mode) || stringValue(raw.mode) || 'code',
     planMode: booleanValue(raw.plan_mode),
@@ -206,6 +220,13 @@ export function daemonTranscriptRecord(transcript: DaemonTranscript): Record<str
     generation: transcript.generation ?? 0,
     turn_count: transcript.turnCount,
     message_count: transcript.messages.length,
+    // Journal coverage watermark: the number of raw-list positions this
+    // snapshot subsumes. Journal indexes are absolute against that raw list,
+    // so a save that shrinks history must publish the new base or later
+    // entries numbered from it would be misjudged as covered and deleted
+    // before their messages were ever persisted. Unknown to older readers,
+    // which look fields up by key.
+    journal_base: transcript.messages.length,
     interaction_mode: transcript.interactionMode,
     plan_mode: transcript.planMode,
     ...(transcript.totalApiCalls === undefined ? {} : { total_api_calls: transcript.totalApiCalls }),
@@ -427,10 +448,18 @@ export class DaemonTranscriptStore {
         this.pathFor(transcript.sessionId),
         daemonTranscriptRecord({ ...transcript, generation, messages }),
       )
-      // Appends cannot enter this critical section while covered entries are
-      // removed. Keep entries beyond this snapshot's message count: an append
-      // may have completed just before a save holding an older transcript.
-      await this.discardCoveredJournalEntries(transcript.sessionId, messages.length)
+      // Appends cannot enter this critical section while journal coverage is
+      // settled. The cutoff is the persisted coverage watermark when one
+      // exists: journal indexes are absolute against the raw list of the era
+      // that watermark was written in, and a shrinking save publishes a new,
+      // lower base. Freezing the load-time raw length here instead would let
+      // entries numbered from the shrunken base fall below the threshold and
+      // be deleted although their messages were never persisted.
+      const coveredThrough = Math.max(
+        persisted.journalBase ?? transcript.rawMessageCount ?? messages.length,
+        messages.length,
+      )
+      await this.discardCoveredJournalEntries(transcript.sessionId, coveredThrough, messages.length)
       options.onSavedGeneration?.(generation)
     })
   }
@@ -499,15 +528,20 @@ export class DaemonTranscriptStore {
 
   private async readPersistedState(
     sessionId: string,
-  ): Promise<{ readonly generation: number; readonly messages: readonly RawMessage[] }> {
+  ): Promise<{ readonly generation: number; readonly journalBase: number | undefined; readonly messages: readonly RawMessage[] }> {
     try {
       const raw = JSON.parse(await readFile(this.pathFor(sessionId), 'utf8')) as unknown
       return {
         generation: isRecord(raw) ? integerValue(raw.generation) : 0,
+        // Snapshots written before the watermark existed have none; callers
+        // fall back to their own load-time raw count for those.
+        journalBase: isRecord(raw) && typeof raw.journal_base === 'number' && Number.isFinite(raw.journal_base)
+          ? raw.journal_base
+          : undefined,
         messages: isRecord(raw) && Array.isArray(raw.messages) ? raw.messages.filter(isRecord) : [],
       }
     } catch (error) {
-      if (isMissing(error)) return { generation: 0, messages: [] }
+      if (isMissing(error)) return { generation: 0, journalBase: undefined, messages: [] }
       throw error
     }
   }
@@ -522,7 +556,15 @@ export class DaemonTranscriptStore {
       throw new ValidationError('transcript_generation', 'stale rewrite conflicts with persisted history', options.expectedGeneration)
     }
     const baseCount = options.expectedMessageCount ?? transcript.messages.length
-    if (baseCount > transcript.messages.length || !messagesEqual(transcript.messages.slice(0, baseCount), persisted.messages.slice(0, baseCount))) {
+    // Both sides are compared after the same resume repair: a loaded
+    // transcript has provider markers stripped from assistant content, so a
+    // raw persisted prefix differs from it cosmetically while meaning the
+    // same history. Stringifying raw bytes here used to fabricate divergent
+    // append conflicts for legitimate marker-stripped resumes.
+    if (baseCount > transcript.messages.length || !messagesEqual(
+      normalizedPrefix(transcript.messages.slice(0, baseCount)),
+      normalizedPrefix(persisted.messages.slice(0, baseCount)),
+    )) {
       throw new ValidationError('transcript_generation', 'divergent append conflicts with persisted history', options.expectedGeneration)
     }
     const suffix = transcript.messages.slice(baseCount)
@@ -530,7 +572,18 @@ export class DaemonTranscriptStore {
     return [...persisted.messages, ...suffix]
   }
 
-  private async discardCoveredJournalEntries(sessionId: string, messageCount: number): Promise<void> {
+  /**
+   * Drop journal entries this snapshot subsumes and rebase the survivors into
+   * the saved snapshot's coordinate system.
+   *
+   * Entries below `coveredThrough` are either persisted or were dropped by
+   * resume repair, so they must never replay again. Survivors — entries
+   * numbered from a base the snapshot has not reached — shift by the distance
+   * between their era's base and the new message count, keeping the journal
+   * anchored to "absolute position against the current snapshot" across
+   * shrink saves.
+   */
+  private async discardCoveredJournalEntries(sessionId: string, coveredThrough: number, rebasedBase: number): Promise<void> {
     const path = this.journalPathFor(sessionId)
     let contents: string
     try {
@@ -539,16 +592,18 @@ export class DaemonTranscriptStore {
       if (isMissing(error)) return
       throw error
     }
-    const retained = contents.split('\n').filter(line => {
-      if (!line.trim()) return false
+    const retained = contents.split('\n').flatMap(line => {
+      if (!line.trim()) return []
+      let entry: unknown
       try {
-        const entry = JSON.parse(line) as unknown
-        return isRecord(entry) && typeof entry.index === 'number' && entry.index >= messageCount
+        entry = JSON.parse(line) as unknown
       } catch {
         // A torn final line carries no recoverable entry. Writers are excluded
         // from this critical section, so dropping it cannot race live bytes.
-        return false
+        return []
       }
+      if (!isRecord(entry) || typeof entry.index !== 'number' || entry.index < coveredThrough) return []
+      return [JSON.stringify({ index: entry.index - coveredThrough + rebasedBase, message: entry.message })]
     })
     if (retained.length === 0) {
       await rm(path, { force: true })
@@ -661,6 +716,11 @@ function messagesEqual(left: readonly RawMessage[], right: readonly RawMessage[]
     && left.every((message, index) => JSON.stringify(message) === JSON.stringify(right[index]))
 }
 
+/** Normalize a message slice through the same resume repair a load applies. */
+function normalizedPrefix(messages: readonly RawMessage[]): readonly RawMessage[] {
+  return repairResumedTranscript(messages).messages
+}
+
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
@@ -672,7 +732,9 @@ function isMissing(error: unknown): boolean {
     && (error as { readonly code?: unknown }).code === 'ENOENT'
 }
 
-interface FileLockOptions {
+export interface FileLockOptions {
+  /** Owner description used in wait-timeout errors; defaults to 'transcript'. */
+  readonly label?: string
   readonly staleMs: number
   readonly waitMs: number
 }
@@ -683,7 +745,14 @@ interface FileLockMetadata {
   readonly token: string
 }
 
-async function withFileLock<T>(path: string, operation: () => Promise<T>, options: FileLockOptions): Promise<T> {
+/**
+ * Exclusive cross-process lock file protocol, shared by the transcript store,
+ * the SQLite session store, and agent self-memory: an exclusive `'wx'`
+ * creation loop with a bounded wait deadline, stale-owner takeover based on a
+ * metadata heartbeat rather than PID liveness, and token-checked cleanup so a
+ * deposed owner can never delete a replacement lock.
+ */
+export async function withFileLock<T>(path: string, operation: () => Promise<T>, options: FileLockOptions): Promise<T> {
   await mkdir(dirname(path), { recursive: true })
   const deadline = performance.now() + options.waitMs
   for (;;) {
@@ -695,7 +764,7 @@ async function withFileLock<T>(path: string, operation: () => Promise<T>, option
       if (!isAlreadyExists(error)) throw error
       await removeAbandonedLock(path, options.staleMs)
       if (performance.now() >= deadline) {
-        throw new Error(`Timed out waiting for transcript lock ${path} after ${options.waitMs}ms`)
+        throw new Error(`Timed out waiting for ${options.label ?? 'transcript'} lock ${path} after ${options.waitMs}ms`)
       }
       await Bun.sleep(Math.min(5, Math.max(1, deadline - performance.now())))
       continue

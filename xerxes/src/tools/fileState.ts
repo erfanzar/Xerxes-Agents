@@ -2,7 +2,8 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { createHash } from 'node:crypto'
-import { readFileSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { basename, dirname, join } from 'node:path'
 
 import { ValidationError } from '../core/errors.js'
 
@@ -226,7 +227,7 @@ export function guardedWrite(
   const next = request.transform(previous)
   const changed = next !== previous
   if (changed) {
-    writeFileSync(request.absolutePath, next)
+    atomicWriteSync(request.absolutePath, next, stats.mode)
   }
   if (session !== undefined && session !== '') {
     // Record the post-write state, otherwise a second edit in the same turn would be
@@ -282,6 +283,35 @@ export function guardedCreate(
 /** Put the drift report ahead of the tool's own summary so the model reads it first. */
 export function withStaleNotice(notice: string | undefined, message: string): string {
   return notice === undefined ? message : notice + '\n\n' + message
+}
+
+/**
+ * Replace a file's contents atomically: write beside it, then rename over it.
+ *
+ * An in-place `writeFileSync` truncates the target before the new bytes land,
+ * so a failure midway through destroyed the original — the one outcome this
+ * guarded path must never cause. The temp file lives in the same directory as
+ * the target (rename is only atomic within one filesystem) under a unique
+ * dotted name, and is removed if anything fails so no stray `.tmp` files are
+ * left in the workspace. The target's permission bits are carried onto the
+ * temp file before the rename: rename-over otherwise resets an executable
+ * script to the process umask, silently breaking it, and swaps a hardlinked
+ * file's identity without its mode.
+ */
+function atomicWriteSync(targetPath: string, contents: string, mode: number): void {
+  const temporary = join(dirname(targetPath), `.${basename(targetPath)}.${crypto.randomUUID()}.tmp`)
+  try {
+    writeFileSync(temporary, contents)
+    chmodSync(temporary, mode)
+    renameSync(temporary, targetPath)
+  } catch (error) {
+    try {
+      rmSync(temporary, { force: true })
+    } catch {
+      // Best effort: the original write error is the one worth surfacing.
+    }
+    throw error
+  }
 }
 
 /**

@@ -6,13 +6,14 @@ import { homedir } from 'node:os'
 import { join, posix, win32 } from 'node:path'
 
 import { isWindows } from '../core/hostPlatform.js'
+import { version } from '../../package.json' with { type: 'json' }
 
 /** IDE-discovery metadata for the Bun-native `xerxes-acp` executable. */
 export const ACP_REGISTRY_METADATA = {
   name: 'xerxes',
   display_name: 'Xerxes',
   description: 'Multi-agent coding assistant built on Xerxes-Agents.',
-  version: '0.2.6',
+  version,
   vendor: 'Erfan Zare Chavoshi',
   license: 'Apache-2.0',
   homepage: 'https://github.com/erfanzar/Xerxes-Agents',

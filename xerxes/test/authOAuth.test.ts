@@ -2,12 +2,12 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from 'bun:test'
-import { mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
 import { OAuthClient, anthropicPreset, copilotPreset, githubPatPreset, openaiPreset } from '../src/auth/oauth.js'
-import { CredentialStorage, CredentialTamperedError } from '../src/auth/storage.js'
+import { CredentialConflictError, CredentialStorage, CredentialTamperedError } from '../src/auth/storage.js'
 import {
   OAuthToken,
   buildAuthorizeUrl,
@@ -246,6 +246,74 @@ test('a key file that is neither raw nor base64 key material is still rejected',
 
     const storage = new CredentialStorage(join(root, 'credentials'), { keyPath })
     await expect(storage.save('example', new OAuthToken({ accessToken: 'x' }))).rejects.toThrow(/32 bytes/)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a transient key-file read failure heals instead of poisoning the storage instance', async () => {
+  if (process.platform === 'win32') return
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-credkey-heal-'))
+  const keyPath = join(root, '.credential_key')
+  try {
+    await writeFile(keyPath, Buffer.alloc(32, 9))
+    const storage = new CredentialStorage(join(root, 'credentials'), { keyPath })
+    const token = new OAuthToken({ accessToken: 'heals-later' })
+
+    // One transient EACCES: the memoized key promise rejects...
+    await chmod(keyPath, 0o000)
+    await expect(storage.save('example', token)).rejects.toMatchObject({ code: 'EACCES' })
+
+    // ...and once the permission heals, the SAME instance must retry creation
+    // instead of replaying the cached rejection until restart.
+    await chmod(keyPath, 0o600)
+    await storage.save('example', token)
+    expect((await storage.load('example'))?.accessToken).toBe('heals-later')
+  } finally {
+    await chmod(keyPath, 0o666).catch(() => undefined)
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('guarded saves compare-and-swap against the on-disk record seen at load', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-oauth-cas-'))
+  try {
+    const storage = new CredentialStorage(join(root, 'credentials'), { credentialKey: 'test-only-key' })
+    await storage.save('github', new OAuthToken({ accessToken: 'loaded-token' }))
+
+    const loaded = await storage.loadWithFingerprint('github')
+    expect(loaded.token?.accessToken).toBe('loaded-token')
+    expect(loaded.fingerprint).toBeString()
+
+    // An absent record reports a null fingerprint rather than pretending.
+    expect(await storage.loadWithFingerprint('absent')).toEqual({ fingerprint: null, token: undefined })
+
+    // Another writer replaces the record underneath us; our stale expectation
+    // must refuse instead of clobbering their newer state.
+    await storage.save('github', new OAuthToken({ accessToken: 'newer-writer' }))
+    const conflict = await storage
+      .save('github', new OAuthToken({ accessToken: 'stale-write' }), { expectedFingerprint: loaded.fingerprint })
+      .then(() => null, (error: unknown) => error)
+    expect(conflict).toBeInstanceOf(CredentialConflictError)
+    expect((conflict as CredentialConflictError).provider).toBe('github')
+    expect((conflict as CredentialConflictError).currentFingerprint).not.toBe(loaded.fingerprint)
+    // The newer writer's record survived the refused overwrite.
+    expect((await storage.load('github'))?.accessToken).toBe('newer-writer')
+
+    // With the CURRENT fingerprint the same save goes through.
+    const fresh = await storage.loadWithFingerprint('github')
+    await storage.save('github', new OAuthToken({ accessToken: 'cas-write' }), {
+      expectedFingerprint: fresh.fingerprint,
+    })
+    expect((await storage.load('github'))?.accessToken).toBe('cas-write')
+
+    // Deletion is a state too: expecting absence succeeds only on an absent file.
+    await storage.remove('github')
+    await expect(storage.save('github', new OAuthToken({ accessToken: 'x' }), {
+      expectedFingerprint: fresh.fingerprint,
+    })).rejects.toBeInstanceOf(CredentialConflictError)
+    await storage.save('github', new OAuthToken({ accessToken: 'recreated' }), { expectedFingerprint: null })
+    expect((await storage.load('github'))?.accessToken).toBe('recreated')
   } finally {
     await rm(root, { recursive: true, force: true })
   }

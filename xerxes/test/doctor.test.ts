@@ -2,8 +2,12 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from 'bun:test'
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import {
+  checkAgentDefinitions,
   checkComputerUse,
   checkPlatform,
   checkProviderKeys,
@@ -14,6 +18,7 @@ import {
   hasDoctorFailures,
   runAllDoctorChecks,
 } from '../src/runtime/doctor.js'
+import { loadAgentDefinitions } from '../src/agents/definitions.js'
 
 test('Bun doctor checks use injected host facts and do not expose credential values', () => {
   const options = {
@@ -78,4 +83,38 @@ test('Bun doctor flags missing Windows console tooling only on Windows', () => {
   expect(present.severity).toBe('ok')
 
   expect(checkWindowsTooling({ platform: 'linux', findExecutable: () => null }).severity).toBe('ok')
+})
+
+test('agent-specs doctor check warns on broken specs and reports a clean catalog as ok', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-doctor-agent-specs-'))
+  const home = join(directory, 'home')
+  const priorHome = process.env.XERXES_HOME
+  try {
+    // The check reads the loader's ambient view (like config provenance), so
+    // injection happens through XERXES_HOME and a forced fresh catalog load.
+    await mkdir(join(home, 'agents'), { recursive: true })
+    process.env.XERXES_HOME = home
+    await writeFile(join(home, 'agents', 'broken.yaml'), '- this is not an agent mapping\n', 'utf8')
+    loadAgentDefinitions()
+
+    const warn = checkAgentDefinitions()
+    expect(warn.name).toBe('agent-specs')
+    expect(warn.severity).toBe('warn')
+    expect(warn.message).toContain('broken.yaml')
+    expect(warn.fixHint).toContain('broken.yaml')
+
+    // Once the offending file is gone the same check reports ok.
+    await rm(join(home, 'agents', 'broken.yaml'))
+    loadAgentDefinitions()
+    const ok = checkAgentDefinitions()
+    expect(ok.name).toBe('agent-specs')
+    expect(ok.severity).toBe('ok')
+    expect(ok.fixHint).toBe('')
+  } finally {
+    if (priorHome === undefined) delete process.env.XERXES_HOME
+    else process.env.XERXES_HOME = priorHome
+    await rm(directory, { recursive: true, force: true })
+    // Reset the shared loader state so later tests do not observe this env.
+    loadAgentDefinitions()
+  }
 })

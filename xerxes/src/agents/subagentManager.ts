@@ -316,6 +316,12 @@ export interface SubAgentManagerOptions {
   readonly maxSpawnedAgents?: number
   /** Terminal tasks retained before the oldest are evicted; defaults to DEFAULT_MAX_RETAINED_TERMINAL_TASKS. */
   readonly maxRetainedTerminalTasks?: number
+  /**
+   * Terminal handles retained by the native layer before the oldest are
+   * evicted; defaults to the native DEFAULT_MAX_RETAINED_TERMINAL_HANDLES.
+   * Waits resolve from the retained task snapshot once a handle is evicted.
+   */
+  readonly maxRetainedTerminalHandles?: number
   readonly now?: () => Date
   readonly onEvent?: (event: SubAgentEvent) => void
   readonly pathResolver?: (rawPath: string) => string | undefined
@@ -497,6 +503,9 @@ export class SubAgentManager {
     this.worktree = options.worktree
     this.handleManager = new SpawnedAgentManager({
       idFactory: this.idFactory,
+      ...(options.maxRetainedTerminalHandles === undefined
+        ? {}
+        : { maxRetainedTerminalHandles: options.maxRetainedTerminalHandles }),
       now: this.now,
       runner: async (request, signal) => this.runTaskInput(request.handleId, request.input, signal),
     })
@@ -658,6 +667,12 @@ export class SubAgentManager {
     if (TERMINAL_STATUSES.has(task.status)) return task
     const remaining = Math.max(0, deadline - Date.now())
     if (remaining === 0) return task
+    // The native layer LRU-evicts settled handles while this map still retains
+    // the task itself. A retained task's stored state is already its final
+    // observable snapshot, so a missing handle must resolve from that snapshot
+    // instead of throwing 'spawned agent not found'. Defensive: a live task
+    // implies a non-inert handle, so natural divergence should not occur.
+    if (!this.handleManager.hasHandle(task.id)) return task
     const wait = await this.handleManager.wait([task.id], remaining)
     const snapshot = wait.completed[0] ?? wait.pending[0]
     if (snapshot !== undefined) this.synchronize(task, snapshot)

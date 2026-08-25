@@ -398,6 +398,16 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
   private readonly sessions = new Map<string, DaemonSession>();
   /** Coalesces async transcript loads so one key cannot initialize twice. */
   private readonly sessionOpenPromises = new Map<string, Promise<DaemonSession>>();
+  /**
+   * In-progress initializations keyed by resolved persisted id (value is the
+   * claiming session key). The duplicate-live-copy check inside
+   * initializeSession is check-then-act across several awaits, so two
+   * concurrent openers of one persisted id under different keys could both
+   * observe "no live copy" and register two live sessions that race on every
+   * save. The claim is taken synchronously before those awaits and released
+   * when the initialization settles.
+   */
+  private readonly sessionIdClaims = new Map<string, string>();
   private shutdownPromise: Promise<void> | undefined;
   private readonly steerQueues = new Map<string, string[]>();
   private readonly transcriptStore: DaemonTranscriptStore;
@@ -811,50 +821,74 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     // in-memory sessions sharing one id race on every save — flushSessions
     // persists both concurrently and the stale copy silently overwrites
     // newer history — so fold the live copy in before registering this one.
-    const duplicate = [...this.sessions.entries()].find(
-      ([otherKey, other]) => otherKey !== key && other.id === session.id,
-    );
-    if (duplicate) {
-      const [otherKey, other] = duplicate;
-      if (other.activeTurnId) {
-        throw new ValidationError(
-          "session_id",
-          "is still running a turn under another connection; wait for it to finish before resuming it here",
-          key,
-        );
+    //
+    // The scan alone is check-then-act across the awaits below, so a second
+    // concurrent opener of the same id would also observe "no duplicate" and
+    // register a second live copy. Claim the resolved id synchronously first;
+    // a concurrent opener of another key folds into a deterministic typed
+    // error instead of racing.
+    const claimant = this.sessionIdClaims.get(session.id);
+    if (claimant !== undefined && claimant !== key) {
+      throw new ValidationError(
+        "session_id",
+        "is already being opened for another session key; retry once that open settles",
+        key,
+      );
+    }
+    this.sessionIdClaims.set(session.id, key);
+    // Held in a const: the duplicate-fold path may rebuild `session` from a
+    // reloaded transcript, and the release must always target the claimed id.
+    const claimedId = session.id;
+    try {
+      const duplicate = [...this.sessions.entries()].find(
+        ([otherKey, other]) => otherKey !== key && other.id === session.id,
+      );
+      if (duplicate) {
+        const [otherKey, other] = duplicate;
+        if (other.activeTurnId) {
+          throw new ValidationError(
+            "session_id",
+            "is still running a turn under another connection; wait for it to finish before resuming it here",
+            key,
+          );
+        }
+        // The live copy can hold state newer than the transcript loaded above
+        // (idle steers, title or mode edits); persist it before dropping the
+        // stale key, then re-read so the adopted session loses nothing.
+        await this.saveSession(other);
+        this.evictSession(otherKey);
+        const reloaded = await this.transcriptStore.load(key, {
+          currentProjectDirectory: cwd,
+          workspaceRoot: this.workspaceRoot,
+        });
+        if (reloaded) {
+          effectiveTranscript = reloaded;
+          session = sessionFromTranscript(
+            reloaded,
+            key,
+            options.model ?? this.model(),
+            this.workspaceRoot,
+          );
+        }
       }
-      // The live copy can hold state newer than the transcript loaded above
-      // (idle steers, title or mode edits); persist it before dropping the
-      // stale key, then re-read so the adopted session loses nothing.
-      await this.saveSession(other);
-      this.evictSession(otherKey);
-      const reloaded = await this.transcriptStore.load(key, {
-        currentProjectDirectory: cwd,
-        workspaceRoot: this.workspaceRoot,
-      });
-      if (reloaded) {
-        effectiveTranscript = reloaded;
-        session = sessionFromTranscript(
-          reloaded,
-          key,
-          options.model ?? this.model(),
-          this.workspaceRoot,
-        );
+      // evictSession must remain synchronous for callers such as channel reset,
+      // but its owner disposal is asynchronous. Do not expose a replacement
+      // session with the same persisted id until that disposal has settled: a
+      // late disposeOwner(id) could otherwise include commands the replacement
+      // starts after openSession returns.
+      await this.awaitBackgroundOwnerCleanup(session.id);
+      const releaseSubagentClaim = effectiveTranscript && transcriptIsSubagent(effectiveTranscript)
+        ? claimDirectSubagentConversation(effectiveTranscript.sessionId)
+        : undefined;
+      applySystemPromptAddendum(session, options.systemPromptAddendum);
+      this.sessions.set(key, session);
+      if (releaseSubagentClaim) this.directSubagentClaims.set(key, releaseSubagentClaim);
+      return session;
+    } finally {
+      if (this.sessionIdClaims.get(claimedId) === key) {
+        this.sessionIdClaims.delete(claimedId);
       }
     }
-    // evictSession must remain synchronous for callers such as channel reset,
-    // but its owner disposal is asynchronous. Do not expose a replacement
-    // session with the same persisted id until that disposal has settled: a
-    // late disposeOwner(id) could otherwise include commands the replacement
-    // starts after openSession returns.
-    await this.awaitBackgroundOwnerCleanup(session.id);
-    const releaseSubagentClaim = effectiveTranscript && transcriptIsSubagent(effectiveTranscript)
-      ? claimDirectSubagentConversation(effectiveTranscript.sessionId)
-      : undefined;
-    applySystemPromptAddendum(session, options.systemPromptAddendum);
-    this.sessions.set(key, session);
-    if (releaseSubagentClaim) this.directSubagentClaims.set(key, releaseSubagentClaim);
-    return session;
   }
 
   reload(overrides: JsonRpcPayload = {}): JsonRpcPayload {
@@ -1139,9 +1173,23 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     if (controller.signal.aborted) {
       session.status = "idle";
       session.cancelRequested = true;
+      session.lastActive = Date.now();
       if (this.abortControllers.get(sessionKey) === controller) {
         this.abortControllers.delete(sessionKey);
       }
+      // A cancel landing during setup still owes the client a terminal event.
+      // The initialize-eviction and disconnect races admit a turn and then
+      // abort it before turn_begin; returning silently left the submitter
+      // waiting for a turn_end that never came, so the TUI showed an
+      // eternally in-flight prompt. Match the cancelled-turn vocabulary the
+      // post-setup abort path below uses. `unstarted` is additive wire
+      // vocabulary marking that no assistant content (indeed, no turn_begin)
+      // ever existed for this submission, so clients must not synthesize an
+      // empty assistant row from it.
+      emit({
+        type: "turn_end",
+        payload: { cancelled: true, unstarted: true, session_id: session.id },
+      });
       return;
     }
 

@@ -5,9 +5,12 @@ import { expect, test } from 'bun:test'
 
 import { ProviderError } from '../src/core/errors.js'
 import {
+  CompletionDeadlineError,
   OpenAiCompatibleClient,
   collectLlmCompletion,
+  completeLlm,
   type CompletionRequest,
+  type LlmClient,
   type LlmDelta,
 } from '../src/llms/client.js'
 import { classifyError } from '../src/runtime/errorClassifier.js'
@@ -197,4 +200,63 @@ test('chat-completions SSE requires an explicit terminal finish event', async ()
   await expect(collect(client.stream(request()))).rejects.toThrow(
     'stream ended before a terminal completion event',
   )
+})
+
+/** A client whose completion never settles, ignoring whatever signal it is handed. */
+function hungClient(observed: { signal?: AbortSignal | undefined }): LlmClient {
+  return {
+    stream() {
+      throw new Error('unused by these tests')
+    },
+    complete: (_request, signal) => {
+      observed.signal = signal
+      return new Promise(() => {})
+    },
+  }
+}
+
+test('completeLlm enforces its deadline even when the client ignores the abort signal', async () => {
+  // A stalled upstream is exactly the failure that may never observe the
+  // signal, so the caller must still be released promptly.
+  const observed: { signal?: AbortSignal } = {}
+  const started = Date.now()
+
+  await expect(completeLlm(hungClient(observed), request(), undefined, { timeoutMs: 25 }))
+    .rejects.toBeInstanceOf(CompletionDeadlineError)
+  expect(Date.now() - started).toBeLessThan(2_000)
+  // The transport was asked to stop through the combined signal as well.
+  expect(observed.signal?.aborted).toBeTrue()
+})
+
+test('completeLlm applies the same deadline when collecting a stream-only client', async () => {
+  const client: LlmClient = {
+    stream: async function* (): AsyncGenerator<LlmDelta> {
+      await new Promise<never>(() => {})
+      yield {}
+    },
+  }
+
+  const failure = await completeLlm(client, request(), undefined, { timeoutMs: 25 }).then(
+    () => { throw new Error('expected deadline rejection') },
+    error => error,
+  )
+  expect(failure).toBeInstanceOf(CompletionDeadlineError)
+  expect((failure as CompletionDeadlineError).timeoutMs).toBe(25)
+})
+
+test('a caller abort is honored immediately and independently of the deadline', async () => {
+  const controller = new AbortController()
+  const observed: { signal?: AbortSignal } = {}
+  // completeLlm wires its abort wiring synchronously before suspending, so
+  // aborting right after starting the call races nothing.
+  const pending = completeLlm(hungClient(observed), request(), controller.signal, { timeoutMs: 60_000 })
+  controller.abort()
+
+  const reason = await pending.then(
+    () => { throw new Error('expected the call to reject') },
+    error => error,
+  )
+  // The deadline was far away; only the caller's signal can have stopped this.
+  expect((reason as Error).name).toBe('AbortError')
+  expect(observed.signal?.aborted).toBeTrue()
 })

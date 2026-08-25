@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { planSpawn } from '../core/windowsSpawn.js'
+import { version } from '../../package.json' with { type: 'json' }
 import type { JsonObject, JsonSchema } from '../types/toolCalls.js'
 import { MCPHttpClientTransport } from './http.js'
 import { mcpConfigSecrets, scrubCredentials } from './reconnect.js'
@@ -128,7 +129,7 @@ export class MCPClient {
     const transport = this.config.transport ?? 'stdio'
     const result = await this.request('initialize', {
       capabilities: this.config.clientCapabilities ?? {},
-      clientInfo: this.config.clientInfo ?? { name: 'xerxes', version: '0.3.0' },
+      clientInfo: this.config.clientInfo ?? { name: 'xerxes', version },
       protocolVersion: this.config.protocolVersion ?? defaultProtocolVersion(transport),
     }, true)
     this.initializeResult = parseInitializeResult(result)

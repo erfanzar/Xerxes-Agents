@@ -25,6 +25,7 @@ import {
   requiredString,
 } from './inputs.js'
 import { WorkspacePathResolver } from './pathSafety.js'
+import { collectChildOutput } from './processOutput.js'
 
 export const DEFAULT_READ_LINE_LIMIT = 400
 const DEFAULT_GIT_TIMEOUT = 30_000
@@ -519,12 +520,45 @@ export async function moveFile(inputs: JsonObject, paths: WorkspacePathResolver)
   // Re-validate both endpoints immediately before the move (see recheck).
   const checkedSource = await paths.recheck(sourcePath)
   const checkedDestination = await paths.recheck(destinationPath)
+  // The existence check above is only a snapshot: POSIX rename replaces a
+  // destination that appears in the gap silently. With overwrite=false the
+  // destination is therefore RESERVED exclusively first, so the kernel — not a
+  // check-then-act race — refuses a competing creator. The reservation matches
+  // the payload kind: an empty FILE for file moves (the rename atomically
+  // replaces it with the real bytes) and an empty DIRECTORY for directory moves
+  // (a reserved empty file would make every directory rename fail ENOTDIR, and
+  // no flag combination could move a directory to a fresh destination). The
+  // rename then replaces either reservation atomically.
+  let reserved = false
+  if (!overwrite) {
+    try {
+      if (sourceInfo.isDirectory()) {
+        await mkdir(checkedDestination)
+      } else {
+        writeFileSync(checkedDestination, '', { flag: 'wx' })
+      }
+      reserved = true
+    } catch (error) {
+      if (isAlreadyExists(error)) {
+        throw new ValidationError('destination', 'already exists; pass overwrite=true to replace it', destination)
+      }
+      throw error
+    }
+  }
   try {
     await rename(checkedSource, checkedDestination)
   } catch (error) {
     if (!isCrossDevice(error)) {
+      // A failed move must not leave the empty reservation behind posing as the
+      // destination.
+      if (reserved) await rm(checkedDestination, { force: true, recursive: true })
       throw error
     }
+    // Cross-device moves cannot rename; fall back to copy+delete. The exclusive
+    // reservation has to be lifted first (copy does not replace), and the copy's
+    // own errorOnExist keeps refusing a destination someone else created in the
+    // interim.
+    if (reserved) await rm(checkedDestination, { force: true, recursive: true })
     await cp(checkedSource, checkedDestination, {
       dereference: false,
       errorOnExist: true,
@@ -715,15 +749,39 @@ async function repositoryRelativePath(
   return result || '.'
 }
 
-async function runGit(repository: string, arguments_: readonly string[], input?: string): Promise<string> {
+/**
+ * Run one bounded git command inside a repository and collect its output.
+ *
+ * Exported so hosts that embed git flows share the exact bounded behavior, and
+ * so the wedge regression tests can drive it directly with a stub `git`.
+ *
+ * The failure this survives: a git hook (or anything git backgrounds) keeps a
+ * copy of stdout open after git itself is dead. Waiting on pipe EOF then waits
+ * forever, which made the kill-on-timeout below a lie — the timer fired, the
+ * direct child died, and the call sat on `.text()` indefinitely. Output is
+ * collected through owned readers instead ({@link collectChildOutput}), so the
+ * result lands once git exits whether or not anyone else still holds the pipe,
+ * and a git that ignores SIGTERM meets SIGKILL after a short grace.
+ */
+export async function runGit(
+  repository: string,
+  arguments_: readonly string[],
+  input?: string,
+  timeoutMs: number = DEFAULT_GIT_TIMEOUT,
+  /** Absolute path to the git binary; tests drive stubs through this. */
+  executable: string = 'git',
+): Promise<string> {
   let child: Bun.PipedSubprocess
   try {
-    child = Bun.spawn(['git', ...arguments_], {
+    child = Bun.spawn([executable, ...arguments_], {
       cwd: repository,
       stdin: 'pipe',
       stderr: 'pipe',
       stdout: 'pipe',
       maxBuffer: MAX_GIT_OUTPUT * 4,
+      // Detached on POSIX so the timeout's kill reaches hook helpers and
+      // anything else git spawned, not just the git process itself.
+      ...(process.platform !== 'win32' ? { detached: true } : {}),
     })
   } catch (error) {
     throw new ValidationError('git', errorMessage(error))
@@ -731,30 +789,21 @@ async function runGit(repository: string, arguments_: readonly string[], input?:
   child.stdin.write(input ?? '')
   child.stdin.end()
 
-  let timedOut = false
-  const timer = setTimeout(() => {
-    timedOut = true
-    child.kill()
-  }, DEFAULT_GIT_TIMEOUT)
-  try {
-    const [exitCode, stdout, stderr] = await Promise.all([
-      child.exited,
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-    ])
-    if (timedOut) {
-      throw new ValidationError('git', 'command timed out after ' + DEFAULT_GIT_TIMEOUT + 'ms')
-    }
-    if (exitCode !== 0) {
-      throw new ValidationError('git', stderr.trim() || 'git exited with code ' + exitCode)
-    }
-    if (stdout.length > MAX_GIT_OUTPUT) {
-      return stdout.slice(0, MAX_GIT_OUTPUT) + '\n…[truncated]…'
-    }
-    return stdout
-  } finally {
-    clearTimeout(timer)
+  const collected = await collectChildOutput(child, {
+    capacityChars: MAX_GIT_OUTPUT * 4,
+    timeoutMs,
+    ...(process.platform !== 'win32' ? { processGroupLeader: true } : {}),
+  })
+  if (collected.timedOut) {
+    throw new ValidationError('git', 'command timed out after ' + timeoutMs + 'ms')
   }
+  if (collected.exitCode !== 0) {
+    throw new ValidationError('git', collected.stderr.trim() || 'git exited with code ' + collected.exitCode)
+  }
+  if (collected.stdout.length > MAX_GIT_OUTPUT) {
+    return collected.stdout.slice(0, MAX_GIT_OUTPUT) + '\n…[truncated]…'
+  }
+  return collected.stdout
 }
 
 function describeGitStatus(status: string): string {
@@ -1762,6 +1811,10 @@ function isWithin(root: string, candidate: string): boolean {
 
 function isNotFound(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT'
+}
+
+function isAlreadyExists(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === 'EEXIST'
 }
 
 function isCrossDevice(error: unknown): boolean {

@@ -1,7 +1,12 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { InMemoryCollector, type AuditCollector } from './collector.js'
+import {
+  InMemoryCollector,
+  isClosableCollector,
+  isDrainableCollector,
+  type AuditCollector,
+} from './collector.js'
 import { redactPayload, redactString } from '../security/redact.js'
 import {
   AgentSwitchEvent,
@@ -327,8 +332,32 @@ export class AuditEmitter {
     })
   }
 
-  flush(): void {
-    this.collector.flush()
+  /**
+   * Durability barrier: resolves once every emitted record reached its destination.
+   *
+   * For buffering collectors (the JSONL file sink, composites containing one) this
+   * awaits the underlying drain instead of fire-and-forgetting it, so callers can
+   * hold process shutdown until buffered audit records are on disk.
+   */
+  async flush(): Promise<void> {
+    const collector: AuditCollector = this.collector
+    if (isDrainableCollector(collector)) {
+      await collector.drain()
+      return
+    }
+    collector.flush()
+  }
+
+  /**
+   * Flush durably and close the underlying collector when it owns resources or
+   * buffered writes. Long-lived hosts (CLI, daemon) should call this during
+   * shutdown so queued audit records are never lost.
+   */
+  async close(): Promise<void> {
+    await this.flush()
+    if (isClosableCollector(this.collector)) {
+      await this.collector.close()
+    }
   }
 
   private emitLoopWarningEvent(input: ToolLoopWarningAuditInput): void {

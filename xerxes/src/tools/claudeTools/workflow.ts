@@ -26,6 +26,7 @@ import { resolveInteractionMode, type InteractionMode } from '../../runtime/inte
 import type { AgentDefinition } from '../../agents/definitions.js'
 import type { JsonObject, JsonValue, ToolDefinition } from '../../types/toolCalls.js'
 import { optionalBoolean, optionalString, optionalStringArray, requiredString } from '../inputs.js'
+import { collectChildOutput } from '../processOutput.js'
 
 export type { InteractionMode } from '../../runtime/interactionModes.js'
 
@@ -346,14 +347,25 @@ export const CLAUDE_WORKFLOW_TOOL_CAPABILITIES: Readonly<Record<string, ToolCapa
   }),
 })
 
-/** Register Claude-compatible workflow tools without duplicating core file/process tools. */
+/**
+ * Register Claude-compatible workflow tools without duplicating core file/process tools.
+ *
+ * Only the definitions whose host port is actually attached are registered and
+ * returned: AskUserQuestionTool requires `userPromptManager`, SkillTool requires
+ * `skillRegistry`, and PlanTool requires `planGenerator`. Advertising a tool
+ * whose port is absent invites a call that can only end in an error — and, worse,
+ * a host that answers questions through its own board gets its tool shadowed by
+ * one that always fails. The self-contained tools (todos, plan-mode state,
+ * interaction mode, worktrees, ToolSearchTool) register unconditionally.
+ */
 export function registerClaudeWorkflowTools(
   registry: ToolRegistry,
   options: ClaudeWorkflowToolsOptions = {},
   agentId = 'default',
 ): readonly ToolDefinition[] {
   const adapter = new ClaudeWorkflowTools(options, registry)
-  for (const tool of CLAUDE_WORKFLOW_TOOL_DEFINITIONS) {
+  const registered = CLAUDE_WORKFLOW_TOOL_DEFINITIONS.filter(tool => workflowToolHasHostPort(tool.function.name, options))
+  for (const tool of registered) {
     const name = tool.function.name
     registry.replace(
       tool,
@@ -363,7 +375,17 @@ export function registerClaudeWorkflowTools(
       CLAUDE_WORKFLOW_TOOL_GUIDANCE[name],
     )
   }
-  return CLAUDE_WORKFLOW_TOOL_DEFINITIONS
+  return registered
+}
+
+/** Whether every host port this named tool depends on was supplied. */
+function workflowToolHasHostPort(name: string, options: ClaudeWorkflowToolsOptions): boolean {
+  switch (name) {
+    case 'AskUserQuestionTool': return options.userPromptManager !== undefined
+    case 'PlanTool': return options.planGenerator !== undefined
+    case 'SkillTool': return options.skillRegistry !== undefined
+    default: return true
+  }
 }
 
 /**
@@ -774,28 +796,37 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+/**
+ * Run one bounded git command for the worktree lifecycle.
+ *
+ * Output is collected through owned readers ({@link collectChildOutput}) rather
+ * than `new Response(stream).text()`: a git hook holding a copy of stdout keeps
+ * pipe EOF from ever arriving, and the EOF wait then outlived the kill-on-timeout
+ * below, wedging worktree creation indefinitely. Git is spawned detached on
+ * POSIX so the timeout's kill reaches hook helpers and anything else it spawned,
+ * not just the git process itself.
+ */
 async function runGit(arguments_: readonly string[], cwd: string): Promise<string> {
-  let process: Bun.ReadableSubprocess
+  const posix = process.platform !== 'win32'
+  let child: Bun.ReadableSubprocess
   try {
-    process = Bun.spawn(['git', ...arguments_], { cwd, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' })
+    child = Bun.spawn(['git', ...arguments_], {
+      cwd,
+      stdin: 'ignore',
+      stdout: 'pipe',
+      stderr: 'pipe',
+      ...(posix ? { detached: true } : {}),
+    })
   } catch (error) {
     throw new ValidationError('git', error instanceof Error ? error.message : String(error))
   }
-  let timedOut = false
-  const timer = setTimeout(() => {
-    timedOut = true
-    process.kill()
-  }, DEFAULT_GIT_TIMEOUT_MS)
-  try {
-    const [exitCode, stdout, stderr] = await Promise.all([
-      process.exited,
-      new Response(process.stdout).text(),
-      new Response(process.stderr).text(),
-    ])
-    if (timedOut) throw new ValidationError('git', `command timed out after ${DEFAULT_GIT_TIMEOUT_MS}ms`)
-    if (exitCode !== 0) throw new ValidationError('git', stderr.trim() || `git exited with code ${exitCode}`)
-    return stdout
-  } finally {
-    clearTimeout(timer)
+  const collected = await collectChildOutput(child, {
+    timeoutMs: DEFAULT_GIT_TIMEOUT_MS,
+    ...(posix ? { processGroupLeader: true } : {}),
+  })
+  if (collected.timedOut) throw new ValidationError('git', `command timed out after ${DEFAULT_GIT_TIMEOUT_MS}ms`)
+  if (collected.exitCode !== 0) {
+    throw new ValidationError('git', collected.stderr.trim() || `git exited with code ${collected.exitCode}`)
   }
+  return collected.stdout
 }

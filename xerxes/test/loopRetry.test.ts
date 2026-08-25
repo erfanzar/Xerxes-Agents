@@ -130,10 +130,17 @@ test('a retried provider attempt drops partial text, thinking, and stale tool ca
   expect(events.filter(event => event.type === 'provider_retry')).toEqual([
     expect.objectContaining({ attempt: 1, final: false }),
   ])
+  // Text streams inline as the provider emits it, so the failed attempt's
+  // partial text and thinking were already delivered live before the retry.
+  // They must still be dropped everywhere it matters: never persisted, never
+  // re-emitted by the retry, and no stale tool call executed.
   expect(events.filter(event => event.type === 'text').map(event => event.text)).toEqual([
+    'stale partial text',
     'clean response',
   ])
-  expect(events.filter(event => event.type === 'thinking')).toEqual([])
+  expect(events.filter(event => event.type === 'thinking').map(event => event.text)).toEqual([
+    'stale rationale',
+  ])
   const assistant = state.messages.filter(message => message.role === 'assistant')
   expect(assistant).toHaveLength(1)
   expect(assistant[0]).toMatchObject({ content: 'clean response' })

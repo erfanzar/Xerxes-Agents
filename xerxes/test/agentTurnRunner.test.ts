@@ -174,9 +174,11 @@ test('agent turn runner maps portable loop events to daemon v35 event names', as
   }
 
   expect(events).toEqual([
-    // Live token and context counts arrive as soon as the provider round lands,
-    // ahead of the text it paid for, so both footer meters move during the turn
-    // rather than jumping only at the terminal event.
+    // Text streams inline while the provider is still emitting; the round's
+    // live token/context status_update lands once per provider round, right
+    // after that round's deltas, and the terminal status_update closes the
+    // turn with the complete totals.
+    { type: 'text_part', payload: { text: 'Hello from the real loop.' } },
     {
       type: 'status_update',
       payload: {
@@ -191,7 +193,6 @@ test('agent turn runner maps portable loop events to daemon v35 event names', as
         max_context: 128_000,
       },
     },
-    { type: 'text_part', payload: { text: 'Hello from the real loop.' } },
     {
       type: 'status_update',
       payload: {

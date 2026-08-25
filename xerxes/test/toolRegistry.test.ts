@@ -8,6 +8,8 @@ import {
   ToolRegistry,
   revealedToolNames,
 } from '../src/executors/toolRegistry.js'
+import { SkillRegistry } from '../src/extensions/skills.js'
+import { UserPromptManager } from '../src/operators/userPrompt.js'
 import {
   CLAUDE_WORKFLOW_TOOL_CAPABILITIES,
   CLAUDE_WORKFLOW_TOOL_DEFINITIONS,
@@ -93,18 +95,55 @@ test('capabilities fail closed, follow agent-first lookup, and seed the always-l
 
 test('every tool registered by the Claude workflow module declares an explicit capability record', () => {
   const registry = new ToolRegistry()
-  registerClaudeWorkflowTools(registry)
+  // No host ports attached: the port-backed tools are filtered out of both the
+  // registration loop and the returned definitions.
+  const registered = registerClaudeWorkflowTools(registry)
 
-  for (const tool of CLAUDE_WORKFLOW_TOOL_DEFINITIONS) {
+  expect(names(registered)).not.toContain('AskUserQuestionTool')
+  expect(names(registered)).not.toContain('SkillTool')
+  expect(names(registered)).not.toContain('PlanTool')
+  for (const tool of registered) {
     const name = tool.function.name
     // A new workflow tool without a record would silently inherit the fail-closed
     // defaults, including defer: true, and quietly vanish from deferred requests.
     expect(CLAUDE_WORKFLOW_TOOL_CAPABILITIES[name]).toBeDefined()
     expect(registry.hasDeclaredCapabilities(name)).toBe(true)
   }
+  expect(registry.hasDeclaredCapabilities('AskUserQuestionTool')).toBe(false)
   expect(registry.capabilities('TodoWriteTool').defer).toBe(false)
   expect(registry.capabilities('ToolSearchTool')).toMatchObject({ defer: false, readOnly: true })
   expect(registry.capabilities('ExitWorktreeTool').destructive).toBe(true)
+})
+
+test('port-backed workflow tools are advertised exactly when their host port is attached', () => {
+  const bare = new ToolRegistry()
+  const bareRegistered = names(registerClaudeWorkflowTools(bare))
+  expect(bareRegistered).not.toContain('AskUserQuestionTool')
+  expect(bareRegistered).not.toContain('PlanTool')
+  expect(bareRegistered).not.toContain('SkillTool')
+
+  const ports: Parameters<typeof registerClaudeWorkflowTools>[1] = {
+    planGenerator: { generate: async () => [] },
+    skillRegistry: new SkillRegistry(),
+    userPromptManager: new UserPromptManager(),
+  }
+  const full = new ToolRegistry()
+  const fullRegistered = names(registerClaudeWorkflowTools(full, ports))
+  expect(fullRegistered).toContain('AskUserQuestionTool')
+  expect(fullRegistered).toContain('PlanTool')
+  expect(fullRegistered).toContain('SkillTool')
+  expect(full.get('AskUserQuestionTool')).toBeDefined()
+  expect(full.get('PlanTool')).toBeDefined()
+  expect(full.get('SkillTool')).toBeDefined()
+
+  // Each port backs only its own tool.
+  const partial = new ToolRegistry()
+  const partialRegistered = names(registerClaudeWorkflowTools(partial, {
+    planGenerator: { generate: async () => [] },
+  }))
+  expect(partialRegistered).toContain('PlanTool')
+  expect(partialRegistered).not.toContain('AskUserQuestionTool')
+  expect(partialRegistered).not.toContain('SkillTool')
 })
 
 test('deferred loading is opt-in and its live schema set is derived from the transcript', async () => {

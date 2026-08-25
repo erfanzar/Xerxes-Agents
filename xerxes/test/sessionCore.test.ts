@@ -6,6 +6,7 @@ import { Database } from 'bun:sqlite'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 import type { Embedder } from '../src/memory/index.js'
 import {
@@ -24,6 +25,7 @@ import {
   ToolCallRecord,
   TurnRecord,
   branchSession,
+  branchSessionExclusive,
   cloneSessionRecord,
   diffAgainstSnapshot,
   migrateSessionRecord,
@@ -426,6 +428,145 @@ test('SessionManager serializes mutations across instances sharing one store', a
   expect(store.loadSession(session.sessionId)?.metadata.ended).toBe(true)
 })
 
+test('SessionManager mutations wait behind a cross-process store lock holder', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'xerxes-session-filelock-'))
+  const database = join(directory, 'sessions.db')
+  let store: SQLiteSessionStore | undefined
+  try {
+    store = new SQLiteSessionStore({ dbPath: database })
+    const manager = new SessionManager(store)
+    const session = manager.startSession({ sessionId: 'locked' })
+
+    // Emulate another process inside its load→mutate→save critical section by
+    // holding the store lock file with a live (heartbeat-fresh) owner record.
+    const lockPath = `${database}.lock`
+    writeFileSync(
+      lockPath,
+      `${JSON.stringify({ pid: process.pid, token: 'external-owner', createdAt: Date.now() })}\n`,
+      'utf8',
+    )
+
+    let settled = false
+    const pending = manager.recordTurn(session.sessionId, turn('from-waiter')).then(() => {
+      settled = true
+    })
+    await Bun.sleep(150)
+    // While the lock window is held the mutator must wait instead of racing
+    // its whole-blob save against the other process's snapshot.
+    expect(settled).toBeFalse()
+
+    rmSync(lockPath, { force: true })
+    await pending
+    expect(store.loadSession('locked')?.turns.map(entry => entry.turnId)).toEqual(['from-waiter'])
+  } finally {
+    store?.close()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test('two processes racing through their managers over one database keep every turn', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'xerxes-session-cross-process-'))
+  const database = join(directory, 'sessions.db')
+  const barrier = join(directory, 'go')
+  const workerPath = join(directory, 'turn-writer.ts')
+  let store: SQLiteSessionStore | undefined
+  try {
+    store = new SQLiteSessionStore({ dbPath: database })
+    new SessionManager(store).startSession({ sessionId: 'raced' })
+
+    // Each worker owns a separate store instance over the same file — the
+    // shape of two daemon/CLI processes whose interleaved load→mutate→save
+    // cycles used to overwrite each other's turns via stale whole-blob saves.
+    const storeModule = pathToFileURL(join(import.meta.dir, '../src/session/store.ts')).href
+    const modelsModule = pathToFileURL(join(import.meta.dir, '../src/session/models.ts')).href
+    writeFileSync(workerPath, `
+      import { SessionManager, SQLiteSessionStore } from ${JSON.stringify(storeModule)}
+      import { TurnRecord } from ${JSON.stringify(modelsModule)}
+      const [dbPath, label] = process.argv.slice(2)
+      const writer = new SQLiteSessionStore({ dbPath })
+      try {
+        const manager = new SessionManager(writer)
+        while (!(await Bun.file(${JSON.stringify(barrier)}).exists())) await Bun.sleep(1)
+        for (let index = 0; index < 12; index += 1) {
+          await manager.recordTurn('raced', new TurnRecord({
+            prompt: label + ' turn ' + index,
+            turnId: label + '-' + index,
+          }))
+        }
+      } finally {
+        writer.close()
+      }
+    `, 'utf8')
+
+    const workers = ['alpha', 'beta'].map(label => Bun.spawn({
+      cmd: [process.execPath, workerPath, database, label],
+      stdout: 'pipe',
+      stderr: 'pipe',
+    }))
+    writeFileSync(barrier, 'go', 'utf8')
+    const results = await Promise.all(workers.map(async worker => ({
+      exitCode: await worker.exited,
+      stderr: await new Response(worker.stderr).text(),
+    })))
+    expect(results).toEqual([{ exitCode: 0, stderr: '' }, { exitCode: 0, stderr: '' }])
+
+    const expected = [
+      ...Array.from({ length: 12 }, (_, index) => `alpha-${index}`),
+      ...Array.from({ length: 12 }, (_, index) => `beta-${index}`),
+    ].sort()
+    expect((store.loadSession('raced')?.turns ?? []).map(entry => entry.turnId).sort()).toEqual(expected)
+  } finally {
+    store?.close()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test('loadSessionExclusive holds the cross-process lock across a schema-skew write-back', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'xerxes-session-exclusive-load-'))
+  const database = join(directory, 'sessions.db')
+  let store: SQLiteSessionStore | undefined
+  try {
+    store = new SQLiteSessionStore({ dbPath: database, schemaVersion: 1 })
+    store.saveSession(new SessionRecord({ sessionId: 'skewed', schemaVersion: 1 }))
+    store.close()
+    store = undefined
+
+    registerMigration(2, record => {
+      record.migration_marker = 'kept'
+      return record
+    })
+    try {
+      store = new SQLiteSessionStore({ dbPath: database, schemaVersion: 2 })
+
+      // A concurrent process holding the lock defers the load and its
+      // migration write-back; releasing the lock lets both complete.
+      const lockPath = `${database}.lock`
+      writeFileSync(
+        lockPath,
+        `${JSON.stringify({ pid: process.pid, token: 'external-owner', createdAt: Date.now() })}\n`,
+        'utf8',
+      )
+      let settled = false
+      const pending = store.loadSessionExclusive('skewed').then(session => {
+        settled = true
+        return session
+      })
+      await Bun.sleep(150)
+      expect(settled).toBeFalse()
+
+      rmSync(lockPath, { force: true })
+      const session = await pending
+      expect(session?.schemaVersion).toBe(2)
+      expect(store.loadSession('skewed')?.extra.migration_marker).toBe('kept')
+    } finally {
+      unregisterMigration(2)
+    }
+  } finally {
+    store?.close()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
 test('SessionManager drains the per-session lock map after mutations settle, including failures', async () => {
   const store = new InMemorySessionStore()
   const manager = new SessionManager(store)
@@ -695,6 +836,129 @@ test('shadow git prune rewrites retained history and collects pruned commits', a
     await snapshots.rollback(third.id)
     expect(readFileSync(join(workspace, 'a.txt'), 'utf8')).toBe('three')
   } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+function holdStoreLock(database: string): string {
+  const lockPath = `${database}.lock`
+  writeFileSync(
+    lockPath,
+    `${JSON.stringify({ pid: process.pid, token: 'external-owner', createdAt: Date.now() })}\n`,
+    'utf8',
+  )
+  return lockPath
+}
+
+test('deleteSessionExclusive serializes against locked mutators and leaves nothing to resurrect', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'xerxes-session-delete-lock-'))
+  const database = join(directory, 'sessions.db')
+  let store: SQLiteSessionStore | undefined
+  try {
+    store = new SQLiteSessionStore({ dbPath: database })
+    const manager = new SessionManager(store)
+    manager.startSession({ sessionId: 'doomed' })
+
+    // Another process mid-mutation holds the lock; both the mutator's turn
+    // and the exclusive delete queue behind it.
+    const lockPath = holdStoreLock(database)
+    let turnSettled = false
+    let deleteSettled = false
+    const pendingTurn = manager.recordTurn('doomed', turn('last-turn')).then(() => { turnSettled = true })
+    const pendingDelete = store.deleteSessionExclusive('doomed').then(deleted => { deleteSettled = deleted })
+    await Bun.sleep(150)
+    expect(turnSettled).toBeFalse()
+    expect(deleteSettled).toBeFalse()
+
+    rmSync(lockPath, { force: true })
+    const [turnOutcome, deleteOutcome] = await Promise.allSettled([pendingTurn, pendingDelete])
+    // The exclusive delete always succeeds; whichever operation won the
+    // released lock ran first, and the serialized outcome leaves nothing.
+    expect(deleteOutcome.status).toBe('fulfilled')
+    expect(store.loadSession('doomed')).toBeUndefined()
+    if (turnOutcome.status === 'rejected') {
+      // The delete went first; the queued mutator observed the deletion
+      // instead of resurrecting the row from a stale snapshot.
+      expect(String((turnOutcome.reason as Error)?.message ?? turnOutcome.reason)).toContain('Session not found')
+    }
+
+    // A later mutation observes the deletion instead of resurrecting the row.
+    await expect(manager.recordTurn('doomed', turn('zombie'))).rejects.toThrow('Session not found')
+    expect(store.loadSession('doomed')).toBeUndefined()
+  } finally {
+    store?.close()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test('startSessionExclusive waits behind a held cross-process lock', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'xerxes-session-start-lock-'))
+  const database = join(directory, 'sessions.db')
+  let store: SQLiteSessionStore | undefined
+  try {
+    store = new SQLiteSessionStore({ dbPath: database })
+    const manager = new SessionManager(store)
+
+    const lockPath = holdStoreLock(database)
+    let settled = false
+    const pending = manager.startSessionExclusive({ sessionId: 'fresh' }).then(session => {
+      settled = true
+      return session
+    })
+    await Bun.sleep(150)
+    expect(settled).toBeFalse()
+
+    rmSync(lockPath, { force: true })
+    const session = await pending
+    expect(session.sessionId).toBe('fresh')
+    expect(store.loadSession('fresh')?.sessionId).toBe('fresh')
+  } finally {
+    store?.close()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test('branchSessionExclusive performs its existence checks under one lock', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'xerxes-session-branch-lock-'))
+  const database = join(directory, 'sessions.db')
+  let store: SQLiteSessionStore | undefined
+  try {
+    store = new SQLiteSessionStore({ dbPath: database })
+    new SessionManager(store).startSession({ sessionId: 'source', metadata: { title: 'Origin' } })
+
+    // Two processes branching to the same explicit id race their check-then-
+    // create cycles through one lock: exactly one wins, the other observes
+    // the created row and fails its own check instead of overwriting it.
+    const attempts = await Promise.allSettled([
+      branchSessionExclusive(store, { newSessionId: 'child', sourceSessionId: 'source' }),
+      branchSessionExclusive(store, { newSessionId: 'child', sourceSessionId: 'source' }),
+    ])
+    const fulfilled = attempts.filter(result => result.status === 'fulfilled')
+    const rejected = attempts.filter(result => result.status === 'rejected')
+    expect(fulfilled).toHaveLength(1)
+    expect(rejected).toHaveLength(1)
+    expect(rejected[0].status === 'rejected'
+      ? String((rejected[0] as PromiseRejectedResult).reason?.message ?? rejected[0].reason)
+      : '').toContain('session already exists')
+
+    const child = store.loadSession('child')
+    expect(child?.parentSessionId).toBe('source')
+    expect(child?.metadata.forked_from).toBe('source')
+
+    // The exclusive form also defers to a held cross-process lock.
+    const lockPath = holdStoreLock(database)
+    let settled = false
+    const pending = branchSessionExclusive(store, { newSessionId: 'held', sourceSessionId: 'source' }).then(branch => {
+      settled = true
+      return branch
+    })
+    await Bun.sleep(150)
+    expect(settled).toBeFalse()
+    rmSync(lockPath, { force: true })
+    await pending
+    expect(store.loadSession('held')?.sessionId).toBe('held')
+  } finally {
+    store?.close()
     rmSync(directory, { recursive: true, force: true })
   }
 })

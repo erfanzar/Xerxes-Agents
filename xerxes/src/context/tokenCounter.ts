@@ -77,7 +77,56 @@ function contentToText(value: unknown): string {
   return JSON.stringify(value)
 }
 
+/**
+ * CJK code-point ranges counted individually by the estimator: CJK punctuation
+ * and symbols (U+3000-U+303F), Hiragana (U+3040-U+309F), Katakana
+ * (U+30A0-U+30FF), Han unified ideographs Extension A (U+3400-U+4DBF) and the
+ * URO (U+4E00-U+9FFF), Hangul syllables (U+AC00-U+D7AF), compatibility
+ * ideographs (U+F900-U+FAFF), and fullwidth forms (U+FF00-U+FFEF).
+ */
+const CJK_CODE_POINT_PATTERN =
+  /[\u3000-\u303f\u3040-\u309f\u30a0-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]/gu
+
+/**
+ * Estimated tokens per CJK code point.
+ *
+ * Word-splitting heuristics collapse an entire Han run into a single lexical
+ * token while measured BPE tokenizers emit roughly 0.6-1.0 tokens per CJK
+ * character; 3/4 sits in the middle of that band and keeps the math exact
+ * enough to stay deterministic (`Math.ceil(cjkCodePoints * 0.75)`).
+ */
+const TOKENS_PER_CJK_CODE_POINT = 0.75
+
+/**
+ * Deterministic provider-independent token estimate.
+ *
+ * Formula:
+ * 1. Baseline (legacy behavior, unchanged): the number of lexical tokens
+ *    (word/number runs count one each, a run of punctuation/symbols counts
+ *    once per run), floored at 1 and at `ceil(text.length / 4)`.
+ * 2. Script-aware correction: each CJK code point (ranges documented on
+ *    {@link CJK_CODE_POINT_PATTERN}) contributes ~0.75 tokens via
+ *    `ceil(cjkCodePoints * 0.75)` because lexical splitting would otherwise
+ *    charge a whole Han/Hangul/Kana paragraph as one token (~4x undercount).
+ * 3. Result: `max(baseline, cjkContribution + nonCjkBaseline)` where
+ *    nonCjkBaseline re-applies the baseline heuristic to the text with CJK
+ *    code points removed. Inputs without CJK characters therefore keep their
+ *    exact previous estimates; empty input still estimates 0.
+ */
 function estimateTokens(text: string): number {
+  if (!text) return 0
+  const baseline = heuristicEstimate(text)
+  const cjkMatches = text.match(CJK_CODE_POINT_PATTERN)
+  if (!cjkMatches?.length) {
+    return baseline
+  }
+  const cjkContribution = Math.ceil(cjkMatches.length * TOKENS_PER_CJK_CODE_POINT)
+  const nonCjkText = text.replace(CJK_CODE_POINT_PATTERN, '')
+  return Math.max(baseline, cjkContribution + heuristicEstimate(nonCjkText))
+}
+
+/** Lexical-token plus chars-per-4 estimate for a single script run. */
+function heuristicEstimate(text: string): number {
   if (!text) return 0
   // Words and numbers count individually while a run of punctuation/symbols counts once
   // per run. One token per non-space character over-counted punctuation-dense content

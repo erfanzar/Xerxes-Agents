@@ -11,6 +11,7 @@ import {
   GenericWebhookChannel,
   MessageDirection,
   SlackChannel,
+  TELEGRAM_MESSAGE_LIMIT,
   TelegramChannel,
   WebhookDispatcher,
   chunkText,
@@ -425,3 +426,50 @@ function discordSignedHeaders(privateKey: KeyObject, body: Uint8Array): WebhookH
   ).toString('hex')
   return { 'x-signature-ed25519': signature, 'x-signature-timestamp': timestamp }
 }
+
+test('Telegram outbound chunks oversized text into sequential sendMessage calls within the Bot API limit', async () => {
+  const calls: Array<{ readonly body: Record<string, unknown>; readonly url: string }> = []
+  let messageId = 0
+  const channel = new TelegramChannel({
+    token: '123:testing-token',
+    apiBaseUrl: 'https://telegram.test/',
+    fetchImplementation: async (input, init) => {
+      calls.push({ body: JSON.parse(String(init?.body)), url: String(input) })
+      messageId += 1
+      return Response.json({ ok: true, result: { message_id: messageId } })
+    },
+  })
+  const longText = Array.from({ length: 60 }, (_, index) => `line-${index}:${'x'.repeat(100)}`).join('\n')
+  expect(longText.length).toBeGreaterThan(TELEGRAM_MESSAGE_LIMIT)
+
+  const firstEnvelope = await channel.sendText('-100', longText, '42')
+
+  // One sendMessage per chunk, all within the limit, in order.
+  expect(calls.length).toBeGreaterThan(1)
+  for (const call of calls) {
+    expect(call.url).toBe('https://telegram.test/bot123:testing-token/sendMessage')
+    expect(String(call.body.text).length).toBeLessThanOrEqual(TELEGRAM_MESSAGE_LIMIT)
+  }
+  // reply_to anchors only the first piece.
+  expect(calls[0]?.body.reply_to_message_id).toBe('42')
+  expect(calls.slice(1).every(call => call.body.reply_to_message_id === undefined)).toBeTrue()
+  // Content boundaries survive chunking.
+  expect(String(calls[0]?.body.text).startsWith('line-0:')).toBeTrue()
+  expect(String(calls.at(-1)?.body.text).endsWith(`line-59:${'x'.repeat(100)}`)).toBeTrue()
+  // The first envelope is returned so callers can anchor later edits.
+  expect(firstEnvelope).toEqual({ ok: true, result: { message_id: 1 } })
+
+  // The normalized outbound path chunks through sendText as well.
+  calls.length = 0
+  await channel.send(createChannelMessage({
+    channel: 'telegram',
+    direction: MessageDirection.OUTBOUND,
+    text: 'y'.repeat(TELEGRAM_MESSAGE_LIMIT * 2 + 808),
+    roomId: '-100',
+  }))
+  expect(calls.length).toBe(3)
+  for (const call of calls) {
+    expect(String(call.body.text).length).toBeLessThanOrEqual(TELEGRAM_MESSAGE_LIMIT)
+    expect(call.body.chat_id).toBe('-100')
+  }
+})

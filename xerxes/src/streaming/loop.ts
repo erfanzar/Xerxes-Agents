@@ -415,6 +415,7 @@ export async function* runTurn(
   }
 
   let consecutiveUnconfiguredOnlyRounds = 0
+  /** Set when a round ends without post-processing: a terminal provider failure or a caller abort. */
   let terminalProviderFailure = false
   let stopReason: TurnStopReason = signal?.aborted ? 'aborted' : 'tool_budget_exhausted'
   /** One-shot per turn: a reducer that already ran cannot free the same tokens twice. */
@@ -446,7 +447,6 @@ export async function* runTurn(
       let finishReason: string | undefined
       let streamCompleted = false
       let textDeduper = new ToolRoundTextDeduper(latestToolRoundText)
-      let attemptEvents: IncrementalTextEvent[] = []
 
       for (let attempt = 0; attempt <= retryDelays.length; attempt += 1) {
         parser = dependencies.thinkingParserFactory?.() ?? new ThinkingParser()
@@ -457,7 +457,6 @@ export async function* runTurn(
         lastUsage = undefined
         finishReason = undefined
         textDeduper = new ToolRoundTextDeduper(latestToolRoundText)
-        attemptEvents = []
         const attemptSignal = linkAttemptSignal(signal)
         try {
           apiCallsCount += 1
@@ -476,7 +475,14 @@ export async function* runTurn(
           )) {
             const parts = processDelta(delta, parser, textParts, thinkingParts)
             for (const part of parts) {
-              attemptEvents.push(...textDeduper.push(part))
+              // Live incremental emission: each deduped part is yielded the
+              // moment it arrives, so consumers render text while the provider
+              // is still streaming. 95c53d6 buffered whole rounds here, which
+              // silenced live output end to end; this restores the inline
+              // yield. The deduper still withholds exactly one thing — the
+              // not-yet-diverged replay prefix it must hold back — so retry
+              // replay suppression is unchanged.
+              for (const visible of textDeduper.push(part)) yield visible
             }
             if (delta.toolCalls) {
               const merged = [...roundToolCalls]
@@ -505,10 +511,10 @@ export async function* runTurn(
           for (const flushed of parser.process('')) {
             if (flushed.type === 'text') {
               textParts.push(flushed.text)
-              attemptEvents.push(...textDeduper.push({ type: 'text', text: flushed.text }))
+              for (const visible of textDeduper.push({ type: 'text', text: flushed.text })) yield visible
             } else {
               thinkingParts.push(flushed.text)
-              attemptEvents.push(...textDeduper.push({ type: 'thinking', text: flushed.text }))
+              for (const visible of textDeduper.push({ type: 'thinking', text: flushed.text })) yield visible
             }
           }
           streamCompleted = true
@@ -577,6 +583,19 @@ export async function* runTurn(
             // polluted durable history with `[Error: ...]` messages, and the
             // objective guard could then re-call a terminally failed provider
             // (auth/config) until its retry limit.
+            //
+            // Cancellation is not a provider failure (bugfix): when the caller's
+            // signal aborted mid-stream the attempt error is just the abort
+            // surfacing, so emitting a synthetic `[Error: ...]` text event would
+            // fabricate model output and reporting `provider_failed` would map
+            // a user escape to a hard subagent failure downstream. The abort
+            // wins even if the raced error classified as a context overflow —
+            // that classification is preserved for genuine overflows below.
+            if (signal?.aborted) {
+              terminalProviderFailure = true
+              stopReason = 'aborted'
+              break
+            }
             const overflow = classified.kind === ErrorKind.CONTEXT_OVERFLOW
             yield {
               type: 'text',
@@ -631,15 +650,11 @@ export async function* runTurn(
       }
 
       const rawAssistantText = textParts.join('')
+      // Flush whatever the deduper was still holding at round end: a replay
+      // prefix that never diverged is emitted here, stripped of the overlap it
+      // suppressed. Everything else already went out inline in the delta loop.
       const deduplication = textDeduper.finish()
-      attemptEvents.push(...deduplication.events)
-      const discardRegeneration = finishReason === 'length'
-        && roundToolCalls.length === 0
-        && outputLimitEscalations === 0
-        && request.maxTokens === undefined
-      if (!discardRegeneration) {
-        for (const visible of attemptEvents) yield visible
-      }
+      for (const visible of deduplication.events) yield visible
       const assistantText = rawAssistantText.slice(deduplication.suppressedPrefix)
       const providerToolCalls = roundToolCalls
       const visibleTools = forceToolFreeSummary ? [] : request.tools
@@ -707,6 +722,20 @@ export async function* runTurn(
           // Deliberately not fed to the cross-round text deduper: the popped
           // text is gone from history, so suppressing the regenerated prefix
           // would drop it from the transcript as well as from the stream.
+          //
+          // Live-emission note (bugfix reverting the 95c53d6 round buffering):
+          // because deduped parts now stream inline, this discarded round's
+          // truncated text was already yielded while the provider was still
+          // streaming, before `finishReason: 'length'` revealed it as
+          // regenerable. Text events have no supersession mechanism — unlike
+          // screenshot tool results, which supersedeScreenshotToolResults
+          // collapses in history — so an emitted prefix cannot be retracted,
+          // and buffering every round until its finish reason arrives (the
+          // 95c53d6 approach) would silence all live streaming to keep only
+          // this rare window clean. The accepted tradeoff: consumers briefly
+          // see the severed prefix before the wider-window regeneration below;
+          // the transcript of record stays correct because the assistant
+          // message was popped here.
           outputTokenOverride = OUTPUT_LIMIT_RETRY_MAX_TOKENS
           continue
         }
@@ -1046,6 +1075,13 @@ export async function* runTurn(
       kind: classified.kind,
       ...(request.sessionId ? { sessionId: request.sessionId } : {}),
     })
+    // An abort that lands here — typically the injected delay rejecting with
+    // the signal's reason during retry backoff — is a user cancellation, not a
+    // turn failure (bugfix): report `aborted` and skip the synthetic
+    // `[Error: ...]` text event, mirroring the in-stream abort branch. The
+    // final provider_retry event still carries the abort reason for
+    // observability.
+    const cancelled = signal?.aborted === true || isAbortLikeError(error)
     yield {
       type: 'provider_retry',
       error: errorMessage(error),
@@ -1054,8 +1090,12 @@ export async function* runTurn(
       delay: 0,
       final: true,
     }
-    yield { type: 'text', text: `[Error: ${errorMessage(error)}]` }
-    stopReason = 'turn_failed'
+    if (cancelled) {
+      stopReason = 'aborted'
+    } else {
+      yield { type: 'text', text: `[Error: ${errorMessage(error)}]` }
+      stopReason = 'turn_failed'
+    }
   } finally {
     state.totalApiCalls += apiCallsCount
     state.usageComplete &&= usageComplete
@@ -1499,6 +1539,19 @@ function unconfiguredToolResult(call: ToolCall): ToolResult {
     toolCallId: call.id,
     durationMs: 0,
   }
+}
+
+/**
+ * Recognize cancellation-shaped rejections by name: a DOMException AbortError
+ * from an aborted fetch/stream, and InterruptToken's InterruptRequestedError.
+ * Used only where the caller's signal may not have flipped yet (or IS the
+ * rejection reason), so genuine provider failures never match.
+ */
+function isAbortLikeError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  return error.name === 'AbortError'
+    || error.name === 'InterruptedError'
+    || error.name === 'InterruptRequestedError'
 }
 
 function defaultDelay(

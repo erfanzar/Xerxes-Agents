@@ -13,6 +13,7 @@ import {
 } from './cortexCompletionService.js'
 import {
   ApiRequestError,
+  FORCED_TOOL_CHOICE_HEADER,
   parseChatCompletionRequest,
   toOpenAiToolCalls,
   toOpenAiUsage,
@@ -260,11 +261,13 @@ export class OpenAiApiServer implements OpenAiApiHandler {
       return preflight
     }
 
-    const authenticationFailure = this.authenticationFailure(request)
-    if (authenticationFailure) {
-      return this.decorateResponse(request, authenticationFailure)
-    }
-
+    // Rate limiting runs before authentication: with bearer auth enabled,
+    // garbage-token requesters would otherwise be an unlimited free channel
+    // because they never reached the old post-auth consumption point. Every
+    // non-preflight request counts against its bucket (the limiter's own key
+    // function decides the bucket; the default keys by client address). CORS
+    // preflights stay exempt above: browsers send them unconditionally before
+    // the real request, so counting them would double-charge browser clients.
     let rateLimitDecision: RateLimitDecision | null
     try {
       rateLimitDecision = this.consumeRateLimit(request, clientAddress)
@@ -284,6 +287,13 @@ export class OpenAiApiServer implements OpenAiApiHandler {
         ),
         rateLimitDecision.headers,
       )
+    }
+
+    const authenticationFailure = this.authenticationFailure(request)
+    if (authenticationFailure) {
+      // The 401 verdict is unchanged; it now also carries the limiter headers
+      // so rejected clients can still see their remaining budget.
+      return this.decorateResponse(request, authenticationFailure, rateLimitDecision?.headers)
     }
 
     const pathname = new URL(request.url).pathname
@@ -378,7 +388,7 @@ export class OpenAiApiServer implements OpenAiApiHandler {
     }
     try {
       const aggregate = await collectCompletion(client, parsed.completion, request.signal)
-      return json({
+      return withForcedToolChoiceMarker(json({
         id,
         object: 'chat.completion',
         created,
@@ -393,7 +403,7 @@ export class OpenAiApiServer implements OpenAiApiHandler {
           finish_reason: aggregate.finishReason,
         }],
         usage: aggregate.usage,
-      })
+      }), parsed.completion.toolChoiceFunctionName)
     } catch (error) {
       if (request.signal.aborted || isAbortError(error)) {
         // The client disconnected: converting the abort into a 500 response
@@ -513,13 +523,15 @@ export class OpenAiApiServer implements OpenAiApiHandler {
       requestSignal.removeEventListener('abort', abortUpstream)
       upstreamAbort.abort()
     })
-    return new Response(body, {
-      headers: {
-        'Cache-Control': 'no-cache',
-        Connection: 'keep-alive',
-        'Content-Type': 'text/event-stream; charset=utf-8',
-      },
+    const headers = new Headers({
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+      'Content-Type': 'text/event-stream; charset=utf-8',
     })
+    if (completion.toolChoiceFunctionName !== undefined) {
+      headers.set(FORCED_TOOL_CHOICE_HEADER, completion.toolChoiceFunctionName)
+    }
+    return new Response(body, { headers })
   }
 
   private streamingCortexCompletion(
@@ -1022,6 +1034,20 @@ function json(value: unknown, init: ResponseInit = {}): Response {
 
 function methodNotAllowed(allow: string): Response {
   return apiError(405, 'Method not allowed.', 'invalid_request_error', null, 'method_not_allowed', { Allow: allow })
+}
+
+/**
+ * Attach the documented forced-tool-choice marker when the request used the
+ * named object form. Stock neutral adapters force only `'any'`, so this header
+ * keeps the requested name observable instead of letting the downgrade hide in
+ * model behavior; a transport that natively forces the named function can keep
+ * emitting the header (the request still names it) or replace it.
+ */
+function withForcedToolChoiceMarker(response: Response, functionName: string | undefined): Response {
+  if (functionName !== undefined) {
+    response.headers.set(FORCED_TOOL_CHOICE_HEADER, functionName)
+  }
+  return response
 }
 
 function apiError(

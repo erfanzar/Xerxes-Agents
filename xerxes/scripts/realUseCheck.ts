@@ -846,6 +846,9 @@ async function checkFileSync(): Promise<string> {
     { localPath: 'large.bin', remotePath: 'inputs/large.bin' },
   ], {
     async copy(request) { copied.push(`${request.source}->${request.destination}`) },
+    // Remote containment requires symlink resolution (see fileSync.assertRemotePathContained);
+    // the injected sandbox has none, so paths pass through unchanged.
+    resolveRemotePath: path => path,
     async stat(request) {
       if (request.path.endsWith('small.txt')) return { size: 4 }
       if (request.path.endsWith('large.bin')) return { size: 20_000 }

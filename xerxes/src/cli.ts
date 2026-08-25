@@ -15,6 +15,7 @@ import { writeAcpRegistryFile } from "./acp/registry.js";
 import { AcpServer } from "./acp/server.js";
 import { serveACPStdio } from "./acp/transport.js";
 import { loadAgentDefinitions, resolveAgentDefinition } from "./agents/definitions.js";
+import { ConfigurationError } from "./core/errors.js";
 import {
   BunDiscordGatewayWebSocketPort,
   FetchDiscordGatewayRestPort,
@@ -168,7 +169,8 @@ function renderHelp(writer: CliWriter): void {
   writer.line();
   writer.line(writer.style.bold("Also"));
   writer.line(`  ${writer.command("--help".padEnd(widest))}  ${writer.style.dim("show this message")}`);
-  writer.line(`  ${writer.command("--version".padEnd(widest))}  ${writer.style.dim("print the version and exit")}`);
+  writer.line(`  ${writer.command("-v, --version".padEnd(widest))}  ${writer.style.dim("print the version and exit")}`);
+  writer.line(`  ${writer.command("--".padEnd(widest))}  ${writer.style.dim("send everything after this marker verbatim as the prompt")}`);
   writer.line();
   writer.hint(
     "Browser tools attach only to an explicitly supplied Chromium CDP endpoint; use /browser in the TUI\n"
@@ -211,6 +213,59 @@ if (
   );
 }
 
+/**
+ * A bare token that looks like a flag (`-x`, `--model`) rather than prompt text.
+ *
+ * Negative numbers and dash-led words without a letter (e.g. `-42`, `---`) stay
+ * prompt-eligible; only single- or double-dash letter-initial tokens read as
+ * flags the dispatcher never recognized.
+ */
+function isFlagLikeToken(word: string): boolean {
+  return /^-{1,2}[A-Za-z]/.test(word);
+}
+
+/**
+ * Join free-form prompt words into one prompt, rejecting unrecognized flags.
+ *
+ * Dash-led tokens before any `--` separator are treated as mistyped flags and
+ * rendered through the standard usage-error reporter instead of being sent to
+ * the provider as prompt text; everything after the separator joins verbatim.
+ *
+ * `command` is the invocation prefix shown in the escape-hatch hint. For the
+ * bare one-shot form the bun launcher itself consumes one leading `--`, so the
+ * leading-flag hint there tells writers to repeat the separator; every other
+ * form (e.g. after `--resume <id>`) keeps its first argument slot occupied and
+ * therefore passes a mid-position separator straight through.
+ */
+function parsePromptArguments(words: readonly string[], command: string): string {
+  const separator = words.indexOf("--");
+  const flagged = (separator === -1 ? words : words.slice(0, separator))
+    .find(isFlagLikeToken);
+  if (flagged !== undefined) {
+    const doubledNote = command === "xerxes" && flagged === words[0]
+      ? " — write the separator twice, because bun consumes the first one"
+      : "";
+    reportCommandUsageError(
+      new Error(
+        `Unknown option '${flagged}'. To send dash-led text as a prompt, put it after '--'${doubledNote}: ${command} -- ${flagged}`,
+      ),
+      "xerxes --help",
+    );
+  }
+  return (
+    separator === -1 ? [...words] : [...words.slice(0, separator), ...words.slice(separator + 1)]
+  ).join(" ").trim();
+}
+
+/**
+ * A turn cannot start because no provider connection is configured.
+ *
+ * A missing profile is a setup problem, not a crash, so callers render this
+ * through {@link reportCommandUsageError} rather than letting it surface as an
+ * unhandled stack trace.
+ */
+class RuntimeConnectionRequiredError extends Error {}
+
 /** Render a typed command error as two clean stderr lines and exit; never dump a stack. */
 function reportCommandUsageError(error: Error, helpCommand: string): never {
   // Errors go to stderr, so the styler is built against stderr's TTY state
@@ -231,7 +286,7 @@ function reportCommandUsageError(error: Error, helpCommand: string): never {
 if (argument === "--help" || argument === "-h") {
   renderHelp(new CliWriter());
   process.exit(0);
-} else if (argument === "--version" || argument === "-V") {
+} else if (argument === "--version" || argument === "-v" || argument === "-V") {
   console.log(version);
   process.exit(0);
 } else if (argument === "skill") {
@@ -336,7 +391,15 @@ if (argument === "--help" || argument === "-h") {
         : "The --resume option requires a session ID",
     );
   }
-  const prompt = argumentsAfterCommand.slice(1).join(" ").trim();
+  // Same contract as the one-shot catch-all: dash-led words here are
+  // unrecognized flags, not prompt text — `--resume abc --model gpt-4 hi`
+  // must not silently resume with '--model gpt-4 hi' as the turn's prompt.
+  // Unlike that form, this one keeps '--resume' in argv's first slot, so a
+  // single separator survives and needs no doubling.
+  const prompt = parsePromptArguments(
+    argumentsAfterCommand.slice(1),
+    "xerxes --resume <session_id>",
+  );
   if (prompt) {
     await runResumedOneShot(sessionId, prompt);
   } else {
@@ -345,7 +408,7 @@ if (argument === "--help" || argument === "-h") {
 } else if (argument === undefined) {
   const prompt = process.stdin.isTTY ? "" : await readStandardInput();
   if (prompt) {
-    await runOneShot(prompt, cliAgentReference);
+    await runOneShotOrUsageError(prompt, cliAgentReference);
   } else if (cliAgentReference !== undefined) {
     throw new Error(
       "The --agent option requires a prompt: xerxes --agent <name|path> <prompt>",
@@ -356,10 +419,16 @@ if (argument === "--help" || argument === "-h") {
     throw new Error("No prompt was provided on standard input");
   }
 } else {
-  await runOneShot(
-    [argument, ...argumentsAfterCommand].join(" "),
-    cliAgentReference,
-  );
+  // The catch-all owns free-form prompts, so a dash-prefixed token here is
+  // almost certainly a mistyped or unsupported flag — sending it to the
+  // provider as prompt text used to silently produce an answer to nobody.
+  const prompt = parsePromptArguments([argument, ...argumentsAfterCommand], "xerxes");
+  if (!prompt) {
+    throw new Error(
+      "No prompt was provided. Put prompt text after '--' when it begins with a dash",
+    );
+  }
+  await runOneShotOrUsageError(prompt, cliAgentReference);
 }
 
 async function runDaemon(
@@ -775,6 +844,9 @@ function daemonRuntime(
   // Off by default: an always-on JSONL sink is a surprise disk writer. Every
   // downstream call is optional-chained, so enabling it is purely additive —
   // but until something constructs one the daemon emits no audit record at all.
+  // The sink buffers writes, so the runtime `shutdown` hook below must close it:
+  // without that barrier a fast exit could drop queued records (policy denials
+  // included) after the turn already reported them.
   const auditEmitter = process.env.XERXES_AUDIT?.trim()
     ? new AuditEmitter({
       collector: new JSONLSinkCollector(join(xerxesHome(), "audit", "events.jsonl")),
@@ -953,7 +1025,10 @@ function daemonRuntime(
       toolExecutor: tools,
       // Per-tool usage-policy sections ride with the visible tool surface.
       toolRegistry: tools,
-      toolCapabilities: (name, agentId) => tools.capabilities(name, agentId),
+      // The call's arguments ride along so invocation-scoped refinement can
+      // widen one axis (a read-only exec_command may run concurrently) without
+      // ever loosening the permissioned axes.
+      toolCapabilities: (name, agentId, args) => tools.capabilities(name, agentId, args),
       // Spill oversized tool results outside the user's repo. The bootstrap
       // prompt has always claimed this happens; supplying the root is what
       // makes the claim true.
@@ -1009,7 +1084,15 @@ function daemonRuntime(
       tools: activeToolCount,
     }),
     backgroundCommands,
-    shutdown: () => subagentHost?.manager.shutdown(),
+    shutdown: async () => {
+      // Children first: their final events still belong in this session's
+      // audit log, so the audit sink is only closed after they settle.
+      await subagentHost?.manager.shutdown();
+      // Durability barrier for queued audit records: holds process shutdown
+      // (daemon stop, SIGINT/SIGTERM finish, resumed one-shot finally) until
+      // every buffered record reached the JSONL sink.
+      await auditEmitter?.close();
+    },
     onSessionEvict: sessionId => {
       subagentHost?.cancelSource(sessionId);
       memoryToolContext.prune(sessionId);
@@ -1053,7 +1136,7 @@ function daemonRuntime(
 function websocketOptions(
   config: DaemonConfig,
 ): import("./daemon/websocketGateway.js").DaemonWebSocketGatewayOptions {
-  const port = numericSetting(config.control.websocket_port, 11996);
+  const port = websocketPortSetting(config.control.websocket_port);
   return {
     host: stringSetting(config.control.websocket_host) || "127.0.0.1",
     port,
@@ -1063,19 +1146,33 @@ function websocketOptions(
   };
 }
 
-function numericSetting(value: unknown, fallback: number): number {
-  if (
-    typeof value === "number" &&
-    Number.isInteger(value) &&
-    value >= 0 &&
-    value <= 65_535
-  )
-    return value;
-  if (typeof value === "string" && /^\d+$/.test(value)) {
-    const parsed = Number.parseInt(value, 10);
-    return parsed <= 65_535 ? parsed : fallback;
+/** Port served when configuration stays silent about the WebSocket control channel. */
+const DEFAULT_WEBSOCKET_PORT = 11_996;
+
+/**
+ * Resolve the WebSocket control-channel port.
+ *
+ * Absent settings fall back to {@link DEFAULT_WEBSOCKET_PORT}; an explicit but
+ * invalid value is a configuration error rather than a silent fallback onto the
+ * default port, which would strand every client that was told a different port
+ * and make the misconfiguration undiagnosable. Digit strings stay accepted so
+ * historically valid string configs keep working; their values are range-checked
+ * like numbers. Wording mirrors the core config's integer field parser.
+ */
+function websocketPortSetting(value: unknown): number {
+  if (value === undefined) return DEFAULT_WEBSOCKET_PORT;
+  const parsed = typeof value === "number"
+    ? value
+    : typeof value === "string" && /^\d+$/.test(value)
+      ? Number.parseInt(value, 10)
+      : Number.NaN;
+  if (!Number.isInteger(parsed)) {
+    throw new ConfigurationError("control.websocket_port", "must be a finite integer");
   }
-  return fallback;
+  if (parsed < 0 || parsed > 65_535) {
+    throw new ConfigurationError("control.websocket_port", "must be between 0 and 65535");
+  }
+  return parsed;
 }
 
 function stringSetting(value: unknown): string {
@@ -1243,6 +1340,28 @@ async function runAcp(args: readonly string[]): Promise<void> {
   }
 }
 
+/**
+ * Run a one-shot turn, rendering a missing provider configuration as a clean
+ * usage error.
+ *
+ * Without this, `xerxes "hi"` with no configured profile died with an unhandled
+ * stack trace; that is setup guidance, not a crash report. Every other failure
+ * still propagates untouched.
+ */
+async function runOneShotOrUsageError(
+  prompt: string,
+  agentReference?: string,
+): Promise<void> {
+  try {
+    await runOneShot(prompt, agentReference);
+  } catch (error) {
+    if (error instanceof RuntimeConnectionRequiredError) {
+      reportCommandUsageError(error, "xerxes --help");
+    }
+    throw error;
+  }
+}
+
 async function runOneShot(
   prompt: string,
   agentReference?: string,
@@ -1250,7 +1369,7 @@ async function runOneShot(
   const config = loadSystemDaemonConfig();
   const connection = runtimeConnection(config, new ProfileStore().active());
   if (!connection) {
-    throw new Error(
+    throw new RuntimeConnectionRequiredError(
       "One-shot execution requires a configured runtime connection or active provider profile",
     );
   }

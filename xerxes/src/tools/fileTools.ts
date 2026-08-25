@@ -294,8 +294,14 @@ export async function readFile(
     )
   }
   const text = await Bun.file(target).text()
+  // An explicit max_chars is itself bounded by the window ceiling: a caller
+  // passing max_chars=1_000_000 over a 60k-character window used to skip
+  // truncation and then be rejected by the ceiling — advised, absurdly, to cap
+  // the return with the very parameter they had supplied. -1 keeps its
+  // documented meaning (no char cap; oversized reads are an error, not a cut).
+  const effectiveMaxChars = maxChars === -1 ? -1 : Math.min(maxChars, MAX_READ_WINDOW_CHARS)
   if (limit === -1) {
-    const whole = truncateCharacters(text, maxChars)
+    const whole = truncateCharacters(text, effectiveMaxChars)
     enforceReadWindowCeiling(whole, { charCap: 'max_chars', filePath, lineParameter: 'limit', toolName: 'ReadFile' })
     recordFileRead(context, target, text, {
       mtimeMs: fileInfo.mtimeMs,
@@ -311,7 +317,7 @@ export async function readFile(
   }
   const endOffset = Math.min(offset + limit, lines.length)
   const window = lines.slice(offset, endOffset).join('')
-  const selected = truncateCharacters(window, maxChars)
+  const selected = truncateCharacters(window, effectiveMaxChars)
   enforceReadWindowCeiling(selected, { charCap: 'max_chars', filePath, lineParameter: 'limit', toolName: 'ReadFile' })
   recordFileRead(context, target, text, {
     mtimeMs: fileInfo.mtimeMs,
@@ -965,11 +971,19 @@ function positiveInteger(raw: string | undefined): number | undefined {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined
 }
 
+/** Appended when max_chars cuts a read window short (2 newlines + 26 chars). */
+const TRUNCATED_BY_MAX_CHARS_MARKER = '\n\n…[truncated by max_chars]…'
+
 function truncateCharacters(text: string, maxChars: number): string {
   if (maxChars === -1 || text.length <= maxChars) {
     return text
   }
-  return `${text.slice(0, maxChars)}\n\n…[truncated by max_chars]…`
+  // Clamp the slice so slice + marker never exceed MAX_READ_WINDOW_CHARS.
+  // Otherwise a caller asking for max_chars=40000 got the truncation marker
+  // appended past the ceiling and then rejected by enforceReadWindowCeiling —
+  // told, absurdly, to raise the very cap they had just set.
+  const sliceLength = Math.min(maxChars, MAX_READ_WINDOW_CHARS - TRUNCATED_BY_MAX_CHARS_MARKER.length)
+  return `${text.slice(0, sliceLength)}${TRUNCATED_BY_MAX_CHARS_MARKER}`
 }
 
 /** JSON tool calls often serialize omitted optional integers as null. */

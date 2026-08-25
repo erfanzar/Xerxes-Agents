@@ -92,6 +92,36 @@ test("sandbox executor only invokes the host for host decisions and fails closed
   expect(calls).toEqual(["sandbox:exec_command"]);
 });
 
+test("sandbox tool sets match case-insensitively so config casing typos cannot route to host", () => {
+  // security/policy.ts compares tool names lowercased; a mixed-case sandbox or
+  // elevated entry must behave identically instead of silently missing.
+  const strict = new SandboxRouter({
+    config: {
+      mode: SandboxMode.STRICT,
+      sandboxedTools: ["Exec_Command"],
+      elevatedTools: ["ReadFile"],
+    },
+  });
+  expect(strict.decide("exec_command")).toMatchObject({ context: "sandbox" });
+  expect(strict.decide("EXEC_COMMAND")).toMatchObject({ context: "sandbox" });
+  expect(strict.decide("Exec_Command")).toMatchObject({ context: "sandbox" });
+  expect(strict.decide("readfile")).toMatchObject({
+    context: "host",
+    reason: "Tool is marked as elevated",
+  });
+  // Unrelated tools still fall through to host under strict mode.
+  expect(strict.decide("ListDir")).toMatchObject({ context: "host" });
+
+  // Warn mode keeps its advisory behavior for casing-mismatched entries too.
+  const warnings: string[] = [];
+  const warn = new SandboxRouter({
+    config: { mode: SandboxMode.WARN, sandboxedTools: ["EXEC_COMMAND"] },
+    onWarning: (decision) => warnings.push(decision.reason),
+  });
+  expect(warn.decide("exec_command")).toMatchObject({ context: "host" });
+  expect(warnings).toHaveLength(1);
+});
+
 test("subprocess backend executes strict router requests with a bounded cwd and sanitized environment", async () => {
   await inTemporaryDirectory(async (workspace) => {
     const originalSecret = process.env.XERXES_SANDBOX_PARENT_SECRET;

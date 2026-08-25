@@ -29,6 +29,8 @@ import {
   BUNDLED_SKILLS_DIRECTORY,
   MAX_SKILL_FILE_BYTES,
   parseSkillMarkdown,
+  skillNamesUnderRoot,
+  type Skill,
 } from "./skills.js";
 import {
   HUB_DIR as DEFAULT_HUB_DIR,
@@ -90,6 +92,15 @@ export interface OfficialSkillSourceOptions {
 export interface SkillsHubOptions extends SkillGuardPaths {
   readonly now?: () => Date;
   readonly officialSkillsDirectory?: string;
+  /**
+   * Extra skill names treated as native/host-owned on top of the bundled root.
+   * Installing a skill with one of these names is refused unless the caller
+   * passes an explicit force option, because first-root-wins discovery would
+   * otherwise let a hub bundle shadow the trusted skill.
+   */
+  readonly reservedSkillNames?:
+    | (() => readonly string[] | Promise<readonly string[]>)
+    | readonly string[];
   /** Replaces the default local/official source pair when supplied. */
   readonly sources?: readonly SkillSource[];
 }
@@ -236,6 +247,10 @@ export class SkillsHub {
   private readonly auditLocks = new Map<string, Promise<void>>();
   private readonly guardPaths: SkillGuardPaths;
   private readonly now: () => Date;
+  private reservedSkillNamesCache: Promise<Set<string>> | undefined;
+  private readonly reservedSkillNamesProvider:
+    | (() => readonly string[] | Promise<readonly string[]>)
+    | undefined;
   private readonly sources = new Map<string, SkillSource>();
 
   constructor(options: SkillsHubOptions = {}) {
@@ -248,6 +263,13 @@ export class SkillsHub {
         : { quarantineDirectory: options.quarantineDirectory }),
     };
     this.now = options.now ?? (() => new Date());
+    const reservedSkillNamesOption = options.reservedSkillNames;
+    this.reservedSkillNamesProvider =
+      reservedSkillNamesOption === undefined
+        ? undefined
+        : typeof reservedSkillNamesOption === "function"
+          ? reservedSkillNamesOption
+          : () => reservedSkillNamesOption;
     const defaults: readonly SkillSource[] = [
       new LocalSkillSource(
         options.skillsDirectory === undefined
@@ -293,6 +315,33 @@ export class SkillsHub {
       );
       return await this.withMutationLock(mutationKey, async () => {
         const directories = await this.ensureDirectories();
+
+        // The bundle's DECLARED identity must match the directory it will be
+        // installed under. Discovery registers a skill by its frontmatter
+        // `name:`, so a bundle declaring a different name would activate under
+        // a name nobody validated — the exact vector for shadowing a native
+        // skill. Documents that fail to parse (for example duplicate
+        // frontmatter keys) are rejected here as well.
+        let stagedSkill: Skill;
+        try {
+          stagedSkill = parseSkillMarkdown(
+            bundle.content,
+            join(directories.skills, skillName, "SKILL.md"),
+          );
+        } catch (error) {
+          return `[Error] Failed to install ${uri}: ${errorMessage(error)}`;
+        }
+        if (
+          !stagedSkill.nameFromDirectory &&
+          stagedSkill.metadata.name !== skillName
+        ) {
+          return (
+            `[Error] Skill '${skillName}' declares 'name: ${stagedSkill.metadata.name}' in its SKILL.md frontmatter.` +
+            ` A hub install may only activate under its own directory name;` +
+            ` fix the declared name to '${skillName}' and retry.`
+          );
+        }
+
         const existing = await inspectChild(
           directories.skills,
           skillName,
@@ -303,6 +352,15 @@ export class SkillsHub {
         }
         if (existing.kind === "directory" && !options.force) {
           return `[Error] Skill '${skillName}' already installed. Use force=true to overwrite.`;
+        }
+        // First-root-wins discovery puts the hub skills root ahead of bundled
+        // and host-registered skills, so this name would hijack theirs.
+        if (!options.force && (await this.reservedSkillNames()).has(skillName)) {
+          return (
+            `[Error] Skill '${skillName}' collides with an already-discovered native or host skill.` +
+            " Installing it from the hub would shadow the trusted skill." +
+            " Pass force=true only if replacing it is intended."
+          );
         }
 
         const staging = await ensureChildDirectory(
@@ -461,6 +519,35 @@ export class SkillsHub {
 
   getSource(name: string): SkillSource | undefined {
     return this.sources.get(name);
+  }
+
+  /**
+   * Skill names this hub must not shadow, resolved lazily and once.
+   *
+   * Every parseable skill under the bundled root is reserved by default;
+   * hosts add their registered skills through {@link SkillsHubOptions.reservedSkillNames}.
+   */
+  private async reservedSkillNames(): Promise<Set<string>> {
+    this.reservedSkillNamesCache ??= (async () => {
+      const names = await skillNamesUnderRoot(
+        DEFAULT_OFFICIAL_SKILLS_DIRECTORY,
+      );
+      if (this.reservedSkillNamesProvider !== undefined) {
+        for (const name of await this.reservedSkillNamesProvider()) {
+          names.add(name);
+        }
+      }
+      return names;
+    })();
+    const cached = this.reservedSkillNamesCache;
+    void cached.catch(() => {
+      // Never keep a rejected resolution: the next install retries instead of
+      // failing forever on a transient provider error.
+      if (this.reservedSkillNamesCache === cached) {
+        this.reservedSkillNamesCache = undefined;
+      }
+    });
+    return cached;
   }
 
   registerSource(source: SkillSource): void {

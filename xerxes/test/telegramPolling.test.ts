@@ -102,6 +102,66 @@ test('telegram polling acknowledges the offset only after successful delivery', 
   await loop.stop()
 })
 
+test('telegram polling dead-letters a deterministically failing update after its retry budget', async () => {
+  const channel = new PoisonedUpdateChannel()
+  const errors: unknown[] = []
+  const loop = new TelegramPollingLoop({
+    channel,
+    timeout: 0,
+    retryDelay: 0,
+    onError: error => { errors.push(error) },
+  })
+
+  // Polling must move past the poisoned update and deliver the ones behind it.
+  await eventually(() => channel.delivered.includes(43))
+  await loop.stop()
+
+  // Default budget: five failed deliveries for update 41, then it is skipped.
+  expect(channel.poisonAttempts).toBe(5)
+  expect(channel.delivered).toContain(42)
+  expect(channel.delivered).toContain(43)
+  expect(channel.calls.some(call => call.offset === 43)).toBeTrue()
+  const deadLetters = errors.map(String).filter(text => text.includes('dead-lettered'))
+  expect(deadLetters).toHaveLength(1)
+  expect(deadLetters[0]).toContain('update_id 41')
+})
+
+class PoisonedUpdateChannel {
+  readonly calls: TelegramUpdatesOptions[] = []
+  readonly delivered: number[] = []
+  poisonAttempts = 0
+
+  async getUpdates(options: TelegramUpdatesOptions = {}): Promise<Readonly<Record<string, unknown>>> {
+    this.calls.push(options)
+    if ((options.offset ?? 0) >= 44) {
+      // One delivery past the poisoned window, then behave like a real
+      // long-poll: block until aborted instead of re-serving update 43.
+      return new Promise((_resolve, reject) => {
+        options.signal?.addEventListener('abort', () => reject(new Error('request aborted')), { once: true })
+      })
+    }
+    if ((options.offset ?? 0) >= 43) {
+      return { result: [{ update_id: 43, message: { text: 'after the poison' } }] }
+    }
+    return {
+      result: [
+        { update_id: 41, message: { text: 'deterministically failing' } },
+        { update_id: 42, message: { text: 'queued behind the poison' } },
+      ],
+    }
+  }
+
+  async handleWebhook(_headers: WebhookHeaders, body: Uint8Array): Promise<WebhookResponse> {
+    const updateId = (JSON.parse(new TextDecoder().decode(body)) as { update_id: number }).update_id
+    if (updateId === 41) {
+      this.poisonAttempts += 1
+      return { status: 500, body: 'handler always fails' }
+    }
+    this.delivered.push(updateId)
+    return { status: 200, body: 'ok' }
+  }
+}
+
 class FlakyPollingChannel {
   readonly calls: TelegramUpdatesOptions[] = []
   readonly delivered: number[] = []

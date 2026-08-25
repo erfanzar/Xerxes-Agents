@@ -11,6 +11,7 @@ import { AcpPermissionBoard, routePermission } from '../src/acp/permissions.js'
 import { ACP_REGISTRY_METADATA, writeAcpRegistryFile } from '../src/acp/registry.js'
 import { AcpServer, ServerCapabilities } from '../src/acp/server.js'
 import { AcpSessionConflictError, AcpSessionStore } from '../src/acp/session.js'
+import { version as packageVersion } from '../package.json' with { type: 'json' }
 
 test('ACP registry manifest preserves IDE discovery metadata', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'xerxes-acp-registry-'))
@@ -19,6 +20,8 @@ test('ACP registry manifest preserves IDE discovery metadata', async () => {
     expect(output).toBe(join(directory, 'xerxes', 'agent.json'))
     expect(JSON.parse(await readFile(output, 'utf8'))).toEqual(ACP_REGISTRY_METADATA)
     expect(ACP_REGISTRY_METADATA.distribution).toEqual({ type: 'command', command: 'xerxes-acp', args: [] })
+    // The manifest version is sourced from package.json, never hardcoded.
+    expect(ACP_REGISTRY_METADATA.version).toBe(packageVersion)
   } finally {
     await rm(directory, { recursive: true, force: true })
   }

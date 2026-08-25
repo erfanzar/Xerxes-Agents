@@ -418,6 +418,147 @@ test('stale append writers preserve distinct suffixes while divergent and stale 
   }
 })
 
+test('journal entries covered by a repaired snapshot are not re-spliced as duplicates', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-transcript-journal-shrink-'))
+  try {
+    const sessionId = 'f00df00df00df00d'
+    const store = new DaemonTranscriptStore({ directory, currentProjectDirectory: '/project' })
+    // Raw persisted snapshot whose orphan tool reply resume repair will drop,
+    // shrinking the live history below the raw list the journal indexes use.
+    await Bun.write(store.pathFor(sessionId), JSON.stringify({
+      generation: 3,
+      messages: [
+        { role: 'user', content: 'saved turn' },
+        { role: 'tool', tool_call_id: 'ghost-call', content: 'orphan reply' },
+      ],
+      session_id: sessionId,
+      turn_count: 1,
+    }))
+    // Journalled at raw position 2, after both persisted entries.
+    await store.appendMessage(sessionId, { role: 'assistant', content: 'live answer' }, 2)
+
+    const recovered = await store.load(sessionId)
+    expect(recovered?.messages).toEqual([
+      { role: 'user', content: 'saved turn' },
+      { role: 'assistant', content: 'live answer' },
+    ])
+
+    await store.save(recovered!)
+    // Coverage must be judged against the raw pre-repair length (3), not the
+    // repaired length (2): otherwise this entry survives and the next load
+    // splices a second copy of an already-persisted message.
+    expect(await Bun.file(store.journalPathFor(sessionId)).exists()).toBeFalse()
+    expect((await store.load(sessionId))?.messages).toEqual([
+      { role: 'user', content: 'saved turn' },
+      { role: 'assistant', content: 'live answer' },
+    ])
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('new-era journal entries survive a shrink save and a stale follow-up save', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-transcript-journal-era-'))
+  try {
+    const sessionId = 'e12a34e12a34e12a'
+    const store = new DaemonTranscriptStore({ directory, currentProjectDirectory: '/project' })
+    await Bun.write(store.pathFor(sessionId), JSON.stringify({
+      generation: 7,
+      messages: [
+        { role: 'user', content: 'turn zero' },
+        { role: 'tool', tool_call_id: 'ghost-call', content: 'orphan reply' },
+      ],
+      session_id: sessionId,
+      turn_count: 1,
+    }))
+    // Old-era entry journalled against the raw list (position 2 of 2+orphan).
+    await store.appendMessage(sessionId, { role: 'assistant', content: 'live answer' }, 2)
+
+    // Load shrinks the history to two messages; saving it must publish the
+    // shrunken coverage base so later entries numbered from it are judged
+    // against the new era, not the frozen pre-repair length.
+    const recovered = await store.load(sessionId)
+    expect(recovered).toMatchObject({ messages: [{ content: 'turn zero' }, { content: 'live answer' }] })
+    expect(recovered?.rawMessageCount).toBe(3)
+    await store.save(recovered!)
+
+    // New-era append numbering from the shrunken base (2), then a crash
+    // before its message is ever saved.
+    await store.appendMessage(sessionId, { role: 'user', content: 'new-era message' }, 2)
+
+    // A stale writer — still holding the pre-shrink transcript whose frozen
+    // raw count is 3 — saves again after another writer bumped the generation.
+    // The old threshold would delete index 2 although that message was never
+    // persisted anywhere.
+    const rawSnapshot = JSON.parse(await Bun.file(store.pathFor(sessionId)).text()) as Record<string, unknown>
+    rawSnapshot.generation = typeof rawSnapshot.generation === 'number' ? rawSnapshot.generation + 1 : 1
+    await Bun.write(store.pathFor(sessionId), JSON.stringify(rawSnapshot))
+    await store.save(
+      { ...recovered!, generation: recovered!.generation ?? 0 },
+      {
+        mode: 'append',
+        expectedGeneration: recovered!.generation ?? 0,
+        expectedMessageCount: recovered!.messages.length,
+      },
+    )
+
+    expect((await store.load(sessionId))?.messages).toEqual([
+      { role: 'user', content: 'turn zero' },
+      { role: 'assistant', content: 'live answer' },
+      { role: 'user', content: 'new-era message' },
+    ])
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('marker-stripped resume appends do not fabricate divergent conflicts', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-transcript-marker-resume-'))
+  try {
+    const sessionId = 'c1a5c1a5c1a5c1a5'
+    const store = new DaemonTranscriptStore({ directory, currentProjectDirectory: '/project' })
+    await Bun.write(store.pathFor(sessionId), JSON.stringify({
+      generation: 4,
+      messages: [
+        { role: 'user', content: 'read it' },
+        {
+          role: 'assistant',
+          content: 'ASSISTANT_TOOL_CALLS: [{"id":"call-1","name":"ReadFile","input":{"path":"a.ts"}}]',
+        },
+      ],
+      session_id: sessionId,
+      turn_count: 1,
+    }))
+
+    const resumed = await store.load(sessionId)
+    if (!resumed) throw new Error('expected transcript to load')
+    expect(JSON.stringify(resumed.messages[1])).not.toContain('ASSISTANT_TOOL_CALLS')
+
+    // Another writer advances the generation while the persisted bytes still
+    // carry the raw provider markers that resume repair strips on load.
+    const rawSnapshot = JSON.parse(await Bun.file(store.pathFor(sessionId)).text()) as Record<string, unknown>
+    rawSnapshot.generation = typeof rawSnapshot.generation === 'number' ? rawSnapshot.generation + 1 : 1
+    await Bun.write(store.pathFor(sessionId), JSON.stringify(rawSnapshot))
+
+    // The stripped prefix differs byte-wise from disk but means the same
+    // history, so the append merges instead of failing as divergent.
+    await store.save(
+      { ...resumed, messages: [...resumed.messages, { role: 'user', content: 'follow-up question' }] },
+      {
+        mode: 'append',
+        expectedGeneration: resumed.generation ?? 0,
+        expectedMessageCount: resumed.messages.length,
+      },
+    )
+
+    const merged = await store.load(sessionId)
+    expect(merged?.messages).toHaveLength(3)
+    expect(merged?.messages.at(-1)?.content).toBe('follow-up question')
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
 test('remove waits behind a journal append and cannot leave an orphaned sidecar', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'xerxes-transcript-remove-race-'))
   try {

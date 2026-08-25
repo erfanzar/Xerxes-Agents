@@ -549,9 +549,11 @@ test('file storage validates lock ownership before removing a stale-looking lock
     const refresher = Bun.spawn(
       [
         process.execPath,
-        'run',
+        // NOTE: `bun run -e SCRIPT ARG` treats ARG as a script name ("Script
+        // not found") and dies instantly; plain `bun -e SCRIPT ARG` passes
+        // ARG as process.argv[1].
         '-e',
-        `const fs = require('node:fs'); const lock = process.argv[2]; const id = setInterval(() => { try { fs.utimesSync(lock, new Date(), new Date()); } catch { process.exit(0); } }, 25); setTimeout(() => { clearInterval(id); process.exit(0); }, 300);`,
+        `const fs = require('node:fs'); const lock = process.argv[1]; const id = setInterval(() => { try { fs.utimesSync(lock, new Date(), new Date()); } catch { process.exit(0); } }, 25); setTimeout(() => { clearInterval(id); process.exit(0); }, 300);`,
         lock,
       ],
       { stdout: 'ignore', stderr: 'ignore' },

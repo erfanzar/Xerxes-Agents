@@ -11,8 +11,11 @@ import {
   WebhookChannel,
   type WebhookHeaders,
 } from './webhooks.js'
+import { chunkText } from './textChunking.js'
 
 const TELEGRAM_API_BASE = 'https://api.telegram.org/'
+/** Telegram Bot API rejects sendMessage text longer than this with HTTP 400. */
+export const TELEGRAM_MESSAGE_LIMIT = 4_096
 const DEFAULT_MAX_PAYLOAD_BYTES = 256 * 1024
 const PATH_REDACTION = /(?:\/Users\/[^\s'"]+|\/home\/[^\s'"]+|\/private\/[^\s'"]+|\/var\/[^\s'"]+|\/tmp\/[^\s'"]+|~[\/\\]\.xerxes[^\s'"]*|[A-Za-z]:\\Users\\[^\s'"]+|[A-Za-z]:\\[^\s'"]*\\\.xerxes[^\s'"]*)/g
 const TRACEBACK_REDACTION = /Traceback \(most recent call last\):.*?(?=\n\n|$)/gs
@@ -143,7 +146,13 @@ export class TelegramChannel extends WebhookChannel {
     return asRecord(await this.request('getUpdates', payload, options.signal))
   }
 
-  /** Send a Telegram text message and return Telegram's API envelope. */
+  /**
+   * Send a Telegram text message and return Telegram's API envelope.
+   *
+   * Text longer than {@link TELEGRAM_MESSAGE_LIMIT} is split into sequential
+   * sendMessage calls; only the first piece carries `replyTo`, and the first
+   * envelope is returned so callers can anchor later edits to the thread.
+   */
   async sendText(
     chatId: string,
     text: string,
@@ -152,11 +161,17 @@ export class TelegramChannel extends WebhookChannel {
     if (!chatId) {
       throw new TypeError('Telegram chat id must not be empty')
     }
-    const payload: Record<string, unknown> = { chat_id: chatId, text: sanitizeTelegramOutbound(text) }
-    if (replyTo) {
-      payload.reply_to_message_id = replyTo
+    const chunks = chunkText(sanitizeTelegramOutbound(text), TELEGRAM_MESSAGE_LIMIT)
+    let firstResponse: Readonly<Record<string, unknown>> = {}
+    for (const [index, chunk] of chunks.entries()) {
+      const payload: Record<string, unknown> = { chat_id: chatId, text: chunk }
+      if (replyTo && index === 0) {
+        payload.reply_to_message_id = replyTo
+      }
+      const response = asRecord(await this.request('sendMessage', payload))
+      if (index === 0) firstResponse = response
     }
-    return asRecord(await this.request('sendMessage', payload))
+    return firstResponse
   }
 
   /** Replace a previously sent Telegram message's text. */

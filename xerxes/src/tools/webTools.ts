@@ -37,10 +37,27 @@ export interface PublicFetchOptions {
   readonly timeoutMs?: number
 }
 
+export interface PublicTextOptions {
+  /** Caller cancellation, honored while the response body streams in. */
+  readonly signal?: AbortSignal | undefined
+  /** Fresh budget for the body read; defaults to what remains of the fetch deadline. */
+  readonly timeoutMs?: number | undefined
+}
+
 export interface PublicFetchResponse {
   readonly response: Response
   readonly url: string
 }
+
+/**
+ * Epoch deadline each fetched response must finish downloading by.
+ *
+ * `fetch()` bounds only the headers today; the body used to be read outside any
+ * timeout or abort wiring, so a server that trickled bytes forever held the tool
+ * call open past every limit. Keyed weakly by response object so `text()` can
+ * pick up the remaining time automatically without widening the public shape.
+ */
+const responseReadDeadlines = new WeakMap<object, number>()
 
 /** HTTP-only client that blocks private URLs — literal IPs and DNS answers — and rechecks every redirect target. */
 export class PublicWebClient {
@@ -68,6 +85,9 @@ export class PublicWebClient {
     const { signal: initSignal, ...requestBase } = init
     const signal = options.signal ?? initSignal ?? undefined
     const timeoutMs = boundedInteger(options.timeoutMs ?? this.timeoutMs, 'timeoutMs', 1, MAX_TIMEOUT_MS)
+    // One deadline for the whole exchange — every redirect hop and the body
+    // read that follows — not a fresh budget per request.
+    const deadline = Date.now() + timeoutMs
     const method = (requestBase.method ?? 'GET').toUpperCase()
     let redirectCount = 0
     let currentOrigin = new URL(currentUrl).origin
@@ -82,21 +102,27 @@ export class PublicWebClient {
         : { ...requestBase, redirect: 'manual' }
       const response = await runWithTimeout(
         requestSignal => this.fetcher(currentUrl, withSignal(requestInit, requestSignal)),
-        timeoutMs,
+        Math.max(1, deadline - Date.now()),
         signal,
       )
       if (!REDIRECT_STATUSES.has(response.status) || (method !== 'GET' && method !== 'HEAD')) {
+        responseReadDeadlines.set(response, deadline)
         return { response, url: currentUrl }
       }
 
       const location = response.headers.get('location')
       if (!location) {
+        responseReadDeadlines.set(response, deadline)
         return { response, url: currentUrl }
       }
       if (redirectCount >= this.maxRedirects) {
         throw new ClientError('web', `redirect limit of ${this.maxRedirects} exceeded`)
       }
       const previousProtocol = new URL(currentUrl).protocol
+      // This hop's body is never read — only its Location header mattered.
+      // Leaving it un-consumed pins the connection until GC notices; cancel it
+      // so the socket is released before the next hop.
+      void response.body?.cancel().catch(() => {})
       currentUrl = await assertPublicHttpUrl(new URL(location, currentUrl).toString(), this.urlSafety)
       if (previousProtocol === 'https:' && new URL(currentUrl).protocol === 'http:') {
         throw new ClientError('web', 'refusing to follow an HTTPS to HTTP redirect downgrade')
@@ -110,9 +136,23 @@ export class PublicWebClient {
     }
   }
 
-  async text(response: Response): Promise<string> {
-    return boundedResponseText(response, this.maxResponseBytes)
-  }
+  /**
+   * Download the response body under the same discipline as the fetch itself.
+   *
+   * Reads race against the remaining time to the fetch's deadline (or an
+   * explicit fresh `options.timeoutMs`), the caller's signal aborts the read,
+   * and a timed-out or cancelled body is cancelled at the reader so the
+   * connection is released instead of trickling on unseen.
+   */
+  async text(response: Response, options: PublicTextOptions = {}): Promise<string> {
+    let budgetMs: number | undefined
+    if (options.timeoutMs !== undefined) {
+      budgetMs = boundedInteger(options.timeoutMs, 'timeoutMs', 1, MAX_TIMEOUT_MS)
+    } else {
+      const deadline = responseReadDeadlines.get(response)
+      budgetMs = deadline === undefined ? this.timeoutMs : Math.max(1, deadline - Date.now())
+    }
+    return boundedResponseText(response, this.maxResponseBytes, { signal: options.signal, timeoutMs: budgetMs })  }
 
   urlSafetyDecision(url: string): UrlSafetyDecision {
     return checkUrl(url, this.urlSafety)
@@ -159,7 +199,7 @@ export async function apiRequest(
   }
 
   const fetched = await client.fetch(url, init, fetchOptions(signal, request.timeoutMs))
-  const text = await client.text(fetched.response)
+  const text = await client.text(fetched.response, { signal })
   const result: {
     headers: Readonly<Record<string, string>>
     json?: JsonValue
@@ -219,7 +259,7 @@ export async function scrapeWebPage(
   if (!fetched.response.ok) {
     throw new ClientError('web', `GET ${fetched.url} returned HTTP ${fetched.response.status}`)
   }
-  const html = await client.text(fetched.response)
+  const html = await client.text(fetched.response, { signal })
   const extracted = await extractHtml(html, fetched.url, request.selector)
   const result: {
     content?: string
@@ -283,7 +323,7 @@ export async function readRssFeed(
   if (!fetched.response.ok) {
     throw new ClientError('rss', `GET ${fetched.url} returned HTTP ${fetched.response.status}`)
   }
-  const xml = await client.text(fetched.response)
+  const xml = await client.text(fetched.response, { signal })
   return parseRssFeed(xml, request.includeContent ?? true, maxItems)
 }
 
@@ -909,7 +949,23 @@ async function runWithTimeout<T>(
   }
 }
 
-async function boundedResponseText(response: Response, maxBytes: number): Promise<string> {
+/**
+ * Read a response body up to `maxBytes`, under an optional deadline and signal.
+ *
+ * The byte cap is enforced both from content-length up front and on the
+ * accumulated stream, exactly as before. What changed: each read races against
+ * a composed abort (the caller's signal plus the deadline), so a body that
+ * trickles forever can no longer hold a tool call open past every limit. On
+ * timeout or cancellation the reader is cancelled — releasing the connection —
+ * and a deadline miss surfaces as {@link XerxesTimeoutError}.
+ */
+async function boundedResponseText(
+  response: Response,
+  maxBytes: number,
+  limits: { readonly signal?: AbortSignal | undefined; readonly timeoutMs?: number | undefined } = {},
+): Promise<string> {
+  const signal = limits.signal
+  if (signal?.aborted) throw new ClientError('web', 'request cancelled before execution')
   const declaredLength = response.headers.get('content-length')
   if (declaredLength !== null) {
     const length = Number.parseInt(declaredLength, 10)
@@ -919,11 +975,28 @@ async function boundedResponseText(response: Response, maxBytes: number): Promis
   }
   if (response.body === null) return ''
   const reader = response.body.getReader()
+  const controller = new AbortController()
+  let timedOut = false
+  const forwardCallerAbort = () => controller.abort(signal?.reason)
+  signal?.addEventListener('abort', forwardCallerAbort, { once: true })
+  const timer = limits.timeoutMs === undefined ? undefined : setTimeout(() => {
+    timedOut = true
+    controller.abort(new Error('response body read timed out'))
+  }, limits.timeoutMs)
+  const aborted = new Promise<never>((_resolve, reject) => {
+    controller.signal.addEventListener('abort', () => reject(new Error('response aborted')), { once: true })
+  })
   const chunks: Uint8Array[] = []
   let length = 0
   try {
     while (true) {
-      const chunk = await reader.read()
+      // Deterministic abort precedence: once the deadline or caller abort has
+      // fired, stop consuming immediately. Buffered stream chunks resolve
+      // reader.read() synchronously and can otherwise win Promise.race
+      // repeatedly, draining up to the byte cap before the abort is observed
+      // and misclassifying a deadline cutoff as a size failure.
+      if (controller.signal.aborted) break
+      const chunk = await Promise.race([reader.read(), aborted])
       if (chunk.done) break
       length += chunk.value.byteLength
       if (length > maxBytes) {
@@ -932,8 +1005,28 @@ async function boundedResponseText(response: Response, maxBytes: number): Promis
       }
       chunks.push(chunk.value)
     }
+  } catch (error) {
+    // Release the connection promptly on every abort path; the bytes in flight
+    // are worthless once the caller has stopped waiting.
+    void reader.cancel().catch(() => {})
+    if (controller.signal.aborted) {
+      if (timedOut) {
+        throw new XerxesTimeoutError('web response', Math.max(1, Math.ceil((limits.timeoutMs ?? 0) / 1000)))
+      }
+      if (!signal?.aborted) {
+        throw new ClientError('web', 'request aborted during response download')
+      }
+      throw signal.reason ?? new ClientError('web', 'request cancelled during response download')
+    }
+    throw error
   } finally {
-    reader.releaseLock()
+    if (timer !== undefined) clearTimeout(timer)
+    signal?.removeEventListener('abort', forwardCallerAbort)
+    try {
+      reader.releaseLock()
+    } catch {
+      // Cancelled readers release their own lock; nothing to do.
+    }
   }
   const combined = new Uint8Array(length)
   let offset = 0

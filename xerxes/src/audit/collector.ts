@@ -16,6 +16,30 @@ export interface AuditCollector {
   flush(): void
 }
 
+/**
+ * Optional awaitable durability barrier for collectors that buffer writes
+ * asynchronously (for example the JSONL file sink). Resolves once every record
+ * accepted so far has reached the underlying destination.
+ */
+export interface DrainableAuditCollector {
+  drain(): Promise<void>
+}
+
+/** Optional shutdown contract for collectors that own resources or buffered writes. */
+export interface ClosableAuditCollector {
+  close(): Promise<void>
+}
+
+/** Narrow a collector to its {@link DrainableAuditCollector} capability when it has one. */
+export function isDrainableCollector(collector: AuditCollector): collector is AuditCollector & DrainableAuditCollector {
+  return typeof (collector as Partial<DrainableAuditCollector>).drain === 'function'
+}
+
+/** Narrow a collector to its {@link ClosableAuditCollector} capability when it has one. */
+export function isClosableCollector(collector: AuditCollector): collector is AuditCollector & ClosableAuditCollector {
+  return typeof (collector as Partial<ClosableAuditCollector>).close === 'function'
+}
+
 /** A caller-owned synchronous text sink, useful for embedding or tests. */
 export interface AuditTextSink {
   flush?(): void
@@ -109,6 +133,9 @@ export class JSONLSinkCollector implements AuditCollector {
   private dropped = 0
   private writeFailures = 0
   private lastWriteError: unknown
+  private warnedDropped = 0
+  private warnedFailedBatches = 0
+  private warnTimer: ReturnType<typeof setTimeout> | undefined
 
   constructor(sink: string | AuditTextSink, options: JSONLSinkOptions = {}) {
     this.maxBytes = positiveInteger(options.maxBytes, JSONLSinkCollector.DEFAULT_MAX_BYTES, 'maxBytes')
@@ -149,6 +176,7 @@ export class JSONLSinkCollector implements AuditCollector {
     if (this.filePath !== undefined) {
       if (this.queue.length >= this.maxQueueSize) {
         this.dropped += 1
+        this.queueDurabilityWarning()
         return
       }
       this.queue.push(line)
@@ -184,6 +212,7 @@ export class JSONLSinkCollector implements AuditCollector {
         // Slow/full filesystems must surface as counters, never as agent-loop stalls.
         this.writeFailures += 1
         this.lastWriteError = error
+        this.queueDurabilityWarning()
       })
       .finally(() => {
         this.draining = undefined
@@ -199,11 +228,54 @@ export class JSONLSinkCollector implements AuditCollector {
       clearTimeout(this.flushTimer)
       this.flushTimer = undefined
     }
-    if (this.filePath !== undefined) {
-      await this.drain()
-      return
+    if (this.warnTimer !== undefined) {
+      clearTimeout(this.warnTimer)
+      this.warnTimer = undefined
     }
-    this.stream?.flush?.()
+    try {
+      if (this.filePath !== undefined) {
+        await this.drain()
+        return
+      }
+      this.stream?.flush?.()
+    } finally {
+      // Surface every loss -- including any caused by this final drain -- even if
+      // the deferred warning timer never got a chance to fire.
+      this.reportDurabilityLoss()
+    }
+  }
+
+  /**
+   * Batch durability losses into a single deferred console warning: bursts of drops
+   * within one tick warn once instead of once per event, and a later increase batch
+   * warns again.
+   */
+  private queueDurabilityWarning(): void {
+    if (this.warnTimer !== undefined) return
+    this.warnTimer = setTimeout(() => {
+      this.warnTimer = undefined
+      this.reportDurabilityLoss()
+    }, 0)
+    this.warnTimer.unref?.()
+  }
+
+  /** Warn once when droppedEvents or failedWriteBatches increased past the last warning. */
+  private reportDurabilityLoss(): void {
+    const droppedIncrease = this.dropped - this.warnedDropped
+    const failureIncrease = this.writeFailures - this.warnedFailedBatches
+    if (droppedIncrease <= 0 && failureIncrease <= 0) return
+    this.warnedDropped = this.dropped
+    this.warnedFailedBatches = this.writeFailures
+    const parts = [`audit durability loss on ${this.filePath ?? 'caller-owned sink'}:`]
+    if (droppedIncrease > 0) parts.push(`dropped ${droppedIncrease} audit event(s) because the queue was full`)
+    if (failureIncrease > 0) {
+      parts.push(`${failureIncrease} audit write batch(es) failed`)
+      if (this.lastWriteError !== undefined) {
+        const message = this.lastWriteError instanceof Error ? this.lastWriteError.message : String(this.lastWriteError)
+        parts.push(`last error: ${message}`)
+      }
+    }
+    console.warn(parts.join(' '))
   }
 
   private scheduleFlush(): void {
@@ -277,5 +349,25 @@ export class CompositeCollector implements AuditCollector {
 
   flush(): void {
     for (const collector of this.collectors) collector.flush()
+  }
+
+  /** Await each child's durability barrier in registration order; children without one just flush. */
+  async drain(): Promise<void> {
+    for (const collector of this.collectors) {
+      if (isDrainableCollector(collector)) {
+        await collector.drain()
+        continue
+      }
+      collector.flush()
+    }
+  }
+
+  /** Close children that own resources or buffered writes; they drain as part of closing. */
+  async close(): Promise<void> {
+    for (const collector of this.collectors) {
+      if (isClosableCollector(collector)) {
+        await collector.close()
+      }
+    }
   }
 }

@@ -7,6 +7,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, s
 import { dirname, join, resolve, sep } from 'node:path'
 
 import { xerxesHome } from '../daemon/paths.js'
+import { withFileLock } from './daemonTranscript.js'
 import { migrateSessionRecord } from './migrations.js'
 import {
   CURRENT_SESSION_SCHEMA_VERSION,
@@ -190,10 +191,16 @@ export interface SQLiteSessionStoreOptions {
   readonly busyTimeoutMs?: number
   readonly dbPath?: string
   readonly embedder?: Embedder
+  /** Maximum age before an unverifiable mutation lock may be recovered. */
+  readonly lockStaleMs?: number
+  /** Maximum time a mutator waits for an active cross-process owner. */
+  readonly lockWaitMs?: number
   readonly schemaVersion?: number
 }
 
 const DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 5_000
+const DEFAULT_SESSION_LOCK_STALE_MS = 30_000
+const DEFAULT_SESSION_LOCK_WAIT_MS = 10_000
 
 function sqliteBusyTimeout(value: number | undefined): number {
   const timeout = value ?? DEFAULT_SQLITE_BUSY_TIMEOUT_MS
@@ -201,6 +208,10 @@ function sqliteBusyTimeout(value: number | undefined): number {
     throw new RangeError('busyTimeoutMs must be a non-negative safe integer')
   }
   return timeout
+}
+
+function lockDuration(value: number | undefined, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.trunc(value) : fallback
 }
 
 /**
@@ -244,11 +255,17 @@ export class SQLiteSessionStore implements SessionStore {
   readonly schemaVersion: number
   private readonly database: Database
   private readonly index: SessionIndex
+  private readonly lockPath: string | undefined
+  private readonly lockStaleMs: number
+  private readonly lockWaitMs: number
 
   constructor(options: SQLiteSessionStoreOptions = {}) {
     this.dbPath = options.dbPath ?? join(xerxesHome(), 'sessions', 'sessions.db')
     this.schemaVersion = options.schemaVersion ?? CURRENT_SESSION_SCHEMA_VERSION
     if (this.dbPath !== ':memory:') mkdirSync(dirname(this.dbPath), { recursive: true })
+    this.lockPath = this.dbPath === ':memory:' ? undefined : `${this.dbPath}.lock`
+    this.lockStaleMs = lockDuration(options.lockStaleMs, DEFAULT_SESSION_LOCK_STALE_MS)
+    this.lockWaitMs = lockDuration(options.lockWaitMs, DEFAULT_SESSION_LOCK_WAIT_MS)
     this.database = new Database(this.dbPath)
     try {
       // Install the handler before WAL/schema initialization: opening another
@@ -272,6 +289,45 @@ export class SQLiteSessionStore implements SessionStore {
   close(): void {
     this.index.close()
     this.database.close()
+  }
+
+  /**
+   * Hold the cross-process store lock (`${dbPath}.lock`) while running one
+   * read-modify-write cycle.
+   *
+   * `saveSession` is a whole-blob upsert, so SQLite locking alone only makes
+   * it last-writer-wins: two processes interleaving load→mutate→save cycles
+   * overwrite each other's turns with stale snapshots. The file lock
+   * serializes the entire critical section across processes; `busy_timeout`
+   * stays as the inner defense for raw statement contention.
+   */
+  async withWriteLock<T>(operation: () => Promise<T> | T): Promise<T> {
+    if (this.lockPath === undefined) return await operation()
+    return withFileLock(this.lockPath, async () => await operation(), {
+      label: 'session store',
+      staleMs: this.lockStaleMs,
+      waitMs: this.lockWaitMs,
+    })
+  }
+
+  /**
+   * Load one session with any schema-skew write-back performed under the
+   * cross-process store lock, so a migrating reader cannot interleave its
+   * rewrite with another process's mutation cycle. Plain {@link loadSession}
+   * keeps its synchronous contract for read-only callers.
+   */
+  async loadSessionExclusive(sessionId: string): Promise<SessionRecord | undefined> {
+    return this.withWriteLock(() => this.loadSession(sessionId))
+  }
+
+  /**
+   * Delete one session under the cross-process store lock. An unlocked delete
+   * racing a mutator's whole-blob save resurrects the row the moment that
+   * stale snapshot lands; under the shared lock the delete either precedes
+   * the cycle (which then fails with "Session not found") or follows it.
+   */
+  async deleteSessionExclusive(sessionId: string): Promise<boolean> {
+    return this.withWriteLock(() => this.deleteSession(sessionId))
   }
 
   deleteSession(sessionId: string): boolean {
@@ -389,6 +445,19 @@ export class SQLiteSessionStore implements SessionStore {
 
 const storeSessionLocks = new WeakMap<SessionStore, Map<string, Promise<void>>>()
 
+/**
+ * Durable stores that serialize whole read-modify-write cycles behind the
+ * cross-process store lock. Structural rather than nominal so test doubles
+ * and future stores can opt in without inheriting SQLite internals.
+ */
+export interface LockableSessionStore extends SessionStore {
+  withWriteLock<T>(operation: () => Promise<T> | T): Promise<T>
+}
+
+export function isLockableSessionStore(store: SessionStore): store is LockableSessionStore {
+  return typeof (store as Partial<LockableSessionStore>).withWriteLock === 'function'
+}
+
 /** Lifecycle helper that owns timestamps, identifiers, and durable mutations. */
 export class SessionManager {
   /**
@@ -411,6 +480,16 @@ export class SessionManager {
   }
 
   getSession(sessionId: string): SessionRecord | undefined {
+    return this.store.loadSession(sessionId)
+  }
+
+  /**
+   * Load through the cross-process store lock when the store supports it, so
+   * a schema-skew write-back cannot interleave with another process's
+   * mutation cycle. Intended caller wrapper for store.loadSessionExclusive.
+   */
+  async getSessionExclusive(sessionId: string): Promise<SessionRecord | undefined> {
+    if (isLockableSessionStore(this.store)) return this.store.withWriteLock(() => this.store.loadSession(sessionId))
     return this.store.loadSession(sessionId)
   }
 
@@ -446,6 +525,18 @@ export class SessionManager {
     return session
   }
 
+  /**
+   * Create (or explicitly replace) a session under the cross-process store
+   * lock, so an explicit-id start cannot interleave with another process's
+   * mutation cycle or delete of the same id. The synchronous
+   * {@link startSession} keeps its contract for callers that already hold the
+   * lock or run against ephemeral stores.
+   */
+  async startSessionExclusive(options: StartSessionOptions = {}): Promise<SessionRecord> {
+    if (!isLockableSessionStore(this.store)) return this.startSession(options)
+    return this.store.withWriteLock(() => this.startSession(options))
+  }
+
   private requiredSession(sessionId: string): SessionRecord {
     const session = this.store.loadSession(sessionId)
     if (!session) throw new Error(`Session not found: ${sessionId}`)
@@ -457,6 +548,11 @@ export class SessionManager {
    * for the same session settles. The returned promise rejects when the
    * mutation fails, but the lock chain itself always releases so one failure
    * cannot block later writers.
+   *
+   * The per-store promise chain serializes managers sharing one store
+   * instance; a durable store additionally holds an OS-level lock across the
+   * whole critical section so separate processes cannot overwrite each
+   * other's turns with stale whole-blob snapshots.
    */
   private mutateSession(sessionId: string, mutate: (session: SessionRecord) => void): Promise<void> {
     const previous = this.sessionLocks.get(sessionId) ?? Promise.resolve()
@@ -465,11 +561,15 @@ export class SessionManager {
       release = resolve
     })
     this.sessionLocks.set(sessionId, current)
-    return previous.then(() => {
+    return previous.then(async () => {
       try {
-        const session = this.requiredSession(sessionId)
-        mutate(session)
-        this.store.saveSession(session)
+        const cycle = (): void => {
+          const session = this.requiredSession(sessionId)
+          mutate(session)
+          this.store.saveSession(session)
+        }
+        if (isLockableSessionStore(this.store)) await this.store.withWriteLock(cycle)
+        else cycle()
       } finally {
         // Drain: only the chain tail removes the entry; a queued successor
         // that already replaced it keeps the lock alive.

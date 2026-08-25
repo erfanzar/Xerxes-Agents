@@ -4,8 +4,18 @@
 import { expect, spyOn, test } from 'bun:test'
 
 import { CortexCompletionService, type CortexStreamEvent } from '../src/api-server/cortexCompletionService.js'
+import { ApiRequestError, parseChatCompletionRequest } from '../src/api-server/protocol.js'
 import { OpenAiApiServer } from '../src/api-server/server.js'
 import type { CompletionRequest, LlmClient, LlmDelta } from '../src/llms/client.js'
+
+const READ_FILE_TOOL = {
+  type: 'function',
+  function: {
+    name: 'ReadFile',
+    description: 'Read a workspace file.',
+    parameters: { type: 'object', properties: { path: { type: 'string' } } },
+  },
+} as const
 
 class RecordingClient implements LlmClient {
   readonly requests: CompletionRequest[] = []
@@ -983,6 +993,203 @@ function parseSseFrames(body: string): unknown[] {
     .filter(frame => frame.startsWith('data: {'))
     .map(frame => JSON.parse(frame.slice('data: '.length)) as unknown)
 }
+
+test('tool_choice accepts string forms and maps required onto the neutral any choice', () => {
+  const base = { model: 'gpt-4o', messages: [{ role: 'user', content: 'hi' }] }
+
+  expect(parseChatCompletionRequest({ ...base, tool_choice: 'auto' }).completion.toolChoice).toBe('auto')
+  expect(parseChatCompletionRequest({ ...base, tool_choice: 'none' }).completion.toolChoice).toBe('none')
+  expect(parseChatCompletionRequest({ ...base, tool_choice: 'required' }).completion.toolChoice).toBe('any')
+  const absent = parseChatCompletionRequest(base)
+  expect(absent.completion.toolChoice).toBeUndefined()
+  expect(absent.toolChoiceFunctionName).toBeUndefined()
+})
+
+test('tool_choice accepts the named-function object form when the tool exists', () => {
+  const parsed = parseChatCompletionRequest({
+    model: 'gpt-4o',
+    messages: [{ role: 'user', content: 'hi' }],
+    tools: [READ_FILE_TOOL],
+    tool_choice: { type: 'function', function: { name: 'ReadFile' } },
+  })
+
+  // Neutral request carries the forced-tool-call approximation; the requested
+  // name is preserved for boundaries that own a native OpenAI wire format.
+  expect(parsed.completion.toolChoice).toBe('any')
+  expect(parsed.toolChoiceFunctionName).toBe('ReadFile')
+})
+
+test('tool_choice rejects invalid shapes and unknown named tools with typed validation errors', () => {
+  const base = {
+    model: 'gpt-4o',
+    messages: [{ role: 'user', content: 'hi' }],
+    tools: [READ_FILE_TOOL],
+  }
+  const invalid = [
+    'force',
+    42,
+    {},
+    { type: 'code', function: { name: 'ReadFile' } },
+    { function: { name: 'ReadFile' } },
+    { type: 'function' },
+    { type: 'function', function: {} },
+    { type: 'function', function: { name: '' } },
+    { type: 'function', function: { name: '   ' } },
+    { type: 'function', function: { name: 'MissingTool' } },
+    { type: 'function', function: { name: 'ReadFile' } }, // no tools at all below
+  ]
+  for (const [index, choice] of invalid.entries()) {
+    const body = index === invalid.length - 1 ? { model: base.model, messages: base.messages } : { ...base }
+    try {
+      parseChatCompletionRequest({ ...body, tool_choice: choice })
+      throw new Error(`expected tool_choice ${JSON.stringify(choice)} to be rejected`)
+    } catch (error) {
+      if (!(error instanceof ApiRequestError)) throw error
+      // Sub-field failures point at the offending leaf (e.g. tool_choice.function.name).
+      expect(error.parameter?.startsWith('tool_choice') ?? false, String(index)).toBeTrue()
+    }
+  }
+})
+
+test('the HTTP surface answers an unknown named tool_choice with a 400 envelope', async () => {
+  const server = new OpenAiApiServer({ llm: new RecordingClient([]), models: ['gpt-4o'] })
+  const response = await server.fetch(new Request('http://xerxes.test/v1/chat/completions', {
+    method: 'POST',
+    body: JSON.stringify({
+      model: 'gpt-4o',
+      messages: [{ role: 'user', content: 'hi' }],
+      tools: [READ_FILE_TOOL],
+      tool_choice: { type: 'function', function: { name: 'NotOffered' } },
+    }),
+  }))
+
+  expect(response.status).toBe(400)
+  expect(await response.json()).toMatchObject({
+    error: { type: 'invalid_request_error', param: 'tool_choice' },
+  })
+})
+
+test('named tool_choice passes through to the injected provider end-to-end and marks the response', async () => {
+  const client = new RecordingClient([{ content: 'ok', finishReason: 'stop' }])
+  const server = new OpenAiApiServer({ llm: client, models: ['gpt-4o'], now: fixedNow })
+  const body = {
+    model: 'gpt-4o',
+    messages: [{ role: 'user', content: 'hi' }],
+    tools: [READ_FILE_TOOL],
+    tool_choice: { type: 'function', function: { name: 'ReadFile' } },
+  }
+
+  const response = await server.fetch(new Request('http://xerxes.test/v1/chat/completions', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  }))
+  expect(response.status).toBe(200)
+  // The provider boundary receives the exact requested function, not only the
+  // neutral 'any' approximation, and the response says so.
+  expect(client.requests[0]?.toolChoice).toBe('any')
+  expect(client.requests[0]?.toolChoiceFunctionName).toBe('ReadFile')
+  expect(response.headers.get('x-xerxes-forced-tool-choice')).toBe('ReadFile')
+
+  // Streaming responses carry the same marker.
+  const streaming = await server.fetch(new Request('http://xerxes.test/v1/chat/completions', {
+    method: 'POST',
+    body: JSON.stringify({ ...body, stream: true }),
+  }))
+  expect(streaming.headers.get('x-xerxes-forced-tool-choice')).toBe('ReadFile')
+  await streaming.text()
+
+  // String forms force no named function, so no marker appears.
+  const plain = await server.fetch(new Request('http://xerxes.test/v1/chat/completions', {
+    method: 'POST',
+    body: JSON.stringify({ ...body, tools: [READ_FILE_TOOL], tool_choice: 'required' }),
+  }))
+  expect(plain.headers.get('x-xerxes-forced-tool-choice')).toBeNull()
+})
+
+test('max_completion_tokens takes precedence over max_tokens with field-specific validation errors', () => {
+  const base = { model: 'gpt-4o', messages: [{ role: 'user', content: 'hi' }] }
+
+  const both = parseChatCompletionRequest({ ...base, max_tokens: 5, max_completion_tokens: 9 })
+  expect(both.completion.maxTokens).toBe(9)
+
+  const completionOnly = parseChatCompletionRequest({ ...base, max_completion_tokens: 7 })
+  expect(completionOnly.completion.maxTokens).toBe(7)
+
+  const legacyOnly = parseChatCompletionRequest({ ...base, max_tokens: 3 })
+  expect(legacyOnly.completion.maxTokens).toBe(3)
+
+  const invalidValues = [
+    { max_completion_tokens: 0 },
+    { max_completion_tokens: 1.5 },
+    { max_completion_tokens: 'many' },
+  ]
+  for (const extra of invalidValues) {
+    try {
+      parseChatCompletionRequest({ ...base, ...extra })
+      throw new Error(`expected ${JSON.stringify(extra)} to be rejected`)
+    } catch (error) {
+      if (!(error instanceof ApiRequestError)) throw error
+      expect(error.parameter).toBe('max_completion_tokens')
+    }
+  }
+
+  try {
+    parseChatCompletionRequest({ ...base, max_tokens: -2 })
+    throw new Error('expected invalid max_tokens to be rejected')
+  } catch (error) {
+    if (!(error instanceof ApiRequestError)) throw error
+    expect(error.parameter).toBe('max_tokens')
+  }
+})
+
+test('rate limiting counts unauthenticated requests before the auth verdict', async () => {
+  const server = new OpenAiApiServer({
+    llm: new RecordingClient([]),
+    models: ['gpt-4o'],
+    auth: { token: 'secret-token' },
+    rateLimit: { maxRequests: 2, windowMs: 60_000 },
+  })
+  const attempt = (token: string | undefined) => server.fetch(new Request('http://xerxes.test/v1/models', {
+    method: 'GET',
+    ...(token === undefined ? {} : { headers: { Authorization: `Bearer ${token}` } }),
+  }))
+
+  // Garbage tokens burn the budget instead of riding an unlimited pre-auth
+  // channel; the third attempt is denied before credentials are even checked.
+  expect((await attempt('wrong-1')).status).toBe(401)
+  expect((await attempt('wrong-2')).status).toBe(401)
+  const denied = await attempt('wrong-3')
+  expect(denied.status).toBe(429)
+  expect(denied.headers.get('Retry-After')).toBeDefined()
+  expect(await denied.json()).toMatchObject({ error: { code: 'rate_limit_exceeded' } })
+
+  // The valid credential is subject to the same exhausted bucket.
+  expect((await attempt('secret-token')).status).toBe(429)
+})
+
+test('CORS preflights stay exempt from the rate limiter', async () => {
+  const server = new OpenAiApiServer({
+    llm: new RecordingClient([]),
+    models: ['gpt-4o'],
+    cors: { origins: ['https://app.example'] },
+    auth: { token: 'secret-token' },
+    rateLimit: { maxRequests: 2, windowMs: 60_000 },
+  })
+  const preflight = () => server.fetch(new Request('http://xerxes.test/v1/chat/completions', {
+    method: 'OPTIONS',
+    headers: { Origin: 'https://app.example', 'Access-Control-Request-Method': 'POST' },
+  }))
+  for (let index = 0; index < 5; index += 1) {
+    expect((await preflight()).status).toBe(204)
+  }
+
+  // Preflights consumed nothing: the first two real requests still receive
+  // auth verdicts instead of an immediate 429.
+  const attempt = () => server.fetch(new Request('http://xerxes.test/v1/models'))
+  expect((await attempt()).status).toBe(401)
+  expect((await attempt()).status).toBe(401)
+  expect((await attempt()).status).toBe(429)
+})
 
 async function* emptyCortexStream(): AsyncGenerator<CortexStreamEvent> {}
 

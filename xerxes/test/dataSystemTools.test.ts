@@ -1,9 +1,9 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 import { expect, test } from 'bun:test'
 
@@ -242,4 +242,55 @@ test('SystemInfo uses Bun and Node primitives, while EnvironmentManager redacts 
     operation: 'set',
     key: 'NODE_ENV',
   }), context)).rejects.toBeInstanceOf(FunctionExecutionError)
+})
+
+test('JSONProcessor save refuses an existing file without overwrite and never leaves temp residue', async () => {
+  await inWorkspace(async workspace => {
+    const registry = new ToolRegistry()
+    registerDataTools(registry, new WorkspacePathResolver(workspace))
+    const context = { metadata: {} }
+    const existingPath = join(workspace, 'state', 'keep.json')
+    await mkdir(dirname(existingPath), { recursive: true })
+    await writeFile(existingPath, '{"original":true}\n')
+
+    await expect(registry.execute(call('JSONProcessor', {
+      operation: 'save',
+      file_path: 'state/keep.json',
+      data: { replacement: true },
+      overwrite: false,
+    }), context)).rejects.toThrow('already exists; pass overwrite=true to replace it')
+
+    // The refusal left the original untouched and created no residue.
+    expect(await Bun.file(existingPath).text()).toBe('{"original":true}\n')
+    expect(await readdir(dirname(existingPath))).toEqual(['keep.json'])
+
+    // overwrite=true replaces; a fresh path is created exclusively either way.
+    const replaced = result(await registry.execute(call('JSONProcessor', {
+      operation: 'save',
+      file_path: 'state/keep.json',
+      data: { replacement: true },
+      overwrite: true,
+    }), context))
+    expect(replaced.success).toBeTrue()
+    expect(JSON.parse(await Bun.file(existingPath).text())).toEqual({ replacement: true })
+  })
+})
+
+test('CSVProcessor write refuses an existing file without overwrite', async () => {
+  await inWorkspace(async workspace => {
+    const registry = new ToolRegistry()
+    registerDataTools(registry, new WorkspacePathResolver(workspace))
+    const context = { metadata: {} }
+    const existingPath = join(workspace, 'rows.csv')
+    await writeFile(existingPath, 'a,b\n1,2\n')
+
+    await expect(registry.execute(call('CSVProcessor', {
+      operation: 'write',
+      file_path: 'rows.csv',
+      data: [{ a: 3, b: 4 }],
+      overwrite: false,
+    }), context)).rejects.toThrow('already exists; pass overwrite=true to replace it')
+    expect(await Bun.file(existingPath).text()).toBe('a,b\n1,2\n')
+    expect(await readdir(workspace)).toEqual(['rows.csv'])
+  })
 })

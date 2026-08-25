@@ -4,7 +4,9 @@
 import { expect, test } from 'bun:test'
 
 import {
+  BridgeFrameByteLimitError,
   BridgeServer,
+  MAX_BRIDGE_FRAME_BYTES,
   NdjsonBridgeOutput,
   serveBridgeNdjson,
   validateBridgeModelFetchUrl,
@@ -20,6 +22,7 @@ import { BridgeSession, type BridgeSessionStore } from '../src/bridge/session.js
 import type { BridgeWireFrame } from '../src/bridge/wireEvents.js'
 import type { ProviderProfile, SaveProfileInput } from '../src/bridge/profiles.js'
 import type { StreamEvent } from '../src/streaming/events.js'
+import { version as packageVersion } from '../package.json' with { type: 'json' }
 
 class MemorySessionStore implements BridgeSessionStore {
   readonly records = new Map<string, unknown>()
@@ -181,6 +184,7 @@ class RecordingDiscovery implements BridgeModelDiscoveryPort {
 }
 
 function bridge(options: {
+  readonly contextLimit?: (model: string) => number
   readonly discovery?: BridgeModelDiscoveryPort
   readonly output?: RecordingOutput
   readonly profiles?: BridgeProfileStore
@@ -205,6 +209,7 @@ function bridge(options: {
     store: sessionStore,
   })
   const server = new BridgeServer({
+    contextLimit: options.contextLimit ?? (() => 100_000),
     idFactory: idFactory(),
     output,
     profileStore: profiles,
@@ -455,6 +460,221 @@ test('cancel aborts the server-owned signal and NDJSON output remains transport-
   expect(lines.map(line => JSON.parse(line) as { event: string }).map(item => item.event)).toEqual([
     'ready', 'text_chunk', 'query_done', 'state',
   ])
+})
+
+test('model discovery blocks IPv4-mapped, NAT64, and relay IPv6 literals while public hosts stay allowed', async () => {
+  const discovery = new RecordingDiscovery()
+  const { server } = bridge({ discovery })
+
+  const blocked = [
+    'http://[::ffff:127.0.0.1]/x',
+    'http://[::ffff:169.254.169.254]/x',
+    'http://[::ffff:10.0.0.1]/',
+    'http://[::ffff:7f00:1]/',
+    'http://[64:ff9b::7f00:1]/',
+    'http://[::1]/',
+    'http://[::]/',
+    'http://[fe80::1]/',
+    'http://[fc00::1]/',
+    'http://[fd00::1]/',
+    'http://[2002:7f00:1::]/',
+    'http://[2001:0:1234::]/',
+    'http://[64:ff9b:1::]/',
+  ]
+  for (const url of blocked) {
+    expect(validateBridgeModelFetchUrl(url), url).toBe('Private IP addresses are not allowed')
+    const result = await server.dispatch({ method: 'fetch_models', params: { base_url: url } })
+    expect(result.accepted, url).toBeFalse()
+  }
+  expect(discovery.calls).toHaveLength(0)
+
+  for (const url of ['http://example.com/', 'http://[2606:4700::1111]/', 'https://api.example.com/v1']) {
+    expect(validateBridgeModelFetchUrl(url), url).toBeUndefined()
+  }
+})
+
+test('wire mode surfaces live usage updates as a status update with cumulative usage', async () => {
+  const runtime = new RecordingRuntime()
+  runtime.turn = async function* (input): AsyncGenerator<StreamEvent> {
+    input.state.totalInputTokens += 7
+    input.state.totalOutputTokens += 3
+    input.state.totalCacheReadTokens += 2
+    yield {
+      type: 'usage_update',
+      model: 'gpt-4.1',
+      usage: { inputTokens: 7, outputTokens: 3, cacheReadTokens: 2 },
+      cumulative: { inputTokens: 7, outputTokens: 3, cacheReadTokens: 2 },
+    }
+    yield { type: 'text', text: 'working' }
+    yield {
+      type: 'turn_done',
+      model: 'gpt-4.1',
+      toolCallsCount: 0,
+      usage: { inputTokens: 7, outputTokens: 3, cacheReadTokens: 2 },
+    }
+  }
+  const { server, output } = bridge({ runtime, wireMode: true })
+
+  await server.dispatch({ method: 'init', params: { model: 'gpt-4.1' } })
+  output.wire.length = 0
+  await server.dispatch({ method: 'query', params: { text: 'hello' } })
+  await server.waitForIdle()
+
+  const statusUpdates = output.wire.filter(
+    frame => frame.method === 'event' && frame.params.type === 'StatusUpdate',
+  )
+  // One from usage_update mid-turn and one terminal status after turn end.
+  expect(statusUpdates.length).toBe(2)
+  expect(statusUpdates[0]?.params.payload).toMatchObject({
+    model: 'gpt-4.1',
+    usage: { inputTokens: 7, outputTokens: 3, cacheReadTokens: 2 },
+    total_input_tokens: 7,
+    total_output_tokens: 3,
+    input_tokens: 7,
+    output_tokens: 3,
+    total_tokens: 10,
+    context_tokens: 12,
+    max_context: 100_000,
+    cache_read_tokens: 2,
+  })
+})
+
+test('legacy mode reports live usage through the additive usage_state event', async () => {
+  const runtime = new RecordingRuntime()
+  runtime.turn = async function* (input): AsyncGenerator<StreamEvent> {
+    input.state.totalInputTokens += 5
+    input.state.totalOutputTokens += 2
+    yield {
+      type: 'usage_update',
+      model: 'gpt-4.1',
+      usage: { inputTokens: 5, outputTokens: 2 },
+      cumulative: { inputTokens: 5, outputTokens: 2 },
+    }
+    yield {
+      type: 'turn_done',
+      model: 'gpt-4.1',
+      toolCallsCount: 0,
+      usage: { inputTokens: 5, outputTokens: 2 },
+    }
+  }
+  const { server, output } = bridge({ runtime })
+
+  await server.dispatch({ method: 'init', params: { model: 'gpt-4.1' } })
+  output.legacy.length = 0
+  await server.dispatch({ method: 'query', params: { text: 'hello' } })
+  await server.waitForIdle()
+
+  // Live usage rides the additive `usage_state` event; the terminal `state`
+  // event keeps its disjoint schema for strict legacy consumers.
+  const events = output.legacy.map(event => event.event)
+  expect(events).toContain('usage_state')
+  expect(events.filter(event => event === 'state')).toHaveLength(1)
+  expect(events.indexOf('usage_state')).toBeLessThan(events.indexOf('state'))
+
+  const usageStates = output.legacy.filter(event => event.event === 'usage_state')
+  expect(usageStates[0]?.data).toMatchObject({
+    model: 'gpt-4.1',
+    usage: { inputTokens: 5, outputTokens: 2 },
+    total_input_tokens: 5,
+    total_output_tokens: 2,
+    total_tokens: 7,
+    context_tokens: 7,
+    max_context: 100_000,
+  })
+  expect(usageStates[0]?.data).not.toHaveProperty('turn_count')
+
+  const terminalState = output.legacy.find(event => event.event === 'state')
+  expect(terminalState?.data).toMatchObject({ turn_count: expect.any(Number), cost_usd: expect.any(Number) })
+  expect(terminalState?.data).not.toHaveProperty('usage')
+})
+
+test('wire init_done reports the packaged version', async () => {
+  const { server, output } = bridge({ wireMode: true })
+  await server.dispatch({ method: 'init', params: { model: 'gpt-4.1' } })
+
+  const initDone = output.wire.find(frame => frame.method === 'event' && frame.params.type === 'InitDone')
+  expect(initDone).toBeDefined()
+  expect(initDone?.params.payload.version).toBe(packageVersion)
+})
+
+test('serveBridgeNdjson rejects an oversized frameless line with a typed error and stops reading', async () => {
+  const { server, output } = bridge()
+  let consumedChunks = 0
+  async function* flood(): AsyncGenerator<Uint8Array> {
+    try {
+      while (true) {
+        consumedChunks += 1
+        yield new TextEncoder().encode('a'.repeat(1024 * 1024))
+      }
+    } finally {
+      consumedChunks = -consumedChunks
+    }
+  }
+
+  const error = await serveBridgeNdjson(flood(), server).then(
+    () => undefined,
+    caught => caught,
+  )
+  expect(error).toBeInstanceOf(BridgeFrameByteLimitError)
+  expect((error as BridgeFrameByteLimitError).message).toContain(String(MAX_BRIDGE_FRAME_BYTES))
+  // The typed failure surfaces to the client before the transport gives up.
+  expect(output.legacy.at(-1)).toMatchObject({ event: 'error' })
+  // Reading stopped well before an unbounded number of chunks was consumed.
+  expect(Math.abs(consumedChunks)).toBeLessThan(64)
+  expect(server.isInitialized).toBeFalse()
+})
+
+test('serveBridgeNdjson still accepts a line exactly at the byte cap', async () => {
+  const runtime = new RecordingRuntime()
+  const { server, output } = bridge({ runtime })
+  const padding = 'a'.repeat(MAX_BRIDGE_FRAME_BYTES - '{"method":"init","params":{"model":"gpt-4.1","pad":""}}\n'.length)
+  const oversizedButLegalLine = `${JSON.stringify({ method: 'init', params: { model: 'gpt-4.1', pad: padding } })}\n`
+
+  await serveBridgeNdjson(linesInput([oversizedButLegalLine]), server)
+
+  expect(server.isInitialized).toBeTrue()
+  expect(output.legacy.at(-1)).toMatchObject({ event: 'ready' })
+})
+
+test('serveBridgeNdjson flood rejection stays linear in time (no per-chunk re-encode)', async () => {
+  const { server } = bridge()
+  async function* flood(): AsyncGenerator<Uint8Array> {
+    while (true) {
+      yield new TextEncoder().encode('a'.repeat(64 * 1024))
+    }
+  }
+
+  const started = performance.now()
+  const error = await serveBridgeNdjson(flood(), server).then(() => undefined, caught => caught)
+  const elapsedMs = performance.now() - started
+
+  expect(error).toBeInstanceOf(BridgeFrameByteLimitError)
+  // The cap is ~16 MiB; at 64 KiB chunks that is ~256 chunks. The old
+  // re-encode-per-chunk implementation spent seconds of CPU before reaching
+  // it; incremental accounting must reject in well under one second even on
+  // loaded CI hardware.
+  expect(elapsedMs).toBeLessThan(1_000)
+})
+
+test('serveBridgeNdjson byte accounting stays exact across multibyte and CRLF chunk splits', async () => {
+  const { server, output } = bridge()
+
+  // One init line whose multibyte payload characters and CRLF terminator are
+  // delivered one byte at a time: the incremental counter must subtract
+  // exactly the bytes each consumed line removes, or the next cap check would
+  // misfire and valid input would be rejected.
+  const line = `${JSON.stringify({ method: 'init', params: { model: 'gpt-4.1', text: 'héllo — ünïc' } })}\r\n`
+  const bytes = new TextEncoder().encode(line)
+  async function* bytewise(): AsyncGenerator<Uint8Array> {
+    for (const byte of bytes) {
+      yield new Uint8Array([byte])
+    }
+  }
+
+  await serveBridgeNdjson(bytewise(), server)
+
+  expect(server.isInitialized).toBeTrue()
+  expect(output.legacy.at(-1)).toMatchObject({ event: 'ready' })
 })
 
 async function* defaultTurn(input: BridgeRuntimeTurnInput, _signal: AbortSignal): AsyncGenerator<StreamEvent> {

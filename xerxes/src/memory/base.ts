@@ -151,6 +151,16 @@ export abstract class Memory {
     return this.items.length
   }
 
+  /**
+   * Read-only ordered copy of the in-memory items with no access-state side
+   * effects: unlike retrieve()/search() it never touches items, so boot-time
+   * consumers can inspect a tier without re-persisting access counts. The
+   * copy also shields callers from the live array's internal mutations.
+   */
+  snapshot(): readonly MemoryItem[] {
+    return [...this.items]
+  }
+
   getContext(limit = 10, format: 'json' | 'markdown' | 'text' = 'text'): string {
     const items = this.items.slice(-limit)
     if (format === 'json') {

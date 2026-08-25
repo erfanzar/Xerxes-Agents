@@ -568,21 +568,97 @@ export function requireConfiguredModel(model: string | undefined): string {
 }
 
 /**
+ * Default overall deadline for a {@link completeLlm} call.
+ *
+ * Sized generously: it exists to turn a stalled upstream into an error, not
+ * to cut off slow-but-working generations. Housekeeping completions (pre-turn
+ * auto-compaction, session titling, memory extraction) have no UI watching
+ * them, so without a deadline they could hang a turn forever.
+ */
+export const DEFAULT_COMPLETION_DEADLINE_MS = 180_000
+
+/** Raised when a completion exceeds its deadline rather than failing on its own. */
+export class CompletionDeadlineError extends Error {
+  constructor(
+    readonly timeoutMs: number,
+    options?: { readonly cause?: unknown },
+  ) {
+    super(`LLM completion did not finish within ${timeoutMs}ms`, options)
+    this.name = 'CompletionDeadlineError'
+  }
+}
+
+/** Per-call controls for {@link completeLlm}. */
+export interface CompleteLlmOptions {
+  /**
+   * Overall deadline in milliseconds, overriding
+   * {@link DEFAULT_COMPLETION_DEADLINE_MS}. A caller signal still aborts
+   * immediately and independently of this deadline.
+   */
+  readonly timeoutMs?: number
+}
+
+/**
  * Generate one complete, provider-neutral response.
  *
  * Dedicated adapters can make a native non-streaming request through their optional
  * `complete` method. Stream-only plugins and adapters are collected losslessly from
  * the same delta vocabulary instead, so adding this API does not invalidate them.
+ *
+ * The call carries a default deadline (see {@link DEFAULT_COMPLETION_DEADLINE_MS})
+ * combined with any caller-provided signal: whichever fires first aborts the
+ * transport. The work is additionally raced against that same abort so THIS
+ * caller observes the failure promptly even when a stalled transport never
+ * inspects its signal — precisely the housekeeping stall the deadline exists
+ * for. The race listener is detached on settle.
  */
 export async function completeLlm(
   client: LlmClient,
   request: CompletionRequest,
   signal?: AbortSignal,
+  options: CompleteLlmOptions = {},
 ): Promise<LlmCompletion> {
-  if (typeof client.complete === 'function') {
-    return client.complete(request, signal)
+  const timeoutMs = options.timeoutMs ?? DEFAULT_COMPLETION_DEADLINE_MS
+  const deadline = AbortSignal.timeout(timeoutMs)
+  // Bun 1.3 provides AbortSignal.any; combining keeps one wire into the
+  // transport while the deadline stays attributable for error translation.
+  const combined = signal ? AbortSignal.any([signal, deadline]) : deadline
+
+  let onCombinedAbort: (() => void) | undefined
+  try {
+    const work = typeof client.complete === 'function'
+      ? client.complete(request, combined)
+      : collectLlmCompletion(client.stream(request, combined))
+    return await Promise.race([work, abortRejection(combined, listener => {
+      onCombinedAbort = listener
+    })])
+  } catch (error) {
+    if (deadline.aborted && !signal?.aborted) {
+      throw new CompletionDeadlineError(timeoutMs, { cause: error })
+    }
+    throw error
+  } finally {
+    if (onCombinedAbort) combined.removeEventListener('abort', onCombinedAbort)
   }
-  return collectLlmCompletion(client.stream(request, signal))
+}
+
+/**
+ * Reject with the signal's abort reason as soon as it fires.
+ *
+ * `register` hands the listener back so the caller can detach it on settle;
+ * otherwise every completed call would leave a reaction parked until the
+ * deadline eventually fires.
+ */
+function abortRejection(signal: AbortSignal, register: (listener: () => void) => void): Promise<never> {
+  return new Promise((_, reject) => {
+    const listener = () => reject(signal.reason)
+    register(listener)
+    if (signal.aborted) {
+      listener()
+      return
+    }
+    signal.addEventListener('abort', listener, { once: true })
+  })
 }
 
 /** Collect a provider-neutral stream into a non-streaming completion result. */
@@ -864,7 +940,7 @@ function promptCacheKey(request: CompletionRequest, providerName: ProviderName):
     return undefined
   }
   const digest = createHash('sha256')
-    .update(`${providerName} ${providerModel(request.model, providerName)} ${text}`)
+    .update(`${providerName}\0${providerModel(request.model, providerName)}\0${text}`)
     .digest('hex')
   return `xerxes-${digest.slice(0, 32)}`
 }

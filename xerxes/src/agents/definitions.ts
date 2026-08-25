@@ -8,6 +8,8 @@ import { fileURLToPath } from 'node:url'
 import { xerxesHome } from '../daemon/paths.js'
 import { AgentSpecError } from '../core/errors.js'
 import {
+  agentSpecIsolationError,
+  drainAgentSpecDiagnostics,
   loadAgentSpec,
   loadAgentSpecData,
   type AgentSpecLoadOptions,
@@ -85,11 +87,13 @@ export function loadAgentDefinitions(options: AgentDefinitionLoadOptions = {}): 
       for (const definition of parseProjectAgentFile(candidate, 'project', options)) {
         definitions.set(definition.name, definition)
       }
+      recordSpecDiagnostics()
     } catch (error) {
       recordLoadError(candidate, error)
     }
   }
   loadReferencedSubagentDefinitions(definitions, options)
+  emitCollectedLoadErrors()
   return definitions
 }
 
@@ -107,6 +111,55 @@ export function listAgentDefinitionLoadErrors(): string[] {
     loadAgentDefinitions()
   }
   return [...lastLoadErrors]
+}
+
+/**
+ * Formatted summary of the last definition-load issues, or undefined when the
+ * catalog loaded cleanly. Doctor-style surfaces can render this directly; the
+ * lines name the file and the validation failure for each skipped spec.
+ */
+export function formatAgentDefinitionLoadErrors(): string | undefined {
+  const errors = listAgentDefinitionLoadErrors()
+  return errors.length ? errors.map(error => `- ${error}`).join('\n') : undefined
+}
+
+let lastEmittedLoadErrors: string | undefined
+
+/**
+ * Emit collected load errors to stderr, at most once per loadAgentDefinitions
+ * run.
+ *
+ * Strict spec rejection used to be invisible: a spec that stopped loading
+ * silently vanished from the catalog and `xerxes --agent foo` only reported
+ * "Unknown agent". Identical consecutive error sets are suppressed so hot
+ * paths that re-resolve the catalog (per-spawn definition lookup) cannot flood
+ * stderr with the same warning; any changed set is announced again.
+ */
+function emitCollectedLoadErrors(): void {
+  if (!lastLoadErrors.length) {
+    return
+  }
+  const signature = lastLoadErrors.join('\n')
+  if (signature === lastEmittedLoadErrors) {
+    return
+  }
+  lastEmittedLoadErrors = signature
+  console.error(
+    `[xerxes] ${lastLoadErrors.length} agent definition issue(s); affected specs are skipped until fixed:\n  ${
+      lastLoadErrors.join('\n  ')
+    }`,
+  )
+}
+
+/**
+ * Append notes collected by the spec parser while loading one file (deprecated
+ * spellings such as a YAML `description` next to `when_to_use`) to the shared
+ * load-error channel so adjustments ride the same surface as hard failures.
+ */
+function recordSpecDiagnostics(): void {
+  for (const diagnostic of drainAgentSpecDiagnostics()) {
+    lastLoadErrors.push(diagnostic)
+  }
 }
 
 /**
@@ -131,10 +184,14 @@ export function resolveAgentDefinition(
   if (existsSync(candidate)) {
     const extension = extname(candidate)
     if (extension === '.yaml' || extension === '.yml') {
-      return definitionFromSpec(loadAgentSpec(candidate, options), 'cli')
+      const definition = definitionFromSpec(loadAgentSpec(candidate, options), 'cli')
+      recordSpecDiagnostics()
+      return definition
     }
     if (extension === '.md') {
-      return parseAgentMarkdown(candidate, 'cli')
+      const definition = parseAgentMarkdown(candidate, 'cli')
+      recordSpecDiagnostics()
+      return definition
     }
     throw new AgentSpecError(`Unsupported agent file extension '${extension}': ${candidate}`)
   }
@@ -142,14 +199,35 @@ export function resolveAgentDefinition(
   throw new AgentSpecError(`Unknown agent '${reference}'. Available agents: ${available}`)
 }
 
+/** Recognized fields in a Markdown definition's YAML frontmatter. */
+const RECOGNIZED_MARKDOWN_FRONTMATTER_FIELDS: ReadonlySet<string> = new Set([
+  'description',
+  'isolation',
+  'max_depth',
+  'model',
+  'tools',
+])
+
 /** Parse a Markdown definition with optional YAML frontmatter. */
 export function parseAgentMarkdown(path: string, source = 'user'): AgentDefinition {
   const content = readFileSync(path, 'utf8')
   const name = basenameWithoutExtension(path)
   const frontmatter = markdownFrontmatter(content)
   const fields = frontmatter ? yamlMap(parseYaml(frontmatter.fields, path), `${path} frontmatter`) : {}
+  // Markdown definitions previously bypassed spec validation entirely, so an
+  // `isolation: worktrees` typo silently downgraded children to shared-FS
+  // writes and a `depth_limit: 9` typo kept the default depth. Apply the same
+  // strictness as the YAML loader: unknown keys and invalid modes fail the file.
+  rejectUnknownFrontmatterFields(fields, path)
   const tools = stringList(fields.tools, `${path} frontmatter.tools`)
   const maxDepth = fields.max_depth === undefined ? 5 : integer(fields.max_depth, `${path} frontmatter.max_depth`)
+  const declaredIsolation = fields.isolation === undefined || fields.isolation === null
+    ? ''
+    : String(fields.isolation)
+  const isolationError = agentSpecIsolationError(declaredIsolation, `${path} frontmatter.isolation`)
+  if (isolationError !== undefined) {
+    throw new AgentSpecError(isolationError)
+  }
   return freezeDefinition({
     name,
     description: stringValue(fields.description),
@@ -160,8 +238,21 @@ export function parseAgentMarkdown(path: string, source = 'user'): AgentDefiniti
     excludeTools: [],
     source,
     maxDepth,
-    isolation: stringValue(fields.isolation),
+    isolation: declaredIsolation,
   })
+}
+
+/** Reject unrecognized frontmatter keys so misspelled settings cannot be ignored. */
+function rejectUnknownFrontmatterFields(fields: YamlMap, path: string): void {
+  for (const key of Object.keys(fields)) {
+    if (RECOGNIZED_MARKDOWN_FRONTMATTER_FIELDS.has(key)) {
+      continue
+    }
+    throw new AgentSpecError(
+      `${path} frontmatter contains unknown field '${key}' ` +
+      `(recognized: ${[...RECOGNIZED_MARKDOWN_FRONTMATTER_FIELDS].sort().join(', ')})`,
+    )
+  }
 }
 
 function loadDefinitionDirectory(
@@ -174,6 +265,7 @@ function loadDefinitionDirectory(
     try {
       const definition = definitionFromSpec(loadAgentSpec(path, options), source)
       definitions.set(definition.name, definition)
+      recordSpecDiagnostics()
     } catch (error) {
       recordLoadError(path, error)
     }
@@ -182,6 +274,7 @@ function loadDefinitionDirectory(
     try {
       const definition = parseAgentMarkdown(path, source)
       definitions.set(definition.name, definition)
+      recordSpecDiagnostics()
     } catch (error) {
       recordLoadError(path, error)
     }
@@ -206,6 +299,7 @@ function loadReferencedSubagentDefinitions(
         let profileKey = loadedPaths.get(referenceKey)
         if (!profileKey) {
           const loaded = definitionFromSpec(loadAgentSpec(reference.path, options), creator.source)
+          recordSpecDiagnostics()
           const definition = loaded.name === alias ? loaded : freezeDefinition({ ...loaded, name: alias })
           const existing = definitions.get(alias)
           // Referenced-only profiles never claim the plain alias: that would make a

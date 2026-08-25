@@ -12,6 +12,8 @@ import { AgentMemory } from '../src/memory/agentMemory.js'
 import { ContextualMemory } from '../src/memory/contextualMemory.js'
 import { LongTermMemory } from '../src/memory/longTermMemory.js'
 import { SimpleStorage } from '../src/memory/storage.js'
+import { SkillRegistry } from '../src/extensions/skills.js'
+import { UserPromptManager } from '../src/operators/userPrompt.js'
 import { ToolRegistry } from '../src/executors/toolRegistry.js'
 import {
   BrowserSession,
@@ -164,8 +166,32 @@ test('core registration accepts explicitly host-bound Claude-compatible adapters
   const names = new Set(registry.definitions().map(definition => definition.function.name))
 
   expect(names).toContain('TodoWriteTool')
-  expect(names).toContain('PlanTool')
   expect(names).toContain('EnterWorktreeTool')
+  // Tools whose host port was not supplied are not advertised at all: a
+  // PlanTool without a planner could only answer with an error.
+  expect(names).not.toContain('PlanTool')
+  expect(names).not.toContain('AskUserQuestionTool')
+  expect(names).not.toContain('SkillTool')
+})
+
+test('workflow tools appear once their host ports are attached', () => {
+  const registry = new ToolRegistry()
+  registerCoreTools(registry, {
+    includeProcessTools: false,
+    claudeCompatibilityTools: {
+      workflow: {
+        planGenerator: { generate: async () => [] },
+        skillRegistry: new SkillRegistry(),
+        userPromptManager: new UserPromptManager(),
+        workspaceRoot: process.cwd(),
+      },
+    },
+  })
+  const names = new Set(registry.definitions().map(definition => definition.function.name))
+
+  expect(names).toContain('PlanTool')
+  expect(names).toContain('SkillTool')
+  expect(names).toContain('AskUserQuestionTool')
 })
 
 test('core registration exposes every supplied host-bound port without enabling it by accident', async () => {

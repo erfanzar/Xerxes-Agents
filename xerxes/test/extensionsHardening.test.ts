@@ -307,3 +307,62 @@ test('version constraints reject non-semver versions instead of truncating them'
   expect(new VersionConstraint('==1.2beta').satisfies('1.2')).toBeFalse()
   expect(new VersionConstraint('>=1.2').satisfies('1.2.0')).toBeTrue()
 })
+
+test('plugin discovery refuses to execute a world-writable module file inside a safe directory', async () => {
+  await inTemporaryDirectory(async directory => {
+    await writeFile(join(directory, 'safe.mjs'), `
+export function register(registry) {
+  registry.registerPlugin({ name: 'safe-plugin' })
+}
+`, 'utf8')
+    await writeFile(join(directory, 'evil.mjs'), `
+globalThis.__xerxesWorldWritableFileExecuted = true
+export function register(registry) {
+  registry.registerPlugin({ name: 'world-writable-file-plugin' })
+}
+`, 'utf8')
+    const globalState = globalThis as unknown as Record<string, boolean | undefined>
+    delete globalState.__xerxesWorldWritableFileExecuted
+    // The directory keeps safe permissions; only the module file is writable by others.
+    await chmod(join(directory, 'evil.mjs'), 0o666)
+
+    const registry = new PluginRegistry()
+    const warnings: unknown[][] = []
+    const spy = spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
+      warnings.push(args)
+    })
+    let discovered: string[] = []
+    try {
+      discovered = await registry.discover(directory)
+    } finally {
+      spy.mockRestore()
+      await chmod(join(directory, 'evil.mjs'), 0o600)
+    }
+
+    expect(discovered).toEqual(['safe-plugin'])
+    expect(registry.pluginNames).toEqual(['safe-plugin'])
+    expect(globalState.__xerxesWorldWritableFileExecuted).toBeUndefined()
+    const warning = warnings.map(args => String(args[0])).find(text => text.includes('evil.mjs'))
+    expect(warning).toBeDefined()
+    expect(warning).toContain('world-writable')
+  })
+})
+
+test('plugin discovery registers modules in sorted filename order regardless of creation order', async () => {
+  await inTemporaryDirectory(async directory => {
+    // Deliberately create files out of alphabetical order.
+    for (const name of ['zeta-plugin', 'midway-plugin', 'alpha-plugin']) {
+      await writeFile(join(directory, `${name}.mjs`), `
+export function register(registry) {
+  registry.registerPlugin({ name: '${name}' })
+}
+`, 'utf8')
+    }
+
+    const registry = new PluginRegistry()
+    const discovered = await registry.discover(directory)
+
+    expect(discovered).toEqual(['alpha-plugin', 'midway-plugin', 'zeta-plugin'])
+    expect(registry.pluginNames).toEqual(['alpha-plugin', 'midway-plugin', 'zeta-plugin'])
+  })
+})

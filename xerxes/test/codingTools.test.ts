@@ -1,10 +1,10 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { utimesSync } from 'node:fs'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { chmodSync, utimesSync } from 'node:fs'
+import { lstat, mkdir, mkdtemp, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 import { afterEach, expect, test } from 'bun:test'
 
@@ -26,6 +26,7 @@ import {
   moveFile,
   readFile,
   registerCodingTools,
+  runGit,
   writeFile,
 } from '../src/tools/codingTools.js'
 import { fileStateTracker } from '../src/tools/fileState.js'
@@ -293,4 +294,145 @@ test('the coding surface enforces the same read-before-write rule as the upper-c
     )).rejects.toThrow('a whole-file write would discard those changes')
     expect(await Bun.file(path).text()).toContain('export const extra = true')
   })
+})
+
+/**
+ * Write a stub `git` shell script and hand back its absolute path, so tests can
+ * point runGit's `executable` parameter at it. (Bun resolves bare executable
+ * names against the PATH captured at startup, so PATH mutation cannot shadow
+ * `git` for Bun.spawn.)
+ */
+async function writeStubGit(script: string): Promise<string> {
+  const stubDirectory = await mkdtemp(join(tmpdir(), 'xerxes-stub-git-'))
+  const stubPath = join(stubDirectory, 'git')
+  await Bun.write(stubPath, `#!/bin/sh\n${script}`)
+  chmodSync(stubPath, 0o755)
+  return stubPath
+}
+
+test('runGit collects output even when a hook keeps the pipe open after git exits', async () => {
+  // The bug this pins: awaiting `new Response(child.stdout).text()` waits for
+  // EOF, and EOF requires every holder of the write end to close. A background
+  // holder spawned by a git hook kept the pipe open long after git itself was
+  // done, so the call hung forever even though the command had succeeded.
+  const workspace = await mkdtemp(join(tmpdir(), 'xerxes-run-git-holder-'))
+  const stub = await writeStubGit('(sleep 30) &\necho hook-output\nexit 0\n')
+  try {
+    const started = Date.now()
+    const output = await runGit(workspace, ['status'], undefined, undefined, stub)
+    expect(Date.now() - started).toBeLessThan(10_000)
+    expect(output).toContain('hook-output')
+  } finally {
+    await rm(workspace, { force: true, recursive: true })
+    await rm(dirname(stub), { force: true, recursive: true })
+  }
+})
+
+test('runGit rejects with the timeout error instead of hanging when the child ignores SIGTERM', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'xerxes-run-git-timeout-'))
+  // Ignore SIGTERM like a wedged hook, hold the pipe with a holder, and
+  // busy-wait so only SIGKILL can end it.
+  const stub = await writeStubGit("trap '' TERM\n(sleep 3) &\necho out\nwhile :; do :; done\n")
+  try {
+    const started = Date.now()
+    await expect(runGit(workspace, ['status'], undefined, 800, stub))
+      .rejects.toThrow('command timed out after 800ms')
+    const elapsed = Date.now() - started
+    // The initial SIGTERM fired at 800ms; the SIGKILL escalation lands about
+    // one grace period later. Anything longer means the escalation failed.
+    expect(elapsed).toBeGreaterThan(700)
+    expect(elapsed).toBeLessThan(15_000)
+  } finally {
+    await rm(workspace, { force: true, recursive: true })
+    await rm(dirname(stub), { force: true, recursive: true })
+  }
+})
+
+test('move_file refuses an existing destination without overwrite and never leaves residue', async () => {
+  await inWorkspace(async (workspace, paths) => {
+    await Bun.write(join(workspace, 'src.txt'), 'source\n')
+    await Bun.write(join(workspace, 'dst.txt'), 'destination\n')
+
+    await expect(moveFile({ destination: 'dst.txt', source: 'src.txt' }, paths))
+      .rejects.toThrow('already exists; pass overwrite=true to replace it')
+    // The refusal must not consume the source or disturb the destination.
+    expect(await Bun.file(join(workspace, 'src.txt')).text()).toBe('source\n')
+    expect(await Bun.file(join(workspace, 'dst.txt')).text()).toBe('destination\n')
+
+    // overwrite=true keeps the documented replace semantics.
+    expect(await moveFile({ destination: 'dst.txt', overwrite: true, source: 'src.txt' }, paths))
+      .toContain('Successfully moved')
+    expect(await Bun.file(join(workspace, 'dst.txt')).text()).toBe('source\n')
+    expect(await Bun.file(join(workspace, 'src.txt')).exists()).toBeFalse()
+    const residue = await Array.fromAsync(new Bun.Glob('*.tmp').scan({ cwd: workspace }))
+    expect(residue).toEqual([])
+  })
+})
+
+test('move_file moves a directory to a fresh destination with overwrite=false', async () => {
+  // The bug this pins: the TOCTOU reservation created an empty FILE at the
+  // destination unconditionally, so rename(dir → existing file) failed ENOTDIR
+  // and no flag combination could move a directory anymore.
+  await inWorkspace(async (workspace, paths) => {
+    await mkdir(join(workspace, 'project', 'nested'), { recursive: true })
+    await Bun.write(join(workspace, 'project', 'nested', 'leaf.txt'), 'inside\n')
+
+    expect(await moveFile({ destination: 'moved/project', source: 'project' }, paths))
+      .toContain('Successfully moved')
+    expect(await Bun.file(join(workspace, 'moved', 'project', 'nested', 'leaf.txt')).text()).toBe('inside\n')
+    // The source tree is gone and the destination is the directory itself, not
+    // a reservation artifact.
+    expect(await Bun.file(join(workspace, 'project', 'nested', 'leaf.txt')).exists()).toBeFalse()
+    const stat = await lstat(join(workspace, 'moved', 'project'))
+    expect(stat.isDirectory()).toBeTrue()
+    // No stray reservation files or directories next to it.
+    expect(await readdir(join(workspace, 'moved'))).toEqual(['project'])
+  })
+})
+
+test('move_file still refuses an existing destination for directories without overwrite', async () => {
+  await inWorkspace(async (workspace, paths) => {
+    await mkdir(join(workspace, 'src'), { recursive: true })
+    await mkdir(join(workspace, 'dst'), { recursive: true })
+    await Bun.write(join(workspace, 'src', 'a.txt'), 'a\n')
+
+    await expect(moveFile({ destination: 'dst', source: 'src' }, paths))
+      .rejects.toThrow('already exists; pass overwrite=true to replace it')
+    expect(await Bun.file(join(workspace, 'src', 'a.txt')).text()).toBe('a\n')
+    expect(await readdir(join(workspace, 'dst'))).toEqual([])
+  })
+})
+
+test.skipIf(process.platform === 'win32')('runGit takes down a hook helper forked during the kill window', async () => {
+  // The bug this pins: only the direct git pid was ever signalled. A hook that
+  // traps SIGTERM, forks a helper while dying, and then exits within the grace
+  // window left that helper orphaned — the escalation was skipped because the
+  // direct child looked finished.
+  const workspace = await mkdtemp(join(tmpdir(), 'xerxes-run-git-late-fork-'))
+  const logPath = join(workspace, 'ticks.log')
+  const stub = await writeStubGit(
+    `trap '(while :; do echo tick >> "${logPath}"; sleep 0.05; done) &' TERM\n`
+      + 'echo out\n'
+      + 'while :; do :; done\n',
+  )
+  try {
+    const started = Date.now()
+    await expect(runGit(workspace, ['status'], undefined, 800, stub))
+      .rejects.toThrow('command timed out after 800ms')
+    // TERM at 800ms (trapped, forks the helper), SIGKILL at ~2.8s, then the
+    // post-exit group sweep.
+    const elapsed = Date.now() - started
+    expect(elapsed).toBeGreaterThan(2_500)
+    expect(elapsed).toBeLessThan(15_000)
+
+    await Bun.sleep(400)
+    const file = Bun.file(logPath)
+    const before = (await file.exists()) ? (await file.text()).length : -1
+    await Bun.sleep(800)
+    const after = (await file.exists()) ? (await file.text()).length : -1
+    expect(after).toBe(before)
+  } finally {
+    await rm(workspace, { force: true, recursive: true })
+    await rm(dirname(stub), { force: true, recursive: true })
+  }
 })

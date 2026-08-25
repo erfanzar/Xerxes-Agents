@@ -354,8 +354,17 @@ export function adaptDaemonEvent(type: string, payload: Record<string, unknown>)
     case 'turn_end':
       // The native daemon flags a cancelled turn's final edge. Forward it so
       // the UI can tell a daemon-confirmed interruption from a natural
-      // completion that merely raced the user's Esc keystroke.
-      return [{ type: 'message.complete', payload: { ...(bool(payload.cancelled) ? { interrupted: true } : {}) } }]
+      // completion that merely raced the user's Esc keystroke. `unstarted`
+      // additionally marks a cancel that fired before any turn_begin or
+      // assistant content existed (setup abort / suppressed launch), so the
+      // handler settles the turn without synthesizing an assistant row.
+      return [{
+        type: 'message.complete',
+        payload: {
+          ...(bool(payload.cancelled) ? { interrupted: true } : {}),
+          ...(bool(payload.unstarted) ? { unstarted: true } : {})
+        }
+      }]
 
     case 'step_interrupted':
       return [{ type: 'message.complete', payload: { text: '[interrupted]' } }]

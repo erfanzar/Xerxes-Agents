@@ -644,3 +644,41 @@ function todayNote(workspace: string): string {
   const day = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`
   return join(workspace, 'memory', day + '.md')
 }
+
+class OversizedPreviewRuntime extends RecordingRuntime {
+  override async submitTurn(_sessionKey: string, _text: string, emit: (event: DaemonEvent) => void): Promise<void> {
+    emit({ type: 'text_part', payload: { text: 'START-SENTINEL' + 'x'.repeat(5_000) + 'END-SENTINEL' } })
+  }
+}
+
+test('channel turn router previews keep the head of oversized output and mark the truncation', async () => {
+  const channel = new PreviewRecordingChannel()
+  const runtime = new OversizedPreviewRuntime()
+  const manager = new ChannelManager({ channels: [['telegram', channel]] })
+  const router = new ChannelTurnRouter({
+    channels: manager,
+    previewInterval: 1,
+    runtime,
+    typingInterval: 1,
+  })
+  manager.setInboundHandler(message => router.handle(message))
+  await manager.enable('telegram')
+
+  await channel.receive(createChannelMessage({
+    channel: 'telegram',
+    channelUserId: 'user-7',
+    direction: MessageDirection.INBOUND,
+    platformMessageId: 'incoming-1',
+    roomId: 'chat-7',
+    text: 'stream something huge',
+  }))
+
+  const finalEdit = [...channel.previews].reverse().find(preview => preview.kind === 'edit')
+  expect(finalEdit).toBeDefined()
+  // The head is preserved and the cut is visible, instead of keeping the tail
+  // with no marker.
+  expect(finalEdit!.text.startsWith('START-SENTINEL')).toBeTrue()
+  expect(finalEdit!.text.endsWith('…[truncated]')).toBeTrue()
+  expect(finalEdit!.text.length).toBeLessThanOrEqual(4_096)
+  expect(finalEdit!.text).not.toContain('END-SENTINEL')
+})

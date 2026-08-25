@@ -3,6 +3,8 @@
 
 import { isIP } from 'node:net'
 
+import { version } from '../../package.json' with { type: 'json' }
+
 import {
   BridgeSlashRouter,
   type BridgeProviderProfile,
@@ -268,6 +270,11 @@ export class BridgeServer {
     }
   }
 
+  /** Surface a transport-level failure, such as an oversized NDJSON frame, as a bridge error event. */
+  reportTransportError(message: string): void {
+    this.emitError(message)
+  }
+
   private async initialize(params: Record<string, unknown>): Promise<BridgeDispatchResult> {
     if (this.activeTurn) return this.reject('A query is already running. Wait or send cancel.')
 
@@ -484,6 +491,13 @@ export class BridgeServer {
           tool_calls_count: event.toolCallsCount,
           model: event.model,
         })
+        return
+      case 'usage_update':
+        // Mirrors daemon/turnRunner.ts: the provider's per-round input is the
+        // request context it actually saw; generated output is added so the
+        // remaining-token meter moves before buffered deltas replay. Without
+        // this case bridge clients saw no live usage until turn_done.
+        this.emitUsageStatus(event)
         return
       case 'skill_suggestion':
         this.emitLegacy('skill_suggested', {
@@ -791,7 +805,7 @@ export class BridgeServer {
       skills: [...(this.runtimeInfo.skills ?? [])].sort(),
       skill_descriptions: {},
       mode: textValue(this.config.mode) || 'code',
-      version: '0.3.0',
+      version,
     })
   }
 
@@ -805,6 +819,45 @@ export class BridgeServer {
       mode: textValue(this.config.mode) || 'code',
       reasoning_effort: textValue(this.config.reasoning_effort) || 'off',
     })
+  }
+
+  /**
+   * Live usage for a `usage_update` stream event.
+   *
+   * Wire mode emits the same `status_update` payload shape as
+   * daemon/turnRunner.ts's usage_update mapping. Legacy mode emits the new
+   * additive `usage_state` event rather than reusing `state`: `state` has a
+   * fixed terminal schema ({turn_count, cost_usd, context_limit, ...} from
+   * statePayload()) that strict legacy consumers validate, and folding live
+   * usage fields into it mid-turn broke them. The v35 NDJSON bridge protocol
+   * is preserved because this only adds an event name — existing events keep
+   * their exact shapes, and legacy clients that ignore unknown events are
+   * unaffected while strict ones stop seeing schema collisions.
+   */
+  private emitUsageStatus(event: Extract<StreamEvent, { type: 'usage_update' }>): void {
+    const payload = {
+      model: event.model,
+      usage: event.cumulative,
+      total_input_tokens: this.state.totalInputTokens,
+      total_output_tokens: this.state.totalOutputTokens,
+      input_tokens: this.state.totalInputTokens,
+      output_tokens: this.state.totalOutputTokens,
+      total_tokens: this.state.totalInputTokens + this.state.totalOutputTokens,
+      // Per-round request occupancy: provider input plus cache reads plus the
+      // generated output of this round, matching turnRunner exactly.
+      context_tokens:
+        event.usage.inputTokens + (event.usage.cacheReadTokens ?? 0) + event.usage.outputTokens,
+      max_context: this.contextLimit(event.model),
+      ...(this.state.totalCacheReadTokens ? { cache_read_tokens: this.state.totalCacheReadTokens } : {}),
+      ...(this.state.totalCacheCreationTokens
+        ? { cache_creation_tokens: this.state.totalCacheCreationTokens }
+        : {}),
+    }
+    if (this.options.wireMode) {
+      this.wire.emitStatus(payload)
+      return
+    }
+    this.emitLegacy('usage_state', payload)
   }
 
   private emitResumedHistory(): void {
@@ -931,23 +984,75 @@ export class NdjsonBridgeOutput implements BridgeServerOutput {
   }
 }
 
+/** Matches the daemon, ACP, and MCP caps: one NDJSON frame may not exceed 16 MiB. */
+export const MAX_BRIDGE_FRAME_BYTES = 16 * 1024 * 1024
+
+/**
+ * Typed failure for a single NDJSON bridge frame that exceeds
+ * {@link MAX_BRIDGE_FRAME_BYTES} without a newline. The transport stops
+ * reading instead of letting the line buffer grow without bound.
+ */
+export class BridgeFrameByteLimitError extends Error {
+  constructor(readonly limitBytes: number = MAX_BRIDGE_FRAME_BYTES) {
+    super(`Bridge NDJSON frame exceeds the ${limitBytes}-byte per-line cap.`)
+    this.name = 'BridgeFrameByteLimitError'
+  }
+}
+
 /** Consume newline-delimited input without opening stdin or stdout itself. */
 export async function serveBridgeNdjson(
   input: AsyncIterable<string | Uint8Array>,
   server: BridgeServer,
 ): Promise<void> {
   const decoder = new TextDecoder()
+  const encoder = new TextEncoder()
   let buffer = ''
+  // Incremental UTF-8 byte count of the pending unterminated line, following
+  // the AcpFrameByteCounter/MCPFrameByteCounter siblings. Re-encoding the
+  // whole pending buffer on every chunk was quadratic under a newline-free
+  // flood (seconds of CPU per connection at the cap) and allocated up to
+  // 16 MiB per chunk; each byte is now encoded exactly twice — once when it
+  // arrives and once when its line is consumed.
+  let pendingLineBytes = 0
+  // Characters already scanned without finding a newline, so a flood of
+  // newline-free chunks stays linear instead of rescanning the whole buffer.
+  let scannedChars = 0
   for await (const chunk of input) {
-    buffer += typeof chunk === 'string' ? chunk : decoder.decode(chunk, { stream: true })
-    const lines = buffer.split(/\r?\n/u)
-    buffer = lines.pop() ?? ''
-    for (const line of lines) {
+    const text = typeof chunk === 'string' ? chunk : decoder.decode(chunk, { stream: true })
+    buffer += text
+    pendingLineBytes += encoder.encode(text).byteLength
+    let newlineIndex = buffer.indexOf('\n', Math.max(0, scannedChars - 1))
+    while (newlineIndex >= 0) {
+      const lineEnd = newlineIndex > 0 && buffer[newlineIndex - 1] === '\r' ? newlineIndex - 1 : newlineIndex
+      const line = buffer.slice(0, lineEnd)
+      const terminatorBytes = lineEnd === newlineIndex ? 1 : 2
+      buffer = buffer.slice(newlineIndex + 1)
+      pendingLineBytes -= encoder.encode(line).byteLength + terminatorBytes
       if (line.trim()) await server.handleLine(line)
+      newlineIndex = buffer.indexOf('\n')
+    }
+    scannedChars = buffer.length
+    if (pendingLineBytes > MAX_BRIDGE_FRAME_BYTES) {
+      throw frameByteLimitError(server)
     }
   }
-  buffer += decoder.decode()
+  // The decoder's final flush only ever emits replacement characters for a
+  // truncated multibyte tail (at most three bytes), never newlines.
+  const flushed = decoder.decode()
+  if (flushed) {
+    buffer += flushed
+    pendingLineBytes += encoder.encode(flushed).byteLength
+  }
+  if (pendingLineBytes > MAX_BRIDGE_FRAME_BYTES) {
+    throw frameByteLimitError(server)
+  }
   if (buffer.trim()) await server.handleLine(buffer)
+}
+
+function frameByteLimitError(server: BridgeServer): BridgeFrameByteLimitError {
+  const error = new BridgeFrameByteLimitError()
+  server.reportTransportError(error.message)
+  return error
 }
 
 /** Parse legacy bridge notifications and JSON-RPC 2.0 request envelopes without accepting ambiguous values. */
@@ -991,14 +1096,16 @@ export function validateBridgeModelFetchUrl(baseUrl: string): string | undefined
 }
 
 function isPrivateAddress(hostname: string): boolean {
-  if (!isIP(hostname)) return false
-  if (hostname === '::1' || hostname === '::') return true
-  if (hostname.includes(':')) {
-    const normalized = hostname.toLowerCase()
-    return normalized.startsWith('fc') || normalized.startsWith('fd') || normalized.startsWith('fe8')
-      || normalized.startsWith('fe9') || normalized.startsWith('fea') || normalized.startsWith('feb')
-  }
-  const parts = hostname.split('.').map(part => Number(part))
+  const normalized = hostname.toLowerCase()
+  const version = isIP(normalized)
+  if (version === 0) return false
+  if (version === 4) return isPrivateIpv4Address(normalized)
+  return isPrivateIpv6Address(normalized)
+}
+
+/** Reserved, loopback, link-local, and private-use ranges of the IPv4 space. */
+function isPrivateIpv4Address(address: string): boolean {
+  const parts = address.split('.').map(part => Number(part))
   const first = parts[0] ?? -1
   const second = parts[1] ?? -1
   return first === 0 || first === 10 || first === 127 || first >= 224
@@ -1006,6 +1113,102 @@ function isPrivateAddress(hostname: string): boolean {
     || (first === 169 && second === 254)
     || (first === 172 && second >= 16 && second <= 31)
     || (first === 192 && second === 168)
+}
+
+/**
+ * Range-check an IPv6 literal instead of matching text prefixes: WHATWG URL
+ * parsing normalizes `[::ffff:127.0.0.1]` to `::ffff:7f00:1`, which bypassed
+ * every prefix check and let fetch_models reach localhost, link-local, and
+ * cloud-metadata addresses through an IPv4-mapped literal.
+ */
+function isPrivateIpv6Address(address: string): boolean {
+  const groups = ipv6Groups(address)
+  // Fail closed: a malformed literal that still passed isIP must not be
+  // treated as a routable public address.
+  if (!groups) return true
+  const [g0 = 0, g1 = 0, g2 = 0, g3 = 0, g4 = 0, g5 = 0, g6 = 0, g7 = 0] = groups
+
+  if ((g0 | g1 | g2 | g3 | g4 | g5 | g6 | g7) === 0) return true // :: unspecified
+  if (g7 === 1 && (g0 | g1 | g2 | g3 | g4 | g5 | g6) === 0) return true // ::1 loopback
+  if ((g0 & 0xfe00) === 0xfc00) return true // fc00::/7 unique-local
+  if ((g0 & 0xffc0) === 0xfe80) return true // fe80::/10 link-local
+  if ((g0 & 0xff00) === 0xff00) return true // ff00::/8 multicast
+  if (g0 === 0x2001 && g1 === 0x0000) return true // 2001::/32 Teredo relay
+
+  // ::/96 (deprecated IPv4-compatible) and ::ffff:0:0/96 (IPv4-mapped):
+  // decide on the embedded IPv4 address exactly as if it were given raw.
+  if ((g0 | g1 | g2 | g3 | g4) === 0 && (g5 === 0 || g5 === 0xffff)) {
+    return isPrivateIpv4Bytes(g6, g7)
+  }
+  // 64:ff9b::/96 well-known NAT64 prefix: same embedded-IPv4 treatment.
+  if (g0 === 0x0064 && g1 === 0xff9b && (g2 | g3 | g4) === 0) {
+    return isPrivateIpv4Bytes(g6, g7)
+  }
+  // 64:ff9b:1::/48 local-use NAT64 prefix: reserved, never globally routed.
+  if (g0 === 0x0064 && g1 === 0xff9b && g2 === 0x0001) return true
+  // 2002::/16 6to4 relay: the next 32 bits are the encapsulated IPv4 host.
+  if (g0 === 0x2002) return isPrivateIpv4Bytes(g1, g2)
+
+  return false
+}
+
+/** Apply the IPv4 private check to the 32-bit tail held in two IPv6 groups. */
+function isPrivateIpv4Bytes(highGroup: number | undefined, lowGroup: number | undefined): boolean {
+  const high = highGroup ?? 0
+  const low = lowGroup ?? 0
+  return isPrivateIpv4Address(`${high >> 8}.${high & 0xff}.${low >> 8}.${low & 0xff}`)
+}
+
+const IPV6_GROUP_PATTERN = /^[0-9a-f]{1,4}$/u
+const IPV4_TAIL_PATTERN = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/u
+
+/** Expand an IPv6 literal into its eight 16-bit groups, accepting an embedded IPv4 tail. */
+function ipv6Groups(address: string): readonly number[] | undefined {
+  const halves = address.split('::')
+  if (halves.length > 2) return undefined
+  const headGroups: number[] = []
+  const tailGroups: number[] = []
+  if (!appendIpv6Groups(halves[0] ? halves[0].split(':') : [], headGroups)) return undefined
+  if (!appendIpv6Groups(halves[1] ? halves[1].split(':') : [], tailGroups)) return undefined
+
+  const explicitCount = headGroups.length + tailGroups.length
+  if (explicitCount > 8) return undefined
+  if (halves.length === 2) {
+    if (explicitCount === 8) return undefined
+    return [
+      ...headGroups,
+      ...new Array<number>(8 - explicitCount).fill(0),
+      ...tailGroups,
+    ]
+  }
+  return explicitCount === 8 ? [...headGroups, ...tailGroups] : undefined
+}
+
+/** Append the 16-bit groups of one `::`-delimited section; false when malformed. */
+function appendIpv6Groups(segments: readonly string[], output: number[]): boolean {
+  for (const [index, segment] of segments.entries()) {
+    if (segment.includes('.')) {
+      // An embedded IPv4 tail spans the final two groups, so it is only valid
+      // as the last segment of its section.
+      if (index !== segments.length - 1) return false
+      const embedded = ipv4TailGroups(segment)
+      if (!embedded) return false
+      output.push(...embedded)
+      continue
+    }
+    if (!IPV6_GROUP_PATTERN.test(segment)) return false
+    output.push(Number.parseInt(segment, 16))
+  }
+  return true
+}
+
+function ipv4TailGroups(segment: string): readonly [number, number] | undefined {
+  const match = IPV4_TAIL_PATTERN.exec(segment)
+  if (!match) return undefined
+  const octets = match.slice(1).map(Number)
+  if (octets.some(octet => octet > 255)) return undefined
+  const [a = 0, b = 0, c = 0, d = 0] = octets
+  return [(a << 8) | b, (c << 8) | d]
 }
 
 function stateFromSnapshot(snapshot: BridgeSessionSnapshot): AgentState {

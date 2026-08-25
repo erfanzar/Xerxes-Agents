@@ -1,12 +1,19 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { chmodSync } from 'node:fs'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
 import { expect, test } from 'bun:test'
 
 import {
+  PROCESS_TREE_GRACE_MS,
   ProcessRegistry,
   getDefaultProcessRegistry,
   getDefaultRegistry,
+  terminateProcessSubtree,
   type BunSubprocessLike,
   type ProcessSignal,
 } from '../src/runtime/processRegistry.js'
@@ -128,4 +135,95 @@ test('a real Bun subprocess is accepted and yields its real exit code', async ()
   const procId = registry.register(child, { command: 'bun -e process.exit(7)' })
   expect(await registry.wait(procId, 5)).toBe(7)
   expect(registry.poll(procId)).toBe(7)
+})
+
+test('group-leader registration still signals the direct child when no group exists', () => {
+  // FakeProcess pids have no real process group, so the group delivery fails
+  // with ESRCH and must fall back to the direct-child kill instead of lying
+  // about a successful signal.
+  const registry = new ProcessRegistry({ idFactory: () => 'leader' })
+  const process = new FakeProcess(7001)
+  const procId = registry.register(process, { processGroupLeader: true })
+
+  expect(registry.signal(procId, 'SIGTERM')).toBeTrue()
+  expect(process.signals).toEqual(['SIGTERM'])
+})
+
+test.skipIf(process.platform === 'win32')('terminateProcessSubtree escalates to SIGKILL past a trapped SIGTERM', async () => {
+  const child = Bun.spawn(['/bin/sh', '-c', "trap '' TERM\nwhile :; do :; done"], {
+    stdin: 'ignore',
+    stdout: 'ignore',
+    stderr: 'ignore',
+    detached: true,
+  })
+  // Let the shell install its TERM trap and reach the loop, like a genuinely
+  // wedged command would have.
+  await Bun.sleep(300)
+  const started = Date.now()
+  await terminateProcessSubtree(child, { processGroupLeader: true })
+  const exitCode = await child.exited
+
+  // 137 = 128 + SIGKILL: only the escalation can have ended a TERM-trapped shell.
+  expect(exitCode).toBe(137)
+  const elapsed = Date.now() - started
+  expect(elapsed).toBeGreaterThan(PROCESS_TREE_GRACE_MS - 500)
+  expect(elapsed).toBeLessThan(15_000)
+})
+
+test.skipIf(process.platform === 'win32')('termination sweeps up a helper forked during the kill window', async () => {
+  // The bug this pins: the leader trapped SIGTERM, forked a writer from its trap
+  // handler, and exited within the grace window — so the escalation was skipped
+  // (the direct child looked finished) and the newcomer was orphaned.
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-late-fork-'))
+  const logPath = join(root, 'ticks.log')
+  try {
+    const scriptPath = join(root, 'late-fork.sh')
+    await Bun.write(
+      scriptPath,
+      '#!/bin/sh\n'
+        + `trap 'sh -c "(while :; do echo tick >> ${logPath}; sleep 0.05; done) &"; exit 0' TERM\n`
+        + 'while :; do :; done\n',
+    )
+    await chmodSync(scriptPath, 0o755)
+    const child = Bun.spawn(['/bin/sh', scriptPath], {
+      stdin: 'ignore',
+      stdout: 'ignore',
+      stderr: 'ignore',
+      detached: true,
+    })
+    await Bun.sleep(300)
+
+    const started = Date.now()
+    await terminateProcessSubtree(child, { processGroupLeader: true })
+    // The leader exits on its trapped TERM well inside the grace; only the
+    // post-exit group sweep can account for the helper it just forked.
+    expect(Date.now() - started).toBeLessThan(PROCESS_TREE_GRACE_MS + 5_000)
+
+    await Bun.sleep(400)
+    const file = Bun.file(logPath)
+    const before = (await file.exists()) ? (await file.text()).length : -1
+    await Bun.sleep(800)
+    const after = (await file.exists()) ? (await file.text()).length : -1
+    expect(after).toBe(before)
+  } finally {
+    await rm(root, { force: true, recursive: true })
+  }
+})
+
+test.skipIf(process.platform === 'win32')('a signal-killed child polls as terminated instead of running forever', async () => {
+  // Bun leaves exitCode null when a child dies by signal and reports the death
+  // via signalCode; polling that read "running" for the rest of eternity.
+  const registry = new ProcessRegistry({ idFactory: () => 'signalled' })
+  const child = Bun.spawn(['/bin/sh', '-c', 'sleep 30'], {
+    stdin: 'ignore',
+    stdout: 'ignore',
+    stderr: 'ignore',
+  })
+  const procId = registry.register(child)
+  child.kill('SIGKILL')
+  const code = await child.exited
+
+  expect(code).toBeGreaterThan(128)
+  expect(registry.poll(procId)).toBe(code)
+  expect(await registry.wait(procId)).toBe(code)
 })

@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { createHash } from 'node:crypto'
-import { mkdir, stat } from 'node:fs/promises'
+import { mkdir, stat, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 
 import { ValidationError } from '../core/errors.js'
@@ -213,7 +213,23 @@ export async function processJson(inputs: JsonObject, paths: WorkspacePathResolv
     await mkdir(dirname(target), { recursive: true })
     const relativePath = (await paths.relative(target)).replaceAll('\\', '/')
     const checked = await paths.recheck(target)
-    await Bun.write(checked, JSON.stringify(data, null, pretty ? 2 : undefined) + (pretty ? '\n' : ''))
+    const payload = JSON.stringify(data, null, pretty ? 2 : undefined) + (pretty ? '\n' : '')
+    // The existence check is only a snapshot; Bun.write would silently replace a
+    // destination created in the gap. overwrite=false therefore creates the
+    // file exclusively ('wx') at the destination itself, so the kernel refuses
+    // the competing writer instead of the race deciding.
+    if (overwrite) {
+      await Bun.write(checked, payload)
+    } else {
+      try {
+        await writeFile(checked, payload, { flag: 'wx' })
+      } catch (error) {
+        if (isAlreadyExists(error)) {
+          throw new ValidationError('file_path', 'already exists; pass overwrite=true to replace it', filePath)
+        }
+        throw error
+      }
+    }
     return { file_path: relativePath, success: true }
   }
 
@@ -308,7 +324,20 @@ export async function processCsv(inputs: JsonObject, paths: WorkspacePathResolve
     const rows = [headers, ...data.map(row => headers.map(header => csvCell(row[header])))]
     const relativePath = (await paths.relative(target)).replaceAll('\\', '/')
     const checked = await paths.recheck(target)
-    await Bun.write(checked, stringifyCsv(rows, delimiter))
+    // Same exclusive-reserve discipline as JSONProcessor save: overwrite=false
+    // must be kernel-enforced at the destination, not decided by a snapshot.
+    if (overwrite) {
+      await Bun.write(checked, stringifyCsv(rows, delimiter))
+    } else {
+      try {
+        await writeFile(checked, stringifyCsv(rows, delimiter), { flag: 'wx' })
+      } catch (error) {
+        if (isAlreadyExists(error)) {
+          throw new ValidationError('file_path', 'already exists; pass overwrite=true to replace it', filePath)
+        }
+        throw error
+      }
+    }
     return { file_path: relativePath, rows_written: data.length, success: true }
   }
 
@@ -933,6 +962,10 @@ async function pathExists(path: string): Promise<boolean> {
 
 function isNotFound(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT'
+}
+
+function isAlreadyExists(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === 'EEXIST'
 }
 
 function errorMessage(error: unknown): string {

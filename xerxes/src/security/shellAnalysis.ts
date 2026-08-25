@@ -145,6 +145,15 @@ const CARGO_READ_ONLY_SUBCOMMANDS: ReadonlySet<string> = new Set([
   'tree', 'metadata', 'search', 'locate-project', 'pkgid', 'verify-project', 'version',
 ])
 
+const GO_READ_ONLY_SUBCOMMANDS: ReadonlySet<string> = new Set(['list', 'version', 'env', 'doc'])
+
+/**
+ * Flags that turn a read-only `go env` into a persistent configuration write:
+ * `go env -w VAR=val` and `go env -u VAR` rewrite ~/.config/go/env, surviving
+ * long after the command "finishes".
+ */
+const GO_ENV_WRITE_FLAGS: readonly string[] = ['-w', '-u']
+
 /** `python -m` modules that only print. Anything else can import and run project code. */
 const PYTHON_READ_ONLY_MODULES: ReadonlySet<string> = new Set(['json.tool', 'platform', 'site', 'sysconfig', 'this'])
 
@@ -242,7 +251,7 @@ export function isReadOnlyInvocation(executable: string, args: readonly string[]
   if (binary === 'python' || binary === 'python3') return isReadOnlyPython(args)
   if (binary === 'pip' || binary === 'pip3') return isReadOnlyPip(args)
   if (binary === 'cargo') return CARGO_READ_ONLY_SUBCOMMANDS.has(args[0] ?? '')
-  if (binary === 'go') return ['list', 'version', 'env', 'doc'].includes(args[0] ?? '')
+  if (binary === 'go') return isReadOnlyGo(args)
   // `bun run`/`bunx`/`npx` execute code, so only the inspection verbs pass.
   if (binary === 'bun') return args[0] === 'pm' ? ['ls', 'bin'].includes(args[1] ?? '') : isPackageQuery(args)
   if (['npm', 'pnpm', 'yarn'].includes(binary)) return isPackageQuery(args)
@@ -302,6 +311,18 @@ function isReadOnlyPip(args: readonly string[]): boolean {
   if (!PIP_READ_ONLY_SUBCOMMANDS.has(subcommand)) return false
   // `pip config set/unset/edit` writes; only the reading verbs stay read-only.
   if (subcommand === 'config') return ['list', 'get', 'debug'].includes(args[1] ?? '')
+  return true
+}
+
+function isReadOnlyGo(args: readonly string[]): boolean {
+  const subcommand = args[0] ?? ''
+  if (!GO_READ_ONLY_SUBCOMMANDS.has(subcommand)) return false
+  // `go env -w VAR=val` / `go env -u VAR` persistently rewrite ~/.config/go/env,
+  // so only the plain read forms (`go env`, `go env GOVAR`) stay read-only --
+  // the same treatment the pip config verbs receive above.
+  if (subcommand === 'env') {
+    return !args.slice(1).some(argument => GO_ENV_WRITE_FLAGS.some(flag => argument === flag || argument.startsWith(flag)))
+  }
   return true
 }
 

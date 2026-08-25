@@ -50,6 +50,52 @@ export class CredentialTamperedError extends Error {
 }
 
 /**
+ * Raised when a guarded save refuses to overwrite an on-disk record that
+ * changed since the caller loaded it.
+ *
+ * The classic race this closes: a logout removes the credential while an
+ * in-flight refresh is still running, and the refresh then persists its
+ * rotated chain after the user already believes they are signed out. A newer
+ * writer (another surface's refresh, a fresh login) is protected the same
+ * way. Fingerprints are hashes of the raw on-disk bytes, so no secret
+ * material ever appears in the error.
+ */
+export class CredentialConflictError extends Error {
+  constructor(
+    readonly provider: string,
+    readonly expectedFingerprint: string | null,
+    readonly currentFingerprint: string | null,
+  ) {
+    super(
+      'Credential record for provider "' + provider
+      + '" changed on disk since it was loaded; refusing to overwrite it',
+    )
+    this.name = 'CredentialConflictError'
+  }
+}
+
+/** A stored credential together with the CAS fingerprint of its on-disk record. */
+export interface StoredCredential {
+  /**
+   * SHA-256 of the raw on-disk record, or null when no record exists. Pass
+   * it back to {@link CredentialStorage.save} as a compare-and-swap guard.
+   */
+  readonly fingerprint: string | null
+  readonly token: OAuthToken | undefined
+}
+
+export interface CredentialSaveOptions {
+  /**
+   * Compare-and-swap guard against concurrent writers. Supply the
+   * fingerprint observed at load time (null expects the record to be
+   * absent); when the on-disk record has changed or was deleted underneath,
+   * the save throws {@link CredentialConflictError} instead of clobbering.
+   * Omitted means unconditional save.
+   */
+  readonly expectedFingerprint?: string | null
+}
+
+/**
  * Encrypted filesystem-backed OAuth token store.
  *
  * Each credential is encrypted with AES-256-GCM and atomically replaced from a
@@ -74,31 +120,46 @@ export class CredentialStorage {
     return new CredentialStorage(undefined, options)
   }
 
-  /** Encrypt and atomically save a token. Returns the credential path. */
-  async save(provider: string, token: OAuthToken): Promise<string> {
+  /**
+   * Encrypt and atomically save a token. Returns the credential path.
+   *
+   * With `expectedFingerprint` the save is a compare-and-swap: it refuses
+   * (with {@link CredentialConflictError}) when the on-disk record is no
+   * longer the one the caller loaded — deleted by a logout, or replaced by a
+   * newer writer whose state must not be clobbered.
+   */
+  async save(provider: string, token: OAuthToken, options: CredentialSaveOptions = {}): Promise<string> {
     const normalizedProvider = validatedProvider(provider)
+    const path = this.pathFor(normalizedProvider)
+    if (options.expectedFingerprint !== undefined) {
+      const currentFingerprint = await this.recordFingerprint(path)
+      if (currentFingerprint !== options.expectedFingerprint) {
+        throw new CredentialConflictError(normalizedProvider, options.expectedFingerprint, currentFingerprint)
+      }
+    }
     const key = await this.encryptionKey()
     const content = Buffer.from(JSON.stringify(token.toRecord()), 'utf8')
     const envelope = encrypt(normalizedProvider, content, key)
-    const path = this.pathFor(normalizedProvider)
     await writeAtomic(path, `${JSON.stringify(envelope)}\n`)
     return path
   }
 
   /** Load an encrypted token, or return undefined for a missing/corrupt credential. */
   async load(provider: string): Promise<OAuthToken | undefined> {
+    return (await this.loadWithFingerprint(validatedProvider(provider))).token
+  }
+
+  /**
+   * Load a credential together with the CAS fingerprint of its on-disk
+   * record, after any migrate-on-read rewrite has settled so the fingerprint
+   * always describes what is on disk NOW. Pair it with a guarded
+   * {@link CredentialStorage.save} to avoid clobbering concurrent writers.
+   */
+  async loadWithFingerprint(provider: string): Promise<StoredCredential> {
     const normalizedProvider = validatedProvider(provider)
-    const path = this.pathFor(normalizedProvider)
-    let raw: string
-    try {
-      raw = await readFile(path, 'utf8')
-    } catch (error) {
-      // Only a missing file means "not logged in". Other filesystem failures
-      // (EACCES, EISDIR, ...) must surface instead of masquerading as absence.
-      if (isMissingFile(error)) {
-        return undefined
-      }
-      throw error
+    let raw = await this.readRawRecord(this.pathFor(normalizedProvider))
+    if (raw === null) {
+      return { fingerprint: null, token: undefined }
     }
 
     // Structurally unparseable records mean "no usable credential", nothing more.
@@ -106,7 +167,7 @@ export class CredentialStorage {
     try {
       parsed = JSON.parse(raw)
     } catch {
-      return undefined
+      return { fingerprint: fingerprintOf(raw), token: undefined }
     }
     if (!isEncryptedCredential(parsed)) {
       // A record carrying any envelope marker but failing validation is a damaged
@@ -121,17 +182,23 @@ export class CredentialStorage {
       try {
         legacy = OAuthToken.fromRecord(parsed)
       } catch {
-        return undefined
+        return { fingerprint: fingerprintOf(raw), token: undefined }
       }
       // Migrate-on-read: immediately re-encrypt through the normal save path so a
       // plaintext record is never trusted (or left readable) beyond a single load.
       await this.save(normalizedProvider, legacy)
-      return legacy
+      raw = await this.readRawRecord(this.pathFor(normalizedProvider))
+      return raw === null
+        ? { fingerprint: null, token: legacy }
+        : { fingerprint: fingerprintOf(raw), token: legacy }
     }
     const key = await this.encryptionKey()
     try {
       const plain = decrypt(normalizedProvider, parsed, key)
-      return OAuthToken.fromRecord(JSON.parse(plain.toString('utf8')) as unknown)
+      return {
+        fingerprint: fingerprintOf(raw),
+        token: OAuthToken.fromRecord(JSON.parse(plain.toString('utf8')) as unknown),
+      }
     } catch (error) {
       throw new CredentialTamperedError(
         normalizedProvider,
@@ -176,8 +243,34 @@ export class CredentialStorage {
     return join(this.baseDirectory, `${provider}.json`)
   }
 
+  /** Read the raw credential record; null only for a missing file. */
+  private async readRawRecord(path: string): Promise<string | null> {
+    try {
+      return await readFile(path, 'utf8')
+    } catch (error) {
+      // Only a missing file means "not logged in". Other filesystem failures
+      // (EACCES, EISDIR, ...) must surface instead of masquerading as absence.
+      if (isMissingFile(error)) {
+        return null
+      }
+      throw error
+    }
+  }
+
+  /** Fingerprint of the record currently on disk, or null when absent. */
+  private async recordFingerprint(path: string): Promise<string | null> {
+    const raw = await this.readRawRecord(path)
+    return raw === null ? null : fingerprintOf(raw)
+  }
+
   private encryptionKey(): Promise<Buffer> {
-    this.keyPromise ??= this.createEncryptionKey()
+    this.keyPromise ??= this.createEncryptionKey().catch(error => {
+      // A transient failure (EACCES on a key file, a briefly missing home)
+      // must not poison this instance for its whole lifetime: clear the
+      // memoized rejection so the next caller retries creation.
+      this.keyPromise = undefined
+      throw error
+    })
     return this.keyPromise
   }
 
@@ -318,6 +411,11 @@ function decrypt(provider: string, envelope: EncryptedCredential, key: Buffer): 
 
 function aad(provider: string): string {
   return `xerxes/oauth/v${ENCRYPTION_VERSION}/${provider}`
+}
+
+/** Content fingerprint of a raw on-disk credential record. */
+function fingerprintOf(raw: string): string {
+  return createHash('sha256').update(raw, 'utf8').digest('hex')
 }
 
 function isEncryptedCredential(value: unknown): value is EncryptedCredential {

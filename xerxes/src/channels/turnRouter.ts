@@ -20,6 +20,7 @@ const JOURNAL_RESPONSE_MAX_CHARS = 500
 const MAX_PREVIEW_CHARS = 4_096
 const NO_RESPONSE_TEXT = '(no response)'
 const PREVIEW_PLACEHOLDER = '...'
+const PREVIEW_TRUNCATION_MARKER = '…[truncated]'
 const TURN_FAILED_TEXT = '(turn failed)'
 const PATH_REDACTION = /(?:\/Users\/[^\s'"]+|\/home\/[^\s'"]+|\/private\/[^\s'"]+|\/var\/[^\s'"]+|\/tmp\/[^\s'"]+|~[\/\\]\.xerxes[^\s'"]*|[A-Za-z]:\\Users\\[^\s'"]+|[A-Za-z]:\\[^\s'"]*\\\.xerxes[^\s'"]*)/g
 const TRACEBACK_REDACTION = /Traceback \(most recent call last\):.*?(?=\n\n|$)/gs
@@ -632,8 +633,16 @@ function telegramMessageId(response: Readonly<Record<string, unknown>>): string 
   return rawStringPayload(result, 'message_id') || rawStringPayload(response, 'message_id')
 }
 
+/**
+ * Keep the head of an oversized preview and mark the cut explicitly.
+ *
+ * Dropping the tail (the previous behavior) silently hid the end of the
+ * agent's answer; keeping the head with a visible marker preserves the
+ * beginning of the response and tells the reader text was elided.
+ */
 function previewText(text: string): string {
-  return text.length <= MAX_PREVIEW_CHARS ? text : text.slice(-MAX_PREVIEW_CHARS)
+  if (text.length <= MAX_PREVIEW_CHARS) return text
+  return text.slice(0, MAX_PREVIEW_CHARS - PREVIEW_TRUNCATION_MARKER.length) + PREVIEW_TRUNCATION_MARKER
 }
 
 function channelJournalTarget(message: ChannelMessage): string {

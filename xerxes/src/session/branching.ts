@@ -4,7 +4,7 @@
 import { randomUUID } from 'node:crypto'
 
 import { cloneSessionRecord, SessionRecord } from './models.js'
-import type { SessionStore } from './store.js'
+import { isLockableSessionStore, type SessionStore } from './store.js'
 
 export interface BranchSessionOptions {
   readonly newSessionId?: string
@@ -38,6 +38,19 @@ export function branchSession(store: SessionStore, options: BranchSessionOptions
   }
   store.saveSession(child)
   return child
+}
+
+/**
+ * {@link branchSession} with the whole check-then-create cycle performed under
+ * the cross-process store lock. The synchronous form's existence checks and
+ * final save are separate statements, so two processes branching to the same
+ * explicit id could both pass the check and one silently overwrite the other;
+ * under the shared lock exactly one wins and the other observes the created
+ * row and fails its own check.
+ */
+export async function branchSessionExclusive(store: SessionStore, options: BranchSessionOptions): Promise<SessionRecord> {
+  if (!isLockableSessionStore(store)) return branchSession(store, options)
+  return store.withWriteLock(() => branchSession(store, options))
 }
 
 /** Follow parent pointers from a session back to its root, detecting cycles. */

@@ -1,7 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -356,4 +356,102 @@ test('describeChange trims the common head and tail and caps a long side', () =>
 
   const long = 'head\n' + 'z'.repeat(400)
   expect(describeChange('head\nshort', long)).toContain('…')
+})
+
+test('guardedWrite leaves the original intact when the transform throws', async () => {
+  await inWorkspace(workspace => {
+    const path = join(workspace, 'precious.txt')
+    writeFileSync(path, 'original bytes\n')
+    const tracker = new FileStateTracker()
+    recordCurrent(tracker, path)
+
+    expect(() => guardedWrite({
+      absolutePath: path,
+      displayPath: 'precious.txt',
+      mode: 'overwrite',
+      sessionId: SESSION,
+      toolName: 'WriteFile',
+      transform: () => {
+        throw new Error('boom after read')
+      },
+    }, tracker)).toThrow('boom after read')
+
+    expect(readFileSync(path, 'utf8')).toBe('original bytes\n')
+    // No temp residue next to the target.
+    expect(readdirSync(workspace).filter(name => name !== 'precious.txt')).toEqual([])
+  })
+})
+
+test('a successful guardedWrite replaces content atomically without stray temp files', async () => {
+  await inWorkspace(workspace => {
+    const path = join(workspace, 'swap.txt')
+    writeFileSync(path, 'before\n')
+    const tracker = new FileStateTracker()
+    recordCurrent(tracker, path)
+
+    const result = guardedWrite({
+      absolutePath: path,
+      displayPath: 'swap.txt',
+      mode: 'targeted',
+      sessionId: SESSION,
+      toolName: 'FileEditTool',
+      transform: current => current.replace('before', 'after'),
+    }, tracker)
+
+    expect(result.changed).toBe(true)
+    expect(readFileSync(path, 'utf8')).toBe('after\n')
+    // Freshness semantics are unchanged: the post-write state is recorded, so a
+    // second edit in the same session is not refused as self-inflicted drift.
+    const followUp = guardedWrite({
+      absolutePath: path,
+      displayPath: 'swap.txt',
+      mode: 'targeted',
+      sessionId: SESSION,
+      toolName: 'FileEditTool',
+      transform: current => current + 'again\n',
+    }, tracker)
+    expect(followUp.changed).toBe(true)
+    expect(readFileSync(path, 'utf8')).toBe('after\nagain\n')
+    expect(readdirSync(workspace).filter(name => name !== 'swap.txt')).toEqual([])
+  })
+})
+
+test('guardedWrite preserves permission bits through the atomic rename', async () => {
+  await inWorkspace(workspace => {
+    // An executable script edited through the guarded path must stay
+    // executable: rename-over used to reset it to the process umask.
+    const scriptPath = join(workspace, 'run.sh')
+    writeFileSync(scriptPath, '#!/bin/sh\necho one\n')
+    chmodSync(scriptPath, 0o755)
+    const tracker = new FileStateTracker()
+    recordCurrent(tracker, scriptPath)
+
+    guardedWrite({
+      absolutePath: scriptPath,
+      displayPath: 'run.sh',
+      mode: 'targeted',
+      sessionId: SESSION,
+      toolName: 'FileEditTool',
+      transform: current => current.replace('one', 'two'),
+    }, tracker)
+
+    expect(readFileSync(scriptPath, 'utf8')).toBe('#!/bin/sh\necho two\n')
+    expect(statSync(scriptPath).mode & 0o777).toBe(0o755)
+    expect(readdirSync(workspace).filter(name => name !== 'run.sh')).toEqual([])
+
+    // And a private file stays private.
+    const secretPath = join(workspace, 'secret.env')
+    writeFileSync(secretPath, 'TOKEN=a\n')
+    chmodSync(secretPath, 0o600)
+    recordCurrent(tracker, secretPath)
+    guardedWrite({
+      absolutePath: secretPath,
+      displayPath: 'secret.env',
+      mode: 'targeted',
+      sessionId: SESSION,
+      toolName: 'FileEditTool',
+      transform: current => current.replace('a', 'b'),
+    }, tracker)
+    expect(statSync(secretPath).mode & 0o777).toBe(0o600)
+  })
 })

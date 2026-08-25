@@ -3,6 +3,7 @@
 
 import { expect, test } from 'bun:test'
 
+import { MemoryItem } from '../src/memory/base.js'
 import { EntityMemory } from '../src/memory/entityMemory.js'
 import { ShortTermMemory } from '../src/memory/shortTermMemory.js'
 import { SimpleStorage } from '../src/memory/storage.js'
@@ -172,4 +173,36 @@ test('entity memory hydrates records and graph snapshots back from storage', () 
   expect(restored.entities.Alice?.firstSeen).toBeInstanceOf(Date)
   expect(restored.getRelatedEntities('Alice', 1)).toEqual(new Set(['Bob', 'Widget']))
   expect(restored.entityMentions.Bob).toHaveLength(2)
+})
+
+test('entity memory prunes evicted overflow rows from storage on save and hydration', () => {
+  const storage = new SimpleStorage()
+  const entityRows = () => storage.listKeys().filter(key => key.startsWith('entity_')).sort()
+
+  // save()-time eviction deletes the overflow rows instead of orphaning them.
+  const bounded = new EntityMemory({ maxItems: 3, storage })
+  const saved: Array<{ readonly memoryId: string }> = []
+  for (let index = 0; index < 5; index += 1) {
+    saved.push(bounded.save(`Alice mention ${index}`, {}, { entities: ['Alice'] }))
+  }
+  expect(entityRows()).toEqual(saved.slice(2).map(item => `entity_${item.memoryId}`).sort())
+
+  // Hydration prunes overflow rows too: a backend stuffed past the cap is
+  // cut back to it instead of reloading every surplus row on each restart.
+  const stuffed = new SimpleStorage()
+  for (let index = 0; index < 6; index += 1) {
+    const item = new MemoryItem({
+      content: `Row ${index}`,
+      memoryType: 'entity',
+      metadata: { entities: ['Alice'] },
+      timestamp: new Date(Date.UTC(2026, 0, 1, 0, index)),
+    })
+    stuffed.save(`entity_${item.memoryId}`, item.toRecord())
+  }
+  const reopened = new EntityMemory({ maxItems: 4, storage: stuffed })
+  expect(reopened.size).toBe(4)
+  expect(stuffed.listKeys().filter(key => key.startsWith('entity_'))).toHaveLength(4)
+  const restoredRows = reopened.retrieve(undefined, undefined, 10)
+  expect(Array.isArray(restoredRows) ? restoredRows.map(item => item.content) : [])
+    .toEqual(['Row 2', 'Row 3', 'Row 4', 'Row 5'])
 })

@@ -283,3 +283,48 @@ test('the freshness kill switch restores the previous read-nothing-first behavio
     expect(await Bun.file(join(workspace, 'blind.txt')).text()).toBe('after\n')
   })
 })
+
+test('max_chars truncation lands under the window ceiling instead of contradicting it', async () => {
+  await inWorkspace(async (workspace, paths) => {
+    // 60k characters on one line: the whole-file read cannot fit the ceiling,
+    // and max_chars=40000 is exactly the documented remedy.
+    const text = 'z'.repeat(60_000)
+    await Bun.write(join(workspace, 'generated.txt'), text)
+
+    const capped = await readFile({ file_path: 'generated.txt', limit: -1, max_chars: MAX_READ_WINDOW_CHARS }, paths)
+    // Previously this threw a ValidationError telling the caller to raise the
+    // very ceiling they had just set: the marker was appended past 40000 and
+    // then rejected by enforceReadWindowCeiling.
+    expect(capped).toContain('truncated by max_chars')
+    expect(capped.length).toBeLessThanOrEqual(MAX_READ_WINDOW_CHARS)
+
+    // A small max_chars still truncates to the requested size (marker included
+    // in the response but the slice honors the cap).
+    const small = await readFile({ file_path: 'generated.txt', max_chars: 100 }, paths)
+    expect(small.startsWith('z'.repeat(100))).toBe(true)
+    expect(small).toContain('truncated by max_chars')
+    expect(small.length).toBeLessThanOrEqual(MAX_READ_WINDOW_CHARS)
+  })
+})
+
+test('a max_chars above the window ceiling is clamped instead of self-contradicting', async () => {
+  await inWorkspace(async (workspace, paths) => {
+    const text = 'w'.repeat(60_000)
+    await Bun.write(join(workspace, 'wide.txt'), text)
+
+    // max_chars larger than the ceiling used to skip truncation and then be
+    // rejected by the ceiling — with a remedy advising the already-supplied
+    // parameter.
+    const huge = await readFile({ file_path: 'wide.txt', limit: -1, max_chars: 1_000_000 }, paths)
+    expect(huge).toContain('truncated by max_chars')
+    expect(huge.length).toBeLessThanOrEqual(MAX_READ_WINDOW_CHARS)
+    // The slice honours the caller's cap where it is under the ceiling.
+    const mid = await readFile({ file_path: 'wide.txt', limit: -1, max_chars: 500 }, paths)
+    expect(mid.startsWith('w'.repeat(500))).toBe(true)
+
+    // limit=-1 without any char cap keeps its documented semantics: an
+    // oversized whole-file read is an error that names the ceiling, not a cut.
+    await expect(readFile({ file_path: 'wide.txt', limit: -1 }, paths))
+      .rejects.toThrow(String(MAX_READ_WINDOW_CHARS) + '-character ReadFile window ceiling')
+  })
+})

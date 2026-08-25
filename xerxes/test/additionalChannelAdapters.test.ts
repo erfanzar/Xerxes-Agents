@@ -1,7 +1,9 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { expect, test } from 'bun:test'
+import { createHmac } from 'node:crypto'
+
+import { expect, spyOn, test } from 'bun:test'
 
 import {
   BLUEBUBBLES_TRANSPORT,
@@ -33,6 +35,20 @@ import {
 } from '../src/channels/index.js'
 
 const encoder = new TextEncoder()
+
+/** Compute the expected Twilio signature: base64 HMAC-SHA1 over URL + sorted concatenated values. */
+function twilioSignature(url: string, formBody: string, authToken: string): string {
+  const values = [...new URLSearchParams(formBody).entries()]
+    .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+    .map(([, value]) => value)
+    .join('')
+  return createHmac('sha1', authToken).update(url + values).digest('base64')
+}
+
+/** Compute Meta's expected X-Hub-Signature-256 value for a raw webhook body. */
+function hubSignature(body: Uint8Array, appSecret: string): string {
+  return 'sha256=' + createHmac('sha256', appSecret).update(body).digest('hex')
+}
 
 interface FetchCall {
   readonly body: string
@@ -92,7 +108,9 @@ test('relay-only adapters expose their unsupported persistent transports', () =>
   expect(BLUEBUBBLES_TRANSPORT.unsupported).toContain('BlueBubbles persistent event socket')
   expect(SIGNAL_TRANSPORT.unsupported).toContain('signal-cli receive loop')
   expect(WHATSAPP_TRANSPORT.unsupported).toContain('persistent WhatsApp socket transport')
-  expect(TWILIO_SMS_TRANSPORT.unsupported).toContain('Twilio X-Twilio-Signature verification')
+  expect(WHATSAPP_TRANSPORT.unsupported).not.toContain('webhook signature verification')
+  expect(TWILIO_SMS_TRANSPORT.unsupported).not.toContain('Twilio X-Twilio-Signature verification')
+  expect(TWILIO_SMS_TRANSPORT.unsupported).toContain('MMS media download and delivery callbacks')
   expect(UNSUPPORTED_CHANNEL_TRANSPORTS.email_imap.reason).toContain('direct SMTP delivery')
 })
 
@@ -301,11 +319,25 @@ test('WhatsApp unpacks batched Cloud API webhooks, sends Graph text, and exposes
   })
   const received: ChannelMessage[] = []
   await channel.start(async message => { received.push(message) })
-  await channel.handleWebhook({}, encoder.encode(JSON.stringify({ entry: [{ changes: [{ value: { messages: [
-    { from: '15550001', id: 'wamid-1', type: 'text', text: { body: 'WhatsApp hello' } },
-    { from: '15550002', id: 'wamid-2', type: 'interactive', interactive: { button_reply: { title: 'Choose me' } } },
-  ] } }] }] })))
+  // No appSecret is configured here, so the first webhook warns once about
+  // unverified signatures; capture it instead of leaking noise into test output.
+  const warnings: unknown[][] = []
+  const warnSpy = spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
+    warnings.push(args)
+  })
+  let response: Awaited<ReturnType<typeof channel.handleWebhook>>
+  try {
+    response = await channel.handleWebhook({}, encoder.encode(JSON.stringify({ entry: [{ changes: [{ value: { messages: [
+      { from: '15550001', id: 'wamid-1', type: 'text', text: { body: 'WhatsApp hello' } },
+      { from: '15550002', id: 'wamid-2', type: 'interactive', interactive: { button_reply: { title: 'Choose me' } } },
+    ] } }] }] })))
+  } finally {
+    warnSpy.mockRestore()
+  }
+  expect(response).toEqual({ status: 200, body: 'ok' })
   expect(received.map(message => message.text)).toEqual(['WhatsApp hello', 'Choose me'])
+  expect(warnings).toHaveLength(1)
+  expect(String(warnings[0]?.[0])).toContain('app_secret')
   await channel.send(outbound('whatsapp', { roomId: '15550001' }))
   expect(calls[0]).toMatchObject({
     url: 'https://graph.test/v99.0/phone-id/messages',
@@ -320,15 +352,22 @@ test('WhatsApp unpacks batched Cloud API webhooks, sends Graph text, and exposes
   expect(whatsAppWebhookChallenge({ 'hub.mode': 'subscribe' }, 'match')).toBeUndefined()
 })
 
-test('Twilio parses form callbacks and sends a Basic-auth URL-encoded SMS request', async () => {
+test('Twilio verifies X-Twilio-Signature and parses form callbacks before sending a Basic-auth SMS', async () => {
   const calls: FetchCall[] = []
+  const webhookUrl = 'https://edge.test/channels/sms/webhook'
   const channel = new TwilioSmsChannel({
     accountSid: 'AC123', authToken: 'auth-token', fromNumber: '+15550100', apiBaseUrl: 'https://twilio.test',
     fetchImplementation: recordingFetch(calls),
+    webhookUrl,
   })
   const received: ChannelMessage[] = []
   await channel.start(async message => { received.push(message) })
-  await channel.handleWebhook({}, encoder.encode('Body=SMS+hello&From=%2B15550001&To=%2B15550100&MessageSid=SM1'))
+  const form = 'Body=SMS+hello&From=%2B15550001&To=%2B15550100&MessageSid=SM1'
+  const response = await channel.handleWebhook(
+    { 'X-Twilio-Signature': twilioSignature(webhookUrl, form, 'auth-token') },
+    encoder.encode(form),
+  )
+  expect(response).toEqual({ status: 200, body: 'ok' })
   expect(received[0]).toMatchObject({
     text: 'SMS hello', channelUserId: '+15550001', roomId: '+15550001', metadata: { to: '+15550100' },
   })
@@ -341,4 +380,85 @@ test('Twilio parses form callbacks and sends a Basic-auth URL-encoded SMS reques
     `Basic ${Buffer.from('AC123:auth-token').toString('base64')}`,
   )
   expect(calls[0]?.headers.get('content-type')).toContain('application/x-www-form-urlencoded')
+})
+
+test('Twilio rejects inbound webhooks with a missing or unverifiable X-Twilio-Signature', async () => {
+  const webhookUrl = 'https://edge.test/channels/sms/webhook'
+  const channel = new TwilioSmsChannel({
+    accountSid: 'AC123', authToken: 'auth-token', fromNumber: '+15550100', webhookUrl,
+  })
+  let dispatched = 0
+  await channel.start(async () => { dispatched += 1 })
+  const form = 'Body=spoofed&From=%2B15559999'
+  const body = encoder.encode(form)
+
+  // No signature header at all.
+  expect(await channel.handleWebhook({}, body)).toEqual({ status: 401, body: 'unauthorized' })
+  // Malformed signature.
+  expect(await channel.handleWebhook({ 'X-Twilio-Signature': 'garbage' }, body))
+    .toEqual({ status: 401, body: 'unauthorized' })
+  // Valid signature computed over a different URL (spoofed edge).
+  expect(await channel.handleWebhook(
+    { 'X-Twilio-Signature': twilioSignature('https://evil.test/channels/sms/webhook', form, 'auth-token') },
+    body,
+  )).toEqual({ status: 401, body: 'unauthorized' })
+  // Signature for the wrong auth token.
+  expect(await channel.handleWebhook(
+    { 'x-twilio-signature': twilioSignature(webhookUrl, form, 'other-token') },
+    body,
+  )).toEqual({ status: 401, body: 'unauthorized' })
+  expect(dispatched).toBe(0)
+})
+
+test('Twilio reconstructs the signed URL from forwarded headers when no webhookUrl is configured', async () => {
+  const channel = new TwilioSmsChannel({
+    accountSid: 'AC123', authToken: 'auth-token', fromNumber: '+15550100',
+  })
+  const received: ChannelMessage[] = []
+  await channel.start(async message => { received.push(message) })
+  const form = 'Body=proxied&From=%2B15550001'
+  const reconstructedUrl = 'https://proxy.test/channels/sms/webhook'
+  const response = await channel.handleWebhook(
+    {
+      Host: 'internal.test',
+      'X-Forwarded-Proto': 'https',
+      'X-Forwarded-Host': 'proxy.test',
+      'X-Twilio-Signature': twilioSignature(reconstructedUrl, form, 'auth-token'),
+    },
+    encoder.encode(form),
+  )
+  expect(response).toEqual({ status: 200, body: 'ok' })
+  expect(received[0]?.text).toBe('proxied')
+
+  // The same form signed for the wrong scheme fails: with no forwarded proto
+  // the adapter reconstructs http://internal.test, not https.
+  const mismatch = await channel.handleWebhook(
+    {
+      Host: 'internal.test',
+      'X-Twilio-Signature': twilioSignature('https://internal.test/channels/sms/webhook', form, 'auth-token'),
+    },
+    encoder.encode(form),
+  )
+  expect(mismatch).toEqual({ status: 401, body: 'unauthorized' })
+})
+
+test('WhatsApp enforces X-Hub-Signature-256 when an appSecret is configured', async () => {
+  const payload = JSON.stringify({ entry: [{ changes: [{ value: { messages: [
+    { from: '15550001', id: 'wamid-signed', type: 'text', text: { body: 'signed hello' } },
+  ] } }] }] })
+  const body = encoder.encode(payload)
+  const channel = new WhatsAppChannel({ accessToken: 'wa-token', phoneNumberId: 'phone-id', appSecret: 'meta-secret' })
+  const received: ChannelMessage[] = []
+  await channel.start(async message => { received.push(message) })
+
+  // Missing header and wrong digest are rejected before parsing.
+  expect(await channel.handleWebhook({}, body)).toEqual({ status: 401, body: 'unauthorized' })
+  expect(await channel.handleWebhook({ 'X-Hub-Signature-256': 'sha256=' + '0'.repeat(64) }, body))
+    .toEqual({ status: 401, body: 'unauthorized' })
+  expect(received).toEqual([])
+
+  // A correctly signed delivery passes and parses.
+  expect(await channel.handleWebhook({ 'X-Hub-Signature-256': hubSignature(body, 'meta-secret') }, body))
+    .toEqual({ status: 200, body: 'ok' })
+  expect(received.map(message => message.text)).toEqual(['signed hello'])
 })

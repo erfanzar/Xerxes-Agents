@@ -11,6 +11,33 @@ export const MAX_TURN_IMAGE_BYTES = 10 * 1024 * 1024;
 export const MAX_TURN_IMAGES_TOTAL_BYTES = 20 * 1024 * 1024;
 /** Bound the number of attachments per turn so a frame cannot grow without limit. */
 export const MAX_TURN_IMAGES = 16;
+/**
+ * Total data-URL bytes kept inline when one transcript message is echoed to
+ * clients.
+ *
+ * Turn submissions accept up to 20MB of decoded images and embed the base64
+ * (~27MB) in `session.messages`, but every socket response must fit the
+ * daemon's output cap — a verbatim transcript echo permanently wedged any
+ * session that ever received an image, because initialize could never deliver
+ * its own payload. Session payloads therefore replace data URLs beyond this
+ * per-message budget with compact text placeholders; turn submission and the
+ * provider-facing messages always keep the full images.
+ */
+export const MAX_TRANSCRIPT_INLINE_IMAGE_BYTES = 256 * 1024;
+/**
+ * Whole-projection data-URL ceiling across an entire transcript echo.
+ *
+ * The per-message budget above alone still allowed a wedge: ~64 turns each
+ * carrying a legal ~250 KB screenshot re-accumulated to ~16 MB of inline
+ * base64 and blew every initialize/open/status response past the socket
+ * output cap. This outer bound is spent newest first during projection —
+ * the most recent context keeps real pixels, the oldest inline images are
+ * omitted first once the ceiling hits — so images contribute at most ~2 MiB
+ * (an eighth of both transports' 16 MiB default frame cap) plus placeholder
+ * bytes to any echoed payload, provably leaving frame headroom no matter how
+ * many image-bearing turns the session accumulates.
+ */
+export const MAX_TRANSCRIPT_TOTAL_INLINE_IMAGE_BYTES = 2 * 1024 * 1024;
 
 /**
  * One validated turn attachment. `data` is canonical base64 of the decoded

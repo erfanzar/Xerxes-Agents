@@ -8,6 +8,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  MAX_TRANSCRIPT_INLINE_IMAGE_BYTES,
+  MAX_TRANSCRIPT_TOTAL_INLINE_IMAGE_BYTES,
   MAX_TURN_IMAGE_BYTES,
   MAX_TURN_IMAGES,
   MAX_TURN_IMAGES_TOTAL_BYTES,
@@ -267,6 +269,88 @@ test("transcript store round-trips structured content and still loads legacy pla
   }
 });
 
+test("session payloads omit oversized inline images but keep provider-facing parts intact", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-transcript-omit-"));
+  const socketPath = join(directory, "daemon.sock");
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: directory,
+    model: "vision-model",
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const server = new DaemonServer({ socketPath, runtime });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "image-echo", project_dir: directory },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    // A payload above the per-message inline budget (a ~250KB decoded image
+    // becomes a ~333KB base64 data URL) plus a tiny one that fits.
+    const hugeBytes = new Uint8Array(250_000);
+    hugeBytes.set(PNG_BYTES);
+    const hugeB64 = Buffer.from(hugeBytes).toString("base64");
+    const session = runtime.sessionStatus("image-echo");
+    if (!session) throw new Error("expected live session");
+    session.messages.push(
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "look at this" },
+          { type: "image_url", image_url: { url: `data:image/png;base64,${PNG_B64}` } },
+          { type: "image_url", image_url: { url: `data:image/png;base64,${hugeB64}` } },
+        ],
+        text: "look at this",
+      },
+      { role: "assistant", content: "I see it." },
+    );
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "session.open",
+      params: { session_key: "image-echo" },
+    });
+    const opened = await client.next((frame) => frame.id === 2);
+    expect(opened.result?.ok).toBe(true);
+    const echoed = opened.result?.session as Record<string, unknown>;
+    expect(echoed.message_count).toBe(2);
+
+    // Part count and ordering survive; only the over-budget data URL is
+    // replaced with a compact placeholder.
+    const transcript = echoed.transcript as Array<Record<string, unknown>>;
+    expect(transcript).toHaveLength(2);
+    const userParts = transcript[0]?.content as Array<Record<string, unknown>>;
+    expect(userParts).toHaveLength(3);
+    expect(userParts[1]).toEqual({
+      type: "image_url",
+      image_url: { url: `data:image/png;base64,${PNG_B64}` },
+    });
+    expect(userParts[2]?.type).toBe("text");
+    expect(String(userParts[2]?.text)).toMatch(/^\[image omitted: \d+ KB\]$/);
+    expect(echoed.transcript_images_omitted).toBe(1);
+    expect(JSON.stringify(opened.result)).not.toContain(hugeB64.slice(0, 64));
+
+    // The live session keeps full images: turn submission and the provider
+    // must never see the placeholder.
+    const liveContent = session.messages[0]?.content as Array<Record<string, unknown>>;
+    expect(liveContent[2]).toEqual({
+      type: "image_url",
+      image_url: { url: `data:image/png;base64,${hugeB64}` },
+    });
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 class CapturingClient implements LlmClient {
   readonly requests: CompletionRequest[] = [];
 
@@ -352,4 +436,99 @@ class SocketTestClient {
       }
     }
   }
+}
+
+test("a whole-projection ceiling keeps many legal per-turn images from wedging session.open", async () => {
+  // Mirrors the round-2 audit reproduction: every turn carries an image that
+  // is individually inside the per-message budget, but ~N such turns sum far
+  // past the socket output cap. The whole-projection ceiling must omit the
+  // oldest inline images first so initialize/open/status stay deliverable.
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-transcript-total-cap-"));
+  const socketPath = join(directory, "daemon.sock");
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: directory,
+    model: "vision-model",
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const server = new DaemonServer({ socketPath, runtime });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "image-flood", project_dir: directory },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    // Each data URL: decoded 100KB → ~133,336 base64 chars + prefix — well
+    // under MAX_TRANSCRIPT_INLINE_IMAGE_BYTES (256 KB) per message.
+    const heavyBytes = new Uint8Array(100_000);
+    heavyBytes.set(PNG_BYTES);
+    const heavyUrl = `data:image/png;base64,${Buffer.from(heavyBytes).toString("base64")}`;
+    const urlBytes = Buffer.byteLength(heavyUrl, "utf8");
+    expect(urlBytes).toBeLessThanOrEqual(MAX_TRANSCRIPT_INLINE_IMAGE_BYTES);
+
+    const turnCount = 20;
+    const session = runtime.sessionStatus("image-flood");
+    if (!session) throw new Error("expected live session");
+    for (let index = 0; index < turnCount; index += 1) {
+      session.messages.push({
+        role: "user",
+        content: [
+          { type: "text", text: `turn ${index} screenshot` },
+          { type: "image_url", image_url: { url: heavyUrl } },
+        ],
+        text: `turn ${index} screenshot`,
+      });
+    }
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "session.open",
+      params: { session_key: "image-flood" },
+    });
+    const opened = await client.next((frame) => frame.id === 2);
+    expect(opened.result?.ok).toBe(true);
+
+    // The ceiling spends itself newest first: the oldest inline images drop
+    // off first, recent turns keep real pixels.
+    const expectedKept = Math.floor(MAX_TRANSCRIPT_TOTAL_INLINE_IMAGE_BYTES / urlBytes);
+    expect(expectedKept).toBeGreaterThan(0);
+    expect(expectedKept).toBeLessThan(turnCount);
+    expect(echoedCount(opened)).toBe(turnCount);
+    const echoed = opened.result?.session as Record<string, unknown>;
+    expect(echoed.transcript_images_omitted).toBe(turnCount - expectedKept);
+
+    const transcript = echoed.transcript as Array<Record<string, unknown>>;
+    const oldestParts = transcript[0]?.content as Array<Record<string, unknown>>;
+    expect(oldestParts[1]?.type).toBe("text");
+    expect(String(oldestParts[1]?.text)).toMatch(/^\[image omitted: \d+ KB\]$/);
+    const newestParts = transcript[turnCount - 1]?.content as Array<Record<string, unknown>>;
+    expect(newestParts[1]).toEqual({ type: "image_url", image_url: { url: heavyUrl } });
+
+    // The echoed payload stays far below any frame cap by construction.
+    expect(JSON.stringify(opened.result).length).toBeLessThan(
+      MAX_TRANSCRIPT_TOTAL_INLINE_IMAGE_BYTES * 2,
+    );
+
+    // The live session keeps every full image.
+    for (const message of session.messages) {
+      const parts = message.content as Array<{ image_url?: { url?: string } }>;
+      expect(parts[1]?.image_url?.url).toBe(heavyUrl);
+    }
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+function echoedCount(frame: { result?: Record<string, unknown> }): number {
+  const session = frame.result?.session as Record<string, unknown> | undefined;
+  return Number(session?.message_count ?? -1);
 }

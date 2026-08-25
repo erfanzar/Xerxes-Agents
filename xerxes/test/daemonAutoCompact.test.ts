@@ -8,10 +8,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { createCompactionAgent } from "../src/agents/compactionAgent.js";
+import {
+  compactMessagesIfNeeded,
+  compactionCompletionPort,
+  lazyCompactionCompletionPort,
+} from "../src/daemon/compactionRunner.js";
 import { InMemoryDaemonRuntime } from "../src/daemon/runtime.js";
 import { DaemonServer } from "../src/daemon/server.js";
 import { ProfileStore } from "../src/bridge/profiles.js";
-import type { FetchImplementation } from "../src/llms/client.js";
+import type {
+  FetchImplementation,
+  LlmClient,
+  LlmDelta,
+} from "../src/llms/client.js";
 import type { DaemonEvent, DaemonSession, TurnRunner } from "../src/daemon/runtime.js";
 
 interface Frame {
@@ -375,7 +384,14 @@ test("cancel during pre-turn auto-compaction prevents the admitted turn from lau
     expect((await client.next((frame) => frame.id === 3)).result).toEqual({ ok: true });
 
     releaseCompaction.resolve();
-    await Bun.sleep(50);
+    // The suppressed launch still owes the submitter a terminal event, and
+    // since no turn_begin or assistant content ever existed it is marked
+    // `unstarted` so clients do not synthesize an assistant row from it.
+    const suppressedEnd = await client.next(eventFrame("turn_end"));
+    expect(suppressedEnd.params?.payload).toMatchObject({
+      cancelled: true,
+      unstarted: true,
+    });
 
     expect(runnerCalls).toBe(0);
     expect(runtime.sessionStatus("cancel-before-launch")).toMatchObject({
@@ -1065,4 +1081,82 @@ test("runtime setting auto_compact_threshold = 0 disables auto-compaction", asyn
     await server.stop();
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("a stalled compaction provider hits the injected deadline instead of hanging", async () => {
+  const deadlineMs = 25;
+  const never: LlmClient = {
+    stream(): AsyncIterable<LlmDelta> {
+      // A provider that accepts the request and never produces a delta —
+      // the exact stall that used to park a user's turn indefinitely.
+      return (async function* stuck(): AsyncGenerator<LlmDelta> {
+        await new Promise<void>(() => undefined);
+        yield { content: "" };
+      })();
+    },
+  };
+  const expectTimeout = (error: unknown): void => {
+    // Either the runner's own deadline error or the cooperative
+    // AbortSignal.timeout rejection may win the race; both are named
+    // TimeoutError and both mean "the deadline fired".
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).name).toBe("TimeoutError");
+  };
+  const port = compactionCompletionPort(never, "gpt-4", deadlineMs);
+  const startedAt = Date.now();
+  let timeoutError: unknown;
+  try {
+    await port({ prompt: "CONTEXT TO SUMMARIZE", maxTokens: 32, stream: false, temperature: 0 });
+  } catch (error) {
+    timeoutError = error;
+  }
+  expect(timeoutError).toBeDefined();
+  expectTimeout(timeoutError);
+  expect(Date.now() - startedAt).toBeLessThan(2_000);
+
+  // The same bound applies through the lazy port the daemon actually uses,
+  // whose client construction is deferred until first use.
+  const lazy = lazyCompactionCompletionPort(() => never, "gpt-4", deadlineMs);
+  let lazyError: unknown;
+  try {
+    await lazy.port({ prompt: "CONTEXT TO SUMMARIZE", maxTokens: 32, stream: false, temperature: 0 });
+  } catch (error) {
+    lazyError = error;
+  }
+  await lazy.close();
+  expectTimeout(lazyError);
+
+  // End to end through compactMessagesIfNeeded: a deadline miss is reported
+  // as a failed attempt, so auto-compaction records it and the turn proceeds.
+  // The transcript must exceed the agent's small-context shortcut so the
+  // completion port is genuinely consulted.
+  const filler = "transcript filler ".repeat(40);
+  const outcome = await compactMessagesIfNeeded({
+    completion: port,
+    messages: [
+      { role: "user", content: `first ${filler}` },
+      { role: "assistant", content: `second ${filler}` },
+    ],
+    model: "gpt-4",
+    reason: "auto-compact",
+  });
+  expect(outcome.compacted).toBe(false);
+  if (!outcome.compacted) {
+    expect(outcome.reason).toBe("failed");
+    expect(String(outcome.error ?? "").length).toBeGreaterThan(0);
+  }
+});
+
+test("compaction completion still succeeds under a generous deadline", async () => {
+  let calls = 0;
+  const quick: LlmClient = {
+    async *stream(): AsyncGenerator<LlmDelta> {
+      calls += 1;
+      yield { content: "short summary", usage: { inputTokens: 4, outputTokens: 2 } };
+    },
+  };
+  const port = compactionCompletionPort(quick, "gpt-4", 5_000);
+  const text = await port({ prompt: "CONTEXT TO SUMMARIZE", maxTokens: 32, stream: false, temperature: 0 });
+  expect(text).toBe("short summary");
+  expect(calls).toBe(1);
 });

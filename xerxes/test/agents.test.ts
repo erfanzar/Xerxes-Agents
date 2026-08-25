@@ -1,18 +1,24 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { expect, test } from 'bun:test'
+import { expect, spyOn, test } from 'bun:test'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { loadAgentSpec } from '../src/agents/agentSpec.js'
+import {
+  AGENT_SPEC_ISOLATION_MODES,
+  drainAgentSpecDiagnostics,
+  loadAgentSpec,
+} from '../src/agents/agentSpec.js'
 import { AgentSpecError } from '../src/core/errors.js'
 import {
   BUILTIN_AGENTS,
+  formatAgentDefinitionLoadErrors,
   listAgentDefinitionLoadErrors,
   loadAgentDefinitions,
   loadBuiltinAgentDefinitions,
+  parseAgentMarkdown,
   resolveAgentDefinition,
   type AgentDefinition,
 } from '../src/agents/definitions.js'
@@ -351,6 +357,377 @@ agent:
 `, 'utf8')
     expect(() => loadAgentSpec(join(root, 'missing-prompt.yaml'))).toThrow(AgentSpecError)
     expect(() => loadAgentSpec(join(root, 'missing-prompt.yaml'))).toThrow('System prompt file not found')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('agent specs accept explicit isolation modes and inherit them across extend chains', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-agent-spec-isolation-'))
+  try {
+    const write = async (name: string, isolation?: string): Promise<string> => {
+      const path = join(root, name)
+      const field = isolation === undefined ? '' : `  isolation: ${isolation === '' ? "''" : isolation}\n`
+      await writeFile(path, `version: 1\nagent:\n  name: ${name.replace('.yaml', '')}\n  system_prompt: prompt\n${field}`, 'utf8')
+      return path
+    }
+
+    expect(loadAgentSpec(await write('worktree.yaml', 'worktree')).isolation).toBe('worktree')
+    expect(loadAgentSpec(await write('shared.yaml', 'shared')).isolation).toBe('shared')
+    // An explicit empty value opts out instead of inheriting.
+    expect(loadAgentSpec(await write('unset.yaml', '')).isolation).toBe('')
+    // Absent fields keep inheriting across extend chains.
+    await writeFile(join(root, 'base.yaml'), `version: 1
+agent:
+  name: base
+  system_prompt: base prompt
+  isolation: worktree
+`, 'utf8')
+    await writeFile(join(root, 'child.yaml'), `version: 1
+agent:
+  extend: ./base.yaml
+  name: child
+`, 'utf8')
+    expect(loadAgentSpec(join(root, 'child.yaml')).isolation).toBe('worktree')
+    // A child may still override the inherited mode explicitly.
+    await writeFile(join(root, 'override.yaml'), `version: 1
+agent:
+  extend: ./base.yaml
+  name: override
+  isolation: shared
+`, 'utf8')
+    expect(loadAgentSpec(join(root, 'override.yaml')).isolation).toBe('shared')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('agent specs reject unknown isolation modes instead of silently downgrading children', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-agent-spec-isolation-invalid-'))
+  try {
+    const path = join(root, 'typo-mode.yaml')
+    await writeFile(path, `version: 1
+agent:
+  name: typo-mode
+  system_prompt: prompt
+  isolation: git-worktree
+`, 'utf8')
+    expect(() => loadAgentSpec(path)).toThrow(AgentSpecError)
+    expect(() => loadAgentSpec(path)).toThrow(/isolation must be one of.*got 'git-worktree'/u)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('unknown agent-spec fields surface through the loader error channel without dropping healthy siblings', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-agent-spec-unknown-'))
+  const projectAgents = join(root, '.xerxes', 'agents')
+  try {
+    await mkdir(projectAgents, { recursive: true })
+    const misspelled = join(projectAgents, 'misspelled-field.yaml')
+    await writeFile(misspelled, `version: 1
+agent:
+  name: misspelled-field
+  system_prompt: prompt
+  isolaton: worktree
+`, 'utf8')
+    await writeFile(join(projectAgents, 'healthy-sibling.yaml'), `version: 1
+agent:
+  name: healthy-sibling
+  system_prompt: healthy prompt
+`, 'utf8')
+
+    // Direct loads fail with an AgentSpecError naming the file and the field...
+    expect(() => loadAgentSpec(misspelled)).toThrow(AgentSpecError)
+    expect(() => loadAgentSpec(misspelled)).toThrow(/contains unknown agent-spec field 'isolaton'/u)
+
+    // ...and directory loads record the failure per file while unrelated specs still load.
+    const options = {
+      builtinDefinitions: new Map(),
+      cwd: root,
+      userDirectory: join(root, 'no-user-agents'),
+      projectDirectory: projectAgents,
+    }
+    const definitions = loadAgentDefinitions(options)
+    expect(definitions.get('healthy-sibling')?.systemPrompt).toBe('healthy prompt')
+    expect(definitions.get('misspelled-field')).toBeUndefined()
+    const errors = listAgentDefinitionLoadErrors()
+    expect(errors.some(error => error.includes('misspelled-field.yaml') && error.includes("'isolaton'"))).toBeTrue()
+
+    // Unknown top-level sections are rejected the same way.
+    const topLevelTypo = join(projectAgents, 'top-level-typo.yaml')
+    await writeFile(topLevelTypo, `verison: 1
+agent:
+  name: top-level-typo
+  system_prompt: prompt
+`, 'utf8')
+    expect(() => loadAgentSpec(topLevelTypo)).toThrow(/contains unknown agent-spec section 'verison'/u)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('definition loading surfaces collected spec errors on stderr once per distinct set', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-agent-spec-surface-'))
+  const projectAgents = join(root, '.xerxes', 'agents')
+  const emitted: string[] = []
+  try {
+    await mkdir(projectAgents, { recursive: true })
+    await writeFile(join(projectAgents, 'healthy.yaml'), `version: 1
+agent:
+  name: healthy
+  system_prompt: healthy prompt
+`, 'utf8')
+    await writeFile(join(projectAgents, 'invalid.yaml'), `version: 1
+agent:
+  name: invalid
+  system_prompt: prompt
+  isolation: git-worktree
+`, 'utf8')
+    const options = {
+      builtinDefinitions: new Map(),
+      cwd: root,
+      userDirectory: join(root, 'no-user-agents'),
+      projectDirectory: projectAgents,
+    }
+
+    const spy = spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      emitted.push(args.map(part => String(part)).join(' '))
+    })
+    try {
+      // The failing spec vanishes from the catalog, but the reason is announced.
+      const definitions = loadAgentDefinitions(options)
+      expect(definitions.get('healthy')?.systemPrompt).toBe('healthy prompt')
+      expect(definitions.get('invalid')).toBeUndefined()
+      expect(emitted).toHaveLength(1)
+      expect(emitted[0]).toContain('[xerxes] 1 agent definition issue(s)')
+      expect(emitted[0]).toContain('invalid.yaml')
+      expect(emitted[0]).toContain("got 'git-worktree'")
+
+      // Re-resolving the unchanged catalog does not flood stderr with repeats.
+      loadAgentDefinitions(options)
+      loadAgentDefinitions(options)
+      expect(emitted).toHaveLength(1)
+    } finally {
+      spy.mockRestore()
+    }
+
+    // A newly broken file is a changed error set and is announced again.
+    await writeFile(join(projectAgents, 'worse.yaml'), '- not an agent mapping\n', 'utf8')
+    const secondSpy = spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      emitted.push(args.map(part => String(part)).join(' '))
+    })
+    try {
+      loadAgentDefinitions(options)
+      expect(emitted).toHaveLength(2)
+      expect(emitted[1]).toContain('[xerxes] 2 agent definition issue(s)')
+      expect(emitted[1]).toContain('worse.yaml')
+    } finally {
+      secondSpy.mockRestore()
+    }
+    expect(formatAgentDefinitionLoadErrors()).toContain('invalid.yaml')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('YAML description is accepted as a deprecated alias of when_to_use', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-agent-spec-alias-'))
+  try {
+    // Description alone resolves like when_to_use with no diagnostic noise.
+    await writeFile(join(root, 'aliased.yaml'), `version: 1
+agent:
+  name: aliased
+  system_prompt: prompt
+  description: Runs QA passes.
+`, 'utf8')
+    const aliased = loadAgentSpec(join(root, 'aliased.yaml'))
+    expect(aliased.whenToUse).toBe('Runs QA passes.')
+    expect(drainAgentSpecDiagnostics()).toEqual([])
+
+    // Both spellings: when_to_use wins and a note rides the load-error channel.
+    await writeFile(join(root, 'both.yaml'), `version: 1
+agent:
+  name: both
+  system_prompt: prompt
+  description: markdown spelling
+  when_to_use: canonical spelling
+`, 'utf8')
+    const both = loadAgentSpec(join(root, 'both.yaml'))
+    expect(both.whenToUse).toBe('canonical spelling')
+    const notes = drainAgentSpecDiagnostics()
+    expect(notes).toHaveLength(1)
+    expect(notes[0]).toContain("'description' is deprecated")
+    expect(notes[0]).toContain('both.yaml')
+
+    // Through the definition loader the same note reaches listAgentDefinitionLoadErrors.
+    await mkdir(join(root, '.xerxes', 'agents'), { recursive: true })
+    await writeFile(join(root, '.xerxes', 'agents', 'both-loader.yaml'), `version: 1
+agent:
+  name: both-loader
+  system_prompt: prompt
+  description: loader alias
+  when_to_use: loader canonical
+`, 'utf8')
+    const definitions = loadAgentDefinitions({
+      builtinDefinitions: new Map(),
+      cwd: root,
+      userDirectory: join(root, 'no-user-agents'),
+      projectDirectory: join(root, '.xerxes', 'agents'),
+    })
+    expect(definitions.get('both-loader')?.description).toBe('loader canonical')
+    expect(listAgentDefinitionLoadErrors().some(error =>
+      error.includes('both-loader.yaml') && error.includes("'description' is deprecated"),
+    )).toBeTrue()
+  } finally {
+    drainAgentSpecDiagnostics()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('markdown frontmatter enforces recognized fields and isolation modes', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-agent-md-frontmatter-'))
+  const writeMarkdown = async (name: string, fields: string): Promise<string> => {
+    const path = join(root, name)
+    await writeFile(path, `---\n${fields}---\nbody prompt\n`, 'utf8')
+    return path
+  }
+  try {
+    // An isolation typo used to be accepted and silently downgraded children.
+    const badIsolation = await writeMarkdown('bad-isolation.md', 'description: x\nisolation: worktrees\n')
+    expect(() => parseAgentMarkdown(badIsolation)).toThrow(AgentSpecError)
+    expect(() => parseAgentMarkdown(badIsolation)).toThrow(/frontmatter\.isolation must be one of.*got 'worktrees'/u)
+
+    // A depth_limit typo used to be silently ignored, keeping the default depth.
+    const badDepthKey = await writeMarkdown('bad-depth-key.md', 'description: x\ndepth_limit: 9\n')
+    expect(() => parseAgentMarkdown(badDepthKey)).toThrow(AgentSpecError)
+    expect(() => parseAgentMarkdown(badDepthKey)).toThrow(/contains unknown field 'depth_limit'/u)
+
+    // Every documented field still parses, and directory loads record rejections per file.
+    const valid = await writeMarkdown(
+      'valid.md',
+      'description: Notes keeper\nmodel: gpt-4o\nmax_depth: 3\ntools: [ReadFile]\nisolation: shared\n',
+    )
+    expect(parseAgentMarkdown(valid)).toMatchObject({
+      description: 'Notes keeper',
+      model: 'gpt-4o',
+      maxDepth: 3,
+      isolation: 'shared',
+      systemPrompt: 'body prompt',
+      tools: ['ReadFile'],
+    })
+
+    await mkdir(join(root, '.xerxes', 'agents'), { recursive: true })
+    await writeFile(join(root, '.xerxes', 'agents', 'broken.md'), '---\ndepth_limit: 9\n---\nprompt\n', 'utf8')
+    await writeFile(join(root, '.xerxes', 'agents', 'fine.md'), '---\ndescription: fine\n---\nprompt\n', 'utf8')
+    const definitions = loadAgentDefinitions({
+      builtinDefinitions: new Map(),
+      cwd: root,
+      userDirectory: join(root, 'no-user-agents'),
+      projectDirectory: join(root, '.xerxes', 'agents'),
+    })
+    expect(definitions.get('fine')?.systemPrompt).toBe('prompt')
+    expect(definitions.has('broken')).toBeFalse()
+    expect(listAgentDefinitionLoadErrors().some(error =>
+      error.includes('broken.md') && error.includes("'depth_limit'"),
+    )).toBeTrue()
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('subagent entries reject missing, empty, or mistyped paths instead of dropping them', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-agent-subagent-paths-'))
+  try {
+    const cases: ReadonlyArray<readonly [string, string, RegExp]> = [
+      ['missing-path.yaml', '    helper:\n      description: no path declared\n', /subagents\.helper must declare a non-empty string 'path'/u],
+      ['empty-path.yaml', '    helper:\n      path: ""\n', /subagents\.helper must declare a non-empty string 'path'/u],
+      ['typo-path.yaml', '    helper:\n      pth: ./helper.yaml\n', /subagents\.helper contains unknown agent-spec field 'pth'/u],
+      ['null-entry.yaml', '    helper:\n', /subagents\.helper must be a mapping with a 'path' field/u],
+      ['list-entry.yaml', '    helper: [a, b]\n', /subagents\.helper must be a mapping with a 'path' field/u],
+    ]
+    for (const [name, subagentsBlock, pattern] of cases) {
+      const path = join(root, name)
+      await writeFile(path, `version: 1\nagent:\n  name: ${name.replace('.yaml', '')}\n  system_prompt: prompt\n  subagents:\n${subagentsBlock}`, 'utf8')
+      expect(() => loadAgentSpec(path), name).toThrow(AgentSpecError)
+      expect(() => loadAgentSpec(path), name).toThrow(pattern)
+    }
+
+    // Shorthand string entries and full mappings keep working side by side.
+    const valid = join(root, 'valid.yaml')
+    await writeFile(valid, `version: 1
+agent:
+  name: valid-parent
+  system_prompt: prompt
+  subagents:
+    shorthand: ./shorthand-child.yaml
+    full:
+      path: ./full-child.yaml
+      description: Full entry
+`, 'utf8')
+    const spec = loadAgentSpec(valid)
+    expect(spec.subagents.shorthand?.path).toBe(join(root, 'shorthand-child.yaml'))
+    expect(spec.subagents.full).toMatchObject({ path: join(root, 'full-child.yaml'), description: 'Full entry' })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('bundled specs survive strict validation and every documented field still resolves', async () => {
+  // All seven bundled YAML specs must keep loading under the strict parser.
+  const bundled = loadBuiltinAgentDefinitions()
+  expect([...bundled.keys()].sort()).toEqual([
+    'coder',
+    'default',
+    'objective',
+    'planner',
+    'researcher',
+    'reviewer',
+    'tester',
+  ])
+  for (const definition of bundled.values()) {
+    expect(AGENT_SPEC_ISOLATION_MODES as readonly string[]).toContain(definition.isolation)
+  }
+  expect(BUILTIN_AGENTS.get('default')?.isolation).toBe('')
+
+  // A spec using every documented field resolves end to end.
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-agent-spec-full-'))
+  try {
+    await writeFile(join(root, 'prompt.md'), 'Role: ${ROLE:-general}\n', 'utf8')
+    await writeFile(join(root, 'full.yaml'), `version: 1
+agent:
+  name: kitchen-sink
+  system_prompt_path: ./prompt.md
+  system_prompt_args:
+    ROLE: sink
+  model: gpt-4o
+  when_to_use: Full documentation coverage.
+  tools:
+    - ReadFile
+  allowed_tools:
+    - ReadFile
+  exclude_tools:
+    - exec_command
+  max_depth: 2
+  isolation: worktree
+  subagents:
+    helper:
+      path: ./helper.yaml
+      description: Helper child
+`, 'utf8')
+    const spec = loadAgentSpec(join(root, 'full.yaml'))
+    expect(spec).toMatchObject({
+      name: 'kitchen-sink',
+      systemPrompt: 'Role: sink\n',
+      model: 'gpt-4o',
+      whenToUse: 'Full documentation coverage.',
+      tools: ['ReadFile'],
+      allowedTools: ['ReadFile'],
+      excludeTools: ['exec_command'],
+      maxDepth: 2,
+      isolation: 'worktree',
+    })
+    expect(spec.subagents.helper?.path).toBe(join(root, 'helper.yaml'))
   } finally {
     await rm(root, { recursive: true, force: true })
   }

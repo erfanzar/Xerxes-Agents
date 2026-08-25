@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { errorMessage, ToolRegistry, type ToolExecutionContext } from '../executors/toolRegistry.js'
+import { version } from '../../package.json' with { type: 'json' }
 import type { JsonObject } from '../types/toolCalls.js'
 import {
   MCP_JSON_RPC_ERRORS,
@@ -47,7 +48,7 @@ class MCPFrameByteCounter {
   }
 }
 
-const DEFAULT_SERVER_INFO: MCPImplementation = { name: 'xerxes', version: '0.3.0' }
+const DEFAULT_SERVER_INFO: MCPImplementation = { name: 'xerxes', version }
 const TOOL_SERVER_CAPABILITIES: MCPServerCapabilities = { tools: { listChanged: false } }
 
 /**

@@ -3,6 +3,7 @@
 
 import { expect, test } from 'bun:test'
 
+import { CompletionDeadlineError } from '../src/llms/client.js'
 import {
   CircuitBreakerConfig,
   CircuitBreakerRegistry,
@@ -84,6 +85,20 @@ test('error classification maps built-in JavaScript failures, status codes, patt
   })
   expect(classifyError(new Error('unrelated message'))).toMatchObject({ kind: ErrorKind.UNKNOWN, retryable: false })
   expect(new ErrorClassifier().isRetryable({ code: 'ECONNREFUSED', message: 'connection refused' })).toBe(true)
+})
+
+test('the completion deadline error classifies as a retryable timeout, not an unknown failure', () => {
+  // completeLlm's default deadline raises this class on stalled upstreams.
+  // Callers relying on the internal deadline (compaction fallbacks, plan
+  // generators) need the same retry policy as TimeoutError-named failures.
+  const deadline = new CompletionDeadlineError(180_000)
+  expect(deadline.name).toBe('CompletionDeadlineError')
+  expect(classifyError(deadline)).toMatchObject({
+    kind: ErrorKind.TIMEOUT,
+    retryable: true,
+  })
+  expect((deadline as Error).message).toContain('did not finish within 180000ms')
+  expect(new ErrorClassifier().isRetryable(deadline)).toBeTrue()
 })
 
 test('rate limit tracking merges case-insensitive headers and uses an injected clock for delays', () => {

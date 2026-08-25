@@ -428,12 +428,16 @@ describe('assembled screens', () => {
     const lines = frame.split('\n')
     const at = (needle: string) => lines.findIndex(line => line.includes(needle))
 
-    // Bottom-anchored: a short conversation sits just above the composer, not
-    // stranded at the top of a tall terminal with a dead gap underneath.
-    const ledger = at('6 tools · 11.4s')
+    // Top-anchored, as the canvas draws it: the conversation starts under the
+    // header and the composer is pinned below. Bottom-anchoring this moved
+    // the dead space above the content, which reads far worse on a tall
+    // terminal than a gap under it.
+    const header = at('session 4a91')
+    const firstRow = at('the scheduler drops tasks')
     const composerTop = lines.findIndex(line => line.includes('╭─'))
-    expect(ledger).toBeGreaterThan(0)
-    expect(composerTop - ledger).toBeLessThanOrEqual(2)
+    expect(firstRow).toBeGreaterThan(header)
+    expect(firstRow - header).toBeLessThanOrEqual(4)
+    expect(composerTop).toBeGreaterThan(firstRow)
 
     // The user's own words carry the prompt glyph on a filled band.
     expect(frame).toContain('❯ the scheduler drops tasks')

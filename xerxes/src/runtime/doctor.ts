@@ -7,6 +7,7 @@ import { xerxesHome } from '../core/paths.js'
 import { CliWriter, createCliStyle, type CliWriterOptions } from './cliStyle.js'
 import { PROVIDERS } from '../llms/providerRegistry.js'
 import { formatConfigProvenance, getConfigProvenance } from '../core/config.js'
+import { formatAgentDefinitionLoadErrors } from '../agents/definitions.js'
 
 export type DiagnosisSeverity = 'fail' | 'ok' | 'warn'
 
@@ -174,6 +175,34 @@ export function checkConfigProvenance(_options: DoctorOptions = {}): Diagnosis {
     : diagnosis('config-provenance', 'ok', 'Every setting is at its built-in default')
 }
 
+/**
+ * Report agent-spec files that failed to load or carried fixable diagnostics.
+ *
+ * Strict spec rejection used to be invisible: a broken YAML file silently
+ * vanished from the catalog and `--agent <name>` only reported "Unknown agent".
+ * The loader now captures formatted per-file errors; this check surfaces them
+ * where users already look when something feels off. Like config provenance,
+ * it reads the live catalog rather than injected options, because the errors
+ * live in the loader's own load of the ambient user/project directories.
+ */
+export function checkAgentDefinitions(_options: DoctorOptions = {}): Diagnosis {
+  const formatted = formatAgentDefinitionLoadErrors()
+  if (formatted === undefined) {
+    return diagnosis('agent-specs', 'ok', 'Agent definitions loaded')
+  }
+  // Load errors render as '- <path>: <ErrorName>: <message>'; lift the path
+  // out so the fix hint names the spec file to open instead of restating it.
+  const firstFile = /^- (.+?): [A-Za-z$_][\w$]*: /.exec(formatted)?.[1]
+  return diagnosis(
+    'agent-specs',
+    'warn',
+    formatted,
+    firstFile
+      ? `Fix the agent spec at ${firstFile}; affected agents are skipped until it loads cleanly.`
+      : 'Fix the named agent spec files; affected agents are skipped until they load cleanly.',
+  )
+}
+
 export const DEFAULT_DOCTOR_CHECKS: readonly DoctorCheck[] = Object.freeze([
   checkBunRuntime,
   checkPlatform,
@@ -183,6 +212,7 @@ export const DEFAULT_DOCTOR_CHECKS: readonly DoctorCheck[] = Object.freeze([
   checkComputerUse,
   checkWindowsTooling,
   checkConfigProvenance,
+  checkAgentDefinitions,
 ])
 
 export const MINIMAL_DOCTOR_CHECKS: readonly DoctorCheck[] = Object.freeze([

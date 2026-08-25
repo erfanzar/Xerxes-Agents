@@ -151,7 +151,7 @@ export class PluginRegistry {
 
   private async discoverPass(directory: string, options: PluginDiscoveryOptions): Promise<string[]> {
     if (!existsSync(directory)) return []
-    if (isWorldWritableDirectory(directory)) {
+    if (isWorldWritable(directory)) {
       // A world-writable plugin directory lets any local user swap in arbitrary code; refuse to execute it.
       console.warn(`Plugin discovery skipped: directory is world-writable: ${directory}`)
       return []
@@ -160,11 +160,21 @@ export class PluginRegistry {
       ? undefined
       : new Set(options.allowedModules.map(entry => resolve(directory, entry)))
     const discovered: string[] = []
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    // Discovery order must not depend on filesystem readdir order, or
+    // cross-plugin mutation hooks would run in a platform-dependent sequence.
+    const entries = readdirSync(directory, { withFileTypes: true })
+      .sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0)
+    for (const entry of entries) {
       if (!entry.isFile() || entry.name.startsWith('_') || !/\.(?:[cm]?js|ts)$/.test(entry.name)) continue
       const path = join(directory, entry.name)
       if (allowedModules !== undefined && !allowedModules.has(resolve(path))) {
         console.warn(`Plugin discovery skipped module without explicit host opt-in: ${path}`)
+        continue
+      }
+      if (isWorldWritable(path)) {
+        // A world-writable module file lets any local user inject arbitrary
+        // code into a trusted directory; refuse to execute it.
+        console.warn(`Plugin discovery skipped: module is world-writable: ${path}`)
         continue
       }
       const href = pathToFileURL(path).href
@@ -383,25 +393,27 @@ export class PluginRegistry {
 }
 
 /**
- * World-writable directories must never be a source of executable plugin code.
+ * World-writable paths must never be a source of executable plugin code —
+ * this covers both the discovery directory and each module file imported
+ * from it.
  *
  * The POSIX mode bits this reads do not exist on Windows, where access is an ACL
  * and `stat().mode` is a synthesized value: Node reports 0o666/0o777-style modes
  * derived from the read-only attribute alone, so the other-write bit is set for
- * essentially every directory. Evaluating it there would reject every plugin
+ * essentially every path. Evaluating it there would reject every plugin
  * directory on the machine as unsafe. Windows containment is enforced by the
  * discovery roots (per-user profile directories) instead, so this check reports
  * "not world-writable" rather than pretending to an answer it cannot compute.
  */
-function isWorldWritableDirectory(directory: string, platform: NodeJS.Platform = process.platform): boolean {
+function isWorldWritable(path: string, platform: NodeJS.Platform = process.platform): boolean {
   if (isWindows(platform)) {
     return false
   }
   try {
-    return (statSync(directory).mode & 0o002) !== 0
+    return (statSync(path).mode & 0o002) !== 0
   } catch {
     // Dynamic imports execute arbitrary code. If permissions cannot be inspected, withhold the
-    // directory rather than treating an unknown ownership boundary as safe.
+    // path rather than treating an unknown ownership boundary as safe.
     return true
   }
 }

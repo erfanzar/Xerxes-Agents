@@ -73,6 +73,7 @@ import {
   jsonRpcFailure,
   jsonRpcSuccess,
   parseJsonRpcRequest,
+  type JsonRpcId,
   type JsonRpcPayload,
   type JsonRpcRequest,
 } from "../protocol/jsonRpc.js";
@@ -135,7 +136,12 @@ import {
   normalizeCompactionThreshold,
   precompactArchivePathFor,
 } from "./compactionRunner.js";
-import { validateTurnImages, type TurnImage } from "./images.js";
+import {
+  MAX_TRANSCRIPT_INLINE_IMAGE_BYTES,
+  MAX_TRANSCRIPT_TOTAL_INLINE_IMAGE_BYTES,
+  validateTurnImages,
+  type TurnImage,
+} from "./images.js";
 import { DaemonInteractionBoard } from "./interactions.js";
 import {
   queueSessionNotification,
@@ -161,6 +167,7 @@ import {
   type DaemonEvent,
   type DaemonRuntime,
   type DaemonSession,
+  type DaemonTranscriptMessage,
   type SavedDaemonSession,
   type SubmitTurnOptions,
   InMemoryDaemonRuntime,
@@ -182,6 +189,14 @@ const DEFAULT_MAX_SOCKET_FRAME_BYTES = 16 * 1024 * 1024;
 const DEFAULT_MAX_PENDING_SOCKET_REQUESTS = 1_024;
 const DEFAULT_MAX_PENDING_SOCKET_BYTES = 16 * 1024 * 1024;
 const DEFAULT_MAX_SOCKET_OUTPUT_BYTES = 16 * 1024 * 1024;
+
+/**
+ * Accepted client submission ids retained per session for reconnect-retry
+ * idempotency. A long-lived daemon otherwise grows the set with every submit,
+ * so it is FIFO-bounded and cleared when a session is evicted; the bound is
+ * far above any realistic retry window.
+ */
+export const MAX_ACCEPTED_SUBMISSION_IDS = 4_096;
 
 /**
  * Compaction mechanics — thresholds, summary budgets, retry policy and the
@@ -738,8 +753,14 @@ export class DaemonServer {
   private readonly socketPath: string;
   private readonly terminalRegistry: TerminalRegistry | undefined;
   private readonly transcriptSearch = new TranscriptSearchIndex();
-  /** Accepted client submission ids, retained for this daemon lifetime to make reconnect retries idempotent. */
+  /**
+   * Accepted client submission ids, keyed by `<session-key>\u0000<submission-id>`
+   * and FIFO-bounded, so reconnect retries stay idempotent without growing a
+   * daemon-lifetime set. Entries for an evicted session are dropped with it.
+   */
   private readonly acceptedSubmissionIds = new Set<string>();
+  /** Session-scoped signals bounding background work to the session's life. */
+  private readonly sessionLifetimeSignals = new Map<string, AbortController>();
   /** One cold read of the transcript directory, shared by concurrent searches. */
   private transcriptSearchHydration: Promise<void> | undefined;
   private readonly toolCatalog: DaemonToolCatalogPort | undefined;
@@ -1180,6 +1201,8 @@ export class DaemonServer {
       }
     } finally {
       process.off("SIGTERM", hardExit);
+      // Background work bound to a session must not outlive the daemon.
+      this.endSessionLifetime([...this.sessionLifetimeSignals.keys()]);
       this.removeCrashHandlers();
       await this.shutdownRuntime();
     }
@@ -1223,13 +1246,13 @@ export class DaemonServer {
     const bytes = Buffer.byteLength(encoded, "utf8");
     if (bytes > this.maxSocketOutputBytes) {
       console.error("Xerxes daemon dropping slow client: response exceeds the socket output limit");
-      connection.socket.destroy();
+      this.destroyWithOutputErrorFrame(connection, frame);
       return;
     }
     if (connection.outputBlocked || connection.outputQueue.length > 0) {
       if (connection.queuedOutputBytes + bytes > this.maxSocketOutputBytes) {
         console.error("Xerxes daemon dropping slow client: queued output exceeds the socket output limit");
-        connection.socket.destroy();
+        this.destroyWithOutputErrorFrame(connection, frame);
         return;
       }
       connection.outputQueue.push(encoded);
@@ -1237,6 +1260,30 @@ export class DaemonServer {
       return;
     }
     connection.outputBlocked = !connection.socket.write(encoded);
+  }
+
+  /**
+   * Destroy an over-limit connection, but tell the client why first.
+   *
+   * A silent destroy leaves the request's author hanging on a response that
+   * will never arrive. When the oversized frame carries a JSON-RPC id, deliver
+   * a minimal correlated error frame before closing; `end` flushes the write
+   * before FIN so the error is not discarded with the socket buffer.
+   */
+  private destroyWithOutputErrorFrame(connection: Connection, frame: object): void {
+    const id = (frame as { id?: unknown }).id;
+    const routable = typeof id === "string" ? id.length > 0 : typeof id === "number";
+    const socket = connection.socket;
+    if (!routable || socket.destroyed) {
+      socket.destroy();
+      return;
+    }
+    try {
+      const failure = jsonRpcFailure(id as JsonRpcId, -32000, "response exceeds socket output limit");
+      socket.end(`${JSON.stringify(failure)}\n`, () => socket.destroy());
+    } catch {
+      socket.destroy();
+    }
   }
 
   private flushSocketOutput(connection: Connection): void {
@@ -1555,6 +1602,14 @@ export class DaemonServer {
       }
       try {
         const deleted = await remove.call(this.runtime, sessionId);
+        if (deleted) {
+          this.forgetAcceptedSubmissions([sessionId, active?.sessionKey ?? ""]);
+          this.endSessionLifetime(
+            [sessionId, active?.sessionKey].filter(
+              (value): value is string => Boolean(value),
+            ),
+          );
+        }
         return deleted
           ? { ok: true, deleted: true, session_id: sessionId }
           : { ok: false, deleted: false, error: "saved session not found" };
@@ -1645,7 +1700,7 @@ export class DaemonServer {
         return { ok: true, duplicate: true };
       }
       if (submissionKey) {
-        this.acceptedSubmissionIds.add(submissionKey);
+        this.rememberAcceptedSubmission(submissionKey);
       }
       void this.submitTrackedTurn(
         key,
@@ -2704,13 +2759,21 @@ export class DaemonServer {
         );
         return { ok: true };
       case "new": {
-        // Flush before evicting so unpersisted edits survive the reset; for
-        // a hex resume key openSession then re-adopts the persisted history
-        // instead of overwriting it with an empty session.
+        // Flush before evicting so unpersisted edits survive the reset.
         await this.runtime.flushSessions();
-        this.runtime.evictSession(key);
-        this.clearAutoCompactFailures(key);
-        const fresh = await this.runtime.openSession(key);
+        // A resumed connection holds the persisted hex id as its session key,
+        // and openSession re-adopts that transcript — announcing a new
+        // session while actually continuing the old one. Mint a fresh
+        // non-hex slot key exactly like a new attach does, so /new always
+        // opens an empty conversation; the old transcript is left untouched.
+        const previousKey = key;
+        this.forgetAcceptedSubmissions([previousKey]);
+        this.endSessionLifetime([previousKey]);
+        this.runtime.evictSession(previousKey);
+        this.clearAutoCompactFailures(previousKey);
+        const freshKey = `tui:${newConnectionKey()}`;
+        connection.activeSessionKey = freshKey;
+        const fresh = await this.runtime.openSession(freshKey);
         this.emitSlash(connection, `New session \`${fresh.id}\` started.`);
         this.emitInitDone(connection, fresh);
         this.emitStatus(connection, fresh);
@@ -4387,6 +4450,9 @@ export class DaemonServer {
         assistantText: assistant,
         sessionModel: session.model,
         profile: this.profileStore.active(),
+        // Bound the background call to the session's lifetime: a title
+        // request for an evicted or reset session must not outlive it.
+        signal: this.sessionSignal(sessionKey),
         ...(this.titleClientFactory ? { clientFactory: this.titleClientFactory } : {}),
       }));
     if (!attempt) return;
@@ -4758,6 +4824,8 @@ export class DaemonServer {
           candidate.id === target.id && candidate.sessionKey !== target.id,
       )?.sessionKey;
     if (activeKey) {
+      this.forgetAcceptedSubmissions([activeKey]);
+      this.endSessionLifetime([activeKey]);
       this.runtime.evictSession(activeKey);
     }
     connection.activeSessionKey = target.id;
@@ -5727,7 +5795,15 @@ export class DaemonServer {
         // title and mode edits); flush first so a reconnect cannot silently
         // lose them.
         await this.runtime.flushSessions();
-        this.runtime.evictSession(key);
+        // Re-check across the flush await: a turn admitted while it was in
+        // flight registers its controller and session state, and evicting
+        // now would abort just-admitted work. With no further yield between
+        // this check and eviction, the decision is atomic.
+        if (!this.runtime.sessionStatus(key)?.activeTurnId) {
+          this.forgetAcceptedSubmissions([key]);
+          this.endSessionLifetime([key]);
+          this.runtime.evictSession(key);
+        }
       }
     }
     const modelOverride = optionalString(params.model);
@@ -6070,6 +6146,19 @@ export class DaemonServer {
       // Its cancellation removes this ownership entry before a runtime turn
       // exists, so do not launch work that no connection can cancel or observe.
       if (owner && this.turnOwners.get(sessionKey) !== owner) {
+        // The submit was already acknowledged to the client, so the suppressed
+        // turn still owes it the terminal event a launched one would produce.
+        // Without this the client waits forever, exactly as if the daemon had
+        // died mid-turn. `unstarted` marks that no turn_begin or assistant
+        // content ever existed for this submission (additive wire vocabulary).
+        emit({
+          type: "turn_end",
+          payload: {
+            cancelled: true,
+            unstarted: true,
+            session_id: this.runtime.sessionStatus(sessionKey)?.id ?? sessionKey,
+          },
+        });
         return;
       }
       return this.runtime.submitTurn(
@@ -6135,6 +6224,56 @@ export class DaemonServer {
     }
     for (const [requestId, owner] of this.questionOwners) {
       if (owner === connection) this.questionOwners.delete(requestId);
+    }
+  }
+
+  /**
+   * Record an accepted submission id, evicting the oldest entries once the
+   * FIFO cap is reached so the set stays bounded for the daemon's lifetime.
+   */
+  private rememberAcceptedSubmission(submissionKey: string): void {
+    while (this.acceptedSubmissionIds.size >= MAX_ACCEPTED_SUBMISSION_IDS) {
+      const oldest = this.acceptedSubmissionIds.values().next().value;
+      if (oldest === undefined) break;
+      this.acceptedSubmissionIds.delete(oldest);
+    }
+    this.acceptedSubmissionIds.add(submissionKey);
+  }
+
+  /**
+   * Forget the submissions recorded under any of these session keys or ids.
+   *
+   * Called when a session is evicted or deleted: its retry window is over,
+   * and keeping the entries only delays cap turnover for live sessions.
+   */
+  private forgetAcceptedSubmissions(sessionKeys: readonly string[]): void {
+    if (this.acceptedSubmissionIds.size === 0) return;
+    const dropped = new Set(sessionKeys);
+    for (const entry of this.acceptedSubmissionIds) {
+      const separator = entry.indexOf("\u0000");
+      if (separator > 0 && dropped.has(entry.slice(0, separator))) {
+        this.acceptedSubmissionIds.delete(entry);
+      }
+    }
+  }
+
+  /** Signal bounding background work (title generation) to this session's life. */
+  private sessionSignal(sessionKey: string): AbortSignal {
+    let controller = this.sessionLifetimeSignals.get(sessionKey);
+    if (!controller) {
+      controller = new AbortController();
+      this.sessionLifetimeSignals.set(sessionKey, controller);
+    }
+    return controller.signal;
+  }
+
+  /** Abort background work bound to these sessions and forget their signals. */
+  private endSessionLifetime(sessionKeys: readonly string[]): void {
+    for (const sessionKey of sessionKeys) {
+      this.sessionLifetimeSignals.get(sessionKey)?.abort(
+        new Error("Session closed"),
+      );
+      this.sessionLifetimeSignals.delete(sessionKey);
     }
   }
 
@@ -6385,6 +6524,154 @@ function requestedSessionKey(params: JsonRpcPayload, fallback: string): string {
   );
 }
 
+/** A content part carrying an inline base64 image payload. */
+interface InlineImagePart {
+  readonly image_url: { readonly url: string };
+  readonly type: "image_url";
+}
+
+function isInlineImagePart(part: unknown): part is InlineImagePart & Record<string, unknown> {
+  return (
+    isRecord(part) &&
+    part.type === "image_url" &&
+    isRecord(part.image_url) &&
+    typeof part.image_url.url === "string"
+  );
+}
+
+/** Placeholder text standing in for an omitted transcript image. */
+function transcriptImagePlaceholder(dataUrlBytes: number): string {
+  const kilobytes = Math.max(1, Math.round(dataUrlBytes / 1024));
+  return `[image omitted: ${kilobytes} KB]`;
+}
+
+/** One data-URL image part surviving the inner per-message rule. */
+interface TranscriptImageSlot {
+  readonly part: InlineImagePart & Record<string, unknown>;
+  /** UTF-8 byte length of the full data URL — the cost of keeping it inline. */
+  readonly urlBytes: number;
+  /** Flipped false when the whole-projection ceiling omits this image. */
+  inline: boolean;
+}
+
+/** Per-part projection decision built during the classification pass. */
+type TranscriptSlot =
+  | { readonly kind: "part"; readonly part: Record<string, unknown> }
+  | { readonly kind: "image"; readonly image: TranscriptImageSlot };
+
+/**
+ * Echo a session's transcript for wire payloads with inline image payloads
+ * bounded twice.
+ *
+ * Inner rule (per message): data-URL image parts stay verbatim until one
+ * message's cumulative base64 bytes exceed `MAX_TRANSCRIPT_INLINE_IMAGE_BYTES`.
+ * Outer rule (whole projection): surviving images then draw on a shared
+ * ceiling, `MAX_TRANSCRIPT_TOTAL_INLINE_IMAGE_BYTES`, spent newest first so
+ * the most recent context keeps its real pixels while the OLDEST inline
+ * images are omitted first once the ceiling hits. Every omitted image becomes
+ * `{ type: "text", text: "[image omitted: N KB]" }`.
+ *
+ * Frame-safety arithmetic: one outbound frame is capped at 16 MiB on both
+ * transports (the Unix socket's `DEFAULT_MAX_SOCKET_OUTPUT_BYTES` and the
+ * WebSocket gateway's `DEFAULT_MAX_MESSAGE_BYTES`). Images therefore
+ * contribute at most ~2 MiB — an eighth of the cap — plus a few dozen bytes
+ * per placeholder to any echoed payload, so even the worst case where every
+ * historical turn carries an individually legal ~250 KB screenshot can no
+ * longer wedge initialize/open/status from the image side. Non-image text was
+ * never bounded here and stays untouched by this projection.
+ *
+ * Only this wire projection is compacted: provider-facing requests and the
+ * live session keep the full images. Part count and ordering are preserved so
+ * clients can still align the surrounding content parts, and the total number
+ * of omissions is reported alongside the transcript. Remote (http) image URLs
+ * are small and never touched.
+ */
+function projectTranscriptForPayload(
+  messages: readonly DaemonTranscriptMessage[],
+): { readonly imagesOmitted: number; readonly messages: DaemonTranscriptMessage[] } {
+  let imagesOmitted = 0;
+
+  // Pass 1 — classify every part under the inner per-message rule. Data-URL
+  // images that survive become shared slot objects so the budgeting pass can
+  // flip them without re-walking the messages.
+  const messageSlots: Array<TranscriptSlot[] | undefined> = [];
+  const candidates: TranscriptImageSlot[] = [];
+  for (const message of messages) {
+    const { content } = message;
+    if (!Array.isArray(content)) {
+      messageSlots.push(undefined);
+      continue;
+    }
+    let inlineBytes = 0;
+    const slots: TranscriptSlot[] = [];
+    for (const part of content) {
+      if (
+        isInlineImagePart(part) &&
+        part.image_url.url.startsWith("data:")
+      ) {
+        const urlBytes = Buffer.byteLength(part.image_url.url, "utf8");
+        if (inlineBytes + urlBytes > MAX_TRANSCRIPT_INLINE_IMAGE_BYTES) {
+          slots.push({
+            kind: "image",
+            image: { part, urlBytes, inline: false },
+          });
+          continue;
+        }
+        const image: TranscriptImageSlot = { part, urlBytes, inline: true };
+        slots.push({ kind: "image", image });
+        candidates.push(image);
+        inlineBytes += urlBytes;
+        continue;
+      }
+      slots.push({ kind: "part", part });
+    }
+    messageSlots.push(slots);
+  }
+
+  // Pass 2 — spend the whole-projection ceiling newest first. Walking the
+  // candidates in reverse document order makes the oldest inline images drop
+  // off first; a later-but-smaller image may still fit after a huge old one
+  // was skipped, which only ever keeps more recent context inside the same
+  // fixed ceiling.
+  let totalInlineBytes = 0;
+  for (let index = candidates.length - 1; index >= 0; index -= 1) {
+    const image = candidates[index];
+    if (image === undefined) continue;
+    if (totalInlineBytes + image.urlBytes > MAX_TRANSCRIPT_TOTAL_INLINE_IMAGE_BYTES) {
+      image.inline = false;
+      continue;
+    }
+    totalInlineBytes += image.urlBytes;
+  }
+
+  // Pass 3 — materialize the projected messages in document order.
+  const projected = messages.map((message, index) => {
+    const slots = messageSlots[index];
+    if (slots === undefined) {
+      return structuredClone(message);
+    }
+    const { content, ...rest } = message;
+    const parts = slots.map((slot) => {
+      if (slot.kind === "image") {
+        if (!slot.image.inline) {
+          imagesOmitted += 1;
+          return {
+            type: "text" as const,
+            text: transcriptImagePlaceholder(slot.image.urlBytes),
+          };
+        }
+        return structuredClone(slot.image.part);
+      }
+      return structuredClone(slot.part);
+    });
+    // Clone the small remainder so the payload shares no state with the live
+    // session, matching what a full structuredClone used to guarantee.
+    return { ...structuredClone(rest), content: parts };
+  });
+
+  return { imagesOmitted, messages: projected };
+}
+
 function sessionPayload(
   session: DaemonSession,
   contextLimit = configuredContextLimit(session.model),
@@ -6397,6 +6684,12 @@ function sessionPayload(
     ? undefined
     : optionalString(session.metadata.title);
   const subagentSnapshots = subagentSnapshotPanelPayloads(session.metadata);
+  // The transcript echo must fit a socket frame even when turns carried
+  // multi-megabyte image attachments, so inline data URLs are bounded twice:
+  // a small per-message budget, then a whole-projection ceiling spent newest
+  // first. Only this wire projection is compacted: session.messages and every
+  // provider-facing request keep the full images.
+  const transcript = projectTranscriptForPayload(session.messages);
   return {
     id: session.id,
     key: session.sessionKey,
@@ -6414,7 +6707,10 @@ function sessionPayload(
     model: session.model,
     messages: session.messages.length,
     message_count: session.messages.length,
-    transcript: session.messages.map((message) => structuredClone(message)),
+    transcript: transcript.messages,
+    ...(transcript.imagesOmitted > 0
+      ? { transcript_images_omitted: transcript.imagesOmitted }
+      : {}),
     ...(session.activeTurnId
       ? {
           inflight: {

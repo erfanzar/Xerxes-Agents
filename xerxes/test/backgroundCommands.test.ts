@@ -2,12 +2,15 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from 'bun:test'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { chmod, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { BackgroundCommandManager } from '../src/tools/backgroundCommands.js'
 import { BoundedOutputBuffer } from '../src/tools/processOutput.js'
+import { ProcessRegistry } from '../src/runtime/processRegistry.js'
+import type { TerminalRegistry } from '../src/runtime/terminalRegistry.js'
+import { ValidationError } from '../src/core/errors.js'
 import { ToolRegistry } from '../src/executors/toolRegistry.js'
 import type { JsonObject, ToolCall } from '../src/types/toolCalls.js'
 import { WorkspacePathResolver } from '../src/tools/pathSafety.js'
@@ -268,4 +271,143 @@ test('a capped read keeps the remainder for the next poll instead of discarding 
   expect(first).toEqual({ text: 'abcd', truncated: true })
   // Paging through a chatty process must not lose the pages not yet read.
   expect(buffer.take(100)).toEqual({ text: 'efghij', truncated: false })
+})
+
+/**
+ * A shell whose backgrounded grandchild appends to `logPath` forever while the
+ * shell itself sleeps: the exact shape that used to survive a timeout or kill,
+ * because only the direct child was ever signalled.
+ */
+async function writeTreeScript(root: string, logPath: string): Promise<string> {
+  const scriptPath = join(root, 'tree.sh')
+  await Bun.write(
+    scriptPath,
+    '#!/bin/sh\n'
+      + `(while :; do echo tick >> "${logPath}"; sleep 0.05; done) &\n`
+      + 'exec sleep 30\n',
+  )
+  await chmod(scriptPath, 0o755)
+  return scriptPath
+}
+
+/** Whether the log stopped growing across `windowMs` — i.e. the writer is dead. */
+async function logIsStill(logPath: string, windowMs: number): Promise<boolean> {
+  const file = Bun.file(logPath)
+  const before = (await file.exists()) ? (await file.text()).length : -1
+  await Bun.sleep(windowMs)
+  const after = (await file.exists()) ? (await file.text()).length : -1
+  return after === before
+}
+
+// Windows has neither /bin/sh nor POSIX process groups; these kills are
+// best-effort child.kill() calls there.
+test.skipIf(process.platform === 'win32')('a timed out command takes its whole process group down', async () => {
+  await inTemporaryWorkspace(async (root, paths) => {
+    const logPath = join(root, 'ticks.log')
+    const script = await writeTreeScript(root, logPath)
+
+    const started = Date.now()
+    const result = await executeCommand(
+      { cmd: '/bin/sh', args: [script], timeout_ms: 1_000 },
+      paths,
+    )
+    expect(result).toMatchObject({ timedOut: true })
+    expect(Date.now() - started).toBeLessThan(15_000)
+
+    // The tool returned; the grandchild must not still be appending.
+    await Bun.sleep(300)
+    expect(await logIsStill(logPath, 800)).toBe(true)
+  })
+})
+
+test.skipIf(process.platform === 'win32')('a caller cancel takes the whole process group down', async () => {
+  await inTemporaryWorkspace(async (root, paths) => {
+    const logPath = join(root, 'ticks.log')
+    const script = await writeTreeScript(root, logPath)
+    const controller = new AbortController()
+    setTimeout(() => controller.abort(new Error('cancelled by test')), 500)
+
+    let observedError: unknown
+    try {
+      await executeCommand({ cmd: '/bin/sh', args: [script], timeout_ms: 30_000 }, paths, controller.signal)
+    } catch (error) {
+      observedError = error
+    }
+    expect(observedError).toBeInstanceOf(ValidationError)
+
+    await Bun.sleep(300)
+    expect(await logIsStill(logPath, 800)).toBe(true)
+  })
+})
+
+test.skipIf(process.platform === 'win32')('kill_command stops background commands including their grandchildren', async () => {
+  await inTemporaryWorkspace(async (root) => {
+    const logPath = join(root, 'ticks.log')
+    const script = await writeTreeScript(root, logPath)
+    const background = new BackgroundCommandManager()
+    try {
+      const handle = background.startForOwner('owner-kill', { command: '/bin/sh', args: [script], cwd: root })
+      // Let the tree spin up and produce output first.
+      await Bun.sleep(400)
+      const killed = await background.killForOwner('owner-kill', handle.procId, 'SIGTERM')
+      expect(killed.signalled).toBeTrue()
+
+      await Bun.sleep(300)
+      expect(await logIsStill(logPath, 800)).toBe(true)
+    } finally {
+      await background.disposeAll()
+    }
+  })
+})
+
+test.skipIf(process.platform === 'win32')('a command that forks a helper while dying leaves no survivors', async () => {
+  // Auditor repro at tool level: the shell traps TERM and forks its helper from
+  // inside the trap handler — the fork happens DURING the kill window, after
+  // every signal the timeout path sends has already been aimed.
+  await inTemporaryWorkspace(async (root, paths) => {
+    const logPath = join(root, 'ticks.log')
+    const scriptPath = join(root, 'late-fork.sh')
+    await Bun.write(
+      scriptPath,
+      '#!/bin/sh\n'
+        + `trap '(while :; do echo tick >> "${logPath}"; sleep 0.05; done) &' TERM\n`
+        + 'echo ready\n'
+        + 'while :; do :; done\n',
+    )
+    await chmod(scriptPath, 0o755)
+
+    const result = await executeCommand(
+      { cmd: '/bin/sh', args: [scriptPath], timeout_ms: 1_000 },
+      paths,
+    )
+    expect(result).toMatchObject({ timedOut: true })
+
+    await Bun.sleep(400)
+    expect(await logIsStill(logPath, 800)).toBe(true)
+  })
+})
+
+test('startForOwner kills the child when the terminal mirror cannot be opened', async () => {
+  // A detached child outlives this process; if mirror registration throws, the
+  // child must be killed and unregistered rather than leaked ownerless.
+  const failingTerminals = {
+    open: () => {
+      throw new Error('mirror boom')
+    },
+  } as unknown as TerminalRegistry
+  await inTemporaryWorkspace(async (root) => {
+    const logPath = join(root, 'ticks.log')
+    const script = await writeTreeScript(root, logPath)
+    const background = new BackgroundCommandManager(new ProcessRegistry(), failingTerminals)
+
+    await expect(() =>
+      background.startForOwner('owner-leak', { command: '/bin/sh', args: [script], cwd: root }),
+    ).toThrow('mirror boom')
+    // Nothing is left registered under the failed start.
+    expect(background.list()).toEqual([])
+
+    // And the spawned tree was killed, not left running detached forever.
+    await Bun.sleep(300)
+    expect(await logIsStill(logPath, 800)).toBeTrue()
+  })
 })

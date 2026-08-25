@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from "bun:test";
-import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -525,6 +525,100 @@ test("JSONL file sink drops and counts events once the bounded queue is full", a
       "closed",
     );
   } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("emitter.flush awaits durable drain so buffered records reach disk before shutdown", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "xerxes-audit-flush-"));
+  try {
+    const path = join(directory, "audit.jsonl");
+    const jsonl = new JSONLSinkCollector(path, { flushIntervalMs: 60_000 });
+    const emitter = new AuditEmitter({ collector: jsonl });
+    emitter.emitTurnStart({ turnId: "durable-turn" });
+    // No close(): the awaited flush alone must guarantee durability.
+    await emitter.flush();
+    expect(readFileSync(path, "utf8")).toContain('"event_type":"turn_start"');
+    expect(readFileSync(path, "utf8")).toContain('"turn_id":"durable-turn"');
+
+    // A composite wrapping a buffering sink drains through the same call.
+    const composite = new AuditEmitter({
+      collector: new CompositeCollector([
+        new InMemoryCollector(),
+        new JSONLSinkCollector(join(directory, "composite.jsonl"), { flushIntervalMs: 60_000 }),
+      ]),
+    });
+    composite.emitToolCallFailure({
+      errorMessage: "boom",
+      errorType: "E",
+      toolName: "Bash",
+    });
+    await composite.flush();
+    expect(readFileSync(join(directory, "composite.jsonl"), "utf8")).toContain(
+      '"event_type":"tool_call_failure"',
+    );
+
+    // close() flushes durably and then closes the owned sink.
+    await composite.close();
+    expect(() => composite.emit(new ErrorEvent())).toThrow("closed");
+    expect(() => jsonl.emit(new ErrorEvent())).not.toThrow(); // separate collector stays open
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("queue-full drops and failed write batches surface as throttled console warnings", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "xerxes-audit-warn-"));
+  const warnings: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = (...parts: unknown[]) => warnings.push(parts.map(String).join(" "));
+  try {
+    // A burst of drops inside one tick collapses into a single warning.
+    const dropping = new JSONLSinkCollector(join(directory, "drop", "audit.jsonl"), {
+      maxQueueSize: 2,
+      flushIntervalMs: 60_000,
+    });
+    for (let index = 0; index < 6; index += 1) {
+      dropping.emit(new ErrorEvent({ errorType: "E", errorMessage: `e${index}` }));
+    }
+    expect(dropping.droppedEvents).toBe(4);
+    await dropping.close();
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("audit durability loss");
+    expect(warnings[0]).toContain("dropped 4 audit event(s)");
+
+    // Write failures warn too, including the underlying filesystem error. The
+    // sink path is an existing directory, so every append fails with EISDIR.
+    const failingPath = join(directory, "not-a-file");
+    mkdirSync(failingPath);
+    const failing = new JSONLSinkCollector(failingPath, { maxBytes: 10 * 1024 * 1024 });
+    failing.emit(new ErrorEvent({ errorType: "E", errorMessage: "unwritable" }));
+    await failing.drain();
+    expect(failing.failedWriteBatches).toBe(1);
+    expect(failing.lastError).toBeInstanceOf(Error);
+    await failing.close();
+    expect(warnings).toHaveLength(2);
+    expect(warnings[1]).toContain("write batch");
+
+    // Without close(), the deferred timer still reports each increase batch once.
+    const deferredBaseline = warnings.length;
+    const deferred = new JSONLSinkCollector(join(directory, "deferred", "audit.jsonl"), {
+      maxQueueSize: 1,
+      flushIntervalMs: 60_000,
+    });
+    deferred.emit(new ErrorEvent());
+    deferred.emit(new ErrorEvent()); // dropped
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    deferred.emit(new ErrorEvent()); // dropped again -> a second increase batch
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(warnings.length - deferredBaseline).toBe(2);
+
+    // Nothing further is reported once the counters were already surfaced.
+    await deferred.close();
+    expect(warnings.length - deferredBaseline).toBe(2);
+    expect(deferred.droppedEvents).toBe(2);
+  } finally {
+    console.warn = originalWarn;
     rmSync(directory, { recursive: true, force: true });
   }
 });

@@ -19,6 +19,20 @@ import { classifyError, ErrorKind } from "../runtime/errorClassifier.js";
 export const DEFAULT_AUTO_COMPACT_THRESHOLD = 0.8;
 
 /**
+ * Wall-clock deadline for one compaction completion call.
+ *
+ * Pre-turn auto-compaction runs ahead of every due turn, so a compaction call
+ * that never settles would hang the user's turn indefinitely with no terminal
+ * event and no way to retry. The deadline is enforced twice: as an
+ * `AbortSignal.timeout` handed to the transport, which well-behaved providers
+ * observe, and as a racing timer in `withCompletionDeadline`, which bounds
+ * even a client that ignores its signal. A deadline miss classifies as a
+ * timeout (retryable) exactly like a provider that fails slowly, but it can
+ * no longer hang.
+ */
+export const COMPACTION_COMPLETION_TIMEOUT_MS = 180_000;
+
+/**
  * Summary token budgets tried in order: the default, then a half, then a
  * quarter. A compaction call that overflows the window is the one failure a
  * smaller summary can fix, and there are only ever two retries — a third
@@ -71,16 +85,66 @@ export function compactionAttemptIsRetryable(error: unknown): boolean {
 export function compactionCompletionPort(
   client: LlmClient,
   model: string,
+  /** Wall-clock deadline for the completion call; omit for the default. */
+  timeoutMs: number = COMPACTION_COMPLETION_TIMEOUT_MS,
 ): CompactionCompletionPort {
   return async (request) => {
-    const result = await completeLlm(client, {
-      model,
-      messages: [{ role: "user", content: request.prompt }],
-      maxTokens: request.maxTokens,
-      temperature: request.temperature,
-    });
+    const result = await withCompletionDeadline(
+      completeLlm(
+        client,
+        {
+          model,
+          messages: [{ role: "user", content: request.prompt }],
+          maxTokens: request.maxTokens,
+          temperature: request.temperature,
+        },
+        deadlineSignal(timeoutMs),
+      ),
+      timeoutMs,
+    );
     return result.content;
   };
+}
+
+/** Cooperative-cancellation half of the deadline: `undefined` disables it. */
+function deadlineSignal(timeoutMs: number): AbortSignal | undefined {
+  if (!isFiniteDeadline(timeoutMs)) return undefined;
+  return AbortSignal.timeout(timeoutMs);
+}
+
+/**
+ * Bound a completion promise even when its client ignores the abort signal.
+ *
+ * The losing branch settles quietly: its rejection is routed into an
+ * already-settled race, so neither path produces an unhandled rejection.
+ */
+async function withCompletionDeadline<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+): Promise<T> {
+  if (!isFiniteDeadline(timeoutMs)) return promise;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await new Promise<T>((resolve, reject) => {
+      timer = setTimeout(() => reject(compactionTimeoutError(timeoutMs)), timeoutMs);
+      promise.then(resolve, reject);
+    });
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+function isFiniteDeadline(timeoutMs: number): boolean {
+  return Number.isFinite(timeoutMs) && timeoutMs > 0;
+}
+
+/** Named so error classification records the miss as a retryable timeout. */
+function compactionTimeoutError(timeoutMs: number): Error {
+  const error = new Error(
+    `compaction completion exceeded its ${timeoutMs}ms deadline`,
+  );
+  error.name = "TimeoutError";
+  return error;
 }
 
 /**
@@ -103,6 +167,8 @@ export function compactionCompletionPort(
 export function lazyCompactionCompletionPort(
   createClient: () => LlmClient,
   model: string,
+  /** Wall-clock deadline forwarded to every completion; omit for the default. */
+  timeoutMs: number = COMPACTION_COMPLETION_TIMEOUT_MS,
 ): LazyCompactionPort {
   type Resolved =
     | { readonly error: unknown; readonly ok: false }
@@ -118,7 +184,7 @@ export function lazyCompactionCompletionPort(
         }
       }
       if (!resolved.ok) throw resolved.error;
-      return compactionCompletionPort(resolved.client, model)(request);
+      return compactionCompletionPort(resolved.client, model, timeoutMs)(request);
     },
     // Closing has to be the port's job rather than the caller's, because the
     // caller can no longer see whether a client was ever built. A port that was

@@ -272,6 +272,7 @@ export function createConfiguredChannel(
       return new WhatsAppChannel({
         accessToken: requiredString(type, settings, 'access_token', 'accessToken'),
         phoneNumberId: requiredString(type, settings, 'phone_number_id', 'phoneNumberId'),
+        ...optionalField('appSecret', optionalString(settings, 'app_secret', 'appSecret')),
         ...optionalField('apiBaseUrl', optionalString(settings, 'api_base_url', 'apiBaseUrl')),
         ...optionalField('apiVersion', optionalString(settings, 'api_version', 'apiVersion')),
       })
@@ -312,6 +313,7 @@ export function createConfiguredChannel(
         authToken: requiredString(type, settings, 'auth_token', 'authToken'),
         fromNumber: requiredString(type, settings, 'from_number', 'fromNumber'),
         ...optionalField('apiBaseUrl', optionalString(settings, 'api_base_url', 'apiBaseUrl')),
+        ...optionalField('webhookUrl', optionalString(settings, 'webhook_url', 'webhookUrl')),
       })
     case 'bluebubbles':
       return new BlueBubblesChannel({

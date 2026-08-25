@@ -21,7 +21,7 @@ import { join } from 'node:path'
 
 import { ConfigurationError, ProviderError } from '../core/errors.js'
 import { buildAuthorizeUrl, OAuthToken, type OAuthConfig, type OAuthFetch } from '../mcp/oauth.js'
-import { CredentialStorage } from './storage.js'
+import { CredentialConflictError, CredentialStorage } from './storage.js'
 
 /** Provider key under which the Codex session is stored. */
 export const CODEX_PROVIDER = 'openai-codex'
@@ -175,6 +175,19 @@ export async function importCodexCliTokens(
   })
 }
 
+/**
+ * Process-global single-flight registry for Codex credential resolution.
+ *
+ * Keyed by the resolved credential directory each session persists into,
+ * because independent {@link CodexSession} instances are minted per LLM client
+ * (title generation, compaction, catalogs, reasoning) while they all rotate
+ * the SAME stored refresh token. An instance-scoped guard cannot see another
+ * instance's refresh, so two parallel resolutions double-POST the rotating
+ * token and the provider answers the loser `invalid_grant` — worst case
+ * killing the stored chain and forcing a browser relogin mid-turn.
+ */
+const credentialFlightsByStoragePath = new Map<string, Promise<CodexCredential>>()
+
 export interface CodexSessionOptions {
   readonly environment?: Readonly<Record<string, string | undefined>>
   readonly fetchImplementation?: OAuthFetch
@@ -210,20 +223,66 @@ export class CodexSession {
   /**
    * Return a usable credential, refreshing when it is at or near expiry.
    *
-   * Concurrent callers share one in-flight resolution: a parallel fan-out of
-   * subagents would otherwise race N refreshes against the same refresh token,
-   * and a provider that rotates it on use invalidates every loser.
+   * Concurrent callers share one in-flight resolution — both within this
+   * instance and, through the process-global registry, across every
+   * {@link CodexSession} bound to the same credential store: a parallel
+   * fan-out of subagents would otherwise race N refreshes against the same
+   * refresh token, and a provider that rotates it on use invalidates every
+   * loser. The instance `pending` mirror keeps intra-instance callers on one
+   * promise and clears itself when the shared flight settles.
+   *
+   * `signal` is accepted for call-site compatibility but deliberately NOT
+   * bound into the shared flight: the flight is co-owned by every coalesced
+   * caller, so letting whichever instance arrived first cancel it would fail
+   * joiners that never asked to abort (their own turn may be very much
+   * alive). A token refresh is short and store-backed; an aborted caller
+   * simply stops awaiting while the flight finishes persisting the rotated
+   * chain for everyone else.
    */
   async credential(signal?: AbortSignal): Promise<CodexCredential> {
-    this.pending ??= this.resolve(signal).finally(() => {
-      this.pending = undefined
+    const flight = this.sharedFlight()
+    const tracked = flight.finally(() => {
+      if (this.pending === tracked) {
+        this.pending = undefined
+      }
     })
-    return this.pending
+    this.pending = tracked
+    return tracked
   }
 
-  /** Persist a freshly minted session, replacing any stored one. */
-  async store(token: OAuthToken): Promise<void> {
-    await this.storage.save(CODEX_PROVIDER, token)
+  /**
+   * Join the resolution already in flight for this session's storage path,
+   * creating and registering one when none is running. Never binds a caller
+   * abort signal — see {@link CodexSession.credential}.
+   */
+  private sharedFlight(): Promise<CodexCredential> {
+    const key = this.storage.baseDirectory
+    const existing = credentialFlightsByStoragePath.get(key)
+    if (existing) return existing
+    const created = this.resolve()
+    credentialFlightsByStoragePath.set(key, created)
+    // Drop the settled flight so the next expiry starts a fresh resolution;
+    // the catch keeps a failed flight from surfacing as an unhandled rejection.
+    void created.catch(() => undefined).finally(() => {
+      if (credentialFlightsByStoragePath.get(key) === created) {
+        credentialFlightsByStoragePath.delete(key)
+      }
+    })
+    return created
+  }
+
+  /**
+   * Persist a freshly minted session, replacing any stored one.
+   *
+   * Pass `expectedFingerprint` (from {@link loadWithFingerprint}) to refuse
+   * the write when the on-disk record moved underneath — a logout or a newer
+   * writer whose state must not be clobbered by this stale link.
+   */
+  async store(
+    token: OAuthToken,
+    options: { readonly expectedFingerprint?: string | null } = {},
+  ): Promise<void> {
+    await this.storage.save(CODEX_PROVIDER, token, options)
   }
 
   /** Forget the stored session. Returns false when there was nothing to remove. */
@@ -236,16 +295,20 @@ export class CodexSession {
     return this.storage.load(CODEX_PROVIDER)
   }
 
-  private async resolve(signal?: AbortSignal): Promise<CodexCredential> {
-    const stored = await this.storage.load(CODEX_PROVIDER)
+  private async resolve(): Promise<CodexCredential> {
+    const stored = await this.storage.loadWithFingerprint(CODEX_PROVIDER)
     const cli = await importCodexCliTokens(this.environment, this.homeDirectory)
+    // Compare-and-swap guard for every persist below: if the record on disk
+    // moved since this load (a logout, another surface's refresh, a fresh
+    // login), that state wins and our stale write is refused.
+    const expected = { expectedFingerprint: stored.fingerprint }
 
     // OpenAI rotates the refresh token on every refresh, so two stores holding
     // copies of one chain cannot stay valid together — whoever refreshes first
     // kills the other's copy. When the CLI session is fresher than ours, the
     // CLI won the last rotation and is the only chain still alive; trusting the
     // stale copy would answer a working CLI login with refresh_token_reused.
-    const token = this.preferCliSession(stored, cli) ?? stored ?? cli
+    const token = this.preferCliSession(stored.token, cli) ?? stored.token ?? cli
     if (!token) {
       throw new ConfigurationError(
         'codex_auth',
@@ -254,23 +317,91 @@ export class CodexSession {
     }
 
     if (!token.isExpired(CODEX_REFRESH_SKEW_SECONDS, this.now())) {
-      if (token !== stored) await this.store(token)
+      if (token !== stored.token) {
+        await this.storeUnlessRaced(token, expected)
+      }
       return credentialFrom(token)
     }
 
     try {
-      const refreshed = await this.refresh(token, signal)
-      await this.store(refreshed)
-      return credentialFrom(refreshed)
+      return await this.refreshAndStore(token, expected)
     } catch (error) {
       // The stored refresh token died under us (typically the CLI rotated the
       // chain first). A still-valid CLI session is a newer link in the same
       // chain, so re-adopting it heals the login without a browser round trip.
-      if (token === stored && cli && isInvalidGrantError(error) && !cli.isExpired(0, this.now())) {
-        await this.store(cli)
+      if (token === stored.token && cli && isInvalidGrantError(error) && !cli.isExpired(0, this.now())) {
+        await this.storeUnlessRaced(cli, expected)
         return credentialFrom(cli)
       }
+      // No CLI copy to fall back on: the rejection may still be a rotation
+      // race between independent Xerxes surfaces sharing this store. Try the
+      // store-as-CAS-point recovery once before failing the caller.
+      if (isInvalidGrantError(error)) {
+        const recovered = await this.retryWithRacedRefresh(token)
+        if (recovered) return recovered
+      }
       throw error
+    }
+  }
+
+  /**
+   * Persist a link of the rotation chain unless a concurrent writer moved the
+   * on-disk record underneath us.
+   *
+   * A refused write is not an error for the caller: the in-hand credential is
+   * already minted and serves the current turn. What matters is what lands on
+   * disk — a logout must stay logged out, and a newer writer's chain must not
+   * be clobbered by our older one.
+   */
+  private async storeUnlessRaced(
+    token: OAuthToken,
+    expected: { readonly expectedFingerprint?: string | null },
+  ): Promise<void> {
+    try {
+      await this.store(token, expected)
+    } catch (error) {
+      if (!(error instanceof CredentialConflictError)) {
+        throw error
+      }
+    }
+  }
+
+  /** Refresh a token and persist the rotated link it yields. */
+  private async refreshAndStore(
+    token: OAuthToken,
+    expected: { readonly expectedFingerprint?: string | null },
+  ): Promise<CodexCredential> {
+    const refreshed = await this.refresh(token)
+    await this.storeUnlessRaced(refreshed, expected)
+    return credentialFrom(refreshed)
+  }
+
+  /**
+   * Recover from losing a refresh-token rotation race.
+   *
+   * `invalid_grant` after we POSTed our copy means either that the chain is
+   * truly dead or that an independent session refreshed the same stored
+   * credential between our load and our failure and persisted the newer link.
+   * Reload the store exactly once: a refresh token we did not attempt proves
+   * someone else won the race underneath us, so trust that fresh link —
+   * refreshing it first if it too has aged past the skew. Returns undefined
+   * when the store still holds the very token that just failed, i.e. there is
+   * nothing newer to fall back to and the original error stands.
+   */
+  private async retryWithRacedRefresh(attempted: OAuthToken): Promise<CodexCredential | undefined> {
+    const current = await this.storage.loadWithFingerprint(CODEX_PROVIDER)
+    if (!current.token || current.token.refreshToken === attempted.refreshToken) {
+      return undefined
+    }
+    if (!current.token.isExpired(CODEX_REFRESH_SKEW_SECONDS, this.now())) {
+      return credentialFrom(current.token)
+    }
+    try {
+      return await this.refreshAndStore(current.token, { expectedFingerprint: current.fingerprint })
+    } catch {
+      // The newer link raced dead too; the original invalid_grant remains the
+      // honest diagnosis for the caller.
+      return undefined
     }
   }
 
@@ -293,7 +424,7 @@ export class CodexSession {
     return cliExpiresAt > storedExpiresAt ? cli : undefined
   }
 
-  private async refresh(token: OAuthToken, signal?: AbortSignal): Promise<OAuthToken> {
+  private async refresh(token: OAuthToken): Promise<OAuthToken> {
     if (!token.refreshToken) {
       throw new ConfigurationError(
         'codex_auth',
@@ -318,7 +449,6 @@ export class CodexSession {
         refresh_token: token.refreshToken,
       }).toString(),
       redirect: 'manual',
-      ...(signal ? { signal } : {}),
     })
 
     if (!response.ok) {

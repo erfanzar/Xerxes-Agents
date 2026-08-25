@@ -267,3 +267,113 @@ test('install treats a Windows drive prefix as a local path, not a source scheme
     expect(result).not.toContain('Unknown source: C')
   })
 })
+
+test('install rejects a bundle whose declared frontmatter name differs from its directory name', async () => {
+  await inTemporaryDirectory(async directory => {
+    const skillsDirectory = join(directory, 'skills')
+    const source = new InjectedRemoteSkillSource('catalog', {
+      async fetch(identifier) {
+        return identifier === 'mismatch'
+          ? {
+              name: 'code-review',
+              content: '---\nname: totally-other\ndescription: Hijack attempt.\n---\nDo work.',
+            }
+          : { name: 'consistent', content: '---\nname: consistent\n---\nDo work.' }
+      },
+      async search() {
+        return []
+      },
+    })
+    const hub = new SkillsHub({ skillsDirectory, sources: [source] })
+
+    const rejected = await hub.install('catalog:mismatch')
+    expect(rejected).toContain('[Error]')
+    expect(rejected).toContain('totally-other')
+    expect(rejected).toContain("'code-review'")
+    expect(rejected).toContain('frontmatter')
+    expect(await hub.listInstalled()).toEqual([])
+    await expect(readFile(join(skillsDirectory, 'code-review', 'SKILL.md'), 'utf8')).rejects.toMatchObject({
+      code: 'ENOENT',
+    })
+    // A duplicate frontmatter key fails closed at install time with the parser's diagnosis.
+    const duplicated = new InjectedRemoteSkillSource('dup', {
+      async fetch() {
+        return { name: 'broken', content: '---\nname: broken\nname: twice\n---\nDo work.' }
+      },
+      async search() {
+        return []
+      },
+    })
+    const dupHub = new SkillsHub({ skillsDirectory, sources: [duplicated] })
+    const duplicateResult = await dupHub.install('dup:broken')
+    expect(duplicateResult).toContain('[Error] Failed to install')
+    expect(duplicateResult).toContain("repeats 'name'")
+
+    expect(await hub.install('catalog:consistent')).toBe("Installed skill 'consistent' from catalog:consistent")
+  })
+})
+
+test('hub installs refuse native-skill collisions without force and succeed with force', async () => {
+  await inTemporaryDirectory(async directory => {
+    const skillsDirectory = join(directory, 'skills')
+    const source = new InjectedRemoteSkillSource('catalog', {
+      async fetch(identifier) {
+        return {
+          name: identifier,
+          content: `---\nname: ${identifier}\ndescription: Hub copy.\n---\nOrdinary helper content.`,
+        }
+      },
+      async search() {
+        return []
+      },
+    })
+    const hub = new SkillsHub({
+      skillsDirectory,
+      sources: [source],
+      reservedSkillNames: () => ['deepscan'],
+    })
+
+    const refused = await hub.install('catalog:deepscan')
+    expect(refused).toContain('[Error]')
+    expect(refused).toContain('native or host skill')
+    expect(refused).toContain('force=true')
+    expect(await hub.listInstalled()).toEqual([])
+
+    expect(await hub.install('catalog:deepscan', { force: true })).toBe(
+      "Installed skill 'deepscan' from catalog:deepscan",
+    )
+    expect(await readFile(join(skillsDirectory, 'deepscan', 'SKILL.md'), 'utf8')).toContain(
+      'Ordinary helper content.',
+    )
+    expect(await hub.listInstalled()).toEqual([expect.objectContaining({ name: 'deepscan' })])
+
+    // Unreserved names install normally without force.
+    expect(await hub.install('catalog:custom-tool')).toBe("Installed skill 'custom-tool' from catalog:custom-tool")
+  })
+})
+
+test('bundled native skills are reserved by default and cannot be shadowed from the hub', async () => {
+  await inTemporaryDirectory(async directory => {
+    const skillsDirectory = join(directory, 'skills')
+    const source = new InjectedRemoteSkillSource('catalog', {
+      async fetch(identifier) {
+        return { name: identifier, content: `---\nname: ${identifier}\n---\nOrdinary helper content.` }
+      },
+      async search() {
+        return []
+      },
+    })
+    const hub = new SkillsHub({ skillsDirectory, sources: [source] })
+
+    const refused = await hub.install('catalog:youtube-content')
+    expect(refused).toContain('[Error]')
+    expect(refused).toContain('native or host skill')
+    await expect(readFile(join(skillsDirectory, 'youtube-content', 'SKILL.md'), 'utf8')).rejects.toMatchObject({
+      code: 'ENOENT',
+    })
+
+    expect(await hub.install('catalog:unrelated-name')).toBe(
+      "Installed skill 'unrelated-name' from catalog:unrelated-name",
+    )
+  })
+})

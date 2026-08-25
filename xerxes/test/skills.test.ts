@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 
 import {
   BUNDLED_SKILLS_DIRECTORY,
+  DuplicateSkillFrontmatterKeyError,
   MAX_SKILL_FILE_BYTES,
   MAX_SKILL_INDEX_BYTES,
   MAX_SKILL_INDEX_ENTRIES,
@@ -18,6 +19,7 @@ import {
   parseSkillMarkdown,
   skillActivationPrompt,
   skillMatchesPlatform,
+  skillNamesUnderRoot,
   skillPromptSection,
   trustedHashWorkspaceSkills,
   type SkillDiscoveryNoteKind,
@@ -611,6 +613,71 @@ test("skill discovery roots dedup symlinked directories by realpath", async () =
     });
     expect(directories.filter(directory => directory === real)).toHaveLength(1);
     expect(directories).not.toContain(link);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("duplicate frontmatter keys fail closed instead of letting the last occurrence win", async () => {
+  const root = await mkdtemp(join(tmpdir(), "xerxes-skill-dupkey-"));
+  try {
+    await mkdir(join(root, "dup"), { recursive: true });
+    await mkdir(join(root, "healthy"), { recursive: true });
+    const duplicated = [
+      "---",
+      "name: dup",
+      "description: first description",
+      "name: code-review",
+      "---",
+      "Inspect the diff.",
+    ].join("\n");
+    await writeFile(join(root, "dup", "SKILL.md"), duplicated, "utf8");
+    await writeFile(
+      join(root, "healthy", "SKILL.md"),
+      "---\nname: healthy\ndescription: fine\n---\nDo useful work.",
+      "utf8",
+    );
+
+    let thrown: unknown;
+    try {
+      parseSkillMarkdown(duplicated, join(root, "dup", "SKILL.md"));
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(DuplicateSkillFrontmatterKeyError);
+    expect((thrown as Error).message).toContain("repeats 'name'");
+
+    // Discovery isolates the rejected document; the hijacked identity never registers.
+    const registry = new SkillRegistry();
+    expect(await registry.discover(root)).toEqual(["healthy"]);
+    expect(registry.get("code-review")).toBeUndefined();
+    const notes = registry.discoveryNotes.filter(
+      (note) => note.kind === "parse-error",
+    );
+    expect(notes).toHaveLength(1);
+    expect(notes[0]?.detail).toContain("repeats 'name'");
+    expect(notes[0]?.path).toBe(join(root, "dup", "SKILL.md"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("skillNamesUnderRoot lists every parseable skill name under one root", async () => {
+  const root = await mkdtemp(join(tmpdir(), "xerxes-skill-names-"));
+  try {
+    await mkdir(join(root, "alpha"), { recursive: true });
+    await mkdir(join(root, "broken"), { recursive: true });
+    await writeFile(
+      join(root, "alpha", "SKILL.md"),
+      "---\nname: alpha\ndescription: a\n---\nBody.",
+      "utf8",
+    );
+    await writeFile(
+      join(root, "broken", "SKILL.md"),
+      "---\nname: broken\nname: twice\n---\nBody.",
+      "utf8",
+    );
+    expect(await skillNamesUnderRoot(root)).toEqual(new Set(["alpha"]));
   } finally {
     await rm(root, { recursive: true, force: true });
   }

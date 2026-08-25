@@ -1,11 +1,12 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { mkdir, readFile, readdir, rename, rm, stat } from 'node:fs/promises'
+import { appendFile, mkdir, open, readFile, readdir, rename, rm, stat } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 
 import { ValidationError } from '../core/errors.js'
 import { xerxesHome } from '../daemon/paths.js'
+import { withFileLock } from '../session/daemonTranscript.js'
 
 export const AGENT_SELF_MEMORY_KEYS = [
   'user_taste',
@@ -40,6 +41,11 @@ export interface AgentSelfMemoryOptions {
   readonly projectRoot?: string
 }
 
+/** Maximum age before an unverifiable self-memory mutation lock may be recovered. */
+const MUTATION_LOCK_STALE_MS = 30_000
+/** Maximum time a read-modify-write cycle waits for an active cross-process owner. */
+const MUTATION_LOCK_WAIT_MS = 10_000
+
 /**
  * Per-agent persistent self-knowledge, distinct from global/project durable
  * conversation memory. It backs the learn and sync-context tool family.
@@ -60,11 +66,7 @@ export class AgentSelfMemory {
 
   async ensure(): Promise<void> {
     await mkdir(this.directory, { recursive: true })
-    for (const key of AGENT_SELF_MEMORY_KEYS) {
-      const path = this.pathFor(key)
-      if (await exists(path)) continue
-      await Bun.write(path, DEFAULT_CONTENT[key])
-    }
+    for (const key of AGENT_SELF_MEMORY_KEYS) await this.ensureKey(key)
   }
 
   async read(key: AgentSelfMemoryKey | string): Promise<string> {
@@ -87,26 +89,27 @@ export class AgentSelfMemory {
   async write(key: AgentSelfMemoryKey | string, content: string): Promise<void> {
     const normalized = normalizeKey(key)
     if (typeof content !== 'string') throw new ValidationError('content', 'must be a string', content)
-    await this.withAppendLock(normalized, () => this.writeUnlocked(normalized, content))
+    // The whole-file replace publishes through atomic rename like every other
+    // mutation, so it shares the per-file OS lock: without it a rename could
+    // land between another process's read and publish (or vice versa) and
+    // silently erase entries written in between.
+    await this.withAppendLock(normalized, () => this.withMutationLock(normalized, () => this.writeUnlocked(normalized, content)))
   }
 
   async append(key: AgentSelfMemoryKey | string, content: string): Promise<void> {
     const normalized = normalizeKey(key)
     if (typeof content !== 'string') throw new ValidationError('content', 'must be a string', content)
-    await this.withAppendLock(normalized, async () => {
-      const existing = await this.read(normalized)
-      await this.writeUnlocked(normalized, existing + '\n' + content)
-    })
+    await this.withAppendLock(normalized, () => this.appendUnlocked(normalized, content))
   }
 
   async patch(key: AgentSelfMemoryKey | string, oldText: string, newText: string): Promise<boolean> {
     const normalized = normalizeKey(key)
-    return this.withAppendLock(normalized, async () => {
+    return this.withAppendLock(normalized, () => this.withMutationLock(normalized, async () => {
       const content = await this.read(normalized)
       if (!content.includes(oldText)) return false
       await this.writeUnlocked(normalized, content.replace(oldText, newText))
       return true
-    })
+    }))
   }
 
   async syncProjectContext(projectRoot = this.projectRoot): Promise<void> {
@@ -166,13 +169,13 @@ export class AgentSelfMemory {
   }
 
   async updateUserTaste(preference: string, category = 'notes'): Promise<void> {
-    await this.withAppendLock('user_taste', async () => {
+    await this.withAppendLock('user_taste', () => this.withMutationLock('user_taste', async () => {
       const content = await this.read('user_taste')
       const header = '## ' + titleCase(category.replaceAll('_', ' '))
       const entry = '\n- ' + preference
       const index = content.indexOf(header)
       if (index < 0) {
-        // Inline the append so the read-modify-write stays inside this lock.
+        // Inline the write so the whole read-modify-write stays inside both locks.
         await this.writeUnlocked('user_taste', content + '\n' + entry)
         return
       }
@@ -182,7 +185,7 @@ export class AgentSelfMemory {
         ? content + entry + '\n'
         : content.slice(0, nextSection) + entry + '\n' + content.slice(nextSection)
       await this.writeUnlocked('user_taste', updated)
-    })
+    }))
   }
 
   async proposeSkill(name: string, description: string, pattern: string): Promise<void> {
@@ -193,7 +196,7 @@ export class AgentSelfMemory {
   }
 
   async markSkillImplemented(name: string): Promise<void> {
-    await this.withAppendLock('skill_journal', async () => {
+    await this.withAppendLock('skill_journal', () => this.withMutationLock('skill_journal', async () => {
       const content = await this.read('skill_journal')
       const marker = '### ' + name
       const start = content.indexOf(marker)
@@ -203,7 +206,7 @@ export class AgentSelfMemory {
       if (!section.includes('Status: proposed')) return
       const updated = content.slice(0, start) + section.replace('Status: proposed', 'Status: implemented') + (next < 0 ? '' : content.slice(next))
       await this.writeUnlocked('skill_journal', updated)
-    })
+    }))
   }
 
   async systemPromptAddendum(): Promise<string> {
@@ -225,8 +228,81 @@ export class AgentSelfMemory {
     return join(this.directory, KEY_FILES[key])
   }
 
+  /**
+   * Create one memory file with its template through a single exclusive
+   * `'wx'` handle: the template bytes go through the same handle before it
+   * closes, so there is no exists-check/truncating-write window in which a
+   * concurrent creator or appender could be clobbered, and no crashed
+   * creator can leave anything worse than an empty file — which the next
+   * pass heals. A foreign-created file is respected and never templated.
+   */
+  private async ensureKey(key: AgentSelfMemoryKey): Promise<void> {
+    const path = this.pathFor(key)
+    try {
+      const handle = await open(path, 'wx')
+      try {
+        await handle.writeFile(DEFAULT_CONTENT[key], 'utf8')
+      } finally {
+        await handle.close()
+      }
+      return
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== 'EEXIST') throw error
+    }
+    // Heal the empty leftover of a creator that crashed between exclusive
+    // creation and its template write. The size re-check right before the
+    // write bounds the race against a concurrent appender populating the
+    // file between the stat and the heal.
+    let info: Awaited<ReturnType<typeof stat>>
+    try {
+      info = await stat(path)
+    } catch (error) {
+      if (isMissing(error)) return
+      throw error
+    }
+    if (!info.isFile() || info.size > 0) return
+    const handle = await open(path, 'r+')
+    try {
+      if ((await handle.stat()).size > 0) return
+      await handle.writeFile(DEFAULT_CONTENT[key], 'utf8')
+    } finally {
+      await handle.close()
+    }
+  }
+
+  /**
+   * Append-only write through O_APPEND instead of read-modify-write: kernel
+   * append positioning keeps every entry durable without a rewrite.
+   *
+   * The publish still runs under the per-file OS mutation lock because the
+   * RMW operations (write/patch/updateUserTaste/markSkillImplemented) replace
+   * the whole file via atomic rename: an O_APPEND landing between one of
+   * those reads and its rename was permanently erased by that rename. Under
+   * the shared lock every append either fully precedes a cycle's read or
+   * fully follows its publish, so nothing is lost in between.
+   */
+  private async appendUnlocked(key: AgentSelfMemoryKey, content: string): Promise<void> {
+    return this.withMutationLock(key, async () => {
+      await this.ensureKey(key)
+      await appendFile(this.pathFor(key), `\n${content}`, 'utf8')
+    })
+  }
+
+  /**
+   * Guard one whole-file read-modify-write cycle with an OS-level lock file
+   * keyed per memory file. The in-process {@link withAppendLock} chain cannot
+   * see other processes, so without this lock their interleaved cycles clobber
+   * each other's rewrite via atomic rename.
+   */
+  private withMutationLock<T>(key: AgentSelfMemoryKey, operation: () => Promise<T>): Promise<T> {
+    return withFileLock(`${this.pathFor(key)}.lock`, operation, {
+      staleMs: MUTATION_LOCK_STALE_MS,
+      waitMs: MUTATION_LOCK_WAIT_MS,
+    })
+  }
+
   private async writeUnlocked(key: AgentSelfMemoryKey, content: string): Promise<void> {
-    await this.ensure()
+    await this.ensureKey(key)
     await atomicWrite(this.pathFor(key), content)
   }
 
@@ -310,16 +386,6 @@ async function readProjectFile(root: string, name: string): Promise<string> {
     const parent = dirname(current)
     if (parent === current) return ''
     current = parent
-  }
-}
-
-async function exists(path: string): Promise<boolean> {
-  try {
-    await stat(path)
-    return true
-  } catch (error) {
-    if (isMissing(error)) return false
-    throw error
   }
 }
 

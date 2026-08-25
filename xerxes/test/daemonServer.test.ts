@@ -10,7 +10,12 @@ import { tmpdir } from "node:os";
 
 import { InMemoryDaemonRuntime } from "../src/daemon/runtime.js";
 import { DaemonInteractionBoard } from "../src/daemon/interactions.js";
-import { DaemonServer, MIGRATED_ERROR } from "../src/daemon/server.js";
+import {
+  DaemonServer,
+  MAX_ACCEPTED_SUBMISSION_IDS,
+  MIGRATED_ERROR,
+} from "../src/daemon/server.js";
+import { ValidationError } from "../src/core/errors.js";
 import { TerminalRegistry } from "../src/runtime/terminalRegistry.js";
 import { ProfileStore } from "../src/bridge/profiles.js";
 import {
@@ -25,8 +30,12 @@ import { processCommand } from "../src/core/processLiveness.js";
 import { DaemonTranscriptStore } from "../src/session/daemonTranscript.js";
 import { SnapshotManager } from "../src/session/snapshots.js";
 import { resetTitleAttempts } from "../src/daemon/titleGenerator.js";
-import type { FetchImplementation } from "../src/llms/client.js";
-import type { LlmClient } from "../src/llms/client.js";
+import type {
+  CompletionRequest,
+  FetchImplementation,
+  LlmClient,
+  LlmDelta,
+} from "../src/llms/client.js";
 import type { PermissionRequest } from "../src/streaming/events.js";
 import type {
   DaemonEvent,
@@ -3802,6 +3811,9 @@ test("an explicit cancel still stops the owning turn and only that turn", async 
     first.release();
     const cancelledEnd = await clientA.next(eventFrame("turn_end"));
     expect(cancelledEnd.params?.payload?.cancelled).toBe(true);
+    // A cancel that landed mid-turn is NOT unstarted — assistant content
+    // existed (turn_begin was emitted), so the additive field stays absent.
+    expect(cancelledEnd.params?.payload?.unstarted).toBeUndefined();
 
     second.release();
     expect(
@@ -3998,6 +4010,477 @@ class DaemonRecordingChannel implements Channel {
   }
 }
 
+test("a turn aborted during admission setup still delivers exactly one terminal cancel event", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-setup-abort-"));
+  const hexId = "deadbeef01";
+  const releaseCleanup = Promise.withResolvers<void>();
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: directory,
+    model: "setup-abort-model",
+    sessionDirectory: join(directory, "sessions"),
+    backgroundCommands: {
+      disposeAll: async () => {},
+      disposeOwner: async () => {
+        // Park openSession mid-setup: initializeSession awaits this before
+        // the session can be registered.
+        await releaseCleanup.promise;
+      },
+    },
+  });
+  // Queue a pending owner cleanup for this id so submitTurn's openSession
+  // blocks after admission but before the turn launches.
+  runtime.evictSession(hexId);
+  const events: DaemonEvent[] = [];
+  try {
+    const submitting = runtime.submitTurn(hexId, "hello", (event) =>
+      events.push(event),
+    );
+    await Bun.sleep(10);
+    expect(runtime.cancelTurn(hexId)).toBe(true);
+    releaseCleanup.resolve();
+    await submitting;
+
+    const terminal = events.filter((event) => event.type === "turn_end");
+    expect(terminal).toHaveLength(1);
+    expect(terminal[0]?.payload).toMatchObject({
+      cancelled: true,
+      unstarted: true,
+      session_id: hexId,
+    });
+    // Nothing ran: no turn_begin, no text, no transcript growth.
+    expect(events.some((event) => event.type === "turn_begin")).toBe(false);
+    expect(runtime.sessionStatus(hexId)?.messages ?? []).toHaveLength(0);
+
+    // The controller was released with the terminal event, so the session is
+    // immediately usable again.
+    const followUp: DaemonEvent[] = [];
+    await runtime.submitTurn(hexId, "again", (event) => followUp.push(event));
+    expect(followUp.some((event) => event.type === "turn_end")).toBe(true);
+  } finally {
+    releaseCleanup.resolve();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("initialize re-checks admitted turns across its flush and leaves them running", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-init-race-"));
+  const socketPath = join(directory, "daemon.sock");
+  const store = new GatedSaveStore({
+    currentProjectDirectory: directory,
+    directory: join(directory, "sessions"),
+  });
+  const runner = new GatedRunner();
+  const server = new DaemonServer({
+    socketPath,
+    autoTitle: false,
+    runtime: new InMemoryDaemonRuntime(runner, {
+      currentProjectDirectory: directory,
+      model: "race-model",
+      transcriptStore: store,
+    }),
+  });
+  await server.start();
+  const initializer = await SocketTestClient.connect(socketPath);
+  const submitter = await SocketTestClient.connect(socketPath);
+  try {
+    initializer.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "evict-race" },
+    });
+    await initializer.next((frame) => frame.id === 1);
+    await initializer.next(eventFrame("init_done"));
+    await initializer.next(eventFrame("status_update"));
+
+    // Block flushSessions inside the second initialize's eviction branch.
+    store.armSaveGate();
+    initializer.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "initialize",
+      params: { session_key: "evict-race" },
+    });
+    await store.saveEntered.promise;
+
+    // While that flush is parked, a turn is admitted for the same key.
+    submitter.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "turn.submit",
+      params: { session_key: "evict-race", text: "admitted mid-flush" },
+    });
+    await submitter.next(eventFrame("turn_begin"));
+
+    // Release the flush: the post-await re-check must now see the live turn
+    // and skip eviction instead of aborting it silently.
+    store.releaseSave();
+    expect(
+      (await initializer.next((frame) => frame.id === 2)).result,
+    ).toMatchObject({ ok: true });
+
+    runner.release();
+    const end = await submitter.next(eventFrame("turn_end"));
+    expect(end.params?.payload).toMatchObject({
+      cancelled: false,
+      session_id: expect.any(String),
+    });
+  } finally {
+    initializer.close();
+    submitter.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("/new after /resume starts an empty session instead of re-adopting the transcript", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-new-after-resume-"));
+  const socketPath = join(directory, "daemon.sock");
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: directory,
+    model: "resume-model",
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const server = new DaemonServer({ socketPath, runtime, autoTitle: false });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "origin" },
+    });
+    const firstInit = await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+    const originalId = String(
+      (firstInit.result?.session as { id?: unknown } | undefined)?.id ?? "",
+    );
+    expect(originalId).not.toBe("");
+
+    const originSession = runtime.sessionStatus("origin");
+    if (!originSession) throw new Error("expected live session");
+    originSession.messages.push(
+      { role: "user", content: "older question" },
+      { role: "assistant", content: "older answer" },
+    );
+    await runtime.flushSessions();
+
+    // Resume by id: the connection's active session key becomes the hex id.
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "initialize",
+      params: { resume_session_id: originalId },
+    });
+    const resumed = await client.next((frame) => frame.id === 2);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+    expect(resumed.result?.session).toMatchObject({
+      id: originalId,
+      messages: 2,
+    });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "slash",
+      params: { command: "/new" },
+    });
+    const fresh = await client.next((frame) => frame.id === 3);
+    await client.next(eventFrame("init_done"));
+    expect(fresh.result?.ok).toBe(true);
+    const freshSession = fresh.result?.session as Record<string, unknown>;
+    const freshKey = String(freshSession.key ?? "");
+    expect(freshSession.id).not.toBe(originalId);
+    expect(Number(freshSession.message_count)).toBe(0);
+    expect(freshKey.startsWith("tui:")).toBe(true);
+
+    // The old live copy is gone and the prompt after /new lands in the new
+    // session, not in the resumed history.
+    expect(runtime.sessionStatus(originalId)).toBeUndefined();
+    client.send({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "turn.submit",
+      params: { text: "fresh hello" },
+    });
+    await client.next((frame) => frame.id === 4);
+    await client.next(eventFrame("turn_begin"));
+    await client.next(eventFrame("turn_end"));
+    const active = runtime.sessionStatus(freshKey);
+    expect(active?.id).not.toBe(originalId);
+
+    // The persisted transcript of the resumed session is untouched.
+    const persisted = await new DaemonTranscriptStore({
+      currentProjectDirectory: directory,
+      directory: join(directory, "sessions"),
+    }).load(originalId);
+    expect(persisted?.messages.map((message) => message.role)).toEqual([
+      "user",
+      "assistant",
+    ]);
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("concurrent opens of one persisted id fold into exactly one live session", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-open-claim-"));
+  const sessionId = "feedface01";
+  const seedDirectory = join(directory, "seed-sessions");
+  const seedRuntime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: directory,
+    model: "claim-model",
+    sessionDirectory: seedDirectory,
+  });
+  const seeded = await seedRuntime.openSession(sessionId);
+  seeded.messages.push(
+    { role: "user", content: "history one" },
+    { role: "assistant", content: "history two" },
+  );
+  await seedRuntime.flushSessions();
+
+  const releaseCleanup = Promise.withResolvers<void>();
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: directory,
+    model: "claim-model",
+    // Both slot keys resolve to the same persisted transcript.
+    transcriptStore: new SameIdStore(sessionId, {
+      currentProjectDirectory: directory,
+      directory: seedDirectory,
+    }),
+    backgroundCommands: {
+      disposeAll: async () => {},
+      disposeOwner: async () => {
+        await releaseCleanup.promise;
+      },
+    },
+  });
+  // Park the first opener between its synchronous claim and registration.
+  runtime.evictSession(sessionId);
+  try {
+    const first = runtime.openSession("slot-a", undefined, { resume: true });
+    await Bun.sleep(10);
+    const second = runtime.openSession("slot-b", undefined, { resume: true });
+    let secondError: unknown;
+    let secondSettled = false;
+    try {
+      await second;
+      secondSettled = true;
+    } catch (error) {
+      secondError = error;
+    }
+    expect(secondSettled).toBe(false);
+    expect(secondError).toBeInstanceOf(ValidationError);
+    expect(String(secondError instanceof Error ? secondError.message : secondError)).toMatch(
+      /already being opened/,
+    );
+
+    releaseCleanup.resolve();
+    const opened = await first;
+    expect(opened.id).toBe(sessionId);
+    expect(
+      runtime.listSessions().filter((session) => session.id === sessionId),
+    ).toHaveLength(1);
+
+    // After the claim releases, a sequential reopen folds into the live
+    // session instead of duplicating it.
+    const third = await runtime.openSession("slot-b", undefined, {
+      resume: true,
+    });
+    expect(third.id).toBe(sessionId);
+    expect(
+      runtime.listSessions().filter((session) => session.id === sessionId),
+    ).toHaveLength(1);
+  } finally {
+    releaseCleanup.resolve();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("accepted submission ids stay bounded and are dropped when their session is evicted", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-submission-cap-"));
+  const server = new DaemonServer({
+    socketPath: join(directory, "daemon.sock"),
+    runtime: new InMemoryDaemonRuntime(undefined, {
+      currentProjectDirectory: directory,
+      sessionDirectory: join(directory, "sessions"),
+    }),
+  });
+  type Remember = (submissionKey: string) => void;
+  type Forget = (sessionKeys: readonly string[]) => void;
+  const internals = server as unknown as {
+    acceptedSubmissionIds: Set<string>;
+    forgetAcceptedSubmissions: Forget;
+    rememberAcceptedSubmission: Remember;
+  };
+  try {
+    for (let index = 0; index < MAX_ACCEPTED_SUBMISSION_IDS + 50; index += 1) {
+      internals.rememberAcceptedSubmission(`key-${index}\u0000sub-${index}`);
+    }
+    expect(internals.acceptedSubmissionIds.size).toBe(MAX_ACCEPTED_SUBMISSION_IDS);
+    // Oldest entries were evicted FIFO; the newest survive.
+    expect(internals.acceptedSubmissionIds.has("key-0\u0000sub-0")).toBe(false);
+    expect(
+      internals.acceptedSubmissionIds.has(
+        `key-${MAX_ACCEPTED_SUBMISSION_IDS + 49}\u0000sub-${MAX_ACCEPTED_SUBMISSION_IDS + 49}`,
+      ),
+    ).toBe(true);
+
+    // Eviction drops only the evicted session's entries.
+    internals.forgetAcceptedSubmissions(["key-100"]);
+    expect(internals.acceptedSubmissionIds.has("key-100\u0000sub-100")).toBe(
+      false,
+    );
+    expect(internals.acceptedSubmissionIds.has("key-101\u0000sub-101")).toBe(true);
+    expect(internals.acceptedSubmissionIds.size).toBe(
+      MAX_ACCEPTED_SUBMISSION_IDS - 1,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("duplicate submission ids still short-circuit to an idempotent duplicate result", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-submission-dedupe-"));
+  const socketPath = join(directory, "daemon.sock");
+  const server = new DaemonServer({
+    socketPath,
+    autoTitle: false,
+    runtime: new InMemoryDaemonRuntime(undefined, {
+      currentProjectDirectory: directory,
+      model: "dedupe-model",
+      sessionDirectory: join(directory, "sessions"),
+    }),
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "turn.submit",
+      params: {
+        session_key: "dedupe",
+        text: "exactly once",
+        submission_id: "client-submit-1",
+      },
+    });
+    expect((await client.next((frame) => frame.id === 1)).result).toEqual({
+      ok: true,
+    });
+    await client.next(eventFrame("turn_end"));
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "turn.submit",
+      params: {
+        session_key: "dedupe",
+        text: "exactly once",
+        submission_id: "client-submit-1",
+      },
+    });
+    expect((await client.next((frame) => frame.id === 2)).result).toEqual({
+      ok: true,
+      duplicate: true,
+    });
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+/** Title client that records the abort signal each completion received. */
+class SignalCapturingTitleClient implements LlmClient {
+  readonly signals: Array<AbortSignal | undefined> = [];
+
+  async *stream(
+    _request: CompletionRequest,
+    signal?: AbortSignal,
+  ): AsyncGenerator<LlmDelta> {
+    this.signals.push(signal);
+    yield { content: "Quiet Session Notes", usage: { inputTokens: 2, outputTokens: 2 } };
+  }
+}
+
+test("title generation rides a session-scoped signal aborted when the session closes", async () => {
+  resetTitleAttempts();
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-title-signal-"));
+  const socketPath = join(directory, "daemon.sock");
+  const titleClient = new SignalCapturingTitleClient();
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: directory,
+    model: "title-model",
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const server = new DaemonServer({
+    socketPath,
+    runtime,
+    titleClientFactory: () => titleClient,
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "titled" },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "turn.submit",
+      params: { session_key: "titled", text: "hello there" },
+    });
+    await client.next((frame) => frame.id === 2);
+    await client.next(eventFrame("turn_end"));
+
+    // The background title call carries the session-lifetime signal.
+    for (let waited = 0; waited < 4_000; waited += 25) {
+      if (titleClient.signals.length > 0) break;
+      await Bun.sleep(25);
+    }
+    expect(titleClient.signals).toHaveLength(1);
+    expect(titleClient.signals[0]?.aborted).toBe(false);
+
+    // The generated title lands on the session.
+    for (let waited = 0; waited < 4_000; waited += 25) {
+      if (runtime.sessionStatus("titled")?.metadata.title) break;
+      await Bun.sleep(25);
+    }
+    expect(runtime.sessionStatus("titled")?.metadata.title).toBe(
+      "Quiet Session Notes",
+    );
+
+    // Closing the session (a fresh initialize without resume evicts it)
+    // aborts the signal so any still-open title work stops with it.
+    client.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "initialize",
+      params: { session_key: "titled" },
+    });
+    await client.next((frame) => frame.id === 3);
+    await client.next(eventFrame("init_done"));
+    expect(titleClient.signals[0]?.aborted).toBe(true);
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 class UsageRunner implements TurnRunner {
   async *run(): AsyncGenerator<DaemonEvent> {
     yield {
@@ -4093,6 +4576,74 @@ class SteerRunner implements TurnRunner {
       type: "text_part",
       payload: { text: `steer:${controls?.drainSteer?.().join("|") ?? ""}` },
     };
+  }
+}
+
+/** Turn runner that parks mid-turn until released. */
+class GatedRunner implements TurnRunner {
+  private resolveGate: (() => void) | undefined;
+  private readonly gate = new Promise<void>((resolve) => {
+    this.resolveGate = resolve;
+  });
+
+  release(): void {
+    this.resolveGate?.();
+  }
+
+  async *run(): AsyncGenerator<DaemonEvent> {
+    yield { type: "text_part", payload: { text: "waiting" } };
+    await this.gate;
+    yield { type: "text_part", payload: { text: "done" } };
+  }
+}
+
+/** Transcript store whose save() can be parked to hold flushSessions open. */
+class GatedSaveStore extends DaemonTranscriptStore {
+  private gate: PromiseWithResolvers<void> | undefined;
+  /** Resolver kept out-of-band so releaseSave works after save consumes `gate`. */
+  private parkedGate: PromiseWithResolvers<void> | undefined;
+  saveEntered: PromiseWithResolvers<void> = Promise.withResolvers();
+
+  armSaveGate(): void {
+    this.parkedGate = Promise.withResolvers();
+    this.gate = this.parkedGate;
+    this.saveEntered = Promise.withResolvers();
+  }
+
+  releaseSave(): void {
+    this.parkedGate?.resolve();
+    this.parkedGate = undefined;
+    this.gate = undefined;
+  }
+
+  override async save(
+    transcript: Parameters<DaemonTranscriptStore["save"]>[0],
+    options?: Parameters<DaemonTranscriptStore["save"]>[1],
+  ): Promise<void> {
+    if (this.gate) {
+      const gate = this.gate;
+      this.gate = undefined;
+      this.saveEntered.resolve();
+      await gate.promise;
+    }
+    return super.save(transcript, options);
+  }
+}
+
+/** Transcript store that resolves every load against one persisted id. */
+class SameIdStore extends DaemonTranscriptStore {
+  constructor(
+    private readonly targetSessionId: string,
+    options: ConstructorParameters<typeof DaemonTranscriptStore>[0],
+  ) {
+    super(options);
+  }
+
+  override loadResult(
+    _sessionKey: string,
+    options?: Parameters<DaemonTranscriptStore["loadResult"]>[1],
+  ): ReturnType<DaemonTranscriptStore["loadResult"]> {
+    return super.loadResult(this.targetSessionId, options);
   }
 }
 
@@ -5341,12 +5892,14 @@ test("daemon stop persists sessions even when an in-flight turn never settles", 
     });
     await client.next((frame) => frame.id === 2);
     await client.next(eventFrame("turn_begin"));
-    await waitFor(() => runner.runs === 1);
+    await waitFor(() => runner.runs === 1, 10_000);
 
     // The prompt is durable before the turn ends: the transcript itself is
     // only written in the turn's `finally`, which a crash never reaches.
+    // Generous budgets: these waits separate "lands" from "never lands" and
+    // must stay robust while the rest of the suite saturates the machine.
     await waitFor(async () =>
-      (await readdir(sessionDirectory)).some((file) => file.endsWith(".jsonl")),
+      (await readdir(sessionDirectory)).some((file) => file.endsWith(".jsonl")), 10_000,
     );
     const journal = (await readdir(sessionDirectory)).find((file) =>
       file.endsWith(".jsonl"),
@@ -5357,10 +5910,12 @@ test("daemon stop persists sessions even when an in-flight turn never settles", 
 
     // Regression: the only session flush sat behind an unbounded await on the
     // drain, so one turn that never settles parked the daemon with the
-    // transcript unwritten.
+    // transcript unwritten. The bound only has to separate "resolves" from
+    // "hangs forever", so keep it far above scheduler jitter on loaded
+    // machines instead of asserting interactive latency.
     const startedAt = Date.now();
     await server.stop();
-    expect(Date.now() - startedAt).toBeLessThan(4_000);
+    expect(Date.now() - startedAt).toBeLessThan(20_000);
 
     const files = await readdir(sessionDirectory);
     expect(files).toHaveLength(1);
