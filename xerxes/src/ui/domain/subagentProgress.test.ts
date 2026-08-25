@@ -12,6 +12,7 @@ import {
 } from '../app/spawnHistoryStore.js'
 import type { Msg, SubagentProgress } from '../types.js'
 
+import { agentContentWidth } from './agentPanelLayout.js'
 import { reconcileArchivedSubagent } from './subagentProgress.js'
 
 const archivedAgent: SubagentProgress = {
@@ -105,5 +106,20 @@ describe('reconcileArchivedSubagent', () => {
     expect(spawnHistoryForSession(getSpawnHistory(), 'session-b')[0]?.subagents[0]?.id).toBe('child-2')
     expect(spawnHistoryForSession(getSpawnHistory(), null)).toEqual([])
     expect(spawnHistoryForSession(getSpawnHistory(), '  ')).toEqual([])
+  })
+
+  it('reserves rail width only for the active session, never for the warm cache', () => {
+    pushSnapshot([archivedAgent], { sessionId: 'session-a', startedAt: 1 })
+
+    const railAgents = (sessionId: null | string) =>
+      spawnHistoryForSession(getSpawnHistory(), sessionId)
+        .reduce((count, snapshot) => count + snapshot.subagents.length, 0)
+
+    // The chat that ran the fan-out gives up columns to the rail…
+    expect(agentContentWidth(120, railAgents('session-a'))).toBe(82)
+    // …and a chat that never spawned anything keeps the whole terminal.
+    // Counting the global cache here reserved ~40 columns for a rail that
+    // appLayout then declined to mount, leaving a blank strip on the right.
+    expect(agentContentWidth(120, railAgents('session-b'))).toBe(120)
   })
 })

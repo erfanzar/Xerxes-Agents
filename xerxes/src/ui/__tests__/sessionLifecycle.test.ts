@@ -9,6 +9,7 @@ import { turnController } from '../app/turnController.js'
 import { getTurnState, patchTurnState } from '../app/turnStore.js'
 import { getUiState, patchUiState, resetUiState } from '../app/uiStore.js'
 import { hydrateLiveSessionInflight, liveSessionInflightMessages, useSessionLifecycle } from '../app/useSessionLifecycle.js'
+import { clearSpawnHistory, getSpawnHistory } from '../app/spawnHistoryStore.js'
 import { subagentProgressFromSnapshot } from '../domain/subagentProgress.js'
 import type { GatewayClient } from '../gatewayClient.js'
 import type {
@@ -17,6 +18,7 @@ import type {
   SessionResumeResponse,
   SetupStatusResponse
 } from '../gatewayTypes.js'
+import type { Msg } from '../types.js'
 
 const deferred = <T,>() => Promise.withResolvers<T>()
 
@@ -351,5 +353,132 @@ describe('useSessionLifecycle', () => {
     expect(subagentProgressFromSnapshot({ id: 'sa-2', status: 'cancelled' }, 1).status).toBe('interrupted')
     expect(subagentProgressFromSnapshot({ id: 'sa-3', status: 'mystery' }, 2).status).toBe('interrupted')
     expect(subagentProgressFromSnapshot({ closed: true, id: 'sa-4', status: 'mystery' }, 3).status).toBe('completed')
+    // A handle spawned but not yet given a turn is waiting, not dead.
+    expect(subagentProgressFromSnapshot({ id: 'sa-5', status: 'idle' }, 4).status).toBe('queued')
+    expect(subagentProgressFromSnapshot({ closed: true, id: 'sa-6', status: 'idle' }, 5).status).toBe('completed')
+  })
+
+  it('reattaches a mid-turn session with its unfinished subagents still live', async () => {
+    resetUiState()
+    turnController.fullReset()
+    clearSpawnHistory()
+    const historyItems: Msg[][] = []
+    const gw = {
+      request: vi.fn(async (method: string) => {
+        if (method !== 'session.activate') throw new Error(`unexpected gateway request: ${method}`)
+        return {
+          messages: [],
+          running: true,
+          session_id: 'busy-session',
+          session_key: 'key:busy',
+          status: 'working',
+          subagent_snapshots: [
+            { id: 'sa-done', name: 'scout', status: 'completed', summary: 'found it', title: 'Scout repo' },
+            { id: 'sa-live', name: 'auditor', status: 'running', title: 'Audit runtime' },
+            { id: 'sa-queued', name: 'waiter', status: 'idle', title: 'Queued work' }
+          ]
+        } satisfies SessionActivateResponse
+      })
+    } as unknown as GatewayClient
+    let lifecycle: ReturnType<typeof useSessionLifecycle> | undefined
+
+    const Probe = () => {
+      lifecycle = useSessionLifecycle({
+        colsRef: { current: 80 },
+        composerActions: { activateSessionQueue: vi.fn(), setPasteSnips: vi.fn() } as unknown as ComposerActions,
+        gw,
+        panel: vi.fn(),
+        rpc: vi.fn() as GatewayRpc,
+        scrollRef: { current: null },
+        setHistoryItems: vi.fn((next: Msg[] | ((prev: Msg[]) => Msg[])) => {
+          historyItems.push(typeof next === 'function' ? next([]) : next)
+        }),
+        setLastUserMsg: vi.fn(),
+        setSessionStartedAt: vi.fn(),
+        setStickyPrompt: vi.fn(),
+        setVoiceProcessing: vi.fn(),
+        setVoiceRecording: vi.fn(),
+        sys: vi.fn()
+      })
+      return null
+    }
+
+    const setup = await testRender(createElement(Probe), { height: 6, width: 40 })
+    try {
+      await setup.flush()
+      if (!lifecycle) throw new Error('lifecycle hook did not mount')
+      lifecycle.activateLiveSession('busy-session')
+      await setup.flush()
+
+      // Unfinished children come back LIVE: this is what repopulates the F6
+      // rail's WORKING count and gives every subsequent update-only
+      // `subagent.*` event a row to land on.
+      expect(getTurnState().subagents.map(agent => agent.id)).toEqual(['sa-live', 'sa-queued'])
+      expect(getTurnState().subagents.map(agent => agent.status)).toEqual(['running', 'queued'])
+
+      // Finished children stay history — a folded trail card plus a snapshot.
+      const trail = historyItems.at(-1)?.find(item => item.kind === 'trail')
+      expect(trail?.subagents?.map(agent => agent.id)).toEqual(['sa-done'])
+      expect(getSpawnHistory().flatMap(snapshot => snapshot.subagents.map(agent => agent.id))).toEqual(['sa-done'])
+    } finally {
+      act(() => setup.renderer.destroy())
+      turnController.fullReset()
+      clearSpawnHistory()
+      resetUiState()
+    }
+  })
+
+  it('archives every persisted subagent when the reattached session is idle', async () => {
+    resetUiState()
+    turnController.fullReset()
+    clearSpawnHistory()
+    const gw = {
+      request: vi.fn(async () => ({
+        messages: [],
+        running: false,
+        session_id: 'idle-session',
+        session_key: 'key:idle',
+        status: 'idle',
+        subagent_snapshots: [{ id: 'orphan', name: 'ghost', status: 'running', title: 'Orphaned child' }]
+      } satisfies SessionActivateResponse))
+    } as unknown as GatewayClient
+    let lifecycle: ReturnType<typeof useSessionLifecycle> | undefined
+
+    const Probe = () => {
+      lifecycle = useSessionLifecycle({
+        colsRef: { current: 80 },
+        composerActions: { activateSessionQueue: vi.fn(), setPasteSnips: vi.fn() } as unknown as ComposerActions,
+        gw,
+        panel: vi.fn(),
+        rpc: vi.fn() as GatewayRpc,
+        scrollRef: { current: null },
+        setHistoryItems: vi.fn(),
+        setLastUserMsg: vi.fn(),
+        setSessionStartedAt: vi.fn(),
+        setStickyPrompt: vi.fn(),
+        setVoiceProcessing: vi.fn(),
+        setVoiceRecording: vi.fn(),
+        sys: vi.fn()
+      })
+      return null
+    }
+
+    const setup = await testRender(createElement(Probe), { height: 6, width: 40 })
+    try {
+      await setup.flush()
+      lifecycle?.activateLiveSession('idle-session')
+      await setup.flush()
+
+      // A manifest that still says "running" on an idle session describes
+      // children orphaned by a daemon restart. Re-animating those would show
+      // work that can never report again as permanently in flight.
+      expect(getTurnState().subagents).toEqual([])
+      expect(getSpawnHistory().flatMap(snapshot => snapshot.subagents.map(agent => agent.id))).toEqual(['orphan'])
+    } finally {
+      act(() => setup.renderer.destroy())
+      turnController.fullReset()
+      clearSpawnHistory()
+      resetUiState()
+    }
   })
 })

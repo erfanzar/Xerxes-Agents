@@ -198,3 +198,84 @@ export function resetTitleAttempts(): void {
   attempts.clear()
   inflight.clear()
 }
+
+/**
+ * Provisional titles — the name a chat wears before the model names it.
+ *
+ * A generated title only exists after the first exchange *completes*, which
+ * is precisely the window where a dispatched background chat most needs a
+ * name: Agent View lists it while it works, and every unnamed row rendered as
+ * the same `—`. Worse, a session whose three title attempts all failed stayed
+ * `—` for the rest of its life.
+ *
+ * So the opening prompt seeds a placeholder immediately. It is written with
+ * `title_derived: true`, which is exactly the marker `maybeGenerateTitle` and
+ * `/title` already treat as "replaceable", so the model's title still wins
+ * the moment it lands and an explicit title still wins over both.
+ */
+const PROVISIONAL_TITLE_MAX_CHARS = 48
+
+/**
+ * Runtime scaffolding submitted as a user turn (skill activation, compaction,
+ * steers). Naming a chat "[Skill x activated]" is worse than leaving it blank,
+ * so these never seed a title. Mirrors `looksLikeInternalUserPrompt` in the
+ * TUI's gateway adapter.
+ */
+function isScaffoldPrompt(text: string): boolean {
+  const head = text.trimStart()
+  if (head.startsWith('[') && /^\[[^\]]{1,64}\]/.test(head)) return true
+  return [
+    'Please compact this conversation:',
+    'Write a reusable agent skill called',
+    'Generate an image matching this brief',
+  ].some(prefix => head.startsWith(prefix))
+}
+
+/**
+ * Derive a one-line placeholder title from a session's opening prompt.
+ *
+ * Returns undefined when the prompt cannot produce anything more useful than
+ * a blank — an empty message, or runtime scaffolding.
+ */
+export function provisionalTitleFrom(userText: string): string | undefined {
+  if (isScaffoldPrompt(userText)) return undefined
+  // The first non-empty line, minus fence/quote decoration: a pasted diff or
+  // a fenced snippet should not become the chat's name.
+  const firstLine = userText
+    .split('\n')
+    .map(line => line.trim())
+    .find(line => line && !line.startsWith('```'))
+  if (!firstLine) return undefined
+  const cleaned = firstLine
+    // A leading slash command reads as a name once the slash is gone
+    // ("/skill bug-bounty-hunter" → "Skill bug-bounty-hunter").
+    .replace(/^\/+/, '')
+    .replace(/^["'`]+|["'`]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (!cleaned) return undefined
+  const capped = cleaned.length <= PROVISIONAL_TITLE_MAX_CHARS
+    ? cleaned
+    // Cut on a word boundary when one is near the limit; a mid-word chop
+    // reads as corruption rather than as truncation.
+    : (() => {
+        const head = cleaned.slice(0, PROVISIONAL_TITLE_MAX_CHARS)
+        const lastSpace = head.lastIndexOf(' ')
+        return `${(lastSpace > PROVISIONAL_TITLE_MAX_CHARS * 0.6 ? head.slice(0, lastSpace) : head).trimEnd()}…`
+      })()
+  return capped.charAt(0).toUpperCase() + capped.slice(1)
+}
+
+/**
+ * Clamp any stored title to the shape pickers can render.
+ *
+ * Builds before provisional titles existed wrote the whole first message into
+ * `metadata.title` behind the `title_derived` flag, and that flag no longer
+ * blanks the field on the wire. Those legacy values are multi-line and
+ * unbounded, so they are normalized on read rather than migrated on disk.
+ */
+export function displayTitle(raw: string): string {
+  const firstLine = raw.split('\n').map(line => line.trim()).find(Boolean) ?? ''
+  if (!firstLine) return ''
+  return firstLine.length > TITLE_MAX_CHARS ? `${firstLine.slice(0, TITLE_MAX_CHARS - 1)}…` : firstLine
+}

@@ -1109,6 +1109,42 @@ class TurnController {
     this.publishToolState()
   }
 
+  /**
+   * Restore a reattached session's still-running subagents as LIVE rows.
+   *
+   * The daemon's persisted manifest was previously replayed straight into
+   * spawn history, i.e. as archived rows. That is right for children that have
+   * finished and wrong for children that have not: the agent rail lost its
+   * WORKING count, and — because every incremental `subagent.tool` /
+   * `.progress` / `.complete` event is deliberately update-only
+   * (`createIfMissing: false`, so late events cannot resurrect a finished
+   * child) — those events then had nothing to land on. A wave you walked away
+   * from came back frozen, with no way to tell working from dead.
+   *
+   * Existing rows win: this only ever fills gaps, so a hydrate that races the
+   * live stream cannot roll a child's state backwards to its spawn-time
+   * snapshot.
+   */
+  hydrateSubagents(subagents: readonly SubagentProgress[]) {
+    if (!subagents.length) {
+      return
+    }
+
+    patchTurnState(state => {
+      const known = new Set(state.subagents.map(item => item.id))
+      const added = subagents.filter(item => !known.has(item.id))
+
+      if (!added.length) {
+        return state
+      }
+
+      return {
+        ...state,
+        subagents: [...state.subagents, ...added].sort((a, b) => a.depth - b.depth || a.index - b.index)
+      }
+    })
+  }
+
   startMessage() {
     this.endReasoningPhase()
     this.clearReasoning()

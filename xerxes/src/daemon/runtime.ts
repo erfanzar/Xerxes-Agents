@@ -22,6 +22,7 @@ import type { JsonRpcPayload } from "../protocol/jsonRpc.js";
 import { processAtMentions } from "./atMentions.js";
 import { imageUrlContentParts, type TurnImage } from "./images.js";
 import { xerxesHome } from "./paths.js";
+import { displayTitle } from "./titleGenerator.js";
 import type { DaemonInteractionBoard } from "./interactions.js";
 import {
   claimDirectSubagentConversation,
@@ -1651,8 +1652,9 @@ function savedSessionSummary(
     key: transcript.key,
     kind,
     resumable: !activeChild,
-    // Empty until the user sets a title or the title model generates one.
-    title: metadata.title_derived === true ? "" : stringValue(metadata.title),
+    // A provisional title derived from the opening prompt counts: saved chats
+    // whose title call never landed used to list as blank forever.
+    title: displayTitle(stringValue(metadata.title)),
     agentId: transcript.agentId,
     ...(model ? { model } : {}),
     ...(parentSessionId ? { parentSessionId } : {}),

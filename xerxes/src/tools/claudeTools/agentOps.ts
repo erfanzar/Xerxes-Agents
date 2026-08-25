@@ -21,6 +21,15 @@ import type { PermissionMode } from '../../streaming/permissions.js'
 import { optionalBoolean, optionalString, requiredString } from '../inputs.js'
 
 const DEFAULT_WAIT_SECONDS = 120
+
+/**
+ * How often a blocking wait rewrites the persisted subagent manifest.
+ *
+ * Bounds how stale the agent panel can be for a session reattached mid-wave;
+ * slow on purpose, because the write is only worth anything to a client that
+ * is not currently attached.
+ */
+const MANIFEST_HEARTBEAT_MS = 1_500
 const MAILBOX_EVENT_LIMIT = 1_000
 const MAX_INLINE_BATCH_RECEIPT_AGENTS = 8
 const DEFAULT_TASK_LIST_PAGE_SIZE = 50
@@ -182,6 +191,8 @@ export interface ClaudeAgentToolsOptions {
   readonly agentResolver?: (subagentType: string, model?: string) => SpawnedAgentDescriptor | undefined
   readonly mailbox?: AgentEventMailbox
   readonly manager: SpawnedAgentManagerPort
+  /** Manifest-refresh cadence during a blocking wait; test seam for the 1.5s default. */
+  readonly manifestHeartbeatMs?: number
   readonly now?: () => number
   /**
    * Maximum concurrent spawn registrations inside one SpawnAgents batch.
@@ -304,6 +315,7 @@ export function registerClaudeAgentTools(
 /** Adapter that maps Claude-style task calls onto the Bun `SpawnedAgentManager`. */
 export class ClaudeAgentTools {
   private readonly mailbox: AgentEventMailbox
+  private readonly manifestHeartbeatMs: number
   private readonly now: () => number
   private readonly rolledBackIds = new Set<string>()
   private readonly spawnConcurrency: number
@@ -311,6 +323,11 @@ export class ClaudeAgentTools {
   constructor(private readonly options: ClaudeAgentToolsOptions) {
     this.mailbox = options.mailbox ?? new AgentEventMailbox()
     this.now = options.now ?? (() => Date.now())
+    const heartbeat = options.manifestHeartbeatMs ?? MANIFEST_HEARTBEAT_MS
+    if (!Number.isFinite(heartbeat) || heartbeat <= 0) {
+      throw new ValidationError('manifestHeartbeatMs', 'must be a positive number of milliseconds', heartbeat)
+    }
+    this.manifestHeartbeatMs = heartbeat
     const concurrency = options.spawnConcurrency ?? DEFAULT_SPAWN_CONCURRENCY
     if (!Number.isInteger(concurrency) || concurrency < 1) {
       throw new ValidationError('spawnConcurrency', 'must be a positive integer', concurrency)
@@ -377,7 +394,7 @@ export class ClaudeAgentTools {
       return agentSnapshotWire(snapshot)
     }
     try {
-      const settled = await this.waitFor([snapshot.id], timeoutMilliseconds(inputs, 'timeout', DEFAULT_WAIT_SECONDS), signal)
+      const settled = await this.waitFor([snapshot.id], timeoutMilliseconds(inputs, 'timeout', DEFAULT_WAIT_SECONDS), signal, context)
       const final = settled[0] ?? snapshot
       this.observeBackgroundState([final])
       return agentSnapshotWire(final)
@@ -472,7 +489,7 @@ export class ClaudeAgentTools {
     }
     const ids = snapshots.map(snapshot => snapshot.id)
     try {
-      const settled = await this.waitFor(ids, timeoutMilliseconds(inputs, 'timeout', DEFAULT_WAIT_SECONDS), signal)
+      const settled = await this.waitFor(ids, timeoutMilliseconds(inputs, 'timeout', DEFAULT_WAIT_SECONDS), signal, context)
       this.observeSpawnBatchState(settled)
       return spawnBatchWire(settled)
     } catch (error) {
@@ -657,7 +674,7 @@ export class ClaudeAgentTools {
       prompt: `## Handoff from parent agent\n\nReason: ${reason}\n\nContext: ${contextSummary}\n\nYour task: ${prompt}`,
     }, context)
     try {
-      const settled = await this.waitFor([snapshot.id], timeoutMilliseconds(inputs, 'timeout', DEFAULT_WAIT_SECONDS), signal)
+      const settled = await this.waitFor([snapshot.id], timeoutMilliseconds(inputs, 'timeout', DEFAULT_WAIT_SECONDS), signal, context)
       const final = settled[0] ?? snapshot
       this.observeBackgroundState([final])
       return final.lastOutput === undefined ? agentSnapshotWire(final) : boundedOutput(final.lastOutput)
@@ -692,13 +709,49 @@ export class ClaudeAgentTools {
     }
     const snapshot = await this.options.manager.spawn(request)
     this.capture()
+    // Persist the manifest at the spawn, not at the tool boundary.
+    //
+    // `execute`'s finally-block persist only fires once the call RETURNS, and
+    // AgentTool/HandoffTool block for the whole life of the child. A session
+    // reattached mid-agent therefore found no record that the child existed:
+    // `subagent_snapshots` came back empty, the F6 rail rebuilt as blank, and
+    // running work looked dead. Rewriting the metadata array is in-memory, so
+    // paying it per spawn is cheap next to losing the whole fan-out.
+    this.persistContext(context)
     return snapshot
   }
 
-  private async waitFor(ids: readonly string[], timeout: number, signal?: AbortSignal): Promise<SpawnedAgentSnapshot[]> {
+  private async waitFor(
+    ids: readonly string[],
+    timeout: number,
+    signal?: AbortSignal,
+    context?: ToolExecutionContext,
+  ): Promise<SpawnedAgentSnapshot[]> {
     if (signal?.aborted) throw signal.reason ?? new Error('Subagent wait cancelled')
-    const result = await abortable(this.options.manager.wait(ids, timeout), signal)
+    // Keep the durable manifest tracking the children WHILE they run.
+    //
+    // No tool code executes during a foreground wait, so without this the
+    // manifest stays frozen at spawn state for the entire life of the batch: a
+    // session reattached midway showed every child as still working even when
+    // they had all finished, which is precisely the state the agent panel
+    // exists to report. The rewrite is an in-memory array rebuild, so a slow
+    // heartbeat costs nothing next to a whole fan-out reading as stuck.
+    const heartbeat = context === undefined
+      ? undefined
+      // Swallowed deliberately: a refresh runs on a timer, outside any
+      // caller's try/catch, so a manager that throws here would surface as an
+      // uncaught exception and take the daemon down. The wait itself, and the
+      // authoritative persist after it, still report failures normally.
+      : setInterval(() => { try { this.persistContext(context) } catch { /* best-effort */ } },
+        this.manifestHeartbeatMs)
+    let result
+    try {
+      result = await abortable(this.options.manager.wait(ids, timeout), signal)
+    } finally {
+      if (heartbeat !== undefined) clearInterval(heartbeat)
+    }
     this.capture()
+    if (context !== undefined) this.persistContext(context)
     const snapshots = new Map(
       [...result.completed, ...result.pending].map(snapshot => [snapshot.id, snapshot]),
     )

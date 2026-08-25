@@ -54,11 +54,11 @@ import { type GatewayRpc, type TranscriptRow } from './interfaces.js'
 import { isLiveTailActive } from './liveTailScroll.js'
 import { $overlayState, clearApprovalOverlay, clearClarifyOverlay, patchOverlayState } from './overlayStore.js'
 import { scrollWithSelectionBy } from './scroll.js'
-import { $spawnHistory } from './spawnHistoryStore.js'
+import { $spawnHistory, spawnHistoryForSession } from './spawnHistoryStore.js'
 import { $thinkingVisibility, thinkingRowExpanded } from './thinkingVisibilityStore.js'
 import { turnController } from './turnController.js'
 import { patchTurnState, useTurnSelector } from './turnStore.js'
-import { $uiState, $uiTheme, getUiState, patchUiState } from './uiStore.js'
+import { $uiSessionId, $uiState, $uiTheme, getUiState, patchUiState } from './uiStore.js'
 import { useComposerState } from './useComposerState.js'
 import { useConfigSync } from './useConfigSync.js'
 import { useInputHandlers } from './useInputHandlers.js'
@@ -152,7 +152,14 @@ export function useMainApp(gw: GatewayClient) {
   const [terminalCols, setTerminalCols] = useState(stdout?.columns ?? 80)
   const liveAgentCount = useTurnSelector(state => state.subagents.length)
   const spawnHistory = useStore($spawnHistory)
-  const archivedAgentCount = spawnHistory.reduce((count, snapshot) => count + snapshot.subagents.length, 0)
+  // Session-scoped, exactly like the rail that this width is reserved FOR
+  // (appLayout mounts it from the same filtered slice). The global cache is a
+  // warm pool spanning every chat, so counting all of it made a chat that had
+  // never spawned anything give up ~40 columns to a rail that then rendered
+  // nothing — a blank strip down the right of the transcript.
+  const sessionId = useStore($uiSessionId)
+  const archivedAgentCount = spawnHistoryForSession(spawnHistory, sessionId)
+    .reduce((count, snapshot) => count + snapshot.subagents.length, 0)
   const cols = agentContentWidth(terminalCols, liveAgentCount + archivedAgentCount)
 
   useEffect(() => {

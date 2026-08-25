@@ -13,7 +13,10 @@ import {
   SkillRegistry,
   parseSkillMarkdown,
 } from '../src/extensions/skills.js'
-import { persistedSubagentSnapshotValues } from '../src/agents/subagentPersistence.js'
+import {
+  SUBAGENT_SNAPSHOT_METADATA_KEY,
+  persistedSubagentSnapshotValues,
+} from '../src/agents/subagentPersistence.js'
 import { MCPClient } from '../src/mcp/client.js'
 import { SpawnedAgentManager } from '../src/operators/subagents.js'
 import { UserPromptManager } from '../src/operators/userPrompt.js'
@@ -1220,4 +1223,74 @@ test('NativeWorktreeManager sweeps worktrees this process created but never exit
   } finally {
     await rm(repository, { force: true, recursive: true })
   }
+})
+
+test('a waiting AgentTool persists its child manifest before the child finishes', async () => {
+  // The child's run is held open so the assertion happens while AgentTool is
+  // still blocked inside its foreground wait.
+  const running = Promise.withResolvers<{ content: string }>()
+  const manager = new SpawnedAgentManager({
+    idFactory: () => 'held-agent',
+    runner: () => running.promise,
+  })
+  const tools = new ClaudeAgentTools({ manager })
+  const metadata: Record<string, unknown> = {}
+
+  const call = tools.execute(
+    'AgentTool',
+    { prompt: 'audit the runtime', title: 'Audit runtime', wait: true, timeout: 5 },
+    { metadata },
+  )
+  // Let the spawn settle without letting the child's turn complete.
+  await Promise.resolve()
+  await Promise.resolve()
+
+  // `execute`'s finally-block persist only fires once the wait RETURNS, so
+  // without a spawn-time persist a session reattached here found no record
+  // that the child existed and its agent panel rebuilt as empty.
+  const inflight = persistedSubagentSnapshotValues(metadata)
+  expect(inflight).toHaveLength(1)
+  expect(inflight[0]).toMatchObject({ id: 'held-agent', title: 'Audit runtime' })
+  expect(String(inflight[0]?.status)).not.toBe('completed')
+
+  running.resolve({ content: 'audited' })
+  await call
+
+  const settled = persistedSubagentSnapshotValues(metadata)
+  expect(settled).toHaveLength(1)
+  expect(settled[0]).toMatchObject({ id: 'held-agent', status: 'completed' })
+})
+
+test('a blocking agent wait refreshes the persisted manifest while its children run', async () => {
+  const running = Promise.withResolvers<{ content: string }>()
+  const manager = new SpawnedAgentManager({
+    idFactory: () => 'slow-agent',
+    runner: () => running.promise,
+  })
+  const tools = new ClaudeAgentTools({ manager, manifestHeartbeatMs: 5 })
+  const metadata: Record<string, unknown> = {}
+
+  const call = tools.execute(
+    'AgentTool',
+    { prompt: 'long audit', title: 'Long audit', wait: true, timeout: 5 },
+    { metadata },
+  )
+  await Promise.resolve()
+  // Drop the spawn-time manifest so only a mid-wait refresh can restore it.
+  // No tool code runs during a foreground wait, so before the heartbeat the
+  // panel of a reattached session stayed frozen at whatever spawn wrote.
+  delete metadata[SUBAGENT_SNAPSHOT_METADATA_KEY]
+  expect(persistedSubagentSnapshotValues(metadata)).toHaveLength(0)
+
+  await new Promise(resolve => setTimeout(resolve, 40))
+  expect(persistedSubagentSnapshotValues(metadata)).toHaveLength(1)
+
+  running.resolve({ content: 'done' })
+  await call
+  expect(persistedSubagentSnapshotValues(metadata)[0]).toMatchObject({ id: 'slow-agent', status: 'completed' })
+})
+
+test('an invalid manifest heartbeat is rejected at construction', () => {
+  const manager = new SpawnedAgentManager({ idFactory: () => 'x', runner: async () => ({ content: '' }) })
+  expect(() => new ClaudeAgentTools({ manager, manifestHeartbeatMs: 0 })).toThrow('positive number')
 })

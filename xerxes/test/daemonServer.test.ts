@@ -2606,7 +2606,10 @@ test("daemon resumes only initialize resume IDs and lists saved sessions separat
           session_id: firstSessionId,
           key: "tui:first",
           messages: 2,
-          title: "",
+          // Provisional title seeded from the opening prompt: a saved chat is
+          // never listed as a nameless dash while it waits on (or never gets)
+          // a model-written title.
+          title: "Saved question",
         },
       ],
     });
@@ -6879,9 +6882,19 @@ test("a completed first exchange generates a model-written session title and bro
       params: { session_key: "titled", text: "hello there" },
     });
     expect((await client.next((frame) => frame.id === 2)).result).toMatchObject({ ok: true });
+
+    // A provisional title lands with the submit, before a single token
+    // streams, so the chat is never anonymous while it works.
+    const provisional = await client.next(eventFrame("session_title"));
+    expect(provisional.params?.payload).toMatchObject({
+      session_id: sessionId,
+      title: "Hello there",
+    });
+
     await client.next(eventFrame("turn_end"));
 
-    // The title lands in the background after the turn; wait for its event.
+    // The model-written title lands in the background after the turn and
+    // replaces the placeholder; wait for its event.
     const titled = await client.next(eventFrame("session_title"));
     expect(titled.params?.payload).toMatchObject({
       session_id: sessionId,

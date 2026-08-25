@@ -96,7 +96,9 @@ import {
 } from "../llms/client.js";
 import {
   attemptSessionTitle,
+  displayTitle,
   generateSessionTitle,
+  provisionalTitleFrom,
   type TitleClientFactory,
 } from "./titleGenerator.js";
 import { formatDoctorReport, runAllDoctorChecks } from "../runtime/doctor.js";
@@ -4410,6 +4412,37 @@ export class DaemonServer {
   }
 
   /**
+   * Name a session from its opening prompt the moment work starts.
+   *
+   * The model-written title only exists once the first exchange *ends*, so
+   * every chat spent its entire first turn — minutes, for a dispatched
+   * background chat — rendering as an anonymous `—` in Agent View, and a
+   * session whose three title attempts all failed wore that dash forever.
+   *
+   * The placeholder is written with `title_derived`, the flag
+   * `maybeGenerateTitle` already reads as "replaceable", so the generated
+   * title still wins the moment it lands and an explicit `/title` wins over
+   * both. Sourced from the session's FIRST user message rather than this
+   * turn's text, so an old untitled chat is backfilled with the prompt that
+   * actually opened it.
+   */
+  private seedProvisionalTitle(sessionKey: string, text: string): void {
+    if (!this.resolvedAutoTitle()) return;
+    const session = this.runtime.sessionStatus(sessionKey);
+    if (!session) return;
+    // Any title at all wins — explicit ones must never be clobbered, and a
+    // provisional one is already the opening prompt.
+    if (stringValue(session.metadata.title)) return;
+    const title = provisionalTitleFrom(
+      firstExchangeText(session, "user") || text,
+    );
+    if (!title) return;
+    session.metadata.title = title;
+    session.metadata.title_derived = true;
+    this.broadcast("session_title", { session_id: session.id, title });
+  }
+
+  /**
    * Generate a model-written title after a session's first exchange.
    *
    * Fires on every turn-end edge but spends a provider call exactly once per
@@ -6137,6 +6170,8 @@ export class DaemonServer {
       this.turnOwners.set(sessionKey, owner);
     }
     const interactionIds = new Set<string>();
+    // Named before the first token streams, not after the turn ends.
+    this.seedProvisionalTitle(sessionKey, options.displayText ?? text);
     // Before compaction, so the capture reflects the tree the user is looking
     // at rather than one an auto-compaction turn may already have edited.
     this.captureTurnSnapshot(sessionKey);
@@ -6680,9 +6715,13 @@ function sessionPayload(
   const contextTokens = sessionContextTokens(session, model);
   const calls = exactSessionApiCalls(session);
   const hierarchy = sessionHierarchyPayload(session.metadata);
-  const title = session.metadata.title_derived === true
-    ? undefined
-    : optionalString(session.metadata.title);
+  // Derived titles ride the wire too. They used to be blanked here, which is
+  // why a chat dispatched from Agent View rendered as `—` for the whole time
+  // it worked: the model-written title only exists after the first exchange
+  // ENDS. `title_derived` still marks the value as replaceable — it just no
+  // longer means "invisible".
+  const title = displayTitle(optionalString(session.metadata.title) ?? "") ||
+    undefined;
   const subagentSnapshots = subagentSnapshotPanelPayloads(session.metadata);
   // The transcript echo must fit a socket frame even when turns carried
   // multi-megabyte image attachments, so inline data URLs are bounded twice:

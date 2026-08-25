@@ -23,7 +23,7 @@ import { capTranscriptHistory } from '../lib/messages.js'
 import { asRpcResult } from '../lib/rpc.js'
 import { releaseTerminalCaches } from '../lib/terminalRuntime.opentui.js'
 import type { ScrollBoxHandle } from '../lib/terminalTypes.js'
-import type { Msg, PanelSection, SessionInfo, Usage } from '../types.js'
+import type { Msg, PanelSection, SessionInfo, SubagentProgress, Usage } from '../types.js'
 
 import type { ComposerActions, GatewayRpc, StateSetter } from './interfaces.js'
 import { patchOverlayState } from './overlayStore.js'
@@ -82,23 +82,52 @@ export const hydrateLiveSessionInflight = (inflight?: null | SessionInflightTurn
   turnController.hydrateStreamingText(assistant)
 }
 
+/** Children the daemon's manifest still reports as unfinished. */
+const NON_TERMINAL_SNAPSHOT_STATUSES = new Set<SubagentProgress['status']>(['queued', 'running'])
+
 /**
- * Rehydrate the session's persisted subagent manifest as a folded trail card
- * and a spawn-history snapshot, so a reattached transcript keeps the spawned
- * agents it rendered live. Returns the card to append, or null.
+ * Rehydrate the session's persisted subagent manifest on reattach.
+ *
+ * Split by state, because the two halves belong in different places:
+ *
+ *  - finished children are history — a folded trail card in the transcript
+ *    plus a spawn-history snapshot, which is what the whole manifest used to
+ *    become;
+ *  - children still working are LIVE, and are restored into the turn state so
+ *    the F6 rail shows its WORKING count again and every subsequent
+ *    `subagent.*` event (all update-only) has a row to land on. Archiving them
+ *    is what made a fan-out you walked away from come back frozen.
+ *
+ * The live half only applies to a session that is actually mid-turn. An idle
+ * session whose manifest still says "running" is describing children orphaned
+ * by a daemon restart, and re-animating those would show work that will never
+ * report again as permanently in flight.
+ *
+ * Returns the card to append, or null.
  */
 const subagentTrailFromSnapshots = (
   snapshots: SubagentSnapshotPayload[] | undefined,
-  sessionId: string
+  sessionId: string,
+  running: boolean
 ): Msg | null => {
   if (!snapshots?.length) {
     return null
   }
 
   const subagents = snapshots.map((row, index) => subagentProgressFromSnapshot(row, index))
-  pushSnapshot(subagents, { sessionId, startedAt: null })
+  const live = running ? subagents.filter(item => NON_TERMINAL_SNAPSHOT_STATUSES.has(item.status)) : []
+  const liveIds = new Set(live.map(item => item.id))
+  const archived = liveIds.size ? subagents.filter(item => !liveIds.has(item.id)) : subagents
 
-  return { kind: 'trail', role: 'system', subagents, text: '' }
+  turnController.hydrateSubagents(live)
+
+  if (!archived.length) {
+    return null
+  }
+
+  pushSnapshot(archived, { sessionId, startedAt: null })
+
+  return { kind: 'trail', role: 'system', subagents: archived, text: '' }
 }
 
 /** Keep the live elapsed clock continuous across a mid-turn reattach. */
@@ -361,7 +390,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
           resetSession()
           setSessionStartedAt(r.started_at ? r.started_at * 1000 : Date.now())
           seedTurnClock(r.inflight, running, setTurnStartedAt)
-          const subagentTrail = subagentTrailFromSnapshots(r.subagent_snapshots, r.session_id)
+          const subagentTrail = subagentTrailFromSnapshots(r.subagent_snapshots, r.session_id, running)
           const transcript = [
             ...toTranscriptMessages(r.messages),
             ...(subagentTrail ? [subagentTrail] : []),
@@ -426,7 +455,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
             setSessionStartedAt(r.started_at ? r.started_at * 1000 : Date.now())
             seedTurnClock(r.inflight, running, setTurnStartedAt)
 
-            const subagentTrail = subagentTrailFromSnapshots(r.subagent_snapshots, r.session_id)
+            const subagentTrail = subagentTrailFromSnapshots(r.subagent_snapshots, r.session_id, running)
             const resumed = [
               ...toTranscriptMessages(r.messages),
               ...(subagentTrail ? [subagentTrail] : []),

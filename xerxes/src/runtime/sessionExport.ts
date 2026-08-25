@@ -5,6 +5,7 @@ import { readdir, readFile, realpath, stat } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
 
 import { xerxesHome } from '../daemon/paths.js'
+import { displayTitle } from '../daemon/titleGenerator.js'
 
 export const EXPORT_SCHEMA = 'xerxes.session.export.v1'
 export const DEFAULT_EXPORT_FORMAT = 'json'
@@ -314,7 +315,7 @@ function recordProjectDirectoryText(record: SessionRecordJson): string {
 
 function recordTitle(record: SessionRecordJson): string {
   const metadata = recordValue(record.metadata)
-  return metadata.title_derived === true ? '' : firstText(metadata.title)
+  return displayTitle(firstText(metadata.title))
 }
 
 function recordTurnCount(record: SessionRecordJson): number {

@@ -70,6 +70,12 @@ const snapshotStatus = (row: SubagentSnapshotPayload): SubagentStatus => {
   if (status === 'cancelled' || status === 'canceled') {
     return 'interrupted'
   }
+  // A spawned handle sits at `idle` until its first input starts a turn.
+  // Falling through to the unknown-spelling rule below called that
+  // `interrupted` — a child that had not started yet reported as dead.
+  if (status === 'idle' && row.closed !== true) {
+    return 'queued'
+  }
   if (status === 'done' || status === 'success') {
     return 'completed'
   }

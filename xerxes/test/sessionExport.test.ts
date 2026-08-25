@@ -28,7 +28,7 @@ interface SessionFixture {
   readonly updatedAt: string
 }
 
-test('untitled session exports never derive a title from the first user message', async () => {
+test('derived session titles are exported, clamped to one bounded line', async () => {
   const root = await mkdtemp(join(tmpdir(), 'xerxes-session-export-title-'))
   const sessions = join(root, 'sessions')
   const project = join(root, 'project')
@@ -37,13 +37,34 @@ test('untitled session exports never derive a title from the first user message'
     await writeSession(sessions, {
       sessionId: 'untitled1',
       project,
-      messages: [{ role: 'user', content: 'Do not use this as the title' }],
-      metadata: { title: 'Do not use this as the title', title_derived: true },
+      messages: [{ role: 'user', content: 'Provisional name' }],
+      metadata: { title: 'Provisional name', title_derived: true },
       updatedAt: '2026-06-27T12:00:00.000Z',
     })
+    // Builds before provisional titles existed stored the whole first message
+    // behind `title_derived`. Those legacy values are multi-line and unbounded,
+    // so they are normalized on read rather than migrated on disk.
+    await writeSession(sessions, {
+      sessionId: 'untitled2',
+      project,
+      messages: [{ role: 'user', content: 'legacy' }],
+      metadata: {
+        title: `${'x'.repeat(200)}\nsecond line`,
+        title_derived: true,
+      },
+      updatedAt: '2026-06-27T13:00:00.000Z',
+    })
 
-    const [saved] = await listSavedSessions({ storeDir: sessions, projectDir: project })
-    expect(savedSessionSummary(saved!).title).toBe('')
+    const saved = await listSavedSessions({ storeDir: sessions, projectDir: project })
+    const titles = new Map(saved.map(row => {
+      const summary = savedSessionSummary(row)
+      return [summary.session_id, summary.title]
+    }))
+    expect(titles.get('untitled1')).toBe('Provisional name')
+    const legacy = titles.get('untitled2') ?? ''
+    expect(legacy.length).toBe(60)
+    expect(legacy.endsWith('…')).toBe(true)
+    expect(legacy).not.toContain('second line')
   } finally {
     await rm(root, { recursive: true, force: true })
   }

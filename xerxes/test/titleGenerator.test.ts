@@ -5,7 +5,9 @@ import { expect, test } from 'bun:test'
 
 import {
   attemptSessionTitle,
+  displayTitle,
   generateSessionTitle,
+  provisionalTitleFrom,
   resetTitleAttempts,
   sanitizeTitle,
   titleModelFor,
@@ -202,4 +204,43 @@ test('generateSessionTitle falls back to the session model when the cheap tier f
 
   expect(title).toBe('Fix socket leak')
   expect(tried).toEqual(['gpt-4o-mini', 'gpt-5.6-sol'])
+})
+
+test('provisionalTitleFrom names a chat from the shape of its opening prompt', () => {
+  expect(provisionalTitleFrom('compare xerxes agents against codex'))
+    .toBe('Compare xerxes agents against codex')
+  // A leading slash command reads as a name once the slash is gone.
+  expect(provisionalTitleFrom('/skill bug-bounty-hunter Iterations = 10'))
+    .toBe('Skill bug-bounty-hunter Iterations = 10')
+  // The first line carries the intent; a pasted body must not become the name.
+  expect(provisionalTitleFrom('map the repo\n\n```ts\nconst a = 1\n```')).toBe('Map the repo')
+  // A fenced-first paste falls through to the first line that is not fence.
+  expect(provisionalTitleFrom('```\nconst a = 1\n```')).toBe('Const a = 1')
+  expect(provisionalTitleFrom('   ')).toBeUndefined()
+})
+
+test('provisionalTitleFrom truncates on a word boundary and refuses runtime scaffolding', () => {
+  const source = 'please rewrite the entire streaming loop so that provider retries are bounded'
+  const long = provisionalTitleFrom(source)
+  expect(long).toBeDefined()
+  expect(long!.length).toBeLessThanOrEqual(49)
+  expect(long!.endsWith('…')).toBe(true)
+  // Cut on a word boundary: a mid-word chop reads as corruption, not truncation.
+  const stem = long!.slice(0, -1)
+  expect(source.toLowerCase().startsWith(stem.toLowerCase())).toBe(true)
+  expect(source[stem.length]).toBe(' ')
+
+  // Naming a chat after its own scaffolding is worse than leaving it blank.
+  expect(provisionalTitleFrom('[Skill deepscan activated]')).toBeUndefined()
+  expect(provisionalTitleFrom('[mid-turn steer from user] keep going')).toBeUndefined()
+  expect(provisionalTitleFrom('Please compact this conversation: ...')).toBeUndefined()
+})
+
+test('displayTitle clamps legacy unbounded derived titles to one line', () => {
+  expect(displayTitle('Greeting exchange')).toBe('Greeting exchange')
+  expect(displayTitle('first line\nsecond line')).toBe('first line')
+  const clamped = displayTitle('y'.repeat(200))
+  expect(clamped.length).toBe(TITLE_MAX_CHARS)
+  expect(clamped.endsWith('…')).toBe(true)
+  expect(displayTitle('   ')).toBe('')
 })
