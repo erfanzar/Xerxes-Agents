@@ -38,6 +38,7 @@ import {
   updateGoalLedger,
 } from '../runtime/goalState.js'
 import {
+  mergeContextDeltas,
   renderContextDeltas,
   takeContextDeltas,
 } from '../runtime/contextDeltas.js'
@@ -45,7 +46,7 @@ import { beginEditDiagnosticsTurn, reportEditDiagnostics } from '../runtime/edit
 import { withActiveSession } from '../runtime/sessionContext.js'
 import { resolveTurnThinking } from '../runtime/thinkingLevels.js'
 import { captureUserWorkflowMemory } from '../runtime/workflowMemory.js'
-import { createAgentState, type AgentState, type StreamEvent } from '../streaming/events.js'
+import { createAgentState, type AgentState, type StreamEvent, type ToolResult } from '../streaming/events.js'
 import { runTurn, type ContextReducer } from '../streaming/loop.js'
 import type { SystemPromptSegment } from '../streaming/promptCaching.js'
 import { fileStateTracker } from '../tools/fileState.js'
@@ -901,6 +902,43 @@ function systemPromptAddendum(session: DaemonSession): string {
   return session.systemPromptAddendum?.trim() ?? ''
 }
 
+/**
+ * Structured blocks a client can render instead of re-parsing result prose.
+ *
+ * This shipped as a hard-coded `[]`, so the TUI's entire todo pipeline —
+ * `recordTodos`, `turnState.todos`, the progress rows — was fed by a channel
+ * that never carried anything, and a todo list the model maintained was
+ * invisible. The wire shape and both consumers already existed; only the
+ * producer was missing.
+ */
+function displayBlocksFor(result: ToolResult): readonly Record<string, unknown>[] {
+  if (result.name !== 'TodoWriteTool' || !result.permitted) return []
+  const items = parseTodoList(result.result)
+  return items.length ? [{ type: 'todo', items }] : []
+}
+
+/**
+ * Read back the canonical todo rendering TodoWriteTool returns.
+ *
+ * Parsing our own deterministic output rather than the model's, and locked to
+ * the writer by a round-trip test — the alternative is threading a structured
+ * payload through ToolResult, which every other tool would then carry for one
+ * tool's benefit.
+ */
+function parseTodoList(text: string): readonly Record<string, unknown>[] {
+  const items: Record<string, unknown>[] = []
+  for (const line of text.split('\n')) {
+    const match = /^\s*\d+\.\s+\[([ x~])\]\s+(.*\S)\s*$/.exec(line)
+    if (!match) continue
+    const [, mark, content] = match
+    items.push({
+      content,
+      status: mark === 'x' ? 'completed' : mark === '~' ? 'in_progress' : 'pending',
+    })
+  }
+  return items
+}
+
 /** Apply an agent's declared tool surface without exposing unregistered tools. */
 function toolsForAgent(
   available: readonly ToolDefinition[] | undefined,
@@ -1039,7 +1077,9 @@ function synchronizeSessionState(session: DaemonSession, state: AgentState): voi
     const { displayText, ...providerMessage } = message
     return { ...providerMessage, text: displayText }
   })
+  const mergedDeltas = mergeContextDeltas(state.metadata, session.metadata)
   session.metadata = { ...state.metadata }
+  if (mergedDeltas.length) session.metadata.context_deltas = mergedDeltas
   session.thinkingContent = [...state.thinkingContent]
   session.toolExecutions = [...state.toolExecutions]
   session.totalApiCalls = state.totalApiCalls
@@ -1163,7 +1203,7 @@ function daemonEventFromStream(
           permitted: event.result.permitted,
           tool_call_id: event.result.toolCallId,
           duration_ms: event.result.durationMs,
-          display_blocks: [],
+          display_blocks: displayBlocksFor(event.result),
         },
       }
     case 'usage_update':

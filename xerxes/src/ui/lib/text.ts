@@ -207,6 +207,50 @@ export const formatToolCall = (name: string, context = '') => {
   return preview ? `${label}("${preview}")` : label
 }
 
+/** Detail budget for a successful row, where the note is a nicety. */
+const TOOL_DETAIL_MAX = 72
+/**
+ * Detail budget for a failure, where the note is the entire point.
+ *
+ * A rejection reached the row as "Tool execution failed: Function ReadFile:
+ * Validation error for file_path: must refer to an existing regular file" and
+ * was clamped at 72 — which landed inside the word "file_path", so the reason
+ * never appeared at all. Stripping the boilerplate below reclaims most of it;
+ * the wider budget covers what is left.
+ */
+const TOOL_ERROR_DETAIL_MAX = 160
+
+/**
+ * Drop harness framing the row already conveys.
+ *
+ * The row shows the tool's name and a ✗ next to it, so "Tool execution failed:"
+ * and "Function <name>:" are 40-plus characters restating the two things the
+ * reader can already see, in front of the one thing they cannot.
+ */
+const stripToolErrorFraming = (note: string, name: string): string => {
+  let text = note.trim()
+  const prefixes = [
+    'Tool execution failed:',
+    `Function ${name}:`,
+    // The registry wraps by registered name; the row may show a prettier label.
+    /^Function [A-Za-z_][A-Za-z_0-9]*:/,
+  ]
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const prefix of prefixes) {
+      const match = typeof prefix === 'string'
+        ? (text.startsWith(prefix) ? prefix.length : 0)
+        : (text.match(prefix)?.[0].length ?? 0)
+      if (match > 0) {
+        text = text.slice(match).trim()
+        changed = true
+      }
+    }
+  }
+  return text
+}
+
 export const buildToolTrailLine = (
   name: string,
   context: string,
@@ -214,7 +258,10 @@ export const buildToolTrailLine = (
   note?: string,
   duration?: number
 ) => {
-  const detail = compactPreview(note ?? '', 72)
+  const raw = note ?? ''
+  const detail = error
+    ? compactPreview(stripToolErrorFraming(raw, name), TOOL_ERROR_DETAIL_MAX)
+    : compactPreview(raw, TOOL_DETAIL_MAX)
   const took = duration !== undefined ? ` (${duration.toFixed(1)}s)` : ''
 
   return `${formatToolCall(name, context)}${took}${detail ? ` :: ${detail}` : ''} ${error ? '✗' : '✓'}`

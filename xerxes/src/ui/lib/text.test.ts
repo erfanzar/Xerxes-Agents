@@ -141,3 +141,19 @@ describe('toolTrailParts', () => {
     expect(parts.duration).toBe('1.5s')
   })
 })
+
+it('keeps the reason visible on a failed tool row', () => {
+  const line = buildToolTrailLine(
+    'ReadFile',
+    'xerxes/src/daemon/server.ts',
+    true,
+    'Tool execution failed: Function ReadFile: Validation error for file_path: must refer to an existing regular file',
+    0.1,
+  )
+  // The framing the row already shows is dropped, so the budget is spent on
+  // the reason instead of being consumed before it starts.
+  expect(line).toContain('must refer to an existing regular file')
+  expect(line).not.toContain('Tool execution failed')
+  expect(line).not.toContain('Function ReadFile:')
+  expect(line.endsWith('✗')).toBe(true)
+})

@@ -1294,3 +1294,34 @@ test('an invalid manifest heartbeat is rejected at construction', () => {
   const manager = new SpawnedAgentManager({ idFactory: () => 'x', runner: async () => ({ content: '' }) })
   expect(() => new ClaudeAgentTools({ manager, manifestHeartbeatMs: 0 })).toThrow('positive number')
 })
+
+test('the todo list a client renders round-trips from what TodoWriteTool writes', async () => {
+  const registry = new ToolRegistry()
+  const state = new WorkflowState()
+  registerClaudeWorkflowTools(registry, { state })
+
+  const rendered = await registry.execute(toolCall('TodoWriteTool', {
+    todos: [
+      { content: 'Wire the mode change', status: 'completed' },
+      { content: 'Shrink the tool surface', status: 'in_progress' },
+      { content: 'Freeze the naming drift', status: 'pending' },
+    ],
+  }), { metadata: {} })
+
+  // The daemon derives the todo display block by reading this exact rendering
+  // back (turnRunner parseTodoList). Both halves live in different modules, so
+  // this asserts the contract between them rather than either side alone —
+  // the block shipped as a hard-coded [] for long enough that the TUI's whole
+  // todo pipeline was fed nothing.
+  const items = [...rendered.matchAll(/^\s*\d+\.\s+\[([ x~])\]\s+(.*\S)\s*$/gm)].map(match => ({
+    content: match[2],
+    status: match[1] === 'x' ? 'completed' : match[1] === '~' ? 'in_progress' : 'pending',
+  }))
+
+  expect(items).toEqual([
+    { content: 'Wire the mode change', status: 'completed' },
+    { content: 'Shrink the tool surface', status: 'in_progress' },
+    { content: 'Freeze the naming drift', status: 'pending' },
+  ])
+  expect(state.todoItems()).toHaveLength(3)
+})
