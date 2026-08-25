@@ -4,7 +4,17 @@
 import { XerxesError } from '../core/errors.js'
 import type { ToolExecutionContext, ToolExecutor } from '../executors/toolRegistry.js'
 import type { ToolCall } from '../types/toolCalls.js'
+import { LocalSandboxBackend } from './localSandbox.js'
+import type { LocalSandboxHost } from './localSandbox.js'
 import { SubprocessSandboxBackend, SubprocessSandboxConfigurationError } from './subprocessSandbox.js'
+
+export { LocalSandboxBackend, LocalSandboxRunner, LocalSandboxUnavailableError } from './localSandbox.js'
+export type {
+  LocalSandboxEnforcement,
+  LocalSandboxHost,
+  LocalSandboxPolicy,
+  LocalSandboxProbeResult,
+} from './localSandbox.js'
 
 export const SandboxMode = {
   OFF: 'off',
@@ -63,12 +73,15 @@ export interface SandboxExecutionRequest {
 export interface SandboxBackend {
   execute(request: SandboxExecutionRequest): Promise<string>
   getCapabilities?(): Readonly<Record<string, unknown>>
+  getUnavailableError?(toolName: string): Error
   isAvailable?(): Promise<boolean> | boolean
 }
 
 export interface SandboxRouterOptions {
   readonly backend?: SandboxBackend
   readonly config?: SandboxConfig
+  /** Required when `backendType` is `local`; owns platform probing and isolated execution. */
+  readonly localSandboxHost?: LocalSandboxHost
   readonly onWarning?: (decision: ExecutionDecision) => void
 }
 
@@ -96,7 +109,12 @@ export class SandboxRouter {
 
   constructor(options: SandboxRouterOptions = {}) {
     this.config = normalizeConfig(options.config)
-    this.backend = options.backend ?? backendFromConfig(this.config)
+    if (options.backend !== undefined && this.config.backendType !== undefined) {
+      throw new SubprocessSandboxConfigurationError(
+        `backendType ${JSON.stringify(this.config.backendType)} conflicts with explicitly supplied backend`,
+      )
+    }
+    this.backend = options.backend ?? backendFromConfig(this.config, options.localSandboxHost)
     this.onWarning = options.onWarning ?? (() => undefined)
   }
 
@@ -131,7 +149,7 @@ export class SandboxRouter {
       throw new SandboxExecutionUnavailableError(request.toolName)
     }
     if (this.backend.isAvailable && !(await this.backend.isAvailable())) {
-      throw new SandboxExecutionUnavailableError(request.toolName)
+      throw this.backend.getUnavailableError?.(request.toolName) ?? new SandboxExecutionUnavailableError(request.toolName)
     }
     return this.backend.execute(request)
   }
@@ -220,9 +238,28 @@ function normalizeConfig(config: SandboxConfig | undefined): RequiredSandboxConf
   })
 }
 
-function backendFromConfig(config: RequiredSandboxConfig): SandboxBackend | undefined {
+function backendFromConfig(
+  config: RequiredSandboxConfig,
+  localSandboxHost: LocalSandboxHost | undefined,
+): SandboxBackend | undefined {
   if (config.backendType === undefined) {
     return undefined
+  }
+  if (config.backendType === 'local') {
+    if (localSandboxHost === undefined) {
+      throw new SubprocessSandboxConfigurationError(
+        'backendType "local" requires an explicit localSandboxHost; unrestricted subprocess fallback is forbidden',
+      )
+    }
+    return new LocalSandboxBackend(localSandboxHost, {
+      environment: config.backendConfig.envVars,
+      memoryLimitMb: config.sandboxMemoryLimitMb,
+      mountPaths: config.backendConfig.mountPaths,
+      mountReadonly: config.backendConfig.mountReadonly,
+      networkAccess: config.sandboxNetworkAccess,
+      timeoutMs: Math.ceil(config.sandboxTimeout * 1_000),
+      ...(config.workingDirectory === undefined ? {} : { workingDirectory: config.workingDirectory }),
+    })
   }
   if (config.backendType !== 'subprocess') {
     throw new SubprocessSandboxConfigurationError(

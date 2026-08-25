@@ -292,7 +292,7 @@ test('bridge command metadata remains a complete, non-conflicting Telegram-safe 
 })
 
 test('bridge modes reach the native runtime, plan mode wins, and init emits the complete client contract', async () => {
-  const { output, runtime, server } = bridge({ wireMode: true })
+  const { output, runtime, server, sessionStore } = bridge({ wireMode: true })
 
   expect(await server.dispatch({
     method: 'init',
@@ -324,6 +324,10 @@ test('bridge modes reach the native runtime, plan mode wins, and init emits the 
   await submitAndWait(server, 'plan')
   expect(runtime.turnInputs.at(-1)?.config).toMatchObject({ mode: 'plan', plan_mode: true })
 
+  expect(await server.dispatch({ method: 'set_plan_mode', params: { enabled: false } })).toEqual({ accepted: true })
+  await submitAndWait(server, 'leave plan')
+  expect(runtime.turnInputs.at(-1)?.config).toMatchObject({ mode: 'code', plan_mode: false })
+
   expect(await server.dispatch({ method: 'set_mode', params: { mode: 'code' } })).toEqual({ accepted: true })
   await submitAndWait(server, 'implement')
   expect(runtime.turnInputs.at(-1)?.config).toMatchObject({ mode: 'code', plan_mode: false })
@@ -332,6 +336,14 @@ test('bridge modes reach the native runtime, plan mode wins, and init emits the 
   await submitAndWait(server, 'verify')
   expect(runtime.turnInputs.at(-1)?.config).toMatchObject({ mode: 'objective', plan_mode: false })
   expect(server.session).toMatchObject({ interactionMode: 'objective', planMode: false })
+
+  expect(await server.dispatch({ method: 'set_mode', params: { mode: 'researcher' } })).toEqual({ accepted: true })
+  const resumed = bridge({ sessionStore })
+  expect(await resumed.server.dispatch({
+    method: 'init',
+    params: { model: 'gpt-4.1', resume_session_id: server.session.sessionId },
+  })).toEqual({ accepted: true })
+  expect(resumed.server.session).toMatchObject({ interactionMode: 'researcher', planMode: false })
 })
 
 test('bridge model selection persists to the active profile and cancellation also reaches subagents', async () => {
@@ -365,8 +377,10 @@ test('bridge initialization applies a project directory and restores a saved ses
   const sessionStore = new MemorySessionStore()
   sessionStore.records.set('saved-session', {
     cwd: '/persisted-project',
+    interaction_mode: 'researcher',
     messages: [{ role: 'user', content: 'resume me' }],
     model: 'gpt-4.1',
+    plan_mode: false,
     session_id: 'saved-session',
   })
   const { server } = bridge({ sessionStore })
@@ -381,7 +395,12 @@ test('bridge initialization applies a project directory and restores a saved ses
     method: 'init',
     params: { model: 'gpt-4.1', resume_session_id: 'saved-session' },
   })).toEqual({ accepted: true })
-  expect(server.session.cwd).toBe('/persisted-project')
+  expect(server.session).toMatchObject({
+    cwd: '/persisted-project',
+    interactionMode: 'researcher',
+    planMode: false,
+  })
+  expect(server.configuration).toMatchObject({ mode: 'researcher', plan_mode: false })
 })
 
 test('the bridge preserves every documented legacy wire-name pair in both directions', () => {

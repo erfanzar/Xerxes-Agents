@@ -512,6 +512,26 @@ describe('GatewayClient session lifecycle', () => {
     expect(result).toEqual({ info: { reasoning_effort: 'high' }, value: 'high' })
   })
 
+  it('returns the daemon-canonical mode and rejects failed config.set mode requests', async () => {
+    const client = new GatewayClient({ projectDir: process.cwd(), sessionKey: 'test:mode' })
+    const privateClient = client as unknown as {
+      configSet: (params: Record<string, unknown>) => Promise<Record<string, unknown>>
+      rawRequest: (method: string, params?: Record<string, unknown>) => Promise<Record<string, unknown>>
+    }
+
+    privateClient.rawRequest = async (method, params) => {
+      expect(method).toBe('set_mode')
+      expect(params).toEqual({ mode: 'planner' })
+      return { ok: true, mode: 'plan', plan_mode: true }
+    }
+    await expect(privateClient.configSet({ key: 'mode', session_id: 'session-1', value: 'planner' }))
+      .resolves.toEqual({ info: { mode: 'plan', plan_mode: true }, value: 'plan' })
+
+    privateClient.rawRequest = async () => ({ ok: false, error: 'no active session' })
+    await expect(privateClient.configSet({ key: 'mode', session_id: 'session-1', value: 'code' }))
+      .rejects.toThrow('no active session')
+  })
+
   it('uses real native session RPCs instead of fabricating title, compact, save, undo, or recent-session results', async () => {
     const client = new GatewayClient({ projectDir: process.cwd(), sessionKey: 'test:session-rpcs' })
     const calls: Array<{ method: string; params: Record<string, unknown> }> = []

@@ -290,7 +290,11 @@ export class BridgeServer {
     const suppliedBaseUrl = textValue(params.base_url)
     const suppliedApiKey = textValue(params.api_key)
     const profile = !suppliedModel && !suppliedBaseUrl ? await this.options.profileStore.active() : undefined
-    const mode = normalizeInteractionMode(params.mode, booleanValue(params.plan_mode, false))
+    const requestedMode = textValue(params.mode)
+    const hasRequestedPlanMode = typeof params.plan_mode === 'boolean'
+    const mode = requestedMode || hasRequestedPlanMode
+      ? normalizeInteractionMode(requestedMode, booleanValue(params.plan_mode, false))
+      : this.options.session.snapshot.interactionMode
     const projectDirectory = textValue(params.project_dir)
 
     const nextConfig: Record<string, unknown> = {
@@ -556,11 +560,12 @@ export class BridgeServer {
 
   private async setPlanMode(params: Record<string, unknown>): Promise<BridgeDispatchResult> {
     const enabled = booleanValue(params.enabled, booleanValue(params.plan_mode, false))
-    const mode = normalizeInteractionMode(params.mode ?? this.config.mode, enabled)
+    const mode = normalizeInteractionMode(params.mode ?? (enabled ? this.config.mode : 'code'), enabled)
     this.config.mode = mode
     this.config.plan_mode = mode === 'plan'
     await this.options.runtime.configure?.(this.configuration)
     this.synchronizeSession()
+    await this.options.session.save()
     if (this.options.wireMode) this.emitWireStatus()
     return { accepted: true }
   }
@@ -571,6 +576,7 @@ export class BridgeServer {
     this.config.plan_mode = mode === 'plan'
     await this.options.runtime.configure?.(this.configuration)
     this.synchronizeSession()
+    await this.options.session.save()
     if (this.options.wireMode) this.emitWireStatus()
     return { accepted: true }
   }

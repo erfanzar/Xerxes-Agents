@@ -1161,7 +1161,10 @@ export class GatewayClient extends EventEmitter {
       }
     }
     if (key === 'mode') {
-      await this.rawRequest('set_mode', { mode: value })
+      const raw = await this.nativeSuccess('set_mode', { mode: value })
+      const mode = String(raw.mode ?? value)
+      const planMode = raw.plan_mode === true
+      return { info: { mode, plan_mode: planMode }, value: mode }
     }
     return { value }
   }

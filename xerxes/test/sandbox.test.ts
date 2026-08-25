@@ -8,6 +8,8 @@ import { join } from "node:path";
 import { expect, test } from "bun:test";
 
 import {
+  LocalSandboxBackend,
+  LocalSandboxUnavailableError,
   SandboxExecutionUnavailableError,
   SandboxedToolExecutor,
   SandboxMode,
@@ -90,6 +92,113 @@ test("sandbox executor only invokes the host for host decisions and fails closed
   );
   expect(await routed.execute(CALL, { metadata: {} })).toBe("sandbox result");
   expect(calls).toEqual(["sandbox:exec_command"]);
+});
+
+test("local sandbox selects the first available platform runner and reports enforcement", async () => {
+  const executed: string[] = [];
+  const router = new SandboxRouter({
+    config: {
+      mode: SandboxMode.STRICT,
+      sandboxedTools: ["exec_command"],
+      backendType: "local",
+      sandboxNetworkAccess: false,
+      sandboxTimeout: 2,
+      workingDirectory: "/workspace",
+    },
+    localSandboxHost: {
+      platform: "linux",
+      async probe(runner) {
+        if (runner === "bubblewrap") throw new Error("bwrap probe failed");
+        return runner === "landlock"
+          ? {
+              available: true,
+              enforcement: "partial",
+              filesystemIsolation: true,
+              processIsolation: false,
+              networkIsolation: true,
+              limitations: ["kernel ABI limits filesystem coverage"],
+            }
+          : {
+              available: false,
+              enforcement: "none",
+              filesystemIsolation: false,
+              processIsolation: false,
+              networkIsolation: false,
+              limitations: [],
+            };
+      },
+      async execute(runner, _request, policy) {
+        executed.push(`${runner}:${policy.networkAccess}:${policy.timeoutMs}`);
+        return "locally sandboxed";
+      },
+    },
+  });
+
+  expect(router.backend).toBeInstanceOf(LocalSandboxBackend);
+  expect(await router.executeInSandbox({
+    toolName: "exec_command",
+    arguments: { cmd: "pwd" },
+    context: { metadata: {} },
+  })).toBe("locally sandboxed");
+  expect(executed).toEqual(["landlock:false:2000"]);
+  expect(router.backend?.getCapabilities?.()).toMatchObject({
+    backend: "local",
+    runner: "landlock",
+    enforcement: "partial",
+    filesystemIsolation: true,
+    networkIsolation: true,
+    processIsolation: false,
+    failClosed: true,
+  });
+});
+
+test("local sandbox fails closed when no platform runner is available", async () => {
+  const router = new SandboxRouter({
+    config: {
+      mode: SandboxMode.STRICT,
+      sandboxedTools: ["exec_command"],
+      backendType: "local",
+    },
+    localSandboxHost: {
+      platform: "darwin",
+      async probe() {
+        return {
+          available: false,
+          enforcement: "none",
+          filesystemIsolation: false,
+          processIsolation: false,
+          networkIsolation: false,
+          limitations: ["runner unavailable"],
+        };
+      },
+      async execute() {
+        throw new Error("must not execute without an available runner");
+      },
+    },
+  });
+
+  await expect(router.executeInSandbox({
+    toolName: "exec_command",
+    arguments: { cmd: "pwd" },
+    context: { metadata: {} },
+  })).rejects.toBeInstanceOf(LocalSandboxUnavailableError);
+  expect(router.backend?.getCapabilities?.()).toMatchObject({
+    backend: "local",
+    available: false,
+    enforcement: "none",
+    failClosed: true,
+  });
+});
+
+test("local sandbox rejects a conflicting explicit backend instead of weakening isolation", () => {
+  expect(() => new SandboxRouter({
+    config: {
+      mode: SandboxMode.STRICT,
+      sandboxedTools: ["exec_command"],
+      backendType: "local",
+    },
+    backend: new SubprocessSandboxBackend({ allowedCommands: [process.execPath] }),
+  })).toThrow("conflicts with explicitly supplied backend");
 });
 
 test("sandbox tool sets match case-insensitively so config casing typos cannot route to host", () => {
