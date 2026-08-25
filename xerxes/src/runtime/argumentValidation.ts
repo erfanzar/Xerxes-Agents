@@ -29,6 +29,15 @@ export interface ToolArgumentValidationResult {
  * Providers hand arguments over as a JSON string often enough that decoding one
  * here is cheaper than a burnt turn; the decoded object is reported back through
  * `coerced` so the caller never has to parse it a second time.
+ *
+ * Messages deliberately do NOT name the tool: the result carries `toolName`, and
+ * the one production consumer wraps this in a FunctionExecutionError that
+ * already prefixes `Function <name>: `. Repeating it here produced
+ * "Function agent_memory_list: agent_memory_list: ..." — the name twice, and the
+ * actual reason pushed past the point where surfaces truncate it.
+ *
+ * A rejection is the model's only chance to get the call right on the retry, so
+ * a failure that turns on the schema states the schema.
  */
 export function validateToolArguments(
   toolName: string,
@@ -41,12 +50,12 @@ export function validateToolArguments(
     try {
       payload = JSON.parse(argumentsValue) as unknown
     } catch {
-      return invalid(name, `${name}: arguments are not valid JSON: ${argumentsValue.slice(0, 200)}`)
+      return invalid(name, `arguments are not valid JSON: ${argumentsValue.slice(0, 200)}`)
     }
   }
   if (!schema || !Object.keys(schema).length) return valid(name, isRecord(payload) ? payload : undefined)
   if (!isRecord(payload)) {
-    return invalid(name, `${name}: expected arguments to be an object, got ${typeName(payload)}`)
+    return invalid(name, `expected arguments to be an object, got ${typeName(payload)}`)
   }
 
   const required = stringArray(schema.required)
@@ -58,7 +67,7 @@ export function validateToolArguments(
       toolName: name,
       coerced: undefined,
       missing,
-      error: `${name}: missing required parameter(s): ${missing.join(', ')}`,
+      error: `missing required parameter(s): ${missing.join(', ')}. ${expectedParameters(properties, required)}`,
     }
   }
 
@@ -67,7 +76,7 @@ export function validateToolArguments(
     const property = properties[key]
     if (!isRecord(property)) {
       if (schema.additionalProperties === false) {
-        return invalid(name, `${name}: unknown parameter '${key}' (schema has additionalProperties=false)`)
+        return invalid(name, `unknown parameter '${key}'. ${acceptedParameters(properties)}`)
       }
       continue
     }
@@ -78,14 +87,57 @@ export function validateToolArguments(
       repaired[key] = value
     }
     if (expectedType && !matchesType(value, expectedType)) {
-      return invalid(name, `${name}: parameter '${key}' expected ${expectedType}, got ${typeName(value)}`)
+      return invalid(name, `parameter '${key}' expected ${expectedType}, got ${typeName(value)}`)
     }
     const values = Array.isArray(property.enum) ? property.enum : undefined
     if (values && !values.some(candidate => jsonEqual(candidate, value))) {
-      return invalid(name, `${name}: parameter '${key}' must be ${formatEnumRequirement(values)}, got ${formatValue(value)}`)
+      return invalid(name, `parameter '${key}' must be ${formatEnumRequirement(values)}, got ${formatValue(value)}`)
     }
+    const elementError = expectedType === 'array' && Array.isArray(value)
+      ? arrayElementError(key, value, property.items)
+      : undefined
+    if (elementError) return invalid(name, elementError)
   }
   return valid(name, repaired ?? payload)
+}
+
+/**
+ * Check the declared element shape of an array parameter.
+ *
+ * Only the top level used to be checked, so a SpawnAgents batch missing a
+ * title per element passed the gate cleanly and failed much deeper, where the
+ * error no longer names the element that was wrong. Batch tools are exactly
+ * where a model is most likely to slip, and where a vague failure costs the
+ * most, so the element shape is worth one pass.
+ *
+ * Deliberately shallow — element type, element enum, and the required keys of
+ * an object element. This stays a pre-execution boundary, not a JSON Schema
+ * engine, and it never repairs: a rejection here is information for the model,
+ * and silently rewriting a nested value would be a worse failure than the one
+ * it prevents.
+ */
+function arrayElementError(key: string, values: readonly unknown[], items: unknown): string | undefined {
+  if (!isRecord(items)) return undefined
+  const expected = typeof items.type === 'string' ? items.type : undefined
+  const allowed = Array.isArray(items.enum) ? items.enum : undefined
+  const itemRequired = stringArray(items.required)
+  const itemProperties = isRecord(items.properties) ? items.properties : {}
+  for (const [index, element] of values.entries()) {
+    const at = `parameter '${key}[${index}]'`
+    if (expected && !matchesType(element, expected)) {
+      return `${at} expected ${expected}, got ${typeName(element)}`
+    }
+    if (allowed && !allowed.some(candidate => jsonEqual(candidate, element))) {
+      return `${at} must be ${formatEnumRequirement(allowed)}, got ${formatValue(element)}`
+    }
+    if (!itemRequired.length || !isRecord(element)) continue
+    const missing = itemRequired.filter(field => !(field in element))
+    if (missing.length) {
+      return `${at} is missing required field(s): ${missing.join(', ')}. `
+        + `${expectedParameters(itemProperties, itemRequired)}`
+    }
+  }
+  return undefined
 }
 
 const INTEGER_LITERAL = /^-?\d+$/
@@ -124,6 +176,35 @@ export function coerceDeclared(value: unknown, expectedType: string): unknown {
 
 function valid(toolName: string, coerced: Record<string, unknown> | undefined): ToolArgumentValidationResult {
   return { ok: true, toolName, coerced: coerced as JsonObject | undefined, error: '', missing: [] }
+}
+
+/** Bound how much schema a rejection may quote; a wide tool must not flood the turn. */
+const MAX_QUOTED_PARAMETERS = 12
+
+/** "Expected parameters: path (string, required), limit (integer)" */
+function expectedParameters(
+  properties: Record<string, unknown>,
+  required: readonly string[],
+): string {
+  const names = Object.keys(properties)
+  if (!names.length) return 'This tool declares no parameters.'
+  const requiredSet = new Set(required)
+  const shown = names.slice(0, MAX_QUOTED_PARAMETERS).map(key => {
+    const property = properties[key]
+    const type = isRecord(property) && typeof property.type === 'string' ? property.type : 'any'
+    return `${key} (${type}${requiredSet.has(key) ? ', required' : ''})`
+  })
+  const rest = names.length - shown.length
+  return `Expected parameters: ${shown.join(', ')}${rest > 0 ? `, and ${rest} more` : ''}.`
+}
+
+/** "Accepted parameters: path, limit, offset" */
+function acceptedParameters(properties: Record<string, unknown>): string {
+  const names = Object.keys(properties)
+  if (!names.length) return 'This tool accepts no parameters.'
+  const shown = names.slice(0, MAX_QUOTED_PARAMETERS)
+  const rest = names.length - shown.length
+  return `Accepted parameters: ${shown.join(', ')}${rest > 0 ? `, and ${rest} more` : ''}.`
 }
 
 function invalid(toolName: string, error: string): ToolArgumentValidationResult {

@@ -31,14 +31,21 @@ const coercionSchema = {
 } as const
 
 test('tool argument validation reports required, unknown, type, and enum mistakes before execution', () => {
-  expect(validateToolArguments('ReadFile', {}, schema)).toMatchObject({
-    ok: false,
-    missing: ['path', 'mode'],
-    error: 'ReadFile: missing required parameter(s): path, mode',
-  })
+  // The message does not repeat the tool name — the result carries `toolName`
+  // and the caller's FunctionExecutionError already prefixes it. It does state
+  // the schema, because a rejection is the model's one shot at a correct retry.
+  const missingRequired = validateToolArguments('ReadFile', {}, schema)
+  expect(missingRequired).toMatchObject({ ok: false, toolName: 'ReadFile', missing: ['path', 'mode'] })
+  expect(missingRequired.error).toBe(
+    'missing required parameter(s): path, mode. '
+    + 'Expected parameters: path (string, required), mode (string, required), retries (integer).',
+  )
+  expect(missingRequired.error).not.toContain('ReadFile')
   expect(validateToolArguments('ReadFile', { path: 1, mode: 'read' }, schema).error).toContain("parameter 'path' expected string")
   expect(validateToolArguments('ReadFile', { path: 'a', mode: 'delete' }, schema).error).toContain("parameter 'mode' must be read or write")
-  expect(validateToolArguments('ReadFile', { path: 'a', mode: 'read', extra: true }, schema).error).toContain("unknown parameter 'extra'")
+  const unknownParameter = validateToolArguments('ReadFile', { path: 'a', mode: 'read', extra: true }, schema).error
+  expect(unknownParameter).toContain("unknown parameter 'extra'")
+  expect(unknownParameter).toContain('Accepted parameters: path, mode, retries')
   expect(validateToolArguments('ReadFile', { path: 'a', mode: 'read', retries: 2 }, schema)).toMatchObject({ ok: true, error: '' })
 })
 
@@ -170,4 +177,47 @@ test('tool registry validates its selected per-agent definition before calling a
     function: { name: 'read', arguments: { path: 'a' } },
   }, { metadata: {} })).rejects.toBeInstanceOf(FunctionExecutionError)
   expect(calls).toBe(0)
+})
+
+test('array parameters are checked against their declared element shape', () => {
+  const batch = {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      agents: {
+        type: 'array',
+        items: {
+          type: 'object',
+          required: ['title', 'prompt'],
+          properties: { title: { type: 'string' }, prompt: { type: 'string' }, model: { type: 'string' } },
+        },
+      },
+      tags: { type: 'array', items: { type: 'string' } },
+    },
+    required: ['agents'],
+  } as const
+
+  expect(validateToolArguments('SpawnAgents', { agents: [{ title: 't', prompt: 'p' }] }, batch))
+    .toMatchObject({ ok: true })
+
+  // The element that is wrong is named, so a batch failure is actionable
+  // instead of surfacing much deeper with no index attached.
+  const missingField = validateToolArguments(
+    'SpawnAgents',
+    { agents: [{ title: 'ok', prompt: 'p' }, { prompt: 'no title' }] },
+    batch,
+  )
+  expect(missingField.ok).toBe(false)
+  expect(missingField.error).toContain("parameter 'agents[1]' is missing required field(s): title")
+  expect(missingField.error).toContain('title (string, required)')
+
+  const wrongElementType = validateToolArguments('SpawnAgents', { agents: [{ title: 't', prompt: 'p' }], tags: ['a', 7] }, batch)
+  expect(wrongElementType.ok).toBe(false)
+  expect(wrongElementType.error).toContain("parameter 'tags[1]' expected string, got number")
+
+  // An array with no declared items keeps passing — this is a boundary, not a
+  // schema engine, and it must not invent constraints the tool never declared.
+  expect(validateToolArguments('Loose', { any: [1, 'two', null] }, {
+    type: 'object', properties: { any: { type: 'array' } },
+  }).ok).toBe(true)
 })

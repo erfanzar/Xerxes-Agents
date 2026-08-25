@@ -226,7 +226,16 @@ export class AgentTurnRunner implements TurnRunner {
         session.interactionMode,
       )
     }
-    const selectedTools = toolsForAgent(this.options.tools, agent)
+    // Deferred loading is resolved per turn, against this session's transcript.
+    // `options.tools` is a snapshot taken once at construction, so it can only
+    // ever be the full surface; the registry is the only thing that knows which
+    // deferred schemas the transcript has already revealed. Falls back to the
+    // snapshot whenever deferral is off, which keeps every embedding that
+    // passes no registry on exactly its old behaviour.
+    const availableTools = this.options.toolRegistry?.deferredToolLoading
+      ? this.options.toolRegistry.definitionsForTranscript(state.messages)
+      : this.options.tools
+    const selectedTools = toolsForAgent(availableTools, agent)
     const modeTools = toolsForAgent(selectedTools, modeAgent)
     const resumedSubagent = session.metadata.session_kind === 'subagent'
     if (resumedSubagent) state.metadata.status = 'running'

@@ -10,6 +10,7 @@ import {
 } from '../src/executors/toolRegistry.js'
 import { SkillRegistry } from '../src/extensions/skills.js'
 import { UserPromptManager } from '../src/operators/userPrompt.js'
+import { registerInteractionModeTool } from '../src/runtime/interactionModeTool.js'
 import {
   CLAUDE_WORKFLOW_TOOL_CAPABILITIES,
   CLAUDE_WORKFLOW_TOOL_DEFINITIONS,
@@ -113,6 +114,35 @@ test('every tool registered by the Claude workflow module declares an explicit c
   expect(registry.capabilities('TodoWriteTool').defer).toBe(false)
   expect(registry.capabilities('ToolSearchTool')).toMatchObject({ defer: false, readOnly: true })
   expect(registry.capabilities('ExitWorktreeTool').destructive).toBe(true)
+})
+
+test('Claude workflow registration preserves a host-owned interaction-mode handler', async () => {
+  const registry = new ToolRegistry()
+  let mode = 'plan'
+  registerInteractionModeTool(registry, {
+    setMode(request) {
+      mode = request.mode
+      return { mode: request.mode, planMode: request.mode === 'plan' }
+    },
+  })
+
+  const registered = registerClaudeWorkflowTools(registry)
+  const result = JSON.parse(await registry.execute({
+    id: 'mode-code',
+    type: 'function',
+    function: { name: 'SetInteractionModeTool', arguments: { mode: 'code' } },
+  }, { metadata: {}, sessionId: 'main-session' })) as { message: string; mode: string }
+
+  expect(registered.map(tool => tool.function.name)).not.toContain('SetInteractionModeTool')
+  expect(mode).toBe('code')
+  // The host-owned handler answered, not the workflow adapter's inert copy.
+  // Its message states the applied mode, since the host commits immediately.
+  expect(result.message).toContain('Interaction mode is now code')
+
+  // Same guard covers the plan-mode pair, which used to reach the workflow
+  // adapter and flip a WorkflowState nothing reads.
+  expect(registered.map(tool => tool.function.name)).not.toContain('ExitPlanModeTool')
+  expect(registered.map(tool => tool.function.name)).not.toContain('EnterPlanModeTool')
 })
 
 test('port-backed workflow tools are advertised exactly when their host port is attached', () => {

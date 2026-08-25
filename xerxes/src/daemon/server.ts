@@ -1911,10 +1911,15 @@ export class DaemonServer {
         booleanValue(params.plan_mode, false),
       );
       const mode = optionalString(params.mode) ?? (enabled ? "plan" : "code");
-      return this.setMode(connection, mode, enabled);
+      return this.setMode(connection, mode, enabled, sessionKey(connection, params));
     }
     if (method === "set_mode") {
-      return this.setMode(connection, optionalString(params.mode) ?? "code");
+      return this.setMode(
+        connection,
+        optionalString(params.mode) ?? "code",
+        undefined,
+        sessionKey(connection, params),
+      );
     }
     if (method === "permission_response") {
       return this.permissionResponse(connection, params);
@@ -2420,6 +2425,30 @@ export class DaemonServer {
         ),
       ),
     );
+  }
+
+  /**
+   * Announce a mode change that the MODEL made, not the user.
+   *
+   * The human path (`set_mode` / `set_plan_mode`) already ends in emitStatus,
+   * which is how the TUI learns its footer changed. A transition driven by
+   * SetInteractionModeTool went through the runtime instead and told nobody,
+   * so the session really did leave plan mode while every client kept
+   * rendering — and gating on — the old one.
+   *
+   * Scoped to the connections actually attached to that session rather than
+   * broadcast: a background session changing mode must not repaint the mode
+   * of whatever session the user happens to be looking at. A client that
+   * attaches later reads the current mode from the session payload anyway.
+   */
+  notifySessionModeChanged(sessionId: string): void {
+    const target = sessionId.trim();
+    if (!target) return;
+    for (const connection of this.connections) {
+      const session = this.runtime.sessionStatus(connection.activeSessionKey);
+      if (!session || session.id !== target) continue;
+      this.emitStatus(connection, session);
+    }
   }
 
   private async fetchModels(params: JsonRpcPayload): Promise<JsonRpcPayload> {
@@ -5797,9 +5826,13 @@ export class DaemonServer {
     connection: DaemonTransportConnection,
     mode: string,
     planMode?: boolean,
+    // Callers pass the session the request named. The TUI has always sent one;
+    // this used to drop it and act on whatever session the connection happened
+    // to be attached to, so a mode change aimed at one tab could land on another.
+    targetSessionKey = connection.activeSessionKey,
   ): Promise<JsonRpcPayload> {
     const session = await this.runtime.setSessionMode(
-      connection.activeSessionKey,
+      targetSessionKey,
       mode,
       planMode,
     );

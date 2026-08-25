@@ -454,13 +454,22 @@ async function runDaemon(
     import.meta.dir,
     fileURLToPath(import.meta.url),
   );
+  // Forward reference: the runtime is built before the server that announces
+  // its events, and the server needs the runtime. Same shape as `finishDaemon`
+  // below.
+  let announceModeChange: ((sessionId: string) => void) | undefined;
   const runtime = daemonRuntime(
     config,
     projectDirectory,
     profileStore,
     interactions,
     browserManager,
-    { ...(buildId ? { buildId } : {}), skillRegistry, terminals },
+    {
+      ...(buildId ? { buildId } : {}),
+      onSessionModeChange: (sessionId) => announceModeChange?.(sessionId),
+      skillRegistry,
+      terminals,
+    },
   );
   const channelManager = createDaemonChannelManager(config, runtime, {
     discordApplicationRest: new FetchDiscordApplicationRestPort(),
@@ -497,6 +506,7 @@ async function runDaemon(
       : {}),
     ...(pidPath ? { pidPath } : {}),
   });
+  announceModeChange = (sessionId) => daemon.notifySessionModeChanged(sessionId);
   try {
     await daemon.start();
     await channelManager.startConfigured();
@@ -778,6 +788,24 @@ async function runTui(resumeSessionId = ""): Promise<void> {
   }
 }
 
+/**
+ * Whether the model is shown the deferred tool surface rather than all of it.
+ *
+ * On unless explicitly disabled: the full surface is the regression, not the
+ * safe default. Accepts a settings key first so it can be flipped per host,
+ * then an environment override for a one-off run.
+ */
+function deferredToolLoadingEnabled(
+  settings: Readonly<Record<string, unknown>>,
+): boolean {
+  const configured = settings.deferred_tool_loading ?? settings.deferredToolLoading;
+  if (typeof configured === "boolean") return configured;
+  const override = (process.env.XERXES_DEFERRED_TOOL_LOADING ?? "").trim().toLowerCase();
+  if (override === "0" || override === "false" || override === "off") return false;
+  if (override === "1" || override === "true" || override === "on") return true;
+  return true;
+}
+
 function daemonRuntime(
   config: DaemonConfig,
   projectDirectory: string | undefined,
@@ -786,6 +814,8 @@ function daemonRuntime(
   browserManager?: BrowserManager,
   host: {
     readonly buildId?: string;
+    /** Announce a model-driven interaction-mode change to attached clients. */
+    readonly onSessionModeChange?: (sessionId: string, mode: string) => void;
     readonly skillRegistry?: SkillRegistry;
     readonly terminals?: TerminalRegistry;
   } = {},
@@ -873,7 +903,21 @@ function daemonRuntime(
       activeToolCount = 0;
       return undefined;
     }
-    const tools = new ToolRegistry();
+    // Deferred schema loading. The model gets the always-loaded core plus
+    // whatever ToolSearchTool has already revealed in this transcript, instead
+    // of the entire surface on every request — measured at 76 schemas, which is
+    // well past where models start confusing neighbouring tools and borrowing
+    // one tool's argument shape for another.
+    //
+    // Escape hatch rather than a hard-coded truth: discovery becomes
+    // load-bearing when this is on, so a host that hits a gap can put the full
+    // surface back without a rebuild.
+    const tools = new ToolRegistry({
+      deferredToolLoading: deferredToolLoadingEnabled({
+        ...config.runtime,
+        ...settings,
+      }),
+    });
     const computerUseTool = createMacOSComputerUseToolOptions({
       ...config.runtime,
       ...settings,
@@ -973,7 +1017,10 @@ function daemonRuntime(
       planGenerator: createLlmPlanGenerator(llm, { model: connection.model }),
       subagentManager: subagentHost.managerPort,
     });
-    activeToolCount = tools.definitions().length;
+    // Report what a request actually carries, not what is registered. With
+    // deferred loading on those differ by design, and the status line claiming
+    // the full registry would hide the very thing this setting changes.
+    activeToolCount = tools.definitionsForTranscript([]).length;
     return new AgentTurnRunner({
       // The profile's provider, carried explicitly so nothing downstream has
       // to infer it from the model id. An OpenRouter id like
@@ -1101,6 +1148,12 @@ function daemonRuntime(
     // the parent's provider stream. Children stay retryable because the user
     // asked to pause, not to discard the work.
     onTurnCancel: sessionId => subagentHost?.interruptSource(sessionId) ?? 0,
+    // A mode change the MODEL made has to reach the clients too. Without this
+    // the session left plan mode while every TUI kept rendering — and gating
+    // on — the old mode, which is indistinguishable from the switch failing.
+    ...(host.onSessionModeChange
+      ? { onSessionModeChange: host.onSessionModeChange }
+      : {}),
     // First-class retry of a dead subagent under its stable identity
     // (`subagent.retry` RPC, `/agents retry`, agents-panel `r` key). The host
     // continues the persisted conversation when one survives; without an

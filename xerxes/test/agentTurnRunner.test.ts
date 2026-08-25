@@ -12,6 +12,7 @@ import { DaemonInteractionBoard } from '../src/daemon/interactions.js'
 import { ToolRegistry } from '../src/executors/toolRegistry.js'
 import { AgentMemory } from '../src/memory/agentMemory.js'
 import { AgentSelfMemory } from '../src/memory/agentSelfMemory.js'
+import { readContextDeltas } from '../src/runtime/contextDeltas.js'
 import { registerInteractionModeTool } from '../src/runtime/interactionModeTool.js'
 import { BUILTIN_AGENTS, type AgentDefinition } from '../src/agents/definitions.js'
 import { AuditEmitter, InMemoryCollector } from '../src/index.js'
@@ -337,6 +338,9 @@ test('agent turn runner reports a model-scheduled next-turn mode in the terminal
     type: 'status_update',
     payload: { mode: 'plan', plan_mode: true },
   })
+  expect(readContextDeltas(activeSession.metadata)).toEqual([
+    expect.objectContaining({ layer: 'interaction-mode', value: 'plan' }),
+  ])
 })
 
 test('agent turn runner synchronizes persisted daemon sessions for explicit resume', async () => {
@@ -1246,4 +1250,48 @@ test('agent turn runner persists per-message journal entries for crash recovery'
     { index: 1, role: 'assistant' },
   ])
   expect(session.messages.map(message => message.role)).toEqual(['user', 'assistant'])
+})
+
+test('deferred tool loading sends the core surface, not every registered schema', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-deferred-tools-'))
+  const tool = (name: string): ToolDefinition => ({
+    type: 'function',
+    function: { name, description: name, parameters: { type: 'object', properties: {} } },
+  })
+  // Two always-loaded core tools plus a long tail of deferrable ones — the
+  // shape of the real surface, where 76 schemas shipped on every request and
+  // models started borrowing one tool's arguments for another.
+  const registry = new ToolRegistry({ deferredToolLoading: true })
+  registry.register(tool('ReadFile'), async () => 'ok')
+  registry.register(tool('ToolSearchTool'), async () => 'ok')
+  for (let index = 0; index < 40; index += 1) {
+    registry.register(tool(`Deferrable${index}`), async () => 'ok')
+  }
+
+  const client = new CapturingClient()
+  const runtime = new InMemoryDaemonRuntime(
+    new AgentTurnRunner({
+      llm: client,
+      model: 'gpt-4o',
+      toolRegistry: registry,
+      tools: registry.definitions(),
+    }),
+    { currentProjectDirectory: directory, model: 'gpt-4o', sessionDirectory: join(directory, 'sessions') },
+  )
+
+  try {
+    await runtime.openSession('deferred')
+    await runtime.submitTurn('deferred', 'hello', () => {})
+
+    const sent = (client.requests[0]?.tools ?? []).map(entry => entry.function.name)
+    expect(sent).toContain('ReadFile')
+    expect(sent).toContain('ToolSearchTool')
+    // The whole point: the deferrable tail is not on the wire. Before this was
+    // wired, every production call site used definitions(), so the flag existed
+    // but could not change what a request carried.
+    expect(sent.some(name => name.startsWith('Deferrable'))).toBe(false)
+    expect(sent.length).toBeLessThan(registry.definitions().length)
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
 })

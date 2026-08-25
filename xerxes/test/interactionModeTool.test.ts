@@ -32,14 +32,27 @@ test('interaction mode tool delegates the canonical mode to its live-session hos
     mode: 'plan',
     reason: 'design first',
   }])
+  // The host commits the change immediately, so the result says so. It used to
+  // claim the transition was "scheduled for the next turn" while the session had
+  // already moved — and the enforced tool policy really does lag by a turn, so
+  // the two facts are stated separately rather than collapsed into a wrong one.
   expect(result).toEqual({
     mode: 'plan',
     plan_mode: true,
     reason: 'design first',
-    message: 'Interaction mode plan is scheduled for the next turn. Reason: design first',
-    guidance: expect.stringContaining('apply on the next user turn'),
+    message: 'Interaction mode is now plan. Reason: design first',
+    guidance: expect.stringContaining('tool policy applies from the next turn'),
   })
-  expect(metadata).toEqual({ pending_interaction_mode: 'plan' })
+  expect(metadata).toMatchObject({
+    context_deltas: [expect.objectContaining({ layer: 'interaction-mode', value: 'plan' })],
+    pending_interaction_mode: 'plan',
+  })
+  expect(registry.capabilities('SetInteractionModeTool')).toMatchObject({
+    defer: false,
+    destructive: false,
+    openWorld: false,
+    readOnly: false,
+  })
 })
 
 test('interaction mode tool rejects unknown modes before invoking the host', async () => {
@@ -88,9 +101,54 @@ test('authorized main agent can schedule transitions from every guarded mode', a
       reason: 'next policy',
     }])
     expect(result.mode).toBe(nextMode)
-    expect(result.guidance).toContain('next user turn')
+    expect(result.guidance).toContain('tool policy applies from the next turn')
     expect(metadata.pending_interaction_mode).toBe(nextMode)
   }
+})
+
+test('plan mode is entered and left through the same live session as the mode tool', async () => {
+  const registry = new ToolRegistry()
+  const applied: Array<{ mode: string }> = []
+  const metadata: Record<string, unknown> = { interaction_mode: 'code', session_kind: 'main' }
+  registerInteractionModeTool(registry, {
+    setMode(request) {
+      applied.push({ mode: request.mode })
+      return { mode: request.mode, planMode: request.mode === 'plan' }
+    },
+  })
+
+  const enter = JSON.parse(await registry.execute({
+    id: 'enter', type: 'function', function: { name: 'EnterPlanModeTool', arguments: {} },
+  }, { agentId: 'main-agent', metadata, sessionId: 'session-plan' }))
+  expect(enter).toMatchObject({ mode: 'plan', plan_mode: true })
+  expect(metadata).toMatchObject({ pending_interaction_mode: 'plan' })
+
+  const exit = JSON.parse(await registry.execute({
+    id: 'exit', type: 'function', function: { name: 'ExitPlanModeTool', arguments: {} },
+  }, { agentId: 'main-agent', metadata, sessionId: 'session-plan' }))
+  expect(exit).toMatchObject({ mode: 'code', plan_mode: false })
+  expect(metadata).toMatchObject({ pending_interaction_mode: 'code' })
+
+  // The whole point: the exit reached the SESSION. The inert WorkflowState copy
+  // of this tool reported the same success while changing nothing, which is why
+  // plan mode kept refusing to write after the model said it had left.
+  expect(applied).toEqual([{ mode: 'plan' }, { mode: 'code' }])
+})
+
+test('plan mode tools refuse subagents, exactly like the mode tool', async () => {
+  const registry = new ToolRegistry()
+  let called = false
+  registerInteractionModeTool(registry, {
+    setMode() {
+      called = true
+      return { mode: 'code', planMode: false }
+    },
+  })
+
+  await expect(registry.execute({
+    id: 'child-exit', type: 'function', function: { name: 'ExitPlanModeTool', arguments: {} },
+  }, { metadata: { session_kind: 'subagent' } })).rejects.toThrow('only the main agent')
+  expect(called).toBeFalse()
 })
 
 test('interaction mode tool rejects subagent scheduling even if exposed by a host', async () => {

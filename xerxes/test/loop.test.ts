@@ -380,7 +380,7 @@ test('a model mode transition is deferred so the next turn receives the enforced
     '\n[Objective gate: no verified completion or concrete blocker evidence. Continuing.]',
   )
   const modeResult = state.messages.find(message => message.role === 'tool')
-  expect(String(modeResult?.content)).toContain('apply on the next user turn')
+  expect(String(modeResult?.content)).toContain('tool policy applies from the next turn')
 
   state.metadata.interaction_mode = 'objective'
   delete state.metadata.pending_interaction_mode

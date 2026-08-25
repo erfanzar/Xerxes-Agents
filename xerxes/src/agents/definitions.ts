@@ -544,7 +544,23 @@ function hardcodedBuiltinDefinitions(): ReadonlyMap<string, AgentDefinition> {
       systemPrompt: 'You are an expert software architect and planner. Produce structured plans, not code.',
       model: '',
       tools: [],
-      allowedTools: ['ReadFile', 'GlobTool', 'GrepTool', 'ListDir', 'SetInteractionModeTool'],
+      // Read-only by design, but a planner still has to be able to record the
+      // plan, ask whether it is right, and leave. Without the last three the
+      // mode was a dead end: the model produced a plan it could not write
+      // anywhere, had no approval tool, and no exit — so it asked in prose and
+      // the session stayed in plan mode refusing every write that followed.
+      // ToolSearchTool stays so discovery keeps working under deferred loading.
+      allowedTools: [
+        'AskUserQuestionTool',
+        'ExitPlanModeTool',
+        'GlobTool',
+        'GrepTool',
+        'ListDir',
+        'ReadFile',
+        'SetInteractionModeTool',
+        'TodoWriteTool',
+        'ToolSearchTool',
+      ],
       excludeTools: [],
       source: 'built-in',
       maxDepth: 5,

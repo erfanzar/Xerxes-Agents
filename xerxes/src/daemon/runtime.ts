@@ -952,6 +952,7 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     session.interactionMode = normalized;
     session.planMode = planMode ?? normalized === "plan";
     session.lastActive = Date.now();
+    await this.saveSession(session);
     this.options.onSessionModeChange?.(session.id, normalized);
     return session;
   }

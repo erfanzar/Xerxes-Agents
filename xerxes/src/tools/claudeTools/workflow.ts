@@ -364,7 +364,10 @@ export function registerClaudeWorkflowTools(
   agentId = 'default',
 ): readonly ToolDefinition[] {
   const adapter = new ClaudeWorkflowTools(options, registry)
-  const registered = CLAUDE_WORKFLOW_TOOL_DEFINITIONS.filter(tool => workflowToolHasHostPort(tool.function.name, options))
+  const registered = CLAUDE_WORKFLOW_TOOL_DEFINITIONS.filter(tool =>
+    workflowToolHasHostPort(tool.function.name, options)
+    && registry.get(tool.function.name, agentId) === undefined,
+  )
   for (const tool of registered) {
     const name = tool.function.name
     registry.replace(

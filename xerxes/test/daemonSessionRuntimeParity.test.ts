@@ -651,6 +651,30 @@ test('concurrent openSession calls share one initialization and one session obje
   }
 })
 
+test('an idle interaction-mode change is persisted before a daemon restart', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-daemon-mode-persist-'))
+  const sessionDirectory = join(directory, 'sessions')
+  try {
+    const firstRuntime = new InMemoryDaemonRuntime(undefined, {
+      currentProjectDirectory: directory,
+      sessionDirectory,
+    })
+    const session = await firstRuntime.openSession('tui:mode-persist')
+    await firstRuntime.submitTurn(session.sessionKey, 'create durable history', () => {})
+    await firstRuntime.setSessionMode(session.sessionKey, 'researcher')
+
+    const secondRuntime = new InMemoryDaemonRuntime(undefined, {
+      currentProjectDirectory: directory,
+      sessionDirectory,
+    })
+    const resumed = await secondRuntime.openSession(session.id, undefined, { resume: true })
+
+    expect(resumed).toMatchObject({ interactionMode: 'researcher', planMode: false })
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
 test('interaction mode is scoped to a daemon session rather than process-global runtime settings', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'xerxes-daemon-mode-parity-'))
   const runtime = new InMemoryDaemonRuntime(undefined, {
