@@ -245,6 +245,26 @@ const TURN_DRAIN_TIMEOUT_MS = 2_000;
 const TITLE_RETRY_TURN_WINDOW = 3;
 
 /**
+ * Methods dispatched WITHOUT holding the per-connection serialization queue.
+ *
+ * That queue exists so handlers cannot race on shared session state, and every
+ * handler pays for it: one slow request stalls every later request from the
+ * same client. Model discovery is the pathological case — it reads the profile
+ * store, then waits on a provider's network endpoint, which for a dead
+ * self-hosted URL means the full `MODEL_DISCOVERY_TIMEOUT_MS`. Measured on a
+ * real profile set: nine providers took 16.2s end to end, 8.4s of it one
+ * unreachable endpoint, and everything queued behind it — including whichever
+ * provider the user was actually looking at, which is why the model picker sat
+ * on "discovering models…" while the daemon was perfectly healthy.
+ *
+ * Safe to admit here because these handlers touch no session: they read the
+ * profile store and write only `discoveredContextLimits`, keyed by profile, so
+ * two concurrent runs either address different keys or write identical values.
+ * Do NOT add a method that mutates a session, its transcript, or its metadata.
+ */
+const CONCURRENT_DISPATCH_METHODS = new Set(["fetch_models"]);
+
+/**
  * Snapshots retained per workspace. A per-turn snapshot makes the shadow repo
  * grow with the conversation, so the daemon prunes it once on start rather
  * than letting a long-lived project accumulate history forever.
@@ -1326,15 +1346,30 @@ export class DaemonServer {
         }
         connection.pendingRequestCount += 1;
         connection.pendingRequestBytes += pendingBytes;
+        // Resolved when this request hands the queue back: at settlement for
+        // an ordinary handler, right after parsing for a concurrent-safe one.
+        let releaseQueue!: () => void;
+        const queueHandback = new Promise<void>((resolve) => {
+          releaseQueue = resolve;
+        });
         const handle = async (): Promise<void> => {
-          try {
-            if (!connection.socket.destroyed) {
-              await this.handleLine(connection, line);
+          // Work still STARTS in arrival order — only the handback moves.
+          const settled = (async () => {
+            try {
+              if (!connection.socket.destroyed) {
+                await this.handleLine(connection, line, releaseQueue);
+              }
+            } finally {
+              releaseQueue();
+              // Backpressure accounting tracks real completion, never the
+              // handback, so a client cannot queue unbounded concurrent work
+              // by choosing a method that releases the queue early.
+              connection.pendingRequestCount -= 1;
+              connection.pendingRequestBytes -= pendingBytes;
             }
-          } finally {
-            connection.pendingRequestCount -= 1;
-            connection.pendingRequestBytes -= pendingBytes;
-          }
+          })();
+          void settled.catch(() => undefined);
+          await queueHandback;
         };
         // Serialize dispatch per connection so handlers cannot race on shared state.
         connection.queue = connection.queue.then(handle, handle);
@@ -1358,6 +1393,7 @@ export class DaemonServer {
   private async handleLine(
     connection: DaemonTransportConnection,
     line: string,
+    releaseQueue: () => void = () => undefined,
   ): Promise<void> {
     let request: JsonRpcRequest;
     try {
@@ -1371,6 +1407,12 @@ export class DaemonServer {
         ),
       );
       return;
+    }
+    // Hand the queue back before the slow part: a concurrent-safe handler
+    // touches no session, so a request that waits on a provider endpoint must
+    // not hold up everything else this client asked for.
+    if (CONCURRENT_DISPATCH_METHODS.has(request.method)) {
+      releaseQueue();
     }
     try {
       const result = await this.dispatch(connection, request);

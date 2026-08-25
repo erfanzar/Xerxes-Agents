@@ -7145,3 +7145,70 @@ test("daemon.wipe_memory removes global and project memory stores with counts", 
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("a slow model discovery does not stall the rest of the connection", async () => {
+  // A provider endpoint that accepts the request and takes its time. Model
+  // discovery used to run inline on the per-connection serialization queue, so
+  // one of these held up every later request from the same client — measured
+  // at 8.4s for a single unreachable endpoint, with the provider the user was
+  // actually looking at stuck behind it in the picker.
+  const slowProvider = Bun.serve({
+    port: 0,
+    fetch: async () => {
+      await Bun.sleep(400);
+      return Response.json({ data: [{ id: "slow-model" }] });
+    },
+  });
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-discovery-queue-"));
+  const socketPath = join(directory, "daemon.sock");
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: directory,
+    model: "test-model",
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const profilesPath = join(directory, "profiles.json");
+  const server = new DaemonServer({
+    socketPath,
+    runtime,
+    profileStore: new ProfileStore(profilesPath),
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "provider_save",
+      params: {
+        name: "slow",
+        base_url: `http://127.0.0.1:${slowProvider.port}/v1`,
+        model: "slow-model",
+        provider: "openai",
+        api_key: "k",
+      },
+    });
+    expect((await client.next((frame) => frame.id === 1)).result).toMatchObject({ ok: true });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "fetch_models",
+      params: { profile_name: "slow" },
+    });
+    client.send({ jsonrpc: "2.0", id: 3, method: "runtime.status", params: {} });
+
+    // The cheap request must come back while discovery is still in flight.
+    const status = await client.next((frame) => frame.id === 3);
+    expect(status.result).toBeDefined();
+    expect(client.seen((frame) => frame.id === 2)).toBe(false);
+
+    // …and the discovery still answers on its own schedule.
+    const discovery = await client.next((frame) => frame.id === 2);
+    expect(discovery.result).toMatchObject({ ok: true, models: ["slow-model"] });
+  } finally {
+    client.close();
+    await server.stop();
+    await slowProvider.stop(true);
+    await rm(directory, { recursive: true, force: true });
+  }
+});

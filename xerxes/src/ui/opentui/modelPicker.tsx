@@ -38,6 +38,13 @@ const MIN_PANEL_WIDTH = 40
 const MAX_PANEL_WIDTH = 110
 /** At this width the picker switches to mockup 09's side-by-side layout. */
 const TWO_PANE_MIN_WIDTH = 84
+/**
+ * Settle time before the highlighted provider's models are discovered.
+ *
+ * Long enough that walking the list costs nothing, short enough that stopping
+ * on a row feels immediate.
+ */
+const DISCOVERY_DEBOUNCE_MS = 180
 
 type Stage = 'provider' | 'model'
 
@@ -204,6 +211,7 @@ export function ModelPicker({
   const [persistGlobal, setPersistGlobal] = useState(false)
   const [providerIdx, setProviderIdx] = useState(0)
   const [stage, setStage] = useState<Stage>('provider')
+  const browsedRef = useRef(false)
   const discoveries = useRef(new Map<string, ModelDiscovery>())
   const nextDiscoveryRequest = useRef(0)
 
@@ -711,6 +719,12 @@ export function ModelPicker({
   // keep the sequential wizard.
 
   // Keep the right pane pointed at whichever provider row is highlighted.
+  //
+  // The pane follows the cursor immediately, but discovery is debounced: each
+  // one is a live call to that provider's endpoint, and holding ↓ through the
+  // list otherwise fires a network request per keystroke — for a profile set
+  // with an unreachable endpoint, several seconds of work nobody asked for
+  // just to pass over a row.
   useEffect(() => {
     if (!twoPane || stage !== 'provider' || optionsLoading) {
       return
@@ -720,10 +734,29 @@ export function ModelPicker({
 
     if (focused && focused.slug !== modelProviderSlug) {
       setModelProviderSlug(focused.slug)
-      discoverModels(focused)
       setModelIdx(0)
     }
-  }, [discoverModels, filteredProviderRows, modelProviderSlug, optionsLoading, providerIdx, stage, twoPane])
+  }, [filteredProviderRows, modelProviderSlug, optionsLoading, providerIdx, stage, twoPane])
+
+  useEffect(() => {
+    if (!twoPane || stage !== 'provider' || optionsLoading || !modelProviderSlug) {
+      return
+    }
+
+    const focused = providers.find(candidate => candidate.slug === modelProviderSlug)
+    if (!focused) {
+      return
+    }
+
+    // The provider the picker opens on is discovered at once — waiting there
+    // would just be latency, since no cursor movement is coming. Only moving
+    // the cursor pays the settle time.
+    const delay = browsedRef.current ? DISCOVERY_DEBOUNCE_MS : 0
+    browsedRef.current = true
+    const timer = setTimeout(() => discoverModels(focused), delay)
+
+    return () => clearTimeout(timer)
+  }, [discoverModels, modelProviderSlug, optionsLoading, providers, stage, twoPane])
 
   if (optionsLoading) {
     return (

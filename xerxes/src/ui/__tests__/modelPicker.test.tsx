@@ -687,9 +687,11 @@ describe("OpenTUI model picker — mockup 09 profile health", () => {
 
       // Focus starts on the current profile; moving up lands on openai-work,
       // whose discovery fails. Only what discovery already knew is surfaced.
+      // Cursor movement debounces discovery (DISCOVERY_DEBOUNCE_MS), so the
+      // wait has to outlast the settle time the real picker uses.
       act(() => setup.mockInput.pressArrow("up"));
       await flushPromises(setup);
-      await flushPromises(setup, 10);
+      await flushPromises(setup, 250);
 
       const frame = setup.captureCharFrame();
       // Red ✗ + right-side offline tag on the failed row, grayed name;

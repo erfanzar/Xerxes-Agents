@@ -52,6 +52,44 @@ export const CODEX_ORIGINATOR = 'codex_cli_rs'
  */
 export const CODEX_REFRESH_SKEW_SECONDS = 120
 
+/**
+ * Deadline for one Codex backend HTTP call.
+ *
+ * Bun's `fetch` has no default timeout, so an unbounded call here never
+ * settles: the model picker sat on "discovering models…" forever, and because
+ * the credential resolution is coalesced process-wide by storage path, a hung
+ * refresh wedged every later Codex caller onto the same dead promise rather
+ * than just the one that started it. Every other provider's discovery is
+ * already bounded (`MODEL_DISCOVERY_TIMEOUT_MS`); this is the same guarantee
+ * for the calls that path never covered. Generous, because a token refresh and
+ * a catalog read are both short and the cost of a false timeout is a spurious
+ * sign-in prompt.
+ */
+export const CODEX_REQUEST_TIMEOUT_MS = 15_000
+
+/**
+ * Bound one request, honouring a caller's abort as well as the deadline.
+ *
+ * Returns the signal plus a disposer: `AbortSignal.timeout` alone keeps a
+ * timer alive for its full duration even after the request settles, which on a
+ * long-lived daemon means one dangling timer per Codex call.
+ */
+function requestDeadline(signal?: AbortSignal): {
+  readonly dispose: () => void
+  readonly signal: AbortSignal
+} {
+  const controller = new AbortController()
+  const timer = setTimeout(
+    () => controller.abort(new Error(`Codex request timed out after ${CODEX_REQUEST_TIMEOUT_MS}ms`)),
+    CODEX_REQUEST_TIMEOUT_MS,
+  )
+  const dispose = () => clearTimeout(timer)
+  if (!signal) return { dispose, signal: controller.signal }
+  if (signal.aborted) controller.abort(signal.reason)
+  else signal.addEventListener('abort', () => controller.abort(signal.reason), { once: true })
+  return { dispose, signal: controller.signal }
+}
+
 /** Claims Xerxes reads out of a Codex access token. */
 export interface CodexClaims {
   readonly accountId: string | undefined
@@ -437,19 +475,31 @@ export class CodexSession {
     // endpoint overrides receive the same HTTPS/loopback validation as login.
     buildAuthorizeUrl(config, { codeChallenge: 'endpoint-validation', state: 'endpoint-validation' })
     const request = this.fetchImplementation ?? fetch
-    const response = await request(config.tokenUrl, {
-      method: 'POST',
-      headers: {
-        Accept: 'application/json',
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: new URLSearchParams({
-        client_id: config.clientId,
-        grant_type: 'refresh_token',
-        refresh_token: token.refreshToken,
-      }).toString(),
-      redirect: 'manual',
-    })
+    // Bounded even though `credential()` refuses to bind a caller's abort: the
+    // flight is shared process-wide by storage path, so an unbounded refresh
+    // does not stall one caller, it strands every Codex caller that joins it
+    // afterwards. The deadline belongs to the flight itself for exactly that
+    // reason — it is the only abort no joiner can be surprised by.
+    const deadline = requestDeadline()
+    let response: Response
+    try {
+      response = await request(config.tokenUrl, {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: new URLSearchParams({
+          client_id: config.clientId,
+          grant_type: 'refresh_token',
+          refresh_token: token.refreshToken,
+        }).toString(),
+        redirect: 'manual',
+        signal: deadline.signal,
+      })
+    } finally {
+      deadline.dispose()
+    }
 
     if (!response.ok) {
       const body = await response.text()
@@ -555,10 +605,16 @@ export async function fetchCodexModelCatalog(
   const base = options.baseUrl ?? codexBaseUrl()
   const url = `${base.replace(/\/+$/, '')}/models?client_version=${encodeURIComponent(CODEX_CLIENT_VERSION)}`
   const request = options.fetchImplementation ?? fetch
-  const response = await request(url, {
-    headers: { ...codexAuthHeaders(credential), Accept: 'application/json' },
-    ...(options.signal ? { signal: options.signal } : {}),
-  })
+  const deadline = requestDeadline(options.signal)
+  let response: Response
+  try {
+    response = await request(url, {
+      headers: { ...codexAuthHeaders(credential), Accept: 'application/json' },
+      signal: deadline.signal,
+    })
+  } finally {
+    deadline.dispose()
+  }
 
   if (!response.ok) {
     throw new ProviderError(
