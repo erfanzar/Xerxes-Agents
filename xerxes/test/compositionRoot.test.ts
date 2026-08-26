@@ -101,3 +101,35 @@ test('deferred tool loading is reachable from production, not just configurable'
   expect(cli).toContain('deferredToolLoading:')
   expect(runner).toContain('definitionsForTranscript(state.messages)')
 })
+
+/**
+ * Subsystems that must be CONSTRUCTED by production, not merely importable.
+ *
+ * The hook list above only guards DaemonRuntimeOptions. It did not catch the
+ * durable-task subsystem, whose runtime, bridge and every consumer branch were
+ * written and tested while nothing outside a test ever built one — so
+ * `durableTaskBridge` was permanently undefined and every recording branch in
+ * the subagent manager and the Cortex orchestrator was dead code. A factory
+ * called only from tests is the signature of that bug.
+ */
+const CONSTRUCTED_SUBSYSTEMS: ReadonlyArray<{ readonly factory: string; readonly why: string }> = [
+  { factory: 'bridgeDurableTaskLifecycle', why: 'durable record of subagent attempts across a crash' },
+  { factory: 'createNativeSubagentHost', why: 'the delegated-turn host every subagent runs on' },
+  { factory: 'createLocalWorkspaceProvider', why: 'backs the workspace CLI surface' },
+]
+
+test('subsystems with a factory are constructed outside their own tests', async () => {
+  const [cli, workspaceCommand] = await Promise.all([
+    readSource('cli.ts'),
+    readSource('runtime/workspaceCommand.ts'),
+  ])
+  const production = `${cli}\n${workspaceCommand}`
+
+  for (const subsystem of CONSTRUCTED_SUBSYSTEMS) {
+    // A bare mention is not enough — an import with no call site is exactly the
+    // shape this is looking for, so require the invocation.
+    const invoked = new RegExp(`\\b${subsystem.factory}\\s*\\(`).test(production)
+    expect({ factory: subsystem.factory, invoked }, `${subsystem.factory} (${subsystem.why})`)
+      .toEqual({ factory: subsystem.factory, invoked: true })
+  }
+})

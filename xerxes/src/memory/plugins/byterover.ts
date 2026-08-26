@@ -9,7 +9,7 @@ import {
   requiredMemoryPluginEnvironment,
   type MemoryPluginEnvironment,
 } from './base.js'
-import { HttpMemoryUpstream, memoryPluginPathSegment, memoryPluginUrl, type MemoryPluginHttpTransport } from './http.js'
+import { HttpMemoryUpstream, memoryPluginPathSegment, memoryPluginUrl, type MemoryPluginHttpRequest, type MemoryPluginHttpTransport } from './http.js'
 
 /** Default ByteRover cloud API endpoint. */
 export const DEFAULT_BYTEROVER_BASE_URL = 'https://api.byterover.dev/v1'
@@ -36,7 +36,7 @@ export class ByteRoverProvider extends ExternalMemoryProviderBase {
       upstream: new HttpMemoryUpstream({
         providerName: 'byterover',
         transport: options.transport,
-        requestFor: (action, arguments_) => {
+        requestFor: (action, arguments_): MemoryPluginHttpRequest => {
           const apiKey = requiredMemoryPluginEnvironment(options.environment, 'BRV_API_KEY')
           const headers = { Authorization: `Bearer ${apiKey}` }
           if (action === 'add') {

@@ -284,9 +284,11 @@ test('boot hydration restore order is deterministic for identical timestamps', (
     // Two boots over the same rows agree exactly...
     expect(boots[1]).toEqual(boots[0])
     // ...because identical timestamps are tie-broken by ascending memoryId.
-    const ids = boots[0].map(entry => entry.id)
+    const firstBoot = boots[0]
+    if (firstBoot === undefined) throw new Error('first boot missing')
+    const ids = firstBoot.map(entry => entry.id)
     expect([...ids].sort((left, right) => left.localeCompare(right))).toEqual(ids)
-    expect(boots[0].map(entry => entry.content).sort()).toEqual(['alpha', 'beta', 'delta', 'gamma'])
+    expect(firstBoot.map(entry => entry.content).sort()).toEqual(['alpha', 'beta', 'delta', 'gamma'])
   } finally {
     rmSync(directory, { force: true, recursive: true })
   }

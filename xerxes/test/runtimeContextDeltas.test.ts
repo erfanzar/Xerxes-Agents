@@ -76,6 +76,8 @@ describe("context deltas", () => {
         "junk",
         null,
         { at: "not-a-number", layer: "model", value: "x" },
+        { at: Number.NaN, layer: "model", value: "nan" },
+        { at: Number.POSITIVE_INFINITY, layer: "model", value: "infinite" },
         { at: 9, layer: "warp-drive", value: "y" },
         { at: 10, layer: "model", value: "real" },
       ],

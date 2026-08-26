@@ -8,7 +8,7 @@ import {
   requiredMemoryPluginEnvironment,
   type MemoryPluginEnvironment,
 } from './base.js'
-import { HttpMemoryUpstream, memoryPluginPathSegment, memoryPluginUrl, type MemoryPluginHttpTransport } from './http.js'
+import { HttpMemoryUpstream, memoryPluginPathSegment, memoryPluginUrl, type MemoryPluginHttpRequest, type MemoryPluginHttpTransport } from './http.js'
 
 /** Default Supermemory cloud API endpoint. */
 export const DEFAULT_SUPERMEMORY_BASE_URL = 'https://api.supermemory.ai/v1'
@@ -35,7 +35,7 @@ export class SupermemoryProvider extends ExternalMemoryProviderBase {
       upstream: new HttpMemoryUpstream({
         providerName: 'supermemory',
         transport: options.transport,
-        requestFor: (action, arguments_) => {
+        requestFor: (action, arguments_): MemoryPluginHttpRequest => {
           const apiKey = requiredMemoryPluginEnvironment(options.environment, 'SUPERMEMORY_API_KEY')
           const headers = { Authorization: `Bearer ${apiKey}` }
           if (action === 'add') {

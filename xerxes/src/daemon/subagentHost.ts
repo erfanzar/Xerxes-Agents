@@ -47,6 +47,7 @@ import {
   type SubagentConversationContext,
 } from './subagentConversations.js'
 import { DaemonSubagentEventBus } from './subagentEvents.js'
+import type { DurableTaskBridge } from '../tasks/durableTaskBridge.js'
 
 export interface NativeSubagentHostOptions {
   readonly agentDefinitions: ReadonlyMap<string, AgentDefinition>
@@ -58,6 +59,12 @@ export interface NativeSubagentHostOptions {
    */
   readonly autoCompactThreshold?: number
   readonly cwd: string
+  /**
+   * Durable record of subagent attempts, so a crash mid-fan-out leaves a
+   * readable account of what ran. Optional: hosts that do not want the sidecar
+   * simply omit it and the manager records nothing, as before.
+   */
+  readonly durableTaskBridge?: DurableTaskBridge
   readonly eventBus: DaemonSubagentEventBus
   /** Bounded supplemental bootstrap context, such as the discovered skill catalog. */
   readonly extraContext?: string
@@ -144,6 +151,7 @@ export function createNativeSubagentHost(options: NativeSubagentHostOptions): Na
       }
       return taskId
     },
+    ...(options.durableTaskBridge === undefined ? {} : { durableTaskBridge: options.durableTaskBridge }),
     onEvent: event => publishSubagentEvent(options.eventBus, event, historySessionIds.get(event.taskId)),
     pathResolver: rawPath => rawPath,
     runner: request => {

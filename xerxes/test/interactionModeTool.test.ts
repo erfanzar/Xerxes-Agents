@@ -55,6 +55,32 @@ test('interaction mode tool delegates the canonical mode to its live-session hos
   })
 })
 
+test('interaction mode tool does not duplicate a context delta already recorded by its host', async () => {
+  const registry = new ToolRegistry()
+  const metadata: Record<string, unknown> = {
+    interaction_mode: 'code',
+    context_deltas: [{ at: 1, layer: 'interaction-mode', value: 'plan' }],
+  }
+  registerInteractionModeTool(registry, {
+    setMode(request) {
+      return {
+        mode: request.mode,
+        planMode: request.mode === 'plan',
+        contextDeltaRecorded: true,
+      }
+    },
+  })
+
+  await registry.execute({
+    id: 'mode-host-delta',
+    type: 'function',
+    function: { name: 'SetInteractionModeTool', arguments: { mode: 'plan' } },
+  }, { agentId: 'default', metadata, sessionId: 'session-1' })
+
+  expect(metadata.context_deltas).toEqual([{ at: 1, layer: 'interaction-mode', value: 'plan' }])
+  expect(metadata.pending_interaction_mode).toBe('plan')
+})
+
 test('interaction mode tool rejects unknown modes before invoking the host', async () => {
   const registry = new ToolRegistry()
   let called = false

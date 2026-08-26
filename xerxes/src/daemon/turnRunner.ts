@@ -200,6 +200,13 @@ export class AgentTurnRunner implements TurnRunner {
     // re-adopt them instead of clobbering them at the next synchronization.
     const previous = this.states.get(session.id)
     const state = stateFromSession(session)
+    // Snapshot and consume notices at the same synchronous boundary as the
+    // effective mode/model/tool policy above. Later RPC changes belong to the
+    // next request and remain queued on the live session; draining only the
+    // live copy after async setup would either misreport them on this request
+    // or let the state snapshot resurrect already-consumed notices at sync.
+    const contextDeltas = takeContextDeltas(session.metadata)
+    takeContextDeltas(state.metadata)
     if (previous) {
       state.totalCacheReadTokens = previous.totalCacheReadTokens
       state.totalCacheCreationTokens = previous.totalCacheCreationTokens
@@ -287,7 +294,7 @@ export class AgentTurnRunner implements TurnRunner {
       addendum: systemPromptAddendum(session),
       agentPrompt: promptAgent?.systemPrompt ?? '',
       bootstrap: bootstrapPrompt,
-      contextDeltas: renderContextDeltas(takeContextDeltas(session.metadata)),
+      contextDeltas: renderContextDeltas(contextDeltas),
       memoryRecall: memoryPrompt,
       modeHint: modeSwitchHint(
         session.interactionMode,

@@ -12,7 +12,7 @@ import { DaemonInteractionBoard } from '../src/daemon/interactions.js'
 import { ToolRegistry } from '../src/executors/toolRegistry.js'
 import { AgentMemory } from '../src/memory/agentMemory.js'
 import { AgentSelfMemory } from '../src/memory/agentSelfMemory.js'
-import { readContextDeltas } from '../src/runtime/contextDeltas.js'
+import { appendContextDelta, readContextDeltas } from '../src/runtime/contextDeltas.js'
 import { registerInteractionModeTool } from '../src/runtime/interactionModeTool.js'
 import { BUILTIN_AGENTS, type AgentDefinition } from '../src/agents/definitions.js'
 import { AuditEmitter, InMemoryCollector } from '../src/index.js'
@@ -52,6 +52,23 @@ class ModeSwitchClient implements LlmClient {
       return
     }
     yield { content: 'Plan ready.' }
+  }
+}
+
+class GatedClient implements LlmClient {
+  readonly requests: CompletionRequest[] = []
+  started = false
+  private releaseGate: (() => void) | undefined
+
+  async *stream(request: CompletionRequest): AsyncGenerator<LlmDelta> {
+    this.requests.push(request)
+    this.started = true
+    await new Promise<void>(resolve => { this.releaseGate = resolve })
+    yield { content: 'released' }
+  }
+
+  release(): void {
+    this.releaseGate?.()
   }
 }
 
@@ -1026,6 +1043,60 @@ test('agent turn runner routes AskUserQuestionTool through the native daemon rep
     expect(session.messages.find(message => message.role === 'tool')?.content).toContain('"answer":"yes"')
   } finally {
     release()
+  }
+})
+
+test('agent turn runner preserves a mode delta appended while its turn is active', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-agent-mode-race-'))
+  const llm = new GatedClient()
+  const runtime = new InMemoryDaemonRuntime(new AgentTurnRunner({ llm, model: 'gpt-4o' }), {
+    currentProjectDirectory: directory,
+    model: 'gpt-4o',
+    sessionDirectory: join(directory, 'sessions'),
+  })
+  try {
+    const active = runtime.submitTurn('tui:mode-race', 'first prompt', () => {})
+    await waitForCondition(() => llm.started)
+    await runtime.setSessionMode('tui:mode-race', 'researcher')
+    llm.release()
+    await active
+
+    const session = runtime.sessionStatus('tui:mode-race')
+    if (!session) throw new Error('expected a live session')
+    expect(readContextDeltas(session.metadata)).toEqual([
+      expect.objectContaining({ layer: 'interaction-mode', value: 'researcher' }),
+    ])
+  } finally {
+    llm.release()
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('agent turn runner consumes a queued context delta exactly once', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-agent-mode-once-'))
+  const llm = new CapturingClient()
+  const runtime = new InMemoryDaemonRuntime(new AgentTurnRunner({ llm, model: 'gpt-4o' }), {
+    currentProjectDirectory: directory,
+    model: 'gpt-4o',
+    sessionDirectory: join(directory, 'sessions'),
+  })
+  try {
+    const opened = await runtime.openSession('tui:mode-once')
+    appendContextDelta(opened.metadata, { at: 1, layer: 'interaction-mode', value: 'researcher' })
+
+    await runtime.submitTurn('tui:mode-once', 'first prompt', () => {})
+    const session = runtime.sessionStatus('tui:mode-once')
+    if (!session) throw new Error('expected a live session')
+    expect(String(llm.requests[0]?.messages[0]?.content)).toContain(
+      '[Context updated]\n- interaction mode: researcher',
+    )
+    expect(readContextDeltas(session.metadata)).toEqual([])
+
+    await runtime.submitTurn('tui:mode-once', 'second prompt', () => {})
+    expect(String(llm.requests[1]?.messages[0]?.content)).not.toContain('[Context updated]')
+    expect(readContextDeltas(session.metadata)).toEqual([])
+  } finally {
+    await rm(directory, { recursive: true, force: true })
   }
 })
 

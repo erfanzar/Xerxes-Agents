@@ -1190,7 +1190,15 @@ export class SubAgentManager {
           output: task.result ?? '',
         }).catch(() => undefined)
       } else if (task.status === 'failed') {
-        await this.durableTaskBridge.attemptFailed(attemptId, { error: task.error, retryable: false }).catch(() => undefined)
+        // Truthfully retryable: `retry()` accepts any terminal task whose
+        // runtime is still registered, which is what `/agents retry` and the
+        // subagent.retry RPC drive. Reporting false marked the task terminal in
+        // the durable projection, so the manager's own retry then failed
+        // `startAttempt` with "task is terminal" — swallowed by the catch — and
+        // no retried attempt was ever recorded. The task stayed failed forever,
+        // including after a retry succeeded.
+        const retryable = this.runtimes.has(task.id)
+        await this.durableTaskBridge.attemptFailed(attemptId, { error: task.error, retryable }).catch(() => undefined)
       }
     }
     await this.cleanupWorktree(task)

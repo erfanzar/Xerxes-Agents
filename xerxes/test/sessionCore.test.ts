@@ -937,8 +937,9 @@ test('branchSessionExclusive performs its existence checks under one lock', asyn
     const rejected = attempts.filter(result => result.status === 'rejected')
     expect(fulfilled).toHaveLength(1)
     expect(rejected).toHaveLength(1)
-    expect(rejected[0].status === 'rejected'
-      ? String((rejected[0] as PromiseRejectedResult).reason?.message ?? rejected[0].reason)
+    const rejected0 = rejected[0]
+    expect(rejected0 !== undefined && rejected0.status === 'rejected'
+      ? String((rejected0 as PromiseRejectedResult).reason?.message ?? rejected0.reason)
       : '').toContain('session already exists')
 
     const child = store.loadSession('child')

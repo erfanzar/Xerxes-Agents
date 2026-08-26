@@ -3662,6 +3662,48 @@ test("turn events keep their session identity after the connection switches sess
   }
 });
 
+test("set_mode targets its explicit session without changing the active connection session", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-mode-target-"));
+  const socketPath = join(directory, "daemon.sock");
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: directory,
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const server = new DaemonServer({ socketPath, runtime });
+  await runtime.openSession("target-session");
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "active-session" },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "set_mode",
+      params: { mode: "researcher", session_key: "target-session" },
+    });
+    expect((await client.next((frame) => frame.id === 2)).result).toMatchObject({
+      ok: true,
+      mode: "researcher",
+      plan_mode: false,
+    });
+    expect(runtime.sessionStatus("target-session")?.interactionMode).toBe("researcher");
+    expect(runtime.sessionStatus("active-session")?.interactionMode).toBe("code");
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("mid-turn steer and mode changes never cancel the active turn", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-steer-mode-"));
   const socketPath = join(directory, "daemon.sock");
@@ -4881,7 +4923,7 @@ test("daemon stop drains in-flight turns so their final state reaches disk", asy
 
     await server.stop();
 
-    const files = await readdir(sessionDirectory);
+    const files = (await readdir(sessionDirectory)).filter(file => file.endsWith(".json"));
     expect(files).toHaveLength(1);
     const saved = JSON.parse(
       await readFile(join(sessionDirectory, String(files[0])), "utf8"),
@@ -5421,7 +5463,7 @@ test("daemon stop drains slash-submitted turns so their final state reaches disk
 
     await server.stop();
 
-    const files = await readdir(sessionDirectory);
+    const files = (await readdir(sessionDirectory)).filter(file => file.endsWith(".json"));
     expect(files).toHaveLength(1);
     const saved = JSON.parse(
       await readFile(join(sessionDirectory, String(files[0])), "utf8"),
@@ -5473,7 +5515,7 @@ test("daemon stop drains scheduled cron turns before flushing sessions", async (
     await waitFor(() => runner.runs === 1);
     await server.stop();
 
-    const files = await readdir(sessionDirectory);
+    const files = (await readdir(sessionDirectory)).filter(file => file.endsWith(".json"));
     expect(files).toHaveLength(1);
     const saved = JSON.parse(
       await readFile(join(sessionDirectory, String(files[0])), "utf8"),
@@ -5920,7 +5962,7 @@ test("daemon stop persists sessions even when an in-flight turn never settles", 
     await server.stop();
     expect(Date.now() - startedAt).toBeLessThan(20_000);
 
-    const files = await readdir(sessionDirectory);
+    const files = (await readdir(sessionDirectory)).filter(file => file.endsWith(".json"));
     expect(files).toHaveLength(1);
     const saved = JSON.parse(
       await readFile(join(sessionDirectory, String(files[0])), "utf8"),

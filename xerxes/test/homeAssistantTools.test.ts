@@ -44,8 +44,8 @@ test('Home Assistant tools use an explicit authenticated client and preserve ent
     { entity_id: 'switch.coffee', state: 'off', attributes: { area_id: 'kitchen' } },
   ]
   const services = [
-    { domain: 'light', services: { turn_on: { description: 'Turn on' }, turn_off: {} } },
-    { domain: 'switch', services: { turn_on: {}, turn_off: {} } },
+    { domain: 'light', services: { turn_on: { description: 'Turn on' }, turn_off: { description: 'Turn off' } } },
+    { domain: 'switch', services: { turn_on: { description: 'Turn on' }, turn_off: { description: 'Turn off' } } },
   ]
   const client = new HomeAssistantClient({
     baseUrl: 'https://hass.test/nested',

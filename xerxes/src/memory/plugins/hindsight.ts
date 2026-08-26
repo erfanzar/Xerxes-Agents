@@ -9,7 +9,7 @@ import {
   requiredMemoryPluginEnvironment,
   type MemoryPluginEnvironment,
 } from './base.js'
-import { HttpMemoryUpstream, memoryPluginPathSegment, memoryPluginUrl, type MemoryPluginHttpTransport } from './http.js'
+import { HttpMemoryUpstream, memoryPluginPathSegment, memoryPluginUrl, type MemoryPluginHttpRequest, type MemoryPluginHttpTransport } from './http.js'
 
 /** Default Hindsight knowledge-graph API endpoint. */
 export const DEFAULT_HINDSIGHT_BASE_URL = 'https://api.hindsight.ai/v1'
@@ -36,7 +36,7 @@ export class HindsightProvider extends ExternalMemoryProviderBase {
       upstream: new HttpMemoryUpstream({
         providerName: 'hindsight',
         transport: options.transport,
-        requestFor: (action, arguments_) => {
+        requestFor: (action, arguments_): MemoryPluginHttpRequest => {
           const apiKey = requiredMemoryPluginEnvironment(options.environment, 'HINDSIGHT_API_KEY')
           const bankId = requiredMemoryPluginEnvironment(options.environment, 'HINDSIGHT_BANK_ID')
           const bankPath = `banks/${memoryPluginPathSegment(bankId)}`

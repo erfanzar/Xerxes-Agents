@@ -9,7 +9,7 @@ import {
   requiredMemoryPluginEnvironment,
   type MemoryPluginEnvironment,
 } from './base.js'
-import { HttpMemoryUpstream, memoryPluginPathSegment, memoryPluginUrl, type MemoryPluginHttpTransport } from './http.js'
+import { HttpMemoryUpstream, memoryPluginPathSegment, memoryPluginUrl, type MemoryPluginHttpRequest, type MemoryPluginHttpTransport } from './http.js'
 
 /** Default Mem0 cloud API endpoint. An embedding application may override it explicitly. */
 export const DEFAULT_MEM0_BASE_URL = 'https://api.mem0.ai/v1'
@@ -36,7 +36,7 @@ export class Mem0Provider extends ExternalMemoryProviderBase {
       upstream: new HttpMemoryUpstream({
         providerName: 'mem0',
         transport: options.transport,
-        requestFor: (action, arguments_) => {
+        requestFor: (action, arguments_): MemoryPluginHttpRequest => {
           const apiKey = requiredMemoryPluginEnvironment(options.environment, 'MEM0_API_KEY')
           const userId = memoryPluginEnvironmentValue(options.environment, 'MEM0_USER_ID', 'xerxes')
           const headers = { Authorization: `Bearer ${apiKey}` }

@@ -112,6 +112,8 @@ import { createAgentState } from "./streaming/events.js";
 import { runTurn } from "./streaming/loop.js";
 import { runBundledSkillCli } from "./skills/cli.js";
 import { AuthCommandError, runAuthCommand } from "./auth/command.js";
+import { bridgeDurableTaskLifecycle } from "./tasks/durableTaskBridge.js";
+import { DurableTaskRuntime } from "./tasks/durableTaskRuntime.js";
 
 /**
  * Command list for `--help`, grouped by what the reader is trying to do.
@@ -388,10 +390,18 @@ if (argument === "--help" || argument === "-h") {
   const knownFlags = new Set(["--id", "--working-dir", "--path", "--content"]);
   const options = new Map<string, string>()
   const command: string[] = []
+  // `--` ends option parsing, so the command being run inside the workspace can
+  // carry its own flags. Without it every `-`-prefixed token was claimed as a
+  // workspace option and `xerxes workspace exec --id w ls -la` died on `-la`.
+  let parsingOptions = true
   for (let index = 1; index < argumentsAfterCommand.length; index += 1) {
     const flag = argumentsAfterCommand[index]
     if (flag === undefined) continue
-    if (!flag.startsWith("-")) {
+    if (parsingOptions && flag === "--") {
+      parsingOptions = false
+      continue
+    }
+    if (!parsingOptions || !flag.startsWith("-")) {
       command.push(flag)
       continue
     }
@@ -399,7 +409,10 @@ if (argument === "--help" || argument === "-h") {
       reportCommandUsageError(new Error(`Unknown workspace option: ${flag}`), "xerxes workspace --help")
     }
     const value = argumentsAfterCommand[index + 1]
-    if (value === undefined || value.startsWith("-")) {
+    // Only a MISSING value is an error. Rejecting anything starting with `-`
+    // also rejected legitimate values: negative numbers, and paths or content
+    // that begin with a dash.
+    if (value === undefined) {
       reportCommandUsageError(new Error(`workspace option ${flag} requires a value`), "xerxes workspace --help")
     }
     options.set(flag, value)
@@ -1171,6 +1184,13 @@ function daemonRuntime(
     const subagentOptions = {
       agentDefinitions,
       cwd: workspaceRoot,
+      // The durable attempt log. Its runtime, bridge, and every consumer branch
+      // were written and tested, and nothing ever constructed one — so in
+      // production `durableTaskBridge` was always undefined and every guarded
+      // recording branch in the manager and the Cortex orchestrator was dead.
+      durableTaskBridge: bridgeDurableTaskLifecycle(
+        new DurableTaskRuntime({ directory: join(xerxesHome(), "tasks") }),
+      ),
       eventBus: subagentEvents,
       ...(host.skillRegistry?.markdownIndex()
         ? { extraContext: host.skillRegistry.markdownIndex() }

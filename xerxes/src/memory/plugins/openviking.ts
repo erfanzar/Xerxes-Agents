@@ -8,7 +8,7 @@ import {
   requiredMemoryPluginEnvironment,
   type MemoryPluginEnvironment,
 } from './base.js'
-import { HttpMemoryUpstream, memoryPluginPathSegment, memoryPluginUrl, type MemoryPluginHttpTransport } from './http.js'
+import { HttpMemoryUpstream, memoryPluginPathSegment, memoryPluginUrl, type MemoryPluginHttpRequest, type MemoryPluginHttpTransport } from './http.js'
 
 /** Explicit OpenViking endpoint configuration and host-owned HTTP transport. */
 export interface OpenVikingProviderOptions {
@@ -28,7 +28,7 @@ export class OpenVikingProvider extends ExternalMemoryProviderBase {
       upstream: new HttpMemoryUpstream({
         providerName: 'openviking',
         transport: options.transport,
-        requestFor: (action, arguments_) => {
+        requestFor: (action, arguments_): MemoryPluginHttpRequest => {
           const endpoint = requiredMemoryPluginEnvironment(options.environment, 'OPENVIKING_ENDPOINT')
           const apiKey = requiredMemoryPluginEnvironment(options.environment, 'OPENVIKING_API_KEY')
           const headers = { Authorization: `Bearer ${apiKey}` }
