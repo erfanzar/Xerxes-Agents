@@ -1087,6 +1087,9 @@ export function Composer({ composer }: Pick<AppLayoutProps, 'composer'>) {
 
   const modelLabel = ui.info?.model || 'choose model with /provider'
   const modeLabel = ui.info?.mode || 'code'
+  // 'code' is the assumed mode; every other one changes what the turn is
+  // allowed to do and deserves to read as an exception rather than as chrome.
+  const modeIsDefault = modeLabel === 'code'
   const yoloEnabled = isYoloEnabled(ui.info?.permission_mode)
   const narrow = composer.cols < 76
   // Below this the identity alone (model + YOLO + context + tokens) already
@@ -1349,8 +1352,16 @@ export function Composer({ composer }: Pick<AppLayoutProps, 'composer'>) {
           {ui.busy ? (
             <>
               <Text color={t.color.system}>{GLYPH.mode}</Text>
-              <Text color={t.ds.title} wrap="truncate-end">
-                {liveActivity}
+              {/* The mode stays on screen while the turn runs. It used to be
+                  swapped out for the activity, so the one moment you need to
+                  know you are in plan or objective mode — something is running
+                  and behaving in a way you did not ask for — was the one moment
+                  it was hidden. A non-default mode is coloured, because that is
+                  the state worth catching the eye. */}
+              <Text wrap="truncate-end">
+                <Span color={modeIsDefault ? t.ds.meta : t.color.warn}>{modeLabel}</Span>
+                <Span color={t.ds.separator}>{` ${GLYPH.separator} `}</Span>
+                <Span color={t.ds.title}>{liveActivity}</Span>
               </Text>
             </>
           ) : (

@@ -475,3 +475,38 @@ describe('assembled screens', () => {
     act(() => s.renderer.destroy())
   })
 })
+
+describe('interaction mode visibility', () => {
+  const renderWithMode = async (mode: string, busy: boolean) => {
+    resetOverlayState()
+    $uiTheme.set(DEFAULT_THEME)
+    $uiState.set({
+      ...$uiState.get(),
+      busy,
+      info: { cwd: '/repo', mode, model: 'claude-sonnet-4.6', version: '0.9.4' } as never,
+      sessionTitle: 'roadmap slices',
+      sid: 'sess-795d',
+      usage: { context_max: 262100, context_used: 127000 } as never,
+      sessionTabs: []
+    })
+    const s = await testRender(<AppLayout {...props(150)} />, { height: 30, width: 150 })
+    await s.flush()
+    const frame = s.captureCharFrame()
+    act(() => s.renderer.destroy())
+    return frame
+  }
+
+  it('keeps the mode on screen while a turn is running', async () => {
+    // The chip used to be swapped out for the live activity whenever a turn
+    // was in flight, so the one moment you need to know you are in objective
+    // or plan mode — something is running and behaving in a way you did not
+    // ask for — was the one moment the answer was hidden.
+    expect(await renderWithMode('objective', true)).toContain('objective')
+    expect(await renderWithMode('plan', true)).toContain('plan')
+  })
+
+  it('still states the mode when idle', async () => {
+    expect(await renderWithMode('objective', false)).toContain('objective')
+    expect(await renderWithMode('code', false)).toContain('code')
+  })
+})
