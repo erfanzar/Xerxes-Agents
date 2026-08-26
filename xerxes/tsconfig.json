@@ -28,5 +28,5 @@
     "types": ["bun"]
   },
   "include": ["src/**/*.ts", "test/**/*.ts"],
-  "exclude": ["src/ui"]
+  "exclude": ["src/ui", "src/desktop/renderer"]
 }

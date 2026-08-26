@@ -31,5 +31,13 @@
     "typecheck": "bun run --cwd xerxes check",
     "verify": "bun run check && bun run test && bun run build",
     "xerxes": "bun xerxes/src/cli.ts"
+  },
+  "dependencies": {
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@types/react-dom": "^19.2.5",
+    "electron": "^44.0.0"
   }
 }

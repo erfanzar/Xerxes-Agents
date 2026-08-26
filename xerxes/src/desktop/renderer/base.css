@@ -1,0 +1,43 @@
+/* Static desktop styling. Every colour comes from the generated custom
+   properties (see ../tokens.ts) — no literal ever appears here, so the app
+   cannot drift from the TUI palette. */
+
+:root {
+  --font-body: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+html, body, #root { height: 100%; }
+body {
+  margin: 0;
+  background: var(--x-backdrop);
+  color: var(--x-title);
+  font-family: var(--font-body);
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--x-working); }
+a:hover { color: var(--x-bridge, var(--x-working)); }
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: var(--x-hairline); border-radius: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+
+@keyframes nxpulse { 0%, 100% { opacity: 1 } 50% { opacity: .35 } }
+
+/* The frameless window draws its own title bar, so the strip beside the
+   traffic lights has to be the drag handle the OS no longer provides. */
+.titlebar-drag { -webkit-app-region: drag; }
+.titlebar-drag button, .titlebar-drag [role='button'] { -webkit-app-region: no-drag; }
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+}
+.hv1:hover { background: var(--x-selected); }
+.hv2:hover { background: var(--x-selected); }
+.hv3:hover { background: var(--x-selected); }
+.hv4:hover { background: var(--x-selected); }
+.hv5:hover { background: var(--x-selected); }
+.hv6:hover { background: var(--x-selected); }
+.hv7:hover { background: var(--x-selected); }

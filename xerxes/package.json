@@ -9,7 +9,7 @@
     "build": "bun run build:runtime && bun run build:ui",
     "build:runtime": "bun build ./src/cli.ts --target=bun --minify --outdir ./dist && bun ./scripts/copyBundledSkills.ts",
     "build:ui": "bun ./scripts/buildTui.ts && bun ./scripts/verifyTuiBuild.ts",
-    "check": "bun run check:runtime && bun run check:ui",
+    "check": "bun run check:runtime && bun run check:ui && bun run check:desktop",
     "check:runtime": "bunx tsc --noEmit -p tsconfig.json",
     "check:ui": "bunx --bun --no-install tsc --noEmit -p tsconfig.ui.json",
     "cleanup-docstrings": "bun ./src/maintenance/cleanupDuplicateDocstrings.ts",
@@ -29,20 +29,25 @@
     "test": "bun run test:runtime && bun run test:ui",
     "test:runtime": "bun test ./test",
     "test:ui": "bunx --bun --no-install vitest run --config vitest.ui.config.ts",
-    "test:ui:watch": "bunx --bun --no-install vitest --config vitest.ui.config.ts"
+    "test:ui:watch": "bunx --bun --no-install vitest --config vitest.ui.config.ts",
+    "build:desktop": "bun scripts/buildDesktop.ts",
+    "desktop": "bun run build:desktop && bunx electron dist/desktop/main.js",
+    "check:desktop": "bunx --bun --no-install tsc --noEmit -p tsconfig.desktop.json"
   },
   "dependencies": {
     "@nanostores/react": "^1.1.0",
     "@opentui/core": "0.4.3",
     "@opentui/react": "0.4.3",
     "nanostores": "^1.2.0",
-    "react": "^19.2.4"
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
   },
   "devDependencies": {
     "@types/bun": "^1.3.12",
     "@types/node": "^24.13.2",
     "@types/react": "^19.2.14",
     "prettier": "^3",
+    "react-dom": "^19.2.8",
     "typescript": "^5.9.3",
     "vitest": "^4.1.3"
   }
