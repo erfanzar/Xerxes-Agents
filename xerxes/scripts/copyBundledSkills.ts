@@ -86,7 +86,23 @@ async function assertSafeSkillAssets(
   }
 }
 
+/**
+ * Ship the sandbox shim beside the bundle.
+ *
+ * `bun build` only follows imports, and the shim is reached by spawning it as a
+ * script — so it was absent from every packaged install, and SandboxedCodeRunner
+ * silently degraded to "cannot start" for anyone who did not run from source.
+ * The runner now fails closed on a missing shim, which makes this copy the
+ * thing that keeps the feature working at all.
+ */
+export async function copySandboxShim(): Promise<void> {
+  const source = resolve(packageDirectory, "src", "runtime", "sandboxShim.ts");
+  const destination = resolve(packageDirectory, "dist", "sandboxShim.ts");
+  await cp(source, destination);
+}
+
 if (import.meta.main) {
   await copyBundledSkills();
   await copyBundledAgents();
+  await copySandboxShim();
 }

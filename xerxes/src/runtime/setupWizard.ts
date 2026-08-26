@@ -1,7 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { mkdir, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 
 export type SetupValidator = (value: unknown) => boolean
@@ -86,9 +86,15 @@ export async function writeSetupConfig(
   answers: Readonly<Record<string, unknown>>,
   target: string,
 ): Promise<string> {
-  await mkdir(dirname(target), { recursive: true })
+  await mkdir(dirname(target), { recursive: true, mode: 0o700 })
   const lines = Object.entries(answers).map(([key, value]) => key + ': ' + yamlScalar(value))
-  await writeFile(target, lines.join('\n') + '\n', 'utf8')
+  // Owner-only: `xerxes setup --api-key` routes a provider credential straight
+  // into these answers, and the default 0644 left it readable by every local
+  // user. The mode is set explicitly rather than left to the umask, and applied
+  // after the write too, because `writeFile` only honours `mode` when it
+  // creates the file — overwriting an existing 0644 config kept the old mode.
+  await writeFile(target, lines.join('\n') + '\n', { encoding: 'utf8', mode: 0o600 })
+  await chmod(target, 0o600)
   return target
 }
 
