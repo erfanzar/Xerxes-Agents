@@ -89,6 +89,11 @@ import { runSetupCommand } from "./runtime/setupCommand.js";
 import { runWorkspaceCommand } from "./runtime/workspaceCommand.js";
 import { runScheduleCommand } from "./runtime/scheduleCommand.js";
 import { runMemoryCommand, type MemoryCommandOptions } from "./runtime/memoryCommand.js";
+import { runCapabilityCommand } from "./runtime/capabilityCommand.js";
+import { runTelemetryCommand, type TelemetryCommandOptions } from "./runtime/telemetryCommand.js";
+import { runStatusCommand } from "./runtime/statusCommand.js";
+import { runChannelsCommand } from "./runtime/channelsCommand.js";
+import { runSandboxCommand } from "./runtime/sandboxCommand.js";
 import { withTerminalWatchdog } from "./ui/lib/terminalModes.js";
 import {
   DEFAULT_EXPORT_FORMAT,
@@ -141,6 +146,11 @@ const HELP_GROUPS: readonly {
       ["xerxes daemon", "run the local project daemon"],
       ["xerxes acp", "speak the Agent Client Protocol over stdio"],
       ["xerxes telegram --token <token>", "run the Telegram channel gateway"],
+      ["xerxes discord --token <token> --application-id <id>", "run the Discord channel gateway"],
+      ["xerxes slack --token <token> [--signing-secret <secret>]", "run the Slack channel gateway"],
+      ["xerxes whatsapp --access-token <token> --phone-number-id <id>", "run the WhatsApp channel gateway"],
+      ["xerxes email --smtp-user <u> --smtp-password <p> [--smtp-host <h>] [--smtp-port <p>]", "run the email channel gateway"],
+      ["xerxes signal --rest-url <url> --sender-number <number>", "run the Signal channel gateway"],
     ],
   },
   {
@@ -156,6 +166,11 @@ const HELP_GROUPS: readonly {
       ["xerxes workspace create|exec|read|write|destroy --id <id>", "manage a local sandbox workspace"],
       ["xerxes schedule create|fire|list --id <id> --schedule <spec>", "manage durable scheduled triggers"],
       ["xerxes memory record|review|classify|correct|expire|list", "manage governed memory records"],
+      ["xerxes capability register|unregister|list|diff --id <id>", "manage capability manifests"],
+      ["xerxes telemetry record|list|benchmark|inject", "record events, benchmark, or inject failures"],
+      ["xerxes status [--directory <dir>]", "show subsystem health snapshot"],
+      ["xerxes channels list", "show supported channel gateways"],
+      ["xerxes sandbox status", "report local sandbox availability"],
     ],
   },
 ];
@@ -211,8 +226,18 @@ const NON_ONESHOT_COMMANDS: ReadonlySet<string> = new Set([
   "workspace",
   "schedule",
   "memory",
+  "capability",
+  "telemetry",
+  "status",
+  "channels",
+  "sandbox",
   "daemon",
   "telegram",
+  "discord",
+  "slack",
+  "whatsapp",
+  "email",
+  "signal",
   "acp",
   "-r",
   "--resume",
@@ -315,8 +340,13 @@ if (argument === "--help" || argument === "-h") {
     throw error;
   }
 } else if (argument === "doctor") {
+  const json = argumentsAfterCommand.includes("--json")
   const report = runAllDoctorChecks();
-  printDoctorReport(report);
+  if (json) {
+    console.log(JSON.stringify(report, null, 2))
+  } else {
+    printDoctorReport(report);
+  }
   process.exit(hasDoctorFailures(report) ? 1 : 0);
 } else if (argument === "install") {
   if (
@@ -356,6 +386,7 @@ if (argument === "--help" || argument === "-h") {
     "--model",
     "--api-key",
     "--permission-mode",
+    "--profile",
     "--target",
   ]);
   const target = options.get("--target") ?? `${xerxesHome()}/config/setup.yaml`;
@@ -369,8 +400,9 @@ if (argument === "--help" || argument === "-h") {
     const value = options.get(flag)
     if (value !== undefined) answers[key] = value
   }
+  const profile = options.get("--profile")
   try {
-    await runSetupCommand({ targetPath: target, answers })
+    await runSetupCommand({ targetPath: target, answers, ...(profile === undefined ? {} : { profile }) })
     console.log(`Wrote setup configuration to ${target}`)
     process.exit(0)
   } catch (error) {
@@ -518,6 +550,110 @@ if (argument === "--help" || argument === "-h") {
   }
   if (result.message) console.log(result.message)
   process.exit(0)
+} else if (argument === "capability") {
+  const action = argumentsAfterCommand[0]
+  if (
+    action !== "register" &&
+    action !== "unregister" &&
+    action !== "list" &&
+    action !== "diff"
+  ) {
+    reportCommandUsageError(new Error("capability requires action: register|unregister|list|diff"), "xerxes capability --help")
+  }
+  const options = parseValueOptions(argumentsAfterCommand.slice(1), "capability", [
+    "--id",
+    "--file",
+    "--manifest-json",
+    "--from-snapshot",
+    "--to-snapshot",
+    "--directory",
+  ]);
+  const result = await runCapabilityCommand({
+    action,
+    id: options.get("--id"),
+    file: options.get("--file"),
+    manifestJson: options.get("--manifest-json"),
+    fromSnapshot: options.get("--from-snapshot"),
+    toSnapshot: options.get("--to-snapshot"),
+    directory: options.get("--directory"),
+  })
+  if (!result.ok) {
+    reportCommandUsageError(new Error(result.error ?? "capability command failed"), "xerxes capability --help")
+  }
+  if (result.message) console.log(result.message)
+  process.exit(0)
+} else if (argument === "telemetry") {
+  const action = argumentsAfterCommand[0]
+  if (
+    action !== "record" &&
+    action !== "list" &&
+    action !== "benchmark" &&
+    action !== "inject"
+  ) {
+    reportCommandUsageError(new Error("telemetry requires action: record|list|benchmark|inject"), "xerxes telemetry --help")
+  }
+  const options = parseValueOptions(argumentsAfterCommand.slice(1), "telemetry", [
+    "--event",
+    "--data",
+    "--name",
+    "--iterations",
+    "--target",
+    "--operation",
+    "--mode",
+    "--probability",
+    "--latency-ms",
+    "--error-message",
+    "--directory",
+  ]);
+  const result = await runTelemetryCommand({
+    action,
+    event: options.get("--event"),
+    data: options.get("--data"),
+    name: options.get("--name"),
+    iterations: options.get("--iterations") !== undefined ? Number(options.get("--iterations")) : undefined,
+    target: options.get("--target") as TelemetryCommandOptions['target'],
+    operation: options.get("--operation"),
+    mode: options.get("--mode") as TelemetryCommandOptions['mode'],
+    probability: options.get("--probability") !== undefined ? Number(options.get("--probability")) : undefined,
+    latencyMs: options.get("--latency-ms") !== undefined ? Number(options.get("--latency-ms")) : undefined,
+    errorMessage: options.get("--error-message"),
+    directory: options.get("--directory"),
+  })
+  if (!result.ok) {
+    reportCommandUsageError(new Error(result.error ?? "telemetry command failed"), "xerxes telemetry --help")
+  }
+  if (result.message) console.log(result.message)
+  process.exit(0)
+} else if (argument === "status") {
+  const options = parseValueOptions(argumentsAfterCommand, "status", ["--directory"]);
+  const result = await runStatusCommand({ directory: options.get("--directory") })
+  if (!result.ok) {
+    reportCommandUsageError(new Error(result.error ?? "status command failed"), "xerxes status --help")
+  }
+  if (result.message) console.log(result.message)
+  process.exit(0)
+} else if (argument === "channels") {
+  const action = argumentsAfterCommand[0]
+  if (action !== "list") {
+    reportCommandUsageError(new Error("channels requires action: list"), "xerxes channels --help")
+  }
+  const result = await runChannelsCommand(action)
+  if (!result.ok) {
+    reportCommandUsageError(new Error(result.error ?? "channels command failed"), "xerxes channels --help")
+  }
+  if (result.message) console.log(result.message)
+  process.exit(0)
+} else if (argument === "sandbox") {
+  const action = argumentsAfterCommand[0]
+  if (action !== "status") {
+    reportCommandUsageError(new Error("sandbox requires action: status"), "xerxes sandbox --help")
+  }
+  const result = await runSandboxCommand({ action })
+  if (!result.ok) {
+    reportCommandUsageError(new Error(result.error ?? "sandbox command failed"), "xerxes sandbox --help")
+  }
+  if (result.message) console.log(result.message)
+  process.exit(0)
 } else if (argument === "export") {
   await runExport(argumentsAfterCommand);
 } else if (argument === "daemon") {
@@ -556,6 +692,161 @@ if (argument === "--help" || argument === "-h") {
     token,
     options.get("--host"),
     options.get("--port"),
+  );
+  const socketPath =
+    options.get("--socket") ?? daemonPaths(projectDirectory).socketPath;
+  const pidPath = options.get("--pid-file");
+  await runDaemon(config, projectDirectory, socketPath, pidPath);
+  process.exit(0);
+} else if (argument === "discord") {
+  const options = parseValueOptions(argumentsAfterCommand, "discord", [
+    "--application-id",
+    "--pid-file",
+    "--project-dir",
+    "--public-key",
+    "--socket",
+    "--token",
+    "--transport",
+  ]);
+  const token =
+    options.get("--token") ?? process.env.DISCORD_BOT_TOKEN?.trim();
+  if (!token)
+    throw new Error("discord requires --token or DISCORD_BOT_TOKEN");
+  const applicationId = options.get("--application-id");
+  if (!applicationId)
+    throw new Error("discord requires --application-id");
+  const transport = options.get("--transport") ?? "gateway";
+  if (transport !== "gateway" && transport !== "webhook")
+    throw new Error('discord --transport must be "gateway" or "webhook"');
+  const projectDirectory = options.get("--project-dir");
+  const config = discordDaemonConfig(
+    loadSystemDaemonConfig({
+      ...(projectDirectory ? { projectDirectory } : {}),
+    }),
+    token,
+    applicationId,
+    options.get("--public-key"),
+    transport,
+  );
+  const socketPath =
+    options.get("--socket") ?? daemonPaths(projectDirectory).socketPath;
+  const pidPath = options.get("--pid-file");
+  await runDaemon(config, projectDirectory, socketPath, pidPath);
+  process.exit(0);
+} else if (argument === "slack") {
+  const options = parseValueOptions(argumentsAfterCommand, "slack", [
+    "--pid-file",
+    "--project-dir",
+    "--signing-secret",
+    "--socket",
+    "--token",
+  ]);
+  const token =
+    options.get("--token") ?? process.env.SLACK_BOT_TOKEN?.trim();
+  if (!token)
+    throw new Error("slack requires --token or SLACK_BOT_TOKEN");
+  const projectDirectory = options.get("--project-dir");
+  const config = slackDaemonConfig(
+    loadSystemDaemonConfig({
+      ...(projectDirectory ? { projectDirectory } : {}),
+    }),
+    token,
+    options.get("--signing-secret"),
+  );
+  const socketPath =
+    options.get("--socket") ?? daemonPaths(projectDirectory).socketPath;
+  const pidPath = options.get("--pid-file");
+  await runDaemon(config, projectDirectory, socketPath, pidPath);
+  process.exit(0);
+} else if (argument === "whatsapp") {
+  const options = parseValueOptions(argumentsAfterCommand, "whatsapp", [
+    "--access-token",
+    "--app-secret",
+    "--phone-number-id",
+    "--pid-file",
+    "--project-dir",
+    "--socket",
+  ]);
+  const accessToken =
+    options.get("--access-token") ?? process.env.WHATSAPP_ACCESS_TOKEN?.trim();
+  if (!accessToken)
+    throw new Error("whatsapp requires --access-token or WHATSAPP_ACCESS_TOKEN");
+  const phoneNumberId = options.get("--phone-number-id");
+  if (!phoneNumberId)
+    throw new Error("whatsapp requires --phone-number-id");
+  const projectDirectory = options.get("--project-dir");
+  const config = whatsappDaemonConfig(
+    loadSystemDaemonConfig({
+      ...(projectDirectory ? { projectDirectory } : {}),
+    }),
+    accessToken,
+    phoneNumberId,
+    options.get("--app-secret"),
+  );
+  const socketPath =
+    options.get("--socket") ?? daemonPaths(projectDirectory).socketPath;
+  const pidPath = options.get("--pid-file");
+  await runDaemon(config, projectDirectory, socketPath, pidPath);
+  process.exit(0);
+} else if (argument === "email") {
+  const options = parseValueOptions(argumentsAfterCommand, "email", [
+    "--from",
+    "--pid-file",
+    "--project-dir",
+    "--smtp-host",
+    "--smtp-password",
+    "--smtp-port",
+    "--smtp-user",
+    "--socket",
+  ]);
+  const smtpHost = options.get("--smtp-host") ?? "localhost";
+  const smtpPortRaw = options.get("--smtp-port");
+  const smtpPort = smtpPortRaw === undefined ? 25 : Number(smtpPortRaw);
+  if (!Number.isFinite(smtpPort) || smtpPort < 1 || smtpPort > 65_535)
+    throw new Error("email --smtp-port must be an integer between 1 and 65535");
+  const smtpUser = options.get("--smtp-user");
+  if (!smtpUser)
+    throw new Error("email requires --smtp-user");
+  const smtpPassword = options.get("--smtp-password");
+  if (!smtpPassword)
+    throw new Error("email requires --smtp-password");
+  const projectDirectory = options.get("--project-dir");
+  const config = emailDaemonConfig(
+    loadSystemDaemonConfig({
+      ...(projectDirectory ? { projectDirectory } : {}),
+    }),
+    smtpHost,
+    smtpPort,
+    smtpUser,
+    smtpPassword,
+    options.get("--from"),
+  );
+  const socketPath =
+    options.get("--socket") ?? daemonPaths(projectDirectory).socketPath;
+  const pidPath = options.get("--pid-file");
+  await runDaemon(config, projectDirectory, socketPath, pidPath);
+  process.exit(0);
+} else if (argument === "signal") {
+  const options = parseValueOptions(argumentsAfterCommand, "signal", [
+    "--pid-file",
+    "--project-dir",
+    "--rest-url",
+    "--sender-number",
+    "--socket",
+  ]);
+  const restBaseUrl = options.get("--rest-url") ?? process.env.SIGNAL_REST_URL?.trim();
+  if (!restBaseUrl)
+    throw new Error("signal requires --rest-url or SIGNAL_REST_URL");
+  const senderNumber = options.get("--sender-number");
+  if (!senderNumber)
+    throw new Error("signal requires --sender-number");
+  const projectDirectory = options.get("--project-dir");
+  const config = signalDaemonConfig(
+    loadSystemDaemonConfig({
+      ...(projectDirectory ? { projectDirectory } : {}),
+    }),
+    restBaseUrl,
+    senderNumber,
   );
   const socketPath =
     options.get("--socket") ?? daemonPaths(projectDirectory).socketPath;
@@ -751,6 +1042,144 @@ function telegramPort(value: string | undefined): number | undefined {
   if (port < 0 || port > 65_535)
     throw new Error("telegram --port must be an integer between 0 and 65535");
   return port;
+}
+
+function discordDaemonConfig(
+  config: DaemonConfig,
+  token: string,
+  applicationId: string,
+  publicKey: string | undefined,
+  transport: 'gateway' | 'webhook',
+): DaemonConfig {
+  const existing = config.channels.discord ?? {};
+  const settings = isRecord(existing.settings) ? existing.settings : {};
+  return {
+    ...config,
+    channels: {
+      ...config.channels,
+      discord: {
+        ...existing,
+        type: "discord",
+        enabled: true,
+        settings: {
+          ...settings,
+          token,
+          applicationId,
+          ...(publicKey === undefined ? {} : { publicKey }),
+          transport,
+        },
+      },
+    },
+  };
+}
+
+function slackDaemonConfig(
+  config: DaemonConfig,
+  botToken: string,
+  signingSecret: string | undefined,
+): DaemonConfig {
+  const existing = config.channels.slack ?? {};
+  const settings = isRecord(existing.settings) ? existing.settings : {};
+  return {
+    ...config,
+    channels: {
+      ...config.channels,
+      slack: {
+        ...existing,
+        type: "slack",
+        enabled: true,
+        settings: {
+          ...settings,
+          botToken,
+          ...(signingSecret === undefined ? {} : { signingSecret }),
+        },
+      },
+    },
+  };
+}
+
+function whatsappDaemonConfig(
+  config: DaemonConfig,
+  accessToken: string,
+  phoneNumberId: string,
+  appSecret: string | undefined,
+): DaemonConfig {
+  const existing = config.channels.whatsapp ?? {};
+  const settings = isRecord(existing.settings) ? existing.settings : {};
+  return {
+    ...config,
+    channels: {
+      ...config.channels,
+      whatsapp: {
+        ...existing,
+        type: "whatsapp",
+        enabled: true,
+        settings: {
+          ...settings,
+          accessToken,
+          phoneNumberId,
+          ...(appSecret === undefined ? {} : { appSecret }),
+        },
+      },
+    },
+  };
+}
+
+function emailDaemonConfig(
+  config: DaemonConfig,
+  smtpHost: string,
+  smtpPort: number,
+  smtpUser: string,
+  smtpPassword: string,
+  fromAddress: string | undefined,
+): DaemonConfig {
+  const existing = config.channels.email ?? {};
+  const settings = isRecord(existing.settings) ? existing.settings : {};
+  return {
+    ...config,
+    channels: {
+      ...config.channels,
+      email: {
+        ...existing,
+        type: "email",
+        enabled: true,
+        settings: {
+          ...settings,
+          smtpHost,
+          smtpPort,
+          smtpUser,
+          smtpPassword,
+          ...(fromAddress === undefined ? {} : { fromAddress }),
+          requireImapTransport: true,
+        },
+      },
+    },
+  };
+}
+
+function signalDaemonConfig(
+  config: DaemonConfig,
+  restBaseUrl: string,
+  senderNumber: string,
+): DaemonConfig {
+  const existing = config.channels.signal ?? {};
+  const settings = isRecord(existing.settings) ? existing.settings : {};
+  return {
+    ...config,
+    channels: {
+      ...config.channels,
+      signal: {
+        ...existing,
+        type: "signal",
+        enabled: true,
+        settings: {
+          ...settings,
+          restBaseUrl,
+          senderNumber,
+        },
+      },
+    },
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -973,9 +1402,18 @@ async function runTui(resumeSessionId = ""): Promise<void> {
 /**
  * Whether the model is shown the deferred tool surface rather than all of it.
  *
- * On unless explicitly disabled: the full surface is the regression, not the
- * safe default. Accepts a settings key first so it can be flipped per host,
- * then an environment override for a one-off run.
+ * OFF by default, on the evidence. Deferral shrinks a request from 76 schemas
+ * to ~16, which is the right direction — but measured against a real provider
+ * it broke delegation outright. The same prompt, same model, same daemon:
+ *
+ *   deferral off  — 18.4s, 1 tool call, 20 subagent events, correct answer
+ *   deferral on   — 300s, 122 tool calls, 0 subagent events, no answer at all
+ *
+ * Told about the hidden tools through the catalog layer, the model still
+ * thrashed instead of searching once and proceeding. A surface that is large
+ * but works beats a small one that does not, so the machinery and its catalog
+ * stay — reachable with XERXES_DEFERRED_TOOL_LOADING=1 — and the default goes
+ * back to the behaviour that demonstrably completes work.
  */
 function deferredToolLoadingEnabled(
   settings: Readonly<Record<string, unknown>>,
@@ -985,7 +1423,7 @@ function deferredToolLoadingEnabled(
   const override = (process.env.XERXES_DEFERRED_TOOL_LOADING ?? "").trim().toLowerCase();
   if (override === "0" || override === "false" || override === "off") return false;
   if (override === "1" || override === "true" || override === "on") return true;
-  return true;
+  return false;
 }
 
 /**

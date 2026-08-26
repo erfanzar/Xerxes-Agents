@@ -89,7 +89,7 @@ test('the daemon announces model-driven mode changes through the server', async 
   expect(server).toMatch(/notifySessionModeChanged[\s\S]{0,600}emitStatus/)
 })
 
-test('deferred tool loading is reachable from production, not just configurable', async () => {
+test('deferred tool loading is reachable from production, even though it is off by default', async () => {
   const [cli, runner] = await Promise.all([
     readSource('cli.ts'),
     readSource('daemon/turnRunner.ts'),
@@ -97,7 +97,9 @@ test('deferred tool loading is reachable from production, not just configurable'
 
   // The flag existed for a long time while every production call site used
   // definitions(), so turning it on changed nothing. The selector that honours
-  // it has to be the one the turn actually calls.
+  // it has to be the one the turn actually calls — that stays true even though
+  // the default is now off, because an escape hatch nobody can reach is the
+  // same dead wiring in a different costume.
   expect(cli).toContain('deferredToolLoading:')
   expect(runner).toContain('definitionsForTranscript(state.messages)')
 })

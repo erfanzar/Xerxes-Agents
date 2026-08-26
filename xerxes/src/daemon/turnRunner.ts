@@ -307,6 +307,17 @@ export class AgentTurnRunner implements TurnRunner {
       subagentJoin: this.options.subagentCoordinator
         ? 'Background subagents are joined before the parent turn ends. Integrate their delivered results in this turn; do not promise synthesis in a later turn.'
         : '',
+      // Deferred loading hides most of the surface from the request. Without
+      // this the model is simply told it has sixteen tools and concludes the
+      // rest do not exist — it answered "I can't use AgentTool, it's not in my
+      // available tool list" rather than searching for it. The hiding half and
+      // the discovery half only work as a pair.
+      deferredCatalog: renderDeferredCatalog(
+        this.options.toolRegistry?.deferredToolLoading
+          ? this.options.toolRegistry.deferredCatalog(session.agentId)
+          : [],
+        new Set((tools ?? []).map(tool => tool.function.name)),
+      ),
       toolGuidance: this.options.toolRegistry && tools?.length
         ? renderToolGuidance(
           this.options.toolRegistry.guidanceForTools(
@@ -944,6 +955,36 @@ function parseTodoList(text: string): readonly Record<string, unknown>[] {
     })
   }
   return items
+}
+
+/**
+ * Tell the model what exists but is not loaded.
+ *
+ * With deferred loading on, a request carries the always-loaded core plus
+ * whatever ToolSearchTool already revealed — around sixteen of seventy-six
+ * schemas. A model shown sixteen tools and nothing else reasonably concludes
+ * that is all there is, which silently removes capabilities the product
+ * advertises. Names and one-line descriptions are enough to search on and far
+ * cheaper than the schemas themselves, which is the whole point of deferring.
+ *
+ * Tools already in this request are filtered out so the list never tells the
+ * model to search for something it can already call.
+ */
+function renderDeferredCatalog(
+  catalog: readonly { readonly name: string; readonly description: string }[],
+  visible: ReadonlySet<string>,
+): string {
+  const hidden = catalog.filter(entry => !visible.has(entry.name))
+  if (!hidden.length) return ''
+  const lines = hidden.map(entry => `- ${entry.name}: ${entry.description}`)
+  return [
+    '[Additional tools]',
+    `${hidden.length} more tools are available in this session but their schemas are not in this request.`,
+    'Call ToolSearchTool with a capability query to load the ones you need, then call them normally.',
+    'Never tell the user a capability is unavailable because it is not in your current tool list — search first.',
+    '',
+    ...lines,
+  ].join('\n')
 }
 
 /** Apply an agent's declared tool surface without exposing unregistered tools. */
