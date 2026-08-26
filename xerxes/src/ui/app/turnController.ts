@@ -10,6 +10,7 @@ import {
 } from '../config/timing.js'
 import { mergeSubagentProgress, subagentProgressId } from '../domain/subagentProgress.js'
 import type { SessionInflightTool, SessionInterruptResponse, SubagentEventPayload } from '../gatewayTypes.js'
+import { compact } from '../lib/compact.js'
 import { appendToolShelfMessage, isToolShelfMessage } from '../lib/liveProgress.js'
 import { hasReasoningTag, splitReasoning } from '../lib/reasoning.js'
 import { ReasoningFilter } from '../lib/reasoningFilter.js'
@@ -398,7 +399,7 @@ class TurnController {
       text: '',
       thinking,
       thinkingTokens: estimateTokensRough(thinking),
-      toolTokens: this.toolTokenAcc || undefined
+      ...(this.toolTokenAcc ? { toolTokens: this.toolTokenAcc } : {})
     }
 
     if (this.reasoningSegmentIndex === null) {
@@ -684,7 +685,7 @@ class TurnController {
     let tools = this.pendingSegmentTools
     const last = this.segmentMessages[this.segmentMessages.length - 1]
 
-    if (tools.length && isToolShelfMessage(last)) {
+    if (tools.length && last !== undefined && isToolShelfMessage(last)) {
       this.segmentMessages = [
         ...this.segmentMessages.slice(0, -1),
         { ...last, tools: [...(last.tools ?? []), ...tools] }
@@ -720,9 +721,8 @@ class TurnController {
       kind: 'trail',
       role: 'system',
       text: '',
-      thinking: finalThinking || undefined,
-      thinkingTokens: finalThinking ? estimateTokensRough(finalThinking) : undefined,
-      toolTokens: savedToolTokens || undefined,
+      ...(finalThinking ? { thinking: finalThinking, thinkingTokens: estimateTokensRough(finalThinking) } : {}),
+      ...(savedToolTokens ? { toolTokens: savedToolTokens } : {}),
       ...(finishedSubagents.length && { subagents: finishedSubagents }),
       ...(tools.length && { tools })
     }
@@ -1195,7 +1195,7 @@ class TurnController {
         return state
       }
 
-      const base: SubagentProgress = existing ?? {
+      const base: SubagentProgress = existing ?? compact<SubagentProgress>({
         agentType: p.agent_type,
         name: p.agent_name,
         title: p.title,
@@ -1215,7 +1215,7 @@ class TurnController {
         toolCount: p.tool_count ?? 0,
         tools: [],
         toolsets: p.toolsets
-      }
+      })
 
       const next = mergeSubagentProgress(base, p, patch)
 

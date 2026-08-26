@@ -49,6 +49,28 @@ export function appendContextDelta(metadata: Record<string, unknown>, delta: Con
 }
 
 /**
+ * Merge independently mutated delta queues without replaying the same change.
+ *
+ * A daemon mode RPC may append to live session metadata while the active turn
+ * owns a snapshot. End-of-turn synchronization must preserve both queues. The
+ * tuple is the durable identity for the current schema; duplicate identical
+ * changes recorded in the same millisecond are observationally equivalent.
+ */
+export function mergeContextDeltas(
+  first: Readonly<Record<string, unknown>>,
+  second: Readonly<Record<string, unknown>>,
+): readonly ContextDelta[] {
+  const merged = [...readContextDeltas(first), ...readContextDeltas(second)]
+  const unique = new Map<string, ContextDelta>()
+  for (const delta of merged) {
+    unique.set(`${delta.at}\u0000${delta.layer}\u0000${delta.value}`, delta)
+  }
+  return [...unique.values()]
+    .sort((left, right) => left.at - right.at)
+    .slice(-MAX_CONTEXT_DELTAS)
+}
+
+/**
  * Consume the backlog: render-ready deltas are removed from metadata so the
  * same change is injected exactly once. Call this at turn assembly; a turn that
  * aborts afterwards simply misses its notice — the constraint itself still
@@ -101,6 +123,7 @@ function isContextDelta(value: unknown): value is ContextDelta {
   if (typeof value !== 'object' || value === null) return false
   const candidate = value as Record<string, unknown>
   return typeof candidate.at === 'number'
+    && Number.isFinite(candidate.at)
     && typeof candidate.value === 'string'
     && (candidate.layer === 'interaction-mode'
       || candidate.layer === 'model'

@@ -85,6 +85,10 @@ import {
   UpdateCommandError,
   runUpdateCommand,
 } from "./runtime/update.js";
+import { runSetupCommand } from "./runtime/setupCommand.js";
+import { runWorkspaceCommand } from "./runtime/workspaceCommand.js";
+import { runScheduleCommand } from "./runtime/scheduleCommand.js";
+import { runMemoryCommand, type MemoryCommandOptions } from "./runtime/memoryCommand.js";
 import { withTerminalWatchdog } from "./ui/lib/terminalModes.js";
 import {
   DEFAULT_EXPORT_FORMAT,
@@ -146,6 +150,10 @@ const HELP_GROUPS: readonly {
       ["xerxes install --cloud-code [--force] [--dry-run]", "install a companion integration"],
       ["xerxes export [session]", "write a session transcript to disk"],
       ["xerxes skill <skill> [arguments]", "run a bundled skill"],
+      ["xerxes setup [--provider <p>] [--model <m>] [--api-key <k>] [--permission-mode <mode>]", "create an initial provider configuration"],
+      ["xerxes workspace create|exec|read|write|destroy --id <id>", "manage a local sandbox workspace"],
+      ["xerxes schedule create|fire|list --id <id> --schedule <spec>", "manage durable scheduled triggers"],
+      ["xerxes memory record|review|classify|correct|expire|list", "manage governed memory records"],
     ],
   },
 ];
@@ -197,6 +205,10 @@ const NON_ONESHOT_COMMANDS: ReadonlySet<string> = new Set([
   "install",
   "update",
   "export",
+  "setup",
+  "workspace",
+  "schedule",
+  "memory",
   "daemon",
   "telegram",
   "acp",
@@ -336,6 +348,163 @@ if (argument === "--help" || argument === "-h") {
       throw error;
     }
   }
+} else if (argument === "setup") {
+  const options = parseValueOptions(argumentsAfterCommand, "setup", [
+    "--provider",
+    "--model",
+    "--api-key",
+    "--permission-mode",
+    "--target",
+  ]);
+  const target = options.get("--target") ?? `${xerxesHome()}/config/setup.yaml`;
+  const answers: Record<string, unknown> = {}
+  for (const [flag, key] of [
+    ["--provider", "provider"],
+    ["--model", "model"],
+    ["--api-key", "api_key"],
+    ["--permission-mode", "permission_mode"],
+  ] as const) {
+    const value = options.get(flag)
+    if (value !== undefined) answers[key] = value
+  }
+  try {
+    await runSetupCommand({ targetPath: target, answers })
+    console.log(`Wrote setup configuration to ${target}`)
+    process.exit(0)
+  } catch (error) {
+    reportCommandUsageError(error instanceof Error ? error : new Error(String(error)), "xerxes setup --help")
+  }
+} else if (argument === "workspace") {
+  const action = argumentsAfterCommand[0]
+  if (
+    action !== "create" &&
+    action !== "exec" &&
+    action !== "read" &&
+    action !== "write" &&
+    action !== "destroy"
+  ) {
+    reportCommandUsageError(new Error("workspace requires action: create|exec|read|write|destroy"), "xerxes workspace --help")
+  }
+  const knownFlags = new Set(["--id", "--working-dir", "--path", "--content"]);
+  const options = new Map<string, string>()
+  const command: string[] = []
+  for (let index = 1; index < argumentsAfterCommand.length; index += 1) {
+    const flag = argumentsAfterCommand[index]
+    if (flag === undefined) continue
+    if (!flag.startsWith("-")) {
+      command.push(flag)
+      continue
+    }
+    if (!knownFlags.has(flag)) {
+      reportCommandUsageError(new Error(`Unknown workspace option: ${flag}`), "xerxes workspace --help")
+    }
+    const value = argumentsAfterCommand[index + 1]
+    if (value === undefined || value.startsWith("-")) {
+      reportCommandUsageError(new Error(`workspace option ${flag} requires a value`), "xerxes workspace --help")
+    }
+    options.set(flag, value)
+    index += 1
+  }
+  const id = options.get("--id")
+  if (typeof id !== "string" || id.length === 0) {
+    reportCommandUsageError(new Error("workspace requires --id"), "xerxes workspace --help")
+  }
+  const result = await runWorkspaceCommand({
+    action,
+    id,
+    ...optionalOptions(options, {
+      workingDir: "--working-dir",
+      path: "--path",
+      content: "--content",
+    }),
+    command,
+  })
+  if (!result.ok) {
+    reportCommandUsageError(new Error(result.error ?? "workspace command failed"), "xerxes workspace --help")
+  }
+  if (result.stdout) console.log(result.stdout)
+  if (result.stderr) console.error(result.stderr)
+  if (result.content !== undefined) console.log(result.content)
+  process.exit(result.exitCode ?? 0)
+} else if (argument === "schedule") {
+  const action = argumentsAfterCommand[0]
+  if (
+    action !== "create" &&
+    action !== "disable" &&
+    action !== "enable" &&
+    action !== "remove" &&
+    action !== "fire" &&
+    action !== "list"
+  ) {
+    reportCommandUsageError(new Error("schedule requires action: create|disable|enable|remove|fire|list"), "xerxes schedule --help")
+  }
+  const options = parseValueOptions(argumentsAfterCommand.slice(1), "schedule", [
+    "--id",
+    "--owner",
+    "--schedule",
+    "--objective",
+    "--delivery-id",
+    "--directory",
+  ]);
+  const result = await runScheduleCommand({
+    action,
+    ...optionalOptions(options, {
+      id: "--id",
+      owner: "--owner",
+      schedule: "--schedule",
+      objective: "--objective",
+      deliveryId: "--delivery-id",
+    }),
+    ...optionalOptions(options, { directory: "--directory" }),
+  })
+  if (!result.ok) {
+    reportCommandUsageError(new Error(result.error ?? "schedule command failed"), "xerxes schedule --help")
+  }
+  if (result.message) console.log(result.message)
+  process.exit(0)
+} else if (argument === "memory") {
+  const action = argumentsAfterCommand[0]
+  if (
+    action !== "record" &&
+    action !== "review" &&
+    action !== "classify" &&
+    action !== "correct" &&
+    action !== "expire" &&
+    action !== "list"
+  ) {
+    reportCommandUsageError(new Error("memory requires action: record|review|classify|correct|expire|list"), "xerxes memory --help")
+  }
+  const options = parseValueOptions(argumentsAfterCommand.slice(1), "memory", [
+    "--id",
+    "--content",
+    "--source",
+    "--agent-id",
+    "--sensitivity",
+    "--original-id",
+    "--new-id",
+    "--reason",
+    "--directory",
+  ]);
+  const sensitivity = options.get("--sensitivity") as MemoryCommandOptions["sensitivity"];
+  const result = await runMemoryCommand({
+    action,
+    ...optionalOptions(options, {
+      id: "--id",
+      content: "--content",
+      source: "--source",
+      agentId: "--agent-id",
+      originalId: "--original-id",
+      newId: "--new-id",
+      reason: "--reason",
+    }),
+    ...(sensitivity === undefined ? {} : { sensitivity }),
+    ...optionalOptions(options, { directory: "--directory" }),
+  })
+  if (!result.ok) {
+    reportCommandUsageError(new Error(result.error ?? "memory command failed"), "xerxes memory --help")
+  }
+  if (result.message) console.log(result.message)
+  process.exit(0)
 } else if (argument === "export") {
   await runExport(argumentsAfterCommand);
 } else if (argument === "daemon") {
@@ -806,6 +975,27 @@ function deferredToolLoadingEnabled(
   return true;
 }
 
+/**
+ * Build an options object that OMITS absent flags rather than setting them to
+ * undefined.
+ *
+ * With exactOptionalPropertyTypes on, `{ id: undefined }` is not the same as
+ * `{}` — and the difference is real at runtime too, wherever a callee uses
+ * `'id' in options` or Object.keys. Spreading this keeps every CLI command's
+ * option object honest without repeating the ternary per field.
+ */
+function optionalOptions<K extends string>(
+  parsed: ReadonlyMap<string, string | undefined>,
+  fields: Readonly<Record<K, string>>,
+): Partial<Record<K, string>> {
+  const result: Partial<Record<K, string>> = {};
+  for (const [key, flag] of Object.entries(fields) as [K, string][]) {
+    const value = parsed.get(flag);
+    if (value !== undefined) result[key] = value;
+  }
+  return result;
+}
+
 function daemonRuntime(
   config: DaemonConfig,
   projectDirectory: string | undefined,
@@ -967,6 +1157,7 @@ function daemonRuntime(
         return {
           mode,
           planMode: changed.planMode,
+          contextDeltaRecorded: true,
         };
       },
     });

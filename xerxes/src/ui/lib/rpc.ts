@@ -17,7 +17,7 @@ export const asCommandDispatch = (value: unknown): CommandDispatchResponse | nul
   const t = o.type
 
   if (t === 'exec' || t === 'plugin') {
-    return { type: t, output: typeof o.output === 'string' ? o.output : undefined }
+    return { type: t, ...(typeof o.output === 'string' ? { output: o.output } : {}) }
   }
 
   if (t === 'alias' && typeof o.target === 'string') {
@@ -25,14 +25,14 @@ export const asCommandDispatch = (value: unknown): CommandDispatchResponse | nul
   }
 
   if (t === 'skill' && typeof o.name === 'string') {
-    return { type: 'skill', name: o.name, message: typeof o.message === 'string' ? o.message : undefined }
+    return { type: 'skill', name: o.name, ...(typeof o.message === 'string' ? { message: o.message } : {}) }
   }
 
   if (t === 'send' && typeof o.message === 'string') {
     return {
       type: 'send',
       message: o.message,
-      notice: typeof o.notice === 'string' ? o.notice : undefined
+      ...(typeof o.notice === 'string' ? { notice: o.notice } : {})
     }
   }
 
@@ -40,7 +40,7 @@ export const asCommandDispatch = (value: unknown): CommandDispatchResponse | nul
     return {
       type: 'prefill',
       message: o.message,
-      notice: typeof o.notice === 'string' ? o.notice : undefined
+      ...(typeof o.notice === 'string' ? { notice: o.notice } : {})
     }
   }
 

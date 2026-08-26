@@ -37,6 +37,7 @@ import type {
 import { controlChannelPath, isWindows } from './lib/hostPlatform.js'
 import { ImageAttachmentError, loadImageAttachment, resolveAttachmentPath } from './lib/imageAttachment.js'
 import type { SessionInfo, Usage } from './types.js'
+import { compact } from './lib/compact.js'
 
 const MAX_GATEWAY_LOG_LINES = 200
 const MAX_LOG_LINE_BYTES = 4096
@@ -1161,7 +1162,10 @@ export class GatewayClient extends EventEmitter {
       }
     }
     if (key === 'mode') {
-      const raw = await this.nativeSuccess('set_mode', { mode: value })
+      const raw = await this.nativeSuccess('set_mode', {
+        mode: value,
+        session_key: this.keyFor(params.session_id)
+      })
       const mode = String(raw.mode ?? value)
       const planMode = raw.plan_mode === true
       return { info: { mode, plan_mode: planMode }, value: mode }
@@ -2009,7 +2013,7 @@ function hasRenderableSessionInfo(info: SessionInfo): boolean {
 
 function mergeUsage(base: Partial<Usage>, incoming?: null | Partial<Usage>): Usage {
   const merged = { ...base, ...(incoming ?? {}) }
-  return {
+  return compact<Usage>({
     calls: merged.calls ?? 0,
     compressions: merged.compressions,
     context_max: incoming?.context_max || base.context_max,
@@ -2022,7 +2026,7 @@ function mergeUsage(base: Partial<Usage>, incoming?: null | Partial<Usage>): Usa
     output: merged.output ?? 0,
     reasoning: merged.reasoning,
     total: merged.total ?? 0
-  }
+  })
 }
 
 function mergeSessionInfo(base: SessionInfo, incoming?: null | Partial<SessionInfo>): SessionInfo {
@@ -2030,7 +2034,7 @@ function mergeSessionInfo(base: SessionInfo, incoming?: null | Partial<SessionIn
     return base
   }
 
-  return {
+  return compact<SessionInfo>({
     ...base,
     ...incoming,
     cwd: incoming.cwd || base.cwd,
@@ -2046,7 +2050,7 @@ function mergeSessionInfo(base: SessionInfo, incoming?: null | Partial<SessionIn
     tools: incoming.tools && hasStringGroups(incoming.tools) ? incoming.tools : base.tools,
     usage: mergeUsage(base.usage ?? {}, incoming.usage),
     version: incoming.version || base.version
-  }
+  })
 }
 
 async function localGitHead(projectDir: string): Promise<string> {

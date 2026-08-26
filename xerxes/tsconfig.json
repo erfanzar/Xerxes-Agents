@@ -6,6 +6,20 @@
     "moduleResolution": "bundler",
     "strict": true,
     "noUncheckedIndexedAccess": true,
+    // Do not remove this to make `check` green.
+    //
+    // It was dropped repo-wide once to accommodate seven spots in one branch,
+    // which silently made `{ key: undefined }` assignable to `key?: T`
+    // everywhere — including the many places this codebase distinguishes an
+    // absent key from an undefined one. Those seven are fixed with the
+    // `...(x === undefined ? {} : { x })` idiom used throughout.
+    //
+    // Known remaining failures are in src/ui adapter and merge builders, which
+    // predate this flag and are pulled into this program transitively by the
+    // two runtime tests that import UI modules (src/ui is excluded below).
+    // They need a real refactor of those builders, not a wider type: widening
+    // their optional properties to `| undefined` turns the flag off for those
+    // types by another name.
     "exactOptionalPropertyTypes": true,
     "verbatimModuleSyntax": true,
     "isolatedModules": true,

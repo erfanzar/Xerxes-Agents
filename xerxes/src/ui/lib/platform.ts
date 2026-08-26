@@ -244,6 +244,9 @@ export const parseVoiceRecordKey = (raw: unknown): ParsedVoiceRecordKey => {
   }
 
   const last = parts[parts.length - 1]
+  if (last === undefined) {
+    return DEFAULT_VOICE_RECORD_KEY
+  }
   const modCandidates = parts.slice(0, -1)
 
   // Reject multi-modifier chords (``ctrl+alt+r``, ``cmd+ctrl+b``) rather
@@ -265,7 +268,11 @@ export const parseVoiceRecordKey = (raw: unknown): ParsedVoiceRecordKey => {
     return DEFAULT_VOICE_RECORD_KEY
   }
 
-  const norm = _MOD_ALIASES[modCandidates[0]]
+  const modCandidate = modCandidates[0]
+  if (modCandidate === undefined) {
+    return DEFAULT_VOICE_RECORD_KEY
+  }
+  const norm = _MOD_ALIASES[modCandidate]
 
   // Unknown modifier token (e.g. bare ``meta+b`` which is ambiguous on
   // the wire) falls back to the documented default rather than
@@ -325,10 +332,10 @@ export const parseVoiceRecordKey = (raw: unknown): ParsedVoiceRecordKey => {
  * 2 on #19835). */
 export const formatVoiceRecordKey = (parsed: ParsedVoiceRecordKey): string => {
   const modLabel =
-    parsed.mod === 'super' ? (isMac ? 'Cmd' : 'Super') : parsed.mod[0].toUpperCase() + parsed.mod.slice(1)
+    parsed.mod === 'super' ? (isMac ? 'Cmd' : 'Super') : parsed.mod.charAt(0).toUpperCase() + parsed.mod.slice(1)
   // Named tokens render in title case (Ctrl+Space, Ctrl+Enter); single
   // chars render upper-case to match the existing Ctrl+B convention.
-  const keyLabel = parsed.named ? parsed.named[0].toUpperCase() + parsed.named.slice(1) : parsed.ch.toUpperCase()
+  const keyLabel = parsed.named ? parsed.named.charAt(0).toUpperCase() + parsed.named.slice(1) : parsed.ch.toUpperCase()
 
   return `${modLabel}+${keyLabel}`
 }

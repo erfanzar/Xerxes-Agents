@@ -43,7 +43,7 @@ export async function runMemoryCommand(options: MemoryCommandOptions): Promise<M
         content: options.content,
         source: options.source,
         agentId: options.agentId,
-        sensitivity: options.sensitivity,
+        ...(options.sensitivity === undefined ? {} : { sensitivity: options.sensitivity }),
       })
       return { ok: true, message: `recorded memory ${options.id}` }
     }

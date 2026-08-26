@@ -9,7 +9,7 @@ export const localWorkspaceHost: LocalWorkspaceHostPort = {
   async spawn(command, options): Promise<WorkspaceExecResult> {
     const child = Bun.spawn([...command], {
       cwd: options.cwd,
-      env: options.env,
+      ...(options.env === undefined ? {} : { env: options.env }),
       stdout: 'pipe',
       stderr: 'pipe',
     })

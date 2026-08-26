@@ -11,6 +11,8 @@ import { resolveInteractionMode, type InteractionMode } from './interactionModes
 export interface InteractionModeChange {
   readonly mode: InteractionMode
   readonly planMode: boolean
+  /** The host already queued the durable next-request context notice. */
+  readonly contextDeltaRecorded?: boolean
 }
 
 export interface InteractionModeToolHost {
@@ -109,8 +111,10 @@ async function applyMode(
   assertMainAgentContext(context)
   const previousMode = resolveInteractionMode(context.metadata.interaction_mode)
   const changed = await host.setMode({ context, mode, reason })
-  const delta = contextDeltaFor(previousMode, changed.mode, Date.now(), 'interaction-mode')
-  if (delta) appendContextDelta(context.metadata, delta)
+  if (!changed.contextDeltaRecorded) {
+    const delta = contextDeltaFor(previousMode, changed.mode, Date.now(), 'interaction-mode')
+    if (delta) appendContextDelta(context.metadata, delta)
+  }
   // Recorded as PENDING, never written over `interaction_mode`. The session
   // itself has already moved — the host commits immediately and the daemon
   // announces it — but the running turn's policy is keyed off this metadata,

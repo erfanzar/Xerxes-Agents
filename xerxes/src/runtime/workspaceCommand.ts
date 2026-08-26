@@ -34,7 +34,11 @@ export async function runWorkspaceCommand(options: WorkspaceCommandOptions): Pro
     switch (options.action) {
       case 'create': {
         if (!options.id) return { ok: false, error: 'workspace create requires --id' }
-        const connection = await provider.prepare({ id: options.id, kind: 'local', workingDir: options.workingDir })
+        const connection = await provider.prepare({
+          id: options.id,
+          kind: 'local',
+          ...(options.workingDir === undefined ? {} : { workingDir: options.workingDir }),
+        })
         return { ok: true, connection: { id: connection.id, kind: connection.kind, workingDir: connection.workingDir } }
       }
       case 'exec': {

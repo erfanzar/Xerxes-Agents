@@ -521,7 +521,7 @@ describe('GatewayClient session lifecycle', () => {
 
     privateClient.rawRequest = async (method, params) => {
       expect(method).toBe('set_mode')
-      expect(params).toEqual({ mode: 'planner' })
+      expect(params).toEqual({ mode: 'planner', session_key: 'session-1' })
       return { ok: true, mode: 'plan', plan_mode: true }
     }
     await expect(privateClient.configSet({ key: 'mode', session_id: 'session-1', value: 'planner' }))

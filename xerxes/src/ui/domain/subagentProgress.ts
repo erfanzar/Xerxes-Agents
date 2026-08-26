@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import type { SubagentEventPayload, SubagentSnapshotPayload } from '../gatewayTypes.js'
+import { compact } from '../lib/compact.js'
 import type { Msg, SubagentProgress, SubagentStatus } from '../types.js'
 
 export type SubagentProgressPatch = (current: SubagentProgress) => Partial<SubagentProgress>
@@ -22,7 +23,7 @@ export function mergeSubagentProgress(
       }))
     : base.outputTail
 
-  return {
+  return compact<SubagentProgress>({
     ...base,
     agentType: payload.agent_type ?? base.agentType,
     name: payload.agent_name ?? base.name,
@@ -50,7 +51,7 @@ export function mergeSubagentProgress(
     toolCount: payload.tool_count ?? base.toolCount,
     toolsets: payload.toolsets ?? base.toolsets,
     ...patch(base)
-  }
+  })
 }
 
 /** Terminal/visible status for a persisted snapshot row the daemon reports. */

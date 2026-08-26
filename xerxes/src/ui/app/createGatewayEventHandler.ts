@@ -19,6 +19,7 @@ import { formatAbandonedClarify, formatToolCall, stripAnsi } from '../lib/text.j
 import { summarizeToolStartDisplay } from '../lib/toolStartDisplay.js'
 import { fromSkin } from '../theme.js'
 import type {
+  ClarifyReq,
   Msg,
   SessionInfo,
   SlashCatalog,
@@ -27,7 +28,8 @@ import type {
   SubagentToolCall
 } from '../types.js'
 
-import type { GatewayEventHandlerContext } from './interfaces.js'
+import type { GatewayEventHandlerContext, Notice } from './interfaces.js'
+import { compact } from '../lib/compact.js'
 import { getOverlayState, patchOverlayState } from './overlayStore.js'
 import { catalogFromSessionSkills, mergeSkillCatalog, skillInfoFromCatalog } from './skillCatalog.js'
 import { reconcileSpawnHistorySubagent } from './spawnHistoryStore.js'
@@ -361,7 +363,9 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
           }))
           setHistoryItems(prev =>
             prev.map(m =>
-              m.kind === 'intro' ? { ...m, info: mergeCatalogSkillInfo(m.info, catalogSkills) ?? m.info } : m
+              m.kind === 'intro'
+                ? compact<Msg>({ ...m, info: mergeCatalogSkillInfo(m.info, catalogSkills) ?? m.info })
+                : m
             )
           )
         }
@@ -493,7 +497,7 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
         patchUiState(state => ({
           ...state,
           info: state.info
-            ? {
+            ? compact<SessionInfo>({
                 ...state.info,
                 ...info,
                 cwd: info.cwd || state.info.cwd,
@@ -506,7 +510,7 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
                   ? info.skillDescriptions
                   : state.info.skillDescriptions,
                 tools: Object.keys(info.tools ?? {}).length ? info.tools : state.info.tools
-              }
+              })
             : hasRenderableInfo
               ? info
               : state.info,
@@ -525,7 +529,7 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
 
             return {
               ...m,
-              info: {
+              info: compact<SessionInfo>({
                 ...existing,
                 ...info,
                 cwd: info.cwd || existing.cwd,
@@ -538,7 +542,7 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
                   ? info.skillDescriptions
                   : existing.skillDescriptions,
                 tools: Object.keys(info.tools ?? {}).length ? info.tools : existing.tools
-              }
+              })
             }
           })
         )
@@ -583,11 +587,11 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
         patchUiState(state => ({
           ...state,
           info: state.info
-            ? {
+            ? compact<SessionInfo>({
                 ...state.info,
                 mode: p.mode || state.info.mode,
                 reasoning_effort: p.reasoning_effort || state.info.reasoning_effort
-              }
+              })
             : state.info,
           usage: p.usage ? { ...state.usage, ...p.usage } : state.usage
         }))
@@ -645,14 +649,14 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
           return
         }
 
-        turnController.showNotice({
+        turnController.showNotice(compact<Notice>({
           id: p.id,
           key: p.key,
           kind: p.kind ?? 'sticky',
           level: p.level ?? 'info',
           text: p.text,
           ttl_ms: p.ttl_ms ?? null
-        })
+        }))
 
         return
       }
@@ -860,7 +864,7 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
 
       case 'clarify.request':
         patchOverlayState({
-          clarify: {
+          clarify: compact<ClarifyReq>({
             allowFreeform: ev.payload.allow_free_form,
             choices: ev.payload.choices,
             placeholder: ev.payload.placeholder,
@@ -869,7 +873,7 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
             requestId: ev.payload.request_id,
             source: ev.payload.source,
             toolId: ev.payload.tool_id
-          }
+          })
         })
         setStatus('waiting for input…')
 
@@ -1023,11 +1027,11 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
         const patch: SubagentProgressPatch = c => {
           const fallbackDuration = c.startedAt ? Math.max(0, (Date.now() - c.startedAt) / 1000) : undefined
 
-          return {
+          return compact<Partial<SubagentProgress>>({
             durationSeconds: ev.payload.duration_seconds ?? c.durationSeconds ?? fallbackDuration,
             status: normalizeSubagentStatus(ev.payload.status, 'completed'),
             summary: ev.payload.summary || ev.payload.text || c.summary
-          }
+          })
         }
         turnController.upsertSubagent(ev.payload, patch, { createIfMissing: false })
         reconcileArchived(ev.payload, patch)

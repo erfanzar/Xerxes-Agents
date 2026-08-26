@@ -7,6 +7,7 @@ import {
   type GatewayTranscriptMessage,
   type SubagentEventPayload
 } from './gatewayTypes.js'
+import { compact } from './lib/compact.js'
 import { summarizeToolStartDisplay } from './lib/toolStartDisplay.js'
 import type { SessionInfo, Usage } from './types.js'
 
@@ -70,37 +71,63 @@ const subagentMetadata = (...sources: Record<string, unknown>[]): Partial<Subage
       })
     : undefined
 
+  // Each accessor is called once and held: calling it twice — inside the
+  // guard and again inside the object — gave TypeScript nothing to narrow,
+  // so every field stayed `T | undefined` against an optional property.
+  const agentName = stringField('agent_name')
+  const agentType = stringField('agent_type')
+  const apiCalls = numberField('api_calls')
+  const costUsd = numberField('cost_usd')
+  const creatorId = stringField('creator_id')
+  const depth = numberField('depth')
+  const durationSeconds = numberField('duration_seconds')
+  const filesRead = listField('files_read')
+  const filesWritten = listField('files_written')
+  const inputTokens = numberField('input_tokens')
+  const iteration = numberField('iteration')
+  const model = stringField('model')
+  const outputTokens = numberField('output_tokens')
+  const cacheReadTokens = numberField('cache_read_tokens')
+  const cacheCreationTokens = numberField('cache_creation_tokens')
+  const reasoningTokens = numberField('reasoning_tokens')
+  const rules = listField('rules')
+  const summary = stringField('summary')
+  const taskCount = numberField('task_count')
+  const title = stringField('title')
+  const toolCount = numberField('tool_count')
+  const toolsets = listField('toolsets')
+
   return {
-    ...(stringField('agent_name') ? { agent_name: stringField('agent_name') } : {}),
-    ...(stringField('agent_type') ? { agent_type: stringField('agent_type') } : {}),
-    ...(numberField('api_calls') !== undefined ? { api_calls: numberField('api_calls') } : {}),
-    ...(numberField('cost_usd') !== undefined ? { cost_usd: numberField('cost_usd') } : {}),
-    ...(stringField('creator_id') ? { creator_id: stringField('creator_id') } : {}),
-    ...(numberField('depth') !== undefined ? { depth: numberField('depth') } : {}),
-    ...(numberField('duration_seconds') !== undefined ? { duration_seconds: numberField('duration_seconds') } : {}),
-    ...(listField('files_read') ? { files_read: listField('files_read') } : {}),
-    ...(listField('files_written') ? { files_written: listField('files_written') } : {}),
-    ...(numberField('input_tokens') !== undefined ? { input_tokens: numberField('input_tokens') } : {}),
-    ...(numberField('iteration') !== undefined ? { iteration: numberField('iteration') } : {}),
-    ...(stringField('model') ? { model: stringField('model') } : {}),
-    ...(outputTail ? { output_tail: outputTail } : {}),
-    ...(numberField('output_tokens') !== undefined ? { output_tokens: numberField('output_tokens') } : {}),
-    ...(numberField('cache_read_tokens') !== undefined ? { cache_read_tokens: numberField('cache_read_tokens') } : {}),
-    ...(numberField('cache_creation_tokens') !== undefined ? { cache_creation_tokens: numberField('cache_creation_tokens') } : {}),
-    ...(numberField('reasoning_tokens') !== undefined ? { reasoning_tokens: numberField('reasoning_tokens') } : {}),
-    ...(listField('rules') ? { rules: listField('rules') } : {}),
-    ...(stringField('summary') ? { summary: stringField('summary') } : {}),
-    ...(numberField('task_count') !== undefined ? { task_count: numberField('task_count') } : {}),
-    ...(stringField('title') ? { title: stringField('title') } : {}),
-    ...(numberField('tool_count') !== undefined ? { tool_count: numberField('tool_count') } : {}),
-    ...(listField('toolsets') ? { toolsets: listField('toolsets') } : {})
+    ...(agentName ? { agent_name: agentName } : {}),
+    ...(agentType ? { agent_type: agentType } : {}),
+    ...(apiCalls !== undefined ? { api_calls: apiCalls } : {}),
+    ...(costUsd !== undefined ? { cost_usd: costUsd } : {}),
+    ...(creatorId ? { creator_id: creatorId } : {}),
+    ...(depth !== undefined ? { depth: depth } : {}),
+    ...(durationSeconds !== undefined ? { duration_seconds: durationSeconds } : {}),
+    ...(filesRead ? { files_read: filesRead } : {}),
+    ...(filesWritten ? { files_written: filesWritten } : {}),
+    ...(inputTokens !== undefined ? { input_tokens: inputTokens } : {}),
+    ...(iteration !== undefined ? { iteration: iteration } : {}),
+    ...(model ? { model: model } : {}),
+    ...(outputTokens !== undefined ? { output_tokens: outputTokens } : {}),
+    ...(cacheReadTokens !== undefined ? { cache_read_tokens: cacheReadTokens } : {}),
+    ...(cacheCreationTokens !== undefined ? { cache_creation_tokens: cacheCreationTokens } : {}),
+    ...(reasoningTokens !== undefined ? { reasoning_tokens: reasoningTokens } : {}),
+    ...(rules ? { rules: rules } : {}),
+    ...(summary ? { summary: summary } : {}),
+    ...(taskCount !== undefined ? { task_count: taskCount } : {}),
+    ...(title ? { title: title } : {}),
+    ...(toolCount !== undefined ? { tool_count: toolCount } : {}),
+    ...(toolsets ? { toolsets: toolsets } : {}),
+    ...(outputTail ? { output_tail: outputTail } : {})
   }
 }
 
 export function sessionInfoFromInit(payload: Record<string, unknown>): SessionInfo {
   const skills = payload.skills
   const skillList = Array.isArray(skills) ? skills.map(s => String(s)).filter(Boolean) : []
-  return {
+  return compact<SessionInfo>({
     cwd: str(payload.cwd),
     head_hash: str(payload.head_hash),
     model: str(payload.model),
@@ -114,7 +141,7 @@ export function sessionInfoFromInit(payload: Record<string, unknown>): SessionIn
     tools: {},
     usage: usageFromStatus(payload),
     version: str(payload.version)
-  }
+  })
 }
 
 /**
