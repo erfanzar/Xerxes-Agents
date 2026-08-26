@@ -5,11 +5,19 @@ import { appendFile, mkdir, open, readdir, readFile, rename, rm, stat, utimes } 
 import { basename, dirname, resolve, sep } from 'node:path'
 
 import { ValidationError } from '../core/errors.js'
+import { inspectTranscriptEventLog, type TranscriptEventInspection } from './transcriptEventInspection.js'
 import {
   RESUME_REPLAY_SENTINEL,
   repairResumedTranscript,
   type PendingResumeReplay,
 } from './resumeRepair.js'
+import {
+  encodeTranscriptEvent,
+  readTranscriptEventRecords,
+  transcriptMessageAppendedEvent,
+  type TranscriptEvent,
+  type TranscriptEventIdentity,
+} from './transcriptEventLog.js'
 
 export const DAEMON_SESSION_FORMAT = 'xerxes-daemon-session'
 export const DAEMON_SESSION_SCHEMA_VERSION = 2
@@ -45,6 +53,8 @@ export interface DaemonTranscript {
   readonly format: 'bun-v2' | 'legacy-v1'
   /** Monotonic persisted revision used to authorize transcript mutations. */
   readonly generation?: number
+  /** Byte prefix of the append-only event log covered by this snapshot. */
+  readonly eventLogOffset?: number
   readonly interactionMode: string
   readonly key: string
   readonly messages: readonly RawMessage[]
@@ -149,7 +159,7 @@ export function normalizeDaemonTranscript(raw: unknown, options: TranscriptLoadO
   const format = raw.format === DAEMON_SESSION_FORMAT ? 'bun-v2' : 'legacy-v1'
   const knownKeys = new Set([
     'format', 'schema_version', 'session_id', 'key', 'agent_id', 'cwd', 'project_dir', 'workspace', 'updated_at', 'messages',
-    'message_count', 'generation',
+    'message_count', 'generation', 'event_log_offset', 'journal_base',
     'turn_count', 'interaction_mode', 'mode', 'plan_mode', 'api_calls_complete', 'total_api_calls', 'total_input_tokens',
     'total_output_tokens',
     'usage_complete', 'metadata',
@@ -163,10 +173,12 @@ export function normalizeDaemonTranscript(raw: unknown, options: TranscriptLoadO
   )
   const repair = repairResumedTranscript(validMessages)
   const totalApiCalls = optionalIntegerValue(raw.total_api_calls)
+  const eventLogOffset = optionalNonNegativeInteger(raw.event_log_offset)
   return {
     format,
     schemaVersion: numberValue(raw.schema_version),
     generation: integerValue(raw.generation),
+    ...(eventLogOffset === undefined ? {} : { eventLogOffset }),
     sessionId: rawSessionId,
     // Resume always binds to the caller's requested ID, never stale slot keys stored on disk.
     key: options.requestedSessionKey,
@@ -218,6 +230,7 @@ export function daemonTranscriptRecord(transcript: DaemonTranscript): Record<str
     workspace: transcript.workspace,
     updated_at: transcript.updatedAt || new Date().toISOString(),
     generation: transcript.generation ?? 0,
+    ...(transcript.eventLogOffset === undefined ? {} : { event_log_offset: transcript.eventLogOffset }),
     turn_count: transcript.turnCount,
     message_count: transcript.messages.length,
     // Journal coverage watermark: the number of raw-list positions this
@@ -400,10 +413,24 @@ export class DaemonTranscriptStore {
    * expected and is discarded on replay.
    */
   async appendMessage(sessionId: string, message: RawMessage, index: number): Promise<void> {
-    await this.serializeTranscriptWrite(sessionId, async () => {
+    await this.appendEvent(sessionId, identity => transcriptMessageAppendedEvent(sessionId, index, message, identity))
+  }
+
+  /** Append any typed session event with one lock-authorized identity. */
+  async appendEvent(
+    sessionId: string,
+    create: (identity: TranscriptEventIdentity) => TranscriptEvent,
+  ): Promise<TranscriptEvent> {
+    return this.serializeTranscriptWrite(sessionId, async () => {
       const path = this.journalPathFor(sessionId)
       await mkdir(dirname(path), { recursive: true })
-      await appendFile(path, `${JSON.stringify({ index, message })}\n`, 'utf8')
+      const identity = { eventId: crypto.randomUUID(), sequence: await this.nextEventSequence(sessionId) }
+      const event = create(identity)
+      if (event.sessionId !== sessionId || event.eventId !== identity.eventId || event.sequence !== identity.sequence) {
+        throw new ValidationError('transcript_event', 'event factory must preserve its allocated session identity')
+      }
+      await appendFile(path, encodeTranscriptEvent(event), 'utf8')
+      return event
     })
   }
 
@@ -444,22 +471,17 @@ export class DaemonTranscriptStore {
       const persisted = await this.readPersistedState(transcript.sessionId)
       const messages = this.resolveMessages(transcript, options, persisted)
       const generation = persisted.generation + 1
+      const inheritedOffset = Math.max(persisted.eventLogOffset, transcript.eventLogOffset ?? 0)
+      const coveredOffset = options.mode === 'rewrite'
+        ? await this.eventLogSize(transcript.sessionId)
+        : inheritedOffset
       await atomicJsonWrite(
         this.pathFor(transcript.sessionId),
-        daemonTranscriptRecord({ ...transcript, generation, messages }),
+        daemonTranscriptRecord({ ...transcript, generation, eventLogOffset: coveredOffset, messages }),
       )
-      // Appends cannot enter this critical section while journal coverage is
-      // settled. The cutoff is the persisted coverage watermark when one
-      // exists: journal indexes are absolute against the raw list of the era
-      // that watermark was written in, and a shrinking save publishes a new,
-      // lower base. Freezing the load-time raw length here instead would let
-      // entries numbered from the shrunken base fall below the threshold and
-      // be deleted although their messages were never persisted.
-      const coveredThrough = Math.max(
-        persisted.journalBase ?? transcript.rawMessageCount ?? messages.length,
-        messages.length,
-      )
-      await this.discardCoveredJournalEntries(transcript.sessionId, coveredThrough, messages.length)
+      // The snapshot above covers only events the caller actually loaded into
+      // `messages`. Events appended concurrently or after that load remain
+      // beyond its inherited byte watermark and replay on the next resume.
       options.onSavedGeneration?.(generation)
     })
   }
@@ -502,6 +524,21 @@ export class DaemonTranscriptStore {
       .sort((left, right) => timestampMillis(right.updatedAt) - timestampMillis(left.updatedAt))
   }
 
+  /** Inspect event-log integrity without mutating persisted history. */
+  async inspectEventLog(sessionId: string): Promise<
+    | { readonly kind: 'inspected'; readonly report: TranscriptEventInspection }
+    | { readonly kind: 'missing'; readonly sessionId: string }
+  > {
+    let bytes: Uint8Array
+    try {
+      bytes = await readFile(this.journalPathFor(sessionId))
+    } catch (error) {
+      if (isMissing(error)) return { kind: 'missing', sessionId }
+      throw error
+    }
+    return { kind: 'inspected', report: inspectTranscriptEventLog(bytes, sessionId) }
+  }
+
   /** Remove one persisted transcript by its canonical resume id. */
   async remove(sessionId: string): Promise<boolean> {
     return this.serializeTranscriptWrite(sessionId, async () => {
@@ -528,20 +565,16 @@ export class DaemonTranscriptStore {
 
   private async readPersistedState(
     sessionId: string,
-  ): Promise<{ readonly generation: number; readonly journalBase: number | undefined; readonly messages: readonly RawMessage[] }> {
+  ): Promise<{ readonly eventLogOffset: number; readonly generation: number; readonly messages: readonly RawMessage[] }> {
     try {
       const raw = JSON.parse(await readFile(this.pathFor(sessionId), 'utf8')) as unknown
       return {
+        eventLogOffset: isRecord(raw) ? optionalNonNegativeInteger(raw.event_log_offset) ?? 0 : 0,
         generation: isRecord(raw) ? integerValue(raw.generation) : 0,
-        // Snapshots written before the watermark existed have none; callers
-        // fall back to their own load-time raw count for those.
-        journalBase: isRecord(raw) && typeof raw.journal_base === 'number' && Number.isFinite(raw.journal_base)
-          ? raw.journal_base
-          : undefined,
         messages: isRecord(raw) && Array.isArray(raw.messages) ? raw.messages.filter(isRecord) : [],
       }
     } catch (error) {
-      if (isMissing(error)) return { generation: 0, journalBase: undefined, messages: [] }
+      if (isMissing(error)) return { eventLogOffset: 0, generation: 0, messages: [] }
       throw error
     }
   }
@@ -573,43 +606,61 @@ export class DaemonTranscriptStore {
   }
 
   /**
-   * Drop journal entries this snapshot subsumes and rebase the survivors into
-   * the saved snapshot's coordinate system.
+   * Allocate the next journal sequence by reading the tail, not the whole log.
    *
-   * Entries below `coveredThrough` are either persisted or were dropped by
-   * resume repair, so they must never replay again. Survivors — entries
-   * numbered from a base the snapshot has not reached — shift by the distance
-   * between their era's base and the new message count, keeping the journal
-   * anchored to "absolute position against the current snapshot" across
-   * shrink saves.
+   * This used to read and JSON-parse the entire journal on every append, so
+   * journalling a session was quadratic in its own length and a long chat
+   * re-parsed a growing sidecar on every single message. The log is append-only
+   * with monotonic sequences, so the highest one is in the last complete line;
+   * a bounded tail read answers the same question in constant time.
+   *
+   * Deliberately still reading from disk rather than caching in memory: the
+   * journal is a crash-recovery artifact and another writer on the same file
+   * must not be allocated a colliding sequence. The full-log fallback covers a
+   * final line torn by a crash mid-append, and a window too small to hold one
+   * complete record.
    */
-  private async discardCoveredJournalEntries(sessionId: string, coveredThrough: number, rebasedBase: number): Promise<void> {
+  private async nextEventSequence(sessionId: string): Promise<number> {
     const path = this.journalPathFor(sessionId)
-    let contents: string
+    let size: number
     try {
-      contents = await readFile(path, 'utf8')
+      size = (await stat(path)).size
     } catch (error) {
-      if (isMissing(error)) return
+      if (isMissing(error)) return 1
       throw error
     }
-    const retained = contents.split('\n').flatMap(line => {
-      if (!line.trim()) return []
-      let entry: unknown
-      try {
-        entry = JSON.parse(line) as unknown
-      } catch {
-        // A torn final line carries no recoverable entry. Writers are excluded
-        // from this critical section, so dropping it cannot race live bytes.
-        return []
-      }
-      if (!isRecord(entry) || typeof entry.index !== 'number' || entry.index < coveredThrough) return []
-      return [JSON.stringify({ index: entry.index - coveredThrough + rebasedBase, message: entry.message })]
-    })
-    if (retained.length === 0) {
-      await rm(path, { force: true })
-      return
+    if (size === 0) return 1
+
+    const window = Math.min(size, NEXT_SEQUENCE_TAIL_BYTES)
+    const handle = await open(path, 'r')
+    let tail: Buffer
+    try {
+      tail = Buffer.alloc(window)
+      await handle.read(tail, 0, window, size - window)
+    } finally {
+      await handle.close()
     }
-    await atomicTextWrite(path, `${retained.join('\n')}\n`)
+    const highest = highestSequenceIn(tail, sessionId, window < size)
+    if (highest !== undefined) return highest + 1
+
+    // Nothing usable in the tail: fall back to the exhaustive read this
+    // replaced, so a damaged or unexpectedly shaped log still allocates safely.
+    const contents = await readFile(path)
+    const decoded = readTranscriptEventRecords(contents, sessionId)
+    let maximum = 0
+    for (const event of decoded.events) {
+      if (event.sequence !== undefined) maximum = Math.max(maximum, event.sequence)
+    }
+    return maximum + 1
+  }
+
+  private async eventLogSize(sessionId: string): Promise<number> {
+    try {
+      return (await stat(this.journalPathFor(sessionId))).size
+    } catch (error) {
+      if (isMissing(error)) return 0
+      throw error
+    }
   }
 
   private async serializeTranscriptWrite<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
@@ -670,43 +721,44 @@ export class DaemonTranscriptStore {
     }
   }
 
-  /** Splice journalled messages onto a freshly parsed record, in place. */
+  /** Splice uncovered append-only message events onto a freshly parsed snapshot. */
   private async replayMessageJournal(sessionId: string, raw: unknown): Promise<void> {
-    if (!isRecord(raw) || !Array.isArray(raw.messages)) {
-      return
-    }
-    let contents: string
+    if (!isRecord(raw) || !Array.isArray(raw.messages)) return
+    let contents: Uint8Array
     try {
-      contents = await readFile(this.journalPathFor(sessionId), 'utf8')
+      contents = await readFile(this.journalPathFor(sessionId))
     } catch {
       return
     }
-    const pending = new Map<number, RawMessage>()
-    for (const line of contents.split('\n')) {
-      if (!line.trim()) continue
-      let entry: unknown
-      try {
-        entry = JSON.parse(line) as unknown
-      } catch {
-        // A crash mid-append leaves a partial final line. Everything before it
-        // is intact, so stop here instead of discarding the whole journal.
-        break
+    const offset = optionalNonNegativeInteger(raw.event_log_offset) ?? 0
+    const safeOffset = offset <= contents.byteLength ? offset : 0
+    const decoded = readTranscriptEventRecords(contents.subarray(safeOffset), sessionId, safeOffset)
+
+    // The first durable append for an index wins. A retry cannot rewrite
+    // logical history merely by appending another row with the same index.
+    const pending = new Map<number, { readonly endOffset: number; readonly message: RawMessage }>()
+    for (const record of decoded.records) {
+      if (record.event.type !== 'message_appended') continue
+      if (!pending.has(record.event.index)) {
+        pending.set(record.event.index, { endOffset: record.endOffset, message: { ...record.event.message } })
       }
-      if (!isRecord(entry) || typeof entry.index !== 'number' || !isRecord(entry.message)) continue
-      pending.set(entry.index, entry.message)
     }
-    // Indexes are absolute positions in the message list, so entries the saved
-    // snapshot already covers are ignored and a gap stops the replay rather
-    // than reordering the transcript around a lost write.
+
+    // Indexes are absolute positions in the message list. The watermark moves
+    // only through the contiguous records actually projected into messages;
+    // gaps, malformed lines, and torn tails stay uncovered for later repair.
     let next = raw.messages.length
     let replayed = 0
-    for (let message = pending.get(next); message !== undefined; message = pending.get(next)) {
-      raw.messages.push(message)
+    let coveredOffset = safeOffset
+    for (let record = pending.get(next); record !== undefined; record = pending.get(next)) {
+      raw.messages.push(record.message)
+      coveredOffset = record.endOffset
       replayed += 1
       next += 1
     }
     if (replayed > 0) {
-      console.warn(`Recovered ${replayed} unsaved message(s) for session ${sessionId} from its crash journal`)
+      raw.event_log_offset = coveredOffset
+      console.warn(`Recovered ${replayed} unsaved message(s) for session ${sessionId} from its event log`)
     }
   }
 }
@@ -723,6 +775,32 @@ function normalizedPrefix(messages: readonly RawMessage[]): readonly RawMessage[
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+/** Tail window for sequence allocation; comfortably larger than one record. */
+const NEXT_SEQUENCE_TAIL_BYTES = 64 * 1024
+
+/**
+ * Highest sequence among the complete lines in a tail buffer.
+ *
+ * `partialLeadingLine` drops the first line when the window starts mid-record,
+ * which would otherwise be parsed as garbage. Scans from the end and returns the
+ * first line that yields a sequence, so a torn final line is skipped rather than
+ * treated as the answer.
+ */
+function highestSequenceIn(
+  tail: Buffer,
+  sessionId: string,
+  partialLeadingLine: boolean,
+): number | undefined {
+  const lines = tail.toString('utf8').split('\n').filter(line => line.trim())
+  const usable = partialLeadingLine ? lines.slice(1) : lines
+  for (let index = usable.length - 1; index >= 0; index -= 1) {
+    const decoded = readTranscriptEventRecords(new TextEncoder().encode(`${usable[index]}\n`), sessionId)
+    const sequence = decoded.events[0]?.sequence
+    if (sequence !== undefined) return sequence
+  }
+  return undefined
 }
 
 function isMissing(error: unknown): boolean {
@@ -943,6 +1021,10 @@ function positiveDuration(value: number | undefined, fallback: number): number {
 
 function optionalIntegerValue(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : undefined
+}
+
+function optionalNonNegativeInteger(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined
 }
 
 function numberValue(value: unknown): number | undefined {

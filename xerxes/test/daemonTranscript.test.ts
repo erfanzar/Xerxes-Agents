@@ -14,6 +14,7 @@ import {
   normalizeDaemonTranscript,
   repairToolPairs,
 } from '../src/session/daemonTranscript.js'
+import { transcriptTurnStartedEvent } from '../src/session/transcriptEventLog.js'
 
 test('daemon transcript normalizer repairs only orphaned contiguous tool calls', () => {
   const repaired = repairToolPairs([
@@ -222,6 +223,117 @@ test('a journal append racing a save remains recoverable', async () => {
     expect((await store.load(sessionId))?.messages).toEqual([
       { role: 'user', content: 'saved turn' },
       { role: 'assistant', content: 'raced answer' },
+    ])
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('journal appends allocate stable IDs and monotonic per-session sequences', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-transcript-event-sequence-'))
+  try {
+    const sessionId = 'abcddcbaabcddcba'
+    const store = new DaemonTranscriptStore({ directory, currentProjectDirectory: '/project' })
+    await Promise.all([
+      store.appendMessage(sessionId, { role: 'user', content: 'first' }, 0),
+      store.appendMessage(sessionId, { role: 'assistant', content: 'second' }, 1),
+    ])
+
+    const rows = (await Bun.file(store.journalPathFor(sessionId)).text())
+      .trim().split('\n').map(line => JSON.parse(line) as Record<string, unknown>)
+    expect(rows.map(row => row.sequence)).toEqual([1, 2])
+    expect(rows.every(row => typeof row.event_id === 'string' && row.event_id.length > 0)).toBeTrue()
+    expect(new Set(rows.map(row => row.event_id)).size).toBe(2)
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('generic lifecycle appends receive the store identity and reject forged identities', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-transcript-event-generic-'))
+  try {
+    const sessionId = 'deadbeefcafefeed'
+    const store = new DaemonTranscriptStore({ directory, currentProjectDirectory: '/project' })
+    const event = await store.appendEvent(sessionId, identity => transcriptTurnStartedEvent(
+      sessionId, 'turn-1', { mode: 'code' }, identity,
+    ))
+    expect(event).toMatchObject({ type: 'turn_started', sequence: 1 })
+    await expect(store.appendEvent(sessionId, identity => transcriptTurnStartedEvent(
+      sessionId, 'turn-2', {}, { ...identity, eventId: 'forged' },
+    ))).rejects.toThrow('event factory must preserve its allocated session identity')
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('event sequences remain monotonic across store restarts', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-transcript-event-sequence-restart-'))
+  try {
+    const sessionId = '1234432112344321'
+    await new DaemonTranscriptStore({ directory, currentProjectDirectory: '/project' })
+      .appendMessage(sessionId, { role: 'user', content: 'first' }, 0)
+    await new DaemonTranscriptStore({ directory, currentProjectDirectory: '/project' })
+      .appendMessage(sessionId, { role: 'assistant', content: 'second' }, 1)
+
+    const rows = (await Bun.file(`${join(directory, sessionId)}.jsonl`).text())
+      .trim().split('\n').map(line => JSON.parse(line) as Record<string, unknown>)
+    expect(rows.map(row => row.sequence)).toEqual([1, 2])
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('a rewrite covers prior event rows so removed messages cannot resurrect', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-transcript-event-rewrite-'))
+  try {
+    const sessionId = 'aa11bb22cc33dd44'
+    const store = new DaemonTranscriptStore({ directory, currentProjectDirectory: '/project' })
+    const messages = [
+      { role: 'user', content: 'keep' },
+      { role: 'assistant', content: 'kept answer' },
+      { role: 'user', content: 'undo me' },
+      { role: 'assistant', content: 'remove me' },
+    ]
+    const transcript = normalizeDaemonTranscript({ session_id: sessionId, messages, turn_count: 2 }, {
+      requestedSessionKey: sessionId,
+      currentProjectDirectory: '/project',
+    })
+    if (!transcript) throw new Error('expected transcript to normalize')
+    for (const [index, message] of messages.entries()) await store.appendMessage(sessionId, message, index)
+    await store.save(transcript, { mode: 'rewrite', expectedGeneration: 0 })
+
+    const loaded = await store.load(sessionId)
+    if (!loaded) throw new Error('expected transcript to load')
+    await store.save({ ...loaded, messages: loaded.messages.slice(0, 2), turnCount: 1 }, {
+      mode: 'rewrite',
+      expectedGeneration: loaded.generation ?? 0,
+    })
+
+    expect((await new DaemonTranscriptStore({ directory, currentProjectDirectory: '/project' }).load(sessionId))?.messages)
+      .toEqual(messages.slice(0, 2))
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('event watermark uses UTF-8 bytes and leaves a later multibyte event recoverable', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-transcript-event-utf8-'))
+  try {
+    const sessionId = 'ee11ff22aa33bb44'
+    const store = new DaemonTranscriptStore({ directory, currentProjectDirectory: '/project' })
+    const baseMessage = { role: 'user', content: 'héllo 👋' }
+    await store.appendMessage(sessionId, baseMessage, 0)
+    const transcript = normalizeDaemonTranscript({ session_id: sessionId, messages: [baseMessage], turn_count: 1 }, {
+      requestedSessionKey: sessionId,
+      currentProjectDirectory: '/project',
+    })
+    if (!transcript) throw new Error('expected transcript to normalize')
+    await store.save(transcript, { mode: 'rewrite', expectedGeneration: 0 })
+    await store.appendMessage(sessionId, { role: 'assistant', content: 'later ✓' }, 1)
+
+    expect((await store.load(sessionId))?.messages).toEqual([
+      baseMessage,
+      { role: 'assistant', content: 'later ✓' },
     ])
   } finally {
     await rm(directory, { recursive: true, force: true })
@@ -444,10 +556,13 @@ test('journal entries covered by a repaired snapshot are not re-spliced as dupli
     ])
 
     await store.save(recovered!)
-    // Coverage must be judged against the raw pre-repair length (3), not the
-    // repaired length (2): otherwise this entry survives and the next load
-    // splices a second copy of an already-persisted message.
-    expect(await Bun.file(store.journalPathFor(sessionId)).exists()).toBeFalse()
+    // The event log remains append-only. The snapshot records the byte prefix
+    // it covers, so loading it cannot replay this event as a duplicate.
+    expect(await Bun.file(store.journalPathFor(sessionId)).exists()).toBeTrue()
+    const eventLog = await Bun.file(store.journalPathFor(sessionId)).text()
+    expect(eventLog).toContain('"type":"message_appended"')
+    const snapshot = JSON.parse(await Bun.file(store.pathFor(sessionId)).text()) as Record<string, unknown>
+    expect(snapshot.event_log_offset).toBe(new TextEncoder().encode(eventLog).byteLength)
     expect((await store.load(sessionId))?.messages).toEqual([
       { role: 'user', content: 'saved turn' },
       { role: 'assistant', content: 'live answer' },
@@ -618,10 +733,13 @@ test('journalled messages survive a crash between the append and the next save',
       { role: 'user', content: 'unsaved follow-up' },
     ])
 
-    // A successful save subsumes the journal, so the next load must not replay it.
+    // A successful save advances the covered byte prefix without truncating
+    // the append-only log, so the next load must not replay it.
     if (!recovered) throw new Error('expected a recovered transcript')
     await store.save(recovered)
-    expect(await Bun.file(store.journalPathFor(sessionId)).exists()).toBeFalse()
+    expect(await Bun.file(store.journalPathFor(sessionId)).exists()).toBeTrue()
+    const savedRecord = JSON.parse(await Bun.file(store.pathFor(sessionId)).text()) as Record<string, unknown>
+    expect(typeof savedRecord.event_log_offset).toBe('number')
     expect((await store.load(sessionId))?.messages).toHaveLength(3)
 
     // A gap stops the replay instead of reordering the transcript around a lost write.
@@ -676,4 +794,38 @@ test.skipIf(process.platform === 'win32')('store writes Python-readable v2 super
   expect(await Bun.file(store.pathFor(sessionId)).exists()).toBe(false)
   expect(await store.remove(sessionId)).toBe(false)
   await rm(directory, { recursive: true, force: true })
+})
+
+test('journal appends stay constant-time as the log grows', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-transcript-seq-'))
+  try {
+    const sessionId = 'abcdefabcdefabcd'
+    const store = new DaemonTranscriptStore({ directory, currentProjectDirectory: '/project' })
+
+    // Sequence allocation used to read and JSON-parse the whole journal on
+    // every append, making a session's own journalling quadratic in its length.
+    const time = async (count: number) => {
+      const started = Bun.nanoseconds()
+      for (let index = 0; index < count; index += 1) {
+        await store.appendMessage(sessionId, { role: 'user', content: `m${index}`.padEnd(400, 'x') }, index)
+      }
+      return Bun.nanoseconds() - started
+    }
+
+    const first = await time(150)
+    const later = await time(150)
+
+    // Sequences stay correct and monotonic across the tail read.
+    const rows = (await Bun.file(store.journalPathFor(sessionId)).text())
+      .split('\n').filter(Boolean).map(line => JSON.parse(line) as { sequence: number })
+    expect(rows).toHaveLength(300)
+    expect(rows.map(row => row.sequence)).toEqual([...Array(300).keys()].map(index => index + 1))
+
+    // With a full re-parse per append the second batch reads ~3x the bytes of
+    // the first; a tail read makes the two batches comparable. Generous bound
+    // so this measures the algorithm, not the machine.
+    expect(later).toBeLessThan(first * 4)
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
 })

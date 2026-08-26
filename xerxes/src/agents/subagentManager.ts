@@ -9,6 +9,7 @@ import {
   SpawnedAgentManager,
   type SpawnedAgentSnapshot,
 } from '../operators/subagents.js'
+import type { DurableTaskBridge } from '../tasks/durableTaskBridge.js'
 
 export const SUBAGENT_CALLER_PROMPT = [
   'You are now running as a subagent. All the user messages are sent by the main agent.',
@@ -309,6 +310,7 @@ export interface SubAgentEvent {
 }
 
 export interface SubAgentManagerOptions {
+  readonly durableTaskBridge?: DurableTaskBridge
   readonly idFactory?: () => string
   readonly maxConcurrent?: number
   readonly maxDepth?: number
@@ -396,6 +398,8 @@ interface TaskRuntime {
   monitor: Promise<void> | undefined
   /** In-flight runner turn; cancellation is cooperative so monitors await it before terminal bookkeeping. */
   run: Promise<string> | undefined
+  /** Stable id of the current execution attempt, used for durable event logging. */
+  currentAttemptId: string | undefined
 }
 
 /**
@@ -459,6 +463,7 @@ export class SubAgentManager {
   readonly maxSpawnedAgents: number
   maxConcurrent: number
   private readonly archivedTerminalTasks = new Map<string, ArchivedSubagentTask>()
+  private readonly durableTaskBridge: DurableTaskBridge | undefined
   private readonly eventSink: (event: SubAgentEvent) => void
   private readonly gate: ConcurrencyGate
   private readonly handleManager: SpawnedAgentManager
@@ -483,6 +488,7 @@ export class SubAgentManager {
 
   constructor(options: SubAgentManagerOptions) {
     if (typeof options.runner !== 'function') throw new TypeError('runner must be a function')
+    this.durableTaskBridge = options.durableTaskBridge
     this.runner = options.runner
     this.maxConcurrent = positiveIntegerOrInfinity(options.maxConcurrent ?? Number.POSITIVE_INFINITY, 'maxConcurrent')
     this.maxDepth = positiveIntegerOrInfinity(options.maxDepth ?? Number.POSITIVE_INFINITY, 'maxDepth')
@@ -566,9 +572,18 @@ export class SubAgentManager {
     })
     this.tasks.set(task.id, task)
     if (options.name?.trim()) this.tasksByName.set(options.name.trim(), task.id)
+    if (this.durableTaskBridge !== undefined) {
+      await this.durableTaskBridge.taskCreated({
+        id: task.id,
+        objective: task.prompt,
+        creatorId: task.creatorId || 'subagent',
+        dependencies: [],
+        ...(task.parentId === undefined ? {} : { parentId: task.parentId }),
+      }).catch(() => undefined)
+    }
 
     if (depth >= depthLimit.limit) {
-      this.fail(task, `Max depth (${depthLimit.limit}, from ${depthLimit.source}) exceeded: cannot spawn at depth ${depth}`)
+      await this.fail(task, `Max depth (${depthLimit.limit}, from ${depthLimit.source}) exceeded: cannot spawn at depth ${depth}`)
       return task
     }
 
@@ -577,7 +592,7 @@ export class SubAgentManager {
     let prompt = options.prompt
     if (isolation === 'worktree') {
       if (this.worktree === undefined) {
-        this.fail(task, "isolation='worktree' requires a configured worktree port")
+        await this.fail(task, "isolation='worktree' requires a configured worktree port")
         return task
       }
       setup = Promise.withResolvers<void>()
@@ -589,7 +604,7 @@ export class SubAgentManager {
         prompt = `${prompt}\n\n[Note: You are working in an isolated git worktree at ${worktree.path} (branch: ${worktree.branch}). Commit your changes before finishing so they can be reviewed and merged.]`
       } catch (error) {
         if (!TERMINAL_STATUSES.has(task.status)) {
-          this.fail(task, `Failed to create worktree: ${errorMessage(error)}`)
+          await this.fail(task, `Failed to create worktree: ${errorMessage(error)}`)
         }
         this.finishSetup(task.id, setup)
         return task
@@ -607,6 +622,7 @@ export class SubAgentManager {
       worktree,
       attempt: 0,
       cleanup: undefined,
+      currentAttemptId: undefined,
       emittedSpawn: false,
       monitor: undefined,
       run: undefined,
@@ -636,7 +652,7 @@ export class SubAgentManager {
       const runtime = this.runtimes.get(task.id)
       if (runtime !== undefined) runtime.monitor = this.monitor(task, runtime.attempt)
     } catch (error) {
-      this.fail(task, errorMessage(error))
+      await this.fail(task, errorMessage(error))
       await this.cleanupWorktree(task)
     } finally {
       if (setup !== undefined) this.finishSetup(task.id, setup)
@@ -725,6 +741,9 @@ export class SubAgentManager {
     task.result ??= '[Sub-agent was cancelled.]'
     task.lastActivityAt = this.now().valueOf()
     this.postEvent(task, 'cancelled', { reason: 'explicit_cancel' })
+    if (this.durableTaskBridge !== undefined) {
+      this.durableTaskBridge.taskCancelled(task.id, 'explicit_cancel').catch(() => undefined)
+    }
     // Abort is cooperative: keep the worktree alive until the runner turn has
     // actually settled so a still-running agent never loses its checkout.
     const inFlight = this.runtimes.get(task.id)?.run
@@ -1061,6 +1080,14 @@ export class SubAgentManager {
       if (runtime.attempt !== attempt) throw new Error(`Subagent task '${handleId}' attempt was superseded by a retry`)
       task.status = 'running'
       task.lastActivityAt = this.now().valueOf()
+      runtime.currentAttemptId = crypto.randomUUID()
+      if (this.durableTaskBridge !== undefined) {
+        await this.durableTaskBridge.attemptStarted({
+          id: runtime.currentAttemptId,
+          taskId: task.id,
+          executorId: task.agentDefName || 'subagent',
+        }).catch(() => undefined)
+      }
       if (!runtime.emittedSpawn) {
         runtime.emittedSpawn = true
         this.postEvent(task, 'spawn', {
@@ -1134,6 +1161,7 @@ export class SubAgentManager {
       if (snapshot !== undefined) this.synchronize(task, snapshot)
     }
     if (this.runtimes.get(task.id)?.attempt !== attempt) return
+    const runtime = this.runtimes.get(task.id)
     // Cancellation is cooperative: never post `done` or clean up while the
     // runner turn is still settling, so late report events precede `done`.
     const inFlight = this.runtimes.get(task.id)?.run
@@ -1154,6 +1182,17 @@ export class SubAgentManager {
       filesRead: [...task.readFiles].sort(),
       filesWritten: [...task.writtenFiles].sort(),
     })
+    if (this.durableTaskBridge !== undefined && runtime?.currentAttemptId !== undefined) {
+      const attemptId = runtime.currentAttemptId
+      if (task.status === 'completed') {
+        await this.durableTaskBridge.attemptCompleted(attemptId, {
+          deliveryId: `delivery-${task.id}-${runtime.attempt}`,
+          output: task.result ?? '',
+        }).catch(() => undefined)
+      } else if (task.status === 'failed') {
+        await this.durableTaskBridge.attemptFailed(attemptId, { error: task.error, retryable: false }).catch(() => undefined)
+      }
+    }
     await this.cleanupWorktree(task)
     this.compactTerminalTasks()
   }
@@ -1184,7 +1223,7 @@ export class SubAgentManager {
     }
   }
 
-  private fail(task: SubAgentTask, error: string): void {
+  private async fail(task: SubAgentTask, error: string): Promise<void> {
     this.flushThinkingBurst(task)
     task.status = 'failed'
     task.error = error
@@ -1192,6 +1231,13 @@ export class SubAgentManager {
     task.lastActivityAt = this.now().valueOf()
     this.postEvent(task, 'error', { error })
     this.postEvent(task, 'done', { status: task.status, error, resultPreview: error, toolCalls: 0 })
+    if (this.durableTaskBridge !== undefined) {
+      const attemptId = crypto.randomUUID()
+      try {
+        await this.durableTaskBridge.attemptStarted({ id: attemptId, taskId: task.id, executorId: task.agentDefName || 'subagent' })
+        await this.durableTaskBridge.attemptFailed(attemptId, { error, retryable: false })
+      } catch { /* durable logging is best-effort */ }
+    }
     this.compactTerminalTasks()
   }
 
@@ -1314,6 +1360,7 @@ export class SubAgentManager {
       worktree: undefined,
       attempt: archived.attempt,
       cleanup: undefined,
+      currentAttemptId: undefined,
       emittedSpawn: false,
       monitor: undefined,
       run: undefined,

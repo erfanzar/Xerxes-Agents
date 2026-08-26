@@ -3,6 +3,7 @@
 
 import {
   taskContext,
+  topologicallyOrderTasks,
   validateContextTaskReferences,
   validateTaskGraph,
   type CortexAgent,
@@ -14,6 +15,7 @@ import {
   type TaskExecutionContext,
   type TaskExecutionResult,
 } from './task.js'
+import type { DurableTaskBridge } from '../tasks/durableTaskBridge.js'
 
 export const CortexProcess = {
   PARALLEL: 'parallel',
@@ -32,6 +34,7 @@ export type CortexRunStatus = 'failed' | 'partial' | 'succeeded'
 
 export interface CortexOrchestratorOptions {
   readonly agents?: readonly CortexAgent[]
+  readonly durableTaskBridge?: DurableTaskBridge
   readonly executor?: CortexTaskExecutor
   /** Stop the run with CortexRunFailedError as soon as any task fails. */
   readonly failFast?: boolean
@@ -98,6 +101,7 @@ export class CortexRunFailedError extends Error {
  */
 export class CortexOrchestrator {
   private readonly agents = new Map<string, CortexAgent>()
+  private readonly durableTaskBridge: DurableTaskBridge | undefined
   private readonly executor: CortexTaskExecutor | undefined
   private readonly failFast: boolean
   private readonly maxParallel: number
@@ -108,6 +112,7 @@ export class CortexOrchestrator {
   private latest: CortexRunOutput | undefined
 
   constructor(options: CortexOrchestratorOptions = {}) {
+    this.durableTaskBridge = options.durableTaskBridge
     this.executor = options.executor
     this.memory = options.memory
     this.now = options.now ?? (() => new Date())
@@ -157,6 +162,7 @@ export class CortexOrchestrator {
     validateTaskGraph(tasks)
     validateContextTaskReferences(tasks)
     throwIfRunAborted(signal)
+    await this.ensureDurableTasks(tasks)
     const states = new Map<string, CortexTaskStatus>(tasks.map(task => [task.id, 'pending']))
     const outputs = new Map<string, CortexTaskOutput>()
 
@@ -247,6 +253,18 @@ export class CortexOrchestrator {
   ): Promise<CortexTaskOutput> {
     const startedAt = this.now()
     const agent = task.agentId ? this.agents.get(task.agentId) : undefined
+    const attemptId = crypto.randomUUID()
+    // Every durable-log call here is best-effort. This one was awaited outside
+    // the try with no catch, so a rejecting log — a task id already terminal,
+    // say — aborted the entire run instead of producing a CortexRunOutput. The
+    // log records what the run did; it must never decide what the run does.
+    if (this.durableTaskBridge !== undefined) {
+      await this.durableTaskBridge.attemptStarted({
+        id: attemptId,
+        taskId: task.id,
+        executorId: task.agentId ?? 'cortex',
+      }).catch(() => undefined)
+    }
     try {
       if (task.agentId && !agent) throw new Error(`Task ${task.id} references unknown agent ${task.agentId}`)
       const executor = this.executor ?? agent?.execute
@@ -275,10 +293,42 @@ export class CortexOrchestrator {
         metadata: normalized.metadata ?? {},
         ...(task.agentId ? { agentId: task.agentId } : {}),
       }
+      if (this.durableTaskBridge !== undefined) {
+        // Awaited inside the try without a catch, a failure to RECORD a
+        // genuinely successful task fell into the catch below and was rewritten
+        // into a failed output — plus an attemptFailed on an attempt that had
+        // already completed.
+        await this.durableTaskBridge.attemptCompleted(attemptId, {
+          deliveryId: `delivery-${attemptId}`,
+          output: output.output,
+        }).catch(() => undefined)
+      }
       await this.saveTaskResult(task, output)
       return output
     } catch (error) {
+      if (this.durableTaskBridge !== undefined) {
+        await this.durableTaskBridge.attemptFailed(attemptId, {
+          error: errorMessage(error),
+          retryable: false,
+        }).catch(() => undefined)
+      }
       return failedOutput(task, startedAt, this.now(), errorMessage(error))
+    }
+  }
+
+  private async ensureDurableTasks(tasks: readonly CortexTask[]): Promise<void> {
+    if (this.durableTaskBridge === undefined) return
+    for (const task of topologicallyOrderTasks(tasks)) {
+      try {
+        await this.durableTaskBridge.taskCreated({
+          id: task.id,
+          objective: task.description,
+          creatorId: 'cortex',
+          dependencies: task.dependencies ?? [],
+        })
+      } catch (error) {
+        if (!String(error).includes('duplicate task')) throw error
+      }
     }
   }
 
