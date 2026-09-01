@@ -154,3 +154,42 @@ export function tokenBreakdown(usage: Usage): string {
   if (usage.cache_read) parts.push(`${fmtK(usage.cache_read)} cached`)
   return parts.join(" · ")
 }
+
+/**
+ * Wall-clock format matching the desktop stats bar exactly: minutes and
+ * zero-padded seconds, with minutes running past 60 ("885m11s") so the TUI
+ * and desktop never disagree on the same session.
+ */
+export function telemetryDuration(ms: number): string {
+  const totalSeconds = Math.max(0, Math.round(ms / 1000))
+  const minutes = Math.trunc(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  if (minutes > 0) return `${minutes}m${String(seconds).padStart(2, '0')}s`
+  return `${seconds}s`
+}
+
+/**
+ * One-line cumulative session telemetry, the same counters the desktop stats
+ * bar shows: turns, steps, LLM/tool wall time, TTFT, throughput, cache hit
+ * rate, token totals.
+ *
+ * Returns '' for a fresh session (no turns yet) so the row can hide instead
+ * of displaying a bar of zeros. Cache rate renders only when the provider
+ * actually reported cache telemetry — an absent value is never faked as 0%.
+ */
+export function sessionTelemetryLine(usage: Usage): string {
+  const turns = usage.turns ?? 0
+  if (turns <= 0) return ''
+
+  const parts: string[] = [`${turns} turn${turns === 1 ? '' : 's'}`]
+  const steps = (usage.llm_steps ?? 0) + (usage.tool_steps ?? 0)
+  if (steps > 0) parts.push(`${fmtK(steps)} steps`)
+  if (usage.llm_ms) parts.push(`LLM ${telemetryDuration(usage.llm_ms)}`)
+  if (usage.tool_ms) parts.push(`tools ${telemetryDuration(usage.tool_ms)}`)
+  if (usage.ttft_avg_ms) parts.push(`TTFT ${(usage.ttft_avg_ms / 1000).toFixed(1)}s`)
+  if (usage.tok_per_sec) parts.push(`${Math.round(usage.tok_per_sec)} tok/s`)
+  if (usage.cache_hit_rate !== undefined) parts.push(`cache ${Math.round(usage.cache_hit_rate * 100)}%`)
+  if (usage.input) parts.push(`${fmtK(usage.input)} in`)
+  if (usage.output) parts.push(`${fmtK(usage.output)} out`)
+  return parts.join(' · ')
+}

@@ -7328,6 +7328,14 @@ export class DaemonServer {
       if (owner && this.turnOwners.get(sessionKey) === owner) {
         this.turnOwners.delete(sessionKey);
       }
+      // Final full status for the turn that just settled: token totals,
+      // context, and the cumulative telemetry row (turns/steps/timings) all
+      // changed during it, and mid-turn ticks carry only deltas. Without
+      // this, clients show init-time counters until the next slash command.
+      const settled = this.runtime.sessionStatus(sessionKey);
+      if (owner && settled) {
+        this.emitStatus(owner, settled);
+      }
       // A turn that ends or is cancelled without an answer must not leak its
       // approval/question ownership entries into later requests.
       this.releaseTurnInteractions(interactionIds);
@@ -8274,6 +8282,12 @@ function statusUpdatePayload(
       ? { observed_calls: session.totalApiCalls }
       : {}),
     usage_complete: session.usageComplete ?? session.turnCount === 0,
+    // Cumulative session telemetry, additive: turns, step counts, LLM/tool
+    // wall time, TTFT, throughput, cache hit rate. The desktop reads the same
+    // counters from the session payload; status_update now carries them so
+    // the TUI can show the identical live bar without an extra RPC.
+    turn_count: session.turnCount,
+    ...sessionRuntimeTelemetryPayload(session.extra.runtime_telemetry),
     plan_mode: session.planMode,
     ultra_mode: session.ultraMode === true,
     mode: session.interactionMode,

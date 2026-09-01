@@ -846,4 +846,35 @@ describe('usageFromStatus partial updates', () => {
     expect(tick).not.toHaveProperty('output')
     expect(tick).not.toHaveProperty('total')
   })
+
+  it('parses cumulative telemetry when the daemon sends it and omits it otherwise', () => {
+    const telemetry = usageFromStatus({
+      total_input_tokens: 592_000_000,
+      total_output_tokens: 931_000,
+      turn_count: 64,
+      llm_steps: 1_200,
+      tool_steps: 906,
+      llm_duration_ms: 53_111_000,
+      tool_duration_ms: 11_665_000,
+      ttft_avg_ms: 8_800,
+      tokens_per_second: 44,
+      cache_hit_rate: 0.98
+    })
+
+    expect(telemetry.turns).toBe(64)
+    expect(telemetry.llm_steps).toBe(1_200)
+    expect(telemetry.tool_steps).toBe(906)
+    expect(telemetry.llm_ms).toBe(53_111_000)
+    expect(telemetry.tool_ms).toBe(11_665_000)
+    expect(telemetry.ttft_avg_ms).toBe(8_800)
+    expect(telemetry.tok_per_sec).toBe(44)
+    expect(telemetry.cache_hit_rate).toBe(0.98)
+
+    // Old daemons send none of these: absent keys must stay absent so the
+    // stats row hides instead of rendering fabricated zeros.
+    const legacy = usageFromStatus({ total_input_tokens: 10, total_output_tokens: 2 })
+    expect(legacy).not.toHaveProperty('turns')
+    expect(legacy).not.toHaveProperty('llm_ms')
+    expect(legacy).not.toHaveProperty('cache_hit_rate')
+  })
 })

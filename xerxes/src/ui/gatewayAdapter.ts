@@ -314,7 +314,17 @@ export function usageFromStatus(payload: Record<string, unknown>): Usage {
     ...(present('context_tokens') ? { context_used: num(payload.context_tokens) } : {}),
     ...(hasInput ? { input } : {}),
     ...(hasOutput ? { output } : {}),
-    ...(present('total_tokens') || (hasInput && hasOutput) ? { total } : {})
+    ...(present('total_tokens') || (hasInput && hasOutput) ? { total } : {}),
+    // Cumulative telemetry (additive v35): absent keys stay absent so the
+    // stats row renders nothing instead of fabricated zeros on old daemons.
+    ...(present('turn_count') ? { turns: num(payload.turn_count) } : {}),
+    ...(present('llm_steps') ? { llm_steps: num(payload.llm_steps) } : {}),
+    ...(present('tool_steps') ? { tool_steps: num(payload.tool_steps) } : {}),
+    ...(present('llm_duration_ms') ? { llm_ms: num(payload.llm_duration_ms) } : {}),
+    ...(present('tool_duration_ms') ? { tool_ms: num(payload.tool_duration_ms) } : {}),
+    ...(present('ttft_avg_ms') ? { ttft_avg_ms: num(payload.ttft_avg_ms) } : {}),
+    ...(present('tokens_per_second') ? { tok_per_sec: num(payload.tokens_per_second) } : {}),
+    ...(present('cache_hit_rate') ? { cache_hit_rate: num(payload.cache_hit_rate) } : {})
   } as Usage
 }
 

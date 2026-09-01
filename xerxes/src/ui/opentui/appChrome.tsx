@@ -125,6 +125,31 @@ export function SessionHeader({
   )
 }
 
+/**
+ * Cumulative session telemetry, one quiet line under the header — the same
+ * counters the desktop stats bar shows (turns, steps, LLM/tool time, TTFT,
+ * throughput, cache, tokens). Hidden for a fresh session: a bar of zeros is
+ * noise, and the caller passes '' then.
+ */
+export function SessionTelemetryRow({ line, t }: { line: string; t: Theme }) {
+  if (!line) return null
+
+  return (
+    <Box
+      flexDirection="row"
+      flexShrink={0}
+      justifyContent="flex-end"
+      overflow="hidden"
+      paddingX={2}
+      width="100%"
+    >
+      <Text color={t.ds.meta} wrap="truncate-end">
+        {line}
+      </Text>
+    </Box>
+  )
+}
+
 const NEW_TAB_LABEL = ' +'
 // Mockup 04's gesture, advertised where the tabs live: Left walks one tab
 // left, and Left from the leftmost tab backgrounds the session into the

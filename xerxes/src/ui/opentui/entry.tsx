@@ -181,6 +181,12 @@ const renderer = await createCliRenderer({
   // Xerxes owns SIGINT/SIGTERM/SIGHUP and sequences renderer teardown before
   // gateway cleanup. A second OpenTUI signal handler can race that lifecycle.
   exitSignals: [],
+  // Mouse capture intercepts drags before the terminal can turn them into a
+  // selection, which makes copying anything from the transcript impossible.
+  // Every mouse affordance here (tab strip, pickers, fold toggles) has a
+  // keyboard path, so capture stays off and native select/copy works.
+  // XERXES_TUI_MOUSE=1 opts back in for pointer-driven sessions.
+  useMouse: process.env.XERXES_TUI_MOUSE === '1',
   // INLINE_MODE stays in the main screen so terminal scrollback is preserved.
   screenMode: INLINE_MODE ? 'main-screen' : 'alternate-screen',
   useKittyKeyboard: { alternateKeys: true, disambiguate: true }

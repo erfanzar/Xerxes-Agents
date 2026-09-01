@@ -222,6 +222,17 @@ export interface Usage {
   output: number
   reasoning?: number
   total: number
+  // Cumulative session telemetry (daemon status_update, v35 additive):
+  // wall-clock LLM/tool time, step counts, TTFT, throughput, cache hit rate.
+  turns?: number
+  llm_steps?: number
+  tool_steps?: number
+  llm_ms?: number
+  tool_ms?: number
+  ttft_avg_ms?: number
+  tok_per_sec?: number
+  /** Fraction 0..1; absent when the provider never reported cache reads. */
+  cache_hit_rate?: number
 }
 
 export interface SudoReq {

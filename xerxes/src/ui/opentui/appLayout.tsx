@@ -51,7 +51,7 @@ import {
   providerPromptIsSecret,
   providerPromptTitle
 } from '../domain/providerPrompt.js'
-import { sessionDisplayTitle, usageCounts, writePolicyLabel } from '../domain/statusFormat.js'
+import { sessionDisplayTitle, sessionTelemetryLine, usageCounts, writePolicyLabel } from '../domain/statusFormat.js'
 import { formatBytes } from '../lib/imageAttachment.js'
 import { describeLiveness, type LivenessPhase, livenessGlyph, livenessTokens, livenessVerb } from '../lib/liveness.js'
 import { unarchivedToolLines } from '../lib/liveProgress.js'
@@ -64,7 +64,7 @@ import type { ScrollBoxHandle } from '../lib/terminalTypes.js'
 import { themeForMode, type Theme } from '../theme.js'
 
 import { AgentPanel, AgentPanelHotkey, AgentPanelOverlay, collectAgentPanelRecords } from './agentPanel.js'
-import { displayModeLabel, SessionHeader, SessionTabStrip, WorkspaceFooter } from './appChrome.js'
+import { displayModeLabel, SessionHeader, SessionTabStrip, SessionTelemetryRow, WorkspaceFooter } from './appChrome.js'
 import { CompletionMenu } from './completionMenu.js'
 import { CopyPicker } from './copyPicker.js'
 import { DiffPanelHotkey, DiffPanelOverlay } from './diffPanel.js'
@@ -2191,6 +2191,7 @@ export function AppLayout({
                 sessionTitle={sessionTitle}
                 t={t}
               />
+              <SessionTelemetryRow line={sessionTelemetryLine(ui.usage)} t={t} />
               <SessionTabStrip
                 activeId={ui.sid ?? ui.info?.session_id ?? null}
                 onNewTab={() => actions.newLiveSession()}
