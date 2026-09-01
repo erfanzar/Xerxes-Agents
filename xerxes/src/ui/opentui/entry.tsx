@@ -7,7 +7,7 @@ import '../lib/forceTruecolor.js'
 
 import { writeSync } from 'node:fs'
 
-import { INLINE_MODE, TERMUX_TUI_MODE } from '../config/env.js'
+import { INLINE_MODE, MOUSE_TRACKING, TERMUX_TUI_MODE } from '../config/env.js'
 import { $uiSessionId, getUiState } from '../app/uiStore.js'
 import { GatewayClient } from '../gatewayClient.js'
 import { setEarlyInputText, startEarlyInputCapture } from '../lib/earlyInput.js'
@@ -181,14 +181,13 @@ const renderer = await createCliRenderer({
   // Xerxes owns SIGINT/SIGTERM/SIGHUP and sequences renderer teardown before
   // gateway cleanup. A second OpenTUI signal handler can race that lifecycle.
   exitSignals: [],
-  // Mouse capture is ON so the wheel scrolls the transcript and clicks work
-  // (tabs, pickers, fold toggles). The trade: the app, not the terminal,
-  // receives drags, so native select-copy needs the terminal's bypass
-  // modifier — ⌥-drag in iTerm2, Fn/Shift-drag in Terminal.app — or the
-  // /copy picker, which puts any message on the clipboard by keyboard.
-  // XERXES_TUI_MOUSE=0 disables capture entirely (drags select natively,
-  // wheel scroll dies in alternate-screen mode).
-  useMouse: process.env.XERXES_TUI_MOUSE !== '0',
+  // Mouse capture follows MOUSE_TRACKING (config/env.ts): off in inline
+  // mode so the terminal owns scrollback and drag-select auto-copies (the
+  // Claude Code behavior); on in alternate-screen mode, which has no native
+  // scrollback, so the wheel can scroll the transcript — copy there goes
+  // through the terminal's bypass modifier (⌥/Fn/Shift-drag) or the
+  // keyboard /copy picker. /mouse toggles it live via applyMouseTracking.
+  useMouse: MOUSE_TRACKING !== 'off',
   // INLINE_MODE stays in the main screen so terminal scrollback is preserved.
   screenMode: INLINE_MODE ? 'main-screen' : 'alternate-screen',
   useKittyKeyboard: { alternateKeys: true, disambiguate: true }

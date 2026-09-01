@@ -16,7 +16,7 @@ import type {
   SessionUndoResponse
 } from '../../../gatewayTypes.js'
 import { COPY_USAGE, copyableMessages, copyTextToClipboard, formatCopyOutcome, resolveCopyArg } from '../../../lib/copyText.js'
-import { forceRedraw } from '../../../lib/terminalRuntime.opentui.js'
+import { applyMouseTracking, forceRedraw } from '../../../lib/terminalRuntime.opentui.js'
 import { configureDetectedTerminalKeybindings, configureTerminalKeybindings } from '../../../lib/terminalSetup.js'
 import type { MouseTrackingMode } from '../../../lib/terminalTypes.js'
 import type { Msg, PanelSection } from '../../../types.js'
@@ -225,6 +225,11 @@ export const coreCommands: SlashCommand[] = [
 
       patchUiState({ mouseTracking: next })
       persistDisplayPref(ctx, 'mouse', next, 'mouse')
+      // Actually apply it: the state used to change while the renderer kept
+      // its boot-time capture, so /mouse off never gave the terminal its
+      // drags back. off hands select-copy to the terminal; every capture
+      // preset enables the renderer switch (the FFI is binary).
+      applyMouseTracking(next)
 
       queueMicrotask(() => ctx.transcript.sys(`mouse tracking ${next}`))
     }

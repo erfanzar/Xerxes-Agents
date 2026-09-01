@@ -9,6 +9,7 @@ import type { GatewayClient } from '../gatewayClient.js'
 import type { ConfigFullResponse, ConfigMtimeResponse } from '../gatewayTypes.js'
 import { DEFAULT_VOICE_RECORD_KEY, type ParsedVoiceRecordKey, parseVoiceRecordKey } from '../lib/platform.js'
 import { asRpcResult } from '../lib/rpc.js'
+import { applyMouseTracking } from '../lib/terminalRuntime.opentui.js'
 
 import {
   type BusyInputMode,
@@ -214,6 +215,10 @@ export const applyDisplay = (
     statusBar: normalizeStatusBar(d.tui_statusbar),
     streaming: d.streaming !== false
   })
+  // The renderer reads no state on its own — apply the resolved tracking
+  // mode so a persisted display.mouse_tracking pref takes effect at boot
+  // instead of only after the first /mouse command.
+  applyMouseTracking(normalizeMouseTracking(d))
 }
 
 export function useConfigSync({

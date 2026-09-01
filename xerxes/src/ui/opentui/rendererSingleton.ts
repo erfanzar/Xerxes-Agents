@@ -8,6 +8,7 @@
 import type { CliRenderer } from '@opentui/core'
 
 import { resetTerminalModes } from '../lib/terminalModes.js'
+import type { MouseTrackingMode } from '../lib/terminalTypes.js'
 
 let active: CliRenderer | null = null
 let completedTeardown: ActiveRendererTeardownResult | null = null
@@ -50,6 +51,19 @@ export function setActiveRenderer(renderer: CliRenderer): void {
 
 export function getActiveRenderer(): CliRenderer | null {
   return active
+}
+
+/**
+ * Apply a mouse-tracking mode to the live renderer. The OpenTUI FFI exposes
+ * capture as a binary switch, so the wheel/buttons presets both map to full
+ * capture; 'off' is the only one that hands drags back to the terminal for
+ * native select-copy. Called by the /mouse slash and config sync — before
+ * this, those changed state the renderer never read.
+ */
+export function applyMouseTracking(mode: MouseTrackingMode): void {
+  const renderer = getActiveRenderer()
+  if (!renderer) return
+  renderer.useMouse = mode !== 'off'
 }
 
 /**

@@ -10,10 +10,13 @@ import type { KeyEvent } from '@opentui/core'
 import { useKeyboard } from '@opentui/react'
 
 import {
+  applyMouseTracking,
   destroyActiveRenderer,
   forceRendererRepaint,
   getActiveRenderer
 } from '../opentui/rendererSingleton.js'
+
+export { applyMouseTracking }
 
 // ── Pure utilities ───────────────────────────────────────────────────────
 // Both are native under Bun (this app only ever runs under Bun).
