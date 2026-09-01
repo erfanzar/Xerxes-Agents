@@ -16,12 +16,13 @@ import {
 
 test('bridge command registry preserves canonical metadata, aliases, categories, and registry order', () => {
   expect(CATEGORIES).toContain('session')
-  expect(COMMAND_REGISTRY).toHaveLength(69)
+  expect(COMMAND_REGISTRY).toHaveLength(70)
   expect(resolveCommand('/compress now')).toMatchObject({ name: 'compact', aliases: ['compress'] })
   expect(resolveCommand('/thinking high')).toMatchObject({ name: 'reasoning', argsHint: '[level]' })
   expect(resolveCommand('/q')).toMatchObject({ name: 'exit' })
   expect(resolveCommand('/help@XerxesBot')).toMatchObject({ name: 'help' })
   expect(resolveCommand('unknown')).toBeUndefined()
+  expect(resolveCommand('/goal ship the release')).toMatchObject({ name: 'goal', category: 'session' })
   expect(listCommands('snapshots').map(commandDefinition => commandDefinition.name)).toEqual([
     'rollback',
     'snapshot',

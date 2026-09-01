@@ -99,7 +99,8 @@ export interface OpenAiProtocolMessage {
   readonly name?: string
   readonly role: OpenAiMessageRole
   readonly tool_call_id?: string
-  readonly tool_calls?: readonly OpenAiToolCall[]
+  /** Grammar-constrained custom calls serialize back out as `custom`; inbound parsing only produces function calls. */
+  readonly tool_calls?: readonly (import('./toolCalls.js').OpenAiCustomToolCall | OpenAiToolCall)[]
 }
 
 export interface OpenAiFunctionCallDelta {
@@ -460,7 +461,19 @@ export function chatMessageFromOpenAi(
     )
   }
 
-  const toolCalls = (message.tool_calls ?? []).map(toolCallFromOpenAi)
+  const toolCalls = (message.tool_calls ?? []).map((call) => {
+    // Inbound grammar custom calls keep their raw text under the generic
+    // `input` property; the authoritative property name is only known to the
+    // outbound request builder.
+    if (call.type === 'custom') {
+      return {
+        id: requiredText(call.id, 'message.tool_calls[].id'),
+        type: 'function' as const,
+        function: { name: requiredText(call.custom.name, 'message.tool_calls[].custom.name'), arguments: { input: call.custom.input } },
+      }
+    }
+    return toolCallFromOpenAi(call)
+  })
   const legacyCall = message.function_call
   if (legacyCall !== undefined) {
     const functionName = requiredText(legacyCall.name, 'message.function_call.name')

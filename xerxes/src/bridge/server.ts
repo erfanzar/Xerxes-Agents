@@ -19,7 +19,7 @@ import {
 } from './wireEvents.js'
 import type { ProviderProfile, SaveProfileInput } from './profiles.js'
 import { estimateContextTokens } from '../context/windowUsage.js'
-import { calcCost, getContextLimit, resolveProvider } from '../llms/providerRegistry.js'
+import { calcCost, resolveProvider } from '../llms/providerRegistry.js'
 import { CostTracker } from '../runtime/costTracker.js'
 import { normalizeInteractionMode } from '../runtime/interactionModes.js'
 import { createAgentState, type AgentState, type StreamEvent } from '../streaming/events.js'
@@ -167,7 +167,7 @@ export class BridgeServer {
   private readonly wire: WireEventEmitter
 
   constructor(private readonly options: BridgeServerOptions) {
-    this.contextLimit = options.contextLimit ?? getContextLimit
+    this.contextLimit = options.contextLimit ?? (() => 0)
     this.state = stateFromSnapshot(options.session.snapshot)
     this.wire = new WireEventEmitter({
       eventNameStyle: options.wireEventNameStyle ?? 'kimi',
@@ -487,6 +487,7 @@ export class BridgeServer {
           ...(event.usage.cacheCreationTokens === undefined
             ? {}
             : { cacheCreationTokens: event.usage.cacheCreationTokens }),
+          ...(event.usage.serviceTier === undefined ? {} : { serviceTier: event.usage.serviceTier }),
           sessionId: this.options.session.snapshot.sessionId,
         })
         this.emitLegacy('turn_done', {
@@ -890,7 +891,9 @@ export class BridgeServer {
       message_count: this.state.messages.length,
       tool_execution_count: this.state.toolExecutions.length,
       context_limit: contextLimit,
-      remaining_context: Math.max(0, contextLimit - usedContext),
+      ...(contextLimit > 0
+        ? { remaining_context: Math.max(0, contextLimit - usedContext) }
+        : {}),
       used_context: usedContext,
       cost_usd: calcCost(model, this.state.totalInputTokens, this.state.totalOutputTokens),
       reasoning_effort: textValue(this.config.reasoning_effort) || 'off',

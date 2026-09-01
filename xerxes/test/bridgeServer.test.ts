@@ -588,6 +588,18 @@ test('legacy mode reports live usage through the additive usage_state event', as
   expect(terminalState?.data).not.toHaveProperty('usage')
 })
 
+test('bridge state leaves remaining capacity unknown when no provider limit exists', async () => {
+  const { server, output } = bridge({ contextLimit: () => 0 })
+  await server.dispatch({ method: 'init', params: { model: 'unreported-model' } })
+  output.legacy.length = 0
+  await server.dispatch({ method: 'query', params: { text: 'hello' } })
+  await server.waitForIdle()
+
+  const terminalState = output.legacy.find(event => event.event === 'state')
+  expect(terminalState?.data).toMatchObject({ context_limit: 0 })
+  expect(terminalState?.data).not.toHaveProperty('remaining_context')
+})
+
 test('wire init_done reports the packaged version', async () => {
   const { server, output } = bridge({ wireMode: true })
   await server.dispatch({ method: 'init', params: { model: 'gpt-4.1' } })

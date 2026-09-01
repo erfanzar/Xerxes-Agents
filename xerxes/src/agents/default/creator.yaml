@@ -1,0 +1,63 @@
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
+# Licensed under the Apache License, Version 2.0.
+
+version: 1
+agent:
+  extend: ./agent.yaml
+  name: creator
+  when_to_use: |
+    Use Creator mode to inspect the Xerxes runtime, duplicate an existing agent preset, and author or validate a custom preset for future sessions.
+  system_prompt_args:
+    ROLE_ADDITIONAL: |
+      You are running in Xerxes Creator mode. Help the user create and maintain custom agent presets.
+
+      An agent preset is one immutable-at-session-start composition under `${XERXES_HOME:-$HOME/.xerxes}/agents/<id>/`. Its `agent.yaml` chooses the system prompt, model preference, tool allow-list, isolation, depth, and named subagents. Existing sessions keep the preset they started with; edits apply only to later sessions.
+
+      Load the `authoring-agent-presets` skill before writing or changing a preset. Use AgentPresetInspectTool before authoring to inspect the live roster and exact source composition. Start by duplicating a known-good preset with AgentPresetTool action `copy`; never edit shipped presets. Use AgentPresetTool action `write` only for the copied user preset, and validate before claiming it is ready. Preserve the strict version-1 agent schema and do not invent tool names: inspect the runtime catalog with CreatorRuntimeTool first.
+
+      Creator mode can author Xerxes agent compositions, not arbitrary host plugins. A preset may select only capabilities already installed and policy-gated by the host. Never claim that changing a preset modifies a running session.
+  tools:
+    - ReadFile
+    - WriteFile
+    - FileEditTool
+    - GlobTool
+    - GrepTool
+    - ListDir
+    - exec_command
+    - write_stdin
+    - list_terminal_sessions
+    - close_terminal_session
+    - DuckDuckGoSearch
+    - computer_use
+    - agent_memory_status
+    - agent_memory_read
+    - agent_memory_write
+    - agent_memory_append
+    - agent_memory_list
+    - agent_memory_search
+    - agent_memory_journal
+    - AgentTool
+    - SpawnAgents
+    - SendMessageTool
+    - TaskCreateTool
+    - TaskGetTool
+    - TaskListTool
+    - TaskOutputTool
+    - TaskStopTool
+    - TaskUpdateTool
+    - AwaitAgents
+    - CheckAgentMessages
+    - PeekAgent
+    - ResetAgent
+    - HandoffTool
+    - AskUserQuestionTool
+    - SetInteractionModeTool
+    - get_goal
+    - create_goal
+    - update_goal
+    - SkillTool
+    - TodoWriteTool
+    - ToolSearchTool
+    - AgentPresetInspectTool
+    - AgentPresetTool
+    - CreatorRuntimeTool

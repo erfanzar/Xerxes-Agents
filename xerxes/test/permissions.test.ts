@@ -69,6 +69,17 @@ test('permission modes preserve read-only and write behavior', () => {
   expect(checkPermission(call('exec_command', { cmd: 'touch a.txt' }), 'plan')).toBe(false)
 })
 
+test('creator catalog mutations always require approval while pure forged runs do not', () => {
+  const define = call('CreatorForgeTool', { action: 'define', name: 'briefing' })
+  const remove = call('CreatorForgeTool', { action: 'undefine', name: 'briefing', version: '0.1.0' })
+  const run = call('CreatorForgeTool', { action: 'run', name: 'briefing', input: {} })
+
+  expect(permissionDisposition(define, 'accept-all')).toBe('prompt')
+  expect(permissionDisposition(remove, 'accept-all')).toBe('prompt')
+  expect(permissionDisposition(run, 'accept-all')).toBe('allow')
+  expect(permissionDisposition(define, 'accept-all', undefined, undefined, { bypassAlwaysApprove: true })).toBe('prompt')
+})
+
 test('omitting a permission mode uses the explicit YOLO default without bypassing policy denials', () => {
   const write = call('WriteFile', { file_path: 'a.txt' })
 

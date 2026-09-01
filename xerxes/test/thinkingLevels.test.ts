@@ -128,7 +128,7 @@ test('Anthropic payload maps neutral thinking to an enabled budget block', async
   })
 
   for await (const _ of client.stream({
-    model: 'claude-sonnet-4-6',
+    model: 'claude-sonnet-4-5',
     messages: [{ role: 'user', content: 'hi' }],
     thinking: { budgetTokens: 20_000, effort: 'high' },
   })) {
@@ -161,7 +161,7 @@ test('Anthropic thinking raises max_tokens past the budget and withholds incompa
   // Ultra escalation with default sampling: budget wins over max_tokens, and
   // temperature 0.6 / top_p are withheld because extended thinking rejects them.
   const escalated = await capture({
-    model: 'claude-sonnet-4-6',
+    model: 'claude-sonnet-4-5',
     messages: [{ role: 'user', content: 'hi' }],
     temperature: 0.6,
     thinking: { budgetTokens: 32_000, effort: 'high' },
@@ -174,7 +174,7 @@ test('Anthropic thinking raises max_tokens past the budget and withholds incompa
 
   // An explicit larger maxTokens and temperature exactly 1 are preserved.
   const explicit = await capture({
-    model: 'claude-sonnet-4-6',
+    model: 'claude-sonnet-4-5',
     maxTokens: 64_000,
     messages: [{ role: 'user', content: 'hi' }],
     temperature: 1,
@@ -183,9 +183,11 @@ test('Anthropic thinking raises max_tokens past the budget and withholds incompa
   expect(explicit['max_tokens']).toBe(64_000)
   expect(explicit['temperature']).toBe(1)
 
-  // Without thinking, sampling flows exactly as before.
+  // Without thinking, sampling flows exactly as before — and thinking is
+  // explicitly disabled rather than omitted: omitting it leaves the provider
+  // default, which for always-thinking models is ON (pi-ai parity).
   const plain = await capture({
-    model: 'claude-sonnet-4-6',
+    model: 'claude-sonnet-4-5',
     messages: [{ role: 'user', content: 'hi' }],
     temperature: 0.6,
     topP: 0.9,
@@ -193,7 +195,57 @@ test('Anthropic thinking raises max_tokens past the budget and withholds incompa
   expect(plain['max_tokens']).toBe(2048)
   expect(plain['temperature']).toBe(0.6)
   expect(plain['top_p']).toBe(0.9)
-  expect(plain['thinking']).toBeUndefined()
+  expect(plain['thinking']).toEqual({ type: 'disabled' })
+})
+
+test('Anthropic adaptive models take thinking: adaptive plus output_config effort (pi parity)', async () => {
+  const capture = async (
+    request: Partial<CompletionRequest> & Pick<CompletionRequest, 'model' | 'messages'>,
+    providerName?: string,
+  ) => {
+    let body: Record<string, unknown> = {}
+    const client = new AnthropicMessagesClient({
+      apiKey: 'test-key',
+      ...(providerName === undefined ? {} : { providerName }),
+      fetchImplementation: async (_url, init) => {
+        body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
+        return new Response(sse(
+          'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n' +
+          'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+        ), { headers: { 'Content-Type': 'text/event-stream' } })
+      },
+    })
+    for await (const _ of client.stream(request)) {
+      void _
+    }
+    return body
+  }
+
+  // claude-sonnet-4-6 is forceAdaptiveThinking in the Pi catalog: effort maps
+  // through thinkingLevelMap, no budget block, no max_tokens inflation.
+  const adaptive = await capture({
+    model: 'claude-sonnet-4-6',
+    messages: [{ role: 'user', content: 'hi' }],
+    thinking: { budgetTokens: 20_000, effort: 'high' },
+  })
+  expect(adaptive['thinking']).toEqual({ type: 'adaptive', display: 'summarized' })
+  expect(adaptive['output_config']).toEqual({ effort: 'high' })
+  expect(adaptive['max_tokens']).toBe(2048)
+
+  // kimi-code k3-256k marks off: null — it cannot disable thinking, so an off
+  // turn sends nothing and the server's adaptive default stands. Its ladder
+  // is low/high/max, and max maps straight through.
+  const kimiOff = await capture(
+    { model: 'k3-256k', messages: [{ role: 'user', content: 'hi' }], thinking: { effort: 'off' } },
+    'kimi-code',
+  )
+  expect(kimiOff['thinking']).toBeUndefined()
+  const kimiOn = await capture(
+    { model: 'k3-256k', messages: [{ role: 'user', content: 'hi' }], thinking: { effort: 'max' } },
+    'kimi-code',
+  )
+  expect(kimiOn['thinking']).toEqual({ type: 'adaptive', display: 'summarized' })
+  expect(kimiOn['output_config']).toEqual({ effort: 'max' })
 })
 
 function sse(payload: string): string {

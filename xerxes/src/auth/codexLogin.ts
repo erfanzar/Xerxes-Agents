@@ -186,7 +186,7 @@ function constantTimeEquals(left: string, right: string): boolean {
  * Spawned detached with stdio ignored so the browser outlives the CLI process
  * and never writes into a terminal the caller may have in raw mode.
  */
-function openInBrowser(url: string): void {
+export function openInBrowser(url: string): void {
   const command = process.platform === 'darwin'
     ? { command: 'open', args: [] as string[] }
     : process.platform === 'win32'

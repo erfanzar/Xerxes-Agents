@@ -91,6 +91,7 @@ export function messagesToGemini(messages: readonly ChatMessage[]): GeminiMessag
   const contents: GeminiContent[] = []
   const systemParts: GeminiPart[] = []
   const toolNames = new Map<string, string>()
+  const unresolvedToolCalls = new Map<string, string>()
   let index = 0
 
   while (index < messages.length) {
@@ -103,6 +104,12 @@ export function messagesToGemini(messages: readonly ChatMessage[]): GeminiMessag
       index += 1
       continue
     }
+    if (message.role !== 'tool' && unresolvedToolCalls.size) {
+      appendContent(contents, 'user', [...unresolvedToolCalls].map(([id, name]) => ({
+        functionResponse: { id, name, response: { error: 'No result provided' } },
+      })))
+      unresolvedToolCalls.clear()
+    }
     if (message.role === 'user') {
       appendContent(contents, 'user', contentToGeminiParts(message.content))
       index += 1
@@ -112,6 +119,7 @@ export function messagesToGemini(messages: readonly ChatMessage[]): GeminiMessag
       const parts = assistantContentParts(message)
       for (const call of message.tool_calls ?? []) {
         toolNames.set(call.id, call.function.name)
+        unresolvedToolCalls.set(call.id, call.function.name)
         parts.push({
           functionCall: {
             id: call.id,
@@ -143,12 +151,22 @@ export function messagesToGemini(messages: readonly ChatMessage[]): GeminiMessag
         functionResponse: {
           id: toolMessage.tool_call_id,
           name,
-          response: toolMessage.is_error ? { error: toolMessage.content } : { result: toolMessage.content },
+          response: toolMessage.is_error ? { error: toolMessage.content } : { output: toolMessage.content },
         },
       })
+      unresolvedToolCalls.delete(toolMessage.tool_call_id)
       index += 1
     }
+    for (const [id, name] of unresolvedToolCalls) {
+      toolParts.push({ functionResponse: { id, name, response: { error: 'No result provided' } } })
+    }
+    unresolvedToolCalls.clear()
     appendContent(contents, 'user', toolParts)
+  }
+  if (unresolvedToolCalls.size) {
+    appendContent(contents, 'user', [...unresolvedToolCalls].map(([id, name]) => ({
+      functionResponse: { id, name, response: { error: 'No result provided' } },
+    })))
   }
 
   return {
@@ -362,7 +380,10 @@ export class GeminiClient implements LlmClient {
 
 /** Preserve HTTP status and retry timing for runtime retry classification. */
 function geminiHttpError(message: string, response: Response): ProviderError {
-  const retryAfterSeconds = parseRetryAfterHeader(response.headers.get('retry-after'))
+  const retryAfterMilliseconds = parseRetryAfterHeader(response.headers.get('retry-after-ms'))
+  const retryAfterSeconds = retryAfterMilliseconds === undefined
+    ? parseRetryAfterHeader(response.headers.get('retry-after'))
+    : retryAfterMilliseconds / 1_000
   return new ProviderError('gemini', message, undefined, {
     status: response.status,
     ...(retryAfterSeconds === undefined ? {} : { retryAfterSeconds }),
@@ -487,6 +508,7 @@ function geminiRequestPayload(
       payload.toolConfig = toolConfig
     }
   }
+  if (request.extraBody) Object.assign(payload, request.extraBody)
   return payload
 }
 
@@ -509,14 +531,26 @@ function requestGenerationConfig(
   if (request.topP !== undefined) generationConfig.topP = request.topP
   if (request.stop?.length) generationConfig.stopSequences = [...request.stop]
   if (request.thinking !== undefined) {
-    // Gemini's native API nests thinking controls inside generationConfig.
-    // The neutral effort is intentionally not translated to thinkingLevel:
-    // budgetTokens is the cross-model control, while thinkingLevel support and
-    // accepted values vary by model. Request thought parts so the adapter can
-    // expose them through the neutral thinking delta.
-    generationConfig.thinkingConfig = {
-      thinkingBudget: request.thinking.budgetTokens ?? 10_000,
-      includeThoughts: true,
+    const model = bareModel(request.model).toLowerCase()
+    const effort = request.thinking.effort?.toLowerCase()
+    if (model.includes('gemini-3') || model.includes('gemma-4')) {
+      const thinkingLevel = effort === 'off' || effort === 'none'
+        ? model.includes('pro') ? 'LOW' : 'MINIMAL'
+        : effort === 'minimal'
+          ? 'MINIMAL'
+          : effort === 'low'
+          ? 'LOW'
+          : effort === 'medium'
+            ? 'MEDIUM'
+            : 'HIGH'
+      generationConfig.thinkingConfig = { thinkingLevel, includeThoughts: true }
+    } else {
+      generationConfig.thinkingConfig = {
+        thinkingBudget: effort === 'off' || effort === 'none'
+          ? 0
+          : request.thinking.budgetTokens ?? 10_000,
+        includeThoughts: effort !== 'off' && effort !== 'none',
+      }
     }
   }
   return generationConfig
@@ -526,7 +560,7 @@ function toolToGemini(tool: ToolDefinition): Record<string, unknown> {
   return {
     name: tool.function.name,
     description: tool.function.description,
-    parameters: tool.function.parameters,
+    parametersJsonSchema: tool.function.parameters,
   }
 }
 
@@ -782,7 +816,7 @@ function geminiUsage(value: unknown): TokenUsage | undefined {
   const inputTokens = Math.max(0, (promptTokens ?? 0) - (cacheReadTokens ?? 0))
   return {
     inputTokens,
-    outputTokens: outputTokens ?? 0,
+    outputTokens: (outputTokens ?? 0) + (reasoningTokens ?? 0),
     ...(cacheReadTokens === undefined ? {} : { cacheReadTokens }),
     ...(reasoningTokens === undefined ? {} : { reasoningTokens }),
   }
@@ -818,10 +852,25 @@ function promptBlockReason(value: unknown): string | undefined {
 
 function normalizeFinishReason(value: string): string {
   const normalized = value.toLowerCase()
-  if (normalized === 'max_tokens') {
-    return 'length'
+  if (normalized === 'max_tokens') return 'length'
+  if (normalized === 'stop') return 'stop'
+  if (new Set([
+    'finish_reason_unspecified',
+    'safety',
+    'recitation',
+    'blocklist',
+    'prohibited_content',
+    'spii',
+    'language',
+    'malformed_function_call',
+    'other',
+    'image_safety',
+    'image_prohibited_content',
+    'image_recitation',
+  ]).has(normalized)) {
+    throw new ProviderError('gemini', `provider stopped with: ${value}`)
   }
-  return normalized === 'finish_reason_unspecified' ? 'stop' : normalized
+  return normalized
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

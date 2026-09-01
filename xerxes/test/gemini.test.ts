@@ -63,7 +63,7 @@ test('Gemini conversion separates system instructions and preserves native tool 
       {
         role: 'user',
         parts: [
-          { functionResponse: { id: 'call-1', name: 'ReadFile', response: { result: '# Xerxes' } } },
+          { functionResponse: { id: 'call-1', name: 'ReadFile', response: { output: '# Xerxes' } } },
           { functionResponse: { id: 'call-2', name: 'RunTests', response: { error: 'failed' } } },
         ],
       },
@@ -143,14 +143,18 @@ test('Gemini direct REST stream sends native settings and normalizes all shared 
       stopSequences: ['<stop>'],
     },
     safetySettings: [{ category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_ONLY_HIGH' }],
-    tools: [{ functionDeclarations: [READ_FILE.function] }],
+    tools: [{ functionDeclarations: [{
+      name: READ_FILE.function.name,
+      description: READ_FILE.function.description,
+      parametersJsonSchema: READ_FILE.function.parameters,
+    }] }],
     toolConfig: { functionCallingConfig: { mode: 'ANY' } },
   })
   expect(events).toContainEqual({ content: 'Hello ', thinking: 'Inspect source.', thinkingSignature: 'thought-2' })
   expect(events).toContainEqual({
     content: 'world',
     finishReason: 'stop',
-    usage: { inputTokens: 8, outputTokens: 7, cacheReadTokens: 3, reasoningTokens: 2 },
+    usage: { inputTokens: 8, outputTokens: 9, cacheReadTokens: 3, reasoningTokens: 2 },
     toolCalls: [{
       id: 'gemini-call-1',
       type: 'function',
@@ -168,7 +172,7 @@ test('Gemini usage treats cached prompt tokens as cache reads without double cou
         cachedContentTokenCount: 3,
         thoughtsTokenCount: 2,
       },
-      expected: { inputTokens: 8, outputTokens: 7, cacheReadTokens: 3, reasoningTokens: 2 },
+      expected: { inputTokens: 8, outputTokens: 9, cacheReadTokens: 3, reasoningTokens: 2 },
     },
     {
       usageMetadata: {
@@ -280,7 +284,7 @@ test('Gemini native completion sends generateContent and normalizes a complete c
     thinking: 'Inspect source.',
     thinkingSignature: 'thought-1',
     finishReason: 'stop',
-    usage: { inputTokens: 10, outputTokens: 6, cacheReadTokens: 2, reasoningTokens: 3 },
+    usage: { inputTokens: 10, outputTokens: 9, cacheReadTokens: 2, reasoningTokens: 3 },
     toolCalls: [{ id: 'call-1', type: 'function', function: { name: 'ReadFile', arguments: { path: 'README.md' } } }],
   })
 })

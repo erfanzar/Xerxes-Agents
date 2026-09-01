@@ -23,6 +23,40 @@ export interface FileReadRecord {
   readonly snapshot: string | undefined
 }
 
+/**
+ * One entry of the read-guard state saved into session metadata. Keys are
+ * short on purpose: this rides inside the session blob on every persist.
+ */
+export interface PersistedFileRead {
+  readonly digest: string
+  readonly mtime_ms: number
+  readonly partial: boolean
+  readonly path: string
+  readonly size: number
+}
+
+/** Metadata key under which the read-guard state is stored. */
+export const FILE_READS_METADATA_KEY = 'file_reads'
+
+/** Collect the current session's read records in their persisted form. */
+export function fileReadsForMetadata(
+  sessionId: string | undefined,
+  tracker: FileStateTracker = fileStateTracker,
+): PersistedFileRead[] {
+  if (sessionId === undefined || sessionId === '') return []
+  return tracker.serializeSession(sessionId).map(entry => ({ ...entry }))
+}
+
+/** Restore read records saved under {@link FILE_READS_METADATA_KEY}. */
+export function hydrateFileReadsFromMetadata(
+  sessionId: string,
+  metadata: Record<string, unknown> | undefined,
+  tracker: FileStateTracker = fileStateTracker,
+): number {
+  if (metadata === undefined) return 0
+  return tracker.hydrateSession(sessionId, metadata[FILE_READS_METADATA_KEY])
+}
+
 export interface FileStateTrackerOptions {
   readonly maxEntries?: number
   /** Files larger than this are tracked but not snapshotted, so drift reports stay bounded. */
@@ -112,6 +146,71 @@ export class FileStateTracker {
 
   clear(): void {
     this.entries.clear()
+  }
+
+  /**
+   * Persisted form of one read record — what session metadata stores.
+   *
+   * The snapshot text is deliberately excluded: metadata rides inside the
+   * session blob on every save, and pinning up to 200 file bodies there would
+   * bloat each write. A hydrated record still carries digest/mtime/size, so
+   * the freshness guard works across restarts; only the drift diff report is
+   * lost, and its fallback simply asks the model to re-read.
+   */
+  serializeSession(sessionId: string): readonly PersistedFileRead[] {
+    const prefix = entryKey(sessionId, '')
+    const entries: PersistedFileRead[] = []
+    for (const [key, record] of this.entries) {
+      if (!key.startsWith(prefix)) continue
+      entries.push({
+        path: key.slice(prefix.length),
+        digest: record.digest,
+        mtime_ms: record.mtimeMs,
+        partial: record.partialView,
+        size: record.size,
+      })
+    }
+    return entries
+  }
+
+  /**
+   * Restore records saved by serializeSession (tolerant of anything a future
+   * or corrupted metadata blob might hold). Returns the count restored.
+   */
+  hydrateSession(sessionId: string, raw: unknown): number {
+    if (!Array.isArray(raw)) return 0
+    let restored = 0
+    for (const entry of raw) {
+      if (typeof entry !== 'object' || entry === null) continue
+      const record = entry as Record<string, unknown>
+      const path = record.path
+      const digest = record.digest
+      const mtimeMs = record.mtime_ms
+      const size = record.size
+      if (typeof path !== 'string' || path === '' || typeof digest !== 'string' || digest === ''
+        || typeof mtimeMs !== 'number' || !Number.isFinite(mtimeMs)
+        || typeof size !== 'number' || !Number.isFinite(size)) {
+        continue
+      }
+      const key = entryKey(sessionId, path)
+      this.entries.delete(key)
+      this.entries.set(key, {
+        digest,
+        mtimeMs,
+        partialView: record.partial !== false,
+        size,
+        // No snapshot across a restart: drift refusals fall back to
+        // "read it again" instead of a diff, which is the safe direction.
+        snapshot: undefined,
+      })
+      restored += 1
+    }
+    while (this.entries.size > this.maxEntries) {
+      const oldest = this.entries.keys().next().value
+      if (oldest === undefined) break
+      this.entries.delete(oldest)
+    }
+    return restored
   }
 
   /**
@@ -366,8 +465,10 @@ function assessDrift(
 function refusalMessage(drift: FileDrift, request: GuardedWriteRequest): string {
   const killSwitch = ' (set XERXES_FILE_FRESHNESS=off to disable this check)'
   if (drift.reason === 'never-read') {
-    return 'has not been read in this session, so ' + request.toolName + ' could overwrite changes made since you '
-      + 'last looked at it; read the file first' + killSwitch
+    // Lead with the instruction the model can act on directly: the sentence
+    // names the tool, the exact path, and the recovery step in that order.
+    return request.toolName + ' requires reading "' + request.displayPath + '" first — read the file, then retry'
+      + killSwitch
   }
   if (drift.report === undefined) {
     return 'changed on disk after you read it, and your read covered only part of the file so the changes cannot be '

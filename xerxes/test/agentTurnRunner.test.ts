@@ -117,8 +117,7 @@ const repeatedReadTool: ToolDefinition = {
 
 test('a vendor-prefixed model id runs without being read as a routing prefix', async () => {
   // `stealth/ox-alpha` is an OpenRouter MODEL id: the part before the slash
-  // is a vendor, not a provider prefix. `retryPolicyForModel` and
-  // `getContextLimit` used to be called with no overrides, so they inferred a
+  // is a vendor, not a provider prefix. Provider routing used to infer a
   // provider from the id and threw `unknown provider prefix 'stealth'` on
   // every turn that used one. The active profile knows the provider, so the
   // runner is given it and nothing has to guess.
@@ -157,12 +156,49 @@ test('a vendor-prefixed model id runs without being read as a routing prefix', a
   const status = events.find(event => event.type === 'status_update')
 
   expect(status).toBeDefined()
-  // Resolved through the profile's provider, not guessed from the id.
-  expect((status as unknown as { payload: { max_context: number } }).payload.max_context).toBeGreaterThan(0)
+  // Provider routing succeeds, but no capacity was reported for this model.
+  expect((status as unknown as { payload: Record<string, unknown> }).payload).not.toHaveProperty('max_context')
 })
 
-test('agent turn runner maps portable loop events to daemon v35 event names', async () => {
-  const runner = new AgentTurnRunner({ llm: new TextClient(), model: 'gpt-4o' })
+test('agent turn runner resolves output capacity for the session model after explicit max tokens', async () => {
+  const session: DaemonSession = {
+    activeTurnId: '', agentId: 'default', cancelRequested: false, cwd: process.cwd(), extra: {},
+    id: 'model-cap-session', interactionMode: 'code', sessionKey: 'model-cap', lastActive: 0,
+    messages: [], metadata: {}, model: 'pinned-model', planMode: false, status: 'working',
+    thinkingContent: [], toolExecutions: [], totalInputTokens: 0, totalOutputTokens: 0,
+    turnCount: 0, workspace: '/tmp/agents/default',
+  }
+  const catalogClient = new CapturingClient()
+  const lookedUp: string[] = []
+  const catalogRunner = new AgentTurnRunner({
+    llm: catalogClient,
+    maxOutputTokens: model => {
+      lookedUp.push(model)
+      return 65_536
+    },
+    model: 'global-model',
+  })
+  for await (const _event of catalogRunner.run(session, 'hi', new AbortController().signal)) {
+    // drain
+  }
+  expect(lookedUp).toEqual(['pinned-model'])
+  expect(catalogClient.requests[0]?.maxTokens).toBe(65_536)
+
+  const explicitClient = new CapturingClient()
+  const explicitRunner = new AgentTurnRunner({
+    llm: explicitClient,
+    maxOutputTokens: () => 65_536,
+    maxTokens: 8_192,
+    model: 'global-model',
+  })
+  for await (const _event of explicitRunner.run({ ...session, id: 'explicit-cap-session', messages: [] }, 'hi', new AbortController().signal)) {
+    // drain
+  }
+  expect(explicitClient.requests[0]?.maxTokens).toBe(8_192)
+})
+
+test('agent turn runner maps portable loop events and supplied live capacity to daemon v35 events', async () => {
+  const runner = new AgentTurnRunner({ contextLimit: 128_000, llm: new TextClient(), model: 'gpt-4o' })
   const session: DaemonSession = {
     activeTurnId: '',
     agentId: 'default',
@@ -209,6 +245,9 @@ test('agent turn runner maps portable loop events to daemon v35 event names', as
         total_tokens: 8,
         context_tokens: 8,
         max_context: 128_000,
+        llm_duration_ms: expect.any(Number),
+        ttft_ms: expect.any(Number),
+        tokens_per_second: expect.any(Number),
       },
     },
     {
@@ -233,6 +272,15 @@ test('agent turn runner maps portable loop events to daemon v35 event names', as
     },
   ])
   expect(runner.stateFor('session-1')?.messages.map(message => message.role)).toEqual(['user', 'assistant'])
+  expect(session.extra.runtime_telemetry).toMatchObject({
+    cacheTelemetryKnown: false,
+    llmSteps: 1,
+    llmDurationMs: expect.any(Number),
+    toolSteps: 0,
+    toolDurationMs: 0,
+    ttftSamples: 1,
+    ttftTotalMs: expect.any(Number),
+  })
 })
 
 test('agent turn runner keeps live context monotonic when a later round is fully cached', async () => {
@@ -278,6 +326,12 @@ test('agent turn runner keeps live context monotonic when a later round is fully
     .filter(event => event.type === 'status_update' && event.payload.usage_complete === undefined)
     .map(event => Number(event.payload.context_tokens))
   expect(liveContext).toEqual([110, 107])
+  expect(session.extra.runtime_telemetry).toMatchObject({
+    cacheTelemetryKnown: true,
+    cacheReadTokens: 100,
+    inputTokens: 5,
+    cacheHitRate: 100 / 105,
+  })
 })
 
 test('agent turn runner forwards tool arguments into capability refinement', async () => {
@@ -1041,6 +1095,11 @@ test('agent turn runner routes AskUserQuestionTool through the native daemon rep
       { type: 'text_part', payload: { text: 'Thanks for the answer.' } },
     ]))
     expect(session.messages.find(message => message.role === 'tool')?.content).toContain('"answer":"yes"')
+    expect(session.extra.runtime_telemetry).toMatchObject({
+      llmSteps: 0,
+      toolSteps: 1,
+      toolDurationMs: expect.any(Number),
+    })
   } finally {
     release()
   }

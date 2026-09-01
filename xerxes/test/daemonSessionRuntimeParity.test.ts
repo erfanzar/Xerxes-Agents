@@ -216,6 +216,44 @@ test('daemon runtime persists a project-scoped session and resumes only an expli
   }
 })
 
+test('a prompt whose turn never produced a reply never becomes a session row', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-daemon-dangling-prompt-'))
+  const projectDirectory = join(directory, 'project')
+  const workspaceRoot = join(directory, 'agents')
+  const sessionDirectory = join(directory, 'sessions')
+  const runtime = new InMemoryDaemonRuntime(new RecordingRunner(), {
+    currentProjectDirectory: projectDirectory,
+    model: 'gpt-4o',
+    sessionDirectory,
+    workspaceRoot,
+  })
+  try {
+    const session = await runtime.openSession('tui:default', 'researcher', { cwd: projectDirectory })
+
+    // Simulate the desktop-app launch pattern: a prompt landed but the turn
+    // died before any assistant output was synced — one user message, zero
+    // completed turns. This is exactly what used to litter /resume and the
+    // GUI sidebar with phantom "0 turns" sessions.
+    session.messages.push({ role: 'user', content: 'hello' })
+    await runtime.flushSessions()
+
+    expect(await runtime.listSavedSessions()).toEqual([])
+    expect(await Bun.file(join(sessionDirectory, `${session.id}.json`)).exists()).toBeFalse()
+
+    // The exchange completes: real history now — persists and lists.
+    session.messages.push({ role: 'assistant', content: 'hi back' })
+    session.turnCount += 1
+    await runtime.flushSessions()
+
+    const listed = await runtime.listSavedSessions()
+    expect(listed).toHaveLength(1)
+    expect(listed[0]).toMatchObject({ id: session.id, messageCount: 2, turnCount: 1 })
+    expect(await Bun.file(join(sessionDirectory, `${session.id}.json`)).exists()).toBeTrue()
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
 test('saved session listing exposes additive hierarchy metadata and limits roots after project and kind filters', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'xerxes-daemon-session-hierarchy-'))
   const projectDirectory = join(directory, 'project-a')

@@ -51,7 +51,10 @@ export class TrajectoryCompressor {
   private readonly workers: number
 
   constructor(options: TrajectoryCompressorOptions = {}) {
-    this.compressor = options.compressor ?? new ContextCompressor({ threshold: 0.5, contextWindow: 200_000 })
+    // No model/profile exists in an offline trajectory by default. Without an
+    // injected capacity the shared compressor prunes tool output only; it never
+    // invents a context window to trigger lossy summarization.
+    this.compressor = options.compressor ?? new ContextCompressor({ threshold: 0.5 })
     this.workers = options.workers ?? 4
   }
 

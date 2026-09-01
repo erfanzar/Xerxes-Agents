@@ -15,13 +15,18 @@ import { writeAcpRegistryFile } from "./acp/registry.js";
 import { AcpServer } from "./acp/server.js";
 import { serveACPStdio } from "./acp/transport.js";
 import { loadAgentDefinitions, resolveAgentDefinition } from "./agents/definitions.js";
+import { AgentPresetRoster } from "./agents/presets.js";
 import { ConfigurationError } from "./core/errors.js";
 import {
   BunDiscordGatewayWebSocketPort,
   FetchDiscordGatewayRestPort,
 } from "./channels/discordGateway.js";
 import { FetchDiscordApplicationRestPort } from "./channels/discordApplications.js";
-import { ProfileStore } from "./bridge/profiles.js";
+import {
+  resolvedProfileContextLimit,
+  resolvedProfileMaxOutputTokens,
+  ProfileStore,
+} from "./bridge/profiles.js";
 import {
   createDaemonChannelManager,
   daemonChannelWebhookOptions,
@@ -42,6 +47,7 @@ import {
   SkillRegistry,
   trustedHashWorkspaceSkills,
 } from "./extensions/skills.js";
+import { DeclarativeToolForge } from "./extensions/declarativeForge.js";
 import {
   ToolRegistry,
   type ToolExecutionContext,
@@ -50,7 +56,6 @@ import { createCompactionAgent } from "./agents/compactionAgent.js";
 import { AuditEmitter } from "./audit/emitter.js";
 import { JSONLSinkCollector } from "./audit/collector.js";
 import { estimateContextTokens } from "./context/windowUsage.js";
-import { getContextLimit } from "./llms/providerRegistry.js";
 import { createLlmClient } from "./llms/client.js";
 import type { ChatMessage } from "./types/messages.js";
 import type { SpawnedAgentSnapshot } from "./operators/subagents.js";
@@ -75,6 +80,7 @@ import {
 import { CliWriter, createCliStyle, detectColorDepth } from "./runtime/cliStyle.js";
 import { resolveTuiEntry } from "./runtime/distribution.js";
 import { registerInteractionModeTool } from "./runtime/interactionModeTool.js";
+import { goalPolicyPrompt, registerGoalTools } from "./runtime/goalTools.js";
 import { extractAgentOption, parseValueOptions } from "./runtime/commandOptions.js";
 import { ProcessRegistry } from "./runtime/processRegistry.js";
 import { TerminalRegistry } from "./runtime/terminalRegistry.js";
@@ -105,6 +111,8 @@ import {
   selectSavedSession,
 } from "./runtime/sessionExport.js";
 import { createMacOSComputerUseToolOptions } from "./tools/computerUse/macosPort.js";
+import { registerCreatorForgeTool } from "./tools/creatorForge.js";
+import { registerAgentPresetTools } from "./tools/agentPresets.js";
 import {
   createLlmPlanGenerator,
   registerClaudeAgentTools,
@@ -157,6 +165,8 @@ const HELP_GROUPS: readonly {
     title: "Maintain",
     commands: [
       ["xerxes auth login codex", "sign in to ChatGPT and use its Codex plan"],
+      ["xerxes auth login copilot", "sign in to GitHub and use Copilot models"],
+      ["xerxes auth login anthropic|kimi|openrouter|xai|radius", "authorize subscription or gateway OAuth sessions"],
       ["xerxes doctor", "check the host, providers, and configuration"],
       ["xerxes update [--check] [--git] [--dry-run] [--apply]", "report or apply an update"],
       ["xerxes install --cloud-code [--force] [--dry-run]", "install a companion integration"],
@@ -320,6 +330,17 @@ function reportCommandUsageError(error: Error, helpCommand: string): never {
   errorWriter.status("fail", "error", error.message);
   errorWriter.hint(`run '${helpCommand}' for usage.`);
   process.exit(1);
+}
+
+/** Image generation through OpenRouter's chat-modality surface, when a key exists. */
+function generateImageToolOptions(workspaceRoot: string): {
+  resolveApiKey: () => string;
+  workspaceRoot: string;
+} {
+  return {
+    resolveApiKey: () => process.env.OPENROUTER_API_KEY?.trim() ?? "",
+    workspaceRoot,
+  };
 }
 
 if (argument === "--help" || argument === "-h") {
@@ -919,6 +940,13 @@ async function runDaemon(
   });
   const browserManager = new BrowserManager();
   const skillRegistry = new SkillRegistry({ workspaceTrust: trustedHashWorkspaceSkills() });
+  await skillRegistry.refresh(...defaultSkillDiscoveryRoots({
+    cwd: projectDirectory ?? config.projectDirectory,
+  }));
+  const declarativeForge = new DeclarativeToolForge();
+  const agentPresetRoster = new AgentPresetRoster({
+    projectDirectory: projectDirectory ?? config.projectDirectory,
+  });
   // Shared by the tool registry that starts the processes and the RPC surface
   // that lists them. One instance is the whole point: a second registry would
   // be a second, permanently empty view of the same shells.
@@ -941,6 +969,8 @@ async function runDaemon(
       ...(buildId ? { buildId } : {}),
       onSessionModeChange: (sessionId) => announceModeChange?.(sessionId),
       skillRegistry,
+      declarativeForge,
+      agentPresetRoster,
       terminals,
     },
   );
@@ -958,14 +988,38 @@ async function runDaemon(
     finishDaemon = resolveLifetime;
   });
   const finish = () => finishDaemon?.();
+  // MCP: connect the servers configured in ~/.xerxes/mcp.json so their
+  // status is real (session.status.mcp_status) and /reload-mcp works.
+  // Per-server failures are recorded on the manager and logged — one broken
+  // server must not stop the daemon.
+  const { MCPManager } = await import("./mcp/manager.js");
+  const { loadMcpConfig } = await import("./mcp/config.js");
+  const mcpConfig = loadMcpConfig(join(xerxesHome(), "mcp.json"));
+  for (const warning of mcpConfig.warnings) console.error(`mcp: ${warning}`);
+  const mcpManager = new MCPManager();
+  for (const server of mcpConfig.servers) {
+    void mcpManager
+      .addServer(server)
+      .then((connected) => {
+        if (!connected) console.error(`mcp: server '${server.name}' not connected (disabled or duplicate)`);
+      })
+      .catch((error) => console.error(`mcp: server '${server.name}' failed: ${errorMessage(error)}`));
+  }
   const daemon = new DaemonServer({
     socketPath,
     runtime,
+    // Sessions created without an explicit project_dir belong to THIS
+    // project, not to wherever the daemon process happened to start.
+    ...(projectDirectory ? { projectDirectory } : {}),
     interactions,
     browserManager,
     terminalRegistry: terminals,
     profileStore,
+    autoDiscoverModelCapabilities: true,
     skillRegistry,
+    declarativeForge,
+    agentPresetRoster,
+    ...(mcpConfig.servers.length ? { mcpManager } : {}),
     onRestart: finish,
     onShutdown: finish,
     // Only a process-owning host may claim uncaughtException/unhandledRejection,
@@ -1458,6 +1512,8 @@ function daemonRuntime(
     /** Announce a model-driven interaction-mode change to attached clients. */
     readonly onSessionModeChange?: (sessionId: string, mode: string) => void;
     readonly skillRegistry?: SkillRegistry;
+    readonly declarativeForge?: DeclarativeToolForge;
+    readonly agentPresetRoster?: AgentPresetRoster;
     readonly terminals?: TerminalRegistry;
   } = {},
 ): InMemoryDaemonRuntime {
@@ -1544,6 +1600,9 @@ function daemonRuntime(
       activeToolCount = 0;
       return undefined;
     }
+    const maxTokens = connection.maxTokens;
+    const maxOutputTokens = (candidate: string): number | undefined =>
+      resolvedProfileMaxOutputTokens(profileStore.active(), candidate);
     // Deferred schema loading. The model gets the always-loaded core plus
     // whatever ToolSearchTool has already revealed in this transcript, instead
     // of the entire surface on every request — measured at 76 schemas, which is
@@ -1566,6 +1625,7 @@ function daemonRuntime(
     registerCoreTools(tools, {
       workspaceRoot,
       backgroundCommands,
+      generateImageTool: generateImageToolOptions(workspaceRoot),
       ...(host.terminals === undefined ? {} : { terminals: host.terminals }),
       ...(computerUseTool === undefined ? {} : { computerUseTool }),
       agentMemoryTools: {
@@ -1580,6 +1640,14 @@ function daemonRuntime(
       },
       memoryTools: { resolveContext: memoryToolContext.resolve },
     });
+    if (host.declarativeForge) {
+      registerCreatorForgeTool(tools, host.declarativeForge);
+    }
+    if (host.agentPresetRoster) {
+      registerAgentPresetTools(tools, host.agentPresetRoster, {
+        onChanged: () => { runtime?.reload({}); },
+      });
+    }
     if (browserManager) {
       registerBrowserManagerTools(tools, browserManager);
     }
@@ -1589,6 +1657,18 @@ function daemonRuntime(
     if (host.skillRegistry) {
       registerClaudeSkillTool(tools, host.skillRegistry);
     }
+    // Same-session goals: the model states lifecycle through typed calls
+    // instead of the runtime inferring it from English phrases in the prose.
+    registerGoalTools(tools, {
+      sessionId: (context) => String(context.sessionId ?? ""),
+      metadata: (context) => context.metadata,
+      // Authority is a property of the turn, written by the turn runner.
+      isHumanTurn: (context) => context.metadata.goal_turn_human !== false,
+      currentRound: (context) =>
+        typeof context.metadata.goal_turn_round === "number"
+          ? context.metadata.goal_turn_round
+          : undefined,
+    });
     registerInteractionModeTool(tools, {
       async setMode({ context, mode }) {
         const activeRuntime = runtime;
@@ -1621,6 +1701,7 @@ function daemonRuntime(
     });
     const subagentOptions = {
       agentDefinitions,
+      contextLimit: (model: string) => resolvedProfileContextLimit(profileStore.active(), model),
       cwd: workspaceRoot,
       // The durable attempt log. Its runtime, bridge, and every consumer branch
       // were written and tested, and nothing ever constructed one — so in
@@ -1634,9 +1715,8 @@ function daemonRuntime(
         ? { extraContext: host.skillRegistry.markdownIndex() }
         : {}),
       llm,
-      ...(connection.maxTokens === undefined
-        ? {}
-        : { maxTokens: connection.maxTokens }),
+      ...(maxTokens === undefined ? {} : { maxTokens }),
+      maxOutputTokens,
       model: connection.model,
       permissionMode: connection.permissionMode,
       ...(connection.temperature === undefined
@@ -1670,7 +1750,9 @@ function daemonRuntime(
     // deferred loading on those differ by design, and the status line claiming
     // the full registry would hide the very thing this setting changes.
     activeToolCount = tools.definitionsForTranscript([]).length;
+    const contextLimit = resolvedProfileContextLimit(profileStore.active(), connection.model);
     return new AgentTurnRunner({
+      ...(contextLimit === undefined ? {} : { contextLimit }),
       // The profile's provider, carried explicitly so nothing downstream has
       // to infer it from the model id. An OpenRouter id like
       // `stealth/ox-alpha` has a vendor before the slash, not a routing
@@ -1699,9 +1781,8 @@ function daemonRuntime(
           ...(runnerTools === undefined ? {} : { tools: runnerTools }),
         }).then((result) => result.systemPrompt),
       llm,
-      ...(connection.maxTokens !== undefined
-        ? { maxTokens: connection.maxTokens }
-        : {}),
+      ...(maxTokens === undefined ? {} : { maxTokens }),
+      maxOutputTokens,
       model: connection.model,
       permissionMode: connection.permissionMode,
       ...(connection.reasoningEffort === undefined
@@ -1918,7 +1999,8 @@ async function acpServer(
   readonly server: AcpServer;
   readonly shutdown: () => Promise<void>;
 }> {
-  const connection = runtimeConnection(config, new ProfileStore().active());
+  const profileStore = new ProfileStore();
+  const connection = runtimeConnection(config, profileStore.active());
   if (!connection) {
     throw new Error(
       "ACP requires a configured runtime connection or active provider profile",
@@ -1932,6 +2014,7 @@ async function acpServer(
   const acpComputerUseTool = createMacOSComputerUseToolOptions(config.runtime);
   registerCoreTools(tools, {
     workspaceRoot,
+    generateImageTool: generateImageToolOptions(workspaceRoot),
     ...(acpComputerUseTool === undefined ? {} : { computerUseTool: acpComputerUseTool }),
     agentMemoryTools: {
       memory: new AgentMemory({ projectRoot: workspaceRoot }),
@@ -1940,12 +2023,18 @@ async function acpServer(
     },
     memoryTools: { resolveContext: memoryToolContext.resolve },
   });
+  registerCreatorForgeTool(tools, new DeclarativeToolForge());
+  registerAgentPresetTools(tools, new AgentPresetRoster({ projectDirectory: workspaceRoot }));
   registerClaudeSkillTool(tools, skillRegistry);
   const definitions = loadAgentDefinitions({ cwd: workspaceRoot });
   const agent = definitions.get("default");
   const agentId = agent?.name ?? "default";
   const selfMemory = getAgentSelfMemory(agentId);
   const model = agent?.model || connection.model;
+  const maxTokens = connection.maxTokens;
+  const maxOutputTokens = (candidate: string): number | undefined =>
+    resolvedProfileMaxOutputTokens(profileStore.active(), candidate);
+  const effectiveMaxTokens = maxTokens ?? maxOutputTokens(model);
   const llm = createLlmClient(connection.model, {
     ...(connection.apiKey ? { api_key: connection.apiKey } : {}),
     ...(connection.baseUrl ? { base_url: connection.baseUrl } : {}),
@@ -1954,13 +2043,13 @@ async function acpServer(
   });
   const subagentHost = createNativeSubagentHost({
     agentDefinitions: definitions,
+    contextLimit: candidate => resolvedProfileContextLimit(profileStore.active(), candidate),
     cwd: workspaceRoot,
     eventBus: new DaemonSubagentEventBus(),
     ...(skillRegistry.markdownIndex() ? { extraContext: skillRegistry.markdownIndex() } : {}),
     llm,
-    ...(connection.maxTokens === undefined
-      ? {}
-      : { maxTokens: connection.maxTokens }),
+    ...(maxTokens === undefined ? {} : { maxTokens }),
+    maxOutputTokens,
     model,
     permissionMode: defaultPermissionMode,
     ...(connection.temperature === undefined
@@ -1993,9 +2082,7 @@ async function acpServer(
     model,
     agentId,
     ...(systemPrompt ? { systemPrompt } : {}),
-    ...(connection.maxTokens !== undefined
-      ? { maxTokens: connection.maxTokens }
-      : {}),
+    ...(effectiveMaxTokens === undefined ? {} : { maxTokens: effectiveMaxTokens }),
     defaultPermissionMode,
     subagentCoordinator: subagentHost.turnCoordinator,
     ...(connection.temperature !== undefined
@@ -2069,7 +2156,8 @@ async function runOneShot(
   agentReference?: string,
 ): Promise<void> {
   const config = loadSystemDaemonConfig();
-  const connection = runtimeConnection(config, new ProfileStore().active());
+  const profileStore = new ProfileStore();
+  const connection = runtimeConnection(config, profileStore.active());
   if (!connection) {
     throw new RuntimeConnectionRequiredError(
       "One-shot execution requires a configured runtime connection or active provider profile",
@@ -2084,6 +2172,7 @@ async function runOneShot(
   const computerUseTool = createMacOSComputerUseToolOptions(config.runtime);
   registerCoreTools(tools, {
     workspaceRoot,
+    generateImageTool: generateImageToolOptions(workspaceRoot),
     ...(computerUseTool === undefined ? {} : { computerUseTool }),
     agentMemoryTools: {
       memory: agentMemory,
@@ -2092,6 +2181,8 @@ async function runOneShot(
     },
     memoryTools: { resolveContext: memoryToolContext.resolve },
   });
+  registerCreatorForgeTool(tools, new DeclarativeToolForge());
+  registerAgentPresetTools(tools, new AgentPresetRoster({ projectDirectory: workspaceRoot }));
   registerClaudeSkillTool(tools, skillRegistry);
   const definitions = loadAgentDefinitions({ cwd: workspaceRoot });
   // An explicit --agent reference swaps the session's persona, tool surface,
@@ -2106,6 +2197,10 @@ async function runOneShot(
         });
   const selfMemory = getAgentSelfMemory(agent?.name ?? "default");
   const model = agent?.model || connection.model;
+  const maxTokens = connection.maxTokens;
+  const maxOutputTokens = (candidate: string): number | undefined =>
+    resolvedProfileMaxOutputTokens(profileStore.active(), candidate);
+  const effectiveMaxTokens = maxTokens ?? maxOutputTokens(model);
   const llm = createLlmClient(model, {
     ...(connection.apiKey ? { api_key: connection.apiKey } : {}),
     ...(connection.baseUrl ? { base_url: connection.baseUrl } : {}),
@@ -2114,13 +2209,13 @@ async function runOneShot(
   });
   const subagentHost = createNativeSubagentHost({
     agentDefinitions: definitions,
+    contextLimit: candidate => resolvedProfileContextLimit(profileStore.active(), candidate),
     cwd: workspaceRoot,
     eventBus: new DaemonSubagentEventBus(),
     ...(skillRegistry.markdownIndex() ? { extraContext: skillRegistry.markdownIndex() } : {}),
     llm,
-    ...(connection.maxTokens === undefined
-      ? {}
-      : { maxTokens: connection.maxTokens }),
+    ...(maxTokens === undefined ? {} : { maxTokens }),
+    maxOutputTokens,
     model,
     permissionMode: "accept-all",
     ...(connection.temperature === undefined
@@ -2165,9 +2260,7 @@ async function runOneShot(
         sessionId,
         ...(agent?.name ? { agentId: agent.name } : {}),
         ...(systemPrompt ? { systemPrompt } : {}),
-        ...(connection.maxTokens !== undefined
-          ? { maxTokens: connection.maxTokens }
-          : {}),
+        ...(effectiveMaxTokens === undefined ? {} : { maxTokens: effectiveMaxTokens }),
         ...(connection.temperature !== undefined
           ? { temperature: connection.temperature }
           : {}),
@@ -2220,7 +2313,17 @@ async function runResumedOneShot(
 ): Promise<void> {
   const projectDirectory = resolve(process.cwd());
   const config = loadSystemDaemonConfig({ projectDirectory });
-  const runtime = daemonRuntime(config, projectDirectory, new ProfileStore());
+  const runtime = daemonRuntime(
+    config,
+    projectDirectory,
+    new ProfileStore(),
+    undefined,
+    undefined,
+    {
+      declarativeForge: new DeclarativeToolForge(),
+      agentPresetRoster: new AgentPresetRoster({ projectDirectory }),
+    },
+  );
   let wroteText = false;
   let turnFailed = false;
   try {

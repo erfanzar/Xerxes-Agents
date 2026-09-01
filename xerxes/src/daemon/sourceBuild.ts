@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { readdir } from "node:fs/promises";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 
 import { computeDaemonBuildId } from "./fingerprint.js";
 
@@ -34,9 +34,12 @@ export async function sourceDaemonBuildId(
 }
 
 /**
- * Resolve the identity used by a running CLI. Source checkouts hash their full
- * runtime tree; bundled releases hash the actual executable module bytes.
- * A missing entry returns undefined rather than fabricating an identity.
+ * Resolve the identity used by a running CLI. Source checkouts hash their
+ * full runtime tree; bundled releases read the `build-id` fingerprint the
+ * runtime build stamped next to the entry (same source hash, so a bundled
+ * daemon and a source daemon of one build agree), falling back to hashing
+ * the actual executable module bytes. A missing entry returns undefined
+ * rather than fabricating an identity.
  */
 export async function daemonBuildIdForEntry(
   sourceRoot: string,
@@ -44,6 +47,12 @@ export async function daemonBuildIdForEntry(
 ): Promise<string | undefined> {
   const sourceBuild = await sourceDaemonBuildId(sourceRoot);
   if (sourceBuild) return sourceBuild;
+
+  const stamped = Bun.file(join(dirname(entryPath), "build-id"));
+  if (await stamped.exists()) {
+    const value = (await stamped.text()).trim();
+    if (value) return value;
+  }
 
   const entry = Bun.file(entryPath);
   if (!(await entry.exists())) return undefined;

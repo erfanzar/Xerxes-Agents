@@ -691,6 +691,7 @@ test('native subagent turns inherit configured sampling controls', async () => {
     cwd: process.cwd(),
     eventBus: new DaemonSubagentEventBus(),
     llm: client,
+    maxOutputTokens: model => model === 'test-model' ? 4_096 : undefined,
     model: 'test-model',
     permissionMode: 'accept-all',
     temperature: 0.6,
@@ -707,7 +708,7 @@ test('native subagent turns inherit configured sampling controls', async () => {
     })
     await host.managerPort.wait([task.id], 1_000)
 
-    expect(client.requests[0]).toMatchObject({ temperature: 0.6, topK: 64 })
+    expect(client.requests[0]).toMatchObject({ maxTokens: 4_096, temperature: 0.6, topK: 64 })
   } finally {
     await host.manager.shutdown()
   }
@@ -2870,6 +2871,13 @@ test('mid-turn steer and interaction-mode changes keep background subagents runn
     await waitFor(() => host.manager.listTasks().some(task => task.status === 'running'))
     const childTask = host.manager.listTasks().find(task => task.status === 'running')
     if (!childTask) throw new Error('expected a running background child')
+    expect(persistedSubagentSnapshotValues(session.metadata)).toEqual([
+      expect.objectContaining({
+        id: childTask.id,
+        status: 'running',
+        title: 'Child review',
+      }),
+    ])
 
     // A mid-turn user message steers the live turn; an interaction-mode
     // change re-scopes future turns. Neither may cancel the parent turn or
@@ -3495,6 +3503,7 @@ test('a retried child compacts and persists its conversation before the turn sta
     // A low threshold keeps the fixture small; the mechanism is the same one
     // the daemon runs at 90%.
     autoCompactThreshold: 0.01,
+    contextLimit: () => 100_000,
     cwd: directory,
     eventBus: bus,
     llm: client,

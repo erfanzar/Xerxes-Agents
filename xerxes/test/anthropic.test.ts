@@ -40,6 +40,48 @@ test('Anthropic conversion preserves signed thinking and error tool results', ()
   })
 })
 
+test('Anthropic conversion sends data URL images natively and repairs orphaned tool calls', () => {
+  const converted = messagesToAnthropic([
+    { role: 'user', content: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,aGVsbG8=' } }] },
+    {
+      role: 'assistant',
+      content: '',
+      tool_calls: [{ id: 'call-orphan', type: 'function', function: { name: 'ReadFile', arguments: { path: 'README.md' } } }],
+    },
+  ])
+
+  expect(converted.messages).toEqual([
+    {
+      role: 'user',
+      content: [
+        { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'aGVsbG8=' } },
+        { type: 'text', text: '(see attached image)' },
+      ],
+    },
+    {
+      role: 'assistant',
+      content: [{ type: 'tool_use', id: 'call-orphan', name: 'ReadFile', input: { path: 'README.md' } }],
+    },
+    {
+      role: 'user',
+      content: [{ type: 'tool_result', tool_use_id: 'call-orphan', content: 'No result provided', is_error: true }],
+    },
+  ])
+})
+
+test('Anthropic replays redacted thinking blocks without exposing their data as text', () => {
+  const signature = JSON.stringify({ type: 'redacted_thinking', data: 'opaque-redaction' })
+  expect(messagesToAnthropic([
+    { role: 'assistant', content: 'Continue.', thinking_signature: signature },
+  ], { thinkingEnabled: true }).messages).toEqual([{
+    role: 'assistant',
+    content: [
+      { type: 'redacted_thinking', data: 'opaque-redaction' },
+      { type: 'text', text: 'Continue.' },
+    ],
+  }])
+})
+
 test('Anthropic SSE adapter normalizes text, thinking, usage, and tool calls', async () => {
   const payload = [
     { type: 'message_start', message: { usage: { input_tokens: 11 } } },
@@ -227,6 +269,7 @@ test('Anthropic streaming maps stop reasons onto the neutral finish vocabulary',
     ['stop_sequence', 'stop'],
     ['max_tokens', 'length'],
     ['tool_use', 'tool_calls'],
+    ['pause_turn', 'stop'],
   ] as const
   for (const [stopReason, finishReason] of cases) {
     const client = new AnthropicMessagesClient({
@@ -242,6 +285,20 @@ test('Anthropic streaming maps stop reasons onto the neutral finish vocabulary',
     }))
     expect(events).toContainEqual({ finishReason, usage: { inputTokens: 0, outputTokens: 3 } })
   }
+})
+
+test('Anthropic refusal and sensitive stop reasons surface as errors', async () => {
+  const client = new AnthropicMessagesClient({
+    apiKey: 'test-key',
+    fetchImplementation: async () => sseResponse([
+      { type: 'message_delta', delta: { stop_reason: 'refusal', stop_details: { explanation: 'Cannot help.' } } },
+      { type: 'message_stop' },
+    ]),
+  })
+  await expect(collect(client.stream({
+    model: 'claude-sonnet-4-6',
+    messages: [{ role: 'user', content: 'hi' }],
+  }))).rejects.toThrow('Cannot help.')
 })
 
 test('Anthropic tool choice none disables tool use in the request payload', async () => {

@@ -401,7 +401,19 @@ describe('GatewayClient session lifecycle', () => {
       }
 
       if (method === 'fetch_models') {
-        return { ok: true, models: ['k3', 'kimi-k2.5', 'k3', ''], source: 'remote' }
+        return {
+          ok: true,
+          models: ['k3', 'kimi-k2.5', 'k3', ''],
+          catalog: [{
+            id: 'k3',
+            context_limit: 1_048_576,
+            context_source: 'catalog',
+            max_output_tokens: 131_072,
+            output_source: 'override',
+            overridden: true,
+          }],
+          source: 'remote',
+        }
       }
 
       return { ok: true }
@@ -433,6 +445,14 @@ describe('GatewayClient session lifecycle', () => {
     expect(options).not.toHaveProperty('providers.0.authenticated')
     await expect(client.request('model.models', { profile_name: 'kimi-local' })).resolves.toEqual({
       models: ['k3', 'kimi-k2.5'],
+      catalog: [{
+        id: 'k3',
+        context_limit: 1_048_576,
+        context_source: 'catalog',
+        max_output_tokens: 131_072,
+        output_source: 'override',
+        overridden: true,
+      }],
       source: 'remote'
     })
     await expect(
@@ -687,8 +707,9 @@ describe('GatewayClient session lifecycle', () => {
         rawRequest: (method: string, params?: Record<string, unknown>) => Promise<Record<string, unknown>>
       }
 
-      privateClient.rawRequest = async method => {
+      privateClient.rawRequest = async (method, params = {}) => {
         expect(method).toBe('initialize')
+        expect(params.agent_id).toBe('creator')
         client.emit('session.info', {
           payload: {
             cwd: projectDir,
@@ -701,7 +722,7 @@ describe('GatewayClient session lifecycle', () => {
           type: 'session.info'
         })
         client.emit('status.update', {
-          payload: { usage: { calls: 0, context_max: 1_000_000, context_used: 123, input: 0, output: 0, total: 0 } },
+          payload: { usage: { calls: 0, context_max: 0, context_used: 123, input: 0, output: 0, total: 0 } },
           type: 'status.update'
         })
 
@@ -720,7 +741,7 @@ describe('GatewayClient session lifecycle', () => {
         }
       }
 
-      const result = (await client.request('session.create', {})) as SessionCreateResult
+      const result = (await client.request('session.create', { agent_id: 'creator' })) as SessionCreateResult
 
       expect(result.session_id).toBe('s1')
       expect(result.info.cwd).toBe(projectDir)
@@ -728,7 +749,7 @@ describe('GatewayClient session lifecycle', () => {
       expect(result.info.head_hash).toBe(head)
       expect(result.info.skills).toEqual({ skills: ['deepscan', 'eternal-army'] })
       expect(result.info.skillDescriptions).toEqual({ deepscan: 'deep scan' })
-      expect(result.info.usage?.context_max).toBe(1_000_000)
+      expect(result.info.usage?.context_max).toBe(0)
       expect(result.info.usage?.context_used).toBe(123)
     } finally {
       rmSync(projectDir, { force: true, recursive: true })

@@ -36,6 +36,15 @@ class ToolThenTextClient implements LlmClient {
   }
 }
 
+class TelemetryClient implements LlmClient {
+  async *stream(): AsyncGenerator<LlmDelta> {
+    yield {
+      content: 'Measured reply.',
+      usage: { inputTokens: 25, outputTokens: 10, cacheReadTokens: 75 },
+    }
+  }
+}
+
 class RepeatedToolSentinelClient implements LlmClient {
   private calls = 0
 
@@ -255,6 +264,30 @@ test('agent loop pairs model tool calls with results and preserves thinking sepa
   expect(state.totalInputTokens).toBe(13)
   expect(state.totalOutputTokens).toBe(7)
   expect(events.at(-1)).toMatchObject({ type: 'turn_done', apiCallsCount: 2, usageComplete: true })
+})
+
+test('usage updates carry measured TTFT, decode rate, and cache-hit telemetry', async () => {
+  const state = createAgentState()
+  const times = [1_000, 1_250, 2_250]
+  const events = []
+  for await (const event of runTurn({
+    model: 'gpt-4o',
+    state,
+    userMessage: 'measure this round',
+  }, {
+    llm: new TelemetryClient(),
+    now: () => times.shift() ?? 2_250,
+  })) {
+    events.push(event)
+  }
+
+  expect(events.find(event => event.type === 'usage_update')).toMatchObject({
+    type: 'usage_update',
+    durationMs: 1_250,
+    ttftMs: 250,
+    tokensPerSecond: 10,
+    cacheHitRate: 0.75,
+  })
 })
 
 test('agent loop emits and persists an identical cross-tool-round sentinel only once', async () => {

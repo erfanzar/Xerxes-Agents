@@ -8,6 +8,7 @@ import { dirname, join } from 'node:path'
 
 import { runSetupCommand } from '../src/runtime/setupCommand.js'
 import { writeSetupConfig } from '../src/runtime/setupWizard.js'
+import { SETUP_PROFILES } from '../src/runtime/setupProfiles.js'
 
 test('setup command writes a validated provider configuration file', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'xerxes-setup-'))
@@ -63,6 +64,25 @@ test('the setup config holding a provider credential is owner-only', async () =>
     await chmod(target, 0o644)
     await writeSetupConfig({ provider: 'anthropic', api_key: 'sk-rotated' }, target)
     expect((await stat(target)).mode & 0o777).toBe(0o600)
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('setup command applies a profile preset and allows answer overrides', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-setup-profile-'))
+  try {
+    const target = join(directory, 'setup.yaml')
+    const exitCode = await runSetupCommand({
+      targetPath: target,
+      profile: 'developer',
+      answers: { model: 'custom-model' },
+    })
+    expect(exitCode).toBe(0)
+    const contents = await Bun.file(target).text()
+    expect(contents).toContain(`provider: "${SETUP_PROFILES.developer.answers.provider}"`)
+    expect(contents).toContain('model: "custom-model"')
+    expect(contents).toContain('permission_mode: "manual"')
   } finally {
     await rm(directory, { recursive: true, force: true })
   }

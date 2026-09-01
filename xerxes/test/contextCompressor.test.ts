@@ -37,6 +37,26 @@ test('context compressor preserves head and tail while folding the middle into r
   expect(result.metadata.strategy).toBe('first-pass')
 })
 
+test('unknown model capacity disables threshold summarization but keeps safe pruning', () => {
+  const compressor = new ContextCompressor({
+    protectFirst: 0,
+    protectLast: 1,
+    summarizer: naiveSummarizer,
+    summaryMinTokens: 1,
+  })
+  const messages = [
+    { role: 'user', content: 'start' },
+    { role: 'tool', content: 'x'.repeat(10_000) },
+    { role: 'user', content: 'latest' },
+  ]
+  expect(compressor.thresholdTokens()).toBeUndefined()
+  expect(compressor.shouldCompact(messages)).toBe(false)
+  const result = compressor.compress(messages)
+  expect(result.metadata.strategy).toBe('prune-only')
+  expect(result.prunedToolResults).toBe(1)
+  expect(result.messages.some(message => String(message.content).includes(COMPACTION_REFERENCE_PREFIX))).toBe(false)
+})
+
 test('pre-pruning alone can satisfy a context budget without an LLM summarizer', () => {
   const messages = [
     { role: 'user', content: 'start' },

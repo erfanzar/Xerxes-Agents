@@ -108,6 +108,16 @@ export function permissionDisposition(
   if (ALWAYS_APPROVAL_TOOLS.has(name) && options?.bypassAlwaysApprove !== true) {
     return 'prompt'
   }
+  // Creator mode mutates a durable, version-immutable package catalog. Reads
+  // and pure template runs stay lightweight, but define/undefine must cross an
+  // explicit approval boundary even when the session otherwise runs in YOLO.
+  if (
+    name === 'CreatorForgeTool'
+    && (stringInput(call.function.arguments, 'action') === 'define'
+      || stringInput(call.function.arguments, 'action') === 'undefine')
+  ) {
+    return 'prompt'
+  }
   if (mode === 'accept-all') {
     return 'allow'
   }

@@ -203,6 +203,29 @@ export function checkAgentDefinitions(_options: DoctorOptions = {}): Diagnosis {
   )
 }
 
+export function checkSubsystemStorage(options: DoctorOptions = {}): Diagnosis {
+  const environment = options.environment ?? process.env
+  const home = options.home ?? xerxesHome(environment)
+  const exists = options.fileExists ?? existsSync
+  const subsystems = [
+    { name: 'scheduler', path: `${home}/scheduler` },
+    { name: 'memory', path: `${home}/governed-memory` },
+    { name: 'capabilities', path: `${home}/capabilities` },
+    { name: 'telemetry', path: `${home}/telemetry` },
+  ]
+  const present = subsystems.filter(({ path }) => exists(path)).map(({ name }) => name)
+  if (present.length === subsystems.length) {
+    return diagnosis('subsystem-storage', 'ok', 'All subsystem storage directories are present: ' + present.join(', '))
+  }
+  const missing = subsystems.filter(({ path }) => !exists(path)).map(({ name }) => name)
+  return diagnosis(
+    'subsystem-storage',
+    'warn',
+    'Subsystem storage directories are missing: ' + missing.join(', '),
+    'Run the relevant xerxes commands (schedule, memory, capability, telemetry) to create them.',
+  )
+}
+
 export const DEFAULT_DOCTOR_CHECKS: readonly DoctorCheck[] = Object.freeze([
   checkBunRuntime,
   checkPlatform,
@@ -213,6 +236,7 @@ export const DEFAULT_DOCTOR_CHECKS: readonly DoctorCheck[] = Object.freeze([
   checkWindowsTooling,
   checkConfigProvenance,
   checkAgentDefinitions,
+  checkSubsystemStorage,
 ])
 
 export const MINIMAL_DOCTOR_CHECKS: readonly DoctorCheck[] = Object.freeze([

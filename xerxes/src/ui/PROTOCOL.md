@@ -131,7 +131,14 @@ params fall back to per-connection defaults.
 | `turn.steer` / `steer`               | `{ session_key?, content }`                    | `{ ok }`                                                       | Inject steer text into the active turn.                                           |
 | `turn.cancel` / `cancel`             | `{ session_key? }`                             | `{ ok }`                                                       | Cancel this connection's turn.                                                    |
 | `cancel_all`                         | `{}`                                           | `{ ok, cancelled }`                                            | Cancel every session.                                                             |
-| `session.open`                       | `{ session_key?, agent_id?, project_dir? }`    | `{ ok, session }`                                              | Open/attach a session within the active or explicit project boundary. Mid-turn, `session.inflight` additively carries `started_at` (epoch seconds), `thinking`, and `tools: [{ id?, name, arguments?, ok?, duration_ms?, error? }]` — the turn's work so far, since the transcript only covers completed turns. Attaching also drains that session's pending background-completion notices as `notification` events (at-most-once; they accumulate while no client is attached). |
+| `session.open`                       | `{ session_key?, agent_id?, project_dir? }`    | `{ ok, session }`                                              | Open/attach a session within the active or explicit project boundary. `agent_id` is the DSH-style agent preset; changing it is rejected after the first transcript message. Mid-turn, `session.inflight` additively carries `started_at` (epoch seconds), `thinking`, and `tools: [{ id?, name, arguments?, ok?, duration_ms?, error? }]` — the turn's work so far, since the transcript only covers completed turns. The session payload also carries cumulative `llm_duration_ms`, `llm_steps`, `tool_duration_ms`, `tool_steps`, `ttft_total_ms`, `ttft_samples`, and `ttft_avg_ms` when observed. Attaching also drains that session's pending background-completion notices as `notification` events (at-most-once; they accumulate while no client is attached). |
+| `agentPreset.list`                   | `{}`                                           | `{ ok, presets, default_id, authorable, has_document }`         | Uncached roster of built-in, user, and project agent compositions; broken presets remain visible with a reason. |
+| `agentPreset.select`                 | `{ agent_preset, session_key? }`                | `{ ok, agent_preset }`                                         | Recompose a blank session only. A started session returns `agent-preset-locked`. |
+| `agentPreset.read`                   | `{ agent_preset }`                              | `{ ok, preset, content }`                                      | Read the exact `agent.yaml` composition. |
+| `agentPreset.copy`                   | `{ from, agent_preset, name? }`                 | `{ ok, preset, path }`                                         | Duplicate a known-good preset into the user root; ids match `[a-z0-9][a-z0-9-]*`. |
+| `agentPreset.write`                  | `{ agent_preset, content }`                     | `{ ok, preset }`                                               | Replace one user composition atomically after strict version-1 validation. |
+| `agentPreset.setDefault`             | `{ agent_preset }`                              | `{ ok, preset, default_id }`                                   | Changes only the default for sessions created later. |
+| `agentPreset.openDocument` / `agentPreset.remove` | `{ agent_preset }`                    | `{ ok, path? }`                                                | User presets only; running sessions are unaffected. |
 | `session.active_list`                | `{}`                                           | `{ ok, sessions }`                                             | List live top-level and subagent sessions. Agent View filters subagents into their parent and polls this for live state. |
 | `session.list`                       | `{}`                                           | `{ ok, sessions }`                                             | For `/resume` picker.                                                             |
 | `session.status`                     | `{ session_key? }`                             | `{ ok, session: { ..., profile_name } \| null }`                | `profile_name` is the exact matching stored profile or `null` for an overridden/unmatched runtime. |
@@ -145,7 +152,8 @@ params fall back to per-connection defaults.
 | `question_response`                  | `{ request_id, answers }`                      | `{ ok }`                                                       | `answers: {questionId: value}`. Answers `QuestionRequest`.                        |
 | `channel.list`                       | `{}`                                           | `{ ok, channels }`                                             | Multi-platform channels.                                                          |
 | `channel.enable` / `channel.disable` | `{ name }`                                     | `{ ok }`                                                       |                                                                                   |
-| `fetch_models`                       | `{ profile_name }`                             | `{ ok, models, source, warning? }`                              | Discover one exact stored profile without exposing its endpoint credential.       |
+| `fetch_models` / `provider_models`   | `{ profile_name }`                             | `{ ok, models, catalog?, source, warning? }`                    | Catalog rows may carry effective `context_limit`, `max_output_tokens`, provenance sources, and `overridden`; credentials never leave the daemon. |
+| `provider_model_override`            | `{ profile_name, model, context_limit?, max_output_tokens? }` | `{ ok, model }`                          | Positive safe integers set per-model user overrides; `null` clears a field. Precedence: user override → provider metadata → generated Pi catalog → unknown. Explicit runtime/profile `max_tokens` still wins for requests. |
 | `provider_list`                      | `{}`                                           | `{ ok, profiles }`                                             |                                                                                   |
 | `provider_save`                      | `{ name, base_url, api_key, model, provider }` | `{ ok, profile }` + emits `InitDone`                           |                                                                                   |
 | `provider_select`                    | `{ name }`                                     | `{ ok }` + emits `InitDone`                                    |                                                                                   |
@@ -156,7 +164,9 @@ params fall back to per-connection defaults.
 `task.cancel`, `task.list`, `task.status`, bare `submit` / `list` / `status`.
 
 > Slash routing: the TS client handles presentation-only commands locally and
-> sends daemon-owned commands to the Bun daemon. The v35 daemon provides
+> sends daemon-owned commands to the Bun daemon. `/creator` visibly starts a
+> fresh session initialized with the built-in `creator` preset; `/preset` lists
+> and manages the live roster. The v35 daemon provides
 > completion, session controls, approval/question replies, profile CRUD/model
 > discovery, browser CDP attachment, plugins, skills, runtime controls, and
 > cron/session workflows. Unknown or unavailable operations return an explicit
@@ -215,10 +225,15 @@ terminal turn events by that identity instead of the currently selected tab.
 | `ApprovalResponse` | `approval_response`   | `request_id, response, feedback?`                                                       |
 | `QuestionRequest`  | `question_request`    | `id, tool_call_id, questions: QuestionItem[]`                                           |
 | `QuestionResponse` | `question_response`   | `id, answers: {string: string}`                                                         |
-| `StatusUpdate`     | `status_update`       | `context_tokens, max_context, mcp_status, plan_mode, mode, reasoning_effort`            |
+| `StatusUpdate`     | `status_update`       | `context_tokens, max_context, mcp_status, plan_mode, mode, reasoning_effort, llm_duration_ms?, ttft_ms?, tokens_per_second?, cache_hit_rate?` |
+| `AgentPresetSelected` | `agent_preset_selected` | `session_id, agent_preset`                                                           |
 | `Notification`     | `notification`        | `id, category, type, severity, title, body, payload`                                    |
 | `PlanDisplay`      | `plan_display`        | `content, file_path?`                                                                   |
 | `SubagentEvent`    | `subagent_event`      | `parent_tool_call_id?, agent_id?, subagent_type?, event: WireEvent` (nested, recursive) |
+
+Context capacity fields are provider-reported metadata, never a model-name or
+provider fallback. A missing field or numeric `0` means **unknown**; clients must
+not render a percentage, infer a denominator, or trigger threshold compaction.
 
 ### Nested types
 

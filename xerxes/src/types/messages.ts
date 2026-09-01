@@ -1,8 +1,8 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import type { OpenAiToolCall, ToolCall } from './toolCalls.js'
-import { toolCallToOpenAi } from './toolCalls.js'
+import type { OpenAiCustomToolCall, OpenAiToolCall, ToolCall } from './toolCalls.js'
+import { toolCallToOpenAi, toolCallToOpenAiCustom } from './toolCalls.js'
 
 export interface TextContentPart {
   readonly type: 'text'
@@ -42,6 +42,12 @@ export interface AssistantMessage {
 }
 
 export interface ToolMessage {
+  /**
+   * Tool names this result made available (pi-ai `addedToolNames`): set when a
+   * tool-search result loaded schemas. Provider adapters with native deferred
+   * tool loading use it as the load point for their wire protocol.
+   */
+  readonly added_tool_names?: readonly string[]
   readonly role: 'tool'
   readonly content: string
   readonly name?: string
@@ -56,7 +62,7 @@ export interface OpenAiChatMessage {
   readonly content: MessageContent
   readonly name?: string
   readonly tool_call_id?: string
-  readonly tool_calls?: readonly OpenAiToolCall[]
+  readonly tool_calls?: readonly (OpenAiCustomToolCall | OpenAiToolCall)[]
   readonly reasoning_content?: string
 }
 
@@ -68,7 +74,10 @@ export function messageText(message: ChatMessage): string {
 }
 
 /** Convert once at the OpenAI-compatible provider boundary. */
-export function messageToOpenAi(message: ChatMessage): OpenAiChatMessage {
+export function messageToOpenAi(
+  message: ChatMessage,
+  grammarProperties: ReadonlyMap<string, string> = new Map(),
+): OpenAiChatMessage {
   const base: { content: MessageContent; role: MessageRole } = {
     role: message.role,
     content: message.content,
@@ -77,7 +86,16 @@ export function messageToOpenAi(message: ChatMessage): OpenAiChatMessage {
   if (message.role === 'assistant') {
     return {
       ...base,
-      ...(message.tool_calls?.length ? { tool_calls: message.tool_calls.map(toolCallToOpenAi) } : {}),
+      ...(message.tool_calls?.length
+        ? {
+          tool_calls: message.tool_calls.map((call) => {
+            const grammarProperty = grammarProperties.get(call.function.name)
+            return grammarProperty === undefined
+              ? toolCallToOpenAi(call)
+              : toolCallToOpenAiCustom(call, grammarProperty)
+          }),
+        }
+        : {}),
       ...(message.thinking ? { reasoning_content: message.thinking } : {}),
     }
   }
@@ -91,6 +109,9 @@ export function messageToOpenAi(message: ChatMessage): OpenAiChatMessage {
   return base
 }
 
-export function messagesToOpenAi(messages: readonly ChatMessage[]): OpenAiChatMessage[] {
-  return messages.map(messageToOpenAi)
+export function messagesToOpenAi(
+  messages: readonly ChatMessage[],
+  grammarProperties: ReadonlyMap<string, string> = new Map(),
+): OpenAiChatMessage[] {
+  return messages.map(message => messageToOpenAi(message, grammarProperties))
 }

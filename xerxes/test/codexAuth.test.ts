@@ -467,7 +467,11 @@ test('codex requests carry OAuth headers and omit the parameters the backend rej
       fetchImplementation: (async (url: string, init?: RequestInit) => {
         seenUrl = String(url)
         seenHeaders = init?.headers as Record<string, string>
-        seenBody = JSON.parse(String(init?.body)) as Record<string, unknown>
+        // The Codex SSE path zstd-compresses request bodies (pi-ai parity).
+        const rawBody = init?.body
+        seenBody = JSON.parse(rawBody instanceof Uint8Array
+          ? new TextDecoder().decode(Bun.zstdDecompressSync(rawBody))
+          : String(rawBody)) as Record<string, unknown>
         return new Response(
           'data: {"type":"response.completed","response":{"status":"completed"}}\n\ndata: [DONE]\n\n',
           {

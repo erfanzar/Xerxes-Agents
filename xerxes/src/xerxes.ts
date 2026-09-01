@@ -119,13 +119,22 @@ export class Xerxes {
 
     if (options.coreTools !== false) {
       const coreOptions = options.coreTools ?? {}
+      const workspaceRoot = options.workspaceRoot ?? coreOptions.workspaceRoot
       registerCoreTools(this.toolRegistry, {
         ...coreOptions,
         ...(this.memory && coreOptions.memoryTools === undefined
           ? { memoryTools: { context: { memory: this.memory } } }
           : {}),
-        ...(options.workspaceRoot ?? coreOptions.workspaceRoot
-          ? { workspaceRoot: options.workspaceRoot ?? coreOptions.workspaceRoot }
+        ...(workspaceRoot ? { workspaceRoot } : {}),
+        // Image generation rides OpenRouter's chat-modality surface; register
+        // it only when the host can name a workspace and a credential source.
+        ...(coreOptions.generateImageTool === undefined && workspaceRoot
+          ? {
+            generateImageTool: {
+              resolveApiKey: () => process.env.OPENROUTER_API_KEY?.trim() ?? '',
+              workspaceRoot,
+            },
+          }
           : {}),
       })
     }

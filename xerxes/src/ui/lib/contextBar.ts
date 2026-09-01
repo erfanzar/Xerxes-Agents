@@ -47,7 +47,8 @@ export const contextBar = ({
     return ''
   }
 
-  const safeWindow = Math.max(1, integer(window, 'window'))
+  const safeWindow = integer(window, 'window')
+  if (safeWindow <= 0) return empty.repeat(safeWidth)
   const safeUsed = Math.max(0, integer(used, 'used'))
   const cells = safeUsed < safeWindow ? (safeUsed / safeWindow) * safeWidth : safeWidth
   let full = Math.trunc(cells)
@@ -71,7 +72,7 @@ export const contextBarWithPct = ({ showPct = true, used, window, ...options }: 
     return bar
   }
 
-  const pct = window > 0 ? (used / window) * 100 : 0
-
+  if (window <= 0) return `${bar}   n/a`
+  const pct = (used / window) * 100
   return `${bar} ${pct.toFixed(1).padStart(5)}%`
 }

@@ -4,6 +4,7 @@
 import { join, resolve } from "node:path";
 
 import { ValidationError } from "../core/errors.js";
+import { disarmGoal } from "../runtime/goalDomain.js";
 import { normalizeInteractionMode } from "../runtime/interactionModes.js";
 import {
   appendContextDelta,
@@ -19,6 +20,11 @@ import {
   type TranscriptMessageJournalAppend,
 } from "../session/daemonTranscript.js";
 import type { JsonRpcPayload } from "../protocol/jsonRpc.js";
+import {
+  FILE_READS_METADATA_KEY,
+  fileReadsForMetadata,
+  hydrateFileReadsFromMetadata,
+} from "../tools/fileState.js";
 import { processAtMentions } from "./atMentions.js";
 import { imageUrlContentParts, type TurnImage } from "./images.js";
 import { xerxesHome } from "./paths.js";
@@ -30,8 +36,9 @@ import {
 } from "./subagentConversations.js";
 
 export const DAEMON_PROTOCOL_VERSION = 35;
+export const XERXES_VERSION = "0.3.0";
 export const BUN_DAEMON_BUILD_ID =
-  process.env.XERXES_DAEMON_BUILD_ID?.trim() || "bun-runtime-v0.3.0";
+  process.env.XERXES_DAEMON_BUILD_ID?.trim() || `bun-runtime-v${XERXES_VERSION}`;
 /** Maximum hints retained between active-turn provider/tool boundaries. */
 export const MAX_ACTIVE_TURN_STEERS = 64;
 
@@ -167,6 +174,8 @@ export interface OpenSessionOptions {
 
 export interface SavedDaemonSession {
   readonly agentId: string;
+  /** Canonical project directory the transcript ran in — the workspace key. */
+  readonly cwd: string;
   readonly id: string;
   readonly key: string;
   /** Persisted session role; legacy transcripts default to main. */
@@ -221,6 +230,14 @@ export interface TurnRunControls {
    * tool calls does not lose the whole turn.
    */
   readonly journal?: TranscriptMessageJournalAppend;
+  /**
+   * Positive round number when this turn is an automatic goal continuation.
+   *
+   * Absent means a human opened the turn. The goal tools authorise against
+   * this: only a human may create, edit, pause or resume a goal, while an
+   * automatic round may additionally complete or block the one it belongs to.
+   */
+  readonly goalRound?: number;
 }
 
 export interface SubmitTurnOptions {
@@ -228,6 +245,11 @@ export interface SubmitTurnOptions {
   readonly displayText?: string;
   /** Validated image attachments for this turn's user message. */
   readonly images?: readonly TurnImage[];
+  /**
+   * Positive round number when the goal round driver opened this turn rather
+   * than a person. Forwarded to {@link TurnRunControls.goalRound}.
+   */
+  readonly goalRound?: number;
 }
 
 export interface SubagentRetryRequest {
@@ -290,6 +312,11 @@ export interface DaemonRuntime {
     mode: string,
     planMode?: boolean,
   ): Promise<DaemonSession | undefined>;
+  /** Select an agent preset only while the session is still blank. */
+  selectSessionAgent?(
+    sessionKey: string,
+    agentId: string,
+  ): Promise<DaemonSession | undefined>;
   /**
    * Pin one session to a model without disturbing any other session.
    *
@@ -325,6 +352,13 @@ export interface DaemonRuntime {
   /** Release host-owned resources such as native delegated-agent managers. */
   shutdown?(): Promise<void>;
   steerTurn(sessionKey: string, content: string): boolean;
+  /**
+   * True when steering text is queued and not yet folded into the transcript.
+   *
+   * Automatic goal rounds yield to it: a person who has already typed should
+   * not wait behind a round the machine queued for itself.
+   */
+  hasPendingSteer?(sessionKey: string): boolean;
   status(): JsonRpcPayload;
   submitTurn(
     sessionKey: string,
@@ -475,6 +509,10 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     const session = this.sessions.get(sessionKey);
     if (session) {
       session.cancelRequested = true;
+      // An interrupt is the clearest possible statement that unattended work
+      // should stop. The goal keeps its phase and history; what it loses is
+      // this process's authority to open another round on its own.
+      disarmGoal(session.id);
     }
     // Delegated children run on their own execution boundary: aborting the
     // parent's signal alone leaves a detached subagent burning tokens and
@@ -587,7 +625,24 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
 
   async flushSessions(mode: 'append' | 'rewrite' = 'append'): Promise<void> {
     await Promise.all(
-      [...this.sessions.values()].map((session) => this.saveSession(session, mode)),
+      [...this.sessions.values()].map(async (session) => {
+        try {
+          await this.saveSession(session, mode);
+        } catch (error) {
+          // A session whose in-memory state diverges from disk (transcripts
+          // removed or restored under a live daemon) must never wedge the
+          // connection: initialize flushes before every bind, so one stale
+          // session would reject every new session the client tries to
+          // create. Disk is the source of truth — drop the stale memory and
+          // keep the flush moving. Sessions with a live turn are real
+          // failures, not staleness; let them propagate.
+          const message = error instanceof Error ? error.message : String(error);
+          if (session.activeTurnId || !message.includes("conflicts with persisted history")) {
+            throw error;
+          }
+          this.evictSession(session.sessionKey);
+        }
+      }),
     );
   }
 
@@ -631,45 +686,46 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     projectDirectory: string | undefined,
   ): Promise<SavedDaemonSession | undefined> {
     const result = await this.transcriptStore.readHeader(entry.sessionId);
-    if (result.kind === "header") {
-      const header = result.header;
-      if (header.messageCount <= 0 && header.turnCount <= 0) return undefined;
+    const fastHeader =
+      result.kind === "header" && result.header.turnCount > 0 ? result.header : undefined;
+    if (fastHeader) {
       if (
         projectDirectory !== undefined &&
-        sourceProjectDirectory(header.metadata, header.cwd) !== projectDirectory
+        sourceProjectDirectory(fastHeader.metadata, fastHeader.cwd) !== projectDirectory
       ) {
         return undefined;
       }
-      return savedSessionSummary({ ...header, path: entry.path });
+      return savedSessionSummary({ ...fastHeader, path: entry.path });
     }
-    if (result.kind === "truncated") {
-      // Written before the summary fields were hoisted above `messages`, so
-      // the header cannot answer; this row costs a full parse until its next
-      // save rewrites it in the new order.
-      const transcript = await this.transcriptStore.loadForListing(
-        entry.sessionId,
-      );
-      if (!transcript) return unreadableSavedSession(entry);
-      if (!transcriptHasHistory(transcript)) return undefined;
-      if (
-        projectDirectory !== undefined &&
-        transcriptProjectDirectory(transcript) !== projectDirectory
-      ) {
-        return undefined;
-      }
-      return savedSessionSummary({
-        agentId: transcript.agentId,
-        key: transcript.key,
-        messageCount: transcript.messages.length,
-        messages: transcript.messages,
-        metadata: transcript.metadata,
-        path: entry.path,
-        sessionId: transcript.sessionId,
-        turnCount: transcript.turnCount,
-        updatedAt: transcript.updatedAt,
-      });
+    if (result.kind === "unreadable") return unreadableSavedSession(entry);
+    // Both remaining cases go through the full parse: a truncated header
+    // cannot answer at all, and a zero-turn header usually means a dangling
+    // prompt (a turn that died before any reply) whose messages-only
+    // transcript must not list as a session — transcriptHasHistory below
+    // decides on roles, which the header cannot see.
+    const transcript = await this.transcriptStore.loadForListing(
+      entry.sessionId,
+    );
+    if (!transcript) return unreadableSavedSession(entry);
+    if (!transcriptHasHistory(transcript)) return undefined;
+    if (
+      projectDirectory !== undefined &&
+      transcriptProjectDirectory(transcript) !== projectDirectory
+    ) {
+      return undefined;
     }
-    return unreadableSavedSession(entry);
+    return savedSessionSummary({
+      agentId: transcript.agentId,
+      cwd: transcript.cwd,
+      key: transcript.key,
+      messageCount: transcript.messages.length,
+      messages: transcript.messages,
+      metadata: transcript.metadata,
+      path: entry.path,
+      sessionId: transcript.sessionId,
+      turnCount: transcript.turnCount,
+      updatedAt: transcript.updatedAt,
+    });
   }
 
   /** Keep untitled rows untitled; chat content is never a title fallback. */
@@ -744,7 +800,14 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
         );
       }
       existing.lastActive = Date.now();
-      if (agentId) {
+      if (agentId && agentId !== existing.agentId) {
+        if (existing.activeTurnId || existing.turnCount > 0 || existing.messages.length > 0) {
+          throw new ValidationError(
+            "agent_preset",
+            `session '${existing.id}' has already started; its agent preset is fixed`,
+            agentId,
+          );
+        }
         existing.agentId = agentId;
         existing.workspace = workspaceFor(this.workspaceRoot, agentId);
       }
@@ -882,6 +945,14 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
         ? claimDirectSubagentConversation(effectiveTranscript.sessionId)
         : undefined;
       applySystemPromptAddendum(session, options.systemPromptAddendum);
+      if (effectiveTranscript) {
+        // A goal reloaded from disk keeps saying what it is, but this process
+        // has not been told to keep driving it unattended. Continuation is
+        // re-armed by an explicit goal call, never by the act of reopening a
+        // session — otherwise merely listing history could restart an
+        // objective that a person had walked away from.
+        disarmGoal(session.id);
+      }
       this.sessions.set(key, session);
       if (releaseSubagentClaim) this.directSubagentClaims.set(key, releaseSubagentClaim);
       return session;
@@ -935,6 +1006,27 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
       }
     }
     return this.status();
+  }
+
+  async selectSessionAgent(
+    sessionKey: string,
+    agentId: string,
+  ): Promise<DaemonSession | undefined> {
+    const session = this.sessions.get(sessionKey);
+    if (!session) return undefined;
+    if (session.activeTurnId || session.turnCount > 0 || session.messages.length > 0) {
+      throw new ValidationError(
+        "agent_preset",
+        `session '${session.id}' has already started; its agent preset is fixed`,
+        agentId,
+      );
+    }
+    const chosen = agentId.trim();
+    if (!chosen) return session;
+    session.agentId = chosen;
+    session.workspace = workspaceFor(this.workspaceRoot, chosen);
+    session.lastActive = Date.now();
+    return session;
   }
 
   async setSessionMode(
@@ -1288,6 +1380,7 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
           displayText,
           journal: this.messageJournal(session.id),
           ...(images.length ? { images } : {}),
+          ...(options.goalRound === undefined ? {} : { goalRound: options.goalRound }),
         },
       )) {
         emitSessionEvent(event);
@@ -1377,6 +1470,10 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     }
   }
 
+  hasPendingSteer(sessionKey: string): boolean {
+    return (this.steerQueues.get(sessionKey)?.length ?? 0) > 0;
+  }
+
   private drainSteers(sessionKey: string): readonly string[] {
     const queued = this.steerQueues.get(sessionKey) ?? [];
     this.steerQueues.delete(sessionKey);
@@ -1388,6 +1485,17 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
   }
 
   private async saveSession(session: DaemonSession, mode: 'append' | 'rewrite' = 'append'): Promise<void> {
+    // A session with no completed exchange must not be persisted: a fresh
+    // GUI or daemon session that never sent a message — or a dangling prompt
+    // whose turn died before any reply — would otherwise live forever in
+    // every listing as a phantom session. In-flight turns still save: this
+    // write plus the crash journal are what make a mid-turn crash recoverable.
+    if (
+      !session.activeTurnId &&
+      !transcriptHasHistory({ messages: session.messages, turnCount: session.turnCount })
+    ) {
+      return;
+    }
     await this.transcriptStore.save({
       agentId: session.agentId,
       ...(session.apiCallsComplete === undefined
@@ -1406,6 +1514,11 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
       metadata: {
         ...session.metadata,
         model: session.model,
+        // The read-before-edit guard's per-session state rides with the
+        // transcript so a resumed session still knows which files the model
+        // has current knowledge of. Refreshed on every save, so a daemon
+        // restart loses at most the reads of the turn that was in flight.
+        [FILE_READS_METADATA_KEY]: fileReadsForMetadata(session.id),
         ...(session.reasoningEffort ? { reasoning_effort: session.reasoningEffort } : {}),
         ...(session.permissionMode ? { permission_mode: session.permissionMode } : {}),
       },
@@ -1541,7 +1654,7 @@ function sessionFromTranscript(
     stringValue(transcript.metadata.permission_mode),
     currentPermissionMode,
   );
-  return {
+  const session: DaemonSession = {
     id: transcript.sessionId,
     sessionKey,
     agentId: transcript.agentId,
@@ -1588,11 +1701,21 @@ function sessionFromTranscript(
     activeTurnId: "",
     cancelRequested: false,
   };
+  // Restore the read-before-edit guard's saved state. This belongs to the
+  // resume path — a session loaded from disk must know which files the model
+  // already read in this conversation, or a restart would force needless
+  // re-reads of files the model still holds current knowledge of. Mutates
+  // the shared tracker deliberately; every transcript load funnels through
+  // here, so both resume sites are covered by construction.
+  hydrateFileReadsFromMetadata(transcript.sessionId, transcript.metadata);
+  return session;
 }
 
 /** Everything a listing row needs, from either a header or a full transcript. */
 interface SavedSessionSource {
   readonly agentId: string;
+  /** Project directory the transcript ran in — surfaced on every row. */
+  readonly cwd: string;
   readonly key: string;
   readonly messageCount: number;
   /** Present only when the row came from a full parse; titles can fall back to it. */
@@ -1615,6 +1738,9 @@ function unreadableSavedSession(entry: DaemonTranscriptEntry): SavedDaemonSessio
   return {
     id: entry.sessionId,
     key: entry.sessionId,
+    // A corrupt file cannot be attributed to a project; it groups under the
+    // fallback workspace bucket.
+    cwd: "",
     kind: "main",
     resumable: false,
     title: `(unreadable transcript ${entry.sessionId})`,
@@ -1651,6 +1777,7 @@ function savedSessionSummary(
   return {
     id: transcript.sessionId,
     key: transcript.key,
+    cwd: transcriptProjectDirectory(transcript),
     kind,
     resumable: !activeChild,
     // A provisional title derived from the opening prompt counts: saved chats
@@ -1675,7 +1802,10 @@ function transcriptIsSubagent(transcript: DaemonTranscript): boolean {
   return metadataIsSubagent(transcript.metadata);
 }
 
-function transcriptProjectDirectory(transcript: DaemonTranscript): string {
+function transcriptProjectDirectory(transcript: {
+  readonly metadata: Readonly<Record<string, unknown>>;
+  readonly cwd: string;
+}): string {
   return sourceProjectDirectory(transcript.metadata, transcript.cwd);
 }
 

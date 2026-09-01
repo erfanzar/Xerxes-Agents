@@ -42,6 +42,9 @@ agent:
     - ResetAgent
     - TodoWriteTool
     - SetInteractionModeTool
+    - get_goal
+    - create_goal
+    - update_goal
     - agent_memory_status
     - agent_memory_read
     - agent_memory_write
@@ -77,6 +80,9 @@ agent:
     - ResetAgent
     - TodoWriteTool
     - SetInteractionModeTool
+    - get_goal
+    - create_goal
+    - update_goal
     - agent_memory_status
     - agent_memory_read
     - agent_memory_write

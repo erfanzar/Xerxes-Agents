@@ -11,9 +11,11 @@ import { afterEach, expect, test } from 'bun:test'
 import {
   describeChange,
   FileStateTracker,
+  fileReadsForMetadata,
   fileStateTracker,
   guardedCreate,
   guardedWrite,
+  hydrateFileReadsFromMetadata,
   isFileFreshnessEnforced,
   recordFileRead,
   setFileFreshnessEnforcement,
@@ -67,7 +69,7 @@ test('guardedWrite refuses a file the session never read and points at the kill 
       sessionId: SESSION,
       toolName: 'FileEditTool',
       transform: () => 'two\n',
-    }, tracker)).toThrow('has not been read in this session')
+    }, tracker)).toThrow('requires reading "a.txt" first — read the file, then retry')
     expect(() => guardedWrite({
       absolutePath: path,
       displayPath: 'a.txt',
@@ -453,5 +455,106 @@ test('guardedWrite preserves permission bits through the atomic rename', async (
       transform: current => current.replace('a', 'b'),
     }, tracker)
     expect(statSync(secretPath).mode & 0o777).toBe(0o600)
+  })
+})
+
+test('read state serializes into session metadata without pinning file contents', () => {
+  const tracker = new FileStateTracker()
+  tracker.record(SESSION, '/tmp/one.ts', 'one', { mtimeMs: 111, partialView: false, size: 3 })
+  tracker.record(SESSION, '/tmp/big.ts', 'huge', { mtimeMs: 222, partialView: true, size: 4 })
+
+  const persisted = fileReadsForMetadata(SESSION, tracker)
+  expect(persisted.map(entry => entry.path).sort()).toEqual(['/tmp/big.ts', '/tmp/one.ts'])
+  const one = persisted.find(entry => entry.path === '/tmp/one.ts')
+  expect(one).toMatchObject({ digest: expect.any(String), mtime_ms: 111, partial: false, size: 3 })
+  // Sessions with no reads, or no session at all, persist nothing.
+  expect(fileReadsForMetadata('other-session', tracker)).toEqual([])
+  expect(fileReadsForMetadata(undefined, tracker)).toEqual([])
+})
+
+test('hydrated metadata restores the guard across a restart, minus the diff snapshots', async () => {
+  await inWorkspace(workspace => {
+    const path = join(workspace, 'resume.ts')
+    writeFileSync(path, 'const original = 1\n')
+    const first = new FileStateTracker()
+    recordCurrent(first, path)
+    const saved = fileReadsForMetadata(SESSION, first)
+
+    // A fresh process: empty tracker, state restored from session metadata.
+    const rehydrated = new FileStateTracker()
+    expect(hydrateFileReadsFromMetadata(SESSION, { file_reads: saved }, rehydrated)).toBe(1)
+    const record = rehydrated.peek(SESSION, path)
+    expect(record?.digest).toBe(first.peek(SESSION, path)?.digest)
+    expect(record?.snapshot).toBeUndefined()
+
+    // The file is untouched since the read, so an edit proceeds.
+    expect(() => guardedWrite({
+      absolutePath: path,
+      displayPath: 'resume.ts',
+      mode: 'targeted',
+      sessionId: SESSION,
+      toolName: 'FileEditTool',
+      transform: current => current.replace('original', 'resumed'),
+    }, rehydrated)).not.toThrow()
+    expect(readFileSync(path, 'utf8')).toBe('const resumed = 1\n')
+
+    // A file the resumed session never read is still refused.
+    writeFileSync(join(workspace, 'never.ts'), 'x\n')
+    expect(() => guardedWrite({
+      absolutePath: join(workspace, 'never.ts'),
+      displayPath: 'never.ts',
+      mode: 'targeted',
+      sessionId: SESSION,
+      toolName: 'FileEditTool',
+      transform: () => 'y\n',
+    }, rehydrated)).toThrow('requires reading "never.ts" first')
+  })
+})
+
+test('malformed persisted read state is ignored instead of poisoning the tracker', () => {
+  const tracker = new FileStateTracker()
+  expect(hydrateFileReadsFromMetadata(SESSION, undefined, tracker)).toBe(0)
+  expect(hydrateFileReadsFromMetadata(SESSION, { file_reads: 'junk' }, tracker)).toBe(0)
+  expect(hydrateFileReadsFromMetadata(SESSION, {
+    file_reads: [
+      null,
+      42,
+      { path: '/tmp/no-digest.ts', mtime_ms: 1, size: 1 },
+      { path: '/tmp/ok.ts', digest: 'abc', mtime_ms: 5, partial: false, size: 10 },
+    ],
+  }, tracker)).toBe(1)
+  expect(tracker.peek(SESSION, '/tmp/ok.ts')?.size).toBe(10)
+})
+
+test('clearing read state — what compaction does — forces a fresh read before editing', async () => {
+  await inWorkspace(workspace => {
+    const path = join(workspace, 'compact.ts')
+    writeFileSync(path, 'before\n')
+    const tracker = new FileStateTracker()
+    recordCurrent(tracker, path)
+
+    // Compaction retires the session's read records…
+    expect(tracker.clearSession(SESSION)).toBe(1)
+
+    // …so the model must read the file again before editing it.
+    expect(() => guardedWrite({
+      absolutePath: path,
+      displayPath: 'compact.ts',
+      mode: 'targeted',
+      sessionId: SESSION,
+      toolName: 'FileEditTool',
+      transform: current => current.replace('before', 'after'),
+    }, tracker)).toThrow('requires reading "compact.ts" first')
+    expect(readFileSync(path, 'utf8')).toBe('before\n')
+
+    recordCurrent(tracker, path)
+    expect(() => guardedWrite({
+      absolutePath: path,
+      displayPath: 'compact.ts',
+      mode: 'targeted',
+      sessionId: SESSION,
+      toolName: 'FileEditTool',
+      transform: current => current.replace('before', 'after'),
+    }, tracker)).not.toThrow()
   })
 })

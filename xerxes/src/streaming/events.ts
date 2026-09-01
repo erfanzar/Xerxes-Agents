@@ -84,13 +84,18 @@ export type StreamEvent =
   | {
     /** Running totals for the turn so far, so consumers never re-accumulate. */
     readonly cumulative: TokenUsage
+    /** Wall-clock duration of this completed provider round. */
+    readonly durationMs?: number
+    /** Cache-served share of provider input, from 0 through 1. */
+    readonly cacheHitRate?: number
     readonly model: string
+    /** Milliseconds from request start to the first model-output delta. */
+    readonly ttftMs?: number
+    /** Decode throughput after the first output delta. */
+    readonly tokensPerSecond?: number
     /**
      * Token usage from one provider round, emitted as soon as it lands.
-     *
-     * Without this the only usage signal is `turn_done`, so a long turn shows
-     * nothing at all until it finishes — which is exactly when the numbers
-     * stop being interesting.
+     * Without this the only usage signal is turn_done.
      */
     readonly type: 'usage_update'
     readonly usage: TokenUsage

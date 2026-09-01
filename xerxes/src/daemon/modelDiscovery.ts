@@ -8,6 +8,7 @@ import type { ProviderProfile } from "../bridge/profiles.js";
 import type { FetchImplementation } from "../llms/client.js";
 import {
   PROVIDERS,
+  getProviderConfig,
   isProviderName,
   providerDefaultHeaders,
   type ProviderName,
@@ -39,6 +40,7 @@ export interface ModelDiscoveryOptions {
 export interface DiscoveredModel {
   readonly contextLimit?: number;
   readonly id: string;
+  readonly maxOutputTokens?: number;
 }
 
 const platformFetch = globalThis.fetch;
@@ -236,11 +238,15 @@ export function modelDiscoveryEndpoint(
   const url = new URL(baseUrl);
   const path = url.pathname.replace(/\/+$/u, "");
   if (!path.toLowerCase().endsWith("/models")) {
-    const suffix =
-      canonicalProvider(provider) === "anthropic" &&
-      !/\/v\d+(?:beta\d*)?$/iu.test(path)
-        ? "/v1/models"
-        : "/models";
+    const name = canonicalProvider(provider);
+    // Anthropic-protocol hosts (anthropic, minimax-cn, vercel-ai-gateway) and
+    // Mistral version their API root; their base URLs stop before it.
+    const needsVersionedRoot =
+      (isProviderName(name) &&
+        getProviderConfig(name).transport === "anthropic" &&
+        !/\/v\d+(?:beta\d*)?$/iu.test(path)) ||
+      (name === "mistral" && !/\/v\d+$/iu.test(path));
+    const suffix = needsVersionedRoot ? "/v1/models" : "/models";
     url.pathname = `${path}${suffix}` || suffix;
   }
   url.hash = "";
@@ -282,13 +288,24 @@ export function modelCatalogFromResponse(value: unknown): DiscoveredModel[] {
           candidate.max_model_len,
         )
       : undefined;
+    const maxOutputTokens = isRecord(candidate)
+      ? firstPositiveInteger(
+          candidate.max_output_tokens,
+          candidate.maxOutputTokens,
+          candidate.max_tokens,
+        )
+      : undefined;
     const existing = models.get(id);
     const resolvedContextLimit = contextLimit ?? existing?.contextLimit;
+    const resolvedMaxOutputTokens = maxOutputTokens ?? existing?.maxOutputTokens;
     models.set(id, {
       id,
       ...(resolvedContextLimit === undefined
         ? {}
         : { contextLimit: resolvedContextLimit }),
+      ...(resolvedMaxOutputTokens === undefined
+        ? {}
+        : { maxOutputTokens: resolvedMaxOutputTokens }),
     });
   }
   return [...models.values()];
@@ -325,7 +342,8 @@ function modelDiscoveryHeaders(
 ): Record<string, string> {
   const headers: Record<string, string> = { Accept: "application/json" };
   const name = canonicalProvider(provider);
-  if (name === "anthropic") {
+  // Anthropic-protocol hosts authenticate with x-api-key + a version header.
+  if (isProviderName(name) && getProviderConfig(name).transport === "anthropic") {
     headers["anthropic-version"] = "2023-06-01";
     if (apiKey) {
       headers["x-api-key"] = apiKey;

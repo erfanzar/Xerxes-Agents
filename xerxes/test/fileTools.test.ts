@@ -204,7 +204,7 @@ test('FileEditTool refuses to edit a file this session never read, and proceeds 
     const context = { sessionId: 'session-edit' }
     const edit = { file_path: 'edit.ts', new_string: 'const a = 2', old_string: 'const a = 1' }
 
-    await expect(editFile(edit, paths, context)).rejects.toThrow('has not been read in this session')
+    await expect(editFile(edit, paths, context)).rejects.toThrow('requires reading "edit.ts" first')
     expect(await Bun.file(join(workspace, 'edit.ts')).text()).toBe('const a = 1\n')
 
     await readFile({ file_path: 'edit.ts' }, paths, context)

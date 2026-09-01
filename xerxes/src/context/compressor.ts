@@ -55,7 +55,7 @@ export interface ContextCompressorOptions {
 
 /** Pre-prunes tool data then safely folds the unprotected middle into a reference-only summary. */
 export class ContextCompressor {
-  readonly contextWindow: number
+  readonly contextWindow: number | undefined
   readonly forceSummarize: boolean
   readonly protectFirst: number
   readonly protectLast: number
@@ -69,7 +69,10 @@ export class ContextCompressor {
   constructor(options: ContextCompressorOptions = {}) {
     this.threshold = options.threshold ?? 0.75
     if (this.threshold <= 0 || this.threshold > 1) throw new Error('threshold must be in (0.0, 1.0]')
-    this.contextWindow = options.contextWindow ?? 200_000
+    this.contextWindow = options.contextWindow
+    if (this.contextWindow !== undefined && (!Number.isSafeInteger(this.contextWindow) || this.contextWindow <= 0)) {
+      throw new Error('contextWindow must be a positive safe integer when supplied')
+    }
     this.protectFirst = options.protectFirst ?? 3
     this.protectLast = options.protectLast ?? 6
     if (this.protectFirst < 0 || this.protectLast < 0) throw new Error('protectFirst and protectLast must be >= 0')
@@ -86,7 +89,8 @@ export class ContextCompressor {
     if (messages.length === 0) return unchanged([], tokensBefore)
     const pruned = pruneToolMessages(messages, { protectLast: this.protectLast })
     const afterPrune = this.count(pruned.messages)
-    if (afterPrune < this.thresholdTokens() && !this.forceSummarize) {
+    const thresholdTokens = this.thresholdTokens()
+    if ((thresholdTokens === undefined || afterPrune < thresholdTokens) && !this.forceSummarize) {
       if (pruned.prunedCount === 0) {
         // Already under threshold with nothing pruned: a scheduled compaction must not
         // lossily summarize a context that still fits the window.
@@ -174,11 +178,14 @@ export class ContextCompressor {
   }
 
   shouldCompact(messages: readonly ContextMessage[]): boolean {
-    return this.count(messages) >= this.thresholdTokens()
+    const threshold = this.thresholdTokens()
+    return threshold !== undefined && this.count(messages) >= threshold
   }
 
-  thresholdTokens(): number {
-    return Math.floor(this.contextWindow * this.threshold)
+  thresholdTokens(): number | undefined {
+    return this.contextWindow === undefined
+      ? undefined
+      : Math.floor(this.contextWindow * this.threshold)
   }
 
   private count(messages: readonly ContextMessage[]): number {

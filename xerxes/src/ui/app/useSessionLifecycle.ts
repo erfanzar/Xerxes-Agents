@@ -254,7 +254,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
   )
 
   const startNewSession = useCallback(
-    async (msg?: string, title?: string, keepCurrent = false) => {
+    async (msg?: string, title?: string, keepCurrent = false, agentPreset?: string) => {
       const generation = ++switchGenerationRef.current
       const setup = await rpc<SetupStatusResponse>('setup.status', {})
       if (generation !== switchGenerationRef.current) return null
@@ -272,7 +272,10 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
       }
 
       const r = await runClientSwitch(generation, () =>
-        rpc<SessionCreateResponse>('session.create', { cols: colsRef.current })
+        rpc<SessionCreateResponse>('session.create', {
+          cols: colsRef.current,
+          ...(agentPreset?.trim() ? { agent_id: agentPreset.trim() } : {})
+        })
       )
       if (generation !== switchGenerationRef.current) return null
 
@@ -343,7 +346,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
   )
 
   const newSession = useCallback(
-    (msg?: string, title?: string) => startNewSession(msg, title, false),
+    (msg?: string, title?: string, agentPreset?: string) => startNewSession(msg, title, false, agentPreset),
     [startNewSession]
   )
 

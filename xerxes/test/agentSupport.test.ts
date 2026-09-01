@@ -64,6 +64,12 @@ test('compaction and automatic compaction use caller-owned model and compactor p
 
   const unavailable = await new AutoCompactAgent({ maxContextTokens: 20, compactThreshold: 0.5 }).compact(messages)
   expect(unavailable.metadata).toMatchObject({ summaryCreated: false, reason: 'no_summary_agent' })
+  const unknownCapacity = new AutoCompactAgent({ compactor: agent })
+  expect(unknownCapacity.shouldCompact(messages)).toBeFalse()
+  expect((await unknownCapacity.compact(messages)).metadata).toMatchObject({
+    summaryCreated: false,
+    reason: 'unknown_context',
+  })
 })
 
 test('profile agent persists heuristic domains, preferences, feedback, and injected summaries', async () => {

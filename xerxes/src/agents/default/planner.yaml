@@ -24,6 +24,8 @@ agent:
     - DuckDuckGoSearch
     - SetInteractionModeTool
   exclude_tools:
+    - create_goal
+    - update_goal
     - AgentTool
     - SpawnAgents
     - AskUserQuestionTool

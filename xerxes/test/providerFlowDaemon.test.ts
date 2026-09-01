@@ -11,6 +11,8 @@ import { ProfileStore } from "../src/bridge/profiles.js";
 import { InMemoryDaemonRuntime } from "../src/daemon/runtime.js";
 import { PROVIDER_FLOW_ADD_LABEL } from "../src/daemon/providerFlow.js";
 import { DaemonServer } from "../src/daemon/server.js";
+import { appendSkillSuggestion } from "../src/extensions/skillSuggestions.js";
+import { DeclarativeToolForge } from "../src/extensions/declarativeForge.js";
 import type { FetchImplementation } from "../src/llms/client.js";
 
 interface Frame {
@@ -45,14 +47,12 @@ test("daemon routes interactive provider setup through native question replies w
     return new Response(JSON.stringify({ data: [{ id: "daemon-remote-model" }] }));
   };
   globalThis.fetch = modelFetch as typeof globalThis.fetch;
-  const server = new DaemonServer({
-    socketPath,
-    profileStore,
-    runtime: new InMemoryDaemonRuntime(undefined, {
-      currentProjectDirectory: directory,
-      sessionDirectory: join(directory, "sessions"),
-    }),
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: directory,
+    sessionDirectory: join(directory, "sessions"),
   });
+  const declarativeForge = new DeclarativeToolForge(join(directory, "forged-tools.json"));
+  const server = new DaemonServer({ socketPath, profileStore, runtime, declarativeForge });
   await server.start();
   const client = await SocketTestClient.connect(socketPath);
   process.env.OPENAI_API_KEY = "environment-must-not-leak";
@@ -68,6 +68,79 @@ test("daemon routes interactive provider setup through native question replies w
     );
     await client.next(eventFrame("init_done"));
     await client.next(eventFrame("status_update"));
+
+    const session = runtime.sessionStatus("provider-flow");
+    if (!session) throw new Error("expected initialized provider-flow session");
+    appendSkillSuggestion(session.metadata, {
+      skillName: "release-checklist",
+      description: "Repeat the verified release sequence.",
+      version: "0.1.0",
+      sourcePath: "/tmp/release-checklist/SKILL.md",
+      toolCount: 4,
+      uniqueTools: ["Read", "Bash"],
+    });
+    client.send({ jsonrpc: "2.0", id: 20, method: "skill_suggestions", params: {} });
+    expect((await client.next((frame) => frame.id === 20)).result).toMatchObject({
+      ok: true,
+      suggestions: [{
+        skill_name: "release-checklist",
+        tool_count: 4,
+        unique_tools: ["Read", "Bash"],
+      }],
+    });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 21,
+      method: "forge.define",
+      params: {
+        name: "briefing",
+        version: "0.1.0",
+        description: "Format a briefing.",
+        parameters: [{ name: "topic", required: true }],
+        template: "Briefing: {{topic}}",
+      },
+    });
+    expect((await client.next((frame) => frame.id === 21)).result).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("confirm: true"),
+    });
+    client.send({
+      jsonrpc: "2.0",
+      id: 22,
+      method: "forge.define",
+      params: {
+        confirm: true,
+        name: "briefing",
+        version: "0.1.0",
+        description: "Format a briefing.",
+        parameters: [{ name: "topic", required: true }],
+        template: "Briefing: {{topic}}",
+      },
+    });
+    expect((await client.next((frame) => frame.id === 22)).result).toMatchObject({
+      ok: true,
+      package: { name: "briefing", version: "0.1.0" },
+    });
+    client.send({
+      jsonrpc: "2.0",
+      id: 23,
+      method: "forge.run",
+      params: { name: "briefing", input: { topic: "telemetry" } },
+    });
+    expect((await client.next((frame) => frame.id === 23)).result).toMatchObject({
+      ok: true,
+      output: "Briefing: telemetry",
+    });
+    client.send({ jsonrpc: "2.0", id: 24, method: "creator_trace", params: {} });
+    expect((await client.next((frame) => frame.id === 24)).result).toMatchObject({
+      ok: true,
+      trace: [
+        { action: "define", name: "briefing", status: "error" },
+        { action: "define", name: "briefing", status: "ok" },
+        { action: "run", name: "briefing", status: "ok" },
+      ],
+    });
 
     client.send({
       jsonrpc: "2.0",
@@ -127,9 +200,31 @@ test("daemon routes interactive provider setup through native question replies w
     );
     expect(JSON.stringify(listed.result)).not.toContain("environment-must-not-leak");
     expect(profileStore.get("daemon-profile")?.api_key).toBe("");
+
+    // Edit sheets can discover one exact saved profile without switching the
+    // active runtime connection or receiving any credential material.
+    client.send({
+      jsonrpc: "2.0",
+      id: 10,
+      method: "provider_models",
+      params: { profile_name: "daemon-profile" },
+    });
+    const catalog = await client.next((frame) => frame.id === 10);
+    expect(catalog.result).toMatchObject({
+      ok: true,
+      profile: "daemon-profile",
+      provider: "openai",
+      configured_model: "daemon-remote-model",
+      models: ["daemon-remote-model"],
+    });
+    expect(JSON.stringify(catalog.result)).not.toContain("environment-must-not-leak");
     expect(requests).toEqual([
       {
         authorization: null,
+        url: "https://api.openai.com/v1/models",
+      },
+      {
+        authorization: "Bearer environment-must-not-leak",
         url: "https://api.openai.com/v1/models",
       },
     ]);
@@ -140,6 +235,81 @@ test("daemon routes interactive provider setup through native question replies w
     } else {
       process.env.OPENAI_API_KEY = nativeOpenAiKey;
     }
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("provider_types exposes the registry catalog; provider_save defaults endpoints and keeps stored keys", async () => {
+  const directory = await mkdtemp(
+    join(tmpdir(), "xerxes-bun-provider-types-"),
+  );
+  const socketPath = join(directory, "daemon.sock");
+  const profileStore = new ProfileStore(join(directory, "profiles.json"));
+  const server = new DaemonServer({
+    socketPath,
+    profileStore,
+    runtime: new InMemoryDaemonRuntime(undefined, {
+      currentProjectDirectory: directory,
+      sessionDirectory: join(directory, "sessions"),
+    }),
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    // The adapter catalog: registry names, default endpoints, env fallback
+    // names — catalog facts only, never key material.
+    client.send({ jsonrpc: "2.0", id: 1, method: "provider_types", params: {} });
+    const types = (await client.next((frame) => frame.id === 1)).result?.types;
+    expect(Array.isArray(types)).toBe(true);
+    expect(types as unknown[]).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "zhipu",
+          transport: "openai",
+          base_url: "https://api.z.ai/api/coding/paas/v4",
+          api_key_env: "ZHIPU_API_KEY",
+        }),
+        // Types without a default endpoint say so explicitly.
+        expect.objectContaining({ name: "custom", base_url: null }),
+      ]),
+    );
+
+    // A known type with a blank base_url saves the registry default.
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "provider_save",
+      params: { name: "zai", provider: "zhipu", model: "glm-5.2", api_key: "stored-key" },
+    });
+    expect((await client.next((frame) => frame.id === 2)).result).toMatchObject({
+      ok: true,
+      profile: { name: "zai", base_url: "https://api.z.ai/api/coding/paas/v4", active: true },
+    });
+
+    // An edit that omits api_key keeps the stored credential — the desktop
+    // edit flow never re-sends the key.
+    client.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "provider_save",
+      params: { name: "zai", provider: "zhipu", model: "glm-5.3" },
+    });
+    expect((await client.next((frame) => frame.id === 3)).result).toMatchObject({ ok: true });
+    const stored = profileStore.list().find(p => p.name === "zai");
+    expect(stored?.api_key).toBe("stored-key");
+    expect(stored?.model).toBe("glm-5.3");
+
+    // A type without a registry default still must name its endpoint.
+    client.send({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "provider_save",
+      params: { name: "mine", provider: "custom", model: "qwen3.8-max" },
+    });
+    expect((await client.next((frame) => frame.id === 4)).result?.ok).toBe(false);
+  } finally {
     client.close();
     await server.stop();
     await rm(directory, { recursive: true, force: true });

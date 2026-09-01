@@ -525,6 +525,8 @@ export const sessionCommands: SlashCommand[] = [
 
         if (r.context_max) {
           sections.push({ text: `Context: ${f(r.context_used)} / ${f(r.context_max)} (${r.context_percent}%)` })
+        } else {
+          sections.push({ text: 'Context: unknown' })
         }
 
         if (r.compressions) {

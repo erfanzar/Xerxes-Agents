@@ -153,6 +153,53 @@ describe("OpenTUI dynamic model picker", () => {
     }
   });
 
+  it("edits cached input and output limits without inventing defaults", async () => {
+    const request = vi.fn((method: string, params?: Record<string, unknown>) => {
+      if (method === "model.options") return Promise.resolve(options);
+      if (method === "model.models") {
+        return Promise.resolve({
+          models: ["k3"],
+          catalog: [{
+            id: "k3",
+            context_limit: 1_000_000,
+            context_source: "catalog",
+            max_output_tokens: 131_072,
+            output_source: "catalog",
+          }],
+        } satisfies ModelModelsResponse);
+      }
+      if (method === "provider_model_override") return Promise.resolve({ ok: true });
+      return Promise.reject(new Error(`unexpected request: ${method}`));
+    });
+    const { setup } = await renderPicker(request);
+
+    try {
+      act(() => setup.mockInput.pressEnter());
+      await flushPromises(setup);
+      act(() => setup.mockInput.pressKey("e", { ctrl: true }));
+      await setup.flush();
+      const editor = setup.captureCharFrame();
+      expect(editor).toContain("Edit model limits");
+      expect(editor).toContain("inherit: 1,000,000");
+      expect(editor).toContain("inherit: 131,072");
+
+      await act(async () => setup.mockInput.typeText("262144"));
+      act(() => setup.mockInput.pressKey("TAB"));
+      await act(async () => setup.mockInput.typeText("65536"));
+      act(() => setup.mockInput.pressEnter());
+      await flushPromises(setup);
+
+      expect(request).toHaveBeenCalledWith("provider_model_override", {
+        profile_name: "kimi-local",
+        model: "k3",
+        context_limit: 262_144,
+        max_output_tokens: 65_536,
+      });
+    } finally {
+      act(() => setup.renderer.destroy());
+    }
+  });
+
   it("keeps warning-backed fallbacks retryable when the profile is entered again", async () => {
     let attempts = 0;
     const request = vi.fn((method: string) => {

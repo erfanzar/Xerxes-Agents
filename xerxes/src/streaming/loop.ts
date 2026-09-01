@@ -7,6 +7,7 @@ import {
 } from '../context/screenshotSuperseder.js'
 import {
   errorMessage,
+  toolSearchLoadedNames,
   type ToolExecutor,
   type ToolExecutionContext,
 } from '../executors/toolRegistry.js'
@@ -29,6 +30,7 @@ import {
   objectiveGuardRetryLimit,
   type ObjectiveToolExecutionEvidence,
 } from '../runtime/objectiveGuard.js'
+import { getGoal } from '../runtime/goalDomain.js'
 import type { ChatMessage, MessageContent } from '../types/messages.js'
 import { isJsonObject, type ToolCall, type ToolDefinition } from '../types/toolCalls.js'
 import { appendInjection } from './attachments.js'
@@ -205,6 +207,8 @@ export interface TurnRequest {
   /** Why this completion is being made; drives cost attribution and retry policy. */
   readonly querySource?: QuerySource
   readonly sessionId?: string
+  /** OpenAI processing tier request (`auto`/`default`/`flex`/`priority`); Responses-family only. */
+  readonly serviceTier?: string
   readonly state: AgentState
   readonly systemPrompt?: string
   /** Send the system prompt in a request copy without mutating durable AgentState messages. */
@@ -252,6 +256,8 @@ export interface TurnDependencies {
   /** Optional plugin hook dispatch surface; when absent the turn dispatches no hooks. */
   readonly hookRunner?: HookRunner
   readonly llm: LlmClient
+  /** Monotonic millisecond clock for provider telemetry; Date.now by default. */
+  readonly now?: () => number
   /**
    * Observes provider-requested tools that were not included in the model-visible
    * surface. Returning `stop` ends the current turn without executing or retrying
@@ -332,6 +338,7 @@ export async function* runTurn(
     dependencies.maxSuggestedRetryDelayMs ?? MAX_SUGGESTED_RETRY_DELAY_MS
   const streamInactivityTimeoutMs =
     dependencies.streamInactivityTimeoutMs ?? DEFAULT_STREAM_INACTIVITY_TIMEOUT_MS
+  const now = dependencies.now ?? (() => performance.now())
   const hookRunner = dependencies.hookRunner
   // One instance per turn, so a subagent running under a stricter policy burns
   // its own budget instead of the parent's.
@@ -360,6 +367,7 @@ export async function* runTurn(
   let reasoningTokens = 0
   let reasoningUsageComplete = true
   let usageComplete = true
+  let turnServiceTier: string | undefined
   let apiCallsCount = 0
   let objectiveGuardRetries = 0
   const objectiveToolExecutions: ObjectiveToolExecutionEvidence[] = []
@@ -446,6 +454,9 @@ export async function* runTurn(
       let lastUsage: TokenUsage | undefined
       let finishReason: string | undefined
       let streamCompleted = false
+      let roundStartedAt = 0
+      let roundFirstOutputAt: number | undefined
+      let roundCompletedAt = 0
       let textDeduper = new ToolRoundTextDeduper(latestToolRoundText)
 
       for (let attempt = 0; attempt <= retryDelays.length; attempt += 1) {
@@ -460,6 +471,9 @@ export async function* runTurn(
         const attemptSignal = linkAttemptSignal(signal)
         try {
           apiCallsCount += 1
+          roundStartedAt = now()
+          roundFirstOutputAt = undefined
+          roundCompletedAt = 0
           for await (const delta of watchProviderStream(
             dependencies.llm.stream(
               completionRequest(
@@ -473,6 +487,9 @@ export async function* runTurn(
             streamInactivityTimeoutMs,
             attemptSignal,
           )) {
+            if (roundFirstOutputAt === undefined && hasModelOutput(delta)) {
+              roundFirstOutputAt = now()
+            }
             const parts = processDelta(delta, parser, textParts, thinkingParts)
             for (const part of parts) {
               // Live incremental emission: each deduped part is yielded the
@@ -517,6 +534,7 @@ export async function* runTurn(
               for (const visible of textDeduper.push({ type: 'thinking', text: flushed.text })) yield visible
             }
           }
+          roundCompletedAt = now()
           streamCompleted = true
           break
         } catch (error) {
@@ -631,10 +649,17 @@ export async function* runTurn(
         cacheCreationTokens += usage.cacheCreationTokens ?? 0
         reasoningTokens += usage.reasoningTokens ?? 0
       })
+      if (lastUsage?.serviceTier) {
+        turnServiceTier = lastUsage.serviceTier
+      }
       if (lastUsage) {
         // Emitted per provider round rather than only at turn_done: a turn that
         // runs for minutes across many rounds would otherwise report nothing
         // until it ended.
+        const decodeMilliseconds = roundFirstOutputAt === undefined
+          ? 0
+          : Math.max(0, roundCompletedAt - roundFirstOutputAt)
+        const cacheInput = lastUsage.inputTokens + (lastUsage.cacheReadTokens ?? 0)
         yield {
           type: 'usage_update',
           model: request.model,
@@ -646,6 +671,16 @@ export async function* runTurn(
             ...(cacheCreationTokens ? { cacheCreationTokens } : {}),
             ...(reasoningTokens ? { reasoningTokens } : {}),
           },
+          durationMs: Math.max(0, roundCompletedAt - roundStartedAt),
+          ...(roundFirstOutputAt === undefined
+            ? {}
+            : { ttftMs: Math.max(0, roundFirstOutputAt - roundStartedAt) }),
+          ...(decodeMilliseconds > 0 && lastUsage.outputTokens > 0
+            ? { tokensPerSecond: lastUsage.outputTokens * 1_000 / decodeMilliseconds }
+            : {}),
+          ...(lastUsage.cacheReadTokens !== undefined && cacheInput > 0
+            ? { cacheHitRate: lastUsage.cacheReadTokens / cacheInput }
+            : {}),
         }
       }
 
@@ -810,10 +845,20 @@ export async function* runTurn(
             text: renderIntervention({ kind: 'steer-note', content }),
           }
         }
-        const objectiveDecision = inspectObjectiveResponse(assistantText, {
-          evidence: { toolExecutions: objectiveToolExecutions },
-          mode: currentInteractionMode(state, request.interactionMode),
-        })
+        // A session holding a live goal is driven by that goal, not by reading
+        // its own prose: the turn ends here and the round driver decides at
+        // idle whether the durable goal wants another round. Phrase matching
+        // remains only for objective mode without a goal, where there is no
+        // typed state to consult.
+        const liveGoal = request.sessionId
+          ? getGoal(state.metadata, request.sessionId)
+          : undefined
+        const objectiveDecision = liveGoal
+          ? { shouldContinue: false, reason: '', reminder: '' }
+          : inspectObjectiveResponse(assistantText, {
+              evidence: { toolExecutions: objectiveToolExecutions },
+              mode: currentInteractionMode(state, request.interactionMode),
+            })
         if (!objectiveDecision.shouldContinue) {
           // The guard states its own grounds when it has any; today an accepted
           // answer carries an empty reason, so plain completion is the fallback.
@@ -1109,6 +1154,13 @@ export async function* runTurn(
     turnCount: state.turnCount,
     usageComplete,
   })
+  // Codex's proxy echoes `default` even when it served the requested flex or
+  // priority tier, so the requested tier wins for pricing whenever the served
+  // report is absent or the meaningless default (pi-ai's reconciliation).
+  const pricedServiceTier = (turnServiceTier === undefined || turnServiceTier === 'default')
+    && (request.serviceTier === 'flex' || request.serviceTier === 'priority')
+    ? request.serviceTier
+    : turnServiceTier
   yield {
     type: 'turn_done',
     apiCallsCount,
@@ -1122,6 +1174,7 @@ export async function* runTurn(
       ...(cacheReadTokens ? { cacheReadTokens } : {}),
       ...(cacheCreationTokens ? { cacheCreationTokens } : {}),
       ...(usageComplete && reasoningUsageComplete ? { reasoningTokens } : {}),
+      ...(pricedServiceTier === undefined ? {} : { serviceTier: pricedServiceTier }),
     },
   }
 }
@@ -1331,6 +1384,8 @@ function completionRequest(
       : {}),
     ...(request.topK !== undefined ? { topK: request.topK } : {}),
     ...(request.systemSegments?.length ? { systemSegments: request.systemSegments } : {}),
+    ...(request.sessionId ? { sessionId: request.sessionId } : {}),
+    ...(request.serviceTier !== undefined ? { serviceTier: request.serviceTier } : {}),
     ...(request.querySource ? { querySource: request.querySource } : {}),
     ...(request.topP !== undefined ? { topP: request.topP } : {}),
     // Passthrough, not translation: the resolved per-turn directive travels
@@ -1390,6 +1445,10 @@ function partitionToolCalls(
   return { exposed, unconfigured }
 }
 
+function hasModelOutput(delta: LlmDelta): boolean {
+  return Boolean(delta.content || delta.thinking || delta.toolCalls?.length)
+}
+
 function processDelta(
   delta: LlmDelta,
   parser: ThinkingStreamParser,
@@ -1442,12 +1501,14 @@ function mergeUsage(
   const cacheReadTokens = incoming.cacheReadTokens ?? existing.cacheReadTokens
   const cacheCreationTokens = incoming.cacheCreationTokens ?? existing.cacheCreationTokens
   const reasoningTokens = incoming.reasoningTokens ?? existing.reasoningTokens
+  const serviceTier = incoming.serviceTier ?? existing.serviceTier
   return {
     inputTokens: incoming.inputTokens ?? existing.inputTokens,
     outputTokens: incoming.outputTokens ?? existing.outputTokens,
     ...(cacheReadTokens !== undefined ? { cacheReadTokens } : {}),
     ...(cacheCreationTokens !== undefined ? { cacheCreationTokens } : {}),
     ...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
+    ...(serviceTier !== undefined ? { serviceTier } : {}),
   }
 }
 
@@ -1478,6 +1539,13 @@ function appendToolResult(
     content: providerContent ?? result.result,
     name: result.name,
     tool_call_id: result.toolCallId,
+    // Structured load point for provider-native deferred tool protocols
+    // (pi-ai addedToolNames); derived from the same marker the regex scan in
+    // revealedToolNames recovers, so compaction stays consistent. Errored
+    // searches never serialize `loaded_tool` keys, so no error guard is needed.
+    ...(toolSearchLoadedNames(result.result).length
+      ? { added_tool_names: toolSearchLoadedNames(result.result) }
+      : {}),
   })
   // A fresh screenshot supersedes every earlier one: screenshots are the
   // largest payloads that ever enter the transcript, so only the latest
@@ -1495,6 +1563,9 @@ function appendToolResult(
   }
   state.toolExecutions.push(execution)
   objectiveToolExecutions.push(execution)
+  // Recomputed per result rather than stored as a list: the goal tools need to
+  // know whether this turn has proved anything, and putting the executions
+  // themselves on metadata would write every tool result into the session file.
 }
 
 function deniedToolResult(call: ToolCall): ToolResult {

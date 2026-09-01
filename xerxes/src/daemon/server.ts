@@ -2,9 +2,10 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import {
   CATEGORIES,
@@ -17,11 +18,15 @@ import {
   type AgentDefinition,
 } from "../agents/definitions.js";
 import { persistedSubagentSnapshotValues } from "../agents/subagentPersistence.js";
+import { AgentPresetRoster, type AgentPresetEntry } from "../agents/presets.js";
 import { CodexSession, fetchCodexModelCatalog } from "../auth/codexAuth.js";
+import { CopilotSession, fetchCopilotModels } from "../auth/copilotAuth.js";
 import {
   fallbackReasoningLevels,
   providerReasoningLevels,
   REASONING_OFF,
+  catalogReasoningLevels,
+  clampEffort,
   reasoningShapeNote,
   resolveEffort,
   selectableEfforts,
@@ -29,6 +34,8 @@ import {
 } from "../llms/reasoningLevels.js";
 import {
   ProfileStore,
+  resolvedProfileMaxOutputTokens,
+  resolvedProfileModelCapabilities,
   SAMPLING_PARAMS,
   type ProviderProfile,
 } from "../bridge/profiles.js";
@@ -55,6 +62,12 @@ import {
   releaseCronLease,
 } from "../cron/lease.js";
 import { CronScheduler } from "../cron/scheduler.js";
+import { blockGoal, getGoal, pauseGoal } from "../runtime/goalDomain.js";
+import { runGoalCommand } from "./goalCommand.js";
+import {
+  nextGoalRound,
+  type AdmittedGoalRound,
+} from "../runtime/goalRoundDriver.js";
 import {
   defaultSkillDiscoveryRoots,
   skillActivationPrompt,
@@ -62,6 +75,15 @@ import {
   SkillRegistry,
   trustedHashWorkspaceSkills,
 } from "../extensions/skills.js";
+import { skillSuggestionValues } from "../extensions/skillSuggestions.js";
+import {
+  creatorTraceValues,
+  DeclarativeToolForge,
+  recordCreatorTrace,
+  type CreatorTraceRow,
+  type DeclarativeForgeDefinition,
+  type DeclarativeForgePackage,
+} from "../extensions/declarativeForge.js";
 import {
   getDefaultSlashPluginRegistry,
   type SlashPluginRegistry,
@@ -80,7 +102,7 @@ import {
 import {
   calcCost,
   effectiveContextLimit,
-  getContextLimit,
+  PROVIDERS,
   resolveProvider,
   type ProviderName,
 } from "../llms/providerRegistry.js";
@@ -95,6 +117,12 @@ import {
   type LlmClient,
 } from "../llms/client.js";
 import {
+  DEFAULT_RADIUS_GATEWAY,
+  getRadiusModelsFromConfig,
+  loadRadiusGatewayConfig,
+  normalizeRadiusGatewayUrl,
+} from "../llms/radiusGateway.js";
+import {
   attemptSessionTitle,
   displayTitle,
   generateSessionTitle,
@@ -104,9 +132,14 @@ import {
 import { formatDoctorReport, runAllDoctorChecks } from "../runtime/doctor.js";
 import { formatGitUpdateStatus, gitUpdateStatus } from "../runtime/update.js";
 import {
+  FILE_READS_METADATA_KEY,
+  fileStateTracker,
+} from "../tools/fileState.js";
+import {
   DEFAULT_PERMISSION_MODE,
   type PermissionMode,
 } from "../streaming/permissions.js";
+import { closeCodexWebSocketSessions } from "../streaming/codexWebSocket.js";
 import {
   loadProjectAgentWorkspace,
   projectAgentsDir,
@@ -166,6 +199,7 @@ import { SkillCreateFlow, type SkillCreateTransition } from "./skillCreate.js";
 import {
   BUN_DAEMON_BUILD_ID,
   DAEMON_PROTOCOL_VERSION,
+  XERXES_VERSION,
   type DaemonEvent,
   type DaemonRuntime,
   type DaemonSession,
@@ -262,7 +296,13 @@ const TITLE_RETRY_TURN_WINDOW = 3;
  * two concurrent runs either address different keys or write identical values.
  * Do NOT add a method that mutates a session, its transcript, or its metadata.
  */
-const CONCURRENT_DISPATCH_METHODS = new Set(["fetch_models"]);
+const CONCURRENT_DISPATCH_METHODS = new Set([
+  "creator_trace",
+  "fetch_models",
+  "forge.inspect",
+  "forge.list",
+  "provider_models",
+]);
 
 /**
  * Snapshots retained per workspace. A per-turn snapshot makes the shadow repo
@@ -489,6 +529,7 @@ const RUNTIME_OVERRIDE_KEYS = new Set([
   "reasoning_effort",
   "repetition_penalty",
   "responses_api",
+  "service_tier",
   "temperature",
   "thinking",
   "thinking_budget",
@@ -560,6 +601,14 @@ export interface DaemonServerOptions {
   /** Resolve real native agent definitions for `/agents`; injectable for embedding hosts. */
   readonly agentDefinitionLoader?: (cwd: string) => readonly AgentDefinition[];
   /**
+   * The project this daemon owns (`--project-dir`). When a client binds a
+   * session without an explicit `project_dir`, this — not the daemon
+   * process's launch directory — is the workspace the session lives in;
+   * otherwise a daemon spawned from another cwd silently misfiles every
+   * session it creates.
+   */
+  readonly projectDirectory?: string;
+  /**
    * Capture a workspace snapshot before every turn, so an agent-made mess is
    * recoverable without the user having remembered to run `/snapshot`.
    *
@@ -616,6 +665,10 @@ export interface DaemonServerOptions {
   readonly crashHandlers?: boolean;
   /** Shared approval/question state passed to the native agent turn runner. */
   readonly interactions?: DaemonInteractionBoard;
+  /** Legacy declarative text-template store retained for persisted packages. */
+  readonly declarativeForge?: DeclarativeToolForge;
+  /** DSH-style live agent-preset roster used by session selection and authoring RPCs. */
+  readonly agentPresetRoster?: AgentPresetRoster;
   /** Opens the persistent native cron job store used by `/cron list`. */
   readonly cronStoreFactory?: () => JobStore;
   /** Native MCP lifecycle owner used by `/reload-mcp`. */
@@ -631,6 +684,8 @@ export interface DaemonServerOptions {
   readonly pluginRegistry?: PluginRegistry;
   /** Persistent native provider profile store. */
   readonly profileStore?: ProfileStore;
+  /** Refresh provider-reported model capabilities after initialize. Host opt-in avoids ambient network calls. */
+  readonly autoDiscoverModelCapabilities?: boolean;
   /** Optional host-owned model catalogue lookup for interactive `/provider` setup. */
   readonly providerModelDiscovery?: ProviderModelDiscoveryPort;
   readonly runtime?: DaemonRuntime;
@@ -692,6 +747,20 @@ interface ChannelStatusData {
 }
 
 /** NDJSON JSON-RPC v35 Unix socket server consumed by the OpenTUI client and native hosts. */
+/**
+ * Event types that prove a turn actually did something.
+ *
+ * Deliberately narrow: a turn that emits only status and lifecycle events has
+ * produced nothing an objective can be advanced by, however successful it looks
+ * from the outside.
+ */
+const PRODUCTIVE_TURN_EVENTS: ReadonlySet<string> = new Set([
+  "text_part",
+  "thinking_part",
+  "tool_call",
+  "tool_result",
+]);
+
 export class DaemonServer {
   private readonly agentDefinitionLoader: (
     cwd: string,
@@ -726,6 +795,9 @@ export class DaemonServer {
   private crashHandler: ((error: unknown) => void) | undefined;
   private readonly crashHandlersEnabled: boolean;
   private readonly interactions: DaemonInteractionBoard;
+  private readonly declarativeForge: DeclarativeToolForge;
+  private readonly agentPresetRoster: AgentPresetRoster;
+  private readonly agentPresetSwitches = new Map<string, Promise<void>>();
   private readonly inFlightTurns = new Set<Promise<void>>();
   private readonly mcpManager: MCPManager | undefined;
   private readonly maxSocketFrameBytes: number;
@@ -746,6 +818,8 @@ export class DaemonServer {
   private readonly providerModelDiscovery:
     ProviderModelDiscoveryPort | undefined;
   private readonly discoveredContextLimits = new Map<string, number>();
+  private readonly autoDiscoverModelCapabilities: boolean;
+  private readonly modelCapabilityRefreshes = new Map<string, Promise<void>>();
   /** Per-model reasoning-level sets, so the picker does not refetch each open. */
   private readonly reasoningLevelCache = new Map<string, ReasoningLevelSet>();
   private readonly profileStore: ProfileStore;
@@ -755,6 +829,7 @@ export class DaemonServer {
   >();
   private readonly runtime: DaemonRuntime;
   private runtimeShutdown = false;
+  private readonly projectDirectory: string | undefined;
   private readonly sessionArchiveDirectory: string;
   /** True when a host named the transcript directory, so archives are unconditional. */
   private readonly sessionArchiveDirectoryConfigured: boolean;
@@ -794,6 +869,9 @@ export class DaemonServer {
   constructor(options: DaemonServerOptions) {
     this.socketPath = options.socketPath;
     this.pidPath = options.pidPath;
+    this.projectDirectory = options.projectDirectory
+      ? resolveProjectDirectory(options.projectDirectory)
+      : undefined;
     this.autoCompactThreshold = normalizeCompactionThreshold(
       options.autoCompactThreshold ?? DEFAULT_AUTO_COMPACT_THRESHOLD,
     );
@@ -815,6 +893,10 @@ export class DaemonServer {
     this.agentDefinitionLoader =
       options.agentDefinitionLoader ?? ((cwd) => listAgentDefinitions({ cwd }));
     this.interactions = options.interactions ?? new DaemonInteractionBoard();
+    this.declarativeForge = options.declarativeForge ?? new DeclarativeToolForge();
+    this.agentPresetRoster = options.agentPresetRoster ?? new AgentPresetRoster({
+      ...(this.projectDirectory ? { projectDirectory: this.projectDirectory } : {}),
+    });
     this.maxSocketFrameBytes =
       options.maxSocketFrameBytes ?? DEFAULT_MAX_SOCKET_FRAME_BYTES;
     this.maxPendingSocketRequests =
@@ -858,6 +940,8 @@ export class DaemonServer {
       },
     );
     this.profileStore = options.profileStore ?? new ProfileStore();
+    // Only the process-owning host opts in; embeddings remain network-silent.
+    this.autoDiscoverModelCapabilities = options.autoDiscoverModelCapabilities ?? false;
     this.providerModelDiscovery =
       options.providerModelDiscovery ??
       {
@@ -1233,6 +1317,9 @@ export class DaemonServer {
   private async shutdownRuntime(): Promise<void> {
     if (this.runtimeShutdown) return;
     this.runtimeShutdown = true;
+    // Pooled Codex WebSocket sessions outlive individual turns; drop them so
+    // the daemon exits without waiting on an idle-timeout close.
+    await closeCodexWebSocketSessions();
     await this.runtime.shutdown?.();
   }
 
@@ -1449,11 +1536,17 @@ export class DaemonServer {
           activeSession?.cwd ||
           process.cwd(),
       );
-      const session = await this.runtime.openSession(
-        key,
-        optionalString(params.agent_id),
-        { cwd },
-      );
+      const requestedAgent = optionalString(params.agent_id)
+        ?? this.runtime.sessionStatus(key)?.agentId
+        ?? this.agentPresetRoster.defaultId;
+      let preset: AgentPresetEntry;
+      try {
+        preset = this.agentPresetRoster.resolve(requestedAgent, cwd);
+      } catch (error) {
+        return { ok: false, code: "agent-preset-not-found", error: errorMessage(error) };
+      }
+      if (preset.broken) return { ok: false, code: "agent-preset-broken", error: preset.broken };
+      const session = await this.runtime.openSession(key, preset.id, { cwd });
       connection.activeSessionKey = key;
       // Drain notices that settled while no client was attached (background
       // tasks above). At-most-once: the attaching client receives them here,
@@ -1466,7 +1559,7 @@ export class DaemonServer {
       }
       return {
         ok: true,
-        session: sessionPayload(session, this.contextLimit(session.model)),
+        session: sessionPayload(session, this.contextLimit(session.model), this.mcpStatusRecord()),
       };
     }
     if (method === "session.active_list") {
@@ -1475,7 +1568,7 @@ export class DaemonServer {
         sessions: this.runtime
           .listSessions()
           .map((session) =>
-            sessionPayload(session, this.contextLimit(session.model)),
+            sessionPayload(session, this.contextLimit(session.model), this.mcpStatusRecord()),
           ),
       };
     }
@@ -1525,7 +1618,7 @@ export class DaemonServer {
         ok: Boolean(session),
         session: session
           ? {
-              ...sessionPayload(session, this.contextLimit(session.model)),
+              ...sessionPayload(session, this.contextLimit(session.model), this.mcpStatusRecord()),
               // This is intentionally an identity only. The picker can use it
               // to select the exact stored profile without receiving the live
               // endpoint or credential that proved the match.
@@ -1554,6 +1647,43 @@ export class DaemonServer {
         optionalString(params.title) ?? optionalString(params.value) ?? "",
         false,
       );
+    }
+    if (method === "changes.undo") {
+      const key = sessionKey(connection, params);
+      connection.activeSessionKey = key;
+      return this.undoChanges(
+        this.runtime.sessionStatus(key),
+        optionalString(params.path) ?? "",
+      );
+    }
+    if (method === "workspace.worktree") {
+      const key = sessionKey(connection, params);
+      connection.activeSessionKey = key;
+      if (optionalString(params.action) !== "create") {
+        return { ok: false, error: "unsupported workspace.worktree action" };
+      }
+      return this.createWorktree(
+        this.runtime.sessionStatus(key),
+        optionalString(params.name) ?? "",
+      );
+    }
+    if (method === "session.goal") {
+      const key = sessionKey(connection, params);
+      connection.activeSessionKey = key;
+      const session = this.runtime.sessionStatus(key);
+      if (!session) {
+        return { ok: false, error: "no active session" };
+      }
+      const result = runGoalCommand(
+        session.metadata,
+        session.id,
+        optionalString(params.input) ?? optionalString(params.text) ?? "",
+      );
+      // A goal edit is durable state a crash must not lose, and it is the
+      // thing that decides whether this session keeps working on its own.
+      // Persist before answering.
+      await this.runtime.flushSessions();
+      return { ok: result.ok, text: result.text };
     }
     if (method === "session.compress") {
       connection.activeSessionKey = sessionKey(connection, params);
@@ -1930,13 +2060,42 @@ export class DaemonServer {
     if (method === "fetch_models") {
       return this.fetchModels(params);
     }
+    if (method === "provider_model_override") {
+      return this.updateProviderModelOverride(connection, params);
+    }
+    if (method === "provider_models") {
+      const profileName = optionalString(params.profile_name) ?? optionalString(params.name);
+      if (!profileName) {
+        return { ok: false, error: "provider_models requires profile_name", models: [] };
+      }
+      const profile = this.profileStore.get(profileName);
+      if (!profile) {
+        return { ok: false, error: `No provider profile named ${profileName}`, models: [] };
+      }
+      const result = await this.fetchModels({ profile_name: profileName });
+      return {
+        ...result,
+        profile: profileName,
+        provider: profile.provider,
+        configured_model: profile.model,
+      };
+    }
+    if (method === "context_breakdown") {
+      return this.contextBreakdown(connection, params);
+    }
     if (method === "reasoning_levels") {
       const set = await this.reasoningLevels();
       const selectable = selectableEfforts(set);
+      // Session-first, like configureReasoning: /thinking pins the effort per
+      // session, so reading only the daemon-wide value would report an effort
+      // this session is not running at (the picker looked "stuck on off").
+      const activeSession = this.runtime.sessionStatus(sessionKey(connection, params));
       return {
         ok: true,
         current:
-          stringValue(this.runtime.status().reasoning_effort) || REASONING_OFF,
+          activeSession?.reasoningEffort
+          || stringValue(this.runtime.status().reasoning_effort)
+          || REASONING_OFF,
         default: set.defaultEffort ?? null,
         // An `inherent` provider yields no selectable efforts at all, so the
         // panel shows the note rather than a menu that cannot change anything.
@@ -1963,11 +2122,32 @@ export class DaemonServer {
         source: set.source,
       };
     }
+    if (method === "skill_suggestions") {
+      const session = this.runtime.sessionStatus(sessionKey(connection, params));
+      if (!session) return { ok: false, error: "no active session", suggestions: [] };
+      return {
+        ok: true,
+        suggestions: skillSuggestionValues(session.metadata).map((suggestion) => ({
+          skill_name: suggestion.skillName,
+          description: suggestion.description,
+          version: suggestion.version,
+          source_path: suggestion.sourcePath,
+          tool_count: suggestion.toolCount,
+          unique_tools: [...suggestion.uniqueTools],
+        })),
+      };
+    }
     if (method === "provider_list") {
       return {
         ok: true,
         profiles: this.profileStore.list().map(profilePayload),
       };
+    }
+    if (method === "provider_types") {
+      // The registry IS the adapter list an add/edit form may offer — names,
+      // default endpoints, and the env var each type falls back to. Catalog
+      // facts only; keys never cross the wire.
+      return { ok: true, types: providerTypePayloads() };
     }
     if (method === "provider_save") {
       return this.saveProvider(connection, params);
@@ -1977,6 +2157,18 @@ export class DaemonServer {
     }
     if (method === "provider_delete") {
       return this.deleteProvider(connection, optionalString(params.name) ?? "");
+    }
+    if (method.startsWith("agentPreset.")) {
+      return this.agentPresetRpc(connection, method, params);
+    }
+    if (method.startsWith("forge.")) {
+      return this.forgeRpc(connection, method, params);
+    }
+    if (method === "creator_trace") {
+      const session = this.runtime.sessionStatus(sessionKey(connection, params));
+      return session
+        ? { ok: true, trace: creatorTraceValues(session.metadata).map(creatorTracePayload) }
+        : { ok: false, error: "no active session", trace: [] };
     }
     if (method === "shutdown") {
       queueMicrotask(() => {
@@ -2087,11 +2279,32 @@ export class DaemonServer {
   ): Promise<JsonRpcPayload> {
     const text = stringValue(params.text);
     const stripped = text.trim();
-    if (stripped.startsWith("/") && !/\s/.test(stripped)) {
+    // `/skill <partial>` completes native skill names — and `name:subcommand`
+    // references — from the same registry `/skills` lists, so every client
+    // hints skills without re-implementing discovery. Matched against the raw
+    // text: a trailing space is the signal the user left the command word and
+    // wants argument completion, while a bare `/skill` still completes as a
+    // command.
+    const skillArg = /^\/skill\s+(\S*)$/.exec(text);
+    if (skillArg) {
+      const session = this.runtime.sessionStatus(sessionKey(connection, params));
       return {
         ok: true,
         kind: "slash",
-        completions: this.completeSlash(stripped),
+        completions: await this.completeSkillReference(
+          skillArg[1] ?? "",
+          session,
+        ),
+      };
+    }
+    if (stripped.startsWith("/") && !/\s/.test(stripped)) {
+      // A single token is both a canonical command and a skill shorthand —
+      // `/review` invokes the review skill without spelling `/skill review`.
+      const session = this.runtime.sessionStatus(sessionKey(connection, params));
+      return {
+        ok: true,
+        kind: "slash",
+        completions: await this.completeSlashAndSkills(stripped, session),
       };
     }
     const session = this.runtime.sessionStatus(sessionKey(connection, params));
@@ -2101,6 +2314,111 @@ export class DaemonServer {
       kind: "path",
       completions: await completePath(text, cwd),
     };
+  }
+
+  /**
+   * Single-token completions: canonical commands first (they own their
+   * names), then skill shorthands — `/review` is the same invocation as
+   * `/skill review` — ranked prefix, then name substring, then description
+   * substring, so `/bug` and even `/bounty` find `bug-bounty-hunter`.
+   */
+  private async completeSlashAndSkills(
+    stripped: string,
+    session: DaemonSession | undefined,
+  ): Promise<JsonRpcPayload[]> {
+    const commands = this.completeSlash(stripped);
+    const reserved = new Set<string>();
+    const prefix = slashCompletionPrefix(stripped);
+    for (const command of DAEMON_SLASH_COMMANDS) {
+      if (
+        command.name.startsWith(prefix) ||
+        command.aliases.some((alias) => alias.startsWith(prefix))
+      ) {
+        reserved.add(command.name);
+        for (const alias of command.aliases) reserved.add(alias);
+      }
+    }
+    // First keystroke of a fresh daemon must already hint skills: refresh
+    // before ranking instead of trusting whatever a previous call loaded.
+    await this.refreshSkills(session);
+    const skills = (await this.completeSkillEntries(stripped.slice(1)))
+      .filter((entry) => !reserved.has(String(entry.label ?? "").split(":", 1)[0] ?? ""));
+    return [...commands, ...skills].slice(0, 200);
+  }
+
+  /**
+   * Skill-reference completions for `/skill <prefix>` — trusted sources only.
+   * Matching is ranked: exact prefix, then substring in the reference, then
+   * substring in the description — so `/skill bounty` still finds a skill
+   * named `read-project-and-hunt-bugs` whose description says "bug bounty".
+   */
+  private async completeSkillReference(
+    prefix: string,
+    session: DaemonSession | undefined,
+  ): Promise<JsonRpcPayload[]> {
+    await this.refreshSkills(session);
+    return this.rankSkillReferences(prefix).map((entry) => ({
+      value: `/skill ${entry.reference} `,
+      label: entry.reference,
+      meta: entry.description,
+    }));
+  }
+
+  /** Skill shorthands as bare `/<reference> ` completions. */
+  private async completeSkillEntries(
+    prefix: string,
+  ): Promise<JsonRpcPayload[]> {
+    return this.rankSkillReferences(prefix).map((entry) => ({
+      value: `/${entry.reference} `,
+      label: entry.reference,
+      meta: entry.description,
+    }));
+  }
+
+  /**
+   * Rank trusted, platform-valid skill references (name and
+   * `name:subcommand`) for a partial token: exact prefix first, then
+   * substring in the reference, then substring in the description —
+   * `/bounty` finds `bug-bounty-hunter` through its description.
+   */
+  private rankSkillReferences(
+    prefix: string,
+  ): Array<{ reference: string; description: string }> {
+    const wanted = prefix.toLowerCase();
+    const starts: Array<{ reference: string; description: string }> = [];
+    const nameHits: Array<{ reference: string; description: string }> = [];
+    const descriptionHits: Array<{ reference: string; description: string }> = [];
+    for (const skill of this.skillRegistry.all()) {
+      if (!skillMatchesPlatform(skill)) continue;
+      const description = skill.metadata.description || "No description";
+      const references = [
+        skill.metadata.name,
+        ...skill.metadata.subcommands.map(
+          (subcommand) => `${skill.metadata.name}:${subcommand}`,
+        ),
+      ];
+      for (const reference of references) {
+        const item = { reference, description };
+        const lower = reference.toLowerCase();
+        if (!wanted) starts.push(item);
+        else if (lower.startsWith(wanted)) starts.push(item);
+        else if (lower.includes(wanted)) nameHits.push(item);
+        else if (
+          reference === skill.metadata.name &&
+          description.toLowerCase().includes(wanted)
+        ) {
+          descriptionHits.push(item);
+        }
+      }
+    }
+    const byReference = (
+      left: { reference: string },
+      right: { reference: string },
+    ): number => left.reference.localeCompare(right.reference);
+    return [...starts.sort(byReference), ...nameHits, ...descriptionHits].slice(
+      0,
+      200,
+    );
   }
 
   private completeSlash(text: string): JsonRpcPayload[] {
@@ -2423,6 +2741,7 @@ export class DaemonServer {
         runtimePermissionMode(
           session.permissionMode ?? this.runtime.status().permission_mode,
         ),
+        this.mcpStatusRecord(),
       ),
     );
   }
@@ -2449,6 +2768,195 @@ export class DaemonServer {
       if (!session || session.id !== target) continue;
       this.emitStatus(connection, session);
     }
+  }
+
+  private async agentPresetRpc(
+    connection: DaemonTransportConnection,
+    method: string,
+    params: JsonRpcPayload,
+  ): Promise<JsonRpcPayload> {
+    const key = sessionKey(connection, params);
+    const session = this.runtime.sessionStatus(key);
+    const cwd = session?.cwd ?? this.projectDirectory ?? process.cwd();
+    const id = optionalString(params.agent_preset) ?? optionalString(params.id) ?? "";
+    try {
+      if (method === "agentPreset.list") {
+        return {
+          ok: true,
+          presets: this.agentPresetRoster.list(cwd).map(agentPresetPayload),
+          default_id: this.agentPresetRoster.defaultId,
+          authorable: true,
+          has_document: true,
+        };
+      }
+      if (method === "agentPreset.read") {
+        const preset = this.agentPresetRoster.read(id, cwd);
+        return { ok: true, preset: agentPresetPayload(preset), content: preset.content };
+      }
+      if (method === "agentPreset.copy") {
+        const from = optionalString(params.from) ?? "";
+        const preset = this.agentPresetRoster.copy(from, id, optionalString(params.name), cwd);
+        this.runtime.reload({});
+        return { ok: true, preset: agentPresetPayload(preset), path: preset.path ?? "" };
+      }
+      if (method === "agentPreset.write") {
+        const content = optionalString(params.content) ?? "";
+        const preset = this.agentPresetRoster.write(id, content, cwd);
+        this.runtime.reload({});
+        return { ok: true, preset: agentPresetPayload(preset) };
+      }
+      if (method === "agentPreset.remove") {
+        this.agentPresetRoster.remove(id, cwd);
+        this.runtime.reload({});
+        return { ok: true, removed: id, default_id: this.agentPresetRoster.defaultId };
+      }
+      if (method === "agentPreset.setDefault") {
+        const preset = this.agentPresetRoster.setDefault(id, cwd);
+        return { ok: true, preset: agentPresetPayload(preset), default_id: preset.id };
+      }
+      if (method === "agentPreset.openDocument") {
+        const preset = this.agentPresetRoster.resolve(id, cwd);
+        if (!preset.manageable || !preset.path) {
+          return { ok: false, code: "agent-preset-not-writable", error: "shipped agent presets are read-only" };
+        }
+        return { ok: true, opened: false, path: dirname(preset.path) };
+      }
+      if (method === "agentPreset.select") {
+        const select = async (): Promise<JsonRpcPayload> => {
+          const current = this.runtime.sessionStatus(key);
+          if (!current) return { ok: false, code: "session-not-found", error: "no active session" };
+          const preset = this.agentPresetRoster.resolve(id, current.cwd);
+          if (preset.broken) {
+            return { ok: false, code: "agent-preset-broken", error: preset.broken };
+          }
+          const selected = this.runtime.selectSessionAgent
+            ? await this.runtime.selectSessionAgent(key, preset.id)
+            : await this.runtime.openSession(key, preset.id, { cwd: current.cwd });
+          if (!selected) return { ok: false, code: "session-not-found", error: "no active session" };
+          this.emitStatus(connection, selected);
+          this.emit(connection, "agent_preset_selected", {
+            session_id: selected.id,
+            agent_preset: selected.agentId,
+          });
+          return { ok: true, agent_preset: selected.agentId };
+        };
+        const prior = this.agentPresetSwitches.get(key) ?? Promise.resolve();
+        const operation = prior.then(select);
+        const settled = operation.then(() => undefined, () => undefined);
+        this.agentPresetSwitches.set(key, settled);
+        try {
+          return await operation;
+        } finally {
+          if (this.agentPresetSwitches.get(key) === settled) this.agentPresetSwitches.delete(key);
+        }
+      }
+      return { ok: false, code: "method-not-found", error: `Unknown agent preset method: ${method}` };
+    } catch (error) {
+      const message = errorMessage(error);
+      return {
+        ok: false,
+        code: message.includes("already started") ? "agent-preset-locked" : "agent-preset-error",
+        error: message,
+      };
+    }
+  }
+
+  private async forgeRpc(
+    connection: DaemonTransportConnection,
+    method: string,
+    params: JsonRpcPayload,
+  ): Promise<JsonRpcPayload> {
+    const session = this.runtime.sessionStatus(sessionKey(connection, params));
+    const name = optionalString(params.name) ?? "";
+    const version = optionalString(params.version);
+    let result: JsonRpcPayload;
+    try {
+      if (method === "forge.list") {
+        result = { ok: true, packages: this.declarativeForge.list().map(pkg => forgePackagePayload(pkg)) };
+      } else if (method === "forge.inspect") {
+        const pkg = this.declarativeForge.inspect(name, version);
+        result = pkg
+          ? { ok: true, package: forgePackagePayload(pkg, true) }
+          : { ok: false, error: "forged package not found" };
+      } else if (method === "forge.run") {
+        result = {
+          ok: true,
+          ...this.declarativeForge.run(
+            name,
+            version,
+            isRecord(params.input) ? params.input : {},
+          ),
+        };
+      } else if (method === "forge.define") {
+        if (params.confirm !== true) {
+          result = {
+            ok: false,
+            error: "forge.define requires confirm: true; definitions are persistent and immutable",
+          };
+        } else {
+          const definition: DeclarativeForgeDefinition = {
+            name,
+            version: version ?? "",
+            description: optionalString(params.description) ?? "",
+            template: typeof params.template === "string" ? params.template : "",
+            parameters: Array.isArray(params.parameters)
+              ? params.parameters.filter(isRecord)
+              : [],
+          };
+          result = {
+            ok: true,
+            package: forgePackagePayload(this.declarativeForge.define(definition)),
+          };
+        }
+      } else if (method === "forge.undefine") {
+        result = params.confirm !== true
+          ? { ok: false, error: "forge.undefine requires confirm: true" }
+          : this.declarativeForge.undefine(name, version ?? "")
+            ? { ok: true, removed: `${name}@${version ?? ""}` }
+            : { ok: false, error: "forged package not found" };
+      } else if (method === "forge.stop") {
+        result = { ok: false, error: "declarative forge runs are synchronous; no run is active" };
+      } else {
+        result = { ok: false, error: `Unknown method: ${method}` };
+      }
+    } catch (error) {
+      result = { ok: false, error: errorMessage(error) };
+    }
+    if (session && method !== "forge.list" && method !== "forge.inspect") {
+      recordCreatorTrace(session.metadata, {
+        action: method.slice("forge.".length),
+        name,
+        version: version ?? optionalString(result.version) ?? "",
+        status: result.ok === false ? "error" : "ok",
+        detail: optionalString(result.error) ?? optionalString(result.output) ?? "",
+      });
+      await this.runtime.flushSessions();
+    }
+    return result;
+  }
+
+  private refreshActiveModelCapabilities(connection: DaemonTransportConnection): void {
+    if (!this.autoDiscoverModelCapabilities) return;
+    const profileName = this.activeRuntimeProfileName();
+    if (!profileName) return;
+    let flight = this.modelCapabilityRefreshes.get(profileName);
+    if (!flight) {
+      flight = this.fetchModels({ profile_name: profileName }).then(() => undefined);
+      this.modelCapabilityRefreshes.set(profileName, flight);
+      void flight.then(
+        () => this.modelCapabilityRefreshes.delete(profileName),
+        () => this.modelCapabilityRefreshes.delete(profileName),
+      );
+    }
+    void flight.then(() => {
+      const session = this.runtime.sessionStatus(connection.activeSessionKey);
+      if (session) this.emitStatus(connection, session);
+    }).catch((error) => {
+      this.emit(connection, "notification", {
+        level: "warning",
+        message: `Model capability discovery failed: ${errorMessage(error)}`,
+      });
+    });
   }
 
   private async fetchModels(params: JsonRpcPayload): Promise<JsonRpcPayload> {
@@ -2484,7 +2992,10 @@ export class DaemonServer {
         models: [],
       };
     }
-    const fallbackModels = profile.model.trim() ? [profile.model.trim()] : [];
+    const fallbackModels = [...new Set([
+      ...(profile.model.trim() ? [profile.model.trim()] : []),
+      ...Object.keys(profile.model_capabilities ?? {}),
+    ])];
     if (
       profile.provider === "claude-code" ||
       profile.base_url.startsWith("claude-code://")
@@ -2492,6 +3003,7 @@ export class DaemonServer {
       return {
         ok: true,
         models: fallbackModels,
+        catalog: fallbackModels.map(model => modelCapabilityPayload(profile, model)),
         profile: profile.name,
         source: "profile",
       };
@@ -2503,6 +3015,12 @@ export class DaemonServer {
     ) {
       return this.fetchCodexModels(profile, fallbackModels);
     }
+    if (profile.provider === "github-copilot") {
+      return this.fetchCopilotModels(profile, fallbackModels);
+    }
+    if (profile.provider === "radius") {
+      return this.fetchRadiusModels(profile, fallbackModels);
+    }
 
     const apiKey = profileDiscoveryApiKey(profile);
     try {
@@ -2512,18 +3030,21 @@ export class DaemonServer {
         baseUrl: profile.base_url,
         provider: profile.provider,
       });
-      this.rememberDiscoveredContextLimits(profile, catalog);
       const models = catalog.map((model) => model.id);
+      if (models.length > 0) this.rememberDiscoveredContextLimits(profile, catalog);
+      const cachedProfile = this.profileStore.get(profile.name) ?? profile;
       return models.length
         ? {
             ok: true,
             models,
+            catalog: models.map(model => modelCapabilityPayload(cachedProfile, model)),
             profile: profile.name,
             source: "remote",
           }
         : {
             ok: true,
             models: fallbackModels,
+            catalog: fallbackModels.map(model => modelCapabilityPayload(cachedProfile, model)),
             profile: profile.name,
             source: "profile",
             warning: "provider returned no model ids",
@@ -2537,6 +3058,7 @@ export class DaemonServer {
         ? {
             ok: true,
             models: fallbackModels,
+            catalog: fallbackModels.map(model => modelCapabilityPayload(profile, model)),
             profile: profile.name,
             source: "profile",
             warning,
@@ -2598,21 +3120,31 @@ export class DaemonServer {
       const catalog = await fetchCodexModelCatalog(credential, {
         ...(profile.base_url.trim() ? { baseUrl: profile.base_url.trim() } : {}),
       });
-      this.rememberDiscoveredContextLimits(
-        profile,
-        catalog.map((model) => ({
-          id: model.id,
-          ...(model.contextLimit === undefined
-            ? {}
-            : { contextLimit: model.contextLimit }),
-        })),
-      );
       const models = catalog.map((model) => model.id);
+      if (models.length > 0) {
+        this.rememberDiscoveredContextLimits(
+          profile,
+          catalog.map((model) => ({
+            id: model.id,
+            ...(model.contextLimit === undefined
+              ? {}
+              : { contextLimit: model.contextLimit }),
+          })),
+        );
+      }
+      const cachedProfile = this.profileStore.get(profile.name) ?? profile;
       return models.length
-        ? { ok: true, models, profile: profile.name, source: "remote" }
+        ? {
+            ok: true,
+            models,
+            catalog: models.map(model => modelCapabilityPayload(cachedProfile, model)),
+            profile: profile.name,
+            source: "remote",
+          }
         : {
             ok: true,
             models: [...fallbackModels],
+            catalog: fallbackModels.map(model => modelCapabilityPayload(cachedProfile, model)),
             profile: profile.name,
             source: "profile",
             warning: "ChatGPT plan returned no Codex models",
@@ -2624,6 +3156,85 @@ export class DaemonServer {
       return {
         ok: true,
         models: [...fallbackModels],
+        catalog: fallbackModels.map(model => modelCapabilityPayload(profile, model)),
+        profile: profile.name,
+        source: "profile",
+        warning: errorMessage(error),
+      };
+    }
+  }
+
+  /** Copilot lists models through the exchanged proxy token, never the GitHub token. */
+  private async fetchCopilotModels(
+    profile: ProviderProfile,
+    fallbackModels: readonly string[],
+  ): Promise<JsonRpcPayload> {
+    try {
+      const credential = await new CopilotSession().credential();
+      const models = await fetchCopilotModels(credential);
+      const cachedProfile = this.profileStore.get(profile.name) ?? profile;
+      return models.length
+        ? {
+            ok: true,
+            models,
+            catalog: models.map(model => modelCapabilityPayload(cachedProfile, model)),
+            profile: profile.name,
+            source: "remote",
+          }
+        : {
+            ok: true,
+            models: [...fallbackModels],
+            catalog: fallbackModels.map(model => modelCapabilityPayload(cachedProfile, model)),
+            profile: profile.name,
+            source: "profile",
+            warning: "GitHub Copilot returned no models",
+          };
+    } catch (error) {
+      return {
+        ok: true,
+        models: [...fallbackModels],
+        catalog: fallbackModels.map(model => modelCapabilityPayload(profile, model)),
+        profile: profile.name,
+        source: "profile",
+        warning: errorMessage(error),
+      };
+    }
+  }
+
+  /** Radius's catalog is live gateway configuration, not a static list. */
+  private async fetchRadiusModels(
+    profile: ProviderProfile,
+    fallbackModels: readonly string[],
+  ): Promise<JsonRpcPayload> {
+    try {
+      const gateway = normalizeRadiusGatewayUrl(
+        profile.base_url.trim() || DEFAULT_RADIUS_GATEWAY,
+      );
+      const apiKey = profileDiscoveryApiKey(profile);
+      const config = await loadRadiusGatewayConfig(gateway, apiKey || undefined);
+      const models = getRadiusModelsFromConfig("radius", config).map((model) => model.id);
+      const cachedProfile = this.profileStore.get(profile.name) ?? profile;
+      return models.length
+        ? {
+            ok: true,
+            models,
+            catalog: models.map(model => modelCapabilityPayload(cachedProfile, model)),
+            profile: profile.name,
+            source: "remote",
+          }
+        : {
+            ok: true,
+            models: [...fallbackModels],
+            catalog: fallbackModels.map(model => modelCapabilityPayload(cachedProfile, model)),
+            profile: profile.name,
+            source: "profile",
+            warning: "Radius gateway returned no models",
+          };
+    } catch (error) {
+      return {
+        ok: true,
+        models: [...fallbackModels],
+        catalog: fallbackModels.map(model => modelCapabilityPayload(profile, model)),
         profile: profile.name,
         source: "profile",
         warning: errorMessage(error),
@@ -2637,10 +3248,12 @@ export class DaemonServer {
   ): void {
     const profilePrefix = discoveredContextProfilePrefix(profile);
     for (const key of this.discoveredContextLimits.keys()) {
-      if (key.startsWith(profilePrefix)) {
-        this.discoveredContextLimits.delete(key);
-      }
+      if (key.startsWith(profilePrefix)) this.discoveredContextLimits.delete(key);
     }
+    const capabilities: Record<string, {
+      readonly context_limit?: number;
+      readonly max_output_tokens?: number;
+    }> = Object.create(null);
     for (const model of models) {
       if (model.contextLimit !== undefined) {
         this.discoveredContextLimits.set(
@@ -2648,23 +3261,29 @@ export class DaemonServer {
           model.contextLimit,
         );
       }
+      capabilities[model.id] = {
+        ...(model.contextLimit === undefined ? {} : { context_limit: model.contextLimit }),
+        ...(model.maxOutputTokens === undefined ? {} : { max_output_tokens: model.maxOutputTokens }),
+      };
     }
+    this.profileStore.replaceModelCapabilities(profile.name, capabilities);
   }
 
   private contextLimit(model: string): number {
     const profileName = this.activeRuntimeProfileName();
     const profile = profileName ? this.profileStore.get(profileName) : undefined;
+    const resolved = resolvedProfileModelCapabilities(profile, model);
+    if (resolved.contextSource === "override") return resolved.contextLimit ?? 0;
     const discovered = profile
       ? this.discoveredContextLimits.get(discoveredContextKey(profile, model))
       : undefined;
-    if (discovered !== undefined) {
-      return discovered;
-    }
-    const status = this.runtime.status();
-    return configuredContextLimit(model, {
-      provider: status.provider,
-      base_url: status.base_url,
-    });
+    return discovered ?? resolved.contextLimit ?? 0;
+  }
+
+  private maxOutputTokens(model: string): number | undefined {
+    const profileName = this.activeRuntimeProfileName();
+    const profile = profileName ? this.profileStore.get(profileName) : undefined;
+    return resolvedProfileMaxOutputTokens(profile, model);
   }
 
   /**
@@ -2677,9 +3296,12 @@ export class DaemonServer {
   private promptBudget(model: string): number {
     if (!model.trim()) return 0;
     const status = this.runtime.status();
-    return effectiveContextLimit(model, {
+    const requestedOutputTokens = typeof status.max_tokens === "number"
+      ? status.max_tokens
+      : this.maxOutputTokens(model);
+    return effectiveContextLimit({
       contextLimit: this.contextLimit(model),
-      overrides: { provider: status.provider, base_url: status.base_url },
+      ...(requestedOutputTokens === undefined ? {} : { requestedOutputTokens }),
     });
   }
 
@@ -2852,7 +3474,7 @@ export class DaemonServer {
         this.emitStatus(connection, fresh);
         return {
           ok: true,
-          session: sessionPayload(fresh, this.contextLimit(fresh.model)),
+          session: sessionPayload(fresh, this.contextLimit(fresh.model), this.mcpStatusRecord()),
         };
       }
       case "stop": {
@@ -3121,7 +3743,12 @@ export class DaemonServer {
     // Validated against what this model actually accepts. The efforts differ
     // per model — some publish `ultra`, others stop at `xhigh` — so a fixed
     // list would both reject valid levels and accept ones the backend 400s on.
-    const resolved = resolveEffort(levels, requested);
+    // Validated against what this model actually accepts. The efforts differ
+    // per model — some publish `ultra`, others stop at `xhigh` — so a fixed
+    // list would both reject valid levels and accept ones the backend 400s on.
+    // A known ladder word the model lacks clamps to its nearest rung
+    // (pi-ai clampThinkingLevel); an unknown word stays a usage error.
+    const resolved = resolveEffort(levels, requested) ?? clampEffort(levels, requested);
     if (!resolved) {
       this.emitSlash(
         connection,
@@ -3168,14 +3795,53 @@ export class DaemonServer {
    * ranges from four efforts to six, with three different defaults. Providers
    * with no capability endpoint fall back to a per-provider table.
    */
+  /**
+   * Estimated token budget split for the active session's next request:
+   * system-prompt scaffold, tool schemas, and transcript messages. These are
+   * the same counter estimates that drive auto-compaction — never provider
+   * telemetry, and rendered with a `~` by clients for that reason.
+   */
+  private contextBreakdown(
+    connection: DaemonTransportConnection,
+    params: JsonRpcPayload,
+  ): JsonRpcPayload {
+    const key = sessionKey(connection, params);
+    const session = this.runtime.sessionStatus(key);
+    if (!session) {
+      return { ok: false, error: "no active session" };
+    }
+    const model = session.model || stringValue(this.runtime.status().model) || "";
+    const scaffold = sessionContextScaffold(session);
+    const systemPromptTokens = scaffold.systemPrompt
+      ? estimateContextTokens([], { model, systemPrompt: scaffold.systemPrompt })
+      : 0;
+    const toolsTokens = scaffold.toolSchemas?.length
+      ? estimateContextTokens([], { model, toolSchemas: scaffold.toolSchemas })
+      : 0;
+    const messagesTokens = estimateContextTokens(session.messages, { model });
+    return {
+      ok: true,
+      model,
+      system_prompt_tokens: systemPromptTokens,
+      tools_tokens: toolsTokens,
+      messages_tokens: messagesTokens,
+      total_tokens: sessionContextTokens(session, model),
+      context_limit: this.contextLimit(model),
+    };
+  }
+
   private async reasoningLevels(): Promise<ReasoningLevelSet> {
     const status = this.runtime.status();
     const model = stringValue(status.model) ?? "";
     const profile = this.profileStore.active();
     const providerName = resolveProviderSafely(model, profile);
+    // The generated Pi catalog knows each model's real ladder
+    // (thinking_level_map); the static provider table is only the last resort
+    // for models the catalog does not carry.
+    const catalog = catalogReasoningLevels(model, providerName);
 
     if (providerName !== "openai-codex") {
-      return fallbackReasoningLevels(providerName);
+      return catalog ?? fallbackReasoningLevels(providerName);
     }
 
     const cached = this.reasoningLevelCache.get(model);
@@ -3184,13 +3850,13 @@ export class DaemonServer {
     }
     try {
       const credential = await new CodexSession().credential();
-      const catalog = await fetchCodexModelCatalog(credential, {
+      const liveCatalog = await fetchCodexModelCatalog(credential, {
         ...(profile?.base_url.trim() ? { baseUrl: profile.base_url.trim() } : {}),
       });
       const bare = model.includes("/") ? model.slice(model.indexOf("/") + 1) : model;
-      const entry = catalog.find((candidate) => candidate.id === bare);
+      const entry = liveCatalog.find((candidate) => candidate.id === bare);
       if (!entry?.reasoningLevels.length) {
-        return fallbackReasoningLevels(providerName);
+        return catalog ?? fallbackReasoningLevels(providerName);
       }
       const resolved = providerReasoningLevels(
         entry.reasoningLevels.map((level) => ({
@@ -3205,8 +3871,8 @@ export class DaemonServer {
       return resolved;
     } catch {
       // A lapsed session or offline host must not make the level list
-      // unusable; the fallback still lets the user pick something valid.
-      return fallbackReasoningLevels(providerName);
+      // unusable; the catalog still describes the model's real ladder.
+      return catalog ?? fallbackReasoningLevels(providerName);
     }
   }
 
@@ -3539,7 +4205,7 @@ export class DaemonServer {
           session.status === "waiting" ||
           session.status === "working",
       )
-      .map(sessionPayload);
+      .map((session) => sessionPayload(session, this.contextLimit(session.model)));
     if (!sessions.length) {
       this.emitSlash(connection, "No native background turns running.");
       return { ok: true, sessions: [] };
@@ -3722,6 +4388,23 @@ export class DaemonServer {
       status: this.browserManager.connectionStatus(),
       pages: this.browserManager.listPages(),
     };
+  }
+
+  /** Redacted per-server MCP status for the wire; empty without a manager. */
+  private mcpStatusRecord(): Record<string, unknown> {
+    const statuses = this.mcpManager?.listStatus() ?? [];
+    return Object.fromEntries(
+      statuses.map((entry) => [
+        entry.name,
+        {
+          connected: entry.connected,
+          tools: entry.tools,
+          resources: entry.resources,
+          prompts: entry.prompts,
+          ...(entry.lastError ? { lastError: entry.lastError } : {}),
+        },
+      ]),
+    );
   }
 
   private async reloadMcp(
@@ -4272,6 +4955,12 @@ export class DaemonServer {
         ...appended,
       ] as DaemonSession["messages"];
       session.metadata.last_compaction = outcome.stamp;
+      // Compaction dropped full file contents out of the model's context, so
+      // its belief about what a file looks like is no longer trustworthy:
+      // retire the read-guard state and force fresh reads before the next
+      // edit. Covers /compact and auto-compact — both funnel through here.
+      fileStateTracker.clearSession(session.id);
+      session.metadata[FILE_READS_METADATA_KEY] = [];
       // A compaction that worked — by hand or automatically — retires the
       // failure evidence, so `/compact` is a way back from the bail-out.
       this.clearAutoCompactFailures(sessionKey);
@@ -4638,9 +5327,11 @@ export class DaemonServer {
     this.emitSlash(
       connection,
       [
-        model
+        contextLimit > 0
           ? `Context window: ${contextLimit.toLocaleString()} tokens for \`${model}\``
-          : "Context window: unknown (model not configured)",
+          : model
+            ? `Context window: unknown (provider reported no capacity for \`${model}\`)`
+            : "Context window: unknown (model not configured)",
         promptBudget && promptBudget < contextLimit
           ? `Prompt budget: ${promptBudget.toLocaleString()} (window minus the reply this model may emit)`
           : "",
@@ -4653,8 +5344,8 @@ export class DaemonServer {
       ok: true,
       context_limit: contextLimit,
       prompt_budget: promptBudget,
+      ...(promptBudget > 0 ? { remaining_tokens: remaining } : {}),
       used_tokens: used,
-      remaining_tokens: remaining,
     };
   }
 
@@ -4820,6 +5511,129 @@ export class DaemonServer {
     }
   }
 
+  /**
+   * Undo recorded FileEditTool changes — one path, or every recorded path.
+   * The daemon's own execution record is the only source of truth: edits
+   * are reverse-applied strictly newest-first and only while each inserted
+   * span is still present verbatim. Any drift refuses the undo instead of
+   * corrupting the file.
+   */
+  private async undoChanges(
+    session: DaemonSession | undefined,
+    requestedPath: string,
+  ): Promise<JsonRpcPayload> {
+    if (!session) return { ok: false, error: "no active session" };
+    type Edit = { readonly path: string; readonly oldString: string; readonly newString: string };
+    const edits: Edit[] = [];
+    for (const exec of session.toolExecutions) {
+      if (!exec || typeof exec !== "object") continue;
+      const record = exec as Record<string, unknown>;
+      if (record.name !== "FileEditTool") continue;
+      const args = record.inputs ?? record.arguments;
+      if (!args || typeof args !== "object" || Array.isArray(args)) continue;
+      const path = stringValue((args as Record<string, unknown>).file_path);
+      if (!path || (requestedPath && path !== requestedPath)) continue;
+      edits.push({
+        path,
+        oldString: stringValue((args as Record<string, unknown>).old_string),
+        newString: stringValue((args as Record<string, unknown>).new_string),
+      });
+    }
+    if (!edits.length) {
+      return {
+        ok: false,
+        error: `no reversible recorded edits${requestedPath ? ` for ${requestedPath}` : ""}`,
+      };
+    }
+    const byPath = new Map<string, Edit[]>();
+    for (const edit of edits) {
+      const list = byPath.get(edit.path) ?? [];
+      list.push(edit);
+      byPath.set(edit.path, list);
+    }
+    const results: Array<{
+      readonly path: string;
+      readonly ok: boolean;
+      readonly reverted?: number;
+      readonly error?: string;
+    }> = [];
+    for (const [path, pathEdits] of byPath) {
+      try {
+        const file = Bun.file(path);
+        if (!(await file.exists())) {
+          results.push({ path, ok: false, error: "file is gone — nothing to undo" });
+          continue;
+        }
+        let content = await file.text();
+        let reverted = 0;
+        let refused = false;
+        for (let index = pathEdits.length - 1; index >= 0; index--) {
+          const edit = pathEdits[index];
+          if (!edit) break;
+          const { oldString, newString } = edit;
+          // A deleted span (empty new_string) cannot be re-located safely.
+          if (!newString || !content.includes(newString)) {
+            results.push({
+              path,
+              ok: false,
+              error: `file changed since edit ${pathEdits.length - index} of ${pathEdits.length} — refusing to undo blindly`,
+            });
+            refused = true;
+            break;
+          }
+          content = content.replace(newString, oldString);
+          reverted += 1;
+        }
+        if (refused) continue;
+        await Bun.write(path, content);
+        results.push({ path, ok: true, reverted });
+      } catch (error) {
+        results.push({ path, ok: false, error: errorMessage(error) });
+      }
+    }
+    return {
+      ok: results.every((result) => result.ok),
+      results,
+      reverted: results.reduce((sum, result) => sum + (result.reverted ?? 0), 0),
+    };
+  }
+
+  /**
+   * Create a git worktree beside the project (`<project>-<name>` on a branch
+   * named after it) so a task can start in an isolated checkout. Refuses
+   * with a typed error outside a repo or on an existing path — never
+   * guesses a fallback directory.
+   */
+  private async createWorktree(
+    session: DaemonSession | undefined,
+    rawName: string,
+  ): Promise<JsonRpcPayload> {
+    if (!session) return { ok: false, error: "no active session" };
+    const name = rawName.trim().replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48);
+    if (!name) return { ok: false, error: "worktree name is required" };
+    const cwd = session.cwd;
+    const inside = Bun.spawnSync(["git", "-C", cwd, "rev-parse", "--is-inside-work-tree"], {
+      stdin: "ignore", stdout: "pipe", stderr: "pipe",
+    });
+    if (inside.exitCode !== 0 || new TextDecoder().decode(inside.stdout).trim() !== "true") {
+      return { ok: false, error: `not a git work tree: ${cwd}` };
+    }
+    const path = join(dirname(cwd), `${basename(cwd)}-${name}`);
+    if (existsSync(path)) return { ok: false, error: `worktree path already exists: ${path}` };
+    const run = (args: string[]): { code: number; stderr: string } => {
+      const proc = Bun.spawnSync(["git", "-C", cwd, ...args], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+      return { code: proc.exitCode ?? 1, stderr: new TextDecoder().decode(proc.stderr).trim() };
+    };
+    // Fresh branch when the name is free; attach when it already exists.
+    let created = run(["worktree", "add", path, "-b", name]);
+    if (created.code !== 0 && !created.stderr.includes("already exists")) {
+      return { ok: false, error: created.stderr || "git worktree add failed" };
+    }
+    if (created.code !== 0) created = run(["worktree", "add", path, name]);
+    if (created.code !== 0) return { ok: false, error: created.stderr || "git worktree add failed" };
+    return { ok: true, path, branch: name };
+  }
+
   private async setSessionTitle(
     connection: DaemonTransportConnection,
     session: DaemonSession | undefined,
@@ -4836,6 +5650,10 @@ export class DaemonServer {
       session.metadata.title = title;
       delete session.metadata.title_derived;
       await this.runtime.flushSessions();
+      // Same broadcast the auto-titler emits: every surface showing this
+      // session (the renamer's own header, other clients' sidebars) learns
+      // the new title instead of waiting for the next full refresh.
+      this.broadcast("session_title", { session_id: session.id, title });
     }
     const current = stringValue(session.metadata.title);
     if (notify) {
@@ -4941,7 +5759,7 @@ export class DaemonServer {
     this.indexSessionForSearch(target.id);
     return {
       ok: true,
-      session: sessionPayload(session, this.contextLimit(session.model)),
+      session: sessionPayload(session, this.contextLimit(session.model), this.mcpStatusRecord()),
     };
   }
 
@@ -5022,7 +5840,7 @@ export class DaemonServer {
       ok: true,
       session: persisted
         ? savedSessionPayload(persisted)
-        : sessionPayload(branch, this.contextLimit(branch.model)),
+        : sessionPayload(branch, this.contextLimit(branch.model), this.mcpStatusRecord()),
     };
   }
 
@@ -5783,22 +6601,91 @@ export class DaemonServer {
     return { ok };
   }
 
+  private updateProviderModelOverride(
+    connection: DaemonTransportConnection,
+    params: JsonRpcPayload,
+  ): JsonRpcPayload {
+    const profileName = optionalString(params.profile_name) ?? optionalString(params.name);
+    const model = optionalString(params.model);
+    if (!profileName || !model) {
+      return { ok: false, error: "profile_name and model are required" };
+    }
+    const profile = this.profileStore.get(profileName);
+    if (!profile) return { ok: false, error: `No provider profile named ${profileName}` };
+    const cached = Object.prototype.hasOwnProperty.call(profile.model_capabilities ?? {}, model);
+    if (!cached && profile.model.trim() !== model) {
+      return { ok: false, error: `No cached model named ${model} for profile ${profileName}` };
+    }
+    const hasContext = Object.prototype.hasOwnProperty.call(params, "context_limit");
+    const hasOutput = Object.prototype.hasOwnProperty.call(params, "max_output_tokens");
+    if (!hasContext && !hasOutput) {
+      return { ok: false, error: "context_limit or max_output_tokens is required" };
+    }
+    const contextLimit = nullablePositiveSafeInteger(params.context_limit);
+    const maxOutputTokens = nullablePositiveSafeInteger(params.max_output_tokens);
+    if (hasContext && contextLimit === undefined) {
+      return { ok: false, error: "context_limit must be a positive safe integer or null" };
+    }
+    if (hasOutput && maxOutputTokens === undefined) {
+      return { ok: false, error: "max_output_tokens must be a positive safe integer or null" };
+    }
+    const updated = this.profileStore.updateModelCapabilities(profileName, model, {
+      ...(hasContext ? { contextLimit: contextLimit as number | null } : {}),
+      ...(hasOutput ? { maxOutputTokens: maxOutputTokens as number | null } : {}),
+    });
+    if (!updated) return { ok: false, error: "model capability update was rejected" };
+    if (this.activeRuntimeProfileName() === profileName) {
+      this.runtime.reload({});
+      const session = this.runtime.sessionStatus(connection.activeSessionKey);
+      if (session) this.emitStatus(connection, session);
+    }
+    return {
+      ok: true,
+      model: modelCapabilityPayload(updated, model),
+    };
+  }
+
   private async saveProvider(
     connection: DaemonTransportConnection,
     params: JsonRpcPayload,
   ): Promise<JsonRpcPayload> {
     this.cancelProviderFlow(connection);
     const name = optionalString(params.name);
-    const baseUrl = optionalString(params.base_url);
+    const provider = optionalString(params.provider)
+      ?.trim()
+      .toLowerCase()
+      .replaceAll("_", "-");
+    // A known provider type carries its default endpoint in the registry —
+    // "Provider default" in the form means exactly this, not an empty string.
+    const known =
+      provider !== undefined &&
+      Object.prototype.hasOwnProperty.call(PROVIDERS, provider)
+        ? PROVIDERS[provider as keyof typeof PROVIDERS]
+        : undefined;
+    const baseUrl = optionalString(params.base_url) ?? known?.baseUrl;
     const model = optionalString(params.model);
     if (!name || !baseUrl || !model) {
-      return { ok: false, error: "name, base_url, and model are required" };
+      return {
+        ok: false,
+        error: known
+          ? "name and model are required"
+          : "name, base_url, and model are required",
+      };
     }
-    const provider = optionalString(params.provider);
+    // An absent (or blank) api_key keeps the stored one — an edit that only
+    // changes the model must not wipe the credential it never re-typed.
+    // (The desktop client omits the field unless the user typed a
+    // replacement; `stringValue` maps absent to "", which ?? cannot catch.)
+    const existing = this.profileStore.list().find(p => p.name === name);
+    const typedKey =
+      typeof params.api_key === "string" && params.api_key.trim()
+        ? params.api_key
+        : undefined;
+    const apiKey = typedKey ?? existing?.api_key ?? "";
     const profile = this.profileStore.save({
       name,
       baseUrl,
-      apiKey: stringValue(params.api_key),
+      apiKey,
       model,
       ...(provider === undefined ? {} : { provider }),
     });
@@ -5882,7 +6769,9 @@ export class DaemonServer {
     const requestedKey = optionalString(params.session_key);
     const key = resumeId || requestedKey || `tui:${newConnectionKey()}`;
     const cwd = resolveProjectDirectory(
-      optionalString(params.project_dir) || process.cwd(),
+      optionalString(params.project_dir) ||
+        this.projectDirectory ||
+        process.cwd(),
     );
     connection.activeSessionKey = key;
     const runtimeOverrides = Object.fromEntries(
@@ -5920,21 +6809,36 @@ export class DaemonServer {
       resume: Boolean(resumeId),
       ...(modelOverride ? { model: modelOverride } : {}),
     };
-    const session = await this.runtime.openSession(
-      key,
-      optionalString(params.agent_id),
-      openOptions,
-    );
+    let requestedAgent = optionalString(params.agent_id)
+      ?? this.runtime.sessionStatus(key)?.agentId
+      ?? (resumeId ? undefined : this.agentPresetRoster.defaultId);
+    if (requestedAgent) {
+      let preset: AgentPresetEntry;
+      try {
+        preset = this.agentPresetRoster.resolve(requestedAgent, cwd);
+      } catch (error) {
+        return { ok: false, code: "agent-preset-not-found", error: errorMessage(error) };
+      }
+      if (preset.broken) return { ok: false, code: "agent-preset-broken", error: preset.broken };
+      requestedAgent = preset.id;
+    }
+    const session = await this.runtime.openSession(key, requestedAgent, openOptions);
     await this.refreshSkills(session);
     const skills = this.skillRegistry
       .all()
       .filter((skill) => skillMatchesPlatform(skill));
     const model = session.model || stringValue(this.runtime.status().model);
     const contextLimit = this.contextLimit(model);
+    // One cheap git call per initialize: the shell shows the branch the work
+    // is happening on. Null outside a repo — never fabricated.
+    const branch = await gitBranch(cwd);
     const initPayload: JsonRpcPayload = {
       session_id: session.id,
       model,
       cwd: session.cwd,
+      branch: branch ?? "",
+      // JSON-RPC v35 keeps this numeric field; zero means provider metadata is
+      // unavailable and clients must render an unknown capacity.
       context_limit: contextLimit,
       agent_name: session.agentId,
       mode: session.interactionMode,
@@ -5956,7 +6860,12 @@ export class DaemonServer {
         ]),
       ),
       head_hash: "",
-      version: "0.3.0",
+      // `version` is retained for existing clients; daemon_version makes the
+      // handshake role explicit for desktop/app compatibility checks.
+      version: XERXES_VERSION,
+      daemon_version: XERXES_VERSION,
+      daemon_protocol: DAEMON_PROTOCOL_VERSION,
+      daemon_build_id: this.daemonBuildId(),
     };
     this.emit(connection, "init_done", initPayload);
     this.emit(
@@ -5969,6 +6878,7 @@ export class DaemonServer {
         this.channelStatusData(),
         stringValue(this.runtime.status().reasoning_effort) || "off",
         runtimePermissionMode(this.runtime.status().permission_mode),
+        this.mcpStatusRecord(),
       ),
     );
     if (session.messages.length) {
@@ -5978,11 +6888,14 @@ export class DaemonServer {
     if (resumeId && session.messages.length) {
       await this.reportResumeRepair(connection, session.id);
     }
+    // Populate the live capability cache after the initial frame. Until the
+    // provider answers, every context surface remains explicitly unknown.
+    this.refreshActiveModelCapabilities(connection);
     return {
       ...this.runtimeStatusWithChannels(),
       ...initPayload,
       ok: true,
-      session: sessionPayload(session, contextLimit),
+      session: sessionPayload(session, contextLimit, this.mcpStatusRecord()),
       daemon_protocol: DAEMON_PROTOCOL_VERSION,
       daemon_build_id: this.daemonBuildId(),
     };
@@ -6190,10 +7103,15 @@ export class DaemonServer {
       const session = this.runtime.sessionStatus(connection.activeSessionKey);
       const model = optionalString(payload.model) || session?.model || "";
       if (model) {
+        const normalized = { ...payload };
+        delete normalized.max_context;
+        const contextLimit = this.contextLimit(model);
         connection.send(
           daemonEvent(type, {
-            ...payload,
-            max_context: this.contextLimit(model),
+            ...normalized,
+            // Zero is the explicit unknown sentinel and clears any previous
+            // profile/model window held by a connected client.
+            max_context: contextLimit,
           }),
         );
         return;
@@ -6225,6 +7143,62 @@ export class DaemonServer {
       if (session) session.cancelRequested = true;
     }
     return true;
+  }
+
+  /**
+   * Ask the goal driver whether this session has earned another round.
+   *
+   * Returns undefined for every refusal — no goal, paused, blocked, complete,
+   * disarmed, out of capacity, or a human message already waiting — because
+   * from the caller's side they all mean the same thing: stop here and hand the
+   * session back to the person.
+   */
+  /** Record a durable blocker on the live goal, if there is still one to block. */
+  private blockGoalForFailure(
+    sessionKey: string,
+    code: string,
+    message: string,
+  ): void {
+    const session = this.runtime.sessionStatus(sessionKey);
+    if (!session) return;
+    const goal = getGoal(session.metadata, session.id);
+    if (!goal || goal.phase !== "active") return;
+    try {
+      blockGoal(
+        session.metadata,
+        session.id,
+        { id: goal.id, revision: goal.revision },
+        { code, message },
+        Date.now(),
+      );
+    } catch (error) {
+      // Losing the blocker record must not mask the failure that caused it.
+      console.error(`Could not record goal blocker: ${errorMessage(error)}`);
+    }
+  }
+
+  /** Pause a goal whose round the user interrupted, leaving it resumable. */
+  private pauseGoalAfterInterrupt(sessionKey: string): void {
+    const session = this.runtime.sessionStatus(sessionKey);
+    if (!session) return;
+    const goal = getGoal(session.metadata, session.id);
+    if (!goal || goal.phase !== "active") return;
+    try {
+      pauseGoal(session.metadata, session.id, { id: goal.id, revision: goal.revision }, Date.now());
+    } catch (error) {
+      console.error(`Could not pause interrupted goal: ${errorMessage(error)}`);
+    }
+  }
+
+  private admitGoalRound(
+    sessionKey: string,
+  ): AdmittedGoalRound | undefined {
+    const session = this.runtime.sessionStatus(sessionKey);
+    if (!session || session.cancelRequested) return undefined;
+    const outcome = nextGoalRound(session.metadata, session.id, {
+      humanWorkPending: this.runtime.hasPendingSteer?.(sessionKey) === true,
+    });
+    return "admitted" in outcome ? outcome.admitted : undefined;
   }
 
   private submitTrackedTurn(
@@ -6271,15 +7245,81 @@ export class DaemonServer {
         });
         return;
       }
-      return this.runtime.submitTurn(
-        sessionKey,
-        text,
-        (event) => {
-          this.rememberTurnInteraction(event, interactionIds);
-          emit(event);
-        },
-        options,
-      );
+      // Watched per round: a round that produced nothing must not be allowed to
+      // spend the whole budget in a hot loop (see `unproductiveRound` below).
+      const round_ = { productive: false, error: undefined as string | undefined };
+      const forward = (event: DaemonEvent): void => {
+        if (PRODUCTIVE_TURN_EVENTS.has(event.type)) round_.productive = true;
+        if (event.type === "notification" && event.payload?.level === "error") {
+          round_.error = String(event.payload.message ?? "");
+        }
+        this.rememberTurnInteraction(event, interactionIds);
+        emit(event);
+      };
+      await this.runtime.submitTurn(sessionKey, text, forward, options);
+      // Goal continuation. Each round is a real turn — its own turn_begin and
+      // turn_end, its own auto-compaction check, its own place in the
+      // transcript — rather than another lap inside one physical turn. That is
+      // what lets a person read the run, steer between rounds, and lose only
+      // the current round to a crash.
+      for (;;) {
+        const round = this.admitGoalRound(sessionKey);
+        if (!round) break;
+        // Rounds ride the same edges a human turn does: a session named after
+        // its first exchange should not wait for the whole objective to end,
+        // and search must see each round as it lands.
+        this.indexSessionForSearch(sessionKey);
+        this.maybeGenerateTitle(sessionKey);
+        await this.autoCompactIfDue(sessionKey, owner);
+        if (owner && this.turnOwners.get(sessionKey) !== owner) return;
+        round_.productive = false;
+        round_.error = undefined;
+        try {
+          await this.runtime.submitTurn(sessionKey, round.prompt, forward, {
+            displayText: round.displayText,
+            goalRound: round.source.round,
+          });
+        } catch (error) {
+          // The round was already reserved in the durable log, so failing to
+          // run it must be recorded rather than retried: a silent retry loop
+          // against a persistently failing submit is exactly the runaway this
+          // subsystem exists to bound.
+          this.blockGoalForFailure(
+            sessionKey,
+            "round-failed",
+            `Goal round ${round.source.round} could not run: ${errorMessage(error)}`,
+          );
+          throw error;
+        }
+        // An interrupt during an automatic round is the person taking the
+        // session back. Pausing is durable and visible — /goal reports paused
+        // and offers resume — where merely dropping authority would leave the
+        // goal reading "active" while nothing advanced it.
+        if (this.runtime.sessionStatus(sessionKey)?.cancelRequested) {
+          this.pauseGoalAfterInterrupt(sessionKey);
+          break;
+        }
+        // A round that failed, or produced no work at all, did not advance the
+        // objective — and the next round fails the same way. Left alone this is
+        // a hot loop: against an out-of-quota provider a live run burned all 24
+        // rounds in nine seconds and wrote nothing but its own prompts into the
+        // transcript. Stop on the first one and record why.
+        //
+        // The error notification is the decisive signal, not the absence of
+        // output. That same live run showed why: the runtime renders a failure
+        // as assistant text, so "did any text arrive" reported a productive
+        // round for every single 403.
+        if (round_.error !== undefined || !round_.productive) {
+          this.blockGoalForFailure(
+            sessionKey,
+            round_.error === undefined ? "round-produced-nothing" : "round-failed",
+            round_.error === undefined
+              ? `Goal round ${round.source.round} produced no work.`
+              : `Goal round ${round.source.round} failed: ${round_.error}`,
+          );
+          break;
+        }
+      }
     });
     const tracked = turnPromise.catch(() => undefined);
     this.inFlightTurns.add(tracked);
@@ -6404,6 +7444,20 @@ export class DaemonServer {
     // its client and refills simply re-earns the count.
     this.clearAutoCompactFailures(connection.activeSessionKey);
     this.dropConnectionRequests(connection);
+    // Exchange-less sessions no client is bound to anymore are empty shells:
+    // nothing to resume, nothing to persist (the store skips them), nothing to
+    // show. Reap them so dead app launches do not litter active_list — and
+    // the GUI sidebar — with 0-turn ghosts. Sessions with history, sessions
+    // with a live turn, and sessions still pinned by a connected client all
+    // survive. (The disconnecting connection is already out of this.connections.)
+    const attached = new Set(
+      [...this.connections].map((other) => other.activeSessionKey),
+    );
+    for (const session of this.runtime.listSessions()) {
+      if (sessionHasHistory(session) || session.activeTurnId) continue;
+      if (attached.has(session.sessionKey)) continue;
+      this.runtime.evictSession(session.sessionKey);
+    }
   }
 }
 
@@ -6782,9 +7836,51 @@ function projectTranscriptForPayload(
   return { imagesOmitted, messages: projected };
 }
 
+/**
+ * The wire twin of a stored tool execution, for transcript replay: the call's
+ * identity and timing without the result body. Clients rebuilding a reopened
+ * transcript need verb/args/duration; full results would bloat the frame the
+ * same way inline images did before `projectTranscriptForPayload`.
+ */
+function replayExecutionPayload(exec: unknown): unknown {
+  if (!exec || typeof exec !== "object" || Array.isArray(exec)) return exec;
+  const { result: _result, permitted: _permitted, ...rest } =
+    exec as Record<string, unknown>;
+  void _result;
+  void _permitted;
+  return rest;
+}
+
+/**
+ * Current git branch of `dir` — null outside a work tree, on a detached
+ * HEAD, or whenever git fails/times out. Never fabricates a name.
+ */
+export async function gitBranch(dir: string): Promise<string | null> {
+  try {
+    const proc = Bun.spawn(
+      ["git", "-C", dir, "rev-parse", "--abbrev-ref", "HEAD"],
+      { stdout: "pipe", stderr: "pipe", stdin: "ignore" },
+    );
+    const timer = setTimeout(() => proc.kill(), 2000);
+    try {
+      const out = await new Response(proc.stdout).text();
+      await proc.exited;
+      const branch = out.trim();
+      return proc.exitCode === 0 && branch && branch !== "HEAD"
+        ? branch
+        : null;
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch {
+    return null;
+  }
+}
+
 function sessionPayload(
   session: DaemonSession,
-  contextLimit = configuredContextLimit(session.model),
+  contextLimit: number,
+  mcpStatus: Record<string, unknown> = {},
 ): JsonRpcPayload {
   const model = session.model;
   const contextTokens = sessionContextTokens(session, model);
@@ -6822,6 +7918,11 @@ function sessionPayload(
     messages: session.messages.length,
     message_count: session.messages.length,
     transcript: transcript.messages,
+    // Additive replay fields: the stored twins of the streamed tool calls and
+    // per-turn reasoning, so a reopened transcript renders the same
+    // think → tool rows the live stream did instead of dropping the activity.
+    tool_executions: session.toolExecutions.slice(-200).map(replayExecutionPayload),
+    thinking_content: session.thinkingContent.slice(-32),
     ...(transcript.imagesOmitted > 0
       ? { transcript_images_omitted: transcript.imagesOmitted }
       : {}),
@@ -6850,6 +7951,20 @@ function sessionPayload(
     input_tokens: session.totalInputTokens,
     output_tokens: session.totalOutputTokens,
     total_tokens: session.totalInputTokens + session.totalOutputTokens,
+    ...sessionRuntimeTelemetryPayload(session.extra.runtime_telemetry),
+    // Same estimate the /cost slash reports, now on the session wire: an
+    // unknown model prices at 0, and a session without a model omits the
+    // field rather than implying a free run.
+    ...(session.model
+      ? {
+          cost_usd: calcCost(
+            session.model,
+            session.totalInputTokens,
+            session.totalOutputTokens,
+          ),
+        }
+      : {}),
+    mcp_status: mcpStatus,
     context_tokens: contextTokens,
     context_limit: contextLimit,
     max_context: contextLimit,
@@ -6865,6 +7980,34 @@ function sessionPayload(
     last_active: session.lastActive / 1000,
     status: session.status,
   };
+}
+
+function sessionRuntimeTelemetryPayload(value: unknown): JsonRpcPayload {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  const record = value as Record<string, unknown>
+  const metric = (key: string): number => {
+    const candidate = record[key]
+    return typeof candidate === 'number' && Number.isFinite(candidate) && candidate >= 0 ? candidate : 0
+  }
+  const cacheHitRate = record.cacheTelemetryKnown === true ? Math.min(1, metric('cacheHitRate')) : null
+  const llmDurationMs = metric('llmDurationMs')
+  const llmSteps = Math.trunc(metric('llmSteps'))
+  const toolDurationMs = metric('toolDurationMs')
+  const toolSteps = Math.trunc(metric('toolSteps'))
+  const tokensPerSecond = metric('tokensPerSecond')
+  const ttftSamples = Math.trunc(metric('ttftSamples'))
+  const ttftTotalMs = metric('ttftTotalMs')
+  return {
+    ...(cacheHitRate === null ? {} : { cache_hit_rate: cacheHitRate }),
+    llm_duration_ms: llmDurationMs,
+    llm_steps: llmSteps,
+    tool_duration_ms: toolDurationMs,
+    tool_steps: toolSteps,
+    tokens_per_second: tokensPerSecond,
+    ttft_samples: ttftSamples,
+    ttft_total_ms: ttftTotalMs,
+    ...(ttftSamples > 0 ? { ttft_avg_ms: ttftTotalMs / ttftSamples } : {}),
+  }
 }
 
 function sessionHierarchyPayload(
@@ -6947,7 +8090,7 @@ function subagentSnapshotPanelPayloads(
 
 function sessionUsagePayload(
   session: DaemonSession,
-  contextMax = configuredContextLimit(session.model),
+  contextMax: number,
 ): JsonRpcPayload {
   const model = session.model;
   const contextUsed = sessionContextTokens(session, model);
@@ -6960,7 +8103,7 @@ function sessionUsagePayload(
     total,
     context_used: contextUsed,
     context_max: contextMax,
-    context_percent: contextMax ? (contextUsed / contextMax) * 100 : 0,
+    context_percent: contextMax > 0 ? (contextUsed / contextMax) * 100 : 0,
     ...(calls === undefined ? {} : { calls }),
     calls_complete: calls !== undefined,
     ...(calls === undefined && session.totalApiCalls !== undefined
@@ -6995,6 +8138,8 @@ function savedSessionPayload(session: SavedDaemonSession): JsonRpcPayload {
     resumable: session.resumable,
     title: session.title,
     agent_id: session.agentId,
+    // The workspace grouping key: which project folder the chat ran in.
+    cwd: session.cwd,
     ...(session.model ? { model: session.model } : {}),
     ...(session.parentSessionId
       ? { parent_session_id: session.parentSessionId }
@@ -7078,7 +8223,7 @@ function initPayload(
   model: string,
   reasoningEffort = "off",
   permissionMode = DEFAULT_PERMISSION_MODE,
-  contextLimit = configuredContextLimit(model),
+  contextLimit = 0,
 ): JsonRpcPayload {
   return {
     session_id: session.id,
@@ -7105,6 +8250,7 @@ function statusUpdatePayload(
   channelData: ChannelStatusData,
   reasoningEffort = "off",
   permissionMode = DEFAULT_PERMISSION_MODE,
+  mcpStatus: Record<string, unknown> = {},
 ): JsonRpcPayload {
   const calls = exactSessionApiCalls(session);
   return {
@@ -7113,6 +8259,15 @@ function statusUpdatePayload(
     max_context: contextLimit,
     input_tokens: session.totalInputTokens,
     output_tokens: session.totalOutputTokens,
+    ...(model
+      ? {
+          cost_usd: calcCost(
+            model,
+            session.totalInputTokens,
+            session.totalOutputTokens,
+          ),
+        }
+      : {}),
     ...(calls === undefined ? {} : { calls }),
     calls_complete: calls !== undefined,
     ...(calls === undefined && session.totalApiCalls !== undefined
@@ -7124,7 +8279,7 @@ function statusUpdatePayload(
     mode: session.interactionMode,
     reasoning_effort: reasoningEffort,
     permission_mode: permissionMode,
-    mcp_status: {},
+    mcp_status: mcpStatus,
     channels: channelData.channels,
     channels_available: channelData.available,
     channels_configured: channelData.configured,
@@ -7142,23 +8297,26 @@ function statusUpdatePayload(
  * every request without ever appearing in the transcript, so they are priced
  * too whenever the turn runner has cached them on the session.
  */
-function sessionContextTokens(session: DaemonSession, model: string): number {
-  const systemPrompt =
-    session.requestScaffold?.systemPrompt ?? session.systemPromptAddendum;
-  const toolSchemas = session.requestScaffold?.toolSchemas;
-  return estimateContextTokens(session.messages, {
-    model,
-    ...(systemPrompt ? { systemPrompt } : {}),
-    ...(toolSchemas?.length ? { toolSchemas } : {}),
-  });
+function sessionContextScaffold(session: DaemonSession): {
+  systemPrompt: string | undefined;
+  toolSchemas: readonly Record<string, unknown>[] | undefined;
+} {
+  return {
+    systemPrompt:
+      session.requestScaffold?.systemPrompt ?? session.systemPromptAddendum,
+    toolSchemas: session.requestScaffold?.toolSchemas,
+  };
 }
 
-function configuredContextLimit(
-  model: string,
-  overrides: Readonly<Record<string, unknown>> = {},
-): number {
-  const configured = model.trim();
-  return configured ? getContextLimit(configured, overrides) : 0;
+function sessionContextTokens(session: DaemonSession, model: string): number {
+  const scaffold = sessionContextScaffold(session);
+  return estimateContextTokens(session.messages, {
+    model,
+    ...(scaffold.systemPrompt ? { systemPrompt: scaffold.systemPrompt } : {}),
+    ...(scaffold.toolSchemas?.length
+      ? { toolSchemas: scaffold.toolSchemas }
+      : {}),
+  });
 }
 
 function channelStatusPayload(status: ManagedChannelStatus): JsonRpcPayload {
@@ -7284,6 +8442,13 @@ function newConnectionKey(): string {
 
 function optionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function nullablePositiveSafeInteger(value: unknown): number | null | undefined {
+  if (value === null) return null;
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
+    ? value
+    : undefined;
 }
 
 /** A positive whole count from the wire, or undefined so a default applies. */
@@ -7577,6 +8742,10 @@ function parseNativeSamplingValue(
       (effort) => effort.toLowerCase() === raw.trim().toLowerCase(),
     );
   }
+  if (key === "service_tier") {
+    const tier = raw.trim().toLowerCase();
+    return ["auto", "default", "flex", "priority"].includes(tier) ? tier : undefined;
+  }
   const value = Number(raw);
   if (!Number.isFinite(value)) return undefined;
   if (key === "temperature") {
@@ -7610,6 +8779,9 @@ function invalidSamplingMessage(
     return reasoningEfforts.length
       ? `\`reasoning_effort\` must be one of: ${reasoningEfforts.join(", ")}.`
       : "`reasoning_effort` is not available for this model.";
+  }
+  if (key === "service_tier") {
+    return "`service_tier` must be one of: auto, default, flex, priority.";
   }
   return `\`${key}\` must be a valid finite numeric value.`;
 }
@@ -7673,6 +8845,77 @@ function profilePayload(
     provider: profile.provider,
     sampling: { ...profile.sampling },
     active: profile.active,
+  };
+}
+
+/**
+ * The registry's adapter catalog for the provider add/edit form: type name,
+ * transport, default endpoint, and the environment variable a blank API key
+ * falls back to. Metadata only — `defaultApiKey` and stored keys are never
+ * part of this payload.
+ */
+function providerTypePayloads(): JsonRpcPayload[] {
+  return Object.values(PROVIDERS).map(config => ({
+    name: config.name,
+    transport: config.transport,
+    base_url: config.baseUrl ?? null,
+    api_key_env: config.apiKeyEnv ?? null,
+  }));
+}
+
+function modelCapabilityPayload(profile: ProviderProfile, model: string): JsonRpcPayload {
+  const resolved = resolvedProfileModelCapabilities(profile, model);
+  return {
+    id: model,
+    ...(resolved.contextLimit === undefined ? {} : { context_limit: resolved.contextLimit }),
+    ...(resolved.contextSource === "unknown" ? {} : { context_source: resolved.contextSource }),
+    ...(resolved.maxOutputTokens === undefined ? {} : { max_output_tokens: resolved.maxOutputTokens }),
+    ...(resolved.outputSource === "unknown" ? {} : { output_source: resolved.outputSource }),
+    ...(resolved.contextSource === "override" || resolved.outputSource === "override"
+      ? { overridden: true }
+      : {}),
+  };
+}
+
+function agentPresetPayload(preset: AgentPresetEntry): JsonRpcPayload {
+  return {
+    id: preset.id,
+    name: preset.name,
+    description: preset.description,
+    trust: preset.trust,
+    is_default: preset.isDefault,
+    manageable: preset.manageable,
+    ...(preset.broken ? { broken: preset.broken } : {}),
+  };
+}
+
+function forgePackagePayload(
+  pkg: DeclarativeForgePackage,
+  includeTemplate = false,
+): JsonRpcPayload {
+  return {
+    name: pkg.name,
+    version: pkg.version,
+    description: pkg.description,
+    parameters: pkg.parameters.map(parameter => ({
+      name: parameter.name,
+      description: parameter.description,
+      required: parameter.required,
+      ...(parameter.defaultValue === undefined ? {} : { default: parameter.defaultValue }),
+    })),
+    ...(includeTemplate ? { template: pkg.template } : {}),
+    created_at: pkg.createdAt,
+  };
+}
+
+function creatorTracePayload(row: CreatorTraceRow): JsonRpcPayload {
+  return {
+    action: row.action,
+    name: row.name,
+    version: row.version,
+    status: row.status,
+    detail: row.detail,
+    at: row.at,
   };
 }
 

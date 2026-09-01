@@ -1,6 +1,14 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { parseStreamingJson } from '@earendil-works/pi-ai'
+
+import {
+  ANTHROPIC_OAUTH_IDENTITY_PROMPT,
+  anthropicOAuthHeaders,
+  isAnthropicOAuthToken,
+  toClaudeCodeToolName,
+} from '../auth/anthropicOAuth.js'
 import { ConfigurationError, ProviderError } from '../core/errors.js'
 import {
   cacheableSystemPrompt,
@@ -15,6 +23,12 @@ import type { JsonObject, ToolCall, ToolChoice, ToolDefinition } from '../types/
 import { parseToolArguments } from '../types/toolCalls.js'
 import type { CompletionRequest, FetchImplementation, LlmClient, LlmCompletion, LlmDelta, TokenUsage } from './client.js'
 import { internalSseData } from './client.js'
+import {
+  anthropicSupportsToolReferences,
+  splitDeferredTools,
+  type DeferredToolSplit,
+} from './deferredTools.js'
+import { piCatalogModelCapabilities } from './piModelCatalog.js'
 import { bareModel, getApiKey } from './providerRegistry.js'
 
 export interface AnthropicClientOptions {
@@ -24,6 +38,21 @@ export interface AnthropicClientOptions {
   /** Add Anthropic's ephemeral cache breakpoints to stable system/tool prefixes. */
   readonly promptCaching?: boolean
   readonly version?: string
+  /**
+   * The Xerxes provider this client serves ('anthropic', 'kimi-code',
+   * 'minimax', …). Catalog lookups (thinking maps, tool-reference support)
+   * are keyed by it — hardcoding 'anthropic' would miss every
+   * anthropic-protocol satellite provider.
+   */
+  readonly providerName?: string
+  /**
+   * Resolve a subscription OAuth bearer token per request (Claude Pro/Max).
+   * A token carrying `sk-ant-oat` switches the request to the OAuth surface:
+   * `Authorization: Bearer` instead of x-api-key, the Claude Code beta flags
+   * and identity, and Claude Code tool naming. Returning `undefined` keeps
+   * the ordinary API-key request.
+   */
+  readonly resolveOAuthToken?: (signal?: AbortSignal) => Promise<string | undefined>
 }
 
 export interface AnthropicMessage {
@@ -35,8 +64,11 @@ export type AnthropicContent = string | readonly AnthropicContentBlock[]
 
 export type AnthropicContentBlock =
   | { readonly text: string; readonly type: 'text' }
+  | { readonly source: { readonly data: string; readonly media_type: string; readonly type: 'base64' }; readonly type: 'image' }
   | { readonly input: JsonObject; readonly id: string; readonly name: string; readonly type: 'tool_use' }
   | { readonly content: string; readonly is_error?: boolean; readonly tool_use_id: string; readonly type: 'tool_result' }
+  | { readonly content: readonly { readonly tool_name: string; readonly type: 'tool_reference' }[]; readonly is_error?: boolean; readonly tool_use_id: string; readonly type: 'tool_result' }
+  | { readonly data: string; readonly type: 'redacted_thinking' }
   | { readonly signature: string; readonly thinking: string; readonly type: 'thinking' }
 
 export interface AnthropicMessagePayload {
@@ -46,6 +78,18 @@ export interface AnthropicMessagePayload {
 
 /** Options controlling how neutral messages are converted for one Anthropic request. */
 export interface AnthropicConversionOptions {
+  /**
+   * Names of tools still deferred for this request. A tool result that loaded
+   * one of them replays as `tool_reference` blocks with its content displaced
+   * to sibling text blocks, per pi-ai's tool-reference mode.
+   */
+  readonly deferredToolNames?: ReadonlySet<string>
+  /**
+   * Claude Code stealth mode (pi-ai): rewrite tool names to their canonical
+   * Claude Code casing on `tool_use`, `tool_reference`, and tool definitions.
+   * Identity by default; the OAuth subscription surface sets this.
+   */
+  readonly normalizeToolName?: (name: string) => string
   /**
    * Re-emit signed thinking blocks only when the current request enables
    * extended thinking; replaying them otherwise is a provider-side rejection.
@@ -59,8 +103,13 @@ export function messagesToAnthropic(
   options: AnthropicConversionOptions = {},
 ): AnthropicMessagePayload {
   const thinkingEnabled = options.thinkingEnabled ?? false
+  const deferredToolNames = options.deferredToolNames ?? new Set<string>()
+  const normalizeToolName = options.normalizeToolName ?? ((name: string): string => name)
+  // Each deferred schema is introduced once, at the result that loaded it.
+  const loadedToolNames = new Set<string>()
   const converted: AnthropicMessage[] = []
   const systems: string[] = []
+  const unresolvedToolCalls = new Set<string>()
   let index = 0
   while (index < messages.length) {
     const message = messages[index]
@@ -72,21 +121,40 @@ export function messagesToAnthropic(
       index += 1
       continue
     }
+    if (message.role !== 'tool' && unresolvedToolCalls.size) {
+      converted.push({
+        role: 'user',
+        content: [...unresolvedToolCalls].map(toolUseId => ({
+          type: 'tool_result' as const,
+          tool_use_id: toolUseId,
+          content: 'No result provided',
+          is_error: true,
+        })),
+      })
+      unresolvedToolCalls.clear()
+    }
     if (message.role === 'user') {
-      converted.push({ role: 'user', content: anthropicUserContent(message.content) })
+      const content = anthropicUserContent(message.content)
+      if ((typeof content === 'string' && content.trim()) || (Array.isArray(content) && content.length)) {
+        converted.push({ role: 'user', content })
+      }
       index += 1
       continue
     }
     if (message.role === 'assistant') {
       const blocks: AnthropicContentBlock[] = []
-      if (thinkingEnabled && message.thinking && message.thinking_signature) {
+      const redactedThinking = anthropicRedactedThinking(message.thinking_signature)
+      if (thinkingEnabled && redactedThinking) {
+        blocks.push(redactedThinking)
+      } else if (thinkingEnabled && message.thinking && message.thinking_signature) {
         blocks.push({ type: 'thinking', thinking: message.thinking, signature: message.thinking_signature })
       }
       if (messageText(message)) {
         blocks.push({ type: 'text', text: messageText(message) })
       }
       for (const call of message.tool_calls ?? []) {
-        blocks.push({ type: 'tool_use', id: call.id, name: call.function.name, input: call.function.arguments })
+        blocks.push({ type: 'tool_use', id: call.id, name: normalizeToolName(call.function.name), input: call.function.arguments })
+        unresolvedToolCalls.add(call.id)
       }
       // Anthropic rejects an assistant turn with an empty content array, so a
       // message whose only block was a non-replayable thinking trace is
@@ -99,25 +167,73 @@ export function messagesToAnthropic(
     }
 
     const toolResults: AnthropicContentBlock[] = []
+    // Anthropic rejects tool references mixed with ordinary tool-result
+    // content, so reference-bearing results displace their text into sibling
+    // blocks that follow every tool_result block of the same user message.
+    const displacedContent: AnthropicContentBlock[] = []
     while (index < messages.length && messages[index]?.role === 'tool') {
       const toolMessage = messages[index]
       if (toolMessage?.role === 'tool') {
-        toolResults.push({
-          type: 'tool_result',
-          tool_use_id: toolMessage.tool_call_id,
-          content: toolMessage.content,
-          ...(toolMessage.is_error ? { is_error: true } : {}),
-        })
+        const references = (toolMessage.added_tool_names ?? []).filter(
+          name => deferredToolNames.has(normalizeToolName(name)) && !loadedToolNames.has(normalizeToolName(name)),
+        )
+        for (const name of references) loadedToolNames.add(normalizeToolName(name))
+        const content = toolMessage.content || '(no tool output)'
+        toolResults.push(references.length
+          ? {
+            type: 'tool_result',
+            tool_use_id: toolMessage.tool_call_id,
+            content: references.map(name => ({ type: 'tool_reference' as const, tool_name: normalizeToolName(name) })),
+            ...(toolMessage.is_error ? { is_error: true } : {}),
+          }
+          : {
+            type: 'tool_result',
+            tool_use_id: toolMessage.tool_call_id,
+            content,
+            ...(toolMessage.is_error ? { is_error: true } : {}),
+          })
+        if (references.length) displacedContent.push({ type: 'text', text: content })
+        unresolvedToolCalls.delete(toolMessage.tool_call_id)
       }
       index += 1
     }
-    if (toolResults.length) {
-      converted.push({ role: 'user', content: toolResults })
+    for (const toolUseId of unresolvedToolCalls) {
+      toolResults.push({ type: 'tool_result', tool_use_id: toolUseId, content: 'No result provided', is_error: true })
     }
+    unresolvedToolCalls.clear()
+    if (toolResults.length || displacedContent.length) {
+      converted.push({ role: 'user', content: [...toolResults, ...displacedContent] })
+    }
+  }
+  if (unresolvedToolCalls.size) {
+    converted.push({
+      role: 'user',
+      content: [...unresolvedToolCalls].map(toolUseId => ({
+        type: 'tool_result' as const,
+        tool_use_id: toolUseId,
+        content: 'No result provided',
+        is_error: true,
+      })),
+    })
   }
   return {
     messages: converted,
     ...(systems.filter(Boolean).length ? { system: systems.filter(Boolean).join('\n\n') } : {}),
+  }
+}
+
+function anthropicRedactedThinking(signature: string | undefined): AnthropicContentBlock | undefined {
+  if (!signature) return undefined
+  try {
+    const parsed: unknown = JSON.parse(signature)
+    const record = typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {}
+    return record.type === 'redacted_thinking' && typeof record.data === 'string'
+      ? { type: 'redacted_thinking', data: record.data }
+      : undefined
+  } catch {
+    return undefined
   }
 }
 
@@ -128,6 +244,10 @@ export class AnthropicMessagesClient implements LlmClient {
   private readonly fetchImplementation: FetchImplementation
   private readonly promptCaching: boolean
   private readonly version: string
+  private readonly providerName: string
+  private readonly resolveOAuthToken:
+    | ((signal?: AbortSignal) => Promise<string | undefined>)
+    | undefined
 
   constructor(options: AnthropicClientOptions = {}) {
     this.apiKey = options.apiKey ?? getApiKey('anthropic')
@@ -135,21 +255,65 @@ export class AnthropicMessagesClient implements LlmClient {
     this.fetchImplementation = options.fetchImplementation ?? fetch
     this.promptCaching = options.promptCaching ?? true
     this.version = options.version ?? '2023-06-01'
-    if (!this.apiKey) {
+    this.providerName = options.providerName ?? 'anthropic'
+    this.resolveOAuthToken = options.resolveOAuthToken
+    // A subscription session can authorize requests without an API key, so
+    // the missing-key error waits until a request actually lacks both.
+    if (!this.apiKey && !this.resolveOAuthToken) {
       throw new ConfigurationError('ANTHROPIC_API_KEY', 'Anthropic API key not provided')
     }
   }
 
+  /**
+   * Per-request auth context: a resolved subscription token and whether it
+   * takes the OAuth surface (`sk-ant-oat`, pi-ai's `isOAuthToken`).
+   */
+  private async resolveOAuthContext(signal?: AbortSignal): Promise<{
+    readonly isOAuthToken: boolean
+    readonly token?: string
+  }> {
+    const token = (await this.resolveOAuthToken?.(signal))?.trim()
+    if (!token) return { isOAuthToken: false }
+    return { isOAuthToken: isAnthropicOAuthToken(token), ...(token ? { token } : {}) }
+  }
+
+  /** Request headers for the resolved auth context. */
+  private requestHeaders(accept: string, oauth: { readonly isOAuthToken: boolean; readonly token?: string }): Record<string, string> {
+    if (oauth.token) {
+      return {
+        Accept: accept,
+        'Content-Type': 'application/json',
+        'anthropic-version': this.version,
+        ...anthropicOAuthHeaders(oauth.token, oauth.isOAuthToken),
+      }
+    }
+    if (!this.apiKey) {
+      throw new ConfigurationError(
+        'ANTHROPIC_API_KEY',
+        "Anthropic API key not provided and no subscription session found ('xerxes auth login anthropic')",
+      )
+    }
+    return anthropicHeaders(this.apiKey, this.version, accept)
+  }
+
   async complete(request: CompletionRequest, signal?: AbortSignal): Promise<LlmCompletion> {
-    const converted = messagesToAnthropic(request.messages, { thinkingEnabled: request.thinking !== undefined })
+    const oauth = await this.resolveOAuthContext(signal)
+    const placement = anthropicDeferredPlacement(request, this.providerName)
+    const converted = messagesToAnthropic(request.messages, {
+      thinkingEnabled: planAnthropicThinking(request, this.providerName).requested,
+      ...(oauth.isOAuthToken ? { normalizeToolName: toClaudeCodeToolName } : {}),
+      ...(placement.enabled && placement.split.deferred.size
+        ? { deferredToolNames: new Set(placement.split.deferred.keys()) }
+        : {}),
+    })
     if (!converted.messages.length) {
       throw new ConfigurationError('messages', 'Anthropic requires at least one user or assistant message')
     }
 
     const response = await this.fetchImplementation(new URL('v1/messages', withTrailingSlash(this.baseUrl)), {
       method: 'POST',
-      headers: anthropicHeaders(this.apiKey, this.version, 'application/json'),
-      body: JSON.stringify(anthropicRequestPayload(request, converted, this.promptCaching, false)),
+      headers: this.requestHeaders('application/json', oauth),
+      body: JSON.stringify(anthropicRequestPayload(request, converted, this.promptCaching, false, placement, oauth.isOAuthToken, this.providerName)),
       ...(signal ? { signal } : {}),
     })
     if (!response.ok) {
@@ -182,6 +346,11 @@ export class AnthropicMessagesClient implements LlmClient {
         if (signature) thinkingSignature = signature
         continue
       }
+      if (type === 'redacted_thinking') {
+        const data = stringAt(block, 'data')
+        if (data) thinkingSignature = JSON.stringify({ type: 'redacted_thinking', data })
+        continue
+      }
       if (type === 'tool_use') {
         const input = block.input
         if (input !== undefined && !isJsonObject(input)) {
@@ -195,7 +364,10 @@ export class AnthropicMessagesClient implements LlmClient {
       }
     }
 
-    const finishReason = anthropicFinishReason(stringAt(completion, 'stop_reason')) || undefined
+    const finishReason = anthropicFinishReason(
+      stringAt(completion, 'stop_reason'),
+      stringAt(asRecord(completion.stop_details), 'explanation'),
+    ) || undefined
     const usage = anthropicUsage(completion)
     return {
       content: content.join(''),
@@ -208,15 +380,23 @@ export class AnthropicMessagesClient implements LlmClient {
   }
 
   async *stream(request: CompletionRequest, signal?: AbortSignal): AsyncGenerator<LlmDelta> {
-    const converted = messagesToAnthropic(request.messages, { thinkingEnabled: request.thinking !== undefined })
+    const oauth = await this.resolveOAuthContext(signal)
+    const placement = anthropicDeferredPlacement(request, this.providerName)
+    const converted = messagesToAnthropic(request.messages, {
+      thinkingEnabled: planAnthropicThinking(request, this.providerName).requested,
+      ...(oauth.isOAuthToken ? { normalizeToolName: toClaudeCodeToolName } : {}),
+      ...(placement.enabled && placement.split.deferred.size
+        ? { deferredToolNames: new Set(placement.split.deferred.keys()) }
+        : {}),
+    })
     if (!converted.messages.length) {
       throw new ConfigurationError('messages', 'Anthropic requires at least one user or assistant message')
     }
 
     const response = await this.fetchImplementation(new URL('v1/messages', withTrailingSlash(this.baseUrl)), {
       method: 'POST',
-      headers: anthropicHeaders(this.apiKey, this.version, 'text/event-stream'),
-      body: JSON.stringify(anthropicRequestPayload(request, converted, this.promptCaching, true)),
+      headers: this.requestHeaders('text/event-stream', oauth),
+      body: JSON.stringify(anthropicRequestPayload(request, converted, this.promptCaching, true, placement, oauth.isOAuthToken, this.providerName)),
       ...(signal ? { signal } : {}),
     })
     if (!response.ok) {
@@ -279,9 +459,10 @@ export class AnthropicMessagesClient implements LlmClient {
         }
         if (blockType === 'thinking') {
           const signature = stringAt(block, 'signature')
-          if (signature) {
-            yield { thinkingSignature: signature }
-          }
+          if (signature) yield { thinkingSignature: signature }
+        } else if (blockType === 'redacted_thinking') {
+          const data = stringAt(block, 'data')
+          if (data) yield { thinkingSignature: JSON.stringify({ type: 'redacted_thinking', data }) }
         }
         if (eventUsage) {
           yield { usage: eventUsage }
@@ -316,7 +497,11 @@ export class AnthropicMessagesClient implements LlmClient {
         continue
       }
       if (type === 'message_delta') {
-        const stopReason = anthropicFinishReason(stringAt(asRecord(event.delta), 'stop_reason'))
+        const messageDelta = asRecord(event.delta)
+        const stopReason = anthropicFinishReason(
+          stringAt(messageDelta, 'stop_reason'),
+          stringAt(asRecord(messageDelta.stop_details), 'explanation'),
+        )
         if (stopReason || eventUsage) {
           yield {
             ...(stopReason ? { finishReason: stopReason } : {}),
@@ -343,7 +528,10 @@ export class AnthropicMessagesClient implements LlmClient {
 
 /** Preserve HTTP retry metadata without exposing provider headers in the error message. */
 function anthropicHttpError(message: string, response: Response): ProviderError {
-  const retryAfterSeconds = parseRetryAfterHeader(response.headers.get('retry-after'))
+  const retryAfterMilliseconds = parseRetryAfterHeader(response.headers.get('retry-after-ms'))
+  const retryAfterSeconds = retryAfterMilliseconds === undefined
+    ? parseRetryAfterHeader(response.headers.get('retry-after'))
+    : retryAfterMilliseconds / 1_000
   return new ProviderError('anthropic', message, undefined, {
     status: response.status,
     ...(retryAfterSeconds === undefined ? {} : { retryAfterSeconds }),
@@ -371,15 +559,85 @@ interface PendingToolCall {
   seededFromSnapshot?: boolean
 }
 
+interface AnthropicDeferredPlacement {
+  readonly enabled: boolean
+  readonly split: DeferredToolSplit
+}
+
+/**
+ * pi-ai's tool-reference placement: first-party Claude 4.5+ (non-Haiku) splits
+ * transcript-loaded tools out of the immediate surface.
+ */
+function anthropicDeferredPlacement(request: CompletionRequest, provider: string): AnthropicDeferredPlacement {
+  const enabled = anthropicSupportsToolReferences(request.model, provider)
+  return { enabled, split: splitDeferredTools(request.tools, request.messages, enabled) }
+}
+
+/**
+ * How thinking lands on the wire for this request (pi-ai anthropic-messages
+ * parity).
+ *
+ * - `requested` — the caller asked for thinking. `off`/`none` count as *not*
+ *   requested: before this, any defined `thinking` object was treated as on,
+ *   which is how an explicit "off" still produced a thinking model.
+ * - adaptive models (compat.forceAdaptiveThinking, e.g. Kimi K3) take
+ *   `{ type: 'adaptive' }` plus `output_config.effort`; budget models take
+ *   `{ type: 'enabled', budget_tokens }`.
+ * - A model whose thinking map marks `off: null` cannot disable thinking;
+ *   sending `{ type: 'disabled' }` would be a provider-side rejection, so it
+ *   is omitted (pi-ai guards the same way).
+ */
+interface AnthropicThinkingPlan {
+  readonly adaptive: boolean
+  readonly canDisable: boolean
+  readonly effort: string | undefined
+  readonly reasoningModel: boolean
+  readonly requested: boolean
+  readonly budgetTokens: number | undefined
+}
+
+function planAnthropicThinking(request: CompletionRequest, provider: string): AnthropicThinkingPlan {
+  const effortRaw = request.thinking?.effort?.trim().toLowerCase()
+  const requested = request.thinking !== undefined && effortRaw !== 'off' && effortRaw !== 'none'
+  const capabilities = piCatalogModelCapabilities(request.model, provider)
+  const map = capabilities?.thinkingLevelMap
+  const adaptive = capabilities?.compat?.forceAdaptiveThinking === true
+  const mapped = effortRaw ? map?.[effortRaw] : undefined
+  // pi mapThinkingLevelToEffort: catalog mapping wins, unknowns land on high.
+  const effort = !adaptive
+    ? undefined
+    : typeof mapped === 'string'
+      ? mapped
+      : effortRaw === 'minimal' || effortRaw === 'low'
+        ? 'low'
+        : effortRaw === 'medium'
+          ? 'medium'
+          : 'high'
+  return {
+    adaptive,
+    canDisable: map?.off !== null,
+    effort,
+    reasoningModel: capabilities?.reasoning ?? true,
+    requested,
+    budgetTokens: request.thinking === undefined
+      ? undefined
+      : request.thinking.budgetTokens ?? 10_000,
+  }
+}
+
 function anthropicRequestPayload(
   request: CompletionRequest,
   converted: AnthropicMessagePayload,
   promptCaching: boolean,
   stream: boolean,
+  placement: AnthropicDeferredPlacement,
+  isOAuthToken = false,
+  provider = 'anthropic',
 ): Record<string, unknown> {
-  const thinkingBudget = request.thinking === undefined
-    ? undefined
-    : request.thinking.budgetTokens ?? 10_000
+  const plan = planAnthropicThinking(request, provider)
+  // Budget-based thinking raises max_tokens past the budget; adaptive models
+  // carry no budget, and an off request must not inflate the cap either.
+  const thinkingBudget = plan.requested && !plan.adaptive ? plan.budgetTokens : undefined
   const payload: Record<string, unknown> = {
     model: bareModel(request.model),
     // Extended thinking rejects budget_tokens >= max_tokens. An unconfigured
@@ -413,38 +671,82 @@ function anthropicRequestPayload(
         ? wrapSystemSegmentsWithCache(segments)
         : cacheableSystemPrompt(converted.system)
   }
-  if (request.temperature !== undefined && (thinkingBudget === undefined || request.temperature === 1)) {
+  if (isOAuthToken) {
+    // pi-ai: the subscription endpoint REQUIRES the Claude Code identity as
+    // the first system block, ahead of the caller's own system prompt.
+    const identity = { type: 'text', text: ANTHROPIC_OAUTH_IDENTITY_PROMPT }
+    const current = payload.system
+    payload.system = typeof current === 'string'
+      ? [identity, { type: 'text', text: current }]
+      : Array.isArray(current)
+        ? [identity, ...current]
+        : [identity]
+  }
+  if (request.temperature !== undefined && (!plan.requested || request.temperature === 1)) {
     // Extended thinking requires temperature exactly 1; any other value is a
     // provider-side rejection, so it is omitted rather than sent.
     payload.temperature = request.temperature
   }
-  if (request.topP !== undefined && thinkingBudget === undefined) {
+  if (request.topP !== undefined && !plan.requested) {
     // top_p sampling is likewise incompatible with extended thinking.
     payload.top_p = request.topP
   }
   if (request.stop?.length) {
     payload.stop_sequences = request.stop
   }
-  if (thinkingBudget !== undefined) {
-    // WHY budget_tokens: Anthropic extended thinking is budget-based, not
-    // effort-based — the wire contract is { type: 'enabled', budget_tokens },
-    // so the neutral ThinkingRequest's effort hint has no Anthropic meaning
-    // and is intentionally not translated. The 10_000 fallback mirrors the
-    // session-default budget in runtime/thinkingLevels.ts so an effort-only
-    // directive still produces a valid budget.
-    payload.thinking = {
-      type: 'enabled',
-      budget_tokens: thinkingBudget,
+  if (plan.reasoningModel) {
+    if (plan.requested) {
+      if (plan.adaptive) {
+        // Adaptive thinking (Kimi K3, adaptive Claude): the model decides how
+        // much to think; the caller only nudges via output_config.effort.
+        // pi-ai sends display: 'summarized' as the default view hint.
+        payload.thinking = { type: 'adaptive', display: 'summarized' }
+        if (plan.effort) {
+          payload.output_config = { effort: plan.effort }
+        }
+      } else {
+        // WHY budget_tokens: Anthropic extended thinking is budget-based, not
+        // effort-based — the wire contract is { type: 'enabled', budget_tokens },
+        // so the neutral ThinkingRequest's effort hint has no Anthropic meaning
+        // and is intentionally not translated. The 10_000 fallback mirrors the
+        // session-default budget in runtime/thinkingLevels.ts so an effort-only
+        // directive still produces a valid budget.
+        payload.thinking = {
+          type: 'enabled',
+          budget_tokens: thinkingBudget ?? 10_000,
+        }
+      }
+    } else if (plan.canDisable) {
+      // Explicit off: omitting the field leaves the server default, which for
+      // always-thinking models is ON — "off" must be sent to mean off. Models
+      // whose map marks off: null cannot disable; the field stays out.
+      payload.thinking = { type: 'disabled' }
     }
   }
   if (request.tools?.length) {
-    const tools = request.tools.map(toolToAnthropic)
-    payload.tools = promptCaching ? wrapToolsWithCache(tools) : tools
+    const normalize = isOAuthToken ? toClaudeCodeToolName : ((name: string): string => name)
+    let wireTools = request.tools.map(tool => toolToAnthropic(tool, false, normalize))
+    if (placement.enabled) {
+      let immediate = [...placement.split.immediate]
+      let deferred = [...placement.split.deferred.values()]
+      // A request whose whole surface is deferred would send no callable
+      // tools at all; pi-ai promotes everything to immediate in that corner.
+      if (immediate.length === 0 && deferred.length > 0) {
+        immediate = deferred
+        deferred = []
+      }
+      wireTools = [
+        ...immediate.map(tool => toolToAnthropic(tool, false, normalize)),
+        ...deferred.map(tool => toolToAnthropic(tool, true, normalize)),
+      ]
+    }
+    payload.tools = promptCaching ? wrapToolsWithCache(wireTools) : wireTools
     const choice = anthropicToolChoice(request.toolChoice)
     if (choice) {
       payload.tool_choice = choice
     }
   }
+  if (request.extraBody) Object.assign(payload, request.extraBody)
   return payload
 }
 
@@ -452,6 +754,7 @@ function anthropicHeaders(apiKey: string, version: string, accept: string): Reco
   return {
     Accept: accept,
     'Content-Type': 'application/json',
+    'User-Agent': 'xerxes-agents/0.3.0',
     'anthropic-version': version,
     'x-api-key': apiKey,
   }
@@ -462,23 +765,36 @@ function anthropicUserContent(content: MessageContent): AnthropicContent {
     return content
   }
   const blocks = content.flatMap(part => anthropicContentPart(part))
-  return blocks
+  return blocks.some(block => block.type === 'text' && block.text.trim())
+    ? blocks
+    : [...blocks, { type: 'text', text: '(see attached image)' }]
 }
 
 function anthropicContentPart(part: ContentPart): AnthropicContentBlock[] {
   if (part.type === 'text') {
-    return [{ type: 'text', text: part.text }]
+    return part.text ? [{ type: 'text', text: part.text }] : []
   }
-  // URL images need a provider download step; preserve user-visible context rather
-  // than issuing an invalid Anthropic block until media transport is ported.
+  const match = /^data:([^;,]+);base64,([A-Za-z0-9+/=\r\n]+)$/.exec(part.image_url.url)
+  if (match?.[1] && match[2]) {
+    return [{
+      type: 'image',
+      source: { type: 'base64', media_type: match[1], data: match[2].replaceAll(/\s/g, '') },
+    }]
+  }
+  // Anthropic accepts base64 image sources, not arbitrary remote URLs.
   return [{ type: 'text', text: `[Image: ${part.image_url.url}]` }]
 }
 
-function toolToAnthropic(tool: ToolDefinition): Record<string, unknown> {
+function toolToAnthropic(
+  tool: ToolDefinition,
+  deferLoading = false,
+  normalizeToolName: (name: string) => string = (name): string => name,
+): Record<string, unknown> {
   return {
-    name: tool.function.name,
+    name: normalizeToolName(tool.function.name),
     description: tool.function.description,
     input_schema: tool.function.parameters,
+    ...(deferLoading ? { defer_loading: true } : {}),
   }
 }
 
@@ -496,7 +812,7 @@ function anthropicToolChoice(choice: ToolChoice | undefined): Record<string, str
 }
 
 /** Map Anthropic stop reasons onto the neutral OpenAI-style finish vocabulary. */
-function anthropicFinishReason(stopReason: string): string {
+function anthropicFinishReason(stopReason: string, explanation = ''): string {
   if (stopReason === 'end_turn' || stopReason === 'stop_sequence') {
     return 'stop'
   }
@@ -505,6 +821,10 @@ function anthropicFinishReason(stopReason: string): string {
   }
   if (stopReason === 'tool_use') {
     return 'tool_calls'
+  }
+  if (stopReason === 'pause_turn') return 'stop'
+  if (stopReason === 'refusal' || stopReason === 'sensitive') {
+    throw new ProviderError('anthropic', explanation || `provider stopped with: ${stopReason}`)
   }
   return stopReason
 }
@@ -516,7 +836,8 @@ function completeToolCalls(calls: Map<number, PendingToolCall>): ToolCall[] {
       if (!call.name) {
         throw new ProviderError('anthropic', 'tool_use block missing a name')
       }
-      const arguments_ = parseToolArguments(call.arguments)
+      const partial = parseStreamingJson(call.arguments)
+      const arguments_ = isJsonObject(partial) ? partial : parseToolArguments(call.arguments)
       return {
         id: call.id ?? deterministicToolCallId(call.name, arguments_),
         type: 'function' as const,
@@ -536,11 +857,14 @@ function anthropicUsage(event: Record<string, unknown>): TokenUsage | undefined 
   const cacheReadTokens = numberAt(messageUsage, 'cache_read_input_tokens') ?? numberAt(deltaUsage, 'cache_read_input_tokens')
   const cacheCreationTokens = numberAt(messageUsage, 'cache_creation_input_tokens')
     ?? numberAt(deltaUsage, 'cache_creation_input_tokens')
+  const reasoningTokens = numberAt(asRecord(messageUsage.output_tokens_details), 'thinking_tokens')
+    ?? numberAt(asRecord(deltaUsage.output_tokens_details), 'thinking_tokens')
   return {
     inputTokens: inputTokens ?? 0,
     outputTokens: outputTokens ?? 0,
     ...(cacheReadTokens === undefined ? {} : { cacheReadTokens }),
     ...(cacheCreationTokens === undefined ? {} : { cacheCreationTokens }),
+    ...(reasoningTokens === undefined ? {} : { reasoningTokens }),
   }
 }
 
@@ -550,6 +874,7 @@ interface AnthropicStreamUsage {
   cacheReadTokens?: number
   inputTokens?: number
   outputTokens?: number
+  reasoningTokens?: number
 }
 
 /**
@@ -572,11 +897,14 @@ function trackAnthropicUsage(
   const cacheReadTokens = numberAt(messageUsage, 'cache_read_input_tokens') ?? numberAt(deltaUsage, 'cache_read_input_tokens')
   const cacheCreationTokens = numberAt(messageUsage, 'cache_creation_input_tokens')
     ?? numberAt(deltaUsage, 'cache_creation_input_tokens')
+  const reasoningTokens = numberAt(asRecord(messageUsage.output_tokens_details), 'thinking_tokens')
+    ?? numberAt(asRecord(deltaUsage.output_tokens_details), 'thinking_tokens')
   if (
     inputTokens === undefined
     && outputTokens === undefined
     && cacheReadTokens === undefined
     && cacheCreationTokens === undefined
+    && reasoningTokens === undefined
   ) {
     return undefined
   }
@@ -592,11 +920,15 @@ function trackAnthropicUsage(
   if (cacheCreationTokens !== undefined) {
     accumulator.cacheCreationTokens = cacheCreationTokens
   }
+  if (reasoningTokens !== undefined) {
+    accumulator.reasoningTokens = reasoningTokens
+  }
   return {
     inputTokens: accumulator.inputTokens ?? 0,
     outputTokens: accumulator.outputTokens ?? 0,
     ...(accumulator.cacheReadTokens === undefined ? {} : { cacheReadTokens: accumulator.cacheReadTokens }),
     ...(accumulator.cacheCreationTokens === undefined ? {} : { cacheCreationTokens: accumulator.cacheCreationTokens }),
+    ...(accumulator.reasoningTokens === undefined ? {} : { reasoningTokens: accumulator.reasoningTokens }),
   }
 }
 

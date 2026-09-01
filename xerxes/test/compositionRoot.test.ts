@@ -118,6 +118,7 @@ const CONSTRUCTED_SUBSYSTEMS: ReadonlyArray<{ readonly factory: string; readonly
   { factory: 'bridgeDurableTaskLifecycle', why: 'durable record of subagent attempts across a crash' },
   { factory: 'createNativeSubagentHost', why: 'the delegated-turn host every subagent runs on' },
   { factory: 'createLocalWorkspaceProvider', why: 'backs the workspace CLI surface' },
+  { factory: 'registerGoalTools', why: 'without it a goal can be driven but never created by the model' },
 ]
 
 test('subsystems with a factory are constructed outside their own tests', async () => {
@@ -133,5 +134,46 @@ test('subsystems with a factory are constructed outside their own tests', async 
     const invoked = new RegExp(`\\b${subsystem.factory}\\s*\\(`).test(production)
     expect({ factory: subsystem.factory, invoked }, `${subsystem.factory} (${subsystem.why})`)
       .toEqual({ factory: subsystem.factory, invoked: true })
+  }
+})
+
+test('the goal subsystem is reachable end to end, not just importable', async () => {
+  const [cli, server, runner, assembly] = await Promise.all([
+    readSource('cli.ts'),
+    readSource('daemon/server.ts'),
+    readSource('daemon/turnRunner.ts'),
+    readSource('context/assembly.ts'),
+  ])
+
+  // Four separate links, each of which has been the missing one somewhere in
+  // this codebase before: the tools exist on the surface, the model is told the
+  // policy, the turn actually renders that layer, and something at idle admits
+  // the next round. Any three without the fourth is a subsystem with passing
+  // tests and no effect.
+  expect(cli).toMatch(/registerGoalTools\(/)
+  expect(runner).toMatch(/goalPolicy:/)
+  expect(assembly).toContain("name: 'goal_policy'")
+  expect(server).toMatch(/nextGoalRound\(/)
+  // The round has to be submitted as a turn, not merely computed.
+  expect(server).toMatch(/admitGoalRound\(sessionKey\)[\s\S]{0,900}submitTurn\(/)
+  // And a person must be able to see and steer it.
+  expect(server).toMatch(/"session\.goal"/)
+})
+
+test('the goal tool host reads exactly the turn facts the turn runner writes', async () => {
+  const [cli, runner] = await Promise.all([
+    readSource('cli.ts'),
+    readSource('daemon/turnRunner.ts'),
+  ])
+
+  // These two metadata keys are the entire contract between the turn runner
+  // (which knows how a turn was opened) and the goal tools (which authorise
+  // against exactly that). They are strings on both sides, so renaming one
+  // silently turns every autonomous round into an unauthorised one — or, worse,
+  // every turn into an authorised one.
+  const CONTRACT = ['goal_turn_human', 'goal_turn_round'] as const
+  for (const key of CONTRACT) {
+    expect({ key, written: runner.includes(key), read: cli.includes(key) })
+      .toEqual({ key, written: true, read: true })
   }
 })

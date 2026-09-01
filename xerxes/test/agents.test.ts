@@ -84,6 +84,7 @@ test('built-in definitions are TypeScript-owned and retain resolved specialist p
   const definitions = loadBuiltinAgentDefinitions()
   expect([...definitions.keys()].sort()).toEqual([
     'coder',
+    'creator',
     'default',
     'objective',
     'planner',
@@ -102,6 +103,12 @@ test('built-in definitions are TypeScript-owned and retain resolved specialist p
     'agent_memory_search',
     'agent_memory_journal',
   ]))
+  expect(definitions.get('creator')?.tools).toEqual(expect.arrayContaining([
+    'AgentPresetInspectTool',
+    'AgentPresetTool',
+    'CreatorRuntimeTool',
+  ]))
+  expect(definitions.get('creator')?.systemPrompt).toContain('Creator mode')
   expect(definitions.get('default')?.subagents).toMatchObject({
     coder: { description: 'Good at general software engineering tasks.' },
     objective: { description: 'Hard-goal execution loop with verification gates.' },
@@ -674,10 +681,11 @@ agent:
 })
 
 test('bundled specs survive strict validation and every documented field still resolves', async () => {
-  // All seven bundled YAML specs must keep loading under the strict parser.
+  // Every bundled YAML spec must keep loading under the strict parser.
   const bundled = loadBuiltinAgentDefinitions()
   expect([...bundled.keys()].sort()).toEqual([
     'coder',
+    'creator',
     'default',
     'objective',
     'planner',

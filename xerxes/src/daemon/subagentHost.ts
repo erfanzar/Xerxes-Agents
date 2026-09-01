@@ -23,6 +23,7 @@ import type {
 } from '../operators/subagents.js'
 import { bootstrap } from '../runtime/bootstrap.js'
 import { looksLikeSessionId, type DaemonTranscriptStore } from '../session/daemonTranscript.js'
+import { FILE_READS_METADATA_KEY, fileStateTracker } from '../tools/fileState.js'
 import type { AgentState, StreamEvent } from '../streaming/events.js'
 import { runTurn } from '../streaming/loop.js'
 import type { PermissionBroker, PermissionMode } from '../streaming/permissions.js'
@@ -58,6 +59,8 @@ export interface NativeSubagentHostOptions {
    * full; 0 disables child compaction.
    */
   readonly autoCompactThreshold?: number
+  /** Live provider/profile capability lookup; absence disables speculative compaction. */
+  readonly contextLimit?: (model: string) => number | undefined
   readonly cwd: string
   /**
    * Durable record of subagent attempts, so a crash mid-fan-out leaves a
@@ -69,7 +72,10 @@ export interface NativeSubagentHostOptions {
   /** Bounded supplemental bootstrap context, such as the discovered skill catalog. */
   readonly extraContext?: string
   readonly llm: LlmClient
+  /** Explicit runtime/profile request cap. */
   readonly maxTokens?: number
+  /** Per-child model fallback used when maxTokens is not configured. */
+  readonly maxOutputTokens?: (model: string) => number | undefined
   readonly model: string
   readonly permissionMode: PermissionMode
   readonly temperature?: number
@@ -1025,9 +1031,10 @@ async function runNativeSubagent(
         model,
         tools,
       })
+      const maxTokens = options.maxTokens ?? options.maxOutputTokens?.(model)
       const events = runTurn({
         agentId: request.task.agentDefName || request.task.id,
-        ...(options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens }),
+        ...(maxTokens === undefined ? {} : { maxTokens }),
         model,
         permissionMode,
         sessionId: conversation.historySessionId,
@@ -1163,10 +1170,15 @@ interface ChildCompactionRequest {
 async function compactChildConversation(input: ChildCompactionRequest): Promise<void> {
   const { conversation, conversations, model, options, request, state } = input
   if (state.messages.length < 2) return
-  // No profile overrides reach a delegated run, so the child prices its window
-  // from the model registry. It is the same prompt-budget rule the parent uses.
+  // Unknown provider capacity disables speculative child compaction rather
+  // than enforcing a model window Xerxes invented locally.
+  const contextLimit = options.contextLimit?.(model)
+  const maxTokens = options.maxTokens ?? options.maxOutputTokens?.(model)
   const thresholdTokens = compactionThresholdTokens(
-    effectiveContextLimit(model),
+    effectiveContextLimit({
+      ...(contextLimit === undefined ? {} : { contextLimit }),
+      ...(maxTokens === undefined ? {} : { requestedOutputTokens: maxTokens }),
+    }),
     options.autoCompactThreshold ?? DEFAULT_AUTO_COMPACT_THRESHOLD,
   )
   if (thresholdTokens <= 0) return
@@ -1185,6 +1197,10 @@ async function compactChildConversation(input: ChildCompactionRequest): Promise<
     // already holds a reference to.
     state.messages.splice(0, state.messages.length, ...(outcome.messages as unknown as ChatMessage[]))
     state.metadata = { ...state.metadata, last_compaction: outcome.stamp }
+    // Same rule as the main session's compaction: the summary no longer
+    // carries full file contents, so the child must re-read before editing.
+    fileStateTracker.clearSession(conversation.historySessionId)
+    state.metadata[FILE_READS_METADATA_KEY] = []
     await conversations.save(conversation, state, 'running')
     publishChildCompaction(options.eventBus, request, outcome.stamp)
   } catch (error) {

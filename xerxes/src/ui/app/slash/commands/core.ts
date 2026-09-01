@@ -8,6 +8,7 @@ import type {
   ConfigGetValueResponse,
   ConfigSetResponse,
   NativeUpdateStatusResponse,
+  SessionGoalResponse,
   SessionSaveResponse,
   SessionStatusResponse,
   SessionSteerResponse,
@@ -285,6 +286,29 @@ export const coreCommands: SlashCommand[] = [
         .then(ctx.guarded<SessionStatusResponse>(r => ctx.transcript.page(r.output || '(no status)', 'Status')))
         .catch(ctx.guardedErr)
     }
+  },
+
+  {
+    help: 'set or view the goal for a long-running task',
+    name: 'goal',
+    // Rendering happens daemon-side so the terminal, the bridge and every
+    // channel describe one goal with one vocabulary. This end only carries the
+    // words.
+    run: (arg, ctx) => {
+      if (!ctx.sid) {
+        return ctx.transcript.sys('no active session')
+      }
+
+      ctx.gateway
+        .rpc<SessionGoalResponse>('session.goal', { input: arg, session_id: ctx.sid })
+        .then(
+          ctx.guarded<SessionGoalResponse>(r => {
+            ctx.transcript.page(r?.text || 'no goal state returned', 'Goal')
+          })
+        )
+        .catch(ctx.guardedErr)
+    },
+    usage: '/goal [<objective>|clear|edit <objective>|pause|resume]'
   },
 
   {

@@ -141,6 +141,51 @@ test('chat-completions usage reports cached prompt tokens apart from fresh input
   expect(completion.usage).toEqual({ inputTokens: 8, outputTokens: 5, cacheReadTokens: 12, reasoningTokens: 3 })
 })
 
+test('chat-completions normalizes GLM cache-hit usage fields', async () => {
+  const usage = {
+    prompt_tokens: 10_000,
+    completion_tokens: 50,
+    prompt_cache_hit_tokens: 9_700,
+    prompt_cache_miss_tokens: 300,
+  }
+  const streaming = openAiClient(async () => sseResponse([
+    { choices: [{ delta: { content: 'hi' } }] },
+    { choices: [{ delta: {}, finish_reason: 'stop' }], usage },
+  ]))
+  expect(await collect(streaming.stream(request()))).toContainEqual({
+    finishReason: 'stop',
+    usage: { inputTokens: 300, outputTokens: 50, cacheReadTokens: 9_700 },
+  })
+
+  const completing = openAiClient(async () => Response.json({
+    choices: [{ finish_reason: 'stop', message: { content: 'hi' } }],
+    usage,
+  }))
+  expect((await completing.complete(request())).usage).toEqual({
+    inputTokens: 300,
+    outputTokens: 50,
+    cacheReadTokens: 9_700,
+  })
+})
+
+test('chat-completions mirrors Pi cache placement and cache-write accounting', async () => {
+  const client = openAiClient(async () => Response.json({
+    choices: [{ finish_reason: 'stop', message: { content: 'done' } }],
+    usage: {
+      prompt_tokens: 1_000,
+      completion_tokens: 20,
+      cached_tokens: 700,
+      prompt_tokens_details: { cache_write_tokens: 100 },
+    },
+  }))
+  expect((await client.complete(request())).usage).toEqual({
+    inputTokens: 200,
+    outputTokens: 20,
+    cacheReadTokens: 700,
+    cacheCreationTokens: 100,
+  })
+})
+
 test('chat-completions propagates Retry-After delta-seconds as structured classifier metadata', async () => {
   for (const operation of ['complete', 'stream'] as const) {
     const client = openAiClient(async () => new Response('slow down', {

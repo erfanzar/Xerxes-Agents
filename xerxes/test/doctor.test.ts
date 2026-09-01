@@ -11,6 +11,7 @@ import {
   checkComputerUse,
   checkPlatform,
   checkProviderKeys,
+  checkSubsystemStorage,
   checkWindowsTooling,
   checkXerxesHome,
   checkXerxesOnPath,
@@ -24,7 +25,7 @@ test('Bun doctor checks use injected host facts and do not expose credential val
   const options = {
     bunVersion: '1.3.12',
     environment: { OPENAI_API_KEY: 'secret-value' },
-    fileExists: (path: string) => path === '/home/xerxes',
+    fileExists: (path: string) => path === '/home/xerxes' || path.startsWith('/home/xerxes/'),
     findExecutable: () => '/bin/xerxes',
     home: '/home/xerxes',
     platform: 'linux' as const,
@@ -57,6 +58,25 @@ test('Bun doctor warns for absent optional setup', () => {
   expect(checkXerxesOnPath({ findExecutable: () => null }).severity).toBe('warn')
   expect(checkProviderKeys({ environment: {} }).severity).toBe('warn')
   expect(checkXerxesHome({ home: '/missing', fileExists: () => false }).severity).toBe('warn')
+})
+
+test('subsystem storage doctor check reports present and missing directories', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-doctor-subsystems-'))
+  try {
+    await mkdir(join(directory, 'scheduler'))
+    await mkdir(join(directory, 'governed-memory'))
+    await mkdir(join(directory, 'capabilities'))
+    await mkdir(join(directory, 'telemetry'))
+    const allPresent = checkSubsystemStorage({ home: directory, fileExists: () => true })
+    expect(allPresent.severity).toBe('ok')
+    expect(allPresent.message).toContain('scheduler')
+
+    const missing = checkSubsystemStorage({ home: directory, fileExists: () => false })
+    expect(missing.severity).toBe('warn')
+    expect(missing.message).toContain('missing')
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
 })
 
 test('Bun doctor reports each platform as supported and names its control transport', () => {

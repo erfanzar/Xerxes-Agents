@@ -12,7 +12,12 @@ import { patchOverlayState } from '../app/overlayStore.js'
 import { $uiSessionId, $uiTheme } from '../app/uiStore.js'
 import { providerDisplayNames } from '../domain/providers.js'
 import { TUI_SESSION_MODEL_FLAG } from '../domain/slash.js'
-import type { ModelModelsResponse, ModelOptionProvider, ModelOptionsResponse } from '../gatewayTypes.js'
+import type {
+  ModelCapabilityOption,
+  ModelModelsResponse,
+  ModelOptionProvider,
+  ModelOptionsResponse,
+} from '../gatewayTypes.js'
 import { fuzzyRank } from '../lib/fuzzy.js'
 import { asRpcResult, rpcErrorMessage } from '../lib/rpc.js'
 import { compactPreview } from '../lib/text.js'
@@ -54,6 +59,7 @@ interface ProviderRow {
 }
 
 interface ModelDiscovery {
+  catalog: ModelCapabilityOption[]
   error?: string
   models: string[]
   requestId: number
@@ -65,6 +71,18 @@ interface ModelDiscovery {
 interface ModelRow {
   custom: boolean
   model: string
+}
+
+interface CapacityEditorState {
+  busy: boolean
+  context: string
+  contextHint?: number
+  error?: string
+  field: 'context' | 'output'
+  model: string
+  output: string
+  outputHint?: number
+  profile: string
 }
 
 export interface ModelPickerProps {
@@ -83,6 +101,14 @@ const consume = (event: KeyEvent) => {
 const uniqueModels = (values: readonly (null | string | undefined)[]) => [
   ...new Set(values.map(value => value?.trim()).filter((value): value is string => Boolean(value)))
 ]
+
+const capacityInput = (value: string): number | null | undefined => {
+  const trimmed = value.trim()
+  if (!trimmed) return null
+  if (!/^\d+$/u.test(trimmed)) return undefined
+  const parsed = Number(trimmed)
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined
+}
 
 /** Mockup 09 groups models by family (`opus`, `sonnet`, …) derived from the ID. */
 /**
@@ -200,6 +226,7 @@ export function ModelPicker({
   const twoPane = width >= TWO_PANE_MIN_WIDTH
 
   const [providers, setProviders] = useState<ModelOptionProvider[]>([])
+  const [capacityEditor, setCapacityEditor] = useState<CapacityEditorState | null>(null)
   const [currentModel, setCurrentModel] = useState('')
   const [discoveryVersion, setDiscoveryVersion] = useState(0)
   const [filter, setFilter] = useState('')
@@ -297,6 +324,7 @@ export function ModelPicker({
 
       const requestId = ++nextDiscoveryRequest.current
       discoveries.current.set(selected.slug, {
+        catalog: cached?.catalog ?? [],
         models: cached?.models ?? [],
         requestId,
         status: 'loading'
@@ -317,6 +345,7 @@ export function ModelPicker({
           }
           const warning = result.warning?.trim()
           discoveries.current.set(selected.slug, {
+            catalog: result.catalog ?? [],
             models: uniqueModels(result.models ?? []),
             requestId,
             source: result.source,
@@ -330,6 +359,7 @@ export function ModelPicker({
             return
           }
           discoveries.current.set(selected.slug, {
+            catalog: cached?.catalog ?? [],
             error: rpcErrorMessage(reason),
             models: cached?.models ?? [],
             requestId,
@@ -444,6 +474,50 @@ export function ModelPicker({
     close()
   }, [close, filter, modelProviderSlug, providerRows, stage])
 
+  const openCapacityEditor = useCallback((profile: string, model: string) => {
+    const capability = discoveries.current.get(profile)?.catalog.find(entry => entry.id === model)
+    setCapacityEditor({
+      busy: false,
+      context: capability?.context_source === 'override' && capability.context_limit !== undefined
+        ? String(capability.context_limit)
+        : '',
+      ...(capability?.context_limit === undefined ? {} : { contextHint: capability.context_limit }),
+      field: 'context',
+      model,
+      output: capability?.output_source === 'override' && capability.max_output_tokens !== undefined
+        ? String(capability.max_output_tokens)
+        : '',
+      ...(capability?.max_output_tokens === undefined ? {} : { outputHint: capability.max_output_tokens }),
+      profile,
+    })
+  }, [])
+
+  const saveCapacityEditor = useCallback((editor: CapacityEditorState) => {
+    const contextLimit = capacityInput(editor.context)
+    const maxOutputTokens = capacityInput(editor.output)
+    if (contextLimit === undefined || maxOutputTokens === undefined) {
+      setCapacityEditor({ ...editor, error: 'Use positive whole numbers, or blank to inherit.' })
+      return
+    }
+    setCapacityEditor({ ...editor, busy: true, error: undefined })
+    void gw.request('provider_model_override', {
+      profile_name: editor.profile,
+      model: editor.model,
+      context_limit: contextLimit,
+      max_output_tokens: maxOutputTokens,
+    }).then(raw => {
+      const result = asRpcResult(raw)
+      if (!result || result.ok === false) throw new Error(result?.error ? String(result.error) : 'capacity update refused')
+      setCapacityEditor(null)
+      const selected = providers.find(candidate => candidate.slug === editor.profile)
+      if (selected) discoverModels(selected, true)
+    }).catch((reason: unknown) => {
+      setCapacityEditor(current => current
+        ? { ...current, busy: false, error: rpcErrorMessage(reason) }
+        : current)
+    })
+  }, [discoverModels, gw, providers])
+
   const handleKey = useCallback(
     (event: KeyEvent) => {
       const name = event.name.toLowerCase()
@@ -452,6 +526,65 @@ export function ModelPicker({
       const isReturn = name === 'return' || name === 'enter' || name === 'kpenter'
       const isClose = event.ctrl && name === 'c'
       const isRefresh = event.ctrl && name === 'r'
+
+      if (capacityEditor) {
+        if (isClose) {
+          consume(event)
+          close()
+          return
+        }
+        if (isEscape) {
+          consume(event)
+          setCapacityEditor(null)
+          return
+        }
+        if (capacityEditor.busy) return
+        if (isReturn) {
+          consume(event)
+          saveCapacityEditor(capacityEditor)
+          return
+        }
+        if (name === 'tab' || name === 'up' || name === 'down') {
+          consume(event)
+          setCapacityEditor(current => current
+            ? {
+                ...current,
+                field: current.field === 'context' ? 'output' : 'context',
+                error: undefined,
+              }
+            : current)
+          return
+        }
+        if (event.ctrl && name === 'u') {
+          consume(event)
+          setCapacityEditor(current => current
+            ? { ...current, context: '', output: '', error: undefined }
+            : current)
+          return
+        }
+        if (name === 'backspace' || name === 'delete') {
+          consume(event)
+          setCapacityEditor(current => current
+            ? {
+                ...current,
+                [current.field]: current[current.field].slice(0, -1),
+                error: undefined,
+              }
+            : current)
+          return
+        }
+        if (!event.ctrl && !event.meta && !event.super && /^\d$/u.test(sequence)) {
+          consume(event)
+          setCapacityEditor(current => current
+            ? {
+                ...current,
+                [current.field]: current[current.field] + sequence,
+                error: undefined,
+              }
+            : current)
+        }
+        return
+      }
 
       if (isClose) {
         consume(event)
@@ -466,6 +599,15 @@ export function ModelPicker({
           close()
         }
 
+        return
+      }
+
+      if (event.ctrl && name === 'e' && stage === 'model') {
+        const selectedModel = modelRows[modelIdx]?.model
+        if (modelProviderSlug && selectedModel) {
+          consume(event)
+          openCapacityEditor(modelProviderSlug, selectedModel)
+        }
         return
       }
 
@@ -685,6 +827,7 @@ export function ModelPicker({
     [
       allowPersistGlobal,
       back,
+      capacityEditor,
       close,
       discoverModels,
       discovery,
@@ -694,11 +837,13 @@ export function ModelPicker({
       modelProviderSlug,
       twoPane,
       modelRows,
+      openCapacityEditor,
       optionsLoading,
       persistGlobal,
       provider,
       providerIdx,
       providers.length,
+      saveCapacityEditor,
       select,
       stage
     ]
@@ -757,6 +902,25 @@ export function ModelPicker({
 
     return () => clearTimeout(timer)
   }, [discoverModels, modelProviderSlug, optionsLoading, providers, stage, twoPane])
+
+  if (capacityEditor) {
+    const contextActive = capacityEditor.field === 'context'
+    return (
+      <ModalShell height={height} panelHeight={11} panelWidth={panelWidth} t={t} title="Edit model limits" width={width}>
+        <InfoRow color={t.color.muted}>{capacityEditor.profile} · {capacityEditor.model}</InfoRow>
+        <InfoRow color={t.color.muted}>Blank inherits discovered/Pi metadata; no generic limit is invented.</InfoRow>
+        <InfoRow color={contextActive ? t.color.accent : t.color.text}>
+          {contextActive ? '›' : ' '} Input / context tokens: {capacityEditor.context || `(inherit${capacityEditor.contextHint === undefined ? '' : `: ${capacityEditor.contextHint.toLocaleString()}`})`}{contextActive ? '▎' : ''}
+        </InfoRow>
+        <InfoRow color={!contextActive ? t.color.accent : t.color.text}>
+          {!contextActive ? '›' : ' '} Maximum output tokens: {capacityEditor.output || `(inherit${capacityEditor.outputHint === undefined ? '' : `: ${capacityEditor.outputHint.toLocaleString()}`})`}{!contextActive ? '▎' : ''}
+        </InfoRow>
+        <InfoRow color={capacityEditor.error ? t.color.error : t.color.muted}>
+          {capacityEditor.error ?? (capacityEditor.busy ? 'saving…' : 'Tab/↑↓ field · Enter save · Ctrl+U inherit · Esc cancel')}
+        </InfoRow>
+      </ModalShell>
+    )
+  }
 
   if (optionsLoading) {
     return (
@@ -845,7 +1009,7 @@ export function ModelPicker({
           <Box flexDirection="row" width="100%">
             <Box flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
               <Text color={t.color.muted} wrap="truncate-end">
-                {`←→ pane · ↑↓ select · Enter use${allowPersistGlobal ? ' · a set as default' : ''}`}
+                {`←→ pane · ↑↓ select · Enter use · Ctrl+E edit limits${allowPersistGlobal ? ' · a set as default' : ''}`}
               </Text>
             </Box>
             <Box flexShrink={0}>
@@ -1206,7 +1370,7 @@ export function ModelPicker({
             ? 'type full ID · Ctrl+R retry · Esc clear/back'
             : discovery?.status === 'partial'
               ? 'fallback available · Ctrl+R retry · Esc clear/back'
-              : 'Enter switch · Ctrl+Enter typed ID · Ctrl+R refresh · Esc clear/back'}
+              : 'Enter switch · Ctrl+E edit limits · Ctrl+Enter typed ID · Ctrl+R refresh · Esc clear/back'}
       </InfoRow>
     </ModalShell>
   )

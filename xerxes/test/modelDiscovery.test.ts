@@ -273,18 +273,18 @@ test("model discovery preserves provider-reported context metadata", async () =>
           new Response(
             JSON.stringify({
               data: [
-                { id: "k3", context_length: 262_144 },
+                { id: "k3", context_length: 262_144, max_output_tokens: 65_536 },
                 { id: "k3" },
-                { id: "wide", max_model_len: 1_000_000 },
-                { id: "invalid", context_window: -1 },
+                { id: "wide", max_model_len: 1_000_000, maxOutputTokens: 131_072 },
+                { id: "invalid", context_window: -1, max_tokens: 0 },
               ],
             }),
           ),
       },
     ),
   ).resolves.toEqual([
-    { id: "k3", contextLimit: 262_144 },
-    { id: "wide", contextLimit: 1_000_000 },
+    { id: "k3", contextLimit: 262_144, maxOutputTokens: 65_536 },
+    { id: "wide", contextLimit: 1_000_000, maxOutputTokens: 131_072 },
     { id: "invalid" },
   ]);
 
@@ -294,3 +294,36 @@ test("model discovery preserves provider-reported context metadata", async () =>
     }),
   ).toEqual([{ id: "camel", contextLimit: 32_768 }]);
 });
+
+test('anthropic-transport and versioned-root providers build the right discovery URL', () => {
+  expect(modelDiscoveryEndpoint('https://api.minimaxi.com/anthropic', 'minimax-cn'))
+    .toBe('https://api.minimaxi.com/anthropic/v1/models')
+  expect(modelDiscoveryEndpoint('https://ai-gateway.vercel.sh', 'vercel-ai-gateway'))
+    .toBe('https://ai-gateway.vercel.sh/v1/models')
+  expect(modelDiscoveryEndpoint('https://api.mistral.ai', 'mistral'))
+    .toBe('https://api.mistral.ai/v1/models')
+  expect(modelDiscoveryEndpoint('https://api.groq.com/openai/v1', 'groq'))
+    .toBe('https://api.groq.com/openai/v1/models')
+  expect(modelDiscoveryEndpoint('https://api.x.ai/v1', 'xai'))
+    .toBe('https://api.x.ai/v1/models')
+})
+
+test('anthropic-transport providers authenticate discovery with x-api-key', async () => {
+  const requests: { url: string; headers: Headers }[] = []
+  await discoverModelCatalog(
+    {
+      apiKey: 'mm-key',
+      baseUrl: 'https://api.minimaxi.com/anthropic',
+      provider: 'minimax-cn',
+    },
+    {
+      fetchImplementation: (async (input: RequestInfo | URL, init?: RequestInit) => {
+        requests.push({ url: String(input), headers: new Headers(init?.headers) })
+        return new Response(JSON.stringify({ data: [{ id: 'MiniMax-M2.7' }] }))
+      }) as typeof fetch,
+    },
+  )
+  expect(requests[0]?.headers.get('x-api-key')).toBe('mm-key')
+  expect(requests[0]?.headers.get('anthropic-version')).toBe('2023-06-01')
+  expect(requests[0]?.headers.get('authorization')).toBeNull()
+})

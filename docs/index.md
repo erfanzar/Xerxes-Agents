@@ -28,6 +28,7 @@ credentials without attempting a remote request.
 - [Configuration](configuration-guide.md)
 - [Deployment](deployment-guide.md)
 - [Testing](testing-guide.md)
+- [Goal mode](goal-mode.md)
 - [System architecture](system-architecture.md)
 - [API reference](api-reference.md)
 - [Release history](changelog.md)

@@ -40,6 +40,9 @@ agent:
     - HandoffTool
     - AskUserQuestionTool
     - SetInteractionModeTool
+    - get_goal
+    - create_goal
+    - update_goal
     - SkillTool
     - TodoWriteTool
     - ToolSearchTool

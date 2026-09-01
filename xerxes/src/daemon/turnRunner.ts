@@ -12,6 +12,7 @@ import {
 import { ToolResultStorage } from '../context/toolResultStorage.js'
 import { estimateContextTokens } from '../context/windowUsage.js'
 import { ValidationError } from '../core/errors.js'
+import { appendSkillSuggestion } from '../extensions/skillSuggestions.js'
 import {
   renderToolGuidance,
   type ToolExecutor,
@@ -23,6 +24,8 @@ import {
   persistedSubagentDeliveryValues,
   persistedSubagentSnapshotValues,
   replacePersistedSubagentDeliveries,
+  SUBAGENT_DELIVERY_METADATA_KEY,
+  SUBAGENT_SNAPSHOT_METADATA_KEY,
 } from '../agents/subagentPersistence.js'
 import { SUBAGENT_BLOCKED_TOOLS } from '../agents/subagentManager.js'
 import type { AgentSelfMemory } from '../memory/agentSelfMemory.js'
@@ -30,13 +33,10 @@ import { makeTurnIndexerHook } from '../memory/turnIndexer.js'
 import type { Memory } from '../memory/base.js'
 import type { SpawnedAgentSnapshot } from '../operators/subagents.js'
 import type { LlmClient } from '../llms/client.js'
-import { getContextLimit, type ProviderOverrides, retryPolicyForModel } from '../llms/providerRegistry.js'
+import { type ProviderOverrides, retryPolicyForModel } from '../llms/providerRegistry.js'
 import { agentNameForMode, modeSwitchHint, normalizeInteractionMode } from '../runtime/interactionModes.js'
-import {
-  readGoalLedger,
-  startGoalLedger,
-  updateGoalLedger,
-} from '../runtime/goalState.js'
+import { getGoal, type GoalView } from '../runtime/goalDomain.js'
+import { DEFAULT_BLOCKED_AFTER_CONSECUTIVE_ROUNDS, goalPolicyPrompt } from '../runtime/goalTools.js'
 import {
   mergeContextDeltas,
   renderContextDeltas,
@@ -88,14 +88,19 @@ export interface AgentTurnRunnerOptions {
   readonly memory?: Memory
   readonly memoryMinChars?: number
   readonly llm: LlmClient
+  /** Provider-reported context capacity for this profile/model; absent means unknown. */
+  readonly contextLimit?: number
+  /** Explicit runtime/profile request cap; wins over model metadata. */
   readonly maxTokens?: number
+  /** Per-turn model fallback used when maxTokens is not explicitly configured. */
+  readonly maxOutputTokens?: (model: string) => number | undefined
   readonly model: string
   readonly permissionBroker?: PermissionBroker
   /**
    * The connection's provider identity, threaded from the active profile.
    *
-   * `retryPolicyForModel` and `getContextLimit` resolve a provider from the
-   * model id when given nothing else, and an OpenRouter id like
+   * `retryPolicyForModel` resolves a provider from the model id when given
+   * nothing else, and an OpenRouter id like
    * `stealth/ox-alpha` carries a VENDOR before the slash, not a routing
    * prefix — so resolution threw `unknown provider prefix 'stealth'` on every
    * turn that used one. The active profile already knows the answer; this
@@ -161,6 +166,12 @@ export interface AgentTurnRunnerOptions {
    */
   readonly toolResultDirectory?: string
   readonly temperature?: number
+  /**
+   * Requested OpenAI service tier (`auto`/`default`/`flex`/`priority`).
+   * Responses-family transports send it as `service_tier`; the priced tier
+   * comes back from the provider in usage, never assumed from the request.
+   */
+  readonly serviceTier?: string
   readonly tools?: readonly ToolDefinition[]
   readonly topK?: number
   readonly topP?: number
@@ -220,6 +231,13 @@ export class AgentTurnRunner implements TurnRunner {
     state.metadata.project_root = projectRoot
     state.metadata.interaction_mode = session.interactionMode
     state.metadata.plan_mode = session.planMode
+    // Facts the goal tools authorise against. Written per turn because
+    // authority is a property of THIS turn, not of the session: a human turn
+    // may open or redefine a goal, while an automatic round may only conclude
+    // one. Evidence starts false so a completion claim cannot inherit proof
+    // from a previous turn.
+    state.metadata.goal_turn_round = controls.goalRound ?? undefined
+    state.metadata.goal_turn_human = controls.goalRound === undefined
     delete state.metadata.pending_interaction_mode
     const agent = this.options.agentDefinitions?.get(session.agentId)
     if (this.options.agentDefinitions && !agent) {
@@ -312,6 +330,10 @@ export class AgentTurnRunner implements TurnRunner {
       // rest do not exist — it answered "I can't use AgentTool, it's not in my
       // available tool list" rather than searching for it. The hiding half and
       // the discovery half only work as a pair.
+      goalPolicy: renderGoalLayer(
+        tools?.some(tool => tool.function.name === 'update_goal') ?? false,
+        getGoal(session.metadata, session.id),
+      ),
       deferredCatalog: renderDeferredCatalog(
         this.options.toolRegistry?.deferredToolLoading
           ? this.options.toolRegistry.deferredCatalog(session.agentId)
@@ -327,22 +349,6 @@ export class AgentTurnRunner implements TurnRunner {
         )
         : '',
     })
-    // Objective mode gets a durable goal ledger: the turn's own prompt is the
-    // goal statement on first entry, and every guarded round is accounted for
-    // across restarts instead of living only in this turn's locals.
-    if (session.interactionMode === 'objective') {
-      const now = Date.now()
-      const existing = readGoalLedger(session.metadata)
-      const started = startGoalLedger(session.metadata, { now, text: displayText })
-      const ledger = 'created' in started ? started.created : started.existing
-      const outcome = updateGoalLedger(session.metadata, ledger.revision, { roundDelta: 1 }, now)
-      if (!outcome.ok
-        && outcome.reason === 'stale'
-        && outcome.conflictWith !== undefined) {
-        // A concurrent writer advanced the ledger; retry once against its view.
-        updateGoalLedger(session.metadata, outcome.conflictWith.revision, { roundDelta: 1 }, now)
-      }
-    }
     // Fingerprint the assembled layers before the request fires: any later
     // "why did this turn behave differently?" is a metadata diff, not a guess.
     recordAssemblyProvenance(session.metadata, {
@@ -397,6 +403,7 @@ export class AgentTurnRunner implements TurnRunner {
       ? [{ type: 'text', text }, ...imageUrlContentParts(images)]
       : text
     let pendingAgentEventSnapshots: readonly SpawnedAgentSnapshot[] = []
+    const maxTokens = this.options.maxTokens ?? this.options.maxOutputTokens?.(model)
     try {
       const turnEvents = withActiveSession(session, runTurn({
         agentId: promptAgent?.name ?? session.agentId,
@@ -406,9 +413,10 @@ export class AgentTurnRunner implements TurnRunner {
         state,
         userMessage,
         querySource: 'main',
-        ...(this.options.maxTokens !== undefined ? { maxTokens: this.options.maxTokens } : {}),
+        ...(maxTokens === undefined ? {} : { maxTokens }),
         permissionMode,
         ...(this.options.temperature !== undefined ? { temperature: this.options.temperature } : {}),
+        ...(this.options.serviceTier !== undefined ? { serviceTier: this.options.serviceTier } : {}),
         ...(thinking === undefined ? {} : { thinking: { budgetTokens: thinking.budgetTokens, effort: thinking.effort } }),
         ...(this.options.topK !== undefined ? { topK: this.options.topK } : {}),
         ...(tools ? { tools } : {}),
@@ -454,6 +462,11 @@ export class AgentTurnRunner implements TurnRunner {
           : {}),
       }, signal))
       for await (const item of multiplexTurnEvents(turnEvents, this.options.subagentEvents, session.id)) {
+        // Agent tools persist their live manifest into the turn-local state.
+        // Mirror only those bounded manifest fields at every event boundary so
+        // session.status can report running children before the parent turn
+        // completes; the complete state still synchronizes in finally below.
+        synchronizeLiveSubagentMetadata(session, state)
         if (item.kind === 'subagent') {
           yield {
             type: item.event.type,
@@ -466,26 +479,15 @@ export class AgentTurnRunner implements TurnRunner {
           continue
         }
         const event = item.event
+        accumulateSessionTelemetry(session, event)
         auditStreamEvent(this.options.auditEmitter, event, auditContext, state)
         auditTurnEnded ||= event.type === 'turn_done'
-        // A guard-verified completion is the ledger's terminal transition.
-        if (event.type === 'turn_done' && event.reason === 'objective_verified') {
-          const ledger = readGoalLedger(session.metadata)
-          if (ledger && ledger.phase !== 'verified') {
-            const verification = updateGoalLedger(session.metadata, ledger.revision, { phase: 'verified' }, Date.now())
-            if (!verification.ok
-              && verification.reason === 'stale'
-              && verification.conflictWith !== undefined) {
-              updateGoalLedger(
-                session.metadata,
-                verification.conflictWith.revision,
-                { phase: 'verified' },
-                Date.now(),
-              )
-            }
-          }
-        }
-        yield daemonEventFromStream(event, state, session, this.options.providerOverrides)
+        yield daemonEventFromStream(
+          event,
+          state,
+          session,
+          this.options.contextLimit,
+        )
       }
     } catch (error) {
       if (resumedSubagent) resumedSubagentOutcome = signal.aborted ? 'cancelled' : 'error'
@@ -987,6 +989,23 @@ function renderDeferredCatalog(
   ].join('\n')
 }
 
+/**
+ * Goal policy plus the current goal, when the goal tools are on this surface.
+ *
+ * The live snapshot rides with the policy so the model does not have to spend a
+ * `get_goal` call to learn whether a goal exists — but the exact id and
+ * revision it must copy still come from that call, because this layer is
+ * assembled once per turn and a mutation mid-turn would make it stale.
+ */
+function renderGoalLayer(toolsVisible: boolean, goal: GoalView | undefined): string {
+  if (!toolsVisible) return ''
+  const policy = goalPolicyPrompt(DEFAULT_BLOCKED_AFTER_CONSECUTIVE_ROUNDS)
+  if (!goal) return `${policy}\n\nNo goal is set for this session.`
+  const blocked = goal.blockedReason ? ` Blocker: ${goal.blockedReason.message}` : ''
+  return `${policy}\n\nCurrent goal: ${JSON.stringify(goal.objective)} — phase ${goal.phase}, `
+    + `round ${goal.roundsStarted} of ${goal.maxGoalRounds}, ${goal.activation}.${blocked}`
+}
+
 /** Apply an agent's declared tool surface without exposing unregistered tools. */
 function toolsForAgent(
   available: readonly ToolDefinition[] | undefined,
@@ -1118,6 +1137,15 @@ function stateFromSession(session: DaemonSession): AgentState {
   return state
 }
 
+function synchronizeLiveSubagentMetadata(session: DaemonSession, state: AgentState): void {
+  for (const key of [SUBAGENT_SNAPSHOT_METADATA_KEY, SUBAGENT_DELIVERY_METADATA_KEY] as const) {
+    const value = state.metadata[key]
+    if (value !== undefined && session.metadata[key] !== value) {
+      session.metadata[key] = value
+    }
+  }
+}
+
 function synchronizeSessionState(session: DaemonSession, state: AgentState): void {
   session.apiCallsComplete = state.apiCallsComplete
   session.messages = state.messages.map(message => {
@@ -1204,12 +1232,70 @@ function isToolExecutionRecord(value: unknown): value is AgentState['toolExecuti
     && !Array.isArray(record.inputs)
 }
 
+interface SessionRuntimeTelemetry {
+  cacheHitRate: number
+  cacheReadTokens: number
+  cacheTelemetryKnown: boolean
+  inputTokens: number
+  llmDurationMs: number
+  llmSteps: number
+  toolDurationMs: number
+  toolSteps: number
+  tokensPerSecond: number
+  ttftSamples: number
+  ttftTotalMs: number
+}
+
+function accumulateSessionTelemetry(session: DaemonSession, event: StreamEvent): void {
+  if (event.type !== 'usage_update' && event.type !== 'tool_end') return
+  const raw = session.extra.runtime_telemetry
+  const stored = raw && typeof raw === 'object' && !Array.isArray(raw)
+    ? raw as Record<string, unknown>
+    : {}
+  const finite = (key: keyof SessionRuntimeTelemetry): number => {
+    const value = stored[key]
+    return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0
+  }
+  const telemetry: SessionRuntimeTelemetry = {
+    cacheHitRate: finite('cacheHitRate'),
+    cacheReadTokens: finite('cacheReadTokens'),
+    cacheTelemetryKnown: stored.cacheTelemetryKnown === true,
+    inputTokens: finite('inputTokens'),
+    llmDurationMs: finite('llmDurationMs'),
+    llmSteps: finite('llmSteps'),
+    toolDurationMs: finite('toolDurationMs'),
+    toolSteps: finite('toolSteps'),
+    tokensPerSecond: finite('tokensPerSecond'),
+    ttftSamples: finite('ttftSamples'),
+    ttftTotalMs: finite('ttftTotalMs'),
+  }
+  if (event.type === 'usage_update') {
+    telemetry.llmSteps += 1
+    telemetry.llmDurationMs += Math.max(0, event.durationMs ?? 0)
+    if (event.tokensPerSecond !== undefined) telemetry.tokensPerSecond = Math.max(0, event.tokensPerSecond)
+    if (event.usage.cacheReadTokens !== undefined) {
+      telemetry.cacheTelemetryKnown = true
+      telemetry.inputTokens += Math.max(0, event.usage.inputTokens)
+      telemetry.cacheReadTokens += Math.max(0, event.usage.cacheReadTokens)
+      const cacheDenominator = telemetry.inputTokens + telemetry.cacheReadTokens
+      if (cacheDenominator > 0) telemetry.cacheHitRate = telemetry.cacheReadTokens / cacheDenominator
+    }
+    if (event.ttftMs !== undefined) {
+      telemetry.ttftSamples += 1
+      telemetry.ttftTotalMs += Math.max(0, event.ttftMs)
+    }
+  } else {
+    telemetry.toolSteps += 1
+    telemetry.toolDurationMs += Math.max(0, event.result.durationMs)
+  }
+  session.extra.runtime_telemetry = telemetry
+}
+
 function daemonEventFromStream(
   event: StreamEvent,
   state: AgentState,
   session: DaemonSession,
-  // Passed rather than sniffed: see `TurnRunnerOptions.providerOverrides`.
-  providerOverrides?: ProviderOverrides
+  contextLimit?: number,
 ): DaemonEvent {
   switch (event.type) {
     case 'text':
@@ -1271,9 +1357,13 @@ function daemonEventFromStream(
           total_tokens: state.totalInputTokens + state.totalOutputTokens,
           context_tokens:
             event.usage.inputTokens + (event.usage.cacheReadTokens ?? 0) + event.usage.outputTokens,
-          max_context: getContextLimit(event.model, providerOverrides),
+          ...(typeof contextLimit === 'number' && contextLimit > 0 ? { max_context: contextLimit } : {}),
           ...(state.totalCacheReadTokens ? { cache_read_tokens: state.totalCacheReadTokens } : {}),
           ...(state.totalCacheCreationTokens ? { cache_creation_tokens: state.totalCacheCreationTokens } : {}),
+          ...(event.durationMs === undefined ? {} : { llm_duration_ms: event.durationMs }),
+          ...(event.ttftMs === undefined ? {} : { ttft_ms: event.ttftMs }),
+          ...(event.tokensPerSecond === undefined ? {} : { tokens_per_second: event.tokensPerSecond }),
+          ...(event.cacheHitRate === undefined ? {} : { cache_hit_rate: event.cacheHitRate }),
         },
       }
     case 'turn_done': {
@@ -1302,7 +1392,7 @@ function daemonEventFromStream(
           output_tokens: state.totalOutputTokens,
           total_tokens: state.totalInputTokens + state.totalOutputTokens,
           context_tokens: contextTokens,
-          max_context: getContextLimit(event.model, providerOverrides),
+          ...(typeof contextLimit === 'number' && contextLimit > 0 ? { max_context: contextLimit } : {}),
           mode: session.interactionMode,
           plan_mode: session.planMode,
           ...(state.totalCacheReadTokens ? { cache_read_tokens: state.totalCacheReadTokens } : {}),
@@ -1311,6 +1401,7 @@ function daemonEventFromStream(
       }
     }
     case 'skill_suggestion':
+      appendSkillSuggestion(state.metadata, event)
       return { type: 'notification', payload: { level: 'info', message: `Skill suggestion: ${event.skillName}`, skill: event } }
   }
 }

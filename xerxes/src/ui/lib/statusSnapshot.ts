@@ -26,7 +26,7 @@ export const DEFAULT_STATUS_SNAPSHOT: Readonly<StatusSnapshot> = {
   activeSkill: '',
   cacheReadTokens: 0,
   cacheWriteTokens: 0,
-  contextWindow: 200_000,
+  contextWindow: 0,
   costUsd: 0,
   durationSeconds: 0,
   inputTokens: 0,
@@ -133,10 +133,13 @@ export const formatStatus = (snapshot: StatusSnapshot): string => {
   }
 
   const extrasPart = extras.length > 0 ? ` | ${extras.join(' ')}` : ''
+  const contextPart = snapshot.contextWindow > 0
+    ? `${statusContextPercent(snapshot).toFixed(0)}% ctx`
+    : 'ctx unknown'
 
   return `${snapshot.model || '(no model)'} | ${compactStatusNumber(snapshot.inputTokens)}in/${compactStatusNumber(
     snapshot.outputTokens
-  )}out${cachePart} | $${snapshot.costUsd.toFixed(4)} | ${statusContextPercent(snapshot).toFixed(0)}% ctx | ${formatStatusDuration(
+  )}out${cachePart} | $${snapshot.costUsd.toFixed(4)} | ${contextPart} | ${formatStatusDuration(
     snapshot.durationSeconds
   )}${extrasPart}`
 }

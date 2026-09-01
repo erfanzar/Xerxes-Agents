@@ -104,9 +104,9 @@ export function SessionHeader({
         <Text wrap="truncate-end">
           <Span color={busy ? t.ds.working : t.ds.done}>{`${GLYPH.state} `}</Span>
           <Span color={t.ds.meta}>{busy ? 'working' : 'idle'}</Span>
+          <Span color={t.ds.rule}>{` ${GLYPH.sectionBreak} `}</Span>
           {max > 0 ? (
             <>
-              <Span color={t.ds.rule}>{` ${GLYPH.sectionBreak} `}</Span>
               {/* One answer to "how much context is left", in one place: the
                   bar for the glance, the numbers for the decision. It used
                   to be rendered beside the composer as well, on the row that
@@ -116,7 +116,9 @@ export function SessionHeader({
               <Span color={ctxBarColor(pressure, t)}>{fmtK(used)}</Span>
               <Span color={t.ds.meta}>{` / ${fmtK(max)} ctx`}</Span>
             </>
-          ) : null}
+          ) : (
+            <Span color={t.ds.meta}>ctx unknown</Span>
+          )}
         </Text>
       </Box>
     </Box>

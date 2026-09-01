@@ -28,6 +28,8 @@ export interface ContextAssemblyInput {
   readonly agentPrompt: string
   /** Stable: per-tool usage-policy sections for exactly the visible surface. */
   readonly toolGuidance: string
+  /** Stable: goal policy and the session's current goal, when goal tools are visible. */
+  readonly goalPolicy?: string
   /** Stable: names of tools that exist but are not in this request's schemas. */
   readonly deferredCatalog?: string
   /** Stable: interaction-mode switch hint for the current mode. */
@@ -59,6 +61,7 @@ export function assembleContextLayers(input: ContextAssemblyInput): SystemPrompt
     { name: 'bootstrap', text: input.bootstrap },
     { name: 'agent', text: input.agentPrompt },
     { name: 'tool_guidance', text: input.toolGuidance },
+    { name: 'goal_policy', text: input.goalPolicy ?? '' },
     { name: 'deferred_catalog', text: input.deferredCatalog ?? '' },
     { name: 'mode_hint', text: input.modeHint },
     { name: 'subagent_join', text: input.subagentJoin },

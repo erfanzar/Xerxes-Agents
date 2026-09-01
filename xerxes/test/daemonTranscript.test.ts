@@ -13,8 +13,24 @@ import {
   DaemonTranscriptStore,
   normalizeDaemonTranscript,
   repairToolPairs,
+  transcriptHasHistory,
 } from '../src/session/daemonTranscript.js'
 import { transcriptTurnStartedEvent } from '../src/session/transcriptEventLog.js'
+
+test('transcriptHasHistory counts only completed exchanges, not dangling prompts', () => {
+  // A fresh session that never sent anything is not history.
+  expect(transcriptHasHistory({ messages: [], turnCount: 0 })).toBeFalse()
+  // A dangling prompt — a turn that died before any reply — is not either:
+  // this is the shape that used to litter listings with phantom sessions.
+  expect(transcriptHasHistory({ messages: [{ role: 'user', content: 'hello' }], turnCount: 0 })).toBeFalse()
+  // One assistant reply makes it a real conversation.
+  expect(transcriptHasHistory({
+    messages: [{ role: 'user', content: 'hello' }, { role: 'assistant', content: 'hi' }],
+    turnCount: 0,
+  })).toBeTrue()
+  // Completed turns count even if the message list is out of sync.
+  expect(transcriptHasHistory({ messages: [], turnCount: 3 })).toBeTrue()
+})
 
 test('daemon transcript normalizer repairs only orphaned contiguous tool calls', () => {
   const repaired = repairToolPairs([

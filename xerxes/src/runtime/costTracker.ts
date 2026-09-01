@@ -64,9 +64,22 @@ export interface RecordTurnOptions {
   readonly agentId?: string
   readonly cacheCreationTokens?: number
   readonly cacheReadTokens?: number
+  /**
+   * Provider-served OpenAI service tier. `flex` prices at 0.5× and
+   * `priority` at 2× (2.5× for gpt-5.5), matching pi-ai's multipliers;
+   * unknown/absent tiers leave pricing untouched.
+   */
+  readonly serviceTier?: string
   readonly sessionId?: string
   readonly source?: QuerySource
   readonly timestamp?: string
+}
+
+/** pi-ai's per-tier cost multipliers; reconciled against the served tier, not the request. */
+export function serviceTierMultiplier(model: string, serviceTier: string | undefined): number {
+  if (serviceTier === 'flex') return 0.5
+  if (serviceTier === 'priority') return model.replace(/^.*\//, '') === 'gpt-5.5' ? 2.5 : 2
+  return 1
 }
 
 export interface RecordRawOptions {
@@ -269,6 +282,7 @@ export class CostTracker {
     const cacheReadTokens = tokenCount(options.cacheReadTokens ?? 0, 'cacheReadTokens')
     const cacheCreationTokens = tokenCount(options.cacheCreationTokens ?? 0, 'cacheCreationTokens')
     const baseCost = finiteNumber(this.calculator(validatedModel, validatedInput, validatedOutput), 'calculated cost')
+    const tierMultiplier = serviceTierMultiplier(validatedModel, options.serviceTier)
     let cacheCost = 0
     if (cacheReadTokens || cacheCreationTokens) {
       const inputProbe = finiteNumber(this.calculator(validatedModel, PRICING_PROBE_TOKENS, 0), 'input pricing')
@@ -280,7 +294,7 @@ export class CostTracker {
       model: validatedModel,
       inputTokens: validatedInput,
       outputTokens: validatedOutput,
-      costUsd: baseCost + cacheCost,
+      costUsd: (baseCost + cacheCost) * tierMultiplier,
       label: stringValue(label, 'label'),
       timestamp: options.timestamp ?? this.nowTimestamp(),
       cacheReadTokens,

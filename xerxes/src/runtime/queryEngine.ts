@@ -150,6 +150,7 @@ export class QueryEngine {
               ...(event.usage.cacheCreationTokens === undefined
                 ? {}
                 : { cacheCreationTokens: event.usage.cacheCreationTokens }),
+              ...(event.usage.serviceTier === undefined ? {} : { serviceTier: event.usage.serviceTier }),
             },
           )
         }

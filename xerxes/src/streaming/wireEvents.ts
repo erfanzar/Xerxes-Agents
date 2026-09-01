@@ -82,13 +82,17 @@ export interface ToolResultPayload extends WireRecord {
 
 /** Status payloads vary between streamed turns and daemon startup; known fields are validated when present. */
 export interface StatusUpdatePayload extends WireRecord {
+  readonly cache_hit_rate?: number
   readonly context_tokens?: number
+  readonly llm_duration_ms?: number
   readonly max_context?: number
   readonly mcp_status?: WireRecord
   readonly mode?: string
   readonly model?: string
   readonly plan_mode?: boolean
   readonly reasoning_effort?: string
+  readonly tokens_per_second?: number
+  readonly ttft_ms?: number
   readonly usage?: WireRecord
 }
 
@@ -248,7 +252,14 @@ function validatePayload(eventType: WireEventName, payload: WireRecord): KnownWi
       }
     case 'status_update':
       validateOptionalText(payload, ['model', 'mode', 'reasoning_effort'])
-      validateOptionalFiniteNumbers(payload, ['context_tokens', 'max_context'])
+      validateOptionalFiniteNumbers(payload, [
+        'cache_hit_rate',
+        'context_tokens',
+        'llm_duration_ms',
+        'max_context',
+        'tokens_per_second',
+        'ttft_ms',
+      ])
       validateOptionalBoolean(payload, 'plan_mode')
       validateOptionalRecord(payload, ['mcp_status', 'usage'])
       return { event_type: eventType, payload: copyRecord(payload) }

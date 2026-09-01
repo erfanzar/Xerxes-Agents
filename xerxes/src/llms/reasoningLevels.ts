@@ -16,6 +16,7 @@
  * the shape that provider documents.
  */
 
+import { piCatalogModelCapabilities } from './piModelCatalog.js'
 import type { ProviderName } from './providerRegistry.js'
 
 /**
@@ -40,6 +41,13 @@ export interface ReasoningLevelSet {
   readonly shape: ReasoningShape
   /** `provider` when the model itself reported these, `fallback` otherwise. */
   readonly source: 'fallback' | 'provider'
+  /**
+   * Whether `off` is a real choice. Models whose thinking-level map marks
+   * `off: null` (always-on adaptive thinking, e.g. Kimi K3) cannot disable
+   * reasoning, and offering the switch would lie (pi-ai getSupportedThinkingLevels
+   * filters the rung the same way).
+   */
+  readonly canDisable?: boolean
 }
 
 /**
@@ -81,7 +89,11 @@ interface FallbackEntry {
 
 const EFFORT_FALLBACK: FallbackEntry = { defaultEffort: 'medium', levels: GRADED, shape: 'effort' }
 const BUDGET_FALLBACK: FallbackEntry = { defaultEffort: 'medium', levels: BUDGETED, shape: 'effort' }
-const TOGGLE_FALLBACK: FallbackEntry = { defaultEffort: REASONING_ON, levels: TOGGLE, shape: 'toggle' }
+// No claimed default: whether a toggle provider starts with thinking on is a
+// server-side fact we do not know from the provider name alone, and showing
+// "default on" while the session runs off is exactly the lie this table used
+// to tell.
+const TOGGLE_FALLBACK: FallbackEntry = { defaultEffort: undefined, levels: TOGGLE, shape: 'toggle' }
 const INHERENT_FALLBACK: FallbackEntry = { defaultEffort: undefined, levels: [], shape: 'inherent' }
 
 /**
@@ -138,12 +150,71 @@ export function providerReasoningLevels(
   return { defaultEffort, levels, shape: 'effort', source: 'provider' }
 }
 
+/**
+ * pi-ai's full effort ladder (models.js EXTENDED_THINKING_LEVELS), minus the
+ * Xerxes-side `off` switch that {@link selectableEfforts} prepends.
+ */
+const EXTENDED_THINKING_LEVELS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
+
+const LEVEL_DESCRIPTIONS: Readonly<Record<string, string>> = {
+  minimal: 'Bare minimum reasoning; fastest with thinking on',
+  low: 'Fast responses with lighter reasoning',
+  medium: 'Balances speed and reasoning depth',
+  high: 'Greater reasoning depth for complex problems',
+  xhigh: 'Deepest extended reasoning',
+  max: 'Maximum reasoning the model supports',
+}
+
+/**
+ * Per-model reasoning levels exactly as pi-ai derives them
+ * (getSupportedThinkingLevels): a non-reasoning model has nothing to select;
+ * a reasoning model offers the ladder filtered by its thinking-level map —
+ * a `null` mapping disables the rung, and `xhigh`/`max` exist only when the
+ * map names them explicitly. The catalog entry is authoritative, so the set
+ * reports `source: 'provider'`.
+ */
+export function catalogReasoningLevels(
+  model: string,
+  providerName: ProviderName | undefined,
+): ReasoningLevelSet | undefined {
+  if (!providerName || !model.trim()) return undefined
+  const capabilities = piCatalogModelCapabilities(model, providerName)
+  if (!capabilities) return undefined
+  if (!capabilities.reasoning) {
+    return { defaultEffort: undefined, levels: [], shape: 'inherent', source: 'provider', canDisable: false }
+  }
+  const map = capabilities.thinkingLevelMap
+  const canDisable = map?.off !== null
+  const levels: ReasoningLevel[] = EXTENDED_THINKING_LEVELS
+    .filter(level => {
+      const mapped = map?.[level]
+      if (mapped === null) return false
+      if (level === 'xhigh' || level === 'max') return mapped !== undefined
+      return true
+    })
+    .map(effort => ({
+      effort,
+      ...(LEVEL_DESCRIPTIONS[effort] === undefined ? {} : { description: LEVEL_DESCRIPTIONS[effort] }),
+    }))
+  if (!levels.length) {
+    return { defaultEffort: undefined, levels: [], shape: 'inherent', source: 'provider', canDisable }
+  }
+  const defaultEffort = levels.some(level => level.effort === 'medium')
+    ? 'medium'
+    : levels[Math.floor((levels.length - 1) / 2)]?.effort
+  return { defaultEffort, levels, shape: 'effort', source: 'provider', canDisable }
+}
+
 /** Every value the user may select, including the Xerxes-side off switch. */
 export function selectableEfforts(set: ReasoningLevelSet): readonly string[] {
   // An `inherent` provider offers nothing to select: presenting `off` alone
   // would imply reasoning can be disabled, which it cannot.
   if (set.shape === 'inherent') {
     return []
+  }
+  // Always-on models (thinking map marks off: null) get no off row either.
+  if (set.canDisable === false) {
+    return set.levels.map(level => level.effort)
   }
   return [REASONING_OFF, ...set.levels.map(level => level.effort)]
 }
@@ -158,8 +229,31 @@ export function resolveEffort(set: ReasoningLevelSet, requested: string): string
   const clean = requested.trim().toLowerCase()
   if (!clean) return undefined
   if (set.shape === 'inherent') return undefined
-  if (clean === REASONING_OFF) return REASONING_OFF
+  if (clean === REASONING_OFF) return set.canDisable === false ? undefined : REASONING_OFF
   return set.levels.find(level => level.effort.toLowerCase() === clean)?.effort
+}
+
+/**
+ * Clamp a known ladder word to the nearest rung the model actually offers
+ * (pi-ai clampThinkingLevel): search upward first, then downward. Unknown
+ * words still resolve to `undefined` so a typo stays a usage error rather
+ * than silently becoming a different effort.
+ */
+export function clampEffort(set: ReasoningLevelSet, requested: string): string | undefined {
+  if (set.shape !== 'effort' || !set.levels.length) return undefined
+  const clean = requested.trim().toLowerCase()
+  if (!EXTENDED_THINKING_LEVELS.some(level => level === clean)) return undefined
+  const available = set.levels.map(level => level.effort)
+  const at = EXTENDED_THINKING_LEVELS.indexOf(clean as (typeof EXTENDED_THINKING_LEVELS)[number])
+  for (let index = at; index < EXTENDED_THINKING_LEVELS.length; index++) {
+    const candidate = EXTENDED_THINKING_LEVELS[index]
+    if (candidate && available.includes(candidate)) return candidate
+  }
+  for (let index = at - 1; index >= 0; index--) {
+    const candidate = EXTENDED_THINKING_LEVELS[index]
+    if (candidate && available.includes(candidate)) return candidate
+  }
+  return available[0]
 }
 
 /**

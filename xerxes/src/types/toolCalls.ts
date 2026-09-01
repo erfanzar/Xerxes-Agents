@@ -15,6 +15,13 @@ export interface FunctionDefinition {
 }
 
 export interface ToolDefinition {
+  /**
+   * Grammar-constrained sampling declaration (pi-ai parity). When the target
+   * model's compat flags support OpenAI grammar tools, adapters serialize the
+   * tool as a `custom` grammar tool instead of a function tool; `false` or
+   * absent keeps the ordinary function-tool path.
+   */
+  readonly constrainedSampling?: false | { readonly type: 'grammar'; readonly variants: Partial<Record<'openai_lark' | 'openai_regex', string>> }
   readonly type: 'function'
   readonly function: FunctionDefinition
 }
@@ -38,6 +45,16 @@ export interface OpenAiToolCall {
   readonly function: {
     readonly name: string
     readonly arguments: string
+  }
+}
+
+/** Chat-completions replay shape for a grammar-constrained custom tool call (pi-ai parity). */
+export interface OpenAiCustomToolCall {
+  readonly id: string
+  readonly type: 'custom'
+  readonly custom: {
+    readonly name: string
+    readonly input: string
   }
 }
 
@@ -90,6 +107,27 @@ export function toolCallToOpenAi(value: ToolCall): OpenAiToolCall {
       name: value.function.name,
       arguments: JSON.stringify(value.function.arguments),
     },
+  }
+}
+
+/**
+ * Replay a grammar custom tool call. The raw constrained text must still live
+ * under the tool's declared input property; a corrupted record throws loudly
+ * instead of being re-serialized as a function call the provider never made.
+ */
+export function toolCallToOpenAiCustom(value: ToolCall, inputProperty: string): OpenAiCustomToolCall {
+  const input = value.function.arguments[inputProperty]
+  if (typeof input !== 'string') {
+    throw new ValidationError(
+      'tool_call',
+      `grammar tool call "${value.function.name}" requires argument "${inputProperty}" to be a string`,
+      value.function.arguments,
+    )
+  }
+  return {
+    id: value.id,
+    type: 'custom',
+    custom: { name: value.function.name, input },
   }
 }
 

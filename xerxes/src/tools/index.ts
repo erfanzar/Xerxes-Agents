@@ -15,6 +15,7 @@ import { registerCodingTools } from './codingTools.js'
 import { registerDataTools } from './dataTools.js'
 import { registerFileTools } from './fileTools.js'
 import { registerHomeAssistantTools, type HomeAssistantToolsOptions } from './homeAssistantTools.js'
+import { registerGenerateImageTool, type GenerateImageToolOptions } from './imageGen.js'
 import { registerSearchHistoryTool, type SearchHistoryTool } from './history.js'
 import { registerMathTools } from './mathTools.js'
 import { registerMediaTools, type MediaToolPorts } from './mediaTools.js'
@@ -49,6 +50,7 @@ export * from './fileTools.js'
 export * from './googleSearch.js'
 export * from './history.js'
 export * from './homeAssistantTools.js'
+export * from './imageGen.js'
 export * from './imageGeneration.js'
 export * from './mathTools.js'
 export * from './mediaHttp.js'
@@ -113,6 +115,12 @@ export interface CoreToolsOptions {
   readonly includeWebTools?: boolean
   /** Home Assistant is registered only after a host supplies an explicit client or resolver. */
   readonly homeAssistantTools?: HomeAssistantToolsOptions
+  /**
+   * Catalogued image generation (OpenRouter-style chat-modality image APIs).
+   * Registered only when a host supplies a credential resolver and workspace
+   * root; the credential itself is resolved per call, never captured.
+   */
+  readonly generateImageTool?: GenerateImageToolOptions
   /** History search requires a host-owned index or session store wrapper. */
   readonly historyTool?: SearchHistoryTool
   /** Media tools are registered only for explicitly configured provider ports. */
@@ -192,6 +200,9 @@ export function registerCoreTools(registry: ToolRegistry, options: CoreToolsOpti
   }
   if (options.homeAssistantTools !== undefined) {
     registerHomeAssistantTools(registry, options.homeAssistantTools)
+  }
+  if (options.generateImageTool !== undefined) {
+    registerGenerateImageTool(registry, options.generateImageTool)
   }
   if (options.historyTool !== undefined) {
     registerSearchHistoryTool(registry, options.historyTool)

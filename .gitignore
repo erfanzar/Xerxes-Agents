@@ -35,3 +35,8 @@ tmp-files/
 *.log
 
 xerxes/dist/
+
+# Local agent working artifacts (plans, design renders, audit notes).
+.xerxes/
+design/
+PUBLISH-AUDIT.md

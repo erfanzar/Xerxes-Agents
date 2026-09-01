@@ -9,7 +9,12 @@ test('Responses API translator streams text and thinking while assembling functi
   const translator = new ResponsesEventTranslator()
   const deltas = [...translator.translateAll([
     { type: 'response.output_text.delta', delta: 'I will inspect it.' },
-    { type: 'response.reasoning.delta', delta: 'Need the project file.' },
+    { type: 'response.reasoning_summary_text.delta', delta: 'Need the project file.' },
+    { type: 'response.reasoning_summary_part.done' },
+    {
+      type: 'response.output_item.done',
+      item: { type: 'reasoning', id: 'rs_1', summary: [{ type: 'summary_text', text: 'Need the project file.' }] },
+    },
     {
       type: 'response.output_item.added',
       item: { type: 'function_call', id: 'item_1', call_id: 'call_1', name: 'ReadFile' },
@@ -37,6 +42,14 @@ test('Responses API translator streams text and thinking while assembling functi
   expect(deltas).toEqual([
     { content: 'I will inspect it.' },
     { thinking: 'Need the project file.' },
+    { thinking: '\n\n' },
+    {
+      thinkingSignature: JSON.stringify({
+        type: 'reasoning',
+        id: 'rs_1',
+        summary: [{ type: 'summary_text', text: 'Need the project file.' }],
+      }),
+    },
     {
       finishReason: 'tool_calls',
       // input_tokens 12 includes the 3 cached, so fresh is 9 and the pair

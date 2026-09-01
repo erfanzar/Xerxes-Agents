@@ -24,14 +24,7 @@ export const DEFAULT_RETRY_POLICY: ProviderRetryPolicy = Object.freeze({
 export interface ProviderConfig {
   readonly apiKeyEnv?: string
   readonly baseUrl?: string
-  readonly contextLimit: number
   readonly defaultApiKey?: string
-  /**
-   * Largest completion this provider will emit for one request. The context
-   * window has to hold the prompt *and* the reply, so a prompt measured
-   * against `contextLimit` alone is already over budget by this much.
-   */
-  readonly maxOutput: number
   readonly name: string
   /** Route-specific transient-failure patience; absent means the default policy. */
   readonly retry?: ProviderRetryPolicy
@@ -44,19 +37,15 @@ const provider = (
   options: Omit<ProviderConfig, 'name' | 'transport'>,
 ): ProviderConfig => ({ name, transport, ...options })
 
-/** Provider connection and routing metadata. Model catalogs are discovered live. */
+/** Provider connection and routing metadata; model capacities live in the Pi catalog layer. */
 export const PROVIDERS = {
   anthropic: provider('anthropic', 'anthropic', {
     apiKeyEnv: 'ANTHROPIC_API_KEY',
     baseUrl: 'https://api.anthropic.com',
-    contextLimit: 200_000,
-    maxOutput: 64_000,
   }),
   openai: provider('openai', 'openai', {
     apiKeyEnv: 'OPENAI_API_KEY',
     baseUrl: 'https://api.openai.com/v1',
-    contextLimit: 128_000,
-    maxOutput: 32_000,
   }),
   // Subscription-backed: a ChatGPT Plus/Pro/Business plan authorizes this
   // endpoint with an OAuth session, so it has no API-key environment variable.
@@ -64,67 +53,185 @@ export const PROVIDERS = {
   // route carries more patience than the default before giving up.
   'openai-codex': provider('openai-codex', 'openai', {
     baseUrl: 'https://chatgpt.com/backend-api/codex',
-    contextLimit: 272_000,
-    maxOutput: 128_000,
     retry: { delaysMs: [2_000, 5_000, 10_000], maxSuggestedDelayMs: 60_000 },
+  }),
+  // Subscription-backed like Codex: the GitHub OAuth device flow mints a
+  // short-lived proxy token, and the api host derives from that token's
+  // proxy-ep claim (copilotApiBase) rather than this static default.
+  'github-copilot': provider('github-copilot', 'openai', {
+    apiKeyEnv: 'COPILOT_GITHUB_TOKEN',
+    baseUrl: 'https://api.individual.githubcopilot.com',
+  }),
+  // Deployment-scoped: the base URL comes from AZURE_OPENAI_RESOURCE_NAME or
+  // base_url and the model id maps to a deployment name, so there is no
+  // meaningful static default here.
+  azure: provider('azure', 'openai', {
+    apiKeyEnv: 'AZURE_OPENAI_API_KEY',
+  }),
+  // AWS-backed: SigV4/bearer auth and the SDK credential chain resolve inside
+  // the Bedrock adapter; this endpoint is only the default pin when neither
+  // AWS_REGION nor AWS_PROFILE is configured (pi-ai endpoint rules).
+  'amazon-bedrock': provider('amazon-bedrock', 'openai', {
+    baseUrl: 'https://bedrock-runtime.us-east-1.amazonaws.com',
+  }),
+  groq: provider('groq', 'openai', {
+    apiKeyEnv: 'GROQ_API_KEY',
+    baseUrl: 'https://api.groq.com/openai/v1',
+  }),
+  xai: provider('xai', 'openai', {
+    apiKeyEnv: 'XAI_API_KEY',
+    baseUrl: 'https://api.x.ai/v1',
+  }),
+  cerebras: provider('cerebras', 'openai', {
+    apiKeyEnv: 'CEREBRAS_API_KEY',
+    baseUrl: 'https://api.cerebras.ai/v1',
+  }),
+  together: provider('together', 'openai', {
+    apiKeyEnv: 'TOGETHER_API_KEY',
+    baseUrl: 'https://api.together.ai/v1',
+  }),
+  baseten: provider('baseten', 'openai', {
+    apiKeyEnv: 'BASETEN_API_KEY',
+    baseUrl: 'https://inference.baseten.co/v1',
+  }),
+  huggingface: provider('huggingface', 'openai', {
+    apiKeyEnv: 'HF_TOKEN',
+    baseUrl: 'https://router.huggingface.co/v1',
+  }),
+  nvidia: provider('nvidia', 'openai', {
+    apiKeyEnv: 'NVIDIA_API_KEY',
+    baseUrl: 'https://integrate.api.nvidia.com/v1',
+  }),
+  // Moonshot's international host; the 'kimi' provider is the .cn host.
+  moonshotai: provider('moonshotai', 'openai', {
+    apiKeyEnv: 'MOONSHOT_API_KEY',
+    baseUrl: 'https://api.moonshot.ai/v1',
+  }),
+  'moonshotai-cn': provider('moonshotai-cn', 'openai', {
+    apiKeyEnv: 'MOONSHOT_API_KEY',
+    baseUrl: 'https://api.moonshot.cn/v1',
+  }),
+  'zai-coding-cn': provider('zai-coding-cn', 'openai', {
+    apiKeyEnv: 'ZAI_CODING_CN_API_KEY',
+    baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4',
+  }),
+  'qwen-token-plan': provider('qwen-token-plan', 'openai', {
+    apiKeyEnv: 'QWEN_TOKEN_PLAN_API_KEY',
+    baseUrl: 'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1',
+  }),
+  'qwen-token-plan-cn': provider('qwen-token-plan-cn', 'openai', {
+    apiKeyEnv: 'QWEN_TOKEN_PLAN_CN_API_KEY',
+    baseUrl: 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+  }),
+  'qwen-token-plan-individual': provider('qwen-token-plan-individual', 'openai', {
+    apiKeyEnv: 'QWEN_TOKEN_PLAN_API_KEY',
+    baseUrl: 'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1',
+  }),
+  xiaomi: provider('xiaomi', 'openai', {
+    apiKeyEnv: 'XIAOMI_API_KEY',
+    baseUrl: 'https://api.xiaomimimo.com/v1',
+  }),
+  'xiaomi-token-plan-ams': provider('xiaomi-token-plan-ams', 'openai', {
+    apiKeyEnv: 'XIAOMI_TOKEN_PLAN_AMS_API_KEY',
+    baseUrl: 'https://token-plan-ams.xiaomimimo.com/v1',
+  }),
+  'xiaomi-token-plan-cn': provider('xiaomi-token-plan-cn', 'openai', {
+    apiKeyEnv: 'XIAOMI_TOKEN_PLAN_CN_API_KEY',
+    baseUrl: 'https://token-plan-cn.xiaomimimo.com/v1',
+  }),
+  'xiaomi-token-plan-sgp': provider('xiaomi-token-plan-sgp', 'openai', {
+    apiKeyEnv: 'XIAOMI_TOKEN_PLAN_SGP_API_KEY',
+    baseUrl: 'https://token-plan-sgp.xiaomimimo.com/v1',
+  }),
+  'ant-ling': provider('ant-ling', 'openai', {
+    apiKeyEnv: 'ANT_LING_API_KEY',
+    baseUrl: 'https://api.ant-ling.com/v1',
+  }),
+  // Anthropic-messages hosts (pi-ai serves these through the Anthropic protocol).
+  'minimax-cn': provider('minimax-cn', 'anthropic', {
+    apiKeyEnv: 'MINIMAX_CN_API_KEY',
+    baseUrl: 'https://api.minimaxi.com/anthropic',
+  }),
+  'vercel-ai-gateway': provider('vercel-ai-gateway', 'anthropic', {
+    apiKeyEnv: 'AI_GATEWAY_API_KEY',
+    baseUrl: 'https://ai-gateway.vercel.sh',
+  }),
+  // Multi-API gateways: the transport is decided per model from the catalog
+  // entry's api field (see MULTI_API_PROVIDERS in client.ts).
+  fireworks: provider('fireworks', 'openai', {
+    apiKeyEnv: 'FIREWORKS_API_KEY',
+    baseUrl: 'https://api.fireworks.ai/inference/v1',
+  }),
+  opencode: provider('opencode', 'openai', {
+    apiKeyEnv: 'OPENCODE_API_KEY',
+    baseUrl: 'https://opencode.ai/zen/v1',
+  }),
+  'opencode-go': provider('opencode-go', 'openai', {
+    apiKeyEnv: 'OPENCODE_API_KEY',
+    baseUrl: 'https://opencode.ai/zen/go/v1',
+  }),
+  // Account-templated gateway: the concrete base URL is resolved from
+  // CLOUDFLARE_ACCOUNT_ID/CLOUDFLARE_GATEWAY_ID (or base_url) per API family.
+  'cloudflare-ai-gateway': provider('cloudflare-ai-gateway', 'openai', {
+    apiKeyEnv: 'CLOUDFLARE_API_KEY',
+  }),
+  // Pi's own gateway: the wire protocol is pi-messages (see llms/piMessages.ts)
+  // and the model catalog is live (radiusGateway.ts), not static.
+  radius: provider('radius', 'openai', {
+    apiKeyEnv: 'RADIUS_API_KEY',
+    baseUrl: 'https://radius.pi.dev',
   }),
   openrouter: provider('openrouter', 'openai', {
     apiKeyEnv: 'OPENROUTER_API_KEY',
     baseUrl: 'https://openrouter.ai/api/v1',
-    contextLimit: 1_000_000,
-    maxOutput: 32_000,
   }),
   'claude-code': provider('claude-code', 'claude-code', {
     baseUrl: 'claude-code://local',
-    contextLimit: 200_000,
-    maxOutput: 64_000,
   }),
   gemini: provider('gemini', 'openai', {
     apiKeyEnv: 'GEMINI_API_KEY',
     baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai/',
-    contextLimit: 1_000_000,
-    maxOutput: 65_536,
   }),
   kimi: provider('kimi', 'openai', {
     apiKeyEnv: 'MOONSHOT_API_KEY',
     baseUrl: 'https://api.moonshot.cn/v1',
-    contextLimit: 128_000,
-    maxOutput: 8_192,
   }),
   'kimi-code': provider('kimi-code', 'openai', {
     apiKeyEnv: 'KIMI_CODE_API_KEY',
     baseUrl: 'https://api.kimi.com/coding/v1',
-    contextLimit: 262_144,
-    maxOutput: 32_000,
+  }),
+  // Auth is GCP Application Default Credentials (or a Vertex express API
+  // key), not a registry-managed API key, so there is no apiKeyEnv here.
+  'google-vertex': provider('google-vertex', 'openai', {
+    baseUrl: 'https://aiplatform.googleapis.com',
+  }),
+  mistral: provider('mistral', 'openai', {
+    apiKeyEnv: 'MISTRAL_API_KEY',
+    baseUrl: 'https://api.mistral.ai',
+  }),
+  // The endpoint is account-scoped: the base URL is materialized from
+  // CLOUDFLARE_ACCOUNT_ID at client construction, not stored statically.
+  'cloudflare-workers-ai': provider('cloudflare-workers-ai', 'openai', {
+    apiKeyEnv: 'CLOUDFLARE_API_KEY',
   }),
   qwen: provider('qwen', 'openai', {
     apiKeyEnv: 'DASHSCOPE_API_KEY',
     baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-    contextLimit: 1_000_000,
-    maxOutput: 32_000,
   }),
   zhipu: provider('zhipu', 'openai', {
     apiKeyEnv: 'ZHIPU_API_KEY',
     baseUrl: 'https://api.z.ai/api/coding/paas/v4',
-    contextLimit: 128_000,
-    maxOutput: 32_000,
   }),
   deepseek: provider('deepseek', 'openai', {
     apiKeyEnv: 'DEEPSEEK_API_KEY',
     baseUrl: 'https://api.deepseek.com/v1',
-    contextLimit: 64_000,
-    maxOutput: 8_192,
   }),
   minimax: provider('minimax', 'openai', {
     apiKeyEnv: 'MINIMAX_API_KEY',
     baseUrl: 'https://api.minimax.io/v1',
-    contextLimit: 128_000,
-    maxOutput: 32_000,
   }),
   ollama: provider('ollama', 'openai', {
     baseUrl: 'http://localhost:11434/v1',
-    contextLimit: 128_000,
-    maxOutput: 8_192,
     defaultApiKey: 'ollama',
     // A local daemon either answers or is down; long cloud-style backoffs just
     // stall the turn in front of a user who can see the server.
@@ -132,18 +239,11 @@ export const PROVIDERS = {
   }),
   lmstudio: provider('lmstudio', 'openai', {
     baseUrl: 'http://localhost:1234/v1',
-    contextLimit: 128_000,
-    maxOutput: 8_192,
     defaultApiKey: 'lm-studio',
     retry: { delaysMs: [250, 500], maxSuggestedDelayMs: 5_000 },
   }),
   custom: provider('custom', 'openai', {
     apiKeyEnv: 'CUSTOM_API_KEY',
-    // A custom endpoint has no trustworthy static context ceiling. Its live
-    // `/models` metadata is authoritative; until discovery succeeds, report
-    // the limit as unknown instead of pretending it is OpenAI's default.
-    contextLimit: 0,
-    maxOutput: 8_192,
   }),
 } as const satisfies Record<string, ProviderConfig>
 
@@ -213,6 +313,36 @@ const PROVIDER_ALIASES: Readonly<Record<string, ProviderName>> = {
   codex: 'openai-codex',
   'chatgpt': 'openai-codex',
   'openai_codex': 'openai-codex',
+  copilot: 'github-copilot',
+  'gh-copilot': 'github-copilot',
+  'github_copilot': 'github-copilot',
+  'azure-openai': 'azure',
+  'azure_openai': 'azure',
+  'azure-openai-responses': 'azure',
+  bedrock: 'amazon-bedrock',
+  aws: 'amazon-bedrock',
+  'amazon_bedrock': 'amazon-bedrock',
+  groqcloud: 'groq',
+  'x-ai': 'xai',
+  'hf': 'huggingface',
+  'hugging-face': 'huggingface',
+  moonshot: 'moonshotai',
+  'moonshot-cn': 'moonshotai-cn',
+  'moonshotai_cn': 'moonshotai-cn',
+  'zai-coding': 'zai-coding-cn',
+  bigmodel: 'zai-coding-cn',
+  vercel: 'vercel-ai-gateway',
+  'vercel_gateway': 'vercel-ai-gateway',
+  'minimax_cn': 'minimax-cn',
+  'opencode-zen': 'opencode',
+  cloudflare: 'cloudflare-ai-gateway',
+  'cf-ai-gateway': 'cloudflare-ai-gateway',
+  'pi-gateway': 'radius',
+  vertex: 'google-vertex',
+  'google_vertex': 'google-vertex',
+  'workers-ai': 'cloudflare-workers-ai',
+  'workers_ai': 'cloudflare-workers-ai',
+  'cf-workers-ai': 'cloudflare-workers-ai',
 }
 
 const PREFIX_MAP = [
@@ -223,6 +353,11 @@ const PREFIX_MAP = [
   ['o3', 'openai'],
   ['o4', 'openai'],
   ['openrouter/', 'openrouter'],
+  ['google-vertex/', 'google-vertex'],
+  ['vertex/', 'google-vertex'],
+  ['workers-ai/', 'cloudflare-workers-ai'],
+  ['@cf/', 'cloudflare-workers-ai'],
+  ['grok-', 'xai'],
   ['gemini-', 'gemini'],
   ['moonshot-', 'kimi'],
   ['kimi-for-', 'kimi-code'],
@@ -233,46 +368,21 @@ const PREFIX_MAP = [
   ['deepseek-', 'deepseek'],
   ['minimax-', 'minimax'],
   ['abab', 'minimax'],
+  ['codestral', 'mistral'],
+  ['pixtral', 'mistral'],
+  ['magistral', 'mistral'],
+  ['devstral', 'mistral'],
+  ['ministral', 'mistral'],
+  ['open-mixtral', 'mistral'],
+  ['mistral-', 'mistral'],
+  ['mixtral', 'mistral'],
   ['llama', 'ollama'],
-  ['mistral', 'ollama'],
-  ['mixtral', 'ollama'],
   ['phi', 'ollama'],
   ['gemma', 'ollama'],
   ['codellama', 'ollama'],
 ] as [string, ProviderName][]
 
 PREFIX_MAP.sort((left, right) => right[0].length - left[0].length)
-
-const MODEL_CONTEXT_LIMITS: Readonly<Record<string, number>> = {
-  opus: 1_000_000,
-  fable: 1_000_000,
-  mythos: 1_000_000,
-  'claude-fable-5': 1_000_000,
-  'claude-mythos-5': 1_000_000,
-  'claude-mythos-preview': 1_000_000,
-  'claude-opus-4-8': 1_000_000,
-  'claude-opus-4-7': 1_000_000,
-  'claude-opus-4-6': 1_000_000,
-  'claude-opus-4-5': 1_000_000,
-  'claude-sonnet-4-6': 1_000_000,
-  'MiniMax-M2.7-highspeed': 1_024_000,
-  'MiniMax-M2.7-flashspeed': 1_024_000,
-  'MiniMax-Text-01': 256_000,
-  'MiniMax-Text-01-MiniApp': 256_000,
-  'glm-5.2': 1_048_576,
-  'moonshot-v1-8k': 8_192,
-  'moonshot-v1-32k': 32_768,
-  'moonshot-v1-128k': 128_000,
-  'kimi-latest': 262_144,
-  'kimi-for-coding': 262_144,
-  'kimi-k2.5': 262_144,
-  'kimi-k2.6': 262_144,
-  'kimi-k2.7': 262_144,
-  'kimi-k2.5-001': 262_144,
-  'kimi-k2.6-001': 262_144,
-  'kimi-k2.7-001': 262_144,
-  'kimi-k2.7-code': 262_144,
-}
 
 export function isProviderName(value: string): value is ProviderName {
   return Object.hasOwn(PROVIDERS, value)
@@ -391,46 +501,26 @@ export function calcCost(model: string, inputTokens: number, outputTokens: numbe
   return (inputTokens * inputRate + outputTokens * outputRate) / 1_000_000
 }
 
-export function getContextLimit(model: string, overrides: ProviderOverrides = {}): number {
-  const name = bareModel(model)
-  const exact = MODEL_CONTEXT_LIMITS[name]
-  if (exact !== undefined) {
-    return exact
-  }
-  return PROVIDERS[resolveProvider(model, overrides)].contextLimit
-}
-
-/** Largest reply the routed provider will emit for one request. */
-export function getMaxOutputTokens(model: string, overrides: ProviderOverrides = {}): number {
-  return PROVIDERS[resolveProvider(model, overrides)].maxOutput
-}
-
 /** Transient-failure patience for the route that would serve this model. */
 export function retryPolicyForModel(model: string, overrides: ProviderOverrides = {}): ProviderRetryPolicy {
   return PROVIDERS[resolveProvider(model, overrides)].retry ?? DEFAULT_RETRY_POLICY
 }
 
 export interface EffectiveContextLimitOptions {
-  /** Live window discovered from provider metadata; defaults to the static registry value. */
+  /** Resolved model window from profile overrides or Pi's generated catalog. */
   readonly contextLimit?: number
-  readonly overrides?: ProviderOverrides
+  /** Actual configured reply allowance for this request. */
+  readonly requestedOutputTokens?: number
 }
 
-/**
- * Prompt budget: the context window minus the reply the provider may still emit.
- *
- * Sizing a prompt against the raw window is how a request that every local
- * meter calls "within limits" comes back as a provider 400 — the reply has
- * nowhere to go. The reservation is capped at a quarter of the window so a
- * small-window model (moonshot-v1-8k against an 8k reserve) keeps a usable
- * budget instead of collapsing to nothing.
- */
-export function effectiveContextLimit(model: string, options: EffectiveContextLimitOptions = {}): number {
-  const overrides = options.overrides ?? {}
-  const limit = options.contextLimit ?? getContextLimit(model, overrides)
-  if (!Number.isFinite(limit) || limit <= 0) {
-    return 0
-  }
-  const reserve = Math.min(getMaxOutputTokens(model, overrides), Math.floor(limit / 4))
-  return Math.max(1, limit - Math.max(0, reserve))
+/** Prompt budget from resolved model capacity and caller-configured output. */
+export function effectiveContextLimit(options: EffectiveContextLimitOptions = {}): number {
+  const reported = options.contextLimit
+  if (typeof reported !== 'number' || !Number.isFinite(reported) || reported <= 0) return 0
+  const limit = Math.floor(reported)
+  const requested = options.requestedOutputTokens
+  const reserve = typeof requested === 'number' && Number.isFinite(requested) && requested > 0
+    ? Math.min(limit, Math.floor(requested))
+    : 0
+  return limit - reserve
 }

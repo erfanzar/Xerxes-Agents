@@ -248,9 +248,17 @@ test("daemon auto-compacts before submitting a turn once usage crosses the thres
     provider: "openai",
     setActive: true,
   });
+  // Simulates provider-reported catalog metadata; no model-name fallback exists.
+  profileStore.replaceModelCapabilities("openai-test", {
+    "gpt-4": { context_limit: 128_000 },
+  });
   const runtime = new InMemoryDaemonRuntime(undefined, {
     currentProjectDirectory: directory,
     model: "gpt-4",
+    runtimeSettings: {
+      base_url: "https://api.openai.test",
+      provider: "openai",
+    },
     sessionDirectory: join(directory, "sessions"),
   });
   const server = new DaemonServer({
@@ -334,6 +342,10 @@ test("cancel during pre-turn auto-compaction prevents the admitted turn from lau
     provider: "openai",
     setActive: true,
   });
+  // Simulates provider-reported catalog metadata; no model-name fallback exists.
+  profileStore.replaceModelCapabilities("openai-test", {
+    "gpt-4": { context_limit: 128_000 },
+  });
   const compactionStarted = Promise.withResolvers<void>();
   const releaseCompaction = Promise.withResolvers<void>();
   let runnerCalls = 0;
@@ -345,6 +357,10 @@ test("cancel during pre-turn auto-compaction prevents the admitted turn from lau
   }, {
     currentProjectDirectory: directory,
     model: "gpt-4",
+    runtimeSettings: {
+      base_url: "https://api.openai.test",
+      provider: "openai",
+    },
     sessionDirectory: join(directory, "sessions"),
   });
   const server = new DaemonServer({
@@ -420,6 +436,10 @@ test("disconnect during pre-turn auto-compaction does not start an ownerless tur
     provider: "openai",
     setActive: true,
   });
+  // Simulates provider-reported catalog metadata; no model-name fallback exists.
+  profileStore.replaceModelCapabilities("openai-test", {
+    "gpt-4": { context_limit: 128_000 },
+  });
   const compactionStarted = Promise.withResolvers<void>();
   const releaseCompaction = Promise.withResolvers<void>();
   let runnerCalls = 0;
@@ -432,6 +452,10 @@ test("disconnect during pre-turn auto-compaction does not start an ownerless tur
   const runtime = new InMemoryDaemonRuntime(runner, {
     currentProjectDirectory: directory,
     model: "gpt-4",
+    runtimeSettings: {
+      base_url: "https://api.openai.test",
+      provider: "openai",
+    },
     sessionDirectory: join(directory, "sessions"),
   });
   const server = new DaemonServer({
@@ -495,6 +519,10 @@ test("a second submit cannot wait behind compaction and launch after its owner d
     provider: "openai",
     setActive: true,
   });
+  // Simulates provider-reported catalog metadata; no model-name fallback exists.
+  profileStore.replaceModelCapabilities("openai-test", {
+    "gpt-4": { context_limit: 128_000 },
+  });
   const compactionStarted = Promise.withResolvers<void>();
   const releaseCompaction = Promise.withResolvers<void>();
   const submitted: string[] = [];
@@ -506,6 +534,10 @@ test("a second submit cannot wait behind compaction and launch after its owner d
   }, {
     currentProjectDirectory: directory,
     model: "gpt-4",
+    runtimeSettings: {
+      base_url: "https://api.openai.test",
+      provider: "openai",
+    },
     sessionDirectory: join(directory, "sessions"),
   });
   const server = new DaemonServer({
@@ -566,11 +598,19 @@ test("a submit serialized behind manual compaction keeps its newly appended prom
     provider: "openai",
     setActive: true,
   });
+  // Simulates provider-reported catalog metadata; no model-name fallback exists.
+  profileStore.replaceModelCapabilities("openai-test", {
+    "gpt-4": { context_limit: 128_000 },
+  });
   const compactionStarted = Promise.withResolvers<void>();
   const releaseCompaction = Promise.withResolvers<void>();
   const runtime = new InMemoryDaemonRuntime(undefined, {
     currentProjectDirectory: directory,
     model: "gpt-4",
+    runtimeSettings: {
+      base_url: "https://api.openai.test",
+      provider: "openai",
+    },
     sessionDirectory: join(directory, "sessions"),
   });
   const server = new DaemonServer({
@@ -635,6 +675,10 @@ test("manual compaction does not restore stale idle status over a live turn", as
     provider: "openai",
     setActive: true,
   });
+  // Simulates provider-reported catalog metadata; no model-name fallback exists.
+  profileStore.replaceModelCapabilities("openai-test", {
+    "gpt-4": { context_limit: 128_000 },
+  });
   const compactionStarted = Promise.withResolvers<void>();
   const releaseCompaction = Promise.withResolvers<void>();
   const releaseTurn = Promise.withResolvers<void>();
@@ -646,6 +690,10 @@ test("manual compaction does not restore stale idle status over a live turn", as
   }, {
     currentProjectDirectory: directory,
     model: "gpt-4",
+    runtimeSettings: {
+      base_url: "https://api.openai.test",
+      provider: "openai",
+    },
     sessionDirectory: join(directory, "sessions"),
   });
   const server = new DaemonServer({ autoTitle: false, socketPath, runtime, profileStore });
@@ -705,9 +753,17 @@ test("daemon leaves small transcripts alone under the default 80% threshold", as
     provider: "openai",
     setActive: true,
   });
+  // Simulates provider-reported catalog metadata; no model-name fallback exists.
+  profileStore.replaceModelCapabilities("openai-test", {
+    "gpt-4": { context_limit: 128_000 },
+  });
   const runtime = new InMemoryDaemonRuntime(undefined, {
     currentProjectDirectory: directory,
     model: "gpt-4",
+    runtimeSettings: {
+      base_url: "https://api.openai.test",
+      provider: "openai",
+    },
     sessionDirectory: join(directory, "sessions"),
   });
   const server = new DaemonServer({ autoTitle: false, socketPath, runtime, profileStore });
@@ -754,6 +810,7 @@ test("daemon leaves small transcripts alone under the default 80% threshold", as
 });
 
 interface CompactionHarnessOptions {
+  readonly contextLimit?: number;
   readonly fetch: FetchImplementation;
   readonly model?: string;
   readonly runtimeSettings?: Record<string, unknown>;
@@ -785,10 +842,18 @@ async function withCompactionDaemon(
     provider: "openai",
     setActive: true,
   });
+  // Simulates provider-reported catalog metadata; no model-name fallback exists.
+  profileStore.replaceModelCapabilities("openai-test", {
+    [model]: { context_limit: options.contextLimit ?? 128_000 },
+  });
   const runtime = new InMemoryDaemonRuntime(undefined, {
     currentProjectDirectory: directory,
     model,
-    ...(options.runtimeSettings ? { runtimeSettings: options.runtimeSettings } : {}),
+    runtimeSettings: {
+      base_url: "https://api.openai.test",
+      provider: "openai",
+      ...(options.runtimeSettings ?? {}),
+    },
     sessionDirectory: join(directory, "sessions"),
   });
   const server = new DaemonServer({
@@ -998,8 +1063,9 @@ test("a disabled threshold still warns once as the prompt budget fills", async (
       ),
       // 8_192-token window with a 2_048-token reply reserve: a 6_144-token
       // prompt budget, so the warning fires without a huge fixture.
+      contextLimit: 8_192,
       model: "moonshot-v1-8k",
-      runtimeSettings: { auto_compact_threshold: 0 },
+      runtimeSettings: { auto_compact_threshold: 0, max_tokens: 2_048 },
       sessionKey: "warned",
     },
     async ({ client, runtime, submit }) => {
@@ -1028,6 +1094,10 @@ test("runtime setting auto_compact_threshold = 0 disables auto-compaction", asyn
     model: "gpt-4",
     provider: "openai",
     setActive: true,
+  });
+  // Simulates provider-reported catalog metadata; no model-name fallback exists.
+  profileStore.replaceModelCapabilities("openai-test", {
+    "gpt-4": { context_limit: 128_000 },
   });
   const runtime = new InMemoryDaemonRuntime(undefined, {
     currentProjectDirectory: directory,

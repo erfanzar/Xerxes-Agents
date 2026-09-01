@@ -1173,16 +1173,18 @@ export class GatewayClient extends EventEmitter {
     return { value }
   }
 
-  private async sessionCreate(_params: Record<string, unknown>): Promise<RpcObject> {
+  private async sessionCreate(params: Record<string, unknown>): Promise<RpcObject> {
     // Commit the new key only after the daemon confirms it; a failed
     // initialize must not strand the client on a dead session key.
     const nextSessionKey = `tui:${randomKey()}`
     const finishCapture = this.captureInitializeInfo()
 
     try {
+      const agentId = typeof params.agent_id === 'string' ? params.agent_id.trim() : ''
       const raw = await this.nativeSuccess('initialize', {
         project_dir: this.projectDir,
-        session_key: nextSessionKey
+        session_key: nextSessionKey,
+        ...(agentId ? { agent_id: agentId } : {})
       })
       const captured = finishCapture()
       const session = (raw.session ?? {}) as RpcObject
@@ -1636,8 +1638,25 @@ export class GatewayClient extends EventEmitter {
       ? [...new Set(raw.models.map(model => String(model).trim()).filter(Boolean))]
       : []
 
+    const catalog = Array.isArray(raw.catalog)
+      ? raw.catalog
+          .filter((entry): entry is RpcObject => typeof entry === 'object' && entry !== null)
+          .map(entry => ({
+            id: String(entry.id ?? '').trim(),
+            ...(typeof entry.context_limit === 'number' ? { context_limit: entry.context_limit } : {}),
+            ...(entry.context_source ? { context_source: String(entry.context_source) } : {}),
+            ...(typeof entry.max_output_tokens === 'number'
+              ? { max_output_tokens: entry.max_output_tokens }
+              : {}),
+            ...(entry.output_source ? { output_source: String(entry.output_source) } : {}),
+            ...(entry.overridden === true ? { overridden: true } : {})
+          }))
+          .filter(entry => Boolean(entry.id))
+      : []
+
     return {
       models,
+      ...(catalog.length ? { catalog } : {}),
       ...(raw.source ? { source: String(raw.source) } : {}),
       ...(raw.warning ? { warning: String(raw.warning) } : {})
     }
@@ -2016,7 +2035,9 @@ function mergeUsage(base: Partial<Usage>, incoming?: null | Partial<Usage>): Usa
   return compact<Usage>({
     calls: merged.calls ?? 0,
     compressions: merged.compressions,
-    context_max: incoming?.context_max || base.context_max,
+    // Zero is the protocol's explicit unknown-capacity sentinel; do not revive
+    // a previous model's window after a profile switch.
+    context_max: incoming?.context_max ?? base.context_max,
     context_percent: merged.context_percent,
     context_used: incoming?.context_used ?? base.context_used,
     cost_status: merged.cost_status,

@@ -41,7 +41,9 @@ describe('status snapshots', () => {
 
   it('caps context percentage and handles an unavailable context window', () => {
     expect(statusContextPercent(createStatusSnapshot({ contextWindow: 100, inputTokens: 200 }))).toBe(100)
-    expect(statusContextPercent(createStatusSnapshot({ contextWindow: 0, inputTokens: 200 }))).toBe(0)
+    const unknown = createStatusSnapshot({ contextWindow: 0, inputTokens: 200 })
+    expect(statusContextPercent(unknown)).toBe(0)
+    expect(formatStatus(unknown)).toContain('ctx unknown')
   })
 })
 

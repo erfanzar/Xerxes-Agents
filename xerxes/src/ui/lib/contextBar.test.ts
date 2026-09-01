@@ -18,6 +18,11 @@ describe('contextBar', () => {
     expect(contextBar({ used: 2, window: 1, width: 3, filled: '#', empty: '.' })).toBe('###')
   })
 
+  it('renders unknown capacity as indeterminate instead of a full meter', () => {
+    expect(contextBar({ used: 500, window: 0, width: 8 })).toBe(EMPTY_BLOCK.repeat(8))
+    expect(contextBarWithPct({ used: 500, window: 0, width: 8 })).toContain('n/a')
+  })
+
   it('returns an empty meter for non-positive widths', () => {
     expect(contextBar({ used: 1, window: 2, width: 0 })).toBe('')
     expect(contextBar({ used: 1, window: 2, width: -2 })).toBe('')

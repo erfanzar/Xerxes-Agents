@@ -348,6 +348,12 @@ export interface SessionMostRecentResponse {
   title?: string
 }
 
+/** Rendered `/goal` output; `ok` is false for a refused transition. */
+export interface SessionGoalResponse {
+  ok?: boolean
+  text?: string
+}
+
 export interface SessionTitleResponse {
   pending?: boolean
   session_key?: string
@@ -555,7 +561,17 @@ export interface ModelOptionsResponse {
   providers?: ModelOptionProvider[]
 }
 
+export interface ModelCapabilityOption {
+  context_limit?: number
+  context_source?: 'catalog' | 'override' | 'provider' | 'unknown'
+  id: string
+  max_output_tokens?: number
+  output_source?: 'catalog' | 'override' | 'provider' | 'unknown'
+  overridden?: boolean
+}
+
 export interface ModelModelsResponse {
+  catalog?: ModelCapabilityOption[]
   models?: string[]
   source?: string
   warning?: string

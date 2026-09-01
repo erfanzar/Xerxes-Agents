@@ -22,6 +22,8 @@ export interface RuntimeConnection {
    */
   readonly reasoningEffort?: string
   readonly responsesApi?: boolean
+  /** Requested OpenAI service tier (`auto`/`default`/`flex`/`priority`); Responses-family only. */
+  readonly serviceTier?: string
   readonly temperature?: number
   /**
    * Session default extended-thinking toggle. Carried through (not dropped
@@ -68,6 +70,8 @@ export function runtimeConnection(config: DaemonConfig, profile: ProviderProfile
     ?? numberSetting(useProfile?.sampling.thinking_budget)
   const reasoningEffort = stringSetting(runtime.reasoning_effort)
     || stringSetting(useProfile?.sampling.reasoning_effort)
+  const serviceTier = stringSetting(runtime.service_tier)
+    || stringSetting(useProfile?.sampling.service_tier)
   return {
     model,
     permissionMode,
@@ -76,6 +80,7 @@ export function runtimeConnection(config: DaemonConfig, profile: ProviderProfile
     ...(provider ? { provider } : {}),
     ...(reasoningEffort ? { reasoningEffort } : {}),
     ...(responsesApi === undefined ? {} : { responsesApi }),
+    ...(serviceTier ? { serviceTier } : {}),
     ...(maxTokens !== undefined ? { maxTokens } : {}),
     temperature,
     ...(thinking === undefined ? {} : { thinking }),

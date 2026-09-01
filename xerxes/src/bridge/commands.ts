@@ -59,6 +59,9 @@ export const COMMAND_REGISTRY: readonly CommandDefinition[] = Object.freeze([
   command('retry-connection', 'Retry the last failed provider connection', 'session'),
   command('undo', 'Undo the last turn', 'session'),
   command('title', 'Generate or set the session title', 'session', { argsHint: '[title]' }),
+  command('goal', 'Set or view the goal for a long-running task', 'session', {
+    argsHint: '[<objective>|clear|edit <objective>|pause|resume]',
+  }),
   command('branch', 'Fork this session', 'session', { argsHint: '[label]' }),
   command('branches', 'List branches of this session', 'session'),
   command('compact', 'Compress the conversation', 'session', { aliases: ['compress'] }),

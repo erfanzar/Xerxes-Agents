@@ -21,7 +21,6 @@ import {
 import {
   PROVIDERS,
   detectProvider,
-  getContextLimit,
   providerModel,
   resolveProvider,
 } from '../src/llms/providerRegistry.js'
@@ -120,16 +119,17 @@ test('native completions collect stream-only clients, honor cleanup, and expose 
   expect(getLlmModelInfo('anthropic/claude-sonnet-4-6', {
     temperature: 0.25,
     maxTokens: 750_000,
+    contextLimit: 262_144,
     stream: true,
   })).toEqual({
     provider: 'anthropic',
     model: 'anthropic/claude-sonnet-4-6',
     temperature: 0.25,
     maxTokens: 750_000,
-    maxModelLen: 1_000_000,
+    maxModelLen: 262_144,
     stream: true,
   })
-  expect(getLlmModelInfo('unprefixed-model', {}, { provider: 'custom' }).maxModelLen).toBe(0)
+  expect(getLlmModelInfo('unprefixed-model', {}, { provider: 'custom' })).not.toHaveProperty('maxModelLen')
   expect(formatLlmMessages([{ role: 'user', content: 'Hello' }], 'Be concise.')).toEqual([
     { role: 'system', content: 'Be concise.' },
     { role: 'user', content: 'Hello' },
@@ -346,7 +346,7 @@ test('Kimi Code keeps its fixed temperature and omits unsupported extended sampl
   expect(payloads[1]).not.toHaveProperty('top_k')
 })
 
-test('provider registry retains Kimi, Claude Code, OpenRouter, and context-window routing', () => {
+test('provider registry retains routing without static context-window capabilities', () => {
   expect(resolveProvider('kimi/kimi-latest', { base_url: 'https://api.kimi.com/coding/v1' })).toBe('kimi-code')
   expect(resolveProvider('kimi/kimi-latest', { base_url: 'https://api.moonshot.cn/v1' })).toBe('kimi')
   expect(detectProvider('claude-code/sonnet')).toBe('claude-code')
@@ -359,10 +359,10 @@ test('provider registry retains Kimi, Claude Code, OpenRouter, and context-windo
     baseUrl: 'https://openrouter.ai/api/v1',
   })
   expect(providerModel('anthropic/claude-sonnet-4.5', 'openrouter')).toBe('anthropic/claude-sonnet-4.5')
-  expect(getContextLimit('kimi/kimi-for-coding')).toBe(262_144)
-  expect(getContextLimit('claude-code/opus')).toBe(1_000_000)
-  expect(getContextLimit('claude-code/custom')).toBe(200_000)
-  expect(getContextLimit('anthropic/claude-sonnet-4-6')).toBe(1_000_000)
+  for (const provider of Object.values(PROVIDERS)) {
+    expect(provider).not.toHaveProperty('contextLimit')
+    expect(provider).not.toHaveProperty('maxOutput')
+  }
 })
 
 test('native OpenAI message and tool conversion covers every supported role with strict wire validation', () => {

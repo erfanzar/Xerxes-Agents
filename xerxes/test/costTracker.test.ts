@@ -7,7 +7,30 @@ import {
   CostEvent,
   CostTracker,
   UNSCOPED_COST_SCOPE,
+  serviceTierMultiplier,
 } from '../src/runtime/costTracker.js'
+
+test('service tier multipliers match pi-ai and reprice whole turns including cache', () => {
+  expect(serviceTierMultiplier('openai/gpt-5.2', 'flex')).toBe(0.5)
+  expect(serviceTierMultiplier('openai/gpt-5.2', 'priority')).toBe(2)
+  expect(serviceTierMultiplier('openai/gpt-5.5', 'priority')).toBe(2.5)
+  expect(serviceTierMultiplier('gpt-5.5', 'priority')).toBe(2.5)
+  expect(serviceTierMultiplier('openai/gpt-5.2', 'default')).toBe(1)
+  expect(serviceTierMultiplier('openai/gpt-5.2', undefined)).toBe(1)
+
+  const tracker = new CostTracker({ now: () => new Date('2026-07-13T10:00:00.000Z') })
+  const full = tracker.recordTurn('openai/gpt-4o', 1_000, 500, 'full', { cacheReadTokens: 100 })
+  const flex = tracker.recordTurn('openai/gpt-4o', 1_000, 500, 'flex', {
+    cacheReadTokens: 100,
+    serviceTier: 'flex',
+  })
+  const priority = tracker.recordTurn('openai/gpt-4o', 1_000, 500, 'priority', {
+    cacheReadTokens: 100,
+    serviceTier: 'priority',
+  })
+  expect(flex.costUsd).toBeCloseTo(full.costUsd * 0.5, 12)
+  expect(priority.costUsd).toBeCloseTo(full.costUsd * 2, 12)
+})
 
 test('cost tracker uses shared provider pricing and Python-compatible cache multipliers', () => {
   const tracker = new CostTracker({

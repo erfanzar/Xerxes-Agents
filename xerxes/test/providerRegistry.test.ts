@@ -7,7 +7,8 @@ import { ConfigurationError } from '../src/core/errors.js'
 import {
   calcCost,
   detectProvider,
-  getContextLimit,
+  effectiveContextLimit,
+  PROVIDERS,
   providerDefaultHeaders,
   providerModel,
   resolveProvider,
@@ -25,7 +26,6 @@ test('unrecognized explicit prefixes are rejected instead of silently routed to 
   expect(() => detectProvider('missing-provider/gpt-4o')).toThrow(ConfigurationError)
   expect(() => detectProvider('missing-provider/gpt-4o')).toThrow("unknown provider prefix 'missing-provider'")
   expect(() => resolveProvider('missing-provider/gpt-4o')).toThrow(ConfigurationError)
-  expect(() => getContextLimit('missing-provider/gpt-4o')).toThrow(ConfigurationError)
   // A recognized explicit provider override still routes before prefix checks.
   expect(resolveProvider('missing-provider/gpt-4o', { provider: 'openrouter' })).toBe('openrouter')
   // Aliased and bare models keep their existing behavior.
@@ -55,11 +55,15 @@ test('unknown explicit provider overrides are rejected instead of enabling autom
   })).toThrow("Configuration provider: unknown provider 'not-a-provider'")
 })
 
-test('costs, context windows, and Kimi headers match registry behavior', () => {
+test('the registry contains no invented context or output-capacity defaults', () => {
   expect(calcCost('gpt-4o', 1_000_000, 1_000_000)).toBe(12.5)
-  expect(getContextLimit('claude-opus-4-6')).toBe(1_000_000)
-  expect(getContextLimit('moonshot-v1-8k')).toBe(8_192)
-  expect(getContextLimit('k3', { provider: 'kimi-code' })).toBe(262_144)
-  expect(getContextLimit('unknown-model', { provider: 'custom' })).toBe(0)
+  for (const provider of Object.values(PROVIDERS)) {
+    expect(provider).not.toHaveProperty('contextLimit')
+    expect(provider).not.toHaveProperty('maxOutput')
+  }
+  expect(effectiveContextLimit()).toBe(0)
+  expect(effectiveContextLimit({ contextLimit: 262_144 })).toBe(262_144)
+  expect(effectiveContextLimit({ contextLimit: 262_144, requestedOutputTokens: 32_000 })).toBe(230_144)
+  expect(effectiveContextLimit({ contextLimit: 262_144, requestedOutputTokens: 300_000 })).toBe(0)
   expect(providerDefaultHeaders('kimi-code')).toMatchObject({ 'User-Agent': 'claude-code/1.0.0' })
 })

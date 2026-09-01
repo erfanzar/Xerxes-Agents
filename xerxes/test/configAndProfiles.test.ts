@@ -6,7 +6,13 @@ import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
-import { ProfileStore } from '../src/bridge/profiles.js'
+import {
+  profileContextLimit,
+  ProfileStore,
+  resolvedProfileContextLimit,
+  resolvedProfileMaxOutputTokens,
+  type ProviderProfile,
+} from '../src/bridge/profiles.js'
 import { daemonConfigPath, loadSystemDaemonConfig, resolveEnvironmentReferences } from '../src/daemon/config.js'
 import { runtimeConnection } from '../src/daemon/runtimeConnection.js'
 
@@ -57,6 +63,23 @@ test('profile store preserves active selection and filters sampling keys', async
   }
 })
 
+test('resolved profile capacity layers provider metadata over the Pi catalog', () => {
+  const profile: ProviderProfile = {
+    api_key: '',
+    base_url: 'https://api.z.ai/api/coding/paas/v4',
+    model: 'glm-5.2',
+    name: 'zai',
+    provider: 'zhipu',
+    sampling: {},
+  }
+  expect(resolvedProfileContextLimit(profile, 'glm-5.2')).toBe(1_000_000)
+  expect(resolvedProfileContextLimit({
+    ...profile,
+    model_capabilities: { 'glm-5.2': { context_limit: 262_144 } },
+  }, 'glm-5.2')).toBe(262_144)
+  expect(resolvedProfileContextLimit({ ...profile, provider: 'custom' }, 'glm-5.2')).toBeUndefined()
+})
+
 test('profile store writes atomically and leaves no temporary files behind', async () => {
   const normalizedHome = await mkdtemp(join(tmpdir(), 'xerxes-profiles-atomic-'))
   try {
@@ -69,6 +92,80 @@ test('profile store writes atomically and leaves no temporary files behind', asy
     expect(document.profiles.two?.api_key).toBe('sk-two')
     expect((await readdir(normalizedHome)).filter(entry => entry.includes('.tmp'))).toEqual([])
     expect((await stat(store.filePath)).mode & 0o777).toBe(0o600)
+  } finally {
+    await rm(normalizedHome, { recursive: true, force: true })
+  }
+})
+
+test('profile capabilities persist provider metadata, migrate old documents, and clear on connection changes', async () => {
+  const normalizedHome = await mkdtemp(join(tmpdir(), 'xerxes-profile-capabilities-'))
+  try {
+    const path = join(normalizedHome, 'profiles.json')
+    await writeFile(path, JSON.stringify({
+      active: 'zai',
+      profiles: {
+        zai: {
+          name: 'zai',
+          base_url: 'https://api.z.ai/api/coding/paas/v4',
+          api_key: 'secret',
+          model: 'glm-5.3-flash',
+          provider: 'zhipu',
+          sampling: {},
+        },
+      },
+    }), 'utf8')
+    const store = new ProfileStore(path)
+    expect(store.get('zai')?.model_capabilities).toEqual({})
+    expect(profileContextLimit(store.get('zai'), 'glm-5.3-flash')).toBeUndefined()
+
+    store.replaceModelCapabilities('zai', {
+      'glm-5.3-flash': { context_limit: 262_144 },
+      malformed: { context_limit: Number.NaN },
+      zero: { context_limit: 0 },
+    })
+    expect(profileContextLimit(store.get('zai'), 'glm-5.3-flash')).toBe(262_144)
+    expect(profileContextLimit(store.get('zai'), 'zhipu/glm-5.3-flash')).toBe(262_144)
+    expect(new ProfileStore(path).get('zai')?.model_capabilities).toEqual({
+      'glm-5.3-flash': { context_limit: 262_144 },
+    })
+
+    store.updateModelCapabilities('zai', 'glm-5.3-flash', {
+      contextLimit: 1_000_000,
+      maxOutputTokens: 131_072,
+    })
+    expect(resolvedProfileContextLimit(store.get('zai'), 'glm-5.3-flash')).toBe(1_000_000)
+    expect(resolvedProfileMaxOutputTokens(store.get('zai'), 'glm-5.3-flash')).toBe(131_072)
+    store.replaceModelCapabilities('zai', {
+      'glm-5.3-flash': { context_limit: 300_000, max_output_tokens: 64_000 },
+      'id-only-model': {},
+    })
+    expect(store.get('zai')?.model_capabilities).toEqual({
+      'glm-5.3-flash': { context_limit: 300_000, max_output_tokens: 64_000 },
+      'id-only-model': {},
+    })
+    expect(store.get('zai')?.model_overrides).toEqual({
+      'glm-5.3-flash': { context_limit: 1_000_000, max_output_tokens: 131_072 },
+    })
+    expect(resolvedProfileContextLimit(store.get('zai'), 'glm-5.3-flash')).toBe(1_000_000)
+
+    store.save({
+      name: 'zai',
+      baseUrl: 'https://api.z.ai/api/coding/paas/v4',
+      apiKey: 'new-secret',
+      model: 'glm-5.3-flash',
+      provider: 'zhipu',
+    })
+    expect(profileContextLimit(store.get('zai'), 'glm-5.3-flash')).toBe(1_000_000)
+
+    store.save({
+      name: 'zai',
+      baseUrl: 'https://other.example/v1',
+      apiKey: 'new-secret',
+      model: 'glm-5.3-flash',
+      provider: 'custom',
+    })
+    expect(store.get('zai')?.model_capabilities).toEqual({})
+    expect(store.get('zai')?.model_overrides).toEqual({})
   } finally {
     await rm(normalizedHome, { recursive: true, force: true })
   }

@@ -12,6 +12,7 @@ import {
 } from '../src/extensions/skillAuthoring/improver.js'
 import { SkillTelemetry, attachSkillTelemetry } from '../src/extensions/skillAuthoring/telemetry.js'
 import { ToolSequenceTracker } from '../src/extensions/skillAuthoring/tracker.js'
+import { appendSkillSuggestion, skillSuggestionValues } from '../src/extensions/skillSuggestions.js'
 
 function observedCandidate() {
   const tracker = new ToolSequenceTracker({ now: () => 1 })
@@ -100,6 +101,26 @@ test('SkillImprover preserves name, bumps versions, and delegates backup and wri
   expect(bumpPatchVersion('bad-version')).toBe('0.1.1')
   expect(extractSkillName(documents.get(location) ?? '')).toBe('ci-helper')
   expect(extractSkillVersion(documents.get(location) ?? '')).toBe('1.2.10')
+})
+
+test('skill suggestions persist as bounded validated session telemetry', () => {
+  const metadata: Record<string, unknown> = {}
+  appendSkillSuggestion(metadata, {
+    skillName: 'ci-helper',
+    description: 'Reuse the verified CI sequence.',
+    version: '0.1.0',
+    sourcePath: '/tmp/ci-helper/SKILL.md',
+    toolCount: 2,
+    uniqueTools: ['Read', 'Edit'],
+  })
+  expect(skillSuggestionValues(metadata)).toEqual([{
+    skillName: 'ci-helper',
+    description: 'Reuse the verified CI sequence.',
+    version: '0.1.0',
+    sourcePath: '/tmp/ci-helper/SKILL.md',
+    toolCount: 2,
+    uniqueTools: ['Read', 'Edit'],
+  }])
 })
 
 test('telemetry consumes only a caller-owned source and can be detached', () => {

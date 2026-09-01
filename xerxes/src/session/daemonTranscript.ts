@@ -291,7 +291,12 @@ export interface DaemonTranscriptEntry {
 export type TranscriptMessageJournalAppend = (message: RawMessage, index: number) => void
 
 export function transcriptHasHistory(transcript: Pick<DaemonTranscript, 'messages' | 'turnCount'>): boolean {
-  return transcript.messages.length > 0 || transcript.turnCount > 0
+  if (transcript.turnCount > 0) return true
+  // A completed exchange requires at least one assistant message. User-only
+  // transcripts are dead attempts — a prompt whose turn never produced a
+  // reply — and must neither persist nor list as sessions, or every failed
+  // launch litters the session list with phantom rows.
+  return transcript.messages.some(message => message.role === 'assistant')
 }
 
 /** Filesystem store for legacy-compatible daemon transcripts. */

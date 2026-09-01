@@ -78,13 +78,51 @@ test('Responses API client maps request tools and streamed events into neutral d
   ])
 })
 
-test('createLlmClient chooses the Responses API only through explicit configuration', () => {
-  const client = createLlmClient('gpt-4o', {}, {
+test('Responses API replays encrypted reasoning items with store disabled', async () => {
+  let payload: Record<string, unknown> | undefined
+  const reasoningItem = {
+    type: 'reasoning',
+    id: 'rs_1',
+    encrypted_content: 'opaque-provider-state',
+    summary: [{ type: 'summary_text', text: 'Inspect source.' }],
+  }
+  const client = new ResponsesApiClient({
+    providerName: 'openai',
     apiKey: 'test-key',
     baseUrl: 'https://example.invalid/v1',
-    responsesApi: true,
+    fetchImplementation: async (_input, init) => {
+      payload = JSON.parse(String(init?.body)) as Record<string, unknown>
+      return Response.json({ status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: 'done' }] }] })
+    },
   })
-  expect(client).toBeInstanceOf(ResponsesApiClient)
+
+  await client.complete({
+    model: 'gpt-5',
+    messages: [
+      { role: 'system', content: 'Use tools carefully.' },
+      { role: 'assistant', content: '', thinking: 'Inspect source.', thinking_signature: JSON.stringify(reasoningItem) },
+      { role: 'user', content: 'Continue.' },
+    ],
+    maxTokens: 1,
+    thinking: { effort: 'high' },
+  })
+
+  expect(payload).toMatchObject({
+    store: false,
+    instructions: 'Use tools carefully.',
+    input: [reasoningItem, { role: 'user', content: 'Continue.' }],
+    include: ['reasoning.encrypted_content'],
+    max_output_tokens: 16,
+    reasoning: { effort: 'high' },
+  })
+})
+
+test('createLlmClient selects the Responses API through explicit configuration', () => {
+  const forced = createLlmClient('openai/gpt-4o', { responses_api: true }, {
+    apiKey: 'test-key',
+    baseUrl: 'https://example.invalid/v1',
+  })
+  expect(forced).toBeInstanceOf(ResponsesApiClient)
 })
 
 test('Responses API client supports a native non-streaming completion response', async () => {
@@ -120,10 +158,12 @@ test('Responses API client supports a native non-streaming completion response',
     model: 'gpt-4o',
     input: [{ role: 'user', content: 'Read the README.' }],
     stream: false,
+    store: false,
   })
   expect(completion).toEqual({
     content: 'I will read it.',
     thinking: 'Inspect source.',
+    thinkingSignature: JSON.stringify({ type: 'reasoning', summary: [{ text: 'Inspect source.' }] }),
     finishReason: 'tool_calls',
     usage: { inputTokens: 11, outputTokens: 6, cacheReadTokens: 3 },
     toolCalls: [{ id: 'call-1', type: 'function', function: { name: 'ReadFile', arguments: { path: 'README.md' } } }],
@@ -259,8 +299,8 @@ test('Responses API client translates tool history into native input items', asy
     ],
   })) events.push(event)
 
+  expect(payload?.instructions).toBe('Be concise.')
   expect(payload?.input).toEqual([
-    { role: 'system', content: 'Be concise.' },
     {
       role: 'user',
       content: [
@@ -313,6 +353,38 @@ test('Responses API client rejects EOF without a terminal response event and nev
     model: 'gpt-4o',
     messages: [{ role: 'user', content: 'hi' }],
   }))).rejects.toThrow('Responses API stream ended before a terminal response event')
+})
+
+test('Responses API client sends service_tier and reports the served tier on usage', async () => {
+  let payload: Record<string, unknown> | undefined
+  const client = new ResponsesApiClient({
+    providerName: 'openai',
+    apiKey: 'test-key',
+    baseUrl: 'https://example.invalid/v1',
+    fetchImplementation: async (_input, init) => {
+      payload = JSON.parse(String(init?.body)) as Record<string, unknown>
+      return sseResponse([
+        { type: 'response.output_text.delta', delta: 'ok' },
+        {
+          type: 'response.completed',
+          response: {
+            status: 'completed',
+            service_tier: 'flex',
+            usage: { input_tokens: 4, output_tokens: 2 },
+          },
+        },
+      ])
+    },
+  })
+
+  const events = await collect(client.stream({
+    model: 'gpt-4o',
+    messages: [{ role: 'user', content: 'hi' }],
+    serviceTier: 'flex',
+  }))
+
+  expect(payload?.service_tier).toBe('flex')
+  expect(events.at(-1)?.usage).toMatchObject({ inputTokens: 4, outputTokens: 2, serviceTier: 'flex' })
 })
 
 async function collect(stream: AsyncIterable<LlmDelta>): Promise<LlmDelta[]> {

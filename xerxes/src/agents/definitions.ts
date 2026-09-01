@@ -50,7 +50,7 @@ export interface AgentDefinitionLoadOptions extends AgentSpecLoadOptions {
   readonly userDirectory?: string
 }
 
-const BUILTIN_AGENT_DIRECTORY = resolve(dirname(fileURLToPath(import.meta.url)), 'default')
+export const BUILTIN_AGENT_DIRECTORY = resolve(dirname(fileURLToPath(import.meta.url)), 'default')
 let lastLoadErrors: string[] = []
 
 /** Built-ins available in a source checkout; a hardcoded set survives an asset-less bundle. */
@@ -428,10 +428,19 @@ function agentFiles(directory: string, extension: '.md' | '.yaml'): string[] {
   if (!existsSync(directory)) {
     return []
   }
-  return readdirSync(directory, { withFileTypes: true })
+  const entries = readdirSync(directory, { withFileTypes: true })
+  const direct = entries
     .filter(entry => entry.isFile() && extname(entry.name) === extension)
     .map(entry => join(directory, entry.name))
-    .sort()
+  // DSH-style authored presets live one directory per preset. Only the root
+  // composition is a roster entry; referenced files below `subagents/` are
+  // loaded through that composition and never leak into the global picker.
+  const nested = extension === '.yaml'
+    ? entries
+      .filter(entry => entry.isDirectory() && existsSync(join(directory, entry.name, 'agent.yaml')))
+      .map(entry => join(directory, entry.name, 'agent.yaml'))
+    : []
+  return [...direct, ...nested].sort()
 }
 
 function recordLoadError(path: string, error: unknown): void {
@@ -477,7 +486,40 @@ function basenameWithoutExtension(path: string): string {
 }
 
 function hardcodedBuiltinDefinitions(): ReadonlyMap<string, AgentDefinition> {
+  const standardTools = [
+    'ReadFile', 'WriteFile', 'FileEditTool', 'GlobTool', 'GrepTool', 'ListDir',
+    'exec_command', 'write_stdin', 'list_terminal_sessions', 'close_terminal_session',
+    'DuckDuckGoSearch', 'computer_use', 'AgentTool', 'SpawnAgents', 'SendMessageTool',
+    'TaskCreateTool', 'TaskGetTool', 'TaskListTool', 'TaskOutputTool', 'TaskStopTool',
+    'TaskUpdateTool', 'AwaitAgents', 'CheckAgentMessages', 'PeekAgent', 'ResetAgent',
+    'HandoffTool', 'AskUserQuestionTool', 'SetInteractionModeTool', 'get_goal',
+    'create_goal', 'update_goal', 'SkillTool', 'TodoWriteTool', 'ToolSearchTool',
+  ]
   const definitions: AgentDefinition[] = [
+    {
+      name: 'default',
+      description: 'Full Xerxes coding agent with filesystem, shell, research, planning, goals, and subagents.',
+      systemPrompt: 'You are Xerxes, an interactive coding and research agent. Use the capabilities supplied by the host and never claim work you did not perform.',
+      model: '',
+      tools: standardTools,
+      allowedTools: null,
+      excludeTools: [],
+      source: 'built-in',
+      maxDepth: 5,
+      isolation: '',
+    },
+    {
+      name: 'creator',
+      description: 'DSH-style Creator mode for inspecting, duplicating, authoring, and validating agent presets.',
+      systemPrompt: 'You are running in Xerxes Creator mode. Inspect the live roster and tool catalog, duplicate a shipped preset, edit only the user copy, validate it, and explain that running sessions keep their original preset.',
+      model: '',
+      tools: [...standardTools, 'AgentPresetInspectTool', 'AgentPresetTool', 'CreatorRuntimeTool'],
+      allowedTools: null,
+      excludeTools: [],
+      source: 'built-in',
+      maxDepth: 5,
+      isolation: '',
+    },
     {
       name: 'general-purpose',
       description: 'General-purpose agent for researching complex questions, searching for code, and executing multi-step tasks.',

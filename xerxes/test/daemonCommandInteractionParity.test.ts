@@ -19,7 +19,19 @@ test('daemon completion preserves command and path semantics while native skills
     currentProjectDirectory: directory,
     sessionDirectory: join(directory, 'sessions'),
   })
-  const server = new DaemonServer({ socketPath, runtime })
+  // Seeded skill library: the shorthand assertions below must be hermetic —
+  // default discovery would read the developer's real ~/.xerxes/skills AND
+  // the bundled xerxes/skills. It lives OUTSIDE the project directory so
+  // path completions never see it.
+  const skillLibrary = await mkdtemp(join(tmpdir(), 'xerxes-daemon-skill-lib-'))
+  const skillDirectory = join(skillLibrary, 'deepscan')
+  await mkdir(skillDirectory, { recursive: true })
+  await writeFile(
+    join(skillDirectory, 'SKILL.md'),
+    '---\nname: deepscan\ndescription: Deep scan the workspace for issues\n---\nScan.',
+    'utf8',
+  )
+  const server = new DaemonServer({ socketPath, skillDirectories: [skillLibrary], runtime })
   await writeFile(join(directory, 'alpha.txt'), 'alpha', 'utf8')
   await writeFile(join(directory, 'my file.md'), 'space', 'utf8')
   await writeFile(join(directory, '.hidden'), 'hidden', 'utf8')
@@ -87,12 +99,24 @@ test('daemon completion preserves command and path semantics while native skills
 
     client.send({ jsonrpc: '2.0', id: 9, method: 'commands.catalog', params: {} })
     expect((await client.next(frame => frame.id === 9)).result).toMatchObject({ skill_count: expect.any(Number), sub: {} })
+    // A skill name completes as its own slash shorthand — `/deepscan` invokes
+    // the skill directly, no `/skill` prefix needed. This is the FIRST skill
+    // completion this daemon serves: the registry must self-refresh here, not
+    // depend on a prior catalog or `/skill` call having warmed it.
     client.send({ jsonrpc: '2.0', id: 10, method: 'complete', params: { text: '/deepscan' } })
-    expect((await client.next(frame => frame.id === 10)).result?.completions).toEqual([])
+    expect((await client.next(frame => frame.id === 10)).result?.completions).toEqual([
+      { value: '/deepscan ', label: 'deepscan', meta: 'Deep scan the workspace for issues' },
+    ])
+
+    client.send({ jsonrpc: '2.0', id: 15, method: 'complete', params: { text: '/deep' } })
+    expect((await client.next(frame => frame.id === 15)).result?.completions).toEqual([
+      { value: '/deepscan ', label: 'deepscan', meta: 'Deep scan the workspace for issues' },
+    ])
   } finally {
     client.close()
     await server.stop()
     await rm(directory, { recursive: true, force: true })
+    await rm(skillLibrary, { recursive: true, force: true })
   }
 })
 
@@ -255,7 +279,7 @@ test('slash compact rewrites and persists the active native session without subm
     })
     expect((await client.next(eventFrame('status_update'))).params?.payload).toMatchObject({
       context_tokens: expect.any(Number),
-      max_context: 128_000,
+      max_context: 0,
     })
 
     // Model-backed compaction: the provider was invoked with the transcript

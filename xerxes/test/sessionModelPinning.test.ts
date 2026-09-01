@@ -15,7 +15,14 @@ async function inRuntime(
   const directory = await mkdtemp(join(tmpdir(), 'xerxes-session-model-'))
   try {
     await run(
-      new InMemoryDaemonRuntime(undefined, { currentProjectDirectory: directory, model }),
+      // An explicit session store: without one, flushSessions writes
+      // transcripts into the developer's real ~/.xerxes/sessions on every
+      // test run, surfacing as junk workspaces in the GUI sidebar.
+      new InMemoryDaemonRuntime(undefined, {
+        currentProjectDirectory: directory,
+        model,
+        sessionDirectory: join(directory, 'sessions'),
+      }),
       directory,
     )
   } finally {
@@ -68,7 +75,7 @@ test('resuming history continues on the model that wrote it', async () => {
     const opened = await runtime.openSession('original')
     // An empty transcript is never persisted, so the session needs history for
     // there to be anything to resume.
-    opened.messages.push({ role: 'user', content: 'hello' })
+    opened.messages.push({ role: 'user', content: 'hello' }, { role: 'assistant', content: 'hi — the pinned reply' })
     await runtime.setSessionModel('original', 'codex/gpt-5.5')
     await runtime.flushSessions()
 
@@ -76,6 +83,7 @@ test('resuming history continues on the model that wrote it', async () => {
     const restarted = new InMemoryDaemonRuntime(undefined, {
       currentProjectDirectory: directory,
       model: 'claude-sonnet-4-6',
+      sessionDirectory: join(directory, 'sessions'),
     })
     const resumed = await restarted.openSession(opened.id, undefined, { resume: true })
 
@@ -139,7 +147,7 @@ test('a global reload leaves a session that picked its own effort alone', async 
 test('resuming history continues at the effort it was held at', async () => {
   await inRuntime(async (runtime, directory) => {
     const opened = await runtime.openSession('original')
-    opened.messages.push({ role: 'user', content: 'hello' })
+    opened.messages.push({ role: 'user', content: 'hello' }, { role: 'assistant', content: 'hi — the pinned reply' })
     await runtime.setSessionModel('original', 'codex/gpt-5.5')
     await runtime.setSessionReasoning('original', 'xhigh')
     await runtime.flushSessions()
@@ -147,6 +155,7 @@ test('resuming history continues at the effort it was held at', async () => {
     const restarted = new InMemoryDaemonRuntime(undefined, {
       currentProjectDirectory: directory,
       model: 'claude-sonnet-4-6',
+      sessionDirectory: join(directory, 'sessions'),
     })
     const resumed = await restarted.openSession(opened.id, undefined, { resume: true })
 
@@ -200,7 +209,7 @@ test('a global reload leaves a session that set its own permission mode alone', 
 test('resuming restores a stricter stored permission mode', async () => {
   await inRuntime(async (runtime, directory) => {
     const opened = await runtime.openSession('locked')
-    opened.messages.push({ role: 'user', content: 'hello' })
+    opened.messages.push({ role: 'user', content: 'hello' }, { role: 'assistant', content: 'hi — the pinned reply' })
     await runtime.setSessionPermissionMode('locked', 'manual')
     await runtime.flushSessions()
 
@@ -208,6 +217,7 @@ test('resuming restores a stricter stored permission mode', async () => {
       currentProjectDirectory: directory,
       model: 'claude-code/default',
       permissionMode: 'accept-all',
+      sessionDirectory: join(directory, 'sessions'),
     })
     const resumed = await restarted.openSession(opened.id, undefined, { resume: true })
 
@@ -218,7 +228,7 @@ test('resuming restores a stricter stored permission mode', async () => {
 test('resuming never loosens permissions from a stored value', async () => {
   await inRuntime(async (runtime, directory) => {
     const opened = await runtime.openSession('wideopen')
-    opened.messages.push({ role: 'user', content: 'hello' })
+    opened.messages.push({ role: 'user', content: 'hello' }, { role: 'assistant', content: 'hi — the pinned reply' })
     await runtime.setSessionPermissionMode('wideopen', 'accept-all')
     await runtime.flushSessions()
 

@@ -122,6 +122,16 @@ export function resolveToolCapabilities(
  * resume, or a rewound turn, and the model would be told about tools whose
  * schemas are no longer in its context (or denied ones that are).
  */
+/** Ordered tool names one result text loaded, for the structured `added_tool_names` marker. */
+export function toolSearchLoadedNames(content: string): string[] {
+  const names: string[] = []
+  for (const match of content.matchAll(TOOL_SEARCH_LOADED_PATTERN)) {
+    const name = match[1]
+    if (name) names.push(name)
+  }
+  return names
+}
+
 export function revealedToolNames(messages: readonly ChatMessage[]): ReadonlySet<string> {
   const names = new Set<string>()
   for (const message of messages) {

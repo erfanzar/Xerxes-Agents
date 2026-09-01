@@ -273,7 +273,7 @@ test('the coding surface enforces the same read-before-write rule as the upper-c
       { backup: false, file_path: 'module.ts', replace: '2', search: '1' },
       paths,
       context,
-    )).rejects.toThrow('has not been read in this session')
+    )).rejects.toThrow('requires reading "module.ts" first')
     expect(await Bun.file(path).text()).toBe('export const value = 1\n')
 
     await readFile({ file_path: 'module.ts' }, paths, context)

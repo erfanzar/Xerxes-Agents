@@ -63,6 +63,25 @@ test('Gemini gives an effort-only neutral thinking request the project default b
   })
 })
 
+test('Gemini 3 uses thinkingLevel instead of the legacy token budget', async () => {
+  let payload: Record<string, unknown> | undefined
+  const client = new GeminiClient({
+    apiKey: 'test-key',
+    baseUrl: 'https://gemini.test/v1beta',
+    fetchImplementation: async (_input, init) => {
+      payload = JSON.parse(String(init?.body)) as Record<string, unknown>
+      return Response.json({ candidates: [{ content: { parts: [{ text: 'answer' }] }, finishReason: 'STOP' }] })
+    },
+  })
+
+  await client.complete({ ...simpleRequest(), model: 'gemini-3-pro', thinking: { effort: 'medium', budgetTokens: 4_000 } })
+
+  expect(payload).toEqual({
+    contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+    generationConfig: { thinkingConfig: { thinkingLevel: 'MEDIUM', includeThoughts: true } },
+  })
+})
+
 test('Gemini omits thinkingConfig when neutral thinking is not requested', async () => {
   let payload: Record<string, unknown> | undefined
   const client = new GeminiClient({
@@ -79,6 +98,37 @@ test('Gemini omits thinkingConfig when neutral thinking is not requested', async
   await client.complete(simpleRequest())
 
   expect(payload).toEqual({ contents: [{ role: 'user', parts: [{ text: 'hello' }] }] })
+})
+
+test('Gemini legacy family maps an explicit off directive to a zero thinking budget', async () => {
+  let payload: Record<string, unknown> | undefined
+  const client = new GeminiClient({
+    apiKey: 'test-key',
+    baseUrl: 'https://gemini.test/v1beta',
+    fetchImplementation: async (_input, init) => {
+      payload = JSON.parse(String(init?.body)) as Record<string, unknown>
+      return Response.json({ candidates: [{ content: { parts: [{ text: 'answer' }] }, finishReason: 'STOP' }] })
+    },
+  })
+
+  await client.complete({ ...simpleRequest(), thinking: { effort: 'off' } })
+
+  expect(payload).toEqual({
+    contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+    generationConfig: { thinkingConfig: { thinkingBudget: 0, includeThoughts: false } },
+  })
+})
+
+test('Gemini blocked finish reasons fail the turn instead of returning an empty success', async () => {
+  const client = new GeminiClient({
+    apiKey: 'test-key',
+    baseUrl: 'https://gemini.test/v1beta',
+    fetchImplementation: async () => Response.json({
+      candidates: [{ content: { parts: [] }, finishReason: 'SAFETY' }],
+    }),
+  })
+
+  await expect(client.complete(simpleRequest())).rejects.toThrow('provider stopped with: SAFETY')
 })
 
 function simpleRequest(): CompletionRequest {

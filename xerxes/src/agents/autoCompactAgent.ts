@@ -21,7 +21,7 @@ export interface AutoCompactAgentOptions {
 }
 
 export interface AutoCompactionMetadata {
-  readonly reason?: 'below_threshold' | 'disabled' | 'no_summary_agent'
+  readonly reason?: 'below_threshold' | 'disabled' | 'no_summary_agent' | 'unknown_context'
   readonly summaryCreated: boolean
   readonly tokensAfter: number
   readonly tokensBefore: number
@@ -39,7 +39,7 @@ export class AutoCompactAgent {
   readonly compactThreshold: number
   readonly compactionStrategy: string
   readonly liveTailHint: number
-  readonly maxContextTokens: number
+  readonly maxContextTokens: number | undefined
   readonly model: string
   readonly preserveSystemPrompt: boolean
   readonly targetTokens: number
@@ -54,14 +54,20 @@ export class AutoCompactAgent {
     this.autoCompact = options.autoCompact ?? true
     this.compactThreshold = fraction(options.compactThreshold ?? 0.8, 'compactThreshold')
     this.compactTarget = fraction(options.compactTarget ?? 0.5, 'compactTarget')
-    this.maxContextTokens = positiveInteger(options.maxContextTokens ?? 8_000, 'maxContextTokens')
+    this.maxContextTokens = options.maxContextTokens === undefined
+      ? undefined
+      : positiveInteger(options.maxContextTokens, 'maxContextTokens')
     this.compactionStrategy = options.compactionStrategy?.trim() || 'summarize'
     this.preserveSystemPrompt = options.preserveSystemPrompt ?? true
     this.liveTailHint = nonNegativeInteger(options.liveTailHint ?? 5, 'liveTailHint')
     this.compactor = options.compactor
     this.tokenCounter = options.tokenCounter ?? new SmartTokenCounter({ model: this.model })
-    this.thresholdTokens = Math.floor(this.maxContextTokens * this.compactThreshold)
-    this.targetTokens = Math.floor(this.maxContextTokens * this.compactTarget)
+    this.thresholdTokens = this.maxContextTokens === undefined
+      ? 0
+      : Math.floor(this.maxContextTokens * this.compactThreshold)
+    this.targetTokens = this.maxContextTokens === undefined
+      ? 0
+      : Math.floor(this.maxContextTokens * this.compactTarget)
   }
 
   /** Return cumulative compaction savings and resolved thresholds. */
@@ -69,7 +75,7 @@ export class AutoCompactAgent {
     return Object.freeze({
       compactionCount: this.compactionCount,
       tokensSaved: this.tokensSaved,
-      maxContextTokens: this.maxContextTokens,
+      ...(this.maxContextTokens === undefined ? {} : { maxContextTokens: this.maxContextTokens }),
       thresholdTokens: this.thresholdTokens,
       targetTokens: this.targetTokens,
       strategy: this.compactionStrategy,
@@ -79,7 +85,7 @@ export class AutoCompactAgent {
   /** Return the configured automatic-compaction threshold and target. */
   checkUsage(): Readonly<Record<string, number>> {
     return Object.freeze({
-      maxContextTokens: this.maxContextTokens,
+      ...(this.maxContextTokens === undefined ? {} : { maxContextTokens: this.maxContextTokens }),
       thresholdTokens: this.thresholdTokens,
       compactThreshold: this.compactThreshold,
       compactTarget: this.compactTarget,
@@ -94,7 +100,9 @@ export class AutoCompactAgent {
 
   /** Return whether this message sequence meets the configured threshold. */
   shouldCompact(messages: readonly ContextMessage[]): boolean {
-    return this.autoCompact && this.tokenCounter.countTokens(messages) >= this.thresholdTokens
+    return this.autoCompact
+      && this.maxContextTokens !== undefined
+      && this.tokenCounter.countTokens(messages) >= this.thresholdTokens
   }
 
   /**
@@ -105,6 +113,7 @@ export class AutoCompactAgent {
     const original = [...messages]
     const tokensBefore = this.tokenCounter.countTokens(original)
     if (!this.autoCompact) return unchanged(original, tokensBefore, 'disabled')
+    if (this.maxContextTokens === undefined) return unchanged(original, tokensBefore, 'unknown_context')
     if (tokensBefore < this.thresholdTokens) return unchanged(original, tokensBefore, 'below_threshold')
     if (this.compactor === undefined) return unchanged(original, tokensBefore, 'no_summary_agent')
 
