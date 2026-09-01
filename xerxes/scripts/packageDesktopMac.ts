@@ -124,9 +124,82 @@ async function packageDesktopMac(): Promise<void> {
   await writeFile(plistPath, plist, 'utf8')
 
   // Modifying a vendor-signed Electron.app invalidates its outer signature.
-  // An ad-hoc deep signature makes this local development bundle launchable.
-  await run('codesign', ['--force', '--deep', '--sign', '-', applicationBundle])
+  // Release signing needs a Developer ID Application certificate; with one
+  // available (keychain or XERXES_SIGN_IDENTITY) we sign for real with the
+  // hardened runtime so Gatekeeper can verify downloads, and notarize when
+  // App Store Connect credentials are present. Without them the bundle falls
+  // back to an ad-hoc deep signature, which is launchable locally but will
+  // be quarantine-blocked for anyone downloading it — the release notes must
+  // then carry the `xattr -dr com.apple.quarantine` workaround.
+  const identity =
+    process.env.XERXES_SIGN_IDENTITY?.trim() || (await developerIdIdentity())
+  if (identity) {
+    await run('codesign', [
+      '--force',
+      '--deep',
+      '--options',
+      'runtime',
+      '--timestamp',
+      '--sign',
+      identity,
+      applicationBundle,
+    ])
+    const notarized = await notarizeIfPossible(applicationBundle)
+    if (!notarized) {
+      console.warn('signed but not notarized — set ASC key credentials to notarize')
+    }
+  } else {
+    await run('codesign', ['--force', '--deep', '--sign', '-', applicationBundle])
+    console.warn('no Developer ID identity — ad-hoc signed; downloads will be quarantine-blocked')
+  }
   console.log(`packaged ${applicationBundle}`)
+}
+
+/** First "Developer ID Application" identity in the keychain, if any. */
+async function developerIdIdentity(): Promise<string | undefined> {
+  try {
+    const proc = Bun.spawn(['security', 'find-identity', '-v', '-p', 'codesigning'], {
+      stdout: 'pipe',
+      stderr: 'ignore',
+    })
+    const listing = await new Response(proc.stdout).text()
+    await proc.exited
+    return listing
+      .split('\n')
+      .find(line => line.includes('Developer ID Application'))
+      ?.match(/"([^"]+)"/)?.[1]
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Notarize and staple when App Store Connect credentials exist. Accepts
+ * either key profile (XERXES_NOTARY_KEY_PROFILE, stored via
+ * `notarytool store-credentials`) or explicit key/id/issuer env triple.
+ * Returns false when no credentials are configured.
+ */
+async function notarizeIfPossible(applicationBundle: string): Promise<boolean> {
+  const profile = process.env.XERXES_NOTARY_KEY_PROFILE?.trim()
+  const keyPath = process.env.XERXES_ASC_KEY_PATH?.trim()
+  const keyId = process.env.XERXES_ASC_KEY_ID?.trim()
+  const issuer = process.env.XERXES_ASC_ISSUER_ID?.trim()
+  const authArgs = profile
+    ? ['--keychain-profile', profile]
+    : keyPath && keyId && issuer
+      ? ['--key', keyPath, '--key-id', keyId, '--issuer', issuer]
+      : undefined
+  if (!authArgs) return false
+
+  const archive = `${applicationBundle}.zip`
+  await run('ditto', ['-c', '-k', '--keepParent', applicationBundle, archive])
+  try {
+    await run('xcrun', ['notarytool', 'submit', archive, '--wait', ...authArgs])
+    await run('xcrun', ['stapler', 'staple', applicationBundle])
+    return true
+  } finally {
+    await rm(archive, { force: true })
+  }
 }
 
 if (import.meta.main) await packageDesktopMac()
