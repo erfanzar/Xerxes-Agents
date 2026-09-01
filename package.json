@@ -1,6 +1,6 @@
 {
   "name": "xerxes-agents",
-  "version": "0.3.0",
+  "version": "0.3.6",
   "private": true,
   "type": "module",
   "description": "Bun-native coding-agent and multi-agent runtime with a React + OpenTUI interface.",

@@ -8247,7 +8247,7 @@ function initPayload(
     skills: [],
     skill_descriptions: {},
     head_hash: "",
-    version: "0.3.0",
+    version: "0.3.6",
   };
 }
 

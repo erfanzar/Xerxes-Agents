@@ -11,7 +11,7 @@ declare const __XERXES_DESKTOP_PROTOCOL__: number
 declare const __XERXES_EXPECTED_DAEMON_BUILD_ID__: string
 
 export const DESKTOP_VERSION =
-  typeof __XERXES_DESKTOP_VERSION__ === 'string' ? __XERXES_DESKTOP_VERSION__ : '0.3.0'
+  typeof __XERXES_DESKTOP_VERSION__ === 'string' ? __XERXES_DESKTOP_VERSION__ : '0.3.6'
 export const DESKTOP_DAEMON_PROTOCOL =
   typeof __XERXES_DESKTOP_PROTOCOL__ === 'number' ? __XERXES_DESKTOP_PROTOCOL__ : 35
 export const EXPECTED_DAEMON_BUILD_ID =

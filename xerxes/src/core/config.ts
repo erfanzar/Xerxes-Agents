@@ -541,7 +541,7 @@ export class ObservabilityConfig {
       serviceName: stringField('xerxes', ['service_name']),
       // Keep in sync with xerxes/package.json "version"; the bundled runtime
       // cannot read package.json at module load time.
-      serviceVersion: stringField('0.3.0', ['service_version']),
+      serviceVersion: stringField('0.3.6', ['service_version']),
       enableRequestLogging: booleanField(true, ['enable_request_logging']),
       enableResponseLogging: booleanField(false, ['enable_response_logging']),
       enableFunctionLogging: booleanField(true, ['enable_function_logging']),
