@@ -1,0 +1,113 @@
+# Xerxes PR Review — GitHub Actions template (Claude Code Action parity)
+#
+# Copy this file to .github/workflows/xerxes-review.yml in your repository.
+# It reviews every pull request with a headless Xerxes turn and posts the
+# result as a PR comment. Everything is plain GitHub Actions plus the
+# published Bun package — no custom action repository required.
+#
+# Configuration (Xerxes reads these env vars natively in headless mode):
+#   secrets.XERXES_API_KEY        provider API key (required)
+#   vars.XERXES_MODEL             e.g. "gpt-4o-mini" (required)
+#   vars.XERXES_BASE_URL          optional; omit for the provider default
+#   vars.XERXES_FALLBACK_MODEL    optional overload fallback model
+
+name: Xerxes PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: xerxes-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      XERXES_API_KEY: ${{ secrets.XERXES_API_KEY }}
+      XERXES_MODEL: ${{ vars.XERXES_MODEL }}
+      XERXES_BASE_URL: ${{ vars.XERXES_BASE_URL }}
+      XERXES_FALLBACK_MODEL: ${{ vars.XERXES_FALLBACK_MODEL }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install Xerxes
+        run: bun add --global xerxes-bun
+
+      - name: Collect the PR diff
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git diff --stat "$BASE" "$HEAD" > "$RUNNER_TEMP/diff-stat.txt"
+          # Cap the diff so huge PRs cannot blow the context window; the
+          # prompt tells the reviewer the diff may be truncated.
+          git diff "$BASE" "$HEAD" | head -c 200000 > "$RUNNER_TEMP/pr.diff"
+
+      - name: Run the review turn
+        run: |
+          # Prompt as a file avoids shell-quoting a multi-KB diff.
+          PROMPT_FILE="$RUNNER_TEMP/review-prompt.md"
+          {
+            echo "You are reviewing pull request #${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}"
+            echo
+            echo '## Diff stat'
+            cat "$RUNNER_TEMP/diff-stat.txt"
+            echo
+            echo '## Unified diff (possibly truncated at 200 KB)'
+            echo '```diff'
+            cat "$RUNNER_TEMP/pr.diff"
+            echo '```'
+            echo
+            echo "Review this diff. Report only actionable findings: bugs, regressions, security issues. Be concise; use a markdown list ordered by severity. If the diff is clean, say so in one line."
+          } > "$PROMPT_FILE"
+          # Headless one-shot; --output-format json buffers the reply into a
+          # single { response, usage, is_error, ... } object for the next step.
+          xerxes --output-format json "$(cat "$PROMPT_FILE")" > "$RUNNER_TEMP/review.json"
+          bun -e '
+            const result = await Bun.file(process.env.RUNNER_TEMP + "/review.json").json();
+            if (result.is_error) { console.error("review turn failed"); process.exit(1); }
+            await Bun.write(process.env.RUNNER_TEMP + "/review-body.md", result.response ?? "");
+          '
+
+      - name: Post or update the review comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync(`${process.env.RUNNER_TEMP}/review-body.md`, 'utf8');
+            const marker = '<!-- xerxes-pr-review -->';
+            const comment = `${marker}\n### Xerxes review\n\n${body}`;
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c => c.body?.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body: comment,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: comment,
+              });
+            }

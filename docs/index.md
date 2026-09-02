@@ -29,6 +29,7 @@ credentials without attempting a remote request.
 - [Deployment](deployment-guide.md)
 - [Testing](testing-guide.md)
 - [Goal mode](goal-mode.md)
+- [GitHub Actions](github-action.md)
 - [System architecture](system-architecture.md)
 - [API reference](api-reference.md)
 - [Release history](changelog.md)
