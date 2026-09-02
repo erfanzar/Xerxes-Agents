@@ -15,6 +15,8 @@ describe("per-provider retry policies", () => {
     expect(retryPolicyForModel("anthropic/claude-sonnet-4")).toEqual(DEFAULT_RETRY_POLICY);
     // Default schedule stays aligned with the loop's historical constants.
     expect(DEFAULT_RETRY_POLICY.delaysMs).toEqual([...DEFAULT_RETRY_DELAYS]);
+    // The recovery contract: five attempts, ten seconds apart, then fail.
+    expect(DEFAULT_RETRY_POLICY.delaysMs).toEqual([10_000, 10_000, 10_000, 10_000]);
     expect(DEFAULT_RETRY_POLICY.maxSuggestedDelayMs).toBe(60_000);
   });
 
@@ -25,10 +27,8 @@ describe("per-provider retry policies", () => {
     expect(retryPolicyForModel("lmstudio/x")).toEqual(ollama);
   });
 
-  test("the subscription codex route carries more patience than the default", () => {
-    const codex = retryPolicyForModel("openai-codex/gpt-5.2");
-    expect(codex.delaysMs.length).toBeGreaterThan(DEFAULT_RETRY_POLICY.delaysMs.length);
-    expect(codex.delaysMs[0]).toBeGreaterThan(DEFAULT_RETRY_POLICY.delaysMs[0]!);
+  test("the subscription codex route shares the default 5x10s recovery cadence", () => {
+    expect(retryPolicyForModel("openai-codex/gpt-5.2")).toEqual(DEFAULT_RETRY_POLICY);
   });
 
   test("every declared policy is internally consistent", () => {

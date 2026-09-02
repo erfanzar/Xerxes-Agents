@@ -1474,6 +1474,9 @@ test('agent turn runner restarts a pre-content overload on the configured fallba
     fallbackModel: 'fallback-model',
     llm: new OverloadedThenOkClient(),
     model: 'primary-model',
+    // Fast local-route schedule; the production 5x10s cadence is asserted in
+    // retryPolicies.test.ts, not waited out here.
+    providerOverrides: { provider: 'ollama' },
   })
   const session: DaemonSession = {
     activeTurnId: '', agentId: 'default', cancelRequested: false, cwd: process.cwd(), extra: {},
@@ -1505,6 +1508,7 @@ test('agent turn runner does not fall back once content has streamed', async () 
     fallbackModel: 'fallback-model',
     llm: new HalfStreamedThenOverload(),
     model: 'primary-model',
+    providerOverrides: { provider: 'ollama' },
   })
   const session: DaemonSession = {
     activeTurnId: '', agentId: 'default', cancelRequested: false, cwd: process.cwd(), extra: {},

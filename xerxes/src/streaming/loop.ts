@@ -56,7 +56,8 @@ import { neutralizeSystemReminders } from './toolMarkers.js'
 
 /** Distinct productive tool rounds are unbounded unless the caller opts into a budget. */
 export const DEFAULT_MAX_TOOL_TURNS = Number.POSITIVE_INFINITY
-export const DEFAULT_RETRY_DELAYS = [1_000, 2_000] as const
+/** Connection-drop recovery: five attempts at a fixed ten-second cadence, then the turn fails. */
+export const DEFAULT_RETRY_DELAYS = [10_000, 10_000, 10_000, 10_000] as const
 /** Generous default chunk-arrival budget before a provider stream is treated as stalled. */
 export const DEFAULT_STREAM_INACTIVITY_TIMEOUT_MS = 120_000
 /** Cap provider-suggested Retry-After waits so a bad hint cannot park a turn for hours. */

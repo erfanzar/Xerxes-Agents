@@ -17,7 +17,9 @@ export interface ProviderRetryPolicy {
 
 /** Schedule every route without an explicit policy inherits. */
 export const DEFAULT_RETRY_POLICY: ProviderRetryPolicy = Object.freeze({
-  delaysMs: [1_000, 2_000],
+  // Five attempts at a fixed ten-second cadence, then the turn fails —
+  // the recovery contract for a dropped provider connection.
+  delaysMs: [10_000, 10_000, 10_000, 10_000],
   maxSuggestedDelayMs: 60_000,
 })
 
@@ -49,11 +51,10 @@ export const PROVIDERS = {
   }),
   // Subscription-backed: a ChatGPT Plus/Pro/Business plan authorizes this
   // endpoint with an OAuth session, so it has no API-key environment variable.
-  // Peak-hour 429s are routine and clear within seconds-to-minutes, so the
-  // route carries more patience than the default before giving up.
+  // Peak-hour 429s clear within seconds-to-minutes; the shared 5×10s default
+  // gives them forty seconds of room before the turn fails.
   'openai-codex': provider('openai-codex', 'openai', {
     baseUrl: 'https://chatgpt.com/backend-api/codex',
-    retry: { delaysMs: [2_000, 5_000, 10_000], maxSuggestedDelayMs: 60_000 },
   }),
   // Subscription-backed like Codex: the GitHub OAuth device flow mints a
   // short-lived proxy token, and the api host derives from that token's
