@@ -75,6 +75,7 @@ import {
   SkillRegistry,
   trustedHashWorkspaceSkills,
 } from "../extensions/skills.js";
+import { expandSkillInstructions } from "../extensions/skillInjection.js";
 import { skillSuggestionValues } from "../extensions/skillSuggestions.js";
 import {
   creatorTraceValues,
@@ -4140,9 +4141,16 @@ export class DaemonServer {
       return { ok: false, error: "skill subcommand not found" };
     }
     const sessionKey = connection.activeSessionKey;
-    await this.runtime.openSession(sessionKey);
+    const openedSession = await this.runtime.openSession(sessionKey);
     const argumentsText = argumentParts.join(" ").trim();
-    const prompt = skillActivationPrompt(skill, {
+    // Claude Code custom-command parity: expand $ARGUMENTS/$N and !`cmd`
+    // injections before the activation prompt is built. Expansion output is
+    // untrusted — the scan in skillPromptSection still applies.
+    const expandedInstructions = await expandSkillInstructions(skill.instructions, {
+      ...(argumentsText ? { args: argumentsText } : {}),
+      cwd: openedSession.cwd,
+    });
+    const prompt = skillActivationPrompt({ ...skill, instructions: expandedInstructions }, {
       ...(subcommand ? { subcommand } : {}),
       ...(argumentsText ? { request: argumentsText } : {}),
     });

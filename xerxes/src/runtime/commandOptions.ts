@@ -69,3 +69,41 @@ export function extractAgentOption(
   }
   return { agent, rest }
 }
+
+export type OutputFormat = 'json' | 'stream-json' | 'text'
+
+/**
+ * Extract the global `--output-format <text|json|stream-json>` option
+ * (Claude Code `-p --output-format` parity). `text` is the default and keeps
+ * the historical plain-text stream; `json` buffers the reply and prints one
+ * result object; `stream-json` prints one NDJSON event per line as the turn
+ * runs, for scripts and CI.
+ */
+export function extractOutputFormatOption(
+  args: readonly string[],
+): { readonly format: OutputFormat; readonly rest: string[] } {
+  let format: OutputFormat = 'text'
+  const rest: string[] = []
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index]
+    if (argument === undefined) continue
+    const value = argument === '--output-format'
+      ? args[index + 1]
+      : argument.startsWith('--output-format=')
+        ? argument.slice('--output-format='.length)
+        : undefined
+    if (value === undefined) {
+      if (argument === '--output-format') {
+        throw new Error('The --output-format option requires a value (text, json, or stream-json)')
+      }
+      rest.push(argument)
+      continue
+    }
+    if (argument === '--output-format') index += 1
+    if (value !== 'text' && value !== 'json' && value !== 'stream-json') {
+      throw new Error(`Unknown --output-format '${value}' (expected text, json, or stream-json)`)
+    }
+    format = value
+  }
+  return { format, rest }
+}

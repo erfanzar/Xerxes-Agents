@@ -12,7 +12,9 @@ import {
 import { ToolResultStorage } from '../context/toolResultStorage.js'
 import { estimateContextTokens } from '../context/windowUsage.js'
 import { ValidationError } from '../core/errors.js'
+import { classify, ErrorKind } from '../runtime/errorClassifier.js'
 import { appendSkillSuggestion } from '../extensions/skillSuggestions.js'
+import type { HookRunner } from '../extensions/hooks.js'
 import {
   renderToolGuidance,
   type ToolExecutor,
@@ -82,6 +84,20 @@ export interface AgentTurnRunnerOptions {
   readonly bootstrapSystemPrompt?: BootstrapSystemPromptProvider
   /** Optional structured audit sink fed from the canonical streaming events. */
   readonly auditEmitter?: AuditEmitter
+  /**
+   * Extension hook sink (plugins, user shell hooks). Without it the loop's
+   * hook points never fire — the daemon used to run with this unset, which
+   * made the entire hooks subsystem inert outside tests.
+   */
+  readonly hookRunner?: HookRunner
+  /**
+   * Fallback model chain (Claude Code parity): when a terminal overload-class
+   * provider failure arrives before any content streams, the turn restarts
+   * once on this model. Requires `createLlmForModel` to build its client.
+   */
+  readonly fallbackModel?: string
+  /** Builds an LlmClient for a fallback model using the same credentials. */
+  readonly createLlmForModel?: (model: string) => LlmClient
   /** Native daemon reply board for approvals and ask-user tool calls. */
   readonly interactions?: DaemonInteractionBoard
   /** Optional tier receiving completed assistant turns for recall on later work. */
@@ -403,12 +419,23 @@ export class AgentTurnRunner implements TurnRunner {
       ? [{ type: 'text', text }, ...imageUrlContentParts(images)]
       : text
     let pendingAgentEventSnapshots: readonly SpawnedAgentSnapshot[] = []
-    const maxTokens = this.options.maxTokens ?? this.options.maxOutputTokens?.(model)
     try {
-      const turnEvents = withActiveSession(session, runTurn({
+      // Fallback model chain (Claude Code fallback-model parity): when the
+      // primary provider fails terminally with an overload-class error before
+      // any content streamed, the turn restarts once on the configured
+      // fallback model. Restarting after content would duplicate streamed
+      // text, so the fallback is strictly pre-content and exactly once.
+      const fallbackModel = this.options.fallbackModel
+      const fallbackFactory = this.options.createLlmForModel
+      let attemptModel = model
+      let attemptLlm = this.options.llm
+      let fallbackAttempted = false
+      for (;;) {
+        const maxTokens = this.options.maxTokens ?? this.options.maxOutputTokens?.(attemptModel)
+        const turnEvents = withActiveSession(session, runTurn({
         agentId: promptAgent?.name ?? session.agentId,
         interactionMode: session.interactionMode,
-        model,
+        model: attemptModel,
         sessionId: session.id,
         state,
         userMessage,
@@ -442,10 +469,11 @@ export class AgentTurnRunner implements TurnRunner {
         } : {}),
         ...(controls.drainSteer ? { drainSteer: controls.drainSteer } : {}),
         // Retry patience is owned by the routed provider, not a global default.
-        retryDelays: retryPolicyForModel(model, this.options.providerOverrides).delaysMs,
-        maxSuggestedRetryDelayMs: retryPolicyForModel(model, this.options.providerOverrides)
+        retryDelays: retryPolicyForModel(attemptModel, this.options.providerOverrides).delaysMs,
+        maxSuggestedRetryDelayMs: retryPolicyForModel(attemptModel, this.options.providerOverrides)
           .maxSuggestedDelayMs,
-        llm: this.options.llm,
+        llm: attemptLlm,
+        ...(this.options.hookRunner ? { hookRunner: this.options.hookRunner } : {}),
         ...(permissionBroker ? { permissionBroker } : {}),
         ...(this.options.policy ? { policy: this.options.policy } : {}),
         ...(toolExecutor ? { toolExecutor } : {}),
@@ -460,34 +488,81 @@ export class AgentTurnRunner implements TurnRunner {
         ...(this.options.auditEmitter
           ? { auditToolLoopBlock: (input) => this.options.auditEmitter?.emitToolLoopBlock(input) }
           : {}),
-      }, signal))
-      for await (const item of multiplexTurnEvents(turnEvents, this.options.subagentEvents, session.id)) {
-        // Agent tools persist their live manifest into the turn-local state.
-        // Mirror only those bounded manifest fields at every event boundary so
-        // session.status can report running children before the parent turn
-        // completes; the complete state still synchronizes in finally below.
-        synchronizeLiveSubagentMetadata(session, state)
-        if (item.kind === 'subagent') {
-          yield {
-            type: item.event.type,
-            payload: {
-              ...item.event.payload,
-              session_id: session.id,
-              ...(session.activeTurnId ? { turn_id: session.activeTurnId } : {}),
-            },
+        }, signal))
+        const decorate = (item: MultiplexedTurnEvent): DaemonEvent => {
+          // Agent tools persist their live manifest into the turn-local state.
+          // Mirror only those bounded manifest fields at every event boundary so
+          // session.status can report running children before the parent turn
+          // completes; the complete state still synchronizes in finally below.
+          synchronizeLiveSubagentMetadata(session, state)
+          if (item.kind === 'subagent') {
+            return {
+              type: item.event.type,
+              payload: {
+                ...item.event.payload,
+                session_id: session.id,
+                ...(session.activeTurnId ? { turn_id: session.activeTurnId } : {}),
+              },
+            }
           }
-          continue
+          const event = item.event
+          accumulateSessionTelemetry(session, event)
+          auditStreamEvent(this.options.auditEmitter, event, auditContext, state)
+          auditTurnEnded ||= event.type === 'turn_done'
+          return daemonEventFromStream(
+            event,
+            state,
+            session,
+            this.options.contextLimit,
+          )
         }
-        const event = item.event
-        accumulateSessionTelemetry(session, event)
-        auditStreamEvent(this.options.auditEmitter, event, auditContext, state)
-        auditTurnEnded ||= event.type === 'turn_done'
-        yield daemonEventFromStream(
-          event,
-          state,
-          session,
-          this.options.contextLimit,
-        )
+        // Pre-content buffering: hold status/retry events until the attempt
+        // proves it can stream. A terminal overload before any content swaps
+        // the whole attempt for the fallback model instead of surfacing.
+        const preContent: MultiplexedTurnEvent[] = []
+        let sawContent = false
+        let restartWithFallback = false
+        for await (const item of multiplexTurnEvents(turnEvents, this.options.subagentEvents, session.id)) {
+          if (!sawContent && item.kind === 'turn') {
+            const event = item.event
+            if (
+              event.type === 'provider_retry'
+              && event.final
+              && !fallbackAttempted
+              && fallbackModel !== undefined
+              && fallbackFactory !== undefined
+              && !signal.aborted
+            ) {
+              const classified = classify(event.error)
+              if (classified.kind === ErrorKind.RATE_LIMIT || classified.kind === ErrorKind.PROVIDER_DOWN) {
+                restartWithFallback = true
+                break
+              }
+            }
+            if (event.type !== 'text' && event.type !== 'thinking' && event.type !== 'tool_start') {
+              preContent.push(item)
+              continue
+            }
+            sawContent = true
+            for (const buffered of preContent) yield decorate(buffered)
+            preContent.length = 0
+          }
+          yield decorate(item)
+        }
+        if (!restartWithFallback) break
+        fallbackAttempted = true
+        // Narrowed by the restart condition above: both are defined here.
+        const nextModel = fallbackModel as string
+        const nextFactory = fallbackFactory as (model: string) => LlmClient
+        attemptModel = nextModel
+        attemptLlm = nextFactory(nextModel)
+        yield {
+          type: 'notification',
+          payload: {
+            level: 'warning',
+            message: `Provider overloaded before the reply started; retrying the turn on fallback model '${nextModel}'`,
+          },
+        }
       }
     } catch (error) {
       if (resumedSubagent) resumedSubagentOutcome = signal.aborted ? 'cancelled' : 'error'

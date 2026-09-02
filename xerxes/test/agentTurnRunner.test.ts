@@ -160,6 +160,36 @@ test('a vendor-prefixed model id runs without being read as a routing prefix', a
   expect((status as unknown as { payload: Record<string, unknown> }).payload).not.toHaveProperty('max_context')
 })
 
+test('agent turn runner fires extension hooks during the turn (hookRunner pass-through)', async () => {
+  const { HookRunner } = await import('../src/extensions/hooks.js')
+  const hookRunner = new HookRunner()
+  const fired: string[] = []
+  hookRunner.register('on_turn_start', payload => {
+    fired.push(`start:${String(payload.model ?? '')}`)
+  })
+  hookRunner.register('on_turn_end', () => {
+    fired.push('end')
+  })
+
+  const runner = new AgentTurnRunner({
+    hookRunner,
+    llm: new TextClient(),
+    model: 'hook-model',
+  })
+  const session: DaemonSession = {
+    activeTurnId: '', agentId: 'default', cancelRequested: false, cwd: process.cwd(), extra: {},
+    id: 'hook-session', interactionMode: 'code', sessionKey: 'hook-key', lastActive: 0,
+    messages: [], metadata: {}, model: 'hook-model', planMode: false, status: 'working',
+    thinkingContent: [], toolExecutions: [], totalInputTokens: 0, totalOutputTokens: 0,
+    turnCount: 0, workspace: '/tmp/agents/default',
+  }
+  for await (const _event of runner.run(session, 'hi', new AbortController().signal)) {
+    void _event
+  }
+
+  expect(fired).toEqual(['start:hook-model', 'end'])
+})
+
 test('agent turn runner resolves output capacity for the session model after explicit max tokens', async () => {
   const session: DaemonSession = {
     activeTurnId: '', agentId: 'default', cancelRequested: false, cwd: process.cwd(), extra: {},
@@ -1424,4 +1454,70 @@ test('deferred tool loading sends the core surface, not every registered schema'
   } finally {
     await rm(directory, { recursive: true, force: true })
   }
+})
+
+class OverloadedThenOkClient implements LlmClient {
+  async *stream(): AsyncGenerator<LlmDelta> {
+    throw new Error('HTTP 529: provider is overloaded')
+  }
+}
+
+class FallbackTextClient implements LlmClient {
+  async *stream(): AsyncGenerator<LlmDelta> {
+    yield { content: 'fallback model reply' }
+  }
+}
+
+test('agent turn runner restarts a pre-content overload on the configured fallback model', async () => {
+  const runner = new AgentTurnRunner({
+    createLlmForModel: model => model === 'fallback-model' ? new FallbackTextClient() : new TextClient(),
+    fallbackModel: 'fallback-model',
+    llm: new OverloadedThenOkClient(),
+    model: 'primary-model',
+  })
+  const session: DaemonSession = {
+    activeTurnId: '', agentId: 'default', cancelRequested: false, cwd: process.cwd(), extra: {},
+    id: 'fallback-session', interactionMode: 'code', sessionKey: 'fallback-key', lastActive: 0,
+    messages: [], metadata: {}, model: 'primary-model', planMode: false, status: 'working',
+    thinkingContent: [], toolExecutions: [], totalInputTokens: 0, totalOutputTokens: 0,
+    turnCount: 0, workspace: '/tmp/agents/default',
+  }
+  const events: { type: string, payload: Record<string, unknown> }[] = []
+  for await (const event of runner.run(session, 'hi', new AbortController().signal)) {
+    events.push(event as { type: string, payload: Record<string, unknown> })
+  }
+  const texts = events.filter(event => event.type === 'text_part').map(event => String(event.payload.text ?? ''))
+  expect(texts.join('')).toContain('fallback model reply')
+  expect(texts.join('')).not.toContain('[Error:')
+  const notice = events.find(event => event.type === 'notification' && String(event.payload.message ?? '').includes('fallback model'))
+  expect(notice).toBeDefined()
+})
+
+test('agent turn runner does not fall back once content has streamed', async () => {
+  class HalfStreamedThenOverload implements LlmClient {
+    async *stream(): AsyncGenerator<LlmDelta> {
+      yield { content: 'partial ' }
+      throw new Error('HTTP 529: provider is overloaded')
+    }
+  }
+  const runner = new AgentTurnRunner({
+    createLlmForModel: () => new FallbackTextClient(),
+    fallbackModel: 'fallback-model',
+    llm: new HalfStreamedThenOverload(),
+    model: 'primary-model',
+  })
+  const session: DaemonSession = {
+    activeTurnId: '', agentId: 'default', cancelRequested: false, cwd: process.cwd(), extra: {},
+    id: 'no-fallback-session', interactionMode: 'code', sessionKey: 'no-fallback-key', lastActive: 0,
+    messages: [], metadata: {}, model: 'primary-model', planMode: false, status: 'working',
+    thinkingContent: [], toolExecutions: [], totalInputTokens: 0, totalOutputTokens: 0,
+    turnCount: 0, workspace: '/tmp/agents/default',
+  }
+  const texts: string[] = []
+  for await (const event of runner.run(session, 'hi', new AbortController().signal)) {
+    if (event.type === 'text_part') texts.push(String((event.payload as { text?: string }).text ?? ''))
+  }
+  const joined = texts.join('')
+  expect(joined).toContain('partial')
+  expect(joined).not.toContain('fallback model reply')
 })

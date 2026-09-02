@@ -3,6 +3,7 @@
 
 import { version } from "../package.json" with { type: "json" };
 import { mkdir, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AcpAgentRunner } from "./acp/runner.js";
@@ -48,6 +49,8 @@ import {
   trustedHashWorkspaceSkills,
 } from "./extensions/skills.js";
 import { DeclarativeToolForge } from "./extensions/declarativeForge.js";
+import { HookRunner } from "./extensions/hooks.js";
+import { loadShellHookConfigSync, registerShellHooks } from "./extensions/shellHooks.js";
 import {
   ToolRegistry,
   type ToolExecutionContext,
@@ -81,7 +84,7 @@ import { CliWriter, createCliStyle, detectColorDepth } from "./runtime/cliStyle.
 import { resolveTuiEntry } from "./runtime/distribution.js";
 import { registerInteractionModeTool } from "./runtime/interactionModeTool.js";
 import { goalPolicyPrompt, registerGoalTools } from "./runtime/goalTools.js";
-import { extractAgentOption, parseValueOptions } from "./runtime/commandOptions.js";
+import { extractAgentOption, extractOutputFormatOption, parseValueOptions, type OutputFormat } from "./runtime/commandOptions.js";
 import { ProcessRegistry } from "./runtime/processRegistry.js";
 import { TerminalRegistry } from "./runtime/terminalRegistry.js";
 import { BackgroundCommandManager } from "./tools/backgroundCommands.js";
@@ -216,9 +219,10 @@ function renderHelp(writer: CliWriter): void {
 /** Summary budget for a mid-turn overflow rescue: small, because the window is already full. */
 const OVERFLOW_SUMMARY_MAX_TOKENS = 2_048;
 
-const { agent: cliAgentReference, rest: cliArguments } = extractAgentOption(
+const { agent: cliAgentReference, rest: agentlessArguments } = extractAgentOption(
   Bun.argv.slice(2),
 );
+const { format: cliOutputFormat, rest: cliArguments } = extractOutputFormatOption(agentlessArguments);
 const [argument, ...argumentsAfterCommand] = cliArguments;
 
 /**
@@ -996,8 +1000,33 @@ async function runDaemon(
   const { loadMcpConfig } = await import("./mcp/config.js");
   const mcpConfig = loadMcpConfig(join(xerxesHome(), "mcp.json"));
   for (const warning of mcpConfig.warnings) console.error(`mcp: ${warning}`);
+  // Project-scoped MCP (Claude Code `.mcp.json` parity): a repo can ship its
+  // own servers. They execute arbitrary commands, so they load ONLY behind
+  // the workspace-config trust opt-in — otherwise the file is noted and
+  // ignored. Project servers never shadow user-configured names.
+  const mcpServers = [...mcpConfig.servers];
+  const workspaceTrusted = process.env.XERXES_ALLOW_WORKSPACE_CONFIG === "1"
+    || /^true|yes|on$/i.test(process.env.XERXES_ALLOW_WORKSPACE_CONFIG ?? "");
+  const projectRoot = projectDirectory ?? config.projectDirectory;
+  const projectMcpPath = join(projectRoot, ".mcp.json");
+  if (existsSync(projectMcpPath)) {
+    if (!workspaceTrusted) {
+      console.error("mcp: project .mcp.json found but workspace config is not trusted — ignored (set XERXES_ALLOW_WORKSPACE_CONFIG=1 to enable)");
+    } else {
+      const projectMcp = loadMcpConfig(projectMcpPath);
+      for (const warning of projectMcp.warnings) console.error(`mcp: ${warning}`);
+      const known = new Set(mcpServers.map((server) => server.name));
+      for (const server of projectMcp.servers) {
+        if (known.has(server.name)) {
+          console.error(`mcp: project server '${server.name}' ignored — a user server with that name exists`);
+          continue;
+        }
+        mcpServers.push(server);
+      }
+    }
+  }
   const mcpManager = new MCPManager();
-  for (const server of mcpConfig.servers) {
+  for (const server of mcpServers) {
     void mcpManager
       .addServer(server)
       .then((connected) => {
@@ -1019,7 +1048,7 @@ async function runDaemon(
     skillRegistry,
     declarativeForge,
     agentPresetRoster,
-    ...(mcpConfig.servers.length ? { mcpManager } : {}),
+    ...(mcpServers.length ? { mcpManager } : {}),
     onRestart: finish,
     onShutdown: finish,
     // Only a process-owning host may claim uncaughtException/unhandledRejection,
@@ -1518,6 +1547,21 @@ function daemonRuntime(
   } = {},
 ): InMemoryDaemonRuntime {
   const workspaceRoot = projectDirectory ?? config.projectDirectory;
+  // User shell hooks (Claude Code settings.json parity): one runner for the
+  // whole daemon, shared by every turn. Without this the loop's hook points
+  // never fired in production — nothing passed a HookRunner down before.
+  // Workspace hooks load only behind the workspace-config trust opt-in.
+  const hookRunner = new HookRunner();
+  {
+    const hookLoad = loadShellHookConfigSync({
+      allowWorkspace: process.env.XERXES_ALLOW_WORKSPACE_CONFIG === "1"
+        || /^true|yes|on$/i.test(process.env.XERXES_ALLOW_WORKSPACE_CONFIG ?? ""),
+      home: xerxesHome(),
+      workspaceRoot,
+    });
+    for (const error of hookLoad.errors) console.error(`hooks: ${error}`);
+    registerShellHooks(hookRunner, hookLoad.hooks, { cwd: workspaceRoot });
+  }
   const home = xerxesHome();
   const transcriptStore = new DaemonTranscriptStore({
     currentProjectDirectory: workspaceRoot,
@@ -1699,6 +1743,13 @@ function daemonRuntime(
       ...(connection.provider ? { provider: connection.provider } : {}),
       ...(connection.responsesApi ? { responsesApi: true } : {}),
     });
+    // Fallback model chain (Claude Code fallback-model parity): configured via
+    // XERXES_FALLBACK_MODEL or runtime.fallback_model; the fallback client
+    // reuses the primary connection's credentials and routing.
+    const fallbackSetting = settings.fallback_model ?? config.runtime.fallback_model;
+    const fallbackModel = process.env.XERXES_FALLBACK_MODEL?.trim()
+      || (typeof fallbackSetting === "string" ? fallbackSetting.trim() : "")
+      || undefined;
     const subagentOptions = {
       agentDefinitions,
       contextLimit: (model: string) => resolvedProfileContextLimit(profileStore.active(), model),
@@ -1781,6 +1832,16 @@ function daemonRuntime(
           ...(runnerTools === undefined ? {} : { tools: runnerTools }),
         }).then((result) => result.systemPrompt),
       llm,
+      hookRunner,
+      ...(fallbackModel === undefined ? {} : {
+        fallbackModel,
+        createLlmForModel: (candidate: string) => createLlmClient(candidate, {
+          ...(connection.apiKey ? { api_key: connection.apiKey } : {}),
+          ...(connection.baseUrl ? { base_url: connection.baseUrl } : {}),
+          ...(connection.provider ? { provider: connection.provider } : {}),
+          ...(connection.responsesApi ? { responsesApi: true } : {}),
+        }),
+      }),
       ...(maxTokens === undefined ? {} : { maxTokens }),
       maxOutputTokens,
       model: connection.model,
@@ -1818,6 +1879,14 @@ function daemonRuntime(
       // loop can retry an overflowed round once, but only if something is
       // willing to shrink the history for it.
       reduceContext: async (messages) => {
+        // PreCompact hook before any message is dropped (Claude Code parity).
+        if (hookRunner.hasHooks("on_compact")) {
+          await hookRunner.run("on_compact", {
+            message_count: messages.length,
+            model: connection.model,
+            trigger: "context_overflow",
+          });
+        }
         const priced = messages as unknown as Readonly<Record<string, unknown>>[];
         const before = estimateContextTokens(priced, { model: connection.model });
         const agent = createCompactionAgent({
@@ -1911,6 +1980,7 @@ function daemonRuntime(
     // spawned with. Children are reclaimed only when their owning session
     // is evicted (above) or the daemon shuts down.
     turnRunnerFactory: runnerFactory,
+    hookRunner,
     ...(interactions ? { interactions } : {}),
   });
   return runtime;
@@ -2142,7 +2212,7 @@ async function runOneShotOrUsageError(
   agentReference?: string,
 ): Promise<void> {
   try {
-    await runOneShot(prompt, agentReference);
+    await runOneShot(prompt, agentReference, { outputFormat: cliOutputFormat });
   } catch (error) {
     if (error instanceof RuntimeConnectionRequiredError) {
       reportCommandUsageError(error, "xerxes --help");
@@ -2154,6 +2224,7 @@ async function runOneShotOrUsageError(
 async function runOneShot(
   prompt: string,
   agentReference?: string,
+  options: { readonly outputFormat?: OutputFormat } = {},
 ): Promise<void> {
   const config = loadSystemDaemonConfig();
   const profileStore = new ProfileStore();
@@ -2247,9 +2318,17 @@ async function runOneShot(
   const sessionId = `oneshot-${crypto.randomUUID()}`;
   const state = createAgentState();
   const subagentCohort = subagentHost.turnCoordinator.begin(sessionId);
+  const outputFormat: OutputFormat = options.outputFormat ?? "text";
   let pendingAgentEventSnapshots: readonly SpawnedAgentSnapshot[] = [];
   let wroteText = false;
   let terminalProviderError: string | undefined;
+  // json buffers the whole reply; stream-json mirrors every event as NDJSON.
+  let bufferedText = "";
+  let lastUsage: Record<string, unknown> | undefined;
+  let stopReason: string | undefined;
+  const writeStreamJson = (record: Record<string, unknown>) => {
+    process.stdout.write(`${JSON.stringify(record)}\n`);
+  };
   try {
     for await (const event of runTurn(
       {
@@ -2284,7 +2363,20 @@ async function runOneShot(
     )) {
       if (event.type === "text") {
         wroteText = true;
-        process.stdout.write(event.text);
+        if (outputFormat === "stream-json") {
+          writeStreamJson({ text: event.text, type: "text" });
+        } else if (outputFormat === "json") {
+          bufferedText += event.text;
+        } else {
+          process.stdout.write(event.text);
+        }
+      } else if (outputFormat === "stream-json" && (event.type === "tool_start" || event.type === "tool_end")) {
+        writeStreamJson({ ...(event as unknown as Record<string, unknown>), type: event.type });
+      } else if (event.type === "usage_update") {
+        lastUsage = { ...(event as unknown as Record<string, unknown>) };
+        delete lastUsage.type;
+      } else if (event.type === "turn_done") {
+        stopReason = (event as unknown as Record<string, unknown>).stopReason as string | undefined;
       } else if (event.type === "provider_retry" && event.final) {
         terminalProviderError = event.error;
         console.error(`Provider error: ${event.error}`);
@@ -2294,7 +2386,27 @@ async function runOneShot(
     subagentCohort.close();
     await subagentHost.manager.shutdown();
   }
-  if (wroteText) process.stdout.write("\n");
+  if (outputFormat === "json") {
+    writeStreamJson({
+      is_error: terminalProviderError !== undefined,
+      model,
+      response: bufferedText,
+      session_id: sessionId,
+      type: "result",
+      ...(stopReason === undefined ? {} : { stop_reason: stopReason }),
+      ...(lastUsage === undefined ? {} : { usage: lastUsage }),
+    });
+  } else if (outputFormat === "stream-json") {
+    writeStreamJson({
+      is_error: terminalProviderError !== undefined,
+      session_id: sessionId,
+      type: "result",
+      ...(stopReason === undefined ? {} : { stop_reason: stopReason }),
+      ...(lastUsage === undefined ? {} : { usage: lastUsage }),
+    });
+  } else if (wroteText) {
+    process.stdout.write("\n");
+  }
   // A terminal provider failure still yields a text event, so scripts and CI
   // must learn about it through the exit code rather than stdout alone.
   if (terminalProviderError !== undefined) process.exitCode = 1;

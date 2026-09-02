@@ -6,7 +6,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { extractAgentOption, parseValueOptions } from '../src/runtime/commandOptions.js'
+import { extractAgentOption, extractOutputFormatOption, parseValueOptions } from '../src/runtime/commandOptions.js'
 
 const CLI = join(import.meta.dir, '../src/cli.ts')
 
@@ -144,4 +144,23 @@ test('telegram rejects unsupported positional arguments after consuming option v
   ])
   expect(result.exitCode).not.toBe(0)
   expect(result.stderr).toContain('Unexpected telegram argument: poll')
+})
+
+test('extractOutputFormatOption accepts text/json/stream-json and rejects the rest', () => {
+  expect(extractOutputFormatOption(['--output-format', 'json', 'hi']).format).toBe('json')
+  expect(extractOutputFormatOption(['--output-format=json', 'hi']).format).toBe('json')
+  expect(extractOutputFormatOption(['hi', '--output-format', 'stream-json'])).toEqual({
+    format: 'stream-json',
+    rest: ['hi'],
+  })
+  expect(extractOutputFormatOption(['hi']).format).toBe('text')
+  expect(() => extractOutputFormatOption(['--output-format', 'xml'])).toThrow(/--output-format/)
+  expect(() => extractOutputFormatOption(['--output-format'])).toThrow(/--output-format/)
+})
+
+test('one-shot flag parsing keeps --output-format out of the prompt text', () => {
+  // The global extractor must strip the flag wherever it appears, or the
+  // catch-all prompt parser would reject it as an unknown dash-led token.
+  const { rest } = extractOutputFormatOption(['--output-format', 'json', 'explain', 'this'])
+  expect(rest).toEqual(['explain', 'this'])
 })

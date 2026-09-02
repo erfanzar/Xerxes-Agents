@@ -11,6 +11,9 @@ export const HOOK_POINTS = [
   'on_turn_end',
   'on_loop_warning',
   'on_error',
+  'on_session_start',
+  'on_session_end',
+  'on_compact',
 ] as const
 
 export type HookPoint = (typeof HOOK_POINTS)[number]

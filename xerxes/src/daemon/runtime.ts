@@ -4,6 +4,7 @@
 import { join, resolve } from "node:path";
 
 import { ValidationError } from "../core/errors.js";
+import type { HookRunner } from "../extensions/hooks.js";
 import { disarmGoal } from "../runtime/goalDomain.js";
 import { normalizeInteractionMode } from "../runtime/interactionModes.js";
 import {
@@ -378,6 +379,8 @@ export interface InMemoryDaemonRuntimeOptions {
   readonly baseUrl?: string;
   readonly buildId?: string;
   readonly currentProjectDirectory?: string;
+  /** Extension hook sink: session start/end and compaction events fire here. */
+  readonly hookRunner?: HookRunner;
   readonly model?: string;
   readonly permissionMode?: string;
   /** Coordinates approval and question replies for agent runners that opt in. */
@@ -554,7 +557,17 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
   }
 
   evictSession(sessionKey: string): void {
-    const sessionId = this.sessions.get(sessionKey)?.id ?? sessionKey;
+    const session = this.sessions.get(sessionKey);
+    const sessionId = session?.id ?? sessionKey;
+    // SessionEnd hook: fired synchronously-scheduled before the record is
+    // dropped so the payload still has the session's identity and cwd.
+    if (session && this.options.hookRunner?.hasHooks("on_session_end")) {
+      void this.options.hookRunner.run("on_session_end", {
+        cwd: session.cwd,
+        session_id: sessionId,
+        turns: session.turnCount,
+      });
+    }
     // Abort any in-flight turn so its orphaned controller cannot block a
     // future submitTurn with "already active" or race the next saveSession.
     this.abortControllers.get(sessionKey)?.abort(new Error("Session evicted"));
@@ -955,6 +968,17 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
       }
       this.sessions.set(key, session);
       if (releaseSubagentClaim) this.directSubagentClaims.set(key, releaseSubagentClaim);
+      // SessionStart hook (Claude Code parity): fired once per process for a
+      // newly opened session, with `resumed` distinguishing a fresh session
+      // from one reloaded from disk. Observer-only; failures are isolated by
+      // the HookRunner.
+      if (this.options.hookRunner?.hasHooks("on_session_start")) {
+        void this.options.hookRunner.run("on_session_start", {
+          cwd: session.cwd,
+          resumed: effectiveTranscript !== undefined,
+          session_id: session.id,
+        });
+      }
       return session;
     } finally {
       if (this.sessionIdClaims.get(claimedId) === key) {

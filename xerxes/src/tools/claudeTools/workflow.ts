@@ -14,6 +14,7 @@ import {
   type ToolExecutionContext,
 } from '../../executors/toolRegistry.js'
 import { skillActivationPrompt, skillMetadataIndexLine, type SkillRegistry } from '../../extensions/skills.js'
+import { expandSkillInstructions } from '../../extensions/skillInjection.js'
 import { completeLlm, type LlmClient } from '../../llms/client.js'
 import {
   SpawnedAgentManager,
@@ -561,7 +562,7 @@ export class ClaudeWorkflowTools {
     })
   }
 
-  private skill(inputs: JsonObject): string {
+  private skill(inputs: JsonObject): Promise<string> {
     const registry = this.options.skillRegistry
     if (registry === undefined) {
       throw new ClientError('skills', 'no SkillRegistry is attached to this Claude workflow session')
@@ -636,7 +637,7 @@ export class ClaudeWorkflowTools {
   }
 }
 
-function renderSkill(registry: SkillRegistry, inputs: JsonObject): string {
+async function renderSkill(registry: SkillRegistry, inputs: JsonObject): Promise<string> {
   const skillName = optionalString(inputs, 'skill_name')?.trim()
   if (!skillName) {
     if (optionalString(inputs, 'args')?.trim()) {
@@ -649,9 +650,15 @@ function renderSkill(registry: SkillRegistry, inputs: JsonObject): string {
     return `No installed skill has that exact name.\n${renderSkillSearch(registry, { query: skillName })}`
   }
   const args = optionalString(inputs, 'args')?.trim()
+  // $ARGUMENTS/$N and !`cmd` expansion (Claude Code custom-command parity);
+  // the injection scan in skillPromptSection still runs on the result.
+  const instructions = await expandSkillInstructions(skill.instructions, {
+    ...(args ? { args } : {}),
+    cwd: process.cwd(),
+  })
   // Same canonical framing as /skill activation, so the daemon and TUI
   // classifiers recognize this expansion as private runtime context too.
-  return skillActivationPrompt(skill, args ? { request: args } : {})
+  return skillActivationPrompt({ ...skill, instructions }, args ? { request: args } : {})
 }
 
 function renderSkillSearch(registry: SkillRegistry, inputs: JsonObject): string {
