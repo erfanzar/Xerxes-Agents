@@ -4,6 +4,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactElement } from 'react'
 
 import { CommandPalette, ContextMenu, ModelMenu, ModelPicker, ReasoningPicker, SettingsModal, bareModelName } from './Overlays.js'
+import { SessionSearch } from './SearchPanel.js'
 import { store, type Snapshot, isPlanReview } from './store.js'
 import type { AgentMember } from './types.js'
 import { applyCompletion, wantsHints, HINT_LIMIT, type HintItem } from './hints.js'
@@ -118,6 +119,7 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
       {/* Mounted only while open: the palette's hooks (needle, cursor,
           focus effect) must never share a fiber with a closed render. */}
       {snap.paletteOpen && <CommandPalette snap={snap} />}
+      {snap.searchOpen && <SessionSearch snap={snap} />}
       {snap.wsMenuOpen && <WorkspaceMenu snap={snap} />}
       {snap.sessionMenu && <SessionMenu menu={snap.sessionMenu} />}
       <GlobalKeys snap={snap} />
@@ -514,6 +516,12 @@ function Sidebar({ snap }: { snap: Snapshot }): ReactElement {
           placeholder={online ? 'Filter tasks' : 'Offline'}
           spellCheck={false}
         />
+        <button
+          className="side__find"
+          disabled={!online}
+          title="Full-text search across every saved session (daemon transcript index)"
+          onClick={() => store.openSessionSearch()}
+        >⌕ Search sessions & messages…</button>
       </div>
       <nav className="side__list">
         {groups.map(group => (
@@ -1623,6 +1631,11 @@ function GlobalKeys({ snap }: { snap: Snapshot }): ReactElement | null {
           store.closePalette()
           return
         }
+        if (snap.searchOpen) {
+          event.preventDefault()
+          store.closeSessionSearch()
+          return
+        }
         if (snap.taskModalOpen) {
           event.preventDefault()
           store.closeTaskModal()
@@ -1682,6 +1695,6 @@ function GlobalKeys({ snap }: { snap: Snapshot }): ReactElement | null {
     // Every overlay flag the handler branches on must be a dep — a stale
     // closure here swallowed Escape after the task modal closed (the old
     // snap still claimed taskModalOpen, so settings could never dismiss).
-  }, [snap.approval, snap.paletteOpen, snap.taskModalOpen, snap.settingsOpen, snap.pickerOpen, snap.reasoningPickerOpen, snap.modelMenuOpen, snap.contextMenuOpen, snap.wsMenuOpen, snap.sessionMenu, snap.turnActive])
+  }, [snap.approval, snap.paletteOpen, snap.searchOpen, snap.taskModalOpen, snap.settingsOpen, snap.pickerOpen, snap.reasoningPickerOpen, snap.modelMenuOpen, snap.contextMenuOpen, snap.wsMenuOpen, snap.sessionMenu, snap.turnActive])
   return null
 }

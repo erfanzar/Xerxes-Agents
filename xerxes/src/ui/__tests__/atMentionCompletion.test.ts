@@ -37,3 +37,27 @@ describe('OpenTUI @ file completion', () => {
     expect(completionRequestForInput('/model ./not-a-path')).toBeNull()
   })
 })
+
+describe('skill argument completion requests', () => {
+  it('routes /skill <prefix> to daemon skill suggestions with the right replace point', () => {
+    expect(completionRequestForInput('/skill git')).toEqual({
+      method: 'skill_suggestions',
+      params: { prefix: 'git' },
+      replaceFrom: 7
+    })
+    expect(completionRequestForInput('/skill ')).toEqual({
+      method: 'skill_suggestions',
+      params: { prefix: '' },
+      replaceFrom: 7
+    })
+  })
+
+  it('leaves the bare /skill name and other commands on the catalog path', () => {
+    expect(completionRequestForInput('/skill')).toEqual({
+      method: 'complete.slash',
+      params: { text: '/skill' },
+      replaceFrom: 1
+    })
+    expect(completionRequestForInput('/skills list')).toBeNull()
+  })
+})

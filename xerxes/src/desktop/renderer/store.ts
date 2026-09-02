@@ -31,6 +31,8 @@ import type {
   BackgroundJob,
   Block,
   CachedModel,
+  ChannelRow,
+  ChannelStatus,
   CreatorTrace,
   DaemonEvent,
   DiffFile,
@@ -46,8 +48,12 @@ import type {
   ProviderTypeRow,
   QueueItem,
   SessionRow,
+  SessionSearchHit,
+  SessionSearchStats,
   SettingsTab,
   SkillSuggestion,
+  TerminalDetail,
+  TerminalRow,
   WorkspaceTab,
 } from './types.js'
 
@@ -176,6 +182,19 @@ export interface Snapshot {
   readonly currentAgentPreset: string
   /** Live DSH-style preset roster used by settings and the new-task seat. */
   readonly agentPresets: readonly AgentPreset[]
+  /** Messaging gateways from `channel.list`, kept fresh by `channel_status` broadcasts. */
+  readonly channels: readonly ChannelRow[]
+  readonly channelsAvailable: boolean
+  readonly channelsConfigured: boolean
+  /** Daemon-tracked terminals from `terminal.list` (owner: the bound session). */
+  readonly terminals: readonly TerminalRow[]
+  readonly terminalsLoading: boolean
+  /** Transcript search (`session.search`) state for the search overlay. */
+  readonly searchOpen: boolean
+  readonly searchResults: readonly SessionSearchHit[]
+  readonly searchStats: SessionSearchStats | null
+  readonly searchSearching: boolean
+  readonly searchError: string | null
   /** Git branch of the workspace, from the daemon's initialize — '' when unknown. */
   readonly branch: string
   /** Actionable initialize-handshake mismatch; null when app and daemon agree. */
@@ -333,6 +352,97 @@ function capabilitySource(
   return value === 'catalog' || value === 'override' || value === 'provider' || value === 'unknown'
     ? value
     : undefined
+}
+
+/** Fold a `channel.list` / `channel_status` payload onto the channels state. */
+function channelStatusFrom(result: Record<string, unknown>): ChannelStatus {
+  const rows = Array.isArray(result.channels) ? result.channels : []
+  const channels: ChannelRow[] = rows.flatMap(value => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return []
+    const row = value as Record<string, unknown>
+    const name = str(row.name).trim()
+    if (!name) return []
+    return [{
+      name,
+      adapterName: str(row.adapter_name) || name,
+      enabled: row.enabled === true,
+      ...(str(row.last_operation) ? { lastOperation: str(row.last_operation) } : {}),
+      ...(str(row.last_error) ? { lastError: str(row.last_error) } : {}),
+    }]
+  })
+  return {
+    channels,
+    available: result.channels_available === true,
+    configured: result.channels_configured === true,
+  }
+}
+
+/** The terminal registry's rows pass the wire camelCase — parse them as-is. */
+function terminalRowOf(value: unknown): TerminalRow | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const row = value as Record<string, unknown>
+  const id = str(row.id).trim()
+  if (!id) return null
+  const pid = num(row.pid)
+  const endedAt = num(row.endedAt)
+  return {
+    id,
+    kind: str(row.kind) || 'background',
+    label: str(row.label),
+    command: str(row.command),
+    cwd: str(row.cwd),
+    ...(pid === null ? {} : { pid }),
+    running: row.running === true,
+    // Required on the wire (registry rows always carry the start epoch).
+    startedAt: Math.max(0, num(row.startedAt) ?? 0),
+    ...(endedAt === null ? {} : { endedAt }),
+    exitCode: typeof row.exitCode === 'number' ? row.exitCode : null,
+    outputChars: Math.max(0, num(row.outputChars) ?? 0),
+    canWrite: row.canWrite === true,
+    canInterrupt: row.canInterrupt === true,
+    canKill: row.canKill === true,
+  }
+}
+
+function terminalsFromResult(result: Record<string, unknown>): TerminalRow[] {
+  const rows = Array.isArray(result.terminals) ? result.terminals : []
+  return rows.map(terminalRowOf).filter((row): row is TerminalRow => row !== null)
+}
+
+function terminalDetailOf(value: unknown): TerminalDetail | null {
+  const row = terminalRowOf(value)
+  if (!row) return null
+  const record = (value ?? {}) as Record<string, unknown>
+  return {
+    ...row,
+    output: str(record.output),
+    outputTruncated: record.outputTruncated === true,
+  }
+}
+
+function searchHitOf(value: unknown): SessionSearchHit | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const row = value as Record<string, unknown>
+  const sessionId = str(row.session_id).trim()
+  if (!sessionId) return null
+  return {
+    sessionId,
+    messageIndex: Math.max(0, num(row.message_index) ?? 0),
+    role: str(row.role),
+    excerpt: str(row.excerpt),
+    title: str(row.title),
+    updatedAt: str(row.updated_at),
+  }
+}
+
+function searchStatsOf(value: unknown): SessionSearchStats | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const row = value as Record<string, unknown>
+  return {
+    sessions: Math.max(0, num(row.sessions) ?? 0),
+    indexedMessages: Math.max(0, num(row.indexed_messages) ?? 0),
+    searchableMessages: Math.max(0, num(row.searchable_messages) ?? 0),
+  }
 }
 
 function clientHandshake(): Record<string, unknown> {
@@ -534,6 +644,8 @@ export class Store {
   private lastUser = ''
   private snippets: Record<string, string> = {}
   private enriching = new Set<string>()
+  /** Latest session-search request; stale responses must not win. */
+  private searchSeq = 0
   private ttftTotalMs = 0
   private ttftSamples = 0
   private activeMetricTools = new Set<string>()
@@ -546,6 +658,16 @@ export class Store {
       model: '',
       currentAgentPreset: 'default',
       agentPresets: [],
+      channels: [],
+      channelsAvailable: false,
+      channelsConfigured: false,
+      terminals: [],
+      terminalsLoading: false,
+      searchOpen: false,
+      searchResults: [],
+      searchStats: null,
+      searchSearching: false,
+      searchError: null,
       branch: '',
       daemonWarning: null,
       costUsd: null,
@@ -1225,6 +1347,8 @@ export class Store {
     this.loadModels()
     void this.loadProviders()
     void this.loadAgentPresets()
+    if (tab === 'channels') this.loadChannels()
+    if (tab === 'terminals') this.loadTerminals()
   }
 
   closeSettings(): void {
@@ -1238,6 +1362,8 @@ export class Store {
       this.loadModels()
       void this.loadProviders()
     }
+    if (tab === 'channels') this.loadChannels()
+    if (tab === 'terminals') this.loadTerminals()
   }
 
   togglePalette(): void {
@@ -1648,6 +1774,37 @@ export class Store {
     return str(result.content)
   }
 
+  /** Persist an edited preset body (`agentPreset.write`); the daemon revalidates on save. */
+  async writeAgentPreset(id: string, content: string): Promise<boolean> {
+    try {
+      const result = await this.bridge.call('agentPreset.write', { agent_preset: id, content })
+      if (result.ok === false) throw new Error(str(result.error) || 'could not save agent preset')
+      await this.loadAgentPresets()
+      return true
+    } catch (error) {
+      this.fail(error)
+      return false
+    }
+  }
+
+  /** Bind an existing preset to the current session (`agentPreset.select`). */
+  async selectAgentPreset(id: string): Promise<boolean> {
+    if (!this.frame.currentId || this.frame.turnActive) return false
+    try {
+      const result = await this.bridge.call('agentPreset.select', {
+        agent_preset: id,
+        session_key: this.sessionKey,
+      })
+      if (result.ok === false) throw new Error(str(result.error) || 'could not select agent preset')
+      const applied = str(result.agent_preset)
+      if (applied) this.patch({ currentAgentPreset: applied })
+      return true
+    } catch (error) {
+      this.fail(error)
+      return false
+    }
+  }
+
   async openAgentPresetLocation(id: string): Promise<void> {
     try {
       const result = await this.bridge.call('agentPreset.openDocument', { agent_preset: id })
@@ -1666,6 +1823,152 @@ export class Store {
       false,
       'creator',
     )
+  }
+
+  // ── Channels ─────────────────────────────────────────────────────────
+
+  /** Load gateway status; flags stay truthful even when the manager is absent (`ok:false`). */
+  loadChannels(): void {
+    void this.bridge
+      .call('channel.list', {})
+      .then(result => this.applyChannelStatus(channelStatusFrom(result)))
+      .catch(error => this.fail(error))
+  }
+
+  private applyChannelStatus(status: ChannelStatus): void {
+    this.patch({
+      channels: status.channels,
+      channelsAvailable: status.available,
+      channelsConfigured: status.configured,
+    })
+  }
+
+  /** Enable or disable one gateway; the response list and the `channel_status` broadcast both refresh the panel. */
+  setChannelEnabled(name: string, enabled: boolean): void {
+    const method = enabled ? 'channel.enable' : 'channel.disable'
+    void this.bridge
+      .call(method, { name })
+      .then(result => {
+        if (result.ok === false) throw new Error(str(result.error) || `could not ${enabled ? 'enable' : 'disable'} ${name}`)
+        // Fast path: the response carries the refreshed channel LIST but no
+        // availability flags — those ride the `channel_status` broadcast the
+        // daemon emits right after, or the quiet reload below.
+        const status = channelStatusFrom(result)
+        this.patch({ channels: status.channels })
+        this.loadChannels()
+      })
+      .catch(error => this.fail(error))
+  }
+
+  // ── Terminals ────────────────────────────────────────────────────────
+
+  loadTerminals(): void {
+    this.patch({ terminalsLoading: true })
+    void this.bridge
+      .call('terminal.list', { session_key: this.sessionKey })
+      .then(result => {
+        this.patch({ terminals: terminalsFromResult(result), terminalsLoading: false })
+      })
+      .catch(error => {
+        this.patch({ terminalsLoading: false })
+        this.fail(error)
+      })
+  }
+
+  /** Read one terminal's retained output tail (`terminal.inspect`). */
+  async inspectTerminal(id: string): Promise<TerminalDetail | null> {
+    const result = await this.bridge.call('terminal.inspect', {
+      terminal_id: id,
+      session_key: this.sessionKey,
+      max_output_chars: 24_000,
+    })
+    if (result.ok === false) throw new Error(str(result.error) || 'could not inspect terminal')
+    return terminalDetailOf(result.terminal)
+  }
+
+  /** Send input to, interrupt, or kill one terminal (`terminal.control`). */
+  controlTerminal(id: string, action: 'write' | 'interrupt' | 'kill', chars?: string): void {
+    const params: Record<string, unknown> = {
+      action,
+      terminal_id: id,
+      session_key: this.sessionKey,
+      ...(action === 'write' ? { chars: chars ?? '' } : {}),
+    }
+    void this.bridge
+      .call('terminal.control', params)
+      .then(result => {
+        if (result.ok === false) throw new Error(str(result.error) || `terminal ${action} refused`)
+        // The control result echoes the inspected terminal — fold its fresh
+        // state (running flag, output size, exit code) into the open list.
+        const detail = terminalDetailOf(result.terminal)
+        this.patch({
+          terminals: detail
+            ? this.frame.terminals.map(row => (row.id === id ? detail : row))
+            : this.frame.terminals,
+        })
+      })
+      .catch(error => this.fail(error))
+  }
+
+  // ── Session search ───────────────────────────────────────────────────
+
+  openSessionSearch(): void {
+    this.patch({
+      searchOpen: true,
+      paletteOpen: false,
+      settingsOpen: false,
+      taskModalOpen: false,
+    })
+  }
+
+  closeSessionSearch(): void {
+    this.patch({ searchOpen: false })
+  }
+
+  /**
+   * Ask the daemon's transcript FTS (`session.search`). Stale answers drop:
+   * a sequence counter makes the slowest response for an earlier needle
+   * lose to the latest one.
+   */
+  runSessionSearch(query: string): void {
+    const needle = query.trim()
+    if (needle.length < 2) {
+      this.searchSeq += 1
+      this.patch({ searchResults: [], searchStats: null, searchSearching: false, searchError: null })
+      return
+    }
+    const seq = ++this.searchSeq
+    this.patch({ searchSearching: true, searchError: null })
+    void this.bridge
+      .call('session.search', { query: needle, limit: 24 })
+      .then(result => {
+        if (seq !== this.searchSeq) return
+        if (result.ok === false) {
+          this.patch({
+            searchResults: [],
+            searchStats: null,
+            searchSearching: false,
+            searchError: str(result.error) || 'search failed',
+          })
+          return
+        }
+        const rows = Array.isArray(result.results) ? result.results : []
+        this.patch({
+          searchResults: rows.map(searchHitOf).filter((row): row is SessionSearchHit => row !== null),
+          searchStats: searchStatsOf(result.stats),
+          searchSearching: false,
+          searchError: null,
+        })
+      })
+      .catch(error => {
+        if (seq !== this.searchSeq) return
+        this.patch({
+          searchResults: [],
+          searchStats: null,
+          searchSearching: false,
+          searchError: error instanceof Error ? error.message : String(error),
+        })
+      })
   }
 
   async loadProviders(): Promise<void> {
@@ -2362,6 +2665,12 @@ export class Store {
       case 'agent_preset_selected': {
         const selected = str(payload.agent_preset)
         if (selected) this.patch({ currentAgentPreset: selected })
+        break
+      }
+      case 'channel_status': {
+        // Daemon-wide broadcast (no session tag): any enable/disable — from
+        // this shell, the TUI, or the webhook itself — keeps the panel true.
+        this.applyChannelStatus(channelStatusFrom(payload))
         break
       }
       case 'status_update': {

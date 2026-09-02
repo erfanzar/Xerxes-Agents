@@ -223,9 +223,6 @@ const NATIVE_UNSUPPORTED_RPC_GUIDANCE: Readonly<Record<string, string>> = Object
   'session.close': 'Native sessions are persistent; use /new or the session switcher instead.',
   'skills.manage': 'Use `bun run xerxes skill <name>` for bundled native skills.',
   'skills.reload': 'Restart the Bun daemon to reload bundled skill content.',
-  'spawn_tree.list': 'Native spawn-tree persistence is not configured in this daemon.',
-  'spawn_tree.load': 'Native spawn-tree persistence is not configured in this daemon.',
-  'spawn_tree.save': 'Native spawn-tree persistence is not configured in this daemon.',
   'subagent.interrupt': 'Native subagent lifecycle control is not configured in this daemon.',
   'tools.configure': 'Native runtime tool configuration is not available through the daemon.',
   'voice.record': 'Native voice capture is not configured in this daemon.',
@@ -915,9 +912,6 @@ export class GatewayClient extends EventEmitter {
       case 'delegation.status':
       case 'delegation.pause':
       case 'subagent.interrupt':
-      case 'spawn_tree.save':
-      case 'spawn_tree.list':
-      case 'spawn_tree.load':
       case 'process.stop':
       case 'reload.mcp':
       case 'reload.env':

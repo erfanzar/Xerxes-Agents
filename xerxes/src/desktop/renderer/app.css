@@ -1309,3 +1309,41 @@ button.hchip--btn { cursor: pointer; }
   font-family: var(--mono); font-size: 10.5px; line-height: 1.5;
   white-space: pre; user-select: text;
 }
+
+/* ── Daemon ops surfaces: session search, channels, terminals ─────── */
+.side__find {
+  display: flex; align-items: center; justify-content: center; gap: 7px;
+  padding: 5px 0; border: 1px dashed var(--x-hairline); border-radius: var(--r-sm);
+  background: transparent; color: var(--x-caption); font-family: var(--mono);
+  font-size: 10.5px; cursor: pointer;
+}
+.side__find:hover:not(:disabled) { border-color: var(--x-focus); color: var(--x-strong); }
+.side__find:disabled { opacity: 0.4; cursor: default; }
+/* Search hit: title + role/age on the head line, the matched excerpt under it. */
+.srow {
+  display: flex; flex-direction: column; gap: 3px; width: 100%;
+  border: none; background: transparent; color: var(--x-prose);
+  font-family: var(--mono); font-size: 11px; padding: 7px 9px;
+  border-radius: var(--r-sm); cursor: pointer; text-align: left;
+}
+.srow.is-sel, .srow:hover { background: var(--x-selected); }
+.srow:disabled { opacity: 0.5; cursor: default; }
+.srow__head { display: flex; align-items: baseline; gap: 10px; width: 100%; }
+.srow__title { color: var(--x-title); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.srow__meta { margin-left: auto; flex: 0 0 auto; color: var(--x-numeric); font-size: 10px; }
+.srow__excerpt {
+  color: var(--x-meta); font-size: 10.5px; line-height: 1.5;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+/* Preset body editor: same chrome as the composition reader, editable. */
+.preset-editor {
+  width: 100%; resize: vertical; padding: 10px;
+  border: 1px solid var(--x-hairline); border-radius: var(--r-sm);
+  background: var(--x-backdrop); color: var(--x-prose);
+  font-family: var(--mono); font-size: 10.5px; line-height: 1.5;
+  white-space: pre; outline: none;
+}
+.preset-editor:focus { border-color: var(--x-focus); }
+/* Inline "input + action" rows (terminal write, search entry). */
+.findwrap { display: flex; gap: 8px; align-items: center; }
+.findwrap .findwrap__input { flex: 1 1 auto; }

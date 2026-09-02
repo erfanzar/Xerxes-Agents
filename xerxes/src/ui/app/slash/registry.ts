@@ -5,6 +5,7 @@ import { attachCommands } from './commands/attach.js'
 import { coreCommands } from './commands/core.js'
 import { creditsCommands } from './commands/credits.js'
 import { debugCommands } from './commands/debug.js'
+import { integrationCommands } from './commands/integrations.js'
 import { maintenanceCommands } from './commands/maintenance.js'
 import { opsCommands } from './commands/ops.js'
 import { presetCommands } from './commands/presets.js'
@@ -21,6 +22,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   ...presetCommands,
   ...setupCommands,
   ...debugCommands,
+  ...integrationCommands,
   ...attachCommands,
   // Registered last on purpose: the retry-aware `/agents` shadows the stock
   // dashboard command in the by-name map while delegating every non-retry

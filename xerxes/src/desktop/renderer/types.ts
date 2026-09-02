@@ -254,9 +254,80 @@ export interface ProviderTypeRow {
   readonly apiKeyEnv: string
 }
 
+// ── Channels (daemon gateways: telegram, discord, slack, …) ─────────────
+
+/** One messaging gateway the daemon's channel manager drives. */
+export interface ChannelRow {
+  readonly name: string
+  readonly adapterName: string
+  readonly enabled: boolean
+  /** Last lifecycle op the gateway ran ('start' | 'stop' | …), when reported. */
+  readonly lastOperation?: string
+  /** Why the gateway is not up, when the daemon reports one. */
+  readonly lastError?: string
+}
+
+/** Point-in-time channel-manager status shared by `channel.list` and the `channel_status` broadcast. */
+export interface ChannelStatus {
+  readonly channels: readonly ChannelRow[]
+  /** False when the daemon runs without its channel manager at all. */
+  readonly available: boolean
+  /** False when no channel credentials are configured yet. */
+  readonly configured: boolean
+}
+
+// ── Terminals (daemon-tracked shells the agents ran) ────────────────────
+
+/** One daemon-registered terminal in list view — everything but the output. */
+export interface TerminalRow {
+  readonly id: string
+  readonly kind: string
+  readonly label: string
+  readonly command: string
+  readonly cwd: string
+  readonly pid?: number
+  readonly running: boolean
+  /** Epoch ms. */
+  readonly startedAt: number
+  /** Epoch ms, absent while running. */
+  readonly endedAt?: number
+  readonly exitCode: number | null
+  /** Total characters observed, including any dropped from the mirror. */
+  readonly outputChars: number
+  readonly canWrite: boolean
+  readonly canInterrupt: boolean
+  readonly canKill: boolean
+}
+
+/** Detail view: a row plus the retained tail of what it printed. */
+export interface TerminalDetail extends TerminalRow {
+  readonly output: string
+  /** Older output was dropped from the mirror before this tail. */
+  readonly outputTruncated: boolean
+}
+
+// ── Session search (`session.search` over the persisted transcripts) ────
+
+/** One transcript message that matched a search query. */
+export interface SessionSearchHit {
+  readonly sessionId: string
+  readonly messageIndex: number
+  readonly role: string
+  readonly excerpt: string
+  readonly title: string
+  readonly updatedAt: string
+}
+
+/** What the daemon's search index currently covers. */
+export interface SessionSearchStats {
+  readonly sessions: number
+  readonly indexedMessages: number
+  readonly searchableMessages: number
+}
+
 // ── Settings ────────────────────────────────────────────────────────────
 
-export type SettingsTab = 'general' | 'models' | 'agents' | 'permissions' | 'mcp'
+export type SettingsTab = 'general' | 'models' | 'agents' | 'permissions' | 'mcp' | 'channels' | 'terminals'
 
 /** One MCP server's redacted status, straight from the daemon wire. */
 export interface McpServerStatus {

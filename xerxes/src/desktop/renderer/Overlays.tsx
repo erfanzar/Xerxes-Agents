@@ -13,6 +13,8 @@
 
 import { useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 
+import { ChannelsCard } from './ChannelsPanel.js'
+import { TerminalsCard } from './TerminalsPanel.js'
 import { store, type Snapshot } from './store.js'
 import type { CachedModel, ModelChoice, PermissionMode, ProviderRow, SettingsTab } from './types.js'
 
@@ -23,7 +25,9 @@ const SETTINGS_TABS: ReadonlyArray<{ id: SettingsTab; label: string }> = [
   { id: 'models', label: 'Models & Providers' },
   { id: 'agents', label: 'Agent presets' },
   { id: 'permissions', label: 'Permissions' },
+  { id: 'channels', label: 'Channels' },
   { id: 'mcp', label: 'MCP Servers' },
+  { id: 'terminals', label: 'Terminals' },
 ]
 
 export function SettingsModal({ snap }: { snap: Snapshot }): ReactElement | null {
@@ -53,7 +57,9 @@ export function SettingsModal({ snap }: { snap: Snapshot }): ReactElement | null
           {snap.settingsTab === 'models' && <ModelsCard snap={snap} />}
           {snap.settingsTab === 'agents' && <AgentPresetsCard snap={snap} />}
           {snap.settingsTab === 'permissions' && <PermissionsCard snap={snap} />}
+          {snap.settingsTab === 'channels' && <ChannelsCard snap={snap} />}
           {snap.settingsTab === 'mcp' && <McpCard snap={snap} />}
+          {snap.settingsTab === 'terminals' && <TerminalsCard snap={snap} />}
         </div>
       </div>
     </div>
@@ -273,6 +279,7 @@ function AgentPresetsCard({ snap }: { snap: Snapshot }): ReactElement {
   const [copyId, setCopyId] = useState('')
   const [copyName, setCopyName] = useState('')
   const [viewing, setViewing] = useState<{ id: string; content: string } | null>(null)
+  const [editing, setEditing] = useState<{ id: string; content: string; dirty: boolean } | null>(null)
   const [busy, setBusy] = useState(false)
   const presets = snap.agentPresets ?? []
   useEffect(() => { void store.loadAgentPresets() }, [])
@@ -290,6 +297,24 @@ function AgentPresetsCard({ snap }: { snap: Snapshot }): ReactElement {
       .catch(() => {})
       .finally(() => setBusy(false))
   }
+  const edit = (id: string): void => {
+    setBusy(true)
+    void store.readAgentPreset(id)
+      .then(content => setEditing({ id, content, dirty: false }))
+      .catch(() => {})
+      .finally(() => setBusy(false))
+  }
+  const saveEdit = async (): Promise<void> => {
+    if (!editing) return
+    setBusy(true)
+    const saved = await store.writeAgentPreset(editing.id, editing.content)
+    setBusy(false)
+    if (saved) setEditing(null)
+  }
+  // A preset binds to the CURRENT session (agentPreset.select); there is
+  // nothing to rebind before the first turn creates one, and the swap is
+  // refused mid-turn like every other live-session mutation.
+  const canSelect = snap.currentId !== '' && !snap.turnActive && snap.connection === 'online'
   return (
     <>
       <h2 className="modal__title">Agent presets</h2>
@@ -311,13 +336,24 @@ function AgentPresetsCard({ snap }: { snap: Snapshot }): ReactElement {
                   <div className="pcard__main">
                     <span className={`dot ${row.broken ? 'dot--fail' : row.isDefault ? 'dot--live' : 'dot--idle'}`} />
                     <span className="pcard__text">
-                      <span className="pcard__name">{row.name} <code>{row.id}</code>{row.isDefault ? <span className="chipbtn" style={{ marginLeft: 6 }}>default</span> : null}</span>
+                      <span className="pcard__name">{row.name} <code>{row.id}</code>{row.isDefault ? <span className="chipbtn" style={{ marginLeft: 6 }}>default</span> : null}{snap.currentAgentPreset === row.id ? <span className="chipbtn" style={{ marginLeft: 6 }}>this session</span> : null}</span>
                       <span className="pcard__meta">{row.broken || row.description || 'No description.'}</span>
                     </span>
                   </div>
                   <div className="pcard__actions">
                     {!row.broken && !row.isDefault && <button className="chipbtn" onClick={() => { void store.setDefaultAgentPreset(row.id) }}>Set default</button>}
+                    {!row.broken && !snap.turnActive && row.id !== snap.currentAgentPreset && (
+                      <button
+                        className="chipbtn"
+                        disabled={!canSelect}
+                        title={canSelect ? `run the current session with ${row.id}` : 'start a task first — a preset binds to an existing session'}
+                        onClick={() => { void store.selectAgentPreset(row.id) }}
+                      >
+                        Use here
+                      </button>
+                    )}
                     <button className="chipbtn" disabled={busy || Boolean(row.broken)} onClick={() => inspect(row.id)}>View</button>
+                    {!row.broken && row.manageable && <button className="chipbtn" disabled={busy} onClick={() => edit(row.id)}>Edit</button>}
                     {!row.broken && <button className="chipbtn" onClick={() => { setCopyFrom(row.id); setCopyId(''); setCopyName('') }}>Duplicate</button>}
                     {row.manageable && <button className="chipbtn" onClick={() => { void store.openAgentPresetLocation(row.id) }}>Open folder</button>}
                     {row.manageable && <button className="chipbtn chipbtn--danger" onClick={() => { if (window.confirm(`Delete agent preset ${row.id}? Running sessions are unaffected.`)) void store.removeAgentPreset(row.id) }}>Delete</button>}
@@ -341,6 +377,22 @@ function AgentPresetsCard({ snap }: { snap: Snapshot }): ReactElement {
           <div className="row__t">Composition · {viewing.id}</div>
           <pre className="preset-composition">{viewing.content}</pre>
           <div className="preset-actions"><button className="btn btn--ghost" onClick={() => setViewing(null)}>Close</button></div>
+        </div>
+      )}
+      {editing && (
+        <div className="provform">
+          <div className="row__t">Edit · {editing.id} — the daemon validates the spec on save</div>
+          <textarea
+            className="preset-editor"
+            value={editing.content}
+            rows={18}
+            spellCheck={false}
+            onChange={event => setEditing({ ...editing, content: event.target.value, dirty: true })}
+          />
+          <div className="preset-actions">
+            <button className="btn btn--ghost" onClick={() => setEditing(null)}>Cancel</button>
+            <button className="btn" disabled={busy || !editing.dirty} onClick={() => { void saveEdit() }}>{busy ? 'Saving…' : 'Save'}</button>
+          </div>
         </div>
       )}
     </>
@@ -1198,6 +1250,9 @@ export function CommandPalette({ snap }: { snap: Snapshot }): ReactElement | nul
       { id: 'settings', icon: '⚙', label: 'Settings…', run: () => store.openSettings() },
       { id: 'models-settings', icon: '◆', label: 'Models & Providers settings…', run: () => store.openSettings('models') },
       { id: 'permissions', icon: '⛨', label: 'Permissions settings…', run: () => store.openSettings('permissions') },
+      { id: 'channels', icon: '⇄', label: 'Channels settings…', run: () => store.openSettings('channels') },
+      { id: 'terminals', icon: '⌨', label: 'Terminals…', run: () => store.openSettings('terminals') },
+      { id: 'session-search', icon: '⌕', label: 'Search sessions & messages…', run: () => store.openSessionSearch() },
     ]
     for (const provider of snap.providers) {
       if (provider.active || snap.turnActive) continue

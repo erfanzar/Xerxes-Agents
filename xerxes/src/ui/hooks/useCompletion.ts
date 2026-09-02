@@ -10,6 +10,12 @@ import { rankCompletionItems } from '../lib/completion.js'
 import { asRpcResult } from '../lib/rpc.js'
 import type { SlashCatalog } from '../types.js'
 
+/** Wire shape of the daemon's skill_suggestions RPC (daemon/server.ts). */
+interface SkillSuggestionsWire {
+  ok?: boolean
+  suggestions?: { description?: string; skill_name?: string }[]
+}
+
 const TAB_PATH_RE = /((?:["']?(?:[A-Za-z]:[\\/]|\.{1,2}\/|~\/|\/|@|[^"'`\s]+\/))[^\s]*)$/
 
 const commandToken = (input: string) => input.slice(1).split(/\s+/, 1)[0]?.toLowerCase() ?? ''
@@ -86,9 +92,23 @@ export function completionRequestForInput(
 ):
   | { method: 'complete.path'; params: { word: string }; replaceFrom: number }
   | { method: 'complete.slash'; params: { text: string }; replaceFrom: number }
+  | { method: 'skill_suggestions'; params: { prefix: string }; replaceFrom: number }
   | null {
   const isSlashCommand = looksLikeSlashCommand(input)
   const isSlashName = isSlashCommand && !/\s/.test(input.slice(1))
+
+  // `/skill <prefix>` completes skill ARGUMENTS from the daemon's
+  // context-aware suggestions (the desktop GUI already consumes this RPC).
+  const skillArg = input.match(/^\/skill\s+(\S*)$/)
+  if (skillArg) {
+    const prefix = skillArg[1] ?? ''
+    return {
+      method: 'skill_suggestions',
+      params: { prefix },
+      replaceFrom: input.length - prefix.length
+    }
+  }
+
   const pathWord = isSlashName ? null : (input.match(TAB_PATH_RE)?.[1] ?? null)
 
   if (!isSlashName && !pathWord) {
@@ -174,6 +194,7 @@ export function useCompletion(input: string, blocked: boolean, gw: GatewayClient
     }
 
     const initialLocal = request.method === 'complete.slash' ? slashCompletionsFromCatalog(input, catalog) : []
+    const isSkillSuggest = request.method === 'skill_suggestions'
 
     if (initialLocal.length) {
       setCompletions(rankCompletionItems(initialLocal, commandToken(input)))
@@ -192,9 +213,31 @@ export function useCompletion(input: string, blocked: boolean, gw: GatewayClient
         return
       }
 
-      gw.request<CompletionResponse>(request.method, request.params)
+      gw.request<CompletionResponse | SkillSuggestionsWire>(request.method, request.params)
         .then(raw => {
           if (ref.current !== input) {
+            return
+          }
+
+          if (isSkillSuggest) {
+            const r = asRpcResult<SkillSuggestionsWire>(raw)
+            const prefix = (request.params as { prefix: string }).prefix.toLowerCase()
+            const items = (r?.suggestions ?? [])
+              .filter(row => row.skill_name && row.skill_name.toLowerCase().startsWith(prefix))
+              .map(row => ({
+                display: row.skill_name!,
+                group: 'suggested skills',
+                meta: row.description ?? 'suggested skill',
+                text: row.skill_name!
+              }))
+
+            setCompletions(
+              items.length
+                ? items
+                : [{ display: 'no suggested skills match', meta: '', text: '' }]
+            )
+            setCompIdx(0)
+            setCompReplace(request.replaceFrom)
             return
           }
 
@@ -213,6 +256,11 @@ export function useCompletion(input: string, blocked: boolean, gw: GatewayClient
         })
         .catch((e: unknown) => {
           if (ref.current !== input) {
+            return
+          }
+
+          if (isSkillSuggest) {
+            clear()
             return
           }
 
