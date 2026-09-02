@@ -351,3 +351,23 @@ function fakeHost(overrides: Partial<BootstrapHost> = {}): BootstrapHost {
     ...overrides
   }
 }
+
+test('bootstrap loads CLAUDE.md and .claude/CLAUDE.md like Claude Code project memory', async () => {
+  const result = await bootstrap({
+    host: fakeHost({
+      readText: async path =>
+        ({
+          '/workspace/project/CLAUDE.md': 'Claude Code project notes.',
+          '/workspace/project/.claude/CLAUDE.md': 'Claude directory notes.'
+        })[path]
+    }),
+    cwd: '/workspace/project',
+    model: 'gpt-4.1'
+  })
+
+  expect(result.ok).toBe(true)
+  expect(result.systemPrompt).toContain('[Project CLAUDE.md: /workspace/project/CLAUDE.md]')
+  expect(result.systemPrompt).toContain('Claude Code project notes.')
+  expect(result.systemPrompt).toContain('[Project .claude/CLAUDE.md: /workspace/project/.claude/CLAUDE.md]')
+  expect(result.systemPrompt).toContain('Claude directory notes.')
+})

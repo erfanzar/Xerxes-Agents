@@ -113,7 +113,7 @@ export const COMMAND_REGISTRY: readonly CommandDefinition[] = Object.freeze([
   command('reload-mcp', 'Reload MCP servers', 'tools'),
   command('browser', 'Manage browser sessions', 'tools'),
   command('plugins', 'List loaded plugins', 'tools'),
-  command('init', 'Ask the agent to inspect and initialize project context', 'tools'),
+  command('init', 'Analyze the repo and write/update XERXES.md', 'tools'),
   command('workspace', 'Inspect or initialize project .agents workspace', 'tools', { argsHint: '[status|init]' }),
   command('soul', 'Show or edit SOUL.md', 'tools'),
   command('agents', 'List or select sub-agents', 'tools'),

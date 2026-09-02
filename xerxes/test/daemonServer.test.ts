@@ -47,6 +47,87 @@ import type {
   TurnRunner,
 } from "../src/daemon/runtime.js";
 
+test("daemon slash RPC runs ! shell mode and # memory notes", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-shell-hash-"));
+  const socketPath = join(directory, "daemon.sock");
+  const server = new DaemonServer({
+    socketPath,
+    projectDirectory: directory,
+    runtime: new InMemoryDaemonRuntime(undefined, {
+      currentProjectDirectory: directory,
+      model: "protocol-model",
+      sessionDirectory: join(directory, "sessions"),
+    }),
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "shell-hash", project_dir: directory },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    // ! runs in the project shell and returns captured output.
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "slash",
+      params: { command: "!echo shell-mode-works" },
+    });
+    const shellResponse = await client.next((frame) => frame.id === 2);
+    expect(shellResponse.result).toMatchObject({ code: 0, ok: true });
+    expect(shellResponse.result?.stdout).toContain("shell-mode-works");
+    expect(
+      (await client.next(eventFrame("notification"))).params?.payload,
+    ).toMatchObject({ category: "slash", body: "shell-mode-works" });
+
+    // Non-zero exits surface the code instead of pretending success.
+    client.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "slash",
+      params: { command: "!exit 3" },
+    });
+    expect((await client.next((frame) => frame.id === 3)).result).toMatchObject({
+      code: 3,
+      ok: false,
+    });
+    await client.next(eventFrame("notification"));
+
+    // # appends one line to project MEMORY.md through the workspace store.
+    client.send({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "slash",
+      params: { command: "#this project uses Bun" },
+    });
+    const noteResponse = await client.next((frame) => frame.id === 4);
+    expect(noteResponse.result).toMatchObject({ id: 1, ok: true });
+    expect(
+      (await client.next(eventFrame("notification"))).params?.payload,
+    ).toMatchObject({ category: "slash", severity: "info" });
+    const memoryBody = await Bun.file(join(directory, "MEMORY.md")).text();
+    expect(memoryBody).toContain("this project uses Bun");
+
+    // Empty payloads stay usage errors, not silent no-ops.
+    client.send({ jsonrpc: "2.0", id: 5, method: "slash", params: { command: "!" } });
+    expect((await client.next((frame) => frame.id === 5)).result).toMatchObject({ ok: false });
+    await client.next(eventFrame("notification"));
+    client.send({ jsonrpc: "2.0", id: 6, method: "slash", params: { command: "#" } });
+    expect((await client.next((frame) => frame.id === 6)).result).toMatchObject({ ok: false });
+    await client.next(eventFrame("notification"));
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("daemon preserves JSON-RPC v35 NDJSON responses and stream event framing", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-daemon-"));
   const socketPath = join(directory, "daemon.sock");

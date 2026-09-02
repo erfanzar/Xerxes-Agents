@@ -497,7 +497,11 @@ async function loadXerxesMd(cwd: string, host: BootstrapHost): Promise<string> {
     ))
   }
 
-  for (const name of ['XERXES.md', 'AGENTS.md'] as const) {
+  // Project instruction files, nearest-first per name: XERXES.md is the
+  // native file, AGENTS.md the cross-agent convention, CLAUDE.md and
+  // .claude/CLAUDE.md are honored so repos already documented for Claude
+  // Code carry their instructions over without renaming anything.
+  for (const name of ['XERXES.md', 'AGENTS.md', 'CLAUDE.md', '.claude/CLAUDE.md'] as const) {
     let current = cwd
     for (let index = 0; index < 10; index += 1) {
       const candidate = join(current, name)

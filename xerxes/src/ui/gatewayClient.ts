@@ -1511,7 +1511,7 @@ export class GatewayClient extends EventEmitter {
 
   private async slashExec(params: Record<string, unknown>): Promise<RpcObject> {
     const raw = String(params.command ?? '').trim()
-    const command = raw.startsWith('/') || raw.startsWith('!') ? raw : `/${raw}`
+    const command = raw.startsWith('/') || raw.startsWith('!') || raw.startsWith('#') ? raw : `/${raw}`
     const result = (await this.rawRequest('slash', { command })) as RpcObject
     if (result.ok === false) {
       return { output: 'error: ' + String(result.error ?? 'command was rejected') }

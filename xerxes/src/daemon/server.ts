@@ -135,6 +135,7 @@ import {
   FILE_READS_METADATA_KEY,
   fileStateTracker,
 } from "../tools/fileState.js";
+import { WorkspaceMemoryStore } from "../tools/workspaceMemory.js";
 import {
   DEFAULT_PERMISSION_MODE,
   type PermissionMode,
@@ -2700,6 +2701,101 @@ export class DaemonServer {
     });
   }
 
+  /**
+   * `!<cmd>` shell mode. Runs the command in the user's login shell with the
+   * project directory as cwd, mirroring Claude Code's shell mode: bounded
+   * runtime and output, non-zero exits surface the code, and the raw
+   * stdout/stderr ride the slash notification body so every client renders
+   * the same thing. This is deliberately NOT permission-gated — the user
+   * typed the command themselves; it is exactly what they'd get in their own
+   * terminal.
+   */
+  private async handleShellCommand(
+    connection: DaemonTransportConnection,
+    shellCommand: string,
+  ): Promise<JsonRpcPayload> {
+    if (!shellCommand) {
+      this.emitSlash(connection, "usage: !<command>", "warning");
+      return { ok: false, error: "empty shell command" };
+    }
+
+    const SHELL_TIMEOUT_MS = 120_000;
+    const SHELL_OUTPUT_CAP = 30_000;
+    const cwd = this.projectDirectory ?? process.cwd();
+    const shell = process.platform === "win32" ? "cmd.exe" : "/bin/sh";
+    const shellArgs = process.platform === "win32" ? ["/d", "/s", "/c", shellCommand] : ["-c", shellCommand];
+
+    let code = 0;
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    try {
+      const proc = Bun.spawn([shell, ...shellArgs], {
+        cwd,
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const killer = setTimeout(() => {
+        timedOut = true;
+        proc.kill();
+      }, SHELL_TIMEOUT_MS);
+      const [out, err, exit] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+      clearTimeout(killer);
+      code = timedOut ? 124 : exit;
+      stdout = out;
+      stderr = err;
+    } catch (error) {
+      this.emitSlash(connection, `shell failed: ${errorMessage(error)}`, "error");
+      return { ok: false, error: errorMessage(error) };
+    }
+
+    const clip = (value: string) =>
+      value.length > SHELL_OUTPUT_CAP
+        ? value.slice(0, SHELL_OUTPUT_CAP) + `\n… (truncated, ${value.length} chars total)`
+        : value;
+    const combined = [clip(stdout), clip(stderr)].filter(Boolean).join("\n").trimEnd();
+    const suffix = timedOut ? `\n(exited: timed out after ${SHELL_TIMEOUT_MS / 1000}s)` : code !== 0 ? `\n(exit ${code})` : "";
+    const body = combined ? combined + suffix : suffix.trim() || "(no output)";
+    this.emitSlash(connection, body, code === 0 ? "info" : "warning");
+    return { code, ok: code === 0, stderr: clip(stderr), stdout: clip(stdout) };
+  }
+
+  /**
+   * `#<note>` quick memory (Claude Code's `#` prefix): appends one line to
+   * the project MEMORY.md through the same store the memory tools use, so
+   * notes are immediately visible to future turns without a model round.
+   */
+  private async handleMemoryNote(
+    connection: DaemonTransportConnection,
+    note: string,
+  ): Promise<JsonRpcPayload> {
+    if (!note) {
+      this.emitSlash(connection, "usage: #<note to remember>", "warning");
+      return { ok: false, error: "empty memory note" };
+    }
+    try {
+      const store = new WorkspaceMemoryStore(
+        this.projectDirectory ? { workspaceRoot: this.projectDirectory } : {},
+      );
+      const result = await store.add("memory", note);
+      if ("ok" in result && result.ok) {
+        this.emitSlash(connection, `remembered (MEMORY.md #${result.id}): ${result.content}`);
+        return { id: result.id, ok: true };
+      }
+      const message = "error" in result ? String(result.error) : "memory write failed";
+      this.emitSlash(connection, `memory note failed: ${message}`, "error");
+      return { ok: false, error: message };
+    } catch (error) {
+      this.emitSlash(connection, `memory note failed: ${errorMessage(error)}`, "error");
+      return { ok: false, error: errorMessage(error) };
+    }
+  }
+
   private emitCompactionLog(
     connection: DaemonTransportConnection,
     body: string,
@@ -3310,6 +3406,18 @@ export class DaemonServer {
     raw: string,
   ): Promise<JsonRpcPayload> {
     const command = raw.trim();
+    // `!<cmd>` shell mode (Claude Code parity): run the rest in the project
+    // shell and report output as a slash notification. The TUI already
+    // routes `!` input here via the slash RPC; without this branch the
+    // startsWith('/') guard rejected it and shell mode was dead on the wire.
+    if (command.startsWith("!")) {
+      return this.handleShellCommand(connection, command.slice(1).trim());
+    }
+    // `#<note>` quick memory (Claude Code parity): one line appended to the
+    // project MEMORY.md — the same store the memory_add tool writes.
+    if (command.startsWith("#")) {
+      return this.handleMemoryNote(connection, command.slice(1).trim());
+    }
     if (!command.startsWith("/")) {
       this.emitSlash(
         connection,

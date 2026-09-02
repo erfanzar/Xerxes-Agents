@@ -223,6 +223,20 @@ export function useSubmission(opts: UseSubmissionOptions) {
     [appendMessage, gw, sys]
   )
 
+  const memoryNote = useCallback(
+    (note: string) => {
+      const sid = getUiState().sid
+
+      gw.request('slash', { command: `#${note}` })
+        .catch((e: unknown) => {
+          if (getUiState().sid === sid) {
+            sys(`error: ${rpcErrorMessage(e)}`)
+          }
+        })
+    },
+    [gw, sys]
+  )
+
   const interpolate = useCallback(
     (text: string, then: (result: string) => void) => {
       patchUiState({ status: 'interpolating…' })
@@ -250,6 +264,10 @@ export function useSubmission(opts: UseSubmissionOptions) {
         return shellExec(message.submitText.slice(1).trim())
       }
 
+      if (message.submitText.startsWith('#')) {
+        return memoryNote(message.submitText.slice(1).trim())
+      }
+
       if (hasInterpolation(message.submitText)) {
         const sid = getUiState().sid
         patchUiState({ busy: true })
@@ -269,7 +287,7 @@ export function useSubmission(opts: UseSubmissionOptions) {
 
       submitPrompt(message)
     },
-    [interpolate, shellExec, submitPrompt]
+    [interpolate, memoryNote, shellExec, submitPrompt]
   )
 
   // Honors `display.busy_input_mode` from config.yaml (CLI parity):
@@ -407,6 +425,16 @@ export function useSubmission(opts: UseSubmissionOptions) {
         composerActions.clearIn()
 
         return shellExec(full.slice(1).trim())
+      }
+
+      // `#<note>` quick memory — Claude Code parity. Appended to project
+      // MEMORY.md daemon-side without consuming a turn.
+      if (full.startsWith('#')) {
+        appendMessage({ role: 'user', text: full })
+        composerActions.pushHistory(full)
+        composerActions.clearIn()
+
+        return memoryNote(full.slice(1).trim())
       }
 
       const live = getUiState()
