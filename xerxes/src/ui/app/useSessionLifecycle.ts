@@ -421,7 +421,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
   )
 
   const resumeById = useCallback(
-    (id: string) => {
+    (id: string, options: { keepCurrent?: boolean } = {}) => {
       const generation = ++switchGenerationRef.current
       patchOverlayState({ sessions: false })
       patchUiState({ status: 'resuming…' })
@@ -476,7 +476,11 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
             })
             hydrateLiveSessionInflight(r.inflight)
 
-            if (previousSid && previousSid !== r.session_id) {
+            // Agent View "attach" is non-destructive: the chat you came from
+            // remains live (and may keep working) while the saved chat becomes
+            // the foreground tab. Explicit /resume keeps replacement semantics
+            // and closes the previous idle session as before.
+            if (!options.keepCurrent && previousSid && previousSid !== r.session_id) {
               void closeSession(previousSid)
             }
 
@@ -490,6 +494,12 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
       })
     },
     [closeSession, colsRef, gw, panel, resetSession, rpc, runClientSwitch, scrollRef, setHistoryItems, setSessionStartedAt, setTurnStartedAt, sys]
+  )
+
+  /** Agent View attach: promote saved history without replacing live work. */
+  const attachSavedSession = useCallback(
+    (id: string) => resumeById(id, { keepCurrent: true }),
+    [resumeById]
   )
 
   const guardBusySessionSwitch = useCallback(
@@ -507,6 +517,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
 
   return {
     activateLiveSession,
+    attachSavedSession,
     closeSession,
     guardBusySessionSwitch,
     newLiveSession,

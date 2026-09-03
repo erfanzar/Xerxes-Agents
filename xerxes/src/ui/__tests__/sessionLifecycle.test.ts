@@ -77,6 +77,60 @@ describe('useSessionLifecycle', () => {
     }
   })
 
+  it('attaches saved history from Agent View while the current chat keeps working', async () => {
+    resetUiState()
+    turnController.fullReset()
+    patchUiState({ busy: true, sid: 'live-main' })
+    const sys = vi.fn()
+    const gw = {
+      request: vi.fn(async (method: string) => {
+        if (method !== 'session.resume') throw new Error(`unexpected gateway request: ${method}`)
+        return { messages: [], resumed: 'saved-main', session_id: 'saved-main', status: 'idle' }
+      })
+    } as unknown as GatewayClient
+    const rpc = vi.fn(async (method: string) =>
+      method === 'setup.status' ? { provider_configured: true } : null
+    ) as GatewayRpc
+    let lifecycle: ReturnType<typeof useSessionLifecycle> | undefined
+
+    const Probe = () => {
+      lifecycle = useSessionLifecycle({
+        colsRef: { current: 120 },
+        composerActions: { activateSessionQueue: vi.fn(), setPasteSnips: vi.fn() } as unknown as ComposerActions,
+        gw,
+        panel: vi.fn(),
+        rpc,
+        scrollRef: { current: null },
+        setHistoryItems: vi.fn(),
+        setLastUserMsg: vi.fn(),
+        setSessionStartedAt: vi.fn(),
+        setStickyPrompt: vi.fn(),
+        setTurnStartedAt: vi.fn(),
+        setVoiceProcessing: vi.fn(),
+        setVoiceRecording: vi.fn(),
+        sys
+      })
+      return null
+    }
+
+    const setup = await testRender(createElement(Probe), { height: 6, width: 40 })
+    try {
+      await setup.flush()
+      if (!lifecycle) throw new Error('lifecycle hook did not mount')
+      lifecycle.attachSavedSession('saved-main')
+      await act(async () => Bun.sleep(0))
+      await setup.flush()
+
+      expect(gw.request).toHaveBeenCalledWith('session.resume', { cols: 120, session_id: 'saved-main' })
+      expect(sys).not.toHaveBeenCalledWith('interrupt the current turn before trying to switch sessions')
+      expect(getUiState().sid).toBe('saved-main')
+    } finally {
+      act(() => setup.renderer.destroy())
+      turnController.fullReset()
+      resetUiState()
+    }
+  })
+
   it('lets only the newest overlapping new-session request replace visible state', async () => {
     resetUiState()
     const firstSetup = deferred<null | SetupStatusResponse>()

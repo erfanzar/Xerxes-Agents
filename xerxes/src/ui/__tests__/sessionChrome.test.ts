@@ -48,10 +48,22 @@ describe('session chrome', () => {
     expect(ctxMeterBar(-10)).toBe('▱▱▱▱▱')
   })
 
-  it('hides the telemetry line for a fresh session', () => {
-    // A bar of zeros is noise; the row mounts only once a turn has run.
+  it('hides only zero telemetry and paints first-step data before turn completion', () => {
+    // A bar of zeros is noise, but real provider usage can arrive while the
+    // first turn is still inside its tool loop (`turns` remains zero).
     expect(sessionTelemetryLine({ calls: 0, input: 0, output: 0, total: 0 })).toBe('')
-    expect(sessionTelemetryLine({ calls: 1, input: 10, output: 5, total: 15, turns: 0 })).toBe('')
+    expect(
+      sessionTelemetryLine({
+        cache_hit_rate: 0.91,
+        calls: 1,
+        input: 10,
+        llm_ms: 2_400,
+        output: 5,
+        tok_per_sec: 37,
+        total: 15,
+        turns: 0
+      })
+    ).toBe('LLM 2s · 37 tok/s · cache 91% · 10 in · 5 out')
   })
 
   it('renders the desktop-parity cumulative stats line', () => {

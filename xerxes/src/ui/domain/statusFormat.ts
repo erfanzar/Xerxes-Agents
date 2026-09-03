@@ -173,15 +173,17 @@ export function telemetryDuration(ms: number): string {
  * bar shows: turns, steps, LLM/tool wall time, TTFT, throughput, cache hit
  * rate, token totals.
  *
- * Returns '' for a fresh session (no turns yet) so the row can hide instead
- * of displaying a bar of zeros. Cache rate renders only when the provider
- * actually reported cache telemetry — an absent value is never faked as 0%.
+ * Returns '' only when no telemetry exists, so a fresh session still stays
+ * quiet. Per-provider-step figures (cache, TTFT, throughput, LLM duration and
+ * token totals) may arrive before the first whole turn increments `turns`;
+ * those are real data and must paint immediately instead of waiting until the
+ * agent finishes every tool loop. Cache rate renders only when the provider
+ * actually reported it — an absent value is never faked as 0%.
  */
 export function sessionTelemetryLine(usage: Usage): string {
   const turns = usage.turns ?? 0
-  if (turns <= 0) return ''
-
-  const parts: string[] = [`${turns} turn${turns === 1 ? '' : 's'}`]
+  const parts: string[] = []
+  if (turns > 0) parts.push(`${turns} turn${turns === 1 ? '' : 's'}`)
   const steps = (usage.llm_steps ?? 0) + (usage.tool_steps ?? 0)
   if (steps > 0) parts.push(`${fmtK(steps)} steps`)
   if (usage.llm_ms) parts.push(`LLM ${telemetryDuration(usage.llm_ms)}`)

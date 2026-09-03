@@ -1275,17 +1275,11 @@ export function useMainApp(gw: GatewayClient) {
       newPromptSession,
       onModelSelect,
       onReasoningSelect,
-      // Resuming a cold session from the overlay CLOSES the current one, so it
-      // must respect the busy guard just like the `/resume` slash path.
-      // (Switching between live sessions and `+ new` keep the current session
-      // running, so those stay unguarded — that's the orchestrator's purpose.)
-      resumeById: (id: string) => {
-        if (session.guardBusySessionSwitch('switch sessions')) {
-          return
-        }
-
-        session.resumeById(id)
-      },
+      // Agent View means attach, not replace: opening a saved chat promotes it
+      // to a live tab and leaves the chat we came from running in the fleet.
+      // Explicit `/resume <id>` retains replacement semantics and its busy
+      // guard through the slash-command session API.
+      resumeById: (id: string) => session.attachSavedSession(id),
       setStickyPrompt,
       sys
     }),
@@ -1300,7 +1294,7 @@ export function useMainApp(gw: GatewayClient) {
       onModelSelect,
       onReasoningSelect,
       session.activateLiveSession,
-      session.guardBusySessionSwitch,
+      session.attachSavedSession,
       session.newLiveSession,
       session.resumeById,
       sys
