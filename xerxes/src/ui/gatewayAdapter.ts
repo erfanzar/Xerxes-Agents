@@ -249,9 +249,19 @@ export function transcriptFromStoredMessages(messages: unknown): GatewayTranscri
         // OpenAI wire shape nests {name, arguments} under 'function'; legacy
         // rows carry top-level name/input instead. Run the raw arguments through
         // the same summarizer live tool.start events use, so a reattached row
-        // reads "directory_path=…" instead of a raw JSON blob.
-        const rawArguments = storedPreviewText(fn.arguments ?? record.input, STORED_ARGUMENTS_PREVIEW_CHARS)
-        const context = rawArguments ? summarizeToolStartDisplay(name, '', rawArguments).context : ''
+        // reads "directory_path=…" instead of a raw JSON blob. Summarize the
+        // FULL arguments and truncate the rendered summary afterwards: cutting
+        // the JSON first leaves an unparseable fragment, which the summarizer
+        // then echoes back as the raw blob this comment promises to avoid.
+        const rawValue = fn.arguments ?? record.input
+        const argumentsText = typeof rawValue === 'string' ? rawValue : safeJsonStringify(rawValue)
+        const summary = argumentsText.trim()
+          ? summarizeToolStartDisplay(name, '', argumentsText.replace(/\s+/g, ' ').trim()).context
+          : ''
+        const context =
+          summary.length > STORED_ARGUMENTS_PREVIEW_CHARS
+            ? `${summary.slice(0, STORED_ARGUMENTS_PREVIEW_CHARS - 1)}…`
+            : summary
         const row: GatewayTranscriptMessage = { role: 'tool', name, ...(context ? { context } : {}) }
         const callId = optionalStr(record.id)
         if (callId) {

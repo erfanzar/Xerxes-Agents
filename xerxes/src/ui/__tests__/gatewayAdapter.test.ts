@@ -199,6 +199,34 @@ describe('gatewayAdapter', () => {
     ])
   })
 
+  it('summarizes long stored arguments instead of echoing truncated JSON', () => {
+    // Regression: the arguments preview used to be truncated BEFORE
+    // summarization, so any call whose JSON exceeded the cap reattached as the
+    // raw blob — exec_command's argv shape hit this on every real command.
+    const longCommand = 'grep -aE ' + "'LOADED' " + 'engine.log ' + 'x'.repeat(300)
+    const rows = transcriptFromStoredMessages([
+      {
+        content: '',
+        role: 'assistant',
+        tool_calls: [
+          {
+            function: {
+              arguments: JSON.stringify({ args: ['-o', 'BatchMode=yes', 'n_server_spot_m', longCommand] }),
+              name: 'exec_command'
+            },
+            id: 'call_long'
+          }
+        ]
+      }
+    ])
+
+    const context = rows[0]?.context ?? ''
+    expect(context.startsWith('-o BatchMode=yes n_server_spot_m')).toBe(true)
+    expect(context).not.toContain('"args"')
+    expect(context.endsWith('\u2026')).toBe(true)
+    expect(context.length).toBeLessThanOrEqual(200)
+  })
+
   it('bounds stored tool argument previews like replayPreviewText', () => {
     const rows = transcriptFromStoredMessages([
       {
