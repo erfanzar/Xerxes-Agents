@@ -1551,7 +1551,10 @@ function responsesPayload(
       deferredMode === 'tool-search',
     ),
     stream,
-    store: false,
+    // Stored requests are the only way the Responses API reports
+    // `cached_tokens` in usage. Codex's subscription backend overrides this
+    // below; metered OpenAI needs it on for cache-hit telemetry to exist.
+    store: providerName !== 'openai-codex',
     ...(systemPrompt ? { instructions: systemPrompt } : {}),
   }
   addResponsesSampling(payload, request, providerName)
@@ -1584,7 +1587,9 @@ function responsesPayload(
     // schema and answers anything outside it with `400 Unsupported
     // parameter`, never by ignoring the field. It caps output by plan rather
     // than per request, and it is not the stateful Responses host, so both
-    // the output cap and the sampling knobs have to come back off.
+    // the output cap and the sampling knobs have to come back off. The
+    // subscription backend also forces store:false, which is why Codex
+    // never reports cached_tokens — the API simply doesn't track them.
     delete payload.max_output_tokens
     delete payload.temperature
     delete payload.top_p

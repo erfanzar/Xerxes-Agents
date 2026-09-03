@@ -108,7 +108,7 @@ test('Responses API replays encrypted reasoning items with store disabled', asyn
   })
 
   expect(payload).toMatchObject({
-    store: false,
+    store: true,
     instructions: 'Use tools carefully.',
     input: [reasoningItem, { role: 'user', content: 'Continue.' }],
     include: ['reasoning.encrypted_content'],
@@ -158,7 +158,7 @@ test('Responses API client supports a native non-streaming completion response',
     model: 'gpt-4o',
     input: [{ role: 'user', content: 'Read the README.' }],
     stream: false,
-    store: false,
+    store: true,
   })
   expect(completion).toEqual({
     content: 'I will read it.',
