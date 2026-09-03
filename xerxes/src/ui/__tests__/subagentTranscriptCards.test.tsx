@@ -16,6 +16,7 @@ import { patchTurnState, resetTurnState } from '../app/turnStore.js'
 import { patchUiState, resetUiState } from '../app/uiStore.js'
 import { subagentCardAccent, subagentCardModel, subagentCardRowCount, subagentCardRows } from '../lib/subagentCards.js'
 import { buildToolTrailLine } from '../lib/text.js'
+import { StreamingAssistant } from '../opentui/appLayout.js'
 import { MessageLine, thinkingHeaderLabel } from '../opentui/messageLine.js'
 import { DEFAULT_THEME, themeForMode } from '../theme.js'
 import type { SubagentProgress } from '../types.js'
@@ -91,6 +92,46 @@ describe('spawn fleet roster', () => {
       expect(frame).toContain('⣿ alpha: completed')
       expect(frame).toContain('⣿ beta: failed')
       expect(frame).toContain('⠿ gamma: queued')
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
+
+  it('renders all live cube rows while Spawn Agents itself is still in flight', async () => {
+    const names = [
+      'structure-analyzer',
+      'tech-analyzer',
+      'arch-analyzer',
+      'security-analyzer',
+      'test-analyzer',
+      'docs-analyzer',
+      'perf-analyzer',
+      'release-analyzer'
+    ]
+    const agents: SubagentProgress[] = names.map((name, index) => ({
+      ...base,
+      durationSeconds: 20 + index,
+      goal: '',
+      id: `live-${index}`,
+      index,
+      name,
+      notes: [`working on ${name.replace('-analyzer', '')}`],
+      status: 'running',
+      title: name
+    }))
+    patchTurnState({
+      subagents: agents,
+      tools: [{ context: `8 agents: ${names.join(', ')}`, id: 'spawn-live', name: 'SpawnAgents' }]
+    })
+    const setup = await testRender(<StreamingAssistant cols={120} />, { height: 30, width: 125 })
+
+    try {
+      await setup.flush()
+      const frame = setup.captureCharFrame()
+      expect(frame).toContain('Spawn Agents')
+      for (const [index, name] of names.entries()) {
+        expect(frame).toContain(`${name}: working on ${name.replace('-analyzer', '')} [${20 + index}s]`)
+      }
     } finally {
       act(() => setup.renderer.destroy())
     }

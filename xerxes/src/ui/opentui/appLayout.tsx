@@ -59,6 +59,7 @@ import { compactProgressRows, type CompactProgressRow } from '../lib/progressRow
 import { getActiveSkin } from '../lib/skinEngine.js'
 import { compactStatusNumber, formatStatusDuration, isYoloEnabled } from '../lib/statusSnapshot.js'
 import { fmtK, formatToolCall, toolTrailParts } from '../lib/text.js'
+import { spawnRosterFromLine } from '../lib/toolStartDisplay.js'
 import { useTerminalFocus } from '../lib/terminalRuntime.opentui.js'
 import type { ScrollBoxHandle } from '../lib/terminalTypes.js'
 import { themeForMode, type Theme } from '../theme.js'
@@ -69,7 +70,7 @@ import { CompletionMenu } from './completionMenu.js'
 import { CopyPicker } from './copyPicker.js'
 import { DiffPanelHotkey, DiffPanelOverlay } from './diffPanel.js'
 import { TerminalPanelHotkey, TerminalPanelOverlay } from './terminalPanel.js'
-import { MessageLine, StreamingMarkdown } from './messageLine.js'
+import { MessageLine, SpawnFleetRoster, StreamingMarkdown } from './messageLine.js'
 import { ModelPicker } from './modelPicker.js'
 import { OVERLAY_PANEL_SPECS, overlayPanelWidth, responsivePanelWidth } from './overlayLayout.js'
 import { rebasePasteResult } from './pasteRebase.js'
@@ -97,7 +98,7 @@ const decodePaste = (bytes: Uint8Array): string => new TextDecoder().decode(byte
 
 // ── Live streaming turn ─────────────────────────────────────────────────
 
-function StreamingAssistant({ cols }: { cols: number }) {
+export function StreamingAssistant({ cols }: { cols: number }) {
   const t = useStore($uiTheme)
   // Live rows get the same column budget as settled history so dotted
   // leaders and fold math do not restyle the moment the turn lands.
@@ -136,10 +137,12 @@ function StreamingAssistant({ cols }: { cols: number }) {
           restyle the moment it finishes — only the duration and mark are
           added. It carries no mark, which is what distinguishes "running". */}
       {tools.map(tool => {
-        const { args, name } = toolTrailParts(formatToolCall(tool.name, tool.context))
+        const line = formatToolCall(tool.name, tool.context)
+        const { args, name } = toolTrailParts(line)
+        const roster = spawnRosterFromLine(line)
 
         return (
-          <Box flexShrink={0} key={tool.id} paddingLeft={3}>
+          <Box flexDirection="column" flexShrink={0} key={tool.id} paddingLeft={3}>
             <Text color={t.color.muted} wrap="truncate-end">
               <Span color={t.color.muted}>{`${VOICE.tool(t).glyph} `}</Span>
               <Span bold color={t.color.toolName}>
@@ -147,6 +150,14 @@ function StreamingAssistant({ cols }: { cols: number }) {
               </Span>
               {args ? <Span color={t.color.muted}>{`  ${args}`}</Span> : null}
             </Text>
+            {roster ? (
+              <>
+                <SpawnFleetRoster names={roster.names} t={t} />
+                {roster.extra > 0 ? (
+                  <Text color={t.color.muted} wrap="truncate-end">{`    … +${roster.extra} more in the agents panel (F6)`}</Text>
+                ) : null}
+              </>
+            ) : null}
           </Box>
         )
       })}

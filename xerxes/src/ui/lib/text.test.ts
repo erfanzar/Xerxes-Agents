@@ -101,6 +101,13 @@ describe('inlineToolDisplay', () => {
     expect(inlineToolDisplay('Tool (12.4s)')).toBe('Tool')
     expect(inlineToolDisplay(formatToolCall('ReadFile', 'package.json'))).toBe('Read File package.json')
   })
+
+  it('keeps a bounded Spawn Agents roster intact for live cube parsing', () => {
+    const names = Array.from({ length: 8 }, (_, index) => `specialist-${index}-analyzer`)
+    const line = formatToolCall('SpawnAgents', `8 agents: ${names.join(', ')}`)
+
+    expect(line).toContain(names.at(-1))
+  })
 })
 
 describe('parseToolTrailResultLine', () => {

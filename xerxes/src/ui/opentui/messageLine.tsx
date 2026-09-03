@@ -415,12 +415,12 @@ function fleetActivity(entry: SubagentProgress | undefined, state: FleetRowState
  * agent name with its latest activity and elapsed time; missing agents retain a
  * muted dot-matrix cube so the requested roster never disappears.
  */
-function SpawnFleetRoster({
-  archived,
+export function SpawnFleetRoster({
+  archived = [],
   names,
   t
 }: {
-  archived: readonly SubagentProgress[]
+  archived?: readonly SubagentProgress[]
   names: readonly string[]
   t: Theme
 }) {
