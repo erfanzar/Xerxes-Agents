@@ -13,6 +13,7 @@ import { ToolResultStorage } from '../context/toolResultStorage.js'
 import { estimateContextTokens } from '../context/windowUsage.js'
 import { ValidationError } from '../core/errors.js'
 import { classify, ErrorKind } from '../runtime/errorClassifier.js'
+import { instructionFileUpdateLayer } from '../runtime/instructionFreshness.js'
 import { appendSkillSuggestion } from '../extensions/skillSuggestions.js'
 import type { HookRunner } from '../extensions/hooks.js'
 import {
@@ -234,6 +235,18 @@ export class AgentTurnRunner implements TurnRunner {
     // or let the state snapshot resurrect already-consumed notices at sync.
     const contextDeltas = takeContextDeltas(session.metadata)
     takeContextDeltas(state.metadata)
+    // Instruction-file freshness (DSH reconciliation parity, delivered as a
+    // volatile layer): files edited mid-session announce themselves with
+    // fresh content on this turn instead of silently going stale until a
+    // reload. Runs against the live session metadata so the recorded digest
+    // baseline persists with the transcript.
+    const instructionUpdates = await instructionFileUpdateLayer(
+      sessionProjectRoot(session),
+      session.metadata as Record<string, unknown>,
+    )
+    if (instructionUpdates) {
+      state.metadata.instruction_file_digests = session.metadata.instruction_file_digests
+    }
     if (previous) {
       state.totalCacheReadTokens = previous.totalCacheReadTokens
       state.totalCacheCreationTokens = previous.totalCacheCreationTokens
@@ -329,6 +342,7 @@ export class AgentTurnRunner implements TurnRunner {
       agentPrompt: promptAgent?.systemPrompt ?? '',
       bootstrap: bootstrapPrompt,
       contextDeltas: renderContextDeltas(contextDeltas),
+      ...(instructionUpdates ? { instructionUpdates } : {}),
       memoryRecall: memoryPrompt,
       modeHint: modeSwitchHint(
         session.interactionMode,

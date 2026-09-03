@@ -44,6 +44,8 @@ export interface ContextAssemblyInput {
   readonly selfMemory?: string
   /** Volatile: change-driven constraint deltas emitted since the previous turn. */
   readonly contextDeltas?: string
+  /** Volatile: fresh content of instruction files that changed since bootstrap. */
+  readonly instructionUpdates?: string
   /** Volatile: operator/session addendum. */
   readonly addendum?: string
 }
@@ -69,6 +71,7 @@ export function assembleContextLayers(input: ContextAssemblyInput): SystemPrompt
     { name: 'memory', text: input.memoryRecall ?? '', volatile: true },
     { name: 'self_memory', text: input.selfMemory ?? '', volatile: true },
     { name: 'context_deltas', text: input.contextDeltas ?? '', volatile: true },
+    { name: 'instruction_updates', text: input.instructionUpdates ?? '', volatile: true },
     { name: 'addendum', text: input.addendum ?? '', volatile: true },
   ].filter(segment => segment.text !== '')
 }

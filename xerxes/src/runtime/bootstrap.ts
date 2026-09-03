@@ -30,6 +30,20 @@ export const DEFAULT_BOOTSTRAP_COMMANDS = [
 export const MAX_BOOTSTRAP_GIT_STATUS_BYTES = 8 * 1024
 /** Per-file ceiling for global/project XERXES.md and AGENTS.md instructions. */
 export const MAX_BOOTSTRAP_INSTRUCTION_FILE_BYTES = 16 * 1024
+/**
+ * Project instruction file candidates, nearest-per-name walking up from the
+ * session cwd. Shared with the freshness check so a turn diffs exactly the
+ * file set bootstrap injected.
+ */
+export const INSTRUCTION_FILE_CANDIDATES = [
+  'XERXES.md',
+  'AGENTS.md',
+  'CLAUDE.md',
+  '.claude/CLAUDE.md',
+  'XERXES.local.md',
+  'AGENTS.local.md',
+  'CLAUDE.local.md',
+] as const
 /** Aggregate ceiling for automatically imported global/project instructions. */
 export const MAX_BOOTSTRAP_INSTRUCTIONS_BYTES = 32 * 1024
 /**
@@ -500,8 +514,11 @@ async function loadXerxesMd(cwd: string, host: BootstrapHost): Promise<string> {
   // Project instruction files, nearest-first per name: XERXES.md is the
   // native file, AGENTS.md the cross-agent convention, CLAUDE.md and
   // .claude/CLAUDE.md are honored so repos already documented for Claude
-  // Code carry their instructions over without renaming anything.
-  for (const name of ['XERXES.md', 'AGENTS.md', 'CLAUDE.md', '.claude/CLAUDE.md'] as const) {
+  // Code carry their instructions over without renaming anything. The
+  // *.local.md variants (DSH parity) are personal overlays: they are
+  // separate names, so they load ALONGSIDE the shared base file and belong
+  // in .gitignore.
+  for (const name of INSTRUCTION_FILE_CANDIDATES) {
     let current = cwd
     for (let index = 0; index < 10; index += 1) {
       const candidate = join(current, name)
