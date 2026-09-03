@@ -277,7 +277,6 @@ test('agent turn runner maps portable loop events and supplied live capacity to 
         max_context: 128_000,
         llm_duration_ms: expect.any(Number),
         ttft_ms: expect.any(Number),
-        tokens_per_second: expect.any(Number),
       },
     },
     {
@@ -301,6 +300,8 @@ test('agent turn runner maps portable loop events and supplied live capacity to 
       },
     },
   ])
+  // This fixture completes in under 100ms; its event burst is not a decode-rate sample.
+  expect(events[1]?.payload).not.toHaveProperty('tokens_per_second')
   expect(runner.stateFor('session-1')?.messages.map(message => message.role)).toEqual(['user', 'assistant'])
   expect(session.extra.runtime_telemetry).toMatchObject({
     cacheTelemetryKnown: false,

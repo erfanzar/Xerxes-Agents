@@ -70,6 +70,44 @@ describe('createGatewayEventHandler', () => {
     vi.restoreAllMocks()
   })
 
+  it('accumulates live LLM timing without mixing a final round with cumulative TTFT', () => {
+    const { handler } = buildHarness()
+    patchUiState({
+      usage: {
+        calls: 11,
+        input: 340_000,
+        llm_ms: 180_000,
+        llm_steps: 11,
+        output: 6_000,
+        total: 346_000,
+        ttft_avg_ms: 16_000,
+        ttft_samples: 11,
+        ttft_total_ms: 176_000
+      }
+    })
+
+    handler({
+      payload: {
+        telemetry_delta: { llm_ms: 12_000, ttft_ms: 16_100 },
+        text: 'working',
+        usage: { calls: 12, input: 353_500, output: 6_900, tok_per_sec: 52, total: 360_400 }
+      },
+      type: 'status.update'
+    })
+
+    expect(getUiState().usage).toMatchObject({
+      calls: 12,
+      input: 353_500,
+      llm_ms: 192_000,
+      llm_steps: 12,
+      output: 6_900,
+      tok_per_sec: 52,
+      ttft_avg_ms: 16_008.333333333334,
+      ttft_samples: 12,
+      ttft_total_ms: 192_100
+    })
+  })
+
   it('passes replayed thinking through to the transcript row', () => {
     const { appended, handler } = buildHarness()
 

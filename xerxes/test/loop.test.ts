@@ -45,6 +45,26 @@ class TelemetryClient implements LlmClient {
   }
 }
 
+class ToolOnlyTelemetryClient implements LlmClient {
+  private calls = 0
+
+  async *stream(): AsyncGenerator<LlmDelta> {
+    this.calls += 1
+    if (this.calls === 1) {
+      yield {
+        toolCalls: [{
+          id: 'call_tool_only',
+          type: 'function',
+          function: { name: 'ReadFile', arguments: { path: 'README.md' } },
+        }],
+        usage: { inputTokens: 25, outputTokens: 100, reasoningTokens: 90 },
+      }
+      return
+    }
+    yield { content: 'Done.', usage: { inputTokens: 30, outputTokens: 2 } }
+  }
+}
+
 class RepeatedToolSentinelClient implements LlmClient {
   private calls = 0
 
@@ -288,6 +308,29 @@ test('usage updates carry measured TTFT, decode rate, and cache-hit telemetry', 
     tokensPerSecond: 10,
     cacheHitRate: 0.75,
   })
+})
+
+test('tool-only terminal events do not fabricate Codex decode throughput', async () => {
+  const registry = new ToolRegistry()
+  registry.register(readFile, inputs => `read ${inputs.path}`)
+  const times = [1_000, 17_000, 17_001]
+  const events = []
+  for await (const event of runTurn({
+    model: 'openai-codex/gpt-5.4',
+    state: createAgentState(),
+    userMessage: 'inspect the readme',
+    tools: [readFile],
+  }, {
+    llm: new ToolOnlyTelemetryClient(),
+    now: () => times.shift() ?? 18_000,
+    toolExecutor: registry,
+  })) {
+    events.push(event)
+  }
+
+  const firstUsage = events.find(event => event.type === 'usage_update')
+  expect(firstUsage).toMatchObject({ type: 'usage_update', durationMs: 16_001, ttftMs: 16_000 })
+  expect(firstUsage).not.toHaveProperty('tokensPerSecond')
 })
 
 test('agent loop emits and persists an identical cross-tool-round sentinel only once', async () => {

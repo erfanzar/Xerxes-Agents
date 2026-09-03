@@ -875,6 +875,27 @@ describe('usageFromStatus partial updates', () => {
     expect(tick).not.toHaveProperty('total')
   })
 
+  it('marks per-round timing as a delta instead of replacing cumulative session timing', () => {
+    const events = adaptDaemonEvent('status_update', {
+      llm_duration_ms: 12_000,
+      model: 'openai-codex/gpt-5.4',
+      tokens_per_second: 52,
+      total_input_tokens: 353_500,
+      total_output_tokens: 6_900,
+      ttft_ms: 16_100
+    })
+
+    expect(events[0]).toMatchObject({
+      payload: {
+        telemetry_delta: { llm_ms: 12_000, ttft_ms: 16_100 },
+        usage: { input: 353_500, output: 6_900, tok_per_sec: 52 }
+      },
+      type: 'status.update'
+    })
+    expect(events[0]?.payload?.usage).not.toHaveProperty('llm_ms')
+    expect(events[1]?.payload?.usage).not.toHaveProperty('llm_ms')
+  })
+
   it('parses cumulative telemetry when the daemon sends it and omits it otherwise', () => {
     const telemetry = usageFromStatus({
       total_input_tokens: 592_000_000,
@@ -885,6 +906,8 @@ describe('usageFromStatus partial updates', () => {
       llm_duration_ms: 53_111_000,
       tool_duration_ms: 11_665_000,
       ttft_avg_ms: 8_800,
+      ttft_samples: 1_200,
+      ttft_total_ms: 10_560_000,
       tokens_per_second: 44,
       cache_hit_rate: 0.98
     })
@@ -895,6 +918,8 @@ describe('usageFromStatus partial updates', () => {
     expect(telemetry.llm_ms).toBe(53_111_000)
     expect(telemetry.tool_ms).toBe(11_665_000)
     expect(telemetry.ttft_avg_ms).toBe(8_800)
+    expect(telemetry.ttft_samples).toBe(1_200)
+    expect(telemetry.ttft_total_ms).toBe(10_560_000)
     expect(telemetry.tok_per_sec).toBe(44)
     expect(telemetry.cache_hit_rate).toBe(0.98)
 

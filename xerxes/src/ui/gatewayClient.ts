@@ -2047,6 +2047,9 @@ function hasRenderableSessionInfo(info: SessionInfo): boolean {
 function mergeUsage(base: Partial<Usage>, incoming?: null | Partial<Usage>): Usage {
   const merged = { ...base, ...(incoming ?? {}) }
   return compact<Usage>({
+    cache_hit_rate: merged.cache_hit_rate,
+    cache_read: merged.cache_read,
+    cache_write: merged.cache_write,
     calls: merged.calls ?? 0,
     compressions: merged.compressions,
     // Zero is the protocol's explicit unknown-capacity sentinel; do not revive
@@ -2058,9 +2061,18 @@ function mergeUsage(base: Partial<Usage>, incoming?: null | Partial<Usage>): Usa
     cost_usd: merged.cost_usd,
     dev_credits_spent_micros: merged.dev_credits_spent_micros,
     input: merged.input ?? 0,
+    llm_ms: merged.llm_ms,
+    llm_steps: merged.llm_steps,
     output: merged.output ?? 0,
     reasoning: merged.reasoning,
-    total: merged.total ?? 0
+    tok_per_sec: merged.tok_per_sec,
+    tool_ms: merged.tool_ms,
+    tool_steps: merged.tool_steps,
+    total: merged.total ?? 0,
+    ttft_avg_ms: merged.ttft_avg_ms,
+    ttft_samples: merged.ttft_samples,
+    ttft_total_ms: merged.ttft_total_ms,
+    turns: merged.turns
   })
 }
 

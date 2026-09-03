@@ -62,6 +62,10 @@ export const DEFAULT_RETRY_DELAYS = [10_000, 10_000, 10_000, 10_000] as const
 export const DEFAULT_STREAM_INACTIVITY_TIMEOUT_MS = 120_000
 /** Cap provider-suggested Retry-After waits so a bad hint cannot park a turn for hours. */
 export const MAX_SUGGESTED_RETRY_DELAY_MS = 60_000
+/** Shorter event bursts measure transport batching rather than model decode. */
+const MIN_THROUGHPUT_SAMPLE_MS = 100
+/** Defensive ceiling for corrupted or batch-derived throughput samples. */
+const MAX_THROUGHPUT_TOKENS_PER_SECOND = 100_000
 /**
  * Consecutive rounds in which the model requests only unconfigured tools
  * before the turn stops with an explicit error. Without a cap that pattern
@@ -457,6 +461,7 @@ export async function* runTurn(
       let streamCompleted = false
       let roundStartedAt = 0
       let roundFirstOutputAt: number | undefined
+      let roundFirstStreamTokenAt: number | undefined
       let roundCompletedAt = 0
       let textDeduper = new ToolRoundTextDeduper(latestToolRoundText)
 
@@ -474,6 +479,7 @@ export async function* runTurn(
           apiCallsCount += 1
           roundStartedAt = now()
           roundFirstOutputAt = undefined
+          roundFirstStreamTokenAt = undefined
           roundCompletedAt = 0
           for await (const delta of watchProviderStream(
             dependencies.llm.stream(
@@ -488,8 +494,12 @@ export async function* runTurn(
             streamInactivityTimeoutMs,
             attemptSignal,
           )) {
-            if (roundFirstOutputAt === undefined && hasModelOutput(delta)) {
-              roundFirstOutputAt = now()
+            const hasStreamToken = Boolean(delta.content || delta.thinking)
+            if ((roundFirstOutputAt === undefined && hasModelOutput(delta))
+              || (roundFirstStreamTokenAt === undefined && hasStreamToken)) {
+              const observedAt = now()
+              if (roundFirstOutputAt === undefined && hasModelOutput(delta)) roundFirstOutputAt = observedAt
+              if (roundFirstStreamTokenAt === undefined && hasStreamToken) roundFirstStreamTokenAt = observedAt
             }
             const parts = processDelta(delta, parser, textParts, thinkingParts)
             for (const part of parts) {
@@ -657,9 +667,22 @@ export async function* runTurn(
         // Emitted per provider round rather than only at turn_done: a turn that
         // runs for minutes across many rounds would otherwise report nothing
         // until it ended.
-        const decodeMilliseconds = roundFirstOutputAt === undefined
+        // Tool calls from the Responses API become visible only on the terminal
+        // event. Treating that event as both the first and last decode token
+        // produced multi-million tok/s readings for Codex tool rounds. Throughput
+        // needs an actual streamed text/reasoning interval, and sub-100ms bursts
+        // are too coarse to be a meaningful sample.
+        const decodeMilliseconds = roundFirstStreamTokenAt === undefined
           ? 0
-          : Math.max(0, roundCompletedAt - roundFirstOutputAt)
+          : Math.max(0, roundCompletedAt - roundFirstStreamTokenAt)
+        const decodedTokens = Math.max(0, lastUsage.outputTokens - (lastUsage.reasoningTokens ?? 0))
+        const measuredTokensPerSecond = decodeMilliseconds >= MIN_THROUGHPUT_SAMPLE_MS && decodedTokens > 0
+          ? decodedTokens * 1_000 / decodeMilliseconds
+          : undefined
+        const tokensPerSecond = measuredTokensPerSecond !== undefined
+          && measuredTokensPerSecond <= MAX_THROUGHPUT_TOKENS_PER_SECOND
+          ? measuredTokensPerSecond
+          : undefined
         const cacheInput = lastUsage.inputTokens + (lastUsage.cacheReadTokens ?? 0)
         yield {
           type: 'usage_update',
@@ -676,9 +699,7 @@ export async function* runTurn(
           ...(roundFirstOutputAt === undefined
             ? {}
             : { ttftMs: Math.max(0, roundFirstOutputAt - roundStartedAt) }),
-          ...(decodeMilliseconds > 0 && lastUsage.outputTokens > 0
-            ? { tokensPerSecond: lastUsage.outputTokens * 1_000 / decodeMilliseconds }
-            : {}),
+          ...(tokensPerSecond === undefined ? {} : { tokensPerSecond }),
           ...(lastUsage.cacheReadTokens !== undefined && cacheInput > 0
             ? { cacheHitRate: lastUsage.cacheReadTokens / cacheInput }
             : {}),

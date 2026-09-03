@@ -333,6 +333,8 @@ export function usageFromStatus(payload: Record<string, unknown>): Usage {
     ...(present('llm_duration_ms') ? { llm_ms: num(payload.llm_duration_ms) } : {}),
     ...(present('tool_duration_ms') ? { tool_ms: num(payload.tool_duration_ms) } : {}),
     ...(present('ttft_avg_ms') ? { ttft_avg_ms: num(payload.ttft_avg_ms) } : {}),
+    ...(present('ttft_samples') ? { ttft_samples: num(payload.ttft_samples) } : {}),
+    ...(present('ttft_total_ms') ? { ttft_total_ms: num(payload.ttft_total_ms) } : {}),
     ...(present('tokens_per_second') ? { tok_per_sec: num(payload.tokens_per_second) } : {}),
     ...(present('cache_hit_rate') ? { cache_hit_rate: num(payload.cache_hit_rate) } : {})
   } as Usage
@@ -361,6 +363,23 @@ export function adaptDaemonEvent(type: string, payload: Record<string, unknown>)
       const mode = optionalStr(payload.mode)
       const activePermissionMode = permissionMode(payload.permission_mode)
       const reasoningEffort = optionalStr(payload.reasoning_effort)
+      const usage = usageFromStatus(payload)
+      // Streamed usage_update frames carry one round's duration, while session
+      // status payloads carry cumulative telemetry under the same v35 field.
+      // Mark the former explicitly and keep it out of the ordinary spread merge.
+      const llmDurationMs = optionalNum(payload.llm_duration_ms)
+      const ttftMs = optionalNum(payload.ttft_ms)
+      const timingIsDelta = llmDurationMs !== undefined
+        && payload.llm_steps === undefined
+        && payload.turn_count === undefined
+      const stableUsage: Usage = { ...usage }
+      if (timingIsDelta) delete stableUsage.llm_ms
+      const telemetryDelta = timingIsDelta
+        ? {
+            llm_ms: llmDurationMs,
+            ...(ttftMs === undefined ? {} : { ttft_ms: ttftMs })
+          }
+        : undefined
 
       return [
         {
@@ -370,8 +389,9 @@ export function adaptDaemonEvent(type: string, payload: Record<string, unknown>)
             ...(mode ? { mode } : {}),
             ...(activePermissionMode ? { permission_mode: activePermissionMode } : {}),
             ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
+            ...(telemetryDelta ? { telemetry_delta: telemetryDelta } : {}),
             text: statusText(payload),
-            usage: usageFromStatus(payload)
+            usage: stableUsage
           }
         },
         {
@@ -383,7 +403,7 @@ export function adaptDaemonEvent(type: string, payload: Record<string, unknown>)
             ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
             skills: {},
             tools: {},
-            usage: usageFromStatus(payload)
+            usage: stableUsage
           }
         }
       ]

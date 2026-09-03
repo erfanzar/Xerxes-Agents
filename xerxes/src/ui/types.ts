@@ -230,6 +230,9 @@ export interface Usage {
   llm_ms?: number
   tool_ms?: number
   ttft_avg_ms?: number
+  /** Cumulative sample state retained so live per-round TTFT can update the average exactly. */
+  ttft_samples?: number
+  ttft_total_ms?: number
   tok_per_sec?: number
   /** Fraction 0..1; absent when the provider never reported cache reads. */
   cache_hit_rate?: number

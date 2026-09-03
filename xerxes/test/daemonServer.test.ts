@@ -304,6 +304,15 @@ test("agent preset RPC mirrors DSH roster, authoring, defaults, and blank-sessio
       },
     });
 
+    runtime.sessionStatus("preset-session")!.extra.runtime_telemetry = {
+      ...runtime.sessionStatus("preset-session")!.extra.runtime_telemetry as Record<string, unknown>,
+      tokensPerSecond: 8_527_132,
+    };
+    client.send({ jsonrpc: "2.0", id: 61, method: "session.status", params: { session_key: "preset-session" } });
+    expect((await client.next(frame => frame.id === 61)).result).toMatchObject({
+      session: { tokens_per_second: 0 },
+    });
+
     // The lock is transcript-based, not a client busy flag. Marking one durable
     // user message is enough to represent a session whose model-visible history
     // was produced under Creator mode.

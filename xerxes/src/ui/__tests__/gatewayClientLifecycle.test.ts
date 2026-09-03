@@ -232,6 +232,12 @@ describe('GatewayClient session lifecycle', () => {
         }
       }
       if (method === 'session.status') {
+        // session.activate captures status events while attaching. A partial
+        // token tick must not erase cumulative timing from session.open.
+        client.emit('status.update', {
+          payload: { usage: { calls: 12, input: 353_500, output: 6_900, total: 360_400 } },
+          type: 'status.update'
+        })
         return {
           ok: true,
           session: { cwd: '/worktrees/tab-b', id: 'tab-b', key: 'daemon:key-b', status: 'idle' }
@@ -245,11 +251,16 @@ describe('GatewayClient session lifecycle', () => {
             context_tokens: 65_536,
             id: 'tab-b',
             key: 'daemon:key-b',
+            llm_duration_ms: 192_000,
+            llm_steps: 12,
             messages: 0,
             model: 'k3-256k',
             profile_name: 'kimi-code',
             status: 'idle',
-            transcript: []
+            transcript: [],
+            ttft_avg_ms: 16_008,
+            ttft_samples: 12,
+            ttft_total_ms: 192_100
           }
         }
       }
@@ -260,7 +271,20 @@ describe('GatewayClient session lifecycle', () => {
     }
 
     await client.request('session.active_list', {})
-    const activation = await client.request<{ info?: { profile_name?: string; usage?: { context_max?: number; context_used?: number } } }>(
+    const activation = await client.request<{
+      info?: {
+        profile_name?: string
+        usage?: {
+          context_max?: number
+          context_used?: number
+          llm_ms?: number
+          llm_steps?: number
+          ttft_avg_ms?: number
+          ttft_samples?: number
+          ttft_total_ms?: number
+        }
+      }
+    }>(
       'session.activate',
       { session_id: 'tab-b' }
     )
@@ -268,7 +292,15 @@ describe('GatewayClient session lifecycle', () => {
 
     expect(activation.info).toMatchObject({
       profile_name: 'kimi-code',
-      usage: { context_max: 262_144, context_used: 65_536 }
+      usage: {
+        context_max: 262_144,
+        context_used: 65_536,
+        llm_ms: 192_000,
+        llm_steps: 12,
+        ttft_avg_ms: 16_008,
+        ttft_samples: 12,
+        ttft_total_ms: 192_100
+      }
     })
     expect(calls.slice(1)).toEqual([
       { method: 'session.status', params: { session_key: 'daemon:key-b' } },

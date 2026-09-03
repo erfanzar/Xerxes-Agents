@@ -750,6 +750,7 @@ export type GatewayEvent =
         mode?: string
         permission_mode?: SessionInfo['permission_mode']
         reasoning_effort?: string
+        telemetry_delta?: { llm_ms?: number; ttft_ms?: number }
         text?: string
         usage?: Usage
       }

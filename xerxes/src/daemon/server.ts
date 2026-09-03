@@ -8240,7 +8240,11 @@ function sessionRuntimeTelemetryPayload(value: unknown): JsonRpcPayload {
   const llmSteps = Math.trunc(metric('llmSteps'))
   const toolDurationMs = metric('toolDurationMs')
   const toolSteps = Math.trunc(metric('toolSteps'))
-  const tokensPerSecond = metric('tokensPerSecond')
+  const measuredTokensPerSecond = metric('tokensPerSecond')
+  // Older Codex tool-only rounds measured a sub-millisecond terminal-event
+  // burst and persisted multi-million-token rates. Such a sample describes
+  // event batching, not model decode throughput; suppress it on reattach.
+  const tokensPerSecond = measuredTokensPerSecond <= 100_000 ? measuredTokensPerSecond : 0
   const ttftSamples = Math.trunc(metric('ttftSamples'))
   const ttftTotalMs = metric('ttftTotalMs')
   return {

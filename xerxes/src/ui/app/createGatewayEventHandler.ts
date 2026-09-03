@@ -6,6 +6,7 @@ import {
   reconcileArchivedSubagent,
   type SubagentProgressPatch
 } from '../domain/subagentProgress.js'
+import { mergeLiveUsage } from '../domain/usage.js'
 import type {
   CommandsCatalogResponse,
   ConfigFullResponse,
@@ -593,7 +594,7 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
                 reasoning_effort: p.reasoning_effort || state.info.reasoning_effort
               })
             : state.info,
-          usage: p.usage ? { ...state.usage, ...p.usage } : state.usage
+          usage: mergeLiveUsage(state.usage, p.usage, p.telemetry_delta)
         }))
 
         if (p.kind === 'goal') {
