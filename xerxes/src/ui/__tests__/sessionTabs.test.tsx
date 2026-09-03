@@ -19,12 +19,13 @@ const tabs: SessionTab[] = [
 
 const render = async (props: {
   activeId?: null | string
+  onSelect?: (id: string) => void
   width?: number
   value?: SessionTab[]
 } = {}) => {
-  const { activeId = 'a', width = 120, value = tabs } = props
+  const { activeId = 'a', onSelect, width = 120, value = tabs } = props
   const session = await testRender(
-    <SessionTabStrip activeId={activeId} tabs={value} t={DEFAULT_THEME} width={width} />,
+    <SessionTabStrip activeId={activeId} onSelect={onSelect} tabs={value} t={DEFAULT_THEME} width={width} />,
     { height: 10, width: Math.max(width, 40) }
   )
   await session.flush()
@@ -77,6 +78,34 @@ describe('SessionTabStrip', () => {
   it('shows the active position in the collapsed indicator', async () => {
     const session = await render({ activeId: 'c', width: 20 })
     expect(session.captureCharFrame()).toContain('‹ 3/3 ›')
+  })
+})
+
+describe('SessionTabStrip mouse', () => {
+  it('activates a tab when its cell is clicked', async () => {
+    const onSelect = vi.fn()
+    const session = await render({ onSelect })
+    try {
+      // Strip has paddingX=2; the active "● Fix auth" cell is 12 wide, so the
+      // "○ Docs pass" cell spans columns 14..26 — click its label.
+      await session.mockMouse.click(16, 0)
+      await session.flush()
+      expect(onSelect).toHaveBeenCalledWith('b')
+    } finally {
+      act(() => session.renderer.destroy())
+    }
+  })
+
+  it("activates the active tab too (a no-op switch is the session's call)", async () => {
+    const onSelect = vi.fn()
+    const session = await render({ onSelect })
+    try {
+      await session.mockMouse.click(4, 0)
+      await session.flush()
+      expect(onSelect).toHaveBeenCalledWith('a')
+    } finally {
+      act(() => session.renderer.destroy())
+    }
   })
 })
 

@@ -166,6 +166,7 @@ const HINTS_LABEL = '← switch · ←← agent view'
 export function SessionTabStrip({
   activeId,
   onNewTab,
+  onSelect,
   tabs,
   t,
   width
@@ -173,6 +174,8 @@ export function SessionTabStrip({
   activeId: null | string
   /** Click target for the faint "+" affordance; absent renders it inert. */
   onNewTab?: () => void
+  /** Click target for switching to a tab; absent renders tabs inert. */
+  onSelect?: (id: string) => void
   tabs: SessionTab[]
   t: Theme
   width: number
@@ -231,7 +234,13 @@ export function SessionTabStrip({
           const cellWidth = content.length + 2
 
           return (
-            <Box flexDirection="column" flexShrink={0} key={tab.id} width={cellWidth}>
+            <Box
+              flexDirection="column"
+              flexShrink={0}
+              key={tab.id}
+              onClick={onSelect ? () => onSelect(tab.id) : undefined}
+              width={cellWidth}
+            >
               <Text wrap="truncate-end">
                 <Span bold color={t.color.brandGold}>{` ${content} `}</Span>
               </Text>
@@ -244,7 +253,13 @@ export function SessionTabStrip({
         const content = `${glyph} ${label}`
 
         return (
-          <Box flexDirection="column" flexShrink={0} key={tab.id} width={content.length + 2}>
+          <Box
+            flexDirection="column"
+            flexShrink={0}
+            key={tab.id}
+            onClick={onSelect ? () => onSelect(tab.id) : undefined}
+            width={content.length + 2}
+          >
             <Text wrap="truncate-end">
               <Span color={t.color.muted}>{` ${content} `}</Span>
             </Text>

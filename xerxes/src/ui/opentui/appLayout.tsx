@@ -2195,6 +2195,7 @@ export function AppLayout({
               <SessionTabStrip
                 activeId={ui.sid ?? ui.info?.session_id ?? null}
                 onNewTab={() => actions.newLiveSession()}
+                onSelect={id => actions.activateLiveSession(id)}
                 tabs={ui.sessionTabs}
                 t={t}
                 width={composer.cols}
