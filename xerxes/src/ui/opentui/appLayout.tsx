@@ -227,8 +227,10 @@ export function LiveProgressPill() {
 
       if (glyph) {
         // ✻ is the frozen "working" glyph; a stalled swap keeps the hollow ring.
+        // While the turn streams, the glyph sweeps cyan → purple → cyan so
+        // "alive" reads from across the room, not only on inspection.
         glyph.content = liveness.phase === 'stalled' ? `${livenessGlyph(liveness.phase, liveness.intensity)} ` : '✻ '
-        glyph.fg = tone[liveness.phase]
+        glyph.fg = liveness.phase === 'stalled' ? tone.stalled : pulsingAccentColor(Date.now() - pulse.startedAt)
       }
 
       if (label) {
