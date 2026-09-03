@@ -41,15 +41,18 @@ export const EXEC_COMMAND_DEFINITION: ToolDefinition = {
       + '--no-pager, --porcelain, CI mode) up front. A non-zero exitCode is a normal successful call and never an '
       + 'exception: read stderr and decide. The tool itself only fails for shell syntax in `cmd`, a workdir that is '
       + `not an existing directory inside the workspace, or cancellation. A timeout (default ${DEFAULT_TIMEOUT_MS}ms, `
-      + 'ceiling 120000) also returns normally, with timedOut:true and whatever output arrived before the kill, so '
-      + 'check that flag before trusting empty output. stdout and stderr are capped independently at '
-      + `max_output_chars (default ${DEFAULT_MAX_OUTPUT_CHARS}) with truncated:true set. Nothing survives the call: `
-      + 'the process is killed when it returns, and no cwd, environment variable, or shell state carries into the '
-      + 'next invocation. Keeping a live shell open across calls needs the separate PTY tool, where the host '
-      + 'enables it. For work that outlasts the timeout — a build, a server, a training run — do NOT background it '
-      + 'with `&` or nohup, whose output goes nowhere you can read and whose failure you cannot see: pass '
-      + 'run_in_background:true instead, which returns a proc_id immediately and leaves the process readable through '
-      + 'check_command.',
+      + 'ceiling 120000) does NOT kill the command when the host supports backgrounding: the process keeps running '
+      + 'as a background job and the call returns backgrounded:true with a proc_id you read via check_command — '
+      + 'so long builds, servers and training runs are safe to launch without run_in_background, and work is never '
+      + 'lost to the ceiling. Where no background host exists the timeout kills instead and returns timedOut:true, '
+      + 'so check the flags before trusting empty output. stdout and stderr are capped independently at '
+      + `max_output_chars (default ${DEFAULT_MAX_OUTPUT_CHARS}) with truncated:true set. No cwd, environment `
+      + 'variable, or shell state carries into the next invocation. Keeping a live shell open across calls — an '
+      + 'SSH session you keep sending commands to, a REPL, an interactive installer — uses the pty_open/pty_write '
+      + 'tools, where the host enables them. For work you KNOW will outlast the timeout, pass '
+      + 'run_in_background:true to background it immediately; anything that merely outlives the timeout by surprise '
+      + 'is backgrounded automatically at the ceiling. Either way, never use `&` or nohup: that output goes nowhere '
+      + 'you can read and its failure is invisible.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -152,6 +155,21 @@ export const LIST_COMMANDS_DEFINITION: ToolDefinition = {
       + 'running.',
     parameters: { type: 'object', additionalProperties: false, properties: {} },
   },
+}
+
+/**
+ * A foreground command that outlived its timeout and was handed to the
+ * background registry instead of being killed. The work survives, the model
+ * gets a proc_id, and the terminals panel keeps watching it.
+ */
+export interface AutoBackgroundedResult {
+  readonly backgrounded: true
+  readonly command: readonly string[]
+  readonly cwd: string
+  readonly pid: number
+  readonly procId: string
+  readonly running: true
+  readonly timedOut: true
 }
 
 export interface ProcessResult {
@@ -260,7 +278,7 @@ export async function executeCommand(
   background?: BackgroundCommandManager,
   terminals?: TerminalRegistry,
   ownerSessionId?: string,
-): Promise<BackgroundStartResult | ProcessResult> {
+): Promise<AutoBackgroundedResult | BackgroundStartResult | ProcessResult> {
   const command = requiredString(inputs, 'cmd')
   if (/\s/.test(command) || /[;&|`$<>]/.test(command)) {
     throw new ValidationError(
@@ -323,7 +341,21 @@ export async function executeCommand(
     requestTermination('SIGTERM')
   }
   signal?.addEventListener('abort', cancel, { once: true })
+  // Timeout semantics: with a background manager and an owning session the
+  // process is ADOPTED as a background job rather than killed — the model
+  // asked for the work, and killing it at the ceiling destroyed exactly the
+  // long builds/servers this boundary exists for. The adopt promise resolves
+  // the wait race below; user cancellation still kills immediately.
+  const canAdopt = background !== undefined && ownerSessionId !== undefined
+  let requestAdoption: (() => void) | undefined
+  const adoption = new Promise<'adopt'>(resolve => {
+    requestAdoption = () => resolve('adopt')
+  })
   const timer = setTimeout(() => {
+    if (canAdopt) {
+      requestAdoption?.()
+      return
+    }
     timedOut = true
     requestTermination('SIGTERM')
   }, timeout)
@@ -333,6 +365,8 @@ export async function executeCommand(
   let stdoutDrain: StreamDrain | undefined
   let stderrDrain: StreamDrain | undefined
   let observedExit: number | null = null
+  let adoptedByBackground = false
+  let fallbackExit: number | undefined
   // Mirrored live rather than recorded at the end: a foreground command may run
   // for two minutes, and the whole point of the terminal panel is being able to
   // watch it during those two minutes instead of afterwards. The kill control
@@ -350,6 +384,10 @@ export async function executeCommand(
       },
     },
   })
+  // Indirection, not a fixed mirror: when the timeout adoption fires, the
+  // drains created below keep running but must append to the NEW background
+  // mirror, so the sink target is swapped rather than the drains rebuilt.
+  let appendSink: (text: string) => void = text => mirror?.append(text)
 
   try {
     // Detached on POSIX so the child leads its own process group; that group is
@@ -368,8 +406,8 @@ export async function executeCommand(
       cancelRequested = true
       requestTermination('SIGTERM')
     }
-    stdoutDrain = drainStream(process.stdout, stdoutBuffer, text => mirror?.append(text))
-    stderrDrain = drainStream(process.stderr, stderrBuffer, text => mirror?.append(text))
+    stdoutDrain = drainStream(process.stdout, stdoutBuffer, text => appendSink(text))
+    stderrDrain = drainStream(process.stderr, stderrBuffer, text => appendSink(text))
 
     // Wait for the process, not for its pipes to reach EOF.
     //
@@ -380,8 +418,47 @@ export async function executeCommand(
     // forever on a read that could never finish — one stray `&` stalled a turn
     // indefinitely. Exit status is a fact about our child alone, so that is what
     // bounds the call.
-    const exitCode = await process.exited
-    observedExit = typeof exitCode === 'number' ? exitCode : null
+    const outcome = await Promise.race([
+      process.exited.then(code => ({ code, kind: 'exit' as const })),
+      adoption.then(kind => ({ code: null, kind })),
+    ])
+    if (outcome.kind === 'adopt' && background !== undefined && ownerSessionId !== undefined) {
+      try {
+        const adopted = background.adoptForOwner(
+          ownerSessionId,
+          {
+            child: process,
+            command: [command, ...args],
+            cwd,
+            drains: [stdoutDrain, stderrDrain].filter(
+              (drain): drain is StreamDrain => drain !== undefined,
+            ),
+            stdout: stdoutBuffer,
+            stderr: stderrBuffer,
+            name: [command, ...args].join(' ').slice(0, 60),
+          },
+          handle => {
+            appendSink = text => handle.append(text)
+          },
+        )
+        adoptedByBackground = true
+        mirror?.close(null)
+        return {
+          backgrounded: true,
+          timedOut: true,
+          ...adopted,
+        }
+      } catch {
+        // Adoption failed (registry full, mirror refused): degrade to the
+        // historical behavior rather than leak the process.
+        timedOut = true
+        requestTermination('SIGTERM')
+        fallbackExit = await process.exited
+        observedExit = typeof fallbackExit === 'number' ? fallbackExit : null
+      }
+    }
+    const exitCode: number = outcome.kind === 'exit' ? outcome.code : (fallbackExit ?? 137)
+    observedExit = exitCode
     // Give the already-buffered output a moment to land. Output written just
     // before exit may still be in flight in the pipe, and returning without it
     // would drop the last line of every fast command.
@@ -406,8 +483,10 @@ export async function executeCommand(
     signal?.removeEventListener('abort', cancel)
     // Release our end unconditionally. A grandchild may still hold the write
     // end; that is its business, and no longer ours.
-    stdoutDrain?.cancel()
-    stderrDrain?.cancel()
+    if (!adoptedByBackground) {
+      stdoutDrain?.cancel()
+      stderrDrain?.cancel()
+    }
     // Closed on the error and cancellation paths too: a foreground command the
     // panel still listed as running after the turn moved on would be a lie.
     mirror?.close(observedExit)

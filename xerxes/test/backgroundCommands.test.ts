@@ -102,6 +102,50 @@ test('run_in_background returns a handle at once rather than waiting out the com
   })
 })
 
+test('a foreground command that hits its timeout is adopted into the background instead of killed', async () => {
+  await inTemporaryWorkspace(async (_root, paths) => {
+    const background = new BackgroundCommandManager()
+    try {
+      const started = Date.now()
+      const result = await executeCommand(
+        { cmd: '/bin/sh', args: ['-c', 'echo before-ceiling; sleep 30'], timeout_ms: 500 },
+        paths,
+        undefined,
+        background,
+        undefined,
+        'owner-session',
+      )
+      // The call answered at the ceiling, not after 30s.
+      expect(Date.now() - started).toBeLessThan(5_000)
+      expect(result).toMatchObject({ backgrounded: true, running: true, timedOut: true })
+      const procId = 'procId' in result ? result.procId : ''
+      expect(procId).not.toBe('')
+
+      // The process survived the ceiling: output from before the handoff is
+      // still readable and the process is genuinely still running.
+      const check = await background.checkForOwner('owner-session', procId, 1_000, 0)
+      expect(check.stdout).toContain('before-ceiling')
+      expect(check.running).toBe(true)
+
+      const killed = await background.killForOwner('owner-session', procId, 'SIGKILL')
+      expect(killed.signalled).toBe(true)
+    } finally {
+      await background.disposeAll()
+    }
+  })
+}, 15_000)
+
+test('without a background host the timeout still kills, exactly as before', async () => {
+  await inTemporaryWorkspace(async (_root, paths) => {
+    const result = await executeCommand(
+      { cmd: 'sleep', args: ['30'], timeout_ms: 500 },
+      paths,
+    )
+    expect(result).toMatchObject({ timedOut: true })
+    expect('backgrounded' in result).toBe(false)
+  })
+}, 15_000)
+
 test('a background command that finishes reports its exit code and final output', async () => {
   await inTemporaryWorkspace(async (_root, paths) => {
     const background = new BackgroundCommandManager()

@@ -34,6 +34,16 @@ const KILL_GRACE_MS = 2_000
 /** Process groups (and therefore whole-tree kills) exist on POSIX only. */
 const PROCESS_GROUPS_AVAILABLE = process.platform !== 'win32'
 
+export interface BackgroundAdoptOptions {
+  readonly child: Bun.Subprocess
+  readonly command: readonly string[]
+  readonly cwd: string
+  readonly drains: readonly StreamDrain[]
+  readonly name?: string
+  readonly stderr: BoundedOutputBuffer
+  readonly stdout: BoundedOutputBuffer
+}
+
 export interface BackgroundStartOptions {
   readonly args?: readonly string[]
   readonly command: string
@@ -177,6 +187,72 @@ export class BackgroundCommandManager {
     // build that finishes on its own must stop being listed as running.
     void child.exited.then(code => terminal?.close(typeof code === 'number' ? code : null)).catch(() => {})
     return { procId, pid: child.pid, running: true, command: argv, cwd: options.cwd }
+  }
+
+  /**
+   * Adopt an already-running child into this registry.
+   *
+   * Used by exec_command's timeout handoff: the foreground executor spawned
+   * and drained the process, the caller's patience ran out, and killing it
+   * would destroy work the model explicitly asked for. The existing buffers
+   * and drains transfer as-is, so output produced before the handoff stays
+   * readable through check_command. `onTerminal` fires with the background
+   * mirror the moment it opens so the caller can repoint its drain sink from
+   * the foreground mirror it is about to close.
+   */
+  adoptForOwner(
+    owner: BackgroundCommandOwner,
+    options: BackgroundAdoptOptions,
+    onTerminal?: (terminal: TerminalHandle) => void,
+  ): BackgroundStartResult {
+    const procId = this.registry.register(options.child, {
+      command: options.command.join(' '),
+      cwd: options.cwd,
+      ...(options.name ? { name: options.name } : {}),
+      ...(PROCESS_GROUPS_AVAILABLE ? { processGroupLeader: true } : {}),
+    })
+    const terminalOwnerSessionId = typeof owner === 'string' ? owner : 'legacy-private-background-commands'
+    let terminal: TerminalHandle | undefined
+    try {
+      terminal = this.terminals?.open({
+        id: procId,
+        kind: 'background',
+        ownerSessionId: terminalOwnerSessionId,
+        command: options.command.join(' '),
+        cwd: options.cwd,
+        pid: options.child.pid,
+        ...(options.name ? { label: options.name } : {}),
+        control: { kill: async signal => void (await this.killForOwner(owner, procId, signal)) },
+      })
+    } catch (error) {
+      try {
+        this.registry.signal(procId, 'SIGKILL')
+      } catch {
+        // Nothing left to signal; fall through to removal either way.
+      }
+      this.registry.remove(procId)
+      throw error
+    }
+    onTerminal?.(terminal as TerminalHandle)
+    this.entries.set(procId, {
+      command: options.command,
+      drains: options.drains,
+      owner,
+      process: options.child,
+      stdout: options.stdout,
+      stderr: options.stderr,
+      ...(terminal ? { terminal } : {}),
+    })
+    void options.child.exited
+      .then(code => terminal?.close(typeof code === 'number' ? code : null))
+      .catch(() => {})
+    return {
+      procId,
+      pid: options.child.pid,
+      running: true,
+      command: options.command,
+      cwd: options.cwd,
+    }
   }
 
   /**

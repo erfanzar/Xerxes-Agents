@@ -87,6 +87,7 @@ import { goalPolicyPrompt, registerGoalTools } from "./runtime/goalTools.js";
 import { extractAgentOption, extractOutputFormatOption, parseValueOptions, type OutputFormat } from "./runtime/commandOptions.js";
 import { ProcessRegistry } from "./runtime/processRegistry.js";
 import { TerminalRegistry } from "./runtime/terminalRegistry.js";
+import { PtySessionManager } from "./operators/pty.js";
 import { BackgroundCommandManager } from "./tools/backgroundCommands.js";
 import { DaemonTranscriptStore } from "./session/daemonTranscript.js";
 import {
@@ -1631,6 +1632,27 @@ function daemonRuntime(
     new ProcessRegistry(),
     host.terminals,
   );
+  // Persistent interactive PTYs (pty_open/pty_write/...). Built once for the
+  // same reason as backgroundCommands: a per-registry manager would orphan
+  // live terminals on every settings rebuild. Mirrors into the terminals
+  // panel so the user can watch and type.
+  const ptySessions = new PtySessionManager({
+    ...(host.terminals === undefined ? {} : { terminals: host.terminals }),
+    workspaceRoot,
+  });
+  // Both process-owning managers share the daemon teardown contract; the
+  // runtime accepts one lifecycle object, so compose them here.
+  const processLifecycle = {
+    disposeAll: async () => {
+      await Promise.all([backgroundCommands.disposeAll(), ptySessions.disposeAll()]);
+    },
+    disposeOwner: async (owner: string) => {
+      await Promise.all([
+        backgroundCommands.disposeOwner(owner),
+        ptySessions.disposeOwner(owner),
+      ]);
+    },
+  };
   let subagentHost: ReturnType<typeof createNativeSubagentHost> | undefined;
   let runtime: InMemoryDaemonRuntime | undefined;
   let activeToolCount = 0;
@@ -1669,6 +1691,7 @@ function daemonRuntime(
     registerCoreTools(tools, {
       workspaceRoot,
       backgroundCommands,
+      ptySessions,
       generateImageTool: generateImageToolOptions(workspaceRoot),
       ...(host.terminals === undefined ? {} : { terminals: host.terminals }),
       ...(computerUseTool === undefined ? {} : { computerUseTool }),
@@ -1929,7 +1952,7 @@ function daemonRuntime(
       skills: host.skillRegistry?.all().length ?? 0,
       tools: activeToolCount,
     }),
-    backgroundCommands,
+    backgroundCommands: processLifecycle,
     shutdown: async () => {
       // Children first: their final events still belong in this session's
       // audit log, so the audit sink is only closed after they settle.

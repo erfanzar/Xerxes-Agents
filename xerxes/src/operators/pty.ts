@@ -67,6 +67,7 @@ export interface WritePtySessionOptions {
 
 interface PtySession {
   readonly command: string
+  readonly owner?: string
   readonly decoder: TextDecoder
   readonly id: string
   readonly mirror?: TerminalHandle
@@ -158,6 +159,7 @@ export class PtySessionManager {
     const session: PtySession = {
       id,
       command,
+      ...(options.ownerSessionId === undefined ? {} : { owner: options.ownerSessionId }),
       workdir,
       process: childProcess,
       terminal,
@@ -206,6 +208,48 @@ export class PtySessionManager {
     session.mirror?.close(session.process.exitCode)
     this.sessions.delete(sessionId)
     return { sessionId, closed: true, exitCode: session.process.exitCode }
+  }
+
+  /**
+   * Write only when the caller owns the session. A missing id and a foreign
+   * id fail identically — session-id possession is not authorization and must
+   * not become an existence oracle.
+   */
+  async writeForOwner(owner: string, sessionId: string, options: WritePtySessionOptions = {}): Promise<PtyOutput> {
+    return this.write(this.requireOwned(owner, sessionId).id, options)
+  }
+
+  /** Close only when the caller owns the session; same no-oracle rule. */
+  async closeForOwner(
+    owner: string,
+    sessionId: string,
+  ): Promise<{ readonly closed: true; readonly exitCode: number | null; readonly sessionId: string }> {
+    return this.close(this.requireOwned(owner, sessionId).id)
+  }
+
+  /** Sessions owned by one Xerxes session, in stable id order. */
+  listForOwner(owner: string): PtySessionSummary[] {
+    return this.listSessions().filter(summary => this.sessions.get(summary.sessionId)?.owner === owner)
+  }
+
+  /** Daemon teardown hook: close every session one owner opened. */
+  async disposeOwner(owner: string): Promise<void> {
+    await Promise.all(
+      [...this.sessions.values()]
+        .filter(session => session.owner === owner)
+        .map(async session => {
+          try {
+            await this.close(session.id)
+          } catch {
+            // Already exited; teardown must not fail on a race with natural exit.
+          }
+        }),
+    )
+  }
+
+  /** Daemon teardown hook: close everything still open. */
+  async disposeAll(): Promise<void> {
+    await this.closeAll()
   }
 
   listSessions(): PtySessionSummary[] {
@@ -273,6 +317,14 @@ export class PtySessionManager {
       running: session.process.exitCode === null,
       exitCode: session.process.exitCode,
     })
+  }
+
+  private requireOwned(owner: string, sessionId: string): PtySession {
+    const session = this.sessions.get(sessionId)
+    if (session === undefined || session.owner !== owner) {
+      throw new ValidationError('session_id', 'PTY session not found', sessionId)
+    }
+    return session
   }
 
   private requireSession(sessionId: string): PtySession {

@@ -22,7 +22,9 @@ import { registerMediaTools, type MediaToolPorts } from './mediaTools.js'
 import { registerMemoryTools, type MemoryToolsOptions } from './memoryTools.js'
 import { WorkspacePathResolver } from './pathSafety.js'
 import type { BackgroundCommandManager } from './backgroundCommands.js'
+import type { PtySessionManager } from '../operators/pty.js'
 import { registerProcessTools } from './processTools.js'
+import { registerPtyTools } from './ptyTools.js'
 import { registerRlTools, type RLToolsOptions } from './rlTools.js'
 import { registerSendMessageTool, type SendMessageToolOptions } from './sendMessage.js'
 import { registerSkillManageTool, type SkillManageOptions } from './skillManage.js'
@@ -133,6 +135,8 @@ export interface CoreToolsOptions {
   readonly rlTools?: RLToolsOptions
   /** Skill authoring writes are opt-in because they mutate persistent user storage. */
   readonly skillManageTools?: SkillManageOptions
+  /** Persistent interactive PTY sessions (pty_open/pty_write/pty_close/pty_list); opt-in per host. */
+  readonly ptySessions?: PtySessionManager
   /** Optional injectable web transport, useful for hosts with DNS-pinning policy. */
   readonly webClient?: PublicWebClient
   /** Workspace MEMORY.md/USER.md CRUD is opt-in for hosts that own a markdown workspace. */
@@ -170,6 +174,9 @@ export function registerCoreTools(registry: ToolRegistry, options: CoreToolsOpti
   }
   if (options.includeProcessTools ?? true) {
     registerProcessTools(registry, paths, options.backgroundCommands, options.terminals)
+    if (options.ptySessions !== undefined) {
+      registerPtyTools(registry, options.ptySessions)
+    }
   }
   if (options.includeSystemTools ?? true) {
     registerSystemTools(registry)
