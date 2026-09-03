@@ -239,6 +239,8 @@ export interface SessionActiveListResponse {
 export interface SessionInflightTool {
   /** Compact arguments preview, never the full payload. */
   arguments?: string
+  /** Display-safe semantic context retained when raw JSON was truncated. */
+  context?: string
   /** Milliseconds when the call already settled; absent while running. */
   duration_ms?: number
   /** Compact diagnostic when the call failed. */

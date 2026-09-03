@@ -54,9 +54,19 @@ test("session.open mid-turn exposes the in-flight thinking and tool trail", asyn
     expect(typeof inflight.started_at).toBe("number");
     expect(inflight.started_at as number).toBeGreaterThan(0);
     expect(inflight.thinking).toBe("mid-turn reasoning");
-    expect(inflight.tools).toEqual([
-      { id: "call-1", name: "ReadFile", arguments: '{"path":"a.ts"}' },
-    ]);
+    const inflightTools = inflight.tools as Array<Record<string, unknown>>;
+    expect(inflightTools[0]).toEqual({
+      id: "call-1",
+      name: "ReadFile",
+      arguments: '{"path":"a.ts"}',
+    });
+    expect(inflightTools[1]).toMatchObject({
+      id: "call-2",
+      name: "SpawnAgents",
+      context: "2 agents: Analyze structure, Audit security",
+    });
+    expect(String(inflightTools[1]?.arguments)).toEndWith("…");
+    expect(() => JSON.parse(String(inflightTools[1]?.arguments))).toThrow();
 
     runner.release("settle");
     await runner.waitForPhase("settled");
@@ -74,6 +84,13 @@ test("session.open mid-turn exposes the in-flight thinking and tool trail", asyn
         duration_ms: 42,
         ok: true,
       },
+      expect.objectContaining({
+        id: "call-2",
+        name: "SpawnAgents",
+        context: "2 agents: Analyze structure, Audit security",
+        duration_ms: 184_300,
+        ok: true,
+      }),
     ]);
 
     runner.release("finish");
@@ -108,6 +125,19 @@ class GatedTurnRunner implements TurnRunner {
       type: "tool_call",
       payload: { id: "call-1", name: "ReadFile", arguments: '{"path":"a.ts"}' },
     };
+    yield {
+      type: "tool_call",
+      payload: {
+        id: "call-2",
+        name: "SpawnAgents",
+        arguments: JSON.stringify({
+          agents: [
+            { title: "Analyze structure", prompt: "inspect architecture ".repeat(40) },
+            { title: "Audit security", prompt: "inspect security ".repeat(40) },
+          ],
+        }),
+      },
+    };
     await this.gate("settle");
     this.markPhase("settled");
     yield {
@@ -117,6 +147,16 @@ class GatedTurnRunner implements TurnRunner {
         name: "ReadFile",
         return_value: "file body",
         duration_ms: 42,
+        permitted: true,
+      },
+    };
+    yield {
+      type: "tool_result",
+      payload: {
+        tool_call_id: "call-2",
+        name: "SpawnAgents",
+        return_value: "agents completed",
+        duration_ms: 184_300,
         permitted: true,
       },
     };

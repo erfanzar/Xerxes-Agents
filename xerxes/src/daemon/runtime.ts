@@ -156,6 +156,8 @@ export interface DaemonSession {
 export interface InflightToolSnapshot {
   /** Compact arguments preview, never the full payload. */
   arguments?: string;
+  /** Display-safe semantic context retained when raw JSON must be truncated. */
+  context?: string;
   duration_ms?: number;
   /** Compact diagnostic when the call failed. */
   error?: string;
@@ -1937,6 +1939,45 @@ function inflightPreviewText(value: unknown, limit: number): string {
 }
 
 /**
+ * Preserve the Spawn Agents roster before its prompt-heavy JSON is truncated.
+ * The raw preview remains bounded at 200 characters, but a nine-agent call can
+ * exceed that in its first prompt and become invalid JSON; the reattached TUI
+ * then has neither readable tool context nor names for its status cubes.
+ */
+function inflightToolContext(name: string, value: unknown): string {
+  if (name.replace(/[^a-z0-9]+/gi, "").toLowerCase() !== "spawnagents") {
+    return "";
+  }
+  const raw = typeof value === "string" ? value : "";
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return "";
+  }
+  if (!isRecord(parsed) || !Array.isArray(parsed.agents)) {
+    return "";
+  }
+  const names = parsed.agents.flatMap((entry): string[] => {
+    if (!isRecord(entry)) return [];
+    const label = stringValue(entry.name)
+      || stringValue(entry.agent_name)
+      || stringValue(entry.title)
+      || stringValue(entry.id);
+    const preview = inflightPreviewText(label, 64);
+    return preview ? [preview] : [];
+  });
+  const count = parsed.agents.length;
+  if (count === 0) return "";
+  const shown = names.slice(0, 8);
+  const extra = Math.max(0, count - shown.length);
+  const roster = shown.length
+    ? `: ${shown.join(", ")}${extra ? `, +${extra} more` : ""}`
+    : "";
+  return `${count} agent${count === 1 ? "" : "s"}${roster}`;
+}
+
+/**
  * Accumulate the in-flight turn's thinking and tool rows onto the session so
  * sessionPayload can show a mid-turn reattach the work so far. Reads the same
  * frozen wire vocabulary the TUI adapter consumes.
@@ -1959,10 +2000,12 @@ function recordInflightTrail(session: DaemonSession, event: DaemonEvent): void {
       event.payload.arguments,
       INFLIGHT_ARGUMENTS_PREVIEW_CHARS,
     );
+    const context = inflightToolContext(name, event.payload.arguments);
     const id = stringValue(event.payload.id) || stringValue(event.payload.tool_call_id);
     const tools = [...(session.inflightTools ?? [])];
     tools.push({
       ...(args ? { arguments: args } : {}),
+      ...(context ? { context } : {}),
       ...(id ? { id } : {}),
       name,
     });

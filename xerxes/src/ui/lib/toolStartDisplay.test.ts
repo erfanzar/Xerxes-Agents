@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 import { describe, expect, it } from 'vitest'
 
-import { summarizeToolStartDisplay } from './toolStartDisplay.js'
+import { spawnRosterFromLine, summarizeToolStartDisplay } from './toolStartDisplay.js'
 
 describe('summarizeToolStartDisplay', () => {
   it('summarizes SpawnAgents without exposing prompt arguments', () => {
@@ -19,6 +19,28 @@ describe('summarizeToolStartDisplay', () => {
     expect(display).toEqual({ context: '2 agents: runtime, tools · wait=true' })
     expect('verboseArgs' in display).toBe(false)
     expect(display.context).not.toContain('long report')
+    expect(spawnRosterFromLine(`Spawn Agents("${display.context}") ✓`)).toEqual({
+      extra: 0,
+      names: ['runtime', 'tools']
+    })
+  })
+
+  it('uses agent titles and a safe reattach context when raw SpawnAgents JSON was truncated', () => {
+    expect(
+      summarizeToolStartDisplay(
+        'Spawn Agents',
+        '2 agents: Analyze structure, Audit security',
+        '{"agents":[{"title":"Analyze structure","prompt":"truncated…'
+      )
+    ).toEqual({ context: '2 agents: Analyze structure, Audit security' })
+
+    expect(
+      summarizeToolStartDisplay(
+        'SpawnAgents',
+        '',
+        JSON.stringify({ agents: [{ title: 'Analyze structure' }, { title: 'Audit security' }] })
+      )
+    ).toEqual({ context: '2 agents: Analyze structure, Audit security' })
   })
 
   it('reduces ordinary file args to a one-line path without retaining raw JSON', () => {

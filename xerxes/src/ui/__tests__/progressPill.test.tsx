@@ -18,6 +18,7 @@ const renderPill = async () => {
 describe('LiveProgressPill', () => {
   it('renders verb, clock, tool count and tokens in one row while live', async () => {
     patchTurnState({
+      streamPendingTools: ['Read File("a.ts") ✓', 'Spawn Agents("2 agents: scout, tester") ✓'],
       toolTokens: 4200,
       tools: [{ id: 't1', name: 'Bash' }]
     })
@@ -26,7 +27,7 @@ describe('LiveProgressPill', () => {
       const out = session.captureCharFrame()
       expect(out).toContain('✻')
       expect(out).toContain('(esc interrupt)')
-      expect(out).toContain('1 tool')
+      expect(out).toContain('3 tools')
       expect(out).toContain('4.2K tok')
     } finally {
       resetTurnState()

@@ -15,6 +15,7 @@ import {
   thinkingRowExpanded,
   toggleThinkingRow
 } from '../app/thinkingVisibilityStore.js'
+import { $spawnHistory, spawnHistoryForSession } from '../app/spawnHistoryStore.js'
 import { $toolRunVisibility, toggleToolRun, toolRunExpanded } from '../app/toolRunStore.js'
 import { $uiDetailVisibility, $uiState } from '../app/uiStore.js'
 import { useTurnSelector } from '../app/turnStore.js'
@@ -26,7 +27,7 @@ import { messageHasVisibleDetails, trailHasRenderableContent } from '../lib/live
 import { spawnRosterFromLine } from '../lib/toolStartDisplay.js'
 import { subagentCardAccent, subagentCardModel } from '../lib/subagentCards.js'
 import { fmtDuration } from '../lib/subagentElapsed.js'
-import { groupToolRun, type ToolRunGroup } from '../lib/toolRun.js'
+import { groupToolRun, toolRunSpawnRoster, type ToolRunGroup } from '../lib/toolRun.js'
 import { estimateTokensRough, fmtK, parseToolTrailResultLine, toolTrailParts } from '../lib/text.js'
 import { splitStreamingRender, STREAMING_CHUNKS_EMPTY, type StreamingChunks } from '../lib/streamingMarkdown.js'
 import { stringWidth } from '../lib/terminalRuntime.opentui.js'
@@ -401,24 +402,28 @@ function SpawnFleetRoster({
   t: Theme
 }) {
   const live = useTurnSelector(state => state.subagents)
+  const history = useStore($spawnHistory)
+  const sessionId = useStore($uiState).sid
   const fleet = useMemo(() => {
     const byName = new Map<string, SubagentProgress>()
-    for (const agent of archived) {
-      const key = agent.name ?? agent.title ?? ''
-      if (key) byName.set(key, agent)
+    const remember = (agent: SubagentProgress) => {
+      for (const alias of [agent.name, agent.title]) {
+        const key = alias?.trim().toLowerCase()
+        if (key) byName.set(key, agent)
+      }
     }
+    // Oldest first, so the most recent snapshot wins for a reused title.
+    for (const snapshot of [...spawnHistoryForSession(history, sessionId)].reverse()) {
+      for (const agent of snapshot.subagents) remember(agent)
+    }
+    for (const agent of archived) remember(agent)
     // Live entries win: their status is fresher than any archived snapshot.
-    for (const agent of live) {
-      const key = agent.name ?? agent.title ?? ''
-      if (key) byName.set(key, agent)
-    }
-    return [...byName.values()]
-  }, [archived, live])
+    for (const agent of live) remember(agent)
+    return byName
+  }, [archived, history, live, sessionId])
+  const resolve = (name: string) => fleet.get(name.trim().toLowerCase())
   const [frame, setFrame] = useState(0)
-  const anyWorking = names.some(name => {
-    const entry = fleet.find(agent => agent.name === name || agent.title === name)
-    return fleetRowState(entry) === 'working'
-  })
+  const anyWorking = names.some(name => fleetRowState(resolve(name)) === 'working')
 
   useEffect(() => {
     if (!anyWorking) return
@@ -430,7 +435,8 @@ function SpawnFleetRoster({
   return (
     <Box flexDirection="column" flexShrink={0}>
       {names.map(name => {
-        const entry = fleet.find(agent => agent.name === name || agent.title === name)
+        const entry = resolve(name)
+        const label = entry?.name?.trim() || entry?.title?.trim() || name
         const state = fleetRowState(entry)
         const glyph =
           state === 'working'
@@ -457,7 +463,7 @@ function SpawnFleetRoster({
         return (
           <Text key={name} wrap="truncate-end">
             <Span color={color}>{`  ${glyph} `}</Span>
-            <Span bold color={t.ds.title}>{name}</Span>
+            <Span bold color={t.ds.title}>{label}</Span>
             {detail ? <Span color={t.color.muted}>{`  ${detail}`}</Span> : null}
           </Text>
         )
@@ -694,11 +700,13 @@ function ThinkingBlock({ cols, msg, rowId, t }: { cols?: number; msg: Msg; rowId
 }
 
 function ToolRun({
+  archived,
   cols,
   group,
   runId,
   t
 }: {
+  archived: readonly SubagentProgress[]
   cols?: number
   group: Extract<ToolRunGroup, { kind: 'run' }>
   runId: string
@@ -706,8 +714,8 @@ function ToolRun({
 }) {
   const visibility = useStore($toolRunVisibility)
   const expanded = toolRunExpanded(visibility, runId)
-  const voice = VOICE.tool(t)
   const { duration, slowest, slowestDuration, tally, total } = group.summary
+  const roster = toolRunSpawnRoster(group.lines)
 
   if (expanded) {
     return (
@@ -721,7 +729,7 @@ function ToolRun({
           </Text>
         </Box>
         {group.lines.map((line, i) => (
-          <ToolStep cols={cols} key={i} line={line} t={t} />
+          <ToolStep archived={archived} cols={cols} key={i} line={line} t={t} />
         ))}
       </Box>
     )
@@ -745,6 +753,14 @@ function ToolRun({
         <Text color={t.color.muted} dimColor wrap="truncate-end">
           {`    slowest ${slowest} ${slowestDuration.toFixed(1)}s`}
         </Text>
+      ) : null}
+      {roster ? (
+        <>
+          <SpawnFleetRoster archived={archived} names={roster.names} t={t} />
+          {roster.extra > 0 ? (
+            <Text color={t.color.muted} wrap="truncate-end">{`    … +${roster.extra} more in the agents panel (F6)`}</Text>
+          ) : null}
+        </>
       ) : null}
     </Box>
   )
@@ -830,7 +846,7 @@ function ToolTrail({
             group.kind === 'row' ? (
               <ToolStep archived={msg.subagents} cols={cols} key={i} line={group.line} t={t} />
             ) : (
-              <ToolRun cols={cols} group={group} key={i} runId={`${thinkingRowId(msg, msgKey)}:run${i}`} t={t} />
+              <ToolRun archived={msg.subagents ?? []} cols={cols} group={group} key={i} runId={`${thinkingRowId(msg, msgKey)}:run${i}`} t={t} />
             )
           )
         : null}

@@ -133,7 +133,7 @@ export function sessionInfoFromInit(payload: Record<string, unknown>): SessionIn
     model: str(payload.model),
     mode: str(payload.mode, 'code'),
     permission_mode: permissionMode(payload.permission_mode),
-    profile_name: optionalStr(payload.agent_name),
+    profile_name: optionalStr(payload.profile_name) ?? optionalStr(payload.agent_name),
     reasoning_effort: str(payload.reasoning_effort, 'off'),
     session_id: optionalStr(payload.session_id),
     skillDescriptions: asStringRecord(payload.skill_descriptions),

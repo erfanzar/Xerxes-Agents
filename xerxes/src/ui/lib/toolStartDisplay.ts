@@ -146,9 +146,11 @@ function commandPreview(parsed: Record<string, unknown>): string {
 export function spawnRosterFromSummary(args: string): { extra: number; names: string[] } | null {
   const match = args.match(/^(\d+) agents?: (.+)$/u)
   if (!match) return null
-  const extraMatch = match[2]!.match(/, \+(\d+) more$/u)
+  // `wait` is call metadata, not part of the final agent's identity.
+  const roster = match[2]!.replace(/\s+·\s+wait=(?:true|false)$/u, '')
+  const extraMatch = roster.match(/, \+(\d+) more$/u)
   const extra = extraMatch ? Number(extraMatch[1]) : 0
-  const body = extraMatch ? match[2]!.slice(0, -extraMatch[0].length) : match[2]!
+  const body = extraMatch ? roster.slice(0, -extraMatch[0].length) : roster
   const names = body.split(',').map(name => name.trim()).filter(Boolean)
   return names.length || extra ? { extra, names } : null
 }
@@ -167,7 +169,11 @@ export function spawnRosterFromLine(line: string): { extra: number; names: strin
 
 function summarizeSpawnAgents(context: string, verboseArgs?: string): ToolStartDisplay {
   const raw = verboseArgs || context
-  const parsed = parseObject(raw)
+  // Reattach snapshots intentionally bound raw arguments. When truncation
+  // breaks JSON, prefer the daemon's already-safe semantic context instead of
+  // echoing the broken blob into the transcript.
+  const parsed = parseObject(raw) ?? parseObject(context)
+  const fallback = parsed || !context ? raw : context
   const agents = Array.isArray(parsed?.agents) ? parsed.agents : []
   const names = agents.map(agentName).filter(Boolean)
   const count = agents.length || names.length
@@ -180,7 +186,10 @@ function summarizeSpawnAgents(context: string, verboseArgs?: string): ToolStartD
     return { context: `${count} agent${count === 1 ? '' : 's'}${roster}${wait}` }
   }
 
-  const fallbackNames = Array.from(raw.matchAll(/["']name["']\s*:\s*["']([^"']+)["']/g), m => m[1]).filter(Boolean)
+  const fallbackNames = Array.from(
+    fallback.matchAll(/["'](?:name|agent_name|title)["']\s*:\s*["']([^"']+)["']/g),
+    m => m[1]
+  ).filter(Boolean)
   if (fallbackNames.length) {
     const shown = fallbackNames.slice(0, MAX_INLINE_AGENTS)
     const suffix = fallbackNames.length > MAX_INLINE_AGENTS ? `, +${fallbackNames.length - MAX_INLINE_AGENTS} more` : ''
@@ -188,7 +197,7 @@ function summarizeSpawnAgents(context: string, verboseArgs?: string): ToolStartD
     return { context: `${fallbackNames.length} agents: ${shown.join(', ')}${suffix}` }
   }
 
-  return { context: compact(raw) }
+  return { context: compact(fallback) }
 }
 
 function summarizeFileOperation(toolName: string, context: string, verboseArgs?: string): ToolStartDisplay | null {
@@ -298,7 +307,7 @@ function agentName(value: unknown): string {
     return ''
   }
   const record = value as Record<string, unknown>
-  const name = record.name ?? record.agent_name ?? record.id
+  const name = record.name ?? record.agent_name ?? record.title ?? record.id
 
   return typeof name === 'string' ? name.trim() : ''
 }

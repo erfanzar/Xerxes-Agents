@@ -1070,9 +1070,11 @@ class TurnController {
 
     for (const tool of input.tools ?? []) {
       const name = tool.name || 'tool'
-      // Inflight arguments are a raw JSON preview; summarize them into the
-      // same friendly context live tool.start rows carry ("path=…", not "{"path":…}").
-      const context = tool.arguments ? summarizeToolStartDisplay(name, '', tool.arguments).context : ''
+      // Prefer daemon-preserved semantic context when a prompt-heavy argument
+      // object was too large to keep as valid JSON. Ordinary bounded arguments
+      // still pass through the same summarizer as live tool.start rows.
+      const context = tool.context
+        || (tool.arguments ? summarizeToolStartDisplay(name, '', tool.arguments).context : '')
 
       if (tool.ok === undefined) {
         const id = tool.id ?? `inflight-${name}-${this.activeTools.length}`

@@ -355,6 +355,14 @@ describe('useSessionLifecycle', () => {
         streaming: true,
         thinking: 'trace so far',
         tools: [
+          {
+            arguments: '{"agents":[{"title":"Analyze structure","prompt":"truncated…',
+            context: '2 agents: Analyze structure, Audit security',
+            duration_ms: 184_300,
+            id: 'call-spawn',
+            name: 'SpawnAgents',
+            ok: true
+          },
           { arguments: '{"path":"a.ts"}', duration_ms: 200, id: 'call-1', name: 'ReadFile', ok: true },
           { arguments: '{"path":"b.ts"}', id: 'call-2', name: 'WriteFile' }
         ],
@@ -365,6 +373,10 @@ describe('useSessionLifecycle', () => {
       // The settled call renders as a completed trail line; the call still in
       // flight stays active so its late tool_result settles it live.
       expect(turn.streamPendingTools.some(line => line.includes('a.ts'))).toBe(true)
+      const spawn = turn.streamPendingTools.find(line => line.includes('Spawn Agents'))
+      expect(spawn).toContain('2 agents: Analyze structure, Audit security')
+      expect(spawn).not.toContain('{"agents"')
+      expect(turn.streamPendingTools).toHaveLength(2)
       expect(turn.tools.map(tool => tool.name)).toEqual(['WriteFile'])
       expect(turn.streaming).toContain('partial reply that keeps')
     } finally {

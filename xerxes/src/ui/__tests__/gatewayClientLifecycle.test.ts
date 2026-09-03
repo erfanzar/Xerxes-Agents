@@ -240,7 +240,17 @@ describe('GatewayClient session lifecycle', () => {
       if (method === 'session.open') {
         return {
           ok: true,
-          session: { id: 'tab-b', key: 'daemon:key-b', messages: 0, status: 'idle', transcript: [] }
+          session: {
+            context_limit: 262_144,
+            context_tokens: 65_536,
+            id: 'tab-b',
+            key: 'daemon:key-b',
+            messages: 0,
+            model: 'k3-256k',
+            profile_name: 'kimi-code',
+            status: 'idle',
+            transcript: []
+          }
         }
       }
       if (method === 'slash') {
@@ -250,9 +260,16 @@ describe('GatewayClient session lifecycle', () => {
     }
 
     await client.request('session.active_list', {})
-    await client.request('session.activate', { session_id: 'tab-b' })
+    const activation = await client.request<{ info?: { profile_name?: string; usage?: { context_max?: number; context_used?: number } } }>(
+      'session.activate',
+      { session_id: 'tab-b' }
+    )
     await client.request('slash.exec', { command: '/title Active tab' })
 
+    expect(activation.info).toMatchObject({
+      profile_name: 'kimi-code',
+      usage: { context_max: 262_144, context_used: 65_536 }
+    })
     expect(calls.slice(1)).toEqual([
       { method: 'session.status', params: { session_key: 'daemon:key-b' } },
       {

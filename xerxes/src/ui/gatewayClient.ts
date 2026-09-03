@@ -1760,7 +1760,12 @@ export class GatewayClient extends EventEmitter {
     session: RpcObject,
     captured: { info: null | SessionInfo; usage: null | Usage }
   ): Promise<SessionInfo> {
+    // session.open/session.status carry context capacity, usage, reasoning and
+    // telemetry inside `session`, while initialize-era fields may still be
+    // top-level. Merge both surfaces before adapting; selecting only cwd/model
+    // discarded context_limit on every live-tab reattach (`ctx unknown`).
     const rawInfo = sessionInfoFromInit({
+      ...session,
       ...raw,
       cwd: raw.cwd ?? session.cwd,
       mode: raw.mode ?? session.mode,
@@ -1832,6 +1837,7 @@ function inflightFromSession(session: RpcObject): null | SessionInflightTurn {
         const name = optionalTrimmedText(row.name) ?? 'tool'
         const id = optionalTrimmedText(row.id)
         const args = optionalTrimmedText(row.arguments)
+        const context = optionalTrimmedText(row.context)
         const error = optionalTrimmedText(row.error)
         const durationMs = typeof row.duration_ms === 'number' && Number.isFinite(row.duration_ms)
           ? row.duration_ms
@@ -1839,6 +1845,7 @@ function inflightFromSession(session: RpcObject): null | SessionInflightTurn {
 
         return [{
           ...(args ? { arguments: args } : {}),
+          ...(context ? { context } : {}),
           ...(durationMs === undefined ? {} : { duration_ms: durationMs }),
           ...(error ? { error } : {}),
           ...(id ? { id } : {}),

@@ -219,8 +219,13 @@ export function LiveProgressPill() {
         lastDeltaAt: pulse.lastDeltaAt,
         now: Date.now(),
         startedAt: pulse.startedAt,
+        // Liveness cares about calls executing now, not the completed ledger.
         toolCount: turn.tools.length
       })
+      // The label is cumulative for this turn. Reattached snapshots restore
+      // settled calls into streamPendingTools; counting active calls alone made
+      // an eleven-tool run come back as "0 tools" while it was still working.
+      const toolCount = turn.streamPendingTools.length + turn.tools.length
       const tokens = livenessTokens(turn)
       const glyph = glyphRef.current
       const label = labelRef.current
@@ -236,7 +241,7 @@ export function LiveProgressPill() {
       if (label) {
         const parts = [
           `${livenessVerb(verbs, liveness.elapsedMs)} ${formatStatusDuration(liveness.elapsedMs / 1000)}`,
-          `${turn.tools.length} tool${turn.tools.length === 1 ? '' : 's'}`
+          `${toolCount} tool${toolCount === 1 ? '' : 's'}`
         ]
 
         if (tokens > 0) {

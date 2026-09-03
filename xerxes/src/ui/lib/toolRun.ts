@@ -10,6 +10,7 @@
 // summary. Anything that still needs your attention — a failure, a call
 // still in flight — is never folded away.
 
+import { spawnRosterFromLine } from './toolStartDisplay.js'
 import { isToolTrailResultLine, parseToolTrailResultLine, toolTrailParts } from './text.js'
 
 /** Below this a run is not worth summarizing; the rows are cheaper to read. */
@@ -130,6 +131,20 @@ export function groupToolRun(lines: readonly string[], min = TOOL_RUN_MIN): Tool
   return groups
 }
 
+/** Merge Spawn Agents rosters hidden inside one folded successful run. */
+export function toolRunSpawnRoster(lines: readonly string[]): { extra: number; names: string[] } | null {
+  return lines.reduce<{ extra: number; names: string[] } | null>((combined, line) => {
+    const next = spawnRosterFromLine(line)
+    if (!next) return combined
+    const names = [...new Set([...(combined?.names ?? []), ...next.names])]
+    return { extra: (combined?.extra ?? 0) + next.extra, names }
+  }, null)
+}
+
 /** Rows a group occupies when collapsed — the height estimator needs this. */
-export const collapsedRunHeight = (group: ToolRunGroup): number =>
-  group.kind === 'row' ? 1 : group.summary.slowestDuration > 0 ? 2 : 1
+export const collapsedRunHeight = (group: ToolRunGroup): number => {
+  if (group.kind === 'row') return 1
+  const roster = toolRunSpawnRoster(group.lines)
+  const base = group.summary.slowestDuration > 0 ? 2 : 1
+  return base + (roster?.names.length ?? 0) + (roster?.extra ? 1 : 0)
+}
