@@ -67,7 +67,7 @@ test("native installer writes Bun and ACP launchers against an explicit local so
 
     const launcher = await execute([join(binDirectory, "xerxes"), "--version"]);
     expect(launcher.exitCode, launcher.stderr).toBe(0);
-    expect(launcher.stdout.trim()).toBe("0.3.6");
+    expect(launcher.stdout.trim()).toBe("0.4.0");
 
     const acpLauncher = await Bun.file(join(binDirectory, "xerxes-acp")).text();
     expect(acpLauncher).toContain("/xerxes/dist/cli.js' acp \"$@\"");

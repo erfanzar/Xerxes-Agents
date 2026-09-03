@@ -44,7 +44,7 @@ jobs:
         uses: oven-sh/setup-bun@v2
 
       - name: Install Xerxes
-        run: bun add --global xerxes-bun
+        run: bun add --global @xsimurgh/xerxes-agents
 
       - name: Collect the PR diff
         env:

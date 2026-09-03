@@ -1,9 +1,13 @@
 <div align="center">
 
+<img src="https://raw.githubusercontent.com/erfanzar/Xerxes-Agents/main/assets/logo-128.png" width="96" alt="Xerxes logo" />
+
 # Xerxes
 
 ### A Bun-native coding agent and multi-agent runtime
 
+[![npm](https://img.shields.io/npm/v/%40xsimurgh%2Fxerxes-agents?logo=npm&color=cb3837)](https://www.npmjs.com/package/@xsimurgh/xerxes-agents)
+[![npm downloads](https://img.shields.io/npm/dm/%40xsimurgh%2Fxerxes-agents)](https://www.npmjs.com/package/@xsimurgh/xerxes-agents)
 [![Bun CI](https://github.com/erfanzar/Xerxes-Agents/actions/workflows/bun-ci.yml/badge.svg)](https://github.com/erfanzar/Xerxes-Agents/actions/workflows/bun-ci.yml)
 [![Bun 1.3+](https://img.shields.io/badge/Bun-1.3%2B-f9f1e1?logo=bun&logoColor=111)](https://bun.sh/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
@@ -12,6 +16,8 @@
 
 **One terminal for streaming coding work, policy-controlled tools, persistent sessions,
 sub-agents, skills, MCP, channels, and scheduled jobs.**
+
+[Install](#quick-start) · [Features](#what-you-actually-get) · [Providers](#configure-a-provider) · [Documentation](#documentation)
 
 </div>
 
@@ -25,36 +31,41 @@ Xerxes keeps its own identity: an animated Derafsh Kaviani Braille mark, `XERXES
 branding, neutral charcoal surfaces, an amber signal color, and mode accents for code,
 research, planning, and objectives.
 
-## Install
+<p align="center">
+  <img src="https://raw.githubusercontent.com/erfanzar/Xerxes-Agents/main/design/desktop/renders/06-fleet-subagents.png" width="100%" alt="Xerxes multi-agent fleet view" />
+  <br />
+  <sub>One task, multiple specialists: live activity, tool calls, elapsed time, token usage, and review state.</sub>
+</p>
+
+## Quick start
 
 You need [Bun 1.3.12 or newer](https://bun.sh/). Git is required only for a source
 checkout. For live turns, provide provider credentials or configure a local backend.
 
-Install the published [`xerxes-bun`](https://www.npmjs.com/package/xerxes-bun)
+Install the published [`@xsimurgh/xerxes-agents`](https://www.npmjs.com/package/@xsimurgh/xerxes-agents)
 package globally with Bun or npm:
 
 ```bash
-bun add --global xerxes-bun
+bun add --global @xsimurgh/xerxes-agents
 # or
-npm install --global xerxes-bun
+npm install --global @xsimurgh/xerxes-agents
 
 xerxes
 ```
 
-The global package installs three executable names: `xerxes` for normal use,
-`xerxes-acp` for Agent Client Protocol hosts, and `xerxes-bun` as an explicit
-package-name alias. The runtime still requires Bun even when npm installs the
-package.
+The package installs three executable names: `xerxes` for normal use,
+`xerxes-acp` for Agent Client Protocol hosts, and `xerxes-agents` as a package-name
+alias. The runtime still requires Bun even when npm performs the installation.
 
 Run the same published CLI without a global install:
 
 ```bash
-bunx xerxes-bun
+bunx @xsimurgh/xerxes-agents
 # or
-npx --yes xerxes-bun
+npx --yes @xsimurgh/xerxes-agents
 ```
 
-> **Package-name note:** install `xerxes-bun`, not `xerxes`. The unscoped npm
+> **Package-name note:** install `@xsimurgh/xerxes-agents`, not `xerxes`. The unscoped npm
 > package named `xerxes` is unrelated to this project.
 
 To install the current `main` checkout and local launchers instead:
@@ -335,7 +346,7 @@ xerxes doctor
 
 | Problem                         | Fix                                                                                                           |
 | ------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `xerxes: command not found`     | Reinstall `xerxes-bun` globally, use `bunx xerxes-bun`, or add the source installer's bin directory to `PATH` |
+| `xerxes: command not found`     | Reinstall `@xsimurgh/xerxes-agents` globally, use `bunx @xsimurgh/xerxes-agents`, or add the source installer's bin directory to `PATH` |
 | No model is configured          | Open `/provider`, select or create a profile, then choose a model                                             |
 | Local backend will not connect  | Confirm the backend is already running and its configured base URL is reachable                               |
 | Terminal colors are wrong       | Use a modern Unicode terminal; set `XERXES_TUI_THEME=dark` or `light` when automatic detection is wrong       |
@@ -382,7 +393,7 @@ installed package:
 bun run verify
 RELEASE_ROOT="$(mktemp -d)"
 PACKAGE_DIR="$RELEASE_ROOT/package"
-ARCHIVE="$RELEASE_ROOT/xerxes-bun-$(bun -p 'require("./package.json").version').tgz"
+ARCHIVE="$RELEASE_ROOT/xerxes-agents-$(bun -p 'require("./package.json").version').tgz"
 bun run release:prepare -- --output "$PACKAGE_DIR"
 (
   cd "$PACKAGE_DIR"

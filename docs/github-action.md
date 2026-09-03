@@ -68,7 +68,7 @@ xerxes --output-format stream-json "tally the test files" \
   interactive approval — that is what makes it safe to leave unattended in
   CI. If a workflow needs a human gate, put the gate in the workflow, not in
   the turn.
-- The PR template installs from the published `xerxes-bun` npm package. To
+- The PR template installs from the published `@xsimurgh/xerxes-agents` npm package. To
   track a source checkout instead, replace the install step with
   `bun install --frozen-lockfile && bun run xerxes …` against your clone.
 - Hooks from `~/.xerxes/config.yaml` also run in CI (`~` is the runner user),

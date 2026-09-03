@@ -66,7 +66,7 @@ describe("native release package staging", () => {
       "bin/default/tester.yaml",
       "bin/xerxes",
       "bin/xerxes-acp",
-      "bin/xerxes-bun",
+      "bin/xerxes-agents",
       "bin/xerxes.js",
       "LICENSE",
       "package.json",
@@ -82,10 +82,10 @@ describe("native release package staging", () => {
       (await stat(join(packageDirectory, "bin/xerxes-acp"))).mode & 0o111,
     ).not.toBe(0);
     expect(
-      (await stat(join(packageDirectory, "bin/xerxes-bun"))).mode & 0o111,
+      (await stat(join(packageDirectory, "bin/xerxes-agents"))).mode & 0o111,
     ).not.toBe(0);
     expect(
-      await readFile(join(packageDirectory, "bin/xerxes-bun"), "utf8"),
+      await readFile(join(packageDirectory, "bin/xerxes-agents"), "utf8"),
     ).toBe(await readFile(join(packageDirectory, "bin/xerxes"), "utf8"));
     expect(
       await readFile(join(packageDirectory, "bin/xerxes-acp"), "utf8"),
@@ -109,11 +109,13 @@ describe("native release package staging", () => {
       bin: {
         xerxes: "./bin/xerxes",
         "xerxes-acp": "./bin/xerxes-acp",
-        "xerxes-bun": "./bin/xerxes-bun",
+        "xerxes-agents": "./bin/xerxes-agents",
       },
       bugs: {
         url: "https://github.com/erfanzar/Xerxes-Agents/issues",
       },
+      description:
+        "Bun-native coding agent with OpenTUI, persistent sessions, policy-controlled tools, MCP, and live multi-agent orchestration.",
       dependencies: {
         "@opentui/core": "0.4.3",
         "@opentui/react": "0.4.3",
@@ -134,6 +136,9 @@ describe("native release package staging", () => {
         "agent",
         "coding-agent",
         "multi-agent",
+        "developer-tools",
+        "llm",
+        "cli",
         "bun",
         "typescript",
         "terminal",
@@ -421,10 +426,10 @@ describe("native release package staging", () => {
         "--package",
         "/tmp/release",
         "--archive",
-        "/tmp/xerxes-bun.tgz",
+        "/tmp/xerxes-agents.tgz",
       ]),
     ).toEqual({
-      archivePath: "/tmp/xerxes-bun.tgz",
+      archivePath: "/tmp/xerxes-agents.tgz",
       expectedVersion: undefined,
       kind: "publish-dry-run",
       outputDirectory: undefined,

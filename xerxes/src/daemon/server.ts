@@ -8489,7 +8489,7 @@ function initPayload(
     skills: [],
     skill_descriptions: {},
     head_hash: "",
-    version: "0.3.6",
+    version: XERXES_VERSION,
   };
 }
 

@@ -1,20 +1,21 @@
 # Deployment guide
 
-Xerxes is published to npm as `xerxes-bun` and requires Bun 1.3.12 or newer. Install the
-package globally with either package manager:
+Xerxes is published to npm as `@xsimurgh/xerxes-agents` and requires Bun 1.3.12 or newer.
+Install the package globally with either package manager:
 
 ```sh
-bun add --global xerxes-bun
+bun add --global @xsimurgh/xerxes-agents
 # or
-npm install --global xerxes-bun
+npm install --global @xsimurgh/xerxes-agents
 
 xerxes doctor
 xerxes
 ```
 
-The package provides `xerxes`, `xerxes-acp`, and the package-name alias `xerxes-bun`. To run it
-without a global install, use `bunx xerxes-bun` or `npx --yes xerxes-bun`. The unscoped npm
-package named `xerxes` is unrelated to this project; install `xerxes-bun`.
+The package provides `xerxes`, `xerxes-acp`, and the package-name alias `xerxes-agents`. To run it
+without a global install, use `bunx @xsimurgh/xerxes-agents` or
+`npx --yes @xsimurgh/xerxes-agents`. The unscoped npm package named `xerxes` is unrelated to this
+project.
 
 For source deployments, fetch the Bun workspace and install its locked dependencies:
 
@@ -137,7 +138,7 @@ Before packaging a deployment artifact, run:
 bun run verify
 RELEASE_ROOT="$(mktemp -d)"
 PACKAGE_DIR="$RELEASE_ROOT/package"
-ARCHIVE="$RELEASE_ROOT/xerxes-bun-$(bun -p 'require("./package.json").version').tgz"
+ARCHIVE="$RELEASE_ROOT/xerxes-agents-$(bun -p 'require("./package.json").version').tgz"
 bun run release:prepare -- --output "$PACKAGE_DIR"
 (
   cd "$PACKAGE_DIR"

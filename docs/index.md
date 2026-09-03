@@ -4,9 +4,10 @@ Xerxes is a Bun-native TypeScript runtime for building, serving, and operating L
 agents. The public command, daemon protocol, HTTP surface, and OpenTUI terminal client share typed
 contracts from `xerxes/`.
 
-The npm package is `xerxes-bun` (the package named `xerxes` is unrelated). With Bun 1.3.12 or
-newer installed, either install it globally with `bun add --global xerxes-bun` or run it directly
-with `bunx xerxes-bun`.
+The npm package is `@xsimurgh/xerxes-agents` (the package named `xerxes` is unrelated). With Bun
+1.3.12 or newer installed, either install it globally with
+`bun add --global @xsimurgh/xerxes-agents` or run it directly with
+`bunx @xsimurgh/xerxes-agents`.
 
 ## Start here
 

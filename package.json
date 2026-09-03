@@ -1,9 +1,9 @@
 {
-  "name": "xerxes-agents",
-  "version": "0.3.6",
+  "name": "@xsimurgh/xerxes-agents",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
-  "description": "Bun-native coding-agent and multi-agent runtime with a React + OpenTUI interface.",
+  "description": "Bun-native coding agent with OpenTUI, persistent sessions, policy-controlled tools, MCP, and live multi-agent orchestration.",
   "license": "Apache-2.0",
   "workspaces": [
     "xerxes"

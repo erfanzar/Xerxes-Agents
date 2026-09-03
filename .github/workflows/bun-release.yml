@@ -88,25 +88,25 @@ jobs:
 
       - name: Package and validate the Bun distribution
         env:
-          ARTIFACT_DIRECTORY: ${{ runner.temp }}/xerxes-bun-artifacts
-          PACKAGE_DIRECTORY: ${{ runner.temp }}/xerxes-bun-package
+          ARTIFACT_DIRECTORY: ${{ runner.temp }}/xerxes-agents-artifacts
+          PACKAGE_DIRECTORY: ${{ runner.temp }}/xerxes-agents-package
           RELEASE_VERSION: ${{ steps.release.outputs.version }}
         run: |
           bun run release:prepare -- --output "$PACKAGE_DIRECTORY" --expected-version "$RELEASE_VERSION"
           (
             cd "$PACKAGE_DIRECTORY"
             mkdir -p "$ARTIFACT_DIRECTORY"
-            bun pm pack --filename "$ARTIFACT_DIRECTORY/xerxes-bun-${RELEASE_VERSION}.tgz" --ignore-scripts
+            bun pm pack --filename "$ARTIFACT_DIRECTORY/xerxes-agents-${RELEASE_VERSION}.tgz" --ignore-scripts
             bun pm pack --dry-run --ignore-scripts
           )
-          bun run release:check -- --package "$PACKAGE_DIRECTORY" --archive "$ARTIFACT_DIRECTORY/xerxes-bun-${RELEASE_VERSION}.tgz" --expected-version "$RELEASE_VERSION"
-          bun run release:smoke -- "$ARTIFACT_DIRECTORY/xerxes-bun-${RELEASE_VERSION}.tgz"
+          bun run release:check -- --package "$PACKAGE_DIRECTORY" --archive "$ARTIFACT_DIRECTORY/xerxes-agents-${RELEASE_VERSION}.tgz" --expected-version "$RELEASE_VERSION"
+          bun run release:smoke -- "$ARTIFACT_DIRECTORY/xerxes-agents-${RELEASE_VERSION}.tgz"
 
       - name: Upload native release artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: xerxes-bun-${{ steps.release.outputs.version }}
-          path: ${{ runner.temp }}/xerxes-bun-artifacts/xerxes-bun-${{ steps.release.outputs.version }}.tgz
+          name: xerxes-agents-${{ steps.release.outputs.version }}
+          path: ${{ runner.temp }}/xerxes-agents-artifacts/xerxes-agents-${{ steps.release.outputs.version }}.tgz
           if-no-files-found: error
           retention-days: 30
 
@@ -121,12 +121,12 @@ jobs:
       - name: Download native release artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: xerxes-bun-${{ needs.package.outputs.version }}
+          name: xerxes-agents-${{ needs.package.outputs.version }}
           path: artifacts
 
       - name: Attach native package
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ needs.package.outputs.tag }}
-          files: artifacts/xerxes-bun-${{ needs.package.outputs.version }}.tgz
+          files: artifacts/xerxes-agents-${{ needs.package.outputs.version }}.tgz
           fail_on_unmatched_files: true

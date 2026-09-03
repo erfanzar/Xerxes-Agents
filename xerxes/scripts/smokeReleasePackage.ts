@@ -36,7 +36,8 @@ export async function smokeReleasePackage(archivePath: string): Promise<void> {
     const packageDirectory = join(
       temporaryDirectory,
       "node_modules",
-      "xerxes-bun",
+      "@xsimurgh",
+      "xerxes-agents",
     );
     const version = assertCommand(
       await run(

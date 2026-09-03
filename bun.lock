@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "xerxes-agents",
+      "name": "@xsimurgh/xerxes-agents",
       "dependencies": {
         "react": "19.2.8",
         "react-dom": "19.2.8",
@@ -15,7 +15,7 @@
     },
     "xerxes": {
       "name": "@xerxes/runtime",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "dependencies": {
         "@aws-sdk/client-bedrock-runtime": "3.1048.0",
         "@earendil-works/pi-ai": "^0.84.2",

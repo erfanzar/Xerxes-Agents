@@ -18,7 +18,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const RELEASE_PACKAGE_FORMAT = 2;
-export const RELEASE_PACKAGE_NAME = "xerxes-bun";
+export const RELEASE_PACKAGE_NAME = "@xsimurgh/xerxes-agents";
 export const RELEASE_PACKAGE_MINIMUM_BUN_VERSION = "1.3.12";
 export const RELEASE_REQUIRED_TUI_DEPENDENCIES = Object.freeze([
   "@opentui/core",
@@ -40,6 +40,9 @@ const RELEASE_PACKAGE_KEYWORDS = Object.freeze([
   "agent",
   "coding-agent",
   "multi-agent",
+  "developer-tools",
+  "llm",
+  "cli",
   "bun",
   "typescript",
   "terminal",
@@ -92,7 +95,7 @@ const REQUIRED_RELEASE_FILES = Object.freeze([
   "README.md",
   "bin/xerxes",
   "bin/xerxes-acp",
-  "bin/xerxes-bun",
+  "bin/xerxes-agents",
   "bin/xerxes.js",
   "package.json",
   "ui/entry.js",
@@ -187,7 +190,7 @@ export async function prepareReleasePackage(
     "utf8",
   );
   await chmod(launcherPath, 0o755);
-  const packageLauncherPath = join(outputDirectory, "bin/xerxes-bun");
+  const packageLauncherPath = join(outputDirectory, "bin/xerxes-agents");
   await writeFile(
     packageLauncherPath,
     "#!/usr/bin/env bun\nimport './xerxes.js'\n",
@@ -296,7 +299,7 @@ export async function validateReleasePackage(
       );
   }
 
-  for (const launcher of ["xerxes", "xerxes-acp", "xerxes-bun"]) {
+  for (const launcher of ["xerxes", "xerxes-acp", "xerxes-agents"]) {
     const launcherMode = (await stat(join(packageDirectory, "bin", launcher)))
       .mode;
     if ((launcherMode & 0o111) === 0)
@@ -541,12 +544,12 @@ async function packageMetadata(
   return Object.freeze({
     bin: Object.freeze({
       xerxes: "./bin/xerxes",
-      "xerxes-bun": "./bin/xerxes-bun",
+      "xerxes-agents": "./bin/xerxes-agents",
       "xerxes-acp": "./bin/xerxes-acp",
     }),
     bugs: RELEASE_PACKAGE_BUGS,
     description:
-      "Bun-native TypeScript distribution of the Xerxes agent runtime.",
+      "Bun-native coding agent with OpenTUI, persistent sessions, policy-controlled tools, MCP, and live multi-agent orchestration.",
     dependencies: Object.freeze(dependencies),
     engines: Object.freeze({ bun: `>=${RELEASE_PACKAGE_MINIMUM_BUN_VERSION}` }),
     files: Object.freeze([
@@ -913,10 +916,10 @@ function assertReleasePackageMetadata(value: unknown, version: string): void {
     throw new Error("Release package launcher must be ./bin/xerxes.");
   }
   if (
-    recordString(bin, "xerxes-bun", "Release package metadata bin") !==
-    "./bin/xerxes-bun"
+    recordString(bin, "xerxes-agents", "Release package metadata bin") !==
+    "./bin/xerxes-agents"
   ) {
-    throw new Error("Release package name launcher must be ./bin/xerxes-bun.");
+    throw new Error("Release package name launcher must be ./bin/xerxes-agents.");
   }
   if (
     recordString(bin, "xerxes-acp", "Release package metadata bin") !==
@@ -949,7 +952,7 @@ function publishDryRunEnvironment(): Record<string, string | undefined> {
   environment.NPM_CONFIG_DRY_RUN = "true";
   // Bun requires an auth-shaped value even for --dry-run. A fixed invalid token
   // keeps this command deterministic and makes an accidental real publish fail.
-  environment.NPM_CONFIG_TOKEN = "xerxes-bun-dry-run-not-a-credential";
+  environment.NPM_CONFIG_TOKEN = "xerxes-agents-dry-run-not-a-credential";
   return environment;
 }
 
@@ -1000,7 +1003,7 @@ async function assertPackedArchive(
       );
     }
   }
-  for (const launcher of ["bin/xerxes", "bin/xerxes-acp", "bin/xerxes-bun"]) {
+  for (const launcher of ["bin/xerxes", "bin/xerxes-acp", "bin/xerxes-agents"]) {
     if (((packedByPath.get(launcher)?.mode ?? 0) & 0o111) === 0) {
       throw new Error(
         `Packed release archive launcher must be executable: ${launcher}`,

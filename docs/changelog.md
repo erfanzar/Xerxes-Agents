@@ -7,6 +7,23 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.4.0 — 2026-09-03
+
+- Published the native distribution under the scoped npm identity
+  [`@xsimurgh/xerxes-agents`](https://www.npmjs.com/package/@xsimurgh/xerxes-agents).
+- Added Claude Code compatibility for project instructions, `/init`, shell mode, memory capture,
+  hooks, project MCP, headless output formats, model fallback, and injected skills.
+- Added timeout-driven command backgrounding and persistent PTY sessions with live terminal
+  inspection and control from the TUI.
+- Added a live spawned-agent roster with animated activity cubes, elapsed time, tool summaries,
+  completion state, and restoration after session reattachment.
+- Improved Agent View attachment, session-tab switching, reasoning-model pinning, provider-profile
+  capability resolution, and full tool-argument summaries after resume.
+- Corrected cumulative LLM/TTFT accounting and rejected fabricated Codex throughput samples from
+  tool-only terminal events.
+- Added provider-stream retries, fresh instruction-file overlays, and complete daemon-capability
+  mapping across the TUI and desktop renderer.
+
 ## 0.3.0 — Native Bun/TypeScript migration
 
 - Added the native runtime, CLI, daemon, session, streaming, API, and OpenTUI client paths under the
