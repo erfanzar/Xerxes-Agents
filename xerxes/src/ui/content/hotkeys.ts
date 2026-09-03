@@ -21,7 +21,7 @@ export const HOTKEYS: [string, string][] = [
   ...copyHotkeys,
   ['Ctrl+O / /copy', 'copy last assistant message; /copy picks any message (user or Xerxes)'],
   ['Ctrl+T', 'expand / collapse all thinking blocks (click a thinking header to toggle one)'],
-  ['F6 / F7 / F8', 'agents panel / git diff viewer / terminals Xerxes is running'],
+  ['F6 / F7 / F8', 'agents panel / git diff viewer / terminals Xerxes is running (Shift+F6 also toggles agents)'],
   ['Shift+Cmd/Ctrl+←/→', 'resize the F6/F7/F8 panel width (Option works where Cmd is intercepted)'],
   [action + '+D', 'exit'],
   [action + '+G / Alt+G', 'open $EDITOR (Alt+G fallback for VSCode/Cursor)'],

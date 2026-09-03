@@ -328,6 +328,31 @@ describe('OpenTUI agent panel', () => {
     }
   })
 
+  it('toggles the panel with Shift+F6 in both terminal encodings', async () => {
+    const transitions: boolean[] = []
+    const setup = await testRender(
+      <box>
+        <AgentPanelHotkey disabled={false} onToggle={open => transitions.push(open)} open={false} />
+        <text>ready</text>
+      </box>,
+      { height: 4, width: 30, kittyKeyboard: true }
+    )
+
+    try {
+      // Kitty-protocol terminals: Shift+F6 arrives as 'f6' with shift set...
+      setup.mockInput.pressKey('F6', { shift: true })
+      await setup.flush()
+      expect(transitions).toEqual([true])
+      // ...or, with kitty alternate-keys reporting, as the F18 key event
+      // (kitty codepoint 57381). The alias covers both encodings.
+      setup.renderer.stdin.emit('data', Buffer.from('\x1b[57381u'))
+      await setup.flush()
+      expect(transitions).toEqual([true, true])
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
+
   it('keeps the overlay inside the terminal and its footer on screen for a long agent list', async () => {
     // Ten agents is far more than fits: the frame previously grew to its content
     // height and ran off the bottom of the terminal, taking the footer — the only

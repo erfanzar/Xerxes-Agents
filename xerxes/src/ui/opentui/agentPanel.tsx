@@ -941,6 +941,15 @@ const consumeKey = (event: KeyEvent) => {
   event.stopPropagation()
 }
 
+
+/**
+ * F6 in every encoding a terminal can deliver. Kitty-protocol terminals send
+ * Shift+F6 as name 'f6' with the shift flag set; legacy xterm encodes
+ * Shift+F6 as the F18 key. Both toggle the agents panel.
+ */
+const isAgentsToggleKey = (event: KeyEvent): boolean =>
+  event.name === 'f6' || event.name === 'f18'
+
 export function AgentPanelHotkey({
   disabled,
   open,
@@ -959,7 +968,7 @@ export function AgentPanelHotkey({
       consumeKey(event)
       return
     }
-    if (disabled || event.name !== 'f6') return
+    if (disabled || !isAgentsToggleKey(event)) return
     onToggle(!open)
     consumeKey(event)
   })
@@ -1124,7 +1133,7 @@ export function AgentPanelOverlay({
 
     if (isPanelResizeKey(event)) {
       adjustPanelWidth(event.name === 'right' ? PANEL_WIDTH_STEP : -PANEL_WIDTH_STEP)
-    } else if (event.name === 'escape' || event.name === 'f6' || event.sequence === 'q') {
+    } else if (event.name === 'escape' || isAgentsToggleKey(event) || event.sequence === 'q') {
       // Esc steps back to the list before it closes the panel: the inspector is
       // a place inside /agents, not a modal stacked on top of it. Only from the
       // list does Esc return you to the main agent.
