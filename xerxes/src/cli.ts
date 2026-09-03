@@ -172,6 +172,7 @@ const HELP_GROUPS: readonly {
       ["xerxes auth login copilot", "sign in to GitHub and use Copilot models"],
       ["xerxes auth login anthropic|kimi|openrouter|xai|radius", "authorize subscription or gateway OAuth sessions"],
       ["xerxes doctor", "check the host, providers, and configuration"],
+      ["xerxes usage [claude|codex|kimi|zai] [--json]", "show subscription 5-hour/weekly quota windows"],
       ["xerxes update [--check] [--git] [--dry-run] [--apply]", "report or apply an update"],
       ["xerxes install --cloud-code [--force] [--dry-run]", "install a companion integration"],
       ["xerxes export [session]", "write a session transcript to disk"],
@@ -234,6 +235,7 @@ const NON_ONESHOT_COMMANDS: ReadonlySet<string> = new Set([
   "skill",
   "auth",
   "doctor",
+  "usage",
   "install",
   "update",
   "export",
@@ -374,6 +376,21 @@ if (argument === "--help" || argument === "-h") {
     printDoctorReport(report);
   }
   process.exit(hasDoctorFailures(report) ? 1 : 0);
+} else if (argument === "usage") {
+  const json = argumentsAfterCommand.includes("--json");
+  const provider = argumentsAfterCommand.find((value) => !value.startsWith("-"));
+  const { collectSubscriptionUsage, formatUsageReport } = await import("./auth/usage.js");
+  const collection = await collectSubscriptionUsage(provider);
+  if (json) {
+    console.log(JSON.stringify(collection, null, 2));
+  } else {
+    for (const report of collection.reports) console.log(formatUsageReport(report));
+    for (const failure of collection.errors) console.error(`${failure.provider}: ${failure.message}`);
+    if (!collection.reports.length && !collection.errors.length) {
+      console.log("No subscription providers configured; see xerxes auth login --help.");
+    }
+  }
+  process.exit(collection.errors.length && !collection.reports.length ? 1 : 0);
 } else if (argument === "install") {
   if (
     argumentsAfterCommand.includes("--help") ||

@@ -305,6 +305,9 @@ xerxes daemon --project-dir .
 # Agent Client Protocol over stdio
 xerxes acp --project-dir .
 
+# Show subscription quota windows (Claude, Codex, Kimi Code, Z.ai)
+xerxes usage [provider]
+
 # Export a session
 xerxes export [session]
 
