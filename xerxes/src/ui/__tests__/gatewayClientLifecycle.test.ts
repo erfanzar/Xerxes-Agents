@@ -466,7 +466,7 @@ describe('GatewayClient session lifecycle', () => {
     ])
     expect(calls.slice(-2)).toEqual([
       { method: 'provider_select', params: { name: 'openai-dev' } },
-      { method: 'runtime.reload', params: { model: 'gpt-4.1' } }
+      { method: 'set_model', params: { model: 'gpt-4.1', session_key: 'test:model-picker' } }
     ])
   })
 
@@ -522,8 +522,8 @@ describe('GatewayClient session lifecycle', () => {
     }
 
     privateClient.rawRequest = async (method, params) => {
-      expect(method).toBe('runtime.reload')
-      expect(params).toEqual({ reasoning_effort: 'high' })
+      expect(method).toBe('set_reasoning')
+      expect(params).toEqual({ reasoning_effort: 'high', session_key: 'test:reasoning' })
       return { ok: true, reasoning_effort: 'high' }
     }
 

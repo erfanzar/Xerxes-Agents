@@ -2053,6 +2053,25 @@ export class DaemonServer {
         sessionKey(connection, params),
       );
     }
+    if (method === "set_model") {
+      const model = optionalString(params.model);
+      if (!model) {
+        return { ok: false, error: "model id is required" };
+      }
+      return this.setModel(connection, model, sessionKey(connection, params));
+    }
+    if (method === "set_reasoning") {
+      const effort = optionalString(params.reasoning_effort)
+        ?? optionalString(params.effort);
+      if (!effort) {
+        return { ok: false, error: "reasoning effort is required" };
+      }
+      return this.setReasoning(
+        connection,
+        effort,
+        sessionKey(connection, params),
+      );
+    }
     if (method === "permission_response") {
       return this.permissionResponse(connection, params);
     }
@@ -2086,12 +2105,14 @@ export class DaemonServer {
       return this.contextBreakdown(connection, params);
     }
     if (method === "reasoning_levels") {
-      const set = await this.reasoningLevels();
+      // Resolve the ladder against the requested session's model. The daemon
+      // default can differ after another tab/provider changes configuration.
+      const activeSession = this.runtime.sessionStatus(sessionKey(connection, params));
+      const set = await this.reasoningLevels(activeSession?.model);
       const selectable = selectableEfforts(set);
       // Session-first, like configureReasoning: /thinking pins the effort per
       // session, so reading only the daemon-wide value would report an effort
       // this session is not running at (the picker looked "stuck on off").
-      const activeSession = this.runtime.sessionStatus(sessionKey(connection, params));
       return {
         ok: true,
         current:
@@ -2679,8 +2700,12 @@ export class DaemonServer {
       initPayload(
         session,
         model,
-        stringValue(this.runtime.status().reasoning_effort) || "off",
-        runtimePermissionMode(this.runtime.status().permission_mode),
+        session.reasoningEffort
+          || stringValue(this.runtime.status().reasoning_effort)
+          || "off",
+        runtimePermissionMode(
+          session.permissionMode || this.runtime.status().permission_mode,
+        ),
         this.contextLimit(model),
       ),
     );
@@ -3864,7 +3889,7 @@ export class DaemonServer {
       active?.reasoningEffort
       || stringValue(this.runtime.status().reasoning_effort)
       || REASONING_OFF;
-    const levels = await this.reasoningLevels();
+    const levels = await this.reasoningLevels(active?.model);
     const offered = selectableEfforts(levels);
     const requested = raw.trim();
     if (!requested) {
@@ -3964,9 +3989,9 @@ export class DaemonServer {
     };
   }
 
-  private async reasoningLevels(): Promise<ReasoningLevelSet> {
+  private async reasoningLevels(modelOverride?: string): Promise<ReasoningLevelSet> {
     const status = this.runtime.status();
-    const model = stringValue(status.model) ?? "";
+    const model = modelOverride?.trim() || stringValue(status.model) || "";
     const profile = this.profileStore.active();
     const providerName = resolveProviderSafely(model, profile);
     // The generated Pi catalog knows each model's real ladder
@@ -6875,6 +6900,75 @@ export class DaemonServer {
     };
   }
 
+  /** Pin a picker-selected model to the session named by the RPC. */
+  private async setModel(
+    connection: DaemonTransportConnection,
+    model: string,
+    targetSessionKey = connection.activeSessionKey,
+  ): Promise<JsonRpcPayload> {
+    if (this.runtime.setSessionModel === undefined) {
+      return { ok: false, error: "this runtime does not support session model selection" };
+    }
+    const session = await this.runtime.setSessionModel(targetSessionKey, model);
+    if (!session) {
+      return { ok: false, error: "no active session" };
+    }
+    // Keep the selected profile's default aligned for sessions opened later;
+    // existing sessions retain their own pins.
+    try {
+      this.profileStore?.updateActiveModel(session.model);
+    } catch {
+      // Profile persistence is best-effort; the session pin already applies.
+    }
+    if (targetSessionKey === connection.activeSessionKey) {
+      await this.emitProviderInit(connection);
+    }
+    this.emitStatus(connection, session);
+    return { ok: true, model: session.model };
+  }
+
+  /** Pin a validated reasoning effort to the session named by the RPC. */
+  private async setReasoning(
+    connection: DaemonTransportConnection,
+    requested: string,
+    targetSessionKey = connection.activeSessionKey,
+  ): Promise<JsonRpcPayload> {
+    const active = this.runtime.sessionStatus(targetSessionKey);
+    if (!active) {
+      return { ok: false, error: "no active session" };
+    }
+    const levels = await this.reasoningLevels(active.model);
+    const offered = selectableEfforts(levels);
+    const resolved = resolveEffort(levels, requested)
+      ?? clampEffort(levels, requested);
+    if (!resolved) {
+      return {
+        ok: false,
+        error: `Thinking level must be one of: ${offered.join(", ")}.`,
+        levels: offered,
+      };
+    }
+    if (this.runtime.setSessionReasoning === undefined) {
+      return { ok: false, error: "this runtime does not support session reasoning selection" };
+    }
+    const session = await this.runtime.setSessionReasoning(
+      targetSessionKey,
+      resolved,
+    );
+    if (!session) {
+      return { ok: false, error: "no active session" };
+    }
+    const profile = this.profileStore.active();
+    if (profile) {
+      this.profileStore.updateSampling(profile.name, {
+        reasoning_effort: resolved,
+        thinking: resolved !== REASONING_OFF,
+      });
+    }
+    this.emitStatus(connection, session);
+    return { ok: true, reasoning_effort: resolved, levels: offered };
+  }
+
   /**
    * /ultra handler. Guards on the optional DaemonRuntime.setSessionUltra so
    * runtimes without ultra support receive a typed error instead of a crash,
@@ -8064,6 +8158,9 @@ function sessionPayload(
     mode: session.interactionMode,
     plan_mode: session.planMode,
     model: session.model,
+    ...(session.reasoningEffort
+      ? { reasoning_effort: session.reasoningEffort }
+      : {}),
     messages: session.messages.length,
     message_count: session.messages.length,
     transcript: transcript.messages,

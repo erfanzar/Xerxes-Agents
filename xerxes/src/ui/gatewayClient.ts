@@ -1144,12 +1144,25 @@ export class GatewayClient extends EventEmitter {
         await this.nativeSuccess('provider_select', { name: providerProfile })
       }
 
-      await this.nativeSuccess('runtime.reload', { model })
-      return { value: model }
+      // Pin the model on the session itself. A daemon-wide runtime.reload only
+      // changes the default for unpinned sessions; the picker then claimed the
+      // new model while the next status update (often triggered by /reasoning)
+      // restored the session's old model and sent it to the newly selected
+      // provider.
+      const raw = await this.nativeSuccess('set_model', {
+        model,
+        session_key: this.keyFor(params.session_id)
+      })
+      return { value: String(raw.model ?? model) }
     }
     if (key === 'reasoning') {
-      const raw = (await this.rawRequest('runtime.reload', { reasoning_effort: value })) as RpcObject
-      const effort = String(raw?.reasoning_effort ?? value)
+      // Reasoning is session-scoped for the same reason as model selection:
+      // changing one tab must not silently retarget every other live chat.
+      const raw = await this.nativeSuccess('set_reasoning', {
+        reasoning_effort: value,
+        session_key: this.keyFor(params.session_id)
+      })
+      const effort = String(raw.reasoning_effort ?? value)
       return {
         info: { reasoning_effort: effort },
         value: effort

@@ -517,6 +517,76 @@ test("a provider switch from a second client keeps the first session's context l
   }
 });
 
+test("session model remains selected after a session reasoning change", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-session-config-"));
+  const socketPath = join(directory, "daemon.sock");
+  const profileStore = new ProfileStore(join(directory, "profiles.json"));
+  profileStore.save({
+    apiKey: "test-key",
+    baseUrl: "https://api.openai.com/v1",
+    model: "k3-256k",
+    name: "openai-test",
+    provider: "openai",
+  });
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: directory,
+    runtimeSettings: { model: "k3-256k", provider: "openai" },
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const server = new DaemonServer({ profileStore, runtime, socketPath });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "configured-session" },
+    });
+    await client.next((frame) => frame.id === 1);
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "set_model",
+      params: { model: "gpt-5.6-luna", session_key: "configured-session" },
+    });
+    expect((await client.next((frame) => frame.id === 2)).result).toMatchObject({
+      ok: true,
+      model: "gpt-5.6-luna",
+    });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "set_reasoning",
+      params: { reasoning_effort: "max", session_key: "configured-session" },
+    });
+    expect((await client.next((frame) => frame.id === 3)).result).toMatchObject({
+      ok: true,
+      reasoning_effort: "max",
+    });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "session.status",
+      params: { session_key: "configured-session" },
+    });
+    expect((await client.next((frame) => frame.id === 4)).result?.session).toMatchObject({
+      model: "gpt-5.6-luna",
+      reasoning_effort: "max",
+    });
+    // The picker changed this session, not the runtime default inherited by
+    // unrelated live chats.
+    expect(runtime.status().model).toBe("k3-256k");
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("daemon context limits layer live metadata over the Pi model catalog", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-context-limit-"));
   const socketPath = join(directory, "daemon.sock");
