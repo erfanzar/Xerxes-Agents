@@ -137,6 +137,34 @@ function commandPreview(parsed: Record<string, unknown>): string {
   return compact([...command, ...args].join(' '))
 }
 
+/**
+ * Parse the roster back out of a SpawnAgents summary line ("8 agents: a, b, +2
+ * more"). The transcript row is a rendered string by the time ToolStep sees
+ * it; this recovers the displayable names and the overflow count for the live
+ * status roster beneath the row.
+ */
+export function spawnRosterFromSummary(args: string): { extra: number; names: string[] } | null {
+  const match = args.match(/^(\d+) agents?: (.+)$/u)
+  if (!match) return null
+  const extraMatch = match[2]!.match(/, \+(\d+) more$/u)
+  const extra = extraMatch ? Number(extraMatch[1]) : 0
+  const body = extraMatch ? match[2]!.slice(0, -extraMatch[0].length) : match[2]!
+  const names = body.split(',').map(name => name.trim()).filter(Boolean)
+  return names.length || extra ? { extra, names } : null
+}
+
+/**
+ * Recover the roster from a whole Spawn Agents transcript line, quoted-context
+ * and all: `Spawn Agents("3 agents: a, b, +1 more") ✓`. The generic trail
+ * parser splits legacy ': ' inside the quoted context, so spawn rows need
+ * their own extraction. Matches in-flight lines (no ✓/✗) too.
+ */
+export function spawnRosterFromLine(line: string): { extra: number; names: string[] } | null {
+  const body = line.replace(/ [✓✗]$/u, '')
+  const match = body.match(/^Spawn Agents\("(\d+ agents?: .*)"\)/u)
+  return match ? spawnRosterFromSummary(match[1]!) : null
+}
+
 function summarizeSpawnAgents(context: string, verboseArgs?: string): ToolStartDisplay {
   const raw = verboseArgs || context
   const parsed = parseObject(raw)

@@ -93,6 +93,21 @@ export const livenessGlyph = (phase: LivenessPhase, intensity: number): string =
   return PULSE_FRAMES[Math.min(PULSE_FRAMES.length - 1, index)]!
 }
 
+// Cyan → purple → cyan sweep for the live indicator (UI polish request): a
+// cosine loop so the hue eases at both ends instead of snapping.
+const PULSE_CYAN = { b: 0xee, g: 0xd3, r: 0x22 } as const
+const PULSE_PURPLE = { b: 0xfa, g: 0x8b, r: 0xa7 } as const
+const PULSE_COLOR_PERIOD_MS = 2_400
+
+/** The working glyph's color at this moment; stalled turns never call this. */
+export const pulsingAccentColor = (elapsedMs: number): string => {
+  const phase = ((elapsedMs % PULSE_COLOR_PERIOD_MS) + PULSE_COLOR_PERIOD_MS) % PULSE_COLOR_PERIOD_MS
+  const t = (1 - Math.cos((2 * Math.PI * phase) / PULSE_COLOR_PERIOD_MS)) / 2
+  const channel = (from: number, to: number) => Math.round(from + (to - from) * t)
+  const hex = (value: number) => value.toString(16).padStart(2, '0')
+  return `#${hex(channel(PULSE_CYAN.r, PULSE_PURPLE.r))}${hex(channel(PULSE_CYAN.g, PULSE_PURPLE.g))}${hex(channel(PULSE_CYAN.b, PULSE_PURPLE.b))}`
+}
+
 /** Rough assistant-side token volume for the turn so far. */
 export const livenessTokens = (turn: { reasoningTokens: number; streaming: string; toolTokens: number }): number =>
   turn.reasoningTokens + turn.toolTokens + estimateTokensRough(turn.streaming)

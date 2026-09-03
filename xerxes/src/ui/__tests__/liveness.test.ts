@@ -13,6 +13,7 @@ import {
 import { patchUiState, resetUiState } from '../app/uiStore.js'
 import {
   describeLiveness,
+  pulsingAccentColor,
   LIVENESS_PULSE_MS,
   LIVENESS_STALL_MS,
   LIVENESS_TOKENS_AFTER_MS,
@@ -253,5 +254,15 @@ describe('coarse liveness gate', () => {
 
     expect(notifications).toBe(1)
     unlisten()
+  })
+})
+
+describe('pulsingAccentColor', () => {
+  it('sweeps cyan → purple → cyan over one period', () => {
+    expect(pulsingAccentColor(0)).toBe('#22d3ee')
+    expect(pulsingAccentColor(1_200)).toBe('#a78bfa')
+    expect(pulsingAccentColor(2_400)).toBe('#22d3ee')
+    // Continuous past the wrap, no snap.
+    expect(pulsingAccentColor(2_401)).toBe(pulsingAccentColor(1))
   })
 })

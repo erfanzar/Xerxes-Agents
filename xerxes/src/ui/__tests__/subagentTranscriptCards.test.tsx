@@ -54,6 +54,69 @@ const tester: SubagentProgress = {
   toolCount: 9
 }
 
+describe('spawn fleet roster', () => {
+  afterEach(() => {
+    resetUiState()
+  })
+
+  it('paints one status row per spawned agent beneath the Spawn Agents tool row', async () => {
+    const done: SubagentProgress = { ...base, goal: '', id: 'a1', name: 'alpha', status: 'completed' }
+    const dead: SubagentProgress = { ...base, goal: '', id: 'a2', name: 'beta', status: 'failed' }
+    const setup = await testRender(
+      <box flexDirection="column">
+        <MessageLine
+          msg={{
+            kind: 'trail',
+            role: 'system',
+            subagents: [done, dead],
+            text: '',
+            tools: ['Spawn Agents("3 agents: alpha, beta, gamma") ✓'],
+          }}
+          t={theme}
+        />
+      </box>,
+      { height: 20, width: 80 }
+    )
+
+    try {
+      await setup.flush()
+      const frame = setup.captureCharFrame()
+      // Archived verdicts survive turn end: done green cube, failed red cube,
+      // and the agent that never reported keeps its hollow queued marker.
+      expect(frame).toContain('⬢ alpha')
+      expect(frame).toContain('completed')
+      expect(frame).toContain('⬢ beta')
+      expect(frame).toContain('failed')
+      expect(frame).toContain('◇ gamma')
+      expect(frame).toContain('queued')
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
+
+  it('keeps other tool rows roster-free', async () => {
+    const setup = await testRender(
+      <box flexDirection="column">
+        <MessageLine
+          msg={{ kind: 'trail', role: 'system', text: '', tools: ['Bash("bun test") ✓'] }}
+          t={theme}
+        />
+      </box>,
+      { height: 8, width: 60 }
+    )
+
+    try {
+      await setup.flush()
+      const frame = setup.captureCharFrame()
+      expect(frame).toContain('Bash')
+      expect(frame).not.toContain('⬢')
+      expect(frame).not.toContain('◇')
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
+})
+
 describe('subagent card model', () => {
   it('keeps each card at three lines or fewer', () => {
     expect(subagentCardRowCount(researcher)).toBe(3)

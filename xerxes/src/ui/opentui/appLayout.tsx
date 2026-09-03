@@ -53,7 +53,7 @@ import {
 } from '../domain/providerPrompt.js'
 import { sessionDisplayTitle, sessionTelemetryLine, usageCounts, writePolicyLabel } from '../domain/statusFormat.js'
 import { formatBytes } from '../lib/imageAttachment.js'
-import { describeLiveness, type LivenessPhase, livenessGlyph, livenessTokens, livenessVerb } from '../lib/liveness.js'
+import { describeLiveness, type LivenessPhase, livenessGlyph, livenessTokens, livenessVerb, pulsingAccentColor } from '../lib/liveness.js'
 import { unarchivedToolLines } from '../lib/liveProgress.js'
 import { compactProgressRows, type CompactProgressRow } from '../lib/progressRows.js'
 import { getActiveSkin } from '../lib/skinEngine.js'

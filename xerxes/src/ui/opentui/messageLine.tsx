@@ -8,7 +8,7 @@
 // when it carries information the one-line result cannot safely summarize.
 import { computed } from 'nanostores'
 import { useStore } from '@nanostores/react'
-import { memo, type ReactNode, useRef } from 'react'
+import { memo, type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 
 import {
   $thinkingVisibility,
@@ -17,11 +17,13 @@ import {
 } from '../app/thinkingVisibilityStore.js'
 import { $toolRunVisibility, toggleToolRun, toolRunExpanded } from '../app/toolRunStore.js'
 import { $uiDetailVisibility, $uiState } from '../app/uiStore.js'
+import { useTurnSelector } from '../app/turnStore.js'
 import { sectionMode } from '../domain/details.js'
 import { GLYPH, leaderRun } from '../domain/nocturne.js'
 import { VOICE } from '../domain/roles.js'
 import { contentColumnWidth } from '../domain/startupLayout.js'
 import { messageHasVisibleDetails, trailHasRenderableContent } from '../lib/liveProgress.js'
+import { spawnRosterFromLine } from '../lib/toolStartDisplay.js'
 import { subagentCardAccent, subagentCardModel } from '../lib/subagentCards.js'
 import { fmtDuration } from '../lib/subagentElapsed.js'
 import { groupToolRun, type ToolRunGroup } from '../lib/toolRun.js'
@@ -369,20 +371,137 @@ export function isQuietToolName(name: string): boolean {
   return verb !== undefined && QUIET_TOOL_VERBS.has(verb)
 }
 
-function ToolStep({ cols, line, t }: { cols?: number; line: string; t: Theme }) {
+
+/** Rolling-cube frames: four quarter-block rotations read as a cube in motion. */
+const FLEET_CUBE_FRAMES = ['◰', '◳', '◲', '◱'] as const
+const FLEET_CUBE_TICK_MS = 140
+
+type FleetRowState = 'done' | 'failed' | 'missing' | 'working'
+
+const fleetRowState = (entry: SubagentProgress | undefined): FleetRowState => {
+  if (!entry) return 'missing'
+  if (entry.status === 'completed') return 'done'
+  if (entry.status === 'error' || entry.status === 'failed' || entry.status === 'interrupted' || entry.status === 'timeout') return 'failed'
+  return 'working'
+}
+
+/**
+ * Live per-agent status roster under a Spawn Agents transcript row (DSH-style
+ * fleet visibility): a rolling cyan cube while the agent works, a still green
+ * cube when it completes, red when it fails or dies. Agents that never showed
+ * up in the fleet keep a hollow muted cube so the row still names them.
+ */
+function SpawnFleetRoster({
+  archived,
+  names,
+  t
+}: {
+  archived: readonly SubagentProgress[]
+  names: readonly string[]
+  t: Theme
+}) {
+  const live = useTurnSelector(state => state.subagents)
+  const fleet = useMemo(() => {
+    const byName = new Map<string, SubagentProgress>()
+    for (const agent of archived) {
+      const key = agent.name ?? agent.title ?? ''
+      if (key) byName.set(key, agent)
+    }
+    // Live entries win: their status is fresher than any archived snapshot.
+    for (const agent of live) {
+      const key = agent.name ?? agent.title ?? ''
+      if (key) byName.set(key, agent)
+    }
+    return [...byName.values()]
+  }, [archived, live])
+  const [frame, setFrame] = useState(0)
+  const anyWorking = names.some(name => {
+    const entry = fleet.find(agent => agent.name === name || agent.title === name)
+    return fleetRowState(entry) === 'working'
+  })
+
+  useEffect(() => {
+    if (!anyWorking) return
+    const timer = setInterval(() => setFrame(value => value + 1), FLEET_CUBE_TICK_MS)
+    timer.unref?.()
+    return () => clearInterval(timer)
+  }, [anyWorking])
+
+  return (
+    <Box flexDirection="column" flexShrink={0}>
+      {names.map(name => {
+        const entry = fleet.find(agent => agent.name === name || agent.title === name)
+        const state = fleetRowState(entry)
+        const glyph =
+          state === 'working'
+            ? FLEET_CUBE_FRAMES[frame % FLEET_CUBE_FRAMES.length]
+            : state === 'missing'
+              ? '◇'
+              : '⬢'
+        const color =
+          state === 'working'
+            ? '#22d3ee'
+            : state === 'done'
+              ? t.color.ok
+              : state === 'failed'
+                ? t.color.error
+                : t.color.muted
+        const status = entry ? entry.status : 'queued'
+        const seconds = entry?.durationSeconds
+        const tokens = entry && entry.inputTokens !== undefined
+          ? fmtK(entry.inputTokens + (entry.outputTokens ?? 0))
+          : ''
+        const detail = [status, seconds ? fmtDuration(seconds) : '', tokens ? `${tokens} tok` : '']
+          .filter(Boolean)
+          .join(' · ')
+        return (
+          <Text key={name} wrap="truncate-end">
+            <Span color={color}>{`  ${glyph} `}</Span>
+            <Span bold color={t.ds.title}>{name}</Span>
+            {detail ? <Span color={t.color.muted}>{`  ${detail}`}</Span> : null}
+          </Text>
+        )
+      })}
+    </Box>
+  )
+}
+
+function ToolStep({
+  archived,
+  cols,
+  line,
+  t
+}: {
+  archived?: readonly SubagentProgress[]
+  cols?: number
+  line: string
+  t: Theme
+}) {
   const parsed = parseToolTrailResultLine(line)
 
   const voice = VOICE.tool(t)
+
+  const roster = spawnRosterFromLine(line)
 
   if (!parsed) {
     // In-flight / transient call line ("drafting …", a bare tool name). No
     // mark and a muted glyph, so "still running" reads differently from a
     // settled row at a glance.
     return (
-      <Text color={voice.body} wrap="truncate-end">
-        <Span color={t.color.muted}>{voice.glyph} </Span>
-        {line}
-      </Text>
+      <Box flexDirection="column" flexShrink={0}>
+        <Text color={voice.body} wrap="truncate-end">
+          <Span color={t.color.muted}>{voice.glyph} </Span>
+          {line}
+        </Text>
+        {roster ? (
+          <>
+            <SpawnFleetRoster archived={archived ?? []} names={roster.names} t={t} />
+            {roster.extra > 0 ? (
+              <Text color={t.color.muted} wrap="truncate-end">{`    … +${roster.extra} more in the agents panel (F6)`}</Text>
+            ) : null}
+          </>
+        ) : null}
+      </Box>
     )
   }
 
@@ -440,6 +559,14 @@ function ToolStep({ cols, line, t }: { cols?: number; line: string; t: Theme }) 
           {d || ' '}
         </Text>
       ))}
+      {roster ? (
+        <>
+          <SpawnFleetRoster archived={archived ?? []} names={roster.names} t={t} />
+          {roster.extra > 0 ? (
+            <Text color={t.color.muted} wrap="truncate-end">{`    … +${roster.extra} more in the agents panel (F6)`}</Text>
+          ) : null}
+        </>
+      ) : null}
       {detail.lines.length > 0 && detail.overflow > 0 ? (
         <Text color={t.color.muted} dimColor>
           {'  '}… +{detail.overflow} more line{detail.overflow === 1 ? '' : 's'}
@@ -701,7 +828,7 @@ function ToolTrail({
       {visibility.tools
         ? groupToolRun(tools).map((group, i) =>
             group.kind === 'row' ? (
-              <ToolStep cols={cols} key={i} line={group.line} t={t} />
+              <ToolStep archived={msg.subagents} cols={cols} key={i} line={group.line} t={t} />
             ) : (
               <ToolRun cols={cols} group={group} key={i} runId={`${thinkingRowId(msg, msgKey)}:run${i}`} t={t} />
             )
