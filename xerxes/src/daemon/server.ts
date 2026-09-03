@@ -20,6 +20,7 @@ import {
 import { persistedSubagentSnapshotValues } from "../agents/subagentPersistence.js";
 import { AgentPresetRoster, type AgentPresetEntry } from "../agents/presets.js";
 import { CodexSession, fetchCodexModelCatalog } from "../auth/codexAuth.js";
+import { collectSubscriptionUsage, formatUsageReport } from "../auth/usage.js";
 import { CopilotSession, fetchCopilotModels } from "../auth/copilotAuth.js";
 import {
   fallbackReasoningLevels,
@@ -433,7 +434,7 @@ const DAEMON_DESCRIPTION_OVERRIDES: Readonly<Record<string, string>> =
     sampling: "Show or set next-turn native sampling options",
     title: "Show or set the session title",
     tools: "Show native tool count",
-    usage: "Show session token usage",
+    usage: "Show session and subscription usage",
   });
 
 /** These controls are daemon protocol extensions rather than registry commands. */
@@ -3576,19 +3577,34 @@ export class DaemonServer {
       case "personality":
         return this.showPersonality(connection, session);
       case "context":
-      case "usage":
+      case "usage": {
         if (!session) {
           this.emitSlash(connection, "No active session yet.", "warning");
           return { ok: false, error: "no active session" };
         }
-        this.emitSlash(
-          connection,
-          formatSessionUsage(
-            session,
-            this.contextLimit(session.model),
-          ),
+        const section = formatSessionUsage(
+          session,
+          this.contextLimit(session.model),
         );
+        // Subscription quota joins the session block only when a provider
+        // answers; a fetch failure or missing login must never hide the
+        // local usage the command already had.
+        let subscriptionSection = "";
+        try {
+          const collection = await collectSubscriptionUsage();
+          if (collection.reports.length) {
+            subscriptionSection = [
+              "",
+              "Subscription usage:",
+              ...collection.reports.map((report) => `  ${formatUsageReport(report)}`),
+            ].join("\n");
+          }
+        } catch {
+          // Keep the session report usable when the network is unavailable.
+        }
+        this.emitSlash(connection, `${section}${subscriptionSection}`);
         return { ok: true };
+      }
       case "history":
         if (!session) {
           this.emitSlash(connection, "No active session yet.", "warning");

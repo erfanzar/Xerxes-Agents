@@ -1584,6 +1584,59 @@ test("daemon history reports active session counters over the socket", async () 
   }
 });
 
+test("daemon /usage keeps the session report when subscription quota is unavailable", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-usage-slash-"));
+  const socketPath = join(directory, "daemon.sock");
+  const server = new DaemonServer({
+    socketPath,
+    projectDirectory: directory,
+    runtime: new InMemoryDaemonRuntime(undefined, {
+      currentProjectDirectory: directory,
+      model: "protocol-model",
+      sessionDirectory: join(directory, "sessions"),
+    }),
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  // Point every subscription endpoint at an unroutable address so the test
+  // never depends on the network or on stored credentials.
+  const previousEnvironment = { ...process.env };
+  process.env.XERXES_CLAUDE_USAGE_URL = "http://127.0.0.1:1/unreachable";
+  process.env.XERXES_CODEX_USAGE_URL = "http://127.0.0.1:1/unreachable";
+  process.env.XERXES_KIMI_USAGE_URL = "http://127.0.0.1:1/unreachable";
+  process.env.XERXES_ZAI_USAGE_URL = "http://127.0.0.1:1/unreachable";
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "usage-slash", project_dir: directory },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "slash",
+      params: { command: "/usage" },
+    });
+    expect((await client.next((frame) => frame.id === 2)).result).toMatchObject({ ok: true });
+    const notification = (await client.next(eventFrame("notification"))).params?.payload as
+      | Record<string, unknown>
+      | undefined;
+    expect(notification?.category).toBe("slash");
+    expect(String(notification?.body)).toContain("Model: protocol-model");
+    expect(String(notification?.body)).toContain("Input tokens:");
+  } finally {
+    process.env = previousEnvironment;
+    await client.close();
+    await server.stop();
+    await rm(directory, { force: true, recursive: true });
+  }
+});
+
 test("daemon usage marks imported counters unknown instead of fabricating cumulative API calls", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-imported-usage-"));
   const socketPath = join(directory, "daemon.sock");

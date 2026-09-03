@@ -125,7 +125,7 @@ export const COMMAND_REGISTRY: readonly CommandDefinition[] = Object.freeze([
   command('help', 'Show help', 'info', { aliases: ['?'] }),
   command('commands', 'List every available command', 'info'),
   command('restart', 'Restart the agent process', 'info'),
-  command('usage', 'Show token & cost usage', 'info'),
+  command('usage', 'Show token, cost & subscription usage', 'info'),
   command('insights', 'Show usage analytics', 'info', { argsHint: '[--days N]' }),
   command('platforms', 'List configured messaging platforms', 'info'),
   command('paste', 'Paste from clipboard', 'info', { cliOnly: true }),
