@@ -3367,7 +3367,23 @@ export class DaemonServer {
   }
 
   private contextLimit(model: string): number {
-    const profileName = this.activeRuntimeProfileName();
+    const activeName = this.activeRuntimeProfileName();
+    const direct = this.contextLimitForProfile(activeName, model);
+    if (direct > 0) return direct;
+    // Cross-profile fallback: one attached client switching the daemon-wide
+    // provider must not blind the sessions still running on another profile.
+    // Their model keeps resolving against the profile that actually serves it;
+    // without this the status bar reported "ctx unknown" for every session
+    // left behind by a provider_select from a second TUI.
+    for (const profile of this.profileStore.list()) {
+      if (profile.name === activeName) continue;
+      const candidate = this.contextLimitForProfile(profile.name, model);
+      if (candidate > 0) return candidate;
+    }
+    return 0;
+  }
+
+  private contextLimitForProfile(profileName: string | null, model: string): number {
     const profile = profileName ? this.profileStore.get(profileName) : undefined;
     const resolved = resolvedProfileModelCapabilities(profile, model);
     if (resolved.contextSource === "override") return resolved.contextLimit ?? 0;
@@ -3378,9 +3394,18 @@ export class DaemonServer {
   }
 
   private maxOutputTokens(model: string): number | undefined {
-    const profileName = this.activeRuntimeProfileName();
-    const profile = profileName ? this.profileStore.get(profileName) : undefined;
-    return resolvedProfileMaxOutputTokens(profile, model);
+    const activeName = this.activeRuntimeProfileName();
+    const direct = resolvedProfileMaxOutputTokens(
+      activeName ? this.profileStore.get(activeName) : undefined,
+      model,
+    );
+    if (direct !== undefined) return direct;
+    for (const profile of this.profileStore.list()) {
+      if (profile.name === activeName) continue;
+      const candidate = resolvedProfileMaxOutputTokens(profile, model);
+      if (candidate !== undefined) return candidate;
+    }
+    return undefined;
   }
 
   /**

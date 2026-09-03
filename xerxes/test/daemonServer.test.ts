@@ -438,6 +438,85 @@ test("unconfigured daemon status is neutral and turn submission rejects model in
   }
 });
 
+test("a provider switch from a second client keeps the first session's context limit", async () => {
+  // Regression: contextLimit resolved the session's model against the
+  // daemon-wide ACTIVE profile only. A second TUI running provider_select
+  // flipped the active profile, and every session still on the old provider
+  // reported context_limit 0 — the TUI's "ctx unknown".
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-cross-profile-"));
+  const socketPath = join(directory, "daemon.sock");
+  const profileStore = new ProfileStore(join(directory, "profiles.json"));
+  profileStore.save({
+    apiKey: "",
+    baseUrl: "https://api.kimi.com/coding/v1",
+    model: "k3",
+    name: "kimi-code",
+    provider: "kimi-code",
+  });
+  profileStore.save({
+    apiKey: "",
+    baseUrl: "https://api.other.example/v1",
+    model: "m2",
+    name: "other-provider",
+    provider: "other-provider",
+  });
+  // Only profile A knows k3's window; profile B never heard of it.
+  profileStore.updateModelCapabilities("kimi-code", "k3", { contextLimit: 262_144 });
+  profileStore.updateModelCapabilities("other-provider", "m2", { contextLimit: 100_000 });
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: directory,
+    runtimeSettings: {
+      base_url: "https://api.kimi.com/coding/v1",
+      model: "k3",
+      provider: "kimi-code",
+    },
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const server = new DaemonServer({ profileStore, runtime, socketPath });
+  await server.start();
+  const first = await SocketTestClient.connect(socketPath);
+  const second = await SocketTestClient.connect(socketPath);
+  try {
+    first.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "stays-on-kimi" },
+    });
+    await first.next((frame) => frame.id === 1);
+    // Pin session 1 to k3 explicitly, the way the user's /model pick does.
+    first.send({ jsonrpc: "2.0", id: 2, method: "slash", params: { command: "/model k3" } });
+    await first.next((frame) => frame.id === 2);
+
+    second.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "switching-client" },
+    });
+    await second.next((frame) => frame.id === 1);
+    second.send({ jsonrpc: "2.0", id: 2, method: "provider_select", params: { name: "other-provider" } });
+    expect((await second.next((frame) => frame.id === 2)).result).toMatchObject({ ok: true });
+
+    first.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "session.status",
+      params: { session_key: "stays-on-kimi" },
+    });
+    const status = (await first.next((frame) => frame.id === 3)).result?.session as
+      | { context_limit?: number; model?: string }
+      | undefined;
+    expect(status).toMatchObject({ model: "k3" });
+    expect(status?.context_limit).toBe(262_144);
+  } finally {
+    first.close();
+    second.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("daemon context limits layer live metadata over the Pi model catalog", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-context-limit-"));
   const socketPath = join(directory, "daemon.sock");
