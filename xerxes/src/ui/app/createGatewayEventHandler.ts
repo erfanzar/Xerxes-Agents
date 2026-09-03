@@ -968,7 +968,8 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
       case 'subagent.tool': {
         const name = ev.payload.tool_name ?? 'delegate_task'
         const preview = ev.payload.tool_preview ?? ev.payload.text ?? ''
-        const line = formatToolCall(name, preview)
+        const display = summarizeToolStartDisplay(name, '', preview)
+        const line = formatToolCall(name, display.context)
         const startedAt = Date.now()
 
         const patch: SubagentProgressPatch = c => ({

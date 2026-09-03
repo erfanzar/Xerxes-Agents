@@ -26,7 +26,7 @@ import { contentColumnWidth } from '../domain/startupLayout.js'
 import { messageHasVisibleDetails, trailHasRenderableContent } from '../lib/liveProgress.js'
 import { spawnRosterFromLine } from '../lib/toolStartDisplay.js'
 import { subagentCardAccent, subagentCardModel } from '../lib/subagentCards.js'
-import { fmtDuration } from '../lib/subagentElapsed.js'
+import { fmtDuration, subagentElapsedSeconds } from '../lib/subagentElapsed.js'
 import { groupToolRun, toolRunSpawnRoster, type ToolRunGroup } from '../lib/toolRun.js'
 import { estimateTokensRough, fmtK, parseToolTrailResultLine, toolTrailParts } from '../lib/text.js'
 import { splitStreamingRender, STREAMING_CHUNKS_EMPTY, type StreamingChunks } from '../lib/streamingMarkdown.js'
@@ -373,9 +373,13 @@ export function isQuietToolName(name: string): boolean {
 }
 
 
-/** Rolling-cube frames: four quarter-block rotations read as a cube in motion. */
-const FLEET_CUBE_FRAMES = ['◰', '◳', '◲', '◱'] as const
-const FLEET_CUBE_TICK_MS = 140
+/**
+ * Braille's dot matrix is the closest one-cell terminal analogue to DSH's
+ * animated 3×3 agent cube. Rotating the filled edge reads as motion without
+ * changing row width or making the agent name jump.
+ */
+const FLEET_CUBE_FRAMES = ['⡿', '⣿', '⢿', '⣻', '⣽', '⣾', '⣷', '⣯'] as const
+const FLEET_CUBE_TICK_MS = 120
 
 type FleetRowState = 'done' | 'failed' | 'missing' | 'working'
 
@@ -386,11 +390,30 @@ const fleetRowState = (entry: SubagentProgress | undefined): FleetRowState => {
   return 'working'
 }
 
+const cleanFleetActivity = (value: string | undefined): string =>
+  value?.replace(/\s+/g, ' ').trim() ?? ''
+
+/** The freshest human-readable answer to “what is this agent doing?” */
+function fleetActivity(entry: SubagentProgress | undefined, state: FleetRowState): string {
+  if (!entry) return 'queued'
+  const live = cleanFleetActivity(entry.notes.at(-1))
+    || cleanFleetActivity(entry.tools.at(-1))
+    || cleanFleetActivity(entry.thinking.at(-1))
+  const summary = cleanFleetActivity(entry.summary)
+  if (state === 'working') {
+    return live || summary || (entry.status === 'queued' ? 'waiting to start' : 'working')
+  }
+  const status = state === 'done' ? 'completed' : entry.status
+  const result = summary || live
+  return result ? `${status} — ${result}` : status
+}
+
 /**
  * Live per-agent status roster under a Spawn Agents transcript row (DSH-style
  * fleet visibility): a rolling cyan cube while the agent works, a still green
- * cube when it completes, red when it fails or dies. Agents that never showed
- * up in the fleet keep a hollow muted cube so the row still names them.
+ * cube when it completes, red when it fails or dies. Each row pairs the stable
+ * agent name with its latest activity and elapsed time; missing agents retain a
+ * muted dot-matrix cube so the requested roster never disappears.
  */
 function SpawnFleetRoster({
   archived,
@@ -438,33 +461,31 @@ function SpawnFleetRoster({
         const entry = resolve(name)
         const label = entry?.name?.trim() || entry?.title?.trim() || name
         const state = fleetRowState(entry)
-        const glyph =
-          state === 'working'
-            ? FLEET_CUBE_FRAMES[frame % FLEET_CUBE_FRAMES.length]
-            : state === 'missing'
-              ? '◇'
-              : '⬢'
+        const glyph = state === 'working'
+          ? FLEET_CUBE_FRAMES[frame % FLEET_CUBE_FRAMES.length]
+          : state === 'missing'
+            ? '⠿'
+            : '⣿'
         const color =
           state === 'working'
-            ? '#22d3ee'
+            ? '#6487ff'
             : state === 'done'
               ? t.color.ok
               : state === 'failed'
                 ? t.color.error
                 : t.color.muted
-        const status = entry ? entry.status : 'queued'
-        const seconds = entry?.durationSeconds
+        const elapsed = entry ? subagentElapsedSeconds(entry) : null
         const tokens = entry && entry.inputTokens !== undefined
           ? fmtK(entry.inputTokens + (entry.outputTokens ?? 0))
           : ''
-        const detail = [status, seconds ? fmtDuration(seconds) : '', tokens ? `${tokens} tok` : '']
-          .filter(Boolean)
-          .join(' · ')
+        const timing = elapsed === null ? '' : ` [${fmtDuration(elapsed)}]`
+        const tokenText = tokens ? ` · ${tokens} tok` : ''
+        const activity = fleetActivity(entry, state)
         return (
           <Text key={name} wrap="truncate-end">
             <Span color={color}>{`  ${glyph} `}</Span>
             <Span bold color={t.ds.title}>{label}</Span>
-            {detail ? <Span color={t.color.muted}>{`  ${detail}`}</Span> : null}
+            <Span color={t.color.muted}>{`: ${activity}${timing}${tokenText}`}</Span>
           </Text>
         )
       })}

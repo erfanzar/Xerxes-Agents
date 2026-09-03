@@ -87,13 +87,10 @@ describe('spawn fleet roster', () => {
       await setup.flush()
       const frame = setup.captureCharFrame()
       // Archived verdicts survive turn end: done green cube, failed red cube,
-      // and the agent that never reported keeps its hollow queued marker.
-      expect(frame).toContain('⬢ alpha')
-      expect(frame).toContain('completed')
-      expect(frame).toContain('⬢ beta')
-      expect(frame).toContain('failed')
-      expect(frame).toContain('◇ gamma')
-      expect(frame).toContain('queued')
+      // and the agent that never reported keeps its muted dot-matrix marker.
+      expect(frame).toContain('⣿ alpha: completed')
+      expect(frame).toContain('⣿ beta: failed')
+      expect(frame).toContain('⠿ gamma: queued')
     } finally {
       act(() => setup.renderer.destroy())
     }
@@ -118,9 +115,11 @@ describe('spawn fleet roster', () => {
     }
     const testerAgent: SubagentProgress = {
       ...base,
+      durationSeconds: 20,
       goal: '',
       id: 'tester',
       name: 'test-analyzer',
+      notes: ['running focused tests'],
       status: 'running',
       title: 'Test behavior'
     }
@@ -148,11 +147,20 @@ describe('spawn fleet roster', () => {
       await setup.flush()
       const frame = setup.captureCharFrame()
       expect(frame).toContain('4 tools')
-      expect(frame).toContain('⬢ structure-analyzer')
-      expect(frame).toContain('⬢ security-analyzer')
-      expect(['◰', '◳', '◲', '◱'].some(glyph => frame.includes(`${glyph} test-analyzer`))).toBe(true)
-      expect(frame).toContain('running')
+      expect(frame).toContain('⣿ structure-analyzer: completed')
+      expect(frame).toContain('⣿ security-analyzer: failed')
+      const activeGlyph = frame.match(/([⡿⣿⢿⣻⣽⣾⣷⣯]) test-analyzer/u)?.[1]
+      expect(activeGlyph).toBeTruthy()
+      expect(frame).toContain('test-analyzer: running focused tests [20s]')
       expect(frame).not.toContain('{"agents"')
+
+      await act(async () => {
+        await new Promise(resolve => setTimeout(resolve, 150))
+      })
+      await setup.flush()
+      const nextGlyph = setup.captureCharFrame().match(/([⡿⣿⢿⣻⣽⣾⣷⣯]) test-analyzer/u)?.[1]
+      expect(nextGlyph).toBeTruthy()
+      expect(nextGlyph).not.toBe(activeGlyph)
     } finally {
       act(() => setup.renderer.destroy())
     }

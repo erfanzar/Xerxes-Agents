@@ -253,7 +253,7 @@ describe('createGatewayEventHandler', () => {
 
     handler({ payload: { ...base, status: 'running' }, type: 'subagent.start' } as GatewayEvent)
     handler({
-      payload: { ...base, tool_call_id: 'call-1', tool_name: 'ReadFile', tool_preview: 'src/auth.ts' },
+      payload: { ...base, tool_call_id: 'call-1', tool_name: 'ReadFile', tool_preview: '{"file_path":"src/auth.ts"}' },
       type: 'subagent.tool'
     } as GatewayEvent)
     handler({
@@ -265,7 +265,14 @@ describe('createGatewayEventHandler', () => {
     const [call] = agent?.toolCalls ?? []
 
     expect(agent?.toolCalls).toHaveLength(1)
-    expect(call).toMatchObject({ id: 'call-1', name: 'ReadFile', ok: true, preview: 'src/auth.ts' })
+    expect(call).toMatchObject({
+      id: 'call-1',
+      name: 'ReadFile',
+      ok: true,
+      preview: '{"file_path":"src/auth.ts"}'
+    })
+    expect(agent?.tools.at(-1)).toContain('src/auth.ts')
+    expect(agent?.tools.at(-1)).not.toContain('{"file_path"')
     // The duration is reported by the daemon, so it is used verbatim rather
     // than measured against this client's clock.
     expect((call?.endedAt ?? 0) - (call?.startedAt ?? 0)).toBe(1_250)
