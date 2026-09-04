@@ -101,6 +101,7 @@ export interface OverlayState {
   confirm: ConfirmReq | null
   copyPicker: CopyPickerState | null
   diff: boolean
+  machinePicker: boolean
   modelPicker: boolean
   reasoningPicker: boolean
   pager: null | PagerState

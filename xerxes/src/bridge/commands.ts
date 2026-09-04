@@ -121,6 +121,7 @@ export const COMMAND_REGISTRY: readonly CommandDefinition[] = Object.freeze([
   command('workspace', 'Inspect or initialize project .agents workspace', 'tools', { argsHint: '[status|init]' }),
   command('soul', 'Show or edit SOUL.md', 'tools'),
   command('agents', 'List or select sub-agents', 'tools'),
+  command('machine', 'Select a remote machine to work on', 'tools'),
 
   command('help', 'Show help', 'info', { aliases: ['?'] }),
   command('commands', 'List every available command', 'info'),

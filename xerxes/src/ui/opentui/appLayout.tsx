@@ -65,6 +65,7 @@ import type { ScrollBoxHandle } from '../lib/terminalTypes.js'
 import { themeForMode, type Theme } from '../theme.js'
 
 import { AgentPanel, AgentPanelHotkey, AgentPanelOverlay, collectAgentPanelRecords } from './agentPanel.js'
+import { MachinePicker } from './machinePicker.js'
 import { displayModeLabel, SessionHeader, SessionTabStrip, SessionTelemetryRow, WorkspaceFooter } from './appChrome.js'
 import { CompletionMenu } from './completionMenu.js'
 import { CopyPicker } from './copyPicker.js'
@@ -2378,6 +2379,18 @@ export function AppLayout({
       ) : null}
       {overlay.terminals ? (
         <TerminalPanelOverlay onClose={() => patchOverlayState({ terminals: false })} t={t} />
+      ) : null}
+      {overlay.machinePicker ? (
+        <MachinePicker
+          onSelect={machine => {
+            patchOverlayState({ machinePicker: false })
+            if (machine) {
+              // TODO: wire the selected machine into the daemon
+              console.log('Selected machine:', machine)
+            }
+          }}
+          t={t}
+        />
       ) : null}
       {overlay.skillsHub ? <InfoOverlay kind='skillsHub' /> : null}
       {overlay.pluginsHub ? <InfoOverlay kind='pluginsHub' /> : null}

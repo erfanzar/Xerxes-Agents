@@ -3859,6 +3859,8 @@ export class DaemonServer {
         return this.initializeProject(connection, session, args);
       case "workspace":
         return this.showWorkspace(connection, session, args);
+      case "machine":
+        return this.showMachinePicker(connection);
       case "image":
         return this.generateImage(connection, args);
       case "paste":
@@ -4775,6 +4777,14 @@ export class DaemonServer {
       agents_directory: workspace.agentsDir,
       loaded_files: workspace.loadedFiles,
     };
+  }
+
+  private showMachinePicker(
+    connection: DaemonTransportConnection,
+  ): JsonRpcPayload {
+    // The TUI opens the picker overlay; the daemon just acknowledges.
+    this.emitSlash(connection, "Opening machine picker…");
+    return { ok: true };
   }
 
   private async generateImage(

@@ -317,6 +317,18 @@ export const coreCommands: SlashCommand[] = [
   },
 
   {
+    help: 'select a remote machine to work on',
+    name: 'machine',
+    run: (_arg, ctx) => {
+      // The TUI opens the picker overlay; the daemon just acknowledges.
+      ctx.gateway.rpc('slash', { command: '/machine' }).catch(ctx.guardedErr)
+      // Open the picker locally — the daemon's response is a no-op.
+      patchOverlayState({ machinePicker: true })
+    },
+    usage: '/machine'
+  },
+
+  {
     help: 'set or show current session title',
     name: 'title',
     run: (arg, ctx) => {
