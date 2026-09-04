@@ -129,6 +129,8 @@ export function sessionInfoFromInit(payload: Record<string, unknown>): SessionIn
   const skillList = Array.isArray(skills) ? skills.map(s => String(s)).filter(Boolean) : []
   return compact<SessionInfo>({
     cwd: str(payload.cwd),
+    goal: optionalStr(payload.goal),
+    goal_phase: optionalStr(payload.goal_phase),
     head_hash: str(payload.head_hash),
     model: str(payload.model),
     mode: str(payload.mode, 'code'),

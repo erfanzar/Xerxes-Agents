@@ -51,6 +51,8 @@ export function SessionHeader({
   busy,
   contextMax,
   contextUsed,
+  goal,
+  goalPhase,
   mode,
   sessionId,
   sessionTitle,
@@ -60,6 +62,10 @@ export function SessionHeader({
   busy?: boolean
   contextMax?: number
   contextUsed?: number
+  /** Current goal objective, when one is set. */
+  goal?: string
+  /** Goal phase: active, paused, blocked, complete. */
+  goalPhase?: string
   mode?: string
   sessionId?: null | string
   sessionTitle?: null | string
@@ -76,51 +82,62 @@ export function SessionHeader({
 
   return (
     <Box
-      flexDirection="row"
+      flexDirection="column"
       flexShrink={0}
-      gap={2}
-      justifyContent="space-between"
       overflow="hidden"
       paddingX={2}
       paddingY={1}
       width="100%"
     >
-      <Box flexDirection="row" flexShrink={1} minWidth={0} overflow="hidden">
-        <Text wrap="truncate-end">
-          <Span color={t.color.brandGold}>{`${GLYPH.brand} `}</Span>
-          {/* The mode is stated once — in the composer's chip. Repeating it
-              here made the header read like a second status bar. An untitled
-              session still falls back to it as a name. */}
-          <Span color={t.ds.title}>{title || displayModeLabel(mode)}</Span>
-          {shortId ? (
-            <>
-              <Span color={t.ds.separator}>{` ${GLYPH.separator} `}</Span>
-              <Span color={t.ds.meta}>{`session ${shortId}`}</Span>
-            </>
-          ) : null}
-        </Text>
+      <Box flexDirection="row" flexShrink={0} gap={2} justifyContent="space-between" overflow="hidden" width="100%">
+        <Box flexDirection="row" flexShrink={1} minWidth={0} overflow="hidden">
+          <Text wrap="truncate-end">
+            <Span color={t.color.brandGold}>{`${GLYPH.brand} `}</Span>
+            {/* The mode is stated once — in the composer's chip. Repeating it
+                here made the header read like a second status bar. An untitled
+                session still falls back to it as a name. */}
+            <Span color={t.ds.title}>{title || displayModeLabel(mode)}</Span>
+            {shortId ? (
+              <>
+                <Span color={t.ds.separator}>{` ${GLYPH.separator} `}</Span>
+                <Span color={t.ds.meta}>{`session ${shortId}`}</Span>
+              </>
+            ) : null}
+          </Text>
+        </Box>
+        <Box flexDirection="row" flexShrink={0} minWidth={0} overflow="hidden">
+          <Text wrap="truncate-end">
+            <Span color={busy ? t.ds.working : t.ds.done}>{`${GLYPH.state} `}</Span>
+            <Span color={t.ds.meta}>{busy ? 'working' : 'idle'}</Span>
+            <Span color={t.ds.rule}>{` ${GLYPH.sectionBreak} `}</Span>
+            {max > 0 ? (
+              <>
+                {/* One answer to "how much context is left", in one place: the
+                    bar for the glance, the numbers for the decision. It used
+                    to be rendered beside the composer as well, on the row that
+                    answers what ⏎ will do — two places, two truncation rules,
+                    and a collision at 80 columns. */}
+                <Span color={ctxBarColor(pressure, t)}>{`${ctxMeterBar(pressure)} `}</Span>
+                <Span color={ctxBarColor(pressure, t)}>{fmtK(used)}</Span>
+                <Span color={t.ds.meta}>{` / ${fmtK(max)} ctx`}</Span>
+              </>
+            ) : (
+              <Span color={t.ds.meta}>ctx unknown</Span>
+            )}
+          </Text>
+        </Box>
       </Box>
-      <Box flexDirection="row" flexShrink={0} minWidth={0} overflow="hidden">
-        <Text wrap="truncate-end">
-          <Span color={busy ? t.ds.working : t.ds.done}>{`${GLYPH.state} `}</Span>
-          <Span color={t.ds.meta}>{busy ? 'working' : 'idle'}</Span>
-          <Span color={t.ds.rule}>{` ${GLYPH.sectionBreak} `}</Span>
-          {max > 0 ? (
-            <>
-              {/* One answer to "how much context is left", in one place: the
-                  bar for the glance, the numbers for the decision. It used
-                  to be rendered beside the composer as well, on the row that
-                  answers what ⏎ will do — two places, two truncation rules,
-                  and a collision at 80 columns. */}
-              <Span color={ctxBarColor(pressure, t)}>{`${ctxMeterBar(pressure)} `}</Span>
-              <Span color={ctxBarColor(pressure, t)}>{fmtK(used)}</Span>
-              <Span color={t.ds.meta}>{` / ${fmtK(max)} ctx`}</Span>
-            </>
-          ) : (
-            <Span color={t.ds.meta}>ctx unknown</Span>
-          )}
-        </Text>
-      </Box>
+      {goal ? (
+        <Box flexDirection="row" flexShrink={0} marginTop={1} overflow="hidden" width="100%">
+          <Text wrap="truncate-end">
+            <Span color={t.ds.caption}>{'goal '}</Span>
+            <Span color={t.ds.meta}>{goal}</Span>
+            {goalPhase && goalPhase !== 'active' ? (
+              <Span color={t.color.muted}>{` (${goalPhase})`}</Span>
+            ) : null}
+          </Text>
+        </Box>
+      ) : null}
     </Box>
   )
 }

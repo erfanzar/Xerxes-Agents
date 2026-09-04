@@ -344,12 +344,24 @@ function CompactLiveProgress({ show }: { show: boolean }) {
     [live, rows]
   )
 
-  if (!show || !visibleRows.length) {
+  const goal = ui.info?.goal
+  const goalPhase = ui.info?.goal_phase
+
+  if (!show || (!visibleRows.length && !goal)) {
     return null
   }
 
   return (
     <Box flexDirection="column" flexShrink={0} marginTop={1} paddingLeft={3}>
+      {goal ? (
+        <Text color={t.ds.caption} wrap="truncate-end">
+          <Span color={t.ds.caption}>{'◎ '}</Span>
+          {goal}
+          {goalPhase && goalPhase !== 'active' ? (
+            <Span color={t.color.muted}>{` (${goalPhase})`}</Span>
+          ) : null}
+        </Text>
+      ) : null}
       {visibleRows.map((row, index) => {
         const color = progressToneColor(row.tone, t)
         const glyph = row.kind === 'todo' ? '◇' : row.kind === 'outcome' ? '✓' : row.kind === 'activity' ? '·' : '→'
@@ -2204,6 +2216,8 @@ export function AppLayout({
                 busy={ui.busy}
                 contextMax={usageCounts(ui.usage).max}
                 contextUsed={usageCounts(ui.usage).used}
+                goal={ui.info?.goal}
+                goalPhase={ui.info?.goal_phase}
                 mode={ui.info?.mode}
                 sessionId={ui.sid ?? ui.info?.session_id}
                 sessionTitle={sessionTitle}

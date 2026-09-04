@@ -8161,6 +8161,7 @@ function sessionPayload(
   // first. Only this wire projection is compacted: session.messages and every
   // provider-facing request keep the full images.
   const transcript = projectTranscriptForPayload(session.messages);
+  const goal = getGoal(session.metadata, session.id);
   return {
     id: session.id,
     key: session.sessionKey,
@@ -8169,6 +8170,7 @@ function sessionPayload(
     ...(subagentSnapshots.length
       ? { subagent_snapshots: subagentSnapshots }
       : {}),
+    ...(goal ? { goal: goal.objective, goal_phase: goal.phase } : {}),
     agent_id: session.agentId,
     workspace: session.workspace,
     cwd: session.cwd,

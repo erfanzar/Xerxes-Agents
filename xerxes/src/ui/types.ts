@@ -201,6 +201,10 @@ export interface McpServerStatus {
 export interface SessionInfo {
   cwd?: string
   fast?: boolean
+  /** Current goal objective, when one is set. */
+  goal?: string
+  /** Goal phase: active, paused, blocked, complete. */
+  goal_phase?: string
   head_hash?: string
   lazy?: boolean
   mcp_servers?: McpServerStatus[]
