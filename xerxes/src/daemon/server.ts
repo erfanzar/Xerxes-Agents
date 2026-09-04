@@ -5108,6 +5108,12 @@ export class DaemonServer {
       );
       session.status = "working";
       this.emitStatus(notify, session);
+      // A persistent compressing state, not a transient notice: the TUI
+      // shows a spinner until the compaction result arrives.
+      this.emit(notify, "status_update", {
+        kind: "compressing",
+        text: `Compacting ${session.messages.length} message(s) with ${model}…`,
+      });
     }
     try {
       const archivePath = await this.precompactArchivePath(session.id);

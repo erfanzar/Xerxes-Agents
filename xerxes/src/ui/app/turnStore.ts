@@ -9,6 +9,7 @@ import { $uiState } from './uiStore.js'
 
 const buildTurnState = (): TurnState => ({
   activity: [],
+  compacting: false,
   outcome: '',
   reasoning: '',
   reasoningActive: false,
@@ -121,6 +122,8 @@ const stampTurnDelta = (previous: TurnState, updated: TurnState) => {
 
 export interface TurnState {
   activity: ActivityItem[]
+  /** True while the daemon is compacting this session's transcript. */
+  compacting: boolean
   outcome: string
   reasoning: string
   reasoningActive: boolean

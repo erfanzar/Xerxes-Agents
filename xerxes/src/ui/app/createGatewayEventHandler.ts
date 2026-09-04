@@ -36,6 +36,7 @@ import { catalogFromSessionSkills, mergeSkillCatalog, skillInfoFromCatalog } fro
 import { reconcileSpawnHistorySubagent } from './spawnHistoryStore.js'
 import { turnController } from './turnController.js'
 import { getUiState, patchUiState } from './uiStore.js'
+import { patchTurnState } from './turnStore.js'
 
 const NO_PROVIDER_RE = /\bNo (?:LLM|inference) provider configured\b/i
 
@@ -617,6 +618,14 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
         setStatus(p.text)
 
         if (p.kind === 'compressing') {
+          sys(p.text)
+          patchTurnState({ compacting: true })
+
+          return
+        }
+
+        if (p.kind === 'compaction') {
+          patchTurnState({ compacting: false })
           sys(p.text)
 
           return

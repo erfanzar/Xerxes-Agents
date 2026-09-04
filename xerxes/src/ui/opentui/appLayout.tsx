@@ -210,6 +210,7 @@ const activeSpinnerVerbs = (): string[] => {
 export function LiveProgressPill() {
   const t = useStore($uiTheme)
   const live = useStore($turnLive)
+  const compacting = useTurnSelector(state => state.compacting)
   const glyphRef = useRef<TextRenderable | null>(null)
   const labelRef = useRef<TextRenderable | null>(null)
   const verbs = useMemo(activeSpinnerVerbs, [])
@@ -219,7 +220,7 @@ export function LiveProgressPill() {
   )
 
   useEffect(() => {
-    if (!live) {
+    if (!live && !compacting) {
       return
     }
 
@@ -250,6 +251,16 @@ export function LiveProgressPill() {
       }
 
       if (label) {
+        if (compacting) {
+          // Compaction is one long provider call with no intermediate deltas;
+          // a spinner is the only honest "still working" signal.
+          const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+          const frame = frames[Math.floor(Date.now() / 80) % frames.length]
+          label.content = `${frame} compacting context…`
+          label.fg = t.color.accent
+          return
+        }
+
         const parts = [
           `${livenessVerb(verbs, liveness.elapsedMs)} ${formatStatusDuration(liveness.elapsedMs / 1000)}`,
           `${toolCount} tool${toolCount === 1 ? '' : 's'}`
@@ -271,9 +282,9 @@ export function LiveProgressPill() {
     timer.unref?.()
 
     return () => clearInterval(timer)
-  }, [live, t.color.warn, t.color.muted, tone, verbs])
+  }, [live, compacting, t.color.warn, t.color.muted, t.color.accent, tone, verbs])
 
-  if (!live) {
+  if (!live && !compacting) {
     return null
   }
 
@@ -321,6 +332,7 @@ function CompactLiveProgress({ show }: { show: boolean }) {
   const ui = useStore($uiState)
   const t = useStore($uiTheme)
   const activity = useTurnSelector(state => state.activity)
+  const compacting = useTurnSelector(state => state.compacting)
   const outcome = useTurnSelector(state => state.outcome)
   const todos = useTurnSelector(state => state.todos)
   const turnTrail = useTurnSelector(state => state.turnTrail)
@@ -347,12 +359,18 @@ function CompactLiveProgress({ show }: { show: boolean }) {
   const goal = ui.info?.goal
   const goalPhase = ui.info?.goal_phase
 
-  if (!show || (!visibleRows.length && !goal)) {
+  if (!show || (!visibleRows.length && !goal && !compacting)) {
     return null
   }
 
   return (
     <Box flexDirection="column" flexShrink={0} marginTop={1} paddingLeft={3}>
+      {compacting ? (
+        <Text color={t.color.accent} wrap="truncate-end">
+          <Span color={t.color.accent}>{'◌ '}</Span>
+          {'Compacting context…'}
+        </Text>
+      ) : null}
       {goal ? (
         <Text color={t.ds.caption} wrap="truncate-end">
           <Span color={t.ds.caption}>{'◎ '}</Span>
