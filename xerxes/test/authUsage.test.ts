@@ -147,6 +147,32 @@ describe('subscription usage fetchers', () => {
     expect(capture.url).toBe('https://proxy.test/usage')
   })
 
+  test('collectSubscriptionUsage resolves kimi and zai from profiles without OAuth', async () => {
+    const { collectSubscriptionUsage } = await import('../src/auth/usage.js')
+    const collection = await collectSubscriptionUsage(undefined, {
+      environment: {},
+      profiles: [
+        { name: 'kimi-work', provider: 'kimi-code', api_key: 'kimi-key', base_url: 'https://api.kimi.com/coding/v1', model: 'kimi-for-coding' },
+        { name: 'zai-cn', provider: 'zai-coding-cn', api_key: 'zai-key', base_url: 'https://open.bigmodel.cn/api/coding/paas/v4', model: 'glm-5' },
+      ],
+      fetchImplementation: async (url) => {
+        if (String(url).includes('kimi.com')) {
+          return new Response(JSON.stringify({ usages: [{ scope: 'LIMIT_5H', used_percent: 12 }] }), { status: 200 })
+        }
+        if (String(url).includes('bigmodel.cn')) {
+          return new Response(JSON.stringify({ data: { limits: [{ type: 'TIME_LIMIT', unit: 5, percentage: 55 }] } }), { status: 200 })
+        }
+        return new Response('not found', { status: 404 })
+      },
+    })
+    expect(collection.reports.map(r => r.provider)).toEqual(['kimi', 'zai'])
+    expect(collection.reports[0]?.windows[0]?.usedPercent).toBe(12)
+    expect(collection.reports[1]?.windows[0]?.usedPercent).toBe(55)
+    // claude and codex have no profiles and no OAuth sessions in this test,
+    // so they land in errors without blocking the profile-driven providers.
+    expect(collection.errors.map(e => e.provider)).toEqual(['claude', 'codex'])
+  })
+
   test('formatUsageReport renders a compact provider line', () => {
     const line = formatUsageReport({
       provider: 'codex',

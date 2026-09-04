@@ -3591,7 +3591,9 @@ export class DaemonServer {
         // local usage the command already had.
         let subscriptionSection = "";
         try {
-          const collection = await collectSubscriptionUsage();
+          const collection = await collectSubscriptionUsage(undefined, {
+            profiles: this.profileStore.list(),
+          });
           if (collection.reports.length) {
             subscriptionSection = [
               "",

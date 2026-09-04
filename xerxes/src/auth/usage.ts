@@ -312,13 +312,23 @@ export interface SubscriptionUsageCollection {
   readonly reports: readonly ProviderUsageReport[]
 }
 
+/** Minimal profile shape the collector needs from the daemon's profile store. */
+export interface UsageProfile {
+  readonly name: string
+  readonly provider: string
+  readonly api_key: string
+  readonly base_url: string
+  readonly model: string
+}
+
 /**
- * Resolve each provider's stored subscription credential and fetch its quota
- * windows. One provider's failure never hides another's report.
+ * Resolve subscription quota for every configured profile (and OAuth
+ * session), not just the active one. A profile whose provider has no quota
+ * endpoint is skipped; a profile whose fetch fails lands in `errors`.
  */
 export async function collectSubscriptionUsage(
   provider?: string,
-  options: UsageRequestOptions = {},
+  options: UsageRequestOptions & { readonly profiles?: readonly UsageProfile[] } = {},
 ): Promise<SubscriptionUsageCollection> {
   const normalized = provider?.trim().toLowerCase()
   const targets = normalized
@@ -346,9 +356,12 @@ export async function collectSubscriptionUsage(
 
 async function fetchOne(
   provider: SubscriptionUsageProvider,
-  options: UsageRequestOptions,
+  options: UsageRequestOptions & { readonly profiles?: readonly UsageProfile[] },
 ): Promise<ProviderUsageReport> {
   const environment = options.environment ?? process.env
+  const profiles = options.profiles ?? []
+  const profile = profiles.find(p => PROVIDER_ALIASES[p.provider] === provider)
+
   if (provider === 'claude') {
     const credential = await new AnthropicOAuthSession({ environment }).credential(options.signal)
     return fetchClaudeUsage(credential.access, { ...options, environment })
@@ -358,20 +371,29 @@ async function fetchOne(
     return fetchCodexUsage(codexAuthHeaders(credential), { ...options, environment })
   }
   if (provider === 'kimi') {
+    // Profile API key first (Kimi Code profiles store the coding key), then
+    // the device-flow OAuth session.
+    const apiKey = profile?.api_key?.trim() || environment.KIMI_CODE_API_KEY?.trim()
+    if (apiKey) return fetchKimiUsage(apiKey, { ...options, environment })
     const credential = await new KimiCodingOAuthSession({ environment }).credential(options.signal)
     return fetchKimiUsage(credential.access, { ...options, environment })
   }
-  const apiKey = environment.ZHIPU_API_KEY?.trim() || environment.ZAI_API_KEY?.trim()
+  // zai
+  const apiKey = profile?.api_key?.trim()
+    || environment.ZHIPU_API_KEY?.trim()
+    || environment.ZAI_API_KEY?.trim()
   if (!apiKey) {
     throw new ConfigurationError(
       'zai',
-      'No Z.ai API key found. Set ZHIPU_API_KEY (or ZAI_API_KEY) for the coding plan quota.',
+      'No Z.ai API key found. Add a zai-coding profile or set ZHIPU_API_KEY.',
     )
   }
+  const isCn = profile?.base_url.includes('bigmodel.cn')
+    || environment.XERXES_ZAI_USAGE_URL?.includes('bigmodel.cn')
   return fetchZaiUsage(apiKey, {
     ...options,
     environment,
-    host: environment.XERXES_ZAI_USAGE_URL?.includes('bigmodel.cn') ? 'cn' : 'global',
+    host: isCn ? 'cn' : 'global',
   })
 }
 
