@@ -103,6 +103,28 @@ export const CONTEXT_OVERFLOW_STOP_TEXT = renderContextOverflowStopGuard()
 /** Upper bound on tools executed at once, so a wide round cannot exhaust file handles or sockets. */
 export const MAX_CONCURRENT_TOOL_CALLS = 8
 
+/**
+ * The reasoning that preceded one specific tool call, not the whole round's.
+ *
+ * A round with multiple tool calls splits its thinking at each call boundary:
+ * the model thinks, calls a tool, thinks again, calls another. Without this
+ * split every row in the expanded view shows the same full-round text.
+ */
+function reasoningBeforeCall(
+  callId: string,
+  roundToolCalls: readonly ToolCall[],
+  thinkingParts: readonly string[],
+): string | undefined {
+  if (!thinkingParts.length) return undefined
+  const index = roundToolCalls.findIndex(call => call.id === callId)
+  if (index < 0) return thinkingParts.join('')
+  // The thinking that preceded this call is everything before the call's
+  // position in the round. The parts array is one entry per thinking block,
+  // so the split is at the same index as the call.
+  const before = thinkingParts.slice(0, index + 1)
+  return before.length ? before.join('') : undefined
+}
+
 /** A per-call verdict from the sequential permission phase, executed later in order. */
 type ToolDecision =
   | { readonly call: ToolCall; readonly effectiveCall: ToolCall; readonly kind: 'allowed' }
@@ -1005,7 +1027,10 @@ export async function* runTurn(
         // Emitting starts after Promise.all would collapse that window to zero.
         for (const decision of group) {
           if (decision.kind === 'allowed') {
-            const reasoning = thinkingParts.length ? thinkingParts.join('') : undefined
+            // The reasoning that preceded THIS call, not the whole round's.
+            // A round with multiple tool calls splits its thinking at each
+            // call boundary so each row shows the model's actual intent.
+            const reasoning = reasoningBeforeCall(decision.effectiveCall.id, roundToolCalls, thinkingParts)
             yield { type: 'tool_start', call: decision.effectiveCall, ...(reasoning ? { reasoning } : {}) }
           }
         }
@@ -1098,7 +1123,7 @@ export async function* runTurn(
             result = { ...result, result: mutatedOutput }
           }
           const recorded = await recordToolResult(result, effectiveCall)
-          const reasoning = thinkingParts.length ? thinkingParts.join('') : undefined
+          const reasoning = reasoningBeforeCall(effectiveCall.id, roundToolCalls, thinkingParts)
           yield { type: 'tool_end', result: recorded, ...(reasoning ? { reasoning } : {}) }
         }
       }
