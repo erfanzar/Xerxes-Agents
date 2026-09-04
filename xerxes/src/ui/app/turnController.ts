@@ -724,7 +724,8 @@ class TurnController {
       ...(finalThinking ? { thinking: finalThinking, thinkingTokens: estimateTokensRough(finalThinking) } : {}),
       ...(savedToolTokens ? { toolTokens: savedToolTokens } : {}),
       ...(finishedSubagents.length && { subagents: finishedSubagents }),
-      ...(tools.length && { tools })
+      ...(tools.length && { tools }),
+      toolRecords: getTurnState().toolRecords
     }
 
     const finalMessages: Msg[] = [...segments, ...(hasDetails(finalDetails) ? [finalDetails] : [])]
@@ -844,7 +845,8 @@ class TurnController {
     summary?: string,
     duration?: number,
     todos?: unknown,
-    resultText?: string
+    resultText?: string,
+    reasoning?: string
   ) {
     if (this.interrupted) {
       return
@@ -854,7 +856,7 @@ class TurnController {
     if (this.completedToolIds.has(toolId)) return
     this.completedToolIds.add(toolId)
     const alreadyPersisted = this.toolCompletionAlreadyPersisted(toolId, fallbackName)
-    const line = this.completeTool(toolId, fallbackName, error, summary, duration, resultText)
+    const line = this.completeTool(toolId, fallbackName, error, summary, duration, resultText, reasoning)
 
     if (alreadyPersisted) {
       this.publishToolState()
@@ -873,7 +875,8 @@ class TurnController {
     fallbackName?: string,
     error?: string,
     duration?: number,
-    resultText?: string
+    resultText?: string,
+    reasoning?: string
   ) {
     if (this.interrupted) {
       return
@@ -883,7 +886,7 @@ class TurnController {
     this.completedToolIds.add(toolId)
     this.flushStreamingSegment()
     const alreadyPersisted = this.toolCompletionAlreadyPersisted(toolId, fallbackName)
-    const line = this.completeTool(toolId, fallbackName, error, '', duration, resultText)
+    const line = this.completeTool(toolId, fallbackName, error, '', duration, resultText, reasoning)
 
     if (alreadyPersisted) {
       this.publishToolState()
@@ -901,7 +904,8 @@ class TurnController {
     error?: string,
     summary?: string,
     duration?: number,
-    resultText?: string
+    resultText?: string,
+    reasoning?: string
   ) {
     const done = this.activeTools.find(tool => tool.id === toolId)
     const name = done?.name ?? fallbackName ?? 'tool'
@@ -924,6 +928,21 @@ class TurnController {
     }
 
     this.turnTools = next.slice(-TRAIL_LIMIT)
+
+    // Persist the full record for the expanded detail view.
+    patchTurnState({
+      toolRecords: {
+        ...getTurnState().toolRecords,
+        [toolId]: {
+          name,
+          ...(reasoning ? { reasoning } : {}),
+          ...(done?.rawArgs ? { args: done.rawArgs } : {}),
+          ...(resultText ? { result: resultText } : {}),
+          ...(error ? { error } : {}),
+          ...(duration !== undefined ? { durationS: duration } : {}),
+        }
+      }
+    })
 
     return line
   }
@@ -965,7 +984,7 @@ class TurnController {
     }, STREAM_BATCH_MS)
   }
 
-  recordToolStart(toolId: string, name: string, context: string) {
+  recordToolStart(toolId: string, name: string, context: string, reasoning?: string, rawArgs?: string) {
     if (this.interrupted) {
       return
     }
@@ -978,9 +997,23 @@ class TurnController {
     const sample = `${name} ${context}`.trim()
 
     this.toolTokenAcc += sample ? estimateTokensRough(sample) : 0
-    this.activeTools = [...this.activeTools, { context, id: toolId, name, startedAt: Date.now() }]
+    this.activeTools = [...this.activeTools, {
+      context,
+      id: toolId,
+      name,
+      ...(reasoning ? { reasoning } : {}),
+      ...(rawArgs ? { rawArgs } : {}),
+      startedAt: Date.now()
+    }]
 
-    patchTurnState({ toolTokens: this.toolTokenAcc, tools: this.activeTools })
+    patchTurnState({
+      toolTokens: this.toolTokenAcc,
+      tools: this.activeTools,
+      toolRecords: {
+        ...getTurnState().toolRecords,
+        [toolId]: { name, ...(reasoning ? { reasoning } : {}), ...(rawArgs ? { args: rawArgs } : {}) }
+      }
+    })
   }
 
   reset() {

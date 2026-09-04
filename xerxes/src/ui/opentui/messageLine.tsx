@@ -17,6 +17,7 @@ import {
 } from '../app/thinkingVisibilityStore.js'
 import { $spawnHistory, spawnHistoryForSession } from '../app/spawnHistoryStore.js'
 import { $toolRunVisibility, toggleToolRun, toolRunExpanded } from '../app/toolRunStore.js'
+import { $toolStepVisibility, toggleToolStep, toolStepExpanded } from '../app/toolStepStore.js'
 import { $uiDetailVisibility, $uiState } from '../app/uiStore.js'
 import { useTurnSelector } from '../app/turnStore.js'
 import { sectionMode } from '../domain/details.js'
@@ -497,11 +498,13 @@ function ToolStep({
   archived,
   cols,
   line,
+  msgKey,
   t
 }: {
   archived?: readonly SubagentProgress[]
   cols?: number
   line: string
+  msgKey?: string
   t: Theme
 }) {
   const parsed = parseToolTrailResultLine(line)
@@ -544,6 +547,12 @@ function ToolStep({
   const dots = toolLeaderDots({ args, duration: duration ?? '', glyph: voice.glyph, mark: parsed.mark ?? '', name }, cols)
   const mark = parsed.mark
 
+  // Expandable detail: the step id is stable for the message's lifetime so
+  // scrolling away and back does not collapse it.
+  const stepId = msgKey ? `${msgKey}:${line}` : line
+  const expanded = toolStepExpanded(useStore($toolStepVisibility), stepId)
+  const record = useTurnSelector(state => state.toolRecords[stepId])
+
   return (
     <Box flexDirection="column" flexShrink={0}>
       {/* One line, styled by part: tinted ⏺, lapis name, receding arguments,
@@ -558,23 +567,26 @@ function ToolStep({
           reads vertically as durations without reading the rows at all. The
           verb and the disc were the same colour until the ramp was assigned
           by role; they are different jobs and now different steps. */}
-      <Text color={voice.body} wrap="truncate-end">
-        <Span color={outcomeColor}>{voice.glyph} </Span>
-        <Span color={t.color.toolName}>{name}</Span>
-        {args ? <Span color={t.ds.title}>{`  ${args}`}</Span> : null}
-        {/* Paint the tick too. Rendering only '✗' left success visually
-            identical to a call that is still running. */}
-        {mark ? (
-          <>
-            {' '}
-            <Span color={markColor} dimColor={!failed}>
-              {mark}
-            </Span>
-          </>
-        ) : null}
-        {dots ? <Span color={t.ds.leader}>{dots}</Span> : null}
-        {duration ? <Span color={t.ds.numeric}>{`  ${duration}`}</Span> : null}
-      </Text>
+      <Box flexShrink={0} onClick={() => toggleToolStep(stepId)}>
+        <Text color={voice.body} wrap="truncate-end">
+          <Span color={t.color.muted}>{expanded ? '▾' : '▸'} </Span>
+          <Span color={outcomeColor}>{voice.glyph} </Span>
+          <Span color={t.color.toolName}>{name}</Span>
+          {args ? <Span color={t.ds.title}>{`  ${args}`}</Span> : null}
+          {/* Paint the tick too. Rendering only '✗' left success visually
+              identical to a call that is still running. */}
+          {mark ? (
+            <>
+              {' '}
+              <Span color={markColor} dimColor={!failed}>
+                {mark}
+              </Span>
+            </>
+          ) : null}
+          {dots ? <Span color={t.ds.leader}>{dots}</Span> : null}
+          {duration ? <Span color={t.ds.numeric}>{`  ${duration}`}</Span> : null}
+        </Text>
+      </Box>
       {detail.lines.map((d, i) => (
         <Text
           color={toolDetailColor(d, detail.diagnostic, t)}
@@ -586,6 +598,30 @@ function ToolStep({
           {d || ' '}
         </Text>
       ))}
+      {expanded && record ? (
+        <Box flexDirection="column" flexShrink={0} paddingLeft={2}>
+          {record.reasoning ? (
+            <Text color={t.color.thinking} wrap="wrap">
+              {'  '}reasoning: {record.reasoning}
+            </Text>
+          ) : null}
+          {record.args ? (
+            <Text color={t.color.muted} wrap="wrap">
+              {'  '}call: {record.args}
+            </Text>
+          ) : null}
+          {record.result ? (
+            <Text color={t.color.muted} wrap="wrap">
+              {'  '}result: {record.result}
+            </Text>
+          ) : null}
+          {record.error ? (
+            <Text color={t.color.error} wrap="wrap">
+              {'  '}error: {record.error}
+            </Text>
+          ) : null}
+        </Box>
+      ) : null}
       {roster ? (
         <>
           <SpawnFleetRoster archived={archived ?? []} names={roster.names} t={t} />
@@ -750,7 +786,7 @@ function ToolRun({
           </Text>
         </Box>
         {group.lines.map((line, i) => (
-          <ToolStep archived={archived} cols={cols} key={i} line={line} t={t} />
+          <ToolStep archived={archived} cols={cols} key={i} line={line} msgKey={runId} t={t} />
         ))}
       </Box>
     )
@@ -865,7 +901,7 @@ function ToolTrail({
       {visibility.tools
         ? groupToolRun(tools).map((group, i) =>
             group.kind === 'row' ? (
-              <ToolStep archived={msg.subagents} cols={cols} key={i} line={group.line} t={t} />
+              <ToolStep archived={msg.subagents} cols={cols} key={i} line={group.line} msgKey={msgKey} t={t} />
             ) : (
               <ToolRun archived={msg.subagents ?? []} cols={cols} group={group} key={i} runId={`${thinkingRowId(msg, msgKey)}:run${i}`} t={t} />
             )

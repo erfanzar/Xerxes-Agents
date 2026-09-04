@@ -821,7 +821,13 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
             ev.payload.args_text ? stripAnsi(String(ev.payload.args_text)) : undefined
           )
 
-          turnController.recordToolStart(ev.payload.tool_id, ev.payload.name ?? 'tool', display.context)
+          turnController.recordToolStart(
+            ev.payload.tool_id,
+            ev.payload.name ?? 'tool',
+            display.context,
+            ev.payload.reasoning,
+            ev.payload.args_text
+          )
         }
 
         return
@@ -846,7 +852,8 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
             ev.payload.name,
             ev.payload.error,
             ev.payload.duration_s,
-            resultText
+            resultText,
+            ev.payload.reasoning
           )
         } else {
           turnController.recordToolComplete(
@@ -856,7 +863,8 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
             ev.payload.summary,
             ev.payload.duration_s,
             ev.payload.todos,
-            resultText
+            resultText,
+            ev.payload.reasoning
           )
         }
 

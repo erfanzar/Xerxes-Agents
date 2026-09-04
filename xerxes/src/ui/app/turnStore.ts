@@ -20,6 +20,7 @@ const buildTurnState = (): TurnState => ({
   subagents: [],
   todoCollapsed: false,
   todos: [],
+  toolRecords: {},
   toolTokens: 0,
   tools: [],
   turnTrail: []
@@ -134,5 +135,16 @@ export interface TurnState {
   todos: TodoItem[]
   toolTokens: number
   tools: ActiveTool[]
+  /** Full call/response records keyed by tool id, for the expanded detail view. */
+  toolRecords: Record<string, ToolCallRecord>
   turnTrail: string[]
+}
+
+export interface ToolCallRecord {
+  args?: string
+  durationS?: number
+  error?: string
+  name: string
+  reasoning?: string
+  result?: string
 }

@@ -67,9 +67,19 @@ export type StreamEvent =
   | { readonly text: string; readonly type: 'text' }
   | { readonly text: string; readonly type: 'thinking' }
   | { readonly attempt: number; readonly delay: number; readonly error: string; readonly final: boolean; readonly maxAttempts: number; readonly type: 'provider_retry' }
-  | { readonly call: ToolCall; readonly type: 'tool_start' }
+  | {
+    readonly call: ToolCall
+    /** The model's visible reasoning that preceded this call, when it exists. */
+    readonly reasoning?: string
+    readonly type: 'tool_start'
+  }
   | { readonly request: PermissionRequest; readonly type: 'permission_request' }
-  | { readonly result: ToolResult; readonly type: 'tool_end' }
+  | {
+    readonly result: ToolResult
+    /** The model's visible reasoning that preceded this call, when it exists. */
+    readonly reasoning?: string
+    readonly type: 'tool_end'
+  }
   | {
     readonly apiCallsCount?: number
     readonly model: string

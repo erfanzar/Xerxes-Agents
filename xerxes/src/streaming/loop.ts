@@ -1004,7 +1004,10 @@ export async function* runTurn(
         // checkpointer commits a tool call while the tool is still running.
         // Emitting starts after Promise.all would collapse that window to zero.
         for (const decision of group) {
-          if (decision.kind === 'allowed') yield { type: 'tool_start', call: decision.effectiveCall }
+          if (decision.kind === 'allowed') {
+            const reasoning = thinkingParts.length ? thinkingParts.join('') : undefined
+            yield { type: 'tool_start', call: decision.effectiveCall, ...(reasoning ? { reasoning } : {}) }
+          }
         }
         const outcomes = await Promise.all(group.map(async (decision, member) => {
           if (decision.kind !== 'allowed') return undefined
@@ -1095,7 +1098,8 @@ export async function* runTurn(
             result = { ...result, result: mutatedOutput }
           }
           const recorded = await recordToolResult(result, effectiveCall)
-          yield { type: 'tool_end', result: recorded }
+          const reasoning = thinkingParts.length ? thinkingParts.join('') : undefined
+          yield { type: 'tool_end', result: recorded, ...(reasoning ? { reasoning } : {}) }
         }
       }
       if (signal?.aborted) {

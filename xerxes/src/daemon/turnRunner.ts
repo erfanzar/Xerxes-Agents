@@ -1401,6 +1401,7 @@ function daemonEventFromStream(
           tool_call_id: event.call.id,
           name: event.call.function.name,
           arguments: JSON.stringify(event.call.function.arguments),
+          ...(event.reasoning ? { reasoning: event.reasoning } : {}),
         },
       }
     case 'permission_request':
@@ -1427,6 +1428,7 @@ function daemonEventFromStream(
           tool_call_id: event.result.toolCallId,
           duration_ms: event.result.durationMs,
           display_blocks: displayBlocksFor(event.result),
+          ...(event.reasoning ? { reasoning: event.reasoning } : {}),
         },
       }
     case 'usage_update':

@@ -443,7 +443,8 @@ export function adaptDaemonEvent(type: string, payload: Record<string, unknown>)
           payload: {
             args_text: str(payload.arguments),
             name: str(payload.name, 'tool'),
-            tool_id: str(payload.id, str(payload.tool_call_id, 'tool'))
+            tool_id: str(payload.id, str(payload.tool_call_id, 'tool')),
+            ...(optionalStr(payload.reasoning) ? { reasoning: optionalStr(payload.reasoning) } : {})
           }
         }
       ]
@@ -554,7 +555,8 @@ function toolComplete(payload: Record<string, unknown>): AnyEvent {
       result_text: preview,
       summary: str(brief?.body, str(generic?.content, first)),
       todos: Array.isArray(todo?.items) ? todo.items : undefined,
-      tool_id: str(payload.tool_call_id, 'tool')
+      tool_id: str(payload.tool_call_id, 'tool'),
+      ...(optionalStr(payload.reasoning) ? { reasoning: optionalStr(payload.reasoning) } : {})
     }
   }
 }

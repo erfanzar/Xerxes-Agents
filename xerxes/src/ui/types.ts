@@ -4,6 +4,10 @@ export interface ActiveTool {
   context?: string
   id: string
   name: string
+  /** The model's reasoning that preceded this call, when it exists. */
+  reasoning?: string
+  /** Raw arguments JSON, for the expanded detail view. */
+  rawArgs?: string
   startedAt?: number
 }
 
@@ -157,9 +161,20 @@ export interface Msg {
   thinkingTokens?: number
   toolTokens?: number
   tools?: string[]
+  /** Full call/response records keyed by tool id, for the expanded detail view. */
+  toolRecords?: Record<string, ToolCallRecord>
   todos?: TodoItem[]
   todoIncomplete?: boolean
   todoCollapsedByDefault?: boolean
+}
+
+export interface ToolCallRecord {
+  args?: string
+  durationS?: number
+  error?: string
+  name: string
+  reasoning?: string
+  result?: string
 }
 
 export type Role = 'assistant' | 'system' | 'tool' | 'user'
