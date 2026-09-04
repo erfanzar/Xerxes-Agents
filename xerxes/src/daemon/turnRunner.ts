@@ -1037,11 +1037,12 @@ function displayBlocksFor(result: ToolResult): readonly Record<string, unknown>[
 function parseTodoList(text: string): readonly Record<string, unknown>[] {
   const items: Record<string, unknown>[] = []
   for (const line of text.split('\n')) {
-    const match = /^\s*\d+\.\s+\[([ x~])\]\s+(.*\S)\s*$/.exec(line)
+    const match = /^\s*(\d+)\.\s+\[([ x~])\]\s+(.*\S)\s*$/.exec(line)
     if (!match) continue
-    const [, mark, content] = match
+    const [, index, mark, content] = match
     items.push({
       content,
+      id: `todo-${index}`,
       status: mark === 'x' ? 'completed' : mark === '~' ? 'in_progress' : 'pending',
     })
   }
