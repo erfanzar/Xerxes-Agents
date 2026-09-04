@@ -98,12 +98,20 @@ export const compactStatusNumber = (value: number): string => {
   return String(value)
 }
 
-/** Formats a non-negative duration as a zero-padded MM:SS clock. */
+/** Formats a non-negative duration as a compact clock: MM:SS under an hour, then H:MM:SS, then days. */
 export const formatStatusDuration = (seconds: number): string => {
   const total = Math.max(0, Math.trunc(seconds))
-  const minutes = Math.trunc(total / 60)
+  const days = Math.trunc(total / 86_400)
+  const hours = Math.trunc((total % 86_400) / 3_600)
+  const minutes = Math.trunc((total % 3_600) / 60)
   const remainingSeconds = total % 60
 
+  if (days > 0) {
+    return `${days}d ${hours}h`
+  }
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}`
+  }
   return `${String(minutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}`
 }
 

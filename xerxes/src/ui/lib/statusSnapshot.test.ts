@@ -89,6 +89,6 @@ describe('formatStatus', () => {
     expect(compactStatusNumber(1_250)).toBe('1.3K')
     expect(compactStatusNumber(1_250_000)).toBe('1.3M')
     expect(formatStatusDuration(-3)).toBe('00:00')
-    expect(formatStatusDuration(3_661.9)).toBe('61:01')
+    expect(formatStatusDuration(3_661.9)).toBe('1:01:01')
   })
 })

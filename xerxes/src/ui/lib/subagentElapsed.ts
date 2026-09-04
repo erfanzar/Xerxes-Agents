@@ -31,16 +31,26 @@ export function fmtTokens(n: number): string {
 }
 
 /**
- * `Ns` / `Nm` / `Nm Ss` formatter for seconds, shared by the agent panel
- * cards and inspector so every subagent duration speaks the same dialect.
+ * `Ns` / `Nm` / `Nm Ss` / `Hh Mm` / `Dd Hh` formatter for seconds, shared by
+ * the agent panel cards and inspector so every subagent duration speaks the
+ * same dialect.
  */
 export function fmtDuration(seconds: number): string {
   if (seconds < 60) {
     return `${Math.max(0, Math.round(seconds))}s`
   }
 
-  const m = Math.floor(seconds / 60)
-  const s = Math.round(seconds - m * 60)
+  const total = Math.max(0, Math.round(seconds))
+  const days = Math.floor(total / 86_400)
+  const hours = Math.floor((total % 86_400) / 3_600)
+  const minutes = Math.floor((total % 3_600) / 60)
+  const secs = total % 60
 
-  return s === 0 ? `${m}m` : `${m}m ${s}s`
+  if (days > 0) {
+    return `${days}d ${hours}h`
+  }
+  if (hours > 0) {
+    return minutes === 0 ? `${hours}h` : `${hours}h ${minutes}m`
+  }
+  return secs === 0 ? `${minutes}m` : `${minutes}m ${secs}s`
 }
