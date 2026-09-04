@@ -101,6 +101,7 @@ export interface OverlayState {
   confirm: ConfirmReq | null
   copyPicker: CopyPickerState | null
   diff: boolean
+  goal: boolean
   machinePicker: boolean
   modelPicker: boolean
   reasoningPicker: boolean

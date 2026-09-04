@@ -6,6 +6,7 @@
 import type { SessionTab } from '../app/interfaces.js'
 import type { LiveSessionStatus } from '../gatewayTypes.js'
 import { GLYPH } from '../domain/nocturne.js'
+import { patchOverlayState } from '../app/overlayStore.js'
 import { ctxBarColor, ctxMeterBar } from '../domain/statusFormat.js'
 import { fmtK } from '../lib/text.js'
 import { branchLabel, type RepoPulse } from '../lib/repoPulse.js'
@@ -129,13 +130,15 @@ export function SessionHeader({
       </Box>
       {goal ? (
         <Box flexDirection="row" flexShrink={0} marginTop={1} overflow="hidden" width="100%">
-          <Text wrap="truncate-end">
-            <Span color={t.ds.caption}>{'goal '}</Span>
-            <Span color={t.ds.meta}>{goal}</Span>
-            {goalPhase && goalPhase !== 'active' ? (
-              <Span color={t.color.muted}>{` (${goalPhase})`}</Span>
-            ) : null}
-          </Text>
+          <Box onClick={() => patchOverlayState({ goal: true })}>
+            <Text wrap="truncate-end">
+              <Span color={t.ds.caption}>{'goal '}</Span>
+              <Span color={t.ds.meta}>{goal}</Span>
+              {goalPhase && goalPhase !== 'active' ? (
+                <Span color={t.color.muted}>{` (${goalPhase})`}</Span>
+              ) : null}
+            </Text>
+          </Box>
         </Box>
       ) : null}
     </Box>

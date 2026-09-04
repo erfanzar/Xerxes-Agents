@@ -65,6 +65,7 @@ import type { ScrollBoxHandle } from '../lib/terminalTypes.js'
 import { themeForMode, type Theme } from '../theme.js'
 
 import { AgentPanel, AgentPanelHotkey, AgentPanelOverlay, collectAgentPanelRecords } from './agentPanel.js'
+import { GoalOverlay } from './goalOverlay.js'
 import { MachinePicker } from './machinePicker.js'
 import { displayModeLabel, SessionHeader, SessionTabStrip, SessionTelemetryRow, WorkspaceFooter } from './appChrome.js'
 import { CompletionMenu } from './completionMenu.js'
@@ -386,10 +387,12 @@ function CompactLiveProgress({ show }: { show: boolean }) {
         const glyph = row.kind === 'todo' ? '◇' : row.kind === 'outcome' ? '✓' : row.kind === 'activity' ? '·' : '→'
 
         return (
-          <Text color={color} key={`${row.kind}:${index}:${row.text}`} wrap="truncate-end">
-            <Span color={color}>{glyph} </Span>
-            {row.text}
-          </Text>
+          <Box key={`${row.kind}:${index}:${row.text}`} onClick={row.kind === 'todo' ? () => patchOverlayState({ goal: true }) : undefined}>
+            <Text color={color} wrap="truncate-end">
+              <Span color={color}>{glyph} </Span>
+              {row.text}
+            </Text>
+          </Box>
         )
       })}
     </Box>
@@ -2380,6 +2383,7 @@ export function AppLayout({
       {overlay.terminals ? (
         <TerminalPanelOverlay onClose={() => patchOverlayState({ terminals: false })} t={t} />
       ) : null}
+      {overlay.goal ? <GoalOverlay t={t} /> : null}
       {overlay.machinePicker ? (
         <MachinePicker
           onSelect={machine => {
