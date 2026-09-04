@@ -548,10 +548,15 @@ function ToolStep({
   const mark = parsed.mark
 
   // Expandable detail: the step id is stable for the message's lifetime so
-  // scrolling away and back does not collapse it.
+  // scrolling away and back does not collapse it. The record lookup goes
+  // through the trail-line → tool-id map because the daemon's tool id is not
+  // part of the rendered line.
   const stepId = msgKey ? `${msgKey}:${line}` : line
   const expanded = toolStepExpanded(useStore($toolStepVisibility), stepId)
-  const record = useTurnSelector(state => state.toolRecords[stepId])
+  const record = useTurnSelector(state => {
+    const toolId = state.toolLineToId[line]
+    return toolId ? state.toolRecords[toolId] : undefined
+  })
 
   return (
     <Box flexDirection="column" flexShrink={0}>

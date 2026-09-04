@@ -11,6 +11,7 @@ const buildTurnState = (): TurnState => ({
   activity: [],
   compacting: false,
   outcome: '',
+  toolLineToId: {},
   reasoning: '',
   reasoningActive: false,
   reasoningStreaming: false,
@@ -140,6 +141,8 @@ export interface TurnState {
   tools: ActiveTool[]
   /** Full call/response records keyed by tool id, for the expanded detail view. */
   toolRecords: Record<string, ToolCallRecord>
+  /** Map from rendered trail line to the daemon's tool id, for expansion lookup. */
+  toolLineToId: Record<string, string>
   turnTrail: string[]
 }
 

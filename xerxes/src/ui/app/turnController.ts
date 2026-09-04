@@ -929,8 +929,13 @@ class TurnController {
 
     this.turnTools = next.slice(-TRAIL_LIMIT)
 
-    // Persist the full record for the expanded detail view.
+    // Persist the full record for the expanded detail view, and map the
+    // rendered trail line back to the tool id so ToolStep can find it.
     patchTurnState({
+      toolLineToId: {
+        ...getTurnState().toolLineToId,
+        [line]: toolId
+      },
       toolRecords: {
         ...getTurnState().toolRecords,
         [toolId]: {

@@ -8,6 +8,7 @@ import { type MutableRefObject, memo, useEffect, useMemo, useRef, useState } fro
 
 import { useOptionalGateway } from '../app/gatewayContext.js'
 import { adjustPanelWidth, PANEL_WIDTH_STEP, withPanelWidthDelta } from '../app/panelSizeStore.js'
+import { useTurnSelector } from '../app/turnStore.js'
 
 import {
   AGENT_GROUP_LABEL,
@@ -920,6 +921,32 @@ function AgentPanelBody({
           {footer}
         </Text>
       </box>
+      <TodoPanel t={t} />
+    </Box>
+  )
+}
+
+/** The session's todo checklist, pinned to the bottom of the agent panel. */
+function TodoPanel({ t }: { t: Theme }) {
+  const todos = useTurnSelector(state => state.todos)
+  if (!todos.length) return null
+  const done = todos.filter(todo => todo.status === 'completed').length
+  return (
+    <Box flexDirection="column" flexShrink={0} marginTop={1} paddingTop={1}>
+      <Text color={t.color.muted} wrap="truncate-end">
+        <Span color={t.color.accent}>{'◇ '}</Span>
+        {`${done}/${todos.length} todos`}
+      </Text>
+      {todos.slice(0, 6).map(todo => (
+        <Text color={todo.status === 'completed' ? t.color.muted : t.color.text} dimColor={todo.status === 'completed'} key={todo.id} wrap="truncate-end">
+          {todo.status === 'completed' ? '✓' : todo.status === 'in_progress' ? '◌' : '◇'} {todo.content}
+        </Text>
+      ))}
+      {todos.length > 6 ? (
+        <Text color={t.color.muted} dimColor>
+          {`… +${todos.length - 6} more`}
+        </Text>
+      ) : null}
     </Box>
   )
 }
