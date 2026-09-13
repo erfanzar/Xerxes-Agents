@@ -11,6 +11,7 @@
 
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactElement } from 'react'
 
+import { useDialogFocus } from './dialogFocus.js'
 import { store, type Snapshot } from './store.js'
 
 function ageLabel(updatedAt: string): string {
@@ -30,9 +31,7 @@ export function SessionSearch({ snap }: { snap: Snapshot }): ReactElement | null
   const [needle, setNeedle] = useState('')
   const [cursor, setCursor] = useState(0)
   const ref = useRef<HTMLInputElement>(null)
-  useEffect(() => {
-    ref.current?.focus()
-  }, [])
+  useDialogFocus(ref)
 
   // Debounced live search: 250ms after the last keystroke, ≥2 chars. The
   // store drops stale responses by sequence, so laggy answers never win.

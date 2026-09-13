@@ -9,7 +9,7 @@
  * every other pair of surfaces in this repo drift apart.
  */
 
-import { cp, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -23,6 +23,7 @@ const rendererOutput = join(outputDirectory, 'renderer')
 
 async function buildDesktop(): Promise<void> {
   await mkdir(rendererOutput, { recursive: true })
+  await rm(join(outputDirectory, 'machineHelper.js'), { force: true })
   const packageRecord = JSON.parse(await readFile(join(packageDirectory, 'package.json'), 'utf8')) as {
     readonly version?: unknown
   }
@@ -30,6 +31,10 @@ async function buildDesktop(): Promise<void> {
   if (!desktopVersion) throw new Error('desktop build needs package.json version')
   const expectedDaemonBuildId = await sourceDaemonBuildId(join(packageDirectory, 'src'))
   if (!expectedDaemonBuildId) throw new Error('desktop build could not fingerprint daemon source')
+  const runtimeStamp = Bun.file(join(packageDirectory, 'dist', 'build-id'))
+  if (!await runtimeStamp.exists() || (await runtimeStamp.text()).trim() !== expectedDaemonBuildId) {
+    throw new Error('Runtime bundle is missing or stale. Run bun run --cwd xerxes build:desktop to build matching runtime and desktop bundles.')
+  }
 
   const renderer = await Bun.build({
     entrypoints: [join(packageDirectory, 'src', 'desktop', 'renderer', 'main.tsx')],
@@ -90,7 +95,7 @@ async function buildDesktop(): Promise<void> {
     'utf8',
   )
   await writeFile(join(rendererOutput, 'theme.css'), themeStylesheet(), 'utf8')
-  for (const asset of ['index.html', 'app.css']) {
+  for (const asset of ['index.html', 'app.css', 'atelier.css']) {
     await cp(join(packageDirectory, 'src', 'desktop', 'renderer', asset), join(rendererOutput, asset))
   }
   // The renderer's brand asset ships inside the bundle so CSP img-src 'self'

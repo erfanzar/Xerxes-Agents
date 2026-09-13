@@ -50,7 +50,13 @@ async function readMachines(path: string): Promise<MachineWorkspace[]> {
 }
 
 /** Persistent registry shared by daemons; returning a target does not claim a connection succeeded. */
-export async function runMachineCommand(path: string, input: string, discovery: MachineDiscovery = machineDiscovery): Promise<Record<string, unknown>> {
+export interface MachineRegistryPort {
+  write(path: string, content: string): Promise<void>
+}
+const machineRegistry: MachineRegistryPort = {
+  async write(path, content) { await Bun.write(path, content, { mode: 0o600 }) },
+}
+export async function runMachineCommand(path: string, input: string, discovery: MachineDiscovery = machineDiscovery, registry: MachineRegistryPort = machineRegistry): Promise<Record<string, unknown>> {
   try {
     const [action = 'list', ...args] = machineArguments(input)
     if (action === 'hosts' && !args.length) return { ok: true, hosts: await discovery.hosts() }
@@ -82,7 +88,7 @@ export async function runMachineCommand(path: string, input: string, discovery: 
         machines.splice(index, 1)
       }
       const temporary = `${path}.${crypto.randomUUID()}.tmp`
-      try { await Bun.write(temporary, JSON.stringify({ machines }, null, 2), { mode: 0o600 }); await rename(temporary, path) }
+      try { await registry.write(temporary, JSON.stringify({ machines }, null, 2)); await rename(temporary, path) }
       finally { await rm(temporary, { force: true }) }
       return { ok: true, machines, output: action === 'add' ? `Saved ${machine!.alias}. Open /machine to connect.` : `Removed ${args[0]}.` }
     }, { label: 'machine settings', staleMs: 30000, waitMs: 5000 })

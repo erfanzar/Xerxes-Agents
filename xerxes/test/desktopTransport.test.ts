@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { createServer, type Server, type Socket as NetSocket } from 'node:net'
+import { spawn } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -9,6 +10,33 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, expect, test } from 'bun:test'
 
 import { DaemonRpc, MAX_FRAME_BYTES } from '../src/desktop/main/daemon.js'
+
+test('slow daemon startup retries reuse the child and recover when its socket appears', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'xds-'))
+  const path = join(directory, 'daemon.sock')
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
+  const exited = new Promise<void>(resolve => child.once('exit', () => resolve()))
+  let launches = 0
+  const rpc = new DaemonRpc({
+    projectDir: directory, env: { XERXES_DAEMON_SOCKET: path }, startupTimeoutMs: 25,
+    launch: () => { launches += 1; return child },
+  })
+  const daemon = new FakeDaemon(path, ['runtime.status'])
+  try {
+    await expect(rpc.call('runtime.status', {})).rejects.toThrow('still starting')
+    await expect(rpc.call('runtime.status', {})).rejects.toThrow('still starting')
+    expect(launches).toBe(1)
+    await daemon.listen()
+    expect(await rpc.call<{ ok: boolean }>('runtime.status', {})).toEqual({ ok: true })
+    expect(launches).toBe(1)
+  } finally {
+    rpc.dispose()
+    daemon.close()
+    child.kill('SIGTERM')
+    await exited
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
 
 // Transport contract for the fresh DaemonRpc, exercised against an
 // in-process fake daemon on a temp socket. Live auto-launch is covered by the
@@ -293,4 +321,99 @@ test('argv matches the frozen daemon launch contract', () => {
     'daemon', '--project-dir', root, '--socket', '/s/d.sock', '--pid-file', '/s/d.pid',
   ])
   expect(bunBinaryOf({ XERXES_TUI_BUN: '/opt/bun' })).toBe('/opt/bun')
+})
+
+test('SSH socket attachment keeps the remote project path and never launches locally',async()=>{
+ const fake=new FakeDaemon(socketPath,['runtime.status']);await fake.listen()
+ const rpc=new DaemonRpc({projectDir:'/remote/project',socketPath,env:{XERXES_BUN:'/must-not-launch'},deadlineMs:2000})
+ try{expect(await rpc.call<Record<string,unknown>>('runtime.status')).toEqual({ok:true});expect(rpc.projectDir).toBe('/remote/project')}
+ finally{rpc.dispose();fake.close()}
+ const missing=new DaemonRpc({projectDir:'/remote/project',socketPath:join(dir,'missing.sock'),env:{XERXES_BUN:'/must-not-launch'}})
+ try{await expect(missing.call('runtime.status')).rejects.toThrow('SSH transport unavailable')}
+ finally{missing.dispose()}
+})
+
+test('runtime update refuses remote transports without issuing a shutdown', async () => {
+  const rpc = new DaemonRpc({ projectDir: '/remote', socketPath: '/missing' })
+  expect(await rpc.restartRuntime()).toMatchObject({ ok: false, error: expect.stringContaining('remote machine') })
+  rpc.dispose()
+})
+
+test('runtime update leaves busy and unsupported daemons connected', async () => {
+  const daemon = new FakeDaemon(socketPath)
+  await daemon.listen()
+  const rpc = client()
+  try {
+    const pending = rpc.restartRuntime()
+    await until(() => daemon.requests.length === 1, 'restart request')
+    expect(daemon.requests[0]!.method).toBe('runtime.restart_if_idle')
+    daemon.reply(daemon.requests[0]!.id, { ok: false, busy: true })
+    expect(await pending).toEqual({ ok: false, busy: true })
+    expect(rpc.online).toBe(true)
+    const unsupported = rpc.restartRuntime()
+    await until(() => daemon.requests.length === 2, 'second restart request')
+    daemon.reply(daemon.requests[1]!.id, { ok: false, error: 'Unknown method' })
+    expect(await unsupported).toMatchObject({ ok: false, error: expect.stringContaining('older runtime') })
+    expect(rpc.online).toBe(true)
+  } finally { rpc.dispose(); daemon.close() }
+})
+
+test('runtime update waits for the old connection to close before reconnecting', async () => {
+  const daemon = new FakeDaemon(socketPath)
+  await daemon.listen()
+  const rpc = client()
+  let completed = false
+  try {
+    const pending = rpc.restartRuntime().then(result => { completed = true; return result })
+    await until(() => daemon.requests.length === 1, 'restart request')
+    daemon.reply(daemon.requests[0]!.id, { ok: true })
+    await new Promise(resolve => setTimeout(resolve, 40))
+    expect(completed).toBe(false)
+    // Keep the listener available, as a supervisor would, but replace the connection.
+    daemon.connections[0]!.destroy()
+    expect(await pending).toEqual({ ok: true })
+    expect(daemon.connections.length).toBeGreaterThan(1)
+  } finally { rpc.dispose(); daemon.close() }
+})
+
+test('explicit legacy restart checks activity and shuts down before reconnecting', async () => {
+  const daemon = new FakeDaemon(socketPath)
+  await daemon.listen()
+  const rpc = client()
+  try {
+    const pending = rpc.restartRuntime(true)
+    const replies: Array<[string, Record<string, unknown>]> = [
+      ['runtime.restart_if_idle', { ok: false, error: 'Unknown method: runtime.restart_if_idle' }],
+      ['runtime.status', { ok: true, active_subagents: 0, channels_configured: false }],
+      ['session.active_list', { ok: true, sessions: [{ key: 'session', status: 'idle', active_turn_id: '' }] }],
+      ['terminal.list', { ok: true, terminals: [] }],
+      ['monitor.list', { ok: true, monitors: [] }],
+      ['shutdown', { ok: true }],
+    ]
+    for (const [index, [method, reply]] of replies.entries()) {
+      await until(() => daemon.requests.length > index, method)
+      expect(daemon.requests[index]!.method).toBe(method)
+      daemon.reply(daemon.requests[index]!.id, reply)
+    }
+    await new Promise(resolve => setTimeout(resolve, 30))
+    daemon.connections[0]!.destroy()
+    expect(await pending).toEqual({ ok: true })
+  } finally { rpc.dispose(); daemon.close() }
+})
+
+test('explicit legacy restart refuses another session that is working', async () => {
+  const daemon = new FakeDaemon(socketPath)
+  await daemon.listen()
+  const rpc = client()
+  try {
+    const pending = rpc.restartRuntime(true)
+    await until(() => daemon.requests.length === 1, 'restart probe')
+    daemon.reply(daemon.requests[0]!.id, { ok: false, error: 'Unknown method' })
+    await until(() => daemon.requests.length === 2, 'status')
+    daemon.reply(daemon.requests[1]!.id, { ok: true, active_subagents: 0, channels_configured: false })
+    await until(() => daemon.requests.length === 3, 'sessions')
+    daemon.reply(daemon.requests[2]!.id, { ok: true, sessions: [{ key: 'other', status: 'working' }] })
+    expect(await pending).toEqual({ ok: false, busy: true })
+    expect(daemon.requests.some(row => row.method === 'shutdown')).toBe(false)
+  } finally { rpc.dispose(); daemon.close() }
 })

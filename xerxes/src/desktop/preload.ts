@@ -55,6 +55,21 @@ function cleanEvent(frame: unknown): { type: string; payload: Record<string, unk
 }
 
 const bridge = {
+  getResumeSession(): Promise<string | null> {
+    return ipcRenderer.invoke('desktop:resume')
+  },
+  voice(action: string, params: unknown = {}): Promise<unknown> {
+    if (!['check', 'transcribe', 'cancel'].includes(action))
+      return Promise.reject(new Error('Unknown dictation action'))
+    return ipcRenderer.invoke('desktop:voice', action, cleanParams(params))
+  },
+  remote(action: string, params: unknown = {}): Promise<unknown> {
+    if (
+      !['list', 'hosts', 'browse', 'save', 'remove', 'connect', 'cancel', 'status'].includes(action)
+    )
+      return Promise.reject(new Error('Unknown remote action'))
+    return ipcRenderer.invoke('desktop:remote', action, cleanParams(params))
+  },
   call<T = Record<string, unknown>>(method: unknown, params?: unknown): Promise<T> {
     if (typeof method !== 'string' || !METHOD.test(method)) {
       return Promise.reject(new TypeError(`invalid rpc method: ${String(method).slice(0, 32)}`))
@@ -90,9 +105,12 @@ const bridge = {
   },
 
   /** Enter a workspace by absolute folder path (sidebar header click). */
-  useWorkspace(dir: unknown): Promise<unknown> {
-    if (typeof dir !== 'string' || !dir) return Promise.reject(new TypeError('invalid workspace dir'))
-    return ipcRenderer.invoke(USE_WORKSPACE_CHANNEL, dir) as Promise<unknown>
+  useWorkspace(dir: unknown, resumeSessionId?: unknown): Promise<unknown> {
+    if (typeof dir !== 'string' || !dir)
+      return Promise.reject(new TypeError('invalid workspace dir'))
+    if (resumeSessionId !== undefined && (typeof resumeSessionId !== 'string' || !resumeSessionId || resumeSessionId.length > 256 || /[\x00-\x1f]/.test(resumeSessionId)))
+      return Promise.reject(new TypeError('invalid resume session id'))
+    return ipcRenderer.invoke(USE_WORKSPACE_CHANNEL, dir, resumeSessionId) as Promise<unknown>
   },
 
   /** The saved workspace folder, or null while the gate is showing. */
@@ -102,7 +120,8 @@ const bridge = {
 
   /** Whether the shell pings for needs-input / task-finished moments. */
   setNotifications(on: unknown): Promise<boolean> {
-    if (typeof on !== 'boolean') return Promise.reject(new TypeError('notifications expects a boolean'))
+    if (typeof on !== 'boolean')
+      return Promise.reject(new TypeError('notifications expects a boolean'))
     return ipcRenderer.invoke(NOTIFICATIONS_CHANNEL, on) as Promise<boolean>
   },
 
@@ -113,13 +132,15 @@ const bridge = {
 
   /** Register or unregister the app as a login item; returns the new state. */
   setLoginItem(on: unknown): Promise<boolean> {
-    if (typeof on !== 'boolean') return Promise.reject(new TypeError('login item expects a boolean'))
+    if (typeof on !== 'boolean')
+      return Promise.reject(new TypeError('login item expects a boolean'))
     return ipcRenderer.invoke(LOGIN_ITEM_SET_CHANNEL, on) as Promise<boolean>
   },
 
   /** Reveal one daemon-resolved user preset directory. Main re-checks containment. */
   openPath(path: unknown): Promise<boolean> {
-    if (typeof path !== 'string' || !path) return Promise.reject(new TypeError('invalid preset path'))
+    if (typeof path !== 'string' || !path)
+      return Promise.reject(new TypeError('invalid preset path'))
     return ipcRenderer.invoke(OPEN_PRESET_PATH_CHANNEL, path) as Promise<boolean>
   },
 }

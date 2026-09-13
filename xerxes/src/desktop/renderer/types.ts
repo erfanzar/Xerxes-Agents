@@ -18,12 +18,15 @@ export interface DaemonEvent {
 }
 
 export interface XerxesBridge {
+  getResumeSession?(): Promise<string | null>
+  voice?(action: string, params?: Record<string, unknown>): Promise<unknown>
+  remote?(action: string, params?: Record<string, unknown>): Promise<unknown>
   call<T = Record<string, unknown>>(method: string, params?: Record<string, unknown>): Promise<T>
   onEvent(handler: (event: DaemonEvent) => void): () => void
   /** Present the folder picker; the shell switches workspace and reloads. */
   chooseWorkspace?(): Promise<unknown>
   /** Enter a workspace folder directly (no dialog). */
-  useWorkspace?(dir: string): Promise<unknown>
+  useWorkspace?(dir: string, resumeSessionId?: string): Promise<unknown>
   /** Saved workspace folder, or null when the create-workspace gate shows. */
   getWorkspace?(): Promise<string | null>
   /** Ping for needs-input / task-finished moments when the app is unfocused. */
@@ -61,7 +64,7 @@ export interface ToolItem {
 }
 
 export type Block =
-  | { kind: 'user'; id: number; text: string }
+  | { kind: 'user'; id: number; text: string; contextSummary?: boolean }
   | { kind: 'agent'; id: number; text: string; streaming: boolean }
   | { kind: 'thinking'; id: number; text: string; streaming: boolean }
   | { kind: 'tools'; id: number; items: readonly ToolItem[]; running: boolean }

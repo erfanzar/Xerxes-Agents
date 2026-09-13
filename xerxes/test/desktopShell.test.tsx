@@ -7,8 +7,20 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
-import { Shell } from '../src/desktop/renderer/App.js'
+import { Shell, ActivityDetails, SessionDiagnostics } from '../src/desktop/renderer/App.js'
+import { DesktopPage, DesktopRail } from '../src/desktop/renderer/DesktopPanels.js'
 import type { Snapshot } from '../src/desktop/renderer/store.js'
+
+test('provider configuration failures retain their error and expose a settings action', () => {
+  for (const error of ['Authentication failed: invalid credential', 'Certificate verification failed']) {
+    const html = renderToStaticMarkup(createElement(Shell, { snap: snapshot({
+      failed: { error, turn: 2, lastUser: 'Continue the task' },
+    }) }))
+    expect(html).toContain(error)
+    expect(html).toContain('Provider settings')
+    expect(html).toContain('resubmit the instruction')
+  }
+})
 
 /**
  * Renders the presentational shell across connectivity states (SSR, no
@@ -91,9 +103,9 @@ const render = (snap: Snapshot): string =>
 
 test('the shell renders the right state in every connectivity mode', () => {
   const cases: Array<[string, Snapshot, string[]]> = [
-    ['offline', snapshot({ connection: 'offline' }), ['daemon offline', 'New task']],
-    ['connecting', snapshot({ connection: 'connecting' }), ['connecting']],
-    ['online-empty', snapshot({}), ['Describe the outcome']],
+    ['offline', snapshot({ connection: 'offline' }), ['Runtime offline', 'New session']],
+    ['connecting', snapshot({ connection: 'connecting' }), ['Connecting…']],
+    ['online-empty', snapshot({}), ['Describe what you need']],
     [
       'online-turn',
       snapshot({
@@ -105,7 +117,7 @@ test('the shell renders the right state in every connectivity mode', () => {
           { kind: 'agent', id: 3, text: 'here it is', streaming: true },
         ],
       }),
-      ['acting · 12s', 'Stop', 'map the repo', 'here it is', 'Acting… 12s', 'Grep'],
+      ['Working', 'Stop', 'map the repo', 'here it is', 'Acting… 12s', 'Grep'],
     ],
   ]
   for (const [label, snap, needles] of cases) {
@@ -118,13 +130,17 @@ test('the shell renders the right state in every connectivity mode', () => {
 
 test('a stale daemon handshake renders the actionable restart warning', () => {
   const html = render(snapshot({ daemonWarning: 'Daemon is older than the app — restart it.' }))
-  expect(html).toContain('Daemon is older than the app — restart it.')
-  expect(html).toContain('Restart the project daemon')
+  expect(html).toContain('Workspace runtime: Runtime update available')
+  expect(html).toContain('aria-haspopup="dialog"')
+  expect(html).not.toContain('Runtime update needed')
+  expect(html).not.toContain('daemon connected')
+  expect(html.match(/aria-label="Activity"/g)?.length).toBe(1)
+
 })
 
 test('a running turn shows live state and a Stop affordance', () => {
   const html = render(snapshot({ turnActive: true, turnSeconds: 8 }))
-  expect(html).toContain('acting · 8s')
+  expect(html).toContain('Working')
   expect(html).toContain('Stop')
 })
 
@@ -150,8 +166,20 @@ test('a mid-turn approval flips the header to needs-input even while acting', ()
   expect(html).toContain('Stop')
 })
 
-test('the statusline reflects mode, model, context and connection', () => {
-  const html = render(
+const renderStats = (snap: Snapshot): string => renderToStaticMarkup(createElement(SessionDiagnostics, {snap}))
+
+test('the main window does not render a diagnostic footer', () => {
+ const html = render(snapshot({contextTokens:0,contextMax:262000}))
+ expect(html).not.toContain('class="status"')
+ expect(html).not.toContain('ctx 0k/262k')
+ expect(html).not.toContain('Session statistics')
+ expect(html).toContain('Workspace runtime: Connected')
+ expect(html).not.toContain('daemon connected')
+ expect(html).not.toContain('build-notice')
+})
+
+test('session statistics align metrics and omit duplicate context and connection status', () => {
+  const html = renderStats(
     snapshot({
       planMode: true,
       model: 'kimi-for-coding',
@@ -168,25 +196,26 @@ test('the statusline reflects mode, model, context and connection', () => {
       cacheHitRate: 0.98,
     }),
   )
-  for (const needle of ['⏸ plan', '39 turns · 2106 steps', 'LLM 515m47s · Tool calls 2m', 'TTFT avg 8.5s', '43.0 tok/s', 'Cache hit 98%', 'Input 142K', 'kimi-for-coding', 'ctx 61k/262k', 'connected']) {
+  for (const needle of ['<dt>Turns</dt><dd>39</dd>', '<dt>Steps</dt><dd>2106</dd>', '515m47s', '2m', '8.5s', '43.0 tokens/s', '<dt>Cache hit</dt><dd>98%</dd>', '142K', 'kimi-for-coding']) {
     expect(html).toContain(needle)
   }
-  const acting = render(snapshot({ turnActive: true }))
-  expect(acting).toContain('▶ act')
-  expect(acting).toContain('Cache hit —')
+  const acting = renderStats(snapshot({ turnActive: true }))
+  expect(acting).not.toContain('connected')
+  expect(acting).not.toContain('Context:')
+  expect(acting).toContain('<dt>Cache hit</dt><dd>Unavailable</dd>')
 })
 
-test('the statusline shows the git branch and cost only when the wire reports them', () => {
-  const bare = render(snapshot({}))
+test('the optional session statistics shows the git branch and cost only when the wire reports them', () => {
+  const bare = renderStats(snapshot({}))
   expect(bare).not.toContain('⎇')
   expect(bare).not.toContain('$')
-  const full = render(snapshot({ branch: 'feat/cancel-safe', costUsd: 0.4123 }))
-  expect(full).toContain('⎇ feat/cancel-safe')
+  const full = renderStats(snapshot({ branch: 'feat/cancel-safe', costUsd: 0.4123 }))
+  expect(full).toContain('<dt>Branch</dt><dd>feat/cancel-safe</dd>')
   expect(full).toContain('$0.41')
   // Sub-cent costs keep four decimals; nothing is shown for a free run.
-  const tiny = render(snapshot({ costUsd: 0.0041 }))
+  const tiny = renderStats(snapshot({ costUsd: 0.0041 }))
   expect(tiny).toContain('$0.0041')
-  const free = render(snapshot({ costUsd: 0 }))
+  const free = renderStats(snapshot({ costUsd: 0 }))
   expect(free).not.toContain('$')
 })
 
@@ -290,7 +319,7 @@ test('the settings modal opens on its cards and reads daemon state', () => {
   expect(models).toContain('Discovered models · 2')
   expect(models).toContain('z-ai/glm-5.2')
   // Provider rows are live switches, not a static list.
-  expect(models).toContain('Providers · click to switch')
+  expect(models).toContain('Providers</div>')
   expect(models).toContain('switch ▸')
   expect(models).toContain('title="make zai the active profile"')
   // TUI parity: the profile CRUD surface the /provider flow offers.
@@ -299,6 +328,10 @@ test('the settings modal opens on its cards and reads daemon state', () => {
   // The active profile offers Edit but no Delete — switch away first.
   expect(models).toContain('title="edit kimi"')
   expect(models).not.toContain('title="delete kimi"')
+  const unavailable = render(snapshot({ settingsOpen: true, settingsTab: 'models', providerError: 'Profile file is unreadable' }))
+  expect(unavailable).toContain('Profile file is unreadable')
+  expect(unavailable).toContain('Retry loading providers')
+  expect(unavailable).not.toContain('No saved provider profiles')
   const permissions = render(snapshot({ settingsOpen: true, settingsTab: 'permissions', permissionMode: 'auto' }))
   expect(permissions).toContain('daemon reports: auto')
   expect(permissions).toContain('accept-all')
@@ -356,7 +389,7 @@ test('checkpoint markers and edit stats render in the activity feed', () => {
   expect(html).toContain('turn 1 end')
 })
 
-test('the feed renders think and tool activity as flat one-line rows', () => {
+test('the feed groups reasoning and tools while retaining individual execution details', () => {
   const html = render(
     snapshot({
       turnActive: true,
@@ -379,7 +412,8 @@ test('the feed renders think and tool activity as flat one-line rows', () => {
     }),
   )
   // Think row tails the latest streamed line; the full trail stays expandable.
-  expect(html).toContain('Think')
+  expect(html).toContain('Reasoning')
+  expect(html).toContain('activity-group')
   expect(html).toContain('<span class="frow__excerpt">and cleared, end to end. …</span>')
   // Tool row: title-cased label, arg summary, duration — no fold header.
   expect(html).toContain('Bash')
@@ -403,10 +437,9 @@ test('streaming thinking clips from the live tail instead of freezing its prefix
   expect(excerpt.length).toBeLessThanOrEqual(113)
 })
 
-test('the topbar renders the workspace as a switcher chip, not a dead label', () => {
+test('the sidebar and composer expose the current workspace', () => {
   const html = render(snapshot({ cwd: '/Users/erfan/Documents/Projects/EasyDeL' }))
-  expect(html).toContain('wschip')
-  expect(html).toContain('Switch workspace')
+  expect(html).toContain('studio-side-bottom')
   expect(html).toContain('EasyDeL')
 })
 
@@ -463,14 +496,13 @@ test('the header fleet chip opens the live subagent roster', () => {
   ]
   const html = render(snapshot({ currentId: 'c1', currentTitle: 'T', fleet }))
   expect(html).toContain('2 subagents')
-  // SSR renders local state closed; the roster mounts on click — but the
-  // rail lists the same rows either way.
-  expect(html).toContain('Analyze libs/eyvan')
-  expect(html).toContain('Analyze the OCI pipeline')
+  const details = renderToStaticMarkup(createElement(ActivityDetails, {snap:snapshot({fleet})}))
+  expect(details).toContain('Analyze libs/eyvan')
+  expect(details).toContain('Analyze the OCI pipeline')
 })
 
 test('the rail surfaces skill suggestions with observed tool telemetry', () => {
-  const html = render(snapshot({
+  const html = renderToStaticMarkup(createElement(ActivityDetails, {snap:snapshot({
     skillSuggestions: [{
       skillName: 'release-checklist',
       description: 'Repeat the verified release sequence.',
@@ -479,14 +511,14 @@ test('the rail surfaces skill suggestions with observed tool telemetry', () => {
       toolCount: 4,
       uniqueTools: ['Read', 'Bash'],
     }],
-  }))
+  })}))
   expect(html).toContain('Skill suggestions · 1')
   expect(html).toContain('release-checklist')
   expect(html).toContain('4 tool calls · Read, Bash')
 })
 
 test('the rail separates legacy template-forge traces from Creator mode', () => {
-  const html = render(snapshot({
+  const html = renderToStaticMarkup(createElement(ActivityDetails, {snap:snapshot({
     creatorTrace: [{
       action: 'define',
       name: 'briefing',
@@ -495,7 +527,7 @@ test('the rail separates legacy template-forge traces from Creator mode', () => 
       detail: '',
       at: '2026-03-24T10:00:00.000Z',
     }],
-  }))
+  })}))
   expect(html).toContain('Template forge · legacy')
   expect(html).toContain('define · briefing@0.1.0')
   expect(html).toContain('data-state="ok"')
@@ -547,19 +579,19 @@ test('the current session stays in the sidebar with live status, not excluded', 
   )
   // The open session renders as a row with its live acting state…
   expect(html).toContain('Ship cancel-safe loop')
-  expect(html).toContain('acting · 9s')
+  expect(html).toContain('Working')
   expect(html).toContain('is-current')
   // …inside the current workspace group, next to the folder's history.
   expect(html).toContain('Old chat')
 })
 
-test('an acting current row shows acting; an idle one shows the turn count', () => {
+test('session rows show active state without repetitive idle turn counts', () => {
   const acting = render(snapshot({ cwd: '/repo', currentId: 'c1', currentTitle: 'T', turnActive: true, turnSeconds: 4, turnCount: 1 }))
   // The status subline and the right-aligned age ride separate spans.
   expect(acting).toContain('acting')
   expect(acting).toContain('sess__age')
   const idle = render(snapshot({ cwd: '/repo', currentId: 'c1', currentTitle: 'T', turnActive: false, turnCount: 2 }))
-  expect(idle).toContain('2 turns')
+  expect(idle).not.toContain('2 turns')
 })
 
 // ── Session context menu (mockup 08) ────────────────────────────────────
@@ -589,7 +621,7 @@ test('the session context menu rename mode renders an inline field', () => {
 test('the general card renders creator policy and the stream-thinking switch', () => {
   const html = render(snapshot({ settingsOpen: true }))
   expect(html).toContain('Creator mode')
-  expect(html).toContain('DSH-style agent preset authoring · runtime inspection · changes apply to future sessions')
+  expect(html).toContain('Create and manage presets for future sessions')
   expect(html).toContain('Stream thinking')
   expect(html).toContain('switch is-on')
 })
@@ -610,18 +642,22 @@ test('streamThinking off hides thinking blocks but keeps the tool runs', () => {
 
 // ── New-task modal (mockup 18) ──────────────────────────────────────────
 
-test('Creator mode is a direct visible desktop launch, not hidden in settings', () => {
+test('specialized creation is removed from primary session navigation', () => {
   const html = render(snapshot({ currentAgentPreset: 'creator' }))
   expect(html).toContain('◈ Creator mode')
-  expect(html).toContain('Start a fresh DSH-style Creator mode session')
+  expect(html).not.toContain('Start a fresh DSH-style Creator mode session')
+  expect(html).toContain('Skills &amp; tools')
+  expect(html).toContain('Scheduled jobs')
 })
 
-test('the new-task modal renders the mockup-18 grammar', () => {
+test('the new-task modal renders accessible editable controls', () => {
   const html = render(snapshot({ taskModalOpen: true, permissionMode: 'auto' }))
   expect(html).toContain('New task')
   expect(html).toContain('Objective')
   expect(html).toContain('Review plan before changes')
-  expect(html).toContain('Start task ⏎')
+  expect(html).toContain('Start task ↵')
+  expect(html).toContain('select aria-label="Model"')
+  expect(html).not.toContain('Change the model from the composer chip once the task starts')
   expect(html).toContain('Cancel')
   expect(html).toContain('switch is-on')
   expect(html).toContain('approvals in this workspace: auto')
@@ -671,9 +707,10 @@ test('the MCP card renders connected and failed servers from the daemon', () => 
   expect(html).toContain('~/.xerxes/mcp.json')
 })
 
-test('the MCP card explains where configuration lives when no servers exist', () => {
+test('the MCP card waits for status before declaring an empty configuration', () => {
   const html = render(snapshot({ settingsOpen: true, settingsTab: 'mcp' }))
-  expect(html).toContain('No MCP servers configured')
+  expect(html).toContain('Checking server status')
+  expect(html).not.toContain('No MCP servers configured')
   expect(html).toContain('~/.xerxes/mcp.json')
 })
 
@@ -681,7 +718,7 @@ test('the composer goal badge follows parseGoal, not raw goal-text truthiness', 
   // The daemon answers an empty /goal query with prose and the store keeps
   // that string verbatim — truthiness alone lit the badge with no goal set.
   const none = render(snapshot({ goal: 'No goal is currently set.\nUsage: /goal [<objective>|clear|edit <objective>|pause|resume]' }))
-  expect(none).toContain('No goal set')
+  expect(none).not.toContain('goal set</span>')
   expect(none).not.toContain('◎ goal set')
 
   const armed = render(snapshot({ goal: 'Goal created\nStatus: active\nObjective: ship the release\nRounds: 0/20\nActivation: armed' }))
@@ -825,4 +862,66 @@ test('the preload exposes narrow validated capabilities, never raw ipcRenderer',
 test('the renderer actually starts the store in production', async () => {
   const app = await read('renderer/App.tsx')
   expect(app).toContain('store.start()')
+})
+
+
+test('settings notices preserve the welcome screen while errors and real conversation replace it', () => {
+  const notice = { kind: 'notice' as const, id: 901, error: false, text: 'Thinking: medium.' }
+  const html = render(snapshot({ blocks: [notice] }))
+  expect(html).toContain('welcome__wordmark')
+  expect(html).toContain('Thinking: medium.')
+  expect(html).toContain('welcome-notices')
+  const error = render(snapshot({ blocks: [{ ...notice, error: true, text: 'Provider failed' }] }))
+  expect(error).not.toContain('welcome__wordmark')
+  expect(error).toContain('Provider failed')
+})
+
+
+test('skills and agents are durable pages, task context is nonmodal', () => {
+  const snap = snapshot({})
+  for (const panel of ['agents', 'extensions'] as const) {
+    const html = renderToStaticMarkup(createElement(DesktopPage, { panel, snap }))
+    expect(html).not.toContain('aria-modal')
+    expect(html).toContain(panel === 'agents' ? 'Generate' : 'Search skills and tools')
+  }
+  for (const panel of ['files', 'review', 'activity'] as const) {
+    const html = renderToStaticMarkup(createElement(DesktopRail, { panel, snap, close() {}, activityDetails: null }))
+    expect(html).toContain('aria-label="Task context"')
+    expect(html).not.toContain('aria-modal')
+    expect(html).toContain('Close task context')
+  }
+})
+
+test("agents page exposes its project scope and workspace switch", () => {
+  const html = renderToStaticMarkup(createElement(DesktopPage, { panel: "agents", snap: snapshot({ cwd: "/work/project-a" }) }))
+  expect(html).toContain("/work/project-a")
+  expect(html).toContain("Change workspace…")
+  expect(html).toContain('aria-label="Agents"')
+})
+
+test('navigation remains available while a turn starts, streams, fails, or completes', () => {
+  for (const state of [
+    { sessionKey: '' },
+    { sessionKey: 'new-session', turnActive: true },
+    { sessionKey: 'new-session', turnActive: true, turnSeconds: 30 },
+    { sessionKey: 'new-session', turnActive: false, turnFailed: true },
+    { sessionKey: 'new-session', turnActive: false, turnCount: 1 },
+  ]) {
+    const html = render(snapshot(state))
+    expect(html).toContain('id="session-sidebar"')
+    expect(html).toContain('aria-expanded="true" aria-controls="session-sidebar"')
+    expect(html).not.toContain('atelier--focus')
+  }
+})
+
+test('welcome offers draft starters while navigation retains accessible button names', () => {
+  const html = render(snapshot({}))
+  expect(html).toContain('<h1 class="welcome__wordmark">XERXES</h1>')
+  expect(html).toContain('Understand this project')
+  expect(html).toContain('Review recent changes')
+  expect(html).toContain('Build something')
+  expect(html).toContain('aria-label="Search sessions"')
+  expect(html).toContain('aria-label="Project files"')
+  expect(html).toContain('aria-label="Toggle sidebar"')
+  expect(html).toContain('aria-hidden="true"')
 })

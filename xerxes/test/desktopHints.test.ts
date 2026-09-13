@@ -9,9 +9,11 @@ describe('composer hints', () => {
   test('a single slash token hints; prose and finished args never do', () => {
     expect(wantsHints('/')).toBe(true)
     expect(wantsHints('/com')).toBe(true)
+    expect(wantsHints('/compact ')).toBe(false)
     expect(wantsHints('/skill ')).toBe(true)
     expect(wantsHints('/skill rev')).toBe(true)
     expect(wantsHints('/skill review:sec')).toBe(true)
+    expect(wantsHints('/skill review ')).toBe(false)
     expect(wantsHints('hello')).toBe(false)
     expect(wantsHints('/compact now please')).toBe(false)
     expect(wantsHints('/skill rev extra words')).toBe(false)

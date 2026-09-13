@@ -23,6 +23,8 @@ import {
   EXPECTED_DAEMON_BUILD_ID,
 } from './buildInfo.js'
 import { sessionToMarkdown, type ExportSession } from './exportMarkdown.js'
+import { selectedSession, rememberSession } from './sessionPreference.js'
+import { desktopCall, desktopError } from './desktopRpc.js'
 import type {
   AgentMember,
   AgentPreset,
@@ -156,6 +158,9 @@ export interface SessionMenuState {
   readonly title: string
   readonly x: number
   readonly y: number
+  readonly renaming?: boolean
+  readonly pending?: boolean
+  readonly error?: string
 }
 
 export interface ReasoningLevelRow {
@@ -182,6 +187,7 @@ export interface Snapshot {
   readonly currentAgentPreset: string
   /** Live DSH-style preset roster used by settings and the new-task seat. */
   readonly agentPresets: readonly AgentPreset[]
+  readonly agentPresetsError: string | null
   /** Messaging gateways from `channel.list`, kept fresh by `channel_status` broadcasts. */
   readonly channels: readonly ChannelRow[]
   readonly channelsAvailable: boolean
@@ -189,6 +195,7 @@ export interface Snapshot {
   /** Daemon-tracked terminals from `terminal.list` (owner: the bound session). */
   readonly terminals: readonly TerminalRow[]
   readonly terminalsLoading: boolean
+  readonly terminalsError: string | null
   /** Transcript search (`session.search`) state for the search overlay. */
   readonly searchOpen: boolean
   readonly searchResults: readonly SessionSearchHit[]
@@ -199,6 +206,8 @@ export interface Snapshot {
   readonly branch: string
   /** Actionable initialize-handshake mismatch; null when app and daemon agree. */
   readonly daemonWarning: string | null
+  readonly runtimeUpdate?: 'checking' | 'waiting' | 'restarting' | 'failed'
+  readonly runtimeUpdateMessage?: string
   /** Session cost estimate from the daemon wire (USD); null when unpriced. */
   readonly costUsd: number | null
   /** MCP server statuses from the daemon; empty until fetched or without servers. */
@@ -240,6 +249,7 @@ export interface Snapshot {
   readonly question: import('./types.js').TaskQuestion | null
   readonly planMode: boolean
   readonly turnActive: boolean
+  readonly networkRetrying?: boolean
   readonly turnFailed: boolean
   readonly turnSeconds: number
   readonly blocks: readonly Block[]
@@ -272,6 +282,8 @@ export interface Snapshot {
   readonly reasoningNote: string
   readonly reasoningLoading: boolean
   readonly wsMenuOpen: boolean
+  readonly workspaceBusy: boolean
+  readonly workspaceError: string | null
   readonly sessionMenu: SessionMenuState | null
   /** Display choice: show reasoning trails in the activity feed. */
   readonly streamThinking: boolean
@@ -279,6 +291,7 @@ export interface Snapshot {
   readonly taskModalOpen: boolean
   // ── settings data ──
   readonly providers: readonly ProviderRow[]
+  readonly providerError: string
   /** Model catalogs and editable capacities cached for each provider profile. */
   readonly providerModels: Readonly<Record<string, readonly CachedModel[]>>
   readonly providerModelLoading: readonly string[]
@@ -619,6 +632,7 @@ export class Store {
   private builder = new BlockBuilder()
   private tick: NodeJS.Timeout | null = null
   private heartbeat: NodeJS.Timeout | null = null
+  private updatingRuntime = false
   /** In-flight agent-family tool calls; the fleet poll lives while any do. */
   private readonly pendingAgentCalls = new Set<string>()
   private fleetPoll: NodeJS.Timeout | null = null
@@ -658,11 +672,13 @@ export class Store {
       model: '',
       currentAgentPreset: 'default',
       agentPresets: [],
+      agentPresetsError: null,
       channels: [],
       channelsAvailable: false,
       channelsConfigured: false,
       terminals: [],
       terminalsLoading: false,
+      terminalsError: null,
       searchOpen: false,
       searchResults: [],
       searchStats: null,
@@ -699,7 +715,7 @@ export class Store {
       approval: null,
       question: null,
       planMode: false,
-      turnActive: false,
+      turnActive: false, networkRetrying: false,
       turnFailed: false,
       turnSeconds: 0,
       blocks: [],
@@ -727,10 +743,13 @@ export class Store {
       reasoningNote: '',
       reasoningLoading: false,
       wsMenuOpen: false,
+      workspaceBusy: false,
+      workspaceError: null,
       sessionMenu: null,
       streamThinking: readStreamThinking(),
       taskModalOpen: false,
       providers: [],
+      providerError: '',
       providerModels: {},
       providerModelLoading: [],
       providerModelWarnings: {},
@@ -764,17 +783,20 @@ export class Store {
         this.patch({ noWorkspace: true, connection: 'offline' })
         return
       }
-      this.initializeLive()
+      this.initializeLive(typeof saved === 'string' ? saved : '')
     })
   }
 
-  private initializeLive(): void {
-    void this.initializeSelfHealing().then(
+  private initializeLive(workspace: string): void {
+    void Promise.resolve(this.bridge.getResumeSession?.()).then(explicitId => {
+      const id = explicitId || (workspace ? selectedSession(workspace) : null)
+      return this.initializeSelfHealing(id ? { resume_session_id: id } : {})
+    }).then(
       () => {
         void this.refreshGoal()
         void this.refreshSessions()
       },
-      () => this.wentOffline(),
+      error => this.wentOffline(error),
     )
     this.heartbeat = setInterval(() => void this.beat(), HEARTBEAT_MS)
     this.heartbeat.unref?.()
@@ -886,14 +908,43 @@ export class Store {
   }
 
   /** Ask the attached process to exit; DaemonRpc reconnects and launches this build. */
-  restartDaemon(): void {
-    this.patch({ connection: 'connecting' })
-    void this.bridge.call('slash', { command: '/restart' }).catch(error => this.fail(error))
+  async restartDaemon(allowLegacy = true): Promise<void> {
+    if (this.updatingRuntime) return
+    if (this.frame.daemonWarning?.startsWith('The app is older')) {
+      this.patch({ runtimeUpdate: 'failed', runtimeUpdateMessage: 'Update and relaunch the desktop app. Its bundled runtime is older than the running runtime.' })
+      return
+    }
+    this.updatingRuntime = true
+    this.patch({ runtimeUpdate: 'checking', runtimeUpdateMessage: 'Checking for running work…' })
+    try {
+      const result = await this.bridge.call('desktop.restartRuntime', { session_key: this.sessionKey, allow_legacy: allowLegacy })
+      if (result.ok !== true) {
+        if (result.busy === true) {
+          this.patch({ runtimeUpdate: 'waiting', runtimeUpdateMessage: 'Running work is still active. Retry the update after it finishes.' })
+          return
+        }
+        throw new Error(str(result.error) || 'This runtime cannot update automatically. Restart the workspace runtime from its terminal, then reopen the app.')
+      }
+      this.patch({ runtimeUpdate: 'restarting', runtimeUpdateMessage: 'Reconnecting to the updated runtime…' })
+      await this.initialize(this.frame.currentId ? { resume_session_id: this.frame.currentId } : {})
+      if (this.frame.daemonWarning) throw new Error('The runtime restarted, but its build still differs. Quit and relaunch the latest app; check any custom runtime path.')
+      this.patch({ runtimeUpdate: undefined, runtimeUpdateMessage: undefined })
+    } catch (error) {
+      this.patch({ runtimeUpdate: 'failed', runtimeUpdateMessage: error instanceof Error ? error.message : String(error) })
+    } finally {
+      this.updatingRuntime = false
+    }
   }
 
   async openSession(id: string): Promise<void> {
     if (this.frame.turnActive) return
     try {
+      const row = [...this.frame.sessions, ...this.frame.live].find(session => session.id === id)
+      if (row?.cwd && row.cwd !== this.frame.cwd) {
+        if (!this.bridge.useWorkspace) throw new Error('This host cannot switch workspaces. Open the session from its project folder.')
+        await this.bridge.useWorkspace(row.cwd, id)
+        return
+      }
       // A resume re-keys the connection, but NOT to a string of our own
       // choosing: the daemon binds a resumed session under the session id
       // (resume_session_id wins over session_key — see its 'ignored-slot'
@@ -1232,33 +1283,54 @@ export class Store {
    * `/skill <name>` references (the same registry `/skills` lists). The one
    * completion source of truth — the TUI's — not a GUI-local copy.
    */
-  async completeText(text: string): Promise<{ value: string; label: string; meta: string }[]> {
-    const result = await this.bridge.call('complete', { text })
-    const completions = Array.isArray(result.completions) ? result.completions : []
+  async completeText(text: string): Promise<{ value: string; label: string; meta: string; kind: 'command' | 'skill' }[]> {
+    const queries = /^\/[^\s]*$/.test(text) && text !== '/skill'
+      ? [text, '/skill ' + text.slice(1)] : [text]
+    const results = await Promise.all(queries.map(text => this.bridge.call('complete', { text })))
+    const completions = results.flatMap(result => Array.isArray(result.completions) ? result.completions : [])
     return completions
       .map(raw => {
         const entry = (raw ?? {}) as Record<string, unknown>
         const value = str(entry.value)
-        return { value, label: str(entry.label) || value, meta: str(entry.meta) }
+        return { value, label: str(entry.label) || value, meta: str(entry.meta), kind: (entry.category !== undefined ? 'command' : 'skill') as 'command' | 'skill' }
       })
-      .filter(entry => entry.value)
+      .filter((entry, index, entries) => entry.value && entries.findIndex(other => other.value === entry.value) === index)
   }
 
   /**
    * Ask the shell for a workspace folder. On a pick the shell retargets its
    * daemon and reloads this window — the renderer's job ends at the request.
    */
-  chooseWorkspace(): void {
-    void this.bridge.chooseWorkspace?.().catch(() => {})
+  chooseWorkspace(): Promise<void> {
+    return this.requestWorkspace(async () => {
+      if (!this.bridge.chooseWorkspace) throw new Error('This host cannot open a workspace folder.')
+      await this.bridge.chooseWorkspace()
+    })
   }
 
   /** Enter a known workspace folder (sidebar header, switcher menu) — retargets the daemon. */
-  enterWorkspace(cwd: string): void {
-    if (!cwd) return
-    this.patch({ wsMenuOpen: false })
-    void (this.bridge as XerxesLike & { useWorkspace?: (dir: string) => Promise<unknown> })
-      .useWorkspace?.(cwd)
-      .catch(() => {})
+  enterWorkspace(cwd: string): Promise<void> {
+    if (!cwd) return Promise.resolve()
+    return this.requestWorkspace(async () => {
+      if (!this.bridge.useWorkspace) throw new Error('This host cannot switch workspace folders.')
+      await this.bridge.useWorkspace(cwd)
+    })
+  }
+
+  clearWorkspaceError(): void {
+    this.patch({ workspaceError: null })
+  }
+
+  private async requestWorkspace(action: () => Promise<void>): Promise<void> {
+    if (this.frame.workspaceBusy) return
+    this.patch({ wsMenuOpen: false, workspaceBusy: true, workspaceError: null })
+    try {
+      await action()
+    } catch (error) {
+      this.patch({ workspaceError: desktopError(error) })
+    } finally {
+      this.patch({ workspaceBusy: false })
+    }
   }
 
   pickModel(modelId: string): void {
@@ -1540,6 +1612,7 @@ export class Store {
     if (this.frame.turnActive || this.frame.connection !== 'online') return
     this.patch({ taskModalOpen: true, paletteOpen: false, wsMenuOpen: false, sessionMenu: null })
     void this.loadAgentPresets()
+    this.loadModels()
   }
 
   closeTaskModal(): void {
@@ -1551,14 +1624,26 @@ export class Store {
    * to THAT session, then the objective submitted — in this order, so the
    * ceiling and the first message land on the session they belong to.
    */
-  async startTask(objective: string, planFirst: boolean, agentPreset?: string): Promise<void> {
-    this.patch({ taskModalOpen: false })
+  async startTask(objective: string, planFirst: boolean, agentPreset?: string, model?: string): Promise<void> {
     if (this.frame.turnActive || this.frame.connection !== 'online') return
+    this.patch({ error: null })
     const bound = await this.beginFreshTask(agentPreset)
     if (!bound) return
-    if (planFirst && !this.frame.planMode) this.setPlanMode(true)
-    const text = objective.trim()
-    if (text) await this.submit(text)
+    try {
+      if (model) {
+        const result = await this.bridge.call('slash', { session_key: this.sessionKey, command: `/model ${model}` })
+        if (result.ok === false) throw new Error(str(result.error) || 'Model change rejected')
+        this.patch({ model: str(result.model) || model })
+      }
+      if (planFirst !== this.frame.planMode) {
+        const result = await this.bridge.call('set_plan_mode', { session_key: this.sessionKey, enabled: planFirst })
+        if (result.ok === false) throw new Error(str(result.error) || 'Plan mode could not be enabled')
+        this.patch({ planMode: planFirst })
+      }
+      this.patch({ taskModalOpen: false })
+      const text = objective.trim()
+      if (text) await this.submit(text)
+    } catch (error) { this.fail(error) }
   }
 
   // ── Session context menu (mockup 08) ─────────────────────────────────
@@ -1581,16 +1666,19 @@ export class Store {
   async renameSession(key: string, title: string): Promise<void> {
     const clean = title.trim()
     const anchor = this.frame.sessionMenu
-    this.patch({ sessionMenu: null })
-    if (!clean) return
+    if (anchor?.pending) return
+    if (!clean) { this.closeSessionMenu(); return }
+    const pending = anchor ? { ...anchor, title: clean, renaming: true, pending: true, error: '' } : null
+    if (pending) this.patch({ sessionMenu: pending })
     try {
-      await this.bridge.call('session.title', { session_key: key, title: clean })
+      await desktopCall(this.bridge, key, 'session.title', { title: clean })
+      if (this.frame.sessionMenu === pending) this.closeSessionMenu()
       this.refreshSessions()
     } catch (error) {
-      // Observable, not swallowed: the menu reopens at its anchor so the
-      // failed rename is visible and retryable.
-      if (anchor) this.patch({ sessionMenu: anchor })
-      console.error('session.title failed', error)
+      // Preserve the attempted title, but never resurrect a dismissed menu.
+      if (pending && this.frame.sessionMenu === pending) {
+        this.patch({ sessionMenu: { ...pending, pending: false, error: desktopError(error) } })
+      } else if (!anchor) this.fail(new Error(`Rename failed: ${desktopError(error)}`))
     }
   }
 
@@ -1601,22 +1689,26 @@ export class Store {
    */
   async exportSessionTranscript(key: string): Promise<void> {
     this.patch({ sessionMenu: null })
-    if (typeof document === 'undefined') return
     try {
-      const result = await this.bridge.call('session.status', { session_key: key })
-      const record = (this.sessionOf(result) ?? result) as unknown as ExportSession
-      const markdown = sessionToMarkdown(record)
-      const anchor = document.createElement('a')
-      anchor.href = URL.createObjectURL(new Blob([markdown], { type: 'text/markdown' }))
-      anchor.download = `${(str(record.title) || str(record.id) || 'session').replace(/[^\w-]+/g, '-').slice(0, 64) || 'session'}.md`
-      document.body.appendChild(anchor)
-      anchor.click()
-      anchor.remove()
-      setTimeout(() => URL.revokeObjectURL(anchor.href), 5_000)
+      await this.downloadSessionTranscript(key)
     } catch (error) {
-      // Observable, not swallowed — a failed export must say so.
       this.fail(new Error(`export failed: ${String(error)}`))
     }
+  }
+
+  /** Export for a surface that owns its own pending and error presentation. */
+  async downloadSessionTranscript(key: string): Promise<void> {
+    if (typeof document === 'undefined') throw new Error('Transcript downloads require a desktop or browser window')
+    const result = await desktopCall(this.bridge, key, 'session.status')
+    const record = (this.sessionOf(result) ?? result) as unknown as ExportSession
+    const markdown = sessionToMarkdown(record)
+    const anchor = document.createElement('a')
+    anchor.href = URL.createObjectURL(new Blob([markdown], { type: 'text/markdown' }))
+    anchor.download = `${(str(record.title) || str(record.id) || 'session').replace(/[^\w-]+/g, '-').slice(0, 64) || 'session'}.md`
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
+    setTimeout(() => URL.revokeObjectURL(anchor.href), 5_000)
   }
 
   /**
@@ -1722,27 +1814,34 @@ export class Store {
     })
   }
 
+  clearAgentPresetError(): void {
+    this.patch({ agentPresetsError: null })
+  }
+
   async loadAgentPresets(): Promise<void> {
+    this.patch({ agentPresetsError: null })
     try {
       const result = await this.bridge.call('agentPreset.list', {})
       if (result.ok === false) throw new Error(str(result.error) || 'could not load agent presets')
       this.patch({ agentPresets: agentPresetsFromResult(result) })
     } catch (error) {
-      this.fail(error)
+      this.patch({ agentPresetsError: desktopError(error) })
     }
   }
 
   async setDefaultAgentPreset(id: string): Promise<void> {
+    this.patch({ agentPresetsError: null })
     try {
       const result = await this.bridge.call('agentPreset.setDefault', { agent_preset: id })
       if (result.ok === false) throw new Error(str(result.error) || 'could not set default agent preset')
       await this.loadAgentPresets()
     } catch (error) {
-      this.fail(error)
+      this.patch({ agentPresetsError: desktopError(error) })
     }
   }
 
   async copyAgentPreset(from: string, id: string, name?: string): Promise<boolean> {
+    this.patch({ agentPresetsError: null })
     try {
       const result = await this.bridge.call('agentPreset.copy', {
         from,
@@ -1753,18 +1852,19 @@ export class Store {
       await this.loadAgentPresets()
       return true
     } catch (error) {
-      this.fail(error)
+      this.patch({ agentPresetsError: desktopError(error) })
       return false
     }
   }
 
   async removeAgentPreset(id: string): Promise<void> {
+    this.patch({ agentPresetsError: null })
     try {
       const result = await this.bridge.call('agentPreset.remove', { agent_preset: id })
       if (result.ok === false) throw new Error(str(result.error) || 'could not remove agent preset')
       await this.loadAgentPresets()
     } catch (error) {
-      this.fail(error)
+      this.patch({ agentPresetsError: desktopError(error) })
     }
   }
 
@@ -1776,13 +1876,14 @@ export class Store {
 
   /** Persist an edited preset body (`agentPreset.write`); the daemon revalidates on save. */
   async writeAgentPreset(id: string, content: string): Promise<boolean> {
+    this.patch({ agentPresetsError: null })
     try {
       const result = await this.bridge.call('agentPreset.write', { agent_preset: id, content })
       if (result.ok === false) throw new Error(str(result.error) || 'could not save agent preset')
       await this.loadAgentPresets()
       return true
     } catch (error) {
-      this.fail(error)
+      this.patch({ agentPresetsError: desktopError(error) })
       return false
     }
   }
@@ -1790,6 +1891,7 @@ export class Store {
   /** Bind an existing preset to the current session (`agentPreset.select`). */
   async selectAgentPreset(id: string): Promise<boolean> {
     if (!this.frame.currentId || this.frame.turnActive) return false
+    this.patch({ agentPresetsError: null })
     try {
       const result = await this.bridge.call('agentPreset.select', {
         agent_preset: id,
@@ -1800,19 +1902,22 @@ export class Store {
       if (applied) this.patch({ currentAgentPreset: applied })
       return true
     } catch (error) {
-      this.fail(error)
+      this.patch({ agentPresetsError: desktopError(error) })
       return false
     }
   }
 
   async openAgentPresetLocation(id: string): Promise<void> {
+    this.patch({ agentPresetsError: null })
     try {
       const result = await this.bridge.call('agentPreset.openDocument', { agent_preset: id })
       if (result.ok === false) throw new Error(str(result.error) || 'could not open agent preset')
       const path = str(result.path)
-      if (path) await window.xerxes.openPath?.(path)
+      if (!path) throw new Error('The runtime did not return a preset location')
+      if (!window.xerxes.openPath) throw new Error('Opening preset folders requires the desktop host')
+      if (!await window.xerxes.openPath(path)) throw new Error('The system file manager could not open this preset folder')
     } catch (error) {
-      this.fail(error)
+      this.patch({ agentPresetsError: desktopError(error) })
     }
   }
 
@@ -1844,9 +1949,9 @@ export class Store {
   }
 
   /** Enable or disable one gateway; the response list and the `channel_status` broadcast both refresh the panel. */
-  setChannelEnabled(name: string, enabled: boolean): void {
+  setChannelEnabled(name: string, enabled: boolean): Promise<void> {
     const method = enabled ? 'channel.enable' : 'channel.disable'
-    void this.bridge
+    return this.bridge
       .call(method, { name })
       .then(result => {
         if (result.ok === false) throw new Error(str(result.error) || `could not ${enabled ? 'enable' : 'disable'} ${name}`)
@@ -1857,21 +1962,20 @@ export class Store {
         this.patch({ channels: status.channels })
         this.loadChannels()
       })
-      .catch(error => this.fail(error))
   }
 
   // ── Terminals ────────────────────────────────────────────────────────
 
   loadTerminals(): void {
-    this.patch({ terminalsLoading: true })
+    this.patch({ terminalsLoading: true, terminalsError: null })
     void this.bridge
       .call('terminal.list', { session_key: this.sessionKey })
       .then(result => {
+        if (result.ok === false) throw new Error(str(result.error) || 'Could not list terminals')
         this.patch({ terminals: terminalsFromResult(result), terminalsLoading: false })
       })
       .catch(error => {
-        this.patch({ terminalsLoading: false })
-        this.fail(error)
+        this.patch({ terminalsLoading: false, terminalsError: desktopError(error) })
       })
   }
 
@@ -1887,14 +1991,14 @@ export class Store {
   }
 
   /** Send input to, interrupt, or kill one terminal (`terminal.control`). */
-  controlTerminal(id: string, action: 'write' | 'interrupt' | 'kill', chars?: string): void {
+  async controlTerminal(id: string, action: 'write' | 'interrupt' | 'kill', chars?: string): Promise<void> {
     const params: Record<string, unknown> = {
       action,
       terminal_id: id,
       session_key: this.sessionKey,
       ...(action === 'write' ? { chars: chars ?? '' } : {}),
     }
-    void this.bridge
+    await this.bridge
       .call('terminal.control', params)
       .then(result => {
         if (result.ok === false) throw new Error(str(result.error) || `terminal ${action} refused`)
@@ -1907,7 +2011,6 @@ export class Store {
             : this.frame.terminals,
         })
       })
-      .catch(error => this.fail(error))
   }
 
   // ── Session search ───────────────────────────────────────────────────
@@ -1972,9 +2075,11 @@ export class Store {
   }
 
   async loadProviders(): Promise<void> {
+    this.patch({ providerError: '' })
     const providers = this.bridge
       .call('provider_list', {})
       .then(result => {
+        if (result.ok === false) throw new Error(str(result.error) || 'Could not load provider profiles')
         const rows = Array.isArray(result.profiles) ? (result.profiles as unknown[]) : []
         return rows
           .map(raw => {
@@ -1991,7 +2096,7 @@ export class Store {
           })
           .filter((row): row is ProviderRow => row !== null)
       })
-      .catch(() => null)
+      .catch(error => { this.patch({ providerError: error instanceof Error ? error.message : String(error) }); return null })
     // The adapter catalog for the add/edit form; an older daemon simply
     // lacks the method, and the form falls back to a free-text type field.
     const types = this.bridge
@@ -2016,7 +2121,7 @@ export class Store {
       .call('runtime.status', {})
       .then(result => ({ permissionMode: str(result.permission_mode), model: str(result.model) }))
       .catch(() => null)
-    void Promise.all([providers, types, status]).then(([rows, typeRows, state]) => {
+    await Promise.all([providers, types, status]).then(([rows, typeRows, state]) => {
       if (rows) this.patch({ providers: rows })
       if (typeRows) this.patch({ providerTypes: typeRows })
       // Daemon-wide fallback only: a session-scoped /permissions pin from
@@ -2049,20 +2154,21 @@ export class Store {
     const extra: Record<string, unknown> = this.frame.currentId
       ? { resume_session_id: this.frame.currentId }
       : {}
-    void this.initializeSelfHealing().then(
+    void this.initializeSelfHealing(extra).then(
       () => {
         void this.refreshGoal()
         void this.refreshSessions()
       },
-      () => this.wentOffline(),
+      error => this.wentOffline(error),
     )
   }
 
   private cameOnline(): void {
-    if (this.frame.connection !== 'online') this.patch({ connection: 'online' })
+    if (this.frame.connection !== 'online') this.patch({ connection: 'online', error: null })
   }
 
-  private wentOffline(): void {
+  private wentOffline(error?: unknown): void {
+    if (error !== undefined) this.patch({ error: error instanceof Error ? error.message : String(error) })
     // A daemon that died mid-turn will never send turn_end; clear the
     // acting badge (and with it the 1s tick) or Stop/⌘N stay bricked
     // against a turn that no longer exists. The live runs must fold too:
@@ -2082,6 +2188,7 @@ export class Store {
 
   /** Cheap liveness probe; also heals the badge after a daemon restart. */
   private async beat(): Promise<void> {
+    if (this.updatingRuntime) return
     if (this.frame.connection === 'online') {
       // Events would still be flowing; a silent socket only shows when a
       // call dies, which every action already routes through fail().
@@ -2089,15 +2196,14 @@ export class Store {
     }
     try {
       await this.bridge.call('runtime.status', {})
-      this.cameOnline()
       const extra: Record<string, unknown> = this.frame.currentId
         ? { resume_session_id: this.frame.currentId }
         : {}
       await this.initialize(extra)
       void this.refreshGoal()
       void this.refreshSessions()
-    } catch {
-      this.wentOffline()
+    } catch (error) {
+      this.wentOffline(error)
     }
   }
 
@@ -2108,8 +2214,9 @@ export class Store {
     // Passthrough — the wrapper must forward EVERY preload method or the
     // optional calls silently do nothing.
     chooseWorkspace: () => window.xerxes.chooseWorkspace?.() ?? Promise.resolve(null),
-    useWorkspace: dir => window.xerxes.useWorkspace?.(dir) ?? Promise.resolve(null),
+    useWorkspace: (dir, resumeSessionId) => window.xerxes.useWorkspace?.(dir, resumeSessionId) ?? Promise.resolve(null),
     getWorkspace: () => window.xerxes.getWorkspace?.() ?? Promise.resolve(''),
+    getResumeSession: () => window.xerxes.getResumeSession?.() ?? Promise.resolve(null),
   }
 
   private sessionOf(result: Record<string, unknown>): Record<string, unknown> {
@@ -2157,7 +2264,13 @@ export class Store {
     // key — every session-scoped call below must target what the daemon
     // actually bound or it silently addresses a fresh session.
     const boundKey = str(session.key) || str(result.session_id)
-    if (extra.resume_session_id && boundKey) this.sessionKey = boundKey
+    if (extra.resume_session_id && boundKey) {
+      this.sessionKey = boundKey
+      this.builder.reset(blocksFromStoredMessages(session.transcript ?? session.messages, {
+        executions: session.tool_executions, thinking: session.thinking_content,
+      }))
+      this.resetWorkspaceFolds()
+    }
     const reportedContextLimit = num(result.context_limit)
     const contextLimit = reportedContextLimit !== null && reportedContextLimit > 0
       ? reportedContextLimit
@@ -2167,12 +2280,14 @@ export class Store {
     // would show ▶ act forever with blinking carets on finished messages —
     // reconcile to the daemon and close any stranded live runs.
     const daemonInTurn = str(session.active_turn_id) !== ''
+    if (daemonInTurn && !this.frame.turnActive) this.startTurn()
     if (!daemonInTurn && this.frame.turnActive) {
       this.stopTick()
       this.builder.finalize()
     }
     this.patch({
       connection: 'online',
+      error: null,
       currentId: str(result.session_id ?? session.id),
       currentTitle: str(session.title),
       sessionKey: this.sessionKey,
@@ -2375,13 +2490,12 @@ export class Store {
     this.fleetPollRounds = 0
   }
 
-  /** Fetch MCP server statuses for the settings card (best-effort). */
-  refreshMcpStatus(): void {
-    void this.bridge
-      .call('session.status', { session_key: this.sessionKey })
+  /** Fetch MCP statuses without presenting an unavailable response as empty. */
+  refreshMcpStatus(): Promise<void> {
+    return desktopCall(this.bridge, this.sessionKey, 'session.status')
       .then(result => {
         const raw = (this.sessionOf(result).mcp_status ?? (result as Record<string, unknown>).mcp_status) as unknown
-        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('MCP status is unavailable from this runtime. Check the runtime version and connection.')
         const statuses: Record<string, McpServerStatus> = {}
         for (const [name, value] of Object.entries(raw as Record<string, unknown>)) {
           if (!value || typeof value !== 'object') continue
@@ -2396,17 +2510,12 @@ export class Store {
         }
         this.patch({ mcpStatus: statuses })
       })
-      .catch(() => {})
   }
 
   /** Reconnect every configured MCP server through the daemon's slash RPC. */
   async reloadMcp(): Promise<void> {
-    try {
-      await this.bridge.call('slash', { command: '/reload-mcp' })
-      this.refreshMcpStatus()
-    } catch (error) {
-      this.fail(error)
-    }
+    await desktopCall(this.bridge, this.sessionKey, 'slash', { command: '/reload-mcp' })
+    await this.refreshMcpStatus()
   }
 
   private refreshSessions(): void {
@@ -2674,6 +2783,8 @@ export class Store {
         break
       }
       case 'status_update': {
+        if (payload.kind === 'network_retry') this.patch({ networkRetrying: true })
+        if (payload.kind === 'provider_ready') this.patch({ networkRetrying: false })
         const patch: Record<string, unknown> = {}
         if (typeof payload.model === 'string' && payload.model) patch.model = payload.model
         if (typeof payload.context_tokens === 'number') patch.contextTokens = payload.context_tokens
@@ -2926,7 +3037,7 @@ export class Store {
   private startTurn(): void {
     this.activeMetricTools.clear()
     this.patch({
-      turnActive: true,
+      turnActive: true, networkRetrying: false,
       turnFailed: false,
       turnSeconds: 0,
       metricPhase: 'llm',
@@ -2948,7 +3059,10 @@ export class Store {
 
   private fail(error: unknown): void {
     const message = error instanceof Error ? error.message : String(error)
-    if (/connect|socket|offline|disposed|closed|not ready|launch/i.test(message)) this.wentOffline()
+    if (/connect|socket|offline|disposed|closed|not ready|launch/i.test(message)) {
+      this.wentOffline(error)
+      return
+    }
     this.patch({ error: message })
     this.builder.push('notification', { severity: 'error', message })
     this.notify()
@@ -2965,6 +3079,7 @@ export class Store {
       turnCount: this.turnCount,
       snippets: this.snippets,
     })
+    if ('currentId' in merge || 'cwd' in merge) rememberSession(this.frame.cwd, this.frame.currentId)
     this.emit()
   }
 
@@ -2993,8 +3108,9 @@ export interface XerxesLike {
   call(method: string, params?: Record<string, unknown>): Promise<Record<string, unknown>>
   /** Present on the real preload bridge; test bridges may omit it. */
   chooseWorkspace?(): Promise<unknown>
-  useWorkspace?(dir: string): Promise<unknown>
+  useWorkspace?(dir: string, resumeSessionId?: string): Promise<unknown>
   getWorkspace?(): Promise<string | null>
+  getResumeSession?(): Promise<string | null>
 }
 
 export const store = new Store()

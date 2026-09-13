@@ -3,10 +3,12 @@
 
 import { createRoot } from 'react-dom/client'
 
+import { restoreAppearance } from './appearance.js'
 import { App } from './App.js'
 
 // Theme: follow the system only while the user has not pinned an explicit
 // choice (Settings writes data-user-theme alongside data-theme).
+restoreAppearance()
 const root = document.documentElement
 const applyTheme = (): void => {
   if (root.hasAttribute('data-user-theme')) return

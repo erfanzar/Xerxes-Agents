@@ -915,6 +915,13 @@ with bounded conflict details. No automatic reversal runs after process death.
 
 ### Runtime tool inventory
 
+`workspace.filePreview` accepts `{session_key,path}` for an active session and returns
+`{ok:true,path,content,truncated}`. Paths resolve inside that session's workspace;
+canonical paths outside it (including symlinks) and non-regular files are rejected.
+UTF-8 text is limited to 128 KiB and retains whitespace; binary or invalid UTF-8
+files return errors. This read-only operation does not append messages, execute a
+tool, or call a provider. Older daemons may report an unsupported method.
+
 `capabilities.list` returns a read-only catalog for the attached session:
 `{ok:true,skills,total_skills,tools,tools_source,usage_scope,model,provider_profile,reasoning_effort}`.
 Skills contain name, description, tags, source, platform_supported and uses;
@@ -1446,3 +1453,24 @@ clear an active compaction indicator.
 Provider requests emit `status_update` with `kind: "provider_wait"` before
 waiting for output and `kind: "provider_ready"` when output begins or that
 attempt ends. These activity events do not replace usage or session metadata.
+
+The `complete` RPC accepts optional `path_prefix` for directory browsing.
+Unlike mention completion, this is a literal path prefix (spaces are preserved),
+`./` lists the workspace root, and unreadable directories return an RPC error.
+Results retain the existing `value`, `label`, and `meta: "file" | "dir"` format
+and a 50-entry bound. Hidden entries appear when the basename prefix begins with `.`.
+
+### Idle runtime replacement
+
+`runtime.restart_if_idle` returns `{ok:false,busy:true}` while sessions, queued
+session operations, subagents, scheduled runs, shells, monitors, or configured
+channels keep the runtime in use. When idle it closes request admission, stops
+scheduled dispatch, acknowledges `{ok:true}`, and gracefully shuts down. A local
+desktop transport reconnects using its bundled runtime and resumes the same
+session. Remote transports require an update on the remote host. Older daemons
+that do not recognize this method are never restarted automatically. An explicit
+desktop restart click can migrate a legacy daemon after checking runtime status,
+all active sessions, terminals, and monitors; unavailable activity checks block
+the restart. This legacy check is advisory rather than atomic across clients.
+The desktop attempts replacement once per app instance; busy work defers
+it, while failures remain visible and require retry rather than a restart loop.

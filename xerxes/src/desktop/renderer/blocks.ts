@@ -13,6 +13,7 @@
  */
 
 import type { AgentMember, Block, ToolItem } from './types.js'
+import { transcriptContent } from './transcriptContent.js'
 
 /** One contiguous run of same-kind scratch events inside an active turn. */
 interface ToolRun {
@@ -275,9 +276,9 @@ export class BlockBuilder {
   }
 
   /** A user line lands at the fold's end (submit ordering, replays). */
-  pushUser(text: string): void {
+  pushUser(text: string, contextSummary = false): void {
     this.finalize()
-    this.blocks.push({ kind: 'user', id: this.nextId(), text })
+    this.blocks.push({ kind: 'user', id: this.nextId(), text, ...(contextSummary ? { contextSummary: true } : {}) })
   }
 
   /**
@@ -398,13 +399,15 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
  * stream emits, so a resumed transcript shows the identical verb + compact
  * arg + duration row instead of silently dropping the tool activity.
  */
-function pushStoredExecution(builder: BlockBuilder, exec: unknown, index: number): void {
+function pushStoredExecution(builder: BlockBuilder, exec: unknown, index: number, content?: unknown): void {
   if (!isRecord(exec)) return // no fabricated rows for missing records
   const id = typeof exec.toolCallId === 'string' && exec.toolCallId ? exec.toolCallId : `stored-${index}`
   builder.push('tool_call', { id, name: exec.name, arguments: exec.inputs ?? exec.arguments })
   builder.push('tool_result', {
     tool_call_id: id,
     name: exec.name,
+    result: content ?? exec.result,
+    ...(exec.permitted === false ? { error: typeof exec.result === 'string' ? exec.result : 'Tool permission denied' } : {}),
     ...(typeof exec.durationMs === 'number' ? { duration_ms: exec.durationMs } : {}),
     ...(typeof exec.error === 'string' && exec.error ? { error: exec.error } : {}),
   })
@@ -422,6 +425,8 @@ export function blocksFromStoredMessages(messages: unknown, hydration: StoredHyd
   const builder = new BlockBuilder()
   const executions = Array.isArray(hydration.executions) ? hydration.executions : []
   const thinking = Array.isArray(hydration.thinking) ? hydration.thinking : []
+  const executionsById = new Map(executions.filter(isRecord).filter(exec => typeof exec.toolCallId === 'string').map(exec => [exec.toolCallId as string, exec]))
+  const calls = new Map<string, Record<string, unknown>>()
   let executionIndex = 0
   let assistantIndex = 0
   for (const message of messages) {
@@ -430,8 +435,18 @@ export function blocksFromStoredMessages(messages: unknown, hydration: StoredHyd
     const role = typeof record.role === 'string' ? record.role : ''
 
     if (role === 'tool') {
-      // A stored result: its call lives in tool_executions at the same order.
-      pushStoredExecution(builder, executions[executionIndex], executionIndex)
+      // Retained executions can be truncated independently of messages. Match
+      // identities first; positional association is only for legacy rows with no ID.
+      const id = typeof record.tool_call_id === 'string' ? record.tool_call_id : ''
+      const execution = id ? executionsById.get(id) : executions[executionIndex]
+      if (id && calls.has(id)) {
+        const call = calls.get(id)!
+        const stored = isRecord(execution) ? execution : null
+        builder.push('tool_result', { tool_call_id: id, name: call.name, result: record.content ?? stored?.result,
+          duration_ms: stored?.durationMs,
+          ...(stored?.permitted === false ? { error: typeof stored.result === 'string' ? stored.result : 'Tool permission denied' } : {}),
+        })
+      } else pushStoredExecution(builder, execution, executionIndex, record.content)
       executionIndex += 1
       continue
     }
@@ -443,15 +458,25 @@ export function blocksFromStoredMessages(messages: unknown, hydration: StoredHyd
       builder.push('think_part', { think: turnThinking })
     }
 
-    const content = record.content
+    const emitCalls = (): void => {
+      if (role !== 'assistant' || !Array.isArray(record.tool_calls)) return
+      for (const rawCall of record.tool_calls) {
+        if (!isRecord(rawCall) || typeof rawCall.id !== 'string' || !isRecord(rawCall.function)) continue
+        const call = rawCall.function
+        calls.set(rawCall.id, call)
+        builder.push('tool_call', { id: rawCall.id, name: call.name, arguments: call.arguments })
+      }
+    }
+    const content = transcriptContent(record)
     if (typeof content === 'string') {
-      if (!content.trim()) continue
-      if (role === 'user') builder.pushUser(content)
+      if (!content.trim()) { emitCalls(); continue }
+      if (role === 'user') builder.pushUser(content, record.xerxes_compaction_summary === true)
       else if (role === 'assistant') builder.push('text_part', { text: content })
       else if (role !== 'system') builder.push('think_part', { think: content })
+      emitCalls()
       continue
     }
-    if (!Array.isArray(content)) continue
+    if (!Array.isArray(content)) { emitCalls(); continue }
     // Parts fold sequentially — a [think, text] assistant message replays as
     // a thinking block then an agent block, matching the live run grammar.
     const userParts: string[] = []
@@ -469,6 +494,8 @@ export function blocksFromStoredMessages(messages: unknown, hydration: StoredHyd
       if (p.type === 'tool_result') {
         builder.push('tool_result', {
           tool_call_id: typeof p.tool_use_id === 'string' ? p.tool_use_id : typeof p.id === 'string' ? p.id : '',
+          result: p.content ?? p.result,
+          ...(p.is_error === true ? { error: detailOf(p.content) || 'Tool execution failed' } : {}),
           ...(typeof p.error === 'string' && p.error ? { error: p.error } : {}),
         })
         continue
@@ -481,7 +508,8 @@ export function blocksFromStoredMessages(messages: unknown, hydration: StoredHyd
         else builder.push('text_part', { text })
       }
     }
-    if (userParts.length) builder.pushUser(userParts.join('\n'))
+    if (userParts.length) builder.pushUser(userParts.join('\n'), record.xerxes_compaction_summary === true)
+    emitCalls()
   }
   return [...builder.all()]
 }

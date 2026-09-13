@@ -88,8 +88,208 @@ describe('Store workspace folds', () => {
     store.start(bridge)
   })
 
+  test('workspace errors stay separate from the task and overlapping host requests are suppressed', async () => {
+    await new Promise(resolve => setTimeout(resolve, 0))
+    const before = store.getSnapshot()
+    let reject!: (error: Error) => void
+    let calls = 0
+    Object.assign(bridge, { useWorkspace: async () => {
+      calls++
+      return new Promise((_resolve, fail) => { reject = fail })
+    } })
+    const pending = store.enterWorkspace('/inaccessible')
+    expect(store.getSnapshot().workspaceBusy).toBe(true)
+    await store.enterWorkspace('/another')
+    expect(calls).toBe(1)
+    reject(new Error('Folder access denied'))
+    await pending
+    expect(store.getSnapshot().workspaceError).toBe('Folder access denied')
+    expect(store.getSnapshot().workspaceBusy).toBe(false)
+    expect(store.getSnapshot().failed).toBe(before.failed)
+    expect(store.getSnapshot().sessionKey).toBe(before.sessionKey)
+    expect(store.getSnapshot().cwd).toBe(before.cwd)
+    Object.assign(bridge, { chooseWorkspace: async () => null })
+    await store.chooseWorkspace()
+    expect(store.getSnapshot().workspaceError).toBeNull()
+    expect(store.getSnapshot().cwd).toBe(before.cwd)
+    Object.assign(bridge, { useWorkspace: async () => true })
+    await store.enterWorkspace('/available')
+    expect(store.getSnapshot().workspaceError).toBeNull()
+  })
+
+  test('workspace host capability failures are visible and dismissible', async () => {
+    await store.chooseWorkspace()
+    expect(store.getSnapshot().workspaceError).toContain('cannot open')
+    store.clearWorkspaceError()
+    expect(store.getSnapshot().workspaceError).toBeNull()
+    await store.enterWorkspace('/available')
+    expect(store.getSnapshot().workspaceError).toContain('cannot switch')
+  })
+
+  test('terminal control awaits acceptance, preserves line input and propagates rejection', async () => {
+    let answer!: (result: Record<string, unknown>) => void
+    bridge.respondWith(() => new Promise(resolve => { answer = resolve }))
+    let settled = false
+    const pending = store.controlTerminal('shell-1', 'write', '  bun test\n').finally(() => { settled = true })
+    await Promise.resolve()
+    expect(settled).toBe(false)
+    expect(bridge.calls.at(-1)?.params.chars).toBe('  bun test\n')
+    answer({ ok: false, error: 'Terminal input denied' })
+    await expect(pending).rejects.toThrow('Terminal input denied')
+    expect(store.getSnapshot().failed).toBeNull()
+  })
+
+  test('terminal list failure retains known rows and reports an inline error', async () => {
+    bridge.respondWith(() => ({ ok: true, terminals: [{ id: 'shell-1', running: true }] }))
+    store.loadTerminals()
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(store.getSnapshot().terminals).toHaveLength(1)
+    bridge.respondWith(() => ({ ok: false, error: 'Terminal registry unavailable' }))
+    store.loadTerminals()
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(store.getSnapshot().terminals).toHaveLength(1)
+    expect(store.getSnapshot().terminalsError).toBe('Terminal registry unavailable')
+    expect(store.getSnapshot().terminalsLoading).toBe(false)
+    expect(store.getSnapshot().failed).toBeNull()
+  })
+
+  test('channel mutation stays pending until the daemon answers and reports rejection', async () => {
+    let answer!: (result: Record<string, unknown>) => void
+    bridge.respondWith(method => method === 'channel.enable'
+      ? new Promise(resolve => { answer = resolve }) : { ok: true })
+    let finished = false
+    const pending = store.setChannelEnabled('test-gateway', true).finally(() => { finished = true })
+    await Promise.resolve()
+    expect(finished).toBe(false)
+    expect(bridge.calls.at(-1)).toEqual({ method: 'channel.enable', params: { name: 'test-gateway' } })
+    answer({ ok: false, error: 'Gateway credentials unavailable' })
+    await expect(pending).rejects.toThrow('Gateway credentials unavailable')
+    expect(finished).toBe(true)
+    expect(store.getSnapshot().channels).toEqual([])
+  })
+
+  test('MCP status and reload reject typed errors without replacing known server state', async () => {
+    bridge.respondWith(() => ({ session: { mcp_status: { local: { connected: true, tools: 3 } } } }))
+    await store.refreshMcpStatus()
+    expect(store.getSnapshot().mcpStatus.local?.tools).toBe(3)
+    bridge.respondWith(() => ({ ok: false, error: 'MCP configuration is unreadable' }))
+    await expect(store.refreshMcpStatus()).rejects.toThrow('MCP configuration is unreadable')
+    await expect(store.reloadMcp()).rejects.toThrow('MCP configuration is unreadable')
+    expect(store.getSnapshot().mcpStatus.local?.connected).toBe(true)
+    bridge.respondWith(() => ({ session: {} }))
+    await expect(store.refreshMcpStatus()).rejects.toThrow('MCP status is unavailable')
+    bridge.respondWith(() => ({ session: { mcp_status: {} } }))
+    await store.refreshMcpStatus()
+    expect(store.getSnapshot().mcpStatus).toEqual({})
+  })
+
+  test("slash search combines command and skill results", async () => {
+    bridge.respondWith((method, params) => method === "complete" ? {completions: params.text === "/deep" ? [{value:"/deep-command",category:"session"}] : [{value:"/skill deep-research",label:"deep-research"}]} : {ok:true})
+    const items = await store.completeText("/deep")
+    expect(items.map(item => item.value)).toEqual(["/deep-command", "/skill deep-research"])
+    expect(items.map(item => item.kind)).toEqual(["command", "skill"])
+    expect(bridge.calls.filter(call => call.method === "complete").map(call => call.params.text)).toEqual(["/deep", "/skill deep"])
+  })
+
+  test('provider loading exposes errors and a successful retry clears them', async () => {
+    bridge.respondWith(method => method === 'provider_list' ? { ok: false, error: 'Profile file is unreadable' } : { ok: true })
+    await store.loadProviders()
+    expect(store.getSnapshot().providerError).toBe('Profile file is unreadable')
+    bridge.respondWith(method => method === 'provider_list' ? { ok: true, profiles: [{ name: 'local', provider: 'openai', model: 'configured-model', active: true }] } : { ok: true })
+    await store.loadProviders()
+    expect(store.getSnapshot().providerError).toBe('')
+    expect(store.getSnapshot().providers[0]?.name).toBe('local')
+  })
+
+  test('manual reconnect resumes the current session and keeps the failure actionable', async () => {
+    await new Promise(resolve => setTimeout(resolve, 20))
+    const id = store.getSnapshot().currentId
+    bridge.respondWith(async method => { if (method === 'initialize') throw new Error('Authentication failed: configure provider credentials'); return {ok:true} })
+    store.retryConnection()
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(bridge.calls.filter(call => call.method === 'initialize').at(-1)?.params.resume_session_id).toBe(id)
+    expect(store.getSnapshot().connection).toBe('offline')
+    expect(store.getSnapshot().error).toContain('Authentication failed')
+    expect(store.getSnapshot().currentId).toBe(id)
+  })
+
+  test('heartbeat preserves initialization errors until the session reconnects', async () => {
+    await new Promise(resolve => setTimeout(resolve, 20))
+    const id = store.getSnapshot().currentId
+    const heartbeat = store as unknown as { beat(): Promise<void>; wentOffline(error: unknown): void }
+    heartbeat.wentOffline(new Error('Socket closed'))
+    bridge.respondWith(async method => {
+      if (method === 'initialize') throw new Error('Authentication failed: configure provider credentials')
+      return { ok: true }
+    })
+    await heartbeat.beat()
+    expect(store.getSnapshot().connection).toBe('offline')
+    expect(store.getSnapshot().error).toContain('Authentication failed')
+    expect(store.getSnapshot().currentId).toBe(id)
+    expect(bridge.calls.filter(call => call.method === 'initialize').at(-1)?.params.resume_session_id).toBe(id)
+  })
+
   afterEach(() => {
     delete (globalThis as { window?: unknown }).window
+  })
+
+  test('opening global history switches project and carries the resume id without calling the old daemon', async () => {
+    const switches: unknown[][] = []
+    ;(bridge as XerxesLike).useWorkspace = async (...args) => { switches.push(args) }
+    bridge.respondWith(method => {
+      if (method === 'initialize') return initializeResult
+      if (method === 'session.list') return { ok: true, sessions: [{ id: 'other-session', title: 'Other project', cwd: '/other-project', message_count: 4 }] }
+      if (method === 'session.active_list') return { ok: true, sessions: [] }
+      return { ok: true }
+    })
+    await new Promise(resolve => setTimeout(resolve, 10))
+    await store.renameSession('aa19f402', 'Current project')
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(store.getSnapshot().sessions.some(row => row.id === 'other-session')).toBe(true)
+    const callsBefore = bridge.calls.filter(call => call.method === 'initialize').length
+    await store.openSession('other-session')
+    expect(switches).toEqual([['/other-project', 'other-session']])
+    expect(bridge.calls.filter(call => call.method === 'initialize')).toHaveLength(callsBefore)
+    expect(store.getSnapshot().currentId).toBe('aa19f402')
+    ;(bridge as XerxesLike).useWorkspace = async () => { throw new Error('Folder is unavailable') }
+    await store.openSession('other-session')
+    expect(store.getSnapshot().error).toBe('Folder is unavailable')
+    expect(store.getSnapshot().currentId).toBe('aa19f402')
+  })
+
+  test('runtime update reports waiting and errors and resumes the original session', async () => {
+    await new Promise(resolve => setTimeout(resolve, 10))
+    let outcome: Record<string, unknown> = { ok: false, busy: true }
+    bridge.respondWith(method => method === "initialize" ? initializeResult : method === "desktop.restartRuntime" ? outcome : { ok: true })
+    await store.restartDaemon()
+    expect(store.getSnapshot().runtimeUpdate).toBe("waiting")
+    expect(store.getSnapshot().currentId).toBe("aa19f402")
+    outcome = { ok: false, error: "Update unavailable" }
+    await store.restartDaemon()
+    expect(store.getSnapshot().runtimeUpdate).toBe("failed")
+    expect(store.getSnapshot().runtimeUpdateMessage).toBe("Update unavailable")
+    outcome = { ok: true }
+    await store.restartDaemon()
+    expect(store.getSnapshot().runtimeUpdate).toBeUndefined()
+    expect(bridge.calls.filter(call => call.method === "initialize").at(-1)?.params.resume_session_id).toBe("aa19f402")
+    expect(bridge.calls.some(call => call.method === "slash" && call.params.command === "/restart")).toBe(false)
+  })
+
+  test('a build mismatch preserves the daemon until an explicit runtime update', async () => {
+    await new Promise(resolve => setTimeout(resolve, 10))
+    let attempts = 0
+    bridge.respondWith(method => {
+      if (method === "initialize") return { ...initializeResult, daemon_protocol: 34 }
+      if (method === "desktop.restartRuntime") { attempts += 1; return { ok: false, error: "Older runtime" } }
+      return { ok: true }
+    })
+    await store.openSession("aa19f402")
+    await (store as unknown as { beat(): Promise<void> }).beat()
+    expect(attempts).toBe(0)
+    expect(store.getSnapshot().daemonWarning).toBeTruthy()
+    await store.restartDaemon()
+    expect(attempts).toBe(1)
+    expect(store.getSnapshot().runtimeUpdate).toBe("failed")
   })
 
   test('starts online after initialize and sends the desktop handshake', async () => {
@@ -152,7 +352,76 @@ describe('Store workspace folds', () => {
     expect(store.getSnapshot().sessionMenu).toBeNull()
   })
 
+  test('rename rejection retains the attempted title and a retry clears the error', async () => {
+    bridge.respondWith(method => method === 'session.title' ? { ok: false, error: 'Session is read-only' } : { ok: true, sessions: [] })
+    store.openSessionMenu({ id: 'aa19f402', key: 'aa19f402', title: 'Old title' }, 40, 60)
+    await store.renameSession('aa19f402', 'New title')
+    expect(store.getSnapshot().sessionMenu).toMatchObject({ title: 'New title', renaming: true, pending: false, error: 'Session is read-only' })
+    bridge.respondWith(() => ({ ok: true, sessions: [] }))
+    await store.renameSession('aa19f402', 'New title')
+    expect(store.getSnapshot().sessionMenu).toBeNull()
+  })
+
+  test('a rejected transcript read never produces an empty successful download', async () => {
+    const host = globalThis as { document?: unknown }
+    const previous = host.document
+    let downloads = 0
+    host.document = { createElement: () => { downloads += 1; throw new Error('Unexpected download') } }
+    bridge.respondWith(method => method === 'session.status' ? { ok: false, error: 'Transcript access denied' } : { ok: true, sessions: [] })
+    try {
+      await expect(store.downloadSessionTranscript('aa19f402')).rejects.toThrow('Transcript access denied')
+      expect(downloads).toBe(0)
+      await store.exportSessionTranscript('aa19f402')
+      expect(downloads).toBe(0)
+      expect(store.getSnapshot().error).toContain('Transcript access denied')
+    } finally {
+      if (previous === undefined) delete host.document
+      else host.document = previous
+    }
+  })
+
+  test('dismissing a pending rename does not reopen its menu on failure', async () => {
+    let finish: ((value: Record<string, unknown>) => void) | undefined
+    bridge.respondWith(method => method === 'session.title' ? new Promise(resolve => { finish = resolve }) : { ok: true, sessions: [] })
+    store.openSessionMenu({ id: 'aa19f402', key: 'aa19f402', title: 'Old title' }, 40, 60)
+    const saving = store.renameSession('aa19f402', 'New title')
+    expect(store.getSnapshot().sessionMenu?.pending).toBe(true)
+    store.closeSessionMenu()
+    finish?.({ ok: false, error: 'Disconnected' })
+    await saving
+    expect(store.getSnapshot().sessionMenu).toBeNull()
+  })
+
   // ── New-task modal (mockup 18) ────────────────────────────────────────
+
+  test('task startup waits for the selected model and does not submit on rejection', async () => {
+    await new Promise(resolve => setTimeout(resolve, 10))
+    let finishModel: ((value: Record<string, unknown>) => void) | undefined
+    const previousCall = bridge.call.bind(bridge)
+    bridge.call = (method, params = {}) => {
+      if (method === 'slash' && String(params.command).startsWith('/model ')) {
+        bridge.calls.push({ method, params })
+        return new Promise(resolve => { finishModel = resolve })
+      }
+      return previousCall(method, params)
+    }
+    store.openTaskModal()
+    const start = store.startTask('Use the chosen model', false, 'default', 'gpt-5.6-sol')
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(bridge.calls.some(call => call.method === 'turn.submit')).toBe(false)
+    expect(bridge.calls.find(call => call.method === 'slash')).toMatchObject({ params: { command: '/model gpt-5.6-sol', session_key: store.getSnapshot().sessionKey } })
+    finishModel?.({ ok: true, model: 'gpt-5.6-sol' })
+    await start
+    expect(store.getSnapshot().model).toBe('gpt-5.6-sol')
+    expect(bridge.calls.filter(call => call.method === 'turn.submit')).toHaveLength(1)
+    store.openTaskModal()
+    const rejected = store.startTask('Do not send', false, 'default', 'missing-model')
+    await new Promise(resolve => setTimeout(resolve, 10))
+    finishModel?.({ ok: false, error: 'Model unavailable' })
+    await rejected
+    expect(bridge.calls.filter(call => call.method === 'turn.submit')).toHaveLength(1)
+    expect(store.getSnapshot()).toMatchObject({ taskModalOpen: true, error: 'Model unavailable' })
+  })
 
   test('⌘N opens the task modal; startTask re-keys, arms the ceiling, submits in order', async () => {
     const before = store.getSnapshot().sessionKey
@@ -189,6 +458,36 @@ describe('Store workspace folds', () => {
     expect(store.getSnapshot().sessionKey).not.toBe(before)
     expect(bridge.calls.some(c => c.method === 'turn.submit')).toBe(false)
     expect(store.getSnapshot().taskModalOpen).toBe(false)
+  })
+
+  test('preset folder opening reports a refused host response and permits retry', async () => {
+    await new Promise(resolve => setTimeout(resolve, 0))
+    bridge.respondWith(() => ({ ok: true, path: '/fixture/presets/reviewer' }))
+    const opened: string[] = []
+    Object.assign(window.xerxes, { openPath: async (path: string) => { opened.push(path); return false } })
+    await store.openAgentPresetLocation('reviewer')
+    expect(opened).toEqual(['/fixture/presets/reviewer'])
+    expect(store.getSnapshot().agentPresetsError).toContain('file manager could not open')
+    expect(store.getSnapshot().failed).toBeNull()
+    Object.assign(window.xerxes, { openPath: async () => true })
+    await store.openAgentPresetLocation('reviewer')
+    expect(store.getSnapshot().agentPresetsError).toBeNull()
+  })
+
+  test('preset mutations report local errors without replacing the task failure state', async () => {
+    await new Promise(resolve => setTimeout(resolve, 0))
+    bridge.respondWith(() => ({ ok: false, error: 'Preset validation rejected the draft' }))
+    expect(await store.copyAgentPreset('default', 'review-copy')).toBe(false)
+    expect(store.getSnapshot().agentPresetsError).toBe('Preset validation rejected the draft')
+    expect(await store.writeAgentPreset('review-copy', 'invalid: [')).toBe(false)
+    expect(store.getSnapshot().failed).toBeNull()
+    const selected = store.getSnapshot().currentAgentPreset
+    expect(await store.selectAgentPreset('review-copy')).toBe(false)
+    expect(store.getSnapshot().currentAgentPreset).toBe(selected)
+    bridge.respondWith(method => method === 'agentPreset.list' ? { ok: true, presets: [] } : { ok: true })
+    expect(await store.writeAgentPreset('review-copy', 'name: reviewer')).toBe(true)
+    expect(store.getSnapshot().agentPresetsError).toBeNull()
+    expect(store.getSnapshot().failed).toBeNull()
   })
 
   test('new tasks stage an agent preset and the roster mirrors daemon management RPCs', async () => {
@@ -844,4 +1143,56 @@ describe('Store workspace folds', () => {
     await new Promise(resolve => setTimeout(resolve, 10))
     expect(store.getSnapshot().backgroundJobs).toHaveLength(0)
   })
+})
+
+ test('native reconnect startup replays the resumed transcript and binds its key', async () => {
+  const bridge = new FakeBridge(method => method === 'initialize' ? {
+    ...initializeResult, session_id: 'remote-resume',
+    session: { id: 'remote-resume', key: 'remote-resume', title: 'Recovered', active_turn_id: 'still-running', messages: [{role:'user',content:'Keep the important work'}] },
+  } : {ok:true})
+  Object.assign(bridge, {getResumeSession: async () => 'remote-resume'})
+  withWindow(bridge)
+  const resumed = new Store()
+  resumed.start(bridge)
+  await new Promise(resolve => setTimeout(resolve, 20))
+  expect(bridge.calls.find(call => call.method === 'initialize')?.params.resume_session_id).toBe('remote-resume')
+  expect(resumed.getSnapshot().sessionKey).toBe('remote-resume')
+  expect(resumed.getSnapshot().turnActive).toBe(true)
+  bridge.push('turn_end', {})
+  expect(JSON.stringify(resumed.getSnapshot().blocks)).toContain('Keep the important work')
+  delete (globalThis as {window?:unknown}).window
+})
+
+test('desktop selection resumes per workspace after reload and explicit navigation takes precedence', async () => {
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+  const values = new Map<string, string>()
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => values.set(key, value),
+  } })
+  const bridge = new FakeBridge((method, params) => method === 'initialize' ? {
+    ...initializeResult, session_id: params.resume_session_id || 'fresh',
+    session: { id: params.resume_session_id || 'fresh', key: params.resume_session_id || 'fresh', cwd: '/repo', title: 'Selected task' },
+  } : { ok: true })
+  Object.assign(bridge, { getWorkspace: async () => '/repo' })
+  withWindow(bridge)
+  try {
+    const first = new Store()
+    first.start(bridge)
+    await new Promise(resolve => setTimeout(resolve, 20))
+    await first.openSession('chosen-task')
+    bridge.calls.length = 0
+    new Store().start(bridge)
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(bridge.calls.find(call => call.method === 'initialize')?.params.resume_session_id).toBe('chosen-task')
+    bridge.calls.length = 0
+    Object.assign(bridge, { getResumeSession: async () => 'explicit-task' })
+    new Store().start(bridge)
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(bridge.calls.find(call => call.method === 'initialize')?.params.resume_session_id).toBe('explicit-task')
+  } finally {
+    if (original) Object.defineProperty(globalThis, 'localStorage', original)
+    else delete (globalThis as { localStorage?: unknown }).localStorage
+    delete (globalThis as { window?: unknown }).window
+  }
 })

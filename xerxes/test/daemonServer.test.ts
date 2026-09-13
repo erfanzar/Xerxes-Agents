@@ -235,6 +235,27 @@ test("daemon preserves JSON-RPC v35 NDJSON responses and stream event framing", 
   }
 });
 
+test("workspace file preview RPC reads only active-session workspace text without starting a turn", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-preview-rpc-"));
+  const socketPath = join(directory, "daemon.sock");
+  const runtime = new InMemoryDaemonRuntime(undefined, { currentProjectDirectory: directory, sessionDirectory: join(directory, "sessions") });
+  const server = new DaemonServer({ socketPath, runtime, projectDirectory: directory });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    await Bun.write(join(directory, "source.ts"), "first\n  second\n");
+    client.send({ jsonrpc: "2.0", id: 1, method: "workspace.filePreview", params: { path: "source.ts" } });
+    expect((await client.next(frame => frame.id === 1)).result).toMatchObject({ ok: false });
+    client.send({ jsonrpc: "2.0", id: 2, method: "initialize", params: { session_key: "preview", project_dir: directory } });
+    await client.next(frame => frame.id === 2);
+    client.send({ jsonrpc: "2.0", id: 3, method: "workspace.filePreview", params: { session_key: "preview", path: "source.ts" } });
+    expect((await client.next(frame => frame.id === 3)).result).toEqual({ ok: true, path: "source.ts", content: "first\n  second\n", truncated: false });
+    expect(runtime.sessionStatus("preview")?.turnCount).toBe(0);
+    client.send({ jsonrpc: "2.0", id: 4, method: "workspace.filePreview", params: { session_key: "preview", path: "missing.ts" } });
+    expect((await client.next(frame => frame.id === 4)).error).toBeDefined();
+  } finally { client.close(); await server.stop(); await rm(directory, { recursive: true, force: true }); }
+});
+
 test("project agent editor RPC scopes writes and preserves invalid drafts on disk", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-project-agent-rpc-"));
   const socketPath = join(directory, "daemon.sock");
@@ -10124,3 +10145,26 @@ test('capability catalog exposes admitted skills and retained usage without acti
     expect(session.messages.length).toBe(before);
   } finally { client.close(); await server.stop(); await rm(directory, { recursive: true, force: true }); }
 });
+
+test('skill completion returns the full library beyond 200 entries', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-large-skill-menu-'))
+  const skills = join(directory, 'skills')
+  await Promise.all(Array.from({ length: 215 }, async (_, i) => {
+    const name = `skill-${String(i).padStart(3, '0')}`
+    const folder = join(skills, name)
+    await mkdir(folder, { recursive: true })
+    await writeFile(join(folder, 'SKILL.md'), `---\nname: ${name}\ndescription: Example ${i}\n---\nInstructions.`)
+  }))
+  const server = new DaemonServer({ socketPath: join(directory, 'daemon.sock'), skillDirectories: [skills], runtime: new InMemoryDaemonRuntime(undefined, { currentProjectDirectory: directory, sessionDirectory: join(directory, 'sessions') }) })
+  await server.start()
+  const client = await SocketTestClient.connect(join(directory, 'daemon.sock'))
+  try {
+    client.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { session_key: 'library' } })
+    await client.next(frame => frame.id === 1)
+    client.send({ jsonrpc: '2.0', id: 2, method: 'complete', params: { text: '/skill ' } })
+    const reply = await client.next(frame => frame.id === 2)
+    const rows = reply.result?.completions as { label: string }[]
+    expect(rows).toHaveLength(215)
+    expect(rows.at(-1)?.label).toBe('skill-214')
+  } finally { client.close(); await server.stop(); await rm(directory, { recursive: true, force: true }) }
+})

@@ -9,7 +9,7 @@
  * all see Xerxes Agents rather than Electron.
  */
 
-import { cp, mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { chmod, cp, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -103,11 +103,15 @@ async function packageDesktopMac(): Promise<void> {
   // baked in — without it every packaged daemon trips the compatibility
   // banner by construction.
   await cp(join(outputDirectory, 'build-id'), join(runtimeDirectory, 'build-id'))
-  for (const entry of await readdir(outputDirectory, { withFileTypes: true })) {
-    if (entry.isDirectory() && entry.name === 'skills') {
-      await cp(join(outputDirectory, entry.name), join(runtimeDirectory, entry.name), { recursive: true })
-    }
-  }
+  // These assets are loaded from disk, so the CLI bundler cannot include them.
+  // Keep missing build outputs fatal rather than shipping a partially working app.
+  await copyDesktopRuntimeAssets(outputDirectory, runtimeDirectory)
+
+  // Finder launches do not inherit a shell PATH. Ship the build runtime alongside the CLI.
+  await cp(process.execPath, join(resources, 'bun'))
+  await chmod(join(resources, 'bun'), 0o755)
+  await cp(join(packageDirectory, 'assets', 'notices', 'Bun-LICENSE.md'), join(resources, 'Bun-LICENSE.md'))
+  await writeFile(join(resources, 'Bun-version.txt'), `${Bun.version}\nSource and build instructions: https://github.com/oven-sh/bun/tree/bun-v${Bun.version}\n`)
 
   const iconName = 'xerxes-agents.icns'
   await createIcon(join(resources, iconName))
@@ -121,6 +125,9 @@ async function packageDesktopMac(): Promise<void> {
   plist = replacePlistString(plist, 'CFBundleName', productName)
   plist = replacePlistString(plist, 'CFBundleShortVersionString', version)
   plist = replacePlistString(plist, 'CFBundleVersion', version)
+  const microphoneKey = 'NSMicrophoneUsageDescription'
+  if (plist.includes('<key>' + microphoneKey + '</key>')) plist = replacePlistString(plist, microphoneKey, 'Record speech only when you choose Dictate, then transcribe it into your draft.')
+  else plist = plist.replace('</dict>', '<key>' + microphoneKey + '</key><string>Record speech only when you choose Dictate, then transcribe it into your draft.</string></dict>')
   await writeFile(plistPath, plist, 'utf8')
 
   // Modifying a vendor-signed Electron.app invalidates its outer signature.
@@ -199,6 +206,13 @@ async function notarizeIfPossible(applicationBundle: string): Promise<boolean> {
     return true
   } finally {
     await rm(archive, { force: true })
+  }
+}
+
+/** Preserve runtime files resolved dynamically from the packaged CLI directory. */
+export async function copyDesktopRuntimeAssets(source: string, destination: string): Promise<void> {
+  for (const asset of ['skills', 'default', 'sandboxShim.ts']) {
+    await cp(join(source, asset), join(destination, asset), { recursive: true })
   }
 }
 

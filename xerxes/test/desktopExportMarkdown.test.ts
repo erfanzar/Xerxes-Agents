@@ -8,6 +8,27 @@ import { sessionToMarkdown } from '../src/desktop/renderer/exportMarkdown.js'
 const stamp = new Date('2026-08-29T12:00:00Z')
 
 describe('sessionToMarkdown', () => {
+  test('uses the daemon transcript projection instead of the message count', () => {
+    const md = sessionToMarkdown({ messages: 2, transcript: [
+      { role: 'user', content: 'Review the workspace' },
+      { role: 'assistant', content: 'First finding\n\nSecond finding' },
+    ] }, stamp)
+    expect(md).toContain('## You\n\nReview the workspace')
+    expect(md).toContain('## Agent\n\nFirst finding\n\nSecond finding')
+  })
+
+  test('exports the same user-facing labels as the restored conversation', () => {
+    const md = sessionToMarkdown({ messages: [
+      { role: 'user', text: 'Monitor reaction · 1–8', content: 'Expanded monitor evidence' },
+      { role: 'user', text: '/skill workspace-review', content: [{ type: 'text', text: 'Expanded skill instructions' }] },
+      { role: 'user', content: 'Original\n\nuser message' },
+    ] }, stamp)
+    expect(md).toContain('## You\n\nMonitor reaction · 1–8')
+    expect(md).toContain('## You\n\n/skill workspace-review')
+    expect(md).toContain('Original\n\nuser message')
+    expect(md).not.toContain('Expanded')
+  })
+
   test('renders the metadata header with title, model and cwd', () => {
     const md = sessionToMarkdown({
       id: 'aa19f402',

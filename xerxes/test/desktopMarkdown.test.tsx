@@ -82,3 +82,9 @@ test('the tail glues to the end of trailing prose, not a line of its own', () =>
   const fenced = renderToStaticMarkup(createElement(Markdown, { text: 'prose\n```ts\nx\n```', tail: caret }))
   expect(fenced).toContain('</code></pre><span class="caret">')
 })
+
+test('mixed inline list content shares one text flow beside its marker', () => {
+  const html = render('- **Capture** the diff with `git diff` and read it.\n- [ ] Keep *all* text together.')
+  expect(html).toContain('<span class="md__item"><strong>Capture</strong> the diff with <code>git diff</code> and read it.</span>')
+  expect(html).toContain('<span class="md__item">Keep <em>all</em> text together.</span>')
+})

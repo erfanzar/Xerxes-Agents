@@ -105,6 +105,23 @@ describe('BlockBuilder', () => {
 })
 
 describe('blocksFromStoredMessages', () => {
+  test('restores daemon display text without exposing expanded provider prompts', () => {
+    const messages = [
+      { role: 'user', text: 'Monitor reaction · 1–8', content: 'Expanded monitor evidence' },
+      { role: 'user', text: '/skill workspace-review', content: [{ type: 'text', text: 'Expanded skill instructions' }] },
+      { role: 'user', text: '  Keep spacing\n\nand line breaks  ' },
+      { role: 'user', text: ' ', content: 'Legacy user message' },
+      { role: 'assistant', text: 'Unrelated metadata', content: 'Actual answer' },
+    ]
+    const before = structuredClone(messages)
+    const blocks = blocksFromStoredMessages(messages)
+    expect(blocks.map(block => 'text' in block ? block.text : '')).toEqual([
+      'Monitor reaction · 1–8', '/skill workspace-review', '  Keep spacing\n\nand line breaks  ',
+      'Legacy user message', 'Actual answer',
+    ])
+    expect(messages).toEqual(before)
+  })
+
   test('role/content pairs hydrate in order; system rows drop; parts fold sequentially', () => {
     const blocks = blocksFromStoredMessages([
       { role: 'user', content: 'fix the loop' },
@@ -291,4 +308,33 @@ describe('blocksFromStoredMessages', () => {
     const cards = b.all().filter(block => block.kind === 'agents')
     expect(cards).toHaveLength(2)
   })
+})
+
+test('replay restores exact result content and matches IDs after execution retention truncation', () => {
+  const blocks = blocksFromStoredMessages([
+    { role: 'assistant', content: '', tool_calls: [{ id: 'old', type: 'function', function: { name: 'exec_command', arguments: '{"cmd":"first"}' } }] },
+    { role: 'tool', tool_call_id: 'old', content: '{"stdout":"first\\noutput","exitCode":0}' },
+    { role: 'assistant', content: '', tool_calls: [{ id: 'new', type: 'function', function: { name: 'exec_command', arguments: '{"cmd":"second"}' } }] },
+    { role: 'tool', tool_call_id: 'new', content: 'Permission denied' },
+  ], { executions: [{ toolCallId: 'new', name: 'exec_command', inputs: { cmd: 'second' }, result: 'Permission denied', permitted: false, durationMs: 120 }] })
+  const tools = blocks.flatMap(block => block.kind === 'tools' ? block.items : [])
+  expect(tools.map(item => item.id)).toEqual(['old', 'new'])
+  expect(tools[0]?.arg).toBe('first')
+  expect(JSON.parse(tools[0]!.output)).toEqual({stdout:'first\noutput',exitCode:0})
+  expect(tools[1]).toMatchObject({ arg: 'second', output: 'Permission denied', state: 'failed' })
+})
+
+test('restored compaction summaries use typed metadata, not quoted marker text', () => {
+  const content = '[CONTEXT COMPACTION — REFERENCE ONLY]\n\nPreserve the earlier task.'
+  const blocks = blocksFromStoredMessages([
+    { role: 'user', content, xerxes_compaction_summary: true },
+    { role: 'user', content },
+    { role: 'user', content: [{ type: 'text', text: content }], xerxes_compaction_summary: true },
+  ])
+  expect(blocks).toMatchObject([
+    { kind: 'user', text: content, contextSummary: true },
+    { kind: 'user', text: content },
+    { kind: 'user', text: content, contextSummary: true },
+  ])
+  expect(blocks[1]).not.toHaveProperty('contextSummary')
 })

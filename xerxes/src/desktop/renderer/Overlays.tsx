@@ -11,8 +11,11 @@
  * (per-file undo, per-model pricing) is not faked.
  */
 
-import { useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
+import { useLayoutEffect, useEffect, useMemo, useRef, useState, type ReactElement, type RefObject } from 'react'
 
+import { saveAppearance } from './appearance.js'
+import { desktopError } from './desktopRpc.js'
+import { useDialogFocus } from './dialogFocus.js'
 import { ChannelsCard } from './ChannelsPanel.js'
 import { TerminalsCard } from './TerminalsPanel.js'
 import { store, type Snapshot } from './store.js'
@@ -31,12 +34,14 @@ const SETTINGS_TABS: ReadonlyArray<{ id: SettingsTab; label: string }> = [
 ]
 
 export function SettingsModal({ snap }: { snap: Snapshot }): ReactElement | null {
+  const ref=useRef<HTMLDivElement>(null)
+  useDialogFocus(ref, snap.settingsOpen)
   if (!snap.settingsOpen) return null
   return (
     <div className="backdrop">
-      <div className="modal" role="dialog" aria-label="Settings">
+      <div className="modal" ref={ref} role="dialog" aria-modal="true" aria-label="Settings">
         <div className="modal__side">
-          <div className="cap">Settings</div>
+          <div className="cap">Settings <button className="chipbtn" aria-label="Close settings" onClick={()=>store.closeSettings()}>×</button></div>
           {SETTINGS_TABS.map(tab => (
             <button
               key={tab.id}
@@ -87,6 +92,7 @@ function useThemeChoice(): [string, (next: string) => void] {
       document.documentElement.setAttribute('data-user-theme', next)
       document.documentElement.setAttribute('data-theme', next)
     }
+    saveAppearance()
     setChoice(next)
   }
   return [choice, set]
@@ -130,21 +136,34 @@ function useNativeSwitches(): { notifications: boolean; loginItem: boolean | nul
 /** MCP server statuses (mockup 19) — the daemon is the source of truth. */
 function McpCard({ snap }: { snap: Snapshot }): ReactElement {
   // Statuses are point-in-time daemon state, not pushed events.
-  useEffect(() => { store.refreshMcpStatus() }, [])
+  const [busy, setBusy] = useState<'status' | 'reload' | null>('status')
+  const [error, setError] = useState('')
+  const refresh = async (reload = false): Promise<void> => {
+    setBusy(reload ? 'reload' : 'status')
+    setError('')
+    try {
+      if (reload) await store.reloadMcp()
+      else await store.refreshMcpStatus()
+    } catch (error) { setError(desktopError(error)) }
+    finally { setBusy(null) }
+  }
+  useEffect(() => { void refresh() }, [])
   const entries = Object.entries(snap.mcpStatus)
   return (
     <>
       <h2 className="modal__title">MCP Servers</h2>
+      {error && <p className="studio-error" role="alert">{error}</p>}
+      {busy && <p role="status">{busy === 'reload' ? 'Reconnecting servers…' : 'Checking server status…'}</p>}
       <p className="modal__sub">External tools the agents may call. Tool calls still pass the permission policy — enabling a server is not an auto-approve.</p>
       <div className="rowlist">
-      {entries.length === 0 ? (
+      {entries.length === 0 ? (!busy && !error && (
         <div className="row">
           <div className="row__main">
             <div className="row__t">No MCP servers configured</div>
             <div className="row__s">add servers to <code>~/.xerxes/mcp.json</code> — the daemon connects them at boot</div>
           </div>
         </div>
-      ) : entries.map(([name, status]) => (
+      )) : entries.map(([name, status]) => (
         <div className="row" key={name}>
           <span className={`dot ${status.connected ? 'dot--done' : 'dot--fail'}`} />
           <div className="row__main">
@@ -159,7 +178,8 @@ function McpCard({ snap }: { snap: Snapshot }): ReactElement {
       ))}
       </div>
       <div style={{ display: 'flex', gap: 8, paddingTop: 16 }}>
-        <button className="btn btn--ghost" onClick={() => { void store.reloadMcp() }}>Reload servers</button>
+        <button className="btn btn--ghost" disabled={busy !== null || snap.connection !== 'online'} onClick={() => { void refresh() }}>Refresh status</button>
+        <button className="btn btn--ghost" disabled={busy !== null || snap.connection !== 'online'} onClick={() => { void refresh(true) }}>Reload servers</button>
       </div>
       <p className="modal__sub" style={{ marginTop: 14 }}>
         Config: <code>~/.xerxes/mcp.json</code> · a reload reconnects every configured server.
@@ -175,11 +195,13 @@ function GeneralCard({ snap }: { snap: Snapshot }): ReactElement {
   const { notifications, loginItem, toggleNotifications, toggleLoginItem } = useNativeSwitches()
   const applyFont = (size: string): void => {
     if (typeof document !== 'undefined') document.documentElement.setAttribute('data-font', size)
+    saveAppearance()
     setFontSize(size)
   }
   return (
     <>
       <h2 className="modal__title">General</h2>
+      <button className="btn" onClick={() => { store.closeSettings(); window.dispatchEvent(new Event("xerxes:setup")) }}>Open setup checklist</button>
       <p className="modal__sub">Applies immediately; nothing here is per-task.</p>
 
       <div className="field">
@@ -219,14 +241,14 @@ function GeneralCard({ snap }: { snap: Snapshot }): ReactElement {
       <div className="row">
         <div className="row__main">
           <div className="row__t">Creator mode</div>
-          <div className="row__s">DSH-style agent preset authoring · runtime inspection · changes apply to future sessions</div>
+          <div className="row__s">Create and manage presets for future sessions</div>
         </div>
         <button className="chipbtn" onClick={() => store.setSettingsTab('agents')}>manage</button>
       </div>
       <div className="row">
         <div className="row__main">
           <div className="row__t">Launch at login</div>
-          <div className="row__s">keeps per-project daemons warm</div>
+          <div className="row__s">Open Xerxes when you sign in</div>
         </div>
         <button
           className={`switch${loginItem ? ' is-on' : ''}`}
@@ -265,8 +287,8 @@ function GeneralCard({ snap }: { snap: Snapshot }): ReactElement {
       </div>
       <div className="row">
         <div className="row__main">
-          <div className="row__t">Plan mode default</div>
-          <div className="row__s">start tasks with the ⏸ ceiling on (this session)</div>
+          <div className="row__t">Plan this session</div>
+          <div className="row__s">Review a plan before making changes</div>
         </div>
         <button className="chipbtn" onClick={() => store.setPlanMode(true)}>enable now</button>
       </div>
@@ -275,6 +297,7 @@ function GeneralCard({ snap }: { snap: Snapshot }): ReactElement {
 }
 
 function AgentPresetsCard({ snap }: { snap: Snapshot }): ReactElement {
+  const [readError, setReadError] = useState('')
   const [copyFrom, setCopyFrom] = useState<string | null>(null)
   const [copyId, setCopyId] = useState('')
   const [copyName, setCopyName] = useState('')
@@ -282,6 +305,24 @@ function AgentPresetsCard({ snap }: { snap: Snapshot }): ReactElement {
   const [editing, setEditing] = useState<{ id: string; content: string; dirty: boolean } | null>(null)
   const [busy, setBusy] = useState(false)
   const presets = snap.agentPresets ?? []
+  const unavailable = busy || snap.connection !== 'online'
+  const clearError = (): void => { setReadError(''); store.clearAgentPresetError() }
+  const runAction = async (action: () => Promise<unknown>): Promise<void> => {
+    if (unavailable) return
+    clearError()
+    setBusy(true)
+    try { await action() }
+    catch (error) { setReadError(desktopError(error)) }
+    finally { setBusy(false) }
+  }
+  const detail = useRef<HTMLDivElement>(null)
+  const detailOpen = Boolean(copyFrom || viewing || editing)
+  useEffect(() => {
+    if (detailOpen) {
+      detail.current?.focus()
+      detail.current?.scrollIntoView({ block: 'start' })
+    }
+  }, [detailOpen])
   useEffect(() => { void store.loadAgentPresets() }, [])
   const duplicate = async (): Promise<void> => {
     if (!copyFrom || !copyId.trim()) return
@@ -291,17 +332,19 @@ function AgentPresetsCard({ snap }: { snap: Snapshot }): ReactElement {
     if (created) { setCopyFrom(null); setCopyId(''); setCopyName('') }
   }
   const inspect = (id: string): void => {
+    clearError()
     setBusy(true)
     void store.readAgentPreset(id)
       .then(content => setViewing({ id, content }))
-      .catch(() => {})
+      .catch(error => setReadError(desktopError(error)))
       .finally(() => setBusy(false))
   }
   const edit = (id: string): void => {
+    clearError()
     setBusy(true)
     void store.readAgentPreset(id)
       .then(content => setEditing({ id, content, dirty: false }))
-      .catch(() => {})
+      .catch(error => setReadError(desktopError(error)))
       .finally(() => setBusy(false))
   }
   const saveEdit = async (): Promise<void> => {
@@ -318,10 +361,11 @@ function AgentPresetsCard({ snap }: { snap: Snapshot }): ReactElement {
   return (
     <>
       <h2 className="modal__title">Agent presets</h2>
+      {(readError || snap.agentPresetsError) && <p className="studio-error" role="alert">{readError || snap.agentPresetsError}</p>}
       <p className="modal__sub">
         A preset is the tools, system prompt, and subagents one session runs. Duplicate a known-good preset and edit its files, or let Creator mode draft one. Running sessions keep the preset they started with.
       </p>
-      <button className="pcard pcard--add" disabled={!presets.some(row => row.id === 'creator' && !row.broken)} onClick={() => { void store.draftAgentPreset() }}>
+      {!detailOpen && <><button className="pcard pcard--add" disabled={unavailable || !presets.some(row => row.id === 'creator' && !row.broken)} onClick={() => { void store.draftAgentPreset() }}>
         <span className="pcard__main"><span className="pcard__text"><span className="pcard__name">＋ Draft a custom preset with Creator mode</span><span className="pcard__meta">starts a fresh Creator session</span></span></span>
       </button>
       {(['system', 'user', 'project'] as const).map(trust => {
@@ -341,57 +385,59 @@ function AgentPresetsCard({ snap }: { snap: Snapshot }): ReactElement {
                     </span>
                   </div>
                   <div className="pcard__actions">
-                    {!row.broken && !row.isDefault && <button className="chipbtn" onClick={() => { void store.setDefaultAgentPreset(row.id) }}>Set default</button>}
+                    {!row.broken && !row.isDefault && <button className="chipbtn" disabled={unavailable} onClick={() => { void runAction(() => store.setDefaultAgentPreset(row.id)) }}>Set default</button>}
                     {!row.broken && !snap.turnActive && row.id !== snap.currentAgentPreset && (
                       <button
                         className="chipbtn"
-                        disabled={!canSelect}
+                        disabled={unavailable || !canSelect}
                         title={canSelect ? `run the current session with ${row.id}` : 'start a task first — a preset binds to an existing session'}
-                        onClick={() => { void store.selectAgentPreset(row.id) }}
+                        onClick={() => { void runAction(() => store.selectAgentPreset(row.id)) }}
                       >
                         Use here
                       </button>
                     )}
-                    <button className="chipbtn" disabled={busy || Boolean(row.broken)} onClick={() => inspect(row.id)}>View</button>
-                    {!row.broken && row.manageable && <button className="chipbtn" disabled={busy} onClick={() => edit(row.id)}>Edit</button>}
-                    {!row.broken && <button className="chipbtn" onClick={() => { setCopyFrom(row.id); setCopyId(''); setCopyName('') }}>Duplicate</button>}
-                    {row.manageable && <button className="chipbtn" onClick={() => { void store.openAgentPresetLocation(row.id) }}>Open folder</button>}
-                    {row.manageable && <button className="chipbtn chipbtn--danger" onClick={() => { if (window.confirm(`Delete agent preset ${row.id}? Running sessions are unaffected.`)) void store.removeAgentPreset(row.id) }}>Delete</button>}
+                    <button className="chipbtn" disabled={unavailable || Boolean(row.broken)} onClick={() => inspect(row.id)}>View</button>
+                    {!row.broken && row.manageable && <button className="chipbtn" disabled={unavailable} onClick={() => edit(row.id)}>Edit</button>}
+                    {!row.broken && <button className="chipbtn" disabled={unavailable} onClick={() => { clearError(); setCopyFrom(row.id); setCopyId(''); setCopyName('') }}>Duplicate</button>}
+                    {row.manageable && <button className="chipbtn" disabled={unavailable} onClick={() => { void runAction(() => store.openAgentPresetLocation(row.id)) }}>Open folder</button>}
+                    {row.manageable && <button className="chipbtn chipbtn--danger" disabled={unavailable} onClick={() => { if (window.confirm(`Delete agent preset ${row.id}? Running sessions are unaffected.`)) void runAction(() => store.removeAgentPreset(row.id)) }}>Delete</button>}
                   </div>
                 </div>
               ))}
             </div>
           </div>
         )
-      })}
+      })}</>}
       {copyFrom && (
-        <div className="provform">
+        <div className="provform" ref={detail} tabIndex={-1} aria-label="Duplicate preset">
           <div className="row__t">Duplicate {copyFrom}</div>
-          <div className="field"><label>Identifier</label><input value={copyId} spellCheck={false} placeholder="my-agent" onChange={event => setCopyId(event.target.value)} /></div>
-          <div className="field"><label>Display name</label><input value={copyName} placeholder="Optional" onChange={event => setCopyName(event.target.value)} /></div>
-          <div className="preset-actions"><button className="btn btn--ghost" onClick={() => setCopyFrom(null)}>Cancel</button><button className="btn" disabled={busy || !/^[a-z0-9][a-z0-9-]*$/.test(copyId)} onClick={() => { void duplicate() }}>{busy ? 'Creating…' : 'Create'}</button></div>
+          <div className="field"><label htmlFor="preset-copy-id">Identifier</label><input id="preset-copy-id" disabled={unavailable} value={copyId} spellCheck={false} placeholder="my-agent" onChange={event => setCopyId(event.target.value)} /></div>
+          <div className="field"><label htmlFor="preset-copy-name">Display name</label><input id="preset-copy-name" disabled={unavailable} value={copyName} placeholder="Optional" onChange={event => setCopyName(event.target.value)} /></div>
+          <div className="preset-actions"><button className="btn btn--ghost" disabled={busy} onClick={() => { clearError(); setCopyFrom(null) }}>Cancel</button><button className="btn" disabled={unavailable || !/^[a-z0-9][a-z0-9-]*$/.test(copyId)} onClick={() => { void duplicate() }}>{busy ? 'Creating…' : 'Create'}</button></div>
         </div>
       )}
       {viewing && (
-        <div className="provform">
+        <div className="provform" ref={detail} tabIndex={-1} aria-label="Preset composition">
+          <button className="btn btn--ghost" onClick={() => setViewing(null)}>Back to presets</button>
           <div className="row__t">Composition · {viewing.id}</div>
           <pre className="preset-composition">{viewing.content}</pre>
-          <div className="preset-actions"><button className="btn btn--ghost" onClick={() => setViewing(null)}>Close</button></div>
         </div>
       )}
       {editing && (
-        <div className="provform">
+        <div className="provform" ref={detail} tabIndex={-1} aria-label="Edit preset">
           <div className="row__t">Edit · {editing.id} — the daemon validates the spec on save</div>
           <textarea
             className="preset-editor"
+            aria-label="Preset composition"
+            disabled={unavailable}
             value={editing.content}
             rows={18}
             spellCheck={false}
             onChange={event => setEditing({ ...editing, content: event.target.value, dirty: true })}
           />
           <div className="preset-actions">
-            <button className="btn btn--ghost" onClick={() => setEditing(null)}>Cancel</button>
-            <button className="btn" disabled={busy || !editing.dirty} onClick={() => { void saveEdit() }}>{busy ? 'Saving…' : 'Save'}</button>
+            <button className="btn btn--ghost" disabled={busy} onClick={() => { clearError(); setEditing(null) }}>Cancel</button>
+            <button className="btn" disabled={unavailable || !editing.dirty} onClick={() => { void saveEdit() }}>{busy ? 'Saving…' : 'Save'}</button>
           </div>
         </div>
       )}
@@ -410,13 +456,13 @@ function ModelsCard({ snap }: { snap: Snapshot }): ReactElement {
     <>
       <h2 className="modal__title">Models & Providers</h2>
       <p className="modal__sub">
-        One model per session — change it anytime from the composer chip. Click a provider to make it active; profiles persist in <code>~/.xerxes/profiles.json</code> and keys never leave this machine.
+        Change the session model from the composer. Select a provider to make it active. Profiles are stored in <code>~/.xerxes/profiles.json</code> on the workspace host.
       </p>
 
       <div className="field">
         <label>Current model</label>
         <button
-          className="mchip is-custom"
+          className="chipbtn settings-model"
           title="Change model"
           disabled={snap.turnActive}
           onClick={() => store.openPicker()}
@@ -428,14 +474,15 @@ function ModelsCard({ snap }: { snap: Snapshot }): ReactElement {
         )}
       </div>
 
-      <div className="cap" style={{ paddingLeft: 0 }}>Providers · click to switch</div>
+      <div className="row__t">Providers</div>
+      {snap.providerError && <div role="alert" className="studio-error">{snap.providerError}<button onClick={() => void store.loadProviders()}>Retry loading providers</button></div>}
       <div className="pcardlist">
-      {snap.providers.length === 0 && (
+      {snap.providers.length === 0 && !snap.providerError && (
         <div className="row">
           <span className="dot dot--idle" />
           <div className="row__main">
-            <div className="row__t">no provider profiles answered</div>
-            <div className="row__s">the daemon reads ~/.xerxes/profiles.json</div>
+            <div className="row__t">No saved provider profiles</div>
+            <div className="row__s">Add a provider to configure a model.</div>
           </div>
         </div>
       )}
@@ -840,6 +887,35 @@ function PermissionsCard({ snap }: { snap: Snapshot }): ReactElement {
   )
 }
 
+
+/** Anchor each picker to its invoking chip and clamp it inside the viewport. */
+function useAnchoredPicker(ref: RefObject<HTMLElement | null>): void {
+  useLayoutEffect(() => {
+    const popup = ref.current?.closest<HTMLElement>('.modelpop')
+    const anchor = popup?.parentElement?.closest<HTMLElement>('.chipanchor')
+    if (!popup || !anchor) return
+    const trigger = anchor.querySelector<HTMLElement>('button')
+    const place = (): void => {
+      const rect = anchor.getBoundingClientRect()
+      popup.style.position = 'fixed'
+      popup.style.bottom = 'auto'
+      popup.style.right = 'auto'
+      popup.style.maxWidth = 'calc(100vw - 24px)'
+      popup.style.maxHeight = `${Math.max(80, window.innerHeight - 24)}px`
+      const width = popup.getBoundingClientRect().width
+      const height = popup.getBoundingClientRect().height
+      popup.style.left = `${Math.max(12, Math.min(rect.right - width, window.innerWidth - width - 12))}px`
+      popup.style.top = `${Math.max(12, Math.min(rect.top - height - 8, window.innerHeight - height - 12))}px`
+    }
+    place()
+    const observer = new ResizeObserver(place)
+    observer.observe(popup)
+    observer.observe(anchor)
+    window.addEventListener('resize', place)
+    return () => { observer.disconnect(); window.removeEventListener('resize', place); trigger?.focus() }
+  }, [ref])
+}
+
 // ── Model picker (anchored popover) ─────────────────────────────────────
 
 export interface ModelGroup {
@@ -867,12 +943,14 @@ export function ModelPicker({ snap, onClose }: { snap: Snapshot; onClose: () => 
   const flat = useMemo(() => groups.flatMap(group => group.choices.map(choice => choice.id)), [groups])
   const [cursor, setCursor] = useState(0)
   const ref = useRef<HTMLInputElement>(null)
+  useAnchoredPicker(ref)
   useEffect(() => {
     ref.current?.focus()
   }, [])
   useEffect(() => {
     setCursor(0)
   }, [needle])
+  useEffect(() => { ref.current?.closest('.modelpop')?.querySelector('.is-hover')?.scrollIntoView({ block: 'nearest' }) }, [cursor])
   const pick = (id: string): void => {
     if (snap.turnActive) return // hot-swapping under a running turn is refused
     store.pickModel(id)
@@ -886,6 +964,7 @@ export function ModelPicker({ snap, onClose }: { snap: Snapshot; onClose: () => 
       event.preventDefault()
       setCursor(value => Math.max(value - 1, 0))
     } else if (event.key === 'Enter') {
+      if (event.target instanceof HTMLButtonElement) return
       event.preventDefault()
       const id = flat[cursor]
       if (id) pick(id)
@@ -952,7 +1031,7 @@ export function ModelPicker({ snap, onClose }: { snap: Snapshot; onClose: () => 
         </div>
         <div className="modelpop__foot">
           <span>↑↓ select · ⏎ use · esc close</span>
-          <span className="lnk" onClick={() => { onClose(); store.openSettings('models') }}>manage providers…</span>
+          <button className="lnk" onClick={() => { onClose(); store.openSettings('models') }}>Manage providers…</button>
         </div>
       </div>
     </>
@@ -973,6 +1052,7 @@ export function ModelMenu({ snap, onClose }: { snap: Snapshot; onClose: () => vo
   ]
   const [cursor, setCursor] = useState(0)
   const ref = useRef<HTMLDivElement>(null)
+  useAnchoredPicker(ref)
   useEffect(() => {
     ref.current?.focus()
   }, [])
@@ -989,6 +1069,7 @@ export function ModelMenu({ snap, onClose }: { snap: Snapshot; onClose: () => vo
       event.preventDefault()
       setCursor(value => Math.max(value - 1, 0))
     } else if (event.key === 'Enter') {
+      if (event.target instanceof HTMLButtonElement) return
       event.preventDefault()
       drill(rows[cursor]!.key)
     } else if (event.key === 'Escape') {
@@ -1125,6 +1206,7 @@ export function ReasoningPicker({ snap, onClose }: { snap: Snapshot; onClose: ()
     return at >= 0 ? at : 0
   })
   const ref = useRef<HTMLDivElement>(null)
+  useAnchoredPicker(ref)
   useEffect(() => {
     ref.current?.focus()
   }, [])
@@ -1141,6 +1223,7 @@ export function ReasoningPicker({ snap, onClose }: { snap: Snapshot; onClose: ()
       event.preventDefault()
       setCursor(value => Math.max(value - 1, 0))
     } else if (event.key === 'Enter') {
+      if (event.target instanceof HTMLButtonElement) return
       event.preventDefault()
       const row = rows[cursor]
       if (row) pick(row.effort)
@@ -1222,9 +1305,9 @@ export function CommandPalette({ snap }: { snap: Snapshot }): ReactElement | nul
   const [needle, setNeedle] = useState('')
   const [cursor, setCursor] = useState(0)
   const ref = useRef<HTMLInputElement>(null)
-  useEffect(() => {
-    ref.current?.focus()
-  }, [])
+  const listRef = useRef<HTMLDivElement>(null)
+  useEffect(() => { listRef.current?.children[cursor]?.scrollIntoView({ block: 'nearest' }) }, [cursor, needle])
+  useDialogFocus(ref)
 
   const actions: PaletteAction[] = useMemo(() => {
     // 'new' and session rows join below, gated on turn/connection state.
@@ -1267,7 +1350,7 @@ export function CommandPalette({ snap }: { snap: Snapshot }): ReactElement | nul
     // Same mid-turn refusal as the store's pickModel — the reload rebuilds
     // the turn runner under a running turn.
     if (!snap.turnActive) {
-      for (const choice of snap.models.slice(0, 8)) {
+      for (const choice of snap.models) {
         list.push({
           id: `model:${choice.id}`,
           icon: '✳',
@@ -1287,7 +1370,10 @@ export function CommandPalette({ snap }: { snap: Snapshot }): ReactElement | nul
         hint: '⌘N',
         run: () => store.openTaskModal(),
       })
-      for (const row of [...snap.live, ...snap.sessions].slice(0, 8)) {
+      const seenSessions = new Set<string>()
+      for (const row of [...snap.live, ...snap.sessions]) {
+        if (seenSessions.has(row.id)) continue
+        seenSessions.add(row.id)
         list.push({
           id: `session:${row.id}`,
           icon: '◇',
@@ -1318,8 +1404,7 @@ export function CommandPalette({ snap }: { snap: Snapshot }): ReactElement | nul
 
   const lower = needle.trim().toLowerCase()
   const filtered = actions.filter(action =>
-    !lower || action.label.toLowerCase().includes(lower) || action.id.toLowerCase().includes(lower))
-  const bounded = filtered.slice(0, 14)
+    !lower || action.label.toLowerCase().includes(lower) || action.id.toLowerCase().includes(lower) || action.hint?.toLowerCase().includes(lower))
 
   const run = (action: PaletteAction): void => {
     // Prefill actions keep the palette open — closing first would unmount
@@ -1334,13 +1419,14 @@ export function CommandPalette({ snap }: { snap: Snapshot }): ReactElement | nul
   const onKey = (event: React.KeyboardEvent): void => {
     if (event.key === 'ArrowDown') {
       event.preventDefault()
-      setCursor(value => Math.min(value + 1, Math.max(bounded.length - 1, 0)))
+      setCursor(value => Math.min(value + 1, Math.max(filtered.length - 1, 0)))
     } else if (event.key === 'ArrowUp') {
       event.preventDefault()
       setCursor(value => Math.max(value - 1, 0))
     } else if (event.key === 'Enter') {
+      if (event.target instanceof HTMLButtonElement) return
       event.preventDefault()
-      const action = bounded[cursor]
+      const action = filtered[cursor]
       if (action) run(action)
     } else if (event.key === 'Escape') {
       event.preventDefault()
@@ -1369,8 +1455,8 @@ export function CommandPalette({ snap }: { snap: Snapshot }): ReactElement | nul
             }
           }}
         />
-        <div className="palette__list">
-          {bounded.map((action, index) => (
+        <div className="palette__list" ref={listRef}>
+          {filtered.map((action, index) => (
             <button
               key={action.id}
               className={`prow${index === cursor ? ' is-sel' : ''}`}
@@ -1382,7 +1468,7 @@ export function CommandPalette({ snap }: { snap: Snapshot }): ReactElement | nul
               {action.hint ? <span className="prow__kbd">{action.hint}</span> : null}
             </button>
           ))}
-          {bounded.length === 0 && (
+          {filtered.length === 0 && (
             <div className="prow is-sel">
               {needle.startsWith('/')
                 ? <>no match — ⏎ sends “{needle}” to the daemon</>

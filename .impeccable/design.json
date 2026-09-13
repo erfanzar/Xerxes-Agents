@@ -1,0 +1,145 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-12T16:08:58.342Z",
+  "title": "Design System: Xerxes Desktop",
+  "extensions": {
+    "shadows": [
+      {
+        "name": "glass-shadow",
+        "value": "inset 0 1px 0 var(--glass-highlight),0 8px 24px #00000020",
+        "purpose": "Composer material."
+      },
+      {
+        "name": "mac-shadow",
+        "value": "inset 0 1px 0 var(--glass-highlight),0 12px 40px #00000050,0 32px 80px #00000030",
+        "purpose": "Elevated overlays."
+      },
+      {
+        "name": "glass-shadow-light",
+        "value": "inset 0 1px 0 var(--glass-highlight),0 8px 24px #1a234012",
+        "purpose": "Composer material."
+      },
+      {
+        "name": "mac-shadow-light",
+        "value": "inset 0 1px 0 var(--glass-highlight),0 12px 40px #1a234026,0 32px 80px #1a234015",
+        "purpose": "Elevated overlays."
+      }
+    ],
+    "motion": [
+      {
+        "name": "button-state",
+        "value": "background-color 120ms ease,color 120ms ease",
+        "purpose": "Button state feedback."
+      },
+      {
+        "name": "sheet-entry",
+        "value": "studio-enter 180ms ease-out",
+        "purpose": "Sheet fades in and moves from translateY(6px); disabled for reduced motion."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "conversation-container",
+        "value": "520px"
+      },
+      {
+        "name": "sheet-navigation",
+        "value": "650px"
+      },
+      {
+        "name": "catalog-form",
+        "value": "700px"
+      },
+      {
+        "name": "compact-toolbar",
+        "value": "1000px"
+      },
+      {
+        "name": "inspector-takes-conversation-space",
+        "value": "850px"
+      },
+      {
+        "name": "compact-window-height",
+        "value": "650px"
+      }
+    ],
+    "materials": {
+      "blur": "blur(24px) saturate(140%)",
+      "controlGradient": {
+        "dark": "linear-gradient(180deg,#ffffff0d,#ffffff04)",
+        "light": "linear-gradient(180deg,#ffffffb3,#ffffff40)"
+      },
+      "native": {
+        "platform": "darwin",
+        "vibrancy": "under-window",
+        "visualEffectState": "followWindow"
+      },
+      "fallbacks": {
+        "reducedTransparencyOrIncreasedContrast": "Solid navigation, toolbar, overlays and renderer root; no blur or control gradient.",
+        "unsupportedBackdropFilter": "Solid chrome background on material surfaces.",
+        "reducedMotion": "No animations or transitions."
+      }
+    }
+  },
+  "components": [
+    {
+      "name": "Primary sheet action",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Emphasized sheet action.",
+      "html": "<button class=\"ds-control ds-primary\">Save changes</button>",
+      "css": ".ds-primary{font-family:var(--sans);font-size:var(--ui-font);border:0;border-radius:6px;padding:7px 10px;background:var(--x-title);color:var(--x-screen);cursor:pointer;transition:background-color 120ms ease,color 120ms ease}.ds-primary:hover{background:var(--x-title)}.ds-primary:disabled{opacity:.45;cursor:default}.ds-control:focus-visible{outline:2px solid var(--x-focus);outline-offset:2px}"
+    },
+    {
+      "name": "Form field",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "Opaque form field.",
+      "html": "<label class=\"ds-label\">Name<input class=\"ds-control ds-input\" placeholder=\"Agent name\"></label>",
+      "css": ".ds-label{font-family:var(--sans);color:var(--x-secondary)}.ds-input{display:block;margin-top:7px;border:1px solid var(--x-hairline);background:var(--x-screen);color:var(--x-title);border-radius:6px;padding:10px;font:var(--ui-large)/1.6 var(--sans)}.ds-control:focus-visible{outline:2px solid var(--x-focus);outline-offset:2px}"
+    },
+    {
+      "name": "Navigation row",
+      "kind": "nav",
+      "refersTo": "navigation",
+      "description": "Compact workspace navigation.",
+      "html": "<nav><button class=\"ds-control ds-nav\">Agents</button></nav>",
+      "css": ".ds-nav{display:flex;width:100%;min-height:30px;padding:6px 8px;border:0;border-radius:4px;background:none;color:var(--x-secondary);font:var(--ui-font) var(--sans);cursor:pointer}.ds-nav:hover{background:var(--x-selected)}.ds-control:focus-visible{outline:2px solid var(--x-focus);outline-offset:2px}"
+    },
+    {
+      "name": "Context chip",
+      "kind": "chip",
+      "description": "Quiet composer context control.",
+      "html": "<button class=\"ds-control ds-chip\">Model</button>",
+      "css": ".ds-chip{font:var(--ui-font) var(--sans);border:0;background:transparent;color:var(--x-meta);border-radius:5px;cursor:pointer}.ds-chip:hover{color:var(--x-title);background:var(--mac-control)}.ds-control:focus-visible{outline:2px solid var(--x-focus);outline-offset:2px}"
+    },
+    {
+      "name": "Composer material",
+      "kind": "card",
+      "refersTo": "composer",
+      "description": "Highlighted composer with opaque chrome beneath.",
+      "html": "<div class=\"ds-composer\"><textarea class=\"ds-control ds-draft\" aria-label=\"Message\" placeholder=\"Ask Xerxes\"></textarea></div>",
+      "css": ".ds-composer{padding:12px;border:1px solid var(--glass-edge);border-radius:18px;background:var(--glass-control),var(--x-chrome);box-shadow:var(--glass-shadow)}.ds-composer:focus-within{border-color:var(--x-focus)}.ds-draft{width:100%;min-height:48px;border:0;background:none;resize:none;font:14px/24px var(--sans);color:var(--x-prose)}.ds-control:focus-visible{outline:2px solid var(--x-focus);outline-offset:2px}"
+    }
+  ],
+  "narrative": {
+    "northStar": "macOS-inspired glass workspace",
+    "overview": "Xerxes is a Bun/Electron desktop for working with developer agents. The approved direction is macOS-inspired glass: translucent navigation, softly highlighted controls, and an opaque reading surface within a compact continuous workspace. The serif XERXES wordmark remains the signature.\n\nThis material refinement supersedes the earlier no-glass direction. It uses Electron native vibrancy and CSS translucent materials; it does not implement Apple’s SwiftUI Liquid Glass refraction API.",
+    "keyCharacteristics": [
+      "Translucent navigation and elevated overlays.",
+      "Opaque conversation, code, and input surfaces for reading.",
+      "Compact controls, restrained blue accents, and the serif XERXES wordmark."
+    ],
+    "rules": [],
+    "dos": [
+      "Do reuse the theme-specific material tokens for navigation, toolbar, overlays, and the composer.",
+      "Do retain the opaque reading surface and visible keyboard focus.",
+      "Do check both themes and the reduced-transparency fallback after material changes."
+    ],
+    "donts": [
+      "Don’t describe the Electron/CSS implementation as Apple’s native SwiftUI Liquid Glass.",
+      "Don’t turn every message or content block into a floating glass card.",
+      "Don’t treat the four material screenshots as verification of every application flow."
+    ]
+  }
+}

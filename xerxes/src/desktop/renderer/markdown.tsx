@@ -93,7 +93,7 @@ export function markdownBlocks(markdown: string, prefix = 'md'): ReactElement[] 
           {list.map((item, index) => (
             <li key={index} className={item.checked === null ? undefined : 'md__check'}>
               {item.checked === null ? null : <span className={`md__box${item.checked ? ' is-done' : ''}`}>{item.checked ? '✓' : ''}</span>}
-              {inlinePieces(item.text)}
+              <span className="md__item">{inlinePieces(item.text)}</span>
             </li>
           ))}
         </ul>,

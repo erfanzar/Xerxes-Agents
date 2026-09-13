@@ -13,6 +13,7 @@ import { useEffect, useState, type ReactElement } from 'react'
 
 import { store, type Snapshot } from './store.js'
 import type { TerminalRow } from './types.js'
+import { desktopError } from './desktopRpc.js'
 
 function clockOf(epoch: number | undefined): string {
   if (epoch === undefined) return ''
@@ -31,8 +32,9 @@ export function TerminalsCard({ snap }: { snap: Snapshot }): ReactElement {
     <>
       <h2 className="modal__title">Terminals</h2>
       <p className="modal__sub">
-        Shells the agents started while working in this session — watching never consumes: the retained tail below is a mirror, so peeking never steals the model's output.
+        Commands started in this session. Inspect retained output without interrupting the process.
       </p>
+      {snap.terminalsError && <p className="studio-error" role="alert">{snap.terminalsError}</p>}
       {!online && (
         <div className="row">
           <span className="dot dot--idle" />
@@ -43,7 +45,7 @@ export function TerminalsCard({ snap }: { snap: Snapshot }): ReactElement {
         </div>
       )}
       <div className="rowlist">
-        {terminals.length === 0 && online && (
+        {terminals.length === 0 && online && !snap.terminalsError && (
           <div className="row">
             <span className="dot dot--idle" />
             <div className="row__main">
@@ -65,65 +67,75 @@ export function TerminalsCard({ snap }: { snap: Snapshot }): ReactElement {
   )
 }
 
-function TerminalCard({ row, online }: { row: TerminalRow; online: boolean }): ReactElement {
+export function TerminalCard({ row, online }: { row: TerminalRow; online: boolean }): ReactElement {
   const [open, setOpen] = useState(false)
   const [output, setOutput] = useState('')
   const [truncated, setTruncated] = useState(false)
   const [loading, setLoading] = useState(false)
   const [draft, setDraft] = useState('')
+  const [error, setError] = useState('')
+  const [pending, setPending] = useState<'write' | 'interrupt' | 'kill' | null>(null)
   const running = row.running
   const state = running ? 'running' : row.exitCode === null ? 'exited' : `exit ${row.exitCode}`
 
   const inspect = (): void => {
     setLoading(true)
+    setError('')
     store.inspectTerminal(row.id)
       .then(detail => {
         if (detail) {
           setOutput(detail.output)
           setTruncated(detail.outputTruncated)
           setOpen(true)
-        }
+        } else setError('This terminal no longer has a retained result. Refresh the terminal list.')
       })
-      .catch(() => {})
+      .catch(failure => setError(desktopError(failure)))
       .finally(() => setLoading(false))
+  }
+
+  const control = async (action: 'write' | 'interrupt' | 'kill'): Promise<void> => {
+    if (pending || !online || !running) return
+    setPending(action)
+    setError('')
+    try {
+      await store.controlTerminal(row.id, action, action === 'write' ? `${draft}\n` : undefined)
+      if (action === 'write') setDraft('')
+    } catch (failure) {
+      setError(desktopError(failure))
+    } finally {
+      setPending(null)
+    }
   }
 
   const send = (): void => {
     // The trailing newline is the Enter key — `terminal.control` deliberately
     // does not trim `chars`.
     if (!draft.trim()) return
-    store.controlTerminal(row.id, 'write', `${draft}\n`)
-    setDraft('')
+    void control('write')
   }
 
   return (
-    <div className="pcard">
-      <div className="pcard__main">
+    <section className="terminal-row" aria-busy={pending !== null}>
+      <div className="terminal-row__head">
         <span className={`dot ${running ? 'dot--live' : 'dot--idle'}`} />
-        <span className="pcard__text">
-          <span className="pcard__name">{row.label || row.command.slice(0, 48) || row.id}</span>
-          <span className="pcard__meta">
-            <code>{row.kind}</code> · {state}
-            {row.pid ? ` · pid ${row.pid}` : ''}
+        <div className="terminal-row__identity">
+          <code className="terminal-row__command">{row.command || row.label || 'Terminal'}</code>
+          <div className="terminal-row__meta">
+            {state}
             {clockOf(row.startedAt) ? ` · started ${clockOf(row.startedAt)}` : ''}
-            {running && clockOf(row.endedAt) ? ` · ended ${clockOf(row.endedAt)}` : ''}
-            {` · ${row.outputChars} chars seen`}
-          </span>
-          <span className="pcard__meta" title={row.command}>
-            <code>{row.command}</code>
-          </span>
-        </span>
-      </div>
-      <div className="pcard__actions">
-        <button className="chipbtn" disabled={!online || loading} onClick={inspect}>
-          {loading ? 'Reading…' : open ? '↻ Output' : 'Inspect'}
+            {!running && clockOf(row.endedAt) ? ` · ended ${clockOf(row.endedAt)}` : ''}
+          </div>
+        </div>
+      <div className="terminal-row__actions">
+        <button className="chipbtn" disabled={!online || loading || pending !== null} onClick={inspect}>
+          {loading ? 'Reading…' : open ? 'Refresh output' : 'Inspect'}
         </button>
         {row.canInterrupt && running && (
           <button
             className="chipbtn"
-            disabled={!online}
+            disabled={!online || pending !== null}
             title="Send Ctrl+C to the live process"
-            onClick={() => store.controlTerminal(row.id, 'interrupt')}
+            onClick={() => { void control('interrupt') }}
           >
             Interrupt
           </button>
@@ -131,24 +143,27 @@ function TerminalCard({ row, online }: { row: TerminalRow; online: boolean }): R
         {row.canKill && running && (
           <button
             className="chipbtn chipbtn--danger"
-            disabled={!online}
+            disabled={!online || pending !== null}
             title="Terminate the process (SIGTERM)"
-            onClick={() => { if (window.confirm(`Kill terminal ${row.label || row.id}?`)) store.controlTerminal(row.id, 'kill') }}
+            onClick={() => { if (window.confirm(`Kill terminal ${row.label || row.id}?`)) void control('kill') }}
           >
             Kill
           </button>
         )}
       </div>
+      </div>
+      {error && <p className="studio-error" role="alert">{error}</p>}
       {open && (
-        <div className="provform">
-          <div className="row__t">Output tail · {row.id}</div>
-          <pre className="preset-composition">{output || (row.running ? '(no output yet)' : '(no output recorded)')}</pre>
+        <div className="terminal-row__output">
+          <pre tabIndex={0} role="region" aria-label="Terminal output">{output || (row.running ? 'No output yet.' : 'No output recorded.')}</pre>
           {truncated && <div className="row__s">older output was dropped from the mirror</div>}
           {row.canWrite && running && (
             <div className="findwrap">
               <input
                 className="side__search findwrap__input"
                 value={draft}
+                aria-label="Terminal input"
+                disabled={!online || pending !== null}
                 spellCheck={false}
                 placeholder="send a line to this shell…"
                 onChange={event => setDraft(event.target.value)}
@@ -157,14 +172,15 @@ function TerminalCard({ row, online }: { row: TerminalRow; online: boolean }): R
                   if (event.key === 'Escape') setDraft('')
                 }}
               />
-              <button className="btn btn--solid" disabled={!draft.trim() || !online} onClick={send}>Send ⏎</button>
+              <button className="btn btn--solid" disabled={!draft.trim() || !online || pending !== null} onClick={send}>{pending === 'write' ? 'Sending…' : 'Send ⏎'}</button>
             </div>
           )}
           <div className="preset-actions">
             <button className="btn btn--ghost" onClick={() => setOpen(false)}>Close</button>
           </div>
+          <details className="terminal-row__diagnostics"><summary>Process details</summary><p>{row.kind}{row.pid ? ` · PID ${row.pid}` : ''}</p><p>{row.id}</p></details>
         </div>
       )}
-    </div>
+    </section>
   )
 }

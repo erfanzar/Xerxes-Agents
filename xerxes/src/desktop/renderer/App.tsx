@@ -1,16 +1,25 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { Fragment, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactElement } from 'react'
+import { createPortal } from 'react-dom'
+import { Fragment, useLayoutEffect, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactElement } from 'react'
 
-import { CommandPalette, ContextMenu, ModelMenu, ModelPicker, ReasoningPicker, SettingsModal, bareModelName } from './Overlays.js'
+import { CommandPalette, ModelMenu, ModelPicker, ReasoningPicker, SettingsModal, bareModelName } from './Overlays.js'
 import { SessionSearch } from './SearchPanel.js'
 import { store, type Snapshot, isPlanReview } from './store.js'
 import type { AgentMember } from './types.js'
-import { applyCompletion, wantsHints, HINT_LIMIT, type HintItem } from './hints.js'
+import { applyCompletion, wantsHints, type HintItem } from './hints.js'
 import { groupByWorkspace } from './workspaceGroups.js'
 import { ChangesTab, LogTab, PlanTab } from './Workspaces.js'
 import { Markdown } from './markdown.js'
+import { Dictation } from './Dictation.js'
+import { draftKey, readDraft, writeDraft } from './drafts.js'
+import { PanelDivider, usePanelLayout } from './layout.js'
+import { groupActivity } from "./activityGroups.js"
+import { ExecutionDetails } from "./Execution.js"
+import { Icon } from './Icon.js'
+import { FirstRunSetup } from './Setup.js'
+import { BackgroundIndicator, DesktopNavigation, DesktopSheet, DesktopPage, DesktopRail, useDesktopNavigation, type DesktopPanel } from './DesktopPanels.js'
 
 /** Every palette read goes through the generated custom properties. */
 const C = {
@@ -105,15 +114,37 @@ export function App(): ReactElement {
 
 /** Presentational shell — pure over the snapshot, SSR-friendly. */
 export function Shell({ snap }: { snap: Snapshot }): ReactElement {
+  const [panel, setPanel] = useState<DesktopPanel>(null)
+  const { layout, setLayout } = usePanelLayout()
+  const focused = layout.sidebarHidden
+  const [windowWidth, setWindowWidth] = useState(() => typeof window === 'undefined' ? 1440 : window.innerWidth)
+  useEffect(() => { const resize = () => setWindowWidth(window.innerWidth); window.addEventListener('resize', resize); return () => window.removeEventListener('resize', resize) }, [])
+  const [rail, setRail] = useState<'files' | 'review' | 'activity' | null>(null)
+  const [filesExpanded, setFilesExpanded] = useState(false)
+  const [reviewPath, setReviewPath] = useState('')
+  const contextRequiresFullWidth = windowWidth < (focused ? 0 : layout.sidebarWidth) + layout.inspectorWidth + 320
+  const [page, setPage] = useState<'agents' | 'extensions' | 'artifacts' | null>(null)
+  const navigate = (next: DesktopPanel, filePath?: string): void => {
+    if (next === 'review') setReviewPath(filePath ?? '')
+    if (next === 'files' || next === 'review' || next === 'activity') setRail(next)
+    else if (next === 'agents' || next === 'extensions' || next === 'artifacts') { setPage(next); setPanel(null) }
+    else if (next === null) { setPage(null); setPanel(null) }
+    else setPanel(next)
+  }
+  useEffect(() => { setPanel(null); setPage(null) }, [snap.cwd, snap.sessionKey])
   return (
-    <div className="app">
-      <Topbar snap={snap} />
-      <div className="app__body">
-        <Sidebar snap={snap} />
-        {snap.noWorkspace ? <WorkspaceGate /> : <Chat snap={snap} />}
-        {!snap.noWorkspace && <Rail snap={snap} />}
+    <DesktopNavigation.Provider value={navigate}>
+    <div className={`app atelier${focused ? ' atelier--focus' : ''}`} style={{ '--sidebar-width': `${layout.sidebarWidth}px`, '--inspector-width': `${layout.inspectorWidth}px` } as React.CSSProperties}>
+      <Topbar snap={snap} inspectorOpen={rail !== null} sidebarVisible={!focused} onFocus={() => setLayout({ sidebarHidden: !focused })} />
+      <FirstRunSetup snap={snap} />
+      <div className="app__body" data-context-full={rail && rail !== 'review' && (rail === 'files' && filesExpanded || contextRequiresFullWidth) || undefined} data-review={rail === "review" || undefined}>
+        <Sidebar snap={snap} page={page} />
+        {!focused && <PanelDivider label="Resize sessions" value={layout.sidebarWidth} min={180} max={360} onChange={sidebarWidth => setLayout({ sidebarWidth })} />}
+        {snap.noWorkspace ? <WorkspaceGate /> : <Chat snap={snap} page={page} />}
+        {rail && rail !== 'review' && <PanelDivider label="Resize inspector" value={layout.inspectorWidth} min={260} max={520} reverse onChange={inspectorWidth => setLayout({ inspectorWidth })} />}
+        {rail && <DesktopRail panel={rail} snap={snap} close={() => setRail(null)} filesExpanded={filesExpanded} reviewPath={reviewPath} {...(!contextRequiresFullWidth ? { toggleFilesExpanded: () => setFilesExpanded(value => !value) } : {})} activityDetails={<><ActivityDetails snap={snap} /><SessionDiagnostics snap={snap} /></>} />}
+
       </div>
-      <Statusbar snap={snap} />
       <SettingsModal snap={snap} />
       {snap.taskModalOpen && <TaskModal snap={snap} />}
       {/* Mounted only while open: the palette's hooks (needle, cursor,
@@ -122,36 +153,80 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
       {snap.searchOpen && <SessionSearch snap={snap} />}
       {snap.wsMenuOpen && <WorkspaceMenu snap={snap} />}
       {snap.sessionMenu && <SessionMenu menu={snap.sessionMenu} />}
+      {panel && <DesktopSheet panel={panel} snap={snap} close={() => setPanel(null)} activityDetails={<><ActivityDetails snap={snap} /><SessionDiagnostics snap={snap} /></>} />}
+      {(snap.workspaceBusy || snap.workspaceError) && <div className="workspace-notice" role={snap.workspaceError ? 'alert' : 'status'}>
+        <span>{snap.workspaceError || 'Opening workspace…'}</span>
+        {snap.workspaceError && <button aria-label="Dismiss workspace error" onClick={() => store.clearWorkspaceError()}>×</button>}
+      </div>}
       <GlobalKeys snap={snap} />
     </div>
+    </DesktopNavigation.Provider>
   )
 }
 
 // ── Top bar ─────────────────────────────────────────────────────────────
 
-function Topbar({ snap }: { snap: Snapshot }): ReactElement {
-  const online = snap.connection === 'online'
-  return (
-    <div className="top">
-      <img className="top__brand top__logo" src="./logo-128.png" alt="Xerxes" />
-      <span className="top__name">Xerxes</span>
-      <span className="top__sep">·</span>
-      {/* Mockup 01/16: the workspace is a switcher chip, not a static label —
-          one click lists every folder the shell knows and the gate to add one. */}
-      <button className="wschip" title="Switch workspace" onClick={() => store.toggleWorkspaceMenu()}>
-        <span className="wschip__ico">▣</span> {workspaceLabel(snap.cwd) || 'no workspace'} <span className="wschip__c">▾</span>
-      </button>
-      {snap.daemonWarning && (
-        <button className="top__warn" title="Restart the project daemon" onClick={() => store.restartDaemon()}>
-          ⚠ {snap.daemonWarning}
-        </button>
-      )}
-      <div className="top__conn">
-        <span className="dot" data-state={snap.connection} />
-        {online ? 'daemon connected' : snap.connection === 'connecting' ? 'connecting…' : 'daemon offline'}
-      </div>
+function Topbar({ snap, inspectorOpen, sidebarVisible, onFocus }: { snap: Snapshot; inspectorOpen: boolean; sidebarVisible: boolean; onFocus: () => void }): ReactElement {
+  const open = useDesktopNavigation()
+  return <div className="top">
+    <button className="studio-icon" title="Toggle sidebar" aria-label="Toggle sidebar" aria-expanded={sidebarVisible} aria-controls="session-sidebar" onClick={onFocus}><Icon name="sidebar" /></button>
+    <span className="top__name">{snap.currentTitle || 'New session'}</span>
+    {!sidebarVisible && <RuntimeStatus snap={snap} compact />}
+    <div className="top__actions" role="group" aria-label="Workspace tools">
+    <button title="Search sessions" aria-label="Search sessions" onClick={() => store.openSessionSearch()}><Icon name="search" /></button>
+    <BackgroundIndicator snap={snap} />
+    {!inspectorOpen && <>
+    <button title="Working tree changes" onClick={() => open('review')}><Icon name="changes" /><span>Changes</span></button>
+    <button title="Project files" aria-label="Project files" onClick={() => open('files')}><Icon name="sidebar" /></button></>}
     </div>
-  )
+  </div>
+}
+
+/** One workspace-level home for connection, version mismatch and recovery. */
+function RuntimeStatus({ snap, compact = false }: { snap: Snapshot; compact?: boolean }): ReactElement {
+  const navigate = useDesktopNavigation()
+  const [expanded, setExpanded] = useState(false)
+  const trigger = useRef<HTMLButtonElement>(null)
+  const popup = useRef<HTMLDivElement>(null)
+  const busy = snap.runtimeUpdate === 'checking' || snap.runtimeUpdate === 'restarting'
+  const label = snap.noWorkspace ? 'Choose workspace' : busy ? 'Updating runtime…' : snap.runtimeUpdate === 'waiting' ? 'Update waiting for idle' : snap.connection === 'offline' ? 'Runtime offline' : snap.connection === 'connecting' ? 'Connecting…' : snap.daemonWarning ? 'Runtime update available' : 'Connected'
+  useLayoutEffect(() => {
+    if (!expanded) return
+    const place = () => {
+      const anchor = trigger.current?.getBoundingClientRect(), panel = popup.current
+      if (!anchor || !panel) return
+      const left = Math.max(8, Math.min(anchor.left, window.innerWidth - panel.offsetWidth - 8))
+      const top = anchor.top > panel.offsetHeight + 16 ? anchor.top - panel.offsetHeight - 8 : anchor.bottom + 8
+      panel.style.left = left + 'px'
+      panel.style.top = Math.max(8, Math.min(top, window.innerHeight - panel.offsetHeight - 8)) + 'px'
+    }
+    place()
+    popup.current?.focus()
+    const dismiss = (event: MouseEvent) => {
+      if (event.target instanceof Node && !popup.current?.contains(event.target) && !trigger.current?.contains(event.target)) setExpanded(false)
+    }
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { event.preventDefault(); setExpanded(false); trigger.current?.focus() }
+    }
+    window.addEventListener('resize', place)
+    document.addEventListener('mousedown', dismiss)
+    document.addEventListener('keydown', escape)
+    return () => { window.removeEventListener('resize', place); document.removeEventListener('mousedown', dismiss); document.removeEventListener('keydown', escape) }
+  }, [expanded, label, snap.daemonWarning, snap.runtimeUpdateMessage])
+  return <>
+    <button ref={trigger} className={'runtime-status' + (compact ? ' runtime-status--compact' : '')} aria-label={'Workspace runtime: ' + label} aria-expanded={expanded} aria-haspopup="dialog" onClick={() => setExpanded(value => !value)}>
+      <span className="runtime-status__dot" data-state={snap.connection} data-warning={Boolean(snap.daemonWarning)} />
+      <span>{label}</span>
+    </button>
+    {expanded && createPortal(<div ref={popup} className="runtime-popover" role="dialog" aria-label="Workspace runtime" tabIndex={-1}>
+      <header><strong>Workspace runtime</strong><button aria-label="Close runtime status" onClick={() => { setExpanded(false); trigger.current?.focus() }}>×</button></header>
+      <p role="status" aria-live="polite">{snap.connection === 'online' ? 'Connected to this workspace' : label}</p>
+      {snap.daemonWarning && <><strong>App and runtime versions differ</strong><p>{snap.daemonWarning}</p></>}
+      {snap.runtimeUpdateMessage && <p role="status">{snap.runtimeUpdateMessage}</p>}
+      {snap.daemonWarning && <><p>The current runtime keeps your tasks running. Review activity before restarting.</p><div className="runtime-popover__actions"><button onClick={() => { setExpanded(false); navigate('activity') }}>Review activity</button><button disabled={snap.turnActive || busy} onClick={() => void store.restartDaemon()}>Restart workspace runtime</button></div></>}
+      {!snap.daemonWarning && snap.connection !== 'online' && <button onClick={() => { setExpanded(false); navigate('workspace') }}>Open workspace settings</button>}
+    </div>, document.body)}
+  </>
 }
 
 // ── Workspace switcher menu (mockup 16) ─────────────────────────────────
@@ -219,19 +294,26 @@ function TaskModal({ snap }: { snap: Snapshot }): ReactElement | null {
   const [namingWorktree, setNamingWorktree] = useState(false)
   const [worktreeName, setWorktreeName] = useState('')
   const [agentPreset, setAgentPreset] = useState('')
+  const [model, setModel] = useState(snap.model)
+  const [starting, setStarting] = useState(false)
+  const models = [...new Set([snap.model, ...snap.models.map(choice => choice.id)].filter(Boolean))]
   const presets = snap.agentPresets ?? []
   const selectedPreset = agentPreset || presets.find(row => row.isDefault && !row.broken)?.id || 'default'
-  const start = (): void => { void store.startTask(objective, planFirst, selectedPreset) }
+  const start = (): void => {
+    if (starting || !objective.trim() || !model) return
+    setStarting(true)
+    void store.startTask(objective, planFirst, selectedPreset, model).finally(() => setStarting(false))
+  }
   const submitWorktree = (): void => {
     if (!worktreeName.trim()) { setNamingWorktree(false); return }
     void store.createWorktree(worktreeName)
   }
   return (
     <div className="backdrop">
-      <div className="modal taskmodal" role="dialog" aria-label="New task">
+      <div className="modal taskmodal" role="dialog" aria-modal="true" aria-label="New task">
         <div className="modal__main">
           <h2 className="modal__title">New task</h2>
-          <p className="modal__sub"><kbd>⌘N</kbd> · describe the outcome — the planner turns it into a checklist first.</p>
+          <p className="modal__sub">Choose how you want to work, then describe your task.</p>
 
           <div className="field">
             <label>Workspace</label>
@@ -262,18 +344,20 @@ function TaskModal({ snap }: { snap: Snapshot }): ReactElement | null {
           </div>
 
           <div className="field">
-            <label>Agent preset</label>
+            <label htmlFor="task-agent">Agent preset</label>
             <select
+              id="task-agent"
+              disabled={starting}
               value={selectedPreset}
               onChange={event => setAgentPreset(event.target.value)}
               title="Fixed after this session starts"
             >
               {presets.filter(row => !row.broken).map(row => (
-                <option key={row.id} value={row.id}>{row.name}{row.isDefault ? ' · default' : ''}</option>
+                <option key={row.id} value={row.id}>{row.name}{row.isDefault && row.name !== 'default' ? ' · default' : ''}</option>
               ))}
               {presets.length === 0 && <option value="default">default</option>}
             </select>
-            <div className="row__s" style={{ marginTop: 4 }}>chooses this session’s tools, prompt, and subagents · fixed after the first turn</div>
+            <div className="row__s" style={{ marginTop: 4 }}>Instructions and tools for this task.</div>
           </div>
 
           <div className="field">
@@ -284,7 +368,7 @@ function TaskModal({ snap }: { snap: Snapshot }): ReactElement | null {
               value={objective}
               autoFocus
               spellCheck={false}
-              placeholder="e.g. Add rate limiting to the public API — 429s with a Retry-After header, config-driven limits. Verify with the new integration test."
+              placeholder="What would you like to get done?"
               onChange={e => setObjective(e.target.value)}
               onKeyDown={e => {
                 if (e.key === 'Enter' && !e.shiftKey) {
@@ -311,9 +395,10 @@ function TaskModal({ snap }: { snap: Snapshot }): ReactElement | null {
 
           <div className="field">
             <label>Model</label>
-            <span className="mchip is-custom" title="Change the model from the composer chip once the task starts">
-              <span className="star">✳</span> {snap.model || 'unset'}
-            </span>
+            <select aria-label="Model" value={model} disabled={starting} onChange={event => setModel(event.target.value)}>
+              {!model && <option value="">Choose a model</option>}
+              {models.map(id => <option key={id} value={id}>{id}</option>)}
+            </select>
           </div>
 
           <div className="fieldnote" style={{ marginBottom: 16 }}>
@@ -321,9 +406,10 @@ function TaskModal({ snap }: { snap: Snapshot }): ReactElement | null {
             <u style={{ cursor: 'pointer' }} onClick={() => { store.closeTaskModal(); store.openSettings('permissions') }}>change</u>
           </div>
 
+          <div role="status" className="taskmodal__error">{snap.error}</div>
           <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-            <button className="btn btn--ghost" onClick={() => store.closeTaskModal()}>Cancel</button>
-            <button className="btn" onClick={start}>Start task ⏎</button>
+            <button className="btn btn--ghost" disabled={starting} onClick={() => store.closeTaskModal()}>Cancel</button>
+            <button className="btn" disabled={starting || !objective.trim() || !model} onClick={start}>{starting ? 'Starting…' : 'Start task ↵'}</button>
           </div>
         </div>
       </div>
@@ -353,8 +439,19 @@ function copyText(text: string): void {
  * deliberately absent — no dead switches.
  */
 function SessionMenu({ menu }: { menu: Snapshot['sessionMenu'] }): ReactElement | null {
-  const [renaming, setRenaming] = useState(false)
+  const [renaming, setRenaming] = useState(menu?.renaming ?? false)
   const [draft, setDraft] = useState(menu?.title ?? '')
+  const menuRef = useRef<HTMLDivElement>(null)
+  useLayoutEffect(() => {
+    const element = menuRef.current
+    if (!element || !menu) return
+    const previous = document.activeElement
+    const place = () => { const rect = element.getBoundingClientRect(); element.style.left = `${Math.max(8, Math.min(menu.x, window.innerWidth - rect.width - 8))}px`; element.style.top = `${Math.max(8, Math.min(menu.y, window.innerHeight - rect.height - 8))}px` }
+    place()
+    element.querySelector<HTMLElement>('button,input')?.focus()
+    window.addEventListener('resize', place)
+    return () => { window.removeEventListener('resize', place); if(previous instanceof HTMLElement && previous.isConnected) previous.focus() }
+  }, [menu?.key, menu?.x, menu?.y, renaming])
   const inputRef = useRef<HTMLInputElement>(null)
   useEffect(() => {
     if (renaming) inputRef.current?.select()
@@ -370,39 +467,55 @@ function SessionMenu({ menu }: { menu: Snapshot['sessionMenu'] }): ReactElement 
         onClick={() => store.closeSessionMenu()}
         onContextMenu={event => { event.preventDefault(); store.closeSessionMenu() }}
       />
-      <div className="menu" role="menu" aria-label="Session actions" style={{ left: menu.x, top: menu.y }}>
+      <div ref={menuRef} onKeyDown={event => {
+        if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); store.closeSessionMenu(); return }
+        if (renaming) return
+        if (event.key === 'ArrowDown' || event.key === 'ArrowUp' || event.key === 'Home' || event.key === 'End') {
+          event.preventDefault()
+          const buttons = Array.from(menuRef.current?.querySelectorAll<HTMLButtonElement>('button') ?? [])
+          const current = buttons.indexOf(document.activeElement as HTMLButtonElement)
+          const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : (current + (event.key === 'ArrowDown' ? 1 : buttons.length - 1)) % buttons.length
+          buttons[next]?.focus()
+        }
+      }} className={'menu' + (renaming ? ' menu--renaming' : '')} role={renaming ? 'form' : 'menu'} aria-label={renaming ? 'Rename session' : 'Session actions'} style={{ left: menu.x, top: menu.y }}>
         {renaming ? (
           <div className="menu__rename">
             <input
               ref={inputRef}
               value={draft}
+              disabled={menu.pending}
               onChange={e => setDraft(e.target.value)}
               onKeyDown={e => {
-                if (e.key === 'Enter') submitRename()
-                if (e.key === 'Escape') store.closeSessionMenu()
+                if (e.key === 'Enter' || e.key === 'Escape') {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  if (e.key === 'Enter') submitRename()
+                  else store.closeSessionMenu()
+                }
               }}
               aria-label="Session title"
               spellCheck={false}
             />
-            <button className="menu__item" onClick={submitRename} title="Rename">⏎</button>
+            <button className="menu__item" onClick={submitRename} disabled={menu.pending || !draft.trim()} aria-label="Save session title">{menu.pending ? 'Saving…' : 'Save'}</button>
           </div>
         ) : (
           <>
-            <button className="menu__item" onClick={() => { store.closeSessionMenu(); void store.openSession(menu.id) }}>
+            <button role="menuitem" className="menu__item" onClick={() => { store.closeSessionMenu(); void store.openSession(menu.id) }}>
               <span className="ico">↵</span> Open <span className="kbd">⏎</span>
             </button>
-            <button className="menu__item" onClick={() => setRenaming(true)}>
+            <button role="menuitem" className="menu__item" onClick={() => setRenaming(true)}>
               <span className="ico">✎</span> Rename…
             </button>
             <div className="menu__sep" />
-            <button className="menu__item" onClick={() => { copyText(menu.id); store.closeSessionMenu() }}>
+            <button role="menuitem" className="menu__item" onClick={() => { copyText(menu.id); store.closeSessionMenu() }}>
               <span className="ico">⧉</span> Copy id
             </button>
-            <button className="menu__item" onClick={() => { void store.exportSessionTranscript(menu.key) }}>
+            <button role="menuitem" className="menu__item" onClick={() => { void store.exportSessionTranscript(menu.key) }}>
               <span className="ico">⬇</span> Export md
             </button>
           </>
         )}
+        {menu.error && <p className="session-menu-error" role="alert">{menu.error}</p>}
       </div>
     </>
   )
@@ -410,51 +523,30 @@ function SessionMenu({ menu }: { menu: Snapshot['sessionMenu'] }): ReactElement 
 
 // ── Statusline ──────────────────────────────────────────────────────────
 
-function Statusbar({ snap }: { snap: Snapshot }): ReactElement {
-  const online = snap.connection === 'online'
-  const livePhaseMs = snap.turnActive && snap.metricPhaseStartedAt != null
-    ? Math.max(0, Date.now() - snap.metricPhaseStartedAt)
-    : 0
-  const llmDurationMs = snap.llmDurationMs + (snap.metricPhase === 'llm' ? livePhaseMs : 0)
-  const toolDurationMs = snap.toolDurationMs + (snap.metricPhase === 'tool' ? livePhaseMs : 0)
-  const steps = snap.llmSteps + snap.toolSteps
-  return (
-    <div className="status">
-      <span className="st-mode">{snap.planMode ? '⏸ plan' : snap.turnActive ? '▶ act' : online ? 'idle' : '—'}</span>
-      <span>{snap.turnCount} turn{snap.turnCount === 1 ? '' : 's'} · {steps} step{steps === 1 ? '' : 's'}</span>
-      <span>LLM {metricDurationOf(llmDurationMs)} · Tool calls {metricDurationOf(toolDurationMs)}</span>
-      {snap.ttftMs != null && <span>TTFT avg {ttftOf(snap.ttftMs)}</span>}
-      {snap.tokensPerSecond != null && <span>{snap.tokensPerSecond.toFixed(1)} tok/s</span>}
-      <span>Cache hit {snap.cacheHitRate == null ? '—' : `${Math.round(snap.cacheHitRate * 100)}%`}</span>
-      <span>Input {compactTokensOf(snap.inputTokens)}</span>
-      <span className="chipanchor">
-        <button
-          className="st-ctx"
-          title="Context usage — click for the token split"
-          onClick={() => store.toggleContextMenu()}
-        >
-          {snap.contextMax == null
-            ? 'ctx unknown'
-            : `ctx ${Math.round((snap.contextTokens ?? 0) / 1000)}k/${Math.round(snap.contextMax / 1000)}k`}
-        </button>
-        {snap.contextMenuOpen && <ContextMenu snap={snap} onClose={() => store.closeContextMenu()} />}
-      </span>
-      {snap.costUsd != null && snap.costUsd > 0 && (
-        <span>${snap.costUsd < 0.01 ? snap.costUsd.toFixed(4) : snap.costUsd.toFixed(2)}</span>
-      )}
-      {snap.model && <span className="st-model">{snap.model}</span>}
-      {snap.branch && <span>⎇ {snap.branch}</span>}
-      <span className="st-conn">
-        <span className="st-dot" data-state={snap.connection} />
-        {online ? 'connected' : snap.connection === 'connecting' ? 'connecting' : 'offline'}
-      </span>
-    </div>
-  )
+export function SessionDiagnostics({ snap }: { snap: Snapshot }): ReactElement {
+  const livePhaseMs = snap.turnActive && snap.metricPhaseStartedAt != null ? Math.max(0, Date.now() - snap.metricPhaseStartedAt) : 0
+  const metrics: [string, string][] = [
+    ['Turns', String(snap.turnCount)],
+    ['Steps', String(snap.llmSteps + snap.toolSteps)],
+    ['Model time', metricDurationOf(snap.llmDurationMs + (snap.metricPhase === 'llm' ? livePhaseMs : 0))],
+    ['Tool time', metricDurationOf(snap.toolDurationMs + (snap.metricPhase === 'tool' ? livePhaseMs : 0))],
+    ['First response', snap.ttftMs == null ? 'Unavailable' : ttftOf(snap.ttftMs)],
+    ['Generation', snap.tokensPerSecond == null ? 'Unavailable' : snap.tokensPerSecond.toFixed(1) + ' tokens/s'],
+    ['Cache hit', snap.cacheHitRate == null ? 'Unavailable' : Math.round(snap.cacheHitRate * 100) + '%'],
+    ['Input tokens', compactTokensOf(snap.inputTokens)],
+  ]
+  if (snap.costUsd != null && snap.costUsd > 0) metrics.push(['Cost', '$' + snap.costUsd.toFixed(snap.costUsd < 0.01 ? 4 : 2)])
+  if (snap.model) metrics.push(['Model', snap.model])
+  if (snap.branch) metrics.push(['Branch', snap.branch])
+  return <details className="session-diagnostics"><summary>Session statistics</summary>
+    <dl className="session-diagnostics__values">{metrics.map(([label, value]) => <Fragment key={label}><dt>{label}</dt><dd>{value}</dd></Fragment>)}</dl>
+  </details>
 }
 
 // ── Sidebar ─────────────────────────────────────────────────────────────
 
-function Sidebar({ snap }: { snap: Snapshot }): ReactElement {
+function Sidebar({ snap, page }: { snap: Snapshot; page: 'agents' | 'extensions' | 'artifacts' | null }): ReactElement {
+  const open = useDesktopNavigation()
   const [filter, setFilter] = useState('')
   const needle = filter.trim().toLowerCase()
   // Match what the row DISPLAYS: enriched snippets replace raw titles, and
@@ -495,25 +587,24 @@ function Sidebar({ snap }: { snap: Snapshot }): ReactElement {
   const online = snap.connection === 'online'
 
   return (
-    <aside className="side">
+    <aside id="session-sidebar" className="side" aria-label="Sessions">
       <div className="side__pad">
+        <div className="studio-segment"><button className={page !== 'agents' ? 'is-selected' : ''} onClick={() => open(null)}>Sessions</button><button className={page === 'agents' ? 'is-selected' : ''} onClick={() => open('agents')}>Agents</button></div>
         <button
           className="newchat"
           disabled={!online || snap.turnActive}
-          onClick={() => store.openTaskModal()}
+          onClick={() => { open(null); store.newChat() }}
           title={homeLabel(snap) ? `Start a new task in ${homeLabel(snap)} (⌘N)` : 'Start a fresh session (⌘N)'}
-        >＋ New task</button>
-        <button
-          className="creatorchat"
-          disabled={!online || snap.turnActive}
-          onClick={() => store.startCreatorMode()}
-          title="Start a fresh DSH-style Creator mode session"
-        >◈ Creator mode</button>
+        ><Icon name="plus" /><span>New session</span><kbd>⌘ N</kbd></button>
+        <button className={`studio-nav${page === "extensions" ? " is-selected" : ""}`} disabled={!online} onClick={() => open('extensions')}><Icon name="tools" /><span>Skills & tools</span></button>
+        <button className={`studio-nav${page === "artifacts" ? " is-selected" : ""}`} disabled={!online} onClick={() => open('artifacts')}><Icon name="folder" /><span>Artifacts</span></button>
+        <button className="studio-nav" disabled={!online} onClick={() => open('schedules')}><Icon name="clock" /><span>Scheduled jobs</span></button>
         <input
           className="side__search"
           value={filter}
           onChange={e => setFilter(e.target.value)}
-          placeholder={online ? 'Filter tasks' : 'Offline'}
+          placeholder={online ? 'Search sessions…' : 'Offline'}
+          aria-label="Filter sessions"
           spellCheck={false}
         />
         <button
@@ -521,7 +612,7 @@ function Sidebar({ snap }: { snap: Snapshot }): ReactElement {
           disabled={!online}
           title="Full-text search across every saved session (daemon transcript index)"
           onClick={() => store.openSessionSearch()}
-        >⌕ Search sessions & messages…</button>
+        >Search message history →</button>
       </div>
       <nav className="side__list">
         {groups.map(group => (
@@ -544,13 +635,13 @@ function Sidebar({ snap }: { snap: Snapshot }): ReactElement {
           </div>
         ))}
         {groups.length === 0 && (
-          <div className="side__empty">{online ? 'No tasks yet — your chats live inside the workspace folder' : 'Daemon offline — retrying automatically'}</div>
+          <div className="side__empty">{snap.noWorkspace ? 'Your sessions will appear here' : online ? 'No tasks yet — your chats live inside the workspace folder' : 'Daemon offline — retrying automatically'}</div>
         )}
         <button className="addws" onClick={() => store.chooseWorkspace()} title="Choose another folder to open as a workspace">
           ＋ Add folder…
         </button>
       </nav>
-      <Foot snap={snap} />
+      <div className="studio-side-bottom"><RuntimeStatus snap={snap} /><button onClick={() => store.openSettings()}><Icon name="settings" /><span>Settings</span></button><button onClick={() => open('workspace')}><Icon name="folder" /><span>{homeLabel(snap) || 'Workspace'}</span></button></div>
     </aside>
   )
 }
@@ -575,20 +666,10 @@ function SessionCell({
   // subline only when it says something the age doesn't.
   const sub = [
     row.status === 'working' ? 'acting' : row.status === 'failed' ? 'failed' : '',
-    // Untitled rows carry their turn count as identity; the snapshot-derived
-    // current row (empty age) shows it as progress. Daemon rows keep their age.
-    row.untitled || !row.age ? `${row.turns} turn${row.turns === 1 ? '' : 's'}` : '',
   ].filter(Boolean).join(' · ')
   if (displayOnly) {
     return (
-      <div className="sess sess--status" title="subagent snapshot — read-only while it runs">
-        <span className="sess__dot" style={{ background: statusColor(row.status) }} />
-        <span className="sess__body">
-          <span className="sess__t">{title}</span>
-          {sub && <span className="sess__s">{sub}</span>}
-        </span>
-        {row.age && <span className="sess__age">{row.age}</span>}
-      </div>
+      <details className="agent-row"><summary><span className="sess__dot" style={{ background: statusColor(row.status) }} /><span>{title}</span><small>{row.status}</small></summary><p>{title}</p>{row.turns > 0 && <small>{row.turns} turns</small>}</details>
     )
   }
   return (
@@ -596,11 +677,19 @@ function SessionCell({
       className={`sess${row.current ? ' is-current' : ''}`}
       disabled={locked}
       title={locked ? 'Finish or stop the current task before switching' : undefined}
+      aria-haspopup="menu"
       onClick={() => store.openSession(row.id)}
+      onKeyDown={event => {
+        if (event.key === 'ContextMenu' || event.key === 'F10' && event.shiftKey) {
+          event.preventDefault()
+          const rect = event.currentTarget.getBoundingClientRect()
+          store.openSessionMenu({ id: row.id, key: row.key, title: row.title }, rect.left, rect.bottom)
+        }
+      }}
       onContextMenu={event => {
         event.preventDefault()
         store.openSessionMenu(
-          { id: row.id, key: row.key, title: snippet ?? title },
+          { id: row.id, key: row.key, title: row.title },
           event.clientX,
           event.clientY,
         )
@@ -615,28 +704,6 @@ function SessionCell({
     </button>
   )
 }
-function Foot({ snap }: { snap: Snapshot }): ReactElement {
-  return (
-    <div className="side__foot">
-      <div className="meter" title={snap.contextMax == null ? 'Context window unknown' : 'Context usage'}>
-        <div className="meter__bar">
-          {snap.contextMax != null && (
-            <div className="meter__fill" style={{ width: `${Math.min(100, ((snap.contextTokens ?? 0) / snap.contextMax) * 100)}%` }} />
-          )}
-        </div>
-        <span className="meter__label">
-          {snap.contextMax == null
-            ? 'ctx unknown'
-            : `ctx ${Math.round((snap.contextTokens ?? 0) / 1000)}k / ${Math.round(snap.contextMax / 1000)}k`}
-        </span>
-      </div>
-      <button className="footlink" title="Settings" onClick={() => store.openSettings()}>
-        <span className="footlink__ico">⚙</span> Settings
-      </button>
-    </div>
-  )
-}
-
 // ── Chat column ─────────────────────────────────────────────────────────
 
 /**
@@ -714,7 +781,8 @@ function JobsChip({ snap }: { snap: Snapshot }): ReactElement {
   )
 }
 
-function Chat({ snap }: { snap: Snapshot }): ReactElement {
+function Chat({ snap, page }: { snap: Snapshot; page: 'agents' | 'extensions' | 'artifacts' | null }): ReactElement {
+  const open = useDesktopNavigation()
   const changes = snap.changes
   const totals = useMemo(() => ({
     adds: changes.reduce((sum, file) => sum + file.adds, 0),
@@ -727,6 +795,7 @@ function Chat({ snap }: { snap: Snapshot }): ReactElement {
   return (
     <main className="chat">
       <header className="chat__head">
+        <button className="chat__workspace" onClick={() => open('workspace')}>{homeLabel(snap)}</button>
         <span className="chat__title">{snap.currentTitle || (snap.connection === 'online' ? 'New task' : 'Not connected')}</span>
         {snap.currentId && <span className="chat__id">{snap.currentId.slice(0, 8)}</span>}
         <span className="hchip" title="Agent preset for this session · fixed after its first turn">◈ {snap.currentAgentPreset === 'creator' ? 'Creator mode' : (snap.currentAgentPreset || 'default')}</span>
@@ -752,7 +821,7 @@ function Chat({ snap }: { snap: Snapshot }): ReactElement {
             </>
           ) : snap.turnActive ? (
             <>
-              <span className="badge badge--live">▶ acting · {snap.turnSeconds}s</span>
+              <span className="badge badge--live">Working</span>
               <button className="stop" onClick={() => store.cancel()}>Stop</button>
             </>
           ) : snap.planMode ? (
@@ -771,32 +840,26 @@ function Chat({ snap }: { snap: Snapshot }): ReactElement {
         >
           ⤓ Session log
         </button>
-      </header>
-
-      <div className="workspace__tabs">
+      <div hidden={page !== null} className={`workspace__tabs${snap.turnCount === 0 && !snap.blocks.some(block => block.kind !== "notice") ? ' workspace__tabs--empty' : ''}`}>
         <div className="tabs">
-          <button className={`tab${snap.tab === 'activity' ? ' is-on' : ''}`} onClick={() => store.setTab('activity')}>Activity</button>
-          <button className={`tab${snap.tab === 'changes' ? ' is-on' : ''}`} onClick={() => store.setTab('changes')}>
-            Changes
-            {totals.adds || totals.dels ? (
-              <> <span className="pillcount add">+{totals.adds}</span> <span className="pillcount del">−{totals.dels}</span></>
-            ) : null}
-          </button>
+          <button className={`tab${snap.tab === 'activity' ? ' is-on' : ''}`} onClick={() => store.setTab('activity')}>Conversation</button>
           <button className={`tab${snap.tab === 'plan' ? ' is-on' : ''}`} onClick={() => store.setTab('plan')}>
             Plan{planTotal ? <> <span className="pillcount">{planDone}/{planTotal}</span></> : null}
           </button>
           <button className={`tab${snap.tab === 'log' ? ' is-on' : ''}`} onClick={() => store.setTab('log')}>Log</button>
-          <span className="cost">
-            {snap.turnActive ? `${snap.turnSeconds}s` : planTotal ? `${planDone}/${planTotal} steps` : `${snap.turnCount} turn${snap.turnCount === 1 ? '' : 's'}`}
-          </span>
         </div>
       </div>
+      </header>
 
+      {page && <DesktopPage panel={page} snap={snap} />}
+      <div className="conversation-surface" hidden={page !== null}>
+      {snap.connection !== 'online' && snap.blocks.length > 0 && <div className="connection-status" role="status" aria-live="polite"><strong>{snap.connection === 'connecting' ? 'Reconnecting…' : 'Connection lost. Retrying…'}</strong>{snap.error && <span>{snap.error}</span>}<button onClick={() => store.retryConnection()}>Retry now</button></div>}
       {snap.tab === 'activity' && <Stream snap={snap} />}
       {snap.tab === 'changes' && <div className="workspace"><ChangesTab snap={snap} /></div>}
       {snap.tab === 'plan' && <div className="workspace"><PlanTab snap={snap} /></div>}
       {snap.tab === 'log' && <div className="workspace workspace--log"><LogTab snap={snap} /></div>}
 
+      </div>
       <Composer snap={snap} />
     </main>
   )
@@ -815,7 +878,7 @@ function Stream({ snap }: { snap: Snapshot }): ReactElement {
   // still streams them; this is a display choice, not a policy change.
   const blocks = snap.streamThinking ? snap.blocks : snap.blocks.filter(b => b.kind !== 'thinking')
   const offline = snap.connection === 'offline'
-  const empty = snap.connection === 'online' && blocks.length === 0 && !snap.turnActive
+  const empty = snap.connection === 'online' && blocks.every(block => block.kind === 'notice' && !block.error) && !snap.turnActive
 
   // dsh: the approval attaches to the tool call it is about — render it
   // directly under the trail holding that call, not floating elsewhere.
@@ -831,20 +894,23 @@ function Stream({ snap }: { snap: Snapshot }): ReactElement {
   const failedCard = snap.failed && !snap.turnActive ? <FailedCard failed={snap.failed} /> : null
 
   if (offline && blocks.length === 0 && !snap.question) {
-    return <div className="stream" ref={ref}><Offline cwd={snap.cwd} /></div>
+    return <div className="stream" ref={ref}><Offline cwd={snap.cwd} error={snap.error} /></div>
   }
 
   // The failed card and pending question own the tail of the feed even when
   // the transcript itself is still empty — an empty welcome must not bury
   // the thing asking for a decision.
   return (
-    <div className="stream" ref={ref}>
-      {empty && !failedCard && !snap.question ? <Welcome /> : (
+    <div className={`stream${empty && !failedCard && !snap.question ? ' stream--welcome' : ''}`} ref={ref}>
+      {empty && !failedCard && !snap.question ? <>
+        {blocks.length > 0 && <div className="welcome-notices" aria-live="polite">{blocks.map(block => <BlockView key={block.id} block={block} />)}</div>}
+        <Welcome />
+      </> : (
         <div className="stream__col">
-          {blocks.map((block, index) => (
-            <Fragment key={block.id}>
-              <BlockView block={block} />
-              {inlineApproval && index === approvalIndex && <ApprovalCard approval={approval} inline />}
+          {groupActivity(blocks, approval?.toolCallId).map(group => (
+            <Fragment key={group[0]!.id}>
+              {group.length > 1 ? <ActivityGroup blocks={group} /> : <BlockView block={group[0]!} />}
+              {inlineApproval && group.some(block => block === blocks[approvalIndex]) && <ApprovalCard approval={approval} inline />}
             </Fragment>
           ))}
           {failedCard}
@@ -853,7 +919,7 @@ function Stream({ snap }: { snap: Snapshot }): ReactElement {
           {snap.plan && <TodosCard plan={snap.plan} turnActive={snap.turnActive} />}
           {/* Live tail of the feed: the turn clock the header badge shows,
               repeated where the eye actually is while scrolling. */}
-          {snap.turnActive && <div className="streamstatus">Acting… {turnDurOf(snap.turnSeconds)}</div>}
+          {snap.turnActive && <div className="streamstatus" role="status" aria-live="polite">{snap.networkRetrying ? 'Retrying connection…' : 'Acting…'} {turnDurOf(snap.turnSeconds)}</div>}
         </div>
       )}
       {floatApproval && <ApprovalCard approval={approval} />}
@@ -949,25 +1015,15 @@ function AgentsCard({ members }: { members: readonly AgentMember[] }): ReactElem
 }
 
 function Welcome(): ReactElement {
-  const ideas: Array<[string, string]> = [
-    ['Map this repo', 'Map this repository: entry points, hot paths, and anything dead.'],
-    ['Explain the streaming loop', 'Explain how the streaming loop normalizes provider deltas into events.'],
-    ['Audit TODOs', 'Find every TODO in src/ and group them by subsystem.'],
-  ]
-  return (
-    <div className="welcome">
-      <img className="welcome__mark welcome__logo" src="./logo-128.png" alt="Xerxes" />
-      <h1>Describe the outcome, not the steps</h1>
-      <div className="welcome__ideas">
-        {ideas.map(([label, text]) => (
-          <button key={label} className="idea" onClick={() => void store.submit(text)}>
-            <span className="idea__label">{label}</span>
-            <span className="idea__go">↵</span>
-          </button>
-        ))}
-      </div>
-    </div>
-  )
+  return <div className="welcome">
+    <h1 className="welcome__wordmark">XERXES</h1>
+    <p>A place to think, build, and finish.</p>
+    <div className="welcome__ideas">{([
+      ['Understand this project', 'Explain the structure of this project and where to start.'],
+      ['Review recent changes', 'Review recent changes for bugs and explain the findings.'],
+      ['Build something', 'Help me implement '],
+    ] as const).map(([label, prompt]) => <button className="idea" key={label} onClick={() => window.dispatchEvent(new CustomEvent('xerxes:add-context', { detail: prompt }))}><span>{label}</span><Icon name="arrow" size={14} /></button>)}</div>
+  </div>
 }
 
 /**
@@ -981,25 +1037,25 @@ function WorkspaceGate(): ReactElement {
     <main className="chat">
       <div className="wsgate">
         <div className="wsgate__mark">⌂</div>
-        <h1>Create a workspace</h1>
+        <h1>Welcome to Xerxes.</h1>
         <p>
-          A workspace is a folder that holds your chats. Pick one — Xerxes runs
-          a dedicated daemon inside it, and every task you start stays in that
-          folder's context.
+          Choose the folder you want to work in. Next, connect a model provider and start your first task. Your existing files stay in place.
         </p>
         <button className="btn btn--solid wsgate__btn" onClick={() => store.chooseWorkspace()}>
-          Choose folder…
+          Choose your first folder…
         </button>
+        <p className="studio-muted">The macOS app includes Bun. Git and SSH are needed only for their respective features.</p>
       </div>
     </main>
   )
 }
 
-function Offline({ cwd }: { cwd: string }): ReactElement {
+function Offline({ cwd, error }: { cwd: string; error: string | null }): ReactElement {
   return (
     <div className="offline">
       <div className="offline__dot" />
       <h1>Daemon offline</h1>
+      {error && <p className="connection-error" role="alert">{error}</p>}
       <p>
         Every task runs against a per-project daemon — the terminal, TUI and this app share the same sessions through it. The app launches one automatically and reconnects on its own.
       </p>
@@ -1009,12 +1065,34 @@ function Offline({ cwd }: { cwd: string }): ReactElement {
   )
 }
 
+function ActivityGroup({ blocks }: { blocks: Snapshot['blocks'] }): ReactElement {
+  const tools = blocks.flatMap(block => block.kind === 'tools' ? block.items : [])
+  const failures = tools.filter(item => item.state === 'failed').length
+  const running = tools.some(item => item.state === 'working') || blocks.some(block => block.kind === 'thinking' && block.streaming)
+  const [expanded, setExpanded] = useState(failures > 0)
+  useEffect(() => { if (failures) setExpanded(true) }, [failures])
+  return <details className="activity-group" open={expanded} onToggle={event => setExpanded(event.currentTarget.open)}>
+    <summary><Icon name="chevron" size={14} /><span>{running ? 'Working' : 'Work details'}{tools.length ? ' · ' + tools.length + ' operation' + (tools.length === 1 ? '' : 's') : ''}</span>{failures > 0 && <strong>{failures} failed</strong>}</summary>
+    <div className="activity-group__body">{blocks.map(block => <BlockView key={block.id} block={block} />)}</div>
+  </details>
+}
+
+function UserMessage({ text }: { text: string }): ReactElement {
+  const [expanded, setExpanded] = useState(false)
+  const long = text.length > 1600 || text.split('\n').length > 16
+  return <div className="msg msg--user">
+    <div className={`msg__text${long && !expanded ? ' msg__text--preview' : ''}`}>{text}</div>
+    {long && <button className="message-expand" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>{expanded ? 'Show less' : 'Show full message'}</button>}
+  </div>
+}
+
 function BlockView({ block }: { block: Snapshot['blocks'][number] }): ReactElement {
   if (block.kind === 'agents') {
     return <AgentsCard members={block.members} />
   }
   if (block.kind === 'user') {
-    return <div className="msg msg--user"><div className="msg__text">{block.text}</div></div>
+    if (block.contextSummary) return <details className="context-summary"><summary>Earlier conversation summary</summary><Markdown text={block.text} /></details>
+    return <UserMessage text={block.text} />
   }
   if (block.kind === 'agent') {
     return (
@@ -1034,8 +1112,8 @@ function BlockView({ block }: { block: Snapshot['blocks'][number] }): ReactEleme
     return (
       <details className="thinkrow">
         <summary>
-          <span className="frow__icon">⚛</span>
-          <span className="frow__label">Think</span>
+          <span className="frow__icon"><Icon name="activity" size={14} /></span>
+          <span className="frow__label">Reasoning</span>
           <span className="frow__sep">·</span>
           <span className="frow__excerpt">{thinkingTailOf(block.text)}{block.streaming ? ' …' : ''}</span>
         </summary>
@@ -1051,7 +1129,7 @@ function BlockView({ block }: { block: Snapshot['blocks'][number] }): ReactEleme
         {block.items.map(item => (
           <details key={item.id} className="toolrow">
             <summary className="frow frow--tool">
-              <span className="frow__icon" data-state={item.state}>⌘</span>
+              <span className="frow__icon" data-state={item.state}><Icon name={item.verb.includes("exec") ? "terminal" : "tools"} size={14} /></span>
               <span className="frow__label">{toolLabelOf(item.verb)}</span>
               {item.arg ? (
                 <>
@@ -1062,15 +1140,9 @@ function BlockView({ block }: { block: Snapshot['blocks'][number] }): ReactEleme
               {item.diff && (
                 <span className="frow__diff"><span className="add">+{item.diff.adds}</span> <span className="del">−{item.diff.dels}</span></span>
               )}
-              <span className="frow__dur">{item.dur || (item.state === 'working' ? 'running' : '')}</span>
+              <span className="frow__dur">{item.state === 'working' ? 'Running' : item.state === 'failed' ? 'Failed' : item.dur && item.dur !== '0.0s' ? item.dur : ''}</span>
             </summary>
-            <div className="toolrow__body">
-              <div className="toolrow__meta"><b>{item.name || toolLabelOf(item.verb)}</b><code>{item.id}</code></div>
-              <div className="toolrow__section"><span>Input</span><pre>{item.input || '(no arguments)'}</pre></div>
-              {item.error
-                ? <div className="toolrow__section toolrow__section--error"><span>Error</span><pre>{item.error}</pre></div>
-                : <div className="toolrow__section"><span>Output</span><pre>{item.output || (item.state === 'working' ? '(waiting)' : '(no output)')}</pre></div>}
-            </div>
+            <ExecutionDetails item={item} />
           </details>
         ))}
       </div>
@@ -1115,11 +1187,14 @@ function ApprovalCard({ approval, inline }: { approval: NonNullable<Snapshot['ap
 
 /** Failed turn: the error, a retry from the last instruction, or resolve. */
 function FailedCard({ failed }: { failed: NonNullable<Snapshot['failed']> }): ReactElement {
+  // Navigation hint only: transport/security code remains responsible for retry policy.
+  const providerSettingsRelevant = /authenticat|credential|api[ _-]?key|certificate|self.signed|provider.*config/i.test(failed.error)
   return (
     <div className="terr" role="alert">
       <div className="terr__head"><span>✕</span> Turn {failed.turn} failed</div>
       <div className="terr__body">{failed.error}</div>
       <div className="terr__row">
+        {providerSettingsRelevant && <button className="btn" onClick={() => store.openSettings('models')}>Provider settings</button>}
         <button className="btn" disabled={!failed.lastUser} onClick={() => store.retryFailed()}>
           ↺ Retry{failed.lastUser ? ' — resubmit the instruction' : ''}
         </button>
@@ -1344,18 +1419,58 @@ function PlanReviewCard({
 // ── Composer ────────────────────────────────────────────────────────────
 
 function Composer({ snap }: { snap: Snapshot }): ReactElement {
-  const [draft, setDraft] = useState('')
+  const open = useDesktopNavigation()
+  const key = draftKey(snap.cwd, snap.sessionKey)
+  const [draft, setDraft] = useState(() => readDraft(key))
   const [hints, setHints] = useState<{ items: HintItem[]; index: number } | null>(null)
   const ref = useRef<HTMLTextAreaElement>(null)
   const hintSeq = useRef(0)
+  const draftSession = useRef(key)
+  useEffect(() => {
+    if (draftSession.current === key) {
+      writeDraft(key, draft)
+      return
+    }
+    writeDraft(draftSession.current, draft)
+    draftSession.current = key
+    setDraft(readDraft(key))
+    setHints(null)
+    ref.current?.focus()
+  }, [key, draft])
+  useEffect(() => {
+    const add = (event: Event) => { const detail = (event as CustomEvent<unknown>).detail; if (typeof detail === 'string') { setDraft(value => value + ' ' + detail); ref.current?.focus() } }
+    const insert = (event: Event) => { const detail = (event as CustomEvent<unknown>).detail; if (typeof detail === 'string') { setDraft(value => applyCompletion(detail) + value); setHints(null); ref.current?.focus() } }
+    window.addEventListener('xerxes:add-context', add)
+    window.addEventListener('xerxes:insert-command', insert)
+    return () => { window.removeEventListener('xerxes:add-context', add); window.removeEventListener('xerxes:insert-command', insert) }
+  }, [])
   const grow = (): void => {
     const el = ref.current
     if (!el) return
     el.style.height = 'auto'
-    el.style.height = `${Math.min(el.scrollHeight, 180)}px`
+    const limit = Math.max(96, Math.min(280, window.innerHeight * .32))
+    el.style.height = `${Math.min(el.scrollHeight, limit)}px`
+    el.style.overflowY = el.scrollHeight > limit ? 'auto' : 'hidden'
   }
-  const send = (): void => {
+  useLayoutEffect(() => {
+    grow()
+    const observer = new ResizeObserver(grow)
+    if (ref.current?.parentElement) observer.observe(ref.current.parentElement)
+    window.addEventListener('resize', grow)
+    return () => { observer.disconnect(); window.removeEventListener('resize', grow) }
+  }, [draft])
+  const send = async (): Promise<void> => {
+    if (wantsHints(draft)) {
+      const seq = hintSeq.current
+      const items = hints?.items ?? await store.completeText(draft).catch(() => [])
+      if (seq !== hintSeq.current) return
+      const item = items[hints?.index ?? 0]
+      if (item) pickHint(item)
+      else setHints({items: [], index: 0})
+      return
+    }
     if (!draft.trim() || snap.connection !== 'online') return
+    open(null)
     void store.submit(draft)
     setDraft('')
     requestAnimationFrame(grow)
@@ -1364,18 +1479,18 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
   // Live slash/skill hints: debounced daemon completions while the draft is a
   // bare `/tok` or a `/skill <ref>`; latest request wins, stale ones drop.
   useEffect(() => {
+    const seq = ++hintSeq.current
     if (!wantsHints(draft) || snap.connection !== 'online') {
       setHints(null)
       return
     }
-    const seq = ++hintSeq.current
     const timer = setTimeout(() => {
       void store
         .completeText(draft)
         .then(items => {
-          if (hintSeq.current === seq) setHints({ items: items.slice(0, HINT_LIMIT), index: 0 })
+          if (hintSeq.current === seq) setHints({ items, index: 0 })
         })
-        .catch(() => {})
+        .catch(() => { if (hintSeq.current === seq) setHints({items: [], index: 0}) })
     }, 90)
     return () => clearTimeout(timer)
   }, [draft, snap.connection])
@@ -1404,12 +1519,18 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
         ? 'Steer now — queued until this step settles'
         : snap.planMode
           ? 'Planning — describe the outcome, or /plan <msg> to steer'
-          : 'Describe the outcome — the agents plan and execute'
+          : 'Describe what you need'
 
   return (
     <div className="composer-wrap">
-      {hints && hints.items.length > 0 && (
-        <div className="hints" role="listbox" aria-label="Command and skill hints" ref={hintsRef}>
+      {hints && (
+        <div className="hints">
+          <div className="hints__header">
+            <strong>Commands & skills</strong>
+            <span>{hints.items.length} available</span>
+          </div>
+          <div className="hints__list" role="listbox" aria-label="Command and skill hints" ref={hintsRef}>
+          {hints.items.length === 0 && <div className="hints__empty">No matches. Try another name or description.</div>}
           {hints.items.map((item, index) => (
             <button
               key={item.value}
@@ -1420,11 +1541,12 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
               onMouseEnter={() => setHints({ ...hints, index })}
               onClick={() => pickHint(item)}
             >
-              <span className="hints__label">{item.label}</span>
+              <span className="hints__label">{item.label}<small>{item.kind === "skill" ? "Skill" : "Command"}</small></span>
               <span className="hints__meta">{item.meta}</span>
             </button>
           ))}
-          <div className="hints__keys"><kbd>tab</kbd> complete <kbd>↑↓</kbd> pick <kbd>esc</kbd> dismiss</div>
+          </div>
+          <div className="hints__keys"><span>Type to filter</span><kbd>↵</kbd> / <kbd>tab</kbd> complete <kbd>↑↓</kbd> pick <kbd>esc</kbd> dismiss</div>
         </div>
       )}
       {snap.queue.length > 0 && (
@@ -1441,11 +1563,12 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
         <textarea
           ref={ref}
           className="composer__input"
-          rows={1}
+          aria-label="Message"
+          rows={2}
           value={draft}
           placeholder={placeholder}
           spellCheck={false}
-          onChange={e => { setDraft(e.target.value); grow() }}
+          onChange={e => { hintSeq.current += 1; setHints(null); setDraft(e.target.value); grow() }}
           onKeyDown={e => {
             if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() }
             else if (hints && hints.items.length > 0 && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
@@ -1459,27 +1582,20 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
               pickHint(hints.items[hints.index]!)
             }
             else if (e.key === 'Escape') {
-              if (hints) { hintSeq.current += 1; setHints(null) }
-              else if (draft) { setDraft(''); grow() }
-              else if (snap.turnActive) store.cancel()
+              if (hints) {
+                e.preventDefault()
+                e.stopPropagation()
+                hintSeq.current += 1
+                setHints(null)
+              }
+              // Global Escape may stop a running turn, but never erases the draft.
             }
           }}
         />
         <div className="composer__bar">
-          <button
-            className="cchip"
-            title="Tool approvals — change in Settings → Permissions"
-            onClick={() => store.openSettings('permissions')}
-          >
-            <span className="ico">⛨</span> {snap.permissionMode || 'policy'} <span className="c">▾</span>
-          </button>
-          <button
-            className={`cchip${snap.planMode ? ' is-on' : ''}`}
-            title={snap.planMode ? 'Plan mode ON — nothing touches disk' : 'Plan mode — propose before touching disk'}
-            onClick={() => store.togglePlanMode()}
-          >
-            <span className="ico">⏸</span> plan{snap.planMode ? ' on' : ''}
-          </button>
+          <button className="composer__context" aria-label="Add context" onClick={() => open('files')}><Icon name="folder" size={16} /></button>
+          <Dictation sessionKey={snap.sessionKey} onText={text=>{setDraft(value=>(value ? value+" " : "")+text)}} />
+
           <span className="composer__flex" />
           <div className="chipanchor">
             <button
@@ -1503,7 +1619,23 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
           >↑</button>
         </div>
       </div>
-      <div className="composer__hints">
+      <div className="composer__hints">          <button
+            className="cchip"
+            title={`Permissions: ${snap.permissionMode || 'not configured'} — open settings`}
+            onClick={() => store.openSettings('permissions')}
+          >
+            <Icon name="shield" size={14} /> Permissions <span className="c">▾</span>
+          </button>
+          <button
+            className={`cchip${snap.planMode ? ' is-on' : ''}`}
+            aria-pressed={snap.planMode}
+            title={snap.planMode ? 'Planning enabled. Click to work directly.' : 'Click to plan before making changes.'}
+            onClick={() => store.togglePlanMode()}
+          >
+            <Icon name="plan" size={14} /> {snap.planMode ? 'Plan first' : 'Work directly'}
+          </button>
+
+        <button className="cchip composer__workspace" title="Change workspace" onClick={() => open('workspace')}><Icon name="folder" size={14} />{homeLabel(snap)}</button>
         <span><kbd>⏎</kbd> {snap.turnActive ? 'queue' : 'send'}</span>
         <span><kbd>⇧⏎</kbd> newline</span>
         <span><kbd>esc</kbd> stop / clear</span>
@@ -1516,19 +1648,22 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
 
 // ── Right rail ──────────────────────────────────────────────────────────
 
-function Rail({ snap }: { snap: Snapshot }): ReactElement {
-  const wide = useWindowWide()
-  if (!wide) return <></>
+function GoalObjective({ text }: { text: string }): ReactElement {
+  const [expanded, setExpanded] = useState(false)
+  return <><p className={`goal-objective${expanded ? " is-expanded" : ""}`}>{text}</p>{text.length > 180 && <button className="goal-expand" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>{expanded ? "Show less" : "Show full goal"}</button>}</>
+}
+
+export function ActivityDetails({ snap }: { snap: Snapshot }): ReactElement | null {
   const fleet = snap.fleet
   const goal = parseGoal(snap.goal)
+  if (!goal && !fleet.length && !snap.skillSuggestions.length && !snap.creatorTrace.length) return null
   return (
-    <aside className="rail">
+    <aside className="activity-details">
       {goal ? (
         <>
-          <div className="rail__cap">Goal</div>
+          <div className="rail__cap goal-heading">Goal <span>{goal.phase}{goal.activation === 'armed' ? ' · armed' : ''}</span></div>
           <div className="goalcard">
-            <span className="ph">◎ {goal.phase}{goal.activation === 'armed' ? ' · armed' : ''}</span>
-            {goal.objective}
+            <GoalObjective text={goal.objective} />
             {goal.rounds ? <div className="goalcard__rounds">Rounds: {goal.rounds}</div> : null}
             <div className="goalcard__btns">
               {/* The daemon only pauses an active goal and only resumes a
@@ -1544,20 +1679,9 @@ function Rail({ snap }: { snap: Snapshot }): ReactElement {
             </div>
           </div>
         </>
-      ) : (
-        <>
-          <div className="rail__cap">Goal</div>
-          <div className="rail__hint">
-            No goal set — <code>/goal {'<objective>'}</code> in the composer arms autonomous rounds.
-          </div>
-        </>
-      )}
-      <div className="rail__cap">Fleet · {fleet.length}</div>
-      <div className="rail__fleet">
-        {fleet.length === 0
-          ? <div className="rail__hint">{snap.turnActive ? 'No subagents running.' : 'Nothing running.'}</div>
-          : fleet.map(row => <SessionCell key={row.id} row={row} displayOnly />)}
-      </div>
+      ) : null}
+      {fleet.length > 0 && <><div className="rail__cap">Agents <span>{fleet.length}</span></div>
+      <div className="rail__fleet">{fleet.map(row => <SessionCell key={row.id} row={row} displayOnly />)}</div></>}
       {snap.skillSuggestions.length > 0 && (
         <>
           <div className="rail__cap">Skill suggestions · {snap.skillSuggestions.length}</div>
@@ -1598,16 +1722,6 @@ function Rail({ snap }: { snap: Snapshot }): ReactElement {
   )
 }
 
-function useWindowWide(): boolean {
-  const [wide, setWide] = useState(() => (typeof window === 'undefined' ? true : window.innerWidth >= 1240))
-  useEffect(() => {
-    const onResize = (): void => setWide(window.innerWidth >= 1240)
-    window.addEventListener('resize', onResize)
-    return () => window.removeEventListener('resize', onResize)
-  }, [])
-  return useMemo(() => wide, [wide])
-}
-
 // ── Global keys ─────────────────────────────────────────────────────────
 
 /** ⌘K palette · ⌘N new task · Esc stop · 1/2/3 approvals. */
@@ -1622,7 +1736,7 @@ function GlobalKeys({ snap }: { snap: Snapshot }): ReactElement | null {
       }
       if (meta && event.key.toLowerCase() === 'n') {
         event.preventDefault()
-        store.openTaskModal()
+        store.newChat()
         return
       }
       if (event.key === 'Escape') {

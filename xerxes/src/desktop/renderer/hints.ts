@@ -9,16 +9,11 @@
  */
 
 export interface HintItem {
+  readonly kind?: 'command' | 'skill'
   readonly value: string
   readonly label: string
   readonly meta: string
 }
-
-/**
- * Hints cap: a typing aid, not a catalog browser — ⌘K owns the full list.
- * The strip scrolls, so a big skill library stays browsable while typing.
- */
-export const HINT_LIMIT = 14
 
 /**
  * Typing that should surface live hints: a single `/token` being typed, or a
@@ -26,6 +21,7 @@ export const HINT_LIMIT = 14
  * arguments already typed, never hint.
  */
 export function wantsHints(draft: string): boolean {
+  if (/\s$/.test(draft) && draft.trim() !== '/skill') return false
   const text = draft.trim()
   if (!text.startsWith('/')) return false
   if (!/\s/.test(text)) return true

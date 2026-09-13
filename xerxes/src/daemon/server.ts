@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { recordCompaction } from '../context/compactionHistory.js'
+import { previewWorkspaceFile } from './filePreview.js'
 import { collectGitDiff } from '../workspace/gitDiff.js'
 import { FEATURES_GUIDE } from '../bridge/features.js';
 import { inspectSessionContext } from '../context/inspection.js';
@@ -930,6 +931,7 @@ export class DaemonServer {
   >();
   private readonly runtime: DaemonRuntime;
   private runtimeShutdown = false;
+  private desktopRestartPending = false;
   private stopPromise: Promise<void> | undefined;
   private readonly projectDirectory: string | undefined;
   private readonly sessionArchiveDirectory: string;
@@ -1831,6 +1833,33 @@ export class DaemonServer {
     request: JsonRpcRequest,
   ): Promise<JsonRpcPayload> {
     const { method, params } = request;
+    if (this.desktopRestartPending) return { ok: false, error: 'Runtime is restarting. Reconnect to continue.' };
+    if (method === 'runtime.restart_if_idle') {
+      const sessions = this.runtime.listSessions();
+      const busy = this.inFlightTurns.size > 0 || this.activeScheduleRuns.size > 0
+        || this.goalWakeDispatches.size > 0 || this.agentPresetSwitches.size > 0
+        || this.channelStatusData().configured
+        || numberValue(this.runtime.status().active_subagents) > 0
+        || sessions.some(session => session.activeTurnId || session.status !== 'idle'
+          || this.sessionOperations.has(session.sessionKey)
+          || (this.terminalRegistry?.list(session.id) ?? []).some(terminal => terminal.running)
+          || (this.monitors?.list(session.id) ?? []).some(monitor => monitor.state === 'watching')
+          || subagentSnapshotPanelPayloads(session.metadata).some(agent => agent.status === 'running' || agent.status === 'queued'));
+      if (busy) return { ok: false, busy: true };
+      this.desktopRestartPending = true;
+      this.stoppingGoalWakes = true;
+      this.cronScheduler.stop();
+      // Let the acknowledgement flush before shutting down the transport.
+      setTimeout(() => {
+        void Promise.resolve().then(() => this.onRestart ? this.onRestart() : this.stop()).catch(error => {
+          this.desktopRestartPending = false;
+          this.stoppingGoalWakes = false;
+          if (this.cronSchedulerStarted) this.cronScheduler.start();
+          this.broadcast('notification', { level: 'error', message: `Runtime restart failed: ${errorMessage(error)}` });
+        });
+      }, 25);
+      return { ok: true };
+    }
     if (
       method.startsWith("task.") ||
       method === "submit" ||
@@ -1928,6 +1957,11 @@ export class DaemonServer {
         ...(projectDirectory ? { projectDirectory } : {}),
       });
       return { ok: true, sessions: sessions.map(savedSessionPayload) };
+    }
+    if (method === "workspace.filePreview") {
+      const session = this.runtime.sessionStatus(sessionKey(connection, params));
+      if (!session) return { ok: false, error: "Select a session before previewing workspace files" };
+      return await previewWorkspaceFile(session.cwd, params.path);
     }
     if (method === "workspace.diff") {
       const session = this.runtime.sessionStatus(sessionKey(connection, params));
@@ -3074,6 +3108,10 @@ export class DaemonServer {
     connection: DaemonTransportConnection,
     params: JsonRpcPayload,
   ): Promise<JsonRpcPayload> {
+    if (typeof params.path_prefix === "string") {
+      const session = this.runtime.sessionStatus(sessionKey(connection, params));
+      return { ok: true, kind: "path", completions: await completePath(params.path_prefix, session?.cwd ?? process.cwd(), true) };
+    }
     const text = stringValue(params.text);
     const stripped = text.trim();
     const configAction = /^\/config\s+(\S*)$/.exec(text);
@@ -3166,7 +3204,7 @@ export class DaemonServer {
     await this.refreshSkills(session);
     const skills = (await this.completeSkillEntries(stripped.slice(1)))
       .filter((entry) => !reserved.has(String(entry.label ?? "").split(":", 1)[0] ?? ""));
-    return [...commands, ...skills].slice(0, 200);
+    return [...commands, ...skills];
   }
 
   /**
@@ -3238,10 +3276,7 @@ export class DaemonServer {
       left: { reference: string },
       right: { reference: string },
     ): number => left.reference.localeCompare(right.reference);
-    return [...starts.sort(byReference), ...nameHits, ...descriptionHits].slice(
-      0,
-      200,
-    );
+    return [...starts.sort(byReference), ...nameHits, ...descriptionHits];
   }
 
   private completeSlash(text: string): JsonRpcPayload[] {
@@ -6473,6 +6508,7 @@ export class DaemonServer {
     operation: () => Promise<T>,
     priority: 'human' | 'background' = 'human',
   ): Promise<T> {
+    if (this.desktopRestartPending) return Promise.reject(new Error('Runtime is restarting. Reconnect to continue.'));
     return this.sessionOperations.run(sessionKey, operation, priority);
   }
 
@@ -10583,9 +10619,10 @@ function booleanValue(value: unknown, fallback: boolean): boolean {
 async function completePath(
   text: string,
   cwd: string,
+  directoryBrowse = false,
 ): Promise<JsonRpcPayload[]> {
-  const token = text.trim().split(/\s+/).at(-1) ?? "";
-  const mention = token.startsWith("@");
+  const token = directoryBrowse ? text : text.trim().split(/\s+/).at(-1) ?? "";
+  const mention = !directoryBrowse && token.startsWith("@");
   const raw = mention ? token.slice(1) : token;
   if (mention && !externalMentionPath(raw)) {
     const query = raw.replace(/^"/, "").replace(/^\.\//, "");
@@ -10645,7 +10682,8 @@ async function completePath(
           meta: entry.isDirectory() ? "dir" : "file",
         };
       });
-  } catch {
+  } catch (error) {
+    if (directoryBrowse) throw error;
     return [];
   }
 }

@@ -412,6 +412,7 @@ Container deployment is documented in the
 
 ## Documentation
 
+- [Desktop workspace](docs/desktop-workspace.md)
 - [Configuration](docs/configuration-guide.md)
 - [Deployment](docs/deployment-guide.md)
 - [API reference](docs/api-reference.md)

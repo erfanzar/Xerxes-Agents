@@ -126,6 +126,20 @@ test('daemon completion preserves command and path semantics while native skills
   const client = await DaemonParityClient.connect(socketPath)
   try {
     await initialize(client, 1, 'completion', directory)
+    await mkdir(join(directory, 'folder with spaces'))
+    await writeFile(join(directory, 'folder with spaces', 'notes.txt'), 'notes')
+    client.send({ jsonrpc: '2.0', id: 101, method: 'complete', params: { path_prefix: './' } })
+    expect((await client.next(frame => frame.id === 101)).result?.completions).toEqual(expect.arrayContaining([
+      { value: './alpha.txt', label: 'alpha.txt', meta: 'file' },
+      { value: './folder with spaces/', label: 'folder with spaces/', meta: 'dir' },
+    ]))
+    client.send({ jsonrpc: '2.0', id: 102, method: 'complete', params: { path_prefix: './folder with spaces/' } })
+    expect((await client.next(frame => frame.id === 102)).result?.completions).toEqual([
+      { value: './folder with spaces/notes.txt', label: 'notes.txt', meta: 'file' },
+    ])
+    client.send({ jsonrpc: '2.0', id: 103, method: 'complete', params: { path_prefix: './missing-directory/' } })
+    expect((await client.next(frame => frame.id === 103)).error).toBeDefined()
+
 
     client.send({ jsonrpc: '2.0', id: 2, method: 'complete', params: { text: '/prov' } })
     const slash = await client.next(frame => frame.id === 2)
@@ -411,6 +425,7 @@ class UnexpectedTurnRunner implements TurnRunner {
 }
 
 interface Frame {
+  readonly error?: { readonly code: number; readonly message: string }
   readonly id?: number | string
   readonly method?: string
   readonly params?: {
@@ -492,3 +507,35 @@ class DaemonParityClient {
     this.frames.push(frame)
   }
 }
+
+test('idle-only runtime restart rejects active work and closes admission before restarting', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-idle-update-'))
+  let activeSubagents = 1
+  let restarts = 0
+  const runtime = new InMemoryDaemonRuntime({ async *run() {} }, {
+    currentProjectDirectory: root,
+    sessionDirectory: join(root, 'sessions'),
+    statusInventory: () => ({ activeSubagents }),
+  })
+  const server = new DaemonServer({ socketPath: join(root, 'daemon.sock'), runtime, onRestart: () => { restarts += 1 } })
+  await server.start()
+  const client = await DaemonParityClient.connect(join(root, 'daemon.sock'))
+  try {
+    client.send({ jsonrpc: '2.0', id: 1, method: 'runtime.restart_if_idle', params: {} })
+    expect((await client.next(frame => frame.id === 1)).result).toEqual({ ok: false, busy: true })
+    expect(restarts).toBe(0)
+    activeSubagents = 0
+    const session = await runtime.openSession("busy", undefined, { cwd: root })
+    session.status = "working"
+    client.send({ jsonrpc: "2.0", id: 4, method: "runtime.restart_if_idle", params: {} })
+    expect((await client.next(frame => frame.id === 4)).result).toEqual({ ok: false, busy: true })
+    expect(restarts).toBe(0)
+    session.status = "idle"
+    client.send({ jsonrpc: '2.0', id: 2, method: 'runtime.restart_if_idle', params: {} })
+    expect((await client.next(frame => frame.id === 2)).result).toEqual({ ok: true })
+    client.send({ jsonrpc: '2.0', id: 3, method: 'initialize', params: { session_key: 'late' } })
+    expect((await client.next(frame => frame.id === 3)).result).toMatchObject({ ok: false, error: expect.stringContaining('restarting') })
+    await new Promise(resolve => setTimeout(resolve, 40))
+    expect(restarts).toBe(1)
+  } finally { client.close(); await server.stop(); await rm(root, { recursive: true, force: true }) }
+})

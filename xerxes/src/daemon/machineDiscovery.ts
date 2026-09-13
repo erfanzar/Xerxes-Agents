@@ -29,7 +29,9 @@ function sshWords(line: string): string[] {
 }
 
 /** Discover names only: never evaluate Match exec, expand identity files, or rewrite SSH configuration. */
-export async function readSshHosts(home = homedir()): Promise<string[]> {
+export type SshConfigScan = (pattern: string) => AsyncIterable<string>
+const scanSshConfig: SshConfigScan = pattern => new Bun.Glob(pattern).scan({ absolute: true, onlyFiles: true })
+export async function readSshHosts(home = homedir(), scan: SshConfigScan = scanSshConfig): Promise<string[]> {
   const names = new Set<string>(), visited = new Set<string>()
   const base = join(home, '.ssh')
   async function read(file: string): Promise<void> {
@@ -51,7 +53,7 @@ export async function readSshHosts(home = homedir()): Promise<string[]> {
       if (keyword === 'include') for (const pattern of normalized) {
         const expanded = pattern.startsWith('~/') ? join(home, pattern.slice(2)) : resolve(base, pattern)
         const matches: string[] = []
-        for await (const match of new Bun.Glob(expanded).scan({ absolute: true, onlyFiles: true })) {
+        for await (const match of scan(expanded)) {
           matches.push(match)
           if (matches.length > 64) throw new Error('SSH Include matches too many files (limit 64)')
         }

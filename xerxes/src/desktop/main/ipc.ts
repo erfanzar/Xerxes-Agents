@@ -45,7 +45,7 @@ export function attachDaemon(next: DaemonRpc): void {
  * plus a plain-data params object on one channel; events flow out on another.
  * `ipcRenderer` itself never crosses the bridge.
  */
-export function registerDaemonBridge(daemon: DaemonRpc): void {
+export function registerDaemonBridge(daemon?: DaemonRpc): void {
   if (!registered) {
     registered = true
     ipcMain.handle('daemon:call', (_event, method: unknown, params: unknown) => {
@@ -55,9 +55,10 @@ export function registerDaemonBridge(daemon: DaemonRpc): void {
         return Promise.reject(new TypeError('params must be an object'))
       }
       const current = active
-      if (!current) return Promise.reject(new Error('daemon bridge has no active connection'))
+      if (!current) return Promise.reject(new Error('Choose a workspace folder before using runtime features'))
+      if (name === 'desktop.restartRuntime') return current.restartRuntime((params as Record<string, unknown> | undefined)?.allow_legacy === true)
       return current.call(name, (params ?? {}) as Record<string, unknown>)
     })
   }
-  attachDaemon(daemon)
+  if (daemon) attachDaemon(daemon)
 }

@@ -10,12 +10,15 @@
  * records the daemon did not store.
  */
 
+import { transcriptContent } from './transcriptContent.js'
+
 export interface ExportSession {
   readonly id?: unknown
   readonly title?: unknown
   readonly model?: unknown
   readonly cwd?: unknown
   readonly messages?: unknown
+  readonly transcript?: unknown
   readonly tool_executions?: unknown
   readonly thinking_content?: unknown
 }
@@ -69,7 +72,8 @@ export function sessionToMarkdown(session: ExportSession, exportedAt = new Date(
   ].filter(Boolean).join(' · ')
 
   const out: string[] = [`# ${title}`, `> ${meta}`]
-  const messages = Array.isArray(session.messages) ? session.messages : []
+  const stored = session.transcript ?? session.messages
+  const messages = Array.isArray(stored) ? stored : []
   const executions = Array.isArray(session.tool_executions) ? session.tool_executions : []
   const thinking = Array.isArray(session.thinking_content) ? session.thinking_content : []
   let executionIndex = 0
@@ -98,7 +102,7 @@ export function sessionToMarkdown(session: ExportSession, exportedAt = new Date(
       out.push(`**Thinking**\n\n> ${turnThinking.trim().replace(/\n/g, '\n> ')}`)
     }
 
-    const content = message.content
+    const content = transcriptContent(message)
     if (typeof content === 'string') {
       if (!content.trim()) continue
       out.push(role === 'user' ? `## You\n\n${content}` : `## Agent\n\n${content}`)

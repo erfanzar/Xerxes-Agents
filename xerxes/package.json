@@ -35,6 +35,7 @@
     "test:ui": "bunx --bun --no-install vitest run --config vitest.ui.config.ts",
     "test:ui:watch": "bunx --bun --no-install vitest --config vitest.ui.config.ts",
     "build:desktop": "bun run build:runtime && bun scripts/buildDesktop.ts && bun scripts/packageDesktopMac.ts",
+    "build:installer": "bun run build:desktop && bun scripts/buildDesktopInstaller.ts",
     "desktop": "bun run build:desktop && bun scripts/runDesktop.ts",
     "check:desktop": "bunx --bun --no-install tsc --noEmit -p tsconfig.desktop.json"
   },

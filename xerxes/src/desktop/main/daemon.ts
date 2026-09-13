@@ -13,7 +13,8 @@
  */
 
 import { EventEmitter } from 'node:events'
-import { connect, type Socket } from 'node:net'
+import type { ChildProcess } from 'node:child_process'
+import { Socket } from 'node:net'
 
 import {
   canonicalProjectDir,
@@ -42,10 +43,15 @@ export interface DaemonRpcOptions {
   projectDir?: string
   env?: Env
   deadlineMs?: number
+  socketPath?: string
+  /** Injectable startup boundary for deterministic desktop transport tests. */
+  launch?: typeof launchDaemon
+  startupTimeoutMs?: number
 }
 
 export class DaemonRpc extends EventEmitter {
   readonly projectDir: string
+  private readonly externalSocket: string | undefined
   private readonly env: Env
   private readonly deadlineMs: number
   private socket: Socket | null = null
@@ -58,12 +64,18 @@ export class DaemonRpc extends EventEmitter {
   private stopped = false
   private stderrRing: string[] = []
   private writeTail: Promise<void> = Promise.resolve()
+  private launchedProcess: ChildProcess | null = null
+  private readonly launch: typeof launchDaemon
+  private readonly startupTimeoutMs: number
 
   constructor(options: DaemonRpcOptions = {}) {
     super()
-    this.projectDir = canonicalProjectDir(options.projectDir)
+    this.externalSocket = options.socketPath
+    this.projectDir = options.socketPath ? options.projectDir ?? "/" : canonicalProjectDir(options.projectDir)
     this.env = options.env ?? process.env
     this.deadlineMs = options.deadlineMs ?? DEFAULT_DEADLINE_MS
+    this.launch = options.launch ?? launchDaemon
+    this.startupTimeoutMs = Math.max(1, options.startupTimeoutMs ?? STARTUP_TIMEOUT_MS)
   }
 
   get online(): boolean {
@@ -92,6 +104,46 @@ export class DaemonRpc extends EventEmitter {
   ): Promise<T> {
     await this.ensure()
     return this.send<T>(method, params)
+  }
+
+  /** Replace only an idle local runtime, then wait for a fresh connection. */
+  async restartRuntime(allowLegacy = false): Promise<Record<string, unknown>> {
+    if (this.externalSocket) return { ok: false, error: 'Update the runtime on the remote machine, then reconnect this workspace.' }
+    await this.ensure()
+    const previous = this.socket
+    let result = await this.send<Record<string, unknown>>('runtime.restart_if_idle', {})
+    if (result.ok !== true && typeof result.error === 'string' && result.error.startsWith('Unknown method') && allowLegacy) {
+      // Only an explicit click may migrate a runtime without atomic idle restart.
+      // Read every session, including work owned by other connected clients.
+      const status = await this.send<Record<string, unknown>>('runtime.status', {})
+      const list = await this.send<Record<string, unknown>>('session.active_list', {})
+      if (status.ok !== true || list.ok !== true || !Array.isArray(list.sessions)) return { ok: false, error: 'Could not check running work. Runtime was left connected.' }
+      if (status.active_subagents !== 0 || status.channels_configured !== false) return { ok: false, busy: true }
+      for (const value of list.sessions) {
+        if (!value || typeof value !== 'object') return { ok: false, error: 'Could not check a session. Runtime was left connected.' }
+        const session = value as Record<string, unknown>
+        if (session.status !== 'idle' || session.active_turn_id) return { ok: false, busy: true }
+        if (typeof session.key !== 'string') return { ok: false, error: 'Session identity unavailable. Runtime was left connected.' }
+        const terminals = await this.send<Record<string, unknown>>('terminal.list', { session_key: session.key })
+        const monitors = await this.send<Record<string, unknown>>('monitor.list', { session_key: session.key })
+        if (terminals.ok !== true || !Array.isArray(terminals.terminals) || monitors.ok !== true || !Array.isArray(monitors.monitors)) return { ok: false, error: 'Could not check background work. Runtime was left connected.' }
+        if (terminals.terminals.some(row => row?.running) || monitors.monitors.some(row => row?.state === 'watching')) return { ok: false, busy: true }
+      }
+      result = await this.send<Record<string, unknown>>('shutdown', {})
+    }
+    if (result.ok !== true) {
+      if (result.busy === true) return result
+      if (typeof result.error === 'string' && !result.error.startsWith('Unknown method')) return result
+      return { ok: false, error: 'This older runtime needs a one-time restart. Click Restart workspace runtime to check running work and reconnect with the bundled version.' }
+    }
+    const deadline = Date.now() + STARTUP_TIMEOUT_MS
+    while (this.socket === previous) {
+      if (this.stopped) throw new Error('Runtime update cancelled: workspace closed')
+      if (Date.now() >= deadline) throw new Error('The runtime did not shut down. Retry when it has finished stopping.')
+      await new Promise<void>(resolve => setTimeout(resolve, POLL_MS))
+    }
+    await this.ensure()
+    return { ok: true }
   }
 
   /** Stop reconnecting and drop the socket; a launched daemon keeps running. */
@@ -127,22 +179,36 @@ export class DaemonRpc extends EventEmitter {
   }
 
   private async open(): Promise<void> {
+    if (this.externalSocket) {
+      if (!await this.tryAttach(this.externalSocket)) throw new Error('SSH transport unavailable. Reconnect from Workspace.')
+      this.announce(true); return
+    }
     const { socketPath, pidPath } = daemonAddress(this.projectDir, this.env)
     if (await this.tryAttach(socketPath)) {
       this.announce(true)
       return
     }
     try {
-      launchDaemon(this.projectDir, socketPath, pidPath, this.env, line => {
-        this.stderrRing.push(line.slice(0, 512))
-        if (this.stderrRing.length > 200) this.stderrRing.shift()
-      })
+      // A slow startup must not create a new process on every retry. Continue
+      // probing the existing child until it exits or its socket becomes ready.
+      const child = this.launchedProcess
+      if (!child || child.exitCode !== null || child.signalCode !== null) {
+        const launched = this.launch(this.projectDir, socketPath, pidPath, this.env, line => {
+          this.stderrRing.push(line.slice(0, 512))
+          if (this.stderrRing.length > 200) this.stderrRing.shift()
+        })
+        this.launchedProcess = launched
+        launched.once('error', error => {
+          this.stderrRing.push(error.message)
+          if (this.launchedProcess === launched) this.launchedProcess = null
+        })
+      }
     } catch (error) {
       throw new Error(
         `could not launch daemon: ${error instanceof Error ? error.message : String(error)}`,
       )
     }
-    const deadline = Date.now() + STARTUP_TIMEOUT_MS
+    const deadline = Date.now() + this.startupTimeoutMs
     while (Date.now() < deadline) {
       if (this.stopped) throw new Error('daemon rpc disposed')
       if (await this.tryAttach(socketPath)) {
@@ -153,13 +219,13 @@ export class DaemonRpc extends EventEmitter {
       await new Promise<void>(r => setTimeout(r, POLL_MS))
     }
     throw new Error(
-      `daemon not ready within ${STARTUP_TIMEOUT_MS}ms:\n${this.stderrRing.slice(-8).join('\n')}`,
+      `daemon not ready within ${this.startupTimeoutMs}ms${this.launchedProcess?.pid ? ` (process ${this.launchedProcess.pid} is still starting)` : ''}:\n${this.stderrRing.slice(-8).join('\n')}`,
     )
   }
 
   private tryAttach(socketPath: string): Promise<boolean> {
     return new Promise<boolean>(resolveAttach => {
-      const sock = connect({ path: socketPath })
+      const sock = new Socket()
       let done = false
       const settle = (outcome: boolean): void => {
         if (done) return
@@ -172,8 +238,9 @@ export class DaemonRpc extends EventEmitter {
         resolveAttach(outcome)
       }
       const guard = setTimeout(() => settle(false), CONNECT_TIMEOUT_MS)
-      sock.once('error', () => settle(false))
+      sock.on('error', () => settle(false))
       sock.once('connect', () => settle(true))
+      try { sock.connect({ path: socketPath }) } catch { settle(false) }
     })
   }
 
