@@ -1473,6 +1473,7 @@ function daemonEventFromStream(
     case 'thinking':
       return { type: 'think_part', payload: { think: event.text } }
     case 'provider_retry':
+      if (!event.final && event.maxAttempts === 0) return { type: 'status_update', payload: { kind: 'network_retry', text: 'Retrying connection…', attempt: event.attempt, delay: event.delay } }
       return { type: 'notification', payload: { level: event.final ? 'error' : 'warning', message: event.error, retry: event } }
     case 'tool_start':
       return {

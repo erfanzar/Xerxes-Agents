@@ -796,3 +796,14 @@ You keep notes.
     await rm(root, { recursive: true, force: true })
   }
 })
+
+test('source and bundled fallback execution agents expose native terminal lifecycle tools', () => {
+  for (const definitions of [BUILTIN_AGENTS, loadBuiltinAgentDefinitions('/missing-xerxes-acceptance-assets')]) {
+    for (const name of ['default', 'creator']) {
+      const tools = definitions.get(name)!.tools
+      for (const tool of ['exec_command', 'check_command', 'list_commands', 'kill_command', 'pty_open', 'pty_write', 'pty_list', 'pty_close']) expect(tools).toContain(tool)
+    }
+    const reviewer = definitions.get('reviewer')!
+    expect(reviewer.allowedTools ?? reviewer.tools).not.toContain('pty_open')
+  }
+})

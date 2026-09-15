@@ -604,7 +604,10 @@ function collapseWhitespace(text: string): string {
 
 function truncatePreview(text: string, limit: number): string {
   if (text.length <= limit) return text
-  return `${text.slice(0, limit)}… (+${text.length - limit} chars)`
+  // A preview is sent back to the provider, whose JSON decoder can reject
+  // isolated UTF-16 surrogates. Keep supplementary characters together.
+  const end = /[\uD800-\uDBFF]/u.test(text[limit - 1]!) ? limit - 1 : limit
+  return `${text.slice(0, end)}… (+${text.length - end} chars)`
 }
 
 function firstText(...candidates: readonly unknown[]): string {

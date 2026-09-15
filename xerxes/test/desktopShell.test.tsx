@@ -172,7 +172,8 @@ test('the main window does not render a diagnostic footer', () => {
  const html = render(snapshot({contextTokens:0,contextMax:262000}))
  expect(html).not.toContain('class="status"')
  expect(html).not.toContain('ctx 0k/262k')
- expect(html).not.toContain('Session statistics')
+ expect(html).toContain('<details class="session-diagnostics" open="">')
+ expect(html).toContain('<button aria-pressed="true">Activity</button>')
  expect(html).toContain('Workspace runtime: Connected')
  expect(html).not.toContain('daemon connected')
  expect(html).not.toContain('build-notice')
@@ -264,7 +265,7 @@ test('a failed turn renders the error body with retry and resolve affordances', 
   const html = render(
     snapshot({ failed: { error: 'provider 429: quota exceeded', turn: 3, lastUser: 'fix it' }, turnFailed: true }),
   )
-  for (const needle of ['Turn 3 failed', 'provider 429: quota exceeded', 'Retry', 'Mark resolved']) {
+  for (const needle of ['Turn 3 failed', 'provider 429: quota exceeded', 'Retry', 'Dismiss']) {
     expect(html).toContain(needle)
   }
 })
@@ -294,7 +295,8 @@ test('the palette surfaces the daemon slash catalog with descriptions', () => {
 
 test('a steering queue renders visibly above the composer', () => {
   const html = render(snapshot({ turnActive: true, queue: [{ id: 1, text: 'also cover the replay path' }] }))
-  expect(html).toContain('queued 1')
+  expect(html).toContain('Queued messages')
+  expect(html).toContain('Hide queued message from view')
   expect(html).toContain('also cover the replay path')
 })
 
@@ -722,7 +724,7 @@ test('the composer goal badge follows parseGoal, not raw goal-text truthiness', 
   expect(none).not.toContain('◎ goal set')
 
   const armed = render(snapshot({ goal: 'Goal created\nStatus: active\nObjective: ship the release\nRounds: 0/20\nActivation: armed' }))
-  expect(armed).toContain('◎ goal set')
+  expect(armed).toContain('aria-label="Current task"')
   expect(armed).toContain('ship the release')
 })
 
@@ -734,7 +736,7 @@ test('feed rows are scoped (.frow) and provider rows stack name over detail', as
   // detail lines together on one baseline.
   const [css, app] = await Promise.all([read('renderer/app.css'), read('renderer/App.tsx')])
   expect(css).toMatch(/^\.frow \{/m)
-  expect(app).toContain('frow frow--tool')
+  expect(app).toContain('<ToolCallRow')
   expect(app).not.toContain('className="row row--tool"')
 
   const models = render(
@@ -854,7 +856,7 @@ test('the preload exposes narrow validated capabilities, never raw ipcRenderer',
   expect(preload).toContain('call(')
   expect(preload).toContain('onEvent(')
   expect(preload).toContain('openPath(path: unknown)')
-  expect(main).toContain("ipcMain.handle('native:preset:open-path'")
+  expect(main).toContain("handle('native:preset:open-path'")
   expect(main).toContain("relative(root, candidate)")
   expect(preload).not.toMatch(/exposeInMainWorld\(\s*'xerxes'\s*,\s*ipcRenderer/)
 })
@@ -917,11 +919,18 @@ test('navigation remains available while a turn starts, streams, fails, or compl
 test('welcome offers draft starters while navigation retains accessible button names', () => {
   const html = render(snapshot({}))
   expect(html).toContain('<h1 class="welcome__wordmark">XERXES</h1>')
-  expect(html).toContain('Understand this project')
-  expect(html).toContain('Review recent changes')
+  expect(html).toContain('Research a question')
+  expect(html).toContain('Make a plan')
   expect(html).toContain('Build something')
   expect(html).toContain('aria-label="Search sessions"')
-  expect(html).toContain('aria-label="Project files"')
+  expect(html).toContain('<button aria-pressed="false">Files</button>')
   expect(html).toContain('aria-label="Toggle sidebar"')
   expect(html).toContain('aria-hidden="true"')
+})
+
+test('saved work with an empty transcript offers continuation instead of a new-task welcome', () => {
+  const html = render(snapshot({ goal: 'Status: active\nObjective: Compare research findings', blocks: [] }))
+  expect(html).toContain('Continue this task')
+  expect(html).toContain('Review activity')
+  expect(html).not.toContain('A place to think, build, and finish.')
 })

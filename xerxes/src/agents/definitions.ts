@@ -314,7 +314,8 @@ function markdownTools(value: YamlValue | undefined, source: string): string[] {
   const aliases: Readonly<Record<string, readonly string[]>> = {
     Read: ['ReadFile'], Write: ['WriteFile'], Edit: ['FileEditTool'],
     Glob: ['GlobTool'], Grep: ['GrepTool'],
-    Bash: ['exec_command', 'write_stdin', 'list_terminal_sessions', 'close_terminal_session'],
+    Bash: ['exec_command', 'write_stdin', 'list_terminal_sessions', 'close_terminal_session',
+      'check_command', 'list_commands', 'kill_command', 'pty_open', 'pty_write', 'pty_list', 'pty_close'],
     Agent: ['AgentTool', 'SpawnAgents', 'TaskCreateTool'], Task: ['AgentTool', 'SpawnAgents', 'TaskCreateTool'],
     Skill: ['SkillTool'], WebSearch: ['DuckDuckGoSearch'], WebFetch: ['URLAnalyzer'],
     TodoWrite: ['TodoWriteTool'], NotebookEdit: ['NotebookEditTool'],
@@ -597,6 +598,7 @@ function hardcodedBuiltinDefinitions(): ReadonlyMap<string, AgentDefinition> {
   const standardTools = [
     'ReadFile', 'WriteFile', 'FileEditTool', 'GlobTool', 'GrepTool', 'ListDir',
     'exec_command', 'write_stdin', 'list_terminal_sessions', 'close_terminal_session',
+    'check_command', 'list_commands', 'kill_command', 'pty_open', 'pty_write', 'pty_list', 'pty_close',
     'DuckDuckGoSearch', 'computer_use', 'AgentTool', 'SpawnAgents', 'SendMessageTool',
     'TaskCreateTool', 'TaskGetTool', 'TaskListTool', 'TaskOutputTool', 'TaskStopTool',
     'TaskUpdateTool', 'AwaitAgents', 'CheckAgentMessages', 'PeekAgent', 'ResetAgent',

@@ -69,6 +69,9 @@ const CONNECTION_CODES = new Set([
   'ENETDOWN',
   'ENETUNREACH',
   'ENOTFOUND',
+  'EHOSTUNREACH',
+  'ETIMEDOUT',
+  'EPIPE',
 ])
 
 /** Stateless provider error classifier with JavaScript-native error detection. */
@@ -100,7 +103,7 @@ export class ErrorClassifier {
     if (
       details.name === 'ConnectionError'
       || (details.code !== undefined && CONNECTION_CODES.has(details.code))
-      || isFetchNetworkFailure(error, details.message)
+      || isRecoverableNetworkError(error)
     ) {
       return classified(ErrorKind.PROVIDER_DOWN, error, details.message)
     }
@@ -238,4 +241,18 @@ function numberProperty(value: Record<string, unknown>, ...keys: readonly string
     if (typeof candidate === 'number' && Number.isFinite(candidate)) return candidate
   }
   return undefined
+}
+
+/** Retry connectivity and TLS verification failures without weakening TLS checks. */
+export function isRecoverableNetworkError(error: unknown, depth = 0): boolean {
+  if (depth > 4) return false
+  const details = describeError(error)
+  if (details.name === 'AbortError' || details.name === 'ConfigurationError') return false
+  if (details.status !== undefined) return false
+  return details.name === 'ConnectionError'
+    || (details.code !== undefined && CONNECTION_CODES.has(details.code))
+    || isFetchNetworkFailure(error, details.message)
+    || /Unable to connect\. Is the computer able to access the url\?/i.test(details.message)
+    || /unknown certificate verification error|certificate verify failed|unable to verify the first certificate|unable to get local issuer certificate/i.test(details.message)
+    || (isRecord(error) && error.cause !== undefined && isRecoverableNetworkError(error.cause, depth + 1))
 }

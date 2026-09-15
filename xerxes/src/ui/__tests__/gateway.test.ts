@@ -36,21 +36,21 @@ describe('daemonPaths', () => {
     else process.env.XERXES_DAEMON_SOCKET = prevSock
   })
 
-  it('derives the per-project digest socket under $XERXES_HOME/daemon/projects', () => {
+  it('derives the per-user digest socket under $XERXES_HOME/daemon', () => {
     delete process.env.XERXES_DAEMON_SOCKET
     process.env.XERXES_HOME = '/tmp/xh'
     const dir = '/Users/me/proj'
-    const digest = createHash('sha256').update(dir, 'utf8').digest('hex').slice(0, 16)
+    const digest = 'global-' + createHash('sha256').update('/tmp/xh', 'utf8').digest('hex').slice(0, 16)
     const { socketPath, pidPath } = daemonPaths(dir)
-    expect(socketPath).toBe(`/tmp/xh/daemon/projects/${digest}.sock`)
-    expect(pidPath).toBe(`/tmp/xh/daemon/projects/${digest}.pid`)
+    expect(socketPath).toBe(`/tmp/xh/daemon/${digest}.sock`)
+    expect(pidPath).toBe(`/tmp/xh/daemon/${digest}.pid`)
   })
 
   it('defaults $XERXES_HOME to ~/.xerxes', () => {
     delete process.env.XERXES_HOME
     delete process.env.XERXES_DAEMON_SOCKET
     const { socketPath } = daemonPaths('/x')
-    expect(socketPath.startsWith(join(homedir(), '.xerxes', 'daemon', 'projects'))).toBe(true)
+    expect(socketPath.startsWith(join(homedir(), '.xerxes', 'daemon'))).toBe(true)
     expect(socketPath.endsWith('.sock')).toBe(true)
   })
 
@@ -59,7 +59,7 @@ describe('daemonPaths', () => {
     process.env.XERXES_DAEMON_SOCKET = '/run/custom.sock'
     const { socketPath, pidPath } = daemonPaths('/x')
     expect(socketPath).toBe('/run/custom.sock')
-    expect(pidPath).toContain('/tmp/xh/daemon/projects/')
+    expect(pidPath).toContain('/tmp/xh/daemon/')
   })
 
   it('produces a 16-hex-char digest', () => {
@@ -67,7 +67,7 @@ describe('daemonPaths', () => {
     process.env.XERXES_HOME = '/tmp/xh'
     const { socketPath } = daemonPaths('/any/where')
     const name = socketPath.split('/').pop() ?? ''
-    expect(name).toMatch(/^[0-9a-f]{16}\.sock$/)
+    expect(name).toMatch(/^global-[0-9a-f]{16}\.sock$/)
   })
 
   it('canonicalizes subdirectories to the git repository root', () => {
@@ -159,7 +159,7 @@ describe('Bun daemon launcher', () => {
   it('retries a cold daemon at a short cadence without busy-spinning', async () => {
     vi.useFakeTimers()
     try {
-      const client = new GatewayClient({ projectDir: process.cwd() })
+      const client = new GatewayClient({ projectDir: '/fixture/gateway-project' })
       const privateClient = client as unknown as {
         ensureConnectedDaemonCurrent: (socketPath: string, pidPath: string) => Promise<boolean>
         spawnBunDaemon: (socketPath: string, pidPath: string) => void
@@ -198,7 +198,7 @@ describe('Bun daemon launcher', () => {
   })
 
   it('shares one cold-daemon startup across concurrent callers', async () => {
-    const client = new GatewayClient({ projectDir: process.cwd() })
+    const client = new GatewayClient({ projectDir: '/fixture/gateway-project' })
     const privateClient = client as unknown as {
       ensureConnectedDaemonCurrent: (socketPath: string, pidPath: string) => Promise<boolean>
       spawnBunDaemon: (socketPath: string, pidPath: string) => void
@@ -225,7 +225,7 @@ describe('Bun daemon launcher', () => {
   it('replaces a verified stale local daemon before reporting gateway.ready', async () => {
     const client = new GatewayClient({
       expectedDaemonBuildId: 'expected-build',
-      projectDir: process.cwd()
+      projectDir: '/fixture/gateway-project'
     })
     const privateClient = client as unknown as {
       ensureConnectedDaemonCurrent: (socketPath: string, pidPath: string) => Promise<boolean>
@@ -317,7 +317,7 @@ describe('native RPC compatibility boundary', () => {
     ['process.stop', 'Use /stop'],
     ['session.close', 'Native sessions are persistent']
   ])('rejects %s instead of fabricating a success response', async (method, guidance) => {
-    const client = new GatewayClient({ projectDir: process.cwd() })
+    const client = new GatewayClient({ projectDir: '/fixture/gateway-project' })
 
     await expect(client.request(method)).rejects.toEqual(
       expect.objectContaining({

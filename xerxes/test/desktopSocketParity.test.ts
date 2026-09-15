@@ -7,6 +7,7 @@ import { join } from 'node:path'
 
 import { afterEach, beforeEach, expect, test } from 'bun:test'
 
+import { daemonPaths as runtimePaths } from '../src/daemon/paths.js'
 import { daemonAddress } from '../src/desktop/main/spawn.js'
 import { daemonPaths as gatewayPaths } from '../src/ui/gatewayClient.js'
 
@@ -15,7 +16,7 @@ import { daemonPaths as gatewayPaths } from '../src/ui/gatewayClient.js'
 // launch a second one on a socket nobody else will ever use.
 
 const PROJECT = '/fixture/some-project'
-const DIGEST = createHash('sha256').update(PROJECT, 'utf8').digest('hex').slice(0, 16)
+const DIGEST = 'global-' + createHash('sha256').update(join(homedir(), '.xerxes'), 'utf8').digest('hex').slice(0, 16)
 
 let savedSocket: string | undefined
 let savedHome: string | undefined
@@ -34,10 +35,10 @@ afterEach(() => {
   else process.env.XERXES_HOME = savedHome
 })
 
-test('posix default lands beside the pid file under ~/.xerxes/daemon/projects', () => {
+test('posix default lands beside the pid file under ~/.xerxes/daemon', () => {
   const address = daemonAddress(PROJECT)
-  expect(address.socketPath).toBe(join(homedir(), '.xerxes', 'daemon', 'projects', `${DIGEST}.sock`))
-  expect(address.pidPath).toBe(join(homedir(), '.xerxes', 'daemon', 'projects', `${DIGEST}.pid`))
+  expect(address.socketPath).toBe(join(homedir(), '.xerxes', 'daemon', `${DIGEST}.sock`))
+  expect(address.pidPath).toBe(join(homedir(), '.xerxes', 'daemon', `${DIGEST}.pid`))
 })
 
 test('desktop derivation equals the TUI gateway client on every platform', () => {
@@ -64,5 +65,21 @@ test('XERXES_HOME and XERXES_DAEMON_SOCKET behave identically on both sides', ()
     })
   }
   expect(daemonAddress(PROJECT).socketPath).toBe('/tmp/override.sock')
-  expect(daemonAddress(PROJECT).pidPath).toBe(join('/tmp/alt-home', 'daemon', 'projects', `${DIGEST}.pid`))
+  expect(daemonAddress(PROJECT).pidPath).toBe(join('/tmp/alt-home', 'daemon', `global-${createHash('sha256').update('/tmp/alt-home').digest('hex').slice(0,16)}.pid`))
+})
+
+test('two projects use the same daemon; different user homes do not', () => {
+  expect(daemonAddress('/a')).toEqual(daemonAddress('/b'))
+  expect(daemonAddress('/a', { XERXES_HOME: '/one' }, 'win32')).not.toEqual(daemonAddress('/a', { XERXES_HOME: '/two' }, 'win32'))
+})
+
+test('runtime, desktop and TUI normalize configured home identically', () => {
+  for (const home of ['~', '~/.xerxes', '/tmp/another-home']) {
+    process.env.XERXES_HOME = home
+    for (const platform of ['darwin', 'linux', 'win32'] as const) {
+      const expected = runtimePaths('/first', process.env, platform)
+      expect(daemonAddress('/second', process.env, platform)).toEqual(expected)
+      expect(gatewayPaths('/third', platform)).toEqual(expected)
+    }
+  }
 })

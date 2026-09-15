@@ -15,6 +15,10 @@ The desktop client renders locally and uses the same daemon and persisted sessio
 
 Dialogs support Escape, keyboard focus containment, visible errors, and narrow windows. Errors do not erase the conversation.
 
+## Working in multiple windows
+
+Use **File → Open Workspace in New Window…** (Cmd/Ctrl+Shift+O), or **Workspace → Open workspace in new window…**, to keep another project open alongside the current one. **File → New Window** (Cmd/Ctrl+Shift+N) opens an unassigned window where you can select a local or SSH workspace. Each window owns its connection, session view, draft, reconnect and dictation state. Switching or closing one window does not retarget the others or stop project daemons. Use the native Window menu to switch between named workspaces. Closing the entire app currently restores only the last saved local workspace on relaunch, not the complete window arrangement.
+
 ## Local and SSH workspaces
 
 The workspace control selects local folders or saved SSH workspaces. **Add remote workspace** can discover host aliases from the local SSH configuration, browse remote folders, and save the selected project. Connecting installs or updates the managed remote runtime, then forwards its Unix socket. The desktop renderer stays local.
@@ -91,3 +95,28 @@ Artifacts lists files changed during the current session and offers transcript
 export; it is not a global artifact index. Scheduled jobs and workspace setup
 remain focused dialogs. Creator mode remains available through the plugin
 workflow rather than occupying primary session navigation.
+
+The macOS DMG uses a compact 680-point Finder window with a Retina background,
+a real application bundle, and an Applications shortcut. Instructions appear
+in the background; no separate “Start here” document is required. Building the
+DMG requires Finder and permission for `osascript` to configure its window.
+The builder uses a uniquely named temporary volume to avoid other mounted
+installers, persists its layout, converts to a read-only image, and verifies its
+checksum before replacing the previous artifact. Installer artwork lives in
+`assets/installer/`.
+
+## Shared runtime for desktop and terminal
+
+Desktop and the TUI now connect to one local daemon per Xerxes home, regardless of workspace. Each workspace has independent skills, MCP connections, agent definitions and turn runners; sessions retain their own working directories, instructions, permissions and persisted history. Closing either client leaves the daemon available to the others.
+
+Idle legacy project daemons migrate automatically through the atomic idle-restart endpoint. Busy project daemons stay attached while their work is running. The global runtime refuses to reopen a workspace still owned by a legacy daemon, so migration cannot overwrite running work. After an old runtime finishes and exits, its next connection joins the shared daemon. Explicit custom sockets and remote connections continue to select independent runtimes.
+
+### Package without replacing a running bundle
+
+When an app or daemon is running from `xerxes/dist/Xerxes Agents.app`, build into a separate directory:
+
+```bash
+XERXES_DESKTOP_PACKAGE_DIR=/absolute/path/to/package bun run --cwd xerxes build:installer
+```
+
+Compiled inputs still come from `xerxes/dist`; the branded application and DMG are written to the selected directory. Use a fresh directory for each verification build. This does not install the app, restart a daemon, or update the copy in `/Applications`.

@@ -357,7 +357,7 @@ button.hchip--btn { cursor: pointer; }
   flex: 1 1 auto; min-width: 0; overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap;
 }
-.frow__excerpt--wrap { overflow: visible; white-space: pre-wrap; }
+.frow__excerpt--wrap { overflow: visible; white-space: pre-wrap; overflow-wrap: anywhere; }
 .frow__dur { flex: 0 0 auto; font-family: var(--mono); font-size: 10.5px; color: var(--x-numeric); }
 .frow__diff { flex: 0 0 auto; font-family: var(--mono); font-size: 10px; }
 .frow__diff .add { color: var(--x-done); }
@@ -380,7 +380,7 @@ button.hchip--btn { cursor: pointer; }
 /* Tool rows retain the compact trail but expand to the exact wire input/output. */
 .toolrow > summary { cursor: pointer; list-style: none; user-select: none; }
 .toolrow > summary::-webkit-details-marker { display: none; }
-.execution { margin: 4px 0 12px 23px; padding: 10px 0; border-block: 1px solid var(--x-hairline); min-width: 0; }
+.execution { margin: 4px 0 12px 23px; padding: 10px 0; min-width: 0; }
 .execution__status { display:flex; justify-content:space-between; gap:12px; color:var(--x-meta); font-size:var(--ui-small); }
 .execution__status > span:last-child { overflow-wrap:anywhere; }
 .execution__status[data-failed], .execution__error { color:var(--x-failed-text); }
@@ -405,8 +405,8 @@ button.hchip--btn { cursor: pointer; }
 
 /* ── To-dos card (dsh grammar): live plan in the feed ── */
 .todos {
-  border: 1px solid var(--x-hairline); border-radius: 10px;
-  background: var(--x-card); overflow: hidden;
+  border: 0; border-block: 1px solid var(--x-hairline); border-radius: 0;
+  background: transparent; overflow: hidden;
 }
 .todos__head {
   display: flex; align-items: baseline; gap: 8px; width: 100%;
@@ -420,8 +420,8 @@ button.hchip--btn { cursor: pointer; }
 .todos__counts { color: var(--x-meta); font-size: 11.5px; }
 .todos__chev { margin-left: auto; color: var(--x-caption); font-size: 10px; transition: transform 120ms ease; }
 .todos__chev.is-open { transform: rotate(180deg); }
-.todos__list { display: flex; flex-direction: column; gap: 2px; padding: 2px 12px 10px; }
-.todo { display: flex; align-items: center; gap: 9px; padding: 3px 0; font-family: var(--prose); font-size: 12.5px; }
+.todos__list { display: flex; flex-direction: column; gap: 0; padding: 2px 12px 10px; }
+.todo { display: flex; align-items: center; gap: 12px; padding: 8px 0; font-family: var(--prose); font-size: 12.5px; }
 .todo__icon {
   flex: 0 0 auto; width: 14px; height: 14px; border-radius: 50%;
   display: inline-flex; align-items: center; justify-content: center;
@@ -433,6 +433,7 @@ button.hchip--btn { cursor: pointer; }
   animation: spin 0.9s linear infinite;
 }
 .todo__icon[data-state='todo'] { border: 1.5px dashed var(--x-separator); }
+.todo__t { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .todo--done .todo__t { color: var(--x-meta); }
 .todo--cur .todo__t { color: var(--x-prose); }
 .todo--todo .todo__t { color: var(--x-meta); }
@@ -577,7 +578,7 @@ button.hchip--btn { cursor: pointer; }
 /* The composer is the one calm primary surface: rounded card, input on top,
    chip bar below (dsh grammar). */
 .composer {
-  max-width: 84ch; margin: 0 auto; display: flex; flex-direction: column; gap: 4px;
+  margin: 0 auto; display: flex; flex-direction: column; gap: 4px;
   border: 1px solid var(--x-hairline); border-radius: 12px;
   background: var(--x-card); padding: 10px 12px 8px;
 }
@@ -988,7 +989,9 @@ button.hchip--btn { cursor: pointer; }
 }
 /* Inline code keeps its chip look; fenced code must not inherit it. */
 .md__code code { background: none; border: none; padding: 0; font-size: inherit; }
-.md__table { border-collapse: collapse; margin: 0 0 6px; font-size: 10.5px; }
+.md__table { border-collapse: collapse; margin: 0 0 6px; font-size: 10.5px; overflow-wrap: normal; word-break: normal; }
+.md__table-scroll { min-width: 0; max-width: 100%; overflow-x: auto; }
+.md__table-scroll:focus-visible { outline: 1px solid var(--x-focus); outline-offset: 2px; }
 .md__table th, .md__table td {
   border: 1px solid var(--x-hairline); padding: 3px 8px;
   text-align: left; vertical-align: top;
@@ -1012,18 +1015,6 @@ button.hchip--btn { cursor: pointer; }
 .logrow__turn { color: var(--x-separator); flex: 0 0 28px; }
 .logrow__type { color: var(--x-secondary); flex: 0 0 128px; }
 .logrow__sum { color: var(--x-meta); overflow: hidden; text-overflow: ellipsis; }
-
-/* ── Steering queue ───────────────────────────────────────────────── */
-.queue { max-width: 84ch; margin: 0 auto 6px; display: flex; flex-direction: column; gap: 4px; }
-.qmsg {
-  display: flex; align-items: center; gap: 9px;
-  border: 1px solid var(--x-hairline); border-left: 2px solid var(--x-needs);
-  border-radius: var(--r-sm); background: var(--x-backdrop);
-  padding: 5px 10px; font-family: var(--mono); font-size: var(--ui-small); color: var(--x-secondary);
-}
-.qmsg .q-x { margin-left: auto; cursor: pointer; color: var(--x-meta); border: none; background: none; font-size: var(--ui-small); }
-.qmsg .q-x:hover { color: var(--x-strong); }
-.qmsg .q-tag { color: var(--x-needs); }
 
 /* ── Failed turn ──────────────────────────────────────────────────── */
 .terr {

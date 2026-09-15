@@ -8969,7 +8969,7 @@ test('run cancellation routes to the live terminal and rejects stale or foreign 
     expect(history.inspect(session.id, run.id)?.state).toBe('running');
     terminal.close(0);
     client.send({ jsonrpc: '2.0', id: 5, method: 'run.inspect', params: { session_key: 'owner', run_id: run.id } });
-    expect((await client.next(frame => frame.id === 5)).result?.run).toMatchObject({ cancel_label: null, state: 'succeeded' });
+    expect((await client.next(frame => frame.id === 5)).result?.run).toMatchObject({ cancel_label: null, state: 'cancelled' });
   } finally { client.close(); await server.stop(); history.close(); await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -8996,6 +8996,40 @@ test('Runs cancels only the exact active schedule execution', async () => {
     expect(await running).toBeInstanceOf(Error);
     expect(history.inspect(current.ownerSessionId, current.id)?.state).toBe('cancelled');
     expect(store.get('job')?.paused).toBe(true);
+  } finally { client.close(); await server.stop(); history.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('one connection can inspect and cancel its pending schedule.run', async () => {
+  const directory = await realpath(await mkdtemp(join(tmpdir(), 'xerxes-schedule-live-control-')));
+  const history = new RunHistory(join(directory, 'runs.sqlite'));
+  const store = new JobStore(join(directory, 'jobs.json'));
+  const runner = new AbortGateRunner();
+  const runtime = new InMemoryDaemonRuntime(runner, { currentProjectDirectory: directory, sessionDirectory: join(directory, 'sessions') });
+  store.add(new CronJob({ id: 'job', prompt: 'Check', projectRoot: directory, paused: true, schedule: '0 9 * * *' }));
+  const server = new DaemonServer({ socketPath: join(directory, 'daemon.sock'), projectDirectory: directory, runtime, runHistory: history, cronStoreFactory: () => store, cronLeasePath: join(directory, 'lease'), cronArchiveDirectory: join(directory, 'archive') });
+  await server.start();
+  const client = await SocketTestClient.connect(join(directory, 'daemon.sock'));
+  try {
+    client.send({ jsonrpc: '2.0', id: 1, method: 'session.open', params: { session_key: 'caller' } });
+    await client.next(frame => frame.id === 1);
+    client.send({ jsonrpc: '2.0', id: 2, method: 'schedule.run', params: { schedule_id: 'job' } });
+    await waitFor(() => runner.runs === 1);
+    client.send({ jsonrpc: '2.0', id: 3, method: 'run.list', params: { scope: 'workspace' } });
+    const listed = (await client.next(frame => frame.id === 3)).result;
+    expect(listed?.runs).toMatchObject([{ kind: 'schedule', state: 'running' }]);
+    const run = history.listWorkspace(directory)[0]!;
+    expect(run.ownerSessionId).not.toBe(runtime.sessionStatus('caller')?.id);
+    client.send({ jsonrpc: '2.0', id: 4, method: 'run.inspect', params: { scope: 'workspace', run_id: run.id } });
+    expect((await client.next(frame => frame.id === 4)).result?.run).toMatchObject({ cancel_label: 'Cancel run' });
+    client.send({ jsonrpc: '2.0', id: 5, method: 'run.cancel', params: { scope: 'workspace', run_id: run.id, revision: run.revision + 1 } });
+    expect((await client.next(frame => frame.id === 5)).result).toMatchObject({ ok: false, error: 'Run changed; refresh before cancelling' });
+    client.send({ jsonrpc: '2.0', id: 6, method: 'run.cancel', params: { scope: 'workspace', run_id: run.id, revision: run.revision } });
+    expect((await client.next(frame => frame.id === 6)).result).toMatchObject({ ok: true, requested: true });
+    expect((await client.next(frame => frame.id === 2)).error).toBeDefined();
+    expect(history.inspect(run.ownerSessionId, run.id)?.state).toBe('cancelled');
+    expect(runtime.sessionStatus('caller')?.activeTurnId).toBe('');
+    expect(client.seen(eventFrame('text_part'))).toBe(false);
+    expect(client.seen(eventFrame('cron_event'))).toBe(true);
   } finally { client.close(); await server.stop(); history.close(); await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -10047,7 +10081,7 @@ test('activity pushes lifecycle changes, lists schedules and scopes process cont
     expect(JSON.stringify(activity)).not.toContain('private command');
     expect(await request('terminal.control',{terminal_id:'other',action:'kill'})).toMatchObject({ok:false});
     expect(await request('terminal.control',{terminal_id:'owned',action:'kill'})).toMatchObject({ok:true});
-    expect(await request('background.activity')).toMatchObject({rows:expect.arrayContaining([expect.objectContaining({id:'owned',state:'completed',endedAt:expect.any(Number),action:null})])});
+    expect(await request('background.activity')).toMatchObject({rows:expect.arrayContaining([expect.objectContaining({id:'owned',state:'cancelled',endedAt:expect.any(Number),action:null})])});
     const schedule = { revision: Bun.hash(JSON.stringify(store.get('queued')!.toRecord())).toString(16) };
     expect(await request('schedule.pause',{schedule_id:'queued',revision:schedule.revision})).toMatchObject({ok:true});
     expect(await request('background.activity')).toMatchObject({rows:expect.arrayContaining([expect.objectContaining({id:'queued',state:'paused'})])});

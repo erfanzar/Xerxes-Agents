@@ -436,6 +436,8 @@ export interface InMemoryDaemonRuntimeOptions {
   readonly onSessionEvict?: (sessionId: string) => unknown;
   /** Exact worker IDs currently owned by this daemon, for restored panel state. */
   readonly liveSubagentIds?: () => readonly string[];
+  /** Refresh the owning session's manifest when children run outside its turn. */
+  readonly refreshSubagents?: (session: DaemonSession) => void;
   /**
    * Stop the delegated work a session started, because the user interrupted
    * its turn. Unlike eviction this is a pause, not a reclaim: implementations
@@ -1245,7 +1247,9 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
   }
 
   sessionStatus(sessionKey: string): DaemonSession | undefined {
-    return this.sessions.get(sessionKey);
+    const session = this.sessions.get(sessionKey);
+    if (session) this.options.refreshSubagents?.(session);
+    return session;
   }
 
   lspSettings(): LspSettingsView | undefined { return this.options.lspSettings?.(); }

@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="680" height="440" viewBox="0 0 680 440">
+ <defs><linearGradient id="surface" x2="0" y2="1"><stop stop-color="#f6f4fb"/><stop offset="1" stop-color="#e8e7f0"/></linearGradient><linearGradient id="line"><stop stop-color="#77718d" stop-opacity="0"/><stop offset=".5" stop-color="#77718d" stop-opacity=".22"/><stop offset="1" stop-color="#77718d" stop-opacity="0"/></linearGradient></defs>
+ <path fill="url(#surface)" d="M0 0h680v440H0z"/>
+ <text x="340" y="83" text-anchor="middle" fill="#272433" font-family="Didot, Georgia, serif" font-size="58" letter-spacing="-2">XERXES</text>
+ <text x="340" y="119" text-anchor="middle" fill="#575367" font-family="-apple-system, Helvetica Neue, sans-serif" font-size="14">Drag Xerxes Agents into Applications</text>
+ <path d="M64 150h552" stroke="url(#line)"/>
+ <path d="M302 228h76m-12-12 12 12-12 12" fill="none" stroke="#75639e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+ <text x="340" y="354" text-anchor="middle" fill="#454152" font-family="-apple-system, Helvetica Neue, sans-serif" font-size="13">Open from Applications. Choose a project. Start creating.</text>
+ <text x="340" y="383" text-anchor="middle" fill="#676274" font-family="-apple-system, Helvetica Neue, sans-serif" font-size="11">Bun is included. Your sessions and settings stay with you when updating.</text>
+ <text x="340" y="411" text-anchor="middle" fill="#676274" font-family="-apple-system, Helvetica Neue, sans-serif" font-size="11">Eject this disk when installation is complete.</text>
+</svg>

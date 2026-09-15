@@ -16,6 +16,7 @@ import {
   importCodexCliTokens,
 } from '../src/auth/codexAuth.js'
 import { CredentialStorage } from '../src/auth/storage.js'
+import { compactionCompletionPort } from '../src/daemon/compactionRunner.js'
 import { OAuthToken } from '../src/mcp/oauth.js'
 import { createLlmClient } from '../src/llms/client.js'
 import { detectProvider, getApiKey, resolveProvider } from '../src/llms/providerRegistry.js'
@@ -497,6 +498,7 @@ test('codex requests carry OAuth headers and omit the parameters the backend rej
     expect(seenHeaders['chatgpt-account-id']).toBe('acct-5')
 
     expect(seenBody.model).toBe('gpt-5.3-codex')
+    expect(seenBody.instructions).toBe('You are a helpful assistant.')
     expect(seenBody.store).toBe(false)
     expect(seenBody.stream).toBe(true)
     // The backend answers an unsupported parameter with 400, never by
@@ -505,6 +507,13 @@ test('codex requests carry OAuth headers and omit the parameters the backend rej
     expect(seenBody).not.toHaveProperty('max_tokens')
     expect(seenBody).not.toHaveProperty('temperature')
     expect(seenBody).not.toHaveProperty('top_p')
+    for await (const _delta of client.stream({
+      model: 'codex/gpt-5.3-codex',
+      messages: [{ role: 'system', content: 'Preserve the summary facts.' }, { role: 'user', content: 'Summarize.' }],
+    })) { /* Drain the second request. */ }
+    expect(seenBody.instructions).toBe('Preserve the summary facts.')
+    await compactionCompletionPort(client, 'codex/gpt-5.3-codex')({ prompt: 'Summarize this conversation without losing pending work.', maxTokens: 1024, temperature: 0, stream: false })
+    expect(seenBody.instructions).toBe('You are a helpful assistant.')
   })
 })
 

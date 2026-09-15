@@ -45,8 +45,8 @@ test('Claude-style Markdown fields map to native settings and reject invalid val
     expect(parseAgentMarkdown(path)).toMatchObject({
       name: 'specialist', model: '', maxTurns: 3, effort: 'high', background: true,
       permissionMode: 'plan', skills: ['audit'], promptMode: 'replace',
-      tools: ['ReadFile', 'GrepTool', 'exec_command', 'write_stdin', 'list_terminal_sessions', 'close_terminal_session'],
-      excludeTools: ['exec_command', 'write_stdin', 'list_terminal_sessions', 'close_terminal_session'],
+      tools: ['ReadFile', 'GrepTool', 'exec_command', 'write_stdin', 'list_terminal_sessions', 'close_terminal_session', 'check_command', 'list_commands', 'kill_command', 'pty_open', 'pty_write', 'pty_list', 'pty_close'],
+      excludeTools: ['exec_command', 'write_stdin', 'list_terminal_sessions', 'close_terminal_session', 'check_command', 'list_commands', 'kill_command', 'pty_open', 'pty_write', 'pty_list', 'pty_close'],
     })
     for (const field of ['maxTurns: 0', 'effort: enormous', 'background: yes', 'permissionMode: unknown', 'tools: [42]']) {
       await writeFile(path, `---\nname: specialist\ndescription: Test\n${field}\n---\nTest.`)

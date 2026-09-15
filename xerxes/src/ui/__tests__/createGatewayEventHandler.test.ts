@@ -64,6 +64,19 @@ const liveClarify = () =>
   })
 
 describe('createGatewayEventHandler', () => {
+  it('keeps connection retry visible across attempts until provider output resumes', () => {
+    const { handler } = buildHarness()
+    const send = (payload: Record<string, unknown>) => {
+      for (const event of adaptDaemonEvent('status_update', payload)) handler(event)
+    }
+    send({ kind: 'network_retry', text: 'Retrying connection…' })
+    expect(getTurnState().networkRetrying).toBe(true)
+    send({ kind: 'provider_wait', text: 'Waiting for model response…' })
+    send({ input_tokens: 123 })
+    expect(getTurnState().networkRetrying).toBe(true)
+    send({ kind: 'provider_ready', text: '' })
+    expect(getTurnState().networkRetrying).toBe(false)
+  })
   it('preserves provider waiting until response or failure ends that phase', () => {
     const { handler } = buildHarness()
     const send = (payload: Record<string, unknown>) => {

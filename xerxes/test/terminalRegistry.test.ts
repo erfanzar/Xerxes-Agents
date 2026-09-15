@@ -255,3 +255,64 @@ test('incremental reads fail rather than acknowledge an unpersisted cursor when 
   expect(() => terminals.readOutput(OWNER, 'failed-store')).toThrow()
   handle.close(null)
 })
+
+test('confirmed terminal cancellation is persisted only after exit, including exit during signalling', async () => {
+  await inTemporaryWorkspace(async root => {
+    const history = new RunHistory(join(root, 'cancel.sqlite'))
+    try {
+      const terminals = new TerminalRegistry({ runHistory: history })
+      const handle = terminals.open({ id: 'cancel', kind: 'background', command: 'worker', cwd: root, ownerSessionId: OWNER, control: { kill: async () => {} } })
+      await terminals.kill(OWNER, handle.id)
+      expect(terminals.inspect(OWNER, handle.id)?.running).toBe(true)
+      expect(history.list(OWNER)[0]?.state).toBe('running')
+      handle.append('last output')
+      handle.close(143)
+      expect(history.list(OWNER)[0]).toMatchObject({ state: 'cancelled', exitCode: 143, output: 'last output', error: null })
+      expect(terminals.wasCancelled(OWNER, handle.id)).toBe(true)
+      expect(terminals.wasCancelled('another-session', handle.id)).toBe(false)
+      const restored = new TerminalRegistry({ runHistory: history })
+      expect(restored.wasCancelled(OWNER, restored.list(OWNER)[0]!.id)).toBe(true)
+      const fast = terminals.open({ id: 'fast', kind: 'background', command: 'fast worker', cwd: root, ownerSessionId: OWNER, control: { kill: async () => { fast.close(143) } } })
+      await terminals.kill(OWNER, fast.id)
+      expect(history.list(OWNER).find(run => run.sourceId === 'fast')?.state).toBe('cancelled')
+    } finally { history.close() }
+  })
+})
+
+test('refused terminal cancellation propagates and does not disguise a process failure', async () => {
+  await inTemporaryWorkspace(async root => {
+    const history = new RunHistory(join(root, 'refused.sqlite'))
+    try {
+      const terminals = new TerminalRegistry({ runHistory: history })
+      const handle = terminals.open({ id: 'refused', kind: 'background', command: 'worker', cwd: root, ownerSessionId: OWNER, control: { kill: async () => { handle.close(1); throw new Error('Signal denied') } } })
+      await expect(terminals.kill(OWNER, handle.id)).rejects.toThrow('Signal denied')
+      expect(history.list(OWNER)[0]).toMatchObject({ state: 'failed', exitCode: 1, error: 'Process exited with code 1' })
+    } finally { history.close() }
+  })
+})
+
+test('confirmed Ctrl+C records interruption while unrelated failures and denied interrupts remain failures', async () => {
+  await inTemporaryWorkspace(async root => {
+    const history = new RunHistory(join(root, 'interrupt.sqlite'))
+    try {
+      const terminals = new TerminalRegistry({ runHistory: history })
+      const interrupted = terminals.open({ id: 'interrupted', kind: 'pty', command: 'cat', cwd: root, ownerSessionId: OWNER, control: { interrupt: async () => { interrupted.close(130) } } })
+      await terminals.interrupt(OWNER, interrupted.id)
+      await Promise.resolve()
+      expect(history.list(OWNER).find(run => run.sourceId === interrupted.id)).toMatchObject({ state: 'interrupted', exitCode: 130, error: null })
+      expect(terminals.wasInterrupted(OWNER, interrupted.id)).toBe(true)
+      expect(terminals.wasInterrupted('foreign', interrupted.id)).toBe(false)
+      const restored = new TerminalRegistry({ runHistory: history })
+      expect(restored.wasInterrupted(OWNER, restored.list(OWNER)[0]!.id)).toBe(true)
+      const continued = terminals.open({ id: 'continued', kind: 'pty', command: 'shell', cwd: root, ownerSessionId: OWNER, control: { interrupt: async () => {} } })
+      await terminals.interrupt(OWNER, continued.id)
+      expect(terminals.inspect(OWNER, continued.id)?.running).toBe(true)
+      continued.close(1)
+      expect(history.list(OWNER).find(run => run.sourceId === continued.id)?.state).toBe('failed')
+      const denied = terminals.open({ id: 'denied', kind: 'pty', command: 'shell', cwd: root, ownerSessionId: OWNER, control: { interrupt: async () => { denied.close(130); throw new Error('Interrupt denied') } } })
+      await expect(terminals.interrupt(OWNER, denied.id)).rejects.toThrow('Interrupt denied')
+      await Promise.resolve()
+      expect(history.list(OWNER).find(run => run.sourceId === denied.id)?.state).toBe('failed')
+    } finally { history.close() }
+  })
+})

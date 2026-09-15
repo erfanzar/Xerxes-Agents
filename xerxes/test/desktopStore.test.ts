@@ -153,6 +153,19 @@ describe('Store workspace folds', () => {
     expect(store.getSnapshot().failed).toBeNull()
   })
 
+  test('late terminal refresh cannot replace a newer exited state', async () => {
+    const answers: Array<(result: Record<string, unknown>) => void> = []
+    bridge.respondWith(() => new Promise(resolve => { answers.push(resolve) }))
+    store.loadTerminals()
+    store.loadTerminals()
+    answers[1]!({ ok: true, terminals: [{ id: 'shell-1', running: false, exitCode: 130 }] })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    answers[0]!({ ok: true, terminals: [{ id: 'shell-1', running: true }] })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(store.getSnapshot().terminals[0]).toMatchObject({ running: false, exitCode: 130 })
+    expect(store.getSnapshot().terminalsLoading).toBe(false)
+  })
+
   test('channel mutation stays pending until the daemon answers and reports rejection', async () => {
     let answer!: (result: Record<string, unknown>) => void
     bridge.respondWith(method => method === 'channel.enable'
@@ -174,13 +187,23 @@ describe('Store workspace folds', () => {
     expect(store.getSnapshot().mcpStatus.local?.tools).toBe(3)
     bridge.respondWith(() => ({ ok: false, error: 'MCP configuration is unreadable' }))
     await expect(store.refreshMcpStatus()).rejects.toThrow('MCP configuration is unreadable')
-    await expect(store.reloadMcp()).rejects.toThrow('MCP configuration is unreadable')
+    await expect(store.reloadMcp()).rejects.toThrow('MCP reload failed and current server status could not be refreshed.')
     expect(store.getSnapshot().mcpStatus.local?.connected).toBe(true)
     bridge.respondWith(() => ({ session: {} }))
     await expect(store.refreshMcpStatus()).rejects.toThrow('MCP status is unavailable')
     bridge.respondWith(() => ({ session: { mcp_status: {} } }))
     await store.refreshMcpStatus()
     expect(store.getSnapshot().mcpStatus).toEqual({})
+  })
+
+  test('failed MCP reload refreshes disconnected status while preserving the failure', async () => {
+    bridge.respondWith(() => ({ session: { mcp_status: { local: { connected: true, tools: 1 } } } }))
+    await store.refreshMcpStatus()
+    bridge.respondWith(method => method === 'slash'
+      ? { ok: false, error: 'Server failed to reconnect' }
+      : { session: { mcp_status: { local: { connected: false, tools: 0, lastError: 'Process exited' } } } })
+    await expect(store.reloadMcp()).rejects.toThrow('Server failed to reconnect')
+    expect(store.getSnapshot().mcpStatus.local).toMatchObject({ connected: false, tools: 0, lastError: 'Process exited' })
   })
 
   test("slash search combines command and skill results", async () => {
@@ -255,6 +278,17 @@ describe('Store workspace folds', () => {
     await store.openSession('other-session')
     expect(store.getSnapshot().error).toBe('Folder is unavailable')
     expect(store.getSnapshot().currentId).toBe('aa19f402')
+  })
+
+  test('explicit resume signals a fresh tail position even for the same session, but failed resume does not', async () => {
+    const revision = store.getSnapshot().sessionOpenRevision
+    await store.openSession('aa19f402')
+    expect(store.getSnapshot().sessionOpenRevision).toBe(revision + 1)
+    await store.openSession('aa19f402')
+    expect(store.getSnapshot().sessionOpenRevision).toBe(revision + 2)
+    bridge.respondWith(method => { if (method === 'initialize') throw new Error('Resume unavailable'); return { ok: true } })
+    await store.openSession('aa19f402')
+    expect(store.getSnapshot().sessionOpenRevision).toBe(revision + 2)
   })
 
   test('runtime update reports waiting and errors and resumes the original session', async () => {
@@ -766,6 +800,20 @@ describe('Store workspace folds', () => {
     expect(resubmit.at(-1)?.params.text).toBe('make it pass')
   })
 
+  test('compaction recovery targets the session, retains rejected failures, and never resubmits the goal', async () => {
+    bridge.push('turn_begin', { user_input: 'continue goal' })
+    bridge.push('notification', { severity: 'error', body: 'Automatic context compaction failed: 400' })
+    bridge.push('turn_end', {})
+    bridge.respondWith(() => ({ ok: false, error: 'Provider rejected compaction' }))
+    await store.retryCompaction()
+    expect(store.getSnapshot().failed?.error).toContain('Provider rejected compaction')
+    expect(bridge.calls.at(-1)).toEqual({ method: 'slash', params: { session_key: store.getSnapshot().sessionKey, command: '/compact' } })
+    bridge.respondWith(() => ({ ok: true, output: 'Compacted successfully' }))
+    await store.retryCompaction()
+    expect(store.getSnapshot().failed).toBeNull()
+    expect(bridge.calls.filter(call => call.method === 'turn.submit')).toHaveLength(0)
+  })
+
   test('a clean turn ends without failure and clears the queue', () => {
     bridge.push('turn_begin', { user_input: 'hello' })
     bridge.push('turn_end', {})
@@ -985,6 +1033,14 @@ describe('Store workspace folds', () => {
     expect(bridge.calls.some(call => call.method === 'provider_models')).toBe(true)
   })
 
+  test('provider save returns daemon refusal to keep the editor open for retry', async () => {
+    const initializations = bridge.calls.filter(call => call.method === 'initialize').length
+    bridge.respondWith(method => method === 'provider_save' ? { ok: false, error: 'Profile path is read-only' } : {})
+    expect(await store.saveProvider({name:'local',baseUrl:'https://example.invalid/v1',model:'test'})).toBe('Profile path is read-only')
+    expect(bridge.calls.filter(call => call.method === 'initialize')).toHaveLength(initializations)
+    expect(await store.saveProvider({name:'',baseUrl:'',model:''})).toContain('required')
+  })
+
   test('saving a provider persists via provider_save with exact wire fields', async () => {
     store.saveProvider({ name: ' openrouter ', baseUrl: ' https://api.local/v1 ', model: ' glm-5.2 ', provider: '', apiKey: '  ' })
     await new Promise(resolve => setTimeout(resolve, 10))
@@ -1036,13 +1092,42 @@ describe('Store workspace folds', () => {
     expect(commands[0]?.description).toBe('runtime status')
   })
 
+  test('a fast retry completion supersedes its optimistic acknowledgement', async () => {
+    bridge.push('subagent_event', { agent_id: 'retry-child', title: 'Retry review', event: { type: 'turn_begin', payload: {} } })
+    const completedAt = new Date().toISOString()
+    bridge.respondWith(method => method === 'subagent.retry' ? { ok: true } : {
+      session: { subagent_snapshots: [{ id: 'retry-child', title: 'Retry review', status: 'completed', summary: 'Finished before acknowledgement', updated_at: completedAt }] },
+    })
+    await store.controlAgent('retry-child', 'retry', 'Review again')
+    await new Promise(resolve => setTimeout(resolve, 0))
+    const child = store.getSnapshot().fleet.find(row => row.id === 'retry-child')
+    expect(child?.status).toBe('completed')
+    expect(child?.agentDetails?.summary).toBe('Finished before acknowledgement')
+    expect(bridge.calls.find(call => call.method === 'subagent.retry')?.params.message).toBe('Review again')
+  })
+
+  test('nested agent events stay out of the main transcript and controls expose runtime rejection', async () => {
+    const before = store.getSnapshot().blocks
+    bridge.push('subagent_event', { agent_id: 'live-child', title: 'Live review', event: { type: 'turn_begin', payload: {} } })
+    bridge.push('subagent_event', { agent_id: 'live-child', event: { type: 'tool_call', payload: { id: 'child-call', name: 'read_file', arguments: 'src/test.ts' } } })
+    bridge.push('subagent_event', { agent_id: 'foreign-child', session_id: 'another-session', event: { type: 'turn_begin', payload: {} } })
+    expect(store.getSnapshot().fleet.map(row=>row.id)).toContain('live-child')
+    expect(store.getSnapshot().fleet.map(row=>row.id)).not.toContain('foreign-child')
+    expect(store.getSnapshot().fleet.find(row=>row.id==='live-child')?.agentDetails?.toolCalls?.[0]?.arg).toBe('src/test.ts')
+    expect(store.getSnapshot().blocks.filter(block=>block.kind==='tools')).toEqual(before.filter(block=>block.kind==='tools'))
+    bridge.respondWith(method => method === 'subagent.interrupt' ? { found: false } : { ok: false, error: 'Retry denied' })
+    await expect(store.controlAgent('live-child','stop')).rejects.toThrow('did not confirm')
+    await expect(store.controlAgent('live-child','retry')).rejects.toThrow('Retry denied')
+    expect(store.getSnapshot().fleet.find(row=>row.id==='live-child')?.status).toBe('running')
+  })
+
   test('agent tool calls mid-turn refresh the fleet rail from subagent snapshots', async () => {
     // The manifest only exists once the spawn persists inside tool execution,
     // so model the race: session.status answers empty until the tool_call
     // arrives, then reports two running children.
     let spawned = false
     const snapshots = [
-      { id: 'sub-one', title: 'Analyze libs/eyvan', status: 'working' },
+      { id: 'sub-one', title: 'Analyze libs/eyvan', status: 'working', summary: 'Reviewing cancellation handling', model: 'test-model', tool_count: 12, input_tokens: 4500, files_read: ['src/recovery.ts', 42], files_written: [], error: '' },
       { id: 'sub-two', title: 'Analyze the OCI release pipeline', status: 'working' },
     ]
     bridge.respondWith(method => {
@@ -1067,6 +1152,7 @@ describe('Store workspace folds', () => {
     const fleet = store.getSnapshot().fleet
     expect(fleet.map(row => row.title)).toEqual(['Analyze libs/eyvan', 'Analyze the OCI release pipeline'])
     expect(fleet.every(row => row.kind === 'subagent' && row.status === 'working')).toBe(true)
+    expect(fleet[0]?.agentDetails).toMatchObject({ summary: 'Reviewing cancellation handling', model: 'test-model', toolCount: 12, inputTokens: 4500, filesRead: ['src/recovery.ts'] })
 
     // A non-agent tool call must not pay a status fetch: the snapshots it
     // would read cannot have moved.
@@ -1195,4 +1281,49 @@ test('desktop selection resumes per workspace after reload and explicit navigati
     else delete (globalThis as { localStorage?: unknown }).localStorage
     delete (globalThis as { window?: unknown }).window
   }
+})
+
+test('opening a second workspace window preserves the current session and surfaces host failure', async () => {
+  const bridge = new FakeBridge(method => method === 'initialize' ? initializeResult : { ok: true })
+  const paths: Array<string | undefined> = []
+  let fail = true
+  Object.assign(bridge, { openWorkspaceWindow: async (path?: string) => { paths.push(path); if (fail) throw new Error('Window unavailable') } })
+  withWindow(bridge)
+  const current = new Store()
+  current.start(bridge)
+  await new Promise(resolve => setTimeout(resolve, 20))
+  const key = current.getSnapshot().sessionKey
+  await current.openWorkspaceWindow('/second')
+  expect(current.getSnapshot().workspaceError).toBe('Window unavailable')
+  expect(current.getSnapshot().sessionKey).toBe(key)
+  fail = false
+  await current.openWorkspaceWindow('/second')
+  expect(paths).toEqual(['/second', '/second'])
+  expect(current.getSnapshot().workspaceError).toBeNull()
+  expect(current.getSnapshot().workspaceBusy).toBe(false)
+  expect(current.getSnapshot().sessionKey).toBe(key)
+  delete (globalThis as { window?: unknown }).window
+})
+
+test('todos restore, update from confirmed tool results, and remain isolated from failed or background writes', async () => {
+  const bridge = new FakeBridge(method => method === 'initialize' ? {...initializeResult,session:{...initializeResult.session,todos:[{id:'one',content:'Saved task',status:'pending'}]}} : {ok:true})
+  withWindow(bridge)
+  const current=new Store();current.start(bridge)
+  await new Promise(resolve=>setTimeout(resolve,20))
+  expect(current.getSnapshot().todos?.[0]?.content).toBe('Saved task')
+  const result={name:'TodoWriteTool',permitted:true,display_blocks:[{type:'todo',items:[{id:'one',content:'Saved task',status:'in_progress'}]}]}
+  bridge.push('tool_result',{...result,session_id:'foreign'})
+  expect(current.getSnapshot().todos?.[0]?.status).toBe('pending')
+  bridge.push('tool_result',{...result,error:'Denied'})
+  expect(current.getSnapshot().todos?.[0]?.status).toBe('pending')
+  bridge.push('tool_result',result)
+  expect(current.getSnapshot().todos?.[0]?.status).toBe('in_progress')
+  bridge.push('tool_result',{name:'TodoWriteTool',permitted:true,return_value:'1. [x] Saved task'})
+  expect(current.getSnapshot().todos?.[0]?.status).toBe('completed')
+  bridge.push('tool_result',{name:'TodoWriteTool',permitted:true,display_blocks:[{type:'todo',items:[]}]})
+  expect(current.getSnapshot().todos).toEqual([])
+  bridge.respondWith(method => method === 'initialize' ? { ...initializeResult, session_id:'different', session:{id:'different'} } : {ok:true})
+  await current.openSession('different')
+  expect(current.getSnapshot().todos).toBeNull()
+  delete (globalThis as {window?:unknown}).window
 })

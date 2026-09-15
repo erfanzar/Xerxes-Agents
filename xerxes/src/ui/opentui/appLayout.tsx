@@ -252,12 +252,12 @@ export function LiveProgressPill() {
       }
 
       if (label) {
-        if (compacting) {
+        if (compacting || turn.networkRetrying) {
           // Compaction is one long provider call with no intermediate deltas;
           // a spinner is the only honest "still working" signal.
           const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
           const frame = frames[Math.floor(Date.now() / 80) % frames.length]
-          label.content = `${frame} Compacting conversation…`
+          label.content = `${frame} ${turn.networkRetrying ? "Retrying connection…" : "Compacting conversation…"}`
           label.fg = t.color.accent
           return
         }

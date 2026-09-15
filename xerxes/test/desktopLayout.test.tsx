@@ -6,6 +6,7 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { parsePanelLayout, PanelDivider } from '../src/desktop/renderer/layout.js'
 import { ActivityDetails } from '../src/desktop/renderer/App.js'
+import { BackgroundActivity } from '../src/desktop/renderer/DesktopPanels.js'
 import { Store } from '../src/desktop/renderer/store.js'
 
 test('panel preferences validate persisted data and bound widths', () => {
@@ -26,7 +27,8 @@ test('long goals and eight agents retain all content without zero-turn noise', (
   const html = renderToStaticMarkup(createElement(ActivityDetails, { snap }))
   expect(html).toContain(objective.trim())
   expect(html).toContain('Show full goal')
-  expect(html.match(/class="agent-row"/g)).toHaveLength(8)
+  expect(html.match(/class="agent-record"/g)).toHaveLength(8)
+  expect(html.indexOf('Session statistics')).toBeLessThan(html.indexOf('class="agent-record"'))
   expect(html).not.toContain('0 turns')
 })
 
@@ -34,4 +36,22 @@ test('appearance preferences validate stored choices independently of session st
   const { parseAppearance } = await import('../src/desktop/renderer/appearance.js')
   expect(parseAppearance({ theme: 'light', font: '13' })).toEqual({ theme: 'light', font: '13' })
   expect(parseAppearance({ theme: 'invalid', font: 90 })).toEqual({ theme: 'system', font: '12' })
+})
+
+test('background history is collapsed while active and unknown states remain visible', () => {
+  const rows = [
+    { id: 'live', state: 'running', title: 'Live watch' },
+    { id: 'future', state: 'waiting_for_input', title: 'Needs input' },
+    { id: 'old', state: 'archived', title: 'Archived watch' },
+    { id: 'failed', state: 'failed', title: 'Failed command' },
+  ]
+  const html = renderToStaticMarkup(createElement(BackgroundActivity, { rows, renderRow: row => createElement('p', { key: String(row.id) }, String(row.title)) }))
+  const disclosure = html.indexOf('<details')
+  expect(html.indexOf('Live watch')).toBeLessThan(disclosure)
+  expect(html.indexOf('Needs input')).toBeLessThan(disclosure)
+  expect(html.indexOf('Archived watch')).toBeGreaterThan(disclosure)
+  expect(html).toContain('2 · 1 failed')
+  expect(html).not.toContain('<details open')
+  expect(html).toContain('aria-label="Past background activity" tabindex="0"')
+  expect(renderToStaticMarkup(createElement(BackgroundActivity, { rows: [], renderRow: () => createElement('p') }))).toBe('')
 })

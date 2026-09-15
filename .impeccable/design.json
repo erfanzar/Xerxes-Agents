@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-09-12T16:08:58.342Z",
+  "generatedAt": "2026-09-14T23:23:08.950Z",
   "title": "Design System: Xerxes Desktop",
   "extensions": {
     "shadows": [
@@ -61,6 +61,11 @@
       {
         "name": "compact-window-height",
         "value": "650px"
+      },
+      {
+        "name": "task-navigation-collapse",
+        "value": "850px",
+        "purpose": "Below this width, navigation starts hidden; inspector fitting additionally reserves 320px for conversation."
       }
     ],
     "materials": {
@@ -120,26 +125,49 @@
       "description": "Highlighted composer with opaque chrome beneath.",
       "html": "<div class=\"ds-composer\"><textarea class=\"ds-control ds-draft\" aria-label=\"Message\" placeholder=\"Ask Xerxes\"></textarea></div>",
       "css": ".ds-composer{padding:12px;border:1px solid var(--glass-edge);border-radius:18px;background:var(--glass-control),var(--x-chrome);box-shadow:var(--glass-shadow)}.ds-composer:focus-within{border-color:var(--x-focus)}.ds-draft{width:100%;min-height:48px;border:0;background:none;resize:none;font:14px/24px var(--sans);color:var(--x-prose)}.ds-control:focus-visible{outline:2px solid var(--x-focus);outline-offset:2px}"
+    },
+    {
+      "name": "Session statistics",
+      "kind": "custom",
+      "description": "Open by default above agents; compact two-column diagnostic values.",
+      "html": "<details class=\"ds-stats\" open><summary>Session statistics</summary><dl><div><dt>Turns</dt><dd>4</dd></div><div><dt>Steps</dt><dd>12</dd></div></dl></details>",
+      "css": ".ds-stats{margin:8px 0;font:var(--ui-font) var(--sans);color:var(--x-secondary)}.ds-stats summary{cursor:pointer;padding:8px 0}.ds-stats dl{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 16px;margin:4px 0 16px;font-variant-numeric:tabular-nums}.ds-stats dt{font-size:var(--ui-small);line-height:1.4;color:var(--x-meta)}.ds-stats dd{margin-top:2px;text-align:left;font-size:var(--ui-font);line-height:1.4;color:var(--x-prose);overflow-wrap:anywhere}.ds-stats summary:focus-visible{outline:2px solid var(--x-focus);outline-offset:2px}"
+    },
+    {
+      "name": "Completed agents history",
+      "kind": "custom",
+      "description": "Successful work is retained in a collapsed history disclosure.",
+      "html": "<details class=\"ds-history\"><summary><svg viewBox=\"0 0 24 24\" width=\"13\" height=\"13\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\"><path d=\"m9 5 7 7-7 7\"/></svg><span>Completed agents</span><span>1</span></summary><p>Research notes · Completed</p></details>",
+      "css": ".ds-history{margin-top:12px;font:var(--ui-font) var(--sans);color:var(--x-secondary)}.ds-history>summary{display:flex;align-items:center;gap:8px;list-style:none;cursor:pointer;padding:10px 0}.ds-history>summary::-webkit-details-marker{display:none}.ds-history>summary>span:last-child{margin-left:auto;font-variant-numeric:tabular-nums;color:var(--x-meta)}.ds-history[open]>summary>svg{transform:rotate(90deg)}.ds-history summary:focus-visible{outline:2px solid var(--x-focus);outline-offset:2px}"
     }
   ],
   "narrative": {
-    "northStar": "macOS-inspired glass workspace",
-    "overview": "Xerxes is a Bun/Electron desktop for working with developer agents. The approved direction is macOS-inspired glass: translucent navigation, softly highlighted controls, and an opaque reading surface within a compact continuous workspace. The serif XERXES wordmark remains the signature.\n\nThis material refinement supersedes the earlier no-glass direction. It uses Electron native vibrancy and CSS translucent materials; it does not implement Apple’s SwiftUI Liquid Glass refraction API.",
+    "northStar": "The task-centered Xerxes workspace",
+    "overview": "Preserve charcoal surfaces, periwinkle actions, restrained separators, and the expressive serif XERXES identity. The current scoped presentation follows Claude desktop Code view: readable conversation, expandable evidence, and persistent task context.",
     "keyCharacteristics": [
-      "Translucent navigation and elevated overlays.",
-      "Opaque conversation, code, and input surfaces for reading.",
-      "Compact controls, restrained blue accents, and the serif XERXES wordmark."
+      "Compact controls and continuous reading surfaces.",
+      "Visible task context with expandable tools and agent history.",
+      "Keyboard access and responsive space for the conversation."
     ],
-    "rules": [],
+    "rules": [
+      {
+        "name": "The Evidence Access Rule",
+        "body": "Concise tool rows retain keyboard-operable disclosure and full underlying results. Failed execution exposes its error in the summary; expanded content retains command, output, standard error, and raw input/result. Output has a bounded scroll region (320px), an expanded view (70vh), and text wrapping controls where applicable.",
+        "section": "components"
+      },
+      {
+        "name": "The Truthful Continuation Rule",
+        "body": "Saved work without a displayed conversation receives Continue this task, with Review activity and a plan/todos action when those exist. The copy does not claim that saved work is still running. New-task starters include research, planning, and building.",
+        "section": "components"
+      }
+    ],
     "dos": [
-      "Do reuse the theme-specific material tokens for navigation, toolbar, overlays, and the composer.",
-      "Do retain the opaque reading surface and visible keyboard focus.",
-      "Do check both themes and the reduced-transparency fallback after material changes."
+      "Do preserve the established palette and serif identity while improving task hierarchy.",
+      "Do keep full evidence reachable from concise activity summaries.",
+      "Do retain failed, stopped, and unknown agent states outside completed history."
     ],
     "donts": [
-      "Don’t describe the Electron/CSS implementation as Apple’s native SwiftUI Liquid Glass.",
-      "Don’t turn every message or content block into a floating glass card.",
-      "Don’t treat the four material screenshots as verification of every application flow."
+      "Don't describe this scoped presentation update as full GUI/TUI parity or a global-daemon migration."
     ]
   }
 }

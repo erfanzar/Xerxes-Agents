@@ -1,13 +1,15 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { GoalInspectorDisclosure } from "./GoalInspector.js"
 import { createPortal } from 'react-dom'
-import { Fragment, useLayoutEffect, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactElement } from 'react'
+import { Fragment, createContext, useContext, useLayoutEffect, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactElement } from 'react'
 
-import { CommandPalette, ModelMenu, ModelPicker, ReasoningPicker, SettingsModal, bareModelName } from './Overlays.js'
+import { CommandPalette, PickerLayer, ModelMenu, ModelPicker, ReasoningPicker, SettingsModal, bareModelName } from './Overlays.js'
 import { SessionSearch } from './SearchPanel.js'
+import { useTranscriptScroll } from './transcriptScroll.js'
 import { store, type Snapshot, isPlanReview } from './store.js'
-import type { AgentMember } from './types.js'
+import type { AgentMember, Block } from './types.js'
 import { applyCompletion, wantsHints, type HintItem } from './hints.js'
 import { groupByWorkspace } from './workspaceGroups.js'
 import { ChangesTab, LogTab, PlanTab } from './Workspaces.js'
@@ -16,10 +18,14 @@ import { Dictation } from './Dictation.js'
 import { draftKey, readDraft, writeDraft } from './drafts.js'
 import { PanelDivider, usePanelLayout } from './layout.js'
 import { groupActivity } from "./activityGroups.js"
-import { ExecutionDetails } from "./Execution.js"
+import { ToolCallRow } from "./Execution.js"
+import { TodoList } from './Todos.js'
+import { AgentRoster } from './AgentRoster.js'
 import { Icon } from './Icon.js'
 import { FirstRunSetup } from './Setup.js'
 import { BackgroundIndicator, DesktopNavigation, DesktopSheet, DesktopPage, DesktopRail, useDesktopNavigation, type DesktopPanel } from './DesktopPanels.js'
+
+const ActivityVisible = createContext(false)
 
 /** Every palette read goes through the generated custom properties. */
 const C = {
@@ -116,16 +122,22 @@ export function App(): ReactElement {
 export function Shell({ snap }: { snap: Snapshot }): ReactElement {
   const [panel, setPanel] = useState<DesktopPanel>(null)
   const { layout, setLayout } = usePanelLayout()
-  const focused = layout.sidebarHidden
+  const [narrowNavigation, setNarrowNavigation] = useState(false)
   const [windowWidth, setWindowWidth] = useState(() => typeof window === 'undefined' ? 1440 : window.innerWidth)
   useEffect(() => { const resize = () => setWindowWidth(window.innerWidth); window.addEventListener('resize', resize); return () => window.removeEventListener('resize', resize) }, [])
-  const [rail, setRail] = useState<'files' | 'review' | 'activity' | null>(null)
+  const narrow = windowWidth < 850
+  const focused = narrow ? !narrowNavigation : layout.sidebarHidden
+  const [railChoice, setRail] = useState<'files' | 'review' | 'activity' | null | undefined>(undefined)
   const [filesExpanded, setFilesExpanded] = useState(false)
   const [reviewPath, setReviewPath] = useState('')
   const contextRequiresFullWidth = windowWidth < (focused ? 0 : layout.sidebarWidth) + layout.inspectorWidth + 320
+  // Show activity on entry without covering the conversation in a narrow window.
+  // An explicit open/close choice survives session changes and resizing.
+  const rail = railChoice === undefined ? (!snap.noWorkspace && !contextRequiresFullWidth ? 'activity' : null) : railChoice
   const [page, setPage] = useState<'agents' | 'extensions' | 'artifacts' | null>(null)
   const navigate = (next: DesktopPanel, filePath?: string): void => {
     if (next === 'review') setReviewPath(filePath ?? '')
+    if (next === 'activity') requestAnimationFrame(() => document.querySelector('.desktop-rail .studio-sheet-content')?.scrollTo({ top: 0 }))
     if (next === 'files' || next === 'review' || next === 'activity') setRail(next)
     else if (next === 'agents' || next === 'extensions' || next === 'artifacts') { setPage(next); setPanel(null) }
     else if (next === null) { setPage(null); setPanel(null) }
@@ -133,16 +145,16 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
   }
   useEffect(() => { setPanel(null); setPage(null) }, [snap.cwd, snap.sessionKey])
   return (
-    <DesktopNavigation.Provider value={navigate}>
+    <DesktopNavigation.Provider value={navigate}><ActivityVisible.Provider value={rail === 'activity'}>
     <div className={`app atelier${focused ? ' atelier--focus' : ''}`} style={{ '--sidebar-width': `${layout.sidebarWidth}px`, '--inspector-width': `${layout.inspectorWidth}px` } as React.CSSProperties}>
-      <Topbar snap={snap} inspectorOpen={rail !== null} sidebarVisible={!focused} onFocus={() => setLayout({ sidebarHidden: !focused })} />
+      <Topbar snap={snap} inspectorOpen={rail !== null} sidebarVisible={!focused} onFocus={() => narrow ? setNarrowNavigation(value => !value) : setLayout({ sidebarHidden: !focused })} />
       <FirstRunSetup snap={snap} />
-      <div className="app__body" data-context-full={rail && rail !== 'review' && (rail === 'files' && filesExpanded || contextRequiresFullWidth) || undefined} data-review={rail === "review" || undefined}>
+      <div className="app__body" data-context-full={rail && rail !== 'review' && (filesExpanded || contextRequiresFullWidth) || undefined} data-review={rail === "review" || undefined}>
         <Sidebar snap={snap} page={page} />
         {!focused && <PanelDivider label="Resize sessions" value={layout.sidebarWidth} min={180} max={360} onChange={sidebarWidth => setLayout({ sidebarWidth })} />}
         {snap.noWorkspace ? <WorkspaceGate /> : <Chat snap={snap} page={page} />}
         {rail && rail !== 'review' && <PanelDivider label="Resize inspector" value={layout.inspectorWidth} min={260} max={520} reverse onChange={inspectorWidth => setLayout({ inspectorWidth })} />}
-        {rail && <DesktopRail panel={rail} snap={snap} close={() => setRail(null)} filesExpanded={filesExpanded} reviewPath={reviewPath} {...(!contextRequiresFullWidth ? { toggleFilesExpanded: () => setFilesExpanded(value => !value) } : {})} activityDetails={<><ActivityDetails snap={snap} /><SessionDiagnostics snap={snap} /></>} />}
+        {rail && <DesktopRail panel={rail} snap={snap} close={() => setRail(null)} filesExpanded={filesExpanded} reviewPath={reviewPath} {...(!contextRequiresFullWidth ? { toggleFilesExpanded: () => setFilesExpanded(value => !value) } : {})} activityDetails={<ActivityDetails snap={snap} />} />}
 
       </div>
       <SettingsModal snap={snap} />
@@ -153,14 +165,14 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
       {snap.searchOpen && <SessionSearch snap={snap} />}
       {snap.wsMenuOpen && <WorkspaceMenu snap={snap} />}
       {snap.sessionMenu && <SessionMenu menu={snap.sessionMenu} />}
-      {panel && <DesktopSheet panel={panel} snap={snap} close={() => setPanel(null)} activityDetails={<><ActivityDetails snap={snap} /><SessionDiagnostics snap={snap} /></>} />}
+      {panel && <DesktopSheet panel={panel} snap={snap} close={() => setPanel(null)} activityDetails={<ActivityDetails snap={snap} />} />}
       {(snap.workspaceBusy || snap.workspaceError) && <div className="workspace-notice" role={snap.workspaceError ? 'alert' : 'status'}>
         <span>{snap.workspaceError || 'Opening workspace…'}</span>
         {snap.workspaceError && <button aria-label="Dismiss workspace error" onClick={() => store.clearWorkspaceError()}>×</button>}
       </div>}
       <GlobalKeys snap={snap} />
     </div>
-    </DesktopNavigation.Provider>
+    </ActivityVisible.Provider></DesktopNavigation.Provider>
   )
 }
 
@@ -524,6 +536,7 @@ function SessionMenu({ menu }: { menu: Snapshot['sessionMenu'] }): ReactElement 
 // ── Statusline ──────────────────────────────────────────────────────────
 
 export function SessionDiagnostics({ snap }: { snap: Snapshot }): ReactElement {
+  const [expanded, setExpanded] = useState(true)
   const livePhaseMs = snap.turnActive && snap.metricPhaseStartedAt != null ? Math.max(0, Date.now() - snap.metricPhaseStartedAt) : 0
   const metrics: [string, string][] = [
     ['Turns', String(snap.turnCount)],
@@ -538,8 +551,8 @@ export function SessionDiagnostics({ snap }: { snap: Snapshot }): ReactElement {
   if (snap.costUsd != null && snap.costUsd > 0) metrics.push(['Cost', '$' + snap.costUsd.toFixed(snap.costUsd < 0.01 ? 4 : 2)])
   if (snap.model) metrics.push(['Model', snap.model])
   if (snap.branch) metrics.push(['Branch', snap.branch])
-  return <details className="session-diagnostics"><summary>Session statistics</summary>
-    <dl className="session-diagnostics__values">{metrics.map(([label, value]) => <Fragment key={label}><dt>{label}</dt><dd>{value}</dd></Fragment>)}</dl>
+  return <details className="session-diagnostics" open={expanded} onToggle={event => setExpanded(event.currentTarget.open)}><summary>Session statistics</summary>
+    <dl className="session-diagnostics__values">{metrics.map(([label, value]) => <div key={label} data-wide={label === 'Model' || label === 'Branch' || undefined}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>
   </details>
 }
 
@@ -589,6 +602,7 @@ function Sidebar({ snap, page }: { snap: Snapshot; page: 'agents' | 'extensions'
   return (
     <aside id="session-sidebar" className="side" aria-label="Sessions">
       <div className="side__pad">
+        <div className="sidebar-wordmark" aria-label="Xerxes">XERXES</div>
         <div className="studio-segment"><button className={page !== 'agents' ? 'is-selected' : ''} onClick={() => open(null)}>Sessions</button><button className={page === 'agents' ? 'is-selected' : ''} onClick={() => open('agents')}>Agents</button></div>
         <button
           className="newchat"
@@ -652,14 +666,11 @@ function SessionCell({
   row,
   snippet,
   locked = false,
-  displayOnly = false,
 }: {
   row: Snapshot['live'][number]
   snippet?: string
   /** A running turn owns the connection's session slot — switching now would silently no-op. */
   locked?: boolean
-  /** Status-only rows (fleet snapshots): the daemon refuses resuming them while owned. */
-  displayOnly?: boolean
 }): ReactElement {
   const title = snippet ?? row.title
   // dsh row grammar: title + right-aligned age on the first line, a status
@@ -667,11 +678,6 @@ function SessionCell({
   const sub = [
     row.status === 'working' ? 'acting' : row.status === 'failed' ? 'failed' : '',
   ].filter(Boolean).join(' · ')
-  if (displayOnly) {
-    return (
-      <details className="agent-row"><summary><span className="sess__dot" style={{ background: statusColor(row.status) }} /><span>{title}</span><small>{row.status}</small></summary><p>{title}</p>{row.turns > 0 && <small>{row.turns} turns</small>}</details>
-    )
-  }
   return (
     <button
       className={`sess${row.current ? ' is-current' : ''}`}
@@ -788,8 +794,8 @@ function Chat({ snap, page }: { snap: Snapshot; page: 'agents' | 'extensions' | 
     adds: changes.reduce((sum, file) => sum + file.adds, 0),
     dels: changes.reduce((sum, file) => sum + file.dels, 0),
   }), [changes])
-  const planDone = snap.plan?.items.filter(item => item.done).length ?? 0
-  const planTotal = snap.plan?.items.length ?? 0
+  const planDone = (snap.todos?.filter(item => item.status === 'completed') ?? snap.plan?.items.filter(item => item.done))?.length ?? 0
+  const planTotal = snap.todos?.length ?? snap.plan?.items.length ?? 0
   const needsInput = snap.approval !== null || snap.question !== null
 
   return (
@@ -844,7 +850,7 @@ function Chat({ snap, page }: { snap: Snapshot; page: 'agents' | 'extensions' | 
         <div className="tabs">
           <button className={`tab${snap.tab === 'activity' ? ' is-on' : ''}`} onClick={() => store.setTab('activity')}>Conversation</button>
           <button className={`tab${snap.tab === 'plan' ? ' is-on' : ''}`} onClick={() => store.setTab('plan')}>
-            Plan{planTotal ? <> <span className="pillcount">{planDone}/{planTotal}</span></> : null}
+            Plan &amp; todos{planTotal ? <> <span className="pillcount">{planDone}/{planTotal}</span></> : null}
           </button>
           <button className={`tab${snap.tab === 'log' ? ' is-on' : ''}`} onClick={() => store.setTab('log')}>Log</button>
         </div>
@@ -868,16 +874,13 @@ function Chat({ snap, page }: { snap: Snapshot; page: 'agents' | 'extensions' | 
 // ── Activity stream ─────────────────────────────────────────────────────
 
 function Stream({ snap }: { snap: Snapshot }): ReactElement {
-  const ref = useRef<HTMLDivElement>(null)
-  // Stick to the newest content unless the human scrolled up to read.
-  useEffect(() => {
-    const el = ref.current
-    if (el && el.scrollHeight - el.scrollTop - el.clientHeight < 180) el.scrollTop = el.scrollHeight
-  })
+  const ref = useTranscriptScroll(`${snap.currentId}:${snap.sessionOpenRevision}`)
   // 'Stream thinking' off hides reasoning trails from the feed — the daemon
   // still streams them; this is a display choice, not a policy change.
-  const blocks = snap.streamThinking ? snap.blocks : snap.blocks.filter(b => b.kind !== 'thinking')
+  const visible = snap.streamThinking ? snap.blocks : snap.blocks.filter(b => b.kind !== 'thinking')
+  const blocks = snap.failed && !snap.turnActive ? withoutDuplicateFailure(visible, snap.failed.error) : visible
   const offline = snap.connection === 'offline'
+  const existingWork = Boolean(parseGoal(snap.goal) || snap.fleet.length || snap.todos?.length || snap.plan)
   const empty = snap.connection === 'online' && blocks.every(block => block.kind === 'notice' && !block.error) && !snap.turnActive
 
   // dsh: the approval attaches to the tool call it is about — render it
@@ -904,7 +907,7 @@ function Stream({ snap }: { snap: Snapshot }): ReactElement {
     <div className={`stream${empty && !failedCard && !snap.question ? ' stream--welcome' : ''}`} ref={ref}>
       {empty && !failedCard && !snap.question ? <>
         {blocks.length > 0 && <div className="welcome-notices" aria-live="polite">{blocks.map(block => <BlockView key={block.id} block={block} />)}</div>}
-        <Welcome />
+        {existingWork ? <TaskContinuation snap={snap} /> : <Welcome />}
       </> : (
         <div className="stream__col">
           {groupActivity(blocks, approval?.toolCallId).map(group => (
@@ -916,7 +919,7 @@ function Stream({ snap }: { snap: Snapshot }): ReactElement {
           {failedCard}
           {/* The plan card lives in the feed where the work happens — the
               rail stays for goal + fleet supervision. */}
-          {snap.plan && <TodosCard plan={snap.plan} turnActive={snap.turnActive} />}
+          {snap.todos != null ? <TodoList items={snap.todos} /> : snap.plan && <TodosCard plan={snap.plan} turnActive={snap.turnActive} />}
           {/* Live tail of the feed: the turn clock the header badge shows,
               repeated where the eye actually is while scrolling. */}
           {snap.turnActive && <div className="streamstatus" role="status" aria-live="polite">{snap.networkRetrying ? 'Retrying connection…' : 'Acting…'} {turnDurOf(snap.turnSeconds)}</div>}
@@ -981,19 +984,22 @@ function TodosCard({ plan, turnActive }: { plan: NonNullable<Snapshot['plan']>; 
  * daemon still shows — then the daemon snapshots land terminal states.
  */
 function AgentsCard({ members }: { members: readonly AgentMember[] }): ReactElement {
+  const navigate = useDesktopNavigation()
   const [open, setOpen] = useState(true)
   const working = members.filter(m => m.status === 'working').length
-  const failed = members.filter(m => m.status === 'failed' || m.status === 'cancelled').length
+  const failed = members.filter(m => m.status === 'failed').length
+  const stopped = members.filter(m => m.status === 'cancelled').length
   const counts = [
     `${members.length} agent${members.length === 1 ? '' : 's'}`,
     working ? `${working} working` : '',
     failed ? `${failed} failed` : '',
-    !working && !failed ? 'completed' : '',
+    stopped ? `${stopped} stopped` : '',
+    !working && !failed && !stopped ? 'completed' : '',
   ].filter(Boolean).join(' · ')
   return (
     <div className="acard">
       <button className="acard__head" onClick={() => setOpen(value => !value)} aria-expanded={open}>
-        <span className="acard__ico">⚇</span>
+        <Icon name="agent" size={16} />
         <span className="acard__title">Subagents</span>
         <span className="acard__counts">{counts}</span>
         {working > 0 && <span className="acard__spin" />}
@@ -1010,8 +1016,14 @@ function AgentsCard({ members }: { members: readonly AgentMember[] }): ReactElem
           ))}
         </div>
       )}
+      <button className="agents-inspect" onClick={() => navigate('activity')}>Inspect agents</button>
     </div>
   )
+}
+
+function TaskContinuation({ snap }: { snap: Snapshot }): ReactElement {
+  const open = useDesktopNavigation()
+  return <section className="task-continuation"><Icon name="activity" size={24}/><h1>Continue this task</h1><p>This session has saved work. Review its progress or send your next instruction below.</p><div><button className="btn" onClick={() => open('activity')}>Review activity</button>{(snap.todos?.length || snap.plan) ? <button className="btn" onClick={() => store.setTab('plan')}>View plan &amp; todos</button> : null}</div></section>
 }
 
 function Welcome(): ReactElement {
@@ -1019,8 +1031,8 @@ function Welcome(): ReactElement {
     <h1 className="welcome__wordmark">XERXES</h1>
     <p>A place to think, build, and finish.</p>
     <div className="welcome__ideas">{([
-      ['Understand this project', 'Explain the structure of this project and where to start.'],
-      ['Review recent changes', 'Review recent changes for bugs and explain the findings.'],
+      ['Research a question', 'Help me research '],
+      ['Make a plan', 'Help me plan '],
       ['Build something', 'Help me implement '],
     ] as const).map(([label, prompt]) => <button className="idea" key={label} onClick={() => window.dispatchEvent(new CustomEvent('xerxes:add-context', { detail: prompt }))}><span>{label}</span><Icon name="arrow" size={14} /></button>)}</div>
   </div>
@@ -1057,7 +1069,7 @@ function Offline({ cwd, error }: { cwd: string; error: string | null }): ReactEl
       <h1>Daemon offline</h1>
       {error && <p className="connection-error" role="alert">{error}</p>}
       <p>
-        Every task runs against a per-project daemon — the terminal, TUI and this app share the same sessions through it. The app launches one automatically and reconnects on its own.
+        The terminal, TUI and desktop app share a daemon across workspaces. Each task keeps its own workspace and session. The app connects automatically when the daemon is available.
       </p>
       <button className="btn" onClick={() => store.retryConnection()}>↻ Retry now</button>
       <div className="cmd">bun xerxes daemon --project-dir {cwd || '<this project>'}</div>
@@ -1069,10 +1081,10 @@ function ActivityGroup({ blocks }: { blocks: Snapshot['blocks'] }): ReactElement
   const tools = blocks.flatMap(block => block.kind === 'tools' ? block.items : [])
   const failures = tools.filter(item => item.state === 'failed').length
   const running = tools.some(item => item.state === 'working') || blocks.some(block => block.kind === 'thinking' && block.streaming)
-  const [expanded, setExpanded] = useState(failures > 0)
-  useEffect(() => { if (failures) setExpanded(true) }, [failures])
+  const [expanded, setExpanded] = useState(failures > 0 || running)
+  useEffect(() => { if (failures || running) setExpanded(true) }, [failures, running])
   return <details className="activity-group" open={expanded} onToggle={event => setExpanded(event.currentTarget.open)}>
-    <summary><Icon name="chevron" size={14} /><span>{running ? 'Working' : 'Work details'}{tools.length ? ' · ' + tools.length + ' operation' + (tools.length === 1 ? '' : 's') : ''}</span>{failures > 0 && <strong>{failures} failed</strong>}</summary>
+    <summary><Icon name="chevron" size={14} /><span>{running ? 'Working' : tools.length ? 'Used ' + tools.length + ' tool' + (tools.length === 1 ? '' : 's') : 'Reasoning'}<span className="activity-group__actions">{[...new Set(tools.map(item => toolLabelOf(item.verb)))].join(', ')}</span></span>{failures > 0 && <strong>{failures} failed</strong>}</summary>
     <div className="activity-group__body">{blocks.map(block => <BlockView key={block.id} block={block} />)}</div>
   </details>
 }
@@ -1127,23 +1139,7 @@ function BlockView({ block }: { block: Snapshot['blocks'][number] }): ReactEleme
     return (
       <div className="tlist">
         {block.items.map(item => (
-          <details key={item.id} className="toolrow">
-            <summary className="frow frow--tool">
-              <span className="frow__icon" data-state={item.state}><Icon name={item.verb.includes("exec") ? "terminal" : "tools"} size={14} /></span>
-              <span className="frow__label">{toolLabelOf(item.verb)}</span>
-              {item.arg ? (
-                <>
-                  <span className="frow__sep">·</span>
-                  <span className="frow__excerpt">{item.arg}</span>
-                </>
-              ) : null}
-              {item.diff && (
-                <span className="frow__diff"><span className="add">+{item.diff.adds}</span> <span className="del">−{item.diff.dels}</span></span>
-              )}
-              <span className="frow__dur">{item.state === 'working' ? 'Running' : item.state === 'failed' ? 'Failed' : item.dur && item.dur !== '0.0s' ? item.dur : ''}</span>
-            </summary>
-            <ExecutionDetails item={item} />
-          </details>
+          <ToolCallRow key={item.id} item={item} label={toolLabelOf(item.verb)} />
         ))}
       </div>
     )
@@ -1186,19 +1182,33 @@ function ApprovalCard({ approval, inline }: { approval: NonNullable<Snapshot['ap
 }
 
 /** Failed turn: the error, a retry from the last instruction, or resolve. */
-function FailedCard({ failed }: { failed: NonNullable<Snapshot['failed']> }): ReactElement {
+export function withoutDuplicateFailure(blocks: readonly Block[], error: string): readonly Block[] {
+  const lastUser = blocks.findLastIndex(block => block.kind === 'user')
+  const matches = (text: string) => text === error || (
+    error.startsWith('Automatic context compaction failed:') && text.startsWith('Automatic context compaction failed:')
+  )
+  return blocks.filter((block, index) => index <= lastUser || !(
+    (block.kind === 'notice' && block.error && matches(block.text)) ||
+    (block.kind === 'agent' && block.text.trim().startsWith('[Error: ') && block.text.trim().endsWith(']') && matches(block.text.trim().slice(8, -1)))
+  ))
+}
+
+export function FailedCard({ failed }: { failed: NonNullable<Snapshot['failed']> }): ReactElement {
+  const compaction = failed.error.startsWith('Automatic context compaction failed:')
+  const [compacting, setCompacting] = useState(false)
   // Navigation hint only: transport/security code remains responsible for retry policy.
   const providerSettingsRelevant = /authenticat|credential|api[ _-]?key|certificate|self.signed|provider.*config/i.test(failed.error)
   return (
     <div className="terr" role="alert">
       <div className="terr__head"><span>✕</span> Turn {failed.turn} failed</div>
-      <div className="terr__body">{failed.error}</div>
+      <div className="terr__body">{compaction ? 'Couldn’t compact the conversation. Original history preserved; this turn has stopped.' : failed.error}</div>
+      {compaction && <details><summary>Technical details</summary><p>{failed.error}</p></details>}
       <div className="terr__row">
         {providerSettingsRelevant && <button className="btn" onClick={() => store.openSettings('models')}>Provider settings</button>}
-        <button className="btn" disabled={!failed.lastUser} onClick={() => store.retryFailed()}>
+        {compaction ? <button className="btn" disabled={compacting} onClick={async () => { setCompacting(true); try { await store.retryCompaction() } finally { setCompacting(false) } }}>{compacting ? 'Compacting…' : 'Retry compaction'}</button> : <button className="btn" disabled={!failed.lastUser} onClick={() => store.retryFailed()}>
           ↺ Retry{failed.lastUser ? ' — resubmit the instruction' : ''}
-        </button>
-        <button className="btn btn--ghost" onClick={() => store.resolveFailure()}>Mark resolved</button>
+        </button>}
+        <button className="btn btn--ghost" onClick={() => store.resolveFailure()}>Dismiss</button>
       </div>
     </div>
   )
@@ -1229,6 +1239,7 @@ function QuestionCard({
   // Number keys choose options while the card is up (not while typing); the
   // hints are only honest for the FIRST question — later ones have no keys.
   useEffect(() => {
+    if (review) return // PlanReviewCard owns its keyboard responses.
     const onKey = (event: KeyboardEvent): void => {
       const target = event.target as HTMLElement | null
       if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return
@@ -1255,7 +1266,7 @@ function QuestionCard({
       window.removeEventListener('keydown', onEnter)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [question, selections, others])
+  }, [question, selections, others, review])
 
   if (review) return <PlanReviewCard question={question} plan={plan} />
   return (
@@ -1420,7 +1431,8 @@ function PlanReviewCard({
 
 function Composer({ snap }: { snap: Snapshot }): ReactElement {
   const open = useDesktopNavigation()
-  const key = draftKey(snap.cwd, snap.sessionKey)
+  // The RPC binding key may change on resume; drafts belong to the durable session.
+  const key = draftKey(snap.cwd, snap.currentId || snap.sessionKey)
   const [draft, setDraft] = useState(() => readDraft(key))
   const [hints, setHints] = useState<{ items: HintItem[]; index: number } | null>(null)
   const ref = useRef<HTMLTextAreaElement>(null)
@@ -1549,16 +1561,8 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
           <div className="hints__keys"><span>Type to filter</span><kbd>↵</kbd> / <kbd>tab</kbd> complete <kbd>↑↓</kbd> pick <kbd>esc</kbd> dismiss</div>
         </div>
       )}
-      {snap.queue.length > 0 && (
-        <div className="queue">
-          {snap.queue.map((item, index) => (
-            <div key={item.id} className="qmsg">
-              <span className="q-tag">queued {index + 1}</span> {item.text}
-              <button className="q-x" title="Hide from view — the daemon already holds it" onClick={() => store.dropQueued(item.id)}>✕</button>
-            </div>
-          ))}
-        </div>
-      )}
+      <div className="composer-dock">
+      <ComposerTaskSummary snap={snap} />
       <div className="composer">
         <textarea
           ref={ref}
@@ -1607,9 +1611,11 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
               {snap.reasoningEffort && snap.reasoningEffort !== 'off' ? ` ${snap.reasoningEffort}` : ''}
               {' '}<span className="c">▾</span>
             </button>
+            <PickerLayer>
             {snap.modelMenuOpen && <ModelMenu snap={snap} onClose={() => store.closeModelMenu()} />}
             {snap.pickerOpen && <ModelPicker snap={snap} onClose={() => store.closePicker()} />}
             {snap.reasoningPickerOpen && <ReasoningPicker snap={snap} onClose={() => store.closeReasoningPicker()} />}
+            </PickerLayer>
           </div>
           <button
             className="composer__send"
@@ -1618,6 +1624,7 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
             onClick={send}
           >↑</button>
         </div>
+      </div>
       </div>
       <div className="composer__hints">          <button
             className="cchip"
@@ -1640,13 +1647,28 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
         <span><kbd>⇧⏎</kbd> newline</span>
         <span><kbd>esc</kbd> stop / clear</span>
         <span><kbd>⌘K</kbd> palette</span>
-        {snap.goal && parseGoal(snap.goal) && <span className="composer__goal" title={snap.goal}>◎ goal set</span>}
       </div>
     </div>
   )
 }
 
 // ── Right rail ──────────────────────────────────────────────────────────
+
+export function ComposerTaskSummary({ snap }: { snap: Snapshot }): ReactElement | null {
+  const open = useDesktopNavigation()
+  const goal = parseGoal(snap.goal)
+  const activityVisible = useContext(ActivityVisible)
+  const visibleGoal = goal && ['active', 'paused', 'blocked'].includes(goal.phase) ? goal : null
+  const current = snap.todos?.find(item => item.status === 'in_progress')
+  const next = current ?? snap.todos?.find(item => item.status === 'pending')
+  if (!visibleGoal && !next && !snap.queue.length) return null
+  const done = snap.todos?.filter(item => item.status === 'completed').length ?? 0
+  return <section className="composer-task-summary" aria-label="Current task">
+    {visibleGoal && <button onClick={() => open('activity')} title={visibleGoal.objective}><span className="composer-task-summary__label">Goal</span><span className="composer-task-summary__text">{activityVisible ? 'View goal details' : visibleGoal.objective}</span><span className="composer-task-summary__status">{visibleGoal.phase}</span></button>}
+    {next && <button onClick={() => store.setTab('plan')} title={next.content}><span className="composer-task-summary__label">{current ? 'Doing' : 'Next'}</span><span className="composer-task-summary__text">{next.content}</span><span className="composer-task-summary__status">{done}/{snap.todos?.length}</span></button>}
+    {snap.queue.length > 0 && <div className="composer-queue"><div className="composer-queue__heading">Queued messages <span>{snap.queue.length}</span></div><div className="composer-queue__list">{snap.queue.map(item => <div className="composer-queue__message" key={item.id}><p>{item.text}</p><button aria-label="Hide queued message from view" title="Hide from view only — this does not cancel the queued message" onClick={() => store.dropQueued(item.id)}><Icon name="close" size={14} /></button></div>)}</div></div>}
+  </section>
+}
 
 function GoalObjective({ text }: { text: string }): ReactElement {
   const [expanded, setExpanded] = useState(false)
@@ -1656,7 +1678,6 @@ function GoalObjective({ text }: { text: string }): ReactElement {
 export function ActivityDetails({ snap }: { snap: Snapshot }): ReactElement | null {
   const fleet = snap.fleet
   const goal = parseGoal(snap.goal)
-  if (!goal && !fleet.length && !snap.skillSuggestions.length && !snap.creatorTrace.length) return null
   return (
     <aside className="activity-details">
       {goal ? (
@@ -1664,6 +1685,7 @@ export function ActivityDetails({ snap }: { snap: Snapshot }): ReactElement | nu
           <div className="rail__cap goal-heading">Goal <span>{goal.phase}{goal.activation === 'armed' ? ' · armed' : ''}</span></div>
           <div className="goalcard">
             <GoalObjective text={goal.objective} />
+            <GoalInspectorDisclosure snap={snap} />
             {goal.rounds ? <div className="goalcard__rounds">Rounds: {goal.rounds}</div> : null}
             <div className="goalcard__btns">
               {/* The daemon only pauses an active goal and only resumes a
@@ -1680,8 +1702,9 @@ export function ActivityDetails({ snap }: { snap: Snapshot }): ReactElement | nu
           </div>
         </>
       ) : null}
+      <SessionDiagnostics snap={snap} />
       {fleet.length > 0 && <><div className="rail__cap">Agents <span>{fleet.length}</span></div>
-      <div className="rail__fleet">{fleet.map(row => <SessionCell key={row.id} row={row} displayOnly />)}</div></>}
+      <AgentRoster rows={fleet} /></>}
       {snap.skillSuggestions.length > 0 && (
         <>
           <div className="rail__cap">Skill suggestions · {snap.skillSuggestions.length}</div>

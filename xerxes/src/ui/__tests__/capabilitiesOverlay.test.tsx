@@ -19,7 +19,10 @@ it.each([[140, 42], [40, 18]])('searches and previews capabilities at %ix%i with
     await vi.waitFor(async () => { await screen.flush(); expect(screen.captureCharFrame()).toContain('review') })
     expect(rpc).toHaveBeenCalledWith('capabilities.inspect', { name: 'review' })
     expect(screen.captureCharFrame()).toContain('Esc close')
-    if (width > 100) expect(screen.captureCharFrame()).toContain('Review instructions here')
+    if (width > 100) await vi.waitFor(async () => {
+      await screen.flush()
+      expect(screen.captureCharFrame()).toContain('Review instructions here')
+    })
     await act(async () => screen.mockInput.typeText('testing'))
     await vi.waitFor(async () => { await screen.flush(); expect(rpc).toHaveBeenCalledWith('capabilities.inspect', { name: 'testing' }) })
     act(() => screen.mockInput.pressKey('ESCAPE'))

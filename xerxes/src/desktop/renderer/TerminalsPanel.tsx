@@ -23,8 +23,12 @@ function clockOf(epoch: number | undefined): string {
 }
 
 export function TerminalsCard({ snap }: { snap: Snapshot }): ReactElement {
-  // Terminals live and die with turns; the open view re-reads, plus a manual refresh.
-  useEffect(() => { store.loadTerminals() }, [])
+  useEffect(() => {
+    store.loadTerminals()
+    return window.xerxes.onEvent(({ type, payload }) => {
+      if (type === 'background_changed' && (!payload.session_id || payload.session_id === snap.currentId)) store.loadTerminals()
+    })
+  }, [snap.sessionKey, snap.currentId])
   const terminals = snap.terminals
   const online = snap.connection === 'online'
 

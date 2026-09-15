@@ -25,7 +25,7 @@ import {
   renderIntervention,
   renderOutputLimitResumeDirective,
 } from '../runtime/interventions.js'
-import { classifyError, ErrorKind } from '../runtime/errorClassifier.js'
+import { classifyError, ErrorKind, isRecoverableNetworkError } from '../runtime/errorClassifier.js'
 import {
   inspectObjectiveResponse,
   objectiveGuardRetryLimit,
@@ -507,7 +507,7 @@ export async function* runTurn(
       let roundCompletedAt = 0
       let textDeduper = new ToolRoundTextDeduper(latestToolRoundText)
 
-      for (let attempt = 0; attempt <= retryDelays.length; attempt += 1) {
+      for (let attempt = 0; ; attempt += 1) {
         parser = dependencies.thinkingParserFactory?.() ?? new ThinkingParser()
         textParts = []
         thinkingParts = []
@@ -651,7 +651,8 @@ export async function* runTurn(
           }
           // Only transient failures earn another attempt. Auth, validation,
           // configuration, and other terminal errors fail the round at once.
-          const final = attempt === retryDelays.length
+          const networkRetry = isRecoverableNetworkError(error)
+          const final = (!networkRetry && attempt >= retryDelays.length)
             || error instanceof ModelCallBudgetError
             || error instanceof ModelTokenBudgetError
             || error instanceof ModelUsageCheckpointError
@@ -660,12 +661,12 @@ export async function* runTurn(
           const suggestedDelay = classified.suggestedBackoffSeconds === undefined
             ? 0
             : Math.min(maxSuggestedRetryDelayMs, classified.suggestedBackoffSeconds * 1_000)
-          const delay = final ? 0 : Math.max(retryDelays[attempt] ?? 0, suggestedDelay)
+          const delay = final ? 0 : Math.max(networkRetry ? Math.min(30_000, 1_000 * 2 ** Math.min(attempt, 5)) : (retryDelays[attempt] ?? 0), suggestedDelay)
           yield {
             type: 'provider_retry',
             error: errorMessage(error),
             attempt: attempt + 1,
-            maxAttempts: retryDelays.length + 1,
+            maxAttempts: networkRetry ? 0 : retryDelays.length + 1,
             delay,
             final,
           }

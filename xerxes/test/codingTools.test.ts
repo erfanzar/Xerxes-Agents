@@ -335,7 +335,9 @@ test('runGit rejects with the timeout error instead of hanging when the child ig
   const stub = await writeStubGit("trap '' TERM\n(sleep 3) &\necho out\nwhile :; do :; done\n")
   try {
     const started = Date.now()
-    await expect(runGit(workspace, ['status'], undefined, 800, stub))
+    // Invoke the interpreter directly: first execution of a newly written
+    // executable on macOS can consume the deadline before its trap is installed.
+    await expect(runGit(workspace, [stub], undefined, 800, '/bin/sh'))
       .rejects.toThrow('command timed out after 800ms')
     const elapsed = Date.now() - started
     // The initial SIGTERM fired at 800ms; the SIGKILL escalation lands about
@@ -428,6 +430,7 @@ test.skipIf(process.platform === 'win32')('runGit takes down a hook helper forke
     await Bun.sleep(400)
     const file = Bun.file(logPath)
     const before = (await file.exists()) ? (await file.text()).length : -1
+    expect(before).toBeGreaterThan(0)
     await Bun.sleep(800)
     const after = (await file.exists()) ? (await file.text()).length : -1
     expect(after).toBe(before)

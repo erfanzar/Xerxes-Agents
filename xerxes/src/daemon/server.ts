@@ -1,6 +1,8 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import type { WorkspaceResources } from './workspaceResources.js';
+
 import { recordCompaction } from '../context/compactionHistory.js'
 import { previewWorkspaceFile } from './filePreview.js'
 import { collectGitDiff } from '../workspace/gitDiff.js'
@@ -664,6 +666,7 @@ export interface DaemonToolCatalogPort {
 }
 
 export interface DaemonServerOptions {
+  readonly workspaceResources?: (cwd: string) => Promise<WorkspaceResources>;
   /** Optional host catalog port; the default uses the authenticated Codex session. */
   readonly codexModelCatalog?: (profile: ProviderProfile, signal?: AbortSignal) => ReturnType<typeof fetchCodexModelCatalog>;
   /** Resolve real native agent definitions for `/agents`; injectable for embedding hosts. */
@@ -890,10 +893,12 @@ export class DaemonServer {
   private readonly crashHandlersEnabled: boolean;
   private readonly interactions: DaemonInteractionBoard;
   private readonly declarativeForge: DeclarativeToolForge;
-  private readonly agentPresetRoster: AgentPresetRoster;
+  private readonly default_agentPresetRoster: AgentPresetRoster;
+  private get agentPresetRoster(): AgentPresetRoster { return this.workspaceContext.getStore()?.agentPresetRoster ?? this.default_agentPresetRoster; }
   private readonly agentPresetSwitches = new Map<string, Promise<void>>();
   private readonly inFlightTurns = new Set<Promise<void>>();
-  private readonly mcpManager: MCPManager | undefined;
+  private readonly default_mcpManager: MCPManager | undefined;
+  private get mcpManager(): MCPManager | undefined { return this.workspaceContext.getStore()?.mcpManager ?? this.default_mcpManager; }
   private readonly mcpSettingsStore: McpSettingsStore | undefined;
   private readonly lspSettingsUpdates = new Map<DaemonTransportConnection, AbortController>();
   private readonly mcpSettingsUpdates = new Map<DaemonTransportConnection, AbortController>();
@@ -938,7 +943,11 @@ export class DaemonServer {
   /** True when a host named the transcript directory, so archives are unconditional. */
   private readonly sessionArchiveDirectoryConfigured: boolean;
   private readonly skillDirectories: readonly string[] | undefined;
-  private readonly skillRegistry: SkillRegistry;
+  private readonly workspaceCatalog = new Map<string, WorkspaceResources>();
+  private readonly workspaceContext = new AsyncLocalStorage<WorkspaceResources>();
+  private readonly workspaceResources: DaemonServerOptions["workspaceResources"];
+  private readonly default_skillRegistry: SkillRegistry;
+  private get skillRegistry(): SkillRegistry { return this.workspaceContext.getStore()?.skillRegistry ?? this.default_skillRegistry; }
   private readonly skillCreates = new Map<
     DaemonTransportConnection,
     SkillCreateFlow
@@ -1000,6 +1009,7 @@ export class DaemonServer {
     });
     this.agentSettingsStore = options.agentSettingsStore ?? new AgentSettingsStore(join(xerxesHome(), "daemon", "agent-settings.sqlite"));
     this.agentSettingsDefaults = options.agentSettingsDefaults;
+    this.workspaceResources = options.workspaceResources;
     this.socketPath = options.socketPath;
     this.pidPath = options.pidPath;
     this.projectDirectory = options.projectDirectory
@@ -1029,7 +1039,7 @@ export class DaemonServer {
       options.agentDefinitionLoader ?? ((cwd) => listAgentDefinitions({ cwd }));
     this.interactions = options.interactions ?? new DaemonInteractionBoard();
     this.declarativeForge = options.declarativeForge ?? new DeclarativeToolForge();
-    this.agentPresetRoster = options.agentPresetRoster ?? new AgentPresetRoster({
+    this.default_agentPresetRoster = options.agentPresetRoster ?? new AgentPresetRoster({
       ...(this.projectDirectory ? { projectDirectory: this.projectDirectory } : {}),
     });
     this.maxSocketFrameBytes =
@@ -1093,7 +1103,7 @@ export class DaemonServer {
             resolveProviderCredential: false,
           }),
       };
-    this.mcpManager = options.mcpManager;
+    this.default_mcpManager = options.mcpManager;
     this.mcpSettingsStore = options.mcpSettingsStore;
     this.memoryFactory =
       options.memoryFactory ??
@@ -1108,7 +1118,7 @@ export class DaemonServer {
       options.skillDirectory ?? join(xerxesHome(), "skills"),
     );
     this.skillDirectories = options.skillDirectories;
-    this.skillRegistry =
+    this.default_skillRegistry =
       options.skillRegistry ??
       new SkillRegistry({ workspaceTrust: trustedHashWorkspaceSkills({ skillsDirectory: this.skillDirectory }) });
     this.slashPluginRegistry =
@@ -1644,13 +1654,17 @@ export class DaemonServer {
         // A long session operation may already own this connection's queue.
         // Releasing a read-only handler *after* it reaches that queue is too
         // late: status polling would wait behind the provider call itself.
-        // Only these snapshot reads may bypass the queue once a session exists;
-        // initialization and every mutation retain their arrival ordering.
+        // Run inspection and cancellation must also remain reachable while
+        // schedule.run owns the queue. These controls validate the run's owner,
+        // workspace and revision; they never change the connection's session.
+        // Initialization and session mutations retain their arrival ordering.
         let readySnapshot = false;
         if (this.runtime.sessionStatus(connection.activeSessionKey)) {
           try {
             const method = parseJsonRpcRequest(line).method;
-            readySnapshot = method === 'runtime.status' || method === 'schedule.list';
+            readySnapshot = method === 'runtime.status' || method === 'schedule.list'
+              || method === 'run.list' || method === 'run.inspect'
+              || method === 'run.events' || method === 'run.cancel';
           } catch { /* Normal dispatch reports malformed frames. */ }
         }
         if (readySnapshot) void handle();
@@ -1776,7 +1790,7 @@ export class DaemonServer {
       this.runtime.sessionStatus(connection.activeSessionKey)?.id === monitor.owner;
     const payload: JsonRpcPayload = {
       id: `monitor:${monitor.id}:${event.sequence}`, category: "slash", type: "result",
-      severity: "info", title: monitor.trigger === "completion" ? "Command finished" : monitor.source?.kind === 'file' ? 'File changed' : "Monitor match", body: `${monitor.source?.kind === 'websocket' ? 'WebSocket' : monitor.source?.kind === 'file' ? 'File' : 'Terminal'} watch: ${event.text.slice(0, 2000)}\n/runs inspect ${monitor.id}`,
+      severity: "info", title: monitor.trigger === "completion" ? "Command finished" : monitor.source?.kind === 'file' ? 'File changed' : "Monitor match", body: `${monitor.source?.kind === 'websocket' ? 'WebSocket' : monitor.source?.kind === 'webhook' ? 'Webhook' : monitor.source?.kind === 'file' ? 'File' : 'Terminal'} watch: ${event.text.slice(0, 2000)}\n/runs inspect ${monitor.id}`,
       payload: { run_id: monitor.id, sequence: event.sequence, session_id: monitor.owner },
     };
     for (const connection of this.connections) if (accepts(connection)) this.emit(connection, "notification", payload);
@@ -1821,7 +1835,14 @@ export class DaemonServer {
       releaseQueue();
     }
     try {
-      const result = await this.dispatch(connection, request);
+      const session = this.runtime.sessionStatus(sessionKey(connection, request.params));
+      const opening = request.method === 'initialize' || request.method === 'session.open';
+      const cwd = (opening ? optionalString(request.params.project_dir) : undefined) || session?.cwd || this.projectDirectory || process.cwd();
+      const resources = await this.workspaceResources?.(cwd);
+      if (resources) this.workspaceCatalog.set(resolveProjectDirectory(cwd), resources);
+      const result = resources
+        ? await this.workspaceContext.run(resources, () => this.dispatch(connection, request))
+        : await this.dispatch(connection, request);
       connection.send(jsonRpcSuccess(request.id, result));
     } catch (error) {
       connection.send(jsonRpcFailure(request.id, -32000, errorMessage(error)));
@@ -1907,7 +1928,7 @@ export class DaemonServer {
       }
       return {
         ok: true,
-        session: sessionPayload(session, this.contextLimit(session.model), this.mcpStatusRecord()),
+        session: sessionPayload(session, this.contextLimit(session.model), this.mcpStatusRecord(session)),
       };
     }
     if (method === "session.active_list") {
@@ -1916,7 +1937,7 @@ export class DaemonServer {
         sessions: this.runtime
           .listSessions()
           .map((session) =>
-            sessionPayload(session, this.contextLimit(session.model), this.mcpStatusRecord()),
+            sessionPayload(session, this.contextLimit(session.model), this.mcpStatusRecord(session)),
           ),
       };
     }
@@ -1975,7 +1996,7 @@ export class DaemonServer {
         ok: Boolean(session),
         session: session
           ? {
-              ...sessionPayload(session, this.contextLimit(session.model), this.mcpStatusRecord()),
+              ...sessionPayload(session, this.contextLimit(session.model), this.mcpStatusRecord(session)),
               // This is intentionally an identity only. The picker can use it
               // to select the exact stored profile without receiving the live
               // endpoint or credential that proved the match.
@@ -2451,7 +2472,7 @@ export class DaemonServer {
         || resolveProjectDirectory(params.expected_project_directory) !== project)) {
         return { ok: false, error: 'Daemon project does not match the requested project; select the correct --socket or --project-dir' };
       }
-      return this.manageProjectSchedule(project, method, params, job => this.runCronJob(connection, [job.id]), this.runtime.sessionStatus(connection.activeSessionKey));
+      return this.manageProjectSchedule(project, method, params, job => this.runCronJob(connection, [job.id], false), this.runtime.sessionStatus(connection.activeSessionKey));
     }
     if (["workspace.list", "workspace.inspect", "workspace.checkApply", "workspace.apply", "workspace.integrations", "workspace.integration.inspect", "workspace.recover"].includes(method)) {
       const session = this.runtime.sessionStatus(sessionKey(connection, params));
@@ -3707,7 +3728,7 @@ export class DaemonServer {
         runtimePermissionMode(
           session.permissionMode ?? this.runtime.status().permission_mode,
         ),
-        this.mcpStatusRecord(),
+        this.mcpStatusRecord(session),
       ),
     );
   }
@@ -4626,7 +4647,7 @@ export class DaemonServer {
         this.emitStatus(connection, fresh);
         return {
           ok: true,
-          session: sessionPayload(fresh, this.contextLimit(fresh.model), this.mcpStatusRecord()),
+          session: sessionPayload(fresh, this.contextLimit(fresh.model), this.mcpStatusRecord(fresh)),
         };
       }
       case "stop": {
@@ -5646,7 +5667,7 @@ export class DaemonServer {
       // Successful synchronous calls belong in the transcript, not activity history.
       if (!shell.running && shell.kind === 'foreground' && shell.exitCode === 0) continue;
       rows.push({ id: shell.id, kind: 'shell', title: shell.command.slice(0, 2000), detail: shell.cwd,
-        state: shell.running ? 'running' : shell.exitCode === 0 ? 'completed' : shell.exitCode === null ? 'interrupted' : 'failed',
+        state: shell.running ? 'running' : this.terminalRegistry?.wasCancelled(owner, shell.id) ? 'cancelled' : this.terminalRegistry?.wasInterrupted(owner, shell.id) ? 'interrupted' : shell.exitCode === 0 ? 'completed' : shell.exitCode === null ? 'interrupted' : 'failed',
         startedAt: shell.startedAt, endedAt: shell.endedAt ?? null, exitCode: shell.exitCode,
         action: shell.canKill ? 'stop' : null, scope: 'session' });
     }
@@ -5846,8 +5867,11 @@ export class DaemonServer {
   }
 
   /** Redacted per-server MCP status for the wire; empty without a manager. */
-  private mcpStatusRecord(): Record<string, unknown> {
-    const statuses = this.mcpManager?.listStatus() ?? [];
+  private mcpStatusRecord(session?: DaemonSession): Record<string, unknown> {
+    const manager = session && this.workspaceResources
+      ? this.workspaceCatalog.get(resolveProjectDirectory(session.cwd))?.mcpManager
+      : this.mcpManager;
+    const statuses = manager?.listStatus() ?? [];
     return Object.fromEntries(
       statuses.map((entry) => [
         entry.name,
@@ -7247,7 +7271,7 @@ export class DaemonServer {
     this.indexSessionForSearch(target.id);
     return {
       ok: true,
-      session: sessionPayload(session, this.contextLimit(session.model), this.mcpStatusRecord()),
+      session: sessionPayload(session, this.contextLimit(session.model), this.mcpStatusRecord(session)),
     };
   }
 
@@ -7366,7 +7390,7 @@ export class DaemonServer {
       ok: true,
       session: persisted
         ? savedSessionPayload(persisted)
-        : sessionPayload(branch, this.contextLimit(branch.model), this.mcpStatusRecord()),
+        : sessionPayload(branch, this.contextLimit(branch.model), this.mcpStatusRecord(branch)),
     };
   }
 
@@ -7877,6 +7901,7 @@ export class DaemonServer {
   private async runCronJob(
     connection: DaemonTransportConnection,
     tokens: readonly string[],
+    streamToCaller = true,
   ): Promise<JsonRpcPayload> {
     const id = singleCronJobId(tokens);
     if (!id) {
@@ -7889,11 +7914,16 @@ export class DaemonServer {
       return { ok: false, error: "cron job not found" };
     }
     const { result, archivePath } = await this.cronScheduler.runNow(job, async (signal) => {
-      this.emitSlash(connection, `Running cron job \`${job.id}\`.`);
+      if (streamToCaller) this.emitSlash(connection, `Running cron job \`${job.id}\`.`);
       const result = await this.runCronJobTurn(
         job,
-        connection.activeSessionKey,
-        (event) => { if (!job.targetSessionId) this.emit(connection, event.type, event.payload); },
+        job.targetSessionId || streamToCaller ? connection.activeSessionKey : `cron:${job.id}`,
+        (event) => {
+          if (streamToCaller && !job.targetSessionId) this.emit(connection, event.type, event.payload);
+          else if (!streamToCaller) this.broadcast('cron_event', {
+            job_id: job.id, event_type: event.type, payload: event.payload,
+          });
+        },
         signal,
       );
       const archivePath = await this.deliverCronOutput(job, result.output);
@@ -7903,7 +7933,7 @@ export class DaemonServer {
     const updated = this.cronStore.update(job.id, {
       lastRunAt: new Date().toISOString(),
     });
-    this.emitSlash(
+    if (streamToCaller) this.emitSlash(
       connection,
       `Cron job \`${job.id}\` finished; archived to \`${archivePath}\`.`,
     );
@@ -8802,7 +8832,7 @@ export class DaemonServer {
         this.channelStatusData(),
         stringValue(this.runtime.status().reasoning_effort) || "off",
         runtimePermissionMode(this.runtime.status().permission_mode),
-        this.mcpStatusRecord(),
+        this.mcpStatusRecord(session),
       ),
     );
     if (session.messages.length) {
@@ -8820,7 +8850,7 @@ export class DaemonServer {
       ...this.runtimeStatusWithChannels(),
       ...initPayload,
       ok: true,
-      session: sessionPayload(session, contextLimit, this.mcpStatusRecord()),
+      session: sessionPayload(session, contextLimit, this.mcpStatusRecord(session)),
       daemon_protocol: DAEMON_PROTOCOL_VERSION,
       daemon_build_id: this.daemonBuildId(),
     };

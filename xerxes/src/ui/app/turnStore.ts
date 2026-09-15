@@ -11,6 +11,7 @@ const buildTurnState = (): TurnState => ({
   activity: [],
   compacting: false,
   providerWaiting: false,
+  networkRetrying: false,
   outcome: '',
   toolLineToId: {},
   reasoning: '',
@@ -127,6 +128,7 @@ export interface TurnState {
   /** True while the daemon is compacting this session's transcript. */
   compacting: boolean
   providerWaiting: boolean
+  networkRetrying: boolean
   outcome: string
   reasoning: string
   reasoningActive: boolean

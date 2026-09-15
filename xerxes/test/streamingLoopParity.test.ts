@@ -615,3 +615,31 @@ test('cancellation while awaiting an injected approval broker never starts the t
   }))
   expect(events.at(-1)).toEqual(expect.objectContaining({ type: 'turn_done' }))
 })
+
+for (const failure of ['unknown certificate verification error', 'Unable to connect. Is the computer able to access the url?']) test(`network recovery outlives finite retries: ${failure}`, async () => {
+  let calls = 0
+  const delays: number[] = []
+  const events = await collect(runTurn({ model: 'gpt-4o', state: createAgentState(), userMessage: 'hello' }, {
+    llm: { async *stream() {
+      if (++calls < 8) throw new Error(failure)
+      yield { content: 'back online' }
+    } } as LlmClient,
+    retryDelays: [0],
+    delay: async ms => { delays.push(ms) },
+  }))
+  expect(calls).toBe(8)
+  expect(delays).toEqual([1000, 2000, 4000, 8000, 16000, 30000, 30000])
+  expect(events.filter(event => event.type === 'provider_retry')).toHaveLength(7)
+  expect(events.at(-1)?.type).toBe('turn_done')
+})
+
+test('cancellation stops persistent network recovery', async () => {
+  const controller = new AbortController()
+  let calls = 0
+  const events = await collect(runTurn({ model: 'gpt-4o', state: createAgentState(), userMessage: 'hello' }, {
+    llm: { async *stream() { calls++; throw new TypeError('fetch failed') } } as LlmClient,
+    delay: async () => { controller.abort(); throw controller.signal.reason },
+  }, controller.signal))
+  expect(calls).toBe(1)
+  expect(events.at(-1)).toMatchObject({ type: 'turn_done', reason: 'aborted' })
+})

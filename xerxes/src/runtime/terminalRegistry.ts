@@ -127,6 +127,10 @@ interface TerminalEntry {
   readonly mirror: TailBuffer
   readonly pid: number | undefined
   running: boolean
+  cancellationAccepted: boolean
+  pendingKill: Promise<void> | undefined
+  interruptAccepted: boolean
+  pendingInterrupt: Promise<void> | undefined
   readonly startedAt: number
 }
 
@@ -182,6 +186,10 @@ export class TerminalRegistry {
       control: options.control ?? {},
       mirror: new TailBuffer(this.mirrorCapacity),
       running: true,
+      cancellationAccepted: false,
+      pendingKill: undefined,
+      interruptAccepted: false,
+      pendingInterrupt: undefined,
       exitCode: null,
       startedAt: this.now(),
       endedAt: undefined,
@@ -229,18 +237,28 @@ export class TerminalRegistry {
         checkpoint = undefined
         if (run) {
           const tail = entry.mirror.tail(this.mirrorCapacity)
-          try {
-            this.runHistory?.checkpointTerminalOutput(ownerSessionId, run.id, tail.text, entry.mirror.observed)
-            const completed = this.runHistory?.finish(ownerSessionId, run.id,
-              entry.exitCode === 0 ? 'succeeded' : entry.exitCode === null ? 'interrupted' : 'failed', {
-                output: tail.text,
-                exitCode: entry.exitCode,
-                outputTruncated: tail.truncated || entry.mirror.dropped,
-                ...(entry.exitCode === 0 ? {} : { error: entry.exitCode === null ? 'Process ended without an exit code' : `Process exited with code ${entry.exitCode}` }),
-                notify: options.kind !== 'foreground' || entry.exitCode !== 0,
-              })
-            if (completed) this.onRunComplete?.(completed)
-          } catch (error) { this.onPersistenceError(error) }
+          const finish = (): void => {
+            const interrupted = entry.interruptAccepted && entry.exitCode === 130
+            try {
+              this.runHistory?.checkpointTerminalOutput(ownerSessionId, run.id, tail.text, entry.mirror.observed)
+              const completed = this.runHistory?.finish(ownerSessionId, run.id,
+                entry.cancellationAccepted ? 'cancelled' : interrupted ? 'interrupted' : entry.exitCode === 0 ? 'succeeded' : entry.exitCode === null ? 'interrupted' : 'failed', {
+                  output: tail.text,
+                  exitCode: entry.exitCode,
+                  outputTruncated: tail.truncated || entry.mirror.dropped,
+                  ...(entry.cancellationAccepted || interrupted || entry.exitCode === 0 ? {} : { error: entry.exitCode === null ? 'Process ended without an exit code' : `Process exited with code ${entry.exitCode}` }),
+                  notify: options.kind !== 'foreground' || entry.exitCode !== 0,
+                })
+              if (completed) this.onRunComplete?.(completed)
+            } catch (error) { this.onPersistenceError(error) }
+          }
+          // A manager may report exit before its signal promise settles. Only
+          // confirmed cancellation changes the persisted completion status.
+          const pendingSignal = entry.pendingKill && entry.pendingInterrupt
+            ? Promise.allSettled([entry.pendingKill, entry.pendingInterrupt])
+            : entry.pendingKill ?? entry.pendingInterrupt
+          if (pendingSignal) void pendingSignal.then(finish, finish)
+          else finish()
         }
         this.trim()
       },
@@ -270,6 +288,21 @@ export class TerminalRegistry {
     const sources = new Set(live.map(entry => entry.id))
     const archived = this.runHistory?.list(ownerSessionId).filter(run => run.kind === 'terminal' && !sources.has(run.sourceId)) ?? []
     return [...archived.map(archivedTerminal), ...live]
+  }
+
+  /** Internal lifecycle detail; terminal wire summaries keep their existing shape. */
+  wasCancelled(ownerSessionId: string, id: string): boolean {
+    const entry = this.entries.get(id)
+    if (entry) return entry.ownerSessionId === ownerSessionId && !entry.running && entry.cancellationAccepted
+    const run = id.startsWith('run:') ? this.runHistory?.inspect(ownerSessionId, id.slice(4)) : undefined
+    return run?.kind === 'terminal' && run.state === 'cancelled'
+  }
+
+  wasInterrupted(ownerSessionId: string, id: string): boolean {
+    const entry = this.entries.get(id)
+    if (entry) return entry.ownerSessionId === ownerSessionId && !entry.running && entry.interruptAccepted && entry.exitCode === 130
+    const run = id.startsWith('run:') ? this.runHistory?.inspect(ownerSessionId, id.slice(4)) : undefined
+    return run?.kind === 'terminal' && run.state === 'interrupted'
   }
 
   /** Observe future output without consuming the model's or inspector's buffer. */
@@ -336,7 +369,16 @@ export class TerminalRegistry {
   async interrupt(ownerSessionId: string, id: string): Promise<void> {
     const control = this.liveControl(ownerSessionId, id)
     if (!control.interrupt) throw new Error('this terminal cannot be interrupted')
-    await control.interrupt()
+    const entry = this.entries.get(id)!
+    if (entry.pendingInterrupt) return entry.pendingInterrupt
+    const interrupt = control.interrupt
+    const pending = Promise.resolve().then(() => interrupt()).then(() => {
+      entry.interruptAccepted = true
+      if (!entry.running) this.activityChanges.notify()
+    })
+    entry.pendingInterrupt = pending
+    try { await pending }
+    finally { entry.pendingInterrupt = undefined }
   }
 
   /**
@@ -349,7 +391,13 @@ export class TerminalRegistry {
   async kill(ownerSessionId: string, id: string, signal: TerminalSignal = 'SIGTERM'): Promise<void> {
     const control = this.liveControl(ownerSessionId, id)
     if (!control.kill) throw new Error('this terminal cannot be killed from here')
-    await control.kill(signal)
+    const entry = this.entries.get(id)!
+    if (entry.pendingKill) return entry.pendingKill
+    const kill = control.kill
+    const pending = Promise.resolve().then(() => kill(signal)).then(() => { entry.cancellationAccepted = true })
+    entry.pendingKill = pending
+    try { await pending }
+    finally { entry.pendingKill = undefined }
   }
 
   /** Forget everything. Session teardown; does not signal anything. */

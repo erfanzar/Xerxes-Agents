@@ -366,7 +366,7 @@ export function adaptDaemonEvent(type: string, payload: Record<string, unknown>)
       ]
 
     case 'status_update': {
-      if (payload.kind === 'provider_wait' || payload.kind === 'provider_ready') {
+      if (payload.kind === 'network_retry' || payload.kind === 'provider_wait' || payload.kind === 'provider_ready') {
         return [{ type: 'status.update', payload: { kind: payload.kind, text: str(payload.text) } }]
       }
       if (payload.kind === 'compressing' || payload.kind === 'compaction') {

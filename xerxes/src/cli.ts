@@ -1,6 +1,11 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { DaemonWorkspaces, type WorkspaceResources } from './daemon/workspaceResources.js';
+import { assertLegacyDaemonReleased } from './daemon/legacyDaemon.js';
+import { WorkspaceTurnRunner } from './daemon/workspaceTurnRunner.js';
+import { createHash } from 'node:crypto';
+import { acquireCronLease, releaseCronLease } from './cron/lease.js';
 import { ManagedPlugins } from "./extensions/managedPlugins.js";
 import { version } from "../package.json" with { type: "json" };
 import { mkdir, writeFile } from "node:fs/promises";
@@ -70,6 +75,7 @@ import { estimateContextTokens } from "./context/windowUsage.js";
 import { createLlmClient } from "./llms/client.js";
 import type { ChatMessage } from "./types/messages.js";
 import type { SpawnedAgentSnapshot } from "./operators/subagents.js";
+import { mergePersistedSubagentSnapshots } from "./agents/subagentPersistence.js";
 import { AgentMemory } from "./memory/agentMemory.js";
 import { getAgentSelfMemory } from "./memory/agentSelfMemory.js";
 import { ContextualMemory } from "./memory/contextualMemory.js";
@@ -758,7 +764,7 @@ if (argument === "--help" || argument === "-h") {
   });
   const socketPath =
     options.get("--socket") ?? daemonPaths(projectDirectory).socketPath;
-  const pidPath = options.get("--pid-file");
+  const pidPath = options.get("--pid-file") ?? (options.has("--socket") ? undefined : daemonPaths(projectDirectory).pidPath);
   await runDaemon(config, projectDirectory, socketPath, pidPath);
   process.exit(0);
 } else if (argument === "telegram") {
@@ -994,7 +1000,15 @@ if (argument === "--help" || argument === "-h") {
   await runOneShotOrUsageError(prompt, cliAgentReference);
 }
 
-async function runDaemon(
+async function runDaemon(config: DaemonConfig, projectDirectory: string | undefined, socketPath: string, pidPath: string | undefined): Promise<void> {
+  const leasePath = join(xerxesHome(), 'daemon', 'owners', createHash('sha256').update(socketPath).digest('hex') + '.json');
+  const claim = { ownerKey: socketPath };
+  if (!acquireCronLease(leasePath, claim).held) return;
+  try { await runDaemonOwned(config, projectDirectory, socketPath, pidPath); }
+  finally { releaseCronLease(leasePath, claim); }
+}
+
+async function runDaemonOwned(
   config: DaemonConfig,
   projectDirectory: string | undefined,
   socketPath: string,
@@ -1008,18 +1022,16 @@ async function runDaemon(
     },
   });
   const browserManager = new BrowserManager();
-  const mcpManager = new MCPManager();
-  let stopping = false;
-  const skillRegistry = new SkillRegistry({ workspaceTrust: trustedHashWorkspaceSkills() });
-  await skillRegistry.refresh(...defaultSkillDiscoveryRoots({
-    cwd: projectDirectory ?? config.projectDirectory,
-  }));
+  const workspaces = new DaemonWorkspaces({
+    ...mcpHostOptions(projectDirectory ?? config.projectDirectory),
+    ...(socketPath === daemonPaths(projectDirectory).socketPath && !process.env.XERXES_DAEMON_SOCKET
+      ? { beforeOpen: assertLegacyDaemonReleased } : {}),
+  });
+  const { mcpManager, skillRegistry, agentPresetRoster } = await workspaces.get(projectDirectory ?? config.projectDirectory);
   const managedPlugins = new ManagedPlugins(join(xerxesHome(), "managed-plugins.json"));
   await managedPlugins.load();
   const declarativeForge = new DeclarativeToolForge();
-  const agentPresetRoster = new AgentPresetRoster({
-    projectDirectory: projectDirectory ?? config.projectDirectory,
-  });
+
   // Shared by the tool registry that starts the processes and the RPC surface
   // that lists them. One instance is the whole point: a second registry would
   // be a second, permanently empty view of the same shells.
@@ -1069,6 +1081,7 @@ async function runDaemon(
     {
       ...(buildId ? { buildId } : {}),
       onSessionModeChange: (sessionId) => announceModeChange?.(sessionId),
+      workspaces,
       skillRegistry,
       managedPlugins,
       mcpManager,
@@ -1097,16 +1110,13 @@ async function runDaemon(
   const daemonLifetime = new Promise<void>((resolveLifetime) => {
     finishDaemon = resolveLifetime;
   });
-  const finish = () => { stopping = true; finishDaemon?.(); };
+  const finish = () => { finishDaemon?.(); };
   // MCP: connect the servers configured in ~/.xerxes/mcp.json so their
   // status is real (session.status.mcp_status) and /reload-mcp works.
   // Per-server failures are recorded on the manager and logged — one broken
   // server must not stop the daemon.
-  void startConfiguredMcpServers(mcpManager, {
-    ...mcpHostOptions(projectDirectory ?? config.projectDirectory),
-    onConnected: () => { if (!stopping) runtime.reload({}); },
-  }).catch(error => console.error(`mcp: ${errorMessage(error)}`));
   const daemon = new DaemonServer({
+    workspaceResources: cwd => workspaces.get(cwd),
     autoSnapshotTurns: true,
     managedPlugins,
     agentSettingsDefaults: config.runtime.agent_intelligence,
@@ -1150,12 +1160,11 @@ async function runDaemon(
     await daemon.start();
     await channelManager.startConfigured();
   } catch (error) {
-    stopping = true;
     // Cleanup must not replace the startup error or skip the remaining owners.
     for (const cleanup of [
       () => channelManager.stopAll(),
       () => daemon.stop(),
-      () => mcpManager.disconnectAll(),
+      () => workspaces.close(),
       () => reactionMailbox.close(),
       () => runHistory.close(),
       () => goalTokenLedger.close(),
@@ -1176,9 +1185,8 @@ async function runDaemon(
   } finally {
     process.off("SIGINT", finish);
     process.off("SIGTERM", finish);
-    stopping = true;
     await daemon.stop();
-    await mcpManager.disconnectAll();
+    await workspaces.close();
     reactionMailbox.close();
     runHistory.close();
     goalTokenLedger.close();
@@ -1644,6 +1652,7 @@ function daemonRuntime(
   interactions?: DaemonInteractionBoard,
   browserManager?: BrowserManager,
   host: {
+    readonly workspaces?: DaemonWorkspaces;
     readonly buildId?: string;
     /** Announce a model-driven interaction-mode change to attached clients. */
     readonly onSessionModeChange?: (sessionId: string, mode: string) => void;
@@ -1764,10 +1773,11 @@ function daemonRuntime(
       ]);
     },
   };
-  let subagentHost: ReturnType<typeof createNativeSubagentHost> | undefined;
+  const subagentHosts = new Map<string, ReturnType<typeof createNativeSubagentHost>>();
   let runtime: InMemoryDaemonRuntime | undefined;
   let activeToolCount = 0;
-  const runnerFactory = (settings: Readonly<Record<string, unknown>>) => {
+  const createWorkspaceRunner = (settings: Readonly<Record<string, unknown>>, workspaceRoot: string, resources: WorkspaceResources) => {
+    let subagentHost = subagentHosts.get(workspaceRoot);
     const connection = runtimeConnection(
       { ...config, runtime: { ...config.runtime, ...settings } },
       profileStore.active(),
@@ -1801,7 +1811,7 @@ function daemonRuntime(
       ...settings,
     });
     if (host.monitors) registerMonitorTools(tools, host.monitors);
-    const mcpTools = host.mcpManager ? registerMcpTools(tools, host.mcpManager) : [];
+    const mcpTools = resources.mcpManager ? registerMcpTools(tools, resources.mcpManager) : [];
     registerConfiguredLspTool(tools, lspManager, () => getActiveSession<{ cwd: string }>()?.cwd ?? workspaceRoot);
     if (host.schedules) registerScheduleTools(tools, host.schedules);
     registerCoreTools(tools, {
@@ -1832,8 +1842,8 @@ function daemonRuntime(
     if (host.declarativeForge) {
       registerCreatorForgeTool(tools, host.declarativeForge);
     }
-    if (host.agentPresetRoster) {
-      registerAgentPresetTools(tools, host.agentPresetRoster, {
+    if (resources.agentPresetRoster) {
+      registerAgentPresetTools(tools, resources.agentPresetRoster, {
         onChanged: () => { runtime?.reload({}); },
       });
     }
@@ -1843,8 +1853,8 @@ function daemonRuntime(
     if (interactions) {
       registerDaemonQuestionTool(tools);
     }
-    if (host.skillRegistry) {
-      registerClaudeSkillTool(tools, host.skillRegistry);
+    if (resources.skillRegistry) {
+      registerClaudeSkillTool(tools, resources.skillRegistry);
     }
     // Same-session goals: the model states lifecycle through typed calls
     // instead of the runtime inferring it from English phrases in the prose.
@@ -1908,7 +1918,7 @@ function daemonRuntime(
       || undefined;
     const subagentOptions = {
       ...(connection.reasoningEffort ? { reasoningEffort: connection.reasoningEffort } : {}),
-      ...(host.skillRegistry ? { skillRegistry: host.skillRegistry } : {}),
+      ...(resources.skillRegistry ? { skillRegistry: resources.skillRegistry } : {}),
       resolveSourceProvider: (sourceId: string, model: string): string | undefined => {
         const session = runtime?.listSessions().find(candidate => candidate.id === sourceId);
         if (!session) throw new Error('Subagent source session is unavailable; reopen the parent chat');
@@ -1944,8 +1954,8 @@ function daemonRuntime(
         new DurableTaskRuntime({ directory: join(xerxesHome(), "tasks") }),
       ),
       eventBus: subagentEvents,
-      ...(host.skillRegistry?.markdownIndex()
-        ? { extraContext: host.skillRegistry.markdownIndex() }
+      ...(resources.skillRegistry?.markdownIndex()
+        ? { extraContext: resources.skillRegistry.markdownIndex() }
         : {}),
       llm,
       ...(maxTokens === undefined ? {} : { maxTokens }),
@@ -1965,6 +1975,7 @@ function daemonRuntime(
       subagentHost.reconfigure(subagentOptions);
     } else {
       subagentHost = createNativeSubagentHost(subagentOptions);
+      subagentHosts.set(workspaceRoot, subagentHost);
     }
     registerClaudeAgentTools(tools, {
       availableAgents: bootstrapSubagentsForAgent(agentDefinitions),
@@ -1977,7 +1988,7 @@ function daemonRuntime(
     // same managed subagent pool (depth caps, cohort join, persistence).
     registerClaudeWorkflowTools(tools, {
       ...(agentDefinitions.size ? { agentDefinitions: [...agentDefinitions.values()] } : {}),
-      ...(host.skillRegistry ? { skillRegistry: host.skillRegistry } : {}),
+      ...(resources.skillRegistry ? { skillRegistry: resources.skillRegistry } : {}),
       planGenerator: {
         generate: (request, signal) => {
           const active = getActiveSession<DaemonSession>();
@@ -2028,8 +2039,8 @@ function daemonRuntime(
       bootstrapSystemPrompt: ({ agentId, session, model, tools: runnerTools }) =>
         bootstrap({
           cwd: session.cwd,
-          ...(host.skillRegistry?.markdownIndex()
-            ? { extraContext: host.skillRegistry.markdownIndex() }
+          ...(resources.skillRegistry?.markdownIndex()
+            ? { extraContext: resources.skillRegistry.markdownIndex() }
             : {}),
           model,
           subagents: bootstrapSubagentsForAgent(agentDefinitions, agentId),
@@ -2141,6 +2152,13 @@ function daemonRuntime(
       ...(interactions ? { interactions } : {}),
     });
   };
+  const runnerFactory = (settings: Readonly<Record<string, unknown>>) => host.workspaces
+    ? new WorkspaceTurnRunner(host.workspaces, (cwd, resources) => createWorkspaceRunner(settings, cwd, resources))
+    : createWorkspaceRunner(settings, workspaceRoot, {
+      skillRegistry: host.skillRegistry ?? new SkillRegistry(),
+      mcpManager: host.mcpManager ?? new MCPManager(),
+      agentPresetRoster: host.agentPresetRoster ?? new AgentPresetRoster({ projectDirectory: workspaceRoot }),
+    });
   runtime = new InMemoryDaemonRuntime(undefined, {
     lspSettings: () => lspSettingsView(lspSettingsStore.read()),
     saveLspSettings: (request, signal) => saveLspSettings(lspManager, lspSettingsStore, request, signal),
@@ -2151,12 +2169,7 @@ function daemonRuntime(
     runtimeSettings: initialSettings,
     transcriptStore,
     statusInventory: () => ({
-      activeSubagents:
-        subagentHost?.manager
-          .listTasks()
-          .filter(
-            (task) => task.status === "pending" || task.status === "running",
-          ).length ?? 0,
+      activeSubagents: [...subagentHosts.values()].flatMap(host => host.manager.listTasks()).filter(task => task.status === "pending" || task.status === "running").length,
       skills: host.skillRegistry?.all().length ?? 0,
       tools: activeToolCount,
     }),
@@ -2165,7 +2178,7 @@ function daemonRuntime(
       host.monitors?.close();
       // Children first: their final events still belong in this session's
       // audit log, so the audit sink is only closed after they settle.
-      try { await subagentHost?.manager.shutdown(); }
+      try { await Promise.all([...subagentHosts.values()].map(host => host.manager.shutdown())); }
       finally {
         try { await lspManager.close(); }
         finally { await auditEmitter?.close(); }
@@ -2173,13 +2186,13 @@ function daemonRuntime(
     },
     onSessionEvict: sessionId => {
       host.monitors?.disposeOwner(sessionId);
-      subagentHost?.cancelSource(sessionId);
+      for (const host of subagentHosts.values()) host.cancelSource(sessionId);
       memoryToolContext.prune(sessionId);
     },
     // Esc/Ctrl+C stops the whole delegation tree the turn started, not just
     // the parent's provider stream. Children stay retryable because the user
     // asked to pause, not to discard the work.
-    onTurnCancel: sessionId => subagentHost?.interruptSource(sessionId) ?? 0,
+    onTurnCancel: sessionId => [...subagentHosts.values()].reduce((total, host) => total + host.interruptSource(sessionId), 0),
     // A mode change the MODEL made has to reach the clients too. Without this
     // the session left plan mode while every TUI kept rendering — and gating
     // on — the old mode, which is indistinguishable from the switch failing.
@@ -2191,7 +2204,8 @@ function daemonRuntime(
     // continues the persisted conversation when one survives; without an
     // active provider connection there is no runner to resume with.
     subagentRetry: async (request) => {
-      const host = subagentHost;
+      const ownedSession = request.sessionKey ? runtime?.sessionStatus(request.sessionKey) : undefined;
+      const host = ownedSession ? subagentHosts.get(resolve(ownedSession.cwd)) : undefined;
       if (!host) {
         return {
           ok: false,
@@ -2207,7 +2221,13 @@ function daemonRuntime(
         return { ok: false, error: errorMessage(error) };
       }
     },
-    liveSubagentIds: () => subagentHost?.managerPort.listHandles().filter(snapshot => ['running', 'pending'].includes(snapshot.status)).map(snapshot => snapshot.id) ?? [],
+    liveSubagentIds: () => [...subagentHosts.values()].flatMap(host => host.managerPort.listHandles()).filter(snapshot => ['running', 'pending'].includes(snapshot.status)).map(snapshot => snapshot.id),
+    refreshSubagents: session => {
+      const host = subagentHosts.get(resolve(session.cwd));
+      if (!host) return;
+      const owned = host.managerPort.listHandles().filter(snapshot => snapshot.sourceAgentId === session.id);
+      if (owned.length) mergePersistedSubagentSnapshots(session.metadata, owned);
+    },
     // An interaction-mode change (set_mode / set_plan_mode /
     // SetInteractionModeTool) must never cancel this session's running
     // subagents: mode only re-scopes the parent turn's next tool surface,

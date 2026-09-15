@@ -1,6 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { daemonPaths } from './paths.js'
 import { join, posix } from 'node:path'
 
 export const DAEMON_SERVICE_LABEL = 'com.xerxes.daemon'
@@ -113,7 +114,7 @@ export function daemonServicePaths(home: string, xerxesHome: string): DaemonServ
   const systemdDirectory = join(normalizedHome, '.config', 'systemd', 'user')
   return Object.freeze({
     defaultLogDirectory: join(normalizedXerxesHome, 'daemon', 'logs'),
-    defaultPidPath: join(normalizedXerxesHome, 'daemon', 'daemon.pid'),
+    defaultPidPath: daemonPaths('.', { XERXES_HOME: normalizedXerxesHome }).pidPath,
     launchdDirectory,
     launchdPlistPath: join(launchdDirectory, LAUNCHD_PLIST_NAME),
     systemdDirectory,

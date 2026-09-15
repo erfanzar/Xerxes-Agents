@@ -66,6 +66,17 @@ test('control client rejects daemon JSON-RPC failures and malformed responses', 
   finally { await malformed.close() }
 })
 
+test('control client retains an unfinished response after a complete event frame', async () => {
+  const f = await fixture(socket => socket.on('data', raw => {
+    const request = JSON.parse(String(raw))
+    const response = JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { text: 'retained tail' } }) + '\n'
+    socket.write(JSON.stringify({ jsonrpc: '2.0', method: 'event', params: {} }) + '\n' + response.slice(0, 20))
+    setTimeout(() => socket.write(response.slice(20)), 5)
+  }))
+  try { await expect(requestDaemonControl(f.path, 'status', {})).resolves.toEqual({ text: 'retained tail' }) }
+  finally { await f.close() }
+})
+
 test('control client rejects close, abort, timeout, and absent daemon', async () => {
   const closed = await fixture(socket => socket.on('data', () => socket.destroy()))
   try { await expect(requestDaemonControl(closed.path, 'status', {})).rejects.toThrow('closed') }

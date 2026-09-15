@@ -312,6 +312,7 @@ export class StreamConsoleRenderer {
         this.writeLine(`${this.paint('⚠️', COLORS.YELLOW)} Permission requested: ${event.request.description}`)
         return
       case 'provider_retry':
+        if (!event.final && event.maxAttempts === 0) { this.writeLine('⏳ Retrying connection…'); return }
         this.writeLine(`${this.paint('⏳', COLORS.YELLOW)} Retry ${event.attempt}/${event.maxAttempts}: ${event.error}`)
         return
       case 'skill_suggestion':

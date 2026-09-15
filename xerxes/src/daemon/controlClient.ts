@@ -35,7 +35,8 @@ export function requestDaemonControl(
 
   return new Promise<JsonRpcPayload>((resolve, reject) => {
     let socket: Socket | undefined
-    let buffer = ''
+    let chunks: string[] = []
+    let bufferedBytes = 0
     let settled = false
     let sent = false
     let timer: ReturnType<typeof setTimeout> | undefined
@@ -54,11 +55,19 @@ export function requestDaemonControl(
       else resolve(result ?? {})
     }
     const onData = (chunk: Buffer | string): void => {
-      buffer += typeof chunk === 'string' ? chunk : chunk.toString('utf8')
-      if (Buffer.byteLength(buffer, 'utf8') > MAX_FRAME_BYTES) {
+      const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8')
+      chunks.push(text)
+      bufferedBytes += Buffer.byteLength(text, 'utf8')
+      if (bufferedBytes > MAX_FRAME_BYTES) {
         finish(new Error('daemon control response exceeds the socket frame limit'))
         return
       }
+      // Scan each new chunk once; joining and rescanning the whole unfinished
+      // frame on every read makes large responses quadratic.
+      if (!text.includes('\n')) return
+      let buffer = chunks.join('')
+      chunks = []
+      bufferedBytes = 0
       let newline = buffer.indexOf('\n')
       while (newline >= 0 && !settled) {
         const line = buffer.slice(0, newline)
@@ -82,6 +91,10 @@ export function requestDaemonControl(
           return
         }
         finish(undefined, response.result as JsonRpcPayload)
+      }
+      if (!settled && buffer) {
+        chunks = [buffer]
+        bufferedBytes = Buffer.byteLength(buffer, 'utf8')
       }
     }
     const onError = (error: Error & { readonly code?: string }): void => {

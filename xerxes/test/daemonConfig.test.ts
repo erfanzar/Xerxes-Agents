@@ -1,6 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { daemonPaths } from '../src/daemon/paths.js'
 import { expect, test } from 'bun:test'
 
 import {
@@ -185,8 +186,8 @@ test('loader safely falls back to defaults for unreadable or malformed explicit 
 
   expect(config.control).toEqual({
     log_dir: '/isolated/home/daemon/logs',
-    pid_file: '/isolated/home/daemon/daemon.pid',
-    unix_socket: '/isolated/home/daemon/xerxes.sock',
+    pid_file: daemonPaths('.', { XERXES_HOME: '/isolated/home' }).pidPath,
+    unix_socket: daemonPaths('.', { XERXES_HOME: '/isolated/home' }).socketPath,
     websocket_host: '127.0.0.1',
     websocket_port: 11996,
   })

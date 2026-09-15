@@ -1,64 +1,45 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { BrowserWindow, ipcMain } from 'electron'
-
+import { ipcMain, type WebContents } from 'electron'
+import { WindowConnections } from "./windowRoutes.js"
 import type { DaemonRpc } from './daemon.js'
 
 const METHOD_PATTERN = /^[A-Za-z0-9_.]{1,128}$/
-
-/**
- * The live daemon behind the one `daemon:call` channel. Swappable so the
- * shell can retarget to another workspace's daemon without re-registering
- * ipc handlers (a second `handle()` on the same channel throws).
- */
-let active: DaemonRpc | null = null
+const connections = new WindowConnections<DaemonRpc>()
+const results = new Map<number, (method: string, result: Record<string, unknown>) => void>()
 let registered = false
-let forward: ((type: string, payload: Record<string, unknown>) => void) | null = null
-let eventObserver: ((type: string, payload: Record<string, unknown>) => void) | null = null
 
-/**
- * Main-process-side hook on the daemon event stream (native notifications
- * ride it). At most one observer; the pipe stays the single forward path.
- */
-export function setDaemonEventObserver(
-  observer: ((type: string, payload: Record<string, unknown>) => void) | null,
-): void {
-  eventObserver = observer
+/** Remove only this renderer's event subscription. The caller owns its connection. */
+export function detachDaemon(id: number): void {
+  connections.detach(id)
+  results.delete(id)
 }
 
-/** Point the bridge at `next`, moving the event pipe off the previous one. */
-export function attachDaemon(next: DaemonRpc): void {
-  if (forward && active) active.offEvent(forward)
-  active = next
-  forward = (type, payload) => {
-    eventObserver?.(type, payload)
-    for (const window of BrowserWindow.getAllWindows()) {
-      if (!window.isDestroyed()) window.webContents.send('daemon:event', { type, payload })
-    }
-  }
-  next.onEvent(forward)
-}
-
-/**
- * The whole renderer↔daemon seam. The renderer may only send a method name
- * plus a plain-data params object on one channel; events flow out on another.
- * `ipcRenderer` itself never crosses the bridge.
- */
-export function registerDaemonBridge(daemon?: DaemonRpc): void {
+/** Calls and events stay inside the workspace window that owns the connection. */
+export function registerDaemonBridge(target: WebContents, daemon?: DaemonRpc, observer?: (type: string, payload: Record<string, unknown>) => void, resultObserver?: (method: string, result: Record<string, unknown>) => void): void {
   if (!registered) {
     registered = true
-    ipcMain.handle('daemon:call', (_event, method: unknown, params: unknown) => {
+    ipcMain.handle('daemon:call', (event, method: unknown, params: unknown) => {
       const name = typeof method === 'string' && METHOD_PATTERN.test(method) ? method : ''
-      if (!name) return Promise.reject(new TypeError(`invalid rpc method: ${String(method).slice(0, 32)}`))
-      if (params !== undefined && params !== null && (typeof params !== 'object' || Array.isArray(params))) {
-        return Promise.reject(new TypeError('params must be an object'))
-      }
-      const current = active
-      if (!current) return Promise.reject(new Error('Choose a workspace folder before using runtime features'))
+      if (!name) throw new TypeError(`invalid rpc method: ${String(method).slice(0, 32)}`)
+      if (params !== undefined && params !== null && (typeof params !== 'object' || Array.isArray(params))) throw new TypeError('params must be an object')
+      const current = connections.get(event.sender.id)
+      if (!current) throw new Error('Choose a workspace folder before using runtime features')
       if (name === 'desktop.restartRuntime') return current.restartRuntime((params as Record<string, unknown> | undefined)?.allow_legacy === true)
-      return current.call(name, (params ?? {}) as Record<string, unknown>)
+      return current.call(name, (params ?? {}) as Record<string, unknown>).then(result => {
+        if (connections.get(event.sender.id) === current) results.get(event.sender.id)?.(name, result)
+        return result
+      })
     })
   }
-  if (daemon) attachDaemon(daemon)
+  detachDaemon(target.id)
+  if (!daemon) return
+  if (resultObserver) results.set(target.id, resultObserver)
+  const forward = (type: string, payload: Record<string, unknown>) => {
+    if (target.isDestroyed()) return
+    observer?.(type, payload)
+    target.send('daemon:event', { type, payload })
+  }
+  connections.attach(target.id, daemon, forward)
 }

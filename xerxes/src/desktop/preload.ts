@@ -104,6 +104,11 @@ const bridge = {
     return ipcRenderer.invoke(WORKSPACE_CHANNEL) as Promise<unknown>
   },
 
+  openWorkspaceWindow(dir?: unknown): Promise<unknown> {
+    if (dir !== undefined && (typeof dir !== 'string' || !dir || /[\x00-\x1f]/.test(dir))) return Promise.reject(new TypeError('invalid workspace dir'))
+    return ipcRenderer.invoke('desktop:new-window', dir) as Promise<unknown>
+  },
+
   /** Enter a workspace by absolute folder path (sidebar header click). */
   useWorkspace(dir: unknown, resumeSessionId?: unknown): Promise<unknown> {
     if (typeof dir !== 'string' || !dir)

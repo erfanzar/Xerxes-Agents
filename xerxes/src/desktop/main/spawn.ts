@@ -5,8 +5,8 @@
  * Daemon address derivation and launch for the desktop app.
  *
  * The address algorithm mirrors `daemonPaths()` in ui/gatewayClient.ts
- * byte-for-byte (sha256 of the canonical project dir, hex[:16], under
- * `$XERXES_HOME/daemon/projects`, `XERXES_DAEMON_SOCKET` wins) — drift means
+ * byte-for-byte (global- plus sha256 of Xerxes home, hex[:16], under
+ * `$XERXES_HOME/daemon`, `XERXES_DAEMON_SOCKET` wins) — drift means
  * the app finds no daemon and launches a second one nobody else will ever
  * talk to. `test/desktopSocketParity.test.ts` pins the mirror against the
  * original.
@@ -35,6 +35,8 @@ export interface DaemonAddress {
 
 export function xerxesHome(env: Env): string {
   const configured = env.XERXES_HOME?.trim()
+  if (configured === '~') return homedir()
+  if (configured?.startsWith('~/') || configured?.startsWith('~\\')) return resolve(homedir(), configured.slice(2))
   return configured ? resolve(configured) : join(homedir(), '.xerxes')
 }
 
@@ -58,6 +60,21 @@ export function canonicalProjectDir(projectDir?: string): string {
 }
 
 export function daemonAddress(
+  projectDir: string,
+  env: Env = process.env,
+  platform: NodeJS.Platform = process.platform,
+): DaemonAddress {
+  const digest = 'global-' + createHash('sha256').update(xerxesHome(env), 'utf8').digest('hex').slice(0, 16)
+  const base = join(xerxesHome(env), 'daemon')
+  const override = env.XERXES_DAEMON_SOCKET?.trim()
+  return {
+    socketPath: override || controlChannelPath(base, digest, platform),
+    pidPath: join(base, `${digest}.pid`),
+  }
+}
+
+/** Read-only migration address for an already-running project daemon. */
+export function legacyProjectDaemonPaths(
   projectDir: string,
   env: Env = process.env,
   platform: NodeJS.Platform = process.platform,

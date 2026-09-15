@@ -164,8 +164,13 @@ it.each(['max_model_calls', 'max_runs', 'expires_at'] as const)('saves and remov
     await screen.flush()
     act(() => screen.mockInput.pressKey('RETURN'))
     await vi.waitFor(() => expect(rpc).toHaveBeenCalledWith('schedule.update', expect.objectContaining({ [limit]: limit === 'expires_at' ? '2099-01-01T00:00:00Z' : 3 })))
-    await vi.waitFor(() => expect(screen.captureCharFrame()).not.toContain('Saving…'))
-    await screen.flush()
+    // The RPC spy observes submission before React commits busy/focus changes.
+    // Flush inside the retry so a stale pre-save frame cannot pass this check
+    // while the editor is still disabled and discard the following keystrokes.
+    await vi.waitFor(async () => {
+      await screen.flush()
+      expect(screen.captureCharFrame()).not.toContain('Saving…')
+    })
     for (let i = 0; i < (limit === 'expires_at' ? 20 : 1); i++) act(() => screen.mockInput.pressKey('BACKSPACE'))
     await screen.flush()
     act(() => screen.mockInput.pressKey('RETURN'))

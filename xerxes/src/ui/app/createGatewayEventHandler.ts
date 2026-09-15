@@ -582,8 +582,13 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
       case 'status.update': {
         const p = ev.payload
 
+        if (p?.kind === 'network_retry') {
+          patchTurnState({ networkRetrying: true })
+          setStatus('Retrying connection…')
+          return
+        }
         if (p?.kind === 'provider_wait' || p?.kind === 'provider_ready') {
-          patchTurnState({ providerWaiting: p.kind === 'provider_wait' })
+          patchTurnState({ providerWaiting: p.kind === 'provider_wait', ...(p.kind === 'provider_ready' ? { networkRetrying: false } : {}) })
           return
         }
 

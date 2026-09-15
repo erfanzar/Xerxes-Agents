@@ -139,7 +139,7 @@ export function markdownBlocks(markdown: string, prefix = 'md'): ReactElement[] 
       }
       const head = rows[0]?.cells ?? []
       out.push(
-        <table key={`${prefix}-t${key++}`} className="md__table">
+        <div key={`${prefix}-t${key++}`} className="md__table-scroll" role="region" aria-label="Table contents" tabIndex={0}><table className="md__table">
           <thead>
             <tr>{head.map((cell, ci) => <th key={ci}>{inlinePieces(cell)}</th>)}</tr>
           </thead>
@@ -148,7 +148,7 @@ export function markdownBlocks(markdown: string, prefix = 'md'): ReactElement[] 
               <tr key={ri}>{row.cells.map((cell, ci) => <td key={ci}>{inlinePieces(cell)}</td>)}</tr>
             ))}
           </tbody>
-        </table>,
+        </table></div>,
       )
       i = j - 1
       continue

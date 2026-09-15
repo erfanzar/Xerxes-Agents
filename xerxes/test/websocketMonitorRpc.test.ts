@@ -131,7 +131,7 @@ test('websocket monitor RPC filters and deduplicates frames and enforces ownersh
     foreign.send(7, 'monitor.stop', { monitor_id: id })
     expect((await foreign.response(7)).error).toBeDefined()
     owner.send(8, 'monitor.stop', { monitor_id: id })
-    expect(result(await owner.response(8))).toMatchObject({ ok: true, monitor: { state: 'stopped' } })
+    expect(result(await owner.response(8))).toMatchObject({ ok: true, monitor: { state: 'stopped', sourceStatus: 'Source closed (stopped).' } })
     await waitFor(() => closed, value => value === 1)
   } finally {
     owner.close(); foreign.close()

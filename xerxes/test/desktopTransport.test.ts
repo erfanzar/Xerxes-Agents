@@ -44,7 +44,7 @@ test('slow daemon startup retries reuse the child and recover when its socket ap
 
 class FakeDaemon {
   readonly connections: NetSocket[] = []
-  requests: Array<{ id: unknown; method: string }> = []
+  requests: Array<{ id: unknown; method: string; params?: Record<string, unknown> }> = []
   private server: Server
   /** Methods answered automatically with `{ok:true}`; everything else needs an explicit reply. */
   private readonly autoReply: Set<string>
@@ -64,9 +64,9 @@ class FakeDaemon {
           buffer = buffer.slice(nl + 1)
           if (!line.trim()) continue
           try {
-            const parsed = JSON.parse(line) as { id?: unknown; method?: string }
+            const parsed = JSON.parse(line) as { id?: unknown; method?: string; params?: Record<string, unknown> }
             const method = String(parsed.method ?? '')
-            this.requests.push({ id: parsed.id, method })
+            this.requests.push({ id: parsed.id, method, ...(parsed.params ? { params: parsed.params } : {}) })
             if (parsed.id !== undefined && this.autoReply.has(method)) {
               // Deferred a tick: replying synchronously from inside this same
               // socket's data handler wedges subsequent delivery under Bun.
@@ -416,4 +416,41 @@ test('explicit legacy restart refuses another session that is working', async ()
     expect(await pending).toEqual({ ok: false, busy: true })
     expect(daemon.requests.some(row => row.method === 'shutdown')).toBe(false)
   } finally { rpc.dispose(); daemon.close() }
+})
+
+
+test('opening and resuming a desktop session uses its window target on the shared daemon', async () => {
+  const fake = new FakeDaemon(socketPath, ['initialize', 'session.open', 'runtime.status']); await fake.listen()
+  const rpc = new DaemonRpc({ projectDir: '/second/workspace', socketPath, deadlineMs: 2000 })
+  try {
+    await rpc.call('initialize', { session_key: 'second' })
+    await rpc.call('initialize', { resume_session_id: 'saved', project_dir: '/wrong' })
+    await rpc.call('session.open', { session_key: 'another' })
+    await rpc.call('runtime.status')
+    expect(fake.requests.filter(row => row.method === 'initialize' || row.method === 'session.open').map(row => row.params)).toEqual([
+      { session_key: 'second', project_dir: '/second/workspace' },
+      { resume_session_id: 'saved', project_dir: '/second/workspace' },
+      { session_key: 'another', project_dir: '/second/workspace' },
+    ])
+    expect(fake.requests.findLast(row => row.method === 'runtime.status')?.params).toEqual({})
+  } finally { rpc.dispose(); fake.close() }
+})
+
+test('initialize uses structured history without duplicate legacy replay events', async () => {
+  const fake = new FakeDaemon(socketPath); await fake.listen()
+  const rpc = new DaemonRpc({ projectDir: '/project', socketPath, deadlineMs: 2000 })
+  const events: string[] = []; rpc.onEvent((_type, payload) => events.push(String(payload.body)))
+  try {
+    const initializing = rpc.call('initialize', { resume_session_id: 'saved' })
+    for (let n = 0; n < 100 && !fake.requests.some(row => row.method === 'initialize'); n++) await Bun.sleep(5)
+    const request = fake.requests.find(row => row.method === 'initialize')!
+    fake.raw(JSON.stringify({ method: 'event', params: { type: 'notification', payload: { category: 'history', type: 'replay_user', body: 'Stored message' } } }) + '\n')
+    fake.raw(JSON.stringify({ method: 'event', params: { type: 'notification', payload: { category: 'runtime', body: 'Live warning' } } }) + '\n')
+    fake.reply(request.id, { ok: true, session: { messages: [{ role: 'user', content: 'Stored message' }] } })
+    expect(await initializing).toMatchObject({ session: { messages: [{ content: 'Stored message' }] } })
+    expect(events).toEqual(['Live warning'])
+    fake.raw(JSON.stringify({ method: 'event', params: { type: 'notification', payload: { category: 'history', body: 'Explicit slash replay' } } }) + '\n')
+    for (let n = 0; n < 100 && events.length < 2; n++) await Bun.sleep(5)
+    expect(events).toEqual(['Live warning', 'Explicit slash replay'])
+  } finally { rpc.dispose(); fake.close() }
 })

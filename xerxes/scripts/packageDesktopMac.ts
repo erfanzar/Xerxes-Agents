@@ -17,7 +17,11 @@ const productName = 'Xerxes Agents'
 const packageDirectory = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const repositoryDirectory = resolve(packageDirectory, '..')
 const outputDirectory = join(packageDirectory, 'dist')
-const applicationBundle = join(outputDirectory, `${productName}.app`)
+// Keep build inputs in dist, but allow verification/release packaging away
+// from a bundle currently backing a running app or daemon.
+const packageOutputDirectory = process.env.XERXES_DESKTOP_PACKAGE_DIR?.trim()
+  ? resolve(process.env.XERXES_DESKTOP_PACKAGE_DIR.trim()) : outputDirectory
+const applicationBundle = join(packageOutputDirectory, `${productName}.app`)
 
 async function run(command: string, arguments_: string[]): Promise<void> {
   const process = Bun.spawn([command, ...arguments_], { stdout: 'inherit', stderr: 'inherit' })
@@ -85,6 +89,7 @@ async function packageDesktopMac(): Promise<void> {
   const version = typeof packageRecord.version === 'string' ? packageRecord.version : ''
   if (!version) throw new Error('desktop packaging needs package.json version')
 
+  await mkdir(packageOutputDirectory, { recursive: true })
   await rm(applicationBundle, { recursive: true, force: true })
   await cp(sourceBundle, applicationBundle, { recursive: true })
   await rename(sourceExecutable, productExecutable)

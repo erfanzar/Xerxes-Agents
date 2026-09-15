@@ -2,22 +2,25 @@
 // Licensed under the Apache License, Version 2.0.
 
 /**
- * Electron entry. Owns the window and the one daemon connection; everything
+ * Electron entry. Owns independent workspace windows and their daemon connections; everything
  * renderer-side crosses the preload bridge (`daemon:call` in, `daemon:event`
  * out). The renderer is sandboxed with no Node access and a self-only CSP —
  * those properties are the design, not configuration.
  */
 
-import { app, BrowserWindow, dialog, ipcMain, nativeImage, Notification, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, nativeImage, Notification, shell, Menu, screen, type IpcMainInvokeEvent } from 'electron'
 import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { loadWindowLayout, saveWindowLayout, visibleWindowBounds, type SavedWindow } from './main/windowState.js'
+import { WindowRoutes } from './main/windowRoutes.js'
+import { windowRecovery } from './main/windowRecovery.js'
 import { desktopMachineCommand } from './main/machines.js'
 import { xerxesHome } from '../daemon/paths.js'
 import { DaemonRpc } from './main/daemon.js'
-import { registerDaemonBridge, setDaemonEventObserver } from './main/ipc.js'
+import { registerDaemonBridge, detachDaemon } from './main/ipc.js'
 import { dictationPort, transcribeDictation } from './main/voice.js'
 import { saveDesktopWorkspace } from './main/workspaceSettings.js'
 import {
@@ -61,14 +64,6 @@ function appIcon(): ReturnType<typeof nativeImage.createFromPath> | undefined {
   return undefined
 }
 
-let daemon: DaemonRpc | null = null
-let remote: RemoteConnection | null = null
-let remoteMachine: RemoteTarget | null = null
-let remoteAttempt: AbortController | null = null
-let remoteError = ''
-let selectedWorkspace: string | null = null
-let resumeSession: string | null = null
-
 // ── Native notifications + launch at login ──────────────────────────────
 // Needs-input (approval, question) and task-finished moments deserve a ping
 // only when the user is NOT already looking at the app — the preference and
@@ -76,16 +71,15 @@ let resumeSession: string | null = null
 
 let notificationsEnabled = true
 
-function maybeNotify(type: string, payload: Record<string, unknown>): void {
+function maybeNotify(window: BrowserWindow, type: string, payload: Record<string, unknown>): void {
   if (!notificationsEnabled || !Notification.isSupported()) return
-  if (BrowserWindow.getAllWindows().some((window) => !window.isDestroyed() && window.isFocused()))
+  if (window.isDestroyed() || window.isFocused())
     return
   const decision = notificationFor({ type, payload })
   if (!decision) return
   const ping = new Notification({ title: decision.title, body: decision.body })
   ping.on('click', () => {
-    const window = BrowserWindow.getAllWindows().find((w) => !w.isDestroyed())
-    if (!window) return
+    if (window.isDestroyed()) return
     if (window.isMinimized()) window.restore()
     window.show()
     window.focus()
@@ -94,14 +88,14 @@ function maybeNotify(type: string, payload: Record<string, unknown>): void {
 }
 
 // ── Workspace selection ─────────────────────────────────────────────────
-// A workspace is a folder: its daemon owns that project's sessions, and the
+// A workspace is a folder: the shared daemon isolates its sessions, and the
 // sidebar groups every chat under its folder name. The chosen folder is the
-// app's only daemon target, persisted across launches.
+// window's daemon target, persisted across launches.
 
 const workspaceFile = (): string => join(xerxesHome(), 'desktop.json')
 
 function loadWorkspace(): string | null {
-  // Sync read keeps startup deterministic; the file is a one-field object.
+  // Legacy fallback for installations without a saved window layout.
   try {
     const raw = readFileSync(workspaceFile(), 'utf8')
     const parsed = JSON.parse(raw) as { workspace?: unknown }
@@ -120,34 +114,14 @@ async function pickWorkspace(): Promise<string | null> {
   return result.canceled || !result.filePaths[0] ? null : result.filePaths[0]
 }
 
-/** Point the shell at a new workspace daemon and give the renderer a clean boot. */
-function useProject(directory: string, sessionId: string | null = null): void {
-  saveDesktopWorkspace(workspaceFile(), directory)
-  remoteAttempt?.abort()
-  remoteAttempt = null
-  void remote?.close()
-  remote = null
-  remoteMachine = null
-  remoteError = ''
-  selectedWorkspace = directory
-  resumeSession = sessionId
-  const next = new DaemonRpc({ projectDir: directory })
-  const previous = daemon
-  daemon = next
-  registerDaemonBridge(next)
-  previous?.dispose()
-  for (const window of BrowserWindow.getAllWindows()) {
-    if (!window.isDestroyed()) window.webContents.reload()
-  }
-}
-
-function createWindow(): BrowserWindow {
+function createWindow(saved?: SavedWindow): BrowserWindow {
   // Windows/Linux window icon (macOS reads the dock tile set at boot).
   const windowIcon = process.platform === 'darwin' ? undefined : appIcon()
   const window = new BrowserWindow({
     title: APP_NAME,
     width: 1560,
     height: 980,
+    ...(saved ? visibleWindowBounds(saved.bounds, screen.getAllDisplays().map(display => display.workArea)) : {}),
     minWidth: 760,
     minHeight: 560,
     // Native backdrop material is visible through navigation only. Content
@@ -169,62 +143,163 @@ function createWindow(): BrowserWindow {
     },
   })
 
-  window.once('ready-to-show', () => window.show())
-  void window.loadFile(join(here, 'renderer', 'index.html'))
+  window.once('ready-to-show', () => {
+    if (saved?.maximized) window.maximize()
+    if (saved?.fullscreen) window.setFullScreen(true)
+    window.show()
+  })
+  void window.loadFile(join(here, 'renderer', 'index.html')).catch(error => console.error('Desktop page load failed:', error))
 
   // Agent output must not navigate the shell away.
   window.webContents.setWindowOpenHandler(({ url }) => {
     void shell.openExternal(url)
     return { action: 'deny' }
   })
+  window.on('page-title-updated', event => event.preventDefault())
   window.webContents.on('will-navigate', (event) => event.preventDefault())
 
   return window
 }
 
-void app.whenReady().then(async () => {
-  app.setAboutPanelOptions({ applicationName: APP_NAME })
-  // The dock/taskbar icon is the phoenix mark; on macOS the running app's
-  // dock tile only changes through app.dock.
-  const icon = appIcon()
-  if (icon && process.platform === 'darwin') app.dock?.setIcon(icon)
+const windowRoutes = new WindowRoutes<IpcMainInvokeEvent>()
+const registeredChannels = new Set<string>()
+const cleanupWindows = new Set<() => void>()
+
+const windowStates = new Map<number, () => SavedWindow>()
+let quitting = false
+let saveTimer: ReturnType<typeof setTimeout> | undefined
+const layoutFile = () => join(xerxesHome(), 'desktop-windows.json')
+function persistWindows(): void {
+  if (saveTimer) clearTimeout(saveTimer)
+  saveTimer = undefined
+  try { saveWindowLayout(layoutFile(), [...windowStates.values()].map(read => read())) }
+  catch (error) { console.error('Could not save desktop windows:', error) }
+}
+function scheduleWindowSave(): void {
+  if (quitting) return
+  if (saveTimer) clearTimeout(saveTimer)
+  saveTimer = setTimeout(persistWindows, 250)
+}
+
+function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: SavedWindow): BrowserWindow {
+  let daemon: DaemonRpc | null = null
+  let remote: RemoteConnection | null = null
+  let remoteMachine: RemoteTarget | null = null
+  let remoteAttempt: AbortController | null = null
+  let remoteError = ''
+  let selectedWorkspace: string | null = null
+  let resumeSession: string | null = saved?.sessionId ?? null
+  let currentSession: string | null = resumeSession
+
+
+  const window = createWindow(saved)
+  const recover = windowRecovery({
+    closed: () => window.isDestroyed(),
+    prompt: async detail => {
+      window.show()
+      const result = await dialog.showMessageBox(window, {
+        type: 'error', message: 'The workspace view stopped responding',
+        detail: `${detail}\n\nReload this view to reconnect to your session. Running work stays in the daemon.`,
+        buttons: ['Reload view', 'Cancel'], defaultId: 0, cancelId: 1,
+      })
+      return result.response === 0
+    },
+    reload: async () => {
+      resumeSession = currentSession
+      await window.loadFile(join(here, 'renderer', 'index.html'))
+      if (!window.isDestroyed()) {
+        window.show()
+        window.focus()
+        window.webContents.focus()
+      }
+    },
+    report: error => console.error('Desktop recovery failed:', error),
+  })
+  window.webContents.on('render-process-gone', (_event, details) => {
+    if (details.reason !== 'clean-exit') void recover(`Renderer exited: ${details.reason} (code ${details.exitCode}).`)
+  })
+  window.webContents.on('did-fail-load', (_event, code, description, _url, isMainFrame) => {
+    // ERR_ABORTED is expected when a workspace switch replaces a navigation.
+    if (isMainFrame && code !== -3) void recover(`Page load failed: ${description} (${code}).`)
+  })
+  const id = window.webContents.id
+  const attach = (next?: DaemonRpc) => registerDaemonBridge(window.webContents, next, (type, payload) => maybeNotify(window, type, payload), (method, result) => {
+    if (method !== 'initialize' && method !== 'session.open') return
+    const session = result.session as Record<string, unknown> | undefined
+    if (session && typeof session.id === 'string' && /^[a-zA-Z0-9_-]{1,256}$/.test(session.id)) {
+      currentSession = session.id
+      scheduleWindowSave()
+    }
+  })
+  const handle = <Args extends unknown[], Result>(channel: string, handler: (event: IpcMainInvokeEvent, ...args: Args) => Result): void => {
+    windowRoutes.bind(id, channel, handler)
+    if (!registeredChannels.has(channel)) {
+      registeredChannels.add(channel)
+      ipcMain.handle(channel, (event, ...args: unknown[]) => windowRoutes.invoke(channel, event, args))
+    }
+  }
+  /** Point the shell at a new workspace daemon and give the renderer a clean boot. */
+  function useProject(directory: string, sessionId: string | null = null): void {
+    if (window.isDestroyed()) throw new Error('Workspace window is closed')
+    saveDesktopWorkspace(workspaceFile(), directory)
+    remoteAttempt?.abort()
+    remoteAttempt = null
+    void remote?.close()
+    remote = null
+    remoteMachine = null
+    remoteError = ''
+    selectedWorkspace = directory
+    window.setTitle(`${basename(directory)} — ${APP_NAME}`)
+    resumeSession = sessionId
+    currentSession = sessionId
+    scheduleWindowSave()
+    const next = new DaemonRpc({ projectDir: directory })
+    const previous = daemon
+    daemon = next
+    attach(next)
+    previous?.dispose()
+    if (!window.isDestroyed()) window.webContents.reload()
+  }
+
+
   // Workspace gate: with no saved workspace the shell boots WITHOUT a daemon
   // and the renderer shows the create-workspace screen. A daemon target only
   // exists once the user picks a folder — a silent cwd fallback would open
   // the app on a workspace the user never chose.
-  let workspace = loadWorkspace()
+  const workspace = initialWorkspace
   selectedWorkspace = workspace
-  registerDaemonBridge()
+  if (workspace) window.setTitle(`${basename(workspace)} — ${APP_NAME}`)
+  attach()
   if (workspace) {
     daemon = new DaemonRpc({ projectDir: workspace })
-    registerDaemonBridge(daemon)
+    attach(daemon)
     // Warm the connection without gating first paint on it.
     void daemon.call('runtime.status', {}).catch(() => {})
   }
   // The renderer's workspace gate lands here: pick a folder (or enter one
   // from the sidebar), move the bridge to that project's daemon, reload for
   // a clean session view.
-  ipcMain.handle('desktop:choose-workspace', async () => {
+  handle('desktop:choose-workspace', async () => {
     const picked = await pickWorkspace()
     if (!picked) return null
     useProject(picked)
     return picked
   })
-  ipcMain.handle('desktop:use-workspace', (_event, dir: unknown, sessionId?: unknown) => {
+  handle('desktop:use-workspace', (_event, dir: unknown, sessionId?: unknown) => {
     if (typeof dir !== 'string' || !dir) throw new TypeError('Invalid workspace directory')
     if (sessionId !== undefined && (typeof sessionId !== 'string' || !sessionId || sessionId.length > 256 || /[\x00-\x1f]/.test(sessionId))) throw new TypeError('Invalid resume session id')
     if (remote && sessionId) throw new Error('Open this session from its saved SSH workspace first.')
     if (dir !== selectedWorkspace || remote || sessionId) useProject(dir, typeof sessionId === 'string' ? sessionId : null)
     return dir
   })
-  ipcMain.handle('desktop:workspace', () => selectedWorkspace)
-  ipcMain.handle('desktop:resume', () => {
+  handle('desktop:workspace', () => selectedWorkspace)
+  handle('desktop:resume', () => {
     const selected = resumeSession
     resumeSession = null
     return selected
   })
   let voiceRequest: AbortController | null = null
-  ipcMain.handle('desktop:voice', async (_event, action: unknown, value: unknown) => {
+  handle('desktop:voice', async (_event, action: unknown, value: unknown) => {
     if (action === 'cancel') {
       voiceRequest?.abort()
       return true
@@ -243,7 +318,54 @@ void app.whenReady().then(async () => {
       if (voiceRequest === controller) voiceRequest = null
     }
   })
-  ipcMain.handle(
+  async function connectRemote(params: Record<string, unknown>) {
+    if (remoteAttempt) throw new Error('A connection is already being prepared')
+    const machine = remoteTarget(params.machine),
+      controller = new AbortController()
+    remoteAttempt = controller
+    remoteError = ''
+    try {
+      const next = await openRemote(machine, controller.signal, (error) => {
+        remoteError = error.message
+      })
+      const rpc = new DaemonRpc({ projectDir: next.projectDir, socketPath: next.socketPath })
+      try {
+        await rpc.call('runtime.status')
+        controller.signal.throwIfAborted()
+      } catch (error) {
+        rpc.dispose()
+        await next.close()
+        throw error
+      }
+      resumeSession =
+        (remoteMachine ?? saved?.remote)?.target === machine.target &&
+        (remoteMachine ?? saved?.remote)?.workspacePath === machine.workspacePath &&
+        typeof params.resume_session_id === 'string' &&
+        /^[a-zA-Z0-9_-]{1,128}$/.test(params.resume_session_id)
+          ? params.resume_session_id
+          : null
+      const previous = remote
+      daemon?.dispose()
+      daemon = rpc
+      attach(rpc)
+      remote = next
+      remoteMachine = machine
+      selectedWorkspace = next.projectDir
+      currentSession = resumeSession
+      scheduleWindowSave()
+      window.setTitle(`${machine.alias} · ${basename(next.projectDir)} — ${APP_NAME}`)
+      await previous?.close()
+      if (!window.isDestroyed()) window.webContents.reload()
+      return { ok: true }
+    } catch (error) {
+      remoteError = error instanceof Error ? error.message : String(error)
+      throw error
+    } finally {
+      if (remoteAttempt === controller) remoteAttempt = null
+    }
+
+  }
+  handle(
     'desktop:remote',
     async (_event, action: unknown, params: Record<string, unknown>) => {
       if (!params || typeof params !== 'object' || Array.isArray(params))
@@ -264,50 +386,7 @@ void app.whenReady().then(async () => {
         remoteAttempt?.abort()
         return { ok: true }
       }
-      if (action === 'connect') {
-        if (remoteAttempt) throw new Error('A connection is already being prepared')
-        const machine = remoteTarget(params.machine),
-          controller = new AbortController()
-        remoteAttempt = controller
-        remoteError = ''
-        try {
-          const next = await openRemote(machine, controller.signal, (error) => {
-            remoteError = error.message
-          })
-          const rpc = new DaemonRpc({ projectDir: next.projectDir, socketPath: next.socketPath })
-          try {
-            await rpc.call('runtime.status')
-            controller.signal.throwIfAborted()
-          } catch (error) {
-            rpc.dispose()
-            await next.close()
-            throw error
-          }
-          resumeSession =
-            remoteMachine?.target === machine.target &&
-            remoteMachine?.workspacePath === machine.workspacePath &&
-            typeof params.resume_session_id === 'string' &&
-            /^[a-zA-Z0-9_-]{1,128}$/.test(params.resume_session_id)
-              ? params.resume_session_id
-              : null
-          const previous = remote
-          daemon?.dispose()
-          daemon = rpc
-          registerDaemonBridge(rpc)
-          remote = next
-          remoteMachine = machine
-          selectedWorkspace = next.projectDir
-          await previous?.close()
-          for (const window of BrowserWindow.getAllWindows())
-            if (!window.isDestroyed()) window.webContents.reload()
-          return { ok: true }
-        } catch (error) {
-          remoteError = error instanceof Error ? error.message : String(error)
-          throw error
-        } finally {
-          if (remoteAttempt === controller) remoteAttempt = null
-        }
-      }
+      if (action === 'connect') return connectRemote(params)
       let command: string
       if (action === 'hosts' || action === 'list') command = action
       else if (action === 'browse')
@@ -329,19 +408,18 @@ void app.whenReady().then(async () => {
 
   // Native capabilities behind validated, narrow channels (repo law: every
   // preload capability has a bridge contract, a default wrapper, and types).
-  setDaemonEventObserver((type, payload) => maybeNotify(type, payload))
-  ipcMain.handle('native:notifications:set', (_event, on: unknown) => {
+  handle('native:notifications:set', (_event, on: unknown) => {
     if (typeof on !== 'boolean') throw new TypeError('notifications expects a boolean')
     notificationsEnabled = on
     return notificationsEnabled
   })
-  ipcMain.handle('native:login-item:get', () => app.getLoginItemSettings().openAtLogin)
-  ipcMain.handle('native:login-item:set', (_event, on: unknown) => {
+  handle('native:login-item:get', () => app.getLoginItemSettings().openAtLogin)
+  handle('native:login-item:set', (_event, on: unknown) => {
     if (typeof on !== 'boolean') throw new TypeError('login item expects a boolean')
     app.setLoginItemSettings({ openAtLogin: on })
     return app.getLoginItemSettings().openAtLogin
   })
-  ipcMain.handle('native:preset:open-path', async (_event, value: unknown) => {
+  handle('native:preset:open-path', async (_event, value: unknown) => {
     if (typeof value !== 'string' || !value) throw new TypeError('invalid preset path')
     const root = resolve(xerxesHome(), 'agents')
     const candidate = resolve(value)
@@ -351,20 +429,65 @@ void app.whenReady().then(async () => {
     }
     return (await shell.openPath(candidate)) === ''
   })
-  createWindow()
-
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+  handle('desktop:new-window', async (_event, directory?: unknown) => {
+    if (directory !== undefined && (typeof directory !== 'string' || !isAbsolute(directory) || /[\x00-\x1f]/.test(directory))) throw new TypeError('Invalid workspace directory')
+    const picked = typeof directory === 'string' ? directory : await pickWorkspace()
+    if (!picked || window.isDestroyed()) return null
+    createWorkspaceWindow(picked)
+    return picked
   })
-})
+  const cleanup = () => {
+    windowStates.delete(id)
+    if (!quitting) scheduleWindowSave()
+    windowRoutes.remove(id)
+    detachDaemon(id)
+    daemon?.dispose()
+    remoteAttempt?.abort()
+    voiceRequest?.abort()
+    void remote?.close()
+    cleanupWindows.delete(cleanup)
+  }
+  cleanupWindows.add(cleanup)
+  window.once('closed', cleanup)
+  windowStates.set(id, () => ({
+    workspace: remoteMachine || saved?.remote && !selectedWorkspace ? null : selectedWorkspace,
+    remote: remoteMachine ?? (selectedWorkspace ? null : saved?.remote ?? null),
+    sessionId: currentSession, bounds: window.getNormalBounds(), maximized: window.isMaximized(), fullscreen: window.isFullScreen(),
+  }))
+  window.on('move', scheduleWindowSave)
+  window.on('resize', scheduleWindowSave)
+  window.on('maximize', scheduleWindowSave)
+  window.on('unmaximize', scheduleWindowSave)
+  window.on('enter-full-screen', scheduleWindowSave)
+  window.on('leave-full-screen', scheduleWindowSave)
+  scheduleWindowSave()
+  if (saved?.remote) void connectRemote({ machine: saved.remote, resume_session_id: saved.sessionId }).catch(error => {
+    if (!window.isDestroyed()) void dialog.showMessageBox(window, { type: 'error', message: 'Could not reopen SSH workspace', detail: error instanceof Error ? error.message : String(error) })
+  })
+  return window
+}
 
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit()
-})
+void app.whenReady().then(async () => {
+  app.setAboutPanelOptions({ applicationName: APP_NAME })
+  // The dock/taskbar icon is the phoenix mark; on macOS the running app's
+  // dock tile only changes through app.dock.
+  const icon = appIcon()
+  if (icon && process.platform === 'darwin') app.dock?.setIcon(icon)
 
-app.on('will-quit', () => {
-  // Ours drops the socket; a launched daemon keeps serving other surfaces.
-  daemon?.dispose()
-  remoteAttempt?.abort()
-  void remote?.close()
+  Menu.setApplicationMenu(Menu.buildFromTemplate([
+    ...(process.platform === 'darwin' ? [{ role: 'appMenu' as const }] : []),
+    { label: 'File', submenu: [
+      { label: 'New Window', accelerator: 'CmdOrCtrl+Shift+N', click: () => { createWorkspaceWindow() } },
+      { label: 'Open Workspace in New Window…', accelerator: 'CmdOrCtrl+Shift+O', click: () => { void pickWorkspace().then(directory => { if (directory) createWorkspaceWindow(directory) }) } },
+      { type: 'separator' }, { role: 'close' },
+    ] },
+    { role: 'editMenu' }, { role: 'viewMenu' }, { role: 'windowMenu' },
+  ]))
+  const saved = loadWindowLayout(layoutFile())
+  if (saved?.length) for (const state of saved) createWorkspaceWindow(state.remote ? null : state.workspace, state)
+  else createWorkspaceWindow(loadWorkspace())
+  app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWorkspaceWindow(loadWorkspace()) })
 })
+app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit() })
+app.on('before-quit', () => { persistWindows(); quitting = true })
+app.on('will-quit', () => { for (const cleanup of [...cleanupWindows]) cleanup() })

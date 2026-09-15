@@ -11,12 +11,14 @@
  * (per-file undo, per-model pricing) is not faked.
  */
 
-import { useLayoutEffect, useEffect, useMemo, useRef, useState, type ReactElement, type RefObject } from 'react'
+import { createPortal } from 'react-dom'
+import { createContext, useContext, type ReactNode, useLayoutEffect, useEffect, useMemo, useRef, useState, type ReactElement, type RefObject } from 'react'
 
 import { saveAppearance } from './appearance.js'
 import { desktopError } from './desktopRpc.js'
 import { useDialogFocus } from './dialogFocus.js'
 import { ChannelsCard } from './ChannelsPanel.js'
+import { LspCard } from "./LspPanel.js"
 import { TerminalsCard } from './TerminalsPanel.js'
 import { store, type Snapshot } from './store.js'
 import type { CachedModel, ModelChoice, PermissionMode, ProviderRow, SettingsTab } from './types.js'
@@ -31,6 +33,7 @@ const SETTINGS_TABS: ReadonlyArray<{ id: SettingsTab; label: string }> = [
   { id: 'channels', label: 'Channels' },
   { id: 'mcp', label: 'MCP Servers' },
   { id: 'terminals', label: 'Terminals' },
+  { id: 'lsp', label: 'Language servers' },
 ]
 
 export function SettingsModal({ snap }: { snap: Snapshot }): ReactElement | null {
@@ -65,6 +68,7 @@ export function SettingsModal({ snap }: { snap: Snapshot }): ReactElement | null
           {snap.settingsTab === 'channels' && <ChannelsCard snap={snap} />}
           {snap.settingsTab === 'mcp' && <McpCard snap={snap} />}
           {snap.settingsTab === 'terminals' && <TerminalsCard snap={snap} />}
+          {snap.settingsTab === 'lsp' && <LspCard snap={snap} />}
         </div>
       </div>
     </div>
@@ -233,7 +237,7 @@ function GeneralCard({ snap }: { snap: Snapshot }): ReactElement {
         <div className="row__main">
           <div className="row__t">Daemon</div>
           <div className="row__s">
-            {snap.connection === 'online' ? 'connected · auto-spawned per project' : 'offline — retrying with backoff'}
+            {snap.connection === 'online' ? 'connected · shared across workspaces' : 'offline — retrying with backoff'}
           </div>
         </div>
         <button className="chipbtn" onClick={() => store.retryConnection()}>reconnect</button>
@@ -601,6 +605,7 @@ export function ProviderForm({
   const [model, setModel] = useState(editing?.model ?? '')
   const [apiKey, setApiKey] = useState('')
   const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
   const types = snap.providerTypes
   const known = types.find(t => t.name === provider)
   const profileModels: readonly CachedModel[] = editing
@@ -616,12 +621,15 @@ export function ProviderForm({
   // Valid when the wire's required fields are covered; base URL may fall
   // back to the registry default for a known type.
   const valid = name.trim() !== '' && model.trim() !== '' && (baseUrl.trim() !== '' || (known?.baseUrl ?? '') !== '')
-  const submit = (): void => {
+  const submit = async (): Promise<void> => {
+    if (busy || !valid) return
     setBusy(true)
-    store.saveProvider({ name, baseUrl, model, provider, apiKey })
-    // The store surfaces refusals as transcript notifications; close on the
-    // optimistic path only when the required fields are present.
-    if (valid) onCancel()
+    setError('')
+    try {
+      const failure = await store.saveProvider({ name, baseUrl, model, provider, apiKey })
+      if (failure) setError(failure)
+      else onCancel()
+    } finally { setBusy(false) }
   }
   return (
     <div className="provform">
@@ -714,9 +722,10 @@ export function ProviderForm({
           ) : null}
         </div>
       </details>
+      {error && <p role="alert" className="studio-error">{error}</p>}
       <div className="approval__row" style={{ paddingTop: 4 }}>
-        <button className="btn btn--solid" disabled={busy || !valid} onClick={submit}>Save &amp; activate</button>
-        <button className="btn" onClick={onCancel}>Cancel</button>
+        <button className="btn btn--solid" disabled={busy || !valid} onClick={() => void submit()}>Save &amp; activate</button>
+        <button className="btn" disabled={busy} onClick={onCancel}>Cancel</button>
       </div>
       <p className="row__s">Saving writes the profile, makes it the active provider, and points this session at its model — exactly what the TUI's <code>/provider</code> flow does.</p>
     </div>
@@ -880,7 +889,7 @@ function PermissionsCard({ snap }: { snap: Snapshot }): ReactElement {
       <div className="row">
         <div className="row__main">
           <div className="row__t">Scope</div>
-          <div className="row__s">per-project daemon · this workspace only</div>
+          <div className="row__s">Current session on the shared daemon</div>
         </div>
       </div>
     </>
@@ -888,11 +897,22 @@ function PermissionsCard({ snap }: { snap: Snapshot }): ReactElement {
 }
 
 
+const PickerAnchor = createContext<RefObject<HTMLSpanElement | null> | null>(null)
+
+/** Escape compositor containing blocks while keeping the invoking chip as anchor. */
+export function PickerLayer({ children }: { children: ReactNode }): ReactElement {
+  const anchor = useRef<HTMLSpanElement>(null)
+  return <><span hidden ref={anchor} /><PickerAnchor.Provider value={anchor}>
+    {typeof document === 'undefined' ? children : createPortal(<div className="atelier picker-layer">{children}</div>, document.body)}
+  </PickerAnchor.Provider></>
+}
+
 /** Anchor each picker to its invoking chip and clamp it inside the viewport. */
 function useAnchoredPicker(ref: RefObject<HTMLElement | null>): void {
+  const origin = useContext(PickerAnchor)
   useLayoutEffect(() => {
     const popup = ref.current?.closest<HTMLElement>('.modelpop')
-    const anchor = popup?.parentElement?.closest<HTMLElement>('.chipanchor')
+    const anchor = origin?.current?.closest<HTMLElement>('.chipanchor') ?? popup?.parentElement?.closest<HTMLElement>('.chipanchor')
     if (!popup || !anchor) return
     const trigger = anchor.querySelector<HTMLElement>('button')
     const place = (): void => {
@@ -913,7 +933,7 @@ function useAnchoredPicker(ref: RefObject<HTMLElement | null>): void {
     observer.observe(anchor)
     window.addEventListener('resize', place)
     return () => { observer.disconnect(); window.removeEventListener('resize', place); trigger?.focus() }
-  }, [ref])
+  }, [ref, origin])
 }
 
 // ── Model picker (anchored popover) ─────────────────────────────────────
@@ -1238,7 +1258,7 @@ export function ReasoningPicker({ snap, onClose }: { snap: Snapshot; onClose: ()
       <div className="backdrop backdrop--clear" onClick={onClose} />
       <div
         ref={ref}
-        className="modelpop"
+        className="modelpop modelpop--effort"
         role="dialog"
         aria-label="Reasoning effort"
         tabIndex={-1}

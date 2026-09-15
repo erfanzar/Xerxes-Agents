@@ -25,6 +25,7 @@ export interface XerxesBridge {
   onEvent(handler: (event: DaemonEvent) => void): () => void
   /** Present the folder picker; the shell switches workspace and reloads. */
   chooseWorkspace?(): Promise<unknown>
+  openWorkspaceWindow?(dir?: string): Promise<unknown>
   /** Enter a workspace folder directly (no dialog). */
   useWorkspace?(dir: string, resumeSessionId?: string): Promise<unknown>
   /** Saved workspace folder, or null when the create-workspace gate shows. */
@@ -135,6 +136,25 @@ export interface SessionRow {
   readonly cwd: string
   /** No daemon-derived title — eligible for first-message enrichment. */
   readonly untitled: boolean
+  /** Optional details reported by the parent daemon's subagent snapshot. */
+  readonly agentDetails?: {
+    readonly summary: string
+    readonly error: string
+    readonly model: string
+    readonly toolCount?: number | undefined
+    readonly inputTokens?: number | undefined
+    readonly outputTokens?: number | undefined
+    readonly filesRead: readonly string[]
+    readonly filesWritten: readonly string[]
+    readonly goal?: string
+    readonly parentId?: string
+    readonly thinking?: readonly string[]
+    readonly notes?: readonly string[]
+    readonly toolCalls?: readonly ToolItem[]
+    readonly startedAt?: number
+    readonly lastEventAt?: number
+    readonly durationSeconds?: number
+  }
 }
 
 // ── Approval ────────────────────────────────────────────────────────────
@@ -330,7 +350,7 @@ export interface SessionSearchStats {
 
 // ── Settings ────────────────────────────────────────────────────────────
 
-export type SettingsTab = 'general' | 'models' | 'agents' | 'permissions' | 'mcp' | 'channels' | 'terminals'
+export type SettingsTab = 'general' | 'models' | 'agents' | 'permissions' | 'mcp' | 'channels' | 'terminals' | 'lsp'
 
 /** One MCP server's redacted status, straight from the daemon wire. */
 export interface McpServerStatus {

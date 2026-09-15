@@ -1,6 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { daemonPaths } from '../src/daemon/paths.js'
 import { expect, test } from 'bun:test'
 
 import {
@@ -92,7 +93,7 @@ test.skipIf(process.platform === 'win32')('service renderers preserve launchd an
   const paths = daemonServicePaths('/home/agent', '/home/agent/.xerxes')
   expect(paths).toEqual({
     defaultLogDirectory: '/home/agent/.xerxes/daemon/logs',
-    defaultPidPath: '/home/agent/.xerxes/daemon/daemon.pid',
+    defaultPidPath: daemonPaths('.', { XERXES_HOME: '/home/agent/.xerxes' }).pidPath,
     launchdDirectory: '/home/agent/Library/LaunchAgents',
     launchdPlistPath: '/home/agent/Library/LaunchAgents/com.xerxes.daemon.plist',
     systemdDirectory: '/home/agent/.config/systemd/user',

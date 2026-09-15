@@ -12,6 +12,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 
 import { Markdown } from './markdown.js'
+import { TodoList } from './Todos.js'
 import { isPlanReview, store, type Snapshot } from './store.js'
 import type { DiffFile, LogEntry, PlanState } from './types.js'
 
@@ -102,6 +103,7 @@ export function PlanTab({ snap }: { snap: Snapshot }): ReactElement {
   const done = items.filter(item => item.done).length
 
   if (!plan) {
+    if (snap.todos != null) return <div className="plan plan--tab"><TodoList items={snap.todos} /></div>
     return (
       <div className="tabempty">
         <div className="tabempty__mark">⏸</div>
@@ -116,6 +118,7 @@ export function PlanTab({ snap }: { snap: Snapshot }): ReactElement {
   }
   return (
     <div className="plan plan--tab">
+      {snap.todos != null && <TodoList items={snap.todos} />}
       <div className="plan__head">
         <span className="plan__title">Working plan</span>
         <span className="plan__meta">

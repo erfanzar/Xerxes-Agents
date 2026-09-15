@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 /**
- * DaemonRpc — one NDJSON JSON-RPC 2.0 connection to the per-project daemon
+ * DaemonRpc — one NDJSON JSON-RPC 2.0 connection to the shared daemon
  * (ui/PROTOCOL.md is the frozen contract).
  *
  * Deliberately small: `call` auto-connects (reusing a listening daemon or
@@ -12,6 +12,8 @@
  * stranding the UI offline.
  */
 
+import { releaseIdleProjectDaemon } from '../../ui/lib/daemonMigration.js'
+import { existsSync } from 'node:fs'
 import { EventEmitter } from 'node:events'
 import type { ChildProcess } from 'node:child_process'
 import { Socket } from 'node:net'
@@ -19,6 +21,7 @@ import { Socket } from 'node:net'
 import {
   canonicalProjectDir,
   daemonAddress,
+  legacyProjectDaemonPaths,
   launchDaemon,
   type Env,
 } from './spawn.js'
@@ -34,6 +37,7 @@ const RETRY_BASE_MS = 250
 const RETRY_MAX_MS = 5_000
 
 interface Waiter {
+  method: string
   resolve: (value: Record<string, unknown>) => void
   reject: (error: Error) => void
   timer: NodeJS.Timeout
@@ -103,7 +107,12 @@ export class DaemonRpc extends EventEmitter {
     params: Record<string, unknown> = {},
   ): Promise<T> {
     await this.ensure()
-    return this.send<T>(method, params)
+    // A shared daemon's launch directory is not this window's workspace.
+    // Bind every opening handshake to the host-owned window target, including
+    // resumes and reconnects, rather than trusting a renderer-supplied path.
+    return this.send<T>(method, method === 'initialize' || method === 'session.open'
+      ? { ...params, project_dir: this.projectDir }
+      : params)
   }
 
   /** Replace only an idle local runtime, then wait for a fresh connection. */
@@ -182,6 +191,14 @@ export class DaemonRpc extends EventEmitter {
     if (this.externalSocket) {
       if (!await this.tryAttach(this.externalSocket)) throw new Error('SSH transport unavailable. Reconnect from Workspace.')
       this.announce(true); return
+    }
+    // Keep existing project work attached until its old runtime exits.
+    const legacy = legacyProjectDaemonPaths(this.projectDir, this.env).socketPath
+    if (!this.env.XERXES_DAEMON_SOCKET && (process.platform === 'win32' || existsSync(legacy)) && await this.tryAttach(legacy)) {
+      if (!await releaseIdleProjectDaemon(method => this.send(method, {}))) {
+        this.announce(true)
+        return
+      }
     }
     const { socketPath, pidPath } = daemonAddress(this.projectDir, this.env)
     if (await this.tryAttach(socketPath)) {
@@ -352,6 +369,12 @@ export class DaemonRpc extends EventEmitter {
         params.payload && typeof params.payload === 'object' && !Array.isArray(params.payload)
           ? (params.payload as Record<string, unknown>)
           : {}
+      // initialize returns the authoritative structured transcript. Its legacy
+      // history notifications travel over a separate Electron IPC channel and
+      // can arrive after that response, duplicating already hydrated messages.
+      // Slash-command replay outside initialization remains available.
+      if (type === 'notification' && payload.category === 'history'
+        && [...this.waiters.values()].some(waiter => waiter.method === 'initialize')) return
       this.emit('event', type, payload)
       return
     }
@@ -371,6 +394,7 @@ export class DaemonRpc extends EventEmitter {
         rejectCall(new Error(`rpc timeout: ${method} (${this.deadlineMs}ms)`))
       }, this.deadlineMs)
       this.waiters.set(id, {
+        method,
         resolve: resolveCall as (value: Record<string, unknown>) => void,
         reject: rejectCall,
         timer,

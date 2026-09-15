@@ -425,7 +425,7 @@ export class BridgeServer {
             title: 'Provider connection',
             body: event.final
               ? `${event.error}\nUse /retry-connection to retry the last prompt.`
-              : `${event.error}\nRetrying provider connection in ${event.delay}ms `
+              : event.maxAttempts === 0 ? 'Retrying connection…' : `${event.error}\nRetrying provider connection in ${event.delay}ms `
                 + `(${event.attempt}/${event.maxAttempts}).`,
           })
         }

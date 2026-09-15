@@ -437,7 +437,7 @@ export class TerminalMonitors {
     watch.unsubscribe()
     if (watch.timer) clearTimeout(watch.timer)
     watch.state = state
-    this.activityChanges.notify()
+    if (watch.source && state !== 'interrupted') watch.sourceStatus = `Source closed (${state}).`
     watch.partial = ''
     delete watch.matchedLine
     if (state === 'interrupted' && watch.source?.kind === 'file') watch.sourceStatus = 'File watch interrupted. Changes during downtime were not observed; create a new watch.'
@@ -447,6 +447,7 @@ export class TerminalMonitors {
       output: `${state} · ${watch.sequence} matches · ${watch.droppedEvents} older events omitted\n${this.output(watch)}`,
       outputTruncated: watch.droppedEvents > 0, notify: watch.sequence > 0,
     }) } catch (error) { this.fail(watch, error) }
+    this.activityChanges.notify()
     this.pruneCompleted()
   }
   private pruneCompleted(): void {

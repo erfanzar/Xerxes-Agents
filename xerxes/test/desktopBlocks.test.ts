@@ -102,6 +102,24 @@ describe('BlockBuilder', () => {
       expect.objectContaining({ kind: 'notice', error: false, text: 'resumed session' }),
     ])
   })
+
+  test('history replay preserves message and tool semantics without fabricated output', () => {
+    const b = new BlockBuilder()
+    const replay = (type: string, body: string, payload = {}) => b.push('notification', { category: 'history', type, body, payload })
+    replay('replay_user', '✨ Review\nthis file')
+    replay('replay_assistant', 'Checking it.', { thinking: 'Inspect the file' })
+    replay('replay_tool', '✓ ReadFile', { name: 'ReadFile', context: '{"file_path":"src/index.ts"}', ok: true, duration_ms: 500 })
+    replay('replay_tool', '✗ exec_command', { name: 'exec_command', ok: false, preview: 'Permission denied' })
+    replay('resumed', '── resumed session ──')
+    const blocks = [...b.all()]
+    expect(blocks.map(block => block.kind)).toEqual(['user', 'thinking', 'agent', 'tools'])
+    expect(blocks[0]).toMatchObject({ text: 'Review\nthis file' })
+    const tools = blocks.find(block => block.kind === 'tools')
+    expect(tools?.kind === 'tools' && tools.items).toEqual([
+      expect.objectContaining({ name: 'ReadFile', state: 'done', output: expect.stringContaining('History preview only') }),
+      expect.objectContaining({ name: 'exec_command', state: 'failed', error: 'Permission denied' }),
+    ])
+  })
 })
 
 describe('blocksFromStoredMessages', () => {

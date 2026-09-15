@@ -36,16 +36,16 @@ Newline-delimited JSON (NDJSON), one JSON-RPC 2.0 object per line, UTF-8, over a
 
 1. Resolve the project dir to the nearest Git root when available; otherwise
    use `realpath(cwd)` (falling back to the absolute path).
-2. Compute the per-project socket path through the native `daemonPaths()`
+2. Compute the per-user global socket path through the native `daemonPaths()`
    helpers (default layout):
 
    ```md
-   $XERXES_HOME/daemon/projects/<sha256(project_dir)[:16]>.sock
+   $XERXES_HOME/daemon/global-<sha256(resolved_xerxes_home)[:16]>.sock
    ```
 
    where `$XERXES_HOME` defaults to `~/.xerxes`. (`.pid` sits next to `.sock`.)
    `XERXES_DAEMON_SOCKET` can explicitly override the socket path; the gateway
-   and daemon use the same deterministic project-path calculation.
+   and daemon use the same deterministic home-path calculation.
 3. Try to `net.connect({ path })`. A compatible daemon already listening on the
    socket is attached without replacing it.
 4. If not reachable, spawn the daemon and poll `runtime.status` until the
@@ -1454,6 +1454,12 @@ Provider requests emit `status_update` with `kind: "provider_wait"` before
 waiting for output and `kind: "provider_ready"` when output begins or that
 attempt ends. These activity events do not replace usage or session metadata.
 
+Network recovery uses `status_update` with `kind: "network_retry"` and text
+`Retrying connection…`. It remains visible across provider attempts until
+`provider_ready` or turn completion. These recoverable failures do not append
+error messages to the transcript. Retries have capped backoff but no attempt
+limit; cancellation still ends the turn. TLS verification remains enabled.
+
 The `complete` RPC accepts optional `path_prefix` for directory browsing.
 Unlike mention completion, this is a literal path prefix (spaces are preserved),
 `./` lists the workspace root, and unreadable directories return an RPC error.
@@ -1474,3 +1480,11 @@ all active sessions, terminals, and monitors; unavailable activity checks block
 the restart. This legacy check is advisory rather than atomic across clients.
 The desktop attempts replacement once per app instance; busy work defers
 it, while failures remain visible and require retry rather than a restart loop.
+
+### Shared local daemon ownership
+
+TUI and desktop derive the same control address under `$XERXES_HOME/daemon` from the resolved Xerxes home, independent of project directory. Projects remain explicit on `initialize` and `session.open`; sessions retain their own cwd, permissions and instructions. Skill registries, MCP managers, agent presets and turn runners are scoped to the workspace within this one process. The v35 frames remain unchanged.
+
+Closing a TUI detaches its connection; it does not terminate the daemon. Build updates request `runtime.restart_if_idle`, which checks work across every session atomically. Explicit socket overrides and remote endpoints remain supported.
+
+Migration preserves old work: clients first attach to an already-running legacy project socket. The global daemon refuses to take that workspace while its old socket is alive, preventing two writers to a saved session. Clients migrate an idle legacy runtime only after its atomic restart endpoint approves shutdown. Busy runtimes and older servers without that endpoint remain attached. Once a legacy runtime exits, subsequent clients use the global socket.

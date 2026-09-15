@@ -268,3 +268,16 @@ test('summary rendering and strategy selection are stable and model-backed smart
   expect(result.stats.summaryCreated).toBe(true)
   expect(result.stats.substrategy).toBe('summarization')
 })
+
+test('tool previews keep emoji whole at both compaction truncation boundaries', () => {
+  const history = [
+    { role: 'assistant', content: '', tool_calls: [{ id: 'unicode', function: { name: 'exec_command', arguments: 'a'.repeat(199) + '😀tail' } }] },
+    { role: 'tool', tool_call_id: 'unicode', content: 'b'.repeat(399) + '🚀tail' },
+  ]
+  const before = JSON.stringify(history)
+  const prompt = renderMessagesForSummary(history)
+  expect(prompt.isWellFormed()).toBe(true)
+  expect(prompt).toContain('a'.repeat(199) + '… (+6 chars)')
+  expect(prompt).toContain('b'.repeat(399) + '… (+6 chars)')
+  expect(JSON.stringify(history)).toBe(before)
+})

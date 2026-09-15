@@ -33,7 +33,7 @@ export function resolveProjectDirectory(projectDirectory = process.cwd()): strin
 }
 
 /**
- * Match the current TypeScript gateway's per-project control-channel algorithm.
+ * Match the TypeScript gateway's per-user control-channel algorithm.
  *
  * POSIX hosts get a Unix socket under the Xerxes home. Windows has no Unix
  * sockets in this position, so the control channel is a named pipe instead —
@@ -44,6 +44,21 @@ export function resolveProjectDirectory(projectDirectory = process.cwd()): strin
  * run; `ui/lib/hostPlatform.ts` must derive the identical address.
  */
 export function daemonPaths(
+  projectDirectory = process.cwd(),
+  environment = process.env,
+  platform: NodeJS.Platform = process.platform,
+): DaemonPaths {
+  const digest = 'global-' + createHash('sha256').update(xerxesHome(environment), 'utf8').digest('hex').slice(0, 16)
+  const base = join(xerxesHome(environment), 'daemon')
+  const configuredSocket = environment.XERXES_DAEMON_SOCKET?.trim()
+  return {
+    socketPath: configuredSocket || controlChannelPath(base, digest, platform),
+    pidPath: join(base, `${digest}.pid`),
+  }
+}
+
+/** Read-only migration address for an already-running project daemon. */
+export function legacyProjectDaemonPaths(
   projectDirectory = process.cwd(),
   environment = process.env,
   platform: NodeJS.Platform = process.platform,

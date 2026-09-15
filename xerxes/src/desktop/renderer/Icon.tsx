@@ -9,6 +9,7 @@ const paths = {
   collapse: 'M3 7h4V3 M13 3v4h4 M17 13h-4v4 M7 17v-4H3',
   search: 'M14 14l4 4 M15 9a6 6 0 1 1-12 0 6 6 0 0 1 12 0',
   plus: 'M10 4v12 M4 10h12',
+  close: 'M5 5l10 10 M15 5L5 15',
   tools: 'M4 4h5v5H4z M12 4h4v5h-4z M4 12h5v4H4z M12 12h4v4h-4z',
   folder: 'M2 5h6l2 2h8v10H2z',
   file: 'M5 2h6l4 4v12H5z M11 2v5h4',

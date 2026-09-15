@@ -260,6 +260,35 @@ export class BlockBuilder {
         break
       }
       case 'notification': {
+        // Slash-command resume emits history notifications rather than live
+        // tool events. Keep their semantics without pretending the bounded
+        // replay payload contains the original output.
+        if (payload.category === 'history') {
+          const replay = isRecord(payload.payload) ? payload.payload : {}
+          const body = typeof payload.body === 'string' ? payload.body : ''
+          if (payload.type === 'replay_tool') {
+            const id = `replay-${this.nextId()}`
+            this.push('tool_call', { id, name: replay.name, arguments: replay.context })
+            this.push('tool_result', {
+              tool_call_id: id, name: replay.name, duration_ms: replay.duration_ms,
+              result: 'History preview only. Original output is not included in this replay.',
+              ...(replay.ok === false ? { error: typeof replay.preview === 'string' && replay.preview ? replay.preview : 'Tool execution failed.' } : {}),
+            })
+            break
+          }
+          if (payload.type === 'replay_user') {
+            this.pushUser(body.replace(/^✨\s?/, ''))
+            break
+          }
+          if (payload.type === 'replay_assistant') {
+            this.finalize()
+            if (typeof replay.thinking === 'string' && replay.thinking.trim()) this.push('think_part', { think: replay.thinking })
+            this.push('text_part', { text: body })
+            this.finalize()
+            break
+          }
+          if (payload.type === 'resumed') { this.finalize(); break }
+        }
         const message =
           (typeof payload.body === 'string' && payload.body) ||
           (typeof payload.message === 'string' && payload.message) ||

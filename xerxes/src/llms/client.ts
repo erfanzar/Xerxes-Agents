@@ -1599,6 +1599,9 @@ function responsesPayload(
     // the output cap and the sampling knobs have to come back off. The
     // subscription backend also forces store:false, which is why Codex
     // never reports cached_tokens — the API simply doesn't track them.
+    // Unlike the public Responses endpoint, the subscription backend expects
+    // instructions even for user-only requests (including context compaction).
+    payload.instructions = systemPrompt || 'You are a helpful assistant.'
     delete payload.max_output_tokens
     delete payload.temperature
     delete payload.top_p

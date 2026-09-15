@@ -2,13 +2,14 @@
 // Licensed under the Apache License, Version 2.0.
 //
 // GatewayClient — the TS side of the Xerxes TUI ⇄ daemon seam. It connects to
-// the per-project Unix domain socket published by the Bun TypeScript daemon
+// the per-user Unix domain socket published by the Bun TypeScript daemon
 // (spawning that daemon if none is reachable), speaks newline-delimited
 // JSON-RPC 2.0, and demuxes responses (carry `id`) from streaming events
 // (`method === "event"`). See `xerxes/src/ui/PROTOCOL.md` for the frozen contract.
 //
 // The transport is a Unix socket (Node `net`) rather than child stdio.
 
+import { releaseIdleProjectDaemon } from './lib/daemonMigration.js'
 import { type ChildProcess, execFile, execFileSync, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
@@ -69,6 +70,8 @@ const MAX_SESSION_KEYS = 200
 /** `$XERXES_HOME` or `~/.xerxes`. */
 function xerxesHome(): string {
   const override = (process.env.XERXES_HOME ?? '').trim()
+  if (override === '~') return homedir()
+  if (override.startsWith('~/') || override.startsWith('~\\')) return resolve(homedir(), override.slice(2))
   return override ? resolve(override) : join(homedir(), '.xerxes')
 }
 
@@ -98,8 +101,8 @@ export function resolveProjectDir(projectDir?: string): string {
 }
 
 /**
- * Per-project control-channel + pid paths. `XERXES_DAEMON_SOCKET` overrides the
- * channel address while retaining the deterministic per-project pid path.
+ * Per-user control-channel + pid paths. `XERXES_DAEMON_SOCKET` overrides the
+ * channel address while retaining the deterministic per-user pid path.
  *
  * Windows gets a named pipe rather than a Unix socket; `node:net` connects to
  * either through the same `path` option. This must derive the identical address
@@ -107,6 +110,20 @@ export function resolveProjectDir(projectDir?: string): string {
  * and starts a second one.
  */
 export function daemonPaths(
+  projectDir: string,
+  platform: NodeJS.Platform = process.platform
+): { socketPath: string; pidPath: string } {
+  const digest = 'global-' + createHash('sha256').update(xerxesHome(), 'utf8').digest('hex').slice(0, 16)
+  const base = join(xerxesHome(), 'daemon')
+  const override = (process.env.XERXES_DAEMON_SOCKET ?? '').trim()
+  return {
+    socketPath: override || controlChannelPath(base, digest, platform),
+    pidPath: join(base, `${digest}.pid`)
+  }
+}
+
+/** Read-only migration address for an already-running project daemon. */
+export function legacyProjectDaemonPaths(
   projectDir: string,
   platform: NodeJS.Platform = process.platform
 ): { socketPath: string; pidPath: string } {
@@ -436,6 +453,16 @@ export class GatewayClient extends EventEmitter {
       this.emitClient('gateway.ready', { socketPath: this.externalSocketPath, spawned: false })
       return
     }
+    if (!process.env.XERXES_DAEMON_SOCKET) {
+      const legacy = legacyProjectDaemonPaths(this.projectDir)
+      if ((process.platform === 'win32' || existsSync(legacy.socketPath)) && await this.tryConnect(legacy.socketPath)) {
+        if (!await releaseIdleProjectDaemon(method => this.rawRequest<Record<string, unknown>>(method, {}, 5000))) {
+          this.emitClient('gateway.ready', { socketPath: legacy.socketPath, spawned: false })
+          return
+        }
+        await this.detachSocketSilently()
+      }
+    }
     const { socketPath, pidPath } = daemonPaths(this.projectDir)
 
     if (await this.tryConnect(socketPath)) {
@@ -452,7 +479,7 @@ export class GatewayClient extends EventEmitter {
       if (this.spawnError) {
         throw new Error(`could not start Bun daemon: ${this.spawnError.message}`)
       }
-      if (this.proc && this.proc.exitCode !== null) {
+      if (this.proc && this.proc.exitCode !== null && this.proc.exitCode !== 0) {
         throw new Error(`daemon exited (code ${this.proc.exitCode}) before becoming ready:\n${this.stderrSnapshot()}`)
       }
       if (await this.tryConnect(socketPath)) {
@@ -565,9 +592,9 @@ export class GatewayClient extends EventEmitter {
       return true
     }
 
-    await this.detachSocketSilently()
     const mismatch = `Bun daemon build mismatch (running ${actualBuildId || 'unknown'}, expected ${expectedBuildId})`
     if (decision === 'reject' || daemonPid === undefined) {
+      await this.detachSocketSilently()
       // Name the remedy, and name the right one. This used to end every
       // rejection with "restart it explicitly when idle" regardless of why
       // it was rejected — which is actively misleading for a daemon that is
@@ -585,13 +612,9 @@ export class GatewayClient extends EventEmitter {
       )
     }
 
-    try {
-      process.kill(daemonPid, 'SIGTERM')
-    } catch (error) {
-      if (!isMissingProcessError(error)) {
-        throw new Error(`${mismatch}. Could not stop the stale local daemon: ${String(error)}`)
-      }
-    }
+    const restart = await this.rawRequest<Record<string, unknown>>('runtime.restart_if_idle', {})
+    await this.detachSocketSilently()
+    if (restart.ok !== true) throw new Error(mismatch + '. The shared runtime is busy or cannot restart safely; existing work was left running.')
     const deadline = Date.now() + 5000
     while (processIsAlive(daemonPid) && Date.now() < deadline) {
       await delay(DAEMON_CONNECT_RETRY_MS)
@@ -1072,9 +1095,9 @@ export class GatewayClient extends EventEmitter {
 
   kill(_reason = ''): void {
     this.close()
-    if (this.proc && this.proc.exitCode === null) {
-      this.proc.kill('SIGTERM')
-    }
+    // The daemon owns all projects and survives any individual client.
+    this.proc?.stderr?.destroy()
+    this.proc = null
     this.emit('exit')
   }
 

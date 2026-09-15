@@ -1,6 +1,12 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { DiffPreview } from './DiffPreview.js'
+import { WorkspaceReview } from "./WorkspaceReview.js"
+import { Deliveries } from "./Deliveries.js"
+import { MonitorsDisclosure } from "./Monitors.js"
+import { UnifiedRuns } from "./UnifiedRuns.js"
+import { ContextInspectorDisclosure } from "./ContextInspector.js"
 import {
   createContext,
   useContext,
@@ -113,7 +119,7 @@ export function DesktopRail({ panel, snap, close, activityDetails, filesExpanded
 }): ReactElement {
   const open = useDesktopNavigation()
   return <aside className={`desktop-rail studio-sheet${panel === "review" ? " desktop-rail--review" : ""}`} aria-label="Task context">
-    <header><nav aria-label="Task context views">{(['files', 'review', 'activity'] as const).map(value => <button key={value} aria-pressed={panel === value} onClick={() => open(value)}>{value === 'review' ? 'Changes' : value === 'files' ? 'Files' : 'Activity'}</button>)}</nav>{panel === 'files' && toggleFilesExpanded && <button aria-label={filesExpanded ? 'Restore conversation beside files' : 'Expand files workspace'} title={filesExpanded ? 'Restore conversation beside files' : 'Expand files workspace'} aria-pressed={filesExpanded} onClick={toggleFilesExpanded}><Icon name={filesExpanded ? 'collapse' : 'expand'} size={15} /></button>}<button aria-label="Close task context" onClick={close}>×</button></header>
+    <header><nav aria-label="Task context views">{(['files', 'review', 'activity'] as const).map(value => <button key={value} aria-pressed={panel === value} onClick={() => open(value)}>{value === 'review' ? 'Changes' : value === 'files' ? 'Files' : 'Activity'}</button>)}</nav>{(panel === 'files' || panel === 'activity') && toggleFilesExpanded && <button aria-label={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : 'Expand Activity workspace'} title={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : 'Expand Activity workspace'} aria-pressed={filesExpanded} onClick={toggleFilesExpanded}><Icon name={filesExpanded ? 'collapse' : 'expand'} size={15} /></button>}<button aria-label="Close task context" onClick={close}>×</button></header>
     <div className="studio-sheet-content" key={`${panel}:${snap.cwd}:${snap.sessionKey}`}>
       {panel === 'files' && <FilesPanel snap={snap} close={close} />}
       {panel === 'review' && <ReviewPanel snap={snap} initialPath={reviewPath} />}
@@ -557,6 +563,9 @@ function ExtensionsPanel({ snap }: { snap: Snapshot }): ReactElement {
 }
 
 function SchedulesPanel({ snap }: { snap: Snapshot }): ReactElement {
+  const [allRuns,setAllRuns]=useState(false)
+  const [runNotice,setRunNotice]=useState('')
+  const [deliverySchedule,setDeliverySchedule]=useState<string|null>(null)
   const request = useRequest(snap),
     [jobs, setJobs] = useState<RpcRecord[]>([]),
     [loaded, setLoaded] = useState(false),
@@ -595,7 +604,8 @@ function SchedulesPanel({ snap }: { snap: Snapshot }): ReactElement {
   return (
     <div className="studio-form">
       <Feedback {...request} />
-      {history ? <RunHistory page={history} result={runResult} busy={request.busy}
+      {runNotice && <p role="status">{runNotice}</p>}
+      {deliverySchedule ? <Deliveries key={snap.sessionKey+deliverySchedule} snap={snap} scheduleId={deliverySchedule} close={()=>setDeliverySchedule(null)} /> : allRuns ? <UnifiedRuns key={snap.sessionKey} snap={snap} close={()=>setAllRuns(false)} /> : history ? <RunHistory page={history} result={runResult} busy={request.busy}
         onClose={() => { setHistory(null); setRunResult(null) }}
         onMore={() => void loadHistory(history.job, true)}
         onInspect={run => void request.run(async () => {
@@ -720,6 +730,7 @@ function SchedulesPanel({ snap }: { snap: Snapshot }): ReactElement {
             >
               New schedule
             </button>
+            <button onClick={()=>setAllRuns(true)}>All run history</button>
           </div>
           {loaded && !jobs.length && <Empty>No scheduled work in this workspace yet.</Empty>}
           {jobs.map((job) => (
@@ -733,6 +744,24 @@ function SchedulesPanel({ snap }: { snap: Snapshot }): ReactElement {
                 <small>Next: {text(job.next_run_at) ? scheduleTime(text(job.next_run_at), text(job.timezone)) : 'not scheduled'}</small>
               </div>
               <div className="studio-actions">
+                <button
+                  disabled={request.busy || job.execution_state === 'running'}
+                  onClick={() => {
+                    setAllRuns(true)
+                    setRunNotice('')
+                    void request.run(async () => {
+                      try {
+                        await request.call('schedule.run', { schedule_id: job.id })
+                      } catch (error) {
+                        if (desktopError(error) !== `job ${text(job.id)} cancelled by operator`) throw error
+                        if (request.alive.current) setRunNotice('Scheduled run cancelled.')
+                      }
+                      await load()
+                    })
+                  }}
+                >
+                  Run now
+                </button>
                 {text(job.schedule) && (
                   <button
                     disabled={request.busy}
@@ -767,6 +796,7 @@ function SchedulesPanel({ snap }: { snap: Snapshot }): ReactElement {
                 >
                   History
                 </button>
+                <button disabled={request.busy} onClick={()=>setDeliverySchedule(text(job.id))}>Deliveries</button>
                 <button
                   disabled={request.busy}
                   onClick={() => {
@@ -798,6 +828,25 @@ function SchedulesPanel({ snap }: { snap: Snapshot }): ReactElement {
   )
 }
 
+const finishedActivityStates = new Set(['completed', 'succeeded', 'failed', 'interrupted', 'cancelled', 'canceled', 'stopped', 'expired', 'archived'])
+
+export function BackgroundActivity({ rows, renderRow }: {
+  rows: readonly RpcRecord[]
+  renderRow: (row: RpcRecord) => ReactElement
+}): ReactElement {
+  // Unknown states remain visible: a new daemon state must not silently hide work.
+  const current = rows.filter(row => !finishedActivityStates.has(text(row.state)))
+  const history = rows.filter(row => finishedActivityStates.has(text(row.state)))
+  const failures = history.filter(row => row.state === 'failed').length
+  return <>
+    {current.map(renderRow)}
+    {history.length > 0 && <details className="activity-history">
+      <summary><Icon name="chevron" size={12} />Past background activity <span>{history.length}{failures ? ` · ${failures} failed` : ''}</span></summary>
+      <div className="activity-history__rows" role="region" aria-label="Past background activity" tabIndex={0}>{history.map(renderRow)}</div>
+    </details>}
+  </>
+}
+
 function ActivityPanel({ snap }: { snap: Snapshot }): ReactElement {
   const request = useRequest(snap),
     [rows, setRows] = useState<RpcRecord[]>([]),
@@ -807,6 +856,7 @@ function ActivityPanel({ snap }: { snap: Snapshot }): ReactElement {
     let active = true,
       timer: ReturnType<typeof setTimeout> | undefined
     const load = async () => {
+      if (timer) clearTimeout(timer)
       await request.run(async () => {
         const result = await request.call('background.activity')
         const next = records(result.rows)
@@ -815,18 +865,22 @@ function ActivityPanel({ snap }: { snap: Snapshot }): ReactElement {
           setLoaded(true)
         }
       })
-      if (active) timer = setTimeout(() => void load(), 3000)
+      if (active) {
+        if (timer) clearTimeout(timer)
+        timer = setTimeout(() => void load(), 3000)
+      }
     }
+    const unsubscribe = window.xerxes.onEvent(({ type, payload }) => {
+      if (type === 'background_changed' && (!payload.session_id || payload.session_id === snap.currentId)) void load()
+    })
     void load()
     return () => {
+      unsubscribe()
       active = false
       if (timer) clearTimeout(timer)
     }
-  }, [])
-  return (
-    <div className="studio-form activity-panel">
-      <Feedback {...request} />
-      {rows.map((row) => (
+  }, [snap.sessionKey, snap.currentId])
+  const renderRow = (row: RpcRecord): ReactElement => (
         <div className="studio-item" key={text(row.id)}>
           <div>
             <strong>{text(row.title)}</strong>
@@ -857,7 +911,12 @@ function ActivityPanel({ snap }: { snap: Snapshot }): ReactElement {
             </button>
           )}
         </div>
-      ))}
+      )
+
+  return (
+    <div className="studio-form activity-panel">
+      <Feedback {...request} />
+      <BackgroundActivity rows={rows} renderRow={renderRow} />
       {loaded && !rows.length && !snap.fleet.length && (
         <div className="activity-idle" role="status"><Icon name="activity" size={22} /><strong>{snap.turnActive ? "Working on your request" : "No active work"}</strong><p>{snap.turnActive ? "Tools and background jobs appear here as they start." : "Agents and background jobs appear here when they run."}</p></div>
       )}
@@ -896,7 +955,7 @@ function ActivityPanel({ snap }: { snap: Snapshot }): ReactElement {
         <dt>Tools</dt><dd>{snap.contextBreakdown.toolsTokens.toLocaleString()}</dd>
         <dt>Messages</dt><dd>{snap.contextBreakdown.messagesTokens.toLocaleString()}</dd>
       </dl> : <p role="status">Token breakdown unavailable.</p>)}
-      </details></div>
+      </details><ContextInspectorDisclosure snap={snap} /><MonitorsDisclosure snap={snap} /></div>
     </div>
   )
 }
@@ -1064,6 +1123,7 @@ function FilesPanel({ snap, close }: { snap: Snapshot; close: () => void }): Rea
 }
 
 function WorkspacePanel({ snap }: { snap: Snapshot }): ReactElement {
+  const [managed,setManaged]=useState(false)
   const open = useDesktopNavigation(),
     request = useRequest(snap)
   const [machines, setMachines] = useState<RpcRecord[]>([]),
@@ -1129,6 +1189,7 @@ function WorkspacePanel({ snap }: { snap: Snapshot }): ReactElement {
     })
   return (
     <div className="studio-form workspace-panel">
+      {managed ? <WorkspaceReview key={snap.sessionKey} snap={snap} close={()=>setManaged(false)} /> : <>
       <Feedback {...request} />
       <div className="workspace-current">
         <div>
@@ -1155,7 +1216,9 @@ function WorkspacePanel({ snap }: { snap: Snapshot }): ReactElement {
         </p>
       ) : null}
       <div className="workspace-local-actions">
-        <button onClick={() => store.chooseWorkspace()}>Choose local folder</button>
+        <button onClick={()=>setManaged(true)}>Review isolated work</button>
+        <button onClick={() => store.chooseWorkspace()}>Switch this window’s folder</button>
+        <button disabled={snap.workspaceBusy} onClick={() => void store.openWorkspaceWindow()}>Open workspace in new window…</button>
         <button
           onClick={() => {
             open(null)
@@ -1304,6 +1367,7 @@ function WorkspacePanel({ snap }: { snap: Snapshot }): ReactElement {
           Add remote workspace
         </button>
       )}
+    </>}
     </div>
   )
 }
@@ -1473,7 +1537,7 @@ function SnapshotsPanel({ snap }: { snap: Snapshot }): ReactElement {
               ))}
             </select>
           </label>
-          <pre className="studio-source">{text(preview.diff) || 'No changes in this preview.'}</pre>
+          <DiffPreview diff={text(preview.diff)} label="Snapshot restore diff" />
           {preview.truncated === true && <p>Large preview truncated.</p>}
           <button
             disabled={request.busy || !path || reviewedPath !== path || snap.turnActive}

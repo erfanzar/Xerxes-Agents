@@ -15,6 +15,7 @@
  * notifications (a provider failure arrives as text, never as silence).
  */
 
+import { todoItemsOf, todosFromResult, type TodoItem } from './todoState.js'
 import { BlockBuilder, blocksFromStoredMessages, editStatsOf, parseArgs } from './blocks.js'
 import {
   daemonCompatibilityWarning,
@@ -25,6 +26,7 @@ import {
 import { sessionToMarkdown, type ExportSession } from './exportMarkdown.js'
 import { selectedSession, rememberSession } from './sessionPreference.js'
 import { desktopCall, desktopError } from './desktopRpc.js'
+import { foldAgentEvent } from './agentEvents.js'
 import type {
   AgentMember,
   AgentPreset,
@@ -241,6 +243,8 @@ export interface Snapshot {
   /** Daemon-backgrounded turns (bg-* sessions) currently working. */
   readonly backgroundJobs: readonly BackgroundJob[]
   readonly currentId: string
+  /** Successful explicit resumes, including reopening the current session. */
+  readonly sessionOpenRevision: number
   readonly currentTitle: string
   /** The connection's bound daemon session key — what key-scoped RPCs address. */
   readonly sessionKey: string
@@ -260,6 +264,7 @@ export interface Snapshot {
   readonly queue: readonly QueueItem[]
   readonly changes: readonly DiffFile[]
   readonly changesKept: boolean
+  readonly todos: readonly TodoItem[] | null
   readonly plan: PlanState | null
   readonly log: readonly LogEntry[]
   readonly failed: FailedTurn | null
@@ -633,6 +638,7 @@ export class Store {
   private tick: NodeJS.Timeout | null = null
   private heartbeat: NodeJS.Timeout | null = null
   private updatingRuntime = false
+  private terminalsLoadVersion = 0
   /** In-flight agent-family tool calls; the fleet poll lives while any do. */
   private readonly pendingAgentCalls = new Set<string>()
   private fleetPoll: NodeJS.Timeout | null = null
@@ -709,6 +715,7 @@ export class Store {
       creatorTrace: [],
       backgroundJobs: [],
       currentId: '',
+      sessionOpenRevision: 0,
       currentTitle: '',
       sessionKey: '',
       goal: '',
@@ -726,6 +733,7 @@ export class Store {
       changes: [],
       changesKept: false,
       plan: null,
+      todos: null,
       log: [],
       failed: null,
       settingsOpen: false,
@@ -969,6 +977,7 @@ export class Store {
       this.resetWorkspaceFolds()
       this.patch({
         currentId: str(result.session_id ?? session.id ?? id),
+        sessionOpenRevision: this.frame.sessionOpenRevision + 1,
         currentTitle: str(session.title),
         currentAgentPreset: str(session.agent_id) || this.frame.currentAgentPreset,
         sessionKey: this.sessionKey,
@@ -978,6 +987,7 @@ export class Store {
         ...this.telemetryFromSession(session),
       })
       this.adoptFleet(session)
+      this.adoptTodos(session)
       this.loadSkillSuggestions()
       this.loadCreatorTrace()
       void this.refreshGoal()
@@ -1168,13 +1178,13 @@ export class Store {
    * reloads onto the new credentials), so the session re-initializes onto
    * the saved model. Refused mid-turn for the same reason as switching.
    */
-  saveProvider(profile: {
+  async saveProvider(profile: {
     name: string
     baseUrl: string
     model: string
     provider?: string
     apiKey?: string
-  }): void {
+  }): Promise<string | null> {
     const name = profile.name.trim()
     const baseUrl = profile.baseUrl.trim()
     const model = profile.model.trim()
@@ -1190,14 +1200,14 @@ export class Store {
           : 'name, base_url, and model are required',
       })
       this.notify()
-      return
+      return knownDefault ? 'Name and model are required.' : 'Name, base URL, and model are required.'
     }
-    if (this.frame.turnActive) return
+    if (this.frame.turnActive) return 'Wait for the current turn to finish before changing providers.'
     const params: Record<string, unknown> = { name, model }
     if (baseUrl) params.base_url = baseUrl
     if (provider) params.provider = provider
     if (profile.apiKey?.trim()) params.api_key = profile.apiKey.trim()
-    void this.bridge
+    return this.bridge
       .call('provider_save', params)
       .then(async result => {
         if (result.ok === false) {
@@ -1206,7 +1216,7 @@ export class Store {
             message: str(result.error) || 'provider save refused',
           })
           this.notify()
-          return
+          return str(result.error) || 'Provider save refused.'
         }
         const saved = (result.profile && typeof result.profile === 'object'
           ? result.profile
@@ -1229,8 +1239,9 @@ export class Store {
           // Already surfaced by initialize's caller contract: the profile
           // list above shows the truth; the chip catches up on recovery.
         }
+        return null
       })
-      .catch(error => this.fail(error))
+      .catch(error => { this.fail(error); return error instanceof Error ? error.message : String(error) })
   }
 
   /** Delete a saved profile. The active one must be switched away from first. */
@@ -1305,6 +1316,13 @@ export class Store {
     return this.requestWorkspace(async () => {
       if (!this.bridge.chooseWorkspace) throw new Error('This host cannot open a workspace folder.')
       await this.bridge.chooseWorkspace()
+    })
+  }
+
+  openWorkspaceWindow(directory?: string): Promise<void> {
+    return this.requestWorkspace(async () => {
+      if (!this.bridge.openWorkspaceWindow) throw new Error('This desktop build cannot open additional windows. Relaunch the updated app.')
+      await this.bridge.openWorkspaceWindow(directory)
     })
   }
 
@@ -1753,8 +1771,7 @@ export class Store {
 
   /**
    * Create a git worktree through the daemon and switch the shell into it —
-   * the per-project daemon for the worktree spawns on the reload, so the
-   * next task runs in the isolated checkout.
+   * the shared daemon binds the next task to the isolated checkout.
    */
   async createWorktree(name: string): Promise<void> {
     try {
@@ -1781,6 +1798,24 @@ export class Store {
     this.failure = null
     this.patch({ failed: null, turnFailed: false, tab: 'activity' })
     if (failed.lastUser) void this.submit(failed.lastUser)
+  }
+
+  async retryCompaction(): Promise<void> {
+    const key = this.sessionKey
+    const failed = this.frame.failed
+    if (!failed || this.frame.turnActive) return
+    try {
+      const result = await this.bridge.call('slash', { session_key: key, command: '/compact' })
+      if (key !== this.sessionKey || this.frame.failed !== failed) return
+      if (result.ok !== true) throw new Error(str(result.error) || str(result.output) || 'Compaction failed')
+      this.resolveFailure()
+      this.builder.push('notification', { severity: 'info', message: str(result.output) || 'Conversation compacted. You can now continue the task.' })
+      this.notify()
+    } catch (error) {
+      if (key !== this.sessionKey || this.frame.failed !== failed) return
+      this.failure = { ...failed, error: `Automatic context compaction failed: ${error instanceof Error ? error.message : String(error)}. Original conversation retained.` }
+      this.patch({ failed: this.failure })
+    }
   }
 
   resolveFailure(): void {
@@ -1967,14 +2002,19 @@ export class Store {
   // ── Terminals ────────────────────────────────────────────────────────
 
   loadTerminals(): void {
+    const sessionKey = this.sessionKey
+    const version = ++this.terminalsLoadVersion
+    const current = () => sessionKey === this.sessionKey && version === this.terminalsLoadVersion
     this.patch({ terminalsLoading: true, terminalsError: null })
     void this.bridge
-      .call('terminal.list', { session_key: this.sessionKey })
+      .call('terminal.list', { session_key: sessionKey })
       .then(result => {
+        if (!current()) return
         if (result.ok === false) throw new Error(str(result.error) || 'Could not list terminals')
         this.patch({ terminals: terminalsFromResult(result), terminalsLoading: false })
       })
       .catch(error => {
+        if (!current()) return
         this.patch({ terminalsLoading: false, terminalsError: desktopError(error) })
       })
   }
@@ -2213,6 +2253,10 @@ export class Store {
     call: (method, params) => window.xerxes.call(method, params),
     // Passthrough — the wrapper must forward EVERY preload method or the
     // optional calls silently do nothing.
+    openWorkspaceWindow: directory => {
+      if (!window.xerxes.openWorkspaceWindow) return Promise.reject(new Error('This desktop build cannot open additional windows. Relaunch the updated app.'))
+      return window.xerxes.openWorkspaceWindow(directory)
+    },
     chooseWorkspace: () => window.xerxes.chooseWorkspace?.() ?? Promise.resolve(null),
     useWorkspace: (dir, resumeSessionId) => window.xerxes.useWorkspace?.(dir, resumeSessionId) ?? Promise.resolve(null),
     getWorkspace: () => window.xerxes.getWorkspace?.() ?? Promise.resolve(''),
@@ -2310,6 +2354,7 @@ export class Store {
       ...this.telemetryFromSession(session),
     })
     this.adoptFleet(session)
+      this.adoptTodos(session)
     this.loadSkillSuggestions()
     this.loadCreatorTrace()
     return result
@@ -2321,6 +2366,17 @@ export class Store {
    * sessions, so filtering it for kind 'subagent' shows nothing while
    * subagents actually run.
    */
+  private adoptTodos(session: Readonly<Record<string, unknown>>): void {
+    const structured = todoItemsOf(session.todos)
+    if (structured !== null) { this.patch({ todos: structured }); return }
+    if (!Array.isArray(session.tool_executions)) return
+    for (const execution of [...session.tool_executions].reverse()) {
+      if (!execution || execution.permitted === false || execution.error) continue
+      const todos = todosFromResult(execution.name, execution.result ?? execution.return_value)
+      if (todos !== null) { this.patch({ todos }); return }
+    }
+  }
+
   private adoptFleet(session: Readonly<Record<string, unknown>>): void {
     const raw = Array.isArray(session.subagent_snapshots) ? session.subagent_snapshots : []
     const fleet = raw
@@ -2328,12 +2384,17 @@ export class Store {
         const row = (item && typeof item === 'object' ? item : {}) as Record<string, unknown>
         const id = str(row.id)
         if (!id) return null
+        const previous = this.frame.fleet.find(agent => agent.id === id)
+        const updatedAt = Date.parse(str(row.updated_at))
+        const liveWins = previous?.agentDetails?.lastEventAt !== undefined && (!Number.isFinite(updatedAt) || updatedAt <= previous.agentDetails.lastEventAt)
         const label = str(row.title) || str(row.name) || str(row.agent_id) || `#${id.slice(0, 6)}`
+        const count = (value: unknown): number | undefined => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
+        const paths = (value: unknown): string[] => Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
         const entry: SessionRow = {
           id,
           key: id,
           title: label,
-          status: str(row.status) || 'running',
+          status: liveWins ? previous.status : str(row.status) || 'running',
           age: '',
           current: false,
           kind: 'subagent',
@@ -2341,12 +2402,20 @@ export class Store {
           messages: 0,
           cwd: '',
           untitled: false,
+          agentDetails: {
+            ...this.frame.fleet.find(agent => agent.id === id)?.agentDetails,
+            summary: str(row.summary), error: str(row.error), model: str(row.model),
+            toolCount: count(row.tool_count), inputTokens: count(row.input_tokens), outputTokens: count(row.output_tokens),
+            filesRead: paths(row.files_read), filesWritten: paths(row.files_written),
+            ...(liveWins ? previous.agentDetails : {}),
+          },
         }
         return entry
       })
       .filter(row => row !== null)
-    this.patch({ fleet })
-    this.syncAgentMembersFromFleet(fleet)
+    const merged = [...fleet, ...this.frame.fleet.filter(row => row.agentDetails?.lastEventAt !== undefined && !fleet.some(saved => saved.id === row.id))]
+    this.patch({ fleet: merged })
+    this.syncAgentMembersFromFleet(merged)
   }
 
   /**
@@ -2450,10 +2519,33 @@ export class Store {
   }
 
   /** Mid-turn fleet refresh: snapshots only move while a turn runs. */
+  async controlAgent(id: string, action: 'stop' | 'retry', message = ''): Promise<string> {
+    if (!this.frame.fleet.some(row => row.id === id)) throw new Error('This agent is no longer in the current session')
+    const key = this.sessionKey
+    const started = Date.now()
+    const result = await desktopCall(this.bridge, key, action === 'retry' ? 'subagent.retry' : 'subagent.interrupt', { task: id, ...(message.trim() ? { message: message.trim() } : {}) })
+    if (action === 'stop' && result.found !== true) throw new Error('The runtime did not confirm the stop request')
+    if (action === 'retry' && result.ok !== true) throw new Error('The runtime did not confirm the retry')
+    if (key === this.sessionKey) {
+      if (action === 'retry') {
+        // An acknowledgement is not a live agent event. Giving it a timestamp
+        // can mask a completed snapshot produced before the RPC reply arrives.
+        this.patch({ fleet: this.frame.fleet.map(row => row.id === id && (row.agentDetails?.lastEventAt ?? 0) <= started ? { ...row, status: 'running', ...(row.agentDetails ? { agentDetails: { ...row.agentDetails, error: '', summary: '', toolCalls: [], thinking: [], notes: [], startedAt: Date.now(), lastEventAt: undefined } } : {}) } : row) })
+        this.syncAgentMembersFromFleet(this.frame.fleet)
+        this.startFleetPoll()
+      }
+      this.refreshFleet()
+    }
+    return action === 'retry' ? 'Retry accepted. Waiting for agent progress.' : 'Stop requested. Waiting for the runtime to confirm it ended.'
+  }
+
   private refreshFleet(): void {
+    const key = this.sessionKey
+    const revision = this.frame.sessionOpenRevision
     void this.bridge
-      .call('session.status', { session_key: this.sessionKey })
+      .call('session.status', { session_key: key })
       .then(result => {
+        if (key !== this.sessionKey || revision !== this.frame.sessionOpenRevision) return
         const session = this.sessionOf(result)
         this.adoptFleet(Object.keys(session).length ? session : result)
       })
@@ -2514,7 +2606,15 @@ export class Store {
 
   /** Reconnect every configured MCP server through the daemon's slash RPC. */
   async reloadMcp(): Promise<void> {
-    await desktopCall(this.bridge, this.sessionKey, 'slash', { command: '/reload-mcp' })
+    try {
+      await desktopCall(this.bridge, this.sessionKey, 'slash', { command: '/reload-mcp' })
+    } catch (reloadError) {
+      try { await this.refreshMcpStatus() }
+      catch (statusError) {
+        throw new AggregateError([reloadError, statusError], `MCP reload failed and current server status could not be refreshed. ${desktopError(reloadError)}; ${desktopError(statusError)}`, { cause: reloadError })
+      }
+      throw reloadError
+    }
     await this.refreshMcpStatus()
   }
 
@@ -2623,6 +2723,12 @@ export class Store {
       return
     }
     switch (type) {
+      case 'subagent_event': {
+        const fleet = foldAgentEvent(this.frame.fleet, payload)
+        this.patch({ fleet })
+        this.syncAgentMembersFromFleet(fleet)
+        return
+      }
       case 'turn_begin': {
         this.turnCount += 1
         // A new attempt supersedes the previous failure card; retry clears
@@ -2673,6 +2779,17 @@ export class Store {
       case 'tool_result':
       case 'notification':
         if (type === 'think_part') this.setMetricPhase('llm')
+        if (type === 'tool_result' && payload.permitted !== false && !payload.error) {
+          const todos = todosFromResult(payload.name, payload.return_value)
+          if (todos !== null) this.patch({ todos })
+        }
+        if (type === 'tool_result' && payload.permitted !== false && !payload.error && Array.isArray(payload.display_blocks)) {
+          for (const block of payload.display_blocks) {
+            if (block?.type !== 'todo') continue
+            const todos = todoItemsOf(block.items)
+            if (todos !== null) this.patch({ todos })
+          }
+        }
         if (type === 'notification') {
           const suggestion = skillSuggestionOf(payload.skill)
           if (suggestion) {
@@ -3004,11 +3121,13 @@ export class Store {
     this.ttftSamples = 0
     this.activeMetricTools.clear()
     this.patch({
+      fleet: [],
       queue: this.queue,
       changes: [],
       changesKept: false,
       log: this.logRing,
       plan: null,
+      todos: null,
       failed: null,
       turnCount: 0,
       turnFailed: false,
@@ -3108,6 +3227,7 @@ export interface XerxesLike {
   call(method: string, params?: Record<string, unknown>): Promise<Record<string, unknown>>
   /** Present on the real preload bridge; test bridges may omit it. */
   chooseWorkspace?(): Promise<unknown>
+  openWorkspaceWindow?(dir?: string): Promise<unknown>
   useWorkspace?(dir: string, resumeSessionId?: string): Promise<unknown>
   getWorkspace?(): Promise<string | null>
   getResumeSession?(): Promise<string | null>
