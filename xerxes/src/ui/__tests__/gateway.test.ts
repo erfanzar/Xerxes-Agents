@@ -312,9 +312,9 @@ describe('source daemon build compatibility', () => {
 
 describe('native RPC compatibility boundary', () => {
   it.each([
-    ['skills.manage', 'bun run xerxes skill'],
-    ['reload.mcp', 'Restart the Bun daemon'],
-    ['process.stop', 'Use /stop'],
+    ['skills.manage', 'Use /skills'],
+    ['reload.mcp', 'Use /reload-mcp'],
+    ['process.stop', 'Use /runs or /terminals'],
     ['session.close', 'Native sessions are persistent']
   ])('rejects %s instead of fabricating a success response', async (method, guidance) => {
     const client = new GatewayClient({ projectDir: '/fixture/gateway-project' })

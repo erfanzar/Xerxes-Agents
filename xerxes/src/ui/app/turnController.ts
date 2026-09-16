@@ -26,7 +26,7 @@ import {
 import type { ActiveTool, ActivityItem, Msg, SubagentProgress, TodoItem } from '../types.js'
 
 import type { Notice } from './interfaces.js'
-import { resetFlowOverlays, resetOverlayState } from './overlayStore.js'
+import { getOverlayState, patchOverlayState, resetFlowOverlays, resetOverlayState } from './overlayStore.js'
 import { pushSnapshot } from './spawnHistoryStore.js'
 import { getTurnState, patchTurnState, resetTurnState } from './turnStore.js'
 import { getUiState, patchUiState } from './uiStore.js'
@@ -725,7 +725,8 @@ class TurnController {
       ...(savedToolTokens ? { toolTokens: savedToolTokens } : {}),
       ...(finishedSubagents.length && { subagents: finishedSubagents }),
       ...(tools.length && { tools }),
-      toolRecords: getTurnState().toolRecords
+      toolRecords: getTurnState().toolRecords,
+      toolLineToId: getTurnState().toolLineToId
     }
 
     const finalMessages: Msg[] = [...segments, ...(hasDetails(finalDetails) ? [finalDetails] : [])]
@@ -1048,14 +1049,16 @@ class TurnController {
     patchTurnState({ activity: [], outcome: '' })
   }
 
-  fullReset() {
+  fullReset(preserveInspectors = false) {
+    const pager = preserveInspectors ? getOverlayState().pager : null
     this.reset()
     resetTurnState()
     // Unlike a turn-end idle reset, a session boundary must not leave a
     // transcript- or session-specific picker open over the replacement
     // session. `reset()` intentionally preserves those overlays for ordinary
     // turn completion; fullReset is the hard boundary.
-    resetOverlayState()
+    if (!preserveInspectors) resetOverlayState()
+    else if (pager) patchOverlayState({ pager })
   }
 
   scheduleReasoning() {

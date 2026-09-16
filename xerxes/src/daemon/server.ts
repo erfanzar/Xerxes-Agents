@@ -2,6 +2,8 @@
 // Licensed under the Apache License, Version 2.0.
 
 import type { WorkspaceResources } from './workspaceResources.js';
+import { historyLimit, sessionHistoryPage } from './historyPage.js';
+import { ValidationError } from '../core/errors.js';
 
 import { recordCompaction } from '../context/compactionHistory.js'
 import { previewWorkspaceFile } from './filePreview.js'
@@ -430,6 +432,9 @@ const HANDLED_CANONICAL_COMMANDS: ReadonlySet<string> = new Set([
   "features",
   "machine",
   "custom-agents",
+  "forge",
+  "file",
+  "undo-edits",
   "image",
   "init",
   "insights",
@@ -1893,6 +1898,7 @@ export class DaemonServer {
       return this.initialize(connection, params);
     }
     if (method === "session.open") {
+      const requestedHistory = historyLimit(params.history_limit);
       const key = requestedSessionKey(params, "default");
       const activeSession = this.runtime.sessionStatus(
         connection.activeSessionKey,
@@ -1901,6 +1907,7 @@ export class DaemonServer {
         optionalString(params.project_dir) ||
           optionalString(activeSession?.metadata.project_root) ||
           activeSession?.cwd ||
+          this.runtime.sessionStatus(key)?.cwd ||
           this.projectDirectory ||
           process.cwd(),
       );
@@ -1914,7 +1921,7 @@ export class DaemonServer {
         return { ok: false, code: "agent-preset-not-found", error: errorMessage(error) };
       }
       if (preset.broken) return { ok: false, code: "agent-preset-broken", error: preset.broken };
-      const session = await this.runtime.openSession(key, preset.id, { cwd });
+      const session = await this.runtime.openSession(key, preset.id, { cwd, preserveProject: true });
       connection.activeSessionKey = key;
       this.recoverMonitorReactions(session);
       // Drain notices that settled while no client was attached (background
@@ -1928,16 +1935,17 @@ export class DaemonServer {
       }
       return {
         ok: true,
-        session: sessionPayload(session, this.contextLimit(session.model), this.mcpStatusRecord(session)),
+        session: sessionPayload(session, this.contextLimit(session.model), this.mcpStatusRecord(session), requestedHistory),
       };
     }
     if (method === "session.active_list") {
+      const requestedHistory = historyLimit(params.history_limit);
       return {
         ok: true,
         sessions: this.runtime
           .listSessions()
           .map((session) =>
-            sessionPayload(session, this.contextLimit(session.model), this.mcpStatusRecord(session)),
+            sessionPayload(session, this.contextLimit(session.model), this.mcpStatusRecord(session), requestedHistory),
           ),
       };
     }
@@ -1988,7 +1996,15 @@ export class DaemonServer {
       const session = this.runtime.sessionStatus(sessionKey(connection, params));
       return await collectGitDiff({ cwd: session?.cwd || this.projectDirectory || process.cwd(), includeUntracked: true }) as unknown as JsonRpcPayload;
     }
+    if (method === 'session.history') {
+      const session = this.runtime.sessionStatus(sessionKey(connection, params));
+      if (!session) return { ok: false, error: 'Session is not open' };
+      const limit = historyLimit(params.history_limit) ?? 100;
+      if (!limit) throw new ValidationError('history_limit', 'history pages need at least one action', limit);
+      return { ok: true, session_id: session.id, history: projectedHistoryPage(session, limit, params.before) };
+    }
     if (method === "session.status") {
+      const requestedHistory = historyLimit(params.history_limit);
       const session = this.runtime.sessionStatus(
         sessionKey(connection, params),
       );
@@ -1996,7 +2012,7 @@ export class DaemonServer {
         ok: Boolean(session),
         session: session
           ? {
-              ...sessionPayload(session, this.contextLimit(session.model), this.mcpStatusRecord(session)),
+              ...sessionPayload(session, this.contextLimit(session.model), this.mcpStatusRecord(session), requestedHistory),
               // This is intentionally an identity only. The picker can use it
               // to select the exact stored profile without receiving the live
               // endpoint or credential that proved the match.
@@ -3135,6 +3151,22 @@ export class DaemonServer {
     }
     const text = stringValue(params.text);
     const stripped = text.trim();
+    const forgeAction = /^\/forge\s+(\S*)$/.exec(text);
+    if (forgeAction) return { ok: true, kind: 'slash', completions: ['list', 'inspect']
+      .filter(action => action.startsWith(forgeAction[1] ?? ''))
+      .map(action => ({ value: `/forge ${action} `, label: action, meta: 'Forge packages; /forge opens management' })) };
+    const forgeInspect = /^\/forge\s+inspect\s+(\S*)?(?:\s+(\S*))?$/.exec(text);
+    if (forgeInspect) return { ok: true, kind: 'slash', completions: this.declarativeForge.list()
+      .filter(pkg => forgeInspect[2] === undefined ? pkg.name.startsWith(forgeInspect[1] ?? '') : pkg.name === forgeInspect[1] && pkg.version.startsWith(forgeInspect[2]))
+      .map(pkg => ({ value: `/forge inspect ${pkg.name} ${pkg.version} `, label: `${pkg.name}@${pkg.version}`, meta: pkg.description })) };
+    const presetAction = /^\/presets?\s+(\S*)$/.exec(text);
+    if (presetAction) return { ok: true, kind: 'slash', completions: ['manage', 'list', 'use', 'default', 'copy', 'remove', 'creator']
+      .filter(action => action.startsWith(presetAction[1] ?? ''))
+      .map(action => ({ value: `/preset ${action} `, label: action, meta: 'Agent compositions' })) };
+    const presetId = /^\/presets?\s+(use|default|copy|remove)\s+(\S*)$/.exec(text);
+    if (presetId) return { ok: true, kind: 'slash', completions: this.agentPresetRoster.list(this.runtime.sessionStatus(sessionKey(connection, params))?.cwd)
+      .filter(preset => preset.id.startsWith(presetId[2] ?? ''))
+      .map(preset => ({ value: `/preset ${presetId[1]} ${preset.id} `, label: preset.id, meta: preset.name })) };
     const configAction = /^\/config\s+(\S*)$/.exec(text);
     if (configAction) return { ok: true, kind: 'slash', completions: ['agents', 'mcp', 'lsp']
       .filter(action => action.startsWith(configAction[1] ?? ''))
@@ -3807,7 +3839,7 @@ export class DaemonServer {
       }
       if (method === "agentPreset.read") {
         const preset = this.agentPresetRoster.read(id, cwd);
-        return { ok: true, preset: agentPresetPayload(preset), content: preset.content };
+        return { ok: true, preset: agentPresetPayload(preset), content: preset.content, guarded_write: true };
       }
       if (method === "agentPreset.copy") {
         const from = optionalString(params.from) ?? "";
@@ -3816,7 +3848,11 @@ export class DaemonServer {
         return { ok: true, preset: agentPresetPayload(preset), path: preset.path ?? "" };
       }
       if (method === "agentPreset.write") {
-        const content = optionalString(params.content) ?? "";
+        const content = typeof params.content === 'string' ? params.content : '';
+        if (params.expected_content !== undefined && (typeof params.expected_content !== 'string'
+          || this.agentPresetRoster.read(id, cwd).content !== params.expected_content)) {
+          return { ok: false, code: 'agent-preset-stale', error: 'Composition changed on disk. Keep your draft for comparison, or discard it and reopen the current version.' };
+        }
         const preset = this.agentPresetRoster.write(id, content, cwd);
         this.runtime.reload({});
         return { ok: true, preset: agentPresetPayload(preset) };
@@ -5005,6 +5041,29 @@ export class DaemonServer {
         const agents = listProjectAgents(session?.cwd ?? this.projectDirectory ?? process.cwd());
         return { ok: true, agents, output: ['CUSTOM AGENTS', ...agents.map(agent => `${agent.id} · ${agent.error ?? agent.description}`), 'Open /custom-agents in the TUI: N creates, Enter edits, Ctrl+S saves.'].join('\n') };
       }
+      case 'forge': {
+        const [action = 'list', packageName, version, extra] = args.split(/\s+/).filter(Boolean);
+        if (extra || !['list', 'inspect'].includes(action) || (action === 'inspect' && !packageName) || (action === 'list' && packageName)) {
+          return { ok: false, error: 'Usage: /forge [list|inspect <name> [version]]. Open /forge in the TUI to define, run or remove packages.' };
+        }
+        const result = await this.forgeRpc(connection, `forge.${action}`, { ...(packageName ? { name: packageName } : {}), ...(version ? { version } : {}) });
+        if (!result.ok) return result;
+        const packages = action === 'list' ? this.declarativeForge.list() : [this.declarativeForge.inspect(packageName!, version)!];
+        return { ...result, output: [packages.length ? 'Forge packages' : 'No Forge packages.',
+          ...packages.map(pkg => `${pkg.name}@${pkg.version} — ${pkg.description}${action === 'inspect' ? `\n${pkg.parameters.map(p => `${p.name}: ${p.required ? 'required' : 'optional'}${p.defaultValue === undefined ? '' : `, default: ${p.defaultValue}`}`).join('\n')}\n\n${pkg.template}` : ''}`),
+          'Open /forge in the TUI to define, run or remove packages.'].join('\n') };
+      }
+      case 'file': {
+        if (!session) return { ok: false, error: 'Select a session first' };
+        const result = await previewWorkspaceFile(session.cwd, args.trim());
+        return { ...result, output: `${result.path}${result.truncated ? '\nPreview limited to 128 KiB.' : ''}\n\n${result.content.split('\n').map((line, index) => `${index + 1}  ${line}`).join('\n')}` };
+      }
+      case 'undo-edits': {
+        const confirmed = args.endsWith(' --confirm');
+        const path = (confirmed ? args.slice(0, -10) : args).trim();
+        if (!path || !confirmed) return { ok: false, error: 'Review /diff first. Reversing recorded text edits changes files. Use /undo-edits <exact recorded path|--all> --confirm, or the TUI confirmation dialog.' };
+        return this.undoChanges(session, path === '--all' ? '' : path);
+      }
       case "image":
         return this.generateImage(connection, args);
       case "paste":
@@ -5016,7 +5075,7 @@ export class DaemonServer {
       case "exit":
         this.emitSlash(
           connection,
-          "Close this TUI or send the `shutdown` JSON-RPC method to stop the daemon.",
+          "Closing the TUI detaches this client and leaves shared work running. The TUI /daemon stop command explicitly stops the shared daemon for every workspace.",
         );
         return { ok: true };
       default:
@@ -8194,7 +8253,20 @@ export class DaemonServer {
     connection: DaemonTransportConnection,
     query: string,
   ): Promise<JsonRpcPayload> {
-    const needle = query.trim();
+    let needle = query.trim();
+    let scopedSessionId: string | undefined;
+    let resultLimit = SEARCH_RESULT_LIMIT;
+    while (/^--(?:session|limit)(?:\s|$)/.test(needle)) {
+      const option = /^--(session|limit)\s+(\S+)(?:\s+|$)/.exec(needle);
+      if (!option) return { ok: false, error: 'Usage: /search [--session <id>] [--limit <count>] <text>' };
+      if (option[1] === 'session') scopedSessionId = option[2];
+      else {
+        const value = Number(option[2]);
+        if (!Number.isSafeInteger(value) || value < 1 || value > 500) return { ok: false, error: 'Search limit must be between 1 and 500' };
+        resultLimit = value;
+      }
+      needle = needle.slice(option[0].length).trim();
+    }
     if (!needle) {
       this.emitSlash(
         connection,
@@ -8205,7 +8277,8 @@ export class DaemonServer {
     }
     await this.hydrateTranscriptSearch();
     const hits = this.transcriptSearch.search(needle, {
-      limit: SEARCH_RESULT_LIMIT,
+      limit: resultLimit,
+      ...(scopedSessionId ? { sessionId: scopedSessionId } : {}),
     });
     const stats = this.transcriptSearch.stats();
     if (!hits.length) {
@@ -8217,7 +8290,7 @@ export class DaemonServer {
           : "";
       this.emitSlash(
         connection,
-        `No transcript matches \`${needle}\` across ${stats.sessions} session${stats.sessions === 1 ? "" : "s"}.${blindSpot}`,
+        `No transcript matches \`${needle}\` ${scopedSessionId ? `in session ${scopedSessionId}` : `across ${stats.sessions} sessions`}.${blindSpot}`,
       );
       return { ok: true, results: [], stats: searchStatsPayload(stats) };
     }
@@ -8712,15 +8785,22 @@ export class DaemonServer {
     connection: DaemonTransportConnection,
     params: JsonRpcPayload,
   ): Promise<JsonRpcPayload> {
+    const requestedHistory = historyLimit(params.history_limit);
     const resumeId = optionalString(params.resume_session_id);
     const requestedKey = optionalString(params.session_key);
     const key = resumeId || requestedKey || `tui:${newConnectionKey()}`;
     const cwd = resolveProjectDirectory(
       optionalString(params.project_dir) ||
+        this.runtime.sessionStatus(connection.activeSessionKey)?.cwd ||
+        this.runtime.sessionStatus(key)?.cwd ||
         this.projectDirectory ||
         process.cwd(),
     );
-    connection.activeSessionKey = key;
+    const boundSession = this.runtime.sessionStatus(key);
+    if (boundSession && resolveProjectDirectory(boundSession.cwd) !== cwd) {
+      // Validate before flushing/evicting or applying initialization overrides.
+      throw new ValidationError('session_id', 'belongs to another workspace; choose a separate session', key);
+    }
     const runtimeOverrides = Object.fromEntries(
       ["model", "base_url", "api_key", "provider", "permission_mode"].flatMap(
         (name) => (params[name] === undefined ? [] : [[name, params[name]]]),
@@ -8753,6 +8833,7 @@ export class DaemonServer {
     const modelOverride = optionalString(params.model);
     const openOptions = {
       cwd,
+      preserveProject: true,
       resume: Boolean(resumeId),
       ...(modelOverride ? { model: modelOverride } : {}),
     };
@@ -8770,6 +8851,8 @@ export class DaemonServer {
       requestedAgent = preset.id;
     }
     const session = await this.runtime.openSession(key, requestedAgent, openOptions);
+    // A refused cross-workspace resume must not redirect later unscoped RPCs.
+    connection.activeSessionKey = key;
     const previousWake = readGoalWake(session.metadata, session.id);
     const recoveredWake = recoverGoalWake(session.metadata, session.id, this.goalTokenOwner, Date.now());
     if (previousWake?.state !== recoveredWake?.state) {
@@ -8836,7 +8919,7 @@ export class DaemonServer {
       ),
     );
     if (session.messages.length) {
-      this.replaySessionHistory(connection, session);
+      if (requestedHistory === undefined) this.replaySessionHistory(connection, session);
       this.indexSessionForSearch(key);
     }
     if (resumeId && session.messages.length) {
@@ -8850,7 +8933,7 @@ export class DaemonServer {
       ...this.runtimeStatusWithChannels(),
       ...initPayload,
       ok: true,
-      session: sessionPayload(session, contextLimit, this.mcpStatusRecord(session)),
+      session: sessionPayload(session, contextLimit, this.mcpStatusRecord(session), requestedHistory),
       daemon_protocol: DAEMON_PROTOCOL_VERSION,
       daemon_build_id: this.daemonBuildId(),
     };
@@ -9971,10 +10054,22 @@ export async function gitBranch(dir: string): Promise<string | null> {
   }
 }
 
+function projectedHistoryPage(session: DaemonSession, limit: number, before?: unknown) {
+  const page = sessionHistoryPage(session, limit, before);
+  const projection = projectTranscriptForPayload(page.actions.flatMap(action => action.messages));
+  let offset = 0;
+  return { ...page, actions: page.actions.map(action => {
+    const messages = projection.messages.slice(offset, offset + action.messages.length);
+    offset += action.messages.length;
+    return { ...action, messages, executions: action.executions.map(replayExecutionPayload) };
+  }) };
+}
+
 function sessionPayload(
   session: DaemonSession,
   contextLimit: number,
   mcpStatus: Record<string, unknown> = {},
+  requestedHistory?: number,
 ): JsonRpcPayload {
   const model = session.model;
   const contextTokens = sessionContextTokens(session, model);
@@ -9993,7 +10088,7 @@ function sessionPayload(
   // a small per-message budget, then a whole-projection ceiling spent newest
   // first. Only this wire projection is compacted: session.messages and every
   // provider-facing request keep the full images.
-  const transcript = projectTranscriptForPayload(session.messages);
+  const transcript = projectTranscriptForPayload(requestedHistory === undefined ? session.messages : []);
   const goal = getGoal(session.metadata, session.id);
   return {
     id: session.id,
@@ -10016,13 +10111,16 @@ function sessionPayload(
       : {}),
     messages: session.messages.length,
     message_count: session.messages.length,
-    transcript: transcript.messages,
+    preview: (() => { const first = session.messages.find(message => message.role === 'user'); return first ? messageText(first).slice(0, 160) : ''; })(),
+    ...(requestedHistory === undefined ? { transcript: transcript.messages } : requestedHistory > 0 ? { history: projectedHistoryPage(session, requestedHistory) } : {}),
     todos: session.inflightTodoResult === undefined ? todosFromExecutions(session.toolExecutions) : parseTodoList(session.inflightTodoResult),
     // Additive replay fields: the stored twins of the streamed tool calls and
     // per-turn reasoning, so a reopened transcript renders the same
     // think → tool rows the live stream did instead of dropping the activity.
-    tool_executions: session.toolExecutions.slice(-200).map(replayExecutionPayload),
-    thinking_content: session.thinkingContent.slice(-32),
+    ...(requestedHistory === undefined ? {
+      tool_executions: session.toolExecutions.slice(-200).map(replayExecutionPayload),
+      thinking_content: session.thinkingContent.slice(-32),
+    } : {}),
     ...(transcript.imagesOmitted > 0
       ? { transcript_images_omitted: transcript.imagesOmitted }
       : {}),
@@ -10680,6 +10778,7 @@ async function completePath(
     // navigation when the ranked project index has no eligible file match.
   }
   if (
+    !directoryBrowse &&
     !mention &&
     (!raw ||
       (raw[0] !== "/" &&

@@ -165,6 +165,7 @@ export interface Msg {
   tools?: string[]
   /** Full call/response records keyed by tool id, for the expanded detail view. */
   toolRecords?: Record<string, ToolCallRecord>
+  toolLineToId?: Record<string, string>
   todos?: TodoItem[]
   todoIncomplete?: boolean
   todoCollapsedByDefault?: boolean

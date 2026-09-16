@@ -230,18 +230,18 @@ const NATIVE_UNSUPPORTED_RPC_GUIDANCE: Readonly<Record<string, string>> = Object
   'delegation.status': 'Native subagent delegation status is not configured in this daemon.',
   'model.disconnect': 'Use the native /provider flow to change or remove a provider profile.',
   'model.save_key': 'Use the native /provider flow to save provider credentials.',
-  'plugins.manage': 'Native plugin management is not configured in this daemon.',
-  'process.stop': 'Use /stop to cancel the active native turn; this daemon has no background-process registry.',
+  'plugins.manage': 'Use /plugins to inspect, install, enable or disable native plugins when the host supports management.',
+  'process.stop': 'Use /runs or /terminals to inspect and cancel background work; /stop cancels the active turn.',
   'reload.env': 'Restart the Bun daemon after changing environment values; live .env reload is unavailable.',
-  'reload.mcp': 'Restart the Bun daemon after changing MCP configuration; live MCP reload is unavailable.',
+  'reload.mcp': 'Use /reload-mcp for native MCP reload, or /config mcp to edit server settings.',
   'rollback.diff': 'Use /rollback diff <snapshot-id> to preview the native snapshot restore.',
   'rollback.list': 'Use /snapshots for the native snapshot workflow.',
   'rollback.restore': 'Use /rollback <snapshot-id> for the native snapshot workflow.',
   'session.close': 'Native sessions are persistent; use /new or the session switcher instead.',
-  'skills.manage': 'Use `bun run xerxes skill <name>` for bundled native skills.',
-  'skills.reload': 'Restart the Bun daemon to reload bundled skill content.',
+  'skills.manage': 'Use /skills to inspect, search, install and trust local skills.',
+  'skills.reload': 'Use /skills to refresh workspace skill discovery; this legacy reload method is unsupported.',
   'subagent.interrupt': 'Native subagent lifecycle control is not configured in this daemon.',
-  'tools.configure': 'Native runtime tool configuration is not available through the daemon.',
+  'tools.configure': 'Use /preset manage to edit composition tools and /permissions for the active permission mode.',
   'voice.record': 'Native voice capture is not configured in this daemon.',
   'voice.toggle': 'Native voice capture is not configured in this daemon.'
 })
@@ -928,6 +928,9 @@ export class GatewayClient extends EventEmitter {
       case 'background.activity':
       case 'terminal.control':
       case 'terminal.inspect':
+      case 'terminal.output':
+      case 'workspace.filePreview':
+      case 'changes.undo':
       case 'monitor.stop':
       case 'monitor.inspect':
       case 'schedule.inspect':
@@ -1646,7 +1649,8 @@ export class GatewayClient extends EventEmitter {
 
   private async complete(method: string, params: Record<string, unknown>): Promise<RpcObject> {
     const text = method === 'complete.path' ? String(params.word ?? '') : String(params.text ?? '')
-    const raw = (await this.rawRequest('complete', { text })) as RpcObject
+    const raw = (await this.rawRequest('complete', method === 'complete.path' && typeof params.path_prefix === 'string'
+      ? { path_prefix: params.path_prefix } : { text })) as RpcObject
     const items = Array.isArray(raw.completions)
       ? raw.completions.map((item: RpcObject) => ({
           display: String(item.label ?? item.value ?? ''),

@@ -194,6 +194,11 @@ const renderer = await createCliRenderer({
   useKittyKeyboard: { alternateKeys: true, disambiguate: true }
 })
 
+// A resize can shrink the native buffer before React has committed the new
+// overlay geometry. Clip the root so that intermediate frames cannot draw
+// text outside the terminal's current allocation.
+renderer.root.overflow = 'hidden'
+
 // Stash for imperative controller call sites.
 setActiveRenderer(renderer)
 const stopRendererRecovery = installRendererRecovery(renderer)

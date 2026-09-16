@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 /** @jsxImportSource @opentui/react */
 import { DialogEmpty } from './dialogChrome.js'
+import { TerminalOutputPages } from './terminalOutputPages.js'
 import type { ScrollBoxRenderable } from '@opentui/core'
 import { useStore } from '@nanostores/react'
 import { useKeyboard, usePaste, useTerminalDimensions } from '@opentui/react'
@@ -63,6 +64,7 @@ type KeyEvent = Parameters<Parameters<typeof useKeyboard>[0]>[0]
 /** Poll cadences. Fast enough to read as live, slow enough to stay cheap. */
 const LIST_POLL_MS = 1_200
 const OUTPUT_POLL_MS = 700
+const inputDrafts = new Map<string, string>()
 
 /**
  * Mockup 06: destructive keys are two-step. The first press arms the kill and
@@ -399,6 +401,7 @@ export function TerminalPanelOverlay({ onClose, t }: { onClose: () => void; t: T
   const [searching, setSearching] = useState(false)
   const entries = allEntries.filter(entry => filter === 'all' || (filter === 'running' ? entry.running : !entry.running))
   const [openId, setOpenId] = useState<null | string>(null)
+  const [pagedId, setPagedId] = useState<string | null>(null)
   const [detail, setDetail] = useState<null | TerminalInspection>(null)
   const [notice, setNotice] = useState<null | string>(null)
   // Two-step destructive keys (mockup 06): the kill is armed by the first
@@ -417,6 +420,16 @@ export function TerminalPanelOverlay({ onClose, t }: { onClose: () => void; t: T
   const page = Math.max(4, Math.floor(height * 0.6))
   const [typing, setTyping] = useState(false)
   const [draft, setDraft] = useState('')
+  const sending = useRef(false)
+  const mounted = useRef(true)
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
+  const changeDraft = (update: (value: string) => string) => {
+    setDraft(value => {
+      const next = update(value)
+      if (openId) inputDrafts.set(openId, next)
+      return next
+    })
+  }
   const [now, setNow] = useState(() => Date.now())
   // Pinned to the newest output by default, like `tail -f`. Any manual scroll
   // releases the pin, so reading back through a build log is not fought by the
@@ -438,7 +451,7 @@ export function TerminalPanelOverlay({ onClose, t }: { onClose: () => void; t: T
         setEntries(orderTerminals(next))
         setLoading(false)
       })
-      .catch(() => setLoading(false))
+      .catch(error => { setLoading(false); setNotice(`Terminal list: ${String(error)}`) })
   }, [gateway])
 
   useEffect(() => {
@@ -465,7 +478,7 @@ export function TerminalPanelOverlay({ onClose, t }: { onClose: () => void; t: T
         .then(next => {
           if (!cancelled) setDetail(next)
         })
-        .catch(() => {})
+        .catch(error => { if (!cancelled) setNotice(`Terminal output: ${String(error)}`) })
     }
     load()
     const timer = setInterval(load, OUTPUT_POLL_MS)
@@ -517,21 +530,28 @@ export function TerminalPanelOverlay({ onClose, t }: { onClose: () => void; t: T
   )
 
   const sendDraft = useCallback(() => {
-    if (!gateway || !detail) return
+    if (!gateway || !detail || sending.current) return
+    sending.current = true
     const chars = `${draft}\n`
-    setDraft('')
-    setTyping(false)
+    const targetId = detail.id
+    setNotice('sending input…')
     followOutput.current = true
-    void controlTerminal(gateway.rpc, detail.id, 'write', { chars }).then(error =>
+    void controlTerminal(gateway.rpc, detail.id, 'write', { chars }).then(error => {
+      if (!error) inputDrafts.delete(targetId)
+      if (!mounted.current) return
       setNotice(error ?? 'sent')
-    )
+      if (!error) { setDraft(''); setTyping(false) }
+      sending.current = false
+    })
   }, [detail, draft, gateway])
 
   useKeyboard(event => {
+    if (pagedId) return
     const name = event.name?.toLowerCase() ?? ''
     const sequence = event.sequence ?? ''
 
     if (event.eventType === 'release') return
+    if (!typing && !searching && openId && sequence === 'v') { consumeKey(event); setPagedId(openId); return }
     if (searching) {
       consumeKey(event)
       if (name === 'escape') { setSearching(false); setQuery(''); followOutput.current = true }
@@ -555,15 +575,15 @@ export function TerminalPanelOverlay({ onClose, t }: { onClose: () => void; t: T
     // and only Esc and Enter mean anything to the panel.
     if (typing) {
       consumeKey(event)
+      if (sending.current) return
       if (name === 'escape') {
         setTyping(false)
-        setDraft('')
       } else if (name === 'return' || name === 'enter' || name === 'kpenter') {
         sendDraft()
       } else if (name === 'backspace') {
-        setDraft(current => current.slice(0, -1))
+        changeDraft(current => current.slice(0, -1))
       } else if (sequence && sequence.length === 1 && sequence >= ' ' && !event.ctrl && !event.meta) {
-        setDraft(current => current + sequence)
+        changeDraft(current => current + sequence)
       }
       return
     }
@@ -671,7 +691,7 @@ export function TerminalPanelOverlay({ onClose, t }: { onClose: () => void; t: T
         setNotice('only interactive PTY sessions accept input')
       } else {
         setTyping(true)
-        setDraft('')
+        setDraft(inputDrafts.get(detail.id) ?? '')
       }
       return
     }
@@ -734,7 +754,7 @@ export function TerminalPanelOverlay({ onClose, t }: { onClose: () => void; t: T
 
     event.preventDefault()
     event.stopPropagation()
-    setDraft(current => current + new TextDecoder().decode(event.bytes))
+    if (!sending.current) changeDraft(current => current + new TextDecoder().decode(event.bytes))
   })
 
   const liveCount = allEntries.filter(entry => entry.running).length
@@ -768,6 +788,7 @@ export function TerminalPanelOverlay({ onClose, t }: { onClose: () => void; t: T
         paddingY={1}
         width={panelWidth}
       >
+        {pagedId ? <TerminalOutputPages t={t} terminalId={pagedId} onClose={() => setPagedId(null)} /> : <>
         {/* Same header identity as the agents panel: brand mark, title, count
             budget left; the read-only promise on the right, per the mockup. */}
         <Box flexDirection="row" flexShrink={0} justifyContent="space-between" marginBottom={1}>
@@ -797,6 +818,7 @@ export function TerminalPanelOverlay({ onClose, t }: { onClose: () => void; t: T
         )}
         {!openId ? <Text color={t.color.muted} wrap="wrap">Filter: {filter} · {entries.length} shown</Text> : null}
         {openId && (searching || query) ? <Text color={t.color.accent} wrap="wrap">Search: {query}{searching ? '▏' : ' · Esc clear'}</Text> : null}
+        {openId && !typing ? <Text color={t.color.accent}>V · Browse retained output pages</Text> : null}
         {openId ? (
           <TerminalDetailView
             arm={activeKillArm(armedKill, detail?.id, now)}
@@ -837,6 +859,7 @@ export function TerminalPanelOverlay({ onClose, t }: { onClose: () => void; t: T
             {footer}
           </Text>
         </Box>
+        </>}
       </Box>
     </box>
   )

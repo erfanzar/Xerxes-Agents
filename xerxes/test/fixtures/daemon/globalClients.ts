@@ -64,9 +64,31 @@ try {
  const beta=requests.filter(r=>JSON.stringify(r).includes('BETA_WORKSPACE_ONLY'))
  if(!alpha.length||!beta.length||alpha.some(r=>JSON.stringify(r).includes('BETA_WORKSPACE_ONLY'))||beta.some(r=>JSON.stringify(r).includes('ALPHA_WORKSPACE_ONLY'))) throw new Error('Workspace prompt isolation failed')
  console.log('PASS: simultaneous production turns completed through local provider; project instructions stayed isolated')
+ const secondWindow = new DaemonRpc({projectDir:home+'/b',env:process.env})
+ try {
+   const { Store } = await import('../../../src/desktop/renderer/store.js')
+   const a = opened as {session:{id:string}}
+   Object.assign(globalThis, { window: { xerxes: { onEvent: () => () => {} } } })
+   const view = new Store()
+   view.start({
+     call: (method, params) => secondWindow.call(method, params),
+     getWorkspace: async () => home+'/b',
+     getResumeSession: async () => a.session.id,
+   })
+   const until=Date.now()+10000
+   while(view.getSnapshot().connection === 'connecting' && Date.now()<until) await new Promise(r=>setTimeout(r,25))
+   const snapshot=view.getSnapshot()
+   if(snapshot.connection!=='online' || !snapshot.cwd.endsWith('/b') || snapshot.currentId===a.session.id) throw new Error('Desktop stale workspace recovery failed: '+snapshot.error)
+   const status=await secondWindow.call<Status>('runtime.status',{})
+   if(status.pid!==d.pid) throw new Error('Workspace switch started another daemon')
+   const original=await desktop.call<{session:{id:string}}>('session.open',{session_key:'desktop-a'})
+   if(original.session.id!==a.session.id) throw new Error('Workspace recovery replaced original session')
+   console.log('PASS: real desktop store recovered a cross-project saved session on the SAME daemon; original session unchanged')
+ } finally { secondWindow.dispose(); delete (globalThis as {window?:unknown}).window }
+ const beforeDetach=await desktop.call<Sessions>('session.active_list',{})
  tui.kill('verification detach')
  const after=await desktop.call<Sessions>('session.active_list',{})
- if(after.sessions.length!==2)throw new Error('TUI exit lost sessions')
+ if(after.sessions.length!==beforeDetach.sessions.length)throw new Error('TUI exit lost sessions')
  console.log('PASS: desktop and TUI share two workspace sessions; TUI exit leaves daemon alive')
 } finally {
  tui.close(); desktop.dispose()

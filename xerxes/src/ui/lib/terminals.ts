@@ -79,6 +79,7 @@ function asSummary(value: unknown): null | TerminalSummary {
 /** Every terminal the daemon is tracking, running first and newest first within each group. */
 export async function listTerminals(rpc: GatewayRpc): Promise<TerminalSummary[]> {
   const response = await rpc<TerminalListResponse>('terminal.list', {})
+  if (response?.ok === false) throw new Error(response.error || 'Unable to list terminals')
   const rows = Array.isArray(response?.terminals) ? response.terminals : []
 
   return rows
@@ -100,6 +101,7 @@ export async function inspectTerminal(
     terminal_id: terminalId,
     max_output_chars: maxOutputChars
   })
+  if (response?.ok === false) throw new Error(response.error || 'Unable to inspect terminal')
   const summary = asSummary(response?.terminal)
   if (!summary) return null
   const detail = response?.terminal as Record<string, unknown>

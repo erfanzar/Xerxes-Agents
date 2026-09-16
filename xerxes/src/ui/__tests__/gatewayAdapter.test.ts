@@ -37,17 +37,18 @@ describe('gatewayAdapter', () => {
     expect(info.skillDescriptions).toEqual({ 'deep-scan': 'scan deeply' })
   })
 
-  it('caps large tool result previews', () => {
+  it('keeps full multiline tool output while bounding its compact summary', () => {
     const events = adaptDaemonEvent('tool_result', {
       duration_ms: 1,
       name: 'ReadFile',
-      return_value: 'x'.repeat(1000),
+      return_value: 'x'.repeat(1000) + '\nlast line',
       tool_call_id: 'call_1'
     })
-    const payload = events[0]?.payload as { result_text?: string }
+    const payload = events[0]?.payload as { result_text?: string; summary?: string }
 
-    expect(payload.result_text).toHaveLength(600)
-    expect(String(payload.result_text)).toMatch(/…$/)
+    expect(payload.result_text).toBe('x'.repeat(1000) + '\nlast line')
+    expect(payload.summary).toHaveLength(600)
+    expect(String(payload.summary)).toMatch(/…$/)
   })
 
   it('forwards a cancelled turn_end as a daemon-confirmed interruption', () => {

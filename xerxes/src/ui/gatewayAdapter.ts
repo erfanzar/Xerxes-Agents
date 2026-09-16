@@ -568,7 +568,7 @@ function toolComplete(payload: Record<string, unknown>): AnyEvent {
       ...(failure ? { error: failure } : {}),
       inline_diff: str(diff?.diff),
       name: str(payload.name),
-      result_text: preview,
+      result_text: text,
       summary: str(brief?.body, str(generic?.content, first)),
       todos: Array.isArray(todo?.items) ? todo.items : undefined,
       tool_id: str(payload.tool_call_id, 'tool'),

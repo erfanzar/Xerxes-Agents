@@ -407,6 +407,11 @@ export class BlockBuilder {
     this.agentsCard = null
   }
 
+  /** Older pages must not finalize or replace the active streaming buffers. */
+  prepend(blocks: Block[]): void {
+    this.blocks = [...blocks, ...this.blocks]
+  }
+
   all(): readonly Block[] {
     return this.finalize(), this.blocks
   }

@@ -106,7 +106,7 @@ export function tuiSlashCompletions(input: string, catalog: null | SlashCatalog)
 export function completionRequestForInput(
   input: string
 ):
-  | { method: 'complete.path'; params: { word: string }; replaceFrom: number }
+  | { method: 'complete.path'; params: { word: string; path_prefix?: string }; replaceFrom: number }
   | { method: 'complete.slash'; params: { text: string }; replaceFrom: number }
   | { method: 'skill_suggestions'; params: { prefix: string }; replaceFrom: number }
   | null {
@@ -124,6 +124,15 @@ export function completionRequestForInput(
       replaceFrom: input.length - prefix.length
     }
   }
+
+  // These argument candidates are owned by the daemon, including package
+  // versions and preset IDs. Keep the complete command in the replacement.
+  if (/^\/(?:forge|presets?|config|plugins|skills)\s+\S*$/.test(input)
+    || /^\/(?:forge\s+inspect|presets?\s+(?:use|default|copy|remove)|plugins\s+(?:inspect|enable|disable)|skills\s+inspect)\s+\S*(?:\s+\S*)?$/.test(input)) {
+    return { method: 'complete.slash', params: { text: input }, replaceFrom: 1 }
+  }
+  const fileArg = input.match(/^\/file\s+(.*)$/)
+  if (fileArg) return { method: 'complete.path', params: { word: fileArg[1] || './', path_prefix: fileArg[1] || './' }, replaceFrom: input.length - (fileArg[1]?.length ?? 0) }
 
   const pathWord = isSlashName ? null : (input.match(TAB_PATH_RE)?.[1] ?? null)
 

@@ -4,7 +4,7 @@
   --x-selected:#303441;--x-hairline:#ffffff12;--x-divider:#ffffff0a;
   --x-title:#edf0fa;--x-prose:#d8ddea;--x-strong:#fafafa;--x-secondary:#b8c0d5;
   --x-meta:#a0a7ba;--x-caption:#a0a7ba;--x-numeric:#a0a7ba;--x-separator:#50525a;
-  --x-working:#b4bdff;--x-activity:#b4bdff;--x-accent:#b4bdff;--x-accent-soft:#b4bdff18;
+  --x-working:#74adff;--x-activity:#74adff;--x-accent:#b4bdff;--x-accent-soft:#b4bdff18;
   --x-done:#9cdac1;--x-needs:#e4bd83;--x-focus:#b4bdff;--x-chip:#2a2f40;
   --x-failed:#ff807a;--x-failed-text:#ffaaa3;--x-failed-bg:#e7564915;--x-failed-border:#ff807a30;
   --x-needs-text:#e4bd83;--x-needs-bg:#e4bd8310;--x-needs-border:#e4bd8330;
@@ -745,3 +745,5 @@ html,body,#root,.app.atelier{background:transparent}
 .activity-history>summary span{margin-left:auto;font-size:var(--ui-small);font-variant-numeric:tabular-nums}
 .activity-history__rows{max-height:320px;overflow:auto;overscroll-behavior:contain}
 .activity-history__rows .studio-item{padding:10px 0}
+
+.composer-status{width:100%;max-width:var(--conversation-width);margin:0 auto 8px;box-sizing:border-box}

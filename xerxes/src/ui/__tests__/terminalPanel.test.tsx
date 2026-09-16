@@ -44,6 +44,10 @@ const settle = async (setup: { flush: () => Promise<void> }) => {
 }
 
 describe('terminal list model', () => {
+  it('does not turn a daemon error into an empty terminal list', async () => {
+    const rpc = vi.fn(async () => ({ ok: false, error: 'connection unavailable' }))
+    await expect(listTerminals(rpc as unknown as GatewayServices['rpc'])).rejects.toThrow('connection unavailable')
+  })
   it('puts running terminals first and drops rows it cannot address', async () => {
     const rpc = vi.fn(async () => ({
       ok: true,
@@ -84,6 +88,36 @@ describe('terminal list model', () => {
 })
 
 describe('OpenTUI terminal panel', () => {
+  it('retains rejected input and blocks duplicate writes while the request is pending', async () => {
+    const terminal = wireTerminal({ id: 'write-retry', canWrite: true, kind: 'pty' })
+    let finish: (value: unknown) => void = () => undefined
+    const rpc = vi.fn(async (method: string) => method === 'terminal.list'
+      ? { ok: true, terminals: [terminal] }
+      : method === 'terminal.inspect'
+        ? { ok: true, terminal: { ...terminal, output: '', outputTruncated: false } }
+        : new Promise(resolve => { finish = resolve }))
+    const setup = await testRender(<GatewayProvider value={servicesWith(rpc as unknown as GatewayServices['rpc'])}>
+      <TerminalPanelOverlay onClose={() => undefined} t={DEFAULT_THEME} />
+    </GatewayProvider>, { width: 90, height: 24 })
+    try {
+      await settle(setup)
+      act(() => setup.mockInput.pressEnter()); await settle(setup)
+      act(() => setup.mockInput.pressKey('i')); await settle(setup)
+      await act(async () => setup.mockInput.typeText('echo retained')); await settle(setup)
+      act(() => setup.mockInput.pressEnter()); await settle(setup)
+      act(() => setup.mockInput.pressEnter()); await settle(setup)
+      expect(rpc.mock.calls.filter(call => call[0] === 'terminal.control')).toHaveLength(1)
+      await act(async () => finish({ ok: false, error: 'write rejected' })); await settle(setup)
+      expect(setup.captureCharFrame()).toContain('write rejected')
+      expect(setup.captureCharFrame()).toContain('echo retained')
+      act(() => setup.mockInput.pressKey('ESCAPE')); await settle(setup)
+      act(() => setup.mockInput.pressKey('i')); await settle(setup)
+      expect(setup.captureCharFrame()).toContain('echo retained')
+      act(() => setup.mockInput.pressEnter()); await settle(setup)
+      expect(rpc.mock.calls.filter(call => call[0] === 'terminal.control')).toHaveLength(2)
+      await act(async () => finish({ ok: true })); await settle(setup)
+    } finally { act(() => setup.renderer.destroy()) }
+  })
   it('lists what each terminal is and how long it has been running', async () => {
     const rpc = vi.fn(async () => ({ ok: true, terminals: [wireTerminal()] }))
     const setup = await testRender(

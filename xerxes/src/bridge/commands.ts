@@ -131,6 +131,9 @@ export const COMMAND_REGISTRY: readonly CommandDefinition[] = Object.freeze([
   command('agents', 'List or select sub-agents', 'activity'),
   command('machine', 'Open a saved remote workspace over SSH', 'tools'),
   command('custom-agents', 'Create and edit project specialists in the TUI', 'config'),
+  command('forge', 'Manage reusable text-template packages', 'tools'),
+  command('file', 'Preview a workspace text file', 'tools', { argsHint: '<path>' }),
+  command('undo-edits', 'Reverse recorded agent edits after review', 'tools', { argsHint: '<path|--all> [--confirm]' }),
 
   command('help', 'Show help', 'info', { aliases: ['?'] }),
   command('features', 'Explore capabilities, entry points and current limitations', 'info'),

@@ -3,6 +3,8 @@
 
 import type { RpcResult } from '../../../lib/rpc.js'
 import type { SlashCommand } from '../types.js'
+import { patchOverlayState } from '../../overlayStore.js'
+import { runNativeSlash } from '../nativeSlash.js'
 
 interface PresetRow extends RpcResult {
   id: string
@@ -14,6 +16,13 @@ interface PresetRow extends RpcResult {
 }
 
 export const presetCommands: SlashCommand[] = [
+  {
+    name: 'forge',
+    group: 'tools',
+    help: 'discover, define and run reusable text-template packages',
+    usage: '/forge [list|inspect <name> [version]]',
+    run: (argument, ctx) => { if (argument.trim()) runNativeSlash(ctx, `forge ${argument.trim()}`, 'Forge packages'); else patchOverlayState({ forge: true }) },
+  },
   {
     name: 'plugin-creator',
     help: 'start a plugin authoring session with examples and Bun verification',
@@ -32,11 +41,13 @@ export const presetCommands: SlashCommand[] = [
   },
   {
     name: 'preset',
+    group: 'config',
     aliases: ['presets'],
-    help: 'list, select, duplicate, or manage DSH-style agent presets',
-    usage: '/preset [list|use <id>|default <id>|copy <from> <id> [name]|remove <id>|creator]',
+    help: 'inspect/edit full compositions, select, duplicate, or manage agent presets',
+    usage: '/preset [manage|list|use <id>|default <id>|copy <from> <id> [name]|remove <id>|creator]',
     run: (argument, ctx) => {
       const [verb = 'list', ...parts] = argument.trim().split(/\s+/).filter(Boolean)
+      if (verb === 'manage') { patchOverlayState({ presetEditor: true }); return }
       if (verb === 'list') {
         void ctx.gateway.rpc('agentPreset.list', {}).then(ctx.guarded(result => {
           if (!result || result.ok === false) {
@@ -94,7 +105,7 @@ export const presetCommands: SlashCommand[] = [
         })).catch(ctx.guardedErr)
         return
       }
-      ctx.transcript.sys('usage: /preset [list|use <id>|default <id>|copy <from> <id> [name]|remove <id>|creator]')
+      ctx.transcript.sys('usage: /preset [manage|list|use <id>|default <id>|copy <from> <id> [name]|remove <id>|creator]')
     },
   },
 ]

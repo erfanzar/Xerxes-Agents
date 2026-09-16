@@ -38,3 +38,22 @@ test('first workspace selection creates settings and atomically replaces them', 
     expect(() => saveDesktopWorkspace(join(root,'blocked','desktop.json'),'/project')).toThrow()
   } finally { await rm(root,{recursive:true,force:true}) }
 })
+
+test('workspace registry retains empty folders, deduplicates and migrates legacy settings', async () => {
+  const {mkdtemp,rm,writeFile,readFile} = await import('node:fs/promises')
+  const {loadDesktopWorkspaces,saveDesktopWorkspace} = await import('../src/desktop/main/workspaceSettings.js')
+  const root=await mkdtemp('/tmp/xerxes-workspaces-'), file=root+'/desktop.json'
+  try {
+    expect(loadDesktopWorkspaces(file)).toEqual([])
+    await writeFile(file,JSON.stringify({workspace:'/old'}))
+    saveDesktopWorkspace(file,'/empty')
+    saveDesktopWorkspace(file,'/old')
+    expect(loadDesktopWorkspaces(file)).toEqual(['/old','/empty'])
+    expect(JSON.parse(await readFile(file,'utf8')).workspace).toBe('/old')
+    expect(()=>saveDesktopWorkspace(file,'relative')).toThrow()
+    expect(loadDesktopWorkspaces(file)).toEqual(['/old','/empty'])
+    await writeFile(file,'broken')
+    expect(()=>saveDesktopWorkspace(file,'/new')).toThrow()
+    expect(await readFile(file,'utf8')).toBe('broken')
+  } finally {await rm(root,{recursive:true,force:true})}
+})

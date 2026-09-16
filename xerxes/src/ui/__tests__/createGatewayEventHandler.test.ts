@@ -51,8 +51,15 @@ const buildHarness = (overrides: { bellOnComplete?: boolean; isTTY?: boolean } =
     }
   }
 
-  return { appended, handler: createGatewayEventHandler(ctx), sys }
+  return { appended, handler: createGatewayEventHandler(ctx), sys, ctx }
 }
+
+it('reattaches the recovering session without treating it as a fresh navigation', () => {
+  const { ctx, handler } = buildHarness()
+  ctx.session.recoverSidRef!.current = 'recover-session'
+  handler({ type: 'gateway.ready', payload: {} } as GatewayEvent)
+  expect(ctx.session.resumeById).toHaveBeenCalledWith('recover-session', { preserveView: true, keepCurrent: true })
+})
 
 const liveClarify = () =>
   patchOverlayState({

@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { AgentSettingsStore } from '../src/agents/settingsStore.js';
+import { DeclarativeToolForge } from '../src/extensions/declarativeForge.js';
 import { createGoal, recordGoalEvidence } from '../src/runtime/goalDomain.js';
 import { expect, test } from "bun:test";
 import { existsSync } from "node:fs";
@@ -278,6 +279,49 @@ test("project agent editor RPC scopes writes and preserves invalid drafts on dis
   } finally { client.close(); await server.stop(); await rm(directory, { recursive: true, force: true }); }
 });
 
+test("Forge RPC and slash discovery preserve immutable definitions and explicit confirmation", async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-forge-rpc-'));
+  const socketPath = join(directory, 'daemon.sock');
+  const storage = join(directory, 'forge.json');
+  const runtime = new InMemoryDaemonRuntime(undefined, { currentProjectDirectory: directory, sessionDirectory: join(directory, 'sessions') });
+  const server = new DaemonServer({ socketPath, runtime, projectDirectory: directory,
+    declarativeForge: new DeclarativeToolForge(storage), cronLeasePath: join(directory, 'cron.lease'),
+    cronStoreFactory: () => new JobStore(join(directory, 'jobs.json')) });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  let id = 0;
+  const rpc = async (method: string, params: Record<string, unknown> = {}) => {
+    const requestId = ++id;
+    client.send({ jsonrpc: '2.0', id: requestId, method, params });
+    return (await client.next(frame => frame.id === requestId)).result as Record<string, unknown>;
+  };
+  try {
+    await rpc('initialize', { session_key: 'forge-test' });
+    expect(await rpc('forge.list')).toMatchObject({ ok: true, packages: [] });
+    const definition = { name: 'greeting', version: '1.0.0', description: 'Readable greeting', template: 'Hello {{name}}\nReady.', parameters: [{ name: 'name', description: 'Recipient', required: true }] };
+    expect(await rpc('forge.define', definition)).toMatchObject({ ok: false });
+    expect(await rpc('forge.define', { ...definition, confirm: true })).toMatchObject({ ok: true });
+    expect(new DeclarativeToolForge(storage).inspect('greeting', '1.0.0')?.template).toBe(definition.template);
+    expect(await rpc('forge.define', { ...definition, template: 'overwrite', confirm: true })).toMatchObject({ ok: false });
+    expect(await rpc('forge.run', { name: 'greeting', input: {} })).toMatchObject({ ok: false });
+    expect(await rpc('forge.run', { name: 'greeting', input: { name: 'Ada' } })).toMatchObject({ ok: true, output: 'Hello Ada\nReady.' });
+    const inspected = await rpc('slash', { command: '/forge inspect greeting' });
+    expect(inspected.ok).toBe(true);
+    expect(inspected.output).toContain('Readable greeting');
+    expect(inspected.output).toContain('Hello {{name}}');
+    expect(await rpc('forge.undefine', { name: 'greeting', version: '1.0.0' })).toMatchObject({ ok: false });
+    expect(await rpc('forge.inspect', { name: 'greeting' })).toMatchObject({ ok: true });
+    expect(await rpc('forge.stop')).toMatchObject({ ok: false });
+    expect(await rpc('forge.undefine', { name: 'greeting', version: '1.0.0', confirm: true })).toMatchObject({ ok: true });
+    expect(new DeclarativeToolForge(storage).list()).toEqual([]);
+  } finally {
+    client.close();
+    await server.stop();
+    await runtime.shutdown();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("agent preset RPC mirrors DSH roster, authoring, defaults, and blank-session locking", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-agent-presets-rpc-"));
   const socketPath = join(directory, "daemon.sock");
@@ -326,6 +370,18 @@ test("agent preset RPC mirrors DSH roster, authoring, defaults, and blank-sessio
       ok: true,
       preset: { id: "my-creator", name: "My Creator", trust: "user", manageable: true },
     });
+    client.send({ jsonrpc: "2.0", id: 40, method: "agentPreset.read", params: { agent_preset: "my-creator" } });
+    const original = (await client.next(frame => frame.id === 40)).result!;
+    expect(original.guarded_write).toBe(true);
+    const nextContent = String(original.content) + "\n# User edit\n";
+    client.send({ jsonrpc: "2.0", id: 41, method: "agentPreset.write", params: { agent_preset: "my-creator", content: nextContent, expected_content: original.content } });
+    expect((await client.next(frame => frame.id === 41)).result?.ok).toBe(true);
+    client.send({ jsonrpc: "2.0", id: 42, method: "agentPreset.write", params: { agent_preset: "my-creator", content: original.content, expected_content: original.content } });
+    expect((await client.next(frame => frame.id === 42)).result).toMatchObject({ ok: false, code: "agent-preset-stale" });
+    expect(roster.read("my-creator", directory).content).toBe(nextContent);
+    client.send({ jsonrpc: "2.0", id: 43, method: "agentPreset.write", params: { agent_preset: "my-creator", content: "invalid: composition", expected_content: nextContent } });
+    expect((await client.next(frame => frame.id === 43)).result?.ok).toBe(false);
+    expect(roster.read("my-creator", directory).content).toBe(nextContent);
     client.send({
       jsonrpc: "2.0",
       id: 5,
@@ -1032,9 +1088,27 @@ test("session.list scopes history to the active project and exposes additive sub
       method: "session.open",
       params: { session_key: "ccccdddd0001" },
     });
-    expect((await client.next((frame) => frame.id === 9)).error?.message).toContain(
-      "different project",
-    );
+    expect((await client.next((frame) => frame.id === 9)).error?.message).toMatch(/different project|another workspace/);
+    client.send({ jsonrpc: "2.0", id: 10, method: "initialize", params: {
+      project_dir: otherProjectDirectory, resume_session_id: "ccccdddd0001",
+    } });
+    expect((await client.next(frame => frame.id === 10)).error?.message).toMatch(/different project|another workspace/);
+    client.send({ jsonrpc: "2.0", id: 11, method: "session.list", params: {} });
+    const retained = (await client.next(frame => frame.id === 11)).result;
+    expect(retained?.ok).toBe(true);
+    expect(JSON.stringify(retained)).not.toContain('Child history');
+    client.send({ jsonrpc: "2.0", id: 12, method: "session.open", params: {
+      session_key: "project-b-connection", project_dir: projectDirectory,
+    } });
+    expect((await client.next(frame => frame.id === 12)).error?.message).toContain('another workspace');
+    client.send({ jsonrpc: "2.0", id: 13, method: "session.open", params: { session_key: "project-b-connection" } });
+    expect((await client.next(frame => frame.id === 13)).result?.session).toMatchObject({ cwd: otherProjectDirectory });
+    client.send({ jsonrpc: "2.0", id: 14, method: "initialize", params: {
+      session_key: "project-b-connection", project_dir: projectDirectory,
+    } });
+    expect((await client.next(frame => frame.id === 14)).error?.message).toContain('another workspace');
+    client.send({ jsonrpc: "2.0", id: 15, method: "session.open", params: { session_key: "project-b-connection" } });
+    expect((await client.next(frame => frame.id === 15)).result?.session).toMatchObject({ cwd: otherProjectDirectory });
   } finally {
     client.close();
     await server.stop();
@@ -7541,6 +7615,11 @@ test("transcript search spans saved sessions and reports what it could not index
       ok: false,
       error: "search query is required",
     });
+    client.send({ jsonrpc: '2.0', id: 7, method: 'slash', params: { command: '/search --session aaaabbbbccc3 --limit 1 retry backoff' } });
+    const filtered = (await client.next(frame => frame.id === 7)).result;
+    expect(filtered).toMatchObject({ ok: true, results: [{ session_id: 'aaaabbbbccc3' }] });
+    client.send({ jsonrpc: '2.0', id: 8, method: 'slash', params: { command: '/search --limit -1 retry' } });
+    expect((await client.next(frame => frame.id === 8)).result).toMatchObject({ ok: false });
   } finally {
     client.close();
     await server.stop();
@@ -10201,4 +10280,36 @@ test('skill completion returns the full library beyond 200 entries', async () =>
     expect(rows).toHaveLength(215)
     expect(rows.at(-1)?.label).toBe('skill-214')
   } finally { client.close(); await server.stop(); await rm(directory, { recursive: true, force: true }) }
+})
+
+test('paged initialize omits full replay and metadata refresh never includes history', async()=>{
+ const directory=await mkdtemp(join(tmpdir(),'xerxes-history-page-'))
+ const runtime=new InMemoryDaemonRuntime(undefined,{currentProjectDirectory:directory,sessionDirectory:join(directory,'sessions')})
+ const session=await runtime.openSession('history-source')
+ session.messages=Array.from({length:250},(_,i)=>({role:i%2?'assistant':'user',content:`History entry ${i}`}))
+ session.turnCount=125
+ await runtime.flushSessions()
+ const server=new DaemonServer({runtime,projectDirectory:directory,socketPath:join(directory,'daemon.sock')})
+ await server.start()
+ const client=await SocketTestClient.connect(join(directory,'daemon.sock'))
+ try{
+  client.send({jsonrpc:'2.0',id:1,method:'initialize',params:{resume_session_id:session.id,history_limit:100}})
+  type History = { actions: Array<{ messages: Array<{ content: unknown }> }>; before: string | null }
+  const init=(await client.next(f=>f.id===1)).result as {session:{transcript?:unknown;tool_executions?:unknown;history:History}}
+  expect(init.session.transcript).toBeUndefined()
+  expect(init.session.tool_executions).toBeUndefined()
+  expect(init.session.history.actions).toHaveLength(100)
+  expect(JSON.stringify(init.session.history)).not.toContain('History entry 0"')
+  expect(client.seen(frame=>JSON.stringify(frame).includes('replay_user'))).toBe(false)
+  expect(client.seen(frame=>JSON.stringify(frame).includes('replay_assistant'))).toBe(false)
+  client.send({jsonrpc:'2.0',id:2,method:'session.history',params:{before:init.session.history.before,history_limit:100}})
+  const older=(await client.next(f=>f.id===2)).result as {history:History}
+  expect(older.history.actions).toHaveLength(100)
+  expect(older.history.actions[0]?.messages[0]?.content).toBe('History entry 50')
+  client.send({jsonrpc:'2.0',id:3,method:'session.active_list',params:{history_limit:0}})
+  const active=(await client.next(f=>f.id===3)).result as {sessions:Array<Record<string,unknown>>}
+  expect(active.sessions.every(s=>!('transcript' in s)&&!('tool_executions' in s)&&!('history' in s))).toBe(true)
+  client.send({jsonrpc:'2.0',id:4,method:'session.history',params:{before:'invalid',history_limit:100}})
+  expect((await client.next(f=>f.id===4)).error).toBeDefined()
+ }finally{client.close();await server.stop();await rm(directory,{recursive:true,force:true})}
 })

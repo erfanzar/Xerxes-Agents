@@ -48,3 +48,10 @@ describe('workspace grouping', () => {
     expect(groupByWorkspace([{ id: 'x', cwd: '/w/A' }], '/nowhere').map(g => g.name)).toEqual(['A'])
   })
 })
+
+test('empty saved folders remain reachable and identical basenames stay separate', () => {
+  const groups = groupByWorkspace([{id:'a',cwd:'/first/repo'},{id:'b',cwd:'/second/repo'}], '/second/repo', ['/empty', '/first/repo'])
+  expect(groups.map(g => g.cwd)).toEqual(['/second/repo','/first/repo','/empty'])
+  expect(groups[0]!.rows.map(r=>r.id)).toEqual(['b'])
+  expect(groups[2]!.rows).toEqual([])
+})

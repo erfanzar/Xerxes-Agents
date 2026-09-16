@@ -17,7 +17,9 @@ Dialogs support Escape, keyboard focus containment, visible errors, and narrow w
 
 ## Working in multiple windows
 
-Use **File → Open Workspace in New Window…** (Cmd/Ctrl+Shift+O), or **Workspace → Open workspace in new window…**, to keep another project open alongside the current one. **File → New Window** (Cmd/Ctrl+Shift+N) opens an unassigned window where you can select a local or SSH workspace. Each window owns its connection, session view, draft, reconnect and dictation state. Switching or closing one window does not retarget the others or stop project daemons. Use the native Window menu to switch between named workspaces. Closing the entire app currently restores only the last saved local workspace on relaunch, not the complete window arrangement.
+Use **File → Open Workspace in New Window…** (Cmd/Ctrl+Shift+O), or **Workspace → Open workspace in new window…**, to keep another project open alongside the current one. **File → New Window** (Cmd/Ctrl+Shift+N) opens an unassigned window where you can select a local or SSH workspace. Each window owns its connection, session view, draft, reconnect and dictation state. Local windows share the global daemon; switching or closing one window does not retarget another window or stop its work. Use the native Window menu to switch between named workspaces. The app saves window arrangements, workspace targets and selected sessions for relaunch.
+
+Session ownership is checked before initialization can replace a binding. A session from another workspace cannot be relocated by opening it under the wrong folder. If an older desktop build saved an invalid workspace/session pairing, startup opens a fresh session in the selected folder and explains that the original conversation remains unchanged. RPC validation, authentication and configuration errors are displayed as workspace problems rather than an offline daemon, and are not automatically retried as network failures.
 
 ## Local and SSH workspaces
 
@@ -60,6 +62,12 @@ The packaged app includes the Bun executable used for the build and its upstream
 On first launch, choose a folder. The setup checklist then shows runtime connection and model selection, links to the existing provider credential editor, and offers tool-permission review. **Start working** becomes available only after a workspace, connected runtime, and model are present. This checks configuration, not provider authentication: setup never sends a paid test prompt. **Later** dismisses the checklist; **Preferences → General → Open setup checklist** brings it back.
 
 To update, quit the desktop app and replace the application in Applications. Settings and sessions are stored outside the application and remain intact. Removing the app does not delete `~/.xerxes` or an explicitly configured `XERXES_HOME`.
+
+Replace the complete `.app` bundle, not only `Contents/Resources/app`: the renderer,
+bundled runtime, and build identity must come from the same package. A partial copy
+can leave a build mismatch that restarting the daemon cannot repair. After a full
+replacement, use the runtime status control to update an idle daemon; allow active
+work to finish before restarting it.
 
 Distribution still requires the existing Developer ID signing and Apple notarization configuration in `packageDesktopMac.ts`. A locally ad-hoc-signed image is a development artifact, not a notarized public release.
 
@@ -120,3 +128,23 @@ XERXES_DESKTOP_PACKAGE_DIR=/absolute/path/to/package bun run --cwd xerxes build:
 ```
 
 Compiled inputs still come from `xerxes/dist`; the branded application and DMG are written to the selected directory. Use a fresh directory for each verification build. This does not install the app, restart a daemon, or update the copy in `/Applications`.
+
+## Loading long conversations
+
+The desktop requests the latest 100 historical actions when opening a session and starts at the bottom. A message/reasoning entry or a complete tool call/result pair is one action. Scrolling near the top loads the preceding 100 actions; **Load 100 older actions** is also keyboard accessible. The visible reading position stays anchored while earlier content is inserted. Failed pages can be retried without replacing the conversation or draft, and results from a previously selected session are ignored.
+
+Background session/fleet refreshes request metadata only. The daemon retains the complete working conversation for the model; paging limits what is sent to and rendered by the desktop. An older running runtime cannot honor server paging until safely updated; the desktop limits rendering and pages its legacy response locally in the meantime. Existing v35 clients retain the original response unless they request `history_limit`.
+
+### Switching folders while work runs
+
+**Add folder**, workspace headings and cross-project sessions switch retained workspace views
+inside the same native window. Each view keeps its own daemon connection, draft, scroll position,
+and live response while hidden. Returning to it does not reload it. **Open Workspace in New Window**
+is the explicit alternative for another native window.
+
+Explicitly opened local folders remain in `desktop.json` even without chats. Workspace views and
+the active selection are restored together on relaunch. Older saved workspace windows migrate
+into one window. New explicitly opened windows retain separate window groups.
+
+The sidebar refreshes live session state every five seconds, including tasks in other workspaces.
+Running tasks use blue; a failed refresh preserves the last known state instead of declaring them idle.

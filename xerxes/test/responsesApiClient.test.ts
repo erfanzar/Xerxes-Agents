@@ -407,3 +407,22 @@ function sseResponse(events: readonly Record<string, unknown>[]): Response {
     },
   }), { headers: { 'Content-Type': 'text/event-stream' } })
 }
+
+test('Responses tool aliases are valid, distinct, and restored for execution and replay', async () => {
+  const names = ['mcp.tools/search', 'mcp_tools_search', 'tool with spaces', '工具']
+  const request: CompletionRequest = { model: 'gpt-4o', tools: names.map(name => ({ type: 'function', function: { name, description: 'tool', parameters: { type: 'object', properties: {} } } })), messages: [{ role: 'assistant', content: '', tool_calls: [{ id: 'previous', type: 'function', function: { name: names[0]!, arguments: {} } }] }, { role: 'tool', tool_call_id: 'previous', content: 'done' }] }
+  const before = JSON.stringify(request)
+  const client = new ResponsesApiClient({ providerName: 'openai', apiKey: 'test', baseUrl: 'https://example.invalid/v1', fetchImplementation: async (_url, init) => {
+    const payload = JSON.parse(String(init?.body))
+    const wireNames = payload.tools.map((tool: { name: string }) => tool.name)
+    expect(new Set(wireNames).size).toBe(names.length)
+    for (const name of wireNames) expect(name).toMatch(/^[a-zA-Z0-9_-]{1,64}$/)
+    expect(wireNames[1]).toBe('mcp_tools_search')
+    expect(payload.input[0].name).toBe(wireNames[0])
+    return sseResponse([{ type: 'response.output_item.added', item: { type: 'function_call', id: 'call-new', name: wireNames[0] } }, { type: 'response.function_call_arguments.delta', item_id: 'call-new', delta: '{}' }, { type: 'response.output_item.done', item: { type: 'function_call', id: 'call-new', name: wireNames[0] } }, { type: 'response.completed', response: { status: 'completed' } }])
+  } })
+  const deltas: LlmDelta[] = []
+  for await (const delta of client.stream(request)) deltas.push(delta)
+  expect(deltas.flatMap(delta => delta.toolCalls ?? []).at(-1)?.function.name).toBe(names[0])
+  expect(JSON.stringify(request)).toBe(before)
+})

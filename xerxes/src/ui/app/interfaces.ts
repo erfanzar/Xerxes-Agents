@@ -110,6 +110,8 @@ export interface OverlayState {
   contextInspector: boolean
   machinePicker: boolean
   customAgentEditor: boolean
+  presetEditor: boolean
+  forge: boolean
   activity: boolean
   monitors: boolean
   runs: boolean
@@ -329,7 +331,7 @@ export interface GatewayEventHandlerContext {
     // respawn resumes that session instead of forging a fresh one.
     recoverSidRef?: MutableRefObject<null | string>
     resetSession: () => void
-    resumeById: (id: string, options?: { keepCurrent?: boolean }) => void
+    resumeById: (id: string, options?: { keepCurrent?: boolean; preserveView?: boolean }) => void
     setCatalog: StateSetter<null | SlashCatalog>
   }
   submission: {
@@ -378,7 +380,7 @@ export interface SlashHandlerContext {
     newLiveSession: (msg?: string, title?: string) => void
     newSession: (msg?: string, title?: string, agentPreset?: string) => void
     resetVisibleHistory: (info?: null | SessionInfo) => void
-    resumeById: (id: string, options?: { keepCurrent?: boolean }) => void
+    resumeById: (id: string, options?: { keepCurrent?: boolean; preserveView?: boolean }) => void
     setSessionStartedAt: StateSetter<number>
   }
   slashFlightRef: MutableRefObject<number>
@@ -413,7 +415,7 @@ export interface AppLayoutActions {
   newPromptSession: (prompt: string, modelArg?: string) => void
   onModelSelect: (value: string) => void
   onReasoningSelect: (value: string) => void
-  resumeById: (id: string, options?: { keepCurrent?: boolean }) => void
+  resumeById: (id: string, options?: { keepCurrent?: boolean; preserveView?: boolean }) => void
   setStickyPrompt: (value: string) => void
   sys: (text: string) => void
 }

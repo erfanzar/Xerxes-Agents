@@ -13,6 +13,9 @@ export interface RunSummary {
   startedAt: number
   workspace: string
   sourceId: string
+  endedAt?: number
+  terminalKind?: string
+  exitCode?: number
 }
 export interface ReactionHealthView { usage?: { inputTokens: number; outputTokens: number; complete: boolean }; state: string; attempts: number; maxReactions: number; pendingEvents: number; lastError: string | null }
 export interface RunDetail extends RunSummary { tokenUsage?: { inputTokens: number; outputTokens: number; complete: boolean }; cancelLabel?: string; reactionHealth?: ReactionHealthView; output: string; outputTruncated: boolean; error: string | null }
@@ -27,6 +30,9 @@ function row(value: unknown): RunSummary | null {
     typeof v.revision !== 'number' || !Number.isSafeInteger(v.revision) || v.revision < 1) return null
   return { id: v.id, ownerSessionId: typeof v.ownerSessionId === 'string' ? v.ownerSessionId : '', title: v.title, kind: v.kind, state: v.state, revision: v.revision, unread: v.unread === true,
     startedAt: typeof v.startedAt === 'number' ? v.startedAt : 0,
+    ...(typeof v.endedAt === 'number' && Number.isFinite(v.endedAt) ? { endedAt: v.endedAt } : {}),
+    ...(typeof v.terminalKind === 'string' ? { terminalKind: v.terminalKind } : {}),
+    ...(typeof v.exitCode === 'number' ? { exitCode: v.exitCode } : {}),
     workspace: typeof v.workspace === 'string' ? v.workspace : '', sourceId: typeof v.sourceId === 'string' ? v.sourceId : '' }
 }
 export async function listRunPage(rpc: GatewayRpc, unreadOnly = false, scope: 'session' | 'workspace' = 'session', scheduleId?: string, before?: { startedAt: number; id: string }, filters?: { kind?: string; state?: string }): Promise<{ runs: RunSummary[]; hasMore: boolean; upcoming: UpcomingRun[]; upcomingTotal: number; attention: RunAttention[]; attentionTotal: number }> {

@@ -8,6 +8,8 @@ import { remoteTarget, type RemoteTarget } from './remote.js'
 
 export interface WindowBounds { x: number; y: number; width: number; height: number }
 export interface SavedWindow {
+  windowGroup?: string
+  active?: boolean
   workspace: string | null
   sessionId: string | null
   remote: RemoteTarget | null
@@ -27,8 +29,10 @@ export function parseWindowLayout(value: unknown): SavedWindow[] {
     if (row.workspace !== null && (typeof row.workspace !== 'string' || !isAbsolute(row.workspace) || /[\x00-\x1f]/.test(row.workspace))) throw new Error('Invalid saved workspace')
     if (row.sessionId !== null && (typeof row.sessionId !== 'string' || !/^[a-zA-Z0-9_-]{1,256}$/.test(row.sessionId))) throw new Error('Invalid saved session')
     if (typeof row.maximized !== 'boolean' || typeof row.fullscreen !== 'boolean') throw new Error('Invalid saved window mode')
+    if (row.windowGroup !== undefined && (typeof row.windowGroup !== 'string' || !/^[a-zA-Z0-9_-]{1,64}$/.test(row.windowGroup))) throw new Error('Invalid window group')
+    if (row.active !== undefined && typeof row.active !== 'boolean') throw new Error('Invalid active view')
     const remote = row.remote === null ? null : remoteTarget(row.remote)
-    return { workspace: remote ? null : row.workspace as string | null, sessionId: row.sessionId as string | null, remote,
+    return { ...(typeof row.windowGroup === 'string' ? { windowGroup: row.windowGroup } : {}), ...(typeof row.active === 'boolean' ? { active: row.active } : {}), workspace: remote ? null : row.workspace as string | null, sessionId: row.sessionId as string | null, remote,
       bounds: { x: bounds.x as number, y: bounds.y as number, width: bounds.width as number, height: bounds.height as number }, maximized: row.maximized, fullscreen: row.fullscreen }
   })
 }

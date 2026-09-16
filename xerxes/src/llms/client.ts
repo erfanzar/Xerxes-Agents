@@ -528,6 +528,8 @@ export class ResponsesApiClient implements LlmClient {
     if (this.providerName === 'openai-codex') {
       return collectLlmCompletion(this.stream(request, signal))
     }
+    const mapped = responsesToolNames(request)
+    request = mapped.request
     const endpoint = new URL('responses', withTrailingSlash(this.baseUrl)).toString()
     const response = await this.fetchImplementation(endpoint, {
       method: 'POST',
@@ -543,10 +545,18 @@ export class ResponsesApiClient implements LlmClient {
         response,
       )
     }
-    return parseResponsesCompletion(parseJsonObject(await response.text(), this.providerName))
+    const result = parseResponsesCompletion(parseJsonObject(await response.text(), this.providerName))
+    return { ...result, toolCalls: mapped.restore(result.toolCalls) }
   }
 
   async *stream(request: CompletionRequest, signal?: AbortSignal): AsyncGenerator<LlmDelta> {
+    const mapped = responsesToolNames(request)
+    for await (const delta of this.streamWire(mapped.request, signal)) {
+      yield delta.toolCalls ? { ...delta, toolCalls: mapped.restore(delta.toolCalls) } : delta
+    }
+  }
+
+  private async *streamWire(request: CompletionRequest, signal?: AbortSignal): AsyncGenerator<LlmDelta> {
     if (this.providerName === 'openai-codex') {
       yield* this.streamCodex(request, signal)
       return
@@ -1532,6 +1542,34 @@ function responsesMessageContent(content: MessageContent): unknown {
       image_url: part.image_url.url,
       ...(part.image_url.detail ? { detail: part.image_url.detail } : {}),
     })
+}
+
+
+/** Provider aliases never escape into execution or persisted session names. */
+function responsesToolNames(original: CompletionRequest): { request: CompletionRequest; restore: (calls: readonly ToolCall[]) => readonly ToolCall[] } {
+  const names = new Set(original.tools?.map(tool => tool.function.name) ?? [])
+  for (const message of original.messages) {
+    if (message.role === 'assistant') for (const call of message.tool_calls ?? []) names.add(call.function.name)
+    if (message.role === 'tool') for (const name of message.added_tool_names ?? []) names.add(name)
+  }
+  const aliases = new Map<string, string>()
+  const reverse = new Map<string, string>()
+  for (const name of names) {
+    if (/^[a-zA-Z0-9_-]{1,64}$/.test(name)) continue
+    let alias = 'xerxes_' + createHash('sha256').update(name).digest('hex').slice(0, 48)
+    while (names.has(alias) || reverse.has(alias)) alias = 'xerxes_' + createHash('sha256').update(alias + name).digest('hex').slice(0, 48)
+    aliases.set(name, alias); reverse.set(alias, name)
+  }
+  const wireName = (name: string) => aliases.get(name) ?? name
+  return {
+    request: { ...original,
+      ...(original.tools ? { tools: original.tools.map(tool => ({ ...tool, function: { ...tool.function, name: wireName(tool.function.name) } })) } : {}),
+      messages: original.messages.map(message => message.role === 'assistant' && message.tool_calls
+        ? { ...message, tool_calls: message.tool_calls.map(call => ({ ...call, function: { ...call.function, name: wireName(call.function.name) } })) }
+        : message.role === 'tool' ? { ...message, ...(message.name ? { name: wireName(message.name) } : {}), ...(message.added_tool_names ? { added_tool_names: message.added_tool_names.map(wireName) } : {}) } : message),
+    },
+    restore: calls => calls.map(call => ({ ...call, function: { ...call.function, name: reverse.get(call.function.name) ?? call.function.name } })),
+  }
 }
 
 function responsesPayload(

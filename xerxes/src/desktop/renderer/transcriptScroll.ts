@@ -1,14 +1,37 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { useLayoutEffect, useRef, type RefObject } from 'react'
+import { useCallback, useLayoutEffect, useRef, type RefObject } from 'react'
 
 /** A newly attached session starts at its tail; reading older content pauses following. */
-export function useTranscriptScroll(sessionId: string | null): RefObject<HTMLDivElement | null> {
+export function useTranscriptScroll(sessionId: string | null, options: { more?: boolean; loading?: boolean; automatic?: boolean; load: () => Promise<void> }): { ref: RefObject<HTMLDivElement | null>; loadOlder: () => Promise<void> } {
   const ref = useRef<HTMLDivElement>(null)
   const session = useRef(sessionId)
   const following = useRef(true)
   const lastFollowTop = useRef<number | null>(null)
+  const currentOptions = useRef(options)
+  currentOptions.current = options
+  const pending = useRef(false)
+  const loadOlder = useCallback(async (): Promise<void> => {
+    const element = ref.current
+    if (!element || pending.current || currentOptions.current.loading || !currentOptions.current.more) return
+    pending.current = true
+    following.current = false
+    const identity = session.current
+    const top = element.getBoundingClientRect().top
+    const anchor = [...element.querySelectorAll<HTMLElement>('[data-history-anchor]')].find(node => node.getBoundingClientRect().bottom > top)
+    const anchorId = anchor?.dataset.historyAnchor
+    const offset = anchor ? anchor.getBoundingClientRect().top - top : 0
+    const height = element.scrollHeight
+    const scroll = element.scrollTop
+    try {
+      await currentOptions.current.load()
+      await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+      if (identity !== session.current) return
+      const retained = anchorId ? [...element.querySelectorAll<HTMLElement>('[data-history-anchor]')].find(node => node.dataset.historyAnchor === anchorId) : undefined
+      element.scrollTop = retained ? element.scrollTop + retained.getBoundingClientRect().top - element.getBoundingClientRect().top - offset : scroll + element.scrollHeight - height
+    } finally { pending.current = false }
+  }, [])
 
   useLayoutEffect(() => {
     const element = ref.current
@@ -35,6 +58,7 @@ export function useTranscriptScroll(sessionId: string | null): RefObject<HTMLDiv
         }
         lastFollowTop.current = null
         following.current = element.scrollHeight - element.scrollTop - element.clientHeight < 64
+        if (!following.current && element.scrollTop < 160 && currentOptions.current.automatic !== false) void loadOlder()
       }
     }
     // Measure after React commits the replay, not before its height is known.
@@ -49,5 +73,5 @@ export function useTranscriptScroll(sessionId: string | null): RefObject<HTMLDiv
       observer.disconnect()
     }
   })
-  return ref
+  return { ref, loadOlder }
 }

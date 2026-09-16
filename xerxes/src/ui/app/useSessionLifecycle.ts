@@ -422,7 +422,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
   )
 
   const resumeById = useCallback(
-    (id: string, options: { keepCurrent?: boolean } = {}) => {
+    (id: string, options: { keepCurrent?: boolean; preserveView?: boolean } = {}) => {
       const generation = ++switchGenerationRef.current
       patchOverlayState({ sessions: false })
       patchUiState({ status: 'resuming…' })
@@ -453,9 +453,13 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
 
             const info = r.info ?? null
             const running = Boolean(r.running || r.status === 'working' || r.status === 'waiting')
+            const recovering = options.preserveView === true && (previousSid ?? getUiState().info?.session_id) === r.session_id
+            const scrollPosition = recovering ? scrollRef.current?.getScrollTop() : undefined
+            const followedBottom = recovering ? scrollRef.current?.isSticky() : true
 
             composerActions.activateSessionQueue(r.session_id)
-            resetSession()
+            if (recovering) turnController.fullReset(true)
+            else resetSession()
             setSessionStartedAt(r.started_at ? r.started_at * 1000 : Date.now())
             seedTurnClock(r.inflight, running, setTurnStartedAt)
 
@@ -486,7 +490,11 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
               void closeSession(previousSid)
             }
 
-            setTimeout(() => scrollRef.current?.scrollToBottom(), 0)
+            setTimeout(() => {
+              if (generation !== switchGenerationRef.current) return
+              if (recovering && !followedBottom && scrollPosition !== undefined) scrollRef.current?.scrollTo(scrollPosition)
+              else scrollRef.current?.scrollToBottom()
+            }, 0)
           })
           .catch((e: Error) => {
             if (generation !== switchGenerationRef.current) return

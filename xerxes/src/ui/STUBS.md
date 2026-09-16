@@ -1,58 +1,31 @@
-# Xerxes TUI Stubbed RPCs
+# Native TUI capability limits and legacy names
 
-The TypeScript TUI contains controls whose daemon-side behavior is not exposed
-by the Bun runtime. Unsupported compatibility calls fail explicitly with a
-typed error (or, for bang commands, a nonzero result) so the UI never invents
-a successful no-op response.
+Updated 2026-09-15. A rejected legacy RPC name does not imply that the native
+capability is missing. The TUI uses the v35 daemon and never delegates to Python.
 
-OpenTUI and the Bun daemon are the only supported TUI/runtime path. This
-document records the remaining unsupported control surfaces for that path.
+| Legacy name | Supported workflow or actual limit |
+| --- | --- |
+| `plugins.manage` | `/plugins list`, `inspect`, `install`, `enable`, `disable`. Mutations require the injected plugin-management host. |
+| `skills.manage`, `skills.reload` | `/skills` refreshes discovery; inspect, diagnostics, trust, search, browse and local install are available. |
+| `reload.mcp` | `/reload-mcp`; `/config mcp` edits settings and `/mcp` inspects health/reconnects. |
+| `process.stop` | `/terminals` controls advertised writable/interruptible/killable processes; `/runs` cancels supported runs. |
+| `tools.configure` | `/preset manage` edits composition tools. `/permissions` controls the active permission mode. No generic legacy mutation RPC. |
+| `model.disconnect`, `model.save_key` | `/providers` and `/model` manage profiles and model selection. |
+| `rollback.list`, `rollback.diff`, `rollback.restore` | `/snapshots` and `/rollback` preview and restore supported snapshots. |
+| `terminal.resize` | No daemon terminal-geometry endpoint. TUI resizing does not imply remote PTY resizing. |
+| `voice.toggle`, `voice.record` | No native microphone capture/transcription implementation. `/voice` may report an embedding host's UI action; it is not proof of capture. |
+| `reload.env` | No live environment reload; restart an idle daemon after changing its environment. |
+| `delegation.status`, `delegation.pause`, `subagent.interrupt` | No targeted native delegation pause/interrupt endpoint. `/agents` inspects and retries supported failed agents; cancellation of the containing turn remains available. |
+| `spawn_tree.save/list/load` | No persisted legacy spawn-tree RPCs. Native saved agent manifests and local replay do not recreate a complete historical child-tool timeline. |
+| `forge.stop` | Forge templates execute synchronously. There is no asynchronous Forge run to cancel. |
+| Clipboard/drop helpers | Local terminal features, not daemon capabilities. |
 
-## Explicitly Stubbed in the TUI
+Session creation/activation/resume maps to `initialize`; prompt submission maps
+to `turn.submit`; interruption maps to `cancel`; steering maps to `steer`.
+Approvals and questions use the request-owned native response endpoints. Model
+and reasoning controls use native provider/profile RPCs. Shell results retain
+stdout, stderr and exit status; failures do not become successful no-ops.
 
-- `terminal.resize`: needs a daemon-visible terminal geometry update endpoint.
-- `clipboard.paste`, `paste.collapse`, `input.detect_drop`: local TUI helpers only.
-- `voice.toggle`, `voice.record`: needs voice capture/transcription endpoints.
-- `plugins.manage`: needs plugin install/enable/disable RPCs.
-- `skills.reload`, `skills.manage`: needs structured skill reload and management RPCs.
-- `delegation.status`, `delegation.pause`: needs delegation campaign state endpoints.
-- `subagent.interrupt`: needs targeted subagent cancellation by id.
-- `spawn_tree.save`, `spawn_tree.list`, `spawn_tree.load`: needs persisted spawn-tree endpoints.
-- `process.stop`: needs targeted long-running process control endpoint.
-- `reload.mcp`, `reload.env`: needs explicit MCP/env reload endpoints.
-- `rollback.list`, `rollback.diff`, `rollback.restore`: legacy RPC names remain unsupported; native slash supports /snapshots, /rollback diff <id>, and /rollback <id>.
-- `tools.configure`: needs runtime tool allow/deny configuration RPCs.
-- `model.disconnect`, `model.save_key`: needs provider credential management RPCs.
-
-## Supported by the Bun v35 Cutover
-
-- `shell.exec` maps to native `slash` bang commands. The adapter preserves
-  stdout, stderr and exit codes. Standalone `!command` shows the result and
-  submits it as context for a model follow-up in the same session. Inline
-  `{!command}` interpolation only substitutes output into its enclosing prompt.
-
-- `session.create`, `session.resume`, `session.activate` map to `initialize`.
-- `prompt.submit` maps to `turn.submit`. Pending `/image <path>` attachments
-  ride the same frame as an optional `images` array of
-  `{ media_type, data(base64) }` entries, validated at the daemon boundary
-  (strict base64, magic-byte sniff, 10MB per image, 20MB per turn) and carried
-  into the user message as `image_url` data-URL content parts.
-- `image.attach` is a local TUI operation: it reads, sniffs, and caps one
-  image file and returns its base64 payload for the next `prompt.submit`.
-- `session.interrupt` maps to `cancel`.
-- `session.active_list`, `session.list`, and `session.status` use their v35
-  daemon methods directly.
-- `runtime.status` exposes the Bun runtime build/protocol metadata.
-- `session.steer` uses native `steer`, including safe-boundary injection during
-  an active turn and next-turn persistence while idle.
-- `session.compress`, `slash.exec`, and `command.dispatch` use native slash
-  handling for the documented Bun command subset.
-- `approval.respond` and `clarify.respond` resolve native pending requests.
-- `complete.path` and `complete.slash` use native completion.
-- `model.options` combines native `provider_list` with live `session.status`;
-  selecting a profile lazily calls `fetch_models { profile_name }`. Profile
-  mutation uses `provider_save`, `provider_select`, and `provider_delete`.
-- `config.set` model/mode changes use `runtime.reload` / `set_mode`.
-
-Unsupported slash/plugin/skill commands return an explicit Bun-daemon result;
-they are not delegated to Python.
+See [the capability matrix](../../../docs/daemon-tui-gaps.md) for the current
+TUI parity audit and its verification status. External-provider, remote-machine,
+and platform acceptance must be distinguished from deterministic tests.

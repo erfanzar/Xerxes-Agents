@@ -263,7 +263,7 @@ describe('clean terminal layout', () => {
     }
   )
 
-  it('hides completed live plan progress while keeping the durable F10 plan and unfinished tasks', async () => {
+  it('keeps nonempty tasks pinned and preserves the durable F10 plan', async () => {
     const p = props(120)
     p.progress.showProgressArea = true
     patchUiState({ busy: true, info: { cwd: '/repo', model: 'sonnet-4.6', goal: 'Old completed goal', goal_phase: 'active' } as never })
@@ -278,7 +278,7 @@ describe('clean terminal layout', () => {
       await s.flush()
       const liveFrame = s.captureCharFrame()
       expect(liveFrame.split('\n').filter(line => line.includes('Old completed goal'))).toHaveLength(1)
-      expect(liveFrame).not.toContain('Tasks 1/1')
+      expect(liveFrame).toContain('Tasks 1/1')
 
       act(() => s.mockInput.pressKey('F10'))
       await s.flush()

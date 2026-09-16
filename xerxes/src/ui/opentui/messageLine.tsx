@@ -419,12 +419,14 @@ export function SpawnFleetRoster({
 
 function ToolStep({
   archived,
+  saved,
   cols,
   line,
   msgKey,
   t
 }: {
   archived?: readonly SubagentProgress[]
+  saved?: Msg
   cols?: number
   line: string
   msgKey?: string
@@ -476,6 +478,8 @@ function ToolStep({
   const stepId = msgKey ? `${msgKey}:${line}` : line
   const expanded = toolStepExpanded(useStore($toolStepVisibility), stepId)
   const record = useTurnSelector(state => {
+    const savedId = saved?.toolLineToId?.[line]
+    if (saved?.toolRecords) return savedId ? saved.toolRecords[savedId] : undefined
     const toolId = state.toolLineToId[line]
     return toolId ? state.toolRecords[toolId] : undefined
   })
@@ -526,9 +530,10 @@ function ToolStep({
             </Text>
           ) : null}
           {record.result ? (
-            <Text color={t.color.muted} wrap="wrap">
-              {'  '}result: {record.result}
-            </Text>
+            <Box flexDirection="column" flexShrink={0}>
+              <Text color={t.color.muted}>Output</Text>
+              {record.result.split('\n').map((line, index) => <Text key={index} color={t.color.muted} wrap="wrap">{line || ' '}</Text>)}
+            </Box>
           ) : null}
           {record.error ? (
             <Text color={t.color.error} wrap="wrap">
@@ -660,12 +665,14 @@ function ThinkingBlock({ cols, msg, rowId, t }: { cols?: number; msg: Msg; rowId
 
 function ToolRun({
   archived,
+  saved,
   cols,
   group,
   runId,
   t
 }: {
   archived: readonly SubagentProgress[]
+  saved?: Msg
   cols?: number
   group: Extract<ToolRunGroup, { kind: 'run' }>
   runId: string
@@ -688,7 +695,7 @@ function ToolRun({
           </Text>
         </Box>
         {group.lines.map((line, i) => (
-          <ToolStep archived={archived} cols={cols} key={i} line={line} msgKey={runId} t={t} />
+          <ToolStep archived={archived} saved={saved} cols={cols} key={i} line={line} msgKey={runId} t={t} />
         ))}
       </Box>
     )
@@ -796,9 +803,9 @@ function ToolTrail({
       {visibility.tools
         ? groupToolRun(tools).map((group, i) =>
             group.kind === 'row' ? (
-              <ToolStep archived={msg.subagents} cols={cols} key={i} line={group.line} msgKey={msgKey} t={t} />
+              <ToolStep archived={msg.subagents} saved={msg} cols={cols} key={i} line={group.line} msgKey={msgKey} t={t} />
             ) : (
-              <ToolRun archived={msg.subagents ?? []} cols={cols} group={group} key={i} runId={`${thinkingRowId(msg, msgKey)}:run${i}`} t={t} />
+              <ToolRun archived={msg.subagents ?? []} saved={msg} cols={cols} group={group} key={i} runId={`${thinkingRowId(msg, msgKey)}:run${i}`} t={t} />
             )
           )
         : null}

@@ -36,11 +36,12 @@ export function workspaceName(cwd: string | undefined): string {
 export function groupByWorkspace<T extends GroupableRow>(
   rows: readonly T[],
   currentCwd = '',
+  remembered: readonly string[] = [],
 ): Array<WorkspaceGroup<T>> {
   const order: string[] = []
   const groups = new Map<string, { cwd: string; rows: T[] }>()
   for (const row of rows) {
-    const name = workspaceName(row.cwd) || 'Other'
+    const name = row.cwd ?? ''
     const bucket = groups.get(name)
     if (bucket) bucket.rows.push(row)
     else {
@@ -48,13 +49,16 @@ export function groupByWorkspace<T extends GroupableRow>(
       groups.set(name, { cwd: row.cwd ?? '', rows: [row] })
     }
   }
+  for (const cwd of remembered) {
+    if (!groups.has(cwd)) { order.push(cwd); groups.set(cwd, { cwd, rows: [] }) }
+  }
   const listed = order.map(name => {
     const group = groups.get(name)!
-    return { name, cwd: group.cwd, rows: group.rows }
+    return { name: workspaceName(group.cwd) || 'Other', cwd: group.cwd, rows: group.rows }
   })
-  const current = workspaceName(currentCwd)
+  const current = currentCwd
   if (!current) return listed
-  const home = listed.find(group => group.name === current)
+  const home = listed.find(group => group.cwd === current)
   if (!home) return listed
   return [home, ...listed.filter(group => group !== home)]
 }

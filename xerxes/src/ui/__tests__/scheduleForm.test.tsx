@@ -221,7 +221,10 @@ it.each([[220, 65], [40, 18]])('edits and clears a follow-up stop condition at %
     await screen.flush()
     act(() => screen.mockInput.pressKey('RETURN'))
     await vi.waitFor(() => expect(rpc).toHaveBeenCalledWith('schedule.update', expect.objectContaining({ stop_condition: null, target: 'session' })))
-    await screen.flush()
+    await vi.waitFor(async () => {
+      await screen.flush()
+      expect(screen.captureCharFrame()).not.toContain('Saving…')
+    })
     await act(async () => screen.mockInput.typeText('All checks pass'))
     await screen.flush()
     act(() => screen.mockInput.pressKey('RETURN'))
@@ -248,7 +251,10 @@ it.each([[220, 65], [40, 18]])('edits, validates and clears the lifetime token t
     await screen.flush()
     act(() => screen.mockInput.pressKey('RETURN'))
     await vi.waitFor(() => expect(rpc).toHaveBeenCalledWith('schedule.update', expect.objectContaining({ max_total_tokens: null })))
-    await screen.flush()
+    await vi.waitFor(async () => {
+      await screen.flush()
+      expect(screen.captureCharFrame()).not.toContain('Saving…')
+    })
     await act(async () => screen.mockInput.typeText('250')); await screen.flush()
     act(() => screen.mockInput.pressKey('RETURN'))
     await vi.waitFor(() => expect(rpc).toHaveBeenCalledWith('schedule.update', expect.objectContaining({ max_total_tokens: 250 })))

@@ -11,6 +11,7 @@ import type { Theme } from '../theme.js'
 import { overlayPanelSize } from './overlayLayout.js'
 import { Box, Text } from './primitives.js'
 import { DialogHeader, DialogFooter, DialogEmpty, DialogSection } from './dialogChrome.js'
+import { RunEvents } from './runEvents.js'
 
 export function RunOverlay({ t, scheduleId, onClose }: { t: Theme; scheduleId?: string; onClose?: () => void }) {
   const gateway = useOptionalGateway()
@@ -31,6 +32,7 @@ export function RunOverlay({ t, scheduleId, onClose }: { t: Theme; scheduleId?: 
   const [upcomingTotal, setUpcomingTotal] = useState(0)
   const [runs, setRuns] = useState<RunSummary[]>([])
   const [selected, setSelected] = useState('')
+  const [eventsTarget, setEventsTarget] = useState<{ id: string; title: string; scope: typeof scope } | null>(null)
   const [detail, setDetail] = useState<RunDetail | null>(null)
   const [unread, setUnread] = useState(false)
   const [workspaceScope, setWorkspaceScope] = useState(true)
@@ -113,9 +115,10 @@ export function RunOverlay({ t, scheduleId, onClose }: { t: Theme; scheduleId?: 
       .finally(() => { cancelling.current = false; if (alive.current) setCancelPending(false) })
   }
   useKeyboard(key => {
+    if (eventsTarget) return
     if (key.eventType === 'release') return
     if (key.name === 'escape') { key.preventDefault(); key.stopPropagation(); onClose ? onClose() : patchOverlayState({ runs: false }); return }
-    if (!['up', 'down', 'pageup', 'pagedown', 'home', 'end', 'a', 'u', 'r', 'w', 'n', 'p', 'k', 's', 'x', 't', 'e'].includes(key.name)) return
+    if (!['up', 'down', 'pageup', 'pagedown', 'home', 'end', 'a', 'u', 'r', 'w', 'n', 'p', 'k', 's', 'x', 't', 'e', 'v'].includes(key.name)) return
     key.preventDefault(); key.stopPropagation()
     const index = runs.findIndex(run => run.id === selected)
     if (key.name === 'up' || key.name === 'down') setSelected(runs[Math.max(0, Math.min(runs.length - 1, index + (key.name === 'up' ? -1 : 1)))]?.id ?? '')
@@ -129,6 +132,7 @@ export function RunOverlay({ t, scheduleId, onClose }: { t: Theme; scheduleId?: 
     else if (key.name === 't' && !scheduleId) patchOverlayState({ runs: false, schedules: true })
     else if (key.name === 'e' && attentionTotal > 0) { onClose ? onClose() : patchOverlayState({ runs: false }) }
     else if (key.name === 'a') acknowledge()
+    else if (key.name === 'v' && selected) setEventsTarget({ id: selected, title: selectedRun?.title ?? selected, scope })
     else if (key.name === 'x') cancelSelected()
     else if (key.name === 'home') scroll.current?.scrollTo(0)
     else if (key.name === 'end') scroll.current?.scrollTo(Number.MAX_SAFE_INTEGER)
@@ -144,6 +148,7 @@ export function RunOverlay({ t, scheduleId, onClose }: { t: Theme; scheduleId?: 
   const start = Math.max(0, selectedIndex - visibleCount + 1)
   return <box position="absolute" left={0} top={0} width="100%" height="100%" zIndex={150} backgroundColor="#000000cc" alignItems="center" justifyContent="center">
     <Box width={!runs.length && !attentionRows.length && !nextRows.length ? Math.min(88, size.width) : size.width} height={!runs.length && !attentionRows.length && !nextRows.length ? Math.min(24, size.height) : size.height} flexDirection="column" paddingX={1} borderStyle="round" borderColor={t.color.border} backgroundColor={t.color.statusBg}>
+      {eventsTarget ? <RunEvents key={`${eventsTarget.scope}:${eventsTarget.id}`} t={t} runId={eventsTarget.id} title={eventsTarget.title} scope={eventsTarget.scope} onClose={() => setEventsTarget(null)} /> : <>
       <DialogHeader t={t} title={<>{scheduleId ? 'Schedule history' : 'Runs'} · {workspaceScope ? 'Workspace' : 'Session'}{unread ? ' · Unread' : ''} · {runs.length} · Page {pages.length + 1}</>} subtitle="A record of your work, with results ready to review." />
       <Text color={t.ds.secondary}>K {scheduleId ? 'schedule' : kind || 'all kinds'} · S {state || 'all states'}</Text>
       {attentionRows.length ? <Box flexDirection="column" flexShrink={0} onMouseDown={() => { onClose ? onClose() : patchOverlayState({ runs: false }) }}>
@@ -168,7 +173,6 @@ export function RunOverlay({ t, scheduleId, onClose }: { t: Theme; scheduleId?: 
             <Text color={t.ds.secondary} wrap="wrap">{detail.kind} · {detail.state} · {detail.workspace}</Text>
             {detail.tokenUsage ? <Text color={t.ds.secondary} wrap="wrap">Tokens: {detail.tokenUsage.inputTokens} input · {detail.tokenUsage.outputTokens} output{detail.tokenUsage.complete ? '' : ' · partial; some usage unavailable'}</Text> : detail.kind === 'schedule' ? <Text color={t.ds.secondary}>Token usage unavailable.</Text> : null}
             {detail.cancelLabel ? <Box onMouseDown={cancelSelected}><Text color={t.color.warn}>{cancelPending ? 'Requesting cancellation…' : `X · ${detail.cancelLabel}`}</Text></Box> : null}
-            {wide ? <Text color={t.ds.secondary} wrap="wrap">{detail.id}</Text> : null}
             {detail.reactionHealth ? <Box flexDirection="column">
               <Text color={t.color.accent} wrap="wrap">Reactions: {detail.reactionHealth.state} · {detail.reactionHealth.attempts}/{detail.reactionHealth.maxReactions} attempts · {detail.reactionHealth.pendingEvents} queued events</Text>
               {detail.reactionHealth.usage ? <Text color={t.ds.secondary} wrap="wrap">Measured reaction tokens: {detail.reactionHealth.usage.inputTokens} input · {detail.reactionHealth.usage.outputTokens} output{detail.reactionHealth.usage.complete ? "" : " · incomplete usage"}</Text> : null}
@@ -177,12 +181,17 @@ export function RunOverlay({ t, scheduleId, onClose }: { t: Theme; scheduleId?: 
             {detail.error ? <Text color={t.color.warn} wrap="wrap">{detail.error}</Text> : null}
             {detail.outputTruncated ? <Text color={t.ds.secondary}>Earlier output was omitted.</Text> : null}
             {terminal.height >= 26 ? <DialogSection t={t}>OUTPUT</DialogSection> : null}<Text color={t.color.text} wrap="wrap">{detail.output || 'No output recorded.'}</Text>
+            <Text color={t.ds.secondary} wrap="wrap">Run {detail.id} · revision {detail.revision}</Text>
+            <Text color={t.ds.secondary} wrap="wrap">Session {detail.ownerSessionId} · source {detail.sourceId}</Text>
+            <Text color={t.ds.secondary} wrap="wrap">Started {new Date(detail.startedAt).toLocaleString()}{detail.endedAt === undefined ? '' : ` · ended ${new Date(detail.endedAt).toLocaleString()}`}</Text>
+            {detail.terminalKind || detail.exitCode !== undefined ? <Text color={t.ds.secondary} wrap="wrap">{detail.terminalKind ?? 'Terminal'}{detail.exitCode === undefined ? '' : ` · exit ${detail.exitCode}`}</Text> : null}
           </Box> : null}
         </scrollbox>
       </Box>)}
 
       <DialogFooter t={t}><Text color={t.ds.secondary}>{acknowledging ? 'Acknowledging…' : size.width < 70 ? 'N/P pages · ↑↓ · K kind · S state' : 'K kind · S state · N/P pages · ↑↓ select · U unread · A acknowledge · W scope · R refresh'}</Text>
-      <Text color={t.ds.secondary}>{size.width < 70 ? 'A ack · U unread · W scope · Esc close' : 'PgUp/PgDn scroll result · Esc close'}</Text></DialogFooter>
+      <Box onMouseDown={() => { if (selected) setEventsTarget({ id: selected, title: selectedRun?.title ?? selected, scope }) }}><Text color={t.ds.secondary}>{size.width < 70 ? 'V events · A ack · W scope · Esc close' : 'V saved events · PgUp/PgDn scroll result · Esc close'}</Text></Box></DialogFooter>
+      </>}
     </Box>
   </box>
 }

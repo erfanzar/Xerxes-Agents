@@ -61,6 +61,11 @@ describe('turnController', () => {
 
     expect(getOverlayState()).toMatchObject({ agents: false, reasoningPicker: false, sessions: false })
   })
+  it('retains reading panels while clearing stale interaction authority during reconnect', () => {
+    patchOverlayState({ runs: true, forge: true, presetEditor: true, confirm: { title: 'Old action', detail: 'stale', onConfirm: () => undefined } })
+    turnController.fullReset(true)
+    expect(getOverlayState()).toMatchObject({ runs: true, forge: true, presetEditor: true, confirm: null })
+  })
 
   it('keeps TodoWriteTool state pinned instead of archiving it into the transcript', () => {
     const todos = [{ content: 'verify the fix', id: '1', status: 'completed' as const }]

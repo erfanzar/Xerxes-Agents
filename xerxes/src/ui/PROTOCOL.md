@@ -136,9 +136,9 @@ params fall back to per-connection defaults.
 | `session.open`                       | `{ session_key?, agent_id?, project_dir? }`    | `{ ok, session }`                                              | Open/attach a session within the active or explicit project boundary. `agent_id` is the DSH-style agent preset; changing it is rejected after the first transcript message. Mid-turn, `session.inflight` additively carries `started_at` (epoch seconds), `thinking`, and `tools: [{ id?, name, arguments?, ok?, duration_ms?, error? }]` — the turn's work so far, since the transcript only covers completed turns. The session payload also carries cumulative `llm_duration_ms`, `llm_steps`, `tool_duration_ms`, `tool_steps`, `ttft_total_ms`, `ttft_samples`, and `ttft_avg_ms` when observed. Attaching also drains that session's pending background-completion notices as `notification` events (at-most-once; they accumulate while no client is attached). |
 | `agentPreset.list`                   | `{}`                                           | `{ ok, presets, default_id, authorable, has_document }`         | Uncached roster of built-in, user, and project agent compositions; broken presets remain visible with a reason. |
 | `agentPreset.select`                 | `{ agent_preset, session_key? }`                | `{ ok, agent_preset }`                                         | Recompose a blank session only. A started session returns `agent-preset-locked`. |
-| `agentPreset.read`                   | `{ agent_preset }`                              | `{ ok, preset, content }`                                      | Read the exact `agent.yaml` composition. |
+| `agentPreset.read`                   | `{ agent_preset }`                              | `{ ok, preset, content, guarded_write }`                       | Read the exact `agent.yaml` composition; advertises optimistic editing support. |
 | `agentPreset.copy`                   | `{ from, agent_preset, name? }`                 | `{ ok, preset, path }`                                         | Duplicate a known-good preset into the user root; ids match `[a-z0-9][a-z0-9-]*`. |
-| `agentPreset.write`                  | `{ agent_preset, content }`                     | `{ ok, preset }`                                               | Replace one user composition atomically after strict version-1 validation. |
+| `agentPreset.write`                  | `{ agent_preset, content, expected_content? }`  | `{ ok, preset }`                                               | Replace one user composition atomically after strict version-1 validation. When provided, expected content must match the current file. |
 | `agentPreset.setDefault`             | `{ agent_preset }`                              | `{ ok, preset, default_id }`                                   | Changes only the default for sessions created later. |
 | `agentPreset.openDocument` / `agentPreset.remove` | `{ agent_preset }`                    | `{ ok, path? }`                                                | User presets only; running sessions are unaffected. |
 | `session.active_list`                | `{}`                                           | `{ ok, sessions }`                                             | List live top-level and subagent sessions. Agent View filters subagents into their parent and polls this for live state. |
@@ -347,6 +347,21 @@ It returns `{ok, events: [{sequence, text, at}], next_cursor, has_more}`.
 Reading does not acknowledge the run or consume evidence. Retain the last
 cursor only after processing that page; repeating a cursor safely repeats the
 same evidence. Unknown or inaccessible runs fail without exposing events.
+
+In the TUI, `/runs` → V opens saved events for the selected run. N/P navigate
+event pages; R refreshes the current page or retries the failed request without
+skipping evidence; Escape returns to the selected result. Page content remains
+visible on transport failure. Event text scrolls independently at narrow widths.
+
+`/preset manage` opens full composition inspection and editing. Shipped presets
+are read-only; copy one with `/preset copy <source> <new-id>` before editing.
+`agentPreset.read` additively advertises `guarded_write: true`. Editors may send
+`expected_content` to `agentPreset.write`; a mismatch returns
+`code: "agent-preset-stale"` before writing. Omitting it preserves legacy callers.
+The TUI requires that capability for writes, retains failed drafts, and keeps
+drafts scoped to the session and preset when the editor closes. Ctrl+S saves,
+Escape keeps the draft, and Ctrl+D explicitly discards it. O shows the folder
+returned by `agentPreset.openDocument`; it does not claim to launch an editor.
 
 Terminal monitor events are stored with contiguous per-run sequence numbers
 and their displayed output in one transaction before live notification. A
@@ -1488,3 +1503,64 @@ TUI and desktop derive the same control address under `$XERXES_HOME/daemon` from
 Closing a TUI detaches its connection; it does not terminate the daemon. Build updates request `runtime.restart_if_idle`, which checks work across every session atomically. Explicit socket overrides and remote endpoints remain supported.
 
 Migration preserves old work: clients first attach to an already-running legacy project socket. The global daemon refuses to take that workspace while its old socket is alive, preventing two writers to a saved session. Clients migrate an idle legacy runtime only after its atomic restart endpoint approves shutdown. Busy runtimes and older servers without that endpoint remain attached. Once a legacy runtime exits, subsequent clients use the global socket.
+
+### TUI parity workflows (2026-09-15)
+
+The following are native terminal workflows, not additional wire protocols:
+
+- `/runs` → **V** opens durable event history. **N/P** page using the daemon cursor;
+  **R** retries the failed page. Inspecting events does not acknowledge the run.
+- `/forge` discovers and inspects packages. **Enter** opens parameter inputs,
+  **N** defines a package, **Ctrl+S** reviews and then confirms a definition,
+  and **D**, then **Y**, removes the selected version. Invalid inputs and immutable
+  version errors retain the draft. `/forge inspect <name> [version]` is also supported.
+- `/preset manage` reads complete composition YAML; **E** edits a user composition,
+  **Ctrl+S** performs a guarded save, **Ctrl+D** discards a draft, and **O** reports
+  its document location. Shipped presets can be copied with `/preset copy`.
+  `/custom-agents` remains the separate project-specialist editor.
+- `/file <path>` previews numbered workspace text. Completion uses literal
+  `complete.path_prefix`, including spaces. `/undo-edits <recorded path|--all>`
+  confirms reversal of recorded text edits; it does not discard arbitrary Git changes.
+- `/terminals` → **Enter**, **V** reads retained output with cursor paging.
+  Retention gaps are explicit. Failed input writes preserve the draft; repeated
+  submission while pending cannot duplicate writes.
+- `/tool-output [list|last|number|id]` pages the complete tool result received in
+  this client. Compact transcript summaries remain short. Historical daemon
+  replay can contain only summaries; unavailable historical output is not fabricated.
+- `/search [--session <id>] [--limit 1–500] <text>` displays results in a pager,
+  with conversation identities, resume instructions and index-coverage warnings.
+- `/daemon status` reports shared-runtime identity and readiness. `/restart`
+  and `/daemon restart` use `runtime.restart_if_idle` after confirmation;
+  `/daemon stop` explicitly confirms stopping every workspace through `shutdown`.
+  Quitting one terminal only detaches that client.
+
+On same-session transport recovery, the TUI keeps the inspector identity and
+cursor page, composer draft and manual transcript position. Stale confirmation,
+approval and question state is cleared; reconnect does not grant authority to an
+old dialog. A deliberate session switch resets session-specific inspectors.
+
+See `docs/daemon-tui-gaps.md` for the audit and acceptance evidence.
+
+### Incremental desktop history
+
+`initialize` and `session.open` optionally accept `history_limit` (integer 0–100).
+Omitting it preserves the existing v35 transcript and replay behavior. With 1–100,
+`session.history` in the returned session payload contains `{ actions, before,
+has_more, total_actions }` instead of `transcript`, `tool_executions` and
+`thinking_content`; initialize does not additionally emit the full historical
+replay. Each action contains an `id`, ordered `messages`, `executions`, and
+`thinking`. One complete tool call/result pair is one action.
+
+The `session.history` RPC accepts `{ session_key?, before?, history_limit? }`
+and returns `{ ok, session_id, history }`. Limits default to 100 (maximum 100);
+`before` is the opaque cursor from the preceding response. Pages are chronological
+and exclusive of the cursor boundary. Appending new messages does not shift
+older pages. A rewritten boundary or cursor from another session is rejected;
+clients must retain their current display and offer a reload/retry rather than
+silently splice unrelated history.
+
+`session.status` and `session.active_list` also accept `history_limit: 0` to omit
+transcripts, executions and thinking. Counts, active-turn state, telemetry, goals,
+todos, agent state and a bounded first-user-message `preview` remain available.
+Metadata reads do not change a connection's session selection. Explicit export
+requests may still retrieve the full transcript.

@@ -10,7 +10,7 @@ import { getOverlayState, patchOverlayState, resetFlowOverlays, resetOverlayStat
 import { RunOverlay } from '../opentui/runOverlay.js'
 import { DARK_THEME } from '../theme.js'
 
-const row = { id: 'run-1', title: 'Build application', kind: 'terminal', state: 'failed', revision: 2, unread: true, startedAt: 1, workspace: '/repo', sourceId: 'process-1' }
+const row = { id: 'run-1', title: 'Build application', kind: 'terminal', state: 'failed', revision: 2, unread: true, startedAt: 1, endedAt: 2000, exitCode: 1, terminalKind: 'background', ownerSessionId: 'session-1', workspace: '/repo', sourceId: 'process-1' }
 afterEach(() => resetOverlayState())
 it.each([[220, 65], [110, 35], [60, 24], [40, 18]])('renders populated runs with readable controls at %ix%i', async (width, height) => {
   const rpc = vi.fn(async (method: string) => method === 'run.list' ? { ok: true, runs: [row] } : { ok: true, run: { ...row, output: 'Typecheck failed at app.ts:12', error: 'exit 1' } })
@@ -23,6 +23,11 @@ it.each([[220, 65], [110, 35], [60, 24], [40, 18]])('renders populated runs with
     expect(text).toContain('Build application')
     expect(text).toContain('Esc close')
     expect(text).toContain('Typecheck failed')
+    if (width >= 110) {
+      expect(text).toContain('source process-1')
+      expect(text).toContain('background · exit 1')
+      expect(text).toContain('revision 2')
+    }
   } finally { act(() => screen.renderer.destroy()) }
 })
 it('preserves user-opened runs across turn completion and acknowledges the inspected revision', async () => {

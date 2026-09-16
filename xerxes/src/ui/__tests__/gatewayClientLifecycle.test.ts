@@ -59,6 +59,15 @@ const attachFakeSocket = (client: GatewayClient, socket: Socket) => {
 }
 
 describe('GatewayClient session lifecycle', () => {
+  it('binds file, recorded-edit and terminal output requests to their requested session', async () => {
+    const client = new GatewayClient({ projectDir: process.cwd(), sessionKey: 'attached-session' })
+    const raw = vi.fn(async () => ({ ok: true }))
+    ;(client as unknown as { rawRequest: typeof raw }).rawRequest = raw
+    for (const method of ['workspace.filePreview', 'changes.undo', 'terminal.output']) {
+      await client.request(method, { session_id: 'requested-session', path: 'file.txt' })
+      expect(raw).toHaveBeenLastCalledWith(method, { session_id: 'requested-session', session_key: 'requested-session', path: 'file.txt' })
+    }
+  })
   it('keeps the retired config mtime poll stable when the native daemon has no revision source', async () => {
     const client = new GatewayClient({ projectDir: process.cwd(), sessionKey: 'test:config-mtime' })
 

@@ -39,6 +39,14 @@ describe('OpenTUI @ file completion', () => {
 })
 
 describe('skill argument completion requests', () => {
+  it('requests full daemon command arguments without losing the leading command', () => {
+    for (const input of ['/forge inspect gre', '/preset manage', '/config m', '/plugins enable test', '/skills inspect git']) {
+      expect(completionRequestForInput(input)).toEqual({ method: 'complete.slash', params: { text: input }, replaceFrom: 1 })
+    }
+    expect(completionToApplyOnSubmit('/forge inspect gre', '/forge inspect greeting 1.0.0 ', 1)).toBe('/forge inspect greeting 1.0.0 ')
+    expect(completionRequestForInput('/file evidence')).toEqual({ method: 'complete.path', params: { word: 'evidence', path_prefix: 'evidence' }, replaceFrom: 6 })
+    expect(completionRequestForInput('/plugins install ./source')).toEqual({ method: 'complete.path', params: { word: './source' }, replaceFrom: 17 })
+  })
   it('routes /skill <prefix> to daemon skill suggestions with the right replace point', () => {
     expect(completionRequestForInput('/skill git')).toEqual({
       method: 'skill_suggestions',
@@ -58,6 +66,6 @@ describe('skill argument completion requests', () => {
       params: { text: '/skill' },
       replaceFrom: 1
     })
-    expect(completionRequestForInput('/skills list')).toBeNull()
+    expect(completionRequestForInput('/skills list')).toEqual({ method: 'complete.slash', params: { text: '/skills list' }, replaceFrom: 1 })
   })
 })

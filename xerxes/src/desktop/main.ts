@@ -8,12 +8,13 @@
  * those properties are the design, not configuration.
  */
 
-import { app, BrowserWindow, dialog, ipcMain, nativeImage, Notification, shell, Menu, screen, type IpcMainInvokeEvent } from 'electron'
+import { app, BrowserWindow, WebContentsView, dialog, ipcMain, nativeImage, Notification, shell, Menu, screen, type IpcMainInvokeEvent } from 'electron'
 import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { activateWorkspaceView } from './main/workspaceNavigation.js'
 import { loadWindowLayout, saveWindowLayout, visibleWindowBounds, type SavedWindow } from './main/windowState.js'
 import { WindowRoutes } from './main/windowRoutes.js'
 import { windowRecovery } from './main/windowRecovery.js'
@@ -22,7 +23,7 @@ import { xerxesHome } from '../daemon/paths.js'
 import { DaemonRpc } from './main/daemon.js'
 import { registerDaemonBridge, detachDaemon } from './main/ipc.js'
 import { dictationPort, transcribeDictation } from './main/voice.js'
-import { saveDesktopWorkspace } from './main/workspaceSettings.js'
+import { loadDesktopWorkspaces, saveDesktopWorkspace } from './main/workspaceSettings.js'
 import {
   openRemote,
   remoteTarget,
@@ -165,6 +166,22 @@ const windowRoutes = new WindowRoutes<IpcMainInvokeEvent>()
 const registeredChannels = new Set<string>()
 const cleanupWindows = new Set<() => void>()
 
+const workspaceSurfaces = new Map<number, { host: BrowserWindow; view: WebContentsView | null }>()
+const activeSurfaces = new Map<number, number>()
+function activateSurface(id: number): void {
+  const surface = workspaceSurfaces.get(id)
+  if (!surface || surface.host.isDestroyed()) return
+  for (const [otherId, other] of workspaceSurfaces) {
+    if (other.host === surface.host && other.view) other.view.setVisible(otherId === id)
+  }
+  activeSurfaces.set(surface.host.id, id)
+  const contents = surface.view?.webContents ?? surface.host.webContents
+  contents.focus()
+  const state = windowStates.get(id)?.()
+  if (state?.workspace) surface.host.setTitle(basename(state.workspace) + ' — ' + APP_NAME)
+  scheduleWindowSave()
+}
+
 const windowStates = new Map<number, () => SavedWindow>()
 let quitting = false
 let saveTimer: ReturnType<typeof setTimeout> | undefined
@@ -181,18 +198,45 @@ function scheduleWindowSave(): void {
   saveTimer = setTimeout(persistWindows, 250)
 }
 
-function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: SavedWindow): BrowserWindow {
+function openWorkspaceView(host: BrowserWindow, directory: string, sessionId?: string): void {
+  const views = [...workspaceSurfaces].flatMap(([id, surface]) => {
+    const state = windowStates.get(id)?.()
+    return state && surface.host === host ? [{ ...state, isDestroyed: () => host.isDestroyed(),
+      isMinimized: () => host.isMinimized(), restore: () => host.restore(),
+      show: () => host.show(), focus: () => { host.focus(); activateSurface(id) } }] : []
+  })
+  if (!activateWorkspaceView(views, directory, sessionId)) createWorkspaceWindow(directory, undefined, sessionId, host)
+}
+
+function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: SavedWindow, initialSessionId?: string, host?: BrowserWindow): BrowserWindow {
   let daemon: DaemonRpc | null = null
   let remote: RemoteConnection | null = null
   let remoteMachine: RemoteTarget | null = null
   let remoteAttempt: AbortController | null = null
   let remoteError = ''
   let selectedWorkspace: string | null = null
-  let resumeSession: string | null = saved?.sessionId ?? null
+  let resumeSession: string | null = initialSessionId ?? saved?.sessionId ?? null
   let currentSession: string | null = resumeSession
 
 
-  const window = createWindow(saved)
+  if (initialWorkspace) saveDesktopWorkspace(workspaceFile(), initialWorkspace)
+  const window = host ?? createWindow(saved)
+  const view = host ? new WebContentsView({ webPreferences: {
+    contextIsolation: true, backgroundThrottling: false, nodeIntegration: false,
+    sandbox: true, preload: join(here, 'preload.js'),
+  } }) : null
+  const contents = view?.webContents ?? window.webContents
+  if (view) {
+    view.setBackgroundColor('#181b23')
+    const fit = () => { if (!window.isDestroyed()) { const [width, height] = window.getContentSize(); view.setBounds({ x: 0, y: 0, width: width!, height: height! }) } }
+    window.contentView.addChildView(view)
+    fit()
+    window.on('resize', fit)
+    contents.once('destroyed', () => window.removeListener('resize', fit))
+    contents.setWindowOpenHandler(({ url }) => { void shell.openExternal(url); return { action: 'deny' } })
+    contents.on('will-navigate', event => event.preventDefault())
+    void contents.loadFile(join(here, 'renderer', 'index.html')).catch(error => console.error('Workspace view failed:', error))
+  }
   const recover = windowRecovery({
     closed: () => window.isDestroyed(),
     prompt: async detail => {
@@ -206,24 +250,26 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     },
     reload: async () => {
       resumeSession = currentSession
-      await window.loadFile(join(here, 'renderer', 'index.html'))
+      await contents.loadFile(join(here, 'renderer', 'index.html'))
       if (!window.isDestroyed()) {
         window.show()
         window.focus()
-        window.webContents.focus()
+        contents.focus()
       }
     },
     report: error => console.error('Desktop recovery failed:', error),
   })
-  window.webContents.on('render-process-gone', (_event, details) => {
+  contents.on('render-process-gone', (_event, details) => {
     if (details.reason !== 'clean-exit') void recover(`Renderer exited: ${details.reason} (code ${details.exitCode}).`)
   })
-  window.webContents.on('did-fail-load', (_event, code, description, _url, isMainFrame) => {
+  contents.on('did-fail-load', (_event, code, description, _url, isMainFrame) => {
     // ERR_ABORTED is expected when a workspace switch replaces a navigation.
     if (isMainFrame && code !== -3) void recover(`Page load failed: ${description} (${code}).`)
   })
-  const id = window.webContents.id
-  const attach = (next?: DaemonRpc) => registerDaemonBridge(window.webContents, next, (type, payload) => maybeNotify(window, type, payload), (method, result) => {
+  const id = contents.id
+  workspaceSurfaces.set(id, { host: window, view })
+  activateSurface(id)
+  const attach = (next?: DaemonRpc) => registerDaemonBridge(contents, next, (type, payload) => maybeNotify(window, type, payload), (method, result) => {
     if (method !== 'initialize' && method !== 'session.open') return
     const session = result.session as Record<string, unknown> | undefined
     if (session && typeof session.id === 'string' && /^[a-zA-Z0-9_-]{1,256}$/.test(session.id)) {
@@ -238,7 +284,7 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
       ipcMain.handle(channel, (event, ...args: unknown[]) => windowRoutes.invoke(channel, event, args))
     }
   }
-  /** Point the shell at a new workspace daemon and give the renderer a clean boot. */
+  /** Bind a fresh connection to the selected workspace on the shared daemon. */
   function useProject(directory: string, sessionId: string | null = null): void {
     if (window.isDestroyed()) throw new Error('Workspace window is closed')
     saveDesktopWorkspace(workspaceFile(), directory)
@@ -258,7 +304,7 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     daemon = next
     attach(next)
     previous?.dispose()
-    if (!window.isDestroyed()) window.webContents.reload()
+    if (!window.isDestroyed()) contents.reload()
   }
 
 
@@ -277,21 +323,25 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     void daemon.call('runtime.status', {}).catch(() => {})
   }
   // The renderer's workspace gate lands here: pick a folder (or enter one
-  // from the sidebar), move the bridge to that project's daemon, reload for
+  // from the sidebar), bind the shared-daemon bridge to that workspace, reload for
   // a clean session view.
   handle('desktop:choose-workspace', async () => {
     const picked = await pickWorkspace()
     if (!picked) return null
-    useProject(picked)
+    if (selectedWorkspace || remote) openWorkspaceView(window, picked)
+    else useProject(picked)
     return picked
   })
   handle('desktop:use-workspace', (_event, dir: unknown, sessionId?: unknown) => {
-    if (typeof dir !== 'string' || !dir) throw new TypeError('Invalid workspace directory')
+    if (typeof dir !== 'string' || !isAbsolute(dir) || /[\x00-\x1f]/.test(dir)) throw new TypeError('Invalid workspace directory')
     if (sessionId !== undefined && (typeof sessionId !== 'string' || !sessionId || sessionId.length > 256 || /[\x00-\x1f]/.test(sessionId))) throw new TypeError('Invalid resume session id')
     if (remote && sessionId) throw new Error('Open this session from its saved SSH workspace first.')
-    if (dir !== selectedWorkspace || remote || sessionId) useProject(dir, typeof sessionId === 'string' ? sessionId : null)
+    if (selectedWorkspace || remote) {
+      if (dir !== selectedWorkspace || remote || sessionId) openWorkspaceView(window, dir, typeof sessionId === 'string' ? sessionId : undefined)
+    } else useProject(dir, typeof sessionId === 'string' ? sessionId : null)
     return dir
   })
+  handle('desktop:workspaces', () => loadDesktopWorkspaces(workspaceFile()))
   handle('desktop:workspace', () => selectedWorkspace)
   handle('desktop:resume', () => {
     const selected = resumeSession
@@ -355,7 +405,7 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
       scheduleWindowSave()
       window.setTitle(`${machine.alias} · ${basename(next.projectDir)} — ${APP_NAME}`)
       await previous?.close()
-      if (!window.isDestroyed()) window.webContents.reload()
+      if (!window.isDestroyed()) contents.reload()
       return { ok: true }
     } catch (error) {
       remoteError = error instanceof Error ? error.message : String(error)
@@ -429,14 +479,23 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     }
     return (await shell.openPath(candidate)) === ''
   })
-  handle('desktop:new-window', async (_event, directory?: unknown) => {
+  handle('desktop:new-window', async (_event, directory?: unknown, sessionId?: unknown) => {
+    if (sessionId !== undefined && (typeof sessionId !== 'string' || !sessionId || sessionId.length > 256 || /[\x00-\x1f]/.test(sessionId))) throw new TypeError('Invalid session identity')
     if (directory !== undefined && (typeof directory !== 'string' || !isAbsolute(directory) || /[\x00-\x1f]/.test(directory))) throw new TypeError('Invalid workspace directory')
     const picked = typeof directory === 'string' ? directory : await pickWorkspace()
     if (!picked || window.isDestroyed()) return null
-    createWorkspaceWindow(picked)
+    if (remoteMachine && picked === selectedWorkspace) {
+      const savedWindow = windowStates.get(id)?.()
+      if (!savedWindow) throw new Error('Remote workspace is not ready')
+      createWorkspaceWindow(null, { ...savedWindow, sessionId: typeof sessionId === 'string' ? sessionId : null }, undefined, window)
+    } else if (sessionId) openWorkspaceView(window, picked, sessionId as string)
+    else createWorkspaceWindow(picked)
     return picked
   })
   const cleanup = () => {
+    workspaceSurfaces.delete(id)
+    if (activeSurfaces.get(window.id) === id) activeSurfaces.delete(window.id)
+    if (view && !contents.isDestroyed()) contents.close()
     windowStates.delete(id)
     if (!quitting) scheduleWindowSave()
     windowRoutes.remove(id)
@@ -452,6 +511,7 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
   windowStates.set(id, () => ({
     workspace: remoteMachine || saved?.remote && !selectedWorkspace ? null : selectedWorkspace,
     remote: remoteMachine ?? (selectedWorkspace ? null : saved?.remote ?? null),
+    windowGroup: String(window.id), active: activeSurfaces.get(window.id) === id,
     sessionId: currentSession, bounds: window.getNormalBounds(), maximized: window.isMaximized(), fullscreen: window.isFullScreen(),
   }))
   window.on('move', scheduleWindowSave)
@@ -484,7 +544,18 @@ void app.whenReady().then(async () => {
     { role: 'editMenu' }, { role: 'viewMenu' }, { role: 'windowMenu' },
   ]))
   const saved = loadWindowLayout(layoutFile())
-  if (saved?.length) for (const state of saved) createWorkspaceWindow(state.remote ? null : state.workspace, state)
+  if (saved?.length) {
+    const hosts = new Map<string, BrowserWindow>()
+    const selected: number[] = []
+    for (const state of saved) {
+      const group = state.windowGroup ?? 'legacy-workspaces'
+      const host = hosts.get(group)
+      const window = createWorkspaceWindow(state.remote ? null : state.workspace, state, undefined, host)
+      hosts.set(group, window)
+      if (state.active) selected.push(activeSurfaces.get(window.id)!)
+    }
+    for (const id of selected) activateSurface(id)
+  }
   else createWorkspaceWindow(loadWorkspace())
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWorkspaceWindow(loadWorkspace()) })
 })

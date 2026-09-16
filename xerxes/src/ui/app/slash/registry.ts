@@ -9,6 +9,8 @@ import { integrationCommands } from './commands/integrations.js'
 import { maintenanceCommands } from './commands/maintenance.js'
 import { opsCommands } from './commands/ops.js'
 import { presetCommands } from './commands/presets.js'
+import { fileCommands } from './commands/files.js'
+import { daemonCommands } from './commands/daemon.js'
 import { sessionCommands } from './commands/session.js'
 import { setupCommands } from './commands/setup.js'
 import type { SlashCommand } from './types.js'
@@ -20,6 +22,8 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   ...maintenanceCommands,
   ...opsCommands,
   ...presetCommands,
+  ...fileCommands,
+  ...daemonCommands,
   ...setupCommands,
   ...debugCommands,
   ...integrationCommands,

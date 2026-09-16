@@ -99,14 +99,19 @@ const bridge = {
     return () => ipcRenderer.removeListener(EVENT_CHANNEL, listener)
   },
 
-  /** Pick a workspace folder; the shell switches daemons and reloads. */
+  /** Open a folder independently, preserving the current workspace connection. */
   chooseWorkspace(): Promise<unknown> {
     return ipcRenderer.invoke(WORKSPACE_CHANNEL) as Promise<unknown>
   },
 
-  openWorkspaceWindow(dir?: unknown): Promise<unknown> {
+  getWorkspaceDirectories(): Promise<string[]> {
+    return ipcRenderer.invoke('desktop:workspaces') as Promise<string[]>
+  },
+
+  openWorkspaceWindow(dir?: unknown, resumeSessionId?: unknown): Promise<unknown> {
     if (dir !== undefined && (typeof dir !== 'string' || !dir || /[\x00-\x1f]/.test(dir))) return Promise.reject(new TypeError('invalid workspace dir'))
-    return ipcRenderer.invoke('desktop:new-window', dir) as Promise<unknown>
+    if (resumeSessionId !== undefined && (typeof resumeSessionId !== 'string' || !resumeSessionId || resumeSessionId.length > 256 || /[\x00-\x1f]/.test(resumeSessionId))) return Promise.reject(new TypeError('invalid session identity'))
+    return ipcRenderer.invoke('desktop:new-window', dir, resumeSessionId) as Promise<unknown>
   },
 
   /** Enter a workspace by absolute folder path (sidebar header click). */

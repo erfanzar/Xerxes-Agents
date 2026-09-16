@@ -23,9 +23,10 @@ export interface XerxesBridge {
   remote?(action: string, params?: Record<string, unknown>): Promise<unknown>
   call<T = Record<string, unknown>>(method: string, params?: Record<string, unknown>): Promise<T>
   onEvent(handler: (event: DaemonEvent) => void): () => void
-  /** Present the folder picker; the shell switches workspace and reloads. */
+  /** Present the folder picker; open independently of the current workspace. */
   chooseWorkspace?(): Promise<unknown>
-  openWorkspaceWindow?(dir?: string): Promise<unknown>
+  getWorkspaceDirectories?(): Promise<string[]>
+  openWorkspaceWindow?(dir?: string, resumeSessionId?: string): Promise<unknown>
   /** Enter a workspace folder directly (no dialog). */
   useWorkspace?(dir: string, resumeSessionId?: string): Promise<unknown>
   /** Saved workspace folder, or null when the create-workspace gate shows. */

@@ -37,3 +37,9 @@ test('restored frames fit available monitors after resolution or dock changes', 
   expect(visibleWindowBounds({ x: 5000, y: -2000, width: 2400, height: 1500 }, areas.slice(0, 1))).toEqual(areas[0]!)
   expect(visibleWindowBounds({ x: 1300, y: 700, width: 900, height: 700 }, areas.slice(0, 1))).toEqual({ x: 540, y: 180, width: 900, height: 700 })
 })
+
+test('workspace views retain their shared window and active selection on restoration', () => {
+  const views=[{...first,windowGroup:'one',active:false},{...first,workspace:'/two',sessionId:'two',windowGroup:'one',active:true}]
+  expect(parseWindowLayout({version:1,windows:views})).toEqual(views)
+  expect(()=>parseWindowLayout({version:1,windows:[{...first,windowGroup:'invalid group'}]})).toThrow('group')
+})

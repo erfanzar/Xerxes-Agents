@@ -25,6 +25,8 @@ import {
 } from './buildInfo.js'
 import { sessionToMarkdown, type ExportSession } from './exportMarkdown.js'
 import { selectedSession, rememberSession } from './sessionPreference.js'
+import { historyBlocks, readHistoryPage, type HistoryPage } from './history.js'
+import { connectionFailureKind } from './connectionFailure.js'
 import { desktopCall, desktopError } from './desktopRpc.js'
 import { foldAgentEvent } from './agentEvents.js'
 import type {
@@ -257,6 +259,9 @@ export interface Snapshot {
   readonly turnFailed: boolean
   readonly turnSeconds: number
   readonly blocks: readonly Block[]
+  readonly historyMore?: boolean
+  readonly historyLoading?: boolean
+  readonly historyError?: string | null
   readonly error: string | null
   // ── workspace surfaces ──
   readonly tab: WorkspaceTab
@@ -287,6 +292,7 @@ export interface Snapshot {
   readonly reasoningNote: string
   readonly reasoningLoading: boolean
   readonly wsMenuOpen: boolean
+  readonly workspaceDirectories?: readonly string[]
   readonly workspaceBusy: boolean
   readonly workspaceError: string | null
   readonly sessionMenu: SessionMenuState | null
@@ -649,6 +655,12 @@ export class Store {
   private fleetPollRounds = 0
   private started = false
   private sessionKey = `desktop-${Math.random().toString(36).slice(2, 10)}`
+  private historyBefore: string | null = null
+  private historyGeneration = 0
+  private historySeen = new Set<string>()
+  private legacyHistory: Block[] = []
+  private historyActions: HistoryPage['actions'] = []
+  private historyBlockIds = new Map<string, number>()
   private unsubEvents: (() => void) | null = null
 
   // ── workspace folds (not part of the transcript) ──
@@ -796,9 +808,21 @@ export class Store {
   }
 
   private initializeLive(workspace: string): void {
-    void Promise.resolve(this.bridge.getResumeSession?.()).then(explicitId => {
+    this.patch({ cwd: workspace })
+    void Promise.resolve(this.bridge.getResumeSession?.()).then(async explicitId => {
       const id = explicitId || (workspace ? selectedSession(workspace) : null)
-      return this.initializeSelfHealing(id ? { resume_session_id: id } : {})
+      try {
+        return await this.initializeSelfHealing(id ? { resume_session_id: id } : {})
+      } catch (error) {
+        // Old desktop builds could save a session under the wrong workspace.
+        // Keep the daemon's isolation check: never move or rebind that history.
+        if (!id || connectionFailureKind(error instanceof Error ? error.message : String(error)) !== 'session') throw error
+        this.sessionKey = `desktop-${Math.random().toString(36).slice(2, 10)}`
+        const result = await this.initialize({})
+        this.builder.push('notification', { severity: 'warning', message: 'The saved session belongs to another workspace. Opened a new session here; the original conversation is unchanged and remains available in its workspace.' })
+        this.notify()
+        return result
+      }
     }).then(
       () => {
         void this.refreshGoal()
@@ -945,9 +969,14 @@ export class Store {
   }
 
   async openSession(id: string): Promise<void> {
-    if (this.frame.turnActive) return
     try {
       const row = [...this.frame.sessions, ...this.frame.live].find(session => session.id === id)
+      if (this.frame.turnActive) {
+        if (id === this.frame.currentId) return
+        if (!this.bridge.openWorkspaceWindow) throw new Error('This desktop build cannot open another session window. Relaunch the updated app.')
+        await this.bridge.openWorkspaceWindow(row?.cwd || this.frame.cwd, id)
+        return
+      }
       if (row?.cwd && row.cwd !== this.frame.cwd) {
         if (!this.bridge.useWorkspace) throw new Error('This host cannot switch workspaces. Open the session from its project folder.')
         await this.bridge.useWorkspace(row.cwd, id)
@@ -960,6 +989,7 @@ export class Store {
       // explicitly. Adopt the key the daemon actually bound, or the next
       // message silently lands in a fresh, context-free session.
       const result = await this.bridge.call('initialize', {
+        history_limit: 100,
         session_key: `${this.sessionKey}-r${id.slice(-8)}`,
         resume_session_id: id,
         ...clientHandshake(),
@@ -968,12 +998,7 @@ export class Store {
       this.sessionKey = str(session.key) || str(result.session_id) || id
       // Replay leans on the record's tool_executions + thinking_content so a
       // reopened chat shows the same think → tool rows the live stream did.
-      this.builder.reset(
-        blocksFromStoredMessages(session.transcript ?? session.messages, {
-          executions: session.tool_executions,
-          thinking: session.thinking_content,
-        }),
-      )
+      this.adoptHistory(session)
       this.resetWorkspaceFolds()
       this.patch({
         currentId: str(result.session_id ?? session.id ?? id),
@@ -993,7 +1018,8 @@ export class Store {
       void this.refreshGoal()
       void this.refreshSessions()
     } catch (error) {
-      this.fail(error)
+      if (this.frame.turnActive) this.patch({ error: error instanceof Error ? error.message : String(error) })
+      else this.fail(error)
     }
   }
 
@@ -2228,12 +2254,15 @@ export class Store {
 
   /** Cheap liveness probe; also heals the badge after a daemon restart. */
   private async beat(): Promise<void> {
+    void this.bridge.getWorkspaceDirectories?.().then(workspaceDirectories => this.patch({ workspaceDirectories })).catch(error => this.patch({ workspaceError: desktopError(error) }))
     if (this.updatingRuntime) return
     if (this.frame.connection === 'online') {
+      this.refreshSessions()
       // Events would still be flowing; a silent socket only shows when a
       // call dies, which every action already routes through fail().
       return
     }
+    if (connectionFailureKind(this.frame.error) !== 'transport') return
     try {
       await this.bridge.call('runtime.status', {})
       const extra: Record<string, unknown> = this.frame.currentId
@@ -2253,9 +2282,10 @@ export class Store {
     call: (method, params) => window.xerxes.call(method, params),
     // Passthrough — the wrapper must forward EVERY preload method or the
     // optional calls silently do nothing.
-    openWorkspaceWindow: directory => {
+    getWorkspaceDirectories: () => window.xerxes.getWorkspaceDirectories?.() ?? Promise.resolve([]),
+    openWorkspaceWindow: (directory, resumeSessionId) => {
       if (!window.xerxes.openWorkspaceWindow) return Promise.reject(new Error('This desktop build cannot open additional windows. Relaunch the updated app.'))
-      return window.xerxes.openWorkspaceWindow(directory)
+      return window.xerxes.openWorkspaceWindow(directory, resumeSessionId)
     },
     chooseWorkspace: () => window.xerxes.chooseWorkspace?.() ?? Promise.resolve(null),
     useWorkspace: (dir, resumeSessionId) => window.xerxes.useWorkspace?.(dir, resumeSessionId) ?? Promise.resolve(null),
@@ -2297,12 +2327,69 @@ export class Store {
     }
   }
 
+  private adoptHistory(session: Record<string, unknown>, preserve = false): void {
+    const page = readHistoryPage(session.history)
+    const previousCursor = this.historyBefore
+    this.historyGeneration++
+    if (!preserve) this.historyBlockIds.clear()
+    this.legacyHistory = []
+    if (page) {
+      const overlap = preserve && page.actions.length ? this.historyActions.findIndex(action => action.id === page.actions[0]!.id && JSON.stringify(action) === JSON.stringify(page.actions[0])) : -1
+      const older = overlap > 0 ? this.historyActions.slice(0, overlap) : []
+      this.historyActions = [...older, ...page.actions]
+      this.historyBefore = older.length ? previousCursor : page.before
+      this.historySeen = new Set(this.historyActions.map(action => action.id))
+      this.builder.reset(historyBlocks({ ...page, actions: this.historyActions }, this.historyBlockIds))
+    } else {
+      // Older runtimes lack server paging. Bound rendering until the runtime
+      // can safely update; retain the received legacy data for manual paging.
+      const blocks = blocksFromStoredMessages(session.transcript ?? session.messages, { executions: session.tool_executions, thinking: session.thinking_content })
+      this.legacyHistory = blocks.slice(0, -100)
+      this.builder.reset(blocks.slice(-100))
+      this.historyActions = []
+      this.historyBefore = null
+      this.historySeen.clear()
+    }
+    this.patch({ historyMore: Boolean(this.historyBefore || this.legacyHistory.length), historyLoading: false, historyError: null })
+  }
+
+  async loadOlderHistory(): Promise<void> {
+    if (this.frame.historyLoading || !this.frame.historyMore) return
+    const generation = this.historyGeneration
+    const key = this.sessionKey
+    this.patch({ historyLoading: true, historyError: null })
+    try {
+      if (this.legacyHistory.length) {
+        this.builder.prepend(this.legacyHistory.splice(-100))
+        this.patch({ historyMore: this.legacyHistory.length > 0 })
+      } else {
+        const result = await this.bridge.call('session.history', { session_key: key, before: this.historyBefore, history_limit: 100 })
+        if (generation !== this.historyGeneration || key !== this.sessionKey) return
+        if (result.ok !== true) throw new Error(str(result.error) || 'Could not load older history')
+        const page = readHistoryPage(result.history)
+        if (!page || page.before === this.historyBefore) throw new Error('History page did not advance')
+        if (page.actions.some(action => this.historySeen.has(action.id))) throw new Error('History changed. Reopen this session to load its current history.')
+        this.builder.prepend(historyBlocks(page, this.historyBlockIds))
+        this.historyActions = [...page.actions, ...this.historyActions]
+        for (const action of page.actions) this.historySeen.add(action.id)
+        this.historyBefore = page.before
+        this.patch({ historyMore: page.has_more })
+      }
+    } catch (error) {
+      if (generation === this.historyGeneration && key === this.sessionKey) this.patch({ historyError: error instanceof Error ? error.message : String(error) })
+    } finally {
+      if (generation === this.historyGeneration && key === this.sessionKey) this.patch({ historyLoading: false })
+    }
+  }
+
   private async initialize(extra: Record<string, unknown>): Promise<Record<string, unknown>> {
     const result = await this.bridge.call('initialize', {
+      history_limit: 100,
       session_key: this.sessionKey,
       ...extra,
       ...clientHandshake(),
     })
+    if (result.ok === false) throw new Error(str(result.error) || 'Session initialization was rejected')
     const session = this.sessionOf(result)
     // A resume binds the session under the session id, not our requested
     // key — every session-scoped call below must target what the daemon
@@ -2310,11 +2397,10 @@ export class Store {
     const boundKey = str(session.key) || str(result.session_id)
     if (extra.resume_session_id && boundKey) {
       this.sessionKey = boundKey
-      this.builder.reset(blocksFromStoredMessages(session.transcript ?? session.messages, {
-        executions: session.tool_executions, thinking: session.thinking_content,
-      }))
+      this.adoptHistory(session, this.frame.currentId === str(result.session_id ?? session.id))
       this.resetWorkspaceFolds()
     }
+    if (!extra.resume_session_id) this.adoptHistory(session)
     const reportedContextLimit = num(result.context_limit)
     const contextLimit = reportedContextLimit !== null && reportedContextLimit > 0
       ? reportedContextLimit
@@ -2543,7 +2629,7 @@ export class Store {
     const key = this.sessionKey
     const revision = this.frame.sessionOpenRevision
     void this.bridge
-      .call('session.status', { session_key: key })
+      .call('session.status', { session_key: key, history_limit: 0 })
       .then(result => {
         if (key !== this.sessionKey || revision !== this.frame.sessionOpenRevision) return
         const session = this.sessionOf(result)
@@ -2584,7 +2670,7 @@ export class Store {
 
   /** Fetch MCP statuses without presenting an unavailable response as empty. */
   refreshMcpStatus(): Promise<void> {
-    return desktopCall(this.bridge, this.sessionKey, 'session.status')
+    return desktopCall(this.bridge, this.sessionKey, 'session.status', { history_limit: 0 })
       .then(result => {
         const raw = (this.sessionOf(result).mcp_status ?? (result as Record<string, unknown>).mcp_status) as unknown
         if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('MCP status is unavailable from this runtime. Check the runtime version and connection.')
@@ -2618,24 +2704,29 @@ export class Store {
     await this.refreshMcpStatus()
   }
 
+  private sessionsRefresh = 0
+
   private refreshSessions(): void {
+    const revision = ++this.sessionsRefresh
+    void this.bridge.getWorkspaceDirectories?.().then(workspaceDirectories => this.patch({ workspaceDirectories })).catch(error => this.patch({ workspaceError: desktopError(error) }))
     const saved = this.bridge
       .call('session.list', { kind: 'main', scope: 'global', limit: 60 })
       .then(result => normalize(result.sessions, this.frame.currentId))
       .catch(() => null)
     const active = this.bridge
-      .call('session.active_list', {})
+      .call('session.active_list', { history_limit: 0 })
       .then(result => {
         this.seedBackgroundJobs(result.sessions)
         return normalize(result.sessions, this.frame.currentId)
       })
       .catch(() => null)
     void Promise.all([saved, active]).then(([savedRows, activeRows]) => {
+      if (revision !== this.sessionsRefresh) return
       if (!savedRows && !activeRows) return
       // The attached session is not 'fleet' and not a history row — it is
       // what the chat column is already showing.
       const currentId = this.frame.currentId
-      const all = activeRows ?? []
+      const all = activeRows ?? this.frame.live
       // An untitled 0-turn live row is an empty shell — a session some client
       // opened and never spoke in. It is not a task; listing it as one is how
       // the sidebar filled with "0 turns" ghosts.
@@ -2646,7 +2737,7 @@ export class Store {
       // active_list only holds client-opened sessions and would blank the
       // panel while subagents actually run.
       const liveIds = new Set(live.map(row => row.id))
-      const history = (savedRows ?? []).filter(row => !liveIds.has(row.id) && row.id !== currentId)
+      const history = (savedRows ?? this.frame.sessions).filter(row => !liveIds.has(row.id) && row.id !== currentId)
       this.patch({ live, sessions: history })
       this.enrichUntitled(history)
     })
@@ -2662,9 +2753,13 @@ export class Store {
       if (row.untitled && !this.snippets[row.id] && !this.enriching.has(row.id)) {
         this.enriching.add(row.id)
         void this.bridge
-          .call('session.status', { session_key: row.key })
+          .call('session.status', { session_key: row.key, history_limit: 0 })
           .then(result => {
             const session = this.sessionOf(result)
+            if (typeof session.preview === 'string' && session.preview.trim()) {
+              this.snippets = { ...this.snippets, [row.id]: session.preview }
+              return
+            }
             const transcript = session.transcript ?? session.messages
             if (!Array.isArray(transcript)) return
             for (const message of transcript as unknown[]) {
@@ -3227,7 +3322,8 @@ export interface XerxesLike {
   call(method: string, params?: Record<string, unknown>): Promise<Record<string, unknown>>
   /** Present on the real preload bridge; test bridges may omit it. */
   chooseWorkspace?(): Promise<unknown>
-  openWorkspaceWindow?(dir?: string): Promise<unknown>
+  getWorkspaceDirectories?(): Promise<string[]>
+  openWorkspaceWindow?(dir?: string, resumeSessionId?: string): Promise<unknown>
   useWorkspace?(dir: string, resumeSessionId?: string): Promise<unknown>
   getWorkspace?(): Promise<string | null>
   getResumeSession?(): Promise<string | null>

@@ -270,9 +270,9 @@ test('a failed turn renders the error body with retry and resolve affordances', 
   }
 })
 
-test('offline renders retry state and the launch command', () => {
+test('offline describes the shared daemon and selected workspace', () => {
   const html = render(snapshot({ connection: 'offline', cwd: '/Users/erfan/Documents/Projects/Xerxes-Agents' }))
-  for (const needle of ['Daemon offline', 'Retry now', 'bun xerxes daemon --project-dir']) {
+  for (const needle of ['Connecting to the shared daemon', 'Retry now', 'Workspace:']) {
     expect(html).toContain(needle)
   }
 })
@@ -467,7 +467,7 @@ test('the workspace menu lists known folders current-first with an add row', () 
 
 // ── Right rail run list (mockup 01) ─────────────────────────────────────
 
-test('the feed renders the plan as a live to-dos card', () => {
+test('nonempty plans appear only in the pinned composer summary', () => {
   const html = render(
     snapshot({
       turnActive: true,
@@ -478,17 +478,10 @@ test('the feed renders the plan as a live to-dos card', () => {
       },
     }),
   )
-  // Header counts: done / in-progress (first open while acting) / pending.
-  expect(html).toContain('To-dos')
-  expect(html).toContain('1 completed')
-  expect(html).toContain('1 in progress')
-  expect(html).toContain('1 pending')
-  // Row states ride the icon's data-state: green check, spinner, dashed.
-  expect(html).toContain('data-state="done"')
-  expect(html).toContain('data-state="cur"')
-  expect(html).toContain('data-state="todo"')
-  // The rail no longer duplicates the list — the feed owns it.
-  expect(html).not.toContain('This run')
+  expect(html).toContain('aria-label="Current task"')
+  expect(html).toContain('>1/3</span>')
+  expect(html).not.toContain('class="todos"')
+  expect(html.indexOf('aria-label="Current task"')).toBeGreaterThan(html.indexOf('class="composer-dock"'))
 })
 
 test('the header fleet chip opens the live subagent roster', () => {
@@ -934,3 +927,13 @@ test('saved work with an empty transcript offers continuation instead of a new-t
   expect(html).toContain('Review activity')
   expect(html).not.toContain('A place to think, build, and finish.')
 })
+
+test('rejected session is not presented as a stopped per-project daemon', () => {
+  const html = render(snapshot({ connection: 'offline', error: 'rpc -32000: Validation error for session_id: belongs to a main session from a different project' }))
+  expect(html).toContain('Session belongs to another workspace')
+  expect(html).toContain('Workspace needs attention')
+  expect(html).not.toContain('retrying automatically')
+  expect(html).not.toContain('Runtime offline')
+})
+
+ test('empty todo lists and absent goals produce no task section',()=>{const html=render(snapshot({todos:[],goal:null}));expect(html).not.toContain('0/0 completed');expect(html).not.toContain('No todos in this session');expect(html).not.toContain('aria-label="Current task"')})

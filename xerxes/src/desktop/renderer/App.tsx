@@ -9,6 +9,7 @@ import { CommandPalette, PickerLayer, ModelMenu, ModelPicker, ReasoningPicker, S
 import { SessionSearch } from './SearchPanel.js'
 import { useTranscriptScroll } from './transcriptScroll.js'
 import { store, type Snapshot, isPlanReview } from './store.js'
+import { connectionFailureKind } from './connectionFailure.js'
 import type { AgentMember, Block } from './types.js'
 import { applyCompletion, wantsHints, type HintItem } from './hints.js'
 import { groupByWorkspace } from './workspaceGroups.js'
@@ -19,7 +20,6 @@ import { draftKey, readDraft, writeDraft } from './drafts.js'
 import { PanelDivider, usePanelLayout } from './layout.js'
 import { groupActivity } from "./activityGroups.js"
 import { ToolCallRow } from "./Execution.js"
-import { TodoList } from './Todos.js'
 import { AgentRoster } from './AgentRoster.js'
 import { Icon } from './Icon.js'
 import { FirstRunSetup } from './Setup.js'
@@ -201,7 +201,7 @@ function RuntimeStatus({ snap, compact = false }: { snap: Snapshot; compact?: bo
   const trigger = useRef<HTMLButtonElement>(null)
   const popup = useRef<HTMLDivElement>(null)
   const busy = snap.runtimeUpdate === 'checking' || snap.runtimeUpdate === 'restarting'
-  const label = snap.noWorkspace ? 'Choose workspace' : busy ? 'Updating runtime…' : snap.runtimeUpdate === 'waiting' ? 'Update waiting for idle' : snap.connection === 'offline' ? 'Runtime offline' : snap.connection === 'connecting' ? 'Connecting…' : snap.daemonWarning ? 'Runtime update available' : 'Connected'
+  const label = snap.noWorkspace ? 'Choose workspace' : busy ? 'Updating runtime…' : snap.runtimeUpdate === 'waiting' ? 'Update waiting for idle' : snap.connection === 'offline' ? connectionFailureKind(snap.error) === 'transport' ? 'Runtime offline' : 'Workspace needs attention' : snap.connection === 'connecting' ? 'Connecting…' : snap.daemonWarning ? 'Runtime update available' : 'Connected'
   useLayoutEffect(() => {
     if (!expanded) return
     const place = () => {
@@ -245,14 +245,12 @@ function RuntimeStatus({ snap, compact = false }: { snap: Snapshot; compact?: bo
 
 /**
  * The topbar chip's dropdown: every folder that holds chats, current first
- * and marked, then the folder picker. Rows are entrances — clicking one
- * retargets the shell to that folder's daemon, exactly like the sidebar
- * workspace headers.
+ * and marked, then the folder picker. Other workspaces open independently
+ * so the current session keeps its connection and draft.
  */
 function WorkspaceMenu({ snap }: { snap: Snapshot }): ReactElement {
-  const home = workspaceLabel(snap.cwd)
-  const groups = groupByWorkspace(snap.sessions, snap.cwd)
-  const statusFor = (name: string): string => (name === home ? '● current' : `${groups.find(g => g.name === name)?.rows.length ?? 0} task${(groups.find(g => g.name === name)?.rows.length ?? 0) === 1 ? '' : 's'}`)
+  const groups = groupByWorkspace(snap.sessions, snap.cwd, snap.workspaceDirectories)
+  const statusFor = (cwd: string): string => (cwd === snap.cwd ? '● current' : `${groups.find(g => g.cwd === cwd)?.rows.length ?? 0} tasks`)
   return (
     <>
       <div className="backdrop backdrop--clear" onClick={() => store.closeWorkspaceMenu()} />
@@ -261,23 +259,23 @@ function WorkspaceMenu({ snap }: { snap: Snapshot }): ReactElement {
         {groups.map(group => (
           <button
             key={group.cwd || group.name}
-            className={`wsrow${group.name === home ? ' is-cur' : ''}`}
-            title={group.name === home ? `${group.cwd} — you are here` : `Switch to ${group.cwd}`}
-            onClick={() => { if (group.name !== home) store.enterWorkspace(group.cwd) }}
+            className={`wsrow${group.cwd === snap.cwd ? ' is-cur' : ''}`}
+            title={group.cwd === snap.cwd ? `${group.cwd} — you are here` : `Switch to ${group.cwd}`}
+            onClick={() => { if (group.cwd !== snap.cwd) store.enterWorkspace(group.cwd) }}
           >
-            <span className={`dot ${group.name === home ? 'dot--live' : 'dot--idle'}`} />
+            <span className={`dot ${group.cwd === snap.cwd ? 'dot--live' : 'dot--idle'}`} />
             <span className="wsrow__main">
               <span className="wsrow__t">{group.name}</span>
-              <span className="wsrow__s">{group.cwd || group.name} · {statusFor(group.name)}</span>
+              <span className="wsrow__s">{group.cwd || group.name} · {statusFor(group.cwd)}</span>
             </span>
-            {group.name === home && <span className="kbd">✓</span>}
+            {group.cwd === snap.cwd && <span className="kbd">✓</span>}
           </button>
         ))}
         {groups.length === 0 && (
           <div className="wsrow is-cur">
             <span className="dot dot--live" />
             <span className="wsrow__main">
-              <span className="wsrow__t">{home || 'No workspace'}</span>
+              <span className="wsrow__t">{workspaceLabel(snap.cwd) || 'No workspace'}</span>
               <span className="wsrow__s">{snap.cwd || 'choose a folder to begin'}</span>
             </span>
             <span className="kbd">✓</span>
@@ -596,7 +594,7 @@ function Sidebar({ snap, page }: { snap: Snapshot; page: 'agents' | 'extensions'
     ...snap.sessions.filter(row => row.id !== snap.currentId),
     ...(currentRow ? [currentRow] : []),
   ].filter(match)
-  const groups = groupByWorkspace(rows, snap.cwd)
+  const groups = groupByWorkspace(rows, snap.cwd, snap.workspaceDirectories)
   const online = snap.connection === 'online'
 
   return (
@@ -630,26 +628,26 @@ function Sidebar({ snap, page }: { snap: Snapshot; page: 'agents' | 'extensions'
       </div>
       <nav className="side__list">
         {groups.map(group => (
-          <div key={group.name} className={`wgroup${group.name === homeLabel(snap) ? ' is-home' : ''}`}>
+          <div key={group.cwd} className={`wgroup${group.cwd === snap.cwd ? ' is-home' : ''}`}>
             <button
               className="wgroup__cap"
-              title={group.name === homeLabel(snap) ? `${group.cwd} — you are here` : `Switch to ${group.cwd}`}
-              onClick={() => { if (group.name !== homeLabel(snap)) store.enterWorkspace(group.cwd) }}
+              title={group.cwd === snap.cwd ? `${group.cwd} — you are here` : `Switch to ${group.cwd}`}
+              onClick={() => { if (group.cwd !== snap.cwd) store.enterWorkspace(group.cwd) }}
             >
-              <span className="wgroup__mark">{group.name === homeLabel(snap) ? '●' : '⌂'}</span>
+              <span className="wgroup__mark">{group.cwd === snap.cwd ? '●' : '⌂'}</span>
               {group.name}
-              {group.name === homeLabel(snap) && <span className="wgroup__cur">current</span>}
+              {group.cwd === snap.cwd && <span className="wgroup__cur">current</span>}
             </button>
             {group.rows.map(row => {
               const snippet = snap.snippets[row.id]
               return snippet === undefined
-                ? <SessionCell key={row.id} row={row} locked={snap.turnActive && row.id !== snap.currentId} />
-                : <SessionCell key={row.id} row={row} snippet={snippet} locked={snap.turnActive && row.id !== snap.currentId} />
+                ? <SessionCell key={row.id} row={row} opensWindow={snap.turnActive && row.id !== snap.currentId} />
+                : <SessionCell key={row.id} row={row} snippet={snippet} opensWindow={snap.turnActive && row.id !== snap.currentId} />
             })}
           </div>
         ))}
         {groups.length === 0 && (
-          <div className="side__empty">{snap.noWorkspace ? 'Your sessions will appear here' : online ? 'No tasks yet — your chats live inside the workspace folder' : 'Daemon offline — retrying automatically'}</div>
+          <div className="side__empty">{snap.noWorkspace ? 'Your sessions will appear here' : online ? 'No tasks yet — your chats live inside the workspace folder' : connectionFailureKind(snap.error) === 'transport' ? 'Connecting to the shared daemon…' : 'Workspace needs attention'}</div>
         )}
         <button className="addws" onClick={() => store.chooseWorkspace()} title="Choose another folder to open as a workspace">
           ＋ Add folder…
@@ -665,12 +663,12 @@ const homeLabel = (snap: Snapshot): string => workspaceLabel(snap.cwd)
 function SessionCell({
   row,
   snippet,
-  locked = false,
+  opensWindow = false,
 }: {
   row: Snapshot['live'][number]
   snippet?: string
-  /** A running turn owns the connection's session slot — switching now would silently no-op. */
-  locked?: boolean
+  /** Inspect another session in its own window while this turn continues. */
+  opensWindow?: boolean
 }): ReactElement {
   const title = snippet ?? row.title
   // dsh row grammar: title + right-aligned age on the first line, a status
@@ -681,8 +679,7 @@ function SessionCell({
   return (
     <button
       className={`sess${row.current ? ' is-current' : ''}`}
-      disabled={locked}
-      title={locked ? 'Finish or stop the current task before switching' : undefined}
+      title={opensWindow ? 'Open this session while the current task continues' : undefined}
       aria-haspopup="menu"
       onClick={() => store.openSession(row.id)}
       onKeyDown={event => {
@@ -874,7 +871,7 @@ function Chat({ snap, page }: { snap: Snapshot; page: 'agents' | 'extensions' | 
 // ── Activity stream ─────────────────────────────────────────────────────
 
 function Stream({ snap }: { snap: Snapshot }): ReactElement {
-  const ref = useTranscriptScroll(`${snap.currentId}:${snap.sessionOpenRevision}`)
+  const { ref, loadOlder } = useTranscriptScroll(`${snap.currentId}:${snap.sessionOpenRevision}`, { more: Boolean(snap.historyMore), loading: Boolean(snap.historyLoading), automatic: !snap.historyError, load: () => store.loadOlderHistory() })
   // 'Stream thinking' off hides reasoning trails from the feed — the daemon
   // still streams them; this is a display choice, not a policy change.
   const visible = snap.streamThinking ? snap.blocks : snap.blocks.filter(b => b.kind !== 'thinking')
@@ -910,67 +907,23 @@ function Stream({ snap }: { snap: Snapshot }): ReactElement {
         {existingWork ? <TaskContinuation snap={snap} /> : <Welcome />}
       </> : (
         <div className="stream__col">
+          {(snap.historyMore || snap.historyError) && <div className="history-pager">
+            <button className="btn" disabled={snap.historyLoading} onClick={() => void loadOlder()}>{snap.historyLoading ? 'Loading older history…' : snap.historyError ? 'Retry older history' : 'Load 100 older actions'}</button>
+            {snap.historyError && <p role="alert">{snap.historyError}</p>}
+          </div>}
           {groupActivity(blocks, approval?.toolCallId).map(group => (
-            <Fragment key={group[0]!.id}>
+            <div key={group[0]!.id} data-history-anchor={group[0]!.id}>
               {group.length > 1 ? <ActivityGroup blocks={group} /> : <BlockView block={group[0]!} />}
               {inlineApproval && group.some(block => block === blocks[approvalIndex]) && <ApprovalCard approval={approval} inline />}
-            </Fragment>
+            </div>
           ))}
           {failedCard}
-          {/* The plan card lives in the feed where the work happens — the
-              rail stays for goal + fleet supervision. */}
-          {snap.todos != null ? <TodoList items={snap.todos} /> : snap.plan && <TodosCard plan={snap.plan} turnActive={snap.turnActive} />}
-          {/* Live tail of the feed: the turn clock the header badge shows,
-              repeated where the eye actually is while scrolling. */}
-          {snap.turnActive && <div className="streamstatus" role="status" aria-live="polite">{snap.networkRetrying ? 'Retrying connection…' : 'Acting…'} {turnDurOf(snap.turnSeconds)}</div>}
         </div>
       )}
       {floatApproval && <ApprovalCard approval={approval} />}
       {snap.question && (
         <div className="stream__col">
           <QuestionCard question={snap.question} plan={snap.plan} />
-        </div>
-      )}
-    </div>
-  )
-}
-
-/**
- * The plan as a live to-dos card inside the feed (dsh grammar): header
- * counts by state, a spinner on the item the turn is chewing, green checks
- * behind it, dashed circles ahead. Collapse is the user's — local state.
- */
-function TodosCard({ plan, turnActive }: { plan: NonNullable<Snapshot['plan']>; turnActive: boolean }): ReactElement | null {
-  const [open, setOpen] = useState(true)
-  const items = plan.items
-  if (items.length === 0) return null
-  const done = items.filter(item => item.done).length
-  const current = items.findIndex(item => !item.done)
-  const inProgress = turnActive && current !== -1 ? 1 : 0
-  const counts = [
-    `${done} completed`,
-    inProgress ? '1 in progress' : '',
-    `${items.length - done - inProgress} pending`,
-  ].filter(Boolean).join(' · ')
-  return (
-    <div className="todos">
-      <button className="todos__head" onClick={() => setOpen(value => !value)} aria-expanded={open}>
-        <span className="todos__ico">☷</span>
-        <span className="todos__title">To-dos</span>
-        <span className="todos__counts">{counts}</span>
-        <span className={`todos__chev${open ? ' is-open' : ''}`}>▾</span>
-      </button>
-      {open && (
-        <div className="todos__list">
-          {items.map((item, index) => {
-            const state = item.done ? 'done' : index === current && turnActive ? 'cur' : 'todo'
-            return (
-              <div key={index} className={`todo todo--${state}`}>
-                <span className="todo__icon" data-state={state}>{state === 'done' ? '✓' : ''}</span>
-                <span className="todo__t">{item.text}</span>
-              </div>
-            )
-          })}
         </div>
       )}
     </div>
@@ -1041,7 +994,7 @@ function Welcome(): ReactElement {
 /**
  * Workspace gate — a fresh shell has no folder and therefore no daemon.
  * The composer is unavailable by design until a folder is chosen; the
- * pick feeds useProject, which spawns that project's daemon and reboots
+ * pick feeds useProject, which binds the shared daemon to the folder and reloads
  * the shell into it.
  */
 function WorkspaceGate(): ReactElement {
@@ -1063,16 +1016,17 @@ function WorkspaceGate(): ReactElement {
 }
 
 function Offline({ cwd, error }: { cwd: string; error: string | null }): ReactElement {
+  const kind = connectionFailureKind(error)
   return (
     <div className="offline">
       <div className="offline__dot" />
-      <h1>Daemon offline</h1>
+      <h1>{kind === 'transport' ? 'Connecting to the shared daemon' : kind === 'session' ? 'Session belongs to another workspace' : 'Could not open this workspace'}</h1>
       {error && <p className="connection-error" role="alert">{error}</p>}
       <p>
         The terminal, TUI and desktop app share a daemon across workspaces. Each task keeps its own workspace and session. The app connects automatically when the daemon is available.
       </p>
       <button className="btn" onClick={() => store.retryConnection()}>↻ Retry now</button>
-      <div className="cmd">bun xerxes daemon --project-dir {cwd || '<this project>'}</div>
+      {cwd && <div className="cmd">Workspace: {cwd}</div>}
     </div>
   )
 }
@@ -1561,6 +1515,7 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
           <div className="hints__keys"><span>Type to filter</span><kbd>↵</kbd> / <kbd>tab</kbd> complete <kbd>↑↓</kbd> pick <kbd>esc</kbd> dismiss</div>
         </div>
       )}
+      {snap.turnActive && <div className="streamstatus composer-status" role="status" aria-live="polite">{snap.networkRetrying ? 'Retrying connection…' : 'Acting…'} {turnDurOf(snap.turnSeconds)}</div>}
       <div className="composer-dock">
       <ComposerTaskSummary snap={snap} />
       <div className="composer">
@@ -1659,13 +1614,14 @@ export function ComposerTaskSummary({ snap }: { snap: Snapshot }): ReactElement 
   const goal = parseGoal(snap.goal)
   const activityVisible = useContext(ActivityVisible)
   const visibleGoal = goal && ['active', 'paused', 'blocked'].includes(goal.phase) ? goal : null
-  const current = snap.todos?.find(item => item.status === 'in_progress')
-  const next = current ?? snap.todos?.find(item => item.status === 'pending')
-  if (!visibleGoal && !next && !snap.queue.length) return null
-  const done = snap.todos?.filter(item => item.status === 'completed').length ?? 0
+  const todos = snap.todos ?? snap.plan?.items.map((item, index) => ({ id: String(index), content: item.text, status: item.done ? 'completed' : 'pending' })) ?? []
+  const current = todos.find(item => item.status === 'in_progress')
+  const next = current ?? todos.find(item => item.status === 'pending')
+  if (!visibleGoal && !todos.length && !snap.queue.length) return null
+  const done = todos.filter(item => item.status === 'completed').length
   return <section className="composer-task-summary" aria-label="Current task">
     {visibleGoal && <button onClick={() => open('activity')} title={visibleGoal.objective}><span className="composer-task-summary__label">Goal</span><span className="composer-task-summary__text">{activityVisible ? 'View goal details' : visibleGoal.objective}</span><span className="composer-task-summary__status">{visibleGoal.phase}</span></button>}
-    {next && <button onClick={() => store.setTab('plan')} title={next.content}><span className="composer-task-summary__label">{current ? 'Doing' : 'Next'}</span><span className="composer-task-summary__text">{next.content}</span><span className="composer-task-summary__status">{done}/{snap.todos?.length}</span></button>}
+    {todos.length > 0 && <button onClick={() => store.setTab('plan')} title={next?.content ?? 'View completed tasks'}><span className="composer-task-summary__label">{current ? 'Doing' : next ? 'Next' : 'To-dos'}</span><span className="composer-task-summary__text">{next?.content ?? 'All tasks completed'}</span><span className="composer-task-summary__status">{done}/{todos.length}</span></button>}
     {snap.queue.length > 0 && <div className="composer-queue"><div className="composer-queue__heading">Queued messages <span>{snap.queue.length}</span></div><div className="composer-queue__list">{snap.queue.map(item => <div className="composer-queue__message" key={item.id}><p>{item.text}</p><button aria-label="Hide queued message from view" title="Hide from view only — this does not cancel the queued message" onClick={() => store.dropQueued(item.id)}><Icon name="close" size={14} /></button></div>)}</div></div>}
   </section>
 }

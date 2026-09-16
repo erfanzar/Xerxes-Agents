@@ -1327,3 +1327,129 @@ test('todos restore, update from confirmed tool results, and remain isolated fro
   expect(current.getSnapshot().todos).toBeNull()
   delete (globalThis as {window?:unknown}).window
 })
+
+test('stale cross-workspace startup selection opens a fresh local session without resuming foreign history', async () => {
+  const bridge = new FakeBridge((method, params) => {
+    if (method !== 'initialize') return { ok: true }
+    if (params.resume_session_id) throw new Error('rpc -32000: Validation error for session_id: belongs to a main session from a different project')
+    return initializeResult
+  })
+  Object.assign(bridge, { getWorkspace: async () => '/repo', getResumeSession: async () => 'foreign-session' })
+  withWindow(bridge)
+  try {
+    const current = new Store()
+    current.start(bridge)
+    await new Promise(resolve => setTimeout(resolve, 20))
+    const calls = bridge.calls.filter(call => call.method === 'initialize')
+    expect(calls).toHaveLength(2)
+    expect(calls[0]?.params.resume_session_id).toBe('foreign-session')
+    expect(calls[1]?.params.resume_session_id).toBeUndefined()
+    expect(calls[1]?.params.session_key).not.toBe(calls[0]?.params.session_key)
+    expect(current.getSnapshot().connection).toBe('online')
+    expect(current.getSnapshot().cwd).toBe('/repo')
+    expect(JSON.stringify(current.getSnapshot().blocks)).toContain('original conversation is unchanged')
+  } finally { delete (globalThis as {window?:unknown}).window }
+})
+
+test('startup authentication rejection stays actionable and is not automatically retried or replaced', async () => {
+  const bridge = new FakeBridge(method => {
+    if (method === 'initialize') throw new Error('Authentication failed: configure credentials')
+    return { ok: true }
+  })
+  Object.assign(bridge, { getWorkspace: async () => '/repo', getResumeSession: async () => 'saved-session' })
+  withWindow(bridge)
+  try {
+    const current = new Store()
+    current.start(bridge)
+    await new Promise(resolve => setTimeout(resolve, 20))
+    await (current as unknown as { beat(): Promise<void> }).beat()
+    expect(bridge.calls.filter(call => call.method === 'initialize')).toHaveLength(1)
+    expect(current.getSnapshot().cwd).toBe('/repo')
+    expect(current.getSnapshot().error).toContain('Authentication failed')
+  } finally { delete (globalThis as {window?:unknown}).window }
+})
+
+test('desktop opens only the tail, retries older pages, and ignores pages from a previous session', async()=>{
+ const action=(i:number)=>({id:String(i),messages:[{role:'user',content:`History ${i}`}],executions:[],thinking:[]})
+ const tail={actions:Array.from({length:100},(_,i)=>action(i+100)),has_more:true,before:'page-100'}
+ let rejectPage=true,release:((v:Record<string,unknown>)=>void)|undefined
+ const bridge=new FakeBridge((method,params)=>{
+   if(method==='initialize')return {...initializeResult,session:{...initializeResult.session,history:tail}}
+   if(method==='session.history'){
+     if(rejectPage)throw Error('Temporary read failure')
+     return new Promise(resolve=>{release=resolve})
+   }
+   return {ok:true}
+ })
+ withWindow(bridge)
+ try{
+   const current=new Store();current.start(bridge);await new Promise(r=>setTimeout(r,20))
+   expect(bridge.calls.find(c=>c.method==='initialize')?.params.history_limit).toBe(100)
+   expect(current.getSnapshot().blocks).toHaveLength(100)
+   expect(JSON.stringify(current.getSnapshot().blocks)).not.toContain('History 99"')
+   await current.loadOlderHistory()
+   expect(current.getSnapshot().historyError).toBe('Temporary read failure')
+   expect(current.getSnapshot().historyMore).toBe(true)
+   rejectPage=false
+   const pending=current.loadOlderHistory()
+   await current.loadOlderHistory()
+   expect(bridge.calls.filter(c=>c.method==='session.history')).toHaveLength(2)
+   release!({ok:true,history:{actions:Array.from({length:100},(_,i)=>action(i)),has_more:false,before:null}})
+   await pending
+   expect(current.getSnapshot().blocks).toHaveLength(200)
+   expect(current.getSnapshot().historyMore).toBe(false)
+   await current.openSession('next')
+   const stale=current.loadOlderHistory()
+   await current.openSession('third')
+   release!({ok:true,history:{actions:[action(0)],has_more:false,before:null}})
+   await stale
+   expect(current.getSnapshot().blocks).toHaveLength(100)
+   expect(current.getSnapshot().historyMore).toBe(true)
+ }finally{delete (globalThis as {window?:unknown}).window}
+})
+
+test('opening another project during a turn preserves the running session and opens the exact selected session', async () => {
+  const opened: unknown[][] = []
+  let reject = false
+  const bridge = new FakeBridge(method => method === 'initialize' ? initializeResult : method === 'session.list' ? { ok: true, sessions: [{ id: 'other-project-session', title: 'Other', cwd: '/another-project', message_count: 2 }] } : { ok: true, sessions: [] })
+  Object.assign(bridge, { openWorkspaceWindow: async (...args: unknown[]) => { if (reject) throw Error('Window unavailable'); opened.push(args) } })
+  withWindow(bridge)
+  try {
+    const current = new Store(); current.start(bridge)
+    await new Promise(resolve => setTimeout(resolve, 20))
+    bridge.push('turn_begin', { turn_id: 'active-turn', text: 'Keep working' })
+    bridge.push('text_part', { text: 'Live response' })
+    const before = current.getSnapshot()
+    const calls = bridge.calls.length
+    await current.openSession('other-project-session')
+    expect(opened).toEqual([['/another-project', 'other-project-session']])
+    expect(current.getSnapshot().currentId).toBe(before.currentId)
+    expect(current.getSnapshot().sessionKey).toBe(before.sessionKey)
+    expect(current.getSnapshot().blocks).toEqual(before.blocks)
+    expect(current.getSnapshot().turnActive).toBe(true)
+    expect(bridge.calls.slice(calls).some(call => call.method === 'initialize' || call.method === 'turn.cancel')).toBe(false)
+    reject = true
+    await current.openSession('other-project-session')
+    expect(current.getSnapshot().error).toBe('Window unavailable')
+    expect(current.getSnapshot().turnActive).toBe(true)
+    bridge.push('text_part', { text: ' continues' })
+    expect(JSON.stringify(current.getSnapshot().blocks)).toContain('Live response continues')
+  } finally { delete (globalThis as { window?: unknown }).window }
+})
+
+test('online sidebar refresh reflects work started and completed in another workspace', async () => {
+  let status='idle'
+  const bridge=new FakeBridge(method=>method==='initialize'?initializeResult:method==='session.active_list'?{sessions:[{id:'other',cwd:'/other',title:'Other task',status,turn_count:1}]}:{sessions:[]})
+  withWindow(bridge)
+  try {
+    const current=new Store();current.start(bridge)
+    await new Promise(resolve=>setTimeout(resolve,20))
+    expect(current.getSnapshot().live.find(row=>row.id==='other')?.status).toBe('idle')
+    status='working'
+    await new Promise(resolve=>setTimeout(resolve,5100))
+    expect(current.getSnapshot().live.find(row=>row.id==='other')?.status).toBe('working')
+    status='idle'
+    await new Promise(resolve=>setTimeout(resolve,5100))
+    expect(current.getSnapshot().live.find(row=>row.id==='other')?.status).toBe('idle')
+  }finally{delete (globalThis as {window?:unknown}).window}
+}, 15000)

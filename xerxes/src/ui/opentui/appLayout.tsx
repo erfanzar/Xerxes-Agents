@@ -79,6 +79,8 @@ import { AgentSettingsOverlay } from './agentSettingsOverlay.js'
 import { SnapshotOverlay } from './snapshotOverlay.js'
 import { WorkspaceOverlay } from './workspaceOverlay.js'
 import { RunOverlay } from './runOverlay.js'
+import { PresetEditor } from './presetEditor.js'
+import { ForgeOverlay } from './forgeOverlay.js'
 import { displayModeLabel, SessionHeader, SessionTabStrip, SessionTelemetryRow, WorkspaceFooter } from './appChrome.js'
 import { CompletionMenu } from './completionMenu.js'
 import { CopyPicker } from './copyPicker.js'
@@ -358,13 +360,8 @@ function CompactLiveProgress({ show }: { show: boolean }) {
     [live, rows]
   )
 
-  const goal = ui.info?.goal
-  const goalPhase = ui.info?.goal_phase
-  const unfinishedTodos = todos.filter(todo => todo.status !== 'completed' && todo.status !== 'cancelled')
-  const liveGoal = live && goalPhase === 'complete' ? null : goal
-  const showTodoCard = live ? Boolean(liveGoal) || unfinishedTodos.length > 0 : todos.length > 0 || Boolean(liveGoal)
 
-  if (!show || (!visibleRows.length && !showTodoCard && !compacting)) {
+  if (!show || (!visibleRows.some(row => row.kind !== 'todo') && !compacting)) {
     return null
   }
 
@@ -375,24 +372,6 @@ function CompactLiveProgress({ show }: { show: boolean }) {
           <Span color={t.color.accent}>{'◌ '}</Span>
           {'Compacting context…'}
         </Text>
-      ) : null}
-      {showTodoCard && (liveGoal || todos.length) ? (
-        <Box flexDirection="column" flexShrink={0} backgroundColor={t.color.statusBg}
-          borderSides={['left']} borderColor={t.color.accent} paddingX={compact ? 1 : 2} paddingY={compact ? 0 : 1}
-          marginBottom={compact ? 0 : 1} onClick={() => patchOverlayState({ goal: true })}>
-          <Box justifyContent="space-between">
-            <Text bold color={t.ds.title}>{'Tasks ' + todos.filter(todo => todo.status === 'completed').length + '/' + todos.length}</Text>
-            <Text color={t.ds.secondary}>{compact ? 'F10' : 'F10 · View plan →'}</Text>
-          </Box>
-          {liveGoal && !compact ? <Text color={t.color.text} wrap="wrap">{liveGoal}{goalPhase ? ' · ' + goalPhase : ''}</Text> : null}
-          {unfinishedTodos.slice(0, compact ? 0 : 3).map(todo => (
-            <Box key={todo.id} flexDirection="row" gap={1} marginTop={compact ? 0 : 1}>
-              <Text color={todo.status === 'in_progress' ? t.color.accent : t.ds.secondary}>{todo.status === 'in_progress' ? '◌' : '○'}</Text>
-              <Text color={t.color.text} wrap="wrap">{todo.content}</Text>
-            </Box>
-          ))}
-          {!compact && unfinishedTodos.length > 3 ? <Text color={t.ds.secondary}>More tasks in F10 →</Text> : null}
-        </Box>
       ) : null}
       {visibleRows.filter(row => row.kind !== 'todo').map((row, index) => {
         const color = progressToneColor(row.tone, t)
@@ -409,6 +388,28 @@ function CompactLiveProgress({ show }: { show: boolean }) {
       })}
     </Box>
   )
+}
+
+/** Current task context lives outside transcript scrolling, directly above input. */
+export function ComposerTaskSummary() {
+  const ui = useStore($uiState)
+  const t = useStore($uiTheme)
+  const compact = useTerminalDimensions().height < 24
+  const rawTodos = useTurnSelector(state => state.todos)
+  const todos = rawTodos.filter(todo => todo.content.trim())
+  const goal = ui.info?.goal?.trim()
+  if (!goal && !todos.length) return null
+  const unfinished = todos.filter(todo => todo.status !== 'completed' && todo.status !== 'cancelled')
+  return <Box flexDirection="column" flexShrink={0} backgroundColor={t.color.statusBg}
+    borderSides={['left']} borderColor={t.color.accent} paddingX={1}
+    onClick={() => patchOverlayState({ goal: true })}>
+    <Box justifyContent="space-between">
+      <Text bold color={t.ds.title}>{todos.length ? 'Tasks ' + todos.filter(todo => todo.status === 'completed').length + '/' + todos.length : 'Goal'}</Text>
+      <Text color={t.ds.secondary}>F10 · View plan</Text>
+    </Box>
+    {goal ? <Text color={t.color.text} wrap="truncate-end">{goal}{ui.info?.goal_phase && ui.info.goal_phase !== "active" ? ` · ${ui.info.goal_phase}` : ""}</Text> : null}
+    {unfinished.slice(0, compact ? 1 : 3).map(todo => <Text key={todo.id} color={todo.status === 'in_progress' ? t.color.accent : t.color.text} wrap="truncate-end">{todo.status === 'in_progress' ? '◌ ' : '○ '}{todo.content}</Text>)}
+  </Box>
 }
 
 // ── Prompt overlays (approval / confirm / clarify) ─────────────────────────
@@ -1228,6 +1229,8 @@ export function Composer({ composer }: Pick<AppLayoutProps, 'composer'>) {
           terminal, so its column math must use the same measure — otherwise
           it lays out for a width it does not have and the renderer truncates
           the descriptions mid-string. */}
+      <LiveProgressPill />
+      <ComposerTaskSummary />
       <CompletionMenu
         compIdx={composer.compIdx}
         completions={composer.completions}
@@ -1960,8 +1963,6 @@ export function AppLayout({
                 busy={ui.busy}
                 contextMax={usageCounts(ui.usage).max}
                 contextUsed={usageCounts(ui.usage).used}
-                goal={ui.info?.goal}
-                goalPhase={ui.info?.goal_phase}
                 mode={ui.info?.mode}
                 sessionId={ui.sid ?? ui.info?.session_id}
                 sessionTitle={sessionTitle}
@@ -2015,7 +2016,7 @@ export function AppLayout({
                     <CompactLiveProgress show={progress.showProgressArea} />
                     {/* Mockup 02: the quiet progress pill floats at the very end
                         of the live tail and unmounts on completion. */}
-                    <LiveProgressPill />
+
 
                     {transcript.virtualHistory.bottomSpacer > 0 ? (
                       <Box flexShrink={0} height={transcript.virtualHistory.bottomSpacer} />
@@ -2077,11 +2078,11 @@ export function AppLayout({
         />
       ) : null}
       {overlay.terminals ? (
-        <TerminalPanelOverlay onClose={() => patchOverlayState({ terminals: false })} t={t} />
+        <TerminalPanelOverlay key={ui.sid ?? ui.info?.session_id} onClose={() => patchOverlayState({ terminals: false })} t={t} />
       ) : null}
       {overlay.goal ? <GoalOverlay t={t} /> : null}
       {overlay.contextInspector ? <ContextOverlay t={t} /> : null}
-      {overlay.activity ? <ActivityOverlay key={ui.sid} sessionId={ui.sid} t={t} /> : null}
+      {overlay.activity ? <ActivityOverlay key={ui.sid ?? ui.info?.session_id} sessionId={ui.sid} t={t} /> : null}
       {overlay.monitors ? <MonitorOverlay t={t} /> : null}
       {overlay.loops ? <ScheduleOverlay t={t} followupsOnly /> : null}
       {overlay.capabilities ? <CapabilitiesOverlay t={t} /> : null}
@@ -2090,8 +2091,10 @@ export function AppLayout({
       {overlay.mcpSettings ? <McpSettingsOverlay t={t} /> : null}
       {overlay.machinePicker ? <MachinePicker t={t} onCancel={() => patchOverlayState({ machinePicker: false })} /> : null}
       {overlay.customAgentEditor ? <CustomAgentEditor t={t} onClose={() => patchOverlayState({ customAgentEditor: false })} /> : null}
+      {overlay.presetEditor ? <PresetEditor key={ui.sid ?? ui.info?.session_id} sessionId={ui.sid ?? ui.info?.session_id ?? 'unattached'} t={t} onClose={() => patchOverlayState({ presetEditor: false })} /> : null}
+      {overlay.forge ? <ForgeOverlay key={ui.sid ?? ui.info?.session_id} sessionId={ui.sid ?? ui.info?.session_id ?? 'unattached'} t={t} onClose={() => patchOverlayState({ forge: false })} /> : null}
       {overlay.agentSettings ? <AgentSettingsOverlay t={t} /> : null}
-      {overlay.runs ? <RunOverlay t={t} /> : null}
+      {overlay.runs ? <RunOverlay key={ui.sid ?? ui.info?.session_id} t={t} /> : null}
       {overlay.snapshots ? <SnapshotOverlay t={t} /> : null}
       {overlay.workspaces ? <WorkspaceOverlay t={t} /> : null}
       {overlay.skillsHub ? <InfoOverlay kind='skillsHub' /> : null}

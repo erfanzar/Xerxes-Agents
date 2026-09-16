@@ -139,6 +139,10 @@ test('daemon completion preserves command and path semantics while native skills
     ])
     client.send({ jsonrpc: '2.0', id: 103, method: 'complete', params: { path_prefix: './missing-directory/' } })
     expect((await client.next(frame => frame.id === 103)).error).toBeDefined()
+    client.send({ jsonrpc: '2.0', id: 104, method: 'complete', params: { path_prefix: 'my f' } })
+    expect((await client.next(frame => frame.id === 104)).result?.completions).toEqual([
+      { value: 'my file.md', label: 'my file.md', meta: 'file' },
+    ])
 
 
     client.send({ jsonrpc: '2.0', id: 2, method: 'complete', params: { text: '/prov' } })

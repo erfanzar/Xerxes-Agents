@@ -67,7 +67,7 @@ export function FirstRunSetup({ snap }: { snap: Snapshot }): ReactElement | null
         <div>
           <span>{state.runtime ? '✓' : '2'}</span>
           <strong>Runtime</strong>
-          <p>{state.runtime ? 'Connected and ready.' : 'Connecting to the project runtime…'}</p>
+          <p>{state.runtime ? 'Connected and ready.' : 'Connecting to the shared runtime…'}</p>
           {!state.runtime && (
             <button onClick={() => store.retryConnection()}>Retry connection</button>
           )}

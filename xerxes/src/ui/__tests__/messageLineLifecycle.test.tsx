@@ -7,6 +7,8 @@ import { afterEach, describe, expect, it } from 'vitest'
 
 import { resetThinkingVisibility, toggleAllThinking } from '../app/thinkingVisibilityStore.js'
 import { patchUiState, resetUiState } from '../app/uiStore.js'
+import { toggleToolStep, resetToolStepVisibility } from '../app/toolStepStore.js'
+import { patchTurnState, resetTurnState } from '../app/turnStore.js'
 import { buildToolTrailLine } from '../lib/text.js'
 import { MessageLine } from '../opentui/messageLine.js'
 import { DEFAULT_THEME, themeForMode } from '../theme.js'
@@ -14,6 +16,17 @@ import { DEFAULT_THEME, themeForMode } from '../theme.js'
 const theme = themeForMode(DEFAULT_THEME, 'code')
 
 describe('OpenTUI message lifecycle', () => {
+  it('expands archived output using its own records after another turn begins', async () => {
+    const line = buildToolTrailLine('read_file', 'source.txt', false, '', 0.1)
+    toggleToolStep(`saved:${line}`)
+    patchTurnState({ toolLineToId: { [line]: 'new' }, toolRecords: { new: { name: 'read_file', result: 'WRONG CURRENT OUTPUT' } } })
+    const setup = await testRender(<MessageLine msgKey="saved" msg={{ kind: 'trail', role: 'system', text: '', tools: [line], toolLineToId: { [line]: 'old' }, toolRecords: { old: { name: 'read_file', result: 'saved first line\nsaved second line' } } }} t={theme} />, { width: 80, height: 24 })
+    try {
+      await setup.flush()
+      expect(setup.captureCharFrame()).toContain('saved second line')
+      expect(setup.captureCharFrame()).not.toContain('WRONG CURRENT OUTPUT')
+    } finally { await act(async () => setup.renderer.destroy()); resetTurnState(); resetToolStepVisibility() }
+  })
   afterEach(() => {
     resetUiState()
     resetThinkingVisibility()
