@@ -1,5 +1,6 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
+import { assertOutputTokenLimit } from './outputTokenLimit.js'
 
 /**
  * pi-messages API client (pi-ai parity, dist/api/pi-messages.ts).
@@ -524,6 +525,7 @@ export class PiMessagesClient implements LlmClient {
       ...(request.toolChoice !== undefined ? { toolChoice: piToolChoice(request.toolChoice) } : {}),
     }
     const payload: Record<string, unknown> = { model: bare, context, options }
+    assertOutputTokenLimit(request, options.maxTokens)
 
     const response = await this.fetchImplementation(url, {
       method: 'POST',

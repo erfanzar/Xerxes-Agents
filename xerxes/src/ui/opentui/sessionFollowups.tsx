@@ -83,7 +83,9 @@ export function SessionFollowups({ t, sessionId, expanded = false }: { t: Theme;
     let timer: ReturnType<typeof setTimeout> | undefined
     const load = async () => {
       try {
-        const result = await gateway.rpc<{ ok: boolean; owner_session_id?: string; jobs?: unknown; error?: string }>('schedule.list', { scope: 'session', owner_session_id: sessionId, summary: true })
+        // This poll owns its inline error display. A late failure from a
+        // previous conversation must never become current transcript content.
+        const result = await gateway.rpc<{ ok: boolean; owner_session_id?: string; jobs?: unknown; error?: string }>('schedule.list', { scope: 'session', owner_session_id: sessionId, summary: true }, { reportError: false })
         const jobs = parse(result, sessionId)
         if (alive) setSnapshot({ owner: sessionId, jobs, now: Date.now(), error: '' })
       } catch (error) {

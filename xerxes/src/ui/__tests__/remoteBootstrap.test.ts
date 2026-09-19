@@ -1,7 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 import { expect, it } from 'vitest'
-import { mkdtemp, mkdir, chmod, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, chmod, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { remoteBootstrapScript } from '../lib/remoteBootstrap.js'
@@ -16,7 +16,7 @@ it('installs missing remote Xerxes, skips unchanged builds, updates and preserve
   const executable = async (name: string, content: string) => { const file = join(bin, name); await Bun.write(file, '#!/bin/sh\nset -eu\n' + content); await chmod(file, 0o755) }
   await executable('git', 'if [ "$1" = ls-remote ]; then printf "%s\\trefs/heads/main\\n" "$(cat "$REVISION")"; fi\n')
   await executable('bun', `echo "$*" >> "$CALLS"
-if [ "$1" = install ]; then [ "\${FAIL_BUILD:-0}" != 1 ]; exit; fi
+if [ "$1" = install ]; then if [ "\${FAIL_BUILD:-0}" = 1 ]; then printf 'private-sentinel-credential' >&2; exit 1; fi; exit; fi
 if [ "$1" = run ]; then mkdir -p xerxes/dist/ui; touch xerxes/dist/cli.js xerxes/dist/ui/entry.js; fi
 if [ "$1" != install ] && [ "$1" != run ] && [ "\${2:-}" != --help ]; then printf '%s' "$PWD" > "$HOME/opened"; fi
 `)
@@ -31,7 +31,13 @@ if [ "$1" != install ] && [ "$1" != run ] && [ "\${2:-}" != --help ]; then print
     expect((await run()).output).not.toContain('installing/updating')
     expect((await Bun.file(calls).text()).match(/install --frozen/g)).toHaveLength(1)
     await Bun.write(revision, second)
-    expect((await run({ FAIL_BUILD: '1' })).code).not.toBe(0)
+    const failed = await run({ FAIL_BUILD: '1' })
+    expect(failed.code).not.toBe(0)
+    expect(failed.error).toContain('Dependency installation or build failed')
+    expect(failed.error + failed.output).not.toContain('private-sentinel-credential')
+    const log = join(home, '.xerxes/remote-runtime/setup.log')
+    expect(await Bun.file(log).text()).toBe('Dependency installation or build failed.\n')
+    expect((await stat(log)).mode & 0o777).toBe(0o600)
     expect(await Bun.file(join(home, '.xerxes/remote-runtime', second, '.ready')).exists()).toBe(false)
     expect((await run()).code).toBe(0)
     expect(await Bun.file(join(home, '.xerxes/remote-runtime', first, '.ready')).exists()).toBe(true)

@@ -126,11 +126,11 @@ export function looksLikeDroppedPath(text: string): boolean {
     return true
   }
 
-  // Bare absolute paths (start with /) — require a second '/' or a '.' to avoid
-  // false positives on short strings like "/api" or "/help" which would trigger
-  // unnecessary RPC round-trips.
+  // Inspect the leading token, not command arguments: a model version, search
+  // term or /file argument must not turn a pasted slash command into a file hint.
+  // Paths containing spaces remain explicit through a parent path or quoting.
   if (trimmed.startsWith('/')) {
-    const rest = trimmed.slice(1)
+    const rest = trimmed.slice(1).split(/\s/, 1)[0] ?? ''
 
     return rest.includes('/') || rest.includes('.')
   }

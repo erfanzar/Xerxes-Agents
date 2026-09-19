@@ -33,6 +33,16 @@ export class ConnectionLeases {
 
   has(token: string): boolean { return this.tokens.has(token) }
 
+  /** Private provider requests contain context, not UI events. Never journal
+   * them across a disconnect or restoration boundary. */
+  sendPrivate(owner: DaemonTransportConnection, frame: object): boolean {
+    const lease = this.owners.get(owner)
+    if (!lease) { owner.send(frame); return true }
+    if (!lease.transport || lease.restoring) return false
+    lease.transport.send(frame)
+    return true
+  }
+
   enable(transport: DaemonTransportConnection): string {
     const existing = this.transports.get(transport)
     if (existing) return existing.token

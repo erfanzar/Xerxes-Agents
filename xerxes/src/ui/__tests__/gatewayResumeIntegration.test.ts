@@ -1,11 +1,11 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
-import { mkdtemp, realpath, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises'
 import { connect, type Socket } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import { InMemoryDaemonRuntime } from '../../daemon/runtime.js'
 import { DaemonServer } from '../../daemon/server.js'
@@ -15,6 +15,38 @@ import { GatewayClient } from '../gatewayClient.js'
 import type { SessionResumeResponse } from '../gatewayTypes.js'
 
 describe('GatewayClient resumed transcript integration', () => {
+  it('reattaches running work by public ID and rejects a different workspace before changing its connection', async () => {
+    const directory=await realpath(await mkdtemp(join(tmpdir(),'xr-live-id-')))
+    const otherProject=join(directory,'other');await mkdir(otherProject)
+    let calls=0
+    const runtime=new InMemoryDaemonRuntime({async *run(_session,_text,signal){
+      calls++;yield {type:'text_part',payload:{text:'Work remains running'}}
+      await new Promise<void>(resolve=>{if(signal.aborted)resolve();else signal.addEventListener('abort',()=>resolve(),{once:true})})
+    }},{model:'gpt-4o',currentProjectDirectory:directory,sessionDirectory:join(directory,'sessions')})
+    const socketPath=join(directory,'rpc.sock'),server=new DaemonServer({runtime,socketPath,projectDirectory:directory})
+    const owner=new GatewayClient({externalSocketPath:socketPath,projectDir:directory})
+    const visitor=new GatewayClient({externalSocketPath:socketPath,projectDir:directory})
+    const other=new GatewayClient({externalSocketPath:socketPath,projectDir:otherProject})
+    try {
+      await server.start();await owner.start();await visitor.start();await other.start()
+      const created=await owner.request<{session_id:string}>('session.create')
+      await owner.request('turn.submit',{text:'Keep working while another window opens'})
+      await vi.waitFor(()=>expect(calls).toBe(1))
+      const live=runtime.listSessions().find(s=>s.id===created.session_id)!
+      const turn=live.activeTurnId
+      const otherCreated=await other.request<{session_id:string}>('session.create')
+      await expect(other.request('session.resume',{session_id:created.session_id})).rejects.toThrow('another workspace')
+      expect(await other.request('session.status',{structured:true,history_limit:0})).toMatchObject({session:{id:otherCreated.session_id}})
+      const resumed=await visitor.request('session.resume',{session_id:created.session_id})
+      expect(resumed).toMatchObject({session_id:created.session_id})
+      expect(await visitor.request('session.status',{structured:true,history_limit:0})).toMatchObject({session:{id:created.session_id,key:live.sessionKey}})
+      expect(live.activeTurnId).toBe(turn)
+      expect(calls).toBe(1)
+      expect(runtime.listSessions().filter(s=>s.id===created.session_id)).toEqual([live])
+      await visitor.request('turn.cancel')
+      await vi.waitFor(()=>expect(live.activeTurnId).toBe(''))
+    } finally {owner.close();visitor.close();other.close();await server.stop();await runtime.shutdown();await rm(directory,{recursive:true,force:true})}
+  })
   it('hydrates persisted daemon history once through the real socket protocol', async () => {
     // Canonicalize the temp dir: on macOS /tmp is a symlink to /private/tmp,
     // and the daemon rejects a transcript whose stored project dir differs
@@ -39,7 +71,7 @@ describe('GatewayClient resumed transcript integration', () => {
       key: sessionId,
       messages: [
         { content: 'inspect the resume path', role: 'user' },
-        { content: 'The persisted answer is visible.', role: 'assistant' }
+        { content: 'The persisted answer is visible.', role: 'assistant', turn_outcome: { version: 1, reason: 'aborted', turn_id: 'abcdef01' } }
       ],
       metadata: {},
       pendingResumeReplays: [],
@@ -85,9 +117,12 @@ describe('GatewayClient resumed transcript integration', () => {
       expect(resumed).toMatchObject({ message_count: 2, resumed: sessionId, session_id: sessionId })
       expect(resumed.messages).toEqual([
         { role: 'user', text: 'inspect the resume path' },
-        { role: 'assistant', text: 'The persisted answer is visible.' }
+        { role: 'assistant', text: 'The persisted answer is visible.' },
+        { role: 'assistant', text: 'interrupted', outcome: 'aborted' }
       ])
       expect(forwarded).toEqual([])
+      const page = await client.request<{history: {actions: {messages: Record<string, unknown>[]}[]}}>('session.history', {history_limit: 1})
+      expect(page.history.actions[0]?.messages[0]?.turn_outcome).toEqual({version: 1, reason: 'aborted', turn_id: 'abcdef01'})
     } finally {
       client.close()
       await server.stop()

@@ -1,6 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 import type { LspSettingsView } from '../lsp/settings.js';
+import { readTurnOutcome, turnOutcomeReason, type TurnOutcomeReason } from '../types/turnOutcome.js';
 import { readContextControls, type ContextControls } from '../context/controls.js';
 import type { LspServerHealth } from '../lsp/manager.js';
 
@@ -36,6 +37,7 @@ import { imageUrlContentParts, type TurnImage } from "./images.js";
 import { resolveProjectDirectory, xerxesHome } from "./paths.js";
 import { displayTitle } from "./titleGenerator.js";
 import type { DaemonInteractionBoard } from "./interactions.js";
+import { LOCAL_PROVIDER_BINDING } from './remoteProviderBindings.js';
 import {
   claimDirectSubagentConversation,
   isSubagentConversationActive,
@@ -517,6 +519,7 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
   private readonly runtimeSettings: JsonRpcPayload;
   private readonly sessions = new Map<string, DaemonSession>();
   private readonly exclusiveSessionWrites = new Set<string>();
+  private readonly sessionWrites = new WeakMap<DaemonSession, Promise<unknown>>();
   /** Coalesces async transcript loads so one key cannot initialize twice. */
   private readonly sessionOpenPromises = new Map<string, Promise<DaemonSession>>();
   /**
@@ -969,6 +972,13 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
 
     const cwd = resolve(options.cwd ?? this.currentProjectDirectory);
     const shouldResume = options.resume ?? looksLikeSessionId(key);
+    if (shouldResume && [...this.sessions.values()].some(session => session.id === key && session.activeTurnId)) {
+      throw new ValidationError(
+        "session_id",
+        "is still running a turn under another connection; wait for it to finish before resuming it here",
+        key,
+      );
+    }
     if (shouldResume && isSubagentConversationActive(key)) {
       throw new ValidationError(
         "session_id",
@@ -982,6 +992,13 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
           workspaceRoot: this.workspaceRoot,
         })
       : { kind: "missing" } as const;
+    if (options.resume === true && loadResult.kind === "missing") {
+      throw new ValidationError(
+        "session_id",
+        "saved conversation is missing; use /resume to choose an existing conversation or /new to start one",
+        key,
+      );
+    }
     if (options.resume === true && loadResult.kind === "corrupt") {
       throw new ValidationError(
         "session_id",
@@ -1189,7 +1206,7 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
       if (modelDelta) appendContextDelta(session.metadata, modelDelta);
       session.model = model;
     }
-    if (!session.reasoningPinned) {
+    if (!session.reasoningPinned && !Object.hasOwn(session.metadata, LOCAL_PROVIDER_BINDING)) {
       const effort = stringValue(this.runtimeSettings.reasoning_effort);
       if (effort) {
         const effortDelta = contextDeltaFor(session.reasoningEffort, effort, Date.now(), "reasoning");
@@ -1238,14 +1255,26 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
       return undefined;
     }
     const normalized = normalizeInteractionMode(mode, planMode ?? false);
-    const modeDelta = contextDeltaFor(session.interactionMode, normalized, Date.now(), "interaction-mode");
-    if (modeDelta) appendContextDelta(session.metadata, modeDelta);
-    session.interactionMode = normalized;
-    session.planMode = planMode ?? normalized === "plan";
-    session.lastActive = Date.now();
-    await this.saveSession(session);
-    this.options.onSessionModeChange?.(session.id, normalized);
-    return session;
+    return this.serializeSessionWrite(session, async () => {
+      if (this.sessions.get(sessionKey) !== session) throw new Error('The task changed before mode could be saved. Reopen the task and retry.');
+      const changedAt = Date.now();
+      const modeDelta = contextDeltaFor(session.interactionMode, normalized, changedAt, "interaction-mode");
+      const staged = { ...session, metadata: { ...session.metadata }, interactionMode: normalized,
+        planMode: planMode ?? normalized === "plan", lastActive: changedAt };
+      if (modeDelta) appendContextDelta(staged.metadata, modeDelta);
+      try { await this.writeSession(staged); }
+      catch (cause) {
+        throw new Error('Could not save mode. The previous mode is unchanged. Check session storage permissions and free space, then retry.', { cause });
+      }
+      session.interactionMode = staged.interactionMode;
+      session.planMode = staged.planMode;
+      session.lastActive = Math.max(session.lastActive, changedAt);
+      if (staged.transcriptGeneration !== undefined) session.transcriptGeneration = staged.transcriptGeneration;
+      if (staged.persistedMessageCount !== undefined) session.persistedMessageCount = staged.persistedMessageCount;
+      if (modeDelta) appendContextDelta(session.metadata, modeDelta);
+      this.options.onSessionModeChange?.(session.id, normalized);
+      return session;
+    });
   }
 
   async setSessionModel(
@@ -1261,16 +1290,27 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     if (!chosen) {
       return session;
     }
-    const modelDelta = contextDeltaFor(session.model, chosen, Date.now(), "model");
-    if (modelDelta) appendContextDelta(session.metadata, modelDelta);
-    session.model = chosen;
-    if (providerProfile !== undefined) session.metadata.provider_profile = providerProfile;
-    // Pinned from here on, so a later global reload cannot silently move this
-    // session onto another session's model.
-    session.modelPinned = true;
-    session.lastActive = Date.now();
-    await this.saveSession(session);
-    return session;
+    return this.serializeSessionWrite(session, async () => {
+      if (this.sessions.get(sessionKey) !== session) throw new Error('The task changed before model could be saved. Reopen the task and retry.');
+      const changedAt = Date.now();
+      const modelDelta = contextDeltaFor(session.model, chosen, changedAt, "model");
+      const staged = { ...session, metadata: { ...session.metadata }, model: chosen, modelPinned: true, lastActive: changedAt };
+      if (modelDelta) appendContextDelta(staged.metadata, modelDelta);
+      if (providerProfile !== undefined) staged.metadata.provider_profile = providerProfile;
+      try { await this.writeSession(staged); }
+      catch (cause) {
+        throw new Error('Could not save model. The previous model is unchanged. Check session storage permissions and free space, then retry.', { cause });
+      }
+      session.model = chosen;
+      if (providerProfile !== undefined) session.metadata.provider_profile = providerProfile;
+      // Pin only the committed choice; failed storage cannot change routing.
+      session.modelPinned = true;
+      session.lastActive = Math.max(session.lastActive, changedAt);
+      if (staged.transcriptGeneration !== undefined) session.transcriptGeneration = staged.transcriptGeneration;
+      if (staged.persistedMessageCount !== undefined) session.persistedMessageCount = staged.persistedMessageCount;
+      if (modelDelta) appendContextDelta(session.metadata, modelDelta);
+      return session;
+    });
   }
 
   async setSessionReasoning(
@@ -1285,12 +1325,27 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     if (!chosen) {
       return session;
     }
-    const effortDelta = contextDeltaFor(session.reasoningEffort, chosen, Date.now(), "reasoning");
-    if (effortDelta) appendContextDelta(session.metadata, effortDelta);
-    session.reasoningEffort = chosen;
-    session.reasoningPinned = true;
-    session.lastActive = Date.now();
-    return session;
+    return this.serializeSessionWrite(session, async () => {
+      if (this.sessions.get(sessionKey) !== session) throw new Error('The task changed before reasoning could be saved. Reopen the task and retry.');
+      // Stage the choice privately. A pending or rejected write must not affect
+      // a running turn, status readers, another setting change or a later flush.
+      const changedAt = Date.now();
+      const effortDelta = contextDeltaFor(session.reasoningEffort, chosen, changedAt, "reasoning");
+      const staged = { ...session, metadata: { ...session.metadata }, reasoningEffort: chosen, reasoningPinned: true, lastActive: changedAt };
+      if (effortDelta) appendContextDelta(staged.metadata, effortDelta);
+      try { await this.writeSession(staged); }
+      catch (cause) {
+        throw new Error('Could not save reasoning. The previous effort is unchanged. Check session storage permissions and free space, then retry.', { cause });
+      }
+      session.reasoningEffort = chosen;
+      session.reasoningPinned = true;
+      session.lastActive = Math.max(session.lastActive, changedAt);
+      if (staged.transcriptGeneration !== undefined) session.transcriptGeneration = staged.transcriptGeneration;
+      if (staged.persistedMessageCount !== undefined) session.persistedMessageCount = staged.persistedMessageCount;
+      // Preserve unrelated metadata changes made while storage was pending.
+      if (effortDelta) appendContextDelta(session.metadata, effortDelta);
+      return session;
+    });
   }
 
   async setSessionPermissionMode(
@@ -1305,12 +1360,24 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     if (!chosen) {
       return session;
     }
-    const permissionDelta = contextDeltaFor(session.permissionMode, chosen, Date.now(), "permission");
-    if (permissionDelta) appendContextDelta(session.metadata, permissionDelta);
-    session.permissionMode = chosen;
-    session.permissionPinned = true;
-    session.lastActive = Date.now();
-    return session;
+    return this.serializeSessionWrite(session, async () => {
+      if (this.sessions.get(sessionKey) !== session) throw new Error('The task changed before permissions could be saved. Reopen the task and retry.');
+      const changedAt = Date.now();
+      const permissionDelta = contextDeltaFor(session.permissionMode, chosen, changedAt, "permission");
+      const staged = { ...session, metadata: { ...session.metadata }, permissionMode: chosen, permissionPinned: true, lastActive: changedAt };
+      if (permissionDelta) appendContextDelta(staged.metadata, permissionDelta);
+      try { await this.writeSession(staged); }
+      catch (cause) {
+        throw new Error('Could not save permissions. The previous policy is unchanged. Check session storage permissions and free space, then retry.', { cause });
+      }
+      session.permissionMode = chosen;
+      session.permissionPinned = true;
+      session.lastActive = Math.max(session.lastActive, changedAt);
+      if (staged.transcriptGeneration !== undefined) session.transcriptGeneration = staged.transcriptGeneration;
+      if (staged.persistedMessageCount !== undefined) session.persistedMessageCount = staged.persistedMessageCount;
+      if (permissionDelta) appendContextDelta(session.metadata, permissionDelta);
+      return session;
+    });
   }
 
   async setSessionUltra(
@@ -1562,6 +1629,8 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     const runnerManagesState = this.turnRunner.managesSessionState === true;
     const assistantParts: string[] = [];
     const thinkingParts: string[] = [];
+    let outcomeReason: TurnOutcomeReason | undefined;
+    const turnCountBefore = session.turnCount;
     const displayText = options.displayText?.trim() || text;
     session.inflightUser = displayText;
     session.inflightAssistant = "";
@@ -1575,6 +1644,7 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     // tool, approval, or usage events would otherwise be applied to whichever
     // session happens to be visible when they arrive.
     const emitSessionEvent = (event: DaemonEvent): void => {
+      if (event.type === 'status_update') outcomeReason = turnOutcomeReason(event.payload.stop_reason) ?? outcomeReason;
       // Recorded for BOTH state-management modes: a runner-managed session
       // only synchronizes session.messages at turn end, and this trail is
       // what a mid-turn session.open replays as the turn's work so far.
@@ -1656,6 +1726,7 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
         }
       }
     } catch (error) {
+      outcomeReason = controller.signal.aborted ? 'aborted' : 'turn_failed';
       emitSessionEvent({
         type: "notification",
         payload: { level: "error", message: errorMessage(error) },
@@ -1668,6 +1739,21 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
           ...(thinkingParts.length ? { thinking: thinkingParts.join("") } : {}),
         });
       }
+      // A late cancel may stop children, but cannot rewrite a terminal native
+      // result already emitted before teardown/persistence.
+      outcomeReason ??= controller.signal.aborted ? 'aborted' : undefined;
+      let lastMessage = session.messages.findLast(message => readTurnOutcome(message.turn_outcome)?.turn_id === session.activeTurnId) ?? session.messages.at(-1);
+      if (runnerManagesState && outcomeReason && session.turnCount === turnCountBefore) {
+        // Setup can fail before a native runner enters its stream loop. Keep
+        // the submitted prompt and its outcome, never relabel the prior turn.
+        lastMessage = { role: 'user', content: providerContent, ...(displayText === providerText ? {} : { text: displayText }) };
+        session.messages.push(lastMessage);
+        if (session.turnCount === turnCountBefore) session.turnCount++;
+      }
+      if (lastMessage && outcomeReason) lastMessage.turn_outcome = { version: 1, reason: outcomeReason, turn_id: session.activeTurnId };
+      // Runners without an explicit terminal reason remain unknown. Never
+      // infer successful completion just because the transport became idle.
+      const outcome = outcomeReason;
       session.status = "idle";
       session.activeTurnId = "";
       session.lastActive = Date.now();
@@ -1720,7 +1806,8 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
       emitSessionEvent({
         type: "turn_end",
         payload: {
-          cancelled: controller.signal.aborted,
+          cancelled: outcome ? outcome === 'aborted' : controller.signal.aborted,
+          ...(outcome ? { stop_reason: outcome } : {}),
         },
       });
       // A reload() that landed mid-turn deferred the global default swap to
@@ -1758,7 +1845,23 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     return stringValue(this.runtimeSettings.model) || this.options.model || "";
   }
 
-  private async saveSession(session: DaemonSession, mode: 'append' | 'rewrite' = 'append'): Promise<void> {
+  private serializeSessionWrite<T>(session: DaemonSession, operation: () => Promise<T>): Promise<T> {
+    const previous = this.sessionWrites.get(session) ?? Promise.resolve();
+    // Failure belongs to its caller; it must not poison later retries.
+    const pending = previous.catch(() => {}).then(operation);
+    this.sessionWrites.set(session, pending);
+    const settled = () => { if (this.sessionWrites.get(session) === pending) this.sessionWrites.delete(session); };
+    void pending.then(settled, settled);
+    return pending;
+  }
+
+  private saveSession(session: DaemonSession, mode: 'append' | 'rewrite' = 'append'): Promise<void> {
+    // Build the snapshot only when this write starts. Otherwise a flush queued
+    // behind a committed setting could overwrite it with an older snapshot.
+    return this.serializeSessionWrite(session, () => this.writeSession(session, mode));
+  }
+
+  private async writeSession(session: DaemonSession, mode: 'append' | 'rewrite' = 'append'): Promise<void> {
     // A session with no completed exchange must not be persisted: a fresh
     // GUI or daemon session that never sent a message — or a dangling prompt
     // whose turn died before any reply — would otherwise live forever in
@@ -2328,7 +2431,7 @@ function updateFallbackSession(
   thinkingParts: string[],
 ): void {
   if (event.type === "text_part") {
-    const text = stringValue(event.payload.text);
+    const text = typeof event.payload.text === "string" ? event.payload.text : "";
     if (text) {
       assistantParts.push(text);
       session.inflightAssistant = assistantParts.join("");
@@ -2336,7 +2439,7 @@ function updateFallbackSession(
     return;
   }
   if (event.type === "think_part") {
-    const thinking = stringValue(event.payload.think);
+    const thinking = typeof event.payload.think === "string" ? event.payload.think : "";
     if (thinking) {
       thinkingParts.push(thinking);
       session.thinkingContent.push(thinking);

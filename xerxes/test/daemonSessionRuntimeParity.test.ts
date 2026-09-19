@@ -119,6 +119,22 @@ test('daemon runtime still awaits background disposal when another shutdown hook
   expect(disposeAll).toHaveBeenCalledTimes(1)
 })
 
+test('fallback runner preserves whitespace between streamed text and reasoning chunks in saved sessions', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-stream-whitespace-'))
+  const runtime = new InMemoryDaemonRuntime({ async *run() {
+    for (const text of ['const ', 'x', ' ', '= 1;\n', '\n', 'done']) yield { type: 'text_part', payload: { text } }
+    for (const think of ['first ', '\n', 'then second']) yield { type: 'think_part', payload: { think } }
+  } }, { currentProjectDirectory: directory, sessionDirectory: directory })
+  try {
+    const session = await runtime.openSession('whitespace')
+    await runtime.submitTurn(session.sessionKey, 'write code', () => {})
+    const expected = { role: 'assistant', content: 'const x = 1;\n\ndone', thinking: 'first \nthen second' }
+    expect(session.messages[1]).toEqual(expected)
+    const saved = JSON.parse(await readFile(join(directory, `${session.id}.json`), 'utf8'))
+    expect(saved.messages[1]).toMatchObject(expected)
+  } finally { await runtime.shutdown(); await rm(directory, { recursive: true, force: true }) }
+})
+
 test('daemon runtime persists a project-scoped session and resumes only an explicit ID', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'xerxes-daemon-runtime-parity-'))
   const projectDirectory = join(directory, 'project')
@@ -623,7 +639,7 @@ test('daemon cancellation drains queued steering, clears active state, and does 
     expect(session.toolExecutions).toEqual([])
     expect(session.messages).toEqual([
       { role: 'user', content: 'begin long task' },
-      { role: 'assistant', content: 'waiting for cancellation' },
+      { role: 'assistant', content: 'waiting for cancellation', turn_outcome: {version: 1, reason: 'aborted', turn_id: expect.any(String)} },
       { role: 'user', content: '[steer from user saved for next turn]\npreserve the evidence' },
     ])
     expect(events.find(event => event.type === 'turn_end')?.payload).toMatchObject({
@@ -677,8 +693,8 @@ test('concurrent openSession calls share one initialization and one session obje
   })
   try {
     const [first, second] = await Promise.all([
-      runtime.openSession('deadbeef', undefined, { resume: true }),
-      runtime.openSession('deadbeef', undefined, { resume: true }),
+      runtime.openSession('deadbeef'),
+      runtime.openSession('deadbeef'),
     ])
 
     expect(first).toBe(second)
@@ -846,5 +862,23 @@ test('an already cancelled host submission never opens a session or starts a run
     await expect(runtime.submitTurn('never-opened', 'work', () => {}, { signal: cancellation.signal })).rejects.toThrow('expired before admission')
     expect(runs).toBe(0)
     expect(runtime.sessionStatus('never-opened')).toBeUndefined()
+  } finally { await rm(directory, { recursive: true, force: true }) }
+})
+
+test('explicit missing resume preserves live identity and creates no replacement conversation', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-missing-resume-'))
+  const options = { currentProjectDirectory: directory, sessionDirectory: join(directory, 'sessions') }
+  const runtime = new InMemoryDaemonRuntime(undefined, options)
+  try {
+    const current = await runtime.openSession('current', undefined, { resume: false })
+    const before = runtime.listSessions().map(session => session.id)
+    await expect(runtime.openSession('missing123', undefined, { resume: true })).rejects.toThrow('saved conversation is missing')
+    expect(runtime.listSessions().map(session => session.id)).toEqual(before)
+    expect(runtime.sessionStatus('current')).toBe(current)
+    expect(runtime.sessionStatus('missing123')).toBeUndefined()
+    const restarted = new InMemoryDaemonRuntime(undefined, options)
+    await expect(restarted.openSession('missing123', undefined, { resume: true })).rejects.toThrow('/resume')
+    // Explicit creation remains supported even for a key that resembles an id.
+    expect((await restarted.openSession('abcde12345', undefined, { resume: false })).sessionKey).toBe('abcde12345')
   } finally { await rm(directory, { recursive: true, force: true }) }
 })

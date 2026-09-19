@@ -1,5 +1,6 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
+import { copyTurnOutcome } from '../types/turnOutcome.js'
 
 export const DEFAULT_TOOL_RESULT_MAX_CHARS = 4_000
 export const DEFAULT_TOOL_RESULT_HEAD_LINES = 40
@@ -54,7 +55,7 @@ export function pruneToolMessages<T extends Record<string, unknown>>(
       return message
     }
     prunedCount += 1
-    return { ...message, content: pruned.content } as T
+    return copyTurnOutcome(message, { ...message, content: pruned.content } as T)
   })
   return { messages: prunedMessages, prunedCount }
 }

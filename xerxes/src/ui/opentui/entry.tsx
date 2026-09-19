@@ -8,7 +8,7 @@ import '../lib/forceTruecolor.js'
 import { writeSync } from 'node:fs'
 
 import { INLINE_MODE, MOUSE_TRACKING, TERMUX_TUI_MODE } from '../config/env.js'
-import { $uiSessionId, getUiState } from '../app/uiStore.js'
+import { $uiSessionId, $uiTheme, getUiState, patchUiState } from '../app/uiStore.js'
 import { GatewayClient } from '../gatewayClient.js'
 import { setEarlyInputText, startEarlyInputCapture } from '../lib/earlyInput.js'
 import { formatExitHint } from '../lib/exitHint.js'
@@ -17,7 +17,7 @@ import { formatBytes, type HeapDumpResult, performHeapDump } from '../lib/memory
 import { type MemorySnapshot, startMemoryMonitor } from '../lib/memoryMonitor.js'
 import { recordParentLifecycle } from '../lib/parentLog.js'
 import { resetTerminalModes } from '../lib/terminalModes.js'
-import { DEFAULT_THEME, themeForMode } from '../theme.js'
+import { $appearance, loadAppearance } from '../app/appearance.js'
 import {
   clearActiveRenderer,
   destroyActiveRenderer,
@@ -89,6 +89,9 @@ if (TERMUX_TUI_MODE) {
 
 const gw = new GatewayClient({
   externalSocketPath: process.env.XERXES_REMOTE_SOCKET,
+  externalStatusPath: process.env.XERXES_REMOTE_STATUS_FILE,
+  ...(process.env.XERXES_REMOTE_SOCKET && process.env.XERXES_TUI_RESUME && process.env.XERXES_TUI_PREPARED_SESSION_KEY
+    ? { preparedSession: { id: process.env.XERXES_TUI_RESUME, key: process.env.XERXES_TUI_PREPARED_SESSION_KEY } } : {}),
   projectDir: process.env.XERXES_PROJECT_DIR || process.env.XERXES_CWD
 })
 
@@ -176,8 +179,13 @@ const { createCliRenderer } = await import('@opentui/core')
 const { createRoot } = await import('@opentui/react')
 const { AppOpenTui } = await import('./app.js')
 
+try {
+  $appearance.set(await loadAppearance())
+} catch {
+  patchUiState({ notice: { level: 'warn', text: "Could not read local appearance preference. Using Chrome; check permissions on your Xerxes home." } })
+}
 const renderer = await createCliRenderer({
-  backgroundColor: themeForMode(DEFAULT_THEME, 'code').color.statusBg,
+  backgroundColor: $uiTheme.get().color.statusBg,
   exitOnCtrlC: false,
   // Xerxes owns SIGINT/SIGTERM/SIGHUP and sequences renderer teardown before
   // gateway cleanup. A second OpenTUI signal handler can race that lifecycle.
@@ -201,9 +209,11 @@ renderer.root.overflow = 'hidden'
 
 // Stash for imperative controller call sites.
 setActiveRenderer(renderer)
+const stopAppearance = $uiTheme.listen(theme => renderer.setBackgroundColor(theme.color.statusBg))
 const stopRendererRecovery = installRendererRecovery(renderer)
 
 renderer.once('destroy', () => {
+  stopAppearance()
   stopRendererRecovery()
   clearActiveRenderer(renderer)
 })

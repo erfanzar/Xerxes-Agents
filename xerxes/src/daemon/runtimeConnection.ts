@@ -46,7 +46,7 @@ export function runtimeConnection(config: DaemonConfig, profile: ProviderProfile
     return undefined
   }
   const rawPermissionMode = stringSetting(runtime.permission_mode)
-  const permissionMode = isPermissionMode(rawPermissionMode) ? rawPermissionMode : DEFAULT_PERMISSION_MODE
+  const permissionMode = runtimePermissionMode(rawPermissionMode) ?? DEFAULT_PERMISSION_MODE
   const baseUrl = stringSetting(runtime.base_url) || useProfile?.base_url
   const apiKey = stringSetting(runtime.api_key) || useProfile?.api_key
   const provider = stringSetting(runtime.provider) || useProfile?.provider
@@ -90,8 +90,8 @@ export function runtimeConnection(config: DaemonConfig, profile: ProviderProfile
   }
 }
 
-function isPermissionMode(value: string): value is RuntimeConnection['permissionMode'] {
-  return value === 'accept-all' || value === 'auto' || value === 'manual' || value === 'plan'
+export function runtimePermissionMode(value: unknown): RuntimeConnection['permissionMode'] | undefined {
+  return value === 'accept-all' || value === 'auto' || value === 'manual' || value === 'plan' ? value : undefined
 }
 
 function numberSetting(value: unknown): number | undefined {

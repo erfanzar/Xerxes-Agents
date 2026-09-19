@@ -1,5 +1,6 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
+import { turnOutcomeReason } from '../../types/turnOutcome.js'
 import { STARTUP_IMAGE, STARTUP_QUERY } from '../config/env.js'
 import { buildSetupRequiredSections, SETUP_REQUIRED_TITLE } from '../content/setup.js'
 import {
@@ -1072,7 +1073,12 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
         turnController.recordMessageDelta(ev.payload ?? {})
 
         return
-      case 'transcript.append':
+      case 'transcript.append': {
+        const outcome = turnOutcomeReason(ev.payload?.outcome)
+        if (outcome) {
+          appendMessage({ kind: 'outcome', role: 'assistant', text: '', outcome })
+          return
+        }
         if (ev.payload?.text?.trim()) {
           appendMessage({
             role: ev.payload.role,
@@ -1082,6 +1088,7 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
         }
 
         return
+      }
       case 'message.complete': {
         // Turn-end backstop for an abandoned clarify prompt: recordMessageComplete's
         // idle() would otherwise drop the live overlay without a trace.
@@ -1113,7 +1120,7 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
             : finalText.trim()
               ? [{ role: 'assistant', text: finalText }]
               : []
-          if (!unstarted && bellOnComplete && stdout?.isTTY) {
+          if (!unstarted && (!ev.payload?.outcome || ev.payload.outcome === 'completed' || ev.payload.outcome === 'objective_verified') && bellOnComplete && stdout?.isTTY) {
             // `stdout` here is OpenTUI's guarded proxy, which swallows writes
             // to protect the renderer's cell model. BEL has no cell/cursor
             // effect, so ring it on the real stdout directly.
@@ -1124,6 +1131,9 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
 
           setStatus('ready')
         }
+
+        const outcome = turnOutcomeReason(ev.payload?.outcome) ?? (wasInterrupted ? 'aborted' : undefined)
+        if (!ev.payload?.unstarted && outcome) appendMessage({ kind: 'outcome', role: 'assistant', text: '', outcome })
 
         if (ev.payload?.usage) {
           patchUiState(state => ({ ...state, usage: { ...state.usage, ...ev.payload!.usage } }))

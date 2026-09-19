@@ -1,6 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 import { testRender } from '@opentui/react/test-utils'
+import type { ScrollBoxHandle } from '../lib/terminalTypes.js'
 import { act, createElement } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 
@@ -20,6 +21,41 @@ import type {
 } from '../gatewayTypes.js'
 import type { Msg } from '../types.js'
 
+it('retains live buffers and manual transcript position before applying a reclaimed journal', async () => {
+  resetUiState(); turnController.fullReset()
+  patchUiState({ disconnected: true, sid: null, info: { session_id: 'kept' } })
+  patchTurnState({ streaming: 'before ', todos: [{ id: 'one', content: 'Keep task context', status: 'in_progress' }],
+    activity: [{ id: 1, tone: 'warn', text: 'gateway connection lost · recovering session…' }] })
+  const history = vi.fn(), sys = vi.fn()
+  const scroll = { getScrollTop: () => 17, isSticky: () => false, scrollTo: vi.fn(), scrollToBottom: vi.fn() }
+  const finishSessionRecovery = vi.fn(() => {
+    expect(getUiState()).toMatchObject({ sid: 'kept', disconnected: false })
+    expect(getTurnState().streaming).toBe('before ')
+    patchTurnState({ streaming: 'before offline ' })
+  })
+  const gw = { request: vi.fn(async () => ({ session_id: 'kept', messages: [], reconnected: true,
+    recovery_pending: true, running: true, info: { session_id: 'kept' } })), finishSessionRecovery } as unknown as GatewayClient
+  const rpc = vi.fn(async () => ({ provider_configured: true })) as GatewayRpc
+  let lifecycle!: ReturnType<typeof useSessionLifecycle>
+  const Probe = () => {
+    lifecycle = useSessionLifecycle({ colsRef: { current: 120 }, composerActions: { activateSessionQueue: vi.fn(), setPasteSnips: vi.fn() } as unknown as ComposerActions,
+      gw, panel: vi.fn(), rpc, scrollRef: { current: scroll as unknown as ScrollBoxHandle }, setHistoryItems: history,
+      setLastUserMsg: vi.fn(), setSessionStartedAt: vi.fn(), setStickyPrompt: vi.fn(), setVoiceProcessing: vi.fn(), setVoiceRecording: vi.fn(), sys })
+    return null
+  }
+  const screen = await testRender(createElement(Probe), { width: 80, height: 24 })
+  try {
+    act(() => lifecycle.resumeById('kept', { preserveView: true, keepCurrent: true }))
+    await vi.waitFor(() => expect(finishSessionRecovery).toHaveBeenCalledWith('kept'))
+    expect(history).not.toHaveBeenCalled()
+    expect(getTurnState().streaming).toBe('before offline ')
+    expect(getTurnState().todos).toHaveLength(1)
+    expect(getTurnState().activity).toEqual([])
+    await vi.waitFor(() => expect(scroll.scrollTo).toHaveBeenCalledWith(17))
+    expect(scroll.scrollToBottom).not.toHaveBeenCalled()
+    expect(sys).not.toHaveBeenCalled()
+  } finally { act(() => screen.renderer.destroy()); turnController.fullReset(); resetUiState() }
+})
 const deferred = <T,>() => Promise.withResolvers<T>()
 
 describe('useSessionLifecycle', () => {

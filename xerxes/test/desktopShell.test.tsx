@@ -621,9 +621,9 @@ test('the general card renders creator policy and the stream-thinking switch', (
   expect(html).toContain('switch is-on')
 })
 
-test('streamThinking off hides thinking blocks but keeps the tool runs', () => {
+test('streamThinking off hides live thinking blocks but keeps the tool runs', () => {
   const blocks = [
-    { kind: 'thinking' as const, id: 1, text: 'secret plan', streaming: false },
+    { kind: 'thinking' as const, id: 1, text: 'secret plan', streaming: true },
     { kind: 'tools' as const, id: 2, running: false, items: [{ id: 't1', verb: 'grep', arg: 'x', dur: '', state: 'done' }] },
     { kind: 'agent' as const, id: 3, text: 'answer' },
   ]

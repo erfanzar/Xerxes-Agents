@@ -27,7 +27,7 @@ test('remote browse command lists actual directories safely and preserves unusua
     await mkdir(join(root, '.hidden'))
     await Bun.write(join(root, 'file'), 'not a directory')
     const local = ((_file: string, args: readonly string[]) => {
-      expect(args.slice(0, -1)).toEqual(['-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'ConnectTimeout=10', '--', 'my-host'])
+      expect(args.slice(2, -1)).toEqual(['-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'ForwardAgent=no', '-o', 'ForwardX11=no', '-o', 'ConnectTimeout=10', '--', 'my-host'])
       return spawn('sh', ['-c', args.at(-1)!], { stdio: ['ignore', 'pipe', 'pipe'] })
     })
     expect(await browseSshFolders('my-host', root, { spawnProcess: local })).toEqual({ path: root, directories: ['.hidden', 'space name'], truncated: false })
@@ -45,6 +45,14 @@ test('remote browse terminates on cancellation and timeout and reports process e
   await expect(browseSshFolders('host', '', { spawnProcess: slow, timeoutMs: 10 })).rejects.toThrow('timed out')
   const missing = (() => spawn('/no-such-ssh-binary', [], { stdio: ['ignore', 'pipe', 'pipe'] }))
   await expect(browseSshFolders('host', '', { spawnProcess: missing })).rejects.toThrow()
+})
+
+test('remote browse classifies failures without exposing remote diagnostics', async () => {
+  const denied = (() => spawn('sh', ['-c', "printf 'Permission denied private-sentinel-credential' >&2; exit 255"], { stdio: ['ignore', 'pipe', 'pipe'] }))
+  const error = await browseSshFolders('host', '', { spawnProcess: denied }).catch(error => error as Error)
+  expect(error).toBeInstanceOf(Error)
+  expect(String(error)).toContain('SSH authentication failed')
+  expect(String(error)).not.toContain('private-sentinel-credential')
 })
 
 test('machine discovery command contract returns typed results and actionable errors', async () => {

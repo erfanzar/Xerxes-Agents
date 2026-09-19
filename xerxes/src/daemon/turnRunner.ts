@@ -2,6 +2,9 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { parseTodoList } from "../runtime/todoSnapshot.js";
+import { getTurnOutcome, restoreTurnOutcome } from '../types/turnOutcome.js'
+import { LOCAL_PROVIDER_BINDING, type RemoteProviderBindings } from './remoteProviderBindings.js'
+import { LocalProviderRelayError } from '../security/localProviderRelay.js'
 import { readContextControls } from '../context/controls.js'
 import type { AgentDefinition } from '../agents/definitions.js'
 import type { AuditEmitter } from '../audit/emitter.js'
@@ -38,7 +41,7 @@ import { makeTurnIndexerHook } from '../memory/turnIndexer.js'
 import type { Memory } from '../memory/base.js'
 import type { SpawnedAgentSnapshot } from '../operators/subagents.js'
 import type { LlmClient } from '../llms/client.js'
-import { type ProviderOverrides, retryPolicyForModel } from '../llms/providerRegistry.js'
+import { DEFAULT_RETRY_POLICY, type ProviderOverrides, retryPolicyForModel } from '../llms/providerRegistry.js'
 import { agentNameForMode, modeSwitchHint, normalizeInteractionMode } from '../runtime/interactionModes.js'
 import { GOAL_CHANGES_KEY, getGoal, type GoalView } from '../runtime/goalDomain.js'
 import { DEFAULT_BLOCKED_AFTER_CONSECUTIVE_ROUNDS, goalPolicyPrompt } from '../runtime/goalTools.js'
@@ -75,6 +78,7 @@ import {
 import type { DaemonSubagentEventSource } from './subagentEvents.js'
 
 export interface AgentTurnRunnerOptions {
+  readonly remoteProviderBindings?: RemoteProviderBindings
   /** Definitions loaded from built-in, user, and project agent specs. */
   readonly agentDefinitions?: ReadonlyMap<string, AgentDefinition>
   /** Optional project-aware persistent memory injected into session startup context. */
@@ -248,7 +252,18 @@ export class AgentTurnRunner implements TurnRunner {
     signal: AbortSignal,
     controls: TurnRunControls = {},
   ): AsyncGenerator<DaemonEvent> {
-    const routedProvider = this.options.resolveSessionProvider?.(session, this.options.agentDefinitions?.get(session.agentId)?.model || session.model || this.options.model)
+    const selectedModel = this.options.agentDefinitions?.get(session.agentId)?.model || session.model || this.options.model
+    const requiresLocal = Object.hasOwn(session.metadata, LOCAL_PROVIDER_BINDING)
+    const localClient = this.options.remoteProviderBindings?.client(session, selectedModel)
+    if (requiresLocal && !localClient) throw new LocalProviderRelayError('grant_unavailable')
+    const routedProvider = localClient ? { llm: localClient } : this.options.resolveSessionProvider?.(session, selectedModel)
+    // A local binding owns its provider settings on the local machine. This
+    // host still owns tool/permission policy, but its provider defaults must
+    // not enter local requests or pretend to describe the local context window.
+    const providerDefaults = requiresLocal ? undefined : this.options
+    const contextLimit = requiresLocal ? undefined : routedProvider?.contextLimit ?? this.options.contextLimit
+    const sessionEffort = requiresLocal && !session.reasoningPinned ? undefined : session.reasoningEffort
+    const defaultEffort = sessionEffort ?? providerDefaults?.reasoningEffort
     const displayText = controls.displayText?.trim() || text
     // The session is the source of truth between turns: undo, retry, compact,
     // and idle steers mutate session.messages directly, so cached state must
@@ -453,13 +468,13 @@ export class AgentTurnRunner implements TurnRunner {
     // in-memory flag so both absent and false mean "no ultra override".
     const thinking = resolveTurnThinking({
       defaults: {
-        ...(this.options.thinking !== undefined ? { enabled: this.options.thinking } : {}),
-        ...(this.options.thinkingBudget !== undefined ? { budgetTokens: this.options.thinkingBudget } : {}),
+        ...(providerDefaults?.thinking !== undefined ? { enabled: providerDefaults.thinking } : {}),
+        ...(providerDefaults?.thinkingBudget !== undefined ? { budgetTokens: providerDefaults.thinkingBudget } : {}),
         // The session's own effort wins over the runner default, so two open
         // sessions can run at different efforts and a resumed one continues at
         // the effort it was held at.
-        ...(session.reasoningEffort ?? this.options.reasoningEffort) !== undefined
-          ? { effort: session.reasoningEffort ?? this.options.reasoningEffort }
+        ...(defaultEffort !== undefined)
+          ? { effort: defaultEffort }
           : {},
       },
       prompt: text,
@@ -479,14 +494,20 @@ export class AgentTurnRunner implements TurnRunner {
       // any content streamed, the turn restarts once on the configured
       // fallback model. Restarting after content would duplicate streamed
       // text, so the fallback is strictly pre-content and exactly once.
-      const fallbackModel = this.options.fallbackModel
+      const fallbackModel = requiresLocal ? undefined : this.options.fallbackModel
       const fallbackFactory = routedProvider?.providerOverrides ? routedProvider.createLlmForModel : this.options.createLlmForModel
       let attemptModel = model
       let attemptLlm = routedProvider?.llm ?? this.options.llm
       let fallbackAttempted = false
       for (;;) {
-        const maxTokens = this.options.maxTokens ?? (routedProvider?.maxOutputTokens ?? this.options.maxOutputTokens)?.(attemptModel)
+        const maxTokens = requiresLocal ? undefined : this.options.maxTokens ?? (routedProvider?.maxOutputTokens ?? this.options.maxOutputTokens)?.(attemptModel)
+        const retryPolicy = requiresLocal ? DEFAULT_RETRY_POLICY : retryPolicyForModel(attemptModel, routedProvider?.providerOverrides ?? this.options.providerOverrides)
+        // An explicit off effort must cross the relay, otherwise absence
+        // would correctly mean "use the local profile's thinking default".
+        const thinkingRequest = thinking ? { budgetTokens: thinking.budgetTokens, effort: thinking.effort }
+          : requiresLocal && sessionEffort ? { effort: 'none' } : undefined
         const turnEvents = withActiveSession(session, runTurn({
+        turnId: session.activeTurnId,
         agentId: promptAgent?.name ?? session.agentId,
         interactionMode: session.interactionMode,
         model: attemptModel,
@@ -496,14 +517,14 @@ export class AgentTurnRunner implements TurnRunner {
         querySource: 'main',
         ...(maxTokens === undefined ? {} : { maxTokens }),
         permissionMode,
-        ...(this.options.temperature !== undefined ? { temperature: this.options.temperature } : {}),
-        ...(this.options.serviceTier !== undefined ? { serviceTier: this.options.serviceTier } : {}),
-        ...(thinking === undefined ? {} : { thinking: { budgetTokens: thinking.budgetTokens, effort: thinking.effort } }),
-        ...(this.options.topK !== undefined ? { topK: this.options.topK } : {}),
+        ...(providerDefaults?.temperature !== undefined ? { temperature: providerDefaults.temperature } : {}),
+        ...(providerDefaults?.serviceTier !== undefined ? { serviceTier: providerDefaults.serviceTier } : {}),
+        ...(thinkingRequest === undefined ? {} : { thinking: thinkingRequest }),
+        ...(providerDefaults?.topK !== undefined ? { topK: providerDefaults.topK } : {}),
         ...(tools ? { tools } : {}),
         ...(systemPrompt ? { systemPrompt, systemPromptRequestOnly: true } : {}),
         ...(systemSegments.length ? { systemSegments } : {}),
-        ...(this.options.topP !== undefined ? { topP: this.options.topP } : {}),
+        ...(providerDefaults?.topP !== undefined ? { topP: providerDefaults.topP } : {}),
       }, {
         ...(subagentCohort ? {
           awaitAgentEvents: async signal => {
@@ -523,9 +544,8 @@ export class AgentTurnRunner implements TurnRunner {
         } : {}),
         ...(controls.drainSteer ? { drainSteer: controls.drainSteer } : {}),
         // Retry patience is owned by the routed provider, not a global default.
-        retryDelays: retryPolicyForModel(attemptModel, routedProvider?.providerOverrides ?? this.options.providerOverrides).delaysMs,
-        maxSuggestedRetryDelayMs: retryPolicyForModel(attemptModel, routedProvider?.providerOverrides ?? this.options.providerOverrides)
-          .maxSuggestedDelayMs,
+        retryDelays: retryPolicy.delaysMs,
+        maxSuggestedRetryDelayMs: retryPolicy.maxSuggestedDelayMs,
         llm: attemptLlm,
         ...((this.options.hookRunnerForSession || this.options.hookRunner) ? { hookRunner: this.options.hookRunnerForSession?.(session) ?? this.options.hookRunner } : {}),
         ...(permissionBroker ? { permissionBroker } : {}),
@@ -543,7 +563,7 @@ export class AgentTurnRunner implements TurnRunner {
           }
         } } : {}),
         contextCompactionDue: messages => {
-          const limit = routedProvider?.contextLimit ?? this.options.contextLimit
+          const limit = contextLimit
           if (!limit || limit <= 0) return false
           const threshold = this.options.autoCompactThreshold?.() ?? 0.8
           if (threshold <= 0) return false
@@ -592,7 +612,7 @@ export class AgentTurnRunner implements TurnRunner {
             event,
             state,
             session,
-            routedProvider?.contextLimit ?? this.options.contextLimit,
+            contextLimit,
           )
         }
         // Pre-content buffering: hold status/retry events until the attempt
@@ -1330,9 +1350,11 @@ function synchronizeLiveSubagentMetadata(session: DaemonSession, state: AgentSta
 function synchronizeSessionState(session: DaemonSession, state: AgentState): void {
   session.apiCallsComplete = state.apiCallsComplete
   session.messages = state.messages.map(message => {
-    if (message.role !== 'user' || !message.displayText) return { ...message }
+    const outcome = getTurnOutcome(message)
+    const presentation = outcome ? { turn_outcome: outcome } : {}
+    if (message.role !== 'user' || !message.displayText) return { ...message, ...presentation }
     const { displayText, ...providerMessage } = message
-    return { ...providerMessage, text: displayText }
+    return { ...providerMessage, text: displayText, ...presentation }
   })
   const mergedDeltas = mergeContextDeltas(state.metadata, session.metadata)
   // The picker can change the next turn's route while this turn is streaming.
@@ -1379,6 +1401,10 @@ function recordLatestUserDisplayText(state: AgentState, providerText: string, di
 }
 
 function messageToChatMessage(message: DaemonSession['messages'][number]): ChatMessage[] {
+  return providerMessagesFromTranscript(message).map(value => restoreTurnOutcome(message, value))
+}
+
+function providerMessagesFromTranscript(message: DaemonSession['messages'][number]): ChatMessage[] {
   const role = message.role
   const content = message.content
   if (role === 'assistant' && isMessageContent(content)) {

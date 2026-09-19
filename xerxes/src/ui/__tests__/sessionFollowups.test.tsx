@@ -39,7 +39,7 @@ it.each([[220, 65], [40, 18]])('renders populated follow-ups beside a goal and o
     expect(screen.captureCharFrame()).toContain('Deploy safely')
     expect(screen.captureCharFrame()).toContain('Next')
     if (width >= 100) expect(screen.captureCharFrame()).toContain('Latest: failed')
-    expect(rpc).toHaveBeenCalledWith('schedule.list', { scope: 'session', owner_session_id: 'owner', summary: true })
+    expect(rpc).toHaveBeenCalledWith('schedule.list', { scope: 'session', owner_session_id: 'owner', summary: true }, { reportError: false })
     act(() => screen.mockInput.pressKey('l'))
     await screen.flush()
     expect(getOverlayState()).toMatchObject({ goal: false, loops: true })
@@ -467,5 +467,29 @@ it.each([true, false])('shows blocked lifetime tokens instead of promising a wak
     await vi.waitFor(async () => { await screen.flush(); expect(screen.captureCharFrame()).toContain(complete ? 'Token threshold reached' : 'Token usage incomplete') })
     expect(screen.captureCharFrame()).toContain(`Lifetime tokens: ${complete ? 20 : 5} / 20`)
     expect(screen.captureCharFrame()).not.toContain('Next 2099')
+  } finally { act(() => screen.renderer.destroy()) }
+})
+
+it('ignores a rejected refresh after changing conversations without reporting it globally', async () => {
+  let rejectOld!: (error: Error) => void
+  let switchOwner!: () => void
+  const rpc = vi.fn(async (_method: string, params: { owner_session_id: string }, options?: { reportError?: boolean }) => {
+    expect(options?.reportError).toBe(false)
+    if (params.owner_session_id === 'owner') return await new Promise((_resolve, reject) => { rejectOld = reject })
+    return response([], 'second')
+  })
+  function Harness() {
+    const [owner, setOwner] = useState('owner'); switchOwner = () => setOwner('second')
+    return <GatewayProvider value={{ rpc } as unknown as GatewayServices}><SessionFollowups t={DARK_THEME} sessionId={owner} expanded /></GatewayProvider>
+  }
+  const screen = await testRender(<Harness />, { width: 80, height: 18 })
+  try {
+    await screen.flush()
+    act(() => switchOwner())
+    await screen.flush()
+    rejectOld(new Error('The active conversation changed; refresh its follow-ups before acting'))
+    await vi.waitFor(async () => { await screen.flush(); expect(screen.captureCharFrame()).toContain('No follow-ups') })
+    expect(screen.captureCharFrame()).not.toContain('conversation changed')
+    expect(screen.captureCharFrame()).not.toContain('unavailable')
   } finally { act(() => screen.renderer.destroy()) }
 })

@@ -1,5 +1,6 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
+import { assertOutputTokenLimit } from './outputTokenLimit.js'
 
 import { httpErrorBody } from './httpErrorBody.js'
 import { parseStreamingJson } from '@earendil-works/pi-ai'
@@ -748,6 +749,7 @@ function anthropicRequestPayload(
     }
   }
   if (request.extraBody) Object.assign(payload, request.extraBody)
+  assertOutputTokenLimit(request, payload.max_tokens)
   return payload
 }
 

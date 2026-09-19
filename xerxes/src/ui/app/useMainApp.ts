@@ -9,7 +9,7 @@ import { $agentRailVisible, $panelWidthDelta } from './panelSizeStore.js'
 import { agentContentWidth } from '../domain/agentPanelLayout.js'
 import { hasLeadGap, prevRenderedMsg } from '../domain/blockLayout.js'
 import { SECTION_NAMES, sectionMode } from '../domain/details.js'
-import { composeTabTitle, fmtCwdBranch, shortCwd } from '../domain/paths.js'
+import { composeTabTitle, fmtCwdBranch, shortCwd, terminalActivityMarker } from '../domain/paths.js'
 import { formatBunDaemonStartupFailure, type GatewayClient } from '../gatewayClient.js'
 import type {
   ClarifyRespondResponse,
@@ -412,6 +412,10 @@ export function useMainApp(gw: GatewayClient) {
       }
 
       row.rail = open ? 'mid' : 'none'
+      if (row.msg.kind === 'outcome') {
+        row.rail = 'end'
+        open = false
+      }
     }
 
     for (let i = 0; i < rows.length; i++) {
@@ -421,7 +425,7 @@ export function useMainApp(gw: GatewayClient) {
 
       const next = rows[i + 1]
 
-      if (!next || next.rail !== 'mid') {
+      if (!next || (next.rail !== 'mid' && next.msg.kind !== 'outcome')) {
         rows[i]!.rail = 'end'
       }
     }
@@ -607,7 +611,8 @@ export function useMainApp(gw: GatewayClient) {
   const rpc: GatewayRpc = useCallback(
     async <T extends Record<string, any> = Record<string, any>>(
       method: string,
-      params: Record<string, unknown> = {}
+      params: Record<string, unknown> = {},
+      options: { reportError?: boolean } = {}
     ) => {
       try {
         const result = asRpcResult<T>(await gw.request<T>(method, params))
@@ -616,9 +621,9 @@ export function useMainApp(gw: GatewayClient) {
           return result
         }
 
-        sys(`error: invalid response: ${method}`)
+        if (options.reportError !== false) sys(`error: invalid response: ${method}`)
       } catch (e) {
-        sys(`error: ${rpcErrorMessage(e)}`)
+        if (options.reportError !== false) sys(`error: ${rpcErrorMessage(e)}`)
       }
 
       return null
@@ -759,11 +764,12 @@ export function useMainApp(gw: GatewayClient) {
     }
   }, [gw, ui.sid])
 
-  // Tab title: `⚠` waiting on approval/sudo/secret/clarify, `⏳` busy, `✓` idle.
+  // Report current activity, never infer successful completion from idle.
   // Format: `<marker> <session name> · <model> · <cwd>` — name/cwd omitted when absent.
   const model = ui.info?.model?.replace(/^.*\//, '') ?? ''
 
-  const marker = overlay.approval || overlay.sudo || overlay.secret || overlay.clarify ? '⚠' : ui.busy ? '⏳' : '✓'
+  const marker = terminalActivityMarker({ disconnected: ui.disconnected, busy: ui.busy,
+    waiting: Boolean(overlay.approval || overlay.sudo || overlay.secret || overlay.clarify) })
 
   const tabCwd = ui.info?.cwd
 
@@ -1002,7 +1008,10 @@ export function useMainApp(gw: GatewayClient) {
     const handler = (ev: GatewayEvent) => onEventRef.current(ev)
 
     const closedHandler = () => {
-      turnController.reset()
+      // A leased owner can still be working on the daemon. Keep its renderer
+      // buffers until replay or a definitive expired-lease snapshot arrives.
+      if (!gw.hasConnectionLease) turnController.reset()
+      patchOverlayState({ approval: null, clarify: null, confirm: null, sudo: null, secret: null })
 
       // GatewayClient emits 'gateway.closed' only for an *unexpected* socket
       // death (crash / OOM / signal): the deliberate close()/kill() path sets
@@ -1013,19 +1022,21 @@ export function useMainApp(gw: GatewayClient) {
       // doesn't lose their work. planGatewayRecovery bounds the attempts
       // so a gateway that crash-loops on startup can't spawn-storm, and falls
       // back to recoverSidRef when sid was already cleared by a prior exit.
-      const plan = planGatewayRecovery(getUiState().sid, recoverSidRef.current, recoveryAtRef.current, Date.now())
+      const current = getUiState()
+      const plan = planGatewayRecovery(current.sid, recoverSidRef.current, recoveryAtRef.current, Date.now(),
+        current.disconnected ? current.info?.session_id ?? null : null)
 
       // Clear sid immediately: while the gateway is down, sid-guarded effects
       // (session.active_list poll, queue drain) would otherwise fire RPCs at a
       // dead/respawning gateway. recoverSidRef carries the session forward, and
       // resumeById restores sid once the fresh gateway is ready.
       recoveryAtRef.current = plan.attempts
-      patchUiState({ busy: false, sid: null, status: 'gateway connection lost' })
+      patchUiState({ disconnected: true, busy: false, sid: null, status: 'gateway connection lost' })
 
       if (plan.recover && plan.sid) {
         recoverSidRef.current = plan.sid
         turnController.pushActivity('gateway connection lost · recovering session…', 'warn')
-        sys('gateway connection lost — recovering your session (any in-flight reply was lost)')
+        sys(gw.hasConnectionLease ? 'gateway connection lost — recovering your session' : 'gateway connection lost — reopening saved state; live work may have been interrupted')
         void gw.start().catch((err: unknown) => {
           const message = formatBunDaemonStartupFailure(err)
           patchUiState({ status: `error: ${message}` })

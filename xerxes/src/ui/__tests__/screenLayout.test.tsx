@@ -519,3 +519,21 @@ describe('interaction mode visibility', () => {
     expect(await renderWithMode('code', false)).toContain('code')
   })
 })
+
+it.each([[80, 24], [40, 18]])('wraps recovery notices and opens all content from the keyboard at %ix%i', async (width, height) => {
+  const previous = $uiState.get()
+  resetOverlayState()
+  const message = 'Provider profile removed-provider cannot serve gpt-4o. Use /model to select its provider and model together.'
+  $uiState.set({ ...previous, sid: 'notice-owner', busy: false, notice: { level: 'error', text: message } })
+  const s = await testRender(<AppLayout {...props(width)} />, { width, height })
+  try {
+    await s.flush()
+    expect(s.captureCharFrame()).toContain('Alt+N')
+    if (width === 80) expect(s.captureCharFrame()).toContain('/model')
+    act(() => s.mockInput.pressKey('n', { meta: true }))
+    await s.flush()
+    expect(s.captureCharFrame()).toContain('Notice')
+    expect(s.captureCharFrame()).toContain('/model')
+    expect(s.captureCharFrame()).toContain('together.')
+  } finally { act(() => s.renderer.destroy()); $uiState.set(previous); resetOverlayState() }
+})

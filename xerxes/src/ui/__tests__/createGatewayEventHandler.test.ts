@@ -279,7 +279,7 @@ describe('createGatewayEventHandler', () => {
     turnController.interruptTurn({ gw: { request }, sid: 'session-cut', sys })
     handler({ payload: { interrupted: true }, type: 'message.complete' } as GatewayEvent)
 
-    expect(appended).toEqual([{ role: 'assistant', text: 'Partial draft\n\n*[interrupted]*' }])
+    expect(appended).toEqual([{ role: 'assistant', text: 'Partial draft\n\n*[interrupted]*' }, { kind: 'outcome', role: 'assistant', text: '', outcome: 'aborted' }])
     expect(write).not.toHaveBeenCalled()
   })
 
@@ -291,7 +291,7 @@ describe('createGatewayEventHandler', () => {
     turnController.interruptTurn({ gw: { request }, sid: 'session-empty', sys })
     handler({ payload: { interrupted: true }, type: 'message.complete' } as GatewayEvent)
 
-    expect(appended).toEqual([])
+    expect(appended).toEqual([{ kind: 'outcome', role: 'assistant', text: '', outcome: 'aborted' }])
     expect(sys).toHaveBeenCalledWith('interrupted')
   })
 
@@ -358,4 +358,14 @@ describe('createGatewayEventHandler', () => {
     expect(agent?.toolCalls?.[0]).toMatchObject({ name: 'ExecCommand', ok: false })
     expect(agent?.toolCalls?.[0]?.endedAt).toBeDefined()
   })
+})
+
+for (const outcome of ['provider_failed', 'aborted', 'tool_budget_exhausted', 'completed'] as const) it('archives explicit '+outcome+' and rings only on success', () => {
+  const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+  const { handler, appended } = buildHarness({ bellOnComplete: true, isTTY: true })
+  turnController.startMessage()
+  for (const event of adaptDaemonEvent('turn_end', { stop_reason: outcome })) handler(event)
+  expect(appended).toEqual([{ kind: 'outcome', role: 'assistant', text: '', outcome }])
+  expect(write).toHaveBeenCalledTimes(outcome === 'completed' ? 1 : 0)
+  write.mockRestore()
 })

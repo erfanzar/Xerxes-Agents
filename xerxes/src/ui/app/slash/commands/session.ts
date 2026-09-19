@@ -1,5 +1,6 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
+import { $appearance, saveAppearance } from "../../appearance.js"
 import { introMsg, toTranscriptMessages } from '../../../domain/messages.js'
 import { TUI_SESSION_MODEL_FLAG } from '../../../domain/slash.js'
 import type {
@@ -36,7 +37,30 @@ const modelValueForConfigSet = (arg: string) => {
   return trimmed
 }
 
+let savingAppearance = false
 export const sessionCommands: SlashCommand[] = [
+  {
+    name: "appearance",
+    group: "session",
+    help: "toggle Chrome / Transparent terminal background (saved locally)",
+    usage: "/appearance [chrome|transparent]",
+    run: (arg, ctx) => {
+      const value = arg.trim().toLowerCase() || ($appearance.get() === "chrome" ? "transparent" : "chrome")
+      if (value !== "chrome" && value !== "transparent") {
+        ctx.transcript.sys("Usage: /appearance [chrome|transparent] — no argument toggles the design.")
+        return
+      }
+      if (savingAppearance) return
+      savingAppearance = true
+      void saveAppearance(value).then(() => {
+        patchUiState({ notice: { level: 'info', text: value === "transparent"
+          ? "Transparent appearance saved locally. Uses your terminal background; window opacity is controlled by your terminal."
+          : "Chrome appearance saved locally." } })
+      }).catch(() => {
+        patchUiState({ notice: { level: 'error', text: "Could not save appearance. Check permissions on your local Xerxes home and retry." } })
+      }).finally(() => { savingAppearance = false })
+    }
+  },
   {
     aliases: ['bg'],
     help: 'detach this chat into Agent View; optionally send an instruction first',

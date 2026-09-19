@@ -226,7 +226,7 @@ terminal turn events by that identity instead of the currently selected tab.
 | ------------------ | --------------------- | --------------------------------------------------------------------------------------- |
 | `InitDone`         | `init_done`           | `model, session_id, cwd, git_branch, context_limit, agent_name, skills[]`               |
 | `TurnBegin`        | `turn_begin`          | `user_input: string \| Part[]`                                                          |
-| `TurnEnd`          | `turn_end`            | —                                                                                       |
+| `TurnEnd`          | `turn_end`            | optional `stop_reason`, `cancelled`, `unstarted`                                                                                       |
 | `StepBegin`        | `step_begin`          | `n`                                                                                     |
 | `StepEnd`          | `step_end`            | `n`                                                                                     |
 | `StepInterrupted`  | `step_interrupted`    | —                                                                                       |
@@ -712,6 +712,16 @@ connection's session-mutation queue while waiting for discovery.
 An omitted profile uses the active profile; an omitted model uses that profile's
 model. Missing or unsupported profiles fail explicitly. It neither changes the
 active profile nor returns credentials.
+
+`/permissions` reports the current session's effective policy, falling back to
+the daemon default only when that session has no explicit choice. A successful
+`/permissions <mode>` saves the choice with the existing durable session before
+acknowledging it. Failed saves leave the prior policy active and return an
+actionable storage error. The TUI retains its transcript and ordinary command
+completion; retry after resolving storage failure. Concurrent session writes
+are serialized, and cancelling a turn does not publish a rejected choice.
+As with other settings, empty sessions do not create a history entry until work
+has been saved.
 
 `agent.settings.get` returns `{ok, revision, settings, profiles}` without profile
 credentials. `agent.settings.save` takes `revision` and a complete `settings`
@@ -1417,7 +1427,28 @@ in the daemon user's `~/.ssh/config` and Include files. No config is modified.
 `{ok,path,directories:string[],truncated:boolean}`; an omitted path means remote home.
 Directory names are immediate children, including hidden folders. Listings stop at
 1,000 entries and 1 MiB, with a 15-second SSH deadline. Browsing uses BatchMode and
-strict host-key verification. Errors return `{ok:false,error}`; cancelled TUI
+strict host-key verification. Browsing, TUI setup and its RPC tunnel explicitly
+disable SSH agent and X11 forwarding even when an SSH alias enables them.
+TUI setup and transport also require an already verified host key; establish the
+host's identity with ordinary SSH before connecting a new destination.
+Setup, tunnel and folder browsing use a temporary mode-0600 SSH configuration
+that includes the normal user/system files by reference. It retains aliases and
+identity-file references, then clears `SendEnv`; a fixed `SetEnv XERXES_SSH=1`
+entry prevents configured environment assignments from being forwarded.
+The private configuration also disables inherited control-connection reuse,
+LocalCommand, and all configured port/socket forwards. The long-lived tunnel
+creates its own private control master with no forwards, then adds only the
+selected daemon socket through `ssh -O forward` with no user configuration.
+This avoids reopening unrelated LocalForward, RemoteForward or DynamicForward
+entries. Master readiness and socket creation have a bounded startup deadline;
+cancellation and failures close the owned master. A dropped master follows the
+same bounded same-destination recovery path and does not replace the renderer.
+No credential or configuration contents are copied into that wrapper. It is
+removed when the connection/browse ends. SSH failure diagnostics are classified
+into fixed messages rather than exposing subprocess output. The managed
+bootstrap's private `setup.log` records only known stage messages; installer,
+dependency and build output is not retained there or tailed into the TUI.
+Errors return `{ok:false,error}`; cancelled TUI
 pickers discard late replies. F2 on the host/folder field opens these pickers;
 Escape restores the unfinished form. These are read-only slash RPC extensions.
 Arguments may be single- or double-quoted. Resolution does not prove connectivity
@@ -1425,6 +1456,20 @@ or change daemon session ownership. The terminal client prepares the remote daem
 forwards its Unix socket through SSH, and starts a local renderer with a connect-only
 GatewayClient. That client never starts or signals a local daemon on tunnel failure.
 The previous local renderer is restored on exit. Errors return `{ok:false,error}`.
+
+An established TUI handoff retains that renderer during transient tunnel loss.
+It retries the same destination and private socket at most three times (250 ms,
+1 s, 2 s), without repeating bootstrap. Authentication/host-key failures stop
+automatic retries. A private mode-0600 status file contains fixed transport
+messages, never SSH stderr. Terminal failure leaves the renderer available for
+draft inspection/copying; exiting does not silently start another renderer.
+The gateway waits up to 30 seconds for the replacement socket and reclaims its
+advertised connection lease before resuming. The UI retains its draft and view,
+buffers live events until restored session ownership is installed, then consumes
+missed events once and restores only currently pending interactions. If another
+drop discards an undelivered journal, it reloads persisted/inflight state instead.
+Expired leases reopen saved state without restarting cancelled work. Exhausted
+recovery is visibly disconnected; it must not report idle or submit new work.
 
 `workspace.diff` is an additive read-only RPC with no required parameters. It
 uses the active session's cwd (or the daemon project before initialization), never
@@ -1593,3 +1638,315 @@ transcripts, executions and thinking. Counts, active-turn state, telemetry, goal
 todos, agent state and a bounded first-user-message `preview` remain available.
 Metadata reads do not change a connection's session selection. Explicit export
 requests may still retrieve the full transcript.
+
+### Local provider relay authority (additive v35)
+
+`initialize` advertises `provider_relay_control_supported: true` for the local
+authority RPCs below. These are client control operations, not model tools or
+slash commands. The remote binding and SSH review flows below use this authority.
+A renderer must not read local profile files or provider keys to use this API.
+
+- `provider.relay.inventory {}` returns `{ok:true, profiles}` with profile name,
+  provider, model, supported status, output-limit mode, credential source and an explicitly
+  unverified readiness label. It omits provider endpoints and credentials.
+- `provider.relay.authorize` requires `{consent:true, destination, workspace,
+  profile, model, expires_at, max_requests, max_output_tokens, max_concurrent}`.
+  The caller must obtain explicit user consent for that complete scope first;
+  selecting a machine is not consent. Workspace must be absolute, expiry is a
+  future Unix timestamp in milliseconds (at most eight hours), request limit is
+  1–10000, numeric output limit is 1–1000000 tokens per request, concurrency is 1–16.
+  Numeric limits are checked against the final native provider payload, after
+  thinking expansion or minimum-output floors. Exceeding the approved limit
+  fails with `output_limit` before submitting that request; lower reasoning or
+  explicitly authorize a larger limit before retrying.
+  Codex subscription does not accept an output cap. Numeric grants for that
+  transport fail with `output_limit_unsupported`. It requires the separate
+  policy `{max_output_tokens:null, consent_provider_controlled_output:true}`
+  after explicit consent to provider-controlled output. Omitting the numeric
+  field or the extra consent flag is not consent. Other transports cannot use
+  this null policy. Expiry, request, concurrency and revocation limits still apply.
+  Returns `{ok:true, grant:{id, ...}, capabilities?}`. The optional capability
+  snapshot describes reasoning controls for the exact authorized local model;
+  it contains no credentials, endpoints, provider prose or profile defaults.
+  Local catalog discovery is bounded to three seconds and falls back to the
+  local bundled catalog/provider table with explicit provenance. Authorization
+  is rechecked after discovery; expiration or revocation cannot return an active
+  grant. The grant view shows destination,
+  workspace, exact profile/model, limits, usage, status, local provider execution
+  and memory-only persistence. `outputLimitMode` is `request-bound` or
+  `provider-controlled`, with `maxOutputTokens:null` only for the latter.
+  `id` is an opaque connection-owned handle, not a
+  bearer token. Neither the engine token nor provider credentials leave the daemon.
+- `provider.relay.next {id, frame}` accepts a native relay pull or cancellation
+  frame and returns `{ok:true, reply}`. The bounded codec is defined in
+  `security/providerRelayProtocol.ts`; provider diagnostics are replaced with
+  fixed failure codes. Pending pulls do not serialize revocation or cancellation
+  behind a provider response.
+- `provider.relay.status {id}` returns `{ok:true, grant}` with current usage/state.
+- `provider.relay.revoke {id}` returns `{ok:true}` and aborts active calls. Pending
+  and future pulls report `grant_revoked`.
+
+Revoked or expired grants release their authority resources after backend work
+settles. The daemon retains at most 128 recent terminal status records, without
+tokens or client resolvers; an evicted handle reports `grant_unavailable`.
+Recent repeated revocation is idempotent. Noncooperative backend work continues
+to count as active until it settles. Exhausting the request allowance does not
+discard an already-started request's buffered final output.
+
+An authority/ownership failure returns `{ok:false, code, error}` with fixed text.
+A provider-stream failure appears inside `reply.error`. No arbitrary exception
+text is forwarded. The exact approved route is checked again before each request;
+changing it requires renewed consent, with no fallback to another provider.
+
+Grants belong to the requesting connection's existing lease owner. A client
+without a reconnect lease loses its grants immediately on disconnect; an opted-in
+client retains the owner until the existing lease expires. Lease expiry and daemon
+shutdown abort and remove grants. A new owner cannot recover them by knowing an
+id. Grants are never stored in a session or configuration file. Idle restart
+refuses while a grant is active, including gaps between provider requests; explicit
+shutdown still revokes authority. The production binding and consent lifecycle
+is described below; reconnect never silently grants fresh authority.
+
+The local-only `ui/lib/localProviderBroker.ts` bridge can own one authorized grant
+on the parent TUI's existing daemon connection. It listens only on a Unix socket
+inside a mode-0700 temporary directory, with mode-0600 socket permissions. One
+bounded newline-delimited relay envelope is accepted per connection; it exposes
+no general daemon RPC, grant id, token, profile configuration or provider credential.
+Requests are limited to 16 MiB plus envelope overhead, replies to 1 MiB plus
+overhead, concurrent sockets to 16, and each exchange to a hard 60-second deadline.
+Incomplete and pipelined frames are rejected; UTF-8 decoding occurs after assembly.
+Abandoned pending pulls send cancellation to the owning daemon. Expiry, explicit
+close and the owner's abort signal revoke the grant and remove the private endpoint;
+the broker never retries a request or renews authority. Lost daemon ownership cannot
+be restored by reconnecting and retaining the old grant id.
+
+This broker is a local host primitive, not a general daemon transport. Its caller
+must obtain consent for the exact scope before
+creation, keep the same owning gateway connected, give the socket path only to the
+local renderer for that reviewed destination/workspace, and close the broker when
+the handoff ends. Socket permissions protect against other OS users; they do not
+isolate mutually untrusted processes running under the same local account.
+
+### Partial turns and activity status
+
+Native turns retain text and reasoning already emitted by a terminally interrupted
+provider attempt. Cancellation, terminal failure, retry-backoff cancellation and
+iterator abandonment persist that partial assistant content without inventing
+tool calls or placing error diagnostics in model history. A successful retry still
+replaces its failed attempt rather than concatenating replayed output. Resume
+marker cleanup preserves assistant whitespace when no provider marker was removed.
+This does not yet persist interrupted/failed outcome annotations for the history
+view; preserving content alone is not proof that a turn completed successfully.
+
+Terminal titles report current activity explicitly: idle, working, waiting or
+disconnected. A disconnected connection takes precedence over retained busy or
+approval state. Idle is neutral, including after failure or cancellation; it does
+not show a successful-completion checkmark.
+
+### Complete notices
+
+Status notices wrap in a bounded preview below the composer. While a notice is
+visible, **Alt+N** (or clicking it) opens its complete message in the existing
+keyboard pager. Escape returns to the same draft and conversation. This shortcut
+does not override an active approval, question or other blocking overlay.
+Background follow-up polling owns its inline error display; stale poll failures
+from another conversation do not write into the current transcript.
+
+Explicit `initialize {resume_session_id}` rejects missing persisted history
+instead of creating a replacement conversation. A supplied `session_key` that
+still names the same live session can be reattached after lease expiry without
+requiring its first saved transcript. A mismatched key never changes the requested
+identity; workspace checks remain in force. Failed resume leaves the connection's
+current selection intact. Explicit new-session creation is unchanged.
+
+The TUI footer's **model selected** label reports configuration only. It does not
+assert credential validity, provider availability or successful connectivity.
+
+### Remote setup review
+
+`/machine` → Enter and `/machine connect <name>` open the same setup review
+before handoff. Tab/Left/Right choose an integration; arrows, PageUp/PageDown,
+Home and End scroll its explanation. Enter uses existing remote setup; Escape
+returns without connecting. The review identifies the target host/workspace,
+execution and configuration locations, persistence and remote setup commands.
+It explicitly labels remote readiness uninspected and local reuse unavailable
+until the scoped relay binding and consent controls are implemented.
+
+The review reads no provider credentials. At handoff, the resolved host and
+workspace must still match the reviewed record; a changed destination requires
+reopening the machine list. Pending resolution is single-flight, and cancellation
+ignores its late response. Existing daemon machine RPCs are unchanged.
+
+### Opt-in remote provider binding transport
+
+Hosts that supply the same `RemoteProviderBindings` instance to the server and
+native runner advertise `remote_provider_binding_supported:true`. The ordinary
+CLI daemon now supplies this registry and can execute bound sessions without a
+remote provider configuration. The TUI machine review prepares the remote task
+and requests explicit scoped consent before creating local authority. Its parent
+owns the relay; the child receives only a public remote session ID/key.
+
+`provider.remote.bind` accepts `{consent:true,source,profile,model,capabilities?}` for the
+connection's idle session. It returns `{ok:true,binding}` with a nonsecret opaque
+binding ID, display source/profile/model, workspace and version. No credential
+or local grant token is accepted. The session stores a local-provider requirement;
+that marker alone confers no authority. A runner without its matching live
+binding fails explicitly even if a remote provider or fallback model is configured.
+
+The optional version-1 capability snapshot has `{version:1,model,reasoning:
+{shape,efforts,canDisable,provenance}}`. `shape` is `effort`, `toggle` or
+`inherent`; provenance is `provider_reported`, `bundled_catalog` or
+`provider_fallback`. The exact model, bounded effort names and allowed fields
+are validated at the local broker, remote bind and persisted-read boundaries.
+Only this public metadata is retained in the requirement marker. It never
+restores authority after a disconnect or grants access to provider configuration.
+
+Bound sessions do not inherit the remote daemon's provider sampling, output,
+thinking, retry-route or context-window defaults. The local authority snapshots
+validated sampling fields from the selected local profile at authorization and
+applies them on the local host; explicit request overrides retain precedence.
+Profile sampling edits take effect on a new grant, while same-route credentials
+are resolved per request. Explicit session/agent reasoning is preserved, including
+off; unrelated remote settings reloads do not change local default reasoning.
+Context capacity remains `0` (unknown), and unpinned reasoning is displayed as
+`local default`; the reasoning snapshot does not claim either value. These are display values,
+not claims that local thinking is off or that remote model capacity applies.
+
+The relay adds a local-only output authority annotation that cannot be serialized
+or supplied through JSON. Native adapters validate their final requested output
+cap before sending it. This validates Xerxes's outgoing request, not an external
+provider's implementation of its API contract. Codex subscription is available
+only under the separately consented provider-controlled policy above; a numeric
+grant never silently changes to that policy. The consent panel requires a
+separate provider-controlled-output acknowledgement before authorization.
+
+The daemon sends `{jsonrpc:"2.0",method:"provider.remote.request",params:
+{binding,request_id,frame}}` privately to the owning physical transport.
+The gateway intercepts it before UI events, transcript conversion and reconnect
+buffers. An explicitly supplied local authority callback handles the frame;
+without one, the gateway replies `grant_unavailable`. The reply RPC is
+`provider.remote.reply {binding,request_id,reply}`; another connection and late
+or duplicate replies are rejected. Both ends bound concurrent pulls and waiting.
+The native relay codec still validates model scope and completion/delta shapes.
+
+Physical disconnect closes remote bindings immediately, rejects pending pulls,
+and retains the persisted local-provider requirement. Reclaiming a session lease
+does not reauthorize a provider. A fresh explicit binding is required; pending
+model context is never replayed through the UI journal. `provider.remote.release`
+closes this connection's bindings while retaining their requirements, so release
+cannot silently select remote credentials. User-facing setup/revocation and
+explicit remote-provider override flows remain unfinished.
+
+Automatic titles, manual/pre-turn compaction and project-agent draft generation
+honor the session's provider binding or saved provider pin. A local-bound title
+uses only its authorized model, without a cheaper model substitution. Missing
+or released local authority never selects remote credentials for these calls;
+optional title generation retains the provisional title. Private provider replies
+and release requests bypass a waiting auxiliary RPC on Unix and WebSocket
+transports, while ordinary session mutations retain their queue ordering.
+Release sends cancellation for tracked provider streams before rejecting pending
+waits. The CLI planner, mid-turn compaction and native subagents also resolve the
+source session binding before remote profiles. Child route fingerprints survive
+persistence; a replaced binding cannot revive an old child authority.
+
+The relay reports provider context overflow using the fixed `context_overflow`
+error code so the native loop can compact and retry without forwarding raw
+provider diagnostics. The codec validates and strips internal boolean compaction
+summary provenance before sending history to the provider.
+
+### Client-only appearance
+
+`/appearance` toggles **Chrome** and **Transparent**. `/appearance chrome` and
+`/appearance transparent` select one explicitly. The choice is applied live and
+stored in the TUI host's `$XERXES_HOME/tui-appearance.json` (default
+`~/.xerxes/tui-appearance.json`), independently of daemon/session configuration.
+It stays local when the TUI connects to an SSH daemon. No RPC or daemon catalog
+change is required for this client-only command; it is available in local
+completion and `/help`, including with older daemons.
+
+Transparent uses the terminal's default background, including its configured
+opacity. It does not change terminal window opacity. Foregrounds still follow
+terminal light/dark detection; popup, selection and diff grounds remain filled
+for readability. A failed save leaves the prior appearance active and reports
+an actionable local notice. Switching appearance does not navigate or replace
+session, transcript, draft, viewport or running-work state.
+
+### Durable turn outcomes (additive v35 fields)
+
+A native terminal turn carries optional `stop_reason` on `turn_end`, using the
+same reason vocabulary as the streaming `status_update`. It distinguishes
+`completed` / `objective_verified`, `aborted`, `provider_failed`, `turn_failed`,
+`context_overflow`, `output_limit`, `tool_budget_exhausted`,
+`objective_guard_exhausted`, and `unconfigured_tools`. Absence means unknown,
+not successful completion. `unstarted` still suppresses transcript artifacts.
+
+The last persisted message of a turn can carry `turn_outcome`:
+`{ "version": 1, "reason": "aborted", "turn_id": "abcdef012345" }`.
+It can be on a user message when no assistant output was received, or on a tool
+result when no final narration followed. The optional ID is an opaque hex turn
+identity. These are presentation fields, excluded from native model messages;
+no diagnostic, credential, or assistant text is placed in this object.
+
+Full history replay emits `notification` with `category: "history"`,
+`type: "replay_outcome"`, and the validated object in `payload`. Paged history
+represents each outcome once as its own action (an empty assistant record carrying
+`turn_outcome`), after its message/tool actions. Clients render a status receipt,
+not an empty assistant reply. Old records remain readable and have unknown
+outcomes. Compaction archives retain outcome metadata; a summary does not invent
+an outcome for the turns it replaces. A process crash before final persistence
+can still leave an unknown outcome.
+
+Session/init payloads may include `local_provider_label`, a nonsecret requirement
+label rather than a connectivity claim. An empty string clears a previous label.
+Explicit idle-task `provider_select` or `set_model` with `provider_profile` can
+select remote credentials and remove the local requirement; implicit model
+changes cannot. Active provider work prevents the override. Failed selection
+retains the local requirement and does not restore revoked authority.
+
+The machine consent defaults to keeping current setup. Enter opens a local
+profile review; A authorizes only its displayed scope. C additionally accepts
+provider-controlled output where supported. Exit, expiry or owner disconnect
+revokes the in-memory grant. Reopening requires fresh review; no provider is
+silently substituted. Other integrations continue on their documented host.
+
+SSH task preparation uses `initialize` with `history_limit:0` while inspecting a
+saved task, followed by metadata-only `session.status`. It does not need replay
+rows to request consent. The child TUI still resumes its transcript normally.
+Gateway resume adopts the authoritative returned `session.key` before subsequent
+scoped RPCs, whether initialize attached a prepared live task or loaded history.
+An explicit resume ID first resolves an existing live task, including an untouched
+task without durable history. The workspace check still runs before attachment
+or configuration changes. This does not save empty conversations or reconstruct
+them after daemon loss; missing saved history remains an error.
+
+Explicit reasoning changes on a task with a local-provider requirement stay on
+that task and never update a remote profile's defaults. Native task reasoning is
+saved before acknowledging success when the task has history. A runtime without
+a task reasoning setter refuses the local change rather than reloading global
+defaults. Failed effort saves retain the previous live and durable choice, including
+context deltas. Writes are serialized per session so a pending setting or concurrent
+flush cannot persist a rejected effort; storage failures return an actionable
+bounded message and allow retry.
+
+For locally bound tasks, `reasoning_levels` and effort validation use the negotiated
+local snapshot exclusively. The picker names its provenance and explains that
+fallback tables are not live-verified. Missing or damaged legacy metadata yields
+`shape:"unknown"`, `source:"unavailable"` and no selectable levels, with an
+instruction to reopen/review through an updated local TUI and daemon. It never
+guesses from the remote profile. Long explanations and recovery instructions
+are scrollable with PageUp/PageDown, including at 40 columns. Automatic remote
+model discovery skips locally bound tasks and discards results after the task
+or provider route changes; it cannot inject an unrelated remote-provider warning.
+
+Model and interaction-mode selections use the same per-session write ordering.
+For tasks with history, a successful `set_model` or `set_mode` response means
+the choice is saved. A failed write leaves the previous model/provider pin,
+mode/plan flag and context deltas intact; a later flush cannot persist a rejected
+choice. The host mode callback runs only after the mode has been saved and
+published. Storage errors explain that the previous choice is unchanged and
+direct the user to check session storage and retry. Empty tasks retain the
+existing no-phantom-history behavior.
+
+Pasted slash-command arguments are not file-drop hints: model versions, search
+terms and path arguments do not trigger the image-attachment suggestion. File
+paths remain ordinary composer text; the hint neither attaches nor sends them.

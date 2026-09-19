@@ -4,7 +4,7 @@
 import { timingSafeEqual } from 'node:crypto'
 import type { ServerWebSocket } from 'bun'
 
-import { daemonEvent, jsonRpcFailure, type JsonRpcId, type JsonRpcPayload } from '../protocol/jsonRpc.js'
+import { daemonEvent, jsonRpcFailure, parseJsonRpcRequest, type JsonRpcId, type JsonRpcPayload } from '../protocol/jsonRpc.js'
 import type { DaemonTransportConnection } from './transport.js'
 
 const DEFAULT_MAX_MESSAGE_BYTES = 16 * 1024 * 1024
@@ -226,13 +226,18 @@ export class DaemonWebSocketGateway {
       return
     }
     const connection = websocket.data
+    let privateReply = false
+    try {
+      const method = parseJsonRpcRequest(message).method
+      privateReply = method === 'provider.remote.reply' || method === 'provider.remote.release'
+    } catch { /* The normal handler returns the protocol error. */ }
     const accepted = connection.enqueue(utf8Length(message), async () => {
       try {
         await this.handler(connection, message)
       } catch {
         this.send(connection, jsonRpcFailure(null, -32000, 'Internal daemon error'))
       }
-    })
+    }, privateReply)
     if (!accepted) {
       websocket.close(1013, 'inbound queue limit reached')
     }
@@ -376,7 +381,7 @@ class GatewayConnection implements DaemonTransportConnection {
    * Returns false once the undrained queue exceeds the configured cap so the
    * caller can stop the sender instead of growing memory without bound.
    */
-  enqueue(byteLength: number, task: () => Promise<void>): boolean {
+  enqueue(byteLength: number, task: () => Promise<void>, concurrent = false): boolean {
     if (this.queuedBytes + byteLength > this.gateway.inboundQueueByteLimit) {
       return false
     }
@@ -387,8 +392,8 @@ class GatewayConnection implements DaemonTransportConnection {
       }
       await task()
     }
-    const run = this.pending.then(runIfAttached, runIfAttached)
-    this.pending = run
+    const run = concurrent ? runIfAttached() : this.pending.then(runIfAttached, runIfAttached)
+    if (!concurrent) this.pending = run
     void run.then(
       () => {
         this.queuedBytes -= byteLength

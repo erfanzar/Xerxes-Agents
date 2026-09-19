@@ -36,3 +36,22 @@ test('changed history and cross-session cursors fail without mutating the source
  expect(historyLimit(0)).toBe(0)
  expect(sessionHistoryPage({...s,messages:[]},100)).toMatchObject({actions:[],has_more:false,before:null})
 })
+
+test('outcomes remain ordered and appear once when paging text, no-output, and tool-only turns', () => {
+  const s: Pick<DaemonSession, 'id'|'messages'|'toolExecutions'|'thinkingContent'> = {id: 'outcomes', toolExecutions: [], thinkingContent: [], messages: [
+    {role: 'user', content: 'Failed before output', turn_outcome: {version: 1, reason: 'provider_failed'}},
+    {role: 'assistant', content: 'Tool narration', tool_calls: [{id: 'c', function: {name: 'read_file', arguments: '{}'}}]},
+    {role: 'tool', tool_call_id: 'c', content: 'result', turn_outcome: {version: 1, reason: 'aborted'}},
+    {role: 'assistant', content: 'Answer', turn_outcome: {version: 1, reason: 'completed'}},
+  ]}
+  const rows: DaemonSession['messages'] = []
+  let before: string | null = null
+  do {
+    const page = sessionHistoryPage(s, 1, before)
+    rows.unshift(...page.actions.flatMap(action => action.messages))
+    before = page.before
+  } while (before)
+  expect(rows.filter(m => m.turn_outcome).map(m => (m.turn_outcome as {reason: string}).reason)).toEqual(['provider_failed', 'aborted', 'completed'])
+  expect(rows.filter(m => m.content).map(m => m.content)).toEqual(['Failed before output', 'Tool narration', 'result', 'Answer'])
+  expect(s.messages[0]?.turn_outcome).toEqual({version: 1, reason: 'provider_failed'})
+})

@@ -1,5 +1,6 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
+import { assertOutputTokenLimit } from './outputTokenLimit.js'
 
 /**
  * Azure OpenAI Responses provider (`/openai/v1/responses?api-version=…`).
@@ -177,6 +178,7 @@ function azureResponsesPayload(
   if (request.sessionId) payload.prompt_cache_key = azureCacheKey(request.sessionId)
   // `service_tier` and `prompt_cache_retention` are deliberately never sent:
   // Pi's compat data shows the Azure gateway rejects both with a 400.
+  assertOutputTokenLimit(request, payload.max_output_tokens)
   return payload
 }
 

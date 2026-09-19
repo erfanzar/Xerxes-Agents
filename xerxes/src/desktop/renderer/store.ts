@@ -687,6 +687,7 @@ export class Store {
   private slashResult: { sessionKey: string; text: string } | null = null
   private snippets: Record<string, string> = {}
   private enriching = new Set<string>()
+  private snippetRetryAt = new Map<string, number>()
   /** Latest session-search request; stale responses must not win. */
   private searchSeq = 0
   private ttftTotalMs = 0
@@ -2911,14 +2912,19 @@ export class Store {
    */
   private enrichUntitled(rows: readonly SessionRow[]): void {
     for (const row of rows) {
-      if (row.untitled && !this.snippets[row.id] && !this.enriching.has(row.id)) {
+      // Missing previews are common for unopened sessions. Do not refetch
+      // every one on every heartbeat or redraw the transcript for empty replies.
+      if (this.enriching.size >= 4) break
+      if (row.untitled && !this.snippets[row.id] && !this.enriching.has(row.id) && (this.snippetRetryAt.get(row.id) ?? 0) <= Date.now()) {
         this.enriching.add(row.id)
+        let changed = false
         void this.bridge
           .call('session.status', { session_key: row.key, history_limit: 0 })
           .then(result => {
             const session = this.sessionOf(result)
             if (typeof session.preview === 'string' && session.preview.trim()) {
-              this.snippets = { ...this.snippets, [row.id]: session.preview }
+              this.snippets = { ...this.snippets, [row.id]: session.preview.slice(0, SNIPPET_CAP) }
+              changed = true
               return
             }
             const transcript = session.transcript ?? session.messages
@@ -2936,6 +2942,7 @@ export class Store {
               const cleaned = text.replace(/\s+/g, ' ').trim()
               if (cleaned) {
                 this.snippets = { ...this.snippets, [row.id]: cleaned.length > SNIPPET_CAP ? `${cleaned.slice(0, SNIPPET_CAP - 1)}…` : cleaned }
+                changed = true
                 break
               }
             }
@@ -2943,7 +2950,14 @@ export class Store {
           .catch(() => {})
           .finally(() => {
             this.enriching.delete(row.id)
-            this.patch({})
+            if (!changed) {
+              this.snippetRetryAt.delete(row.id)
+              this.snippetRetryAt.set(row.id, Date.now() + 60_000)
+              if (this.snippetRetryAt.size > 256) this.snippetRetryAt.delete(this.snippetRetryAt.keys().next().value!)
+            } else {
+              this.snippetRetryAt.delete(row.id)
+              this.notify()
+            }
           })
       }
     }

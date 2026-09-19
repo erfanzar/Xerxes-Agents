@@ -5,13 +5,16 @@ import { atom, computed } from 'nanostores'
 import { MOUSE_TRACKING } from '../config/env.js'
 import { sectionMode } from '../domain/details.js'
 import { ZERO } from '../domain/usage.js'
-import { DEFAULT_THEME, themeForMode } from '../theme.js'
+import { DEFAULT_THEME, themeForAppearance, themeForMode } from '../theme.js'
+
+import { $appearance } from "./appearance.js"
 
 import { DEFAULT_INDICATOR_STYLE, type UiState } from './interfaces.js'
 
 const buildUiState = (): UiState => ({
   bgTasks: new Set(),
   busy: false,
+  disconnected: false,
   busyInputMode: 'steer',
   compact: false,
   detailsMode: 'collapsed',
@@ -43,16 +46,18 @@ let cachedThemeBase = DEFAULT_THEME
 let cachedThemeMode: string | undefined
 let cachedTheme = themeForMode(cachedThemeBase, cachedThemeMode)
 
-export const $uiTheme = computed($uiState, state => {
+let cachedAppearance = $appearance.get()
+export const $uiTheme = computed([$uiState, $appearance], (state, appearance) => {
   const mode = state.info?.mode
 
-  if (state.theme === cachedThemeBase && mode === cachedThemeMode) {
+  if (state.theme === cachedThemeBase && mode === cachedThemeMode && appearance === cachedAppearance) {
     return cachedTheme
   }
 
   cachedThemeBase = state.theme
   cachedThemeMode = mode
-  cachedTheme = themeForMode(cachedThemeBase, cachedThemeMode)
+  cachedAppearance = appearance
+  cachedTheme = themeForAppearance(themeForMode(cachedThemeBase, cachedThemeMode), appearance)
 
   return cachedTheme
 })

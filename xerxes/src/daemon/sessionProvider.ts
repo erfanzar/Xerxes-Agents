@@ -12,13 +12,13 @@ export function profileAcceptsModel(profile: ProviderProfile, model: string): bo
   return true
 }
 export function sessionProvider(profiles: Pick<ProfileStore, 'get' | 'list' | 'active'>, session: { metadata: Record<string, unknown> }, model: string): ProviderProfile | undefined {
-  if (!profiles.list().some(profile => profile.provider !== 'claude-code')) return undefined
   const pinned = session.metadata.provider_profile
   if (typeof pinned === 'string' && pinned) {
     const profile = profiles.get(pinned)
     if (!profile || !profileAcceptsModel(profile, model)) throw new Error(`Provider profile ${pinned} cannot serve ${model}. Use /model to select its provider and model together.`)
     return profile
   }
+  if (!profiles.list().some(profile => profile.provider !== 'claude-code')) return undefined
   let inferred = ''
   try { inferred = resolveProvider(model) } catch { /* Custom model names require a configured profile below. */ }
   const compatible = profiles.list().filter(p => profileAcceptsModel(p, model))

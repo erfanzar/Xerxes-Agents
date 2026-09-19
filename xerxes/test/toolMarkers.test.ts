@@ -2,12 +2,23 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from 'bun:test'
+import { repairResumedTranscript } from '../src/session/resumeRepair.js'
 
 import {
   extractAssistantToolCallMarkers,
   neutralizeSystemReminders,
   stripAssistantToolCallMarkers,
 } from '../src/streaming/toolMarkers.js'
+
+test('resume preserves exact assistant whitespace when no provider marker was removed', () => {
+  for (const content of ['  return ', '\n\tfunction x() {\n  ', ' \n\t', '\nordinary response\n', ' ASSISTANT_TOOL_CALLS: invalid ']) {
+    expect(stripAssistantToolCallMarkers(content)).toBe(content)
+    const repaired = repairResumedTranscript([{ role: 'assistant', content }])
+    expect(repaired.messages).toEqual([{ role: 'assistant', content }])
+    expect(repaired.stats.assistantMarkersStripped).toBe(0)
+    expect(repairResumedTranscript(repaired.messages).messages).toEqual(repaired.messages)
+  }
+})
 
 test('tool marker extraction removes JSON payloads and provider context from visible text', () => {
   const result = extractAssistantToolCallMarkers([

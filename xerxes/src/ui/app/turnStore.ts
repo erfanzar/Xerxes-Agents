@@ -83,7 +83,7 @@ export const getTurnPulse = () => $turnPulse.get()
  * re-rendering per delta — the fine-grained animation is driven by mutating
  * its renderables from an interval, not by React.
  */
-export const $turnLive = computed([$uiState, $turnState], (ui, turn) => ui.busy || turn.tools.length > 0)
+export const $turnLive = computed([$uiState, $turnState], (ui, turn) => !ui.disconnected && (ui.busy || turn.tools.length > 0))
 
 /** Open a liveness window; a turn already in flight keeps its original start. */
 export const beginTurnPulse = (now = Date.now()): TurnPulse => {

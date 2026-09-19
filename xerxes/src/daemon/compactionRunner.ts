@@ -1,6 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { getTurnOutcome } from '../types/turnOutcome.js';
 import { appendFile, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
@@ -377,7 +378,10 @@ export async function compactMessagesIfNeeded(
     const tokensAfter = estimateContextTokens(compacted, { model: request.model });
     const archive = await archivePreCompaction(request.archivePath, {
       archived_at: new Date().toISOString(),
-      messages: original,
+      messages: original.map(message => {
+        const outcome = getTurnOutcome(message);
+        return outcome ? { ...message, turn_outcome: outcome } : message;
+      }),
       model: request.model,
       reason: request.reason,
       tokens_after: tokensAfter,

@@ -1,7 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { useState, type ReactElement } from 'react'
+import { memo, useState, type ReactElement } from 'react'
 import type { ToolItem } from './types.js'
 import { Icon } from './Icon.js'
 import { StructuredResult, structuredOutput } from './StructuredResult.js'
@@ -34,11 +34,12 @@ function CopyButton({ text, label }: { text: string; label: string }): ReactElem
   const [status, setStatus] = useState('')
   return <button onClick={() => { void navigator.clipboard.writeText(text).then(() => setStatus('Copied'), () => setStatus('Copy failed')) }}>{status || label}</button>
 }
-export function ToolCallRow({ item, label }: { item: ToolItem; label: string }): ReactElement {
+export const ToolCallRow = memo(function ToolCallRow({ item, label }: { item: ToolItem; label: string }): ReactElement {
+  const [inspected, setInspected] = useState(false)
   const view = executionView(item)
   const failed = item.state === 'failed' || (view.exitCode !== null && view.exitCode !== 0)
   const target = view.command || item.path || item.arg
-  return <details className="toolrow execution-row" data-state={failed ? 'failed' : item.state}>
+  return <details className="toolrow execution-row" data-state={failed ? 'failed' : item.state} onToggle={event => { if (event.currentTarget.open) setInspected(true) }}>
     <summary>
       <span className="execution-row__disclosure"><Icon name="chevron" size={12} /></span>
       <span className="execution-row__label"><Icon name={view.command ? 'terminal' : 'tools'} size={14} />{label}</span>
@@ -47,9 +48,9 @@ export function ToolCallRow({ item, label }: { item: ToolItem; label: string }):
       {item.diff && <span className="execution-row__diff"><span className="add">+{item.diff.adds}</span> <span className="del">−{item.diff.dels}</span></span>}
       {failed && (item.error || view.stderr) && <span className="execution-row__error">{item.error || view.stderr}</span>}
     </summary>
-    <ExecutionDetails item={item} />
+    {inspected && <ExecutionDetails item={item} />}
   </details>
-}
+})
 export function ExecutionDetails({ item }: { item: ToolItem }): ReactElement {
   const [expanded, setExpanded] = useState(false)
   const [wrap, setWrap] = useState(true)

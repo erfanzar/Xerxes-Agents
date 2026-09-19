@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { InMemoryDaemonRuntime } from '../src/daemon/runtime.js'
+import { LOCAL_PROVIDER_BINDING } from '../src/daemon/remoteProviderBindings.js'
 
 async function inRuntime(
   run: (runtime: InMemoryDaemonRuntime, directory: string) => Promise<void>,
@@ -67,6 +68,28 @@ test('a session that never chose still follows the daemon default', async () => 
     runtime.reload({ model: 'claude-sonnet-4-6' })
 
     expect(runtime.sessionStatus('drifter')?.model).toBe('claude-sonnet-4-6')
+  })
+})
+
+test('local provider sessions do not adopt remote default effort on reload or resume', async () => {
+  await inRuntime(async (runtime, directory) => {
+    const local = await runtime.openSession('local')
+    const follower = await runtime.openSession('remote')
+    local.metadata[LOCAL_PROVIDER_BINDING] = { version: 1, source: 'fixture' }
+    local.messages.push({ role: 'user', content: 'Retain the local selection' }, { role: 'assistant', content: 'Saved local fixture reply' })
+    runtime.reload({ reasoning_effort: 'high' })
+    expect(local.reasoningEffort).toBeUndefined()
+    expect(follower.reasoningEffort).toBe('high')
+    await runtime.flushSessions()
+    const restarted = new InMemoryDaemonRuntime(undefined, { currentProjectDirectory: directory, sessionDirectory: join(directory, 'sessions') })
+    const resumed = await restarted.openSession(local.id, undefined, { resume: true })
+    restarted.reload({ reasoning_effort: 'low' })
+    expect(resumed.reasoningEffort).toBeUndefined()
+    await restarted.setSessionReasoning(resumed.sessionKey, 'off')
+    restarted.reload({ reasoning_effort: 'high' })
+    expect(resumed.reasoningEffort).toBe('off')
+    expect(resumed.reasoningPinned).toBe(true)
+    await restarted.shutdown()
   })
 })
 
@@ -144,13 +167,12 @@ test('a global reload leaves a session that picked its own effort alone', async 
   })
 })
 
-test('resuming history continues at the effort it was held at', async () => {
+test('resuming history restores an acknowledged effort without a turn or shutdown flush', async () => {
   await inRuntime(async (runtime, directory) => {
     const opened = await runtime.openSession('original')
     opened.messages.push({ role: 'user', content: 'hello' }, { role: 'assistant', content: 'hi — the pinned reply' })
     await runtime.setSessionModel('original', 'codex/gpt-5.5')
     await runtime.setSessionReasoning('original', 'xhigh')
-    await runtime.flushSessions()
 
     const restarted = new InMemoryDaemonRuntime(undefined, {
       currentProjectDirectory: directory,
@@ -237,6 +259,7 @@ test('resuming never loosens permissions from a stored value', async () => {
       currentProjectDirectory: directory,
       model: 'claude-code/default',
       permissionMode: 'manual',
+      sessionDirectory: join(directory, 'sessions'),
     })
     const resumed = await restarted.openSession(opened.id, undefined, { resume: true })
 
@@ -244,5 +267,7 @@ test('resuming never loosens permissions from a stored value', async () => {
     // looser trust level from a file on disk is not something a resume of an
     // old transcript should be able to do.
     expect(resumed.permissionMode).toBeUndefined()
+    expect(resumed.id).toBe(opened.id)
+    expect(resumed.messages).toEqual(opened.messages)
   })
 })

@@ -13,7 +13,7 @@
  */
 
 import type { ReactElement, ReactNode } from 'react'
-import { Fragment } from 'react'
+import { Fragment, memo } from 'react'
 
 const INLINE_RE = /(`[^`]+`)|(\*\*[^*]+\*\*)|(\*[^*\s][^*]*\*)|(\[[^\]]+\]\([^)\s]*\))/g
 
@@ -204,7 +204,7 @@ export function markdownBlocks(markdown: string, prefix = 'md'): ReactElement[] 
 }
 
 /** Render markdown inside a `.md` container. */
-export function Markdown({ text, className, tail }: { text: string; className?: string; tail?: ReactNode }): ReactElement {
+export const Markdown = memo(function Markdown({ text, className, tail }: { text: string; className?: string; tail?: ReactNode }): ReactElement {
   const cls = className ? `md ${className}` : 'md'
   if (!tail) return <div className={cls}>{markdownBlocks(text)}</div>
 
@@ -229,4 +229,4 @@ export function Markdown({ text, className, tail }: { text: string; className?: 
       <p>{inlinePieces(trailing)}{tail}</p>
     </div>
   )
-}
+})

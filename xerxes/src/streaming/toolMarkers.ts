@@ -60,7 +60,11 @@ export function extractAssistantToolCallMarkers(text: string, idPrefix = 'call_m
 
 /** Remove provider-only assistant markers without exposing their parsed calls. */
 export function stripAssistantToolCallMarkers(text: string): string {
-  return extractAssistantToolCallMarkers(text).text
+  const cleaned = extractAssistantToolCallMarkers(text).text
+  // Resume uses this sanitizer on every assistant message. The extraction
+  // parser trims its display result; that alone is not a provider-marker
+  // repair and must not alter code, partial lines or whitespace-only output.
+  return cleaned === text.trim() ? text : cleaned
 }
 
 /**

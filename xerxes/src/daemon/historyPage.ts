@@ -1,6 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { readTurnOutcome } from "../types/turnOutcome.js";
 import { createHash } from 'node:crypto'
 import { ValidationError } from '../core/errors.js'
 import type { DaemonSession } from './runtime.js'
@@ -49,19 +50,24 @@ export function sessionHistoryActions(session: Pick<DaemonSession, 'messages' | 
     ], executions: executions.has(id) ? [execution] : [], thinking: [] })
   }
   session.messages.forEach((m, index) => {
-    if (m.role === 'system') return
-    if (m.role === 'tool') {
-      const id = String(m.tool_call_id ?? `legacy-${index}`)
-      if (!calls.has(id)) tool(id, {}, `${index}:tool`)
-      return
+    try {
+      if (m.role === 'system') return
+      if (m.role === 'tool') {
+        const id = String(m.tool_call_id ?? `legacy-${index}`)
+        if (!calls.has(id)) tool(id, {}, `${index}:tool`)
+        return
+      }
+      const content = Array.isArray(m.content) ? m.content.filter(p => !['tool_use', 'tool_result'].includes(String(record(p).type))) : m.content
+      const thinking = m.role === 'assistant' ? m.thinking ?? session.thinkingContent[assistant] : undefined
+      if (m.role === 'assistant') assistant++
+      if ((typeof content === 'string' ? content.trim().length > 0 : Array.isArray(content) && content.length > 0) || thinking) {
+        actions.push({ id: `${index}:message`, messages: [{ ...m, content, tool_calls: undefined, turn_outcome: undefined }], executions: [], thinking: thinking ? [thinking] : [] })
+      }
+      callRecords(m).forEach((call, offset) => { if (typeof call.id === 'string') tool(call.id, call, `${index}:tool:${offset}`) })
+    } finally {
+      const outcome = readTurnOutcome(m.turn_outcome)
+      if (outcome) actions.push({ id: `${index}:outcome`, messages: [{ role: "assistant", content: "", turn_outcome: outcome }], executions: [], thinking: [] })
     }
-    const content = Array.isArray(m.content) ? m.content.filter(p => !['tool_use', 'tool_result'].includes(String(record(p).type))) : m.content
-    const thinking = m.role === 'assistant' ? m.thinking ?? session.thinkingContent[assistant] : undefined
-    if (m.role === 'assistant') assistant++
-    if ((typeof content === 'string' ? content.trim().length > 0 : Array.isArray(content) && content.length > 0) || thinking) {
-      actions.push({ id: `${index}:message`, messages: [{ ...m, content, tool_calls: undefined }], executions: [], thinking: thinking ? [thinking] : [] })
-    }
-    callRecords(m).forEach((call, offset) => { if (typeof call.id === 'string') tool(call.id, call, `${index}:tool:${offset}`) })
   })
   return actions
 }

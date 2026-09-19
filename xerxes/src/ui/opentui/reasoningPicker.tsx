@@ -2,10 +2,10 @@
 // Licensed under the Apache License, Version 2.0.
 
 /** @jsxImportSource @opentui/react */
-import type { KeyEvent } from '@opentui/core'
+import type { KeyEvent, ScrollBoxRenderable } from '@opentui/core'
 import { useKeyboard, useTerminalDimensions } from '@opentui/react'
 import { useStore } from '@nanostores/react'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { useGateway } from '../app/gatewayContext.js'
 import { patchOverlayState } from '../app/overlayStore.js'
@@ -13,6 +13,7 @@ import { $uiTheme } from '../app/uiStore.js'
 import type { ReasoningLevelsResponse } from '../gatewayTypes.js'
 import { asRpcResult, rpcErrorMessage } from '../lib/rpc.js'
 import type { Theme } from '../theme.js'
+import { wrappedLines } from '../lib/virtualHeights.js'
 
 import { windowItems } from './overlayLayout.js'
 import { InfoRow, ModalShell } from './pickerChrome.js'
@@ -58,6 +59,7 @@ export function ReasoningPicker({ onCancel, onSelect, t }: ReasoningPickerProps)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
   const [index, setIndex] = useState(0)
+  const details = useRef<ScrollBoxRenderable | null>(null)
 
   const close = useCallback(() => {
     patchOverlayState({ reasoningPicker: false })
@@ -109,6 +111,11 @@ export function ReasoningPicker({ onCancel, onSelect, t }: ReasoningPickerProps)
         close()
         return
       }
+      if (name === 'pageup' || name === 'pagedown') {
+        consume(key)
+        details.current?.scrollBy(name === 'pageup' ? -4 : 4)
+        return
+      }
       if (loading || levels.length === 0) {
         return
       }
@@ -140,8 +147,9 @@ export function ReasoningPicker({ onCancel, onSelect, t }: ReasoningPickerProps)
     1,
     Math.min(MAX_PANEL_WIDTH, Math.max(MIN_PANEL_WIDTH, width - 6), Math.max(1, width - 2))
   )
-  const visible = Math.max(1, Math.min(MAX_VISIBLE, levels.length || 1, Math.max(1, height - 12)))
-  const panelHeight = Math.min(height, visible + 8)
+  const detailRows = note || error ? Math.min(6, Math.max(1,height-12), wrappedLines([note,error].filter(Boolean).join('\n'),Math.max(1,panelWidth-8))) : 0
+  const visible = Math.max(1, Math.min(MAX_VISIBLE, levels.length || 1, Math.max(1, height - 9 - detailRows)))
+  const panelHeight = Math.min(height, visible + detailRows + 8)
   const { items: visibleLevels, offset } = windowItems(levels, index, visible)
 
   // Composed by the daemon: it depends on the provider's reasoning shape,
@@ -151,7 +159,7 @@ export function ReasoningPicker({ onCancel, onSelect, t }: ReasoningPickerProps)
   if (loading) {
     return (
       <ModalShell height={height} panelHeight={5} panelWidth={panelWidth} t={activeTheme} title="Reasoning effort" width={width}>
-        <InfoRow color={activeTheme.color.muted}>asking the provider…</InfoRow>
+        <InfoRow color={activeTheme.color.muted}>loading reasoning controls…</InfoRow>
         <InfoRow color={activeTheme.color.muted}>Esc close</InfoRow>
       </ModalShell>
     )
@@ -166,9 +174,14 @@ export function ReasoningPicker({ onCancel, onSelect, t }: ReasoningPickerProps)
       title="Reasoning effort"
       width={width}
     >
-      {subtitle ? <InfoRow color={activeTheme.color.muted}>{subtitle}</InfoRow> : null}
-      {error ? <InfoRow color={activeTheme.color.error}>error: {error}</InfoRow> : null}
-      <InfoRow color={activeTheme.color.muted}>↑/↓ select · Enter apply · Esc cancel</InfoRow>
+      {detailRows ? <scrollbox ref={details} height={detailRows} flexShrink={0}>
+        <box paddingLeft={2} paddingRight={2} flexDirection="column">
+          {subtitle ? <text fg={activeTheme.color.muted} wrapMode="word">{subtitle}</text> : null}
+          {error ? <text fg={activeTheme.color.error} wrapMode="word">{`error: ${error}`}</text> : null}
+        </box>
+      </scrollbox> : null}
+      <InfoRow color={activeTheme.color.muted}>{levels.length ? '↑/↓ select · Enter apply · Esc cancel' : 'Esc close'}</InfoRow>
+      {detailRows ? <InfoRow color={activeTheme.color.muted}>PgUp/PgDn scroll details</InfoRow> : null}
 
       {levels.length === 0 ? (
         <InfoRow color={activeTheme.color.muted}>nothing to select for this provider</InfoRow>

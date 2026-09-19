@@ -27,6 +27,13 @@ export const fmtCwdBranch = (cwd: string, branch: null | string, max = 40) => {
   return `${shortCwd(cwd, Math.max(8, max - tag.length))}${tag}`
 }
 
+/** Activity is not an outcome: becoming idle never proves successful work. */
+export function terminalActivityMarker(state: { disconnected?: boolean; waiting: boolean; busy: boolean }): string {
+  if (state.disconnected) return '⚠ disconnected'
+  if (state.waiting) return '⚠ waiting'
+  return state.busy ? '⏳ working' : '○ idle'
+}
+
 /**
  * Compose the terminal titlebar string:
  *   `<marker> <session name> · <model> · <cwd>`

@@ -1014,3 +1014,13 @@ export function fromSkin(
     currentLightMode()
   )
 }
+
+/** Let the terminal supply the canvas; keep selection, diff and popup grounds readable. */
+export function themeForAppearance(theme: Theme, appearance: 'chrome' | 'transparent'): Theme {
+  if (appearance === 'chrome') return theme
+  return {
+    ...theme,
+    ds: { ...theme.ds, backdrop: 'transparent', sunken: 'transparent', screen: 'transparent', chrome: 'transparent', card: 'transparent', workingCardBg: 'transparent' },
+    color: { ...theme.color, statusBg: 'transparent', userBandBg: 'transparent' }
+  }
+}

@@ -78,3 +78,32 @@ test('changing a profile during streaming survives the finishing turn and restar
     expect(resumed.metadata.provider_profile).toBe('second')
   } finally { finish(); await rm(root, { recursive: true, force: true }) }
 })
+
+test('a persisted provider pin cannot fall back after the last API profile disappears', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xr-missing-provider-'))
+  try {
+    let calls = 0
+    const fallback = { async *stream() { calls++; yield { content: 'wrong provider' } } }
+    const profiles = { list: () => [], get: () => undefined, active: () => undefined }
+    const runner = new AgentTurnRunner({ model: 'gpt-4o', llm: fallback,
+      resolveSessionProvider: (session, model) => { sessionProvider(profiles, session, model); return { llm: fallback } },
+    })
+    const options = { model: 'gpt-4o', currentProjectDirectory: root, sessionDirectory: join(root, 'sessions') }
+    const runtime = new InMemoryDaemonRuntime(runner, options)
+    const original = await runtime.openSession('pinned')
+    await runtime.submitTurn(original.sessionKey, 'first exchange', () => {})
+    calls = 0
+    await runtime.setSessionModel(original.sessionKey, 'gpt-4o', 'original-provider')
+    const restarted = new InMemoryDaemonRuntime(runner, options)
+    const resumed = await restarted.openSession(original.id, undefined, { resume: true })
+    expect(resumed.metadata.provider_profile).toBe('original-provider')
+    const events: unknown[] = []
+    await restarted.submitTurn(resumed.sessionKey, 'continue', event => { events.push(event) })
+    expect(calls).toBe(0)
+    expect(JSON.stringify(events)).toContain('Use /model')
+    expect(resumed.metadata.provider_profile).toBe('original-provider')
+    expect(resumed.status).toBe('idle')
+    // Unpinned setups can still use an explicitly configured runtime client.
+    expect(sessionProvider(profiles, { metadata: {} }, 'gpt-4o')).toBeUndefined()
+  } finally { await rm(root, { recursive: true, force: true }) }
+})

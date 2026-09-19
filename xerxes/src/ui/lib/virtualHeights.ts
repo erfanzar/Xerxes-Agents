@@ -108,6 +108,8 @@ export const estimatedMsgHeight = (
     userPrompt?: string
   }
 ) => {
+  if (msg.kind === 'outcome') return 1
+
   if (msg.kind === 'intro') {
     return msg.info?.version ? 9 : 5
   }

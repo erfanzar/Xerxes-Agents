@@ -1,5 +1,6 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
+import { assertOutputTokenLimit } from './outputTokenLimit.js'
 
 /** Google Vertex AI native `generateContent` streaming transport (pi-ai `google-vertex`). */
 
@@ -572,6 +573,7 @@ export function vertexPayload(request: CompletionRequest): VertexPayload {
   if (request.temperature !== undefined) generationConfig.temperature = request.temperature
   if (request.maxTokens !== undefined) generationConfig.maxOutputTokens = request.maxTokens
   if (Object.keys(generationConfig).length) config.generationConfig = generationConfig
+  assertOutputTokenLimit(request, generationConfig.maxOutputTokens)
 
   const systemParts = request.messages
     .filter(message => message.role === 'system')

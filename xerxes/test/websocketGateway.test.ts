@@ -441,3 +441,28 @@ class WebSocketTestClient {
     throw new Error('Timed out waiting for WebSocket close')
   }
 }
+
+test('private provider replies and release bypass a blocked WebSocket operation while normal mutations stay ordered', async () => {
+  const release=Promise.withResolvers<void>(), started=Promise.withResolvers<void>()
+  const seen:string[]=[]
+  const gateway=new DaemonWebSocketGateway({host:'127.0.0.1',port:0},async(connection,line)=>{
+    const request=JSON.parse(line) as {id:number;method:string}
+    seen.push(request.method)
+    if(request.method==='long.operation'){started.resolve();await release.promise}
+    if(request.method==='provider.remote.release')release.resolve()
+    connection.send({jsonrpc:'2.0',id:request.id,result:{ok:true}})
+  })
+  gateway.start()
+  const client=await WebSocketTestClient.connect(gateway.url!)
+  try {
+    client.send({jsonrpc:'2.0',id:1,method:'long.operation',params:{}})
+    await started.promise
+    client.send({jsonrpc:'2.0',id:2,method:'ordered.mutation',params:{}})
+    client.send({jsonrpc:'2.0',id:3,method:'provider.remote.reply',params:{}})
+    expect((await client.next(frame=>frame.id===3)).result).toEqual({ok:true})
+    expect(seen).toEqual(['long.operation','provider.remote.reply'])
+    client.send({jsonrpc:'2.0',id:4,method:'provider.remote.release',params:{}})
+    await client.next(frame=>frame.id===2)
+    expect(seen).toEqual(['long.operation','provider.remote.reply','provider.remote.release','ordered.mutation'])
+  } finally {release.resolve();client.close();await gateway.stop()}
+})

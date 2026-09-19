@@ -43,6 +43,7 @@ async function buildDesktop(): Promise<void> {
     format: 'esm',
     minify: true,
     define: {
+      'process.env.NODE_ENV': JSON.stringify('production'),
       __XERXES_DESKTOP_VERSION__: JSON.stringify(desktopVersion),
       __XERXES_DESKTOP_PROTOCOL__: String(DAEMON_PROTOCOL_VERSION),
       __XERXES_EXPECTED_DAEMON_BUILD_ID__: JSON.stringify(expectedDaemonBuildId),
@@ -51,6 +52,13 @@ async function buildDesktop(): Promise<void> {
   if (!renderer.success) {
     for (const log of renderer.logs) console.error(log)
     throw new Error('desktop renderer build failed')
+  }
+  // Minification alone does not select React's production entry point.
+  // Fail packaging if development React accidentally returns to the bundle.
+  for (const output of renderer.outputs) {
+    if (output.path.endsWith('.js') && (await output.text()).includes('Download the React DevTools')) {
+      throw new Error('Desktop renderer contains development React')
+    }
   }
 
   const main = await Bun.build({

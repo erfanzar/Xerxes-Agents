@@ -9057,6 +9057,7 @@ test('reopening a saved session recovers durable monitor evidence not offered be
   const sessionDirectory = join(directory, 'sessions');
   const original = new InMemoryDaemonRuntime(undefined, { currentProjectDirectory: directory, sessionDirectory });
   const owner = await original.openSession('original');
+  await original.submitTurn(owner.sessionKey, 'Create durable monitor owner history', () => {});
   await original.flushSessions();
   await original.shutdown();
   const historyPath = join(directory, 'runs.sqlite'), mailboxPath = join(directory, 'mailbox.sqlite');

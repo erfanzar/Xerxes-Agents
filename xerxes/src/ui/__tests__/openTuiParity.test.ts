@@ -117,6 +117,7 @@ describe('native OpenTUI semantic parity', () => {
 
     expect(first).toMatchObject({ attempts: [now], recover: true, sid: 'session-1' })
     expect(second.recover).toBe(true)
+    expect(planGatewayRecovery(null, null, first.attempts, now + 1, 'session-1')).toEqual(second)
     expect(third.recover).toBe(true)
     expect(exhausted).toEqual({ attempts: third.attempts, recover: false, sid: 'session-1' })
     expect(planGatewayRecovery('session-2', null, [now - 60_001], now)).toEqual({

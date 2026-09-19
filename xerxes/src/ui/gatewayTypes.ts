@@ -1,5 +1,6 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
+import type { TurnOutcomeReason } from '../types/turnOutcome.js'
 import type { SessionInfo, SlashCategory, SubagentStatus, Usage } from './types.js'
 
 export interface GatewaySkin {
@@ -20,6 +21,7 @@ export interface GatewayCompletionItem {
 }
 
 export interface GatewayTranscriptMessage {
+  outcome?: TurnOutcomeReason
   context?: string
   duration_s?: number
   error?: string
@@ -195,6 +197,9 @@ export interface SessionCreateResponse {
 }
 
 export interface SessionResumeResponse {
+  /** Same owner reclaimed; retain the current transcript and apply the journal. */
+  reconnected?: boolean
+  recovery_pending?: boolean
   todos?: unknown[]
   inflight?: null | SessionInflightTurn
   info?: SessionInfo
@@ -852,7 +857,7 @@ export type GatewayEvent =
   | { payload: SubagentEventPayload; session_id?: string; type: 'subagent.complete' }
   | { payload: { rendered?: string; text?: string }; session_id?: string; type: 'message.delta' }
   | {
-      payload?: { interrupted?: boolean; reasoning?: string; rendered?: string; text?: string; usage?: Usage }
+      payload?: { outcome?: TurnOutcomeReason; unstarted?: boolean; interrupted?: boolean; reasoning?: string; rendered?: string; text?: string; usage?: Usage }
       session_id?: string
       type: 'message.complete'
     }

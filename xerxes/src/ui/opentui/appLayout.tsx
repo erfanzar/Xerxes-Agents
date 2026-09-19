@@ -465,6 +465,18 @@ function PromptPanelGap() {
 }
 
 function NoticeBanner({ notice, t }: { notice: Notice | null; t: Theme }) {
+  const { width, height } = useTerminalDimensions()
+  const lines = useMemo(() => (notice?.text ?? '').split('\n').flatMap(line => wrapWithContinuation(line, Math.max(10, width - 9))), [notice?.text, width])
+  const open = () => {
+    if (!notice?.text || overlayBlocksBackgroundHotkeys($overlayState.get())) return
+    patchOverlayState({ pager: { title: 'Notice', lines, offset: 0 } })
+  }
+  useKeyboard(event => {
+    if (event.name !== 'n' || !(event.meta || event.option) || event.ctrl || event.super || !notice?.text || overlayBlocksBackgroundHotkeys($overlayState.get())) return
+    event.preventDefault()
+    event.stopPropagation()
+    open()
+  })
   if (!notice?.text) {
     return null
   }
@@ -481,10 +493,9 @@ function NoticeBanner({ notice, t }: { notice: Notice | null; t: Theme }) {
   return (
     <Box flexDirection="row" flexShrink={0} marginBottom={1} paddingX={2}>
       <Box backgroundColor={color} flexShrink={0} width={1} />
-      <Box backgroundColor={t.color.completionBg} flexGrow={1} flexShrink={1} paddingX={1}>
-        <Text color={color} wrap="truncate-end">
-          {notice.text}
-        </Text>
+      <Box backgroundColor={t.color.completionBg} flexDirection="column" flexGrow={1} flexShrink={1} paddingX={1} onClick={open}>
+        {lines.slice(0, Math.max(1, Math.min(4, Math.floor(height / 6)))).map((line, index) => <Text key={index} color={color} wrap="wrap">{line}</Text>)}
+        <Text color={t.color.muted}>Alt+N · full notice</Text>
       </Box>
     </Box>
   )
@@ -1224,7 +1235,7 @@ export function Composer({ composer }: Pick<AppLayoutProps, 'composer'>) {
   const busyLabels = busyInputLabels(ui.busyInputMode, composer.queuedDisplay.length)
 
   return (
-    <Box backgroundColor={t.color.completionBg} flexDirection="column" flexShrink={0} width="100%">
+    <Box backgroundColor={t.ds.chrome} flexDirection="column" flexShrink={0} width="100%">
       {/* The menu renders inside the composer's reading column, not the full
           terminal, so its column math must use the same measure — otherwise
           it lays out for a width it does not have and the renderer truncates
@@ -1309,6 +1320,7 @@ export function Composer({ composer }: Pick<AppLayoutProps, 'composer'>) {
             </Text>
             <BackgroundStatus sessionId={ui.sid} t={t} />
             </Box>
+            {ui.info?.local_provider_label ? <Text color={t.ds.meta} wrap="truncate-end">{ui.info.local_provider_label}</Text> : null}
             {narrow ? (
               <Text color={yoloEnabled ? t.color.warn : t.ds.meta} wrap="wrap">
                 {writePolicyLabel(ui.info?.permission_mode)}
@@ -1961,6 +1973,7 @@ export function AppLayout({
             <Box key="session" flexDirection="column" flexGrow={1} minHeight={0}>
               <SessionHeader
                 busy={ui.busy}
+                disconnected={ui.disconnected}
                 contextMax={usageCounts(ui.usage).max}
                 contextUsed={usageCounts(ui.usage).used}
                 mode={ui.info?.mode}
@@ -2089,7 +2102,7 @@ export function AppLayout({
       {overlay.schedules ? <ScheduleOverlay t={t} /> : null}
       {overlay.lspSettings ? <LspSettingsOverlay t={t} /> : null}
       {overlay.mcpSettings ? <McpSettingsOverlay t={t} /> : null}
-      {overlay.machinePicker ? <MachinePicker t={t} onCancel={() => patchOverlayState({ machinePicker: false })} /> : null}
+      {overlay.machinePicker ? <MachinePicker t={t} initialAlias={typeof overlay.machinePicker === 'string' ? overlay.machinePicker : undefined} onCancel={() => patchOverlayState({ machinePicker: false })} /> : null}
       {overlay.customAgentEditor ? <CustomAgentEditor t={t} onClose={() => patchOverlayState({ customAgentEditor: false })} /> : null}
       {overlay.presetEditor ? <PresetEditor key={ui.sid ?? ui.info?.session_id} sessionId={ui.sid ?? ui.info?.session_id ?? 'unattached'} t={t} onClose={() => patchOverlayState({ presetEditor: false })} /> : null}
       {overlay.forge ? <ForgeOverlay key={ui.sid ?? ui.info?.session_id} sessionId={ui.sid ?? ui.info?.session_id ?? 'unattached'} t={t} onClose={() => patchOverlayState({ forge: false })} /> : null}

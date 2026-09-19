@@ -1,5 +1,6 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
+import { copyTurnOutcome } from '../types/turnOutcome.js'
 
 import type { ChatMessage } from '../types/messages.js'
 
@@ -41,7 +42,7 @@ export function supersedeScreenshotToolResults(messages: ChatMessage[]): number 
   for (const index of screenshotIndexes.slice(0, -1)) {
     const message = messages[index]
     if (message?.role !== 'tool') continue
-    messages[index] = { ...message, content: omittedScreenshotMarker(message.content) }
+    messages[index] = copyTurnOutcome(message, { ...message, content: omittedScreenshotMarker(message.content) })
     superseded += 1
   }
   return superseded

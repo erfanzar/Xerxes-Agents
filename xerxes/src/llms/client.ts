@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { httpErrorBody } from './httpErrorBody.js'
+import { assertOutputTokenLimit, type OutputTokenBound } from './outputTokenLimit.js'
 import { createHash } from 'node:crypto'
 import { chargeModelCall } from './callBudget.js'
 
@@ -138,7 +139,7 @@ export function isHousekeepingQuerySource(value: QuerySource): boolean {
   return value !== MAIN_QUERY_SOURCE
 }
 
-export interface CompletionRequest {
+export interface CompletionRequest extends OutputTokenBound {
   /** Provider-specific JSON fields sent alongside the standard chat payload. */
   readonly extraBody?: Readonly<Record<string, unknown>>
   readonly frequencyPenalty?: number
@@ -1645,6 +1646,7 @@ function responsesPayload(
     delete payload.top_p
     payload.store = false
   }
+  assertOutputTokenLimit(request, payload.max_output_tokens)
   return payload
 }
 
@@ -1813,6 +1815,7 @@ function openAiCompatiblePayload(
   if (stream && providerName !== 'minimax') {
     payload.stream_options = { include_usage: true }
   }
+  assertOutputTokenLimit(request, payload.max_completion_tokens ?? payload.max_tokens)
   return payload
 }
 

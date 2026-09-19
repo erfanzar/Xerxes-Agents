@@ -78,7 +78,7 @@ export interface CompletionItem {
 }
 
 export interface GatewayRpc {
-  <T extends RpcResult = RpcResult>(method: string, params?: Record<string, unknown>): Promise<null | T>
+  <T extends RpcResult = RpcResult>(method: string, params?: Record<string, unknown>, options?: { reportError?: boolean }): Promise<null | T>
 }
 
 export interface GatewayServices {
@@ -108,7 +108,7 @@ export interface OverlayState {
   lspSettings: boolean
   mcpSettings: boolean
   contextInspector: boolean
-  machinePicker: boolean
+  machinePicker: boolean | string
   customAgentEditor: boolean
   presetEditor: boolean
   forge: boolean
@@ -173,6 +173,7 @@ export interface SessionTab {
 }
 
 export interface UiState {
+  disconnected?: boolean
   bgTasks: Set<string>
   busy: boolean
   busyInputMode: BusyInputMode

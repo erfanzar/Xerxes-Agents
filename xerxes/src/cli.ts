@@ -45,7 +45,9 @@ import type { DaemonInteractionBoard } from "./daemon/interactions.js";
 import { daemonPaths, xerxesHome } from "./daemon/paths.js";
 import { createProductionInteractionBoard } from "./daemon/productionInteractions.js";
 import { profileAcceptsModel, sessionProvider } from './daemon/sessionProvider.js';
-import { runtimeConnection } from "./daemon/runtimeConnection.js";
+import { RemoteProviderBindings } from "./daemon/remoteProviderBindings.js";
+import { DEFAULT_PERMISSION_MODE } from "./streaming/permissions.js";
+import { runtimeConnection, runtimePermissionMode, type RuntimeConnection } from "./daemon/runtimeConnection.js";
 import { InMemoryDaemonRuntime, type DaemonSession } from "./daemon/runtime.js";
 import { daemonBuildIdForEntry } from "./daemon/sourceBuild.js";
 import { compactionCompletionPort } from "./daemon/server.js";
@@ -1015,6 +1017,7 @@ async function runDaemonOwned(
   pidPath: string | undefined,
 ): Promise<void> {
   const { DaemonServer } = await import("./daemon/server.js");
+  const remoteProviderBindings = new RemoteProviderBindings();
   const profileStore = new ProfileStore();
   const interactions = createProductionInteractionBoard({
     onApprovalStoreError: (error) => {
@@ -1080,6 +1083,7 @@ async function runDaemonOwned(
     browserManager,
     {
       ...(buildId ? { buildId } : {}),
+      remoteProviderBindings,
       onSessionModeChange: (sessionId) => announceModeChange?.(sessionId),
       workspaces,
       skillRegistry,
@@ -1116,6 +1120,7 @@ async function runDaemonOwned(
   // Per-server failures are recorded on the manager and logged — one broken
   // server must not stop the daemon.
   const daemon = new DaemonServer({
+    remoteProviderBindings,
     workspaceResources: cwd => workspaces.get(cwd),
     workspaceRelease: cwd => workspaces.release(cwd),
     autoSnapshotTurns: true,
@@ -1653,6 +1658,7 @@ function daemonRuntime(
   interactions?: DaemonInteractionBoard,
   browserManager?: BrowserManager,
   host: {
+    readonly remoteProviderBindings?: RemoteProviderBindings;
     readonly workspaces?: DaemonWorkspaces;
     readonly buildId?: string;
     /** Announce a model-driven interaction-mode change to attached clients. */
@@ -1779,15 +1785,22 @@ function daemonRuntime(
   let activeToolCount = 0;
   const createWorkspaceRunner = (settings: Readonly<Record<string, unknown>>, workspaceRoot: string, resources: WorkspaceResources) => {
     let subagentHost = subagentHosts.get(workspaceRoot);
-    const connection = runtimeConnection(
+    const configuredConnection = runtimeConnection(
       { ...config, runtime: { ...config.runtime, ...settings } },
       profileStore.active(),
     );
-    if (!connection || connection.provider === "claude-code") {
+    const nativeConnection = configuredConnection?.provider === "claude-code" ? undefined : configuredConnection;
+    if (!nativeConnection && !host.remoteProviderBindings) {
       subagentHost?.invalidateAll();
       activeToolCount = 0;
       return undefined;
     }
+    // Empty means unconfigured, never a substitute model or provider. A bound
+    // session supplies its own exact model and client before any model call.
+    const connection: RuntimeConnection = nativeConnection ?? {
+      model: "",
+      permissionMode: runtimePermissionMode(settings.permission_mode ?? config.runtime.permission_mode) ?? DEFAULT_PERMISSION_MODE,
+    };
     const maxTokens = connection.maxTokens;
     const maxOutputTokens = (candidate: string): number | undefined =>
       resolvedProfileMaxOutputTokens(profileStore.active(), candidate);
@@ -1904,12 +1917,12 @@ function daemonRuntime(
     addMcpToolsToBuiltinAgents(agentDefinitions, mcpTools);
     addLspToolToBuiltinAgents(agentDefinitions, lspManager);
     if (host.modelInventory) addModelInventoryToBuiltinAgents(agentDefinitions);
-    const llm = createLlmClient(connection.model, {
+    const llm = nativeConnection ? createLlmClient(connection.model, {
       ...(connection.apiKey ? { api_key: connection.apiKey } : {}),
       ...(connection.baseUrl ? { base_url: connection.baseUrl } : {}),
       ...(connection.provider ? { provider: connection.provider } : {}),
       ...(connection.responsesApi ? { responses_api: true } : {}),
-    });
+    }) : { async *stream(): AsyncGenerator<never> { throw new Error("Configure a remote provider or authorize a local provider connection before starting a turn"); } };
     // Fallback model chain (Claude Code fallback-model parity): configured via
     // XERXES_FALLBACK_MODEL or runtime.fallback_model; the fallback client
     // reuses the primary connection's credentials and routing.
@@ -1920,6 +1933,11 @@ function daemonRuntime(
     const subagentOptions = {
       ...(connection.reasoningEffort ? { reasoningEffort: connection.reasoningEffort } : {}),
       ...(resources.skillRegistry ? { skillRegistry: resources.skillRegistry } : {}),
+      ...(host.remoteProviderBindings ? { resolveSourceClient: (sourceId: string, model: string, profile?: string) => {
+        const session = runtime?.listSessions().find(candidate => candidate.id === sourceId);
+        if (!session) throw new Error('Subagent source session is unavailable; reopen the parent chat');
+        return host.remoteProviderBindings!.sourceClient(session, model, profile);
+      } } : {}),
       resolveSourceProvider: (sourceId: string, model: string): string | undefined => {
         const session = runtime?.listSessions().find(candidate => candidate.id === sourceId);
         if (!session) throw new Error('Subagent source session is unavailable; reopen the parent chat');
@@ -1938,11 +1956,11 @@ function daemonRuntime(
           ownerId: host.goalTokenOwner,
         }),
       worktreeForWorkspace: nativeSubagentWorktrees,
-      validateInheritedSelection: inheritedSelectionValidator(connection),
+      validateInheritedSelection: nativeConnection ? inheritedSelectionValidator(connection) : async () => { throw new Error("Configure a remote provider or authorize a local provider connection before delegating work"); },
       ...(host.validateProviderSelection ? { validateProviderSelection: host.validateProviderSelection } : {}),
       resolveProviderProfile: agentProviderResolver(profileStore),
       resolveProviderRoute: agentProviderRouteResolver(profileStore),
-      inheritedProviderRoute: providerRouteIdentity(connection.model, connection),
+      ...(nativeConnection ? { inheritedProviderRoute: providerRouteIdentity(connection.model, connection) } : {}),
       ...(host.runHistory ? { runHistory: host.runHistory } : {}),
       agentDefinitions,
       contextLimit: (model: string) => resolvedProfileContextLimit(profileStore.active(), model),
@@ -1994,8 +2012,9 @@ function daemonRuntime(
         generate: (request, signal) => {
           const active = getActiveSession<DaemonSession>();
           const model = active?.model || connection.model;
-          const profile = active && (active.metadata.provider_profile || !(config.runtime.provider || config.runtime.base_url || config.runtime.api_key)) ? sessionProvider(profileStore, active, model) : undefined;
-          const planner = profile ? createLlmClient(model, { provider: profile.provider, api_key: profile.api_key, base_url: profile.base_url, ...(connection.responsesApi ? { responses_api: true } : {}) }) : llm;
+          const localClient = active ? host.remoteProviderBindings?.client(active, model) : undefined;
+          const profile = !localClient && active && (active.metadata.provider_profile || !(config.runtime.provider || config.runtime.base_url || config.runtime.api_key)) ? sessionProvider(profileStore, active, model) : undefined;
+          const planner = localClient ?? (profile ? createLlmClient(model, { provider: profile.provider, api_key: profile.api_key, base_url: profile.base_url, ...(connection.responsesApi ? { responses_api: true } : {}) }) : llm);
           return createLlmPlanGenerator(planner, { model }).generate(request, signal);
         },
       },
@@ -2007,6 +2026,7 @@ function daemonRuntime(
     activeToolCount = tools.definitionsForTranscript([]).length;
     const contextLimit = resolvedProfileContextLimit(profileStore.active(), connection.model);
     return new AgentTurnRunner({
+      ...(host.remoteProviderBindings ? { remoteProviderBindings: host.remoteProviderBindings } : {}),
       resolveSessionProvider: (session, model) => {
         if (!session.metadata.provider_profile && (config.runtime.provider || config.runtime.base_url || config.runtime.api_key)) return { llm };
         const profile = sessionProvider(profileStore, session, model);
@@ -2099,8 +2119,9 @@ function daemonRuntime(
       reduceContext: async (messages, signal) => {
         const active = getActiveSession<DaemonSession>();
         const model = active?.model || connection.model;
-        const profile = active && (active.metadata.provider_profile || !(config.runtime.provider || config.runtime.base_url || config.runtime.api_key)) ? sessionProvider(profileStore, active, model) : undefined;
-        const compactionLlm = profile ? createLlmClient(model, { provider: profile.provider, api_key: profile.api_key, base_url: profile.base_url, ...(connection.responsesApi ? { responses_api: true } : {}) }) : llm;
+        const localClient = active ? host.remoteProviderBindings?.client(active, model) : undefined;
+        const profile = !localClient && active && (active.metadata.provider_profile || !(config.runtime.provider || config.runtime.base_url || config.runtime.api_key)) ? sessionProvider(profileStore, active, model) : undefined;
+        const compactionLlm = localClient ?? (profile ? createLlmClient(model, { provider: profile.provider, api_key: profile.api_key, base_url: profile.base_url, ...(connection.responsesApi ? { responses_api: true } : {}) }) : llm);
         // PreCompact hook before any message is dropped (Claude Code parity).
         const hookRunner = hooksForWorkspace(getActiveSession<{ cwd: string }>()?.cwd ?? workspaceRoot);
         if (hookRunner.hasHooks("on_compact")) {
@@ -2112,7 +2133,7 @@ function daemonRuntime(
         }
         const priced = messages as unknown as Readonly<Record<string, unknown>>[];
         const before = estimateContextTokens(priced, { model });
-        const contextWindow = resolvedProfileContextLimit(profile ?? profileStore.active(), model);
+        const contextWindow = localClient ? undefined : resolvedProfileContextLimit(profile ?? profileStore.active(), model);
         const outcome = await compactMessagesIfNeeded({
           model,
           completion: compactionCompletionPort(compactionLlm, model, undefined, signal),

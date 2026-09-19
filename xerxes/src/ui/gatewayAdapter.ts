@@ -1,5 +1,6 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
+import { readTurnOutcome, turnOutcomeReason, turnOutcomeLabel } from '../types/turnOutcome.js'
 import {
   normalizeEventType,
   type AnyEvent,
@@ -132,6 +133,8 @@ export function sessionInfoFromInit(payload: Record<string, unknown>): SessionIn
   const skills = payload.skills
   const skillList = Array.isArray(skills) ? skills.map(s => String(s)).filter(Boolean) : []
   return compact<SessionInfo>({
+    local_provider_label: typeof payload.local_provider_label === 'string' ? payload.local_provider_label : undefined,
+    remote_provider_binding_supported: typeof payload.remote_provider_binding_supported === "boolean" ? payload.remote_provider_binding_supported : undefined,
     cwd: str(payload.cwd),
     goal: optionalStr(payload.goal),
     goal_phase: optionalStr(payload.goal_phase),
@@ -233,72 +236,77 @@ export function transcriptFromStoredMessages(messages: unknown): GatewayTranscri
   for (const raw of messages) {
     const msg = asRecord(raw)
     const role = str(msg.role).toLowerCase()
-    if (role === 'user') {
-      const text = firstNonEmptyStr(msg.text, textFromContent(msg.content))
-      if (!text.trim() || looksLikeInternalUserPrompt(text)) {
-        continue
-      }
-      out.push({ role: 'user', text })
-      continue
-    }
-    if (role === 'assistant') {
-      const text = firstNonEmptyStr(msg.text, textFromContent(msg.content))
-      const thinking = optionalStr(msg.thinking)
-      if (text.trim()) {
-        out.push({ role: 'assistant', text, ...(thinking?.trim() ? { thinking } : {}) })
-      }
-      const calls = Array.isArray(msg.tool_calls) ? msg.tool_calls : []
-      for (const call of calls) {
-        const record = asRecord(call)
-        const fn = asRecord(record.function)
-        const name = firstNonEmptyStr(fn.name, record.name) || 'tool'
-        // OpenAI wire shape nests {name, arguments} under 'function'; legacy
-        // rows carry top-level name/input instead. Run the raw arguments through
-        // the same summarizer live tool.start events use, so a reattached row
-        // reads "directory_path=…" instead of a raw JSON blob. Summarize the
-        // FULL arguments and truncate the rendered summary afterwards: cutting
-        // the JSON first leaves an unparseable fragment, which the summarizer
-        // then echoes back as the raw blob this comment promises to avoid.
-        const rawValue = fn.arguments ?? record.input
-        const argumentsText = typeof rawValue === 'string' ? rawValue : safeJsonStringify(rawValue)
-        const summary = argumentsText.trim()
-          ? summarizeToolStartDisplay(name, '', argumentsText.replace(/\s+/g, ' ').trim()).context
-          : ''
-        const context =
-          summary.length > STORED_ARGUMENTS_PREVIEW_CHARS
-            ? `${summary.slice(0, STORED_ARGUMENTS_PREVIEW_CHARS - 1)}…`
-            : summary
-        const row: GatewayTranscriptMessage = { role: 'tool', name, ...(context ? { context } : {}) }
-        const callId = optionalStr(record.id)
-        if (callId) {
-          toolRowByCallId.set(callId, row)
+    try {
+      if (role === 'user') {
+        const text = firstNonEmptyStr(msg.text, textFromContent(msg.content))
+        if (!text.trim() || looksLikeInternalUserPrompt(text)) {
+          continue
         }
-        out.push(row)
-      }
-      continue
-    }
-    if (role === 'tool') {
-      // Results reconcile onto their call; an orphan result (its assistant
-      // call was trimmed from retained history) is dropped, exactly like the
-      // daemon replay, which only re-emits orphans from tool_executions.
-      const callId = optionalStr(msg.tool_call_id)
-      const existing = callId ? toolRowByCallId.get(callId) : undefined
-      if (!existing) {
+        out.push({ role: 'user', text })
         continue
       }
-      const content = firstNonEmptyStr(msg.text, textFromContent(msg.content))
-      const failure = storedToolFailure(msg, content)
-      const durationMs = optionalNum(msg.duration_ms ?? msg.durationMs)
-      if (failure) {
-        existing.error = failure
+      if (role === 'assistant') {
+        const text = firstNonEmptyStr(msg.text, textFromContent(msg.content))
+        const thinking = optionalStr(msg.thinking)
+        if (text.trim()) {
+          out.push({ role: 'assistant', text, ...(thinking?.trim() ? { thinking } : {}) })
+        }
+        const calls = Array.isArray(msg.tool_calls) ? msg.tool_calls : []
+        for (const call of calls) {
+          const record = asRecord(call)
+          const fn = asRecord(record.function)
+          const name = firstNonEmptyStr(fn.name, record.name) || 'tool'
+          // OpenAI wire shape nests {name, arguments} under 'function'; legacy
+          // rows carry top-level name/input instead. Run the raw arguments through
+          // the same summarizer live tool.start events use, so a reattached row
+          // reads "directory_path=…" instead of a raw JSON blob. Summarize the
+          // FULL arguments and truncate the rendered summary afterwards: cutting
+          // the JSON first leaves an unparseable fragment, which the summarizer
+          // then echoes back as the raw blob this comment promises to avoid.
+          const rawValue = fn.arguments ?? record.input
+          const argumentsText = typeof rawValue === 'string' ? rawValue : safeJsonStringify(rawValue)
+          const summary = argumentsText.trim()
+            ? summarizeToolStartDisplay(name, '', argumentsText.replace(/\s+/g, ' ').trim()).context
+            : ''
+          const context =
+            summary.length > STORED_ARGUMENTS_PREVIEW_CHARS
+              ? `${summary.slice(0, STORED_ARGUMENTS_PREVIEW_CHARS - 1)}…`
+              : summary
+          const row: GatewayTranscriptMessage = { role: 'tool', name, ...(context ? { context } : {}) }
+          const callId = optionalStr(record.id)
+          if (callId) {
+            toolRowByCallId.set(callId, row)
+          }
+          out.push(row)
+        }
+        continue
       }
-      if (durationMs !== undefined) {
-        existing.duration_s = durationMs / 1000
+      if (role === 'tool') {
+        // Results reconcile onto their call; an orphan result (its assistant
+        // call was trimmed from retained history) is dropped, exactly like the
+        // daemon replay, which only re-emits orphans from tool_executions.
+        const callId = optionalStr(msg.tool_call_id)
+        const existing = callId ? toolRowByCallId.get(callId) : undefined
+        if (!existing) {
+          continue
+        }
+        const content = firstNonEmptyStr(msg.text, textFromContent(msg.content))
+        const failure = storedToolFailure(msg, content)
+        const durationMs = optionalNum(msg.duration_ms ?? msg.durationMs)
+        if (failure) {
+          existing.error = failure
+        }
+        if (durationMs !== undefined) {
+          existing.duration_s = durationMs / 1000
+        }
+        continue
       }
-      continue
+      // Persisted system rows are runtime state, not visible chat history; a
+      // full system prompt can also mount tens of thousands of hidden chars.
+    } finally {
+      const outcome = readTurnOutcome(msg.turn_outcome)
+      if (outcome) out.push({ role: 'assistant', text: turnOutcomeLabel(outcome.reason), outcome: outcome.reason })
     }
-    // Persisted system rows are runtime state, not visible chat history; a
-    // full system prompt can also mount tens of thousands of hidden chars.
   }
   return out
 }
@@ -445,6 +453,7 @@ export function adaptDaemonEvent(type: string, payload: Record<string, unknown>)
         type: 'message.complete',
         payload: {
           ...(bool(payload.cancelled) ? { interrupted: true } : {}),
+          ...(turnOutcomeReason(payload.stop_reason) ? { outcome: turnOutcomeReason(payload.stop_reason) } : {}),
           ...(bool(payload.unstarted) ? { unstarted: true } : {})
         }
       }]
@@ -614,6 +623,10 @@ function notificationEvents(payload: Record<string, unknown>): AnyEvent[] {
   }
 
   if (category === 'history') {
+    if (kind === 'replay_outcome') {
+      const outcome = readTurnOutcome(payload.payload)
+      return outcome ? [{ type: 'transcript.append', payload: { role: 'assistant', text: turnOutcomeLabel(outcome.reason), outcome: outcome.reason } }] : []
+    }
     if (kind === 'replay_assistant') {
       // The daemon nests persisted thinking under the notification's payload
       // sub-object; keep the top-level read as a fallback for older emitters.

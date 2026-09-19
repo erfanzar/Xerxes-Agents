@@ -1,6 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 /** @jsxImportSource @opentui/react */
+import { turnOutcomeLabel, type TurnOutcomeReason } from '../../types/turnOutcome.js'
 // OpenTUI message renderer. One Msg becomes one flat transcript block.
 // Assistant text renders through OpenTUI's native <markdown> (tables, code,
 // emphasis). Tool-call trail lines stay compact like Grok's transcript: the
@@ -165,9 +166,10 @@ function RailGutter({ rail, t }: { rail?: TurnRail; t: Theme }) {
  * inventing them would make the receipt a decoration. So the row states what
  * it can and stays the same shape for the day the other two land.
  */
-function TurnLedger({ seconds, tools, t }: { seconds: number; tools: number; t: Theme }) {
+function TurnLedger({ seconds, tools, t, outcome }: { seconds: number; tools: number; t: Theme; outcome?: TurnOutcomeReason }) {
   const facts = [
-    tools > 0 ? `${tools} tool${tools === 1 ? '' : 's'}` : 'done',
+    turnOutcomeLabel(outcome),
+    tools > 0 ? `${tools} tool${tools === 1 ? '' : 's'}` : '',
     seconds >= 0.05 ? `${seconds.toFixed(1)}s` : ''
   ].filter(Boolean)
 
@@ -865,6 +867,8 @@ function MessageLineView({
   const subagentsVisible = useStore($subagentCardsVisible)
   const hasSubagentCards = subagentsVisible && Boolean(msg.subagents?.length)
   const hasVisibleDetails = hasSubagentCards || messageHasVisibleDetails(msg, visibility)
+
+  if (msg.kind === 'outcome') return <TurnLedger outcome={msg.outcome} seconds={turnSeconds} tools={turnTools} t={t} />
 
   if (msg.kind === 'intro') {
     return null

@@ -98,8 +98,10 @@ test('cancelling mid-stream keeps the partial text received so far and ends abor
   // as a provider failure downstream.
   expect(events.some(event => event.type === 'text' && event.text.startsWith('[Error:'))).toBeFalse()
   expect(events.at(-1)).toMatchObject({ type: 'turn_done', reason: 'aborted' })
-  // The interrupted round persists nothing as assistant content.
-  expect(state.messages.filter(message => message.role === 'assistant')).toEqual([])
+  // Resume keeps the actual partial reply, without the cancellation diagnostic.
+  expect(state.messages.filter(message => message.role === 'assistant')).toEqual([
+    { role: 'assistant', content: 'partial before cancel' },
+  ])
   // The terminal provider_retry still records why the attempt sequence ended.
   expect(events.filter(event => event.type === 'provider_retry')).toEqual([
     expect.objectContaining({ final: true, error: 'user hit escape' }),
@@ -112,6 +114,7 @@ test('an abort during retry backoff reports aborted without synthetic error text
 
     async *stream(): AsyncGenerator<LlmDelta> {
       this.calls += 1
+      yield { content: 'Received before backoff. ' }
       throw new Error('transient connection drop')
     }
   }
@@ -139,6 +142,7 @@ test('an abort during retry backoff reports aborted without synthetic error text
   ))
 
   expect(client.calls).toBe(1)
+  expect(state.messages.at(-1)).toEqual({ role: 'assistant', content: 'Received before backoff. ' })
   expect(events.at(-1)).toMatchObject({
     type: 'turn_done',
     reason: 'aborted',
@@ -151,6 +155,36 @@ test('an abort during retry backoff reports aborted without synthetic error text
     final: true,
     error: 'user interrupt during backoff',
   })
+})
+
+test('terminal failure retains emitted text and reasoning but never unexecuted tool calls or diagnostics', async () => {
+  const state = createAgentState()
+  let executed = false
+  const events = await collectLive(runTurn({ model: 'gpt-4o', state, userMessage: 'write code', tools: [
+    { type: 'function', function: { name: 'ReadFile', description: 'Read', parameters: {} } },
+  ] }, { retryDelays: [], toolExecutor: { async execute() { executed = true; return 'unexpected' } },
+    llm: { async *stream() {
+      yield { thinking: 'Keep the indentation. ' }
+      yield { content: 'const x = {\n  value: ' }
+      yield { toolCalls: [{ id: 'incomplete', type: 'function', function: { name: 'ReadFile', arguments: { path: 'x' } } }] }
+      throw new Error('401 terminal provider diagnostic')
+    } },
+  }))
+  expect(events.at(-1)).toMatchObject({ type: 'turn_done', reason: 'provider_failed' })
+  expect(state.messages.at(-1)).toEqual({ role: 'assistant', content: 'const x = {\n  value: ', thinking: 'Keep the indentation. ' })
+  expect(state.thinkingContent).toEqual(['Keep the indentation. '])
+  expect(JSON.stringify(state.messages)).not.toContain('diagnostic')
+  expect(JSON.stringify(state.messages)).not.toContain('incomplete')
+  expect(executed).toBe(false)
+})
+
+test('abandoning the turn iterator retains delivered content once without completing tool calls', async () => {
+  const state = createAgentState()
+  const turn = runTurn({ model: 'gpt-4o', state, userMessage: 'begin' }, {
+    llm: { async *stream() { yield { content: 'Delivered partial' }; yield { content: 'not consumed' } } },
+  })
+  for await (const event of turn) { if (event.type === 'text') break }
+  expect(state.messages.filter(message => message.role === 'assistant')).toEqual([{ role: 'assistant', content: 'Delivered partial' }])
 })
 
 test('a replayed cross-tool-round prefix stays suppressed while streaming diverging chunks live', async () => {

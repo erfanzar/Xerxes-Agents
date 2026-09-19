@@ -1,5 +1,6 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
+import { assertOutputTokenLimit } from './outputTokenLimit.js'
 
 import { ConfigurationError, ProviderError } from '../core/errors.js'
 import { deterministicToolCallId } from '../streaming/toolCallIds.js'
@@ -509,6 +510,8 @@ function geminiRequestPayload(
     }
   }
   if (request.extraBody) Object.assign(payload, request.extraBody)
+  const outputConfig = payload.generationConfig
+  assertOutputTokenLimit(request, outputConfig && typeof outputConfig === 'object' && 'maxOutputTokens' in outputConfig ? outputConfig.maxOutputTokens : undefined)
   return payload
 }
 

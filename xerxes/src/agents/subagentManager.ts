@@ -25,6 +25,7 @@ export const SUBAGENT_CALLER_PROMPT = [
 
 export const SUBAGENT_BLOCKED_TOOLS = Object.freeze(new Set([
   'AgentTool',
+  'PlanTool',
   'AwaitAgents',
   'CheckAgentMessages',
   'HandoffTool',

@@ -52,6 +52,7 @@ export const displayModeLabel = (mode?: string): string => {
  */
 export function SessionHeader({
   busy,
+  disconnected,
   contextMax,
   contextUsed,
   goal,
@@ -63,6 +64,7 @@ export function SessionHeader({
 }: {
   /** Whether a turn is in flight; drives the state dot and its verb. */
   busy?: boolean
+  disconnected?: boolean
   contextMax?: number
   contextUsed?: number
   /** Current goal objective, when one is set. */
@@ -113,8 +115,8 @@ export function SessionHeader({
         </Box>
         <Box flexDirection="row" flexShrink={0} minWidth={0} overflow="hidden">
           <Text wrap="truncate-end">
-            <Span color={busy ? t.ds.working : t.ds.done}>{`${GLYPH.state} `}</Span>
-            <Span color={t.ds.meta}>{busy ? 'working' : 'idle'}</Span>
+            <Span color={disconnected ? t.color.warn : busy ? t.ds.working : t.ds.done}>{`${GLYPH.state} `}</Span>
+            <Span color={t.ds.meta}>{disconnected ? 'disconnected' : busy ? 'working' : 'idle'}</Span>
             <Span color={t.ds.rule}>{` ${GLYPH.sectionBreak} `}</Span>
             {max > 0 ? (
               <>
@@ -395,11 +397,10 @@ export function WorkspaceFooter({
           ) : rightLabel ? <Text color={t.ds.caption} wrap="truncate-end">{rightLabel}</Text> : null}
           {showProvider ? (
             modelConfigured ? (
-              // A green dot vouches that the next ⏎ will actually reach a model.
+              // Configuration is not evidence of credentials or connectivity.
               <Text wrap="truncate-end">
                 <Span color={t.ds.rule}>{`${GLYPH.sectionBreak} `}</Span>
-                <Span color={t.color.statusGood}>{`${GLYPH.state} `}</Span>
-                <Span color={t.ds.caption}>provider ready</Span>
+                <Span color={t.ds.caption}>model selected</Span>
               </Text>
             ) : (
               <Text wrap="truncate-end">

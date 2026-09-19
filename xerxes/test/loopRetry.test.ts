@@ -341,11 +341,11 @@ test('a permanently stalled stream fails the round with a visible timeout error'
   ])
   const texts = events.filter(event => event.type === 'text').map(event => event.text)
   expect(texts.at(-1)).toContain('stream inactivity timeout')
-  // The partial round and the terminal error are not persisted as assistant
-  // content; the turn ends cleanly with the error carried by the final
-  // provider_retry and text events.
-  expect(state.messages.some(message => message.role === 'assistant')).toBe(false)
-  expect(state.messages.at(-1)).toMatchObject({ role: 'user', content: 'stall forever' })
+  // Received output survives the terminal timeout; the diagnostic remains an
+  // event rather than fabricated provider history.
+  expect(state.messages.filter(message => message.role === 'assistant')).toEqual([
+    { role: 'assistant', content: 'partial ' },
+  ])
   expect(events.at(-1)).toMatchObject({ type: 'turn_done' })
 })
 

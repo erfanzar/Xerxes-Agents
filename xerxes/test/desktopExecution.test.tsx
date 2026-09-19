@@ -10,6 +10,14 @@ import type { SessionRow } from '../src/desktop/renderer/types.js'
 import type { ToolItem } from '../src/desktop/renderer/types.js'
 
 const item: ToolItem = { id: 'call-1', name: 'exec_command', verb: 'exec_command', arg: 'sed', dur: '0.0s', state: 'done', input: JSON.stringify({ cmd: 'sed', args: ['-n', '10,20p', 'path with spaces/file.ts'] }), output: JSON.stringify({ stdout: 'function run() {\n  return 1\n}\n', stderr: '', exitCode: 0, cwd: '/repo' }) }
+test('collapsed calls do not construct large output viewers', () => {
+  const output = 'Large result line\n'.repeat(10_000)
+  const html = renderToStaticMarkup(createElement(ToolCallRow, { label: 'Exec command', item: { ...item, output } }))
+  expect(html).toContain('Exec command')
+  expect(html).not.toContain('Large result line')
+  expect(html).not.toContain('execution__viewer')
+  expect(html.length).toBeLessThan(3000)
+})
 test('collapsed tool rows show complete command arguments and surface nonzero exit failures', () => {
   const html = renderToStaticMarkup(createElement(ToolCallRow, { label: 'Exec command', item: { ...item, output: JSON.stringify({ exitCode: 2, stderr: 'Permission denied' }) } }))
   const summary = html.slice(0, html.indexOf('</summary>'))

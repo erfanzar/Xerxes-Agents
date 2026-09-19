@@ -226,7 +226,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
     setVoiceProcessing(false)
     // Background tasks belong to other live sessions too; switching tabs must
     // not forget them before their completion event arrives.
-    patchUiState({ info: null, sid: null, usage: ZERO })
+    patchUiState({ disconnected: false, info: null, sid: null, usage: ZERO })
     setHistoryItems([])
     setLastUserMsg('')
     setStickyPrompt('')
@@ -439,7 +439,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
         const previousSid = getUiState().sid
 
         runClientSwitch(generation, () =>
-          gw.request<SessionResumeResponse>('session.resume', { cols: colsRef.current, session_id: id })
+          gw.request<SessionResumeResponse>('session.resume', { cols: colsRef.current, session_id: id, ...(options.preserveView ? { preserve_view: true } : {}) })
         )
           .then(raw => {
             if (generation !== switchGenerationRef.current) return
@@ -454,12 +454,15 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
             const info = r.info ?? null
             const running = Boolean(r.running || r.status === 'working' || r.status === 'waiting')
             const recovering = options.preserveView === true && (previousSid ?? getUiState().info?.session_id) === r.session_id
+            const replaying = recovering && r.reconnected === true
             const scrollPosition = recovering ? scrollRef.current?.getScrollTop() : undefined
             const followedBottom = recovering ? scrollRef.current?.isSticky() : true
 
             composerActions.activateSessionQueue(r.session_id)
-            if (recovering) turnController.fullReset(true)
-            else resetSession()
+            if (!replaying) {
+              if (recovering) turnController.fullReset(true)
+              else resetSession()
+            }
             setSessionStartedAt(r.started_at ? r.started_at * 1000 : Date.now())
             seedTurnClock(r.inflight, running, setTurnStartedAt)
 
@@ -470,17 +473,24 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
               ...liveSessionInflightMessages(r.inflight)
             ]
 
-            setHistoryItems(capTranscriptHistory(info ? [introMsg(info), ...resumed] : resumed))
+            if (!replaying) setHistoryItems(capTranscriptHistory(info ? [introMsg(info), ...resumed] : resumed))
             writeActiveSessionFile(r.resumed ?? r.session_id)
             patchUiState({
+              disconnected: false,
               busy: running,
               info,
               sid: r.session_id,
               status: statusFromLiveSession(r.status, running),
               usage: usageFrom(info)
             })
-            hydrateLiveSessionInflight(r.inflight)
-            turnController.recordTodos(r.todos)
+            if (!replaying) {
+              hydrateLiveSessionInflight(r.inflight)
+              turnController.recordTodos(r.todos)
+            }
+            if (r.recovery_pending) gw.finishSessionRecovery(r.session_id)
+            if (recovering) patchTurnState(state => ({ ...state,
+              activity: state.activity.filter(item => item.text !== 'gateway connection lost · recovering session…')
+            }))
 
             // Agent View "attach" is non-destructive: the chat you came from
             // remains live (and may keep working) while the saved chat becomes

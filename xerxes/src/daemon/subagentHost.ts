@@ -60,6 +60,8 @@ import { DaemonSubagentEventBus } from './subagentEvents.js'
 import { resolveOwnedSubagentRetry } from './subagentRetryOwnership.js'
 import type { DurableTaskBridge } from '../tasks/durableTaskBridge.js'
 
+export type SourceProviderClient = Pick<NativeSubagentHostOptions, 'llm' | 'contextLimit' | 'maxTokens' | 'maxOutputTokens' | 'temperature' | 'topK' | 'topP'> & { readonly route: string }
+
 export interface NativeSubagentHostOptions {
   /** Reconstruct original durable budget ownership before a recovered attempt starts. */
   readonly restoreModelCallScopes?: (snapshot: SpawnedAgentSnapshot) => readonly ModelCallScope[]
@@ -76,6 +78,8 @@ export interface NativeSubagentHostOptions {
   readonly cwd: string
   /** Resolve the owning session's project root for a new or recovered child. */
   readonly resolveSourceWorkspace?: (sourceId: string) => string
+  /** Host-owned source routing, checked before allocation and execution. Never persist the client. */
+  readonly resolveSourceClient?: (sourceId: string, model: string, explicitProfile?: string) => SourceProviderClient | undefined
   readonly resolveSourceProvider?: (sourceId: string, model: string) => string | undefined
   /** Route identity captured for inherited children and checked on recovery. */
   readonly inheritedProviderRoute?: string
@@ -340,6 +344,7 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
   private validateProviderSelection: NativeSubagentHostOptions['validateProviderSelection']
   private validateInheritedSelection: NativeSubagentHostOptions['validateInheritedSelection']
   private resolveSourceWorkspace: NativeSubagentHostOptions['resolveSourceWorkspace']
+  private resolveSourceClient: NativeSubagentHostOptions['resolveSourceClient']
   private resolveSourceProvider: NativeSubagentHostOptions['resolveSourceProvider']
   private inheritedProviderRoute: NativeSubagentHostOptions['inheritedProviderRoute']
   private resolveProviderRoute: NativeSubagentHostOptions['resolveProviderRoute']
@@ -366,6 +371,7 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
     this.restoreModelCallScopes = options.restoreModelCallScopes
     this.validateProviderSelection = options.validateProviderSelection
     this.validateInheritedSelection = options.validateInheritedSelection
+    this.resolveSourceClient = options.resolveSourceClient
     this.resolveSourceProvider = options.resolveSourceProvider
     this.resolveSourceWorkspace = options.resolveSourceWorkspace
     this.inheritedProviderRoute = options.inheritedProviderRoute
@@ -385,6 +391,7 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
     this.restoreModelCallScopes = options.restoreModelCallScopes
     this.validateProviderSelection = options.validateProviderSelection
     this.validateInheritedSelection = options.validateInheritedSelection
+    this.resolveSourceClient = options.resolveSourceClient
     this.resolveSourceProvider = options.resolveSourceProvider
     this.resolveSourceWorkspace = options.resolveSourceWorkspace
     this.inheritedProviderRoute = options.inheritedProviderRoute
@@ -446,8 +453,10 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
       ? this.fallbackPermissionMode
       : requestedPermissionMode
     const workspace = this.resolveWorkspace(options.sourceAgentId)
-    const providerProfile = options.agent?.providerProfile ?? (options.sourceAgentId ? this.resolveSourceProvider?.(options.sourceAgentId, model) : undefined)
-    const providerRoute = this.captureProviderRoute(providerProfile, model)
+    const sourceClient = options.sourceAgentId ? this.resolveSourceClient?.(options.sourceAgentId, model, options.agent?.providerProfile) : undefined
+    const providerProfile = sourceClient ? undefined : options.agent?.providerProfile ?? (options.sourceAgentId ? this.resolveSourceProvider?.(options.sourceAgentId, model) : undefined)
+    const providerRoute = this.captureProviderRoute(providerProfile, model, options.sourceAgentId)
+    const reasoningEffort = options.agent?.reasoningEffort ?? definition.effort ?? (sourceClient ? undefined : this.fallbackEffort)
     const task = await this.spawnResolved({
       ...(options.signal ? { signal: options.signal } : {}),
       definition,
@@ -456,7 +465,7 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
       ...(options.worktreeSource === undefined ? {} : { worktreeSource: options.worktreeSource }),
       input: prompt,
       ...(providerProfile ? { providerProfile } : {}),
-      ...((options.agent?.reasoningEffort ?? definition.effort ?? this.fallbackEffort) ? { reasoningEffort: (options.agent?.reasoningEffort ?? definition.effort ?? this.fallbackEffort)! } : {}),
+      ...(reasoningEffort ? { reasoningEffort } : {}),
       model,
       workspace,
       ...(providerRoute === undefined ? {} : { providerRoute }),
@@ -497,14 +506,17 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
       && resolved.workspace !== normalizeWorkspace(this.cwd, 'host workspace') && !this.hasWorkspaceWorktreeFactory) {
       throw new ValidationError('workspace', 'alternate workspaces require worktreeForWorkspace', resolved.workspace)
     }
-    this.assertProviderRoute(resolved.providerProfile, model, resolved.providerRoute)
+    this.assertProviderRoute(resolved.providerProfile, model, resolved.providerRoute, resolved.sourceAgentId)
     const generation = this.generation
     resolved.signal?.throwIfAborted()
-    if (resolved.providerProfile) await this.validateProviderSelection?.(resolved.providerProfile, model, resolved.reasoningEffort, resolved.signal)
-    else await this.validateInheritedSelection?.(model, resolved.reasoningEffort, resolved.signal)
+    const sourceClient = resolved.sourceAgentId ? this.resolveSourceClient?.(resolved.sourceAgentId, model, resolved.providerProfile) : undefined
+    if (!sourceClient) {
+      if (resolved.providerProfile) await this.validateProviderSelection?.(resolved.providerProfile, model, resolved.reasoningEffort, resolved.signal)
+      else await this.validateInheritedSelection?.(model, resolved.reasoningEffort, resolved.signal)
+    }
     resolved.signal?.throwIfAborted()
     if (generation !== this.generation) throw new Error('Agent host changed during selection validation; retry the spawn')
-    this.assertProviderRoute(resolved.providerProfile, model, resolved.providerRoute)
+    this.assertProviderRoute(resolved.providerProfile, model, resolved.providerRoute, resolved.sourceAgentId)
     const worktreeRef = parseWorktreeRef(resolved.worktreeRef)
     const worktreeSource = parseWorktreeSource(resolved.worktreeSource)
     if (worktreeSource && (worktreeRef || (resolved.isolation ?? definition.isolation) !== 'worktree')) throw new ValidationError('worktree_source', 'requires isolation=worktree and no worktree_ref', worktreeSource)
@@ -647,10 +659,10 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
     const model = snapshot.model?.trim() || stringConfig(definition.model) || this.fallbackModel
     const workspace = this.resolveRecoveredWorkspace(snapshot)
     const providerRoute = providerRouteOf(snapshot)
-    if (providerRoute === undefined && (this.inheritedProviderRoute !== undefined || this.resolveProviderRoute !== undefined)) {
+    if (providerRoute === undefined && (this.inheritedProviderRoute !== undefined || this.resolveProviderRoute !== undefined || this.resolveSourceClient !== undefined)) {
       throw new ValidationError('provider_route', 'cannot recover a child without its original provider route; dispatch new work under the current route', snapshot.id)
     }
-    this.assertProviderRoute(snapshot.providerProfile, model, providerRoute)
+    this.assertProviderRoute(snapshot.providerProfile, model, providerRoute, snapshot.sourceAgentId)
     const requestedMode = snapshot.rules?.length ? permissionModeFromRules(snapshot.rules) : this.fallbackPermissionMode
     const permissionMode = delegatedPermissionExceeds(requestedMode, this.fallbackPermissionMode)
       ? this.fallbackPermissionMode
@@ -834,16 +846,15 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
     return normalizeWorkspace(raw, 'source workspace')
   }
 
-  private captureProviderRoute(profile: string | undefined, model: string): string | undefined {
-    const route = profile?.trim() ? this.resolveProviderRoute?.(profile.trim(), model) : this.inheritedProviderRoute
+  private captureProviderRoute(profile: string | undefined, model: string, sourceId?: string): string | undefined {
+    const source = sourceId ? this.resolveSourceClient?.(sourceId, model, profile) : undefined
+    const route = source?.route ?? (profile?.trim() ? this.resolveProviderRoute?.(profile.trim(), model) : this.inheritedProviderRoute)
     return route === undefined ? undefined : normalizeProviderRoute(route, 'provider route')
   }
 
-  private assertProviderRoute(profile: string | undefined, model: string, expected: string | undefined): void {
+  private assertProviderRoute(profile: string | undefined, model: string, expected: string | undefined, sourceId?: string): void {
     if (expected === undefined) return
-    const current = profile?.trim()
-      ? this.resolveProviderRoute?.(profile.trim(), model)
-      : this.inheritedProviderRoute
+    const current = this.captureProviderRoute(profile, model, sourceId)
     if (current === undefined || normalizeProviderRoute(current, 'provider route') !== expected) {
       throw new ValidationError('provider_route', 'provider route changed since this child was created; dispatch new work under the current route', { expected, current })
     }
@@ -1218,13 +1229,19 @@ async function runNativeSubagent(
   const model = request.task.model.trim() || stringConfig(request.config.model) || options.model
   const providerProfile = stringConfig(request.config.providerProfile)
   const expectedRoute = providerRouteFromConfig(request.config)
-  const currentRoute = providerProfile
+  const sourceClient = request.task.sourceId ? options.resolveSourceClient?.(request.task.sourceId, model, providerProfile || undefined) : undefined
+  const currentRoute = sourceClient?.route ?? (providerProfile
     ? options.resolveProviderRoute?.(providerProfile, model)
-    : options.inheritedProviderRoute
+    : options.inheritedProviderRoute)
   if (expectedRoute !== undefined && currentRoute !== expectedRoute) {
     throw new ValidationError('provider_route', 'provider route changed before child execution; dispatch new work under the current route', { expected: expectedRoute, current: currentRoute })
   }
-  if (!providerProfile) {
+  request.cancelSignal.throwIfAborted()
+  if (sourceClient) {
+    const { maxTokens: _max, maxOutputTokens: _output, contextLimit: _context, temperature: _temperature, topK: _topK, topP: _topP, ...shared } = options
+    options = { ...shared, ...sourceClient }
+  }
+  if (!sourceClient && !providerProfile) {
     request.cancelSignal.throwIfAborted()
     await options.validateInheritedSelection?.(model, stringConfig(request.config.reasoningEffort) || undefined, request.cancelSignal)
     request.cancelSignal.throwIfAborted()
@@ -1233,7 +1250,7 @@ async function runNativeSubagent(
       throw new ValidationError('provider_route', 'provider route changed before child execution; dispatch new work under the current route', { expected: expectedRoute, current: afterValidation })
     }
   }
-  if (providerProfile) {
+  if (!sourceClient && providerProfile) {
     request.cancelSignal.throwIfAborted()
     await options.validateProviderSelection?.(providerProfile, model, stringConfig(request.config.reasoningEffort) || undefined, request.cancelSignal)
     request.cancelSignal.throwIfAborted()
@@ -1371,7 +1388,9 @@ async function runNativeSubagent(
                 : event.reason === 'context_overflow'
                 ? 'Subagent provider context window was exhausted'
                 : event.reason === 'provider_failed'
-                  ? 'Subagent provider request failed'
+                  ? sourceClient
+                    ? 'Subagent local provider request failed. Check the parent session local connection and authorization before retrying.'
+                    : 'Subagent provider request failed'
                   : `Subagent stopped before completion: ${event.reason}`,
             )
           }

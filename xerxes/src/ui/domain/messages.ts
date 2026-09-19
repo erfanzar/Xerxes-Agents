@@ -1,5 +1,6 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
+import { turnOutcomeReason } from '../../types/turnOutcome.js'
 import { LONG_MSG } from '../config/limits.js'
 import { buildToolTrailLine, fmtK } from '../lib/text.js'
 import { summarizeToolStartDisplay } from '../lib/toolStartDisplay.js'
@@ -47,7 +48,15 @@ export const toTranscriptMessages = (rows: unknown): Msg[] => {
       continue
     }
 
-    const { context, duration_s, error, name, role, text, thinking } = row as TranscriptRow
+    const { context, duration_s, error, name, role, text, thinking, outcome } = row as TranscriptRow
+
+    const reason = turnOutcomeReason(outcome)
+    if (reason) {
+      if (pending.length) out.push({ kind: 'trail', role: 'system', text: '', tools: pending })
+      pending = []
+      out.push({ kind: 'outcome', role: 'assistant', text: '', outcome: reason })
+      continue
+    }
 
     if (role === 'tool') {
       // Bare rows (no name, no context, no diagnostic) carry nothing a folded
@@ -108,6 +117,7 @@ interface ImageMeta {
 }
 
 interface TranscriptRow {
+  outcome?: unknown
   context?: string
   duration_s?: number
   error?: string

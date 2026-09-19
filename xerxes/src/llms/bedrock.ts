@@ -1,5 +1,6 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
+import { assertOutputTokenLimit } from './outputTokenLimit.js'
 
 /**
  * Amazon Bedrock Converse provider (pi-ai `bedrock-converse-stream` parity).
@@ -644,6 +645,8 @@ export function buildBedrockConverseInput(
     ...(thinkingFields ? { additionalModelRequestFields: thinkingFields } : {}),
   }
   if (request.extraBody) Object.assign(input, request.extraBody)
+  const inference = input.inferenceConfig
+  assertOutputTokenLimit(request, inference && typeof inference === 'object' && 'maxTokens' in inference ? inference.maxTokens : undefined)
   return input
 }
 

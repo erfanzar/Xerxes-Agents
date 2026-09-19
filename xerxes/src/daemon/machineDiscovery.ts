@@ -1,9 +1,11 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
-import { readFile } from 'node:fs/promises'
-import { homedir } from 'node:os'
+import { readFile, mkdtemp, rm } from 'node:fs/promises'
+import { homedir, tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawn, type SpawnOptions, type ChildProcess } from 'node:child_process'
+import { sshFailure } from '../security/sshDiagnostics.js'
+import { writeSshConnectionConfig } from '../security/sshConnectionConfig.js'
 
 export interface RemoteFolders { path: string; directories: string[]; truncated: boolean }
 export interface MachineDiscovery {
@@ -73,39 +75,43 @@ export function remoteFolderCommand(path: string): string {
   return "exec sh -c '" + script.replaceAll("'", "'\\''") + "'"
 }
 
-export function browseSshFolders(target: string, path: string, options: { signal?: AbortSignal; spawnProcess?: (file: string, args: readonly string[], options: SpawnOptions) => ChildProcess; timeoutMs?: number } = {}): Promise<RemoteFolders> {
+export async function browseSshFolders(target: string, path: string, options: { signal?: AbortSignal; spawnProcess?: (file: string, args: readonly string[], options: SpawnOptions) => ChildProcess; timeoutMs?: number } = {}): Promise<RemoteFolders> {
   if (!/^(?:[a-zA-Z0-9_][a-zA-Z0-9_.-]*@)?[a-zA-Z0-9_][a-zA-Z0-9_.-]*$/.test(target) || target.length > 255) return Promise.reject(new Error('Choose an SSH alias or user@hostname'))
   const command = remoteFolderCommand(path)
-  return new Promise((accept, reject) => {
-    if (options.signal?.aborted) { reject(new Error('Folder browse cancelled')); return }
-    const child = (options.spawnProcess ?? spawn)('ssh', ['-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'ConnectTimeout=10', '--', target, command], { stdio: ['ignore', 'pipe', 'pipe'] })
-    const output: Buffer[] = [], errors: Buffer[] = []
-    let bytes = 0, settled = false
-    const finish = (error?: Error, value?: RemoteFolders) => {
-      if (settled) return
-      settled = true; clearTimeout(timer); options.signal?.removeEventListener('abort', cancel)
-      if (error) { child.kill('SIGKILL'); reject(error) } else accept(value!)
-    }
-    const cancel = () => finish(new Error('Folder browse cancelled'))
-    const timer = setTimeout(() => finish(new Error('SSH folder browse timed out. Check the host and SSH connection.')), options.timeoutMs ?? 15000)
-    options.signal?.addEventListener('abort', cancel, { once: true })
-    for (const [stream, chunks] of [[child.stdout, output], [child.stderr, errors]] as const) stream?.on('data', (data: Buffer) => {
-      bytes += data.length
-      if (bytes > 1024 * 1024) finish(new Error('SSH folder response is too large; enter a more specific path'))
-      else chunks.push(data)
+  const directory = await mkdtemp(join(tmpdir(), 'xr-browse-'))
+  try {
+    const config = await writeSshConnectionConfig(directory)
+    return await new Promise<RemoteFolders>((accept, reject) => {
+      if (options.signal?.aborted) { reject(new Error('Folder browse cancelled')); return }
+      const child = (options.spawnProcess ?? spawn)('ssh', ['-F', config, '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'ForwardAgent=no', '-o', 'ForwardX11=no', '-o', 'ConnectTimeout=10', '--', target, command], { stdio: ['ignore', 'pipe', 'pipe'] })
+      const output: Buffer[] = [], errors: Buffer[] = []
+      let bytes = 0, settled = false
+      const finish = (error?: Error, value?: RemoteFolders) => {
+        if (settled) return
+        settled = true; clearTimeout(timer); options.signal?.removeEventListener('abort', cancel)
+        if (error) { child.kill('SIGKILL'); reject(error) } else accept(value!)
+      }
+      const cancel = () => finish(new Error('Folder browse cancelled'))
+      const timer = setTimeout(() => finish(new Error('SSH folder browse timed out. Check the host and SSH connection.')), options.timeoutMs ?? 15000)
+      options.signal?.addEventListener('abort', cancel, { once: true })
+      for (const [stream, chunks] of [[child.stdout, output], [child.stderr, errors]] as const) stream?.on('data', (data: Buffer) => {
+        bytes += data.length
+        if (bytes > 1024 * 1024) finish(new Error('SSH folder response is too large; enter a more specific path'))
+        else chunks.push(data)
+      })
+      child.on('error', () => finish(new Error('Could not start SSH. Check that the SSH client is installed and executable.')))
+      child.on('close', code => {
+        if (settled) return
+        if (code !== 0) { finish(sshFailure('browse', Buffer.concat(errors).toString('utf8'))); return }
+        const fields = Buffer.concat(output).toString('utf8').split('\0')
+        const directory = fields.shift() ?? ''
+        if (!directory.startsWith('/') || /[\x00-\x1f\x7f]/.test(directory)) { finish(new Error('SSH returned an invalid folder listing')); return }
+        const truncated = fields.includes('__XERXES_TRUNCATED__')
+        const directories = fields.filter(entry => entry.startsWith('./') && !/[\x00-\x1f\x7f]/.test(entry)).map(entry => entry.slice(2)).sort((a, b) => a.localeCompare(b))
+        finish(undefined, { path: directory, directories, truncated })
+      })
     })
-    child.on('error', error => finish(error))
-    child.on('close', code => {
-      if (settled) return
-      if (code !== 0) { finish(new Error(`SSH browse failed: ${Buffer.concat(errors).toString('utf8').trim().slice(0, 1000) || `exit ${code}`}. Connect with ssh ${target} in a terminal to verify authentication and the host key.`)); return }
-      const fields = Buffer.concat(output).toString('utf8').split('\0')
-      const directory = fields.shift() ?? ''
-      if (!directory.startsWith('/') || /[\x00-\x1f\x7f]/.test(directory)) { finish(new Error('SSH returned an invalid folder listing')); return }
-      const truncated = fields.includes('__XERXES_TRUNCATED__')
-      const directories = fields.filter(entry => entry.startsWith('./') && !/[\x00-\x1f\x7f]/.test(entry)).map(entry => entry.slice(2)).sort((a, b) => a.localeCompare(b))
-      finish(undefined, { path: directory, directories, truncated })
-    })
-  })
+  } finally { await rm(directory, { recursive: true, force: true }) }
 }
 
 export const machineDiscovery: MachineDiscovery = { hosts: readSshHosts, browse: browseSshFolders }

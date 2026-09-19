@@ -1,6 +1,6 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
-import { connectRemoteMachine, parseRemoteMachine } from '../../../lib/machineHandoff.js'
+import { parseRemoteMachine } from '../../../lib/machineHandoff.js'
 import { NO_CONFIRM_DESTRUCTIVE } from '../../../config/env.js'
 import { dailyFortune, randomFortune } from '../../../content/fortunes.js'
 import { HOTKEYS } from '../../../content/hotkeys.js'
@@ -185,6 +185,7 @@ export const coreCommands: SlashCommand[] = [
               '/details <section> [hidden|collapsed|expanded|reset]',
               'override one section (thinking/tools/activity; agents use /agents)'
             ],
+            ['/appearance [chrome|transparent]', 'toggle or select the locally saved terminal background design'],
             ['/fortune [random|daily]', 'show a random or daily local fortune']
           ],
           title: 'TUI'
@@ -336,8 +337,7 @@ export const coreCommands: SlashCommand[] = [
           const result = await ctx.gateway.rpc('slash.exec', { command: 'machine ' + arg.trim() })
           if (ctx.stale()) return
           if (!result?.ok) throw new Error(String(result?.error ?? 'Could not resolve machine'))
-          await connectRemoteMachine(parseRemoteMachine(result.machine))
-          ctx.transcript.sys('Remote session closed. Back in your local workspace.')
+          patchOverlayState({ machinePicker: parseRemoteMachine(result.machine).alias })
         } catch (error) { ctx.guardedErr(error) }
         return
       }

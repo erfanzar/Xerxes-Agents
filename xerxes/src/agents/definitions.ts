@@ -599,7 +599,7 @@ function hardcodedBuiltinDefinitions(): ReadonlyMap<string, AgentDefinition> {
     'ReadFile', 'WriteFile', 'FileEditTool', 'GlobTool', 'GrepTool', 'ListDir',
     'exec_command', 'write_stdin', 'list_terminal_sessions', 'close_terminal_session',
     'check_command', 'list_commands', 'kill_command', 'pty_open', 'pty_write', 'pty_list', 'pty_close',
-    'DuckDuckGoSearch', 'computer_use', 'AgentTool', 'SpawnAgents', 'SendMessageTool',
+    'DuckDuckGoSearch', 'computer_use', 'AgentTool', 'PlanTool', 'SpawnAgents', 'SendMessageTool',
     'TaskCreateTool', 'TaskGetTool', 'TaskListTool', 'TaskOutputTool', 'TaskStopTool',
     'TaskUpdateTool', 'AwaitAgents', 'CheckAgentMessages', 'PeekAgent', 'ResetAgent',
     'HandoffTool', 'AskUserQuestionTool', 'SetInteractionModeTool', 'get_goal',

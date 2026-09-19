@@ -1050,10 +1050,11 @@ function ActivityGroup({ blocks }: { blocks: Snapshot['blocks'] }): ReactElement
   const failures = tools.filter(item => item.state === 'failed').length
   const running = tools.some(item => item.state === 'working') || blocks.some(block => block.kind === 'thinking' && block.streaming)
   const [expanded, setExpanded] = useState(failures > 0 || running)
+  const [inspected, setInspected] = useState(false)
   useEffect(() => { if (failures || running) setExpanded(true) }, [failures, running])
-  return <details className="activity-group" open={expanded} onToggle={event => setExpanded(event.currentTarget.open)}>
+  return <details className="activity-group" open={expanded} onToggle={event => { setExpanded(event.currentTarget.open); if (event.currentTarget.open) setInspected(true) }}>
     <summary><Icon name="chevron" size={14} /><span>{running ? 'Working' : tools.length ? 'Used ' + tools.length + ' tool' + (tools.length === 1 ? '' : 's') : 'Reasoning'}<span className="activity-group__actions">{[...new Set(tools.map(item => toolLabelOf(item.verb)))].join(', ')}</span></span>{failures > 0 && <strong>{failures} failed</strong>}</summary>
-    <div className="activity-group__body">{blocks.map(block => <BlockView key={block.id} block={block} />)}</div>
+    <div className="activity-group__body">{(expanded || inspected) && blocks.map(block => <BlockView key={block.id} block={block} />)}</div>
   </details>
 }
 

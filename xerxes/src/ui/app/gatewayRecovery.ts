@@ -27,9 +27,12 @@ export function planGatewayRecovery(
   liveSid: null | string,
   recoverSid: null | string,
   attempts: number[],
-  now: number
+  now: number,
+  restoringSid: null | string = null
 ): RecoveryPlan {
-  const sid = liveSid ?? recoverSid
+  // gateway.ready consumes recoverSid before initialize finishes. Retain the
+  // disconnected view's identity through a second drop in that interval.
+  const sid = liveSid ?? recoverSid ?? restoringSid
   const recent = attempts.filter(t => now - t < GATEWAY_RECOVERY_WINDOW_MS)
   const recover = Boolean(sid) && recent.length < GATEWAY_RECOVERY_LIMIT
 

@@ -191,11 +191,16 @@ function activateSurface(id: number): void {
   for (const [otherId, other] of workspaceSurfaces) {
     if (other.host === surface.host && other.view) other.view.setVisible(otherId === id)
   }
+  // An already attached view keeps its old stacking position. Activation must
+  // bring it above the other retained workspaces as well as make it visible.
+  if (surface.view) surface.host.contentView.addChildView(surface.view)
   activeSurfaces.set(surface.host.id, id)
   const contents = surface.view?.webContents ?? surface.host.webContents
   contents.focus()
   const state = windowStates.get(id)?.()
-  if (state?.workspace) surface.host.setTitle(basename(state.workspace) + ' — ' + APP_NAME)
+  surface.host.setTitle(state?.remote
+    ? `${state.remote.alias} · ${basename(state.remote.workspacePath)} — ${APP_NAME}`
+    : state?.workspace ? `${basename(state.workspace)} — ${APP_NAME}` : APP_NAME)
   scheduleWindowSave()
 }
 

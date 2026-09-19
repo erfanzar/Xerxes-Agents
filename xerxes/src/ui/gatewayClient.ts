@@ -360,8 +360,12 @@ interface Pending {
 type RpcObject = Record<string, any>
 
 export interface GatewayClientOptions {
+  /** Explicitly bound local authority; private frames never become UI events. */
+  providerRelay?: (binding: string, frame: Readonly<Record<string, unknown>>, signal: AbortSignal) => Promise<unknown>
   /** SSH-forwarded socket: connect only; never launch or signal a local daemon. */
   externalSocketPath?: string
+  /** Private local handoff status: fixed diagnostics only, never remote output. */
+  externalStatusPath?: string
   /** Bun executable used when the client must launch a daemon. */
   bunBinary?: string
   /** Bun TypeScript CLI entry used when the client must launch a daemon. */
@@ -371,6 +375,8 @@ export interface GatewayClientOptions {
   projectDir?: string
   /** Connection-local session key; defaults to `tui:<uuid12>`. */
   sessionKey?: string
+  /** Parent-prepared live task; its public key is not a credential. */
+  preparedSession?: { id: string; key: string }
 }
 
 /**
@@ -380,9 +386,17 @@ export interface GatewayClientOptions {
  *   - `close`                   the socket closed
  */
 export class GatewayClient extends EventEmitter {
+  private readonly providerRelay: GatewayClientOptions['providerRelay']
+  private privateRelayCalls = 0
   readonly sessionKey: string
   private readonly projectDir: string
   private readonly externalSocketPath: string | undefined
+  private readonly externalStatusPath: string | undefined
+  private connectedExternalBefore = false
+  private connectionLeaseToken: string | undefined
+  private connectionLeaseAttached = false
+  private recoverySnapshotRequired = false
+  private recoveryDelivery: { sessionId: string; replay: unknown[]; interactions: unknown[]; live: unknown[]; bytes: number } | null = null
   private readonly bunBinary: string | undefined
   private readonly bunDaemonPath: string | undefined
   private readonly expectedDaemonBuildId: string
@@ -408,15 +422,18 @@ export class GatewayClient extends EventEmitter {
 
   constructor(opts: GatewayClientOptions = {}) {
     super()
+    this.providerRelay = opts.providerRelay
     this.setMaxListeners(100)
     this.bunBinary = opts.bunBinary?.trim() || undefined
     this.bunDaemonPath = opts.bunDaemonPath?.trim() || undefined
     this.expectedDaemonBuildId =
       opts.expectedDaemonBuildId?.trim() || process.env.XERXES_EXPECTED_DAEMON_BUILD_ID?.trim() || ''
     this.externalSocketPath = opts.externalSocketPath
+    this.externalStatusPath = opts.externalStatusPath
     this.projectDir = this.externalSocketPath ? (opts.projectDir || '/') : resolveProjectDir(opts.projectDir)
     this.sessionKey = opts.sessionKey ?? `tui:${randomKey()}`
     this.activeSessionKey = this.sessionKey
+    if (opts.preparedSession) this.rememberSessionKey(opts.preparedSession.id, opts.preparedSession.key)
   }
 
   /** Connect, launching the daemon if none is reachable. Concurrent callers share one cold-start attempt. */
@@ -439,7 +456,29 @@ export class GatewayClient extends EventEmitter {
 
   private async startOnce(): Promise<void> {
     if (this.externalSocketPath) {
-      if (!await this.tryConnect(this.externalSocketPath)) throw new Error('Remote daemon tunnel is unavailable. Reconnect with /machine.')
+      // The owning handoff restores the same socket after an SSH drop. Keep
+      // this renderer and its drafts instead of immediately giving up while
+      // the replacement ssh process is still authenticating.
+      const deadline = Date.now() + (this.connectedExternalBefore ? 30_000 : 0)
+      for (;;) {
+        if (this.closed) throw new Error('Remote connection cancelled')
+        if (await this.tryConnect(this.externalSocketPath)) break
+        if (this.externalStatusPath) {
+          let failed = false
+          try {
+            const status: unknown = JSON.parse(readFileSync(this.externalStatusPath, 'utf8'))
+            failed = isRecord(status) && status.state === 'failed'
+          } catch (error) {
+            if (!(error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT')) {
+              throw new Error('SSH recovery status is unreadable. Your draft is preserved; exit and reconnect with /machine.')
+            }
+          }
+          // Never display arbitrary sidecar content as an error.
+          if (failed) throw new Error('SSH reconnection stopped. Your draft is preserved here. Verify SSH access, then exit and reconnect with /machine.')
+        }
+        if (Date.now() >= deadline) throw new Error('Remote daemon tunnel is unavailable. Your draft is preserved; copy it before exiting and reconnecting with /machine.')
+        await delay(100)
+      }
       try {
         const identity = await this.probeDaemonIdentity()
         if (identity.runtime !== 'bun-typescript' || positiveInteger(identity.daemon_protocol) !== 35) {
@@ -449,6 +488,7 @@ export class GatewayClient extends EventEmitter {
         await this.detachSocketSilently()
         throw error
       }
+      this.connectedExternalBefore = true
       this.emitClient('gateway.ready', { socketPath: this.externalSocketPath, spawned: false })
       return
     }
@@ -515,6 +555,7 @@ export class GatewayClient extends EventEmitter {
       sock.once('error', onError)
       sock.once('connect', () => {
         sock.removeListener('error', onError)
+        if (settled || this.closed) { sock.destroy(); finish(false); return }
         this.attachSocket(sock)
         finish(true)
       })
@@ -677,6 +718,11 @@ export class GatewayClient extends EventEmitter {
       const active = this.socket === sock
       if (active) {
         this.socket = null
+        this.connectionLeaseAttached = false
+        if (this.recoveryDelivery) this.recoverySnapshotRequired = true
+        this.recoveryDelivery = null
+        this.approvalRequestIds.clear()
+        this.lastApprovalRequestId = ''
       }
       if (active && !this.closed && !this.silentSockets.has(sock)) {
         this.emitClient('gateway.closed', {})
@@ -786,8 +832,48 @@ export class GatewayClient extends EventEmitter {
       return
     }
 
+    if (frame.method === 'provider.remote.request') {
+      // Intercept before transcript conversion and reconnect buffering. Replies
+      // belong to this physical socket only, never its later replacement.
+      const socket = this.socket
+      const params = frame.params
+      if (!socket || !isRecord(params) || typeof params.binding !== 'string' || !/^[a-f0-9]{32}$/.test(params.binding) ||
+        typeof params.request_id !== 'string' || !/^[a-f0-9]{32}$/.test(params.request_id)) return
+      const answer = (reply: unknown) => {
+        if (this.socket !== socket || socket.destroyed) return
+        void this.request('provider.remote.reply', { binding: params.binding, request_id: params.request_id, reply }).catch(() => {})
+      }
+      if (!this.providerRelay || this.privateRelayCalls >= 16) { answer({ error: 'grant_unavailable' }); return }
+      // The local authority validates native completion shapes and scope. The
+      // renderer only transports the envelope; it loads no provider runtime.
+      const request = params.frame
+      if (!isRecord(request) || (request.op !== 'next' && request.op !== 'cancel') ||
+        typeof request.id !== 'string' || !/^[a-zA-Z0-9_-]{1,64}$/.test(request.id)) { answer({ error: 'invalid_request' }); return }
+      const controller = new AbortController()
+      const cancel = () => controller.abort()
+      socket.once('close', cancel)
+      this.privateRelayCalls++
+      const deadline = setTimeout(cancel, 60_000)
+      deadline.unref?.()
+      const aborted = new Promise<unknown>(resolve => controller.signal.addEventListener('abort', () => resolve({ error: 'cancelled' }), { once: true }))
+      void Promise.race([Promise.resolve().then(() => this.providerRelay!(params.binding as string, request, controller.signal)), aborted])
+        .then(answer, () => answer({ error: 'provider_failed' }))
+        .finally(() => { clearTimeout(deadline); socket.removeListener('close', cancel); this.privateRelayCalls-- })
+      return
+    }
+
     // Event notification: `{ method: "event", params: { type, payload } }`.
     if (frame.method === 'event' && frame.params && typeof frame.params === 'object') {
+      if (this.recoveryDelivery) {
+        this.recoveryDelivery.bytes += Buffer.byteLength(line)
+        if (this.recoveryDelivery.bytes > 1024 * 1024) {
+          this.emitClient('gateway.protocol_error', { message: 'Reconnect event buffer exceeded its limit; reopen the saved session.' })
+          this.socket?.destroy()
+          return
+        }
+        this.recoveryDelivery.live.push(parsed)
+        return
+      }
       const params = frame.params as { type?: string; payload?: Record<string, unknown> }
       const type = typeof params.type === 'string' ? params.type : ''
       if (!type || (params.payload !== undefined && !isRecord(params.payload))) {
@@ -1080,6 +1166,10 @@ export class GatewayClient extends EventEmitter {
   close(): void {
     this.closed = true
     this.startPromise = null
+    this.connectionLeaseToken = undefined
+    this.connectionLeaseAttached = false
+    this.recoverySnapshotRequired = false
+    this.recoveryDelivery = null
     const socket = this.socket
     this.socket = null
     // Reject in-flight requests immediately: nulling this.socket first makes
@@ -1120,6 +1210,52 @@ export class GatewayClient extends EventEmitter {
   /** True once the socket is connected (before any events have been emitted). */
   get connected(): boolean {
     return this.socket !== null
+  }
+
+  get hasConnectionLease(): boolean { return this.connectionLeaseToken !== undefined }
+
+  /** Deliver only after the UI restores the owning session identity. Consume
+   * once, with pending dialogs authoritative over stale journal requests. */
+  finishSessionRecovery(sessionId: string): void {
+    const delivery = this.recoveryDelivery
+    if (!delivery || delivery.sessionId !== sessionId) return
+    this.recoveryDelivery = null
+    for (const raw of delivery.replay) {
+      if (!isRecord(raw) || !isRecord(raw.params)) continue
+      const type = raw.params.type
+      if (type === 'approval_request' || type === 'question_request') continue
+      if (type === 'notification' && isRecord(raw.params.payload) && raw.params.payload.category === 'history') continue
+      this.onLine(JSON.stringify(raw))
+    }
+    for (const raw of delivery.interactions) {
+      if (!isRecord(raw) || !['approval_request', 'question_request'].includes(String(raw.type)) || !isRecord(raw.payload)) continue
+      this.onLine(JSON.stringify({ jsonrpc: '2.0', method: 'event', params: raw }))
+    }
+    for (const raw of delivery.live) this.onLine(JSON.stringify(raw))
+  }
+
+  private async reclaimConnectionLease(): Promise<boolean> {
+    if (!this.connectionLeaseToken || this.connectionLeaseAttached) return false
+    const lease = await this.rawRequest<RpcObject>('connection.lease', {
+      token: this.connectionLeaseToken, project_dir: this.projectDir
+    })
+    if (lease.ok === false && lease.code === 'lease_expired') {
+      this.connectionLeaseToken = undefined
+      return false
+    }
+    if (lease.ok !== true) throw new Error('Could not reclaim connection ownership. Reconnect without submitting more work.')
+    this.connectionLeaseAttached = true
+    return true
+  }
+
+  private async enableConnectionLease(raw: RpcObject): Promise<void> {
+    if (raw.connection_lease_supported !== true || this.connectionLeaseAttached) return
+    const lease = await this.rawRequest<RpcObject>('connection.lease', {})
+    if (lease.ok !== true || typeof lease.token !== 'string' || !lease.token) {
+      throw new Error('Could not enable reconnect protection. No new work was submitted; reconnect and retry.')
+    }
+    this.connectionLeaseToken = lease.token
+    this.connectionLeaseAttached = true
   }
 
   // ── helpers ─────────────────────────────────────────────────────────
@@ -1247,6 +1383,7 @@ export class GatewayClient extends EventEmitter {
         session_key: nextSessionKey,
         ...(agentId ? { agent_id: agentId } : {})
       })
+      await this.enableConnectionLease(raw)
       const captured = finishCapture()
       const session = (raw.session ?? {}) as RpcObject
       const sessionId = String(session.id ?? '').trim()
@@ -1269,11 +1406,9 @@ export class GatewayClient extends EventEmitter {
 
   private async sessionResume(params: Record<string, unknown>): Promise<RpcObject> {
     const id = String(params.session_id ?? '')
-    // Never bind the raw session id as this connection's session key: another
-    // connection resuming the same session would derive the identical key and
-    // the daemon would alias both connections onto one session. Reuse the key
-    // this connection already owns for the session; otherwise mint a fresh
-    // connection-scoped key, exactly like sessionCreate.
+    // Propose a connection key, then adopt the authoritative key returned by
+    // initialize. The daemon may attach a live task or load history under its
+    // saved ID; subsequent scoped RPCs must address that actual task.
     const nextSessionKey = id ? (this.sessionKeys.get(id) ?? `tui:${randomKey()}`) : this.sessionKey
     // `initialize` replays persisted history as notifications before its RPC
     // response. Capture those rows at the transport boundary and hydrate the
@@ -1285,17 +1420,37 @@ export class GatewayClient extends EventEmitter {
     const finishCapture = this.captureInitializeInfo(true, id || null)
 
     try {
+      const reclaimed = await this.reclaimConnectionLease()
+      // A second drop may lose a journal already drained by initialize. Use
+      // the authoritative persisted/inflight snapshot instead of appending
+      // an incomplete second journal to the existing turn buffers.
+      const preserve = reclaimed && params.preserve_view === true && !this.recoverySnapshotRequired
+      const restoringSocket = this.socket
+      if (preserve) this.recoveryDelivery = { sessionId: id, replay: [], interactions: [], live: [], bytes: 0 }
       const raw = await this.nativeSuccess('initialize', {
         project_dir: this.projectDir,
         resume_session_id: id,
-        session_key: nextSessionKey
+        session_key: nextSessionKey,
+        // A metadata-only preflight does not render history. Ordinary resume
+        // still hydrates the transcript; reconnect may retain its existing view.
+        ...(preserve || params.history_limit === 0 ? { history_limit: 0 } : {})
       })
+      await this.enableConnectionLease(raw)
       const captured = finishCapture()
       const session = (raw.session ?? {}) as RpcObject
       const sessionId = String(session.id ?? '').trim()
 
       if (!sessionId) {
         throw new Error('native daemon resume returned no session id')
+      }
+      if (preserve && sessionId !== id) throw new Error('Reconnect returned a different session; the current view was preserved.')
+      const reconnected = preserve && Array.isArray(raw.reconnect_events)
+      if (preserve && !reconnected) throw new Error('Reconnect journal is unavailable; the current view was preserved. Reopen the saved session.')
+      if (this.recoveryDelivery) {
+        this.recoveryDelivery.replay = reconnected ? raw.reconnect_events : []
+        this.recoveryDelivery.interactions = Array.isArray(raw.pending_interactions) ? raw.pending_interactions : []
+      } else if (Array.isArray(raw.pending_interactions) && raw.pending_interactions.length) {
+        this.recoveryDelivery = { sessionId, replay: [], interactions: raw.pending_interactions, live: [], bytes: 0 }
       }
 
       const responseMessages = transcriptFromStoredMessages(session.messages)
@@ -1309,16 +1464,22 @@ export class GatewayClient extends EventEmitter {
 
       // Same commit-after-confirm rule as sessionCreate: only adopt the key
       // once the daemon accepted the resume.
-      this.activeSessionKey = nextSessionKey
-      this.rememberSessionKey(sessionId, nextSessionKey)
+      const confirmedSessionKey = optionalTrimmedText(session.key) || nextSessionKey
+      this.activeSessionKey = confirmedSessionKey
+      this.rememberSessionKey(sessionId, confirmedSessionKey)
       const status = liveSessionStatus(session)
       const subagentSnapshots = subagentSnapshotsFromSession(session)
+      const info = await this.sessionInfoFromInitialize(raw, session, captured)
+      if (this.socket !== restoringSocket) throw new Error('Connection changed while restoring the session. Retry the connection.')
+      this.recoverySnapshotRequired = false
       return {
-        info: await this.sessionInfoFromInitialize(raw, session, captured),
+        reconnected,
+        recovery_pending: this.recoveryDelivery !== null,
+        info,
         // A resumed session can still be mid-turn (reattach to live work);
         // forward the inflight snapshot exactly like session.activate.
         todos: Array.isArray(session.todos) ? session.todos : undefined,
-      inflight: inflightFromSession(session),
+        inflight: inflightFromSession(session),
         message_count: messageCount,
         messages,
         resumed: sessionId,
@@ -1328,6 +1489,8 @@ export class GatewayClient extends EventEmitter {
         ...(subagentSnapshots ? { subagent_snapshots: subagentSnapshots } : {})
       }
     } catch (error) {
+      if (this.recoveryDelivery) this.recoverySnapshotRequired = true
+      this.recoveryDelivery = null
       finishCapture()
       throw error
     }
@@ -1438,8 +1601,8 @@ export class GatewayClient extends EventEmitter {
   }
 
   private async sessionStatus(params: Record<string, unknown>): Promise<RpcObject> {
-    const raw = await this.nativeSuccess('session.status', { session_key: this.keyFor(params.session_id) })
-    return { output: JSON.stringify(raw.session ?? raw, null, 2) }
+    const raw = await this.nativeSuccess('session.status', { session_key: this.keyFor(params.session_id), ...(params.history_limit === 0 ? {history_limit: 0} : {}) })
+    return params.structured === true ? raw : { output: JSON.stringify(raw.session ?? raw, null, 2) }
   }
 
   /** Inspect one live session without changing the daemon connection's active key. */
@@ -1749,7 +1912,9 @@ export class GatewayClient extends EventEmitter {
           effort: String(entry.effort ?? '').trim()
         }))
         .filter((entry: { effort: string }) => Boolean(entry.effort)),
-      source: String(raw.source ?? '')
+      source: String(raw.source ?? ''),
+      shape: String(raw.shape ?? ''),
+      note: String(raw.note ?? '')
     }
   }
 

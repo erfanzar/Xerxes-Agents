@@ -1,5 +1,6 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
+import type { TurnOutcomeReason } from '../types/turnOutcome.js'
 export interface ActiveTool {
   context?: string
   id: string
@@ -154,7 +155,8 @@ export interface ClarifyReq {
 
 export interface Msg {
   info?: SessionInfo
-  kind?: 'config' | 'diff' | 'intro' | 'panel' | 'slash' | 'trail'
+  kind?: 'config' | 'diff' | 'intro' | 'panel' | 'slash' | 'trail' | 'outcome'
+  outcome?: TurnOutcomeReason
   panelData?: PanelData
   role: Role
   subagents?: SubagentProgress[]
@@ -202,6 +204,8 @@ export interface McpServerStatus {
 }
 
 export interface SessionInfo {
+  local_provider_label?: string
+  remote_provider_binding_supported?: boolean
   cwd?: string
   fast?: boolean
   /** Current goal objective, when one is set. */

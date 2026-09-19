@@ -1,11 +1,11 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 
 import { daemonCompatibilityWarning } from '../src/desktop/renderer/buildInfo.js'
 import { Store, type XerxesLike } from '../src/desktop/renderer/store.js'
-import type { DaemonEvent } from '../src/desktop/renderer/types.js'
+import type { DaemonEvent, SessionRow } from '../src/desktop/renderer/types.js'
 
 /**
  * Store behavior against a scripted fake bridge: no sockets, no React. Each
@@ -105,6 +105,41 @@ describe('Store workspace folds', () => {
     bridge.push('turn_end', {})
     bridge.push('turn_begin', { text: 'review this' })
     expect(store.getSnapshot().blocks.filter(block => block.kind === 'user' && block.text === 'review this')).toHaveLength(2)
+  })
+
+  test('missing session previews have bounded concurrency and retries without empty redraws', async () => {
+    await Bun.sleep(0)
+    const rows: SessionRow[] = Array.from({ length: 60 }, (_, i) => ({ id: `preview-${i}`, key: `preview-${i}`, title: '', status: '', age: '', current: false, kind: 'main', turns: 1, messages: 2, cwd: '/repo', untitled: true }))
+    const pending: Array<ReturnType<typeof Promise.withResolvers<Record<string, unknown>>>> = []
+    bridge.respondWith(method => {
+      if (method !== 'session.status') return { ok: true }
+      const reply = Promise.withResolvers<Record<string, unknown>>()
+      pending.push(reply)
+      return reply.promise
+    })
+    const loader = store as unknown as { enrichUntitled(rows: readonly SessionRow[]): void }
+    let redraws = 0
+    const unsub = store.subscribe(() => redraws++)
+    loader.enrichUntitled(rows)
+    loader.enrichUntitled(rows)
+    expect(pending).toHaveLength(4)
+    pending[0]!.reject(new Error('Unavailable'))
+    for (const reply of pending.slice(1)) reply.resolve({ ok: false })
+    await Bun.sleep(0)
+    expect(redraws).toBe(0)
+    loader.enrichUntitled(rows.slice(0, 4))
+    expect(pending).toHaveLength(4)
+    const clock = spyOn(Date, 'now').mockReturnValue(Date.now() + 60_001)
+    try {
+      loader.enrichUntitled(rows.slice(0, 4))
+      expect(pending).toHaveLength(8)
+      for (const reply of pending.slice(4)) reply.resolve({ session: { preview: 'Useful task preview' } })
+      await Bun.sleep(0)
+      expect(store.getSnapshot().snippets['preview-0']).toBe('Useful task preview')
+      expect(redraws).toBe(4)
+      loader.enrichUntitled(rows.slice(0, 4))
+      expect(pending).toHaveLength(8)
+    } finally { clock.mockRestore(); unsub() }
   })
 
   test('rejected preparation clears sending and rolls back only its optimistic message', async () => {

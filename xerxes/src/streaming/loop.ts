@@ -33,6 +33,7 @@ import {
 } from '../runtime/objectiveGuard.js'
 import { getGoal } from '../runtime/goalDomain.js'
 import type { ChatMessage, MessageContent } from '../types/messages.js'
+import { setTurnOutcome } from '../types/turnOutcome.js'
 import { isJsonObject, type ToolCall, type ToolDefinition } from '../types/toolCalls.js'
 import { appendInjection } from './attachments.js'
 import type {
@@ -218,6 +219,7 @@ export function normalizeToolOutput(name: string, output: string): string {
 }
 
 export interface TurnRequest {
+  readonly turnId?: string
   readonly agentId?: string
   /** Session interaction mode; objective mode rejects unsupported narrative stops. */
   readonly interactionMode?: string
@@ -466,6 +468,12 @@ export async function* runTurn(
   let contextReductionAttempted = false
   let outputLimitEscalations = 0
   let outputTokenOverride: number | undefined
+  // A terminally interrupted attempt still owns the output already shown to
+  // the user. Keep only emitted text/reasoning, never incomplete tool calls or
+  // synthetic diagnostics. A new retry replaces this capture; a successful
+  // round commits its normal, complete message and clears it.
+  let persistUnfinishedRound: (() => void) | undefined
+  let loopSettled = false
   try {
     for (let toolTurn = 0; !signal?.aborted && toolTurn < turnLimit && toolTurn < maxModelTurns; toolTurn += 1) {
       appendAgentEventMessage(state, dependencies.drainAgentEvents?.())
@@ -491,8 +499,8 @@ export async function* runTurn(
       }
       // Per-attempt accumulators sit at round scope so the surviving attempt is
       // readable after the retry loop, but every attempt starts from a clean
-      // slate: partial text, thinking, usage, and tool calls from a failed
-      // attempt must never leak into the persisted assistant message.
+      // slate: partial text, thinking, usage, and tool calls from a retried
+      // attempt must never leak into the replacement assistant message.
       let parser = dependencies.thinkingParserFactory?.() ?? new ThinkingParser()
       let textParts: string[] = []
       let thinkingParts: string[] = []
@@ -508,6 +516,20 @@ export async function* runTurn(
       let textDeduper = new ToolRoundTextDeduper(latestToolRoundText)
 
       for (let attempt = 0; ; attempt += 1) {
+        const visibleText: string[] = []
+        const visibleThinking: string[] = []
+        const rememberVisible = (event: StreamEvent): StreamEvent => {
+          if (event.type === 'text') visibleText.push(event.text)
+          else if (event.type === 'thinking') visibleThinking.push(event.text)
+          return event
+        }
+        persistUnfinishedRound = () => {
+          persistUnfinishedRound = undefined
+          const content = visibleText.join(''), thinking = visibleThinking.join('')
+          if (!content && !thinking) return
+          state.messages.push({ role: 'assistant', content, ...(thinking ? { thinking } : {}) })
+          state.thinkingContent.push(thinking)
+        }
         parser = dependencies.thinkingParserFactory?.() ?? new ThinkingParser()
         textParts = []
         thinkingParts = []
@@ -563,7 +585,7 @@ export async function* runTurn(
                 // yield. The deduper still withholds exactly one thing — the
                 // not-yet-diverged replay prefix it must hold back — so retry
                 // replay suppression is unchanged.
-                for (const visible of textDeduper.push(part)) yield visible
+                for (const visible of textDeduper.push(part)) yield rememberVisible(visible)
               }
               if (delta.toolCalls) {
                 const merged = [...roundToolCalls]
@@ -595,10 +617,10 @@ export async function* runTurn(
           for (const flushed of parser.process('')) {
             if (flushed.type === 'text') {
               textParts.push(flushed.text)
-              for (const visible of textDeduper.push({ type: 'text', text: flushed.text })) yield visible
+              for (const visible of textDeduper.push({ type: 'text', text: flushed.text })) yield rememberVisible(visible)
             } else {
               thinkingParts.push(flushed.text)
-              for (const visible of textDeduper.push({ type: 'thinking', text: flushed.text })) yield visible
+              for (const visible of textDeduper.push({ type: 'thinking', text: flushed.text })) yield rememberVisible(visible)
             }
           }
           roundCompletedAt = now()
@@ -803,6 +825,7 @@ export async function* runTurn(
           state.thinkingContent.push('')
         }
       }
+      persistUnfinishedRound = undefined
       if (providerToolCalls.length && assistantText) {
         latestToolRoundText = assistantText
       }
@@ -1227,6 +1250,7 @@ export async function* runTurn(
         if (needsFinalization) turnLimit += 1
       }
     }
+    loopSettled = true
   } catch (error) {
     // Rejections outside the provider-attempt handler — an abort during
     // retry backoff, a permission broker failure, a subagent join failure —
@@ -1261,7 +1285,12 @@ export async function* runTurn(
       yield { type: 'text', text: `[Error: ${errorMessage(error)}]` }
       stopReason = 'turn_failed'
     }
+    loopSettled = true
   } finally {
+    persistUnfinishedRound?.()
+    if (!loopSettled || signal?.aborted) stopReason = 'aborted'
+    const lastMessage = state.messages.at(-1)
+    if (lastMessage) setTurnOutcome(lastMessage, stopReason, request.turnId)
     state.totalApiCalls += apiCallsCount
     state.usageComplete &&= usageComplete
   }

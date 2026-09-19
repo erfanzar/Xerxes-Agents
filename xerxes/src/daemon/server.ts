@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import type { WorkspaceResources } from './workspaceResources.js';
+import { readTurnOutcome, turnOutcomeLabel } from '../types/turnOutcome.js';
 import { ConnectionLeases } from './connectionLease.js';
 import { historyLimit, sessionHistoryPage } from './historyPage.js';
 import { ValidationError } from '../core/errors.js';
@@ -266,6 +267,11 @@ import { resolveProjectDirectory, xerxesHome } from "./paths.js";
 import { formatBytes, wipeHistoryStores, wipeMemoryStores } from "./wipe.js";
 import { searchProjectFileMentions } from "./projectFileMentions.js";
 import { profileAcceptsModel, sessionProvider } from './sessionProvider.js';
+import { DaemonProviderRelays, type RelayClientFactory } from './providerRelays.js';
+import { LOCAL_PROVIDER_BINDING, RemoteProviderBindings, localProviderLabel, localProviderCapabilities } from './remoteProviderBindings.js';
+import { boundedLocalCapabilities, localReasoningLevels, localReasoningNote } from './localReasoningCapabilities.js';
+import { parseLocalProviderCapabilities } from '../protocol/localProviderCapabilities.js';
+import { LocalProviderRelayError } from '../security/localProviderRelay.js';
 import type { DaemonTransportConnection } from "./transport.js";
 import {
   DaemonWebSocketGateway,
@@ -364,6 +370,9 @@ const CONCURRENT_DISPATCH_METHODS = new Set([
   "forge.inspect",
   "forge.list",
   "provider_models",
+  "provider.relay.next",
+  "provider.remote.reply",
+  "provider.remote.release",
   "runtime.status",
   "schedule.list",
 ]);
@@ -678,6 +687,11 @@ export interface DaemonToolCatalogPort {
 }
 
 export interface DaemonServerOptions {
+  /** Must be the same instance used by the native runner. Hosts opt in only
+   * after routing all model-producing paths through this authority. */
+  readonly remoteProviderBindings?: RemoteProviderBindings;
+  /** Local provider client factory for explicitly consented relay grants. */
+  readonly relayClientFactory?: RelayClientFactory;
   readonly workspaceResources?: (cwd: string) => Promise<WorkspaceResources>;
   /**
    * Drop one workspace's cached resources (per-project skill registry, MCP
@@ -947,6 +961,8 @@ export class DaemonServer {
   private readonly reasoningLevelCache = new Map<string, ReasoningLevelSet>();
   private readonly codexModelCatalog: NonNullable<DaemonServerOptions['codexModelCatalog']>;
   private readonly profileStore: ProfileStore;
+  private readonly providerRelays: DaemonProviderRelays;
+  private readonly remoteProviderBindings: RemoteProviderBindings | undefined;
   private readonly agentSettingsStore: AgentSettingsStore;
   private readonly agentSettingsDefaults: unknown;
   private readonly questionOwners = new Map<
@@ -1113,6 +1129,8 @@ export class DaemonServer {
       },
     );
     this.profileStore = options.profileStore ?? new ProfileStore();
+    this.providerRelays = new DaemonProviderRelays(this.profileStore, options.relayClientFactory);
+    this.remoteProviderBindings = options.remoteProviderBindings;
     // Only the process-owning host opts in; embeddings remain network-silent.
     this.autoDiscoverModelCapabilities = options.autoDiscoverModelCapabilities ?? false;
     this.providerModelDiscovery =
@@ -1462,6 +1480,8 @@ export class DaemonServer {
 
   private async stopOnce(): Promise<void> {
     this.stoppingGoalWakes = true;
+    this.providerRelays.close();
+    this.remoteProviderBindings?.close();
     for (const unsubscribe of this.activityUnsubscribe.splice(0)) unsubscribe();
     const server = this.server;
     const gateway = this.websocketGateway;
@@ -1689,7 +1709,8 @@ export class DaemonServer {
             const method = parseJsonRpcRequest(line).method;
             readySnapshot = method === 'runtime.status' || method === 'schedule.list'
               || method === 'run.list' || method === 'run.inspect'
-              || method === 'run.events' || method === 'run.cancel';
+              || method === 'run.events' || method === 'run.cancel'
+              || method === 'provider.remote.reply' || method === 'provider.remote.release';
           } catch { /* Normal dispatch reports malformed frames. */ }
         }
         if (readySnapshot) void handle();
@@ -1907,6 +1928,7 @@ export class DaemonServer {
     if (method === 'runtime.restart_if_idle') {
       const sessions = this.runtime.listSessions();
       const busy = this.inFlightTurns.size > 0 || this.activeScheduleRuns.size > 0
+        || this.providerRelays.hasLiveGrants()
         || this.goalWakeDispatches.size > 0 || this.agentPresetSwitches.size > 0
         || this.channelStatusData().configured
         || numberValue(this.runtime.status().active_subagents) > 0
@@ -1979,7 +2001,7 @@ export class DaemonServer {
       }
       return {
         ok: true,
-        session: sessionPayload(session, this.contextLimit(session.model), this.mcpStatusRecord(session), requestedHistory),
+        session: sessionPayload(session, this.contextLimit(session.model, session), this.mcpStatusRecord(session), requestedHistory),
       };
     }
     if (method === "session.active_list") {
@@ -1989,7 +2011,7 @@ export class DaemonServer {
         sessions: this.runtime
           .listSessions()
           .map((session) =>
-            sessionPayload(session, this.contextLimit(session.model), this.mcpStatusRecord(session), requestedHistory),
+            sessionPayload(session, this.contextLimit(session.model, session), this.mcpStatusRecord(session), requestedHistory),
           ),
       };
     }
@@ -2056,7 +2078,7 @@ export class DaemonServer {
         ok: Boolean(session),
         session: session
           ? {
-              ...sessionPayload(session, this.contextLimit(session.model), this.mcpStatusRecord(session), requestedHistory),
+              ...sessionPayload(session, this.contextLimit(session.model, session), this.mcpStatusRecord(session), requestedHistory),
               // This is intentionally an identity only. The picker can use it
               // to select the exact stored profile without receiving the live
               // endpoint or credential that proved the match.
@@ -2072,7 +2094,7 @@ export class DaemonServer {
       return session
         ? {
             ok: true,
-            ...sessionUsagePayload(session, this.contextLimit(session.model)),
+            ...sessionUsagePayload(session, this.contextLimit(session.model, session)),
           }
         : { ok: false, error: "no active session" };
     }
@@ -3029,18 +3051,16 @@ export class DaemonServer {
       // Resolve the ladder against the requested session's model. The daemon
       // default can differ after another tab/provider changes configuration.
       const activeSession = this.runtime.sessionStatus(sessionKey(connection, params));
-      const profileName = activeSession ? this.sessionProfileName(activeSession) : null;
-      const set = await this.reasoningLevels(activeSession?.model, profileName ? this.profileStore.get(profileName) : undefined);
+      const set = await this.sessionReasoningLevels(activeSession);
+      if (!set) return { ok: true, current: this.sessionReasoningEffort(activeSession), default: null, levels: [],
+        shape: 'unknown', source: 'unavailable', note: 'Local reasoning capabilities are unavailable. Reopen this SSH task and authorize its local provider using an updated local TUI and daemon.' };
       const selectable = selectableEfforts(set);
       // Session-first, like configureReasoning: /thinking pins the effort per
       // session, so reading only the daemon-wide value would report an effort
       // this session is not running at (the picker looked "stuck on off").
       return {
         ok: true,
-        current:
-          activeSession?.reasoningEffort
-          || stringValue(this.runtime.status().reasoning_effort)
-          || REASONING_OFF,
+        current: this.sessionReasoningEffort(activeSession),
         default: set.defaultEffort ?? null,
         // An `inherent` provider yields no selectable efforts at all, so the
         // panel shows the note rather than a menu that cannot change anything.
@@ -3062,7 +3082,7 @@ export class DaemonServer {
                     }),
               },
         ),
-        note: reasoningShapeNote(set),
+        note: activeSession && Object.hasOwn(activeSession.metadata, LOCAL_PROVIDER_BINDING) ? localReasoningNote(set) : reasoningShapeNote(set),
         shape: set.shape,
         source: set.source,
       };
@@ -3087,6 +3107,76 @@ export class DaemonServer {
         ok: true,
         profiles: this.profileStore.list().map(profilePayload),
       };
+    }
+    if (method.startsWith('provider.remote.')) {
+      try {
+        const bindings = this.remoteProviderBindings;
+        if (!bindings) return { ok: false, code: 'unsupported', error: 'This daemon does not support local provider session binding.' };
+        if (method === 'provider.remote.reply') {
+          bindings.reply(connection, params.binding, params.request_id, params.reply);
+          return { ok: true };
+        }
+        if (method === 'provider.remote.bind') {
+          const session = this.runtime.sessionStatus(connection.activeSessionKey);
+          if (!session || session.activeTurnId || session.status !== 'idle') return { ok: false, error: 'Choose an idle session before binding a local provider.' };
+          if (params.consent !== true || typeof params.source !== 'string' || typeof params.profile !== 'string' || typeof params.model !== 'string') throw new LocalProviderRelayError('invalid_request');
+          let capabilities;
+          try { capabilities = parseLocalProviderCapabilities(params.capabilities, params.model); }
+          catch { throw new LocalProviderRelayError('invalid_request'); }
+          const binding = bindings.bind(connection, session, { source: params.source, profile: params.profile, model: params.model, ...(capabilities ? {capabilities} : {}) },
+            request => this.connectionLeases.sendPrivate(connection, { jsonrpc: '2.0', method: 'provider.remote.request', params: request }));
+          try {
+            await this.runtime.setSessionModel?.(connection.activeSessionKey, binding.model);
+            // Keep explicit session effort, but don't persist an inherited
+            // remote default as though the user chose it for this local route.
+            if (!session.reasoningPinned) {
+              delete session.reasoningEffort;
+              delete session.metadata.reasoning_effort;
+            }
+            await this.runtime.flushSessions();
+          } catch {
+            bindings.disconnect(connection);
+            return { ok: false, error: 'Could not save the local provider selection. The binding was closed; review setup before retrying.' };
+          }
+          await this.emitProviderInit(connection);
+          return { ok: true, binding };
+        }
+        if (method === 'provider.remote.release') { bindings.disconnect(connection); return { ok: true }; }
+        return { ok: false, error: 'Unknown remote provider binding operation' };
+      } catch (error) {
+        return error instanceof LocalProviderRelayError
+          ? { ok: false, code: error.code, error: error.message }
+          : { ok: false, code: 'provider_failed', error: 'The local provider binding failed. Review setup before retrying.' };
+      }
+    }
+    if (method.startsWith('provider.relay.')) {
+      try {
+        if (method === 'provider.relay.inventory') return { ok: true, profiles: this.providerRelays.inventory() };
+        if (method === 'provider.relay.authorize') {
+          const grant = this.providerRelays.authorize(connection, params);
+          try {
+            const profile = this.profileStore.get(grant.profile);
+            if (!profile) throw new LocalProviderRelayError('route_changed');
+            const provider = resolveProviderSafely(grant.model, profile);
+            const fallback = catalogReasoningLevels(grant.model, provider) ?? fallbackReasoningLevels(provider);
+            const capabilities = await boundedLocalCapabilities(grant.model, signal => this.reasoningLevels(grant.model, profile, signal), fallback);
+            const current = this.providerRelays.status(connection, grant.id);
+            if (current.status !== 'active') throw new LocalProviderRelayError(current.status === 'expired' ? 'grant_expired' : 'grant_revoked');
+            return { ok: true, grant: { ...grant, capabilities } };
+          } catch (error) {
+            try { this.providerRelays.revoke(connection, grant.id); } catch { /* Disconnected owners already lost authority. */ }
+            throw error;
+          }
+        }
+        if (method === 'provider.relay.next') return { ok: true, reply: await this.providerRelays.next(connection, params.id, params.frame) };
+        if (method === 'provider.relay.status') return { ok: true, grant: this.providerRelays.status(connection, params.id) };
+        if (method === 'provider.relay.revoke') { this.providerRelays.revoke(connection, params.id); return { ok: true }; }
+        return { ok: false, error: 'Unknown local provider relay operation' };
+      } catch (error) {
+        return error instanceof LocalProviderRelayError
+          ? { ok: false, code: error.code, error: error.message }
+          : { ok: false, code: 'provider_failed', error: 'Could not prepare the local provider relay. Check the selected local profile.' };
+      }
     }
     if (method === "provider_types") {
       // The registry IS the adapter list an add/edit form may offer — names,
@@ -3649,6 +3739,33 @@ export class DaemonServer {
     catch { return typeof session.metadata.provider_profile === 'string' ? session.metadata.provider_profile : null; }
   }
 
+  private boundLocalProvider(session: DaemonSession, model: string): LlmClient | undefined {
+    if (!Object.hasOwn(session.metadata, LOCAL_PROVIDER_BINDING)) return undefined;
+    const client = this.remoteProviderBindings?.client(session, model);
+    if (!client) throw new LocalProviderRelayError('grant_unavailable');
+    return client;
+  }
+
+  /** Auxiliary calls inherit the session's authority just like the turn.
+   * Inventory/display fallbacks must never select credentials for a request. */
+  private sessionAuxiliaryClient(session: DaemonSession, model: string,
+    factory?: (model: string, profile: ProviderProfile | undefined) => LlmClient): LlmClient {
+    const local = this.boundLocalProvider(session, model);
+    if (local) return local;
+    const profile = this.sessionAuxiliaryProfile(session, model);
+    return factory ? factory(model, profile) : createCompactionClient(model, profile, this.runtime.status());
+  }
+
+  private sessionAuxiliaryProfile(session: DaemonSession, model: string): ProviderProfile | undefined {
+    if (typeof session.metadata.provider_profile === 'string' && session.metadata.provider_profile) {
+      return sessionProvider(this.profileStore, { metadata: { ...session.metadata } }, model);
+    }
+    // An unpinned session can use explicit daemon connection settings. An
+    // optional title must neither replace that route nor persist a new pin.
+    const name = this.activeRuntimeProfileName();
+    return name ? this.profileStore.get(name) : undefined;
+  }
+
   private async emitProviderInit(
     connection: DaemonTransportConnection,
   ): Promise<void> {
@@ -3672,13 +3789,11 @@ export class DaemonServer {
       initPayload(
         session,
         model,
-        session.reasoningEffort
-          || stringValue(this.runtime.status().reasoning_effort)
-          || "off",
+        this.sessionReasoningEffort(session),
         runtimePermissionMode(
           session.permissionMode || this.runtime.status().permission_mode,
         ),
-        this.contextLimit(model),
+        this.contextLimit(model, session),
       ),
     );
   }
@@ -3864,11 +3979,9 @@ export class DaemonServer {
       statusUpdatePayload(
         session,
         model,
-        this.contextLimit(model),
+        this.contextLimit(model, session),
         this.channelStatusData(),
-        session.reasoningEffort
-        || stringValue(this.runtime.status().reasoning_effort)
-        || "off",
+        this.sessionReasoningEffort(session),
         runtimePermissionMode(
           session.permissionMode ?? this.runtime.status().permission_mode,
         ),
@@ -3922,10 +4035,9 @@ export class DaemonServer {
         const model = session?.model || optionalString(this.runtime.status().model);
         if (!model) throw new Error("Select a model before generating an agent.");
         const generated = await generateProjectAgent(params.description, async (prompt) => {
-          const profileName = session ? this.sessionProfileName(session) : null;
-          const profile = profileName ? this.profileStore.get(profileName) : undefined;
-          if (profileName && !profile) throw new Error(`Provider profile ${profileName} is unavailable. Select a provider before generating.`);
-          const client = this.projectAgentClientFactory ? this.projectAgentClientFactory(model, profile) : createCompactionClient(model, profile, this.runtime.status());
+          const client = session ? this.sessionAuxiliaryClient(session, model, this.projectAgentClientFactory)
+            : this.projectAgentClientFactory ? this.projectAgentClientFactory(model, undefined)
+            : createCompactionClient(model, undefined, this.runtime.status());
           try {
             const result = await completeLlm(client, { model, messages: [{ role: "user", content: prompt }], maxTokens: 4096 }, this.sessionSignal(key), { timeoutMs: 90_000 });
             return result.content;
@@ -4101,7 +4213,9 @@ export class DaemonServer {
 
   private refreshActiveModelCapabilities(connection: DaemonTransportConnection): void {
     if (!this.autoDiscoverModelCapabilities) return;
-    const profileName = this.activeRuntimeProfileName();
+    const selected = this.runtime.sessionStatus(connection.activeSessionKey);
+    if (selected && Object.hasOwn(selected.metadata, LOCAL_PROVIDER_BINDING)) return;
+    const profileName = selected ? this.sessionProfileName(selected) : this.activeRuntimeProfileName();
     if (!profileName) return;
     let flight = this.modelCapabilityRefreshes.get(profileName);
     if (!flight) {
@@ -4117,6 +4231,10 @@ export class DaemonServer {
     }
     void flight.then((result) => {
       const session = this.runtime.sessionStatus(connection.activeSessionKey);
+      // The operator may have switched tasks or authorized a local provider
+      // while discovery was pending. Its remote result no longer describes
+      // this view, and must not inject an unrelated warning into the task.
+      if (session !== selected || (session && (Object.hasOwn(session.metadata, LOCAL_PROVIDER_BINDING) || this.sessionProfileName(session) !== profileName))) return;
       if (session) this.emitStatus(connection, session);
       // `result === undefined` means the flight itself rejected (swallowed by
       // the .catch above) — still worth telling the operator about. A
@@ -4532,7 +4650,14 @@ export class DaemonServer {
     this.profileStore.replaceModelCapabilities(profile.name, capabilities);
   }
 
-  private contextLimit(model: string): number {
+  private sessionReasoningEffort(session?: DaemonSession): string {
+    if (session && Object.hasOwn(session.metadata, LOCAL_PROVIDER_BINDING)) return session.reasoningEffort || 'local default';
+    return session?.reasoningEffort || stringValue(this.runtime.status().reasoning_effort) || REASONING_OFF;
+  }
+
+  private contextLimit(model: string, session?: DaemonSession): number {
+    // Local provider capacity has not been negotiated. Never substitute a remote profile window.
+    if (session && Object.hasOwn(session.metadata, LOCAL_PROVIDER_BINDING)) return 0;
     const activeName = this.activeRuntimeProfileName();
     const direct = this.contextLimitForProfile(activeName, model);
     if (direct > 0) return direct;
@@ -4581,14 +4706,15 @@ export class DaemonServer {
    * neither of them measures a prompt against a ceiling the request as a whole
    * has to fit under.
    */
-  private promptBudget(model: string): number {
+  private promptBudget(model: string, session?: DaemonSession): number {
+    if (session && Object.hasOwn(session.metadata, LOCAL_PROVIDER_BINDING)) return 0;
     if (!model.trim()) return 0;
     const status = this.runtime.status();
     const requestedOutputTokens = typeof status.max_tokens === "number"
       ? status.max_tokens
       : this.maxOutputTokens(model);
     return effectiveContextLimit({
-      contextLimit: this.contextLimit(model),
+      contextLimit: this.contextLimit(model, session),
       ...(requestedOutputTokens === undefined ? {} : { requestedOutputTokens }),
     });
   }
@@ -4738,7 +4864,7 @@ export class DaemonServer {
         }
         const section = formatSessionUsage(
           session,
-          this.contextLimit(session.model),
+          this.contextLimit(session.model, session),
         );
         // Subscription quota joins the session block only when a provider
         // answers; a fetch failure or missing login must never hide the
@@ -4819,7 +4945,7 @@ export class DaemonServer {
         this.emitStatus(connection, fresh);
         return {
           ok: true,
-          session: sessionPayload(fresh, this.contextLimit(fresh.model), this.mcpStatusRecord(fresh)),
+          session: sessionPayload(fresh, this.contextLimit(fresh.model, fresh), this.mcpStatusRecord(fresh)),
         };
       }
       case "stop": {
@@ -4894,7 +5020,7 @@ export class DaemonServer {
         return this.openSkillCreate(connection, args);
       case "permissions": {
         const current = runtimePermissionMode(
-          this.runtime.status().permission_mode,
+          this.runtime.sessionStatus(key)?.permissionMode ?? this.runtime.status().permission_mode,
         );
         if (!args) {
           this.emitSlash(connection, `Permission mode: \`${current}\`.`);
@@ -5244,17 +5370,20 @@ export class DaemonServer {
     // open those differ, and naming the global value would report an effort
     // this session is not running at.
     const active = this.runtime.sessionStatus(connection.activeSessionKey);
-    const current =
-      active?.reasoningEffort
-      || stringValue(this.runtime.status().reasoning_effort)
-      || REASONING_OFF;
+    const current = this.sessionReasoningEffort(active);
+    const locallyBound = !!active && Object.hasOwn(active.metadata, LOCAL_PROVIDER_BINDING);
     // Resolve the ladder against THIS session's profile, the way set_reasoning
     // and reasoning_levels do — the daemon-wide active profile can differ after
     // another tab switched providers, and a claude model read against a
     // codex/deepseek profile reports (or rejects) levels the model never had.
     const sessionProfileName = active ? this.sessionProfileName(active) : undefined;
     const sessionProfile = sessionProfileName ? this.profileStore.get(sessionProfileName) : undefined;
-    const levels = await this.reasoningLevels(active?.model, sessionProfile);
+    const levels = await this.sessionReasoningLevels(active);
+    if (!levels) {
+      const error = 'Local reasoning capabilities are unavailable. Reopen this SSH task and authorize its local provider using an updated local TUI and daemon.';
+      this.emitSlash(connection, error, 'warning');
+      return { ok: false, error, levels: [] };
+    }
     const offered = selectableEfforts(levels);
     const requested = raw.trim();
     if (!requested) {
@@ -5286,6 +5415,7 @@ export class DaemonServer {
       resolved,
     );
     if (!pinned) {
+      if (locallyBound) return { ok: false, error: 'This runtime cannot save reasoning for the selected task. Update it before changing local-provider reasoning.' };
       this.runtime.reload({
         reasoning_effort: resolved,
         thinking: resolved !== REASONING_OFF,
@@ -5296,7 +5426,7 @@ export class DaemonServer {
     // profile — the daemon-wide active one can belong to another tab's
     // provider, and sampling defaults set on the wrong profile never help.
     const profile = sessionProfile ?? this.profileStore.active();
-    if (profile) {
+    if (profile && !locallyBound) {
       this.profileStore.updateSampling(profile.name, {
         reasoning_effort: resolved,
         thinking: resolved !== REASONING_OFF,
@@ -5341,7 +5471,7 @@ export class DaemonServer {
       tools_tokens: toolsTokens,
       messages_tokens: messagesTokens,
       total_tokens: sessionContextTokens(session, model),
-      context_limit: this.contextLimit(model),
+      context_limit: this.contextLimit(model, session),
     };
   }
 
@@ -5353,7 +5483,16 @@ export class DaemonServer {
    * ranges from four efforts to six, with three different defaults. Providers
    * with no capability endpoint fall back to a per-provider table.
    */
-  private async reasoningLevels(modelOverride?: string, profileOverride?: ProviderProfile): Promise<ReasoningLevelSet> {
+  private async sessionReasoningLevels(session: DaemonSession | undefined): Promise<ReasoningLevelSet | undefined> {
+    if (session && Object.hasOwn(session.metadata, LOCAL_PROVIDER_BINDING)) {
+      const capabilities = localProviderCapabilities(session.metadata, session.model);
+      return capabilities ? localReasoningLevels(capabilities) : undefined;
+    }
+    const profileName = session ? this.sessionProfileName(session) : undefined;
+    return this.reasoningLevels(session?.model, profileName ? this.profileStore.get(profileName) : undefined);
+  }
+
+  private async reasoningLevels(modelOverride?: string, profileOverride?: ProviderProfile, signal?: AbortSignal): Promise<ReasoningLevelSet> {
     const status = this.runtime.status();
     const model = modelOverride?.trim() || stringValue(status.model) || "";
     const profile = profileOverride ?? this.profileStore.active();
@@ -5374,7 +5513,8 @@ export class DaemonServer {
     }
     try {
       if (!profile) return catalog ?? fallbackReasoningLevels(providerName);
-      const liveCatalog = await this.codexModelCatalog(profile);
+      const liveCatalog = await this.codexModelCatalog(profile, signal);
+      signal?.throwIfAborted();
       const bare = model.includes("/") ? model.slice(model.indexOf("/") + 1) : model;
       const entry = liveCatalog.find((candidate) => candidate.id === bare);
       if (!entry?.reasoningLevels.length) {
@@ -5840,7 +5980,7 @@ export class DaemonServer {
           session.status === "waiting" ||
           session.status === "working",
       )
-      .map((session) => sessionPayload(session, this.contextLimit(session.model)));
+      .map((session) => sessionPayload(session, this.contextLimit(session.model, session)));
     if (!sessions.length) {
       this.emitSlash(connection, "No native background turns running.");
       return { ok: true, sessions: [] };
@@ -6598,8 +6738,7 @@ export class DaemonServer {
     // no-op require a constructible one. See lazyCompactionCompletionPort.
     const completion = lazyCompactionCompletionPort(
       () => {
-        const profileName = this.sessionProfileName(session);
-        return createCompactionClient(model, profileName ? this.profileStore.get(profileName) : undefined, this.runtime.status());
+        return this.sessionAuxiliaryClient(session, model);
       },
       model,
       undefined,
@@ -6641,7 +6780,7 @@ export class DaemonServer {
         messages: session.messages,
         model,
         reason,
-        maxContextTokens: this.promptBudget(model) || 64_000,
+        maxContextTokens: this.promptBudget(model, session) || 64_000,
       });
       signal?.throwIfAborted();
       if (!outcome.compacted) {
@@ -6821,7 +6960,7 @@ export class DaemonServer {
     // The prompt budget, not the raw window: a prompt that fills the window
     // leaves the reply nowhere to go, and the request fails as a 400 that no
     // local meter predicted.
-    const limit = this.promptBudget(model);
+    const limit = this.promptBudget(model, session);
     if (!limit) {
       return Promise.resolve();
     }
@@ -6974,17 +7113,28 @@ export class DaemonServer {
     // for new sessions, not a backfill of long-lived history.
     if (session.turnCount < 1 || session.turnCount > TITLE_RETRY_TURN_WINDOW) return;
 
-    const attempt = attemptSessionTitle(session.id, () =>
-      generateSessionTitle({
+    const attempt = attemptSessionTitle(session.id, async () => {
+      let profile: ProviderProfile | undefined;
+      const local = Object.hasOwn(session.metadata, LOCAL_PROVIDER_BINDING);
+      try {
+        if (local) this.boundLocalProvider(session, session.model);
+        else profile = this.sessionAuxiliaryProfile(session, session.model);
+      } catch { return undefined; }
+      return generateSessionTitle({
         userText: user,
         assistantText: assistant,
         sessionModel: session.model,
-        profile: this.profileStore.active(),
+        profile,
         // Bound the background call to the session's lifetime: a title
         // request for an evicted or reset session must not outlive it.
         signal: this.sessionSignal(sessionKey),
-        ...(this.titleClientFactory ? { clientFactory: this.titleClientFactory } : {}),
-      }));
+        ...(local ? { clientFactory: (model: string) => {
+          const client = this.boundLocalProvider(session, model);
+          if (!client) throw new LocalProviderRelayError('grant_unavailable');
+          return client;
+        } } : { clientFactory: this.titleClientFactory ?? ((model: string) => createCompactionClient(model, profile, this.runtime.status())) }),
+      });
+    });
     if (!attempt) return;
     // Both promises here are fire-and-forget by design (a title must never
     // fail a turn), but neither may orphan a rejection: withSessionOperation
@@ -7058,11 +7208,11 @@ export class DaemonServer {
       return { ok: false, error: "no active session" };
     }
     const model = session.model || stringValue(this.runtime.status().model);
-    const contextLimit = this.contextLimit(model);
+    const contextLimit = this.contextLimit(model, session);
     // The same measurement and the same limit the auto-compaction trigger
     // uses. Reading them from two different estimates is how `/context` and
     // the status bar came to disagree about one session.
-    const promptBudget = this.promptBudget(model);
+    const promptBudget = this.promptBudget(model, session);
     const used = sessionContextTokens(session, model);
     const remaining = Math.max(0, promptBudget - used);
     const percent = promptBudget ? (used / promptBudget) * 100 : 0;
@@ -7504,7 +7654,7 @@ export class DaemonServer {
     this.indexSessionForSearch(target.id);
     return {
       ok: true,
-      session: sessionPayload(session, this.contextLimit(session.model), this.mcpStatusRecord(session)),
+      session: sessionPayload(session, this.contextLimit(session.model, session), this.mcpStatusRecord(session)),
     };
   }
 
@@ -7623,7 +7773,7 @@ export class DaemonServer {
       ok: true,
       session: persisted
         ? savedSessionPayload(persisted)
-        : sessionPayload(branch, this.contextLimit(branch.model), this.mcpStatusRecord(branch)),
+        : sessionPayload(branch, this.contextLimit(branch.model, branch), this.mcpStatusRecord(branch)),
     };
   }
 
@@ -8804,6 +8954,16 @@ export class DaemonServer {
     if (chosen.provider !== 'claude-code' && !profileAcceptsModel(chosen, chosen.model)) {
       return { ok: false, error: `Provider ${name} cannot serve its configured model ${chosen.model}. Use /model to choose a supported model.` };
     }
+    const current = this.runtime.sessionStatus(connection.activeSessionKey);
+    const previousLocalRequirement = current?.metadata[LOCAL_PROVIDER_BINDING];
+    const hadLocalRequirement = !!current && Object.hasOwn(current.metadata, LOCAL_PROVIDER_BINDING);
+    if (current && Object.hasOwn(current.metadata, LOCAL_PROVIDER_BINDING)) {
+      if (current.activeTurnId || current.status !== 'idle') return { ok: false, error: 'Stop the active turn before choosing remote credentials.' };
+      try { this.remoteProviderBindings?.useRemote(current); }
+      catch { return { ok: false, error: 'Local provider work is still active. Wait for it to stop before choosing remote credentials.' }; }
+      delete current.metadata[LOCAL_PROVIDER_BINDING];
+    }
+    try {
     // Preserve the routes of existing chats before changing the daemon default.
     for (const session of this.runtime.listSessions()) {
       if (!session.metadata.provider_profile) {
@@ -8821,6 +8981,10 @@ export class DaemonServer {
     await this.emitProviderInit(connection);
     this.emitSlash(connection, `Switched to provider profile \`${name}\`.`);
     return { ok: true };
+    } catch (error) {
+      if (current && hadLocalRequirement) current.metadata[LOCAL_PROVIDER_BINDING] = previousLocalRequirement;
+      throw error;
+    }
   }
 
   private async setMode(
@@ -8866,8 +9030,19 @@ export class DaemonServer {
       if (providerName && !profile) return { ok: false, error: 'Unknown provider profile: ' + providerName };
       if (profile && !profileAcceptsModel(profile, model)) return { ok: false, error: 'Provider ' + profile.name + ' cannot serve ' + model };
     } catch (error) { return { ok: false, error: errorMessage(error) }; }
+    const previousLocalRequirement = current.metadata[LOCAL_PROVIDER_BINDING];
+    const hadLocalRequirement = Object.hasOwn(current.metadata, LOCAL_PROVIDER_BINDING);
+    if (Object.hasOwn(current.metadata, LOCAL_PROVIDER_BINDING)) {
+      if (!providerName || !profile) return { ok: false, error: 'Choose a remote provider profile explicitly, or return to /machine to review a different local model.' };
+      if (current.activeTurnId || current.status !== 'idle') return { ok: false, error: 'Stop the active turn before choosing remote credentials.' };
+      try { this.remoteProviderBindings?.useRemote(current); }
+      catch { return { ok: false, error: 'Local provider work is still active. Wait for it to stop before choosing remote credentials.' }; }
+      delete current.metadata[LOCAL_PROVIDER_BINDING];
+    }
+    try {
     const session = await this.runtime.setSessionModel(targetSessionKey, model, profile?.name);
     if (!session) {
+      if (hadLocalRequirement) current.metadata[LOCAL_PROVIDER_BINDING] = previousLocalRequirement;
       return { ok: false, error: "no active session" };
     }
     if (profile) session.metadata.provider_profile = profile.name;
@@ -8883,6 +9058,10 @@ export class DaemonServer {
     }
     this.emitStatus(connection, session);
     return { ok: true, model: session.model };
+    } catch (error) {
+      if (hadLocalRequirement) current.metadata[LOCAL_PROVIDER_BINDING] = previousLocalRequirement;
+      throw error;
+    }
   }
 
   /** Pin a validated reasoning effort to the session named by the RPC. */
@@ -8897,7 +9076,8 @@ export class DaemonServer {
     }
     const profileName = this.sessionProfileName(active);
     const profile = profileName ? this.profileStore.get(profileName) : undefined;
-    const levels = await this.reasoningLevels(active.model, profile);
+    const levels = await this.sessionReasoningLevels(active);
+    if (!levels) return { ok: false, error: 'Local reasoning capabilities are unavailable. Reopen this SSH task and authorize its local provider using an updated local TUI and daemon.', levels: [] };
     const offered = selectableEfforts(levels);
     const resolved = resolveEffort(levels, requested)
       ?? clampEffort(levels, requested);
@@ -8918,7 +9098,7 @@ export class DaemonServer {
     if (!session) {
       return { ok: false, error: "no active session" };
     }
-    if (profile) {
+    if (profile && !Object.hasOwn(active.metadata, LOCAL_PROVIDER_BINDING)) {
       this.profileStore.updateSampling(profile.name, {
         reasoning_effort: resolved,
         thinking: resolved !== REASONING_OFF,
@@ -8963,9 +9143,16 @@ export class DaemonServer {
     const resumeId = optionalString(params.resume_session_id);
     const requestedKey = optionalString(params.session_key);
     const attachedSession = this.runtime.sessionStatus(connection.activeSessionKey);
+    const previousSession = requestedKey ? this.runtime.sessionStatus(requestedKey) : undefined;
+    // A new connection knows the public task ID, not its original connection
+    // key. Reattach live tasks before looking for durable history: untouched
+    // tasks intentionally have no transcript, and active work must stay live.
+    const liveSession = resumeId ? this.runtime.listSessions().find(session => session.id === resumeId) : undefined;
     const key = resumeId && attachedSession?.id === resumeId
       ? attachedSession.sessionKey
-      : resumeId || requestedKey || `tui:${newConnectionKey()}`;
+      : resumeId && previousSession?.id === resumeId
+        ? previousSession.sessionKey
+      : liveSession?.sessionKey || resumeId || requestedKey || `tui:${newConnectionKey()}`;
     const cwd = resolveProjectDirectory(
       optionalString(params.project_dir) ||
         this.runtime.sessionStatus(connection.activeSessionKey)?.cwd ||
@@ -9056,7 +9243,7 @@ export class DaemonServer {
       .all()
       .filter((skill) => skillMatchesPlatform(skill));
     const model = session.model || stringValue(this.runtime.status().model);
-    const contextLimit = this.contextLimit(model);
+    const contextLimit = this.contextLimit(model, session);
     // One cheap git call per initialize: the shell shows the branch the work
     // is happening on. Null outside a repo — never fabricated.
     const branch = await gitBranch(cwd);
@@ -9074,9 +9261,7 @@ export class DaemonServer {
       ultra_mode: session.ultraMode === true,
       // Session-first: with two sessions open the daemon-wide value names an
       // effort this session may not be running at.
-      reasoning_effort: session.reasoningEffort
-        || stringValue(this.runtime.status().reasoning_effort)
-        || "off",
+      reasoning_effort: this.sessionReasoningEffort(session),
       permission_mode: runtimePermissionMode(
         session.permissionMode ?? this.runtime.status().permission_mode,
       ),
@@ -9093,6 +9278,9 @@ export class DaemonServer {
       version: XERXES_VERSION,
       daemon_version: XERXES_VERSION,
       connection_lease_supported: true,
+      provider_relay_control_supported: true,
+      remote_provider_binding_supported: Boolean(this.remoteProviderBindings),
+      local_provider_label: localProviderLabel(session.metadata),
       daemon_protocol: DAEMON_PROTOCOL_VERSION,
       daemon_build_id: this.daemonBuildId(),
     };
@@ -9105,8 +9293,8 @@ export class DaemonServer {
         model,
         contextLimit,
         this.channelStatusData(),
-        stringValue(this.runtime.status().reasoning_effort) || "off",
-        runtimePermissionMode(this.runtime.status().permission_mode),
+        this.sessionReasoningEffort(session),
+        runtimePermissionMode(session.permissionMode ?? this.runtime.status().permission_mode),
         this.mcpStatusRecord(session),
       ),
     );
@@ -9158,49 +9346,55 @@ export class DaemonServer {
     const replayedToolCallIds = new Set<string>();
     let count = 0;
     for (const message of session.messages) {
-      const role = message.role.toLowerCase();
-      if (role !== "user" && role !== "assistant") {
-        continue;
-      }
-      const text = messageText(message);
-      if (text && !(role === "user" && looksLikeInternalReplayMessage(text))) {
-        // Persisted thinking traces ride the replay payload so a reopened TUI
-        // can render them exactly like live thinking instead of dropping them.
-        const thinking =
-          role === "assistant" && typeof message.thinking === "string" && message.thinking.trim()
-            ? message.thinking
-            : undefined;
-        this.emit(connection, "notification", {
-          id: newConnectionKey(),
-          category: "history",
-          type: `replay_${role}`,
-          severity: "info",
-          title: "",
-          body: role === "user" ? `✨ ${text}` : text,
-          payload: thinking === undefined ? {} : { thinking },
-        });
-        count += 1;
-      }
-      if (role !== "assistant" || !Array.isArray(message.tool_calls)) {
-        continue;
-      }
-      for (const call of message.tool_calls) {
-        if (!isRecord(call)) {
+      try {
+        const role = message.role.toLowerCase();
+        if (role !== "user" && role !== "assistant") {
           continue;
         }
-        const toolCallId = stringValue(call.id);
-        const functionRecord = isRecord(call.function) ? call.function : {};
-        this.emitToolReplay(connection, {
-          argumentsPreview: replayPreviewText(
-            functionRecord.arguments,
-            REPLAY_ARGUMENTS_PREVIEW_CHARS,
-          ),
-          execution: toolCallId ? executionsByToolCallId.get(toolCallId) : undefined,
-          fallbackName: stringValue(functionRecord.name),
-        });
-        if (toolCallId) {
-          replayedToolCallIds.add(toolCallId);
+        const text = messageText(message);
+        if (text && !(role === "user" && looksLikeInternalReplayMessage(text))) {
+          // Persisted thinking traces ride the replay payload so a reopened TUI
+          // can render them exactly like live thinking instead of dropping them.
+          const thinking =
+            role === "assistant" && typeof message.thinking === "string" && message.thinking.trim()
+              ? message.thinking
+              : undefined;
+          this.emit(connection, "notification", {
+            id: newConnectionKey(),
+            category: "history",
+            type: `replay_${role}`,
+            severity: "info",
+            title: "",
+            body: role === "user" ? `✨ ${text}` : text,
+            payload: thinking === undefined ? {} : { thinking },
+          });
+          count += 1;
         }
+        if (role !== "assistant" || !Array.isArray(message.tool_calls)) {
+          continue;
+        }
+        for (const call of message.tool_calls) {
+          if (!isRecord(call)) {
+            continue;
+          }
+          const toolCallId = stringValue(call.id);
+          const functionRecord = isRecord(call.function) ? call.function : {};
+          this.emitToolReplay(connection, {
+            argumentsPreview: replayPreviewText(
+              functionRecord.arguments,
+              REPLAY_ARGUMENTS_PREVIEW_CHARS,
+            ),
+            execution: toolCallId ? executionsByToolCallId.get(toolCallId) : undefined,
+            fallbackName: stringValue(functionRecord.name),
+          });
+          if (toolCallId) {
+            replayedToolCallIds.add(toolCallId);
+          }
+        }
+      } finally {
+        const outcome = readTurnOutcome(message.turn_outcome);
+        if (outcome) this.emit(connection, 'notification', { id: newConnectionKey(), category: 'history',
+          type: 'replay_outcome', severity: 'info', title: '', body: turnOutcomeLabel(outcome.reason), payload: outcome });
       }
     }
     for (const execution of session.toolExecutions) {
@@ -9350,13 +9544,14 @@ export class DaemonServer {
       if (model) {
         const normalized = { ...payload };
         delete normalized.max_context;
-        const contextLimit = this.contextLimit(model);
+        const contextLimit = this.contextLimit(model, session);
         connection.send(
           daemonEvent(type, {
             ...normalized,
             // Zero is the explicit unknown sentinel and clears any previous
             // profile/model window held by a connected client.
             max_context: contextLimit,
+            ...(session ? { reasoning_effort: this.sessionReasoningEffort(session) } : {}),
           }),
         );
         return;
@@ -9845,11 +10040,13 @@ export class DaemonServer {
   }
 
   private disconnect(connection: DaemonTransportConnection): void {
+    this.remoteProviderBindings?.disconnect(this.connectionLeases.owner(connection));
     if (this.connectionLeases.disconnect(connection)) return;
     this.disconnectOwner(connection);
   }
 
   private disconnectOwner(connection: DaemonTransportConnection): void {
+    this.providerRelays.disconnect(connection);
     this.disconnectedGoalOwners.add(connection);
     this.lspSettingsUpdates.get(connection)?.abort();
     this.mcpSettingsUpdates.get(connection)?.abort();
@@ -10400,6 +10597,7 @@ function sessionPayload(
       : {}),
     ...(goal ? { goal: goal.objective, goal_phase: goal.phase } : {}),
     agent_id: session.agentId,
+    local_provider_label: localProviderLabel(session.metadata),
     workspace: session.workspace,
     cwd: session.cwd,
     active_turn_id: session.activeTurnId,
@@ -10748,6 +10946,7 @@ function initPayload(
 ): JsonRpcPayload {
   return {
     session_id: session.id,
+    local_provider_label: localProviderLabel(session.metadata),
     model,
     cwd: session.cwd,
     context_limit: contextLimit,

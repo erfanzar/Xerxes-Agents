@@ -163,7 +163,7 @@ test('CLI --resume submits a supplied prompt to the persisted native session wit
     expect(persisted.messages).toEqual(
       expect.arrayContaining([
         { role: 'user', content: 'continue the saved work' },
-        { role: 'assistant', content: 'resumed reply' },
+        { role: 'assistant', content: 'resumed reply', turn_outcome: {version: 1, reason: 'completed', turn_id: expect.any(String)} },
       ]),
     )
   } finally {
