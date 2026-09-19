@@ -16,7 +16,7 @@ import { groupByWorkspace } from './workspaceGroups.js'
 import { ChangesTab, LogTab, PlanTab } from './Workspaces.js'
 import { Markdown } from './markdown.js'
 import { Dictation } from './Dictation.js'
-import { draftKey, readDraft, transitionDraft } from './drafts.js'
+import { draftKey, readDraft, transitionDraft, writeDraft, acceptedDraft } from './drafts.js'
 import { PanelDivider, usePanelLayout } from './layout.js'
 import { groupActivity } from "./activityGroups.js"
 import { ToolCallRow } from "./Execution.js"
@@ -1415,6 +1415,9 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
   const ref = useRef<HTMLTextAreaElement>(null)
   const hintSeq = useRef(0)
   const draftSession = useRef({ key, workspace, sessionId: snap.currentId })
+  const latestDraft = useRef({ identity: { key, workspace, sessionId: snap.currentId }, text: draft })
+  latestDraft.current = { identity: { key, workspace, sessionId: snap.currentId }, text: draft }
+  const sendingDraft = useRef(false)
   useEffect(() => {
     const next = { key, workspace, sessionId: snap.currentId }
     const changed = draftSession.current.key !== key
@@ -1457,11 +1460,22 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
       else setHints({items: [], index: 0})
       return
     }
-    if (!draft.trim() || snap.connection !== 'online' || store.getSnapshot().submissionPending) return
+    if (!draft.trim() || snap.connection !== 'online' || store.getSnapshot().submissionPending || sendingDraft.current) return
     open(null)
-    void store.submit(draft)
-    setDraft('')
-    requestAnimationFrame(grow)
+    const origin = latestDraft.current.identity
+    const sent = draft
+    writeDraft(origin.key, sent)
+    sendingDraft.current = true
+    try {
+      if (await store.submit(sent)) {
+        const current = latestDraft.current
+        const next = acceptedDraft(origin, current.identity, sent, current.text)
+        if (next !== current.text) setDraft(next)
+      }
+    } finally {
+      sendingDraft.current = false
+      requestAnimationFrame(grow)
+    }
   }
 
   // Live slash/skill hints: debounced daemon completions while the draft is a

@@ -2,7 +2,24 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from 'bun:test'
-import { draftKey, readDraft, writeDraft, transitionDraft } from '../src/desktop/renderer/drafts.js'
+import { draftKey, readDraft, writeDraft, transitionDraft, acceptedDraft } from '../src/desktop/renderer/drafts.js'
+
+test('accepted text clears only its originating draft and preserves edits made while sending', () => {
+  const a = { key: draftKey('/acceptance', 'a'), workspace: '/acceptance', sessionId: 'a' }
+  const b = { key: draftKey('/acceptance', 'b'), workspace: '/acceptance', sessionId: 'b' }
+  const sent = 'Draft\n  with indentation'
+  writeDraft(a.key, sent)
+  expect(acceptedDraft(a, a, sent, sent)).toBe('')
+  expect(readDraft(a.key)).toBe('')
+  writeDraft(a.key, sent + '\nNew thought')
+  expect(acceptedDraft(a, a, sent, sent + '\nNew thought')).toBe(sent + '\nNew thought')
+  expect(readDraft(a.key)).toBe(sent + '\nNew thought')
+  writeDraft(a.key, sent)
+  writeDraft(b.key, 'Another task')
+  expect(acceptedDraft(a, b, sent, 'Another task')).toBe('Another task')
+  expect(readDraft(b.key)).toBe('Another task')
+  expect(readDraft(a.key)).toBe('')
+})
 
 test('draft storage preserves whitespace, isolates workspaces and clears submitted drafts', () => {
   const saved = new Map<string, string>()

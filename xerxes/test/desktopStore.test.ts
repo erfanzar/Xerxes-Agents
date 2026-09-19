@@ -129,6 +129,60 @@ describe('Store workspace folds', () => {
     expect(store.getSnapshot().submissionPending).toBe(false)
   })
 
+  test.each(['turn.submit', 'slash', 'set_plan_mode', 'turn.steer'])('composer admission reports a refused %s instead of clearing its draft', async (method) => {
+    await Bun.sleep(0)
+    bridge.respondWith(name => name === method ? { ok: false, error: 'Audit refusal' } : { ok: true })
+    const input = method === 'slash' ? '/missing argument' : method === 'set_plan_mode' ? '/plan' : 'Keep this\n  draft'
+    if (method === 'turn.steer') bridge.push('turn_begin', { text: 'existing task' })
+    expect(await store.submit(input)).toBe(false)
+    expect(store.getSnapshot().error || store.getSnapshot().blocks.map(block => block.kind === 'notice' ? block.text : '').join(' ')).toContain('Audit refusal')
+  })
+
+  test.each([false, true])('slash rejection renders one notice when the event accompanies the RPC result (throws=%s)', async (throws) => {
+    await Bun.sleep(0)
+    bridge.respondWith(method => {
+      if (method !== 'slash') return { ok: true }
+      bridge.push('notification', { category: 'slash', type: 'result', severity: 'warning', body: 'Unknown command: /absent (type /help).' })
+      if (throws) throw new Error('Unknown slash command: /absent')
+      return { ok: false, error: 'Unknown slash command: /absent' }
+    })
+    expect(await store.submit('/absent argument')).toBe(false)
+    expect(store.getSnapshot().blocks.filter(block => block.kind === 'notice')).toHaveLength(1)
+  })
+
+  test('slash success omits redundant ok but preserves a distinct rejection', async () => {
+    await Bun.sleep(0)
+    bridge.respondWith(method => {
+      if (method !== 'slash') return { ok: true }
+      bridge.push('notification', { category: 'slash', type: 'result', severity: 'info', body: 'Configuration loaded' })
+      return { ok: true }
+    })
+    expect(await store.submit('/settings inspect')).toBe(true)
+    expect(store.getSnapshot().blocks.filter(block => block.kind === 'notice')).toHaveLength(1)
+    bridge.respondWith(method => {
+      if (method !== 'slash') return { ok: true }
+      bridge.push('notification', { category: 'slash', type: 'result', severity: 'warning', body: 'Configuration loaded with warnings' })
+      return { ok: false, error: 'Authentication required' }
+    })
+    expect(await store.submit('/settings inspect')).toBe(false)
+    expect(store.getSnapshot().blocks.some(block => block.kind === 'notice' && block.text === 'Authentication required')).toBe(true)
+  })
+
+  test('late command rejection cannot add an error to another session', async () => {
+    await Bun.sleep(0)
+    const reply = Promise.withResolvers<Record<string, unknown>>()
+    bridge.respondWith(method => method === 'slash' ? reply.promise : method === 'initialize'
+      ? { ...initializeResult, session_id: 'command-other', session: { id: 'command-other', key: 'command-other', cwd: '/repo' }, messages: [] }
+      : { ok: true, sessions: [] })
+    const command = store.submit('/settings inspect')
+    await store.openSession('command-other')
+    const before = store.getSnapshot()
+    reply.reject(new Error('Old command failed'))
+    expect(await command).toBe(false)
+    expect(store.getSnapshot().blocks).toEqual(before.blocks)
+    expect(store.getSnapshot().error).toBe(before.error)
+  })
+
   test('a rejected submission from another session cannot alter the current draft transcript or connection', async () => {
     await Bun.sleep(0)
     const reply = Promise.withResolvers<Record<string, unknown>>()

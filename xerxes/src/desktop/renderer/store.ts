@@ -684,6 +684,7 @@ export class Store {
   private lastUser = ''
   private preparingSubmissions = new Map<string, object>()
   private optimisticSubmissions = new Map<string, { text: string; id: number; acknowledged: boolean }>()
+  private slashResult: { sessionKey: string; text: string } | null = null
   private snippets: Record<string, string> = {}
   private enriching = new Set<string>()
   /** Latest session-search request; stale responses must not win. */
@@ -891,24 +892,25 @@ export class Store {
    * daemon queues it between steps and the store mirrors it visibly; when
    * idle it is a normal `turn.submit`.
    */
-  async submit(text: string): Promise<void> {
+  async submit(text: string): Promise<boolean> {
     const trimmed = text.trim()
-    if (!trimmed) return
+    if (!trimmed) return false
     if (this.frame.turnActive && !trimmed.startsWith('/')) {
-      await this.steer(trimmed)
-      return
+      return this.steer(trimmed)
     }
     if (!trimmed.startsWith('/')) {
       const sessionKey = this.sessionKey
-      if (this.preparingSubmissions.has(sessionKey)) return
+      if (this.preparingSubmissions.has(sessionKey)) return false
       this.lastUser = trimmed
       const optimistic = { text: trimmed, id: this.builder.pushUser(trimmed), acknowledged: false }
       this.optimisticSubmissions.set(sessionKey, optimistic)
       this.preparingSubmissions.set(sessionKey, optimistic)
       this.notify()
       try {
-        await this.bridge.call('turn.submit', { session_key: sessionKey, text: trimmed })
+        const result = await this.bridge.call('turn.submit', { session_key: sessionKey, text: trimmed })
+        if (result.ok === false) throw new Error(str(result.error) || 'Submission refused')
         if (this.sessionKey === sessionKey) this.cameOnline()
+        return true
       } catch (error) {
         // The daemon rejected the submit (e.g. no provider configured): the
         // optimistic bubble never happened — roll it back rather than leave
@@ -919,53 +921,74 @@ export class Store {
           if (!optimistic.acknowledged) this.builder.rollbackUser(trimmed)
           this.fail(error)
         }
+        return optimistic.acknowledged
       } finally {
         // RPC acceptance precedes snapshot preparation and turn_begin. Keep
         // the pending state until the daemon actually starts or ends the turn.
         this.notify()
       }
-      return
     }
     // /goal routes to its dedicated durable-state RPC; everything else goes
     // to the daemon's native slash table, which owns rejection.
     if (trimmed === '/goal' || trimmed.startsWith('/goal ')) {
       const result = await this.setGoal(trimmed.slice(5).trim())
       if (!result.ok) this.fail(new Error(result.text))
-      return
+      return result.ok
     }
     if (trimmed === '/plan' || trimmed.startsWith('/plan ') || trimmed === '/plan off') {
       // /plan steers planning; the mode flip itself is the RPC's job.
       const rest = trimmed.slice(5).trim()
-      if (!rest || rest === 'off') this.setPlanMode(!this.frame.planMode)
-      else await this.steer(rest)
-      return
+      if (!rest || rest === 'off') return this.setPlanMode(!this.frame.planMode)
+      else return this.steer(rest)
+    }
+    const sessionKey = this.sessionKey
+    const previousResult = this.slashResult
+    const alreadyReported = (text: string) => {
+      const current = this.slashResult
+      if (!current || current === previousResult || current.sessionKey !== sessionKey) return false
+      // Legacy daemons describe an unknown command differently in the event
+      // and RPC reply. Both identify the same command and rejection.
+      const normalize = (value: string) => value.trim().replace(/^Unknown slash command:/, 'Unknown command:').replace(/ \(type \/help\)\.$/, '')
+      return normalize(current.text) === normalize(text)
     }
     try {
       const result = await this.bridge.call('slash', { command: trimmed })
+      if (this.sessionKey !== sessionKey) return result.ok === true
       const message = str(result.output) || str(result.error) || (result.ok === true ? 'ok' : 'command failed')
-      this.builder.push('notification', { severity: result.ok === true ? 'info' : 'error', message })
+      const emitted = this.slashResult !== previousResult && this.slashResult?.sessionKey === sessionKey
+      if (!alreadyReported(message) && !(result.ok === true && !result.output && emitted)) {
+        this.builder.push('notification', { severity: result.ok === true ? 'info' : 'error', message })
+      }
       this.notify()
       if (trimmed.startsWith('/permissions')) void this.loadProviders()
       void this.refreshSessions()
+      return result.ok === true
     } catch (error) {
-      this.fail(error)
+      if (this.sessionKey === sessionKey && !alreadyReported(desktopError(error))) this.fail(error)
+      return false
     }
   }
 
   /** Queue steering text daemon-side; mirror it locally until consumed. */
-  async steer(text: string): Promise<void> {
+  async steer(text: string): Promise<boolean> {
     const cleaned = text.trim()
-    if (!cleaned) return
+    if (!cleaned) return false
+    const sessionKey = this.sessionKey
     try {
-      const result = await this.bridge.call('turn.steer', { session_key: this.sessionKey, content: cleaned })
+      const result = await this.bridge.call('turn.steer', { session_key: sessionKey, content: cleaned })
       if (result.ok === true) {
-        this.queue = [...this.queue, { id: this.seq++, text: cleaned }]
-        this.patch({ queue: this.queue })
+        if (this.sessionKey === sessionKey) {
+          this.queue = [...this.queue, { id: this.seq++, text: cleaned }]
+          this.patch({ queue: this.queue })
+        }
+        return true
       } else {
-        this.fail(new Error(str(result.error) || 'steering refused'))
+        if (this.sessionKey === sessionKey) this.fail(new Error(str(result.error) || 'steering refused'))
+        return false
       }
     } catch (error) {
-      this.fail(error)
+      if (this.sessionKey === sessionKey) this.fail(error)
+      return false
     }
   }
 
@@ -1506,24 +1529,25 @@ export class Store {
   }
 
   /** Toggle the session's plan mode on the daemon (plan = read-only ceiling). */
-  setPlanMode(next: boolean): void {
+  setPlanMode(next: boolean): Promise<boolean> {
     const { sessionKey, isCurrent } = this.captureSessionRequest()
-    void this.bridge
+    return this.bridge
       .call('set_plan_mode', { session_key: sessionKey, enabled: next })
       .then(result => {
-        if (!isCurrent()) return
+        if (!isCurrent()) return result.ok !== false
         if (result.ok === false) {
           // Refused (e.g. the daemon restarted and lost the session): flip
           // nothing locally — the chip must not claim a ceiling the daemon
           // never armed.
           this.fail(new Error(str(result.error) || 'plan mode refused'))
-          return
+          return false
         }
         // The daemon answers before the status echo; apply optimistically,
         // the next status_update.plan_mode is authoritative either way.
         this.patch({ planMode: next })
+        return true
       })
-      .catch(error => { if (isCurrent()) this.fail(error) })
+      .catch(error => { if (isCurrent()) this.fail(error); return false })
   }
 
   togglePlanMode(): void {
@@ -3035,6 +3059,9 @@ export class Store {
           }
         }
         if (type === 'notification') {
+          if (payload.category === 'slash' && payload.type === 'result') {
+            this.slashResult = { sessionKey: this.sessionKey, text: str(payload.body) || str(payload.message) }
+          }
           const suggestion = skillSuggestionOf(payload.skill)
           if (suggestion) {
             this.patch({

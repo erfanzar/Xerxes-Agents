@@ -10,6 +10,15 @@ export function draftKey(workspace: string, session: string): string {
 
 export interface DraftIdentity { key: string; workspace: string; sessionId: string }
 
+/** Clear only the accepted text, never a newer edit or another session's draft. */
+export function acceptedDraft(origin: DraftIdentity, current: DraftIdentity, sent: string, text: string): string {
+  if (readDraft(origin.key) === sent) writeDraft(origin.key, '')
+  if (origin.key !== current.key) return text
+  if (text !== sent) return text
+  writeDraft(current.key, '')
+  return ''
+}
+
 /** Move a pre-session draft only into its own newly opened conversation. */
 export function transitionDraft(previous: DraftIdentity, next: DraftIdentity, text: string): string {
   writeDraft(previous.key, text)
