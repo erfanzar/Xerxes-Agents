@@ -504,6 +504,8 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
           ok: true,
           machine: remoteMachine ?? saved?.remote ?? null,
           connected: Boolean(remote && daemon?.online),
+          connecting: Boolean(remoteAttempt),
+          resume_session_id: resumeSession ?? currentSession,
           error: remoteError,
         }
       if (action === 'cancel') {
@@ -624,8 +626,10 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
   window.on('enter-full-screen', scheduleWindowSave)
   window.on('leave-full-screen', scheduleWindowSave)
   scheduleWindowSave()
+  // The retained SSH view reads status and offers retry/cancel inline. A modal
+  // on the host can interrupt a different, healthy workspace during restoration.
   if (saved?.remote) void connectRemote({ machine: saved.remote, resume_session_id: saved.sessionId }).catch(error => {
-    if (!window.isDestroyed()) void dialog.showMessageBox(window, { type: 'error', message: 'Could not reopen SSH workspace', detail: error instanceof Error ? error.message : String(error) })
+    console.error('Could not reopen SSH workspace:', error)
   })
   return window
 }

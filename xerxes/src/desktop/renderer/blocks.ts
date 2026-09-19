@@ -305,9 +305,11 @@ export class BlockBuilder {
   }
 
   /** A user line lands at the fold's end (submit ordering, replays). */
-  pushUser(text: string, contextSummary = false): void {
+  pushUser(text: string, contextSummary = false): number {
     this.finalize()
-    this.blocks.push({ kind: 'user', id: this.nextId(), text, ...(contextSummary ? { contextSummary: true } : {}) })
+    const id = this.nextId()
+    this.blocks.push({ kind: 'user', id, text, ...(contextSummary ? { contextSummary: true } : {}) })
+    return id
   }
 
   /**

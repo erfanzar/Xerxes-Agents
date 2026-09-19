@@ -88,6 +88,64 @@ describe('Store workspace folds', () => {
     store.start(bridge)
   })
 
+  test('slow submission remains visible and a preparation warning does not duplicate its echo', async () => {
+    await Bun.sleep(0)
+    const reply = Promise.withResolvers<Record<string, unknown>>()
+    bridge.respondWith(method => method === 'turn.submit' ? reply.promise : { ok: true })
+    const sending = store.submit('review this')
+    expect(store.getSnapshot().submissionPending).toBe(true)
+    await store.submit('second request')
+    expect(bridge.calls.filter(call => call.method === 'turn.submit')).toHaveLength(1)
+    bridge.push('notification', { severity: 'warning', message: 'Could not snapshot before this work' })
+    bridge.push('turn_begin', { text: 'review this' })
+    expect(store.getSnapshot().submissionPending).toBe(false)
+    expect(store.getSnapshot().blocks.filter(block => block.kind === 'user' && block.text === 'review this')).toHaveLength(1)
+    expect(store.getSnapshot().blocks.some(block => block.kind === 'notice' && block.text.includes('Could not snapshot'))).toBe(true)
+    reply.resolve({ ok: true }); await sending
+    bridge.push('turn_end', {})
+    bridge.push('turn_begin', { text: 'review this' })
+    expect(store.getSnapshot().blocks.filter(block => block.kind === 'user' && block.text === 'review this')).toHaveLength(2)
+  })
+
+  test('rejected preparation clears sending and rolls back only its optimistic message', async () => {
+    await Bun.sleep(0)
+    const reply = Promise.withResolvers<Record<string, unknown>>()
+    bridge.respondWith(method => method === 'turn.submit' ? reply.promise : { ok: true })
+    const sending = store.submit('not admitted')
+    bridge.push('notification', { severity: 'warning', message: 'Preparation warning' })
+    reply.reject(new Error('Provider configuration missing')); await sending
+    expect(store.getSnapshot().submissionPending).toBe(false)
+    expect(store.getSnapshot().blocks.some(block => block.kind === 'user' && block.text === 'not admitted')).toBe(false)
+    expect(store.getSnapshot().error).toContain('Provider configuration missing')
+  })
+
+  test('RPC acceptance keeps sending visible until the daemon begins or ends preparation', async () => {
+    await Bun.sleep(0)
+    await store.submit('accepted before preparation')
+    expect(store.getSnapshot().submissionPending).toBe(true)
+    bridge.push('notification', { severity: 'warning', message: 'Snapshot unavailable' })
+    expect(store.getSnapshot().submissionPending).toBe(true)
+    bridge.push('turn_end', {})
+    expect(store.getSnapshot().submissionPending).toBe(false)
+  })
+
+  test('a rejected submission from another session cannot alter the current draft transcript or connection', async () => {
+    await Bun.sleep(0)
+    const reply = Promise.withResolvers<Record<string, unknown>>()
+    bridge.respondWith((method, params) => method === 'turn.submit' ? reply.promise : method === 'initialize'
+      ? { ...initializeResult, session_id: 'other-session', session: { id: 'other-session', key: 'other-session', cwd: '/repo' }, messages: [] }
+      : { ok: true, sessions: [] })
+    const sending = store.submit('old session request')
+    await store.openSession('other-session')
+    expect(store.getSnapshot().submissionPending).toBe(false)
+    const before = store.getSnapshot()
+    reply.reject(new Error('Old connection closed')); await sending
+    expect(store.getSnapshot().currentId).toBe('other-session')
+    expect(store.getSnapshot().blocks).toEqual(before.blocks)
+    expect(store.getSnapshot().connection).toBe(before.connection)
+    expect(store.getSnapshot().error).toBe(before.error)
+  })
+
   test('workspace errors stay separate from the task and overlapping host requests are suppressed', async () => {
     await new Promise(resolve => setTimeout(resolve, 0))
     const before = store.getSnapshot()

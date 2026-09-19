@@ -18,10 +18,14 @@ it.each([[220,65], [100,30], [40,18]])('renders snapshot timeline and guarded co
   const rpc = vi.fn(async (method: string) => method === 'snapshot.list' ? { ok: true, snapshots: [row] } : method === 'snapshot.preview' ? preview : { ok: true })
   const screen = await testRender(<GatewayProvider value={{ rpc } as unknown as GatewayServices}><SnapshotOverlay t={DARK_THEME} /></GatewayProvider>, { width, height })
   try {
-    await screen.flush(); await screen.flush()
-    expect(screen.captureCharFrame()).toContain('Snapshot timeline')
-    expect(screen.captureCharFrame()).toContain('Before turn 3')
-    expect(screen.captureCharFrame()).toContain('restored')
+    // Listing and preview are separate asynchronous effects. Flushing twice
+    // does not guarantee their commits under the full-suite renderer load.
+    await vi.waitFor(async () => {
+      await screen.flush()
+      expect(screen.captureCharFrame()).toContain('Snapshot timeline')
+      expect(screen.captureCharFrame()).toContain('Before turn 3')
+      expect(screen.captureCharFrame()).toContain('restored')
+    }, { timeout: 2000, interval: 20 })
     act(() => screen.mockInput.pressKey('a')); await screen.flush()
     expect(screen.captureCharFrame()).toContain('Y restore')
     expect(rpc.mock.calls.some(([method]) => method === 'slash.exec')).toBe(false)

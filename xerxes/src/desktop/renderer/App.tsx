@@ -23,6 +23,7 @@ import { ToolCallRow } from "./Execution.js"
 import { AgentRoster } from './AgentRoster.js'
 import { Icon } from './Icon.js'
 import { FirstRunSetup } from './Setup.js'
+import { RemoteWorkspaceGate } from './RemoteWorkspaceGate.js'
 import { BackgroundIndicator, DesktopNavigation, DesktopSheet, DesktopPage, DesktopRail, useDesktopNavigation, type DesktopPanel } from './DesktopPanels.js'
 
 const ActivityVisible = createContext(false)
@@ -152,7 +153,7 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
       <div className="app__body" data-context-full={rail && rail !== 'review' && (filesExpanded || contextRequiresFullWidth) || undefined} data-review={rail === "review" || undefined}>
         <Sidebar snap={snap} page={page} />
         {!focused && <PanelDivider label="Resize sessions" value={layout.sidebarWidth} min={180} max={360} onChange={sidebarWidth => setLayout({ sidebarWidth })} />}
-        {snap.noWorkspace ? <WorkspaceGate /> : <Chat snap={snap} page={page} />}
+        {snap.noWorkspace ? snap.storageScope?.startsWith('ssh:') ? <RemoteWorkspaceGate /> : <WorkspaceGate /> : <Chat snap={snap} page={page} />}
         {rail && rail !== 'review' && <PanelDivider label="Resize inspector" value={layout.inspectorWidth} min={260} max={520} reverse onChange={inspectorWidth => setLayout({ inspectorWidth })} />}
         {rail && <DesktopRail panel={rail} snap={snap} close={() => setRail(null)} filesExpanded={filesExpanded} reviewPath={reviewPath} {...(!contextRequiresFullWidth ? { toggleFilesExpanded: () => setFilesExpanded(value => !value) } : {})} activityDetails={<ActivityDetails snap={snap} />} />}
 
@@ -201,7 +202,7 @@ function RuntimeStatus({ snap, compact = false }: { snap: Snapshot; compact?: bo
   const trigger = useRef<HTMLButtonElement>(null)
   const popup = useRef<HTMLDivElement>(null)
   const busy = snap.runtimeUpdate === 'checking' || snap.runtimeUpdate === 'restarting'
-  const label = snap.noWorkspace ? 'Choose workspace' : busy ? 'Updating runtime…' : snap.runtimeUpdate === 'waiting' ? 'Update waiting for idle' : snap.connection === 'offline' ? connectionFailureKind(snap.error) === 'transport' ? 'Runtime offline' : 'Workspace needs attention' : snap.connection === 'connecting' ? 'Connecting…' : snap.daemonWarning ? 'Runtime update available' : 'Connected'
+  const label = snap.noWorkspace ? snap.storageScope?.startsWith('ssh:') ? 'SSH connection' : 'Choose workspace' : busy ? 'Updating runtime…' : snap.runtimeUpdate === 'waiting' ? 'Update waiting for idle' : snap.connection === 'offline' ? connectionFailureKind(snap.error) === 'transport' ? 'Runtime offline' : 'Workspace needs attention' : snap.connection === 'connecting' ? 'Connecting…' : snap.daemonWarning ? 'Runtime update available' : 'Connected'
   useLayoutEffect(() => {
     if (!expanded) return
     const place = () => {
@@ -660,7 +661,7 @@ function Sidebar({ snap, page }: { snap: Snapshot; page: 'agents' | 'extensions'
           </div>
         ))}
         {groups.length === 0 && (
-          <div className="side__empty">{snap.noWorkspace ? 'Your sessions will appear here' : online ? 'No tasks yet — your chats live inside the workspace folder' : connectionFailureKind(snap.error) === 'transport' ? 'Connecting to the shared daemon…' : 'Workspace needs attention'}</div>
+          <div className="side__empty">{snap.noWorkspace ? snap.storageScope?.startsWith('ssh:') ? 'Remote sessions appear after connecting' : 'Your sessions will appear here' : online ? 'No tasks yet — your chats live inside the workspace folder' : connectionFailureKind(snap.error) === 'transport' ? 'Connecting to the shared daemon…' : 'Workspace needs attention'}</div>
         )}
         <button className="addws" onClick={() => store.chooseWorkspace()} title="Choose another folder to open as a workspace">
           ＋ Add folder…
@@ -1456,7 +1457,7 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
       else setHints({items: [], index: 0})
       return
     }
-    if (!draft.trim() || snap.connection !== 'online') return
+    if (!draft.trim() || snap.connection !== 'online' || store.getSnapshot().submissionPending) return
     open(null)
     void store.submit(draft)
     setDraft('')
@@ -1536,6 +1537,7 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
           <div className="hints__keys"><span>Type to filter</span><kbd>↵</kbd> / <kbd>tab</kbd> complete <kbd>↑↓</kbd> pick <kbd>esc</kbd> dismiss</div>
         </div>
       )}
+      {snap.submissionPending && !snap.turnActive && <div className="streamstatus composer-status" role="status">Sending… preparing the task</div>}
       {snap.turnActive && <div className="streamstatus composer-status" role="status" aria-live="polite">{snap.networkRetrying ? 'Retrying connection…' : 'Acting…'} {turnDurOf(snap.turnSeconds)}</div>}
       <div className="composer-dock">
       <ComposerTaskSummary snap={snap} />
@@ -1595,7 +1597,7 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
           </div>
           <button
             className="composer__send"
-            disabled={!ready || !draft.trim()}
+            disabled={!ready || !draft.trim() || snap.submissionPending}
             title={snap.turnActive ? 'Queue — runs when this step settles (⏎)' : 'Send (⏎)'}
             onClick={send}
           >↑</button>

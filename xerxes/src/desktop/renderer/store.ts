@@ -186,6 +186,7 @@ export interface Snapshot {
   readonly connection: Connection
   /** True before any workspace folder is chosen — the shell shows the gate. */
   readonly noWorkspace: boolean
+  readonly submissionPending?: boolean
   readonly cwd: string
   readonly model: string
   /** Agent preset fixed for the current session after its first turn. */
@@ -681,6 +682,8 @@ export class Store {
   private turnError: string | null = null
   private agentText = ''
   private lastUser = ''
+  private preparingSubmissions = new Map<string, object>()
+  private optimisticSubmissions = new Map<string, { text: string; id: number; acknowledged: boolean }>()
   private snippets: Record<string, string> = {}
   private enriching = new Set<string>()
   /** Latest session-search request; stale responses must not win. */
@@ -896,19 +899,30 @@ export class Store {
       return
     }
     if (!trimmed.startsWith('/')) {
+      const sessionKey = this.sessionKey
+      if (this.preparingSubmissions.has(sessionKey)) return
       this.lastUser = trimmed
-      this.builder.pushUser(trimmed)
+      const optimistic = { text: trimmed, id: this.builder.pushUser(trimmed), acknowledged: false }
+      this.optimisticSubmissions.set(sessionKey, optimistic)
+      this.preparingSubmissions.set(sessionKey, optimistic)
       this.notify()
       try {
-        await this.bridge.call('turn.submit', { session_key: this.sessionKey, text: trimmed })
-        this.cameOnline()
+        await this.bridge.call('turn.submit', { session_key: sessionKey, text: trimmed })
+        if (this.sessionKey === sessionKey) this.cameOnline()
       } catch (error) {
         // The daemon rejected the submit (e.g. no provider configured): the
         // optimistic bubble never happened — roll it back rather than leave
         // a delivered-looking ghost above the error.
-        this.builder.rollbackUser(trimmed)
+        if (this.preparingSubmissions.get(sessionKey) === optimistic) this.preparingSubmissions.delete(sessionKey)
+        if (this.optimisticSubmissions.get(sessionKey) === optimistic) this.optimisticSubmissions.delete(sessionKey)
+        if (this.sessionKey === sessionKey) {
+          if (!optimistic.acknowledged) this.builder.rollbackUser(trimmed)
+          this.fail(error)
+        }
+      } finally {
+        // RPC acceptance precedes snapshot preparation and turn_begin. Keep
+        // the pending state until the daemon actually starts or ends the turn.
         this.notify()
-        this.fail(error)
       }
       return
     }
@@ -2323,6 +2337,7 @@ export class Store {
   }
 
   private wentOffline(error?: unknown): void {
+    this.preparingSubmissions.delete(this.sessionKey)
     if (error !== undefined) this.patch({ error: error instanceof Error ? error.message : String(error) })
     if (this.supportsConnectionLease) {
       this.patch({ connection: 'offline' })
@@ -2973,8 +2988,15 @@ export class Store {
         if (user) {
           this.lastUser = user
           const last = this.frame.blocks.at(-1)
-          if (!(last && last.kind === 'user' && last.text === user)) this.builder.pushUser(user)
+          const optimistic = this.optimisticSubmissions.get(this.sessionKey)
+          const alreadyShown = optimistic?.text === user && this.frame.blocks.some(block => block.kind === 'user' && block.id === optimistic.id && block.text === user)
+          if (optimistic?.text === user) {
+            optimistic.acknowledged = true
+            this.optimisticSubmissions.delete(this.sessionKey)
+          }
+          if (!alreadyShown && !(last && last.kind === 'user' && last.text === user)) this.builder.pushUser(user)
         }
+        this.preparingSubmissions.delete(this.sessionKey)
         // A late delta that landed after the previous turn_end sits in the
         // scratch runs; left alone it re-enters the stream as a "live" block
         // of THIS turn. Drain it committed before the tail opens.
@@ -3024,6 +3046,7 @@ export class Store {
           }
           const body = str(payload.body) || str(payload.message)
           const severity = String(payload.severity ?? payload.level ?? 'info').toLowerCase()
+          if (body && (severity.includes('error') || severity.includes('fatal'))) this.preparingSubmissions.delete(this.sessionKey)
           if (body && (severity.includes('error') || severity.includes('fatal')) && this.frame.turnActive) {
             // A failed turn announces itself as an error notification — never
             // as silence; text may still have streamed before the failure.
@@ -3240,6 +3263,7 @@ export class Store {
         break
       }
       case 'turn_end': {
+        this.preparingSubmissions.delete(this.sessionKey)
         // Plan mode: whatever the agent reasoned toward in text is the plan
         // artifact — capture it before the buffer resets for the next turn.
         if (this.frame.planMode && this.agentText.trim()) this.capturePlan(this.agentText)
@@ -3458,7 +3482,7 @@ export class Store {
   }
 
   private frozen(value: Snapshot | Record<string, unknown>): Snapshot {
-    return Object.freeze({ ...value } as Snapshot)
+    return Object.freeze({ ...value, submissionPending: this.preparingSubmissions.has(String(value.sessionKey ?? this.sessionKey)) } as Snapshot)
   }
 
   private emit(): void {
