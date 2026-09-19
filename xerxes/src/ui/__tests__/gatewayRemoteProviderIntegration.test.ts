@@ -243,7 +243,7 @@ it('implicit model selection and busy remote overrides leave local authority unc
     await f.bind()
     const session=f.runtime.listSessions().find(s=>s.id===f.created.session_id)!
     const marker=session.metadata[LOCAL_PROVIDER_BINDING]
-    expect(await f.client.request('set_model',{model:'gpt-4o'})).toMatchObject({ok:false,error:expect.stringContaining('explicitly')})
+    expect(await f.client.request('set_model',{model:'gpt-4o'})).toMatchObject({ok:true,model:'gpt-4o'})
     session.activeTurnId='active-fixture'
     try {expect(await f.client.request('provider_select',{name:'remote-choice'})).toMatchObject({ok:false,error:expect.stringContaining('Stop the active turn')})}
     finally {session.activeTurnId=''}
@@ -252,17 +252,19 @@ it('implicit model selection and busy remote overrides leave local authority unc
   } finally {await f.close()}
 })
 
-for (const marker of [undefined, {version:1,source:'unavailable'}]) it(`failed remote selection restores even a malformed local requirement (${String(marker)})`, async () => {
+for (const route of ['model','provider']) for (const marker of [undefined, {version:1,source:'unavailable'}]) it(`failed remote ${route} selection restores even a malformed local requirement (${String(marker)})`, async () => {
   const f = await fixture({async *stream(){yield {content:'local'}}})
   try {
     f.profiles.save({name:'remote-choice',provider:'openai',baseUrl:'https://provider.invalid/v1',model:'gpt-4o',apiKey:'synthetic'})
     const session=f.runtime.listSessions().find(s=>s.id===f.created.session_id)!
     session.metadata[LOCAL_PROVIDER_BINDING]=marker
+    session.metadata.local_provider_profile='second-local'
     const failure=vi.spyOn(f.runtime,'setSessionModel').mockRejectedValueOnce(new Error('fixture persistence unavailable'))
-    try {await expect(f.client.request('set_model',{model:'gpt-4o',provider_profile:'remote-choice'})).rejects.toThrow('fixture persistence unavailable')}
+    try {await expect(route === 'model' ? f.client.request('set_model',{model:'gpt-4o',provider_profile:'remote-choice'}) : f.client.request('provider_select',{name:'remote-choice'})).rejects.toThrow('fixture persistence unavailable')}
     finally {failure.mockRestore()}
     expect(Object.hasOwn(session.metadata,LOCAL_PROVIDER_BINDING)).toBe(true)
     expect(session.metadata[LOCAL_PROVIDER_BINDING]).toBe(marker)
+    expect(session.metadata.local_provider_profile).toBe('second-local')
     expect(()=>f.bindings.client(session,session.model)).toThrow('unavailable')
     expect(f.fallback).not.toHaveBeenCalled()
   } finally {await f.close()}

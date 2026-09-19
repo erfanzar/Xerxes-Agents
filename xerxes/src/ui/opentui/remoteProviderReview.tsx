@@ -28,11 +28,16 @@ export function RemoteProviderReview({value, t, onChoose, onCancel}: {
   const [error, setError] = useState('')
   const scroll = useRef<ScrollBoxRenderable | null>(null)
   const profile = value.profiles[profileIndex]
+  const supported = value.profiles.filter(p => p.supported)
+  const bundle = value.localBundleSupported === true && supported.length > 1
+  const chosen = bundle ? supported : profile ? [profile] : []
+  const needsOutputConsent = chosen.some(p => p.providerControlledOutput)
+  const onlyProviderControlled = chosen.length > 0 && chosen.every(p => p.providerControlledOutput)
   const currentRoute = value.localRequirement || `Remote provider: ${value.remoteProfile || 'not configured'}`
   const keepSetup = value.localRequirement
     ? 'Keep this task’s local-provider requirement. No local access is granted. Choose a local profile to authorize again, or open the task and use /provider to select remote credentials explicitly.'
     : 'Use the selected task’s existing remote credentials, model and integrations. No local provider access is granted. After connecting, use /provider to configure remote credentials if needed.'
-  const allowed = value.localBindingSupported && !value.running && profile?.supported
+  const allowed = value.localBindingSupported && !value.running && profile?.supported && chosen.length <= 32
   useKeyboard(key => {
     if (!['escape', 'return', 'enter', 'tab', 'left', 'right', 'up', 'down', 'pageup', 'pagedown', 'home', 'end', 'a', 'c'].includes(key.name)) return
     key.preventDefault(); key.stopPropagation()
@@ -45,17 +50,17 @@ export function RemoteProviderReview({value, t, onChoose, onCancel}: {
     }
     if (confirm) {
       if (key.name === 'up' || key.name === 'down') {scroll.current?.scrollBy(key.name === 'up' ? -1 : 1);return}
-      if (key.name === 'c' && profile?.providerControlledOutput) {setProviderControlled(v => !v);setError('');return}
+      if (key.name === 'c' && needsOutputConsent) {setProviderControlled(v => !v);setError('');return}
       if (key.name !== 'a' || !profile || !allowed) return
-      if (profile.providerControlledOutput && !providerControlled) {setError('Press C to explicitly accept provider-controlled output length first.');return}
-      onChoose({kind:'local',profile:profile.name,durationMinutes:durations[duration]!,maxRequests:requests[request]!,
-        maxOutputTokens:profile.providerControlledOutput ? null : outputs[output]!,maxConcurrent:concurrent[concurrency]!,consentProviderControlledOutput:providerControlled})
+      if (needsOutputConsent && !providerControlled) {setError('Press C to explicitly accept provider-controlled output length first.');return}
+      onChoose({kind:'local',profile:profile.name,...(bundle ? {profiles:chosen.map(p => p.name)} : {}),durationMinutes:durations[duration]!,maxRequests:requests[request]!,
+        maxOutputTokens:onlyProviderControlled ? null : outputs[output]!,maxConcurrent:concurrent[concurrency]!,consentProviderControlledOutput:providerControlled})
       return
     }
     if (key.name === 'tab') {setField(v => (v + (key.shift ? 4 : 1)) % 5);return}
     if (key.name === 'return' || key.name === 'enter') {
       if (!profile) {onChoose({kind:'remote'});return}
-      if (!allowed) {setError(value.running ? 'This task is running. Use its current setup or return after it stops.' : profile.setup || 'Local provider binding is unavailable. Update the remote runtime or use remote setup.');return}
+      if (!allowed) {setError(value.running ? 'This task is running. Use its current setup or return after it stops.' : chosen.length > 32 ? 'Share up to 32 configured providers. Reduce the local profile list before retrying.' : profile.setup || 'Local provider binding is unavailable. Update the remote runtime or use remote setup.');return}
       setConfirm(true);setProviderControlled(false);setError('');scroll.current?.scrollTo(0);return
     }
     const delta = key.name === 'left' || key.name === 'up' ? -1 : key.name === 'right' || key.name === 'down' ? 1 : 0
@@ -68,18 +73,18 @@ export function RemoteProviderReview({value, t, onChoose, onCancel}: {
     else setConcurrency(v => (v + delta + concurrent.length) % concurrent.length)
   })
   const fields = [
-    `Provider: ${profile ? 'local / ' + profile.name + ' · ' + (profileIndex + 1) + '/' + value.profiles.length : 'keep current task setup'}`,
+    `Provider: ${profile ? (bundle ? 'all ' + chosen.length + ' local providers · start / ' : 'local / ') + profile.name + ' · ' + (profileIndex + 1) + '/' + value.profiles.length : 'keep current task setup'}`,
     `Expires: ${durations[duration]} minutes after approval`,
-    `Requests: ${requests[request]} total (includes subagents and summaries)`,
-    `Output: ${profile?.providerControlledOutput ? 'provider-controlled; separate consent required' : outputs[output] + ' tokens per request maximum'}`,
-    `Concurrent requests: ${concurrent[concurrency]}`,
+    `Requests: ${requests[request]} per provider (includes delegated work)`,
+    `Output: ${outputs[output]} tokens/request${needsOutputConsent ? '; subscription providers control their own output' : ''}`,
+    `Concurrent requests: ${concurrent[concurrency]} per provider`,
   ]
-  return <ModalShell t={t} title={confirm ? 'Authorize local provider' : 'Choose provider location'} width={width} height={height} panelWidth={Math.min(88,width)} panelHeight={Math.min(30,height)}>
+  return <ModalShell t={t} title={confirm ? (bundle ? 'Authorize SSH setup' : 'Authorize local provider') : 'Choose provider location'} width={width} height={height} panelWidth={Math.min(88,width)} panelHeight={Math.min(30,height)}>
     <box flexDirection="column" flexGrow={1} minHeight={0} paddingX={2}>
       <scrollbox ref={scroll} style={{flexGrow:1,minHeight:0}}>
         <text fg={t.color.text} wrapMode="word">{`SSH host: ${value.destination}\nRemote workspace: ${value.workspace}\nTask: ${value.sessionId}${value.running ? ' · running' : ''}\n${currentRoute}\nModel: ${value.remoteModel || 'not selected'}\n`}</text>
         {fields.map((text,i) => <text key={i} fg={!confirm && field === i ? t.color.accent : t.color.text} wrapMode="word">{`${!confirm && field === i ? '› ' : '  '}${text}`}</text>)}
-        <text fg={t.color.text} wrapMode="word">{profile ? `\nModel: ${profile.model}\nCredential source: ${profile.credentialSource}\nProvider requests and token refresh run on this local workstation. Code and tools run on the remote host. Only this task and its delegated provider work use this grant. Requests send this task's context to the selected provider.\n\nCredentials are not copied. The grant stays in memory; closing this SSH window, expiry, revocation or connection loss ends access. Remote history keeps the provider requirement. Reconnect requires a new review; it never switches to remote credentials. Other remote tasks keep their own setup.\n\n${profile.setup}` : '\n' + keepSetup}</text>
+        <text fg={t.color.text} wrapMode="word">{profile ? `\nModel: ${profile.model}\nCredential source: ${profile.credentialSource}\nProvider requests and token refresh run on this local workstation. Code and tools run on the remote host. Only this task and its delegated provider work use this setup. Requests send this task's context to the selected provider.\n\nCredentials are not copied. Access stays in memory; closing this SSH window, expiry, revocation or connection loss ends access. Remote history keeps the provider requirement. Reconnect requires a new review; it never switches to remote credentials. Other remote tasks keep their own setup.\n\n${bundle ? 'Shared configured models:\n' + chosen.map(p => p.name + ' / ' + p.model).join('\n') + '\nOne approval covers these providers for this task and its agents. Switch approved models with /model <model> --provider <profile>. Unlisted models require a new setup review.' : profile.setup}\n${value.profiles.filter(p => !p.supported).map(p => 'Unavailable: ' + p.name + '. ' + p.setup).join('\n')}` : '\n' + keepSetup}</text>
         {value.localRequirement ? <text fg={t.color.warn} wrapMode="word">{value.localRequirement + '. Choose a local profile to authorize again, or open the task and use /provider to choose remote credentials explicitly.'}</text> : null}
         {value.inventoryError ? <text fg={t.color.warn} wrapMode="word">{value.inventoryError}</text> : null}
         {!value.localBindingSupported ? <text fg={t.color.warn} wrapMode="word">Remote runtime does not report local provider binding support.</text> : null}
@@ -87,7 +92,7 @@ export function RemoteProviderReview({value, t, onChoose, onCancel}: {
         {error ? <text fg={t.color.error} wrapMode="word">{error}</text> : null}
       </scrollbox>
       <text flexShrink={0} fg={t.color.muted}>PgUp/PgDn scroll · Esc {confirm ? 'edit' : 'cancel'}</text>
-      <text flexShrink={0} fg={t.color.accent} wrapMode="word">{confirm ? 'A authorize this local provider scope' : 'Tab field · ←→ change · Enter ' + (profile ? 'review consent' : 'keep current setup')}</text>
+      <text flexShrink={0} fg={t.color.accent} wrapMode="word">{confirm ? bundle ? 'A authorize all listed providers for this SSH task' : 'A authorize this local provider scope' : 'Tab field · ←→ change · Enter ' + (profile ? 'review consent' : 'keep current setup')}</text>
     </box>
   </ModalShell>
 }

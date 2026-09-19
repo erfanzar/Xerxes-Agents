@@ -125,3 +125,22 @@ for (const field of ['model', 'mode'] as const) {
     } finally { release.resolve(); save?.mockRestore(); f.runtime.cancelTurn('task'); await f.close() }
   })
 }
+
+test('a local provider switch publishes its routing choice only after durable storage succeeds', async () => {
+  const f = await fixture()
+  try {
+    f.session.metadata.local_provider_profile = 'first'
+    await f.runtime.flushSessions()
+    const before = state(f.session)
+    const save = spyOn(f.store,'save').mockRejectedValueOnce(new Error('private storage sentinel'))
+    try { await expect(f.runtime.setSessionModel('task','retry-model',undefined,'second')).rejects.toThrow('unchanged') }
+    finally { save.mockRestore() }
+    expect(state(f.session)).toEqual(before)
+    expect((await f.resumed()).metadata.local_provider_profile).toBe('first')
+    await f.runtime.setSessionModel('task','retry-model',undefined,'second')
+    const resumed = await f.resumed()
+    expect(resumed.model).toBe('retry-model')
+    expect(resumed.metadata.local_provider_profile).toBe('second')
+    expect(resumed.metadata.provider_profile).toBe('initial-profile')
+  } finally { await f.close() }
+})

@@ -1825,7 +1825,7 @@ export class GatewayClient extends EventEmitter {
 
   private async modelOptions(params: Record<string, unknown>): Promise<RpcObject> {
     const [raw, status] = (await Promise.all([
-      this.rawRequest('provider_list', {}),
+      this.rawRequest('provider_list', {for_model_selection:true,session_key:this.keyFor(params.session_id)}),
       this.rawRequest('session.status', { session_key: this.keyFor(params.session_id) })
     ])) as [RpcObject, RpcObject]
     const profiles = Array.isArray(raw.profiles) ? raw.profiles : []
@@ -1835,7 +1835,7 @@ export class GatewayClient extends EventEmitter {
       session && Object.prototype.hasOwnProperty.call(session, 'profile_name')
     )
     const runtimeProfileName = String(session?.profile_name ?? '').trim()
-    const current = hasRuntimeProfileIdentity
+    const current = hasRuntimeProfileIdentity && raw.local_setup !== true
       ? (profiles.find(
           (profile: RpcObject) =>
             String(profile.name ?? profile.provider ?? '').trim() === runtimeProfileName
@@ -1865,7 +1865,7 @@ export class GatewayClient extends EventEmitter {
     if (!profileName) {
       throw new Error('provider profile name is required')
     }
-    const raw = await this.nativeSuccess('fetch_models', { profile_name: profileName })
+    const raw = await this.nativeSuccess('fetch_models', { profile_name: profileName, for_model_selection:true })
     const models = Array.isArray(raw.models)
       ? [...new Set(raw.models.map(model => String(model).trim()).filter(Boolean))]
       : []

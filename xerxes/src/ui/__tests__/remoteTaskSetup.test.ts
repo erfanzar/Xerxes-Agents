@@ -15,6 +15,64 @@ import { GatewayClient } from '../gatewayClient.js'
 import { prepareRemoteTask, shareableLocalProfiles, type RemoteTaskDecision, type RemoteTaskReview } from '../lib/remoteTaskSetup.js'
 const storage = (dir: string) => ({cronLeasePath: join(dir,'cron.lease'), cronStoreFactory: () => new JobStore(join(dir,'jobs.json')), cronArchiveDirectory: join(dir,'cron-archive'), legacyScheduleDirectory: join(dir,'scheduler')})
 const approve: RemoteTaskDecision = {kind:'local',profile:'local',durationMinutes:15,maxRequests:50,maxOutputTokens:4096,maxConcurrent:1,consentProviderControlledOutput:false}
+
+it('one review shares two local providers, discovers them, switches models and revokes both', async () => {
+  const f = await fixture()
+  let prepared: Awaited<ReturnType<typeof prepareRemoteTask>> | undefined
+  try {
+    f.profiles.save({name:'second',provider:'openai',baseUrl:'https://provider.invalid/v1',model:'gpt-4.1',apiKey:'synthetic-second-key',setActive:false})
+    const review = vi.fn(async (value: RemoteTaskReview) => {
+      expect(value.localBundleSupported).toBe(true)
+      return {...approve,profiles:['local','second']}
+    })
+    prepared = await prepareRemoteTask(f.remote,f.rpc,review)
+    expect(review).toHaveBeenCalledOnce()
+    const renderer = await f.attach(prepared)
+    const session = f.runtime.listSessions().find(s => s.id === prepared!.sessionId)!
+    expect(await renderer.request('model.options')).toMatchObject({providers:[{name:'local'},{name:'second'}]})
+    expect(await renderer.request('model.models',{profile_name:'second'})).toMatchObject({models:['gpt-4.1'],source:'approved_local_setup'})
+    expect(await renderer.request('model.models',{profile_name:'second'})).not.toHaveProperty('warning')
+    const inventory = await f.server.modelInventoryToolRequest(session.id,{provider_profile:'',limit:20}) as {entries:{provider_profile:string}[]}
+    expect(inventory.entries.map(e => e.provider_profile)).toEqual(['local','second'])
+    const models = await f.server.modelInventoryToolRequest(session.id,{provider_profile:'second'}) as {entries:{model:string}[]}
+    expect(models.entries.map(e => e.model)).toEqual(['gpt-4.1'])
+    const child = f.bindings.sourceClient(session,'gpt-4.1','second')!
+    for await (const delta of child.llm.stream({model:'gpt-4.1',messages:[{role:'user',content:'delegated'}]})) expect(delta.content).toBe('LOCAL REPLY')
+    expect(await renderer.request('set_model',{model:'gpt-4.1',provider_profile:'second'})).toMatchObject({ok:true})
+    expect(session.model).toBe('gpt-4.1')
+    expect(session.metadata.local_provider_profile).toBe('second')
+    f.remoteProfiles.save({name:'second',provider:'openai',baseUrl:'https://provider.invalid/v1',model:'gpt-4o',apiKey:'synthetic-remote-key',setActive:false})
+    expect(await renderer.request('set_model',{model:'gpt-4o',provider_profile:'second'})).toMatchObject({ok:false,error:expect.stringContaining('not included in the approved local setup')})
+    expect(session.model).toBe('gpt-4.1')
+    expect(session.metadata.local_provider_profile).toBe('second')
+    await f.runtime.submitTurn(session.sessionKey,'Use the second approved provider.',()=>{})
+    expect(session.messages.at(-1)?.content).toBe('LOCAL REPLY')
+    expect(f.remoteCalls).toBe(0)
+    expect(JSON.stringify(session)).not.toContain('synthetic-second-key')
+    expect(f.rpc.mock.calls.filter(([method]) => method === 'provider.relay.authorize')).toHaveLength(2)
+    await prepared.close()
+    expect(f.rpc.mock.calls.filter(([method]) => method === 'provider.relay.revoke')).toHaveLength(2)
+    expect(() => f.bindings.client(session,'gpt-4.1')).toThrow('unavailable')
+  } finally { await prepared?.close(); await f.close() }
+})
+
+for (const abort of [false,true]) it(`partial bundle ${abort ? 'cancellation' : 'failure'} revokes already prepared providers`, async () => {
+  const f = await fixture()
+  try {
+    f.profiles.save({name:'second',provider:'openai',baseUrl:'https://provider.invalid/v1',model:'gpt-4.1',apiKey:'synthetic-second-key',setActive:false})
+    let grants = 0
+    const rpc = async (method:string,params:Record<string,unknown>) => {
+      if (method === 'provider.relay.authorize' && ++grants === 2) {
+        if (abort) f.controller.abort()
+        return {ok:false,error:'synthetic-private-error'}
+      }
+      return f.rpc(method,params)
+    }
+    await expect(prepareRemoteTask(f.remote,rpc,async()=>({...approve,profiles:['local','second']}))).rejects.toThrow('Remote task setup failed')
+    expect(f.rpc.mock.calls.filter(([method]) => method === 'provider.relay.revoke')).toHaveLength(1)
+    expect(f.localCalls).toBe(0)
+  } finally { await f.close() }
+})
 async function fixture() {
   const dir = await realpath(await mkdtemp(join(tmpdir(),'xr-task-setup-')))
   let localCalls = 0, remoteCalls = 0
@@ -34,7 +92,7 @@ async function fixture() {
   await local.start();await renderer.start()
   const rpc = vi.fn((method:string,params:Record<string,unknown>)=>local.request(method,params))
   const controller = new AbortController()
-  return {dir,server,local,renderer,rpc,runtime,controller,get localCalls(){return localCalls},get remoteCalls(){return remoteCalls},
+  return {dir,server,local,renderer,rpc,runtime,controller,profiles,remoteProfiles,bindings,get localCalls(){return localCalls},get remoteCalls(){return remoteCalls},
     async attach(prepared: Awaited<ReturnType<typeof prepareRemoteTask>>) {
       renderer.close()
       renderer = new GatewayClient({externalSocketPath:join(dir,'remote.sock'),projectDir:dir,

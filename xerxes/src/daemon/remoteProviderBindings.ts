@@ -12,22 +12,38 @@ export const LOCAL_PROVIDER_BINDING = 'local_provider_binding'
 export function localProviderLabel(metadata: Record<string, unknown>): string {
   if (!Object.hasOwn(metadata, LOCAL_PROVIDER_BINDING)) return ''
   const marker = metadata[LOCAL_PROVIDER_BINDING]
-  const profile = marker && typeof marker === 'object' && !Array.isArray(marker) ? (marker as Record<string, unknown>).profile : undefined
+  const profile = typeof metadata.local_provider_profile === 'string' ? metadata.local_provider_profile : marker && typeof marker === 'object' && !Array.isArray(marker) ? (marker as Record<string, unknown>).profile : undefined
   return typeof profile === 'string' && profile.length <= 512 && !/[\x00-\x1f\x7f]/.test(profile)
     ? 'Local provider: ' + profile + ' · requires local access' : 'Local provider required · review access'
 }
 interface Session { id: string; cwd: string; metadata: Record<string, unknown> }
-export interface LocalProviderSelection { source: string; profile: string; model: string; capabilities?: LocalProviderCapabilities }
+export interface LocalProviderSelection { source: string; profile: string; model: string; capabilities?: LocalProviderCapabilities; alternatives?: readonly LocalProviderSelection[] }
 export function localProviderCapabilities(metadata: Record<string, unknown>, model: string): LocalProviderCapabilities | undefined {
-  const marker = metadata[LOCAL_PROVIDER_BINDING]
-  if (!marker || typeof marker !== 'object' || Array.isArray(marker) || !('model' in marker) || marker.model !== model) return undefined
+  const marker = localProviderSelections(metadata).find(route => route.model === model && (!metadata.local_provider_profile || route.profile === metadata.local_provider_profile))
+  if (!marker) return undefined
   try { return parseLocalProviderCapabilities('capabilities' in marker ? marker.capabilities : undefined, model) }
   catch { return undefined } // Old or damaged metadata cannot authorize guessed controls.
 }
-interface Marker extends LocalProviderSelection { version: 1; binding: string; workspace: string }
+interface Marker extends LocalProviderSelection { version: 1; binding: string; workspace: string; alternatives?: readonly Marker[] }
+/** Display-only persisted choices; live authority is always checked separately. */
+export function localProviderSelections(metadata: Record<string, unknown>): readonly LocalProviderSelection[] {
+  const raw = metadata[LOCAL_PROVIDER_BINDING]
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return []
+  const marker = raw as Record<string, unknown>
+  const values = [marker, ...(Array.isArray(marker.alternatives) ? marker.alternatives.slice(0,31) : [])]
+  return values.flatMap(value => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return []
+    const r = value as Record<string, unknown>
+    if (typeof r.source !== 'string' || typeof r.profile !== 'string' || typeof r.model !== 'string') return []
+    try { const capabilities = parseLocalProviderCapabilities(r.capabilities, r.model)
+      return [{source:r.source, profile:r.profile, model:r.model, ...(capabilities ? {capabilities} : {})}]
+    } catch { return [] }
+  })
+}
 export interface RemoteProviderRequest { binding: string; request_id: string; frame: ProviderRelayRequest }
 interface Pending { settle(value: unknown): void; reject(error: Error): void }
 interface Binding {
+  alternatives?: Binding[]
   owner: object
   marker: Marker
   pending: Map<string, Pending>
@@ -45,49 +61,62 @@ export class RemoteProviderBindings {
 
   bind(owner: object, session: Session, selection: LocalProviderSelection,
     send: Binding['send']): Marker {
-    if ([selection.source, selection.profile, selection.model].some(value => typeof value !== 'string' || !value.trim() || value.length > 512 || /[\x00-\x1f\x7f]/.test(value))) throw new LocalProviderRelayError('invalid_request')
-    let capabilities: LocalProviderCapabilities | undefined
-    try { capabilities = parseLocalProviderCapabilities(selection.capabilities, selection.model) }
-    catch { throw new LocalProviderRelayError('invalid_request') }
+    if (selection.alternatives !== undefined && (!Array.isArray(selection.alternatives) || selection.alternatives.length > 31)) throw new LocalProviderRelayError('invalid_request')
+    const choices = [selection, ...(selection.alternatives ?? [])]
+    const markers = choices.map((choice,index): Marker => {
+      if (!choice || (index > 0 && choice.alternatives !== undefined) || [choice.source, choice.profile, choice.model].some(value => typeof value !== 'string' || !value.trim() || value.length > 512 || /[\x00-\x1f\x7f]/.test(value))) throw new LocalProviderRelayError('invalid_request')
+      let capabilities: LocalProviderCapabilities | undefined
+      try { capabilities = parseLocalProviderCapabilities(choice.capabilities, choice.model) }
+      catch { throw new LocalProviderRelayError('invalid_request') }
+      return {version:1, binding:randomBytes(16).toString('hex'),workspace:session.cwd,source:choice.source,profile:choice.profile,model:choice.model,...(capabilities ? {capabilities} : {})}
+    })
+    if (new Set(markers.map(m => JSON.stringify([m.profile,m.model]))).size !== markers.length) throw new LocalProviderRelayError('invalid_request')
     const old = this.bindings.get(session.id)
     if (old && old.owner !== owner) throw new LocalProviderRelayError('grant_unavailable')
-    if (old?.pending.size) throw new LocalProviderRelayError('concurrency_limit')
+    if (old && this.group(old).some(route => route.pending.size)) throw new LocalProviderRelayError('concurrency_limit')
     if (!old && this.bindings.size >= 128) throw new LocalProviderRelayError('concurrency_limit')
-    const marker: Marker = { version: 1, binding: randomBytes(16).toString('hex'), workspace: session.cwd, source: selection.source, profile: selection.profile, model: selection.model, ...(capabilities ? {capabilities} : {}) }
-    if (old) this.cancelStreams(old)
-    this.bindings.set(session.id, { owner, marker, pending: new Map(), streams: new Set(), send })
-    session.metadata[LOCAL_PROVIDER_BINDING] = { ...marker }
-    return { ...marker }
+    const routes = markers.map(marker => ({owner,marker,pending:new Map<string,Pending>(),streams:new Set<string>(),send}))
+    const primary: Binding = routes[0]!
+    if (routes.length > 1) { primary.alternatives = routes.slice(1); primary.marker.alternatives = markers.slice(1) }
+    if (old) for (const route of this.group(old)) this.cancelStreams(route)
+    this.bindings.set(session.id, primary)
+    session.metadata[LOCAL_PROVIDER_BINDING] = structuredClone(primary.marker)
+    session.metadata.local_provider_profile = primary.marker.profile
+    return structuredClone(primary.marker)
   }
 
   /** Undefined means this session never chose a local provider. A persisted
    * but disconnected marker is an error, never permission to use a fallback. */
-  client(session: Session, model: string): LlmClient | undefined {
+  client(session: Session, model: string, explicitProfile?: string): LlmClient | undefined {
     if (!Object.hasOwn(session.metadata, LOCAL_PROVIDER_BINDING)) return undefined
     const binding = this.bindings.get(session.id)
     const marker = session.metadata[LOCAL_PROVIDER_BINDING]
     if (!binding || !marker || typeof marker !== 'object' || Array.isArray(marker) ||
       (marker as Record<string, unknown>).binding !== binding.marker.binding || session.cwd !== binding.marker.workspace) throw new LocalProviderRelayError('grant_unavailable')
-    if (model !== binding.marker.model) throw new LocalProviderRelayError('route_mismatch')
+    const candidates = this.group(binding).filter(route => route.marker.model === model)
+    const preferred = explicitProfile ?? (typeof session.metadata.local_provider_profile === 'string' ? session.metadata.local_provider_profile : binding.marker.profile)
+    const selected = candidates.find(route => route.marker.profile === preferred) ?? (!explicitProfile && candidates.length === 1 ? candidates[0] : undefined)
+    if (!selected) throw new LocalProviderRelayError('route_mismatch')
     return new LocalRelayClient((frame, signal) => {
       if (this.bindings.get(session.id) !== binding) return Promise.reject(new LocalProviderRelayError('grant_unavailable'))
-      return this.call(binding, frame, signal)
+      return this.call(selected, frame, signal)
     })
   }
 
   /** Child snapshots keep only a fingerprint. Every execution still needs live authority. */
-  sourceClient(session: Session, model: string, explicitProfile?: string): { llm: LlmClient; route: string } | undefined {
-    const llm = this.client(session, model)
+  sourceClient(session: Session, model: string, explicitProfile?: string): { llm: LlmClient; route: string; profile: string } | undefined {
+    const llm = this.client(session, model, explicitProfile)
     if (!llm) return undefined
-    // An agent definition cannot silently replace a user's local binding.
-    if (explicitProfile) throw new LocalProviderRelayError('route_mismatch')
-    const binding = this.bindings.get(session.id)!
-    const route = createHash('sha256').update(JSON.stringify(binding.marker)).digest('hex')
-    return { llm, route }
+    const root = this.bindings.get(session.id)!
+    const candidates = this.group(root).filter(route => route.marker.model === model)
+    const profile = explicitProfile ?? (typeof session.metadata.local_provider_profile === 'string' ? session.metadata.local_provider_profile : root.marker.profile)
+    const selected = candidates.find(route => route.marker.profile === profile) ?? candidates[0]!
+    const route = createHash('sha256').update(JSON.stringify(selected.marker)).digest('hex')
+    return { llm, route, profile:selected.marker.profile }
   }
 
   reply(owner: object, bindingId: unknown, requestId: unknown, value: unknown): void {
-    const binding = [...this.bindings.values()].find(item => item.marker.binding === bindingId && item.owner === owner)
+    const binding = [...this.bindings.values()].flatMap(item => this.group(item)).find(item => item.marker.binding === bindingId && item.owner === owner)
     const pending = typeof requestId === 'string' ? binding?.pending.get(requestId) : undefined
     if (!pending) throw new LocalProviderRelayError('grant_unavailable')
     try {
@@ -101,19 +130,24 @@ export class RemoteProviderBindings {
    * Refuse to invalidate an active provider request. */
   useRemote(session: Session): void {
     const binding = this.bindings.get(session.id)
-    if (binding && (binding.pending.size || binding.streams.size)) throw new LocalProviderRelayError('concurrency_limit')
+    if (binding && this.group(binding).some(route => route.pending.size || route.streams.size)) throw new LocalProviderRelayError('concurrency_limit')
     this.bindings.delete(session.id)
     delete session.metadata[LOCAL_PROVIDER_BINDING]
+    delete session.metadata.local_provider_profile
   }
 
   disconnect(owner: object): void {
     for (const [id, binding] of this.bindings) if (binding.owner === owner) {
       this.bindings.delete(id)
-      this.cancelStreams(binding)
-      for (const pending of [...binding.pending.values()]) pending.reject(new LocalProviderRelayError('grant_unavailable'))
+      for (const route of this.group(binding)) {
+        this.cancelStreams(route)
+        for (const pending of [...route.pending.values()]) pending.reject(new LocalProviderRelayError('grant_unavailable'))
+      }
     }
   }
   close(): void { for (const binding of [...this.bindings.values()]) this.disconnect(binding.owner) }
+
+  private group(binding: Binding): Binding[] { return [binding, ...(binding.alternatives ?? [])] }
 
   private cancelStreams(binding: Binding): void {
     for (const id of binding.streams) {

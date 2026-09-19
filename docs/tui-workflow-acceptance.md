@@ -5,7 +5,10 @@ acceptance evidence for this checkout. No external service or SSH destination ha
 yet been designated for this audit. Tests using injected ports are not live acceptance.
 Paths below are relative to `xerxes/src` unless prefixed with `test/`.
 
-Latest checkpoint: local reasoning capability negotiation, narrow-picker details,
+Latest checkpoint: one SSH setup approval now covers all supported configured local
+provider/model pairs for that task, and blank model-inventory provider fields no
+longer fail. See the September 20 checkpoint for scope, regressions and actual
+loopback SSH evidence. Local reasoning capability negotiation, narrow-picker details,
 failed model/mode/effort saves, stale remote discovery notices and pasted-command
 file hints are corrected and verified below. The isolated baseline probe at
 `/tmp/xerxes-tui-audit-20260919/setting-failure-probe.{ts,json}` records the original
@@ -1143,3 +1146,39 @@ before/after footer behavior and no synthetic credential values. Focused logs:
 `review-permission-cancellation.log`, `review-permission-resume-before.log` and
 `review-permission-resume-after.log`. Final repository gates are recorded in the
 linked repository review. This checkpoint does not complete the broader audit.
+
+### 2026-09-20 — One approval for the local provider setup
+
+| User expectation | Current behavior/source | Confirmed defect or limitation | Implemented correction | Automated and actual-use verification | Remaining uncertainty |
+| --- | --- | --- | --- | --- | --- |
+| Approve the SSH task's local providers together, then switch without repeated consent | `ui/opentui/remoteProviderReview.tsx`, `ui/lib/remoteTaskSetup.ts`, `daemon/remoteProviderBindings.ts` | Previous binding authorized one profile/model; changing provider required preparing the task again | One destination review covers all supported configured profiles; each retains a separate local grant, common expiry, per-provider limits and private route. Advertised bundle capability preserves older daemon support. Partial failure/cancellation closes every prepared grant | Narrow/normal rendered approval tests; two real daemons test one review, two grants, switching, replies and revocation; binding tests cover ownership, bounds, disconnect and restart. Actual 80×24 TUI through isolated loopback OpenSSH approved once, completed turns using both providers and revoked both on exit | Up to 32 profiles, each profile's configured model only. Memory-only authority ends at expiry/disconnect/revocation; reconnect requires a new setup review. Unsupported integrations remain explicitly unavailable. No permanent host trust or arbitrary-model authority |
+| Model picker and agents can see and use the approved local setup | `daemon/server.ts:modelInventoryToolRequest/setModel`, `daemon/subagentHost.ts`, `ui/gatewayClient.ts` | Remote inventory suggested remote credentials; explicit local child profiles were rejected; picker falsely described approved choices as fallback results | Session-scoped picker/inventory list approved local routes and preserve selected profile for native child work, including profiles sharing a model. Same-named remote profiles cannot silently replace an unapproved local model. Limits stay editable on the local workstation | Real-daemon integration covers discovery and a completed second-provider turn; native subagent test completes on the second profile with matching route fingerprint. Rendering tests at 76/140 columns suppress the remote limit editor. Actual SSH picker lists both providers, switches and completes without another approval; confirmation displays the correct discovery source | Catalog includes configured approved models only, not the provider's full live catalog. Additional models need local configuration and another setup review. Existing external services and the user's actual SSH host were not exercised |
+| Provider selection survives failures and restart without changing credential source | `daemon/runtime.ts:setSessionModel`, `daemon/server.ts` remote override paths | New multiple-profile routing requires a durable selected local profile and correct rollback | Save local profile/model together before publishing; failed explicit remote overrides restore the previous local profile label and requirement; absent live authority remains an error | Storage failure/retry/restart regression; model/provider override failure regressions; group disconnect and restart tests cannot revive authority or invoke a remote fallback | A failed explicit override can require reopening local access, as before; authority is never restored from persisted metadata |
+| Empty optional provider fields work in `list_available_models` | `runtime/modelInventory.ts` | Screenshot's `provider_profile:""` was treated as an unknown profile, blocking discovery | Trim provider input; empty/whitespace means provider inventory. Usage lookup still requires an explicit nonempty profile | Exact screenshot-shaped regression plus whitespace and usage validation; real local-bound daemon inventory returns both approved providers | Live quota/catalog lookup is unavailable through these scoped local grants and is not invented |
+
+Actual-use evidence under `/tmp/xerxes-tui-audit-20260919/`:
+
+- `provider-bundle-live-terminal-after.raw` and `provider-bundle-live-result.json`:
+  the complete first-provider turn, picker switch, second-provider turn and exit.
+- `provider-bundle-final-terminal.raw` and `provider-bundle-final-result.json`:
+  confirmation of honest discovery labeling, second-provider success and cleanup.
+- `provider-bundle-acceptance.json`: 19 passing checks across both trials, including
+  unchanged remote profile defaults, absence of local credential sentinels in
+  terminal/log/history, grant revocation, stopped owned processes and removed
+  fixture SSH private keys.
+
+These used production machine picker, setup, broker, child TUI and actual isolated
+local/SSH daemons. The managed installer handshake was replaced with an isolated
+source-daemon handshake; provider responses came from a local synthetic Anthropic
+HTTP service. This establishes actual TUI/SSH integration behavior, not live
+external-provider or external-host acceptance. The final limit-editor guard was
+verified by rendering regressions after the confirmation trial. No active user
+daemon or task was interrupted. No performance improvement is claimed.
+
+Focused final regressions: 54 tests across model picker, remote task setup and
+remote provider gateway integration. Final root `bun run check && bun run test &&
+bun run build` and `git diff --check` passed on the final source: 4,099 runtime
+tests and 1,484 TUI tests, zero failures. Three runtime tests remain skipped
+(two Windows-only tests and installed-clangd acceptance). Logs:
+`bundle-final-{check,test,build}.log` in the evidence directory. No source edits
+occurred during that gate. The broader capability audit remains in progress.

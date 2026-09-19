@@ -4,6 +4,14 @@ import { expect, test } from 'bun:test'
 import { modelInventory, type ModelInventoryPort } from '../src/runtime/modelInventory.js'
 const profiles = [{ name: 'local', provider: 'custom', model: 'small', active: true, api_key: 'never-return', base_url: 'secret-endpoint' }, { name: 'second', provider: 'custom', model: 'large', active: false }]
 const port: ModelInventoryPort = { profiles: () => profiles, discover: async () => ({ models: [{ id: 'small', context_limit: 32000, context_source: 'provider' }, { id: 'large' }], source: 'remote' }), reasoning: async () => ({ efforts: ['low', 'high'], source: 'provider_reported', shape: 'effort' }) }
+test('empty optional profile fields list providers instead of looking up a blank profile', async () => {
+  for (const provider_profile of ['', '  ']) {
+    const result = await modelInventory(port, {provider_profile, include_usage:false, query:'', offset:0, limit:1, revision:''})
+    expect(result.mode).toBe('providers')
+    expect(result.configured_profiles).toBe(2)
+    await expect(modelInventory(port, {provider_profile, include_usage:true})).rejects.toThrow('requires provider_profile')
+  }
+})
 test('first-page retries recover from empty, stale and different-query revisions', async () => {
   const providers = await modelInventory(port, {})
   const current = await modelInventory(port, { provider_profile: 'local' })

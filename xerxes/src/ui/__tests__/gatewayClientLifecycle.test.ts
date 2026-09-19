@@ -520,9 +520,9 @@ describe('GatewayClient session lifecycle', () => {
     ).resolves.toEqual({ value: 'gpt-4.1' })
 
     expect(calls.slice(0, 3)).toEqual([
-      { method: 'provider_list', params: {} },
+      { method: 'provider_list', params: {for_model_selection:true,session_key:'live-session'} },
       { method: 'session.status', params: { session_key: 'live-session' } },
-      { method: 'fetch_models', params: { profile_name: 'kimi-local' } }
+      { method: 'fetch_models', params: { profile_name: 'kimi-local',for_model_selection:true } }
     ])
     expect(calls.slice(-1)).toEqual([
       { method: 'set_model', params: { model: 'gpt-4.1', provider_profile: 'openai-dev', session_key: 'test:model-picker' } }

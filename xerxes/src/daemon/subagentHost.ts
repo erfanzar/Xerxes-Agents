@@ -60,7 +60,7 @@ import { DaemonSubagentEventBus } from './subagentEvents.js'
 import { resolveOwnedSubagentRetry } from './subagentRetryOwnership.js'
 import type { DurableTaskBridge } from '../tasks/durableTaskBridge.js'
 
-export type SourceProviderClient = Pick<NativeSubagentHostOptions, 'llm' | 'contextLimit' | 'maxTokens' | 'maxOutputTokens' | 'temperature' | 'topK' | 'topP'> & { readonly route: string }
+export type SourceProviderClient = Pick<NativeSubagentHostOptions, 'llm' | 'contextLimit' | 'maxTokens' | 'maxOutputTokens' | 'temperature' | 'topK' | 'topP'> & { readonly route: string; readonly profile?: string }
 
 export interface NativeSubagentHostOptions {
   /** Reconstruct original durable budget ownership before a recovered attempt starts. */
@@ -454,7 +454,7 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
       : requestedPermissionMode
     const workspace = this.resolveWorkspace(options.sourceAgentId)
     const sourceClient = options.sourceAgentId ? this.resolveSourceClient?.(options.sourceAgentId, model, options.agent?.providerProfile) : undefined
-    const providerProfile = sourceClient ? undefined : options.agent?.providerProfile ?? (options.sourceAgentId ? this.resolveSourceProvider?.(options.sourceAgentId, model) : undefined)
+    const providerProfile = sourceClient ? sourceClient.profile : options.agent?.providerProfile ?? (options.sourceAgentId ? this.resolveSourceProvider?.(options.sourceAgentId, model) : undefined)
     const providerRoute = this.captureProviderRoute(providerProfile, model, options.sourceAgentId)
     const reasoningEffort = options.agent?.reasoningEffort ?? definition.effort ?? (sourceClient ? undefined : this.fallbackEffort)
     const task = await this.spawnResolved({

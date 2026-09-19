@@ -205,6 +205,7 @@ export interface McpServerStatus {
 
 export interface SessionInfo {
   local_provider_label?: string
+  remote_provider_bundle_supported?: boolean
   remote_provider_binding_supported?: boolean
   cwd?: string
   fast?: boolean

@@ -8,6 +8,24 @@ const selection = { source: 'local workstation', profile: 'chosen', model: 'gpt-
 const completion = { model: 'gpt-4o', messages: [{ role: 'user' as const, content: 'Private model context' }] }
 const session = () => ({ id: 'session-a', cwd: '/workspace/a', metadata: {} as Record<string, unknown> })
 
+test('bundle routes stay owner scoped, bounded and unavailable after disconnect or restart', async () => {
+  const bindings = new RemoteProviderBindings(), owner = {}, s = session(), frames:RemoteProviderRequest[]=[]
+  try {
+    const marker = bindings.bind(owner,s,{...selection,alternatives:[{...selection,profile:'second',model:'gpt-4.1'}]},frame=>{frames.push(frame);return true})
+    const client = bindings.sourceClient(s,'gpt-4.1','second')!
+    const pending = client.llm.stream({...completion,model:'gpt-4.1'})[Symbol.asyncIterator]().next().catch(error => error)
+    expect(frames[0]?.binding).toBe(marker.alternatives![0]!.binding)
+    expect(()=>bindings.reply({},frames[0]!.binding,frames[0]!.request_id,{done:true})).toThrow('unavailable')
+    expect(()=>bindings.useRemote(s)).toThrow('concurrency')
+    bindings.disconnect(owner);expect(await pending).toHaveProperty('code','grant_unavailable')
+    expect(()=>bindings.client(s,'gpt-4.1','second')).toThrow('unavailable')
+    const restarted = new RemoteProviderBindings()
+    try {expect(()=>restarted.client(structuredClone(s),'gpt-4.1','second')).toThrow('unavailable')} finally {restarted.close()}
+    expect(()=>bindings.bind(owner,s,{...selection,alternatives:[selection]},()=>true)).toThrow('unsupported')
+    expect(()=>bindings.bind(owner,s,{...selection,alternatives:Array.from({length:32},(_,i)=>({...selection,profile:String(i)}))},()=>true)).toThrow('unsupported')
+  } finally {bindings.close()}
+})
+
 test('binding cannot be hijacked, moved to another workspace or changed to another model', async () => {
   const bindings = new RemoteProviderBindings(), owner = {}, other = {}, s = session()
   const frames: RemoteProviderRequest[] = []

@@ -7,7 +7,7 @@ import { createNativeSubagentHost, type NativeSubagentHostOptions } from '../src
 import { RemoteProviderBindings, type RemoteProviderRequest } from '../src/daemon/remoteProviderBindings.js'
 import { ToolRegistry } from '../src/executors/toolRegistry.js'
 
-function fixture(reply = true) {
+function fixture(reply = true, bundle = false) {
   const bindings = new RemoteProviderBindings(1000)
   const owner = {}, session = { id: 'local-parent', cwd: process.cwd(), metadata: {} as Record<string, unknown> }
   const frames: RemoteProviderRequest[] = []
@@ -19,7 +19,7 @@ function fixture(reply = true) {
     })
     return true
   }
-  const bind = () => bindings.bind(owner, session, { source: 'local', profile: 'approved', model: 'gpt-4o' }, send)
+  const bind = () => bindings.bind(owner, session, { source: 'local', profile: 'approved', model: 'gpt-4o', ...(bundle ? {alternatives:[{source:'local',profile:'second',model:'gpt-4o'}]} : {}) }, send)
   bind()
   const registry = new ToolRegistry()
   const options: NativeSubagentHostOptions = {
@@ -40,6 +40,20 @@ const spawn = (host: ReturnType<typeof createNativeSubagentHost>) => host.manage
   promptProfile: 'default', sourceAgentId: 'local-parent', message: 'Complete the delegated task.',
 })
 
+test('a delegated explicit approved provider survives allocation when two routes share a model', async () => {
+  const f = fixture(true,true), host = createNativeSubagentHost(f.options)
+  try {
+    const task = await host.managerPort.spawn({promptProfile:'default',sourceAgentId:f.session.id,message:'Use the second local provider.',agent:{id:'default',model:'gpt-4o',providerProfile:'second'}})
+    await host.managerPort.wait([task.id],5000)
+    const snapshot = host.managerPort.listHandles().find(item => item.id === task.id)!
+    expect(snapshot.status).toBe('completed')
+    expect(snapshot.providerProfile).toBe('second')
+    expect(snapshot.providerRoute).toBe(f.bindings.sourceClient(f.session,'gpt-4o','second')!.route)
+    expect(snapshot.providerRoute).not.toBe(f.bindings.sourceClient(f.session,'gpt-4o','approved')!.route)
+    expect(f.fallbackCalls()).toBe(0)
+  } finally {f.bindings.close();await host.manager.shutdown()}
+})
+
 test('native children use the parent local binding and persist only a route fingerprint', async () => {
   const f = fixture(), host = createNativeSubagentHost({ ...f.options, reasoningEffort: 'high', temperature: 1.9, topK: 999, maxTokens: 65536, topP: 0.99 })
   try {
@@ -48,7 +62,7 @@ test('native children use the parent local binding and persist only a route fing
     const snapshot = host.managerPort.listHandles().find(item => item.id === task.id)!
     expect(snapshot.status).toBe('completed')
     expect(snapshot.providerRoute).toMatch(/^[a-f0-9]{64}$/)
-    expect(snapshot.providerProfile).toBeUndefined()
+    expect(snapshot.providerProfile).toBe('approved')
     expect(f.frames.some(frame => frame.frame.op === 'next')).toBe(true)
     const request = f.frames.find(frame => frame.frame.op === 'next' && frame.frame.request)?.frame
     if (request?.op !== 'next') throw new Error('Missing provider request')

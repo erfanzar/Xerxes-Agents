@@ -475,7 +475,11 @@ export function ModelPicker({
   }, [close, filter, modelProviderSlug, providerRows, stage])
 
   const openCapacityEditor = useCallback((profile: string, model: string) => {
-    const capability = discoveries.current.get(profile)?.catalog.find(entry => entry.id === model)
+    const discovered = discoveries.current.get(profile)
+    // These limits belong to the local workstation. A remote override with the
+    // same profile name would edit a different provider's configuration.
+    if (discovered?.source === 'approved_local_setup' || providers.find(candidate => candidate.slug === profile)?.provider_type === 'local relay') return
+    const capability = discovered?.catalog.find(entry => entry.id === model)
     setCapacityEditor({
       busy: false,
       context: capability?.context_source === 'override' && capability.context_limit !== undefined
@@ -490,7 +494,7 @@ export function ModelPicker({
       ...(capability?.max_output_tokens === undefined ? {} : { outputHint: capability.max_output_tokens }),
       profile,
     })
-  }, [])
+  }, [providers])
 
   const saveCapacityEditor = useCallback((editor: CapacityEditorState) => {
     const contextLimit = capacityInput(editor.context)
@@ -1009,7 +1013,7 @@ export function ModelPicker({
           <Box flexDirection="row" width="100%">
             <Box flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
               <Text color={t.color.muted} wrap="truncate-end">
-                {`←→ pane · ↑↓ select · Enter use · Ctrl+E edit limits${allowPersistGlobal ? ' · a set as default' : ''}`}
+                {`←→ pane · ↑↓ select · Enter use · ${rightProvider?.provider_type === 'local relay' || rightDiscovery?.source === 'approved_local_setup' ? 'limits set locally' : 'Ctrl+E edit limits'}${allowPersistGlobal ? ' · a set as default' : ''}`}
               </Text>
             </Box>
             <Box flexShrink={0}>
@@ -1288,7 +1292,7 @@ export function ModelPicker({
         : discovery?.status === 'partial'
           ? `warning: ${discovery.warning}`
           : discovery?.source
-            ? `source: ${discovery.source}`
+            ? `source: ${discovery.source === 'approved_local_setup' ? 'approved local setup · configured models' : discovery.source}`
             : ' '
   const discoveryColor =
     discovery?.status === 'error' ? t.color.error : discovery?.warning ? t.color.warn : t.color.muted
@@ -1370,7 +1374,9 @@ export function ModelPicker({
             ? 'type full ID · Ctrl+R retry · Esc clear/back'
             : discovery?.status === 'partial'
               ? 'fallback available · Ctrl+R retry · Esc clear/back'
-              : 'Enter switch · Ctrl+E edit limits · Ctrl+Enter typed ID · Ctrl+R refresh · Esc clear/back'}
+              : discovery?.source === 'approved_local_setup'
+                ? 'Enter switch · limits set locally · Esc clear/back'
+                : 'Enter switch · Ctrl+E edit limits · Ctrl+Enter typed ID · Ctrl+R refresh · Esc clear/back'}
       </InfoRow>
     </ModalShell>
   )

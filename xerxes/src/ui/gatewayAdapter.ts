@@ -135,6 +135,7 @@ export function sessionInfoFromInit(payload: Record<string, unknown>): SessionIn
   return compact<SessionInfo>({
     local_provider_label: typeof payload.local_provider_label === 'string' ? payload.local_provider_label : undefined,
     remote_provider_binding_supported: typeof payload.remote_provider_binding_supported === "boolean" ? payload.remote_provider_binding_supported : undefined,
+    remote_provider_bundle_supported: payload.remote_provider_bundle_supported === true,
     cwd: str(payload.cwd),
     goal: optionalStr(payload.goal),
     goal_phase: optionalStr(payload.goal_phase),

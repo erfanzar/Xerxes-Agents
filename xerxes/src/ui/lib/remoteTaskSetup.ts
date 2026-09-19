@@ -22,12 +22,14 @@ export interface RemoteTaskReview {
   readonly localRequirement: string
   readonly running: boolean
   readonly localBindingSupported: boolean
+  readonly localBundleSupported?: boolean
   readonly profiles: readonly ShareableLocalProfile[]
   readonly inventoryError: string
 }
 export type RemoteTaskDecision = { readonly kind: 'remote' } | {
   readonly kind: 'local'
   readonly profile: string
+  readonly profiles?: readonly string[]
   readonly durationMinutes: number
   readonly maxRequests: number
   readonly maxOutputTokens: number | null
@@ -61,12 +63,12 @@ export async function prepareRemoteTask(
   remote.signal.throwIfAborted()
   const lifetime = new AbortController()
   const signal = AbortSignal.any([remote.signal, lifetime.signal])
-  let broker: LocalProviderBroker | undefined
-  let binding = ''
+  const brokers: LocalProviderBroker[] = []
+  const routes = new Map<string,LocalProviderBroker>()
   let closing: Promise<void> | undefined
   const gateway = new GatewayClient({externalSocketPath: remote.socketPath, projectDir: remote.projectDir,
-    providerRelay: (id, frame, abort) => broker && id === binding
-      ? requestLocalProviderBroker(broker.path, frame, abort)
+    providerRelay: (id, frame, abort) => routes.has(id)
+      ? requestLocalProviderBroker(routes.get(id)!.path, frame, abort)
       : Promise.resolve({error: 'grant_unavailable'}),
   })
   const close = (): Promise<void> => {
@@ -74,7 +76,8 @@ export async function prepareRemoteTask(
     closing = Promise.resolve().then(async () => {
       lifetime.abort()
       gateway.close()
-      await broker?.close()
+      await Promise.all(brokers.map(broker => broker.close()))
+      routes.clear()
     })
     return closing
   }
@@ -100,29 +103,41 @@ export async function prepareRemoteTask(
     signal.throwIfAborted()
     const input: RemoteTaskReview = Object.freeze({destination: remote.machine.target, workspace: remote.projectDir, sessionId,
       remoteModel: label(current.model), remoteProfile: label(current.profile_name), localRequirement: label(current.local_provider_label, 600), running: current.status !== 'idle',
-      localBindingSupported: info.remote_provider_binding_supported === true, profiles, inventoryError})
+      localBindingSupported: info.remote_provider_binding_supported === true, localBundleSupported: info.remote_provider_bundle_supported === true, profiles, inventoryError})
     const decision = await review(input, signal)
     signal.throwIfAborted()
     if (decision.kind === 'local') {
-      const profile = profiles.find(p => p.name === decision.profile)
-      if (!input.localBindingSupported || input.running || !profile?.supported ||
+      const names = decision.profiles ?? [decision.profile]
+      if (!Array.isArray(names) || !names.length || names.length > 32 || new Set(names).size !== names.length || !names.includes(decision.profile) || (names.length > 1 && !input.localBundleSupported)) throw failure()
+      const selected = [decision.profile, ...names.filter(name => name !== decision.profile)].map(name => profiles.find(p => p.name === name))
+      if (!input.localBindingSupported || input.running || selected.some(p => !p?.supported) ||
         !Number.isSafeInteger(decision.durationMinutes) || decision.durationMinutes < 1 || decision.durationMinutes > 480 ||
         !Number.isSafeInteger(decision.maxRequests) || decision.maxRequests < 1 || decision.maxRequests > 10000 ||
         !Number.isSafeInteger(decision.maxConcurrent) || decision.maxConcurrent < 1 || decision.maxConcurrent > 16 ||
-        (profile.providerControlledOutput ? decision.maxOutputTokens !== null || !decision.consentProviderControlledOutput
+        selected.some(profile => profile!.providerControlledOutput ? !decision.consentProviderControlledOutput
           : !Number.isSafeInteger(decision.maxOutputTokens) || decision.maxOutputTokens === null || decision.maxOutputTokens < 1 || decision.maxOutputTokens > 1_000_000)) throw failure()
-      broker = await createLocalProviderBroker(localRpc, {consent: true, destination: input.destination, workspace: input.workspace,
-        profile: profile.name, model: profile.model, expires_at: Date.now() + decision.durationMinutes * 60_000,
-        max_requests: decision.maxRequests, max_output_tokens: decision.maxOutputTokens, max_concurrent: decision.maxConcurrent,
-        ...(profile.providerControlledOutput ? {consent_provider_controlled_output: true} : {}),
-      }, signal)
+      const expiresAt = Date.now() + decision.durationMinutes * 60_000
+      const selections = []
+      for (const profile of selected) {
+        signal.throwIfAborted()
+        const broker = await createLocalProviderBroker(localRpc, {consent:true,destination:input.destination,workspace:input.workspace,
+          profile:profile!.name,model:profile!.model,expires_at:expiresAt,max_requests:decision.maxRequests,
+          max_output_tokens:profile!.providerControlledOutput ? null : decision.maxOutputTokens,max_concurrent:decision.maxConcurrent,
+          ...(profile!.providerControlledOutput ? {consent_provider_controlled_output:true} : {}),
+        },signal)
+        brokers.push(broker)
+        selections.push({source:'local workstation (this SSH window)',profile:profile!.name,model:profile!.model,...(broker.capabilities ? {capabilities:broker.capabilities} : {})})
+      }
       signal.throwIfAborted()
-      const bound = record(await gateway.request('provider.remote.bind', {consent: true, source: 'local workstation (this SSH window)', profile: profile.name, model: profile.model,
-        ...(broker.capabilities ? {capabilities: broker.capabilities} : {})}))
+      const bound = record(await gateway.request('provider.remote.bind', {consent:true,...selections[0],...(selections.length > 1 ? {alternatives:selections.slice(1)} : {})}))
       const marker = record(bound.binding)
-      if (bound.ok !== true || marker.workspace !== input.workspace || marker.model !== profile.model ||
-        typeof marker.binding !== 'string' || !/^[a-f0-9]{32}$/.test(marker.binding)) throw failure()
-      binding = marker.binding
+      const markers = [marker, ...(Array.isArray(marker.alternatives) ? marker.alternatives.map(record) : [])]
+      if (bound.ok !== true || markers.length !== selected.length) throw failure()
+      for (const [index, current] of markers.entries()) {
+        if (current.workspace !== input.workspace || current.model !== selected[index]!.model || current.profile !== selected[index]!.name ||
+          typeof current.binding !== 'string' || !/^[a-f0-9]{32}$/.test(current.binding) || routes.has(current.binding)) throw failure()
+        routes.set(current.binding, brokers[index]!)
+      }
     }
     signal.throwIfAborted()
     return {sessionId, sessionKey, close}

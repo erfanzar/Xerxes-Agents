@@ -9,6 +9,20 @@ import { DEFAULT_THEME } from '../theme.js'
 import type { RemoteTaskReview } from '../lib/remoteTaskSetup.js'
 const value: RemoteTaskReview = {destination:'me@reviewed-host',workspace:'/remote/project',sessionId:'abcd1234',remoteModel:'remote-model',remoteProfile:'remote',localRequirement:'',running:false,localBindingSupported:true,inventoryError:'',profiles:[{name:'local-profile',model:'local-model',credentialSource:'local saved profile',supported:true,providerControlledOutput:false,setup:''}]}
 
+for (const [width,height] of [[80,24],[40,18]]) it(`authorizes the local setup once at ${width}x${height}`,async()=>{
+  const choose=vi.fn()
+  const screen=await testRender(<RemoteProviderReview value={{...value,localBundleSupported:true,profiles:[...value.profiles,{...value.profiles[0]!,name:'second',model:'second-model',providerControlledOutput:true}]}} t={DEFAULT_THEME} onChoose={choose} onCancel={()=>{}}/>,{width:width!,height:height!})
+  const press=async(key:string)=>{await act(async()=>screen.mockInput.pressKey(key));await screen.flush()}
+  try {
+    await screen.flush();await press('ARROW_RIGHT');await press('RETURN')
+    expect(screen.captureCharFrame()).toContain('Authorize SSH setup')
+    await press('A');expect(choose).not.toHaveBeenCalled()
+    await press('C');await press('A')
+    expect(choose).toHaveBeenCalledOnce()
+    expect(choose).toHaveBeenCalledWith(expect.objectContaining({profiles:['local-profile','second'],maxOutputTokens:16384,consentProviderControlledOutput:true}))
+  } finally {await act(async()=>screen.renderer.destroy())}
+})
+
 for (const [width,height] of [[80,24],[40,18]]) it(`requires a separate authorization action at ${width}x${height}`,async()=>{
   const choose=vi.fn(),cancel=vi.fn()
   const screen=await testRender(<RemoteProviderReview value={value} t={DEFAULT_THEME} onChoose={choose} onCancel={cancel}/>,{width:width!,height:height!})

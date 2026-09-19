@@ -1764,13 +1764,39 @@ assert credential validity, provider availability or successful connectivity.
 
 ### Remote setup review
 
+Daemons advertise additive `remote_provider_bundle_supported` capability metadata.
+On supporting hosts, one TUI setup approval covers up to 32 supported local
+profiles and their configured models for the selected remote task/workspace.
+Limits are per provider, with one shared expiration time; provider-controlled
+output is accepted once for all affected profiles. Credentials and refresh stay
+local. Unsupported profiles are listed with setup guidance and are not granted.
+Older hosts retain the single-provider path rather than silently dropping choices.
+
+`provider.remote.bind` accepts optional `alternatives`, an array of up to 31
+additional `{source, profile, model, capabilities?}` selections. Its returned
+binding includes corresponding alternatives with independent private binding IDs.
+All belong to the connection owner and session workspace. Disconnect/release
+closes the entire group; partially failed preparation revokes all grants already
+created. Persisted selections confer no authority after restart. Existing private
+request/reply frames and single-provider calls retain their format.
+
+`provider_list` and `fetch_models` accept `for_model_selection: true` to project
+approved local choices for a locally bound task. Ordinary provider management
+still addresses remote configuration. `list_available_models` projects the same
+approved choices and treats empty/whitespace `provider_profile` as omitted.
+`/model` and explicit delegated provider selections may use any approved pair
+without another consent screen. Unapproved models cannot switch a same-named
+local profile to remote credentials. `/provider` remains the explicit remote
+override. New providers/models, reconnection, expiry and revoked access require
+fresh setup; destination trust is not persisted.
+
 `/machine` → Enter and `/machine connect <name>` open the same setup review
 before handoff. Tab/Left/Right choose an integration; arrows, PageUp/PageDown,
-Home and End scroll its explanation. Enter uses existing remote setup; Escape
-returns without connecting. The review identifies the target host/workspace,
+Home and End scroll its explanation. Enter prepares the remote task and opens
+the provider-location review; Escape returns without connecting. The review identifies the target host/workspace,
 execution and configuration locations, persistence and remote setup commands.
-It explicitly labels remote readiness uninspected and local reuse unavailable
-until the scoped relay binding and consent controls are implemented.
+It labels remote readiness uninspected. The next review offers existing remote
+setup or explicitly approved local provider reuse.
 
 The review reads no provider credentials. At handoff, the resolved host and
 workspace must still match the reviewed record; a changed destination requires

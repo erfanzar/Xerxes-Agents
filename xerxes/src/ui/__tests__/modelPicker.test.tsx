@@ -101,6 +101,30 @@ const flushPromises = async (
 };
 
 describe("OpenTUI dynamic model picker", () => {
+  it.each([76, 140])("keeps local relay limits on the local workstation at width %s", async width => {
+    const request = vi.fn((method: string) => {
+      if (method === "model.options") return Promise.resolve({
+        ...options,
+        providers: [ { ...options.providers[1]!, provider_type: "local relay" } ],
+      });
+      if (method === "model.models") return Promise.resolve({ models: ["k3"], source: "approved_local_setup" });
+      return Promise.reject(new Error(`unexpected request: ${method}`));
+    });
+    const { setup } = await renderPicker(request, vi.fn(), { width, allowPersistGlobal: false });
+    try {
+      act(() => setup.mockInput.pressEnter());
+      await flushPromises(setup);
+      expect(setup.captureCharFrame()).toContain("limits set locally");
+      expect(setup.captureCharFrame()).not.toContain("Ctrl+E edit limits");
+      act(() => setup.mockInput.pressKey("e", { ctrl: true }));
+      await setup.flush();
+      expect(setup.captureCharFrame()).not.toContain("Edit model limits");
+      expect(request.mock.calls.some(([method]) => method === "provider_model_override")).toBe(false);
+    } finally {
+      act(() => setup.renderer.destroy());
+    }
+  });
+
   it("discovers only the selected profile, caches the result, and reports a real count", async () => {
     const models = deferred<ModelModelsResponse>();
     const request = vi.fn(

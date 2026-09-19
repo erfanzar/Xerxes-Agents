@@ -395,6 +395,7 @@ export interface DaemonRuntime {
     sessionKey: string,
     model: string,
     providerProfile?: string,
+    localProviderProfile?: string,
   ): Promise<DaemonSession | undefined>;
   /** Pin one session to a reasoning effort without disturbing any other. */
   setSessionReasoning?(
@@ -1281,6 +1282,7 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     sessionKey: string,
     model: string,
     providerProfile?: string,
+    localProviderProfile?: string,
   ): Promise<DaemonSession | undefined> {
     const session = this.sessions.get(sessionKey);
     if (!session) {
@@ -1297,12 +1299,14 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
       const staged = { ...session, metadata: { ...session.metadata }, model: chosen, modelPinned: true, lastActive: changedAt };
       if (modelDelta) appendContextDelta(staged.metadata, modelDelta);
       if (providerProfile !== undefined) staged.metadata.provider_profile = providerProfile;
+      if (localProviderProfile !== undefined) staged.metadata.local_provider_profile = localProviderProfile;
       try { await this.writeSession(staged); }
       catch (cause) {
         throw new Error('Could not save model. The previous model is unchanged. Check session storage permissions and free space, then retry.', { cause });
       }
       session.model = chosen;
       if (providerProfile !== undefined) session.metadata.provider_profile = providerProfile;
+      if (localProviderProfile !== undefined) session.metadata.local_provider_profile = localProviderProfile;
       // Pin only the committed choice; failed storage cannot change routing.
       session.modelPinned = true;
       session.lastActive = Math.max(session.lastActive, changedAt);

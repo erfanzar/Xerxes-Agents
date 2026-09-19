@@ -23,9 +23,9 @@ export async function modelInventory(port: ModelInventoryPort, params: Record<st
   if (typeof offset !== 'number' || !Number.isSafeInteger(offset) || offset < 0 || typeof limit !== 'number' || !Number.isSafeInteger(limit) || limit < 1 || limit > 50) throw new Error('Inventory offset must be nonnegative; limit must be 1–50')
   for (const key of ['provider_profile', 'query', 'revision']) if (params[key] !== undefined && (typeof params[key] !== 'string' || (params[key] as string).length > 512)) throw new Error(`Invalid inventory ${key}`)
   if (params.include_usage !== undefined && typeof params.include_usage !== 'boolean') throw new Error('Invalid include_usage')
-  if (params.include_usage === true && params.provider_profile === undefined) throw new Error('Usage lookup requires provider_profile')
+  const profileName = (params.provider_profile as string | undefined)?.trim() || undefined
+  if (params.include_usage === true && profileName === undefined) throw new Error('Usage lookup requires provider_profile')
   const profiles = [...port.profiles()].sort((a, b) => a.name.localeCompare(b.name))
-  const profileName = params.provider_profile as string | undefined
   const query = (params.query as string | undefined)?.toLowerCase() ?? ''
   const notes = port.routingNotes?.() ?? []
   const guidance = (profile: string, model?: string) => {

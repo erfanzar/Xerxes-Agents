@@ -268,7 +268,7 @@ import { formatBytes, wipeHistoryStores, wipeMemoryStores } from "./wipe.js";
 import { searchProjectFileMentions } from "./projectFileMentions.js";
 import { profileAcceptsModel, sessionProvider } from './sessionProvider.js';
 import { DaemonProviderRelays, type RelayClientFactory } from './providerRelays.js';
-import { LOCAL_PROVIDER_BINDING, RemoteProviderBindings, localProviderLabel, localProviderCapabilities } from './remoteProviderBindings.js';
+import { LOCAL_PROVIDER_BINDING, RemoteProviderBindings, localProviderLabel, localProviderCapabilities, localProviderSelections, type LocalProviderSelection } from './remoteProviderBindings.js';
 import { boundedLocalCapabilities, localReasoningLevels, localReasoningNote } from './localReasoningCapabilities.js';
 import { parseLocalProviderCapabilities } from '../protocol/localProviderCapabilities.js';
 import { LocalProviderRelayError } from '../security/localProviderRelay.js';
@@ -3022,6 +3022,11 @@ export class DaemonServer {
       return this.questionResponse(connection, params);
     }
     if (method === "fetch_models") {
+      const session = this.runtime.sessionStatus(connection.activeSessionKey);
+      if (session && Object.hasOwn(session.metadata, LOCAL_PROVIDER_BINDING) && params.for_model_selection === true) {
+        const models = localProviderSelections(session.metadata).filter(route => route.profile === params.profile_name).map(route => route.model);
+        return {ok:true,models,source:'approved_local_setup'};
+      }
       return this.fetchModels(params);
     }
     if (method === "provider_model_override") {
@@ -3103,6 +3108,10 @@ export class DaemonServer {
       };
     }
     if (method === "provider_list") {
+      const session = this.runtime.sessionStatus(sessionKey(connection, params));
+      if (session && Object.hasOwn(session.metadata, LOCAL_PROVIDER_BINDING) && params.for_model_selection === true) {
+        return {ok:true,local_setup:true,profiles:localProviderSelections(session.metadata).map(route => ({name:route.profile,provider:'local relay',model:route.model,active:route.profile === (session.metadata.local_provider_profile ?? localProviderSelections(session.metadata)[0]?.profile)}))};
+      }
       return {
         ok: true,
         profiles: this.profileStore.list().map(profilePayload),
@@ -3123,7 +3132,9 @@ export class DaemonServer {
           let capabilities;
           try { capabilities = parseLocalProviderCapabilities(params.capabilities, params.model); }
           catch { throw new LocalProviderRelayError('invalid_request'); }
-          const binding = bindings.bind(connection, session, { source: params.source, profile: params.profile, model: params.model, ...(capabilities ? {capabilities} : {}) },
+          if (params.alternatives !== undefined && !Array.isArray(params.alternatives)) throw new LocalProviderRelayError('invalid_request');
+          const binding = bindings.bind(connection, session, { source: params.source, profile: params.profile, model: params.model, ...(capabilities ? {capabilities} : {}),
+            ...(params.alternatives ? {alternatives: params.alternatives as LocalProviderSelection[]} : {}) },
             request => this.connectionLeases.sendPrivate(connection, { jsonrpc: '2.0', method: 'provider.remote.request', params: request }));
           try {
             await this.runtime.setSessionModel?.(connection.activeSessionKey, binding.model);
@@ -4266,7 +4277,21 @@ export class DaemonServer {
   }
 
   async modelInventoryToolRequest(sessionId: string, params: JsonRpcPayload, signal?: AbortSignal): Promise<unknown> {
-    if (!this.runtime.listSessions().some(session => session.id === sessionId)) throw new Error('Model inventory session unavailable');
+    const session = this.runtime.listSessions().find(session => session.id === sessionId);
+    if (!session) throw new Error('Model inventory session unavailable');
+    if (Object.hasOwn(session.metadata, LOCAL_PROVIDER_BINDING)) {
+      // List only the approved local choices. Remote profiles cannot accidentally
+      // become suggested delegation routes for a task that requires local access.
+      const routes = localProviderSelections(session.metadata);
+      return modelInventory({
+        profiles: () => routes.map(route => ({name:route.profile,provider:'local relay',model:route.model,active:route.model === session.model && route.profile === session.metadata.local_provider_profile})),
+        discover: async name => ({source:'approved_local_setup', models:routes.filter(route => route.profile === name).map(route => ({id:route.model})), warning:'Only configured models approved for this SSH connection are available. Credentials stay on the local workstation.'}),
+        reasoning: async (name, model) => {
+          const r = routes.find(route => route.profile === name && route.model === model)?.capabilities?.reasoning;
+          return {efforts:r?.efforts ?? [], source:r?.provenance ?? 'unknown', shape:r?.shape ?? 'inherent'};
+        },
+      }, params, signal);
+    }
     const snapshot = this.profileStore.list();
     const selected = (name: string) => {
       const profile = snapshot.find(value => value.name === name);
@@ -8956,6 +8981,7 @@ export class DaemonServer {
     }
     const current = this.runtime.sessionStatus(connection.activeSessionKey);
     const previousLocalRequirement = current?.metadata[LOCAL_PROVIDER_BINDING];
+    const previousLocalProfile = current?.metadata.local_provider_profile;
     const hadLocalRequirement = !!current && Object.hasOwn(current.metadata, LOCAL_PROVIDER_BINDING);
     if (current && Object.hasOwn(current.metadata, LOCAL_PROVIDER_BINDING)) {
       if (current.activeTurnId || current.status !== 'idle') return { ok: false, error: 'Stop the active turn before choosing remote credentials.' };
@@ -8982,7 +9008,10 @@ export class DaemonServer {
     this.emitSlash(connection, `Switched to provider profile \`${name}\`.`);
     return { ok: true };
     } catch (error) {
-      if (current && hadLocalRequirement) current.metadata[LOCAL_PROVIDER_BINDING] = previousLocalRequirement;
+      if (current && hadLocalRequirement) {
+        current.metadata[LOCAL_PROVIDER_BINDING] = previousLocalRequirement;
+        if (previousLocalProfile !== undefined) current.metadata.local_provider_profile = previousLocalProfile;
+      }
       throw error;
     }
   }
@@ -9024,6 +9053,20 @@ export class DaemonServer {
     }
     const current = this.runtime.sessionStatus(targetSessionKey);
     if (!current) return { ok: false, error: 'no active session' };
+    if (Object.hasOwn(current.metadata, LOCAL_PROVIDER_BINDING)) {
+      const approved = localProviderSelections(current.metadata);
+      const routes = approved.filter(route => route.model === model && (!providerName || route.profile === providerName));
+      const selected = routes.find(route => route.profile === current.metadata.local_provider_profile) ?? (routes.length === 1 ? routes[0] : undefined);
+      if (selected) {
+        if (current.activeTurnId || current.status !== 'idle') return {ok:false,error:'Stop the active turn before changing providers.'};
+        this.remoteProviderBindings?.client(current, model, selected.profile);
+        if (!this.remoteProviderBindings) throw new LocalProviderRelayError('grant_unavailable');
+        await this.runtime.setSessionModel(targetSessionKey, model, undefined, selected.profile);
+        await this.emitProviderInit(connection);
+        return {ok:true,model,provider_profile:selected.profile};
+      }
+      if (providerName && approved.some(route => route.profile === providerName)) return {ok:false,error:'This model is not included in the approved local setup. Configure it locally and review SSH setup again, or use /provider to select remote credentials explicitly.'};
+    }
     let profile: ProviderProfile | undefined;
     try {
       profile = providerName ? this.profileStore.get(providerName) : sessionProvider(this.profileStore, { metadata: {} }, model);
@@ -9031,6 +9074,7 @@ export class DaemonServer {
       if (profile && !profileAcceptsModel(profile, model)) return { ok: false, error: 'Provider ' + profile.name + ' cannot serve ' + model };
     } catch (error) { return { ok: false, error: errorMessage(error) }; }
     const previousLocalRequirement = current.metadata[LOCAL_PROVIDER_BINDING];
+    const previousLocalProfile = current.metadata.local_provider_profile;
     const hadLocalRequirement = Object.hasOwn(current.metadata, LOCAL_PROVIDER_BINDING);
     if (Object.hasOwn(current.metadata, LOCAL_PROVIDER_BINDING)) {
       if (!providerName || !profile) return { ok: false, error: 'Choose a remote provider profile explicitly, or return to /machine to review a different local model.' };
@@ -9042,7 +9086,10 @@ export class DaemonServer {
     try {
     const session = await this.runtime.setSessionModel(targetSessionKey, model, profile?.name);
     if (!session) {
-      if (hadLocalRequirement) current.metadata[LOCAL_PROVIDER_BINDING] = previousLocalRequirement;
+      if (hadLocalRequirement) {
+        current.metadata[LOCAL_PROVIDER_BINDING] = previousLocalRequirement;
+        if (previousLocalProfile !== undefined) current.metadata.local_provider_profile = previousLocalProfile;
+      }
       return { ok: false, error: "no active session" };
     }
     if (profile) session.metadata.provider_profile = profile.name;
@@ -9059,7 +9106,10 @@ export class DaemonServer {
     this.emitStatus(connection, session);
     return { ok: true, model: session.model };
     } catch (error) {
-      if (hadLocalRequirement) current.metadata[LOCAL_PROVIDER_BINDING] = previousLocalRequirement;
+      if (hadLocalRequirement) {
+        current.metadata[LOCAL_PROVIDER_BINDING] = previousLocalRequirement;
+        if (previousLocalProfile !== undefined) current.metadata.local_provider_profile = previousLocalProfile;
+      }
       throw error;
     }
   }
@@ -9280,6 +9330,7 @@ export class DaemonServer {
       connection_lease_supported: true,
       provider_relay_control_supported: true,
       remote_provider_binding_supported: Boolean(this.remoteProviderBindings),
+      remote_provider_bundle_supported: Boolean(this.remoteProviderBindings),
       local_provider_label: localProviderLabel(session.metadata),
       daemon_protocol: DAEMON_PROTOCOL_VERSION,
       daemon_build_id: this.daemonBuildId(),
