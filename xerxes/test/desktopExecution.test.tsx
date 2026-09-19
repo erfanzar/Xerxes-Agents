@@ -8,6 +8,8 @@ import { ExecutionDetails, executionView, ToolCallRow } from '../src/desktop/ren
 import { AgentRoster } from '../src/desktop/renderer/AgentRoster.js'
 import type { SessionRow } from '../src/desktop/renderer/types.js'
 import type { ToolItem } from '../src/desktop/renderer/types.js'
+import { BlockBuilder } from '../src/desktop/renderer/blocks.js'
+import { activityGroupKey, groupActivity, keyedActivityGroups } from '../src/desktop/renderer/activityGroups.js'
 
 const item: ToolItem = { id: 'call-1', name: 'exec_command', verb: 'exec_command', arg: 'sed', dur: '0.0s', state: 'done', input: JSON.stringify({ cmd: 'sed', args: ['-n', '10,20p', 'path with spaces/file.ts'] }), output: JSON.stringify({ stdout: 'function run() {\n  return 1\n}\n', stderr: '', exitCode: 0, cwd: '/repo' }) }
 test('collapsed calls do not construct large output viewers', () => {
@@ -63,6 +65,31 @@ test('activity grouping preserves prose and keeps approval operations outside di
   expect(groupActivity(blocks).map(group => group.length)).toEqual([2, 1])
   expect(groupActivity(blocks, item.id).map(group => group.length)).toEqual([1, 1, 1])
   expect(groupActivity(blocks).flat()).toEqual(blocks)
+})
+
+test('activity identity survives tool results, subsequent calls and turn finalization', () => {
+  for (const error of ['', 'Permission denied', 'Cancelled by user']) {
+    const builder = new BlockBuilder()
+    builder.push('think_part', { think: 'Inspect the files' })
+    builder.push('tool_call', { id: 'first-call', name: 'read_file', arguments: { path: 'README.md' } })
+    const key = activityGroupKey(groupActivity(builder.snapshot(true))[0]!)
+    builder.push('tool_result', { tool_call_id: 'first-call', return_value: 'Contents', error })
+    builder.push('tool_call', { id: 'second-call', name: 'exec_command', arguments: { cmd: 'bun test' } })
+    expect(activityGroupKey(groupActivity(builder.snapshot(true))[0]!)).toBe(key)
+    builder.push('tool_result', { tool_call_id: 'second-call', return_value: 'Tests passed' })
+    builder.finalize()
+    expect(activityGroupKey(groupActivity(builder.snapshot(false))[0]!)).toBe(key)
+  }
+})
+
+test('reused call IDs in different turns get separate disclosure identities', () => {
+  const groups = keyedActivityGroups([
+    { kind: 'user', id: 1, text: 'First request' },
+    { kind: 'tools', id: 2, items: [item], running: false },
+    { kind: 'user', id: 3, text: 'Second request' },
+    { kind: 'tools', id: 4, items: [item], running: false },
+  ])
+  expect(groups[1]!.key).not.toBe(groups[3]!.key)
 })
 
 test('completed agent history is collapsed without hiding failures or active agents', () => {

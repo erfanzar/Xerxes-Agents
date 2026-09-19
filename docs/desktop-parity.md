@@ -281,3 +281,17 @@ the source fingerprint to 4e7e7ff0aed5f71e without changing behavior. Native pac
 evidence above remains tied to 97dfa85333ed2cc2; no new native package is claimed.
 The staged diff whitespace check passed. Confirmed daemon/TUI feature gaps are
 recorded separately in `daemon-tui-gaps.md`.
+
+## Tool section lifecycle — 2026-09-20
+
+| User expectation | Source and confirmed defect | Correction | Automated evidence | Native interaction evidence | Remaining uncertainty |
+| --- | --- | --- | --- | --- | --- |
+| Inspect tools before they finish | `renderer/App.tsx` required more than one activity block before rendering a section. | The first tool block gets a section immediately, including a running call with no output. | `desktopShell.test.tsx` feeds a real `BlockBuilder` tool-call event without a result. | Isolated Electron window showed the collapsed Working section and expanded its waiting-output row. | Deterministic events; no external provider timing claim. |
+| Sections start closed and open only on request | `ActivityGroup` initialized and forced expansion for running/failed calls. | Collapsed defaults; clicks and Enter control expansion. Status and failure counts remain in the header. | Shell tests cover running, completed, failed, cancelled, and nonzero-exit results. | Mouse and Enter checks passed at 1280 and 760 pixels. | Native macOS verified; Windows interaction not exercised here. |
+| Keep an expanded group and output open when work finishes | Live and committed block IDs differed, remounting both the section and inner tool rows. | Disclosure identity follows the tool call and user turn; reasoning rows retain their position within the group. | `desktopExecution.test.tsx` covers finalization, appended calls, failure/cancellation and reused call IDs in different turns. | Open tool output and reasoning remained expanded through new calls and finalization; composer edits did not reopen a closed group. | Reload and cross-session disclosure persistence are not added. |
+| Approval prompts remain visible | Approval-bearing tool blocks must not enter a collapsed section. | Existing approval exception is shared by grouping and single-tool rendering. | Shell and grouping tests cover the pending approval boundary. | Approval was visible without expansion; resolving it restored the collapsed section. | No permission-policy change. |
+
+The native test used the production React shell and event builder in an isolated
+Electron fixture, not a live provider or user daemon. Scripts, screenshots and
+gate logs are retained in the sibling `xerxes-desktop-verification/tool-groups-2026-09-20/`
+directory. Existing user sessions and daemons were not restarted.

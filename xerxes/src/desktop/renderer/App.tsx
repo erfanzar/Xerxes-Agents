@@ -18,8 +18,8 @@ import { Markdown } from './markdown.js'
 import { Dictation } from './Dictation.js'
 import { draftKey, readDraft, transitionDraft, writeDraft, acceptedDraft } from './drafts.js'
 import { PanelDivider, usePanelLayout } from './layout.js'
-import { groupActivity } from "./activityGroups.js"
-import { ToolCallRow } from "./Execution.js"
+import { activityGroupKey, keyedActivityGroups, isGroupedActivity } from "./activityGroups.js"
+import { ToolCallRow, toolHasFailed } from "./Execution.js"
 import { AgentRoster } from './AgentRoster.js'
 import { Icon } from './Icon.js'
 import { FirstRunSetup } from './Setup.js'
@@ -925,9 +925,9 @@ function Stream({ snap }: { snap: Snapshot }): ReactElement {
             <button className="btn" disabled={snap.historyLoading} onClick={() => void loadOlder()}>{snap.historyLoading ? 'Loading older history…' : snap.historyError ? 'Retry older history' : 'Load 100 older actions'}</button>
             {snap.historyError && <p role="alert">{snap.historyError}</p>}
           </div>}
-          {groupActivity(blocks, approval?.toolCallId).map(group => (
-            <div key={group[0]!.id} data-history-anchor={group[0]!.id}>
-              {group.length > 1 ? <ActivityGroup blocks={group} /> : <BlockView block={group[0]!} />}
+          {keyedActivityGroups(blocks, approval?.toolCallId).map(({ key, blocks: group }) => (
+            <div key={`${snap.currentId}:${key}`} data-history-anchor={group[0]!.id}>
+              {group.length > 1 || (group[0]!.kind === 'tools' && isGroupedActivity(group[0]!, approval?.toolCallId)) ? <ActivityGroup blocks={group} /> : <BlockView block={group[0]!} />}
               {inlineApproval && group.some(block => block === blocks[approvalIndex]) && <ApprovalCard approval={approval} inline />}
             </div>
           ))}
@@ -1047,14 +1047,13 @@ function Offline({ cwd, error }: { cwd: string; error: string | null }): ReactEl
 
 function ActivityGroup({ blocks }: { blocks: Snapshot['blocks'] }): ReactElement {
   const tools = blocks.flatMap(block => block.kind === 'tools' ? block.items : [])
-  const failures = tools.filter(item => item.state === 'failed').length
+  const failures = tools.filter(toolHasFailed).length
   const running = tools.some(item => item.state === 'working') || blocks.some(block => block.kind === 'thinking' && block.streaming)
-  const [expanded, setExpanded] = useState(failures > 0 || running)
+  const [expanded, setExpanded] = useState(false)
   const [inspected, setInspected] = useState(false)
-  useEffect(() => { if (failures || running) setExpanded(true) }, [failures, running])
   return <details className="activity-group" open={expanded} onToggle={event => { setExpanded(event.currentTarget.open); if (event.currentTarget.open) setInspected(true) }}>
     <summary><Icon name="chevron" size={14} /><span>{running ? 'Working' : tools.length ? 'Used ' + tools.length + ' tool' + (tools.length === 1 ? '' : 's') : 'Reasoning'}<span className="activity-group__actions">{[...new Set(tools.map(item => toolLabelOf(item.verb)))].join(', ')}</span></span>{failures > 0 && <strong>{failures} failed</strong>}</summary>
-    <div className="activity-group__body">{(expanded || inspected) && blocks.map(block => <BlockView key={block.id} block={block} />)}</div>
+    <div className="activity-group__body">{(expanded || inspected) && blocks.map((block, index) => <BlockView key={block.kind === 'tools' ? activityGroupKey([block]) : `reasoning:${index}`} block={block} />)}</div>
   </details>
 }
 

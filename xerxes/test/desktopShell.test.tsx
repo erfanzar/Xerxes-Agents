@@ -10,6 +10,7 @@ import { join } from 'node:path'
 import { Shell, ActivityDetails, SessionDiagnostics } from '../src/desktop/renderer/App.js'
 import { DesktopPage, DesktopRail } from '../src/desktop/renderer/DesktopPanels.js'
 import type { Snapshot } from '../src/desktop/renderer/store.js'
+import { BlockBuilder } from '../src/desktop/renderer/blocks.js'
 
 test('provider configuration failures retain their error and expose a settings action', () => {
   for (const error of ['Authentication failed: invalid credential', 'Certificate verification failed']) {
@@ -391,7 +392,7 @@ test('checkpoint markers and edit stats render in the activity feed', () => {
   expect(html).toContain('turn 1 end')
 })
 
-test('the feed groups reasoning and tools while retaining individual execution details', () => {
+test('the feed groups live reasoning and tools without constructing collapsed execution details', () => {
   const html = render(
     snapshot({
       turnActive: true,
@@ -413,17 +414,57 @@ test('the feed groups reasoning and tools while retaining individual execution d
       ],
     }),
   )
-  // Think row tails the latest streamed line; the full trail stays expandable.
-  expect(html).toContain('Reasoning')
-  expect(html).toContain('activity-group')
-  expect(html).toContain('<span class="frow__excerpt">and cleared, end to end. …</span>')
-  // Tool row: title-cased label, arg summary, duration — no fold header.
+  expect(html).toContain('<details class="activity-group">')
+  expect(html).toContain('Working')
   expect(html).toContain('Bash')
-  expect(html).toContain('grep -rn caret src/')
-  expect(html).toContain('0.4s')
-  expect(html).not.toContain('tools · 1')
+  expect(html).not.toContain('and cleared, end to end.')
+  expect(html).not.toContain('grep -rn caret src/')
+  expect(html).not.toContain('execution-row')
   // The live status line carries the turn clock at the end of the feed.
   expect(html).toContain('Acting… 1m 15s')
+})
+
+test('the first tool call has a collapsed section before any result or later activity arrives', () => {
+  const builder = new BlockBuilder()
+  builder.push('tool_call', { id: 'call-1', name: 'exec_command', arguments: { cmd: 'bun test' } })
+  const html = render(snapshot({ turnActive: true, blocks: builder.snapshot(true) }))
+  expect(html).toContain('<details class="activity-group">')
+  expect(html).toContain('Working')
+  expect(html).toContain('Exec command')
+  expect(html).not.toContain('Used 1 tool')
+  expect(html).not.toContain('execution-row')
+})
+
+test('completed, failed, and cancelled calls stay collapsed with outcomes visible', () => {
+  for (const error of ['', 'Permission denied', 'Cancelled by user']) {
+    const builder = new BlockBuilder()
+    builder.push('tool_call', { id: 'call-1', name: 'exec_command', arguments: { cmd: 'bun test' } })
+    builder.push('tool_result', { tool_call_id: 'call-1', return_value: 'large output', error })
+    const html = render(snapshot({ blocks: builder.snapshot(true) }))
+    expect(html).toContain('<details class="activity-group">')
+    expect(html).toContain('Used 1 tool')
+    expect(html.includes('1 failed')).toBe(Boolean(error))
+    expect(html).not.toContain('large output')
+  }
+})
+
+test('a pending tool approval stays visible outside the collapsed activity section', () => {
+  const builder = new BlockBuilder()
+  builder.push('tool_call', { id: 'call-1', name: 'exec_command', arguments: { cmd: 'bun test' } })
+  const html = render(snapshot({ blocks: builder.snapshot(true), approval: { id: 'approval-1', toolCallId: 'call-1', action: 'exec_command', description: 'Run tests' } }))
+  expect(html).not.toContain('activity-group')
+  expect(html).toContain('execution-row')
+  expect(html).toContain('Run tests')
+})
+
+test('a nonzero command result is visible as failed in the collapsed group header', () => {
+  const builder = new BlockBuilder()
+  builder.push('tool_call', { id: 'call-1', name: 'exec_command', arguments: { cmd: 'bun test' } })
+  builder.push('tool_result', { tool_call_id: 'call-1', return_value: { exitCode: 2, stderr: 'Test failed' } })
+  const html = render(snapshot({ blocks: builder.snapshot(true) }))
+  expect(html).toContain('<details class="activity-group">')
+  expect(html).toContain('1 failed')
+  expect(html).not.toContain('execution-row')
 })
 
 // ── Workspace switcher (mockup 16) ──────────────────────────────────────
@@ -628,10 +669,12 @@ test('streamThinking off hides live thinking blocks but keeps the tool runs', ()
     { kind: 'agent' as const, id: 3, text: 'answer' },
   ]
   const on = render(snapshot({ blocks }))
-  expect(on).toContain('secret plan')
+  expect(on).toContain('Working')
+  expect(on).not.toContain('secret plan')
   const off = render(snapshot({ blocks, streamThinking: false }))
   expect(off).not.toContain('secret plan')
   expect(off).toContain('Grep')
+  expect(off).toContain('Used 1 tool')
   expect(off).toContain('answer')
 })
 

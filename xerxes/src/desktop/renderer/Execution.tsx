@@ -12,6 +12,17 @@ function record(text: string): Record<string, unknown> | null {
     return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
   } catch { return null }
 }
+const failureByItem = new WeakMap<ToolItem, boolean>()
+/** Share failure status with collapsed group headers without reparsing unchanged results. */
+export function toolHasFailed(item: ToolItem): boolean {
+  if (item.state === 'failed') return true
+  const cached = failureByItem.get(item)
+  if (cached !== undefined) return cached
+  const exitCode = record(item.output)?.exitCode
+  const failed = typeof exitCode === 'number' && exitCode !== 0
+  failureByItem.set(item, failed)
+  return failed
+}
 function shellArgument(value: string): string {
   return /^[a-zA-Z0-9_./:=,+-]+$/.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`
 }
@@ -37,7 +48,7 @@ function CopyButton({ text, label }: { text: string; label: string }): ReactElem
 export const ToolCallRow = memo(function ToolCallRow({ item, label }: { item: ToolItem; label: string }): ReactElement {
   const [inspected, setInspected] = useState(false)
   const view = executionView(item)
-  const failed = item.state === 'failed' || (view.exitCode !== null && view.exitCode !== 0)
+  const failed = toolHasFailed(item)
   const target = view.command || item.path || item.arg
   return <details className="toolrow execution-row" data-state={failed ? 'failed' : item.state} onToggle={event => { if (event.currentTarget.open) setInspected(true) }}>
     <summary>
@@ -55,7 +66,7 @@ export function ExecutionDetails({ item }: { item: ToolItem }): ReactElement {
   const [expanded, setExpanded] = useState(false)
   const [wrap, setWrap] = useState(true)
   const view = executionView(item)
-  const failed = item.state === 'failed' || (view.exitCode !== null && view.exitCode !== 0)
+  const failed = toolHasFailed(item)
   const readableOutput = view.stdout ?? item.output
   const structured = view.stdout === null ? structuredOutput(item.output) : null
   return <div className="execution">
