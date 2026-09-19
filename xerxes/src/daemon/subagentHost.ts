@@ -872,6 +872,8 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
     const task = this.requireTask(handleId)
     const input = (options.message ?? options.taskDescription)?.trim()
     if (!input) throw new ValidationError('message', 'spawned agent input is required', input)
+    if (this.invalidatedHandles.has(task.id)) throw new ValidationError('handle_id', 'was invalidated; spawn a new agent under the current policy', task.id)
+    if (this.handles.get(task.id)?.closed && !this.pendingResume.has(task.id)) throw new ValidationError('handle_id', 'is closed; explicitly resume the agent before sending more work', task.id)
     if (this.pendingResume.delete(task.id)) {
       const replacement = await this.manager.reset(task.id, input)
       if (!replacement) throw new ValidationError('handle_id', 'could not restart spawned agent', task.id)
@@ -889,7 +891,10 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
       return this.snapshot(replacement)
     }
     if (!(await this.manager.sendMessage(task.id, input))) {
-      throw new ValidationError('handle_id', 'spawned agent is not accepting input; use AgentTool with resume and prompt for follow-up work, or TaskOutputTool with offset pagination to read saved output', task.id)
+      // Completion can race message delivery. Continue the same identity and
+      // persisted conversation instead of requiring a different model tool.
+      if (task.status !== 'pending' && task.status !== 'running') return this.retry(task.id, { message: input })
+      throw new ValidationError('handle_id', 'could not queue input while the agent is starting; retry the message after setup completes', task.id)
     }
     const metadata = this.handles.get(task.id)
     if (metadata) metadata.lastInput = input
@@ -1021,6 +1026,7 @@ class RecoverableSubagentManagerPort implements SpawnedAgentManagerPort {
   private readonly recovered = new Map<string, SpawnedAgentSnapshot>()
   private readonly pendingRestart = new Set<string>()
   private readonly tombstones = new Set<string>()
+  private readonly inputQueues = new Map<string, Promise<SpawnedAgentSnapshot>>()
 
   constructor(private readonly live: RichSubagentManagerPort) {}
 
@@ -1061,15 +1067,27 @@ class RecoverableSubagentManagerPort implements SpawnedAgentManagerPort {
     handleId: string | undefined,
     options: SendAgentInputOptions,
   ): Promise<SpawnedAgentSnapshot> {
+    const id = this.findLive(handleId)?.id ?? this.findRecovered(handleId)?.id ?? handleId ?? ''
+    // Admission of a follow-up may restart a terminal child asynchronously.
+    // Serialize by canonical id so concurrent id/name messages are not lost
+    // in the retry setup window. Release the entry on success and failure.
+    const previous = this.inputQueues.get(id)
+    const deliver = () => this.deliverInput(handleId, options)
+    const pending = previous ? previous.then(deliver, deliver) : Promise.resolve().then(deliver)
+    this.inputQueues.set(id, pending)
+    try { return await pending }
+    finally { if (this.inputQueues.get(id) === pending) this.inputQueues.delete(id) }
+  }
+
+  private async deliverInput(handleId: string | undefined, options: SendAgentInputOptions): Promise<SpawnedAgentSnapshot> {
     if (this.findLive(handleId)) return this.live.sendInput(handleId, options)
     const recovered = this.findRecovered(handleId)
     if (!recovered) return this.live.sendInput(handleId, options)
     if (!this.pendingRestart.has(recovered.id)) {
-      throw new ValidationError(
-        'handle_id',
-        'belongs to a task interrupted by a daemon restart; call ResetAgent to rerun it',
-        recovered.id,
-      )
+      const input = (options.message ?? options.taskDescription)?.trim()
+      if (!input) throw new ValidationError('message', 'spawned agent input is required', input)
+      if (recovered.closed) throw new ValidationError('handle_id', 'is closed; explicitly resume the agent before sending more work', recovered.id)
+      return this.retry(recovered.id, { message: input })
     }
     const input = (options.message ?? options.taskDescription)?.trim()
     if (!input) throw new ValidationError('message', 'spawned agent input is required', input)

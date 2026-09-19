@@ -5,7 +5,9 @@ acceptance evidence for this checkout. No external service or SSH destination ha
 yet been designated for this audit. Tests using injected ports are not live acceptance.
 Paths below are relative to `xerxes/src` unless prefixed with `test/`.
 
-Latest checkpoint: one SSH setup approval now covers all supported configured local
+Latest checkpoint: finished spawned agents now accept follow-up messages while
+retaining their identity and saved conversation. See the final September 20
+checkpoint. One SSH setup approval now covers all supported configured local
 provider/model pairs for that task, and blank model-inventory provider fields no
 longer fail. See the September 20 checkpoint for scope, regressions and actual
 loopback SSH evidence. Local reasoning capability negotiation, narrow-picker details,
@@ -1182,3 +1184,24 @@ tests and 1,484 TUI tests, zero failures. Three runtime tests remain skipped
 (two Windows-only tests and installed-clangd acceptance). Logs:
 `bundle-final-{check,test,build}.log` in the evidence directory. No source edits
 occurred during that gate. The broader capability audit remains in progress.
+
+### 2026-09-20 — Follow-up input to finished spawned agents
+
+| User expectation | Current behavior/source | Confirmed defect | Correction | Verification | Remaining uncertainty |
+| --- | --- | --- | --- | --- | --- |
+| A message reaches the existing agent even if it just finished | `daemon/subagentHost.ts:sendInput`, `tools/claudeTools/agentOps.ts:SendMessageTool` | A running-only admission check rejected completed children and required changing to AgentTool; completion could race a status check | Automatically continue terminal open children with stable id, saved history and original configuration. Serialize concurrent id/name admission through asynchronous recovery. Track continued work for parent result delivery | Four focused regressions cover completed/failed/interrupted children, concurrent input, persisted conversation after recovery, empty input, foreign ownership, closed handles and policy invalidation. Existing native-host/tool suites passed. Actual 80×24 source TUI over an isolated real daemon ran AgentTool to completion, then SendMessageTool succeeded and rendered the child's revised result | Live external providers and an external SSH host were not exercised for this correction. Explicitly closed or policy-invalidated agents do not silently restart. Existing provider/budget/workspace checks still apply |
+
+Evidence under `/tmp/xerxes-tui-audit-20260919/`: `followup-terminal-final.raw`,
+`followup-result.json`, `followup-acceptance.json`, `followup-focused.log`, and
+`followup-last-tests.log`. The first fixture attempt used an incorrect injected
+provider delta field and did not exercise a tool; only the corrected final capture
+is acceptance evidence. Providers were deterministic injected clients. The TUI,
+daemon, native child runner, tool dispatch and durable conversations were real.
+The owned fixture processes were stopped without restarting user tasks.
+
+Final gate on this source passed: `bun run check && bun run test && bun run build`
+and `git diff --check`; 4,103 runtime tests and 1,484 TUI tests passed, zero failed.
+Three environment-dependent runtime tests remain skipped (Windows-only behavior
+and installed clangd). Logs: `followup-full-{check,test,build}.log`. The eight
+actual-use assertions in `followup-acceptance.json` passed. No source edits were
+made during that final gate. The broader audit remains in progress.

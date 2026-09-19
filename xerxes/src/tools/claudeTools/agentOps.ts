@@ -245,7 +245,7 @@ export const CLAUDE_AGENT_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     wait: booleanSchema('Wait for the subagent to finish.', true),
     timeout: numberSchema('Maximum seconds to wait.'),
   }, ['prompt']),
-  definition('SendMessageTool', 'Queue a message for a running subagent. Completed agents do not accept messages: use AgentTool with resume and prompt for follow-up work, or TaskOutputTool to read their saved output.', {
+  definition('SendMessageTool', 'Send follow-up work to a subagent. Running agents queue it; finished or interrupted agents continue under the same id with their saved conversation and configuration. Returns after accepting input without waiting for completion. Explicitly closed agents must be resumed with AgentTool first.', {
     target: stringSchema('Subagent id or stable name.'),
     message: stringSchema('Message for the subagent.'),
   }, ['target', 'message']),
@@ -508,6 +508,7 @@ export class ClaudeAgentTools {
       message: requiredString(inputs, 'message'),
     })
     this.capture()
+    this.observeBackgroundState([snapshot])
     return agentSnapshotWire(snapshot)
   }
 

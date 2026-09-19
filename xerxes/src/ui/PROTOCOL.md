@@ -742,6 +742,12 @@ task narrows the cancel to that child (same ownership rules as
 handles stay inspectable and retryable. The response carries `ok`, `found`
 (whether a stoppable child was targeted — clients gate the stop UI on it) and
 `interrupted` (how many children were cancelled).
+Model-tool `SendMessageTool` queues input for running native children and continues
+finished or interrupted open children under the same identity and saved history.
+Recovered children follow the same path with existing workspace, provider-route,
+budget and policy validation. Concurrent id/name messages are admitted in order;
+acceptance does not wait for completion. Explicitly closed children require
+explicit resume, and policy-invalidated children require a new authorized agent.
 Live subagent events and persisted snapshot rows carry optional
 `provider_profile` and `reasoning_effort` alongside the assigned model. Clients
 preserve these across partial progress updates. The agent inspector renders
