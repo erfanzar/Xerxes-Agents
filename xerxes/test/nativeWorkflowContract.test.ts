@@ -40,6 +40,20 @@ const actionPins: Readonly<
 });
 
 describe("native Bun workflow contracts", () => {
+  test("container runtime dependencies agree with its frozen lockfile", async () => {
+    const runtimeDirectory = resolve(repositoryRoot, "packaging/runtime");
+    const manifest = record(
+      await Bun.file(resolve(runtimeDirectory, "package.json")).json(),
+      "runtime manifest",
+    );
+    const lock = record(
+      Bun.JSONC.parse(await Bun.file(resolve(runtimeDirectory, "bun.lock")).text()),
+      "runtime lockfile",
+    );
+    const workspace = record(record(lock.workspaces, "lock workspaces")[""], "runtime workspace");
+    expect(workspace.dependencies).toEqual(manifest.dependencies);
+  });
+
   test("Bun CI validates the root native lifecycle without Python commands", async () => {
     const workflow = await readWorkflow("bun-ci.yml");
 
