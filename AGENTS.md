@@ -4,7 +4,7 @@ Guidance for agents working in Xerxes. Read this before changing the repository.
 
 ## Project overview
 
-Xerxes (`@xsimurgh/xerxes-agents` v0.4.5) is a Bun-native TypeScript multi-agent runtime. It provides a
+Xerxes (`@xsimurgh/xerxes-agents` v0.5.0) is a Bun-native TypeScript multi-agent runtime. It provides a
 terminal UI, JSON-RPC daemon, OpenAI-compatible API, provider routing, tool execution, MCP,
 subagents, channels, persistent sessions, and tiered memory.
 

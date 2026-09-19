@@ -107,8 +107,9 @@ cd Xerxes-Agents
 ./scripts/install.ps1
 ```
 
-Native Windows is supported and does not need WSL2: the daemon control channel is
-a named pipe there rather than a Unix socket. See
+Native Windows uses a named pipe for the daemon control channel. Interactive
+PTY support depends on the installed Bun runtime; Bun 1.3.12 on Windows reports
+it unavailable. Use non-interactive commands or WSL2 for terminal sessions. See
 [docs/deployment-guide.md](docs/deployment-guide.md#windows-hosts) for the
 platform differences that are worth knowing (PTY shell, MCP `.cmd` shims).
 

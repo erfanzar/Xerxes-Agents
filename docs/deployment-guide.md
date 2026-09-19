@@ -78,7 +78,9 @@ It installs the locked Bun workspace, writes `xerxes.cmd` / `xerxes-acp.cmd` lau
 
 Windows-specific behaviour worth knowing:
 
-- **Shell tools.** A PTY session launches `%COMSPEC%` (`cmd.exe`) instead of `$SHELL`, and interrupts
+- **Shell tools.** Bun 1.3.12 does not provide native Windows PTYs; Xerxes
+  reports this limitation and closes the terminal entry. Use non-interactive
+  commands or WSL2. On Bun versions with Windows PTY support, a session launches `%COMSPEC%` (`cmd.exe`) instead of `$SHELL`, and interrupts
   are delivered as a Ctrl+C keystroke rather than SIGINT, which Windows cannot send to another
   process without killing it.
 - **MCP servers.** A server launched as `npx …` resolves to a `.cmd` shim, which Windows cannot

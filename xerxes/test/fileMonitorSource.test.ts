@@ -7,6 +7,14 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { nativeFileMonitorSource } from '../src/runtime/fileMonitorSource.js'
 
+async function waitForError(errors: unknown[], text: string): Promise<void> {
+  const deadline = Date.now() + 2_000
+  while (!errors.some(error => String(error).includes(text))) {
+    if (Date.now() >= deadline) throw new Error('Expected file monitor error: ' + text)
+    await Bun.sleep(10)
+  }
+}
+
 async function fixture(): Promise<{ root: string; file: string; close: () => Promise<void> }> {
   const root = await mkdtemp(join(tmpdir(), 'xerxes-file-monitor-'))
   const file = join(root, 'watched.txt')
@@ -63,8 +71,7 @@ test('file monitor rejects lexical traversal and closes when parent directory is
     await rename(nested, join(root, 'old-nested'))
     await mkdir(nested)
     await writeFile(join(nested, 'watched.txt'), 'b')
-    await new Promise(resolve => setTimeout(resolve, 150))
-    expect(errors.some(error => String(error).includes('parent directory was replaced'))).toBe(true)
+    await waitForError(errors, 'parent directory was replaced')
     monitor.close()
   } finally { await rm(root, { recursive: true, force: true }) }
 })
@@ -80,8 +87,7 @@ test('file monitor rejects a symlink swap outside the workspace after opening', 
     await nextEvent(events)
     await symlink(join(outside, 'secret.txt'), f.file)
     await writeFile(join(outside, 'secret.txt'), 'secret')
-    await new Promise(resolve => setTimeout(resolve, 150))
-    expect(errors.some(error => String(error).includes('outside'))).toBe(true)
+    await waitForError(errors, 'outside')
     monitor.close()
   } finally { await f.close(); await rm(outside, { recursive: true, force: true }) }
 })

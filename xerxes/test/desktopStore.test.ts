@@ -61,7 +61,7 @@ const initializeResult = {
   branch: 'main',
   context_limit: 262_000,
   daemon_protocol: 35,
-  daemon_version: '0.4.5',
+  daemon_version: '0.5.0',
   daemon_build_id: 'current-build',
 }
 
@@ -504,7 +504,7 @@ describe('Store workspace folds', () => {
     expect(store.getSnapshot().connection).toBe('online')
     expect(store.getSnapshot().model).toBe('kimi-for-coding')
     const initialize = bridge.calls.find(call => call.method === 'initialize')
-    expect(initialize?.params).toMatchObject({ client_protocol: 35, client_version: '0.4.5' })
+    expect(initialize?.params).toMatchObject({ client_protocol: 35, client_version: '0.5.0' })
     expect(store.getSnapshot().daemonWarning).toBeNull()
   })
 

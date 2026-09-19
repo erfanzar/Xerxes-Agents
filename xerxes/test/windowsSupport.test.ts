@@ -244,7 +244,7 @@ test('isWindows only reports win32', () => {
 // branching logic; these prove the branch that only a Windows host can reach.
 
 test.skipIf(process.platform !== 'win32')(
-  'a PTY session on Windows runs the command instead of dying instantly with exit 1',
+  'a Windows PTY runs when supported or reports the runtime limitation without a live orphan',
   async () => {
     // Bun.spawn `detached` maps to DETACHED_PROCESS ("no console") on Windows,
     // which contradicts the ConPTY pseudoconsole the terminal option attaches:
@@ -252,8 +252,14 @@ test.skipIf(process.platform !== 'win32')(
     // ever showed dead pty rows. `detached` is POSIX session leadership only.
     const terminals = new TerminalRegistry()
     const manager = new PtySessionManager({ terminals })
-    const result = await manager.createSession('echo pty-windows-alive', { yieldTimeMs: 2_000, ownerSessionId: 'windows-test' })
     try {
+      let result
+      try { result = await manager.createSession('echo pty-windows-alive', { yieldTimeMs: 2_000, ownerSessionId: 'windows-test' }) }
+      catch (error) {
+        expect(error instanceof Error ? error.message : '').toContain('Interactive PTY sessions are unavailable in this Bun runtime')
+        expect(terminals.list('windows-test').every(row => !row.running)).toBe(true)
+        return
+      }
       expect(result.stdout).toContain('pty-windows-alive')
       expect(terminals.inspect('windows-test', result.sessionId)?.output).toContain('pty-windows-alive')
     } finally {
@@ -271,6 +277,7 @@ test.skipIf(process.platform !== 'win32')(
     const store = new DaemonTranscriptStore({ directory, currentProjectDirectory: directory })
     const transcript = normalizeDaemonTranscript({
       session_id: 'feed1234',
+      turn_count: 1,
       messages: [{ role: 'user', content: 'persist me' }],
     }, { requestedSessionKey: 'feed1234', currentProjectDirectory: directory })
     if (!transcript) throw new Error('expected transcript to normalize')

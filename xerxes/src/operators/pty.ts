@@ -128,7 +128,9 @@ export class PtySessionManager {
         kill: async () => void (await this.close(id)),
       },
     })
-    const terminal = new Bun.Terminal({
+    let terminal: Bun.Terminal
+    try {
+      terminal = new Bun.Terminal({
       cols: options.cols ?? 80,
       rows: options.rows ?? 24,
       data: (_terminal, bytes) => {
@@ -138,7 +140,14 @@ export class PtySessionManager {
         resolveWaiters(waiters)
       },
       exit: () => resolveWaiters(waiters),
-    })
+      })
+    } catch (error) {
+      mirror?.close(null)
+      if (error instanceof Error && error.message.includes('PTY not supported')) {
+        throw new Error('Interactive PTY sessions are unavailable in this Bun runtime on this platform. Use a non-interactive command, or run Xerxes in WSL2 or on a supported Linux/macOS host.')
+      }
+      throw error
+    }
     let childProcess: Bun.Subprocess
     try {
       childProcess = Bun.spawn(args, {

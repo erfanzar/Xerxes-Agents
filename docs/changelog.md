@@ -7,7 +7,21 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
-## Unreleased
+## 0.5.0 — 2026-09-20
+
+- Add a selectable transparent TUI background alongside Chrome styling.
+- Reuse supported local providers for SSH tasks with one scoped setup approval;
+  credentials and refresh stay local, with explicit expiry and revocation.
+- Keep approved local models discoverable and usable by delegated agents.
+- Continue finished spawned agents through SendMessageTool with stable identity,
+  saved history, and ordered follow-up input.
+- Persist model, mode, effort and permission choices atomically; preserve prior
+  settings on save failures and restore task policy after daemon restart.
+- Improve task navigation, history, output, cancellation and recovery behavior.
+- Correct empty optional provider fields in model inventory.
+- Avoid Linux watcher failures caused by unrelated Unix sockets by polling scoped
+  file metadata; report unsupported Windows PTY runtimes without orphaned panels.
+
 
 - Reconcile restored active-agent statuses with workers owned by this daemon.
 - Show provider response waits explicitly and avoid generic working verbs during silence.

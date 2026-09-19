@@ -41,6 +41,7 @@ const nativeFileMonitorSource: FileMonitorSource = {
     let state: FileState | undefined = await readValidatedState(roots.workspace, target.path)
     if (state === undefined) throw new Error(`Monitored file is not a regular file: ${path}`)
     const watchers: FSWatcher[] = []
+    let poll: ReturnType<typeof setInterval> | undefined
     let timer: ReturnType<typeof setTimeout> | undefined
     let closed = false
     let pending = false
@@ -94,6 +95,7 @@ const nativeFileMonitorSource: FileMonitorSource = {
       closed = true
       pending = false
       if (timer !== undefined) clearTimeout(timer)
+      if (poll !== undefined) clearInterval(poll)
       timer = undefined
       for (const watcher of watchers) watcher.close()
       watchers.length = 0
@@ -101,6 +103,13 @@ const nativeFileMonitorSource: FileMonitorSource = {
     }
     const abort = (): void => close()
     try {
+      // Bun 1.3.12's Linux directory watcher can open unrelated Unix sockets
+      // and fail with ENXIO. Poll only this file and its parent identity; never
+      // enumerate or open siblings, and retain the same scope validation.
+      if (process.platform === 'linux') {
+        poll = setInterval(schedule, 250)
+        poll.unref()
+      } else {
       const onParentEvent = (_event: string, filename: string | Buffer | null): void => {
         if (closed) return
         if (filename === null || filename.toString() === name) schedule()
@@ -115,6 +124,7 @@ const nativeFileMonitorSource: FileMonitorSource = {
         })
         grandparentWatcher.on('error', fail)
         watchers.push(grandparentWatcher)
+      }
       }
       signal?.addEventListener('abort', abort, { once: true })
       if (signal?.aborted) {

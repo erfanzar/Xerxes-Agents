@@ -490,8 +490,7 @@ test("rounds stop at the goal's own cap without any completion claim", async () 
   await withServer("xerxes-goal-cap-", runner, async (client, runtime) => {
     client.send({ jsonrpc: "2.0", id: 2, method: "turn.submit", params: { text: "start" } });
     await client.next((frame) => frame.id === 2);
-    await waitFor(() => !runtime.sessionStatus("goal-session")?.activeTurnId && runner.turns.length > 1);
-    await Bun.sleep(40);
+    await waitFor(() => !runtime.sessionStatus("goal-session")?.activeTurnId && getGoal(runtime.sessionStatus("goal-session")!.metadata, runtime.sessionStatus("goal-session")!.id)?.phase === 'blocked');
     // One human turn plus exactly max_goal_rounds automatic rounds. A goal that
     // never completes is bounded by its own declared budget, not by a global
     // retry ceiling that the model cannot see.

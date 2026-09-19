@@ -1,6 +1,6 @@
 {
   "name": "@xerxes/runtime",
-  "version": "0.4.5",
+  "version": "0.5.0",
   "private": true,
   "type": "module",
   "description": "Bun-native TypeScript runtime for Xerxes.",
