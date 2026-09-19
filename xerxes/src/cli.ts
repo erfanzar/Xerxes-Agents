@@ -1117,6 +1117,7 @@ async function runDaemonOwned(
   // server must not stop the daemon.
   const daemon = new DaemonServer({
     workspaceResources: cwd => workspaces.get(cwd),
+    workspaceRelease: cwd => workspaces.release(cwd),
     autoSnapshotTurns: true,
     managedPlugins,
     agentSettingsDefaults: config.runtime.agent_intelligence,
@@ -2217,6 +2218,46 @@ function daemonRuntime(
         const owned = resolveSubagentRetryRequest(request, key => runtime?.sessionStatus(key));
         const snapshot = await host.retry(owned.task, owned.options);
         return { ok: true, agent: subagentRetryWirePayload(snapshot) };
+      } catch (error) {
+        return { ok: false, error: errorMessage(error) };
+      }
+    },
+    // Stop delegated children (`subagent.interrupt`, the desktop agents-panel
+    // stop button and the TUI agents panel — previously an always-error
+    // unknown method). A named task narrows the cancel to exactly that child;
+    // clients address children by id OR stable name (the TUI panel prefers
+    // the name), so both are matched, strictly within the requesting
+    // session's own children. Unnamed, every live child of the session.
+    // Interrupt is a pause, not a reclaim: handles stay inspectable and
+    // retryable like Esc mid-turn. `found` is the client contract for "the
+    // request targeted a stoppable child" — clients reject the stop UI when
+    // it is absent.
+    subagentInterrupt: async (request) => {
+      const ownedSession = request.sessionKey ? runtime?.sessionStatus(request.sessionKey) : undefined;
+      const host = ownedSession ? subagentHosts.get(resolve(ownedSession.cwd)) : undefined;
+      if (!ownedSession || !host) {
+        return {
+          ok: false,
+          error:
+            "subagent interrupt requires an active provider connection; configure a profile and try again",
+        };
+      }
+      try {
+        if (request.task) {
+          const named = request.task.trim();
+          const task = host.manager
+            .listTasks()
+            .find(candidate =>
+              candidate.sourceId === ownedSession.id
+              && (candidate.id === named || candidate.name === named));
+          if (!task || (task.status !== 'pending' && task.status !== 'running')) {
+            return { ok: true, found: false };
+          }
+          const cancelled = host.manager.cancel(task.id);
+          return { ok: true, found: true, interrupted: cancelled ? 1 : 0 };
+        }
+        const interrupted = host.interruptSource(ownedSession.id);
+        return { ok: true, found: interrupted > 0, interrupted };
       } catch (error) {
         return { ok: false, error: errorMessage(error) };
       }

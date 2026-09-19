@@ -727,7 +727,10 @@ export async function editFile(
           oldString,
         )
       }
-      return replaceAll ? content.split(oldString).join(newString) : content.replace(oldString, newString)
+      // Function form: a replacement STRING would expand the $&, $`, $' and
+      // $$ patterns in new_string, but this tool's contract is exact literal
+      // spans (mirrors codingTools' find_and_replace).
+      return replaceAll ? content.split(oldString).join(newString) : content.replace(oldString, () => newString)
     },
   })
   const summary = applied === undefined

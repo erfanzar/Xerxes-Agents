@@ -240,7 +240,6 @@ const NATIVE_UNSUPPORTED_RPC_GUIDANCE: Readonly<Record<string, string>> = Object
   'session.close': 'Native sessions are persistent; use /new or the session switcher instead.',
   'skills.manage': 'Use /skills to inspect, search, install and trust local skills.',
   'skills.reload': 'Use /skills to refresh workspace skill discovery; this legacy reload method is unsupported.',
-  'subagent.interrupt': 'Native subagent lifecycle control is not configured in this daemon.',
   'tools.configure': 'Use /preset manage to edit composition tools and /permissions for the active permission mode.',
   'voice.record': 'Native voice capture is not configured in this daemon.',
   'voice.toggle': 'Native voice capture is not configured in this daemon.'
@@ -977,7 +976,6 @@ export class GatewayClient extends EventEmitter {
       case 'skills.manage':
       case 'delegation.status':
       case 'delegation.pause':
-      case 'subagent.interrupt':
       case 'process.stop':
       case 'reload.mcp':
       case 'reload.env':

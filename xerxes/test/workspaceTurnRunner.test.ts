@@ -55,3 +55,29 @@ test('workspace initialization failures are observable and retryable', async () 
   await resources.close()
   await expect(resources.get('/not-owned')).rejects.toThrow('closed')
 })
+
+test('a released load finishing late cannot replace a reopened workspace', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'xws-reopen-'))
+  let unblock!: () => void
+  const gate = new Promise<void>(resolve => { unblock = resolve })
+  let opens = 0
+  const resources = new DaemonWorkspaces({
+    home, allowWorkspace: false, report() {},
+    beforeOpen: async () => { if (++opens === 1) await gate },
+  })
+  try {
+    const oldLoad = resources.get(home)
+    const release = resources.release(home)
+    const reopened = await resources.get(home)
+    expect(resources.peek(home)).toBe(reopened)
+    unblock()
+    expect(await oldLoad).not.toBe(reopened)
+    await release
+    expect(resources.peek(home)).toBe(reopened)
+    expect(await resources.get(home)).toBe(reopened)
+  } finally {
+    unblock()
+    await resources.close()
+    await rm(home, { recursive: true, force: true })
+  }
+})

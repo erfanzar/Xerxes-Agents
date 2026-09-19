@@ -58,6 +58,12 @@ const bridge = {
   getResumeSession(): Promise<string | null> {
     return ipcRenderer.invoke('desktop:resume')
   },
+  getContextScope(): Promise<string> { return ipcRenderer.invoke('desktop:context-scope') },
+  getContexts(): Promise<unknown[]> { return ipcRenderer.invoke('desktop:contexts') },
+  activateContext(id: number, sessionId?: string): Promise<void> {
+    if (!Number.isSafeInteger(id) || sessionId !== undefined && (typeof sessionId !== 'string' || !/^[a-zA-Z0-9_-]{1,256}$/.test(sessionId))) return Promise.reject(new Error('Invalid workspace context'))
+    return ipcRenderer.invoke('desktop:activate-context', id, sessionId)
+  },
   voice(action: string, params: unknown = {}): Promise<unknown> {
     if (!['check', 'transcribe', 'cancel'].includes(action))
       return Promise.reject(new Error('Unknown dictation action'))

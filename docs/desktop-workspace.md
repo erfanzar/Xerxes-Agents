@@ -1,5 +1,12 @@
 # Desktop workspace
 
+When both builds support reconnect leases, the desktop preserves its owned turn
+for up to 30 seconds after a socket or SSH tunnel drops. Retry rebuilds the
+transport, reclaims the same owner, and restores the session and unanswered
+permission requests. Expired leases and daemon shutdown still cancel work;
+Retry never silently resubmits a cancelled instruction. Older runtimes retain
+their immediate disconnect cancellation until updated.
+
 The desktop client renders locally and uses the same daemon and persisted sessions as the terminal client. Start a development build with `bun run --cwd xerxes build:desktop`, then `bun run --cwd xerxes desktop` (requires Electron and Bun).
 
 ## Working in the app
@@ -25,7 +32,16 @@ Session ownership is checked before initialization can replace a binding. A sess
 
 The workspace control selects local folders or saved SSH workspaces. **Add remote workspace** can discover host aliases from the local SSH configuration, browse remote folders, and save the selected project. Connecting installs or updates the managed remote runtime, then forwards its Unix socket. The desktop renderer stays local.
 
+Selecting SSH keeps the local conversation alive in a retained view inside the same window. The sidebar exposes **This Mac** and other connected SSH hosts, including their saved chats and live working status. Selecting one returns to its existing view without reloading or cancelling work. Drafts and remembered sessions are scoped to the endpoint as well as the workspace, so identical paths on different machines cannot overwrite one another. Failed SSH setup leaves local navigation available; disconnected endpoints retain their last known chat list.
+
 SSH uses existing authentication and known-host records. Unknown host keys are rejected; establish trust using SSH before connecting. No provider credentials are copied to the remote machine. Configure providers there as needed.
+
+If the SSH tunnel drops, automatic recovery and **Retry now** recreate the tunnel before retrying RPC calls. The existing renderer and session binding stay in place, preserving the draft. Concurrent requests share one recovery attempt; closing the view cancels it. Authentication and host-key failures remain visible.
+
+Reconnect first probes the existing remote daemon and reuses its address. A live
+daemon does not require a GitHub check or installation during Retry. Only a missing
+or refused daemon socket falls back to remote setup; a stalled or invalid RPC reply
+is surfaced as an error. Explicit runtime updates still check the managed release.
 
 **Reconnect** retries the selected workspace. Reconnecting the same remote host and folder resumes the current session and reloads its transcript. **Cancel connection** stops the current setup attempt. A failed replacement connection preserves the previous workspace. Disconnecting the local tunnel does not delete remote sessions.
 
@@ -68,6 +84,19 @@ bundled runtime, and build identity must come from the same package. A partial c
 can leave a build mismatch that restarting the daemon cannot repair. After a full
 replacement, use the runtime status control to update an idle daemon; allow active
 work to finish before restarting it.
+
+The desktop automatically requests an update when its connected runtime is out of
+date. The daemon's atomic idle guard checks all workspaces; a busy runtime stays
+connected and the desktop retries after work finishes. Unsupported legacy updates
+and setup errors remain visible and require attention rather than a forced stop.
+An older desktop never automatically replaces a newer protocol/version daemon.
+
+Managed SSH workspaces prepare the current remote release and use the same idle
+guard before replacing a running daemon. The existing SSH tunnel and saved session
+are reused. Build compatibility is checked against the release installed on that
+host, which may differ from a local development checkout. Closing the workspace
+cancels an outstanding SSH setup operation. Custom external sockets without a
+managed updater still require an explicit host-side update.
 
 Distribution still requires the existing Developer ID signing and Apple notarization configuration in `packageDesktopMac.ts`. A locally ad-hoc-signed image is a development artifact, not a notarized public release.
 

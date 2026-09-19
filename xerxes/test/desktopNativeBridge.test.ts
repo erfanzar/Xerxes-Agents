@@ -36,4 +36,13 @@ describe('native notification decisions', () => {
     expect(shouldNotify(event, { enabled: true, anyWindowFocused: true })).toBeNull()
     expect(shouldNotify(event, { enabled: true, anyWindowFocused: false })).toMatchObject({ title: 'Task finished' })
   })
+
+  test('interrupted turns report stopped, unstarted turns stay quiet', () => {
+    // Mirrors the TUI bell policy: a cancelled turn is not a completion, and
+    // an unstarted submission has nothing to report at all.
+    expect(notificationFor({ type: 'turn_end', payload: { cancelled: true } }))
+      .toMatchObject({ title: 'Task stopped' })
+    expect(notificationFor({ type: 'turn_end', payload: { cancelled: true, unstarted: true } })).toBeNull()
+    expect(notificationFor({ type: 'turn_end', payload: { unstarted: true } })).toBeNull()
+  })
 })

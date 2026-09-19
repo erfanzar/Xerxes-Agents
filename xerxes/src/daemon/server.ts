@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import type { WorkspaceResources } from './workspaceResources.js';
+import { ConnectionLeases } from './connectionLease.js';
 import { historyLimit, sessionHistoryPage } from './historyPage.js';
 import { ValidationError } from '../core/errors.js';
 
@@ -305,6 +306,12 @@ export { compactionCompletionPort } from "./compactionRunner.js";
  * compact", which reads as benign.
  */
 const MAX_AUTO_COMPACT_FAILURES = 3;
+/**
+ * Grace before an idle workspace's per-project resources (MCP servers
+ * included) are reclaimed — long enough that a concurrently opening session
+ * registers first, short enough that churned projects do not accumulate.
+ */
+const WORKSPACE_RELEASE_DELAY_MS = 60_000;
 
 /**
  * Fraction of the prompt budget at which a daemon with auto-compaction turned
@@ -672,6 +679,13 @@ export interface DaemonToolCatalogPort {
 
 export interface DaemonServerOptions {
   readonly workspaceResources?: (cwd: string) => Promise<WorkspaceResources>;
+  /**
+   * Drop one workspace's cached resources (per-project skill registry, MCP
+   * manager and its server processes) once no live session uses it. Without
+   * this a long-lived shared daemon accumulates every project it ever served
+   * until exit; the server asks only when its last session goes away.
+   */
+  readonly workspaceRelease?: (cwd: string) => Promise<void>;
   /** Optional host catalog port; the default uses the authenticated Codex session. */
   readonly codexModelCatalog?: (profile: ProviderProfile, signal?: AbortSignal) => ReturnType<typeof fetchCodexModelCatalog>;
   /** Resolve real native agent definitions for `/agents`; injectable for embedding hosts. */
@@ -928,7 +942,7 @@ export class DaemonServer {
     ProviderModelDiscoveryPort | undefined;
   private readonly discoveredContextLimits = new Map<string, number>();
   private readonly autoDiscoverModelCapabilities: boolean;
-  private readonly modelCapabilityRefreshes = new Map<string, Promise<void>>();
+  private readonly modelCapabilityRefreshes = new Map<string, Promise<JsonRpcPayload | undefined>>();
   /** Per-model reasoning-level sets, so the picker does not refetch each open. */
   private readonly reasoningLevelCache = new Map<string, ReasoningLevelSet>();
   private readonly codexModelCatalog: NonNullable<DaemonServerOptions['codexModelCatalog']>;
@@ -951,6 +965,8 @@ export class DaemonServer {
   private readonly workspaceCatalog = new Map<string, WorkspaceResources>();
   private readonly workspaceContext = new AsyncLocalStorage<WorkspaceResources>();
   private readonly workspaceResources: DaemonServerOptions["workspaceResources"];
+  private readonly workspaceRelease: DaemonServerOptions["workspaceRelease"];
+  private readonly workspaceReleaseTimers = new Map<string, NodeJS.Timeout>();
   private readonly default_skillRegistry: SkillRegistry;
   private get skillRegistry(): SkillRegistry { return this.workspaceContext.getStore()?.skillRegistry ?? this.default_skillRegistry; }
   private readonly skillCreates = new Map<
@@ -988,6 +1004,8 @@ export class DaemonServer {
   private transcriptSearchHydration: Promise<void> | undefined;
   private readonly toolCatalog: DaemonToolCatalogPort | undefined;
   private readonly turnOwners = new Map<string, DaemonTransportConnection>();
+  private readonly connectionLeases = new ConnectionLeases(owner => this.disconnectOwner(owner));
+  private readonly pendingInteractionFrames = new Map<string, { owner: DaemonTransportConnection; type: string; payload: JsonRpcPayload }>();
   private readonly uiControl: DaemonUiControlPort | undefined;
   private readonly websocketOptions: DaemonWebSocketGatewayOptions | undefined;
   private websocketGateway: DaemonWebSocketGateway | undefined;
@@ -1015,6 +1033,7 @@ export class DaemonServer {
     this.agentSettingsStore = options.agentSettingsStore ?? new AgentSettingsStore(join(xerxesHome(), "daemon", "agent-settings.sqlite"));
     this.agentSettingsDefaults = options.agentSettingsDefaults;
     this.workspaceResources = options.workspaceResources;
+    this.workspaceRelease = options.workspaceRelease;
     this.socketPath = options.socketPath;
     this.pidPath = options.pidPath;
     this.projectDirectory = options.projectDirectory
@@ -1473,6 +1492,7 @@ export class DaemonServer {
       this.stopCronScheduler();
       void this.reactionDispatcher?.close();
       await cleanup(() => this.runtime.cancelAllTurns());
+      this.connectionLeases.close();
       // Let cancelled turns land their final state sync and saveSession, but
       // never wait on them forever: one generator that fails to settle used to
       // park the daemon here with the transcript still unwritten, because the
@@ -1820,6 +1840,9 @@ export class DaemonServer {
     line: string,
     releaseQueue: () => void = () => undefined,
   ): Promise<void> {
+    // RPC ids belong to a physical transport. A slow response from the old
+    // socket must never resolve a reused id on its replacement.
+    const responseConnection = connection;
     let request: JsonRpcRequest;
     try {
       request = parseJsonRpcRequest(line);
@@ -1840,6 +1863,27 @@ export class DaemonServer {
       releaseQueue();
     }
     try {
+      if (request.method === 'connection.lease') {
+        const token = optionalString(request.params.token);
+        if (token) {
+          if (!this.connectionLeases.has(token)) {
+            connection.send(jsonRpcSuccess(request.id, { ok: false, code: 'lease_expired', error: 'Connection lease expired. Reopen the saved session.' }));
+            return;
+          }
+          this.connectionLeases.resume(connection, token, candidate => {
+            const previous = this.runtime.sessionStatus(candidate.activeSessionKey);
+            const requested = optionalString(request.params.project_dir);
+            return Boolean(previous && requested && resolveProjectDirectory(previous.cwd) === resolveProjectDirectory(requested));
+          });
+          connection.send(jsonRpcSuccess(request.id, { ok: true, token, grace_ms: this.connectionLeases.graceMs }));
+        } else {
+          if ([...this.turnOwners.values()].includes(connection)) throw new Error('Enable reconnect before submitting a turn.');
+          const fresh = this.connectionLeases.enable(connection);
+          connection.send(jsonRpcSuccess(request.id, { ok: true, token: fresh, grace_ms: this.connectionLeases.graceMs }));
+        }
+        return;
+      }
+      connection = this.connectionLeases.owner(connection);
       const session = this.runtime.sessionStatus(sessionKey(connection, request.params));
       const opening = request.method === 'initialize' || request.method === 'session.open';
       const cwd = (opening ? optionalString(request.params.project_dir) : undefined) || session?.cwd || this.projectDirectory || process.cwd();
@@ -1848,9 +1892,9 @@ export class DaemonServer {
       const result = resources
         ? await this.workspaceContext.run(resources, () => this.dispatch(connection, request))
         : await this.dispatch(connection, request);
-      connection.send(jsonRpcSuccess(request.id, result));
+      responseConnection.send(jsonRpcSuccess(request.id, result));
     } catch (error) {
-      connection.send(jsonRpcFailure(request.id, -32000, errorMessage(error)));
+      responseConnection.send(jsonRpcFailure(request.id, -32000, errorMessage(error)));
     }
   }
 
@@ -2250,6 +2294,9 @@ export class DaemonServer {
               (value): value is string => Boolean(value),
             ),
           );
+          if (active?.cwd) {
+            void this.releaseWorkspaceIfIdle(active.cwd);
+          }
         }
         return deleted
           ? { ok: true, deleted: true, session_id: sessionId }
@@ -2719,6 +2766,13 @@ export class DaemonServer {
       if (submissionKey && this.acceptedSubmissionIds.has(submissionKey)) {
         return { ok: true, duplicate: true };
       }
+      if (submissionKey && this.turnOwners.has(key)) {
+        // Refuse BEFORE recording the id: a submit refused for busyness must
+        // not consume it, or the client's later retry with the same id — the
+        // reconnect path this field exists for — is answered
+        // {ok:true, duplicate:true} with no turn ever launched.
+        return { ok: false, code: "turn-active", error: "a turn is already active for this session" };
+      }
       if (submissionKey) {
         this.rememberAcceptedSubmission(submissionKey);
       }
@@ -2727,13 +2781,20 @@ export class DaemonServer {
         text,
         (event) => this.emit(connection, event.type, event.payload),
         connection,
-        { displayText, ...(images.length ? { images } : {}) },
-      ).catch((error) =>
+        { displayText, ...(images.length ? { images } : {}), announceSuppressedTurn: true },
+      ).catch((error) => {
+        // Release the idempotency key only for submissions that never became
+        // a turn (refused at admission, or failed before launch) so a retry
+        // with the same id runs instead of reading as a duplicate. A turn
+        // that streamed and then hit a post-settle failure keeps its key —
+        // replaying it would re-execute history that already happened.
+        const neverBegan = (error as Error & { turnNeverBegan?: boolean } | undefined)?.turnNeverBegan;
+        if (submissionKey && neverBegan !== false) this.acceptedSubmissionIds.delete(submissionKey);
         this.emit(connection, "notification", {
           level: "error",
           message: errorMessage(error),
-        }),
-      );
+        });
+      });
       return { ok: true };
     }
     if (method === "turn.background") {
@@ -2849,6 +2910,22 @@ export class DaemonServer {
         sessionKey: sessionKey(connection, params),
         task,
         ...(message ? { message } : {}),
+      });
+    }
+    if (method === "subagent.interrupt") {
+      if (!this.runtime.interruptSubagent) {
+        return {
+          ok: false,
+          error: "subagent interrupt is not available on this daemon runtime",
+        };
+      }
+      // Ownership and task narrowing are enforced inside the runtime's port,
+      // same as subagent.retry; `found` reports whether a stoppable child was
+      // targeted (the desktop's stop UI gates on it).
+      const interruptTask = optionalString(params.task);
+      return this.runtime.interruptSubagent({
+        sessionKey: sessionKey(connection, params),
+        ...(interruptTask ? { task: interruptTask } : {}),
       });
     }
     if (method === "turn.steer" || method === "steer") {
@@ -3652,6 +3729,7 @@ export class DaemonServer {
     let stdout = "";
     let stderr = "";
     let timedOut = false;
+    let outputCapped = false;
     try {
       const proc = Bun.spawn([shell, ...shellArgs], {
         cwd,
@@ -3663,9 +3741,38 @@ export class DaemonServer {
         timedOut = true;
         proc.kill();
       }, SHELL_TIMEOUT_MS);
+      // Drain to completion but retain only the cap. The previous
+      // Response(stream).text() buffered the child's ENTIRE output in the
+      // daemon's memory before the clip below ran — `!cat` on a multi-GB log
+      // took the shared daemon (every client, every workspace) down with it.
+      // The flag lets the notice say the output was capped instead of
+      // claiming the retained prefix was the whole output.
+      const readCapped = async (stream: ReadableStream<Uint8Array>): Promise<string> => {
+        const decoder = new TextDecoder();
+        const reader = stream.getReader();
+        let text = "";
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (text.length < SHELL_OUTPUT_CAP) {
+            text += decoder.decode(value, { stream: true });
+          } else {
+            outputCapped = true;
+          }
+        }
+        text += decoder.decode();
+        // Stay strictly at or under the cap so the clip() below never fires
+        // with a misleading "N chars total" — the capNotice is the only
+        // truncation notice this output earns.
+        if (text.length > SHELL_OUTPUT_CAP) {
+          text = text.slice(0, SHELL_OUTPUT_CAP);
+          outputCapped = true;
+        }
+        return text;
+      };
       const [out, err, exit] = await Promise.all([
-        new Response(proc.stdout).text(),
-        new Response(proc.stderr).text(),
+        readCapped(proc.stdout),
+        readCapped(proc.stderr),
         proc.exited,
       ]);
       clearTimeout(killer);
@@ -3682,8 +3789,13 @@ export class DaemonServer {
         ? value.slice(0, SHELL_OUTPUT_CAP) + `\n… (truncated, ${value.length} chars total)`
         : value;
     const combined = [clip(stdout), clip(stderr)].filter(Boolean).join("\n").trimEnd();
-    const suffix = timedOut ? `\n(exited: timed out after ${SHELL_TIMEOUT_MS / 1000}s)` : code !== 0 ? `\n(exit ${code})` : "";
-    const body = combined ? combined + suffix : suffix.trim() || "(no output)";
+    const suffix = timedOut
+      ? `\n(exited: timed out after ${SHELL_TIMEOUT_MS / 1000}s)`
+      : code !== 0
+        ? `\n(exit ${code})`
+        : "";
+    const capNotice = outputCapped ? "\n(output capped at 30,000 characters)" : "";
+    const body = combined ? combined + suffix + capNotice : (suffix + capNotice).trim() || "(no output)";
     this.emitSlash(connection, body, code === 0 ? "info" : "warning");
     return { code, ok: code === 0, stderr: clip(stderr), stdout: clip(stdout) };
   }
@@ -3993,16 +4105,40 @@ export class DaemonServer {
     if (!profileName) return;
     let flight = this.modelCapabilityRefreshes.get(profileName);
     if (!flight) {
-      flight = this.fetchModels({ profile_name: profileName }).then(() => undefined);
+      // fetchModels reports failure as a result payload ({ok:false} or a
+      // `warning`), never as a rejection — so the result has to survive the
+      // flight for the notification below to have anything to say.
+      flight = this.fetchModels({ profile_name: profileName }).catch(() => undefined);
       this.modelCapabilityRefreshes.set(profileName, flight);
       void flight.then(
         () => this.modelCapabilityRefreshes.delete(profileName),
         () => this.modelCapabilityRefreshes.delete(profileName),
       );
     }
-    void flight.then(() => {
+    void flight.then((result) => {
       const session = this.runtime.sessionStatus(connection.activeSessionKey);
       if (session) this.emitStatus(connection, session);
+      // `result === undefined` means the flight itself rejected (swallowed by
+      // the .catch above) — still worth telling the operator about. A
+      // payload-carrying {ok:true, warning} means discovery fell back to the
+      // profile's own model list, which is degraded, not failed.
+      const degraded = !result
+        ? { ok: false as const, detail: "discovery request failed" }
+        : result.ok === false
+          ? { ok: false as const, detail: stringValue(result.error) || "discovery request failed" }
+          : stringValue(result.warning)
+            ? { ok: true as const, detail: stringValue(result.warning) }
+            : undefined;
+      if (degraded) {
+        // Without this the only observable symptom is a status frame with
+        // max_context: 0 and no explanation, on every reconnect.
+        this.emit(connection, "notification", {
+          level: "warning",
+          message: degraded.ok
+            ? `Model capability discovery incomplete, using the profile's configured models: ${degraded.detail}`
+            : `Model capability discovery failed: ${degraded.detail}`,
+        });
+      }
     }).catch((error) => {
       this.emit(connection, "notification", {
         level: "warning",
@@ -5112,7 +5248,13 @@ export class DaemonServer {
       active?.reasoningEffort
       || stringValue(this.runtime.status().reasoning_effort)
       || REASONING_OFF;
-    const levels = await this.reasoningLevels(active?.model);
+    // Resolve the ladder against THIS session's profile, the way set_reasoning
+    // and reasoning_levels do — the daemon-wide active profile can differ after
+    // another tab switched providers, and a claude model read against a
+    // codex/deepseek profile reports (or rejects) levels the model never had.
+    const sessionProfileName = active ? this.sessionProfileName(active) : undefined;
+    const sessionProfile = sessionProfileName ? this.profileStore.get(sessionProfileName) : undefined;
+    const levels = await this.reasoningLevels(active?.model, sessionProfile);
     const offered = selectableEfforts(levels);
     const requested = raw.trim();
     if (!requested) {
@@ -5122,9 +5264,6 @@ export class DaemonServer {
       );
       return { ok: true, reasoning_effort: current, levels: offered };
     }
-    // Validated against what this model actually accepts. The efforts differ
-    // per model — some publish `ultra`, others stop at `xhigh` — so a fixed
-    // list would both reject valid levels and accept ones the backend 400s on.
     // Validated against what this model actually accepts. The efforts differ
     // per model — some publish `ultra`, others stop at `xhigh` — so a fixed
     // list would both reject valid levels and accept ones the backend 400s on.
@@ -5153,8 +5292,10 @@ export class DaemonServer {
       });
     }
     // Still recorded as the default for sessions opened later; it no longer
-    // retargets sessions already running.
-    const profile = this.profileStore.active();
+    // retargets sessions already running. Land it on the session's own
+    // profile — the daemon-wide active one can belong to another tab's
+    // provider, and sampling defaults set on the wrong profile never help.
+    const profile = sessionProfile ?? this.profileStore.active();
     if (profile) {
       this.profileStore.updateSampling(profile.name, {
         reasoning_effort: resolved,
@@ -5169,14 +5310,6 @@ export class DaemonServer {
     return { ok: true, reasoning_effort: resolved, levels: offered };
   }
 
-  /**
-   * Reasoning efforts the active model accepts.
-   *
-   * Asked of the provider whenever it can answer, because the set is a
-   * property of the model rather than of Xerxes: the Codex catalog alone
-   * ranges from four efforts to six, with three different defaults. Providers
-   * with no capability endpoint fall back to a per-provider table.
-   */
   /**
    * Estimated token budget split for the active session's next request:
    * system-prompt scaffold, tool schemas, and transcript messages. These are
@@ -5212,6 +5345,14 @@ export class DaemonServer {
     };
   }
 
+  /**
+   * Reasoning efforts the active model accepts.
+   *
+   * Asked of the provider whenever it can answer, because the set is a
+   * property of the model rather than of Xerxes: the Codex catalog alone
+   * ranges from four efforts to six, with three different defaults. Providers
+   * with no capability endpoint fall back to a per-provider table.
+   */
   private async reasoningLevels(modelOverride?: string, profileOverride?: ProviderProfile): Promise<ReasoningLevelSet> {
     const status = this.runtime.status();
     const model = modelOverride?.trim() || stringValue(status.model) || "";
@@ -6516,6 +6657,18 @@ export class DaemonServer {
         }
         return { ok: false, error: failure };
       }
+      // The summary call above can take tens of seconds while this method
+      // holds only the session-operation queue for THIS key. A concurrent
+      // session.open / resume of the same persisted id under another key
+      // folds and evicts this exact object — the fold's only guard is
+      // activeTurnId, and compaction is not a turn. If that happened, the
+      // swap below would mutate an orphan that flushSessions no longer sees:
+      // reported as success while the live session keeps the full window.
+      if (this.runtime.sessionStatus(sessionKey) !== session) {
+        const error = "the session was reopened while compaction was running; run /compact again";
+        if (notify) this.emitSlash(notify, `Compaction failed: ${error}`, "warning");
+        return { ok: false, error };
+      }
       // Anything appended while the summary was in flight is newer than the
       // compacted window and must survive the swap.
       const appended = session.messages.slice(outcome.originalCount);
@@ -6550,6 +6703,19 @@ export class DaemonServer {
           this.emitSlash(
             notify,
             `Pre-compaction transcript could not be archived: ${outcome.stamp.archive_error}`,
+            "warning",
+          );
+        } else if (archivePath === undefined && session.messages.length > 0) {
+          // No archive was even attempted: either the id is a slot key with
+          // no persisted transcript, or no archive directory is configured
+          // and the transcript file does not exist (for example after
+          // daemon.wipe_history deliberately kept this live session in
+          // memory). The summary above replaced the only copy of this
+          // history, so say so rather than let an absent sidecar be
+          // discovered after the fact.
+          this.emitSlash(
+            notify,
+            "Note: no pre-compaction archive was available, so the replaced history cannot be recovered if the summary went wrong.",
             "warning",
           );
         }
@@ -6820,6 +6986,11 @@ export class DaemonServer {
         ...(this.titleClientFactory ? { clientFactory: this.titleClientFactory } : {}),
       }));
     if (!attempt) return;
+    // Both promises here are fire-and-forget by design (a title must never
+    // fail a turn), but neither may orphan a rejection: withSessionOperation
+    // rejects while a desktop restart is pending, and the production crash
+    // handler turns any unhandled rejection into "daemon crashed" + exit 1
+    // mid-shutdown. Same rule as the session queue's terminal cleanup chain.
     void attempt.then((title) => {
       if (!title) return;
       // Persist through the session-operation queue: a flush outside it can
@@ -6843,8 +7014,8 @@ export class DaemonServer {
           session_id: current.id,
           title,
         });
-      });
-    });
+      }).catch(() => undefined);
+    }, () => undefined).catch(() => undefined);
   }
 
   private resolvedAutoTitle(): boolean {
@@ -7152,7 +7323,10 @@ export class DaemonServer {
             refused = true;
             break;
           }
-          content = content.replace(newString, oldString);
+          // Function form: a replacement STRING would expand the $&, $`, $'
+          // and $$ patterns in oldString and silently corrupt the file this
+          // path exists to restore verbatim (mirrors codingTools' find_and_replace).
+          content = content.replace(newString, () => oldString);
           reverted += 1;
         }
         if (refused) continue;
@@ -7594,7 +7768,7 @@ export class DaemonServer {
         session.messages.splice(0, session.messages.length, ...priorMessages);
         session.turnCount = priorTurnCount;
         this.emitSlash(connection, `Retry failed: ${errorMessage(error)}`, "error");
-      });
+      }).catch(() => undefined);
     });
     return { ok: true, retried: true };
   }
@@ -8788,7 +8962,10 @@ export class DaemonServer {
     const requestedHistory = historyLimit(params.history_limit);
     const resumeId = optionalString(params.resume_session_id);
     const requestedKey = optionalString(params.session_key);
-    const key = resumeId || requestedKey || `tui:${newConnectionKey()}`;
+    const attachedSession = this.runtime.sessionStatus(connection.activeSessionKey);
+    const key = resumeId && attachedSession?.id === resumeId
+      ? attachedSession.sessionKey
+      : resumeId || requestedKey || `tui:${newConnectionKey()}`;
     const cwd = resolveProjectDirectory(
       optionalString(params.project_dir) ||
         this.runtime.sessionStatus(connection.activeSessionKey)?.cwd ||
@@ -8814,7 +8991,21 @@ export class DaemonServer {
       // connection may still own; adopt the live session instead of
       // resetting it.
       const live = this.runtime.sessionStatus(key);
-      if (!live?.activeTurnId) {
+      // `activeTurnId` is only set once the runtime launches the turn —
+      // submitTrackedTurn claims turnOwners synchronously at admission, long
+      // before any controller exists, and releases it at settle. Count that
+      // pre-launch window as busy too, or a bare initialize here evicts the
+      // session out from under a turn that is between admission and launch.
+      // (Deliberately NOT sessionOperations: benign background ops — a title
+      // write, a compaction — also hold the queue, and this eviction is meant
+      // to proceed during those; the compaction case is guarded where the
+      // swap happens.)
+      const busy = (sessionKey: string): boolean =>
+        Boolean(
+          this.runtime.sessionStatus(sessionKey)?.activeTurnId
+          || this.turnOwners.has(sessionKey),
+        );
+      if (!busy(key)) {
         // Eviction drops every mutation not yet persisted (idle steers,
         // title and mode edits); flush first so a reconnect cannot silently
         // lose them.
@@ -8823,7 +9014,7 @@ export class DaemonServer {
         // flight registers its controller and session state, and evicting
         // now would abort just-admitted work. With no further yield between
         // this check and eviction, the decision is atomic.
-        if (!this.runtime.sessionStatus(key)?.activeTurnId) {
+        if (!busy(key)) {
           this.forgetAcceptedSubmissions([key]);
           this.endSessionLifetime([key]);
           this.runtime.evictSession(key);
@@ -8901,6 +9092,7 @@ export class DaemonServer {
       // handshake role explicit for desktop/app compatibility checks.
       version: XERXES_VERSION,
       daemon_version: XERXES_VERSION,
+      connection_lease_supported: true,
       daemon_protocol: DAEMON_PROTOCOL_VERSION,
       daemon_build_id: this.daemonBuildId(),
     };
@@ -8929,11 +9121,16 @@ export class DaemonServer {
     // provider answers, every context surface remains explicitly unknown.
     this.refreshActiveModelCapabilities(connection);
     this.recoverMonitorReactions(session);
+    const reconnectEvents = this.connectionLeases.takeReplay(connection);
     return {
       ...this.runtimeStatusWithChannels(),
       ...initPayload,
       ok: true,
       session: sessionPayload(session, contextLimit, this.mcpStatusRecord(session), requestedHistory),
+      ...(reconnectEvents ? { reconnect_events: reconnectEvents } : {}),
+      pending_interactions: [...this.pendingInteractionFrames.values()]
+        .filter(frame => frame.owner === connection)
+        .map(({ type, payload }) => ({ type, payload })),
       daemon_protocol: DAEMON_PROTOCOL_VERSION,
       daemon_build_id: this.daemonBuildId(),
     };
@@ -9131,11 +9328,21 @@ export class DaemonServer {
     if (type === "approval_request") {
       const requestId =
         optionalString(payload.id) ?? optionalString(payload.request_id);
-      if (requestId) this.approvalOwners.set(requestId, connection);
+      if (requestId) {
+        this.approvalOwners.set(requestId, connection);
+        this.pendingInteractionFrames.set(requestId, { owner: connection, type, payload });
+      }
     }
     if (type === "question_request") {
       const requestId = optionalString(payload.id);
-      if (requestId) this.questionOwners.set(requestId, connection);
+      if (requestId) {
+        this.questionOwners.set(requestId, connection);
+        this.pendingInteractionFrames.set(requestId, { owner: connection, type, payload });
+      }
+    }
+    if (type === 'approval_response' || type === 'question_response') {
+      const requestId = optionalString(payload.request_id) ?? optionalString(payload.id);
+      if (requestId) this.pendingInteractionFrames.delete(requestId);
     }
     if (type === "status_update") {
       const session = this.runtime.sessionStatus(connection.activeSessionKey);
@@ -9191,6 +9398,11 @@ export class DaemonServer {
     if (!this.runtime.cancelTurn(sessionKey)) {
       const session = this.runtime.sessionStatus(sessionKey);
       if (session) session.cancelRequested = true;
+      // runtime.cancelTurn disarms an armed goal when it aborts a live turn;
+      // mirror that here or a stop landing in the pre-launch setup window
+      // leaves the goal armed-but-stalled: cancelRequested refuses every
+      // future round until the next human turn clears the latch.
+      if (session) disarmGoal(session.id);
     }
     return true;
   }
@@ -9371,7 +9583,30 @@ export class DaemonServer {
     // cleanup release the first turn's disconnect ownership.
     const ownsCancellation = Boolean(owner && !this.turnOwners.has(sessionKey));
     if (owner && !ownsCancellation) {
-      return Promise.reject(new Error("a turn is already active for this session"));
+      // The submit was already acknowledged ({ok:true} is on its way back),
+      // so — exactly like the suppressed-launch branch below — it owes the
+      // client the terminal event a launched turn would have produced. A
+      // bare rejection only becomes an error notification, which no client
+      // treats as a settle edge: the session would sit busy until reconnect.
+      // Only callers that opted in (turn.submit: its RPC already answered
+      // {ok:true}, so the client needs the terminal event a launched turn
+      // would have produced). Other owner-bearing callers (/skill, /image,
+      // /retry) report their own outcome and MUST NOT emit this: their
+      // connection may have a real turn still streaming, and the synthetic
+      // frame would settle its UI mid-flight.
+      if (options.announceSuppressedTurn === true) {
+        emit({
+          type: "turn_end",
+          payload: {
+            cancelled: true,
+            unstarted: true,
+            session_id: this.runtime.sessionStatus(sessionKey)?.id ?? sessionKey,
+          },
+        });
+      }
+      const refusal = new Error("a turn is already active for this session");
+      (refusal as Error & { turnNeverBegan?: boolean }).turnNeverBegan = true;
+      return Promise.reject(refusal);
     }
     if (owner) {
       this.turnOwners.set(sessionKey, owner);
@@ -9472,6 +9707,13 @@ export class DaemonServer {
           emit({ type: "turn_end", payload: { cancelled: options.signal?.aborted === true || Boolean(goalTokenBudget?.tokenFailure), unstarted: true,
             session_id: this.runtime.sessionStatus(sessionKey)?.id ?? sessionKey } });
         }
+        // Tell a rejection apart from a turn that already ran and streamed:
+        // only a turn that never began may release its submission
+        // idempotency key (a post-settle save failure on a finished turn
+        // must not make a client replay re-execute it).
+        if (error instanceof Error) {
+          (error as Error & { turnNeverBegan?: boolean }).turnNeverBegan = !beganTurn;
+        }
         throw error;
       }
       finally {
@@ -9534,12 +9776,16 @@ export class DaemonServer {
     for (const requestId of ids) {
       this.approvalOwners.delete(requestId);
       this.questionOwners.delete(requestId);
+      this.pendingInteractionFrames.delete(requestId);
     }
   }
 
   private dropConnectionRequests(connection: DaemonTransportConnection): void {
     this.providerFlows.delete(connection);
     this.skillCreates.delete(connection);
+    for (const [id, frame] of this.pendingInteractionFrames) {
+      if (frame.owner === connection) this.pendingInteractionFrames.delete(id);
+    }
     for (const [requestId, owner] of this.approvalOwners) {
       if (owner === connection) this.approvalOwners.delete(requestId);
     }
@@ -9599,6 +9845,11 @@ export class DaemonServer {
   }
 
   private disconnect(connection: DaemonTransportConnection): void {
+    if (this.connectionLeases.disconnect(connection)) return;
+    this.disconnectOwner(connection);
+  }
+
+  private disconnectOwner(connection: DaemonTransportConnection): void {
     this.disconnectedGoalOwners.add(connection);
     this.lspSettingsUpdates.get(connection)?.abort();
     this.mcpSettingsUpdates.get(connection)?.abort();
@@ -9628,6 +9879,55 @@ export class DaemonServer {
       if (sessionHasHistory(session) || session.activeTurnId) continue;
       if (attached.has(session.sessionKey)) continue;
       this.runtime.evictSession(session.sessionKey);
+      if (session.cwd) {
+        void this.releaseWorkspaceIfIdle(session.cwd);
+      }
+    }
+  }
+
+  /**
+   * Drop a workspace's per-project resources (skill registry, MCP manager
+   * and its child processes) once no live session sits in it. Best effort:
+   * a later request for the same project simply reloads through
+   * workspaceResources.
+   */
+  private async releaseWorkspaceIfIdle(rawCwd: string): Promise<void> {
+    if (!this.workspaceRelease) return;
+    const root = resolveProjectDirectory(rawCwd);
+    // Debounce: a session.open for this cwd may be mid-handshake right now
+    // (its session is not registered yet, so an immediate inUse() check
+    // would pass). Waiting also coalesces rapid open/close churn instead of
+    // cycling MCP server processes. The timer re-checks before releasing.
+    const existing = this.workspaceReleaseTimers.get(root);
+    if (existing) clearTimeout(existing);
+    const timer = setTimeout(() => {
+      this.workspaceReleaseTimers.delete(root);
+      void this.releaseWorkspaceNow(root);
+    }, WORKSPACE_RELEASE_DELAY_MS);
+    timer.unref?.();
+    this.workspaceReleaseTimers.set(root, timer);
+  }
+
+  private async releaseWorkspaceNow(root: string): Promise<void> {
+    const inUse = (): boolean =>
+      this.runtime
+        .listSessions()
+        .some((session) => resolveProjectDirectory(session.cwd) === root);
+    if (inUse()) return;
+    this.workspaceCatalog.delete(root);
+    try {
+      await this.workspaceRelease?.(root);
+    } catch (error) {
+      console.error(`Releasing workspace resources for '${root}' failed: ${errorMessage(error)}`);
+      return;
+    }
+    // A runner cached for this root holds tool registrations bound to the
+    // disconnected MCP manager; drop it so the next turn rebuilds fresh.
+    this.runtime.dropWorkspace?.(root);
+    if (inUse()) {
+      // A session opened while the teardown was awaiting. Prime a fresh load
+      // so its next request gets new resources instead of a missing entry.
+      void this.workspaceResources?.(root).catch(() => undefined);
     }
   }
 }

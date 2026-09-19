@@ -605,8 +605,13 @@ export class AgentTurnRunner implements TurnRunner {
           if (!sawContent && item.kind === 'turn') {
             const event = item.event
             // Waiting and compaction must be visible before model output exists.
+            // permission_request must too: the loop emits it in the permission
+            // phase BEFORE any tool_start and then parks on the broker, so a
+            // tool-only first round would otherwise never flush the buffer and
+            // the client would wait on an approval it was never shown.
             // Keep only terminal failure events buffered for fallback selection.
             if (event.type === 'provider_wait' || event.type === 'compaction'
+              || event.type === 'permission_request'
               || (event.type === 'provider_retry' && !event.final)) {
               yield decorate(item)
               continue
@@ -640,6 +645,20 @@ export class AgentTurnRunner implements TurnRunner {
           break
         }
         fallbackAttempted = true
+        // The failed attempt already pushed the user message and bumped
+        // turnCount — runTurn does both unconditionally on every invocation.
+        // It produced no assistant content (the restart is strictly
+        // pre-content), so roll both back or the fallback attempt appends the
+        // prompt a second time and the transcript keeps a duplicate user turn.
+        // Search backwards rather than assuming the message is last: a steer
+        // drained at the round boundary may have been appended after it.
+        const pushedIndex = state.messages.findLastIndex(
+          message => message.role === 'user' && message.content === userMessage,
+        )
+        if (pushedIndex >= 0) {
+          state.messages.splice(pushedIndex, 1)
+          if (state.turnCount > 0) state.turnCount -= 1
+        }
         // Narrowed by the restart condition above: both are defined here.
         const nextModel = fallbackModel as string
         const nextFactory = fallbackFactory as (model: string) => LlmClient
@@ -1319,8 +1338,24 @@ function synchronizeSessionState(session: DaemonSession, state: AgentState): voi
   // The picker can change the next turn's route while this turn is streaming.
   // Its session binding must survive the finishing turn's metadata snapshot.
   const providerProfile = session.metadata.provider_profile
+  // The same is true for fields other RPCs write mid-turn without an
+  // active-turn guard: a /title, /save, or session.goal wake staged while a
+  // turn runs must not be reverted by the turn-end snapshot restore. Presence
+  // is preserved too — a mid-turn delete (e.g. /title removing title_derived)
+  // must delete here as well, or a stale flag rides the restore and a later
+  // generated title overwrites the user's explicit rename. (goal_wake needs
+  // no such care: kickGoalWake re-validates id/revision and cancels stale
+  // wakes, so restoring a superseded one self-heals.)
+  const preservedTitle = session.metadata.title
+  const preservedGoalWake = session.metadata.goal_wake
+  const hadTitleDerived = Object.hasOwn(session.metadata, 'title_derived')
+  const preservedTitleDerived = session.metadata.title_derived
   session.metadata = { ...state.metadata }
   if (providerProfile !== undefined) session.metadata.provider_profile = providerProfile
+  if (preservedTitle !== undefined) session.metadata.title = preservedTitle
+  if (preservedGoalWake !== undefined) session.metadata.goal_wake = preservedGoalWake
+  if (hadTitleDerived) session.metadata.title_derived = preservedTitleDerived
+  else delete session.metadata.title_derived
   if (mergedDeltas.length) session.metadata.context_deltas = mergedDeltas
   session.thinkingContent = [...state.thinkingContent]
   session.toolExecutions = [...state.toolExecutions]

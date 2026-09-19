@@ -420,7 +420,7 @@ html,body,#root,.app.atelier{background:transparent}
 .atelier .app__body{padding:0;gap:0;overflow:hidden}
 .atelier .side{flex:0 0 var(--sidebar-width,240px);width:var(--sidebar-width,240px);min-width:0;background:var(--glass-navigation);backdrop-filter:var(--glass-blur);border:0;margin:0;border-radius:0;overflow:hidden}
 .atelier--focus .side{display:none}
-.sidebar-wordmark{font:400 38px/1.1 Didot,'Bodoni MT',Georgia,serif;letter-spacing:-.04em;color:var(--x-title);padding:12px 8px 24px;user-select:none}
+.sidebar-wordmark{font:400 38px/1.1 Didot,'Bodoni MT',Georgia,serif;letter-spacing:-.04em;color:var(--x-title);padding:12px 8px 24px;text-align:center;user-select:none}
 .atelier .side__pad{padding:12px 14px 8px;gap:5px}
 .atelier .side__list{padding:0 14px}
 .studio-segment{display:flex;gap:16px;padding:0 8px;margin:0 0 14px;border:0;border-bottom:1px solid var(--x-hairline);border-radius:0;background:transparent}

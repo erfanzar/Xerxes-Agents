@@ -47,6 +47,9 @@ export function canonicalProjectDir(projectDir?: string): string {
     const root = execFileSync('git', ['-C', raw, 'rev-parse', '--show-toplevel'], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 1_000,
+      killSignal: 'SIGKILL',
+      maxBuffer: 64 * 1024,
     }).trim()
     if (root) return realpathSync(root)
   } catch {

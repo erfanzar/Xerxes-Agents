@@ -16,7 +16,7 @@ import { groupByWorkspace } from './workspaceGroups.js'
 import { ChangesTab, LogTab, PlanTab } from './Workspaces.js'
 import { Markdown } from './markdown.js'
 import { Dictation } from './Dictation.js'
-import { draftKey, readDraft, writeDraft } from './drafts.js'
+import { draftKey, readDraft, transitionDraft } from './drafts.js'
 import { PanelDivider, usePanelLayout } from './layout.js'
 import { groupActivity } from "./activityGroups.js"
 import { ToolCallRow } from "./Execution.js"
@@ -627,6 +627,19 @@ function Sidebar({ snap, page }: { snap: Snapshot; page: 'agents' | 'extensions'
         >Search message history →</button>
       </div>
       <nav className="side__list">
+        {snap.contexts?.map(context => (
+          <div className="wgroup" key={`context-${context.id}`}>
+            <button className="wgroup__cap" title={context.workspace} onClick={() => void store.activateContext(context.id)}>
+              <Icon name="folder" size={14} /> {context.label}
+            </button>
+            {context.sessions.filter(row => !filter || row.title.toLowerCase().includes(filter.toLowerCase())).map(row => (
+              <button className="sess" key={row.id} title={`${context.label} · ${row.cwd}`} onClick={() => void store.activateContext(context.id, row.id)}>
+                <span className="sess__dot" style={{ background: statusColor(row.status) }} />
+                <span className="sess__body"><span className="sess__t">{row.title}</span><span className="sess__s">{workspaceLabel(row.cwd)}{row.status === 'working' ? ' · working' : ''}</span></span>
+              </button>
+            ))}
+          </div>
+        ))}
         {groups.map(group => (
           <div key={group.cwd} className={`wgroup${group.cwd === snap.cwd ? ' is-home' : ''}`}>
             <button
@@ -923,7 +936,7 @@ function Stream({ snap }: { snap: Snapshot }): ReactElement {
       {floatApproval && <ApprovalCard approval={approval} />}
       {snap.question && (
         <div className="stream__col">
-          <QuestionCard question={snap.question} plan={snap.plan} />
+          <QuestionCard key={`${snap.currentId}:${snap.question.requestId}`} question={snap.question} plan={snap.plan} />
         </div>
       )}
     </div>
@@ -1179,14 +1192,16 @@ function QuestionCard({
   const [selections, setSelections] = useState<Record<string, string[]>>({})
   const [others, setOthers] = useState<Record<string, string>>({})
   const review = isPlanReview(question)
+  const canSubmit = question.items.length > 0 && question.items.every(item =>
+    (item.allowFreeform && !!others[item.id]?.trim()) || (selections[item.id]?.length ?? 0) > 0)
   const submit = (): void => {
+    if (!canSubmit) return
     const answers: Record<string, string> = {}
     for (const item of question.items) {
       const custom = others[item.id]?.trim()
       const picked = selections[item.id] ?? []
       if (custom) answers[item.id] = custom
       else if (picked.length) answers[item.id] = picked.join(', ')
-      else if (!item.allowFreeform && item.options.length) answers[item.id] = item.options[0] ?? ''
     }
     store.answerQuestion(question.requestId, answers)
   }
@@ -1196,7 +1211,7 @@ function QuestionCard({
     if (review) return // PlanReviewCard owns its keyboard responses.
     const onKey = (event: KeyboardEvent): void => {
       const target = event.target as HTMLElement | null
-      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'BUTTON' || target.isContentEditable)) return
       const number = Number.parseInt(event.key, 10)
       if (!Number.isFinite(number) || number < 1) return
       const item = question.items[0]
@@ -1205,11 +1220,12 @@ function QuestionCard({
       if (!option) return
       event.preventDefault()
       setSelections(prev => ({ ...prev, [item.id]: [option] }))
+      setOthers(prev => ({ ...prev, [item.id]: '' }))
     }
     const onEnter = (event: KeyboardEvent): void => {
       if (event.key !== 'Enter') return
       const target = event.target as HTMLElement | null
-      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'BUTTON' || target.isContentEditable)) return
       event.preventDefault()
       submit()
     }
@@ -1242,7 +1258,9 @@ function QuestionCard({
                     <button
                       key={option}
                       className={`opt${on ? ' is-approve' : ''}`}
+                      aria-pressed={on}
                       onClick={() => {
+                        setOthers(prev => ({ ...prev, [item.id]: '' }))
                         setSelections(prev => {
                           const current = prev[item.id] ?? []
                           return {
@@ -1268,7 +1286,10 @@ function QuestionCard({
                   placeholder={item.placeholder || 'type a custom answer…'}
                   spellCheck={false}
                   value={others[item.id] ?? ''}
-                  onChange={e => setOthers(prev => ({ ...prev, [item.id]: e.target.value }))}
+                  onChange={e => {
+                    setOthers(prev => ({ ...prev, [item.id]: e.target.value }))
+                    setSelections(prev => ({ ...prev, [item.id]: [] }))
+                  }}
                 />
               </div>
             )}
@@ -1276,7 +1297,7 @@ function QuestionCard({
         )
       })}
       <div className="approval__row">
-        <button className="btn btn--solid" onClick={submit}>Submit answers ⏎</button>
+        <button className="btn btn--solid" disabled={!canSubmit} onClick={submit}>Submit answers ⏎</button>
       </div>
     </div>
   )
@@ -1386,23 +1407,23 @@ function PlanReviewCard({
 function Composer({ snap }: { snap: Snapshot }): ReactElement {
   const open = useDesktopNavigation()
   // The RPC binding key may change on resume; drafts belong to the durable session.
-  const key = draftKey(snap.cwd, snap.currentId || snap.sessionKey)
+  const workspace = (snap.storageScope ?? '') + snap.cwd
+  const key = draftKey(workspace, snap.currentId || snap.sessionKey)
   const [draft, setDraft] = useState(() => readDraft(key))
   const [hints, setHints] = useState<{ items: HintItem[]; index: number } | null>(null)
   const ref = useRef<HTMLTextAreaElement>(null)
   const hintSeq = useRef(0)
-  const draftSession = useRef(key)
+  const draftSession = useRef({ key, workspace, sessionId: snap.currentId })
   useEffect(() => {
-    if (draftSession.current === key) {
-      writeDraft(key, draft)
-      return
-    }
-    writeDraft(draftSession.current, draft)
-    draftSession.current = key
-    setDraft(readDraft(key))
+    const next = { key, workspace, sessionId: snap.currentId }
+    const changed = draftSession.current.key !== key
+    const value = transitionDraft(draftSession.current, next, draft)
+    draftSession.current = next
+    if (!changed) return
+    setDraft(value)
     setHints(null)
     ref.current?.focus()
-  }, [key, draft])
+  }, [key, workspace, snap.currentId, draft])
   useEffect(() => {
     const add = (event: Event) => { const detail = (event as CustomEvent<unknown>).detail; if (typeof detail === 'string') { setDraft(value => value + ' ' + detail); ref.current?.focus() } }
     const insert = (event: Event) => { const detail = (event as CustomEvent<unknown>).detail; if (typeof detail === 'string') { setDraft(value => applyCompletion(detail) + value); setHints(null); ref.current?.focus() } }
@@ -1703,11 +1724,16 @@ export function ActivityDetails({ snap }: { snap: Snapshot }): ReactElement | nu
 
 // ── Global keys ─────────────────────────────────────────────────────────
 
-/** ⌘K palette · ⌘N new task · Esc stop · 1/2/3 approvals. */
+/** ⌘K palette · ⌘N new task · ⌘, settings · Esc stop · 1/2/3 approvals. */
 function GlobalKeys({ snap }: { snap: Snapshot }): ReactElement | null {
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
       const meta = event.metaKey || event.ctrlKey
+      if (meta && event.key === ',') {
+        event.preventDefault()
+        store.openSettings()
+        return
+      }
       if (meta && event.key.toLowerCase() === 'k') {
         event.preventDefault()
         store.togglePalette()

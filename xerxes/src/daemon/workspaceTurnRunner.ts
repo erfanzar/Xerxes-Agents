@@ -29,14 +29,20 @@ export class WorkspaceTurnRunner implements TurnRunner {
     const resources = this.workspaces.peek(session.cwd)
     if (!resources) return []
     const root = resolve(session.cwd)
+    // A listing must not pin a full runner (tool registry, agent maps,
+    // bootstrap-prompt cache) into this map for a workspace that may never
+    // run a turn — cache only runners a real turn created.
     const runner = this.runners.get(root) ?? this.create(root, resources)
     if (!runner) return []
-    this.runners.set(root, runner)
     return runner.toolInventory?.(session) ?? []
   }
 
   dropSession(sessionId: string): void {
     for (const runner of this.runners.values()) runner.dropSession?.(sessionId)
+  }
+
+  dropWorkspace(cwd: string): void {
+    this.runners.delete(resolve(cwd))
   }
 
   async *run(session: DaemonSession, text: string, signal: AbortSignal, controls?: TurnRunControls) {

@@ -464,6 +464,9 @@ test('codex requests carry OAuth headers and omit the parameters the backend rej
     let seenHeaders: Record<string, string> = {}
     let seenBody: Record<string, unknown> = {}
     const client = createLlmClient('codex/gpt-5.3-codex', {}, {
+      // This test inspects the injected HTTP request. Auto transport would
+      // attempt a real WebSocket before falling back to this offline port.
+      codexTransport: 'sse',
       codexSession: new CodexSession({ environment: {}, homeDirectory: home, now: () => 1_000, storage }),
       fetchImplementation: (async (url: string, init?: RequestInit) => {
         seenUrl = String(url)

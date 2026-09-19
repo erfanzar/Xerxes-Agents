@@ -15,7 +15,7 @@ capability is missing. The TUI uses the v35 daemon and never delegates to Python
 | `terminal.resize` | No daemon terminal-geometry endpoint. TUI resizing does not imply remote PTY resizing. |
 | `voice.toggle`, `voice.record` | No native microphone capture/transcription implementation. `/voice` may report an embedding host's UI action; it is not proof of capture. |
 | `reload.env` | No live environment reload; restart an idle daemon after changing its environment. |
-| `delegation.status`, `delegation.pause`, `subagent.interrupt` | No targeted native delegation pause/interrupt endpoint. `/agents` inspects and retries supported failed agents; cancellation of the containing turn remains available. |
+| `delegation.status`, `delegation.pause` | No targeted native delegation pause endpoint. `/agents` inspects and retries supported failed agents; cancellation of the containing turn remains available. (`subagent.interrupt` is now a native daemon method — stopping an agent passes straight through.) |
 | `spawn_tree.save/list/load` | No persisted legacy spawn-tree RPCs. Native saved agent manifests and local replay do not recreate a complete historical child-tool timeline. |
 | `forge.stop` | Forge templates execute synchronously. There is no asynchronous Forge run to cancel. |
 | Clipboard/drop helpers | Local terminal features, not daemon capabilities. |

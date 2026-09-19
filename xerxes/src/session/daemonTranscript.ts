@@ -502,6 +502,8 @@ export class DaemonTranscriptStore {
       const messages = this.resolveMessages(transcript, options, persisted)
       const generation = persisted.generation + 1
       const inheritedOffset = Math.max(persisted.eventLogOffset, transcript.eventLogOffset ?? 0)
+      // Keep the journal until snapshot and journal reclamation can be committed
+      // together. Clearing it first loses recovered messages if this save fails.
       const coveredOffset = options.mode === 'rewrite'
         ? await this.eventLogSize(transcript.sessionId)
         : inheritedOffset

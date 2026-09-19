@@ -8,6 +8,21 @@ export function draftKey(workspace: string, session: string): string {
   return `xerxes.desktop.draft.v1:${JSON.stringify([workspace, session])}`
 }
 
+export interface DraftIdentity { key: string; workspace: string; sessionId: string }
+
+/** Move a pre-session draft only into its own newly opened conversation. */
+export function transitionDraft(previous: DraftIdentity, next: DraftIdentity, text: string): string {
+  writeDraft(previous.key, text)
+  if (previous.key === next.key) return text
+  const saved = readDraft(next.key)
+  if (!previous.sessionId && next.sessionId && previous.workspace === next.workspace && text && !saved) {
+    writeDraft(next.key, text)
+    writeDraft(previous.key, '')
+    return text
+  }
+  return saved
+}
+
 function windowStorage(): DraftStorage | undefined {
   try { return window.sessionStorage } catch { return undefined }
 }

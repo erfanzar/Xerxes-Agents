@@ -309,7 +309,7 @@ describe('Store workspace folds', () => {
     expect(bridge.calls.some(call => call.method === "slash" && call.params.command === "/restart")).toBe(false)
   })
 
-  test('a build mismatch preserves the daemon until an explicit runtime update', async () => {
+  test('a build mismatch automatically requests a safe idle update and stops retrying errors', async () => {
     await new Promise(resolve => setTimeout(resolve, 10))
     let attempts = 0
     bridge.respondWith(method => {
@@ -319,11 +319,37 @@ describe('Store workspace folds', () => {
     })
     await store.openSession("aa19f402")
     await (store as unknown as { beat(): Promise<void> }).beat()
-    expect(attempts).toBe(0)
+    expect(attempts).toBe(1)
     expect(store.getSnapshot().daemonWarning).toBeTruthy()
-    await store.restartDaemon()
+    await (store as unknown as { beat(): Promise<void> }).beat()
     expect(attempts).toBe(1)
     expect(store.getSnapshot().runtimeUpdate).toBe("failed")
+  })
+
+  test('automatic update retries busy work then resumes the same session after idle', async () => {
+    await new Promise(resolve => setTimeout(resolve, 10))
+    let updated = false
+    let busy = true
+    bridge.respondWith(method => {
+      if (method === 'initialize') return { ...initializeResult, daemon_protocol: updated ? 35 : 34 }
+      if (method === 'desktop.restartRuntime') {
+        if (busy) return { ok: false, busy: true }
+        updated = true
+        return { ok: true }
+      }
+      return { ok: true }
+    })
+    await store.openSession('aa19f402')
+    const beat = () => (store as unknown as { beat(): Promise<void> }).beat()
+    await beat()
+    expect(store.getSnapshot().runtimeUpdate).toBe('waiting')
+    expect(updated).toBe(false)
+    busy = false
+    await beat()
+    expect(store.getSnapshot().runtimeUpdate).toBeUndefined()
+    expect(store.getSnapshot().daemonWarning).toBeNull()
+    expect(store.getSnapshot().currentId).toBe('aa19f402')
+    expect(bridge.calls.filter(call => call.method === 'desktop.restartRuntime').every(call => call.params.allow_legacy === false)).toBe(true)
   })
 
   test('starts online after initialize and sends the desktop handshake', async () => {
@@ -350,6 +376,12 @@ describe('Store workspace folds', () => {
       daemon_version: '0.3.0',
       daemon_build_id: 'new-build',
     }, desktop)).toBeNull()
+    expect(daemonCompatibilityWarning({ daemon_protocol: 35, daemon_version: '0.3.0',
+      daemon_build_id: 'remote-release', desktop_expected_daemon_build_id: 'remote-release',
+    }, desktop)).toBeNull()
+    expect(daemonCompatibilityWarning({ daemon_protocol: 36, daemon_version: '0.3.0',
+      daemon_build_id: 'remote-release', desktop_expected_daemon_build_id: 'remote-release',
+    }, desktop)).toContain('app is older')
   })
 
   test('steering while acting queues visibly and clears on turn end', async () => {
@@ -873,12 +905,13 @@ describe('Store workspace folds', () => {
     await new Promise(resolve => setTimeout(resolve, 10))
     expect(store.getSnapshot().providers).toHaveLength(2)
 
+    const initializeCount = bridge.calls.filter(call => call.method === 'initialize').length
     store.selectProvider('zai')
     await new Promise(resolve => setTimeout(resolve, 20))
     const select = bridge.calls.find(call => call.method === 'provider_select')
     expect(select?.params.name).toBe('zai')
-    const reinit = bridge.calls.filter(call => call.method === 'initialize').at(-1)
-    expect(reinit?.params.model).toBe('glm-5.2')
+    expect(bridge.calls.filter(call => call.method === 'initialize')).toHaveLength(initializeCount)
+    expect(store.getSnapshot().model).toBe('glm-5.2')
 
     // No-ops: the already-active profile and unknown names stay silent.
     const callsBefore = bridge.calls.length
@@ -1453,3 +1486,375 @@ test('online sidebar refresh reflects work started and completed in another work
     expect(current.getSnapshot().live.find(row=>row.id==='other')?.status).toBe('idle')
   }finally{delete (globalThis as {window?:unknown}).window}
 }, 15000)
+
+describe('independent endpoint navigation', () => {
+  afterEach(() => { delete (globalThis as { window?: unknown }).window })
+  test('failed remote activation preserves the current session and displays the error', async () => {
+    const bridge = new FakeBridge(method => method === 'initialize' ? initializeResult : { ok: true, sessions: [] })
+    const selected: unknown[] = []
+    Object.assign(bridge, { activateContext: async (...args: unknown[]) => { selected.push(args); throw new Error('SSH unavailable') } })
+    withWindow(bridge)
+    const store = new Store(); store.start(bridge)
+    await Bun.sleep(10)
+    const id = store.getSnapshot().currentId
+    await store.activateContext(12, 'remote-task')
+    expect(selected).toEqual([[12, 'remote-task']])
+    expect(store.getSnapshot().currentId).toBe(id)
+    expect(store.getSnapshot().connection).toBe('online')
+    expect(store.getSnapshot().error).toContain('SSH unavailable')
+    expect(bridge.calls.filter(row => row.method === 'initialize')).toHaveLength(1)
+    expect(bridge.calls.some(row => row.method === 'turn.cancel')).toBe(false)
+  })
+  test('an unconnected SSH view retains local navigation and endpoint-specific storage', async () => {
+    const bridge = new FakeBridge()
+    const contexts = [{ id: 1, label: 'This Mac', workspace: '/repo', remote: false, sessions: [{ id: 'local', cwd: '/repo', title: 'Local task', status: 'working' }] }]
+    Object.assign(bridge, { getWorkspace: async () => null, getContextScope: async () => 'ssh:worker', getContexts: async () => contexts })
+    withWindow(bridge)
+    const store = new Store(); store.start(bridge)
+    await Bun.sleep(10)
+    expect(store.getSnapshot().contexts).toEqual(contexts)
+    expect(store.getSnapshot().storageScope).toBe('ssh:worker:')
+    expect(store.getSnapshot().noWorkspace).toBe(true)
+    expect(bridge.calls).toHaveLength(0)
+  })
+})
+
+describe('transport restoration', () => {
+  afterEach(() => { delete (globalThis as { window?: unknown }).window })
+  test('leased reconnect preserves streamed text and restores missed deltas and unanswered prompts', async () => {
+    const bridge = new FakeBridge(method => method === 'initialize' ? { ...initializeResult, connection_lease_supported: true } : { ok: true, sessions: [] })
+    withWindow(bridge)
+    const store = new Store(); store.start(bridge); await Bun.sleep(10)
+    bridge.push('turn_begin', { text: 'Keep my task', turn_id: 'running' })
+    bridge.push('text_part', { text: 'Before disconnect. ' })
+    bridge.respondWith(method => method === 'initialize' ? {
+      ...initializeResult,
+      connection_lease_supported: true,
+      session: { ...initializeResult.session, active_turn_id: 'running' },
+      reconnect_events: [{ method: 'event', params: { type: 'text_part', payload: { text: 'During disconnect.' } } }],
+      pending_interactions: [{ type: 'approval_request', payload: { id: 'recovered-permission', tool_name: 'Exec', arguments: {} } }],
+    } : { ok: true, sessions: [] })
+    bridge.push('desktop_connection', { online: false })
+    await store.retryConnection()
+    expect(JSON.stringify(store.getSnapshot().blocks)).toContain('Keep my task')
+    expect(store.getSnapshot().blocks.some(block => block.kind === 'agent' && block.text === 'Before disconnect. During disconnect.')).toBe(true)
+    expect(store.getSnapshot().approval).not.toBeNull()
+    expect(store.getSnapshot().turnActive).toBe(true)
+    bridge.push('turn_end', {})
+  })
+  test('socket recovery resumes the same session once despite repeated Retry clicks', async () => {
+    const bridge = new FakeBridge(method => method === 'initialize' ? initializeResult : { ok: true, sessions: [] })
+    withWindow(bridge)
+    const store = new Store(); store.start(bridge); await Bun.sleep(10)
+    let complete!: (result: Record<string, unknown>) => void
+    bridge.respondWith(method => method === 'initialize' ? new Promise(resolve => { complete = resolve }) : { ok: true, sessions: [] })
+    bridge.push('desktop_connection', { online: false })
+    expect(store.getSnapshot().connection).toBe('offline')
+    bridge.push('desktop_connection', { online: true })
+    store.retryConnection(); store.retryConnection()
+    expect(bridge.calls.filter(row => row.method === 'initialize')).toHaveLength(2)
+    expect(bridge.calls.filter(row => row.method === 'initialize').at(-1)?.params.resume_session_id).toBe(initializeResult.session_id)
+    complete({ ...initializeResult, session: { ...initializeResult.session, active_turn_id: 'still-running' } })
+    await Bun.sleep(10)
+    expect(store.getSnapshot().currentId).toBe(initializeResult.session_id)
+    expect(store.getSnapshot().connection).toBe('online')
+    expect(store.getSnapshot().turnActive).toBe(true)
+    bridge.push('text_part', { session_id: initializeResult.session_id, text: 'After reconnect' })
+    expect(store.getSnapshot().blocks.some(block => block.kind === 'agent' && block.text === 'After reconnect')).toBe(true)
+    bridge.push('turn_end', {})
+  })
+})
+
+describe('failed session navigation', () => {
+  afterEach(() => { delete (globalThis as { window?: unknown }).window })
+  test('a refused session open keeps the existing transcript and selection', async () => {
+    const bridge = new FakeBridge(method => method === 'initialize' ? initializeResult : { ok: true, sessions: [] })
+    withWindow(bridge)
+    const store = new Store(); store.start(bridge); await Bun.sleep(10)
+    bridge.push('turn_begin', { text: 'Existing task' })
+    bridge.push('text_part', { text: 'Existing response' })
+    bridge.push('turn_end', {})
+    const before = store.getSnapshot()
+    bridge.respondWith(method => method === 'initialize' ? { ok: false, error: 'Requested agent preset is missing' } : { ok: true, sessions: [] })
+    await store.openSession('rejected-session')
+    expect(store.getSnapshot().currentId).toBe(before.currentId)
+    expect(store.getSnapshot().sessionKey).toBe(before.sessionKey)
+    expect(JSON.stringify(store.getSnapshot().blocks)).toContain('Existing response')
+    expect(store.getSnapshot().error).toBe('Requested agent preset is missing')
+  })
+  test('a new chat commits its identity only after initialization succeeds', async () => {
+    const bridge = new FakeBridge(method => method === 'initialize' ? initializeResult : { ok: true, sessions: [] })
+    withWindow(bridge)
+    const store = new Store(); store.start(bridge); await Bun.sleep(10)
+    bridge.push('turn_begin', { text: 'Existing task' })
+    bridge.push('text_part', { text: 'Keep this response' })
+    bridge.push('turn_end', {})
+    const before = store.getSnapshot()
+    let settle!: (value: Record<string, unknown>) => void
+    bridge.respondWith(method => method === 'initialize' ? new Promise(resolve => { settle = resolve }) : { ok: true, sessions: [] })
+    store.newChat()
+    expect(store.getSnapshot().currentId).toBe(before.currentId)
+    expect(store.getSnapshot().connection).toBe('connecting')
+    expect(JSON.stringify(store.getSnapshot().blocks)).toContain('Keep this response')
+    await store.retryConnection()
+    expect(bridge.calls.filter(call => call.method === 'initialize')).toHaveLength(2)
+    settle({ ok: false, error: 'New session refused' })
+    await Bun.sleep(10)
+    expect(store.getSnapshot().currentId).toBe(before.currentId)
+    expect(store.getSnapshot().sessionKey).toBe(before.sessionKey)
+    expect(store.getSnapshot().connection).toBe('online')
+    expect(store.getSnapshot().error).toBe('New session refused')
+    store.newChat()
+    const key = String(bridge.calls.filter(call => call.method === 'initialize').at(-1)!.params.session_key)
+    settle({ ...initializeResult, session_id: 'new-session', session: { ...initializeResult.session, id: 'new-session', key, messages: [] } })
+    await Bun.sleep(10)
+    expect(store.getSnapshot().currentId).toBe('new-session')
+    expect(store.getSnapshot().sessionKey).toBe(key)
+    expect(store.getSnapshot().blocks).toEqual([])
+    expect(store.getSnapshot().error).toBeNull()
+  })
+})
+
+describe('interaction response ownership', () => {
+  afterEach(() => { delete (globalThis as { window?: unknown }).window })
+  for (const kind of ['approval', 'question'] as const) {
+    for (const outcome of ['success', 'refusal', 'error'] as const) {
+      for (const navigate of [false, true]) {
+        test(`${navigate ? 'session switch' : 'next request'}: late ${kind} ${outcome} does not replace the next request`, async () => {
+          const bridge = new FakeBridge(method => method === 'initialize' ? initializeResult : { ok: true, sessions: [] })
+          withWindow(bridge)
+          const store = new Store(); store.start(bridge); await Bun.sleep(10)
+          const request = (id: string) => bridge.push(kind === 'approval' ? 'approval_request' : 'question_request', kind === 'approval'
+            ? { id, tool_call_id: id, tool_name: 'bash', action: 'bash', description: id }
+            : { id, questions: [{ id: 'answer', question: id, options: ['yes', 'no'] }] })
+          request('old')
+          let resolve!: (value: Record<string, unknown>) => void
+          let reject!: (error: Error) => void
+          bridge.respondWith(method => method === 'initialize'
+            ? { ...initializeResult, session_id: 'different-session', session: { ...initializeResult.session, id: 'different-session', key: 'different-key' } }
+            : method === 'permission_response' || method === 'question_response'
+              ? new Promise((done, fail) => { resolve = done; reject = fail }) : { ok: true, sessions: [] })
+          if (kind === 'approval') store.approve('old', 'allow_once')
+          else store.answerQuestion('old', { answer: 'yes' })
+          if (navigate) await store.openSession('different-session')
+          request(navigate ? 'old' : 'new')
+          const before = store.getSnapshot()
+          if (outcome === 'error') reject(new Error('old transport failure'))
+          else resolve(outcome === 'refusal' ? { ok: false, error: 'old request refused' } : { ok: true })
+          await Bun.sleep(10)
+          expect(store.getSnapshot()[kind]).toEqual(before[kind])
+          expect(store.getSnapshot().error).toBe(before.error)
+          expect(store.getSnapshot().blocks).toEqual(before.blocks)
+        })
+      }
+    }
+  }
+})
+
+describe('rapid session navigation', () => {
+  afterEach(() => { delete (globalThis as { window?: unknown }).window })
+  for (const refused of [false, true]) test(`serializes daemon binding; final selection refused=${refused}`, async () => {
+    const bridge = new FakeBridge(method => method === 'initialize' ? initializeResult : { ok: true, sessions: [] })
+    withWindow(bridge)
+    const store = new Store(); store.start(bridge); await Bun.sleep(10)
+    const before = store.getSnapshot().currentId
+    const pending: Array<{ id: string; resolve: (value: Record<string, unknown>) => void }> = []
+    bridge.respondWith((method, params) => method === 'initialize'
+      ? new Promise(resolve => pending.push({ id: String(params.resume_session_id), resolve })) : { ok: true, sessions: [] })
+    const first = store.openSession('first')
+    await Bun.sleep(0)
+    const second = store.openSession('second')
+    await Bun.sleep(0)
+    expect(pending.map(row => row.id)).toEqual(['first'])
+    expect(store.getSnapshot().connection).toBe('connecting')
+    pending[0]!.resolve({ ...initializeResult, session_id: 'first', session: { id: 'first', key: 'first' } })
+    await first
+    await Bun.sleep(0)
+    expect(store.getSnapshot().currentId).toBe(before)
+    expect(pending.map(row => row.id)).toEqual(['first', 'second'])
+    pending[1]!.resolve(refused ? { ok: false, error: 'Cannot open second' } : { ...initializeResult, session_id: 'second', session: { id: 'second', key: 'second' } })
+    if (refused) {
+      await Bun.sleep(0)
+      expect(pending[2]?.id).toBe(before)
+      pending[2]!.resolve(initializeResult)
+    }
+    await second
+    expect(store.getSnapshot().currentId).toBe(refused ? before : 'second')
+    expect(store.getSnapshot().sessionKey).toBe(refused ? before : 'second')
+    expect(store.getSnapshot().connection).toBe('online')
+  })
+})
+
+describe('session controls follow selection', () => {
+  afterEach(() => { delete (globalThis as { window?: unknown }).window })
+  test('resume adopts the selected model, effort, permissions, plan and live state', async () => {
+    const bridge = new FakeBridge(method => method === 'initialize' ? initializeResult : { ok: true, sessions: [] })
+    withWindow(bridge)
+    const store = new Store(); store.start(bridge); await Bun.sleep(10)
+    bridge.respondWith(method => method === 'initialize' ? {
+      ...initializeResult, session_id: 'selected', model: 'selected-model', reasoning_effort: 'high', permission_mode: 'ask',
+      branch: 'selected-branch', context_limit: 100000,
+      session: { id: 'selected', key: 'selected', cwd: '/repo', model: 'selected-model', plan_mode: true, active_turn_id: 'running' },
+    } : { ok: true, sessions: [] })
+    await store.openSession('selected')
+    expect(store.getSnapshot()).toMatchObject({ currentId: 'selected', model: 'selected-model', reasoningEffort: 'high',
+      permissionMode: 'ask', planMode: true, branch: 'selected-branch', contextMax: 100000, turnActive: true })
+    bridge.push('turn_end', {})
+  })
+})
+
+describe('reasoning controls stay with their session', () => {
+  afterEach(() => { delete (globalThis as { window?: unknown }).window })
+  for (const action of ['load', 'select'] as const) for (const outcome of ['success', 'refusal', 'error'] as const) {
+    test(`${action} ${outcome} from the previous session cannot change the selected chat`, async () => {
+      let resolve!: (result: Record<string, unknown>) => void
+      let reject!: (error: Error) => void
+      const pending = new Promise<Record<string, unknown>>((yes, no) => { resolve = yes; reject = no })
+      const bridge = new FakeBridge(method => method === 'initialize' ? initializeResult : { ok: true, sessions: [] })
+      withWindow(bridge)
+      const store = new Store(); store.start(bridge); await Bun.sleep(10)
+      bridge.respondWith(method => method === 'initialize' ? {
+        ...initializeResult, session_id: 'other', reasoning_effort: 'low', session: { id: 'other', key: 'other', cwd: '/repo' },
+      } : method === (action === 'load' ? 'reasoning_levels' : 'slash') ? pending : { ok: true, sessions: [] })
+      if (action === 'load') store.openReasoningPicker(); else store.pickReasoning('high')
+      await store.openSession('other')
+      const before = store.getSnapshot()
+      if (outcome === 'error') reject(new Error('Old request failed'))
+      else resolve(outcome === 'refusal' ? { ok: false, error: 'Old request refused' } : { ok: true, current: 'high', reasoning_effort: 'high', levels: [{ effort: 'high' }] })
+      await Bun.sleep(1)
+      expect(store.getSnapshot().reasoningEffort).toBe('low')
+      expect(store.getSnapshot().error).toBe(before.error)
+      expect(store.getSnapshot().blocks).toEqual(before.blocks)
+      expect(store.getSnapshot().reasoningPickerOpen).toBe(false)
+      expect(store.getSnapshot().reasoningLoading).toBe(false)
+    })
+  }
+})
+
+describe('session controls ignore responses from a previous selection', () => {
+  afterEach(() => { delete (globalThis as { window?: unknown }).window })
+  for (const action of ['model', 'plan', 'permissions', 'context'] as const) for (const outcome of ['success', 'refusal', 'error'] as const) {
+    test(`${action}: late ${outcome} stays out of the selected chat`, async () => {
+      let resolve!: (result: Record<string, unknown>) => void
+      let reject!: (error: Error) => void
+      const pending = new Promise<Record<string, unknown>>((yes, no) => { resolve = yes; reject = no })
+      const bridge = new FakeBridge(method => method === 'initialize' ? initializeResult : { ok: true, sessions: [] })
+      withWindow(bridge)
+      const store = new Store(); store.start(bridge); await Bun.sleep(10)
+      const rpc = action === 'context' ? 'context_breakdown' : action === 'plan' ? 'set_plan_mode' : 'slash'
+      bridge.respondWith(method => method === 'initialize' ? {
+        ...initializeResult, session_id: 'other', model: 'other-model', permission_mode: 'ask',
+        session: { id: 'other', key: 'other', cwd: '/repo', plan_mode: false },
+      } : method === rpc ? pending : { ok: true, sessions: [] })
+      if (action === 'model') store.pickModel('old-model')
+      if (action === 'plan') store.setPlanMode(true)
+      if (action === 'permissions') store.setPermissionMode('auto')
+      if (action === 'context') store.toggleContextMenu()
+      await store.openSession('other')
+      const before = store.getSnapshot()
+      if (outcome === 'error') reject(new Error('Old control failed'))
+      else resolve(outcome === 'refusal' ? { ok: false, error: 'Old control refused' } : {
+        ok: true, model: 'old-model', permission_mode: 'auto', total_tokens: 9999, context_limit: 10000,
+      })
+      await Bun.sleep(1)
+      const after = store.getSnapshot()
+      expect(after.model).toBe('other-model')
+      expect(after.planMode).toBe(false)
+      expect(after.permissionMode).toBe('ask')
+      expect(after.contextBreakdown).toBeNull()
+      expect(after.contextMenuOpen).toBe(false)
+      expect(after.contextBreakdownLoading).toBe(false)
+      expect(after.error).toBe(before.error)
+      expect(after.blocks).toEqual(before.blocks)
+    })
+  }
+})
+
+describe('permission control feedback', () => {
+  afterEach(() => { delete (globalThis as { window?: unknown }).window })
+  for (const outcome of ['success', 'refusal', 'error'] as const) {
+    test(`${outcome} reports the result without pretending the permission changed`, async () => {
+      let resolve!: (result: Record<string, unknown>) => void
+      let reject!: (error: Error) => void
+      const pending = new Promise<Record<string, unknown>>((yes, no) => { resolve = yes; reject = no })
+      const bridge = new FakeBridge(method => method === 'initialize' ? { ...initializeResult, permission_mode: 'manual' } : { ok: true, sessions: [] })
+      withWindow(bridge)
+      const store = new Store(); store.start(bridge); await Bun.sleep(10)
+      bridge.respondWith(method => method === 'slash' ? pending : { ok: true, sessions: [] })
+      store.setPermissionMode('auto'); store.setPermissionMode('auto')
+      expect(bridge.calls.filter(call => call.method === 'slash')).toHaveLength(1)
+      expect(store.getSnapshot().permissionUpdating).toBe(true)
+      expect(store.getSnapshot().permissionMode).toBe('manual')
+      if (outcome === 'error') reject(new Error('Policy service rejected the request'))
+      else resolve(outcome === 'refusal' ? { ok: false, error: 'Policy service rejected the request' } : { ok: true, permission_mode: 'auto' })
+      await Bun.sleep(1)
+      expect(store.getSnapshot().permissionUpdating).toBe(false)
+      expect(store.getSnapshot().permissionMode).toBe(outcome === 'success' ? 'auto' : 'manual')
+      expect(store.getSnapshot().permissionError).toBe(outcome === 'success' ? null : 'Policy service rejected the request')
+    })
+  }
+})
+
+describe('provider switching feedback and navigation', () => {
+  afterEach(() => { delete (globalThis as { window?: unknown }).window })
+  for (const navigate of [false, true]) for (const outcome of ['success', 'refusal', 'error'] as const) {
+    test(`${outcome}, navigate=${navigate}: switch does not rebind the displayed chat`, async () => {
+      let resolve!: (result: Record<string, unknown>) => void
+      let reject!: (error: Error) => void
+      const pending = new Promise<Record<string, unknown>>((yes, no) => { resolve = yes; reject = no })
+      const profiles = [{ name: 'next', provider: 'fixture', model: 'next-model', active: false }]
+      const bridge = new FakeBridge(method => method === 'initialize' ? initializeResult : method === 'provider_list' ? { ok: true, profiles } : { ok: true, sessions: [] })
+      withWindow(bridge)
+      const store = new Store(); store.start(bridge); await Bun.sleep(10); await store.loadProviders()
+      bridge.respondWith(method => method === 'provider_select' ? pending : method === 'provider_list' ? { ok: true, profiles } : method === 'initialize' ? {
+        ...initializeResult, session_id: 'other', model: 'other-model', session: { id: 'other', key: 'other', cwd: '/repo' },
+      } : { ok: true, sessions: [] })
+      store.selectProvider('next'); store.selectProvider('next')
+      expect(bridge.calls.filter(c => c.method === 'provider_select')).toHaveLength(1)
+      expect(store.getSnapshot().providerSwitching).toBe('next')
+      if (navigate) await store.openSession('other')
+      const initializes = bridge.calls.filter(c => c.method === 'initialize').length
+      if (outcome === 'error') reject(new Error('Profile credentials rejected'))
+      else resolve(outcome === 'refusal' ? { ok: false, error: 'Profile credentials rejected' } : { ok: true })
+      await Bun.sleep(5)
+      expect(bridge.calls.filter(c => c.method === 'initialize')).toHaveLength(initializes)
+      expect(store.getSnapshot().currentId).toBe(navigate ? 'other' : initializeResult.session_id)
+      expect(store.getSnapshot().model).toBe(navigate ? 'other-model' : outcome === 'success' ? 'next-model' : initializeResult.model)
+      expect(store.getSnapshot().providerSwitching).toBeNull()
+      expect(store.getSnapshot().providerSwitchError).toBe(outcome === 'success' ? null : 'Profile credentials rejected')
+    })
+  }
+})
+
+describe('saving providers preserves chat identity', () => {
+  afterEach(() => { delete (globalThis as { window?: unknown }).window })
+  for (const navigate of [false, true]) for (const apply of ['success', 'refusal', 'error'] as const) {
+    test(`save then ${apply}, navigate=${navigate}`, async () => {
+      let saved!: (result: Record<string, unknown>) => void
+      const saveResult = new Promise<Record<string, unknown>>(resolve => { saved = resolve })
+      const bridge = new FakeBridge(method => method === 'initialize' ? initializeResult : { ok: true, sessions: [] })
+      withWindow(bridge)
+      const store = new Store(); store.start(bridge); await Bun.sleep(10)
+      const originalKey = store.getSnapshot().sessionKey
+      bridge.respondWith(method => {
+        if (method === 'provider_save') return saveResult
+        if (method === 'set_model') {
+          if (apply === 'error') return Promise.reject(new Error('Model apply failed'))
+          return apply === 'refusal' ? { ok: false, error: 'Model apply failed' } : { ok: true, model: 'saved-model' }
+        }
+        if (method === 'initialize') return { ...initializeResult, session_id: 'other', model: 'other-model', session: { id: 'other', key: 'other', cwd: '/repo' } }
+        return { ok: true, sessions: [] }
+      })
+      const pending = store.saveProvider({ name: 'saved', model: 'saved-model', baseUrl: 'http://localhost:9999/v1' })
+      if (navigate) await store.openSession('other')
+      const initializeCount = bridge.calls.filter(c => c.method === 'initialize').length
+      saved({ ok: true, profile: { model: 'saved-model' } })
+      const failure = await pending
+      expect(bridge.calls.filter(c => c.method === 'initialize')).toHaveLength(initializeCount)
+      expect(bridge.calls.find(c => c.method === 'set_model')?.params).toEqual({ session_key: originalKey, model: 'saved-model', provider_profile: 'saved' })
+      expect(failure).toBe(apply === 'success' ? null : 'Provider saved, but its model could not be applied to the original chat: Model apply failed')
+      expect(store.getSnapshot().currentId).toBe(navigate ? 'other' : initializeResult.session_id)
+      expect(store.getSnapshot().model).toBe(navigate ? 'other-model' : apply === 'success' ? 'saved-model' : initializeResult.model)
+    })
+  }
+})

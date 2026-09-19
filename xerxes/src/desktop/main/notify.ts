@@ -31,6 +31,14 @@ export function notificationFor(event: NotifyEvent): NotifyDecision | null {
   const payload = event.payload ?? {}
   switch (event.type) {
     case 'turn_end': {
+      // Mirrors the TUI bell policy: an interrupted or never-started turn is
+      // not a completion, and pinging success for one (a goal-mode turn the
+      // time guard cut off, an unstarted submission) tells the user the
+      // opposite of what happened.
+      if (payload.unstarted === true) return null
+      if (payload.cancelled === true) {
+        return { title: 'Task stopped', body: 'The current task was interrupted before it finished.' }
+      }
       return { title: 'Task finished', body: 'The current task completed.' }
     }
     case 'approval_request': {

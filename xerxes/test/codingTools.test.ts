@@ -419,7 +419,9 @@ test.skipIf(process.platform === 'win32')('runGit takes down a hook helper forke
   )
   try {
     const started = Date.now()
-    await expect(runGit(workspace, ['status'], undefined, 800, stub))
+    // Avoid macOS first-execution checks consuming the timeout before the
+    // freshly written script installs its TERM trap.
+    await expect(runGit(workspace, [stub], undefined, 800, '/bin/sh'))
       .rejects.toThrow('command timed out after 800ms')
     // TERM at 800ms (trapped, forks the helper), SIGKILL at ~2.8s, then the
     // post-exit group sweep.

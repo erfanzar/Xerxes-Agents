@@ -269,6 +269,13 @@ export function createNativeSubagentHost(options: NativeSubagentHostOptions): Na
   const pruneGenerationOptions = (): void => {
     const live = liveManagerPort.liveGenerations()
     const retained = new Set(manager.listTasks().map(task => task.id))
+    // Archived (LRU-evicted) terminal tasks stay retryable through
+    // listRetryTasks()/rebuildArchivedTask even though they are gone from
+    // listTasks(). Without pinning their generations here, the next
+    // reconfigure drops the generation and the retry fails permanently with
+    // "Agent execution generation is no longer available" — and the failed
+    // retry overwrites the archived task's recorded result with that error.
+    for (const retryable of manager.listRetryTasks()) retained.add(retryable.id)
     for (const [id, generation] of taskGenerations) {
       if (retained.has(id)) live.add(generation)
       else taskGenerations.delete(id)
@@ -716,7 +723,13 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
 
   /** Cancel handles whose delegated policy grants capabilities absent from the new parent policy. */
   invalidateHandlesExceeding(nextMode: PermissionMode): number {
-    return this.invalidateMatching(metadata => delegatedPermissionExceeds(metadata.permissionMode, nextMode))
+    // Children still inside their spawn-setup window have no registered
+    // policy yet, and their task record does not carry one either — skipping
+    // them here is pinned behavior (a project-switch reconfigure must not
+    // kill an in-allocation child). The known tradeoff: a ceiling tightening
+    // racing a spawn can miss that one child. The eviction path
+    // (invalidateSource) does not extend the same courtesy.
+    return this.invalidateMatching(metadata => metadata !== undefined && delegatedPermissionExceeds(metadata.permissionMode, nextMode))
   }
 
   /** Cancel and permanently close every handle owned by this host. */
@@ -728,7 +741,12 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
   invalidateSource(sourceAgentId: string): number {
     const source = sourceAgentId.trim()
     if (!source) return 0
-    return this.invalidateMatching(metadata => metadata.sourceAgentId === source)
+    return this.invalidateMatching(
+      // Same owner fallback interruptSource uses: a child whose handle
+      // metadata was never registered still stops instead of quietly
+      // outliving the session that owns it.
+      (metadata, task) => (metadata?.sourceAgentId ?? (task.sourceId || undefined)) === source,
+    )
   }
 
   /**
@@ -752,14 +770,20 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
     return cancelled
   }
 
-  private invalidateMatching(predicate: (metadata: HandleMetadata) => boolean): number {
+  private invalidateMatching(
+    predicate: (metadata: HandleMetadata | undefined, task: { id: string; sourceId?: string }) => boolean,
+  ): number {
     let cancelled = 0
     for (const task of this.manager.listTasks()) {
       const metadata = this.handles.get(task.id)
-      if (!metadata || !predicate(metadata)) continue
+      // The task registers with the manager before its handle metadata does
+      // (durable-task bridge + worktree creation run inside manager.spawn),
+      // so a metadata-only check used to skip children inside that window.
+      // Predicates receive undefined metadata and decide.
+      if (!predicate(metadata, task)) continue
       this.invalidatedHandles.add(task.id)
       this.pendingResume.delete(task.id)
-      metadata.closed = true
+      if (metadata) metadata.closed = true
       if (task.status === 'pending' || task.status === 'running') {
         if (this.manager.cancel(task.id)) cancelled += 1
       }

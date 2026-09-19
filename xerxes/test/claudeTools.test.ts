@@ -1123,6 +1123,8 @@ test('Claude remote tools enforce configured endpoints and persist cron jobs', a
   try {
     const payloads: string[] = []
     const triggers = new RemoteTriggerRegistry({
+      // This is an offline transport fixture; DNS must be deterministic too.
+      urlSafety: { dnsLookup: async () => ['93.184.216.34'] },
       fetcher: async (_url, init) => {
         payloads.push(String(init.body ?? ''))
         return { ok: true, status: 202, text: async () => 'accepted' }

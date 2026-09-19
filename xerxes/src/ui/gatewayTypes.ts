@@ -717,7 +717,9 @@ export interface DelegationPauseResponse {
 }
 
 export interface SubagentInterruptResponse {
+  ok?: boolean
   found?: boolean
+  interrupted?: number
   subagent_id?: string
 }
 

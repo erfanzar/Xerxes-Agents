@@ -41,6 +41,7 @@ export function daemonCompatibilityWarning(
   const protocol = finiteNumber(result.daemon_protocol)
   const version = stringValue(result.daemon_version) || stringValue(result.version)
   const buildId = stringValue(result.daemon_build_id)
+  const expectedBuildId = stringValue(result.desktop_expected_daemon_build_id) || desktop.expectedDaemonBuildId
 
   if (protocol !== undefined && protocol > desktop.protocol) {
     return 'The app is older than the daemon — update and restart Xerxes.'
@@ -58,8 +59,8 @@ export function daemonCompatibilityWarning(
   }
 
   if (
-    desktop.expectedDaemonBuildId
-    && (!buildId || buildId !== desktop.expectedDaemonBuildId)
+    expectedBuildId
+    && (!buildId || buildId !== expectedBuildId)
   ) {
     // Same version and protocol but different source fingerprints: either
     // side can be the stale one (a long-lived app instance predating a

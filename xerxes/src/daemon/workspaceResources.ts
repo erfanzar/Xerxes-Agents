@@ -33,7 +33,12 @@ export class DaemonWorkspaces {
     const root = resolve(cwd)
     const existing = this.pending.get(root)
     if (existing) return existing
-    const loading = this.load(root)
+    const loading = this.load(root).then(resources => {
+      // A released load may finish after its replacement. Only the current
+      // generation may publish resources used by peek() and close().
+      if (this.pending.get(root) === loading) this.ready.set(root, resources)
+      return resources
+    })
     this.pending.set(root, loading)
     loading.catch(() => { if (this.pending.get(root) === loading) this.pending.delete(root) })
     return loading
@@ -49,11 +54,44 @@ export class DaemonWorkspaces {
     try {
       await resources.skillRegistry.refresh(...defaultSkillDiscoveryRoots({ cwd: root }))
       await startConfiguredMcpServers(resources.mcpManager, { ...this.options, workspace: root })
-      this.ready.set(root, resources)
       return resources
     } catch (error) {
       await resources.mcpManager.disconnectAll()
       throw error
+    }
+  }
+
+  /**
+   * Drop one workspace's resources when its last session is gone. Without
+   * this a long-lived shared daemon keeps every project it ever saw — each
+   * with its own eagerly-started MCP server processes — alive until process
+   * exit. A later get() for the same root simply reloads. The pending entry
+   * must go too: a resolved load stays memoized there, and a get() that found
+   * only the pending entry would hand back the very manager this release just
+   * disconnected, forever.
+   */
+  async release(cwd: string): Promise<void> {
+    const root = resolve(cwd)
+    const pending = this.pending.get(root)
+    this.pending.delete(root)
+    // Capture the doomed resources up front. A get() that arrives after the
+    // release decision starts a NEW load (pending was deleted above); its
+    // manager belongs to the workspace's next life and must never be
+    // disconnected here, even if it lands in `ready` before this method
+    // resumes — so only the captured reference is ever torn down.
+    let resources = this.ready.get(root)
+    if (!resources && pending) {
+      // Do not tear down a load still in flight mid-load — awaiting it lets
+      // startConfiguredMcpServers finish; the resulting manager is then an
+      // orphan with no session, which is exactly what release disposes.
+      resources = await pending.catch(() => undefined)
+    }
+    if (!resources) return
+    if (this.ready.get(root) === resources) this.ready.delete(root)
+    try {
+      await resources.mcpManager.disconnectAll()
+    } catch (error) {
+      this.options.report(`Disconnecting MCP servers for '${root}' failed: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 

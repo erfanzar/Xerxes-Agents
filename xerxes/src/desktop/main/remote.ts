@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { remoteBootstrapScript } from '../../ui/lib/remoteBootstrap.js'
+import { remoteResumeProgram } from './remoteResume.js'
 
 export interface RemoteTarget {
   alias: string
@@ -30,7 +31,7 @@ export function remoteTarget(value: unknown): RemoteTarget {
     throw new Error('Invalid SSH alias, target, or absolute project folder')
   return { alias: row.alias, target: row.target, workspacePath: row.workspacePath }
 }
-export function remoteAddress(output: string): { socketPath: string; projectDir: string } {
+export function remoteAddress(output: string): { socketPath: string; projectDir: string; expectedBuildId?: string; busy?: boolean } {
   const line = output.split('\n').find((value) => value.startsWith('XERXES_REMOTE_READY '))
   if (!line) throw new Error('Remote setup did not return a daemon address')
   const value: unknown = JSON.parse(line.slice('XERXES_REMOTE_READY '.length))
@@ -45,7 +46,11 @@ export function remoteAddress(output: string): { socketPath: string; projectDir:
     /[\x00-\x1f\x7f]/.test(row.projectDir)
   )
     throw new Error('Invalid remote daemon address')
-  return { socketPath: row.socketPath, projectDir: row.projectDir }
+  if (row.expectedBuildId !== undefined && (typeof row.expectedBuildId !== 'string' || !/^[a-f0-9]{16,64}$/.test(row.expectedBuildId))) throw new Error('Invalid remote build identity')
+  return { socketPath: row.socketPath, projectDir: row.projectDir,
+    ...(typeof row.expectedBuildId === 'string' ? { expectedBuildId: row.expectedBuildId } : {}),
+    ...(row.busy === true ? { busy: true } : {}),
+  }
 }
 export function runCaptured(
   binary: string,
@@ -98,6 +103,9 @@ export function runCaptured(
 export interface RemoteConnection {
   socketPath: string
   projectDir: string
+  expectedBuildId?: string | undefined
+  update(): Promise<Record<string, unknown>>
+  reconnect(signal: AbortSignal, onFailure: (error: Error) => void): Promise<RemoteConnection>
   close(): Promise<void>
 }
 /** Own only the forwarding process; the remote daemon and its durable sessions survive disconnect. */
@@ -105,6 +113,7 @@ export async function openRemote(
   value: unknown,
   signal: AbortSignal,
   onFailure: (error: Error) => void,
+  previousAddress?: ReturnType<typeof remoteAddress>,
 ): Promise<RemoteConnection> {
   const machine = remoteTarget(value)
   const ssh = [
@@ -120,19 +129,28 @@ export async function openRemote(
     'ServerAliveCountMax=3',
   ]
   const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'"
-  const output = await runCaptured(
-    'ssh',
-    [
-      ...ssh,
-      '-T',
-      '--',
-      machine.target,
-      'exec sh -c ' + quote(remoteBootstrapScript(machine.workspacePath, 'daemon')),
-    ],
-    signal,
-    300000,
-  )
-  const address = remoteAddress(output)
+  let address: ReturnType<typeof remoteAddress> | undefined
+  if (previousAddress) {
+    const probe = await runCaptured('ssh', [...ssh, '-T', '--', machine.target,
+      'exec sh -c ' + quote('PATH="$HOME/.bun/bin:$HOME/.local/bin:$PATH"; export PATH; exec bun -e ' + quote(remoteResumeProgram(previousAddress.socketPath)))], signal, 20000)
+    if (probe.split('\n').includes('XERXES_REMOTE_ALIVE')) address = previousAddress
+    else if (!probe.split('\n').includes('XERXES_REMOTE_MISSING')) throw new Error('Remote runtime probe did not return a valid status.')
+  }
+  if (!address) {
+    const output = await runCaptured(
+      'ssh',
+      [
+        ...ssh,
+        '-T',
+        '--',
+        machine.target,
+        'exec sh -c ' + quote(remoteBootstrapScript(machine.workspacePath, 'daemon')),
+      ],
+      signal,
+      300000,
+    )
+    address = remoteAddress(output)
+  }
   signal.throwIfAborted()
   const directory = await mkdtemp(join(tmpdir(), 'xd-')),
     socketPath = join(directory, 'rpc.sock')
@@ -140,9 +158,11 @@ export async function openRemote(
     closing = false,
     failure: Error | undefined,
     errors = ''
+  const updateController = new AbortController()
   const close = async () => {
     if (closing) return
     closing = true
+    updateController.abort()
     signal.removeEventListener('abort', abort)
     tunnel?.kill('SIGKILL')
     await rm(directory, { recursive: true, force: true })
@@ -198,7 +218,19 @@ export async function openRemote(
       if (Date.now() > deadline) throw new Error('SSH tunnel startup timed out')
       await delay(25, undefined, { signal })
     }
-    return { socketPath, projectDir: address.projectDir, close }
+    let reconnectAddress = address
+    const connection: RemoteConnection = { socketPath, projectDir: address.projectDir, expectedBuildId: address.expectedBuildId, close,
+      reconnect: (retrySignal, retryFailure) => openRemote(machine, retrySignal, retryFailure, reconnectAddress),
+      async update() {
+        const updated = remoteAddress(await runCaptured('ssh', [...ssh, '-T', '--', machine.target,
+          'exec sh -c ' + quote(remoteBootstrapScript(machine.workspacePath, 'daemon'))], updateController.signal, 300000))
+        if (updated.socketPath !== address.socketPath || updated.projectDir !== address.projectDir) throw new Error('Remote daemon address changed; reconnect this workspace.')
+        reconnectAddress = updated
+        connection.expectedBuildId = updated.expectedBuildId
+        return updated.busy ? { ok: false, busy: true } : { ok: true }
+      },
+    }
+    return connection
   } catch (error) {
     await close()
     throw error

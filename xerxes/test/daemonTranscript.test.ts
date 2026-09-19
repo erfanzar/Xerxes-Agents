@@ -588,6 +588,29 @@ test('journal entries covered by a repaired snapshot are not re-spliced as dupli
   }
 })
 
+test('failed rewrite serialization preserves crash-journal recovery', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-transcript-rewrite-failure-'))
+  try {
+    const sessionId = 'abcdef1234567890'
+    const store = new DaemonTranscriptStore({ directory, currentProjectDirectory: '/project' })
+    await Bun.write(store.pathFor(sessionId), JSON.stringify({
+      generation: 0, messages: [{ role: 'user', content: 'saved prompt' }],
+      session_id: sessionId, turn_count: 1,
+    }))
+    await store.appendMessage(sessionId, { role: 'assistant', content: 'journalled answer' }, 1)
+    const recovered = (await store.load(sessionId))!
+    const journal = await Bun.file(store.journalPathFor(sessionId)).text()
+    await expect(store.save({ ...recovered, extra: { ...recovered.extra, invalid: 1n } }, {
+      mode: 'rewrite', expectedGeneration: recovered.generation!,
+    })).rejects.toThrow()
+    expect(await Bun.file(store.journalPathFor(sessionId)).text()).toBe(journal)
+    expect((await store.load(sessionId))?.messages).toEqual(recovered.messages)
+    // A later valid rewrite still commits and cannot duplicate journal rows.
+    await store.save(recovered, { mode: 'rewrite', expectedGeneration: recovered.generation! })
+    expect((await store.load(sessionId))?.messages).toEqual(recovered.messages)
+  } finally { await rm(directory, { recursive: true, force: true }) }
+})
+
 test('new-era journal entries survive a shrink save and a stale follow-up save', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'xerxes-transcript-journal-era-'))
   try {

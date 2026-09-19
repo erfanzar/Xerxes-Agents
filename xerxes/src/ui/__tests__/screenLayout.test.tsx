@@ -182,11 +182,15 @@ describe('assembled screens', () => {
       </GatewayProvider>,
       { height: 40, width: 150 }
     )
-    await act(async () => {
-      await Bun.sleep(10)
-    })
-    await s.flush()
-    const frame = s.captureCharFrame()
+    // Model options and the selected provider's catalog load in separate
+    // effects; a fixed delay can capture the intermediate single-model row.
+    const deadline = Date.now() + 2_000
+    let frame = ''
+    do {
+      await act(async () => { await Bun.sleep(10) })
+      await s.flush()
+      frame = s.captureCharFrame()
+    } while (!frame.includes('meta · 2') && Date.now() < deadline)
     dump('model picker', frame)
     const lines = frame.split('\n')
 

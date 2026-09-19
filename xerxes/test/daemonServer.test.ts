@@ -4367,6 +4367,70 @@ test("daemon routes approval and question replies through the active connection"
   }
 });
 
+test('connection lease preserves a waiting turn and replays only pending interactions to its owner', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-lease-'));
+  const socketPath = join(directory, 'daemon.sock');
+  const interactions = new DaemonInteractionBoard();
+  const runtime = new InMemoryDaemonRuntime(new ReplyRunner(interactions), {
+    currentProjectDirectory: directory, interactions, model: 'reply-model', sessionDirectory: join(directory, 'sessions'),
+  });
+  const server = new DaemonServer({ socketPath, runtime, interactions });
+  await server.start();
+  const clients: SocketTestClient[] = [];
+  let id = 0;
+  const rpc = async (client: SocketTestClient, method: string, params: Record<string, unknown> = {}) => {
+    const requestId = ++id;
+    client.send({ jsonrpc: '2.0', id: requestId, method, params });
+    return client.next(frame => frame.id === requestId);
+  };
+  const connectClient = async () => { const client = await SocketTestClient.connect(socketPath); clients.push(client); return client; };
+  try {
+    const first = await connectClient();
+    const initialized = await rpc(first, 'initialize', { session_key: 'leased', project_dir: directory });
+    expect(initialized.result?.connection_lease_supported).toBe(true);
+    const sessionId = initialized.result?.session_id;
+    const leased = await rpc(first, 'connection.lease');
+    const token = leased.result?.token;
+    expect(typeof token).toBe('string');
+    await rpc(first, 'turn.submit', { text: 'permission then question' });
+    await first.next(eventFrame('approval_request'));
+    first.close();
+    await Bun.sleep(30);
+    expect(interactions.pendingPermissionIds()).toEqual(['approval-1']);
+    expect(runtime.sessionStatus('leased')?.cancelRequested).toBe(false);
+
+    const stranger = await connectClient();
+    await rpc(stranger, 'initialize', { session_key: 'unrelated' });
+    expect((await rpc(stranger, 'connection.lease', { token, project_dir: join(directory, 'different') })).error).toBeDefined();
+    expect((await rpc(stranger, 'permission_response', { request_id: 'approval-1', response: 'approve' })).result?.ok).toBe(false);
+
+    const second = await connectClient();
+    const resumedLease = await rpc(second, 'connection.lease', { token, project_dir: directory });
+    expect(resumedLease.error).toBeUndefined();
+    expect(resumedLease.result?.ok).toBe(true);
+    const reopened = await rpc(second, 'initialize', { resume_session_id: sessionId });
+    expect(reopened.error).toBeUndefined();
+    expect(reopened.result?.pending_interactions).toMatchObject([{ type: 'approval_request', payload: { id: 'approval-1' } }]);
+    expect((await rpc(second, 'permission_response', { request_id: 'approval-1', response: 'approve' })).result?.ok).toBe(true);
+    const question = await second.next(eventFrame('question_request'));
+    second.close();
+    await Bun.sleep(30);
+
+    const third = await connectClient();
+    expect((await rpc(third, 'connection.lease', { token, project_dir: directory })).result?.ok).toBe(true);
+    const restoredQuestion = await rpc(third, 'initialize', { resume_session_id: sessionId });
+    expect(restoredQuestion.result?.pending_interactions).toMatchObject([{ type: 'question_request', payload: { id: question.params?.payload?.id } }]);
+    expect(third.seen(eventFrame('approval_request'))).toBe(false);
+    expect((await rpc(third, 'question_response', { request_id: question.params?.payload?.id, answers: { answer: 'yes' } })).result?.ok).toBe(true);
+    await third.next(eventFrame('turn_end'));
+    expect(runtime.sessionStatus('leased')?.cancelRequested).toBe(false);
+  } finally {
+    clients.forEach(client => client.close());
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("disconnecting an interaction owner cancels approval and question waits", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-disconnect-"));
   const socketPath = join(directory, "daemon.sock");

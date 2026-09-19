@@ -795,6 +795,24 @@ test('the provider form is wire-fed: registry dropdown, env fallback, default en
   expect(editForm).toContain('Fetch this provider’s models')
 })
 
+test("editing a saved provider retains an unlisted type and associates every editable field label", async () => {
+  const { ProviderForm } = await import("../src/desktop/renderer/Overlays.js")
+  for (const providerTypes of [[], [{ name: "openai", baseUrl: "https://api.openai.com/v1", apiKeyEnv: "OPENAI_API_KEY" }]]) {
+    const form = renderToStaticMarkup(createElement(ProviderForm, {
+      snap: snapshot({ providerTypes }),
+      editing: { name: "Saved custom", provider: "custom-adapter", model: "custom-model", active: false, baseUrl: "http://localhost:1234/v1" },
+      onCancel: () => {},
+    }))
+    if (providerTypes.length) expect(form).toContain('value="custom-adapter" selected="">custom-adapter (saved type)</option>')
+    else expect(form).toContain('value="custom-adapter"')
+    for (const label of ["Name", "Provider", "API key", "Model", "Base URL"]) {
+      const id = new RegExp('<label for="([^"]+)">' + label + '</label>').exec(form)?.[1]
+      expect(id).toBeDefined()
+      expect(form).toContain('id="' + id + '"')
+    }
+  }
+})
+
 const DESKTOP = join(import.meta.dir, '..', 'src', 'desktop')
 const read = (relative: string): Promise<string> => readFile(join(DESKTOP, relative), 'utf8')
 

@@ -12,7 +12,7 @@
  */
 
 import { createPortal } from 'react-dom'
-import { createContext, useContext, type ReactNode, useLayoutEffect, useEffect, useMemo, useRef, useState, type ReactElement, type RefObject } from 'react'
+import { createContext, useContext, useId, type ReactNode, useLayoutEffect, useEffect, useMemo, useRef, useState, type ReactElement, type RefObject } from 'react'
 
 import { saveAppearance } from './appearance.js'
 import { desktopError } from './desktopRpc.js'
@@ -479,6 +479,8 @@ function ModelsCard({ snap }: { snap: Snapshot }): ReactElement {
       </div>
 
       <div className="row__t">Providers</div>
+      {snap.providerSwitching && <p role="status">Switching to {snap.providerSwitching}…</p>}
+      {snap.providerSwitchError && <p role="alert" className="studio-error">{snap.providerSwitchError}</p>}
       {snap.providerError && <div role="alert" className="studio-error">{snap.providerError}<button onClick={() => void store.loadProviders()}>Retry loading providers</button></div>}
       <div className="pcardlist">
       {snap.providers.length === 0 && !snap.providerError && (
@@ -497,7 +499,7 @@ function ModelsCard({ snap }: { snap: Snapshot }): ReactElement {
         >
           <button
             className="pcard__main"
-            disabled={provider.active || snap.turnActive}
+            disabled={provider.active || snap.turnActive || !!snap.providerSwitching}
             title={
               provider.active
                 ? 'active profile — new tasks start here'
@@ -599,6 +601,7 @@ export function ProviderForm({
   editing: ProviderRow | null
   onCancel: () => void
 }): ReactElement {
+  const fieldId = useId()
   const [name, setName] = useState(editing?.name ?? '')
   const [provider, setProvider] = useState(editing?.provider ?? '')
   const [baseUrl, setBaseUrl] = useState(editing?.baseUrl ?? '')
@@ -606,6 +609,14 @@ export function ProviderForm({
   const [apiKey, setApiKey] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const formRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    formRef.current?.scrollIntoView({ block: 'start' })
+    formRef.current?.querySelector<HTMLElement>('input:not(:disabled), select:not(:disabled)')?.focus({ preventScroll: true })
+  }, [])
+  useEffect(() => {
+    if (error) formRef.current?.querySelector('[role="alert"]')?.scrollIntoView({ block: 'nearest' })
+  }, [error])
   const types = snap.providerTypes
   const known = types.find(t => t.name === provider)
   const profileModels: readonly CachedModel[] = editing
@@ -632,34 +643,37 @@ export function ProviderForm({
     } finally { setBusy(false) }
   }
   return (
-    <div className="provform">
+    <div className="provform" ref={formRef}>
       <div className="cap" style={{ paddingLeft: 0 }}>{editing ? `Edit ${editing.name}` : 'New provider profile'}</div>
       <div className="field">
-        <label>Name</label>
-        <input className="palette__in" value={name} spellCheck={false} placeholder="e.g. openrouter" disabled={editing !== null} onChange={e => setName(e.target.value)} />
+        <label htmlFor={fieldId + '-name'}>Name</label>
+        <input id={fieldId + '-name'} className="palette__in" value={name} spellCheck={false} placeholder="e.g. openrouter" disabled={editing !== null} onChange={e => setName(e.target.value)} />
       </div>
       <div className="field">
-        <label>Provider</label>
+        <label htmlFor={fieldId + '-provider'}>Provider</label>
         {types.length > 0 ? (
           <select
+            id={fieldId + '-provider'}
             className="palette__in provform__select"
             value={provider}
             onChange={e => setProvider(e.target.value)}
           >
             <option value="">choose a provider type…</option>
+            {provider && !known && <option value={provider}>{provider} (saved type)</option>}
             {types.map(t => (
               <option key={t.name} value={t.name}>{t.name}</option>
             ))}
           </select>
         ) : (
           // Older daemons have no provider_types — keep the free-text path.
-          <input className="palette__in" value={provider} spellCheck={false} placeholder="e.g. openai, z-ai, moonshot (optional)" onChange={e => setProvider(e.target.value)} />
+          <input id={fieldId + '-provider'} className="palette__in" value={provider} spellCheck={false} placeholder="e.g. openai, z-ai, moonshot (optional)" onChange={e => setProvider(e.target.value)} />
         )}
       </div>
       <div className="field">
-        <label>API key</label>
+        <label htmlFor={fieldId + '-api-key'}>API key</label>
         <input
           className="palette__in"
+          id={fieldId + '-api-key'}
           type="password"
           value={apiKey}
           spellCheck={false}
@@ -674,8 +688,8 @@ export function ProviderForm({
         />
       </div>
       <div className="field">
-        <label>Model</label>
-        <input className="palette__in" value={model} spellCheck={false} placeholder="e.g. glm-5.2" onChange={e => setModel(e.target.value)} />
+        <label htmlFor={fieldId + '-model'}>Model</label>
+        <input id={fieldId + '-model'} className="palette__in" value={model} spellCheck={false} placeholder="e.g. glm-5.2" onChange={e => setModel(e.target.value)} />
       </div>
       {editing && (
         <div className="field provform__catalog">
@@ -709,9 +723,10 @@ export function ProviderForm({
       <details className="provform__custom">
         <summary>Customized settings</summary>
         <div className="field" style={{ marginTop: 8 }}>
-          <label>Base URL</label>
+          <label htmlFor={fieldId + '-base-url'}>Base URL</label>
           <input
             className="palette__in"
+            id={fieldId + '-base-url'}
             value={baseUrl}
             spellCheck={false}
             placeholder={known?.baseUrl ? `Provider default — ${known.baseUrl}` : 'https://api.example.com/v1'}
@@ -869,7 +884,7 @@ function PermissionsCard({ snap }: { snap: Snapshot }): ReactElement {
             <button
               key={mode.id}
               className={`opt${current === mode.id ? ' is-approve' : ''}`}
-              disabled={snap.connection !== 'online'}
+              disabled={snap.connection !== 'online' || snap.permissionUpdating}
               onClick={() => store.setPermissionMode(mode.id)}
             >
               <span className="opt__label">{mode.label}</span>
@@ -878,6 +893,8 @@ function PermissionsCard({ snap }: { snap: Snapshot }): ReactElement {
             </button>
           ))}
         </div>
+        {snap.permissionUpdating && <p role="status">Updating permission mode…</p>}
+        {snap.permissionError && <p role="alert" className="studio-error">{snap.permissionError}</p>}
       </div>
 
       <div className="row">

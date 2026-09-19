@@ -107,7 +107,7 @@ class FakeDaemon {
    * tests); the flush is a no-op on runtimes without it.
    */
   private send(text: string): void {
-    const conn = this.connections[0]
+    const conn = this.connections.findLast(connection => !connection.destroyed)
     if (!conn) return
     conn.write(text)
     ;(conn as NetSocket & { flush?: () => void }).flush?.()
@@ -339,6 +339,22 @@ test('runtime update refuses remote transports without issuing a shutdown', asyn
   rpc.dispose()
 })
 
+test('managed SSH update uses its host callback and reports the installed remote build', async () => {
+  const fake = new FakeDaemon(socketPath, ['initialize'])
+  await fake.listen()
+  let updates = 0
+  const rpc = new DaemonRpc({ projectDir: '/remote', socketPath,
+    expectedRemoteBuildId: () => 'abcdef0123456789',
+    remoteUpdate: async () => { updates++; return { ok: false, busy: true } },
+  })
+  try {
+    expect(await rpc.call('initialize')).toMatchObject({ desktop_expected_daemon_build_id: 'abcdef0123456789' })
+    expect(await rpc.restartRuntime()).toEqual({ ok: false, busy: true })
+    expect(updates).toBe(1)
+    expect(fake.requests.map(row => row.method)).toEqual(['initialize'])
+  } finally { rpc.dispose(); fake.close() }
+})
+
 test('runtime update leaves busy and unsupported daemons connected', async () => {
   const daemon = new FakeDaemon(socketPath)
   await daemon.listen()
@@ -452,5 +468,58 @@ test('initialize uses structured history without duplicate legacy replay events'
     fake.raw(JSON.stringify({ method: 'event', params: { type: 'notification', payload: { category: 'history', body: 'Explicit slash replay' } } }) + '\n')
     for (let n = 0; n < 100 && events.length < 2; n++) await Bun.sleep(5)
     expect(events).toEqual(['Live warning', 'Explicit slash replay'])
+  } finally { rpc.dispose(); fake.close() }
+})
+
+test('dead SSH tunnel is rebuilt once for concurrent requests without a local launch', async () => {
+  const fake = new FakeDaemon(socketPath, ['initialize', 'runtime.status']); await fake.listen()
+  let reconnects = 0
+  const rpc = new DaemonRpc({ projectDir: '/remote/project', socketPath: join(dir, 'dead.sock'),
+    launch: () => { throw new Error('Must not launch locally') },
+    reconnectRemote: async () => { reconnects++; await Bun.sleep(10); return socketPath },
+  })
+  try {
+    const [initialized, status] = await Promise.all([rpc.call('initialize', { resume_session_id: 'original' }), rpc.call('runtime.status')])
+    expect(initialized).toEqual({ ok: true }); expect(status).toEqual({ ok: true })
+    expect(reconnects).toBe(1)
+    expect(fake.requests.find(row => row.method === 'initialize')?.params).toMatchObject({ resume_session_id: 'original', project_dir: '/remote/project' })
+  } finally { rpc.dispose(); fake.close() }
+})
+test('SSH recovery errors remain actionable and disposal cancels an outstanding reconnect', async () => {
+  const rejected = new DaemonRpc({ socketPath: join(dir, 'dead.sock'), reconnectRemote: async () => { throw new Error('Host key verification failed') } })
+  try { await expect(rejected.call('runtime.status')).rejects.toThrow('Host key verification failed') } finally { rejected.dispose() }
+  let started = false, aborted = false
+  const rpc = new DaemonRpc({ socketPath: join(dir, 'dead.sock'), reconnectRemote: signal => new Promise((_resolve, reject) => {
+    started = true
+    signal.addEventListener('abort', () => { aborted = true; reject(new Error('Connection cancelled')) }, { once: true })
+  }) })
+  const pending = rpc.call('runtime.status')
+  const result = pending.catch(error => error)
+  await until(() => started, 'SSH recovery start')
+  rpc.dispose(); expect((await result).message).toBe('Connection cancelled'); expect(aborted).toBe(true); expect(rpc.online).toBe(false)
+})
+
+test('desktop negotiates a lease and reclaims it before resuming after a socket loss', async () => {
+  const fake = new FakeDaemon(socketPath); await fake.listen()
+  const rpc = new DaemonRpc({ projectDir: '/remote/project', socketPath, deadlineMs: 2000 })
+  try {
+    const opening = rpc.call('initialize', { resume_session_id: 'saved' })
+    await until(() => fake.requests.length === 1, 'initialize')
+    fake.reply(fake.requests[0]!.id, { ok: true, connection_lease_supported: true })
+    await until(() => fake.requests.length === 2, 'enable lease')
+    expect(fake.requests[1]!.method).toBe('connection.lease')
+    fake.reply(fake.requests[1]!.id, { ok: true, token: 'private-lease' })
+    await opening
+    fake.connections.at(-1)!.destroy()
+    await until(() => !rpc.online, 'disconnected')
+    const resuming = rpc.call('initialize', { resume_session_id: 'saved' })
+    await until(() => fake.requests.length === 3, 'reclaim lease')
+    expect(fake.requests[2]).toMatchObject({ method: 'connection.lease', params: { token: 'private-lease', project_dir: '/remote/project' } })
+    fake.reply(fake.requests[2]!.id, { ok: true, token: 'private-lease' })
+    await until(() => fake.requests.length === 4, 'resume initialize')
+    expect(fake.requests[3]).toMatchObject({ method: 'initialize', params: { resume_session_id: 'saved' } })
+    fake.reply(fake.requests[3]!.id, { ok: true, connection_lease_supported: true })
+    await resuming
+    expect(fake.requests).toHaveLength(4)
   } finally { rpc.dispose(); fake.close() }
 })

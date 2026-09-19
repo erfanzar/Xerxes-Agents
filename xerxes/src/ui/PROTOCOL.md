@@ -34,6 +34,29 @@ Newline-delimited JSON (NDJSON), one JSON-RPC 2.0 object per line, UTF-8, over a
 
 ### Connection bootstrap
 
+Optional reconnect ownership: `initialize` may advertise
+`connection_lease_supported: true`. Before submitting work, call
+`connection.lease {}` to obtain an opaque `token` and `grace_ms` (30000).
+Keep this credential in client memory only. After a transport drops, call
+`connection.lease {token, project_dir}` on its replacement **before** resuming
+the saved session with `initialize`. Only a detached connection in the same
+workspace can be reclaimed; a connected owner cannot be taken over.
+Initialization returns `pending_interactions` (type/payload pairs) for unanswered
+permission/question requests owned by the connection. After a reclaimed lease,
+`reconnect_events` contains ordered missed event frames: retain the current
+session's rendered transcript, apply these frames once, then restore pending
+interactions. The journal is bounded to 1 MiB; overflow expires the lease and
+cancels the turn rather than silently omitting output. Reclaiming without
+completing initialization does not extend the deadline.
+RPC replies stay bound to the socket that issued them.
+
+After expiry, `{ok:false, code:"lease_expired"}` permits normal saved-session
+reopening and a new lease; cancelled work does not restart automatically.
+Expiry and daemon shutdown retain normal cancellation and interaction cleanup.
+Clients that do not opt in retain immediate disconnect cancellation. Older
+daemons omit the capability and must not receive the optional method. This is
+an additive v35 capability; existing requests and events are unchanged.
+
 1. Resolve the project dir to the nearest Git root when available; otherwise
    use `realpath(cwd)` (falling back to the absolute path).
 2. Compute the per-user global socket path through the native `daemonPaths()`
@@ -703,6 +726,12 @@ The `subagent.retry` response also includes optional `provider_profile` and
 `reasoning_effort` fields alongside `model`. Resetting a recovered child and
 sending new input retains these settings; rejected empty input does not consume
 the reset permission.
+`subagent.interrupt {task?, session_key?}` stops live delegated work: a named
+task narrows the cancel to that child (same ownership rules as
+`subagent.retry`); unnamed, every live child of the session. Interrupted
+handles stay inspectable and retryable. The response carries `ok`, `found`
+(whether a stoppable child was targeted — clients gate the stop UI on it) and
+`interrupted` (how many children were cancelled).
 Live subagent events and persisted snapshot rows carry optional
 `provider_profile` and `reasoning_effort` alongside the assigned model. Clients
 preserve these across partial progress updates. The agent inspector renders

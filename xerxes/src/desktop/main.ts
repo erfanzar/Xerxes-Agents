@@ -15,6 +15,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 import { fileURLToPath } from 'node:url'
 
 import { activateWorkspaceView } from './main/workspaceNavigation.js'
+import { contextScope, contextSessions, sameRemote, type WorkspaceContext } from './main/contextNavigation.js'
 import { loadWindowLayout, saveWindowLayout, visibleWindowBounds, type SavedWindow } from './main/windowState.js'
 import { WindowRoutes } from './main/windowRoutes.js'
 import { windowRecovery } from './main/windowRecovery.js'
@@ -46,6 +47,21 @@ if (!process.env.XERXES_TUI_BUN && !process.env.XERXES_BUN && existsSync(bundled
 // dock label aligned with the product instead of exposing the host runtime.
 app.setName(APP_NAME)
 process.title = APP_NAME
+
+// Electron scopes this lock to userData, so isolated profiles remain independent.
+// Exit before registering persistence or runtime handlers: a duplicate must not
+// overwrite the first process's window layout or attach another daemon client.
+if (!app.requestSingleInstanceLock()) app.exit(0)
+app.on('second-instance', () => {
+  void app.whenReady().then(() => {
+    const window = BrowserWindow.getFocusedWindow()
+      ?? BrowserWindow.getAllWindows().find(candidate => !candidate.isDestroyed())
+      ?? createWorkspaceWindow(loadWorkspace())
+    if (window.isMinimized()) window.restore()
+    window.show()
+    window.focus()
+  })
+})
 
 /**
  * The phoenix mark lives at the checkout root (assets/logo.png). dist/desktop
@@ -168,6 +184,7 @@ const cleanupWindows = new Set<() => void>()
 
 const workspaceSurfaces = new Map<number, { host: BrowserWindow; view: WebContentsView | null }>()
 const activeSurfaces = new Map<number, number>()
+const contextReaders = new Map<number, () => Promise<WorkspaceContext>>()
 function activateSurface(id: number): void {
   const surface = workspaceSurfaces.get(id)
   if (!surface || surface.host.isDestroyed()) return
@@ -206,6 +223,19 @@ function openWorkspaceView(host: BrowserWindow, directory: string, sessionId?: s
       show: () => host.show(), focus: () => { host.focus(); activateSurface(id) } }] : []
   })
   if (!activateWorkspaceView(views, directory, sessionId)) createWorkspaceWindow(directory, undefined, sessionId, host)
+}
+
+function openRemoteView(host: BrowserWindow, machine: RemoteTarget, sessionId?: string): void {
+  for (const [id, surface] of workspaceSurfaces) {
+    const state = windowStates.get(id)?.()
+    if (surface.host === host && sameRemote(state?.remote, machine) && (!sessionId || state?.sessionId === sessionId)) {
+      activateSurface(id)
+      return
+    }
+  }
+  createWorkspaceWindow(null, { workspace: null, remote: machine, sessionId: sessionId ?? null,
+    bounds: host.getNormalBounds(), maximized: host.isMaximized(), fullscreen: host.isFullScreen(),
+  }, undefined, host)
 }
 
 function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: SavedWindow, initialSessionId?: string, host?: BrowserWindow): BrowserWindow {
@@ -335,13 +365,41 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
   handle('desktop:use-workspace', (_event, dir: unknown, sessionId?: unknown) => {
     if (typeof dir !== 'string' || !isAbsolute(dir) || /[\x00-\x1f]/.test(dir)) throw new TypeError('Invalid workspace directory')
     if (sessionId !== undefined && (typeof sessionId !== 'string' || !sessionId || sessionId.length > 256 || /[\x00-\x1f]/.test(sessionId))) throw new TypeError('Invalid resume session id')
-    if (remote && sessionId) throw new Error('Open this session from its saved SSH workspace first.')
+    if (remoteMachine) {
+      openRemoteView(window, { ...remoteMachine, workspacePath: dir }, typeof sessionId === 'string' ? sessionId : undefined)
+      return dir
+    }
     if (selectedWorkspace || remote) {
       if (dir !== selectedWorkspace || remote || sessionId) openWorkspaceView(window, dir, typeof sessionId === 'string' ? sessionId : undefined)
     } else useProject(dir, typeof sessionId === 'string' ? sessionId : null)
     return dir
   })
-  handle('desktop:workspaces', () => loadDesktopWorkspaces(workspaceFile()))
+  handle('desktop:workspaces', () => remoteMachine || saved?.remote ? [] : loadDesktopWorkspaces(workspaceFile()))
+  handle('desktop:context-scope', () => contextScope(remoteMachine ?? saved?.remote))
+  handle('desktop:contexts', async () => {
+    const currentScope = contextScope(remoteMachine ?? saved?.remote)
+    const scopes = new Set([currentScope])
+    const readers: Array<Promise<WorkspaceContext>> = []
+    for (const [otherId, surface] of workspaceSurfaces) {
+      if (surface.host !== window) continue
+      const scope = contextScope(windowStates.get(otherId)?.().remote)
+      const read = contextReaders.get(otherId)
+      if (scopes.has(scope) || !read) continue
+      scopes.add(scope)
+      readers.push(read())
+    }
+    return Promise.all(readers)
+  })
+  handle('desktop:activate-context', async (_event, contextId: unknown, sessionId?: unknown) => {
+    if (typeof contextId !== 'number' || workspaceSurfaces.get(contextId)?.host !== window) throw new Error('Workspace context is unavailable')
+    const state = windowStates.get(contextId)?.()
+    if (!state) throw new Error('Workspace context is closed')
+    if (sessionId === undefined) { activateSurface(contextId); return }
+    const row = (await contextReaders.get(contextId)?.())?.sessions.find(row => row.id === sessionId)
+    if (!row) throw new Error('Session is no longer available in this workspace')
+    if (state.remote) openRemoteView(window, { ...state.remote, workspacePath: row.cwd }, row.id)
+    else openWorkspaceView(window, row.cwd, row.id)
+  })
   handle('desktop:workspace', () => selectedWorkspace)
   handle('desktop:resume', () => {
     const selected = resumeSession
@@ -375,10 +433,26 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     remoteAttempt = controller
     remoteError = ''
     try {
-      const next = await openRemote(machine, controller.signal, (error) => {
+      let next = await openRemote(machine, controller.signal, (error) => {
         remoteError = error.message
       })
-      const rpc = new DaemonRpc({ projectDir: next.projectDir, socketPath: next.socketPath })
+      const rpc = new DaemonRpc({ projectDir: next.projectDir, socketPath: next.socketPath,
+        remoteUpdate: () => next.update(), expectedRemoteBuildId: () => next.expectedBuildId,
+        reconnectRemote: async signal => {
+          const replacement = await next.reconnect(signal, error => { remoteError = error.message })
+          if (signal.aborted || replacement.projectDir !== next.projectDir) {
+            await replacement.close()
+            signal.throwIfAborted()
+            throw new Error('Remote workspace changed during reconnect.')
+          }
+          const previous = next
+          next = replacement
+          if (remote === previous) remote = replacement
+          remoteError = ''
+          await previous.close()
+          return replacement.socketPath
+        },
+      })
       try {
         await rpc.call('runtime.status')
         controller.signal.throwIfAborted()
@@ -403,7 +477,7 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
       selectedWorkspace = next.projectDir
       currentSession = resumeSession
       scheduleWindowSave()
-      window.setTitle(`${machine.alias} · ${basename(next.projectDir)} — ${APP_NAME}`)
+      if (activeSurfaces.get(window.id) === id) window.setTitle(`${machine.alias} · ${basename(next.projectDir)} — ${APP_NAME}`)
       await previous?.close()
       if (!window.isDestroyed()) contents.reload()
       return { ok: true }
@@ -428,7 +502,7 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
       if (action === 'status')
         return {
           ok: true,
-          machine: remoteMachine,
+          machine: remoteMachine ?? saved?.remote ?? null,
           connected: Boolean(remote && daemon?.online),
           error: remoteError,
         }
@@ -436,7 +510,17 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
         remoteAttempt?.abort()
         return { ok: true }
       }
-      if (action === 'connect') return connectRemote(params)
+      if (action === 'connect') {
+        const machine = remoteTarget(params.machine)
+        // A connection belongs to a retained conversation context. Never replace
+        // a local binding or another host just because the user selected SSH.
+        const bound = remoteMachine ?? saved?.remote
+        if ((selectedWorkspace || bound) && !sameRemote(bound, machine)) {
+          openRemoteView(window, machine)
+          return { ok: true }
+        }
+        return connectRemote(params)
+      }
       let command: string
       if (action === 'hosts' || action === 'list') command = action
       else if (action === 'browse')
@@ -493,6 +577,7 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     return picked
   })
   const cleanup = () => {
+    contextReaders.delete(id)
     workspaceSurfaces.delete(id)
     if (activeSurfaces.get(window.id) === id) activeSurfaces.delete(window.id)
     if (view && !contents.isDestroyed()) contents.close()
@@ -514,6 +599,24 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     windowGroup: String(window.id), active: activeSurfaces.get(window.id) === id,
     sessionId: currentSession, bounds: window.getNormalBounds(), maximized: window.isMaximized(), fullscreen: window.isFullScreen(),
   }))
+  let cachedSessions: WorkspaceContext['sessions'] = []
+  let pendingSessions: Promise<void> | undefined
+  contextReaders.set(id, async () => {
+    if (daemon?.online && !pendingSessions) {
+      pendingSessions = (async () => { try {
+        const [savedRows, liveRows] = await Promise.all([
+          daemon.call<Record<string, unknown>>('session.list', { kind: 'main', scope: 'global', limit: 60 }),
+          daemon.call<Record<string, unknown>>('session.active_list', { history_limit: 0 }),
+        ])
+        cachedSessions = contextSessions(savedRows.sessions, liveRows.sessions)
+      } catch { /* A disconnected endpoint keeps its last known navigation. */ }
+      finally { pendingSessions = undefined }
+      })()
+    }
+    const machine = remoteMachine ?? saved?.remote
+    return { id, label: machine ? `${machine.alias} · SSH` : 'This Mac',
+      workspace: selectedWorkspace ?? machine?.workspacePath ?? '', remote: Boolean(machine), sessions: cachedSessions }
+  })
   window.on('move', scheduleWindowSave)
   window.on('resize', scheduleWindowSave)
   window.on('maximize', scheduleWindowSave)

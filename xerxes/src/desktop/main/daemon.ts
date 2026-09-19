@@ -51,11 +51,16 @@ export interface DaemonRpcOptions {
   /** Injectable startup boundary for deterministic desktop transport tests. */
   launch?: typeof launchDaemon
   startupTimeoutMs?: number
+  remoteUpdate?: () => Promise<Record<string, unknown>>
+  reconnectRemote?: (signal: AbortSignal) => Promise<string>
+  expectedRemoteBuildId?: () => string | undefined
 }
 
 export class DaemonRpc extends EventEmitter {
   readonly projectDir: string
-  private readonly externalSocket: string | undefined
+  private externalSocket: string | undefined
+  private readonly reconnectRemote: DaemonRpcOptions['reconnectRemote']
+  private readonly lifecycle = new AbortController()
   private readonly env: Env
   private readonly deadlineMs: number
   private socket: Socket | null = null
@@ -65,16 +70,24 @@ export class DaemonRpc extends EventEmitter {
   private connecting: Promise<void> | null = null
   private retryTimer: NodeJS.Timeout | null = null
   private retries = 0
+  private previouslyConnected = false
+  private connectionLeaseToken: string | undefined
+  private connectionLeaseAttached = false
   private stopped = false
   private stderrRing: string[] = []
   private writeTail: Promise<void> = Promise.resolve()
   private launchedProcess: ChildProcess | null = null
   private readonly launch: typeof launchDaemon
   private readonly startupTimeoutMs: number
+  private readonly remoteUpdate: DaemonRpcOptions['remoteUpdate']
+  private readonly expectedRemoteBuildId: DaemonRpcOptions['expectedRemoteBuildId']
 
   constructor(options: DaemonRpcOptions = {}) {
     super()
     this.externalSocket = options.socketPath
+    this.reconnectRemote = options.reconnectRemote
+    this.remoteUpdate = options.remoteUpdate
+    this.expectedRemoteBuildId = options.expectedRemoteBuildId
     this.projectDir = options.socketPath ? options.projectDir ?? "/" : canonicalProjectDir(options.projectDir)
     this.env = options.env ?? process.env
     this.deadlineMs = options.deadlineMs ?? DEFAULT_DEADLINE_MS
@@ -107,16 +120,61 @@ export class DaemonRpc extends EventEmitter {
     params: Record<string, unknown> = {},
   ): Promise<T> {
     await this.ensure()
+    if (method === 'initialize' && this.connectionLeaseToken && !this.connectionLeaseAttached) {
+      try {
+        const lease = await this.send<Record<string, unknown>>('connection.lease', { token: this.connectionLeaseToken, project_dir: this.projectDir })
+        if (lease.ok === true) this.connectionLeaseAttached = true
+        else this.connectionLeaseToken = undefined
+      } catch (error) {
+        // Only a daemon ANSWER says the token is unusable: send() formats
+        // JSON-RPC failures as `rpc -<code>: <message>` ("already attached to
+        // another transport" is the normal case after a remote tunnel drop,
+        // because the remote daemon has not observed the dead socket's EOF) —
+        // and wedging on it replays the same failing reclaim on every future
+        // initialize while the heartbeat refuses to retry (rpc errors
+        // classify as configuration, not transport). Drop the token on an
+        // answer and fall through to the plain initialize. A transport fault
+        // ("connection closed", "rpc timeout: ...") says nothing about the
+        // token: keep it so the server-side grace can still re-bind the next
+        // connection, and let the fault surface from the send below.
+        if (error instanceof Error && /^rpc( -\d+|:)/.test(error.message)) {
+          this.connectionLeaseToken = undefined
+        } else {
+          throw error
+        }
+      }
+    }
     // A shared daemon's launch directory is not this window's workspace.
     // Bind every opening handshake to the host-owned window target, including
     // resumes and reconnects, rather than trusting a renderer-supplied path.
-    return this.send<T>(method, method === 'initialize' || method === 'session.open'
+    const result = await this.send<T>(method, method === 'initialize' || method === 'session.open'
       ? { ...params, project_dir: this.projectDir }
       : params)
+    if (method === 'initialize' && result && typeof result === 'object'
+      && 'connection_lease_supported' in result && result.connection_lease_supported === true && !this.connectionLeaseAttached) {
+      // Best effort: the handshake above already succeeded, so a failure to
+      // establish lease ownership (losing the 30s reconnect grace) must not
+      // discard it.
+      try {
+        const lease = await this.send<Record<string, unknown>>('connection.lease', {})
+        if (lease.ok === true && typeof lease.token === 'string') {
+          this.connectionLeaseToken = lease.token
+          this.connectionLeaseAttached = true
+        }
+      } catch {
+        // Keep the successful initialize result; the next clean initialize
+        // can try the lease again.
+      }
+    }
+    if (method === 'initialize' && this.externalSocket && this.expectedRemoteBuildId?.()) {
+      return { ...result, desktop_expected_daemon_build_id: this.expectedRemoteBuildId() }
+    }
+    return result
   }
 
   /** Replace only an idle local runtime, then wait for a fresh connection. */
   async restartRuntime(allowLegacy = false): Promise<Record<string, unknown>> {
+    if (this.externalSocket && this.remoteUpdate) return this.remoteUpdate()
     if (this.externalSocket) return { ok: false, error: 'Update the runtime on the remote machine, then reconnect this workspace.' }
     await this.ensure()
     const previous = this.socket
@@ -157,6 +215,7 @@ export class DaemonRpc extends EventEmitter {
 
   /** Stop reconnecting and drop the socket; a launched daemon keeps running. */
   dispose(): void {
+    this.lifecycle.abort()
     this.stopped = true
     if (this.retryTimer) {
       clearTimeout(this.retryTimer)
@@ -189,7 +248,13 @@ export class DaemonRpc extends EventEmitter {
 
   private async open(): Promise<void> {
     if (this.externalSocket) {
-      if (!await this.tryAttach(this.externalSocket)) throw new Error('SSH transport unavailable. Reconnect from Workspace.')
+      if (!await this.tryAttach(this.externalSocket)) {
+        if (!this.reconnectRemote) throw new Error('SSH transport unavailable. Reconnect from Workspace.')
+        const replacement = await this.reconnectRemote(this.lifecycle.signal)
+        this.lifecycle.signal.throwIfAborted()
+        this.externalSocket = replacement
+        if (!await this.tryAttach(replacement)) throw new Error('SSH reconnected but the remote runtime is unavailable. Retry the connection.')
+      }
       this.announce(true); return
     }
     // Keep existing project work attached until its old runtime exits.
@@ -263,6 +328,7 @@ export class DaemonRpc extends EventEmitter {
 
   private attach(sock: Socket): void {
     this.socket = sock
+    this.connectionLeaseAttached = false
     this.buffer = ''
     sock.setEncoding('utf8')
     sock.on('data', (chunk: string) => this.onData(chunk))
@@ -291,6 +357,8 @@ export class DaemonRpc extends EventEmitter {
   private announce(online: boolean): void {
     if (online) this.retries = 0
     this.emit('connection', online)
+    if (this.previouslyConnected) this.emit('event', 'desktop_connection', { online })
+    if (online) this.previouslyConnected = true
   }
 
   // ── Framing ──────────────────────────────────────────────────────────

@@ -10,6 +10,7 @@
  */
 
 // ── Bridge (preload ↔ main ↔ renderer) ──────────────────────────────────
+import type { WorkspaceContext } from '../main/contextNavigation.js'
 
 /** A daemon event push after bridge sanitization. Payload is frozen. */
 export interface DaemonEvent {
@@ -18,6 +19,9 @@ export interface DaemonEvent {
 }
 
 export interface XerxesBridge {
+  getContextScope?(): Promise<string>
+  getContexts?(): Promise<WorkspaceContext[]>
+  activateContext?(id: number, sessionId?: string): Promise<void>
   getResumeSession?(): Promise<string | null>
   voice?(action: string, params?: Record<string, unknown>): Promise<unknown>
   remote?(action: string, params?: Record<string, unknown>): Promise<unknown>

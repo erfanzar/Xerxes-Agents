@@ -232,6 +232,13 @@ export interface TurnRunner {
   readonly managesSessionState?: boolean;
   /** Release cached per-session state when the daemon evicts the session. */
   dropSession?(sessionId: string): void;
+  /**
+   * Drop any runner cached for this workspace root. Called when the daemon
+   * releases a workspace's resources (its MCP manager is disconnected), so
+   * the next turn rebuilds against fresh resources instead of reusing one
+   * that holds the dead manager.
+   */
+  dropWorkspace?(cwd: string): void;
   run(
     session: DaemonSession,
     text: string,
@@ -282,6 +289,15 @@ export interface SubmitTurnOptions {
    * than a person. Forwarded to {@link TurnRunControls.goalRound}.
    */
   readonly goalRound?: number;
+  /**
+   * Emit a synthetic `turn_end {cancelled, unstarted}` when the submit is
+   * refused because a turn is already active. Only callers whose RPC already
+   * answered {ok:true} (turn.submit) should set it: callers that report
+   * {ok:true, queued:true} (/skill, /image) or {ok:false} themselves must
+   * not, or the frame settles a turn that is genuinely still streaming on
+   * that connection.
+   */
+  readonly announceSuppressedTurn?: boolean;
 }
 
 export interface SubagentRetryRequest {
@@ -313,6 +329,19 @@ export interface DaemonRuntime {
    * source-compatible; the server rejects `subagent.retry` when absent.
    */
   retrySubagent?(request: SubagentRetryRequest): Promise<SubagentRetryResult>;
+  /**
+   * Optional interrupt of the live subagents owned by one session
+   * (`subagent.interrupt`). Kept optional so test fakes and custom hosts stay
+   * source-compatible; the server rejects `subagent.interrupt` when absent.
+   * Like the in-turn interrupt path, interrupted handles stay inspectable and
+   * retryable.
+   */
+  interruptSubagent?(request: {
+    sessionKey: string;
+    task?: string;
+  }): Promise<{ ok: boolean; found?: boolean; interrupted?: number; error?: string }>;
+  /** Drop runner state cached for a workspace whose resources were released. */
+  dropWorkspace?(cwd: string): void;
   /** Optional persistent-session removal capability for hosts with native transcript storage. */
   deleteSavedSession?(sessionId: string): Promise<boolean>;
   /**
@@ -448,6 +477,11 @@ export interface InMemoryDaemonRuntimeOptions {
   readonly subagentRetry?: (
     request: SubagentRetryRequest,
   ) => Promise<SubagentRetryResult>;
+  /** Host-owned subagent interrupt port wired to the daemon's subagent host. */
+  readonly subagentInterrupt?: (request: {
+    sessionKey: string;
+    task?: string;
+  }) => Promise<{ ok: boolean; found?: boolean; interrupted?: number; error?: string }>;
   /** Reconcile session-owned resources after an interaction-policy change. */
   readonly onSessionModeChange?: (sessionId: string, mode: string) => void;
   /** Release resources captured by the host that constructed this runtime. */
@@ -495,6 +529,12 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
    * when the initialization settles.
    */
   private readonly sessionIdClaims = new Map<string, string>();
+  // Sessions that were mid-turn when reload() tried to push new global
+  // defaults onto them. Applying mid-turn would make the turn's final save
+  // persist a metadata.model that did not write this history (and a resume
+  // would then pin the wrong model), so application is deferred to the
+  // turn's settle edge, after the final save.
+  private readonly pendingDefaultSessions = new Set<string>();
   private shutdownPromise: Promise<void> | undefined;
   private readonly steerQueues = new Map<string, string[]>();
   private readonly transcriptStore: DaemonTranscriptStore;
@@ -551,6 +591,24 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
       });
     }
     return port(request);
+  }
+
+  interruptSubagent(request: {
+    sessionKey: string;
+    task?: string;
+  }): Promise<{ ok: boolean; found?: boolean; interrupted?: number; error?: string }> {
+    const port = this.options.subagentInterrupt;
+    if (!port) {
+      return Promise.resolve({
+        ok: false,
+        error: "This daemon runtime does not expose subagent interrupt.",
+      });
+    }
+    return port(request);
+  }
+
+  dropWorkspace(cwd: string): void {
+    this.turnRunner.dropWorkspace?.(cwd);
   }
 
   cancelTurn(sessionKey: string): boolean {
@@ -634,6 +692,7 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     );
     this.turnRunner.dropSession?.(sessionId);
     this.steerQueues.delete(sessionKey);
+    this.pendingDefaultSessions.delete(sessionKey);
     this.cancelledSubagents.delete(sessionKey);
     this.directSubagentClaims.get(sessionKey)?.();
     this.directSubagentClaims.delete(sessionKey);
@@ -1009,6 +1068,18 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
         // (idle steers, title or mode edits); persist it before dropping the
         // stale key, then re-read so the adopted session loses nothing.
         await this.saveSession(other);
+        // The save awaited above is exactly the window in which a submit on
+        // the stale key can be admitted (its admission guard only checks
+        // abortControllers, and activeTurnId is set only after submitTurn's
+        // own openSession await). Re-check before evicting: evicting now
+        // would abort a turn that already emitted turn_begin to its client.
+        if (other.activeTurnId) {
+          throw new ValidationError(
+            "session_id",
+            "is still running a turn under another connection; wait for it to finish before resuming it here",
+            key,
+          );
+        }
         this.evictSession(otherKey);
         const reloaded = await this.transcriptStore.load(key, {
           currentProjectDirectory: cwd,
@@ -1095,33 +1166,45 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
         this.options.turnRunnerFactory(this.runtimeSettings) ??
         new EchoTurnRunner();
     }
-    const model = this.model();
-    for (const session of this.sessions.values()) {
-      // Only sessions that never chose for themselves follow the global
-      // default; a pinned one keeps what it was given.
-      if (!session.modelPinned) {
-        const modelDelta = contextDeltaFor(session.model, model, Date.now(), "model");
-        if (modelDelta) appendContextDelta(session.metadata, modelDelta);
-        session.model = model;
+    for (const [key, session] of this.sessions.entries()) {
+      // A session with a turn in flight captured its model at turn start; the
+      // in-flight turn still runs (and saves) with the old one. Defer the
+      // default swap to that turn's settle edge so the save keeps recording
+      // the model that actually produced the history.
+      if (session.activeTurnId) {
+        this.pendingDefaultSessions.add(key);
+        continue;
       }
-      if (!session.reasoningPinned) {
-        const effort = stringValue(this.runtimeSettings.reasoning_effort);
-        if (effort) {
-          const effortDelta = contextDeltaFor(session.reasoningEffort, effort, Date.now(), "reasoning");
-          if (effortDelta) appendContextDelta(session.metadata, effortDelta);
-          session.reasoningEffort = effort;
-        }
-      }
-      if (!session.permissionPinned) {
-        const permission = stringValue(this.runtimeSettings.permission_mode);
-        if (permission) {
-          const permissionDelta = contextDeltaFor(session.permissionMode, permission, Date.now(), "permission");
-          if (permissionDelta) appendContextDelta(session.metadata, permissionDelta);
-          session.permissionMode = permission;
-        }
-      }
+      this.applyDefaultSettings(session);
     }
     return this.status();
+  }
+
+  private applyDefaultSettings(session: DaemonSession): void {
+    const model = this.model();
+    // Only sessions that never chose for themselves follow the global
+    // default; a pinned one keeps what it was given.
+    if (!session.modelPinned) {
+      const modelDelta = contextDeltaFor(session.model, model, Date.now(), "model");
+      if (modelDelta) appendContextDelta(session.metadata, modelDelta);
+      session.model = model;
+    }
+    if (!session.reasoningPinned) {
+      const effort = stringValue(this.runtimeSettings.reasoning_effort);
+      if (effort) {
+        const effortDelta = contextDeltaFor(session.reasoningEffort, effort, Date.now(), "reasoning");
+        if (effortDelta) appendContextDelta(session.metadata, effortDelta);
+        session.reasoningEffort = effort;
+      }
+    }
+    if (!session.permissionPinned) {
+      const permission = stringValue(this.runtimeSettings.permission_mode);
+      if (permission) {
+        const permissionDelta = contextDeltaFor(session.permissionMode, permission, Date.now(), "permission");
+        if (permissionDelta) appendContextDelta(session.metadata, permissionDelta);
+        session.permissionMode = permission;
+      }
+    }
   }
 
   async selectSessionAgent(
@@ -1640,6 +1723,12 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
           cancelled: controller.signal.aborted,
         },
       });
+      // A reload() that landed mid-turn deferred the global default swap to
+      // this settle edge: the save above already recorded the model that
+      // wrote this history, so applying the new defaults here is safe.
+      if (this.pendingDefaultSessions.delete(sessionKey)) {
+        this.applyDefaultSettings(session);
+      }
       delete session.inflightUser;
       delete session.inflightAssistant;
       delete session.inflightStartedAt;

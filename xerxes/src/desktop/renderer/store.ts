@@ -16,6 +16,7 @@
  */
 
 import { todoItemsOf, todosFromResult, type TodoItem } from './todoState.js'
+import type { WorkspaceContext } from '../main/contextNavigation.js'
 import { BlockBuilder, blocksFromStoredMessages, editStatsOf, parseArgs } from './blocks.js'
 import {
   daemonCompatibilityWarning,
@@ -293,6 +294,8 @@ export interface Snapshot {
   readonly reasoningLoading: boolean
   readonly wsMenuOpen: boolean
   readonly workspaceDirectories?: readonly string[]
+  readonly contexts?: readonly WorkspaceContext[]
+  readonly storageScope?: string
   readonly workspaceBusy: boolean
   readonly workspaceError: string | null
   readonly sessionMenu: SessionMenuState | null
@@ -303,6 +306,8 @@ export interface Snapshot {
   // ── settings data ──
   readonly providers: readonly ProviderRow[]
   readonly providerError: string
+  readonly providerSwitching: string | null
+  readonly providerSwitchError: string | null
   /** Model catalogs and editable capacities cached for each provider profile. */
   readonly providerModels: Readonly<Record<string, readonly CachedModel[]>>
   readonly providerModelLoading: readonly string[]
@@ -312,6 +317,8 @@ export interface Snapshot {
   /** The daemon's slash catalog — name/description pairs from commands.catalog. */
   readonly commands: readonly { readonly name: string; readonly description: string }[]
   readonly permissionMode: string
+  readonly permissionUpdating: boolean
+  readonly permissionError: string | null
   readonly snippets: Readonly<Record<string, string>>
 }
 
@@ -770,12 +777,16 @@ export class Store {
       taskModalOpen: false,
       providers: [],
       providerError: '',
+      providerSwitching: null,
+      providerSwitchError: null,
       providerModels: {},
       providerModelLoading: [],
       providerModelWarnings: {},
       providerTypes: [],
       commands: [],
       permissionMode: '',
+      permissionUpdating: false,
+      permissionError: null,
       snippets: {},
     })
   }
@@ -798,19 +809,23 @@ export class Store {
     // for one instead of inventing a target the user never chose.
     const gate = (this.bridge as XerxesLike & { getWorkspace?: () => Promise<string | null> })
       .getWorkspace?.()
-    void Promise.resolve(gate).then(saved => {
+    void Promise.all([Promise.resolve(gate), this.bridge.getContextScope?.()]).then(([saved, scope]) => {
+      this.patch({ storageScope: scope && scope !== 'local' ? scope + ':' : '' })
       if (saved === null) {
         this.patch({ noWorkspace: true, connection: 'offline' })
         return
       }
       this.initializeLive(typeof saved === 'string' ? saved : '')
-    })
+    }).catch(error => this.wentOffline(error))
+    void this.refreshContexts()
+    this.heartbeat = setInterval(() => void this.beat(), HEARTBEAT_MS)
+    this.heartbeat.unref?.()
   }
 
   private initializeLive(workspace: string): void {
     this.patch({ cwd: workspace })
     void Promise.resolve(this.bridge.getResumeSession?.()).then(async explicitId => {
-      const id = explicitId || (workspace ? selectedSession(workspace) : null)
+      const id = explicitId || (workspace ? selectedSession((this.frame.storageScope ?? '') + workspace) : null)
       try {
         return await this.initializeSelfHealing(id ? { resume_session_id: id } : {})
       } catch (error) {
@@ -830,8 +845,20 @@ export class Store {
       },
       error => this.wentOffline(error),
     )
-    this.heartbeat = setInterval(() => void this.beat(), HEARTBEAT_MS)
-    this.heartbeat.unref?.()
+  }
+
+  private refreshingContexts = false
+  private async refreshContexts(): Promise<void> {
+    if (!this.bridge.getContexts || this.refreshingContexts) return
+    this.refreshingContexts = true
+    try { this.patch({ contexts: await this.bridge.getContexts() }) }
+    catch (error) { this.patch({ workspaceError: desktopError(error) }) }
+    finally { this.refreshingContexts = false }
+  }
+
+  async activateContext(id: number, sessionId?: string): Promise<void> {
+    try { await this.bridge.activateContext?.(id, sessionId) }
+    catch (error) { this.patch({ error: desktopError(error), workspaceError: desktopError(error) }) }
   }
 
   /**
@@ -952,7 +979,7 @@ export class Store {
       const result = await this.bridge.call('desktop.restartRuntime', { session_key: this.sessionKey, allow_legacy: allowLegacy })
       if (result.ok !== true) {
         if (result.busy === true) {
-          this.patch({ runtimeUpdate: 'waiting', runtimeUpdateMessage: 'Running work is still active. Retry the update after it finishes.' })
+          this.patch({ runtimeUpdate: 'waiting', runtimeUpdateMessage: 'Update queued. It will install automatically when all running work finishes.' })
           return
         }
         throw new Error(str(result.error) || 'This runtime cannot update automatically. Restart the workspace runtime from its terminal, then reopen the app.')
@@ -968,7 +995,29 @@ export class Store {
     }
   }
 
-  async openSession(id: string): Promise<void> {
+  private sessionNavigation: Promise<void> = Promise.resolve()
+  private sessionNavigationVersion = 0
+  private openingSession = false
+  private sessionNavigationNeedsRestore = false
+
+  openSession(id: string): Promise<void> {
+    const version = ++this.sessionNavigationVersion
+    this.openingSession = true
+    const pending = this.sessionNavigation.then(async () => {
+      if (version !== this.sessionNavigationVersion) return
+      try { await this.openSessionNow(id, version) }
+      finally {
+        if (version === this.sessionNavigationVersion) {
+          this.openingSession = false
+          if (this.frame.connection === 'connecting') this.patch({ connection: 'online' })
+        }
+      }
+    })
+    this.sessionNavigation = pending
+    return pending
+  }
+
+  private async openSessionNow(id: string, version: number): Promise<void> {
     try {
       const row = [...this.frame.sessions, ...this.frame.live].find(session => session.id === id)
       if (this.frame.turnActive) {
@@ -988,36 +1037,34 @@ export class Store {
       // contract test), and every later submit/steer/cancel sends the key
       // explicitly. Adopt the key the daemon actually bound, or the next
       // message silently lands in a fresh, context-free session.
+      this.patch({ connection: 'connecting' })
       const result = await this.bridge.call('initialize', {
         history_limit: 100,
         session_key: `${this.sessionKey}-r${id.slice(-8)}`,
         resume_session_id: id,
         ...clientHandshake(),
       })
-      const session = this.sessionOf(result)
-      this.sessionKey = str(session.key) || str(result.session_id) || id
-      // Replay leans on the record's tool_executions + thinking_content so a
-      // reopened chat shows the same think → tool rows the live stream did.
-      this.adoptHistory(session)
-      this.resetWorkspaceFolds()
-      this.patch({
-        currentId: str(result.session_id ?? session.id ?? id),
-        sessionOpenRevision: this.frame.sessionOpenRevision + 1,
-        currentTitle: str(session.title),
-        currentAgentPreset: str(session.agent_id) || this.frame.currentAgentPreset,
-        sessionKey: this.sessionKey,
-        daemonWarning: daemonCompatibilityWarning(result),
-        planMode: session.plan_mode === true,
-        approval: null,
-        ...this.telemetryFromSession(session),
-      })
-      this.adoptFleet(session)
-      this.adoptTodos(session)
-      this.loadSkillSuggestions()
-      this.loadCreatorTrace()
+      if (version !== this.sessionNavigationVersion) {
+        if (result.ok !== false) this.sessionNavigationNeedsRestore = true
+        return
+      }
+      if (result.ok === false) throw new Error(str(result.error) || 'Session initialization was rejected')
+      this.sessionNavigationNeedsRestore = false
+      this.applyInitializedSession(result, { resume_session_id: id }, true)
+      this.patch({ sessionOpenRevision: this.frame.sessionOpenRevision + 1 })
       void this.refreshGoal()
       void this.refreshSessions()
     } catch (error) {
+      if (version !== this.sessionNavigationVersion) return
+      if (this.sessionNavigationNeedsRestore && this.frame.currentId) {
+        try {
+          await this.initialize({ resume_session_id: this.frame.currentId })
+          this.sessionNavigationNeedsRestore = false
+        } catch (restoreError) {
+          this.fail(restoreError)
+          return
+        }
+      }
       if (this.frame.turnActive) this.patch({ error: error instanceof Error ? error.message : String(error) })
       else this.fail(error)
     }
@@ -1037,29 +1084,33 @@ export class Store {
    * would reopen the previous conversation under an empty transcript. A
    * fresh task is a fresh key. Resolves true once the daemon has opened the
    * fresh session, so follow-up calls (plan ceiling, first submit) address
-   * a session that exists; false means the rebind failed and the shell
-   * went offline.
+   * a session that exists; false means the rebind failed and the previous
+   * conversation remains selected with the error visible.
    */
   private beginFreshTask(agentPreset?: string): Promise<boolean> {
-    if (this.frame.turnActive || this.frame.connection !== 'online') return Promise.resolve(false)
-    this.sessionKey = `desktop-${Math.random().toString(36).slice(2, 10)}`
-    this.builder.reset()
-    this.resetWorkspaceFolds()
-    this.patch({ currentId: '', currentTitle: '', goal: '', approval: null, failed: null, sessionKey: this.sessionKey })
-    return this.initialize(agentPreset ? { agent_id: agentPreset } : {})
+    if (this.openingSession || this.frame.turnActive || this.frame.connection !== 'online') return Promise.resolve(false)
+    const sessionKey = `desktop-${Math.random().toString(36).slice(2, 10)}`
+    this.openingFreshTask = true
+    this.patch({ connection: 'connecting' })
+    return this.initialize({ session_key: sessionKey, ...(agentPreset ? { agent_id: agentPreset } : {}) })
       .then(() => {
         void this.refreshGoal()
         void this.refreshSessions()
         return true
       })
-      .catch(() => {
-        this.wentOffline()
+      .catch(error => {
+        this.patch({ connection: 'online' })
+        this.fail(error)
         return false
       })
+      .finally(() => { this.openingFreshTask = false })
   }
 
   approve(requestId: string, response: ApprovalResponse): void {
-    const card = this.frame.approval
+    const sessionKey = this.sessionKey
+    const sessionId = this.frame.currentId
+    const isCurrent = () => this.sessionKey === sessionKey && this.frame.currentId === sessionId
+      && this.frame.approval?.id === requestId
     // The daemon's vocabulary is approve / approve_for_session / reject —
     // anything else resolves as reject, so map our UI labels here.
     const wire = response === 'allow_once' ? 'approve'
@@ -1068,38 +1119,41 @@ export class Store {
     void this.bridge
       .call('permission_response', { request_id: requestId, response: wire })
       .then(result => {
+        if (!isCurrent()) return
         // Clear only on confirmation: a refused response (unknown id, another
         // connection owns it) leaves the request pending daemon-side, and
         // dropping the card would strand it with no surface to answer.
         if (result.ok === false) {
-          if (card?.id === requestId) this.patch({ approval: card })
           this.builder.push('notification', { severity: 'error', message: str(result.error) || 'approval refused' })
           this.notify()
-        } else if (card?.id === requestId) {
+        } else {
           this.patch({ approval: null })
         }
       })
       .catch(error => {
-        if (card?.id === requestId) this.patch({ approval: card })
+        if (!isCurrent()) return
         this.fail(error)
       })
   }
 
   answerQuestion(requestId: string, answers: Record<string, string>): void {
-    const card = this.frame.question
+    const sessionKey = this.sessionKey
+    const sessionId = this.frame.currentId
+    const isCurrent = () => this.sessionKey === sessionKey && this.frame.currentId === sessionId
+      && this.frame.question?.requestId === requestId
     void this.bridge
       .call('question_response', { request_id: requestId, answers })
       .then(result => {
+        if (!isCurrent()) return
         if (result.ok === false) {
-          if (card?.requestId === requestId) this.patch({ question: card })
           this.builder.push('notification', { severity: 'error', message: str(result.error) || 'answer refused' })
           this.notify()
-        } else if (card?.requestId === requestId) {
+        } else {
           this.patch({ question: null })
         }
       })
       .catch(error => {
-        if (card?.requestId === requestId) this.patch({ question: card })
+        if (!isCurrent()) return
         this.fail(error)
       })
   }
@@ -1201,8 +1255,8 @@ export class Store {
   /**
    * Upsert a provider profile. The daemon's provider_save persists it to
    * ~/.xerxes/profiles.json AND makes it the active profile (its runtime
-   * reloads onto the new credentials), so the session re-initializes onto
-   * the saved model. Refused mid-turn for the same reason as switching.
+   * reloads onto the new credentials). Apply its model to the original
+   * session without reopening it. Refused mid-turn like provider switching.
    */
   async saveProvider(profile: {
     name: string
@@ -1229,6 +1283,7 @@ export class Store {
       return knownDefault ? 'Name and model are required.' : 'Name, base URL, and model are required.'
     }
     if (this.frame.turnActive) return 'Wait for the current turn to finish before changing providers.'
+    const { sessionKey, isCurrent } = this.captureSessionRequest()
     const params: Record<string, unknown> = { name, model }
     if (baseUrl) params.base_url = baseUrl
     if (provider) params.provider = provider
@@ -1237,7 +1292,7 @@ export class Store {
       .call('provider_save', params)
       .then(async result => {
         if (result.ok === false) {
-          this.builder.push('notification', {
+          if (isCurrent()) this.builder.push('notification', {
             severity: 'error',
             message: str(result.error) || 'provider save refused',
           })
@@ -1247,27 +1302,26 @@ export class Store {
         const saved = (result.profile && typeof result.profile === 'object'
           ? result.profile
           : {}) as Record<string, unknown>
-        // Refresh the surfaces FIRST: the daemon has already moved onto the
-        // new profile, and if the re-initialize below fails (e.g. the saved
-        // key is rejected), a stale list would hide what actually happened.
+        // The save is durable even if applying its model fails. Refresh the
+        // profile list and report the two outcomes separately in the editor.
         void this.loadProviders()
         this.loadModels(true)
-        this.builder.push('notification', {
-          severity: 'info',
-          message: `provider \`${name}\` saved and activated`,
-        })
-        this.notify()
-        const extra: Record<string, unknown> = { model: str(saved.model) || model }
-        if (this.frame.currentId) extra.resume_session_id = this.frame.currentId
         try {
-          await this.initialize(extra)
-        } catch {
-          // Already surfaced by initialize's caller contract: the profile
-          // list above shows the truth; the chip catches up on recovery.
+          const applied = await this.bridge.call('set_model', {
+            session_key: sessionKey, model: str(saved.model) || model, provider_profile: name,
+          })
+          if (applied.ok === false) throw new Error(str(applied.error) || 'Model change was refused')
+          if (isCurrent()) {
+            this.patch({ model: str(applied.model) || str(saved.model) || model })
+            this.builder.push('notification', { severity: 'info', message: `provider \`${name}\` saved and activated` })
+            this.notify()
+          }
+        } catch (error) {
+          return `Provider saved, but its model could not be applied to the original chat: ${desktopError(error)}`
         }
         return null
       })
-      .catch(error => { this.fail(error); return error instanceof Error ? error.message : String(error) })
+      .catch(error => { if (isCurrent()) this.fail(error); return desktopError(error) })
   }
 
   /** Delete a saved profile. The active one must be switched away from first. */
@@ -1377,16 +1431,24 @@ export class Store {
     }
   }
 
+  /** A late session-scoped reply must never update a newly selected chat. */
+  private captureSessionRequest(): { sessionKey: string; isCurrent: () => boolean } {
+    const sessionKey = this.sessionKey, sessionId = this.frame.currentId, navigation = this.sessionNavigationVersion
+    return { sessionKey, isCurrent: () => this.sessionKey === sessionKey && this.frame.currentId === sessionId && this.sessionNavigationVersion === navigation }
+  }
+
   pickModel(modelId: string): void {
     if (!modelId) return
     // Same mid-turn refusal as provider switching: hot-swapping the model a
     // running turn is riding on is refused daemon-side too.
     if (this.frame.turnActive) return
+    const { sessionKey, isCurrent } = this.captureSessionRequest()
     // Route through the daemon's /model handler: it pins the choice to this
     // session AND persists it as the active profile's model. The old
     // initialize({ model }) path only reloaded runtime memory, so every
     // daemon restart silently fell back to the profile's stored model.
-    void this.bridge.call('slash', { command: `/model ${modelId}` }).then(result => {
+    void this.bridge.call('slash', { command: `/model ${modelId}`, session_key: sessionKey }).then(result => {
+      if (!isCurrent()) return
       if (result.ok === false) {
         this.builder.push('notification', {
           severity: 'error',
@@ -1397,7 +1459,7 @@ export class Store {
       }
       const applied = str(result.model)
       if (applied) this.patch({ model: applied })
-    }).catch(error => this.fail(error))
+    }).catch(error => { if (isCurrent()) this.fail(error) })
   }
 
   /**
@@ -1406,34 +1468,36 @@ export class Store {
    * in-flight request is already riding on.
    */
   selectProvider(name: string): void {
-    if (this.frame.turnActive) return
+    if (this.frame.turnActive || this.frame.providerSwitching) return
     const target = this.frame.providers.find(row => row.name === name)
     if (!target || target.active) return
+    const { isCurrent } = this.captureSessionRequest()
+    this.patch({ providerSwitching: name, providerSwitchError: null })
     void this.bridge
       .call('provider_select', { name })
-      .then(async result => {
-        if (result.ok === false) return
-        // Refresh before re-initializing: a failed initialize (profile key
-        // rejected, session gone) must not leave the list claiming the old
-        // profile is still active — the daemon already switched.
+      .then(result => {
+        if (result.ok === false) {
+          this.patch({ providerSwitchError: str(result.error) || 'Provider switch was refused. Select a provider to retry.' })
+          return
+        }
+        // provider_select applies the model to its session and emits status.
+        // Reinitializing here would discard loaded history and could bind a
+        // different chat if navigation happened while the request was pending.
+        if (isCurrent() && target.model) this.patch({ model: target.model })
         void this.loadProviders()
         this.loadModels(true)
-        const extra: Record<string, unknown> = target.model ? { model: target.model } : {}
-        if (this.frame.currentId) extra.resume_session_id = this.frame.currentId
-        try {
-          await this.initialize(extra)
-        } catch {
-          // The refreshed provider list already shows the truth.
-        }
       })
-      .catch(error => this.fail(error))
+      .catch(error => { this.patch({ providerSwitchError: desktopError(error) }) })
+      .finally(() => { this.patch({ providerSwitching: null }) })
   }
 
   /** Toggle the session's plan mode on the daemon (plan = read-only ceiling). */
   setPlanMode(next: boolean): void {
+    const { sessionKey, isCurrent } = this.captureSessionRequest()
     void this.bridge
-      .call('set_plan_mode', { session_key: this.sessionKey, enabled: next })
+      .call('set_plan_mode', { session_key: sessionKey, enabled: next })
       .then(result => {
+        if (!isCurrent()) return
         if (result.ok === false) {
           // Refused (e.g. the daemon restarted and lost the session): flip
           // nothing locally — the chip must not claim a ceiling the daemon
@@ -1445,7 +1509,7 @@ export class Store {
         // the next status_update.plan_mode is authoritative either way.
         this.patch({ planMode: next })
       })
-      .catch(error => this.fail(error))
+      .catch(error => { if (isCurrent()) this.fail(error) })
   }
 
   togglePlanMode(): void {
@@ -1503,6 +1567,7 @@ export class Store {
 
   /** Reasoning levels are asked of the daemon per open — they differ per model. */
   openReasoningPicker(): void {
+    const { sessionKey, isCurrent } = this.captureSessionRequest()
     this.patch({
       reasoningPickerOpen: true,
       settingsOpen: false,
@@ -1512,7 +1577,8 @@ export class Store {
       wsMenuOpen: false,
       reasoningLoading: true,
     })
-    void this.bridge.call('reasoning_levels', {}).then(result => {
+    void this.bridge.call('reasoning_levels', { session_key: sessionKey }).then(result => {
+      if (!isCurrent()) return
       if (result.ok === false) {
         this.builder.push('notification', {
           severity: 'error',
@@ -1539,6 +1605,7 @@ export class Store {
         ...(current ? { reasoningEffort: current } : {}),
       })
     }).catch(error => {
+      if (!isCurrent()) return
       this.patch({ reasoningLoading: false })
       this.fail(error)
     })
@@ -1558,10 +1625,12 @@ export class Store {
 
   /** Selection rides the daemon's /thinking handler so session pinning applies. */
   pickReasoning(effort: string): void {
+    const { sessionKey, isCurrent } = this.captureSessionRequest()
     this.patch({ reasoningPickerOpen: false })
     const trimmed = effort.trim()
     if (!trimmed) return
-    void this.bridge.call('slash', { command: `/thinking ${trimmed}` }).then(result => {
+    void this.bridge.call('slash', { command: `/thinking ${trimmed}`, session_key: sessionKey }).then(result => {
+      if (!isCurrent()) return
       if (result.ok === false) {
         this.builder.push('notification', {
           severity: 'error',
@@ -1572,7 +1641,7 @@ export class Store {
       }
       const applied = str(result.reasoning_effort)
       if (applied) this.patch({ reasoningEffort: applied })
-    }).catch(error => this.fail(error))
+    }).catch(error => { if (isCurrent()) this.fail(error) })
   }
 
   togglePicker(): void {
@@ -1602,6 +1671,7 @@ export class Store {
       this.patch({ contextMenuOpen: false })
       return
     }
+    const { sessionKey, isCurrent } = this.captureSessionRequest()
     this.patch({
       contextMenuOpen: true,
       modelMenuOpen: false,
@@ -1611,7 +1681,8 @@ export class Store {
       wsMenuOpen: false,
       contextBreakdownLoading: true,
     })
-    void this.bridge.call('context_breakdown', { session_key: this.sessionKey }).then(result => {
+    void this.bridge.call('context_breakdown', { session_key: sessionKey }).then(result => {
+      if (!isCurrent()) return
       if (result.ok === false) {
         this.patch({ contextBreakdownLoading: false, contextBreakdown: null })
         return
@@ -1625,6 +1696,7 @@ export class Store {
       }
       this.patch({ contextBreakdownLoading: false, contextBreakdown: breakdown })
     }).catch(() => {
+      if (!isCurrent()) return
       this.patch({ contextBreakdownLoading: false, contextBreakdown: null })
     })
   }
@@ -2197,9 +2269,17 @@ export class Store {
   }
 
   setPermissionMode(mode: PermissionMode): void {
+    if (this.frame.permissionUpdating) return
+    const { sessionKey, isCurrent } = this.captureSessionRequest()
+    this.patch({ permissionUpdating: true, permissionError: null })
     void this.bridge
-      .call('slash', { command: `/permissions ${mode}` })
+      .call('slash', { command: `/permissions ${mode}`, session_key: sessionKey })
       .then(result => {
+        if (!isCurrent()) return
+        if (result.ok === false) {
+          this.patch({ permissionError: str(result.error) || 'Permission change was refused. The previous mode is still active.' })
+          return
+        }
         // The slash result carries the pinned mode; adopt it immediately so
         // the card's ✓ marker follows the click instead of waiting for a
         // re-initialize that may never come.
@@ -2207,12 +2287,21 @@ export class Store {
         if (result.ok !== false && pinned) this.patch({ permissionMode: pinned })
         void this.loadProviders()
       })
-      .catch(error => this.fail(error))
+      .catch(error => {
+        if (!isCurrent()) return
+        this.patch({ permissionError: desktopError(error) })
+      })
+      .finally(() => { if (isCurrent()) this.patch({ permissionUpdating: false }) })
   }
 
   // ── Connection ───────────────────────────────────────────────────────
 
-  retryConnection(): void {
+  private reconnecting = false
+  private openingFreshTask = false
+  private supportsConnectionLease = false
+  async retryConnection(): Promise<void> {
+    if (this.reconnecting || this.openingFreshTask || this.openingSession) return
+    this.reconnecting = true
     this.patch({ connection: 'connecting' })
     // Resume the open conversation by id when one exists — a bare
     // initialize evicts the live session and the daemon would hand back a
@@ -2220,13 +2309,13 @@ export class Store {
     const extra: Record<string, unknown> = this.frame.currentId
       ? { resume_session_id: this.frame.currentId }
       : {}
-    void this.initializeSelfHealing(extra).then(
+    await this.initializeSelfHealing(extra).then(
       () => {
         void this.refreshGoal()
         void this.refreshSessions()
       },
       error => this.wentOffline(error),
-    )
+    ).finally(() => { this.reconnecting = false })
   }
 
   private cameOnline(): void {
@@ -2235,6 +2324,10 @@ export class Store {
 
   private wentOffline(error?: unknown): void {
     if (error !== undefined) this.patch({ error: error instanceof Error ? error.message : String(error) })
+    if (this.supportsConnectionLease) {
+      this.patch({ connection: 'offline' })
+      return
+    }
     // A daemon that died mid-turn will never send turn_end; clear the
     // acting badge (and with it the 1s tick) or Stop/⌘N stay bricked
     // against a turn that no longer exists. The live runs must fold too:
@@ -2254,32 +2347,30 @@ export class Store {
 
   /** Cheap liveness probe; also heals the badge after a daemon restart. */
   private async beat(): Promise<void> {
+    void this.refreshContexts()
+    if (this.frame.noWorkspace) return
     void this.bridge.getWorkspaceDirectories?.().then(workspaceDirectories => this.patch({ workspaceDirectories })).catch(error => this.patch({ workspaceError: desktopError(error) }))
-    if (this.updatingRuntime) return
+    if (this.updatingRuntime || this.openingFreshTask || this.openingSession) return
     if (this.frame.connection === 'online') {
       this.refreshSessions()
+      if (this.frame.daemonWarning && !this.frame.daemonWarning.startsWith('The app is older') && this.frame.runtimeUpdate !== 'failed') {
+        await this.restartDaemon(false)
+      }
       // Events would still be flowing; a silent socket only shows when a
       // call dies, which every action already routes through fail().
       return
     }
     if (connectionFailureKind(this.frame.error) !== 'transport') return
-    try {
-      await this.bridge.call('runtime.status', {})
-      const extra: Record<string, unknown> = this.frame.currentId
-        ? { resume_session_id: this.frame.currentId }
-        : {}
-      await this.initialize(extra)
-      void this.refreshGoal()
-      void this.refreshSessions()
-    } catch (error) {
-      this.wentOffline(error)
-    }
+    await this.retryConnection()
   }
 
   // ── RPC helpers ──────────────────────────────────────────────────────
 
   private bridge: XerxesLike = {
     call: (method, params) => window.xerxes.call(method, params),
+    getContextScope: () => window.xerxes.getContextScope?.() ?? Promise.resolve('local'),
+    getContexts: () => window.xerxes.getContexts?.() ?? Promise.resolve([]),
+    activateContext: (id, sessionId) => window.xerxes.activateContext?.(id, sessionId) ?? Promise.reject(new Error('Update the desktop app to switch contexts.')),
     // Passthrough — the wrapper must forward EVERY preload method or the
     // optional calls silently do nothing.
     getWorkspaceDirectories: () => window.xerxes.getWorkspaceDirectories?.() ?? Promise.resolve([]),
@@ -2390,15 +2481,30 @@ export class Store {
       ...clientHandshake(),
     })
     if (result.ok === false) throw new Error(str(result.error) || 'Session initialization was rejected')
+    return this.applyInitializedSession(result, extra)
+  }
+
+  /** One adoption path for startup, reconnect and explicit session navigation. */
+  private applyInitializedSession(result: Record<string, unknown>, extra: Record<string, unknown>, explicitNavigation = false): Record<string, unknown> {
+    this.supportsConnectionLease = result.connection_lease_supported === true
     const session = this.sessionOf(result)
+    const replay = Array.isArray(result.reconnect_events) ? result.reconnect_events : null
+    const preserveLiveTranscript = !explicitNavigation && replay !== null && this.frame.currentId === str(result.session_id ?? session.id)
+    if (!extra.resume_session_id && typeof extra.session_key === 'string' && extra.session_key !== this.sessionKey) {
+      this.sessionKey = str(session.key) || extra.session_key
+      this.resetWorkspaceFolds()
+      this.patch({ goal: '', approval: null, question: null, failed: null })
+    }
     // A resume binds the session under the session id, not our requested
     // key — every session-scoped call below must target what the daemon
     // actually bound or it silently addresses a fresh session.
     const boundKey = str(session.key) || str(result.session_id)
     if (extra.resume_session_id && boundKey) {
       this.sessionKey = boundKey
-      this.adoptHistory(session, this.frame.currentId === str(result.session_id ?? session.id))
-      this.resetWorkspaceFolds()
+      if (!preserveLiveTranscript) {
+        this.adoptHistory(session, !explicitNavigation && this.frame.currentId === str(result.session_id ?? session.id))
+        this.resetWorkspaceFolds()
+      }
     }
     if (!extra.resume_session_id) this.adoptHistory(session)
     const reportedContextLimit = num(result.context_limit)
@@ -2422,7 +2528,8 @@ export class Store {
       currentTitle: str(session.title),
       sessionKey: this.sessionKey,
       cwd: str(result.cwd ?? session.cwd),
-      model: str(result.model),
+      model: str(result.model ?? session.model),
+      planMode: (result.plan_mode ?? session.plan_mode) === true,
       ...(str(result.reasoning_effort)
         ? { reasoningEffort: str(result.reasoning_effort) }
         : {}),
@@ -2432,6 +2539,7 @@ export class Store {
       costUsd: typeof result.cost_usd === 'number' ? result.cost_usd : null,
       contextMax: contextLimit,
       approval: null,
+      ...(this.frame.currentId !== str(result.session_id ?? session.id) ? { question: null, goal: '' } : {}),
       ...(daemonInTurn ? {} : { turnActive: false, turnSeconds: 0 }),
       // initialize reports THIS session's policy — /permissions pins the
       // mode per session, so the daemon-wide runtime.status would lie about
@@ -2441,6 +2549,20 @@ export class Store {
     })
     this.adoptFleet(session)
       this.adoptTodos(session)
+    if (preserveLiveTranscript) {
+      for (const raw of replay ?? []) {
+        const frame = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {}
+        const params = frame.params && typeof frame.params === 'object' ? frame.params as Record<string, unknown> : {}
+        if (frame.method === 'event' && typeof params.type === 'string' && params.payload && typeof params.payload === 'object') {
+          this.onEvent({ type: params.type, payload: params.payload as Record<string, unknown> })
+        }
+      }
+    }
+    for (const raw of Array.isArray(result.pending_interactions) ? result.pending_interactions : []) {
+      if (raw && typeof raw === 'object' && (raw.type === 'approval_request' || raw.type === 'question_request') && raw.payload && typeof raw.payload === 'object') {
+        this.onEvent({ type: raw.type, payload: raw.payload as Record<string, unknown> })
+      }
+    }
     this.loadSkillSuggestions()
     this.loadCreatorTrace()
     return result
@@ -2808,6 +2930,11 @@ export class Store {
 
   private onEvent(event: DaemonEvent): void {
     const { type, payload } = event
+    if (type === 'desktop_connection') {
+      if (payload.online === false) this.wentOffline(new Error('Connection lost. Reconnecting to your session.'))
+      else if (payload.online === true && this.frame.currentId && this.frame.connection !== 'online') this.retryConnection()
+      return
+    }
     this.pushLog(type, payload)
     // Background turns (bg-* sessions) share this connection's event pipe
     // with a session_id tag. They must never touch the foreground fold —
@@ -3003,11 +3130,23 @@ export class Store {
         if (typeof payload.max_context === 'number') {
           patch.contextMax = payload.max_context > 0 ? payload.max_context : null
         }
+        // The daemon sends two status_update shapes under one type: per-round
+        // deltas (usage frames — no turn_count/llm_steps) and cumulative
+        // session echoes (every settled turn, plus mode/config changes —
+        // those carry turn_count/llm_steps). Only the first kind may be
+        // added; adopting a cumulative echo as a delta inflated model time
+        // roughly N-fold (the TUI adapter discriminates the same way).
+        const cumulativeTelemetry = payload.llm_steps !== undefined || payload.turn_count !== undefined
         if (typeof payload.llm_duration_ms === 'number' && Number.isFinite(payload.llm_duration_ms)) {
-          patch.llmDurationMs = this.frame.llmDurationMs + Math.max(0, payload.llm_duration_ms)
-          patch.llmSteps = this.frame.llmSteps + 1
-          patch.metricPhase = 'llm'
-          patch.metricPhaseStartedAt = Date.now()
+          if (cumulativeTelemetry) {
+            patch.llmDurationMs = Math.max(0, payload.llm_duration_ms)
+            patch.llmSteps = Math.max(0, Math.trunc(typeof payload.llm_steps === 'number' ? payload.llm_steps : this.frame.llmSteps))
+          } else {
+            patch.llmDurationMs = this.frame.llmDurationMs + Math.max(0, payload.llm_duration_ms)
+            patch.llmSteps = this.frame.llmSteps + 1
+            patch.metricPhase = 'llm'
+            patch.metricPhaseStartedAt = Date.now()
+          }
         }
         if (typeof payload.ttft_ms === 'number' && Number.isFinite(payload.ttft_ms)) {
           this.ttftSamples += 1
@@ -3216,6 +3355,16 @@ export class Store {
     this.ttftSamples = 0
     this.activeMetricTools.clear()
     this.patch({
+      reasoningPickerOpen: false,
+      reasoningLoading: false,
+      reasoningLevels: [],
+      reasoningDefault: '',
+      reasoningNote: '',
+      contextMenuOpen: false,
+      contextBreakdownLoading: false,
+      contextBreakdown: null,
+      permissionUpdating: false,
+      permissionError: null,
       fleet: [],
       queue: this.queue,
       changes: [],
@@ -3293,7 +3442,7 @@ export class Store {
       turnCount: this.turnCount,
       snippets: this.snippets,
     })
-    if ('currentId' in merge || 'cwd' in merge) rememberSession(this.frame.cwd, this.frame.currentId)
+    if ('currentId' in merge || 'cwd' in merge) rememberSession((this.frame.storageScope ?? '') + this.frame.cwd, this.frame.currentId)
     this.emit()
   }
 
@@ -3319,6 +3468,9 @@ export class Store {
 
 /** Shape the store actually needs from the bridge (matches types.ts). */
 export interface XerxesLike {
+  getContextScope?(): Promise<string>
+  getContexts?(): Promise<WorkspaceContext[]>
+  activateContext?(id: number, sessionId?: string): Promise<void>
   call(method: string, params?: Record<string, unknown>): Promise<Record<string, unknown>>
   /** Present on the real preload bridge; test bridges may omit it. */
   chooseWorkspace?(): Promise<unknown>

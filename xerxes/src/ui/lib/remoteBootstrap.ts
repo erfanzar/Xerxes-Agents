@@ -1,6 +1,8 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { prepareManagedRuntime } from './managedRuntime.js'
+
 /** Executed by SSH on the selected host. Installs only in a dedicated user-owned directory. */
 export function remoteBootstrapScript(workspacePath: string, mode: 'tui' | 'daemon' = 'tui'): string {
   const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`
@@ -12,10 +14,21 @@ const dist = dirname(cli);
 const { GatewayClient, daemonPaths, resolveProjectDir } = await import(pathToFileURL(resolve(dist, '../src/ui/gatewayClient.ts')).href);
 const projectDir = resolveProjectDir(process.cwd());
 const expectedDaemonBuildId = (await Bun.file(resolve(dist, 'build-id')).text()).trim();
-const gateway = new GatewayClient({ projectDir, bunBinary: process.execPath, bunDaemonPath: cli, expectedDaemonBuildId });
-await gateway.start();
-console.log('XERXES_REMOTE_READY ' + JSON.stringify({ projectDir, socketPath: daemonPaths(projectDir).socketPath }));
-gateway.close();
+delete process.env.XERXES_EXPECTED_DAEMON_BUILD_ID;
+const prepareManagedRuntime = ${prepareManagedRuntime.toString()};
+const result = await prepareManagedRuntime(
+  verify => new GatewayClient({ projectDir, bunBinary: process.execPath, bunDaemonPath: cli, ...(verify ? { expectedDaemonBuildId } : {}) }),
+  expectedDaemonBuildId,
+  async pid => {
+    const deadline = Date.now() + 15000;
+    for (;;) {
+      try { process.kill(pid, 0); } catch (error) { if (error.code === 'ESRCH') return; throw error; }
+      if (Date.now() >= deadline) throw new Error('Remote runtime did not finish stopping.');
+      await Bun.sleep(50);
+    }
+  },
+);
+console.log('XERXES_REMOTE_READY ' + JSON.stringify({ projectDir, socketPath: daemonPaths(projectDir).socketPath, expectedBuildId: expectedDaemonBuildId, busy: result.busy }));
 process.exit(0);
 `
   return `set -eu
