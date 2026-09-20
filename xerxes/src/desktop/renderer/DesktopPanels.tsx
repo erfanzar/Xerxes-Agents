@@ -116,9 +116,10 @@ export function DesktopPage({ panel, snap }: { panel: 'agents' | 'extensions' | 
 }
 
 /** Nonmodal task context: the conversation and draft remain interactive. */
-export function DesktopRail({ panel, snap, close, activityDetails, filesExpanded = false, toggleFilesExpanded, reviewPath = '' }: {
+export function DesktopRail({ panel, snap, close, activityDetails, filesExpanded = false, toggleFilesExpanded, reviewPath = '', activityFocused = false }: {
   panel: 'files' | 'review' | 'activity'; snap: Snapshot; close: () => void; activityDetails: ReactNode; filesExpanded?: boolean; toggleFilesExpanded?: () => void
   reviewPath?: string
+  activityFocused?: boolean
 }): ReactElement {
   const open = useDesktopNavigation()
   return <aside className={`desktop-rail studio-sheet${panel === "review" ? " desktop-rail--review" : ""}`} aria-label="Task context">
@@ -126,7 +127,7 @@ export function DesktopRail({ panel, snap, close, activityDetails, filesExpanded
     <div className="studio-sheet-content" key={`${panel}:${snap.cwd}:${snap.sessionKey}`}>
       {panel === 'files' && <FilesPanel snap={snap} close={close} />}
       {panel === 'review' && <ReviewPanel snap={snap} initialPath={reviewPath} />}
-      {panel === 'activity' && <>{activityDetails}<ActivityPanel snap={snap} /></>}
+      {panel === 'activity' && <>{activityDetails}{!activityFocused && <ActivityPanel snap={snap} />}</>}
     </div>
   </aside>
 }

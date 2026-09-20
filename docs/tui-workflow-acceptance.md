@@ -1231,3 +1231,23 @@ agents precede collapsed history; agent receipts reconcile identities with chat.
 Commands use compact expandable rows. Recursive file branches, untracked-file
 paging and individual previews are reachable in their respective interfaces.
 The broader audit remains in progress.
+
+### 2026-09-20 — Clickable agent inspection and output reading
+
+The [agent inspection/output matrix](agent-inspection-output-2026-09-20.md)
+records clickable desktop agent rows, reported base-agent assignments, scoped
+retained detail access, a shared output reader, and Escape/focus protection.
+Native interaction, packaged renderer plus isolated daemon, and local/SSH RPC
+checks passed. Historical evidence remains bounded and external providers were
+not exercised. The broader audit remains in progress.
+
+### 2026-09-20 — Session work survives UI closure
+
+The [session lifetime matrix](daemon-session-lifetime-2026-09-20.md) records the
+client-disconnect cancellation defect, the additive session-owned turn contract,
+same-session interaction recovery, and explicit-stop regressions. An actual TUI
+and the desktop transport over SSH completed isolated work after client closure
+and lease expiry, then restored the same sessions. UI-owned provider forwarding
+still needs its connection; this change does not extend credential authority or
+promise recovery across daemon termination. Both updated client and daemon are
+required. The broader audit remains in progress.

@@ -895,6 +895,9 @@ export class DaemonServer {
   private readonly sessionOperations = new SessionOperationQueue();
   private readonly goalWakeDispatches = new Map<string, Promise<void>>();
   private readonly disconnectedGoalOwners = new WeakSet<DaemonTransportConnection>();
+  private readonly sessionOwnedClients = new WeakSet<DaemonTransportConnection>();
+  private readonly sessionTurnOwners = new WeakSet<DaemonTransportConnection>();
+  private readonly sessionObservers = new Set<DaemonTransportConnection>();
   private stoppingGoalWakes = false;
   /** Consecutive auto-compaction failures per session; reset by any deliberate history change. */
   private readonly autoCompactFailures = new Map<string, number>();
@@ -1900,6 +1903,9 @@ export class DaemonServer {
         } else {
           if ([...this.turnOwners.values()].includes(connection)) throw new Error('Enable reconnect before submitting a turn.');
           const fresh = this.connectionLeases.enable(connection);
+          const owner = this.connectionLeases.owner(connection);
+          if (this.sessionOwnedClients.has(connection)) this.sessionOwnedClients.add(owner);
+          if (this.sessionObservers.delete(connection)) this.sessionObservers.add(owner);
           connection.send(jsonRpcSuccess(request.id, { ok: true, token: fresh, grace_ms: this.connectionLeases.graceMs }));
         }
         return;
@@ -2912,6 +2918,20 @@ export class DaemonServer {
     }
     if (method === "cancel_all") {
       return { ok: true, cancelled: this.runtime.cancelAllTurns() };
+    }
+    if (method === "subagent.inspect") {
+      const task = optionalString(params.task);
+      if (!task) return { ok: false, error: "subagent.inspect requires a task id" };
+      const session = this.runtime.sessionStatus(sessionKey(connection, params));
+      const saved = session && persistedSubagentSnapshotValues(session.metadata).find(row => row.id === task);
+      if (!saved) return { ok: false, error: "Agent is not available in this session. Refresh its activity or reconnect to its parent task." };
+      const panel = subagentSnapshotPanelPayloads(session.metadata).find(row => row.id === task)!;
+      // Inspect only this parent's retained child evidence, never arbitrary metadata or provider config.
+      return { ok: true, agent: { ...panel,
+        prompt: typeof saved.last_input === 'string' ? saved.last_input.slice(0, 16_000) : '',
+        output: typeof saved.last_output === 'string' ? saved.last_output.slice(0, 16_000) : '',
+        retained: true,
+      } };
     }
     if (method === "subagent.retry") {
       const task =
@@ -8829,7 +8849,7 @@ export class DaemonServer {
   ): JsonRpcPayload {
     const requestId = optionalString(params.request_id) ?? "";
     const owner = this.approvalOwners.get(requestId);
-    if (owner && owner !== connection) {
+    if (owner && !this.canAnswerInteraction(owner, connection)) {
       return { ok: false, error: "approval owned by another connection" };
     }
     const response = optionalString(params.response) ?? "reject";
@@ -8850,7 +8870,7 @@ export class DaemonServer {
   ): Promise<JsonRpcPayload> {
     const requestId = optionalString(params.request_id) ?? "";
     const owner = this.questionOwners.get(requestId);
-    if (owner && owner !== connection) {
+    if (owner && !this.canAnswerInteraction(owner, connection)) {
       return { ok: false, error: "question owned by another connection" };
     }
     const answers = stringRecord(params.answers);
@@ -9194,6 +9214,9 @@ export class DaemonServer {
     connection: DaemonTransportConnection,
     params: JsonRpcPayload,
   ): Promise<JsonRpcPayload> {
+    if (params.session_owned_turns !== undefined && typeof params.session_owned_turns !== 'boolean') {
+      throw new ValidationError('session_owned_turns', 'must be a boolean', params.session_owned_turns);
+    }
     const requestedHistory = historyLimit(params.history_limit);
     const resumeId = optionalString(params.resume_session_id);
     const requestedKey = optionalString(params.session_key);
@@ -9286,6 +9309,8 @@ export class DaemonServer {
     const session = await this.runtime.openSession(key, requestedAgent, openOptions);
     // A refused cross-workspace resume must not redirect later unscoped RPCs.
     connection.activeSessionKey = key;
+    this.sessionObservers.add(connection);
+    if (params.session_owned_turns === true) this.sessionOwnedClients.add(connection);
     const previousWake = readGoalWake(session.metadata, session.id);
     const recoveredWake = recoverGoalWake(session.metadata, session.id, this.goalTokenOwner, Date.now());
     if (previousWake?.state !== recoveredWake?.state) {
@@ -9333,6 +9358,7 @@ export class DaemonServer {
       version: XERXES_VERSION,
       daemon_version: XERXES_VERSION,
       connection_lease_supported: true,
+      session_owned_turns_supported: true,
       provider_relay_control_supported: true,
       remote_provider_binding_supported: Boolean(this.remoteProviderBindings),
       remote_provider_bundle_supported: Boolean(this.remoteProviderBindings),
@@ -9373,7 +9399,7 @@ export class DaemonServer {
       session: sessionPayload(session, contextLimit, this.mcpStatusRecord(session), requestedHistory),
       ...(reconnectEvents ? { reconnect_events: reconnectEvents } : {}),
       pending_interactions: [...this.pendingInteractionFrames.values()]
-        .filter(frame => frame.owner === connection)
+        .filter(frame => this.canAnswerInteraction(frame.owner, connection))
         .map(({ type, payload }) => ({ type, payload })),
       daemon_protocol: DAEMON_PROTOCOL_VERSION,
       daemon_build_id: this.daemonBuildId(),
@@ -9620,7 +9646,9 @@ export class DaemonServer {
    * Submit a turn with the same tracking as the turn.submit RPC branch:
    * every runtime turn is registered in inFlightTurns so stop() drains it
    * before flushing sessions, and — when an owning connection is supplied —
-   * in turnOwners so disconnect() cancels it. The returned promise is the
+   * in turnOwners. Session-owned clients use a stable session observer that
+   * survives client closure; legacy clients retain disconnect cancellation.
+   * The returned promise is the
    * raw submitTurn promise for caller-specific error handling; the tracked
    * view never rejects.
    */
@@ -9859,6 +9887,28 @@ export class DaemonServer {
       (refusal as Error & { turnNeverBegan?: boolean }).turnNeverBegan = true;
       return Promise.reject(refusal);
     }
+    if (owner && this.sessionOwnedClients.has(owner)) {
+      const original = owner;
+      const parentKey = original.activeSessionKey;
+      const background = parentKey !== sessionKey;
+      const taskId = this.runtime.sessionStatus(sessionKey)?.id ?? sessionKey;
+      const sessionOwner: DaemonTransportConnection = {
+        activeSessionKey: sessionKey,
+        send: frame => {
+          // Leased observers still journal brief outages. Once a lease expires,
+          // the task keeps running and a new client restores its session snapshot.
+          const observers = new Set([original, ...this.sessionObservers]);
+          for (const observer of observers) {
+            if (observer.activeSessionKey === sessionKey
+              || (background && observer === original && observer.activeSessionKey === parentKey)) observer.send(frame);
+          }
+        },
+      };
+      this.sessionTurnOwners.add(sessionOwner);
+      owner = sessionOwner;
+      emit = event => this.emit(sessionOwner, event.type, background
+        ? {...event.payload, background_task_id:taskId, session_id:taskId} : event.payload);
+    }
     if (owner) {
       this.turnOwners.set(sessionKey, owner);
     }
@@ -9882,9 +9932,8 @@ export class DaemonServer {
         await this.autoCompactIfDue(sessionKey, owner, options.signal);
       }
       options.signal?.throwIfAborted();
-      // Disconnect may happen while pre-turn compaction is awaiting a provider.
-      // Its cancellation removes this ownership entry before a runtime turn
-      // exists, so do not launch work that no connection can cancel or observe.
+      // An explicit stop (or legacy disconnect) can land during compaction,
+      // before the runtime has installed its turn cancellation controller.
       if (owner && this.turnOwners.get(sessionKey) !== owner) {
         // The submit was already acknowledged to the client, so the suppressed
         // turn still owes it the terminal event a launched one would produce.
@@ -10102,6 +10151,7 @@ export class DaemonServer {
   }
 
   private disconnectOwner(connection: DaemonTransportConnection): void {
+    this.sessionObservers.delete(connection);
     this.providerRelays.disconnect(connection);
     this.disconnectedGoalOwners.add(connection);
     this.lspSettingsUpdates.get(connection)?.abort();
@@ -10136,6 +10186,12 @@ export class DaemonServer {
         void this.releaseWorkspaceIfIdle(session.cwd);
       }
     }
+  }
+
+  private canAnswerInteraction(owner: DaemonTransportConnection, connection: DaemonTransportConnection): boolean {
+    return owner === connection || (this.sessionTurnOwners.has(owner)
+      && this.sessionObservers.has(connection)
+      && owner.activeSessionKey === connection.activeSessionKey);
   }
 
   /**
@@ -10811,6 +10867,8 @@ function subagentSnapshotPanelPayloads(
       "source_agent_id",
       "model",
       "prompt_profile",
+      "provider_profile",
+      "reasoning_effort",
       "summary",
       "error",
       "history_session_id",

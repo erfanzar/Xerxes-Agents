@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 import { useEffect, useState, type ReactElement } from 'react'
 import { desktopCall, desktopError, record, text, type RpcRecord } from './desktopRpc.js'
+import { OutputViewer, readableOutput } from './OutputViewer.js'
 import { Icon } from './Icon.js'
 
 /** A bounded summary first; read only this command's retained output on expansion. */
@@ -46,13 +47,13 @@ export function CommandActivity({ row, sessionKey, online }: {row: RpcRecord; se
       <span className="command-activity__cwd" title={text(row.detail)}>{text(row.detail)}</span>
     </summary>
     {open && <div className="command-activity__body">
-      <pre className="command-activity__command" aria-label="Full command" tabIndex={0}>{text(detail?.command) || text(row.title)}</pre>
-      <div className="command-activity__toolbar"><strong>Output</strong><button disabled={!online} onClick={()=>setRetry(value=>value+1)}>Refresh</button>
+<details className="command-activity__source"><summary>Full command</summary><pre className="command-activity__command" aria-label="Full command" tabIndex={0}>{text(detail?.command) || text(row.title)}</pre></details>
+      <div className="command-activity__toolbar"><strong>{running ? 'Updates every 2 seconds' : 'Recorded output'}</strong><button disabled={!online} onClick={()=>setRetry(value=>value+1)}>Refresh</button>
         {running && detail?.canInterrupt === true && <button disabled={!online || busy} onClick={()=>void interrupt()}>{busy ? 'Requesting…' : 'Interrupt'}</button>}
       </div>
       {!online && <p role="status">Disconnected. Retained output is shown; reconnect to refresh or control this command.</p>}
       {error && <p role="alert" className="studio-error">{error}</p>}
-      <pre className="command-activity__output" aria-label="Command output" tabIndex={0}>{detail ? text(detail.output) || 'No output recorded yet.' : error ? 'Output is unavailable.' : 'Loading output…'}</pre>
+<OutputViewer text={detail ? readableOutput(text(detail.output)) : ''} empty={detail ? 'No output recorded yet.' : error ? 'Output is unavailable.' : 'Loading output…'} />
       {detail?.outputTruncated === true && <p className="studio-muted">Showing the retained output tail.</p>}
     </div>}
   </details>

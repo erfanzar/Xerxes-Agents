@@ -10378,3 +10378,137 @@ test('paged initialize omits full replay and metadata refresh never includes his
   expect((await client.next(f=>f.id===4)).error).toBeDefined()
  }finally{client.close();await server.stop();await rm(directory,{recursive:true,force:true})}
 })
+
+test('session-owned turns finish after the client closes and retain their saved output', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xr-detached-finish-'));
+  const socketPath = join(directory, 'rpc.sock');
+  const runner = new GatedRunner();
+  const runtime = new InMemoryDaemonRuntime(runner, {model:'fixture',currentProjectDirectory:directory,sessionDirectory:join(directory,'sessions')});
+  const server = new DaemonServer({runtime,socketPath,projectDirectory:directory,cronStoreFactory:()=>new JobStore(join(directory,'cron/jobs.json'))});
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  let id = 0;
+  const rpc = async (method: string, params: Record<string, unknown> = {}) => { const request = ++id; client.send({jsonrpc:'2.0',id:request,method,params}); return client.next(frame=>frame.id===request) };
+  try {
+    const initialized = await rpc('initialize',{session_key:'durable',session_owned_turns:true});
+    expect(initialized.result?.session_owned_turns_supported).toBe(true);
+    await rpc('turn.submit',{text:'finish without this window'});
+    await client.next(eventFrame('text_part'));
+    const sessionId = runtime.sessionStatus('durable')!.id;
+    client.close();await Bun.sleep(50);
+    expect(runtime.sessionStatus('durable')?.cancelRequested).toBe(false);
+    runner.release();
+    await waitFor(()=>runtime.sessionStatus('durable')?.activeTurnId==='');
+    await runtime.flushSessions();
+    const saved = await new DaemonTranscriptStore({directory:join(directory,'sessions')}).load(sessionId);
+    expect(JSON.stringify(saved)).toContain('waitingdone');
+    expect(runtime.sessionStatus('durable')?.cancelRequested).toBe(false);
+  } finally {runner.release();client.close();await server.stop();await rm(directory,{recursive:true,force:true})}
+});
+
+test('session-owned turns survive lease expiry, reattach to a new client and still accept explicit cancellation', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xr-detached-cancel-'));
+  const socketPath = join(directory,'rpc.sock');
+  const runner = new AbortGateRunner();
+  const runtime = new InMemoryDaemonRuntime(runner,{model:'fixture',currentProjectDirectory:directory,sessionDirectory:join(directory,'sessions')});
+  const server = new DaemonServer({runtime,socketPath,projectDirectory:directory,cronStoreFactory:()=>new JobStore(join(directory,'cron/jobs.json'))});await server.start();
+  const first = await SocketTestClient.connect(socketPath), second = await SocketTestClient.connect(socketPath);
+  let id=0;
+  const rpc = async (client: SocketTestClient, method: string, params: Record<string,unknown>={}) => {const request=++id;client.send({jsonrpc:'2.0',id:request,method,params});return client.next(frame=>frame.id===request)};
+  try {
+    await rpc(first,'initialize',{session_key:'durable',session_owned_turns:true});
+    await rpc(first,'connection.lease');
+    await rpc(first,'turn.submit',{text:'keep working'});await first.next(eventFrame('text_part'));
+    const sessionId=runtime.sessionStatus('durable')!.id;
+    first.close();await Bun.sleep(30);
+    // Expire the real lease through its production cleanup path, without a 30s test sleep.
+    (server as unknown as {connectionLeases:{close():void}}).connectionLeases.close();
+    expect(runtime.sessionStatus('durable')?.cancelRequested).toBe(false);
+    expect(runtime.sessionStatus('durable')?.activeTurnId).not.toBe('');
+    const resumed=await rpc(second,'initialize',{resume_session_id:sessionId,project_dir:directory,session_owned_turns:true});
+    expect(resumed.result?.ok).toBe(true);
+    expect(runner.runs).toBe(1);
+    expect((await rpc(second,'turn.cancel')).result?.ok).toBe(true);
+    await second.next(eventFrame('turn_end'));
+    await waitFor(()=>runtime.sessionStatus('durable')?.activeTurnId==='');
+    expect(runtime.sessionStatus('durable')?.cancelRequested).toBe(true);
+  } finally {first.close();second.close();await server.stop();await rm(directory,{recursive:true,force:true})}
+});
+
+test('session-owned permission waits survive close and can only be answered by a client attached to that session', async () => {
+  const directory=await mkdtemp(join(tmpdir(),'xr-detached-approval-'));
+  const socketPath=join(directory,'rpc.sock');const interactions=new DaemonInteractionBoard();
+  const runtime=new InMemoryDaemonRuntime(new ReplyRunner(interactions),{model:'fixture',currentProjectDirectory:directory,sessionDirectory:join(directory,'sessions'),interactions});
+  const server=new DaemonServer({runtime,socketPath,interactions,projectDirectory:directory,cronStoreFactory:()=>new JobStore(join(directory,'cron/jobs.json'))});await server.start();
+  const first=await SocketTestClient.connect(socketPath),second=await SocketTestClient.connect(socketPath),stranger=await SocketTestClient.connect(socketPath);
+  let id=0;
+  const rpc=async(client:SocketTestClient,method:string,params:Record<string,unknown>={})=>{const request=++id;client.send({jsonrpc:'2.0',id:request,method,params});return client.next(frame=>frame.id===request)};
+  try{
+    await rpc(first,'initialize',{session_key:'durable',session_owned_turns:true});
+    await rpc(first,'turn.submit',{text:'wait for my return'});await first.next(eventFrame('approval_request'));
+    const sessionId=runtime.sessionStatus('durable')!.id;
+    first.close();await Bun.sleep(30);expect(interactions.pendingPermissionIds()).toEqual(['approval-1']);
+    await rpc(stranger,'initialize',{session_key:'other',session_owned_turns:true});
+    expect((await rpc(stranger,'permission_response',{request_id:'approval-1',response:'approve'})).result?.ok).toBe(false);
+    const resumed=await rpc(second,'initialize',{resume_session_id:sessionId,project_dir:directory,session_owned_turns:true});
+    expect(resumed.result?.pending_interactions).toMatchObject([{type:'approval_request',payload:{id:'approval-1'}}]);
+    expect((await rpc(second,'permission_response',{request_id:'approval-1',response:'approve'})).result?.ok).toBe(true);
+    await second.next(eventFrame('question_request'));
+    expect(interactions.pendingQuestionIds().length).toBe(1);
+    const question=interactions.pendingQuestionIds()[0]!;
+    expect((await rpc(stranger,'question_response',{request_id:question,answers:{answer:'yes'}})).result?.ok).toBe(false);
+    expect((await rpc(second,'question_response',{request_id:question,answers:{answer:'yes'}})).result?.ok).toBe(true);
+    await second.next(eventFrame('turn_end'));expect(runtime.sessionStatus('durable')?.cancelRequested).toBe(false);
+  }finally{first.close();second.close();stranger.close();await server.stop();await rm(directory,{recursive:true,force:true})}
+});
+
+test('session-owned background work keeps scoped progress and completes after its parent client closes', async () => {
+  const directory=await mkdtemp(join(tmpdir(),'xr-detached-background-'));
+  const runner=new GatedRunner();const socketPath=join(directory,'rpc.sock');
+  const runtime=new InMemoryDaemonRuntime(runner,{model:'fixture',currentProjectDirectory:directory,sessionDirectory:join(directory,'sessions')});
+  const server=new DaemonServer({runtime,socketPath,projectDirectory:directory,cronStoreFactory:()=>new JobStore(join(directory,'cron/jobs.json'))});await server.start();
+  const client=await SocketTestClient.connect(socketPath);let id=0;
+  const rpc=async(method:string,params:Record<string,unknown>={})=>{const request=++id;client.send({jsonrpc:'2.0',id:request,method,params});return client.next(frame=>frame.id===request)};
+  try{
+    await rpc('initialize',{session_key:'parent',session_owned_turns:true});
+    const started=await rpc('turn.background',{text:'background work'});
+    const frame=await client.next(eventFrame('text_part'));
+    expect(frame.params?.payload).toMatchObject({background_task_id:started.result?.task_id,session_id:started.result?.task_id,text:'waiting'});
+    const background=runtime.listSessions().find(session=>session.id===started.result?.task_id)!;
+    client.close();await Bun.sleep(30);expect(background.cancelRequested).toBe(false);
+    runner.release();await waitFor(()=>background.activeTurnId==='');
+    expect(JSON.stringify(background.messages)).toContain('waitingdone');
+  }finally{runner.release();client.close();await server.stop();await rm(directory,{recursive:true,force:true})}
+});
+
+test('subagent.inspect scopes retained evidence to the parent across reconnect and terminal states', async () => {
+  const directory=await mkdtemp(join(tmpdir(),'xr-agent-inspect-'));
+  const socketPath=join(directory,'rpc.sock');
+  const runtime=new InMemoryDaemonRuntime(new UsageRunner(),{model:'fixture',currentProjectDirectory:directory,sessionDirectory:join(directory,'sessions')});
+  const server=new DaemonServer({runtime,socketPath,projectDirectory:directory,cronStoreFactory:()=>new JobStore(join(directory,'cron/jobs.json'))});
+  await server.start();let client=await SocketTestClient.connect(socketPath);let id=0;
+  const rpc=async(method:string,params:Record<string,unknown>={})=>{const request=++id;client.send({jsonrpc:'2.0',id:request,method,params});return client.next(frame=>frame.id===request)};
+  try {
+    await rpc('initialize',{session_key:'parent'});
+    await rpc('turn.submit',{text:'Inspect the child'});
+    await client.next(eventFrame('turn_end'));
+    const parent=runtime.sessionStatus('parent')!;
+    parent.metadata.xerxes_subagent_snapshots_v1=[{id:'child',status:'running',agent_id:'reviewer',model:'fixture',provider_profile:'work',reasoning_effort:'high',last_input:'Review the change',last_output:'Reading files\n',private_config:'must not be returned'}];
+    let result=await rpc('subagent.inspect',{task:'child'});
+    expect(result.result?.agent).toMatchObject({id:'child',agent_id:'reviewer',provider_profile:'work',reasoning_effort:'high',prompt:'Review the change',output:'Reading files\n'});
+    expect(JSON.stringify(result)).not.toContain('must not be returned');
+    const status=await rpc('session.status');
+    expect(JSON.stringify(status)).not.toContain('Review the change');
+    expect(JSON.stringify(status)).not.toContain('Reading files');
+    await rpc('initialize',{session_key:'foreign'});
+    expect((await rpc('subagent.inspect',{task:'child'})).result?.ok).toBe(false);
+    expect((await rpc('subagent.inspect',{})).result?.ok).toBe(false);
+    client.close();client=await SocketTestClient.connect(socketPath);
+    await rpc('initialize',{resume_session_id:parent.id});
+    for(const state of ['failed','interrupted','completed']){
+      parent.metadata.xerxes_subagent_snapshots_v1=[{id:'child',status:state,agent_id:'reviewer',last_output:'Retained result'}];
+      result=await rpc('subagent.inspect',{task:'child'});
+      expect(result.result?.agent).toMatchObject({id:'child',status:state,output:'Retained result'});
+    }
+  }finally{client.close();await server.stop();await rm(directory,{recursive:true,force:true})}
+});

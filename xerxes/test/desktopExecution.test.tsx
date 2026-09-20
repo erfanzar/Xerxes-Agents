@@ -46,7 +46,7 @@ test('execution decodes output line breaks and safely displays argument boundari
   expect(view.command).toBe("sed -n 10,20p 'path with spaces/file.ts'")
   expect(view.stdout).toBe('function run() {\n  return 1\n}\n')
   const html = renderToStaticMarkup(createElement(ExecutionDetails, { item }))
-  expect(html).toContain('aria-label="Command output">function run() {\n  return 1\n}')
+  expect(html).toContain('aria-label="Command output" tabindex="0">function run() {\n  return 1\n}')
   expect(html).toContain('<summary>Raw details</summary>')
   expect(html).toContain('Copy command')
 })
@@ -139,4 +139,28 @@ test('long commands use a collapsed compact summary without constructing output'
   expect(html).toContain('Running')
   expect(html).not.toContain('aria-label="Command output"')
   expect(html).not.toContain('<strong>env ')
+})
+
+test('agent inspection keeps a spawn selection mapped to its renamed runtime identity',()=>{
+ const member = {key:'spawn:0',runtimeId:'runtime-child',title:'Requested title',status:'working',baseAgent:'reviewer',prompt:'Check cancellation and reconnect'}
+ const row: SessionRow = {id:'runtime-child',key:'runtime-child',title:'Runtime renamed title',status:'running',age:'',current:false,kind:'subagent',turns:0,messages:0,cwd:'',untitled:false}
+ const result=activityFleetRows([row],[{kind:'agents',id:1,members:[member]}])
+ expect(result).toHaveLength(1)
+ expect(result[0]?.agentDetails).toMatchObject({requestKey:'spawn:0',baseAgent:'reviewer',goal:'Check cancellation and reconnect'})
+ const waiting=activityFleetRows([],[{kind:'agents',id:1,members:[member]}])
+ expect(waiting[0]?.agentDetails).toMatchObject({provisional:true,baseAgent:'reviewer',goal:member.prompt})
+})
+
+test('output viewer decodes valid strings and envelopes, preserves literal paths and malformed logs',async()=>{
+ const {readableOutput,OutputViewer}=await import('../src/desktop/renderer/OutputViewer.js')
+ expect(readableOutput(JSON.stringify('first\nsecond'))).toBe('first\nsecond')
+ expect(readableOutput(JSON.stringify({output:'first\nsecond'}))).toBe('first\nsecond')
+ for(const raw of ['C:\\new\\test','partial {"output":','<script>alert(1)</script>'])expect(readableOutput(raw)).toBe(raw)
+ const html=renderToStaticMarkup(createElement(OutputViewer,{text:'<script>alert(1)</script>\nActual output'}))
+ expect(html).toContain('&lt;script&gt;')
+ expect(html).not.toContain('<script>')
+ expect(html).toContain('Wrap lines')
+ expect(html).toContain('Copy output')
+ expect(html).toContain('Expand output')
+ expect(html).not.toContain('<dialog')
 })

@@ -444,8 +444,8 @@ test('opening and resuming a desktop session uses its window target on the share
     await rpc.call('session.open', { session_key: 'another' })
     await rpc.call('runtime.status')
     expect(fake.requests.filter(row => row.method === 'initialize' || row.method === 'session.open').map(row => row.params)).toEqual([
-      { session_key: 'second', project_dir: '/second/workspace' },
-      { resume_session_id: 'saved', project_dir: '/second/workspace' },
+      { session_key: 'second', project_dir: '/second/workspace', session_owned_turns:true },
+      { resume_session_id: 'saved', project_dir: '/second/workspace', session_owned_turns:true },
       { session_key: 'another', project_dir: '/second/workspace' },
     ])
     expect(fake.requests.findLast(row => row.method === 'runtime.status')?.params).toEqual({})
@@ -505,6 +505,7 @@ test('desktop negotiates a lease and reclaims it before resuming after a socket 
   try {
     const opening = rpc.call('initialize', { resume_session_id: 'saved' })
     await until(() => fake.requests.length === 1, 'initialize')
+    expect(fake.requests[0]!.params).toMatchObject({session_owned_turns:true})
     fake.reply(fake.requests[0]!.id, { ok: true, connection_lease_supported: true })
     await until(() => fake.requests.length === 2, 'enable lease')
     expect(fake.requests[1]!.method).toBe('connection.lease')

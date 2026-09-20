@@ -3,6 +3,7 @@
 
 import { memo, useState, type ReactElement } from 'react'
 import type { ToolItem } from './types.js'
+import { OutputViewer, readableOutput } from './OutputViewer.js'
 import { Icon } from './Icon.js'
 import { StructuredResult, structuredOutput } from './StructuredResult.js'
 
@@ -64,24 +65,23 @@ export const ToolCallRow = memo(function ToolCallRow({ item, label }: { item: To
 })
 export function ExecutionDetails({ item }: { item: ToolItem }): ReactElement {
   const [expanded, setExpanded] = useState(false)
-  const [wrap, setWrap] = useState(true)
   const view = executionView(item)
   const failed = toolHasFailed(item)
-  const readableOutput = view.stdout ?? item.output
-  const structured = view.stdout === null ? structuredOutput(item.output) : null
+  const output = view.stdout ?? readableOutput(item.output)
+  const structured = view.stdout === null && output === item.output ? structuredOutput(item.output) : null
   return <div className="execution">
     <div className="execution__status" data-failed={failed || undefined}>
       <span>{item.state === 'working' ? 'Running' : failed ? 'Failed' : 'Completed'}{view.exitCode !== null ? ` · Exit ${view.exitCode}` : ''}</span>
       {view.cwd && <span title={view.cwd}>{view.cwd}</span>}
     </div>
     {view.command && <pre className="execution__command">{view.command}</pre>}
-    {readableOutput && <><div className="execution__viewer-actions"><span>{structured ? 'Result' : 'Output'}</span><button onClick={()=>setExpanded(value=>!value)} aria-expanded={expanded}>{expanded ? 'Compact view' : 'Expand output'}</button>{!structured && <button onClick={()=>setWrap(value=>!value)} aria-pressed={wrap}>Wrap lines</button>}</div><div className="execution__viewer" data-expanded={expanded || undefined} tabIndex={0} role="region" aria-label="Tool output">{structured ? <StructuredResult value={structured}/> : <pre className="execution__output" data-wrap={wrap} aria-label="Command output">{readableOutput}</pre>}</div></>}
+    {output && (structured ? <><div className="execution__viewer-actions"><span>Result</span><button onClick={()=>setExpanded(value=>!value)} aria-expanded={expanded}>{expanded ? 'Compact view' : 'Expand result'}</button></div><div className="execution__viewer" data-expanded={expanded || undefined} tabIndex={0} role="region" aria-label="Tool output"><StructuredResult value={structured}/></div></> : <OutputViewer text={output} />)}
     {view.stderr && <div className="execution__error"><strong>Standard error</strong><pre>{view.stderr}</pre></div>}
     {item.error && <div className="execution__error"><strong>Error</strong><pre>{item.error}</pre></div>}
-    {!readableOutput && !item.error && !view.stderr && <p className="execution__empty">{item.state === 'working' ? 'Waiting for output…' : 'No output'}</p>}
+    {!output && !item.error && !view.stderr && <p className="execution__empty">{item.state === 'working' ? 'Waiting for output…' : 'No output'}</p>}
     <div className="execution__actions">
       {view.command && <CopyButton text={view.command} label="Copy command" />}
-      {readableOutput && <CopyButton text={readableOutput} label="Copy output" />}
+
     </div>
     <details className="execution__raw"><summary>Raw details</summary><code>{item.name} · {item.id}</code><strong>Input</strong><pre>{item.input || '(no arguments)'}</pre><strong>Result</strong><pre>{item.output || '(no result)'}</pre></details>
   </div>

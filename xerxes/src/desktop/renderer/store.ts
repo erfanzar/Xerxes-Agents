@@ -148,11 +148,11 @@ export function spawnMembersOf(name: unknown, args: unknown, callId: string): Ag
   if (Array.isArray(raw) && raw.length) {
     return raw.slice(0, 24).map((item, index) => {
       const record = (item && typeof item === 'object' ? item : {}) as Record<string, unknown>
-      return { key: `${callId}:${index}`, title: label(record, index), status: 'working' }
+      return { key: `${callId}:${index}`, title: label(record, index), status: 'working', baseAgent: str(record.agent) || str(record.subagent_type), prompt: str(record.prompt) }
     })
   }
   if (!isSpawnTool(name)) return []
-  return [{ key: `${callId}:0`, title: label(parsed, 0), status: 'working' }]
+  return [{ key: `${callId}:0`, title: label(parsed, 0), status: 'working', baseAgent: str(parsed.subagent_type) || str(parsed.target_agent) || str(parsed.agent), prompt: str(parsed.prompt) }]
 }
 
 function agentReceiptRows(value: unknown): Record<string, unknown>[] {
@@ -2660,6 +2660,10 @@ export class Store {
           agentDetails: {
             ...this.frame.fleet.find(agent => agent.id === id)?.agentDetails,
             summary: str(row.summary), error: str(row.error), model: str(row.model),
+            baseAgent: str(row.agent_id) || previous?.agentDetails?.baseAgent || '',
+            parentId: str(row.parent_id) || str(row.creator_id),
+            providerProfile: str(row.provider_profile) || previous?.agentDetails?.providerProfile || '',
+            reasoningEffort: str(row.reasoning_effort) || previous?.agentDetails?.reasoningEffort || '',
             toolCount: count(row.tool_count), inputTokens: count(row.input_tokens), outputTokens: count(row.output_tokens),
             filesRead: paths(row.files_read), filesWritten: paths(row.files_written),
             ...(liveWins ? previous.agentDetails : {}),
@@ -2688,7 +2692,7 @@ export class Store {
       const key = [...this.agentMembers.values()].find(member => member.runtimeId === row.id)?.key ?? this.agentMemberKeysByTitle.get(row.title)
       if (key) {
         const member = this.agentMembers.get(key)
-        if (member && member.status !== status) {
+        if (member && (member.status !== status || member.runtimeId !== row.id)) {
           this.agentMembers.set(key, { ...member, runtimeId: row.id, status })
           touched = true
         }
@@ -3131,7 +3135,7 @@ export class Store {
                 this.agentMemberKeysByTitle.set(title, member.key)
               }
               const row: SessionRow = {...(previous ?? {id:runtimeId,key:runtimeId,age:'',current:false,kind:'subagent',turns:0,messages:0,cwd:'',untitled:false}),title,status:str(report.status),
-                agentDetails:{filesRead:[],filesWritten:[],...previous?.agentDetails,summary:str(report.summary),error:str(report.error),model:str(report.model)||previous?.agentDetails?.model||'',lastReceiptAt:Date.now()}}
+                agentDetails:{filesRead:[],filesWritten:[],...previous?.agentDetails,summary:str(report.summary),error:str(report.error),model:str(report.model)||previous?.agentDetails?.model||'',baseAgent:str(report.agent_id)||member?.baseAgent||previous?.agentDetails?.baseAgent||'',goal:member?.prompt||previous?.agentDetails?.goal||'',requestKey:member?.key||previous?.agentDetails?.requestKey||"",lastReceiptAt:Date.now()}}
               this.patch({fleet:[...this.frame.fleet.filter(row=>row.id!==runtimeId),row]})
             }
             if (reports.length) this.builder.pushAgents([...this.agentMembers.values()])

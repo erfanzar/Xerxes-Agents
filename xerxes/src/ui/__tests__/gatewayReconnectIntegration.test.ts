@@ -140,7 +140,7 @@ it('restores an authoritative snapshot when another drop discards an undelivered
   } finally { offline.release(); finish.release(); await fixture.close() }
 })
 
-it('reopens saved state after lease expiry without restarting cancelled work', async () => {
+it('reattaches to running session-owned work after lease expiry and still supports explicit stop', async () => {
   let calls = 0, cancelled = false
   const fixture = await host({ async *run(_session, _text, signal) {
     calls++
@@ -154,14 +154,16 @@ it('reopens saved state after lease expiry without restarting cancelled work', a
     await drop(client)
     // Drive the real expiry cleanup directly; do not spend 30s on a timer test.
     ;(server as unknown as { connectionLeases: ConnectionLeases }).connectionLeases.close()
-    await vi.waitFor(() => expect(cancelled).toBe(true))
+    expect(cancelled).toBe(false)
     await client.start()
     const restored = await client.request<SessionResumeResponse>('session.resume', { session_id: session.session_id, preserve_view: true })
     expect(restored.reconnected).toBe(false)
-    expect(restored.running).toBe(false)
-    expect(JSON.stringify(restored.messages)).toContain('retained before expiry')
+    expect(restored.running).toBe(true)
+    expect(JSON.stringify(restored.inflight)).toContain('retained before expiry')
     expect(calls).toBe(1)
     expect(client.hasConnectionLease).toBe(true)
+    await client.request('turn.cancel')
+    await vi.waitFor(() => expect(cancelled).toBe(true))
   } finally { await fixture.close() }
 })
 

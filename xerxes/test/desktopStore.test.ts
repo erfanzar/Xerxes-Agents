@@ -1307,7 +1307,7 @@ describe('Store workspace folds', () => {
     // arrives, then reports two running children.
     let spawned = false
     const snapshots = [
-      { id: 'sub-one', title: 'Analyze libs/eyvan', status: 'working', summary: 'Reviewing cancellation handling', model: 'test-model', tool_count: 12, input_tokens: 4500, files_read: ['src/recovery.ts', 42], files_written: [], error: '' },
+      { id: 'sub-one', title: 'Analyze libs/eyvan', agent_id:'reviewer', provider_profile:'work', reasoning_effort:'high', status: 'working', summary: 'Reviewing cancellation handling', model: 'test-model', tool_count: 12, input_tokens: 4500, files_read: ['src/recovery.ts', 42], files_written: [], error: '' },
       { id: 'sub-two', title: 'Analyze the OCI release pipeline', status: 'working' },
     ]
     bridge.respondWith(method => {
@@ -1327,12 +1327,16 @@ describe('Store workspace folds', () => {
     expect(store.getSnapshot().fleet).toHaveLength(0)
 
     spawned = true
-    bridge.push('tool_call', { id: 't1', tool_call_id: 't1', name: 'AgentTool', arguments: '{"prompt":"analyze"}' })
+    bridge.push('tool_call', { id: 't1', tool_call_id: 't1', name: 'AgentTool', arguments: '{"title":"Analyze libs/eyvan","prompt":"analyze"}' })
     await new Promise(resolve => setTimeout(resolve, 10))
     const fleet = store.getSnapshot().fleet
     expect(fleet.map(row => row.title)).toEqual(['Analyze libs/eyvan', 'Analyze the OCI release pipeline'])
     expect(fleet.every(row => row.kind === 'subagent' && row.status === 'working')).toBe(true)
     expect(fleet[0]?.agentDetails).toMatchObject({ summary: 'Reviewing cancellation handling', model: 'test-model', toolCount: 12, inputTokens: 4500, filesRead: ['src/recovery.ts'] })
+
+    expect(fleet[0]?.agentDetails).toMatchObject({baseAgent:'reviewer',providerProfile:'work',reasoningEffort:'high'})
+    const card = store.getSnapshot().blocks.find(block => block.kind === 'agents')
+    expect(card?.kind === 'agents' ? card.members.find(member => member.key === 't1:0')?.runtimeId : undefined).toBe('sub-one')
 
     // A non-agent tool call must not pay a status fetch: the snapshots it
     // would read cannot have moved.

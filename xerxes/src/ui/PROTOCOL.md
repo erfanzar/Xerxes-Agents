@@ -52,10 +52,37 @@ RPC replies stay bound to the socket that issued them.
 
 After expiry, `{ok:false, code:"lease_expired"}` permits normal saved-session
 reopening and a new lease; cancelled work does not restart automatically.
-Expiry and daemon shutdown retain normal cancellation and interaction cleanup.
-Clients that do not opt in retain immediate disconnect cancellation. Older
+Lease expiry retains normal cancellation for connection-owned turns. Daemon
+shutdown still cancels and drains all turns. Clients that do not opt into a
+lease retain immediate disconnect cancellation for connection-owned turns. Older
 daemons omit the capability and must not receive the optional method. This is
 an additive v35 capability; existing requests and events are unchanged.
+
+### Session-owned work
+
+`initialize {session_owned_turns: true, ...}` opts a client into daemon-owned
+turn lifetime. Supporting runtimes advertise `session_owned_turns_supported:
+true`; desktop and TUI request this mode on fresh opening and resume. Omitting
+the flag preserves the legacy connection-owned contract above. Older runtimes
+ignore the optional field and do not provide this guarantee.
+
+For an opted-in client, ordinary, slash-submitted and background turns retain
+session ownership when the window, terminal or transport closes. Expiring or
+overflowing the reconnect journal releases transport state without cancelling
+that work. Reopen the same session to load its transcript/inflight snapshot and
+receive subsequent events. Short reconnects retain the existing bounded journal.
+Explicit `turn.cancel`, session eviction and daemon shutdown still stop work.
+This does not promise execution through daemon/process failure, reboot or host
+sleep; saved sessions and recovery rules remain unchanged.
+
+Pending tool permissions and questions remain unanswered in the session. An
+initialized observer of that same session receives `pending_interactions` and
+may answer them; another session cannot. No unattended approval is implied.
+Client-owned setup flows and provider grants retain their existing ownership.
+In particular, closing a local-provider forwarding connection still revokes its
+remote binding immediately. Such work reports unavailable authority; it never
+silently switches to remote credentials. Independent SSH work needs a provider
+and any required integrations available on the daemon host.
 
 1. Resolve the project dir to the nearest Git root when available; otherwise
    use `realpath(cwd)` (falling back to the absolute path).
@@ -753,6 +780,19 @@ Live subagent events and persisted snapshot rows carry optional
 preserve these across partial progress updates. The agent inspector renders
 explicit assignments; missing fields do not imply a fabricated provider or
 reasoning setting.
+
+`subagent.inspect {task, session_key?}` reads one child by exact runtime ID from
+the selected parent's retained manifest. It returns `{ok, agent}` with the same
+identity/status/configuration fields as `subagent_snapshots`, plus bounded
+`prompt` and `output` strings (at most 16,000 characters each) and `retained: true`.
+This is saved evidence, not a complete live child transcript. Missing or foreign
+children return `{ok:false,error}`; inspection does not start, resume, or cancel
+work. Provider configuration and arbitrary manifest metadata are excluded. The
+ordinary parent snapshot continues to omit child prompt and output bodies.
+Desktop agent rows open this inspector, preserve reported base-agent and explicit
+provider/effort assignments, and keep pending spawn requests distinguishable from
+identified, controllable runtime agents. Older daemons may reject the additive
+method; clients retain already received activity and expose the error.
 Terminal `status_update` events from the native turn adapter include optional
 `stop_reason` from the streaming loop. Scheduled execution treats explicit
 reasons other than `completed` and `objective_verified` as failure, preserving

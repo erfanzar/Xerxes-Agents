@@ -148,7 +148,7 @@ export class DaemonRpc extends EventEmitter {
     // Bind every opening handshake to the host-owned window target, including
     // resumes and reconnects, rather than trusting a renderer-supplied path.
     const result = await this.send<T>(method, method === 'initialize' || method === 'session.open'
-      ? { ...params, project_dir: this.projectDir }
+      ? { ...params, project_dir: this.projectDir, ...(method === 'initialize' ? { session_owned_turns: true } : {}) }
       : params)
     if (method === 'initialize' && result && typeof result === 'object'
       && 'connection_lease_supported' in result && result.connection_lease_supported === true && !this.connectionLeaseAttached) {

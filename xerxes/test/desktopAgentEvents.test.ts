@@ -45,3 +45,11 @@ test('a resumed agent becomes working again and clears the previous failure',()=
  expect(rows[0]?.agentDetails?.summary).toBe('')
  expect(rows[0]?.agentDetails?.startedAt).toBe(200)
 })
+
+test('base agent and explicit provider settings survive partial progress and cancellation',()=>{
+ let rows = foldAgentEvent([], {...event('turn_begin'),subagent_type:'reviewer',provider_profile:'work',reasoning_effort:'high',parent_id:'parent'})
+ rows = foldAgentEvent(rows,event('text_part',{text:'Checking changes'}))
+ rows = foldAgentEvent(rows,event('turn_end',{status:'cancelled'}))
+ expect(rows[0]?.agentDetails).toMatchObject({baseAgent:'reviewer',providerProfile:'work',reasoningEffort:'high',parentId:'parent'})
+ expect(rows[0]?.status).toBe('cancelled')
+})

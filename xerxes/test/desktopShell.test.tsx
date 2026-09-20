@@ -591,7 +591,7 @@ test('spawn requests stay inside closed chat work groups and remain discoverable
   expect(html.slice(0, html.indexOf('</main>'))).not.toContain('Map entry points')
   expect(html).toContain('Map entry points')
   expect(html).toContain('Awaiting runtime status')
-  expect(html).not.toContain('Map hot paths')
+  expect(html.indexOf('Map hot paths')).toBeGreaterThan(html.indexOf('agent-roster__history'))
 })
 
 // ── Sidebar keeps the current task in its group (mockup 07) ─────────────

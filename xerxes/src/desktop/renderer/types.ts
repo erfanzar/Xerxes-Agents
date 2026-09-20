@@ -85,6 +85,8 @@ export interface AgentMember {
   /** Store-local identity: spawn call id + index, or the daemon snapshot id. */
   readonly key: string
   readonly runtimeId?: string
+  readonly baseAgent?: string
+  readonly prompt?: string
   readonly title: string
   /** working | completed | failed | cancelled — snapshot statuses pass through mapped. */
   readonly status: string
@@ -147,6 +149,10 @@ export interface SessionRow {
   /** Optional details reported by the parent daemon's subagent snapshot. */
   readonly agentDetails?: {
     readonly provisional?: boolean
+    readonly requestKey?: string
+    readonly baseAgent?: string
+    readonly providerProfile?: string
+    readonly reasoningEffort?: string
     readonly lastReceiptAt?: number
     readonly summary: string
     readonly error: string

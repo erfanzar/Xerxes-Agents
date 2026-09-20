@@ -769,3 +769,54 @@ html,body,#root,.app.atelier{background:transparent}
 .command-activity__output{max-height:320px;min-height:48px;padding:10px;border:1px solid var(--x-hairline)}
 .command-activity__toolbar{display:flex;align-items:center;gap:8px;padding:12px 0 6px;font-size:12px}
 .command-activity__toolbar>strong{margin-right:auto;font-weight:500}
+
+/* Agent inspection and the shared output reader. */
+.acard__list .acard__row{width:100%;border:0;background:none;text-align:left;color:var(--x-secondary);cursor:pointer;min-height:32px;padding:5px 6px;border-radius:4px}
+.acard__list .acard__row:hover,.acard__list .acard__row:focus-visible{background:var(--mac-control);color:var(--x-title)}
+.agent-inspector{min-width:0;font-size:var(--ui-font);color:var(--x-secondary)}
+.agent-inspector__back{border:0;background:none;color:var(--x-accent);font:inherit;padding:0 0 20px;cursor:pointer}
+.agent-inspector__heading{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px 16px;margin-bottom:20px}
+.agent-inspector__heading h2{font-size:18px;line-height:1.4;font-weight:500;color:var(--x-title);margin:0;overflow-wrap:anywhere}
+.agent-inspector__heading>span{font-size:12px;color:var(--x-meta)}
+.agent-inspector [data-state=working] .agent-inspector__heading>span{color:var(--x-working)}
+.agent-inspector dl{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:8px 18px;font-size:12px;line-height:1.5}
+.agent-inspector dt{color:var(--x-meta)}
+.agent-inspector dd{margin:0;color:var(--x-title);overflow-wrap:anywhere}
+.agent-inspector__identity{padding-bottom:20px;border-bottom:1px solid var(--x-hairline)}
+.agent-inspector h3{font-size:13px;font-weight:500;color:var(--x-title);margin:24px 0 8px}
+.agent-inspector h3 span{color:var(--x-meta);font-weight:400;margin-left:8px}
+.agent-inspector p{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.7}
+.agent-inspector ul{padding-left:18px;overflow-wrap:anywhere}
+.agent-inspector__prompt{max-height:240px;overflow:auto}
+.agent-inspector summary{cursor:pointer;padding:8px 0}
+.agent-inspector__metadata{margin:20px 0;color:var(--x-meta);font-size:12px}
+.agent-inspector__controls{border:0;padding:12px 0;margin:0;border-top:1px solid var(--x-hairline);min-width:0}
+.output-viewer{min-width:0;margin:12px 0 8px;border:1px solid var(--x-hairline);border-radius:8px;overflow:hidden;background:var(--x-screen)}
+.output-viewer>header,.output-dialog>header{display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px;padding:9px 12px;border-bottom:1px solid var(--x-hairline);color:var(--x-secondary);font-size:12px}
+.output-viewer header strong{font-weight:500;color:var(--x-title)}
+.output-viewer__count{margin-right:auto;color:var(--x-meta);font-variant-numeric:tabular-nums}
+.output-viewer button,.output-dialog button{border:0;background:none;padding:4px 0;color:var(--x-secondary);font:inherit;cursor:pointer;display:inline-flex;align-items:center}
+.output-viewer button[aria-pressed=true],.output-dialog button[aria-pressed=true]{color:var(--x-accent)}
+.output-viewer button:hover,.output-dialog button:hover{color:var(--x-title)}
+.output-viewer .output-viewer__text,.output-dialog .output-viewer__text{margin:0;padding:14px 16px;font:12px/1.7 var(--mono);font-variant-ligatures:none;color:var(--x-prose);background:none;max-height:300px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;tab-size:2;overscroll-behavior:contain}
+.output-viewer__text[data-wrap=false]{white-space:pre!important;overflow-wrap:normal!important}
+.output-viewer__text:focus-visible{outline:1px solid var(--x-focus);outline-offset:-2px}
+.output-dialog{width:min(1100px,calc(100vw - 48px));height:min(820px,calc(100vh - 64px));max-width:none;max-height:none;padding:0;border:1px solid var(--x-hairline);border-radius:12px;background:var(--x-screen);color:var(--x-prose);box-shadow:0 20px 70px #0006;overflow:hidden}
+.output-dialog[open]{display:flex;flex-direction:column}
+.output-dialog::backdrop{background:#0008}
+.output-dialog h2{font-size:15px;font-weight:500;margin:0 auto 0 0;color:var(--x-title)}
+.output-dialog .output-viewer__text{flex:1;min-height:0;max-height:none;font-size:13px;padding:20px 24px}
+.command-activity__source summary{font-size:12px;color:var(--x-meta);cursor:pointer}
+.command-activity__source .command-activity__command{white-space:pre-wrap;overflow-wrap:anywhere;max-height:220px;margin-top:8px}
+.command-activity__body{padding-left:0}
+.command-activity__toolbar{flex-wrap:wrap;color:var(--x-meta)}
+.command-activity__toolbar>strong{font-size:11px;font-weight:400}
+.activity-notice{margin:12px 0;font-size:12px;color:var(--x-meta)}
+.activity-notice>summary{display:flex;align-items:center;gap:8px;cursor:pointer;list-style:none}
+.activity-notice>summary>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.activity-notice>summary::-webkit-details-marker{display:none}
+.activity-notice[open]>summary>svg:last-child{transform:rotate(90deg)}
+.agent-inspector{padding:20px}
+.output-viewer__actions{display:flex;align-items:center;gap:12px;margin-left:auto;flex-wrap:nowrap}
+.fleetpop__row{width:100%;border:0;background:none;text-align:left;color:var(--x-secondary);cursor:pointer;font:inherit}
+.fleetpop__row:hover{background:var(--mac-control)}

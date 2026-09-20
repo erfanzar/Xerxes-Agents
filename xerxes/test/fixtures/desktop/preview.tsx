@@ -15,6 +15,7 @@ const patch = (value: Partial<Snapshot>) => { const port = store as unknown as {
 let fixtureFolderAttempts=0
 let fixtureWorkMonitor=false
 let fixtureCommandError=false
+let fixtureAgentError=false
 const cwd='/fixture/xerxes-workspace'
 const session=(i:number) => ({ id:`session-${i}`,key:`session-${i}`,title:['Review transport cancellation behavior','Improve workspace file navigation','Investigate provider retry handling'][i%3]+` ${i+1}`,status:'idle',age:`${i+1}m`,current:i===0,kind:'main',turns:i%5,messages:2,cwd,untitled:false })
 const long='Preserve every runtime integration and saved session. Review cancellation, reconnect behavior, command discovery and deeply nested file paths. Keep navigation available while work is running. '
@@ -186,6 +187,10 @@ const bridge: XerxesBridge={onEvent:()=>()=>{},async call<T>(method:string,param
   }
   else if(method==='runtime.status')result={ok:true}
   else if(method==='terminal.list')result={ok:true,terminals:[fixtureTerminal]}
+  else if(method==='subagent.inspect'){
+    await new Promise(resolve=>setTimeout(resolve,params.task==='live-0'?180:30))
+    result=fixtureAgentError?{ok:false,error:'Agent detail read failed. Retry.'}:{ok:true,agent:{id:params.task,agent_id:'reviewer',model:'fixture/model',provider_profile:'work-profile',reasoning_effort:'high',prompt:'Review cancellation, session persistence and reconnect handling without changing unrelated work.',output:'Review started.\nInspected src/runtime/session.ts\nCancellation retains the saved transcript.\n'+Array.from({length:80},(_,i)=>'Evidence '+(i+1)+': verified boundary').join('\n')}}
+  }
   else if(method==='terminal.inspect')result=fixtureCommandError?{ok:false,error:'Command output is temporarily unavailable. Retry.'}:{ok:true,terminal:fixtureTerminal}
   else if(method==='terminal.control'){
     await new Promise(resolve=>setTimeout(resolve,1200))
@@ -208,11 +213,14 @@ createRoot(document.getElementById('root')!).render(<Preview/> )
 const host=window as unknown as {fixture?:{onScenario(handler:(name:string)=>void):void}}
 let activityBuilder = new BlockBuilder()
 const scenario = (name:string) => {
+  if(name==='Agent failure'){fixtureAgentError=true;return}
+  if(name==='Agent recover'){fixtureAgentError=false;return}
   if(name==='Command failure'){fixtureCommandError=true;return}
   if(name==='Command recover'){fixtureCommandError=false;return}
   if(name==='Command disconnect'){patch({connection:'offline'});return}
   if(name==='Command reconnect'){patch({connection:'online'});return}
   fixtureWorkMonitor=name==='Work monitor'
+  if(fixtureWorkMonitor)fixtureTerminal={...fixtureTerminal,output:'Ready for input.\nRunning the workspace verification suite.\n'+Array.from({length:120},(_,i)=>i%12===0?'FAIL tests/runtime/recovery/session-reconnect.test.ts — expected retained session, received missing history':'PASS tests/runtime/persistence/checkpoint-'+i+'.test.ts · saved state retained').join('\n')}
   if (name.startsWith('Activity ')) {
     if (name === 'Activity start') {
       activityBuilder = new BlockBuilder()
@@ -233,7 +241,7 @@ const scenario = (name:string) => {
   }
   fixtureExportDenied=name==='Export error'
   patch({...base,blocks,turnActive:false,failed:null,networkRetrying:false,settingsOpen:false,pickerOpen:false,modelMenuOpen:false,reasoningPickerOpen:false})
-  if(name==='Work monitor')patch({goal:'',turnActive:true,fleet:[...Array.from({length:58},(_,i)=>({...session(i),id:'past-'+i,kind:'subagent',status:i%3?'completed':'failed',title:'Previous review '+i,agentDetails:{summary:'Previous attempt finished.',error:i%3?'':'Previous attempt failed',model:'fixture/model',filesRead:[],filesWritten:[]}})),...Array.from({length:3},(_,i)=>({...session(i),id:'live-'+i,kind:'subagent',status:'running',title:'Running review '+(i+1)}))],blocks:[{kind:'user',id:900,text:'Review the current changes while the test command runs.'},{kind:'agents',id:901,members:Array.from({length:3},(_,i)=>({key:'call-'+i,runtimeId:'live-'+i,title:'Running review '+(i+1),status:'working'}))}]})
+  if(name==='Work monitor')patch({goal:'',turnActive:true,fleet:[...Array.from({length:58},(_,i)=>({...session(i),id:'past-'+i,kind:'subagent',status:i%3?'completed':'failed',title:'Previous review '+i,agentDetails:{summary:'Previous attempt finished.',error:i%3?'':'Previous attempt failed',model:'fixture/model',filesRead:[],filesWritten:[]}})),...Array.from({length:3},(_,i)=>({...session(i),id:'live-'+i,kind:'subagent',status:'running',title:'Running review '+(i+1),agentDetails:{baseAgent:i===2?'test-engineer':'reviewer',model:'fixture/model',providerProfile:'work-profile',reasoningEffort:'high',goal:'Review cancellation and reconnect boundaries for task '+(i+1),summary:'Inspecting session recovery and recorded output.',error:'',filesRead:['src/runtime/session.ts'],filesWritten:[],notes:['Checking the live cancellation path.','The saved transcript survives reconnect.'],toolCalls:[{id:'inspect-'+i,name:'ReadFile',verb:'Read file',arg:'src/runtime/session.ts',input:'{}',state:'done',dur:'0.1s',output:'export const preserveSession = true;'}]}}))],blocks:[{kind:'user',id:900,text:'Review the current changes while the test command runs.'},{kind:'agents',id:901,members:Array.from({length:3},(_,i)=>({key:'call-'+i,runtimeId:'live-'+i,title:'Running review '+(i+1),status:'working'}))}]})
   if(name==='Artifacts')patch({changes:[{path:'src/runtime/transport/connections/recovery/session-reconnect-controller.ts',adds:24,dels:8,isNew:false,hunks:[],turn:1},{path:'src/desktop/layout.ts',adds:1,dels:0,isNew:true,hunks:[],turn:1}]})
   if(name==='Runtime update')patch({daemonWarning:'The workspace runtime predates this app build. Existing work is still running.',turnActive:true})
   if(name==='Runtime offline')patch({connection:'offline'})

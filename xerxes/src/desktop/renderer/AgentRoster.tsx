@@ -21,15 +21,19 @@ export function agentState(status: string): { label: string; priority: number; t
 export function activityFleetRows(rows: readonly SessionRow[], blocks: readonly Block[]): readonly SessionRow[] {
   const result = [...rows]
   for (const block of blocks) if (block.kind === 'agents') for (const member of block.members) {
-    if (!['working', 'running', 'starting', 'queued', 'pending'].includes(member.status)) continue
-    if (result.some(row => member.runtimeId ? row.id === member.runtimeId : row.id === member.key || row.title === member.title)) continue
-    result.push({id:member.key,key:member.key,title:member.title,status:'starting',age:'',current:false,kind:'subagent',turns:0,messages:0,cwd:'',untitled:false,
-      agentDetails:{provisional:true,summary:'The spawn request is visible in the conversation. Waiting for the runtime to report this agent’s identity and state.',error:'',model:'',filesRead:[],filesWritten:[]}})
+    const matched = result.findIndex(row => member.runtimeId ? row.id === member.runtimeId : row.id === member.key || row.agentDetails?.requestKey === member.key || row.title === member.title)
+    if (matched >= 0) {
+      const row = result[matched]!
+      result[matched] = {...row, agentDetails: {summary:'',error:'',model:'',filesRead:[],filesWritten:[],...row.agentDetails,requestKey:member.key,baseAgent:row.agentDetails?.baseAgent || member.baseAgent || "",goal:row.agentDetails?.goal || member.prompt || ""}}
+      continue
+    }
+    result.push({id:member.key,key:member.key,title:member.title,status:member.status === 'working' ? 'starting' : member.status,age:'',current:false,kind:'subagent',turns:0,messages:0,cwd:'',untitled:false,
+      agentDetails:{provisional:true,baseAgent:member.baseAgent || "",goal:member.prompt || "",summary:agentState(member.status).priority < 2 ? 'The spawn request is visible in the conversation. Waiting for the runtime to report this agent’s identity and state.' : 'This request has finished. Its runtime details were not recorded; the original request is retained.',error:'',model:'',filesRead:[],filesWritten:[]}})
   }
   return result
 }
 
-export function AgentRoster({ rows }: { rows: readonly SessionRow[] }): ReactElement {
+export function AgentRoster({ rows, onInspect }: { rows: readonly SessionRow[]; onInspect?: (id: string) => void }): ReactElement {
   const ordered = [...rows].sort((a, b) => agentState(a.status).priority - agentState(b.status).priority)
   const current = ordered.filter(row => agentState(row.status).priority < 2)
   const completed = ordered.filter(row => agentState(row.status).priority >= 2)
@@ -40,7 +44,7 @@ export function AgentRoster({ rows }: { rows: readonly SessionRow[] }): ReactEle
     const latest = info?.toolCalls?.findLast(call => call.state === 'working')
     const preview = info?.error || (state.tone === 'working' ? info?.notes?.at(-1) || latest?.arg || info?.thinking?.at(-1) : '') || info?.summary
     return <details className="agent-record" key={row.id} data-state={state.tone}>
-      <summary>
+      <summary onClick={event => { if (onInspect) { event.preventDefault(); onInspect(row.id) } }}>
         <Icon name="chevron" size={13} />
         <span className="agent-record__title">{row.title}</span>
         <span className="agent-record__state">{state.label}</span>
@@ -70,7 +74,7 @@ export function AgentRoster({ rows }: { rows: readonly SessionRow[] }): ReactEle
   </div>
 }
 
-function AgentControls({ id, active }: { id: string; active: boolean }): ReactElement {
+export function AgentControls({ id, active }: { id: string; active: boolean }): ReactElement {
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
   const [feedback, setFeedback] = useState('')

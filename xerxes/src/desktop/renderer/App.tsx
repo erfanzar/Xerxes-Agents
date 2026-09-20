@@ -21,6 +21,8 @@ import { PanelDivider, usePanelLayout } from './layout.js'
 import { keyedActivityGroups, isGroupedActivity } from "./activityGroups.js"
 import { ToolCallRow, toolHasFailed } from "./Execution.js"
 import { activityFleetRows, AgentRoster } from './AgentRoster.js'
+import { AgentInspector } from './AgentInspector.js'
+import { OutputViewer } from './OutputViewer.js'
 import { Icon } from './Icon.js'
 import { FirstRunSetup } from './Setup.js'
 import { RemoteWorkspaceGate } from './RemoteWorkspaceGate.js'
@@ -140,6 +142,7 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
   const [railChoice, setRail] = useState<'files' | 'review' | 'activity' | null | undefined>(undefined)
   const [filesExpanded, setFilesExpanded] = useState(false)
   const [reviewPath, setReviewPath] = useState('')
+  const [selectedAgent, setSelectedAgent] = useState('')
   const contextRequiresFullWidth = windowWidth < (focused ? 0 : layout.sidebarWidth) + layout.inspectorWidth + 320
   // Show activity on entry without covering the conversation in a narrow window.
   // An explicit open/close choice survives session changes and resizing.
@@ -147,13 +150,14 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
   const [page, setPage] = useState<'agents' | 'extensions' | 'artifacts' | null>(null)
   const navigate = (next: DesktopPanel, filePath?: string): void => {
     if (next === 'review') setReviewPath(filePath ?? '')
+    if (next === 'activity') setSelectedAgent(filePath ?? '')
     if (next === 'activity') requestAnimationFrame(() => document.querySelector('.desktop-rail .studio-sheet-content')?.scrollTo({ top: 0 }))
     if (next === 'files' || next === 'review' || next === 'activity') setRail(next)
     else if (next === 'agents' || next === 'extensions' || next === 'artifacts') { setPage(next); setPanel(null) }
     else if (next === null) { setPage(null); setPanel(null) }
     else setPanel(next)
   }
-  useEffect(() => { setPanel(null); setPage(null) }, [snap.cwd, snap.sessionKey])
+  useEffect(() => { setPanel(null); setPage(null); setSelectedAgent('') }, [snap.cwd, snap.sessionKey])
   return (
     <DesktopNavigation.Provider value={navigate}><ActivityVisible.Provider value={rail === 'activity'}>
     <div className={`app atelier${trafficLights ? '' : ' app--no-traffic-lights'}${focused ? ' atelier--focus' : ''}`} style={{ '--sidebar-width': `${layout.sidebarWidth}px`, '--inspector-width': `${layout.inspectorWidth}px` } as React.CSSProperties}>
@@ -164,7 +168,7 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
         {!focused && <PanelDivider label="Resize sessions" value={layout.sidebarWidth} min={180} max={360} onChange={sidebarWidth => setLayout({ sidebarWidth })} />}
         {snap.noWorkspace ? snap.storageScope?.startsWith('ssh:') ? <RemoteWorkspaceGate /> : <WorkspaceGate /> : <Chat snap={snap} page={page} />}
         {rail && rail !== 'review' && <PanelDivider label="Resize inspector" value={layout.inspectorWidth} min={260} max={520} reverse onChange={inspectorWidth => setLayout({ inspectorWidth })} />}
-        {rail && <DesktopRail panel={rail} snap={snap} close={() => setRail(null)} filesExpanded={filesExpanded} reviewPath={reviewPath} {...(!contextRequiresFullWidth ? { toggleFilesExpanded: () => setFilesExpanded(value => !value) } : {})} activityDetails={<ActivityDetails snap={snap} />} />}
+        {rail && <DesktopRail activityFocused={Boolean(selectedAgent)} panel={rail} snap={snap} close={() => setRail(null)} filesExpanded={filesExpanded} reviewPath={reviewPath} {...(!contextRequiresFullWidth ? { toggleFilesExpanded: () => setFilesExpanded(value => !value) } : {})} activityDetails={<ActivityDetails snap={snap} selectedAgent={selectedAgent} />} />}
 
       </div>
       <SettingsModal snap={snap} />
@@ -738,6 +742,7 @@ function SessionCell({
  * Rows are read-only status; subagents are supervised from the Fleet rail.
  */
 function FleetChip({ snap }: { snap: Snapshot }): ReactElement {
+  const navigate = useDesktopNavigation()
   const [open, setOpen] = useState(false)
   const fleet = snap.fleet
   if (fleet.length === 0) return <></>
@@ -757,11 +762,11 @@ function FleetChip({ snap }: { snap: Snapshot }): ReactElement {
           <div className="fleetpop" role="menu" aria-label="Subagents">
             <div className="cap fleetpop__cap">Subagents · {fleet.length}</div>
             {fleet.map(row => (
-              <div key={row.id} className="fleetpop__row">
+              <button key={row.id} className="fleetpop__row" role="menuitem" onClick={() => {setOpen(false);navigate('activity',row.id)}}>
                 <span className="sess__dot" style={{ background: statusColor(row.status) }} />
                 <span className="fleetpop__t">{row.title}</span>
                 <span className="fleetpop__s">{row.status}</span>
-              </div>
+              </button>
             ))}
           </div>
         </>
@@ -984,11 +989,11 @@ function AgentsCard({ members }: { members: readonly AgentMember[] }): ReactElem
       {open && (
         <div className="acard__list">
           {members.map(member => (
-            <div key={member.key} className="acard__row">
+            <button key={member.key} className="acard__row" onClick={() => navigate('activity', member.runtimeId || member.key)} aria-label={`Inspect agent: ${member.title}`}>
               <span className="sess__dot" style={{ background: statusColor(member.status) }} />
               <span className="acard__t">{member.title}</span>
-              <span className="acard__s" data-state={member.status}>{member.status}</span>
-            </div>
+              <span className="acard__s" data-state={member.status}>{member.status}</span><Icon name="chevron" size={12}/>
+            </button>
           ))}
         </div>
       )}
@@ -1131,6 +1136,7 @@ function BlockView({ block }: { block: Snapshot['blocks'][number] }): ReactEleme
       </div>
     )
   }
+  if (block.text.length > 320 || block.text.split('\n').length > 4) return <details className="activity-notice"><summary><Icon name="activity" size={14}/><span>{block.text.split('\n')[0]!.slice(0,160)}</span><Icon name="chevron" size={12}/></summary><OutputViewer text={block.text} label="Activity details" /></details>
   return (
     <div className={`frow frow--sys${block.error ? ' frow--err' : ''}`}>
       <span className="frow__icon">▤</span>
@@ -1677,8 +1683,13 @@ function GoalObjective({ text }: { text: string }): ReactElement {
   return <><p className={`goal-objective${expanded ? " is-expanded" : ""}`}>{text}</p>{text.length > 180 && <button className="goal-expand" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>{expanded ? "Show less" : "Show full goal"}</button>}</>
 }
 
-export function ActivityDetails({ snap }: { snap: Snapshot }): ReactElement | null {
+export function ActivityDetails({ snap, selectedAgent = '' }: { snap: Snapshot; selectedAgent?: string }): ReactElement | null {
+  const navigate = useDesktopNavigation()
   const fleet = activityFleetRows(snap.fleet, snap.blocks)
+  if (selectedAgent) {
+    const row = fleet.find(agent => agent.id === selectedAgent || agent.agentDetails?.requestKey === selectedAgent)
+    return <section className="agent-inspector"><button className="agent-inspector__back" onClick={() => navigate('activity')}>← All activity</button>{row ? <AgentInspector key={snap.sessionKey + ':' + row.id} row={row} rows={fleet} sessionKey={snap.sessionKey} online={snap.connection === 'online'} /> : <p role="status">This agent is no longer available in this session. Return to activity to refresh its status.</p>}</section>
+  }
   const goal = parseGoal(snap.goal)
   return (
     <aside className="activity-details">
@@ -1706,7 +1717,7 @@ export function ActivityDetails({ snap }: { snap: Snapshot }): ReactElement | nu
       ) : null}
       <SessionDiagnostics snap={snap} />
       {fleet.length > 0 && <><div className="rail__cap">Agents <span>{fleet.length}</span></div>
-      <AgentRoster rows={fleet} /></>}
+      <AgentRoster rows={fleet} onInspect={id => navigate('activity', id)} /></>}
       {snap.skillSuggestions.length > 0 && (
         <>
           <div className="rail__cap">Skill suggestions · {snap.skillSuggestions.length}</div>
@@ -1753,6 +1764,9 @@ export function ActivityDetails({ snap }: { snap: Snapshot }): ReactElement | nu
 function GlobalKeys({ snap }: { snap: Snapshot }): ReactElement | null {
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
+      // A native modal owns keyboard focus, including Escape. Reading output
+      // must never cancel the running task underneath it.
+      if (event.defaultPrevented || document.querySelector('dialog[open]')) return
       const meta = event.metaKey || event.ctrlKey
       if (meta && event.key === ',') {
         event.preventDefault()

@@ -1379,6 +1379,7 @@ export class GatewayClient extends EventEmitter {
     try {
       const agentId = typeof params.agent_id === 'string' ? params.agent_id.trim() : ''
       const raw = await this.nativeSuccess('initialize', {
+        session_owned_turns: true,
         project_dir: this.projectDir,
         session_key: nextSessionKey,
         ...(agentId ? { agent_id: agentId } : {})
@@ -1428,6 +1429,7 @@ export class GatewayClient extends EventEmitter {
       const restoringSocket = this.socket
       if (preserve) this.recoveryDelivery = { sessionId: id, replay: [], interactions: [], live: [], bytes: 0 }
       const raw = await this.nativeSuccess('initialize', {
+        session_owned_turns: true,
         project_dir: this.projectDir,
         resume_session_id: id,
         session_key: nextSessionKey,
