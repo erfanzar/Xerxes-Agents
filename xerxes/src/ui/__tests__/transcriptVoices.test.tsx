@@ -85,6 +85,33 @@ describe('transcript voices', () => {
     resetUiState()
   })
 
+  it('paints the Xerxes speaker label purple while keeping the reply text neutral', async () => {
+    const spans = await spansOf({ role: 'assistant', text: 'Reply body' })
+    expect(findText(spans, 'Xerxes')?.fg).toBe('#b39cf0')
+    expect(findText(spans, 'Reply body')?.fg).not.toBe('#b39cf0')
+  })
+
+  it('leaves exactly one blank row above and below the speaker label at both transcript widths', async () => {
+    for (const width of [40, 100]) {
+      for (const leadGap of [false, true]) {
+        const setup = await testRender(<box flexDirection="column"><text>Previous tool</text><MessageLine leadGap={leadGap} msg={{ role: 'assistant', text: 'Reply body' }} t={theme} /></box>, { width, height: 12 })
+        try {
+          for (let attempt = 0; attempt < 20; attempt++) {
+            await setup.flush()
+            if (setup.captureCharFrame().includes('Reply body')) break
+            await Bun.sleep(10)
+          }
+          const rows = setup.captureCharFrame().split('\n').map(row => row.trim())
+          const speaker = rows.findIndex(row => row.includes('Xerxes'))
+          expect(speaker).toBe(2)
+          expect(rows[speaker - 1]).toBe('')
+          expect(rows[speaker + 1]).toBe('')
+          expect(rows[speaker + 2]).toBe('Reply body')
+        } finally { await act(async () => setup.renderer.destroy()) }
+      }
+    }
+  })
+
   it('marks the user turn with the prompt glyph on a filled band', async () => {
     const spans = await spansOf({ role: 'user', text: 'refactor the gateway' })
 
@@ -152,20 +179,20 @@ describe('transcript voices', () => {
     expect(findText(spans, VOICE.system(theme).glyph)?.fg).toBe('#b39cf0')
   })
 
-  it('opens the assistant turn with a small accent ✦ and neutral prose', async () => {
+  it('opens the assistant turn with a purple label and neutral prose', async () => {
     const assistant = VOICE.assistant(theme)
 
     // No bar — the rail owns the left edge; the ✦ is the only marker.
     expect(assistant.bar).toBe('')
     expect(assistant.glyph).toBe('✦')
-    expect(assistant.glyphColor).toBe(theme.color.accent)
+    expect(assistant.glyphColor).toBe(theme.color.system)
     // The ramp's `prose` step, one below the `title` the user's own words
     // get — see the voice table for why the two must not be the same.
     expect(assistant.body).toBe(theme.ds.prose)
 
     const spans = await spansOf({ role: 'assistant', text: 'Release gate — three commands in order.' })
 
-    expect(findText(spans, '✦')?.fg).toBe('#c5cdd7')
+    expect(findText(spans, '✦')?.fg).toBe('#b39cf0')
   })
 
   it('keeps every voice visually distinct in code mode', async () => {

@@ -89,10 +89,11 @@ describe('transcript spacing contract', () => {
     const bare = estimatedMsgHeight({ role: 'assistant', text: 'hello' }, 80, { compact: false, details: true })
 
     expect(user).toBe(4)
-    expect(bare).toBe(2) // Author header plus one prose row.
+    expect(bare).toBe(4) // Speaker row, surrounding blank rows, and prose.
+    expect(estimatedMsgHeight({ role: 'assistant', text: 'hello' }, 80, { compact: false, details: true, leadGap: true })).toBe(4)
   })
 
-  it('gives a diff its row from leadGap instead of a hardcoded pair', () => {
+  it('keeps assistant diff speaker spacing independent of the group-boundary gap', () => {
     const withGap = estimatedMsgHeight(
       { kind: 'diff', role: 'assistant', text: 'x' },
       80,
@@ -104,7 +105,8 @@ describe('transcript spacing contract', () => {
       { compact: false, details: true, leadGap: false }
     )
 
-    expect(withGap - without).toBe(1)
+    expect(withGap).toBe(4)
+    expect(without).toBe(4)
   })
 
   it('reserves nothing for the separator that was never rendered', () => {

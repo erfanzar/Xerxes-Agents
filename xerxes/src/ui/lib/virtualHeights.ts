@@ -128,7 +128,10 @@ export const estimatedMsgHeight = (
 
   const bodyWidth = transcriptBodyWidth(cols, msg.role, userPrompt, TERMUX_TUI_MODE)
   const text = msg.text
-  let h = wrappedLines(text || ' ', bodyWidth) + (msg.role === 'assistant' && /\S/.test(text) ? 1 : 0)
+  const hasAssistantFrame = msg.role === 'assistant' && msg.kind !== 'trail' && /\S/.test(text)
+  // Speaker row plus one blank row on either side of it.
+  let h = wrappedLines(text || ' ', bodyWidth) + (hasAssistantFrame ? 3 : 0)
+  let hasVisibleDetails = false
 
   if (!compact && msg.role === 'assistant') {
     // Paragraph gaps add up to 6 extra rows of breathing room. Slice
@@ -142,7 +145,7 @@ export const estimatedMsgHeight = (
   if (details) {
     const hasVisibleTools = toolsVisible && Boolean(msg.tools?.length)
     const hasVisibleThinking = thinkingVisible && /\S/.test(msg.thinking ?? '')
-    const hasVisibleDetails = hasVisibleTools || hasVisibleThinking
+    hasVisibleDetails = hasVisibleTools || hasVisibleThinking
 
     if (hasVisibleDetails) {
       // Thinking renders collapsed by default: a single `▸ thinking` header
@@ -175,8 +178,9 @@ export const estimatedMsgHeight = (
   // above them is a different kind. The caller resolves the boundary against
   // the previous row (see domain/blockLayout.ts::hasLeadGap) and passes the
   // result here so the estimate matches the rendered marginTop before Yoga
-  // remeasures. user / diff / slash never set this — they own their margins.
-  if (leadGap) {
+  // remeasures. The assistant frame already owns its leading row; only a
+  // preceding detail trail can additionally consume the group-boundary gap.
+  if (leadGap && (!hasAssistantFrame || hasVisibleDetails)) {
     h++
   }
 

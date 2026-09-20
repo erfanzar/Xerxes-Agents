@@ -130,11 +130,11 @@ function UserMessage({ msg, t }: { msg: Msg; t: Theme }) {
 }
 
 /** Shared live/settled message layout, matching the design's author and body rows. */
-export function AssistantFrame({children, leadGap, t}: {children: ReactNode; leadGap?: boolean; t: Theme}) {
+export function AssistantFrame({children, t}: {children: ReactNode; leadGap?: boolean; t: Theme}) {
   return (
-    <Box flexDirection="column" flexShrink={0} marginTop={leadGap ? 1 : 0}>
-      <Text bold color={t.ds.title}><Span color={t.color.accent}>✦ </Span>Xerxes</Text>
-      <Box flexDirection="column" paddingLeft={3} minWidth={0}>{children}</Box>
+    <Box flexDirection="column" flexShrink={0} marginTop={1}>
+      <Text bold color={VOICE.assistant(t).glyphColor}>✦ Xerxes</Text>
+      <Box flexDirection="column" marginTop={1} paddingLeft={3} minWidth={0}>{children}</Box>
     </Box>
   )
 }
@@ -916,8 +916,7 @@ function MessageLineView({
           t={t}
           visibility={visibility}
         />
-        {/* The trail already opened the band, so the prose inside it never
-            adds a second gap. */}
+        {/* The speaker label keeps its own breathing room after the trail. */}
         {msg.text ? <AssistantMessage msg={msg} rail={rail} t={t} /> : null}
       </Box>
     ) : (

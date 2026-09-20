@@ -7,7 +7,7 @@
 // The boot emblem animates a lapis → violet → gold gradient
 // (`derafshGradientPalette`). That gradient is the legend for this table:
 //
-//   accent → the model, opening each of its turns
+//   violet → the model's speaker label, opening each of its turns
 //   gold   → the human
 //   lapis  → tools
 //   violet → the system, and its own quieter thinking
@@ -38,14 +38,14 @@ export interface Voice {
 }
 
 export const VOICE: Record<Role, (t: Theme) => Voice> = {
-  // No bar; a small accent ✦ opens each turn while the prose stays neutral.
+  // No bar; a purple ✦ Xerxes label opens each reply while prose stays neutral.
   // The glyph renders once, at the head of the turn body — see TurnGlyph in
   // opentui/messageLine.tsx, which is the only consumer.
   // Prose, not titles. The canvas gives the model's answer the ramp's `prose`
   // step and keeps `title` for the user's own words and for row headings, so
   // scrolling fast the human's sentences sit a shade brighter than the
   // machine's — the same job the filled user band does, one step quieter.
-  assistant: t => ({ bar: '', body: t.ds.prose, glyph: '✦', glyphColor: t.color.accent }),
+  assistant: t => ({ bar: '', body: t.ds.prose, glyph: '✦', glyphColor: t.color.system }),
   // Rare enough that a full-line hue is affordable and instantly identifiable.
   system: t => ({ bar: '', body: t.color.system, glyph: '·', glyphColor: t.color.system }),
   // ⏺ outcome glyph, tinted per row by the renderer (faint for quiet
