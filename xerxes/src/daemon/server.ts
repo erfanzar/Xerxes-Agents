@@ -2060,7 +2060,10 @@ export class DaemonServer {
     }
     if (method === "workspace.diff") {
       const session = this.runtime.sessionStatus(sessionKey(connection, params));
-      return await collectGitDiff({ cwd: session?.cwd || this.projectDirectory || process.cwd(), includeUntracked: true }) as unknown as JsonRpcPayload;
+      if (params.path !== undefined && typeof params.path !== 'string') throw new ValidationError('path', 'must be a workspace-relative file path', params.path);
+      const limit = params.untracked_limit ?? 50;
+      if (typeof limit !== 'number' || !Number.isSafeInteger(limit) || limit < 1 || limit > 10000) throw new ValidationError('untracked_limit', 'must be an integer between 1 and 10000', limit);
+      return await collectGitDiff({ cwd: session?.cwd || this.projectDirectory || process.cwd(), includeUntracked: true, maxUntracked: limit, ...(typeof params.path === 'string' ? { path: params.path } : {}) }) as unknown as JsonRpcPayload;
     }
     if (method === 'session.history') {
       const session = this.runtime.sessionStatus(sessionKey(connection, params));
@@ -3325,7 +3328,9 @@ export class DaemonServer {
   ): Promise<JsonRpcPayload> {
     if (typeof params.path_prefix === "string") {
       const session = this.runtime.sessionStatus(sessionKey(connection, params));
-      return { ok: true, kind: "path", completions: await completePath(params.path_prefix, session?.cwd ?? process.cwd(), true) };
+      const offset = params.path_offset ?? 0;
+      if (typeof offset !== 'number' || !Number.isSafeInteger(offset) || offset < 0 || offset > 100000) throw new ValidationError('path_offset', 'must be an integer between 0 and 100000', offset);
+      return { ok: true, kind: "path", completions: await completePath(params.path_prefix, session?.cwd ?? process.cwd(), true, offset) };
     }
     const text = stringValue(params.text);
     const stripped = text.trim();
@@ -11298,6 +11303,7 @@ async function completePath(
   text: string,
   cwd: string,
   directoryBrowse = false,
+  offset = 0,
 ): Promise<JsonRpcPayload[]> {
   const token = directoryBrowse ? text : text.trim().split(/\s+/).at(-1) ?? "";
   const mention = !directoryBrowse && token.startsWith("@");
@@ -11351,7 +11357,7 @@ async function completePath(
           !base || entry.name.toLowerCase().startsWith(base.toLowerCase()),
       )
       .sort((left, right) => left.name.localeCompare(right.name))
-      .slice(0, 50)
+      .slice(offset, offset + 50)
       .map((entry) => {
         const directorySuffix = entry.isDirectory() ? "/" : "";
         const label = `${entry.name}${directorySuffix}`;

@@ -319,6 +319,12 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
       ipcMain.handle(channel, (event, ...args: unknown[]) => windowRoutes.invoke(channel, event, args))
     }
   }
+  const chromeState = () => ({ trafficLights: process.platform === 'darwin' && !window.isFullScreen() })
+  const sendChrome = () => { if (!contents.isDestroyed()) contents.send('desktop:window-chrome', chromeState()) }
+  handle('desktop:window-chrome', () => chromeState())
+  window.on('enter-full-screen', sendChrome)
+  window.on('leave-full-screen', sendChrome)
+  contents.once('destroyed', () => { window.removeListener('enter-full-screen', sendChrome); window.removeListener('leave-full-screen', sendChrome) })
   /** Bind a fresh connection to the selected workspace on the shared daemon. */
   function useProject(directory: string, sessionId: string | null = null): void {
     if (window.isDestroyed()) throw new Error('Workspace window is closed')

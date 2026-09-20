@@ -36,3 +36,12 @@ test('malformed frames are ignored and progress is bounded',()=>{
  for(let i=0;i<120;i++)rows=foldAgentEvent(rows,event('text_part',{text:`line ${i}`}))
  expect(rows[0]?.agentDetails?.notes).toHaveLength(40)
 })
+
+test('a resumed agent becomes working again and clears the previous failure',()=>{
+ let rows:readonly SessionRow[]=foldAgentEvent([],event('turn_end',{status:'failed',error:'Old error',summary:'Old failed attempt'}),100)
+ rows=foldAgentEvent(rows,event('turn_begin'),200)
+ expect(rows[0]?.status).toBe('running')
+ expect(rows[0]?.agentDetails?.error).toBe('')
+ expect(rows[0]?.agentDetails?.summary).toBe('')
+ expect(rows[0]?.agentDetails?.startedAt).toBe(200)
+})

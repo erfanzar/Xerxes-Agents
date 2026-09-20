@@ -28,7 +28,8 @@ interface ThinkingRun {
   readonly kind: 'thinking'
   text: string
 }
-type Run = ToolRun | TextRun | ThinkingRun
+interface NoticeRun { readonly kind: 'notice'; readonly text: string; readonly error: boolean }
+type Run = ToolRun | TextRun | ThinkingRun | NoticeRun
 
 /** Coarse duration label from a wire millisecond count. */
 function dur(ms: unknown): string {
@@ -142,6 +143,7 @@ export class BlockBuilder {
   private seq = 1
   /** Contiguous same-kind event runs, in stream order. */
   private runs: Run[] = []
+  private runIds = new WeakMap<Run, number>()
   /** Every tool call/result of the turn by id, regardless of which run holds the row. */
   private tools = new Map<string, ToolItem>()
   /**
@@ -178,11 +180,12 @@ export class BlockBuilder {
    * freshly opened one — this is what makes think→tools→think produce two
    * thinking blocks instead of appending to the first.
    */
-  private openRun(kind: Run['kind']): Run {
+  private openRun(kind: Exclude<Run['kind'], 'notice'>): Run {
     const last = this.runs[this.runs.length - 1]
     if (last && last.kind === kind) return last
     const run: Run =
       kind === 'tools' ? { kind: 'tools', order: [] } : kind === 'thinking' ? { kind: 'thinking', text: '' } : { kind: 'text', text: '' }
+    this.runIds.set(run, this.nextId())
     this.runs.push(run)
     return run
   }
@@ -294,9 +297,11 @@ export class BlockBuilder {
           (typeof payload.message === 'string' && payload.message) ||
           ''
         if (!message) break
-        this.finalize()
         const severity = String(payload.severity ?? payload.level ?? 'info').toLowerCase()
-        this.blocks.push({ kind: 'notice', id: this.nextId(), error: severity.includes('error') || severity.includes('fatal'), text: message })
+        const notice: NoticeRun = { kind: 'notice', error: severity.includes('error') || severity.includes('fatal'), text: message }
+        const id = this.nextId()
+        if (this.runs.length) { this.runIds.set(notice, id); this.runs.push(notice) }
+        else this.blocks.push({ ...notice, id })
         break
       }
       default:
@@ -356,9 +361,9 @@ export class BlockBuilder {
 
   /** Render one run as a display block. `streaming` tails the live one. */
   private runBlock(run: Run, index: number, streaming: boolean): Block {
-    // Scratch ids live above any committed id and descend per run, so React
-    // keys stay stable while runs only ever append during a turn.
-    const id = Number.MAX_SAFE_INTEGER - index
+    // Allocate identity at first activity and retain it through finalization.
+    const id = this.runIds.get(run)!
+    if (run.kind === 'notice') return { ...run, id }
     if (run.kind === 'tools') {
       const items = run.order.map(itemId => this.tools.get(itemId)).filter((t): t is ToolItem => t !== undefined)
       // `running` follows the items, not the caret: a still-working tool is
@@ -378,9 +383,10 @@ export class BlockBuilder {
     }
     for (const [index, run] of this.runs.entries()) {
       const block = this.runBlock(run, index, false)
-      if (block.kind === 'tools') this.blocks.push({ ...block, id: this.nextId(), running: false })
-      else if (block.kind === 'thinking') this.blocks.push({ ...block, id: this.nextId(), streaming: false })
-      else if (block.kind === 'agent') this.blocks.push({ ...block, id: this.nextId(), streaming: false })
+      if (block.kind === 'tools') this.blocks.push({ ...block, running: false })
+      else if (block.kind === 'thinking') this.blocks.push({ ...block, streaming: false })
+      else if (block.kind === 'agent') this.blocks.push({ ...block, streaming: false })
+      else if (block.kind === 'notice') this.blocks.push(block)
     }
     this.runs = []
     this.tools.clear()

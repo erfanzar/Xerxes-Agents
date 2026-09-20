@@ -8,6 +8,7 @@ import { daemonAddress } from '../../../src/desktop/main/spawn.js'
 import { requestDaemonControl } from '../../../src/daemon/controlClient.js'
 import { GatewayClient } from '../../../src/ui/gatewayClient.js'
 import { prepareManagedRuntime } from '../../../src/ui/lib/managedRuntime.js'
+import { DaemonTranscriptStore, normalizeDaemonTranscript } from '../../../src/session/daemonTranscript.js'
 
 const root = await mkdtemp('/tmp/x-runtime-update-')
 const oldBuild = 'aaaaaaaaaaaaaaaa', newBuild = 'bbbbbbbbbbbbbbbb'
@@ -21,6 +22,15 @@ try {
   for (const mode of ['local', 'managed-remote']) {
     const home = join(root, mode), workspace = join(home, 'workspace')
     await mkdir(workspace, { recursive: true })
+    // Empty unsent sessions are intentionally not durable. Seed a completed
+    // exchange so this acceptance actually checks saved conversation recovery.
+    const sessionId = 'aaaabbbbccccdddd'
+    const store = new DaemonTranscriptStore({ directory: join(home, 'sessions'), currentProjectDirectory: workspace })
+    const transcript = normalizeDaemonTranscript({ session_id: sessionId, turn_count: 1,
+      messages: [{ role: 'user', content: 'Retain this question' }, { role: 'assistant', content: 'Retain this answer' }],
+    }, { requestedSessionKey: sessionId, currentProjectDirectory: workspace })
+    if (!transcript) throw new Error('Could not prepare saved conversation')
+    await store.save(transcript)
     process.env.XERXES_HOME = home
     delete process.env.XERXES_DAEMON_SOCKET
     delete process.env.XERXES_EXPECTED_DAEMON_BUILD_ID
@@ -36,7 +46,7 @@ try {
       }
       const before = await rpc.call<Record<string, unknown>>('runtime.status')
       if (before.daemon_build_id !== oldBuild) throw new Error('Old build did not start')
-      const opened = await rpc.call<{ session: { id: string } }>('initialize', { session_key: 'preserved', history_limit: 100 })
+      const opened = await rpc.call<{ session: { id: string } }>('initialize', { resume_session_id: sessionId, history_limit: 100 })
       if (mode === 'local') {
         const updated = await rpc.restartRuntime()
         if (updated.ok !== true) throw new Error(JSON.stringify(updated))
@@ -50,8 +60,10 @@ try {
       const check = new DaemonRpc({ projectDir: workspace, env })
       try {
         const after = await check.call<Record<string, unknown>>('runtime.status')
-        const resumed = await check.call<{ session: { id: string } }>('initialize', { resume_session_id: opened.session.id, history_limit: 100 })
-        if (after.daemon_build_id !== newBuild || after.pid === before.pid || resumed.session.id !== opened.session.id) throw new Error('Build replacement or session preservation failed')
+        const resumed = await check.call<{ session: { id: string; message_count: number } }>('initialize', { resume_session_id: opened.session.id, history_limit: 100 })
+        if (after.daemon_build_id !== newBuild || after.pid === before.pid || resumed.session.id !== opened.session.id || resumed.session.message_count !== 2) throw new Error('Build replacement or session preservation failed')
+        const retained = await store.load(sessionId)
+        if (JSON.stringify(retained?.messages) !== JSON.stringify(transcript.messages)) throw new Error('Saved conversation content changed during update')
         console.log(`PASS ${mode}: ${oldBuild} -> ${newBuild}; new PID; original session preserved`)
       } finally { check.dispose() }
     } finally {

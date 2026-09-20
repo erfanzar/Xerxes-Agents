@@ -5,7 +5,8 @@ import { expect, test } from 'bun:test'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { ExecutionDetails, executionView, ToolCallRow } from '../src/desktop/renderer/Execution.js'
-import { AgentRoster } from '../src/desktop/renderer/AgentRoster.js'
+import { activityFleetRows, AgentRoster } from '../src/desktop/renderer/AgentRoster.js'
+import { CommandActivity } from '../src/desktop/renderer/CommandActivity.js'
 import type { SessionRow } from '../src/desktop/renderer/types.js'
 import type { ToolItem } from '../src/desktop/renderer/types.js'
 import { BlockBuilder } from '../src/desktop/renderer/blocks.js'
@@ -28,10 +29,12 @@ test('collapsed tool rows show complete command arguments and surface nonzero ex
   expect(summary).toContain('Failed')
   expect(summary).toContain('Permission denied')
 })
-test('agent roster prioritizes failures and active work and exposes reported outcomes and paths', () => {
+test('agent roster puts active work first and collapses failed and completed history', () => {
   const base: SessionRow = { id: 'a', key: 'a', title: 'Completed review', status: 'completed', age: '', current: false, kind: 'subagent', turns: 0, messages: 0, cwd: '', untitled: false }
   const html = renderToStaticMarkup(createElement(AgentRoster, { rows: [base, { ...base, id: 'b', title: 'Active review', status: 'running' }, { ...base, id: 'c', title: 'Failed review', status: 'failed', agentDetails: { summary: 'Checked cancellation', error: 'Permission denied', model: 'test-model', toolCount: 4, filesRead: ['src/deep/path.ts'], filesWritten: [] } }] }))
-  expect(html.indexOf('Failed review')).toBeLessThan(html.indexOf('Active review'))
+  expect(html.indexOf('Active review')).toBeLessThan(html.indexOf('Failed review'))
+  expect(html.indexOf('Past agents')).toBeLessThan(html.indexOf('Failed review'))
+  expect(html).toContain('2 · 1 failed')
   expect(html.indexOf('Active review')).toBeLessThan(html.indexOf('Completed review'))
   expect(html).toContain('Permission denied')
   expect(html).toContain('src/deep/path.ts')
@@ -63,7 +66,7 @@ test('activity grouping preserves prose and keeps approval operations outside di
   const { groupActivity } = await import('../src/desktop/renderer/activityGroups.js')
   const blocks = [{ kind: 'thinking' as const, id: 1, text: 'Inspect', streaming: false }, { kind: 'tools' as const, id: 2, items: [item], running: false }, { kind: 'agent' as const, id: 3, text: 'Result', streaming: false }]
   expect(groupActivity(blocks).map(group => group.length)).toEqual([2, 1])
-  expect(groupActivity(blocks, item.id).map(group => group.length)).toEqual([1, 1, 1])
+  expect(groupActivity(blocks, item.id).map(group => group.length)).toEqual([2, 1])
   expect(groupActivity(blocks).flat()).toEqual(blocks)
 })
 
@@ -99,4 +102,41 @@ test('completed agent history is collapsed without hiding failures or active age
   expect(html.indexOf('Research in progress')).toBeLessThan(html.indexOf('agent-roster__history'))
   expect(html.indexOf('Finished research')).toBeGreaterThan(html.indexOf('agent-roster__history'))
   expect(html).not.toContain('0 tools')
+})
+
+test('reasoning owns the work group before tools, notices and agents arrive', () => {
+  const builder = new BlockBuilder()
+  builder.push('think_part', { think: 'Inspect' })
+  const initial = keyedActivityGroups(builder.snapshot(true))[0]!.key
+  builder.push('tool_call', { id: 'slow-call', name: 'exec_command', arguments: { cmd: 'bun test' } })
+  builder.push('notification', { message: 'Background agent completed' })
+  builder.pushAgents([{ key: 'child', title: 'Reviewer', status: 'working' }])
+  const during = builder.snapshot(true)
+  expect(keyedActivityGroups(during)).toHaveLength(1)
+  expect(keyedActivityGroups(during)[0]!.key).toBe(initial)
+  expect(during.find(block => block.kind === 'tools')?.kind === 'tools' && (during.find(block => block.kind === 'tools') as Extract<typeof during[number], { kind: 'tools' }>).items[0]?.state).toBe('working')
+  builder.push('tool_result', { tool_call_id: 'slow-call', return_value: 'kept result' })
+  expect(builder.snapshot(true).filter(block => block.kind === 'tools')).toHaveLength(1)
+  builder.finalize()
+  expect(keyedActivityGroups(builder.snapshot(false))[0]!.key).toBe(initial)
+  expect(builder.snapshot(false).some(block => block.kind === 'tools' && block.items[0]?.output === 'kept result')).toBe(true)
+})
+
+test('unconfirmed spawn requests stay visible without fake agent controls', () => {
+  const rows=activityFleetRows([], [{kind:'agents',id:1,members:[{key:'call:0',title:'Review code',status:'working'}]}])
+  expect(rows).toHaveLength(1)
+  expect(rows[0]?.agentDetails?.provisional).toBe(true)
+  const html=renderToStaticMarkup(createElement(AgentRoster,{rows}))
+  expect(html).toContain('Awaiting runtime status')
+  expect(html).not.toContain('Stop agent')
+  expect(activityFleetRows([{...rows[0]!,id:'real-id',status:'working',agentDetails:undefined}], [{kind:'agents',id:1,members:[{key:'call:0',runtimeId:'real-id',title:'Different title',status:'working'}]}])).toHaveLength(1)
+})
+
+test('long commands use a collapsed compact summary without constructing output', () => {
+  const html=renderToStaticMarkup(createElement(CommandActivity,{row:{id:'command-1',kind:'shell',title:'env '+ 'LONG_VARIABLE=value '.repeat(80)+'bun test',detail:'/repo',state:'running'},sessionKey:'session',online:true}))
+  expect(html).toContain('command-activity__preview')
+  expect(html).toContain('Shell command')
+  expect(html).toContain('Running')
+  expect(html).not.toContain('aria-label="Command output"')
+  expect(html).not.toContain('<strong>env ')
 })

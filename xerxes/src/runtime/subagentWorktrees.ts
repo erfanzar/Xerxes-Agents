@@ -208,8 +208,9 @@ export function nativeSubagentWorktrees(repository: string, options: { setupConf
           await allocateGit(['read-tree', base], sourceRoot, environment)
           await allocateGit(['add', '-A', '--', '.'], sourceRoot, environment)
           const snapshotTree = await allocateGit(['write-tree'], sourceRoot, environment)
-          const modes = await allocateGit(['ls-tree', '-r', '--format=%(objectmode)', snapshotTree], sourceRoot)
-          if (modes.split('\n').includes('160000')) throw new Error('Working-tree capture does not support submodules or nested Git repositories; use a committed revision')
+          // The NUL-delimited standard format also works with older Git on SSH hosts.
+          const entries = await allocateGit(['ls-tree', '-r', '-z', snapshotTree], sourceRoot)
+          if (entries.split('\0').some(entry => entry.startsWith('160000 '))) throw new Error('Working-tree capture does not support submodules or nested Git repositories; use a committed revision')
           await allocateGit(['diff', '--quiet', '--ignore-submodules=none', '--'], sourceRoot, environment)
           if (await allocateGit(['ls-files', '--others', '--exclude-standard'], sourceRoot, environment)) throw new Error('Working tree changed during capture; retry when edits settle')
           if (await allocateGit(['rev-parse', 'HEAD'], sourceRoot) !== base) throw new Error('HEAD changed during working-tree capture; retry when edits settle')

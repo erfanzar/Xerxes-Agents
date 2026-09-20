@@ -3,17 +3,14 @@
 
 import type { Block } from './types.js'
 
-/** A pending approval stays visible rather than inside a collapsed section. */
+/** Pure conversation stays in the feed; operational events share a disclosure. */
 export function isGroupedActivity(block: Block, approvalToolId?: string): boolean {
-  return block.kind === 'thinking' || (block.kind === 'tools' && !block.items.some(item => item.id === approvalToolId))
+  return block.kind !== 'user' && block.kind !== 'agent'
 }
 
-/** Tool call identities survive the live-to-committed block ID change. */
+/** The first activity owns the group even before a tool has been called. */
 export function activityGroupKey(blocks: readonly Block[]): string {
-  const firstTool = blocks.find(block => block.kind === 'tools')
-  return firstTool?.kind === 'tools' && firstTool.items[0]
-    ? `tool:${firstTool.items[0].id}`
-    : `block:${blocks[0]?.id}`
+  return `block:${blocks[0]?.id}`
 }
 
 /** Scope call IDs to their user turn: providers may reuse them in later turns. */
@@ -25,7 +22,7 @@ export function keyedActivityGroups(blocks: readonly Block[], approvalToolId?: s
   })
 }
 
-/** Keep prose, decisions, and approval requests outside activity disclosures. */
+/** Only conversation prose separates groups; approval controls render separately. */
 export function groupActivity(blocks: readonly Block[], approvalToolId?: string): Block[][] {
   const groups: Block[][] = []
   let activity: Block[] | null = null

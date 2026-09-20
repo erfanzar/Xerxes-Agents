@@ -11,6 +11,7 @@
 
 import { useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 
+import { useDesktopNavigation } from './DesktopPanels.js'
 import { Markdown } from './markdown.js'
 import { TodoList } from './Todos.js'
 import { isPlanReview, store, type Snapshot } from './store.js'
@@ -19,6 +20,8 @@ import type { DiffFile, LogEntry, PlanState } from './types.js'
 // ── Changes ─────────────────────────────────────────────────────────────
 
 export function ChangesTab({ snap }: { snap: Snapshot }): ReactElement {
+  const navigate = useDesktopNavigation()
+  const allChanges = <button className="btn" onClick={() => navigate('review')}>Review working tree, including new files</button>
   const files = snap.changes
   const totals = useMemo(() => ({
     adds: files.reduce((sum, file) => sum + file.adds, 0),
@@ -30,13 +33,15 @@ export function ChangesTab({ snap }: { snap: Snapshot }): ReactElement {
     return (
       <div className="tabempty">
         <div className="tabempty__mark">⎇</div>
-        <h1>No changes yet</h1>
+        <h1>No recorded edits yet</h1>
+        {allChanges}
         <p>File edits the agents make land here as reviewable diffs — per-file +/− and the exact hunks, folded from the edit calls as they stream.</p>
       </div>
     )
   }
   return (
     <div className="changes">
+      {allChanges}
       <div className="changes__bar">
         <span className="changes__stat">
           {files.length} file{files.length === 1 ? '' : 's'} · <span className="add">+{totals.adds}</span> <span className="del">−{totals.dels}</span>

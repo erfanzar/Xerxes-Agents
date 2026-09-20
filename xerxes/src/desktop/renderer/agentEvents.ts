@@ -5,7 +5,6 @@ import type { SessionRow, ToolItem } from './types.js'
 const text = (value: unknown): string => typeof value === 'string' ? value : ''
 const record = (value: unknown): Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 const count = (value: unknown): number | undefined => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
-const terminal = (status: string): boolean => ['done','completed','succeeded','failed','error','cancelled','canceled','interrupted','timeout'].includes(status)
 const strings = (value: unknown, fallback: readonly string[]): readonly string[] => Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : fallback
 const append = (values: readonly string[] = [], value: string): readonly string[] => value ? [...values, value].slice(-40) : values
 
@@ -20,12 +19,11 @@ export function foldAgentEvent(rows: readonly SessionRow[], envelope: Record<str
   if (!id) return rows
   const existing = rows.find(row => row.id === id)
   const old = existing?.agentDetails
-  const active = !existing || !terminal(existing.status)
   const kind = text(event.type)
   let status = existing?.status || 'running'
-  if (kind === 'turn_begin' && active) status = text(payload.status) || 'running'
+  if (kind === 'turn_begin') status = text(payload.status) || 'running'
   if (kind === 'turn_end') status = text(payload.status) || (payload.cancelled === true ? 'interrupted' : payload.error ? 'failed' : 'completed')
-  let calls = old?.toolCalls ?? []
+  let calls = kind === 'turn_begin' ? [] : old?.toolCalls ?? []
   if (kind === 'tool_call') {
     const callId = text(payload.tool_call_id) || text(payload.id) || `${id}:${calls.length}`
     if (!calls.some(call => call.id === callId)) calls = [...calls, { id: callId, name: text(payload.name) || 'tool', verb: text(payload.name) || 'tool', arg: text(payload.arguments), input: text(payload.arguments), output: '', dur: '', state: 'working' } satisfies ToolItem].slice(-100)
@@ -48,17 +46,17 @@ export function foldAgentEvent(rows: readonly SessionRow[], envelope: Record<str
     status,
     agentDetails: {
       ...old,
-      summary: text(envelope.summary) || text(payload.summary) || old?.summary || '',
-      error: text(payload.error) || old?.error || '', model: text(envelope.model) || old?.model || '',
+      summary: text(envelope.summary) || text(payload.summary) || (kind === 'turn_begin' ? '' : old?.summary) || '',
+      error: text(payload.error) || (kind === 'turn_begin' ? '' : old?.error) || '', model: text(envelope.model) || old?.model || '',
       goal: text(envelope.goal) || old?.goal || '', parentId: text(envelope.parent_id) || old?.parentId || '',
       toolCount: count(envelope.tool_count) ?? old?.toolCount,
       inputTokens: count(envelope.input_tokens) ?? old?.inputTokens,
       outputTokens: count(envelope.output_tokens) ?? old?.outputTokens,
       filesRead: strings(envelope.files_read,old?.filesRead ?? []), filesWritten: strings(envelope.files_written,old?.filesWritten ?? []),
-      thinking: kind === 'think_part' ? append(old?.thinking,text(payload.think)) : old?.thinking ?? [],
-      notes: kind === 'text_part' ? append(old?.notes,text(payload.text)) : old?.notes ?? [],
+      thinking: kind === 'turn_begin' ? [] : kind === 'think_part' ? append(old?.thinking,text(payload.think)) : old?.thinking ?? [],
+      notes: kind === 'turn_begin' ? [] : kind === 'text_part' ? append(old?.notes,text(payload.text)) : old?.notes ?? [],
       toolCalls: calls,
-      startedAt: old?.startedAt ?? now,
+      startedAt: kind === 'turn_begin' ? now : old?.startedAt ?? now,
       lastEventAt: now,
       ...(durationSeconds === undefined ? {} : { durationSeconds }),
     },

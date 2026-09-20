@@ -155,6 +155,14 @@ export function spawnMembersOf(name: unknown, args: unknown, callId: string): Ag
   return [{ key: `${callId}:0`, title: label(parsed, 0), status: 'working' }]
 }
 
+function agentReceiptRows(value: unknown): Record<string, unknown>[] {
+  if (typeof value === 'string') { try {value=JSON.parse(value)} catch {return []} }
+  if (!value || typeof value !== 'object') return []
+  const object=value as Record<string, unknown>
+  const rows=Array.isArray(value) ? value : Array.isArray(object.agents) ? object.agents : object.id ? [object] : []
+  return rows.filter((row): row is Record<string, unknown> => Boolean(row) && typeof row === 'object' && !Array.isArray(row))
+}
+
 /** The session context menu (mockup 08), anchored at pointer coordinates. */
 export interface SessionMenuState {
   readonly id: string
@@ -660,7 +668,6 @@ export class Store {
   private readonly agentMembers = new Map<string, AgentMember>()
   /** Titles the current card shows, for fleet-snapshot status matching. */
   private readonly agentMemberKeysByTitle = new Map<string, string>()
-  private fleetPollRounds = 0
   private started = false
   private sessionKey = `desktop-${Math.random().toString(36).slice(2, 10)}`
   private historyBefore: string | null = null
@@ -2625,7 +2632,7 @@ export class Store {
     }
   }
 
-  private adoptFleet(session: Readonly<Record<string, unknown>>): void {
+  private adoptFleet(session: Readonly<Record<string, unknown>>, requestedAt = Date.now()): void {
     const raw = Array.isArray(session.subagent_snapshots) ? session.subagent_snapshots : []
     const fleet = raw
       .map(item => {
@@ -2634,7 +2641,7 @@ export class Store {
         if (!id) return null
         const previous = this.frame.fleet.find(agent => agent.id === id)
         const updatedAt = Date.parse(str(row.updated_at))
-        const liveWins = previous?.agentDetails?.lastEventAt !== undefined && (!Number.isFinite(updatedAt) || updatedAt <= previous.agentDetails.lastEventAt)
+        const liveWins = (previous?.agentDetails?.lastEventAt !== undefined && (!Number.isFinite(updatedAt) || updatedAt <= previous.agentDetails.lastEventAt)) || (previous?.agentDetails?.lastReceiptAt !== undefined && requestedAt <= previous.agentDetails.lastReceiptAt)
         const label = str(row.title) || str(row.name) || str(row.agent_id) || `#${id.slice(0, 6)}`
         const count = (value: unknown): number | undefined => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
         const paths = (value: unknown): string[] => Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
@@ -2661,7 +2668,7 @@ export class Store {
         return entry
       })
       .filter(row => row !== null)
-    const merged = [...fleet, ...this.frame.fleet.filter(row => row.agentDetails?.lastEventAt !== undefined && !fleet.some(saved => saved.id === row.id))]
+    const merged = [...fleet, ...this.frame.fleet.filter(row => (row.agentDetails?.lastEventAt !== undefined || row.agentDetails?.lastReceiptAt !== undefined) && !fleet.some(saved => saved.id === row.id))]
     this.patch({ fleet: merged })
     this.syncAgentMembersFromFleet(merged)
   }
@@ -2678,11 +2685,11 @@ export class Store {
     let touched = false
     for (const row of fleet) {
       const status = agentStatusOf(row.status)
-      const key = this.agentMemberKeysByTitle.get(row.title)
+      const key = [...this.agentMembers.values()].find(member => member.runtimeId === row.id)?.key ?? this.agentMemberKeysByTitle.get(row.title)
       if (key) {
         const member = this.agentMembers.get(key)
         if (member && member.status !== status) {
-          this.agentMembers.set(key, { ...member, status })
+          this.agentMembers.set(key, { ...member, runtimeId: row.id, status })
           touched = true
         }
         continue
@@ -2789,13 +2796,14 @@ export class Store {
 
   private refreshFleet(): void {
     const key = this.sessionKey
+    const requestedAt = Date.now()
     const revision = this.frame.sessionOpenRevision
     void this.bridge
       .call('session.status', { session_key: key, history_limit: 0 })
       .then(result => {
         if (key !== this.sessionKey || revision !== this.frame.sessionOpenRevision) return
         const session = this.sessionOf(result)
-        this.adoptFleet(Object.keys(session).length ? session : result)
+        this.adoptFleet(Object.keys(session).length ? session : result, requestedAt)
       })
       .catch(() => {})
   }
@@ -2809,12 +2817,10 @@ export class Store {
   private startFleetPoll(): void {
     if (this.fleetPoll) return
     this.fleetPoll = setInterval(() => {
-      this.fleetPollRounds += 1
       const anyWorking = [...this.agentMembers.values()].some(m => m.status === 'working')
       // Background children outlive their turn's tool calls — the poll only
-      // dies once the card is fully terminal (or after ~6 minutes of
-      // silence, leaving the last-known states honestly displayed).
-      if ((this.pendingAgentCalls.size === 0 && !anyWorking) || this.fleetPollRounds > 180) {
+      // stops only after confirmed terminal state, including long-running work.
+      if (this.pendingAgentCalls.size === 0 && !anyWorking) {
         this.stopFleetPoll()
         return
       }
@@ -2827,7 +2833,6 @@ export class Store {
       clearInterval(this.fleetPoll)
       this.fleetPoll = null
     }
-    this.fleetPollRounds = 0
   }
 
   /** Fetch MCP statuses without presenting an unavailable response as empty. */
@@ -3111,7 +3116,27 @@ export class Store {
             toolSteps: this.frame.toolSteps + 1,
           })
           if (this.activeMetricTools.size === 0) this.setMetricPhase('llm')
-          if (isAgentFamilyTool(payload.name)) this.refreshFleet()
+          if (isAgentFamilyTool(payload.name)) {
+            const reports = agentReceiptRows(payload.return_value ?? payload.result)
+            const members = [...this.agentMembers.values()].filter(member => member.key.startsWith(`${id}:`))
+            for (const [index, value] of reports.entries()) {
+              const report = value && typeof value === 'object' ? value as Record<string, unknown> : {}
+              const runtimeId = str(report.id)
+              if (!runtimeId || !str(report.status)) continue
+              const member = members[index]
+              const previous = this.frame.fleet.find(row => row.id === runtimeId)
+              const title = str(report.title) || previous?.title || member?.title || runtimeId
+              if (member) {
+                this.agentMembers.set(member.key, {...member, runtimeId, title, status:agentStatusOf(str(report.status))})
+                this.agentMemberKeysByTitle.set(title, member.key)
+              }
+              const row: SessionRow = {...(previous ?? {id:runtimeId,key:runtimeId,age:'',current:false,kind:'subagent',turns:0,messages:0,cwd:'',untitled:false}),title,status:str(report.status),
+                agentDetails:{filesRead:[],filesWritten:[],...previous?.agentDetails,summary:str(report.summary),error:str(report.error),model:str(report.model)||previous?.agentDetails?.model||'',lastReceiptAt:Date.now()}}
+              this.patch({fleet:[...this.frame.fleet.filter(row=>row.id!==runtimeId),row]})
+            }
+            if (reports.length) this.builder.pushAgents([...this.agentMembers.values()])
+            this.refreshFleet()
+          }
           // A failed spawn never reached the manifest — the card's only
           // honest terminal signal is the result itself.
           if (id && typeof payload.error === 'string' && payload.error && this.agentMembers.size > 0) {

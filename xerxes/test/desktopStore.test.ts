@@ -1352,6 +1352,25 @@ describe('Store workspace folds', () => {
     expect(store.getSnapshot().turnActive).toBe(false)
   })
 
+  test('agent receipts reconcile renamed children and survive a lagging snapshot', async () => {
+    bridge.respondWith(method => {
+      if (method === 'initialize') return initializeResult
+      if (method === 'session.status') return {session:{subagent_snapshots:[{id:'old-failure',title:'Earlier attempt',status:'failed'}]}}
+      return {ok:true}
+    })
+    bridge.push('turn_begin', {user_input:'Review three files'})
+    bridge.push('tool_call',{id:'batch',name:'SpawnAgents',arguments:{agents:[{title:'First requested title'},{title:'Second requested title'},{title:'Third requested title'}]}})
+    bridge.push('tool_result',{tool_call_id:'batch',name:'SpawnAgents',return_value:JSON.stringify([0,1,2].map(i=>({id:'child-'+i,title:'Runtime title '+i,status:'running'})))})
+    await new Promise(resolve=>setTimeout(resolve,20))
+    expect(store.getSnapshot().fleet.filter(row=>row.status==='running').map(row=>row.id)).toEqual(['child-0','child-1','child-2'])
+    const card=store.getSnapshot().blocks.find(row=>row.kind==='agents')
+    expect(card?.kind==='agents' ? card.members.map(row=>row.runtimeId) : []).toEqual(['child-0','child-1','child-2'])
+    bridge.push('tool_result',{tool_call_id:'wait',name:'AwaitAgents',result:{agents:[{id:'child-0',title:'Renamed again',status:'completed'}]}})
+    await new Promise(resolve=>setTimeout(resolve,20))
+    expect(store.getSnapshot().fleet.find(row=>row.id==='child-0')?.status).toBe('completed')
+    bridge.push('turn_end',{})
+  })
+
   test('a spawn batch opens an in-chat agents card even when snapshots never arrive', async () => {
     // Provider-outage shape: the daemon answers empty manifests forever; the
     // card must still appear from the spawn call itself, then mark failed

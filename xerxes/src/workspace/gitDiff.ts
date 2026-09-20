@@ -46,6 +46,7 @@ export interface GitDiffRunOutput {
 export type GitDiffRunner = (args: readonly string[], cwd: string) => Promise<GitDiffRunOutput>
 
 export interface CollectGitDiffOptions {
+  readonly path?: string
   readonly includeUntracked?: boolean
   readonly cwd: string
   readonly maxBytes?: number
@@ -191,6 +192,8 @@ export function parseUnifiedDiff(
 
 /** Collect the bounded worktree diff for one repository. */
 export async function collectGitDiff(options: CollectGitDiffOptions): Promise<GitDiffResult> {
+  const path = options.path
+  if (path !== undefined && (!path || path.length > 4096 || path.startsWith('/') || path.split('/').some(part => part === '..' || part === '.') || /[\0\r\n]/.test(path))) return { kind: 'error', message: 'Choose a workspace-relative file path without parent traversal' }
   const cwd = options.cwd.trim() || process.cwd()
   const run = options.run ?? defaultRunner
   const maxUntracked = options.maxUntracked ?? DEFAULT_MAX_UNTRACKED
@@ -208,13 +211,14 @@ export async function collectGitDiff(options: CollectGitDiffOptions): Promise<Gi
   const head = await run(['rev-parse', '--verify', 'HEAD'], cwd)
   const base = head.code === 0 ? 'HEAD' : EMPTY_TREE
 
-  const diff = await run(['diff', '--no-color', '--no-ext-diff', base, '--'], cwd)
+  const diff = await run([...(path ? ['--literal-pathspecs'] : []), 'diff', '--no-color', '--no-ext-diff', base, '--', ...(path ? [path] : [])], cwd)
   if (diff.code !== 0) {
     return { kind: 'error', message: `git diff failed: ${diff.stderr.trim() || `exit code ${diff.code}`}` }
   }
 
   const untrackedOut = await run(['ls-files', '--others', '--exclude-standard', ...(options.includeUntracked ? ['-z'] : [])], cwd)
-  const untrackedAll = untrackedOut.code === 0 ? untrackedOut.stdout.split(options.includeUntracked ? '\0' : '\n').filter(Boolean) : []
+  if (untrackedOut.code !== 0) return { kind: 'error', message: 'Could not list untracked files: ' + (untrackedOut.stderr.trim() || 'Git failed') }
+  const untrackedAll = untrackedOut.stdout.split(options.includeUntracked ? '\0' : '\n').filter(entry => Boolean(entry) && (!path || entry === path))
   const untracked = untrackedAll.slice(0, maxUntracked)
   const untrackedTruncated = untrackedAll.length > untracked.length
 
@@ -234,7 +238,7 @@ export async function collectGitDiff(options: CollectGitDiffOptions): Promise<Gi
       else if (preview.code <= 1 && extra.lines.length < remainingLines && extra.lines.every(line => line.kind === 'file' || line.kind === 'meta') && !extra.lines.some(line => line.text.startsWith('Binary '))) {
         extra.lines.push({ kind: 'meta', text: 'Empty untracked file' })
       }
-      parsed.lines.push(...extra.lines)
+      parsed.lines.push(...extra.lines.map(line => line.kind === 'file' ? { ...line, text: path } : line))
       parsed.files += Math.max(1, extra.files)
       parsed.insertions += extra.insertions
       parsed.truncated ||= extra.truncated

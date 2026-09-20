@@ -136,3 +136,10 @@ test('native failures retain actionable messages without IPC internals', () => {
   expect(desktopError(new Error('Permission denied'))).toBe('Permission denied')
   expect(desktopError(new Error('rpc -32000: expected 5-field cron expression'))).toBe('expected 5-field cron expression')
 })
+
+test('untracked files stay selectable when the overview budget omits their body', () => {
+  expect(diffSections({ lines: [{ kind: 'file', text: 'tracked.ts' }], untracked: ['new.ts'], truncated: true })).toEqual([
+    { path: 'tracked.ts', start: 0, end: 1, untracked: false },
+    { path: 'new.ts', start: 1, end: 1, untracked: true },
+  ])
+})

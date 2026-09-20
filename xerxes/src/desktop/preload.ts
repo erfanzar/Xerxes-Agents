@@ -55,6 +55,14 @@ function cleanEvent(frame: unknown): { type: string; payload: Record<string, unk
 }
 
 const bridge = {
+  getWindowChrome(): Promise<{ trafficLights: boolean }> { return ipcRenderer.invoke('desktop:window-chrome') },
+  onWindowChrome(handler: (state: { trafficLights: boolean }) => void): () => void {
+    const listener = (_event: Electron.IpcRendererEvent, state: unknown) => {
+      if (state && typeof state === 'object' && 'trafficLights' in state && typeof state.trafficLights === 'boolean') handler({ trafficLights: state.trafficLights })
+    }
+    ipcRenderer.on('desktop:window-chrome', listener)
+    return () => { ipcRenderer.removeListener('desktop:window-chrome', listener) }
+  },
   getResumeSession(): Promise<string | null> {
     return ipcRenderer.invoke('desktop:resume')
   },

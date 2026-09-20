@@ -2,25 +2,38 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { useState, type ReactElement } from 'react'
-import type { SessionRow } from './types.js'
+import type { Block, SessionRow } from './types.js'
 import { Icon } from './Icon.js'
 import { ToolCallRow } from './Execution.js'
 import { store } from './store.js'
 import { desktopError } from './desktopRpc.js'
 
 export function agentState(status: string): { label: string; priority: number; tone: string } {
-  if (['failed', 'error', 'timeout'].includes(status)) return { label: 'Failed', priority: 0, tone: 'failed' }
-  if (['waiting', 'blocked', 'needs_input'].includes(status)) return { label: 'Needs attention', priority: 0, tone: 'waiting' }
-  if (['running', 'working', 'acting', 'queued', 'pending', 'starting'].includes(status)) return { label: ['queued', 'pending'].includes(status) ? 'Queued' : 'Working', priority: 1, tone: 'working' }
+  if (['failed', 'error', 'timeout'].includes(status)) return { label: 'Failed', priority: 2, tone: 'failed' }
+  if (['waiting', 'blocked', 'needs_input'].includes(status)) return { label: 'Needs attention', priority: 1, tone: 'waiting' }
+  if (['running', 'working', 'acting', 'queued', 'pending', 'starting'].includes(status)) return { label: ['queued', 'pending'].includes(status) ? 'Queued' : status === 'starting' ? 'Awaiting runtime status' : 'Working', priority: 0, tone: 'working' }
   if (['done', 'completed', 'succeeded'].includes(status)) return { label: 'Completed', priority: 3, tone: 'done' }
   if (['cancelled', 'canceled', 'interrupted'].includes(status)) return { label: 'Stopped', priority: 2, tone: 'stopped' }
   return { label: status || 'Unknown', priority: 2, tone: 'idle' }
 }
 
+/** Keep requests visible while a daemon snapshot is pending; never invent a controllable agent id. */
+export function activityFleetRows(rows: readonly SessionRow[], blocks: readonly Block[]): readonly SessionRow[] {
+  const result = [...rows]
+  for (const block of blocks) if (block.kind === 'agents') for (const member of block.members) {
+    if (!['working', 'running', 'starting', 'queued', 'pending'].includes(member.status)) continue
+    if (result.some(row => member.runtimeId ? row.id === member.runtimeId : row.id === member.key || row.title === member.title)) continue
+    result.push({id:member.key,key:member.key,title:member.title,status:'starting',age:'',current:false,kind:'subagent',turns:0,messages:0,cwd:'',untitled:false,
+      agentDetails:{provisional:true,summary:'The spawn request is visible in the conversation. Waiting for the runtime to report this agent’s identity and state.',error:'',model:'',filesRead:[],filesWritten:[]}})
+  }
+  return result
+}
+
 export function AgentRoster({ rows }: { rows: readonly SessionRow[] }): ReactElement {
   const ordered = [...rows].sort((a, b) => agentState(a.status).priority - agentState(b.status).priority)
-  const current = ordered.filter(row => agentState(row.status).tone !== 'done')
-  const completed = ordered.filter(row => agentState(row.status).tone === 'done')
+  const current = ordered.filter(row => agentState(row.status).priority < 2)
+  const completed = ordered.filter(row => agentState(row.status).priority >= 2)
+  const failures = completed.filter(row => agentState(row.status).tone === 'failed').length
   const renderRows = (members: readonly SessionRow[]) => members.map(row => {
     const state = agentState(row.status)
     const info = row.agentDetails
@@ -44,14 +57,14 @@ export function AgentRoster({ rows }: { rows: readonly SessionRow[] }): ReactEle
         {info?.toolCalls && info.toolCalls.length > 0 && <section aria-label={`${row.title} tool calls`}><strong>Tool calls</strong>{info.toolCalls.map(item=><ToolCallRow key={item.id} item={item} label={item.name.replaceAll('_',' ')} />)}</section>}
         {info?.thinking && info.thinking.length > 0 && <details><summary>Reasoning</summary>{info.thinking.map((line,index)=><p key={index}>{line}</p>)}</details>}
         {info?.notes && info.notes.length > 0 && <details><summary>Progress</summary>{info.notes.map((line,index)=><p key={index}>{line}</p>)}</details>}
-        <AgentControls id={row.id} active={state.tone === 'working'} />
+        {!info?.provisional && <AgentControls id={row.id} active={state.tone === 'working'} />}
       </div>
     </details>
   })
   return <div className="agent-roster">
     {current.length > 0 && <div className="agent-roster__current">{renderRows(current)}</div>}
     {completed.length > 0 && <details className="agent-roster__history">
-      <summary><Icon name="chevron" size={13}/><span>Completed agents</span><span>{completed.length}</span></summary>
+      <summary><Icon name="chevron" size={13}/><span>Past agents</span><span>{completed.length}{failures ? ` · ${failures} failed` : ''}</span></summary>
       {renderRows(completed)}
     </details>}
   </div>

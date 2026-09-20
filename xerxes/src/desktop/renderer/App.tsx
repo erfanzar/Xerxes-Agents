@@ -18,9 +18,9 @@ import { Markdown } from './markdown.js'
 import { Dictation } from './Dictation.js'
 import { draftKey, readDraft, transitionDraft, writeDraft, acceptedDraft } from './drafts.js'
 import { PanelDivider, usePanelLayout } from './layout.js'
-import { activityGroupKey, keyedActivityGroups, isGroupedActivity } from "./activityGroups.js"
+import { keyedActivityGroups, isGroupedActivity } from "./activityGroups.js"
 import { ToolCallRow, toolHasFailed } from "./Execution.js"
-import { AgentRoster } from './AgentRoster.js'
+import { activityFleetRows, AgentRoster } from './AgentRoster.js'
 import { Icon } from './Icon.js'
 import { FirstRunSetup } from './Setup.js'
 import { RemoteWorkspaceGate } from './RemoteWorkspaceGate.js'
@@ -121,6 +121,15 @@ export function App(): ReactElement {
 
 /** Presentational shell — pure over the snapshot, SSR-friendly. */
 export function Shell({ snap }: { snap: Snapshot }): ReactElement {
+  const [trafficLights, setTrafficLights] = useState(true)
+  useEffect(() => {
+    let current = true
+    let received = false
+    const update = (state: { trafficLights: boolean }) => { if (current) setTrafficLights(state.trafficLights) }
+    const unsubscribe = window.xerxes.onWindowChrome?.(state => { received = true; update(state) })
+    void window.xerxes.getWindowChrome?.().then(state => { if (!received) update(state) }).catch(() => {})
+    return () => { current = false; unsubscribe?.() }
+  }, [])
   const [panel, setPanel] = useState<DesktopPanel>(null)
   const { layout, setLayout } = usePanelLayout()
   const [narrowNavigation, setNarrowNavigation] = useState(false)
@@ -147,7 +156,7 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
   useEffect(() => { setPanel(null); setPage(null) }, [snap.cwd, snap.sessionKey])
   return (
     <DesktopNavigation.Provider value={navigate}><ActivityVisible.Provider value={rail === 'activity'}>
-    <div className={`app atelier${focused ? ' atelier--focus' : ''}`} style={{ '--sidebar-width': `${layout.sidebarWidth}px`, '--inspector-width': `${layout.inspectorWidth}px` } as React.CSSProperties}>
+    <div className={`app atelier${trafficLights ? '' : ' app--no-traffic-lights'}${focused ? ' atelier--focus' : ''}`} style={{ '--sidebar-width': `${layout.sidebarWidth}px`, '--inspector-width': `${layout.inspectorWidth}px` } as React.CSSProperties}>
       <Topbar snap={snap} inspectorOpen={rail !== null} sidebarVisible={!focused} onFocus={() => narrow ? setNarrowNavigation(value => !value) : setLayout({ sidebarHidden: !focused })} />
       <FirstRunSetup snap={snap} />
       <div className="app__body" data-context-full={rail && rail !== 'review' && (filesExpanded || contextRequiresFullWidth) || undefined} data-review={rail === "review" || undefined}>
@@ -535,7 +544,7 @@ function SessionMenu({ menu }: { menu: Snapshot['sessionMenu'] }): ReactElement 
 // ── Statusline ──────────────────────────────────────────────────────────
 
 export function SessionDiagnostics({ snap }: { snap: Snapshot }): ReactElement {
-  const [expanded, setExpanded] = useState(true)
+  const [expanded, setExpanded] = useState(false)
   const livePhaseMs = snap.turnActive && snap.metricPhaseStartedAt != null ? Math.max(0, Date.now() - snap.metricPhaseStartedAt) : 0
   const metrics: [string, string][] = [
     ['Turns', String(snap.turnCount)],
@@ -925,9 +934,9 @@ function Stream({ snap }: { snap: Snapshot }): ReactElement {
             <button className="btn" disabled={snap.historyLoading} onClick={() => void loadOlder()}>{snap.historyLoading ? 'Loading older history…' : snap.historyError ? 'Retry older history' : 'Load 100 older actions'}</button>
             {snap.historyError && <p role="alert">{snap.historyError}</p>}
           </div>}
-          {keyedActivityGroups(blocks, approval?.toolCallId).map(({ key, blocks: group }) => (
+          {keyedActivityGroups(blocks, approval?.toolCallId).map(({ key, blocks: group }, index, groups) => (
             <div key={`${snap.currentId}:${key}`} data-history-anchor={group[0]!.id}>
-              {group.length > 1 || (group[0]!.kind === 'tools' && isGroupedActivity(group[0]!, approval?.toolCallId)) ? <ActivityGroup blocks={group} /> : <BlockView block={group[0]!} />}
+              {isGroupedActivity(group[0]!, approval?.toolCallId) ? <ActivityGroup blocks={group} active={snap.turnActive && index === groups.length - 1} /> : <BlockView block={group[0]!} />}
               {inlineApproval && group.some(block => block === blocks[approvalIndex]) && <ApprovalCard approval={approval} inline />}
             </div>
           ))}
@@ -1045,15 +1054,15 @@ function Offline({ cwd, error }: { cwd: string; error: string | null }): ReactEl
   )
 }
 
-function ActivityGroup({ blocks }: { blocks: Snapshot['blocks'] }): ReactElement {
+function ActivityGroup({ blocks, active }: { blocks: Snapshot['blocks']; active: boolean }): ReactElement {
   const tools = blocks.flatMap(block => block.kind === 'tools' ? block.items : [])
-  const failures = tools.filter(toolHasFailed).length
-  const running = tools.some(item => item.state === 'working') || blocks.some(block => block.kind === 'thinking' && block.streaming)
+  const failures = tools.filter(toolHasFailed).length + blocks.filter(block => block.kind === 'notice' && block.error).length + blocks.reduce((total, block) => total + (block.kind === 'agents' ? block.members.filter(member => member.status === 'failed').length : 0), 0)
+  const running = active || tools.some(item => item.state === 'working') || blocks.some(block => block.kind === 'thinking' && block.streaming || block.kind === 'agents' && block.members.some(member => member.status === 'working' || member.status === 'running'))
   const [expanded, setExpanded] = useState(false)
   const [inspected, setInspected] = useState(false)
   return <details className="activity-group" open={expanded} onToggle={event => { setExpanded(event.currentTarget.open); if (event.currentTarget.open) setInspected(true) }}>
-    <summary><Icon name="chevron" size={14} /><span>{running ? 'Working' : tools.length ? 'Used ' + tools.length + ' tool' + (tools.length === 1 ? '' : 's') : 'Reasoning'}<span className="activity-group__actions">{[...new Set(tools.map(item => toolLabelOf(item.verb)))].join(', ')}</span></span>{failures > 0 && <strong>{failures} failed</strong>}</summary>
-    <div className="activity-group__body">{(expanded || inspected) && blocks.map((block, index) => <BlockView key={block.kind === 'tools' ? activityGroupKey([block]) : `reasoning:${index}`} block={block} />)}</div>
+    <summary><Icon name="chevron" size={14} /><span>{running ? 'Working' : tools.length ? 'Used ' + tools.length + ' tool' + (tools.length === 1 ? '' : 's') : blocks.every(block => block.kind === 'thinking') ? 'Reasoning' : 'Work activity'}<span className="activity-group__actions">{[...new Set(tools.map(item => toolLabelOf(item.verb)))].join(', ')}</span></span>{failures > 0 && <strong>{failures} failed</strong>}</summary>
+    <div className="activity-group__body">{(expanded || inspected) && blocks.map((block, index) => <BlockView key={block.id} block={block} />)}</div>
   </details>
 }
 
@@ -1669,7 +1678,7 @@ function GoalObjective({ text }: { text: string }): ReactElement {
 }
 
 export function ActivityDetails({ snap }: { snap: Snapshot }): ReactElement | null {
-  const fleet = snap.fleet
+  const fleet = activityFleetRows(snap.fleet, snap.blocks)
   const goal = parseGoal(snap.goal)
   return (
     <aside className="activity-details">

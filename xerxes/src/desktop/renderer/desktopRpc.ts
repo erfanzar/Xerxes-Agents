@@ -68,6 +68,9 @@ export function diffSections(
     const path = text(line.text)
     sections.push({ path, start: index, end: lines.length, untracked: untracked.has(path) })
   }
+  for (const path of untracked) {
+    if (typeof path === 'string' && !sections.some(section => section.path === path)) sections.push({ path, start: lines.length, end: lines.length, untracked: true })
+  }
   return sections
 }
 

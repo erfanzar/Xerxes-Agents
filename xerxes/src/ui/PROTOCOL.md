@@ -1478,12 +1478,20 @@ Expired leases reopen saved state without restarting cancelled work. Exhausted
 recovery is visibly disconnected; it must not report idle or submit new work.
 
 `workspace.diff` is an additive read-only RPC with no required parameters. It
-uses the active session's cwd (or the daemon project before initialization), never
-a client-supplied filesystem path. It returns `{kind:'clean'}`, `{kind:'error',message}`
+uses the active session's cwd (or the daemon project before initialization). Optional
+`path` selects one literal workspace-relative file with its own output budget; absolute
+paths and traversal segments are rejected. It never changes the workspace or Git index.
+It returns `{kind:'clean'}`, `{kind:'error',message}`
 or `{kind:'ok',diff:{lines,files,insertions,deletions,truncated,untracked,untrackedTruncated}}`.
 Lines have `kind`, `text`, and optional `oldLine`/`newLine`. Untracked text is
 represented as additions, so it supports the same file navigation as tracked changes.
 Git output, duration and rendered rows are bounded; symlinks are not followed.
+Optional `untracked_limit` (integer 1–10000, default 50) expands the new-file
+list without increasing the diff-content budget. `untrackedTruncated` identifies
+remaining entries; GUI "Load more new files" and TUI `M` request a larger list.
+Clients may use the existing bounded `workspace.filePreview` for a known untracked
+file when an older daemon ignores `path` and omits it from a truncated overview.
+They must not present the complete content of a tracked file as an added-file diff.
 
 `background.status` is a read-only session-scoped RPC returning
 `{ok:true,shells:number,watchers:number}`. It counts currently running terminal
@@ -1559,7 +1567,8 @@ The `complete` RPC accepts optional `path_prefix` for directory browsing.
 Unlike mention completion, this is a literal path prefix (spaces are preserved),
 `./` lists the workspace root, and unreadable directories return an RPC error.
 Results retain the existing `value`, `label`, and `meta: "file" | "dir"` format
-and a 50-entry bound. Hidden entries appear when the basename prefix begins with `.`.
+and a 50-entry bound. Optional `path_offset` (safe integer 0–100000, default 0)
+pages the sorted results. Hidden entries appear when the basename prefix begins with `.`.
 
 ### Idle runtime replacement
 

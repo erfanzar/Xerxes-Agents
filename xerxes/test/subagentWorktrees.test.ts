@@ -229,3 +229,16 @@ test('integration check binds reviewed text and binary content and preserves bot
     expect((await port.inspect(id)).reviewId).not.toBe(review.reviewId)
   } finally { await rm(root, { recursive: true, force: true }) }
 })
+
+test('portable tree inspection still rejects nested repositories without changing the parent index', async () => {
+  const root=await realpath(await mkdtemp(join(tmpdir(),'xerxes-gitlink-capture-')))
+  try {
+    await git(root,'init');await Bun.write(join(root,'file.txt'),'parent');await git(root,'add','.');await git(root,'commit','-m','parent')
+    const nested=join(root,'nested')
+    await Bun.write(join(nested,'child.txt'),'child');await git(nested,'init');await git(nested,'add','.');await git(nested,'commit','-m','nested')
+    const before=await Bun.file(join(root,'.git/index')).bytes()
+    const port=nativeSubagentWorktrees(root)
+    await expect(port.create({taskId:'nested',taskName:'Nested',config:{_nativeSubagentWorktreeSource:'working-tree'}})).rejects.toThrow('does not support submodules or nested Git repositories')
+    expect(await Bun.file(join(root,'.git/index')).bytes()).toEqual(before)
+  } finally {await rm(root,{recursive:true,force:true})}
+})

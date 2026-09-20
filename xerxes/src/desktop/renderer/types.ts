@@ -19,6 +19,8 @@ export interface DaemonEvent {
 }
 
 export interface XerxesBridge {
+  getWindowChrome?(): Promise<{ trafficLights: boolean }>
+  onWindowChrome?(handler: (state: { trafficLights: boolean }) => void): () => void
   getContextScope?(): Promise<string>
   getContexts?(): Promise<WorkspaceContext[]>
   activateContext?(id: number, sessionId?: string): Promise<void>
@@ -82,6 +84,7 @@ export type Block =
 export interface AgentMember {
   /** Store-local identity: spawn call id + index, or the daemon snapshot id. */
   readonly key: string
+  readonly runtimeId?: string
   readonly title: string
   /** working | completed | failed | cancelled — snapshot statuses pass through mapped. */
   readonly status: string
@@ -143,6 +146,8 @@ export interface SessionRow {
   readonly untitled: boolean
   /** Optional details reported by the parent daemon's subagent snapshot. */
   readonly agentDetails?: {
+    readonly provisional?: boolean
+    readonly lastReceiptAt?: number
     readonly summary: string
     readonly error: string
     readonly model: string

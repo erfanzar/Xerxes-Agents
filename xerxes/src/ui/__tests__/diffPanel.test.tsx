@@ -80,17 +80,21 @@ const MULTI_FILE_DIFF: GitDiffResult = {
 }
 
 let activeDiffResult: GitDiffResult = DIFF_RESULT
+let selectedDiffResult: GitDiffResult | undefined
+let expandedDiffResult: GitDiffResult | undefined
 
 vi.mock('../lib/gitDiff.js', async importOriginal => {
   const original = await importOriginal<typeof import('../lib/gitDiff.js')>()
   return {
     ...original,
-    collectGitDiff: vi.fn(async () => activeDiffResult)
+    collectGitDiff: vi.fn(async (options: { path?: string; maxUntracked?: number }) => options.path && selectedDiffResult ? selectedDiffResult : (options.maxUntracked ?? 50) > 50 && expandedDiffResult ? expandedDiffResult : activeDiffResult)
   }
 })
 
 afterEach(() => {
   activeDiffResult = DIFF_RESULT
+  selectedDiffResult = undefined
+  expandedDiffResult = undefined
 })
 
 describe('DiffPanelHotkey', () => {
@@ -138,6 +142,43 @@ describe('DiffPanelHotkey', () => {
 })
 
 describe('DiffPanelOverlay', () => {
+  it('loads additional new files and keeps a long index navigable', async () => {
+    const names = Array.from({length: 65}, (_,i) => `new-${i}.ts`)
+    activeDiffResult = {...DIFF_RESULT, diff: {...DIFF_RESULT.diff, untracked: names.slice(0,50), untrackedTruncated: true, truncated: true}}
+    expandedDiffResult = {...activeDiffResult, diff: {...activeDiffResult.diff, untracked: names, untrackedTruncated: false}}
+    selectedDiffResult = {...DIFF_RESULT, diff: {...DIFF_RESULT.diff, lines: [{kind:'file',text:'new-64.ts'},{kind:'add',text:'+LAST_NEW_FILE',newLine:1}]}}
+    const setup = await testRender(<DiffPanelOverlay onClose={() => {}} t={DEFAULT_THEME} />, {width: 120, height: 32})
+    const settle = async () => { await setup.flush(); await act(async () => { await Bun.sleep(10) }); await setup.flush() }
+    try {
+      await settle();expect(setup.captureCharFrame()).toContain('FILE INDEX · 51')
+      await act(async () => { setup.mockInput.pressKey('m') });await settle()
+      expect(setup.captureCharFrame()).toContain('FILE INDEX · 66')
+      expect(setup.captureCharFrame()).not.toContain('Load more new files')
+      for(let i=0;i<65;i++){await act(async () => {setup.mockInput.pressKey(']')});await settle()}
+      const frame=setup.captureCharFrame()
+      expect(frame).toContain('LAST_NEW_FILE')
+      expect(frame).toContain('new-63.ts')
+      expect(frame).toContain('new-64.ts')
+    } finally { act(() => setup.renderer.destroy()) }
+  })
+  it('loads an omitted new file separately and returns from a failed preview', async () => {
+    activeDiffResult = { ...DIFF_RESULT, diff: { ...DIFF_RESULT.diff, truncated: true } }
+    selectedDiffResult = { ...DIFF_RESULT, diff: { ...DIFF_RESULT.diff, lines: [{kind: 'file', text: 'draft.ts'}, {kind: 'add', text: '+NEW_FILE_CONTENT', newLine: 1}] } }
+    const setup = await testRender(<DiffPanelOverlay onClose={() => {}} t={DEFAULT_THEME} />, {width: 120, height: 32})
+    const settle = async () => { await act(async () => { await Bun.sleep(20) }); await setup.flush() }
+    try {
+      await settle()
+      await act(async () => { setup.mockInput.pressKey(']') }); await settle()
+      expect(setup.captureCharFrame()).toContain('NEW_FILE_CONTENT')
+      selectedDiffResult = {kind: 'error', message: 'The new file was removed'}
+      await act(async () => { setup.mockInput.pressKey('r') }); await settle()
+      expect(setup.captureCharFrame()).toContain('The new file was removed')
+      expect(setup.captureCharFrame()).not.toContain('NEW_FILE_CONTENT')
+      await act(async () => { setup.mockInput.pressKey('BACKSPACE') }); await settle()
+      expect(setup.captureCharFrame()).toContain('src/a.ts')
+      expect(setup.captureCharFrame()).not.toContain('The new file was removed')
+    } finally { act(() => setup.renderer.destroy()) }
+  })
   it('opens an untracked file section with keyboard navigation at desktop width', async () => {
     activeDiffResult = { kind: 'ok', diff: { files: 2, insertions: 1, deletions: 0, truncated: false, untracked: ['new.ts'], untrackedTruncated: false,
       lines: [{ kind: 'file', text: 'tracked.ts' }, ...contextRows(1, 100), { kind: 'file', text: 'new.ts' }, { kind: 'hunk', text: '@@ -0,0 +1 @@' }, { kind: 'add', text: '+visible untracked content', newLine: 1 }] } }

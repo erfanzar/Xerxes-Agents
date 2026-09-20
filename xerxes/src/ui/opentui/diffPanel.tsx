@@ -5,6 +5,7 @@ import { RGBA, type ScrollBoxRenderable } from '@opentui/core'
 import { useStore } from '@nanostores/react'
 import { useKeyboard, useTerminalDimensions } from '@opentui/react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { workspaceFileDiff } from '../lib/workspaceDiffPreview.js'
 import { useOptionalGateway } from '../app/gatewayContext.js'
 
 import {
@@ -213,10 +214,16 @@ export function DiffPanelOverlay({
 }) {
   const gateway = useOptionalGateway()
   const scrollRef = useRef<ScrollBoxRenderable | null>(null)
+  const indexScrollRef = useRef<ScrollBoxRenderable | null>(null)
   const [result, setResult] = useState<GitDiffResult | null>(null)
+  const [allResult, setAllResult] = useState<GitDiffResult | null>(null)
+  const [detailPath, setDetailPath] = useState('')
+  const overviewScroll = useRef(0)
   const [loading, setLoading] = useState(true)
   const [fileIdx, setFileIdx] = useState(0)
   const generation = useRef(0)
+  const untrackedLimit = useRef(50)
+  const [listingError, setListingError] = useState('')
   const { height: terminalHeight, width: terminalWidth } = useTerminalDimensions()
   useStore($panelWidthDelta)
   const { height: panelHeight, width: fittedWidth } = overlayPanelSize(
@@ -225,16 +232,19 @@ export function DiffPanelOverlay({
   )
   const panelWidth = withPanelWidthDelta(fittedWidth, terminalWidth)
 
-  const reload = useCallback(() => {
+  const reload = useCallback((path?: string, untracked = false) => {
+    setDetailPath(path ?? '')
     const gen = ++generation.current
     setLoading(true)
-    void (gateway ? gateway.rpc('workspace.diff', {}).then(value => {
+    void (gateway ? (path ? workspaceFileDiff((method, params) => gateway.rpc(method, params), path, untracked) : gateway.rpc('workspace.diff', {untracked_limit: untrackedLimit.current})).then(value => {
       if (!value || typeof value !== 'object' || !('kind' in value) || !['ok', 'clean', 'error'].includes(String(value.kind))) throw new Error('Invalid workspace diff response')
       return value as GitDiffResult
-    }) : collectGitDiff({ cwd: cwd ?? '', includeUntracked: true }))
+    }) : collectGitDiff({ cwd: cwd ?? '', includeUntracked: true, maxUntracked: untrackedLimit.current, ...(path ? { path } : {}) }))
       .then(next => {
         if (generation.current === gen) {
           setResult(next)
+          if (!path) setAllResult(next)
+          else scrollRef.current?.scrollTo(0)
           setLoading(false)
         }
       })
@@ -248,6 +258,7 @@ export function DiffPanelOverlay({
 
   useEffect(() => {
     reload()
+    return () => { generation.current += 1 }
   }, [reload])
 
   const page = 10
@@ -259,9 +270,13 @@ export function DiffPanelOverlay({
     } else if (event.name === 'escape' || event.name === 'f7' || event.sequence === 'q') {
       consumeKey(event)
       onClose()
+    } else if (event.name === 'backspace' && detailPath) {
+      consumeKey(event); returnToOverview()
+    } else if (event.sequence === 'm' && overview?.untrackedTruncated) {
+      consumeKey(event); loadMoreUntracked()
     } else if (event.sequence === 'r') {
       consumeKey(event)
-      reload()
+      reload(detailPath || undefined, overview?.untracked.includes(detailPath) ?? false)
     } else if (event.name === 'left' || event.name === 'right') {
       consumeKey(event)
       scrollRef.current?.scrollBy({ x: event.name === 'right' ? 12 : -12, y: 0 })
@@ -290,8 +305,7 @@ export function DiffPanelOverlay({
       if (files.length) {
         const next = Math.max(0, Math.min(files.length - 1, fileIdx + (event.sequence === ']' ? 1 : -1)))
 
-        setFileIdx(next)
-        scrollRef.current?.scrollTo(files[next]!.line + DIFF_HEADER_ROWS)
+        openFile(next)
       }
     } else if (event.name === 'home') {
       consumeKey(event)
@@ -305,7 +319,35 @@ export function DiffPanelOverlay({
   })
 
   const diff = result?.kind === 'ok' ? result.diff : null
-  const files = useMemo(() => (diff ? indexDiffFiles(diff.lines) : []), [diff])
+  const overview = allResult?.kind === 'ok' ? allResult.diff : diff
+  const files = useMemo(() => {
+    const indexed = overview ? indexDiffFiles(overview.lines) : []
+    for (const name of overview?.untracked ?? []) if (!indexed.some(file => file.name === name)) indexed.push({ name, line: -1, insertions: 0, deletions: 0 })
+    return indexed
+  }, [overview])
+  function openFile(index: number) {
+    const file = files[index]
+    if (!file) return
+    if (!overview?.truncated && file.line >= 0) {
+      setFileIdx(index)
+      if (detailPath) { generation.current += 1; setDetailPath(''); setResult(allResult); setLoading(false) }
+      setTimeout(() => scrollRef.current?.scrollTo(file.line + DIFF_HEADER_ROWS), 0)
+      return
+    }
+    if (!detailPath) overviewScroll.current = scrollRef.current?.scrollTop ?? 0
+    setFileIdx(index); reload(file.name, overview?.untracked.includes(file.name) ?? false)
+  }
+  function returnToOverview() {
+    generation.current += 1
+    setDetailPath(''); setResult(allResult); setLoading(false)
+    setTimeout(() => scrollRef.current?.scrollTo(overviewScroll.current), 0)
+  }
+  function loadMoreUntracked() {
+    if (loading || listingError) return
+    if (untrackedLimit.current >= 10000) { setListingError('New-file lists are limited to 10,000 entries.'); return }
+    untrackedLimit.current = Math.min(10000, untrackedLimit.current + 100)
+    reload()
+  }
   // Mockup 07: "word highlights answer what exactly changed in this line".
   // Recomputed per refresh, keyed by row index into diff.lines.
   const wordRanges = useMemo(
@@ -315,6 +357,11 @@ export function DiffPanelOverlay({
   // Only when the panel is wide enough that the index is not stealing the
   // columns the hunks need.
   const showFilePane = files.length > 1 && panelWidth >= FILE_PANE_MIN_PANEL_WIDTH
+  useEffect(() => {
+    // Wait for newly loaded index rows to participate in terminal layout.
+    const timer = setTimeout(() => indexScrollRef.current?.scrollTo(Math.max(0, fileIdx - 3)), 0)
+    return () => clearTimeout(timer)
+  }, [fileIdx, files.length, showFilePane])
   const codeWidth = Math.max(panelWidth - (showFilePane ? FILE_PANE_WIDTH + 1 : 0) - 8,
     ...((diff?.lines ?? []).map(line => Bun.stringWidth(line.text) + (GUTTER_WIDTH + 1) * 2 + 4)))
   const location = cwd?.trim() || 'current workspace'
@@ -327,14 +374,14 @@ export function DiffPanelOverlay({
   const syncSelectionFromScroll = useCallback(() => {
     const box = scrollRef.current
 
-    if (!box || files.length === 0) {
+    if (detailPath || !box || files.length === 0) {
       return
     }
 
     setFileIdx(previous =>
       fileIndexFollowingRow(files, Math.max(0, Math.floor(box.scrollTop) - DIFF_HEADER_ROWS), previous)
     )
-  }, [files])
+  }, [files, detailPath])
 
   useEffect(() => {
     // A reload can land with the viewport already deep inside some file;
@@ -403,6 +450,7 @@ export function DiffPanelOverlay({
             </Text>
           </Box>
         </Box>
+        {detailPath && <Box onClick={returnToOverview}><Text color={t.color.accent}>← All changes (Backspace)</Text><Text color={t.color.muted}>  {detailPath}</Text></Box>}
         <Box flexDirection="row" flexGrow={1} flexShrink={1} minHeight={0} marginTop={1}>
         {/* A change set of forty-five files is not a document you read top to
             bottom — it is an index you navigate. The pane appears only when
@@ -411,17 +459,22 @@ export function DiffPanelOverlay({
           <Box
             flexDirection="column"
             flexShrink={0}
+            height="100%"
+            minHeight={0}
             marginRight={1}
             overflow="hidden"
             width={FILE_PANE_WIDTH}
           >
             <GroupCaption count={files.length} label="FILE INDEX" t={t} width={FILE_PANE_WIDTH} />
+            <scrollbox key={files.length} ref={indexScrollRef} flexGrow={1} flexShrink={1} minHeight={0} scrollY scrollX={false}>
+            <Box flexDirection="column" flexShrink={0} height={files.length}>
             {files.map((file, index) => (
               <Box
+                flexShrink={0}
                 backgroundColor={index === fileIdx ? t.ds.selected : undefined}
                 flexDirection="row"
                 key={file.name}
-                onClick={() => { setFileIdx(index); scrollRef.current?.scrollTo({ x: 0, y: file.line + DIFF_HEADER_ROWS }) }}
+                onClick={() => openFile(index)}
               >
                 <Box flexGrow={1} minWidth={0} overflow="hidden">
                   {/* Paths clip from the LEFT — the filename is the part you
@@ -453,17 +506,8 @@ export function DiffPanelOverlay({
                 </Box>
               </Box>
             ))}
-            {diff && diff.untracked.length > 0 ? (
-              <Box flexDirection="column" marginTop={1}>
-                <GroupCaption count={diff.untracked.length} label="UNTRACKED" t={t} width={FILE_PANE_WIDTH} />
-                {diff.untracked.map(name => (
-                  <Box key={name} onClick={() => {
-                    const index = files.findIndex(file => file.name === name)
-                    if (index >= 0) { setFileIdx(index); scrollRef.current?.scrollTo(files[index]!.line + DIFF_HEADER_ROWS) }
-                  }}><Text color={t.color.accent} wrap="truncate-end">{'  + '}{baseName(name)}</Text></Box>
-                ))}
-              </Box>
-            ) : null}
+            </Box>
+            </scrollbox>
           </Box>
         ) : null}
         <scrollbox ref={scrollRef} scrollX style={{ flexGrow: 1, flexShrink: 1, minHeight: 0 }} viewportCulling>
@@ -492,15 +536,14 @@ export function DiffPanelOverlay({
                   <Text color={t.color.muted}>{diff.untracked.length}{diff.untrackedTruncated ? '+' : ''}</Text>
                 </Box>
                 {diff.untracked.map(name => (
-                  <Text key={name} color={t.color.text} wrap="truncate-end">
-                    {'  U  '}{name}
-                  </Text>
+                  <Box key={name} onClick={() => { const index = files.findIndex(file => file.name === name); if (index >= 0) openFile(index) }}><Text color={t.color.accent} wrap="truncate-end">{'  U  '}{name}</Text></Box>
                 ))}
               </Box>
             ) : null}
           </Box>
         </scrollbox>
         </Box>
+        {overview?.untrackedTruncated && <Box flexShrink={0} onClick={loadMoreUntracked}><Text color={t.color.accent}>{listingError || 'M · Load more new files (requires current workspace runtime)'}</Text></Box>}
         <Box
           backgroundColor={t.color.completionBg}
           flexDirection="row"

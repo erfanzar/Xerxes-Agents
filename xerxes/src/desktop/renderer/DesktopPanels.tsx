@@ -1,8 +1,11 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { workspaceFileDiff } from '../../ui/lib/workspaceDiffPreview.js'
+import { WorkspaceFileTree } from './WorkspaceFileTree.js'
 import { DiffPreview } from './DiffPreview.js'
 import { WorkspaceReview } from "./WorkspaceReview.js"
+import { CommandActivity } from './CommandActivity.js'
 import { Deliveries } from "./Deliveries.js"
 import { MonitorsDisclosure } from "./Monitors.js"
 import { UnifiedRuns } from "./UnifiedRuns.js"
@@ -881,6 +884,7 @@ function ActivityPanel({ snap }: { snap: Snapshot }): ReactElement {
     }
   }, [snap.sessionKey, snap.currentId])
   const renderRow = (row: RpcRecord): ReactElement => (
+        row.kind === 'shell' ? <CommandActivity key={text(row.id)} row={row} sessionKey={snap.sessionKey} online={snap.connection === 'online'} /> :
         <div className="studio-item" key={text(row.id)}>
           <div>
             <strong>{text(row.title)}</strong>
@@ -888,16 +892,6 @@ function ActivityPanel({ snap }: { snap: Snapshot }): ReactElement {
               {text(row.kind)} · {text(row.state)} · {text(row.detail)}
             </p>
           </div>
-          {row.kind === 'shell' && (
-            <button
-              onClick={() => {
-                store.loadTerminals()
-                setTerminals(true)
-              }}
-            >
-              Output
-            </button>
-          )}
           {row.kind === 'watcher' && row.state === 'watching' && (
             <button
               disabled={request.busy}
@@ -965,16 +959,29 @@ function ReviewPanel({ snap, initialPath = '' }: { snap: Snapshot; initialPath?:
   const request = useRequest(snap),
     [diff, setDiff] = useState<RpcRecord | null>(null),
     [selected, setSelected] = useState(initialPath)
+  const untrackedLimit = useRef(50)
+  const [listingError, setListingError] = useState('')
   useEffect(() => { setSelected(initialPath) }, [initialPath])
   useEffect(() => {
     void request.run(async () => {
       const result = await request.call('workspace.diff')
+      if (result.kind === 'error') throw new Error(text(result.message));
       if (request.alive.current) setDiff(result.kind === 'clean' ? {} : record(result.diff))
     })
   }, [])
   const files = diff ? diffSections(diff) : []
-  const lines = diff ? records(diff.lines ?? []) : []
+  const [fileDiff, setFileDiff] = useState<RpcRecord | null>(null)
+  const [fileError, setFileError] = useState('')
   const chosen = files.find((file) => file.path === selected) ?? files[0]
+  useEffect(() => {
+    let current = true
+    setFileDiff(null); setFileError('')
+    if (chosen) void workspaceFileDiff((method, params) => desktopCall(window.xerxes, snap.sessionKey, method, params), chosen.path, chosen.untracked)
+      .then(value => { if (value.kind === 'error') throw new Error(text(value.message)); if (current) setFileDiff(value.kind === 'clean' ? {} : record(value.diff)) })
+      .catch(error => { if (current) setFileError(desktopError(error)) })
+    return () => { current = false }
+  }, [chosen?.path, diff, snap.sessionKey, snap.cwd])
+  const lines = fileDiff ? records(fileDiff.lines ?? []) : []
   return (
     <div className="change-review">
       <div className="change-review__toolbar">
@@ -983,14 +990,24 @@ function ReviewPanel({ snap, initialPath = '' }: { snap: Snapshot; initialPath?:
           disabled={request.busy}
           onClick={() =>
             void request.run(async () => {
-              const result = await request.call('workspace.diff')
+              const result = await request.call('workspace.diff', {untracked_limit: untrackedLimit.current})
               if (request.alive.current) setDiff(result.kind === 'clean' ? {} : record(result.diff))
             })
           }
         >
           Refresh changes
         </button>
+        {diff?.untrackedTruncated === true && !listingError && <button disabled={request.busy} onClick={() => void request.run(async () => {
+          const previous = Array.isArray(diff.untracked) ? diff.untracked.length : 0
+          untrackedLimit.current = Math.min(10000, untrackedLimit.current + 100)
+          const result = await request.call('workspace.diff', {untracked_limit: untrackedLimit.current})
+          const next = result.kind === 'clean' ? {} : record(result.diff)
+          if (!request.alive.current) return
+          if (!Array.isArray(next.untracked) || next.untracked.length <= previous) setListingError('No more new files were returned. Older workspace runtimes need an update; lists are limited to 10,000 entries.')
+          else setDiff(next)
+        })}>Load more new files</button>}
       </div>
+      {listingError && <p role="status">{listingError}</p>}
       <Feedback {...request} />
       {diff && !files.length ? (
         <Empty>The working tree is clean.</Empty>
@@ -1012,13 +1029,10 @@ function ReviewPanel({ snap, initialPath = '' }: { snap: Snapshot; initialPath?:
           <section className="change-review__preview" aria-label="Selected file diff">
             <header title={chosen?.path}>{chosen?.path || "Changes"}</header>
             <pre className="change-review__source" tabIndex={0} role="region" aria-label="Diff contents">
+              {chosen && !fileDiff && !fileError && <span role="status">Loading file changes…</span>}
+              {fileError && <span role="alert">{fileError}</span>}
+              {fileDiff && !lines.length && <span>No changes remain for this file.</span>}
               {lines
-                .filter((_, index) => {
-                  const file = chosen
-                  const start = file?.start ?? 0,
-                    end = file?.end ?? lines.length
-                  return index >= start && index < end
-                })
                 .map((line, index) => (
                   <span key={index} className={`studio-diff-${text(line.kind)}`}>
                     <span className="diff-gutter" aria-hidden="true">{typeof line.oldLine === 'number' ? line.oldLine : ''}</span><span className="diff-gutter" aria-hidden="true">{typeof line.newLine === 'number' ? line.newLine : ''}</span><span className="diff-code">{text(line.text)}</span>
@@ -1028,8 +1042,8 @@ function ReviewPanel({ snap, initialPath = '' }: { snap: Snapshot; initialPath?:
           </section>
         </div>
       )}
-      {diff?.truncated === true && (
-        <p className="change-review__notice" role="status">Showing a partial diff. The runtime reached its preview limit.</p>
+      {(fileDiff?.truncated === true || diff?.truncated === true) && (
+        <p className="change-review__notice" role="status">{fileDiff?.truncated ? 'The selected file exceeds the preview limit; only part is shown.' : 'The working-tree overview is partial. Selected files load separately.'}</p>
       )}
     </div>
   )
@@ -1048,34 +1062,7 @@ function FilesPanel({ snap, close }: { snap: Snapshot; close: () => void }): Rea
       .catch(error => { if (current) setPreviewError(desktopError(error)) })
     return () => { current = false }
   }, [selected, snap.sessionKey, snap.cwd])
-  const [needle, setNeedle] = useState(''),
-    [matches, setMatches] = useState<RpcRecord[]>([]),
-    [busy, setBusy] = useState(false),
-    [error, setError] = useState('')
-  useEffect(() => {
-    let current = true
-    setBusy(true)
-    setError('')
-    const timer = setTimeout(() => {
-      void desktopCall(window.xerxes, snap.sessionKey, 'complete', { text: needle.startsWith('./') ? needle : './' + needle, path_prefix: needle.startsWith('./') ? needle : './' + needle })
-        .then((result) => {
-          if (current) setMatches(records(result.completions))
-        })
-        .catch((failure) => {
-          if (current) {
-            setMatches([])
-            setError(String(failure))
-          }
-        })
-        .finally(() => {
-          if (current) setBusy(false)
-        })
-    }, 150)
-    return () => {
-      current = false
-      clearTimeout(timer)
-    }
-  }, [needle, snap.sessionKey, snap.cwd])
+  const [needle, setNeedle] = useState('')
   return (
     <div className={'file-browser' + (selected ? ' file-browser--preview' : '')}>
       <div className="file-browser__navigation">
@@ -1083,32 +1070,10 @@ function FilesPanel({ snap, close }: { snap: Snapshot; close: () => void }): Rea
       <label className="file-browser__search"><Icon name="search" size={15} />
         <input aria-label="Filter workspace files by path" value={needle} onChange={(event) => { setSelected(''); setNeedle(event.target.value) }} placeholder="Find a file…" />
       </label>
-      <Feedback busy={busy} error={error} />
       <div className="file-browser__entries">
-      {needle && needle !== "./" && <button onClick={() => { const parts = needle.replace(/^\.\//, "").split("/").filter(Boolean); parts.pop(); setSelected(''); setNeedle(parts.length ? "./" + parts.join("/") + "/" : "") }}>Up one folder</button>}
-      {matches.map((row, index) => (
-        <button
-          className="file-browser__entry"
-          aria-selected={selected === text(row.value)}
-          title={(row.meta === "dir" || row.kind === "directory" ? "Open folder: " : "Select file: ") + text(row.value)}
-          key={index}
-          onClick={() => {
-            if (row.meta === 'dir' || row.kind === 'directory') {
-              setSelected('')
-              setNeedle(text(row.value).replace(/^@/, ''))
-              return
-            }
-            setSelected(text(row.value))
-          }}
-        >
-          <Icon name={row.meta === 'dir' || row.kind === 'directory' ? 'folder' : 'file'} size={16} />
-          <span>{(text(row.label) || text(row.value)).replace(/\/$/, '').split('/').at(-1)}</span>
-          {(row.meta === 'dir' || row.kind === 'directory') && <Icon name="chevron" size={12} />}
-        </button>
-      ))}
+        <div hidden={Boolean(needle)}><WorkspaceFileTree key={snap.cwd + snap.sessionKey} sessionKey={snap.sessionKey} selected={selected} select={setSelected} /></div>
+        {needle && <WorkspaceFileTree key={snap.cwd + snap.sessionKey + needle} path={needle.startsWith('./') ? needle : './' + needle} sessionKey={snap.sessionKey} selected={selected} select={setSelected} />}
       </div>
-      {!busy && !error && !matches.length && <Empty>{needle ? "No entries match this path." : "This folder has no visible files or folders."}</Empty>}
-      {matches.length >= 50 && <p className="studio-muted">Showing the first 50 entries. Filter by path to narrow the list.</p>}
       </div>
       {selected && <div className="file-browser__document"><div className="file-browser__selection"><p title={selected}>{selected}</p><button onClick={() => { window.dispatchEvent(new CustomEvent('xerxes:add-context', { detail: '@' + JSON.stringify(selected.replace(/^@/, '')) })); close() }}>Add to message</button></div>
       <section className="file-browser__preview" aria-label="File preview">

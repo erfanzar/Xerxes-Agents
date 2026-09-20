@@ -173,7 +173,7 @@ test('the main window does not render a diagnostic footer', () => {
  const html = render(snapshot({contextTokens:0,contextMax:262000}))
  expect(html).not.toContain('class="status"')
  expect(html).not.toContain('ctx 0k/262k')
- expect(html).toContain('<details class="session-diagnostics" open="">')
+ expect(html).toContain('<details class="session-diagnostics">')
  expect(html).toContain('<button aria-pressed="true">Activity</button>')
  expect(html).toContain('Workspace runtime: Connected')
  expect(html).not.toContain('daemon connected')
@@ -198,6 +198,7 @@ test('session statistics align metrics and omit duplicate context and connection
       cacheHitRate: 0.98,
     }),
   )
+  expect(html).toContain('<details class="session-diagnostics">')
   for (const needle of ['<dt>Turns</dt><dd>39</dd>', '<dt>Steps</dt><dd>2106</dd>', '515m47s', '2m', '8.5s', '43.0 tokens/s', '<dt>Cache hit</dt><dd>98%</dd>', '142K', 'kimi-for-coding']) {
     expect(html).toContain(needle)
   }
@@ -386,10 +387,9 @@ test('checkpoint markers and edit stats render in the activity feed', () => {
       ],
     }),
   )
-  expect(html).toContain('+21')
-  // Flat row: label and detail live in separate spans — assert the parts.
-  expect(html).toContain('Checkpoint')
-  expect(html).toContain('turn 1 end')
+  expect(html).toContain('<details class="activity-group">')
+  expect(html).not.toContain('Checkpoint')
+  expect(html).not.toContain('turn 1 end')
 })
 
 test('the feed groups live reasoning and tools without constructing collapsed execution details', () => {
@@ -452,8 +452,8 @@ test('a pending tool approval stays visible outside the collapsed activity secti
   const builder = new BlockBuilder()
   builder.push('tool_call', { id: 'call-1', name: 'exec_command', arguments: { cmd: 'bun test' } })
   const html = render(snapshot({ blocks: builder.snapshot(true), approval: { id: 'approval-1', toolCallId: 'call-1', action: 'exec_command', description: 'Run tests' } }))
-  expect(html).not.toContain('activity-group')
-  expect(html).toContain('execution-row')
+  expect(html).toContain('<details class="activity-group">')
+  expect(html).not.toContain('execution-row')
   expect(html).toContain('Run tests')
 })
 
@@ -469,15 +469,11 @@ test('a nonzero command result is visible as failed in the collapsed group heade
 
 // ── Workspace switcher (mockup 16) ──────────────────────────────────────
 
-test('streaming thinking clips from the live tail instead of freezing its prefix', () => {
-  const stalePrefix = 'old-prefix-'.repeat(14)
-  const html = render(snapshot({
-    blocks: [{ kind: 'thinking' as const, id: 1, text: `${stalePrefix}LATEST_REASONING_TAIL`, streaming: true }],
-  }))
-  const excerpt = html.match(/<span class="frow__excerpt">([^<]+)<\/span>/)?.[1] ?? ''
-  expect(excerpt).toContain('LATEST_REASONING_TAIL')
-  expect(excerpt.startsWith('…')).toBe(true)
-  expect(excerpt.length).toBeLessThanOrEqual(113)
+test('the first thinking delta creates a closed working group', () => {
+  const html = render(snapshot({ turnActive: true, blocks: [{kind:'thinking',id:1,text:'private reasoning body',streaming:true}] }))
+  expect(html).toContain('<details class="activity-group">')
+  expect(html).toContain('Working')
+  expect(html).not.toContain('private reasoning body')
 })
 
 test('the sidebar and composer expose the current workspace', () => {
@@ -569,7 +565,7 @@ test('the rail separates legacy template-forge traces from Creator mode', () => 
   expect(html).toContain('data-state="ok"')
 })
 
-test('spawned subagents render as an in-chat card; background jobs ride the header', () => {
+test('spawn requests stay inside closed chat work groups and remain discoverable in the agent panel', () => {
   const html = render(
     snapshot({
       currentId: 'c1',
@@ -589,12 +585,13 @@ test('spawned subagents render as an in-chat card; background jobs ride the head
     }),
   )
   expect(html).toContain('1 background job running')
-  expect(html).toContain('Subagents')
-  expect(html).toContain('2 agents')
-  expect(html).toContain('1 working')
+  expect(html).toContain('<details class="activity-group">')
+  expect(html).toContain('Working')
   expect(html).toContain('1 failed')
+  expect(html.slice(0, html.indexOf('</main>'))).not.toContain('Map entry points')
   expect(html).toContain('Map entry points')
-  expect(html).toContain('Map hot paths')
+  expect(html).toContain('Awaiting runtime status')
+  expect(html).not.toContain('Map hot paths')
 })
 
 // ── Sidebar keeps the current task in its group (mockup 07) ─────────────
@@ -929,7 +926,8 @@ test('settings notices preserve the welcome screen while errors and real convers
   expect(html).toContain('welcome-notices')
   const error = render(snapshot({ blocks: [{ ...notice, error: true, text: 'Provider failed' }] }))
   expect(error).not.toContain('welcome__wordmark')
-  expect(error).toContain('Provider failed')
+  expect(error).toContain('1 failed')
+  expect(error).not.toContain('Provider failed')
 })
 
 

@@ -1205,3 +1205,29 @@ Three environment-dependent runtime tests remain skipped (Windows-only behavior
 and installed clangd). Logs: `followup-full-{check,test,build}.log`. The eight
 actual-use assertions in `followup-acceptance.json` passed. No source edits were
 made during that final gate. The broader audit remains in progress.
+
+### 2026-09-20 — Automatic SSH setup recovery
+
+The designated `n_server_spot_m` host exposed a stale directory lock blocking
+managed remote updates. The shared TUI/desktop bootstrap now uses kernel-owned
+locks, waits for concurrent setup, rechecks completed builds, and handles legacy
+publication races without deleting unknown staging directories. The reported
+desktop retry successfully loaded remote session discovery after repair.
+
+The [SSH recovery matrix and terminal evidence](ssh-setup-recovery-2026-09-20.md)
+records eight shell regressions on macOS and Linux, real isolated daemon update
+and saved-history acceptance on both machines, the full Bun gate, installation,
+and exact remaining limits. This is live SSH setup acceptance for that named
+host; it does not establish live provider or integration acceptance. The broader
+audit remains in progress.
+
+### 2026-09-20 — Work groups, active agents, compact commands and workspace review
+
+The [workflow repair matrix](desktop-workflow-repairs-2026-09-20.md) records the
+reported desktop/TUI corrections, source references, native captures, real local
+and SSH daemon checks, Git 2.34.1 worktree verification, and remaining limitations.
+Operational groups now exist from their first event and start closed. Active
+agents precede collapsed history; agent receipts reconcile identities with chat.
+Commands use compact expandable rows. Recursive file branches, untracked-file
+paging and individual previews are reachable in their respective interfaces.
+The broader audit remains in progress.

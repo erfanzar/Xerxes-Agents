@@ -6,13 +6,15 @@ import { createRoot } from 'react-dom/client'
 import { useSyncExternalStore } from 'react'
 import { restoreAppearance } from '../../../src/desktop/renderer/appearance.js'
 import { Shell } from '../../../src/desktop/renderer/App.js'
-import { blocksFromStoredMessages } from '../../../src/desktop/renderer/blocks.js'
+import { BlockBuilder, blocksFromStoredMessages } from '../../../src/desktop/renderer/blocks.js'
 import { foldAgentEvent } from '../../../src/desktop/renderer/agentEvents.js'
 import { store, type Snapshot } from '../../../src/desktop/renderer/store.js'
 import type { TerminalDetail, XerxesBridge } from '../../../src/desktop/renderer/types.js'
 
 const patch = (value: Partial<Snapshot>) => { const port = store as unknown as { patch(value: Partial<Snapshot>): void; builder: { reset(blocks: Snapshot['blocks']): void }; turnCount: number }; if(value.blocks) port.builder.reset(value.blocks); if(value.turnCount !== undefined) port.turnCount=value.turnCount; port.patch(value) }
 let fixtureFolderAttempts=0
+let fixtureWorkMonitor=false
+let fixtureCommandError=false
 const cwd='/fixture/xerxes-workspace'
 const session=(i:number) => ({ id:`session-${i}`,key:`session-${i}`,title:['Review transport cancellation behavior','Improve workspace file navigation','Investigate provider retry handling'][i%3]+` ${i+1}`,status:'idle',age:`${i+1}m`,current:i===0,kind:'main',turns:i%5,messages:2,cwd,untitled:false })
 const long='Preserve every runtime integration and saved session. Review cancellation, reconnect behavior, command discovery and deeply nested file paths. Keep navigation available while work is running. '
@@ -103,7 +105,7 @@ const bridge: XerxesBridge={onEvent:()=>()=>{},async call<T>(method:string,param
   else if(method==='workspace.integration.inspect')result={ok:true,inspection:{id:'integration-1',files:[{path:'src/check.ts',action:'conflict',reason:'Concurrent edit will be preserved.'}]}}
   else if(method==='workspace.recover')result={ok:true,recovery:{id:'integration-1',status:'needs-recovery',conflicts:['src/check.ts']}}
   else if(method==='workspace.diff')result={kind:'diff',diff:{lines,untracked:[]}}
-  else if(method==='background.activity')result={rows:new URLSearchParams(location.search).get('scenario')==='Background history'?[{id:'live-watch',kind:'watcher',title:'Watch source changes',state:'watching',detail:'README.md'},...Array.from({length:120},(_,i)=>({id:'old-'+i,kind:'shell',title:'Completed validation '+i,state:i%10===0?'failed':'completed',detail:cwd}))]:[]}
+  else if(method==='background.activity')result={rows:fixtureWorkMonitor?[{id:'fixture-shell',kind:'shell',title:'env CHECK_MODE=full '+Array.from({length:40},(_,i)=>`--completed-xml .cache/results/verification-pass-${i}.xml`).join(' ')+' bun test',state:'running',detail:cwd,startedAt:Date.now()-320000},...Array.from({length:36},(_,i)=>({id:'old-'+i,kind:'shell',title:'bun test previous-'+i,state:i%2?'failed':'completed',detail:cwd}))]:new URLSearchParams(location.search).get('scenario')==='Background history'?[{id:'live-watch',kind:'watcher',title:'Watch source changes',state:'watching',detail:'README.md'},...Array.from({length:120},(_,i)=>({id:'old-'+i,kind:'shell',title:'Completed validation '+i,state:i%10===0?'failed':'completed',detail:cwd}))]:[]}
   else if(method==='background.status')result={shells:0,watchers:0}
   else if(method==='schedule.deliveries')result={ok:true,deliveries:fixtureDeliveries}
   else if(method==='schedule.delivery.inspect')result={ok:true,delivery:fixtureDeliveries.find(row=>row.id===params.delivery_id)}
@@ -184,7 +186,7 @@ const bridge: XerxesBridge={onEvent:()=>()=>{},async call<T>(method:string,param
   }
   else if(method==='runtime.status')result={ok:true}
   else if(method==='terminal.list')result={ok:true,terminals:[fixtureTerminal]}
-  else if(method==='terminal.inspect')result={ok:true,terminal:fixtureTerminal}
+  else if(method==='terminal.inspect')result=fixtureCommandError?{ok:false,error:'Command output is temporarily unavailable. Retry.'}:{ok:true,terminal:fixtureTerminal}
   else if(method==='terminal.control'){
     await new Promise(resolve=>setTimeout(resolve,1200))
     if(String(params.chars).includes('reject'))result={ok:false,error:'Fixture terminal input denied. The draft has not been sent.'}
@@ -204,9 +206,34 @@ patch({...base,blocks})
 function Preview(){return <Shell snap={useSyncExternalStore(store.subscribe,store.getSnapshot)} />}
 createRoot(document.getElementById('root')!).render(<Preview/> )
 const host=window as unknown as {fixture?:{onScenario(handler:(name:string)=>void):void}}
+let activityBuilder = new BlockBuilder()
 const scenario = (name:string) => {
+  if(name==='Command failure'){fixtureCommandError=true;return}
+  if(name==='Command recover'){fixtureCommandError=false;return}
+  if(name==='Command disconnect'){patch({connection:'offline'});return}
+  if(name==='Command reconnect'){patch({connection:'online'});return}
+  fixtureWorkMonitor=name==='Work monitor'
+  if (name.startsWith('Activity ')) {
+    if (name === 'Activity start') {
+      activityBuilder = new BlockBuilder()
+      activityBuilder.push('think_part', {think: 'Checking the workspace before calling tools.'})
+    }
+    if (name === 'Activity tool') activityBuilder.push('tool_call', {id: 'slow-call', name: 'exec_command', arguments: {cmd: 'bun test'}})
+    if (name === 'Activity notice') {
+      activityBuilder.push('notification', {message: 'Background reviewer finished'})
+      activityBuilder.pushAgents([{key: 'reviewer', title: 'Review workspace', status: 'working'}])
+    }
+    if (name === 'Activity result') activityBuilder.push('tool_result', {tool_call_id: 'slow-call', return_value: 'Verification output retained', duration_ms: 1200})
+    if (name === 'Activity done') {
+      activityBuilder.pushAgents([{key: 'reviewer', title: 'Review workspace', status: 'done'}])
+      activityBuilder.finalize()
+    }
+    patch({...base, goal: '', fleet: [], turnActive: name !== 'Activity done', blocks: activityBuilder.snapshot(name !== 'Activity done')})
+    return
+  }
   fixtureExportDenied=name==='Export error'
   patch({...base,blocks,turnActive:false,failed:null,networkRetrying:false,settingsOpen:false,pickerOpen:false,modelMenuOpen:false,reasoningPickerOpen:false})
+  if(name==='Work monitor')patch({goal:'',turnActive:true,fleet:[...Array.from({length:58},(_,i)=>({...session(i),id:'past-'+i,kind:'subagent',status:i%3?'completed':'failed',title:'Previous review '+i,agentDetails:{summary:'Previous attempt finished.',error:i%3?'':'Previous attempt failed',model:'fixture/model',filesRead:[],filesWritten:[]}})),...Array.from({length:3},(_,i)=>({...session(i),id:'live-'+i,kind:'subagent',status:'running',title:'Running review '+(i+1)}))],blocks:[{kind:'user',id:900,text:'Review the current changes while the test command runs.'},{kind:'agents',id:901,members:Array.from({length:3},(_,i)=>({key:'call-'+i,runtimeId:'live-'+i,title:'Running review '+(i+1),status:'working'}))}]})
   if(name==='Artifacts')patch({changes:[{path:'src/runtime/transport/connections/recovery/session-reconnect-controller.ts',adds:24,dels:8,isNew:false,hunks:[],turn:1},{path:'src/desktop/layout.ts',adds:1,dels:0,isNew:true,hunks:[],turn:1}]})
   if(name==='Runtime update')patch({daemonWarning:'The workspace runtime predates this app build. Existing work is still running.',turnActive:true})
   if(name==='Runtime offline')patch({connection:'offline'})
