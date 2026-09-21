@@ -1375,7 +1375,11 @@ describe('Store workspace folds', () => {
     bridge.push('turn_end',{})
   })
 
-  test('a spawn batch opens an in-chat agents card even when snapshots never arrive', async () => {
+  test.each([
+    {error:'provider unavailable',permitted:true},
+    {return_value:'Tool execution failed: Agent provider profile unavailable: zai',permitted:true},
+    {return_value:'Denied by permission',permitted:false},
+  ])('a rejected spawn batch closes its pending agents without a manifest: %j', async failure => {
     // Provider-outage shape: the daemon answers empty manifests forever; the
     // card must still appear from the spawn call itself, then mark failed
     // from the spawn's own error result.
@@ -1391,7 +1395,7 @@ describe('Store workspace folds', () => {
       id: 't1',
       tool_call_id: 't1',
       name: 'SpawnAgents',
-      arguments: JSON.stringify({ agents: [{ title: 'Map entry points' }, { title: 'Map hot paths' }] }),
+      arguments: JSON.stringify({ agents: [{ title: 'Map entry points',model:'glm-5.3-flash',provider_profile:'zai' }, { title: 'Map hot paths' }] }),
     })
     await new Promise(resolve => setTimeout(resolve, 10))
     const card = store.getSnapshot().blocks.find(b => b.kind === 'agents')
@@ -1403,10 +1407,23 @@ describe('Store workspace folds', () => {
     expect(store.getSnapshot().fleet).toHaveLength(0)
 
     // The spawn dies inside the daemon — the card marks the batch failed.
-    bridge.push('tool_result', { tool_call_id: 't1', name: 'SpawnAgents', error: 'provider unavailable', permitted: true })
+    bridge.push('tool_result', { tool_call_id: 't1', name: 'SpawnAgents', ...failure })
     await new Promise(resolve => setTimeout(resolve, 10))
     const failed = store.getSnapshot().blocks.find(b => b.kind === 'agents')
     expect(failed && failed.kind === 'agents' ? failed.members.every(m => m.status === 'failed') : false).toBe(true)
+    expect(failed && failed.kind === 'agents' ? failed.members[0] : {}).toMatchObject({model:'glm-5.3-flash',providerProfile:'zai',error:expect.any(String)})
+    bridge.push('turn_end', {})
+    bridge.push('turn_begin', {user_input:'Keep reviewing'})
+    expect(store.getSnapshot().blocks.find(b=>b.kind==='agents')).toMatchObject({members:[{status:'failed'},{status:'failed'}]})
+    bridge.push('turn_end', {})
+  })
+
+  test('a partial spawn failure preserves a child with a confirmed runtime identity', () => {
+    bridge.push('turn_begin', {user_input:'Run two reviews'})
+    bridge.push('tool_call', {id:'partial-batch',name:'SpawnAgents',arguments:{agents:[{title:'Started review'},{title:'Rejected review'}]}})
+    bridge.push('tool_result', {tool_call_id:'partial-batch',name:'SpawnAgents',return_value:{agents:[{id:'confirmed-child',status:'running',title:'Started review'}]},error:'Second request rejected'})
+    const card=store.getSnapshot().blocks.find(b=>b.kind==='agents')
+    expect(card).toMatchObject({members:[{runtimeId:'confirmed-child',status:'working'},{status:'failed',error:'Second request rejected'}]})
     bridge.push('turn_end', {})
   })
 

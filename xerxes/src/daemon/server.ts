@@ -21,7 +21,7 @@ import { cronTimezone } from "../cron/timezone.js";
 import { parseScheduleTime } from "../cron/time.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { beginScheduleTokenUsage, scheduleTokenState } from "../cron/tokenUsage.js";
-import { modelInventory, type InventoryModel } from '../runtime/modelInventory.js';
+import { modelInventory, unavailableAgentProfile, type InventoryModel } from '../runtime/modelInventory.js';
 import { inventoryCapabilities } from '../runtime/inventoryCapabilities.js';
 import { selectBranchTurn } from '../session/branchSelection.js';
 import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
@@ -4368,9 +4368,10 @@ export class DaemonServer {
         return { efforts: selectableEfforts(levels), source: levels.provenance ?? 'unknown', shape: levels.shape, ...(levels.defaultEffort === undefined ? {} : { defaultEffort: levels.defaultEffort }) };
       },
     }, params, signal);
-    if (typeof params.provider_profile === 'string') {
+    const requestedProfile = typeof params.provider_profile === 'string' ? params.provider_profile.trim() : '';
+    if (requestedProfile) {
       const identity = (profile: ProviderProfile | undefined) => profile && JSON.stringify([profile.provider, profile.api_key, profile.base_url, profile.model, profile.sampling, profile.model_overrides]);
-      if (identity(selected(params.provider_profile)) !== identity(this.profileStore.get(params.provider_profile))) throw new Error('Provider profile changed during discovery; retry');
+      if (identity(selected(requestedProfile)) !== identity(this.profileStore.get(requestedProfile))) throw new Error('Provider profile changed during discovery; retry');
     }
     return result;
   }
@@ -4380,7 +4381,7 @@ export class DaemonServer {
     signal?.throwIfAborted();
     if (!name.trim() || name.length > 512 || !model.trim() || model.length > 512 || (effort !== undefined && (!effort.trim() || effort.length > 64))) throw new Error("Invalid agent provider/model/reasoning selection");
     const profile = this.profileStore.get(name);
-    if (!profile || profile.provider === "claude-code") throw new Error("Agent provider profile unavailable: " + name);
+    if (!profile || profile.provider === "claude-code") throw unavailableAgentProfile(name, model, this.profileStore.list());
     const identity = (value: ProviderProfile | undefined) => value ? JSON.stringify([value.name, value.provider, value.model, value.base_url, value.api_key, value.sampling, value.model_overrides]) : undefined;
     const fingerprint = identity(profile);
     const catalog = await this.fetchModels({ profile_name: name });

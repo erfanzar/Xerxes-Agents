@@ -7,15 +7,18 @@ import { getProviderConfig, resolveProvider } from '../llms/providerRegistry.js'
 import { piCatalogModelCapabilities } from '../llms/piModelCatalog.js'
 import { codexBaseUrl } from '../auth/codexAuth.js'
 import type { NativeSubagentHostOptions } from './subagentHost.js'
+import { unavailableAgentProfile } from '../runtime/modelInventory.js'
+
+type AgentProfiles = Pick<ProfileStore, 'get'> & Partial<Pick<ProfileStore, 'list'>>
 
 /** Select a child transport without changing the active parent profile. */
 export function agentProviderResolver(
-  profiles: Pick<ProfileStore, 'get'>,
+  profiles: AgentProfiles,
   createClient: typeof createLlmClient = createLlmClient,
 ): NonNullable<NativeSubagentHostOptions['resolveProviderProfile']> {
   return (name, model, expectedRoute) => {
     const profile = profiles.get(name)
-    if (!profile || profile.provider === 'claude-code') throw new Error('Agent provider profile unavailable: ' + name)
+    if (!profile || profile.provider === 'claude-code') throw unavailableAgentProfile(name, model, profiles.list?.() ?? [])
     const route = providerRouteIdentity(model, { provider: profile.provider, baseUrl: profile.base_url })
     if (expectedRoute !== undefined && route !== expectedRoute) {
       throw new Error('Agent provider route changed; restore the original provider configuration or dispatch new work')
@@ -53,10 +56,10 @@ export function providerRouteIdentity(
   })).digest('hex')
 }
 
-export function agentProviderRouteResolver(profiles: Pick<ProfileStore, 'get'>): (name: string, model: string) => string {
+export function agentProviderRouteResolver(profiles: AgentProfiles): (name: string, model: string) => string {
   return (name, model) => {
     const profile = profiles.get(name)
-    if (!profile || profile.provider === 'claude-code') throw new Error('Agent provider profile unavailable: ' + name)
+    if (!profile || profile.provider === 'claude-code') throw unavailableAgentProfile(name, model, profiles.list?.() ?? [])
     return providerRouteIdentity(model, { provider: profile.provider, baseUrl: profile.base_url })
   }
 }

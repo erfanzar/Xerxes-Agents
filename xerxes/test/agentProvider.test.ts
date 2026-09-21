@@ -4,6 +4,24 @@ import { expect, test } from 'bun:test'
 import { agentProviderResolver, agentProviderRouteResolver, providerRouteIdentity } from '../src/daemon/agentProvider.js'
 import type { ProviderProfile } from '../src/bridge/profiles.js'
 
+test('missing child profiles suggest exact host names before routing or client creation', () => {
+  const profile: ProviderProfile = {name:'zai-glm',provider:'zhipu',api_key:'never-expose',base_url:'https://private-endpoint.invalid',model:'glm-5.3-flash',sampling:{}}
+  const profiles={get:(name:string)=>name===profile.name?profile:undefined,list:()=>[{...profile,active:false}]}
+  let clients=0
+  const resolver=agentProviderResolver(profiles,()=>{clients++;throw Error('Must not construct a client')})
+  for (const resolve of [resolver,agentProviderRouteResolver(profiles)]) {
+    try {resolve('zai','glm-5.3-flash');throw Error('Expected rejection')}
+    catch(error){
+      const message=error instanceof Error?error.message:''
+      expect(message).toContain('Configured profiles for this model on the execution host: "zai-glm"')
+      expect(message).toContain('No fallback provider was selected')
+      expect(message).not.toContain(profile.api_key)
+      expect(message).not.toContain(profile.base_url)
+    }
+  }
+  expect(clients).toBe(0)
+})
+
 test('child provider resolver isolates credentials and limits for each selected profile', () => {
   const profile: ProviderProfile = { name: 'child', provider: 'openai', api_key: 'fixture-child-key', base_url: 'https://child.invalid/v1', model: 'fixture', sampling: {}, model_overrides: { fixture: { context_limit: 8192, max_output_tokens: 1024 } } }
   const calls: unknown[] = []

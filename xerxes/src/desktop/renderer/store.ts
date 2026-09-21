@@ -17,7 +17,7 @@
 
 import { todoItemsOf, todosFromResult, type TodoItem } from './todoState.js'
 import type { WorkspaceContext } from '../main/contextNavigation.js'
-import { BlockBuilder, blocksFromStoredMessages, editStatsOf, parseArgs } from './blocks.js'
+import { BlockBuilder, blocksFromStoredMessages, editStatsOf, parseArgs, toolFailureText } from './blocks.js'
 import {
   daemonCompatibilityWarning,
   DESKTOP_DAEMON_PROTOCOL,
@@ -148,11 +148,11 @@ export function spawnMembersOf(name: unknown, args: unknown, callId: string): Ag
   if (Array.isArray(raw) && raw.length) {
     return raw.slice(0, 24).map((item, index) => {
       const record = (item && typeof item === 'object' ? item : {}) as Record<string, unknown>
-      return { key: `${callId}:${index}`, title: label(record, index), status: 'working', baseAgent: str(record.agent) || str(record.subagent_type), prompt: str(record.prompt) }
+      return { key: `${callId}:${index}`, title: label(record, index), status: 'working', baseAgent: str(record.agent) || str(record.subagent_type), prompt: str(record.prompt), model: str(record.model), providerProfile: str(record.provider_profile) }
     })
   }
   if (!isSpawnTool(name)) return []
-  return [{ key: `${callId}:0`, title: label(parsed, 0), status: 'working', baseAgent: str(parsed.subagent_type) || str(parsed.target_agent) || str(parsed.agent), prompt: str(parsed.prompt) }]
+  return [{ key: `${callId}:0`, title: label(parsed, 0), status: 'working', baseAgent: str(parsed.subagent_type) || str(parsed.target_agent) || str(parsed.agent), prompt: str(parsed.prompt), model: str(parsed.model), providerProfile: str(parsed.provider_profile) }]
 }
 
 function agentReceiptRows(value: unknown): Record<string, unknown>[] {
@@ -3143,11 +3143,12 @@ export class Store {
           }
           // A failed spawn never reached the manifest — the card's only
           // honest terminal signal is the result itself.
-          if (id && typeof payload.error === 'string' && payload.error && this.agentMembers.size > 0) {
+          const spawnError = toolFailureText(payload)
+          if (id && spawnError && this.agentMembers.size > 0) {
             let touched = false
             for (const [key, member] of this.agentMembers) {
-              if (!key.startsWith(`${id}:`) || member.status !== 'working') continue
-              this.agentMembers.set(key, { ...member, status: 'failed' })
+              if (!key.startsWith(`${id}:`) || member.runtimeId || member.status !== 'working') continue
+              this.agentMembers.set(key, { ...member, status: 'failed', error: spawnError })
               touched = true
             }
             if (touched) this.builder.pushAgents([...this.agentMembers.values()])

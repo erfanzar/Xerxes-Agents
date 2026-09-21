@@ -2,6 +2,12 @@
 // Licensed under the Apache License, Version 2.0.
 import { unknownProfileQuota, type ProfileQuota } from '../auth/profileUsage.js'
 export interface InventoryProfile { name: string; provider: string; model: string; active: boolean }
+/** Suggest exact host-owned names without remapping a requested credential source. */
+export function unavailableAgentProfile(name: string, model: string, profiles: readonly Pick<InventoryProfile, 'name' | 'provider' | 'model'>[]): Error {
+  const matches = profiles.filter(profile => profile.provider !== 'claude-code' && profile.model === model).slice(0, 8)
+  const hint = matches.length ? ` Configured profiles for this model on the execution host: ${matches.map(profile => JSON.stringify(profile.name)).join(', ')}.` : ''
+  return new Error(`Agent provider profile unavailable: ${JSON.stringify(name)}.${hint} Use list_available_models with provider_profile omitted to discover this session's choices, then retry with the exact provider_profile and model. No fallback provider was selected.`)
+}
 export interface InventoryModel { id: string; context_limit?: number; max_output_tokens?: number; context_source?: string; output_source?: string }
 export interface InventoryReasoning {
   efforts: readonly string[]

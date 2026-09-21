@@ -11,7 +11,7 @@ import { catalogReasoningLevels, fallbackReasoningLevels, providerReasoningLevel
 import { getApiKey, getProviderConfig, isProviderName, resolveProvider } from '../llms/providerRegistry.js'
 import { DEFAULT_RADIUS_GATEWAY, loadRadiusGatewayConfig, normalizeRadiusGatewayUrl } from '../llms/radiusGateway.js'
 import type { ModelInventoryHost } from '../tools/modelInventoryTools.js'
-import { modelInventory, type ModelInventoryPort } from './modelInventory.js'
+import { modelInventory, unavailableAgentProfile, type ModelInventoryPort } from './modelInventory.js'
 import { inventoryCapabilities } from './inventoryCapabilities.js'
 
 export interface ProfileInventoryOptions {
@@ -47,7 +47,7 @@ async function copilotCatalog(signal?: AbortSignal): Promise<readonly string[]> 
 export function profileInventoryHost(profiles: ProfileStore, settings: AgentSettingsStore, options: ProfileInventoryOptions = {}): ModelInventoryHost {
   return async (sessionId, params, signal) => {
     if (!sessionId.trim()) throw new Error('Inventory requires a session')
-    return withProfileInventory(profiles, settings, signal, port => modelInventory(port, params, signal), typeof params.provider_profile === 'string' ? params.provider_profile : undefined, options)
+    return withProfileInventory(profiles, settings, signal, port => modelInventory(port, params, signal), typeof params.provider_profile === 'string' ? params.provider_profile.trim() || undefined : undefined, options)
   }
 }
 
@@ -58,7 +58,7 @@ export function profileSelectionValidator(profiles: InventoryProfiles, options: 
     if (!name.trim() || name.length > 512 || !model.trim() || model.length > 512 || (effort !== undefined && (!effort.trim() || effort.length > 64))) throw new Error('Invalid agent provider/model/reasoning selection')
     await withProfileInventory(profiles, undefined, signal, async port => {
       const profile = port.profiles().find(value => value.name === name)
-      if (!profile || profile.provider === 'claude-code') throw new Error('Agent provider profile unavailable: ' + name)
+      if (!profile || profile.provider === 'claude-code') throw unavailableAgentProfile(name, model, port.profiles())
       const catalog = await port.discover(name)
       signal?.throwIfAborted()
       if (model !== profile.model && !catalog.models.some(value => value.id === model)) throw new Error('Model is not configured or discovered for agent provider ' + name + ': ' + model)

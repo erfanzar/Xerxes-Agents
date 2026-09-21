@@ -87,6 +87,9 @@ export interface AgentMember {
   readonly runtimeId?: string
   readonly baseAgent?: string
   readonly prompt?: string
+  readonly model?: string
+  readonly providerProfile?: string
+  readonly error?: string
   readonly title: string
   /** working | completed | failed | cancelled — snapshot statuses pass through mapped. */
   readonly status: string

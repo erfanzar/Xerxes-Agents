@@ -77,7 +77,7 @@ export function ExecutionDetails({ item }: { item: ToolItem }): ReactElement {
     {view.command && <pre className="execution__command">{view.command}</pre>}
     {output && (structured ? <><div className="execution__viewer-actions"><span>Result</span><button onClick={()=>setExpanded(value=>!value)} aria-expanded={expanded}>{expanded ? 'Compact view' : 'Expand result'}</button></div><div className="execution__viewer" data-expanded={expanded || undefined} tabIndex={0} role="region" aria-label="Tool output"><StructuredResult value={structured}/></div></> : <OutputViewer text={output} />)}
     {view.stderr && <div className="execution__error"><strong>Standard error</strong><pre>{view.stderr}</pre></div>}
-    {item.error && <div className="execution__error"><strong>Error</strong><pre>{item.error}</pre></div>}
+    {item.error && item.error !== output && item.error !== view.stderr && <div className="execution__error"><strong>Error</strong><pre>{item.error}</pre></div>}
     {!output && !item.error && !view.stderr && <p className="execution__empty">{item.state === 'working' ? 'Waiting for output…' : 'No output'}</p>}
     <div className="execution__actions">
       {view.command && <CopyButton text={view.command} label="Copy command" />}

@@ -239,16 +239,20 @@ export class BlockBuilder {
         const id = typeof payload.tool_call_id === 'string' ? payload.tool_call_id : typeof payload.id === 'string' ? payload.id : ''
         const existing = this.tools.get(id)
         const stats = editStatsOf(payload.name, existing ? undefined : payload.arguments)
+        const output = detailOf(payload.return_value ?? payload.result ?? payload.output)
+        // Saved native tool results predate an explicit error field. Permission
+        // to execute is independent of whether execution succeeded.
+        const error = toolFailureText(payload, output)
         const item: ToolItem = {
           id,
           verb: existing?.verb ?? verbOf(payload.name),
           arg: existing?.arg ?? '',
           dur: dur(payload.duration_ms),
-          state: typeof payload.error === 'string' && payload.error ? 'failed' : 'done',
+          state: error ? 'failed' : 'done',
           name: existing?.name ?? (typeof payload.name === 'string' ? payload.name : ''),
           input: existing?.input ?? detailOf(payload.arguments),
-          output: detailOf(payload.return_value ?? payload.result ?? payload.output),
-          ...(typeof payload.error === 'string' && payload.error ? { error: payload.error } : {}),
+          output,
+          ...(error ? { error } : {}),
           ...(existing?.path ? { path: existing.path } : stats ? { path: stats.path } : {}),
           ...(existing?.diff ? { diff: existing.diff } : stats ? { diff: { adds: stats.adds, dels: stats.dels } } : {}),
         }
@@ -436,6 +440,12 @@ export interface StoredHydration {
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value)
 
+export function toolFailureText(payload: Readonly<Record<string, unknown>>, output = detailOf(payload.return_value ?? payload.result ?? payload.output)): string {
+  return typeof payload.error === 'string' && payload.error ? payload.error
+    : payload.permitted === false ? output || 'Tool permission denied'
+    : output.startsWith('Tool execution failed:') ? output : ''
+}
+
 /**
  * Replay one stored execution as the same call+result event pair the live
  * stream emits, so a resumed transcript shows the identical verb + compact
@@ -487,6 +497,7 @@ export function blocksFromStoredMessages(messages: unknown, hydration: StoredHyd
         builder.push('tool_result', { tool_call_id: id, name: call.name, result: record.content ?? stored?.result,
           duration_ms: stored?.durationMs,
           ...(stored?.permitted === false ? { error: typeof stored.result === 'string' ? stored.result : 'Tool permission denied' } : {}),
+          ...(typeof stored?.error === 'string' && stored.error ? { error: stored.error } : {}),
         })
       } else pushStoredExecution(builder, execution, executionIndex, record.content)
       executionIndex += 1

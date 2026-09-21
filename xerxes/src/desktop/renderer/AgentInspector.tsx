@@ -38,14 +38,14 @@ export function AgentInspector({ row, rows, sessionKey, online }: {row: SessionR
     <header className="agent-inspector__heading"><h2>{row.title}</h2><span>{state.label}</span></header>
     <dl className="agent-inspector__identity">
       <dt>Base agent</dt><dd>{base || 'Not reported'}</dd>
-      <dt>Model</dt><dd>{model || 'Not reported'}</dd>
-      {Boolean(info?.providerProfile || detail?.provider_profile) && <><dt>Provider profile</dt><dd>{info?.providerProfile || text(detail?.provider_profile)}</dd></>}
+      <dt>{info?.provisional ? 'Requested model' : 'Model'}</dt><dd>{model || 'Not reported'}</dd>
+      {Boolean(info?.providerProfile || detail?.provider_profile) && <><dt>{info?.provisional ? 'Requested provider profile' : 'Provider profile'}</dt><dd>{info?.providerProfile || text(detail?.provider_profile)}</dd></>}
       {Boolean(info?.reasoningEffort || detail?.reasoning_effort) && <><dt>Reasoning effort</dt><dd>{info?.reasoningEffort || text(detail?.reasoning_effort)}</dd></>}
       <dt>Created by</dt><dd>{parent ? rows.find(candidate => candidate.id === parent)?.title || parent : 'Parent task'}</dd>
     </dl>
     {prompt && <section><h3>Assigned task</h3><p className="agent-inspector__prompt">{prompt}</p></section>}
     {!online && <p role="status">Disconnected. Showing retained activity; reconnect for updates and controls.</p>}
-    {info?.provisional && <p role="status">{state.priority < 2 ? 'Waiting for the runtime to identify this spawn request. Its assigned task is available here; controls will appear when its identity is confirmed.' : 'This request has finished. Its runtime identity was not recorded, so live details and controls are unavailable. The original task remains inspectable.'}</p>}
+    {info?.provisional && <p role="status">{state.tone === 'failed' && info.error ? 'The spawn request failed before an agent identity was confirmed. No running agent is reported for this request. Its requested settings and failure are retained below.' : state.priority < 2 ? 'Waiting for the runtime to identify this spawn request. Its assigned task is available here; controls will appear when its identity is confirmed.' : 'This request has finished. Its runtime identity was not recorded, so live details and controls are unavailable. The original task remains inspectable.'}</p>}
     {error && <div role="alert" className="studio-error"><p>{error}</p><button disabled={!online} onClick={() => setRetry(value => value+1)}>Retry agent details</button></div>}
     {info?.error && <p className="studio-error">{info.error}</p>}
     {info?.summary && !info.provisional && <section><h3>Latest summary</h3><p>{info.summary}</p></section>}
@@ -55,7 +55,7 @@ export function AgentInspector({ row, rows, sessionKey, online }: {row: SessionR
     {!output && !info?.notes?.length && !info?.toolCalls?.length && !info?.provisional && <p className="studio-muted">{detail || error ? 'No detailed activity has been recorded yet.' : 'Loading recorded activity…'}</p>}
     {Boolean(info?.thinking?.length) && <details><summary>Reasoning</summary>{info!.thinking!.map((line,index)=><p key={index}>{line}</p>)}</details>}
     {info && [['Files read', info.filesRead], ['Files changed', info.filesWritten]].map(([label, paths]) => Array.isArray(paths) && paths.length > 0 ? <section key={String(label)}><h3>{label}</h3><ul>{paths.map(path => <li key={path}><code>{path}</code></li>)}</ul></section> : null)}
-    <details className="agent-inspector__metadata"><summary>Runtime details</summary><dl><dt>Agent ID</dt><dd>{info?.provisional ? 'Not assigned yet' : row.id}</dd>{info?.toolCount !== undefined && <><dt>Tools</dt><dd>{info.toolCount}</dd></>}{info?.inputTokens !== undefined && <><dt>Input tokens</dt><dd>{info.inputTokens.toLocaleString()}</dd></>}{info?.outputTokens !== undefined && <><dt>Output tokens</dt><dd>{info.outputTokens.toLocaleString()}</dd></>}</dl></details>
+    <details className="agent-inspector__metadata"><summary>Runtime details</summary><dl><dt>Agent ID</dt><dd>{info?.provisional ? state.priority < 2 ? 'Not assigned yet' : 'Not recorded' : row.id}</dd>{info?.toolCount !== undefined && <><dt>Tools</dt><dd>{info.toolCount}</dd></>}{info?.inputTokens !== undefined && <><dt>Input tokens</dt><dd>{info.inputTokens.toLocaleString()}</dd></>}{info?.outputTokens !== undefined && <><dt>Output tokens</dt><dd>{info.outputTokens.toLocaleString()}</dd></>}</dl></details>
     {!info?.provisional && <fieldset disabled={!online} className="agent-inspector__controls"><AgentControls id={row.id} active={state.priority < 2}/></fieldset>}
   </article>
 }

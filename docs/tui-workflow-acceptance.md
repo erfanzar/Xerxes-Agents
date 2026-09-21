@@ -1251,3 +1251,21 @@ and lease expiry, then restored the same sessions. UI-owned provider forwarding
 still needs its connection; this change does not extend credential authority or
 promise recovery across daemon termination. Both updated client and daemon are
 required. The broader audit remains in progress.
+
+### 2026-09-21 — Provider inventory host validation and failed history
+
+The [model discovery recovery matrix](model-discovery-recovery-2026-09-21.md)
+corrects the earlier empty-profile completion claim: the daemon and standalone
+post-discovery checks still rejected empty or padded names. Both hosts now follow
+the inventory core's normalization. Saved native tool failures remain failed in
+the desktop, with duplicate error output removed. Production local daemon,
+packaged GUI and TUI resume checks passed; separate live local/SSH catalogs list
+the configured GLM model. Model generation remains untested for those services.
+
+### 2026-09-21 — Rejected spawns and exact host profile recovery
+
+The [rejected-spawn matrix](rejected-spawn-recovery-2026-09-21.md) records failed
+provisional agent state, retained requested settings, and actionable errors from
+both early route resolution and later validation. Confirmed running children
+remain authoritative when another batch member fails. Profile names are not
+silently aliased across hosts.

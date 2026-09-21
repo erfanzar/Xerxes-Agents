@@ -6,13 +6,55 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { ExecutionDetails, executionView, ToolCallRow } from '../src/desktop/renderer/Execution.js'
 import { activityFleetRows, AgentRoster } from '../src/desktop/renderer/AgentRoster.js'
+import { AgentInspector } from '../src/desktop/renderer/AgentInspector.js'
 import { CommandActivity } from '../src/desktop/renderer/CommandActivity.js'
 import type { SessionRow } from '../src/desktop/renderer/types.js'
 import type { ToolItem } from '../src/desktop/renderer/types.js'
-import { BlockBuilder } from '../src/desktop/renderer/blocks.js'
+import { BlockBuilder, blocksFromStoredMessages } from '../src/desktop/renderer/blocks.js'
 import { activityGroupKey, groupActivity, keyedActivityGroups } from '../src/desktop/renderer/activityGroups.js'
 
 const item: ToolItem = { id: 'call-1', name: 'exec_command', verb: 'exec_command', arg: 'sed', dur: '0.0s', state: 'done', input: JSON.stringify({ cmd: 'sed', args: ['-n', '10,20p', 'path with spaces/file.ts'] }), output: JSON.stringify({ stdout: 'function run() {\n  return 1\n}\n', stderr: '', exitCode: 0, cwd: '/repo' }) }
+test('rejected spawn evidence replaces stale pending status without mislabelling confirmed children', () => {
+  const failure='Tool execution failed: Agent provider profile unavailable: zai'
+  const member={key:'spawn:0',title:'Derive QKV probe',status:'working',baseAgent:'researcher',model:'glm-5.3-flash',providerProfile:'zai',prompt:'Inspect the permutation'}
+  const blocks=[{kind:'tools' as const,id:1,running:false,items:[{...item,id:'spawn',output:failure}]},{kind:'agents' as const,id:2,members:[member,{...member,key:'spawn:1',runtimeId:'real-child'}]}]
+  const rows=activityFleetRows([],blocks)
+  expect(rows[0]).toMatchObject({status:'failed',agentDetails:{error:failure,model:member.model,providerProfile:'zai'}})
+  expect(rows[1]?.status).toBe('starting')
+  const html=renderToStaticMarkup(createElement(AgentInspector,{row:rows[0]!,rows,sessionKey:'parent',online:true}))
+  expect(html).toContain('Requested model')
+  expect(html).toContain('glm-5.3-flash')
+  expect(html).toContain('spawn request failed')
+  expect(html).not.toContain('Waiting for the runtime')
+  expect(html).not.toContain('Not assigned yet')
+  expect(html).not.toContain('Stop agent')
+  const next=activityFleetRows([], [...blocks,{kind:'user',id:3,text:'Next turn'},{kind:'agents',id:4,members:[{...member,key:'spawn:2',title:'Next turn probe'}]}])
+  expect(next.find(row=>row.id==='spawn:2')).toMatchObject({status:'starting'})
+})
+test('failed model discovery stays failed after live delivery and saved history replay', () => {
+  const failure = 'Tool execution failed: Function_list_available_models: Provider profile unavailable'
+  const call = { id: 'models', type: 'function', function: { name: 'list_available_models', arguments: '{"provider_profile":""}' } }
+  const messages = [{ role: 'assistant', content: '', tool_calls: [call] }, { role: 'tool', tool_call_id: 'models', content: failure }]
+  const live = new BlockBuilder()
+  live.push('tool_call', { id: call.id, name: call.function.name, arguments: call.function.arguments })
+  live.push('tool_result', { tool_call_id: call.id, return_value: failure, permitted: true })
+  for (const blocks of [live.all(), blocksFromStoredMessages(messages), blocksFromStoredMessages(messages, { executions: [{ toolCallId: call.id, name: call.function.name, result: failure, permitted: true }] })]) {
+    const block = blocks.find(block => block.kind === 'tools')
+    if (block?.kind !== 'tools') throw new Error('Missing failed tool')
+    const tool = block.items[0]!
+    expect(tool).toMatchObject({ state: 'failed', error: failure, output: failure })
+    expect(renderToStaticMarkup(createElement(ToolCallRow, { item: tool, label: 'List available models' }))).toContain('Failed')
+    const detail = renderToStaticMarkup(createElement(ExecutionDetails, { item: tool }))
+    expect(detail).not.toContain('Completed')
+    expect(detail).not.toContain('class="execution__error"')
+  }
+  const success = blocksFromStoredMessages([messages[0], { role: 'tool', tool_call_id: 'models', content: 'Documentation mentions Tool execution failed: as an example.' }])
+  expect(success[0]).toMatchObject({ kind: 'tools', items: [{ state: 'done' }] })
+  const cancelled = blocksFromStoredMessages([messages[0], { role: 'tool', tool_call_id: 'models', content: 'Cancelled before execution.' }], { executions: [{ toolCallId: 'models', permitted: false, result: 'Cancelled before execution.' }] })
+  expect(cancelled[0]).toMatchObject({ kind: 'tools', items: [{ state: 'failed', error: 'Cancelled before execution.' }] })
+  const explicit = blocksFromStoredMessages(messages, { executions: [{ toolCallId: 'models', permitted: true, error: 'Explicit failure' }] })
+  expect(explicit[0]).toMatchObject({ kind: 'tools', items: [{ error: 'Explicit failure' }] })
+})
 test('collapsed calls do not construct large output viewers', () => {
   const output = 'Large result line\n'.repeat(10_000)
   const html = renderToStaticMarkup(createElement(ToolCallRow, { label: 'Exec command', item: { ...item, output } }))

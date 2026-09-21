@@ -241,6 +241,15 @@ const scenario = (name:string) => {
   }
   fixtureExportDenied=name==='Export error'
   patch({...base,blocks,turnActive:false,failed:null,networkRetrying:false,settingsOpen:false,pickerOpen:false,modelMenuOpen:false,reasoningPickerOpen:false})
+  if(name==='Model discovery replay')patch({goal:'',fleet:[],currentTitle:'Model discovery recovery',blocks:blocksFromStoredMessages([
+    {role:'user',content:'Show the configured models before delegating.'},
+    {role:'assistant',content:'',tool_calls:[{id:'inventory-failed',type:'function',function:{name:'list_available_models',arguments:'{"provider_profile":""}'}}]},
+    {role:'tool',tool_call_id:'inventory-failed',content:'Tool execution failed: Function_list_available_models: Provider profile unavailable'},
+    {role:'assistant',content:'The earlier discovery failed. Retrying after the inventory correction.'},
+    {role:'assistant',content:'',tool_calls:[{id:'inventory-retry',type:'function',function:{name:'list_available_models',arguments:'{"provider_profile":""}'}}]},
+    {role:'tool',tool_call_id:'inventory-retry',content:'{"ok":true,"mode":"providers","source":"configured_profiles","entries":[{"provider_profile":"fixture","configured_model":"fixture-model"}]}'},
+    {role:'assistant',content:'Provider inventory is now available. No conversation model was changed.'},
+  ])})
   if(name==='Work monitor')patch({goal:'',turnActive:true,fleet:[...Array.from({length:58},(_,i)=>({...session(i),id:'past-'+i,kind:'subagent',status:i%3?'completed':'failed',title:'Previous review '+i,agentDetails:{summary:'Previous attempt finished.',error:i%3?'':'Previous attempt failed',model:'fixture/model',filesRead:[],filesWritten:[]}})),...Array.from({length:3},(_,i)=>({...session(i),id:'live-'+i,kind:'subagent',status:'running',title:'Running review '+(i+1),agentDetails:{baseAgent:i===2?'test-engineer':'reviewer',model:'fixture/model',providerProfile:'work-profile',reasoningEffort:'high',goal:'Review cancellation and reconnect boundaries for task '+(i+1),summary:'Inspecting session recovery and recorded output.',error:'',filesRead:['src/runtime/session.ts'],filesWritten:[],notes:['Checking the live cancellation path.','The saved transcript survives reconnect.'],toolCalls:[{id:'inspect-'+i,name:'ReadFile',verb:'Read file',arg:'src/runtime/session.ts',input:'{}',state:'done',dur:'0.1s',output:'export const preserveSession = true;'}]}}))],blocks:[{kind:'user',id:900,text:'Review the current changes while the test command runs.'},{kind:'agents',id:901,members:Array.from({length:3},(_,i)=>({key:'call-'+i,runtimeId:'live-'+i,title:'Running review '+(i+1),status:'working'}))}]})
   if(name==='Artifacts')patch({changes:[{path:'src/runtime/transport/connections/recovery/session-reconnect-controller.ts',adds:24,dels:8,isNew:false,hunks:[],turn:1},{path:'src/desktop/layout.ts',adds:1,dels:0,isNew:true,hunks:[],turn:1}]})
   if(name==='Runtime update')patch({daemonWarning:'The workspace runtime predates this app build. Existing work is still running.',turnActive:true})

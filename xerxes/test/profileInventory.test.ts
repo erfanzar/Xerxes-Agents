@@ -81,6 +81,13 @@ test('standalone profile inventory discovers a configured endpoint, notes and pr
     const settings = new AgentSettingsStore(join(directory, 'settings.sqlite'))
     settings.saveRoutingNote('local', 'worker', 'Review complex code', 0)
     const host = profileInventoryHost(profiles, settings)
+    await expect(profileSelectionValidator(profiles)('wrong-host-name', 'worker')).rejects.toThrow('Configured profiles for this model on the execution host: "local"')
+    for (const provider_profile of ['', ' \t\n']) {
+      expect(await host('session', { provider_profile, include_usage: false, query: '', offset: 0, limit: 1, revision: '' })).toMatchObject({ source: 'configured_profiles', mode: 'providers', entries: [expect.objectContaining({ provider_profile: expect.any(String) })] })
+      await expect(host('session', { provider_profile, include_usage: true })).rejects.toThrow('requires provider_profile')
+    }
+    await expect(host('session', { provider_profile: 'missing' })).rejects.toThrow('Unknown provider profile')
+    expect(await host('session', { provider_profile: ' local\t' })).toMatchObject({ entries: [expect.objectContaining({ model: 'worker' })] })
     const result = await host('session', { provider_profile: 'local' })
     expect(result).toMatchObject({ source: 'provider', entries: [{ model: 'worker', context_window: 32000, reasoning_source: 'provider_fallback' }] })
     expect(JSON.stringify(result)).toContain('Review complex code')

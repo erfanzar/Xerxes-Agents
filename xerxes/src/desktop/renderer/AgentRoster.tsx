@@ -7,6 +7,7 @@ import { Icon } from './Icon.js'
 import { ToolCallRow } from './Execution.js'
 import { store } from './store.js'
 import { desktopError } from './desktopRpc.js'
+import { toolFailureText } from './blocks.js'
 
 export function agentState(status: string): { label: string; priority: number; tone: string } {
   if (['failed', 'error', 'timeout'].includes(status)) return { label: 'Failed', priority: 2, tone: 'failed' }
@@ -20,7 +21,14 @@ export function agentState(status: string): { label: string; priority: number; t
 /** Keep requests visible while a daemon snapshot is pending; never invent a controllable agent id. */
 export function activityFleetRows(rows: readonly SessionRow[], blocks: readonly Block[]): readonly SessionRow[] {
   const result = [...rows]
-  for (const block of blocks) if (block.kind === 'agents') for (const member of block.members) {
+  const failures = new Map<string, string>()
+  for (const block of blocks) {
+    if (block.kind === 'user') failures.clear()
+    if (block.kind === 'tools') for (const tool of block.items) failures.set(tool.id, toolFailureText({error:tool.error,result:tool.output}))
+    if (block.kind !== 'agents') continue
+    for (const original of block.members) {
+    const error = !original.runtimeId ? failures.get(original.key.slice(0, original.key.lastIndexOf(':'))) : ''
+    const member = error && original.status === 'working' ? {...original,status:'failed',error} : original
     const matched = result.findIndex(row => member.runtimeId ? row.id === member.runtimeId : row.id === member.key || row.agentDetails?.requestKey === member.key || row.title === member.title)
     if (matched >= 0) {
       const row = result[matched]!
@@ -28,7 +36,8 @@ export function activityFleetRows(rows: readonly SessionRow[], blocks: readonly 
       continue
     }
     result.push({id:member.key,key:member.key,title:member.title,status:member.status === 'working' ? 'starting' : member.status,age:'',current:false,kind:'subagent',turns:0,messages:0,cwd:'',untitled:false,
-      agentDetails:{provisional:true,baseAgent:member.baseAgent || "",goal:member.prompt || "",summary:agentState(member.status).priority < 2 ? 'The spawn request is visible in the conversation. Waiting for the runtime to report this agent’s identity and state.' : 'This request has finished. Its runtime details were not recorded; the original request is retained.',error:'',model:'',filesRead:[],filesWritten:[]}})
+      agentDetails:{provisional:true,baseAgent:member.baseAgent || "",goal:member.prompt || "",summary:agentState(member.status).priority < 2 ? 'The spawn request is visible in the conversation. Waiting for the runtime to report this agent’s identity and state.' : 'This request has finished. Its runtime details were not recorded; the original request is retained.',error:member.error || '',model:member.model || '',providerProfile:member.providerProfile || '',filesRead:[],filesWritten:[]}})
+    }
   }
   return result
 }

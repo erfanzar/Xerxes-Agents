@@ -10144,11 +10144,19 @@ test('model inventory uses configured discovery without exposing credentials or 
     expect((await client.next(frame => frame.id === 42)).error).toBeDefined();
     const profiles = await server.modelInventoryToolRequest(session.id, {});
     expect(JSON.stringify(profiles)).not.toContain('fixture-secret');
+    for (const provider_profile of ['', ' \t\n']) {
+      expect(await server.modelInventoryToolRequest(session.id, { provider_profile, include_usage: false, query: '', offset: 0, limit: 1, revision: '' })).toMatchObject({ source: 'configured_profiles', mode: 'providers', entries: [expect.objectContaining({ provider_profile: expect.any(String) })] });
+      await expect(server.modelInventoryToolRequest(session.id, { provider_profile, include_usage: true })).rejects.toThrow('requires provider_profile');
+    }
+    await expect(server.modelInventoryToolRequest(session.id, { provider_profile: '' }, AbortSignal.abort(new Error('cancelled')))).rejects.toThrow('cancelled');
+    await expect(server.modelInventoryToolRequest(session.id, { provider_profile: 'missing' })).rejects.toThrow('Unknown provider profile');
     const models = await server.modelInventoryToolRequest(session.id, { provider_profile: 'fixture' }) as { entries: Array<Record<string, unknown>>; quota: unknown };
+    expect(await server.modelInventoryToolRequest(session.id, { provider_profile: '  fixture\t' })).toMatchObject({ entries: expect.arrayContaining([expect.objectContaining({ model: 'fixture-model' })]) });
     expect(models.entries).toContainEqual(expect.objectContaining({ model: 'fixture-model', provider_profile: 'fixture', context_window: 32000, reasoning_efforts: expect.any(Array) }));
     expect(JSON.stringify(models.entries)).toContain('Use for careful review');
     expect(models.quota).toMatchObject({ status: 'unknown' });
     await server.validateAgentProviderSelection('fixture', 'fixture-model', 'high');
+    await expect(server.validateAgentProviderSelection('wrong-host-name', 'configured-model')).rejects.toThrow('Configured profiles for this model on the execution host: "fixture"');
     await expect(server.validateAgentProviderSelection('fixture', 'unknown-model')).rejects.toThrow('not configured or discovered');
     await expect(server.validateAgentProviderSelection('fixture', 'fixture-model', 'impossible')).rejects.toThrow('Unsupported reasoning');
     await expect(server.validateAgentProviderSelection('fixture', 'fixture-model', undefined, AbortSignal.abort(new Error('cancelled')))).rejects.toThrow('cancelled');

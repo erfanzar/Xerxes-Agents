@@ -20,7 +20,7 @@ test('one-shot CLI exposes native subagents and their catalog to the main model'
     port: 0,
     async fetch(request) {
       requests.push((await request.json()) as Record<string, unknown>)
-      if (requests.length === 1) return sseResponse([{ choices: [{ delta: { tool_calls: [{ index: 0, id: 'catalog', function: { name: 'list_available_models', arguments: '{}' } }] }, finish_reason: 'tool_calls' }] }])
+      if (requests.length === 1) return sseResponse([{ choices: [{ delta: { tool_calls: [{ index: 0, id: 'catalog', function: { name: 'list_available_models', arguments: '{"include_usage":false,"provider_profile":"","query":"","offset":0,"limit":1,"revision":""}' } }] }, finish_reason: 'tool_calls' }] }])
       return sseResponse([
         { choices: [{ delta: { content: 'one-shot ready' }, finish_reason: 'stop' }] },
       ])
