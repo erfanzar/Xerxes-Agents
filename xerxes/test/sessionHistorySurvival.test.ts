@@ -341,3 +341,35 @@ test('daemon partial undo keeps the persisted transcript and its remaining histo
     await rm(directory, { recursive: true, force: true })
   }
 })
+
+test('GUI history pages restore archived turns after a daemon restart without expanding model context', async () => {
+  await withTempDirectory(async directory => {
+    const first = runtimeFor(directory)
+    const session = await first.openSession('original')
+    const original = Array.from({ length: 240 }, (_, index) => ({ role: index % 2 ? 'assistant' : 'user', content: `History ${index}` }))
+    const compact = [{ role: 'user', content: 'summary', xerxes_compaction_summary: true }, ...original.slice(-20)]
+    session.messages = compact
+    await first.flushSessions()
+    await Bun.write(join(directory, 'sessions', session.id + '.precompact.jsonl'), JSON.stringify({ messages: original }) + '\n')
+    await first.shutdown()
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const runtime = runtimeFor(directory)
+      const server = new DaemonServer({ runtime, socketPath: join(directory, 'rpc.sock'), sessionArchiveDirectory: join(directory, 'sessions'), cronLeasePath: join(directory, 'cron.lease') })
+      await server.start()
+      const client = await HistoryTestClient.connect(join(directory, 'rpc.sock'))
+      try {
+        client.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { resume_session_id: session.id, project_dir: directory, history_limit: 100 } })
+        const initialized = await client.next(frame => frame.id === 1)
+        const payload = initialized.result?.session as Record<string, unknown>
+        const history = payload.history as { actions: Array<{ messages: Array<{ content: string }> }>; before: string; total_actions: number }
+        expect(history.total_actions).toBe(240)
+        expect(history.actions[0]?.messages[0]?.content).toBe('History 140')
+        client.send({ jsonrpc: '2.0', id: 2, method: 'session.history', params: { before: history.before, history_limit: 100 } })
+        const page = (await client.next(frame => frame.id === 2)).result?.history as typeof history
+        expect(page.actions[0]?.messages[0]?.content).toBe('History 40')
+        expect(runtime.listSessions().find(row => row.id === session.id)?.messages).toHaveLength(21)
+        expect((await Bun.file(join(directory, 'sessions', session.id + '.json')).json()).messages).toHaveLength(21)
+      } finally { client.close(); await server.stop(); await runtime.shutdown() }
+    }
+  })
+})

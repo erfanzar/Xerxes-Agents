@@ -129,6 +129,10 @@ html[data-theme='light'] {
 :root[data-font='11']{--ui-font:11px;--ui-small:10px;--ui-large:12px}
 :root[data-font='12']{--ui-font:12px;--ui-small:11px;--ui-large:13px}
 :root[data-font='13']{--ui-font:13px;--ui-small:12px;--ui-large:14px}
+/* 13px was the ceiling, which is a hard accessibility limit for anyone who
+   needs larger text; the scale now reaches a genuinely comfortable size. */
+:root[data-font='15']{--ui-font:15px;--ui-small:13px;--ui-large:16px}
+:root[data-font='17']{--ui-font:17px;--ui-small:15px;--ui-large:19px}
 
 * { box-sizing: border-box; }
 html, body, #root { margin: 0; height: 100%; }
@@ -529,7 +533,9 @@ details[open] > summary::marker { content: "▾\00a0\00a0"; }
 
 /* Approval */
 .approval {
-  margin: 0 20px 10px; max-width: 84ch; align-self: center; width: 100%;
+  /* width:100% + horizontal margins overflowed .stream's content box by
+     exactly 2×20px and gave the transcript a horizontal scrollbar. */
+  margin: 0 20px 10px; max-width: min(84ch, calc(100% - 40px)); align-self: center; width: 100%;
   border: 1px solid var(--x-needs-border); background: var(--x-needs-bg);
   border-radius: var(--r-sm); padding: 9px 12px; display: grid; gap: 8px;
   box-sizing: border-box;
@@ -717,8 +723,12 @@ details[open] > summary::marker { content: "▾\00a0\00a0"; }
 .wschip:hover { border-color: var(--x-focus); color: var(--x-strong); }
 .wschip__ico { color: var(--x-working); }
 .wschip__c { color: var(--x-meta); font-size: 8px; }
+/* Opened from the Workspace sheet's "Recent workspaces", which closes the
+   sheet first — so there is no anchor element. Without a left/right it
+   resolved to x=0 and sat in the window corner over the sidebar. */
 .wsmenu {
-  position: fixed; top: 44px; z-index: 41; width: 340px;
+  position: fixed; top: 80px; left: 50%; transform: translateX(-50%);
+  z-index: 130; width: 340px;
   background: var(--x-screen); border: 1px solid var(--x-hairline);
   border-radius: var(--r-sm); padding: 4px;
   box-shadow: 0 12px 36px rgba(0, 0, 0, 0.5);
@@ -1078,9 +1088,11 @@ details[open] > summary::marker { content: "▾\00a0\00a0"; }
 /* ── Settings modal ───────────────────────────────────────────────── */
 .backdrop {
   position: fixed; inset: 0; background: rgba(0, 0, 0, 0.6);
-  display: flex; align-items: center; justify-content: center; z-index: 40;
+  /* Above .studio-backdrop (sheets, z-120): Settings can be opened from
+     inside a sheet, and a dialog under its own scrim is unusable. */
+  display: flex; align-items: center; justify-content: center; z-index: 125;
 }
-.backdrop--clear { background: transparent; z-index: 39; }
+.backdrop--clear { background: transparent; z-index: 124; }
 .modal {
   width: 780px; max-width: calc(100vw - 80px); height: 540px;
   background: var(--x-screen); border: 1px solid var(--x-hairline);
@@ -1236,7 +1248,9 @@ details[open] > summary::marker { content: "▾\00a0\00a0"; }
 /* ── Command palette ──────────────────────────────────────────────── */
 .palette {
   position: fixed; top: 80px; left: 50%; transform: translateX(-50%);
-  width: 560px; z-index: 50; background: var(--x-screen);
+  /* Must outrank .studio-backdrop (sheets, z-120) — a palette mounted under
+     the scrim still takes focus and still runs what you type into it. */
+  width: 560px; z-index: 130; background: var(--x-screen);
   border: 1px solid var(--x-hairline); border-radius: var(--r-sm);
   box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5); overflow: hidden;
 }
@@ -1319,3 +1333,286 @@ details[open] > summary::marker { content: "▾\00a0\00a0"; }
 /* Inline "input + action" rows (terminal write, search entry). */
 .findwrap { display: flex; gap: 8px; align-items: center; }
 .findwrap .findwrap__input { flex: 1 1 auto; }
+
+.remote-providers { margin-block: 20px; overflow-wrap: anywhere; }
+.remote-providers h3 { margin-block: 0 10px; }
+.remote-providers p { margin-block: 10px; line-height: 1.5; }
+.remote-providers fieldset { min-width: 0; border: 0; padding: 0; margin-block: 16px; }
+.remote-providers legend { font-weight: 600; }
+.remote-providers__list { max-height: 240px; overflow-y: auto; margin-block: 12px; }
+.remote-providers__choice { display: flex; align-items: flex-start; gap: 10px; margin-block: 10px; }
+.remote-providers__choice input { flex: 0 0 auto; margin-top: 3px; }
+.remote-providers__choice small { display: block; color: var(--muted); }
+.remote-providers .row__actions { display: flex; flex-wrap: wrap; gap: 8px; }
+
+/* ── Render failure containment (ErrorBoundary) ────────────────────── */
+.render-error {
+  display: grid; gap: 10px; align-content: start; justify-items: start;
+  margin: auto; padding: 24px; max-width: 60ch;
+  color: var(--x-prose); font: var(--ui-font) var(--sans);
+}
+.render-error--panel { margin: 16px; }
+.render-error strong { color: var(--x-fail-text, var(--x-title)); font-size: 15px; }
+.render-error p { margin: 0; color: var(--x-secondary); line-height: 1.6; }
+.render-error pre {
+  margin: 0; width: 100%; box-sizing: border-box; max-height: 180px; overflow: auto;
+  padding: 8px 10px; border: 1px solid var(--x-hairline); border-radius: var(--r-sm);
+  background: var(--x-backdrop); font: var(--ui-small) var(--mono); white-space: pre-wrap; word-break: break-word;
+}
+.render-error__actions { display: flex; gap: 8px; }
+
+/* Approval detail: the tool's real arguments, shaped per tool. */
+.approval__dismiss {
+  margin-left: auto; border: 0; background: none; padding: 0 2px; line-height: 1;
+  color: var(--x-meta); font-size: 14px; cursor: pointer;
+}
+.approval__dismiss:hover { color: var(--x-title); }
+.approval__reason { margin: 0; color: var(--x-secondary); font-size: var(--ui-small); line-height: 1.5; }
+.approval__cwd {
+  margin: 0; color: var(--x-meta); font: var(--ui-small) var(--mono);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.approval__fields { display: grid; gap: 6px; margin: 0; }
+.approval__fields > div { display: grid; grid-template-columns: minmax(64px, 18%) minmax(0, 1fr); gap: 10px; align-items: baseline; }
+.approval__fields dt { color: var(--x-meta); font-size: var(--ui-small); text-transform: lowercase; }
+.approval__fields dd {
+  margin: 0; min-width: 0; color: var(--x-prose); font: var(--ui-small) var(--mono);
+  white-space: pre-wrap; word-break: break-word; max-height: 160px; overflow: auto;
+}
+
+/* ── Find in page (⌘F) ────────────────────────────────────────────── */
+.findbar {
+  position: fixed; top: 52px; right: 24px; z-index: 140;
+  display: flex; align-items: center; gap: 4px; padding: 5px 6px;
+  background: var(--x-screen); border: 1px solid var(--x-hairline);
+  border-radius: var(--r-md); box-shadow: 0 12px 36px rgba(0, 0, 0, 0.4);
+}
+.findbar__in {
+  width: 220px; padding: 4px 7px; border: 1px solid var(--x-hairline);
+  border-radius: var(--r-sm); background: var(--x-backdrop); color: var(--x-title);
+  font: var(--ui-font) var(--sans);
+}
+.findbar__in:focus { border-color: var(--x-focus); outline: none; }
+.findbar button {
+  border: 0; background: none; color: var(--x-secondary);
+  padding: 3px 6px; border-radius: var(--r-sm); cursor: pointer; line-height: 1;
+}
+.findbar button:hover { background: var(--x-selected); color: var(--x-title); }
+.findbar__miss { color: var(--x-meta); font: var(--ui-small) var(--sans); padding: 0 4px; }
+
+/* Pending decision, floated above a surface that hides the chat column. */
+.decision-dock {
+  position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%);
+  z-index: 135; width: min(84ch, calc(100vw - 48px));
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45); border-radius: var(--r-sm);
+}
+.decision-dock > .approval, .decision-dock > .qcard { margin: 0; max-width: none; width: 100%; }
+
+.linkish {
+  border: 0; background: none; padding: 0; color: var(--x-accent);
+  font: inherit; cursor: pointer; text-decoration: underline;
+}
+
+/* Visually hidden, still announced. */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+  overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0;
+}
+
+/* ── Copyable code blocks ─────────────────────────────────────────── */
+.copybtn {
+  border: 1px solid var(--x-hairline); background: var(--x-card); color: var(--x-secondary);
+  padding: 2px 7px; border-radius: var(--r-sm); cursor: pointer;
+  font: var(--ui-small) var(--sans); line-height: 1.5; white-space: nowrap;
+}
+.copybtn:hover { color: var(--x-title); border-color: var(--x-focus); }
+.md__codewrap { margin: 10px 0; border: 1px solid var(--x-hairline); border-radius: var(--r-md); overflow: hidden; }
+.md__codebar {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 4px 8px 4px 10px; background: var(--x-chrome); border-bottom: 1px solid var(--x-hairline);
+}
+.md__lang { color: var(--x-meta); font: var(--ui-small) var(--mono); text-transform: lowercase; }
+/* The block already has the wrapper's border. */
+.md__codewrap .md__code { margin: 0; border: 0; border-radius: 0; }
+/* Only show the bar's affordance on hover/focus so the transcript stays calm. */
+.md__codebar .copybtn { opacity: 0; transition: opacity 120ms ease; }
+.md__codewrap:hover .md__codebar .copybtn,
+.md__codebar .copybtn:focus-visible { opacity: 1; }
+@media (prefers-reduced-motion: reduce) { .md__codebar .copybtn { opacity: 1; } }
+.modelpop__error { margin: 4px 10px 8px; color: var(--x-fail-text, var(--x-failed)); font: var(--ui-small) var(--sans); }
+
+/* Return to the tail after reading back. */
+.jump-latest {
+  position: sticky; bottom: 8px; left: 50%; transform: translateX(-50%);
+  display: inline-flex; align-items: center; gap: 6px; z-index: 5;
+  padding: 5px 12px; border: 1px solid var(--x-hairline); border-radius: 999px;
+  background: var(--x-card); color: var(--x-title); cursor: pointer;
+  font: var(--ui-small) var(--sans); box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+}
+.jump-latest:hover { border-color: var(--x-focus); }
+.jump-latest svg { transform: rotate(90deg); }
+.desktop-page__close {
+  border: 0; background: none; color: var(--x-meta); cursor: pointer;
+  font-size: 18px; line-height: 1; padding: 2px 6px; border-radius: var(--r-sm); align-self: start;
+}
+.desktop-page__close:hover { background: var(--x-selected); color: var(--x-title); }
+.schedule-row__prompt {
+  margin: 2px 0 0; color: var(--x-secondary); font-size: var(--ui-small);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+
+/* ── Keyboard shortcut reference (⌘/) ─────────────────────────────── */
+.shortcuts { width: min(620px, 100%); max-height: min(720px, calc(100vh - 80px)); overflow: auto; }
+.shortcuts__group { margin: 18px 0; }
+.shortcuts__group h3 {
+  margin: 0 0 8px; font-size: var(--ui-font); font-weight: 600; color: var(--x-meta);
+  text-transform: uppercase; letter-spacing: 0.06em;
+}
+.shortcuts__group dl { display: grid; gap: 6px; margin: 0; }
+.shortcuts__group dl > div { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 12px; align-items: baseline; }
+.shortcuts__group dt { justify-self: start; }
+.shortcuts__group dt kbd {
+  padding: 2px 6px; border: 1px solid var(--x-hairline); border-radius: var(--r-sm);
+  background: var(--x-backdrop); font: var(--ui-small) var(--mono); color: var(--x-title);
+}
+.shortcuts__group dd { margin: 0; color: var(--x-prose); font-size: var(--ui-font); line-height: 1.5; }
+/* Focused on arrival so the 1/2/3 keys are live; no visible ring on the
+   container itself — the buttons keep their own focus styling. */
+.approval:focus { outline: none; }
+.approval:focus-visible { outline: 1px solid var(--x-focus); outline-offset: 2px; }
+
+/* ── Activity rail: status head, live signals, one drawer ─────────── */
+.railstatus {
+  display: grid; gap: 9px; padding: 11px 12px; margin-bottom: 12px;
+  background: var(--x-card); border: 1px solid var(--x-hairline); border-radius: var(--r-md);
+}
+.railstatus__head { display: flex; align-items: center; gap: 8px; }
+.railstatus__head strong { font-size: var(--ui-large); font-weight: 600; color: var(--x-title); }
+.railstatus__dot { width: 7px; height: 7px; border-radius: 50%; background: var(--x-done); flex: none; }
+.railstatus[data-tone='working'] .railstatus__dot { background: var(--x-activity); animation: pulse 1.4s ease infinite; }
+.railstatus[data-tone='needs'] .railstatus__dot { background: var(--x-needs); animation: pulse 1.4s ease infinite; }
+.railstatus[data-tone='failed'] .railstatus__dot { background: var(--x-failed); }
+.railstatus[data-tone='plan'] .railstatus__dot { background: var(--x-working); }
+.railstatus[data-tone='needs'] .railstatus__head strong { color: var(--x-needs-text); }
+.railstatus[data-tone='failed'] .railstatus__head strong { color: var(--x-fail-text, var(--x-failed)); }
+.railstatus__clock { font: var(--ui-small) var(--mono); color: var(--x-numeric); }
+.railstatus__stop {
+  margin-left: auto; padding: 2px 9px; border: 1px solid var(--x-hairline);
+  border-radius: var(--r-sm); background: none; color: var(--x-secondary);
+  font: var(--ui-small) var(--sans); cursor: pointer;
+}
+.railstatus__stop:hover { border-color: var(--x-failed); color: var(--x-fail-text, var(--x-failed)); }
+.railstatus__action {
+  display: flex; align-items: center; gap: 6px; margin: 0; min-width: 0;
+  font-size: var(--ui-font); color: var(--x-secondary);
+}
+.railstatus__action span { flex: none; }
+.railstatus__action code {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font: var(--ui-small) var(--mono); color: var(--x-meta);
+}
+.railstatus__todos { display: flex; justify-content: space-between; margin: 0; font-size: var(--ui-small); color: var(--x-meta); }
+.railstatus__todocount { font-family: var(--mono); color: var(--x-secondary); }
+.railstatus__meters { display: flex; align-items: center; gap: 10px; }
+.railstatus__meter { flex: 1; min-width: 0; display: grid; gap: 4px; }
+.railstatus__track { height: 4px; border-radius: 2px; background: var(--x-backdrop); overflow: hidden; }
+.railstatus__fill { height: 100%; background: var(--x-activity); }
+.railstatus__fill[data-full] { background: var(--x-needs); }
+.railstatus__meter > span { font: var(--ui-small) var(--mono); color: var(--x-meta); }
+.railstatus__cost { font: var(--ui-small) var(--mono); color: var(--x-numeric); align-self: end; }
+
+/* Flat rows, not disclosures: AgentRoster's per-agent <details> is right
+   for the full-width inspector and wrong for a 340px rail. */
+.raillist { margin-top: 14px; }
+.raillist__cap {
+  display: flex; align-items: baseline; gap: 8px; padding: 0 2px 6px;
+  font-size: var(--ui-small); color: var(--x-meta);
+}
+.raillist__cap > span:first-child { color: var(--x-secondary); font-weight: 600; letter-spacing: 0.02em; }
+.raillist__count { margin-left: auto; display: flex; align-items: baseline; gap: 6px; font-family: var(--mono); }
+.railrow {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 6px 8px; border: 0; border-radius: var(--r-sm);
+  background: none; color: var(--x-prose); cursor: pointer;
+  font: var(--ui-font) var(--sans); text-align: left;
+}
+.railrow:hover { background: var(--x-selected); }
+.railrow__dot { width: 6px; height: 6px; border-radius: 50%; flex: none; background: var(--x-done); }
+.railrow[data-state='working'] .railrow__dot { background: var(--x-activity); animation: pulse 1.4s ease infinite; }
+.railrow[data-state='waiting'] .railrow__dot { background: var(--x-needs); }
+.railrow[data-state='failed'] .railrow__dot { background: var(--x-failed); }
+.railrow[data-state='stopped'] .railrow__dot { background: var(--x-meta); }
+.railrow__name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.railrow__name--path { font-family: var(--mono); font-size: var(--ui-small); }
+.railrow__meta { flex: none; font-size: var(--ui-small); color: var(--x-meta); }
+.railrow__adds { flex: none; font: var(--ui-small) var(--mono); color: var(--x-done); }
+.railrow__dels { flex: none; font: var(--ui-small) var(--mono); color: var(--x-failed); }
+.raillist__more {
+  display: flex; align-items: center; gap: 4px; margin: 2px 0 0 8px;
+  border: 0; background: none; padding: 4px 0; cursor: pointer;
+  font: var(--ui-small) var(--sans); color: var(--x-meta);
+}
+.raillist__more:hover { color: var(--x-title); }
+
+.rail-drawer { margin-top: 12px; border-top: 1px solid var(--x-hairline); }
+.rail-drawer > summary {
+  display: flex; align-items: center; gap: 7px; padding: 10px 2px; cursor: pointer;
+  list-style: none; font-size: var(--ui-font); color: var(--x-meta);
+}
+.rail-drawer > summary::-webkit-details-marker { display: none; }
+.rail-drawer > summary:hover { color: var(--x-title); }
+.rail-drawer[open] > summary svg { transform: rotate(90deg); }
+.rail-drawer > summary svg { transition: transform 120ms ease; flex: none; }
+.rail-drawer__body { display: grid; gap: 6px; padding-bottom: 8px; }
+@media (prefers-reduced-motion: reduce) { .rail-drawer > summary svg { transition: none; } }
+
+/* Rail rhythm: one emphasised surface (the status head), everything else
+   flat with captions doing the separating. Mixed card/flat treatment is
+   what made the panel read as a pile rather than a hierarchy. */
+.railstatus { gap: 0; padding: 10px 12px; }
+.railstatus__head { margin-bottom: 2px; }
+.railstatus__action { margin-top: 8px; }
+.railstatus__facts { display: grid; gap: 4px; margin: 10px 0 0; }
+.railstatus__facts > div { display: flex; align-items: center; gap: 10px; }
+.railstatus__facts dt { flex: none; min-width: 52px; font-size: var(--ui-small); color: var(--x-meta); }
+.railstatus__facts dd {
+  flex: 1; min-width: 0; margin: 0; display: flex; align-items: center; gap: 8px;
+  justify-content: flex-end; font: var(--ui-small) var(--mono); color: var(--x-secondary);
+}
+.railstatus__facts .railstatus__track { flex: 1; min-width: 0; height: 3px; }
+.railstatus__cost { margin-left: auto; font: var(--ui-small) var(--mono); color: var(--x-numeric); }
+
+/* Shell rows: the command is the row. */
+.atelier .command-activity > summary {
+  display: flex; align-items: center; gap: 7px; padding: 6px 8px;
+  border-radius: var(--r-sm); list-style: none; cursor: pointer;
+}
+.atelier .command-activity > summary::-webkit-details-marker { display: none; }
+.atelier .command-activity > summary:hover { background: var(--x-selected); }
+.atelier .command-activity[open] > summary > svg:first-child { transform: rotate(90deg); }
+.command-activity__dot { width: 6px; height: 6px; border-radius: 50%; flex: none; background: var(--x-done); }
+.command-activity[data-state='running'] .command-activity__dot { background: var(--x-activity); animation: pulse 1.4s ease infinite; }
+.command-activity[data-state='failed'] .command-activity__dot { background: var(--x-failed); }
+.atelier .command-activity__preview {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font: var(--ui-small) var(--mono); color: var(--x-prose); background: none; padding: 0;
+}
+.atelier .command-activity__state,
+.atelier .command-activity__elapsed { flex: none; font: var(--ui-small) var(--mono); color: var(--x-meta); }
+
+.activity-row { display: flex; align-items: baseline; gap: 8px; padding: 6px 8px; }
+.activity-row strong { font-size: var(--ui-font); font-weight: 400; color: var(--x-prose); }
+.activity-row__meta {
+  margin: 2px 0 0; font-size: var(--ui-small); color: var(--x-meta);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.atelier .desktop-rail .activity-panel { padding-top: 0; }
+/* Background rows share the agent row grammar but are not click targets. */
+.railrow--static { cursor: default; }
+.railrow--static:hover { background: none; }
+.railrow--static button {
+  flex: none; border: 1px solid var(--x-hairline); background: none; cursor: pointer;
+  padding: 2px 8px; border-radius: var(--r-sm); font: var(--ui-small) var(--sans); color: var(--x-secondary);
+}
+.railrow--static button:hover { border-color: var(--x-focus); color: var(--x-title); }
+.raillist__cap--standalone { margin-top: 18px; }

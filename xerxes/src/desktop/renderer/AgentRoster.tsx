@@ -24,7 +24,11 @@ export function activityFleetRows(rows: readonly SessionRow[], blocks: readonly 
   const failures = new Map<string, string>()
   for (const block of blocks) {
     if (block.kind === 'user') failures.clear()
-    if (block.kind === 'tools') for (const tool of block.items) failures.set(tool.id, toolFailureText({error:tool.error,result:tool.output}))
+    // Pass `output` explicitly: the default parameter re-runs detailOf,
+    // which JSON.parses and re-stringifies — and tool.output is ALREADY a
+    // detailOf result (blocks.ts:242), so it was an idempotent re-parse of
+    // every tool output in the transcript on every store notification.
+    if (block.kind === 'tools') for (const tool of block.items) failures.set(tool.id, toolFailureText({error:tool.error,result:tool.output}, tool.output))
     if (block.kind !== 'agents') continue
     for (const original of block.members) {
     const error = !original.runtimeId ? failures.get(original.key.slice(0, original.key.lastIndexOf(':'))) : ''
@@ -88,16 +92,42 @@ export function AgentControls({ id, active }: { id: string; active: boolean }): 
   const [message, setMessage] = useState('')
   const [feedback, setFeedback] = useState('')
   const [failed, setFailed] = useState(false)
-  const run = async (): Promise<void> => {
+  /**
+   * One text box, two meanings, because the agent's state decides what a
+   * message can possibly do: while it runs, text steers it mid-flight; once
+   * it is dead, the only way to say anything is to start a new attempt with
+   * the text as the opening instruction. Splitting these into two controls
+   * would show a disabled one most of the time.
+   */
+  const run = async (action: 'send' | 'control'): Promise<void> => {
     if (busy) return
     setBusy(true); setFeedback(''); setFailed(false)
-    try { setFeedback(await store.controlAgent(id, active ? 'stop' : 'retry', message)) }
+    try {
+      setFeedback(action === 'send'
+        ? await store.steerAgent(id, message)
+        : await store.controlAgent(id, active ? 'stop' : 'retry', message))
+      if (action === 'send') setMessage('')
+    }
     catch (error) { setFailed(true); setFeedback(desktopError(error)) }
     finally { setBusy(false) }
   }
+  const send = (): void => { void run('send') }
   return <div className="agent-controls">
-    {!active && <label>Follow-up for retry<input value={message} onChange={event=>setMessage(event.target.value)} placeholder="Optional instruction" /></label>}
-    <button disabled={busy} onClick={()=>void run()}>{busy ? 'Requesting…' : active ? 'Stop agent' : 'Retry agent'}</button>
+    <label>
+      {active ? 'Message this agent' : 'Follow-up for retry'}
+      <input
+        value={message}
+        onChange={event => setMessage(event.target.value)}
+        placeholder={active ? 'Redirect it — read at its next step' : 'Optional instruction'}
+        // Enter sends while it runs; with no running agent there is nothing
+        // to send to, so the key does nothing rather than silently retrying.
+        onKeyDown={event => { if (event.key === 'Enter' && active && message.trim()) { event.preventDefault(); send() } }}
+      />
+    </label>
+    <div className="agent-controls__row">
+      {active && <button disabled={busy || !message.trim()} onClick={send}>{busy ? 'Sending…' : 'Send'}</button>}
+      <button disabled={busy} onClick={() => void run('control')}>{busy ? 'Requesting…' : active ? 'Stop agent' : 'Retry agent'}</button>
+    </div>
     {feedback && <p role="status" data-error={failed || undefined}>{feedback}</p>}
   </div>
 }

@@ -115,6 +115,31 @@ describe('steer submission acknowledgement', () => {
     } finally { act(() => fixture.rendered.renderer.destroy()) }
   })
 
+  // The fixture above uses "session busy", which no daemon emits. These are
+  // the strings the Bun daemon actually produces, plus its structured code.
+  // The old regex matched none of them, so a real refusal fell through to the
+  // hard-error path: the user's bubble was deleted and the text was neither
+  // queued nor returned to the composer.
+  for (const [label, rejection] of [
+    ['server.ts prose', new Error('a turn is already active for this session')],
+    ['runtime.ts prose', new Error('A turn is already active for this session')],
+    ['structured code', Object.assign(new Error('rejected'), { code: 'turn-active' })]
+  ] as const) {
+    it(`re-queues a turn-active refusal rather than discarding it (${label})`, async () => {
+      const request = vi.fn().mockRejectedValueOnce(rejection).mockResolvedValue({ ok: true })
+      patchUiState({ busy: false, sid: 'session-a' })
+      const fixture = await mountSubmission(request)
+      try {
+        act(() => fixture.submission.dispatchSubmission('keep this prompt'))
+        await fixture.rendered.flush()
+
+        expect(fixture.queueRef.current[0]?.submitText).toBe('keep this prompt')
+        expect(getUiState().status).toBe('queued for next turn')
+        expect(fixture.sys).not.toHaveBeenCalledWith(expect.stringContaining('error'))
+      } finally { act(() => fixture.rendered.renderer.destroy()) }
+    })
+  }
+
   it('queues a busy image with its text and never lends it to another message', async () => {
     const request = vi.fn(() => Promise.resolve({ ok: true }))
     patchUiState({ busy: true, busyInputMode: 'steer', sid: 'session-a' })

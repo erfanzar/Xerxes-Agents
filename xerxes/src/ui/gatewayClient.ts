@@ -1449,9 +1449,26 @@ export class GatewayClient extends EventEmitter {
       const reconnected = preserve && Array.isArray(raw.reconnect_events)
       if (preserve && !reconnected) throw new Error('Reconnect journal is unavailable; the current view was preserved. Reopen the saved session.')
       if (this.recoveryDelivery) {
+        // Re-target as well as refill. A resume superseded before its caller
+        // could drain (a second session switch returns early behind the
+        // generation guard in useSessionLifecycle) leaves this object behind;
+        // mutating it without moving `sessionId` meant the NEXT session's
+        // `finishSessionRecovery(newId)` no longer matched, so the buffer
+        // stayed armed and swallowed every event until it hit its 1 MiB cap
+        // and destroyed the socket.
+        this.recoveryDelivery.sessionId = sessionId
         this.recoveryDelivery.replay = reconnected ? raw.reconnect_events : []
         this.recoveryDelivery.interactions = Array.isArray(raw.pending_interactions) ? raw.pending_interactions : []
-      } else if (Array.isArray(raw.pending_interactions) && raw.pending_interactions.length) {
+      } else if (
+        Array.isArray(raw.pending_interactions) && raw.pending_interactions.length
+        // Only a caller that is going to render this session will drain the
+        // buffer. A metadata-only preflight (`history_limit: 0`, used by the
+        // remote-task handoff) never reads `recovery_pending` and never calls
+        // `finishSessionRecovery`, so arming here buffered the whole first
+        // turn, tripped the cap, and tore down that client's socket — taking
+        // its local provider brokers with it.
+        && params.history_limit !== 0
+      ) {
         this.recoveryDelivery = { sessionId, replay: [], interactions: raw.pending_interactions, live: [], bytes: 0 }
       }
 

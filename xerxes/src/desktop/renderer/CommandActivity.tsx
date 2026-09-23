@@ -4,6 +4,7 @@ import { useEffect, useState, type ReactElement } from 'react'
 import { desktopCall, desktopError, record, text, type RpcRecord } from './desktopRpc.js'
 import { OutputViewer, readableOutput } from './OutputViewer.js'
 import { Icon } from './Icon.js'
+import { commandGist } from './commandGist.js'
 
 /** A bounded summary first; read only this command's retained output on expansion. */
 export function CommandActivity({ row, sessionKey, online }: {row: RpcRecord; sessionKey: string; online: boolean}): ReactElement {
@@ -39,12 +40,18 @@ export function CommandActivity({ row, sessionKey, online }: {row: RpcRecord; se
     finally {setBusy(false)}
   }
   return <details className="command-activity" data-state={text(row.state)} open={open} onToggle={event=>setOpen(event.currentTarget.open)}>
-    <summary>
-      <Icon name="terminal" size={15}/><span className="command-activity__label">Shell command</span>
-      <span className="command-activity__state">{online ? running ? 'Running' : text(row.state) : 'Disconnected'}</span>
-      {elapsed && <span className="command-activity__elapsed">{elapsed}</span>}<Icon name="chevron" size={12}/>
-      <code className="command-activity__preview">{text(row.title)}</code>
-      <span className="command-activity__cwd" title={text(row.detail)}>{text(row.detail)}</span>
+    {/* One line: the command, its state as a dot, and how long it took.
+        The old summary led with the words "Shell command" and pushed the
+        command itself to a third line, so the least useful thing on the
+        row was the most prominent. */}
+    <summary title={`${text(row.title)}\n${text(row.detail)}`}>
+      <Icon name="chevron" size={12}/>
+      <span className="command-activity__dot" aria-hidden="true" />
+      <code className="command-activity__preview">{commandGist(text(row.title))}</code>
+      {!online
+        ? <span className="command-activity__state">disconnected</span>
+        : running ? <span className="command-activity__state">running</span> : null}
+      {elapsed && <span className="command-activity__elapsed">{elapsed}</span>}
     </summary>
     {open && <div className="command-activity__body">
 <details className="command-activity__source"><summary>Full command</summary><pre className="command-activity__command" aria-label="Full command" tabIndex={0}>{text(detail?.command) || text(row.title)}</pre></details>

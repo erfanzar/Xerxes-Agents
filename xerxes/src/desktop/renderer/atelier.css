@@ -1,36 +1,86 @@
+/* ── Dark surfaces ──────────────────────────────────────────────────
+   Five steps, not two. The old palette had a screen (#17191f) and a card
+   (#242832) and almost nothing between, which is why the whole app read
+   as one grey plane no matter how the panes were arranged. Now the
+   backdrop sits below the chrome, the chrome below the conversation, and
+   cards rise above it — so depth carries hierarchy and the borders can
+   get quieter rather than louder.
+
+   Every foreground below clears WCAG AA 4.5:1 against all five surfaces;
+   the tightest pair is --x-meta on --x-selected at 4.55:1. Re-measure
+   against --x-selected, not --x-screen, before changing any of them. */
 :root,:root[data-theme='dark'],:root:not([data-theme]){
   color-scheme:dark;
-  --x-backdrop:#17191f;--x-screen:#17191f;--x-chrome:#20232c;--x-card:#242832;
-  --x-selected:#303441;--x-hairline:#ffffff12;--x-divider:#ffffff0a;
-  --x-title:#edf0fa;--x-prose:#d8ddea;--x-strong:#fafafa;--x-secondary:#b8c0d5;
-  --x-meta:#a0a7ba;--x-caption:#a0a7ba;--x-numeric:#a0a7ba;--x-separator:#50525a;
-  --x-working:#74adff;--x-activity:#74adff;--x-accent:#b4bdff;--x-accent-soft:#b4bdff18;
-  --x-done:#9cdac1;--x-needs:#e4bd83;--x-focus:#b4bdff;--x-chip:#2a2f40;
-  --x-failed:#ff807a;--x-failed-text:#ffaaa3;--x-failed-bg:#e7564915;--x-failed-border:#ff807a30;
-  --x-needs-text:#e4bd83;--x-needs-bg:#e4bd8310;--x-needs-border:#e4bd8330;
+  --x-backdrop:#0b0d11;--x-screen:#14171d;--x-chrome:#101216;--x-card:#1b1f27;
+  --x-selected:#232832;--x-hairline:#ffffff10;--x-divider:#ffffff08;
+  --x-title:#e8ecf3;--x-prose:#d6dce8;--x-strong:#ffffff;--x-secondary:#a5aec1;
+  --x-meta:#8892a6;--x-caption:#8892a6;--x-numeric:#8892a6;--x-separator:#39404e;
+  /* Brand roles are the TUI's Derafsh family from `src/ui/theme.ts`, used
+     here unchanged so the desktop and the terminal are visibly the same
+     product. Do not retune these in isolation — theme.ts is the source. */
+  --x-working:#6ea8fe;--x-activity:#b39cf0;--x-accent:#6ea8fe;--x-accent-soft:#6ea8fe1c;
+  --x-structure:#56c8d8;
+  --x-done:#57ca85;--x-needs:#d8ae58;--x-focus:#6ea8fe;--x-chip:#1f242e;
+  --x-failed:#f47067;--x-failed-text:#e39a94;--x-failed-bg:#f4706714;--x-failed-border:#f4706733;
+  --x-needs-text:#e4c37e;--x-needs-bg:#d8ae5818;--x-needs-border:#d8ae5833;
   --sans:-apple-system,BlinkMacSystemFont,'SF Pro Text','Helvetica Neue',sans-serif;
   --prose:var(--sans);--mono:'SF Mono',Menlo,monospace;
-  --r-sm:6px;--r-md:8px;--r-lg:12px;
-  --mac-control:#ffffff0b;--mac-toolbar:#1b1e26f5;
-  --glass-navigation:#1b1e26f5;--glass-overlay:#242832fa;--glass-edge:#ffffff20;
-  --glass-highlight:#ffffff0d;--glass-blur:blur(24px) saturate(110%);
+  --r-sm:8px;--r-md:12px;--r-lg:16px;
+  /* On a dark UI the lit top edge does more to separate a surface than
+     the shadow under it does. Both, tuned quiet. */
+  --x-lit:#ffffff0a;
+  --x-elev:inset 0 1px 0 var(--x-lit),0 1px 2px #00000059,0 8px 24px #0000002e;
+  /* ── Glass ────────────────────────────────────────────────────────
+     The window is already created with `vibrancy:'under-window'` and
+     `visualEffectState:'followWindow'` (main.ts), but these tokens were
+     0xf5 — 96% opaque — so the material underneath never showed and the
+     chrome was, in practice, flat paint with a pointless blur behind it.
+
+     These alphas let the desktop through the way a native sidebar and
+     toolbar do, and the blur is raised to macOS's own range: a wide
+     radius with heavy saturation, which is what makes the material look
+     lit rather than merely transparent.
+
+     This only looks right in the app. Run it in a browser and the chrome
+     goes muddy, because there is no vibrancy layer behind it — that is
+     expected, not a bug, and it is why chrome must be checked in the
+     packaged build rather than the harness. */
+  --mac-control:#ffffff0e;--mac-toolbar:#14171da8;
+  --glass-navigation:#14171dbb;--glass-overlay:#1b1f27e6;--glass-edge:#ffffff1f;
+  --glass-highlight:#ffffff12;--glass-blur:blur(40px) saturate(180%);
   --glass-control:linear-gradient(180deg,#ffffff0d,#ffffff04);
   --glass-shadow:inset 0 1px 0 var(--glass-highlight),0 8px 24px #00000020;
   --mac-shadow:inset 0 1px 0 var(--glass-highlight),0 12px 40px #00000050,0 32px 80px #00000030;
 }
 :root[data-theme='light'],html[data-theme='light']{
   color-scheme:light;
-  --x-backdrop:#f5f5f7;--x-screen:#fafafa;--x-chrome:#eeeff1;--x-card:#ffffff;
-  --x-selected:#e0e2e6;--x-hairline:#00000014;--x-divider:#00000008;
-  --x-title:#242529;--x-prose:#38393e;--x-strong:#16171a;--x-secondary:#555862;
-  --x-meta:#686b75;--x-caption:#737681;--x-numeric:#686b75;--x-separator:#c4c7ce;
-  --x-working:#0068d7;--x-activity:#0068d7;--x-accent:#0068d7;--x-accent-soft:#007aff12;
-  --x-done:#317347;--x-needs:#926221;--x-focus:#007aff;--x-chip:#e4e6e9;
-  --x-failed:#d12f26;--x-failed-text:#ae2c25;--x-failed-bg:#d12f260a;--x-failed-border:#d12f2625;
-  --x-needs-text:#926221;--x-needs-bg:#b67a1710;--x-needs-border:#b67a1725;
-  --mac-control:#00000005;--mac-toolbar:#ffffff1f;
-  --glass-navigation:#ffffff1f;--glass-overlay:#fafafac7;--glass-edge:#ffffffb3;
-  --glass-highlight:#ffffffd9;
+  /* The same five-step ramp as dark, mirrored: a tinted backdrop under
+     untinted chrome under a near-white conversation, so cards can be
+     plain white and still read as raised.
+
+     Every colour below clears WCAG AA 4.5:1 against all six light
+     surfaces. The tightest pairs are on --x-selected and --x-chip, not on
+     the card — an earlier palette tuned against white alone left caption
+     text at 3.62:1. Re-measure against --x-selected before changing any
+     of these; `--x-done` in particular has very little headroom and was
+     darkened from #1f7a4d (4.37:1) to clear it. */
+  --x-backdrop:#eceef2;--x-screen:#fafbfc;--x-chrome:#f2f3f6;--x-card:#ffffff;
+  --x-selected:#e6e9ef;--x-hairline:#00000012;--x-divider:#0000000a;
+  --x-title:#1c1f26;--x-prose:#333843;--x-strong:#0d0f14;--x-secondary:#4f5666;
+  --x-meta:#5c6373;--x-caption:#5c6373;--x-numeric:#5c6373;--x-separator:#c2c7d1;
+  /* Derafsh light variants, from `src/ui/theme.ts`. */
+  --x-working:#1f64b5;--x-activity:#7047b5;--x-accent:#1f64b5;--x-accent-soft:#1f64b514;
+  --x-structure:#276b78;
+  --x-done:#1b6f45;--x-needs:#8a5a12;--x-focus:#1f64b5;--x-chip:#e9ecf1;
+  --x-failed:#c02f27;--x-failed-text:#a82a23;--x-failed-bg:#c02f270a;--x-failed-border:#c02f2726;
+  --x-needs-text:#8a5a12;--x-needs-bg:#8a5a1210;--x-needs-border:#8a5a1226;
+  /* On light the shadow carries the elevation and the lit edge is almost
+     nothing — the inverse of dark, where the highlight does the work. */
+  --x-lit:#ffffff;
+  --x-elev:0 1px 2px #1a23400f,0 6px 20px #1a234012;
+  --mac-control:#00000008;--mac-toolbar:#fafbfca8;
+  --glass-navigation:#f7f8fabb;--glass-overlay:#ffffffe6;--glass-edge:#ffffffcc;
+  --glass-highlight:#ffffffe6;
   --glass-control:linear-gradient(180deg,#ffffffb3,#ffffff40);
   --glass-shadow:inset 0 1px 0 var(--glass-highlight),0 8px 24px #1a234012;
   --mac-shadow:inset 0 1px 0 var(--glass-highlight),0 12px 40px #1a234026,0 32px 80px #1a234015;
@@ -39,7 +89,14 @@ body{font:var(--ui-large)/1.5 var(--sans);-webkit-font-smoothing:antialiased}
 button,input,textarea,select{font-family:var(--sans)}
 button{transition:background-color 120ms ease,color 120ms ease;cursor:pointer}
 button:disabled{cursor:default;opacity:.45}
-button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible{outline:2px solid var(--x-focus);outline-offset:2px}
+/* `summary`, `a` and anything given an explicit tabindex are keyboard stops
+   exactly like a button, and this app is full of them — every disclosure in
+   the rail, the transcript's tool rows, the diagnostics drawer. They were
+   missing from this selector, so tabbing through a session moved an
+   invisible cursor. Several of those summaries also set `list-style:none`,
+   which removes the native marker that would otherwise hint at focus. */
+button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible,
+summary:focus-visible,a:focus-visible,[tabindex]:not([tabindex='-1']):focus-visible{outline:2px solid var(--x-focus);outline-offset:2px;border-radius:3px}
 .app-icon{flex:none;vertical-align:middle}
 .atelier .newchat,.atelier .creatorchat,.studio-nav{display:flex;align-items:center;justify-content:flex-start;gap:9px;width:100%;min-height:34px;padding:7px 9px;border:0;border-radius:7px;background:transparent;color:var(--x-secondary);font-size:var(--ui-large);font-weight:400;margin:0}
 .atelier .newchat{margin-bottom:6px;color:var(--x-title);background:var(--mac-control);border:1px solid var(--x-hairline)}
@@ -126,6 +183,10 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
 .studio-background{display:inline-flex;align-items:center;gap:7px}
 .atelier button,.atelier input,.atelier textarea,.atelier select{font-family:var(--sans)}
 .dictation{position:relative}
+/* Anchored to the Dictate button, which sits near the LEFT edge of the
+   composer: a right-aligned 320px card overhangs into the sidebar column,
+   and .side's backdrop-filter creates a stacking context that paints over
+   any z-index inside .chat. Anchor left and clamp to the composer instead. */
 .dictation-error{position:absolute;bottom:40px;left:0;width:300px;background:var(--x-card);border:1px solid var(--x-hairline);padding:14px;border-radius:8px;box-shadow:0 4px 20px #0004;color:var(--x-title);font-size:var(--ui-font);z-index:20}
 
 .setup-backdrop{position:fixed;inset:0;z-index:150;background:#0008;display:grid;place-items:center;padding:24px}
@@ -199,7 +260,10 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
 .desktop-rail .studio-item{flex-wrap:wrap}
 
 
-@media(max-width:700px){.desktop-page .studio-split{grid-template-columns:1fr}
+/* These pages live inside .chat, which is the inline-size container. Keyed
+   to the WINDOW they never fired while the sidebar and rail were open, so a
+   960px window left the detail column a few pixels wide. */
+@container(max-width:700px){.desktop-page .studio-split{grid-template-columns:1fr}
 .desktop-page .studio-split>nav{max-height:180px}
 .desktop-page .studio-form{padding:16px}
 }.atelier .md{font-family:var(--prose);font-size:14px;line-height:1.75}
@@ -212,7 +276,7 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
 .agents-empty-layout .studio-empty{padding:24px 24px 12px}
 .agents-empty-layout h3{color:var(--x-title);font-size:20px;margin:0 0 12px}
 .agents-empty-actions{justify-content:center!important;border:0!important;padding:8px 24px 32px!important;gap:12px}
-.dictation-error{left:auto;right:0;box-sizing:border-box;width:320px;max-width:calc(100vw - 48px);overflow-wrap:anywhere;white-space:normal}
+.dictation-error{left:0;right:auto;box-sizing:border-box;width:320px;max-width:min(320px,var(--composer-width,100%));overflow-wrap:anywhere;white-space:normal}
 .dictation-error details{margin:10px 0}
 .dictation-error details p{max-height:160px;overflow:auto}
 .dictation-error>strong{display:block;margin-bottom:8px}
@@ -318,7 +382,9 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
 }
 @media(max-width:700px){.atelier .modal__side{flex-basis:130px}
 .atelier .modal__main{padding:18px}
-.catalog-page .catalog-browser{grid-template-columns:minmax(0,1fr);gap:12px}
+}
+/* .catalog-page is a .chat child; the modal rules above are not. */
+@container(max-width:700px){.catalog-page .catalog-browser{grid-template-columns:minmax(0,1fr);gap:12px}
 }
 .atelier .switch{width:32px;height:19px;border:0;background:var(--x-selected)}
 .atelier .switch::after{top:2px;left:2px;width:15px;height:15px;border-radius:50%;background:#f7f7f8;box-shadow:0 1px 2px #0003;transition:left 120ms ease}
@@ -410,7 +476,12 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
 
 /* Layout primitives: one continuous workspace, a bounded reading column,
    and independent navigation and inspector widths. */
-:root{--space-1:4px;--space-2:8px;--space-3:12px;--space-4:16px;--space-6:24px;--reading-width:760px;--conversation-width:870px;--panel-inset:16px;--row-height:30px;--r-sm:4px;--r-md:6px;--r-lg:8px}
+/* NOTE: the radius scale deliberately is NOT redeclared here. This `:root`
+   used to end `--r-sm:4px;--r-md:6px;--r-lg:8px`, which silently overrode
+   the block at the top of the file — same specificity, later wins — so the
+   app kept 4/6/8 corners no matter what the palette said. Radii live in one
+   place now: the token block above. */
+:root{--space-1:4px;--space-2:8px;--space-3:12px;--space-4:16px;--space-6:24px;--reading-width:760px;--conversation-width:870px;--panel-inset:16px;--row-height:30px}
 html,body,#root,.app.atelier{background:transparent}
 .atelier .top{height:48px;flex:0 0 48px;padding:0 12px 0 88px;gap:12px;background:var(--mac-toolbar);backdrop-filter:var(--glass-blur);border-bottom:1px solid var(--x-hairline)}
 .atelier .top__name{font:500 var(--ui-large) var(--sans);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:40%}
@@ -436,9 +507,30 @@ html,body,#root,.app.atelier{background:transparent}
 .panel-divider:hover,.panel-divider:focus-visible{background:var(--x-focus);outline:1px solid var(--x-focus)}
 .atelier .chat{container-type:inline-size;flex:1;min-width:280px;border:0;border-radius:0;background:var(--x-screen);overflow:hidden}
 .atelier .chat__head{height:48px;min-height:48px;padding:0 20px;gap:20px;border-bottom:1px solid var(--x-hairline);flex-wrap:nowrap}
-.atelier .chat__head>.hchip,.atelier .chat__head>.chipanchor{display:none}
+/* The skin used to `display:none` every header chip, which un-shipped the
+   fleet and background-job popovers along with the transcript export — they
+   have no other home. Style them compactly instead and let the container
+   query below drop the least load-bearing ones as the column narrows. */
+.atelier .chat__head>.hchip,.atelier .chat__head>.chipanchor>.hchip{min-width:0;max-width:22ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:3px 7px;border-radius:5px;color:var(--x-meta)}
+.atelier .chat__head>.hchip--btn:hover,.atelier .chat__head>.chipanchor>.hchip--btn:hover{background:var(--x-selected);color:var(--x-title)}
+/* The plan toggle is the composer's "Work directly" button under another
+   name; one control per decision. */
+.atelier .chat__head>.hchip--btn.is-plan,.atelier .chat__head>button.hchip--btn:not(.chat__log){display:none}
 .atelier .chat__head .badge:not(.badge--live):not(.badge--need):not(.badge--fail):not(.badge--plan){display:none}
-.atelier .stream{padding:28px 32px;min-height:0;overflow:auto;font:15px/1.65 var(--sans);scrollbar-gutter:stable}
+/* `stable` reserves the gutter on one edge only, so the centred .stream__col
+   sat half a scrollbar left of the composer dock below it. `both-edges`
+   keeps the two centrelines on top of each other. */
+/* The bottom padding is not decoration: `.jump-latest` is a sticky pill at
+   `bottom:8px` that floats over this scroller, and without room to scroll
+   past, the last card's action row ends up underneath it — in practice
+   "Copy arguments" sat half-hidden behind "Still working — jump to latest".
+   `scroll-padding-bottom` alone does not fix that; it only affects where
+   scrollIntoView lands, not what the pill covers at rest. */
+.atelier .stream{padding:28px var(--stream-inset,32px) 60px;min-height:0;overflow:auto;font:15px/1.65 var(--sans);scrollbar-gutter:stable both-edges;scroll-padding-bottom:52px}
+/* `.stream` is `tabIndex={0}`, so it is a real tab stop and needs a real
+   ring — but an offset ring on a full-height region gets clipped by the
+   panes either side, so this one draws inside. */
+.atelier .stream:focus-visible{outline:2px solid var(--x-focus);outline-offset:-2px}
 .task-continuation{align-self:center;width:min(520px,100%);padding:32px 0;color:var(--x-secondary)}
 .task-continuation h1{font:500 26px/1.3 var(--sans);color:var(--x-title);margin:16px 0 10px}
 .task-continuation p{line-height:1.6;margin:0 0 20px}
@@ -464,14 +556,31 @@ html,body,#root,.app.atelier{background:transparent}
 .atelier .composer-wrap{flex:none;position:relative;padding:12px 24px 10px;background:var(--x-screen)}
 .atelier .composer-dock{width:100%;max-width:var(--conversation-width);margin:0 auto;border:1px solid var(--glass-edge);border-radius:16px;background:var(--x-chrome);box-sizing:border-box;overflow:hidden;transition:border-color 160ms ease}
 .atelier .composer{display:flex;flex-direction:column;align-items:stretch;gap:12px;width:100%;margin:0;padding:14px 16px;border:0;border-radius:0;background:transparent;box-shadow:none;box-sizing:border-box}
-.atelier .composer-dock:focus-within{border-color:color-mix(in srgb,var(--x-focus) 45%,var(--glass-edge))}
+/* The input inside sets `outline:none` (a ring drawn inside a 16px dock
+   looks broken), so the dock itself carries the focus indicator. It has to
+   be unmistakable without being loud: the composer holds focus for most of
+   a session, so a hard 2px accent ring — which is what this was first — sits
+   on screen glowing the entire time you work. A lifted border plus a wide,
+   very low-alpha halo reads as focus at a glance and disappears into the
+   surface when you stop looking at it. */
+.atelier .composer-dock:focus-within{
+  /* Mixed against `transparent`, not `--x-hairline`: the hairline is itself
+     a near-transparent white, so mixing into it kept almost all of the
+     accent's alpha and drew a solid blue box. */
+  border-color:color-mix(in srgb,var(--x-focus) 45%,transparent);
+  box-shadow:var(--x-elev),0 0 0 3px color-mix(in srgb,var(--x-focus) 12%,transparent);
+}
 .atelier .composer__input{display:block;flex:none;width:100%;min-width:0;min-height:56px;max-height:32vh;padding:0;border:0;background:none;resize:none;font:14px/24px var(--sans);color:var(--x-prose);box-sizing:border-box;overflow-x:hidden}
 .atelier .composer__bar{display:flex;flex:none;align-items:center;gap:6px;width:100%;min-height:28px;padding:0;border:0}
 .atelier .composer__context{display:grid;place-items:center;width:28px;height:28px;padding:4px;border:0;border-radius:4px;background:none;color:var(--x-secondary)}
 .atelier .composer__send{flex:none;width:32px;height:32px;border:0;border-radius:8px;background:var(--x-accent);color:var(--x-screen)}
 .atelier .composer__bar .cchip{max-width:min(320px,40vw);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:var(--ui-font) var(--sans)}
 .atelier .composer__hints{display:flex;align-items:center;gap:8px;flex-wrap:wrap;max-width:var(--conversation-width);margin:6px auto 0;font:var(--ui-small) var(--sans)}
-.atelier .composer__hints>span{display:none}
+/* These four spans are the only on-screen documentation of ⏎/⇧⏎/esc/⌘K.
+   Hiding them made the command palette undiscoverable. */
+.atelier .composer__hints>span{display:inline-flex;align-items:center;gap:4px;color:var(--x-meta)}
+.atelier .composer__hints>span kbd{padding:1px 4px;border:1px solid var(--x-hairline);border-radius:3px;font:var(--ui-small) var(--mono);color:var(--x-secondary)}
+@container(max-width:560px){.atelier .composer__hints>span:nth-child(2){display:none}}
 .atelier .desktop-rail.studio-sheet{flex:0 0 var(--inspector-width,340px);width:var(--inspector-width,340px);min-width:0;max-height:none;position:static;border:0;border-radius:0;box-shadow:none;margin:0;background:var(--glass-navigation);backdrop-filter:var(--glass-blur);animation:none}
 .atelier .desktop-rail>header{flex:none;display:flex;align-items:center;min-height:48px;padding:5px 8px;border-bottom:1px solid var(--x-hairline);gap:4px}
 .atelier .desktop-rail>header nav{display:flex;flex:1;gap:2px;min-width:0}
@@ -513,10 +622,14 @@ html,body,#root,.app.atelier{background:transparent}
 .desktop-page .studio-split>nav{background:none;border:0;border-radius:0;padding:12px var(--panel-inset)}
 .atelier .studio-tabs{border-radius:4px;background:none;padding:0;border-bottom:1px solid var(--x-hairline)}
 .atelier .studio-tabs .is-selected{box-shadow:none;border-bottom:2px solid var(--x-secondary);background:none;border-radius:0}
-@container(max-width:520px){.atelier .chat__workspace{display:none}.atelier .chat__head{gap:12px;padding-inline:16px}.atelier .chat__head .tab{font-size:var(--ui-small)}.atelier .chat__state .badge--live{display:none}}
-@media(max-width:1000px){.atelier .top__actions button:not(.studio-background)>span{display:none}.atelier .composer-wrap{padding:10px 16px}.atelier .stream{padding:20px 16px}}
+@media(max-width:1000px){.atelier .top__actions button:not(.studio-background)>span{display:none}.atelier .composer-wrap{padding:10px 16px}/* `padding-block` would reset the bottom too, taking the sticky-pill
+     clearance with it — set the top alone. */
+  .atelier .stream{padding-top:20px;--stream-inset:16px}}
 @media(max-width:850px){.atelier .welcome__ideas{flex-direction:column}.atelier .composer__workspace{display:none}}
 @media(max-height:650px){.atelier .welcome h1.welcome__wordmark{font-size:clamp(48px,18cqi,112px);margin-bottom:12px}.atelier .welcome__ideas{margin-top:12px}.atelier .welcome{padding:12px 0}}
+/* Deliberate: the window titlebar (.top__name) already carries the session
+   title, and the short id is on the sidebar row's context menu (Copy id).
+   Two copies in one viewport, not a missing control. */
 .atelier .chat__title,.atelier .chat__id{display:none}
 .atelier .chat__workspace{background:none;border:0;color:var(--x-meta);font:var(--ui-font) var(--sans);text-align:left;max-width:25%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer}
 .atelier .chat__state{margin-left:auto;order:2}
@@ -611,6 +724,10 @@ html,body,#root,.app.atelier{background:transparent}
 /* Body-level picker layer has no filter/transform that changes fixed coordinates. */
 .picker-layer{position:fixed;inset:0;z-index:1000;pointer-events:none}
 .picker-layer>.backdrop,.picker-layer>.modelpop{pointer-events:auto}
+/* The layer is its own stacking context, so the global scrim (z 124) would otherwise
+   sit over the popover (z 41) and swallow every real click as a dismissal. */
+.picker-layer>.backdrop{z-index:0}
+.picker-layer>.modelpop{z-index:1}
 
 /* Execution rows give the action and its target separate, aligned lines. */
 .execution-row{padding:3px 0}
@@ -820,3 +937,1001 @@ html,body,#root,.app.atelier{background:transparent}
 .output-viewer__actions{display:flex;align-items:center;gap:12px;margin-left:auto;flex-wrap:nowrap}
 .fleetpop__row{width:100%;border:0;background:none;text-align:left;color:var(--x-secondary);cursor:pointer;font:inherit}
 .fleetpop__row:hover{background:var(--mac-control)}
+
+/* ── Design scale ─────────────────────────────────────────────────────
+   The skin had one type size (11–12px) and one spacing value, so every
+   element carried identical weight and nothing could be emphasised. These
+   are the vocabulary the rail is rebuilt on; the rest of the app can adopt
+   them incrementally. */
+.atelier{
+  /* Built on --ui-* so Settings ▸ interface text size still scales the
+     whole app. Hardcoding px here would have silently dead-ended that
+     preference the moment a surface moved onto the scale. */
+  --t-caption:500 var(--ui-small)/1.45 var(--sans);
+  --t-body:400 var(--ui-large)/1.5 var(--sans);
+  --t-title:600 var(--ui-large)/1.4 var(--sans);
+  --t-hero:600 calc(var(--ui-large) + 4px)/1.25 var(--sans);
+  --t-num:400 var(--ui-font)/1.4 var(--mono);
+  --t-prose:400 calc(var(--ui-large) + 2px)/1.65 var(--sans);
+  --s-1:4px;--s-2:8px;--s-3:12px;--s-4:16px;--s-5:24px;
+  --card-radius:10px;
+}
+
+/* ── Cards ────────────────────────────────────────────────────────────
+   One group, one surface. The flat caption-and-rows stack gave three
+   identical blocks with no focal point; a card draws its own boundary so
+   grouping stops depending on the reader tracking a hairline. */
+.railcard{
+  background:var(--x-card);border:1px solid var(--x-hairline);
+  border-radius:var(--card-radius);padding:var(--s-3) 14px;
+}
+.railcard+.railcard{margin-top:10px}
+.railcard__head{display:flex;align-items:baseline;gap:var(--s-2);margin-bottom:10px}
+.railcard__title{font:var(--t-title);color:var(--x-title)}
+.railcard__meta{margin-left:auto;font:var(--t-num);color:var(--x-meta);white-space:nowrap}
+
+/* Rows: no status dot. Twelve dots down one column read as texture, not
+   signal — the state word carries the colour instead, and always being
+   present keeps the right edge straight. */
+.railcard .railrow{padding:6px 0;gap:var(--s-3);border-radius:0}
+.railcard .railrow:hover{background:none;color:var(--x-title)}
+.railcard .railrow__dot,.railcard .command-activity__dot{display:none}
+.railcard .railrow__name{font:var(--t-body)}
+/* The directory recedes so the basename still reads first, but a colliding
+   `types.ts` is now distinguishable without hovering for the tooltip. It is
+   the first thing to drop when the rail is narrow. */
+.railcard .railrow__dir{color:var(--x-meta)}
+@container (max-width:300px){.railcard .railrow__dir{display:none}}
+.railcard .railrow__meta{font:var(--t-caption);color:var(--x-meta)}
+.railcard .railrow[data-state='working'] .railrow__meta{color:var(--x-activity)}
+.railcard .railrow[data-state='failed'] .railrow__meta{color:var(--x-failed)}
+.railcard .railrow[data-state='waiting'] .railrow__meta{color:var(--x-needs)}
+.railcard .railrow__adds,.railcard .railrow__dels{font:var(--t-num)}
+.railcard .raillist__more{margin:var(--s-1) 0 0;font:var(--t-caption)}
+
+/* The status card is the one hero on the surface. */
+.railcard--status .railstatus__head strong{font:var(--t-hero)}
+.railcard--status .railstatus__head{gap:var(--s-2);margin-bottom:var(--s-1)}
+.railcard--status .railstatus__facts{margin-top:var(--s-3);gap:var(--s-2)}
+.railcard--status .railstatus__facts dt{font:var(--t-caption);min-width:56px}
+.railcard--status .railstatus__facts dd{font:var(--t-num)}
+.railcard--status .railstatus__action{margin-top:var(--s-2);font:var(--t-body)}
+.railcard--status .railstatus__action code{font:var(--t-num)}
+
+.atelier .desktop-rail .studio-sheet-content{padding:var(--s-3)}
+.atelier .desktop-rail .activity-details{display:block}
+.railcard.rail-drawer{border-top:1px solid var(--x-hairline);margin-top:10px;padding-block:var(--s-1)}
+.railcard.rail-drawer>summary{padding:var(--s-2) 0;font:var(--t-caption);color:var(--x-meta)}
+.railcard.rail-drawer[open]{padding-bottom:var(--s-3)}
+
+/* ── Scale rollout ────────────────────────────────────────────────────
+   Every surface below was written against one font size and one grey. The
+   rules here put them on the shared type and spacing scale so emphasis is
+   decided in one place rather than re-guessed per component. */
+
+/* Sidebar ─ the wordmark was 38px of brand above 11px of everything else;
+   nothing in between carried the eye down to the task list. */
+/* The Didot wordmark is the brand, not a heading to be normalised into the
+   type scale — an earlier pass shrank it to 22px to make it "consistent"
+   and flattened the one piece of identity the sidebar has. It keeps its
+   own size and its own serif. */
+.atelier .sidebar-wordmark{font:400 34px/1.1 Didot,'Bodoni MT',Georgia,serif;letter-spacing:-.03em;padding:var(--s-3) var(--s-2) var(--s-5)}
+.atelier .side__pad{padding:var(--s-3) var(--s-3) var(--s-2);gap:var(--s-1)}
+.atelier .side__list{padding:0 var(--s-3)}
+.atelier .studio-segment{gap:var(--s-4);margin-bottom:var(--s-3)}
+.atelier .studio-segment button{font:var(--t-body);padding:var(--s-2) 0}
+.atelier .newchat,.atelier .studio-nav{min-height:32px;padding:var(--s-2);border-radius:6px;font:var(--t-body);gap:var(--s-2)}
+.atelier .newchat kbd{font:var(--t-caption);color:var(--x-meta)}
+.atelier .wgroup__cap{font:var(--t-caption);letter-spacing:.04em;text-transform:uppercase;color:var(--x-meta);padding:var(--s-5) var(--s-2) var(--s-2)}
+.atelier .sess{min-height:34px;padding:var(--s-2);margin:1px 0;border-radius:6px;gap:var(--s-2)}
+.atelier .sess__t{font:var(--t-body)}
+.atelier .sess__s,.atelier .sess__age{font:var(--t-caption);color:var(--x-meta)}
+.atelier .side__search{font:var(--t-body);padding:var(--s-2)}
+.atelier .side__find,.atelier .addws{font:var(--t-caption);color:var(--x-meta);padding:var(--s-2)}
+.atelier .studio-side-bottom{padding:var(--s-2) var(--s-3) var(--s-3);gap:2px}
+.atelier .studio-side-bottom button{font:var(--t-body);padding:var(--s-2);gap:var(--s-2);min-height:30px}
+
+/* Chat header ─ tabs were the same size as the chips beside them. */
+.atelier .chat__head{height:52px;min-height:52px;padding:0 var(--s-5);gap:var(--s-5)}
+.atelier .chat__head .tab{font:var(--t-body);padding:var(--s-4) 0}
+.atelier .chat__head .tab.is-on{font-weight:600}
+.atelier .chat__head .tabs{gap:var(--s-4)}
+.atelier .chat__workspace{font:var(--t-caption);color:var(--x-meta)}
+.atelier .chat__head>.hchip,.atelier .chat__head>.chipanchor>.hchip{font:var(--t-caption)}
+
+/* Transcript ─ prose gets its own size; everything structural stays small. */
+.atelier .stream{font:var(--t-prose)}
+.atelier .md{font:var(--t-prose)}
+.atelier .activity-group>summary{font:var(--t-body);padding:var(--s-2) 0}
+.atelier .toolrow>summary{font:var(--t-body)}
+.atelier .execution-row__state,.atelier .activity-group__actions{font:var(--t-caption);color:var(--x-meta)}
+
+/* Composer ─ the dock is the one raised surface in the column. */
+.atelier .composer-wrap{padding:var(--s-3) var(--s-5) var(--s-4)}
+.atelier .composer-dock{border-radius:12px}
+.atelier .composer__input{font:var(--t-prose);padding:var(--s-3)}
+.atelier .composer__bar{padding:var(--s-2) var(--s-3) var(--s-3);gap:var(--s-2)}
+.atelier .composer__hints{gap:var(--s-3);margin-top:var(--s-2)}
+.atelier .composer__hints>span,.atelier .composer__hints>button{font:var(--t-caption)}
+.atelier .cchip{font:var(--t-caption);padding:var(--s-1) var(--s-2);border-radius:6px}
+
+/* Pointer targets ─ WCAG 2.2 AA (2.5.8) wants 24×24 CSS px, and measuring
+   the live renderer found six controls under it. The icon-only ones were the
+   worst: the composer's dictate chip and the sidebar's runtime-update button
+   were 16px wide, which is a hard click even with a mouse. These are
+   min-* only, so a chip with a long label still grows past them; nothing
+   here sets a fixed size. Re-measure rather than eyeball if you retune the
+   chip padding — at --ui-small the text alone is under 24px tall. */
+.atelier .cchip,
+.atelier .chat__head>.hchip,
+.atelier .chat__head>.chipanchor>.hchip{min-height:24px;display:inline-flex;align-items:center;gap:var(--s-1);box-sizing:border-box}
+/* Icon-only: no label to widen them, so they need the width floor too. */
+.atelier .cchip:not(.composer__workspace),
+.runtime-status--compact{min-width:24px;justify-content:center}
+
+/* Settings and pages ─ same card language as the rail. */
+.atelier .modal__title{font:var(--t-hero);margin-bottom:var(--s-2)}
+.atelier .modal__sub{font:var(--t-body);color:var(--x-secondary);margin-bottom:var(--s-4)}
+.atelier .modal__main{padding:var(--s-5)}
+.atelier .modal__side{padding:var(--s-3)}
+.atelier .modal__side button{font:var(--t-body);padding:var(--s-2);border-radius:6px}
+.atelier .field{margin-bottom:var(--s-4)}
+.atelier .field>label{font:var(--t-caption);letter-spacing:.04em;text-transform:uppercase;color:var(--x-meta);display:block;margin-bottom:var(--s-2)}
+.atelier .row{padding:var(--s-3) 0;gap:var(--s-3)}
+.atelier .row__t{font:var(--t-body);color:var(--x-title)}
+.atelier .row__s{font:var(--t-caption);color:var(--x-meta);margin-top:2px}
+.atelier .desktop-page>header{padding:var(--s-5) var(--s-5) var(--s-4)}
+.atelier .desktop-page h2{font:var(--t-hero)}
+.atelier .desktop-page .studio-muted{font:var(--t-body);color:var(--x-secondary)}
+.atelier .studio-form{padding:var(--s-4) var(--s-5)}
+.atelier .studio-item{padding:var(--s-3) 0;gap:var(--s-3)}
+.atelier .studio-item strong{font:var(--t-body)}
+.atelier .studio-item p{font:var(--t-caption);color:var(--x-meta);margin-top:2px}
+.atelier .studio-empty{font:var(--t-body);color:var(--x-meta);padding:var(--s-5)}
+/* The header is a single nowrap row: at body size the tab labels were
+   wrapping to two lines inside a fixed-height bar. */
+.atelier .chat__head{gap:var(--s-4)}
+.atelier .chat__head .tabs{gap:var(--s-3);flex-wrap:nowrap}
+.atelier .chat__head .tab{white-space:nowrap}
+.atelier .workspace__tabs{min-width:0;overflow:hidden}
+/* The welcome mark was clamp(…, 18cqi, 112px) — a billboard on the surface
+   where work starts. Brand at a size the page can carry. */
+.atelier .welcome h1.welcome__wordmark{font-size:clamp(56px,14cqi,112px);margin-bottom:var(--s-4)}
+.atelier .welcome>p{font:var(--t-body);color:var(--x-secondary)}
+.atelier .welcome__ideas{margin-top:var(--s-5);gap:var(--s-3)}
+.atelier .idea{font:var(--t-body);padding:var(--s-2) var(--s-3)}
+
+/* Hints are a single line that sheds items rather than wrapping: a second
+   row shifts the whole composer and looks like a layout fault. */
+.atelier .composer__hints{flex-wrap:nowrap;overflow:hidden}
+.atelier .composer__hints>*{flex:none}
+@container(max-width:760px){.atelier .composer__hints>span:nth-last-child(-n+2){display:none}}
+@container(max-width:620px){.atelier .composer__hints>span{display:none}.atelier .composer__workspace{display:none}}
+
+/* ═════════════════════════════════════════════════════════════════════
+   macOS materials
+   ─────────────────────────────────────────────────────────────────────
+   The rules above give the app a palette. These give it the platform's
+   manners: chrome that is a material rather than a painted panel,
+   selection that reads as a tinted capsule, and corners that are
+   concentric rather than uniform.
+
+   Concentric corners matter more than they sound. When a 12px card sits
+   inside a 16px container with 4px of padding, the inner radius has to be
+   the outer radius minus the gap or the curves visibly disagree. That is
+   the difference between "rounded" and "drawn by someone who looked".
+   ═════════════════════════════════════════════════════════════════════ */
+
+/* ── Toolbar ───────────────────────────────────────────────────────
+   A native toolbar has no drawn bottom edge; the separation comes from
+   the material and from content scrolling beneath it. A 1px hairline all
+   the way across is a web header, not a Mac one. */
+.atelier .top{
+  height:52px;flex:0 0 52px;
+  border-bottom:1px solid var(--x-divider);
+  background:var(--mac-toolbar);
+}
+.atelier .top button{border-radius:var(--r-sm);min-height:28px;padding:5px 9px}
+.atelier .top button:hover{background:var(--mac-control)}
+
+/* ── Sidebar ───────────────────────────────────────────────────────
+   Selection is a tinted capsule in the accent, the way Finder and Mail
+   mark the active row — not the grey fill it was, which read as a hover
+   state that had got stuck. */
+.atelier .side{border-right:1px solid var(--x-divider)}
+.atelier .studio-nav,.atelier .newchat{border-radius:var(--r-sm)}
+.atelier .studio-nav:hover,.atelier .side__list button:hover{background:var(--mac-control)}
+.atelier .studio-nav.is-selected{background:var(--x-accent-soft);color:var(--x-accent)}
+.atelier .studio-nav.is-selected .app-icon{color:var(--x-accent)}
+.atelier .side__list button{border-radius:var(--r-sm)}
+.atelier .side__list button[aria-current='true'],
+.atelier .side__list button.is-current{background:var(--x-accent-soft);color:var(--x-title)}
+
+/* ── Cards ─────────────────────────────────────────────────────────
+   One grammar for every card in the app: material fill, hairline, the
+   shared elevation, and a radius from the scale. The rail, the tool
+   groups and the transcript's inline cards all resolve to this. */
+.atelier .railcard,
+.atelier .rail-drawer,
+.atelier .execution,
+.atelier .approval{
+  border-radius:var(--r-md);
+  box-shadow:var(--x-elev);
+  border:1px solid var(--x-hairline);
+  background:var(--x-card);
+}
+/* Nested content sits 4px in, so its radius is 4px tighter. */
+.atelier .railcard > *{border-radius:calc(var(--r-md) - 4px)}
+
+/* The status card is the only one that is always present, so it is the
+   one that carries state as colour — a 2px edge rather than a tint over
+   the whole surface, which would compete with the approval card. */
+.atelier .railcard--status{border-left:2px solid var(--x-meta)}
+.atelier .railcard--status[data-tone='working']{border-left-color:var(--x-working)}
+.atelier .railcard--status[data-tone='needs']{border-left-color:var(--x-needs)}
+.atelier .railcard--status[data-tone='failed']{border-left-color:var(--x-failed)}
+.atelier .railcard--status[data-tone='plan']{border-left-color:var(--x-activity)}
+
+/* ── Controls ──────────────────────────────────────────────────────
+   Capsules for anything that reads as a token (chips, pills, counts),
+   rounded rectangles for anything that reads as a button. macOS is
+   consistent about this and the app was not. */
+.atelier .cchip,.atelier .hchip,.atelier .badge{border-radius:999px}
+.atelier .cchip:hover,.atelier .chat__head>.hchip--btn:hover{background:var(--mac-control)}
+.atelier .btn,.atelier .approval button{border-radius:var(--r-sm)}
+
+/* ── Overlays ──────────────────────────────────────────────────────
+   Sheets and menus already use the glass tokens; they just need the
+   larger corner the platform moved to. */
+.atelier :is(.modal,.menu,.modelpicker,.modelpop,.palette),.studio-sheet{border-radius:var(--r-lg)}
+
+/* Reduced transparency is a real macOS accessibility setting and the
+   whole point of the material is that it can be turned off. */
+@media (prefers-reduced-transparency: reduce){
+  .atelier .top,.atelier .side,.atelier .desktop-rail,
+  .atelier :is(.modal,.menu,.modelpicker,.modelpop,.palette),.studio-sheet{
+    backdrop-filter:none;
+    background:var(--x-chrome);
+  }
+}
+
+/* ── Home ──────────────────────────────────────────────────────────
+   The wordmark stays the centrepiece — it is the brand and the one
+   moment the app gets to be typographic. Everything under it is now
+   about this folder rather than about the product. */
+.atelier .welcome__where{
+  display:flex;align-items:center;justify-content:center;gap:7px;flex-wrap:wrap;
+  font:var(--t-caption);color:var(--x-meta);margin:0;
+}
+.atelier .welcome__where .app-icon{color:var(--x-separator)}
+.atelier .welcome__sep{width:3px;height:3px;border-radius:99px;background:var(--x-separator);margin:0 3px}
+.atelier .welcome__dirty b{color:var(--x-done);font-weight:500}
+.atelier .welcome__dirty i{color:var(--x-failed);font-style:normal}
+
+.atelier .welcome__resume{
+  width:min(440px,100%);margin:var(--s-5) auto 0;text-align:left;
+}
+.atelier .welcome__resume h2{
+  font:600 var(--ui-small)/1 var(--sans);letter-spacing:.08em;text-transform:uppercase;
+  color:var(--x-meta);margin:0 0 var(--s-2);padding:0 var(--s-3);
+}
+.resumerow{
+  display:flex;align-items:center;gap:10px;width:100%;
+  padding:9px var(--s-3);border:0;background:transparent;border-radius:var(--r-sm);
+  color:var(--x-secondary);text-align:left;min-height:36px;font:var(--t-body);
+  transition:background 140ms ease,color 140ms ease;
+}
+.resumerow:hover{background:var(--mac-control);color:var(--x-title)}
+.resumerow .app-icon{color:var(--x-separator);flex:none}
+.resumerow:hover .app-icon{color:var(--x-meta)}
+.resumerow__dot{width:6px;height:6px;border-radius:99px;flex:none;background:var(--x-separator)}
+.resumerow__dot[data-state='working']{background:var(--x-working)}
+.resumerow__dot[data-state='waiting']{background:var(--x-needs)}
+.resumerow__dot[data-state='failed']{background:var(--x-failed)}
+.resumerow__dot[data-state='done']{background:var(--x-done)}
+.resumerow__name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.resumerow__age{font:var(--t-caption);color:var(--x-meta);flex:none}
+.atelier .welcome__start{font:var(--t-caption);color:var(--x-meta);margin:var(--s-5) 0 0}
+
+/* ── Pointer targets, second pass ──────────────────────────────────
+   Found by measuring the live renderer, not by reading the CSS. */
+
+/* The pane dividers are drawn 1px wide and were 1px to *hit*, which is
+   miserable with a trackpad and fails WCAG 2.5.8 outright. The visual
+   stays a hairline; the grab area grows either side of it. */
+.panel-divider{position:relative}
+.panel-divider::after{
+  content:'';position:absolute;top:0;bottom:0;left:-5px;right:-5px;
+}
+/* The workspace crumb in the chat header is a button, so it needs the
+   same floor as every other one. */
+.atelier .chat__workspace{min-height:24px;display:inline-flex;align-items:center}
+/* Anything left in the header action clusters. */
+.atelier .chat__head button,.atelier .top__actions button{min-width:24px;min-height:24px}
+.atelier .desktop-rail>header button{min-width:24px;min-height:24px;display:inline-flex;align-items:center;justify-content:center}
+
+/* ═════════════════════════════════════════════════════════════════════
+   Transcript
+   ─────────────────────────────────────────────────────────────────────
+   The conversation is the largest surface in the app and the one the
+   palette work left untouched. Three things were wrong with it: your
+   own messages looked like just another card, a burst of tool calls
+   read as a loose pile of rows rather than one action, and nothing in
+   a row told you its outcome without reading to the end of the line.
+   ═════════════════════════════════════════════════════════════════════ */
+
+/* ── Your turn ─────────────────────────────────────────────────────
+   Tinted in the accent rather than the same neutral every other card
+   uses. Scrolling back through a long session, the thing you are
+   hunting for is almost always something *you* said, and colour finds
+   it far faster than position does. The square corner points back at
+   the sender — the one bubble affordance worth keeping. */
+.atelier .msg--user{
+  background:var(--x-accent-soft);
+  border:1px solid color-mix(in srgb,var(--x-accent) 22%,transparent);
+  border-radius:var(--r-md) var(--r-md) var(--s-1) var(--r-md);
+  padding:var(--s-3) var(--s-4);
+}
+.atelier .msg--user .msg__text{color:var(--x-title)}
+
+/* ── A burst of tool calls ─────────────────────────────────────────
+   One card, not a stack of rows: the group is a single thing the agent
+   did. The spine already existed as a bare left border; giving the
+   rows dots on it turns a list into a sequence you can read down. */
+.atelier .activity-group{
+  background:var(--x-card);border:1px solid var(--x-hairline);
+  border-radius:var(--r-md);box-shadow:var(--x-elev);
+  padding:var(--s-2) var(--s-3);margin:var(--s-2) 0;
+}
+.atelier .activity-group>summary{padding:var(--s-1) var(--s-2);border-radius:var(--r-sm)}
+.atelier .activity-group>summary:hover{background:var(--mac-control)}
+.atelier .activity-group__body{
+  gap:0;margin-left:var(--s-2);padding-left:var(--s-4);
+  border-left:1px solid var(--x-hairline);
+}
+
+/* Each row gets a dot sitting on the spine, coloured by outcome. The
+   dot is drawn into the disclosure column that already exists, so no
+   markup changed and the chevron still works. */
+.atelier .execution-row{position:relative;padding:1px 0}
+.atelier .execution-row::before{
+  content:'';position:absolute;left:calc(var(--s-4) * -1 - 1px);top:50%;
+  width:7px;height:7px;margin-top:-3.5px;margin-left:-3px;
+  border-radius:99px;background:var(--x-separator);
+  box-shadow:0 0 0 3px var(--x-card);
+}
+.atelier .execution-row[data-state='working']::before{background:var(--x-working)}
+.atelier .execution-row[data-state='failed']::before{background:var(--x-failed)}
+.atelier .execution-row[data-state='done']::before{background:var(--x-done)}
+/* The outcome word matches its dot, so state reads at a glance from
+   either end of the row. */
+.atelier .execution-row[data-state='working'] .execution-row__state{color:var(--x-working)}
+.atelier .execution-row[data-state='failed'] .execution-row__state{color:var(--x-failed-text)}
+
+/* ── Agent prose ───────────────────────────────────────────────────
+   Inline code is the one place a warm tone earns its keep: it marks a
+   literal — a path, a symbol, a flag — inside a sentence. */
+.atelier .msg--agent .md code{
+  background:var(--mac-control);border:1px solid var(--x-hairline);
+  border-radius:5px;padding:1px 5px;color:var(--x-needs-text);
+}
+
+/* ── Status dots ───────────────────────────────────────────────────
+   These were bullet characters (`●`) sized with font-size. A glyph is
+   whatever the font decides it is — it shifts baseline, changes weight
+   between families, and cannot be sized precisely. Drawn instead. */
+.atelier .approval__dot{
+  width:7px;height:7px;border-radius:99px;flex:none;
+  background:var(--x-needs);box-shadow:0 0 0 3px var(--x-needs-bg);
+  animation:pulse 1.4s ease infinite;
+}
+.atelier .wgroup__mark{width:5px;height:5px;border-radius:99px;flex:none;background:var(--x-separator)}
+.atelier .wgroup__mark[data-here]{background:var(--x-working)}
+
+/* ── Approval ──────────────────────────────────────────────────────
+   The one card in the app that must never be mistaken for any other,
+   because it is the only one that is waiting on you. Every other
+   surface is neutral; this one is the only thing wearing the warning
+   colour, and it is the only card with a tinted field rather than a
+   tinted border. If a second element ever starts using --x-needs at
+   this weight, this card stops working. */
+.atelier .approval{
+  border:1px solid var(--x-needs-border);
+  background:linear-gradient(180deg,var(--x-needs-bg),transparent 64%),var(--x-card);
+  box-shadow:var(--x-elev),0 0 0 1px color-mix(in srgb,var(--x-needs) 12%,transparent);
+  border-radius:var(--r-md);
+  padding:var(--s-4);
+  display:grid;gap:var(--s-3);
+}
+.atelier .approval__head{align-items:center;gap:var(--s-2)}
+.atelier .approval__title{
+  font:600 var(--ui-small)/1 var(--sans);letter-spacing:.07em;text-transform:uppercase;
+  color:var(--x-needs-text);
+}
+.atelier .approval__reason{font:var(--t-body);color:var(--x-secondary);margin:0}
+/* The command sits in a well — recessed, monospaced, scrollable. You are
+   being asked to approve *this exact string*, so it gets to be literal. */
+.atelier .approval__desc{
+  background:color-mix(in srgb,var(--x-backdrop) 70%,transparent);
+  border:1px solid var(--x-hairline);border-radius:var(--r-sm);
+  padding:10px 12px;margin:0;overflow-x:auto;
+  font:var(--ui-font)/1.55 var(--mono);color:var(--x-title);
+}
+.atelier .approval__cwd{font:var(--t-caption);color:var(--x-meta);margin:0}
+.atelier .approval__row{gap:var(--s-2);flex-wrap:wrap;align-items:center}
+.atelier .approval .btn{min-height:32px;padding:0 14px}
+/* The safe default is the prominent one. */
+.atelier .approval .btn--solid{
+  background:var(--x-needs);color:var(--x-backdrop);border-color:transparent;font-weight:600;
+}
+.atelier .approval .btn--solid:hover{background:var(--x-needs-text)}
+.atelier .approval .btn--danger{color:var(--x-failed-text);border-color:var(--x-failed-border)}
+.atelier .approval .btn--danger:hover{background:var(--x-failed-bg);color:var(--x-failed)}
+.atelier .approval .btn kbd{margin-left:7px;opacity:.65;font:var(--ui-small) var(--mono)}
+.atelier .appr-policy{font:var(--t-caption);color:var(--x-meta)}
+
+/* ── Files and Changes rails ───────────────────────────────────────
+   The three rail tabs were siblings in name only: Activity had been
+   rebuilt on cards while Files and Changes still drew bordered rows on
+   a bare panel. Switching tabs changed the visual language, which made
+   the rail feel like three different inspectors sharing a strip.
+   These bring both onto the same card and row grammar. */
+.desktop-rail .studio-form{
+  padding:var(--s-3);display:grid;gap:10px;align-content:start;
+  /* `minmax(0,1fr)`, not the implicit `1fr`. A grid item's default
+     `min-width:auto` refuses to shrink below its content, so a card
+     holding one long unbroken command (`bash -c ENABLE_DISTRIBUTED_INIT=0
+     JAX_PLATFORMS=cpu XLA_FLAGS=…`) pushed itself wider than the rail and
+     escaped the window edge — the row's own ellipsis never got a chance to
+     apply because nothing upstream was constraining it. */
+  grid-template-columns:minmax(0,1fr);
+}
+/* Same reason, one level down: every card is itself a flex/grid parent. */
+.desktop-rail .studio-form>*,
+.atelier .railcard,.atelier .rail-drawer{min-width:0}
+/* A run of `.studio-item`s becomes one card, with the hairlines acting
+   as internal separators rather than as the only structure. */
+.desktop-rail .studio-item{
+  padding:10px var(--s-3);border-bottom:1px solid var(--x-divider);
+  gap:var(--s-3);font:var(--t-body);
+}
+.desktop-rail .studio-item:last-of-type{border-bottom:0}
+.desktop-rail .studio-item strong{font:var(--t-body);color:var(--x-title);font-weight:400}
+.desktop-rail .studio-item p{font:var(--t-caption);color:var(--x-meta);margin:2px 0 0}
+.desktop-rail .studio-item button{
+  margin-left:auto;flex:none;border-radius:var(--r-sm);
+  padding:5px 10px;min-height:26px;font:var(--t-caption);
+  color:var(--x-secondary);background:var(--mac-control);border:1px solid var(--x-hairline);
+}
+.desktop-rail .studio-item button:hover{background:var(--x-selected);color:var(--x-title)}
+/* Wrap the whole run so it reads as one surface. */
+.desktop-rail .studio-form>.studio-item{
+  background:var(--x-card);border:1px solid var(--x-hairline);
+}
+.desktop-rail .studio-form>.studio-item:first-of-type{
+  border-radius:var(--r-md) var(--r-md) 0 0;
+}
+.desktop-rail .studio-form>.studio-item:last-of-type{
+  border-radius:0 0 var(--r-md) var(--r-md);box-shadow:var(--x-elev);
+}
+.desktop-rail .studio-form>.studio-item:only-of-type{border-radius:var(--r-md)}
+.desktop-rail .studio-form>.studio-item+.studio-item{border-top:0}
+.desktop-rail .studio-muted{font:var(--t-caption);color:var(--x-meta);padding:var(--s-3)}
+
+/* The file browser is the third tab and gets the same row height and
+   hover as every other list in the app. */
+.desktop-rail .file-browser__entries button{
+  border-radius:var(--r-sm);min-height:30px;padding:5px var(--s-2);font:var(--t-body);
+}
+.desktop-rail .file-browser__entries button:hover{background:var(--mac-control)}
+
+/* ── Workspace gate ────────────────────────────────────────────────
+   The genuinely-first screen: no folder, so no daemon, so no composer.
+   It was a `⌂` character at 26px above three paragraphs. It is the only
+   thing a new user sees, and it has to look like the product does. */
+.atelier .wsgate{
+  max-width:min(460px,100%);margin:auto;text-align:center;
+  display:grid;gap:var(--s-3);padding:var(--s-5);
+}
+.atelier .wsgate__mark{
+  width:56px;height:56px;margin:0 auto var(--s-2);border-radius:var(--r-lg);
+  display:grid;place-items:center;color:var(--x-accent);
+  background:var(--x-accent-soft);border:1px solid color-mix(in srgb,var(--x-accent) 20%,transparent);
+}
+.atelier .wsgate h1{font:var(--t-hero);color:var(--x-title);margin:0}
+.atelier .wsgate p{font:var(--t-body);color:var(--x-secondary);margin:0;line-height:1.6}
+.atelier .wsgate__btn{
+  justify-self:center;margin-top:var(--s-2);min-height:34px;padding:0 var(--s-4);
+  border-radius:var(--r-sm);background:var(--x-accent);color:var(--x-backdrop);
+  border:0;font-weight:600;font:var(--t-body);
+}
+.atelier .wsgate__btn:hover{background:var(--x-accent-bright,var(--x-accent));filter:brightness(1.1)}
+.atelier .wsgate .studio-muted{font:var(--t-caption);color:var(--x-meta)}
+
+/* ── Settings and pages ────────────────────────────────────────────
+   Same card language as the rail so a settings row and a rail row are
+   recognisably the same kind of thing. */
+.atelier .desktop-page>header{border-bottom:1px solid var(--x-divider);padding:var(--s-4) var(--panel-inset)}
+.atelier .desktop-page>header h2{font:var(--t-hero);color:var(--x-title)}
+.atelier .modal__side{border-right:1px solid var(--x-divider)}
+.atelier .modal__side button{border-radius:var(--r-sm);min-height:30px}
+.atelier .modal__side button:hover{background:var(--mac-control)}
+.atelier .modal__side button[aria-pressed='true'],
+.atelier .modal__side button.is-selected{background:var(--x-accent-soft);color:var(--x-accent)}
+.atelier .studio-item{border-bottom:1px solid var(--x-divider)}
+.atelier .studio-item:last-child{border-bottom:0}
+
+/* ── Shared primitives ─────────────────────────────────────────────
+   The inspector, command activity, LSP, terminals, search and
+   shortcuts panels do not have bespoke styling and should not: they
+   are built from the same handful of primitives. Styling those here
+   brings every one of them onto the design without a rule per
+   component — and without any of them drifting next time. */
+.atelier .btn{
+  border-radius:var(--r-sm);min-height:30px;padding:0 var(--s-3);
+  border:1px solid var(--x-hairline);background:var(--mac-control);
+  color:var(--x-secondary);font:var(--t-body);
+  display:inline-flex;align-items:center;gap:6px;justify-content:center;
+}
+.atelier .btn:hover:not(:disabled){background:var(--x-selected);color:var(--x-title)}
+.atelier .btn--solid{background:var(--x-accent);color:var(--x-backdrop);border-color:transparent;font-weight:600}
+.atelier .btn--solid:hover:not(:disabled){background:var(--x-accent);filter:brightness(1.12)}
+.atelier .btn--ghost{background:transparent}
+.atelier .chipbtn{
+  border-radius:999px;min-height:24px;min-width:24px;padding:0 var(--s-2);
+  display:inline-flex;align-items:center;justify-content:center;
+  color:var(--x-meta);background:transparent;border:0;
+}
+.atelier .chipbtn:hover{background:var(--mac-control);color:var(--x-title)}
+
+/* Inputs read as one family whether they are a search box, a path
+   field or a model filter. */
+.atelier input[type='text'],.atelier input[type='search'],.atelier .srow input{
+  border-radius:var(--r-sm);border:1px solid var(--x-hairline);
+  background:color-mix(in srgb,var(--x-backdrop) 55%,transparent);
+  color:var(--x-title);min-height:30px;padding:0 10px;font:var(--t-body);
+}
+.atelier input:focus{border-color:color-mix(in srgb,var(--x-focus) 55%,transparent)}
+
+/* Status dots, wherever they appear. */
+.atelier .dot{width:7px;height:7px;border-radius:99px;flex:none;background:var(--x-separator)}
+.atelier .dot[data-state='online'],.atelier .dot[data-state='running']{background:var(--x-done)}
+.atelier .dot[data-state='failed'],.atelier .dot[data-state='error']{background:var(--x-failed)}
+.atelier .dot[data-state='working']{background:var(--x-working)}
+
+/* Palette and search rows share the sidebar's row rhythm. */
+.atelier .prow,.atelier .srow{border-radius:var(--r-sm);min-height:32px;padding:6px var(--s-3);font:var(--t-body)}
+.atelier .prow:hover,.atelier .srow:hover,
+.atelier .prow[aria-selected='true'],.atelier .srow[aria-selected='true']{background:var(--mac-control)}
+.atelier .prow__ico{display:inline-flex;align-items:center;justify-content:center;width:18px;color:var(--x-meta)}
+.atelier .studio-muted{font:var(--t-caption);color:var(--x-meta)}
+.atelier .studio-error{font:var(--t-body);color:var(--x-failed-text)}
+
+/* ── Agent controls ────────────────────────────────────────────────
+   A message box and its actions, in the inspector for one child. */
+.atelier .agent-controls{display:grid;gap:var(--s-2);margin-top:var(--s-3)}
+.atelier .agent-controls label{display:grid;gap:5px;font:var(--t-caption);color:var(--x-meta)}
+.atelier .agent-controls input{width:100%}
+.atelier .agent-controls__row{display:flex;gap:var(--s-2)}
+.atelier .agent-controls p[role='status']{font:var(--t-caption);color:var(--x-meta);margin:0}
+.atelier .agent-controls p[data-error]{color:var(--x-failed-text)}
+
+/* ── Tool result card ──────────────────────────────────────────────
+   The expanded body of one tool call. It had no padding of its own, so
+   its status line, result panel, copy actions and "Raw details" all sat
+   flush against the card border. */
+.atelier .execution{padding:var(--s-3) var(--s-4) var(--s-4);display:grid;gap:var(--s-3)}
+.atelier .execution__status{font:var(--t-caption);color:var(--x-meta)}
+.atelier .execution__viewer-actions{display:flex;align-items:center;justify-content:space-between;gap:var(--s-3);font:var(--t-caption);color:var(--x-meta)}
+.atelier .execution__viewer{
+  background:color-mix(in srgb,var(--x-backdrop) 55%,transparent);
+  border:1px solid var(--x-hairline);border-radius:var(--r-sm);padding:var(--s-3);
+}
+.atelier .execution__actions{margin:0;gap:var(--s-4)}
+.atelier .execution__raw{margin:0}
+.atelier .execution__raw summary{padding:0}
+
+/* ── Jump-to-latest ────────────────────────────────────────────────
+   It is `position:sticky`, so while you are scrolled back it floats over
+   whatever content happens to be under it — padding at the end of the
+   scroller only clears it at the very bottom, never mid-scroll. It
+   therefore has to read unambiguously as a layer above the page rather
+   than as an element colliding with a card: opaque surface, its own
+   hairline, a real shadow, and the blur the rest of the chrome uses. */
+.atelier .jump-latest{
+  background:var(--glass-overlay);
+  backdrop-filter:var(--glass-blur);
+  border:1px solid var(--x-hairline);
+  box-shadow:0 2px 6px #00000047,0 10px 28px #0000003d;
+  padding:6px 14px;
+  z-index:6;
+}
+
+/* ── Working spinner ───────────────────────────────────────────────
+   Shown in place of the status dot while a turn is genuinely in
+   flight. The elapsed clock beside it already proves time is passing,
+   but a clock only updates once a second — the spinner is what makes
+   the card feel alive between ticks.
+
+   The global reduced-motion rule at the top of this file stops the
+   rotation, which is why the glyph is a notched ring rather than a
+   bare arc: stopped, it still reads as a deliberate indicator instead
+   of a half-drawn circle. */
+/* `--x-working`, not `--x-activity`: the card's left edge already marks
+   this state in the working colour, and the inherited dot rule used the
+   activity purple — one state wearing two colours an inch apart. */
+.atelier .railstatus__spinner{
+  display:inline-flex;flex:none;color:var(--x-working);
+  animation:railspin 900ms linear infinite;
+}
+@keyframes railspin{to{transform:rotate(360deg)}}
+.atelier .railstatus[data-tone='working'] .railstatus__dot{background:var(--x-working)}
+
+/* ── Discovered models ─────────────────────────────────────────────
+   The grid gives each cell `minmax(180px,1fr)` and the row laid the
+   model name and its capacities side by side. The capacities are
+   `white-space:nowrap`, so in a 180px column the name — the only
+   flexible item — absorbed the entire shortfall and rendered as `g…`,
+   `gpt-…`, `c…`. Nine models, none identifiable.
+
+   Stacking them gives the name the full cell width and puts the
+   capacities on their own line, where they are supporting detail
+   rather than a competitor for space. */
+.atelier .provform__model{
+  display:grid;grid-template-columns:minmax(0,1fr) auto;gap:1px 6px;align-items:center;
+  justify-content:stretch;padding:5px 8px;
+}
+.atelier .provform__modelname{
+  grid-column:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  color:var(--x-title);
+}
+.atelier .provform__model:not(.is-on) .provform__modelname{color:var(--x-secondary)}
+.atelier .provform__caps{
+  grid-column:1;grid-row:2;min-width:0;overflow:hidden;text-overflow:ellipsis;
+  color:var(--x-meta);
+}
+/* The tick sits beside the name, spanning both rows. */
+.atelier .provform__model>.app-icon{grid-column:2;grid-row:1 / span 2;color:var(--x-working)}
+/* 180px columns were sized for a name-only chip. A model id is routinely
+   25-40 characters, so fewer, wider columns read better than more, narrower
+   ones — and the list scrolls anyway. */
+.atelier .provform__models{grid-template-columns:repeat(auto-fit,minmax(240px,1fr));max-height:220px}
+
+/* ── Activity group header: live status, then a plain summary ──────
+   While running: "Working · Running pytest tests/". The phrase crossfades
+   in one grid cell (old lifts out, new settles in) so the header never
+   reflows. "Working" carries a slow, low-contrast sheen — motion says
+   "alive" without a spinner competing with the transcript. */
+.atelier .activity-group__live,.atelier .activity-group__done{display:flex;align-items:baseline;gap:8px;min-width:0;flex:1 1 auto}
+.atelier .activity-group__done{color:var(--x-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block}
+.atelier .activity-group__working{
+  flex:none;font-weight:500;color:var(--x-secondary);
+  background:linear-gradient(90deg,var(--x-secondary) 0%,var(--x-secondary) 40%,var(--x-strong) 50%,var(--x-secondary) 60%,var(--x-secondary) 100%);
+  background-size:250% 100%;-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;
+  animation:activity-sheen 2.4s linear infinite;
+}
+.atelier .activity-group__live{gap:0}
+.atelier .live-phrase{display:grid;position:relative;min-width:0;flex:1 1 auto;padding-left:18px;color:var(--x-meta)}
+.atelier .live-phrase::before{content:'·';position:absolute;left:0;width:18px;text-align:center;color:var(--x-caption)}
+.atelier .live-phrase__item{grid-area:1/1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.atelier .live-phrase__item.is-entering{animation:phrase-in 260ms cubic-bezier(.2,.8,.2,1) both}
+.atelier .live-phrase__item.is-leaving{animation:phrase-out 220ms ease-in both;pointer-events:none}
+@keyframes activity-sheen{from{background-position:100% 0}to{background-position:-150% 0}}
+@keyframes phrase-in{from{opacity:0;transform:translateY(5px);filter:blur(2px)}to{opacity:1;transform:none;filter:none}}
+@keyframes phrase-out{from{opacity:1;transform:none;filter:none}to{opacity:0;transform:translateY(-5px);filter:blur(2px)}}
+@media (prefers-reduced-motion:reduce){
+  .atelier .activity-group__working{animation:none;-webkit-text-fill-color:currentColor;background:none}
+  .atelier .live-phrase__item.is-entering{animation:none}
+  .atelier .live-phrase__item.is-leaving{display:none}
+}
+.atelier .activity-group__pending{color:var(--x-meta)}
+/* Header tabs keep their natural width. Shrinkable nowrap buttons were
+   squeezed to 24px in a narrow column and their labels drew over each
+   other; the strip scrolls sideways instead. */
+.atelier .chat__head .tab{flex:none}
+.atelier .chat__head .tabs{overflow-x:auto;overflow-y:hidden;scrollbar-width:none;-webkit-mask-image:linear-gradient(90deg,#000 calc(100% - 20px),transparent);mask-image:linear-gradient(90deg,#000 calc(100% - 20px),transparent)}
+.atelier .chat__head .tabs::-webkit-scrollbar{display:none}
+
+/* A chip inside a form field is a button, not a stretched grid row: it sat
+   centred across the whole card with its label stranded above. */
+.atelier .field>.chipbtn{justify-self:start;justify-content:flex-start;background:var(--mac-control);color:var(--x-title);padding:0 var(--s-3);min-height:28px}
+.atelier .field>.chipbtn:hover:not(:disabled){filter:brightness(1.15)}
+
+/* Popover footers: a quiet caption line, not a terminal. Hints are sans with
+   small keycaps; the footer action is a plain link that underlines on hover. */
+.atelier :is(.modelpop__foot,.palette__foot){
+  display:flex;align-items:center;gap:var(--s-3);padding:var(--s-2) var(--s-3);
+  border-top:1px solid var(--x-hairline);font:var(--t-caption);font-family:var(--sans);color:var(--x-meta);
+}
+.atelier .keyhints,.atelier .palette__foot{display:flex;align-items:center;gap:var(--s-3);min-width:0}
+.atelier :is(.keyhints,.palette__foot)>span{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
+.atelier :is(.modelpop__foot,.palette__foot) kbd{
+  display:inline-grid;place-items:center;min-width:18px;height:18px;padding:0 4px;border-radius:4px;
+  font:500 10.5px/1 var(--sans);color:var(--x-secondary);background:var(--mac-control);border:1px solid var(--x-hairline);
+}
+.atelier .modelpop__foot .lnk{
+  margin-left:auto;padding:2px 0;font:var(--t-caption);color:var(--x-secondary);text-decoration:none;
+}
+.atelier .modelpop__foot .lnk:hover{color:var(--x-title);text-decoration:underline;text-underline-offset:2px}
+.atelier .palette__foot .palette__hint{margin-left:auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.atelier .settings-section{display:flex;align-items:center;gap:var(--s-2);margin:var(--s-5) 0 var(--s-2)}
+.atelier .settings-section__count{font:var(--t-caption);color:var(--x-meta);background:var(--mac-control);border-radius:999px;padding:0 7px;min-width:20px;text-align:center}
+.atelier .settings-actions{display:flex;gap:var(--s-2);padding-top:var(--s-4)}
+.atelier .btn:has(>.app-icon){display:inline-flex;align-items:center;gap:6px}
+
+/* Preset list: the dot sits on the name's line, and action labels start
+   where the name starts (dot 7px + gap 10px, minus the chip's 8px inset). */
+.atelier .pcard__main{align-items:flex-start}
+.atelier .pcard__main>.dot{margin-top:8.5px}
+.atelier .pcard__actions{padding-left:17px;margin-left:-8px}
+/* The "draft a preset" affordance is a button, not a row of text. */
+.atelier .pcard--add{
+  display:flex;align-items:center;border:1px dashed var(--x-separator);border-radius:var(--r-md);
+  padding:var(--s-3) var(--s-4);background:transparent;margin-bottom:var(--s-4);
+}
+.atelier .pcard--add:hover:not(:disabled){background:var(--mac-control);border-color:var(--x-meta)}
+.atelier .pcard--add .pcard__name{display:inline-flex;align-items:center;gap:6px}
+
+/* Settings choice lists (permission mode): aligned label column, sentence
+   description, and a selected state that reads as "chosen", not "approved". */
+.atelier .modal .optlist{gap:6px}
+.atelier .modal .opt{align-items:center;gap:var(--s-3);padding:var(--s-2) var(--s-3);min-height:38px;border-radius:var(--r-sm);background:transparent}
+.atelier .modal .opt__label{flex:0 0 84px;font-weight:500;color:var(--x-title)}
+.atelier .modal .opt__desc{flex:1 1 auto;min-width:0;font:var(--t-caption);color:var(--x-meta)}
+.atelier .modal .opt.is-approve{border-color:color-mix(in srgb,var(--x-accent) 55%,transparent);background:color-mix(in srgb,var(--x-accent) 9%,transparent)}
+.atelier .modal .opt.is-approve .opt__kbd{color:var(--x-accent)}
+.atelier .row__s.keyhints{display:flex;flex-wrap:wrap;gap:var(--s-3);align-items:center}
+.atelier .row__s.keyhints>span{display:inline-flex;align-items:center;gap:5px}
+.atelier .row__s.keyhints kbd{display:inline-grid;place-items:center;min-width:18px;height:18px;padding:0 4px;border-radius:4px;font:500 10.5px/1 var(--sans);color:var(--x-secondary);background:var(--mac-control);border:1px solid var(--x-hairline)}
+.atelier .pcard__meta{font:var(--t-caption);color:var(--x-meta)}
+.atelier .modelpop .palette__in{font:var(--t-body)}
+.atelier .modelpop__status{padding:var(--s-2) var(--s-3) var(--s-1);font:var(--t-caption);color:var(--x-meta)}
+.atelier .palette__in{font:var(--t-body)}
+
+/* Approval heading is a question in sentence case; the tool id rides the tooltip. */
+.atelier .approval__title{font:var(--t-body);font-weight:600;letter-spacing:0;text-transform:none;color:var(--x-needs-text)}
+.atelier .approval__row .btn{flex:0 0 auto}
+.atelier .approval__cwd{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.atelier .approval__cwd .appr-policy{font:inherit;color:inherit}
+.atelier .approval{container-type:inline-size}
+@container (max-width:380px){
+  .atelier .approval__row{flex-wrap:nowrap}
+  .atelier .approval__row .btn{flex:1 1 0;min-width:0;padding:0 8px;justify-content:center}
+  .atelier .approval__row .btn kbd{display:none}
+}
+
+/* Question card: same family as the approval card — a sentence heading,
+   option rows, one sans input, one clear send button. */
+.atelier .qcard{
+  border:1px solid var(--x-needs-border);border-radius:var(--r-md);padding:var(--s-4);gap:var(--s-3);
+  background:linear-gradient(180deg,var(--x-needs-bg),transparent 64%),var(--x-card);box-shadow:var(--x-elev);
+}
+.atelier .qcard__head{align-items:center;gap:var(--s-2)}
+.atelier .qcard__title{font:var(--t-body);font-weight:600;color:var(--x-needs-text)}
+.atelier .qcard__q{font:var(--t-body);font-weight:500;color:var(--x-title)}
+.atelier .qcard .opt{align-items:center;min-height:34px;padding:0 var(--s-3);background:color-mix(in srgb,var(--x-backdrop) 45%,transparent);font:var(--t-body)}
+.atelier .qcard .opt.is-approve{border-color:color-mix(in srgb,var(--x-needs) 60%,transparent);background:color-mix(in srgb,var(--x-needs) 10%,transparent)}
+.atelier .qcard .opt__kbd{color:var(--x-needs-text)}
+.atelier .qcard .opt__kbd kbd{display:inline-grid;place-items:center;min-width:18px;height:18px;padding:0 4px;border-radius:4px;font:500 10.5px/1 var(--sans);color:var(--x-secondary);background:var(--mac-control);border:1px solid var(--x-hairline)}
+.atelier .otherbox{font:var(--t-body)}
+.atelier .otherbox input{font:var(--t-body);min-height:34px;padding:0 var(--s-3);border-radius:var(--r-sm)}
+.atelier .qcard .approval__row .btn{min-height:32px;padding:0 14px}
+.atelier .qcard .btn kbd{margin-left:7px;opacity:.65;font:var(--ui-small) var(--sans)}
+
+/* Failure card: the heading carries the alarm; the explanation is prose. */
+.atelier .terr{border-radius:var(--r-md);padding:var(--s-4);gap:var(--s-3)}
+.atelier .terr__head{display:flex;align-items:center;gap:6px;font:var(--t-body);font-weight:600;color:var(--x-failed-text)}
+.atelier .terr__body{font:var(--t-body);color:var(--x-prose)}
+.atelier .terr details>summary{list-style:none;cursor:pointer;display:inline-flex;align-items:center;gap:6px;font:var(--t-caption);color:var(--x-secondary)}
+.atelier .terr details>summary::-webkit-details-marker{display:none}
+.atelier .terr details>summary::before{content:'';width:5px;height:5px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:rotate(-45deg);transition:transform 120ms}
+.atelier .terr details[open]>summary::before{transform:rotate(45deg)}
+.atelier .terr details>p{margin:var(--s-2) 0 0;font:var(--ui-small)/1.5 var(--mono);color:var(--x-secondary);white-space:pre-wrap;word-break:break-word}
+.atelier .terr__row .btn{display:inline-flex;align-items:center;gap:6px}
+
+/* Narrow chat column. Must stay last: base .chat__head rules later in this
+   file used to cancel every declaration here at equal specificity. */
+@container(max-width:520px){.atelier .chat__workspace{display:none}.atelier .chat__head{gap:12px;padding-inline:16px}.atelier .chat__head .tab{font-size:var(--ui-small)}.atelier .chat__state .badge--live{display:none}}
+
+/* Changes review: the header already names the file, so the diff's own
+   file line is a duplicate. Toolbar actions read as buttons, not loose text. */
+.atelier .change-review__preview .change-review__source>.studio-diff-file{display:none}
+.atelier .change-review__toolbar>button{border-radius:var(--r-sm);padding:0 var(--s-3);min-height:28px;color:var(--x-secondary);background:var(--mac-control);font:var(--t-caption)}
+.atelier .change-review__toolbar>button:hover:not(:disabled){color:var(--x-title);filter:brightness(1.2)}
+
+/* Stacked catalog (narrow column): the single-column switch kept the
+   two-column row track, so the list collapsed to ~23px under the search box. */
+@container (max-width:700px){
+  .catalog-page .catalog-browser{grid-template-rows:minmax(120px,42%) minmax(0,1fr)}
+}
+.atelier .agent-list__warn{display:inline-flex;vertical-align:-2px;margin-left:6px;color:var(--x-needs-text)}
+/* Workspace strip: the path truncates on one line; the action is a button. */
+.atelier .agents-workspace>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;overflow-wrap:normal}
+.atelier .agents-workspace button{border-radius:var(--r-sm);padding:0 var(--s-3);min-height:28px;color:var(--x-secondary);background:var(--mac-control)}
+.atelier .agents-workspace button:hover:not(:disabled){color:var(--x-title);filter:brightness(1.2)}
+.atelier .search-status{padding:var(--s-3);font:var(--t-caption);color:var(--x-meta)}
+.atelier .menu__item kbd.kbd{margin-left:auto;font:var(--t-caption);color:var(--x-meta);background:none;border:0}
+/* A status dot beside a title + subtitle sits on the title's line. */
+.atelier .row>.dot:first-child{align-self:flex-start;margin-top:7px}
+
+/* ── Git (Source Control) rail ────────────────────────────────────────
+   Left: branch/sync, commit box, Staged / Changes groups, history.
+   Right: the selected file's diff (reuses the change-review diff rows). */
+.atelier .scm{display:grid;grid-template-columns:minmax(280px,340px) minmax(0,1fr);flex:1;min-width:0;min-height:0}
+.atelier .scm--empty{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:var(--s-3);padding:var(--s-5)}
+.atelier .scm-empty{display:grid;justify-items:center;gap:6px;text-align:center;color:var(--x-meta)}
+.atelier .scm-empty strong{font:var(--t-body);font-weight:600;color:var(--x-title)}
+.atelier .scm-empty p{margin:0;font:var(--t-caption)}
+.atelier .scm__side{display:flex;flex-direction:column;min-height:0;overflow:auto;border-right:1px solid var(--x-hairline);padding:var(--s-3) var(--s-3) var(--s-4)}
+.atelier .scm__head{display:flex;align-items:center;gap:var(--s-2);margin-bottom:var(--s-3)}
+.atelier .scm-branch{display:inline-flex;align-items:center;gap:6px;min-width:0;max-width:100%;padding:0 var(--s-2);min-height:28px;border-radius:var(--r-sm);background:transparent;color:var(--x-title);font:var(--t-body);font-weight:500}
+.atelier .scm-branch>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.atelier .scm-branch:hover,.atelier .scm-branch[aria-expanded="true"]{background:var(--mac-control)}
+.atelier .scm__tools{display:inline-flex;align-items:center;gap:2px;margin-left:auto;flex:none}
+.atelier .scm-tool{display:inline-flex;align-items:center;justify-content:center;gap:3px;min-width:26px;height:26px;padding:0 6px;border-radius:var(--r-sm);background:transparent;color:var(--x-secondary);font:var(--t-caption)}
+.atelier .scm-tool:hover:not(:disabled){background:var(--mac-control);color:var(--x-title)}
+.atelier .scm-tool:disabled{opacity:.45;cursor:default}
+.atelier .scm-tool--label{padding:0 8px}
+
+.atelier .scm-branches{display:grid;gap:var(--s-2);margin:0 0 var(--s-3);padding:var(--s-2);border:1px solid var(--x-hairline);border-radius:var(--r-md);background:var(--x-card);box-shadow:var(--x-elev)}
+.atelier .scm-branches ul{list-style:none;margin:0;padding:0;max-height:220px;overflow:auto}
+.atelier .scm-branches li>button{display:flex;align-items:center;gap:8px;width:100%;min-height:30px;padding:0 var(--s-2);border-radius:var(--r-sm);background:transparent;color:var(--x-title);font:var(--t-body);text-align:left}
+.atelier .scm-branches li>button>span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.atelier .scm-branches li>button small{font:var(--t-caption);color:var(--x-meta);white-space:nowrap}
+.atelier .scm-branches li>button:hover:not(:disabled){background:var(--x-selected)}
+.atelier .scm-branches li>button:disabled{color:var(--x-accent);cursor:default}
+.atelier .scm-branches__new{display:flex;gap:var(--s-2)}
+.atelier .scm-branches__new input{flex:1;min-width:0}
+
+.atelier .scm__commit{display:grid;gap:var(--s-2);margin-bottom:var(--s-3)}
+.atelier .scm__commit textarea{width:100%;resize:vertical;min-height:120px;max-height:360px;padding:8px 10px;border-radius:var(--r-sm);border:1px solid var(--x-hairline);background:color-mix(in srgb,var(--x-backdrop) 55%,transparent);color:var(--x-title);font:var(--t-body);line-height:1.45}
+.atelier .scm__commit textarea:focus{outline:none;border-color:color-mix(in srgb,var(--x-focus) 55%,transparent)}
+.atelier .scm__commit-row{display:grid;grid-template-columns:auto 1fr;gap:var(--s-2)}
+.atelier .scm__commit-row .btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:30px}
+.atelier .scm-review{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:30px;border-radius:var(--r-sm);border:1px dashed var(--x-separator);background:transparent;color:var(--x-secondary);font:var(--t-caption)}
+.atelier .scm-review:hover:not(:disabled){color:var(--x-title);border-color:var(--x-meta);background:var(--mac-control)}
+.atelier .scm-review:disabled{opacity:.5;cursor:default}
+
+.atelier .scm__status{display:flex;align-items:center;gap:var(--s-2);margin:0 0 var(--s-3);padding:6px var(--s-2);border-radius:var(--r-sm);background:var(--mac-control);font:var(--t-caption);color:var(--x-secondary)}
+.atelier .scm__status>span:not(.studio-spinner){flex:1;min-width:0;overflow-wrap:anywhere}
+.atelier .scm__error{color:var(--x-failed-text);white-space:pre-wrap}
+
+.atelier .scm__groups{display:grid;gap:var(--s-2)}
+.atelier .scm-clean{display:flex;align-items:center;gap:8px;padding:var(--s-3) var(--s-2);font:var(--t-caption);color:var(--x-meta)}
+.atelier .scm-group__head{display:flex;align-items:center;gap:4px}
+.atelier .scm-group__toggle{display:flex;align-items:center;gap:6px;flex:1;min-width:0;min-height:26px;padding:0 4px;border-radius:var(--r-sm);background:transparent;color:var(--x-secondary);font:var(--t-caption);font-weight:600;text-align:left}
+.atelier .scm-group__toggle>.app-icon{transition:transform 120ms;transform:rotate(90deg)}
+.atelier .scm-group__toggle[aria-expanded="false"]>.app-icon{transform:none}
+.atelier .scm-count{margin-left:2px;padding:0 6px;border-radius:999px;background:var(--mac-control);color:var(--x-meta);font-weight:500}
+.atelier .scm-group__actions,.atelier .scm-file__actions{display:inline-flex;gap:1px;opacity:0;transition:opacity 100ms}
+.atelier .scm-group__head:hover .scm-group__actions,.atelier .scm-group__head:focus-within .scm-group__actions,
+.atelier .scm-file:hover .scm-file__actions,.atelier .scm-file:focus-within .scm-file__actions,.atelier .scm-file.is-selected .scm-file__actions{opacity:1}
+.atelier .scm-files{list-style:none;margin:2px 0 0;padding:0}
+.atelier .scm-file{display:flex;align-items:center;gap:4px;min-height:28px;padding:0 4px 0 18px;border-radius:var(--r-sm)}
+.atelier .scm-file:hover{background:var(--mac-control)}
+.atelier .scm-file.is-selected{background:var(--x-selected)}
+.atelier .scm-file__open{display:flex;align-items:baseline;gap:6px;flex:1;min-width:0;padding:4px 0;background:transparent;text-align:left;color:var(--x-title);font:var(--t-body)}
+.atelier .scm-file__name{flex:none;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.atelier .scm-file__dir{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:var(--t-caption);color:var(--x-meta)}
+.atelier .scm-badge{flex:none;width:16px;text-align:center;font:600 11px/1 var(--mono);color:var(--x-needs-text)}
+.atelier .scm-badge--A,.atelier .scm-badge--untracked{color:var(--x-done)}
+.atelier .scm-badge--D,.atelier .scm-badge--conflict{color:var(--x-failed-text)}
+.atelier .scm-badge--R,.atelier .scm-badge--C{color:var(--x-accent)}
+.atelier .scm__more{margin:0;padding:0 var(--s-2);font:var(--t-caption)}
+
+.atelier .scm__history{margin-top:var(--s-4);border-top:1px solid var(--x-hairline);padding-top:var(--s-2)}
+.atelier .scm__history>summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:6px;min-height:26px;padding:0 4px;border-radius:var(--r-sm);font:var(--t-caption);font-weight:600;color:var(--x-secondary)}
+.atelier .scm__history>summary::-webkit-details-marker{display:none}
+.atelier .scm__history>summary::before{content:'';width:5px;height:5px;margin:0 3px 0 2px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:rotate(-45deg);transition:transform 120ms}
+.atelier .scm__history[open]>summary::before{transform:rotate(45deg)}
+.atelier .scm__history>summary:hover{background:var(--mac-control)}
+.atelier .scm__history-note{margin:6px 8px;font:var(--t-caption)}
+.atelier .scm-log{list-style:none;margin:4px 0 0;padding:0}
+.atelier .scm-log>li{display:grid;gap:1px;padding:6px 8px;border-radius:var(--r-sm)}
+.atelier .scm-log>li:hover{background:var(--mac-control)}
+.atelier .scm-log__subject{font:var(--t-body);color:var(--x-title);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.atelier .scm-log__meta{font:var(--t-caption);color:var(--x-meta)}
+.atelier .scm-log__meta code{font:var(--t-caption);font-family:var(--mono)}
+.atelier .scm-link{align-self:flex-start;margin-top:var(--s-3);padding:2px 4px;background:transparent;color:var(--x-secondary);font:var(--t-caption)}
+.atelier .scm-link:hover{color:var(--x-title);text-decoration:underline;text-underline-offset:2px}
+
+.atelier .scm__diff{min-width:0;min-height:0}
+.atelier .scm__diff>header{display:flex;align-items:center;gap:var(--s-2)}
+.atelier .scm__diff>header>span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.atelier .scm__diff>header>em{flex:none;font:var(--t-caption);font-style:normal;color:var(--x-meta);padding:1px 8px;border-radius:999px;background:var(--mac-control)}
+.atelier .scm__diff--empty{display:flex;align-items:center;justify-content:center}
+
+@container (max-width:640px){
+  .atelier .scm{grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(260px,1fr);overflow:auto}
+  .atelier .scm__side{border-right:0;border-bottom:1px solid var(--x-hairline);overflow:visible}
+}
+.atelier .scm-empty p{max-width:46ch}
+
+/* ── Activity drawer: terminals, usage, context, monitors, statistics ──
+   One disclosure grammar (chevron, caption heading, hover row), quiet
+   buttons instead of bare text, and captions instead of loose paragraphs. */
+.atelier .rail-drawer__body details>summary{
+  list-style:none;cursor:pointer;display:flex;align-items:center;gap:8px;min-height:30px;padding:0 8px;
+  border-radius:var(--r-sm);font:var(--t-caption);font-weight:600;color:var(--x-secondary);
+}
+.atelier .rail-drawer__body details>summary::-webkit-details-marker{display:none}
+.atelier .rail-drawer__body details>summary::before{
+  content:'';flex:none;width:5px;height:5px;margin:0 2px 0 1px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;
+  transform:rotate(-45deg);transition:transform 120ms;opacity:.8;
+}
+.atelier .rail-drawer__body details[open]>summary::before{transform:rotate(45deg)}
+.atelier .rail-drawer__body details>summary:hover{background:var(--mac-control);color:var(--x-title)}
+.atelier .rail-drawer__body details[open]>summary{color:var(--x-title)}
+.atelier .rail-drawer__body>details+details,.atelier .rail-drawer__body>details+button,.atelier .rail-drawer__body>button+details{margin-top:2px}
+
+/* Buttons with no styling of their own read as quiet controls, not text. */
+.atelier .rail-drawer__body button:not([class]),.atelier .rail-drawer__body .lsp-actions button,
+.atelier .rail-drawer__body .activity-terminal,.atelier .rail-drawer__body .context-breakdown-toggle{
+  display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:28px;padding:0 var(--s-3);
+  border-radius:var(--r-sm);background:var(--mac-control);color:var(--x-secondary);font:var(--t-caption);font-weight:500;
+}
+.atelier .rail-drawer__body button:not([class]):hover:not(:disabled),.atelier .rail-drawer__body .lsp-actions button:hover:not(:disabled),
+.atelier .rail-drawer__body .activity-terminal:hover,.atelier .rail-drawer__body .context-breakdown-toggle:hover{color:var(--x-title);filter:brightness(1.2)}
+.atelier .rail-drawer__body button:disabled{opacity:.45;cursor:default}
+.atelier .rail-drawer__body .activity-terminal{width:100%;justify-content:flex-start;margin-bottom:var(--s-2)}
+.atelier .rail-drawer__body .lsp-actions{display:flex;flex-wrap:wrap;gap:6px;margin:var(--s-2) 0}
+.atelier .rail-drawer__body details>*:not(summary){margin-left:8px;margin-right:4px}
+
+/* Context inspector */
+.atelier .context-inspector{display:grid;gap:var(--s-2);padding:var(--s-1) 0 var(--s-3)}
+.atelier .context-inspector>p,.atelier .context-inspector p.context-inspector__meta{margin:0;font:var(--t-caption);color:var(--x-meta)}
+.atelier .context-inspector__lead{color:var(--x-secondary)!important}
+.atelier .context-inspector__bar{display:flex;gap:6px}
+.atelier .context-inspector__bar select{flex:1;min-width:0;min-height:28px;padding:0 8px;border-radius:var(--r-sm);border:1px solid var(--x-hairline);background:var(--x-screen);color:var(--x-title);font:var(--t-caption)}
+.atelier .rail-drawer__body .context-inspector__refresh{flex:none;width:28px;min-width:28px;min-height:28px;padding:0;border-radius:var(--r-sm);background:var(--mac-control);color:var(--x-secondary)}
+.atelier .context-sources{display:grid;gap:2px}
+.atelier .rail-drawer__body .context-source>summary{font-weight:500;color:var(--x-title);padding-right:6px}
+.atelier .context-source__title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.atelier .context-source__tokens{flex:none;font:var(--t-caption);font-family:var(--mono);color:var(--x-meta)}
+.atelier .context-source__tag{flex:none;font:var(--t-caption);color:var(--x-accent);padding:0 6px;border-radius:999px;background:color-mix(in srgb,var(--x-accent) 12%,transparent)}
+.atelier .context-source__body{
+  margin:4px 4px var(--s-2) 8px;padding:var(--s-2) var(--s-3);max-height:280px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;
+  border-radius:var(--r-sm);border:1px solid var(--x-hairline);background:color-mix(in srgb,var(--x-backdrop) 55%,transparent);
+  font:12px/1.55 var(--sans);color:var(--x-prose);
+}
+.atelier .context-pager{display:flex;align-items:center;justify-content:center;gap:var(--s-2);font:var(--t-caption);color:var(--x-meta)}
+.atelier .rail-drawer__body .context-pager button{width:26px;min-width:26px;min-height:26px;padding:0}
+.atelier .context-pager button[aria-label="Previous page"] .app-icon{transform:rotate(180deg)}
+.atelier .context-inspector__note{font-size:10.5px!important;color:var(--x-caption)!important}
+.atelier .file-browser__selection p{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.atelier .file-browser__close{flex:none;display:inline-grid;place-items:center;width:28px;height:28px;border-radius:var(--r-sm);background:transparent;color:var(--x-secondary)}
+.atelier .file-browser__close:hover{background:var(--mac-control);color:var(--x-title)}
+
+/* ── Terminal rail ─────────────────────────────────────────────────────
+   Shell tabs on top; the emulator fills the rest edge to edge. */
+.atelier .desktop-rail--terminal .studio-sheet-content{display:flex;flex:1;min-height:0;overflow:hidden;padding:0}
+.atelier .term{display:flex;flex-direction:column;flex:1;min-width:0;min-height:0}
+.atelier .term__bar{display:flex;align-items:center;gap:2px;padding:6px 8px;border-bottom:1px solid var(--x-hairline);overflow-x:auto;scrollbar-width:none}
+.atelier .term-tab{display:inline-flex;align-items:center;flex:none;border-radius:var(--r-sm);color:var(--x-secondary)}
+.atelier .term-tab>button:first-child{display:inline-flex;align-items:center;gap:6px;min-height:26px;padding:0 4px 0 8px;background:transparent;color:inherit;font:var(--t-caption);font-weight:500}
+.atelier .term-tab__close{display:inline-grid;place-items:center;width:20px;height:20px;margin-right:3px;border-radius:4px;background:transparent;color:inherit;opacity:0}
+.atelier .term-tab:hover .term-tab__close,.atelier .term-tab.is-active .term-tab__close{opacity:.7}
+.atelier .term-tab__close:hover{opacity:1!important;background:var(--mac-control)}
+.atelier .term-tab:hover{background:var(--mac-control)}
+.atelier .term-tab.is-active{background:var(--x-selected);color:var(--x-title)}
+.atelier .term-tab.is-exited>button:first-child{text-decoration:line-through;text-decoration-color:var(--x-meta)}
+.atelier .term__new{display:inline-grid;place-items:center;flex:none;width:26px;height:26px;border-radius:var(--r-sm);background:transparent;color:var(--x-secondary)}
+.atelier .term__new:hover:not(:disabled){background:var(--mac-control);color:var(--x-title)}
+.atelier .term__view{flex:1;min-height:0;padding:8px 4px 4px 10px;background:var(--x-screen)}
+.atelier .term__view[hidden]{display:none}
+.atelier .term__view .xterm{height:100%}
+.atelier .term__view .xterm-viewport{scrollbar-width:thin}
+.atelier .term__error{margin:var(--s-2) var(--s-3);padding:6px var(--s-2);border-radius:var(--r-sm);background:var(--x-failed-bg);color:var(--x-failed-text);font:var(--t-caption)}
+.atelier .term__empty{display:grid;justify-items:center;align-content:center;gap:8px;flex:1;color:var(--x-meta);font:var(--t-caption)}
+.atelier .term__empty p{margin:0}
+/* xterm.css paints its viewport #000; below the last row that showed as a black strip. */
+.atelier .term__view .xterm,.atelier .term__view .xterm-viewport{background-color:var(--x-screen)!important}
+/* Recent commits are buttons: click to open the commit's files. */
+.atelier .scm-log>li{padding:0}
+.atelier .scm-log>li:hover{background:transparent}
+.atelier .scm-log__row{display:grid;gap:1px;width:100%;padding:6px 8px;border-radius:var(--r-sm);background:transparent;text-align:left;min-width:0}
+.atelier .scm-log__row:hover{background:var(--mac-control)}
+.atelier .scm-log>li.is-open>.scm-log__row{background:var(--x-selected)}
+.atelier .scm-log__detail{padding:4px 0 8px}
+.atelier .scm-log__body{margin:2px 8px 6px 18px;font:var(--t-caption);color:var(--x-secondary);white-space:pre-wrap;overflow-wrap:anywhere}
+.atelier .scm-log__detail .scm-file{padding-left:18px}

@@ -267,7 +267,7 @@ export const sessionCommands: SlashCommand[] = [
   },
 
   {
-    help: 'forward a voice control to the native daemon',
+    help: 'report voice capture availability in this client',
     name: 'voice',
     run: (arg, ctx) => {
       const normalized = (arg ?? '').trim().toLowerCase()
@@ -276,7 +276,10 @@ export const sessionCommands: SlashCommand[] = [
         return ctx.transcript.sys('usage: /voice [on|off|tts|status]')
       }
 
-      runNativeSlash(ctx, `voice${normalized ? ` ${normalized}` : ''}`, 'Voice')
+      // `/voice` is a client-side control: the daemon only re-emits it as a
+      // `ui_command` event, and this TUI has no audio host port to apply it.
+      // Forwarding it produced a second, contradictory line claiming the
+      // control had been delivered, so only the honest answer is printed.
       ctx.transcript.sys('voice capture is not implemented in this native Bun TUI; recording shortcuts are disabled.')
     }
   },

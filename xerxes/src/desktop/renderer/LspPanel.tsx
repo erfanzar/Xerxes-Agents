@@ -41,6 +41,9 @@ export function LspCard({ snap }: { snap: Snapshot }): ReactElement {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [busy, setBusy] = useState(false)
+  // Every other destructive action in this app confirms; removing a
+  // configured server was one unguarded click.
+  const [confirmRemove, setConfirmRemove] = useState<string | null>(null)
   const pending = useRef(false)
   const epoch = useRef(0)
   const available = snap.connection === 'online' && !!snap.sessionKey
@@ -93,7 +96,9 @@ export function LspCard({ snap }: { snap: Snapshot }): ReactElement {
         <div className="field"><label htmlFor="lsp-command">Executable</label><input id="lsp-command" name="command" required={!server} autoComplete="off"/></div>
         <div className="field"><label htmlFor="lsp-args">Arguments (JSON array)</label><textarea id="lsp-args" name="args" rows={2} placeholder={'["--stdio"]'}/></div>
         <div className="field"><label htmlFor="lsp-env">Environment (JSON object)</label><textarea id="lsp-env" name="env" rows={2} autoComplete="off" spellCheck={false}/></div>
-        <div className="lsp-actions"><button className="btn" type="submit">Save server</button><button className="btn btn--ghost" type="button" onClick={() => setEditing(null)}>Cancel</button>{server && <button className="btn btn--ghost" type="button" onClick={() => void run('lsp.settings.save', { revision: view?.revision, name: server.name, action: 'remove' })}>Remove server</button>}</div>
+        <div className="lsp-actions"><button className="btn" type="submit">Save server</button><button className="btn btn--ghost" type="button" onClick={() => setEditing(null)}>Cancel</button>{server && (confirmRemove === server.name
+          ? <><button className="btn btn--danger" type="button" onClick={() => { setConfirmRemove(null); void run('lsp.settings.save', { revision: view?.revision, name: server.name, action: 'remove' }) }}>Remove for good</button><button className="btn btn--ghost" type="button" onClick={() => setConfirmRemove(null)}>Keep</button></>
+          : <button className="btn btn--ghost" type="button" onClick={() => setConfirmRemove(server.name)}>Remove server</button>)}</div>
       </fieldset>
     </form>}
   </>

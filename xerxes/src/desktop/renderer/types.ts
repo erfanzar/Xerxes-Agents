@@ -21,6 +21,8 @@ export interface DaemonEvent {
 export interface XerxesBridge {
   getWindowChrome?(): Promise<{ trafficLights: boolean }>
   onWindowChrome?(handler: (state: { trafficLights: boolean }) => void): () => void
+  /** Menu items the main process routes to the focused shell. */
+  onMenuCommand?(handler: (command: string) => void): () => void
   getContextScope?(): Promise<string>
   getContexts?(): Promise<WorkspaceContext[]>
   activateContext?(id: number, sessionId?: string): Promise<void>
@@ -185,6 +187,17 @@ export interface Approval {
   /** The streamed tool call this decision attaches to, when known. */
   readonly toolCallId?: string
   readonly toolName?: string
+  /**
+   * The tool's actual arguments. The daemon has always attached these; the
+   * renderer used to drop them and re-stringify `arguments` into the
+   * description instead, so an approval read `send_message(telegram)` while
+   * the recipient and body sat unread on the wire.
+   */
+  readonly inputs?: Readonly<Record<string, unknown>>
+  /** Working directory the call would run in, when the daemon reports one. */
+  readonly cwd?: string
+  /** Why the policy stopped here, in the daemon's words. */
+  readonly reason?: string
 }
 
 export type ApprovalResponse = 'allow_once' | 'allow_session' | 'deny'

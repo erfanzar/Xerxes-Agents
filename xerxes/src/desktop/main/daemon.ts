@@ -54,6 +54,8 @@ export interface DaemonRpcOptions {
   remoteUpdate?: () => Promise<Record<string, unknown>>
   reconnectRemote?: (signal: AbortSignal) => Promise<string>
   expectedRemoteBuildId?: () => string | undefined
+  /** Main-process-only authority. Private provider frames never reach the renderer. */
+  providerRelay?: (binding: string, frame: Readonly<Record<string, unknown>>, signal: AbortSignal) => Promise<unknown>
 }
 
 export class DaemonRpc extends EventEmitter {
@@ -81,6 +83,8 @@ export class DaemonRpc extends EventEmitter {
   private readonly startupTimeoutMs: number
   private readonly remoteUpdate: DaemonRpcOptions['remoteUpdate']
   private readonly expectedRemoteBuildId: DaemonRpcOptions['expectedRemoteBuildId']
+  private readonly providerRelay: DaemonRpcOptions['providerRelay']
+  private privateRelayCalls = 0
 
   constructor(options: DaemonRpcOptions = {}) {
     super()
@@ -88,6 +92,7 @@ export class DaemonRpc extends EventEmitter {
     this.reconnectRemote = options.reconnectRemote
     this.remoteUpdate = options.remoteUpdate
     this.expectedRemoteBuildId = options.expectedRemoteBuildId
+    this.providerRelay = options.providerRelay
     this.projectDir = options.socketPath ? options.projectDir ?? "/" : canonicalProjectDir(options.projectDir)
     this.env = options.env ?? process.env
     this.deadlineMs = options.deadlineMs ?? DEFAULT_DEADLINE_MS
@@ -393,7 +398,7 @@ export class DaemonRpc extends EventEmitter {
     try {
       parsed = JSON.parse(line)
     } catch {
-      this.emit('protocol_error', { message: `unparseable frame: ${line.slice(0, 160)}` })
+      this.emit('protocol_error', { message: 'unparseable daemon frame' })
       return
     }
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
@@ -426,6 +431,33 @@ export class DaemonRpc extends EventEmitter {
       }
       return
     }
+    if (frame.method === 'provider.remote.request') {
+      const socket = this.socket
+      const params = frame.params as Record<string, unknown> | undefined
+      if (!socket || !params || typeof params !== 'object' ||
+        typeof params.binding !== 'string' || !/^[a-f0-9]{32}$/.test(params.binding) ||
+        typeof params.request_id !== 'string' || !/^[a-f0-9]{32}$/.test(params.request_id)) return
+      const answer = (reply: unknown) => {
+        if (this.socket !== socket || socket.destroyed) return
+        void this.send('provider.remote.reply', { binding: params.binding, request_id: params.request_id, reply }).catch(() => {})
+      }
+      if (!this.providerRelay || this.privateRelayCalls >= 16) { answer({ error: 'grant_unavailable' }); return }
+      const request = params.frame as Record<string, unknown> | undefined
+      if (!request || typeof request !== 'object' || Array.isArray(request) ||
+        (request.op !== 'next' && request.op !== 'cancel') || typeof request.id !== 'string' ||
+        !/^[a-zA-Z0-9_-]{1,64}$/.test(request.id)) { answer({ error: 'invalid_request' }); return }
+      const controller = new AbortController()
+      const cancel = () => controller.abort()
+      socket.once('close', cancel)
+      this.privateRelayCalls++
+      const deadline = setTimeout(cancel, 60_000)
+      deadline.unref?.()
+      const aborted = new Promise<unknown>(resolve => controller.signal.addEventListener('abort', () => resolve({ error: 'cancelled' }), { once: true }))
+      void Promise.race([Promise.resolve().then(() => this.providerRelay!(params.binding as string, request, controller.signal)), aborted])
+        .then(answer, () => answer({ error: 'provider_failed' }))
+        .finally(() => { clearTimeout(deadline); socket.removeListener('close', cancel); this.privateRelayCalls-- })
+      return
+    }
     if (frame.method === 'event' && frame.params && typeof frame.params === 'object') {
       const params = frame.params as Record<string, unknown>
       const type = typeof params.type === 'string' ? params.type : ''
@@ -446,7 +478,7 @@ export class DaemonRpc extends EventEmitter {
       this.emit('event', type, payload)
       return
     }
-    this.emit('protocol_error', { message: `unrecognized frame: ${line.slice(0, 160)}` })
+    this.emit('protocol_error', { message: 'unrecognized daemon frame' })
   }
 
   // ── Requests ─────────────────────────────────────────────────────────

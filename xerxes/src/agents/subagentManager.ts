@@ -54,6 +54,12 @@ const WRITE_FILE_TOOLS = new Set([
 ])
 const FILE_PATH_KEYS = ['file_path', 'path', 'notebook_path'] as const
 const TERMINAL_STATUSES = new Set<SubAgentStatus>(['cancelled', 'completed', 'failed'])
+/**
+ * Same cap the daemon puts on main-session steering. A user hammering the
+ * box while a child is mid-tool-call should not be able to queue unbounded
+ * text that all lands at once on the next boundary.
+ */
+const MAX_QUEUED_SUBAGENT_STEERS = 8
 const DEFAULT_THINKING_FLUSH_INTERVAL_MS = 250
 const MAX_THINKING_PREVIEW_CHARS = 400
 /** Hard ceiling on simultaneously live subagent tasks; bounds recursive fan-out. */
@@ -282,6 +288,19 @@ export interface SubagentUsage {
 
 export interface SubagentTaskRunRequest {
   readonly cancelSignal: AbortSignal
+  /**
+   * Steering text the user has sent to this child since the last
+   * provider/tool boundary, newest last. The streaming loop already accepts
+   * a `drainSteer` dependency and drains it at each boundary, so a runner
+   * forwards this straight through — no loop changes, and a child receives
+   * a redirect with exactly the same semantics a main session does.
+   *
+   * Draining is destructive: each message is delivered once. A task that is
+   * cancelled or superseded before its next boundary drops whatever is
+   * queued, which is correct — that text was addressed to work that is no
+   * longer running.
+   */
+  readonly drainSteer: () => readonly string[]
   readonly config: Readonly<Record<string, unknown>>
   readonly depth: number
   readonly prompt: string
@@ -503,6 +522,12 @@ export class SubAgentManager {
   /** Pre-handle worktree setup remains live for waits and spawn-budget accounting. */
   private readonly setups = new Map<string, Promise<void>>()
   private readonly setupControllers = new Map<string, AbortController>()
+  /**
+   * Steering messages queued per task, drained by the runner at the child's
+   * next provider/tool boundary. Mirrors `DaemonRuntime.steerQueues`, which
+   * is the same mechanism for main sessions.
+   */
+  private readonly steerQueues = new Map<string, string[]>()
   private readonly tasksByName = new Map<string, string>()
   private readonly textBurst = new Map<string, string[]>()
   private readonly thinkingBurst = new Map<string, ThinkingBurst>()
@@ -540,6 +565,32 @@ export class SubAgentManager {
       now: this.now,
       runner: async (request, signal) => this.runTaskInput(request.handleId, request.input, signal),
     })
+  }
+
+  /**
+   * Queue a message for a running child. Returns false when the task is
+   * unknown or already finished — a steer has nowhere to land once a task
+   * is terminal, and silently accepting it would tell the user their
+   * redirect was delivered when nothing will ever read it.
+   */
+  steer(taskId: string, message: string): boolean {
+    const task = this.tasks.get(taskId)
+    const cleaned = message.trim()
+    if (task === undefined || !cleaned) return false
+    if (TERMINAL_STATUSES.has(task.status)) return false
+    const queue = this.steerQueues.get(taskId) ?? []
+    if (queue.length >= MAX_QUEUED_SUBAGENT_STEERS) return false
+    queue.push(cleaned)
+    this.steerQueues.set(taskId, queue)
+    task.lastActivityAt = this.now().valueOf()
+    return true
+  }
+
+  /** Destructive read; each queued message is delivered exactly once. */
+  private drainSteers(taskId: string): readonly string[] {
+    const queued = this.steerQueues.get(taskId) ?? []
+    this.steerQueues.delete(taskId)
+    return queued
   }
 
   /** Increase the execution permit pool without interrupting current tasks. */
@@ -1180,6 +1231,7 @@ export class SubAgentManager {
       }
       const chunksBefore = task.recentOutputText().length
       const output = await this.runner({
+        drainSteer: () => this.drainSteers(handleId),
         prompt: input,
         config: runtime.config,
         systemPrompt: runtime.systemPrompt,
@@ -1352,6 +1404,9 @@ export class SubAgentManager {
       this.thinkingBurst.delete(id)
       this.textBurst.delete(id)
       this.runtimes.delete(id)
+      // An evicted task will never reach another boundary, so anything still
+      // queued for it is undeliverable; holding it would leak per task id.
+      this.steerQueues.delete(id)
       for (const [name, taskId] of this.tasksByName) {
         if (taskId === id) this.tasksByName.delete(name)
       }

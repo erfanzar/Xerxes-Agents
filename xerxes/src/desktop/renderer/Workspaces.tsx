@@ -16,6 +16,7 @@ import { Markdown } from './markdown.js'
 import { TodoList } from './Todos.js'
 import { isPlanReview, store, type Snapshot } from './store.js'
 import type { DiffFile, LogEntry, PlanState } from './types.js'
+import { Icon } from './Icon.js'
 
 // ── Changes ─────────────────────────────────────────────────────────────
 
@@ -60,7 +61,7 @@ export function ChangesTab({ snap }: { snap: Snapshot }): ReactElement {
       </div>
       {files.map(file => <DiffFileCard key={file.path} file={file} />)}
       <p className="changes__note">
-        Folded live from <code>FileEditTool</code> / <code>WriteFile</code> calls — the daemon owns the worktree; nothing here rewrites it.
+        Built from the file edits this task made. Your working tree is the source of truth — undo here asks the runtime to put a file back.
       </p>
     </div>
   )
@@ -111,12 +112,12 @@ export function PlanTab({ snap }: { snap: Snapshot }): ReactElement {
     if (snap.todos != null) return <div className="plan plan--tab"><TodoList items={snap.todos} /></div>
     return (
       <div className="tabempty">
-        <div className="tabempty__mark">⏸</div>
+        <div className="tabempty__mark"><Icon name="pause" size={22} /></div>
         <h1>{snap.planMode ? 'Planning in progress' : 'No plan yet'}</h1>
         <p>
           {snap.planMode
             ? 'Plan mode is on — the agent explores and proposes a checklist here before touching anything. Steer it from the composer.'
-            : 'Toggle the ⏸ plan chip in the composer (or ⌘K → plan mode) and the proposed checklist will be captured here for review.'}
+            : 'Switch the composer’s “Work directly” button to plan first (or ⌘K → plan mode), and the checklist the agent proposes is captured here for review.'}
         </p>
       </div>
     )
@@ -127,7 +128,7 @@ export function PlanTab({ snap }: { snap: Snapshot }): ReactElement {
       <div className="plan__head">
         <span className="plan__title">Working plan</span>
         <span className="plan__meta">
-          {snap.planMode ? '⏸ plan mode' : 'approved / executing'} · turn {plan.turn}
+          {snap.planMode ? <><Icon name="pause" size={11} /> plan mode</> : 'approved / executing'} · turn {plan.turn}
           {items.length ? ` · ${done}/${items.length} done` : ''}
         </span>
       </div>
@@ -174,8 +175,8 @@ export function LogTab({ snap }: { snap: Snapshot }): ReactElement {
     return (
       <div className="tabempty">
         <div className="tabempty__mark">≡</div>
-        <h1>Event stream</h1>
-        <p>Every daemon event — wire order, one line each — as it arrived. Streaming a turn fills this ring (last 400 events).</p>
+        <h1>Event log</h1>
+        <p>A diagnostic trace of what the runtime reported, newest last, one line per event. It fills while a task runs and keeps the most recent 400.</p>
       </div>
     )
   }

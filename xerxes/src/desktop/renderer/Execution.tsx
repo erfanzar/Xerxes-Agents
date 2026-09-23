@@ -6,6 +6,7 @@ import type { ToolItem } from './types.js'
 import { OutputViewer, readableOutput } from './OutputViewer.js'
 import { Icon } from './Icon.js'
 import { StructuredResult, structuredOutput } from './StructuredResult.js'
+import { CopyButton } from './CopyButton.js'
 
 function record(text: string): Record<string, unknown> | null {
   try {
@@ -42,10 +43,6 @@ export function executionView(item: ToolItem) {
     cwd: typeof output?.cwd === 'string' ? output.cwd : null,
   }
 }
-function CopyButton({ text, label }: { text: string; label: string }): ReactElement {
-  const [status, setStatus] = useState('')
-  return <button onClick={() => { void navigator.clipboard.writeText(text).then(() => setStatus('Copied'), () => setStatus('Copy failed')) }}>{status || label}</button>
-}
 export const ToolCallRow = memo(function ToolCallRow({ item, label }: { item: ToolItem; label: string }): ReactElement {
   const [inspected, setInspected] = useState(false)
   const view = executionView(item)
@@ -81,7 +78,11 @@ export function ExecutionDetails({ item }: { item: ToolItem }): ReactElement {
     {!output && !item.error && !view.stderr && <p className="execution__empty">{item.state === 'working' ? 'Waiting for output…' : 'No output'}</p>}
     <div className="execution__actions">
       {view.command && <CopyButton text={view.command} label="Copy command" />}
-
+      {/* glob, list_dir, memory, browser, skill and MCP results all land in
+          the structured branch, which had no copy control — the output was
+          reachable only by drag-selecting it. */}
+      {output && <CopyButton text={output} label="Copy output" />}
+      {item.input && <CopyButton text={item.input} label="Copy arguments" />}
     </div>
     <details className="execution__raw"><summary>Raw details</summary><code>{item.name} · {item.id}</code><strong>Input</strong><pre>{item.input || '(no arguments)'}</pre><strong>Result</strong><pre>{item.output || '(no result)'}</pre></details>
   </div>

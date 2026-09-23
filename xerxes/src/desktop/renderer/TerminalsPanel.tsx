@@ -14,6 +14,7 @@ import { useEffect, useState, type ReactElement } from 'react'
 import { store, type Snapshot } from './store.js'
 import type { TerminalRow } from './types.js'
 import { desktopError } from './desktopRpc.js'
+import { Icon } from './Icon.js'
 
 function clockOf(epoch: number | undefined): string {
   if (epoch === undefined) return ''
@@ -44,7 +45,7 @@ export function TerminalsCard({ snap }: { snap: Snapshot }): ReactElement {
           <span className="dot dot--idle" />
           <div className="row__main">
             <div className="row__t">Daemon offline</div>
-            <div className="row__s">reconnect to list and control terminals</div>
+            <div className="row__s">Reconnect to list and control terminals.</div>
           </div>
         </div>
       )}
@@ -54,7 +55,7 @@ export function TerminalsCard({ snap }: { snap: Snapshot }): ReactElement {
             <span className="dot dot--idle" />
             <div className="row__main">
               <div className="row__t">{snap.terminalsLoading ? 'Asking the daemon…' : 'No terminals yet'}</div>
-              <div className="row__s">commands the agents run this session appear here while they exist</div>
+              <div className="row__s">Commands the agents run in this session appear here while they're alive.</div>
             </div>
           </div>
         )}
@@ -64,7 +65,7 @@ export function TerminalsCard({ snap }: { snap: Snapshot }): ReactElement {
       </div>
       <div style={{ display: 'flex', gap: 8, paddingTop: 16 }}>
         <button className="btn btn--ghost" disabled={!online || snap.terminalsLoading} onClick={() => store.loadTerminals()}>
-          ↻ Refresh
+          <Icon name="retry" size={13} /> Refresh
         </button>
       </div>
     </>
@@ -160,7 +161,7 @@ export function TerminalCard({ row, online }: { row: TerminalRow; online: boolea
       {open && (
         <div className="terminal-row__output">
           <pre tabIndex={0} role="region" aria-label="Terminal output">{output || (row.running ? 'No output yet.' : 'No output recorded.')}</pre>
-          {truncated && <div className="row__s">older output was dropped from the mirror</div>}
+          {truncated && <div className="row__s">Older output was dropped from this view.</div>}
           {row.canWrite && running && (
             <div className="findwrap">
               <input

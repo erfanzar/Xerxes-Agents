@@ -5,11 +5,14 @@ import type { WorkspaceResources } from './workspaceResources.js';
 import { readTurnOutcome, turnOutcomeLabel } from '../types/turnOutcome.js';
 import { ConnectionLeases } from './connectionLease.js';
 import { historyLimit, sessionHistoryPage } from './historyPage.js';
+import { ArchiveHistory } from './archiveHistory.js';
 import { ValidationError } from '../core/errors.js';
 
 import { recordCompaction } from '../context/compactionHistory.js'
 import { previewWorkspaceFile } from './filePreview.js'
 import { collectGitDiff } from '../workspace/gitDiff.js'
+import type { PtySessionManager } from '../operators/pty.js'
+import { GitScm, ScmError, assertScmHash, assertScmPath, assertScmPaths, cleanCommitMessage, commitMessagePrompt } from '../workspace/gitScm.js'
 import { FEATURES_GUIDE } from '../bridge/features.js';
 import { inspectSessionContext } from '../context/inspection.js';
 import { readContextControls, updateContextControls } from '../context/controls.js';
@@ -363,18 +366,47 @@ const TITLE_RETRY_TURN_WINDOW = 3;
  * two concurrent runs either address different keys or write identical values.
  * Do NOT add a method that mutates a session, its transcript, or its metadata.
  */
-const CONCURRENT_DISPATCH_METHODS = new Set([
+/**
+ * The stronger tier: these never reach the per-connection queue at all, so they
+ * stay answerable while a long session operation (`schedule.run`, a provider
+ * turn) owns it. Releasing such a handler *after* it reaches the queue is too
+ * late — status polling would wait behind the provider call itself, and run
+ * inspection/cancellation would be unreachable for the duration.
+ *
+ * Every member validates the run's owner, workspace and revision itself and
+ * never changes the connection's attached session. Initialization and session
+ * mutations retain their arrival ordering.
+ */
+export const QUEUE_BYPASS_METHODS: ReadonlySet<string> = new Set([
+  "provider.remote.release",
+  "provider.remote.reply",
+  "run.cancel",
+  "run.events",
+  "run.inspect",
+  "run.list",
+  "runtime.status",
+  "schedule.list",
+]);
+
+export const CONCURRENT_DISPATCH_METHODS: ReadonlySet<string> = new Set([
+  // A queue-bypassing method is concurrency-safe by construction. Deriving the
+  // weaker tier from the stronger one keeps a method from being admitted to one
+  // list and forgotten in the other; the bypass only applies once a session
+  // exists, so the pre-initialize path still needs them here.
+  ...QUEUE_BYPASS_METHODS,
   "agent.settings.options",
   "creator_trace",
+  // Network and model round-trips: a slow push must not stall the panel's
+  // own status refreshes queued behind it.
+  "git.commitMessage",
+  "git.fetch",
+  "git.pull",
+  "git.push",
   "fetch_models",
   "forge.inspect",
   "forge.list",
   "provider_models",
   "provider.relay.next",
-  "provider.remote.reply",
-  "provider.remote.release",
-  "runtime.status",
-  "schedule.list",
 ]);
 
 /**
@@ -747,6 +779,8 @@ export interface DaemonServerOptions {
    * be complete.
    */
   readonly terminalRegistry?: TerminalRegistry;
+  /** Interactive PTYs; enables the desktop terminal tab (terminal.open / resize). */
+  readonly ptySessions?: PtySessionManager;
   readonly runHistory?: RunHistory;
   readonly goalTokenLedger?: GoalTokenLedger;
   readonly goalTokenOwner?: string;
@@ -868,21 +902,24 @@ interface ChannelStatusData {
   readonly configured: boolean;
 }
 
-/** NDJSON JSON-RPC v35 Unix socket server consumed by the OpenTUI client and native hosts. */
 /**
  * Event types that prove a turn actually did something.
  *
  * Deliberately narrow: a turn that emits only status and lifecycle events has
  * produced nothing an objective can be advanced by, however successful it looks
  * from the outside.
+ *
+ * These are wire event names (`streaming/wireEvents.ts`), not internal stream
+ * names: reasoning reaches this set as `think_part`.
  */
 const PRODUCTIVE_TURN_EVENTS: ReadonlySet<string> = new Set([
   "text_part",
-  "thinking_part",
+  "think_part",
   "tool_call",
   "tool_result",
 ]);
 
+/** NDJSON JSON-RPC v35 Unix socket server consumed by the OpenTUI client and native hosts. */
 export class DaemonServer {
   private readonly agentDefinitionLoader: (
     cwd: string,
@@ -1003,6 +1040,9 @@ export class DaemonServer {
   private server: Server | undefined;
   private readonly socketPath: string;
   private readonly terminalRegistry: TerminalRegistry | undefined;
+  private readonly ptySessions: PtySessionManager | undefined;
+  /** Live output subscriptions per client: terminal id → unsubscribe. */
+  private readonly terminalWatches = new Map<DaemonTransportConnection, Map<string, () => void>>();
   private readonly reactionMailbox: ReactionMailbox | undefined;
   private readonly reactionDispatcher: ReactionDispatcher | undefined;
   private readonly runHistory: RunHistory | undefined;
@@ -1180,6 +1220,7 @@ export class DaemonServer {
     this.websocketOptions = options.websocket;
     this.browserManager = options.browserManager ?? new BrowserManager();
     this.terminalRegistry = options.terminalRegistry;
+    this.ptySessions = options.ptySessions;
     this.runHistory = options.runHistory;
     this.goalTokenLedger = options.goalTokenLedger;
     this.goalTokenOwner = options.goalTokenOwner ?? crypto.randomUUID();
@@ -1698,22 +1739,13 @@ export class DaemonServer {
           void settled.catch(() => undefined);
           await queueHandback;
         };
-        // Serialize dispatch per connection so handlers cannot race on shared state.
-        // A long session operation may already own this connection's queue.
-        // Releasing a read-only handler *after* it reaches that queue is too
-        // late: status polling would wait behind the provider call itself.
-        // Run inspection and cancellation must also remain reachable while
-        // schedule.run owns the queue. These controls validate the run's owner,
-        // workspace and revision; they never change the connection's session.
-        // Initialization and session mutations retain their arrival ordering.
+        // Serialize dispatch per connection so handlers cannot race on shared
+        // state. `QUEUE_BYPASS_METHODS` documents the one exemption and why it
+        // is safe; initialization and session mutations retain arrival ordering.
         let readySnapshot = false;
         if (this.runtime.sessionStatus(connection.activeSessionKey)) {
           try {
-            const method = parseJsonRpcRequest(line).method;
-            readySnapshot = method === 'runtime.status' || method === 'schedule.list'
-              || method === 'run.list' || method === 'run.inspect'
-              || method === 'run.events' || method === 'run.cancel'
-              || method === 'provider.remote.reply' || method === 'provider.remote.release';
+            readySnapshot = QUEUE_BYPASS_METHODS.has(parseJsonRpcRequest(line).method);
           } catch { /* Normal dispatch reports malformed frames. */ }
         }
         if (readySnapshot) void handle();
@@ -2007,18 +2039,18 @@ export class DaemonServer {
       }
       return {
         ok: true,
-        session: sessionPayload(session, this.contextLimit(session.model, session), this.mcpStatusRecord(session), requestedHistory),
+        session: sessionPayload(session, this.contextLimit(session.model, session), this.mcpStatusRecord(session), requestedHistory, requestedHistory === 0 ? session : await this.historySession(session)),
       };
     }
     if (method === "session.active_list") {
       const requestedHistory = historyLimit(params.history_limit);
       return {
         ok: true,
-        sessions: this.runtime
+        sessions: await Promise.all(this.runtime
           .listSessions()
-          .map((session) =>
-            sessionPayload(session, this.contextLimit(session.model, session), this.mcpStatusRecord(session), requestedHistory),
-          ),
+          .map(async (session) =>
+            sessionPayload(session, this.contextLimit(session.model, session), this.mcpStatusRecord(session), requestedHistory, requestedHistory === 0 ? session : await this.historySession(session)),
+          )),
       };
     }
     if (method === "session.list") {
@@ -2076,7 +2108,7 @@ export class DaemonServer {
       if (!session) return { ok: false, error: 'Session is not open' };
       const limit = historyLimit(params.history_limit) ?? 100;
       if (!limit) throw new ValidationError('history_limit', 'history pages need at least one action', limit);
-      return { ok: true, session_id: session.id, history: projectedHistoryPage(session, limit, params.before) };
+      return { ok: true, session_id: session.id, history: projectedHistoryPage(await this.historySession(session), limit, params.before) };
     }
     if (method === "session.status") {
       const requestedHistory = historyLimit(params.history_limit);
@@ -2085,9 +2117,13 @@ export class DaemonServer {
       );
       return {
         ok: Boolean(session),
+        ...(session ? {
+          provider_binding_session_guard_supported: Boolean(this.remoteProviderBindings),
+          provider_binding_busy: Boolean(session.activeTurnId || session.status !== 'idle' || this.turnOwners.has(session.sessionKey) || this.sessionOperations.has(session.sessionKey)),
+        } : {}),
         session: session
           ? {
-              ...sessionPayload(session, this.contextLimit(session.model, session), this.mcpStatusRecord(session), requestedHistory),
+              ...sessionPayload(session, this.contextLimit(session.model, session), this.mcpStatusRecord(session), requestedHistory, requestedHistory === 0 ? session : await this.historySession(session)),
               // This is intentionally an identity only. The picker can use it
               // to select the exact stored profile without receiving the live
               // endpoint or credential that proved the match.
@@ -2696,6 +2732,9 @@ export class DaemonServer {
     if (method === "terminal.control") {
       return this.controlTerminal(connection, params);
     }
+    if (method === "terminal.open" || method === "terminal.attach" || method === "terminal.detach" || method === "terminal.resize") {
+      return this.interactiveTerminal(connection, method, params);
+    }
     if (method === "channel.list") {
       return this.listChannels();
     }
@@ -2957,6 +2996,27 @@ export class DaemonServer {
         ...(message ? { message } : {}),
       });
     }
+    if (method === "subagent.steer") {
+      if (!this.runtime.steerSubagent) {
+        return {
+          ok: false,
+          error: "subagent steering is not available on this daemon runtime",
+        };
+      }
+      const steerTask = optionalString(params.task);
+      const steerMessage =
+        optionalString(params.message) ?? optionalString(params.content) ?? "";
+      if (!steerTask) throw new ValidationError("task", "a task id is required to steer one child", undefined);
+      if (!steerMessage.trim()) throw new ValidationError("message", "steering text is required", undefined);
+      // Ownership narrowing happens inside the runtime port, same as
+      // subagent.interrupt; `delivered` reports whether a live child
+      // actually received it, which the desktop surfaces verbatim.
+      return this.runtime.steerSubagent({
+        sessionKey: sessionKey(connection, params),
+        task: steerTask,
+        message: steerMessage,
+      });
+    }
     if (method === "subagent.interrupt") {
       if (!this.runtime.interruptSubagent) {
         return {
@@ -2978,6 +3038,8 @@ export class DaemonServer {
         optionalString(params.content) ?? optionalString(params.text) ?? "";
       const key = sessionKey(connection, params);
       const session = this.runtime.sessionStatus(key);
+      const clientSteerId = optionalString(params.client_steer_id);
+      if (clientSteerId && !/^[a-zA-Z0-9-]{1,80}$/.test(clientSteerId)) throw new ValidationError('client_steer_id', 'invalid steering identity', undefined);
       const processed = session
         ? await processAtMentions(content, session.cwd)
         : { enhancedMessage: content, mentionedFiles: [] };
@@ -2985,6 +3047,7 @@ export class DaemonServer {
       if (ok) {
         this.emit(connection, "steer_input", {
           content,
+          ...(clientSteerId ? { client_steer_id: clientSteerId } : {}),
           ...(processed.mentionedFiles.length
             ? { mentioned_files: processed.mentionedFiles }
             : {}),
@@ -3047,7 +3110,7 @@ export class DaemonServer {
     if (method === "fetch_models") {
       const session = this.runtime.sessionStatus(connection.activeSessionKey);
       if (session && Object.hasOwn(session.metadata, LOCAL_PROVIDER_BINDING) && params.for_model_selection === true) {
-        const models = localProviderSelections(session.metadata).filter(route => route.profile === params.profile_name).map(route => route.model);
+        const models = localProviderSelections(session.metadata).filter(route => params.profile_name === undefined || route.profile === params.profile_name).map(route => route.model);
         return {ok:true,models,source:'approved_local_setup'};
       }
       return this.fetchModels(params);
@@ -3149,8 +3212,9 @@ export class DaemonServer {
           return { ok: true };
         }
         if (method === 'provider.remote.bind') {
+          if (params.session_key !== undefined && params.session_key !== connection.activeSessionKey) return {ok:false,error:'The selected session changed. Review local provider setup again.'};
           const session = this.runtime.sessionStatus(connection.activeSessionKey);
-          if (!session || session.activeTurnId || session.status !== 'idle') return { ok: false, error: 'Choose an idle session before binding a local provider.' };
+          if (!session || session.activeTurnId || session.status !== 'idle' || this.turnOwners.has(session.sessionKey) || this.sessionOperations.has(session.sessionKey)) return { ok: false, error: 'Choose an idle session before binding a local provider.' };
           if (params.consent !== true || typeof params.source !== 'string' || typeof params.profile !== 'string' || typeof params.model !== 'string') throw new LocalProviderRelayError('invalid_request');
           let capabilities;
           try { capabilities = parseLocalProviderCapabilities(params.capabilities, params.model); }
@@ -3229,6 +3293,9 @@ export class DaemonServer {
     }
     if (method.startsWith("agentPreset.")) {
       return this.agentPresetRpc(connection, method, params);
+    }
+    if (method.startsWith("git.")) {
+      return this.gitRpc(connection, method, params);
     }
     if (method.startsWith("forge.")) {
       return this.forgeRpc(connection, method, params);
@@ -4051,6 +4118,89 @@ export class DaemonServer {
       const session = this.runtime.sessionStatus(connection.activeSessionKey);
       if (!session || session.id !== target) continue;
       this.emitStatus(connection, session);
+    }
+  }
+
+  /**
+   * Source Control for the desktop Git panel. Every mutation answers with the
+   * fresh status so the panel never shows a stale list after its own click.
+   * Remote operations only ever run on an explicit request from the client.
+   */
+  private async gitRpc(
+    connection: DaemonTransportConnection,
+    method: string,
+    params: JsonRpcPayload,
+  ): Promise<JsonRpcPayload> {
+    const key = sessionKey(connection, params);
+    const session = this.runtime.sessionStatus(key);
+    const cwd = session?.cwd || this.projectDirectory || process.cwd();
+    try {
+      const scm = await GitScm.open(cwd);
+      if (!scm) return { ok: true, repository: null, reason: "This folder is not a git repository." };
+      const withStatus = async (extra: Record<string, unknown> = {}): Promise<JsonRpcPayload> =>
+        ({ ok: true, ...extra, status: await scm.status() }) as unknown as JsonRpcPayload;
+      const all = params.all === true;
+      switch (method) {
+        case "git.status":
+          return { ok: true, repository: await scm.status() } as unknown as JsonRpcPayload;
+        case "git.diff": {
+          const diff = typeof params.commit === "string"
+            ? await scm.commitDiff(params.commit, assertScmPath(params.path), typeof params.orig_path === "string" ? params.orig_path : undefined)
+            : await scm.diff(assertScmPath(params.path), { staged: params.staged === true, untracked: params.untracked === true });
+          return { ok: true, ...diff } as unknown as JsonRpcPayload;
+        }
+        case "git.show":
+          return { ok: true, ...(await scm.showCommit(assertScmHash(params.commit))) } as unknown as JsonRpcPayload;
+        case "git.stage":
+          if (all) await scm.stageAll(); else await scm.stage(assertScmPaths(params.paths));
+          return withStatus();
+        case "git.unstage":
+          if (all) await scm.unstageAll(); else await scm.unstage(assertScmPaths(params.paths));
+          return withStatus();
+        case "git.discard":
+          await scm.discard(assertScmPaths(params.paths));
+          return withStatus();
+        case "git.commit": {
+          if (typeof params.message !== "string") throw new ScmError("message must be a string");
+          const commit = await scm.commit(params.message, { amend: params.amend === true, all: params.all === true });
+          return withStatus({ commit });
+        }
+        case "git.fetch": await scm.fetch(); return withStatus();
+        case "git.pull": await scm.pull(); return withStatus();
+        case "git.push": await scm.push(); return withStatus();
+        case "git.branches":
+          return { ok: true, branches: await scm.branches() } as unknown as JsonRpcPayload;
+        case "git.switch": {
+          const branch = optionalString(params.branch);
+          if (!branch) throw new ScmError("Choose a branch");
+          await scm.switchBranch(branch, { create: params.create === true });
+          return withStatus();
+        }
+        case "git.log": {
+          const limit = typeof params.limit === "number" ? params.limit : 20;
+          return { ok: true, commits: await scm.log(limit) } as unknown as JsonRpcPayload;
+        }
+        case "git.commitMessage": {
+          const model = session?.model || optionalString(this.runtime.status().model);
+          if (!model) throw new ScmError("Select a model before generating a commit message.");
+          const context = await scm.commitContext();
+          if (!context.diff.trim()) throw new ScmError("There are no changes to describe.");
+          const client = session ? this.sessionAuxiliaryClient(session, model)
+            : createCompactionClient(model, undefined, this.runtime.status());
+          try {
+            // Generous budget: reasoning models spend tokens before the answer,
+            // and a tight cap returns empty content (the session-title bug).
+            const result = await completeLlm(client, { model, messages: [{ role: "user", content: commitMessagePrompt(context) }], maxTokens: 2048 }, this.sessionSignal(key), { timeoutMs: 90_000 });
+            const message = cleanCommitMessage(result.content ?? "");
+            if (!message) throw new ScmError("The model returned an empty message. Try again.");
+            return { ok: true, message, truncated: context.truncated };
+          } finally { await closeLlmClient(client); }
+        }
+        default:
+          return { ok: false, code: "git-unknown-method", error: `Unknown git method: ${method}` };
+      }
+    } catch (error) {
+      return { ok: false, code: "git-error", error: errorMessage(error) };
     }
   }
 
@@ -6090,6 +6240,71 @@ export class DaemonServer {
     return { ok: true, session_id: owner, rows: rows.slice(0, 200), omitted: Math.max(0, rows.length - 200) };
   }
 
+  /**
+   * The desktop terminal tab: a user-opened login shell in the session's
+   * folder, owned by the session like the agent's PTYs (so it appears in the
+   * terminals list and closes with the session). `attach` replays the
+   * retained output and subscribes in one synchronous step — the registry's
+   * observers fire synchronously on append, so nothing can land between the
+   * replay and the first pushed `terminal_output` event.
+   */
+  private async interactiveTerminal(
+    connection: DaemonTransportConnection,
+    method: string,
+    params: JsonRpcPayload,
+  ): Promise<JsonRpcPayload> {
+    const registry = this.terminalRegistry;
+    if (!registry) return { ok: false, error: "this daemon tracks no terminals" };
+    const owner = this.terminalOwnerSessionId(connection, params);
+    const size = (value: unknown, fallback: number, max: number): number =>
+      typeof value === "number" && Number.isFinite(value) ? Math.max(2, Math.min(max, Math.trunc(value))) : fallback;
+    try {
+      if (method === "terminal.open") {
+        if (!this.ptySessions) return { ok: false, error: "Interactive terminals are not available in this runtime" };
+        const cwd = this.runtime.sessionStatus(sessionKey(connection, params))?.cwd;
+        const options = {
+          ownerSessionId: owner,
+          cols: size(params.cols, 80, 1000),
+          rows: size(params.rows, 24, 500),
+          yieldTimeMs: 0,
+          env: { TERM: "xterm-256color", COLORTERM: "truecolor", TERM_PROGRAM: "Xerxes" },
+        };
+        let opened;
+        try { opened = await this.ptySessions.createSession("", { ...options, ...(cwd ? { workdir: cwd } : {}) }); }
+        catch (error) {
+          // A session folder outside the runtime's workspace roots: open in the workspace instead.
+          if (!cwd) throw error;
+          opened = await this.ptySessions.createSession("", options);
+        }
+        return { ok: true, terminal_id: opened.sessionId };
+      }
+      const id = optionalString(params.terminal_id);
+      if (!id) return { ok: false, error: "terminal_id is required" };
+      if (method === "terminal.resize") {
+        if (!this.ptySessions) return { ok: false, error: "Interactive terminals are not available in this runtime" };
+        this.ptySessions.resizeForOwner(owner, id, size(params.cols, 80, 1000), size(params.rows, 24, 500));
+        return { ok: true };
+      }
+      const watches = this.terminalWatches.get(connection) ?? new Map<string, () => void>();
+      watches.get(id)?.();
+      watches.delete(id);
+      if (method === "terminal.detach") return { ok: true };
+      const inspected = registry.inspect(owner, id, 200_000);
+      if (!inspected) return { ok: false, error: "Unknown terminal" };
+      if (inspected.running) {
+        const stop = registry.subscribe(owner, id, (event) => {
+          this.emit(connection, "terminal_output", { terminal_id: id, data: event.text, closed: event.closed, exit_code: event.exitCode });
+          if (event.closed) { watches.get(id)?.(); watches.delete(id); }
+        });
+        watches.set(id, stop);
+        this.terminalWatches.set(connection, watches);
+      }
+      return { ok: true, terminal_id: id, data: inspected.output, running: inspected.running, exit_code: inspected.exitCode ?? null };
+    } catch (error) {
+      return { ok: false, error: errorMessage(error) };
+    }
+  }
+
   private terminalOwnerSessionId(
     connection: DaemonTransportConnection,
     params: JsonRpcPayload,
@@ -6519,14 +6734,21 @@ export class DaemonServer {
       session_key: connection.activeSessionKey,
     });
     const result = await this.uiControl?.execute(input);
+    // Without a host port the daemon has emitted the control event and nothing
+    // more: it cannot observe whether the client applied it. Saying the command
+    // was "sent to the connected client" read as an accomplished action, so a
+    // client with no `ui_command` handler reported a success that never
+    // happened. Report what this process actually did, and let the caller see
+    // `handled` rather than infer it from `ok`.
     this.emitSlash(
       connection,
       result?.message ??
-        `Sent native UI command \`/${action}\` to the connected client.`,
+        `\`/${action}\` is a client-side control. The daemon emitted it as a \`ui_command\` event; applying it belongs to the client.`,
     );
     return {
       ok: true,
       action,
+      handled: this.uiControl !== undefined,
       ...(result?.payload ? { result: result.payload } : {}),
     };
   }
@@ -6978,6 +7200,13 @@ export class DaemonServer {
       if (!found) return undefined;
     }
     return precompactArchivePathFor(directory, sessionId);
+  }
+
+  private readonly archiveHistory = new ArchiveHistory();
+
+  private async historySession(session: DaemonSession): Promise<DaemonSession> {
+    const messages = await this.archiveHistory.messages(await this.precompactArchivePath(session.id), session.messages);
+    return { ...session, messages, thinkingContent: messages.length === session.messages.length ? session.thinkingContent : [] };
   }
 
   private resolvedAutoCompactThreshold(): number {
@@ -7699,13 +7928,13 @@ export class DaemonServer {
     connection.activeSessionKey = target.id;
     this.emitInitDone(connection, session);
     this.emitStatus(connection, session);
-    this.replaySessionHistory(connection, session);
+    this.replaySessionHistory(connection, await this.historySession(session));
     this.emitSlash(connection, `Resumed session \`${session.id}\`.`);
     await this.reportResumeRepair(connection, session.id);
     this.indexSessionForSearch(target.id);
     return {
       ok: true,
-      session: sessionPayload(session, this.contextLimit(session.model, session), this.mcpStatusRecord(session)),
+      session: sessionPayload(session, this.contextLimit(session.model, session), this.mcpStatusRecord(session), undefined, await this.historySession(session)),
     };
   }
 
@@ -9382,7 +9611,7 @@ export class DaemonServer {
       ),
     );
     if (session.messages.length) {
-      if (requestedHistory === undefined) this.replaySessionHistory(connection, session);
+      if (requestedHistory === undefined) this.replaySessionHistory(connection, await this.historySession(session));
       this.indexSessionForSearch(key);
     }
     if (resumeId && session.messages.length) {
@@ -9397,7 +9626,7 @@ export class DaemonServer {
       ...this.runtimeStatusWithChannels(),
       ...initPayload,
       ok: true,
-      session: sessionPayload(session, contextLimit, this.mcpStatusRecord(session), requestedHistory),
+      session: sessionPayload(session, contextLimit, this.mcpStatusRecord(session), requestedHistory, requestedHistory === 0 ? session : await this.historySession(session)),
       ...(reconnectEvents ? { reconnect_events: reconnectEvents } : {}),
       pending_interactions: [...this.pendingInteractionFrames.values()]
         .filter(frame => this.canAnswerInteraction(frame.owner, connection))
@@ -10146,6 +10375,8 @@ export class DaemonServer {
   }
 
   private disconnect(connection: DaemonTransportConnection): void {
+    const watches = this.terminalWatches.get(connection);
+    if (watches) { for (const stop of watches.values()) stop(); this.terminalWatches.delete(connection); }
     this.remoteProviderBindings?.disconnect(this.connectionLeases.owner(connection));
     if (this.connectionLeases.disconnect(connection)) return;
     this.disconnectOwner(connection);
@@ -10680,6 +10911,7 @@ function sessionPayload(
   contextLimit: number,
   mcpStatus: Record<string, unknown> = {},
   requestedHistory?: number,
+  historySession: DaemonSession = session,
 ): JsonRpcPayload {
   const model = session.model;
   const contextTokens = sessionContextTokens(session, model);
@@ -10698,7 +10930,7 @@ function sessionPayload(
   // a small per-message budget, then a whole-projection ceiling spent newest
   // first. Only this wire projection is compacted: session.messages and every
   // provider-facing request keep the full images.
-  const transcript = projectTranscriptForPayload(requestedHistory === undefined ? session.messages : []);
+  const transcript = projectTranscriptForPayload(requestedHistory === undefined ? historySession.messages : []);
   const goal = getGoal(session.metadata, session.id);
   return {
     id: session.id,
@@ -10723,7 +10955,7 @@ function sessionPayload(
     messages: session.messages.length,
     message_count: session.messages.length,
     preview: (() => { const first = session.messages.find(message => message.role === 'user'); return first ? messageText(first).slice(0, 160) : ''; })(),
-    ...(requestedHistory === undefined ? { transcript: transcript.messages } : requestedHistory > 0 ? { history: projectedHistoryPage(session, requestedHistory) } : {}),
+    ...(requestedHistory === undefined ? { transcript: transcript.messages } : requestedHistory > 0 ? { history: projectedHistoryPage(historySession, requestedHistory) } : {}),
     todos: session.inflightTodoResult === undefined ? todosFromExecutions(session.toolExecutions) : parseTodoList(session.inflightTodoResult),
     // Additive replay fields: the stored twins of the streamed tool calls and
     // per-turn reasoning, so a reopened transcript renders the same
@@ -11191,9 +11423,6 @@ function looksLikeInternalReplayMessage(text: string): boolean {
   if (
     [
       "[sub-agent events]",
-      "[mid-turn steer from user]",
-      "[steer from user]",
-      "[steer from user saved for next turn]",
       "[Workspace guard]",
       "[Objective gate]",
       "[Previous conversation summary",
@@ -11226,7 +11455,7 @@ function messageText(message: DaemonSession["messages"][number]): string {  if (
   }
   const content = message.content;
   if (typeof content === "string") {
-    return content.trim();
+    return (message.role === 'user' ? content.replace(/^\[(?:mid-turn steer from user|steer from user(?: saved for next turn)?)\]\r?\n/, '') : content).trim();
   }
   if (Array.isArray(content)) {
     return content

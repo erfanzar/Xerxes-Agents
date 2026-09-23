@@ -20,9 +20,29 @@ import { turnController } from './turnController.js'
 import { getTurnPulse } from './turnStore.js'
 import { getUiState, patchUiState } from './uiStore.js'
 
-const SESSION_BUSY_RE = /session busy|waiting for model response/i
+/**
+ * The daemon's "this session already has a turn" refusal, in every spelling it
+ * actually produces.
+ *
+ * This used to read `/session busy|waiting for model response/i`, which no
+ * daemon has ever emitted — those were the retired gateway's wordings. The Bun
+ * daemon says "a turn is already active for this session"
+ * (`daemon/server.ts`, alongside `code: "turn-active"`) or "A turn is already
+ * active for this session" (`daemon/runtime.ts`). The regex therefore never
+ * matched a real rejection, so the re-queue branch below was unreachable and
+ * the prompt took the hard-error path instead: the user's bubble was removed
+ * and the text was neither queued nor returned to the composer.
+ */
+const SESSION_BUSY_RE = /turn is already active|session busy|waiting for model response/i
 
-const isSessionBusyError = (e: unknown) => SESSION_BUSY_RE.test(rpcErrorMessage(e))
+const isSessionBusyError = (e: unknown) => {
+  // Prefer the structured code when the daemon sent one; the prose is a
+  // fallback for older daemons and for the runtime's bare Error.
+  const code = (e as { code?: unknown } | null | undefined)?.code
+  if (typeof code === 'string' && code === 'turn-active') return true
+
+  return SESSION_BUSY_RE.test(rpcErrorMessage(e))
+}
 
 export const steerWasAccepted = (response: null | SessionSteerResponse): boolean =>
   response?.ok === true || response?.status === 'queued'

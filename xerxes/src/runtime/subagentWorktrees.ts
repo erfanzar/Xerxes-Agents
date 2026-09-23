@@ -7,6 +7,7 @@ import { mkdir, realpath, unlink, readdir, lstat, rename } from 'node:fs/promise
 import { join, resolve } from 'node:path'
 import type { SubagentWorktree, SubagentWorktreePort } from '../agents/subagentManager.js'
 import { loadWorkspaceSetup, runWorkspaceSetup } from './workspaceSetup.js'
+import { captureWorkingTree } from './workingTreeCapture.js'
 
 interface Ownership { id: string; taskId: string; path: string; branch: string; base: string; snapshotTree?: string }
 
@@ -200,25 +201,26 @@ export function nativeSubagentWorktrees(repository: string, options: { setupConf
       const root = await storage()
       const id = crypto.randomUUID()
       const record: Ownership = { id, taskId: request.taskId, path: join(root, id), branch: `xerxes/agent-${id}`, base }
+      let flattened = false
       if (source) {
         const sourceRoot = await allocateGit(['rev-parse', '--show-toplevel'])
-        const index = join(root, id + '.capture-index')
-        const environment = { GIT_INDEX_FILE: index }
-        try {
-          await allocateGit(['read-tree', base], sourceRoot, environment)
-          await allocateGit(['add', '-A', '--', '.'], sourceRoot, environment)
-          const snapshotTree = await allocateGit(['write-tree'], sourceRoot, environment)
-          // The NUL-delimited standard format also works with older Git on SSH hosts.
-          const entries = await allocateGit(['ls-tree', '-r', '-z', snapshotTree], sourceRoot)
-          if (entries.split('\0').some(entry => entry.startsWith('160000 '))) throw new Error('Working-tree capture does not support submodules or nested Git repositories; use a committed revision')
-          await allocateGit(['diff', '--quiet', '--ignore-submodules=none', '--'], sourceRoot, environment)
-          if (await allocateGit(['ls-files', '--others', '--exclude-standard'], sourceRoot, environment)) throw new Error('Working tree changed during capture; retry when edits settle')
-          if (await allocateGit(['rev-parse', 'HEAD'], sourceRoot) !== base) throw new Error('HEAD changed during working-tree capture; retry when edits settle')
-          record.snapshotTree = snapshotTree
-        } finally {
-          // Only this unique temporary index is touched; the parent's index is never used for writes.
-          await unlink(index).catch(error => { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error })
-        }
+        const snapshot = await captureWorkingTree({ git: allocateGit, directory: sourceRoot, indexDirectory: root, base,
+          importObjects: async (directory, tree, destination) => {
+            const deadline = request.signal ? AbortSignal.any([request.signal, AbortSignal.timeout(60_000)]) : AbortSignal.timeout(60_000)
+            // Transfer only objects reachable from this captured tree. No refs,
+            // configuration, ignored files, or child Git directories are copied.
+            const pack = Bun.spawn(['git', 'pack-objects', '--stdout', '--revs'], { cwd: directory, env: gitEnvironment, stdin: new Blob([tree + '\n']), stdout: 'pipe', stderr: 'pipe', signal: deadline })
+            try {
+              const unpack = Bun.spawn(['git', 'index-pack', '--stdin'], { cwd: destination, env: gitEnvironment, stdin: pack.stdout, stdout: 'ignore', stderr: 'pipe', signal: deadline })
+              try {
+                const [packed, unpacked] = await Promise.all([pack.exited, unpack.exited, new Response(pack.stderr).text(), new Response(unpack.stderr).text()])
+                if (packed !== 0 || unpacked !== 0) throw new Error('Could not transfer captured nested repository objects; retry workspace creation')
+              } finally { unpack.kill(); await unpack.exited }
+            } finally { pack.kill(); await pack.exited }
+          },
+        })
+        record.snapshotTree = snapshot.tree
+        flattened = snapshot.flattened
       }
       // Write ownership before Git can create resources. Failed setup leaves
       // its record and any partial checkout available for explicit recovery.
@@ -228,7 +230,9 @@ export function nativeSubagentWorktrees(repository: string, options: { setupConf
         await allocateGit(['read-tree', '--reset', '-u', record.snapshotTree], record.path)
         // Copied edits remain ordinary working files, visible to git diff; do not
         // import the parent staging selection into an independent agent index.
-        await allocateGit(['read-tree', base], record.path)
+        // Flattened child files must stay in the independent index: restoring
+        // gitlinks would hide their contents from ordinary agent Git commands.
+        if (!flattened) await allocateGit(['read-tree', base], record.path)
       }
       if (setup) {
         try { await runWorkspaceSetup(setup, record.path, request.signal, async result => {

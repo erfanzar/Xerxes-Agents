@@ -15,6 +15,9 @@
 import type { ReactElement, ReactNode } from 'react'
 import { Fragment, memo } from 'react'
 
+import { CopyButton } from './CopyButton.js'
+import { Icon } from './Icon.js'
+
 const INLINE_RE = /(`[^`]+`)|(\*\*[^*]+\*\*)|(\*[^*\s][^*]*\*)|(\[[^\]]+\]\([^)\s]*\))/g
 
 /** Never-navigating link: the shell cannot open external targets, so a
@@ -92,7 +95,7 @@ export function markdownBlocks(markdown: string, prefix = 'md'): ReactElement[] 
         <ul key={`${prefix}-l${key++}`}>
           {list.map((item, index) => (
             <li key={index} className={item.checked === null ? undefined : 'md__check'}>
-              {item.checked === null ? null : <span className={`md__box${item.checked ? ' is-done' : ''}`}>{item.checked ? '✓' : ''}</span>}
+              {item.checked === null ? null : <span className={`md__box${item.checked ? ' is-done' : ''}`}>{item.checked ? <Icon name="check" size={11} /> : null}</span>}
               <span className="md__item">{inlinePieces(item.text)}</span>
             </li>
           ))}
@@ -118,10 +121,20 @@ export function markdownBlocks(markdown: string, prefix = 'md'): ReactElement[] 
         if (FENCE_RE.test(lines[j] ?? '')) break
         body.push(lines[j] ?? '')
       }
+      // The fence language was captured into data-lang and then rendered by
+      // nothing, and a code block in a coding tool had no way to be copied.
+      const code = body.join('\n')
+      const language = fence[2] || ''
       out.push(
-        <pre key={`${prefix}-c${key++}`} className="md__code" data-lang={fence[2] || undefined}>
-          <code>{body.join('\n')}</code>
-        </pre>,
+        <figure key={`${prefix}-c${key++}`} className="md__codewrap">
+          <figcaption className="md__codebar">
+            <span className="md__lang">{language || 'text'}</span>
+            <CopyButton text={code} label="Copy code" />
+          </figcaption>
+          <pre className="md__code" data-lang={language || undefined}>
+            <code>{code}</code>
+          </pre>
+        </figure>,
       )
       i = j
       continue

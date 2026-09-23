@@ -10,6 +10,31 @@ export function record(value: unknown): RpcRecord {
 export function text(value: unknown): string {
   return typeof value === 'string' ? value : ''
 }
+const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+
+/**
+ * A readable gloss for the common cron shapes, falling back to the raw
+ * expression. Schedules were shown as `0 2 * * *`, which is precise and
+ * unreadable; the original always stays available as the row's tooltip.
+ */
+export function cronInEnglish(expression: string): string {
+  const parts = expression.trim().split(/\s+/)
+  if (parts.length !== 5) return expression
+  const [minute, hour, dayOfMonth, month, dayOfWeek] = parts as [string, string, string, string, string]
+  const at = (): string => {
+    const h = Number(hour), m = Number(minute)
+    if (!Number.isInteger(h) || !Number.isInteger(m) || h < 0 || h > 23 || m < 0 || m > 59) return ''
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`
+  }
+  const time = at()
+  if (!time) return expression
+  if (dayOfMonth === '*' && month === '*' && dayOfWeek === '*') return `Every day at ${time}`
+  if (dayOfMonth === '*' && month === '*' && /^[0-6]$/.test(dayOfWeek)) return `Every ${DAYS[Number(dayOfWeek)]} at ${time}`
+  if (dayOfMonth === '*' && month === '*' && dayOfWeek === '1-5') return `Weekdays at ${time}`
+  if (month === '*' && dayOfWeek === '*' && /^\d{1,2}$/.test(dayOfMonth)) return `Day ${dayOfMonth} of each month at ${time}`
+  return expression
+}
+
 /** The schedule timezone must match the displayed wall-clock time. */
 export function scheduleTime(value: string, timezone: string, locale?: string): string {
   const date = new Date(value)

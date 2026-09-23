@@ -9,7 +9,7 @@
 // a future regression in either the theme or the renderer is caught.
 import { testRender } from '@opentui/react/test-utils'
 import { act } from 'react'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { resetUiState } from '../app/uiStore.js'
 import { VOICE } from '../domain/roles.js'
@@ -96,11 +96,12 @@ describe('transcript voices', () => {
       for (const leadGap of [false, true]) {
         const setup = await testRender(<box flexDirection="column"><text>Previous tool</text><MessageLine leadGap={leadGap} msg={{ role: 'assistant', text: 'Reply body' }} t={theme} /></box>, { width, height: 12 })
         try {
-          for (let attempt = 0; attempt < 20; attempt++) {
+          // Markdown layout may finish after the first frame, especially while
+          // the parser worker starts. Assert the rendered state, not 200 ms.
+          await vi.waitFor(async () => {
             await setup.flush()
-            if (setup.captureCharFrame().includes('Reply body')) break
-            await Bun.sleep(10)
-          }
+            expect(setup.captureCharFrame()).toContain('Reply body')
+          }, { timeout: 3000 })
           const rows = setup.captureCharFrame().split('\n').map(row => row.trim())
           const speaker = rows.findIndex(row => row.includes('Xerxes'))
           expect(speaker).toBe(2)

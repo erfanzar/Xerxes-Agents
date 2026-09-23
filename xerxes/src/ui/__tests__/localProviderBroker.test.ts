@@ -191,6 +191,9 @@ it('runs a remote native turn through two daemons and the local broker, then fai
     await gateway.request('turn.submit', { text: 'Run with my approved local provider.' })
     await vi.waitFor(() => expect(JSON.stringify(runtime.listSessions())).toContain('Reply through the local broker.'))
     await vi.waitFor(() => expect(runtime.listSessions().every(session => !session.activeTurnId)).toBe(true))
+    // Runtime completion precedes the daemon releasing its turn owner. Wait
+    // for admission to reopen so the next turn actually tests revoked access.
+    await vi.waitFor(async () => expect(await gateway.request('session.status', { history_limit: 0, structured: true })).toMatchObject({ provider_binding_busy: false }))
     expect(JSON.stringify(events)).not.toContain('provider.remote.request')
     expect(JSON.stringify(events)).not.toContain('synthetic-private-key')
     await broker.close()

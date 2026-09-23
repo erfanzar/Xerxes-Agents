@@ -39,8 +39,13 @@ export function sessionHistoryActions(session: Pick<DaemonSession, 'messages' | 
     for (const call of callRecords(m)) if (typeof call.id === 'string') calls.add(call.id)
   }
   const actions: HistoryAction[] = []
+  const renderedCalls = new Set<string>()
   let assistant = 0
   const tool = (id: string, call: Record<string, unknown>, index: string): void => {
+    // Old compaction/retry archives can contain the same execution again.
+    // Its stable call ID denotes one invocation, regardless of window overlap.
+    if (renderedCalls.has(id)) return
+    renderedCalls.add(id)
     const execution = record(executions.get(id))
     const fn = record(call.function)
     const result = results.get(id) ?? execution.result

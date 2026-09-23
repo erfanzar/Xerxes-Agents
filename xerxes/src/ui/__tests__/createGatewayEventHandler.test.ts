@@ -84,6 +84,24 @@ describe('createGatewayEventHandler', () => {
     send({ kind: 'provider_ready', text: '' })
     expect(getTurnState().networkRetrying).toBe(false)
   })
+  it('clears a retry that never got its provider_ready when the next turn starts', () => {
+    const { handler } = buildHarness()
+    const send = (payload: Record<string, unknown>) => {
+      for (const event of adaptDaemonEvent('status_update', payload)) handler(event)
+    }
+    // Interrupting inside the capped backoff aborts before the next attempt
+    // reports ready, so provider_ready never arrives for this attempt.
+    send({ kind: 'network_retry', text: 'Retrying connection…' })
+    send({ kind: 'provider_wait', text: 'Waiting for model response…' })
+    expect(getTurnState().networkRetrying).toBe(true)
+    expect(getTurnState().providerWaiting).toBe(true)
+
+    // Without a turn-start clear the next turn rendered "Retrying connection…"
+    // for its whole TTFT window instead of the real liveness row.
+    turnController.startMessage()
+    expect(getTurnState().networkRetrying).toBe(false)
+    expect(getTurnState().providerWaiting).toBe(false)
+  })
   it('preserves provider waiting until response or failure ends that phase', () => {
     const { handler } = buildHarness()
     const send = (payload: Record<string, unknown>) => {

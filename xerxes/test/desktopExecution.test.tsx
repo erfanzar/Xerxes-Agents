@@ -177,8 +177,10 @@ test('unconfirmed spawn requests stay visible without fake agent controls', () =
 test('long commands use a collapsed compact summary without constructing output', () => {
   const html=renderToStaticMarkup(createElement(CommandActivity,{row:{id:'command-1',kind:'shell',title:'env '+ 'LONG_VARIABLE=value '.repeat(80)+'bun test',detail:'/repo',state:'running'},sessionKey:'session',online:true}))
   expect(html).toContain('command-activity__preview')
-  expect(html).toContain('Shell command')
-  expect(html).toContain('Running')
+  // The row leads with the command, not the words "Shell command": a label
+  // that repeats the icon is the least useful thing it could say first.
+  expect(html).not.toContain('Shell command')
+  expect(html).toContain('>running<')
   expect(html).not.toContain('aria-label="Command output"')
   expect(html).not.toContain('<strong>env ')
 })

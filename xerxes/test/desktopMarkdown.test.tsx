@@ -79,8 +79,18 @@ test('the tail glues to the end of trailing prose, not a line of its own', () =>
   expect(html.match(/<p>/g)).toHaveLength(1)
 
   // Structural endings can't carry it inline — it follows the block instead.
+  // The fence is wrapped so it can carry a language label and a copy button.
   const fenced = renderToStaticMarkup(createElement(Markdown, { text: 'prose\n```ts\nx\n```', tail: caret }))
-  expect(fenced).toContain('</code></pre><span class="caret">')
+  expect(fenced).toContain('</pre></figure><span class="caret">')
+})
+
+test('a fenced block names its language and offers a copy control', () => {
+  const html = renderToStaticMarkup(createElement(Markdown, { text: '```ts\nconst a = 1\n```' }))
+  expect(html).toContain('<span class="md__lang">ts</span>')
+  expect(html).toContain('aria-label="Copy code"')
+  expect(html).toContain('<code>const a = 1</code>')
+  // An unlabelled fence still gets the bar, so the copy control never moves.
+  expect(renderToStaticMarkup(createElement(Markdown, { text: '```\nplain\n```' }))).toContain('<span class="md__lang">text</span>')
 })
 
 test('mixed inline list content shares one text flow beside its marker', () => {

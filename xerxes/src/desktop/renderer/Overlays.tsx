@@ -14,7 +14,7 @@
 import { createPortal } from 'react-dom'
 import { createContext, useContext, useId, type ReactNode, useLayoutEffect, useEffect, useMemo, useRef, useState, type ReactElement, type RefObject } from 'react'
 
-import { saveAppearance } from './appearance.js'
+import { saveAppearance, FONT_SIZES, FONT_LABELS } from './appearance.js'
 import { desktopError } from './desktopRpc.js'
 import { useDialogFocus } from './dialogFocus.js'
 import { ChannelsCard } from './ChannelsPanel.js'
@@ -22,6 +22,8 @@ import { LspCard } from "./LspPanel.js"
 import { TerminalsCard } from './TerminalsPanel.js'
 import { store, type Snapshot } from './store.js'
 import type { CachedModel, ModelChoice, PermissionMode, ProviderRow, SettingsTab } from './types.js'
+import { RemoteProviders } from './RemoteProviders.js'
+import { Icon, type IconName } from './Icon.js'
 
 // ── Settings modal ──────────────────────────────────────────────────────
 
@@ -44,7 +46,7 @@ export function SettingsModal({ snap }: { snap: Snapshot }): ReactElement | null
     <div className="backdrop">
       <div className="modal" ref={ref} role="dialog" aria-modal="true" aria-label="Settings">
         <div className="modal__side">
-          <div className="cap">Settings <button className="chipbtn" aria-label="Close settings" onClick={()=>store.closeSettings()}>×</button></div>
+          <div className="cap">Settings <button className="chipbtn" aria-label="Close settings" onClick={()=>store.closeSettings()}><Icon name="close" size={13} /></button></div>
           {SETTINGS_TABS.map(tab => (
             <button
               key={tab.id}
@@ -156,15 +158,17 @@ function McpCard({ snap }: { snap: Snapshot }): ReactElement {
   return (
     <>
       <h2 className="modal__title">MCP Servers</h2>
+      {/* The error used to lead, so a first-time visitor read a failure
+          before ever learning what the panel is for. */}
+      <p className="modal__sub">External tools the agents may call. Tool calls still pass the permission policy — enabling a server is not an auto-approve.</p>
       {error && <p className="studio-error" role="alert">{error}</p>}
       {busy && <p role="status">{busy === 'reload' ? 'Reconnecting servers…' : 'Checking server status…'}</p>}
-      <p className="modal__sub">External tools the agents may call. Tool calls still pass the permission policy — enabling a server is not an auto-approve.</p>
       <div className="rowlist">
       {entries.length === 0 ? (!busy && !error && (
         <div className="row">
           <div className="row__main">
             <div className="row__t">No MCP servers configured</div>
-            <div className="row__s">add servers to <code>~/.xerxes/mcp.json</code> — the daemon connects them at boot</div>
+            <div className="row__s">Add servers to <code>~/.xerxes/mcp.json</code>; the runtime connects them at startup.</div>
           </div>
         </div>
       )) : entries.map(([name, status]) => (
@@ -205,7 +209,6 @@ function GeneralCard({ snap }: { snap: Snapshot }): ReactElement {
   return (
     <>
       <h2 className="modal__title">General</h2>
-      <button className="btn" onClick={() => { store.closeSettings(); window.dispatchEvent(new Event("xerxes:setup")) }}>Open setup checklist</button>
       <p className="modal__sub">Applies immediately; nothing here is per-task.</p>
 
       <div className="field">
@@ -217,19 +220,27 @@ function GeneralCard({ snap }: { snap: Snapshot }): ReactElement {
         </div>
       </div>
       <div className="field">
-        <label>Interface font size</label>
-        <div className="seg">
-          {['11', '12', '13'].map(size => (
-            <button key={size} className={fontSize === size ? 'is-on' : ''} onClick={() => applyFont(size)}>{size}</button>
+        <label id="ui-font-size">Interface text size</label>
+        {/* Raw pixel numbers told you nothing about which way was bigger. */}
+        <div className="seg" role="group" aria-labelledby="ui-font-size">
+          {FONT_SIZES.map(size => (
+            <button key={size} aria-pressed={fontSize === size} title={`${size}px`} className={fontSize === size ? 'is-on' : ''} onClick={() => applyFont(size)}>{FONT_LABELS[size]}</button>
           ))}
         </div>
       </div>
 
       <div className="row">
         <div className="row__main">
+          <div className="row__t">Setup checklist</div>
+          <div className="row__s">Provider, folder and runtime readiness in one place</div>
+        </div>
+        <button className="btn" onClick={() => { store.closeSettings(); window.dispatchEvent(new Event("xerxes:setup")) }}>Open…</button>
+      </div>
+      <div className="row">
+        <div className="row__main">
           <div className="row__t">Session</div>
           <div className="row__s">
-            {snap.currentId ? `${snap.currentId} · ${snap.model || 'model unset'}` : 'no session yet'}
+            {snap.currentId ? `${snap.currentId} · ${snap.model || 'model unset'}` : 'No session yet'}
           </div>
         </div>
       </div>
@@ -237,17 +248,17 @@ function GeneralCard({ snap }: { snap: Snapshot }): ReactElement {
         <div className="row__main">
           <div className="row__t">Daemon</div>
           <div className="row__s">
-            {snap.connection === 'online' ? 'connected · shared across workspaces' : 'offline — retrying with backoff'}
+            {snap.connection === 'online' ? 'Connected · shared across workspaces' : 'Offline — retrying with backoff'}
           </div>
         </div>
-        <button className="chipbtn" onClick={() => store.retryConnection()}>reconnect</button>
+        <button className="btn" onClick={() => store.retryConnection()}>Reconnect</button>
       </div>
       <div className="row">
         <div className="row__main">
           <div className="row__t">Creator mode</div>
           <div className="row__s">Create and manage presets for future sessions</div>
         </div>
-        <button className="chipbtn" onClick={() => store.setSettingsTab('agents')}>manage</button>
+        <button className="btn" onClick={() => store.setSettingsTab('agents')}>Manage…</button>
       </div>
       <div className="row">
         <div className="row__main">
@@ -266,7 +277,7 @@ function GeneralCard({ snap }: { snap: Snapshot }): ReactElement {
       <div className="row">
         <div className="row__main">
           <div className="row__t">Notifications</div>
-          <div className="row__s">needs-input, task finished — only while the app is unfocused</div>
+          <div className="row__s">When a task needs you or finishes, while Xerxes is in the background</div>
         </div>
         <button
           className={`switch${notifications ? ' is-on' : ''}`}
@@ -279,7 +290,7 @@ function GeneralCard({ snap }: { snap: Snapshot }): ReactElement {
       <div className="row">
         <div className="row__main">
           <div className="row__t">Stream thinking</div>
-          <div className="row__s">show reasoning trails while acting — display only, the daemon always streams them</div>
+          <div className="row__s">Show reasoning while the agent works. Display only; the runtime always records it</div>
         </div>
         <button
           className={`switch${snap.streamThinking ? ' is-on' : ''}`}
@@ -289,12 +300,21 @@ function GeneralCard({ snap }: { snap: Snapshot }): ReactElement {
           onClick={() => store.setStreamThinking(!snap.streamThinking)}
         />
       </div>
+      {/* Was write-only: it hardcoded setPlanMode(true) and never read
+          snap.planMode, so it always said "enable now" — including while
+          plan mode was already on, where clicking it did nothing visible. */}
       <div className="row">
         <div className="row__main">
-          <div className="row__t">Plan this session</div>
-          <div className="row__s">Review a plan before making changes</div>
+          <div className="row__t">Plan this task</div>
+          <div className="row__s">{snap.planMode ? 'On — the agent proposes a checklist before it changes anything' : 'Review a plan before making changes'}</div>
         </div>
-        <button className="chipbtn" onClick={() => store.setPlanMode(true)}>enable now</button>
+        <button
+          className={`switch${snap.planMode ? ' is-on' : ''}`}
+          role="switch"
+          aria-checked={snap.planMode}
+          aria-label="Plan this task"
+          onClick={() => store.setPlanMode(!snap.planMode)}
+        />
       </div>
     </>
   )
@@ -370,7 +390,7 @@ function AgentPresetsCard({ snap }: { snap: Snapshot }): ReactElement {
         A preset is the tools, system prompt, and subagents one session runs. Duplicate a known-good preset and edit its files, or let Creator mode draft one. Running sessions keep the preset they started with.
       </p>
       {!detailOpen && <><button className="pcard pcard--add" disabled={unavailable || !presets.some(row => row.id === 'creator' && !row.broken)} onClick={() => { void store.draftAgentPreset() }}>
-        <span className="pcard__main"><span className="pcard__text"><span className="pcard__name">＋ Draft a custom preset with Creator mode</span><span className="pcard__meta">starts a fresh Creator session</span></span></span>
+        <span className="pcard__main"><span className="pcard__text"><span className="pcard__name"><Icon name="plus" size={12} /> Draft a custom preset with Creator mode</span><span className="pcard__meta">Starts a fresh Creator session that drafts it with you</span></span></span>
       </button>
       {(['system', 'user', 'project'] as const).map(trust => {
         const rows = presets.filter(row => row.trust === trust)
@@ -384,7 +404,7 @@ function AgentPresetsCard({ snap }: { snap: Snapshot }): ReactElement {
                   <div className="pcard__main">
                     <span className={`dot ${row.broken ? 'dot--fail' : row.isDefault ? 'dot--live' : 'dot--idle'}`} />
                     <span className="pcard__text">
-                      <span className="pcard__name">{row.name} <code>{row.id}</code>{row.isDefault ? <span className="chipbtn" style={{ marginLeft: 6 }}>default</span> : null}{snap.currentAgentPreset === row.id ? <span className="chipbtn" style={{ marginLeft: 6 }}>this session</span> : null}</span>
+                      <span className="pcard__name">{row.name}{row.id.toLowerCase() !== row.name.trim().toLowerCase() && <> <code>{row.id}</code></>}{row.isDefault ? <span className="chipbtn" style={{ marginLeft: 6 }}>default</span> : null}{snap.currentAgentPreset === row.id ? <span className="chipbtn" style={{ marginLeft: 6 }}>this session</span> : null}</span>
                       <span className="pcard__meta">{row.broken || row.description || 'No description.'}</span>
                     </span>
                   </div>
@@ -453,12 +473,15 @@ function ModelsCard({ snap }: { snap: Snapshot }): ReactElement {
   const groups = useMemo(() => groupModels(snap.models), [snap.models])
   /** false = closed, true = new profile, a name = editing that profile. */
   const [form, setForm] = useState<boolean | string>(false)
+  /** Name of the profile whose Delete is awaiting confirmation. */
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
   const editing = typeof form === 'string'
     ? snap.providers.find(p => p.name === form) ?? null
     : null
   return (
     <>
       <h2 className="modal__title">Models & Providers</h2>
+      {snap.storageScope?.startsWith('ssh:') && <RemoteProviders key={snap.sessionKey} remote={window.xerxes.remote} changed={()=>store.loadModels(true)}/>}
       <p className="modal__sub">
         Change the session model from the composer. Select a provider to make it active. Profiles are stored in <code>~/.xerxes/profiles.json</code> on the workspace host.
       </p>
@@ -471,10 +494,10 @@ function ModelsCard({ snap }: { snap: Snapshot }): ReactElement {
           disabled={snap.turnActive}
           onClick={() => store.openPicker()}
         >
-          <span className="star">✳</span> {snap.model || 'unset'} <span className="c">▾</span>
+          <Icon name="spark" size={12} /> {snap.model || 'unset'} <Icon name="caretDown" size={11} />
         </button>
         {snap.turnActive && (
-          <div className="row__s" style={{ marginTop: 4 }}>locked while a turn runs — model hot-swaps mid-turn are refused</div>
+          <div className="row__s" style={{ marginTop: 4 }}>Locked while a turn runs. The model can't change mid-turn.</div>
         )}
       </div>
 
@@ -483,12 +506,16 @@ function ModelsCard({ snap }: { snap: Snapshot }): ReactElement {
       {snap.providerSwitchError && <p role="alert" className="studio-error">{snap.providerSwitchError}</p>}
       {snap.providerError && <div role="alert" className="studio-error">{snap.providerError}<button onClick={() => void store.loadProviders()}>Retry loading providers</button></div>}
       <div className="pcardlist">
+      {/* "No saved provider profiles" is a claim, and it used to be made
+          before provider_list had answered — so a configured user was told
+          they had nothing, and Retry cleared the error first and showed the
+          same false empty state again for the whole retry. */}
       {snap.providers.length === 0 && !snap.providerError && (
         <div className="row">
-          <span className="dot dot--idle" />
+          <span className={snap.providersLoading ? 'dot dot--live' : 'dot dot--idle'} />
           <div className="row__main">
-            <div className="row__t">No saved provider profiles</div>
-            <div className="row__s">Add a provider to configure a model.</div>
+            <div className="row__t">{snap.providersLoading ? 'Loading provider profiles…' : 'No saved provider profiles'}</div>
+            <div className="row__s">{snap.providersLoading ? 'Reading ~/.xerxes/profiles.json on the workspace host.' : 'Add a provider to configure a model.'}</div>
           </div>
         </div>
       )}
@@ -520,7 +547,7 @@ function ModelsCard({ snap }: { snap: Snapshot }): ReactElement {
               </span>
             </span>
             {!provider.active && !snap.turnActive
-              ? <span className="row__go">switch ▸</span>
+              ? <span className="row__go">switch <Icon name="chevron" size={11} /></span>
               : null}
           </button>
           <span className="pcard__actions">
@@ -530,13 +557,22 @@ function ModelsCard({ snap }: { snap: Snapshot }): ReactElement {
               title={`edit ${provider.name}`}
               onClick={() => setForm(provider.name)}
             >Edit</button>
+            {/* This app confirms killing a terminal; deleting a stored
+                credential profile was a single unguarded click. */}
             {!provider.active && (
-              <button
-                className="pcard__del"
-                disabled={snap.turnActive}
-                title={`delete ${provider.name}`}
-                onClick={() => store.deleteProvider(provider.name)}
-              >Delete</button>
+              confirmDelete === provider.name ? (
+                <>
+                  <button className="pcard__del" onClick={() => { setConfirmDelete(null); store.deleteProvider(provider.name) }}>Delete for good</button>
+                  <button onClick={() => setConfirmDelete(null)}>Keep</button>
+                </>
+              ) : (
+                <button
+                  className="pcard__del"
+                  disabled={snap.turnActive}
+                  title={`delete ${provider.name}`}
+                  onClick={() => setConfirmDelete(provider.name)}
+                >Delete</button>
+              )
             )}
           </span>
         </div>
@@ -551,11 +587,11 @@ function ModelsCard({ snap }: { snap: Snapshot }): ReactElement {
         />
       ) : (
         <button className="btn" disabled={snap.turnActive} onClick={() => setForm(true)}>
-          ＋ Add provider
+          <Icon name="plus" size={12} /> Add provider
         </button>
       )}
 
-      <div className="cap" style={{ paddingLeft: 0 }}>Discovered models · {snap.models.length}</div>
+      <div className="row__t settings-section">Discovered models{snap.models.length > 0 && <span className="settings-section__count">{snap.models.length}</span>}</div>
       <div className="rowlist">
       {groups.map(group => (
         <div key={group.provider} className="row">
@@ -569,16 +605,15 @@ function ModelsCard({ snap }: { snap: Snapshot }): ReactElement {
       {snap.models.length === 0 && (
         <div className="row">
           <div className="row__main">
-            <div className="row__t">no models discovered yet</div>
-            <div className="row__s">fetch probes the active provider profile</div>
+            <div className="row__t">No models discovered yet</div>
+            <div className="row__s">Fetching asks the active provider which models it serves.</div>
           </div>
-          <button className="chipbtn" onClick={() => store.loadModels(true)}>fetch models</button>
         </div>
       )}
       </div>
 
-      <div style={{ display: 'flex', gap: 8, paddingTop: 16 }}>
-        <button className="btn" onClick={() => store.loadModels(true)}>↻ Fetch models</button>
+      <div className="settings-actions">
+        <button className="btn" onClick={() => store.loadModels(true)}><Icon name="retry" size={13} /> Fetch models</button>
       </div>
     </>
   )
@@ -693,7 +728,9 @@ export function ProviderForm({
       </div>
       {editing && (
         <div className="field provform__catalog">
-          <label>Models · {modelsLoading ? 'fetching…' : `${profileModels.length} discovered`}</label>
+          {/* The count claimed the whole catalog while the list rendered
+              only the first 24, with nothing saying the rest existed. */}
+          <label>Models · {modelsLoading ? 'fetching…' : profileModels.length > 24 ? `showing 24 of ${profileModels.length}` : `${profileModels.length} discovered`}</label>
           {profileModels.length > 0 ? (
             <div className="provform__models" role="list" aria-label={`${editing.name} models`}>
               {profileModels.slice(0, 24).map(cached => (
@@ -716,7 +753,7 @@ export function ProviderForm({
             disabled={modelsLoading}
             onClick={() => store.loadProviderModels(editing.name, true)}
           >
-            {modelsLoading ? 'Fetching…' : '↻ Fetch this provider’s models'}
+            {modelsLoading ? 'Fetching…' : <><Icon name="retry" size={13} /> Fetch this provider’s models</>}
           </button>
         </div>
       )}
@@ -733,7 +770,7 @@ export function ProviderForm({
             onChange={e => setBaseUrl(e.target.value)}
           />
           {known?.baseUrl && !baseUrl.trim() ? (
-            <div className="row__s" style={{ marginTop: 4 }}>blank saves the registry default for {known.name}</div>
+            <div className="row__s" style={{ marginTop: 4 }}>Leave blank to use the default for {known.name}.</div>
           ) : null}
         </div>
       </details>
@@ -803,7 +840,7 @@ function CachedModelEditor({
           <span className="provform__caps">
             in {capacityLabel(model.contextLimit)} · out {capacityLabel(model.maxOutputTokens)}
           </span>
-          {selected ? <span>✓</span> : null}
+          {selected ? <Icon name="check" size={13} /> : null}
         </button>
         <button
           type="button"
@@ -862,10 +899,10 @@ function capacityLabel(value: number | undefined): string {
 }
 
 const PERMISSION_MODES: ReadonlyArray<{ id: PermissionMode; label: string; note: string }> = [
-  { id: 'accept-all', label: 'accept-all', note: 'tools run without asking — trust the workspace' },
-  { id: 'auto', label: 'auto', note: 'safe reads run, writes and commands ask' },
-  { id: 'manual', label: 'manual', note: 'every tool call asks first' },
-  { id: 'plan', label: 'plan', note: 'read-only ceiling; mutations are refused' },
+  { id: 'accept-all', label: 'Accept all', note: 'Tools run without asking. Use only in a workspace you trust.' },
+  { id: 'auto', label: 'Auto', note: 'Safe reads run; writes and commands ask first.' },
+  { id: 'manual', label: 'Manual', note: 'Every tool call asks first.' },
+  { id: 'plan', label: 'Plan', note: 'Read-only. Changes are refused.' },
 ]
 
 function PermissionsCard({ snap }: { snap: Snapshot }): ReactElement {
@@ -878,29 +915,31 @@ function PermissionsCard({ snap }: { snap: Snapshot }): ReactElement {
       </p>
 
       <div className="field">
-        <label>Permission mode{current ? ` · daemon reports: ${current}` : ' · daemon did not report'}</label>
+        <label>Permission mode</label>
         <div className="optlist">
           {PERMISSION_MODES.map(mode => (
             <button
               key={mode.id}
               className={`opt${current === mode.id ? ' is-approve' : ''}`}
+              aria-pressed={current === mode.id}
               disabled={snap.connection !== 'online' || snap.permissionUpdating}
               onClick={() => store.setPermissionMode(mode.id)}
             >
               <span className="opt__label">{mode.label}</span>
-              <span className="opt__desc">— {mode.note}</span>
-              {current === mode.id ? <span className="opt__kbd">✓</span> : null}
+              <span className="opt__desc">{mode.note}</span>
+              {current === mode.id ? <span className="opt__kbd"><Icon name="check" size={12} /></span> : null}
             </button>
           ))}
         </div>
+        {!current && <p className="row__s">The runtime has not reported a mode for this session yet.</p>}
         {snap.permissionUpdating && <p role="status">Updating permission mode…</p>}
         {snap.permissionError && <p role="alert" className="studio-error">{snap.permissionError}</p>}
       </div>
 
       <div className="row">
         <div className="row__main">
-          <div className="row__t">Approval vocabulary</div>
-          <div className="row__s">allow once (1) · this session (2) · deny (3) — keys work while a card is pending</div>
+          <div className="row__t">Approval shortcuts</div>
+          <div className="row__s keyhints"><span><kbd>1</kbd> Allow once</span><span><kbd>2</kbd> This session</span><span><kbd>3</kbd> Deny</span><span>while a request is showing</span></div>
         </div>
       </div>
       <div className="row">
@@ -1045,29 +1084,38 @@ export function ModelPicker({ snap, onClose }: { snap: Snapshot; onClose: () => 
                     <span className={`dot ${current ? 'dot--live' : 'dot--idle'}`} />
                     <span className="mrow__name">{choice.id}</span>
                     <span className="mrow__tags">
-                      {current ? <span className="tag tag--fast">✓ current</span> : null}
+                      {current ? <span className="tag tag--fast"><Icon name="check" size={11} /> current</span> : null}
                     </span>
                   </button>
                 )
               })}
             </div>
           ))}
+          {/* "no models discovered yet" used to be asserted for the whole
+              discovery window and after every failure alike, and the retry
+              below could fail silently on every click. */}
           {groups.length === 0 && (
-            <div className="mgroup__cap">
+            <div className="modelpop__status" role="status">
               {snap.turnActive
-                ? 'locked — a turn is running'
-                : snap.models.length ? 'no match' : 'no models discovered yet'}
+                ? 'Locked while a turn is running'
+                : snap.models.length ? 'No matching model'
+                : snap.modelsLoading ? 'Asking your provider…'
+                : snap.modelsError ? 'Discovery failed'
+                : 'No models discovered yet'}
             </div>
           )}
+          {snap.modelsError && snap.models.length === 0 && (
+            <p className="modelpop__error" role="alert">{snap.modelsError}</p>
+          )}
           {snap.models.length === 0 && (
-            <button className="mrow" onClick={() => store.loadModels(true)}>
-              <span className="dot dot--idle" />
-              <span className="mrow__name">↻ fetch from the daemon</span>
+            <button className="mrow" disabled={snap.modelsLoading} onClick={() => store.loadModels(true)}>
+              <span className={snap.modelsLoading ? 'dot dot--live' : 'dot dot--idle'} />
+              <span className="mrow__name">{snap.modelsLoading ? 'Fetching…' : snap.modelsError ? 'Try again' : 'Fetch from the runtime'}</span>
             </button>
           )}
         </div>
         <div className="modelpop__foot">
-          <span>↑↓ select · ⏎ use · esc close</span>
+          <span className="keyhints"><span><kbd>↑↓</kbd> select</span><span><kbd>⏎</kbd> use</span><span><kbd>esc</kbd> close</span></span>
           <button className="lnk" onClick={() => { onClose(); store.openSettings('models') }}>Manage providers…</button>
         </div>
       </div>
@@ -1283,7 +1331,7 @@ export function ReasoningPicker({ snap, onClose }: { snap: Snapshot; onClose: ()
       >
         <div className="palette__list palette__list--models">
           <div className="mgroup__cap">
-            {snap.reasoningLoading ? 'asking the daemon…' : `reasoning effort${snap.reasoningDefault ? ` · default ${snap.reasoningDefault}` : ''}`}
+            {snap.reasoningLoading ? 'Asking the runtime…' : `Reasoning effort${snap.reasoningDefault ? ` · default ${snap.reasoningDefault}` : ''}`}
           </div>
           {rows.map((row, at) => {
             const current = row.effort === snap.reasoningEffort
@@ -1300,14 +1348,14 @@ export function ReasoningPicker({ snap, onClose }: { snap: Snapshot; onClose: ()
                 <span className="mrow__name">{row.effort}</span>
                 <span className="mrow__tags">
                   {row.description ? <span className="mrow__desc">{row.description}</span> : null}
-                  {current ? <span className="tag tag--fast">✓ current</span> : null}
+                  {current ? <span className="tag tag--fast"><Icon name="check" size={11} /> current</span> : null}
                 </span>
               </button>
             )
           })}
           {rows.length === 0 && !snap.reasoningLoading && (
-            <div className="mgroup__cap">
-              {snap.reasoningNote || 'this model has no reasoning control'}
+            <div className="modelpop__status" role="status">
+              {snap.reasoningNote || 'This model has no reasoning control.'}
             </div>
           )}
         </div>
@@ -1317,7 +1365,7 @@ export function ReasoningPicker({ snap, onClose }: { snap: Snapshot; onClose: ()
           </div>
         ) : (
           <div className="modelpop__foot">
-            <span>↑↓ select · ⏎ use · esc close</span>
+            <span className="keyhints"><span><kbd>↑↓</kbd> select</span><span><kbd>⏎</kbd> use</span><span><kbd>esc</kbd> close</span></span>
           </div>
         )}
       </div>
@@ -1329,7 +1377,11 @@ export function ReasoningPicker({ snap, onClose }: { snap: Snapshot; onClose: ()
 
 interface PaletteAction {
   readonly id: string
-  readonly icon: string
+  /** An icon from the app's set, or omitted when the label carries its own
+   *  marker (the slash commands already read as `/undo`). These used to be
+   *  loose Unicode — `⛨`, `⇄`, `⌕` — which rendered at whatever weight the
+   *  system font happened to have and lined up with nothing else. */
+  readonly icon?: IconName
   readonly label: string
   readonly hint?: string
   /** When set, run() prefills the input with this and keeps the palette open. */
@@ -1351,34 +1403,33 @@ export function CommandPalette({ snap }: { snap: Snapshot }): ReactElement | nul
     const list: PaletteAction[] = [
       {
         id: 'plan',
-        icon: '⏸',
+        icon: 'pause',
         label: snap.planMode ? 'Exit plan mode' : 'Switch to plan mode',
         run: () => store.togglePlanMode(),
       },
       ...(snap.turnActive
-        ? [{ id: 'stop', icon: '■', label: 'Stop the running task', hint: 'esc', run: () => store.cancel() } satisfies PaletteAction]
+        ? [{ id: 'stop', icon: 'stop', label: 'Stop the running task', hint: 'esc', run: () => store.cancel() } satisfies PaletteAction]
         : []),
       {
         id: 'goal',
-        icon: '',
         label: '/goal — set the task objective',
         // Prefill, don't submit: the objective text still has to be typed.
         // Stays open by declaring keepOpen below.
         run: () => setNeedle('/goal '),
       },
-      { id: 'compact', icon: '', label: '/compact — compact this task now', run: () => void store.submit('/compact') },
-      { id: 'settings', icon: '⚙', label: 'Settings…', run: () => store.openSettings() },
-      { id: 'models-settings', icon: '◆', label: 'Models & Providers settings…', run: () => store.openSettings('models') },
-      { id: 'permissions', icon: '⛨', label: 'Permissions settings…', run: () => store.openSettings('permissions') },
-      { id: 'channels', icon: '⇄', label: 'Channels settings…', run: () => store.openSettings('channels') },
-      { id: 'terminals', icon: '⌨', label: 'Terminals…', run: () => store.openSettings('terminals') },
-      { id: 'session-search', icon: '⌕', label: 'Search sessions & messages…', run: () => store.openSessionSearch() },
+      { id: 'compact', label: '/compact — compact this task now', run: () => void store.submit('/compact') },
+      { id: 'settings', icon: 'settings', label: 'Settings…', run: () => store.openSettings() },
+      { id: 'models-settings', icon: 'spark', label: 'Models & Providers settings…', run: () => store.openSettings('models') },
+      { id: 'permissions', icon: 'shield', label: 'Permissions settings…', run: () => store.openSettings('permissions') },
+      { id: 'channels', icon: 'cloud', label: 'Channels settings…', run: () => store.openSettings('channels') },
+      { id: 'terminals', icon: 'terminal', label: 'Terminals…', run: () => store.openSettings('terminals') },
+      { id: 'session-search', icon: 'search', label: 'Search sessions & messages…', run: () => store.openSessionSearch() },
     ]
     for (const provider of snap.providers) {
       if (provider.active || snap.turnActive) continue
       list.push({
         id: `provider:${provider.name}`,
-        icon: '◆',
+        icon: 'spark',
         label: `Switch provider: ${provider.name}`,
         hint: provider.model || provider.provider,
         run: () => store.selectProvider(provider.name),
@@ -1390,7 +1441,7 @@ export function CommandPalette({ snap }: { snap: Snapshot }): ReactElement | nul
       for (const choice of snap.models) {
         list.push({
           id: `model:${choice.id}`,
-          icon: '✳',
+          icon: 'spark',
           label: `Switch model: ${choice.id}`,
           hint: choice.id === snap.model ? 'current' : choice.provider,
           run: () => store.pickModel(choice.id),
@@ -1402,10 +1453,19 @@ export function CommandPalette({ snap }: { snap: Snapshot }): ReactElement | nul
     if (!snap.turnActive && snap.connection === 'online') {
       list.push({
         id: 'new',
-        icon: '＋',
-        label: 'New task',
-        hint: '⌘N',
+        icon: 'plus',
+        // ⌘N runs newChat() — a blank session. This row opens the wizard
+        // (worktree, preset, plan ceiling, model), which is ⇧⌘N.
+        label: 'New task…',
+        hint: '⇧⌘N',
         run: () => store.openTaskModal(),
+      })
+      list.push({
+        id: 'new-blank',
+        icon: 'plus',
+        label: 'New blank task',
+        hint: '⌘N',
+        run: () => store.newChat(),
       })
       const seenSessions = new Set<string>()
       for (const row of [...snap.live, ...snap.sessions]) {
@@ -1413,7 +1473,7 @@ export function CommandPalette({ snap }: { snap: Snapshot }): ReactElement | nul
         seenSessions.add(row.id)
         list.push({
           id: `session:${row.id}`,
-          icon: '◇',
+          icon: 'half',
           label: `Task: ${row.title}`,
           hint: row.age || row.status,
           run: () => void store.openSession(row.id),
@@ -1429,7 +1489,7 @@ export function CommandPalette({ snap }: { snap: Snapshot }): ReactElement | nul
       }
       list.push({
         id: `slash:${command.name}`,
-        icon: '', // the label already carries the slash — '/' + '/undo' reads as '//undo'
+        // the label already carries the slash — '/' + '/undo' reads as '//undo'
         label: `/${command.name}`,
         hint: command.description || 'daemon command',
         prefill: `/${command.name} `,
@@ -1480,6 +1540,14 @@ export function CommandPalette({ snap }: { snap: Snapshot }): ReactElement | nul
           className="palette__in"
           placeholder="Type a command…"
           spellCheck={false}
+          // The list is a listbox the input drives; without these a screen
+          // reader is told about a plain text field and never hears the
+          // highlighted row change under the arrow keys.
+          role="combobox"
+          aria-expanded={true}
+          aria-controls="palette-options"
+          aria-activedescendant={filtered[cursor] ? `palette-option-${filtered[cursor].id}` : undefined}
+          aria-autocomplete="list"
           value={needle}
           onChange={e => { setNeedle(e.target.value); setCursor(0) }}
           onKeyDown={e => {
@@ -1492,15 +1560,18 @@ export function CommandPalette({ snap }: { snap: Snapshot }): ReactElement | nul
             }
           }}
         />
-        <div className="palette__list" ref={listRef}>
+        <div className="palette__list" ref={listRef} id="palette-options" role="listbox" aria-label="Commands">
           {filtered.map((action, index) => (
             <button
               key={action.id}
+              id={`palette-option-${action.id}`}
+              role="option"
+              aria-selected={index === cursor}
               className={`prow${index === cursor ? ' is-sel' : ''}`}
               onMouseEnter={() => setCursor(index)}
               onClick={() => run(action)}
             >
-              <span className="prow__ico">{action.icon}</span>
+              <span className="prow__ico">{action.icon && <Icon name={action.icon} size={14} />}</span>
               {action.label}
               {action.hint ? <span className="prow__kbd">{action.hint}</span> : null}
             </button>

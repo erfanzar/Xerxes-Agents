@@ -3,6 +3,7 @@
 
 import { desktopError } from './desktopRpc.js'
 import { useEffect, useRef, useState, type ReactElement } from 'react'
+import { Icon } from './Icon.js'
 
 /** Explicit push-to-talk. Tracks always stop on cancel, session switch, error, and unmount. */
 export function Dictation({
@@ -124,7 +125,7 @@ export function Dictation({
         }}
       >
         {state === 'recording'
-          ? '● Stop recording'
+          ? <><Icon name="stop" size={12} /> Stop recording</>
           : state === 'transcribing'
             ? 'Transcribing…'
             : state === 'starting'

@@ -230,15 +230,65 @@ test('integration check binds reviewed text and binary content and preserves bot
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
-test('portable tree inspection still rejects nested repositories without changing the parent index', async () => {
+test('working-tree capture isolates nested repositories, excludes secrets, and preserves source indexes', async () => {
   const root=await realpath(await mkdtemp(join(tmpdir(),'xerxes-gitlink-capture-')))
   try {
     await git(root,'init');await Bun.write(join(root,'file.txt'),'parent');await git(root,'add','.');await git(root,'commit','-m','parent')
     const nested=join(root,'nested')
     await Bun.write(join(nested,'child.txt'),'child');await git(nested,'init');await git(nested,'add','.');await git(nested,'commit','-m','nested')
     const before=await Bun.file(join(root,'.git/index')).bytes()
+    const childIndex=await Bun.file(join(nested,'.git/index')).bytes()
+    await Bun.write(join(nested,'child.txt'),'dirty child')
+    await Bun.write(join(nested,'.gitignore'),'secret.txt\n')
+    await Bun.write(join(nested,'secret.txt'),'must stay local')
+    await Bun.write(join(nested,'new.txt'),'new child')
     const port=nativeSubagentWorktrees(root)
-    await expect(port.create({taskId:'nested',taskName:'Nested',config:{_nativeSubagentWorktreeSource:'working-tree'}})).rejects.toThrow('does not support submodules or nested Git repositories')
+    const tree=await port.create({taskId:'nested',taskName:'Nested',config:{_nativeSubagentWorktreeSource:'working-tree'}})
+    expect(await Bun.file(join(tree.path,'nested/child.txt')).text()).toBe('dirty child')
+    expect(await Bun.file(join(tree.path,'nested/new.txt')).text()).toBe('new child')
+    expect(await Bun.file(join(tree.path,'nested/secret.txt')).exists()).toBe(false)
+    expect(await Bun.file(join(tree.path,'nested/.git/config')).exists()).toBe(false)
+    const id=tree.branch.replace('xerxes/agent-','')
+    expect((await port.inspect(id)).diff).toBe('')
+    await Bun.write(join(tree.path,'nested/child.txt'),'agent child')
+    expect((await port.inspect(id)).diff).toContain('+agent child')
+    expect(await Bun.file(join(nested,'child.txt')).text()).toBe('dirty child')
+    expect(await Bun.file(join(nested,'.git/index')).bytes()).toEqual(childIndex)
     expect(await Bun.file(join(root,'.git/index')).bytes()).toEqual(before)
   } finally {await rm(root,{recursive:true,force:true})}
+})
+
+test('initialized submodules and recursive children capture current contents without network or shared Git state', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'xerxes-submodule-capture-')))
+  try {
+    const source = join(root, 'source'), parent = join(root, 'parent')
+    for (const dir of [source, parent]) {
+      await git(root, 'init', dir)
+      await Bun.write(join(dir, 'file.txt'), 'baseline')
+      await git(dir, 'add', '.')
+      await git(dir, 'commit', '-m', 'baseline')
+    }
+    await git(parent, '-c', 'protocol.file.allow=always', 'submodule', 'add', source, 'module')
+    await git(parent, 'commit', '-am', 'submodule')
+    const child = join(parent, 'module'), grandchild = join(child, 'nested')
+    await git(child, 'init', grandchild)
+    await Bun.write(join(grandchild, 'nested.txt'), 'nested baseline')
+    await git(grandchild, 'add', '.')
+    await git(grandchild, 'commit', '-m', 'nested')
+    await Bun.write(join(child, 'file.txt'), 'dirty submodule')
+    const parentIndex = await Bun.file(join(parent, '.git/index')).bytes()
+    const port = nativeSubagentWorktrees(parent)
+    const tree = await port.create({ taskId: 'submodule', taskName: 'Submodule', config: { _nativeSubagentWorktreeSource: 'working-tree' } })
+    expect(await Bun.file(join(tree.path, 'module/file.txt')).text()).toBe('dirty submodule')
+    expect(await Bun.file(join(tree.path, 'module/nested/nested.txt')).text()).toBe('nested baseline')
+    expect(await Bun.file(join(tree.path, 'module/.git')).exists()).toBe(false)
+    expect(await Bun.file(join(parent, '.git/index')).bytes()).toEqual(parentIndex)
+    expect((await port.inspect(tree.branch.replace('xerxes/agent-', ''))).diff).toBe('')
+    const controller = new AbortController(); controller.abort()
+    await expect(port.create({ taskId: 'cancel', taskName: 'Cancel', signal: controller.signal, config: { _nativeSubagentWorktreeSource: 'working-tree' } })).rejects.toThrow()
+    expect((await port.list()).records).toHaveLength(1)
+    await git(parent, 'submodule', 'deinit', '-f', 'module')
+    await expect(port.create({ taskId: 'absent', taskName: 'Absent', config: { _nativeSubagentWorktreeSource: 'working-tree' } })).rejects.toThrow('Initialize the nested repository')
+    expect((await port.list()).records).toHaveLength(1)
+  } finally { await rm(root, { recursive: true, force: true }) }
 })

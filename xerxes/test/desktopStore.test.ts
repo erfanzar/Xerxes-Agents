@@ -547,6 +547,26 @@ describe('Store workspace folds', () => {
 
     bridge.push('turn_end', {})
     expect(store.getSnapshot().queue).toHaveLength(0)
+    expect(store.getSnapshot().blocks.filter(block => block.kind === 'user' && block.text === 'also cover the replay path')).toHaveLength(1)
+  })
+
+  test('identical steers remain separate messages and rejected steers never appear', async () => {
+    bridge.push('turn_begin', { user_input: 'start' })
+    bridge.respondWith((method, params) => {
+      if (method === 'turn.steer') {
+        if (params.content === 'refused') return { ok: false, error: 'No active session' }
+        bridge.push('steer_input', { content: params.content, client_steer_id: params.client_steer_id })
+      }
+      return { ok: true }
+    })
+    await store.steer('continue')
+    bridge.push('text_part', { text: 'First response' })
+    await store.steer('continue')
+    bridge.push('text_part', { text: 'Second response' })
+    expect(await store.steer('refused')).toBe(false)
+    bridge.push('turn_end', {})
+    const users = store.getSnapshot().blocks.filter(block => block.kind === 'user')
+    expect(users.map(block => block.text)).toEqual(['start', 'continue', 'continue'])
   })
 
   test('the session menu renames through session.title with the row key', async () => {
@@ -912,6 +932,22 @@ describe('Store workspace folds', () => {
     expect(store.getSnapshot().turnActive).toBe(false)
     expect(store.getSnapshot().blocks.some(block => (block.kind === 'agent' || block.kind === 'thinking') && block.streaming)).toBe(false)
     expect(store.getSnapshot().blocks.some(block => block.kind === 'agent' && block.text === 'unterminated')).toBe(true)
+  })
+
+  test('a checkpoint marks only turns that changed files, not every turn after one did', () => {
+    // Session edit totals are cumulative, so a read-only review after an
+    // editing turn used to stamp a checkpoint below its final answer.
+    const checkpoints = (): number => store.getSnapshot().blocks.filter(block => block.kind === 'checkpoint').length
+    bridge.push('turn_begin', { user_input: 'edit' })
+    const edit = editCall('src/a.ts', 'one', 'two', 'e1')
+    bridge.push(edit.type, edit.payload)
+    bridge.push('turn_end', {})
+    expect(checkpoints()).toBe(1)
+    bridge.push('turn_begin', { user_input: 'review it' })
+    bridge.push('text_part', { text: 'No files were modified during the review.' })
+    bridge.push('turn_end', {})
+    expect(checkpoints()).toBe(1)
+    expect(store.getSnapshot().blocks.at(-1)?.kind).toBe('agent')
   })
 
   test('undoChanges drops undone files from the review list and reports refusals', async () => {
@@ -2044,4 +2080,100 @@ describe('saving providers preserves chat identity', () => {
       expect(store.getSnapshot().model).toBe(navigate ? 'other-model' : apply === 'success' ? 'saved-model' : initializeResult.model)
     })
   }
+})
+
+/**
+ * A pending decision must never outlive the turn that asked for it. The
+ * daemon force-rejects the request when a turn ends or is cancelled, so a
+ * card left on screen can only answer "refused" while pinning the header
+ * badge on "needs input" for every later turn.
+ */
+describe('pending interactions are bounded by their turn', () => {
+  const start = async (): Promise<{ bridge: FakeBridge; store: Store }> => {
+    const bridge = new FakeBridge(method => method === 'initialize' ? initializeResult : { ok: true, sessions: [] })
+    withWindow(bridge)
+    const store = new Store()
+    store.start(bridge)
+    await Bun.sleep(10)
+    return { bridge, store }
+  }
+
+  test('turn_end clears an approval that was never answered', async () => {
+    const { bridge, store } = await start()
+    bridge.push('turn_begin', { text: 'go' })
+    bridge.push('approval_request', { id: 'req-1', tool_name: 'ExecCommandTool', inputs: { command: 'rm -rf build' } })
+    expect(store.getSnapshot().approval?.id).toBe('req-1')
+    bridge.push('turn_end', {})
+    expect(store.getSnapshot().approval).toBeNull()
+  })
+
+  test('turn_end clears an unanswered question', async () => {
+    const { bridge, store } = await start()
+    bridge.push('turn_begin', { text: 'go' })
+    bridge.push('question_request', { id: 'q-1', questions: [{ id: 'a', question: 'Which one?', options: ['x', 'y'] }] })
+    expect(store.getSnapshot().question?.requestId).toBe('q-1')
+    bridge.push('turn_end', {})
+    expect(store.getSnapshot().question).toBeNull()
+  })
+
+  test('cancelling drops the card before the daemon answers', async () => {
+    const { bridge, store } = await start()
+    bridge.push('turn_begin', { text: 'go' })
+    bridge.push('approval_request', { id: 'req-2', tool_name: 'ExecCommandTool' })
+    store.cancel()
+    expect(store.getSnapshot().approval).toBeNull()
+    expect(bridge.calls.some(call => call.method === 'turn.cancel')).toBe(true)
+  })
+
+  test('dismissing hides the card without answering the daemon', async () => {
+    const { bridge, store } = await start()
+    bridge.push('approval_request', { id: 'req-3', tool_name: 'ExecCommandTool' })
+    store.dismissInteraction()
+    expect(store.getSnapshot().approval).toBeNull()
+    expect(bridge.calls.some(call => call.method === 'permission_response')).toBe(false)
+  })
+})
+
+/** The decision is about the arguments, so the card has to receive them. */
+test('approval requests carry the tool inputs, cwd and reason', async () => {
+  const bridge = new FakeBridge(method => method === 'initialize' ? initializeResult : { ok: true, sessions: [] })
+  withWindow(bridge)
+  const store = new Store(); store.start(bridge); await Bun.sleep(10)
+  bridge.push('approval_request', {
+    id: 'req-9',
+    tool_name: 'send_message',
+    inputs: { platform: 'telegram', recipient: '@someone', body: 'the actual message' },
+    cwd: '/repo',
+    reason: 'Messaging always asks.',
+  })
+  const approval = store.getSnapshot().approval
+  expect(approval?.inputs).toEqual({ platform: 'telegram', recipient: '@someone', body: 'the actual message' })
+  expect(approval?.cwd).toBe('/repo')
+  expect(approval?.reason).toBe('Messaging always asks.')
+  // Older daemons send `arguments`; the card must still get structure.
+  bridge.push('approval_request', { id: 'req-10', name: 'Bash', arguments: { command: 'ls' } })
+  expect(store.getSnapshot().approval?.inputs).toEqual({ command: 'ls' })
+  expect(store.getSnapshot().approval?.toolName).toBe('Bash')
+})
+
+/**
+ * `changes` used to be written only by the live tool_call event, so a
+ * reopened task claimed nothing had changed while the git panel listed the
+ * same files as dirty — and session-scoped undo had nothing to act on.
+ */
+test('reopening a task refolds its edits from stored history', async () => {
+  const session = {
+    id: 'aa19f402',
+    key: 'aa19f402',
+    cwd: '/repo',
+    tool_executions: [
+      { name: 'FileEditTool', arguments: JSON.stringify({ file_path: 'src/a.ts', old_string: 'one', new_string: 'two' }) },
+      { name: 'FileEditTool', arguments: JSON.stringify({ file_path: 'src/b.ts', old_string: '', new_string: 'fresh\nlines' }) },
+    ],
+  }
+  const bridge = new FakeBridge(method => method === 'initialize' ? { ...initializeResult, session } : { ok: true, sessions: [] })
+  withWindow(bridge)
+  const store = new Store(); store.start(bridge); await Bun.sleep(10)
+  const paths = store.getSnapshot().changes.map(file => file.path).sort()
+  expect(paths).toEqual(['src/a.ts', 'src/b.ts'])
 })

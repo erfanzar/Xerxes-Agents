@@ -3,6 +3,33 @@
 import { useEffect, useRef, useState, type ReactElement } from 'react'
 import { desktopCall, desktopError, record, records } from './desktopRpc.js'
 import type { Snapshot } from './store.js'
+import { Icon } from './Icon.js'
+
+/** `goal_policy` → `Goal policy`; paths and prose titles pass through untouched. */
+export function contextTitle(title: string): string {
+  if (!/^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/.test(title)) return title
+  const words = title.replace(/_/g, ' ')
+  return words[0]!.toUpperCase() + words.slice(1)
+}
+
+/**
+ * Prompt text arrives hard-wrapped at ~80 columns. In a 300px rail those
+ * breaks land mid-line and every sentence wraps twice. Join wrapped lines
+ * back into paragraphs, but leave lists, headings, tables, indented blocks
+ * and fenced code exactly as written — their line breaks carry meaning.
+ */
+export function reflowContextText(text: string): string {
+  const structural = /^\s*(?:[-*•+]\s|\d+[.)]\s|#|>|\||```|\s{2,}\S)/
+  return text.replace(/\r\n/g, '\n').split(/\n{2,}/).map(paragraph => {
+    if (paragraph.includes('```')) return paragraph
+    const lines = paragraph.split('\n')
+    let out = lines[0] ?? ''
+    for (const line of lines.slice(1)) {
+      out += structural.test(line) || structural.test(out.split('\n').at(-1) ?? '') ? `\n${line}` : ` ${line.trim()}`
+    }
+    return out
+  }).join('\n\n')
+}
 
 export const contextSections = ['instructions', 'memory', 'conversation', 'tools', 'compaction'] as const
 type Section = typeof contextSections[number]
@@ -59,23 +86,42 @@ export function ContextInspector({ snap }: { snap: Snapshot }): ReactElement {
     finally { mutation.current = false; setSaving(false) }
   }
   const summary = page?.sections.find(row => row.id === section)
+  const paged = page ? !(offset === 0 && page.next_offset === null) : false
   return <section className="context-inspector" aria-label="Context inspector">
-    <p>Inspect what the agent sees. Estimates are local; no provider request is made.</p>
-    <label className="field">Section<select aria-label="Context section" value={section} disabled={saving} onChange={event => { setSection(event.target.value as Section); setOffset(0) }}>{contextSections.map(id => <option key={id} value={id}>{id[0]!.toUpperCase()+id.slice(1)}</option>)}</select></label>
-    <div className="lsp-actions"><button disabled={loading || saving} onClick={() => { generation.current = undefined; setOffset(0); setRefresh(value => value + 1) }}>Refresh context</button></div>
-    {loading && <p role="status">Loading context…</p>}{error && <p className="studio-error" role="alert">{error}</p>}{notice && <p role="status">{notice}</p>}
-    {summary && <p>{summary.available ? `${summary.count} entries · ${section === 'compaction' ? 'Not in model context' : `~${summary.estimated_tokens.toLocaleString()} tokens`} · ${summary.provenance}` : 'Not assembled yet'}</p>}
-    {page && <><details><summary>About context estimates</summary><p>{page.note}</p></details>{page.entries.length === 0 && <p>No entries in this section.</p>}
-      {page.entries.map(entry => <details className="context-source" key={`${page.generation}:${section}:${entry.index}`}>
-        <summary>{entry.title}{entry.control?.pinned ? ' · Pinned' : entry.control?.excluded ? ' · Excluded' : ''}</summary>
-        <pre tabIndex={0}>{entry.text}</pre>{entry.truncated && <p>Excerpt truncated at 8,000 characters.</p>}
-        {entry.control && <div className="lsp-actions">
-          <button disabled={saving || loading || !!error || snap.turnActive} onClick={() => void change(entry.control!, entry.control!.pinned ? 'unpin' : 'pin')}>{entry.control.pinned ? 'Unpin' : 'Pin source'}</button>
-          <button disabled={saving || loading || !!error || snap.turnActive} onClick={() => void change(entry.control!, entry.control!.excluded ? 'include' : 'exclude')}>{entry.control.excluded ? 'Include source' : 'Exclude source'}</button>
-        </div>}
-      </details>)}
-      {section === 'memory' && snap.turnActive && <p>Wait for this turn to finish before changing memory sources.</p>}
-      <div className="lsp-actions"><button disabled={loading || saving || !!error || offset === 0} onClick={() => setOffset(Math.max(0, offset - 20))}>Previous page</button><button disabled={loading || saving || !!error || page.next_offset === null} onClick={() => setOffset(page.next_offset!)}>Next page</button></div>
+    <p className="context-inspector__lead">What the agent sees. Estimates are local; no provider request is made.</p>
+    <div className="context-inspector__bar">
+      <select aria-label="Context section" value={section} disabled={saving} onChange={event => { setSection(event.target.value as Section); setOffset(0) }}>{contextSections.map(id => <option key={id} value={id}>{id[0]!.toUpperCase()+id.slice(1)}</option>)}</select>
+      <button className="context-inspector__refresh" title="Refresh context" aria-label="Refresh context" disabled={loading || saving} onClick={() => { generation.current = undefined; setOffset(0); setRefresh(value => value + 1) }}><Icon name="retry" size={13} /></button>
+    </div>
+    {summary && <p className="context-inspector__meta">{summary.available ? `${summary.count.toLocaleString()} ${summary.count === 1 ? 'entry' : 'entries'} · ${section === 'compaction' ? 'not in model context' : `~${summary.estimated_tokens.toLocaleString()} tokens`} · ${summary.provenance}` : 'Not assembled yet'}</p>}
+    {loading && <p className="context-inspector__meta" role="status">Loading context…</p>}{error && <p className="studio-error" role="alert">{error}</p>}{notice && <p className="context-inspector__meta" role="status">{notice}</p>}
+    {page && <>
+      {page.entries.length === 0 && <p className="context-inspector__meta">No entries in this section.</p>}
+      <div className="context-sources">
+      {page.entries.map(entry => {
+        const title = contextTitle(entry.title)
+        return <details className="context-source" key={`${page.generation}:${section}:${entry.index}`}>
+          <summary>
+            <span className="context-source__title" title={entry.title}>{title}</span>
+            {entry.control?.pinned ? <span className="context-source__tag">Pinned</span> : entry.control?.excluded ? <span className="context-source__tag">Excluded</span> : null}
+            <span className="context-source__tokens">~{entry.estimated_tokens.toLocaleString()}</span>
+          </summary>
+          <div className="context-source__body" tabIndex={0}>{reflowContextText(entry.text)}</div>
+          {entry.truncated && <p className="context-inspector__meta">Excerpt truncated at 8,000 characters.</p>}
+          {entry.control && <div className="lsp-actions">
+            <button disabled={saving || loading || !!error || snap.turnActive} onClick={() => void change(entry.control!, entry.control!.pinned ? 'unpin' : 'pin')}>{entry.control.pinned ? 'Unpin' : 'Pin source'}</button>
+            <button disabled={saving || loading || !!error || snap.turnActive} onClick={() => void change(entry.control!, entry.control!.excluded ? 'include' : 'exclude')}>{entry.control.excluded ? 'Include source' : 'Exclude source'}</button>
+          </div>}
+        </details>
+      })}
+      </div>
+      {section === 'memory' && snap.turnActive && <p className="context-inspector__meta">Wait for this turn to finish before changing memory sources.</p>}
+      {paged && <div className="context-pager">
+        <button aria-label="Previous page" disabled={loading || saving || !!error || offset === 0} onClick={() => setOffset(Math.max(0, offset - 20))}><Icon name="chevron" size={12} /></button>
+        <span>{page.entries.length ? `${offset + 1}–${offset + page.entries.length}` : '0'}{summary ? ` of ${summary.count.toLocaleString()}` : ''}</span>
+        <button aria-label="Next page" disabled={loading || saving || !!error || page.next_offset === null} onClick={() => setOffset(page.next_offset!)}><Icon name="chevron" size={12} /></button>
+      </div>}
+      <p className="context-inspector__note">{page.note}</p>
     </>}
   </section>
 }

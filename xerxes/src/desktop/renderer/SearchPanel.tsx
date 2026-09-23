@@ -44,9 +44,11 @@ export function SessionSearch({ snap }: { snap: Snapshot }): ReactElement | null
   }, [needle])
 
   const hits = snap.searchResults
-  const locked = snap.turnActive
+  // openSession stopped being a mid-turn no-op: it now navigates, or hands
+  // the target to another window so the running turn keeps its connection —
+  // which is exactly what the sidebar rows already do. The gate here was
+  // resting on a comment the store had made false.
   const open = (sessionId: string): void => {
-    if (locked) return // openSession silently no-ops mid-turn — same as the sidebar
     store.closeSessionSearch()
     void store.openSession(sessionId)
   }
@@ -102,17 +104,16 @@ export function SessionSearch({ snap }: { snap: Snapshot }): ReactElement | null
         />
         <div className="palette__list">
           {hits.length === 0 && needle.trim().length >= 2 && !snap.searchSearching && (
-            <div className="prow is-sel">{snap.searchError ? `search failed — ${snap.searchError}` : 'no messages match'}</div>
+            <div className="search-status" role="status">{snap.searchError ? `Search failed: ${snap.searchError}` : 'No messages match.'}</div>
           )}
           {needle.trim().length < 2 && (
-            <div className="prow is-sel">type at least 2 characters — full-text over saved transcripts</div>
+            <div className="search-status">Type at least two characters to search every saved conversation.</div>
           )}
           {hits.map((hit, index) => (
             <button
               key={`${hit.sessionId}:${hit.messageIndex}`}
               className={`srow${index === cursor ? ' is-sel' : ''}`}
-              disabled={locked}
-              title={locked ? 'finish or stop the running task before switching sessions' : `open “${hit.title || hit.sessionId}”`}
+              title={snap.turnActive ? `open “${hit.title || hit.sessionId}” in its own window — this task keeps running` : `open “${hit.title || hit.sessionId}”`}
               onMouseEnter={() => setCursor(index)}
               onClick={() => open(hit.sessionId)}
             >

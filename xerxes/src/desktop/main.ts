@@ -22,6 +22,7 @@ import { windowRecovery } from './main/windowRecovery.js'
 import { desktopMachineCommand } from './main/machines.js'
 import { xerxesHome } from '../daemon/paths.js'
 import { DaemonRpc } from './main/daemon.js'
+import { DesktopProviderForwarding } from './main/providerForwarding.js'
 import { registerDaemonBridge, detachDaemon } from './main/ipc.js'
 import { dictationPort, transcribeDictation } from './main/voice.js'
 import { loadDesktopWorkspaces, saveDesktopWorkspace } from './main/workspaceSettings.js'
@@ -249,12 +250,30 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
   let remoteMachine: RemoteTarget | null = null
   let remoteAttempt: AbortController | null = null
   let remoteError = ''
+  let providerForwarding: DesktopProviderForwarding | null = null
+  let localProviderDaemon: DaemonRpc | null = null
+  const closeProviderForwarding = () => {
+    void providerForwarding?.disconnect()
+    providerForwarding = null
+    localProviderDaemon?.dispose()
+    localProviderDaemon = null
+  }
   let selectedWorkspace: string | null = null
   let resumeSession: string | null = initialSessionId ?? saved?.sessionId ?? null
   let currentSession: string | null = resumeSession
 
 
-  if (initialWorkspace) saveDesktopWorkspace(workspaceFile(), initialWorkspace)
+  // Recording the workspace in the recents list is bookkeeping, not a
+  // precondition for showing a window. This runs inside the whenReady restore
+  // loop, before the window exists, so letting an unwritable or unparseable
+  // desktop.json throw here left the user with no windows at all.
+  if (initialWorkspace) {
+    try {
+      saveDesktopWorkspace(workspaceFile(), initialWorkspace)
+    } catch (error) {
+      console.error('Could not record the workspace in recents:', error instanceof Error ? error.message : error)
+    }
+  }
   const window = host ?? createWindow(saved)
   const view = host ? new WebContentsView({ webPreferences: {
     contextIsolation: true, backgroundThrottling: false, nodeIntegration: false,
@@ -331,6 +350,7 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     saveDesktopWorkspace(workspaceFile(), directory)
     remoteAttempt?.abort()
     remoteAttempt = null
+    closeProviderForwarding()
     void remote?.close()
     remote = null
     remoteMachine = null
@@ -447,7 +467,10 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
       let next = await openRemote(machine, controller.signal, (error) => {
         remoteError = error.message
       })
+      const localProviders = new DaemonRpc({projectDir:homedir()})
+      let forwarding: DesktopProviderForwarding
       const rpc = new DaemonRpc({ projectDir: next.projectDir, socketPath: next.socketPath,
+        providerRelay: (binding, frame, signal) => forwarding.relay(binding, frame, signal),
         remoteUpdate: () => next.update(), expectedRemoteBuildId: () => next.expectedBuildId,
         reconnectRemote: async signal => {
           const replacement = await next.reconnect(signal, error => { remoteError = error.message })
@@ -464,10 +487,16 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
           return replacement.socketPath
         },
       })
+      forwarding = new DesktopProviderForwarding((method, args) => localProviders.call(method,args),
+        (method,args) => rpc.call(method,args), machine.target, next.projectDir)
+      rpc.onConnection(online => { if (!online) void forwarding.disconnect() })
+      localProviders.onConnection(online => { if (!online) void forwarding.disconnect() })
       try {
         await rpc.call('runtime.status')
         controller.signal.throwIfAborted()
       } catch (error) {
+        void forwarding.disconnect()
+        localProviders.dispose()
         rpc.dispose()
         await next.close()
         throw error
@@ -480,6 +509,9 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
           ? params.resume_session_id
           : null
       const previous = remote
+      closeProviderForwarding()
+      providerForwarding = forwarding
+      localProviderDaemon = localProviders
       daemon?.dispose()
       daemon = rpc
       attach(rpc)
@@ -522,6 +554,12 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
       if (action === 'cancel') {
         remoteAttempt?.abort()
         return { ok: true }
+      }
+      if (action === 'provider-review' || action === 'provider-share' || action === 'provider-revoke') {
+        if (!remote || !daemon?.online || !providerForwarding) throw new Error('Reconnect the SSH workspace before reviewing local provider access.')
+        if (action === 'provider-review') return providerForwarding.inspect()
+        if (action === 'provider-share') return providerForwarding.authorize(params)
+        return providerForwarding.revoke(params.sessionKey)
       }
       if (action === 'connect') {
         const machine = remoteTarget(params.machine)
@@ -598,6 +636,7 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     if (!quitting) scheduleWindowSave()
     windowRoutes.remove(id)
     detachDaemon(id)
+    closeProviderForwarding()
     daemon?.dispose()
     remoteAttempt?.abort()
     voiceRequest?.abort()
@@ -652,14 +691,53 @@ void app.whenReady().then(async () => {
   const icon = appIcon()
   if (icon && process.platform === 'darwin') app.dock?.setIcon(icon)
 
+  // Commands the menu can only express by asking the focused renderer:
+  // the shell owns sessions, the palette and the find bar.
+  const toFocused = (command: string) => () => {
+    BrowserWindow.getFocusedWindow()?.webContents.send('desktop:menu', command)
+  }
+  // `role: 'appMenu'` ships no Preferences item, so ⌘, was the one binding
+  // the app honoured and never advertised; there was also no Help menu and
+  // no Find, in an app whose main surface is thousands of lines of output.
+  const appMenu = {
+    label: APP_NAME,
+    submenu: [
+      { role: 'about' as const },
+      { type: 'separator' as const },
+      { label: 'Settings…', accelerator: 'CmdOrCtrl+,', click: toFocused('settings') },
+      { type: 'separator' as const },
+      { role: 'services' as const },
+      { type: 'separator' as const },
+      { role: 'hide' as const }, { role: 'hideOthers' as const }, { role: 'unhide' as const },
+      { type: 'separator' as const },
+      { role: 'quit' as const },
+    ],
+  }
   Menu.setApplicationMenu(Menu.buildFromTemplate([
-    ...(process.platform === 'darwin' ? [{ role: 'appMenu' as const }] : []),
+    ...(process.platform === 'darwin' ? [appMenu] : []),
     { label: 'File', submenu: [
+      { label: 'New Task', accelerator: 'CmdOrCtrl+N', click: toFocused('new-task') },
+      { label: 'New Task from Template…', accelerator: 'CmdOrCtrl+Alt+N', click: toFocused('new-task-wizard') },
+      { type: 'separator' as const },
       { label: 'New Window', accelerator: 'CmdOrCtrl+Shift+N', click: () => { createWorkspaceWindow() } },
       { label: 'Open Workspace in New Window…', accelerator: 'CmdOrCtrl+Shift+O', click: () => { void pickWorkspace().then(directory => { if (directory) createWorkspaceWindow(directory) }) } },
+      { type: 'separator' as const },
+      { label: 'Export Transcript…', accelerator: 'CmdOrCtrl+E', click: toFocused('export') },
       { type: 'separator' }, { role: 'close' },
     ] },
-    { role: 'editMenu' }, { role: 'viewMenu' }, { role: 'windowMenu' },
+    { label: 'Edit', submenu: [
+      { role: 'undo' as const }, { role: 'redo' as const },
+      { type: 'separator' as const },
+      { role: 'cut' as const }, { role: 'copy' as const }, { role: 'paste' as const }, { role: 'selectAll' as const },
+      { type: 'separator' as const },
+      { label: 'Find in Conversation…', accelerator: 'CmdOrCtrl+F', click: toFocused('find') },
+      { label: 'Search All Tasks…', accelerator: 'CmdOrCtrl+Shift+F', click: toFocused('search') },
+      { label: 'Command Palette…', accelerator: 'CmdOrCtrl+K', click: toFocused('palette') },
+    ] },
+    { role: 'viewMenu' }, { role: 'windowMenu' },
+    { role: 'help', submenu: [
+      { label: 'Keyboard Shortcuts', accelerator: 'CmdOrCtrl+/', click: toFocused('shortcuts') },
+    ] },
   ]))
   const saved = loadWindowLayout(layoutFile())
   if (saved?.length) {

@@ -57,3 +57,28 @@ test('workspace registry retains empty folders, deduplicates and migrates legacy
     expect(await readFile(file,'utf8')).toBe('broken')
   } finally {await rm(root,{recursive:true,force:true})}
 })
+
+// Reading this file happens on the window-restore path, before any window
+// exists, so a torn write or a hand-edit must not be able to throw there.
+// Refusing to CLOBBER unparseable content is a separate guarantee, asserted
+// above, and must survive the read becoming total.
+test('an unreadable workspace list degrades to empty instead of throwing', async () => {
+  const {mkdtemp,rm,writeFile} = await import('node:fs/promises')
+  const {loadDesktopWorkspaces,saveDesktopWorkspace} = await import('../src/desktop/main/workspaceSettings.js')
+  const root=await mkdtemp('/tmp/xerxes-workspaces-corrupt-'), file=root+'/desktop.json'
+  try {
+    for (const body of ['', 'broken', '{"directories":', 'null', '[]', '"a string"', '{"directories":{"not":"an array"}}']) {
+      await writeFile(file, body)
+      expect(loadDesktopWorkspaces(file)).toEqual([])
+    }
+    // `null` parses cleanly but has no properties — reading `.directories` off
+    // it threw just as hard as a syntax error did.
+    await writeFile(file, 'null')
+    expect(()=>loadDesktopWorkspaces(file)).not.toThrow()
+    expect(()=>saveDesktopWorkspace(file,'/new')).toThrow()
+
+    // A well-formed file with junk entries still yields only usable paths.
+    await writeFile(file, JSON.stringify({workspace:42, directories:['/good', 'relative', 7, null, '/good']}))
+    expect(loadDesktopWorkspaces(file)).toEqual(['/good'])
+  } finally {await rm(root,{recursive:true,force:true})}
+})

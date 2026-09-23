@@ -234,8 +234,7 @@ describe('createSlashHandler', () => {
     ['/skills search review', 'skills search review'],
     ['/skills install /tmp/skill', 'skills install /tmp/skill'],
     ['/tools list', 'tools'],
-    ['/image a native sunset', 'image a native sunset'],
-    ['/voice status', 'voice status']
+    ['/image a native sunset', 'image a native sunset']
   ])('routes %s through the native daemon slash handler', async (input, command) => {
     patchUiState({ sid: 's1' })
     const request = vi.fn().mockResolvedValue({})
@@ -261,13 +260,37 @@ describe('createSlashHandler', () => {
       expect(methods).not.toContain(retired)
     }
 
-    if (input === '/voice status') {
-      expect(sys).toEqual([
-        'voice capture is not implemented in this native Bun TUI; recording shortcuts are disabled.'
-      ])
-    } else {
-      expect(sys).toEqual([])
-    }
+    expect(sys).toEqual([])
+  })
+
+  it('answers /voice locally instead of forwarding a control the daemon cannot apply', async () => {
+    patchUiState({ sid: 's1' })
+    const request = vi.fn().mockResolvedValue({})
+    const { context, send, sys } = makeContext(request)
+
+    createSlashHandler(context)('/voice status')
+    await flush()
+
+    // The daemon only re-emits `/voice` as a `ui_command` event, which no
+    // client handles. Forwarding it added a second line claiming the control
+    // had been delivered, directly contradicting the honest one below.
+    expect(request).not.toHaveBeenCalled()
+    expect(send).toEqual([])
+    expect(sys).toEqual([
+      'voice capture is not implemented in this native Bun TUI; recording shortcuts are disabled.'
+    ])
+  })
+
+  it('still validates /voice arguments before answering', async () => {
+    patchUiState({ sid: 's1' })
+    const request = vi.fn().mockResolvedValue({})
+    const { context, sys } = makeContext(request)
+
+    createSlashHandler(context)('/voice nonsense')
+    await flush()
+
+    expect(request).not.toHaveBeenCalled()
+    expect(sys).toEqual(['usage: /voice [on|off|tts|status]'])
   })
 
   it('routes every yolo toggle through the daemon instead of the retired config shim', async () => {

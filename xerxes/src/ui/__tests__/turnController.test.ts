@@ -111,10 +111,11 @@ describe('turnController', () => {
     expect(getTurnState().streaming).not.toContain('<reasoning>')
   })
 
-  it('bounds authoritative live message and reasoning buffers while preserving their newest tails', () => {
-    const oldMessage = 'm'.repeat(LIVE_RENDER_MAX_CHARS)
+  it('keeps authoritative message and reasoning buffers complete past the live render cap', () => {
+    const head = 'HEAD-MARKER'
+    const oldMessage = head + 'm'.repeat(LIVE_RENDER_MAX_CHARS)
     const newMessage = 'new-message-tail'
-    const oldReasoning = 'r'.repeat(LIVE_RENDER_MAX_CHARS)
+    const oldReasoning = head + 'r'.repeat(LIVE_RENDER_MAX_CHARS)
     const newReasoning = 'new-reasoning-tail'
 
     turnController.startMessage()
@@ -130,13 +131,43 @@ describe('turnController', () => {
       reasoningText: string
     }
 
-    expect(controller.bufRef.length).toBeLessThanOrEqual(LIVE_RENDER_MAX_CHARS)
+    // These buffers are what gets COMMITTED to the transcript: the daemon's
+    // turn_end carries no text to fall back on. Capping them here dropped the
+    // beginning of every long assistant message, so the transcript row began
+    // mid-word while the daemon's saved session still held the whole thing.
+    expect(controller.bufRef.startsWith(head)).toBe(true)
     expect(controller.bufRef.endsWith(newMessage)).toBe(true)
-    expect(controller.liveVisibleText.length).toBeLessThanOrEqual(LIVE_RENDER_MAX_CHARS)
-    expect(controller.reasoningText.length).toBeLessThanOrEqual(LIVE_RENDER_MAX_CHARS)
+    expect(controller.bufRef.length).toBe(oldMessage.length + newMessage.length)
+    expect(controller.liveVisibleText.startsWith(head)).toBe(true)
+    expect(controller.reasoningText.startsWith(head)).toBe(true)
     expect(controller.reasoningText.endsWith(newReasoning)).toBe(true)
-    expect(controller.activeReasoningText.length).toBeLessThanOrEqual(LIVE_RENDER_MAX_CHARS)
+    expect(controller.activeReasoningText.startsWith(head)).toBe(true)
     expect(controller.activeReasoningText.endsWith(newReasoning)).toBe(true)
+  })
+
+  it('still bounds what it renders, and says so', () => {
+    vi.useFakeTimers()
+    patchUiState({ streaming: true })
+    turnController.startMessage()
+    // Comfortably past the cap: the live reasoning filter withholds a short
+    // tail in case it is the start of a split <reasoning> tag, so an input of
+    // exactly LIVE_RENDER_MAX_CHARS leaves the visible text just under it —
+    // and TAIL-MARKER sits clear of that withheld window rather than in it.
+    const body = 'm'.repeat(LIVE_RENDER_MAX_CHARS * 3)
+    turnController.recordMessageDelta({ text: `HEAD-MARKER${body}TAIL-MARKER${'z'.repeat(256)}` })
+    vi.runOnlyPendingTimers()
+
+    const streaming = getTurnState().streaming
+    const controller = turnController as unknown as { bufRef: string }
+
+    // Bounding belongs at the render edge, where it is labelled, rather than in
+    // the buffer the transcript is built from — which keeps every character.
+    expect(controller.bufRef).toContain('HEAD-MARKER')
+    expect(streaming.length).toBeLessThanOrEqual(LIVE_RENDER_MAX_CHARS + 128)
+    expect(streaming).toContain('TAIL-MARKER')
+    expect(streaming).toContain('showing live tail')
+    expect(streaming).not.toContain('HEAD-MARKER')
+    vi.useRealTimers()
   })
 
   it('cancels a throttled tool progress repaint when the turn resets', () => {

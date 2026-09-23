@@ -4,6 +4,7 @@
 import { createRoot } from 'react-dom/client'
 
 import { restoreAppearance } from './appearance.js'
+import { ErrorBoundary } from './ErrorBoundary.js'
 import { App } from './App.js'
 
 // Theme: follow the system only while the user has not pinned an explicit
@@ -22,5 +23,7 @@ window.matchMedia('(prefers-color-scheme: light)').addEventListener('change', ap
 
 const container = document.getElementById('root')
 if (container) {
-  createRoot(container).render(<App />)
+  // Last line of defence: without this, any throw during render leaves an
+  // empty black window with no message and no way back but the View menu.
+  createRoot(container).render(<ErrorBoundary><App /></ErrorBoundary>)
 }

@@ -342,6 +342,17 @@ export interface DaemonRuntime {
     sessionKey: string;
     task?: string;
   }): Promise<{ ok: boolean; found?: boolean; interrupted?: number; error?: string }>;
+  /**
+   * Queue a message for one running child, delivered at its next
+   * provider/tool boundary. `delivered:false` means the child was not
+   * reachable — finished, unknown, or over its queue cap — and the caller
+   * must report that rather than implying the message landed.
+   */
+  steerSubagent?(request: {
+    sessionKey: string;
+    task: string;
+    message: string;
+  }): Promise<{ ok: boolean; delivered?: boolean; error?: string }>;
   /** Drop runner state cached for a workspace whose resources were released. */
   dropWorkspace?(cwd: string): void;
   /** Optional persistent-session removal capability for hosts with native transcript storage. */
@@ -480,6 +491,16 @@ export interface InMemoryDaemonRuntimeOptions {
   readonly subagentRetry?: (
     request: SubagentRetryRequest,
   ) => Promise<SubagentRetryResult>;
+  /**
+   * Host-owned subagent steering port. Separate from `subagentInterrupt`
+   * because the host must resolve and ownership-check the task before it can
+   * reach a manager, exactly as interrupt does.
+   */
+  readonly subagentSteer?: (request: {
+    sessionKey: string;
+    task: string;
+    message: string;
+  }) => Promise<{ ok: boolean; delivered?: boolean; error?: string }>;
   /** Host-owned subagent interrupt port wired to the daemon's subagent host. */
   readonly subagentInterrupt?: (request: {
     sessionKey: string;
@@ -606,6 +627,21 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
       return Promise.resolve({
         ok: false,
         error: "This daemon runtime does not expose subagent interrupt.",
+      });
+    }
+    return port(request);
+  }
+
+  steerSubagent(request: {
+    sessionKey: string;
+    task: string;
+    message: string;
+  }): Promise<{ ok: boolean; delivered?: boolean; error?: string }> {
+    const port = this.options.subagentSteer;
+    if (!port) {
+      return Promise.resolve({
+        ok: false,
+        error: "This daemon runtime does not expose subagent steering.",
       });
     }
     return port(request);

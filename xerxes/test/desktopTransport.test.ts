@@ -524,3 +524,27 @@ test('desktop negotiates a lease and reclaims it before resuming after a socket 
     expect(fake.requests).toHaveLength(4)
   } finally { rpc.dispose(); fake.close() }
 })
+
+test('private provider frames bypass desktop events, bound concurrency, and sanitize failures', async () => {
+  const fake=new FakeDaemon(socketPath,['warm','provider.remote.reply']);await fake.listen()
+  const events:unknown[]=[], diagnostics:unknown[]=[]
+  let release:()=>void=()=>{}, aborted=false
+  const pending=new Promise<void>(resolve=>{release=resolve})
+  const rpc=new DaemonRpc({projectDir:dir,socketPath,providerRelay:async(_binding,_frame,signal)=>{
+    signal.addEventListener('abort',()=>{aborted=true},{once:true});await pending;throw Error('private-sentinel')
+  }})
+  rpc.onEvent((type,payload)=>events.push({type,payload}));rpc.on('protocol_error',value=>diagnostics.push(value))
+  try{
+    await rpc.call('warm')
+    for(let i=0;i<17;i++)fake.raw(JSON.stringify({method:'provider.remote.request',params:{binding:'a'.repeat(32),request_id:i.toString(16).padStart(32,'0'),frame:{op:'next',id:'stream'+i,request:{messages:[{content:'private-sentinel'}]}}}})+'\n')
+    await until(()=>fake.requests.some(request=>request.method==='provider.remote.reply'),'overflow reply')
+    expect(fake.requests.find(request=>request.method==='provider.remote.reply')?.params?.reply).toEqual({error:'grant_unavailable'})
+    release()
+    await until(()=>fake.requests.filter(request=>request.method==='provider.remote.reply').length===17,'private replies')
+    expect(JSON.stringify(fake.requests)).not.toContain('private-sentinel')
+    expect(JSON.stringify(events)).not.toContain('private-sentinel');expect(diagnostics).toHaveLength(0)
+    fake.raw('{"method":"provider.remote.request","secret":"private-sentinel"BROKEN\n')
+    await until(()=>diagnostics.length>0,'safe diagnostic');expect(JSON.stringify(diagnostics)).not.toContain('private-sentinel')
+    expect(aborted).toBe(false)
+  }finally{release();rpc.dispose();fake.close()}
+})

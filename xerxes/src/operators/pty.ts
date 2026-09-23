@@ -225,6 +225,13 @@ export class PtySessionManager {
    * id fail identically — session-id possession is not authorization and must
    * not become an existence oracle.
    */
+  /** Follow the viewer's size; a full-screen program redraws on SIGWINCH. */
+  resizeForOwner(owner: string, sessionId: string, cols: number, rows: number): void {
+    const session = this.requireOwned(owner, sessionId)
+    const clamp = (value: number, max: number): number => Math.max(1, Math.min(max, Math.trunc(value)))
+    if (!session.terminal.closed) session.terminal.resize(clamp(cols, 1000), clamp(rows, 500))
+  }
+
   async writeForOwner(owner: string, sessionId: string, options: WritePtySessionOptions = {}): Promise<PtyOutput> {
     return this.write(this.requireOwned(owner, sessionId).id, options)
   }

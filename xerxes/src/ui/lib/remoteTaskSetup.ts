@@ -4,15 +4,9 @@ import { GatewayClient } from '../gatewayClient.js'
 import { createLocalProviderBroker, requestLocalProviderBroker, type LocalProviderBroker } from './localProviderBroker.js'
 import type { PreparedRemoteWorkspace, RemoteWorkspacePreparation } from './machineHandoff.js'
 
+import { shareableLocalProfiles, type ShareableLocalProfile } from "../../protocol/shareableLocalProfiles.js"
+export { shareableLocalProfiles, type ShareableLocalProfile } from "../../protocol/shareableLocalProfiles.js"
 type Rpc = (method: string, params: Record<string, unknown>) => Promise<unknown>
-export interface ShareableLocalProfile {
-  readonly name: string
-  readonly model: string
-  readonly credentialSource: string
-  readonly supported: boolean
-  readonly providerControlledOutput: boolean
-  readonly setup: string
-}
 export interface RemoteTaskReview {
   readonly destination: string
   readonly workspace: string
@@ -39,18 +33,6 @@ export type RemoteTaskDecision = { readonly kind: 'remote' } | {
 const record = (v: unknown): Record<string, unknown> => v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {}
 const label = (v: unknown, maximum = 512): string => typeof v === 'string' && v.length <= maximum && !/[\x00-\x1f\x7f]/.test(v) ? v : ''
 const failure = () => new Error('Remote task setup failed. Review the connection and selected provider before retrying.')
-
-export function shareableLocalProfiles(value: unknown): readonly ShareableLocalProfile[] {
-  const result = record(value)
-  if (result.ok !== true || !Array.isArray(result.profiles) || result.profiles.length > 1000) throw failure()
-  return Object.freeze(result.profiles.map(raw => {
-    const p = record(raw)
-    const name = label(p.name), model = label(p.model)
-    if (!name || !model) throw failure()
-    return Object.freeze({name, model, credentialSource: label(p.credential_source) || 'local provider configuration',
-      supported: p.supported === true, providerControlledOutput: p.output_limit_mode === 'provider-controlled', setup: label(p.setup)})
-  }))
-}
 
 /** Prepare a task before asking for authority. The parent owns both connections;
  * the child renderer gets only the remote session ID/key, never the local grant or

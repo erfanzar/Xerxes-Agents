@@ -1269,3 +1269,12 @@ provisional agent state, retained requested settings, and actionable errors from
 both early route resolution and later validation. Confirmed running children
 remain authoritative when another batch member fails. Profile names are not
 silently aliased across hosts.
+
+### 2026-09-21 — GUI local-provider continuity
+
+The [desktop local-provider matrix](desktop-local-provider-continuity-2026-09-21.md)
+records the previously missing GUI path to local provider authority. It covers
+same-route saved-key rotation, one review for a provider bundle, session identity
+guards, private transport handling and fail-closed reconnect/revocation. Existing
+remote credentials remain an explicit option. Final acceptance is recorded in
+that matrix; this does not close the broader workflow audit.

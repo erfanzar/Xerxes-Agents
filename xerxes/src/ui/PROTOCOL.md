@@ -20,10 +20,15 @@ The Bun implementation sources for this document are:
 - Runtime/session lifecycle: `xerxes/src/daemon/runtime.ts`
 - UI connection bootstrap: `xerxes/src/ui/gatewayClient.ts`
 
-> **Stability:** the event-name map (snake_case ⇄ PascalCase) is asserted by a
-> Bun contract test (`xerxes/test/daemonServer.test.ts`) and the TUI
-> gateway tests in `xerxes/src/ui/__tests__/`. If you change an event name or
-> add an event, update those tests **and** `gatewayTypes.ts`.
+> **Stability:** this document is enforced, not aspirational.
+> `xerxes/test/daemonProtocolContract.test.ts` reads the dispatcher and the
+> daemon's emit sites and fails when a method or event here drifts from the
+> code — in either direction, and including the *(bridge only)* flags below.
+> The event-name map (snake_case ⇄ PascalCase) is asserted by
+> `xerxes/test/streamingWireEvents.test.ts`; end-to-end event delivery by
+> `xerxes/test/daemonServer.test.ts` and the TUI gateway tests in
+> `xerxes/src/ui/__tests__/`. If you change an event name or add an event,
+> update those tests **and** `gatewayTypes.ts`.
 
 ---
 
@@ -199,7 +204,7 @@ params fall back to per-connection defaults.
 | `runtime.status`                     | `{}`                                           | `{ ok, runtime_ready, pid, daemon_protocol, daemon_build_id, active_subagents?, channels, ... }` | Liveness probe; `runtime_ready` reports configured-provider readiness and `active_subagents` protects live child work during upgrades. |
 | `runtime.reload`                     | `{ ... }`                                      | `{ ok, ... }`                                                  | Reload runtime config; re-emits status.                                           |
 | `browser.manage`                     | `{ action?, cdp_url? }`                        | `{ ok, status?, pages?, error? }`                              | `connect` attaches to an explicitly supplied, already-running Chromium CDP endpoint; `disconnect` only detaches. |
-| `slash`                              | `{ command }`                                  | `{ ok }`                                                       | Native daemon slash dispatch; unsupported commands report an explicit result.     |
+| `slash`                              | `{ command }`                                  | `{ ok }`                                                       | Native daemon slash dispatch; unsupported commands report an explicit result. Client-side controls (`/paste`, `/queue`, `/skin`, `/statusbar`, `/voice`) additionally return `handled: boolean` — see below. |
 | `set_plan_mode`                      | `{ enabled \| plan_mode, mode? }`              | `{ ok }`                                                       | Re-emits `StatusUpdate`.                                                          |
 | `set_mode`                           | `{ mode }`                                     | `{ ok }`                                                       | Re-emits `StatusUpdate`.                                                          |
 | `permission_response`                | `{ request_id, response }`                     | `{ ok }`                                                       | `response ∈ approve \| approve_for_session \| reject`. Answers `ApprovalRequest`. |
@@ -213,6 +218,65 @@ params fall back to per-connection defaults.
 | `provider_select`                    | `{ name }`                                     | `{ ok }` + emits `InitDone`                                    |                                                                                   |
 | `provider_delete`                    | `{ name }`                                     | `{ ok }` + emits `InitDone`                                    |                                                                                   |
 | `shutdown`                           | `{}`                                           | `{ ok }`                                                       | Stops the daemon.                                                                 |
+
+### Session state and history
+
+| Method                  | Params                                                      | Result                                                     | Notes                                                                                                                                              |
+| ----------------------- | ----------------------------------------------------------- | ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `session.usage`         | `{ session_key? }`                                           | `{ ok, ... }` or `{ ok: false }`                            | Token/telemetry totals for one session, with the resolved context limit.                                                                           |
+| `session.title`         | `{ session_key?, title \| value }`                            | `{ ok, ... }`                                              | Rename the attached session; also emits `session_title`.                                                                                           |
+| `session.save`          | `{ session_key?, title? }`                                   | `{ ok, ... }`                                              | Persist the active session under an explicit title.                                                                                                |
+| `session.undo`          | `{ session_key? }`                                           | `{ ok, ... }`                                              | Discard the last completed turn from the transcript. Not a filesystem undo — see `changes.undo`.                                                   |
+| `session.delete`        | `{ session_id \| id \| key }`                                 | `{ ok, ... }`                                              | Delete a saved session; a live session is evicted first.                                                                                           |
+| `session.most_recent`   | `{ project_dir? }`                                           | `{ ok, session? }`                                         | Newest saved session in the resolved project boundary; used by resume-last.                                                                        |
+| `session.compress`      | `{ session_key? }`                                           | `{ ok, ... }`                                              | Provider-backed compaction on demand. Progress surfaces as `status_update` plus slash `notification`s, not as `compaction_begin`/`compaction_end`. |
+| `session.search`        | `{ query \| text, session_id?, limit? }`                      | `{ ok, hits, stats }`                                      | Full-text transcript search. `session_id` scopes to one transcript; `limit` defaults to 20 and must be a positive integer.                          |
+| `context_breakdown`     | `{ session_key? }`                                           | `{ ok, ... }`                                              | Per-section context accounting behind the context inspector.                                                                                       |
+| `changes.undo`          | `{ session_key?, path? }`                                    | `{ ok, ... }`                                              | Reverse recorded text edits for one exact recorded path, or all of them when `path` is empty. Not a general Git discard.                            |
+| `workspace.worktree`    | `{ session_key?, action: "create", name }`                   | `{ ok, ... }`                                              | Only `action: "create"` is supported; any other action is an explicit error.                                                                        |
+| `git.status` | `{ session_key? }` | `{ ok, repository \| null, reason? }` | Source Control state of the repository containing the session cwd: branch, upstream, ahead/behind, and staged / unstaged / untracked / conflict groups (porcelain v2). `repository: null` outside a git worktree. |
+| `git.diff` | `{ session_key?, path, staged?, untracked?, commit?, orig_path? }` | `{ ok, lines, truncated }` | One file: index vs HEAD when `staged`, worktree vs index otherwise, `/dev/null` vs file when `untracked`; with `commit` (a hash), the file as that commit changed it (`orig_path` for renames). |
+| `git.show` | `{ session_key?, commit }` | `{ ok, commit, files }` | One commit by hash: subject, body, author, date, parent count, and the files it changed against its first parent (`--root` for the first commit). Refs and ranges are refused. |
+| `git.stage` / `git.unstage` | `{ session_key?, paths? , all? }` | `{ ok, status }` | Literal pathspecs, repository-relative, no traversal. `all: true` stages or unstages everything. |
+| `git.discard` | `{ session_key?, paths }` | `{ ok, status }` | Restores tracked files from the index and deletes untracked ones. Never touches staged content. |
+| `git.commit` | `{ session_key?, message, amend? }` | `{ ok, commit, status }` | Commits the index. An empty message is refused unless amending. |
+| `git.fetch` / `git.pull` / `git.push` | `{ session_key? }` | `{ ok, status }` | Client-initiated only. Pull is `--ff-only`; the first push of a branch sets its upstream. Never prompts for credentials. Dispatched concurrently. |
+| `git.branches` / `git.switch` | `{ session_key? } / { branch, create? }` | `{ ok, branches } / { ok, status }` | Local branches, newest first; switch or create-and-switch. |
+| `git.log` | `{ session_key?, limit? }` | `{ ok, commits }` | Recent commits (default 20, max 200). |
+| `git.commitMessage` | `{ session_key? }` | `{ ok, message, staged, truncated }` | Drafts a message from the staged diff (or all changes when nothing is staged) with the session model, matching recent commit subjects. Dispatched concurrently. |
+| `terminal.open` | `{ session_key?, cols?, rows? }` | `{ ok, terminal_id }` | Opens a login shell PTY in the session folder, owned by the session (listed by `terminal.list` with `kind: "pty"`, empty `command`). Input and kill use `terminal.control`. |
+| `terminal.attach` / `terminal.detach` | `{ session_key?, terminal_id }` | `{ ok, data, running, exit_code }` / `{ ok }` | Attach replays up to 200K retained characters and subscribes this connection to `terminal_output` events in the same synchronous step (no gap, no duplicate). Subscriptions end on detach, exit, or disconnect. |
+| `terminal.resize` | `{ session_key?, terminal_id, cols, rows }` | `{ ok }` | Resizes an owned PTY (SIGWINCH to the program). |
+
+### Discovery, configuration and maintenance
+
+| Method                 | Params                                          | Result                                        | Notes                                                                                                                   |
+| ---------------------- | ----------------------------------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `commands.catalog`     | `{}`                                             | `{ ok, ... }`                                 | Daemon-owned slash commands grouped by category; the TUI merges its local-only commands on top.                          |
+| `set_reasoning`        | `{ reasoning_effort \| effort }`                  | `{ ok, ... }`                                 | Missing effort is an explicit error. Re-emits `StatusUpdate`.                                                            |
+| `provider_types`       | `{}`                                             | `{ ok, types }`                               | Adapter registry: names, default endpoints and the environment variable each type falls back to. Keys never cross.       |
+| `skill_suggestions`    | `{ session_key? }`                               | `{ ok, suggestions }`                         | Skills the session observed as relevant but has not loaded.                                                              |
+| `creator_trace`        | `{ session_key? }`                               | `{ ok, trace }`                               | Authoring actions (`forge.*`, skill/preset writes) recorded against the session.                                         |
+| `runtime.update_status`| `{ ... }`                                        | `{ ok, ... }`                                 | Managed-runtime update progress for the desktop shell.                                                                   |
+| `daemon.wipe_memory`   | `{}`                                             | `{ ok, ... }`                                 | Destructive; clears persistent memory for the connection's scope.                                                        |
+| `daemon.wipe_history`  | `{}`                                             | `{ ok, ... }`                                 | Destructive; clears saved transcripts for the connection's scope.                                                        |
+
+### Declarative forge
+
+Text-template tool packages (`extensions/declarativeForge.ts`). Definitions are
+persistent and immutable, so both mutating calls require `confirm: true`.
+
+| Method            | Params                                                     | Result                          | Notes                                                                             |
+| ----------------- | ---------------------------------------------------------- | ------------------------------- | ---------------------------------------------------------------------------------- |
+| `forge.list`      | `{}`                                                        | `{ ok, packages }`              | Metadata only.                                                                     |
+| `forge.inspect`   | `{ name, version? }`                                        | `{ ok, package }`               | Includes the template body.                                                        |
+| `forge.run`       | `{ name, version?, input? }`                                | `{ ok, ... }`                   | Synchronous interpolation.                                                         |
+| `forge.define`    | `{ name, version, description?, template, parameters?, confirm: true }` | `{ ok, package }`   | Without `confirm: true` the call is refused, not silently ignored.                 |
+| `forge.undefine`  | `{ name, version, confirm: true }`                          | `{ ok, removed }`               | Same confirmation requirement.                                                     |
+| `forge.stop`      | `{}`                                                        | `{ ok: false, error }`          | Always refuses: forge runs are synchronous, so no run is ever in flight to stop.   |
+
+`forge.define`, `forge.run`, `forge.undefine` and `forge.stop` append a
+`creator_trace` entry to the attached session; the two read methods do not.
 
 **Migrated/removed** (return `{ ok: false, error: MIGRATED_ERROR }`): `task.submit`,
 `task.cancel`, `task.list`, `task.status`, bare `submit` / `list` / `status`.
@@ -249,32 +313,39 @@ terminal turn events by that identity instead of the currently selected tab.
 
 ### Event name map
 
+> **Not every row reaches a socket client.** The names below marked *(bridge
+> only)* have no producer in `daemon/` or `streaming/` — only the optional
+> native bridge (`src/bridge/`) can emit them. They stay in the vocabulary so a
+> bridge-backed client keeps working, but a client that talks to the daemon
+> directly will never receive one, and should not gate behavior on their
+> arrival. `daemonProtocolContract.test.ts` keeps this classification honest.
+
 | PascalCase (bridge alias) | snake_case (daemon wire) | Payload fields                                                                          |
 | ------------------ | --------------------- | --------------------------------------------------------------------------------------- |
 | `InitDone`         | `init_done`           | `model, session_id, cwd, git_branch, context_limit, agent_name, skills[]`               |
 | `TurnBegin`        | `turn_begin`          | `user_input: string \| Part[]`                                                          |
 | `TurnEnd`          | `turn_end`            | optional `stop_reason`, `cancelled`, `unstarted`                                                                                       |
-| `StepBegin`        | `step_begin`          | `n`                                                                                     |
-| `StepEnd`          | `step_end`            | `n`                                                                                     |
-| `StepInterrupted`  | `step_interrupted`    | —                                                                                       |
+| `StepBegin`        | `step_begin` *(bridge only)* | `n`                                                                                     |
+| `StepEnd`          | `step_end` *(bridge only)* | `n`                                                                                     |
+| `StepInterrupted`  | `step_interrupted` *(bridge only)* | —                                                                                       |
 | `SteerInput`       | `steer_input`         | `content`                                                                               |
-| `CompactionBegin`  | `compaction_begin`    | —                                                                                       |
-| `CompactionEnd`    | `compaction_end`      | —                                                                                       |
-| `HookTriggered`    | `hook_triggered`      | `hook_name, trigger_type`                                                               |
-| `HookResolved`     | `hook_resolved`       | `hook_name`                                                                             |
-| `MCPLoadingBegin`  | `mcp_loading_begin`   | `server_name`                                                                           |
-| `MCPLoadingEnd`    | `mcp_loading_end`     | `server_name, success`                                                                  |
-| `BtwBegin`         | `btw_begin`           | —                                                                                       |
-| `BtwEnd`           | `btw_end`             | —                                                                                       |
+| `CompactionBegin`  | `compaction_begin` *(bridge only)* | —                                                                                       |
+| `CompactionEnd`    | `compaction_end` *(bridge only)* | —                                                                                       |
+| `HookTriggered`    | `hook_triggered` *(bridge only)* | `hook_name, trigger_type`                                                               |
+| `HookResolved`     | `hook_resolved` *(bridge only)* | `hook_name`                                                                             |
+| `MCPLoadingBegin`  | `mcp_loading_begin` *(bridge only)* | `server_name`                                                                           |
+| `MCPLoadingEnd`    | `mcp_loading_end` *(bridge only)* | `server_name, success`                                                                  |
+| `BtwBegin`         | `btw_begin` *(bridge only)* | —                                                                                       |
+| `BtwEnd`           | `btw_end` *(bridge only)* | —                                                                                       |
 | `TextPart`         | `text_part`           | `text` (assistant text delta)                                                           |
 | `ThinkPart`        | `think_part`          | `think` (reasoning delta)                                                               |
-| `ImageURLPart`     | `image_url_part`      | `url, alt?`                                                                             |
-| `AudioURLPart`     | `audio_url_part`      | `url`                                                                                   |
-| `VideoURLPart`     | `video_url_part`      | `url, alt?`                                                                             |
+| `ImageURLPart`     | `image_url_part` *(bridge only)* | `url, alt?`                                                                             |
+| `AudioURLPart`     | `audio_url_part` *(bridge only)* | `url`                                                                                   |
+| `VideoURLPart`     | `video_url_part` *(bridge only)* | `url, alt?`                                                                             |
 | `ToolCall`         | `tool_call`           | `id, name, arguments?: string`                                                          |
-| `ToolCallPart`     | `tool_call_part`      | `arguments_part` (streamed args delta)                                                  |
+| `ToolCallPart`     | `tool_call_part` *(bridge only)* | `arguments_part` (streamed args delta)                                                  |
 | `ToolResult`       | `tool_result`         | `tool_call_id, return_value, duration_ms, display_blocks[]`                             |
-| `ToolCallRequest`  | `tool_call_request`   | `id, tool_call_id, name, arguments: object`                                             |
+| `ToolCallRequest`  | `tool_call_request` *(bridge only)* | `id, tool_call_id, name, arguments: object`                                             |
 | `ApprovalRequest`  | `approval_request`    | `id, tool_call_id, action, description`                                                 |
 | `ApprovalResponse` | `approval_response`   | `request_id, response, feedback?`                                                       |
 | `QuestionRequest`  | `question_request`    | `id, tool_call_id, questions: QuestionItem[]`                                           |
@@ -282,8 +353,33 @@ terminal turn events by that identity instead of the currently selected tab.
 | `StatusUpdate`     | `status_update`       | `context_tokens, max_context, mcp_status, plan_mode, mode, reasoning_effort, llm_duration_ms?, ttft_ms?, tokens_per_second?, cache_hit_rate?` |
 | `AgentPresetSelected` | `agent_preset_selected` | `session_id, agent_preset`                                                           |
 | `Notification`     | `notification`        | `id, category, type, severity, title, body, payload`                                    |
-| `PlanDisplay`      | `plan_display`        | `content, file_path?`                                                                   |
+| `PlanDisplay`      | `plan_display` *(bridge only)* | `content, file_path?`                                                                   |
 | `SubagentEvent`    | `subagent_event`      | `parent_tool_call_id?, agent_id?, subagent_type?, event: WireEvent` (nested, recursive) |
+
+These eight have no PascalCase bridge alias — they exist only on the daemon
+socket. They are broadcast or connection-scoped notices about work that is not
+part of the attached turn's stream, so a client may ignore any of them without
+losing turn output.
+
+| snake_case (daemon wire) | Scope | Payload fields |
+| --- | --- | --- |
+| `session_title`      | broadcast  | `session_id, title` — the model-written title, once per session. Both clients rename the tab on this. |
+| `channel_status`     | broadcast  | Channel roster after an enable/disable. |
+| `background_changed` | broadcast  | `{}` — invalidation ping; re-read `background.activity` / `session.active_list` rather than trusting a cached count. |
+| `cron_run`           | broadcast  | `job_id, session_key` — a scheduled job started a turn. |
+| `cron_event`         | broadcast  | `job_id, event_type, payload` — one nested turn event from a job that is not streaming to a caller. |
+| `cron_complete`      | broadcast  | `job_id, deliver, recipient, archive_path`. |
+| `background.complete`| connection | `task_id, text` — a `turn.background` task settled. Dot-separated by history; it is not a namespace. |
+| `ui_command`         | connection | `action, argument, session_key` — a control only a UI can perform (`paste`, `queue`, `skin`, `statusbar`, `voice`). A headless client may ignore it; the daemon still reports the slash outcome separately. |
+
+**Client-side controls are the client's job.** For those five commands the daemon
+emits `ui_command`, calls a host `DaemonUiControlPort` if one is installed, and
+returns `{ ok: true, action, handled }`. `handled` is true only when a host port
+ran; with no port the daemon has emitted the event and nothing more, and cannot
+observe whether the client applied it. Treat `handled: false` as "this is yours
+to do" — do not render it as a completed action. The daemon previously answered
+"Sent native UI command `/skin` to the connected client", which a client with no
+`ui_command` handler surfaced as a success that never happened.
 
 Context capacity fields are provider-reported metadata, never a model-name or
 provider fallback. A missing field or numeric `0` means **unknown**; clients must
@@ -780,6 +876,16 @@ Live subagent events and persisted snapshot rows carry optional
 preserve these across partial progress updates. The agent inspector renders
 explicit assignments; missing fields do not imply a fabricated provider or
 reasoning setting.
+
+`subagent.steer {task, message}` queues a message for one **running** child,
+delivered at its next provider/tool boundary — the same mechanism and the same
+`[steer from user]` framing as `turn.steer`, and equally not a conversation:
+the text joins the agent's context and the agent may or may not act on it.
+Ownership is narrowed by `sourceId` inside the runtime port, so a connection
+can only reach children of its own session. Replies are
+`{ok, delivered?, error?}`; `delivered:false` means the child was unknown,
+already terminal, or over its queue cap (8) and **nothing was delivered** —
+callers must report that rather than implying the message landed.
 
 `subagent.inspect {task, session_key?}` reads one child by exact runtime ID from
 the selected parent's retained manifest. It returns `{ok, agent}` with the same
@@ -2031,3 +2137,32 @@ existing no-phantom-history behavior.
 Pasted slash-command arguments are not file-drop hints: model versions, search
 terms and path arguments do not trigger the image-attachment suggestion. File
 paths remain ordinary composer text; the hint neither attaches nor sends them.
+
+### Desktop local-provider forwarding
+
+The desktop workspace panel and Models & Providers settings expose the same
+memory-only local provider authority as the TUI. One explicit review authorizes
+up to 32 selected local profiles/configured models for the selected SSH session
+and its delegated provider work. Local requests resolve saved same-route keys
+on each new request; no credential store is copied to SSH. Existing remote
+profiles remain managed explicitly on the workspace host.
+
+`session.status` additionally returns `provider_binding_session_guard_supported`
+and `provider_binding_busy`. The latter includes admitted turns and session
+operations that may not yet have an active turn ID. A desktop setup review
+requires the guard capability. `provider.remote.bind` accepts an optional
+`session_key` precondition; a mismatch with the physical connection's selected
+session rejects before authority or model mutation. Existing callers omitting
+this field retain their wire format. Binding also refuses admitted turns and
+in-progress session operations.
+
+With `for_model_selection:true`, `fetch_models` returns all approved local model
+IDs when `profile_name` is omitted; a supplied name still restricts the result.
+Ordinary provider management continues to refer to remote configuration.
+
+Desktop private relay frames are intercepted in the main process before public
+renderer events or diagnostics. There are at most 16 concurrent pulls and a
+60-second deadline; replies are tied to the original physical socket. Closing
+the workspace view or losing either daemon connection revokes local authority.
+Reconnecting never silently renews it. A retained requirement reports unavailable
+access until explicitly reviewed again; it never falls back to remote keys.

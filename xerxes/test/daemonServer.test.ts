@@ -25,6 +25,7 @@ import {
 } from "../src/daemon/server.js";
 import { ValidationError } from "../src/core/errors.js";
 import { TerminalRegistry } from "../src/runtime/terminalRegistry.js";
+import { PtySessionManager } from "../src/operators/pty.js";
 import { ToolRegistry } from "../src/executors/toolRegistry.js";
 import { registerMonitorTools } from "../src/tools/monitorTools.js";
 import { Scheduler as LegacyScheduler } from "../src/runtime/scheduler.js";
@@ -10178,6 +10179,93 @@ test('workspace.diff reads untracked content in the daemon project without trust
     const response = await client.next(frame => frame.id === 1);
     expect(response.result).toMatchObject({ kind: 'ok', diff: { untracked: expect.arrayContaining(['new.ts']), lines: expect.arrayContaining([{ kind: 'add', text: '+export const remote = true', newLine: 1 }]) } });
   } finally { client.close(); await server.stop(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('git.* methods drive source control in the daemon project and report non-repositories plainly', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xr-rpc-git-'));
+  const plain = await mkdtemp(join(tmpdir(), 'xr-rpc-nogit-'));
+  const gitRun = async (...args: string[]) => { await Bun.spawn(['git', ...args], { cwd: directory, stdout: 'ignore', stderr: 'ignore' }).exited; };
+  await gitRun('init', '-q', '-b', 'main');
+  await gitRun('config', 'user.name', 'Test');
+  await gitRun('config', 'user.email', 'test@example.com');
+  await gitRun('config', 'commit.gpgsign', 'false');
+  await Bun.write(join(directory, 'a.ts'), 'export const a = 1\n');
+  const server = new DaemonServer({ socketPath: join(directory, 'rpc.sock'), projectDirectory: directory, runtime: new InMemoryDaemonRuntime() });
+  await server.start();
+  const client = await SocketTestClient.connect(join(directory, 'rpc.sock'));
+  let id = 0;
+  const call = async (method: string, params: Record<string, unknown> = {}) => {
+    const request = ++id;
+    client.send({ jsonrpc: '2.0', id: request, method, params });
+    return (await client.next(frame => frame.id === request)).result as Record<string, any>;
+  };
+  try {
+    const initial = await call('git.status');
+    expect(initial.repository).toMatchObject({ branch: 'main', hasHead: false });
+    expect(initial.repository.untracked.map((f: { path: string }) => f.path)).toContain('a.ts');
+    expect(await call('git.stage', { paths: ['../escape'] })).toMatchObject({ ok: false, code: 'git-error' });
+    const staged = await call('git.stage', { paths: ['a.ts'] });
+    expect(staged.status.staged).toEqual([{ path: 'a.ts', status: 'A' }]);
+    const diff = await call('git.diff', { path: 'a.ts', staged: true });
+    expect(diff.lines).toEqual(expect.arrayContaining([expect.objectContaining({ kind: 'add', text: '+export const a = 1' })]));
+    expect(await call('git.commit', { message: '' })).toMatchObject({ ok: false, error: expect.stringContaining('commit message') });
+    const committed = await call('git.commit', { message: 'Add a' });
+    expect(committed).toMatchObject({ ok: true, commit: { subject: 'Add a' }, status: { hasHead: true, counts: { staged: 0 } } });
+    expect((await call('git.log')).commits.map((c: { subject: string }) => c.subject)).toEqual(['Add a']);
+    expect((await call('git.branches')).branches).toEqual([expect.objectContaining({ name: 'main', current: true })]);
+    expect(await call('git.bogus')).toMatchObject({ ok: false, code: 'git-unknown-method' });
+  } finally { client.close(); await server.stop(); await rm(directory, { recursive: true, force: true }); }
+
+  const bare = new DaemonServer({ socketPath: join(plain, 'rpc.sock'), projectDirectory: plain, runtime: new InMemoryDaemonRuntime() });
+  await bare.start();
+  const other = await SocketTestClient.connect(join(plain, 'rpc.sock'));
+  try {
+    other.send({ jsonrpc: '2.0', id: 1, method: 'git.status', params: {} });
+    expect((await other.next(frame => frame.id === 1)).result).toEqual({ ok: true, repository: null, reason: 'This folder is not a git repository.' });
+  } finally { other.close(); await bare.stop(); await rm(plain, { recursive: true, force: true }); }
+});
+
+test('terminal.open gives the desktop a live shell: replayed history, pushed output, input, resize, kill', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xr-rpc-term-'));
+  const terminals = new TerminalRegistry();
+  const ptySessions = new PtySessionManager({ terminals, workspaceRoot: directory });
+  const runtime = new InMemoryDaemonRuntime(undefined, { currentProjectDirectory: directory, sessionDirectory: join(directory, 'sessions') });
+  const server = new DaemonServer({ socketPath: join(directory, 'rpc.sock'), runtime, terminalRegistry: terminals, ptySessions });
+  await server.start();
+  const client = await SocketTestClient.connect(join(directory, 'rpc.sock'));
+  let id = 0;
+  const call = async (method: string, params: Record<string, unknown> = {}) => {
+    const request = ++id;
+    client.send({ jsonrpc: '2.0', id: request, method, params: { session_key: 'term-owner', ...params } });
+    return (await client.next(frame => frame.id === request)).result as Record<string, any>;
+  };
+  try {
+    await call('session.open');
+    const opened = await call('terminal.open', { cols: 100, rows: 30 });
+    expect(opened.ok).toBe(true);
+    const terminalId = opened.terminal_id as string;
+    const attached = await call('terminal.attach', { terminal_id: terminalId });
+    expect(attached).toMatchObject({ ok: true, running: true });
+    await call('terminal.control', { terminal_id: terminalId, action: 'write', chars: 'echo xr-$((20+22))\r' });
+    let seen = attached.data as string;
+    while (!seen.includes('xr-42')) {
+      const frame = await client.next(frame => frame.method === 'event' && frame.params?.type === 'terminal_output');
+      const payload = frame.params!.payload as Record<string, unknown>;
+      expect(payload.terminal_id).toBe(terminalId);
+      seen += String(payload.data);
+    }
+    expect(await call('terminal.resize', { terminal_id: terminalId, cols: 120, rows: 40 })).toEqual({ ok: true });
+    expect(await call('terminal.resize', { terminal_id: 'pty_foreign', cols: 1, rows: 1 })).toMatchObject({ ok: false });
+    // The desktop tab finds its shells again by kind + empty command, and a
+    // re-attach (tab switch, window reload) replays what already happened.
+    expect((await call('terminal.list')).terminals).toEqual(expect.arrayContaining([expect.objectContaining({ id: terminalId, kind: 'pty', command: '', running: true })]));
+    const reattached = await call('terminal.attach', { terminal_id: terminalId });
+    expect(reattached.data).toContain('xr-42');
+    await call('terminal.control', { terminal_id: terminalId, action: 'kill' });
+    const closed = await client.next(frame => frame.method === 'event' && frame.params?.type === 'terminal_output' && (frame.params.payload as Record<string, unknown> | undefined)?.closed === true);
+    expect((closed.params!.payload as Record<string, unknown>).terminal_id).toBe(terminalId);
+    expect(await call('terminal.detach', { terminal_id: terminalId })).toEqual({ ok: true });
+  } finally { client.close(); await ptySessions.disposeAll(); await server.stop(); await rm(directory, { recursive: true, force: true }); }
 });
 
 test('background.status counts live session-owned shells and watchers while idle', async () => {

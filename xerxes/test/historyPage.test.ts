@@ -55,3 +55,12 @@ test('outcomes remain ordered and appear once when paging text, no-output, and t
   expect(rows.filter(m => m.content).map(m => m.content)).toEqual(['Failed before output', 'Tool narration', 'result', 'Answer'])
   expect(s.messages[0]?.turn_outcome).toEqual({version: 1, reason: 'provider_failed'})
 })
+
+test('overlapping archived executions render once while repeated user prompts remain distinct', () => {
+  const call = { role: 'assistant', content: '', tool_calls: [{ id: 'same-call', function: { name: 'ReadFile', arguments: '{}' } }] }
+  const result = { role: 'tool', tool_call_id: 'same-call', content: 'output' }
+  const session = { id: 'archives', messages: [{ role: 'user', content: 'continue' }, call, result, { role: 'user', content: 'continue' }, call, result], toolExecutions: [], thinkingContent: [] }
+  const actions = sessionHistoryPage(session, 100).actions
+  expect(actions.filter(action => action.messages[0]?.tool_calls)).toHaveLength(1)
+  expect(actions.filter(action => action.messages[0]?.role === 'user')).toHaveLength(2)
+})

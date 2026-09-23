@@ -375,7 +375,7 @@ export class CodexSession {
       // race between independent Xerxes surfaces sharing this store. Try the
       // store-as-CAS-point recovery once before failing the caller.
       if (isInvalidGrantError(error)) {
-        const recovered = await this.retryWithRacedRefresh(token)
+        const recovered = await this.retryWithRacedRefresh(token, stored.fingerprint)
         if (recovered) return recovered
       }
       throw error
@@ -426,9 +426,9 @@ export class CodexSession {
    * when the store still holds the very token that just failed, i.e. there is
    * nothing newer to fall back to and the original error stands.
    */
-  private async retryWithRacedRefresh(attempted: OAuthToken): Promise<CodexCredential | undefined> {
+  private async retryWithRacedRefresh(attempted: OAuthToken, fingerprint: string | null): Promise<CodexCredential | undefined> {
     const current = await this.storage.loadWithFingerprint(CODEX_PROVIDER)
-    if (!current.token || current.token.refreshToken === attempted.refreshToken) {
+    if (current.fingerprint === fingerprint || !current.token || current.token.refreshToken === attempted.refreshToken) {
       return undefined
     }
     if (!current.token.isExpired(CODEX_REFRESH_SKEW_SECONDS, this.now())) {
@@ -444,18 +444,18 @@ export class CodexSession {
   }
 
   /**
-   * Choose the CLI session over the stored one when it is clearly fresher.
-   *
-   * Both tokens carry their expiry in the JWT, so the fresher access token is
-   * necessarily from a later link in the rotation chain. A CLI session that is
-   * not newer is ignored, keeping an explicit `xerxes auth login codex`
-   * authoritative when the CLI is absent or equally stale.
+   * Follow an explicitly selected CLI account independently of token age.
+   * Within one account, retain the newer rotation chain. Expiry only orders
+   * tokens for the same account; it cannot order account selections.
    */
   private preferCliSession(
     stored: OAuthToken | undefined,
     cli: OAuthToken | undefined,
   ): OAuthToken | undefined {
     if (!stored || !cli || !cli.refreshToken) return undefined
+    const selectedAccount = codexClaims(cli.accessToken).accountId
+    const storedAccount = codexClaims(stored.accessToken).accountId
+    if (selectedAccount && storedAccount && selectedAccount !== storedAccount) return cli
     if (cli.isExpired(CODEX_REFRESH_SKEW_SECONDS, this.now())) return undefined
     const cliExpiresAt = cli.expiresAt ?? 0
     const storedExpiresAt = stored.expiresAt ?? 0

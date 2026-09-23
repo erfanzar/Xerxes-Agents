@@ -14,6 +14,7 @@ import { useEffect, useState, type ReactElement } from 'react'
 import { store, type Snapshot } from './store.js'
 import type { ChannelRow } from './types.js'
 import { desktopError } from './desktopRpc.js'
+import { Icon } from './Icon.js'
 
 export function ChannelsCard({ snap }: { snap: Snapshot }): ReactElement {
   // Statuses are point-in-time daemon state, not pushed on open.
@@ -42,7 +43,7 @@ export function ChannelsCard({ snap }: { snap: Snapshot }): ReactElement {
           <span className="dot dot--idle" />
           <div className="row__main">
             <div className="row__t">Channel manager not configured</div>
-            <div className="row__s">this daemon started without channel adapters — nothing to enable here</div>
+            <div className="row__s">This runtime started without channel adapters, so there is nothing to enable.</div>
           </div>
         </div>
       )}
@@ -51,7 +52,7 @@ export function ChannelsCard({ snap }: { snap: Snapshot }): ReactElement {
           <span className="dot dot--idle" />
           <div className="row__main">
             <div className="row__t">No channel credentials found</div>
-            <div className="row__s">configure a gateway (token/secret env or config) and restart the daemon to list it here</div>
+            <div className="row__s">Configure a gateway (token or secret in env or config), then restart the runtime to list it here.</div>
           </div>
         </div>
       )}
@@ -83,7 +84,7 @@ export function ChannelsCard({ snap }: { snap: Snapshot }): ReactElement {
         ))}
       </div>
       <div style={{ display: 'flex', gap: 8, paddingTop: 16 }}>
-        <button className="btn btn--ghost" onClick={() => store.loadChannels()}>↻ Refresh</button>
+        <button className="btn btn--ghost" onClick={() => store.loadChannels()}><Icon name="retry" size={13} /> Refresh</button>
       </div>
     </>
   )

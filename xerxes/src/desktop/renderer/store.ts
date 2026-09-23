@@ -28,7 +28,7 @@ import { sessionToMarkdown, type ExportSession } from './exportMarkdown.js'
 import { selectedSession, rememberSession } from './sessionPreference.js'
 import { historyBlocks, readHistoryPage, type HistoryPage } from './history.js'
 import { connectionFailureKind } from './connectionFailure.js'
-import { desktopCall, desktopError } from './desktopRpc.js'
+import { desktopCall, desktopError, text } from './desktopRpc.js'
 import { foldAgentEvent } from './agentEvents.js'
 import type {
   AgentMember,
@@ -315,6 +315,18 @@ export interface Snapshot {
   // ── settings data ──
   readonly providers: readonly ProviderRow[]
   readonly providerError: string
+  /**
+   * A session switch or a new task is in flight. Distinct from `connection`:
+   * both used to reuse 'connecting', so deliberate navigation impersonated
+   * a dropped daemon.
+   */
+  readonly navigating: 'session' | 'fresh' | null
+  /** provider_list is in flight — distinct from "there are none". */
+  readonly providersLoading: boolean
+  /** fetch_models is in flight — distinct from "zero models discovered". */
+  readonly modelsLoading: boolean
+  /** Why discovery failed, shown where the person waiting can see it. */
+  readonly modelsError: string | null
   readonly providerSwitching: string | null
   readonly providerSwitchError: string | null
   /** Model catalogs and editable capacities cached for each provider profile. */
@@ -681,6 +693,8 @@ export class Store {
   // ── workspace folds (not part of the transcript) ──
   private queue: QueueItem[] = []
   private changes = new Map<string, DiffFile>()
+  /** Edit totals when the current turn began — a checkpoint marks only this turn's change. */
+  private turnStartTotals = { adds: 0, dels: 0 }
   private logRing: LogEntry[] = []
   private planState: PlanState | null = null
   private failure: FailedTurn | null = null
@@ -691,6 +705,7 @@ export class Store {
   private lastUser = ''
   private preparingSubmissions = new Map<string, object>()
   private optimisticSubmissions = new Map<string, { text: string; id: number; acknowledged: boolean }>()
+  private pendingSteers = new Map<string, { session: string; text: string; shown: boolean; echoed: boolean }>()
   private slashResult: { sessionKey: string; text: string } | null = null
   private snippets: Record<string, string> = {}
   private enriching = new Set<string>()
@@ -789,6 +804,10 @@ export class Store {
       taskModalOpen: false,
       providers: [],
       providerError: '',
+      navigating: null,
+      providersLoading: false,
+      modelsLoading: false,
+      modelsError: null,
       providerSwitching: null,
       providerSwitchError: null,
       providerModels: {},
@@ -982,19 +1001,25 @@ export class Store {
     const cleaned = text.trim()
     if (!cleaned) return false
     const sessionKey = this.sessionKey
+    const steerId = crypto.randomUUID()
+    const pending = { session: sessionKey, text: cleaned, shown: false, echoed: false }
+    this.pendingSteers.set(steerId, pending)
     try {
-      const result = await this.bridge.call('turn.steer', { session_key: sessionKey, content: cleaned })
+      const result = await this.bridge.call('turn.steer', { session_key: sessionKey, content: cleaned, client_steer_id: steerId })
       if (result.ok === true) {
         if (this.sessionKey === sessionKey) {
+          if (!pending.shown) { this.builder.pushUser(cleaned); pending.shown = true }
           this.queue = [...this.queue, { id: this.seq++, text: cleaned }]
           this.patch({ queue: this.queue })
         }
         return true
       } else {
+        this.pendingSteers.delete(steerId)
         if (this.sessionKey === sessionKey) this.fail(new Error(str(result.error) || 'steering refused'))
         return false
       }
     } catch (error) {
+      this.pendingSteers.delete(steerId)
       if (this.sessionKey === sessionKey) this.fail(error)
       return false
     }
@@ -1006,9 +1031,22 @@ export class Store {
   }
 
   cancel(): void {
+    // Cancelling force-rejects any pending approval/question daemon-side.
+    // Leaving the card up would offer buttons that can only answer
+    // "refused" while keeping the header stuck on "needs input".
+    if (this.frame.approval || this.frame.question) this.patch({ approval: null, question: null })
     void this.bridge
       .call('turn.cancel', { session_key: this.sessionKey })
       .catch(error => this.fail(error))
+  }
+
+  /**
+   * Drop a decision card without answering it. The request stays pending in
+   * the daemon (and re-appears on reconnect); this only clears the surface
+   * for a user who wants the transcript back while they think.
+   */
+  dismissInteraction(): void {
+    this.patch({ approval: null, question: null })
   }
 
   /** Ask the attached process to exit; DaemonRpc reconnects and launches this build. */
@@ -1046,13 +1084,26 @@ export class Store {
   private sessionNavigationNeedsRestore = false
 
   openSession(id: string): Promise<void> {
+    const previousVersion = this.sessionNavigationVersion
     const version = ++this.sessionNavigationVersion
     this.openingSession = true
     const pending = this.sessionNavigation.then(async () => {
       if (version !== this.sessionNavigationVersion) return
-      try { await this.openSessionNow(id, version) }
+      let navigated = false
+      try { navigated = await this.openSessionNow(id, version) }
       finally {
         if (version === this.sessionNavigationVersion) {
+          // Not every click navigates: opening the already-current session
+          // mid-turn is a no-op, and a busy or cross-workspace target is
+          // handed to another window instead. `captureSessionRequest` treats
+          // ANY advance of this counter as "the user moved on", so leaving the
+          // bump in place after those exits silently discarded every reply
+          // already in flight — most damagingly `setPermissionMode`, which
+          // early-returns while `permissionUpdating` is set and whose buttons
+          // are disabled by it, leaving no way to retry in that session.
+          // Roll back only when no later click has claimed the counter; if one
+          // has, that click owns it and discarding really is correct.
+          if (!navigated) this.sessionNavigationVersion = previousVersion
           this.openingSession = false
           if (this.frame.connection === 'connecting') this.patch({ connection: 'online' })
         }
@@ -1062,19 +1113,20 @@ export class Store {
     return pending
   }
 
-  private async openSessionNow(id: string, version: number): Promise<void> {
+  /** Resolves true only when this store's own session actually changed. */
+  private async openSessionNow(id: string, version: number): Promise<boolean> {
     try {
       const row = [...this.frame.sessions, ...this.frame.live].find(session => session.id === id)
       if (this.frame.turnActive) {
-        if (id === this.frame.currentId) return
+        if (id === this.frame.currentId) return false
         if (!this.bridge.openWorkspaceWindow) throw new Error('This desktop build cannot open another session window. Relaunch the updated app.')
         await this.bridge.openWorkspaceWindow(row?.cwd || this.frame.cwd, id)
-        return
+        return false
       }
       if (row?.cwd && row.cwd !== this.frame.cwd) {
         if (!this.bridge.useWorkspace) throw new Error('This host cannot switch workspaces. Open the session from its project folder.')
         await this.bridge.useWorkspace(row.cwd, id)
-        return
+        return false
       }
       // A resume re-keys the connection, but NOT to a string of our own
       // choosing: the daemon binds a resumed session under the session id
@@ -1082,7 +1134,10 @@ export class Store {
       // contract test), and every later submit/steer/cancel sends the key
       // explicitly. Adopt the key the daemon actually bound, or the next
       // message silently lands in a fresh, context-free session.
-      this.patch({ connection: 'connecting' })
+      // Deliberate navigation, not a dropped connection: reusing
+      // 'connecting' painted "Reconnecting…" over the previous task's
+      // transcript, with a Retry button that retryConnection() ignores.
+      this.patch({ connection: 'connecting', navigating: 'session' })
       const result = await this.bridge.call('initialize', {
         history_limit: 100,
         session_key: `${this.sessionKey}-r${id.slice(-8)}`,
@@ -1091,7 +1146,7 @@ export class Store {
       })
       if (version !== this.sessionNavigationVersion) {
         if (result.ok !== false) this.sessionNavigationNeedsRestore = true
-        return
+        return true
       }
       if (result.ok === false) throw new Error(str(result.error) || 'Session initialization was rejected')
       this.sessionNavigationNeedsRestore = false
@@ -1099,23 +1154,32 @@ export class Store {
       this.patch({ sessionOpenRevision: this.frame.sessionOpenRevision + 1 })
       void this.refreshGoal()
       void this.refreshSessions()
+      return true
     } catch (error) {
-      if (version !== this.sessionNavigationVersion) return
+      if (version !== this.sessionNavigationVersion) return true
       if (this.sessionNavigationNeedsRestore && this.frame.currentId) {
         try {
           await this.initialize({ resume_session_id: this.frame.currentId })
           this.sessionNavigationNeedsRestore = false
         } catch (restoreError) {
           this.fail(restoreError)
-          return
+          return true
         }
       }
       if (this.frame.turnActive) this.patch({ error: error instanceof Error ? error.message : String(error) })
       else this.fail(error)
+      // A failed open still left the connection re-keyed or the UI in an error
+      // state; treat it as a move rather than resurrecting stale captures.
+      return true
     }
   }
 
   newChat(): void {
+    // The mouse path is honestly disabled while a turn runs; the keyboard
+    // path used to hit beginFreshTask's guard and return in silence, which
+    // reads as a broken shortcut. Say why instead.
+    if (this.frame.turnActive) { this.patch({ workspaceError: 'Finish or stop the current task before starting a new one.' }); return }
+    if (this.frame.connection !== 'online') { this.patch({ workspaceError: 'Not connected to this workspace yet.' }); return }
     void this.beginFreshTask()
   }
 
@@ -1136,7 +1200,7 @@ export class Store {
     if (this.openingSession || this.frame.turnActive || this.frame.connection !== 'online') return Promise.resolve(false)
     const sessionKey = `desktop-${Math.random().toString(36).slice(2, 10)}`
     this.openingFreshTask = true
-    this.patch({ connection: 'connecting' })
+    this.patch({ connection: 'connecting', navigating: 'fresh' })
     return this.initialize({ session_key: sessionKey, ...(agentPreset ? { agent_id: agentPreset } : {}) })
       .then(() => {
         void this.refreshGoal()
@@ -1203,25 +1267,38 @@ export class Store {
       })
   }
 
+  /**
+   * Discovery is slow (the daemon probes the active profile, up to its own
+   * timeout) and can fail. This used to patch no loading or error state and
+   * had no in-flight guard, so the picker asserted "no models discovered
+   * yet" for the whole window and after every failure, while its Retry
+   * button could race a second probe on every click. The failure also went
+   * only to a transcript notification — rendered behind the popover that
+   * triggered it, where the person waiting cannot see it.
+   */
   loadModels(force = false): void {
     if (!force && this.frame.models.length) return
+    if (this.frame.modelsLoading) return
+    this.patch({ modelsLoading: true, modelsError: null })
     void this.bridge
-      .call('fetch_models', {})
+      .call('fetch_models', {for_model_selection:true})
       .then(result => {
         if (result.ok === false) {
           // 'no profile', 'provider refused' and 'offline' are not the same
           // state as 'zero models' — say which one happened.
-          this.builder.push('notification', {
-            severity: 'error',
-            message: str(result.error) || 'model discovery failed',
-          })
+          const message = str(result.error) || 'model discovery failed'
+          this.patch({ modelsLoading: false, modelsError: message })
+          this.builder.push('notification', { severity: 'error', message })
           this.notify()
           return
         }
         const ids = Array.isArray(result.models) ? (result.models as unknown[]).map(m => str(m)).filter(Boolean) : []
-        this.patch({ models: toChoices(ids) })
+        this.patch({ models: toChoices(ids), modelsLoading: false, modelsError: null })
       })
-      .catch(error => this.fail(error))
+      .catch(error => {
+        this.patch({ modelsLoading: false, modelsError: desktopError(error) })
+        this.fail(error)
+      })
   }
 
   /** Discover one saved profile's catalog without activating that profile. */
@@ -1771,7 +1848,8 @@ export class Store {
   // ── New-task modal (mockup 18) ───────────────────────────────────────
 
   openTaskModal(): void {
-    if (this.frame.turnActive || this.frame.connection !== 'online') return
+    if (this.frame.turnActive) { this.patch({ workspaceError: 'Finish or stop the current task before starting a new one.' }); return }
+    if (this.frame.connection !== 'online') { this.patch({ workspaceError: 'Not connected to this workspace yet.' }); return }
     this.patch({ taskModalOpen: true, paletteOpen: false, wsMenuOpen: false, sessionMenu: null })
     void this.loadAgentPresets()
     this.loadModels()
@@ -2259,7 +2337,11 @@ export class Store {
   }
 
   async loadProviders(): Promise<void> {
-    this.patch({ providerError: '' })
+    // "No saved provider profiles" is only true once provider_list has
+    // answered; asserting it while in flight told a configured user they
+    // had nothing — and Retry cleared the error first, so the retry showed
+    // that same false empty state for its whole duration.
+    this.patch({ providerError: '', providersLoading: true })
     const providers = this.bridge
       .call('provider_list', {})
       .then(result => {
@@ -2306,6 +2388,7 @@ export class Store {
       .then(result => ({ permissionMode: str(result.permission_mode), model: str(result.model) }))
       .catch(() => null)
     await Promise.all([providers, types, status]).then(([rows, typeRows, state]) => {
+      this.patch({ providersLoading: false })
       if (rows) this.patch({ providers: rows })
       if (typeRows) this.patch({ providerTypes: typeRows })
       // Daemon-wide fallback only: a session-scoped /permissions pin from
@@ -2370,6 +2453,8 @@ export class Store {
 
   private wentOffline(error?: unknown): void {
     this.preparingSubmissions.delete(this.sessionKey)
+    // A navigation that ends offline really is a connection problem now.
+    if (this.frame.navigating) this.patch({ navigating: null })
     if (error !== undefined) this.patch({ error: error instanceof Error ? error.message : String(error) })
     if (this.supportsConnectionLease) {
       this.patch({ connection: 'offline' })
@@ -2489,6 +2574,32 @@ export class Store {
       this.historySeen.clear()
     }
     this.patch({ historyMore: Boolean(this.historyBefore || this.legacyHistory.length), historyLoading: false, historyError: null })
+    if (!preserve) this.refoldChangesFromHistory(session)
+  }
+
+  /**
+   * Rebuild the session-edits fold from restored history.
+   *
+   * `changes` was written only by the live `tool_call` event, so reopening
+   * a task showed "No files changed in this session yet" while the git
+   * working tree panel listed exactly those files as dirty — and the
+   * session-scoped undo had nothing to act on.
+   */
+  private refoldChangesFromHistory(session: Readonly<Record<string, unknown>>): void {
+    const executions = Array.isArray(session.tool_executions) ? session.tool_executions : []
+    if (!executions.length) return
+    let folded = false
+    for (const raw of executions) {
+      if (!raw || typeof raw !== 'object') continue
+      const execution = raw as Record<string, unknown>
+      if (execution.permitted === false || execution.error) continue
+      const args = parseArgs(execution.arguments ?? execution.input)
+      const stats = editStatsOf(execution.name, args)
+      if (!stats) continue
+      this.foldChange(stats, args, str(execution.name))
+      folded = true
+    }
+    if (folded) this.patch({ changes: [...this.changes.values()] })
   }
 
   async loadOlderHistory(): Promise<void> {
@@ -2549,8 +2660,16 @@ export class Store {
     if (extra.resume_session_id && boundKey) {
       this.sessionKey = boundKey
       if (!preserveLiveTranscript) {
-        this.adoptHistory(session, !explicitNavigation && this.frame.currentId === str(result.session_id ?? session.id))
-        this.resetWorkspaceFolds()
+        // Reconnecting to the session already on screen is not a session
+        // change. Resetting the folds here discarded the Changes review list,
+        // the captured plan and the event log, and yanked the user off the
+        // Changes tab — while the transcript this same call preserved still
+        // showed the edits those folds described. Only the request state that
+        // died with the old connection has to go.
+        const sameSession = !explicitNavigation && this.frame.currentId === str(result.session_id ?? session.id)
+        this.adoptHistory(session, sameSession)
+        if (sameSession) this.resetInFlightRequests()
+        else this.resetWorkspaceFolds()
       }
     }
     if (!extra.resume_session_id) this.adoptHistory(session)
@@ -2570,6 +2689,7 @@ export class Store {
     }
     this.patch({
       connection: 'online',
+      navigating: null,
       error: null,
       currentId: str(result.session_id ?? session.id),
       currentTitle: str(session.title),
@@ -2798,6 +2918,28 @@ export class Store {
     return action === 'retry' ? 'Retry accepted. Waiting for agent progress.' : 'Stop requested. Waiting for the runtime to confirm it ended.'
   }
 
+  /**
+   * Send a message to a running child. It joins the agent's context at its
+   * next provider/tool boundary — the same semantics as steering the main
+   * turn, and equally not a conversation: the agent may or may not act on it.
+   *
+   * `delivered:false` is the interesting case and is reported as a failure,
+   * because the daemon returns it for a child that finished between the user
+   * reading the roster and pressing send. Treating that as success would tell
+   * someone their redirect landed when nothing will ever read it.
+   */
+  async steerAgent(id: string, message: string): Promise<string> {
+    const cleaned = message.trim()
+    if (!cleaned) throw new Error('Type a message to send')
+    if (!this.frame.fleet.some(row => row.id === id)) throw new Error('This agent is no longer in the current session')
+    const key = this.sessionKey
+    const result = await desktopCall(this.bridge, key, 'subagent.steer', { task: id, message: cleaned })
+    if (result.ok !== true) throw new Error(text(result.error) || 'The runtime rejected the message')
+    if (result.delivered !== true) throw new Error('This agent is no longer running, so the message was not delivered')
+    if (key === this.sessionKey) this.refreshFleet()
+    return 'Sent. The agent reads it at its next step.'
+  }
+
   private refreshFleet(): void {
     const key = this.sessionKey
     const requestedAt = Date.now()
@@ -3015,6 +3157,7 @@ export class Store {
       }
       case 'turn_begin': {
         this.turnCount += 1
+        this.turnStartTotals = this.changeTotals()
         // A new attempt supersedes the previous failure card; retry clears
         // it explicitly, and any other submit means the human moved on.
         this.failure = null
@@ -3194,6 +3337,16 @@ export class Store {
         // it queues the text, and offers no "consumed" signal — steers drain
         // silently at the next step boundary. The mirror therefore lives
         // until turn_end, which is the one boundary we do observe.
+        const content = str(payload.content)
+        if (!content) break
+        const id = str(payload.client_steer_id)
+        const pending = id ? this.pendingSteers.get(id) : [...this.pendingSteers.values()].find(item => item.session === this.sessionKey && item.text === content && !item.echoed)
+        if (pending) pending.echoed = true
+        if (!pending?.shown) {
+          this.builder.pushUser(content)
+          if (pending) pending.shown = true
+          this.notify()
+        }
         break
       }
       case 'session_title': {
@@ -3287,6 +3440,14 @@ export class Store {
       case 'approval_request': {
         const id = str(payload.id) || str(payload.request_id)
         if (!id) break
+        // The daemon attaches the real arguments as `inputs` (and older
+        // builds as `arguments`). Keep them structured for the card to
+        // render per tool; the flat description is only the last resort.
+        const inputs = payload.inputs && typeof payload.inputs === 'object' && !Array.isArray(payload.inputs)
+          ? payload.inputs as Record<string, unknown>
+          : payload.arguments && typeof payload.arguments === 'object' && !Array.isArray(payload.arguments)
+            ? payload.arguments as Record<string, unknown>
+            : null
         const description =
           str(payload.description) ||
           `${str(payload.name)} ${str(JSON.stringify(payload.arguments ?? ''))}`.trim()
@@ -3296,7 +3457,10 @@ export class Store {
             action: str(payload.action),
             description,
             ...(str(payload.tool_call_id) ? { toolCallId: str(payload.tool_call_id) } : {}),
-            ...(str(payload.tool_name) ? { toolName: str(payload.tool_name) } : {}),
+            ...(str(payload.tool_name) || str(payload.name) ? { toolName: str(payload.tool_name) || str(payload.name) } : {}),
+            ...(inputs ? { inputs } : {}),
+            ...(str(payload.cwd) ? { cwd: str(payload.cwd) } : {}),
+            ...(str(payload.reason) ? { reason: str(payload.reason) } : {}),
           },
         })
         break
@@ -3334,13 +3498,19 @@ export class Store {
         break
       }
       case 'turn_end': {
+        for (const [id, steer] of this.pendingSteers) if (steer.session === this.sessionKey) this.pendingSteers.delete(id)
         this.preparingSubmissions.delete(this.sessionKey)
         // Plan mode: whatever the agent reasoned toward in text is the plan
         // artifact — capture it before the buffer resets for the next turn.
         if (this.frame.planMode && this.agentText.trim()) this.capturePlan(this.agentText)
         this.agentText = ''
         this.builder.finalize()
-        this.builder.pushCheckpoint(this.turnCount, this.changeTotals())
+        // `changes` is session-cumulative: a read-only turn after an editing
+        // one must not stamp a checkpoint after its answer.
+        const totals = this.changeTotals()
+        if (totals.adds !== this.turnStartTotals.adds || totals.dels !== this.turnStartTotals.dels) {
+          this.builder.pushCheckpoint(this.turnCount, totals)
+        }
         if (this.turnError) {
           this.failure = { error: this.turnError, turn: this.turnCount, lastUser: this.lastUser }
           this.turnError = null
@@ -3363,6 +3533,11 @@ export class Store {
           queue: this.queue,
           metricPhase: null,
           metricPhaseStartedAt: null,
+          // The daemon force-rejects any pending interaction when the turn
+          // ends, so a card left on screen answers into a dead request and
+          // pins the header on "needs input" for every later turn.
+          approval: null,
+          question: null,
         })
         void this.refreshGoal()
         this.refreshFleet()
@@ -3436,9 +3611,30 @@ export class Store {
     this.logRing = [...this.logRing, { id: this.seq++, turn: this.turnCount, type, summary: summarize(type, payload) }].slice(-LOG_CAP)
   }
 
+  /**
+   * Drop request state that a dropped socket has already invalidated.
+   *
+   * Safe on a same-session reconnect, unlike the session-scoped folds below:
+   * every one of these flags gates a control (the reasoning picker, the
+   * context popover, the permission buttons) whose reply died with the old
+   * connection, and `setPermissionMode` early-returns while its flag is set.
+   */
+  private resetInFlightRequests(): void {
+    this.patch({
+      reasoningPickerOpen: false,
+      reasoningLoading: false,
+      contextMenuOpen: false,
+      contextBreakdownLoading: false,
+      permissionUpdating: false,
+      permissionError: null,
+    })
+  }
+
   private resetWorkspaceFolds(): void {
+    this.resetInFlightRequests()
     this.queue = []
     this.changes.clear()
+    this.turnStartTotals = { adds: 0, dels: 0 }
     this.logRing = []
     this.planState = null
     this.failure = null
@@ -3449,6 +3645,17 @@ export class Store {
     this.ttftTotalMs = 0
     this.ttftSamples = 0
     this.activeMetricTools.clear()
+    // Agent bookkeeping belongs to the session that spawned it. Only turn_begin
+    // used to clear these, so a session left with a still-working subagent
+    // carried its members into the next session: the fleet poll kept running
+    // against the NEW session while its stop condition read the OLD session's
+    // members, and `syncAgentMembersFromFleet` could commit the old session's
+    // agents card into the new session's transcript. Title collisions also
+    // folded the new session's status updates onto the old session's entries.
+    this.stopFleetPoll()
+    this.agentMembers.clear()
+    this.agentMemberKeysByTitle.clear()
+    this.pendingAgentCalls.clear()
     this.patch({
       reasoningPickerOpen: false,
       reasoningLoading: false,
@@ -3538,7 +3745,9 @@ export class Store {
       snippets: this.snippets,
     })
     if ('currentId' in merge || 'cwd' in merge) rememberSession((this.frame.storageScope ?? '') + this.frame.cwd, this.frame.currentId)
-    this.emit()
+    // Structural change (connection, approval, tab, session): render now.
+    // Only the per-token streaming path below is allowed to wait a frame.
+    this.emit(true)
   }
 
   private notify(): void {
@@ -3556,8 +3765,34 @@ export class Store {
     return Object.freeze({ ...value, submissionPending: this.preparingSubmissions.has(String(value.sessionKey ?? this.sessionKey)) } as Snapshot)
   }
 
-  private emit(): void {
-    for (const listener of this.listeners) listener()
+  /**
+   * Coalesce notifications to one per frame.
+   *
+   * `text_part` and `think_part` arrive per token and each one used to run
+   * a full snapshot rebuild and a synchronous re-render of the whole Shell,
+   * because the snapshot is one object read through `useSyncExternalStore`.
+   * A fast model made the window spend its time re-rendering the sidebar
+   * and the rail to add a word to the transcript.
+   *
+   * The snapshot itself is still rebuilt eagerly, so `getSnapshot()` is
+   * always current for anything that reads it synchronously; only the
+   * listener fan-out waits for the next frame. A pending frame is flushed
+   * immediately on any event that changes more than the streaming tail.
+   */
+  private emitScheduled: number | null = null
+
+  private emit(immediate = false): void {
+    if (immediate) {
+      if (this.emitScheduled !== null) { cancelAnimationFrame(this.emitScheduled); this.emitScheduled = null }
+      for (const listener of this.listeners) listener()
+      return
+    }
+    if (this.emitScheduled !== null) return
+    if (typeof requestAnimationFrame !== 'function') { for (const listener of this.listeners) listener(); return }
+    this.emitScheduled = requestAnimationFrame(() => {
+      this.emitScheduled = null
+      for (const listener of this.listeners) listener()
+    })
   }
 }
 

@@ -11,7 +11,7 @@ test.skipIf(process.platform === 'win32')('a hung Git lookup is killed and falls
   const git = join(directory, 'git')
   const pidFile = join(directory, 'git.pid')
   const modulePath = join(import.meta.dir, '../src/desktop/main/spawn.ts')
-  await Bun.write(git, `#!/bin/sh\necho $ > ${JSON.stringify(pidFile)}\ntrap '' TERM\nwhile :; do :; done\n`)
+  await Bun.write(git, `#!/bin/sh\necho $$ > ${JSON.stringify(pidFile)}\ntrap '' TERM\nwhile :; do :; done\n`)
   await chmod(git, 0o700)
   const runner = Bun.spawn([process.execPath, '-e', `import {canonicalProjectDir} from ${JSON.stringify(modulePath)};console.log(canonicalProjectDir(${JSON.stringify(directory)}))`], {
     env: { ...process.env, PATH: directory }, stdout: 'pipe', stderr: 'pipe',

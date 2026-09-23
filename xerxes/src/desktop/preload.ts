@@ -63,6 +63,14 @@ const bridge = {
     ipcRenderer.on('desktop:window-chrome', listener)
     return () => { ipcRenderer.removeListener('desktop:window-chrome', listener) }
   },
+  /** Menu commands the main process can only express through the shell. */
+  onMenuCommand(handler: (command: string) => void): () => void {
+    const listener = (_event: Electron.IpcRendererEvent, command: unknown) => {
+      if (typeof command === 'string' && command && command.length <= 64) handler(command)
+    }
+    ipcRenderer.on('desktop:menu', listener)
+    return () => { ipcRenderer.removeListener('desktop:menu', listener) }
+  },
   getResumeSession(): Promise<string | null> {
     return ipcRenderer.invoke('desktop:resume')
   },
@@ -79,7 +87,7 @@ const bridge = {
   },
   remote(action: string, params: unknown = {}): Promise<unknown> {
     if (
-      !['list', 'hosts', 'browse', 'save', 'remove', 'connect', 'cancel', 'status'].includes(action)
+      !['list', 'hosts', 'browse', 'save', 'remove', 'connect', 'cancel', 'status', 'provider-review', 'provider-share', 'provider-revoke'].includes(action)
     )
       return Promise.reject(new Error('Unknown remote action'))
     return ipcRenderer.invoke('desktop:remote', action, cleanParams(params))

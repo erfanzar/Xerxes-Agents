@@ -106,6 +106,8 @@ async function buildDesktop(): Promise<void> {
   for (const asset of ['index.html', 'app.css', 'atelier.css']) {
     await cp(join(packageDirectory, 'src', 'desktop', 'renderer', asset), join(rendererOutput, asset))
   }
+  // The terminal tab's emulator stylesheet ships beside the bundle (CSP: 'self' only).
+  await cp(join(packageDirectory, 'node_modules', '@xterm', 'xterm', 'css', 'xterm.css'), join(rendererOutput, 'xterm.css'))
   // The renderer's brand asset ships inside the bundle so CSP img-src 'self'
   // covers it; the dock icon reads the full-resolution source from assets/.
   await cp(

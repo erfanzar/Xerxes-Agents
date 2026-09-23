@@ -41,11 +41,13 @@
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "3.1048.0",
-    "@smithy/node-http-handler": "4.7.3",
     "@earendil-works/pi-ai": "^0.84.2",
     "@nanostores/react": "^1.1.0",
     "@opentui/core": "0.4.3",
     "@opentui/react": "0.4.3",
+    "@smithy/node-http-handler": "4.7.3",
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/xterm": "6.0.0",
     "nanostores": "^1.2.0",
     "react": "19.2.8",
     "react-dom": "19.2.8"

@@ -5,13 +5,20 @@ import { useEffect, useRef, useState, type ReactElement } from 'react'
 import { store, type Snapshot } from './store.js'
 
 import { setupReadiness } from './setupReadiness.js'
+import { Icon } from './Icon.js'
 
 const SETUP_KEY = 'xerxes.desktop.setup.v1'
 /** A resumable checklist; configuring providers uses the existing credential editor. */
 export function FirstRunSetup({ snap }: { snap: Snapshot }): ReactElement | null {
   const [visible, setVisible] = useState(false)
   const dialog = useRef<HTMLElement>(null)
-  const shown = visible && !snap.noWorkspace && !snap.settingsOpen
+  const state = setupReadiness(snap)
+  // A checklist whose every step is already ✓ is a speed bump, not an
+  // onboarding. It is also gated on having a workspace, so the genuine
+  // first run never saw it — you picked a folder and only THEN were told
+  // to "set up before your first task". Show it only when there is
+  // something to do; mark it done otherwise so it never comes back.
+  const shown = visible && !snap.noWorkspace && !snap.settingsOpen && !state.ready
   useEffect(() => {
     try {
       setVisible(localStorage.getItem(SETUP_KEY) !== 'done')
@@ -22,7 +29,6 @@ export function FirstRunSetup({ snap }: { snap: Snapshot }): ReactElement | null
     window.addEventListener('xerxes:setup', reopen)
     return () => window.removeEventListener('xerxes:setup', reopen)
   }, [])
-  const state = setupReadiness(snap)
   const finish = () => {
     try {
       localStorage.setItem(SETUP_KEY, 'done')
@@ -53,27 +59,31 @@ export function FirstRunSetup({ snap }: { snap: Snapshot }): ReactElement | null
       <div className="setup-heading">
         <div>
           <strong>Make yourself at home.</strong>
-          <p>A few things to set up before your first task.</p>
+          {/* Only the unfinished steps are ever shown now, so naming them
+              beats claiming there are "a few things" when there is one. */}
+          <p>{[!state.workspace && 'a folder', !state.runtime && 'a runtime connection', !state.model && 'a model'].filter(Boolean).join(' and ') || 'Almost there'} — then you can start.</p>
         </div>
         <button onClick={finish}>Later</button>
       </div>
       <div className="setup-steps">
         <div>
-          <span>{state.workspace ? '✓' : '1'}</span>
+          <span>{state.workspace ? <Icon name="check" size={12} /> : '1'}</span>
           <strong>Your workspace</strong>
           <p>{snap.cwd || 'Choose a project folder.'}</p>
           <button onClick={() => store.chooseWorkspace()}>Change folder</button>
         </div>
         <div>
-          <span>{state.runtime ? '✓' : '2'}</span>
+          <span>{state.runtime ? <Icon name="check" size={12} /> : '2'}</span>
           <strong>Runtime</strong>
-          <p>{state.runtime ? 'Connected and ready.' : 'Connecting to the shared runtime…'}</p>
+          <p>{state.runtime ? 'Connected and ready.' : state.runtimeStalled ? (snap.error || 'This workspace needs attention before the runtime can start.') : 'Connecting to the shared runtime…'}</p>
           {!state.runtime && (
-            <button onClick={() => store.retryConnection()}>Retry connection</button>
+            state.runtimeStalled
+              ? <button onClick={() => store.openSettings()}>Open settings</button>
+              : <button onClick={() => store.retryConnection()}>Retry connection</button>
           )}
         </div>
         <div>
-          <span>{state.model ? '✓' : '3'}</span>
+          <span>{state.model ? <Icon name="check" size={12} /> : '3'}</span>
           <strong>Your model</strong>
           <p>{snap.model || 'Use your own provider account or local endpoint.'}</p>
           <button disabled={!state.runtime} onClick={() => store.openSettings('models')}>
@@ -89,7 +99,7 @@ export function FirstRunSetup({ snap }: { snap: Snapshot }): ReactElement | null
           Review tool permissions
         </button>
         <button className="studio-primary" disabled={!state.ready} onClick={finish}>
-          Start working →
+          Start working <Icon name="arrow" size={12} />
         </button>
       </footer>
     </section>

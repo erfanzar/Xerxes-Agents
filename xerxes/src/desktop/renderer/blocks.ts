@@ -29,6 +29,25 @@ interface ThinkingRun {
   text: string
 }
 interface NoticeRun { readonly kind: 'notice'; readonly text: string; readonly error: boolean }
+
+/**
+ * Daemon notices are written for the TUI, where `/runs inspect <id>` is a
+ * command you can actually type. In the desktop it is a raw UUID on its own
+ * line that does nothing — and a failed run already appears in the Activity
+ * rail, where its output is one click away. Two dead lines per failure adds
+ * up fast: a task with a handful of failed commands spends more of the
+ * transcript on unfollowable instructions than on the failures themselves.
+ *
+ * Only the trailing slash-command line is dropped; the message keeps every
+ * word that describes what happened.
+ */
+export function noticeText(message: string): string {
+  return message
+    .split('\n')
+    .filter(line => !/^\s*\/runs\s+inspect\s+\S+\s*$/.test(line))
+    .join('\n')
+    .trim() || message.trim()
+}
 type Run = ToolRun | TextRun | ThinkingRun | NoticeRun
 
 /** Coarse duration label from a wire millisecond count. */
@@ -153,6 +172,8 @@ export class BlockBuilder {
    * finalize so the next turn's spawn opens a fresh card.
    */
   private agentsCard: { readonly id: number; readonly members: readonly AgentMember[] } | null = null
+  /** The run that was trailing when the card opened — normally the spawn call's tools run. */
+  private agentsAnchor: Run | null = null
 
   private nextId(): number {
     return this.seq++
@@ -173,6 +194,13 @@ export class BlockBuilder {
       return
     }
     this.agentsCard = { id: this.nextId(), members }
+    this.agentsAnchor = this.runs.at(-1) ?? null
+  }
+
+  private agentsBlock(): Block | null {
+    const card = this.agentsCard
+    if (!card || this.blocks.some(block => block.id === card.id)) return null
+    return { kind: 'agents', id: card.id, members: card.members }
   }
 
   /**
@@ -264,6 +292,13 @@ export class BlockBuilder {
           if (run.kind === 'tools' && !run.order.includes(id)) run.order.push(id)
           this.tools.set(id, item)
         }
+        // Steering can place a user bubble after a still-running tool group.
+        // Its eventual result updates that original group, not a duplicate.
+        this.blocks = this.blocks.map(block => {
+          if (block.kind !== 'tools' || !block.items.some(tool => tool.id === id)) return block
+          const items = block.items.map(tool => tool.id === id ? item : tool)
+          return { ...block, items, running: items.some(tool => tool.state === 'working') }
+        })
         break
       }
       case 'notification': {
@@ -302,7 +337,7 @@ export class BlockBuilder {
           ''
         if (!message) break
         const severity = String(payload.severity ?? payload.level ?? 'info').toLowerCase()
-        const notice: NoticeRun = { kind: 'notice', error: severity.includes('error') || severity.includes('fatal'), text: message }
+        const notice: NoticeRun = { kind: 'notice', error: severity.includes('error') || severity.includes('fatal'), text: noticeText(message) }
         const id = this.nextId()
         if (this.runs.length) { this.runIds.set(notice, id); this.runs.push(notice) }
         else this.blocks.push({ ...notice, id })
@@ -315,7 +350,7 @@ export class BlockBuilder {
 
   /** A user line lands at the fold's end (submit ordering, replays). */
   pushUser(text: string, contextSummary = false): number {
-    this.finalize()
+    this.commitRuns(false)
     const id = this.nextId()
     this.blocks.push({ kind: 'user', id, text, ...(contextSummary ? { contextSummary: true } : {}) })
     return id
@@ -356,9 +391,12 @@ export class BlockBuilder {
     // (the "caret sticks around after the agent is done talking" bug).
     const tail = this.runs.length - 1
     const live = this.runs.map((run, index) => this.runBlock(run, index, index === tail))
-    // The agents card trails the live activity — it updates in place.
-    if (this.agentsCard) {
-      return [...this.blocks, ...live, { kind: 'agents', id: this.agentsCard.id, members: this.agentsCard.members }]
+    // The card sits right behind the run that spawned it, not behind whatever
+    // streamed last — otherwise it trails the final answer.
+    const card = this.agentsBlock()
+    if (card) {
+      const at = this.agentsAnchor ? this.runs.indexOf(this.agentsAnchor) : -1
+      live.splice(at >= 0 ? at + 1 : live.length, 0, card)
     }
     return [...this.blocks, ...live]
   }
@@ -380,26 +418,38 @@ export class BlockBuilder {
 
   /** Commit every run into the fold, in stream order; call on turn_end. */
   finalize(): void {
+    this.commitRuns(true)
+  }
+
+  private commitRuns(ended: boolean): void {
     // Close any tool still marked working: the turn ended, so nothing can
     // land a result anymore. Closing before rendering keeps the trail honest.
     for (const [id, tool] of this.tools) {
-      if (tool.state === 'working') this.tools.set(id, { ...tool, state: 'done', dur: tool.dur || '' })
+      if (ended && tool.state === 'working') this.tools.set(id, { ...tool, state: 'failed', error: 'Turn ended before a tool result was received' })
     }
+    this.blocks = this.blocks.map(block => {
+      if (block.kind !== 'tools') return block
+      const items = block.items.map(item => this.tools.get(item.id) ?? item)
+      return { ...block, items, running: items.some(item => item.state === 'working') }
+    })
     for (const [index, run] of this.runs.entries()) {
       const block = this.runBlock(run, index, false)
-      if (block.kind === 'tools') this.blocks.push({ ...block, running: false })
+      if (block.kind === 'tools') this.blocks.push(block)
       else if (block.kind === 'thinking') this.blocks.push({ ...block, streaming: false })
       else if (block.kind === 'agent') this.blocks.push({ ...block, streaming: false })
       else if (block.kind === 'notice') this.blocks.push(block)
+      if (run === this.agentsAnchor) {
+        const card = this.agentsBlock()
+        if (card) this.blocks.push(card)
+      }
     }
     this.runs = []
-    this.tools.clear()
+    if (ended) this.tools.clear()
     // Commit the agents card behind the drained runs, keeping the reference:
     // terminal statuses still land on it while background children settle.
     // Idempotent — all() finalizes again and must not double-commit.
-    if (this.agentsCard && !this.blocks.some(block => block.id === this.agentsCard!.id)) {
-      this.blocks.push({ kind: 'agents', id: this.agentsCard.id, members: this.agentsCard.members })
-    }
+    const card = ended ? this.agentsBlock() : null
+    if (card) this.blocks.push(card)
   }
 
   /**
@@ -409,6 +459,7 @@ export class BlockBuilder {
    */
   closeAgentsCard(): void {
     this.agentsCard = null
+    this.agentsAnchor = null
   }
 
   /** Replace the whole fold (session open/resume hydration). */
@@ -417,6 +468,7 @@ export class BlockBuilder {
     this.runs = []
     this.tools.clear()
     this.agentsCard = null
+    this.agentsAnchor = null
   }
 
   /** Older pages must not finalize or replace the active streaming buffers. */

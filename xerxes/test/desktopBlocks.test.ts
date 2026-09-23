@@ -70,7 +70,8 @@ describe('BlockBuilder', () => {
     const trail = [...b.all()][0]!
     expect(trail.kind).toBe('tools')
     if (trail.kind !== 'tools') return
-    expect(trail.items[0]!.state).toBe('done')
+    expect(trail.items[0]!.state).toBe('failed')
+    expect(trail.items[0]!.error).toContain('before a tool result')
   })
 
   test('streaming snapshot interleaves scratch state without mutating the fold', () => {
@@ -280,9 +281,9 @@ describe('blocksFromStoredMessages', () => {
     const done = [...b.all()][0]!
     expect(done.kind).toBe('tools')
     if (done.kind !== 'tools') return
-    // Turn end closes the unanswered call honestly: not live, not failed.
+    // A missing result cannot establish successful completion.
     expect(done.running).toBe(false)
-    expect(done.items[0]!.state).toBe('done')
+    expect(done.items[0]!.state).toBe('failed')
   })
 
   test('the agents card trails live runs, updates in place, and resets per turn', () => {
@@ -326,6 +327,24 @@ describe('blocksFromStoredMessages', () => {
     const cards = b.all().filter(block => block.kind === 'agents')
     expect(cards).toHaveLength(2)
   })
+
+  test('the agents card stays behind its spawn, never after the final answer', () => {
+    // The card used to trail whatever streamed last, so every turn that
+    // spawned agents ended with a collapsed box *below* the answer.
+    const b = new BlockBuilder()
+    b.pushUser('review the daemon')
+    b.push('tool_call', { id: 't1', name: 'SpawnAgents', arguments: '{"agents":[]}' })
+    b.pushAgents([{ key: 't1:0', title: 'Review runtime', status: 'working' }])
+    b.push('tool_result', { tool_call_id: 't1', result: 'spawned' })
+    b.push('text_part', { text: 'All three reviews are in.' })
+    expect(b.snapshot(true).map(block => block.kind)).toEqual(['user', 'tools', 'agents', 'agent'])
+    b.finalize()
+    expect(b.all().map(block => block.kind)).toEqual(['user', 'tools', 'agents', 'agent'])
+    // Terminal statuses still land on the committed card in place.
+    b.pushAgents([{ key: 't1:0', title: 'Review runtime', status: 'completed' }])
+    const card = b.all()[2]!
+    expect(card.kind === 'agents' && card.members[0]?.status).toBe('completed')
+  })
 })
 
 test('replay restores exact result content and matches IDs after execution retention truncation', () => {
@@ -355,4 +374,30 @@ test('restored compaction summaries use typed metadata, not quoted marker text',
     { kind: 'user', text: content, contextSummary: true },
   ])
   expect(blocks[1]).not.toHaveProperty('contextSummary')
+})
+
+test('accepted steering remains an ordinary user message after cancel and reload', () => {
+  const blocks = blocksFromStoredMessages([
+    { role: 'user', content: 'continue' },
+    { role: 'assistant', content: 'Earlier answer' },
+    { role: 'user', content: '[steer from user]\nNew instruction' },
+    { role: 'assistant', content: 'Reply to new instruction' },
+    { role: 'user', content: '[steer from user saved for next turn]\nPending instruction' },
+  ])
+  expect(blocks.filter(block => block.kind === 'user').map(block => block.text)).toEqual(['continue', 'New instruction', 'Pending instruction'])
+})
+
+test('steering leaves an earlier tool live and its result updates the original group', () => {
+  const builder = new BlockBuilder()
+  builder.push('tool_call', { id: 'running', name: 'exec_command', arguments: { command: 'long command' } })
+  builder.pushUser('Also check the logs')
+  const before = builder.snapshot(true)
+  expect(before.map(block => block.kind)).toEqual(['tools', 'user'])
+  expect(before[0]).toMatchObject({ kind: 'tools', running: true, items: [{ state: 'working' }] })
+  builder.push('tool_result', { tool_call_id: 'running', result: 'Finished output', duration_ms: 3000 })
+  builder.push('text_part', { text: 'Checked both' })
+  builder.finalize()
+  const after = builder.snapshot(false)
+  expect(after.map(block => block.kind)).toEqual(['tools', 'user', 'agent'])
+  expect(after[0]).toMatchObject({ id: before[0]!.id, kind: 'tools', running: false, items: [{ state: 'done', output: 'Finished output', arg: 'long command' }] })
 })

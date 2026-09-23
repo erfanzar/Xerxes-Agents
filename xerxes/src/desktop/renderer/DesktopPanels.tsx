@@ -1,8 +1,8 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { workspaceFileDiff } from '../../ui/lib/workspaceDiffPreview.js'
 import { WorkspaceFileTree } from './WorkspaceFileTree.js'
+import { RemoteProviders } from './RemoteProviders.js'
 import { DiffPreview } from './DiffPreview.js'
 import { WorkspaceReview } from "./WorkspaceReview.js"
 import { CommandActivity } from './CommandActivity.js'
@@ -10,6 +10,7 @@ import { Deliveries } from "./Deliveries.js"
 import { MonitorsDisclosure } from "./Monitors.js"
 import { UnifiedRuns } from "./UnifiedRuns.js"
 import { ContextInspectorDisclosure } from "./ContextInspector.js"
+import { SessionDiagnostics } from './SessionDiagnostics.js'
 import {
   createContext,
   useContext,
@@ -23,10 +24,10 @@ import {
   desktopCall,
   desktopError,
   scheduleTime,
+  cronInEnglish,
   record,
   records,
   specialistsOf,
-  diffSections,
   text,
   type RpcRecord,
   type Specialist,
@@ -35,6 +36,8 @@ import { store, type Snapshot } from './store.js'
 import { Markdown } from './markdown.js'
 import { TerminalsCard } from './TerminalsPanel.js'
 import { Icon } from './Icon.js'
+import { GitPanel } from './GitPanel.js'
+import { TerminalPanel } from './TerminalPanel.js'
 import { useDialogFocus } from './dialogFocus.js'
 import { RunHistory, type RunHistoryPage } from './RunHistory.js'
 
@@ -46,6 +49,7 @@ export type DesktopPanel =
   | 'activity'
   | 'files'
   | 'review'
+  | 'terminal'
   | 'workspace'
   | 'snapshots'
   | null
@@ -109,24 +113,29 @@ function Empty({ children }: { children: ReactNode }) {
 
 /** Durable destinations share the shell and never replace the composer. */
 export function DesktopPage({ panel, snap }: { panel: 'agents' | 'extensions' | 'artifacts'; snap: Snapshot }): ReactElement {
+  const close = useDesktopNavigation()
   return <section className={"desktop-page studio-sheet" + (panel === "extensions" ? " catalog-page" : "")} aria-label={panel === 'agents' ? 'Agents' : panel === 'artifacts' ? 'Artifacts' : 'Skills & tools'}>
-    <header><div><h2>{panel === 'agents' ? 'Agents' : panel === 'artifacts' ? 'Artifacts' : 'Skills & tools'}</h2><p className="studio-muted">{panel === 'agents' ? 'Specialists you can bring into a conversation.' : panel === 'artifacts' ? 'Files changed in this session and its exportable transcript.' : 'Instructions and tools available in this workspace.'}</p></div></header>
+    {/* A full-page destination had no way out of itself: no close button,
+        and the tab bar is hidden while it is open, so Escape was the only
+        thing left to try — and Escape cancelled the running turn. */}
+    <header><div><h2>{panel === 'agents' ? 'Agents' : panel === 'artifacts' ? 'Artifacts' : 'Skills & tools'}</h2><p className="studio-muted">{panel === 'agents' ? 'Specialists you can bring into a conversation.' : panel === 'artifacts' ? 'Files this task changed, and its exportable transcript.' : 'Instructions and tools available in this workspace.'}</p></div><button className="desktop-page__close" aria-label="Back to the conversation" title="Back to the conversation (esc)" onClick={() => close(null)}><Icon name="close" size={13} /></button></header>
     <div className="studio-sheet-content" key={`${panel}:${snap.cwd}:${snap.sessionKey}`}>{panel === 'agents' ? <SpecialistsPanel snap={snap} /> : panel === 'artifacts' ? <ArtifactsPanel snap={snap} /> : <ExtensionsPanel snap={snap} />}</div>
   </section>
 }
 
 /** Nonmodal task context: the conversation and draft remain interactive. */
 export function DesktopRail({ panel, snap, close, activityDetails, filesExpanded = false, toggleFilesExpanded, reviewPath = '', activityFocused = false }: {
-  panel: 'files' | 'review' | 'activity'; snap: Snapshot; close: () => void; activityDetails: ReactNode; filesExpanded?: boolean; toggleFilesExpanded?: () => void
+  panel: 'files' | 'review' | 'terminal' | 'activity'; snap: Snapshot; close: () => void; activityDetails: ReactNode; filesExpanded?: boolean; toggleFilesExpanded?: () => void
   reviewPath?: string
   activityFocused?: boolean
 }): ReactElement {
   const open = useDesktopNavigation()
-  return <aside className={`desktop-rail studio-sheet${panel === "review" ? " desktop-rail--review" : ""}`} aria-label="Task context">
-    <header><nav aria-label="Task context views">{(['files', 'review', 'activity'] as const).map(value => <button key={value} aria-pressed={panel === value} onClick={() => open(value)}>{value === 'review' ? 'Changes' : value === 'files' ? 'Files' : 'Activity'}</button>)}</nav>{(panel === 'files' || panel === 'activity') && toggleFilesExpanded && <button aria-label={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : 'Expand Activity workspace'} title={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : 'Expand Activity workspace'} aria-pressed={filesExpanded} onClick={toggleFilesExpanded}><Icon name={filesExpanded ? 'collapse' : 'expand'} size={15} /></button>}<button aria-label="Close task context" onClick={close}>×</button></header>
+  return <aside className={`desktop-rail studio-sheet${panel === "review" ? " desktop-rail--review" : panel === "terminal" ? " desktop-rail--terminal" : ""}`} aria-label="Task context">
+    <header><nav aria-label="Task context views">{(['files', 'review', 'terminal', 'activity'] as const).map(value => <button key={value} aria-pressed={panel === value} onClick={() => open(value)}>{value === 'review' ? 'Git' : value === 'files' ? 'Files' : value === 'terminal' ? 'Terminal' : 'Activity'}</button>)}</nav>{(panel === 'files' || panel === 'terminal' || panel === 'activity') && toggleFilesExpanded && <button aria-label={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'terminal' ? 'Expand terminal' : 'Expand Activity workspace'} title={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'terminal' ? 'Expand terminal' : 'Expand Activity workspace'} aria-pressed={filesExpanded} onClick={toggleFilesExpanded}><Icon name={filesExpanded ? 'collapse' : 'expand'} size={15} /></button>}<button aria-label="Close task context" onClick={close}><Icon name="close" size={13} /></button></header>
     <div className="studio-sheet-content" key={`${panel}:${snap.cwd}:${snap.sessionKey}`}>
       {panel === 'files' && <FilesPanel snap={snap} close={close} />}
-      {panel === 'review' && <ReviewPanel snap={snap} initialPath={reviewPath} />}
+      {panel === 'review' && <GitPanel snap={snap} initialPath={reviewPath} onSnapshots={() => open('snapshots')} onReviewSent={() => open('activity')} />}
+      {panel === 'terminal' && <TerminalPanel snap={snap} />}
       {panel === 'activity' && <>{activityDetails}{!activityFocused && <ActivityPanel snap={snap} />}</>}
     </div>
   </aside>
@@ -165,7 +174,8 @@ export function DesktopSheet({
     schedules: 'Scheduled jobs',
     activity: 'Activity',
     files: 'Project files',
-    review: 'Changes',
+    review: 'Git',
+    terminal: 'Terminal',
     workspace: 'Workspace',
     snapshots: 'Snapshots',
   }
@@ -190,7 +200,7 @@ export function DesktopSheet({
         <header>
           <h2>{names[panel]}</h2>
           <button aria-label="Close dialog" onClick={close}>
-            ×
+            <Icon name="close" size={13} />
           </button>
         </header>
         <div className="studio-sheet-content" key={`${panel}:${snap.cwd}:${snap.sessionKey}`}>
@@ -205,7 +215,8 @@ export function DesktopSheet({
             </>
           )}
           {panel === 'snapshots' && <SnapshotsPanel snap={snap} />}
-          {panel === 'review' && <ReviewPanel snap={snap} />}
+          {panel === 'review' && <GitPanel snap={snap} />}
+          {panel === 'terminal' && <TerminalPanel snap={snap} />}
           {panel === 'files' && <FilesPanel snap={snap} close={close} />}
           {panel === 'workspace' && <WorkspacePanel snap={snap} />}
         </div>
@@ -220,7 +231,7 @@ function ArtifactsPanel({ snap }: { snap: Snapshot }): ReactElement {
   return <div className="studio-form">
     <Feedback {...request} />
     <button className="btn btn--ghost" disabled={!snap.currentId || request.busy || snap.connection !== 'online'} onClick={() => void request.run(() => store.downloadSessionTranscript(snap.sessionKey))}>Export session transcript</button>
-    {snap.changes.map(file => <div className="studio-item" key={file.path}><div><strong>{file.path}</strong><p>+{file.adds} −{file.dels}</p></div><button onClick={() => open('review', file.path)}>Review changes →</button></div>)}
+    {snap.changes.map(file => <div className="studio-item" key={file.path}><div><strong>{file.path}</strong><p>+{file.adds} −{file.dels}</p></div><button onClick={() => open('review', file.path)}>Review changes <Icon name="arrow" size={12} /></button></div>)}
     {!snap.changes.length && <p className="studio-muted">No files changed in this session yet.</p>}
   </div>
 }
@@ -297,7 +308,7 @@ export function SpecialistsPanel({ snap }: { snap: Snapshot }): ReactElement {
       }}
     >
       <Feedback {...request} />
-      <div className="agents-workspace"><span>{snap.cwd}</span><button disabled={request.busy} onClick={() => store.chooseWorkspace()}>Change workspace…</button></div>
+      <div className="agents-workspace"><span title={snap.cwd}>{snap.cwd.replace(/^\/(?:Users|home)\/[^/]+(?=\/|$)/, '~')}</span><button disabled={request.busy} onClick={() => store.chooseWorkspace()}>Change workspace…</button></div>
       {mode === 'generate' ? (
         <div className="studio-form">
           <h1>Who would help?</h1>
@@ -321,7 +332,7 @@ export function SpecialistsPanel({ snap }: { snap: Snapshot }): ReactElement {
               disabled={request.busy || !description.trim()}
               onClick={() => void generate()}
             >
-              {request.busy ? 'Generating…' : 'Draft specialist →'}
+              {request.busy ? 'Generating…' : <>Draft specialist <Icon name="arrow" size={12} /></>}
             </button>
           </div>
         </div>
@@ -362,7 +373,7 @@ export function SpecialistsPanel({ snap }: { snap: Snapshot }): ReactElement {
                   onClick={() => setSelected(row.id)}
                 >
                   {row.id}
-                  {row.error ? ' !' : ''}
+                  {row.error ? <span className="agent-list__warn" title={row.error} aria-label="Needs fixing"><Icon name="warning" size={13} /></span> : null}
                 </button>
               ))}
             </nav>
@@ -377,7 +388,7 @@ export function SpecialistsPanel({ snap }: { snap: Snapshot }): ReactElement {
                   <button disabled={request.busy || !!active.error} onClick={() => {
                     window.dispatchEvent(new CustomEvent('xerxes:add-context', { detail: 'Ask the ' + active.id + ' agent to ' }))
                     open(null)
-                  }}>Use in conversation →</button>
+                  }}>Use in conversation <Icon name="arrow" size={12} /></button>
                   <button disabled={request.busy} onClick={() => void edit()}>
                     Edit instructions
                   </button>
@@ -441,9 +452,19 @@ function ExtensionsPanel({ snap }: { snap: Snapshot }): ReactElement {
   useEffect(() => {
     if (tab === 'plugins') void request.run(loadPlugins)
   }, [tab])
-  const list = catalog && tab !== 'plugins' ? records(catalog[tab] ?? []) : []
+  // These ran inside render, so an unexpected daemon shape threw during
+  // the render pass and (with no boundary above) blanked the window. The
+  // panel now degrades to its own error state instead.
+  let list: RpcRecord[] = []
+  let catalogError = ''
+  try { list = catalog && tab !== 'plugins' ? records(catalog[tab] ?? []) : [] }
+  catch (failure) { catalogError = desktopError(failure) }
+  const skillCount = ((): number | null => {
+    try { return catalog ? records(catalog.skills).length : null } catch { return null }
+  })()
   return (
     <div className={"studio-form catalog-form" + (tab === "plugins" ? " catalog-form--plugins" : "")}>
+      {catalogError && <p className="studio-error" role="alert">This runtime returned a {tab} catalog this app build does not understand. {catalogError}</p>}
       <div className="studio-tabs">
         {(['skills', 'tools', 'plugins'] as const).map((name) => (
           <button
@@ -456,7 +477,7 @@ function ExtensionsPanel({ snap }: { snap: Snapshot }): ReactElement {
               setNeedle('')
             }}
           >
-            {name}{name === 'skills' && catalog ? ' · ' + records(catalog.skills).length : ''}
+            {name}{name === 'skills' && skillCount !== null ? ' · ' + skillCount : ''}
           </button>
         ))}
         <button
@@ -551,7 +572,7 @@ function ExtensionsPanel({ snap }: { snap: Snapshot }): ReactElement {
           {list.length > 0 && !list.some(row => [text(row.name), text(row.description), text(row.source)].join(' ').toLowerCase().includes(needle.toLowerCase())) && <Empty>No matches.</Empty>}
           </nav><section key={selectedSkill} aria-label="Selected capability details" tabIndex={0}>
             {selectedSkill ? <><h2>{selectedSkill}</h2><p className="studio-muted">{text(list.find(row => text(row.name) === selectedSkill)?.source)}</p>
-              {tab === 'skills' && <button onClick={() => { window.dispatchEvent(new CustomEvent('xerxes:insert-command', { detail: '/skill ' + selectedSkill })); open(null) }}>Use in conversation →</button>}
+              {tab === 'skills' && <button onClick={() => { window.dispatchEvent(new CustomEvent('xerxes:insert-command', { detail: '/skill ' + selectedSkill })); open(null) }}>Use in conversation <Icon name="arrow" size={12} /></button>}
               {detail && <Markdown text={detail} />}
             </> : <Empty>Select a {tab === 'skills' ? 'skill' : 'tool'} to read its details.</Empty>}
           </section></div>
@@ -739,13 +760,20 @@ function SchedulesPanel({ snap }: { snap: Snapshot }): ReactElement {
           {loaded && !jobs.length && <Empty>No scheduled work in this workspace yet.</Empty>}
           {jobs.map((job) => (
             <div className="studio-item schedule-row" key={text(job.id)}>
+              {/* The heading was the whole prompt, the schedule was a raw
+                  cron expression, and an empty execution_state left a
+                  dangling separator at the end of the line. */}
               <div>
-                <strong>{text(job.prompt)}</strong>
+                <strong>{text(job.name) || text(job.prompt)}</strong>
+                {text(job.name) && text(job.prompt) ? <p className="schedule-row__prompt" title={text(job.prompt)}>{text(job.prompt)}</p> : null}
                 <p>
-                  {text(job.schedule)} · {text(job.timezone)} ·{' '}
-                  {job.paused ? 'Paused' : text(job.execution_state)}
+                  {[cronInEnglish(text(job.schedule)), text(job.timezone), job.paused ? 'Paused' : text(job.execution_state)].filter(Boolean).join(' · ')}
                 </p>
-                <small>Next: {text(job.next_run_at) ? scheduleTime(text(job.next_run_at), text(job.timezone)) : 'not scheduled'}</small>
+                <small title={text(job.schedule)}>
+                  {job.paused ? 'Paused — it will not run until you resume it'
+                    : text(job.next_run_at) ? `Next: ${scheduleTime(text(job.next_run_at), text(job.timezone))}`
+                    : 'Next run not scheduled yet'}
+                </small>
               </div>
               <div className="studio-actions">
                 <button
@@ -834,19 +862,37 @@ function SchedulesPanel({ snap }: { snap: Snapshot }): ReactElement {
 
 const finishedActivityStates = new Set(['completed', 'succeeded', 'failed', 'interrupted', 'cancelled', 'canceled', 'stopped', 'expired', 'archived'])
 
+/** How many finished rows stay visible once nothing is running. */
+const RECENT_ACTIVITY = 3
+
+/** Map the daemon's activity states onto the rail's four status colours. */
+function activityTone(state: string): string {
+  if (['failed', 'error'].includes(state)) return 'failed'
+  if (['running', 'working', 'watching', 'cancelling'].includes(state)) return 'working'
+  if (['waiting', 'waiting_for_input', 'blocked'].includes(state)) return 'waiting'
+  return 'done'
+}
+
 export function BackgroundActivity({ rows, renderRow }: {
   rows: readonly RpcRecord[]
   renderRow: (row: RpcRecord) => ReactElement
 }): ReactElement {
   // Unknown states remain visible: a new daemon state must not silently hide work.
   const current = rows.filter(row => !finishedActivityStates.has(text(row.state)))
-  const history = rows.filter(row => finishedActivityStates.has(text(row.state)))
+  const finished = rows.filter(row => finishedActivityStates.has(text(row.state)))
+  // Once everything has finished, folding ALL of it away left the rail
+  // showing a single closed triangle — the accordion stack this redesign
+  // set out to remove. Keep the most recent few on screen and fold only
+  // the tail, which is what "past" should have meant all along.
+  const recent = current.length === 0 ? finished.slice(0, RECENT_ACTIVITY) : []
+  const history = finished.slice(recent.length)
   const failures = history.filter(row => row.state === 'failed').length
   return <>
     {current.map(renderRow)}
+    {recent.map(renderRow)}
     {history.length > 0 && <details className="activity-history">
-      <summary><Icon name="chevron" size={12} />Past background activity <span>{history.length}{failures ? ` · ${failures} failed` : ''}</span></summary>
-      <div className="activity-history__rows" role="region" aria-label="Past background activity" tabIndex={0}>{history.map(renderRow)}</div>
+      <summary><Icon name="chevron" size={12} />Earlier background activity <span>{history.length}{failures ? ` · ${failures} failed` : ''}</span></summary>
+      <div className="activity-history__rows" role="region" aria-label="Earlier background activity" tabIndex={0}>{history.map(renderRow)}</div>
     </details>}
   </>
 }
@@ -859,19 +905,24 @@ function ActivityPanel({ snap }: { snap: Snapshot }): ReactElement {
   useEffect(() => {
     let active = true,
       timer: ReturnType<typeof setTimeout> | undefined
-    const load = async () => {
+    // The 3s refresh must not reuse request.run: that flips the shared busy
+    // flag, so an unreserved "Working…" row entered layout every three
+    // seconds and re-disabled the row buttons under the pointer.
+    const load = async (silent = false) => {
       if (timer) clearTimeout(timer)
-      await request.run(async () => {
+      const fetchRows = async () => {
         const result = await request.call('background.activity')
         const next = records(result.rows)
         if (active) {
           setRows(next)
           setLoaded(true)
         }
-      })
+      }
+      if (silent) await fetchRows().catch(() => {})
+      else await request.run(fetchRows)
       if (active) {
         if (timer) clearTimeout(timer)
-        timer = setTimeout(() => void load(), 3000)
+        timer = setTimeout(() => void load(true), 3000)
       }
     }
     const unsubscribe = window.xerxes.onEvent(({ type, payload }) => {
@@ -884,15 +935,16 @@ function ActivityPanel({ snap }: { snap: Snapshot }): ReactElement {
       if (timer) clearTimeout(timer)
     }
   }, [snap.sessionKey, snap.currentId])
+  // Same row grammar as the agents above: dot, name, state. These used to
+  // be two-line blocks whose second line was a whole sentence from the
+  // daemon, so a finished watcher carried more visual weight than a
+  // running agent.
   const renderRow = (row: RpcRecord): ReactElement => (
         row.kind === 'shell' ? <CommandActivity key={text(row.id)} row={row} sessionKey={snap.sessionKey} online={snap.connection === 'online'} /> :
-        <div className="studio-item" key={text(row.id)}>
-          <div>
-            <strong>{text(row.title)}</strong>
-            <p>
-              {text(row.kind)} · {text(row.state)} · {text(row.detail)}
-            </p>
-          </div>
+        <div className="railrow railrow--static" data-state={activityTone(text(row.state))} key={text(row.id)} title={[text(row.title), text(row.kind), text(row.detail)].filter(Boolean).join(' · ')}>
+          <span className="railrow__dot" aria-hidden="true" />
+          <span className="railrow__name">{text(row.title)}</span>
+          <span className="railrow__meta">{text(row.state) || text(row.kind)}</span>
           {row.kind === 'watcher' && row.state === 'watching' && (
             <button
               disabled={request.busy}
@@ -911,141 +963,102 @@ function ActivityPanel({ snap }: { snap: Snapshot }): ReactElement {
   return (
     <div className="studio-form activity-panel">
       <Feedback {...request} />
-      <BackgroundActivity rows={rows} renderRow={renderRow} />
+      {rows.length > 0 && (
+        <section className="railcard" aria-label="Background work">
+          <header className="railcard__head">
+            <span className="railcard__title">Background</span>
+            <span className="railcard__meta">{rows.length}</span>
+          </header>
+          <BackgroundActivity rows={rows} renderRow={renderRow} />
+        </section>
+      )}
       {loaded && !rows.length && !snap.fleet.length && (
         <div className="activity-idle" role="status"><Icon name="activity" size={22} /><strong>{snap.turnActive ? "Working on your request" : "No active work"}</strong><p>{snap.turnActive ? "Tools and background jobs appear here as they start." : "Agents and background jobs appear here when they run."}</p></div>
       )}
-      <div className="activity-utilities">
-      <button className="activity-terminal"
-        onClick={() => {
-          store.loadTerminals()
-          setTerminals((value) => !value)
-        }}
-      >
-        <Icon name="terminal" size={16} /> Open terminals
-      </button>
-      {terminals && <TerminalsCard snap={snap} />}
-      <details className="activity-context"><summary>Conversation usage</summary>
-      <div className="studio-item">
-        <div>
-          <strong>Context</strong>
-          <p>
-            {snap.contextMax
-              ? `${new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(snap.contextTokens ?? 0)} of ${new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(snap.contextMax)} tokens`
-              : 'Usage unavailable'}
-          </p>
-        </div>
-        <button
-          disabled={snap.turnActive || !snap.contextTokens}
-          onClick={() => {
-            void store.submit('/compact')
-          }}
-        >
-          Summarize
-        </button>
-      </div>
-      <button className="context-breakdown-toggle" aria-expanded={snap.contextMenuOpen} onClick={() => store.toggleContextMenu()}>Token breakdown</button>
-      {snap.contextMenuOpen && (snap.contextBreakdownLoading ? <p role="status">Estimating token usage…</p> : snap.contextBreakdown ? <dl className="context-breakdown">
-        <dt>System prompt</dt><dd>{snap.contextBreakdown.systemPromptTokens.toLocaleString()}</dd>
-        <dt>Tools</dt><dd>{snap.contextBreakdown.toolsTokens.toLocaleString()}</dd>
-        <dt>Messages</dt><dd>{snap.contextBreakdown.messagesTokens.toLocaleString()}</dd>
-      </dl> : <p role="status">Token breakdown unavailable.</p>)}
-      </details><ContextInspectorDisclosure snap={snap} /><MonitorsDisclosure snap={snap} /></div>
-    </div>
-  )
-}
-
-function ReviewPanel({ snap, initialPath = '' }: { snap: Snapshot; initialPath?: string }): ReactElement {
-  const open = useDesktopNavigation()
-  const request = useRequest(snap),
-    [diff, setDiff] = useState<RpcRecord | null>(null),
-    [selected, setSelected] = useState(initialPath)
-  const untrackedLimit = useRef(50)
-  const [listingError, setListingError] = useState('')
-  useEffect(() => { setSelected(initialPath) }, [initialPath])
-  useEffect(() => {
-    void request.run(async () => {
-      const result = await request.call('workspace.diff')
-      if (result.kind === 'error') throw new Error(text(result.message));
-      if (request.alive.current) setDiff(result.kind === 'clean' ? {} : record(result.diff))
-    })
-  }, [])
-  const files = diff ? diffSections(diff) : []
-  const [fileDiff, setFileDiff] = useState<RpcRecord | null>(null)
-  const [fileError, setFileError] = useState('')
-  const chosen = files.find((file) => file.path === selected) ?? files[0]
-  useEffect(() => {
-    let current = true
-    setFileDiff(null); setFileError('')
-    if (chosen) void workspaceFileDiff((method, params) => desktopCall(window.xerxes, snap.sessionKey, method, params), chosen.path, chosen.untracked)
-      .then(value => { if (value.kind === 'error') throw new Error(text(value.message)); if (current) setFileDiff(value.kind === 'clean' ? {} : record(value.diff)) })
-      .catch(error => { if (current) setFileError(desktopError(error)) })
-    return () => { current = false }
-  }, [chosen?.path, diff, snap.sessionKey, snap.cwd])
-  const lines = fileDiff ? records(fileDiff.lines ?? []) : []
-  return (
-    <div className="change-review">
-      <div className="change-review__toolbar">
-        <button onClick={() => open('snapshots')}>Snapshots & restore</button>
-        <button
-          disabled={request.busy}
-          onClick={() =>
-            void request.run(async () => {
-              const result = await request.call('workspace.diff', {untracked_limit: untrackedLimit.current})
-              if (request.alive.current) setDiff(result.kind === 'clean' ? {} : record(result.diff))
-            })
-          }
-        >
-          Refresh changes
-        </button>
-        {diff?.untrackedTruncated === true && !listingError && <button disabled={request.busy} onClick={() => void request.run(async () => {
-          const previous = Array.isArray(diff.untracked) ? diff.untracked.length : 0
-          untrackedLimit.current = Math.min(10000, untrackedLimit.current + 100)
-          const result = await request.call('workspace.diff', {untracked_limit: untrackedLimit.current})
-          const next = result.kind === 'clean' ? {} : record(result.diff)
-          if (!request.alive.current) return
-          if (!Array.isArray(next.untracked) || next.untracked.length <= previous) setListingError('No more new files were returned. Older workspace runtimes need an update; lists are limited to 10,000 entries.')
-          else setDiff(next)
-        })}>Load more new files</button>}
-      </div>
-      {listingError && <p role="status">{listingError}</p>}
-      <Feedback {...request} />
-      {diff && !files.length ? (
-        <Empty>The working tree is clean.</Empty>
-      ) : (
-        <div className="change-review__body">
-          <nav aria-label="Changed files">
-            {files.map((file) => (
-              <button
-                key={file.path}
-                className={chosen?.path === file.path ? 'is-selected' : ''}
-                title={file.path}
-                aria-current={chosen?.path === file.path ? 'true' : undefined}
-                onClick={() => setSelected(file.path)}
-              >
-                <Icon name="file" size={16} /><span><strong>{file.path.split('/').at(-1)}</strong><small>{file.path.includes('/') ? file.path.slice(0, file.path.lastIndexOf('/')) : 'Workspace root'}</small></span>{file.untracked && <em>New</em>}
-              </button>
-            ))}
-          </nav>
-          <section className="change-review__preview" aria-label="Selected file diff">
-            <header title={chosen?.path}>{chosen?.path || "Changes"}</header>
-            <pre className="change-review__source" tabIndex={0} role="region" aria-label="Diff contents">
-              {chosen && !fileDiff && !fileError && <span role="status">Loading file changes…</span>}
-              {fileError && <span role="alert">{fileError}</span>}
-              {fileDiff && !lines.length && <span>No changes remain for this file.</span>}
-              {lines
-                .map((line, index) => (
-                  <span key={index} className={`studio-diff-${text(line.kind)}`}>
-                    <span className="diff-gutter" aria-hidden="true">{typeof line.oldLine === 'number' ? line.oldLine : ''}</span><span className="diff-gutter" aria-hidden="true">{typeof line.newLine === 'number' ? line.newLine : ''}</span><span className="diff-code">{text(line.text)}</span>
-                  </span>
+      {/* Zone 3 — one drawer. These were six sibling sections, each
+          collapsed, each competing for attention with the live status
+          above. They are the things you reach for roughly twice a month;
+          one closed row is the honest amount of space for that. */}
+      <details className="railcard rail-drawer">
+        <summary>
+          <Icon name="chevron" size={13} />
+          <span>Terminals, monitors and diagnostics</span>
+        </summary>
+        <div className="rail-drawer__body">
+          <button className="activity-terminal"
+            onClick={() => {
+              store.loadTerminals()
+              setTerminals((value) => !value)
+            }}
+          >
+            <Icon name="terminal" size={16} /> Open terminals
+          </button>
+          {terminals && <TerminalsCard snap={snap} />}
+          <details className="activity-context"><summary>Conversation usage</summary>
+          <div className="studio-item">
+            <div>
+              <strong>Context</strong>
+              <p>
+                {snap.contextMax
+                  ? `${new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(snap.contextTokens ?? 0)} of ${new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(snap.contextMax)} tokens`
+                  : 'Usage unavailable'}
+              </p>
+            </div>
+            <button
+              disabled={snap.turnActive || !snap.contextTokens}
+              onClick={() => {
+                void store.submit('/compact')
+              }}
+            >
+              Summarize
+            </button>
+          </div>
+          <button className="context-breakdown-toggle" aria-expanded={snap.contextMenuOpen} onClick={() => store.toggleContextMenu()}>Token breakdown</button>
+          {snap.contextMenuOpen && (snap.contextBreakdownLoading ? <p role="status">Estimating token usage…</p> : snap.contextBreakdown ? <dl className="context-breakdown">
+            <dt>System prompt</dt><dd>{snap.contextBreakdown.systemPromptTokens.toLocaleString()}</dd>
+            <dt>Tools</dt><dd>{snap.contextBreakdown.toolsTokens.toLocaleString()}</dd>
+            <dt>Messages</dt><dd>{snap.contextBreakdown.messagesTokens.toLocaleString()}</dd>
+          </dl> : <p role="status">Token breakdown unavailable.</p>)}
+          </details>
+          <ContextInspectorDisclosure snap={snap} />
+          <MonitorsDisclosure snap={snap} />
+          <SessionDiagnostics snap={snap} />
+          {snap.skillSuggestions.length > 0 && (
+            <details className="activity-context"><summary>Skills this task used · {snap.skillSuggestions.length}</summary>
+              <div className="rail__skills">
+                {snap.skillSuggestions.slice(-3).reverse().map(suggestion => (
+                  <div className="skillcard" key={suggestion.skillName}>
+                    <div className="skillcard__head">
+                      <span>{suggestion.skillName}</span>
+                      {suggestion.version && <span>v{suggestion.version}</span>}
+                    </div>
+                    {suggestion.description && <div className="skillcard__desc">{suggestion.description}</div>}
+                    <div className="skillcard__meta">
+                      {suggestion.toolCount} tool call{suggestion.toolCount === 1 ? '' : 's'}
+                      {suggestion.uniqueTools.length ? ` · ${suggestion.uniqueTools.join(', ')}` : ''}
+                    </div>
+                  </div>
                 ))}
-            </pre>
-          </section>
+              </div>
+            </details>
+          )}
+          {snap.creatorTrace.length > 0 && (
+            <details className="activity-context"><summary>Template forge · legacy</summary>
+              <div className="rail__creator">
+                {snap.creatorTrace.slice(-4).reverse().map((trace, index) => (
+                  <div className="creatorrow" key={`${trace.at}:${trace.action}:${index}`}>
+                    <span className="creatorrow__state" data-state={trace.status}>{trace.status === 'ok' ? <Icon name="check" size={12} /> : <Icon name="warning" size={12} />}</span>
+                    <span className="creatorrow__body">
+                      <span>{trace.action} · {trace.name || 'forge'}{trace.version ? `@${trace.version}` : ''}</span>
+                      {trace.detail && <span>{trace.detail}</span>}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </details>
+          )}
         </div>
-      )}
-      {(fileDiff?.truncated === true || diff?.truncated === true) && (
-        <p className="change-review__notice" role="status">{fileDiff?.truncated ? 'The selected file exceeds the preview limit; only part is shown.' : 'The working-tree overview is partial. Selected files load separately.'}</p>
-      )}
+      </details>
     </div>
   )
 }
@@ -1076,7 +1089,7 @@ function FilesPanel({ snap, close }: { snap: Snapshot; close: () => void }): Rea
         {needle && <WorkspaceFileTree key={snap.cwd + snap.sessionKey + needle} path={needle.startsWith('./') ? needle : './' + needle} sessionKey={snap.sessionKey} selected={selected} select={setSelected} />}
       </div>
       </div>
-      {selected && <div className="file-browser__document"><div className="file-browser__selection"><p title={selected}>{selected}</p><button onClick={() => { window.dispatchEvent(new CustomEvent('xerxes:add-context', { detail: '@' + JSON.stringify(selected.replace(/^@/, '')) })); close() }}>Add to message</button></div>
+      {selected && <div className="file-browser__document"><div className="file-browser__selection"><p title={selected}>{selected}</p><button onClick={() => { window.dispatchEvent(new CustomEvent('xerxes:add-context', { detail: '@' + JSON.stringify(selected.replace(/^@/, '')) })); close() }}>Add to message</button><button className="file-browser__close" aria-label="Close file preview" title="Close preview" onClick={() => setSelected('')}><Icon name="close" size={13} /></button></div>
       <section className="file-browser__preview" aria-label="File preview">
         <Feedback busy={!preview && !previewError} error={previewError} />
         {preview && <>
@@ -1194,6 +1207,7 @@ function WorkspacePanel({ snap }: { snap: Snapshot }): ReactElement {
           Recent workspaces
         </button>
       </div>
+      {remoteStatus?.machine && <RemoteProviders key={snap.sessionKey} remote={window.xerxes.remote} changed={()=>store.loadModels(true)}/>}
       <h3 className="workspace-section-title">Saved connections</h3>
       <p className="studio-muted">
         Connect to a project on another machine over SSH.
@@ -1285,7 +1299,7 @@ function WorkspacePanel({ snap }: { snap: Snapshot }): ReactElement {
                   void request.run(() => browse(path.split('/').slice(0, -1).join('/') || '/'))
                 }
               >
-                ↑ Parent folder
+                <Icon name="arrowUp" size={12} /> Parent folder
               </button>
               <strong>{path}</strong>
               {folders.map((folder) => (
@@ -1296,7 +1310,7 @@ function WorkspacePanel({ snap }: { snap: Snapshot }): ReactElement {
                     void request.run(() => browse(path.replace(/\/$/, '') + '/' + folder))
                   }
                 >
-                  ▸ {folder}
+                  <Icon name="chevron" size={12} /> {folder}
                 </button>
               ))}
               <button onClick={() => setBrowsing(false)}>Use this folder</button>

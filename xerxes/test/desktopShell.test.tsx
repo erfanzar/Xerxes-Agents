@@ -8,8 +8,10 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { Shell, ActivityDetails, SessionDiagnostics } from '../src/desktop/renderer/App.js'
+import { RailStatus } from '../src/desktop/renderer/RailStatus.js'
 import { DesktopPage, DesktopRail } from '../src/desktop/renderer/DesktopPanels.js'
 import type { Snapshot } from '../src/desktop/renderer/store.js'
+import type { SessionRow } from '../src/desktop/renderer/types.js'
 import { BlockBuilder } from '../src/desktop/renderer/blocks.js'
 
 test('provider configuration failures retain their error and expose a settings action', () => {
@@ -19,7 +21,7 @@ test('provider configuration failures retain their error and expose a settings a
     }) }))
     expect(html).toContain(error)
     expect(html).toContain('Provider settings')
-    expect(html).toContain('resubmit the instruction')
+    expect(html).toMatch(/<button class="btn"[^>]*>.*?Retry<\/button>/)
   }
 })
 
@@ -118,7 +120,7 @@ test('the shell renders the right state in every connectivity mode', () => {
           { kind: 'agent', id: 3, text: 'here it is', streaming: true },
         ],
       }),
-      ['Working', 'Stop', 'map the repo', 'here it is', 'Acting… 12s', 'Grep'],
+      ['Working', 'Stop', 'map the repo', 'here it is', 'Acting… 12s', 'Searching for x'],
     ],
   ]
   for (const [label, snap, needles] of cases) {
@@ -149,7 +151,7 @@ test('an approval request renders the three explicit responses', () => {
   const html = render(
     snapshot({ approval: { id: 'a1', action: 'bash', description: 'rm -rf tmp/' } }),
   )
-  for (const needle of ['bash — approval required', 'Allow once', 'This session', 'Deny']) {
+  for (const needle of ['Run this command?', 'Allow once', 'This session', 'Deny']) {
     expect(html).toContain(needle)
   }
 })
@@ -168,6 +170,15 @@ test('a mid-turn approval flips the header to needs-input even while acting', ()
 })
 
 const renderStats = (snap: Snapshot): string => renderToStaticMarkup(createElement(SessionDiagnostics, {snap}))
+/**
+ * The rail as the Shell actually composes it: the snapshot-driven half
+ * (status head, goal, agents, touched files) plus the fetching half
+ * (background rows and the diagnostics drawer). Asserting against one half
+ * alone lets a section silently move out of the rail entirely.
+ */
+const renderRail = (snap: Snapshot): string => renderToStaticMarkup(createElement(DesktopRail, {
+  panel: 'activity', snap, close: () => {}, activityDetails: createElement(ActivityDetails, { snap }),
+}))
 
 test('the main window does not render a diagnostic footer', () => {
  const html = render(snapshot({contextTokens:0,contextMax:262000}))
@@ -205,7 +216,11 @@ test('session statistics align metrics and omit duplicate context and connection
   const acting = renderStats(snapshot({ turnActive: true }))
   expect(acting).not.toContain('connected')
   expect(acting).not.toContain('Context:')
-  expect(acting).toContain('<dt>Cache hit</dt><dd>Unavailable</dd>')
+  // A row reading "Unavailable" spends a line to say nothing; an
+  // unreported metric is simply absent.
+  expect(acting).not.toContain('Unavailable')
+  expect(acting).not.toContain('<dt>Cache hit</dt>')
+  expect(acting).toContain('<dt>Turns</dt>')
 })
 
 test('the optional session statistics shows the git branch and cost only when the wire reports them', () => {
@@ -248,7 +263,7 @@ test('the tabbed workspace renders every surface with live counts', () => {
       tab: 'changes',
     }),
   )
-  for (const needle of ['Activity', 'Changes', 'Plan', 'Log', 'src/a.ts', 'Keep all']) {
+  for (const needle of ['Activity', 'Git', 'Plan', 'Log', 'src/a.ts', 'Keep all']) {
     expect(tabs).toContain(needle)
   }
   expect(tabs).toContain('+12')
@@ -256,7 +271,7 @@ test('the tabbed workspace renders every surface with live counts', () => {
 
   const plan = render(snapshot({ tab: 'plan', planMode: true, plan: { markdown: '- [ ] one', items: [{ text: 'one', done: false }], turn: 1 } }))
   expect(plan).toContain('Working plan')
-  expect(plan).toContain('⏸ plan mode')
+  expect(plan).toContain('plan mode')
 
   const log = render(snapshot({ tab: 'log', log: [{ id: 1, turn: 2, type: 'tool_call', summary: 'name=read' }] }))
   expect(log).toContain('tool_call')
@@ -320,14 +335,14 @@ test('the settings modal opens on its cards and reads daemon state', () => {
     }),
   )
   expect(models).toContain('kimi-for-coding')
-  expect(models).toContain('Discovered models · 2')
+  expect(models).toContain('Discovered models<span class="settings-section__count">2</span>')
   expect(models).toContain('z-ai/glm-5.2')
   // Provider rows are live switches, not a static list.
   expect(models).toContain('Providers</div>')
-  expect(models).toContain('switch ▸')
+  expect(models).toContain('switch')
   expect(models).toContain('title="make zai the active profile"')
   // TUI parity: the profile CRUD surface the /provider flow offers.
-  expect(models).toContain('＋ Add provider')
+  expect(models).toContain('Add provider')
   expect(models).toContain('title="delete zai"')
   // The active profile offers Edit but no Delete — switch away first.
   expect(models).toContain('title="edit kimi"')
@@ -337,8 +352,9 @@ test('the settings modal opens on its cards and reads daemon state', () => {
   expect(unavailable).toContain('Retry loading providers')
   expect(unavailable).not.toContain('No saved provider profiles')
   const permissions = render(snapshot({ settingsOpen: true, settingsTab: 'permissions', permissionMode: 'auto' }))
-  expect(permissions).toContain('daemon reports: auto')
-  expect(permissions).toContain('accept-all')
+  // The reported mode is the pressed option, not a caption restating it.
+  expect(permissions).toMatch(/aria-pressed="true"[^>]*><span class="opt__label">Auto</)
+  expect(permissions).toContain('Accept all')
 })
 
 test('agent preset settings mirror the DSH roster and creator entry point', () => {
@@ -414,9 +430,10 @@ test('the feed groups live reasoning and tools without constructing collapsed ex
       ],
     }),
   )
-  expect(html).toContain('<details class="activity-group">')
+  expect(html).toContain('<details class="activity-group is-running">')
   expect(html).toContain('Working')
-  expect(html).toContain('Bash')
+  // Nothing is running inside the group; the live reasoning explains the wait.
+  expect(html).toContain('Thinking')
   expect(html).not.toContain('and cleared, end to end.')
   expect(html).not.toContain('grep -rn caret src/')
   expect(html).not.toContain('execution-row')
@@ -428,10 +445,11 @@ test('the first tool call has a collapsed section before any result or later act
   const builder = new BlockBuilder()
   builder.push('tool_call', { id: 'call-1', name: 'exec_command', arguments: { cmd: 'bun test' } })
   const html = render(snapshot({ turnActive: true, blocks: builder.snapshot(true) }))
-  expect(html).toContain('<details class="activity-group">')
+  expect(html).toContain('<details class="activity-group is-running">')
   expect(html).toContain('Working')
-  expect(html).toContain('Exec command')
-  expect(html).not.toContain('Used 1 tool')
+  // The header says what is happening, not which registry entry is running.
+  expect(html).toContain('Running bun test')
+  expect(html).not.toContain('Ran 1 command')
   expect(html).not.toContain('execution-row')
 })
 
@@ -442,7 +460,7 @@ test('completed, failed, and cancelled calls stay collapsed with outcomes visibl
     builder.push('tool_result', { tool_call_id: 'call-1', return_value: 'large output', error })
     const html = render(snapshot({ blocks: builder.snapshot(true) }))
     expect(html).toContain('<details class="activity-group">')
-    expect(html).toContain('Used 1 tool')
+    expect(html).toContain('Ran 1 command')
     expect(html.includes('1 failed')).toBe(Boolean(error))
     expect(html).not.toContain('large output')
   }
@@ -452,7 +470,7 @@ test('a pending tool approval stays visible outside the collapsed activity secti
   const builder = new BlockBuilder()
   builder.push('tool_call', { id: 'call-1', name: 'exec_command', arguments: { cmd: 'bun test' } })
   const html = render(snapshot({ blocks: builder.snapshot(true), approval: { id: 'approval-1', toolCallId: 'call-1', action: 'exec_command', description: 'Run tests' } }))
-  expect(html).toContain('<details class="activity-group">')
+  expect(html).toContain('<details class="activity-group is-running">')
   expect(html).not.toContain('execution-row')
   expect(html).toContain('Run tests')
 })
@@ -471,8 +489,9 @@ test('a nonzero command result is visible as failed in the collapsed group heade
 
 test('the first thinking delta creates a closed working group', () => {
   const html = render(snapshot({ turnActive: true, blocks: [{kind:'thinking',id:1,text:'private reasoning body',streaming:true}] }))
-  expect(html).toContain('<details class="activity-group">')
+  expect(html).toContain('<details class="activity-group is-running">')
   expect(html).toContain('Working')
+  expect(html).toContain('Thinking')
   expect(html).not.toContain('private reasoning body')
 })
 
@@ -497,9 +516,11 @@ test('the workspace menu lists known folders current-first with an add row', () 
     expect(html).toContain(needle)
   }
   // Current workspace is marked, and the home group leads the list.
-  expect(html).toContain('● current')
+  expect(html).toContain('current')
   expect(html.indexOf('repo')).toBeLessThan(html.indexOf('other'))
-  expect(html).toContain('✓')
+  // The tick used to be a literal '✓'; it is an SVG icon now, so assert on
+  // the marker element rather than on a character the icon set owns.
+  expect(html).toContain('<span class="kbd"><svg')
 })
 
 // ── Right rail run list (mockup 01) ─────────────────────────────────────
@@ -534,7 +555,7 @@ test('the header fleet chip opens the live subagent roster', () => {
 })
 
 test('the rail surfaces skill suggestions with observed tool telemetry', () => {
-  const html = renderToStaticMarkup(createElement(ActivityDetails, {snap:snapshot({
+  const html = renderRail(snapshot({
     skillSuggestions: [{
       skillName: 'release-checklist',
       description: 'Repeat the verified release sequence.',
@@ -543,14 +564,14 @@ test('the rail surfaces skill suggestions with observed tool telemetry', () => {
       toolCount: 4,
       uniqueTools: ['Read', 'Bash'],
     }],
-  })}))
-  expect(html).toContain('Skill suggestions · 1')
+  }))
+  expect(html).toContain('Skills this task used · 1')
   expect(html).toContain('release-checklist')
   expect(html).toContain('4 tool calls · Read, Bash')
 })
 
 test('the rail separates legacy template-forge traces from Creator mode', () => {
-  const html = renderToStaticMarkup(createElement(ActivityDetails, {snap:snapshot({
+  const html = renderRail(snapshot({
     creatorTrace: [{
       action: 'define',
       name: 'briefing',
@@ -559,7 +580,7 @@ test('the rail separates legacy template-forge traces from Creator mode', () => 
       detail: '',
       at: '2026-03-24T10:00:00.000Z',
     }],
-  })}))
+  }))
   expect(html).toContain('Template forge · legacy')
   expect(html).toContain('define · briefing@0.1.0')
   expect(html).toContain('data-state="ok"')
@@ -585,13 +606,18 @@ test('spawn requests stay inside closed chat work groups and remain discoverable
     }),
   )
   expect(html).toContain('1 background job running')
+  // No turn is running: a child that outlives it is noted, not called "Working".
   expect(html).toContain('<details class="activity-group">')
-  expect(html).toContain('Working')
+  expect(html).toContain('Started 2 agents')
+  expect(html).toContain('1 agent still running')
   expect(html).toContain('1 failed')
   expect(html.slice(0, html.indexOf('</main>'))).not.toContain('Map entry points')
   expect(html).toContain('Map entry points')
-  expect(html).toContain('Awaiting runtime status')
-  expect(html.indexOf('Map hot paths')).toBeGreaterThan(html.indexOf('agent-roster__history'))
+  // The rail lists agents as flat rows sorted by urgency, so a provisional
+  // spawn is still named and a finished one never outranks a live one.
+  expect(html).toContain('awaiting runtime status')
+  expect(html.indexOf('Map entry points')).toBeLessThan(html.indexOf('Map hot paths'))
+  expect(html).not.toContain('agent-roster__history')
 })
 
 // ── Sidebar keeps the current task in its group (mockup 07) ─────────────
@@ -633,7 +659,7 @@ test('the session context menu offers open, rename and copy id', () => {
   const html = render(
     snapshot({ sessionMenu: { id: 'aa19f402', key: 'aa19f402', title: 'Ship loop', x: 40, y: 60 } }),
   )
-  for (const needle of ['Session actions', 'Open', 'Rename…', 'Copy id']) {
+  for (const needle of ['Session actions', 'Open', 'Rename…', 'Copy ID', 'Export as Markdown']) {
     expect(html).toContain(needle)
   }
   // Items with no wire capability are deliberately absent.
@@ -670,8 +696,7 @@ test('streamThinking off hides live thinking blocks but keeps the tool runs', ()
   expect(on).not.toContain('secret plan')
   const off = render(snapshot({ blocks, streamThinking: false }))
   expect(off).not.toContain('secret plan')
-  expect(off).toContain('Grep')
-  expect(off).toContain('Used 1 tool')
+  expect(off).toContain('Ran 1 search')
   expect(off).toContain('answer')
 })
 
@@ -679,7 +704,7 @@ test('streamThinking off hides live thinking blocks but keeps the tool runs', ()
 
 test('specialized creation is removed from primary session navigation', () => {
   const html = render(snapshot({ currentAgentPreset: 'creator' }))
-  expect(html).toContain('◈ Creator mode')
+  expect(html).toContain('Creator mode')
   expect(html).not.toContain('Start a fresh DSH-style Creator mode session')
   expect(html).toContain('Skills &amp; tools')
   expect(html).toContain('Scheduled jobs')
@@ -690,12 +715,17 @@ test('the new-task modal renders accessible editable controls', () => {
   expect(html).toContain('New task')
   expect(html).toContain('Objective')
   expect(html).toContain('Review plan before changes')
-  expect(html).toContain('Start task ↵')
+  expect(html).toContain('Start task')
   expect(html).toContain('select aria-label="Model"')
   expect(html).not.toContain('Change the model from the composer chip once the task starts')
   expect(html).toContain('Cancel')
   expect(html).toContain('switch is-on')
-  expect(html).toContain('approvals in this workspace: auto')
+  // Per TASK, not per workspace: the daemon pins the mode to the session,
+  // so "in this workspace" promised the next task would inherit it.
+  expect(html).toContain('approvals for this task: auto')
+  expect(html).not.toContain('approvals in this workspace')
+  // The "change" affordance is a real control, not a bare <u>.
+  expect(html).toContain('<button class="linkish">change</button>')
   // No fabricated worktree slots: the current folder, the folder picker,
   // and the worktree creator only — never a pretend list of slots.
   expect(html).not.toContain('· main')
@@ -927,6 +957,7 @@ test('settings notices preserve the welcome screen while errors and real convers
   const error = render(snapshot({ blocks: [{ ...notice, error: true, text: 'Provider failed' }] }))
   expect(error).not.toContain('welcome__wordmark')
   expect(error).toContain('1 failed')
+  expect(error).toContain('Runtime error')
   expect(error).not.toContain('Provider failed')
 })
 
@@ -996,3 +1027,153 @@ test('rejected session is not presented as a stopped per-project daemon', () => 
 })
 
  test('empty todo lists and absent goals produce no task section',()=>{const html=render(snapshot({todos:[],goal:null}));expect(html).not.toContain('0/0 completed');expect(html).not.toContain('No todos in this session');expect(html).not.toContain('aria-label="Current task"')})
+
+/**
+ * The rail's status head is the fix for a panel that used to look
+ * identical whether the agent was idle, working, or had failed. Each state
+ * has to reach the head, and nothing may claim a number the runtime has
+ * not actually reported.
+ */
+test('the rail status head names the state and offers Stop only while stoppable', () => {
+  const cases: Array<[Partial<Snapshot>, string, boolean]> = [
+    [{ turnActive: true, turnSeconds: 88 }, 'working', true],
+    [{ submissionPending: true } as Partial<Snapshot>, 'working', true],
+    [{ approval: { id: 'a', action: 'bash', description: 'rm -rf' } }, 'needs', false],
+    [{ failed: { error: 'boom', turn: 1, lastUser: 'go' } }, 'failed', false],
+    [{ planMode: true }, 'plan', false],
+    [{}, 'idle', false],
+  ]
+  for (const [overrides, tone, stoppable] of cases) {
+    const html = renderToStaticMarkup(createElement(RailStatus, { snap: snapshot(overrides) }))
+    expect({ tone, found: html.includes(`data-tone="${tone}"`) }).toEqual({ tone, found: true })
+    expect({ tone, stop: html.includes('railstatus__stop') }).toEqual({ tone, stop: stoppable })
+  }
+  expect(renderToStaticMarkup(createElement(RailStatus, { snap: snapshot({ turnActive: true, turnSeconds: 88 }) }))).toContain('1m 28s')
+})
+
+test('the status head shows the running tool and omits unreported measurements', () => {
+  const working = snapshot({
+    turnActive: true,
+    contextTokens: 128_000,
+    contextMax: 256_000,
+    costUsd: 0.42,
+    todos: [
+      { id: '1', content: 'one', status: 'completed' },
+      { id: '2', content: 'two', status: 'in_progress' },
+    ],
+    blocks: [{ kind: 'tools', id: 1, running: true, items: [{ id: 't', verb: 'exec_command', arg: 'bun test', dur: '', state: 'working' }] }],
+  } as Partial<Snapshot>)
+  const html = renderToStaticMarkup(createElement(RailStatus, { snap: working }))
+  // The rail and the feed header share one phrase for the running call.
+  expect(html).toContain('Running bun test')
+  expect(html).toContain('1 of 2')
+  expect(html).toContain('50%')
+  // Cost rides the header only once the turn is over — mid-turn that slot
+  // belongs to the elapsed clock and Stop.
+  expect(html).not.toContain('$0.42')
+  expect(renderToStaticMarkup(createElement(RailStatus, { snap: snapshot({ costUsd: 0.42 }) }))).toContain('$0.42')
+
+  // Context the runtime has not reported must not render as "0 of 256K",
+  // which asserts an untouched context rather than an unknown one.
+  const unknown = renderToStaticMarkup(createElement(RailStatus, { snap: snapshot({ turnActive: true, contextMax: 256_000 }) }))
+  expect(unknown).not.toContain('railstatus__track')
+  expect(unknown).not.toContain('context')
+})
+
+test('the rail folds its utilities into one drawer instead of six siblings', () => {
+  const html = renderRail(snapshot({ changes: [{ path: 'src/a.ts', adds: 5, dels: 2, isNew: false, hunks: [] }] } as Partial<Snapshot>))
+  expect(html).toContain('Terminals, monitors and diagnostics')
+  // Everything that used to be a top-level section is still reachable.
+  for (const needle of ['Open terminals', 'Conversation usage', 'Monitors', 'Session statistics']) {
+    expect(html).toContain(needle)
+  }
+  // The touched-files row is a live count that hands off to the edits tab;
+  // it must not grow a second diff viewer inside the rail.
+  // The count heads the list; the rows carry the per-file deltas.
+  expect(html).toContain('>Touched</span>')
+  expect(html).toContain('1 file')
+  expect(html).toContain('>a.ts</span>')
+  expect(html).toContain('+5')
+  expect(html).toContain('−2')
+})
+
+/**
+ * The rail lists agents and touched files as flat rows. AgentRoster's
+ * per-agent `<details>`, and its "Past agents" wrapper, turned the rail
+ * back into the stack of collapsed triangles this redesign removed.
+ */
+test('the rail lists agents as rows, ordered by urgency, never folded away', () => {
+  const agent = (id: string, title: string, status: string): SessionRow =>
+    ({ id, key: id, title, status, age: '', current: false, kind: 'subagent', turns: 0, messages: 0, cwd: '', untitled: false })
+  const html = renderRail(snapshot({
+    fleet: [
+      agent('a', 'Finished one', 'completed'),
+      agent('b', 'Broken one', 'failed'),
+      agent('c', 'Live one', 'running'),
+    ],
+  }))
+  expect(html).not.toContain('agent-roster__history')
+  expect(html).not.toContain('<details class="agent-record"')
+  // Working, then failed, then completed.
+  expect(html.indexOf('Live one')).toBeLessThan(html.indexOf('Broken one'))
+  expect(html.indexOf('Broken one')).toBeLessThan(html.indexOf('Finished one'))
+  expect(html).toContain('1 working · 1 failed · 3')
+})
+
+test('the rail caps its lists and offers the remainder instead of scrolling forever', () => {
+  const agent = (index: number): SessionRow =>
+    ({ id: `a${index}`, key: `a${index}`, title: `Agent ${index}`, status: 'completed', age: '', current: false, kind: 'subagent', turns: 0, messages: 0, cwd: '', untitled: false })
+  const html = renderRail(snapshot({ fleet: Array.from({ length: 9 }, (_, index) => agent(index)) }))
+  expect(html).toContain('3 more')
+  expect(html).toContain('Agent 5')
+  expect(html).not.toContain('Agent 8')
+})
+
+test('the rail orders touched files by how much changed, not by write order', () => {
+  const file = (path: string, adds: number, dels: number) => ({ path, adds, dels, isNew: false, hunks: [], turn: 1 })
+  const html = renderRail(snapshot({
+    changes: [file('small.ts', 1, 0), file('huge.ts', 200, 40), file('mid.ts', 12, 3)],
+  } as Partial<Snapshot>))
+  expect(html.indexOf('huge.ts')).toBeLessThan(html.indexOf('mid.ts'))
+  expect(html.indexOf('mid.ts')).toBeLessThan(html.indexOf('small.ts'))
+  expect(html).toContain('+213')
+  expect(html).toContain('−43')
+})
+
+/**
+ * The rail groups into cards with one emphasised surface. The flat
+ * caption-and-rows stack gave three identically-weighted blocks with no
+ * focal point, and a status dot on every row in every list turned into
+ * texture rather than signal.
+ */
+test('each rail group is its own card and the status head is the only hero', () => {
+  const agent = (id: string, title: string, status: string): SessionRow =>
+    ({ id, key: id, title, status, age: '', current: false, kind: 'subagent', turns: 0, messages: 0, cwd: '', untitled: false })
+  const html = renderRail(snapshot({
+    turnActive: true,
+    fleet: [agent('a', 'Live one', 'running'), agent('b', 'Done one', 'completed')],
+    changes: [{ path: 'src/a.ts', adds: 5, dels: 2, isNew: false, hunks: [], turn: 1 }],
+  } as Partial<Snapshot>))
+  expect(html).toContain('railcard railcard--status')
+  // Status, agents and touched files each get their own surface.
+  expect((html.match(/class="railcard/g) ?? []).length).toBeGreaterThanOrEqual(3)
+  // Exactly one hero.
+  expect((html.match(/railcard--status/g) ?? []).length).toBe(1)
+})
+
+test('every agent row carries a state word so the column edge stays straight', () => {
+  const agent = (id: string, title: string, status: string): SessionRow =>
+    ({ id, key: id, title, status, age: '', current: false, kind: 'subagent', turns: 0, messages: 0, cwd: '', untitled: false })
+  const html = renderRail(snapshot({
+    fleet: [agent('a', 'Live one', 'running'), agent('b', 'Done one', 'completed'), agent('c', 'Bad one', 'failed')],
+  }))
+  // Colour separates them, not presence — omitting the happy path left a
+  // gap-toothed right edge.
+  expect((html.match(/class="railrow__meta"/g) ?? []).length).toBe(3)
+  expect(html).toContain('>working<')
+  expect(html).toContain('>completed<')
+  expect(html).toContain('>failed<')
+  // The dot column is gone; tone lives on the row for the colour rule.
+  expect(html).not.toContain('railrow__dot')
+  expect(html).toContain('data-state="failed"')
+})

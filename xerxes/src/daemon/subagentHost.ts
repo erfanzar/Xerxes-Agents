@@ -159,6 +159,18 @@ export interface NativeSubagentHost {
    */
   interruptSource(sourceAgentId: string): number
   /**
+   * Deliver a message to a live child, read at its next provider/tool
+   * boundary — the same mechanism and the same wording (`[steer from user]`)
+   * a main session gets. Returns false when the task is unknown, already
+   * terminal, or has too much already queued; false means nothing was
+   * delivered, so a caller must say so rather than reporting success.
+   *
+   * This is deliberately not a way to converse with a child. A subagent has
+   * no interactive turn of its own — the message joins its context and the
+   * agent may or may not act on it, exactly as with `turn.steer`.
+   */
+  steer(task: string, message: string): boolean
+  /**
    * Start a new attempt for a dead (failed/cancelled) task under its stable
    * identity. The persisted conversation continues when one survives;
    * retrying a live task returns its current snapshot instead of starting a
@@ -295,6 +307,7 @@ export function createNativeSubagentHost(options: NativeSubagentHostOptions): Na
     invalidateAll: () => managerPort.invalidateAll(),
     cancelSource: sourceAgentId => managerPort.invalidateSource(sourceAgentId),
     interruptSource: sourceAgentId => managerPort.interruptSource(sourceAgentId),
+    steer: (task, message) => managerPort.steer?.(task, message) ?? false,
     retry: (task, retryOptions) => managerPort.retry(task, retryOptions ?? {}),
     reconfigure(nextOptions) {
       if (nextOptions.worktreeForWorkspace !== options.worktreeForWorkspace || nextOptions.worktree !== options.worktree || (options.worktree && nextOptions.cwd !== options.cwd)) {
@@ -340,6 +353,11 @@ interface HandleMetadata {
 
 /** Adapt the richer native manager to the Claude-compatible tool contract. */
 class RichSubagentManagerPort implements SpawnedAgentManagerPort {
+  /** Queue a redirect for a running child; false when it cannot land. */
+  steer(handleId: string, message: string): boolean {
+    return this.manager.steer(handleId, message)
+  }
+
   private restoreModelCallScopes: NativeSubagentHostOptions['restoreModelCallScopes']
   private validateProviderSelection: NativeSubagentHostOptions['validateProviderSelection']
   private validateInheritedSelection: NativeSubagentHostOptions['validateInheritedSelection']
@@ -1030,6 +1048,15 @@ class RecoverableSubagentManagerPort implements SpawnedAgentManagerPort {
 
   constructor(private readonly live: RichSubagentManagerPort) {}
 
+  /**
+   * Steering is only meaningful for a child that is actually running, so it
+   * goes straight to the live port — a recovered or tombstoned handle has no
+   * turn loop to read the message and correctly reports false.
+   */
+  steer(handleId: string, message: string): boolean {
+    return this.live.steer(handleId, message)
+  }
+
   reconfigure(options: NativeSubagentHostOptions, generation: number): void {
     this.live.reconfigure(options, generation)
   }
@@ -1372,6 +1399,10 @@ async function runNativeSubagent(
         ...(options.topP === undefined ? {} : { topP: options.topP }),
         userMessage: request.prompt,
       }, {
+        // The loop drains this at every provider/tool boundary, so a redirect
+        // reaches the child between steps rather than corrupting one in
+        // flight. Identical mechanism to a main session's `turn.steer`.
+        drainSteer: () => request.drainSteer(),
         llm: options.llm,
         ...(permissionBroker === undefined ? {} : { permissionBroker }),
         toolExecutor: options.toolExecutor,

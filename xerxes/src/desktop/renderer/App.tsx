@@ -10,6 +10,7 @@ import { SessionSearch } from './SearchPanel.js'
 import { useTranscriptScroll } from './transcriptScroll.js'
 import { store, type Snapshot, isPlanReview } from './store.js'
 import { connectionFailureKind } from './connectionFailure.js'
+import { failureView } from './turnFailure.js'
 import type { AgentMember, Block } from './types.js'
 import { applyCompletion, wantsHints, type HintItem } from './hints.js'
 import { groupByWorkspace } from './workspaceGroups.js'
@@ -18,12 +19,22 @@ import { Markdown } from './markdown.js'
 import { Dictation } from './Dictation.js'
 import { draftKey, readDraft, transitionDraft, writeDraft, acceptedDraft } from './drafts.js'
 import { PanelDivider, usePanelLayout } from './layout.js'
-import { keyedActivityGroups, isGroupedActivity } from "./activityGroups.js"
+import { useDialogFocus } from './dialogFocus.js'
+import { keyedActivityGroups, isDisclosedActivity } from "./activityGroups.js"
+import { activitySummary, approvalTitle, liveActivityPhrase } from './activityPhrase.js'
 import { ToolCallRow, toolHasFailed } from "./Execution.js"
-import { activityFleetRows, AgentRoster } from './AgentRoster.js'
+import { activityFleetRows, agentState } from './AgentRoster.js'
+import { RailAgents, RailFiles } from './RailLists.js'
 import { AgentInspector } from './AgentInspector.js'
 import { OutputViewer } from './OutputViewer.js'
 import { Icon } from './Icon.js'
+import { RailStatus } from './RailStatus.js'
+// Re-exported: it moved into its own module so the rail's diagnostics
+// drawer (DesktopPanels) can import it without a cycle through App.
+export { SessionDiagnostics } from './SessionDiagnostics.js'
+import { ErrorBoundary } from './ErrorBoundary.js'
+import { FindBar } from './FindBar.js'
+import { Shortcuts } from './Shortcuts.js'
 import { FirstRunSetup } from './Setup.js'
 import { RemoteWorkspaceGate } from './RemoteWorkspaceGate.js'
 import { BackgroundIndicator, DesktopNavigation, DesktopSheet, DesktopPage, DesktopRail, useDesktopNavigation, type DesktopPanel } from './DesktopPanels.js'
@@ -49,6 +60,32 @@ function statusColor(status: string): string {
 function workspaceLabel(cwd: string): string {
   const base = cwd.replaceAll('\\', '/').split('/').filter(Boolean).at(-1)
   return base || 'workspace'
+}
+
+/**
+ * One persistent polite live region for the whole shell.
+ *
+ * Every status in this renderer was a conditionally-mounted `role="status"`
+ * node that arrives already containing its text — assistive tech announces
+ * changes to a live region, not the insertion of one, so turn completion,
+ * failure and a pending approval were announced by nothing at all. This
+ * node is always mounted and only its text changes.
+ */
+function Announcer({ snap }: { snap: Snapshot }): ReactElement {
+  const message = snap.approval
+    ? `Approval required for ${snap.approval.toolName || 'a tool call'}`
+    : snap.question ? 'The agent is asking a question'
+    : snap.turnActive ? 'Working'
+    : snap.submissionPending ? 'Starting'
+    : snap.failed ? `Turn failed: ${snap.failed.error}`
+    : snap.connection === 'offline' ? 'Disconnected from the workspace runtime'
+    : snap.turnCount > 0 ? 'Finished' : ''
+  return <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">{message}</p>
+}
+
+/** Names the rail in a boundary fallback: "Files could not be shown". */
+function railLabel(rail: 'files' | 'review' | 'terminal' | 'activity'): string {
+  return rail === 'files' ? 'Project files' : rail === 'review' ? 'Source control' : rail === 'terminal' ? 'Terminal' : 'Activity'
 }
 
 /** Blinking tail shown on streaming blocks. */
@@ -139,7 +176,7 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
   useEffect(() => { const resize = () => setWindowWidth(window.innerWidth); window.addEventListener('resize', resize); return () => window.removeEventListener('resize', resize) }, [])
   const narrow = windowWidth < 850
   const focused = narrow ? !narrowNavigation : layout.sidebarHidden
-  const [railChoice, setRail] = useState<'files' | 'review' | 'activity' | null | undefined>(undefined)
+  const [railChoice, setRail] = useState<'files' | 'review' | 'terminal' | 'activity' | null | undefined>(undefined)
   const [filesExpanded, setFilesExpanded] = useState(false)
   const [reviewPath, setReviewPath] = useState('')
   const [selectedAgent, setSelectedAgent] = useState('')
@@ -148,11 +185,19 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
   // An explicit open/close choice survives session changes and resizing.
   const rail = railChoice === undefined ? (!snap.noWorkspace && !contextRequiresFullWidth ? 'activity' : null) : railChoice
   const [page, setPage] = useState<'agents' | 'extensions' | 'artifacts' | null>(null)
+  // Which stylesheet takeovers are in effect, named once so the decision
+  // dock below and the CSS cannot disagree about when .chat is gone.
+  const contextFull = Boolean(rail && rail !== 'review' && (filesExpanded || contextRequiresFullWidth))
+  const chatHidden = { contextFull, any: contextFull || rail === 'review' }
+  // The divider must never be draggable past the width that hides the
+  // divider itself — the old max let a persisted value strand the rail
+  // over the whole window with no control able to shrink it again.
+  const inspectorMax = Math.max(260, Math.min(520, windowWidth - (focused ? 0 : layout.sidebarWidth) - 320))
   const navigate = (next: DesktopPanel, filePath?: string): void => {
     if (next === 'review') setReviewPath(filePath ?? '')
     if (next === 'activity') setSelectedAgent(filePath ?? '')
     if (next === 'activity') requestAnimationFrame(() => document.querySelector('.desktop-rail .studio-sheet-content')?.scrollTo({ top: 0 }))
-    if (next === 'files' || next === 'review' || next === 'activity') setRail(next)
+    if (next === 'files' || next === 'review' || next === 'terminal' || next === 'activity') setRail(next)
     else if (next === 'agents' || next === 'extensions' || next === 'artifacts') { setPage(next); setPanel(null) }
     else if (next === null) { setPage(null); setPanel(null) }
     else setPanel(next)
@@ -163,14 +208,28 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
     <div className={`app atelier${trafficLights ? '' : ' app--no-traffic-lights'}${focused ? ' atelier--focus' : ''}`} style={{ '--sidebar-width': `${layout.sidebarWidth}px`, '--inspector-width': `${layout.inspectorWidth}px` } as React.CSSProperties}>
       <Topbar snap={snap} inspectorOpen={rail !== null} sidebarVisible={!focused} onFocus={() => narrow ? setNarrowNavigation(value => !value) : setLayout({ sidebarHidden: !focused })} />
       <FirstRunSetup snap={snap} />
-      <div className="app__body" data-context-full={rail && rail !== 'review' && (filesExpanded || contextRequiresFullWidth) || undefined} data-review={rail === "review" || undefined}>
+      <div className="app__body" data-context-full={chatHidden.contextFull || undefined} data-review={rail === "review" || undefined}>
         <Sidebar snap={snap} page={page} />
         {!focused && <PanelDivider label="Resize sessions" value={layout.sidebarWidth} min={180} max={360} onChange={sidebarWidth => setLayout({ sidebarWidth })} />}
-        {snap.noWorkspace ? snap.storageScope?.startsWith('ssh:') ? <RemoteWorkspaceGate /> : <WorkspaceGate /> : <Chat snap={snap} page={page} />}
-        {rail && rail !== 'review' && <PanelDivider label="Resize inspector" value={layout.inspectorWidth} min={260} max={520} reverse onChange={inspectorWidth => setLayout({ inspectorWidth })} />}
-        {rail && <DesktopRail activityFocused={Boolean(selectedAgent)} panel={rail} snap={snap} close={() => setRail(null)} filesExpanded={filesExpanded} reviewPath={reviewPath} {...(!contextRequiresFullWidth ? { toggleFilesExpanded: () => setFilesExpanded(value => !value) } : {})} activityDetails={<ActivityDetails snap={snap} selectedAgent={selectedAgent} />} />}
+        {snap.noWorkspace ? snap.storageScope?.startsWith('ssh:') ? <RemoteWorkspaceGate /> : <WorkspaceGate /> : <ErrorBoundary label="This conversation"><Chat snap={snap} page={page} /></ErrorBoundary>}
+        {rail && rail !== 'review' && <PanelDivider label="Resize inspector" value={layout.inspectorWidth} min={260} max={inspectorMax} reverse onChange={inspectorWidth => setLayout({ inspectorWidth })} />}
+        {rail && <ErrorBoundary label={railLabel(rail)}><DesktopRail activityFocused={Boolean(selectedAgent)} panel={rail} snap={snap} close={() => setRail(null)} filesExpanded={filesExpanded} reviewPath={reviewPath} {...(!contextRequiresFullWidth ? { toggleFilesExpanded: () => setFilesExpanded(value => !value) } : {})} activityDetails={<ActivityDetails snap={snap} selectedAgent={selectedAgent} />} /></ErrorBoundary>}
 
       </div>
+      {/* The review takeover and an expanded rail both hide .chat, which
+          took the composer, the approval card and the question card with
+          it — a decision that arrived mid-review was invisible and
+          unanswerable. Float it above the takeover instead. */}
+      {chatHidden.any && (snap.approval || snap.question) && (
+        <div className="decision-dock">
+          {snap.approval
+            ? <ApprovalCard approval={snap.approval} policy={snap.permissionMode} />
+            : snap.question ? <QuestionCard key={`dock:${snap.question.requestId}`} question={snap.question} plan={snap.plan} /> : null}
+        </div>
+      )}
+      <FindBar />
+      <Shortcuts />
+      <Announcer snap={snap} />
       <SettingsModal snap={snap} />
       {snap.taskModalOpen && <TaskModal snap={snap} />}
       {/* Mounted only while open: the palette's hooks (needle, cursor,
@@ -182,9 +241,9 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
       {panel && <DesktopSheet panel={panel} snap={snap} close={() => setPanel(null)} activityDetails={<ActivityDetails snap={snap} />} />}
       {(snap.workspaceBusy || snap.workspaceError) && <div className="workspace-notice" role={snap.workspaceError ? 'alert' : 'status'}>
         <span>{snap.workspaceError || 'Opening workspace…'}</span>
-        {snap.workspaceError && <button aria-label="Dismiss workspace error" onClick={() => store.clearWorkspaceError()}>×</button>}
+        {snap.workspaceError && <button aria-label="Dismiss workspace error" onClick={() => store.clearWorkspaceError()}><Icon name="close" size={13} /></button>}
       </div>}
-      <GlobalKeys snap={snap} />
+      <GlobalKeys snap={snap} closeSurface={panel || page ? () => { setPanel(null); setPage(null) } : null} />
     </div>
     </ActivityVisible.Provider></DesktopNavigation.Provider>
   )
@@ -202,7 +261,7 @@ function Topbar({ snap, inspectorOpen, sidebarVisible, onFocus }: { snap: Snapsh
     <button title="Search sessions" aria-label="Search sessions" onClick={() => store.openSessionSearch()}><Icon name="search" /></button>
     <BackgroundIndicator snap={snap} />
     {!inspectorOpen && <>
-    <button title="Working tree changes" onClick={() => open('review')}><Icon name="changes" /><span>Changes</span></button>
+    <button title="Source control" onClick={() => open('review')}><Icon name="branch" /><span>Git</span></button>
     <button title="Project files" aria-label="Project files" onClick={() => open('files')}><Icon name="sidebar" /></button></>}
     </div>
   </div>
@@ -245,7 +304,7 @@ function RuntimeStatus({ snap, compact = false }: { snap: Snapshot; compact?: bo
       <span>{label}</span>
     </button>
     {expanded && createPortal(<div ref={popup} className="runtime-popover" role="dialog" aria-label="Workspace runtime" tabIndex={-1}>
-      <header><strong>Workspace runtime</strong><button aria-label="Close runtime status" onClick={() => { setExpanded(false); trigger.current?.focus() }}>×</button></header>
+      <header><strong>Workspace runtime</strong><button aria-label="Close runtime status" onClick={() => { setExpanded(false); trigger.current?.focus() }}><Icon name="close" size={13} /></button></header>
       <p role="status" aria-live="polite">{snap.connection === 'online' ? 'Connected to this workspace' : label}</p>
       {snap.daemonWarning && <><strong>App and runtime versions differ</strong><p>{snap.daemonWarning}</p></>}
       {snap.runtimeUpdateMessage && <p role="status">{snap.runtimeUpdateMessage}</p>}
@@ -264,15 +323,20 @@ function RuntimeStatus({ snap, compact = false }: { snap: Snapshot; compact?: bo
  */
 function WorkspaceMenu({ snap }: { snap: Snapshot }): ReactElement {
   const groups = groupByWorkspace(snap.sessions, snap.cwd, snap.workspaceDirectories)
-  const statusFor = (cwd: string): string => (cwd === snap.cwd ? '● current' : `${groups.find(g => g.cwd === cwd)?.rows.length ?? 0} tasks`)
+  const statusFor = (cwd: string): string => (cwd === snap.cwd ? 'current' : `${groups.find(g => g.cwd === cwd)?.rows.length ?? 0} tasks`)
   return (
     <>
       <div className="backdrop backdrop--clear" onClick={() => store.closeWorkspaceMenu()} />
-      <div className="wsmenu" role="menu" aria-label="Workspaces">
+      {/* role="menu" owns only menuitem children; the plain buttons and
+          captions here made it an invalid tree that screen readers report
+          as an empty menu. A labelled group describes what is actually
+          rendered. */}
+      <div className="wsmenu" role="group" aria-label="Workspaces">
         <div className="cap" style={{ padding: '6px 10px 2px' }}>Workspaces</div>
         {groups.map(group => (
           <button
             key={group.cwd || group.name}
+            aria-current={group.cwd === snap.cwd ? 'true' : undefined}
             className={`wsrow${group.cwd === snap.cwd ? ' is-cur' : ''}`}
             title={group.cwd === snap.cwd ? `${group.cwd} — you are here` : `Switch to ${group.cwd}`}
             onClick={() => { if (group.cwd !== snap.cwd) store.enterWorkspace(group.cwd) }}
@@ -282,7 +346,7 @@ function WorkspaceMenu({ snap }: { snap: Snapshot }): ReactElement {
               <span className="wsrow__t">{group.name}</span>
               <span className="wsrow__s">{group.cwd || group.name} · {statusFor(group.cwd)}</span>
             </span>
-            {group.cwd === snap.cwd && <span className="kbd">✓</span>}
+            {group.cwd === snap.cwd && <span className="kbd"><Icon name="check" size={11} /></span>}
           </button>
         ))}
         {groups.length === 0 && (
@@ -292,12 +356,12 @@ function WorkspaceMenu({ snap }: { snap: Snapshot }): ReactElement {
               <span className="wsrow__t">{workspaceLabel(snap.cwd) || 'No workspace'}</span>
               <span className="wsrow__s">{snap.cwd || 'choose a folder to begin'}</span>
             </span>
-            <span className="kbd">✓</span>
+            <span className="kbd"><Icon name="check" size={11} /></span>
           </div>
         )}
         <div className="menu__sep" />
         <button className="menu__item" onClick={() => { store.closeWorkspaceMenu(); store.chooseWorkspace() }}>
-          <span className="ico">＋</span> Add workspace…
+          <Icon name="plus" size={13} /> Add workspace…
         </button>
       </div>
     </>
@@ -313,20 +377,24 @@ function WorkspaceMenu({ snap }: { snap: Snapshot }): ReactElement {
  * live picker stays anchored to the composer chip.
  */
 function TaskModal({ snap }: { snap: Snapshot }): ReactElement | null {
-  const [objective, setObjective] = useState('')
+  const [objectiveText, setObjectiveText] = useState('')
   const [planFirst, setPlanFirst] = useState(true)
   const [namingWorktree, setNamingWorktree] = useState(false)
   const [worktreeName, setWorktreeName] = useState('')
   const [agentPreset, setAgentPreset] = useState('')
   const [model, setModel] = useState(snap.model)
   const [starting, setStarting] = useState(false)
+  // Every other aria-modal dialog in the renderer traps and restores focus;
+  // this one shipped without it, so Tab walked out into the shell behind.
+  const objectiveField = useRef<HTMLTextAreaElement>(null)
+  useDialogFocus(objectiveField)
   const models = [...new Set([snap.model, ...snap.models.map(choice => choice.id)].filter(Boolean))]
   const presets = snap.agentPresets ?? []
   const selectedPreset = agentPreset || presets.find(row => row.isDefault && !row.broken)?.id || 'default'
   const start = (): void => {
-    if (starting || !objective.trim() || !model) return
+    if (starting || !objectiveText.trim() || !model) return
     setStarting(true)
-    void store.startTask(objective, planFirst, selectedPreset, model).finally(() => setStarting(false))
+    void store.startTask(objectiveText, planFirst, selectedPreset, model).finally(() => setStarting(false))
   }
   const submitWorktree = (): void => {
     if (!worktreeName.trim()) { setNamingWorktree(false); return }
@@ -343,12 +411,12 @@ function TaskModal({ snap }: { snap: Snapshot }): ReactElement | null {
             <label>Workspace</label>
             <div className="seg" style={{ flexWrap: 'wrap' }}>
               <button className="is-on" title={snap.cwd}>▣ {workspaceLabel(snap.cwd) || 'no workspace'}</button>
-              <button onClick={() => store.chooseWorkspace()} title="Open a different folder as the workspace">＋ different folder…</button>
+              <button onClick={() => store.chooseWorkspace()} title="Open a different folder as the workspace"><Icon name="plus" size={13} /> different folder…</button>
               <button
                 onClick={() => setNamingWorktree(value => !value)}
                 title="Create an isolated git worktree next to the repo and switch into it"
               >
-                ＋ new worktree…
+                <Icon name="plus" size={12} /> new worktree…
               </button>
               {namingWorktree && (
                 <input
@@ -387,13 +455,13 @@ function TaskModal({ snap }: { snap: Snapshot }): ReactElement | null {
           <div className="field">
             <label>Objective</label>
             <textarea
+              ref={objectiveField}
               className="composer__input taskmodal__objective"
               rows={4}
-              value={objective}
-              autoFocus
+              value={objectiveText}
               spellCheck={false}
               placeholder="What would you like to get done?"
-              onChange={e => setObjective(e.target.value)}
+              onChange={e => setObjectiveText(e.target.value)}
               onKeyDown={e => {
                 if (e.key === 'Enter' && !e.shiftKey) {
                   e.preventDefault()
@@ -406,7 +474,7 @@ function TaskModal({ snap }: { snap: Snapshot }): ReactElement | null {
           <div className="row">
             <div className="row__main">
               <div className="row__t">Review plan before changes</div>
-              <div className="row__s">agent proposes a checklist; you approve before anything runs</div>
+              <div className="row__s">The agent proposes a checklist; you approve it before anything runs.</div>
             </div>
             <button
               className={`switch${planFirst ? ' is-on' : ''}`}
@@ -425,15 +493,19 @@ function TaskModal({ snap }: { snap: Snapshot }): ReactElement | null {
             </select>
           </div>
 
+          {/* The mode is pinned per session, not per workspace — saying
+              "in this workspace" promised the next task would inherit it.
+              And the affordance was a bare <u>: not focusable, not a
+              button, the only one of its kind in the renderer. */}
           <div className="fieldnote" style={{ marginBottom: 16 }}>
-            approvals in this workspace: {snap.permissionMode || 'daemon policy'} —{' '}
-            <u style={{ cursor: 'pointer' }} onClick={() => { store.closeTaskModal(); store.openSettings('permissions') }}>change</u>
+            approvals for this task: {snap.permissionMode || 'daemon policy'} —{' '}
+            <button className="linkish" onClick={() => { store.closeTaskModal(); store.openSettings('permissions') }}>change</button>
           </div>
 
           <div role="status" className="taskmodal__error">{snap.error}</div>
           <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
             <button className="btn btn--ghost" disabled={starting} onClick={() => store.closeTaskModal()}>Cancel</button>
-            <button className="btn" disabled={starting || !objective.trim() || !model} onClick={start}>{starting ? 'Starting…' : 'Start task ↵'}</button>
+            <button className="btn" disabled={starting || !objectiveText.trim() || !model} onClick={start}>{starting ? 'Starting…' : 'Start task'}</button>
           </div>
         </div>
       </div>
@@ -525,17 +597,17 @@ function SessionMenu({ menu }: { menu: Snapshot['sessionMenu'] }): ReactElement 
         ) : (
           <>
             <button role="menuitem" className="menu__item" onClick={() => { store.closeSessionMenu(); void store.openSession(menu.id) }}>
-              <span className="ico">↵</span> Open <span className="kbd">⏎</span>
+              <Icon name="arrow" size={13} /> Open <kbd className="kbd">⏎</kbd>
             </button>
             <button role="menuitem" className="menu__item" onClick={() => setRenaming(true)}>
-              <span className="ico">✎</span> Rename…
+              <Icon name="note" size={13} /> Rename…
             </button>
             <div className="menu__sep" />
             <button role="menuitem" className="menu__item" onClick={() => { copyText(menu.id); store.closeSessionMenu() }}>
-              <span className="ico">⧉</span> Copy id
+              <Icon name="copy" size={13} /> Copy ID
             </button>
             <button role="menuitem" className="menu__item" onClick={() => { void store.exportSessionTranscript(menu.key) }}>
-              <span className="ico">⬇</span> Export md
+              <Icon name="download" size={13} /> Export as Markdown
             </button>
           </>
         )}
@@ -546,27 +618,6 @@ function SessionMenu({ menu }: { menu: Snapshot['sessionMenu'] }): ReactElement 
 }
 
 // ── Statusline ──────────────────────────────────────────────────────────
-
-export function SessionDiagnostics({ snap }: { snap: Snapshot }): ReactElement {
-  const [expanded, setExpanded] = useState(false)
-  const livePhaseMs = snap.turnActive && snap.metricPhaseStartedAt != null ? Math.max(0, Date.now() - snap.metricPhaseStartedAt) : 0
-  const metrics: [string, string][] = [
-    ['Turns', String(snap.turnCount)],
-    ['Steps', String(snap.llmSteps + snap.toolSteps)],
-    ['Model time', metricDurationOf(snap.llmDurationMs + (snap.metricPhase === 'llm' ? livePhaseMs : 0))],
-    ['Tool time', metricDurationOf(snap.toolDurationMs + (snap.metricPhase === 'tool' ? livePhaseMs : 0))],
-    ['First response', snap.ttftMs == null ? 'Unavailable' : ttftOf(snap.ttftMs)],
-    ['Generation', snap.tokensPerSecond == null ? 'Unavailable' : snap.tokensPerSecond.toFixed(1) + ' tokens/s'],
-    ['Cache hit', snap.cacheHitRate == null ? 'Unavailable' : Math.round(snap.cacheHitRate * 100) + '%'],
-    ['Input tokens', compactTokensOf(snap.inputTokens)],
-  ]
-  if (snap.costUsd != null && snap.costUsd > 0) metrics.push(['Cost', '$' + snap.costUsd.toFixed(snap.costUsd < 0.01 ? 4 : 2)])
-  if (snap.model) metrics.push(['Model', snap.model])
-  if (snap.branch) metrics.push(['Branch', snap.branch])
-  return <details className="session-diagnostics" open={expanded} onToggle={event => setExpanded(event.currentTarget.open)}><summary>Session statistics</summary>
-    <dl className="session-diagnostics__values">{metrics.map(([label, value]) => <div key={label} data-wide={label === 'Model' || label === 'Branch' || undefined}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>
-  </details>
-}
 
 // ── Sidebar ─────────────────────────────────────────────────────────────
 
@@ -615,30 +666,33 @@ function Sidebar({ snap, page }: { snap: Snapshot; page: 'agents' | 'extensions'
     <aside id="session-sidebar" className="side" aria-label="Sessions">
       <div className="side__pad">
         <div className="sidebar-wordmark" aria-label="Xerxes">XERXES</div>
-        <div className="studio-segment"><button className={page !== 'agents' ? 'is-selected' : ''} onClick={() => open(null)}>Sessions</button><button className={page === 'agents' ? 'is-selected' : ''} onClick={() => open('agents')}>Agents</button></div>
+        {/* `page !== 'agents'` lit Sessions while Skills & tools or
+            Artifacts was open, so two destinations claimed to be current. */}
+        <div className="studio-segment" role="group" aria-label="Sidebar view"><button aria-pressed={page === null} className={page === null ? 'is-selected' : ''} onClick={() => open(null)}>Tasks</button><button aria-pressed={page === 'agents'} className={page === 'agents' ? 'is-selected' : ''} onClick={() => open('agents')}>Agents</button></div>
         <button
           className="newchat"
           disabled={!online || snap.turnActive}
           onClick={() => { open(null); store.newChat() }}
-          title={homeLabel(snap) ? `Start a new task in ${homeLabel(snap)} (⌘N)` : 'Start a fresh session (⌘N)'}
-        ><Icon name="plus" /><span>New session</span><kbd>⌘ N</kbd></button>
-        <button className={`studio-nav${page === "extensions" ? " is-selected" : ""}`} disabled={!online} onClick={() => open('extensions')}><Icon name="tools" /><span>Skills & tools</span></button>
-        <button className={`studio-nav${page === "artifacts" ? " is-selected" : ""}`} disabled={!online} onClick={() => open('artifacts')}><Icon name="folder" /><span>Artifacts</span></button>
+          title={homeLabel(snap) ? `Start a new task in ${homeLabel(snap)} (⌘N, or ⇧⌘N to choose a preset and worktree)` : 'Start a new task (⌘N)'}
+        ><Icon name="plus" /><span>New task</span><kbd>⌘ N</kbd></button>
+        <button className={`studio-nav${page === "extensions" ? " is-selected" : ""}`} aria-pressed={page === 'extensions'} disabled={!online} onClick={() => open('extensions')}><Icon name="tools" /><span>Skills & tools</span></button>
+        <button className={`studio-nav${page === "artifacts" ? " is-selected" : ""}`} aria-pressed={page === 'artifacts'} disabled={!online} onClick={() => open('artifacts')}><Icon name="folder" /><span>Artifacts</span></button>
         <button className="studio-nav" disabled={!online} onClick={() => open('schedules')}><Icon name="clock" /><span>Scheduled jobs</span></button>
         <input
           className="side__search"
           value={filter}
           onChange={e => setFilter(e.target.value)}
-          placeholder={online ? 'Search sessions…' : 'Offline'}
-          aria-label="Filter sessions"
+          placeholder="Filter tasks…"
+          disabled={!online}
+          aria-label="Filter tasks in this list"
           spellCheck={false}
         />
         <button
           className="side__find"
           disabled={!online}
-          title="Full-text search across every saved session (daemon transcript index)"
+          title="Full-text search across the messages of every saved task"
           onClick={() => store.openSessionSearch()}
-        >Search message history →</button>
+        >Search message history <Icon name="arrow" size={12} /></button>
       </div>
       <nav className="side__list">
         {snap.contexts?.map(context => (
@@ -661,7 +715,7 @@ function Sidebar({ snap, page }: { snap: Snapshot; page: 'agents' | 'extensions'
               title={group.cwd === snap.cwd ? `${group.cwd} — you are here` : `Switch to ${group.cwd}`}
               onClick={() => { if (group.cwd !== snap.cwd) store.enterWorkspace(group.cwd) }}
             >
-              <span className="wgroup__mark">{group.cwd === snap.cwd ? '●' : '⌂'}</span>
+              <span className="wgroup__mark" data-here={group.cwd === snap.cwd || undefined} aria-hidden="true" />
               {group.name}
               {group.cwd === snap.cwd && <span className="wgroup__cur">current</span>}
             </button>
@@ -673,14 +727,17 @@ function Sidebar({ snap, page }: { snap: Snapshot; page: 'agents' | 'extensions'
             })}
           </div>
         ))}
+        {/* A zero-match filter used to fall through to "No tasks yet",
+            which reads as "this workspace is empty" rather than "your
+            query matched nothing". */}
         {groups.length === 0 && (
-          <div className="side__empty">{snap.noWorkspace ? snap.storageScope?.startsWith('ssh:') ? 'Remote sessions appear after connecting' : 'Your sessions will appear here' : online ? 'No tasks yet — your chats live inside the workspace folder' : connectionFailureKind(snap.error) === 'transport' ? 'Connecting to the shared daemon…' : 'Workspace needs attention'}</div>
+          <div className="side__empty">{needle ? <>No task matches “{filter.trim()}”. <button className="linkish" onClick={() => setFilter('')}>Clear filter</button></> : snap.noWorkspace ? snap.storageScope?.startsWith('ssh:') ? 'Remote tasks appear after connecting' : 'Your tasks will appear here' : online ? 'No tasks yet — they are stored inside the workspace folder' : connectionFailureKind(snap.error) === 'transport' ? 'Connecting to the runtime…' : 'Workspace needs attention'}</div>
         )}
         <button className="addws" onClick={() => store.chooseWorkspace()} title="Choose another folder to open as a workspace">
-          ＋ Add folder…
+          <Icon name="plus" size={12} /> Add folder…
         </button>
       </nav>
-      <div className="studio-side-bottom"><RuntimeStatus snap={snap} /><button onClick={() => store.openSettings()}><Icon name="settings" /><span>Settings</span></button><button onClick={() => open('workspace')}><Icon name="folder" /><span>{homeLabel(snap) || 'Workspace'}</span></button></div>
+      <div className="studio-side-bottom"><RuntimeStatus snap={snap} /><button onClick={() => store.openSettings()}><Icon name="settings" /><span>Settings</span></button><button onClick={() => open('workspace')}><Icon name="folder" /><span>{homeLabel(snap) && snap.cwd ? homeLabel(snap) : 'Choose a folder…'}</span></button></div>
     </aside>
   )
 }
@@ -754,7 +811,7 @@ function FleetChip({ snap }: { snap: Snapshot }): ReactElement {
         aria-expanded={open}
         onClick={() => setOpen(value => !value)}
       >
-        ⚇ {fleet.length} subagent{fleet.length === 1 ? '' : 's'} <span className="c">▾</span>
+        <Icon name="agent" size={13} /> {fleet.length} subagent{fleet.length === 1 ? '' : 's'} <Icon name="caretDown" size={11} />
       </button>
       {open && (
         <>
@@ -791,7 +848,7 @@ function JobsChip({ snap }: { snap: Snapshot }): ReactElement {
         aria-expanded={open}
         onClick={() => setOpen(value => !value)}
       >
-        ⧉ {jobs.length} background job{jobs.length === 1 ? '' : 's'} running <span className="c">▾</span>
+        <Icon name="stack" size={13} /> {jobs.length} background job{jobs.length === 1 ? '' : 's'} running <Icon name="caretDown" size={11} />
       </button>
       {open && (
         <>
@@ -829,7 +886,7 @@ function Chat({ snap, page }: { snap: Snapshot; page: 'agents' | 'extensions' | 
         <button className="chat__workspace" onClick={() => open('workspace')}>{homeLabel(snap)}</button>
         <span className="chat__title">{snap.currentTitle || (snap.connection === 'online' ? 'New task' : 'Not connected')}</span>
         {snap.currentId && <span className="chat__id">{snap.currentId.slice(0, 8)}</span>}
-        <span className="hchip" title="Agent preset for this session · fixed after its first turn">◈ {snap.currentAgentPreset === 'creator' ? 'Creator mode' : (snap.currentAgentPreset || 'default')}</span>
+        <span className="hchip" title="Agent preset for this session · fixed after its first turn"><Icon name="spark" size={12} /> {snap.currentAgentPreset === 'creator' ? 'Creator mode' : (snap.currentAgentPreset || 'default')}</span>
         {/* Fleet + mode ride the header as chips (dsh grammar); the fleet
             chip opens the live subagent list, the mode chip toggles plan. */}
         <FleetChip snap={snap} />
@@ -839,7 +896,7 @@ function Chat({ snap, page }: { snap: Snapshot; page: 'agents' | 'extensions' | 
           title={snap.planMode ? 'Plan mode on — click to act' : 'Standard mode — click to plan first'}
           onClick={() => store.togglePlanMode()}
         >
-          {snap.planMode ? '⏸ Plan mode' : 'Standard mode'}
+          {snap.planMode ? <><Icon name="pause" size={12} /> Plan mode</> : 'Standard mode'}
         </button>
         <div className="chat__state">
           {/* Needs-input outranks acting: an approval can land mid-turn, and
@@ -848,15 +905,19 @@ function Chat({ snap, page }: { snap: Snapshot; page: 'agents' | 'extensions' | 
           {needsInput ? (
             <>
               <span className="badge badge--need">needs input{snap.turnActive ? ' · acting paused' : ''}</span>
-              {snap.turnActive && <button className="stop" onClick={() => store.cancel()}>Stop</button>}
+              {(snap.turnActive || snap.submissionPending) && <button className="stop" onClick={() => store.cancel()}>Stop</button>}
             </>
-          ) : snap.turnActive ? (
+          ) : snap.turnActive || snap.submissionPending ? (
             <>
-              <span className="badge badge--live">Working</span>
+              {/* submissionPending covers the daemon's pre-launch window —
+                  git snapshot plus any compaction — which can run for
+                  minutes. Gating Stop on turnActive alone left the composer
+                  disabled with no control at all during it. */}
+              <span className="badge badge--live">{snap.turnActive ? 'Working' : 'Starting…'}</span>
               <button className="stop" onClick={() => store.cancel()}>Stop</button>
             </>
           ) : snap.planMode ? (
-            <span className="badge badge--plan">⏸ plan mode</span>
+            <span className="badge badge--plan"><Icon name="pause" size={11} /> plan mode</span>
           ) : snap.failed ? (
             <span className="badge badge--fail">failed</span>
           ) : (
@@ -869,22 +930,29 @@ function Chat({ snap, page }: { snap: Snapshot; page: 'agents' | 'extensions' | 
           title="Export this session's transcript as markdown"
           onClick={() => void store.exportSessionTranscript(snap.sessionKey)}
         >
-          ⤓ Session log
+          <Icon name="download" size={12} /> Session log
         </button>
       <div hidden={page !== null} className={`workspace__tabs${snap.turnCount === 0 && !snap.blocks.some(block => block.kind !== "notice") ? ' workspace__tabs--empty' : ''}`}>
-        <div className="tabs">
-          <button className={`tab${snap.tab === 'activity' ? ' is-on' : ''}`} onClick={() => store.setTab('activity')}>Conversation</button>
-          <button className={`tab${snap.tab === 'plan' ? ' is-on' : ''}`} onClick={() => store.setTab('plan')}>
+        <div className="tabs" role="tablist" aria-label="Session views">
+          <button role="tab" aria-selected={snap.tab === 'activity'} className={`tab${snap.tab === 'activity' ? ' is-on' : ''}`} onClick={() => store.setTab('activity')}>Conversation</button>
+          <button role="tab" aria-selected={snap.tab === 'plan'} className={`tab${snap.tab === 'plan' ? ' is-on' : ''}`} onClick={() => store.setTab('plan')}>
             Plan &amp; todos{planTotal ? <> <span className="pillcount">{planDone}/{planTotal}</span></> : null}
           </button>
-          <button className={`tab${snap.tab === 'log' ? ' is-on' : ''}`} onClick={() => store.setTab('log')}>Log</button>
+          {/* The only route to per-file undo / "Undo all" / "Keep all".
+              Nothing called setTab('changes'), so ChangesTab and the
+              changes.undo RPC shipped unreachable. Distinct from the rail's
+              "Changes", which is the git working tree, not this session. */}
+          {changes.length > 0 && <button role="tab" aria-selected={snap.tab === 'changes'} className={`tab${snap.tab === 'changes' ? ' is-on' : ''}`} onClick={() => store.setTab('changes')}>
+            Session edits <span className="pillcount">+{totals.adds} −{totals.dels}</span>
+          </button>}
+          <button role="tab" aria-selected={snap.tab === 'log'} className={`tab${snap.tab === 'log' ? ' is-on' : ''}`} onClick={() => store.setTab('log')}>Log</button>
         </div>
       </div>
       </header>
 
       {page && <DesktopPage panel={page} snap={snap} />}
       <div className="conversation-surface" hidden={page !== null}>
-      {snap.connection !== 'online' && snap.blocks.length > 0 && <div className="connection-status" role="status" aria-live="polite"><strong>{snap.connection === 'connecting' ? 'Reconnecting…' : 'Connection lost. Retrying…'}</strong>{snap.error && <span>{snap.error}</span>}<button onClick={() => store.retryConnection()}>Retry now</button></div>}
+      {snap.connection !== 'online' && snap.blocks.length > 0 && <ConnectionBanner snap={snap} />}
       {snap.tab === 'activity' && <Stream snap={snap} />}
       {snap.tab === 'changes' && <div className="workspace"><ChangesTab snap={snap} /></div>}
       {snap.tab === 'plan' && <div className="workspace"><PlanTab snap={snap} /></div>}
@@ -896,10 +964,39 @@ function Chat({ snap, page }: { snap: Snapshot; page: 'agents' | 'extensions' | 
   )
 }
 
+/**
+ * The one connection surface that used to hardcode "Connection lost.
+ * Retrying…". `beat()` refuses to retry configuration and session
+ * rejections, so for those the banner promised a recovery that was never
+ * coming — and the offer of "Retry now" made it worse.
+ */
+function ConnectionBanner({ snap }: { snap: Snapshot }): ReactElement {
+  const kind = connectionFailureKind(snap.error)
+  const retrying = snap.connection === 'connecting' || kind === 'transport'
+  return (
+    <div className="connection-status" role={retrying ? 'status' : 'alert'} aria-live="polite">
+      <strong>
+        {snap.navigating === 'fresh' ? 'Starting a new task…'
+          : snap.navigating === 'session' ? 'Opening that task…'
+          : snap.connection === 'connecting' ? 'Reconnecting…'
+          : kind === 'transport' ? 'Connection lost. Retrying…'
+          : kind === 'session' ? 'This session belongs to another workspace'
+          : 'This workspace needs attention'}
+      </strong>
+      {snap.error && !snap.navigating && <span>{snap.error}</span>}
+      {/* retryConnection() is inert during a deliberate navigation, so the
+          button would have been a lie exactly when it looked most useful. */}
+      {snap.navigating ? null : retrying
+        ? <button onClick={() => store.retryConnection()}>Retry now</button>
+        : <button onClick={() => store.openSettings()}>Open settings</button>}
+    </div>
+  )
+}
+
 // ── Activity stream ─────────────────────────────────────────────────────
 
 function Stream({ snap }: { snap: Snapshot }): ReactElement {
-  const { ref, loadOlder } = useTranscriptScroll(`${snap.currentId}:${snap.sessionOpenRevision}`, { more: Boolean(snap.historyMore), loading: Boolean(snap.historyLoading), automatic: !snap.historyError, load: () => store.loadOlderHistory() })
+  const { ref, loadOlder, following, scrollToLatest } = useTranscriptScroll(`${snap.currentId}:${snap.sessionOpenRevision}`, { more: Boolean(snap.historyMore), loading: Boolean(snap.historyLoading), automatic: !snap.historyError, load: () => store.loadOlderHistory() })
   // 'Stream thinking' off hides reasoning trails from the feed — the daemon
   // still streams them; this is a display choice, not a policy change.
   const visible = snap.streamThinking ? snap.blocks : snap.blocks.filter(b => b.kind !== 'thinking')
@@ -929,10 +1026,15 @@ function Stream({ snap }: { snap: Snapshot }): ReactElement {
   // the transcript itself is still empty — an empty welcome must not bury
   // the thing asking for a decision.
   return (
-    <div className={`stream${empty && !failedCard && !snap.question ? ' stream--welcome' : ''}`} ref={ref}>
-      {empty && !failedCard && !snap.question ? <>
+    // Focusable and named: the transcript is the main content of the
+    // window and had no way to reach it by keyboard or name it to a screen
+    // reader. Deliberately not role="log" — a polite live region over
+    // token-level streaming announces continuously; the Announcer below
+    // reports the transitions that actually matter instead.
+    <div className={`stream${empty && !failedCard && !snap.question && !approval ? ' stream--welcome' : ''}`} ref={ref} tabIndex={0} role="region" aria-label="Conversation">
+      {empty && !failedCard && !snap.question && !approval ? <>
         {blocks.length > 0 && <div className="welcome-notices" aria-live="polite">{blocks.map(block => <BlockView key={block.id} block={block} />)}</div>}
-        {existingWork ? <TaskContinuation snap={snap} /> : <Welcome />}
+        {existingWork ? <TaskContinuation snap={snap} /> : <Welcome snap={snap} />}
       </> : (
         <div className="stream__col">
           {(snap.historyMore || snap.historyError) && <div className="history-pager">
@@ -941,18 +1043,26 @@ function Stream({ snap }: { snap: Snapshot }): ReactElement {
           </div>}
           {keyedActivityGroups(blocks, approval?.toolCallId).map(({ key, blocks: group }, index, groups) => (
             <div key={`${snap.currentId}:${key}`} data-history-anchor={group[0]!.id}>
-              {isGroupedActivity(group[0]!, approval?.toolCallId) ? <ActivityGroup blocks={group} active={snap.turnActive && index === groups.length - 1} /> : <BlockView block={group[0]!} />}
-              {inlineApproval && group.some(block => block === blocks[approvalIndex]) && <ApprovalCard approval={approval} inline />}
+              {isDisclosedActivity(group, approval?.toolCallId) ? <ActivityGroup blocks={group} active={snap.turnActive && index === groups.length - 1} turnActive={snap.turnActive} /> : group.map(block => <BlockView key={block.id} block={block} />)}
+              {inlineApproval && group.some(block => block === blocks[approvalIndex]) && <ApprovalCard approval={approval} policy={snap.permissionMode} inline />}
             </div>
           ))}
           {failedCard}
         </div>
       )}
-      {floatApproval && <ApprovalCard approval={approval} />}
+      {floatApproval && <div className="stream__col"><ApprovalCard approval={approval} policy={snap.permissionMode} /></div>}
       {snap.question && (
         <div className="stream__col">
           <QuestionCard key={`${snap.currentId}:${snap.question.requestId}`} question={snap.question} plan={snap.plan} />
         </div>
+      )}
+      {/* Scrolling up silently unpins the tail; without this the only way
+          back was to drag into a 64px band by hand, and a turn that kept
+          streaming gave no sign it had moved on without you. */}
+      {!following && blocks.length > 0 && (
+        <button className="jump-latest" onClick={scrollToLatest}>
+          {snap.turnActive ? 'Still working — jump to latest' : 'Jump to latest'} <Icon name="chevron" size={12} />
+        </button>
       )}
     </div>
   )
@@ -984,7 +1094,7 @@ function AgentsCard({ members }: { members: readonly AgentMember[] }): ReactElem
         <span className="acard__title">Subagents</span>
         <span className="acard__counts">{counts}</span>
         {working > 0 && <span className="acard__spin" />}
-        <span className={`acard__chev${open ? ' is-open' : ''}`}>▾</span>
+        <span className={`acard__chev${open ? ' is-open' : ''}`}><Icon name="caretDown" size={12} /></span>
       </button>
       {open && (
         <div className="acard__list">
@@ -1007,15 +1117,77 @@ function TaskContinuation({ snap }: { snap: Snapshot }): ReactElement {
   return <section className="task-continuation"><Icon name="activity" size={24}/><h1>Continue this task</h1><p>This session has saved work. Review its progress or send your next instruction below.</p><div><button className="btn" onClick={() => open('activity')}>Review activity</button>{(snap.todos?.length || snap.plan) ? <button className="btn" onClick={() => store.setTab('plan')}>View plan &amp; todos</button> : null}</div></section>
 }
 
-function Welcome(): ReactElement {
+/** Most recent first; the daemon already returns them in that order. */
+const RESUMABLE = 4
+
+/**
+ * The home screen.
+ *
+ * This used to be a wordmark, a tagline and three verbs — "Research a
+ * question", "Make a plan", "Build something" — that prefilled the composer
+ * with "Help me research ". It was the same screen whether you had opened a
+ * fresh folder or had eleven sessions and a dirty tree, which meant the one
+ * surface you see on every launch knew nothing about your work.
+ *
+ * Everything below comes from the snapshot the store already holds. No new
+ * wire calls: the sidebar is rendering these same sessions a few hundred
+ * pixels to the left.
+ */
+function Welcome({ snap }: { snap: Snapshot }): ReactElement {
+  const here = snap.cwd
+  // Sessions from other folders belong to those folders' home screens.
+  const resumable = snap.sessions
+    .filter(row => row.kind === 'main' && !row.current && (!here || row.cwd === here))
+    .slice(0, RESUMABLE)
+  const dirty = snap.changes.length
+  const adds = snap.changes.reduce((sum, file) => sum + file.adds, 0)
+  const dels = snap.changes.reduce((sum, file) => sum + file.dels, 0)
+  const place = workspaceLabel(here)
+
   return <div className="welcome">
     <h1 className="welcome__wordmark">XERXES</h1>
-    <p>A place to think, build, and finish.</p>
-    <div className="welcome__ideas">{([
-      ['Research a question', 'Help me research '],
-      ['Make a plan', 'Help me plan '],
-      ['Build something', 'Help me implement '],
-    ] as const).map(([label, prompt]) => <button className="idea" key={label} onClick={() => window.dispatchEvent(new CustomEvent('xerxes:add-context', { detail: prompt }))}><span>{label}</span><Icon name="arrow" size={14} /></button>)}</div>
+
+    {place ? (
+      <p className="welcome__where">
+        <Icon name="folder" size={14} />{place}
+        {snap.branch && <><span className="welcome__sep" aria-hidden="true" /><Icon name="branch" size={14} />{snap.branch}</>}
+        {dirty > 0 && <><span className="welcome__sep" aria-hidden="true" />
+          <span className="welcome__dirty">{dirty} uncommitted {dirty === 1 ? 'file' : 'files'} <b>+{adds}</b> <i>−{dels}</i></span>
+        </>}
+      </p>
+    ) : <p>A place to think, build, and finish.</p>}
+
+    {/* Your own work outranks our suggestions — but only if you have any.
+        A genuinely fresh folder still needs somewhere to start, so the
+        starters remain the fallback rather than being deleted outright. */}
+    {resumable.length > 0 ? (
+      <section className="welcome__resume" aria-label="Recent tasks here">
+        <h2>Pick up where you left off</h2>
+        {resumable.map(row => {
+          const state = agentState(row.status)
+          return (
+            <button className="resumerow" key={row.id} onClick={() => void store.openSession(row.id)}>
+              <span className="resumerow__dot" data-state={state.tone} aria-hidden="true" />
+              <span className="resumerow__name">{row.title}</span>
+              <span className="resumerow__age">{row.age}</span>
+              <Icon name="chevron" size={12} />
+            </button>
+          )
+        })}
+      </section>
+    ) : (
+      <div className="welcome__ideas">{([
+        ['Research a question', 'Help me research '],
+        ['Make a plan', 'Help me plan '],
+        ['Build something', 'Help me implement '],
+      ] as const).map(([label, prompt]) => (
+        <button className="idea" key={label} onClick={() => window.dispatchEvent(new CustomEvent('xerxes:add-context', { detail: prompt }))}>
+          <span>{label}</span><Icon name="arrow" size={14} />
+        </button>
+      ))}</div>
+    )}
+
+    {resumable.length > 0 && <p className="welcome__start">Or describe something new below.</p>}
   </div>
 }
 
@@ -1029,7 +1201,7 @@ function WorkspaceGate(): ReactElement {
   return (
     <main className="chat">
       <div className="wsgate">
-        <div className="wsgate__mark">⌂</div>
+        <div className="wsgate__mark"><Icon name="folder" size={26} /></div>
         <h1>Welcome to Xerxes.</h1>
         <p>
           Choose the folder you want to work in. Next, connect a model provider and start your first task. Your existing files stay in place.
@@ -1053,22 +1225,48 @@ function Offline({ cwd, error }: { cwd: string; error: string | null }): ReactEl
       <p>
         The terminal, TUI and desktop app share a daemon across workspaces. Each task keeps its own workspace and session. The app connects automatically when the daemon is available.
       </p>
-      <button className="btn" onClick={() => store.retryConnection()}>↻ Retry now</button>
+      <button className="btn" onClick={() => store.retryConnection()}><Icon name="retry" size={13} /> Retry now</button>
       {cwd && <div className="cmd">Workspace: {cwd}</div>}
     </div>
   )
 }
 
-function ActivityGroup({ blocks, active }: { blocks: Snapshot['blocks']; active: boolean }): ReactElement {
+function ActivityGroup({ blocks, active, turnActive }: { blocks: Snapshot['blocks']; active: boolean; turnActive: boolean }): ReactElement {
   const tools = blocks.flatMap(block => block.kind === 'tools' ? block.items : [])
   const failures = tools.filter(toolHasFailed).length + blocks.filter(block => block.kind === 'notice' && block.error).length + blocks.reduce((total, block) => total + (block.kind === 'agents' ? block.members.filter(member => member.status === 'failed').length : 0), 0)
-  const running = active || tools.some(item => item.state === 'working') || blocks.some(block => block.kind === 'thinking' && block.streaming || block.kind === 'agents' && block.members.some(member => member.status === 'working' || member.status === 'running'))
+  const liveAgents = blocks.reduce((total, block) => total + (block.kind === 'agents' ? block.members.filter(member => member.status === 'working' || member.status === 'running').length : 0), 0)
+  // Subagents may outlive the turn. That is not the turn still "Working" —
+  // the group reads as finished and notes who is still out.
+  const running = active || tools.some(item => item.state === 'working') || blocks.some(block => block.kind === 'thinking' && block.streaming) || turnActive && liveAgents > 0
   const [expanded, setExpanded] = useState(false)
   const [inspected, setInspected] = useState(false)
-  return <details className="activity-group" open={expanded} onToggle={event => { setExpanded(event.currentTarget.open); if (event.currentTarget.open) setInspected(true) }}>
-    <summary><Icon name="chevron" size={14} /><span>{running ? 'Working' : tools.length ? 'Used ' + tools.length + ' tool' + (tools.length === 1 ? '' : 's') : blocks.every(block => block.kind === 'thinking') ? 'Reasoning' : 'Work activity'}<span className="activity-group__actions">{[...new Set(tools.map(item => toolLabelOf(item.verb)))].join(', ')}</span></span>{failures > 0 && <strong>{failures} failed</strong>}</summary>
+  return <details className={`activity-group${running ? ' is-running' : ''}`} open={expanded} onToggle={event => { setExpanded(event.currentTarget.open); if (event.currentTarget.open) setInspected(true) }}>
+    <summary><Icon name="chevron" size={14} />{running
+      ? <span className="activity-group__live"><span className="activity-group__working">Working</span><LivePhrase text={liveActivityPhrase(blocks)} /></span>
+      : <span className="activity-group__done">{activitySummary(blocks)}{liveAgents > 0 && <span className="activity-group__pending"> · {liveAgents} agent{liveAgents === 1 ? '' : 's'} still running</span>}</span>}{failures > 0 && <strong>{failures} failed</strong>}</summary>
     <div className="activity-group__body">{(expanded || inspected) && blocks.map((block, index) => <BlockView key={block.id} block={block} />)}</div>
   </details>
+}
+
+/**
+ * One status phrase that crossfades when it changes: the outgoing phrase
+ * lifts away while the incoming one settles in the same grid cell, so the
+ * header never jumps width mid-swap. Reduced motion swaps instantly (CSS).
+ */
+function LivePhrase({ text }: { text: string }): ReactElement {
+  const [phrase, setPhrase] = useState<{ text: string; key: number; leaving: { text: string; key: number } | null }>({ text, key: 0, leaving: null })
+  useEffect(() => {
+    setPhrase(prev => prev.text === text ? prev : { text, key: prev.key + 1, leaving: { text: prev.text, key: prev.key } })
+  }, [text])
+  useEffect(() => {
+    if (!phrase.leaving) return
+    const timer = setTimeout(() => setPhrase(prev => ({ ...prev, leaving: null })), 320)
+    return () => clearTimeout(timer)
+  }, [phrase.leaving])
+  return <span className="live-phrase">
+    {phrase.leaving && <span key={phrase.leaving.key} className="live-phrase__item is-leaving" aria-hidden="true">{phrase.leaving.text}</span>}
+    <span key={phrase.key} className={`live-phrase__item${phrase.key ? ' is-entering' : ''}`} title={phrase.text}>{phrase.text}</span>
+  </span>
 }
 
 function UserMessage({ text }: { text: string }): ReactElement {
@@ -1129,7 +1327,7 @@ function BlockView({ block }: { block: Snapshot['blocks'][number] }): ReactEleme
   if (block.kind === 'checkpoint') {
     return (
       <div className="frow frow--sys">
-        <span className="frow__icon">⏱</span>
+        <span className="frow__icon"><Icon name="clock" size={13} /></span>
         <span className="frow__label">Checkpoint</span>
         <span className="frow__sep">·</span>
         <span className="frow__excerpt">turn {block.turn} end · <b>+{block.adds} −{block.dels}</b> cumulative</span>
@@ -1139,27 +1337,81 @@ function BlockView({ block }: { block: Snapshot['blocks'][number] }): ReactEleme
   if (block.text.length > 320 || block.text.split('\n').length > 4) return <details className="activity-notice"><summary><Icon name="activity" size={14}/><span>{block.text.split('\n')[0]!.slice(0,160)}</span><Icon name="chevron" size={12}/></summary><OutputViewer text={block.text} label="Activity details" /></details>
   return (
     <div className={`frow frow--sys${block.error ? ' frow--err' : ''}`}>
-      <span className="frow__icon">▤</span>
+      <span className="frow__icon"><Icon name={block.error ? "warning" : "info"} size={13} /></span>
       <span className="frow__excerpt frow__excerpt--wrap">{block.text}</span>
     </div>
   )
 }
 
-function ApprovalCard({ approval, inline }: { approval: NonNullable<Snapshot['approval']>; inline?: boolean }): ReactElement {
+/** Command-shaped tools read as a command; everything else as its fields. */
+const COMMAND_KEYS = ['command', 'cmd', 'script', 'shell'] as const
+
+/**
+ * What the decision is actually about. The daemon ships the tool's real
+ * arguments; rendering them per shape — the command for a shell call, the
+ * path + diff for an edit, labelled fields otherwise — is the difference
+ * between approving `send_message(telegram)` and approving a message you
+ * have read.
+ */
+function ApprovalBody({ approval }: { approval: NonNullable<Snapshot['approval']> }): ReactElement | null {
+  const inputs = approval.inputs
+  if (!inputs) return approval.description ? <pre className="approval__desc">{approval.description}</pre> : null
+  const entries = Object.entries(inputs).filter(([, value]) => value !== null && value !== undefined && value !== '')
+  if (entries.length === 0) return approval.description ? <pre className="approval__desc">{approval.description}</pre> : null
+  const command = entries.find(([key]) => (COMMAND_KEYS as readonly string[]).includes(key))
+  if (command && typeof command[1] === 'string') {
+    const rest = entries.filter(entry => entry !== command)
+    return <>
+      <pre className="approval__desc">{command[1]}</pre>
+      {rest.length > 0 && <ApprovalFields entries={rest} />}
+    </>
+  }
+  return <ApprovalFields entries={entries} />
+}
+
+function ApprovalFields({ entries }: { entries: readonly [string, unknown][] }): ReactElement {
   return (
-    <div className={`approval${inline ? ' approval--inline' : ''}`} role="alertdialog" aria-label="Tool approval">
+    <dl className="approval__fields">
+      {entries.map(([key, value]) => (
+        <div key={key}>
+          <dt>{key.replace(/[_-]+/g, ' ')}</dt>
+          <dd>{typeof value === 'string' ? value : JSON.stringify(value, null, 1)}</dd>
+        </div>
+      ))}
+    </dl>
+  )
+}
+
+function ApprovalCard({ approval, policy, inline }: { approval: NonNullable<Snapshot['approval']>; policy: string; inline?: boolean }): ReactElement {
+  const card = useRef<HTMLDivElement>(null)
+  // role="alertdialog" that never takes focus announces nothing, and the
+  // 1/2/3 keys it advertises are dropped while the composer (auto-focused
+  // on entry) holds focus. Moving focus here fixes both at once — and it
+  // is what makes the keys safe to bind at all.
+  useEffect(() => {
+    const previous = document.activeElement
+    // The card itself, not its first button: landing on a control would
+    // make Enter activate whatever happens to be first in the DOM.
+    card.current?.focus()
+    return () => { if (previous instanceof HTMLElement && previous.isConnected) previous.focus() }
+  }, [approval.id])
+  return (
+    <div ref={card} tabIndex={-1} className={`approval${inline ? ' approval--inline' : ''}`} role="alertdialog" aria-modal="false" aria-label={`Approve ${approval.toolName || approval.action || 'tool call'}`}>
       <div className="approval__head">
-        <span className="approval__dot">●</span>
-        <span className="approval__title">{approval.toolName || approval.action || 'tool'} — approval required</span>
-        <span className="approval__keys">1 / 2 / 3</span>
+        <span className="approval__dot" aria-hidden="true" />
+        <span className="approval__title" title={approval.toolName || approval.action || undefined}>{approvalTitle(approval.toolName || approval.action || '')}</span>
+        <button className="approval__dismiss" title="Hide until you decide — the request stays pending" aria-label="Hide this request" onClick={() => store.dismissInteraction()}><Icon name="close" size={13} /></button>
       </div>
-      {approval.description && <pre className="approval__desc">{approval.description}</pre>}
+      {approval.reason && <p className="approval__reason">{approval.reason}</p>}
+      <ApprovalBody approval={approval} />
       <div className="approval__row">
         <button className="btn btn--solid" onClick={() => store.approve(approval.id, 'allow_once')}>Allow once <kbd>1</kbd></button>
         <button className="btn" onClick={() => store.approve(approval.id, 'allow_session')}>This session <kbd>2</kbd></button>
         <button className="btn btn--danger" onClick={() => store.approve(approval.id, 'deny')}>Deny <kbd>3</kbd></button>
-        <span className="appr-policy" style={{ marginLeft: 'auto', alignSelf: 'center' }}>session policy: ask</span>
       </div>
+      <p className="approval__cwd" title={approval.cwd || undefined}>
+        <span className="appr-policy">Policy: {policy || 'runtime default'}</span>{approval.cwd && <> · in {approval.cwd}</>}
+      </p>
     </div>
   )
 }
@@ -1177,20 +1429,32 @@ export function withoutDuplicateFailure(blocks: readonly Block[], error: string)
 }
 
 export function FailedCard({ failed }: { failed: NonNullable<Snapshot['failed']> }): ReactElement {
-  const compaction = failed.error.startsWith('Automatic context compaction failed:')
   const [compacting, setCompacting] = useState(false)
-  // Navigation hint only: transport/security code remains responsible for retry policy.
-  const providerSettingsRelevant = /authenticat|credential|api[ _-]?key|certificate|self.signed|provider.*config/i.test(failed.error)
+  // The old check only knew about credentials, so the single most common
+  // recoverable failure — a provider usage limit — rendered as raw JSON
+  // with a unix timestamp and offered a Retry that could only fail again.
+  const view = failureView(failed.error, Date.now())
+  const compaction = view.kind === 'compaction'
   return (
     <div className="terr" role="alert">
-      <div className="terr__head"><span>✕</span> Turn {failed.turn} failed</div>
-      <div className="terr__body">{compaction ? 'Couldn’t compact the conversation. Original history preserved; this turn has stopped.' : failed.error}</div>
-      {compaction && <details><summary>Technical details</summary><p>{failed.error}</p></details>}
+      <div className="terr__head"><Icon name="error" size={14} /> Turn {failed.turn} failed</div>
+      <div className="terr__body">{view.summary || failed.error}</div>
+      {view.summary && <details><summary>What the provider said</summary><p>{failed.error}</p></details>}
       <div className="terr__row">
-        {providerSettingsRelevant && <button className="btn" onClick={() => store.openSettings('models')}>Provider settings</button>}
-        {compaction ? <button className="btn" disabled={compacting} onClick={async () => { setCompacting(true); try { await store.retryCompaction() } finally { setCompacting(false) } }}>{compacting ? 'Compacting…' : 'Retry compaction'}</button> : <button className="btn" disabled={!failed.lastUser} onClick={() => store.retryFailed()}>
-          ↺ Retry{failed.lastUser ? ' — resubmit the instruction' : ''}
-        </button>}
+        {view.offerProviderSettings && <button className="btn btn--solid" onClick={() => store.openSettings('models')}>{view.kind === 'rate-limit' || view.kind === 'context-length' ? 'Switch model or provider' : 'Provider settings'}</button>}
+        {compaction
+          ? <button className="btn" disabled={compacting} onClick={async () => { setCompacting(true); try { await store.retryCompaction() } finally { setCompacting(false) } }}>{compacting ? 'Compacting…' : 'Retry compaction'}</button>
+          : <button
+              className="btn"
+              disabled={!failed.lastUser}
+              // Still offered when futile — the limit may have reset, and
+              // hiding it would strand a user who knows it has — but never
+              // as the obvious next thing to click.
+              title={view.retryIsFutile ? 'This will fail again until the cause above is resolved' : failed.lastUser ? 'Send the last instruction again' : undefined}
+              onClick={() => store.retryFailed()}
+            >
+              <Icon name="retry" size={13} /> Retry
+            </button>}
         <button className="btn btn--ghost" onClick={() => store.resolveFailure()}>Dismiss</button>
       </div>
     </div>
@@ -1258,14 +1522,14 @@ function QuestionCard({
   return (
     <div className="qcard" role="form" aria-label="Agent questions">
       <div className="qcard__head">
-        <span className="qcard__header-tag">questions</span>
-        <span className="appr-policy">{question.items.length} · answers return to the agent</span>
+        <span className="approval__dot" aria-hidden="true" />
+        <span className="qcard__title">{question.items.length === 1 ? 'The agent has a question' : `The agent has ${question.items.length} questions`}</span>
       </div>
       {question.items.map((item, qi) => {
         const picked = selections[item.id] ?? []
         return (
           <div key={item.id} style={{ display: 'grid', gap: 6 }}>
-            <div className="qcard__q">{qi + 1} · {item.question}</div>
+            <div className="qcard__q">{question.items.length > 1 ? `${qi + 1}. ` : ''}{item.question}</div>
             {item.options.length > 0 && (
               <div className="optlist">
                 {item.options.map((option, oi) => {
@@ -1289,7 +1553,7 @@ function QuestionCard({
                       <span className="opt__label">{option}</span>
                       {/* Keys drive the first question only — no kbd badge
                           on later questions would advertise a dead key. */}
-                      <span className="opt__kbd">{on ? '✓' : qi === 0 && oi < 9 ? <kbd>{oi + 1}</kbd> : null}</span>
+                      <span className="opt__kbd">{on ? <Icon name="check" size={12} /> : qi === 0 && oi < 9 ? <kbd>{oi + 1}</kbd> : null}</span>
                     </button>
                   )
                 })}
@@ -1297,9 +1561,9 @@ function QuestionCard({
             )}
             {item.allowFreeform && (
               <div className="otherbox">
-                <span>Other</span>
                 <input
-                  placeholder={item.placeholder || 'type a custom answer…'}
+                  aria-label="Other answer"
+                  placeholder={item.placeholder || (item.options.length ? 'Or type your own answer…' : 'Type your answer…')}
                   spellCheck={false}
                   value={others[item.id] ?? ''}
                   onChange={e => {
@@ -1313,7 +1577,7 @@ function QuestionCard({
         )
       })}
       <div className="approval__row">
-        <button className="btn btn--solid" disabled={!canSubmit} onClick={submit}>Submit answers ⏎</button>
+        <button className="btn btn--solid" disabled={!canSubmit} onClick={submit}>{question.items.length === 1 ? 'Send answer' : 'Send answers'} <kbd>⏎</kbd></button>
       </div>
     </div>
   )
@@ -1342,8 +1606,13 @@ function PlanReviewCard({
   pickedRef.current = picked
   const item = question.items[0]
   if (!item) return <></>
-  const approveOption = item.options.find(option => /approve|accept|start/i.test(option)) ?? item.options[0] ?? ''
+  // No `?? options[0]` fallback: it promoted whatever came first — possibly
+  // "Cancel" — to the solid primary button bound to `1`. When nothing reads
+  // like approval, every option is just an option.
+  const approveOption = item.options.find(option => /approve|accept|start|proceed|go ahead|yes/i.test(option)) ?? ''
   const otherOptions = item.options.filter(option => option !== approveOption)
+  /** `1` belongs to the approve action only when there is one. */
+  const firstOtherKey = approveOption ? 2 : 1
   const answer = (value: string): void => store.answerQuestion(question.requestId, { [item.id]: value })
   const readyToSend = feedback.trim() || picked
   readyToSendRef.current = Boolean(readyToSend)
@@ -1355,9 +1624,11 @@ function PlanReviewCard({
       if (event.key === '1' && approveOption) {
         event.preventDefault()
         answer(approveOption)
-      } else if (event.key === '2' && otherOptions[0]) {
+      } else if (/^[1-9]$/.test(event.key) && otherOptions[Number(event.key) - firstOtherKey]) {
+        // Only 1 and 2 were bound, so a third option ("Cancel") was
+        // mouse-only while its siblings advertised keys.
         event.preventDefault()
-        setPicked(otherOptions[0])
+        setPicked(otherOptions[Number(event.key) - firstOtherKey]!)
       } else if (event.key === 'Enter' && readyToSendRef.current) {
         // The Send hint says ⏎; honor it wherever focus sits, not only in
         // the feedback input.
@@ -1367,7 +1638,7 @@ function PlanReviewCard({
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [question, approveOption, otherOptions])
+  }, [question, approveOption, otherOptions, firstOtherKey])
 
   return (
     <div className="qcard qcard--plan" role="form" aria-label="Plan review">
@@ -1391,8 +1662,11 @@ function PlanReviewCard({
             onClick={() => setPicked(option)}
           >
             <span className="opt__label">{option}</span>
-            {index === 0 ? <span className="opt__desc">— tell the agent what to revise</span> : null}
-            <span className="opt__kbd">{index === 0 ? <kbd>2</kbd> : null}</span>
+            {/* Was pinned to index 0, so a daemon sending
+                ["Approve", "Cancel", "Revise"] labelled Cancel as the
+                revise action. Key off what the option says instead. */}
+            {/revis|edit|change|feedback/i.test(option) ? <span className="opt__desc">— tell the agent what to revise</span> : null}
+            <span className="opt__kbd">{index + firstOtherKey < 10 ? <kbd>{index + firstOtherKey}</kbd> : null}</span>
           </button>
         ))}
       </div>
@@ -1458,13 +1732,16 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
     el.style.height = `${Math.min(el.scrollHeight, limit)}px`
     el.style.overflowY = el.scrollHeight > limit ? 'auto' : 'hidden'
   }
+  // Re-measure on every keystroke…
+  useLayoutEffect(grow, [draft])
+  // …but subscribe once. With [draft] on the subscription effect, every
+  // character tore down and rebuilt a ResizeObserver and a window listener.
   useLayoutEffect(() => {
-    grow()
     const observer = new ResizeObserver(grow)
     if (ref.current?.parentElement) observer.observe(ref.current.parentElement)
     window.addEventListener('resize', grow)
     return () => { observer.disconnect(); window.removeEventListener('resize', grow) }
-  }, [draft])
+  }, [])
   const send = async (): Promise<void> => {
     if (wantsHints(draft)) {
       const seq = hintSeq.current
@@ -1614,9 +1891,9 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
               title="Model and reasoning effort — click to change"
               onClick={() => store.toggleModelMenu()}
             >
-              <span className="star">✳</span> {snap.model ? bareModelName(snap.model) : 'model'}
+              <Icon name="spark" size={12} /> {snap.model ? bareModelName(snap.model) : 'model'}
               {snap.reasoningEffort && snap.reasoningEffort !== 'off' ? ` ${snap.reasoningEffort}` : ''}
-              {' '}<span className="c">▾</span>
+              {' '}<Icon name="caretDown" size={11} />
             </button>
             <PickerLayer>
             {snap.modelMenuOpen && <ModelMenu snap={snap} onClose={() => store.closeModelMenu()} />}
@@ -1629,16 +1906,20 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
             disabled={!ready || !draft.trim() || snap.submissionPending}
             title={snap.turnActive ? 'Queue — runs when this step settles (⏎)' : 'Send (⏎)'}
             onClick={send}
-          >↑</button>
+            aria-label={snap.turnActive ? 'Queue message' : 'Send message'}
+          ><Icon name="arrowUp" size={16} /></button>
         </div>
       </div>
       </div>
       <div className="composer__hints">          <button
             className="cchip"
-            title={`Permissions: ${snap.permissionMode || 'not configured'} — open settings`}
+            title={`Approval policy for this task: ${snap.permissionMode || 'not configured'} — open settings`}
             onClick={() => store.openSettings('permissions')}
           >
-            <Icon name="shield" size={14} /> Permissions <span className="c">▾</span>
+            {/* The live mode used to be in the tooltip only, so the chip
+                read the same word whether every tool call was being waved
+                through or every one of them was going to ask. */}
+            <Icon name="shield" size={14} /> {snap.permissionMode || 'Permissions'} <Icon name="caretDown" size={11} />
           </button>
           <button
             className={`cchip${snap.planMode ? ' is-on' : ''}`}
@@ -1688,11 +1969,18 @@ export function ActivityDetails({ snap, selectedAgent = '' }: { snap: Snapshot; 
   const fleet = activityFleetRows(snap.fleet, snap.blocks)
   if (selectedAgent) {
     const row = fleet.find(agent => agent.id === selectedAgent || agent.agentDetails?.requestKey === selectedAgent)
-    return <section className="agent-inspector"><button className="agent-inspector__back" onClick={() => navigate('activity')}>← All activity</button>{row ? <AgentInspector key={snap.sessionKey + ':' + row.id} row={row} rows={fleet} sessionKey={snap.sessionKey} online={snap.connection === 'online'} /> : <p role="status">This agent is no longer available in this session. Return to activity to refresh its status.</p>}</section>
+    return <section className="agent-inspector"><button className="agent-inspector__back" onClick={() => navigate('activity')}><Icon name="arrow" size={12} /> All activity</button>{row ? <AgentInspector key={snap.sessionKey + ':' + row.id} row={row} rows={fleet} sessionKey={snap.sessionKey} online={snap.connection === 'online'} /> : <p role="status">This agent is no longer available in this session. Return to activity to refresh its status.</p>}</section>
   }
   const goal = parseGoal(snap.goal)
   return (
     <aside className="activity-details">
+      {/* Zone 1 — always populated, always first. The rail used to open on
+          ten collapsed sections, so it looked identical whether the agent
+          was idle, running three subagents, or had failed. */}
+      <RailStatus snap={snap} />
+
+      {/* Zone 2 — only what is true right now. Each of these is absent
+          unless it has something to say. */}
       {goal ? (
         <>
           <div className="rail__cap goal-heading">Goal <span>{goal.phase}{goal.activation === 'armed' ? ' · armed' : ''}</span></div>
@@ -1715,45 +2003,13 @@ export function ActivityDetails({ snap, selectedAgent = '' }: { snap: Snapshot; 
           </div>
         </>
       ) : null}
-      <SessionDiagnostics snap={snap} />
-      {fleet.length > 0 && <><div className="rail__cap">Agents <span>{fleet.length}</span></div>
-      <AgentRoster rows={fleet} onInspect={id => navigate('activity', id)} /></>}
-      {snap.skillSuggestions.length > 0 && (
-        <>
-          <div className="rail__cap">Skill suggestions · {snap.skillSuggestions.length}</div>
-          <div className="rail__skills">
-            {snap.skillSuggestions.slice(-3).reverse().map(suggestion => (
-              <div className="skillcard" key={suggestion.skillName}>
-                <div className="skillcard__head">
-                  <span>{suggestion.skillName}</span>
-                  {suggestion.version && <span>v{suggestion.version}</span>}
-                </div>
-                {suggestion.description && <div className="skillcard__desc">{suggestion.description}</div>}
-                <div className="skillcard__meta">
-                  {suggestion.toolCount} tool call{suggestion.toolCount === 1 ? '' : 's'}
-                  {suggestion.uniqueTools.length ? ` · ${suggestion.uniqueTools.join(', ')}` : ''}
-                </div>
-              </div>
-            ))}
-          </div>
-        </>
-      )}
-      {snap.creatorTrace.length > 0 && (
-        <>
-          <div className="rail__cap">Template forge · legacy</div>
-          <div className="rail__creator">
-            {snap.creatorTrace.slice(-4).reverse().map((trace, index) => (
-              <div className="creatorrow" key={`${trace.at}:${trace.action}:${index}`}>
-                <span className="creatorrow__state" data-state={trace.status}>{trace.status === 'ok' ? '✓' : '!'}</span>
-                <span className="creatorrow__body">
-                  <span>{trace.action} · {trace.name || 'forge'}{trace.version ? `@${trace.version}` : ''}</span>
-                  {trace.detail && <span>{trace.detail}</span>}
-                </span>
-              </div>
-            ))}
-          </div>
-        </>
-      )}
+
+      <RailAgents rows={fleet} onInspect={id => navigate('activity', id)} onInspectAll={() => navigate('activity')} />
+
+      {/* The rows, not a summary line. A rail that only says "5 files" is
+          a number you still have to go and decode; the diffs and the undo
+          stay in the session-edits tab, one click away. */}
+      <RailFiles files={snap.changes} onOpen={() => store.setTab('changes')} />
     </aside>
   )
 }
@@ -1761,7 +2017,19 @@ export function ActivityDetails({ snap, selectedAgent = '' }: { snap: Snapshot; 
 // ── Global keys ─────────────────────────────────────────────────────────
 
 /** ⌘K palette · ⌘N new task · ⌘, settings · Esc stop · 1/2/3 approvals. */
-function GlobalKeys({ snap }: { snap: Snapshot }): ReactElement | null {
+function GlobalKeys({ snap, closeSurface }: { snap: Snapshot; closeSurface: (() => void) | null }): ReactElement | null {
+  // Native menu items are the discoverable half of the keyboard contract;
+  // routing them here keeps one implementation per command.
+  useEffect(() => window.xerxes.onMenuCommand?.(command => {
+    if (command === 'settings') store.openSettings()
+    else if (command === 'new-task') store.newChat()
+    else if (command === 'new-task-wizard') store.openTaskModal()
+    else if (command === 'export') void store.exportSessionTranscript(store.getSnapshot().sessionKey)
+    else if (command === 'find') window.dispatchEvent(new CustomEvent('xerxes:find'))
+    else if (command === 'search') store.openSessionSearch()
+    else if (command === 'palette') store.togglePalette()
+    else if (command === 'shortcuts') window.dispatchEvent(new CustomEvent('xerxes:shortcuts'))
+  }), [])
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
       // A native modal owns keyboard focus, including Escape. Reading output
@@ -1778,9 +2046,29 @@ function GlobalKeys({ snap }: { snap: Snapshot }): ReactElement | null {
         store.togglePalette()
         return
       }
-      if (meta && event.key.toLowerCase() === 'n') {
+      // ⌘N / ⌥⌘N / ⌘, / ⌘F / ⌘⇧F also arrive as menu commands below; these
+      // branches keep them working if the native menu is ever unavailable.
+      // ⇧⌘N belongs to File ▸ New Window and must not be taken here.
+      if (meta && !event.shiftKey && event.key.toLowerCase() === 'n') {
         event.preventDefault()
-        store.newChat()
+        // ⌥⌘N is the wizard (workspace, worktree, preset, plan ceiling,
+        // model); ⌘N stays the one-keystroke blank task the sidebar button
+        // offers. Both now match the labels that advertise them.
+        if (event.altKey) store.openTaskModal()
+        else store.newChat()
+        return
+      }
+      // Find in the transcript. The primary surface of this app is
+      // thousands of lines of tool output and there was no find at all.
+      if (meta && event.key.toLowerCase() === 'f') {
+        event.preventDefault()
+        if (event.shiftKey) store.openSessionSearch()
+        else window.dispatchEvent(new CustomEvent('xerxes:find'))
+        return
+      }
+      if (meta && event.key === '/') {
+        event.preventDefault()
+        window.dispatchEvent(new CustomEvent('xerxes:shortcuts'))
         return
       }
       if (event.key === 'Escape') {
@@ -1834,25 +2122,39 @@ function GlobalKeys({ snap }: { snap: Snapshot }): ReactElement | null {
           store.closeSessionMenu()
           return
         }
+        // A full-page destination (Agents / Skills & tools / Artifacts) and
+        // the bottom sheets live in Shell state, so the ladder could not
+        // see them: Escape fell straight through to cancelling the turn,
+        // and DesktopPage has no close button to try instead.
+        if (closeSurface) {
+          event.preventDefault()
+          closeSurface()
+          return
+        }
         if (snap.turnActive) {
           event.preventDefault()
           store.cancel()
         }
         return
       }
-      // Approval keys work unless a field has the focus.
-      if (!snap.approval) return
-      const target = event.target as HTMLElement | null
-      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return
-      if (event.key === '1') store.approve(snap.approval.id, 'allow_once')
-      else if (event.key === '2') store.approve(snap.approval.id, 'allow_session')
-      else if (event.key === '3') store.approve(snap.approval.id, 'deny')
+      // Approval keys. The old guard only excluded INPUT/TEXTAREA, so with
+      // focus on any button — where it lands after clicking almost anything
+      // in the chrome — a single unmodified digit granted a pending tool
+      // call. Require the card itself to own focus instead: it takes focus
+      // on arrival, so the advertised keys work exactly when the card is
+      // the thing you are looking at, and never by accident.
+      if (!snap.approval || event.metaKey || event.ctrlKey || event.altKey) return
+      const active = document.activeElement
+      if (!(active instanceof HTMLElement) || !active.closest('.approval')) return
+      if (event.key === '1') { event.preventDefault(); store.approve(snap.approval.id, 'allow_once') }
+      else if (event.key === '2') { event.preventDefault(); store.approve(snap.approval.id, 'allow_session') }
+      else if (event.key === '3') { event.preventDefault(); store.approve(snap.approval.id, 'deny') }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
     // Every overlay flag the handler branches on must be a dep — a stale
     // closure here swallowed Escape after the task modal closed (the old
     // snap still claimed taskModalOpen, so settings could never dismiss).
-  }, [snap.approval, snap.paletteOpen, snap.searchOpen, snap.taskModalOpen, snap.settingsOpen, snap.pickerOpen, snap.reasoningPickerOpen, snap.modelMenuOpen, snap.contextMenuOpen, snap.wsMenuOpen, snap.sessionMenu, snap.turnActive])
+  }, [snap.approval, snap.paletteOpen, snap.searchOpen, snap.taskModalOpen, snap.settingsOpen, snap.pickerOpen, snap.reasoningPickerOpen, snap.modelMenuOpen, snap.contextMenuOpen, snap.wsMenuOpen, snap.sessionMenu, snap.turnActive, closeSurface])
   return null
 }

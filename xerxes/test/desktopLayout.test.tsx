@@ -27,8 +27,13 @@ test('long goals and eight agents retain all content without zero-turn noise', (
   const html = renderToStaticMarkup(createElement(ActivityDetails, { snap }))
   expect(html).toContain(objective.trim())
   expect(html).toContain('Show full goal')
-  expect(html.match(/class="agent-record"/g)).toHaveLength(8)
-  expect(html.indexOf('Session statistics')).toBeLessThan(html.indexOf('class="agent-record"'))
+  // The rail lists agents as flat rows; eight working agents are all
+  // visible, because only a finished tail is ever capped.
+  expect(html.match(/class="railrow"/g)).toHaveLength(8)
+  expect(html).not.toContain('more<')
+  // Statistics moved into the rail's diagnostics drawer — they answer a
+  // question you have after the fact, not while eight agents are running.
+  expect(html).not.toContain('Session statistics')
   expect(html).not.toContain('0 turns')
 })
 
@@ -52,6 +57,7 @@ test('background history is collapsed while active and unknown states remain vis
   expect(html.indexOf('Archived watch')).toBeGreaterThan(disclosure)
   expect(html).toContain('2 · 1 failed')
   expect(html).not.toContain('<details open')
-  expect(html).toContain('aria-label="Past background activity" tabindex="0"')
+  // "Past" now means the tail beyond the few kept on screen.
+  expect(html).toContain('aria-label="Earlier background activity" tabindex="0"')
   expect(renderToStaticMarkup(createElement(BackgroundActivity, { rows: [], renderRow: () => createElement('p') }))).toBe('')
 })

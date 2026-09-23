@@ -313,6 +313,36 @@ test('a fresher Codex CLI session is re-adopted over a stale stored one', async 
   })
 })
 
+test('a running session follows explicit CLI account switches with earlier and equal expiry', async () => {
+  await inTemporaryHome(async (home, storage) => {
+    await storage.save(CODEX_PROVIDER, new OAuthToken({ accessToken: accessToken({ accountId: 'a', expiresAt: 50_000 }), refreshToken: 'a-refresh', expiresAt: 50_000 }))
+    const session = new CodexSession({ environment: {}, homeDirectory: home, now: () => 1_000, storage })
+    expect((await session.credential()).accountId).toBe('a')
+    for (const accountId of ['b', 'c']) {
+      await writeCodexCliAuth(home, { tokens: { access_token: accessToken({ accountId, expiresAt: 30_000 }), refresh_token: `${accountId}-refresh` } })
+      expect((await session.credential()).accountId).toBe(accountId)
+      expect((await storage.load(CODEX_PROVIDER))?.refreshToken).toBe(`${accountId}-refresh`)
+    }
+  })
+})
+
+test('an expired selected account fails explicitly instead of falling back to the previous account', async () => {
+  await inTemporaryHome(async (home, storage) => {
+    await storage.save(CODEX_PROVIDER, new OAuthToken({ accessToken: accessToken({ accountId: 'previous', expiresAt: 50_000 }), refreshToken: 'previous-refresh', expiresAt: 50_000 }))
+    await writeCodexCliAuth(home, { tokens: { access_token: accessToken({ accountId: 'selected', expiresAt: 500 }), refresh_token: 'selected-refresh' } })
+    let attempted = ''
+    const session = new CodexSession({ environment: {}, homeDirectory: home, now: () => 1_000, storage,
+      fetchImplementation: (async (_url: unknown, init?: RequestInit) => {
+        attempted = new URLSearchParams(String(init?.body)).get('refresh_token') ?? ''
+        return Response.json({ error: 'invalid_grant' }, { status: 400 })
+      }) as never,
+    })
+    await expect(session.credential()).rejects.toThrow()
+    expect(attempted).toBe('selected-refresh')
+    expect((await storage.load(CODEX_PROVIDER))?.refreshToken).toBe('previous-refresh')
+  })
+})
+
 test('a stale stored session does not displace a working explicit login when the CLI is absent', async () => {
   await inTemporaryHome(async (home, storage) => {
     await storage.save(CODEX_PROVIDER, new OAuthToken({

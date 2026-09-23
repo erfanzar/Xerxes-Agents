@@ -1075,6 +1075,9 @@ async function runDaemonOwned(
   // its events, and the server needs the runtime. Same shape as `finishDaemon`
   // below.
   let announceModeChange: ((sessionId: string) => void) | undefined;
+  // The runtime builds the one PTY manager; the server needs it for the
+  // desktop's interactive terminal tab (terminal.open / resize).
+  let ptySessions: PtySessionManager | undefined;
   const runtime = daemonRuntime(
     config,
     projectDirectory,
@@ -1085,6 +1088,7 @@ async function runDaemonOwned(
       ...(buildId ? { buildId } : {}),
       remoteProviderBindings,
       onSessionModeChange: (sessionId) => announceModeChange?.(sessionId),
+      exposePtySessions: (manager) => { ptySessions = manager; },
       workspaces,
       skillRegistry,
       managedPlugins,
@@ -1134,6 +1138,7 @@ async function runDaemonOwned(
     interactions,
     browserManager,
     terminalRegistry: terminals,
+    ...(ptySessions ? { ptySessions } : {}),
     reactionMailbox,
     runHistory,
     goalTokenLedger,
@@ -1663,6 +1668,8 @@ function daemonRuntime(
     readonly buildId?: string;
     /** Announce a model-driven interaction-mode change to attached clients. */
     readonly onSessionModeChange?: (sessionId: string, mode: string) => void;
+    /** Receives the runtime's PTY manager once it exists. */
+    readonly exposePtySessions?: (manager: PtySessionManager) => void;
     readonly skillRegistry?: SkillRegistry;
     readonly managedPlugins?: ManagedPlugins;
     readonly mcpManager?: MCPManager;
@@ -1767,6 +1774,7 @@ function daemonRuntime(
     workspaceRoot,
     activeWorkspaceRoot: () => getActiveSession<{ cwd: string }>()?.cwd,
   });
+  host.exposePtySessions?.(ptySessions);
   // Both process-owning managers share the daemon teardown contract; the
   // runtime accepts one lifecycle object, so compose them here.
   const processLifecycle = {
@@ -2253,6 +2261,33 @@ function daemonRuntime(
     // retryable like Esc mid-turn. `found` is the client contract for "the
     // request targeted a stoppable child" — clients reject the stop UI when
     // it is absent.
+    subagentSteer: async (request) => {
+      const ownedSession = request.sessionKey ? runtime?.sessionStatus(request.sessionKey) : undefined;
+      const host = ownedSession ? subagentHosts.get(resolve(ownedSession.cwd)) : undefined;
+      if (!ownedSession || !host) {
+        return {
+          ok: false,
+          error:
+            "subagent steering requires an active provider connection; configure a profile and try again",
+        };
+      }
+      try {
+        // Ownership is the whole security story here: a connection may only
+        // steer children of its own session. Resolving by `sourceId` first —
+        // the same narrowing subagentInterrupt uses — means a caller cannot
+        // reach another session's child by guessing a task id.
+        const named = request.task.trim();
+        const task = host.manager
+          .listTasks()
+          .find(candidate =>
+            candidate.sourceId === ownedSession.id
+            && (candidate.id === named || candidate.name === named));
+        if (!task) return { ok: true, delivered: false };
+        return { ok: true, delivered: host.steer(task.id, request.message) };
+      } catch (error) {
+        return { ok: false, error: errorMessage(error) };
+      }
+    },
     subagentInterrupt: async (request) => {
       const ownedSession = request.sessionKey ? runtime?.sessionStatus(request.sessionKey) : undefined;
       const host = ownedSession ? subagentHosts.get(resolve(ownedSession.cwd)) : undefined;

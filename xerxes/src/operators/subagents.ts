@@ -167,6 +167,13 @@ interface SpawnedAgentHandle {
 
 /** Structural manager surface consumed by agent-facing compatibility tools. */
 export interface SpawnedAgentManagerPort {
+  /**
+   * Deliver a message to a running child, read at its next provider/tool
+   * boundary. Optional because only hosts backed by a live turn loop can
+   * honour it; a port without one simply never offers steering, and callers
+   * must treat its absence as "not supported here" rather than as failure.
+   */
+  steer?(handleId: string, message: string): boolean
   /** Native hosts can continue a terminal agent under its original identity/history. */
   retry?(handleId: string, options: { readonly message?: string; readonly sourceAgentId?: string }): Promise<SpawnedAgentSnapshot>
   close(handleId: string): SpawnedAgentSnapshot & { readonly previousStatus: SpawnedAgentStatus }
