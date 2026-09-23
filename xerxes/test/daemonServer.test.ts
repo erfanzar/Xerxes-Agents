@@ -10271,6 +10271,58 @@ test('terminal.open gives the desktop a live shell: replayed history, pushed out
   } finally { client.close(); await ptySessions.disposeAll(); await server.stop(); await rm(directory, { recursive: true, force: true }); }
 });
 
+test('a user shell waiting at its prompt does not hold back a runtime update, but a running command does', async () => {
+  // An open Terminal tab never "finishes", so counting every live shell as
+  // running work queued the update forever ("Update waiting for idle").
+  if (process.platform === 'win32') return
+  const directory = await mkdtemp(join(tmpdir(), 'xr-rpc-idle-shell-'));
+  const terminals = new TerminalRegistry({ runHistory: new RunHistory(join(directory, 'runs.sqlite')) });
+  const ptySessions = new PtySessionManager({ terminals, workspaceRoot: directory });
+  const runtime = new InMemoryDaemonRuntime(undefined, { currentProjectDirectory: directory, sessionDirectory: join(directory, 'sessions') });
+  let restarts = 0;
+  const server = new DaemonServer({ socketPath: join(directory, 'rpc.sock'), runtime, terminalRegistry: terminals, ptySessions, onRestart: () => { restarts += 1; } });
+  await server.start();
+  const client = await SocketTestClient.connect(join(directory, 'rpc.sock'));
+  let id = 0;
+  let output = '';
+  const call = async (method: string, params: Record<string, unknown> = {}) => {
+    const request = ++id;
+    client.send({ jsonrpc: '2.0', id: request, method, params: { session_key: 'idle-shell', ...params } });
+    for (;;) {
+      const frame = await client.next(frame => frame.id === request || (frame.method === 'event' && frame.params?.type === 'terminal_output'));
+      if (frame.id === request) return frame.result as Record<string, any>;
+      output += String((frame.params!.payload as Record<string, unknown>).data ?? '');
+    }
+  };
+  const until = async (pattern: RegExp) => {
+    for (let tries = 0; tries < 60 && !pattern.test(output); tries += 1) {
+      const frame = await Promise.race([client.next(frame => frame.method === 'event' && frame.params?.type === 'terminal_output'), Bun.sleep(150).then(() => null)]);
+      if (frame) output += String((frame.params!.payload as Record<string, unknown>).data ?? '');
+    }
+    return pattern.test(output);
+  };
+  try {
+    await call('session.open');
+    const terminalId = (await call('terminal.open', { cols: 80, rows: 24 })).terminal_id as string;
+    await call('terminal.attach', { terminal_id: terminalId });
+    await call('terminal.control', { terminal_id: terminalId, action: 'write', chars: 'echo ready-$((1+1))\r' });
+    expect(await until(/ready-2/)).toBe(true);
+    // A person's shell belongs to the Terminal tab, not the Background list or its count.
+    expect((await call('background.activity')).rows.some((row: { id: string }) => row.id === terminalId)).toBe(false);
+    expect(await call('background.status')).toMatchObject({ ok: true, shells: 0 });
+    await call('terminal.control', { terminal_id: terminalId, action: 'write', chars: 'sleep 20\r' });
+    await Bun.sleep(600);
+    expect(await call('runtime.restart_if_idle')).toEqual({ ok: false, busy: true });
+    await call('terminal.control', { terminal_id: terminalId, action: 'write', chars: '\x03' });
+    await call('terminal.control', { terminal_id: terminalId, action: 'write', chars: 'echo back-$((3+3))\r' });
+    expect(await until(/back-6/)).toBe(true);
+    await Bun.sleep(300);
+    expect(await call('runtime.restart_if_idle')).toEqual({ ok: true });
+    await Bun.sleep(60);
+    expect(restarts).toBe(1);
+  } finally { client.close(); await ptySessions.disposeAll(); await server.stop(); await rm(directory, { recursive: true, force: true }); }
+});
+
 test('background.status counts live session-owned shells and watchers while idle', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'xr-background-status-'));
   const history = new RunHistory(join(directory, 'runs.sqlite'));

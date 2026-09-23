@@ -122,3 +122,33 @@ test('closing an interactive shell is prompt: it hangs up instead of waiting out
     await manager.closeAll()
   }
 })
+
+test('the shell owns its terminal: a resize reaches it and Ctrl-C stops the running command', async () => {
+  // Bun's PTY never made the terminal the shell's *controlling* terminal, so
+  // the kernel had nowhere to send SIGWINCH/SIGINT: zsh kept its old width
+  // (prompt drawn short after the desktop pane grew) and Ctrl-C did nothing.
+  if (process.platform === 'win32') return
+  const manager = new PtySessionManager({ maxPendingOutputChars: 200_000 })
+  const drain = async (sessionId: string, chars: string, until: RegExp, tries = 40): Promise<string> => {
+    let seen = ''
+    for (let i = 0; i < tries && !until.test(seen); i += 1) {
+      seen += (await manager.writeForOwner('owner', sessionId, { chars: i === 0 ? chars : '', yieldTimeMs: 150 })).stdout
+    }
+    return seen
+  }
+  try {
+    const opened = await manager.createSession('', { ownerSessionId: 'owner', cols: 80, rows: 24, yieldTimeMs: 300 })
+    await drain(opened.sessionId, 'echo up-$((1+1))\r', /up-2/)
+    manager.resizeForOwner('owner', opened.sessionId, 150, 40)
+    await Bun.sleep(300)
+    expect(await drain(opened.sessionId, 'echo cols-$COLUMNS\r', /cols-\d+/)).toMatch(/cols-150/)
+
+    await drain(opened.sessionId, 'sleep 30; echo NOT-INTERRUPTED\r', /sleep 30/, 3)
+    await Bun.sleep(300)
+    const after = await drain(opened.sessionId, '\x03', /\^C/, 5) + await drain(opened.sessionId, 'echo alive-$((2+2))\r', /alive-4\r?\n/)
+    expect(after).toMatch(/alive-4\r?\n/)
+    expect(after).not.toContain('NOT-INTERRUPTED')
+  } finally {
+    await manager.closeAll()
+  }
+})

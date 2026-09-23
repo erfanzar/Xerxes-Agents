@@ -1,6 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { existsSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { basename, resolve } from 'node:path'
 
@@ -14,6 +15,43 @@ import {
 } from '../core/hostPlatform.js'
 import type { TerminalHandle, TerminalRegistry } from '../runtime/terminalRegistry.js'
 import { WorkspacePathResolver } from '../tools/pathSafety.js'
+
+/**
+ * TIOCSCTTY per platform. Bun's PTY support starts the child on the terminal
+ * but never makes it the *controlling* terminal, so the kernel has no
+ * foreground process group to signal: a resize never reached the shell as
+ * SIGWINCH (zsh kept drawing for the old width) and Ctrl-C never became
+ * SIGINT (a running command could not be interrupted).
+ */
+const TIOCSCTTY: Partial<Record<NodeJS.Platform, number>> = {
+  darwin: 0x20007461,
+  freebsd: 0x20007461,
+  openbsd: 0x20007461,
+  linux: 0x540e,
+}
+
+let perlPath: string | null | undefined
+
+/** A perl that can claim the terminal before exec'ing the real program, if one exists. */
+function controllingTerminalHelper(): string | null {
+  if (perlPath !== undefined) return perlPath
+  perlPath = ['/usr/bin/perl', '/bin/perl', '/usr/local/bin/perl', '/opt/homebrew/bin/perl'].find(path => existsSync(path)) ?? null
+  return perlPath
+}
+
+/**
+ * Wrap argv so the child claims the PTY as its controlling terminal
+ * (ioctl TIOCSCTTY — it is already a session leader via `detached`) and then
+ * execs the real program in place, keeping the same pid. Returns argv
+ * unchanged where that is not possible (Windows, no perl, unknown platform).
+ */
+export function withControllingTerminal(argv: readonly string[], platform: NodeJS.Platform = process.platform): { argv: string[]; claimed: boolean } {
+  const request = TIOCSCTTY[platform]
+  const perl = platform === 'win32' || request === undefined ? null : controllingTerminalHelper()
+  if (!perl || argv.length === 0) return { argv: [...argv], claimed: false }
+  const script = `ioctl(STDIN, ${request}, 0); exec { $ARGV[0] } @ARGV or die "xerxes: cannot start $ARGV[0]: $!\\n"`
+  return { argv: [perl, '-e', script, ...argv], claimed: true }
+}
 
 const DEFAULT_MAX_PENDING_OUTPUT_CHARS = 1_000_000
 const DEFAULT_MAX_OUTPUT_CHARS = 4_000
@@ -77,6 +115,8 @@ interface PtySession {
   readonly output: OutputBuffer
   readonly process: Bun.Subprocess
   readonly terminal: Bun.Terminal
+  /** Whether the child owns its terminal; if not, resizes are signalled by hand. */
+  readonly ownsTerminal: boolean
   readonly waiters: Set<() => void>
   readonly workdir: string
 }
@@ -106,7 +146,8 @@ export class PtySessionManager {
   async createSession(command: string, options: CreatePtySessionOptions = {}): Promise<PtyOutput> {
     const workdir = await this.resolveWorkdir(options.workdir)
     const shell = options.shell ?? defaultInteractiveShell()
-    const args = shellCommandArgv(shell, command, options.login ?? true)
+    const wrapped = withControllingTerminal(shellCommandArgv(shell, command, options.login ?? true))
+    const args = wrapped.argv
     const id = `pty_${crypto.randomUUID().replaceAll('-', '').slice(0, 10)}`
     const output = new OutputBuffer(this.maxPendingOutputChars)
     const waiters = new Set<() => void>()
@@ -178,6 +219,7 @@ export class PtySessionManager {
       workdir,
       process: childProcess,
       terminal,
+      ownsTerminal: wrapped.claimed,
       output,
       waiters,
       decoder,
@@ -239,11 +281,33 @@ export class PtySessionManager {
    * id fail identically — session-id possession is not authorization and must
    * not become an existence oracle.
    */
+  /**
+   * True when the shell itself holds its terminal's foreground — waiting at a
+   * prompt — rather than a command it started (a build, a REPL, `top`). Only
+   * answerable when the child owns its terminal; otherwise (Windows, no perl)
+   * it is reported busy so nothing interrupts work we cannot see.
+   */
+  isAtPrompt(sessionId: string): boolean {
+    const session = this.sessions.get(sessionId)
+    if (!session || session.process.exitCode !== null) return true
+    if (!session.ownsTerminal || isWindows()) return false
+    const probe = Bun.spawnSync(['ps', '-o', 'tpgid=,pgid=', '-p', String(session.process.pid)], { stdout: 'pipe', stderr: 'ignore' })
+    const [foreground, own] = probe.stdout.toString().trim().split(/\s+/).map(Number)
+    return foreground !== undefined && Number.isInteger(foreground) && foreground > 0 && foreground === own
+  }
+
   /** Follow the viewer's size; a full-screen program redraws on SIGWINCH. */
   resizeForOwner(owner: string, sessionId: string, cols: number, rows: number): void {
     const session = this.requireOwned(owner, sessionId)
     const clamp = (value: number, max: number): number => Math.max(1, Math.min(max, Math.trunc(value)))
-    if (!session.terminal.closed) session.terminal.resize(clamp(cols, 1000), clamp(rows, 500))
+    if (session.terminal.closed) return
+    session.terminal.resize(clamp(cols, 1000), clamp(rows, 500))
+    // A child that owns its terminal gets SIGWINCH from the kernel. One that
+    // could not claim it is told by hand: its process group (= its pid, it is
+    // a session leader) covers the shell and whatever it is running.
+    if (!session.ownsTerminal && !isWindows() && session.process.exitCode === null) {
+      try { process.kill(-session.process.pid, 'SIGWINCH') } catch { /* already gone */ }
+    }
   }
 
   async writeForOwner(owner: string, sessionId: string, options: WritePtySessionOptions = {}): Promise<PtyOutput> {

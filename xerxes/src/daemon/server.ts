@@ -1975,7 +1975,10 @@ export class DaemonServer {
         || numberValue(this.runtime.status().active_subagents) > 0
         || sessions.some(session => session.activeTurnId || session.status !== 'idle'
           || this.sessionOperations.has(session.sessionKey)
-          || (this.terminalRegistry?.list(session.id) ?? []).some(terminal => terminal.running)
+          // A person's shell idling at its prompt is not work: the update may
+          // close it (the Terminal tab reopens one). A command running in it is.
+          || (this.terminalRegistry?.list(session.id) ?? []).some(terminal => terminal.running
+            && !(terminal.label === USER_SHELL_LABEL && this.ptySessions?.isAtPrompt(terminal.id)))
           || (this.monitors?.list(session.id) ?? []).some(monitor => monitor.state === 'watching')
           || subagentSnapshotPanelPayloads(session.metadata).some(agent => agent.status === 'running' || agent.status === 'queued'));
       if (busy) return { ok: false, busy: true };
@@ -2645,7 +2648,7 @@ export class DaemonServer {
       const owner = this.terminalOwnerSessionId(connection, params);
       return {
         ok: true,
-        shells: (this.terminalRegistry?.list(owner) ?? []).filter(terminal => terminal.running).length,
+        shells: (this.terminalRegistry?.list(owner) ?? []).filter(terminal => terminal.running && terminal.label !== USER_SHELL_LABEL).length,
         watchers: (this.monitors?.list(owner) ?? []).filter(watch => watch.state === 'watching').length,
       };
     }
@@ -6208,6 +6211,8 @@ export class DaemonServer {
     const owner = session?.id ?? key;
     const rows: JsonRpcPayload[] = [];
     for (const shell of this.terminalRegistry?.list(owner) ?? []) {
+      // A person's own shell lives in the Terminal tab; it is not background work.
+      if (shell.label === USER_SHELL_LABEL) continue
       // Successful synchronous calls belong in the transcript, not activity history.
       if (!shell.running && shell.kind === 'foreground' && shell.exitCode === 0) continue;
       rows.push({ id: shell.id, kind: 'shell', title: shell.command.slice(0, 2000), detail: shell.cwd,
