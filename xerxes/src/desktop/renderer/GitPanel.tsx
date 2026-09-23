@@ -81,8 +81,8 @@ export function primaryAction(repo: Pick<ScmStatus, 'upstream' | 'ahead' | 'behi
   const plural = (n: number) => `${n} commit${n === 1 ? '' : 's'}`
   if (!repo.upstream) return { kind: 'publish', label: 'Publish branch', title: `Push ${repo.branch} to the remote and track it` }
   if (repo.ahead > 0 && repo.behind > 0) return { kind: 'sync', label: `Sync ↓${repo.behind} ↑${repo.ahead}`, title: `Pull ${plural(repo.behind)} (fast-forward), then push ${plural(repo.ahead)} to ${repo.upstream}` }
-  if (repo.ahead > 0) return { kind: 'push', label: `Push ↑${repo.ahead}`, title: `Push ${plural(repo.ahead)} to ${repo.upstream}` }
-  if (repo.behind > 0) return { kind: 'pull', label: `Pull ↓${repo.behind}`, title: `Pull ${plural(repo.behind)} from ${repo.upstream} (fast-forward only)` }
+  if (repo.ahead > 0) return { kind: 'push', label: `Push ${repo.ahead}`, title: `Push ${plural(repo.ahead)} to ${repo.upstream}` }
+  if (repo.behind > 0) return { kind: 'pull', label: `Pull ${repo.behind}`, title: `Pull ${plural(repo.behind)} from ${repo.upstream} (fast-forward only)` }
   return { kind: 'commit', label: 'Commit all', title: 'Nothing to commit' }
 }
 
@@ -309,7 +309,7 @@ export function GitPanel({ snap, initialPath = '', onSnapshots, onReviewSent }: 
               title={primary.kind === 'commit' && repo.counts.conflicts ? 'Resolve merge conflicts first' : primary.title}
               onClick={() => void runPrimary()}
             >
-              <Icon name={primary.kind === 'commit' ? 'check' : primary.kind === 'pull' ? 'arrowDown' : primary.kind === 'publish' ? 'cloud' : 'arrowUp'} size={13} /> {primary.label}
+              <Icon name={primary.kind === 'commit' ? 'check' : primary.kind === 'pull' ? 'arrowDown' : primary.kind === 'publish' ? 'cloud' : primary.kind === 'sync' ? 'retry' : 'arrowUp'} size={13} /> {primary.label}
             </button>
           </div>
           <button className="scm-review" disabled={total === 0} onClick={review}>

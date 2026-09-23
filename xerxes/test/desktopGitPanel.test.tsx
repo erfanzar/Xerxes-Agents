@@ -32,8 +32,8 @@ import { primaryAction } from '../src/desktop/renderer/GitPanel.js'
 test('the main button follows the next useful step once there is nothing to commit', () => {
   const repo = { upstream: 'origin/main', ahead: 0, behind: 0, branch: 'main', hasHead: true, detached: false }
   expect(primaryAction({ ...repo, ahead: 1 }, 3)).toMatchObject({ kind: 'commit', label: 'Commit all' })
-  expect(primaryAction({ ...repo, ahead: 1 }, 0)).toMatchObject({ kind: 'push', label: 'Push ↑1', title: 'Push 1 commit to origin/main' })
-  expect(primaryAction({ ...repo, behind: 2 }, 0)).toMatchObject({ kind: 'pull', label: 'Pull ↓2' })
+  expect(primaryAction({ ...repo, ahead: 1 }, 0)).toMatchObject({ kind: 'push', label: 'Push 1', title: 'Push 1 commit to origin/main' })
+  expect(primaryAction({ ...repo, behind: 2 }, 0)).toMatchObject({ kind: 'pull', label: 'Pull 2' })
   expect(primaryAction({ ...repo, ahead: 1, behind: 2 }, 0)).toMatchObject({ kind: 'sync', label: 'Sync ↓2 ↑1' })
   expect(primaryAction({ ...repo, upstream: null }, 0)).toMatchObject({ kind: 'publish', label: 'Publish branch' })
   expect(primaryAction(repo, 0)).toMatchObject({ kind: 'commit', title: 'Nothing to commit' })
