@@ -53,6 +53,8 @@ export function TerminalPanel({ snap }: { snap: Snapshot }): ReactElement {
   const [error, setError] = useState('')
   const [opening, setOpening] = useState(false)
   const call = useCallback((method: string, params: RpcRecord = {}) => desktopCall(window.xerxes, snap.sessionKey, method, params), [snap.sessionKey])
+  // Guards against two automatic opens racing (e.g. a reconnect during the first open).
+  const started = useRef(false)
 
   const open = useCallback(async (): Promise<void> => {
     setOpening(true); setError('')
@@ -69,25 +71,33 @@ export function TerminalPanel({ snap }: { snap: Snapshot }): ReactElement {
     } finally { setOpening(false) }
   }, [call])
 
-  // Pick up shells that already exist (they outlive this view); open one if none.
-  const started = useRef(false)
+  // Pick up shells that already exist (they outlive this view); open one if
+  // none. Runs again whenever the runtime connection comes back — a restarted
+  // runtime (an app update) must not leave an old error on screen.
+  const [attempt, setAttempt] = useState(0)
+  const online = snap.connection === 'online'
   useEffect(() => {
+    if (!online) return
     let current = true
+    setError('')
     void call('terminal.list').then(result => {
       if (!current) return
       const rows = userShells(Array.isArray(result.terminals) ? result.terminals as RpcRecord[] : [])
       setShells(rows)
       if (rows.length) setActive(id => rows.some(row => row.id === id) ? id : rows[0]!.id)
-      else if (!started.current) { started.current = true; void open() }
+      // No shell (first visit, or the runtime restarted and its shells died): open one.
+      else if (!started.current) { started.current = true; void open().finally(() => { started.current = false }) }
     }).catch(failure => { if (current) { setShells([]); setError(failure instanceof Error ? failure.message : String(failure)) } })
     return () => { current = false }
-  }, [call, open])
+  }, [call, open, online, attempt])
 
-  const close = async (id: string): Promise<void> => {
-    try { await call('terminal.control', { terminal_id: id, action: 'kill' }) } catch { /* already gone */ }
+  // The tab goes at once; the shell shuts down in the background. Waiting on
+  // the kill made closing feel laggy.
+  const close = (id: string): void => {
     const next = (shells ?? []).filter(row => row.id !== id)
     setShells(next)
     if (active === id) setActive(next.at(-1)?.id ?? '')
+    void call('terminal.control', { terminal_id: id, action: 'kill' }).catch(() => { /* already gone */ })
   }
 
   const markExited = useCallback((id: string) => {
@@ -102,12 +112,12 @@ export function TerminalPanel({ snap }: { snap: Snapshot }): ReactElement {
             <button role="tab" aria-selected={row.id === active} onClick={() => setActive(row.id)} title={row.running ? 'Shell' : 'Exited'}>
               <Icon name="terminal" size={12} /><span>Shell {index + 1}</span>
             </button>
-            <button className="term-tab__close" aria-label={`Close shell ${index + 1}`} title="Close shell" onClick={() => void close(row.id)}><Icon name="close" size={10} /></button>
+            <button className="term-tab__close" aria-label={`Close shell ${index + 1}`} title="Close shell" onClick={() => close(row.id)}><Icon name="close" size={10} /></button>
           </span>
         ))}
         <button className="term__new" aria-label="New shell" title="New shell" disabled={opening} onClick={() => void open()}><Icon name="plus" size={13} /></button>
       </div>
-      {error && <p className="term__error" role="alert">{error}</p>}
+      {error && <div className="term__error" role="alert"><span>{error}</span><button className="btn" onClick={() => { started.current = false; setAttempt(value => value + 1) }}>Try again</button></div>}
       {shells !== null && shells.length === 0 && !opening && !error && (
         <div className="term__empty"><Icon name="terminal" size={22} /><p>No shell open.</p><button className="btn" onClick={() => void open()}>Open a shell</button></div>
       )}

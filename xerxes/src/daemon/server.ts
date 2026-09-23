@@ -12,6 +12,9 @@ import { recordCompaction } from '../context/compactionHistory.js'
 import { previewWorkspaceFile } from './filePreview.js'
 import { collectGitDiff } from '../workspace/gitDiff.js'
 import type { PtySessionManager } from '../operators/pty.js'
+
+/** Label of shells a person opened from the desktop terminal tab (see renderer terminalShells.ts). */
+const USER_SHELL_LABEL = 'User shell'
 import { GitScm, ScmError, assertScmHash, assertScmPath, assertScmPaths, cleanCommitMessage, commitMessagePrompt } from '../workspace/gitScm.js'
 import { FEATURES_GUIDE } from '../bridge/features.js';
 import { inspectSessionContext } from '../context/inspection.js';
@@ -6264,6 +6267,8 @@ export class DaemonServer {
         const cwd = this.runtime.sessionStatus(sessionKey(connection, params))?.cwd;
         const options = {
           ownerSessionId: owner,
+          // The desktop terminal tab recognises its own shells by this label.
+          label: USER_SHELL_LABEL,
           cols: size(params.cols, 80, 1000),
           rows: size(params.rows, 24, 500),
           yieldTimeMs: 0,

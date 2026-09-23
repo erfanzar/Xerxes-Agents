@@ -950,6 +950,30 @@ describe('Store workspace folds', () => {
     expect(store.getSnapshot().blocks.at(-1)?.kind).toBe('agent')
   })
 
+  test('a runtime restart never strands the window on a conversation that was never saved', async () => {
+    // A "New task" with no messages is not on disk. When the runtime
+    // restarts, resuming it by id is refused — the window used to stop on
+    // "Could not open this workspace" with a Retry that could never succeed.
+    await Bun.sleep(0)
+    bridge.respondWith(method => method === 'initialize' ? { ...initializeResult, session_id: 'unsaved123' } : { ok: true })
+    await store.retryConnection()
+    expect(store.getSnapshot().currentId).toBe('unsaved123')
+    bridge.respondWith((method, params) => {
+      if (method !== 'initialize') return { ok: true }
+      if (params.resume_session_id) return Promise.reject(new Error("Error invoking remote method 'daemon:call': Error: rpc -32000: Validation error for session_id: saved conversation is missing; use /resume to choose an existing conversation or /new to start one"))
+      return { ...initializeResult, session_id: 'fresh456' }
+    })
+    await store.retryConnection()
+    const snap = store.getSnapshot()
+    expect(snap.connection).toBe('online')
+    expect(snap.error).toBeNull()
+    expect(snap.currentId).toBe('fresh456')
+    const inits = bridge.calls.filter(call => call.method === 'initialize').slice(-2)
+    expect(inits.map(call => Boolean(call.params.resume_session_id))).toEqual([true, false])
+    // Nothing was lost (the task was empty), so no alarming notice either.
+    expect(snap.blocks.some(block => block.kind === 'notice')).toBe(false)
+  })
+
   test('undoChanges drops undone files from the review list and reports refusals', async () => {
     bridge.push('turn_begin', { user_input: 'edit' })
     const first = editCall('src/a.ts', 'one', 'two', 'e1')

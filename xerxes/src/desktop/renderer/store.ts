@@ -904,6 +904,21 @@ export class Store {
       return await this.initialize(extra)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
+      // The conversation being resumed is not on disk: a new task that never
+      // got a message when the runtime restarted, or one deleted elsewhere.
+      // Retrying the same id can never succeed, so open a fresh conversation
+      // in this workspace instead of stranding the window on an error.
+      if (extra.resume_session_id && /saved conversation is missing/i.test(message)) {
+        const hadConversation = this.builder.all().some(block => block.kind === 'user' || block.kind === 'agent')
+        this.patch({ currentId: '' })
+        this.builder.reset()
+        const result = await this.initialize({})
+        if (hadConversation) {
+          this.builder.push('notification', { severity: 'warning', message: 'The previous conversation is no longer saved in this workspace, so a new one was started. Open older conversations from the sidebar.' })
+          this.notify()
+        }
+        return result
+      }
       if (!/transcript_generation|divergent append/i.test(message)) throw error
       // A bare initialize with a fresh key — resuming would just re-bind the
       // poisoned session. Old chats stay on disk and in the sidebar.

@@ -100,3 +100,25 @@ test('disposeOwner closes only that owner\'s sessions at teardown', async () => 
     await rm(root, { force: true, recursive: true })
   }
 }, 20_000)
+
+test('closing an interactive shell is prompt: it hangs up instead of waiting out a SIGTERM the shell ignores', async () => {
+  // The desktop Terminal tab opens a bare login shell. Interactive shells
+  // ignore SIGTERM, so close() used to sit out its full 2s grace period and
+  // then SIGKILL — the tab felt laggy to close.
+  const manager = new PtySessionManager({ maxPendingOutputChars: 100_000 })
+  try {
+    const opened = await manager.createSession('', { yieldTimeMs: 200 })
+    let seen = opened.stdout
+    for (let tries = 0; tries < 40 && !seen.includes('ready-7'); tries += 1) {
+      seen += (await manager.write(opened.sessionId, { chars: tries === 0 ? 'echo ready-$((3+4))\r' : '', yieldTimeMs: 150 })).stdout
+    }
+    expect(seen).toContain('ready-7')
+    const started = performance.now()
+    const closed = await manager.close(opened.sessionId)
+    expect(closed.closed).toBe(true)
+    expect(performance.now() - started).toBeLessThan(1000)
+    expect(closed.exitCode).not.toBe(137) // not force-killed
+  } finally {
+    await manager.closeAll()
+  }
+})

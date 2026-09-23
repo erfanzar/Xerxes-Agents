@@ -65,6 +65,27 @@ export function reviewPrompt(status: Pick<ScmStatus, 'branch' | 'hasHead'>): str
   ].join('\n')
 }
 
+export type PrimaryAction =
+  | { readonly kind: 'commit'; readonly label: string; readonly title: string }
+  | { readonly kind: 'push' | 'pull' | 'sync' | 'publish'; readonly label: string; readonly title: string }
+
+/**
+ * The main button follows the next useful step, like the editor: commit while
+ * there is anything to commit; once the tree is clean, push, pull, sync or
+ * publish the branch instead of offering a commit that cannot happen.
+ */
+export function primaryAction(repo: Pick<ScmStatus, 'upstream' | 'ahead' | 'behind' | 'branch' | 'hasHead' | 'detached'>, total: number): PrimaryAction {
+  if (total > 0 || !repo.hasHead || repo.detached || !repo.branch) {
+    return { kind: 'commit', label: 'Commit all', title: `Commit all ${total} changed file${total === 1 ? '' : 's'} (.gitignore respected)` }
+  }
+  const plural = (n: number) => `${n} commit${n === 1 ? '' : 's'}`
+  if (!repo.upstream) return { kind: 'publish', label: 'Publish branch', title: `Push ${repo.branch} to the remote and track it` }
+  if (repo.ahead > 0 && repo.behind > 0) return { kind: 'sync', label: `Sync ↓${repo.behind} ↑${repo.ahead}`, title: `Pull ${plural(repo.behind)} (fast-forward), then push ${plural(repo.ahead)} to ${repo.upstream}` }
+  if (repo.ahead > 0) return { kind: 'push', label: `Push ↑${repo.ahead}`, title: `Push ${plural(repo.ahead)} to ${repo.upstream}` }
+  if (repo.behind > 0) return { kind: 'pull', label: `Pull ↓${repo.behind}`, title: `Pull ${plural(repo.behind)} from ${repo.upstream} (fast-forward only)` }
+  return { kind: 'commit', label: 'Commit all', title: 'Nothing to commit' }
+}
+
 function basename(path: string): string {
   return path.split('/').pop() || path
 }
@@ -193,6 +214,17 @@ export function GitPanel({ snap, initialPath = '', onSnapshots, onReviewSent }: 
   // Commit, Generate and Review all act on every change (.gitignore respected);
   // the Staged / Changes groups are for looking, not for choosing what ships.
   const canCommit = Boolean(message.trim()) && !scm.busy && repo.counts.conflicts === 0 && total > 0
+  const primary = primaryAction(repo, total)
+  const runPrimary = async (): Promise<void> => {
+    if (primary.kind === 'commit') return commit()
+    if (primary.kind === 'sync') {
+      const pulled = await scm.act('Pulling…', 'git.pull')
+      if (!pulled) return
+    }
+    if (primary.kind === 'pull') { if (await scm.act('Pulling…', 'git.pull')) setNotice('Pulled.'); return }
+    const pushed = await scm.act(primary.kind === 'publish' ? 'Publishing…' : 'Pushing…', 'git.push')
+    if (pushed) setNotice(primary.kind === 'publish' ? 'Branch published.' : primary.kind === 'sync' ? 'Synced.' : `Pushed to ${repo.upstream}.`)
+  }
 
   const commit = async (): Promise<void> => {
     if (!canCommit) return
@@ -271,8 +303,13 @@ export function GitPanel({ snap, initialPath = '', onSnapshots, onReviewSent }: 
             <button className="btn" disabled={Boolean(scm.busy) || total === 0} title="Draft a message from all changes with your current model" onClick={() => void generate()}>
               <Icon name="spark" size={13} /> {scm.busy === 'Drafting a message…' ? 'Drafting…' : 'Generate'}
             </button>
-            <button className="btn btn--solid" disabled={!canCommit} title={repo.counts.conflicts ? 'Resolve merge conflicts first' : `Commit all ${total} changed file${total === 1 ? '' : 's'} (.gitignore respected)`} onClick={() => void commit()}>
-              <Icon name="check" size={13} /> Commit all
+            <button
+              className="btn btn--solid"
+              disabled={primary.kind === 'commit' ? !canCommit : Boolean(scm.busy)}
+              title={primary.kind === 'commit' && repo.counts.conflicts ? 'Resolve merge conflicts first' : primary.title}
+              onClick={() => void runPrimary()}
+            >
+              <Icon name={primary.kind === 'commit' ? 'check' : primary.kind === 'pull' ? 'arrowDown' : primary.kind === 'publish' ? 'cloud' : 'arrowUp'} size={13} /> {primary.label}
             </button>
           </div>
           <button className="scm-review" disabled={total === 0} onClick={review}>

@@ -10227,7 +10227,10 @@ test('git.* methods drive source control in the daemon project and report non-re
 
 test('terminal.open gives the desktop a live shell: replayed history, pushed output, input, resize, kill', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'xr-rpc-term-'));
-  const terminals = new TerminalRegistry();
+  // Run history as the real daemon wires it: it refuses an empty run title,
+  // which a bare shell (no command line) used to hit on open.
+  const history = new RunHistory(join(directory, 'runs.sqlite'));
+  const terminals = new TerminalRegistry({ runHistory: history });
   const ptySessions = new PtySessionManager({ terminals, workspaceRoot: directory });
   const runtime = new InMemoryDaemonRuntime(undefined, { currentProjectDirectory: directory, sessionDirectory: join(directory, 'sessions') });
   const server = new DaemonServer({ socketPath: join(directory, 'rpc.sock'), runtime, terminalRegistry: terminals, ptySessions });
@@ -10258,7 +10261,7 @@ test('terminal.open gives the desktop a live shell: replayed history, pushed out
     expect(await call('terminal.resize', { terminal_id: 'pty_foreign', cols: 1, rows: 1 })).toMatchObject({ ok: false });
     // The desktop tab finds its shells again by kind + empty command, and a
     // re-attach (tab switch, window reload) replays what already happened.
-    expect((await call('terminal.list')).terminals).toEqual(expect.arrayContaining([expect.objectContaining({ id: terminalId, kind: 'pty', command: '', running: true })]));
+    expect((await call('terminal.list')).terminals).toEqual(expect.arrayContaining([expect.objectContaining({ id: terminalId, kind: 'pty', label: 'User shell', running: true })]));
     const reattached = await call('terminal.attach', { terminal_id: terminalId });
     expect(reattached.data).toContain('xr-42');
     await call('terminal.control', { terminal_id: terminalId, action: 'kill' });

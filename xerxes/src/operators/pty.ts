@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { stat } from 'node:fs/promises'
-import { resolve } from 'node:path'
+import { basename, resolve } from 'node:path'
 
 import { ValidationError } from '../core/errors.js'
 import {
@@ -49,6 +49,8 @@ export interface PtySessionManagerOptions {
 export interface CreatePtySessionOptions {
   readonly cols?: number
   readonly env?: Readonly<Record<string, string | undefined>>
+  /** Display label in the terminals list; defaults to the command's first words. */
+  readonly label?: string
   readonly ownerSessionId?: string
   readonly login?: boolean
   readonly maxOutputChars?: number
@@ -116,7 +118,10 @@ export class PtySessionManager {
       id,
       kind: 'pty',
       ownerSessionId: options.ownerSessionId,
-      command,
+      // A bare interactive shell has no command line; name it after the shell
+      // (run history refuses an empty title).
+      command: command.trim() || basename(shell),
+      ...(options.label ? { label: options.label } : {}),
       cwd: workdir,
       control: {
         write: async chars => {
@@ -207,8 +212,17 @@ export class PtySessionManager {
   async close(sessionId: string): Promise<{ readonly closed: true; readonly exitCode: number | null; readonly sessionId: string }> {
     const session = this.requireSession(sessionId)
     if (session.process.exitCode === null) {
-      session.process.kill('SIGTERM')
-      await waitForExit(session.process, 2_000)
+      // Hang up first — what closing a terminal window does. Interactive
+      // shells ignore SIGTERM (so close() used to sit out the whole grace
+      // period) but exit on SIGHUP and pass it on to their jobs.
+      if (!isWindows()) {
+        session.process.kill('SIGHUP')
+        await waitForExit(session.process, 500)
+      }
+      if (session.process.exitCode === null) {
+        session.process.kill('SIGTERM')
+        await waitForExit(session.process, 1_500)
+      }
       if (session.process.exitCode === null) {
         session.process.kill('SIGKILL')
         await session.process.exited

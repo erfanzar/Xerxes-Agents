@@ -1935,3 +1935,6 @@ html,body,#root,.app.atelier{background:transparent}
 .atelier .scm-log__detail{padding:4px 0 8px}
 .atelier .scm-log__body{margin:2px 8px 6px 18px;font:var(--t-caption);color:var(--x-secondary);white-space:pre-wrap;overflow-wrap:anywhere}
 .atelier .scm-log__detail .scm-file{padding-left:18px}
+.atelier .term__error{display:flex;align-items:center;gap:var(--s-2)}
+.atelier .term__error>span{flex:1;min-width:0}
+.atelier .term__error .btn{flex:none;min-height:26px;padding:0 10px}
