@@ -13,7 +13,7 @@ const key = 'xerxes.desktop.layout.v1'
 export function parsePanelLayout(value: unknown): PanelLayout {
   const record = value && typeof value === 'object' ? value as Record<string, unknown> : {}
   const width = (name: string, fallback: number, min: number, max: number): number => typeof record[name] === 'number' && Number.isFinite(record[name]) ? Math.max(min, Math.min(max, record[name])) : fallback
-  return { sidebarWidth: width('sidebarWidth', 240, 180, 360), inspectorWidth: width('inspectorWidth', 340, 260, 520), sidebarHidden: record.sidebarHidden === true }
+  return { sidebarWidth: width('sidebarWidth', 240, 180, 360), inspectorWidth: width('inspectorWidth', 340, 260, 1400), sidebarHidden: record.sidebarHidden === true }
 }
 export function usePanelLayout(): { layout: PanelLayout; setLayout: (patch: Partial<PanelLayout>) => void } {
   const [layout, update] = useState<PanelLayout>(() => {

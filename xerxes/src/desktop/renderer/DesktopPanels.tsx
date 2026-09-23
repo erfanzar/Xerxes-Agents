@@ -124,17 +124,21 @@ export function DesktopPage({ panel, snap }: { panel: 'agents' | 'extensions' | 
 }
 
 /** Nonmodal task context: the conversation and draft remain interactive. */
-export function DesktopRail({ panel, snap, close, activityDetails, filesExpanded = false, toggleFilesExpanded, reviewPath = '', activityFocused = false }: {
+export function DesktopRail({ panel, snap, close, activityDetails, filesExpanded = false, toggleFilesExpanded, setExpanded, reviewPath = '', activityFocused = false }: {
   panel: 'files' | 'review' | 'terminal' | 'activity'; snap: Snapshot; close: () => void; activityDetails: ReactNode; filesExpanded?: boolean; toggleFilesExpanded?: () => void
+  /** Present when the window is wide enough to choose between rail and full width. */
+  setExpanded?: (value: boolean) => void
   reviewPath?: string
   activityFocused?: boolean
 }): ReactElement {
   const open = useDesktopNavigation()
-  return <aside className={`desktop-rail studio-sheet${panel === "review" ? " desktop-rail--review" : panel === "terminal" ? " desktop-rail--terminal" : ""}`} aria-label="Task context">
-    <header><nav aria-label="Task context views">{(['files', 'review', 'terminal', 'activity'] as const).map(value => <button key={value} aria-pressed={panel === value} onClick={() => open(value)}>{value === 'review' ? 'Git' : value === 'files' ? 'Files' : value === 'terminal' ? 'Terminal' : 'Activity'}</button>)}</nav>{(panel === 'files' || panel === 'terminal' || panel === 'activity') && toggleFilesExpanded && <button aria-label={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'terminal' ? 'Expand terminal' : 'Expand Activity workspace'} title={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'terminal' ? 'Expand terminal' : 'Expand Activity workspace'} aria-pressed={filesExpanded} onClick={toggleFilesExpanded}><Icon name={filesExpanded ? 'collapse' : 'expand'} size={15} /></button>}<button aria-label="Close task context" onClick={close}><Icon name="close" size={13} /></button></header>
+  // Without the toggle the window is too narrow for a side rail: it is already full width.
+  const wide = filesExpanded || !toggleFilesExpanded
+  return <aside className={`desktop-rail studio-sheet${panel === "review" ? ` desktop-rail--git${wide ? " desktop-rail--review" : ""}` : panel === "terminal" ? " desktop-rail--terminal" : ""}`} aria-label="Task context">
+    <header><nav aria-label="Task context views">{(['files', 'review', 'terminal', 'activity'] as const).map(value => <button key={value} aria-pressed={panel === value} onClick={() => open(value)}>{value === 'review' ? 'Git' : value === 'files' ? 'Files' : value === 'terminal' ? 'Terminal' : 'Activity'}</button>)}</nav>{toggleFilesExpanded && <button aria-label={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'terminal' ? 'Expand terminal' : panel === 'review' ? 'Show changes' : 'Expand Activity workspace'} title={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'terminal' ? 'Expand terminal' : panel === 'review' ? 'Show changes' : 'Expand Activity workspace'} aria-pressed={filesExpanded} onClick={toggleFilesExpanded}><Icon name={filesExpanded ? 'collapse' : 'expand'} size={15} /></button>}<button aria-label="Close task context" onClick={close}><Icon name="close" size={13} /></button></header>
     <div className="studio-sheet-content" key={`${panel}:${snap.cwd}:${snap.sessionKey}`}>
       {panel === 'files' && <FilesPanel snap={snap} close={close} />}
-      {panel === 'review' && <GitPanel snap={snap} initialPath={reviewPath} onSnapshots={() => open('snapshots')} onReviewSent={() => open('activity')} />}
+      {panel === 'review' && <GitPanel snap={snap} initialPath={reviewPath} expanded={wide} {...(setExpanded ? { onExpand: () => setExpanded(true) } : {})} onSnapshots={() => open('snapshots')} onReviewSent={() => { setExpanded?.(false); open('activity') }} />}
       {panel === 'terminal' && <TerminalPanel snap={snap} />}
       {panel === 'activity' && <>{activityDetails}{!activityFocused && <ActivityPanel snap={snap} />}</>}
     </div>
@@ -215,7 +219,7 @@ export function DesktopSheet({
             </>
           )}
           {panel === 'snapshots' && <SnapshotsPanel snap={snap} />}
-          {panel === 'review' && <GitPanel snap={snap} />}
+          {panel === 'review' && <GitPanel snap={snap} expanded />}
           {panel === 'terminal' && <TerminalPanel snap={snap} />}
           {panel === 'files' && <FilesPanel snap={snap} close={close} />}
           {panel === 'workspace' && <WorkspacePanel snap={snap} />}

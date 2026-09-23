@@ -1938,3 +1938,9 @@ html,body,#root,.app.atelier{background:transparent}
 .atelier .term__error{display:flex;align-items:center;gap:var(--s-2)}
 .atelier .term__error>span{flex:1;min-width:0}
 .atelier .term__error .btn{flex:none;min-height:26px;padding:0 10px}
+
+/* Git in the rail: the Source Control column alone, full rail width; the
+   diff view appears only when the rail is expanded. */
+.atelier .desktop-rail--git .studio-sheet-content{display:flex;flex:1;min-height:0;overflow:hidden;padding:0}
+.atelier .scm.scm--compact{display:flex;flex-direction:column}
+.atelier .scm.scm--compact>.scm__side{flex:1;border-right:0}

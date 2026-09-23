@@ -131,7 +131,12 @@ function useScm(snap: Snapshot) {
   return { repo, reason, error, setError, busy, call, refresh, act }
 }
 
-export function GitPanel({ snap, initialPath = '', onSnapshots, onReviewSent }: { snap: Snapshot; initialPath?: string; onSnapshots?: () => void; onReviewSent?: () => void }): ReactElement {
+/**
+ * `expanded`: the diff view is showing beside the lists (full width). In the
+ * rail it is off, like the editor's Source Control sidebar — choosing a file
+ * (or "Show changes") asks the shell to expand via `onExpand`.
+ */
+export function GitPanel({ snap, initialPath = '', expanded = true, onExpand, onSnapshots, onReviewSent }: { snap: Snapshot; initialPath?: string; expanded?: boolean; onExpand?: () => void; onSnapshots?: () => void; onReviewSent?: () => void }): ReactElement {
   const scm = useScm(snap)
   const { repo, refresh } = scm
   const [selected, setSelected] = useState<ScmSelection | null>(null)
@@ -162,6 +167,9 @@ export function GitPanel({ snap, initialPath = '', onSnapshots, onReviewSent }: 
     ['staged', 'Staged changes', repo.staged],
     ['unstaged', 'Changes', [...repo.unstaged, ...repo.untracked]],
   ] as const) : [], [repo])
+
+  // Picking a file in the rail opens the diff view, like the editor opens a diff tab.
+  const choose = (selection: ScmSelection): void => { setSelected(selection); if (!expanded) onExpand?.() }
 
   // Keep the selection valid as the lists change; honour a deep link once.
   const linked = useRef('')
@@ -276,13 +284,14 @@ export function GitPanel({ snap, initialPath = '', onSnapshots, onReviewSent }: 
       : null
 
   return (
-    <div className="scm">
+    <div className={`scm${expanded ? '' : ' scm--compact'}`}>
       <div className="scm__side">
         <header className="scm__head">
           <button className="scm-branch" aria-expanded={branchesOpen} title={repo.detached ? 'Detached HEAD — pick a branch' : 'Switch or create a branch'} onClick={() => setBranchesOpen(value => !value)}>
             <Icon name="branch" size={14} /><span>{repo.detached ? 'Detached HEAD' : repo.branch ?? 'No branch'}</span><Icon name="caretDown" size={11} />
           </button>
           <span className="scm__tools">
+            {!expanded && onExpand && <button className="scm-tool" title="Show changes — open the diff view" aria-label="Show changes" onClick={onExpand}><Icon name="changes" size={13} /></button>}
             {sync}
             <button className="scm-tool" title="Fetch from remotes" disabled={Boolean(scm.busy)} onClick={() => void scm.act('Fetching…', 'git.fetch')}><Icon name="retry" size={13} /></button>
           </span>
@@ -335,7 +344,7 @@ export function GitPanel({ snap, initialPath = '', onSnapshots, onReviewSent }: 
               group={key}
               selected={selected}
               busy={Boolean(scm.busy)}
-              onSelect={setSelected}
+              onSelect={choose}
               onStage={paths => void scm.act('Staging…', 'git.stage', { paths })}
               onUnstage={paths => void scm.act('Unstaging…', 'git.unstage', { paths })}
               onStageAll={() => void scm.act('Staging…', 'git.stage', { all: true })}
@@ -348,12 +357,12 @@ export function GitPanel({ snap, initialPath = '', onSnapshots, onReviewSent }: 
 
         <details className="scm__history" open={historyOpen} onToggle={event => setHistoryOpen(event.currentTarget.open)}>
           <summary>Recent commits</summary>
-          {historyOpen && <History scm={scm} head={repo.hasHead ? `${repo.branch}:${repo.ahead}:${repo.behind}:${repo.counts.staged}` : ''} selected={selected} onSelect={setSelected} />}
+          {historyOpen && <History scm={scm} head={repo.hasHead ? `${repo.branch}:${repo.ahead}:${repo.behind}:${repo.counts.staged}` : ''} selected={selected} onSelect={choose} onPreselect={setSelected} />}
         </details>
         {onSnapshots && <button className="scm-link" onClick={onSnapshots}>Snapshots & restore…</button>}
       </div>
 
-      <FileDiff scm={scm} selection={selected} repo={repo} />
+      {expanded && <FileDiff scm={scm} selection={selected} repo={repo} />}
     </div>
   )
 }
@@ -484,7 +493,7 @@ function BranchList({ scm, onDone }: { scm: ReturnType<typeof useScm>; onDone: (
   )
 }
 
-function History({ scm, head, selected, onSelect }: { scm: ReturnType<typeof useScm>; head: string; selected: ScmSelection | null; onSelect: (selection: ScmSelection) => void }): ReactElement {
+function History({ scm, head, selected, onSelect, onPreselect }: { scm: ReturnType<typeof useScm>; head: string; selected: ScmSelection | null; onSelect: (selection: ScmSelection) => void; onPreselect: (selection: ScmSelection) => void }): ReactElement {
   const [commits, setCommits] = useState<ScmCommit[] | null>(null)
   const [open, setOpen] = useState('')
   const [detail, setDetail] = useState<{ commit: ScmCommitDetail; files: ScmFile[] } | null>(null)
@@ -504,7 +513,7 @@ function History({ scm, head, selected, onSelect }: { scm: ReturnType<typeof use
         setDetail(shown)
         // Opening a commit shows its first file straight away, like the editor does.
         const first = shown.files[0]
-        if (first) onSelect({ path: first.path, group: 'commit', commit: { hash: commit.hash, short: commit.short, ...(first.origPath ? { origPath: first.origPath } : {}) } })
+        if (first) onPreselect({ path: first.path, group: 'commit', commit: { hash: commit.hash, short: commit.short, ...(first.origPath ? { origPath: first.origPath } : {}) } })
       })
       .catch(failure => setError(failure instanceof Error ? failure.message : String(failure)))
   }

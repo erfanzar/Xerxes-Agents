@@ -11,7 +11,9 @@ import { Store } from '../src/desktop/renderer/store.js'
 
 test('panel preferences validate persisted data and bound widths', () => {
   expect(parsePanelLayout(null)).toEqual({ sidebarWidth: 240, inspectorWidth: 340, sidebarHidden: false })
-  expect(parsePanelLayout({ sidebarWidth: -1, inspectorWidth: 900, sidebarHidden: true })).toEqual({ sidebarWidth: 180, inspectorWidth: 520, sidebarHidden: true })
+  expect(parsePanelLayout({ sidebarWidth: -1, inspectorWidth: 5000, sidebarHidden: true })).toEqual({ sidebarWidth: 180, inspectorWidth: 1400, sidebarHidden: true })
+  // A wide rail is kept (it used to be capped at 520px).
+  expect(parsePanelLayout({ inspectorWidth: 900 }).inspectorWidth).toBe(900)
   expect(parsePanelLayout({ sidebarWidth: NaN, inspectorWidth: '500', sidebarHidden: 'false' })).toEqual(parsePanelLayout(null))
 })
 test('resizable panels expose keyboard-operable separator values', () => {

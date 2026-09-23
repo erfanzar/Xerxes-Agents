@@ -187,14 +187,18 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
   const [page, setPage] = useState<'agents' | 'extensions' | 'artifacts' | null>(null)
   // Which stylesheet takeovers are in effect, named once so the decision
   // dock below and the CSS cannot disagree about when .chat is gone.
-  const contextFull = Boolean(rail && rail !== 'review' && (filesExpanded || contextRequiresFullWidth))
-  const chatHidden = { contextFull, any: contextFull || rail === 'review' }
+  // Git sits in the rail like the others; only its expanded diff view takes the window.
+  const contextFull = Boolean(rail && (filesExpanded || contextRequiresFullWidth))
+  const chatHidden = { contextFull, any: contextFull }
   // The divider must never be draggable past the width that hides the
   // divider itself — the old max let a persisted value strand the rail
   // over the whole window with no control able to shrink it again.
-  const inspectorMax = Math.max(260, Math.min(520, windowWidth - (focused ? 0 : layout.sidebarWidth) - 320))
+  // Wide windows can give the rail real room; the chat always keeps 320px.
+  const inspectorMax = Math.max(260, windowWidth - (focused ? 0 : layout.sidebarWidth) - 320)
   const navigate = (next: DesktopPanel, filePath?: string): void => {
     if (next === 'review') setReviewPath(filePath ?? '')
+    // A link to one file's changes opens straight into the diff view.
+    if (next === 'review' && filePath && !contextRequiresFullWidth) setFilesExpanded(true)
     if (next === 'activity') setSelectedAgent(filePath ?? '')
     if (next === 'activity') requestAnimationFrame(() => document.querySelector('.desktop-rail .studio-sheet-content')?.scrollTo({ top: 0 }))
     if (next === 'files' || next === 'review' || next === 'terminal' || next === 'activity') setRail(next)
@@ -208,12 +212,12 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
     <div className={`app atelier${trafficLights ? '' : ' app--no-traffic-lights'}${focused ? ' atelier--focus' : ''}`} style={{ '--sidebar-width': `${layout.sidebarWidth}px`, '--inspector-width': `${layout.inspectorWidth}px` } as React.CSSProperties}>
       <Topbar snap={snap} inspectorOpen={rail !== null} sidebarVisible={!focused} onFocus={() => narrow ? setNarrowNavigation(value => !value) : setLayout({ sidebarHidden: !focused })} />
       <FirstRunSetup snap={snap} />
-      <div className="app__body" data-context-full={chatHidden.contextFull || undefined} data-review={rail === "review" || undefined}>
+      <div className="app__body" data-context-full={chatHidden.contextFull || undefined} data-review={(rail === "review" && contextFull) || undefined}>
         <Sidebar snap={snap} page={page} />
         {!focused && <PanelDivider label="Resize sessions" value={layout.sidebarWidth} min={180} max={360} onChange={sidebarWidth => setLayout({ sidebarWidth })} />}
         {snap.noWorkspace ? snap.storageScope?.startsWith('ssh:') ? <RemoteWorkspaceGate /> : <WorkspaceGate /> : <ErrorBoundary label="This conversation"><Chat snap={snap} page={page} /></ErrorBoundary>}
-        {rail && rail !== 'review' && <PanelDivider label="Resize inspector" value={layout.inspectorWidth} min={260} max={inspectorMax} reverse onChange={inspectorWidth => setLayout({ inspectorWidth })} />}
-        {rail && <ErrorBoundary label={railLabel(rail)}><DesktopRail activityFocused={Boolean(selectedAgent)} panel={rail} snap={snap} close={() => setRail(null)} filesExpanded={filesExpanded} reviewPath={reviewPath} {...(!contextRequiresFullWidth ? { toggleFilesExpanded: () => setFilesExpanded(value => !value) } : {})} activityDetails={<ActivityDetails snap={snap} selectedAgent={selectedAgent} />} /></ErrorBoundary>}
+        {rail && <PanelDivider label="Resize inspector" value={layout.inspectorWidth} min={260} max={inspectorMax} reverse onChange={inspectorWidth => setLayout({ inspectorWidth })} />}
+        {rail && <ErrorBoundary label={railLabel(rail)}><DesktopRail activityFocused={Boolean(selectedAgent)} panel={rail} snap={snap} close={() => setRail(null)} filesExpanded={filesExpanded} reviewPath={reviewPath} {...(!contextRequiresFullWidth ? { toggleFilesExpanded: () => setFilesExpanded(value => !value), setExpanded: setFilesExpanded } : {})} activityDetails={<ActivityDetails snap={snap} selectedAgent={selectedAgent} />} /></ErrorBoundary>}
 
       </div>
       {/* The review takeover and an expanded rail both hide .chat, which
