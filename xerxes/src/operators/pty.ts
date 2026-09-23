@@ -89,6 +89,14 @@ export interface CreatePtySessionOptions {
   readonly env?: Readonly<Record<string, string | undefined>>
   /** Display label in the terminals list; defaults to the command's first words. */
   readonly label?: string
+  /** Suppress the chat notice when it ends (a person's own shell). */
+  readonly quiet?: boolean
+  /**
+   * An absolute folder the host vouches for (the session's recorded
+   * workspace), used as-is. `workdir` instead goes through the workspace
+   * path guard that model-chosen paths need.
+   */
+  readonly trustedWorkdir?: string
   readonly ownerSessionId?: string
   readonly login?: boolean
   readonly maxOutputChars?: number
@@ -144,7 +152,7 @@ export class PtySessionManager {
   }
 
   async createSession(command: string, options: CreatePtySessionOptions = {}): Promise<PtyOutput> {
-    const workdir = await this.resolveWorkdir(options.workdir)
+    const workdir = options.trustedWorkdir !== undefined ? await existingDirectory(options.trustedWorkdir) : await this.resolveWorkdir(options.workdir)
     const shell = options.shell ?? defaultInteractiveShell()
     const wrapped = withControllingTerminal(shellCommandArgv(shell, command, options.login ?? true))
     const args = wrapped.argv
@@ -163,6 +171,7 @@ export class PtySessionManager {
       // (run history refuses an empty title).
       command: command.trim() || basename(shell),
       ...(options.label ? { label: options.label } : {}),
+      ...(options.quiet ? { quiet: true } : {}),
       cwd: workdir,
       control: {
         write: async chars => {
@@ -541,4 +550,13 @@ function requireNonnegativeInteger(value: number, name: string): number {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+async function existingDirectory(path: string): Promise<string> {
+  const resolved = resolve(path)
+  let metadata
+  try { metadata = await stat(resolved) }
+  catch (error) { throw new ValidationError('workdir', 'must refer to an existing directory', path, { cause: errorMessage(error) }) }
+  if (!metadata.isDirectory()) throw new ValidationError('workdir', 'must refer to an existing directory', path)
+  return resolved
 }

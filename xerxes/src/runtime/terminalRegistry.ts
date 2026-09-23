@@ -56,6 +56,8 @@ export interface TerminalOpenOptions {
   readonly kind: TerminalKind
   /** Human label, when the caller has something better than the command line. */
   readonly label?: string
+  /** No "run finished" notice into the chat — the person closed it themselves. */
+  readonly quiet?: boolean
   readonly pid?: number
 }
 
@@ -247,7 +249,7 @@ export class TerminalRegistry {
                   exitCode: entry.exitCode,
                   outputTruncated: tail.truncated || entry.mirror.dropped,
                   ...(entry.cancellationAccepted || interrupted || entry.exitCode === 0 ? {} : { error: entry.exitCode === null ? 'Process ended without an exit code' : `Process exited with code ${entry.exitCode}` }),
-                  notify: options.kind !== 'foreground' || entry.exitCode !== 0,
+                  notify: !options.quiet && (options.kind !== 'foreground' || entry.exitCode !== 0),
                 })
               if (completed) this.onRunComplete?.(completed)
             } catch (error) { this.onPersistenceError(error) }

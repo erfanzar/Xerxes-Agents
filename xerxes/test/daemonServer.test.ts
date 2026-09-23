@@ -10323,6 +10323,47 @@ test('a user shell waiting at its prompt does not hold back a runtime update, bu
   } finally { client.close(); await ptySessions.disposeAll(); await server.stop(); await rm(directory, { recursive: true, force: true }); }
 });
 
+test('a shell opens in the session\'s own folder even when the shared runtime was started from another project', async () => {
+  // The daemon is shared: it was started from EasyDeL, the task lives in
+  // Xerxes-Agents. The shell used to land in EasyDeL, and closing it posted
+  // "terminal cancelled: zsh" into the chat.
+  if (process.platform === 'win32') return
+  const startedFrom = await mkdtemp(join(tmpdir(), 'xr-rpc-easydel-'));
+  const workspace = await realpath(await mkdtemp(join(tmpdir(), 'xr-rpc-xerxes-')));
+  const terminals = new TerminalRegistry({ runHistory: new RunHistory(join(startedFrom, 'runs.sqlite')) });
+  const ptySessions = new PtySessionManager({ terminals, workspaceRoot: startedFrom });
+  const runtime = new InMemoryDaemonRuntime(undefined, { currentProjectDirectory: startedFrom, sessionDirectory: join(startedFrom, 'sessions') });
+  const server = new DaemonServer({ socketPath: join(startedFrom, 'rpc.sock'), runtime, projectDirectory: startedFrom, terminalRegistry: terminals, ptySessions });
+  await server.start();
+  const client = await SocketTestClient.connect(join(startedFrom, 'rpc.sock'));
+  let id = 0;
+  let output = '';
+  const notices: string[] = [];
+  const call = async (method: string, params: Record<string, unknown> = {}) => {
+    const request = ++id;
+    client.send({ jsonrpc: '2.0', id: request, method, params: { session_key: 'folder-owner', ...params } });
+    for (;;) {
+      const frame = await client.next(frame => frame.id === request || frame.method === 'event');
+      if (frame.id === request) return frame.result as Record<string, any>;
+      const payload = frame.params!.payload as Record<string, unknown>;
+      if (frame.params!.type === 'terminal_output') output += String(payload.data ?? '');
+      if (frame.params!.type === 'notification') notices.push(String(payload.body ?? ''));
+    }
+  };
+  try {
+    await runtime.openSession('folder-owner', undefined, { cwd: workspace });
+    const terminalId = (await call('terminal.open', { cols: 100, rows: 24 })).terminal_id as string;
+    expect(terminalId).toBeTruthy();
+    await call('terminal.attach', { terminal_id: terminalId });
+    await call('terminal.control', { terminal_id: terminalId, action: 'write', chars: 'echo "PWD=$PWD"\r' });
+    for (let tries = 0; tries < 60 && !/PWD=\/[^\r\n"]+\r?\n/.test(output); tries += 1) { await Bun.sleep(100); await call('background.status'); }
+    expect(output).toContain(`PWD=${workspace}`);
+    await call('terminal.control', { terminal_id: terminalId, action: 'kill' });
+    for (let tries = 0; tries < 8; tries += 1) { await Bun.sleep(100); await call('background.status'); }
+    expect(notices.filter(body => body.includes('terminal'))).toEqual([]);
+  } finally { client.close(); await ptySessions.disposeAll(); await server.stop(); await rm(startedFrom, { recursive: true, force: true }); await rm(workspace, { recursive: true, force: true }); }
+});
+
 test('background.status counts live session-owned shells and watchers while idle', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'xr-background-status-'));
   const history = new RunHistory(join(directory, 'runs.sqlite'));

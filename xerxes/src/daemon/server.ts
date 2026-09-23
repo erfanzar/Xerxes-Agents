@@ -6279,13 +6279,12 @@ export class DaemonServer {
           yieldTimeMs: 0,
           env: { TERM: "xterm-256color", COLORTERM: "truecolor", TERM_PROGRAM: "Xerxes" },
         };
-        let opened;
-        try { opened = await this.ptySessions.createSession("", { ...options, ...(cwd ? { workdir: cwd } : {}) }); }
-        catch (error) {
-          // A session folder outside the runtime's workspace roots: open in the workspace instead.
-          if (!cwd) throw error;
-          opened = await this.ptySessions.createSession("", options);
-        }
+        // The session's own folder, used directly: the daemon is shared across
+        // workspaces, so its agent path guard (rooted at whichever project
+        // started it) would reject this workspace — and a silent fallback
+        // then opened the shell in another project.
+        const folder = cwd || this.projectDirectory || homedir();
+        const opened = await this.ptySessions.createSession("", { ...options, quiet: true, trustedWorkdir: folder });
         return { ok: true, terminal_id: opened.sessionId };
       }
       const id = optionalString(params.terminal_id);
