@@ -130,10 +130,11 @@ export async function openRemote(
   ]
   const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'"
   let address: ReturnType<typeof remoteAddress> | undefined
+  let reused = false
   if (previousAddress) {
     const probe = await runCaptured('ssh', [...ssh, '-T', '--', machine.target,
       'exec sh -c ' + quote('PATH="$HOME/.bun/bin:$HOME/.local/bin:$PATH"; export PATH; exec bun -e ' + quote(remoteResumeProgram(previousAddress.socketPath)))], signal, 20000)
-    if (probe.split('\n').includes('XERXES_REMOTE_ALIVE')) address = previousAddress
+    if (probe.split('\n').includes('XERXES_REMOTE_ALIVE')) { address = previousAddress; reused = true }
     else if (!probe.split('\n').includes('XERXES_REMOTE_MISSING')) throw new Error('Remote runtime probe did not return a valid status.')
   }
   if (!address) {
@@ -230,6 +231,12 @@ export async function openRemote(
         return updated.busy ? { ok: false, busy: true } : { ok: true }
       },
     }
+    // A reused runtime skipped setup, so nothing compared it with the newest
+    // build: an outdated one stayed forever and had to be replaced by hand.
+    // Check in the background — an idle runtime is replaced now; a busy one
+    // keeps working and the app offers the update once it is idle.
+    // A failed check (offline, GitHub down) leaves the working connection as it is.
+    if (reused) void connection.update().catch(error => { if (!closing) console.error('Remote runtime update check failed:', error instanceof Error ? error.message : error) })
     return connection
   } catch (error) {
     await close()

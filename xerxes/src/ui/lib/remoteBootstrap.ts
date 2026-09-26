@@ -27,6 +27,18 @@ const result = await prepareManagedRuntime(
       await Bun.sleep(50);
     }
   },
+  {
+    // An old runtime may not report its pid. Its pid file is used only when
+    // that process is alive and is a Xerxes daemon — never a stale number.
+    pidFallback: async () => {
+      try {
+        const pid = Number((await Bun.file(daemonPaths(projectDir).pidPath).text()).trim());
+        if (!Number.isSafeInteger(pid) || pid <= 0) return undefined;
+        const command = Bun.spawnSync(['ps', '-o', 'command=', '-p', String(pid)]).stdout.toString();
+        return /\bdaemon\b/.test(command) && /xerxes|cli\.js/i.test(command) ? pid : undefined;
+      } catch { return undefined; }
+    },
+  },
 );
 console.log('XERXES_REMOTE_READY ' + JSON.stringify({ projectDir, socketPath: daemonPaths(projectDir).socketPath, expectedBuildId: expectedDaemonBuildId, busy: result.busy }));
 process.exit(0);
