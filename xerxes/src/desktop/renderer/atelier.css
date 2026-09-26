@@ -2289,3 +2289,13 @@ html,body,#root,.app.atelier{background:transparent}
    then showed the button through itself and vanished. Always opaque. */
 :root,:root[data-theme='dark'],:root:not([data-theme]){--x-on-accent:#0b0d11;--x-inverse:#0b0d11}
 :root[data-theme='light'],html[data-theme='light']{--x-on-accent:#ffffff;--x-inverse:#ffffff}
+
+/* Copy under a message: shown while the pointer is over the message or the
+   button has keyboard focus, so it never clutters the transcript. */
+.atelier .msg-turn--user{align-self:flex-end;display:flex;flex-direction:column;align-items:flex-end;max-width:min(92%,760px)}
+.atelier .msg-turn--user>.msg--user{max-width:100%}
+.atelier .msg__actions{display:flex;gap:6px;margin-top:4px;opacity:0;transition:opacity 120ms ease}
+.atelier .msg-turn:hover .msg__actions,.atelier .msg--agent:hover .msg__actions,.atelier .msg__actions:focus-within{opacity:1}
+.atelier .msg__actions .copybtn{font:var(--t-caption);padding:2px 8px}
+@media (prefers-reduced-motion:reduce){.atelier .msg__actions{transition:none}}
+@media (hover:none){.atelier .msg__actions{opacity:1}}

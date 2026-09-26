@@ -14,6 +14,7 @@ import { failureView } from './turnFailure.js'
 import type { AgentMember, Block } from './types.js'
 import { applyCompletion, wantsHints, type HintItem } from './hints.js'
 import { groupByWorkspace, sidebarOrder } from './workspaceGroups.js'
+import { CopyButton } from './CopyButton.js'
 import { currentSessionDensity, subscribeSessionDensity } from './displayPrefs.js'
 import { ChangesTab, LogTab, PlanTab } from './Workspaces.js'
 import { Markdown } from './markdown.js'
@@ -1291,9 +1292,14 @@ function LivePhrase({ text }: { text: string }): ReactElement {
 function UserMessage({ text }: { text: string }): ReactElement {
   const [expanded, setExpanded] = useState(false)
   const long = text.length > 1600 || text.split('\n').length > 16
-  return <div className="msg msg--user">
-    <div className={`msg__text${long && !expanded ? ' msg__text--preview' : ''}`}>{text}</div>
-    {long && <button className="message-expand" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>{expanded ? 'Show less' : 'Show full message'}</button>}
+  // The wrapper carries the bubble's right alignment so the copy row can sit
+  // under the bubble rather than inside it.
+  return <div className="msg-turn msg-turn--user">
+    <div className="msg msg--user">
+      <div className={`msg__text${long && !expanded ? ' msg__text--preview' : ''}`}>{text}</div>
+      {long && <button className="message-expand" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>{expanded ? 'Show less' : 'Show full message'}</button>}
+    </div>
+    <div className="msg__actions"><CopyButton text={text} label="Copy message" /></div>
   </div>
 }
 
@@ -1314,6 +1320,8 @@ function BlockView({ block }: { block: Snapshot['blocks'][number] }): ReactEleme
         <div className="msg__text">
           <Markdown text={block.text} className="md--agent" tail={block.streaming ? CARET : undefined} />
         </div>
+        {/* The reply as written (Markdown), once it has finished streaming. */}
+        {!block.streaming && block.text.trim() && <div className="msg__actions"><CopyButton text={block.text} label="Copy reply" /></div>}
       </section>
     )
   }
