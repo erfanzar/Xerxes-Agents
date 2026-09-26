@@ -14,6 +14,10 @@ import { InMemoryDaemonRuntime } from '../src/daemon/runtime.js'
 import { AgentTurnRunner } from '../src/daemon/turnRunner.js'
 import { RemoteProviderBindings } from '../src/daemon/remoteProviderBindings.js'
 import type { CompletionRequest } from '../src/llms/client.js'
+import { seedModelsDev } from './fixtures/modelsDev.js'
+
+// Model capabilities come from models.dev at runtime; tests use its fixture.
+seedModelsDev()
 
 async function until(check:()=>boolean) { for(let i=0;i<300;i++){if(check())return;await Bun.sleep(10)}throw new Error('Timed out') }
 async function fixture() {

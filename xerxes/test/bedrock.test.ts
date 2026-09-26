@@ -20,8 +20,12 @@ import {
 } from '../src/llms/bedrock.js'
 import { createLlmClient, type CompletionRequest, type LlmDelta } from '../src/llms/client.js'
 import type { ToolDefinition } from '../src/types/toolCalls.js'
+import { seedModelsDev } from './fixtures/modelsDev.js'
 
 const EMPTY_ENV: BedrockEnv = {}
+
+// Bedrock model capabilities come from models.dev; tests use its fixture.
+seedModelsDev()
 
 const SEARCH_TOOL: ToolDefinition = {
   type: 'function',
@@ -243,7 +247,25 @@ describe('buildBedrockConverseInput', () => {
       { env: EMPTY_ENV, model: resolvedClaude },
     )
     const messages = input.messages as Record<string, unknown>[]
-    expect(messages[0]?.content).toEqual([{ text: '<empty>' }])
+    // The placeholder, then the single cache point on the last message.
+    expect((messages[0]?.content as unknown[])[0]).toEqual({ text: '<empty>' })
+  })
+
+  test('one cache point on the last message, however many tool rounds', () => {
+    const rounds = Array.from({ length: 5 }, (_, round) => [
+      { role: 'assistant' as const, content: '', tool_calls: [{ id: `c${round}`, type: 'function' as const, function: { name: 'read', arguments: { round } } }] },
+      { role: 'tool' as const, tool_call_id: `c${round}`, name: 'read', content: `result ${round}` },
+    ]).flat()
+    const input = buildBedrockConverseInput(
+      claudeRequest({ messages: [{ role: 'system', content: 'Be Xerxes.' }, { role: 'user', content: 'go' }, ...rounds] }),
+      { env: EMPTY_ENV, model: resolvedClaude },
+    )
+    const count = (value: unknown): number => JSON.stringify(value).split('"cachePoint"').length - 1
+    // Bedrock allows four; one per round used to pass it by the fourth round.
+    expect(count(input.messages) + count(input.system)).toBeLessThanOrEqual(2)
+    const messages = input.messages as { content: unknown[] }[]
+    expect(JSON.stringify(messages.at(-1)!.content.at(-1))).toContain('cachePoint')
+    expect(count(messages.slice(0, -1))).toBe(0)
   })
 
   test('budget-based Claude thinking expands the output ceiling and sets the beta', () => {

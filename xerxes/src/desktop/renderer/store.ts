@@ -63,6 +63,8 @@ import type {
   TerminalRow,
   WorkspaceTab,
 } from './types.js'
+import { harnessOriginOf } from './types.js'
+import { withoutTurnContext } from './transcriptContent.js'
 
 export type Connection = 'connecting' | 'online' | 'offline'
 
@@ -126,6 +128,9 @@ function isSpawnTool(name: unknown): boolean {
 }
 
 /** Snapshot statuses fold onto the card's display vocabulary. */
+/** Tools whose success changes the session goal. */
+const GOAL_WRITE_TOOLS = new Set(['create_goal', 'update_goal'])
+
 function agentStatusOf(status: string): string {
   const s = status.toLowerCase()
   if (s === 'working' || s === 'running' || s === 'starting' || s === 'waiting') return 'working'
@@ -245,6 +250,9 @@ export interface Snapshot {
   readonly metricPhaseStartedAt: number | null
   /** Latest provider-reported input-cache hit share, from 0 through 1. */
   readonly cacheHitRate: number | null
+  /** Session prompt tokens served from the provider cache, and written into it (billed above plain input). */
+  readonly cacheReadTokens: number | null
+  readonly cacheWriteTokens: number | null
   readonly sessions: readonly SessionRow[]
   readonly live: readonly SessionRow[]
   readonly fleet: readonly SessionRow[]
@@ -303,6 +311,11 @@ export interface Snapshot {
   readonly reasoningLoading: boolean
   readonly wsMenuOpen: boolean
   readonly workspaceDirectories?: readonly string[]
+  /**
+   * Latest-message time per session id, kept across refreshes. The lists
+   * above drop the open session, so this is where its sort key survives.
+   */
+  readonly sessionActivity?: Readonly<Record<string, number>>
   readonly contexts?: readonly WorkspaceContext[]
   readonly storageScope?: string
   readonly workspaceBusy: boolean
@@ -507,6 +520,16 @@ function clientHandshake(): Record<string, unknown> {
   }
 }
 
+/** Epoch ms from an ISO string or epoch seconds; undefined when unreadable. */
+function epochMsOf(when: unknown): number | undefined {
+  if (typeof when === 'number' && Number.isFinite(when)) return when * 1000
+  if (typeof when === 'string') {
+    const parsed = Date.parse(when)
+    if (!Number.isNaN(parsed)) return parsed
+  }
+  return undefined
+}
+
 function ageOf(when: unknown): string {
   // Saved rows carry updated_at as an ISO string; live rows carry
   // last_active as epoch seconds. Accept both or show nothing rather than
@@ -525,25 +548,34 @@ function ageOf(when: unknown): string {
   return `${Math.floor(hours / 24)}d`
 }
 
-/** Display provider for a model id: `z-ai/glm-5.2` → `z-ai`, else family. */
+/**
+ * Grouping for a model id when the runtime names no profile (older
+ * runtimes): the id's own `vendor/` prefix, else one plain group. Never a
+ * family guessed from the name.
+ */
 export function providerOf(id: string): string {
   const slashed = id.split('/')[0]
-  if (slashed && id.includes('/')) return slashed
-  const lower = id.toLowerCase()
-  if (/^(gpt|o1|o3|o4|codex|chatgpt)/.test(lower)) return 'openai'
-  if (lower.includes('claude')) return 'anthropic'
-  if (lower.includes('kimi') || lower.includes('moonshot')) return 'kimi'
-  if (lower.includes('glm') || lower.includes('z-ai')) return 'z-ai'
-  if (lower.includes('deepseek')) return 'deepseek'
-  if (lower.includes('qwen')) return 'qwen'
-  if (lower.includes('gemini')) return 'google'
-  if (lower.includes('llama')) return 'meta'
-  if (lower.includes('mistral') || lower.includes('codestral')) return 'mistral'
-  return 'models'
+  return slashed && id.includes('/') ? slashed : 'Models'
 }
 
-function toChoices(ids: readonly string[]): ModelChoice[] {
-  return ids.filter(Boolean).map(id => ({ id, provider: providerOf(id) }))
+/**
+ * Picker rows from what the runtime reported: each model's own name and
+ * description when the provider gives them, grouped under the serving
+ * profile's label. The id-based family guess is only for older runtimes.
+ */
+function toChoices(ids: readonly string[], catalog?: unknown, group = ''): ModelChoice[] {
+  const entries = new Map<string, Record<string, unknown>>()
+  if (Array.isArray(catalog)) {
+    for (const item of catalog) {
+      if (item && typeof item === 'object' && typeof (item as Record<string, unknown>).id === 'string') entries.set((item as Record<string, unknown>).id as string, item as Record<string, unknown>)
+    }
+  }
+  return ids.filter(Boolean).map(id => {
+    const entry = entries.get(id)
+    const label = str(entry?.display_name)
+    const hint = str(entry?.description)
+    return { id, provider: group || providerOf(id), ...(label ? { label } : {}), ...(hint ? { hint } : {}) }
+  })
 }
 
 function skillSuggestionOf(value: unknown): SkillSuggestion | null {
@@ -596,6 +628,7 @@ const wireRow = (row: Record<string, unknown>, currentId: string): SessionRow | 
     title: str(row.title) || `#${id.slice(0, 6)}`,
     status: str(row.status) || '',
     age: ageOf(row.updated_at ?? row.last_active),
+    ...(epochMsOf(row.updated_at ?? row.last_active) === undefined ? {} : { activeAt: epochMsOf(row.updated_at ?? row.last_active)! }),
     current: id === currentId,
     kind,
     turns,
@@ -679,7 +712,6 @@ export class Store {
   /** The turn's agents-card members by local key — merged into the builder. */
   private readonly agentMembers = new Map<string, AgentMember>()
   /** Titles the current card shows, for fleet-snapshot status matching. */
-  private readonly agentMemberKeysByTitle = new Map<string, string>()
   private started = false
   private sessionKey = `desktop-${Math.random().toString(36).slice(2, 10)}`
   private historyBefore: string | null = null
@@ -754,6 +786,8 @@ export class Store {
       metricPhase: null,
       metricPhaseStartedAt: null,
       cacheHitRate: null,
+      cacheReadTokens: null,
+      cacheWriteTokens: null,
       sessions: [],
       live: [],
       fleet: [],
@@ -855,8 +889,8 @@ export class Store {
 
   private initializeLive(workspace: string): void {
     this.patch({ cwd: workspace })
-    void Promise.resolve(this.bridge.getResumeSession?.()).then(async explicitId => {
-      const id = explicitId || (workspace ? selectedSession((this.frame.storageScope ?? '') + workspace) : null)
+    void Promise.all([this.bridge.getResumeSession?.(), this.bridge.startsFresh?.()]).then(async ([explicitId, fresh]) => {
+      const id = explicitId || (workspace && !fresh ? selectedSession((this.frame.storageScope ?? '') + workspace) : null)
       try {
         return await this.initializeSelfHealing(id ? { resume_session_id: id } : {})
       } catch (error) {
@@ -932,24 +966,26 @@ export class Store {
   /**
    * Submit or steer. While a turn runs, text goes to `turn.steer` — the
    * daemon queues it between steps and the store mirrors it visibly; when
-   * idle it is a normal `turn.submit`.
+   * idle it is a normal `turn.submit`. `display` is what the transcript
+   * shows when it differs from what the model is sent.
    */
-  async submit(text: string): Promise<boolean> {
+  async submit(text: string, display?: string): Promise<boolean> {
     const trimmed = text.trim()
     if (!trimmed) return false
+    const shown = display?.trim() || trimmed
     if (this.frame.turnActive && !trimmed.startsWith('/')) {
       return this.steer(trimmed)
     }
     if (!trimmed.startsWith('/')) {
       const sessionKey = this.sessionKey
       if (this.preparingSubmissions.has(sessionKey)) return false
-      this.lastUser = trimmed
-      const optimistic = { text: trimmed, id: this.builder.pushUser(trimmed), acknowledged: false }
+      this.lastUser = shown
+      const optimistic = { text: shown, id: this.builder.pushUser(shown), acknowledged: false }
       this.optimisticSubmissions.set(sessionKey, optimistic)
       this.preparingSubmissions.set(sessionKey, optimistic)
       this.notify()
       try {
-        const result = await this.bridge.call('turn.submit', { session_key: sessionKey, text: trimmed })
+        const result = await this.bridge.call('turn.submit', { session_key: sessionKey, text: trimmed, ...(shown === trimmed ? {} : { display_text: shown }) })
         if (result.ok === false) throw new Error(str(result.error) || 'Submission refused')
         if (this.sessionKey === sessionKey) this.cameOnline()
         return true
@@ -960,7 +996,7 @@ export class Store {
         if (this.preparingSubmissions.get(sessionKey) === optimistic) this.preparingSubmissions.delete(sessionKey)
         if (this.optimisticSubmissions.get(sessionKey) === optimistic) this.optimisticSubmissions.delete(sessionKey)
         if (this.sessionKey === sessionKey) {
-          if (!optimistic.acknowledged) this.builder.rollbackUser(trimmed)
+          if (!optimistic.acknowledged) this.builder.rollbackUser(shown)
           this.fail(error)
         }
         return optimistic.acknowledged
@@ -1190,11 +1226,16 @@ export class Store {
   }
 
   newChat(): void {
-    // The mouse path is honestly disabled while a turn runs; the keyboard
-    // path used to hit beginFreshTask's guard and return in silence, which
-    // reads as a broken shortcut. Say why instead.
-    if (this.frame.turnActive) { this.patch({ workspaceError: 'Finish or stop the current task before starting a new one.' }); return }
     if (this.frame.connection !== 'online') { this.patch({ workspaceError: 'Not connected to this workspace yet.' }); return }
+    // A running turn keeps this view's connection, so the new task opens as
+    // another view in the same window — the way opening another chat mid-turn
+    // does. It used to refuse ("Finish or stop the current task…") and the
+    // button sat greyed out for the whole turn.
+    if (this.frame.turnActive) {
+      if (!this.bridge.openWorkspaceWindow) { this.patch({ workspaceError: 'This desktop build cannot open another window. Relaunch the updated app.' }); return }
+      void this.bridge.openWorkspaceWindow(this.frame.cwd || undefined, undefined, { fresh: true }).catch(error => this.fail(error))
+      return
+    }
     void this.beginFreshTask()
   }
 
@@ -1308,7 +1349,7 @@ export class Store {
           return
         }
         const ids = Array.isArray(result.models) ? (result.models as unknown[]).map(m => str(m)).filter(Boolean) : []
-        this.patch({ models: toChoices(ids), modelsLoading: false, modelsError: null })
+        this.patch({ models: toChoices(ids, result.catalog, str(result.profile_label)), modelsLoading: false, modelsError: null })
       })
       .catch(error => {
         this.patch({ modelsLoading: false, modelsError: desktopError(error) })
@@ -2029,12 +2070,20 @@ export class Store {
 
   // ── Failure + retry ──────────────────────────────────────────────────
 
+  /**
+   * Continue the failed turn rather than send its prompt again. The daemon
+   * keeps the prompt and every step that finished before the error, so
+   * re-sending the prompt put it in the conversation twice — as a second
+   * copy of a long instruction in the transcript — and the model started the
+   * whole task over. The model is told what happened; the transcript shows
+   * only "Continue".
+   */
   retryFailed(): void {
     const failed = this.frame.failed
     if (!failed) return
     this.failure = null
     this.patch({ failed: null, turnFailed: false, tab: 'activity' })
-    if (failed.lastUser) void this.submit(failed.lastUser)
+    if (failed.lastUser) void this.submit(`Continue. Your previous reply was cut off by an error (${failed.error.slice(0, 300)}). Pick up where you stopped; do not repeat steps that already finished.`, 'Continue')
   }
 
   async retryCompaction(): Promise<void> {
@@ -2369,7 +2418,8 @@ export class Store {
             if (!name) return null
             return {
               name,
-              provider: str(row.provider) || providerOf(str(row.model) || name),
+              label: str(row.label) || name,
+              provider: str(row.provider),
               model: str(row.model),
               active: row.active === true,
               baseUrl: str(row.base_url),
@@ -2521,10 +2571,11 @@ export class Store {
     // Passthrough — the wrapper must forward EVERY preload method or the
     // optional calls silently do nothing.
     getWorkspaceDirectories: () => window.xerxes.getWorkspaceDirectories?.() ?? Promise.resolve([]),
-    openWorkspaceWindow: (directory, resumeSessionId) => {
+    openWorkspaceWindow: (directory, resumeSessionId, options) => {
       if (!window.xerxes.openWorkspaceWindow) return Promise.reject(new Error('This desktop build cannot open additional windows. Relaunch the updated app.'))
-      return window.xerxes.openWorkspaceWindow(directory, resumeSessionId)
+      return window.xerxes.openWorkspaceWindow(directory, resumeSessionId, options)
     },
+    startsFresh: () => window.xerxes.startsFresh?.() ?? Promise.resolve(false),
     chooseWorkspace: () => window.xerxes.chooseWorkspace?.() ?? Promise.resolve(null),
     useWorkspace: (dir, resumeSessionId) => window.xerxes.useWorkspace?.(dir, resumeSessionId) ?? Promise.resolve(null),
     getWorkspace: () => window.xerxes.getWorkspace?.() ?? Promise.resolve(''),
@@ -2561,6 +2612,8 @@ export class Store {
       metricPhaseStartedAt: str(session.active_turn_id) ? Date.now() : null,
       tokensPerSecond: tokensPerSecond === null ? null : Math.max(0, tokensPerSecond),
       cacheHitRate: cacheHitRate === null ? null : Math.max(0, Math.min(1, cacheHitRate)),
+      cacheReadTokens: num(session.cache_read_tokens),
+      cacheWriteTokens: num(session.cache_write_tokens),
       ttftMs: ttftAverage === null ? null : Math.max(0, ttftAverage),
     }
   }
@@ -2824,7 +2877,14 @@ export class Store {
     let touched = false
     for (const row of fleet) {
       const status = agentStatusOf(row.status)
-      const key = [...this.agentMembers.values()].find(member => member.runtimeId === row.id)?.key ?? this.agentMemberKeysByTitle.get(row.title)
+      // A child is matched to its card row by id once known; before that, by
+      // title — but only to a row still waiting for its agent, newest first.
+      // Two spawns with the same title (a failed one, then its retry) used
+      // to bind the live child to the FAILED row, reviving it as "working"
+      // beside the retry's own row.
+      const members = [...this.agentMembers.values()]
+      const key = members.find(member => member.runtimeId === row.id)?.key
+        ?? members.findLast(member => !member.runtimeId && member.status === 'working' && member.title === row.title)?.key
       if (key) {
         const member = this.agentMembers.get(key)
         if (member && (member.status !== status || member.runtimeId !== row.id)) {
@@ -2834,8 +2894,7 @@ export class Store {
         continue
       }
       if (!this.agentMembers.has(row.id) && status === 'working') {
-        this.agentMembers.set(row.id, { key: row.id, title: row.title, status })
-        this.agentMemberKeysByTitle.set(row.title, row.id)
+        this.agentMembers.set(row.id, { key: row.id, runtimeId: row.id, title: row.title, status })
         touched = true
       }
     }
@@ -3066,7 +3125,11 @@ export class Store {
       // panel while subagents actually run.
       const liveIds = new Set(live.map(row => row.id))
       const history = (savedRows ?? this.frame.sessions).filter(row => !liveIds.has(row.id) && row.id !== currentId)
-      this.patch({ live, sessions: history })
+      const sessionActivity: Record<string, number> = { ...this.frame.sessionActivity }
+      for (const row of [...(savedRows ?? []), ...all]) {
+        if (row.activeAt !== undefined) sessionActivity[row.id] = Math.max(sessionActivity[row.id] ?? 0, row.activeAt)
+      }
+      this.patch({ live, sessions: history, sessionActivity })
       this.enrichUntitled(history)
     })
   }
@@ -3199,7 +3262,9 @@ export class Store {
             optimistic.acknowledged = true
             this.optimisticSubmissions.delete(this.sessionKey)
           }
-          if (!alreadyShown && !(last && last.kind === 'user' && last.text === user)) this.builder.pushUser(user)
+          // A prompt the harness wrote (goal round, monitor, schedule) is not
+          // something the user said, so it is not shown.
+          if (!alreadyShown && !harnessOriginOf(payload.origin) && !(last && last.kind === 'user' && last.text === user)) this.builder.pushUser(withoutTurnContext(user))
         }
         this.preparingSubmissions.delete(this.sessionKey)
         // A late delta that landed after the previous turn_end sits in the
@@ -3210,7 +3275,6 @@ export class Store {
         // card's committed copy keeps its terminal states.
         this.builder.closeAgentsCard()
         this.agentMembers.clear()
-        this.agentMemberKeysByTitle.clear()
         this.startTurn()
         // First fleet read of the turn; agent-family tool calls below keep
         // the panel polling while spawns actually run.
@@ -3232,6 +3296,11 @@ export class Store {
           const todos = todosFromResult(payload.name, payload.return_value)
           if (todos !== null) this.patch({ todos })
         }
+        // Goal tools change the goal mid-turn (create, resume, remove limits).
+        // The card used to refresh only when the turn ended, so it went on
+        // showing "blocked · Rounds 0/1" for a goal the agent had already
+        // resumed with no limits.
+        if (type === 'tool_result' && GOAL_WRITE_TOOLS.has(str(payload.name))) void this.refreshGoal()
         if (type === 'tool_result' && payload.permitted !== false && !payload.error && Array.isArray(payload.display_blocks)) {
           for (const block of payload.display_blocks) {
             if (block?.type !== 'todo') continue
@@ -3290,7 +3359,6 @@ export class Store {
               const title = str(report.title) || previous?.title || member?.title || runtimeId
               if (member) {
                 this.agentMembers.set(member.key, {...member, runtimeId, title, status:agentStatusOf(str(report.status))})
-                this.agentMemberKeysByTitle.set(title, member.key)
               }
               const row: SessionRow = {...(previous ?? {id:runtimeId,key:runtimeId,age:'',current:false,kind:'subagent',turns:0,messages:0,cwd:'',untitled:false}),title,status:str(report.status),
                 agentDetails:{filesRead:[],filesWritten:[],...previous?.agentDetails,summary:str(report.summary),error:str(report.error),model:str(report.model)||previous?.agentDetails?.model||'',baseAgent:str(report.agent_id)||member?.baseAgent||previous?.agentDetails?.baseAgent||'',goal:member?.prompt||previous?.agentDetails?.goal||'',requestKey:member?.key||previous?.agentDetails?.requestKey||"",lastReceiptAt:Date.now()}}
@@ -3337,7 +3405,6 @@ export class Store {
           if (id && isSpawnTool(payload.name)) {
             for (const member of spawnMembersOf(payload.name, payload.arguments, id)) {
               this.agentMembers.set(member.key, member)
-              if (!this.agentMemberKeysByTitle.has(member.title)) this.agentMemberKeysByTitle.set(member.title, member.key)
             }
             this.builder.pushAgents([...this.agentMembers.values()])
           }
@@ -3429,9 +3496,14 @@ export class Store {
           patch.tokensPerSecond = payload.tokens_per_second
         }
         const cacheReadTokens = num(payload.cache_read_tokens)
+        const cacheWriteTokens = num(payload.cache_creation_tokens)
         const cumulativeInputTokens = num(payload.total_input_tokens) ?? num(payload.input_tokens)
-        if (cacheReadTokens !== null && cumulativeInputTokens !== null && cacheReadTokens + cumulativeInputTokens > 0) {
-          patch.cacheHitRate = cacheReadTokens / (cacheReadTokens + cumulativeInputTokens)
+        if (cacheReadTokens !== null) patch.cacheReadTokens = cacheReadTokens
+        if (cacheWriteTokens !== null) patch.cacheWriteTokens = cacheWriteTokens
+        // Writes count: a step that rewrote the cached prefix is a miss.
+        const promptTokens = (cacheReadTokens ?? 0) + (cacheWriteTokens ?? 0) + (cumulativeInputTokens ?? 0)
+        if ((cacheReadTokens !== null || cacheWriteTokens !== null) && cumulativeInputTokens !== null && promptTokens > 0) {
+          patch.cacheHitRate = (cacheReadTokens ?? 0) / promptTokens
         } else if (typeof payload.cache_hit_rate === 'number' && Number.isFinite(payload.cache_hit_rate)) {
           patch.cacheHitRate = Math.max(0, Math.min(1, payload.cache_hit_rate))
         }
@@ -3669,7 +3741,6 @@ export class Store {
     // folded the new session's status updates onto the old session's entries.
     this.stopFleetPoll()
     this.agentMembers.clear()
-    this.agentMemberKeysByTitle.clear()
     this.pendingAgentCalls.clear()
     this.patch({
       reasoningPickerOpen: false,
@@ -3703,6 +3774,8 @@ export class Store {
       metricPhase: null,
       metricPhaseStartedAt: null,
       cacheHitRate: null,
+      cacheReadTokens: null,
+      cacheWriteTokens: null,
       skillSuggestions: [],
       creatorTrace: [],
       tab: 'activity',
@@ -3820,10 +3893,12 @@ export interface XerxesLike {
   /** Present on the real preload bridge; test bridges may omit it. */
   chooseWorkspace?(): Promise<unknown>
   getWorkspaceDirectories?(): Promise<string[]>
-  openWorkspaceWindow?(dir?: string, resumeSessionId?: string): Promise<unknown>
+  openWorkspaceWindow?(dir?: string, resumeSessionId?: string, options?: { fresh?: boolean }): Promise<unknown>
   useWorkspace?(dir: string, resumeSessionId?: string): Promise<unknown>
   getWorkspace?(): Promise<string | null>
   getResumeSession?(): Promise<string | null>
+  /** True for a window opened to start a fresh task: skip the remembered chat. */
+  startsFresh?(): Promise<boolean>
 }
 
 export const store = new Store()

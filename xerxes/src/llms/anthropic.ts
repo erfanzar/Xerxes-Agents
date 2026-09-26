@@ -11,7 +11,7 @@ import {
   isAnthropicOAuthToken,
   toClaudeCodeToolName,
 } from '../auth/anthropicOAuth.js'
-import { ConfigurationError, ProviderError } from '../core/errors.js'
+import { ConfigurationError, ProviderError, StreamFrameError } from '../core/errors.js'
 import {
   cacheableSystemPrompt,
   markLastMessageForCache,
@@ -30,8 +30,9 @@ import {
   splitDeferredTools,
   type DeferredToolSplit,
 } from './deferredTools.js'
-import { piCatalogModelCapabilities } from './piModelCatalog.js'
+import { wireCapability } from './modelsDev.js'
 import { bareModel, getApiKey } from './providerRegistry.js'
+import { credentialFingerprint } from './credentialFingerprint.js'
 
 export interface AnthropicClientOptions {
   readonly apiKey?: string
@@ -277,6 +278,11 @@ export class AnthropicMessagesClient implements LlmClient {
     const token = (await this.resolveOAuthToken?.(signal))?.trim()
     if (!token) return { isOAuthToken: false }
     return { isOAuthToken: isAnthropicOAuthToken(token), ...(token ? { token } : {}) }
+  }
+
+  async authFingerprint(signal?: AbortSignal): Promise<string | undefined> {
+    try { return credentialFingerprint(this.requestHeaders('application/json', await this.resolveOAuthContext(signal))) }
+    catch { return undefined }
   }
 
   /** Request headers for the resolved auth context. */
@@ -567,8 +573,8 @@ interface AnthropicDeferredPlacement {
 }
 
 /**
- * pi-ai's tool-reference placement: first-party Claude 4.5+ (non-Haiku) splits
- * transcript-loaded tools out of the immediate surface.
+ * Tool-reference placement, where the model is reported to take tool
+ * references: transcript-loaded tools split out of the immediate surface.
  */
 function anthropicDeferredPlacement(request: CompletionRequest, provider: string): AnthropicDeferredPlacement {
   const enabled = anthropicSupportsToolReferences(request.model, provider)
@@ -601,25 +607,18 @@ interface AnthropicThinkingPlan {
 function planAnthropicThinking(request: CompletionRequest, provider: string): AnthropicThinkingPlan {
   const effortRaw = request.thinking?.effort?.trim().toLowerCase()
   const requested = request.thinking !== undefined && effortRaw !== 'off' && effortRaw !== 'none'
-  const capabilities = piCatalogModelCapabilities(request.model, provider)
-  const map = capabilities?.thinkingLevelMap
-  const adaptive = capabilities?.compat?.forceAdaptiveThinking === true
-  const mapped = effortRaw ? map?.[effortRaw] : undefined
-  // pi mapThinkingLevelToEffort: catalog mapping wins, unknowns land on high.
-  const effort = !adaptive
-    ? undefined
-    : typeof mapped === 'string'
-      ? mapped
-      : effortRaw === 'minimal' || effortRaw === 'low'
-        ? 'low'
-        : effortRaw === 'medium'
-          ? 'medium'
-          : 'high'
+  // How this model thinks, as its provider (else models.dev) reports it:
+  // effort levels with no token budget mean adaptive thinking; a budget
+  // means budget thinking. Nothing reported keeps budget thinking.
+  const reasoning = wireCapability({ provider, model: request.model }).reasoning
+  const adaptive = Boolean(reasoning && reasoning.efforts.length > 0 && !reasoning.budget)
+  // The effort offered was the model's own word; it goes out as chosen.
+  const effort = adaptive && effortRaw && effortRaw !== 'on' && reasoning!.efforts.includes(effortRaw) ? effortRaw : undefined
   return {
     adaptive,
-    canDisable: map?.off !== null,
+    canDisable: reasoning?.canDisable !== false,
     effort,
-    reasoningModel: capabilities?.reasoning ?? true,
+    reasoningModel: reasoning?.supported ?? true,
     requested,
     budgetTokens: request.thinking === undefined
       ? undefined
@@ -939,7 +938,7 @@ function parseEvent(data: string): Record<string, unknown> {
   try {
     return asRecord(JSON.parse(data) as unknown)
   } catch (error) {
-    throw new ProviderError('anthropic', `invalid SSE JSON: ${data.slice(0, 200)}`, error)
+    throw new StreamFrameError('anthropic', `invalid SSE JSON: ${data.slice(0, 200)}`, error)
   }
 }
 

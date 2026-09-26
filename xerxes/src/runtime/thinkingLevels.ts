@@ -22,11 +22,15 @@ import { maskPromptLiterals } from './promptLiterals.js'
 
 export type ThinkingLevel = 'think' | 'think_hard' | 'think_harder' | 'ultrathink'
 
+/** Effort words providers publish; the session keeps whichever one was picked. */
+export type GradedEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+const GRADED_EFFORTS: ReadonlySet<string> = new Set<GradedEffort>(['minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
+
 export interface ThinkingDirective {
   /** Token budget requested from providers that accept one. */
   readonly budgetTokens: number
   /** Provider-neutral effort hint for effort-based reasoning APIs. */
-  readonly effort: 'high' | 'low' | 'medium'
+  readonly effort: GradedEffort
   readonly level: ThinkingLevel
   /** The exact keyword that matched, for status surfaces. */
   readonly matchedKeyword: string
@@ -43,7 +47,9 @@ const LEVELS: readonly (ThinkingDirective & { readonly keywords: readonly string
   { budgetTokens: 32_000, effort: 'high', keywords: ['ultrathink'], level: 'ultrathink', matchedKeyword: 'ultrathink' },
   { budgetTokens: 20_000, effort: 'high', keywords: ['think harder'], level: 'think_harder', matchedKeyword: 'think harder' },
   { budgetTokens: 10_000, effort: 'medium', keywords: ['think hard', 'megathink'], level: 'think_hard', matchedKeyword: 'think hard' },
-  { budgetTokens: 4_000, effort: 'medium', keywords: ['think'], level: 'think', matchedKeyword: 'think' },
+  // No bare "think": "I think…" and "what do you think?" are ordinary speech,
+  // and flipping thinking on for one turn and off for the next changed the
+  // request (and, on Anthropic, the replayed thinking blocks) every time.
 ]
 
 /**
@@ -131,8 +137,17 @@ export function resolveTurnThinking(options: {
 }): ThinkingDirective | undefined {
   if (options.ultraMode) return { ...ULTRA_THINKING_DIRECTIVE }
   const keyword = detectThinkingDirective(options.prompt)
-  if (keyword) return keyword
-  const defaults = options.defaults
+  const configured = sessionThinking(options.defaults)
+  // A keyword may only raise the level: "think hard" on a session already at
+  // xhigh used to drop that turn to medium.
+  if (keyword && (!configured || effortRank(keyword.effort) > effortRank(configured.effort))) return keyword
+  return configured
+}
+
+const EFFORT_RANK: Readonly<Record<string, number>> = { minimal: 0, low: 1, medium: 2, high: 3, xhigh: 4, max: 5 }
+const effortRank = (effort: string | undefined) => EFFORT_RANK[effort ?? ''] ?? -1
+
+function sessionThinking(defaults: SessionThinkingDefaults | undefined): ThinkingDirective | undefined {
   if (defaults?.enabled !== true && defaults?.budgetTokens === undefined && !defaults?.effort) return undefined
   if (defaults?.enabled === false) return undefined
   // An explicit off-value effort disables even when a budget is configured;
@@ -144,7 +159,9 @@ export function resolveTurnThinking(options: {
   // rather than an extreme.
   return {
     budgetTokens: defaults.budgetTokens ?? 10_000,
-    effort: configuredEffort === 'high' ? 'high' : configuredEffort === 'low' ? 'low' : 'medium',
+    // The effort picked from the provider's own list travels as picked:
+    // clamping to low/medium/high silently ran `xhigh`/`max` at medium.
+    effort: configuredEffort && GRADED_EFFORTS.has(configuredEffort) ? configuredEffort as GradedEffort : 'medium',
     level: 'think_hard',
     matchedKeyword: 'session default',
   }

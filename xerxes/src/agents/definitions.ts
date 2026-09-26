@@ -657,7 +657,7 @@ function hardcodedBuiltinDefinitions(): ReadonlyMap<string, AgentDefinition> {
     {
       name: 'coder',
       description: 'Specialized coding agent for writing, reading, and modifying code.',
-      systemPrompt: 'You are a specialized coding assistant. Focus on clean, idiomatic, minimal changes.',
+      systemPrompt: 'You are a specialized coding assistant. Make minimal changes that read like the surrounding code: match its naming, idiom, and comment density.',
       model: '',
       tools: [],
       allowedTools: null,

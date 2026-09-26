@@ -15,9 +15,9 @@
  * session-edits tab.
  */
 
-import type { ReactElement } from 'react'
+import { useState, type ReactElement } from 'react'
 
-import { agentState } from './AgentRoster.js'
+import { agentKindLabel, agentState } from './AgentRoster.js'
 import type { DiffFile, SessionRow } from './types.js'
 import { Icon } from './Icon.js'
 
@@ -31,11 +31,13 @@ function byUrgency(a: SessionRow, b: SessionRow): number {
   return agentState(a.status).priority - agentState(b.status).priority
 }
 
-export function RailAgents({ rows, onInspect, onInspectAll }: {
+export function RailAgents({ rows, onInspect }: {
   rows: readonly SessionRow[]
   onInspect: (id: string) => void
-  onInspectAll: () => void
 }): ReactElement | null {
+  // "N more" expands the list in place. It used to navigate to the
+  // Activity tab — the tab this card already sits on — so it did nothing.
+  const [expanded, setExpanded] = useState(false)
   if (rows.length === 0) return null
   const ordered = [...rows].sort(byUrgency)
   // Only the finished tail is ever capped. An agent that is working, stuck
@@ -43,7 +45,7 @@ export function RailAgents({ rows, onInspect, onInspectAll }: {
   // thing hidden behind "N more".
   const live = ordered.filter(row => NEEDS_EYES.has(agentState(row.status).tone))
   const finished = ordered.filter(row => !NEEDS_EYES.has(agentState(row.status).tone))
-  const shown = [...live, ...finished.slice(0, Math.max(0, VISIBLE - live.length))]
+  const shown = expanded ? ordered : [...live, ...finished.slice(0, Math.max(0, VISIBLE - live.length))]
   const failed = ordered.filter(row => agentState(row.status).tone === 'failed').length
   const working = ordered.filter(row => agentState(row.status).tone === 'working').length
   return (
@@ -56,9 +58,10 @@ export function RailAgents({ rows, onInspect, onInspectAll }: {
       </header>
       {shown.map(row => {
         const state = agentState(row.status)
+        const kind = agentKindLabel(row.agentDetails)
         return (
-          <button className="railrow" key={row.id} data-state={state.tone} onClick={() => onInspect(row.id)} title={`Inspect ${row.title}`}>
-            <span className="railrow__name">{row.title}</span>
+          <button className="railrow" key={row.id} data-state={state.tone} onClick={() => onInspect(row.id)} title={`Inspect ${row.title}${kind ? ` (${kind})` : ''}`}>
+            <span className="railrow__name agentname agentname--stack"><span className="agentname__t">{row.title}</span>{kind && <span className="agentname__kind">({kind})</span>}</span>
             {/* Always present, coloured by tone. Omitting it for the happy
                 path left a gap-toothed right edge; the colour is what
                 separates "failed" from "completed", not the presence. */}
@@ -67,8 +70,13 @@ export function RailAgents({ rows, onInspect, onInspectAll }: {
         )
       })}
       {ordered.length > shown.length && (
-        <button className="raillist__more" onClick={onInspectAll}>
+        <button className="raillist__more" aria-expanded={false} onClick={() => setExpanded(true)}>
           {ordered.length - shown.length} more<Icon name="chevron" size={12} />
+        </button>
+      )}
+      {expanded && ordered.length > VISIBLE && (
+        <button className="raillist__more" aria-expanded onClick={() => setExpanded(false)}>
+          Show fewer
         </button>
       )}
     </section>

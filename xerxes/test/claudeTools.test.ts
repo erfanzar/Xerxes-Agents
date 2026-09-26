@@ -114,7 +114,7 @@ test('SkillTool searches beyond the prompt index, bounds listings, and preserves
   const registry = new ToolRegistry()
   const definition = registerClaudeSkillTool(registry, skills)
 
-  expect(definition.function.description).toContain('Discover installed skills')
+  expect(definition.function.description).toContain('Activate an installed skill by exact skill_name')
   expect(definition.function.parameters?.required).toBeUndefined()
 
   const listing = await registry.execute(toolCall('SkillTool', {}), { metadata: {} })

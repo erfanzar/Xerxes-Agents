@@ -9,6 +9,21 @@ import { store } from './store.js'
 import { desktopError } from './desktopRpc.js'
 import { toolFailureText } from './blocks.js'
 
+/**
+ * What an agent runs on, as `profile/model[effort]` — e.g.
+ * `openai/gpt-5[xhigh]`. Only reported facts: a child that sets no effort
+ * runs at the provider's default, so the bracket is omitted rather than
+ * guessed. Empty when the runtime has not reported a model yet.
+ */
+export function agentKindLabel(details: { readonly model?: string; readonly providerProfile?: string; readonly reasoningEffort?: string } | undefined): string {
+  const model = details?.model?.trim() ?? ''
+  if (!model) return ''
+  const profile = details?.providerProfile?.trim() ?? ''
+  const route = profile && !model.startsWith(`${profile}/`) ? `${profile}/${model}` : model
+  const effort = details?.reasoningEffort?.trim() ?? ''
+  return effort ? `${route}[${effort}]` : route
+}
+
 export function agentState(status: string): { label: string; priority: number; tone: string } {
   if (['failed', 'error', 'timeout'].includes(status)) return { label: 'Failed', priority: 2, tone: 'failed' }
   if (['waiting', 'blocked', 'needs_input'].includes(status)) return { label: 'Needs attention', priority: 1, tone: 'waiting' }

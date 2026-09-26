@@ -71,7 +71,7 @@ export const EXEC_COMMAND_DEFINITION: ToolDefinition = {
         timeout_ms: {
           type: 'integer',
           default: DEFAULT_TIMEOUT_MS,
-          description: 'Maximum process runtime in milliseconds.',
+          description: 'Foreground wait before the command is backgrounded (ceiling 120000); it is a kill deadline only where no background host exists.',
         },
         max_output_chars: {
           type: 'integer',

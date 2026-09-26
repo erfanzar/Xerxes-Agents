@@ -29,7 +29,9 @@ export class DaemonProviderRelays {
     private readonly client: RelayClientFactory = (model, profile) => createLlmClient(model, { provider: profile.provider, api_key: profile.api_key, base_url: profile.base_url })) {}
 
   inventory() {
-    return this.profiles.list().map(profile => {
+    // A profile with no model yet (the built-in ones until first chosen) has
+    // nothing to share; list it once a model is picked.
+    return this.profiles.list().filter(profile => profile.model.trim() !== '').map(profile => {
       const provider = relayProvider(profile, profile.model)
       return { name: profile.name, provider: profile.provider, model: profile.model,
       supported: provider !== undefined && provider !== 'claude-code',

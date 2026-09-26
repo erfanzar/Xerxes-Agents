@@ -11,6 +11,10 @@ import { LocalProviderEndpoint } from '../src/security/localProviderEndpoint.js'
 import {localCapabilitySnapshot} from '../src/daemon/localReasoningCapabilities.js'
 import {catalogReasoningLevels} from '../src/llms/reasoningLevels.js'
 import type { CompletionRequest, LlmClient } from '../src/llms/client.js'
+import { seedModelsDev } from './fixtures/modelsDev.js'
+
+// Model capabilities come from models.dev at runtime; tests use its fixture.
+seedModelsDev()
 
 async function until(check: () => boolean | Promise<boolean>) {
   for (let i = 0; i < 500; i++) { if (await check()) return; await Bun.sleep(20) }
@@ -89,7 +93,7 @@ for (const configured of [false, true]) test(`production daemon ${configured ? '
     const mainRequests = received.filter(request => request.querySource === 'main')
     expect(mainRequests.length).toBeGreaterThan(10)
     for (const request of mainRequests) expect(request).toMatchObject({ maxTokens: 4096, temperature: 0.2, topK: 20, topP: 0.8, serviceTier: 'flex', thinking: { effort: 'low', budgetTokens: 128 } })
-    expect(received.find(request => request.messages.at(-1)?.content === 'LOCAL_CHILD_TASK')).toMatchObject({ maxTokens: 4096, temperature: 0.2, topK: 20, topP: 0.8, thinking: { effort: 'low', budgetTokens: 128 } })
+    expect(received.find(request => String(request.messages.at(-1)?.content ?? '').endsWith('LOCAL_CHILD_TASK'))).toMatchObject({ maxTokens: 4096, temperature: 0.2, topK: 20, topP: 0.8, thinking: { effort: 'low', budgetTokens: 128 } })
     expect(await client.request('context_breakdown')).toMatchObject({ context_limit: 0 })
     const saved = await Bun.file(join(home, 'sessions', session.session_id + '.json')).text()
     expect(saved).toContain('Local production child completed.')
@@ -100,7 +104,7 @@ for (const configured of [false, true]) test(`production daemon ${configured ? '
     const explicitBefore = ended
     await client.request('turn.submit', { text: 'Use my explicit off effort.' })
     await until(() => ended > explicitBefore)
-    expect(received.find(request => request.messages.at(-1)?.content === 'Use my explicit off effort.')?.thinking).toEqual({ effort: 'none' })
+    expect(received.find(request => String(request.messages.at(-1)?.content ?? '').endsWith('Use my explicit off effort.'))?.thinking).toEqual({ effort: 'none' })
     expect(await Bun.file(join(home, 'sessions', session.session_id + '.json')).json()).toMatchObject({ metadata: { reasoning_effort: 'off' } })
     const cancelledBefore = ended
     await client.request('turn.submit', { text: 'Wait for cancellation' })

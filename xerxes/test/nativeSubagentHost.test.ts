@@ -771,7 +771,7 @@ test('native subagent generations receive the discovered bounded skill catalog',
     }
     const host = createNativeSubagentHost({
       ...baseOptions,
-      extraContext: firstSkills.markdownIndex(),
+      skills: firstSkills.markdownIndex(),
     })
 
     try {
@@ -785,7 +785,7 @@ test('native subagent generations receive the discovered bounded skill catalog',
 
       host.reconfigure({
         ...baseOptions,
-        extraContext: secondSkills.markdownIndex(),
+        skills: secondSkills.markdownIndex(),
       })
       const second = await host.managerPort.spawn({
         message: 'inspect the refreshed catalog',
@@ -955,11 +955,9 @@ test('a restarted daemon exposes transcript agents as honest terminal snapshots 
     expect(joinedContext).toContain('API hunt')
     expect(joinedContext).toContain('Found a reproducible middleware failure.')
 
-    const systemPrompt = client.requests[0]?.messages
-      .filter(message => message.role === 'system')
-      .map(message => String(message.content))
-      .join('\n') ?? ''
-    expect(systemPrompt).toContain('2 delegated task handle(s) were recovered')
+    // Announced with the turn that found them, not baked into the system prompt.
+    const turnMessage = String(client.requests[0]?.messages.filter(message => message.role === 'user').at(-1)?.content ?? '')
+    expect(turnMessage).toContain('2 delegated task handle(s) were recovered')
     const context = { agentId: 'default', metadata: {}, sessionId: sourceId }
     const listed = JSON.parse(await registry.execute(
       toolCall('TaskListTool', {}),
@@ -2035,7 +2033,7 @@ test('auto-mode native subagents can persist project memory without gaining glob
     }])
     expect(response[0]?.status).toBe('completed')
     expect(response[0]?.last_output).toContain('"ok":true')
-    expect(response[0]?.last_output).toContain('Permission denied for agent_memory_write.')
+    expect(response[0]?.last_output).toContain('Permission denied for agent_memory_write: approval was declined.')
   } finally {
     await host.manager.shutdown()
   }

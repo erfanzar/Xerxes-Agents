@@ -1,7 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { expect, test } from 'bun:test'
+import { afterEach, beforeEach, expect, test } from 'bun:test'
 
 import { AnthropicMessagesClient } from '../src/llms/anthropic.js'
 import { OpenAiCompatibleClient, ResponsesApiClient } from '../src/llms/client.js'
@@ -11,6 +11,7 @@ import {
   responsesDeferredToolsMode,
   splitDeferredTools,
 } from '../src/llms/deferredTools.js'
+import { clearReportedCapabilities, reportModelCapability } from '../src/llms/modelsDev.js'
 import type { ChatMessage } from '../src/types/messages.js'
 import type { ToolDefinition } from '../src/types/toolCalls.js'
 
@@ -89,7 +90,17 @@ test('splitDeferredTools keeps used tools immediate and added-but-unused ones de
   expect(disabled.deferred.size).toBe(0)
 })
 
-test('deferred mode resolution follows the pi-ai catalog and first-party defaults', () => {
+// What each provider reported about its models (Codex's catalog, Kimi's
+// /models); nothing is inferred from a model's name.
+beforeEach(() => {
+  reportModelCapability('openai', 'gpt-5.5', { additionalTools: true })
+  reportModelCapability('openai-codex', 'gpt-5.5', { toolSearch: true })
+  reportModelCapability('kimi', 'kimi-k3', { dynamicTools: true })
+  reportModelCapability('anthropic', 'claude-sonnet-4-6', { toolReferences: true })
+})
+afterEach(() => clearReportedCapabilities())
+
+test('deferred mode resolution follows what the provider reported', () => {
   expect(responsesDeferredToolsMode('openai', 'openai/gpt-5.5')).toBe('additional-tools')
   expect(responsesDeferredToolsMode('openai-codex', 'codex/gpt-5.5')).toBe('tool-search')
   expect(responsesDeferredToolsMode('openai', 'openai/gpt-4o')).toBeUndefined()
@@ -97,7 +108,8 @@ test('deferred mode resolution follows the pi-ai catalog and first-party default
   expect(completionsDeferredToolsMode('openai', 'openai/gpt-4o')).toBeUndefined()
   expect(anthropicSupportsToolReferences('anthropic/claude-sonnet-4-6', 'anthropic')).toBe(true)
   expect(anthropicSupportsToolReferences('anthropic/claude-haiku-4-5-20251001', 'anthropic')).toBe(false)
-  expect(anthropicSupportsToolReferences('anthropic/claude-3-5-sonnet', 'anthropic')).toBe(false)
+  // Reported for one provider says nothing about another serving the same id.
+  expect(anthropicSupportsToolReferences('claude-sonnet-4-6', 'openrouter')).toBe(false)
 })
 
 test('anthropic tool-reference mode defers loaded tools and displaces result content to siblings', async () => {

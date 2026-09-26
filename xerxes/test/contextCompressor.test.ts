@@ -6,8 +6,9 @@ import { expect, test } from 'bun:test'
 import { COMPACTION_REFERENCE_PREFIX, ContextCompressor, SmartTokenCounter, naiveSummarizer } from '../src/context/index.js'
 
 test('provider-aware counter detects models and estimates message capacity', () => {
-  const counter = new SmartTokenCounter({ model: 'gemini-2.5-pro' })
+  const counter = new SmartTokenCounter({ model: 'google/gemini-2.5-pro' })
   expect(counter.provider).toBe('google')
+  expect(new SmartTokenCounter({ model: 'gemini-2.5-pro' }).provider).toBeUndefined()
   expect(counter.countTokens('one two three')).toBeGreaterThan(0)
   expect(counter.countRemainingCapacity('one two', 10)).toBeLessThan(10)
 })

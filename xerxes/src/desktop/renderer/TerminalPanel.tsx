@@ -33,6 +33,14 @@ const LIGHT_ANSI = {
 }
 
 /** The terminal follows the app's own tokens, so it never looks bolted on. */
+/** The chosen terminal font (Settings), else the app's monospace stack. */
+function terminalFont(host: HTMLElement): string {
+  const style = getComputedStyle(host)
+  const mono = style.getPropertyValue('--mono').trim() || 'ui-monospace, SFMono-Regular, Menlo, monospace'
+  const chosen = style.getPropertyValue('--x-terminal-font').trim()
+  return chosen ? `${chosen}, ${mono}` : mono
+}
+
 function terminalTheme(host: HTMLElement): ITheme {
   const style = getComputedStyle(host)
   const token = (name: string, fallback: string): string => style.getPropertyValue(name).trim() || fallback
@@ -141,9 +149,12 @@ function XtermView({ snap, terminalId, visible, onExit }: { snap: Snapshot; term
       allowProposedApi: false,
       convertEol: false,
       cursorBlink: true,
-      fontFamily: getComputedStyle(element).getPropertyValue('--mono').trim() || 'ui-monospace, SFMono-Regular, Menlo, monospace',
+      fontFamily: terminalFont(element),
       fontSize: 12.5,
-      lineHeight: 1.2,
+      // Exactly 1: box-drawing and block glyphs (Claude Code's frame, vim
+      // splits, htop bars) must touch the next row, or every border dashes.
+      lineHeight: 1,
+      letterSpacing: 0,
       scrollback: 5000,
       macOptionIsMeta: true,
       theme: terminalTheme(element),
@@ -206,8 +217,12 @@ function XtermView({ snap, terminalId, visible, onExit }: { snap: Snapshot; term
     requestAnimationFrame(syncSize)
 
     // Follow the app's light/dark switch.
-    const themeWatch = new MutationObserver(() => { xterm.options.theme = terminalTheme(element) })
-    themeWatch.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] })
+    const themeWatch = new MutationObserver(() => {
+      xterm.options.theme = terminalTheme(element)
+      const font = terminalFont(element)
+      if (xterm.options.fontFamily !== font) { xterm.options.fontFamily = font; fitter.fit() }
+    })
+    themeWatch.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme', 'data-palette', 'data-terminal-font'] })
 
     return () => {
       alive = false
@@ -232,5 +247,7 @@ function XtermView({ snap, terminalId, visible, onExit }: { snap: Snapshot; term
     })
   }, [visible])
 
-  return <div className="term__view" hidden={!visible} ref={host} onClick={() => term.current?.focus()} />
+  // xterm opens in an unpadded host: the fit addon sizes rows from its
+  // parent's box, and padding there made it propose a row that got clipped.
+  return <div className="term__view" hidden={!visible} onClick={() => term.current?.focus()}><div className="term__host" ref={host} /></div>
 }

@@ -13,7 +13,10 @@ import type { DiffLine } from './gitDiff.js'
 export interface DiffFileEntry {
   deletions: number
   insertions: number
-  /** Row offset of this file's header within the rendered diff. */
+  /**
+   * Row offset of this file's header within the rendered diff, or -1 for a
+   * file the index lists without a section (an untracked file the diff omits).
+   */
   line: number
   name: string
 }
@@ -83,6 +86,12 @@ export function fileAtRow(files: readonly DiffFileEntry[], row: number): number 
   let found = 0
 
   for (let i = 0; i < files.length; i++) {
+    // A sectionless entry sits above no row; counting its -1 as one would
+    // hand every row to the last untracked file.
+    if (files[i]!.line < 0) {
+      continue
+    }
+
     if (files[i]!.line <= row) {
       found = i
     } else {

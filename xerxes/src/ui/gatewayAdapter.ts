@@ -160,8 +160,23 @@ export function sessionInfoFromInit(payload: Record<string, unknown>): SessionIn
  * in sync. The daemon filters these on the replay path; the live-reattach path
  * (session.open transcripts, session previews) filters them here.
  */
+const HARNESS_ORIGINS = new Set(['goal', 'monitor', 'schedule', 'harness'])
+
+/**
+ * The model-only context block Xerxes puts in front of a prompt. A message
+ * loaded before its display text was recorded still carries it; the user
+ * sees only what they typed.
+ */
+export function withoutTurnContext(text: string): string {
+  return text.replace(/^\s*<turn-context>[\s\S]*?<\/turn-context>\s*/, '')
+}
+
 export function looksLikeInternalUserPrompt(text: string): boolean {
   const head = text.trimStart().slice(0, 64)
+  // Goal-round prompts saved before messages carried their origin.
+  if (/^Goal round \d+\/(?:\d+|unlimited) — /.test(text.trimStart())) {
+    return true
+  }
   if (head.startsWith('[Skill') && head.includes('activated')) {
     return true
   }
@@ -239,7 +254,14 @@ export function transcriptFromStoredMessages(messages: unknown): GatewayTranscri
     const role = str(msg.role).toLowerCase()
     try {
       if (role === 'user') {
-        const text = firstNonEmptyStr(msg.text, textFromContent(msg.content))
+        // A prompt the harness wrote (goal round, monitor, schedule, a
+        // mid-turn reminder) is not something the user said.
+        if (HARNESS_ORIGINS.has(str(msg.origin))) {
+          continue
+        }
+        const raw = withoutTurnContext(firstNonEmptyStr(msg.text, msg.displayText, textFromContent(msg.content)))
+        // The retry prompt saved before its short display text was kept.
+        const text = /^Continue\. Your previous reply was cut off by an error \(/.test(raw) ? 'Continue' : raw
         if (!text.trim() || looksLikeInternalUserPrompt(text)) {
           continue
         }

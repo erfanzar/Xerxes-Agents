@@ -10,9 +10,11 @@ import { inheritedSelectionValidator, profileInventoryHost, profileSelectionVali
 
 test('inherited selection validates alternate models against the captured parent connection', async () => {
   const requests: (string | null)[] = []
+  // The endpoint reports the parent model's effort levels itself — the only
+  // grounds on which an effort outside them may be refused.
   const endpoint = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: request => {
     requests.push(request.headers.get('authorization'))
-    return Response.json({ data: [{ id: 'worker' }] })
+    return Response.json({ data: [{ id: 'worker' }, { id: 'parent', supports_reasoning: true, think_efforts: { support: true, valid_efforts: ['low', 'high'] } }] })
   } })
   try {
     const connection = { provider: 'openai', model: 'parent', apiKey: 'parent-key', baseUrl: `${endpoint.url}v1`, permissionMode: 'accept-all' as const }
@@ -109,7 +111,7 @@ test('standalone agent selections validate models, reasoning, cancellation and p
   const endpoint = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => {
     requests++
     onRequest()
-    return Response.json({ data: [{ id: 'worker' }] })
+    return Response.json({ data: [{ id: 'worker', supports_reasoning: true, think_efforts: { support: true, valid_efforts: ['low', 'high'] } }] })
   } })
   try {
     const profiles = new ProfileStore(join(directory, 'profiles.json'))

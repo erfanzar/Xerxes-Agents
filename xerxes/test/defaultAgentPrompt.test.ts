@@ -53,14 +53,20 @@ test('default agent prompt forbids calculator processes and Python package guida
   expect(prompt).not.toMatch(/install third-party (?:tools|packages)/iu)
 })
 
-test('default agent prompt states parallel-call and blast-radius rules the runtime enforces', async () => {
+test('default agent prompt states the parallel-call rule; acting-safely rules ride in the bootstrap of agents that can act', async () => {
   const prompt = await readFile(promptPath, 'utf8')
 
   expect(prompt).toContain('Issue independent tool calls together in one response so they run in parallel')
   expect(prompt).toContain("when one call's input depends on another's result, call them in separate steps")
-  expect(prompt).toContain('Judge blast radius before acting')
-  expect(prompt).toContain('locally reversible work inside the workspace')
-  expect(prompt).toContain('needs explicit user confirmation first')
+  // It used to promise an approval prompt that the default accept-all mode never shows.
+  expect(prompt).not.toContain('expect an approval prompt')
+  const tool = (name: string) => ({ type: 'function' as const, function: { name, description: '', parameters: { type: 'object', properties: {} } } })
+  const acting = buildBootstrapSystemPrompt({ cwd: '/workspace' }, '', [tool('exec_command')])
+  expect(acting).toContain('# Acting safely')
+  expect(acting).toContain('One approval covers one action')
+  expect(acting).toContain('Most commands run unprompted')
+  // Read-only agents are not told about pushes and deletes.
+  expect(buildBootstrapSystemPrompt({ cwd: '/workspace' }, '', [tool('ReadFile')])).not.toContain('# Acting safely')
 })
 
 test('the live bootstrap prompt ships the same verification mandate as the runtime prefix', () => {

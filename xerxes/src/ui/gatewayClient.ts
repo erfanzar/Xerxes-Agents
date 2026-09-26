@@ -1871,7 +1871,8 @@ export class GatewayClient extends EventEmitter {
         return {
           configured_model: (profile.provider === 'kimi-code' && !/^(kimi|k[0-9])(?:[-./]|$)/i.test(String(profile.model ?? ''))) ? '' : String(profile.model ?? ''),
           is_current: Boolean(currentName && profileName === currentName),
-          name: profileName,
+          // Shown name ("Claude Code"); the slug stays the stored id (`cc`).
+          name: String(profile.label ?? '').trim() || profileName,
           provider_type: String(profile.provider ?? ''),
           slug: profileName
         }
@@ -1900,7 +1901,10 @@ export class GatewayClient extends EventEmitter {
               ? { max_output_tokens: entry.max_output_tokens }
               : {}),
             ...(entry.output_source ? { output_source: String(entry.output_source) } : {}),
-            ...(entry.overridden === true ? { overridden: true } : {})
+            ...(entry.overridden === true ? { overridden: true } : {}),
+            // How the provider itself names the model (Claude Code: "Opus (1M context)").
+            ...(typeof entry.display_name === 'string' && entry.display_name.trim() ? { display_name: entry.display_name.trim() } : {}),
+            ...(typeof entry.description === 'string' && entry.description.trim() ? { description: entry.description.trim() } : {})
           }))
           .filter(entry => Boolean(entry.id))
       : []

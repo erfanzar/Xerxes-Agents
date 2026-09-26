@@ -32,7 +32,7 @@ import {
   type ObjectiveToolExecutionEvidence,
 } from '../runtime/objectiveGuard.js'
 import { getGoal } from '../runtime/goalDomain.js'
-import type { ChatMessage, MessageContent } from '../types/messages.js'
+import type { ChatMessage, MessageContent, HarnessOrigin } from '../types/messages.js'
 import { setTurnOutcome } from '../types/turnOutcome.js'
 import { isJsonObject, type ToolCall, type ToolDefinition } from '../types/toolCalls.js'
 import { appendInjection } from './attachments.js'
@@ -46,6 +46,7 @@ import type {
 import {
   DEFAULT_PERMISSION_MODE,
   deniedResult,
+  type DenialSource,
   permissionDisposition,
   permissionDescription,
   type PermissionBroker,
@@ -136,6 +137,8 @@ type ToolDecision =
     readonly detail?: string
     readonly kind: 'denied'
     readonly reason: 'permission_rejected' | 'policy_denied'
+    /** A configured hook refused it (a policy denial for budgeting purposes). */
+    readonly hook?: boolean
   }
 
 /**
@@ -264,6 +267,15 @@ export interface TurnRequest {
   readonly tools?: readonly ToolDefinition[]
   /** Plain text, or a structured part list when the turn carries image attachments. */
   readonly userMessage: MessageContent
+  /**
+   * What the transcript shows for this prompt when it differs from the
+   * provider text (the turn context rides in front of it). Recorded as the
+   * message is appended, so a client that loads history mid-turn never sees
+   * the provider form.
+   */
+  readonly userDisplayText?: string
+  /** Author of a prompt the human did not type; clients hide these. */
+  readonly userOrigin?: HarnessOrigin
 }
 
 export interface TurnDependencies {
@@ -288,6 +300,17 @@ export interface TurnDependencies {
   /** Optional plugin hook dispatch surface; when absent the turn dispatches no hooks. */
   readonly hookRunner?: HookRunner
   readonly llm: LlmClient
+  /**
+   * Build a client from the latest provider settings and login (the active
+   * profile, re-read). When a request fails because the plan or balance is
+   * used up, the loop compares this client's credential with the one that
+   * failed and retries once as the new account or key — for any provider,
+   * whether the change came from an account switcher, a fresh login or an
+   * edited API key.
+   */
+  readonly refreshLlm?: () => LlmClient | undefined
+  /** How long a used-up plan waits for such a credential change (default 8s). */
+  readonly credentialSwitchWaitMs?: number
   /** Monotonic millisecond clock for provider telemetry; Date.now by default. */
   readonly now?: () => number
   /**
@@ -387,7 +410,12 @@ export async function* runTurn(
     metadata: state.metadata,
   }
   if (!request.systemPromptRequestOnly) ensureSystemPrompt(state.messages, request.systemPrompt)
-  state.messages.push({ role: 'user', content: request.userMessage })
+  state.messages.push({
+    role: 'user',
+    content: request.userMessage,
+    ...(request.userDisplayText === undefined ? {} : { displayText: request.userDisplayText }),
+    ...(request.userOrigin === undefined ? {} : { origin: request.userOrigin }),
+  })
   state.metadata.model = request.model
   state.turnCount += 1
   await dispatchHook(hookRunner, 'on_turn_start', {
@@ -466,6 +494,9 @@ export async function* runTurn(
   let stopReason: TurnStopReason = signal?.aborted ? 'aborted' : 'tool_budget_exhausted'
   /** One-shot per turn: a reducer that already ran cannot free the same tokens twice. */
   let contextReductionAttempted = false
+  // The client in use; swapped when a used-up account is replaced mid-turn.
+  let llm = dependencies.llm
+  let credentialSwitchAttempted = false
   let outputLimitEscalations = 0
   let outputTokenOverride: number | undefined
   // A terminally interrupted attempt still owns the output already shown to
@@ -539,10 +570,14 @@ export async function* runTurn(
         finishReason = undefined
         textDeduper = new ToolRoundTextDeduper(latestToolRoundText)
         const attemptSignal = linkAttemptSignal(signal)
+        let attemptCredential: string | undefined
         let recordUsage: ReturnType<typeof chargeModelCall>
         let attemptCompleted = false
         try {
           attemptSignal.controller.signal.throwIfAborted()
+          if (dependencies.refreshLlm && !credentialSwitchAttempted) {
+            attemptCredential = await llm.authFingerprint?.(attemptSignal.controller.signal).catch(() => undefined)
+          }
           recordUsage = chargeModelCall()
           apiCallsCount += 1
           roundStartedAt = now()
@@ -553,7 +588,7 @@ export async function* runTurn(
           let awaitingOutput = true
           try {
             for await (const delta of watchProviderStream(
-              dependencies.llm.stream(
+              llm.stream(
                 completionRequest(
                   request,
                   state.messages,
@@ -671,6 +706,39 @@ export async function* runTurn(
               continue
             }
           }
+          // A used-up plan is not fixed by waiting seconds — but it may already
+          // have been fixed elsewhere: an account switcher moved to another
+          // account, the user signed in again, or edited the key. Give that a
+          // brief window, then retry exactly once as the new credential.
+          if (
+            classified.kind === ErrorKind.QUOTA_EXCEEDED
+            && !credentialSwitchAttempted
+            && dependencies.refreshLlm !== undefined
+            && attemptCredential !== undefined
+            && signal?.aborted !== true
+          ) {
+            credentialSwitchAttempted = true
+            const replacement = await awaitCredentialSwitch(
+              attemptCredential,
+              dependencies.refreshLlm,
+              dependencies.credentialSwitchWaitMs ?? 8_000,
+              dependencies.delay ?? defaultDelay,
+              signal,
+            )
+            if (replacement) {
+              llm = replacement
+              yield {
+                type: 'provider_retry',
+                error: `${errorMessage(error)} — retrying with the newly selected account or key`,
+                attempt: attempt + 1,
+                maxAttempts: retryDelays.length + 1,
+                delay: 0,
+                final: false,
+              }
+              attempt -= 1
+              continue
+            }
+          }
           // Only transient failures earn another attempt. Auth, validation,
           // configuration, and other terminal errors fail the round at once.
           const networkRetry = isRecoverableNetworkError(error)
@@ -770,7 +838,10 @@ export async function* runTurn(
           && measuredTokensPerSecond <= MAX_THROUGHPUT_TOKENS_PER_SECOND
           ? measuredTokensPerSecond
           : undefined
-        const cacheInput = lastUsage.inputTokens + (lastUsage.cacheReadTokens ?? 0)
+        // Every prompt token is fresh, read from cache, or written to it; a
+        // rate over the first two alone reads 100% on a step that rewrote the
+        // whole prefix (Anthropic reports writes apart from input_tokens).
+        const cacheInput = lastUsage.inputTokens + (lastUsage.cacheReadTokens ?? 0) + (lastUsage.cacheCreationTokens ?? 0)
         yield {
           type: 'usage_update',
           model: request.model,
@@ -885,7 +956,7 @@ export async function* runTurn(
           outputTokenOverride = OUTPUT_LIMIT_RETRY_MAX_TOKENS
           continue
         }
-        state.messages.push({ role: 'user', content: OUTPUT_LIMIT_RESUME_REMINDER })
+        state.messages.push({ role: 'user', content: OUTPUT_LIMIT_RESUME_REMINDER, origin: 'harness' })
         yield { type: 'text', text: '\n[Output limit reached. Resuming.]' }
         continue
       }
@@ -990,7 +1061,7 @@ export async function* runTurn(
           stopReason = 'objective_guard_exhausted'
           break
         }
-        state.messages.push({ role: 'user', content: objectiveDecision.reminder })
+        state.messages.push({ role: 'user', content: objectiveDecision.reminder, origin: 'harness' })
         yield {
           type: 'text',
           text:
@@ -1062,6 +1133,7 @@ export async function* runTurn(
             decisions.push({
               call,
               detail: extensionPermission.reason,
+              hook: true,
               kind: 'denied',
               reason: 'policy_denied',
             })
@@ -1167,13 +1239,8 @@ export async function* runTurn(
           }
           if (decision.kind === 'denied') {
             denialBudget.record(decision.reason, decision.call.function.name)
-            const denied = deniedToolResult(decision.call)
-            const result = await recordToolResult(
-              decision.detail === undefined
-                ? denied
-                : { ...denied, result: `${denied.result} ${decision.detail}` },
-              decision.call,
-            )
+            const source = decision.hook ? 'hook' : decision.reason === 'permission_rejected' ? 'user' : 'policy'
+            const result = await recordToolResult(deniedToolResult(decision.call, source, decision.detail), decision.call)
             yield { type: 'tool_end', result }
             continue
           }
@@ -1717,10 +1784,10 @@ function appendToolResult(
   // themselves on metadata would write every tool result into the session file.
 }
 
-function deniedToolResult(call: ToolCall): ToolResult {
+function deniedToolResult(call: ToolCall, source: DenialSource, detail?: string): ToolResult {
   return {
     name: call.function.name,
-    result: deniedResult(call),
+    result: deniedResult(call, source, detail),
     permitted: false,
     toolCallId: call.id,
     durationMs: 0,
@@ -1772,6 +1839,31 @@ function isAbortLikeError(error: unknown): boolean {
   return error.name === 'AbortError'
     || error.name === 'InterruptedError'
     || error.name === 'InterruptRequestedError'
+}
+
+/**
+ * Poll the latest provider settings for a credential other than the one that
+ * just ran out, for up to `waitMs`. Returns a client that would send the new
+ * credential, or undefined when nothing changed (or the turn was cancelled).
+ */
+async function awaitCredentialSwitch(
+  failed: string,
+  refreshLlm: () => LlmClient | undefined,
+  waitMs: number,
+  delay: (milliseconds: number, signal?: AbortSignal) => Promise<void>,
+  signal?: AbortSignal,
+): Promise<LlmClient | undefined> {
+  const deadline = Date.now() + waitMs
+  for (;;) {
+    if (signal?.aborted) return undefined
+    let candidate: LlmClient | undefined
+    try { candidate = refreshLlm() } catch { candidate = undefined }
+    const identity = await candidate?.authFingerprint?.(signal).catch(() => undefined)
+    if (candidate && identity && identity !== failed) return candidate
+    await candidate?.close?.()
+    if (Date.now() >= deadline) return undefined
+    try { await delay(Math.min(500, Math.max(0, deadline - Date.now())), signal) } catch { return undefined }
+  }
 }
 
 function defaultDelay(

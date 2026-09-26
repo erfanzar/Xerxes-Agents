@@ -5,6 +5,8 @@ import { describe, expect, test } from "bun:test";
 
 import {
   assembleContextLayers,
+  assembleTurnContext,
+  renderTurnContext,
   layerDigests,
   MAX_ASSEMBLY_PROVENANCE_ENTRIES,
   readAssemblyProvenance,
@@ -16,17 +18,15 @@ const fullInput = {
   addendum: "operator note",
   agentPrompt: "You are a coding agent.",
   bootstrap: "Workspace prelude",
-  contextDeltas: "reasoning: high",
-  memoryRecall: "user prefers bun",
+  memory: "user prefers bun",
   modeHint: "[Mode: plan]",
-  recoveredSubagents: "1 delegated task handle(s) were recovered",
   selfMemory: "I previously fixed the gateway",
   subagentJoin: "Background subagents are joined before the parent turn ends.",
   toolGuidance: "[Tool usage: WriteFile]\nread before write.",
 };
 
 describe("context assembly", () => {
-  test("assembles every named layer in stable-then-volatile order", () => {
+  test("assembles every system layer in order, none of them per-turn", () => {
     const layers = assembleContextLayers(fullInput);
     expect(layers.map(layer => layer.name)).toEqual([
       "bootstrap",
@@ -34,18 +34,30 @@ describe("context assembly", () => {
       "tool_guidance",
       "mode_hint",
       "subagent_join",
-      "recovered_subagents",
       "memory",
       "self_memory",
-      "context_deltas",
       "addendum",
     ]);
-    for (const layer of layers.slice(0, 5)) {
-      expect(layer.volatile).toBeUndefined();
-    }
-    for (const layer of layers.slice(5)) {
-      expect(layer.volatile).toBe(true);
-    }
+    // Nothing in the system prompt may change between turns of a session.
+    for (const layer of layers) expect(layer.volatile).toBeUndefined();
+  });
+
+  test("per-turn changes form a labelled turn context, and nothing when nothing changed", () => {
+    expect(renderTurnContext(assembleTurnContext({ contextDeltas: "", memoryChanges: " ", recoveredSubagents: "" }))).toBe("");
+    const segments = assembleTurnContext({
+      contextDeltas: "reasoning: high",
+      instructionUpdates: "AGENTS.md changed",
+      memoryChanges: "## Memory written since this conversation began",
+      recoveredSubagents: "1 delegated task handle(s) were recovered",
+      selfMemoryChanges: "",
+    });
+    expect(segments.map(segment => segment.name)).toEqual(["recovered_subagents", "instruction_updates", "context_deltas", "memory_changes"]);
+    const text = renderTurnContext(segments);
+    expect(text.startsWith("<turn-context>\nXerxes attached this")).toBe(true);
+    expect(text.endsWith("</turn-context>")).toBe(true);
+    expect(text).toContain("reasoning: high");
+    // Byte-stable for identical input: it is persisted and replayed.
+    expect(renderTurnContext(assembleTurnContext({ contextDeltas: "reasoning: high", instructionUpdates: "AGENTS.md changed", memoryChanges: "## Memory written since this conversation began", recoveredSubagents: "1 delegated task handle(s) were recovered" }))).toBe(text);
   });
 
   test("identical inputs assemble byte-identically (cache-parity contract)", () => {
@@ -62,10 +74,8 @@ describe("context assembly", () => {
       addendum: "",
       agentPrompt: "",
       bootstrap: "prelude",
-      contextDeltas: "",
-      memoryRecall: "recall",
+      memory: "recall",
       modeHint: "",
-      recoveredSubagents: "",
       selfMemory: "",
       subagentJoin: "",
       toolGuidance: "",
@@ -87,7 +97,7 @@ describe("context assembly", () => {
       modeHint: "",
       subagentJoin: "",
       toolGuidance: "",
-      memoryRecall: "",
+      memory: "",
     });
     expect(absent).toEqual(empty);
   });
@@ -101,7 +111,7 @@ describe("context assembly", () => {
     expect(again).toEqual(digests);
 
     // Only the changed layer moves; its neighbors keep their digests.
-    const moved = layerDigests(assembleContextLayers({ ...fullInput, memoryRecall: "different recall" }));
+    const moved = layerDigests(assembleContextLayers({ ...fullInput, memory: "different recall" }));
     const byName = new Map(moved.map(digest => [digest.name, digest.hash]));
     const before = new Map(digests.map(digest => [digest.name, digest.hash]));
     expect(byName.get("memory")).not.toBe(before.get("memory"));
@@ -116,7 +126,7 @@ describe("context assembly", () => {
   test("provenance records persist per turn in a bounded ring", () => {
     const metadata: Record<string, unknown> = {};
     for (let index = 0; index < MAX_ASSEMBLY_PROVENANCE_ENTRIES + 5; index += 1) {
-      const layers = assembleContextLayers({ ...fullInput, memoryRecall: `recall-${index}` });
+      const layers = assembleContextLayers({ ...fullInput, memory: `recall-${index}` });
       recordAssemblyProvenance(metadata, {
         layers: layerDigests(layers),
         ...(index % 2 === 0 ? { turnId: `turn-${index}` } : {}),

@@ -17,14 +17,12 @@ import { messageText } from '../types/messages.js'
 import { parseToolArguments, type ToolCall, type ToolDefinition } from '../types/toolCalls.js'
 import type { CompletionRequest, FetchImplementation, LlmClient, LlmCompletion, LlmDelta, TokenUsage } from './client.js'
 import { internalSseData } from './client.js'
-import type { PiModelCapabilities } from './piModelCatalog.js'
-import { piCatalogModelCapabilities } from './piModelCatalog.js'
+import { wireCapability } from './modelsDev.js'
 import { bareModel } from './providerRegistry.js'
+import { credentialFingerprint } from './credentialFingerprint.js'
 
 const MISTRAL_TOOL_CALL_ID_LENGTH = 9
 const MAX_ERROR_BODY_CHARS = 4_000
-/** Models that take reasoning strength through `reasoning_effort` (pi-ai usesReasoningEffort). */
-const REASONING_EFFORT_MODELS = new Set(['mistral-small-2603', 'mistral-small-latest', 'mistral-medium-3.5'])
 
 export interface MistralClientOptions {
   readonly apiKey?: string
@@ -218,7 +216,8 @@ export function mistralPayload(
   options: { promptCaching: boolean },
 ): Record<string, unknown> {
   const modelId = bareModel(request.model)
-  const capabilities: PiModelCapabilities | undefined = piCatalogModelCapabilities(modelId, 'mistral')
+  // How this model reasons, as models.dev (or a provider report) states it.
+  const reasoningCapability = wireCapability({ provider: 'mistral', model: modelId }).reasoning
   const normalizeToolCallId = createMistralToolCallIdNormalizer()
   const payload: Record<string, unknown> = {
     model: modelId,
@@ -236,10 +235,11 @@ export function mistralPayload(
   const reasoning = request.thinking?.effort !== undefined && request.thinking.effort !== 'off'
     ? request.thinking.effort
     : undefined
-  if (reasoning && capabilities?.reasoning !== false) {
-    if (REASONING_EFFORT_MODELS.has(modelId)) {
-      const mapped = capabilities?.thinkingLevelMap?.[reasoning]
-      payload.reasoning_effort = typeof mapped === 'string' && mapped ? mapped : 'high'
+  if (reasoning && reasoningCapability?.supported !== false) {
+    // A model with reported effort levels takes `reasoning_effort` (the
+    // chosen level is its own word); other reasoning models, `prompt_mode`.
+    if (reasoningCapability && reasoningCapability.efforts.length > 0) {
+      payload.reasoning_effort = reasoningCapability.efforts.includes(reasoning) ? reasoning : reasoningCapability.efforts.at(-1)!
     } else {
       payload.prompt_mode = 'reasoning'
     }
@@ -334,6 +334,11 @@ function contentDeltaText(item: unknown): { thinking?: string; text?: string } {
 }
 
 export class MistralClient implements LlmClient {
+  /** Identity of the configured key (see credentialFingerprint). */
+  async authFingerprint(): Promise<string | undefined> {
+    return this.apiKey ? credentialFingerprint({ authorization: `Bearer ${this.apiKey}` }) : undefined
+  }
+
   private readonly apiKey: string
   private readonly baseUrl: string
   private readonly fetchImplementation: FetchImplementation

@@ -1,12 +1,15 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { expect, test } from 'bun:test'
+import { afterEach, expect, test } from 'bun:test'
 
 import { ProviderError } from '../src/core/errors.js'
 import { MistralClient, createMistralToolCallIdNormalizer, mistralMessages, mistralPayload } from '../src/llms/mistral.js'
 import type { CompletionRequest } from '../src/llms/client.js'
+import { clearReportedCapabilities, reportModelCapability } from '../src/llms/modelsDev.js'
 import { detectProvider } from '../src/llms/providerRegistry.js'
+
+afterEach(() => clearReportedCapabilities())
 
 const normalize = createMistralToolCallIdNormalizer()
 
@@ -84,7 +87,8 @@ test('mistralPayload maps sampling, reasoning mode, and cache routing per model'
     topP: 0.9,
   }
 
-  // mistral-small-latest takes reasoning_effort (pi-ai usesReasoningEffort).
+  // A model reported with effort levels takes reasoning_effort.
+  reportModelCapability('mistral', 'mistral-small-latest', { reasoning: { supported: true, canDisable: true, efforts: ['high'] } })
   const effortPayload = mistralPayload(base, { promptCaching: true })
   expect(effortPayload.model).toBe('mistral-small-latest')
   expect(effortPayload.stream).toBe(true)
@@ -99,7 +103,7 @@ test('mistralPayload maps sampling, reasoning mode, and cache routing per model'
     function: { name: 'deploy', description: 'd', parameters: { type: 'object', properties: {} }, strict: false },
   }])
 
-  // Every other reasoning model takes prompt_mode: "reasoning".
+  // A reasoning model without reported levels takes prompt_mode: "reasoning".
   const magistral = mistralPayload({ ...base, model: 'mistral/magistral-medium-latest' }, { promptCaching: true })
   expect(magistral.prompt_mode).toBe('reasoning')
   expect(magistral.reasoning_effort).toBeUndefined()
@@ -210,7 +214,6 @@ test('finish reasons map and unknown reasons are fatal', async () => {
 
 test('model routing recognizes mistral families', () => {
   expect(detectProvider('mistral/mistral-small-latest')).toBe('mistral')
-  expect(detectProvider('codestral-latest')).toBe('mistral')
-  expect(detectProvider('pixtral-large-latest')).toBe('mistral')
-  expect(detectProvider('open-mixtral-8x22b')).toBe('mistral')
+  // A bare name is not guessed from its spelling.
+  expect(detectProvider('codestral-latest')).toBe('openai')
 })

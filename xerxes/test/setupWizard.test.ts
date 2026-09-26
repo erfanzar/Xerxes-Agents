@@ -15,12 +15,14 @@ import {
 test('setup wizard applies defaults, preserves supplied answers, and records skipped optional values', () => {
   const result = runSetupWizard({ provider: 'openai', api_key: '' })
 
+  // No built-in model: an unanswered model is skipped for the setup command
+  // to fill from the provider's own list.
   expect(result.answers).toMatchObject({
     provider: 'openai',
-    model: 'claude-opus-4-6',
     permission_mode: 'accept-all',
   })
-  expect(result.skipped).toEqual(['api_key'])
+  expect(result.answers).not.toHaveProperty('model')
+  expect(result.skipped).toEqual(['model', 'api_key'])
   expect(Object.isFrozen(result.answers)).toBe(true)
 })
 

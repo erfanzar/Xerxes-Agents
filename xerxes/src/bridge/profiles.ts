@@ -6,16 +6,20 @@ import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync }
 import { dirname, join } from 'node:path'
 
 import { xerxesHome } from '../daemon/paths.js'
-import { piCatalogModelCapabilities } from '../llms/piModelCatalog.js'
+import { modelsDev, type LiveCost, type LiveReasoning } from '../llms/modelsDev.js'
 
 export const CLAUDE_CODE_PROFILE_NAME = 'cc'
-export const CLAUDE_CODE_DEFAULT_MODEL = 'claude-code/default'
+
+/**
+ * What people see for a profile. The id stays as stored (`cc` is in saved
+ * sessions and `/provider cc`); only the built-in Claude Code profile has a
+ * friendlier name.
+ */
+export function profileLabel(name: string): string {
+  return name === CLAUDE_CODE_PROFILE_NAME ? 'Claude Code' : name
+}
 
 export const CODEX_PROFILE_NAME = 'codex'
-// The plan's newest model. Xerxes uses the ChatGPT subscription as an
-// entitlement and runs its own agent loop, so every model the catalog returns
-// is selectable; this is only the starting point.
-export const CODEX_DEFAULT_MODEL = 'codex/gpt-5.6-sol'
 export const CODEX_PROFILE_BASE_URL = 'https://chatgpt.com/backend-api/codex'
 
 export const SAMPLING_PARAMS = new Set([
@@ -28,6 +32,17 @@ export interface ProviderModelCapabilities {
   readonly context_limit?: number
   /** Provider-reported maximum output tokens. */
   readonly max_output_tokens?: number
+  /** The provider's own name for the model. */
+  readonly display_name?: string
+  /** How the provider says the model reasons (see `LiveReasoning`). */
+  readonly reasoning?: {
+    readonly supported: boolean
+    readonly can_disable: boolean
+    readonly efforts: readonly string[]
+    readonly default_effort?: string
+  }
+  /** Provider-published prices, USD per million tokens. */
+  readonly cost?: { readonly input?: number; readonly output?: number; readonly cache_read?: number; readonly cache_write?: number }
 }
 
 export interface ProviderModelOverride {
@@ -186,11 +201,17 @@ export class ProfileStore {
       if (!id || id.length > 512) continue
       const contextLimit = positiveInteger(value.context_limit)
       const maxOutputTokens = positiveInteger(value.max_output_tokens)
+      const displayName = typeof value.display_name === 'string' && value.display_name.trim() ? value.display_name.trim() : undefined
+      const reasoning = storedReasoning(value.reasoning)
+      const cost = storedCost(value.cost)
       const declaredCapability = value.context_limit !== undefined || value.max_output_tokens !== undefined
-      if (declaredCapability && contextLimit === undefined && maxOutputTokens === undefined) continue
+      if (declaredCapability && contextLimit === undefined && maxOutputTokens === undefined && !displayName && !reasoning && !cost) continue
       modelCapabilities[id] = {
         ...(contextLimit === undefined ? {} : { context_limit: contextLimit }),
         ...(maxOutputTokens === undefined ? {} : { max_output_tokens: maxOutputTokens }),
+        ...(displayName ? { display_name: displayName } : {}),
+        ...(reasoning ? { reasoning } : {}),
+        ...(cost ? { cost } : {}),
       }
     }
     const updated = { ...profile, model_capabilities: modelCapabilities }
@@ -244,6 +265,16 @@ export class ProfileStore {
     return true
   }
 
+  /**
+   * Whether someone chose the active profile. On a fresh install nothing is
+   * saved and the built-in Claude Code profile is active only as a fallback —
+   * which must not quietly start spending a Claude plan.
+   */
+  activeIsExplicit(): boolean {
+    const document = this.load()
+    return Boolean(document.active && Object.hasOwn(this.merged(document), document.active))
+  }
+
   private activeName(document: ProfilesDocument, profiles: Record<string, ProviderProfile>): string {
     return document.active && Object.hasOwn(profiles, document.active) ? document.active : CLAUDE_CODE_PROFILE_NAME
   }
@@ -254,7 +285,9 @@ export class ProfileStore {
       name: CLAUDE_CODE_PROFILE_NAME,
       base_url: 'claude-code://local',
       api_key: '',
-      model: CLAUDE_CODE_DEFAULT_MODEL,
+      // No built-in model: the first one Claude Code reports is taken when
+      // the profile is chosen (see selectProvider).
+      model: '',
       model_capabilities: {},
       provider: 'claude-code',
       sampling: {},
@@ -267,7 +300,9 @@ export class ProfileStore {
       name: CODEX_PROFILE_NAME,
       base_url: CODEX_PROFILE_BASE_URL,
       api_key: '',
-      model: CODEX_DEFAULT_MODEL,
+      // No built-in model: the first one the plan's Codex catalog lists is
+      // taken when the profile is chosen.
+      model: '',
       model_capabilities: {},
       provider: 'openai-codex',
       sampling: {},
@@ -340,6 +375,44 @@ export class ProfileStore {
   }
 }
 
+function storedReasoning(value: unknown): ProviderModelCapabilities['reasoning'] {
+  if (!isRecord(value) || typeof value.supported !== 'boolean') return undefined
+  const efforts = Array.isArray(value.efforts) ? value.efforts.filter((effort): effort is string => typeof effort === 'string' && effort.trim() !== '') : []
+  const defaultEffort = typeof value.default_effort === 'string' && efforts.includes(value.default_effort) ? value.default_effort : undefined
+  return { supported: value.supported, can_disable: value.can_disable === true, efforts, ...(defaultEffort ? { default_effort: defaultEffort } : {}) }
+}
+
+function storedCost(value: unknown): ProviderModelCapabilities['cost'] {
+  if (!isRecord(value)) return undefined
+  const price = (field: unknown) => typeof field === 'number' && Number.isFinite(field) && field >= 0 ? field : undefined
+  const cost = {
+    ...(price(value.input) === undefined ? {} : { input: price(value.input)! }),
+    ...(price(value.output) === undefined ? {} : { output: price(value.output)! }),
+    ...(price(value.cache_read) === undefined ? {} : { cache_read: price(value.cache_read)! }),
+    ...(price(value.cache_write) === undefined ? {} : { cache_write: price(value.cache_write)! }),
+  }
+  return Object.keys(cost).length ? cost : undefined
+}
+
+/** A model's provider-reported reasoning, as stored on its profile. */
+/** The prices the provider reported for a model, as the request builders read them. */
+export function reportedModelCost(profile: ProviderProfile | undefined, model: string): LiveCost | undefined {
+  const stored = modelRecord(profile?.model_capabilities, model)?.cost
+  if (!stored) return undefined
+  const cost: LiveCost = {
+    ...(stored.input === undefined ? {} : { input: stored.input }),
+    ...(stored.output === undefined ? {} : { output: stored.output }),
+    ...(stored.cache_read === undefined ? {} : { cacheRead: stored.cache_read }),
+    ...(stored.cache_write === undefined ? {} : { cacheWrite: stored.cache_write }),
+  }
+  return Object.keys(cost).length ? cost : undefined
+}
+
+export function reportedModelReasoning(profile: ProviderProfile | undefined, model: string): LiveReasoning | undefined {
+  const stored = modelRecord(profile?.model_capabilities, model)?.reasoning
+  return stored ? { supported: stored.supported, canDisable: stored.can_disable, efforts: stored.efforts, ...(stored.default_effort ? { defaultEffort: stored.default_effort } : {}) } : undefined
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
@@ -360,13 +433,18 @@ function providerProfile(value: unknown): ProviderProfile | undefined {
       if (!id || id.length > 512) continue
       const contextLimit = positiveInteger(raw.context_limit)
       const maxOutputTokens = positiveInteger(raw.max_output_tokens)
-      const declaredCapability = raw.context_limit !== undefined || raw.max_output_tokens !== undefined
-      if ((declaredCapability || Object.keys(raw).length > 0)
-        && contextLimit === undefined
-        && maxOutputTokens === undefined) continue
+      const displayName = typeof raw.display_name === 'string' && raw.display_name.trim() ? raw.display_name.trim() : undefined
+      const reasoning = storedReasoning(raw.reasoning)
+      const cost = storedCost(raw.cost)
+      // `{}` means "the provider listed this id" and is kept; an entry that
+      // had fields but none of them valid is dropped.
+      if (Object.keys(raw).length > 0 && contextLimit === undefined && maxOutputTokens === undefined && !displayName && !reasoning && !cost) continue
       modelCapabilities[id] = {
         ...(contextLimit === undefined ? {} : { context_limit: contextLimit }),
         ...(maxOutputTokens === undefined ? {} : { max_output_tokens: maxOutputTokens }),
+        ...(displayName ? { display_name: displayName } : {}),
+        ...(reasoning ? { reasoning } : {}),
+        ...(cost ? { cost } : {}),
       }
     }
   }
@@ -453,7 +531,8 @@ export function resolvedProfileModelCapabilities(
 ): ResolvedModelCapabilities {
   const override = modelRecord(profile?.model_overrides, model)
   const cached = modelRecord(profile?.model_capabilities, model)
-  const catalog = piCatalogModelCapabilities(model, profile?.provider ?? '')
+  // Nothing reported by the provider: what models.dev says (Kimi Code's approach).
+  const catalog = modelsDev.find({ model, ...(profile?.provider ? { provider: profile.provider } : {}), ...(profile?.base_url ? { baseUrl: profile.base_url } : {}) })
   const contextLimit = override?.context_limit ?? cached?.context_limit ?? catalog?.contextLimit
   const maxOutputTokens = override?.max_output_tokens ?? cached?.max_output_tokens ?? catalog?.maxOutputTokens
   return {

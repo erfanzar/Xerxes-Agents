@@ -4,7 +4,7 @@ import { unknownProfileQuota, type ProfileQuota } from '../auth/profileUsage.js'
 export interface InventoryProfile { name: string; provider: string; model: string; active: boolean }
 /** Suggest exact host-owned names without remapping a requested credential source. */
 export function unavailableAgentProfile(name: string, model: string, profiles: readonly Pick<InventoryProfile, 'name' | 'provider' | 'model'>[]): Error {
-  const matches = profiles.filter(profile => profile.provider !== 'claude-code' && profile.model === model).slice(0, 8)
+  const matches = profiles.filter(profile => profile.model === model).slice(0, 8)
   const hint = matches.length ? ` Configured profiles for this model on the execution host: ${matches.map(profile => JSON.stringify(profile.name)).join(', ')}.` : ''
   return new Error(`Agent provider profile unavailable: ${JSON.stringify(name)}.${hint} Use list_available_models with provider_profile omitted to discover this session's choices, then retry with the exact provider_profile and model. No fallback provider was selected.`)
 }
@@ -49,14 +49,14 @@ export async function modelInventory(port: ModelInventoryPort, params: Record<st
     entries = [...new Map(catalog.models.map(model => [model.id, model])).values()].filter(model => model.id.toLowerCase().includes(query)).sort((a,b) => a.id.localeCompare(b.id)).map(model => ({
       provider_profile: profile.name, provider: profile.provider, model: model.id,
       ...guidance(profile.name, model.id),
-      spawn_supported: profile.provider !== 'claude-code',
+      spawn_supported: true,
       context_window: model.context_limit ?? null, max_output_tokens: model.max_output_tokens ?? null,
       context_source: model.context_source ?? 'unknown', output_source: model.output_source ?? 'unknown',
     }))
   } else entries = profiles.filter(profile => `${profile.name} ${profile.provider} ${profile.model}`.toLowerCase().includes(query)).map(profile => ({
     provider_profile: profile.name, provider: profile.provider, configured_model: profile.model, active: profile.active,
     ...guidance(profile.name),
-    spawn_supported: profile.provider !== 'claude-code',
+    spawn_supported: true,
   }))
   // Resolve capability metadata before hashing the catalog. Otherwise a model's
   // effort ladder can change while a caller continues with an old page token.
@@ -84,7 +84,7 @@ export async function modelInventory(port: ModelInventoryPort, params: Record<st
     observed_at: observedAt, source, ...(warning ? { warning } : {}), revision, total: entries.length,
     next_offset: offset + page.length < entries.length ? offset + page.length : null, entries: page,
     quota,
-    guidance: 'Use provider_profile, model and reasoning_effort when delegating. Configuration and catalog discovery do not guarantee model access. Context capacity is not subscription allowance.' })
+    guidance: 'Pass each entry\'s provider_profile with its model, and pick reasoning_effort from its reasoning_efforts; configured_model is only the profile default. Configuration and catalog discovery do not guarantee model access. Context capacity is not subscription allowance.' })
   const encoder = new TextEncoder()
   while (encoder.encode(JSON.stringify(response())).byteLength > 60000) {
     if (page.length <= 1) throw new Error('Inventory entry or metadata exceeds the response size limit')

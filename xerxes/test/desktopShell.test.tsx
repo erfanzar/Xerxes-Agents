@@ -184,8 +184,10 @@ test('the main window does not render a diagnostic footer', () => {
  const html = render(snapshot({contextTokens:0,contextMax:262000}))
  expect(html).not.toContain('class="status"')
  expect(html).not.toContain('ctx 0k/262k')
- expect(html).toContain('<details class="session-diagnostics">')
+  // Statistics live in the Activity card, collapsed; the rail opens on Activity.
+  expect(html).toContain('<dl class="session-diagnostics session-diagnostics__values" aria-label="Session statistics">')
  expect(html).toContain('<button aria-pressed="true">Activity</button>')
+ expect(html).toContain('<button aria-pressed="false">Usage</button>')
  expect(html).toContain('Workspace runtime: Connected')
  expect(html).not.toContain('daemon connected')
  expect(html).not.toContain('build-notice')
@@ -209,7 +211,7 @@ test('session statistics align metrics and omit duplicate context and connection
       cacheHitRate: 0.98,
     }),
   )
-  expect(html).toContain('<details class="session-diagnostics">')
+  expect(html).toContain('<dl class="session-diagnostics session-diagnostics__values" aria-label="Session statistics">')
   for (const needle of ['<dt>Turns</dt><dd>39</dd>', '<dt>Steps</dt><dd>2106</dd>', '515m47s', '2m', '8.5s', '43.0 tokens/s', '<dt>Cache hit</dt><dd>98%</dd>', '142K', 'kimi-for-coding']) {
     expect(html).toContain(needle)
   }
@@ -549,6 +551,12 @@ test('the header fleet chip opens the live subagent roster', () => {
   ]
   const html = render(snapshot({ currentId: 'c1', currentTitle: 'T', fleet }))
   expect(html).toContain('2 subagents')
+  // Closed, the chip itself shows that work is under way.
+  expect(html).toContain('fleetchip is-working')
+  expect(html).toContain('1 of 2 subagents working')
+  const idle = render(snapshot({ currentId: 'c1', currentTitle: 'T', fleet: fleet.map(row => ({ ...row, status: 'completed' })) }))
+  expect(idle).toContain('2 subagents')
+  expect(idle).not.toContain('is-working')
   const details = renderToStaticMarkup(createElement(ActivityDetails, {snap:snapshot({fleet})}))
   expect(details).toContain('Analyze libs/eyvan')
   expect(details).toContain('Analyze the OCI pipeline')
@@ -1069,9 +1077,11 @@ test('the status head shows the running tool and omits unreported measurements',
   expect(html).toContain('1 of 2')
   expect(html).toContain('50%')
   // Cost rides the header only once the turn is over — mid-turn that slot
-  // belongs to the elapsed clock and Stop.
-  expect(html).not.toContain('$0.42')
-  expect(renderToStaticMarkup(createElement(RailStatus, { snap: snapshot({ costUsd: 0.42 }) }))).toContain('$0.42')
+  // belongs to the elapsed clock and Stop. (The collapsed statistics below
+  // may list it; the rule is about the header line.)
+  const head = (markup: string) => markup.slice(0, markup.indexOf('</div>'))
+  expect(head(html)).not.toContain('$0.42')
+  expect(head(renderToStaticMarkup(createElement(RailStatus, { snap: snapshot({ costUsd: 0.42 }) })))).toContain('$0.42')
 
   // Context the runtime has not reported must not render as "0 of 256K",
   // which asserts an untouched context rather than an unknown one.
@@ -1084,9 +1094,11 @@ test('the rail folds its utilities into one drawer instead of six siblings', () 
   const html = renderRail(snapshot({ changes: [{ path: 'src/a.ts', adds: 5, dels: 2, isNew: false, hunks: [] }] } as Partial<Snapshot>))
   expect(html).toContain('Terminals, monitors and diagnostics')
   // Everything that used to be a top-level section is still reachable.
-  for (const needle of ['Open terminals', 'Conversation usage', 'Monitors', 'Session statistics']) {
+  for (const needle of ['Open terminals', 'Conversation usage', 'Monitors']) {
     expect(html).toContain(needle)
   }
+  // Session statistics sit in the status card, collapsed by default.
+  expect(html).toContain('<dl class="session-diagnostics session-diagnostics__values" aria-label="Session statistics">')
   // The touched-files row is a live count that hands off to the edits tab;
   // it must not grow a second diff viewer inside the rail.
   // The count heads the list; the rows carry the per-file deltas.
@@ -1127,6 +1139,27 @@ test('the rail caps its lists and offers the remainder instead of scrolling fore
   expect(html).toContain('3 more')
   expect(html).toContain('Agent 5')
   expect(html).not.toContain('Agent 8')
+  // "N more" expands the card in place; it used to navigate to the tab the
+  // card already sits on, and so did nothing.
+  expect(html).toContain('class="raillist__more" aria-expanded="false"')
+})
+
+test('each agent row says what it runs on: profile/model[effort], only as reported', () => {
+  const agent = (id: string, details: Partial<NonNullable<SessionRow['agentDetails']>>): SessionRow =>
+    ({ id, key: id, title: `Agent ${id}`, status: 'running', age: '', current: false, kind: 'subagent', turns: 0, messages: 0, cwd: '', untitled: false,
+      agentDetails: { summary: '', error: '', model: '', filesRead: [], filesWritten: [], ...details } })
+  const fleet = [
+    agent('a', { model: 'gpt-5', providerProfile: 'openai', reasoningEffort: 'xhigh' }),
+    agent('b', { model: 'claude-code/opus', providerProfile: 'claude-code' }),
+    agent('c', {}),
+  ]
+  const rail = renderRail(snapshot({ fleet }))
+  expect(rail).toContain('(openai/gpt-5[xhigh])')
+  // A profile already in the model id is not repeated; no effort, no bracket.
+  expect(rail).toContain('(claude-code/opus)')
+  expect(rail).not.toContain('claude-code/claude-code')
+  // Nothing reported yet: no empty "()" placeholder.
+  expect(rail).not.toContain('()')
 })
 
 test('the rail orders touched files by how much changed, not by write order', () => {
@@ -1176,4 +1209,53 @@ test('every agent row carries a state word so the column edge stays straight', (
   // The dot column is gone; tone lives on the row for the colour rule.
   expect(html).not.toContain('railrow__dot')
   expect(html).toContain('data-state="failed"')
+})
+
+test('the Usage tab is about accounts; this task\'s statistics live in the Activity card', () => {
+  const snap = snapshot({ connection: 'online', model: 'gpt-5.3-codex', turnCount: 3, llmSteps: 4, toolSteps: 5, llmDurationMs: 42_000, toolDurationMs: 7_000, ttftMs: 640, tokensPerSecond: 58.4, cacheHitRate: 0.82, cacheReadTokens: 240_000, cacheWriteTokens: 12_000, inputTokens: 51_000, costUsd: 0.37, contextTokens: 64_000, contextMax: 256_000 } as Partial<Snapshot>)
+  const usage = renderToStaticMarkup(createElement(DesktopRail, { panel: 'usage', snap, close: () => {}, activityDetails: null }))
+  expect(usage).toMatch(/Activity<\/button><button[^>]*aria-pressed="true"[^>]*>Usage<\/button>/)
+  expect(usage).toContain('Plans &amp; keys')
+  expect(usage).toContain('Checking your plans')
+  // No second copy of the session numbers to drift out of step.
+  expect(usage).not.toContain('This session')
+  expect(usage).not.toContain('Cache written')
+  const card = renderToStaticMarkup(createElement(RailStatus, { snap }))
+  for (const needle of ['Session statistics', 'Turns', '>3<', 'Steps', '>9<', 'Model time', 'First response', '640ms', '58.4 tokens/s', 'Cache hit', '79%', 'Cache read', '240K', 'Cache written', '12K', 'Uncached input', '51K', 'Context']) {
+    expect(card).toContain(needle)
+  }
+})
+
+test('a Usage plan card shows its windows with reset countdowns, a balance, or the reason there is nothing', async () => {
+  const { ProfileCard } = await import('../src/desktop/renderer/UsagePanel.js')
+  const now = 1_800_000_000_000
+  const card = (profile: Record<string, unknown>) => renderToStaticMarkup(createElement(ProfileCard, { now, profile: { windows: [], active: false, model: 'm', provider: 'p', ...profile } as never }))
+  const codex = card({ profile: 'codex', provider: 'openai-codex', source: 'codex', status: 'ok', plan: 'pro', active: true, fetchedAt: now, windows: [{ label: '5-hour', usedPercent: 18, resetAfterSeconds: 11_520 }, { label: 'weekly', usedPercent: 92, resetsAt: now + (3 * 1_440 + 23 * 60) * 60_000, detail: 'opus' }] })
+  expect(codex).toContain('ChatGPT · pro')
+  expect(codex).toContain('In use')
+  expect(codex).toContain('5-hour')
+  expect(codex).toContain('Resets in 3h 12m')
+  expect(codex).toContain('Weekly · opus')
+  expect(codex).toContain('data-level="full"')
+  expect(codex).toContain('Resets in 3d 23h')
+  expect(card({ profile: 'router', source: 'openrouter', status: 'ok', balance: '$7.50 left' })).toContain('$7.50 left')
+  expect(card({ profile: 'zai', source: 'zai', status: 'error', message: 'The provider rejected the saved key or sign-in (401).' })).toContain('rejected the saved key')
+  expect(card({ profile: 'local', provider: 'ollama', status: 'unsupported' })).toContain("doesn&#x27;t publish usage limits")
+})
+
+test('the model picker shows each model as its provider names it, grouped under the profile label', async () => {
+  const { ModelPicker } = await import('../src/desktop/renderer/Overlays.js')
+  const models = [
+    { id: 'claude-code/opus[1m]', provider: 'Claude Code', label: 'Opus (1M context)', hint: 'Opus 5.5 with 1M context' },
+    { id: 'claude-code/claude-fable-5-1[1m]', provider: 'Claude Code', label: 'Fable', hint: 'Fable 5.1 · Most capable' },
+    { id: 'gpt-5', provider: 'codex' },
+  ]
+  const html = renderToStaticMarkup(createElement(ModelPicker, { snap: snapshot({ models, model: 'claude-code/opus[1m]' } as Partial<Snapshot>), onClose: () => {} }))
+  expect(html).toContain('>Claude Code</div>')
+  expect(html).toContain('>Opus (1M context)</span>')
+  expect(html).toContain('>Fable</span>')
+  expect(html).toContain('Fable 5.1 · Most capable')
+  // A provider that names nothing shows its id, not an invented name.
+  expect(html).toContain('>gpt-5</span>')
+  expect(html).toContain('title="claude-code/claude-fable-5-1[1m]"')
 })

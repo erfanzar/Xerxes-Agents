@@ -43,7 +43,13 @@ function thinkingLevels(
   return selectableEfforts(fallbackReasoningLevels(provider))
 }
 
+/**
+ * Whether `value` may be set. With levels reported, only those (and `off`);
+ * with none reported, whatever was typed goes to the provider as written —
+ * refusing needs reported data, not a built-in list.
+ */
 function isThinkingLevel(levels: readonly string[], value: string): boolean {
+  if (!levels.length) return /^[a-z][a-z0-9_-]{0,31}$/i.test(value.trim())
   return levels.some(level => level.toLowerCase() === value.toLowerCase())
 }
 const SENSITIVE_CONFIG_NAME = /api[_-]?key|token|secret|password/iu
@@ -585,7 +591,7 @@ export class BridgeSlashRouter {
   private context(parsed: ParsedBridgeSlashCommand): BridgeSlashResult {
     const model = configString(this.config, 'model')
     const provider = resolveProvider(model, this.config)
-    const cost = calcCost(model, this.state.totalInputTokens, this.state.totalOutputTokens)
+    const cost = (calcCost(model, this.state.totalInputTokens, this.state.totalOutputTokens) ?? 0)
     return result(parsed.name, [
       `CWD: ${this.cwd}`,
       `Model: ${model}`,

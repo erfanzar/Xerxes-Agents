@@ -6,12 +6,10 @@ import { TUI_SESSION_MODEL_FLAG } from '../../../domain/slash.js'
 import type {
   ConfigGetValueResponse,
   ConfigSetResponse,
-  SessionCompressResponse,
-  SessionUsageResponse
+  SessionCompressResponse
 } from '../../../gatewayTypes.js'
 import { capTranscriptHistory } from '../../../lib/messages.js'
 import { fmtK } from '../../../lib/text.js'
-import type { PanelSection } from '../../../types.js'
 import { DEFAULT_INDICATOR_STYLE, INDICATOR_STYLES, type IndicatorStyle } from '../../interfaces.js'
 import { patchOverlayState } from '../../overlayStore.js'
 import { patchUiState } from '../../uiStore.js'
@@ -497,63 +495,10 @@ export const sessionCommands: SlashCommand[] = [
   },
 
   {
-    help: 'session usage + credits',
+    help: 'session statistics + plan limits for every imported provider (opens a popup; works mid-turn)',
     name: 'usage',
-    run: (_arg, ctx) => {
-      ctx.gateway.rpc<SessionUsageResponse>('session.usage', { session_id: ctx.sid }).then(r => {
-        if (ctx.stale()) {
-          return
-        }
-
-        if (r) {
-          patchUiState({
-            usage: { calls: r.calls ?? 0, input: r.input ?? 0, output: r.output ?? 0, total: r.total ?? 0 }
-          })
-        }
-
-        const creditsLines = r?.credits_lines ?? []
-        if (creditsLines.length) {
-          ctx.transcript.panel('Credits', [{ text: creditsLines.join('\n') }])
-        }
-
-        if (!r?.calls) {
-          if (!creditsLines.length) {
-            ctx.transcript.sys('no API calls yet')
-          }
-          return
-        }
-
-        const f = (v: number | undefined) => (v ?? 0).toLocaleString()
-        const cost = r.cost_usd != null ? `${r.cost_status === 'estimated' ? '~' : ''}$${r.cost_usd.toFixed(4)}` : null
-
-        const rows: [string, string][] = [
-          ['Model', r.model ?? ''],
-          ['Input tokens', f(r.input)],
-          ['Cache read tokens', f(r.cache_read)],
-          ['Cache write tokens', f(r.cache_write)],
-          ['Output tokens', f(r.output)],
-          ['Total tokens', f(r.total)],
-          ['API calls', f(r.calls)]
-        ]
-
-        if (cost) {
-          rows.push(['Cost', cost])
-        }
-
-        const sections: PanelSection[] = [{ rows }]
-
-        if (r.context_max) {
-          sections.push({ text: `Context: ${f(r.context_used)} / ${f(r.context_max)} (${r.context_percent}%)` })
-        } else {
-          sections.push({ text: 'Context: unknown' })
-        }
-
-        if (r.compressions) {
-          sections.push({ text: `Compressions: ${r.compressions}` })
-        }
-
-        ctx.transcript.panel('Usage', sections)
-      }).catch(ctx.guardedErr)
-    }
+    // A popup, not a transcript panel: it opens instantly while a turn is
+    // streaming and fills in when the runtime answers.
+    run: () => patchOverlayState({ usage: true })
   }
 ]

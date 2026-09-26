@@ -33,16 +33,17 @@ test('long goals and eight agents retain all content without zero-turn noise', (
   // visible, because only a finished tail is ever capped.
   expect(html.match(/class="railrow"/g)).toHaveLength(8)
   expect(html).not.toContain('more<')
-  // Statistics moved into the rail's diagnostics drawer — they answer a
-  // question you have after the fact, not while eight agents are running.
-  expect(html).not.toContain('Session statistics')
+  // Statistics sit in the status card as plain rows, like context — a question you
+  // have after the fact, not while eight agents are running.
+  expect(html).toContain('<dl class="session-diagnostics session-diagnostics__values" aria-label="Session statistics">')
   expect(html).not.toContain('0 turns')
 })
 
 test('appearance preferences validate stored choices independently of session state', async () => {
   const { parseAppearance } = await import('../src/desktop/renderer/appearance.js')
   expect(parseAppearance({ theme: 'light', font: '13' })).toEqual({ theme: 'light', font: '13' })
-  expect(parseAppearance({ theme: 'invalid', font: 90 })).toEqual({ theme: 'system', font: '12' })
+  // Unreadable choices fall back to a fresh install's defaults (XS text).
+  expect(parseAppearance({ theme: 'invalid', font: 90 })).toEqual({ theme: 'system', font: '11' })
 })
 
 test('background history is collapsed while active and unknown states remain visible', () => {

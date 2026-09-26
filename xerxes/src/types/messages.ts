@@ -26,11 +26,24 @@ export interface SystemMessage {
   readonly content: MessageContent
 }
 
+/** Who wrote a user-role message that the human did not type. */
+export type HarnessOrigin = 'goal' | 'monitor' | 'schedule' | 'harness'
+
+export function isHarnessOrigin(value: unknown): value is HarnessOrigin {
+  return value === 'goal' || value === 'monitor' || value === 'schedule' || value === 'harness'
+}
+
 export interface UserMessage {
   readonly role: 'user'
   readonly content: MessageContent
   /** Provider-omitted text used when an attachment-expanded prompt is rendered. */
   readonly displayText?: string
+  /**
+   * Provider-omitted author of a prompt the human did not type: a goal
+   * round, a monitor reaction, a schedule, or a reminder the harness adds
+   * mid-turn. Absent means the human typed it. Clients never show these.
+   */
+  readonly origin?: HarnessOrigin
 }
 
 export interface AssistantMessage {

@@ -26,13 +26,13 @@ export interface RunWizardOptions {
 export const DEFAULT_SETUP_STEPS: readonly SetupStep[] = Object.freeze([
   {
     key: 'provider',
-    prompt: 'Which LLM provider? [anthropic/openai/gemini/ollama]',
-    default: 'anthropic',
+    prompt: 'Which LLM provider? (any provider Xerxes can drive)',
   },
   {
     key: 'model',
-    prompt: 'Default model id',
-    default: 'claude-opus-4-6',
+    // No default: runSetupCommand asks the provider for its models.
+    prompt: 'Model id (blank: the first model the provider reports)',
+    optional: true,
   },
   {
     key: 'api_key',

@@ -76,13 +76,29 @@ test('setup command applies a profile preset and allows answer overrides', async
     const exitCode = await runSetupCommand({
       targetPath: target,
       profile: 'developer',
-      answers: { model: 'custom-model' },
+      answers: { provider: 'openai', model: 'custom-model' },
     })
     expect(exitCode).toBe(0)
     const contents = await Bun.file(target).text()
-    expect(contents).toContain(`provider: "${SETUP_PROFILES.developer.answers.provider}"`)
+    expect(SETUP_PROFILES.developer.answers).not.toHaveProperty('model')
+    expect(contents).toContain('provider: "openai"')
     expect(contents).toContain('model: "custom-model"')
     expect(contents).toContain('permission_mode: "manual"')
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('setup takes the first model the provider lists when none is given, and refuses without a provider', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-setup-discover-'))
+  try {
+    const target = join(directory, 'setup.yaml')
+    let asked = ''
+    expect(await runSetupCommand({ targetPath: target, answers: { provider: 'openai', api_key: 'k' }, discoverModels: async input => { asked = `${input.provider} ${input.baseUrl} ${input.apiKey}`; return ['listed-first', 'listed-second'] } })).toBe(0)
+    expect(asked).toBe('openai https://api.openai.com/v1 k')
+    expect(await Bun.file(target).text()).toContain('model: "listed-first"')
+    await expect(runSetupCommand({ targetPath: join(directory, 'b.yaml'), answers: {} })).rejects.toThrow('choose a provider with --provider')
+    await expect(runSetupCommand({ targetPath: join(directory, 'c.yaml'), answers: { provider: 'openai' }, discoverModels: async () => [] })).rejects.toThrow('pass --model')
   } finally {
     await rm(directory, { recursive: true, force: true })
   }

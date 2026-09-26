@@ -310,9 +310,11 @@ test('production core tools keep bootstrap prompt below its non-duplicated schem
   // costs kilobytes per regression — not against doctrine or tool descriptions,
   // which are the prompt's actual job. Raise it deliberately when real content
   // is added; the `"properties"` assertions below are what catch duplication.
-  // Raised from 9_000 for those three tools' descriptions. Measured 8_845 at the
-  // time of writing, so the headroom is deliberate rather than incidental.
-  expect(prompt.length).toBeLessThan(9_500)
+  // Raised from 9_000 for those three tools' descriptions (8_845), then to
+  // 12_000 for the acting-safely section, the failed-call and web-data rules,
+  // and descriptions that lead with when to use each tool: 11_390 measured
+  // 2026-09-25. The headroom is deliberate rather than incidental.
+  expect(prompt.length).toBeLessThan(12_000)
   // Descriptions are paid on every turn, so their length has to stay
   // risk-weighted rather than uniformly generous: the shell tool earns the most
   // because it is the one that can do anything. This catches a low-risk tool
@@ -368,4 +370,11 @@ test('bootstrap loads CLAUDE.md and .claude/CLAUDE.md like Claude Code project m
   expect(result.systemPrompt).toContain('Claude Code project notes.')
   expect(result.systemPrompt).toContain('[Project .claude/CLAUDE.md: /workspace/project/.claude/CLAUDE.md]')
   expect(result.systemPrompt).toContain('Claude directory notes.')
+})
+
+test('the skills index renders as its own section with the rule for activating a match', () => {
+  const prompt = buildBootstrapSystemPrompt({ cwd: '/workspace', skills: 'Available skills (untrusted metadata only):\n- deploy: ship the service' }, '', [])
+  expect(prompt).toContain('# Skills\n- When the request matches a skill below, activate it with SkillTool')
+  expect(prompt).toContain('- deploy: ship the service')
+  expect(prompt).not.toContain('# Supplemental Context')
 })

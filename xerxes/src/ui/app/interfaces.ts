@@ -108,6 +108,8 @@ export interface OverlayState {
   lspSettings: boolean
   mcpSettings: boolean
   contextInspector: boolean
+  /** `/usage`: session statistics + plan limits, over the transcript. */
+  usage: boolean
   machinePicker: boolean | string
   customAgentEditor: boolean
   presetEditor: boolean

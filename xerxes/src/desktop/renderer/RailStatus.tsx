@@ -22,6 +22,7 @@ import type { ReactElement } from 'react'
 import { store, type Snapshot } from './store.js'
 import { Icon } from './Icon.js'
 import { toolPhrase } from './activityPhrase.js'
+import { SessionDiagnostics } from './SessionDiagnostics.js'
 
 /** 43 → "43s", 255 → "4m 15s". Matches the composer's clock. */
 export function elapsedOf(seconds: number): string {
@@ -121,6 +122,9 @@ export function RailStatus({ snap }: { snap: Snapshot }): ReactElement {
           )}
         </dl>
       )}
+      {/* This task's numbers live with the task; the Usage tab is about
+          accounts (plans, keys, limits), not one session. */}
+      <SessionDiagnostics snap={snap} />
     </section>
   )
 }

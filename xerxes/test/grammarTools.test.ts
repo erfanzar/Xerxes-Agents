@@ -1,7 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { expect, test } from 'bun:test'
+import { afterAll, beforeAll, expect, test } from 'bun:test'
 
 import { OpenAiCompatibleClient, ResponsesApiClient, type LlmDelta } from '../src/llms/client.js'
 import {
@@ -11,6 +11,7 @@ import {
   grammarToolInput,
   resolveGrammar,
 } from '../src/llms/grammarTools.js'
+import { clearReportedCapabilities, reportModelCapability } from '../src/llms/modelsDev.js'
 import type { ToolDefinition } from '../src/types/toolCalls.js'
 
 const GRAMMAR_TOOL: ToolDefinition = {
@@ -33,9 +34,12 @@ const GRAMMAR_TOOL: ToolDefinition = {
   },
 }
 
-// gpt-5.2's generated catalog compat enables grammar tools; gpt-4o does not.
+// Grammar tools go only to a model reported to take them (Codex's
+// `apply_patch_tool_type: freeform`); gpt-4o reports nothing.
 const GRAMMAR_MODEL = 'openai/gpt-5.2'
 const PLAIN_MODEL = 'openai/gpt-4o'
+beforeAll(() => reportModelCapability('openai', 'gpt-5.2', { grammarTools: true }))
+afterAll(() => clearReportedCapabilities())
 
 test('resolveGrammar prefers lark, falls back to regex, and validates the schema contract', () => {
   expect(resolveGrammar(GRAMMAR_TOOL, true)).toEqual({

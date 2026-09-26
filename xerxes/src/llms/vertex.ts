@@ -14,8 +14,7 @@ import { messageText } from '../types/messages.js'
 import { parseToolArguments, type JsonObject, type ToolCall, type ToolChoice, type ToolDefinition } from '../types/toolCalls.js'
 import type { CompletionRequest, FetchImplementation, LlmClient, LlmCompletion, LlmDelta, TokenUsage } from './client.js'
 import { internalSseData } from './client.js'
-import type { PiModelCapabilities } from './piModelCatalog.js'
-import { piCatalogModelCapabilities } from './piModelCatalog.js'
+import { wireCapability } from './modelsDev.js'
 import { bareModel } from './providerRegistry.js'
 
 const API_VERSION = 'v1'
@@ -539,16 +538,18 @@ function disabledThinkingConfig(modelId: string): Record<string, unknown> {
   return { thinkingBudget: 0 }
 }
 
+/**
+ * The REST generateContent body. The fields sit at the top level and
+ * `thinkingConfig` inside `generationConfig` — the SDK's `config` wrapper is
+ * not part of the REST API, which rejected it (or dropped the system prompt,
+ * tools and thinking with it).
+ */
 interface VertexPayload {
   contents: VertexContent[]
-  model: string
-  readonly config?: {
-    generationConfig?: { maxOutputTokens?: number; temperature?: number }
-    systemInstruction?: { parts: VertexPart[] }
-    thinkingConfig?: Record<string, unknown>
-    toolConfig?: { functionCallingConfig: { mode: 'ANY' | 'AUTO' | 'NONE' } }
-    tools?: { functionDeclarations: Record<string, unknown>[] }[]
-  }
+  generationConfig?: { maxOutputTokens?: number; temperature?: number; thinkingConfig?: Record<string, unknown> }
+  systemInstruction?: { parts: VertexPart[] }
+  toolConfig?: { functionCallingConfig: { mode: 'ANY' | 'AUTO' | 'NONE' } }
+  tools?: { functionDeclarations: Record<string, unknown>[] }[]
 }
 
 function toolChoiceMode(choice: ToolChoice | undefined): 'ANY' | 'AUTO' | 'NONE' | undefined {
@@ -567,16 +568,21 @@ function toolChoiceMode(choice: ToolChoice | undefined): 'ANY' | 'AUTO' | 'NONE'
 /** pi-ai buildParams: the native generateContent request body. */
 export function vertexPayload(request: CompletionRequest): VertexPayload {
   const modelId = bareModel(request.model)
-  const capabilities: PiModelCapabilities | undefined = piCatalogModelCapabilities(modelId, 'google-vertex')
-  const config: NonNullable<VertexPayload['config']> = {}
-  const generationConfig: { maxOutputTokens?: number; temperature?: number } = {}
+  // How this model reasons, as models.dev (or a provider report) states it.
+  const reasoningCapability = wireCapability({ provider: 'google-vertex', model: modelId }).reasoning
+  const config: Omit<VertexPayload, 'contents'> = {}
+  const generationConfig: NonNullable<VertexPayload['generationConfig']> = {}
   if (request.temperature !== undefined) generationConfig.temperature = request.temperature
   if (request.maxTokens !== undefined) generationConfig.maxOutputTokens = request.maxTokens
-  if (Object.keys(generationConfig).length) config.generationConfig = generationConfig
   assertOutputTokenLimit(request, generationConfig.maxOutputTokens)
 
-  const systemParts = request.messages
-    .filter(message => message.role === 'system')
+  // Only the leading system messages form systemInstruction; a later one
+  // stays in place as user text (systemInstruction precedes every content,
+  // so moving it there changed the cached prefix each turn).
+  const leading = request.messages.findIndex(message => message.role !== 'system')
+  const head = leading < 0 ? request.messages : request.messages.slice(0, leading)
+  const rest = leading < 0 ? [] : request.messages.slice(leading)
+  const systemParts = head
     .map(message => sanitizeSurrogates(messageText(message)))
     .filter(Boolean)
   if (systemParts.length) {
@@ -595,33 +601,29 @@ export function vertexPayload(request: CompletionRequest): VertexPayload {
     if (mode) config.toolConfig = { functionCallingConfig: { mode } }
   }
 
-  if (request.thinking && capabilities?.reasoning !== false) {
+  if (request.thinking && reasoningCapability?.supported !== false) {
     const thinkingConfig: Record<string, unknown> = { includeThoughts: true }
-    const mapped = request.thinking.effort === undefined || request.thinking.effort === 'off'
-      ? undefined
-      : capabilities?.thinkingLevelMap?.[request.thinking.effort]
-    const level = typeof mapped === 'string'
-      ? thinkingLevelFromEffort(mapped.toLowerCase())
-      : thinkingLevelFromEffort(request.thinking.effort)
+    // The effort offered was the model's own word; Gemini expresses it as a thinking level.
+    const level = thinkingLevelFromEffort(request.thinking.effort)
     if (level) {
       thinkingConfig.thinkingLevel = level
     } else if (request.thinking.budgetTokens !== undefined) {
       thinkingConfig.thinkingBudget = request.thinking.budgetTokens
     }
-    config.thinkingConfig = thinkingConfig
-  } else if (request.thinking && capabilities?.reasoning === false) {
+    generationConfig.thinkingConfig = thinkingConfig
+  } else if (request.thinking && reasoningCapability?.supported === false) {
     // Explicitly disabled thinking on a reasoning model still needs a config
     // so Gemini 3 models do not leak hidden thoughts into the reply.
-    config.thinkingConfig = disabledThinkingConfig(modelId)
+    generationConfig.thinkingConfig = disabledThinkingConfig(modelId)
   }
+  if (Object.keys(generationConfig).length) config.generationConfig = generationConfig
 
   return {
-    model: modelId,
     contents: vertexContentsFromMessages(
-      request.messages.filter(message => message.role !== 'system'),
+      rest.map(message => message.role === 'system' ? { role: 'user' as const, content: messageText(message) } : message),
       modelId,
     ),
-    ...(Object.keys(config).length ? { config } : {}),
+    ...config,
   }
 }
 

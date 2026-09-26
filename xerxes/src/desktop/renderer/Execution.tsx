@@ -48,7 +48,7 @@ export const ToolCallRow = memo(function ToolCallRow({ item, label }: { item: To
   const view = executionView(item)
   const failed = toolHasFailed(item)
   const target = view.command || item.path || item.arg
-  return <details className="toolrow execution-row" data-state={failed ? 'failed' : item.state} onToggle={event => { if (event.currentTarget.open) setInspected(true) }}>
+  return <details className="toolrow execution-row" data-state={failed ? 'failed' : item.state} data-command={view.command ? '' : undefined} onToggle={event => { if (event.currentTarget.open) setInspected(true) }}>
     <summary>
       <span className="execution-row__disclosure"><Icon name="chevron" size={12} /></span>
       <span className="execution-row__label"><Icon name={view.command ? 'terminal' : 'tools'} size={14} />{label}</span>

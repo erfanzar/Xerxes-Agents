@@ -98,7 +98,8 @@ export interface NativeSubagentHostOptions {
   readonly durableTaskBridge?: DurableTaskBridge
   readonly eventBus: DaemonSubagentEventBus
   /** Bounded supplemental bootstrap context, such as the discovered skill catalog. */
-  readonly extraContext?: string
+  /** The installed-skills index for child bootstrap prompts. */
+  readonly skills?: string
   readonly skillRegistry?: SkillRegistry
   readonly validateProviderSelection?: (profile: string, model: string, effort?: string, signal?: AbortSignal) => Promise<void>
   readonly validateInheritedSelection?: (model: string, effort?: string, signal?: AbortSignal) => Promise<void>
@@ -1378,7 +1379,7 @@ async function runNativeSubagent(
         ...(request.config._agentPromptMode === 'replace' ? { baseSystemPrompt: request.systemPrompt } : {}),
         cwd,
         subagents: bootstrapSubagentsForAgent(options.agentDefinitions, request.task.agentDefName),
-        ...(options.extraContext ? { extraContext: options.extraContext } : {}),
+        ...(options.skills ? { skills: options.skills } : {}),
         model,
         tools,
       })

@@ -4,6 +4,7 @@
 import { ToolRegistry, type ToolExecutionContext } from '../executors/toolRegistry.js'
 import type { JsonObject, ToolDefinition } from '../types/toolCalls.js'
 import { optionalBoolean, optionalStringArray, requiredString } from './inputs.js'
+import { ASK_USER_POLICY } from './askUserPolicy.js'
 
 export interface ClarifyResult {
   readonly answer: string
@@ -71,7 +72,7 @@ export const CLARIFY_DEFINITION: ToolDefinition = {
   type: 'function',
   function: {
     name: 'clarify',
-    description: 'Request a structured user clarification through a configured interactive UI.',
+    description: ASK_USER_POLICY + ' Shown through the configured interactive UI; the turn blocks until they answer.',
     parameters: {
       type: 'object',
       additionalProperties: false,

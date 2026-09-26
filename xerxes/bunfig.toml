@@ -1,0 +1,3 @@
+[test]
+# Keep test runs out of the developer's real ~/.xerxes (see the file).
+preload = ["./test/support/isolatedHome.ts"]

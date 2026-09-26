@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { InMemoryDaemonRuntime } from '../src/daemon/runtime.js'
-import { AgentTurnRunner } from '../src/daemon/turnRunner.js'
+import { AgentTurnRunner, SessionPromptSnapshots } from '../src/daemon/turnRunner.js'
 import { DaemonInteractionBoard } from '../src/daemon/interactions.js'
 import { ToolRegistry } from '../src/executors/toolRegistry.js'
 import { AgentMemory } from '../src/memory/agentMemory.js'
@@ -40,7 +40,8 @@ test('silent provider waits are delivered live and terminal errors are not lost 
       throw new Error('invalid request: test failure')
     },
   } })
-  const runtime = new InMemoryDaemonRuntime(runner)
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-silent-provider-'))
+  const runtime = new InMemoryDaemonRuntime(runner, { sessionDirectory: join(directory, 'sessions') })
   const session = await runtime.openSession('silent-provider')
   const events: DaemonEvent[] = []
   const turn = runtime.submitTurn(session.sessionKey, 'continue', event => { events.push(event) })
@@ -67,7 +68,8 @@ test('proactive compaction metadata survives turn synchronization and blocks ove
       return { messages: messages.slice(-1), tokensFreed: 150_000 }
     },
   })
-  const runtime = new InMemoryDaemonRuntime(runner)
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-compaction-metadata-'))
+  const runtime = new InMemoryDaemonRuntime(runner, { sessionDirectory: join(directory, 'sessions') })
   session = await runtime.openSession('compaction-metadata')
   session.messages = [{ role: 'user', content: 'historical output '.repeat(50_000) }]
   const events: DaemonEvent[] = []
@@ -428,7 +430,8 @@ test('agent turn runner maps portable loop events and supplied live capacity to 
         input_tokens: 3,
         output_tokens: 5,
         total_tokens: 8,
-        context_tokens: 13,
+        // Includes the compaction notice: this runner has a context limit, so it compacts.
+        context_tokens: 59,
         max_context: 128_000,
         mode: 'code',
         plan_mode: false,
@@ -1172,6 +1175,56 @@ test('agent turn runner injects project-scoped persistent memory and exposes its
   }
 })
 
+test('the system prompt stays byte-identical across turns; memory written mid-session rides with the next message', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-runner-stable-prefix-'))
+  try {
+    const memory = new AgentMemory({ globalDirectory: join(root, 'global'), projectRoot: root })
+    await memory.write('global', 'EXPERIENCES.md', 'Bun tests run offline.')
+    const selfMemory = new AgentSelfMemory({ agentId: 'default', directory: join(root, 'self-memory'), projectRoot: root })
+    await selfMemory.learn('The user prefers direct status reports', 'user_taste')
+    const client = new CapturingClient()
+    const runner = new AgentTurnRunner({ agentMemory: () => memory, agentSelfMemory: () => selfMemory, llm: client, model: 'gpt-4o' })
+    const session: DaemonSession = {
+      activeTurnId: '', agentId: 'default', cancelRequested: false, cwd: root, extra: {}, id: 'stable-prefix-session',
+      interactionMode: 'code', sessionKey: 'stable-prefix', lastActive: 0, messages: [], metadata: {}, model: 'gpt-4o', planMode: false,
+      status: 'working', thinkingContent: [], toolExecutions: [], totalInputTokens: 0, totalOutputTokens: 0, turnCount: 0,
+      workspace: '/tmp/agents/default',
+    }
+    const turn = async (text: string) => { for await (const _event of runner.run(session, text, new AbortController().signal)) { /* provider requests are asserted below */ } }
+    await turn('first question')
+    // What the agent (or another session, through the shared global file) writes between turns.
+    await memory.append('global', 'EXPERIENCES.md', 'Claude Code quotes of tool-call tags are parsed as calls.')
+    await selfMemory.learn('The user wants numbers, not adjectives', 'user_taste')
+    await turn('second question')
+    await turn('third question')
+
+    const [first, second, third] = client.requests
+    const systemOf = (request: CompletionRequest | undefined) => request?.messages.filter(message => message.role === 'system').map(message => message.content)
+    // The cached prefix survives every turn: the system prompt never moves.
+    expect(systemOf(second)).toEqual(systemOf(first))
+    expect(systemOf(third)).toEqual(systemOf(first))
+    expect(String(systemOf(first))).toContain('Bun tests run offline.')
+    expect(String(systemOf(second))).not.toContain('tool-call tags')
+    // Turn 1 replays byte for byte in turn 2's request.
+    const conversation = (request: CompletionRequest | undefined) => request?.messages.filter(message => message.role !== 'system') ?? []
+    expect(conversation(second).slice(0, 2) as unknown[]).toEqual([...conversation(first), { role: 'assistant', content: 'configured agent reply' }].slice(0, 2))
+    // The new memory reaches the model with the next message, once.
+    const secondUser = String(conversation(second).at(-1)?.content)
+    expect(secondUser.startsWith('<turn-context>')).toBe(true)
+    expect(secondUser).toContain('Claude Code quotes of tool-call tags are parsed as calls.')
+    expect(secondUser).not.toContain('Bun tests run offline.')
+    expect(secondUser).toContain('The user wants numbers, not adjectives')
+    expect(secondUser.endsWith('second question')).toBe(true)
+    expect(String(conversation(first).at(-1)?.content)).toBe('first question')
+    expect(String(conversation(third).at(-1)?.content)).toBe('third question')
+    // The transcript still shows only what the user typed.
+    const secondRecord = session.messages.find(message => message.role === 'user' && String(message.content).endsWith('second question')) as Record<string, unknown> | undefined
+    expect(secondRecord?.displayText ?? secondRecord?.text).toBe('second question')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('session memory controls reach provider assembly without removing mandatory context', async () => {
   const root = await mkdtemp(join(tmpdir(), 'xerxes-runner-controls-'))
   try {
@@ -1339,13 +1392,16 @@ test('agent turn runner consumes a queued context delta exactly once', async () 
     await runtime.submitTurn('tui:mode-once', 'first prompt', () => {})
     const session = runtime.sessionStatus('tui:mode-once')
     if (!session) throw new Error('expected a live session')
-    expect(String(llm.requests[0]?.messages[0]?.content)).toContain(
-      '[Context updated]\n- interaction mode: researcher',
-    )
+    // Delivered with the message it applies to, not in the system prompt.
+    const latestUser = (index: number) => String(llm.requests[index]?.messages.filter(message => message.role === 'user').at(-1)?.content)
+    expect(latestUser(0)).toContain('[Context updated]\n- interaction mode: researcher')
+    expect(llm.requests[0]?.messages.some(message => message.role === 'system' && String(message.content).includes('[Context updated]'))).toBe(false)
     expect(readContextDeltas(session.metadata)).toEqual([])
 
     await runtime.submitTurn('tui:mode-once', 'second prompt', () => {})
-    expect(String(llm.requests[1]?.messages[0]?.content)).not.toContain('[Context updated]')
+    // Once: the second message carries nothing; the first replays unchanged.
+    expect(latestUser(1)).toBe('second prompt')
+    expect(llm.requests[1]?.messages.filter(message => message.content.toString().includes('[Context updated]'))).toHaveLength(1)
     expect(readContextDeltas(session.metadata)).toEqual([])
   } finally {
     await rm(directory, { recursive: true, force: true })
@@ -1777,4 +1833,175 @@ test('resume reconciles saved active agents against exact live worker ownership'
       { id: 'done', status: 'completed', summary: 'finished report' },
     ])
   } finally { await rm(directory, { recursive: true, force: true }) }
+})
+
+test('session telemetry keeps cache writes, and a step that rewrote the cache is a miss, not a hit', async () => {
+  const steps = [
+    { inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheCreationTokens: 90_000 },
+    { inputTokens: 10, outputTokens: 5, cacheReadTokens: 90_000, cacheCreationTokens: 100 },
+  ]
+  let call = 0
+  const client: LlmClient = { async *stream() { yield { content: 'ok' }; yield { usage: steps[call++]! } } }
+  const runner = new AgentTurnRunner({ llm: client, model: 'gpt-4o' })
+  const session: DaemonSession = {
+    activeTurnId: '', agentId: 'default', cancelRequested: false, cwd: process.cwd(), extra: {}, id: 'cache-telemetry',
+    interactionMode: 'code', sessionKey: 'cache-telemetry', lastActive: 0, messages: [], metadata: {}, model: 'gpt-4o', planMode: false,
+    status: 'working', thinkingContent: [], toolExecutions: [], totalInputTokens: 0, totalOutputTokens: 0, turnCount: 0,
+    workspace: '/tmp/agents/default',
+  }
+  for await (const _event of runner.run(session, 'one', new AbortController().signal)) { /* telemetry below */ }
+  // A full rewrite used to read as a 100% hit: writes were left out of the rate.
+  expect(session.extra.runtime_telemetry).toMatchObject({ cacheTelemetryKnown: true, cacheReadTokens: 0, cacheWriteTokens: 90_000, cacheHitRate: 0 })
+  for await (const _event of runner.run(session, 'two', new AbortController().signal)) { /* telemetry below */ }
+  const telemetry = session.extra.runtime_telemetry as { cacheWriteTokens: number; cacheHitRate: number }
+  expect(telemetry.cacheWriteTokens).toBe(90_100)
+  expect(telemetry.cacheHitRate).toBeCloseTo(90_000 / (20 + 90_000 + 90_100), 6)
+})
+
+test('goal status travels with the message when it changes; the goal rules stay in a fixed system prompt', async () => {
+  const client = new CapturingClient()
+  const updateGoal = { type: 'function' as const, function: { name: 'update_goal', description: 'Update the goal.', parameters: { type: 'object', properties: {} } } }
+  const runner = new AgentTurnRunner({ llm: client, model: 'gpt-4o', tools: [updateGoal] })
+  const session: DaemonSession = {
+    activeTurnId: '', agentId: 'default', cancelRequested: false, cwd: process.cwd(), extra: {}, id: 'goal-status-session',
+    interactionMode: 'code', sessionKey: 'goal-status', lastActive: 0, messages: [], metadata: {}, model: 'gpt-4o', planMode: false,
+    status: 'working', thinkingContent: [], toolExecutions: [], totalInputTokens: 0, totalOutputTokens: 0, turnCount: 0,
+    workspace: '/tmp/agents/default',
+  }
+  const turn = async (text: string) => { for await (const _event of runner.run(session, text, new AbortController().signal)) { /* requests below */ } }
+  await turn('one')
+  const goal = createGoal(session.metadata, session.id, { objective: 'Ship the cache fix' }, 1_000)
+  await turn('two')
+  await turn('three')
+  editGoal(session.metadata, session.id, goal, { objective: 'Ship the cache fix and measure it' }, 2_000)
+  await turn('four')
+
+  const system = client.requests.map(request => request.messages.filter(message => message.role === 'system').map(message => String(message.content)).join('\n'))
+  expect(new Set(system).size).toBe(1)
+  expect(system[0]).not.toContain('Ship the cache fix')
+  const latest = client.requests.map(request => String(request.messages.filter(message => message.role === 'user').at(-1)?.content))
+  // No goal is the default: nothing to announce.
+  expect(latest[0]).toBe('one')
+  expect(latest[1]).toContain('Current goal: "Ship the cache fix"')
+  expect(latest[2]).toBe('three')
+  expect(latest[3]).toContain('Ship the cache fix and measure it')
+})
+
+test('a rebuilt runner keeps each session\'s system prompt byte-identical; a new day is told, not re-rendered', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-runner-rebuild-'))
+  try {
+    const memory = new AgentMemory({ globalDirectory: join(root, 'global'), projectRoot: root })
+    await memory.write('global', 'EXPERIENCES.md', 'First note.')
+    const client = new CapturingClient()
+    const snapshots = new SessionPromptSnapshots()
+    let bootstraps = 0
+    // A settings change (/fast, /permissions, profile switch) builds a fresh runner.
+    const build = () => new AgentTurnRunner({
+      agentMemory: () => memory, llm: client, model: 'gpt-4o', promptSnapshots: snapshots,
+      bootstrapSystemPrompt: () => `bootstrap #${++bootstraps}`,
+    })
+    const session: DaemonSession = {
+      activeTurnId: '', agentId: 'default', cancelRequested: false, cwd: root, extra: {}, id: 'rebuild-session',
+      interactionMode: 'code', sessionKey: 'rebuild', lastActive: 0, messages: [], metadata: {}, model: 'gpt-4o', planMode: false,
+      status: 'working', thinkingContent: [], toolExecutions: [], totalInputTokens: 0, totalOutputTokens: 0, turnCount: 0,
+      workspace: '/tmp/agents/default',
+    }
+    for await (const _event of build().run(session, 'one', new AbortController().signal)) { /* requests below */ }
+    await memory.append('global', 'EXPERIENCES.md', 'Written after the first turn.')
+    for await (const _event of build().run(session, 'two', new AbortController().signal)) { /* requests below */ }
+    // A day passes.
+    snapshots.promptDay.set(session.id, '1999-01-01 Friday')
+    for await (const _event of build().run(session, 'three', new AbortController().signal)) { /* requests below */ }
+
+    const system = client.requests.map(request => request.messages.filter(message => message.role === 'system').map(message => String(message.content)).join('\n'))
+    expect(new Set(system).size).toBe(1)
+    expect(bootstraps).toBe(1)
+    const latest = client.requests.map(request => String(request.messages.filter(message => message.role === 'user').at(-1)?.content))
+    expect(latest[1]).toContain('Written after the first turn.')
+    expect(latest[2]).toContain("Today's date is now")
+    expect(latest[2]).not.toContain('Written after the first turn.')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('loading a deferred tool appends it to the tools array and leaves the system prompt byte-identical', async () => {
+  const { TOOL_SEARCH_LOADED_KEY } = await import('../src/executors/toolRegistry.js')
+  const tool = (name: string) => ({ type: 'function' as const, function: { name, description: `${name} does one thing.`, parameters: { type: 'object', properties: {} } } })
+  const registry = new ToolRegistry({ deferredToolLoading: true })
+  registry.register(tool('ReadFile'), async () => 'ok')
+  registry.register(tool('ToolSearchTool'), async () => 'ok')
+  for (const name of ['Alpha', 'Beta', 'Gamma']) registry.register(tool(name), async () => 'ok')
+  registry.register(tool('WriteFile'), async () => 'ok')
+  const client = new CapturingClient()
+  const runner = new AgentTurnRunner({ llm: client, model: 'gpt-4o', toolRegistry: registry, tools: registry.definitions(), bootstrapSystemPrompt: ({ tools }) => `bootstrap listing ${(tools ?? []).map(entry => entry.function.name).join(',')}` })
+  const session: DaemonSession = {
+    activeTurnId: '', agentId: 'default', cancelRequested: false, cwd: process.cwd(), extra: {}, id: 'deferred-prefix',
+    interactionMode: 'code', sessionKey: 'deferred-prefix', lastActive: 0, messages: [], metadata: {}, model: 'gpt-4o', planMode: false,
+    status: 'working', thinkingContent: [], toolExecutions: [], totalInputTokens: 0, totalOutputTokens: 0, turnCount: 0,
+    workspace: '/tmp/agents/default',
+  }
+  for await (const _event of runner.run(session, 'one', new AbortController().signal)) { /* requests below */ }
+  // A ToolSearchTool result loaded Gamma, then Alpha (in that order).
+  session.messages.push(
+    { role: 'assistant', content: '', tool_calls: [{ id: 's1', type: 'function', function: { name: 'ToolSearchTool', arguments: { query: 'Gamma Alpha' } } }] },
+    { role: 'tool', tool_call_id: 's1', name: 'ToolSearchTool', content: `[{"${TOOL_SEARCH_LOADED_KEY}":"Gamma"},{"${TOOL_SEARCH_LOADED_KEY}":"Alpha"}]` },
+  )
+  for await (const _event of runner.run(session, 'two', new AbortController().signal)) { /* requests below */ }
+  const [first, second] = client.requests
+  const names = (request: CompletionRequest | undefined) => (request?.tools ?? []).map(entry => entry.function.name)
+  const system = (request: CompletionRequest | undefined) => request?.messages.filter(message => message.role === 'system').map(message => String(message.content)).join('\n')
+  // The earlier tools keep their positions; the loaded ones follow, in load order.
+  expect(names(second).slice(0, names(first).length)).toEqual(names(first))
+  expect(names(second).slice(names(first).length)).toEqual(['Gamma', 'Alpha'])
+  // Catalog, bootstrap and guidance describe the fixed core: no re-render.
+  expect(system(second)).toBe(system(first))
+})
+
+test('a harness-written prompt is tagged with its origin, live and in the saved transcript', async () => {
+  // Goal rounds used to render in the desktop as if the user had typed
+  // "Goal round 1/unlimited — …".
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-harness-origin-'))
+  const runtime = new InMemoryDaemonRuntime(new AgentTurnRunner({ llm: new TextClient(), model: 'test-model' }), {
+    currentProjectDirectory: directory, sessionDirectory: join(directory, 'sessions'),
+  })
+  try {
+    const session = await runtime.openSession('origin-tag')
+    const begins: Array<Record<string, unknown>> = []
+    const onEvent = (event: DaemonEvent) => { if (event.type === 'turn_begin') begins.push(event.payload) }
+    await runtime.submitTurn('origin-tag', 'human task', onEvent)
+    await runtime.submitTurn('origin-tag', 'Goal round 1/unlimited — ship it', onEvent, { goalRound: 1 })
+    await runtime.submitTurn('origin-tag', 'monitor saw a failure', onEvent, { origin: 'monitor' })
+    expect(begins.map(payload => payload.origin)).toEqual([undefined, 'goal', 'monitor'])
+    expect(begins[1]!.goal_round).toBe(1)
+    const users = session.messages.filter(message => message.role === 'user') as Array<{ origin?: string }>
+    expect(users.map(message => message.origin)).toEqual([undefined, 'goal', 'monitor'])
+  } finally { await runtime.shutdown(); await rm(directory, { recursive: true, force: true }) }
+})
+
+test('a prompt carries its display text from the moment it is appended, not only at turn end', async () => {
+  // A client that reloaded history mid-turn used to get the provider form —
+  // the model-only <turn-context> block — as the user's message.
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-display-on-append-'))
+  let seenMidTurn: Array<Record<string, unknown>> = []
+  const llm: LlmClient = {
+    async *stream(request) {
+      seenMidTurn = request.messages.filter(message => message.role === 'user') as unknown as Array<Record<string, unknown>>
+      yield { content: 'ok', usage: { inputTokens: 1, outputTokens: 1 } }
+    },
+  }
+  const runtime = new InMemoryDaemonRuntime(new AgentTurnRunner({ llm, model: 'test-model' }), {
+    currentProjectDirectory: directory, sessionDirectory: join(directory, 'sessions'),
+  })
+  try {
+    await runtime.openSession('display-on-append')
+    // The provider reads the expanded prompt; the transcript shows what was typed.
+    await runtime.submitTurn('display-on-append', 'expanded prompt with attached file contents', () => {}, { displayText: 'look at @a.ts' })
+    const typed = seenMidTurn.at(-1)!
+    expect(String(typed.content)).toContain('expanded prompt')
+    expect(typed.displayText).toBe('look at @a.ts')
+    expect(typed.origin).toBeUndefined()
+    await runtime.submitTurn('display-on-append', 'Goal round 1/unlimited — ship it', () => {}, { goalRound: 1 })
+    expect(seenMidTurn.at(-1)!.origin).toBe('goal')
+  } finally { await runtime.shutdown(); await rm(directory, { recursive: true, force: true }) }
 })

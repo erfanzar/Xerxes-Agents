@@ -3,7 +3,7 @@
 
 import type { ChatMessage } from '../types/messages.js'
 import type { ToolDefinition } from '../types/toolCalls.js'
-import { piCatalogModelCapabilities } from './piModelCatalog.js'
+import { wireCapability } from './modelsDev.js'
 
 /**
  * pi-ai's deferred-tool split (utils/deferred-tools.js): tools announced by a
@@ -52,44 +52,28 @@ export function splitDeferredTools(
 export type DeferredToolsMode = 'additional-tools' | 'kimi' | 'tool-reference' | 'tool-search'
 
 /**
- * Anthropic's native tool-reference support: pi-ai defaults it on for
- * first-party Claude models at version 4.5+ except Haiku, and honors an
- * explicit compat flag when the catalog carries one.
+ * Anthropic tool references, only where the provider reports support — no
+ * model-name or version rule. Unreported models send their tools up front
+ * (deferred loading is opt-in; this only trims tokens when it is on).
  */
 export function anthropicSupportsToolReferences(model: string, provider: string): boolean {
-  const compat = piCatalogModelCapabilities(model, provider)?.compat
-  if (compat?.supportsToolReferences === true) return true
-  if (compat?.supportsToolReferences === false) return false
-  const id = model.includes('/') ? model.slice(model.indexOf('/') + 1) : model
-  if (!id.startsWith('claude-')) return false
-  if (id.includes('haiku')) return false
-  const match = /claude-[a-z]+-(\d+)(?:-(\d+))?/.exec(id)
-  if (!match) return false
-  const major = Number(match[1])
-  const minor = Number(match[2] ?? '0')
-  return major > 4 || (major === 4 && minor >= 5)
+  return wireCapability({ provider, model }).toolReferences === true
 }
 
-/**
- * Responses-API deferred mode (pi-ai openai-responses.js): additional-tools
- * developer items win over the synthetic tool-search replay pair.
- */
+/** Responses-API deferred mode, only where reported: tool search (Codex `supports_search_tool`) or additional tools. */
 export function responsesDeferredToolsMode(
   provider: string,
   model: string,
 ): Extract<DeferredToolsMode, 'additional-tools' | 'tool-search'> | undefined {
-  const compat = piCatalogModelCapabilities(model, provider)?.compat
-  if (compat?.supportsAdditionalTools === true) return 'additional-tools'
-  if (compat?.supportsToolSearch === true) return 'tool-search'
-  return undefined
+  const capability = wireCapability({ provider, model })
+  if (capability.toolSearch === true) return 'tool-search'
+  return capability.additionalTools === true ? 'additional-tools' : undefined
 }
 
-/** Chat-completions deferred mode; Kimi's system-message-with-tools is the only one pi-ai ships. */
+/** Chat-completions deferred mode: Kimi's, where Kimi reports `supports_dynamic_tools`. */
 export function completionsDeferredToolsMode(
   provider: string,
   model: string,
 ): Extract<DeferredToolsMode, 'kimi'> | undefined {
-  return piCatalogModelCapabilities(model, provider)?.compat?.deferredToolsMode === 'kimi'
-    ? 'kimi'
-    : undefined
+  return wireCapability({ provider, model }).dynamicTools === true ? 'kimi' : undefined
 }

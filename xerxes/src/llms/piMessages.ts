@@ -22,6 +22,7 @@ import { messageText } from '../types/messages.js'
 import type { JsonObject, ToolChoice, ToolDefinition } from '../types/toolCalls.js'
 import type { CompletionRequest, FetchImplementation, LlmClient, LlmCompletion, LlmDelta, TokenUsage } from './client.js'
 import { collectLlmCompletion } from './client.js'
+import { credentialFingerprint } from './credentialFingerprint.js'
 
 /** Pi thinking levels the wire accepts; Xerxes effort hints are a subset. */
 const PI_THINKING_LEVELS = new Set(['minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
@@ -472,6 +473,11 @@ export interface PiMessagesClientOptions {
  * providerRegistry.ts, and the client itself must not depend on it.
  */
 export class PiMessagesClient implements LlmClient {
+  /** Identity of the configured key (see credentialFingerprint). */
+  async authFingerprint(): Promise<string | undefined> {
+    return this.apiKey ? credentialFingerprint({ authorization: `Bearer ${this.apiKey}` }) : undefined
+  }
+
   private readonly apiKey: string
   private readonly baseUrl: string
   private readonly debug: boolean

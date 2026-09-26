@@ -60,6 +60,19 @@ describe('fileAtRow', () => {
     expect(fileAtRow(files, 7)).toBe(1)
     expect(fileAtRow(files, 99)).toBe(1)
   })
+
+  it('never assigns a row to an index entry without a section', () => {
+    // The panel appends untracked files the diff omitted with line -1.
+    const files = [
+      ...indexDiffFiles(DIFF),
+      { deletions: 0, insertions: 0, line: -1, name: 'new-a.ts' },
+      { deletions: 0, insertions: 0, line: -1, name: 'new-b.ts' }
+    ]
+
+    expect(fileAtRow(files, 0)).toBe(0)
+    expect(fileAtRow(files, 99)).toBe(1)
+    expect(fileIndexFollowingRow(files, 0, 3)).toBe(0)
+  })
 })
 
 describe('fileIndexFollowingRow', () => {

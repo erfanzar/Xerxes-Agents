@@ -52,24 +52,35 @@ import { generateProjectAgent } from "../agents/projectGenerator.js";
 import { AgentPresetRoster, type AgentPresetEntry } from "../agents/presets.js";
 import { CodexSession, fetchCodexModelCatalog } from "../auth/codexAuth.js";
 import { profileQuota } from '../auth/profileUsage.js';
-import { collectSubscriptionUsage, formatUsageReport } from "../auth/usage.js";
+import { buildUsageReport, UsageReportCache } from "../auth/usageReport.js";
+import { formatUsageText, parseUsageReport } from "../auth/usageView.js";
+import { claudeCodeCatalog, claudeCodeReasoningLevels } from "../llms/claudeCodeCatalog.js";
+import { modelsDev, reportModelCapability } from "../llms/modelsDev.js";
 import { CopilotSession, fetchCopilotModels } from "../auth/copilotAuth.js";
 import {
   fallbackReasoningLevels,
   providerReasoningLevels,
   REASONING_OFF,
   catalogReasoningLevels,
-  clampEffort,
+  liveReasoningLevels,
+  reasoningUnreported,
   reasoningShapeNote,
   resolveEffort,
   selectableEfforts,
   type ReasoningLevelSet,
 } from "../llms/reasoningLevels.js";
 import {
+  CLAUDE_CODE_PROFILE_NAME,
+  CODEX_PROFILE_BASE_URL,
+  CODEX_PROFILE_NAME,
   ProfileStore,
+  profileLabel,
   resolvedProfileMaxOutputTokens,
+  reportedModelCost,
+  reportedModelReasoning,
   resolvedProfileModelCapabilities,
   SAMPLING_PARAMS,
+  type ProviderModelCapabilities,
   type ProviderProfile,
 } from "../bridge/profiles.js";
 import {
@@ -402,6 +413,8 @@ export const CONCURRENT_DISPATCH_METHODS: ReadonlySet<string> = new Set([
   // Network and model round-trips: a slow push must not stall the panel's
   // own status refreshes queued behind it.
   "git.commitMessage",
+  // Provider quota endpoints: slow networks must not stall the client's queue.
+  "usage.report",
   "git.fetch",
   "git.pull",
   "git.push",
@@ -1046,6 +1059,8 @@ export class DaemonServer {
   private readonly ptySessions: PtySessionManager | undefined;
   /** Live output subscriptions per client: terminal id → unsubscribe. */
   private readonly terminalWatches = new Map<DaemonTransportConnection, Map<string, () => void>>();
+  /** Plan-usage answers per credential, shared by every client for a minute. */
+  private readonly usageCache = new UsageReportCache();
   private readonly reactionMailbox: ReactionMailbox | undefined;
   private readonly reactionDispatcher: ReactionDispatcher | undefined;
   private readonly runHistory: RunHistory | undefined;
@@ -1179,17 +1194,36 @@ export class DaemonServer {
     this.remoteProviderBindings = options.remoteProviderBindings;
     // Only the process-owning host opts in; embeddings remain network-silent.
     this.autoDiscoverModelCapabilities = options.autoDiscoverModelCapabilities ?? false;
+    // What providers reported earlier (saved on each profile) is known to the
+    // request builders from the start, before this run rediscovers it.
+    for (const profile of this.profileStore.list()) {
+      for (const model of Object.keys(profile.model_capabilities ?? {})) {
+        const reasoning = reportedModelReasoning(profile, model);
+        const cost = reportedModelCost(profile, model);
+        if (reasoning || cost) reportModelCapability(profile.provider, model, { ...(reasoning ? { reasoning } : {}), ...(cost ? { cost } : {}) });
+      }
+    }
     this.providerModelDiscovery =
       options.providerModelDiscovery ??
       {
-        discover: (input) =>
-          discoverModelIds({
+        // Each provider's own model list: Claude Code's CLI, the plan's
+        // Codex catalog, or the endpoint's /models — never a built-in list.
+        discover: async (input) => {
+          if (input.provider === "claude-code") {
+            return (await claudeCodeCatalog.load()).map((entry) => `claude-code/${entry.value}`);
+          }
+          if (input.provider === "openai-codex") {
+            const catalog = await this.codexModelCatalog({ name: "codex", provider: "openai-codex", api_key: "", base_url: input.baseUrl || CODEX_PROFILE_BASE_URL, model: "", sampling: {} });
+            return catalog.map((model) => model.id);
+          }
+          return discoverModelIds({
             allowPrivateEndpoint: true,
             apiKey: input.apiKey,
             baseUrl: input.baseUrl,
             provider: input.provider,
             resolveProviderCredential: false,
-          }),
+          });
+        },
       };
     this.default_mcpManager = options.mcpManager;
     this.mcpSettingsStore = options.mcpSettingsStore;
@@ -2138,6 +2172,12 @@ export class DaemonServer {
           : null,
       };
     }
+    if (method === "usage.report") {
+      // Every imported provider profile with its plan windows (or why there
+      // are none), plus this session's own token use — one call for both the
+      // desktop Usage tab and the TUI's /usage view.
+      return this.usageReportView(this.runtime.sessionStatus(sessionKey(connection, params)) ?? undefined, params.refresh === true);
+    }
     if (method === "session.usage") {
       const session = this.runtime.sessionStatus(
         sessionKey(connection, params),
@@ -2753,7 +2793,7 @@ export class DaemonServer {
     if (method === "agent.settings.options") {
       const profileName = stringValue(params.provider_profile).trim();
       const profile = profileName ? this.profileStore.get(profileName) : this.profileStore.active();
-      if (!profile || profile.provider === "claude-code") throw new Error("Choose an available provider profile");
+      if (!profile) throw new Error("Choose an available provider profile");
       const model = stringValue(params.model).trim() || profile.model;
       const levels = await this.reasoningLevels(model, profile);
       return { ok: true, model, reasoning_efforts: selectableEfforts(levels) };
@@ -2773,14 +2813,14 @@ export class DaemonServer {
       const store = this.agentSettingsStore;
       if (method === "agent.settings.get") {
         const saved = store.read();
-        return { ok: true, ...saved, settings: saved.settings ?? parseAgentIntelligenceConfig(this.agentSettingsDefaults), profiles: this.profileStore.list().filter(profile => profile.provider !== "claude-code").map(profile => ({ name: profile.name, provider: profile.provider, model: profile.model })) };
+        return { ok: true, ...saved, settings: saved.settings ?? parseAgentIntelligenceConfig(this.agentSettingsDefaults), profiles: this.profileStore.list().map(profile => ({ name: profile.name, label: profileLabel(profile.name), provider: profile.provider, model: profile.model })) };
       }
       const settings = parseAgentIntelligenceConfig(params.settings);
       for (const tier of AGENT_INTELLIGENCE_LEVELS) {
         const value = settings[tier];
         if (!value || typeof value === "string") continue;
         const profile = value.provider_profile ? this.profileStore.get(value.provider_profile) : this.profileStore.active();
-        if (!profile || profile.provider === "claude-code") throw new Error(`Choose an available provider profile for ${tier}`);
+        if (!profile) throw new Error(`Choose an available provider profile for ${tier}`);
         const levels = await this.reasoningLevels(value.model, profile);
         if (value.reasoning_effort && !selectableEfforts(levels).includes(value.reasoning_effort)) throw new Error(`Unsupported reasoning effort for ${tier}: ${value.reasoning_effort}`);
       }
@@ -3119,7 +3159,10 @@ export class DaemonServer {
         const models = localProviderSelections(session.metadata).filter(route => params.profile_name === undefined || route.profile === params.profile_name).map(route => route.model);
         return {ok:true,models,source:'approved_local_setup'};
       }
-      return this.fetchModels(params);
+      const found = await this.fetchModels(params);
+      // The picker groups by the serving profile's own label ("Claude Code"),
+      // never by guessing a family from the model id.
+      return typeof found.profile === "string" ? { ...found, profile_label: profileLabel(found.profile) } : found;
     }
     if (method === "provider_model_override") {
       return this.updateProviderModelOverride(connection, params);
@@ -3157,7 +3200,7 @@ export class DaemonServer {
       // this session is not running at (the picker looked "stuck on off").
       return {
         ok: true,
-        current: this.sessionReasoningEffort(activeSession),
+        current: this.sessionReasoningEffort(activeSession, set),
         default: set.defaultEffort ?? null,
         // An `inherent` provider yields no selectable efforts at all, so the
         // panel shows the note rather than a menu that cannot change anything.
@@ -3840,6 +3883,41 @@ export class DaemonServer {
     this.runtime.reload(profileOverrides(active));
     await this.emitProviderInit(connection);
     return { ok: true };
+  }
+
+  /** Token use plus the measured timings — what the Usage views call "session statistics". */
+  private sessionUsageReportPayload(session: DaemonSession): JsonRpcPayload {
+    return {
+      ...sessionUsagePayload(session, this.contextLimit(session.model, session)),
+      turn_count: session.turnCount,
+      ...sessionRuntimeTelemetryPayload(session.extra.runtime_telemetry),
+      ...(() => { const cost = session.model ? this.sessionCost(session, session.model) : undefined; return cost === undefined ? {} : { cost_usd: cost }; })(),
+    };
+  }
+
+  private async usageReportView(session: DaemonSession | undefined, refresh: boolean): Promise<JsonRpcPayload> {
+    // "Active" means the profile this session runs on, not the global default.
+    const current = session ? this.sessionProfileName(session) : null;
+    const listed = this.profileStore.list().map(profile => current ? { ...profile, active: profile.name === current } : profile);
+    const builtIn = new Set(listed.filter(profile => !profile.api_key && (profile.name === CLAUDE_CODE_PROFILE_NAME || profile.name === CODEX_PROFILE_NAME)).map(profile => profile.name));
+    const profiles = await buildUsageReport(listed, { cache: this.usageCache, refresh, hideWhenSignedOut: builtIn });
+    return {
+      ok: true,
+      fetched_at: Date.now(),
+      profiles: profiles as unknown as JsonRpcPayload[],
+      ...(session ? { session: this.sessionUsageReportPayload(session) } : {}),
+    };
+  }
+
+  /** USD for the session's tokens at the prices its provider (or models.dev) publishes; undefined when none does. */
+  private sessionCost(session: DaemonSession, model: string): number | undefined {
+    const name = this.sessionProfileName(session);
+    const profile = name ? this.profileStore.get(name) : undefined;
+    const reported = profile?.model_capabilities?.[model]?.cost;
+    return calcCost(model, session.totalInputTokens, session.totalOutputTokens, {
+      ...(profile ? { provider: profile.provider, baseUrl: profile.base_url } : {}),
+      ...(reported ? { reported: { ...(reported.input === undefined ? {} : { input: reported.input }), ...(reported.output === undefined ? {} : { output: reported.output }), ...(reported.cache_read === undefined ? {} : { cacheRead: reported.cache_read }), ...(reported.cache_write === undefined ? {} : { cacheWrite: reported.cache_write }) } } : {}),
+    });
   }
 
   private sessionProfileName(session: DaemonSession): string | null {
@@ -4537,7 +4615,7 @@ export class DaemonServer {
     signal?.throwIfAborted();
     if (!name.trim() || name.length > 512 || !model.trim() || model.length > 512 || (effort !== undefined && (!effort.trim() || effort.length > 64))) throw new Error("Invalid agent provider/model/reasoning selection");
     const profile = this.profileStore.get(name);
-    if (!profile || profile.provider === "claude-code") throw unavailableAgentProfile(name, model, this.profileStore.list());
+    if (!profile) throw unavailableAgentProfile(name, model, this.profileStore.list());
     const identity = (value: ProviderProfile | undefined) => value ? JSON.stringify([value.name, value.provider, value.model, value.base_url, value.api_key, value.sampling, value.model_overrides]) : undefined;
     const fingerprint = identity(profile);
     const catalog = await this.fetchModels({ profile_name: name });
@@ -4545,7 +4623,13 @@ export class DaemonServer {
     if (catalog.ok !== true) throw new Error(stringValue(catalog.error) || "Agent model discovery failed");
     const models = Array.isArray(catalog.models) ? catalog.models : [];
     if (model !== profile.model && !models.includes(model)) throw new Error("Model is not configured or discovered for agent provider " + name + ": " + model);
-    if (effort !== undefined && !selectableEfforts(await this.reasoningLevels(model, profile)).includes(effort)) throw new Error("Unsupported reasoning effort for agent model " + model + ": " + effort);
+    if (effort !== undefined) {
+      // Refuse only against levels something reported; unreported ones pass
+      // through. Read the profile again: discovery just saved what the
+      // provider reported about its models.
+      const levels = await this.reasoningLevels(model, this.profileStore.get(name) ?? profile);
+      if (!reasoningUnreported(levels) && !selectableEfforts(levels).includes(effort)) throw new Error("Unsupported reasoning effort for agent model " + model + ": " + effort);
+    }
     signal?.throwIfAborted();
     if (identity(this.profileStore.get(name)) !== fingerprint) throw new Error("Agent provider changed during validation; retry the selection");
   }
@@ -4591,13 +4675,34 @@ export class DaemonServer {
       profile.provider === "claude-code" ||
       profile.base_url.startsWith("claude-code://")
     ) {
-      return {
-        ok: true,
-        models: fallbackModels,
-        catalog: fallbackModels.map(model => modelCapabilityPayload(profile, model)),
-        profile: profile.name,
-        source: "profile",
-      };
+      // Asked of Claude Code itself: the models this sign-in offers, with
+      // their names, descriptions and stated windows. Never a built-in list.
+      try {
+        const entries = await claudeCodeCatalog.load(params.refresh === true);
+        const discovered = entries.map(entry => ({ id: `claude-code/${entry.value}`, ...(entry.contextLimit ? { contextLimit: entry.contextLimit } : {}) }));
+        this.rememberDiscoveredContextLimits(profile, discovered);
+        return {
+          ok: true,
+          models: discovered.map(model => model.id),
+          catalog: entries.map(entry => ({
+            ...modelCapabilityPayload(profile, `claude-code/${entry.value}`),
+            display_name: entry.displayName,
+            ...(entry.description ? { description: entry.description } : {}),
+            ...(entry.resolvedModel ? { resolved_model: entry.resolvedModel } : {}),
+          })),
+          profile: profile.name,
+          source: "provider",
+        };
+      } catch (error) {
+        return {
+          ok: true,
+          models: fallbackModels,
+          catalog: fallbackModels.map(model => modelCapabilityPayload(profile, model)),
+          profile: profile.name,
+          source: "profile",
+          warning: errorMessage(error),
+        };
+      }
     }
 
     if (
@@ -4838,10 +4943,7 @@ export class DaemonServer {
     for (const key of this.discoveredContextLimits.keys()) {
       if (key.startsWith(profilePrefix)) this.discoveredContextLimits.delete(key);
     }
-    const capabilities: Record<string, {
-      readonly context_limit?: number;
-      readonly max_output_tokens?: number;
-    }> = Object.create(null);
+    const capabilities: Record<string, ProviderModelCapabilities> = Object.create(null);
     for (const model of models) {
       if (model.contextLimit !== undefined) {
         this.discoveredContextLimits.set(
@@ -4849,17 +4951,30 @@ export class DaemonServer {
           model.contextLimit,
         );
       }
+      // Request builders read what the provider said about this model.
+      reportModelCapability(profile.provider, model.id, {
+        ...(model.reasoning ? { reasoning: model.reasoning } : {}),
+        ...(model.cost ? { cost: model.cost } : {}),
+        ...(model.dynamicTools === undefined ? {} : { dynamicTools: model.dynamicTools }),
+      });
+      // Everything the provider said about the model, kept like Kimi Code
+      // keeps it: sizes, its own name, how it reasons, and its prices.
       capabilities[model.id] = {
         ...(model.contextLimit === undefined ? {} : { context_limit: model.contextLimit }),
         ...(model.maxOutputTokens === undefined ? {} : { max_output_tokens: model.maxOutputTokens }),
+        ...(model.displayName ? { display_name: model.displayName } : {}),
+        ...(model.reasoning ? { reasoning: { supported: model.reasoning.supported, can_disable: model.reasoning.canDisable, efforts: model.reasoning.efforts, ...(model.reasoning.defaultEffort ? { default_effort: model.reasoning.defaultEffort } : {}) } } : {}),
+        ...(model.cost ? { cost: { ...(model.cost.input === undefined ? {} : { input: model.cost.input }), ...(model.cost.output === undefined ? {} : { output: model.cost.output }), ...(model.cost.cacheRead === undefined ? {} : { cache_read: model.cost.cacheRead }), ...(model.cost.cacheWrite === undefined ? {} : { cache_write: model.cost.cacheWrite }) } } : {}),
       };
     }
     this.profileStore.replaceModelCapabilities(profile.name, capabilities);
   }
 
-  private sessionReasoningEffort(session?: DaemonSession): string {
+  private sessionReasoningEffort(session?: DaemonSession, set?: ReasoningLevelSet): string {
     if (session && Object.hasOwn(session.metadata, LOCAL_PROVIDER_BINDING)) return session.reasoningEffort || 'local default';
-    return session?.reasoningEffort || stringValue(this.runtime.status().reasoning_effort) || REASONING_OFF;
+    // Unset is "off" only where off exists; a model that cannot disable
+    // thinking is running at the provider's own default instead.
+    return session?.reasoningEffort || stringValue(this.runtime.status().reasoning_effort) || (set?.canDisable === false ? '' : REASONING_OFF);
   }
 
   private contextLimit(model: string, session?: DaemonSession): number {
@@ -5065,34 +5180,11 @@ export class DaemonServer {
         return inspected;
       }
       case "usage": {
-        if (!session) {
-          this.emitSlash(connection, "No active session yet.", "warning");
-          return { ok: false, error: "no active session" };
-        }
-        const section = formatSessionUsage(
-          session,
-          this.contextLimit(session.model, session),
-        );
-        // Subscription quota joins the session block only when a provider
-        // answers; a fetch failure or missing login must never hide the
-        // local usage the command already had.
-        let subscriptionSection = "";
-        try {
-          const collection = await collectSubscriptionUsage(undefined, {
-            profiles: this.profileStore.list(),
-          });
-          if (collection.reports.length) {
-            subscriptionSection = [
-              "",
-              "Subscription usage:",
-              ...collection.reports.map((report) => `  ${formatUsageReport(report)}`),
-            ].join("\n");
-          }
-        } catch {
-          // Keep the session report usable when the network is unavailable.
-        }
-        this.emitSlash(connection, `${section}${subscriptionSection}`);
-        return { ok: true };
+        // Same report as the Usage views: session statistics plus every
+        // imported profile's plan windows, balance, or the reason there are none.
+        const report = await this.usageReportView(session ?? undefined, /\brefresh\b/.test(args));
+        this.emitSlash(connection, formatUsageText(parseUsageReport(report)));
+        return report;
       }
       case "history":
         if (!session) {
@@ -5605,7 +5697,7 @@ export class DaemonServer {
     // list would both reject valid levels and accept ones the backend 400s on.
     // A known ladder word the model lacks clamps to its nearest rung
     // (pi-ai clampThinkingLevel); an unknown word stays a usage error.
-    const resolved = resolveEffort(levels, requested) ?? clampEffort(levels, requested);
+    const resolved = resolveEffort(levels, requested);
     if (!resolved) {
       this.emitSlash(
         connection,
@@ -5704,11 +5796,22 @@ export class DaemonServer {
     const model = modelOverride?.trim() || stringValue(status.model) || "";
     const profile = profileOverride ?? this.profileStore.active();
     const providerName = resolveProviderSafely(model, profile);
-    // The generated Pi catalog knows each model's real ladder
-    // (thinking_level_map); the static provider table is only the last resort
-    // for models the catalog does not carry.
-    const catalog = catalogReasoningLevels(model, providerName);
 
+    // Only a Claude Code model asks Claude Code; the built-in `cc` profile is
+    // merely the fallback for sessions whose model is something else.
+    if (providerName === "claude-code" && /^claude[-_]code\//i.test(model)) {
+      // What Claude Code reports for this model: its effort levels, and
+      // whether thinking can be switched off at all (adaptive thinking cannot).
+      try {
+        await claudeCodeCatalog.load();
+      } catch { /* No sign-in or no CLI: nothing reported, nothing offered. */ }
+      return claudeCodeReasoningLevels(claudeCodeCatalog.find(model));
+    }
+    // Kimi Code's order: what the provider's own /models said about this
+    // model, else models.dev, else nothing (no ladder is ever invented).
+    const reported = liveReasoningLevels(reportedModelReasoning(profile, model), "provider");
+    await modelsDev.load();
+    const catalog = reported ?? catalogReasoningLevels(model, providerName, profile?.base_url);
     if (providerName !== "openai-codex") {
       return catalog ?? fallbackReasoningLevels(providerName);
     }
@@ -7539,18 +7642,16 @@ export class DaemonServer {
       return { ok: false, error: "no active session" };
     }
     const model = session.model || stringValue(this.runtime.status().model);
-    const cost = calcCost(
-      model,
-      session.totalInputTokens,
-      session.totalOutputTokens,
-    );
+    const cost = this.sessionCost(session, model);
     this.emitSlash(
       connection,
-      `Estimated cost: \`$${cost.toFixed(4)}\` (model: \`${model || "(not configured)"}\`).`,
+      cost === undefined
+        ? `No published price for \`${model || "(not configured)"}\`, so the cost is unknown.`
+        : `Estimated cost: \`$${cost.toFixed(4)}\` (model: \`${model || "(not configured)"}\`).`,
     );
     return {
       ok: true,
-      cost_usd: cost,
+      ...(cost === undefined ? {} : { cost_usd: cost }),
       model,
       input_tokens: session.totalInputTokens,
       output_tokens: session.totalOutputTokens,
@@ -9236,9 +9337,19 @@ export class DaemonServer {
     name: string,
   ): Promise<JsonRpcPayload> {
     this.cancelProviderFlow(connection);
-    const chosen = this.profileStore.get(name);
+    let chosen = this.profileStore.get(name);
     if (!name || !chosen) {
       return { ok: false, error: `No provider profile named ${name}` };
+    }
+    if (!chosen.model.trim()) {
+      // No model saved (the built-in profiles carry none): take the first one
+      // the provider reports, and keep it on the profile.
+      const found = await this.fetchModels({ profile_name: name });
+      const first = Array.isArray(found.models) ? String(found.models[0] ?? "").trim() : "";
+      if (!first) {
+        return { ok: false, error: `${name} reported no models${typeof found.warning === "string" ? ` (${found.warning})` : ""}. Check its sign-in, then choose a model with /model.` };
+      }
+      chosen = this.profileStore.save({ name, provider: chosen.provider, apiKey: chosen.api_key, baseUrl: chosen.base_url, model: first, setActive: false });
     }
     if (chosen.provider !== 'claude-code' && !profileAcceptsModel(chosen, chosen.model)) {
       return { ok: false, error: `Provider ${name} cannot serve its configured model ${chosen.model}. Use /model to choose a supported model.` };
@@ -9393,8 +9504,7 @@ export class DaemonServer {
     const levels = await this.sessionReasoningLevels(active);
     if (!levels) return { ok: false, error: 'Local reasoning capabilities are unavailable. Reopen this SSH task and authorize its local provider using an updated local TUI and daemon.', levels: [] };
     const offered = selectableEfforts(levels);
-    const resolved = resolveEffort(levels, requested)
-      ?? clampEffort(levels, requested);
+    const resolved = resolveEffort(levels, requested);
     if (!resolved) {
       return {
         ok: false,
@@ -11002,18 +11112,13 @@ function sessionPayload(
     output_tokens: session.totalOutputTokens,
     total_tokens: session.totalInputTokens + session.totalOutputTokens,
     ...sessionRuntimeTelemetryPayload(session.extra.runtime_telemetry),
-    // Same estimate the /cost slash reports, now on the session wire: an
-    // unknown model prices at 0, and a session without a model omits the
-    // field rather than implying a free run.
-    ...(session.model
-      ? {
-          cost_usd: calcCost(
-            session.model,
-            session.totalInputTokens,
-            session.totalOutputTokens,
-          ),
-        }
-      : {}),
+    // Same estimate the /cost slash reports, from published prices only: a
+    // model nobody prices (or a session without a model) omits the field
+    // rather than implying a free run.
+    ...(() => {
+      const cost = session.model ? calcCost(session.model, session.totalInputTokens, session.totalOutputTokens) : undefined;
+      return cost === undefined ? {} : { cost_usd: cost };
+    })(),
     mcp_status: mcpStatus,
     context_tokens: contextTokens,
     context_limit: contextLimit,
@@ -11039,7 +11144,11 @@ function sessionRuntimeTelemetryPayload(value: unknown): JsonRpcPayload {
     const candidate = record[key]
     return typeof candidate === 'number' && Number.isFinite(candidate) && candidate >= 0 ? candidate : 0
   }
-  const cacheHitRate = record.cacheTelemetryKnown === true ? Math.min(1, metric('cacheHitRate')) : null
+  // Recomputed from the stored counts: a rate saved before cache writes were
+  // counted reads 100% beside millions of tokens written.
+  const cachePrompt = metric('inputTokens') + metric('cacheReadTokens') + metric('cacheWriteTokens')
+  const cacheHitRate = record.cacheTelemetryKnown !== true ? null
+    : cachePrompt > 0 ? metric('cacheReadTokens') / cachePrompt : Math.min(1, metric('cacheHitRate'))
   const llmDurationMs = metric('llmDurationMs')
   const llmSteps = Math.trunc(metric('llmSteps'))
   const toolDurationMs = metric('toolDurationMs')
@@ -11053,6 +11162,7 @@ function sessionRuntimeTelemetryPayload(value: unknown): JsonRpcPayload {
   const ttftTotalMs = metric('ttftTotalMs')
   return {
     ...(cacheHitRate === null ? {} : { cache_hit_rate: cacheHitRate }),
+    ...(record.cacheTelemetryKnown === true ? { cache_read_tokens: metric('cacheReadTokens'), cache_write_tokens: metric('cacheWriteTokens') } : {}),
     llm_duration_ms: llmDurationMs,
     llm_steps: llmSteps,
     tool_duration_ms: toolDurationMs,
@@ -11338,15 +11448,10 @@ function statusUpdatePayload(
     max_context: contextLimit,
     input_tokens: session.totalInputTokens,
     output_tokens: session.totalOutputTokens,
-    ...(model
-      ? {
-          cost_usd: calcCost(
-            model,
-            session.totalInputTokens,
-            session.totalOutputTokens,
-          ),
-        }
-      : {}),
+    ...(() => {
+      const cost = model ? calcCost(model, session.totalInputTokens, session.totalOutputTokens) : undefined;
+      return cost === undefined ? {} : { cost_usd: cost };
+    })(),
     ...(calls === undefined ? {} : { calls }),
     calls_complete: calls !== undefined,
     ...(calls === undefined && session.totalApiCalls !== undefined
@@ -11694,26 +11799,6 @@ function completionDirectory(prefix: string, cwd: string): string {
   return isAbsolute(expanded) ? resolve(expanded) : resolve(cwd, expanded);
 }
 
-function formatSessionUsage(
-  session: DaemonSession,
-  contextLimit: number,
-): string {
-  const total = session.totalInputTokens + session.totalOutputTokens;
-  const calls = exactSessionApiCalls(session);
-  const contextUsed = sessionContextTokens(session, session.model);
-  return [
-    `Model: ${session.model || "(not configured)"}`,
-    `Messages: ${session.messages.length}`,
-    `Turns: ${session.turnCount}`,
-    `Input tokens: ${session.totalInputTokens}`,
-    `Output tokens: ${session.totalOutputTokens}`,
-    `Total tokens: ${total}`,
-    `API calls: ${calls === undefined ? "unknown (imported session)" : calls}`,
-    `Context used: ${contextUsed}`,
-    `Context window: ${contextLimit || "unknown"}`,
-  ].join("\n");
-}
-
 function formatSessionHistory(session: DaemonSession): string {
   return [
     `Messages: ${session.messages.length}`,
@@ -11932,6 +12017,7 @@ function profilePayload(
 ): JsonRpcPayload {
   return {
     name: profile.name,
+    label: profileLabel(profile.name),
     base_url: profile.base_url,
     model: profile.model,
     provider: profile.provider,
@@ -11955,10 +12041,38 @@ function providerTypePayloads(): JsonRpcPayload[] {
   }));
 }
 
+/**
+ * A model's name and description for the picker: the provider's own answer
+ * first (Claude Code's CLI names its models), then models.dev. A
+ * subscription adapter is looked up under the vendor whose models it serves,
+ * and a Claude Code alias (`opus[1m]`) by the model it resolves to.
+ */
+export function describedModel(
+  profile: Pick<ProviderProfile, "provider" | "base_url">,
+  model: string,
+  catalogs: { readonly modelsDev: Pick<typeof modelsDev, "find">; readonly claudeCode: Pick<typeof claudeCodeCatalog, "find"> } = { modelsDev, claudeCode: claudeCodeCatalog },
+): { displayName?: string; description?: string } {
+  const config = Object.prototype.hasOwnProperty.call(PROVIDERS, profile.provider)
+    ? PROVIDERS[profile.provider as keyof typeof PROVIDERS] as { readonly modelsDevVendor?: string }
+    : undefined;
+  const claudeCode = profile.provider === "claude-code" ? catalogs.claudeCode.find(model) : undefined;
+  const lookupModel = claudeCode?.resolvedModel?.replace(/\[[^\]]*\]$/, "") ?? model;
+  const vendor = config?.modelsDevVendor;
+  const catalog = catalogs.modelsDev.find(vendor ? { model: lookupModel, provider: vendor } : { model: lookupModel, provider: profile.provider, ...(profile.base_url ? { baseUrl: profile.base_url } : {}) });
+  const displayName = claudeCode?.displayName ?? catalog?.displayName;
+  const description = claudeCode?.description ?? catalog?.description;
+  return { ...(displayName ? { displayName } : {}), ...(description ? { description } : {}) };
+}
+
 function modelCapabilityPayload(profile: ProviderProfile, model: string): JsonRpcPayload {
   const resolved = resolvedProfileModelCapabilities(profile, model);
+  // The model's own name and description: the provider's /models entry first, then models.dev.
+  const described = describedModel(profile, model);
+  const displayName = profile.model_capabilities?.[model]?.display_name ?? described.displayName;
   return {
     id: model,
+    ...(displayName && displayName !== model ? { display_name: displayName } : {}),
+    ...(described.description ? { description: described.description } : {}),
     ...(resolved.contextLimit === undefined ? {} : { context_limit: resolved.contextLimit }),
     ...(resolved.contextSource === "unknown" ? {} : { context_source: resolved.contextSource }),
     ...(resolved.maxOutputTokens === undefined ? {} : { max_output_tokens: resolved.maxOutputTokens }),

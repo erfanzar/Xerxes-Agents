@@ -90,6 +90,46 @@ export interface AgentMemoryFile {
   readonly type: string
 }
 
+/** One memory file's raw text, as {@link AgentMemory.promptSources} reads it. */
+export interface MemorySourceText {
+  readonly scope: string
+  readonly path: string
+  readonly content: string
+}
+
+/**
+ * What changed in memory between two reads, for delivery alongside a user
+ * message: the appended part of an append-only file (EXPERIENCES.md, a
+ * journal), the new text of a rewritten one, and deleted names. Bodies are
+ * fenced as data exactly like the prompt section's. Empty when nothing
+ * changed.
+ */
+export function renderMemoryChanges(
+  before: ReadonlyMap<string, MemorySourceText>,
+  after: ReadonlyMap<string, MemorySourceText>,
+): string {
+  const blocks: string[] = []
+  for (const [key, now] of after) {
+    const old = before.get(key)?.content
+    if (old === now.content) continue
+    const appended = old !== undefined && now.content.startsWith(old)
+    const text = (appended ? now.content.slice(old.length) : now.content).trim()
+    if (!text) continue
+    const label = old === undefined ? 'new' : appended ? 'appended' : 'rewritten, now reads'
+    const clipped = clipMemoryText(text, MAX_MEMORY_FILE_PROMPT_BYTES, `${now.path} change`)
+    blocks.push(`### [${now.scope}] ${now.path} (${label})\n\n` + buildMemoryContextBlock(scanContextContent(clipped, `agent memory: ${now.path}`)))
+  }
+  for (const [key, old] of before) {
+    if (!after.has(key)) blocks.push(`### [${old.scope}] ${old.path} (deleted)`)
+  }
+  if (!blocks.length) return ''
+  return clipMemoryText([
+    '## Memory written since this conversation began',
+    'Your persistent memory section was loaded when the conversation started; these are later changes to it.',
+    ...blocks,
+  ].join('\n\n'), MAX_MEMORY_SECTION_BYTES / 2, 'memory changes')
+}
+
 export interface MemoryPromptOptions {
   /** Text this conversation has already shown; matching topics are dropped before ranking. */
   readonly alreadySurfaced?: string
@@ -308,6 +348,34 @@ export class AgentMemory {
    * Concatenating every topic body — the previous behaviour — grew without
    * bound and pushed the actual task out of the useful context window.
    */
+  /**
+   * The raw text of every file the prompt section can draw on, keyed by
+   * scope and path. A session renders the section once and diffs these on
+   * later turns ({@link renderMemoryChanges}), so memory written mid-session
+   * reaches the model without rebuilding the system prompt — a rebuilt prompt
+   * invalidates the provider's cache for the whole conversation behind it.
+   */
+  async promptSources(
+    options: Pick<MemoryPromptOptions, 'excludedSources' | 'pinnedMemories'> = {},
+  ): Promise<Map<string, MemorySourceText>> {
+    validateMemoryPromptControls(options)
+    const skipped = new Set([...(options.excludedSources ?? []), ...(options.pinnedMemories ?? [])]
+      .map(source => memorySourceKey(source.scope, source.path)))
+    await this.ensure()
+    const sources = new Map<string, MemorySourceText>()
+    for (const entry of await this.listFiles()) {
+      if (sources.size >= MAX_MEMORY_PROMPT_SOURCES) break
+      const key = memorySourceKey(entry.scope, entry.path)
+      if (!entry.path.endsWith('.md') || entry.bytes <= 0 || !this.shouldIncludeInPrompt(entry.path) || skipped.has(key)) continue
+      try {
+        sources.set(key, { scope: entry.scope, path: entry.path, content: await this.read(entry.scope, entry.path) })
+      } catch {
+        continue
+      }
+    }
+    return sources
+  }
+
   async toPromptSection(options: MemoryPromptOptions = {}): Promise<string> {
     validateMemoryPromptControls(options)
     const maxBytesPerFile = validateLimit(options.maxBytesPerFile ?? MAX_MEMORY_FILE_PROMPT_BYTES)
@@ -618,7 +686,7 @@ export const MEMORY_CONTAINER_RULE = [
 export const MEMORY_STALENESS_RULE =
   'Every memory is a point-in-time observation, not current state: any file, line, or symbol it names may have '
   + 'moved, been renamed, or been deleted since it was written, so confirm it with a read or a search before '
-  + 'acting on it or recommending it.'
+  + 'acting on it or recommending it. Use only memories that bear on the current request.'
 
 /**
  * What never belongs in memory, scoped to what Xerxes can re-derive on demand.

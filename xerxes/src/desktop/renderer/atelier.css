@@ -132,7 +132,7 @@ summary:focus-visible,a:focus-visible,[tabindex]:not([tabindex='-1']):focus-visi
 .studio-sheet button{border:0;border-radius:6px;padding:7px 10px;cursor:pointer;color:var(--x-title);background:transparent;font-size:var(--ui-font)}
 .studio-sheet button:hover{background:var(--x-selected)}
 .studio-sheet button:disabled{opacity:.45;cursor:default}
-.studio-sheet .studio-primary{background:var(--x-title);color:var(--x-screen)}
+.studio-sheet .studio-primary{background:var(--x-title);color:var(--x-inverse)}
 .studio-sheet-content{overflow:auto;min-height:0}
 .studio-form{padding:24px}
 .studio-form label{display:block;margin:16px 0;color:var(--x-secondary);font-size:var(--ui-font)}
@@ -202,7 +202,7 @@ summary:focus-visible,a:focus-visible,[tabindex]:not([tabindex='-1']):focus-visi
 .setup-steps strong{font-size:var(--ui-large);font-weight:500}
 .setup-card footer{display:flex;flex-wrap:wrap;gap:12px;border-top:1px solid var(--x-hairline);padding-top:18px}
 .setup-card small{flex-basis:100%;font-size:var(--ui-small);line-height:1.5;color:var(--x-meta);margin-bottom:4px}
-.setup-card .studio-primary{margin-left:auto;background:var(--x-title);color:var(--x-screen)}
+.setup-card .studio-primary{margin-left:auto;background:var(--x-title);color:var(--x-inverse)}
 
 .atelier .modal.taskmodal{width:560px;height:auto;max-height:calc(100dvh - 48px);max-width:calc(100vw - 32px);display:flex;flex-direction:column}
 .atelier .taskmodal .modal__main{padding:24px;min-height:0}
@@ -341,7 +341,7 @@ summary:focus-visible,a:focus-visible,[tabindex]:not([tabindex='-1']):focus-visi
 .atelier .rowlist{border:1px solid var(--x-hairline);border-radius:9px;padding:0 14px;background:var(--mac-control);margin-bottom:16px}
 .atelier .btn,.atelier .field input,.atelier .field select,.atelier .field textarea{font:var(--ui-font)/1.5 var(--sans);border-radius:6px;min-height:30px;padding:6px 10px}
 .atelier .field input,.atelier .field select,.atelier .field textarea{background:var(--x-screen);border:1px solid var(--x-hairline);color:var(--x-title);min-width:0;max-width:100%}
-.atelier .btn--solid,.atelier .studio-primary{background:var(--x-accent);color:var(--x-screen);border-color:transparent}
+.atelier .btn--solid,.atelier .studio-primary{background:var(--x-accent);color:var(--x-on-accent);border-color:transparent}
 .atelier .seg{background:var(--mac-control);padding:3px;gap:2px;border-radius:7px;max-width:100%;flex-wrap:wrap}
 .atelier .seg button{border:0;border-radius:4px;font:var(--ui-font) var(--sans);padding:5px 10px}
 .atelier .seg button.is-on{background:var(--x-card);box-shadow:0 1px 3px #0002}
@@ -438,8 +438,7 @@ summary:focus-visible,a:focus-visible,[tabindex]:not([tabindex='-1']):focus-visi
 .atelier ::selection{background:var(--x-accent-soft);color:var(--x-title)}
 .atelier input,.atelier textarea{caret-color:var(--x-accent)}
 .atelier .session-diagnostics{margin:8px 0;font:var(--ui-font) var(--sans);color:var(--x-secondary)}
-.atelier .session-diagnostics summary{cursor:pointer;padding:8px 0}
-.atelier .session-diagnostics__values{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,13rem),1fr));gap:8px 16px;margin:4px 0 16px;font-variant-numeric:tabular-nums}
+.atelier .session-diagnostics__values{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,13rem),1fr));gap:8px 16px;margin:10px 0 0;font-variant-numeric:tabular-nums}
 .atelier .session-diagnostics__values>div{display:flex;align-items:baseline;justify-content:space-between;gap:8px;min-width:0}
 .atelier .session-diagnostics__values>div[data-wide]{grid-column:1/-1}
 .atelier .session-diagnostics dt{font-size:var(--ui-small);line-height:1.4}
@@ -573,7 +572,7 @@ html,body,#root,.app.atelier{background:transparent}
 .atelier .composer__input{display:block;flex:none;width:100%;min-width:0;min-height:56px;max-height:32vh;padding:0;border:0;background:none;resize:none;font:14px/24px var(--sans);color:var(--x-prose);box-sizing:border-box;overflow-x:hidden}
 .atelier .composer__bar{display:flex;flex:none;align-items:center;gap:6px;width:100%;min-height:28px;padding:0;border:0}
 .atelier .composer__context{display:grid;place-items:center;width:28px;height:28px;padding:4px;border:0;border-radius:4px;background:none;color:var(--x-secondary)}
-.atelier .composer__send{flex:none;width:32px;height:32px;border:0;border-radius:8px;background:var(--x-accent);color:var(--x-screen)}
+.atelier .composer__send{flex:none;width:32px;height:32px;border:0;border-radius:8px;background:var(--x-accent);color:var(--x-on-accent)}
 .atelier .composer__bar .cchip{max-width:min(320px,40vw);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:var(--ui-font) var(--sans)}
 .atelier .composer__hints{display:flex;align-items:center;gap:8px;flex-wrap:wrap;max-width:var(--conversation-width);margin:6px auto 0;font:var(--ui-small) var(--sans)}
 /* These four spans are the only on-screen documentation of ⏎/⇧⏎/esc/⌘K.
@@ -1362,7 +1361,7 @@ html,body,#root,.app.atelier{background:transparent}
 .atelier .approval .btn{min-height:32px;padding:0 14px}
 /* The safe default is the prominent one. */
 .atelier .approval .btn--solid{
-  background:var(--x-needs);color:var(--x-backdrop);border-color:transparent;font-weight:600;
+  background:var(--x-needs);color:var(--x-on-accent);border-color:transparent;font-weight:600;
 }
 .atelier .approval .btn--solid:hover{background:var(--x-needs-text)}
 .atelier .approval .btn--danger{color:var(--x-failed-text);border-color:var(--x-failed-border)}
@@ -1442,7 +1441,7 @@ html,body,#root,.app.atelier{background:transparent}
 .atelier .wsgate p{font:var(--t-body);color:var(--x-secondary);margin:0;line-height:1.6}
 .atelier .wsgate__btn{
   justify-self:center;margin-top:var(--s-2);min-height:34px;padding:0 var(--s-4);
-  border-radius:var(--r-sm);background:var(--x-accent);color:var(--x-backdrop);
+  border-radius:var(--r-sm);background:var(--x-accent);color:var(--x-on-accent);
   border:0;font-weight:600;font:var(--t-body);
 }
 .atelier .wsgate__btn:hover{background:var(--x-accent-bright,var(--x-accent));filter:brightness(1.1)}
@@ -1474,7 +1473,7 @@ html,body,#root,.app.atelier{background:transparent}
   display:inline-flex;align-items:center;gap:6px;justify-content:center;
 }
 .atelier .btn:hover:not(:disabled){background:var(--x-selected);color:var(--x-title)}
-.atelier .btn--solid{background:var(--x-accent);color:var(--x-backdrop);border-color:transparent;font-weight:600}
+.atelier .btn--solid{background:var(--x-accent);color:var(--x-on-accent);border-color:transparent;font-weight:600}
 .atelier .btn--solid:hover:not(:disabled){background:var(--x-accent);filter:brightness(1.12)}
 .atelier .btn--ghost{background:transparent}
 .atelier .chipbtn{
@@ -1944,3 +1943,349 @@ html,body,#root,.app.atelier{background:transparent}
 .atelier .desktop-rail--git .studio-sheet-content{display:flex;flex:1;min-height:0;overflow:hidden;padding:0}
 .atelier .scm.scm--compact{display:flex;flex-direction:column}
 .atelier .scm.scm--compact>.scm__side{flex:1;border-right:0}
+
+/* Usage tab: session statistics, then one card per imported provider
+   profile with its plan windows. Bars are neutral until a window is nearly
+   spent — colour means "act on this", not "this is a number". */
+.atelier .usage{display:grid;align-content:start;gap:var(--s-5);padding:var(--s-3) var(--s-3) var(--s-5)}
+.atelier .usage__section{display:grid;gap:var(--s-3);min-width:0}
+.atelier .usage__head{display:flex;align-items:center;gap:var(--s-2);min-width:0;min-height:26px}
+.atelier .usage__head h3{margin:0;font:var(--t-caption);font-weight:600;color:var(--x-secondary);white-space:nowrap}
+.atelier .usage__sub{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:var(--t-caption);color:var(--x-meta)}
+.atelier .usage__refresh{display:inline-grid;place-items:center;flex:none;width:26px;height:26px;margin-left:auto;border-radius:var(--r-sm);background:transparent;color:var(--x-secondary)}
+.atelier .usage__refresh:hover:not(:disabled){background:var(--mac-control);color:var(--x-title)}
+.atelier .usage__refresh:disabled{opacity:.45;cursor:default}
+.atelier .usage__section[aria-busy="true"] .usage__refresh .app-icon{animation:usage-spin .9s linear infinite}
+@keyframes usage-spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.atelier .usage__section[aria-busy="true"] .usage__refresh .app-icon{animation:none}}
+.atelier .usage__empty{margin:0;font:var(--t-caption);color:var(--x-meta)}
+.atelier .usage__error{margin:0;padding:6px var(--s-2);border-radius:var(--r-sm);background:var(--x-failed-bg);color:var(--x-failed-text);font:var(--t-caption)}
+
+.atelier .usage-stats{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,116px),1fr));gap:var(--s-3) var(--s-4);margin:0;padding:var(--s-3);border:1px solid var(--x-hairline);border-radius:var(--r-md);background:var(--x-card)}
+.atelier .usage-stats>div{display:grid;gap:2px;min-width:0}
+.atelier .usage-stats dt{font:var(--t-caption);color:var(--x-meta);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.atelier .usage-stats dd{margin:0;font:var(--t-num);color:var(--x-title);font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+.atelier .usage-meter{display:grid;gap:5px;min-width:0}
+.atelier .usage-meter__row{display:flex;align-items:baseline;justify-content:space-between;gap:var(--s-2)}
+.atelier .usage-meter__label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:var(--t-caption);color:var(--x-prose)}
+.atelier .usage-meter__pct{flex:none;font:var(--t-num);color:var(--x-title);font-variant-numeric:tabular-nums}
+.atelier .usage-meter__bar{position:relative;height:6px;border-radius:999px;background:color-mix(in srgb,var(--x-meta) 18%,transparent);overflow:hidden}
+.atelier .usage-meter__bar>i{position:absolute;inset:0 auto 0 0;border-radius:inherit;background:var(--x-accent);transition:width 240ms ease}
+.atelier .usage-meter[data-level="full"] .usage-meter__bar>i{background:var(--x-failed)}
+.atelier .usage-meter[data-level="full"] .usage-meter__pct{color:var(--x-failed-text)}
+.atelier .usage-meter__meta{display:flex;flex-wrap:wrap;justify-content:space-between;gap:2px var(--s-2);font:var(--t-caption);color:var(--x-meta);font-variant-numeric:tabular-nums}
+.atelier .usage-meter__meta>span:last-child:not(:first-child){margin-left:auto}
+
+.atelier .usage-plans{display:grid;gap:var(--s-2);margin:0;padding:0;list-style:none}
+.atelier .usage-plan{display:grid;gap:var(--s-3);min-width:0;padding:var(--s-3);border:1px solid var(--x-hairline);border-radius:var(--r-md);background:var(--x-card)}
+.atelier .usage-plan[data-status="unsupported"]{gap:4px;background:transparent}
+.atelier .usage-plan__head{display:flex;align-items:center;gap:var(--s-2);min-width:0}
+.atelier .usage-plan__dot{flex:none;width:7px;height:7px;border-radius:50%;box-shadow:inset 0 0 0 1.5px var(--x-meta)}
+.atelier .usage-plan[data-active] .usage-plan__dot{box-shadow:none;background:var(--x-done)}
+.atelier .usage-plan[data-status="error"] .usage-plan__dot{box-shadow:none;background:var(--x-failed)}
+.atelier .usage-plan__head strong{flex:none;max-width:50%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:var(--t-body);font-weight:600;color:var(--x-title)}
+.atelier .usage-plan__account{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:var(--t-caption);color:var(--x-meta)}
+.atelier .usage-plan__badge{flex:none;padding:1px 6px;border-radius:999px;background:var(--x-chip);color:var(--x-secondary);font:var(--t-caption)}
+.atelier .usage-plan__balance{flex:none;font:var(--t-num);color:var(--x-title);font-variant-numeric:tabular-nums}
+.atelier .usage-plan__windows{display:grid;gap:var(--s-3)}
+.atelier .usage-plan__message{margin:0;font:var(--t-caption);color:var(--x-failed-text);overflow-wrap:anywhere}
+.atelier .usage-plan__message--quiet{color:var(--x-meta)}
+
+/* The padded view frames an unpadded host; xterm measures the host. */
+.atelier .term__view{display:flex;flex-direction:column}
+.atelier .term__host{flex:1;min-height:0;width:100%;overflow:hidden}
+.atelier .term__host .xterm{height:100%}
+
+/* ── Transcript, Claude-style ──────────────────────────────────────
+   Work the agent did is a quiet line of text, not a card: the summary
+   reads as part of the conversation and the chevron trails it. It only
+   takes space when someone opens it. The user's own turns sit on the
+   right as a plain grey bubble. */
+.atelier .activity-group{background:none;border:0;box-shadow:none;border-radius:0;padding:0;margin:var(--s-1) 0}
+.atelier .activity-group>summary{display:inline-flex;align-items:center;gap:6px;max-width:100%;padding:3px 0;border-radius:0;font:var(--t-body);font-size:14px;color:var(--x-meta);transition:color 120ms}
+.atelier .activity-group>summary:hover{background:none;color:var(--x-secondary)}
+.atelier .activity-group>summary>.app-icon{flex:none;opacity:.75;transition:transform 150ms ease}
+.atelier .activity-group[open]>summary>.app-icon{transform:rotate(90deg)}
+.atelier .activity-group__done{flex:0 1 auto;color:inherit}
+.atelier .activity-group__live{flex:0 1 auto}
+.atelier .activity-group>summary strong{margin-left:4px;font-weight:400;color:var(--x-failed-text)}
+.atelier .activity-group>summary strong::before{content:'· ';color:var(--x-caption)}
+.atelier .activity-group__body{margin:var(--s-1) 0 var(--s-2) 2px;padding-left:var(--s-4);border-left:1px solid var(--x-hairline)}
+.atelier .msg--user{align-self:flex-end;margin-left:auto;width:fit-content;max-width:min(80%,680px);background:var(--mac-control);border:0;border-radius:18px;padding:10px 16px}
+.atelier .msg--user .msg__text{color:var(--x-title)}
+
+/* ── A chosen background (backdrop.ts) ─────────────────────────────
+   The background paints the canvas; every surface token is then set to
+   a translucent mix of it, so panes read as tinted glass over it. The
+   conversation blurs what is behind it to keep prose legible. */
+:root[data-backdrop]{background:var(--x-backdrop-paint) fixed}
+:root[data-backdrop] :is(body,#root,.app.atelier){background:transparent}
+:root[data-backdrop] .atelier .composer-wrap{background:transparent}
+.atelier .backdrop-field{gap:var(--s-2)}
+.atelier .backdrop-swatches{display:flex;flex-wrap:wrap;gap:8px}
+.atelier .backdrop-swatch{width:44px;height:30px;padding:0;border-radius:8px;border:1px solid var(--x-hairline);background:var(--mac-control) center/cover no-repeat;color:var(--x-secondary);font:var(--t-caption);cursor:pointer}
+.atelier .backdrop-swatch--none,.atelier .backdrop-swatch--image{width:auto;padding:0 10px}
+.atelier .backdrop-swatch[aria-pressed="true"]{outline:2px solid var(--x-accent);outline-offset:2px}
+.atelier .backdrop-custom{display:flex;align-items:center;gap:8px;font:var(--t-caption);color:var(--x-meta)}
+.atelier .backdrop-custom input[type="color"]{width:32px;height:26px;padding:0;border:1px solid var(--x-hairline);border-radius:6px;background:none;cursor:pointer}
+.atelier .backdrop-custom .btn{min-height:26px;padding:0 10px}
+.atelier .backdrop-note{margin:0;font:var(--t-caption);color:var(--x-meta)}
+.atelier .backdrop-note--error{color:var(--x-failed-text)}
+
+/* ── An opened activity group, Claude-style ────────────────────────
+   One bordered box, one row per step, hairlines between them — no
+   spine, no dots. The tool icon stays and carries the state colour; the
+   chevron trails the label; outcome and time sit on the right. Opening
+   a command shows it in its own inset `$` block above the output. Scoped
+   to the transcript group so the agent inspector keeps its layout. */
+.atelier .activity-group__body{margin:var(--s-2) 0 var(--s-3);padding:0;border:1px solid var(--x-hairline);border-left:1px solid var(--x-hairline);border-radius:12px;overflow:hidden;background:color-mix(in srgb,var(--x-card) 55%,transparent)}
+.atelier .activity-group__body>*{margin:0}
+.atelier .activity-group__body>*+*{border-top:1px solid var(--x-hairline)}
+.atelier .activity-group__body .tlist{gap:0}
+.atelier .activity-group__body .tlist>*+*{border-top:1px solid var(--x-hairline)}
+.atelier .activity-group__body .execution-row{padding:0}
+.atelier .activity-group__body .execution-row::before{display:none}
+.atelier .activity-group__body .execution-row>summary{grid-template-columns:auto auto minmax(0,1fr) auto;gap:2px 6px;padding:10px 14px;border-radius:0}
+.atelier .activity-group__body .execution-row>summary:hover{background:var(--mac-control)}
+.atelier .activity-group__body .execution-row__label{grid-column:1;grid-row:1;color:var(--x-secondary)}
+.atelier .activity-group__body .execution-row>summary:hover .execution-row__label{color:var(--x-title)}
+.atelier .activity-group__body .execution-row__disclosure{grid-column:2;grid-row:1;color:var(--x-caption);transition:transform 150ms ease}
+.atelier .activity-group__body .execution-row__state{grid-column:4;grid-row:1}
+.atelier .activity-group__body .execution-row__target{grid-column:1/-1;padding-left:22px}
+.atelier .activity-group__body .execution-row__diff{grid-column:4;grid-row:2;justify-self:end}
+.atelier .activity-group__body .execution-row__error{grid-column:1/-1;padding-left:22px;color:var(--x-failed-text)}
+.atelier .activity-group__body .execution-row[data-state='done'] .execution-row__label>.app-icon{color:var(--x-done)}
+.atelier .activity-group__body .execution-row[data-state='working'] .execution-row__label>.app-icon{color:var(--x-working)}
+.atelier .activity-group__body .execution-row[data-state='failed'] .execution-row__label>.app-icon{color:var(--x-failed)}
+/* Open: the command lives in its inset block, so it leaves the header. */
+.atelier .activity-group__body .execution-row[open][data-command] .execution-row__target{display:none}
+.atelier .activity-group__body .execution{margin:0;padding:0 14px 12px;border:0;border-radius:0;box-shadow:none;background:none}
+.atelier .activity-group__body .execution__command{position:relative;margin:2px 0 10px;padding:10px 12px 10px 28px;border:1px solid var(--x-hairline);border-radius:10px;background:var(--x-sunken);font:var(--t-num);font-size:12.5px;line-height:1.6;color:var(--x-structure);white-space:pre-wrap;overflow-wrap:anywhere}
+.atelier .activity-group__body .execution__command::before{content:'$';position:absolute;left:12px;color:var(--x-meta)}
+.atelier .activity-group__body .execution__status{margin:0 0 6px}
+.atelier .activity-group__body .output-viewer{margin:0 0 8px;border:0;border-radius:0;background:none}
+.atelier .activity-group__body .output-viewer>header{padding:0 0 6px;border:0}
+.atelier .activity-group__body .output-viewer .output-viewer__text{padding:0;max-height:360px}
+.atelier .activity-group__body .thinkrow{padding:10px 14px}
+.atelier .activity-group__body .thinkrow>summary{font-size:13px}
+/* Copy links and raw details are there when you reach for them, not before. */
+.atelier .activity-group__body :is(.execution__actions,.execution__raw){opacity:0;transition:opacity 120ms}
+.atelier .activity-group__body .execution:is(:hover,:focus-within) :is(.execution__actions,.execution__raw){opacity:1}
+.atelier .activity-group__body .execution__actions button{font:var(--t-caption)}
+
+/* Seams over a chosen background: a 1px divider painted with a translucent
+   hairline let the raw image glitter through it. It is an opaque tinted
+   line instead, with the hairline laid over it. Scrollbar thumbs become a
+   soft tint of the text colour so they sit in the palette. */
+:root[data-backdrop] .panel-divider{background:linear-gradient(var(--x-hairline),var(--x-hairline)),var(--x-seam)}
+:root[data-backdrop] .panel-divider:hover,:root[data-backdrop] .panel-divider:focus-visible{background:var(--x-focus)}
+:root[data-backdrop] ::-webkit-scrollbar-thumb{background:color-mix(in srgb,var(--x-title) 20%,transparent);border:2px solid transparent;border-radius:8px;background-clip:padding-box}
+:root[data-backdrop] ::-webkit-scrollbar-thumb:hover{background:color-mix(in srgb,var(--x-title) 34%,transparent);background-clip:padding-box}
+
+.atelier .backdrop-levels{display:grid;grid-template-columns:auto minmax(120px,1fr) 3.5ch;align-items:center;gap:6px 12px;font:var(--t-caption);color:var(--x-secondary)}
+.atelier .backdrop-levels input[type="range"]{width:100%;accent-color:var(--x-accent)}
+.atelier .backdrop-levels output{font:var(--t-num);font-size:11.5px;color:var(--x-meta);text-align:right}
+.atelier .backdrop-swatch--art{width:64px;height:40px;background-size:cover;background-position:center}
+.atelier .backdrop-swatch:not(.backdrop-swatch--none):not(.backdrop-swatch--image){width:64px;height:40px}
+.atelier .backdrop-swatch--none,.atelier .backdrop-swatch--image{height:40px}
+
+/* Model picker rows: name on its own line, the provider's description under
+   it. A long description (Claude Code's "Opus 5.5 with 1M context · …") used
+   to sit beside the name at a fixed width and crush the name to one letter
+   per line. Same shape as the effort picker. */
+.atelier .modelpop:not(.modelpop--menu):not(.modelpop--effort) .mrow{display:grid;grid-template-columns:8px minmax(0,1fr);column-gap:10px;row-gap:2px;align-items:center}
+.atelier .modelpop:not(.modelpop--menu):not(.modelpop--effort) .mrow__name{overflow-wrap:anywhere}
+.atelier .modelpop:not(.modelpop--menu):not(.modelpop--effort) .mrow__tags{grid-column:2;min-width:0;margin:0;display:flex;flex-wrap:wrap;align-items:center;gap:5px}
+.atelier .modelpop:not(.modelpop--menu):not(.modelpop--effort) .mrow__tags:empty{display:none}
+.atelier .modelpop:not(.modelpop--menu):not(.modelpop--effort) .mrow__desc{white-space:normal;max-width:none;overflow:visible}
+.atelier .modelpop:not(.modelpop--menu):not(.modelpop--effort) .tag{white-space:nowrap}
+.atelier .modelpop .palette__list{overflow-x:hidden}
+
+/* Static blur behind the persistent surfaces (see backdropLayers.ts).
+   backdrop-filter re-blurred a whole surface on every repaint inside it —
+   each spinner frame and streamed token — and kept the GPU busy all turn.
+   Each surface now paints a pre-blurred, tinted copy of the part of the
+   background under it; the layer is static, so repaints above it stay
+   small. It overhangs by the blur radius so the blur has real pixels at
+   the edges, and the host clips it back. The clip is overflow:clip, not
+   hidden: a hidden box is still a scroll container, and the overhang would
+   let a scrollIntoView nudge the whole surface. Overlays (menus, modals)
+   keep live blur: they are brief. */
+:root[data-backdrop] .atelier :is(.top,.side,.chat,.desktop-rail){backdrop-filter:none;background:transparent;position:relative;isolation:isolate;overflow:clip}
+:root[data-backdrop] .atelier .chat{--bd-tint:var(--x-screen);--bd-r:var(--x-chat-r,0px);--bd-filter:var(--x-chat-blur,none)}
+:root[data-backdrop] .atelier :is(.side,.desktop-rail){--bd-tint:var(--glass-navigation);--bd-r:var(--x-panel-r,0px);--bd-filter:var(--glass-blur,none)}
+:root[data-backdrop] .atelier .top{--bd-tint:var(--mac-toolbar);--bd-r:var(--x-panel-r,0px);--bd-filter:var(--glass-blur,none)}
+:root[data-backdrop] .atelier :is(.top,.side,.chat,.desktop-rail)::before{
+  content:"";position:absolute;z-index:-1;pointer-events:none;
+  inset:calc(-1 * var(--bd-r));
+  background-image:linear-gradient(var(--bd-tint),var(--bd-tint)),var(--x-backdrop-image,none),var(--x-backdrop-gradient,none);
+  background-repeat:no-repeat;
+  background-size:100% 100%,var(--bd-img-w,100vw) var(--bd-img-h,100vh),100vw 100vh;
+  background-position:0 0,
+    calc(var(--bd-img-x,0px) - var(--bd-x,0px) + var(--bd-r)) calc(var(--bd-img-y,0px) - var(--bd-y,0px) + var(--bd-r)),
+    calc(var(--bd-r) - var(--bd-x,0px)) calc(var(--bd-r) - var(--bd-y,0px));
+  filter:var(--bd-filter);
+  transform:translateZ(0);
+}
+
+/* Header popovers (subagents, background jobs): opaque, in the app's own
+   card colour. They used the chat's --x-screen tint, which follows the
+   Conversation opacity slider and let the transcript read through. */
+.atelier .fleetpop{background:var(--x-popover,var(--x-card));border-color:var(--glass-edge,var(--x-hairline));box-shadow:0 14px 36px rgba(0,0,0,.45)}
+
+/* Subagents chip: while any subagent works, a ring spins around the icon.
+   Only the ring's transform animates, which the compositor handles alone.
+   The blue is fixed (the TUI's working blue), not --x-working: a background
+   retints that token to its own accent, which is grey for Guardian of Pasargadae. */
+:root,:root[data-theme='dark'],:root:not([data-theme]){--x-fleet-blue:#6ea8fe}
+:root[data-theme='light'],html[data-theme='light']{--x-fleet-blue:#1f64b5}
+.atelier .fleetchip__icon{position:relative;display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px}
+.atelier .chat__head>.chipanchor>.fleetchip.is-working{color:var(--x-fleet-blue)}
+.atelier .fleetchip.is-working .fleetchip__icon::after{content:"";position:absolute;inset:0;border-radius:50%;border:1.5px solid color-mix(in srgb,var(--x-fleet-blue) 22%,transparent);border-top-color:var(--x-fleet-blue);animation:fleetchip-spin 900ms linear infinite;will-change:transform}
+@keyframes fleetchip-spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.atelier .fleetchip.is-working .fleetchip__icon::after{animation-duration:2.4s}}
+
+/* Agent name + what it runs on: "Fix CLI (openai/gpt-5[xhigh])". The title
+   gives way first; the kind keeps up to half the row so it stays legible. */
+.atelier .agentname{display:flex;align-items:baseline;gap:6px;min-width:0}
+.atelier .agentname__t{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.atelier .agentname__kind{flex:0 1 auto;min-width:0;max-width:50%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:var(--t-caption);font-family:var(--mono);color:var(--x-meta)}
+/* The rail and the header popover are too narrow for both on one line; the
+   kind drops beneath the title. */
+.atelier .agentname--stack{flex-direction:column;align-items:stretch;gap:1px}
+.atelier .agentname--stack>.agentname__kind{max-width:100%}
+
+/* ── Density ──────────────────────────────────────────────────────────
+   The conversation is the content; chrome gives way to it. The composer
+   block took almost a third of a 1000px window: a two-row input with 12px
+   of padding inside 14px of padding inside 12px of padding, a 52px button
+   bar, and 60px of dead scroll space above it. Each level now carries one
+   small inset, and the input starts at one line (it still grows as you
+   type). Transcript blocks sit closer, as paragraphs of one reply do. */
+.atelier .stream{padding-bottom:20px;scroll-padding-bottom:16px}
+.atelier .stream__col{gap:12px}
+.atelier .msg--user{margin-block:2px}
+.atelier .activity-group{margin-block:0}
+.atelier .composer-wrap{padding:6px 24px 8px}
+@media(max-width:1000px){.atelier .composer-wrap{padding:6px 16px 8px}}
+.atelier .composer-status{margin-bottom:4px;padding:2px 0}
+.atelier .composer-task-summary{padding:2px 14px}
+.atelier .composer-task-summary>button{padding:5px 2px}
+.atelier .composer{padding:8px 12px 6px;gap:2px}
+.atelier .composer__input{min-height:0;padding:6px 4px}
+.atelier .composer__bar{padding:0;min-height:32px}
+.atelier .composer__hints{margin-top:4px}
+
+/* Backstop behind every surface: one static blurred copy of the background
+   under the whole app. The surface layers stop at each padding box, so the
+   1px hairline borders (toolbar bottom, sidebar right) and any sub-pixel
+   gap between panels showed the raw, sharp picture through — a glittering
+   dashed line along every seam. Anything not covered by a surface now shows
+   this instead. Static, so it costs nothing per frame. */
+:root[data-backdrop] .atelier.app{isolation:isolate}
+:root[data-backdrop] .atelier.app::before{
+  content:"";position:fixed;z-index:-1;pointer-events:none;
+  inset:calc(-1 * var(--x-panel-r,0px));
+  background-image:linear-gradient(var(--x-seam-tint,transparent),var(--x-seam-tint,transparent)),var(--x-backdrop-image,none),var(--x-backdrop-gradient,none);
+  background-repeat:no-repeat;
+  background-size:100% 100%,var(--bd-img-w,100vw) var(--bd-img-h,100vh),100vw 100vh;
+  background-position:0 0,
+    calc(var(--bd-img-x,0px) + var(--x-panel-r,0px)) calc(var(--bd-img-y,0px) + var(--x-panel-r,0px)),
+    var(--x-panel-r,0px) var(--x-panel-r,0px);
+  filter:var(--glass-blur,none);
+  transform:translateZ(0);
+}
+
+/* The rail's tab header lines up with the conversation header (52px), so
+   their bottom hairlines form one line across the window. */
+.atelier .desktop-rail>header{height:52px;min-height:52px;box-sizing:border-box}
+
+/* The toolbar is the window's drag region (-webkit-app-region:drag). Its
+   static blur layer overhung 34px downward, over the conversation header and
+   the rail's tabs, and Electron treated that band as draggable: clicks on
+   Files / Git / Terminal / Usage moved the window instead. The layer now
+   stops at the toolbar's bottom edge (its upward and side overhang is off
+   the window), and the header rows under it are never draggable. */
+:root[data-backdrop] .atelier .top::before{bottom:0}
+.atelier :is(.chat__head,.desktop-rail>header){-webkit-app-region:no-drag}
+
+/* Goal as a rail card. */
+.atelier .railcard--goal{margin-bottom:10px}
+.atelier .railcard--goal .goalcard{display:grid;gap:10px;font:var(--t-body);color:var(--x-prose)}
+.atelier .railcard--goal .goal-expand{padding:0;margin-top:-4px;font:var(--t-caption);color:var(--x-secondary)}
+.atelier .railcard--goal .goal-inspection{margin:0;padding-top:10px;border-top:1px solid var(--x-hairline);font:var(--t-caption);color:var(--x-secondary)}
+.atelier .railcard--goal .goalcard__rounds{margin:0;font:var(--t-num);color:var(--x-meta)}
+.atelier .railcard--goal .goalcard__btns{margin:2px 0 0;gap:8px}
+.atelier .railcard--goal .goalcard__btns button{padding:5px 12px;border-radius:6px}
+.atelier .railcard--goal .railcard__meta[data-phase='active']{color:var(--x-working)}
+.atelier .railcard--goal .railcard__meta[data-phase='blocked']{color:var(--x-needs)}
+.atelier .railcard--goal .railcard__meta[data-phase='complete'],.atelier .railcard--goal .railcard__meta[data-phase='completed']{color:var(--x-done)}
+
+
+/* ── Colour themes (Settings › General) ─────────────────────────────── */
+.atelier .field__note{margin:2px 0 10px;font:var(--t-caption);color:var(--x-meta)}
+.atelier .palette-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px}
+.atelier .palette-card{display:grid;gap:4px;padding:8px 8px 10px;text-align:left;border:1px solid var(--x-hairline);border-radius:10px;background:var(--x-card);color:var(--x-title);cursor:pointer}
+.atelier .palette-card:hover{border-color:color-mix(in srgb,var(--x-accent) 45%,var(--x-hairline))}
+.atelier .palette-card.is-on{border-color:var(--x-accent);box-shadow:0 0 0 1px var(--x-accent)}
+.atelier .palette-card__label{margin-top:4px;font:var(--t-body);font-weight:600}
+.atelier .palette-card__desc{font:var(--t-caption);color:var(--x-meta);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.atelier .palette-preview{display:flex;height:64px;border-radius:6px;overflow:hidden;border:1px solid var(--pv-border,var(--x-hairline));background:var(--pv-bg)}
+.atelier .palette-preview--xerxes{--pv-bg:var(--x-screen);--pv-side:var(--x-chrome);--pv-fg:var(--x-title);--pv-muted:var(--x-meta);--pv-primary:var(--x-accent)}
+.atelier .palette-preview__side{flex:0 0 22%;background:var(--pv-side);border-right:1px solid var(--pv-border,var(--x-hairline))}
+.atelier .palette-preview__main{position:relative;flex:1;display:flex;flex-direction:column;gap:6px;padding:10px 12px}
+.atelier .palette-preview__bar{width:34%;height:6px;border-radius:3px;background:var(--pv-fg)}
+.atelier .palette-preview__bar--muted{width:52%;background:var(--pv-muted)}
+.atelier .palette-preview__pill{position:absolute;right:10px;bottom:9px;width:30%;height:12px;border-radius:6px;background:color-mix(in srgb,var(--pv-primary) 40%,var(--pv-bg))}
+.atelier .terminal-font-field__row{display:flex;gap:8px;align-items:center}
+.atelier .terminal-font-field__row input{flex:1;min-width:0}
+.atelier .terminal-font-field__preview{display:flex;align-items:baseline;gap:12px;margin:10px 0 0;font:var(--t-caption);color:var(--x-meta)}
+.atelier .terminal-font-field__preview code{font-size:14px;color:var(--x-title)}
+.atelier .palette-field,.atelier .terminal-font-field{margin-bottom:6px}
+/* A palette's own bubble colour, when it has one. */
+.atelier .msg--user{background:var(--x-user-bubble,var(--x-accent-soft))}
+
+/* ── Session list density ─────────────────────────────────────────── */
+.atelier .sess__detail{display:block;font:var(--t-caption);color:var(--x-meta)}
+:root[data-session-density='compact'] .atelier .sess__s{display:none}
+:root[data-session-density='compact'] .atelier .sess{padding-block:4px}
+
+/* System rows in the activity feed (tool notices, terminal results,
+   provider errors): icon centred on the first line, room around the text,
+   and a long command clamped to three lines (full text on hover). */
+.atelier .frow--sys{display:flex;align-items:flex-start;gap:10px;padding:8px 14px;line-height:1.5}
+.atelier .frow--sys .frow__icon{display:flex;align-items:center;justify-content:center;flex:0 0 16px;height:1.5em}
+.atelier .frow--sys .frow__excerpt--wrap{flex:1;min-width:0;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;overflow:hidden;white-space:pre-wrap;overflow-wrap:anywhere}
+.atelier .activity-group .activity-notice{margin:0;padding:8px 14px}
+.atelier .activity-notice>summary{align-items:flex-start;gap:10px;line-height:1.5}
+.atelier .activity-notice>summary>svg{flex:0 0 auto;margin-top:.25em}
+.atelier .activity-notice>summary>span{white-space:normal;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow-wrap:anywhere}
+.atelier .activity-notice[open]>summary{margin-bottom:8px}
+
+/* Background cards: the picture with a small window laid over it. */
+.atelier .backdrop-preview{position:relative;display:flex;height:64px;border-radius:6px;overflow:hidden;border:1px solid var(--x-hairline)}
+.atelier .backdrop-preview--none{background:var(--x-screen)}
+.atelier .backdrop-preview--transparent{background:
+  linear-gradient(135deg,color-mix(in srgb,var(--x-accent) 22%,transparent),transparent 60%),
+  repeating-conic-gradient(color-mix(in srgb,var(--x-title) 10%,transparent) 0 25%,transparent 0 50%) 0 0/12px 12px}
+.atelier .backdrop-preview__side{flex:0 0 22%;background:color-mix(in srgb,#0b0d11 55%,transparent);border-right:1px solid #ffffff1a}
+.atelier .backdrop-preview__main{flex:1;display:flex;flex-direction:column;gap:6px;padding:10px 12px;--pv-fg:#ffffffd9;--pv-muted:#ffffff80}
+.atelier .backdrop-preview--none .backdrop-preview__side{background:var(--x-chrome)}
+.atelier .backdrop-preview--none .backdrop-preview__main{--pv-fg:var(--x-title);--pv-muted:var(--x-meta)}
+.atelier .backdrop-card--add{align-content:start}
+.atelier .backdrop-card__add{display:flex;align-items:center;justify-content:center;height:64px;border:1px dashed var(--x-hairline);border-radius:6px;color:var(--x-meta)}
+.atelier .backdrop-grid{margin-top:6px}
+.atelier .backdrop-custom{margin-top:12px}
+
+/* A workspace page covered by another view in the same window draws nothing
+   (see main.ts activateSurface). */
+:root[data-occluded]{visibility:hidden}
+:root[data-occluded] body{visibility:hidden}
+:root[data-occluded]{background:transparent!important}
+
+/* Ink on filled buttons (Send, Allow, primary actions). It used the surface
+   colours, which a background or colour theme makes translucent — the label
+   then showed the button through itself and vanished. Always opaque. */
+:root,:root[data-theme='dark'],:root:not([data-theme]){--x-on-accent:#0b0d11;--x-inverse:#0b0d11}
+:root[data-theme='light'],html[data-theme='light']{--x-on-accent:#ffffff;--x-inverse:#ffffff}

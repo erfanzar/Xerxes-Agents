@@ -35,6 +35,7 @@ import { splitStreamingRender, STREAMING_CHUNKS_EMPTY, type StreamingChunks } fr
 import type { Theme } from '../theme.js'
 import type { Msg, SubagentProgress } from '../types.js'
 
+import { PanelMessage } from './panelView.js'
 import { Box, Span, Text } from './primitives.js'
 import { getSyntaxStyle } from './syntax.js'
 
@@ -872,6 +873,10 @@ function MessageLineView({
 
   if (msg.kind === 'intro') {
     return null
+  }
+
+  if (msg.kind === 'panel' && msg.panelData) {
+    return <PanelMessage cols={cols} panel={msg.panelData} t={t} />
   }
 
   if (msg.kind === 'trail') {

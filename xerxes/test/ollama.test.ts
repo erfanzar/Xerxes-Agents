@@ -140,7 +140,7 @@ test('Ollama stream ignores semantic deltas after done while retaining terminal 
 })
 
 test('the native client factory selects direct Ollama unless the Responses API is explicitly requested', () => {
-  const direct = createLlmClient('llama3.3', {}, { baseUrl: 'http://ollama.test/v1' })
+  const direct = createLlmClient('llama3.3', {}, { baseUrl: 'http://localhost:11434/v1' })
   expect(direct).toBeInstanceOf(OllamaClient)
 })
 

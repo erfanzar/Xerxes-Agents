@@ -4,10 +4,12 @@ import { CodexSession, fetchCodexModelCatalog, type CodexModel } from '../auth/c
 import { CopilotSession, fetchCopilotModels } from '../auth/copilotAuth.js'
 import { profileQuota } from '../auth/profileUsage.js'
 import type { AgentSettingsStore } from '../agents/settingsStore.js'
-import type { ProfileStore, ProviderProfile } from '../bridge/profiles.js'
+import { reportedModelReasoning, type ProfileStore, type ProviderProfile } from '../bridge/profiles.js'
+import { claudeCodeCatalog, claudeCodeReasoningLevels } from '../llms/claudeCodeCatalog.js'
 import type { RuntimeConnection } from '../daemon/runtimeConnection.js'
 import { discoverModelCatalog, profileDiscoveryApiKey, sanitizeModelDiscoveryError } from '../daemon/modelDiscovery.js'
-import { catalogReasoningLevels, fallbackReasoningLevels, providerReasoningLevels, selectableEfforts } from '../llms/reasoningLevels.js'
+import { catalogReasoningLevels, fallbackReasoningLevels, liveReasoningLevels, providerReasoningLevels, selectableEfforts } from '../llms/reasoningLevels.js'
+import { modelsDev, reportModelCapability, type LiveReasoning } from '../llms/modelsDev.js'
 import { getApiKey, getProviderConfig, isProviderName, resolveProvider } from '../llms/providerRegistry.js'
 import { DEFAULT_RADIUS_GATEWAY, loadRadiusGatewayConfig, normalizeRadiusGatewayUrl } from '../llms/radiusGateway.js'
 import type { ModelInventoryHost } from '../tools/modelInventoryTools.js'
@@ -58,11 +60,15 @@ export function profileSelectionValidator(profiles: InventoryProfiles, options: 
     if (!name.trim() || name.length > 512 || !model.trim() || model.length > 512 || (effort !== undefined && (!effort.trim() || effort.length > 64))) throw new Error('Invalid agent provider/model/reasoning selection')
     await withProfileInventory(profiles, undefined, signal, async port => {
       const profile = port.profiles().find(value => value.name === name)
-      if (!profile || profile.provider === 'claude-code') throw unavailableAgentProfile(name, model, port.profiles())
+      if (!profile) throw unavailableAgentProfile(name, model, port.profiles())
       const catalog = await port.discover(name)
       signal?.throwIfAborted()
       if (model !== profile.model && !catalog.models.some(value => value.id === model)) throw new Error('Model is not configured or discovered for agent provider ' + name + ': ' + model)
-      if (effort !== undefined && !(await port.reasoning(name, model)).efforts.includes(effort)) throw new Error('Unsupported reasoning effort for agent model ' + model + ': ' + effort)
+      if (effort !== undefined) {
+        // Refuse only against levels something reported; unreported levels pass through to the provider.
+        const reported = await port.reasoning(name, model)
+        if (reported.source !== 'provider_fallback' && !reported.efforts.includes(effort)) throw new Error('Unsupported reasoning effort for agent model ' + model + ': ' + effort)
+      }
     }, name, options)
   }
 }
@@ -76,6 +82,8 @@ async function withProfileInventory<T>(profiles: InventoryProfiles, settings: Ag
       return profile
     }
     let codexModels: readonly CodexModel[] = []
+    // What each provider's /models said about reasoning, per profile and model.
+    const reportedReasoning = new Map<string, LiveReasoning>()
     const result = await read({
       profiles: () => snapshot.map(profile => ({ name: profile.name, provider: profile.provider, model: profile.model, active: profile.name === active })),
       routingNotes: () => settings?.routingNotes() ?? [],
@@ -84,7 +92,7 @@ async function withProfileInventory<T>(profiles: InventoryProfiles, settings: Ag
         const profile = selected(name), apiKey = profileDiscoveryApiKey(profile)
         const discover = async (): ReturnType<ModelInventoryPort['discover']> => {
         try {
-          if (profile.provider === 'claude-code') return { source: 'profile', models: [{ id: profile.model }] }
+          if (profile.provider === 'claude-code') return { source: 'provider', models: (await claudeCodeCatalog.load()).map(entry => ({ id: `claude-code/${entry.value}`, ...(entry.contextLimit ? { context_limit: entry.contextLimit, context_source: 'provider' } : {}) })) }
           if (profile.provider === 'github-copilot') {
             const models = await (options.copilotModels ?? copilotCatalog)(signal)
             signal?.throwIfAborted()
@@ -104,6 +112,10 @@ async function withProfileInventory<T>(profiles: InventoryProfiles, settings: Ag
             return { source: 'provider', models: codexModels.map(model => ({ id: model.id, ...(model.contextLimit === undefined ? {} : { context_limit: model.contextLimit, context_source: 'provider' }) })) }
           }
           const catalog = await discoverModelCatalog({ provider: profile.provider, baseUrl: profile.base_url, apiKey, allowPrivateEndpoint: true, ...(signal ? { signal } : {}) })
+          for (const model of catalog) {
+            if (model.reasoning) reportedReasoning.set(JSON.stringify([profile.name, model.id]), model.reasoning)
+            reportModelCapability(profile.provider, model.id, { ...(model.reasoning ? { reasoning: model.reasoning } : {}), ...(model.dynamicTools === undefined ? {} : { dynamicTools: model.dynamicTools }) })
+          }
           return { source: 'provider', models: catalog.map(model => ({ id: model.id, ...(model.contextLimit === undefined ? {} : { context_limit: model.contextLimit, context_source: 'provider' }), ...(model.maxOutputTokens === undefined ? {} : { max_output_tokens: model.maxOutputTokens, output_source: 'provider' }) })) }
         } catch (error) {
           signal?.throwIfAborted()
@@ -119,8 +131,13 @@ async function withProfileInventory<T>(profiles: InventoryProfiles, settings: Ag
       reasoning: async (name, model) => {
         const profile = selected(name), provider = isProviderName(profile.provider) ? profile.provider : undefined
         const live = codexModels.find(value => value.id === model)
+        // Reported by the provider (Codex, Claude Code, its /models entry),
+        // else models.dev, else nothing — the same order as the pickers.
+        if (profile.provider === 'claude-code') await claudeCodeCatalog.load().catch(() => undefined)
+        await modelsDev.load()
         const levels = live?.reasoningLevels.length ? providerReasoningLevels(live.reasoningLevels.map(level => ({ effort: level.effort, ...(level.description === undefined ? {} : { description: level.description }) })), live.defaultReasoningLevel)
-          : catalogReasoningLevels(model, provider) ?? fallbackReasoningLevels(provider)
+          : profile.provider === 'claude-code' ? claudeCodeReasoningLevels(claudeCodeCatalog.find(model))
+          : liveReasoningLevels(reportedReasoning.get(JSON.stringify([profile.name, model])) ?? reportedModelReasoning(profile, model), 'provider') ?? catalogReasoningLevels(model, provider, profile.base_url) ?? fallbackReasoningLevels(provider)
         return { efforts: selectableEfforts(levels), source: levels.provenance ?? 'unknown', shape: levels.shape, ...(levels.defaultEffort === undefined ? {} : { defaultEffort: levels.defaultEffort }) }
       },
     })

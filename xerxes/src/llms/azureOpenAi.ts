@@ -17,7 +17,7 @@ import { createHash } from 'node:crypto'
 
 import { parseStreamingJson } from '@earendil-works/pi-ai'
 
-import { ConfigurationError, ProviderError } from '../core/errors.js'
+import { ConfigurationError, ProviderError, StreamFrameError } from '../core/errors.js'
 import { ResponsesEventTranslator } from '../streaming/responsesApi.js'
 import { deterministicToolCallId } from '../streaming/toolCallIds.js'
 import type { ChatMessage, MessageContent } from '../types/messages.js'
@@ -34,6 +34,7 @@ import type {
 } from './client.js'
 import { internalSseData } from './client.js'
 import { isGradedEffort } from './reasoningLevels.js'
+import { credentialFingerprint } from './credentialFingerprint.js'
 
 /** Diagnostic label carried by every ProviderError this adapter raises. */
 const PROVIDER_LABEL = 'azure-openai'
@@ -259,6 +260,11 @@ function azureReasoningItem(signature: string | undefined): Record<string, unkno
  * Native-fetch Azure OpenAI Responses client sharing the neutral delta stream.
  */
 export class AzureOpenAiClient implements LlmClient {
+  /** Identity of the configured key (see credentialFingerprint). */
+  async authFingerprint(): Promise<string | undefined> {
+    return this.apiKey ? credentialFingerprint({ 'api-key': this.apiKey }) : undefined
+  }
+
   private readonly apiKey: string
   private readonly baseUrl: string
   private readonly apiVersion: string
@@ -370,7 +376,7 @@ function parseAzureJson(data: string): Record<string, unknown> {
   try {
     return asRecord(JSON.parse(data) as unknown)
   } catch (error) {
-    throw new ProviderError(PROVIDER_LABEL, `invalid SSE JSON: ${data.slice(0, 200)}`, error)
+    throw new StreamFrameError(PROVIDER_LABEL, `invalid SSE JSON: ${data.slice(0, 200)}`, error)
   }
 }
 

@@ -116,6 +116,7 @@ export class MarkdownAgentWorkspace {
       `Workspace: ${root}`,
       '',
       'The following Markdown files are persistent local context. Treat them as memory, not as user input.',
+      'Replies are sent as chat messages that may not render Markdown: use short plain paragraphs and simple dash lists; no headings, tables, or HTML; keep code snippets short.',
     ]
 
     for (const name of ROOT_CONTEXT_FILES) {

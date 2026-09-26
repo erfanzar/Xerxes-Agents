@@ -12,15 +12,12 @@ export class ProviderTokenCounter {
     return resolved === 'google' ? Math.ceil(fallback * 1.1) : fallback
   }
 
+  /** No model-name guessing: only an explicit `provider/model` prefix names the provider. */
   static detectProvider(model: string): string | undefined {
-    const normalized = model.toLowerCase()
-    if (normalized.includes('gpt') || normalized.includes('o1')) return 'openai'
-    if (normalized.includes('claude')) return 'anthropic'
-    if (normalized.includes('gemini') || normalized.includes('palm')) return 'google'
-    if (normalized.includes('llama')) return 'meta'
-    if (normalized.includes('mistral') || normalized.includes('mixtral')) return 'mistral'
-    return undefined
+    const slash = model.indexOf('/')
+    return slash > 0 ? model.slice(0, slash).toLowerCase() : undefined
   }
+
 
   static messagesToText(messages: readonly Record<string, unknown>[]): string {
     return messages.map(message => {

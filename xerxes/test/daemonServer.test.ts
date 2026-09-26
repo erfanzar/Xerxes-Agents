@@ -60,6 +60,7 @@ import type {
   TurnRunControls,
   TurnRunner,
 } from "../src/daemon/runtime.js";
+import { seedModelsDev } from "./fixtures/modelsDev.js";
 
 test("daemon slash RPC runs ! shell mode and # memory notes", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-shell-hash-"));
@@ -708,7 +709,11 @@ test("session model remains selected after a session reasoning change", async ()
   }
 });
 
-test("daemon context limits layer live metadata over the Pi model catalog", async () => {
+test("daemon context limits layer live provider metadata over models.dev", async () => {
+  // What models.dev says for Kimi's coding endpoint (matched by base URL).
+  seedModelsDev({ "kimi-for-coding": { id: "kimi-for-coding", api: "https://api.kimi.com/coding/v1", models: {
+    k3: { id: "k3", name: "K3", reasoning: true, limit: { context: 1_048_576, output: 131_072 } },
+  } } });
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-context-limit-"));
   const socketPath = join(directory, "daemon.sock");
   const profileStore = new ProfileStore(join(directory, "profiles.json"));
@@ -1724,12 +1729,18 @@ test("daemon history reports active session counters over the socket", async () 
   }
 });
 
-test("daemon /usage keeps the session report when subscription quota is unavailable", async () => {
+test("daemon /usage and usage.report cover the session and every imported profile, even when quota lookups fail", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-usage-slash-"));
   const socketPath = join(directory, "daemon.sock");
+  // A private profile store: the test must never read the developer's real
+  // profiles or send their keys anywhere.
+  const profileStore = new ProfileStore(join(directory, "profiles.json"));
+  profileStore.save({ name: "zai", provider: "zai-coding", apiKey: "test-key", baseUrl: "https://api.z.ai/api/coding/paas/v4", model: "glm-4.6" });
+  profileStore.save({ name: "local", provider: "ollama", apiKey: "", baseUrl: "http://127.0.0.1:11434/v1", model: "qwen", setActive: false });
   const server = new DaemonServer({
     socketPath,
     projectDirectory: directory,
+    profileStore,
     runtime: new InMemoryDaemonRuntime(undefined, {
       currentProjectDirectory: directory,
       model: "protocol-model",
@@ -1738,13 +1749,20 @@ test("daemon /usage keeps the session report when subscription quota is unavaila
   });
   await server.start();
   const client = await SocketTestClient.connect(socketPath);
-  // Point every subscription endpoint at an unroutable address so the test
-  // never depends on the network or on stored credentials.
+  // Unroutable quota endpoints: no network, no stored credentials.
   const previousEnvironment = { ...process.env };
   process.env.XERXES_CLAUDE_USAGE_URL = "http://127.0.0.1:1/unreachable";
   process.env.XERXES_CODEX_USAGE_URL = "http://127.0.0.1:1/unreachable";
   process.env.XERXES_KIMI_USAGE_URL = "http://127.0.0.1:1/unreachable";
   process.env.XERXES_ZAI_USAGE_URL = "http://127.0.0.1:1/unreachable";
+  // No signed-in subscriptions: the built-in cc/codex profiles must drop out
+  // rather than report "not signed in" for accounts never set up.
+  process.env.XERXES_HOME = join(directory, "home");
+  process.env.CODEX_HOME = join(directory, "codex");
+  delete process.env.ANTHROPIC_AUTH_TOKEN;
+  delete process.env.ANTHROPIC_OAUTH_TOKEN;
+  // Never read this machine's real Claude Code sign-in from a test.
+  process.env.XERXES_CLAUDE_CODE_LOGIN = "off";
   try {
     client.send({
       jsonrpc: "2.0",
@@ -1756,19 +1774,32 @@ test("daemon /usage keeps the session report when subscription quota is unavaila
     await client.next(eventFrame("init_done"));
     await client.next(eventFrame("status_update"));
 
+    client.send({ jsonrpc: "2.0", id: 2, method: "usage.report", params: {} });
+    const report = (await client.next((frame) => frame.id === 2)).result as Record<string, unknown>;
+    expect(report).toMatchObject({ ok: true, session: { model: "protocol-model", turn_count: 0 } });
+    const profiles = report.profiles as Array<Record<string, unknown>>;
+    expect(profiles.map((entry) => [entry.profile, entry.status])).toEqual([["zai", "error"], ["local", "unsupported"]]);
+    expect(profiles[0]).toMatchObject({ source: "zai", windows: [] });
+    expect(String(profiles[0]!.message)).not.toBe("");
+
     client.send({
       jsonrpc: "2.0",
-      id: 2,
+      id: 3,
       method: "slash",
       params: { command: "/usage" },
     });
-    expect((await client.next((frame) => frame.id === 2)).result).toMatchObject({ ok: true });
+    expect((await client.next((frame) => frame.id === 3)).result).toMatchObject({ ok: true });
     const notification = (await client.next(eventFrame("notification"))).params?.payload as
       | Record<string, unknown>
       | undefined;
     expect(notification?.category).toBe("slash");
-    expect(String(notification?.body)).toContain("Model: protocol-model");
-    expect(String(notification?.body)).toContain("Input tokens:");
+    const body = String(notification?.body);
+    expect(body).toContain("Session · protocol-model");
+    expect(body).toContain("Turns");
+    expect(body).toContain("Plans & keys");
+    expect(body).toContain("zai · Z.ai");
+    expect(body).toContain("local · ollama");
+    expect(body).toContain("No usage limits published");
   } finally {
     process.env = previousEnvironment;
     await client.close();
@@ -3763,6 +3794,7 @@ test("daemon implements native completion, slash, steering, mode, and provider c
       models: ["inactive-remote-model"],
       catalog: [{ id: "inactive-remote-model" }],
       profile: "inactive",
+      profile_label: "inactive",
       source: "remote",
     });
     expect(profileStore.active()?.name).toBe("native");
@@ -4262,10 +4294,13 @@ test("daemon slash config, sampling, agents, and platforms use native backing st
     });
     // `levels` reports what this model actually accepts, so a caller that is
     // not the picker still learns the valid set instead of guessing.
-    expect((await client.next((frame) => frame.id === 10)).result).toEqual({
+    // Nothing reports reasoning levels for this model (no profile is saved,
+    // and it is not a Claude Code model): nothing is offered, and an effort
+    // typed explicitly goes to the provider as written.
+    expect((await client.next((frame) => frame.id === 10)).result).toMatchObject({
       ok: true,
       reasoning_effort: "high",
-      levels: ["off", "low", "medium", "high"],
+      levels: [],
     });
     await client.next(eventFrame("status_update"));
     expect(
@@ -8283,6 +8318,8 @@ test("a slow model discovery does not stall the rest of the connection", async (
 });
 
 test("initialize reports the workspace git branch and session.status prices the run", async () => {
+  // Prices are published data; the fixture publishes one for this model.
+  seedModelsDev({ fixture: { id: "fixture", models: { "protocol-model": { id: "protocol-model", cost: { input: 1, output: 2 } } } } });
   const directory = await mkdtemp(join(tmpdir(), "xerxes-branch-daemon-"));
   const socketPath = join(directory, "daemon.sock");
   // A real git repo, so the branch the daemon reports is the one git does.
@@ -9207,6 +9244,8 @@ test('hooks slash reports the active workspace configuration without running com
 });
 
 test('agent settings RPC persists profile mappings without exposing credentials and rejects stale edits', async () => {
+  // gpt-5's effort levels as models.dev publishes them.
+  seedModelsDev();
   const { AgentSettingsStore } = await import('../src/agents/settingsStore.js');
   const directory = await mkdtemp(join(tmpdir(), 'xerxes-agent-config-'));
   const profiles = new ProfileStore(join(directory, 'profiles.json'));
@@ -9220,7 +9259,7 @@ test('agent settings RPC persists profile mappings without exposing credentials 
     client.send({ jsonrpc: '2.0', id: 1, method: 'agent.settings.get' });
     const result = (await client.next(frame => frame.id === 1)).result;
     expect(JSON.stringify(result)).not.toContain('private-test-key');
-    expect(result).toMatchObject({ revision: 0, profiles: expect.arrayContaining([{ name: 'work', provider: 'openai', model: 'gpt-4o' }]) });
+    expect(result).toMatchObject({ revision: 0, profiles: expect.arrayContaining([{ name: 'work', label: 'work', provider: 'openai', model: 'gpt-4o' }]) });
     client.send({ jsonrpc: '2.0', id: 2, method: 'agent.settings.save', params: { revision: 0, settings: { light: { model: 'gpt-4o', provider_profile: 'work' } } } });
     expect((await client.next(frame => frame.id === 2)).result).toMatchObject({ ok: true, revision: 1 });
     client.send({ jsonrpc: '2.0', id: 3, method: 'agent.settings.save', params: { revision: 0, settings: { smart: 'other' } } });
@@ -10130,7 +10169,9 @@ test('Codex inventory uses one fresh catalog for capacities and reasoning and re
 
 test('model inventory uses configured discovery without exposing credentials or switching the session', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'model-inventory-daemon-'));
-  const endpoint = Bun.serve({ port: 0, hostname: '127.0.0.1', fetch: () => Response.json({ data: [{ id: 'fixture-model', context_length: 32000 }] }) });
+  // The endpoint reports its model's reasoning itself (Kimi-style fields):
+  // the only grounds on which an effort outside it can be refused.
+  const endpoint = Bun.serve({ port: 0, hostname: '127.0.0.1', fetch: () => Response.json({ data: [{ id: 'fixture-model', context_length: 32000, supports_reasoning: true, think_efforts: { support: true, valid_efforts: ['low', 'high'] } }] }) });
   const profileStore = new ProfileStore(join(directory, 'profiles.json'));
   profileStore.save({ name: 'fixture', provider: 'openai', apiKey: 'fixture-secret', baseUrl: `http://127.0.0.1:${endpoint.port}/v1`, model: 'configured-model' });
   const runtime = new InMemoryDaemonRuntime(undefined, { currentProjectDirectory: directory, model: 'parent-model', sessionDirectory: join(directory, 'sessions') });
@@ -10429,6 +10470,8 @@ test('model selection binds profile atomically without poisoning another profile
   const directory = await mkdtemp(join(tmpdir(),'xr-atomic-model-'));
   const profiles = new ProfileStore(join(directory,'profiles.json'));
   profiles.save({name:'kimi',provider:'kimi-code',model:'kimi-for-coding',apiKey:'fixture',baseUrl:'https://example.invalid'});
+  // Kimi's /models list, as discovery saves it: what makes a GPT model refusable here.
+  profiles.replaceModelCapabilities('kimi',{'kimi-for-coding':{context_limit:262144}});
   const runtime = new InMemoryDaemonRuntime(undefined,{model:'kimi-for-coding',currentProjectDirectory:directory});
   const server = new DaemonServer({socketPath:join(directory,'rpc.sock'),runtime,profileStore:profiles});
   await server.start();

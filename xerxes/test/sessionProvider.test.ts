@@ -5,7 +5,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { ProfileStore } from '../src/bridge/profiles.js'
-import { sessionProvider, profileAcceptsModel } from '../src/daemon/sessionProvider.js'
+import { agentProvider, sessionProvider, profileAcceptsModel } from '../src/daemon/sessionProvider.js'
 import { AgentTurnRunner } from '../src/daemon/turnRunner.js'
 import { InMemoryDaemonRuntime } from '../src/daemon/runtime.js'
 import { httpErrorBody } from '../src/llms/httpErrorBody.js'
@@ -16,6 +16,8 @@ test('a resumed GPT chat resolves Codex even with a polluted active Kimi model',
     const profiles=new ProfileStore(join(root,'profiles.json'))
     profiles.save({name:'codex',provider:'openai-codex',model:'gpt-6-astra',apiKey:'',baseUrl:''})
     profiles.save({name:'kimi',provider:'kimi-code',model:'gpt-6-astra',apiKey:'fixture',baseUrl:'https://example.invalid'})
+    // Kimi has reported its models (its /models list); the polluted saved model is not among them.
+    profiles.replaceModelCapabilities('kimi',{'kimi-for-coding':{context_limit:262144}})
     profiles.setActive('kimi')
     const calls:string[]=[]
     const runner=new AgentTurnRunner({model:'gpt-6-astra',llm:{async *stream(){throw new Error('Wrong global Kimi transport');yield {content:''}}},
@@ -105,5 +107,28 @@ test('a persisted provider pin cannot fall back after the last API profile disap
     expect(resumed.status).toBe('idle')
     // Unpinned setups can still use an explicitly configured runtime client.
     expect(sessionProvider(profiles, { metadata: {} }, 'gpt-4o')).toBeUndefined()
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('a delegated agent asking for another profile\'s model runs there, not on the parent\'s catch-all profile', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xr-agent-provider-'))
+  try {
+    const profiles = new ProfileStore(join(root, 'profiles.json'))
+    profiles.save({ name: 'zai', provider: 'zhipu', model: 'glm-5.3-flash', apiKey: 'fixture', baseUrl: 'https://example.invalid' })
+    profiles.replaceModelCapabilities('zai', { 'glm-5.3-flash': { context_limit: 200000 }, 'glm-5.2': { context_limit: 200000 } })
+    profiles.save({ name: 'cc', provider: 'claude-code', model: 'claude-code/opus', apiKey: '', baseUrl: '' })
+    profiles.save({ name: 'router', provider: 'openrouter', model: 'anthropic/claude-sonnet-5', apiKey: 'fixture', baseUrl: 'https://example.invalid' })
+    profiles.save({ name: 'anthropic', provider: 'anthropic', model: 'claude-sonnet-5', apiKey: 'fixture', baseUrl: '' })
+    profiles.setActive('zai')
+    const parent = { metadata: { provider_profile: 'zai' } as Record<string, unknown> }
+    // The z.ai parent accepts any id, but it listed its models and this is not one.
+    expect(agentProvider(profiles, parent, 'claude-code/opus')?.name).toBe('cc')
+    // Its own models stay on it.
+    expect(agentProvider(profiles, parent, 'glm-5.2')?.name).toBe('zai')
+    // A gateway parent that has not listed models keeps a vendor-prefixed id.
+    const routed = { metadata: { provider_profile: 'router' } as Record<string, unknown> }
+    expect(agentProvider(profiles, routed, 'anthropic/claude-opus-5')?.name).toBe('router')
+    // The parent's pin is never rewritten by a child's route.
+    expect(parent.metadata.provider_profile).toBe('zai')
   } finally { await rm(root, { recursive: true, force: true }) }
 })

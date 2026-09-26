@@ -81,7 +81,8 @@ describe("tool guidance", () => {
     const segments = registry.guidanceForTools(names);
     expect(segments.map(segment => segment.name)).toEqual(names);
     for (const segment of segments) {
-      expect(segment.text).toContain("ReadFile the target immediately before writing");
+      expect(segment.text).toContain("ReadFile a file before your first write to it");
+      expect(segment.text).toContain("Your own successful writes count as a fresh read");
     }
   });
 

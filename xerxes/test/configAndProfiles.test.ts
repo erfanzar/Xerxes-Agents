@@ -15,6 +15,7 @@ import {
 } from '../src/bridge/profiles.js'
 import { daemonConfigPath, loadSystemDaemonConfig, resolveEnvironmentReferences } from '../src/daemon/config.js'
 import { runtimeConnection } from '../src/daemon/runtimeConnection.js'
+import { seedModelsDev } from './fixtures/modelsDev.js'
 
 test('daemon config merges legacy/nested records and applies environment priority', async () => {
   const normalizedHome = await mkdtemp(join(tmpdir(), 'xerxes-config-'))
@@ -63,7 +64,11 @@ test('profile store preserves active selection and filters sampling keys', async
   }
 })
 
-test('resolved profile capacity layers provider metadata over the Pi catalog', () => {
+test('resolved profile capacity layers provider metadata over models.dev', () => {
+  // What models.dev says for Z.ai's coding endpoint (matched by base URL).
+  seedModelsDev({ 'zai-coding-plan': { id: 'zai-coding-plan', api: 'https://api.z.ai/api/coding/paas/v4', models: {
+    'glm-5.2': { id: 'glm-5.2', name: 'GLM-5.2', reasoning: true, reasoning_options: [{ type: 'toggle' }], limit: { context: 1_000_000, output: 131_072 } },
+  } } })
   const profile: ProviderProfile = {
     api_key: '',
     base_url: 'https://api.z.ai/api/coding/paas/v4',
@@ -77,7 +82,10 @@ test('resolved profile capacity layers provider metadata over the Pi catalog', (
     ...profile,
     model_capabilities: { 'glm-5.2': { context_limit: 262_144 } },
   }, 'glm-5.2')).toBe(262_144)
-  expect(resolvedProfileContextLimit({ ...profile, provider: 'custom' }, 'glm-5.2')).toBeUndefined()
+  // The endpoint identifies the vendor, whatever the profile calls itself…
+  expect(resolvedProfileContextLimit({ ...profile, provider: 'custom' }, 'glm-5.2')).toBe(1_000_000)
+  // …but a self-hosted build of the same model is not described by the vendor's entry.
+  expect(resolvedProfileContextLimit({ ...profile, provider: 'custom', base_url: 'http://localhost:8080/v1' }, 'glm-5.2')).toBeUndefined()
 })
 
 test('profile store writes atomically and leaves no temporary files behind', async () => {

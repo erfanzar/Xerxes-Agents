@@ -150,3 +150,11 @@ test('fallback registries route unique choices and health probes schedule and re
   expect(prober.snapshot('degraded')?.status).toBe('degraded')
   expect(prober.runOne('missing', 12)).toMatchObject({ status: 'unknown', message: 'not registered' })
 })
+
+test('a spliced stream frame is a transient fault the loop retries, whatever its dump contains', async () => {
+  const { StreamFrameError } = await import('../src/core/errors.js')
+  // Captured from z.ai: a frame cut off mid-id with a fresh stream spliced on.
+  const frame = '{"id":"202609250533140b631f052data:{"id":"20260925053438095d1c327ea0470e","created":1790285685,"object":"chat.completion.chunk","index":401,"choices":[{"index":0,"delta":{"role":"assistan'
+  const error = new StreamFrameError('zhipu', `invalid SSE JSON: ${frame}`, new SyntaxError('JSON Parse error'))
+  expect(classifyError(error)).toMatchObject({ kind: ErrorKind.TRANSIENT, retryable: true })
+})

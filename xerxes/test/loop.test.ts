@@ -745,7 +745,8 @@ test('a second output-token truncation keeps the text and asks the model to resu
   expect(state.messages).toEqual([
     { role: 'user', content: 'write the very long answer' },
     { role: 'assistant', content: 'part 2' },
-    { role: 'user', content: OUTPUT_LIMIT_RESUME_REMINDER },
+    // The harness wrote the reminder: tagged so clients never show it.
+    { role: 'user', content: OUTPUT_LIMIT_RESUME_REMINDER, origin: 'harness' },
     { role: 'assistant', content: ' and the end.' },
   ])
   expect(events.at(-1)).toMatchObject({ type: 'turn_done', reason: 'completed' })

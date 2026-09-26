@@ -118,6 +118,16 @@ function milestoneInput(inputs: JsonObject): string | null | undefined {
   return value
 }
 
+/**
+ * Smallest limits a goal can actually run under. A model that fills every
+ * schema field set a new goal to 1 ms, 1 token and 1 round: it blocked the
+ * instant it was created, before any work. No human asks for a limit that
+ * cannot admit one round, so such a value is a placeholder, and the error
+ * says how to express "no limit" instead of silently guessing one.
+ */
+export const GOAL_MIN_DURATION_MS = 60_000
+export const GOAL_MIN_TOTAL_TOKENS = 1_000
+
 export const GOAL_TOOL_DEFINITIONS: readonly ToolDefinition[] = Object.freeze([
   {
     type: 'function',
@@ -145,11 +155,11 @@ export const GOAL_TOOL_DEFINITIONS: readonly ToolDefinition[] = Object.freeze([
           objective: { type: 'string', description: 'The completion objective, as the human stated it.' },
           current_milestone: { type: ['string', 'null'], maxLength: 1000, description: 'Optional current work milestone; null means no milestone. Progress context only, not completion evidence.' },
           criteria: criterionSchema(),
-          max_duration_ms: { type: 'integer', minimum: 1, description: 'Optional wall-time limit in milliseconds from goal creation, including paused time. Set only from the human request.' },
-          max_total_tokens: { type: 'integer', minimum: 1, description: 'Optional total counted token admission cap. Starts with provider calls after goal creation; includes descendants and cache tokens. Already admitted concurrent calls can exceed the cap. Set only from the human request.' },
+          max_duration_ms: { type: ['integer', 'null'], minimum: GOAL_MIN_DURATION_MS, description: 'Wall-time limit in milliseconds from goal creation, including paused time. Omit or null for no limit (the default). Set only when the human asked for a time limit.' },
+          max_total_tokens: { type: ['integer', 'null'], minimum: GOAL_MIN_TOTAL_TOKENS, description: 'Total counted token admission cap. Starts with provider calls after goal creation; includes descendants and cache tokens. Already admitted concurrent calls can exceed the cap. Omit or null for no limit (the default). Set only when the human asked for a token budget.' },
           max_goal_rounds: {
-            type: 'integer',
-            description: 'Optional automatic continuation limit. Unlimited when omitted. Set only if the human explicitly requests a round limit.',
+            type: ['integer', 'null'],
+            description: 'Automatic continuation limit. Omit or null for no limit (the default). Set only if the human explicitly requests a round limit.',
           },
         },
       },
@@ -181,9 +191,9 @@ export const GOAL_TOOL_DEFINITIONS: readonly ToolDefinition[] = Object.freeze([
           criterion_id: { type: 'string', description: 'Criterion receiving evidence; record_evidence only.' },
           tool_call_id: { type: 'string', description: 'Exact completed successful tool call in this session; record_evidence only.' },
           evidence_summary: { type: 'string', description: 'Explain what this result establishes for the criterion. Relevance is your assessment, not an automatic certification.' },
-          max_goal_rounds: { type: 'integer', description: 'Replacement round cap; action "edit" only.' },
-          max_duration_ms: { type: 'integer', minimum: 1, description: 'Replacement wall-time limit from original creation; action "edit" only. Requires human authorization.' },
-          max_total_tokens: { type: 'integer', minimum: 1, description: 'Replacement total token admission cap; edit only, preserves recorded spend and requires human authorization.' },
+          max_goal_rounds: { type: ['integer', 'null'], description: 'Replacement round cap; action "edit" only. Null or omitted otherwise.' },
+          max_duration_ms: { type: ['integer', 'null'], minimum: GOAL_MIN_DURATION_MS, description: 'Replacement wall-time limit from original creation; action "edit" only (null or omitted otherwise). Requires human authorization.' },
+          max_total_tokens: { type: ['integer', 'null'], minimum: GOAL_MIN_TOTAL_TOKENS, description: 'Replacement total token admission cap; edit only (null or omitted otherwise), preserves recorded spend and requires human authorization.' },
           blocked_reason: {
             type: 'string',
             description: 'The concrete condition that persists; action "blocked" only.',
@@ -258,8 +268,8 @@ export function registerGoalTools(
       assertHumanAuthority(host, context, 'create_goal')
       const objective = requiredString(inputs, 'objective')
       const maxGoalRounds = optionalInteger(inputs, 'max_goal_rounds')
-      const maxDurationMs = optionalInteger(inputs, 'max_duration_ms')
-      const maxTotalTokens = optionalInteger(inputs, 'max_total_tokens')
+      const maxDurationMs = goalLimit(inputs, 'max_duration_ms')
+      const maxTotalTokens = goalLimit(inputs, 'max_total_tokens')
       const criteria = criteriaInput(inputs.criteria)
       const currentMilestone = milestoneInput(inputs) ?? undefined
       return wrap(() => {
@@ -282,20 +292,21 @@ export function registerGoalTools(
       const lifecycleOnly = action === 'resume' || action === 'pause' || action === 'unlimited'
       const ignoredFields = lifecycleOnly ? Object.keys(inputs).filter(key => !['goal_id', 'revision', 'action'].includes(key)) : []
       if (lifecycleOnly) inputs = { goal_id: inputs.goal_id!, revision: inputs.revision!, action }
-      // Strict schemas require numeric placeholders even for milestone-only
-      // calls. These fields cannot change limits through this action.
-      if (action === 'milestone') {
+      // Strict schemas make the model fill every field, and a number has no
+      // empty value: complete, blocked and record_evidence calls arrived with
+      // placeholder limits and were refused ("only accepted for action
+      // edit") — a model then had no call that could close its goal. Limits
+      // only mean something to edit, so every other action ignores them.
+      if (action !== 'edit') {
         inputs = { ...inputs }
         for (const key of ['max_goal_rounds', 'max_duration_ms', 'max_total_tokens']) {
-          if (key in inputs) { ignoredFields.push(key); delete inputs[key] }
+          if (key in inputs) { if (inputs[key] !== null && inputs[key] !== undefined && !ignoredFields.includes(key)) ignoredFields.push(key); delete inputs[key] }
         }
       }
       const meaningful = (value: unknown) => value !== undefined && value !== null && value !== '' && !(Array.isArray(value) && value.length === 0)
       if (meaningful(inputs.current_milestone) && action !== 'edit' && action !== 'milestone') throw new ValidationError('current_milestone', 'is only accepted for action edit or milestone')
       if (action === 'milestone' && Object.keys(inputs).some(key => !['goal_id', 'revision', 'action', 'current_milestone'].includes(key) && meaningful(inputs[key]))) throw new ValidationError('action', 'milestone changes only current_milestone')
       if (meaningful(inputs.criteria) && action !== 'edit') throw new ValidationError('criteria', 'is only accepted for action edit')
-      if (meaningful(inputs.max_duration_ms) && action !== 'edit') throw new ValidationError('max_duration_ms', 'is only accepted for action edit')
-      if (meaningful(inputs.max_total_tokens) && action !== 'edit') throw new ValidationError('max_total_tokens', 'is only accepted for action edit')
       const ref = { id: requiredString(inputs, 'goal_id'), revision: requiredIntegerField(inputs, 'revision') }
       const metadata = host.metadata(context)
       const sessionId = host.sessionId(context)
@@ -309,8 +320,8 @@ export function registerGoalTools(
           case 'edit': {
             const objective = optionalString(inputs, 'objective')
             const maxGoalRounds = optionalInteger(inputs, 'max_goal_rounds')
-            const maxDurationMs = optionalInteger(inputs, 'max_duration_ms')
-            const maxTotalTokens = optionalInteger(inputs, 'max_total_tokens')
+            const maxDurationMs = goalLimit(inputs, 'max_duration_ms')
+            const maxTotalTokens = goalLimit(inputs, 'max_total_tokens')
             const criteria = criteriaInput(inputs.criteria)
             const currentMilestone = milestoneInput(inputs)
             return view(editGoal(metadata, sessionId, ref, {
@@ -544,6 +555,17 @@ function requiredIntegerField(inputs: JsonObject, field: string): number {
   const value = inputs[field]
   if (typeof value !== 'number' || !Number.isSafeInteger(value)) {
     throw new ValidationError(field, 'is required and must be an integer', value)
+  }
+  return value
+}
+
+function goalLimit(inputs: JsonObject, field: 'max_duration_ms' | 'max_total_tokens'): number | undefined {
+  const value = optionalInteger(inputs, field)
+  if (value === undefined) return undefined
+  const minimum = field === 'max_duration_ms' ? GOAL_MIN_DURATION_MS : GOAL_MIN_TOTAL_TOKENS
+  if (value < minimum) {
+    const unit = field === 'max_duration_ms' ? 'ms (one minute)' : 'tokens'
+    throw new ValidationError(field, `must be at least ${minimum} ${unit}; a smaller limit ends the goal before its first round. Goals have no limit by default: omit ${field} or pass null unless the human asked for this limit.`, value)
   }
   return value
 }

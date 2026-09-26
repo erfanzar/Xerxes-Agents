@@ -4,6 +4,10 @@ import {expect,test} from 'bun:test'
 import {parseLocalProviderCapabilities} from '../src/protocol/localProviderCapabilities.js'
 import {boundedLocalCapabilities,localCapabilitySnapshot,localReasoningLevels} from '../src/daemon/localReasoningCapabilities.js'
 import {catalogReasoningLevels,fallbackReasoningLevels,providerReasoningLevels,selectableEfforts} from '../src/llms/reasoningLevels.js'
+import { seedModelsDev } from './fixtures/modelsDev.js'
+
+// Model capabilities come from models.dev at runtime; tests use its fixture.
+seedModelsDev()
 const snapshot=()=>({version:1,model:'local-model',reasoning:{shape:'effort',efforts:['low','ultra'],canDisable:false,provenance:'provider_reported'}})
 
 test('capability metadata is model-scoped, immutable, bounded and excludes arbitrary configuration',()=>{

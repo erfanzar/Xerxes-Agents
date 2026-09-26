@@ -149,7 +149,11 @@ function createWindow(saved?: SavedWindow): BrowserWindow {
     trafficLightPosition: { x: 20, y: 15 },
     ...(windowIcon ? { icon: windowIcon } : {}),
     backgroundColor: process.platform === 'darwin' ? '#00000000' : '#202124',
-    ...(process.platform === 'darwin' ? { vibrancy: 'under-window' as const, visualEffectState: 'followWindow' as const } : {}),
+    // Always active: with 'followWindow' the material went inactive whenever
+    // another app had focus and stopped sampling what is behind the window,
+    // so a transparent background kept showing a frozen copy of whatever was
+    // there (another app's window) instead of the live view.
+    ...(process.platform === 'darwin' ? { vibrancy: 'under-window' as const, visualEffectState: 'active' as const } : {}),
     show: false,
     webPreferences: {
       contextIsolation: true,
@@ -186,11 +190,28 @@ const cleanupWindows = new Set<() => void>()
 const workspaceSurfaces = new Map<number, { host: BrowserWindow; view: WebContentsView | null }>()
 const activeSurfaces = new Map<number, number>()
 const contextReaders = new Map<number, () => Promise<WorkspaceContext>>()
+/**
+ * Base pages (a window's own page, not a view) currently covered by another
+ * workspace view. Kept here, not only pushed: at startup the push arrives
+ * before the page listens, so the page also asks as it loads.
+ */
+const occludedSurfaces = new Set<number>()
+
 function activateSurface(id: number): void {
   const surface = workspaceSurfaces.get(id)
   if (!surface || surface.host.isDestroyed()) return
   for (const [otherId, other] of workspaceSurfaces) {
-    if (other.host === surface.host && other.view) other.view.setVisible(otherId === id)
+    if (other.host !== surface.host) continue
+    if (other.view) other.view.setVisible(otherId === id)
+    // The window's own page cannot be hidden like a view. With a transparent
+    // background the view on top is see-through, so a covered base page
+    // showed through it (two workspaces drawn over each other); it hides
+    // itself instead, which also stops it painting while unseen.
+    else {
+      if (otherId !== id) occludedSurfaces.add(otherId)
+      else occludedSurfaces.delete(otherId)
+      if (!other.host.webContents.isDestroyed()) other.host.webContents.send('desktop:occluded', otherId !== id)
+    }
   }
   // An already attached view keeps its old stacking position. Activation must
   // bring it above the other retained workspaces as well as make it visible.
@@ -244,7 +265,7 @@ function openRemoteView(host: BrowserWindow, machine: RemoteTarget, sessionId?: 
   }, undefined, host)
 }
 
-function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: SavedWindow, initialSessionId?: string, host?: BrowserWindow): BrowserWindow {
+function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: SavedWindow, initialSessionId?: string, host?: BrowserWindow, startFresh = false): BrowserWindow {
   let daemon: DaemonRpc | null = null
   let remote: RemoteConnection | null = null
   let remoteMachine: RemoteTarget | null = null
@@ -281,7 +302,9 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
   } }) : null
   const contents = view?.webContents ?? window.webContents
   if (view) {
-    view.setBackgroundColor('#181b23')
+    // Clear on macOS so a transparent background shows the window's native
+    // material, like the window's own contents do.
+    view.setBackgroundColor(process.platform === 'darwin' ? '#00000000' : '#181b23')
     const fit = () => { if (!window.isDestroyed()) { const [width, height] = window.getContentSize(); view.setBounds({ x: 0, y: 0, width: width!, height: height! }) } }
     window.contentView.addChildView(view)
     fit()
@@ -432,10 +455,27 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     else openWorkspaceView(window, row.cwd, row.id)
   })
   handle('desktop:workspace', () => selectedWorkspace)
+  handle('desktop:occluded', () => occludedSurfaces.has(id))
+  // Transparent background with blur off: remove the native material so the
+  // window is clear glass; any other choice puts it back. Verified on
+  // Electron 44: removing it leaves the window clear, not black.
+  handle('desktop:window-blur', (_event, on: unknown) => {
+    if (typeof on !== 'boolean') throw new TypeError('Invalid window blur')
+    if (process.platform !== 'darwin' || window.isDestroyed()) return
+    window.setVibrancy(on ? 'under-window' : null, { animationDuration: 0 })
+  })
   handle('desktop:resume', () => {
     const selected = resumeSession
     resumeSession = null
     return selected
+  })
+  // Asked once at startup: a window opened for a fresh task must not resume
+  // the workspace's remembered chat (that is the one still running a turn).
+  let startsFresh = startFresh
+  handle('desktop:starts-fresh', () => {
+    const fresh = startsFresh
+    startsFresh = false
+    return fresh
   })
   let voiceRequest: AbortController | null = null
   handle('desktop:voice', async (_event, action: unknown, value: unknown) => {
@@ -614,20 +654,27 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     }
     return (await shell.openPath(candidate)) === ''
   })
-  handle('desktop:new-window', async (_event, directory?: unknown, sessionId?: unknown) => {
+  handle('desktop:new-window', async (_event, directory?: unknown, sessionId?: unknown, fresh?: unknown) => {
     if (sessionId !== undefined && (typeof sessionId !== 'string' || !sessionId || sessionId.length > 256 || /[\x00-\x1f]/.test(sessionId))) throw new TypeError('Invalid session identity')
+    if (fresh !== undefined && typeof fresh !== 'boolean') throw new TypeError('Invalid new-window option')
+    if (fresh === true && sessionId !== undefined) throw new TypeError('A fresh task window cannot also resume a session')
     if (directory !== undefined && (typeof directory !== 'string' || !isAbsolute(directory) || /[\x00-\x1f]/.test(directory))) throw new TypeError('Invalid workspace directory')
     const picked = typeof directory === 'string' ? directory : await pickWorkspace()
     if (!picked || window.isDestroyed()) return null
     if (remoteMachine && picked === selectedWorkspace) {
       const savedWindow = windowStates.get(id)?.()
       if (!savedWindow) throw new Error('Remote workspace is not ready')
-      createWorkspaceWindow(null, { ...savedWindow, sessionId: typeof sessionId === 'string' ? sessionId : null }, undefined, window)
+      createWorkspaceWindow(null, { ...savedWindow, sessionId: typeof sessionId === 'string' ? sessionId : null }, undefined, window, fresh === true)
     } else if (sessionId) openWorkspaceView(window, picked, sessionId as string)
+    // A fresh task opens as another view in THIS window (like opening a
+    // second chat mid-turn does), never as a new OS window; the running task
+    // keeps its own view.
+    else if (fresh === true) createWorkspaceWindow(picked, undefined, undefined, window, true)
     else createWorkspaceWindow(picked)
     return picked
   })
   const cleanup = () => {
+    occludedSurfaces.delete(id)
     contextReaders.delete(id)
     workspaceSurfaces.delete(id)
     if (activeSurfaces.get(window.id) === id) activeSurfaces.delete(window.id)

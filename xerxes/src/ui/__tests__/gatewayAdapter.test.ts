@@ -936,3 +936,27 @@ describe('usageFromStatus partial updates', () => {
     expect(legacy).not.toHaveProperty('cache_hit_rate')
   })
 })
+
+describe('harness-written prompts in history', () => {
+  it('never shows them, and shows the user only what they typed', () => {
+    const rows = transcriptFromStoredMessages([
+      { role: 'user', content: '<turn-context>\ngoal status\n</turn-context>\n\nfix the build', text: 'fix the build' },
+      { role: 'user', content: 'Goal round 2/unlimited — ship it', origin: 'goal' },
+      { role: 'user', content: 'monitor saw a failure', origin: 'monitor' },
+      { role: 'user', content: 'Output limit reached; resume.', origin: 'harness' },
+      { role: 'user', content: '<turn-context>\nCurrent goal: …\n</turn-context>\n\ny' },
+    ])
+    expect(rows.filter(row => row.role === 'user').map(row => row.text)).toEqual(['fix the build', 'y'])
+  })
+})
+
+describe('harness prompts saved before origins existed', () => {
+  it('hides old goal rounds and shows an old retry prompt as Continue', () => {
+    const rows = transcriptFromStoredMessages([
+      { role: 'user', content: 'Goal round 1/unlimited — Run a 10-iteration campaign' },
+      { role: 'user', content: 'Continue. Your previous reply was cut off by an error (cyber_policy). Pick up where you stopped.' },
+      { role: 'user', content: 'Goal round robin scheduling is broken' },
+    ])
+    expect(rows.filter(row => row.role === 'user').map(row => row.text)).toEqual(['Continue', 'Goal round robin scheduling is broken'])
+  })
+})

@@ -982,7 +982,10 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
           key,
         );
       }
-      existing.lastActive = Date.now();
+      // Re-opening a loaded chat is not conversation activity. lastActive is
+      // the latest-message clock (session.list/active_list report it as
+      // such); bumping it here made a merely clicked chat jump to the top
+      // of every client's list and claim "now".
       if (agentId && agentId !== existing.agentId) {
         if (existing.activeTurnId || existing.turnCount > 0 || existing.messages.length > 0) {
           throw new ValidationError(
@@ -1736,6 +1739,10 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
       payload: {
         turn_id: session.activeTurnId,
         text: displayText,
+        // A harness-written prompt (goal round, monitor, schedule) is shown
+        // as a marker, not as something the user said.
+        ...(options.goalRound !== undefined ? { origin: "goal", goal_round: options.goalRound }
+          : options.origin && options.origin !== "human" ? { origin: options.origin } : {}),
         ...(processed.mentionedFiles.length
           ? { mentioned_files: processed.mentionedFiles }
           : {}),

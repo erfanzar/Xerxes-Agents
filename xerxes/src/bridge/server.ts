@@ -895,7 +895,7 @@ export class BridgeServer {
         ? { remaining_context: Math.max(0, contextLimit - usedContext) }
         : {}),
       used_context: usedContext,
-      cost_usd: calcCost(model, this.state.totalInputTokens, this.state.totalOutputTokens),
+      cost_usd: (calcCost(model, this.state.totalInputTokens, this.state.totalOutputTokens) ?? 0),
       reasoning_effort: textValue(this.config.reasoning_effort) || 'off',
     }
   }

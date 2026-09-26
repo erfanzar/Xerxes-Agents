@@ -28,6 +28,7 @@ import type { AgentDefinition } from '../../agents/definitions.js'
 import type { JsonObject, JsonValue, ToolDefinition } from '../../types/toolCalls.js'
 import { optionalBoolean, optionalString, optionalStringArray, requiredString } from '../inputs.js'
 import { collectChildOutput } from '../processOutput.js'
+import { ASK_USER_POLICY } from '../askUserPolicy.js'
 
 export type { InteractionMode } from '../../runtime/interactionModes.js'
 
@@ -240,7 +241,7 @@ export interface ClaudeWorkflowToolsOptions {
 
 export const SKILL_TOOL_DEFINITION: ToolDefinition = definition(
   'SkillTool',
-  'Discover installed skills by query/tags, or activate one exact skill name and render its instructions.',
+  'Activate an installed skill by exact skill_name as your first step when one matches the task, then follow its instructions; search by query or tags only when unsure which fits.',
   {
     skill_name: stringSchema('Exact installed skill name to activate. Omit to search or list skills.'),
     query: stringSchema('Optional name/description search. Omit or use an empty string to list installed skills.'),
@@ -254,7 +255,7 @@ export const SKILL_TOOL_DEFINITION: ToolDefinition = definition(
 )
 
 export const CLAUDE_WORKFLOW_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
-  definition('TodoWriteTool', 'Replace the session-scoped structured todo list.', {
+  definition('TodoWriteTool', 'Track multi-step work (3+ steps) so the user can see progress; skip it for single-step or conversational tasks. Each call REPLACES the whole list, so resend every item.', {
     todos: {
       description: 'Array of {content, status} todo objects.',
       type: 'array',
@@ -263,13 +264,13 @@ export const CLAUDE_WORKFLOW_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
         additionalProperties: false,
         required: ['content'],
         properties: {
-          content: { type: 'string' },
-          status: { type: 'string' },
+          content: { type: 'string', description: 'The step, in a few words.' },
+          status: { type: 'string', enum: ['pending', 'in_progress', 'completed'] },
         },
       },
     },
   }, ['todos']),
-  definition('AskUserQuestionTool', 'Ask the attached user-prompt manager a blocking clarification question.', {
+  definition('AskUserQuestionTool', ASK_USER_POLICY + ' The turn blocks until they answer.', {
     question: stringSchema('Question shown to the user.'),
   }, ['question']),
   definition('EnterPlanModeTool', 'Enter plan mode; hosts can use this state to gate mutations.', {}),
@@ -287,9 +288,11 @@ export const CLAUDE_WORKFLOW_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
   }, ['worktree_path']),
   definition(
     'ToolSearchTool',
-    'Load tool schemas by capability query. Matches come back with their full parameter schema, '
-    + 'which is what makes a deferred tool callable; tools already listed in this request need no search.',
-    { query: stringSchema('Tool capability query.') },
+    'Load deferred tool schemas so you can call them. Load everything the task needs in ONE call: list exact '
+    + 'tool names separated by spaces (e.g. "AgentTool AwaitAgents TaskOutputTool"), or capability words if you do '
+    + `not know the names. Up to ${MAX_TOOL_SEARCH_LOADED} schemas load per call; further matches return loaded:false `
+    + '(name only), so query those by name. Tools already in this request need no search.',
+    { query: stringSchema('Exact tool names and/or capability words, space-separated; each term is matched separately.') },
     ['query'],
   ),
   SKILL_TOOL_DEFINITION,
@@ -405,7 +408,8 @@ export const CLAUDE_WORKFLOW_TOOL_GUIDANCE: Readonly<Record<string, string>> = O
       + 'it declares that dependency.',
   TodoWriteTool:
     'Keep the todo list current: mark items in_progress when starting and completed the moment they '
-      + 'finish, so the user can audit progress mid-turn.',
+      + 'finish, so the user can audit progress mid-turn. Keep one item in_progress at a time, and mark '
+      + 'an item completed only after it is verified.',
 })
 
 /** Register only the safe, read-only skill activation surface for a live registry. */

@@ -14,7 +14,10 @@
 import { createPortal } from 'react-dom'
 import { createContext, useContext, useId, type ReactNode, useLayoutEffect, useEffect, useMemo, useRef, useState, type ReactElement, type RefObject } from 'react'
 
-import { saveAppearance, FONT_SIZES, FONT_LABELS } from './appearance.js'
+import { saveAppearance, DEFAULT_FONT_SIZE, FONT_SIZES, FONT_LABELS } from './appearance.js'
+import { applySessionDensity, applyTerminalFont, applyUiScale, loadSessionDensity, loadTerminalFont, loadUiScale, parseTerminalFont, SESSION_DENSITIES, UI_SCALES, type SessionDensity } from './displayPrefs.js'
+import { loadPalette, PALETTES, paletteVariant, savePalette, type Palette } from './palettes.js'
+import { applyBackdrop, backdropFromImage, BACKDROP_PRESETS, BUNDLED_BACKGROUNDS, DEFAULT_BLUR, DEFAULT_CHAT_OPACITY, DEFAULT_PANEL_OPACITY, loadBackdrop, saveBackdrop, transparencySupported, type Backdrop } from './backdrop.js'
 import { desktopError } from './desktopRpc.js'
 import { useDialogFocus } from './dialogFocus.js'
 import { ChannelsCard } from './ChannelsPanel.js'
@@ -88,6 +91,10 @@ function useThemeChoice(): [string, (next: string) => void] {
   const [choice, setChoice] = useState(readChoice)
   const set = (next: string): void => {
     if (typeof document === 'undefined') return
+    // Picking light or dark by hand takes precedence over a background's
+    // derived mode. With a palette the background stays: the mode only picks
+    // the palette's variant.
+    if (document.documentElement.hasAttribute('data-backdrop') && !loadPalette()) { applyBackdrop({ kind: 'none' }); saveBackdrop({ kind: 'none' }) }
     if (next === 'system') {
       document.documentElement.removeAttribute('data-user-theme')
       document.documentElement.setAttribute(
@@ -98,6 +105,7 @@ function useThemeChoice(): [string, (next: string) => void] {
       document.documentElement.setAttribute('data-user-theme', next)
       document.documentElement.setAttribute('data-theme', next)
     }
+    applyBackdrop(loadBackdrop())
     saveAppearance()
     setChoice(next)
   }
@@ -196,10 +204,203 @@ function McpCard({ snap }: { snap: Snapshot }): ReactElement {
   )
 }
 
+/** One background as a card: a small window laid over the picture. */
+function BackdropCard({ label, description, paint, on, onPick }: { label: string; description: string; paint: string | undefined; on: boolean; onPick: () => void }): ReactElement {
+  return (
+    <button role="radio" aria-checked={on} className={`palette-card backdrop-card${on ? ' is-on' : ''}`} onClick={onPick}>
+      <span className={`backdrop-preview${paint === undefined ? ' backdrop-preview--none' : paint === 'transparent' ? ' backdrop-preview--transparent' : ''}`} style={paint && paint !== 'transparent' ? { background: paint } : undefined} aria-hidden>
+        <span className="backdrop-preview__side" />
+        <span className="backdrop-preview__main"><span className="palette-preview__bar" /><span className="palette-preview__bar palette-preview__bar--muted" /></span>
+      </span>
+      <span className="palette-card__label">{label}</span>
+      <span className="palette-card__desc">{description}</span>
+    </button>
+  )
+}
+
+/**
+ * Background the whole theme follows: pick a gradient, two colours, an
+ * image, or the see-through window, and the surfaces, accent and light/dark
+ * are derived from it.
+ */
+function BackdropField(): ReactElement {
+  const [current, setCurrent] = useState<Backdrop>(() => typeof document === 'undefined' ? { kind: 'none' } : loadBackdrop())
+  const [error, setError] = useState('')
+  const [custom, setCustom] = useState(() => current.kind === 'gradient' ? { from: current.from, to: current.to } : { from: '#1b2a6b', to: '#6b1b5a' })
+  const fileInput = useRef<HTMLInputElement>(null)
+  const choose = (picked: Backdrop): void => {
+    const levels = current.kind === 'none' ? {} : { ...(current.chat === undefined ? {} : { chat: current.chat }), ...(current.panels === undefined ? {} : { panels: current.panels }), ...(current.blur === undefined ? {} : { blur: current.blur }) }
+    const next: Backdrop = picked.kind === 'none' ? picked : { ...levels, ...picked }
+    applyBackdrop(next)
+    setCurrent(next)
+    setError(saveBackdrop(next) ? '' : 'That image is too large to keep; it applies to this window only.')
+  }
+  // Sliders apply live; the levels survive switching to another background.
+  const tune = (levels: { chat?: number; panels?: number; blur?: number }): void => {
+    if (current.kind === 'none') return
+    choose({ ...current, ...levels })
+  }
+  const same = (backdrop: Backdrop) => current.kind === 'gradient' && backdrop.kind === 'gradient' && current.from === backdrop.from && current.to === backdrop.to && current.angle === backdrop.angle
+  const swatch = (backdrop: Backdrop) => backdrop.kind === 'gradient' ? `linear-gradient(${backdrop.angle}deg, ${backdrop.from}, ${backdrop.to})` : undefined
+  const pickImage = async (file: File | undefined): Promise<void> => {
+    if (!file) return
+    try { choose(await backdropFromImage(file)) } catch (failure) { setError(failure instanceof Error ? failure.message : String(failure)) }
+  }
+  return (
+    <div className="field backdrop-field">
+      <label id="backdrop-label">Background</label>
+      {/* Cards like the colour themes: each shows a small window over the
+          picture, so you see how the panels will sit on it. */}
+      <div className="palette-grid backdrop-grid" role="radiogroup" aria-labelledby="backdrop-label">
+        <BackdropCard label="None" description="Solid Xerxes surfaces" paint={undefined} on={current.kind === 'none'} onPick={() => choose({ kind: 'none' })} />
+        {transparencySupported() && <BackdropCard label="Transparent" description="Your desktop, blurred through the window" paint="transparent" on={current.kind === 'transparent'} onPick={() => choose({ kind: 'transparent' })} />}
+        {BUNDLED_BACKGROUNDS.map(art => (
+          <BackdropCard key={art.name} label={art.name} description="Artwork" paint={`center / cover no-repeat url("${art.backdrop.src}")`} on={current.kind === 'image' && current.src === art.backdrop.src} onPick={() => choose(art.backdrop)} />
+        ))}
+        {BACKDROP_PRESETS.map(preset => (
+          <BackdropCard key={preset.name} label={preset.name} description="Gradient" paint={swatch(preset.backdrop)} on={same(preset.backdrop)} onPick={() => choose(preset.backdrop)} />
+        ))}
+        {/* Your own picture; once chosen it shows here as its own card. */}
+        {current.kind === 'image' && current.src.startsWith('data:') && <BackdropCard label="Your image" description="Uploaded picture" paint={`center / cover no-repeat url("${current.src}")`} on onPick={() => undefined} />}
+        <button className="palette-card backdrop-card--add" onClick={() => fileInput.current?.click()}>
+          <span className="backdrop-card__add" aria-hidden><Icon name="plus" size={18} /></span>
+          <span className="palette-card__label">Your image…</span>
+          <span className="palette-card__desc">PNG, JPEG or WebP</span>
+        </button>
+        <input ref={fileInput} type="file" accept="image/png,image/jpeg,image/webp" hidden onChange={event => { void pickImage(event.currentTarget.files?.[0]); event.currentTarget.value = '' }} />
+      </div>
+      <div className="backdrop-custom">
+        <span>Custom gradient</span>
+        <input type="color" aria-label="Gradient start" value={custom.from} onChange={event => setCustom(value => ({ ...value, from: event.target.value }))} />
+        <input type="color" aria-label="Gradient end" value={custom.to} onChange={event => setCustom(value => ({ ...value, to: event.target.value }))} />
+        <button className="btn" onClick={() => choose({ kind: 'gradient', from: custom.from, to: custom.to, angle: 150 })}>Apply</button>
+      </div>
+      {current.kind !== 'none' && <div className="backdrop-levels">
+        <label htmlFor="backdrop-chat">Conversation</label>
+        <input id="backdrop-chat" type="range" min={0} max={100} value={current.chat ?? DEFAULT_CHAT_OPACITY} aria-valuetext={`${current.chat ?? DEFAULT_CHAT_OPACITY}% solid`}
+          onChange={event => tune({ chat: Number(event.target.value) })} />
+        <output htmlFor="backdrop-chat">{current.chat ?? DEFAULT_CHAT_OPACITY}%</output>
+        <label htmlFor="backdrop-panels">Side panels</label>
+        <input id="backdrop-panels" type="range" min={0} max={100} value={current.panels ?? DEFAULT_PANEL_OPACITY} aria-valuetext={`${current.panels ?? DEFAULT_PANEL_OPACITY}% solid`}
+          onChange={event => tune({ panels: Number(event.target.value) })} />
+        <output htmlFor="backdrop-panels">{current.panels ?? DEFAULT_PANEL_OPACITY}%</output>
+        {/* The OS blurs a transparent window itself and has no strength
+            setting: on (system blur) or off (clear glass). */}
+        {current.kind === 'transparent' && <>
+          <label id="backdrop-system-blur">Blur</label>
+          <div className="seg" role="group" aria-labelledby="backdrop-system-blur">
+            <button aria-pressed={current.systemBlur !== false} className={current.systemBlur !== false ? 'is-on' : ''} onClick={() => choose({ ...current, systemBlur: true })}>System blur</button>
+            <button aria-pressed={current.systemBlur === false} className={current.systemBlur === false ? 'is-on' : ''} onClick={() => choose({ kind: 'transparent', ...(current.chat === undefined ? {} : { chat: current.chat }), ...(current.panels === undefined ? {} : { panels: current.panels }), systemBlur: false })}>Clear glass</button>
+          </div>
+          <span />
+        </>}
+        {current.kind !== 'transparent' && <>
+          <label htmlFor="backdrop-blur">Blur</label>
+          <input id="backdrop-blur" type="range" min={0} max={100} value={current.blur ?? DEFAULT_BLUR} aria-valuetext={`${current.blur ?? DEFAULT_BLUR}% blur`}
+            onChange={event => tune({ blur: Number(event.target.value) })} />
+          <output htmlFor="backdrop-blur">{current.blur ?? DEFAULT_BLUR}%</output>
+        </>}
+      </div>}
+      {current.kind !== 'none' && <p className="backdrop-note">{current.kind === 'transparent'
+        ? 'How solid each surface is over your desktop — 0% leaves only the system blur. Light or dark follows the Theme setting.'
+        : 'How solid each surface is, and how blurred the picture under them is — 0% on all three shows the background exactly as it is. Light or dark and the accent follow the background.'}</p>}
+      {error && <p className="backdrop-note backdrop-note--error" role="alert">{error}</p>}
+    </div>
+  )
+}
+
+/** A palette as a small window: sidebar strip, two text bars, an accent pill. */
+function PalettePreview({ palette, mode }: { palette: Palette | undefined; mode: 'light' | 'dark' }): ReactElement {
+  const colors = palette ? paletteVariant(palette, mode).colors : undefined
+  const style = colors ? {
+    '--pv-bg': colors.background, '--pv-side': colors.sidebarBackground ?? colors.card, '--pv-fg': colors.foreground,
+    '--pv-muted': colors.mutedForeground, '--pv-primary': colors.primary, '--pv-border': colors.border,
+  } as React.CSSProperties : undefined
+  return <span className={`palette-preview${colors ? '' : ' palette-preview--xerxes'}`} style={style} aria-hidden><span className="palette-preview__side" /><span className="palette-preview__main"><span className="palette-preview__bar" /><span className="palette-preview__bar palette-preview__bar--muted" /><span className="palette-preview__pill" /></span></span>
+}
+
+/**
+ * Colour themes (Hermes's palettes). With a background they tint the glass;
+ * without one the surfaces are solid. Xerxes keeps its own colours, or the
+ * background's, when none is chosen.
+ */
+function PaletteField(): ReactElement {
+  const [current, setCurrent] = useState(() => typeof document === 'undefined' ? undefined : loadPalette()?.name)
+  const mode: 'light' | 'dark' = typeof document !== 'undefined' && document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark'
+  const choose = (name: string | undefined): void => {
+    savePalette(name)
+    applyBackdrop(loadBackdrop())
+    setCurrent(name)
+  }
+  const options: ReadonlyArray<{ name: string | undefined; label: string; description: string; palette: Palette | undefined }> = [
+    { name: undefined, label: 'Xerxes', description: 'Built-in colours, or the background\'s', palette: undefined },
+    ...PALETTES.map(palette => ({ name: palette.name, label: palette.label, description: palette.description, palette })),
+  ]
+  return (
+    <div className="field palette-field">
+      <label id="palette-label">Colour theme</label>
+      <p className="field__note">With a background, the theme tints the glass over it; Light / Dark picks the theme's variant.</p>
+      <div className="palette-grid" role="radiogroup" aria-labelledby="palette-label">
+        {options.map(option => (
+          <button key={option.label} role="radio" aria-checked={current === option.name} className={`palette-card${current === option.name ? ' is-on' : ''}`} onClick={() => choose(option.name)}>
+            <PalettePreview palette={option.palette} mode={mode} />
+            <span className="palette-card__label">{option.label}</span>
+            <span className="palette-card__desc">{option.description}</span>
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/** UI scale, terminal font and sidebar density (per machine). */
+function DisplayFields(): ReactElement {
+  const [scale, setScale] = useState(() => typeof document === 'undefined' ? 100 : loadUiScale())
+  const [density, setDensity] = useState<SessionDensity>(() => typeof document === 'undefined' ? 'comfortable' : loadSessionDensity())
+  const [font, setFont] = useState(() => typeof document === 'undefined' ? '' : loadTerminalFont() ?? '')
+  const [fontError, setFontError] = useState('')
+  const saveFont = (value: string): void => {
+    try {
+      applyTerminalFont(parseTerminalFont(value))
+      setFontError('')
+    } catch (error) { setFontError(error instanceof Error ? error.message : String(error)) }
+  }
+  return (
+    <>
+      <div className="field">
+        <label id="ui-scale">UI scale</label>
+        <p className="field__note">Zooms the whole window. Cmd with +, − and 0 also works. Current: {scale}%.</p>
+        <div className="seg" role="group" aria-labelledby="ui-scale">
+          {UI_SCALES.map(value => <button key={value} aria-pressed={scale === value} className={scale === value ? 'is-on' : ''} onClick={() => { applyUiScale(value); setScale(value) }}>{value}%</button>)}
+        </div>
+      </div>
+      <div className="field terminal-font-field">
+        <label htmlFor="terminal-font">Terminal font</label>
+        <p className="field__note">An installed font for the built-in terminals. Nerd Fonts render Powerlevel10k and shell icons; leave blank for the default.</p>
+        <div className="terminal-font-field__row">
+          <input id="terminal-font" value={font} placeholder="MesloLGS NF, or a CSS font list" spellCheck={false}
+            onChange={event => setFont(event.target.value)} onBlur={event => saveFont(event.target.value)}
+            onKeyDown={event => { if (event.key === 'Enter') saveFont(event.currentTarget.value) }} />
+          <button className="btn" disabled={!font} onClick={() => { setFont(''); saveFont('') }}>Use default</button>
+        </div>
+        {fontError ? <p className="backdrop-note backdrop-note--error" role="alert">{fontError}</p>
+          : <p className="terminal-font-field__preview"><span>Glyph preview</span><code style={{ fontFamily: font ? `${font}, var(--mono)` : 'var(--mono)' }}>{'~/project  main ❯ \ue0b0 \uf113'}</code></p>}
+      </div>
+      <div className="field">
+        <label id="session-density">Session list density</label>
+        <p className="field__note">How much each chat row in the sidebar shows.</p>
+        <div className="seg" role="group" aria-labelledby="session-density">
+          {SESSION_DENSITIES.map(value => <button key={value} aria-pressed={density === value} className={density === value ? 'is-on' : ''} onClick={() => { applySessionDensity(value); setDensity(value) }}>{value[0]!.toUpperCase() + value.slice(1)}</button>)}
+        </div>
+      </div>
+    </>
+  )
+}
+
 function GeneralCard({ snap }: { snap: Snapshot }): ReactElement {
   const [theme, setTheme] = useThemeChoice()
   const [fontSize, setFontSize] = useState(() =>
-    typeof document === 'undefined' ? '12' : document.documentElement.getAttribute('data-font') ?? '12')
+    typeof document === 'undefined' ? DEFAULT_FONT_SIZE : document.documentElement.getAttribute('data-font') ?? DEFAULT_FONT_SIZE)
   const { notifications, loginItem, toggleNotifications, toggleLoginItem } = useNativeSwitches()
   const applyFont = (size: string): void => {
     if (typeof document !== 'undefined') document.documentElement.setAttribute('data-font', size)
@@ -211,6 +412,7 @@ function GeneralCard({ snap }: { snap: Snapshot }): ReactElement {
       <h2 className="modal__title">General</h2>
       <p className="modal__sub">Applies immediately; nothing here is per-task.</p>
 
+      <BackdropField />
       <div className="field">
         <label>Theme</label>
         <div className="seg">
@@ -219,6 +421,7 @@ function GeneralCard({ snap }: { snap: Snapshot }): ReactElement {
           <button className={theme === 'light' ? 'is-on' : ''} onClick={() => setTheme('light')}>Light</button>
         </div>
       </div>
+      <PaletteField />
       <div className="field">
         <label id="ui-font-size">Interface text size</label>
         {/* Raw pixel numbers told you nothing about which way was bigger. */}
@@ -228,6 +431,7 @@ function GeneralCard({ snap }: { snap: Snapshot }): ReactElement {
           ))}
         </div>
       </div>
+      <DisplayFields />
 
       <div className="row">
         <div className="row__main">
@@ -532,14 +736,14 @@ function ModelsCard({ snap }: { snap: Snapshot }): ReactElement {
                 ? 'active profile — new tasks start here'
                 : snap.turnActive
                   ? 'wait for the running turn to finish'
-                  : `make ${provider.name} the active profile`
+                  : `make ${(provider.label || provider.name)} the active profile`
             }
             onClick={() => store.selectProvider(provider.name)}
           >
             <span className={`dot ${provider.active ? 'dot--live' : 'dot--idle'}`} />
             <span className="pcard__text">
               <span className="pcard__name">
-                {provider.name}
+                {(provider.label || provider.name)}
                 {provider.active ? <span className="chipbtn" style={{ marginLeft: 6 }}>active</span> : null}
               </span>
               <span className="pcard__sub">
@@ -554,7 +758,7 @@ function ModelsCard({ snap }: { snap: Snapshot }): ReactElement {
             <button
               className="chipbtn"
               disabled={snap.turnActive}
-              title={`edit ${provider.name}`}
+              title={`edit ${(provider.label || provider.name)}`}
               onClick={() => setForm(provider.name)}
             >Edit</button>
             {/* This app confirms killing a terminal; deleting a stored
@@ -569,7 +773,7 @@ function ModelsCard({ snap }: { snap: Snapshot }): ReactElement {
                 <button
                   className="pcard__del"
                   disabled={snap.turnActive}
-                  title={`delete ${provider.name}`}
+                  title={`delete ${(provider.label || provider.name)}`}
                   onClick={() => setConfirmDelete(provider.name)}
                 >Delete</button>
               )
@@ -999,11 +1203,17 @@ export interface ModelGroup {
   readonly choices: readonly ModelChoice[]
 }
 
+/** A row as the provider names it; the id itself when the provider gives no name. */
+export function modelRowName(choice: ModelChoice): { name: string; hint?: string } {
+  return { name: choice.label ?? choice.id, ...(choice.hint ? { hint: choice.hint } : {}) }
+}
+
 export function groupModels(models: readonly ModelChoice[], needle = ''): ModelGroup[] {
   const lower = needle.trim().toLowerCase()
   const map = new Map<string, ModelChoice[]>()
   for (const choice of models) {
-    if (lower && !choice.id.toLowerCase().includes(lower) && !choice.provider.toLowerCase().includes(lower)) continue
+    if (lower && !choice.id.toLowerCase().includes(lower) && !choice.provider.toLowerCase().includes(lower)
+      && !modelRowName(choice).name.toLowerCase().includes(lower)) continue
     const bucket = map.get(choice.provider) ?? []
     bucket.push(choice)
     map.set(choice.provider, bucket)
@@ -1077,13 +1287,14 @@ export function ModelPicker({ snap, onClose }: { snap: Snapshot; onClose: () => 
                     key={choice.id}
                     className={`mrow${at === cursor ? ' is-hover' : ''}`}
                     disabled={snap.turnActive}
-                    title={snap.turnActive ? 'wait for the running turn to finish' : undefined}
+                    title={snap.turnActive ? 'wait for the running turn to finish' : choice.id}
                     onClick={() => pick(choice.id)}
                     onMouseEnter={() => setCursor(at)}
                   >
                     <span className={`dot ${current ? 'dot--live' : 'dot--idle'}`} />
-                    <span className="mrow__name">{choice.id}</span>
+                    <span className="mrow__name">{modelRowName(choice).name}</span>
                     <span className="mrow__tags">
+                      {modelRowName(choice).hint ? <span className="mrow__desc">{modelRowName(choice).hint}</span> : null}
                       {current ? <span className="tag tag--fast"><Icon name="check" size={11} /> current</span> : null}
                     </span>
                   </button>
@@ -1430,7 +1641,7 @@ export function CommandPalette({ snap }: { snap: Snapshot }): ReactElement | nul
       list.push({
         id: `provider:${provider.name}`,
         icon: 'spark',
-        label: `Switch provider: ${provider.name}`,
+        label: `Switch provider: ${(provider.label || provider.name)}`,
         hint: provider.model || provider.provider,
         run: () => store.selectProvider(provider.name),
       })

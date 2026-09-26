@@ -75,3 +75,10 @@ test('a reset timestamp outside a plausible window is not invented', () => {
   expect(resetTimeOf('no stamp here', 1790050000000)).toBe('')
   expect(resetTimeOf('{"resets_at":1790054678}', 1790050000000)).toMatch(/\d/)
 })
+
+test('a Codex 401 about OpenAI\'s internal sk- key is their outage, not the user\'s credentials', () => {
+  const error = 'Client openai-codex: Responses API stream request failed (401): { "error": { "message": "Incorrect API key provided: sk-svcac****fvMA.", "code": "invalid_api_key" } }'
+  expect(failureView(error, Date.now())).toMatchObject({ kind: 'provider-outage', retryIsFutile: false, offerProviderSettings: false })
+  // An API-key provider's own 401 is still a credentials problem.
+  expect(failureView('Client openai: Responses API stream request failed (401): Incorrect API key provided: sk-proj****', Date.now()).kind).toBe('credentials')
+})

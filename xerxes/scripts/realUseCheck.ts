@@ -1138,8 +1138,11 @@ async function checkRuntimeRouting(): Promise<string> {
 }
 
 async function checkPricingInsights(): Promise<string> {
-  const directCost = calcCost('gpt-4o', 1_000_000, 500_000)
-  require(directCost > 0, 'provider registry did not price gpt-4o')
+  // Prices are published data now (the provider's own, else models.dev):
+  // a supplied price is used exactly; no price means an unknown cost.
+  const directCost = calcCost('gpt-4o', 1_000_000, 500_000, { reported: { input: 2.5, output: 10 } })
+  require(directCost === 7.5, 'published prices were not applied')
+  require(calcCost('no-such-model', 1_000, 1_000) === undefined, 'an unpriced model was given a cost')
 
   const tracker = new CostTracker({
     now: () => new Date('2026-07-13T12:00:00.000Z'),

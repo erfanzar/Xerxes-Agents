@@ -34,7 +34,17 @@ export interface XerxesBridge {
   /** Present the folder picker; open independently of the current workspace. */
   chooseWorkspace?(): Promise<unknown>
   getWorkspaceDirectories?(): Promise<string[]>
-  openWorkspaceWindow?(dir?: string, resumeSessionId?: string): Promise<unknown>
+  openWorkspaceWindow?(dir?: string, resumeSessionId?: string, options?: { fresh?: boolean }): Promise<unknown>
+  /** True once, for a window opened to start a fresh task. */
+  startsFresh?(): Promise<boolean>
+  /** UI scale: zoom this window's page (0.5–3). */
+  setZoomFactor?(factor: number): void
+  /** macOS: blur what is behind the window (native material) or show it clear. */
+  setWindowBlur?(on: boolean): void
+  /** Asked once as the page starts: is another workspace view covering it? */
+  isOccluded?(): Promise<boolean>
+  /** Whether another workspace view covers this page. */
+  onOccluded?(handler: (occluded: boolean) => void): () => void
   /** Enter a workspace folder directly (no dialog). */
   useWorkspace?(dir: string, resumeSessionId?: string): Promise<unknown>
   /** Saved workspace folder, or null when the create-workspace gate shows. */
@@ -71,6 +81,14 @@ export interface ToolItem {
   readonly path?: string
   /** Line delta for edit-family calls, shown as `+a −d` on the trail row. */
   readonly diff?: { readonly adds: number; readonly dels: number }
+}
+
+/** Who wrote a prompt the human did not: a goal round, a monitor, a schedule, a harness reminder. */
+export type HarnessOrigin = 'goal' | 'monitor' | 'schedule' | 'harness'
+
+/** Narrow an untrusted wire value to a harness origin. */
+export function harnessOriginOf(value: unknown): HarnessOrigin | undefined {
+  return value === 'goal' || value === 'monitor' || value === 'schedule' || value === 'harness' ? value : undefined
 }
 
 export type Block =
@@ -143,6 +161,8 @@ export interface SessionRow {
   readonly title: string
   readonly status: string
   readonly age: string
+  /** Epoch ms of the latest conversation message; the sidebar's sort key. */
+  readonly activeAt?: number
   readonly current: boolean
   readonly kind: 'main' | 'subagent'
   readonly turns: number
@@ -275,8 +295,12 @@ export interface FailedTurn {
 
 export interface ModelChoice {
   readonly id: string
-  /** Display grouping; derived from the id when the daemon sends none. */
+  /** Display grouping: the serving profile's label when the daemon sends it, else derived from the id. */
   readonly provider: string
+  /** The provider's own name for the model, when it gives one. */
+  readonly label?: string
+  /** The provider's own one-line description. */
+  readonly hint?: string
 }
 
 export interface CachedModel {
@@ -290,6 +314,8 @@ export interface CachedModel {
 
 export interface ProviderRow {
   readonly name: string
+  /** Display name ("Claude Code" for `cc`); `name` is the stored id. */
+  readonly label: string
   readonly provider: string
   readonly model: string
   readonly active: boolean

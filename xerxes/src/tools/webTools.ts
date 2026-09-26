@@ -419,7 +419,8 @@ export const WEB_SCRAPER_DEFINITION: ToolDefinition = {
   type: 'function',
   function: {
     name: 'WebScraper',
-    description: 'Fetch one URL over plain HTTP and pull text out of the HTML that came back. There is no browser: '
+    description: 'Read the text of a public page whose URL you already have (for JSON APIs use APIClient). It fetches '
+      + 'one URL over plain HTTP and pulls text out of the HTML that came back. There is no browser: '
       + 'no JavaScript ever runs, so a single-page app returns its empty shell and `content` comes back nearly '
       + 'blank — that is the page as served, not a tool failure, and retrying will not change it. Extracted content '
       + `is capped at ${MAX_SCRAPED_CONTENT_CHARS} characters (whitespace-collapsed text with script and style `
@@ -465,7 +466,8 @@ export const API_CLIENT_DEFINITION: ToolDefinition = {
       + `set. The body is capped at ${DEFAULT_MAX_RESPONSE_BYTES} bytes and exceeding that is an error; a JSON body `
       + `is parsed into \`json\`, anything else lands in \`text\` truncated to ${MAX_SCRAPED_CONTENT_CHARS} `
       + 'characters, so a long HTML or NDJSON reply comes back silently short. Private, loopback, and '
-      + 'DNS-resolving-to-private targets are refused. `timeout` is in SECONDS, not milliseconds.',
+      + 'DNS-resolving-to-private targets are refused. `timeout` is in SECONDS. Anything sent may be logged by the '
+      + 'recipient; a non-GET call is an external write that needs the user\'s go-ahead.',
     parameters: {
       type: 'object',
       additionalProperties: false,

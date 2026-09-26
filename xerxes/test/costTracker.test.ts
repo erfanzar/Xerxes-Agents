@@ -7,32 +7,24 @@ import {
   CostEvent,
   CostTracker,
   UNSCOPED_COST_SCOPE,
-  serviceTierMultiplier,
 } from '../src/runtime/costTracker.js'
+import { seedModelsDev } from './fixtures/modelsDev.js'
 
-test('service tier multipliers match pi-ai and reprice whole turns including cache', () => {
-  expect(serviceTierMultiplier('openai/gpt-5.2', 'flex')).toBe(0.5)
-  expect(serviceTierMultiplier('openai/gpt-5.2', 'priority')).toBe(2)
-  expect(serviceTierMultiplier('openai/gpt-5.5', 'priority')).toBe(2.5)
-  expect(serviceTierMultiplier('gpt-5.5', 'priority')).toBe(2.5)
-  expect(serviceTierMultiplier('openai/gpt-5.2', 'default')).toBe(1)
-  expect(serviceTierMultiplier('openai/gpt-5.2', undefined)).toBe(1)
+// Prices are published data (models.dev here); nothing is hand-written.
+seedModelsDev()
 
+test('a turn is priced from published rates only: no invented service-tier or cache multipliers', () => {
   const tracker = new CostTracker({ now: () => new Date('2026-07-13T10:00:00.000Z') })
   const full = tracker.recordTurn('openai/gpt-4o', 1_000, 500, 'full', { cacheReadTokens: 100 })
-  const flex = tracker.recordTurn('openai/gpt-4o', 1_000, 500, 'flex', {
-    cacheReadTokens: 100,
-    serviceTier: 'flex',
-  })
-  const priority = tracker.recordTurn('openai/gpt-4o', 1_000, 500, 'priority', {
-    cacheReadTokens: 100,
-    serviceTier: 'priority',
-  })
-  expect(flex.costUsd).toBeCloseTo(full.costUsd * 0.5, 12)
-  expect(priority.costUsd).toBeCloseTo(full.costUsd * 2, 12)
+  const flex = tracker.recordTurn('openai/gpt-4o', 1_000, 500, 'flex', { cacheReadTokens: 100, serviceTier: 'flex' })
+  // gpt-4o on models.dev: $2.50 in, $10 out, $1.25 cache read per million.
+  expect(full.costUsd).toBeCloseTo((1_000 * 2.5 + 500 * 10 + 100 * 1.25) / 1_000_000, 12)
+  expect(flex.costUsd).toBeCloseTo(full.costUsd, 12)
+  // Nobody publishes a price for this one: recorded as 0, never a guess.
+  expect(tracker.recordTurn('unpriced-model', 1_000, 500).costUsd).toBe(0)
 })
 
-test('cost tracker uses shared provider pricing and Python-compatible cache multipliers', () => {
+test('cost tracker uses published provider pricing, cache included', () => {
   const tracker = new CostTracker({
     agentId: 'planner',
     sessionId: 'session-a',
@@ -54,8 +46,9 @@ test('cost tracker uses shared provider pricing and Python-compatible cache mult
     sessionId: 'session-a',
     agentId: 'planner',
   })
-  expect(event.costUsd).toBeCloseTo(0.0075875, 12)
-  expect(tracker.totalCostUsd).toBeCloseTo(0.0075875, 12)
+  // Cache reads at gpt-4o's published cache rate; no cache-write price is published, so writes add nothing.
+  expect(event.costUsd).toBeCloseTo(0.007625, 12)
+  expect(tracker.totalCostUsd).toBeCloseTo(0.007625, 12)
   expect(tracker.totalInputTokens).toBe(1_000)
   expect(tracker.totalOutputTokens).toBe(500)
   expect(tracker.totalTokens).toBe(1_500)
@@ -132,17 +125,18 @@ test('cost events are immutable, unknown models cost zero, and invalid accountin
     timestamp: 'not-a-date',
   })).toThrow('timestamp')
 
-  const calls: Array<readonly [number, number]> = []
+  const calls: unknown[] = []
   const probeTracker = new CostTracker({
-    costCalculator: (_model, inputTokens, outputTokens) => {
-      calls.push([inputTokens, outputTokens])
+    costCalculator: (_model, inputTokens, outputTokens, source) => {
+      calls.push([inputTokens, outputTokens, source?.cacheReadTokens ?? 0])
       return 1
     },
   })
   probeTracker.recordTurn('fixture', 1, 2)
-  expect(calls).toEqual([[1, 2]])
+  expect(calls).toEqual([[1, 2, 0]])
+  // Cache tokens go to the price lookup itself (its published cache rate), not through a probe.
   probeTracker.recordTurn('fixture', 1, 2, '', { cacheReadTokens: 1 })
-  expect(calls).toEqual([[1, 2], [1, 2], [1_000, 0]])
+  expect(calls).toEqual([[1, 2, 0], [1, 2, 1]])
 
   tracker.clear()
   expect(tracker.eventCount).toBe(0)

@@ -13,6 +13,7 @@ import { LocalProviderRelay } from '../src/security/localProviderRelay.js'
 import { decodeRelayCompletion } from '../src/security/providerRelayProtocol.js'
 import { LocalProviderEndpoint } from '../src/security/localProviderEndpoint.js'
 import { LocalRelayClient } from '../src/llms/localRelayClient.js'
+import { seedModelsDev } from './fixtures/modelsDev.js'
 
 const messages: CompletionRequest['messages'] = [{ role: 'user', content: 'Fixture only' }]
 async function capture(model: string, cap: number | null, makeClient: (fetch: FetchImplementation) => LlmClient, thinking?: CompletionRequest['thinking']) {
@@ -64,6 +65,7 @@ test('Codex cannot drop a bounded grant silently; provider-controlled policy is 
 })
 
 test('Bedrock expansion is checked before the SDK receives its command input', () => {
+  seedModelsDev()
   const request: CompletionRequest = { model: 'amazon-bedrock/anthropic.claude-opus-4-1-20250805-v1:0', messages, maxTokens: 1024, thinking: { effort: 'high', budgetTokens: 10000 }, [OUTPUT_TOKEN_LIMIT]: 1024 }
   const options = { env: {}, model: resolveBedrockModel(request, {}) }
   expect(() => buildBedrockConverseInput(request, options)).toThrow(OutputTokenLimitError)
@@ -107,7 +109,7 @@ test('other native transports retain the approved ceiling and no authority field
     expect(JSON.stringify(body)).not.toContain('outputTokenLimit')
   }
   const request: CompletionRequest = { model: 'google-vertex/gemini-2.5-flash', messages, maxTokens: 1024, [OUTPUT_TOKEN_LIMIT]: 1024 }
-  expect(vertexPayload(request).config?.generationConfig?.maxOutputTokens).toBe(1024)
+  expect(vertexPayload(request).generationConfig?.maxOutputTokens).toBe(1024)
   expect(() => vertexPayload({ ...request, maxTokens: 1025 })).toThrow(OutputTokenLimitError)
   expect(() => decodeRelayCompletion({ model: 'gpt-4o', messages, outputTokenLimit: null })).toThrow('unsupported')
 })

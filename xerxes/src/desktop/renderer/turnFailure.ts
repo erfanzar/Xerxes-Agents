@@ -15,7 +15,7 @@
  * report.
  */
 
-export type FailureKind = 'compaction' | 'rate-limit' | 'credentials' | 'context-length' | 'cancelled' | 'unknown'
+export type FailureKind = 'compaction' | 'rate-limit' | 'credentials' | 'provider-outage' | 'context-length' | 'cancelled' | 'unknown'
 
 export interface FailureView {
   readonly kind: FailureKind
@@ -61,6 +61,12 @@ export function failureView(error: string, now: number): FailureView {
   }
   if (/context[ _-]?length|maximum context|too many tokens|context window/i.test(error)) {
     return { kind: 'context-length', summary: 'This conversation is longer than the model can hold. Compact it, or switch to a model with a larger context.', retryIsFutile: true, offerProviderSettings: true }
+  }
+  // Codex only ever sends the ChatGPT sign-in (a JWT). An "incorrect API key
+  // sk-…" answer is the key OpenAI's own backend uses to reach the model —
+  // their failure, not your credentials; settings cannot fix it.
+  if (/openai-codex/i.test(error) && /Incorrect API key provided:\s*sk-/i.test(error)) {
+    return { kind: 'provider-outage', summary: 'OpenAI’s Codex service failed on its side: its own internal key was rejected. Your ChatGPT sign-in is fine. Retry in a little while, or switch to another model.', retryIsFutile: false, offerProviderSettings: false }
   }
   if (/authenticat|credential|api[ _-]?key|certificate|self.signed|provider.*config|\b401\b|\b403\b|unauthorized/i.test(error)) {
     return { kind: 'credentials', summary: 'The provider rejected this app’s credentials.', retryIsFutile: true, offerProviderSettings: true }

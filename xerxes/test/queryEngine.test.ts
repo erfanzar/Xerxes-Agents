@@ -13,6 +13,9 @@ import {
   type LlmClient,
   type LlmDelta,
 } from '../src/index.js'
+import { seedModelsDev } from './fixtures/modelsDev.js'
+
+seedModelsDev()
 
 class ReplyClient implements LlmClient {
   async *stream(_request: CompletionRequest): AsyncGenerator<LlmDelta> {
@@ -144,5 +147,6 @@ test('query engine records each completed provider turn in its session cost ledg
     session_id: 'cost-session',
     agent_id: 'planner',
   }])
-  expect(engine.totalCost).toBeCloseTo(0.0075875, 12)
+  // Published gpt-4o rates (models.dev): input, output and cache read.
+  expect(engine.totalCost).toBeCloseTo(0.007625, 12)
 })

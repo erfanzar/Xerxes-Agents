@@ -9,13 +9,16 @@ export interface SetupProfile {
   readonly answers: Readonly<Record<string, unknown>>
 }
 
+/**
+ * Behaviour presets: permissions, voice, messaging. They name no provider or
+ * model — those are the user's, and the model comes from what the provider
+ * reports (see runSetupCommand).
+ */
 export const SETUP_PROFILES: Readonly<Record<SetupProfileName, SetupProfile>> = Object.freeze({
   developer: {
     name: 'developer',
     label: 'iterative coding assistant with manual approvals and tool auditing',
     answers: {
-      provider: 'anthropic',
-      model: 'claude-sonnet-4',
       permission_mode: 'manual',
       enable_voice: 'n',
       messaging_platform: 'none',
@@ -25,8 +28,6 @@ export const SETUP_PROFILES: Readonly<Record<SetupProfileName, SetupProfile>> = 
     name: 'personal',
     label: 'accept-all local helper with voice and chat history',
     answers: {
-      provider: 'openai',
-      model: 'gpt-4o',
       permission_mode: 'accept-all',
       enable_voice: 'y',
       messaging_platform: 'none',
@@ -36,8 +37,6 @@ export const SETUP_PROFILES: Readonly<Record<SetupProfileName, SetupProfile>> = 
     name: 'operator',
     label: 'automation daemon with durable scheduler and strict audit',
     answers: {
-      provider: 'anthropic',
-      model: 'claude-opus-4-6',
       permission_mode: 'manual',
       enable_voice: 'n',
       messaging_platform: 'telegram',
@@ -47,8 +46,6 @@ export const SETUP_PROFILES: Readonly<Record<SetupProfileName, SetupProfile>> = 
     name: 'framework',
     label: 'minimal provider wiring for embedding in another application',
     answers: {
-      provider: 'openai',
-      model: 'gpt-4o-mini',
       permission_mode: 'manual',
       enable_voice: 'n',
       messaging_platform: 'none',
@@ -56,10 +53,8 @@ export const SETUP_PROFILES: Readonly<Record<SetupProfileName, SetupProfile>> = 
   },
   minimal: {
     name: 'minimal',
-    label: 'provider and permissions only; everything else disabled',
+    label: 'permissions only; everything else disabled',
     answers: {
-      provider: 'anthropic',
-      model: 'claude-haiku-4',
       permission_mode: 'manual',
       enable_voice: 'n',
       messaging_platform: 'none',

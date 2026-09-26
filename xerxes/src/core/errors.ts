@@ -137,3 +137,11 @@ export class ToolPolicyViolation extends XerxesError {
 }
 
 export class ProviderError extends ClientError {}
+
+/**
+ * A stream frame that is not valid JSON. Seen when a gateway restarts the
+ * generation inside one HTTP body (z.ai splices a fresh stream onto a frame
+ * it cut off mid-id): nothing in the frame can be salvaged, but a new request
+ * usually succeeds, so it is retried like a dropped connection.
+ */
+export class StreamFrameError extends ProviderError {}

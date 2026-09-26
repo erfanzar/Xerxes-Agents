@@ -135,7 +135,7 @@ test('debug loop reports an unavailable tool rather than fabricating a successfu
 
 test('debug client disables Anthropic prompt cache markers', async () => {
   let payload: Record<string, unknown> | undefined
-  const client = createDebugLlmClient('claude-sonnet-4-6', {}, {
+  const client = createDebugLlmClient('anthropic/claude-sonnet-4-6', {}, {
     apiKey: 'debug-key',
     baseUrl: 'https://debug.example.test',
     fetchImplementation: async (_input, init): Promise<Response> => {

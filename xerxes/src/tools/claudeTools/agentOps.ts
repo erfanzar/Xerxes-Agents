@@ -227,8 +227,8 @@ export interface ClaudeAgentToolsOptions {
 }
 
 export const CLAUDE_AGENT_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
-  definition('AgentTool', 'Spawn one focused subagent, optionally waiting for its final result.', {
-    prompt: stringSchema('The delegated task.'),
+  definition('AgentTool', 'Delegate one self-contained task whose work would flood your context (broad search, parallel investigation, isolated review). The subagent does NOT see this conversation, so the prompt must stand alone. Do not delegate a single read or edit you can do yourself; for several independent tasks use one SpawnAgents call. status=running after the wait means still working, not failed: collect it with AwaitAgents instead of respawning.', {
+    prompt: stringSchema('Complete brief for an agent that sees none of this conversation: goal, relevant paths, constraints, what is already known, and the result shape you want.'),
     title: titleSchema('Short human-readable title describing this delegated task.'),
     description: titleSchema('Short task description; accepted as an alternative to title.'),
     resume: stringSchema('Resume an existing subagent by its returned id, retaining its conversation.'),
@@ -237,34 +237,34 @@ export const CLAUDE_AGENT_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     worktree_ref: stringSchema('Optional Git revision for worktree isolation. Defaults to HEAD. Resolved at each allocation; use a commit ID for a fixed baseline.'),
     isolation: { type: 'string', enum: ['worktree'], description: 'Run in a separate Git checkout. Requires a configured native worktree adapter; starts at committed HEAD.' },
     name: stringSchema('Stable subagent name.'),
-    model: stringSchema('Optional explicit model override. Takes precedence over intelligence presets.'),
-    provider_profile: stringSchema('Configured provider profile from list_available_models. Requires explicit model. Explicit model settings override intelligence presets.'),
-    reasoning_effort: stringSchema('Reasoning effort offered by list_available_models. Requires explicit model. Explicit model settings override intelligence presets.'),
+    model: stringSchema('Exact model id from list_available_models; pass the provider_profile it was listed under. Takes precedence over intelligence presets.'),
+    provider_profile: stringSchema('Profile the model was listed under in list_available_models. Requires explicit model.'),
+    reasoning_effort: stringSchema('One of that entry\'s reasoning_efforts from list_available_models; omit when it lists none. Requires explicit model.'),
     intelligence: { type: 'string', enum: [...AGENT_INTELLIGENCE_LEVELS], description: 'Choose light for simple tasks, balanced for normal work, smart for difficult reasoning. Uses user-configured model mappings; omit to use the configured default.' },
-    run_in_background: booleanSchema('Return immediately while the subagent keeps working.', false),
+    run_in_background: booleanSchema('Return the agent id at once instead of waiting (same as wait=false).', false),
     wait: booleanSchema('Wait for the subagent to finish.', true),
     timeout: numberSchema('Maximum seconds to wait.'),
   }, ['prompt']),
-  definition('SendMessageTool', 'Send follow-up work to a subagent. Running agents queue it; finished or interrupted agents continue under the same id with their saved conversation and configuration. Returns after accepting input without waiting for completion. Explicitly closed agents must be resumed with AgentTool first.', {
+  definition('SendMessageTool', 'Send follow-up work to a subagent. Running agents queue it; finished or interrupted agents continue under the same id with their saved conversation and configuration. Returns after accepting input without waiting for completion. Explicitly closed agents must be resumed with AgentTool first. Prefer this over a new spawn when that agent already has the needed context.', {
     target: stringSchema('Subagent id or stable name.'),
     message: stringSchema('Message for the subagent.'),
   }, ['target', 'message']),
-  definition('TaskCreateTool', 'Create a background subagent task without waiting.', {
+  definition('TaskCreateTool', 'Start a background subagent without waiting; same as AgentTool with run_in_background=true.', {
     isolation: { type: 'string', enum: ['worktree'], description: 'Run in a separate Git checkout using the native worktree adapter.' },
     worktree_ref: stringSchema('Git revision for worktree isolation. Defaults to HEAD.'),
     worktree_source: { type: 'string', enum: ['working-tree'], description: 'Copy current tracked and untracked non-ignored files. Requires isolation=worktree; omit worktree_ref or use HEAD.' },
-    model: stringSchema('Optional model override.'),
-    provider_profile: stringSchema('Configured provider profile; requires explicit model.'),
-    reasoning_effort: stringSchema('Reasoning effort offered for the explicit model.'),
+    model: stringSchema('Exact model id from list_available_models; pass the provider_profile it was listed under. Takes precedence over intelligence presets.'),
+    provider_profile: stringSchema('Profile the model was listed under in list_available_models. Requires explicit model.'),
+    reasoning_effort: stringSchema('One of that entry\'s reasoning_efforts from list_available_models; omit when it lists none. Requires explicit model.'),
     intelligence: { type: 'string', enum: [...AGENT_INTELLIGENCE_LEVELS], description: 'User-configured model capability tier.' },
-    prompt: stringSchema('The delegated task.'),
+    prompt: stringSchema('Complete brief for an agent that sees none of this conversation: goal, relevant paths, constraints, what is already known, and the result shape you want.'),
     title: titleSchema('Short human-readable title describing this background task.'),
     name: stringSchema('Stable subagent name.'),
     subagent_type: stringSchema('Agent definition to run.'),
   }, ['prompt', 'title']),
-  definition('SpawnAgents', 'Spawn a bounded batch of subagents and optionally wait for all of them.', {
+  definition('SpawnAgents', 'Run several independent subagents in one call instead of repeated AgentTool calls. Split by independent slice (per module or question), not by steps of one sequential chain. Agents share no context with you or each other, so each prompt must stand alone. Do not give two agents edits to the same files unless each uses isolation=worktree. Agents still running at the timeout are not failed: collect them with AwaitAgents.', {
     agents: {
-      description: `JSON array of {title, prompt, name?, subagent_type?, model?, intelligence?}. Every agent needs a short title. One batch accepts at most ${MAX_SPAWN_BATCH_SIZE} agents; spawn registrations run through a bounded concurrency pool.`,
+      description: `JSON array of {title, prompt, name?, subagent_type?, provider_profile?, model?, reasoning_effort?, intelligence?}. Every agent needs a short title. One batch accepts at most ${MAX_SPAWN_BATCH_SIZE} agents; spawn registrations run through a bounded concurrency pool.`,
       type: 'array',
       minItems: 1,
       maxItems: MAX_SPAWN_BATCH_SIZE,
@@ -277,12 +277,12 @@ export const CLAUDE_AGENT_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
           worktree_source: { type: 'string', enum: ['working-tree'], description: 'Capture parent uncommitted files; mutually exclusive with worktree_ref.' },
           worktree_ref: stringSchema('Optional Git revision; requires isolation=worktree. Defaults to HEAD.'),
           isolation: { type: 'string', enum: ['worktree'], description: 'Separate Git checkout; requires a configured native worktree adapter.' },
-          prompt: stringSchema('The delegated task.'),
+          prompt: stringSchema('Complete brief for an agent that sees none of this conversation: goal, relevant paths, constraints, what is already known, and the result shape you want.'),
           name: stringSchema('Optional stable subagent handle.'),
           subagent_type: stringSchema('Agent definition to run.'),
-          model: stringSchema('Optional explicit model override. Takes precedence over intelligence presets.'),
-    provider_profile: stringSchema('Configured provider profile from list_available_models. Requires explicit model. Explicit model settings override intelligence presets.'),
-    reasoning_effort: stringSchema('Reasoning effort offered by list_available_models. Requires explicit model. Explicit model settings override intelligence presets.'),
+          model: stringSchema('Exact model id from list_available_models; pass the provider_profile it was listed under. Takes precedence over intelligence presets.'),
+    provider_profile: stringSchema('Profile the model was listed under in list_available_models. Requires explicit model.'),
+    reasoning_effort: stringSchema('One of that entry\'s reasoning_efforts from list_available_models; omit when it lists none. Requires explicit model.'),
           intelligence: { type: 'string', enum: [...AGENT_INTELLIGENCE_LEVELS], description: 'Choose light for simple tasks, balanced for normal work, smart for difficult reasoning. Uses user-configured model mappings; omit to use the configured default.' },
         },
       },
@@ -309,14 +309,14 @@ export const CLAUDE_AGENT_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     task_id: stringSchema('Subagent id or stable name.'),
     message: stringSchema('Update message.'),
   }, ['task_id', 'message']),
-  definition('AwaitAgents', 'Wait for any or all currently attached subagents. Omit agent_ids for the tracked cohort; the default waits for all. Explicit targets must come from the current TaskListTool result.', {
+  definition('AwaitAgents', 'Block until attached subagents finish; use this instead of polling TaskListTool or PeekAgent. Omit agent_ids to wait on the tracked cohort; explicit targets must come from the current TaskListTool result. wake_reason=timeout means still working, not failed: call again with a larger timeout_seconds instead of respawning. Finished is not succeeded: check each status (completed vs error, cancelled, interrupted) before relying on its output.', {
     agent_ids: {
       description: 'Optional array of exact subagent ids or names returned by the current TaskListTool result. Do not retry stale targets.',
       type: 'array',
       items: { type: 'string' },
     },
-    wake_on: { type: 'string', enum: ['any', 'all', 'none'], default: 'all' },
-    timeout_seconds: numberSchema('Maximum seconds to wait.'),
+    wake_on: { type: 'string', enum: ['any', 'all', 'none'], default: 'all', description: 'all (default): return when every target has finished. any: return when the first finishes. none: wait out the full timeout.' },
+    timeout_seconds: numberSchema('Maximum seconds to block (default 30).'),
   }),
   definition('CheckAgentMessages', 'Drain or inspect lifecycle events from managed subagents.', {
     since_seq: { type: 'integer', minimum: 0, default: 0 },
@@ -329,7 +329,7 @@ export const CLAUDE_AGENT_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     target: stringSchema('Subagent id or stable name.'),
     new_prompt: stringSchema('Replacement task; defaults to its last input.'),
   }, ['target']),
-  definition('HandoffTool', 'Hand off work to a specialized subagent.', {
+  definition('HandoffTool', 'Hand work to a specialist agent type with a reason and context summary; it waits and returns the specialist\'s output to you, like AgentTool with subagent_type.', {
     target_agent: stringSchema('Agent type receiving the handoff.'),
     reason: stringSchema('Why the handoff is needed.'),
     context_summary: stringSchema('Compact context handed to the target.'),

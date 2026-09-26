@@ -9,6 +9,10 @@ import { DaemonServer, type DaemonServerOptions } from '../src/daemon/server.js'
 import { InMemoryDaemonRuntime } from '../src/daemon/runtime.js'
 import { ProfileStore } from '../src/bridge/profiles.js'
 import type { CompletionRequest, LlmClient } from '../src/llms/client.js'
+import { seedModelsDev } from './fixtures/modelsDev.js'
+
+// Model capabilities come from models.dev at runtime; tests use its fixture.
+seedModelsDev()
 
 function record(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === 'object' && !Array.isArray(value) }
 function grantId(value: Record<string, unknown>): string {

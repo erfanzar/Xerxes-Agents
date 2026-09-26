@@ -68,6 +68,7 @@ import { themeForMode, type Theme } from '../theme.js'
 import { AgentPanel, AgentPanelHotkey, AgentPanelOverlay, collectAgentPanelRecords } from './agentPanel.js'
 import { GoalOverlay } from './goalOverlay.js'
 import { ContextOverlay } from './contextOverlay.js'
+import { UsageOverlay } from './usageOverlay.js'
 import { MonitorOverlay } from './monitorOverlay.js'
 import { CapabilitiesOverlay } from './capabilitiesOverlay.js'
 import { ScheduleOverlay } from './scheduleOverlay.js'
@@ -2095,6 +2096,7 @@ export function AppLayout({
       ) : null}
       {overlay.goal ? <GoalOverlay t={t} /> : null}
       {overlay.contextInspector ? <ContextOverlay t={t} /> : null}
+      {overlay.usage ? <UsageOverlay t={t} /> : null}
       {overlay.activity ? <ActivityOverlay key={ui.sid ?? ui.info?.session_id} sessionId={ui.sid} t={t} /> : null}
       {overlay.monitors ? <MonitorOverlay t={t} /> : null}
       {overlay.loops ? <ScheduleOverlay t={t} followupsOnly /> : null}

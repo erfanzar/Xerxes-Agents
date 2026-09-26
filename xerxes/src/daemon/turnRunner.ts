@@ -5,14 +5,16 @@ import { parseTodoList } from "../runtime/todoSnapshot.js";
 import { getTurnOutcome, restoreTurnOutcome } from '../types/turnOutcome.js'
 import { LOCAL_PROVIDER_BINDING, type RemoteProviderBindings } from './remoteProviderBindings.js'
 import { LocalProviderRelayError } from '../security/localProviderRelay.js'
-import { readContextControls } from '../context/controls.js'
+import { readContextControls, type ContextControls } from '../context/controls.js'
 import type { AgentDefinition } from '../agents/definitions.js'
 import type { AuditEmitter } from '../audit/emitter.js'
 import { compressToolResult } from '../context/headroom.js'
 import {
   assembleContextLayers,
+  assembleTurnContext,
   layerDigests,
   recordAssemblyProvenance,
+  renderTurnContext,
 } from '../context/assembly.js'
 import { ToolResultStorage } from '../context/toolResultStorage.js'
 import { estimateContextTokens } from '../context/windowUsage.js'
@@ -26,7 +28,7 @@ import {
   type ToolExecutor,
   type ToolRegistry,
 } from '../executors/toolRegistry.js'
-import type { AgentMemory } from '../memory/agentMemory.js'
+import { renderMemoryChanges, type AgentMemory, type MemorySourceText } from '../memory/agentMemory.js'
 import {
   mergePersistedSubagentSnapshots,
   persistedSubagentDeliveryValues,
@@ -43,7 +45,7 @@ import type { SpawnedAgentSnapshot } from '../operators/subagents.js'
 import type { LlmClient } from '../llms/client.js'
 import { DEFAULT_RETRY_POLICY, type ProviderOverrides, retryPolicyForModel } from '../llms/providerRegistry.js'
 import { agentNameForMode, modeSwitchHint, normalizeInteractionMode } from '../runtime/interactionModes.js'
-import { GOAL_CHANGES_KEY, getGoal, type GoalView } from '../runtime/goalDomain.js'
+import { DEFAULT_MAX_GOAL_ROUNDS, GOAL_CHANGES_KEY, getGoal, type GoalView } from '../runtime/goalDomain.js'
 import { DEFAULT_BLOCKED_AFTER_CONSECUTIVE_ROUNDS, goalPolicyPrompt } from '../runtime/goalTools.js'
 import {
   mergeContextDeltas,
@@ -65,7 +67,7 @@ import {
   type ToolPolicy,
 } from '../streaming/permissions.js'
 import type { ChatMessage, MessageContent } from '../types/messages.js'
-import { messageText } from '../types/messages.js'
+import { isHarnessOrigin, messageText, type HarnessOrigin } from '../types/messages.js'
 import { imageUrlContentParts } from './images.js'
 import type { RawMessage, TranscriptMessageJournalAppend } from '../session/daemonTranscript.js'
 import type { ToolCall, ToolDefinition } from '../types/toolCalls.js'
@@ -141,6 +143,8 @@ export interface AgentTurnRunnerOptions {
    */
   readonly reduceContext?: ContextReducer
   readonly autoCompactThreshold?: () => number
+  /** Per-session prompt state shared across runner rebuilds; see SessionPromptSnapshots. */
+  readonly promptSnapshots?: SessionPromptSnapshots
   /**
    * The live tool registry, when the host owns one. Used only to resolve the
    * per-tool usage-policy sections that ride with the request's visible tool
@@ -217,14 +221,53 @@ export type BootstrapSystemPromptProvider = (
 ) => Promise<string> | string
 
 /** Adapts the portable agent loop to the frozen daemon wire-event vocabulary. */
+/**
+ * What keeps each session's system prompt byte-identical from turn to turn:
+ * the rendered bootstrap, the memory snapshot and what has been delivered
+ * since, the goal status last sent, the day the prompt was dated, and
+ * whether it carries the compaction notice.
+ *
+ * It outlives any one runner. Settings changes (/fast, /permissions, a
+ * profile switch, an MCP reconnect, an agent-preset edit) rebuild the runner;
+ * when these lived on the runner, every rebuild re-rendered every open
+ * session's prompt and each one re-wrote its whole conversation to the
+ * provider cache on its next message. The host creates one and passes it to
+ * every runner it builds.
+ */
+export class SessionPromptSnapshots {
+  readonly bootstrapPrompts = new Map<string, Promise<string>>()
+  /** Per session: memory as first rendered, and what has been delivered since. */
+  readonly memorySnapshots = new Map<string, SessionMemorySnapshot>()
+  /** Per session: the goal status the model was last given. */
+  readonly deliveredGoalStatus = new Map<string, string>()
+  /** Per session: the local day its prompt was dated, and whether it compacts. */
+  readonly promptDay = new Map<string, string>()
+  readonly compaction = new Map<string, boolean>()
+
+  drop(sessionId: string): void {
+    this.memorySnapshots.delete(sessionId)
+    this.deliveredGoalStatus.delete(sessionId)
+    this.promptDay.delete(sessionId)
+    this.compaction.delete(sessionId)
+    for (const key of this.bootstrapPrompts.keys()) {
+      if (key.startsWith(sessionId + '\u0000')) this.bootstrapPrompts.delete(key)
+    }
+  }
+}
+
 export class AgentTurnRunner implements TurnRunner {
   readonly managesSessionState = true
 
-  private readonly bootstrapPrompts = new Map<string, Promise<string>>()
+  private readonly snapshots: SessionPromptSnapshots
+  private get bootstrapPrompts() { return this.snapshots.bootstrapPrompts }
+  private get memorySnapshots() { return this.snapshots.memorySnapshots }
+  private get deliveredGoalStatus() { return this.snapshots.deliveredGoalStatus }
   private readonly states = new Map<string, AgentState>()
   private readonly toolResultStores = new Map<string, ToolResultStorage>()
 
-  constructor(private readonly options: AgentTurnRunnerOptions) {}
+  constructor(private readonly options: AgentTurnRunnerOptions) {
+    this.snapshots = options.promptSnapshots ?? new SessionPromptSnapshots()
+  }
 
   toolInventory(session: DaemonSession): RuntimeToolInventoryEntry[] {
     const agent = this.options.agentDefinitions?.get(session.agentId)
@@ -349,30 +392,31 @@ export class AgentTurnRunner implements TurnRunner {
       : configuredPermissionMode
     state.metadata.permission_mode = permissionMode
     const promptAgent = modeAgent ?? agent
+    // The prompt describes the always-loaded core; loaded deferred tools carry
+    // their own schemas. Loading one must not re-render the system prompt.
+    const deferrable = this.options.toolRegistry?.deferredToolLoading
+      ? new Set(this.options.toolRegistry.deferredCatalog(session.agentId).map(entry => entry.name))
+      : new Set<string>()
+    const coreTools = tools?.filter(tool => !deferrable.has(tool.function.name))
     const bootstrapPrompt = await this.bootstrapSystemPrompt(
       session,
       model,
-      tools,
+      coreTools,
       promptAgent?.name ?? session.agentId,
     )
     const memory = this.options.agentMemory ? await this.options.agentMemory(session) : undefined
     await captureUserWorkflowMemory(displayText, memory, { projectRoot })
-    // Rank the memory manifest against this turn rather than emitting every
-    // topic in path order. Without a query the selector is inert, so calling
-    // it with no arguments — as this did — left the ranking permanently off.
     const contextControls = readContextControls(session.metadata)
     if (!memory && (contextControls.pins.length || contextControls.excluded.length)) throw new Error('Session context controls require an available memory host')
-    const memorySources: { scope: string; path: string; content: string }[] = []
-    const memoryPrompt = memory ? await memory.toPromptSection({
-      excludedSources: contextControls.excluded,
-      pinnedMemories: contextControls.pins,
-      onSource: source => memorySources.push(source),
-      query: displayText,
-      alreadySurfaced: recentTranscriptText(session),
-      recentSuccessfulTools: recentSuccessfulToolNames(session),
-    }) : ''
     const selfMemory = this.options.agentSelfMemory ? await this.options.agentSelfMemory(session) : undefined
-    const selfMemoryPrompt = selfMemory ? await selfMemory.systemPromptAddendum() : ''
+    // Memory enters the system prompt once per session, as a snapshot; what
+    // is written later travels with the next message instead. Re-rendering
+    // it each turn — the agent is told to record what it learns, and other
+    // sessions write the shared global files — changed the system prompt
+    // between almost every pair of turns, and each change re-billed the
+    // whole conversation at the provider's cache-write price.
+    const memoryState = await this.memoryForTurn(session, memory, selfMemory, contextControls)
+    const memorySources = memoryState.sources
     const recoveredSubagents = this.options.subagentCoordinator
       ? recoverSubagentSnapshots(
         session.messages,
@@ -385,24 +429,53 @@ export class AgentTurnRunner implements TurnRunner {
     )
     const restoredSubagentCount = this.options.subagentCoordinator
       ?.restore?.(session.id, recoveredSubagents) ?? 0
-    // Assembled through the layered pipeline: identical inputs are byte-stable,
-    // stable layers precede volatile ones for the cache breakpoint, and every
-    // layer keeps a name for provenance digests.
-    const systemSegments = assembleContextLayers({
-      addendum: systemPromptAddendum(session),
-      agentPrompt: promptAgent?.systemPrompt ?? '',
-      bootstrap: bootstrapPrompt,
+    // Assembled through the layered pipeline: every system layer is fixed for
+    // the session, so identical turns send a byte-identical prefix; what
+    // changed rides with the message (turnSegments). Every layer keeps a name
+    // for provenance digests.
+    // The goal's rules are fixed; its status (round, phase, criteria evidence)
+    // moves every goal round, so it travels with the message, and only when
+    // it differs from what the model was last told.
+    const goalTools = tools?.some(tool => tool.function.name === 'update_goal') ?? false
+    const lastGoalStatus = this.deliveredGoalStatus.get(session.id) ?? ''
+    const currentGoal = goalTools ? renderGoalStatus(getGoal(session.metadata, session.id)) : ''
+    // No goal is the default and needs no announcement; a cleared one does.
+    const goalStatus = currentGoal || (lastGoalStatus ? 'The goal was cleared; no goal is set for this session.' : '')
+    const goalChanged = currentGoal !== lastGoalStatus
+    if (goalTools) this.deliveredGoalStatus.set(session.id, currentGoal)
+    // The prompt keeps the date it was built with; a new day is news for the turn.
+    const today = localDay(new Date())
+    const promptDay = this.snapshots.promptDay.get(session.id)
+    this.snapshots.promptDay.set(session.id, today)
+    const turnSegments = assembleTurnContext({
+      ...(promptDay && promptDay !== today ? { dateChange: `Today's date is now ${today}.` } : {}),
+      ...(goalChanged ? { goalStatus } : {}),
       contextDeltas: renderContextDeltas(contextDeltas),
       ...(instructionUpdates ? { instructionUpdates } : {}),
-      memoryRecall: memoryPrompt,
+      memoryChanges: memoryState.changes,
+      selfMemoryChanges: memoryState.selfChanges,
+      recoveredSubagents: restoredSubagentCount
+        ? `${restoredSubagentCount} delegated task handle(s) were recovered from this resumed transcript after their daemon process ended. TaskListTool, TaskGetTool, PeekAgent, and AwaitAgents expose honest terminal snapshots: completed output is preserved, while work last seen active is marked interrupted and must be explicitly restarted with ResetAgent or respawned. Do not retry stale ids as if they were still running.`
+        : '',
+    })
+    // Only where the loop really compacts: with no context limit or a zero
+    // threshold nothing is summarized, and the promise would be false.
+    // Frozen per session: the context limit can arrive late (models.dev loads
+    // in the background), and the prompt must not gain this line mid-session.
+    const compacts = this.snapshots.compaction.get(session.id)
+      ?? (Boolean(contextLimit && contextLimit > 0) && (this.options.autoCompactThreshold?.() ?? 0.8) > 0)
+    this.snapshots.compaction.set(session.id, compacts)
+    const systemSegments = assembleContextLayers({
+      addendum: systemPromptAddendum(session),
+      ...(compacts ? { compaction: 'Long conversations are summarized automatically when context fills, and work continues. Do not cut work short, skip verification, or hand off because the conversation is long.' } : {}),
+      agentPrompt: promptAgent?.systemPrompt ?? '',
+      bootstrap: bootstrapPrompt,
+      memory: memoryState.section,
       modeHint: modeSwitchHint(
         session.interactionMode,
         tools?.some(tool => tool.function.name === 'SetInteractionModeTool') ?? false,
       ),
-      recoveredSubagents: restoredSubagentCount
-        ? `${restoredSubagentCount} delegated task handle(s) were recovered from this resumed transcript after their daemon process ended. TaskListTool, TaskGetTool, PeekAgent, and AwaitAgents expose honest terminal snapshots: completed output is preserved, while work last seen active is marked interrupted and must be explicitly restarted with ResetAgent or respawned. Do not retry stale ids as if they were still running.`
-        : '',
-      selfMemory: selfMemoryPrompt,
+      selfMemory: memoryState.selfSection,
       subagentJoin: this.options.subagentCoordinator
         ? 'Background subagents are joined before the parent turn ends. Integrate their delivered results in this turn; do not promise synthesis in a later turn.'
         : '',
@@ -411,20 +484,19 @@ export class AgentTurnRunner implements TurnRunner {
       // rest do not exist — it answered "I can't use AgentTool, it's not in my
       // available tool list" rather than searching for it. The hiding half and
       // the discovery half only work as a pair.
-      goalPolicy: renderGoalLayer(
-        tools?.some(tool => tool.function.name === 'update_goal') ?? false,
-        getGoal(session.metadata, session.id),
-      ),
+      goalPolicy: goalTools ? goalPolicyPrompt(DEFAULT_BLOCKED_AFTER_CONSECUTIVE_ROUNDS) : '',
       deferredCatalog: renderDeferredCatalog(
         this.options.toolRegistry?.deferredToolLoading
           ? this.options.toolRegistry.deferredCatalog(session.agentId)
           : [],
-        new Set((tools ?? []).map(tool => tool.function.name)),
+        // Only the core is subtracted, never what was loaded since: the list
+        // is fixed for the session, so loading a tool leaves the prompt alone.
+        new Set((coreTools ?? []).map(tool => tool.function.name)),
       ),
-      toolGuidance: this.options.toolRegistry && tools?.length
+      toolGuidance: this.options.toolRegistry && coreTools?.length
         ? renderToolGuidance(
           this.options.toolRegistry.guidanceForTools(
-            tools.map(tool => tool.function.name),
+            coreTools.map(tool => tool.function.name),
             session.agentId,
           ),
         )
@@ -434,7 +506,7 @@ export class AgentTurnRunner implements TurnRunner {
     // "why did this turn behave differently?" is a metadata diff, not a guess.
     recordAssemblyProvenance(session.metadata, {
       ...(session.activeTurnId ? { turnId: session.activeTurnId } : {}),
-      layers: layerDigests(systemSegments),
+      layers: [...layerDigests(systemSegments), ...layerDigests(turnSegments).map(digest => ({ ...digest, name: 'turn:' + digest.name }))],
       recordedAt: Date.now(),
     })
     const systemPrompt = systemSegments.map(segment => segment.text).join('\n\n')
@@ -484,9 +556,14 @@ export class AgentTurnRunner implements TurnRunner {
     // message so every existing provider mapping (OpenAI parts, Anthropic
     // image blocks) works unchanged. Text-only turns keep string content.
     const images = controls.images ?? []
+    // The turn context goes in front of the user's words and is persisted
+    // with them, so later requests replay it unchanged; the transcript keeps
+    // showing only what the user typed (displayText).
+    const turnContext = renderTurnContext(turnSegments)
+    const providerText = turnContext ? `${turnContext}\n\n${text}` : text
     const userMessage: MessageContent = images.length
-      ? [{ type: 'text', text }, ...imageUrlContentParts(images)]
-      : text
+      ? [{ type: 'text', text: providerText }, ...imageUrlContentParts(images)]
+      : providerText
     let pendingAgentEventSnapshots: readonly SpawnedAgentSnapshot[] = []
     try {
       // Fallback model chain (Claude Code fallback-model parity): when the
@@ -504,8 +581,9 @@ export class AgentTurnRunner implements TurnRunner {
         const retryPolicy = requiresLocal ? DEFAULT_RETRY_POLICY : retryPolicyForModel(attemptModel, routedProvider?.providerOverrides ?? this.options.providerOverrides)
         // An explicit off effort must cross the relay, otherwise absence
         // would correctly mean "use the local profile's thinking default".
+        // Claude Code likewise thinks by default, so off has to be said.
         const thinkingRequest = thinking ? { budgetTokens: thinking.budgetTokens, effort: thinking.effort }
-          : requiresLocal && sessionEffort ? { effort: 'none' } : undefined
+          : (requiresLocal || /^claude[-_]code\//i.test(attemptModel)) && sessionEffort ? { effort: 'none' } : undefined
         const turnEvents = withActiveSession(session, runTurn({
         turnId: session.activeTurnId,
         agentId: promptAgent?.name ?? session.agentId,
@@ -514,6 +592,8 @@ export class AgentTurnRunner implements TurnRunner {
         sessionId: session.id,
         state,
         userMessage,
+        ...(providerText === displayText ? {} : { userDisplayText: displayText }),
+        ...(harnessOrigin(controls) ? { userOrigin: harnessOrigin(controls)! } : {}),
         querySource: 'main',
         ...(maxTokens === undefined ? {} : { maxTokens }),
         permissionMode,
@@ -547,6 +627,12 @@ export class AgentTurnRunner implements TurnRunner {
         retryDelays: retryPolicy.delaysMs,
         maxSuggestedRetryDelayMs: retryPolicy.maxSuggestedDelayMs,
         llm: attemptLlm,
+        // A used-up plan can be healed mid-turn by whatever the user just
+        // changed (switched account, new login, edited key): rebuild from the
+        // live profile so the loop can compare and retry as the new identity.
+        ...(!requiresLocal && this.options.resolveSessionProvider ? {
+          refreshLlm: () => this.options.resolveSessionProvider?.(session, attemptModel)?.llm,
+        } : {}),
         ...((this.options.hookRunnerForSession || this.options.hookRunner) ? { hookRunner: this.options.hookRunnerForSession?.(session) ?? this.options.hookRunner } : {}),
         ...(permissionBroker ? { permissionBroker } : {}),
         ...(this.options.policy ? { policy: this.options.policy } : {}),
@@ -722,10 +808,10 @@ export class AgentTurnRunner implements TurnRunner {
       if (this.options.editDiagnostics && turnMutatedFiles(state)) {
         const diagnostics = await editFeedback?.report(signal).catch(() => '')
         if (diagnostics) {
-          state.messages.push({ role: 'user', content: diagnostics })
+          state.messages.push({ role: 'user', content: diagnostics, origin: 'harness' })
         }
       }
-      recordLatestUserDisplayText(state, text, displayText)
+      recordLatestUserDisplayText(state, providerText, displayText, harnessOrigin(controls))
       synchronizeSessionState(session, state)
     }
   }
@@ -735,6 +821,7 @@ export class AgentTurnRunner implements TurnRunner {
   }
 
   dropSession(sessionId: string): void {
+    this.snapshots.drop(sessionId)
     this.states.delete(sessionId)
     this.toolResultStores.delete(sessionId)
     // Otherwise only the tracker's LRU bounds a long-lived daemon, and a file
@@ -783,6 +870,41 @@ export class AgentTurnRunner implements TurnRunner {
   }
 
 
+  /**
+   * The session's memory for this turn. The first turn (or a change of
+   * workspace or context controls) renders the section and snapshots the
+   * files behind it; later turns reuse that exact text and report only what
+   * changed since the last delivery, for the turn context.
+   */
+  private async memoryForTurn(
+    session: DaemonSession,
+    memory: AgentMemory | undefined,
+    selfMemory: AgentSelfMemory | undefined,
+    controls: ContextControls,
+  ): Promise<MemoryForTurn> {
+    const self = selfMemory ? await selfMemory.systemPromptAddendum() : ''
+    if (!memory && !self) return { section: '', selfSection: '', changes: '', selfChanges: '', sources: [] }
+    const key = JSON.stringify([session.cwd, controls.revision, controls.pins, controls.excluded])
+    const sourceOptions = { excludedSources: controls.excluded, pinnedMemories: controls.pins }
+    const current = memory ? await memory.promptSources(sourceOptions) : new Map<string, MemorySourceText>()
+    const known = this.memorySnapshots.get(session.id)
+    if (!known || known.key !== key) {
+      const sources: MemorySourceText[] = []
+      const section = memory ? await memory.toPromptSection({ ...sourceOptions, onSource: source => sources.push(source) }) : ''
+      this.memorySnapshots.set(session.id, { key, section, selfSection: self, delivered: current, deliveredSelf: self, sources })
+      return { section, selfSection: self, changes: '', selfChanges: '', sources }
+    }
+    const changes = renderMemoryChanges(known.delivered, current)
+    const selfChanges = self === known.deliveredSelf
+      ? ''
+      : self
+        ? '## Self-memory changed since this conversation began; it now reads\n\n' + self
+        : '## Self-memory was cleared since this conversation began'
+    known.delivered = current
+    known.deliveredSelf = self
+    return { section: known.section, selfSection: known.selfSection, changes, selfChanges, sources: known.sources }
+  }
+
   private async bootstrapSystemPrompt(
     session: DaemonSession,
     model: string,
@@ -798,7 +920,12 @@ export class AgentTurnRunner implements TurnRunner {
     // The provider receives the whole session, so every session-scoped input
     // the prompt can reflect — plan mode and the trusted addendum, alongside
     // workspace, model, agent, and tool surface — must stay in the cache key.
+    // Per session: the prompt states a git snapshot "from session start",
+    // which must not be another session's. Not per day — a new day is told
+    // in the turn context instead of re-rendering the prompt. Session first,
+    // so drop() can evict its entries.
     const key = [
+      session.id,
       session.cwd,
       model,
       session.agentId,
@@ -859,26 +986,6 @@ function turnMutatedFiles(state: AgentState): boolean {
     const record = execution as { name?: unknown; permitted?: unknown }
     return record.permitted === true && typeof record.name === 'string' && MUTATING_TOOL_NAMES.has(record.name)
   })
-}
-
-/** Recent transcript text used to suppress memories the conversation already covered. */
-function recentTranscriptText(session: DaemonSession, turns = 12): string {
-  return session.messages
-    .slice(-turns)
-    .map(message => (typeof message.content === 'string' ? message.content : ''))
-    .filter(Boolean)
-    .join('\n')
-}
-
-/** Tools that recently succeeded; their reference topics rank down, their gotchas do not. */
-function recentSuccessfulToolNames(session: DaemonSession, limit = 24): readonly string[] {
-  const names = new Set<string>()
-  for (const execution of session.toolExecutions.slice(-limit)) {
-    if (typeof execution !== 'object' || execution === null) continue
-    const record = execution as { name?: unknown; permitted?: unknown }
-    if (record.permitted === true && typeof record.name === 'string') names.add(record.name)
-  }
-  return [...names]
 }
 
 // Must match the shared agent-event injection block cap. Formatting a larger
@@ -1121,6 +1228,32 @@ function latestAssistantContent(state: AgentState): string {
   return typeof message.content === 'string' ? message.content : JSON.stringify(message.content)
 }
 
+interface SessionMemorySnapshot {
+  readonly key: string
+  readonly section: string
+  readonly selfSection: string
+  readonly sources: readonly MemorySourceText[]
+  delivered: ReadonlyMap<string, MemorySourceText>
+  deliveredSelf: string
+}
+
+interface MemoryForTurn {
+  /** Fixed for the session: the system prompt's memory layers. */
+  readonly section: string
+  readonly selfSection: string
+  /** New since the last turn: delivered in the turn context. */
+  readonly changes: string
+  readonly selfChanges: string
+  readonly sources: readonly MemorySourceText[]
+}
+
+/** The date as the bootstrap Environment line states it (YYYY-MM-DD Weekday). */
+function localDay(date: Date): string {
+  const pad = (value: number) => String(value).padStart(2, '0')
+  const weekday = new Intl.DateTimeFormat('en-US', { weekday: 'long' }).format(date)
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${weekday}`
+}
+
 function systemPromptAddendum(session: DaemonSession): string {
   return session.systemPromptAddendum?.trim() ?? ''
 }
@@ -1171,8 +1304,8 @@ function renderDeferredCatalog(
   const lines = hidden.map(entry => `- ${entry.name}: ${entry.description}`)
   return [
     '[Additional tools]',
-    `${hidden.length} more tools are available in this session but their schemas are not in this request.`,
-    'Call ToolSearchTool with a capability query to load the ones you need, then call them normally.',
+    `${hidden.length} more tools can be loaded in this session; a tool's schema is sent only once it is loaded.`,
+    'Load the ones this task needs with ONE ToolSearchTool call listing their exact names space-separated, then call them normally; a loaded tool is already in your tool list.',
     'Never tell the user a capability is unavailable because it is not in your current tool list — search first.',
     '',
     ...lines,
@@ -1180,20 +1313,16 @@ function renderDeferredCatalog(
 }
 
 /**
- * Goal policy plus the current goal, when the goal tools are on this surface.
- *
- * The live snapshot rides with the policy so the model does not have to spend a
- * `get_goal` call to learn whether a goal exists — but the exact id and
- * revision it must copy still come from that call, because this layer is
- * assembled once per turn and a mutation mid-turn would make it stale.
+ * The current goal as of this turn, delivered in the turn context when it
+ * changed. It spares the model a `get_goal` call to learn whether a goal
+ * exists — but the exact id and revision it must copy still come from that
+ * call, because a mutation mid-turn would make this stale.
  */
-function renderGoalLayer(toolsVisible: boolean, goal: GoalView | undefined): string {
-  if (!toolsVisible) return ''
-  const policy = goalPolicyPrompt(DEFAULT_BLOCKED_AFTER_CONSECUTIVE_ROUNDS)
-  if (!goal) return `${policy}\n\nNo goal is set for this session.`
+function renderGoalStatus(goal: GoalView | undefined): string {
+  if (!goal) return ''
   const blocked = goal.blockedReason ? ` Blocker: ${goal.blockedReason.message}` : ''
-  return `${policy}\n\nCurrent goal: ${JSON.stringify(goal.objective)} — phase ${goal.phase}, `
-    + `round ${goal.roundsStarted} of ${goal.maxGoalRounds}, ${goal.activation}.${blocked}`
+  return `Current goal: ${JSON.stringify(goal.objective)} — phase ${goal.phase}, `
+    + `round ${goal.roundsStarted} of ${goal.maxGoalRounds === DEFAULT_MAX_GOAL_ROUNDS ? 'unlimited' : goal.maxGoalRounds}, ${goal.activation}.${blocked}`
     + (goal.maxDurationMs === undefined ? '' : ` Wall-time deadline (Unix milliseconds): ${goal.createdAt + goal.maxDurationMs} (includes pauses).`)
     + (goal.criteria?.length ? '\nCompletion criteria: ' + JSON.stringify(goal.criteria.map(criterion => ({ id: criterion.id, description: criterion.description, evidenceToolCallId: criterion.evidence?.toolCallId ?? null }))) : '\nNo explicit completion criteria declared.')
 }
@@ -1388,14 +1517,20 @@ function synchronizeSessionState(session: DaemonSession, state: AgentState): voi
   session.usageComplete = state.usageComplete
 }
 
-function recordLatestUserDisplayText(state: AgentState, providerText: string, displayText: string): void {
-  if (providerText === displayText) return
+/** Who wrote this turn's prompt when it was not the human. */
+function harnessOrigin(controls: TurnRunControls): HarnessOrigin | undefined {
+  if (controls.goalRound !== undefined) return 'goal'
+  return controls.origin === 'monitor' || controls.origin === 'schedule' ? controls.origin : undefined
+}
+
+function recordLatestUserDisplayText(state: AgentState, providerText: string, displayText: string, origin?: HarnessOrigin): void {
+  if (providerText === displayText && !origin) return
   for (let index = state.messages.length - 1; index >= 0; index -= 1) {
     const message = state.messages[index]
     // Content may be a structured part list (image attachments); compare on
     // the extracted text so displayText is still recorded for those turns.
     if (message?.role !== 'user' || messageText(message) !== providerText) continue
-    state.messages[index] = { ...message, displayText }
+    state.messages[index] = { ...message, ...(providerText === displayText ? {} : { displayText }), ...(origin ? { origin } : {}) }
     return
   }
 }
@@ -1426,6 +1561,7 @@ function providerMessagesFromTranscript(message: DaemonSession['messages'][numbe
       role,
       content,
       ...(typeof message.text === 'string' ? { displayText: message.text } : {}),
+      ...(isHarnessOrigin(message.origin) ? { origin: message.origin } : {}),
     }]
   }
   if (role === 'tool' && typeof content === 'string' && typeof message.tool_call_id === 'string') {
@@ -1435,6 +1571,11 @@ function providerMessagesFromTranscript(message: DaemonSession['messages'][numbe
       tool_call_id: message.tool_call_id,
       ...(typeof message.name === 'string' ? { name: message.name } : {}),
       ...(message.is_error === true ? { is_error: true } : {}),
+      // Where a tool was loaded: providers with native deferred tools render
+      // the result by it, and dropping it re-rendered that result next turn.
+      ...(Array.isArray(message.added_tool_names) && message.added_tool_names.every(name => typeof name === 'string')
+        ? { added_tool_names: message.added_tool_names as string[] }
+        : {}),
     }]
   }
   return []
@@ -1462,6 +1603,8 @@ function isToolExecutionRecord(value: unknown): value is AgentState['toolExecuti
 interface SessionRuntimeTelemetry {
   cacheHitRate: number
   cacheReadTokens: number
+  /** Prompt tokens written to the provider cache — billed above plain input. */
+  cacheWriteTokens: number
   cacheTelemetryKnown: boolean
   inputTokens: number
   llmDurationMs: number
@@ -1486,6 +1629,7 @@ function accumulateSessionTelemetry(session: DaemonSession, event: StreamEvent):
   const telemetry: SessionRuntimeTelemetry = {
     cacheHitRate: finite('cacheHitRate'),
     cacheReadTokens: finite('cacheReadTokens'),
+    cacheWriteTokens: finite('cacheWriteTokens'),
     cacheTelemetryKnown: stored.cacheTelemetryKnown === true,
     inputTokens: finite('inputTokens'),
     llmDurationMs: finite('llmDurationMs'),
@@ -1500,11 +1644,12 @@ function accumulateSessionTelemetry(session: DaemonSession, event: StreamEvent):
     telemetry.llmSteps += 1
     telemetry.llmDurationMs += Math.max(0, event.durationMs ?? 0)
     if (event.tokensPerSecond !== undefined) telemetry.tokensPerSecond = Math.max(0, event.tokensPerSecond)
-    if (event.usage.cacheReadTokens !== undefined) {
+    if (event.usage.cacheReadTokens !== undefined || event.usage.cacheCreationTokens !== undefined) {
       telemetry.cacheTelemetryKnown = true
       telemetry.inputTokens += Math.max(0, event.usage.inputTokens)
-      telemetry.cacheReadTokens += Math.max(0, event.usage.cacheReadTokens)
-      const cacheDenominator = telemetry.inputTokens + telemetry.cacheReadTokens
+      telemetry.cacheReadTokens += Math.max(0, event.usage.cacheReadTokens ?? 0)
+      telemetry.cacheWriteTokens += Math.max(0, event.usage.cacheCreationTokens ?? 0)
+      const cacheDenominator = telemetry.inputTokens + telemetry.cacheReadTokens + telemetry.cacheWriteTokens
       if (cacheDenominator > 0) telemetry.cacheHitRate = telemetry.cacheReadTokens / cacheDenominator
     }
     if (event.ttftMs !== undefined) {
@@ -1590,7 +1735,7 @@ function daemonEventFromStream(
           output_tokens: state.totalOutputTokens,
           total_tokens: state.totalInputTokens + state.totalOutputTokens,
           context_tokens:
-            event.usage.inputTokens + (event.usage.cacheReadTokens ?? 0) + event.usage.outputTokens,
+            event.usage.inputTokens + (event.usage.cacheReadTokens ?? 0) + (event.usage.cacheCreationTokens ?? 0) + event.usage.outputTokens,
           ...(typeof contextLimit === 'number' && contextLimit > 0 ? { max_context: contextLimit } : {}),
           ...(state.totalCacheReadTokens ? { cache_read_tokens: state.totalCacheReadTokens } : {}),
           ...(state.totalCacheCreationTokens ? { cache_creation_tokens: state.totalCacheCreationTokens } : {}),

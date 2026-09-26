@@ -54,13 +54,15 @@ test('payload conversion mirrors the native generateContent shape', () => {
     }],
   }
   const payload = vertexPayload(request)
-  expect(payload.model).toBe('gemini-2.5-flash')
-  expect(payload.config?.systemInstruction).toEqual({ parts: [{ text: 'be brief' }] })
-  expect(payload.config?.generationConfig).toEqual({ maxOutputTokens: 512, temperature: 0.3 })
-  expect(payload.config?.thinkingConfig).toEqual({ includeThoughts: true, thinkingLevel: 'HIGH' })
-  expect(payload.config?.toolConfig).toEqual({ functionCallingConfig: { mode: 'ANY' } })
+  // The REST generateContent shape: fields at the top level, thinking inside
+  // generationConfig, the model in the URL — not the SDK's `config` wrapper.
+  expect(payload).not.toHaveProperty('config')
+  expect(payload).not.toHaveProperty('model')
+  expect(payload.systemInstruction).toEqual({ parts: [{ text: 'be brief' }] })
+  expect(payload.generationConfig).toEqual({ maxOutputTokens: 512, temperature: 0.3, thinkingConfig: { includeThoughts: true, thinkingLevel: 'HIGH' } })
+  expect(payload.toolConfig).toEqual({ functionCallingConfig: { mode: 'ANY' } })
   // $-meta declarations are stripped from the schema (pi-ai sanitizeForOpenApi).
-  expect(payload.config?.tools?.[0]?.functionDeclarations).toEqual([{
+  expect(payload.tools?.[0]?.functionDeclarations).toEqual([{
     name: 'deploy',
     description: 'd',
     parametersJsonSchema: { type: 'object', properties: {} },
@@ -300,4 +302,21 @@ test('the factory routes google-vertex models to the native client', async () =>
 test('model routing recognizes vertex prefixes', () => {
   expect(detectProvider('google-vertex/gemini-2.5-flash')).toBe('google-vertex')
   expect(detectProvider('vertex/gemini-2.5-pro')).toBe('google-vertex')
+})
+
+test('a system message later in the conversation stays in place, so the cached prefix does not move', async () => {
+  const { messagesToGemini } = await import('../src/llms/gemini.js')
+  const messages = [
+    { role: 'system' as const, content: 'You are Xerxes.' },
+    { role: 'user' as const, content: 'first' },
+    { role: 'assistant' as const, content: 'ok' },
+    { role: 'system' as const, content: 'Relevant retained memory for this turn: X' },
+    { role: 'user' as const, content: 'second' },
+  ]
+  const payload = vertexPayload({ model: 'google-vertex/gemini-2.5-flash', messages })
+  expect(payload.systemInstruction).toEqual({ parts: [{ text: 'You are Xerxes.' }] })
+  expect(JSON.stringify(payload.contents)).toContain('Relevant retained memory for this turn: X')
+  const gemini = messagesToGemini(messages)
+  expect(JSON.stringify(gemini.systemInstruction)).not.toContain('Relevant retained memory')
+  expect(JSON.stringify(gemini.contents)).toContain('Relevant retained memory for this turn: X')
 })

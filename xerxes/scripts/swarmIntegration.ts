@@ -300,7 +300,7 @@ async function testXerxesFacade(log: ReportLog): Promise<void> {
   const denialRequest = deniedClient.requests[1]
   requireCondition(denialRequest !== undefined, 'Denied call did not return a tool result to the model')
   requireCondition(
-    messageContent(denialRequest.messages.at(-1)).includes('Permission denied for calculator.'),
+    messageContent(denialRequest.messages.at(-1)).includes('Permission denied for calculator by policy'),
     'Policy denial was not preserved as an explicit tool result',
   )
   log('Policy denials are returned to the model without executing the tool')

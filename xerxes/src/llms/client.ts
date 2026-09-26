@@ -4,6 +4,7 @@
 import { httpErrorBody } from './httpErrorBody.js'
 import { assertOutputTokenLimit, type OutputTokenBound } from './outputTokenLimit.js'
 import { createHash } from 'node:crypto'
+import { credentialFingerprint } from './credentialFingerprint.js'
 import { chargeModelCall } from './callBudget.js'
 
 import { parseStreamingJson } from '@earendil-works/pi-ai'
@@ -21,7 +22,7 @@ import { KimiCodingOAuthSession } from '../auth/kimiCodingOAuth.js'
 import { OpenRouterOAuthSession } from '../auth/openrouterOAuth.js'
 import { XaiOAuthSession } from '../auth/xaiOAuth.js'
 import { isGradedEffort } from './reasoningLevels.js'
-import { ConfigurationError, ProviderError } from '../core/errors.js'
+import { ConfigurationError, ProviderError, StreamFrameError } from '../core/errors.js'
 import { isPluginLlmProviderFactory } from '../extensions/plugins.js'
 import type {
   PluginLlmProviderFactory,
@@ -44,6 +45,7 @@ import {
 import { deterministicToolCallId } from '../streaming/toolCallIds.js'
 import { SSEParser } from '../streaming/sse.js'
 import { AnthropicMessagesClient } from './anthropic.js'
+import { ClaudeCodeClient } from './claudeCode.js'
 import { AzureOpenAiClient } from './azureOpenAi.js'
 import { PiMessagesClient } from './piMessages.js'
 import { DEFAULT_RADIUS_GATEWAY } from './radiusGateway.js'
@@ -63,7 +65,7 @@ import {
   splitDeferredTools,
 } from './deferredTools.js'
 import { OllamaClient } from './ollama.js'
-import { piCatalogModelCapabilities } from './piModelCatalog.js'
+import { wireCapability, type WireApi } from './modelsDev.js'
 import type { ChatMessage, MessageContent, OpenAiChatMessage } from '../types/messages.js'
 import { messageText, messagesToOpenAi } from '../types/messages.js'
 import type { JsonObject, ToolCall, ToolChoice, ToolDefinition } from '../types/toolCalls.js'
@@ -236,6 +238,14 @@ export interface LlmClient {
   /** Optional resource cleanup for SDK-backed or plugin clients. */
   close?(): Promise<void> | void
   stream(request: CompletionRequest, signal?: AbortSignal): AsyncIterable<LlmDelta>
+  /**
+   * Identity of the credential a request would carry right now (see
+   * {@link credentialFingerprint}), resolved fresh — never a cached guess.
+   * Lets the loop tell, for any provider, whether a quota-exhausted account
+   * has since been switched or a key replaced. Absent for clients whose
+   * credentials come from ambient cloud identity.
+   */
+  authFingerprint?(signal?: AbortSignal): Promise<string | undefined>
 }
 
 export type FetchImplementation = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
@@ -309,11 +319,11 @@ interface PendingToolCall {
 }
 
 /**
- * Whether this model on this provider accepts OpenAI `custom` grammar tools,
- * straight from pi-ai's compat flags in the generated catalog.
+ * Whether this model on this provider accepts OpenAI `custom` grammar tools —
+ * as its provider reports it (Codex: `apply_patch_tool_type: freeform`).
  */
 function supportsOpenAiGrammarTools(providerName: ProviderName, model: string): boolean {
-  return piCatalogModelCapabilities(model, providerName)?.compat?.supportsOpenAIGrammarTools === true
+  return wireCapability({ provider: providerName, model }).grammarTools === true
 }
 
 /**
@@ -344,6 +354,11 @@ export class OpenAiCompatibleClient implements LlmClient {
   }
 
   /** Static API-key headers, or freshly resolved OAuth headers when configured. */
+  async authFingerprint(signal?: AbortSignal): Promise<string | undefined> {
+    try { return credentialFingerprint(await this.headers('application/json', signal)) }
+    catch { return undefined }
+  }
+
   private async headers(
     accept: string,
     signal?: AbortSignal,
@@ -510,6 +525,11 @@ export class ResponsesApiClient implements LlmClient {
   }
 
   /** Static API-key headers, or freshly resolved OAuth headers when configured. */
+  async authFingerprint(signal?: AbortSignal): Promise<string | undefined> {
+    try { return credentialFingerprint(await this.headers('application/json', signal)) }
+    catch { return undefined }
+  }
+
   private async headers(
     accept: string,
     signal?: AbortSignal,
@@ -813,7 +833,11 @@ export function createLlmClient(
     return client
   }
 
-  const providerName = resolveProvider(model, overrides)
+  // The endpoint identifies the provider as well when it is given as an option.
+  const routedBaseUrl = typeof overrides.base_url === 'string' || typeof overrides.custom_base_url === 'string' || !options.baseUrl
+    ? overrides
+    : { ...overrides, base_url: options.baseUrl }
+  const providerName = resolveProvider(model, routedBaseUrl)
   const providerConfig = getProviderConfig(providerName)
   const configuredApiKey = typeof overrides.api_key === 'string' ? overrides.api_key : options.apiKey
   const configuredBaseUrl = typeof overrides.base_url === 'string'
@@ -848,6 +872,10 @@ export function createLlmClient(
       },
     })
   }
+  if (providerConfig.transport === 'claude-code') {
+    // The local `claude` CLI on the user's own Claude sign-in, as a model.
+    return new ClaudeCodeClient()
+  }
   if (providerConfig.transport !== 'openai') {
     throw new ConfigurationError('provider', `${providerName} requires its dedicated adapter.`)
   }
@@ -872,7 +900,8 @@ export function createLlmClient(
       ...options,
       providerName,
       ...(configuredBaseUrl ? { baseUrl: configuredBaseUrl } : { baseUrl: codexBaseUrl() }),
-      resolveAuthHeaders: async signal => codexAuthHeaders(await session.credential(signal)),
+      // The session id routes a conversation to the backend holding its cache.
+      resolveAuthHeaders: async (signal, request) => codexAuthHeaders(await session.credential(signal), request?.sessionId),
       ...(codexTransport ? { codexTransport } : {}),
     })
   }
@@ -1077,9 +1106,10 @@ function routeMultiApiProvider(
   configuredApiKey: string | undefined,
   configuredBaseUrl: string | undefined,
 ): LlmClient | undefined {
-  const entry = piCatalogModelCapabilities(model, providerName)
-  if (!entry) return undefined
-  const baseUrl = configuredBaseUrl ?? cloudflareGatewayBaseUrl(entry.baseUrl, providerName)
+  // The protocol each model is served over, as its catalog entry states it.
+  const entry = wireCapability({ provider: providerName, model, ...(configuredBaseUrl ? { baseUrl: configuredBaseUrl } : {}) })
+  if (!entry.api) return undefined
+  const baseUrl = configuredBaseUrl ?? entry.apiBaseUrl ?? gatewayBaseUrl(providerName, entry.api)
   const shared = {
     ...(configuredApiKey ? { apiKey: configuredApiKey } : {}),
     ...(baseUrl ? { baseUrl } : {}),
@@ -1101,6 +1131,21 @@ function routeMultiApiProvider(
     default:
       return new OpenAiCompatibleClient({ ...options, providerName, ...shared })
   }
+}
+
+/**
+ * Where a gateway serves a protocol — each gateway's own URL convention:
+ * Anthropic's client appends `/v1/messages` itself, and Cloudflare's gateway
+ * routes by upstream (`/anthropic`, `/openai`, or the unified `/compat`).
+ */
+function gatewayBaseUrl(providerName: ProviderName, api: WireApi): string | undefined {
+  if (providerName === 'cloudflare-ai-gateway') {
+    const segment = api === 'anthropic-messages' ? 'anthropic' : api === 'openai-responses' ? 'openai' : 'compat'
+    return cloudflareGatewayBaseUrl(`https://gateway.ai.cloudflare.com/v1/{CLOUDFLARE_ACCOUNT_ID}/{CLOUDFLARE_GATEWAY_ID}/${segment}`, providerName)
+  }
+  const base = getProviderConfig(providerName).baseUrl
+  if (!base) return undefined
+  return api === 'anthropic-messages' ? base.replace(/\/v1\/?$/, '') : base
 }
 
 /**
@@ -1583,8 +1628,7 @@ function responsesPayload(
     .map(messageText)
     .filter(Boolean)
     .join('\n\n')
-  const grammarSupport = piCatalogModelCapabilities(request.model, providerName)
-    ?.compat?.supportsOpenAIGrammarTools === true
+  const grammarSupport = supportsOpenAiGrammarTools(providerName, request.model)
   const grammarProperties = createGrammarToolInputProperties(request.tools, grammarSupport)
   const deferredMode = responsesDeferredToolsMode(providerName, request.model)
   const deferredSplit = splitDeferredTools(request.tools, request.messages, deferredMode !== undefined)
@@ -1700,6 +1744,27 @@ function responsesHeaders(providerName: ProviderName, apiKey: string, accept: st
   return headers
 }
 
+/**
+ * Mark the system message and the last message as cache breakpoints (two of
+ * the four Anthropic allows). The next step's request extends this one, so
+ * its breakpoint finds this entry within the lookback window.
+ */
+export function withCacheBreakpoints(messages: readonly Record<string, unknown>[]): Record<string, unknown>[] {
+  const mark = (message: Record<string, unknown>): Record<string, unknown> => {
+    const content = message.content
+    const parts = typeof content === 'string'
+      ? (content ? [{ type: 'text', text: content }] : [])
+      : Array.isArray(content) ? content.map(part => ({ ...(part as Record<string, unknown>) })) : []
+    const last = parts.findLastIndex(part => part.type === 'text')
+    if (last < 0) return message
+    parts[last] = { ...parts[last], cache_control: { type: 'ephemeral' } }
+    return { ...message, content: parts }
+  }
+  const system = messages.findIndex(message => message.role === 'system')
+  const final = messages.length - 1
+  return messages.map((message, index) => index === system || index === final ? mark(message) : message)
+}
+
 function openAiMessagesForProvider(
   messages: readonly ChatMessage[],
   providerName: ProviderName,
@@ -1779,8 +1844,7 @@ function openAiCompatiblePayload(
   providerName: ProviderName,
   stream: boolean,
 ): Record<string, unknown> {
-  const modelCapabilities = piCatalogModelCapabilities(request.model, providerName)
-  const grammarSupport = modelCapabilities?.compat?.supportsOpenAIGrammarTools === true
+  const grammarSupport = supportsOpenAiGrammarTools(providerName, request.model)
   const grammarProperties = createGrammarToolInputProperties(request.tools, grammarSupport)
   const kimiDeferred = completionsDeferredToolsMode(providerName, request.model) === 'kimi'
   const deferredSplit = splitDeferredTools(request.tools, request.messages, kimiDeferred)
@@ -1796,6 +1860,13 @@ function openAiCompatiblePayload(
       : openAiMessagesForProvider(request.messages, providerName, grammarProperties),
     stream,
   }
+  // OpenRouter caches most upstreams automatically, but models billed with a
+  // separate cache-write price (Anthropic, Gemini) cache only at explicit
+  // cache_control breakpoints — without them every step re-sent the whole
+  // conversation at full price. The price, not a model-name list, decides.
+  if (providerName === 'openrouter' && wireCapability({ provider: providerName, model: request.model }).cost?.cacheWrite !== undefined) {
+    payload.messages = withCacheBreakpoints(payload.messages as Record<string, unknown>[])
+  }
   // OpenAI's chat-completions prompt-cache key routes a repeated session
   // prefix to the same backend; other hosts may reject the extension.
   if (providerName === 'openai' && request.sessionId) {
@@ -1807,7 +1878,8 @@ function openAiCompatiblePayload(
     if (wireTools.length) {
       payload.tools = wireTools.map(tool => completionsToolDefinition(tool, grammarSupport))
     }
-    if (modelCapabilities?.compat?.zaiToolStream === true || providerName === 'zhipu') payload.tool_stream = true
+    // Z.ai's API streams tool calls only when asked (its own protocol).
+    if (providerName === 'zhipu') payload.tool_stream = true
     if (request.toolChoice) {
       payload.tool_choice = request.toolChoice === 'any' ? 'required' : request.toolChoice
     }
@@ -1871,10 +1943,7 @@ function addSampling(
     payload.temperature = request.temperature
   }
   if (request.maxTokens !== undefined) {
-    const maxTokensField = piCatalogModelCapabilities(request.model, providerName)?.compat?.maxTokensField
-    payload[maxTokensField === 'max_tokens' || maxTokensField === 'max_completion_tokens'
-      ? maxTokensField
-      : 'max_tokens'] = request.maxTokens
+    payload.max_tokens = request.maxTokens
   }
   if (request.topP !== undefined) {
     payload.top_p = request.topP
@@ -1889,57 +1958,51 @@ function addSampling(
     payload.stop = request.stop
   }
   const effort = request.thinking?.effort
-  const capabilities = piCatalogModelCapabilities(request.model, providerName)
-  const thinkingFormat = capabilities?.compat?.thinkingFormat
-  const thinkingMap = capabilities?.thinkingLevelMap
-  const mappedEffort = effort ? thinkingMap?.[effort] : undefined
-  const reasoningEffort = mappedEffort === null
-    ? undefined
-    : mappedEffort ?? (isGradedEffort(effort) ? effort : undefined)
+  // How this model reasons, as its provider (else models.dev) reports it. The
+  // effort offered was the provider's own word, so it goes out as chosen.
+  const reasoning = wireCapability({ provider: providerName, model: request.model }).reasoning
+  const reasoningEffort = isGradedEffort(effort) && effort !== 'none' ? effort : undefined
   const thinkingEnabled = request.thinking !== undefined && effort !== 'off' && effort !== 'none'
-  // pi-ai guards every thinking field on model.reasoning: a catalog entry
-  // that says the model does not reason gets no thinking knobs at all, and a
-  // map whose `off` is null means the model CANNOT disable thinking (sending
-  // `disabled` would be a provider-side rejection). Unknown models keep the
-  // provider-name heuristics untouched.
-  const reasoningModel = capabilities?.reasoning !== false
-  if (!reasoningModel) {
-    // no thinking fields
-  } else if (thinkingFormat === 'zai' || providerName === 'zhipu') {
-    payload.thinking = thinkingEnabled
+  // Reported "cannot be switched off": never send a disable the provider would reject.
+  const canDisable = reasoning?.canDisable !== false
+  // Effort words go on the wire only where the model reports levels (or nothing is known).
+  const acceptsEffort = reasoning === undefined || reasoning.efforts.length > 0
+  if (reasoning?.supported === false) {
+    // A model reported not to reason gets no thinking fields at all.
+  } else if (providerName === 'zhipu') {
+    payload.thinking = thinkingEnabled || !canDisable
       ? { type: 'enabled', clear_thinking: false }
       : { type: 'disabled' }
-    if (capabilities?.compat?.supportsReasoningEffort !== false && reasoningEffort) {
+    if (acceptsEffort && reasoningEffort) {
       payload.reasoning_effort = reasoningEffort
     }
-  } else if (thinkingFormat === 'deepseek' || providerName === 'deepseek') {
+  } else if (providerName === 'deepseek') {
     if (thinkingEnabled) {
       payload.thinking = { type: 'enabled' }
-    } else if (thinkingMap?.off !== null) {
+    } else if (canDisable) {
       payload.thinking = { type: 'disabled' }
     }
-    if (thinkingEnabled && capabilities?.compat?.supportsReasoningEffort !== false && reasoningEffort) {
+    if (thinkingEnabled && acceptsEffort && reasoningEffort) {
       payload.reasoning_effort = reasoningEffort
     }
-  } else if (thinkingFormat === 'openrouter' || providerName === 'openrouter') {
-    // pi: an explicit off maps through thinkingLevelMap.off ('none' when the
-    // map names nothing); on without a graded effort leaves the field out so
-    // the provider default applies — never `effort: 'none'` for an on turn.
+  } else if (providerName === 'openrouter') {
+    // An explicit off is the model's own off word (`none`); on without a
+    // graded effort leaves the field out so the provider default applies.
     if (thinkingEnabled && reasoningEffort) {
       payload.reasoning = { effort: reasoningEffort }
-    } else if (!thinkingEnabled && thinkingMap?.off !== null) {
-      payload.reasoning = { effort: typeof thinkingMap?.off === 'string' ? thinkingMap.off : 'none' }
+    } else if (!thinkingEnabled && canDisable) {
+      payload.reasoning = { effort: reasoning?.offEffort ?? 'none' }
     }
-  } else if (thinkingFormat === 'qwen' || providerName === 'qwen') {
-    payload.enable_thinking = thinkingEnabled
-    if (capabilities?.compat?.supportsReasoningEffort !== false && reasoningEffort) {
+  } else if (providerName === 'qwen') {
+    payload.enable_thinking = thinkingEnabled || !canDisable
+    if (acceptsEffort && reasoningEffort) {
       payload.reasoning_effort = reasoningEffort
     }
-  } else if (reasoningEffort) {
+  } else if (reasoningEffort && acceptsEffort) {
     payload.reasoning_effort = reasoningEffort
-  } else if (!thinkingEnabled && typeof thinkingMap?.off === 'string' && capabilities?.compat?.supportsReasoningEffort) {
-    // OpenAI-style: off lands as the map's own off word (e.g. 'none').
-    payload.reasoning_effort = thinkingMap.off
+  } else if (!thinkingEnabled && request.thinking !== undefined && reasoning?.offEffort) {
+    // OpenAI-style: off is the model's own off effort (e.g. `none`).
+    payload.reasoning_effort = reasoning.offEffort
   }
   if (request.thinking?.budgetTokens !== undefined) {
     payload.thinking_budget = request.thinking.budgetTokens
@@ -1990,12 +2053,14 @@ const OPENAI_COMPATIBLE_RESERVED_BODY_FIELDS = new Set([
   'tool_stream',
 ])
 
-/** Kimi Code fixes temperature at 1 and rejects every other explicit value. */
+/**
+ * Whether to send `temperature`: models.dev states it per model (reasoning
+ * models commonly refuse it). Kimi Code fixes it at 1 and rejects any other
+ * explicit value. Unknown models get it, as before.
+ */
 function supportsTemperature(providerName: ProviderName, model: string, temperature: number): boolean {
   if (providerName === 'kimi-code') return temperature === 1
-  const capabilities = piCatalogModelCapabilities(model, providerName)
-  if (providerName === 'openai' && capabilities?.api === 'openai-responses' && capabilities.reasoning) return false
-  return capabilities?.compat?.supportsTemperature !== false
+  return wireCapability({ provider: providerName, model }).temperature !== false
 }
 
 /** Only providers that document these non-standard OpenAI-compatible fields receive them. */
@@ -2142,9 +2207,13 @@ function validatedOpenAiFinishReason(reason: string | undefined, providerName: P
 
 function openAiUsage(value: Record<string, unknown>): TokenUsage | undefined {
   const inputDetails = asRecord(value.prompt_tokens_details)
-  const cacheReadTokens = numberAt(inputDetails, 'cached_tokens')
-    ?? numberAt(value, 'prompt_cache_hit_tokens')
-    ?? numberAt(value, 'cached_tokens')
+  // Providers put the read count in different places (OpenAI/OpenRouter/Zhipu
+  // in prompt_tokens_details, DeepSeek as prompt_cache_hit_tokens, Kimi at the
+  // top level). Take the largest one present: a `?? ` chain let a reported 0
+  // in one field hide a real read in another.
+  const readFields = [numberAt(inputDetails, 'cached_tokens'), numberAt(value, 'prompt_cache_hit_tokens'), numberAt(value, 'cached_tokens')]
+    .filter((count): count is number => count !== undefined)
+  const cacheReadTokens = readFields.length ? Math.max(...readFields) : undefined
   const cacheCreationTokens = numberAt(inputDetails, 'cache_write_tokens')
   const cacheMissTokens = numberAt(value, 'prompt_cache_miss_tokens')
   const inputTokens = numberAt(value, 'prompt_tokens')
@@ -2331,7 +2400,7 @@ function parseJsonObject(data: string, providerName: string): Record<string, unk
   try {
     return asRecord(JSON.parse(data) as unknown)
   } catch (error) {
-    throw new ProviderError(providerName, `invalid SSE JSON: ${data.slice(0, 200)}`, error)
+    throw new StreamFrameError(providerName, `invalid SSE JSON: ${data.slice(0, 200)}`, error)
   }
 }
 

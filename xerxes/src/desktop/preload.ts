@@ -10,7 +10,7 @@
  * package is `"type": "module"` and sandboxed preloads only load CJS.
  */
 
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webFrame } from 'electron'
 
 const METHOD = /^[A-Za-z0-9_.]{1,128}$/
 
@@ -55,6 +55,11 @@ function cleanEvent(frame: unknown): { type: string; payload: Record<string, unk
 }
 
 const bridge = {
+  /** UI scale: zoom this window's page (0.5–3). */
+  setZoomFactor(factor: unknown): void {
+    if (typeof factor !== 'number' || !Number.isFinite(factor) || factor < 0.5 || factor > 3) throw new TypeError('invalid zoom factor')
+    webFrame.setZoomFactor(factor)
+  },
   getWindowChrome(): Promise<{ trafficLights: boolean }> { return ipcRenderer.invoke('desktop:window-chrome') },
   onWindowChrome(handler: (state: { trafficLights: boolean }) => void): () => void {
     const listener = (_event: Electron.IpcRendererEvent, state: unknown) => {
@@ -130,10 +135,30 @@ const bridge = {
     return ipcRenderer.invoke('desktop:workspaces') as Promise<string[]>
   },
 
-  openWorkspaceWindow(dir?: unknown, resumeSessionId?: unknown): Promise<unknown> {
+  openWorkspaceWindow(dir?: unknown, resumeSessionId?: unknown, options?: unknown): Promise<unknown> {
     if (dir !== undefined && (typeof dir !== 'string' || !dir || /[\x00-\x1f]/.test(dir))) return Promise.reject(new TypeError('invalid workspace dir'))
     if (resumeSessionId !== undefined && (typeof resumeSessionId !== 'string' || !resumeSessionId || resumeSessionId.length > 256 || /[\x00-\x1f]/.test(resumeSessionId))) return Promise.reject(new TypeError('invalid session identity'))
-    return ipcRenderer.invoke('desktop:new-window', dir, resumeSessionId) as Promise<unknown>
+    const fresh = options !== null && typeof options === 'object' && (options as { fresh?: unknown }).fresh === true
+    return ipcRenderer.invoke('desktop:new-window', dir, resumeSessionId, fresh || undefined) as Promise<unknown>
+  },
+  /** macOS: blur what is behind the window (native material) or show it clear. */
+  setWindowBlur(on: unknown): void {
+    if (typeof on !== 'boolean') throw new TypeError('invalid window blur')
+    void ipcRenderer.invoke('desktop:window-blur', on)
+  },
+  /** Asked once as the page starts: is another workspace view covering it? */
+  isOccluded(): Promise<boolean> {
+    return ipcRenderer.invoke('desktop:occluded') as Promise<boolean>
+  },
+  /** Whether another workspace view covers this page (the window's base page only). */
+  onOccluded(handler: (occluded: boolean) => void): () => void {
+    const listener = (_event: Electron.IpcRendererEvent, occluded: unknown) => { if (typeof occluded === 'boolean') handler(occluded) }
+    ipcRenderer.on('desktop:occluded', listener)
+    return () => { ipcRenderer.removeListener('desktop:occluded', listener) }
+  },
+  /** True once, for a window opened to start a fresh task. */
+  startsFresh(): Promise<boolean> {
+    return ipcRenderer.invoke('desktop:starts-fresh') as Promise<boolean>
   },
 
   /** Enter a workspace by absolute folder path (sidebar header click). */

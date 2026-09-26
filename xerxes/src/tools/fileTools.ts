@@ -110,7 +110,7 @@ export const LIST_DIR_DEFINITION: ToolDefinition = {
   type: 'function',
   function: {
     name: 'ListDir',
-    description: 'List workspace directory entries without following symlinked directories.',
+    description: 'List directory entries to get oriented in an unfamiliar tree; when you know the name pattern, GlobTool is more direct. Symlinked directories are not followed.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -130,7 +130,7 @@ export const GLOB_TOOL_DEFINITION: ToolDefinition = {
   type: 'function',
   function: {
     name: 'GlobTool',
-    description: 'Find workspace files and directories matching a Bun glob pattern.',
+    description: 'Find paths by name pattern (Bun glob, e.g. `**/*.test.ts`, `src/**/index.ts`, `*.{json,yaml}`); use GrepTool to search contents. Returns sorted workspace-relative paths, directories included. .gitignore is not honored, so anchor with path (e.g. path="src"). "... result limit reached" means an arbitrary subset: narrow the pattern rather than raising max_results.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -149,7 +149,7 @@ export const GREP_TOOL_DEFINITION: ToolDefinition = {
   type: 'function',
   function: {
     name: 'GrepTool',
-    description: 'Search workspace text files with a JavaScript regular expression.',
+    description: `Find where a symbol, string or error appears in file contents (JavaScript regex, matched per line; no multiline). Escape metacharacters for literal text (e.g. \`parseFrame\\(\`) and scope with path/glob (glob="src/**/*.ts"). .gitignore is not honored, so "." also walks dependency and build folders. "... result limit reached" means incomplete. "No matches found." is not proof of absence: dotfiles, binary files and files over ${MAX_GREP_FILE_BYTES / 1_000_000} MB are skipped.`,
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -161,9 +161,10 @@ export const GREP_TOOL_DEFINITION: ToolDefinition = {
           type: 'string',
           enum: ['files_with_matches', 'count', 'content'],
           default: 'files_with_matches',
+          description: 'files_with_matches (default): paths only. content: path:line:text, with context for surrounding lines. count: path:n.',
         },
         case_insensitive: { type: 'boolean', default: false, description: 'Search without case sensitivity.' },
-        context: { type: 'integer', default: 0, description: 'Context lines for content mode.' },
+        context: { type: 'integer', default: 0, description: 'Lines before and after each match; content mode only.' },
         max_results: {
           type: 'integer',
           default: DEFAULT_MAX_RESULTS,
@@ -251,9 +252,11 @@ const FILE_WRITE_CAPABILITIES = Object.freeze({
  * tool instead of in a central prompt that can drift from the registry.
  */
 const FILE_WRITE_GUIDANCE =
-  'Writes are checked against your last read: ReadFile the target immediately before writing or '
-    + 'editing it, and re-read after anything outside this session may have changed it — a stale '
-    + 'read is refused rather than silently overwriting newer work.'
+  'Writes are checked against your last read: ReadFile a file before your first write to it, and '
+    + 're-read only if something outside this session may have changed it — a stale read is refused '
+    + 'rather than silently overwriting newer work. Your own successful writes count as a fresh read, '
+    + 'so edit the same file again without re-reading. The edit result is your evidence: do not '
+    + 're-read to confirm it, because a failed edit returns an error.'
 
 export function registerFileTools(registry: ToolRegistry, paths: WorkspacePathResolver): void {
   registry.register(READ_FILE_DEFINITION, (inputs, context) => readFile(inputs, paths, context), 'default', READ_ONLY_FILE_CAPABILITIES)

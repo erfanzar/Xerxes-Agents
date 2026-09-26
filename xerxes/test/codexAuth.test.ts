@@ -20,7 +20,7 @@ import { compactionCompletionPort } from '../src/daemon/compactionRunner.js'
 import { OAuthToken } from '../src/mcp/oauth.js'
 import { createLlmClient } from '../src/llms/client.js'
 import { detectProvider, getApiKey, resolveProvider } from '../src/llms/providerRegistry.js'
-import { CODEX_DEFAULT_MODEL, CODEX_PROFILE_NAME, ProfileStore } from '../src/bridge/profiles.js'
+import { CODEX_PROFILE_NAME, ProfileStore } from '../src/bridge/profiles.js'
 import {
   fallbackReasoningLevels,
   isGradedEffort,
@@ -765,8 +765,8 @@ test('a request with no reusable prefix sends no cache key at all', async () => 
 test('third-party Responses hosts are not sent a field they may reject', async () => {
   // `responses_api` can be enabled for any OpenAI-compatible endpoint, and a
   // strict one answers an unknown parameter with 400 rather than ignoring it.
-  const body = await capturedResponsesBody('deepseek-chat', {}, {
-    model: 'deepseek-chat',
+  const body = await capturedResponsesBody('deepseek/deepseek-chat', {}, {
+    model: 'deepseek/deepseek-chat',
     messages: [{ role: 'system', content: 'stable preamble' }, { role: 'user', content: 'q' }],
   })
 
@@ -804,23 +804,7 @@ test('an effort is validated against the model and returned in the provider spel
   expect(resolveEffort(set, '')).toBeUndefined()
 })
 
-test('providers with no capability endpoint fall back per provider, not globally', () => {
-  const anthropic = fallbackReasoningLevels('anthropic')
-  const generic = fallbackReasoningLevels(undefined)
 
-  expect(anthropic.source).toBe('fallback')
-  expect(selectableEfforts(anthropic)).toEqual(['off', 'low', 'medium', 'high'])
-  // Anthropic's budget-based thinking and OpenAI's effort scale are different
-  // vocabularies; the table is keyed by provider so they can diverge.
-  expect(anthropic.levels[0]?.description).not.toBe(generic.levels[0]?.description)
-})
-
-test('a model reporting no levels degrades to the fallback rather than an empty menu', () => {
-  const empty = providerReasoningLevels([], undefined)
-
-  expect(selectableEfforts(empty)).toEqual(['off'])
-  expect(selectableEfforts(fallbackReasoningLevels('openai')).length).toBeGreaterThan(1)
-})
 
 test('every model the plan returns is selectable, harness-flagged or not', async () => {
   const respond = (models: unknown) => (async () => Response.json({ models })) as never
@@ -884,15 +868,14 @@ test('harness detection keys on capability flags, not on model names', async () 
     .toEqual(['totally-innocuous-name', 'another-plain-name'])
 })
 
-test('the built-in codex profile starts on the plan\'s newest model', () => {
-  expect(CODEX_DEFAULT_MODEL).toBe('codex/gpt-5.6-sol')
+test('the built-in codex profile names no model; the plan\'s catalog supplies one when it is chosen', () => {
+  const store = new ProfileStore(join(tmpdir(), `xerxes-codex-builtin-${process.pid}-${Date.now()}.json`))
+  expect(store.get(CODEX_PROFILE_NAME)?.model).toBe('')
 })
 
-test('toggle-shaped providers offer a switch, not a fake graded scale', () => {
-  for (const provider of ['zhipu', 'qwen', 'kimi', 'kimi-code', 'minimax'] as const) {
-    const set = fallbackReasoningLevels(provider)
-    expect(set.shape).toBe('toggle')
-    expect(selectableEfforts(set)).toEqual(['off', 'on'])
+test('a provider that reports no reasoning controls offers nothing — no built-in on/off or ladder', () => {
+  for (const provider of ['zhipu', 'qwen', 'kimi', 'kimi-code', 'minimax', 'openai', 'openrouter', 'anthropic', 'gemini'] as const) {
+    expect(selectableEfforts(fallbackReasoningLevels(provider))).toEqual([])
   }
 })
 
@@ -902,25 +885,11 @@ test('a provider that chooses reasoning by model offers nothing to select', () =
   expect(set.shape).toBe('inherent')
   // Offering a bare `off` would imply reasoning can be disabled, which it cannot.
   expect(selectableEfforts(set)).toEqual([])
-  expect(resolveEffort(set, 'high')).toBeUndefined()
-  expect(resolveEffort(set, 'off')).toBeUndefined()
+  // Unreported, so an explicitly set effort goes to the provider as written.
+  expect(resolveEffort(set, 'high')).toBe('high')
 })
 
-test('effort-shaped providers keep a graded scale', () => {
-  for (const provider of ['openai', 'openrouter', 'anthropic', 'gemini'] as const) {
-    const set = fallbackReasoningLevels(provider)
-    expect(set.shape).toBe('effort')
-    expect(selectableEfforts(set)).toEqual(['off', 'low', 'medium', 'high'])
-  }
-})
 
-test('local and custom endpoints assume a switch rather than invent gradations', () => {
-  // The served model is whatever the user loaded, so a graded menu would be
-  // a guess the backend may not honor.
-  for (const provider of ['ollama', 'lmstudio', 'custom'] as const) {
-    expect(fallbackReasoningLevels(provider).shape).toBe('toggle')
-  }
-})
 
 test('switch positions never reach the wire as an effort word', () => {
   // `off` and `on` are Xerxes-side states; no provider documents them as levels.

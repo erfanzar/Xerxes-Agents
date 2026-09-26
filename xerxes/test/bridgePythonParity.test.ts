@@ -13,7 +13,6 @@ import {
   telegramBotCommands,
 } from '../src/bridge/commands.js'
 import {
-  CLAUDE_CODE_DEFAULT_MODEL,
   CLAUDE_CODE_PROFILE_NAME,
   ProfileStore,
   type ProviderProfile,
@@ -234,7 +233,8 @@ test('native profiles retain the built-in Claude Code default, persistence, and 
       active: true,
       api_key: '',
       base_url: 'claude-code://local',
-      model: CLAUDE_CODE_DEFAULT_MODEL,
+      // No built-in model: Claude Code's own list supplies one when chosen.
+      model: '',
       model_capabilities: {},
       name: CLAUDE_CODE_PROFILE_NAME,
       provider: 'claude-code',
@@ -243,7 +243,8 @@ test('native profiles retain the built-in Claude Code default, persistence, and 
     expect(store.active()).toEqual({
       api_key: '',
       base_url: 'claude-code://local',
-      model: CLAUDE_CODE_DEFAULT_MODEL,
+      // No built-in model: Claude Code's own list supplies one when chosen.
+      model: '',
       model_capabilities: {},
       name: CLAUDE_CODE_PROFILE_NAME,
       provider: 'claude-code',
@@ -352,7 +353,7 @@ test('bridge model selection persists to the active profile and cancellation als
   const profile: ProviderProfile = {
     api_key: '',
     base_url: 'claude-code://local',
-    model: CLAUDE_CODE_DEFAULT_MODEL,
+    model: 'claude-code/default',
     name: CLAUDE_CODE_PROFILE_NAME,
     provider: 'claude-code',
     sampling: {},

@@ -1,6 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import type { LiveCost, LiveReasoning } from "../llms/modelsDev.js";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 
@@ -41,6 +42,14 @@ export interface DiscoveredModel {
   readonly contextLimit?: number;
   readonly id: string;
   readonly maxOutputTokens?: number;
+  /** The provider's own name for the model. */
+  readonly displayName?: string;
+  /** How the provider says the model reasons (Kimi-style fields, OpenRouter parameters). */
+  readonly reasoning?: LiveReasoning;
+  /** USD per million tokens, when the provider publishes prices (OpenRouter). */
+  readonly cost?: LiveCost;
+  /** Tools can be added mid-conversation (Kimi's `supports_dynamic_tools`). */
+  readonly dynamicTools?: boolean;
 }
 
 const platformFetch = globalThis.fetch;
@@ -298,6 +307,9 @@ export function modelCatalogFromResponse(value: unknown): DiscoveredModel[] {
     const existing = models.get(id);
     const resolvedContextLimit = contextLimit ?? existing?.contextLimit;
     const resolvedMaxOutputTokens = maxOutputTokens ?? existing?.maxOutputTokens;
+    const displayName = isRecord(candidate) ? firstString(candidate.display_name, candidate.displayName) : undefined;
+    const reasoning = isRecord(candidate) ? reportedReasoning(candidate) : undefined;
+    const cost = isRecord(candidate) ? reportedCost(candidate) : undefined;
     models.set(id, {
       id,
       ...(resolvedContextLimit === undefined
@@ -306,9 +318,70 @@ export function modelCatalogFromResponse(value: unknown): DiscoveredModel[] {
       ...(resolvedMaxOutputTokens === undefined
         ? {}
         : { maxOutputTokens: resolvedMaxOutputTokens }),
+      ...(displayName && displayName !== id ? { displayName } : existing?.displayName ? { displayName: existing.displayName } : {}),
+      ...(reasoning ? { reasoning } : existing?.reasoning ? { reasoning: existing.reasoning } : {}),
+      ...(cost ? { cost } : existing?.cost ? { cost: existing.cost } : {}),
+      ...(isRecord(candidate) && typeof candidate.supports_dynamic_tools === "boolean" ? { dynamicTools: candidate.supports_dynamic_tools } : {}),
     });
   }
   return [...models.values()];
+}
+
+/**
+ * Reasoning as a provider states it in its own /models entry — never a guess.
+ *
+ * Kimi's platforms: `supports_reasoning`, `supports_thinking_type`
+ * (`only` = always on, `no` = never, `both` = switchable) and
+ * `think_efforts {support, valid_efforts, default_effort}`. OpenRouter lists
+ * `reasoning` among `supported_parameters`. Anything else says nothing.
+ */
+export function reportedReasoning(model: Record<string, unknown>): LiveReasoning | undefined {
+  const thinkingType = typeof model.supports_thinking_type === "string" ? model.supports_thinking_type.trim().toLowerCase() : undefined;
+  const efforts = isRecord(model.think_efforts) && model.think_efforts.support === true && Array.isArray(model.think_efforts.valid_efforts)
+    ? model.think_efforts.valid_efforts.filter((effort): effort is string => typeof effort === "string" && effort.trim() !== "")
+    : [];
+  const defaultEffort = isRecord(model.think_efforts) && typeof model.think_efforts.default_effort === "string"
+    ? model.think_efforts.default_effort.trim()
+    : undefined;
+  const parameters = Array.isArray(model.supported_parameters) ? model.supported_parameters.filter((value): value is string => typeof value === "string") : undefined;
+  const supported = thinkingType === "no"
+    ? false
+    : thinkingType === "only" || thinkingType === "both" || efforts.length > 0
+      ? true
+      : typeof model.supports_reasoning === "boolean"
+        ? model.supports_reasoning
+        : parameters
+          ? parameters.includes("reasoning") || parameters.includes("include_reasoning")
+          : undefined;
+  if (supported === undefined) return undefined;
+  if (!supported) return { supported: false, canDisable: false, efforts: [] };
+  return {
+    supported: true,
+    // `only` is the one statement that thinking cannot be switched off.
+    canDisable: thinkingType !== "only",
+    efforts: [...new Set(efforts)],
+    ...(defaultEffort && efforts.includes(defaultEffort) ? { defaultEffort } : {}),
+  };
+}
+
+/** Prices a provider publishes in its /models entry (OpenRouter: USD per token, as strings). */
+export function reportedCost(model: Record<string, unknown>): LiveCost | undefined {
+  if (!isRecord(model.pricing)) return undefined;
+  const perMillion = (value: unknown): number | undefined => {
+    const number = typeof value === "string" ? Number(value) : value;
+    return typeof number === "number" && Number.isFinite(number) && number >= 0 ? number * 1_000_000 : undefined;
+  };
+  const input = perMillion(model.pricing.prompt);
+  const output = perMillion(model.pricing.completion);
+  const cacheRead = perMillion(model.pricing.input_cache_read);
+  const cacheWrite = perMillion(model.pricing.input_cache_write);
+  const cost: LiveCost = {
+    ...(input === undefined ? {} : { input }),
+    ...(output === undefined ? {} : { output }),
+    ...(cacheRead === undefined ? {} : { cacheRead }),
+    ...(cacheWrite === undefined ? {} : { cacheWrite }),
+  };
+  return Object.keys(cost).length ? cost : undefined;
 }
 
 export function sanitizeModelDiscoveryError(

@@ -35,7 +35,7 @@ import type { ToolCall, ToolDefinition } from '../types/toolCalls.js'
 import { isJsonObject } from '../types/toolCalls.js'
 import type { CompletionRequest, LlmClient, LlmCompletion, LlmDelta, ThinkingRequest, TokenUsage } from './client.js'
 import { collectLlmCompletion } from './client.js'
-import { piCatalogModelCapabilities, type PiModelCapabilities } from './piModelCatalog.js'
+import { wireCapability, type LiveModelCapability } from './modelsDev.js'
 
 /** Diagnostic label carried by every ProviderError this adapter raises. */
 const PROVIDER_LABEL = 'amazon-bedrock'
@@ -134,7 +134,7 @@ export interface BedrockResolvedConfig {
 
 interface ResolvedBedrockModel {
   readonly adaptiveThinking: boolean
-  readonly capabilities: PiModelCapabilities | undefined
+  readonly capabilities: LiveModelCapability | undefined
   readonly isClaude: boolean
   readonly modelId: string
   readonly supportsCaching: boolean
@@ -156,32 +156,19 @@ function envValue(env: BedrockEnv, name: string): string | undefined {
   return value ? value : undefined
 }
 
-/** pi-ai adaptive-thinking check: Opus 4.6+, Sonnet 4.6+ (model-id match). */
-function supportsAdaptiveThinking(modelId: string): boolean {
-  const lower = modelId.toLowerCase()
-  return ['opus-4-6', 'opus-4-7', 'opus-4-8', 'opus-5', 'sonnet-4-6', 'sonnet-5', 'fable-5']
-    .some(marker => lower.includes(marker))
-}
-
 /** pi-ai: only Anthropic Claude models accept the reasoning signature field. */
 function isClaudeModelId(modelId: string): boolean {
   const lower = modelId.toLowerCase()
   return lower.includes('anthropic.claude') || lower.includes('anthropic/claude')
 }
 
-/** pi-ai `supportsPromptCaching`: Claude 3.5 Haiku, 3.7 Sonnet, 4.x, 5.x only. */
-function supportsPromptCaching(modelId: string, env: BedrockEnv): boolean {
-  const lower = modelId.toLowerCase()
-  if (!lower.includes('claude')) {
-    // Application inference profiles hide the model name in their ARN; allow
-    // an explicit opt-in the way pi-ai does.
-    return envValue(env, 'AWS_BEDROCK_FORCE_CACHE') === '1'
-  }
-  if (['fable-5', 'opus-5', 'sonnet-5'].some(marker => lower.includes(marker))) return true
-  if (/-4-/.test(lower)) return true
-  if (lower.includes('claude-3-7-sonnet')) return true
-  if (lower.includes('claude-3-5-haiku')) return true
-  return false
+/**
+ * Prompt caching where the model has a published cache-read price (models.dev)
+ * — no model-name or version rule. Application inference profiles hide the
+ * model in their ARN; `AWS_BEDROCK_FORCE_CACHE=1` opts in explicitly.
+ */
+function supportsPromptCaching(capabilities: LiveModelCapability, env: BedrockEnv): boolean {
+  return capabilities.cost?.cacheRead !== undefined || envValue(env, 'AWS_BEDROCK_FORCE_CACHE') === '1'
 }
 
 /** Resolve the model id + catalog capabilities that shape one request. */
@@ -189,13 +176,16 @@ export function resolveBedrockModel(request: CompletionRequest, env: BedrockEnv)
   const configured = request.model.trim()
   const slash = configured.indexOf('/')
   const modelId = slash >= 0 ? configured.slice(slash + 1) : configured
-  const capabilities = piCatalogModelCapabilities(configured, 'amazon-bedrock')
+  // What models.dev (or a provider report) says about this Bedrock model:
+  // effort levels without a token budget mean adaptive thinking.
+  const capabilities = wireCapability({ provider: 'amazon-bedrock', model: configured })
+  const reasoning = capabilities.reasoning
   return {
-    adaptiveThinking: supportsAdaptiveThinking(modelId),
+    adaptiveThinking: Boolean(reasoning && reasoning.efforts.length > 0 && !reasoning.budget),
     capabilities,
     isClaude: isClaudeModelId(modelId),
     modelId,
-    supportsCaching: supportsPromptCaching(modelId, env),
+    supportsCaching: supportsPromptCaching(capabilities, env),
   }
 }
 
@@ -421,27 +411,20 @@ export function buildBedrockThinkingFields(options: {
   readonly adaptiveThinking: boolean
   /** Explicit budget resolved by the caller; falls back to the effort default. */
   readonly budgetTokens?: number
-  readonly capabilities: PiModelCapabilities | undefined
+  readonly capabilities: LiveModelCapability | undefined
   readonly govCloud: boolean
   readonly thinking: ThinkingRequest
 }): Record<string, unknown> | undefined {
   const { adaptiveThinking, budgetTokens, capabilities, govCloud, thinking } = options
-  if (!capabilities?.reasoning) return undefined
+  if (!capabilities?.reasoning?.supported) return undefined
   // GovCloud Bedrock rejects the Claude thinking.display field for now.
   const display = govCloud ? undefined : 'summarized'
   if (adaptiveThinking) {
-    const level = thinking.effort ?? 'high'
-    const mapped = capabilities.thinkingLevelMap?.[level]
-    const effort = typeof mapped === 'string'
-      ? mapped
-      : level === 'minimal' || level === 'low'
-        ? 'low'
-        : level === 'medium'
-          ? 'medium'
-          : 'high'
+    // The effort offered was the model's own word; unset leaves it to the model.
+    const effort = thinking.effort && capabilities.reasoning!.efforts.includes(thinking.effort) ? thinking.effort : undefined
     return {
       thinking: { type: 'adaptive', ...(display !== undefined ? { display } : {}) },
-      output_config: { effort },
+      ...(effort ? { output_config: { effort } } : {}),
     }
   }
   return {
@@ -533,10 +516,15 @@ export function buildBedrockMessages(
     }
     index = cursor - 1
     if (toolResults.length > 0) {
-      if (cachePoint) toolResults.push(cachePoint)
       messages.push({ role: "user", content: toolResults })
     }
   }
+  // One cache point, on the last message (pi-ai's placement). One per tool
+  // round passed Bedrock's limit of four by the fourth round, and a plain
+  // chat never cached its transcript at all. The next request extends this
+  // one, so it reads this entry.
+  const last = messages.at(-1)
+  if (cachePoint && last) messages[messages.length - 1] = { ...last, content: [...last.content, cachePoint] }
   return messages
 }
 
@@ -610,7 +598,7 @@ export function buildBedrockConverseInput(
   const thinking = request.thinking
   let thinkingBudget: number | undefined
   let thinkingFields: Record<string, unknown> | undefined
-  if (thinking && capabilities?.reasoning && model.isClaude) {
+  if (thinking && capabilities?.reasoning?.supported && model.isClaude) {
     // pi-ai adjustMaxTokensForThinking: the response ceiling grows to the
     // caller's cap plus the thinking budget, capped by the model maximum;
     // the budget then clamps so MIN_ANSWER_TOKENS remain for the answer.

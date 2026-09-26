@@ -4,6 +4,7 @@ import { TERMUX_TUI_MODE } from '../config/env.js'
 import type { Msg } from '../types.js'
 
 import { transcriptBodyWidth } from './inputMetrics.js'
+import { panelLineCount } from './panelLayout.js'
 import { collapsedRunHeight, groupToolRun } from './toolRun.js'
 import { stringWidth } from './terminalRuntime.opentui.js'
 
@@ -22,7 +23,7 @@ export const messageHeightKey = (msg: Msg) => {
 
   const panelSig =
     msg.panelData?.sections
-      .map(s => `${s.title ?? ''}:${s.text?.length ?? 0}:${s.items?.length ?? 0}:${s.rows?.length ?? 0}`)
+      .map(s => `${s.title ?? ''}:${s.text?.length ?? 0}:${s.items?.length ?? 0}:${s.rows?.length ?? 0}:${s.meters?.length ?? 0}:${s.heading?.label ?? ''}`)
       .join('\u0001') ?? ''
 
   const introSig = msg.kind === 'intro' ? (msg.info?.version ?? '') : ''
@@ -115,7 +116,7 @@ export const estimatedMsgHeight = (
   }
 
   if (msg.kind === 'panel') {
-    return Math.max(3, (msg.panelData?.sections.length ?? 1) * 2 + 1)
+    return msg.panelData ? panelLineCount(msg.panelData, cols) : 3
   }
 
   if (msg.kind === 'trail' && msg.todos?.length) {

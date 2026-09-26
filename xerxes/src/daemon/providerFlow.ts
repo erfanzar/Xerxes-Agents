@@ -2,8 +2,6 @@
 // Licensed under the Apache License, Version 2.0.
 
 import {
-  CLAUDE_CODE_DEFAULT_MODEL,
-  CODEX_DEFAULT_MODEL,
   type ProviderProfile,
   type SaveProfileInput,
 } from '../bridge/profiles.js'
@@ -483,7 +481,7 @@ export class ProviderProfileFlow {
   private async askModel(draft: AddDraft): Promise<ProviderFlowTransition> {
     let discovered: readonly string[] = []
     let discoveryUnavailable = false
-    if (this.modelDiscovery && draft.provider !== 'claude-code') {
+    if (this.modelDiscovery) {
       try {
         discovered = await this.modelDiscovery.discover({
           apiKey: draft.apiKey,
@@ -535,7 +533,7 @@ export class ProviderProfileFlow {
       }
     }
     if (!model) {
-      return this.complete(`Add cancelled — \`${draft.provider}\` has no default model.`, 'warning')
+      return this.complete(`Add cancelled — no model was chosen for \`${draft.provider}\`.`, 'warning')
     }
     try {
       const profile = this.profileStore.save({
@@ -613,9 +611,8 @@ function defaultDraft(name: string, provider: ProviderKind): AddDraft {
     baseUrl: '',
     defaultApiKey: config?.defaultApiKey ?? '',
     defaultBaseUrl: config?.baseUrl ?? '',
-    defaultModel: provider === 'claude-code'
-      ? CLAUDE_CODE_DEFAULT_MODEL
-      : provider === 'openai-codex' ? CODEX_DEFAULT_MODEL : '',
+    // Never a built-in model: the model step offers what the provider reports.
+    defaultModel: '',
     name,
     provider,
   }

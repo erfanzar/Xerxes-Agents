@@ -1,6 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { modelsDev } from "./llms/modelsDev.js";
 import { DaemonWorkspaces, type WorkspaceResources } from './daemon/workspaceResources.js';
 import { assertLegacyDaemonReleased } from './daemon/legacyDaemon.js';
 import { WorkspaceTurnRunner } from './daemon/workspaceTurnRunner.js';
@@ -44,7 +45,7 @@ import { loadSystemDaemonConfig, type DaemonConfig } from "./daemon/config.js";
 import type { DaemonInteractionBoard } from "./daemon/interactions.js";
 import { daemonPaths, xerxesHome } from "./daemon/paths.js";
 import { createProductionInteractionBoard } from "./daemon/productionInteractions.js";
-import { profileAcceptsModel, sessionProvider } from './daemon/sessionProvider.js';
+import { agentProvider, profileAcceptsModel, sessionProvider } from './daemon/sessionProvider.js';
 import { RemoteProviderBindings } from "./daemon/remoteProviderBindings.js";
 import { DEFAULT_PERMISSION_MODE } from "./streaming/permissions.js";
 import { runtimeConnection, runtimePermissionMode, type RuntimeConnection } from "./daemon/runtimeConnection.js";
@@ -54,7 +55,7 @@ import { compactionCompletionPort } from "./daemon/server.js";
 import { DaemonSubagentEventBus } from "./daemon/subagentEvents.js";
 import { nativeSubagentWorktrees } from "./runtime/subagentWorktrees.js";
 import { createNativeSubagentHost, subagentRetryWirePayload, type NativeSubagentHostOptions } from "./daemon/subagentHost.js";
-import { AgentTurnRunner, formatSubagentResults } from "./daemon/turnRunner.js";
+import { AgentTurnRunner, formatSubagentResults, SessionPromptSnapshots } from "./daemon/turnRunner.js";
 import {
   defaultSkillDiscoveryRoots,
   SkillRegistry,
@@ -170,6 +171,7 @@ import { runBundledSkillCli } from "./skills/cli.js";
 import { AuthCommandError, runAuthCommand } from "./auth/command.js";
 import { bridgeDurableTaskLifecycle } from "./tasks/durableTaskBridge.js";
 import { DurableTaskRuntime } from "./tasks/durableTaskRuntime.js";
+import { ASK_USER_POLICY } from "./tools/askUserPolicy.js";
 
 /**
  * Command list for `--help`, grouped by what the reader is trying to do.
@@ -1169,6 +1171,9 @@ async function runDaemonOwned(
   announceMonitorEvent = (monitor, event) => daemon.notifyMonitorEvent(monitor, event);
   try {
     await daemon.start();
+    // Model capabilities come from providers and models.dev at runtime
+    // (nothing is bundled); warm the shared catalog in the background.
+    void modelsDev.load();
     await channelManager.startConfigured();
   } catch (error) {
     // Cleanup must not replace the startup error or skip the remaining owners.
@@ -1710,7 +1715,7 @@ function daemonRuntime(
     agentMemories.set(normalizedRoot, memory);
     return memory;
   };
-  const initialConnection = runtimeConnection(config, profileStore.active());
+  const initialConnection = runtimeConnection(config, profileStore.active(), { claudeCodeChosen: profileStore.activeIsExplicit() });
   const initialProfile = profileStore.active();
   const initialSettings: Record<string, unknown> = {
     provider_profile: initialProfile && initialConnection && profileAcceptsModel(initialProfile, initialConnection.model) && !(config.runtime.provider || config.runtime.base_url || config.runtime.api_key) ? initialProfile.name : undefined,
@@ -1791,13 +1796,17 @@ function daemonRuntime(
   const subagentHosts = new Map<string, ReturnType<typeof createNativeSubagentHost>>();
   let runtime: InMemoryDaemonRuntime | undefined;
   let activeToolCount = 0;
+  // One for the host's lifetime: settings changes rebuild runners, and each
+  // session's prompt must stay byte-identical across those rebuilds.
+  const promptSnapshots = new SessionPromptSnapshots();
   const createWorkspaceRunner = (settings: Readonly<Record<string, unknown>>, workspaceRoot: string, resources: WorkspaceResources) => {
     let subagentHost = subagentHosts.get(workspaceRoot);
     const configuredConnection = runtimeConnection(
       { ...config, runtime: { ...config.runtime, ...settings } },
       profileStore.active(),
+      { claudeCodeChosen: profileStore.activeIsExplicit() },
     );
-    const nativeConnection = configuredConnection?.provider === "claude-code" ? undefined : configuredConnection;
+    const nativeConnection = configuredConnection;
     if (!nativeConnection && !host.remoteProviderBindings) {
       subagentHost?.invalidateAll();
       activeToolCount = 0;
@@ -1950,7 +1959,7 @@ function daemonRuntime(
         const session = runtime?.listSessions().find(candidate => candidate.id === sourceId);
         if (!session) throw new Error('Subagent source session is unavailable; reopen the parent chat');
         if (!session.metadata.provider_profile && (config.runtime.provider || config.runtime.base_url || config.runtime.api_key)) return undefined;
-        return sessionProvider(profileStore, session, model)?.name;
+        return agentProvider(profileStore, session, model)?.name;
       },
       resolveSourceWorkspace: (sourceId: string): string => {
         const session = runtime?.listSessions().find(candidate => candidate.id === sourceId);
@@ -1982,7 +1991,7 @@ function daemonRuntime(
       ),
       eventBus: subagentEvents,
       ...(resources.skillRegistry?.markdownIndex()
-        ? { extraContext: resources.skillRegistry.markdownIndex() }
+        ? { skills: resources.skillRegistry.markdownIndex() }
         : {}),
       llm,
       ...(maxTokens === undefined ? {} : { maxTokens }),
@@ -2034,6 +2043,7 @@ function daemonRuntime(
     activeToolCount = tools.definitionsForTranscript([]).length;
     const contextLimit = resolvedProfileContextLimit(profileStore.active(), connection.model);
     return new AgentTurnRunner({
+      promptSnapshots,
       ...(host.remoteProviderBindings ? { remoteProviderBindings: host.remoteProviderBindings } : {}),
       resolveSessionProvider: (session, model) => {
         if (!session.metadata.provider_profile && (config.runtime.provider || config.runtime.base_url || config.runtime.api_key)) return { llm };
@@ -2069,7 +2079,7 @@ function daemonRuntime(
         bootstrap({
           cwd: session.cwd,
           ...(resources.skillRegistry?.markdownIndex()
-            ? { extraContext: resources.skillRegistry.markdownIndex() }
+            ? { skills: resources.skillRegistry.markdownIndex() }
             : {}),
           model,
           subagents: bootstrapSubagentsForAgent(agentDefinitions, agentId),
@@ -2392,7 +2402,7 @@ function registerDaemonQuestionTool(registry: ToolRegistry): void {
       function: {
         name: "AskUserQuestionTool",
         description:
-          "Ask the connected user a blocking clarification question.",
+          ASK_USER_POLICY + " The turn blocks until they answer.",
         parameters: {
           type: "object",
           properties: {
@@ -2422,7 +2432,7 @@ async function acpServer(
   readonly shutdown: () => Promise<void>;
 }> {
   const profileStore = new ProfileStore();
-  const connection = runtimeConnection(config, profileStore.active());
+  const connection = runtimeConnection(config, profileStore.active(), { claudeCodeChosen: profileStore.activeIsExplicit() });
   if (!connection) {
     throw new Error(
       "ACP requires a configured runtime connection or active provider profile",
@@ -2487,7 +2497,7 @@ async function acpServer(
     contextLimit: candidate => resolvedProfileContextLimit(profileStore.active(), candidate),
     cwd: workspaceRoot,
     eventBus: new DaemonSubagentEventBus(),
-    ...(skillRegistry.markdownIndex() ? { extraContext: skillRegistry.markdownIndex() } : {}),
+    ...(skillRegistry.markdownIndex() ? { skills: skillRegistry.markdownIndex() } : {}),
     llm,
     ...(maxTokens === undefined ? {} : { maxTokens }),
     maxOutputTokens,
@@ -2510,7 +2520,7 @@ async function acpServer(
   const selectedTools = agentToolDefinitions(tools.definitions(), agent);
   const boot = await bootstrap({
     cwd: workspaceRoot,
-    ...(skillRegistry.markdownIndex() ? { extraContext: skillRegistry.markdownIndex() } : {}),
+    ...(skillRegistry.markdownIndex() ? { skills: skillRegistry.markdownIndex() } : {}),
     model,
     subagents: bootstrapSubagentsForAgent(definitions, agentId),
     tools: selectedTools,
@@ -2609,7 +2619,7 @@ async function runOneShot(
 ): Promise<void> {
   const config = loadSystemDaemonConfig();
   const profileStore = new ProfileStore();
-  const connection = runtimeConnection(config, profileStore.active());
+  const connection = runtimeConnection(config, profileStore.active(), { claudeCodeChosen: profileStore.activeIsExplicit() });
   if (!connection) {
     throw new RuntimeConnectionRequiredError(
       "One-shot execution requires a configured runtime connection or active provider profile",
@@ -2683,7 +2693,7 @@ async function runOneShot(
     contextLimit: candidate => resolvedProfileContextLimit(profileStore.active(), candidate),
     cwd: workspaceRoot,
     eventBus: new DaemonSubagentEventBus(),
-    ...(skillRegistry.markdownIndex() ? { extraContext: skillRegistry.markdownIndex() } : {}),
+    ...(skillRegistry.markdownIndex() ? { skills: skillRegistry.markdownIndex() } : {}),
     llm,
     ...(maxTokens === undefined ? {} : { maxTokens }),
     maxOutputTokens,
@@ -2706,7 +2716,7 @@ async function runOneShot(
   const selectedTools = agentToolDefinitions(tools.definitions(), agent);
   const boot = await bootstrap({
     cwd: workspaceRoot,
-    ...(skillRegistry.markdownIndex() ? { extraContext: skillRegistry.markdownIndex() } : {}),
+    ...(skillRegistry.markdownIndex() ? { skills: skillRegistry.markdownIndex() } : {}),
     model,
     subagents: bootstrapSubagentsForAgent(definitions, agent?.name ?? "default"),
     tools: selectedTools,

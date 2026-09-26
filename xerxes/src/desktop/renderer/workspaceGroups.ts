@@ -62,3 +62,18 @@ export function groupByWorkspace<T extends GroupableRow>(
   if (!home) return listed
   return [home, ...listed.filter(group => group !== home)]
 }
+
+/**
+ * Sidebar order: newest conversation first, by latest-message time. A row
+ * with no known time (a chat that has not spoken yet) leads; ties keep their
+ * incoming order, so the list never shuffles between equal rows.
+ */
+export function sidebarOrder<T extends GroupableRow & { readonly activeAt?: number }>(
+  rows: readonly T[],
+  activity: Readonly<Record<string, number>> = {},
+): T[] {
+  const time = (row: T): number => activity[row.id] ?? row.activeAt ?? Number.POSITIVE_INFINITY
+  return rows.map((row, index) => ({ row, index, at: time(row) }))
+    .sort((a, b) => (b.at - a.at) || (a.index - b.index))
+    .map(entry => entry.row)
+}

@@ -532,7 +532,9 @@ test('tool_permission_check denial and failure prevent execution', async () => {
       .filter(event => event.type === 'tool_end')
       .map(event => event.result.result)
       .join('')
-    expect(denialText).toContain('Permission denied for ReadFile.')
+    // Says who refused and what to do instead of retrying.
+    expect(denialText).toContain('Permission denied for ReadFile by a configured hook.')
+    expect(denialText).toContain('Do not retry it unchanged')
     expect(denialText).toContain(scenario.expectedReason)
   }
 })

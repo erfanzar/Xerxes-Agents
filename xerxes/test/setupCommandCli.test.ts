@@ -39,7 +39,7 @@ test('xerxes setup CLI applies a profile preset', async () => {
   try {
     const target = join(directory, 'setup.yaml')
     const child = Bun.spawn({
-      cmd: [process.execPath, 'src/cli.ts', 'setup', '--profile', 'developer', '--target', target],
+      cmd: [process.execPath, 'src/cli.ts', 'setup', '--profile', 'developer', '--provider', 'anthropic', '--model', 'claude-sonnet-4-5', '--target', target],
       cwd: resolve(rootDir),
       stdout: 'pipe',
       stderr: 'pipe',
@@ -51,8 +51,9 @@ test('xerxes setup CLI applies a profile preset', async () => {
     expect(exitCode).toBe(0)
     expect(stdout).toContain(`Wrote setup configuration to ${target}`)
     const contents = await Bun.file(target).text()
+    // The preset supplies behaviour; provider and model are the user's.
     expect(contents).toContain('provider: "anthropic"')
-    expect(contents).toContain('model: "claude-sonnet-4"')
+    expect(contents).toContain('model: "claude-sonnet-4-5"')
     expect(contents).toContain('permission_mode: "manual"')
   } finally {
     await rm(directory, { recursive: true, force: true })

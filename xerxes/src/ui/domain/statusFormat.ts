@@ -71,13 +71,9 @@ export function usageCounts(usage: Usage): { max: number; used: number } {
   return { max: usage.context_max ?? 0, used: usage.context_used ?? usage.total ?? 0 }
 }
 
-const effortLabel = (effort?: string) => {
-  const value = String(effort ?? '')
-    .trim()
-    .toLowerCase()
-
-  return value && value !== 'medium' && value !== 'normal' && value !== 'default' ? value : ''
-}
+// The effort as set; which one is a model's default is the provider's to
+// say, so no word is treated as "the default" and hidden.
+const effortLabel = (effort?: string) => String(effort ?? '').trim().toLowerCase()
 
 const shortModelLabel = (model: string) =>
   model

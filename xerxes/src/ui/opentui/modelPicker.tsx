@@ -85,6 +85,14 @@ interface CapacityEditorState {
   profile: string
 }
 
+
+/** The provider's own name for a model ("Opus (1M context) · Opus 5.5 …"), else its id. */
+function modelLabel(model: string, catalog: readonly { id: string; display_name?: string; description?: string }[] | undefined): string {
+  const entry = catalog?.find(candidate => candidate.id === model)
+  if (!entry?.display_name) return model
+  return entry.description ? `${entry.display_name} · ${entry.description}` : entry.display_name
+}
+
 export interface ModelPickerProps {
   allowPersistGlobal?: boolean
   onCancel?: () => void
@@ -1345,7 +1353,7 @@ export function ModelPicker({
             <text fg={selected ? t.color.accent : t.color.text} flexShrink={0} truncate width="100%" wrapMode="none">
               {model
                 ? `${selected ? '›' : model === currentModel ? '*' : ' '} ${absoluteIndex + 1}. ${
-                    row.custom ? `Use "${model}"` : model
+                    row.custom ? `Use "${model}"` : modelLabel(model, discovery?.catalog)
                   }`
                 : index === 0 && items.length === 0
                   ? filter.trim()

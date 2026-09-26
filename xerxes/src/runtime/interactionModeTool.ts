@@ -66,7 +66,7 @@ const PLAN_MODE_TOOL_DEFINITIONS: Readonly<Record<string, { readonly definition:
         type: 'function',
         function: {
           name: 'EnterPlanModeTool',
-          description: 'Enter plan mode for the active session. Research and planning only; mutations are refused.',
+          description: 'Enter plan mode for the active session: research and planning only, mutations are refused. Use it before new features, multi-file or architectural changes, or when requirements are unclear or several approaches are valid; skip it for small, clear fixes and in objective mode.',
           parameters: { type: 'object', additionalProperties: false, properties: {} },
         },
       }),

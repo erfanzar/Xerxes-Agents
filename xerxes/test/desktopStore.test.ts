@@ -1024,7 +1024,7 @@ describe('Store workspace folds', () => {
     expect(changes[0]!.hunks.filter(line => line.kind === 'add')).toHaveLength(3)
   })
 
-  test('an error notification during a turn marks it failed; retry resubmits', async () => {
+  test('an error notification during a turn marks it failed; retry continues the turn instead of resending the prompt', async () => {
     bridge.push('turn_begin', { user_input: 'make it pass' })
     bridge.push('notification', { severity: 'error', body: 'provider 429: quota exceeded' })
     bridge.push('turn_end', {})
@@ -1036,7 +1036,11 @@ describe('Store workspace folds', () => {
     await new Promise(resolve => setTimeout(resolve, 5))
     expect(store.getSnapshot().failed).toBeNull()
     const resubmit = bridge.calls.filter(call => call.method === 'turn.submit')
-    expect(resubmit.at(-1)?.params.text).toBe('make it pass')
+    expect(resubmit.at(-1)?.params.display_text).toBe('Continue')
+    expect(resubmit.at(-1)?.params.text).toContain('provider 429: quota exceeded')
+    expect(resubmit.at(-1)?.params.text).not.toContain('make it pass')
+    const users = store.getSnapshot().blocks.filter(block => block.kind === 'user').map(block => (block as { text: string }).text)
+    expect(users).toEqual(['make it pass', 'Continue'])
   })
 
   test('compaction recovery targets the session, retains rejected failures, and never resubmits the goal', async () => {
@@ -1414,6 +1418,22 @@ describe('Store workspace folds', () => {
     bridge.push('tool_result', { tool_call_id: 't2', name: 'bash', result: '', permitted: true })
     bridge.push('turn_end', {})
     expect(store.getSnapshot().turnActive).toBe(false)
+  })
+
+  test('a failed spawn and its same-titled retry show one working agent, not two', async () => {
+    bridge.push('turn_begin', { user_input: 'verify the review' })
+    const args = JSON.stringify({ title: 'Opus verification of review findings', model: 'claude-code/opus', prompt: 'verify' })
+    bridge.push('tool_call', { id: 'a', tool_call_id: 'a', name: 'AgentTool', arguments: args })
+    bridge.push('tool_result', { tool_call_id: 'a', name: 'AgentTool', result: 'Tool execution failed: Function AgentTool: Model is not configured or discovered for agent provider zai: claude-code/opus', permitted: true })
+    bridge.push('tool_call', { id: 'b', tool_call_id: 'b', name: 'AgentTool', arguments: args })
+    // The retry's child reports in while its (waiting) spawn call still runs.
+    bridge.push('subagent_event', { agent_id: 'subagent_eec009db7594', title: 'Opus verification of review findings', event: { type: 'turn_begin', payload: { status: 'running' } } })
+    const card = store.getSnapshot().blocks.find(block => block.kind === 'agents')
+    const members = card?.kind === 'agents' ? card.members : []
+    expect(members.map(member => [member.key, member.status, member.runtimeId])).toEqual([
+      ['a:0', 'failed', undefined],
+      ['b:0', 'working', 'subagent_eec009db7594'],
+    ])
   })
 
   test('agent receipts reconcile renamed children and survive a lagging snapshot', async () => {
@@ -1859,6 +1879,30 @@ describe('failed session navigation', () => {
     expect(store.getSnapshot().sessionKey).toBe(key)
     expect(store.getSnapshot().blocks).toEqual([])
     expect(store.getSnapshot().error).toBeNull()
+  })
+})
+
+describe('new task during a running turn', () => {
+  afterEach(() => { delete (globalThis as { window?: unknown }).window })
+  test('opens a fresh task in its own window and leaves the running turn alone', async () => {
+    // The button used to sit greyed out for the whole turn ("Finish or stop
+    // the current task before starting a new one").
+    const bridge = new FakeBridge(method => method === 'initialize' ? initializeResult : { ok: true, sessions: [] })
+    const opened: Array<{ dir: string | undefined; resume: string | undefined; options: { fresh?: boolean } | undefined }> = []
+    Object.assign(bridge, { openWorkspaceWindow: async (dir?: string, resume?: string, options?: { fresh?: boolean }) => { opened.push({ dir, resume, options }) } })
+    withWindow(bridge)
+    const store = new Store(); store.start(bridge); await Bun.sleep(10)
+    bridge.push('turn_begin', { text: 'Long task' })
+    const before = store.getSnapshot()
+    const initializes = bridge.calls.filter(call => call.method === 'initialize').length
+    store.newChat()
+    await Bun.sleep(10)
+    expect(opened).toEqual([{ dir: before.cwd || undefined, resume: undefined, options: { fresh: true } }])
+    // This window keeps its session, its turn and its connection.
+    expect(store.getSnapshot().currentId).toBe(before.currentId)
+    expect(store.getSnapshot().turnActive).toBe(true)
+    expect(bridge.calls.filter(call => call.method === 'initialize')).toHaveLength(initializes)
+    expect(store.getSnapshot().workspaceError ?? null).toBeNull()
   })
 })
 

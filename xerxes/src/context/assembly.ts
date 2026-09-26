@@ -4,49 +4,52 @@
 import type { SystemPromptSegment } from '../streaming/promptCaching.js'
 
 /**
- * The layered system-prompt assembler.
+ * The layered prompt assembler.
  *
- * Every text the daemon contributes to a request's system prompt enters through
- * one declared, ordered pipeline here, so three properties hold by construction
- * instead of by convention:
+ * Every text the daemon contributes to a request enters through one declared,
+ * ordered pipeline here, so these properties hold by construction instead of
+ * by convention:
  *
- * 1. **Purity** — identical inputs assemble byte-identical segments, which is
- *    what keeps the provider's prefix cache alive across turns.
- * 2. **Stability ordering** — layers that survive a turn are emitted before
- *    layers rewritten every turn (`volatile`), so one drifting byte cannot
- *    invalidate cached bytes ahead of it.
+ * 1. **A stable system prompt** — every system layer is fixed for the life of
+ *    a session (memory is a snapshot taken when the session starts). Providers
+ *    cache by prefix and the system prompt comes before the conversation, so
+ *    a single changed byte in it made every provider — Anthropic, OpenAI,
+ *    Kimi, DeepSeek, Claude Code — re-read and re-bill the whole conversation
+ *    on the next turn. Ordering "volatile" layers last in the system prompt
+ *    did not help: the conversation still sat behind them.
+ * 2. **Per-turn context rides with the message** — what changes between turns
+ *    (memory written since the snapshot, the goal's round and status,
+ *    instruction-file edits, constraint deltas, recovered subagents) is rendered by {@link renderTurnContext} and
+ *    prepended to that turn's user message, where it stays: later requests
+ *    replay it byte for byte, so it is cached like any other message.
  * 3. **Provenance** — each layer is named and individually digestible
  *    ({@link layerDigests}), which is what makes "why did this turn behave
  *    differently?" answerable after the fact.
  */
 
-/** Named inputs to {@link assembleContextLayers}, in assembly order within each band. */
+/** Named system-prompt inputs, in assembly order. Each is fixed for the session. */
 export interface ContextAssemblyInput {
-  /** Stable: workspace bootstrap preamble (identity, cwd, environment). */
+  /** Workspace bootstrap preamble (identity, cwd, environment). */
   readonly bootstrap: string
-  /** Stable: the selected agent persona's own system prompt. */
+  /** The selected agent persona's own system prompt. */
   readonly agentPrompt: string
-  /** Stable: per-tool usage-policy sections for exactly the visible surface. */
+  /** Per-tool usage-policy sections for exactly the visible surface. */
   readonly toolGuidance: string
-  /** Stable: goal policy and the session's current goal, when goal tools are visible. */
+  /** Goal policy, when goal tools are visible (the goal's status is per-turn). */
   readonly goalPolicy?: string
-  /** Stable: names of tools that exist but are not in this request's schemas. */
+  /** Names of tools that exist but are not in this request's schemas. */
   readonly deferredCatalog?: string
-  /** Stable: interaction-mode switch hint for the current mode. */
+  /** Interaction-mode switch hint for the current mode. */
   readonly modeHint: string
-  /** Stable: subagent join contract when a coordinator is attached. */
+  /** Subagent join contract when a coordinator is attached. */
   readonly subagentJoin: string
-  /** Volatile: recovery notice for subagents found in a resumed transcript. */
-  readonly recoveredSubagents?: string
-  /** Volatile: ranked memory recall for this turn's query. */
-  readonly memoryRecall?: string
-  /** Volatile: agent-self memory addendum. */
+  /** That long conversations are summarized, when the host compacts automatically. */
+  readonly compaction?: string
+  /** Persistent memory as it stood when the session started. */
+  readonly memory?: string
+  /** Agent self-memory as it stood when the session started. */
   readonly selfMemory?: string
-  /** Volatile: change-driven constraint deltas emitted since the previous turn. */
-  readonly contextDeltas?: string
-  /** Volatile: fresh content of instruction files that changed since bootstrap. */
-  readonly instructionUpdates?: string
-  /** Volatile: operator/session addendum. */
+  /** Operator/session addendum (set when the session opens). */
   readonly addendum?: string
 }
 
@@ -55,8 +58,7 @@ export interface ContextAssemblyInput {
  *
  * Empty contributions drop out; callers never hand-assemble an array, so the
  * layer set is closed under this module's tests rather than open under edit
- * accidents. Output order is stable-first then volatile-first-within-band,
- * matching what providers cache.
+ * accidents.
  */
 export function assembleContextLayers(input: ContextAssemblyInput): SystemPromptSegment[] {
   return [
@@ -67,13 +69,57 @@ export function assembleContextLayers(input: ContextAssemblyInput): SystemPrompt
     { name: 'deferred_catalog', text: input.deferredCatalog ?? '' },
     { name: 'mode_hint', text: input.modeHint },
     { name: 'subagent_join', text: input.subagentJoin },
-    { name: 'recovered_subagents', text: input.recoveredSubagents ?? '', volatile: true },
-    { name: 'memory', text: input.memoryRecall ?? '', volatile: true },
-    { name: 'self_memory', text: input.selfMemory ?? '', volatile: true },
-    { name: 'context_deltas', text: input.contextDeltas ?? '', volatile: true },
-    { name: 'instruction_updates', text: input.instructionUpdates ?? '', volatile: true },
-    { name: 'addendum', text: input.addendum ?? '', volatile: true },
+    { name: 'compaction', text: input.compaction ?? '' },
+    { name: 'memory', text: input.memory ?? '' },
+    { name: 'self_memory', text: input.selfMemory ?? '' },
+    { name: 'addendum', text: input.addendum ?? '' },
   ].filter(segment => segment.text !== '')
+}
+
+/** What changed since the previous turn, delivered with this turn's message. */
+export interface TurnContextInput {
+  /** The local date, when the day changed since the prompt was dated. */
+  readonly dateChange?: string
+  /** The goal's status, when it changed since the model was last told. */
+  readonly goalStatus?: string
+  /** Recovery notice for subagents found in a resumed transcript. */
+  readonly recoveredSubagents?: string
+  /** Memory files written or changed since the session's memory snapshot. */
+  readonly memoryChanges?: string
+  /** Self-memory text, when it changed since it was last delivered. */
+  readonly selfMemoryChanges?: string
+  /** Change-driven constraint deltas emitted since the previous turn. */
+  readonly contextDeltas?: string
+  /** Fresh content of instruction files that changed since the last turn. */
+  readonly instructionUpdates?: string
+}
+
+export function assembleTurnContext(input: TurnContextInput): SystemPromptSegment[] {
+  return [
+    { name: 'date_change', text: input.dateChange ?? '' },
+    { name: 'recovered_subagents', text: input.recoveredSubagents ?? '' },
+    { name: 'goal_status', text: input.goalStatus ?? '' },
+    { name: 'instruction_updates', text: input.instructionUpdates ?? '' },
+    { name: 'context_deltas', text: input.contextDeltas ?? '' },
+    { name: 'memory_changes', text: input.memoryChanges ?? '' },
+    { name: 'self_memory_changes', text: input.selfMemoryChanges ?? '' },
+  ].filter(segment => segment.text.trim() !== '')
+}
+
+/**
+ * The block prepended to a turn's user message, or '' when nothing changed.
+ * It says who wrote it: the runtime, carrying the same authority as the
+ * system prompt it updates, while fenced memory inside stays data.
+ */
+export function renderTurnContext(segments: readonly SystemPromptSegment[]): string {
+  if (!segments.length) return ''
+  return [
+    '<turn-context>',
+    'Xerxes attached this to the message below; the user did not type it. It updates your instructions and memory since they were loaded, with the same standing as the system prompt.',
+    '',
+    segments.map(segment => segment.text.trim()).join('\n\n'),
+    '</turn-context>',
+  ].join('\n')
 }
 
 /** One layer's provenance digest: short enough to log, long enough to diff. */

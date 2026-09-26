@@ -13,7 +13,7 @@
  * import it without the two modules importing each other.
  */
 
-import { useState, type ReactElement } from 'react'
+import type { ReactElement } from 'react'
 
 import type { Snapshot } from './store.js'
 
@@ -35,8 +35,8 @@ function compactTokensOf(tokens: number): string {
   return `${(tokens / 1_000_000).toFixed(1)}M`
 }
 
-export function SessionDiagnostics({ snap }: { snap: Snapshot }): ReactElement {
-  const [expanded, setExpanded] = useState(false)
+/** Label/value pairs for the session's measurements, live while a turn runs. */
+export function sessionMetrics(snap: Snapshot): [string, string][] {
   const livePhaseMs = snap.turnActive && snap.metricPhaseStartedAt != null ? Math.max(0, Date.now() - snap.metricPhaseStartedAt) : 0
   // A row reading "Unavailable" is worse than no row: it spends a line to
   // say nothing. Metrics the runtime has not reported are simply omitted.
@@ -48,12 +48,24 @@ export function SessionDiagnostics({ snap }: { snap: Snapshot }): ReactElement {
   ]
   if (snap.ttftMs != null) metrics.push(['First response', ttftOf(snap.ttftMs)])
   if (snap.tokensPerSecond != null) metrics.push(['Generation', snap.tokensPerSecond.toFixed(1) + ' tokens/s'])
-  if (snap.cacheHitRate != null) metrics.push(['Cache hit', Math.round(snap.cacheHitRate * 100) + '%'])
-  if (snap.inputTokens > 0) metrics.push(['Input tokens', compactTokensOf(snap.inputTokens)])
+  // From the counts when they are known: a stored rate can predate cache
+  // writes being counted and read 100% beside millions of tokens written.
+  const cachePrompt = (snap.cacheReadTokens ?? 0) + (snap.cacheWriteTokens ?? 0) + snap.inputTokens
+  const cacheHit = snap.cacheReadTokens != null && cachePrompt > 0 ? snap.cacheReadTokens / cachePrompt : snap.cacheHitRate
+  if (cacheHit != null) metrics.push(['Cache hit', Math.round(cacheHit * 100) + '%'])
+  if (snap.cacheReadTokens != null && snap.cacheReadTokens > 0) metrics.push(['Cache read', compactTokensOf(snap.cacheReadTokens)])
+  if (snap.cacheWriteTokens != null && snap.cacheWriteTokens > 0) metrics.push(['Cache written', compactTokensOf(snap.cacheWriteTokens)])
+  if (snap.inputTokens > 0) metrics.push(['Uncached input', compactTokensOf(snap.inputTokens)])
   if (snap.costUsd != null && snap.costUsd > 0) metrics.push(['Cost', '$' + snap.costUsd.toFixed(snap.costUsd < 0.01 ? 4 : 2)])
   if (snap.model) metrics.push(['Model', snap.model])
   if (snap.branch) metrics.push(['Branch', snap.branch])
-  return <details className="session-diagnostics" open={expanded} onToggle={event => setExpanded(event.currentTarget.open)}><summary>Session statistics</summary>
-    <dl className="session-diagnostics__values">{metrics.map(([label, value]) => <div key={label} data-wide={label === 'Model' || label === 'Branch' || undefined}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>
-  </details>
+  return metrics
+}
+
+/** This task's numbers, always shown, in the same rows as the context meter. */
+export function SessionDiagnostics({ snap }: { snap: Snapshot }): ReactElement {
+  const metrics = sessionMetrics(snap)
+  return <dl className="session-diagnostics session-diagnostics__values" aria-label="Session statistics">
+    {metrics.map(([label, value]) => <div key={label} data-wide={label === 'Model' || label === 'Branch' || undefined}><dt>{label}</dt><dd>{value}</dd></div>)}
+  </dl>
 }

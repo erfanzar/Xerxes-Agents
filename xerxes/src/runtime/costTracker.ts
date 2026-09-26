@@ -2,11 +2,8 @@
 // Licensed under the Apache License, Version 2.0.
 
 import type { QuerySource } from '../llms/client.js'
-import { calcCost } from '../llms/providerRegistry.js'
+import { calcCost, type CostSource } from '../llms/providerRegistry.js'
 
-const CACHE_READ_MULTIPLIER = 0.1
-const CACHE_CREATION_MULTIPLIER = 1.25
-const PRICING_PROBE_TOKENS = 1_000
 
 /** Bucket used by aggregate views for events without an explicit scope. */
 export const UNSCOPED_COST_SCOPE = '(unscoped)'
@@ -20,7 +17,8 @@ export const UNSCOPED_COST_SCOPE = '(unscoped)'
  */
 const MAIN_COST_SOURCE: QuerySource = 'main'
 
-export type CostCalculator = (model: string, inputTokens: number, outputTokens: number) => number
+/** USD for a turn from published prices; undefined when nobody publishes one (recorded as 0, flagged unpriced). */
+export type CostCalculator = (model: string, inputTokens: number, outputTokens: number, source?: CostSource) => number | undefined
 
 export interface CostEventOptions {
   readonly agentId?: string
@@ -75,12 +73,6 @@ export interface RecordTurnOptions {
   readonly timestamp?: string
 }
 
-/** pi-ai's per-tier cost multipliers; reconciled against the served tier, not the request. */
-export function serviceTierMultiplier(model: string, serviceTier: string | undefined): number {
-  if (serviceTier === 'flex') return 0.5
-  if (serviceTier === 'priority') return model.replace(/^.*\//, '') === 'gpt-5.5' ? 2.5 : 2
-  return 1
-}
 
 export interface RecordRawOptions {
   readonly agentId?: string
@@ -281,20 +273,15 @@ export class CostTracker {
     const validatedOutput = tokenCount(outputTokens, 'outputTokens')
     const cacheReadTokens = tokenCount(options.cacheReadTokens ?? 0, 'cacheReadTokens')
     const cacheCreationTokens = tokenCount(options.cacheCreationTokens ?? 0, 'cacheCreationTokens')
-    const baseCost = finiteNumber(this.calculator(validatedModel, validatedInput, validatedOutput), 'calculated cost')
-    const tierMultiplier = serviceTierMultiplier(validatedModel, options.serviceTier)
-    let cacheCost = 0
-    if (cacheReadTokens || cacheCreationTokens) {
-      const inputProbe = finiteNumber(this.calculator(validatedModel, PRICING_PROBE_TOKENS, 0), 'input pricing')
-      const inputRate = inputProbe > 0 ? inputProbe / PRICING_PROBE_TOKENS : 0
-      cacheCost = cacheReadTokens * inputRate * CACHE_READ_MULTIPLIER
-        + cacheCreationTokens * inputRate * CACHE_CREATION_MULTIPLIER
-    }
+    // Published prices only (cache reads and writes at their own published
+    // rates); no invented multipliers for cache or service tier.
+    const priced = this.calculator(validatedModel, validatedInput, validatedOutput, { cacheReadTokens, cacheWriteTokens: cacheCreationTokens })
+    const cost = priced === undefined ? 0 : finiteNumber(priced, 'calculated cost')
     return this.append(new CostEvent({
       model: validatedModel,
       inputTokens: validatedInput,
       outputTokens: validatedOutput,
-      costUsd: (baseCost + cacheCost) * tierMultiplier,
+      costUsd: cost,
       label: stringValue(label, 'label'),
       timestamp: options.timestamp ?? this.nowTimestamp(),
       cacheReadTokens,

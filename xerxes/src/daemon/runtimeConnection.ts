@@ -1,6 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { claudeExecutable } from '../auth/claudeCodeLogin.js'
 import type { ProviderProfile } from '../bridge/profiles.js'
 import { DEFAULT_TEMPERATURE, DEFAULT_TOP_K } from '../llms/samplingDefaults.js'
 import { DEFAULT_PERMISSION_MODE, type PermissionMode } from '../streaming/permissions.js'
@@ -37,10 +38,21 @@ export interface RuntimeConnection {
   readonly topP?: number
 }
 
-/** Resolve daemon config over the active user profile without selecting the builtin Claude Code placeholder. */
-export function runtimeConnection(config: DaemonConfig, profile: ProviderProfile | undefined): RuntimeConnection | undefined {
+/**
+ * Resolve daemon config over the active user profile. A Claude Code profile
+ * is used only when someone chose it and the `claude` CLI is installed: the
+ * built-in one is merely the fallback on a fresh install, which must reach
+ * "configure a provider" rather than spend a Claude plan nobody picked (or
+ * fail every turn without the CLI).
+ */
+export function runtimeConnection(
+  config: DaemonConfig,
+  profile: ProviderProfile | undefined,
+  options: { readonly claudeCodeChosen?: boolean; readonly claudeCodeInstalled?: () => boolean } = {},
+): RuntimeConnection | undefined {
   const runtime = config.runtime
-  const useProfile = profile?.name !== 'cc' ? profile : undefined
+  const claudeCodeInstalled = options.claudeCodeInstalled ?? (() => claudeExecutable(process.env) !== undefined)
+  const useProfile = profile && (profile.provider !== 'claude-code' || (options.claudeCodeChosen === true && claudeCodeInstalled())) ? profile : undefined
   const model = stringSetting(runtime.model) || useProfile?.model || ''
   if (!model) {
     return undefined

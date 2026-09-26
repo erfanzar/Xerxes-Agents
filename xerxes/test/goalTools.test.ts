@@ -360,3 +360,31 @@ test('milestones ignore numeric provider fillers without changing goal budgets',
   for (const key of ['maxGoalRounds', 'maxDurationMs', 'maxTotalTokens']) expect(result.goal[key]).toBe(before.goal[key])
   expect(result.ignored_fields).toEqual(['max_goal_rounds', 'max_duration_ms', 'max_total_tokens'])
 })
+
+test('a goal cannot be created with placeholder limits that end it before its first round', async () => {
+  // Captured from a live gpt-6-sol turn: every optional limit filled with its
+  // schema minimum (1 ms, 1 token, 1 round). The goal blocked the instant it
+  // was created, before a single agent ran.
+  const h = harness()
+  await expect(h.call('create_goal', { objective: 'bug-bounty campaign', max_duration_ms: 1, max_total_tokens: 1, max_goal_rounds: 1 }))
+    .rejects.toThrow(/max_duration_ms: must be at least 60000 ms.*omit max_duration_ms or pass null/)
+  await expect(h.call('create_goal', { objective: 'bug-bounty campaign', max_total_tokens: 1 })).rejects.toThrow(/max_total_tokens: must be at least 1000/)
+  // null is the honest "no limit" for a model that must fill every field.
+  const created = await h.call('create_goal', { objective: 'bug-bounty campaign', max_duration_ms: null, max_total_tokens: null, max_goal_rounds: null })
+  const unlimited = await harness().call('create_goal', { objective: 'bug-bounty campaign' })
+  for (const limit of ['maxDurationMs', 'maxTotalTokens', 'maxGoalRounds'] as const) expect(created.goal[limit]).toEqual(unlimited.goal[limit])
+})
+
+test('a status change with placeholder limits is not refused: only edit reads limits', async () => {
+  // Captured from gpt-6-sol: a strict schema made it fill max_duration_ms on
+  // "blocked" and "complete", both were refused as edit-only, and the model
+  // had no call left that could close its goal.
+  const h = harness()
+  await h.call('create_goal', { objective: 'ship it' })
+  const blocked = await h.call('update_goal', { ...await h.ref(), action: 'blocked', blocked_reason: 'CI is down', max_duration_ms: 60_000, max_total_tokens: 1_000, max_goal_rounds: 1 })
+  expect(blocked.goal.phase).toBe('blocked')
+  expect(blocked.ignored_fields).toEqual(['max_goal_rounds', 'max_duration_ms', 'max_total_tokens'])
+  // The limits were not applied.
+  const unlimited = await harness().call('create_goal', { objective: 'ship it' })
+  for (const limit of ['maxDurationMs', 'maxTotalTokens', 'maxGoalRounds'] as const) expect(blocked.goal[limit]).toEqual(unlimited.goal[limit])
+})

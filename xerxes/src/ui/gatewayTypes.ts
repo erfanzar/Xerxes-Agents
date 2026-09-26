@@ -576,6 +576,9 @@ export interface ModelOptionsResponse {
 export interface ModelCapabilityOption {
   context_limit?: number
   context_source?: 'catalog' | 'override' | 'provider' | 'unknown'
+  /** The provider's own name and description for the model, when it gives them. */
+  display_name?: string
+  description?: string
   id: string
   max_output_tokens?: number
   output_source?: 'catalog' | 'override' | 'provider' | 'unknown'

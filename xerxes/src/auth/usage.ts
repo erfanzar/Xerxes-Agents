@@ -14,6 +14,7 @@
 
 import { ConfigurationError } from '../core/errors.js'
 import { AnthropicOAuthSession } from './anthropicOAuth.js'
+import { claudeCodeLogin } from './claudeCodeLogin.js'
 import { codexAuthHeaders, CodexSession } from './codexAuth.js'
 import { KimiCodingOAuthSession } from './kimiCodingOAuth.js'
 
@@ -45,6 +46,8 @@ export interface ProviderUsageReport {
 }
 
 export interface UsageRequestOptions {
+  /** Swap the Claude Code sign-in reader (tests). */
+  readonly claudeCodeLogin?: typeof claudeCodeLogin
   /** Model-facing reports reject ambiguous units and malformed percentages. */
   readonly strictUnits?: boolean
   readonly fetchImplementation?: UsageFetch
@@ -140,6 +143,119 @@ function claudeWindow(key: string, body: Record<string, unknown>, label: string,
   }
 }
 
+/** A window's name from its length: 300 minutes → "5-hour", 7 days → "weekly". */
+export function windowNameForSeconds(seconds: number): string {
+  const hours = seconds / 3_600
+  if (Math.abs(hours - 24) < 0.5) return 'daily'
+  if (Math.abs(hours - 168) < 1) return 'weekly'
+  if (hours >= 27 * 24 && hours <= 31 * 24) return 'monthly'
+  if (hours < 48 && Number.isInteger(Math.round(hours * 100) / 100)) return `${Math.round(hours)}-hour`
+  return hours < 48 ? `${Math.round(seconds / 60)}-minute` : `${Math.round(hours / 24)}-day`
+}
+
+const TIME_UNIT_SECONDS: Readonly<Record<string, number>> = { SECOND: 1, MINUTE: 60, HOUR: 3_600, DAY: 86_400, WEEK: 604_800, MONTH: 2_592_000 }
+/** Z.ai's numeric window units (3 = hours, 6 = weeks), confirmed against live responses. */
+const ZAI_UNIT_SECONDS: Readonly<Record<number, number>> = { 3: 3_600, 4: 86_400, 5: 2_592_000, 6: 604_800 }
+
+const numberish = (value: unknown): number | undefined => {
+  const number = typeof value === 'string' && value.trim() !== '' ? Number(value) : value
+  return typeof number === 'number' && Number.isFinite(number) ? number : undefined
+}
+const firstNumber = (record: Record<string, unknown>, keys: readonly string[]): number | undefined => {
+  for (const key of keys) { const value = numberish(record[key]); if (value !== undefined) return value }
+  return undefined
+}
+
+function windowSeconds(record: Record<string, unknown>, zaiUnits: boolean): number | undefined {
+  const window = recordOf(record.window)
+  const duration = numberish(window.duration ?? record.duration)
+  const unit = stringOf(window.timeUnit ?? record.timeUnit ?? window.time_unit ?? record.time_unit)?.toUpperCase()
+  if (duration !== undefined && unit) {
+    const scale = Object.entries(TIME_UNIT_SECONDS).find(([name]) => unit.includes(name))?.[1]
+    if (scale) return duration * scale
+  }
+  const explicit = firstNumber(record, ['limit_window_seconds', 'window_seconds', 'windowSeconds', 'period_seconds'])
+  if (explicit !== undefined) return explicit
+  if (zaiUnits) {
+    const scale = ZAI_UNIT_SECONDS[numberish(record.unit) ?? -1]
+    const count = numberish(record.number)
+    if (scale && count) return scale * count
+  }
+  return undefined
+}
+
+function labelFromKey(key: string): string | undefined {
+  const name = key.toLowerCase()
+  if (/(^|_)(5h|five_?hour|5_?hour)s?($|_)/.test(name) || name.endsWith('5h')) return '5-hour'
+  if (/7d|seven_?day|week/.test(name)) return 'weekly'
+  if (/(^|_)(1d|24h|day|daily)($|_)/.test(name)) return 'daily'
+  if (/month/.test(name)) return 'monthly'
+  return undefined
+}
+
+export interface DiscoverUsageOptions {
+  /** Labels for keys whose meaning the payload does not state (Kimi's `usage` is the weekly total). */
+  readonly keyLabels?: Readonly<Record<string, string>>
+  /** Read Z.ai-style numeric `unit` × `number` window lengths. */
+  readonly zaiUnits?: boolean
+}
+
+function quotaWindow(record: Record<string, unknown>, key: string, options: DiscoverUsageOptions): UsageWindow | undefined {
+  // Kimi nests the counts one level down, beside the window length.
+  const counts = Object.keys(recordOf(record.detail)).length ? recordOf(record.detail) : record
+  const explicit = firstNumber(counts, ['used_percent', 'usedPercent', 'used_percentage', 'utilization', 'percentage', 'percent'])
+  const ratio = firstNumber(counts, ['used_ratio', 'usedRatio'])
+  const limit = firstNumber(counts, ['limit', 'total', 'quota', 'max'])
+  const remaining = firstNumber(counts, ['remaining', 'left', 'available'])
+  const used = firstNumber(counts, ['used', 'consumed', 'currentValue', 'current_value']) ?? (limit !== undefined && remaining !== undefined ? limit - remaining : undefined)
+  const percent = explicit ?? (ratio !== undefined ? percentFromFraction(ratio) : undefined)
+    ?? (limit !== undefined && limit > 0 && used !== undefined ? (used / limit) * 100 : undefined)
+  if (percent === undefined) return undefined
+  const seconds = windowSeconds(record, options.zaiUnits === true)
+  const named = [record.name, record.title, record.label, record.scope].map(stringOf).find(text => text && !/^[A-Z0-9_]+$/.test(text))
+  const label = options.keyLabels?.[key] ?? named ?? (seconds !== undefined ? windowNameForSeconds(seconds) : undefined) ?? labelFromKey(key)
+  if (!label) return undefined
+  const resetsAt = epochMs(counts.reset_at ?? counts.resetAt ?? counts.reset_time ?? counts.resetTime ?? counts.resets_at ?? counts.resetsAt
+    ?? counts.nextResetTime ?? counts.next_reset_time ?? counts.next_reset_at)
+  const resetAfterSeconds = firstNumber(counts, ['reset_after_seconds', 'reset_in', 'resetIn', 'resets_in_seconds'])
+  const left = remaining ?? (limit !== undefined && used !== undefined ? limit - used : undefined)
+  return {
+    label,
+    usedPercent: Math.max(0, Math.min(100, percent)),
+    ...(resetsAt !== undefined ? { resetsAt } : resetAfterSeconds !== undefined ? { resetAfterSeconds } : {}),
+    ...(left !== undefined && left >= 0 && limit !== undefined ? { detail: `${left} remaining` } : {}),
+  }
+}
+
+/**
+ * Fallback for any quota payload: walk the JSON and keep every record that
+ * states how much of a window is used — as a percentage, a 0–1 ratio, or
+ * used/limit/remaining counts — named by its window length, its own name, or
+ * the key it sits under. Providers change these shapes without notice (Kimi
+ * returns three at once); this reads what their own CLIs read instead of
+ * failing on the first unfamiliar field. The first answer per label wins, so
+ * a payload's summary beats its duplicate breakdowns.
+ */
+export function discoverUsageWindows(body: unknown, options: DiscoverUsageOptions = {}): UsageWindow[] {
+  const windows: UsageWindow[] = []
+  const seen = new Set<string>()
+  const visit = (value: unknown, key: string, depth: number) => {
+    if (depth > 5) return
+    if (Array.isArray(value)) { for (const item of value) visit(item, key, depth + 1); return }
+    if (!value || typeof value !== 'object') return
+    const record = value as Record<string, unknown>
+    const window = quotaWindow(record, key, options)
+    if (window) {
+      const id = window.label.toLowerCase()
+      if (!seen.has(id)) { seen.add(id); windows.push(window) }
+      return
+    }
+    for (const [child, nested] of Object.entries(record)) visit(nested, child, depth + 1)
+  }
+  visit(body, '', 0)
+  return windows
+}
+
 /** Claude Pro/Max: GET api.anthropic.com/api/oauth/usage (OAuth bearer + oauth beta flag). */
 export async function fetchClaudeUsage(
   accessToken: string,
@@ -156,6 +272,7 @@ export async function fetchClaudeUsage(
     claudeWindow('seven_day_opus', body, 'weekly', 'opus'),
     claudeWindow('seven_day_sonnet', body, 'weekly', 'sonnet'),
   ].filter((window): window is UsageWindow => window !== undefined)
+  if (!windows.length && !options.strictUnits) windows.push(...discoverUsageWindows(body))
   if (!windows.length) {
     throw new ConfigurationError(
       'claude',
@@ -210,6 +327,7 @@ export async function fetchCodexUsage(
       if (window) windows.push(window)
     }
   }
+  if (!windows.length && !options.strictUnits) windows.push(...discoverUsageWindows(body.rate_limit ?? body))
   if (!windows.length) {
     throw new ConfigurationError(
       'codex',
@@ -232,7 +350,10 @@ export async function fetchKimiUsage(
 ): Promise<ProviderUsageReport> {
   const url = options.environment?.XERXES_KIMI_USAGE_URL?.trim() || KIMI_USAGE_URL
   const body = await fetchJson('kimi', url, { Authorization: `Bearer ${accessToken}` }, options)
-  const windows = kimiWindows(body, options.strictUnits)
+  // Kimi's own CLI reads `usage` (the weekly total) and `limits[]` (each with
+  // a window length and used/limit counts); older shapes carried percentages.
+  const known = kimiWindows(body, options.strictUnits)
+  const windows = known.length || options.strictUnits ? known : discoverUsageWindows(body, { keyLabels: { usage: 'weekly' } })
   if (!windows.length) {
     throw new ConfigurationError(
       'kimi',
@@ -294,14 +415,19 @@ export async function fetchZaiUsage(
   const body = await fetchJson('zai', url, { Authorization: `Bearer ${apiKey}` }, options)
   const data = recordOf(body.data)
   const limits = Array.isArray(data.limits) ? data.limits : []
-  const windows = limits.flatMap(limit => {
+  const windows: UsageWindow[] = limits.flatMap((limit): UsageWindow[] => {
     const record = recordOf(limit)
     const used = finite(record.percentage)
     if (options.strictUnits && (used === undefined || used < 0 || used > 100)) throw new ConfigurationError('zai', 'Usage window has no valid percentage')
     if (used === undefined) return []
     const type = stringOf(record.type) ?? 'quota'
-    const unit = finite(record.unit)
-    const label = options.strictUnits ? type.toLowerCase() : type === 'TOKENS_LIMIT' ? (unit === 5 ? '5-hour' : 'weekly')
+    // The window's length is `unit` × `number` (unit 3 = hours, 6 = weeks):
+    // a coding plan's 5-hour and weekly limits share one type name.
+    const seconds = windowSeconds(record, true)
+    const label = options.strictUnits ? type.toLowerCase()
+      : seconds !== undefined ? windowNameForSeconds(seconds)
+      // Older responses carried no `number`; keep their established reading.
+      : type === 'TOKENS_LIMIT' ? (finite(record.unit) === 5 ? '5-hour' : 'weekly')
       : type === 'TIME_LIMIT' ? '5-hour'
       : type.toLowerCase()
     const nextReset = epochMs(record.nextResetTime)
@@ -313,6 +439,7 @@ export async function fetchZaiUsage(
       detail: options.strictUnits ? type.toLowerCase() : remaining !== undefined ? `${remaining} remaining` : type.toLowerCase(),
     }]
   })
+  if (!windows.length && !options.strictUnits) windows.push(...discoverUsageWindows(body, { zaiUnits: true }))
   if (!windows.length) {
     throw new ConfigurationError(
       'zai',
@@ -325,9 +452,10 @@ export async function fetchZaiUsage(
 export const SUBSCRIPTION_USAGE_PROVIDERS = ['claude', 'codex', 'kimi', 'zai'] as const
 export type SubscriptionUsageProvider = (typeof SUBSCRIPTION_USAGE_PROVIDERS)[number]
 
-const PROVIDER_ALIASES: Readonly<Record<string, SubscriptionUsageProvider>> = {
+export const PROVIDER_ALIASES: Readonly<Record<string, SubscriptionUsageProvider>> = {
   anthropic: 'claude',
   claude: 'claude',
+  'claude-code': 'claude',
   chatgpt: 'codex',
   codex: 'codex',
   'openai-codex': 'codex',
@@ -381,7 +509,7 @@ export async function collectSubscriptionUsage(
   const errors: SubscriptionUsageError[] = []
   await Promise.all(targets.map(async target => {
     try {
-      reports.push(await fetchOne(target, options))
+      reports.push(await fetchSubscriptionUsage(target, options))
     } catch (error) {
       errors.push({ provider: target, message: error instanceof Error ? error.message : String(error) })
     }
@@ -392,7 +520,8 @@ export async function collectSubscriptionUsage(
   return { errors, reports }
 }
 
-async function fetchOne(
+/** One provider's quota, using the given profiles' keys where the provider needs one. */
+export async function fetchSubscriptionUsage(
   provider: SubscriptionUsageProvider,
   options: UsageRequestOptions & { readonly profiles?: readonly UsageProfile[] },
 ): Promise<ProviderUsageReport> {
@@ -401,6 +530,14 @@ async function fetchOne(
   const profile = profiles.find(p => PROVIDER_ALIASES[p.provider] === provider)
 
   if (provider === 'claude') {
+    // The `cc` profile runs the Claude Code CLI on its own sign-in, so its
+    // plan windows come from that login; every other Claude profile uses
+    // Xerxes' Anthropic session. Only `cc` ever reads Claude Code's login.
+    if (profile?.provider === 'claude-code') {
+      const login = await (options.claudeCodeLogin ?? claudeCodeLogin)({ environment })
+      const report = await fetchClaudeUsage(login.accessToken, { ...options, environment })
+      return login.subscriptionType && !report.planType ? { ...report, planType: login.subscriptionType } : report
+    }
     const credential = await new AnthropicOAuthSession({ environment }).credential(options.signal)
     return fetchClaudeUsage(credential.access, { ...options, environment })
   }

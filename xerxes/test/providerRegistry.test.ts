@@ -13,11 +13,17 @@ import {
   providerModel,
   resolveProvider,
 } from '../src/llms/providerRegistry.js'
+import { seedModelsDev } from './fixtures/modelsDev.js'
+
+// Prices come from models.dev at runtime; tests use its fixture.
+seedModelsDev()
 
 test('provider routing preserves explicit prefixes and Kimi Code overrides', () => {
   expect(detectProvider('anthropic/claude-sonnet-4-6')).toBe('anthropic')
-  expect(detectProvider('kimi-for-coding')).toBe('kimi-code')
-  expect(resolveProvider('kimi/kimi-for-coding')).toBe('kimi-code')
+  // A bare id routes to the one provider models.dev lists it under, never by its spelling.
+  expect(detectProvider('claude-haiku-4-5')).toBe('anthropic')
+  expect(detectProvider('kimi-for-coding')).toBe('openai')
+  expect(resolveProvider('kimi-code/kimi-for-coding')).toBe('kimi-code')
   expect(resolveProvider('gpt-4o', { base_url: 'https://api.kimi.com/coding/v1' })).toBe('kimi-code')
   expect(providerModel('openrouter/anthropic/claude-sonnet-4.5', 'openrouter')).toBe('anthropic/claude-sonnet-4.5')
 })
@@ -66,4 +72,19 @@ test('the registry contains no invented context or output-capacity defaults', ()
   expect(effectiveContextLimit({ contextLimit: 262_144, requestedOutputTokens: 32_000 })).toBe(230_144)
   expect(effectiveContextLimit({ contextLimit: 262_144, requestedOutputTokens: 300_000 })).toBe(0)
   expect(providerDefaultHeaders('kimi-code')).toMatchObject({ 'User-Agent': 'claude-code/1.0.0' })
+})
+
+test('a bare id several providers list goes to the one this environment holds a key for', () => {
+  seedModelsDev({
+    anthropic: { id: 'anthropic', models: { 'shared-model': { id: 'shared-model' } } },
+    openrouter: { id: 'openrouter', models: { 'shared-model': { id: 'shared-model' } } },
+  })
+  try {
+    expect(detectProvider('shared-model', { ANTHROPIC_API_KEY: 'k' })).toBe('anthropic')
+    // No key, or keys for both: nothing decides, so the plain default.
+    expect(detectProvider('shared-model', {})).toBe('openai')
+    expect(detectProvider('shared-model', { ANTHROPIC_API_KEY: 'k', OPENROUTER_API_KEY: 'k' })).toBe('openai')
+  } finally {
+    seedModelsDev()
+  }
 })

@@ -13,7 +13,8 @@ import { connectionFailureKind } from './connectionFailure.js'
 import { failureView } from './turnFailure.js'
 import type { AgentMember, Block } from './types.js'
 import { applyCompletion, wantsHints, type HintItem } from './hints.js'
-import { groupByWorkspace } from './workspaceGroups.js'
+import { groupByWorkspace, sidebarOrder } from './workspaceGroups.js'
+import { currentSessionDensity, subscribeSessionDensity } from './displayPrefs.js'
 import { ChangesTab, LogTab, PlanTab } from './Workspaces.js'
 import { Markdown } from './markdown.js'
 import { Dictation } from './Dictation.js'
@@ -23,7 +24,7 @@ import { useDialogFocus } from './dialogFocus.js'
 import { keyedActivityGroups, isDisclosedActivity } from "./activityGroups.js"
 import { activitySummary, approvalTitle, liveActivityPhrase } from './activityPhrase.js'
 import { ToolCallRow, toolHasFailed } from "./Execution.js"
-import { activityFleetRows, agentState } from './AgentRoster.js'
+import { activityFleetRows, agentState, agentKindLabel } from './AgentRoster.js'
 import { RailAgents, RailFiles } from './RailLists.js'
 import { AgentInspector } from './AgentInspector.js'
 import { OutputViewer } from './OutputViewer.js'
@@ -37,7 +38,7 @@ import { FindBar } from './FindBar.js'
 import { Shortcuts } from './Shortcuts.js'
 import { FirstRunSetup } from './Setup.js'
 import { RemoteWorkspaceGate } from './RemoteWorkspaceGate.js'
-import { BackgroundIndicator, DesktopNavigation, DesktopSheet, DesktopPage, DesktopRail, useDesktopNavigation, type DesktopPanel } from './DesktopPanels.js'
+import { BackgroundIndicator, DesktopNavigation, DesktopSheet, DesktopPage, DesktopRail, useDesktopNavigation, type DesktopPanel, type RailPanel } from './DesktopPanels.js'
 
 const ActivityVisible = createContext(false)
 
@@ -84,8 +85,8 @@ function Announcer({ snap }: { snap: Snapshot }): ReactElement {
 }
 
 /** Names the rail in a boundary fallback: "Files could not be shown". */
-function railLabel(rail: 'files' | 'review' | 'terminal' | 'activity'): string {
-  return rail === 'files' ? 'Project files' : rail === 'review' ? 'Source control' : rail === 'terminal' ? 'Terminal' : 'Activity'
+function railLabel(rail: RailPanel): string {
+  return rail === 'files' ? 'Project files' : rail === 'review' ? 'Source control' : rail === 'terminal' ? 'Terminal' : rail === 'usage' ? 'Usage' : 'Activity'
 }
 
 /** Blinking tail shown on streaming blocks. */
@@ -176,7 +177,7 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
   useEffect(() => { const resize = () => setWindowWidth(window.innerWidth); window.addEventListener('resize', resize); return () => window.removeEventListener('resize', resize) }, [])
   const narrow = windowWidth < 850
   const focused = narrow ? !narrowNavigation : layout.sidebarHidden
-  const [railChoice, setRail] = useState<'files' | 'review' | 'terminal' | 'activity' | null | undefined>(undefined)
+  const [railChoice, setRail] = useState<RailPanel | null | undefined>(undefined)
   const [filesExpanded, setFilesExpanded] = useState(false)
   const [reviewPath, setReviewPath] = useState('')
   const [selectedAgent, setSelectedAgent] = useState('')
@@ -201,7 +202,7 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
     if (next === 'review' && filePath && !contextRequiresFullWidth) setFilesExpanded(true)
     if (next === 'activity') setSelectedAgent(filePath ?? '')
     if (next === 'activity') requestAnimationFrame(() => document.querySelector('.desktop-rail .studio-sheet-content')?.scrollTo({ top: 0 }))
-    if (next === 'files' || next === 'review' || next === 'terminal' || next === 'activity') setRail(next)
+    if (next === 'files' || next === 'review' || next === 'terminal' || next === 'activity' || next === 'usage') setRail(next)
     else if (next === 'agents' || next === 'extensions' || next === 'artifacts') { setPage(next); setPanel(null) }
     else if (next === null) { setPage(null); setPanel(null) }
     else setPanel(next)
@@ -658,12 +659,17 @@ function Sidebar({ snap, page }: { snap: Snapshot; page: 'agents' | 'extensions'
         untitled: false,
       }
     : null
-  const rows = [
+  // One order, by latest message. Opening a chat is not activity, so a click
+  // never moves anything: the open chat used to be appended at the end, chats
+  // the daemon had open were listed ahead of the rest, and the open chat's
+  // folder was hoisted to the top — one click could reshuffle the sidebar.
+  // A chat with no message yet (a fresh New task) sorts first.
+  const rows = sidebarOrder([
     ...snap.live.filter(row => row.id !== snap.currentId),
     ...snap.sessions.filter(row => row.id !== snap.currentId),
     ...(currentRow ? [currentRow] : []),
-  ].filter(match)
-  const groups = groupByWorkspace(rows, snap.cwd, snap.workspaceDirectories)
+  ], snap.sessionActivity ?? {}).filter(match)
+  const groups = groupByWorkspace(rows, '', snap.workspaceDirectories)
   const online = snap.connection === 'online'
 
   return (
@@ -675,8 +681,8 @@ function Sidebar({ snap, page }: { snap: Snapshot; page: 'agents' | 'extensions'
         <div className="studio-segment" role="group" aria-label="Sidebar view"><button aria-pressed={page === null} className={page === null ? 'is-selected' : ''} onClick={() => open(null)}>Tasks</button><button aria-pressed={page === 'agents'} className={page === 'agents' ? 'is-selected' : ''} onClick={() => open('agents')}>Agents</button></div>
         <button
           className="newchat"
-          disabled={!online || snap.turnActive}
-          onClick={() => { open(null); store.newChat() }}
+          disabled={!online}
+          onClick={() => { if (!snap.turnActive) open(null); store.newChat() }}
           title={homeLabel(snap) ? `Start a new task in ${homeLabel(snap)} (⌘N, or ⇧⌘N to choose a preset and worktree)` : 'Start a new task (⌘N)'}
         ><Icon name="plus" /><span>New task</span><kbd>⌘ N</kbd></button>
         <button className={`studio-nav${page === "extensions" ? " is-selected" : ""}`} aria-pressed={page === 'extensions'} disabled={!online} onClick={() => open('extensions')}><Icon name="tools" /><span>Skills & tools</span></button>
@@ -759,6 +765,7 @@ function SessionCell({
   opensWindow?: boolean
 }): ReactElement {
   const title = snippet ?? row.title
+  const density = useSyncExternalStore(subscribeSessionDensity, currentSessionDensity, () => 'comfortable' as const)
   // dsh row grammar: title + right-aligned age on the first line, a status
   // subline only when it says something the age doesn't.
   const sub = [
@@ -790,6 +797,9 @@ function SessionCell({
       <span className="sess__body">
         <span className="sess__t">{title}</span>
         {sub && <span className="sess__s">{sub}</span>}
+        {/* Only at the Detailed session-list density (Settings): the
+            default row stays free of idle turn counts. */}
+        {density === 'detailed' && row.turns > 0 && <span className="sess__detail">{row.turns} turn{row.turns === 1 ? '' : 's'}{row.cwd ? ` · ${workspaceLabel(row.cwd)}` : ''}</span>}
       </span>
       {row.age && <span className="sess__age">{row.age}</span>}
     </button>
@@ -807,15 +817,19 @@ function FleetChip({ snap }: { snap: Snapshot }): ReactElement {
   const [open, setOpen] = useState(false)
   const fleet = snap.fleet
   if (fleet.length === 0) return <></>
+  // The chip is the only fleet signal while the popover is closed, so it
+  // carries the working state itself: a ring spins around the icon.
+  const working = fleet.filter(row => statusColor(row.status) === C.activity).length
   return (
     <span className="chipanchor">
       <button
-        className={`hchip hchip--btn${open ? ' is-on' : ''}`}
-        title="Subagents spawned by this task"
+        className={`hchip hchip--btn fleetchip${open ? ' is-on' : ''}${working > 0 ? ' is-working' : ''}`}
+        title={working > 0 ? `${working} of ${fleet.length} subagents working` : 'Subagents spawned by this task'}
         aria-expanded={open}
+        aria-busy={working > 0 || undefined}
         onClick={() => setOpen(value => !value)}
       >
-        <Icon name="agent" size={13} /> {fleet.length} subagent{fleet.length === 1 ? '' : 's'} <Icon name="caretDown" size={11} />
+        <span className="fleetchip__icon"><Icon name="agent" size={13} /></span> {fleet.length} subagent{fleet.length === 1 ? '' : 's'} <Icon name="caretDown" size={11} />
       </button>
       {open && (
         <>
@@ -825,7 +839,7 @@ function FleetChip({ snap }: { snap: Snapshot }): ReactElement {
             {fleet.map(row => (
               <button key={row.id} className="fleetpop__row" role="menuitem" onClick={() => {setOpen(false);navigate('activity',row.id)}}>
                 <span className="sess__dot" style={{ background: statusColor(row.status) }} />
-                <span className="fleetpop__t">{row.title}</span>
+                <span className="fleetpop__t agentname agentname--stack"><span className="agentname__t">{row.title}</span>{agentKindLabel(row.agentDetails) && <span className="agentname__kind">({agentKindLabel(row.agentDetails)})</span>}</span>
                 <span className="fleetpop__s">{row.status}</span>
               </button>
             ))}
@@ -1245,9 +1259,10 @@ function ActivityGroup({ blocks, active, turnActive }: { blocks: Snapshot['block
   const [expanded, setExpanded] = useState(false)
   const [inspected, setInspected] = useState(false)
   return <details className={`activity-group${running ? ' is-running' : ''}`} open={expanded} onToggle={event => { setExpanded(event.currentTarget.open); if (event.currentTarget.open) setInspected(true) }}>
-    <summary><Icon name="chevron" size={14} />{running
+    {/* One quiet line, the chevron trailing the text: "Ran 3 commands, read a file ›". */}
+    <summary>{running
       ? <span className="activity-group__live"><span className="activity-group__working">Working</span><LivePhrase text={liveActivityPhrase(blocks)} /></span>
-      : <span className="activity-group__done">{activitySummary(blocks)}{liveAgents > 0 && <span className="activity-group__pending"> · {liveAgents} agent{liveAgents === 1 ? '' : 's'} still running</span>}</span>}{failures > 0 && <strong>{failures} failed</strong>}</summary>
+      : <span className="activity-group__done">{activitySummary(blocks)}{liveAgents > 0 && <span className="activity-group__pending"> · {liveAgents} agent{liveAgents === 1 ? '' : 's'} still running</span>}</span>}{failures > 0 && <strong>{failures} failed</strong>}<Icon name="chevron" size={13} /></summary>
     <div className="activity-group__body">{(expanded || inspected) && blocks.map((block, index) => <BlockView key={block.id} block={block} />)}</div>
   </details>
 }
@@ -1342,7 +1357,7 @@ function BlockView({ block }: { block: Snapshot['blocks'][number] }): ReactEleme
   return (
     <div className={`frow frow--sys${block.error ? ' frow--err' : ''}`}>
       <span className="frow__icon"><Icon name={block.error ? "warning" : "info"} size={13} /></span>
-      <span className="frow__excerpt frow__excerpt--wrap">{block.text}</span>
+      <span className="frow__excerpt frow__excerpt--wrap" title={block.text.length > 160 ? block.text : undefined}>{block.text}</span>
     </div>
   )
 }
@@ -1454,7 +1469,7 @@ export function FailedCard({ failed }: { failed: NonNullable<Snapshot['failed']>
               // Still offered when futile — the limit may have reset, and
               // hiding it would strand a user who knows it has — but never
               // as the obvious next thing to click.
-              title={view.retryIsFutile ? 'This will fail again until the cause above is resolved' : failed.lastUser ? 'Send the last instruction again' : undefined}
+              title={view.retryIsFutile ? 'This will fail again until the cause above is resolved' : failed.lastUser ? 'Continue from where the turn stopped' : undefined}
               onClick={() => store.retryFailed()}
             >
               <Icon name="retry" size={13} /> Retry
@@ -1856,7 +1871,7 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
           ref={ref}
           className="composer__input"
           aria-label="Message"
-          rows={2}
+          rows={1}
           value={draft}
           placeholder={placeholder}
           spellCheck={false}
@@ -1986,8 +2001,10 @@ export function ActivityDetails({ snap, selectedAgent = '' }: { snap: Snapshot; 
       {/* Zone 2 — only what is true right now. Each of these is absent
           unless it has something to say. */}
       {goal ? (
-        <>
-          <div className="rail__cap goal-heading">Goal <span>{goal.phase}{goal.activation === 'armed' ? ' · armed' : ''}</span></div>
+        <section className="railcard railcard--goal" aria-label="Goal">
+          {/* A card like Agents and Touched. As a bare caption over loose
+              text it had no boundary, and its buttons ran into the next card. */}
+          <header className="railcard__head"><span className="railcard__title">Goal</span><span className="railcard__meta" data-phase={goal.phase}>{goal.phase}{goal.activation === 'armed' ? ' · armed' : ''}</span></header>
           <div className="goalcard">
             <GoalObjective text={goal.objective} />
             <GoalInspectorDisclosure snap={snap} />
@@ -2005,10 +2022,10 @@ export function ActivityDetails({ snap, selectedAgent = '' }: { snap: Snapshot; 
               <button className="chipbtn" onClick={() => void store.submit('/goal clear')}>clear</button>
             </div>
           </div>
-        </>
+        </section>
       ) : null}
 
-      <RailAgents rows={fleet} onInspect={id => navigate('activity', id)} onInspectAll={() => navigate('activity')} />
+      <RailAgents rows={fleet} onInspect={id => navigate('activity', id)} />
 
       {/* The rows, not a summary line. A rail that only says "5 files" is
           a number you still have to go and decode; the diffs and the undo

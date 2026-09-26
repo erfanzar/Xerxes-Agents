@@ -10,6 +10,7 @@ import { isJsonObject } from '../types/toolCalls.js'
 import type { CompletionRequest, FetchImplementation, LlmClient, LlmCompletion, LlmDelta, TokenUsage } from './client.js'
 import { internalSseData } from './client.js'
 import { bareModel, getApiKey } from './providerRegistry.js'
+import { credentialFingerprint } from './credentialFingerprint.js'
 
 /** Root REST endpoint for Gemini's native Generate Content API. */
 export const DEFAULT_GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta'
@@ -82,7 +83,10 @@ export interface GeminiMessagePayload {
 /**
  * Convert the neutral transcript to Gemini's native Generate Content shape.
  *
- * System messages become the separate `systemInstruction`. Consecutive tool
+ * Leading system messages become the separate `systemInstruction`; a system
+ * message later in the conversation stays in place as user text, because
+ * `systemInstruction` precedes every content and moving it there changed the
+ * cached prefix on each turn. Consecutive tool
  * replies become one user content object because Gemini expects its function
  * responses to be sent as a user turn. Remote image URLs remain visible text
  * rather than causing hidden network downloads; data URLs are native
@@ -100,8 +104,13 @@ export function messagesToGemini(messages: readonly ChatMessage[]): GeminiMessag
     if (message === undefined) {
       break
     }
-    if (message.role === 'system') {
+    if (message.role === 'system' && contents.length === 0) {
       systemParts.push(...systemContentParts(message.content))
+      index += 1
+      continue
+    }
+    if (message.role === 'system') {
+      appendContent(contents, 'user', systemContentParts(message.content))
       index += 1
       continue
     }
@@ -184,6 +193,11 @@ export function messagesToGemini(messages: readonly ChatMessage[]): GeminiMessag
  * registry/factory selection to the caller that elects to integrate it.
  */
 export class GeminiClient implements LlmClient {
+  /** Identity of the configured key (see credentialFingerprint). */
+  async authFingerprint(): Promise<string | undefined> {
+    return this.apiKey ? credentialFingerprint({ 'x-goog-api-key': this.apiKey }) : undefined
+  }
+
   private readonly apiKey: string
   private readonly baseUrl: string
   private readonly fetchImplementation: FetchImplementation

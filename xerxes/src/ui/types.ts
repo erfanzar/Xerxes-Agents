@@ -284,7 +284,32 @@ export interface PanelSection {
   items?: string[]
   rows?: [string, string][]
   text?: string
+  /** Caption above the section (`USAGE · 3 ────`). */
   title?: string
+  /** Count on the caption. */
+  count?: string
+  /** One lead line: dot, name, quiet facts, a right-aligned quantity. */
+  heading?: PanelHeading
+  /** Percent bars — plan windows, context. */
+  meters?: PanelMeter[]
+}
+
+export interface PanelHeading {
+  label: string
+  notes?: string[]
+  right?: string
+  /** `active` lights the dot; `failed` colours it; default is a quiet hollow dot. */
+  state?: 'active' | 'failed' | 'idle'
+}
+
+export interface PanelMeter {
+  label: string
+  /** 0–100; the bar and its colour follow it. */
+  percent: number
+  /** Quiet fact after the percent (`44K / 128K`). */
+  note?: string
+  /** Right-aligned (`resets in 3h 12m`). */
+  right?: string
 }
 
 export interface SlashCatalog {

@@ -40,6 +40,21 @@ const RETRYABLE_KINDS = new Set<ErrorKind>([
   ErrorKind.TRANSIENT,
 ])
 
+/**
+ * A plan or balance that is used up, as opposed to a burst rate limit: the
+ * wording OpenAI/Codex (`usage_limit_reached`, `insufficient_quota`),
+ * Anthropic ("usage limit"), Z.ai ("Usage limit reached", "Insufficient
+ * balance"), Kimi and OpenRouter ("insufficient credits") use. Waiting
+ * seconds cannot fix these — only another account, key or the reset can.
+ */
+const PLAN_EXHAUSTED: readonly RegExp[] = [
+  /usage[_ ]?limit/i,
+  /insufficient[_ ]?(?:quota|balance|credits?)/i,
+  /exceeded your (?:current )?(?:quota|plan)/i,
+  /(?:plan|subscription)(?:'s)? (?:quota|limit) (?:is |has been )?(?:exhausted|reached|exceeded)/i,
+  /\bout of (?:credits|quota)\b/i,
+]
+
 const PATTERNS: ReadonlyArray<readonly [ErrorKind, readonly RegExp[]]> = [
   [ErrorKind.RATE_LIMIT, [/rate.?limit/i, /too many requests/i, /\b429\b/]],
   [
@@ -54,7 +69,7 @@ const PATTERNS: ReadonlyArray<readonly [ErrorKind, readonly RegExp[]]> = [
     ],
   ],
   [ErrorKind.AUTH, [/unauthorized/i, /invalid.{0,4}api.{0,4}key/i, /\b40[13]\b/, /forbidden/i]],
-  [ErrorKind.QUOTA_EXCEEDED, [/quota/i, /insufficient.{0,8}credit/i, /billing/i]],
+  [ErrorKind.QUOTA_EXCEEDED, [/quota/i, /insufficient.{0,8}credit/i, /billing/i, ...PLAN_EXHAUSTED]],
   [ErrorKind.PROVIDER_DOWN, [/\b(?:50[0-4]|529)\b/, /service unavailable/i, /overloaded/i, /bad gateway/i]],
   [ErrorKind.TIMEOUT, [/timeout/i, /timed out/i, /\b408\b/]],
   [ErrorKind.BAD_REQUEST, [/\b400\b/, /invalid request/i, /malformed/i]],
@@ -94,6 +109,11 @@ export class ErrorClassifier {
     ) {
       return classified(ErrorKind.TIMEOUT, error, details.message, retryAfter)
     }
+    // A corrupt stream frame is a transport fault, not a verdict on the
+    // request: its dump of raw JSON must not be read for status words.
+    if (details.name === 'StreamFrameError') {
+      return classified(ErrorKind.TRANSIENT, error, details.message, retryAfter)
+    }
     if (details.name === 'ConfigurationError') {
       return classified(ErrorKind.FATAL, error, details.message, retryAfter)
     }
@@ -116,6 +136,11 @@ export class ErrorClassifier {
       // hard bad-request failure.
       if (details.status === 400 && matchesPatterns(ErrorKind.CONTEXT_OVERFLOW, details.message)) {
         return classified(ErrorKind.CONTEXT_OVERFLOW, error, details.message, retryAfter)
+      }
+      // 429 covers both a burst limit (wait and retry) and a used-up plan
+      // (retrying for a minute changes nothing). The body tells them apart.
+      if (details.status === 429 && PLAN_EXHAUSTED.some(pattern => pattern.test(details.message))) {
+        return classified(ErrorKind.QUOTA_EXCEEDED, error, details.message, retryAfter)
       }
       return classified(statusKind, error, details.message, retryAfter)
     }

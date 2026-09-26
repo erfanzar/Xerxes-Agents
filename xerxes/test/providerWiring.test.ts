@@ -1,12 +1,33 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { expect, test } from 'bun:test'
+import { afterEach, expect, test } from 'bun:test'
 
 import type { CopilotCredential, CopilotSession } from '../src/auth/copilotAuth.js'
 import { AzureOpenAiClient } from '../src/llms/azureOpenAi.js'
 import { createLlmClient, OpenAiCompatibleClient } from '../src/llms/client.js'
 import { detectProvider, resolveProvider } from '../src/llms/providerRegistry.js'
+import { clearModelsDev, seedModelsDev } from './fixtures/modelsDev.js'
+
+afterEach(() => clearModelsDev())
+
+/** Gateways whose models speak different protocols, as models.dev describes them. */
+const GATEWAYS = {
+  opencode: {
+    id: 'opencode',
+    npm: '@ai-sdk/openai-compatible',
+    api: 'https://opencode.ai/zen/v1',
+    models: {
+      'claude-haiku-4-5': { id: 'claude-haiku-4-5', provider: { npm: '@ai-sdk/anthropic', api: 'https://opencode.ai/zen' } },
+      'gpt-5': { id: 'gpt-5', provider: { npm: '@ai-sdk/openai' } },
+      'big-pickle': { id: 'big-pickle' },
+    },
+  },
+  'cloudflare-ai-gateway': {
+    id: 'cloudflare-ai-gateway',
+    models: { 'gpt-4.1': { id: 'gpt-4.1', provider: { npm: '@ai-sdk/openai' } } },
+  },
+}
 
 test('provider routing recognizes copilot and azure prefixes and aliases', () => {
   expect(detectProvider('github-copilot/gpt-5.2')).toBe('github-copilot')
@@ -128,6 +149,7 @@ test('the pi-ai openai-compat providers register and route by prefix', () => {
 })
 
 test('multi-api gateways route per model by the catalog api field', async () => {
+  seedModelsDev(GATEWAYS)
   const { AnthropicMessagesClient } = await import('../src/llms/anthropic.js')
   const { ResponsesApiClient } = await import('../src/llms/client.js')
 
@@ -161,6 +183,7 @@ test('anthropic-protocol providers build the messages client', async () => {
 })
 
 test('cloudflare-ai-gateway resolves its account-templated URL or fails loudly', async () => {
+  seedModelsDev(GATEWAYS)
   const saved = { account: process.env.CLOUDFLARE_ACCOUNT_ID, gateway: process.env.CLOUDFLARE_GATEWAY_ID }
   delete process.env.CLOUDFLARE_ACCOUNT_ID
   delete process.env.CLOUDFLARE_GATEWAY_ID

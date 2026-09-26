@@ -4,6 +4,7 @@
 import { expect, test } from 'bun:test'
 
 import { AnthropicMessagesClient } from '../src/llms/anthropic.js'
+import { clearReportedCapabilities, reportModelCapability } from '../src/llms/modelsDev.js'
 import { OpenAiCompatibleClient, type CompletionRequest, type LlmDelta } from '../src/llms/client.js'
 import { createAgentState, type StreamEvent } from '../src/streaming/events.js'
 import { runTurn } from '../src/streaming/loop.js'
@@ -14,7 +15,8 @@ import {
 } from '../src/runtime/thinkingLevels.js'
 
 test('thinking keywords resolve the Claude ladder with longest phrase first', () => {
-  expect(detectThinkingDirective('please think about this')?.budgetTokens).toBe(4_000)
+  // A bare "think" is ordinary speech ("I think…"), not a directive.
+  expect(detectThinkingDirective('please think about this')).toBeUndefined()
   expect(detectThinkingDirective('think hard before editing')?.budgetTokens).toBe(10_000)
   expect(detectThinkingDirective('megathink the rollout')?.level).toBe('think_hard')
   expect(detectThinkingDirective('think harder about the proof')?.budgetTokens).toBe(20_000)
@@ -221,8 +223,10 @@ test('Anthropic adaptive models take thinking: adaptive plus output_config effor
     return body
   }
 
-  // claude-sonnet-4-6 is forceAdaptiveThinking in the Pi catalog: effort maps
-  // through thinkingLevelMap, no budget block, no max_tokens inflation.
+  // Effort levels without a token budget = adaptive thinking: the effort goes
+  // through as reported, no budget block, no max_tokens inflation.
+  reportModelCapability('anthropic', 'claude-sonnet-4-6', { reasoning: { supported: true, canDisable: false, efforts: ['low', 'medium', 'high', 'max'] } })
+  reportModelCapability('kimi-code', 'k3-256k', { reasoning: { supported: true, canDisable: false, efforts: ['low', 'high', 'max'] } })
   const adaptive = await capture({
     model: 'claude-sonnet-4-6',
     messages: [{ role: 'user', content: 'hi' }],
@@ -232,7 +236,7 @@ test('Anthropic adaptive models take thinking: adaptive plus output_config effor
   expect(adaptive['output_config']).toEqual({ effort: 'high' })
   expect(adaptive['max_tokens']).toBe(2048)
 
-  // kimi-code k3-256k marks off: null — it cannot disable thinking, so an off
+  // kimi-code k3-256k reports no way to disable thinking, so an off
   // turn sends nothing and the server's adaptive default stands. Its ladder
   // is low/high/max, and max maps straight through.
   const kimiOff = await capture(
@@ -246,6 +250,7 @@ test('Anthropic adaptive models take thinking: adaptive plus output_config effor
   )
   expect(kimiOn['thinking']).toEqual({ type: 'adaptive', display: 'summarized' })
   expect(kimiOn['output_config']).toEqual({ effort: 'max' })
+  clearReportedCapabilities()
 })
 
 function sse(payload: string): string {

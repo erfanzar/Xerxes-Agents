@@ -203,8 +203,20 @@ export function permissionDescription(call: Pick<ToolCall, 'function'>): string 
   return `${name}(${String(firstValue ?? '').slice(0, 60)})`
 }
 
-export function deniedResult(call: ToolCall): string {
-  return `Permission denied for ${call.function.name}.`
+/** Who refused a call; the result tells the model, since each calls for a different next step. */
+export type DenialSource = 'user' | 'policy' | 'hook'
+
+/**
+ * The tool result for a refused call. It names who refused and what to do
+ * next — a denial the model cannot tell from a crash invites the same call
+ * again, reworded, until the denial budget stops the turn.
+ */
+export function deniedResult(call: ToolCall, source: DenialSource = 'policy', detail?: string): string {
+  const name = call.function.name
+  const reason = detail?.trim() ? ` Reason: ${detail.trim()}` : ''
+  if (source === 'user') return `Permission denied for ${name}: approval was declined. Do not repeat it; adjust your approach or ask the user.${reason}`
+  if (source === 'hook') return `Permission denied for ${name} by a configured hook.${reason} Do not retry it unchanged; follow the reason or report the blocker.`
+  return `Permission denied for ${name} by policy. Do not retry it unchanged; use a permitted alternative or report the blocker.${reason}`
 }
 
 export function isWritingTool(name: string): boolean {

@@ -186,6 +186,14 @@ describe('createSlashHandler', () => {
     expect(getOverlayState().schedules).toBe(false);
     expect(send).toEqual([]); expect(sys).toEqual([]);
   });
+  it('opens usage as a popup, even mid-turn, without writing to the transcript', () => {
+    const request = vi.fn();
+    const { context, send, sys } = makeContext(request);
+    createSlashHandler(context)('/usage');
+    expect(getOverlayState().usage).toBe(true);
+    expect(request).not.toHaveBeenCalled();
+    expect(send).toEqual([]); expect(sys).toEqual([]);
+  });
   it('opens context inspection without a model turn', () => {
     const { context, send, sys } = makeContext(vi.fn());
     createSlashHandler(context)('/context');

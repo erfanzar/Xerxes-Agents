@@ -11,12 +11,13 @@
  * for a provider that only has a switch is the same mistake as hardcoding
  * four levels: it invites a choice that cannot be honored.
  *
- * So levels are asked for — live, per model — wherever a provider publishes a
- * capability endpoint, and otherwise come from a per-provider table describing
- * the shape that provider documents.
+ * So levels are only ever what something reported, live, per model: the
+ * provider itself (its /models entry, Codex's catalog, Claude Code's model
+ * list), else models.dev (Kimi Code's approach). Nothing here is a list.
+ * When neither says anything, nothing is offered — never a guessed ladder.
  */
 
-import { piCatalogModelCapabilities } from './piModelCatalog.js'
+import { modelsDev, type LiveReasoning } from './modelsDev.js'
 import type { ProviderName } from './providerRegistry.js'
 
 /**
@@ -67,81 +68,42 @@ export const REASONING_OFF = 'off'
  */
 export const REASONING_ON = 'on'
 
-const GRADED: readonly ReasoningLevel[] = [
-  { effort: 'low', description: 'Fast responses with lighter reasoning' },
-  { effort: 'medium', description: 'Balances speed and reasoning depth' },
-  { effort: 'high', description: 'Greater reasoning depth for complex problems' },
-]
-
-const BUDGETED: readonly ReasoningLevel[] = [
-  { effort: 'low', description: 'Brief thinking budget' },
-  { effort: 'medium', description: 'Balanced thinking budget' },
-  { effort: 'high', description: 'Extended thinking budget' },
-]
-
-const TOGGLE: readonly ReasoningLevel[] = [
-  { effort: REASONING_ON, description: 'Enable extended thinking' },
-]
-
-interface FallbackEntry {
-  readonly defaultEffort: string | undefined
-  readonly levels: readonly ReasoningLevel[]
-  readonly shape: ReasoningShape
-}
-
-const EFFORT_FALLBACK: FallbackEntry = { defaultEffort: 'medium', levels: GRADED, shape: 'effort' }
-const BUDGET_FALLBACK: FallbackEntry = { defaultEffort: 'medium', levels: BUDGETED, shape: 'effort' }
-// No claimed default: whether a toggle provider starts with thinking on is a
-// server-side fact we do not know from the provider name alone, and showing
-// "default on" while the session runs off is exactly the lie this table used
-// to tell.
-const TOGGLE_FALLBACK: FallbackEntry = { defaultEffort: undefined, levels: TOGGLE, shape: 'toggle' }
-const INHERENT_FALLBACK: FallbackEntry = { defaultEffort: undefined, levels: [], shape: 'inherent' }
-
 /**
- * Reasoning control each provider documents, for hosts that publish no
- * capability endpoint to ask.
- *
- * These entries describe documented behavior rather than behavior Xerxes has
- * measured — unlike the Codex catalog, none of these providers can be probed
- * without a key. Sets built from this table are reported with
- * `source: 'fallback'` so a caller can tell the difference.
+ * A picker set from reported reasoning: effort levels as given, `off` only
+ * where it can be switched off, a plain switch when it reasons without
+ * levels, nothing when it does not reason (or cannot be told apart).
  */
-const FALLBACK_LEVELS: Partial<Record<ProviderName, FallbackEntry>> = {
-  // Budget-based extended thinking; Xerxes maps the rungs onto token budgets.
-  anthropic: BUDGET_FALLBACK,
-  'claude-code': BUDGET_FALLBACK,
-  // Documented effort scales.
-  openai: EFFORT_FALLBACK,
-  openrouter: EFFORT_FALLBACK,
-  // Thinking budget rather than an effort word, mapped from the same rungs.
-  gemini: BUDGET_FALLBACK,
-  // Switch-shaped: thinking is enabled or disabled, with no gradations.
-  zhipu: TOGGLE_FALLBACK,
-  qwen: TOGGLE_FALLBACK,
-  kimi: TOGGLE_FALLBACK,
-  'kimi-code': TOGGLE_FALLBACK,
-  minimax: TOGGLE_FALLBACK,
-  // Reasoning follows from the chosen model rather than a request field.
-  deepseek: INHERENT_FALLBACK,
-}
-
-/**
- * Locally hosted and custom endpoints serve whatever model the user loaded, so
- * the control is genuinely unknown. A toggle is the safe assumption: it never
- * offers a gradation the backend cannot honor.
- */
-const UNKNOWN_FALLBACK: FallbackEntry = TOGGLE_FALLBACK
-
-/** Levels to offer when the provider cannot be asked. */
-export function fallbackReasoningLevels(providerName: ProviderName | undefined): ReasoningLevelSet {
-  const entry = (providerName ? FALLBACK_LEVELS[providerName] : undefined) ?? UNKNOWN_FALLBACK
-  return {
-    defaultEffort: entry.defaultEffort,
-    levels: entry.levels,
-    shape: entry.shape,
-    source: 'fallback', provenance: 'provider_fallback',
+export function liveReasoningLevels(reasoning: LiveReasoning | undefined, source: 'provider' | 'catalog'): ReasoningLevelSet | undefined {
+  if (!reasoning) return undefined
+  const provenance = source === 'provider' ? 'provider_reported' as const : 'bundled_catalog' as const
+  if (!reasoning.supported) return { defaultEffort: undefined, levels: [], shape: 'inherent', source: 'provider', provenance, canDisable: false }
+  if (reasoning.efforts.length) {
+    return {
+      defaultEffort: reasoning.defaultEffort && reasoning.efforts.includes(reasoning.defaultEffort) ? reasoning.defaultEffort : undefined,
+      levels: reasoning.efforts.map(effort => ({ effort })),
+      shape: 'effort',
+      source: 'provider',
+      provenance,
+      canDisable: reasoning.canDisable,
+    }
   }
+  // Reasons, no levels: on/off where it can be switched off, else always on.
+  return reasoning.canDisable
+    ? { defaultEffort: undefined, levels: [{ effort: REASONING_ON }], shape: 'toggle', source: 'provider', provenance, canDisable: true }
+    : { defaultEffort: undefined, levels: [], shape: 'inherent', source: 'provider', provenance, canDisable: false }
+}
+
+/** True when nothing reported the model's reasoning controls (see fallbackReasoningLevels). */
+export function reasoningUnreported(set: ReasoningLevelSet): boolean {
+  return set.source === 'fallback' && set.provenance === 'provider_fallback'
+}
+
+/**
+ * Nothing reported this model's reasoning controls: nothing is offered. The
+ * provider's own default applies (no field is sent).
+ */
+export function fallbackReasoningLevels(_providerName?: ProviderName): ReasoningLevelSet {
+  return { defaultEffort: undefined, levels: [], shape: 'inherent', source: 'fallback', provenance: 'provider_fallback', canDisable: false }
 }
 
 /** Wrap a provider-reported list, preserving its order and descriptions. */
@@ -153,58 +115,18 @@ export function providerReasoningLevels(
 }
 
 /**
- * pi-ai's full effort ladder (models.js EXTENDED_THINKING_LEVELS), minus the
- * Xerxes-side `off` switch that {@link selectableEfforts} prepends.
- */
-const EXTENDED_THINKING_LEVELS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
-
-const LEVEL_DESCRIPTIONS: Readonly<Record<string, string>> = {
-  minimal: 'Bare minimum reasoning; fastest with thinking on',
-  low: 'Fast responses with lighter reasoning',
-  medium: 'Balances speed and reasoning depth',
-  high: 'Greater reasoning depth for complex problems',
-  xhigh: 'Deepest extended reasoning',
-  max: 'Maximum reasoning the model supports',
-}
-
-/**
- * Per-model reasoning levels exactly as pi-ai derives them
- * (getSupportedThinkingLevels): a non-reasoning model has nothing to select;
- * a reasoning model offers the ladder filtered by its thinking-level map —
- * a `null` mapping disables the rung, and `xhigh`/`max` exist only when the
- * map names them explicitly. The catalog entry is authoritative, so the set
- * reports `source: 'provider'`.
+ * What models.dev says about a model's reasoning, for providers that do not
+ * describe their own models (Kimi Code's approach). `baseUrl` matches the
+ * profile to the right models.dev provider.
  */
 export function catalogReasoningLevels(
   model: string,
   providerName: ProviderName | undefined,
+  baseUrl?: string,
 ): ReasoningLevelSet | undefined {
-  if (!providerName || !model.trim()) return undefined
-  const capabilities = piCatalogModelCapabilities(model, providerName)
-  if (!capabilities) return undefined
-  if (!capabilities.reasoning) {
-    return { defaultEffort: undefined, levels: [], shape: 'inherent', source: 'provider', provenance: 'bundled_catalog', canDisable: false }
-  }
-  const map = capabilities.thinkingLevelMap
-  const canDisable = map?.off !== null
-  const levels: ReasoningLevel[] = EXTENDED_THINKING_LEVELS
-    .filter(level => {
-      const mapped = map?.[level]
-      if (mapped === null) return false
-      if (level === 'xhigh' || level === 'max') return mapped !== undefined
-      return true
-    })
-    .map(effort => ({
-      effort,
-      ...(LEVEL_DESCRIPTIONS[effort] === undefined ? {} : { description: LEVEL_DESCRIPTIONS[effort] }),
-    }))
-  if (!levels.length) {
-    return { defaultEffort: undefined, levels: [], shape: 'inherent', source: 'provider', provenance: 'bundled_catalog', canDisable }
-  }
-  const defaultEffort = levels.some(level => level.effort === 'medium')
-    ? 'medium'
-    : levels[Math.floor((levels.length - 1) / 2)]?.effort
-  return { defaultEffort, levels, shape: 'effort', source: 'provider', provenance: 'bundled_catalog', canDisable }
+  if (!model.trim()) return undefined
+  const found = modelsDev.find({ model, ...(providerName ? { provider: providerName } : {}), ...(baseUrl ? { baseUrl } : {}) })
+  return liveReasoningLevels(found?.reasoning, 'catalog')
 }
 
 /** Every value the user may select, including the Xerxes-side off switch. */
@@ -230,32 +152,13 @@ export function selectableEfforts(set: ReasoningLevelSet): readonly string[] {
 export function resolveEffort(set: ReasoningLevelSet, requested: string): string | undefined {
   const clean = requested.trim().toLowerCase()
   if (!clean) return undefined
+  // Nothing reported this model's levels: an effort someone set explicitly
+  // goes to the provider as written (it validates); only reported data is
+  // grounds to refuse one.
+  if (reasoningUnreported(set)) return requested.trim()
   if (set.shape === 'inherent') return undefined
   if (clean === REASONING_OFF) return set.canDisable === false ? undefined : REASONING_OFF
   return set.levels.find(level => level.effort.toLowerCase() === clean)?.effort
-}
-
-/**
- * Clamp a known ladder word to the nearest rung the model actually offers
- * (pi-ai clampThinkingLevel): search upward first, then downward. Unknown
- * words still resolve to `undefined` so a typo stays a usage error rather
- * than silently becoming a different effort.
- */
-export function clampEffort(set: ReasoningLevelSet, requested: string): string | undefined {
-  if (set.shape !== 'effort' || !set.levels.length) return undefined
-  const clean = requested.trim().toLowerCase()
-  if (!EXTENDED_THINKING_LEVELS.some(level => level === clean)) return undefined
-  const available = set.levels.map(level => level.effort)
-  const at = EXTENDED_THINKING_LEVELS.indexOf(clean as (typeof EXTENDED_THINKING_LEVELS)[number])
-  for (let index = at; index < EXTENDED_THINKING_LEVELS.length; index++) {
-    const candidate = EXTENDED_THINKING_LEVELS[index]
-    if (candidate && available.includes(candidate)) return candidate
-  }
-  for (let index = at - 1; index >= 0; index--) {
-    const candidate = EXTENDED_THINKING_LEVELS[index]
-    if (candidate && available.includes(candidate)) return candidate
-  }
-  return available[0]
 }
 
 /**
@@ -274,12 +177,12 @@ export function isGradedEffort(effort: string | undefined): boolean {
 /** Human-readable note describing how a provider exposes reasoning. */
 export function reasoningShapeNote(set: ReasoningLevelSet): string {
   if (set.shape === 'inherent') {
-    return 'this provider selects reasoning by model; there is nothing to set'
+    if (set.source !== 'provider') return 'nothing reports reasoning controls for this model; the provider decides'
+    return set.levels.length ? 'this provider selects reasoning by model; there is nothing to set' : 'this model decides its own reasoning; there is nothing to set'
   }
   if (set.shape === 'toggle') {
     return 'this provider only switches thinking on or off'
   }
-  return set.source === 'provider'
-    ? 'reported by the provider for this model'
-    : 'provider publishes no level list; documented defaults shown'
+  if (set.source !== 'provider') return 'nothing reports reasoning controls for this model; the provider decides'
+  return set.provenance === 'bundled_catalog' ? 'from models.dev for this model' : 'reported by the provider for this model'
 }

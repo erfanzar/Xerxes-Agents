@@ -4,7 +4,7 @@ import { resolvedProfileContextLimit, resolvedProfileMaxOutputTokens, type Profi
 import { createLlmClient } from '../llms/client.js'
 import { createHash } from 'node:crypto'
 import { getProviderConfig, resolveProvider } from '../llms/providerRegistry.js'
-import { piCatalogModelCapabilities } from '../llms/piModelCatalog.js'
+import { wireCapability } from '../llms/modelsDev.js'
 import { codexBaseUrl } from '../auth/codexAuth.js'
 import type { NativeSubagentHostOptions } from './subagentHost.js'
 import { unavailableAgentProfile } from '../runtime/modelInventory.js'
@@ -18,7 +18,7 @@ export function agentProviderResolver(
 ): NonNullable<NativeSubagentHostOptions['resolveProviderProfile']> {
   return (name, model, expectedRoute) => {
     const profile = profiles.get(name)
-    if (!profile || profile.provider === 'claude-code') throw unavailableAgentProfile(name, model, profiles.list?.() ?? [])
+    if (!profile) throw unavailableAgentProfile(name, model, profiles.list?.() ?? [])
     const route = providerRouteIdentity(model, { provider: profile.provider, baseUrl: profile.base_url })
     if (expectedRoute !== undefined && route !== expectedRoute) {
       throw new Error('Agent provider route changed; restore the original provider configuration or dispatch new work')
@@ -38,9 +38,9 @@ export function providerRouteIdentity(
 ): string {
   const provider = resolveProvider(model, { provider: connection.provider, base_url: connection.baseUrl })
   const config = getProviderConfig(provider)
-  const catalog = ['cloudflare-ai-gateway', 'fireworks', 'opencode', 'opencode-go'].includes(provider)
-    ? piCatalogModelCapabilities(model, provider) : undefined
-  const baseUrl = connection.baseUrl || (provider === 'openai-codex' ? codexBaseUrl() : catalog?.baseUrl ?? config.baseUrl) || ''
+  // A gateway model may name its own endpoint in its catalog entry (models.dev).
+  const wire = wireCapability({ provider, model })
+  const baseUrl = connection.baseUrl || (provider === 'openai-codex' ? codexBaseUrl() : wire.apiBaseUrl ?? config.baseUrl) || ''
   // These noncredential selectors can change a deployment even when the profile
   // itself is unchanged. OAuth account rotation is deliberately not fingerprinted.
   const environmentKeys: readonly string[] = provider === 'azure'
@@ -50,7 +50,7 @@ export function providerRouteIdentity(
     : provider === 'cloudflare-ai-gateway' || provider === 'cloudflare-workers-ai'
       ? ['CLOUDFLARE_ACCOUNT_ID', 'CLOUDFLARE_GATEWAY_ID'] : []
   return createHash('sha256').update(JSON.stringify({
-    version: 1, provider, baseUrl, transport: catalog?.api ?? config.transport,
+    version: 1, provider, baseUrl, transport: wire.api ?? config.transport,
     responsesApi: connection.responsesApi === true,
     environment: environmentKeys.map(key => [key, process.env[key] ?? '']),
   })).digest('hex')
@@ -59,7 +59,7 @@ export function providerRouteIdentity(
 export function agentProviderRouteResolver(profiles: AgentProfiles): (name: string, model: string) => string {
   return (name, model) => {
     const profile = profiles.get(name)
-    if (!profile || profile.provider === 'claude-code') throw unavailableAgentProfile(name, model, profiles.list?.() ?? [])
+    if (!profile) throw unavailableAgentProfile(name, model, profiles.list?.() ?? [])
     return providerRouteIdentity(model, { provider: profile.provider, baseUrl: profile.base_url })
   }
 }

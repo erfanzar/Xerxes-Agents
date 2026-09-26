@@ -17,6 +17,10 @@ import { ProfileStore } from '../../bridge/profiles.js'
 import { DaemonTranscriptStore } from '../../session/daemonTranscript.js'
 import { localCapabilitySnapshot } from '../../daemon/localReasoningCapabilities.js'
 import { catalogReasoningLevels, fallbackReasoningLevels } from '../../llms/reasoningLevels.js'
+import { seedModelsDev } from '../../../test/fixtures/modelsDev.js'
+
+// Model capabilities come from models.dev at runtime; tests use its fixture.
+seedModelsDev()
 
 async function fixture(provider: LlmClient, model = 'gpt-4o') {
   const dir = await realpath(await mkdtemp(join(tmpdir(), 'xr-bind-')))

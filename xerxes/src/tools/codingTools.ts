@@ -116,7 +116,7 @@ export const MOVE_FILE_DEFINITION = codingDefinition(
 
 export const DELETE_FILE_DEFINITION = codingDefinition(
   'delete_file',
-  'Delete a workspace file or directory. Non-trivial directories require force=true.',
+  'Delete a workspace file or directory. Non-trivial directories require force=true. List or read the path first; there is no undo.',
   {
     path: { type: 'string', description: 'Workspace-relative path to delete.' },
     force: { type: 'boolean', default: false },

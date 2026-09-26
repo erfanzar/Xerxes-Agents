@@ -15,6 +15,7 @@
  * has to be persisted: identity is derived from the token on use.
  */
 
+import { reportModelCapability } from '../llms/modelsDev.js'
 import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -632,13 +633,30 @@ export async function fetchCodexModelCatalog(
     const id = stringField(record, 'id') ?? stringField(record, 'slug')
     if (!id) continue
     const contextLimit = record?.context_window
+    const reasoningLevels = reasoningLevelsFrom(record?.supported_reasoning_levels)
+    const defaultReasoningLevel = stringField(record, 'default_reasoning_level')
     models.push({
       id,
       displayName: stringField(record, 'display_name'),
       contextLimit: typeof contextLimit === 'number' && contextLimit > 0 ? contextLimit : undefined,
-      defaultReasoningLevel: stringField(record, 'default_reasoning_level'),
+      defaultReasoningLevel,
       harnessCoupled: isHarnessCoupled(record),
-      reasoningLevels: reasoningLevelsFrom(record?.supported_reasoning_levels),
+      reasoningLevels,
+    })
+    // What the plan's catalog says about talking to this model, for the
+    // request builders: its tool types and effort ladder, as reported.
+    const efforts = reasoningLevels.map(level => level.effort)
+    const offEffort = efforts.find(effort => effort.toLowerCase() === 'none')
+    reportModelCapability(CODEX_PROVIDER, id, {
+      grammarTools: record?.apply_patch_tool_type === 'freeform',
+      toolSearch: record?.supports_search_tool === true,
+      ...(efforts.length ? { reasoning: {
+        supported: true,
+        canDisable: offEffort !== undefined,
+        efforts: efforts.filter(effort => effort !== offEffort),
+        ...(offEffort ? { offEffort } : {}),
+        ...(defaultReasoningLevel ? { defaultEffort: defaultReasoningLevel } : {}),
+      } } : {}),
     })
   }
   return options.excludeHarnessModels ? models.filter(model => !model.harnessCoupled) : models

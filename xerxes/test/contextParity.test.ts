@@ -27,13 +27,10 @@ import {
 } from '../src/context/index.js'
 
 test('provider-aware token counting preserves the Python model-routing and capacity contracts', () => {
-  expect(ProviderTokenCounter.detectProvider('gpt-4o')).toBe('openai')
-  expect(ProviderTokenCounter.detectProvider('o1-preview')).toBe('openai')
-  expect(ProviderTokenCounter.detectProvider('claude-3-sonnet')).toBe('anthropic')
-  expect(ProviderTokenCounter.detectProvider('gemini-pro')).toBe('google')
-  expect(ProviderTokenCounter.detectProvider('palm-2')).toBe('google')
-  expect(ProviderTokenCounter.detectProvider('llama-3.3')).toBe('meta')
-  expect(ProviderTokenCounter.detectProvider('mixtral-8x7b')).toBe('mistral')
+  // Only an explicit prefix names the provider; a bare name is not guessed.
+  expect(ProviderTokenCounter.detectProvider('openai/gpt-4o')).toBe('openai')
+  expect(ProviderTokenCounter.detectProvider('google/gemini-pro')).toBe('google')
+  expect(ProviderTokenCounter.detectProvider('gpt-4o')).toBeUndefined()
   expect(ProviderTokenCounter.detectProvider('unknown-model')).toBeUndefined()
   expect(ProviderTokenCounter.detectProvider('')).toBeUndefined()
 
@@ -42,7 +39,7 @@ test('provider-aware token counting preserves the Python model-routing and capac
   expect(ProviderTokenCounter.countTokensForProvider(messages, 'openai', 'gpt-4')).toBeGreaterThan(0)
   expect(ProviderTokenCounter.countTokensForProvider('hello', undefined, 'gpt-4')).toBeGreaterThan(0)
 
-  const counter = new SmartTokenCounter({ model: 'gpt-4' })
+  const counter = new SmartTokenCounter({ model: 'openai/gpt-4' })
   expect(counter.provider).toBe('openai')
   expect(new SmartTokenCounter({ provider: 'anthropic', model: 'gpt-4' }).provider).toBe('anthropic')
   expect(new SmartTokenCounter().provider).toBeUndefined()

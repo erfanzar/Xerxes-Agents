@@ -1,78 +1,83 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { expect, test } from 'bun:test'
+import { afterEach, beforeEach, expect, test } from 'bun:test'
 
+import { reportedReasoning } from '../src/daemon/modelDiscovery.js'
+import { reasoningFromModelsDev } from '../src/llms/modelsDev.js'
 import {
   catalogReasoningLevels,
-  providerReasoningLevels,
-  clampEffort,
   fallbackReasoningLevels,
+  liveReasoningLevels,
+  providerReasoningLevels,
   resolveEffort,
   selectableEfforts,
 } from '../src/llms/reasoningLevels.js'
+import { clearModelsDev, seedModelsDev } from './fixtures/modelsDev.js'
 
-test('catalog levels mirror pi-ai getSupportedThinkingLevels per model', () => {
-  // gpt-5: full ladder minimal..high, xhigh/max explicitly disabled.
-  const gpt5 = catalogReasoningLevels('openai/gpt-5', 'openai')
-  expect(gpt5?.shape).toBe('effort')
-  expect(gpt5?.source).toBe('provider')
-  expect(gpt5?.levels.map(level => level.effort)).toEqual(['minimal', 'low', 'medium', 'high'])
-  expect(gpt5?.defaultEffort).toBe('medium')
+beforeEach(() => seedModelsDev())
+afterEach(() => clearModelsDev())
 
-  // gpt-5-pro: only high — the null rungs are honored, not just xhigh/max.
-  const pro = catalogReasoningLevels('openai/gpt-5-pro', 'openai')
-  expect(pro?.levels.map(level => level.effort)).toEqual(['high'])
-  expect(pro?.defaultEffort).toBe('high')
-
-  // gpt-5.6-luna: max exists only because the map names it.
-  const luna = catalogReasoningLevels('openai/gpt-5.6-luna', 'openai')
-  expect(luna?.levels.map(level => level.effort)).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
-})
-
-test('non-reasoning models offer nothing and unknown models defer to the fallback', () => {
-  const chat = catalogReasoningLevels('openai/gpt-5-chat-latest', 'openai')
-  // reasoning: false in the catalog → nothing selectable (pi returns ["off"]).
-  expect(chat?.shape).toBe('inherent')
-  expect(selectableEfforts(chat!)).toEqual([])
-
+test('levels are whatever models.dev reports for the model — never a built-in ladder', () => {
+  const gpt5 = catalogReasoningLevels('openai/gpt-5', 'openai')!
+  expect(selectableEfforts(gpt5)).toEqual(['minimal', 'low', 'medium', 'high'])
+  // Efforts without `none` or a toggle: thinking is always on, so no off row.
+  expect(gpt5.canDisable).toBe(false)
+  // `none` among the values is the off switch.
+  const gpt51 = catalogReasoningLevels('gpt-5.1', 'openai')!
+  expect(selectableEfforts(gpt51)).toEqual(['off', 'low', 'medium', 'high'])
+  // A token-budget model (Claude) reasons without levels: a plain switch.
+  expect(selectableEfforts(catalogReasoningLevels('claude-haiku-4-5', 'anthropic')!)).toEqual(['off', 'on'])
+  // A model that does not reason offers nothing.
+  expect(selectableEfforts(catalogReasoningLevels('gpt-4o', 'openai')!)).toEqual([])
+  // Not described anywhere: nothing, not a guess.
   expect(catalogReasoningLevels('openai/definitely-not-a-model', 'openai')).toBeUndefined()
   expect(catalogReasoningLevels('', 'openai')).toBeUndefined()
 })
 
-test('clampEffort lands on the nearest offered rung, upward first', () => {
-  const gpt5 = catalogReasoningLevels('openai/gpt-5', 'openai')!
-  // xhigh is not offered; clamp rises to it, fails, then falls to high.
-  expect(clampEffort(gpt5, 'xhigh')).toBe('high')
-  expect(clampEffort(gpt5, 'high')).toBe('high')
-  // On gpt-5-pro (high only), low clamps upward to high.
-  const pro = catalogReasoningLevels('openai/gpt-5-pro', 'openai')!
-  expect(clampEffort(pro, 'low')).toBe('high')
-  expect(clampEffort(pro, 'minimal')).toBe('high')
-  // Unknown words stay usage errors.
-  expect(clampEffort(gpt5, 'galaxy-brain')).toBeUndefined()
-  // Inherent and fallback-table sets never clamp.
-  expect(clampEffort(catalogReasoningLevels('openai/gpt-5-chat-latest', 'openai')!, 'low')).toBeUndefined()
-  expect(clampEffort(fallbackReasoningLevels('zhipu'), 'low')).toBeUndefined()
+test('without models.dev the answer is "unreported", which offers nothing', () => {
+  clearModelsDev()
+  expect(catalogReasoningLevels('gpt-5', 'openai')).toBeUndefined()
+  const none = fallbackReasoningLevels('openai')
+  expect(selectableEfforts(none)).toEqual([])
+  expect(none.provenance).toBe('provider_fallback')
 })
 
-test('resolveEffort stays strict; clamping is the explicit second step', () => {
+test('Kimi Code\'s rules: effort values, `none` = off, toggle/budget = switchable, efforts alone = always on', () => {
+  expect(reasoningFromModelsDev(true, [{ type: 'effort', values: ['low', 'high', 'max'] }])).toEqual({ supported: true, canDisable: false, efforts: ['low', 'high', 'max'] })
+  expect(reasoningFromModelsDev(true, [{ type: 'toggle' }, { type: 'effort', values: ['low', 'high'] }])).toMatchObject({ canDisable: true, efforts: ['low', 'high'] })
+  expect(reasoningFromModelsDev(true, [{ type: 'effort', values: ['none', 'low'] }])).toMatchObject({ canDisable: true, efforts: ['low'], offEffort: 'none' })
+  expect(reasoningFromModelsDev(true, [{ type: 'budget_tokens', min: 1024 }])).toMatchObject({ canDisable: true, efforts: [] })
+  expect(reasoningFromModelsDev(false, undefined)).toEqual({ supported: false, canDisable: false, efforts: [] })
+  expect(reasoningFromModelsDev(undefined, undefined)).toBeUndefined()
+})
+
+test('a provider\'s own /models fields win: Kimi\'s think_efforts and supports_thinking_type', () => {
+  // Captured from api.kimi.com/coding/v1/models on 2026-09-24.
+  const k3 = reportedReasoning({ id: 'k3', context_length: 1048576, supports_reasoning: true, supports_thinking_type: 'only', think_efforts: { support: true, valid_efforts: ['low', 'high', 'max'], default_effort: 'max' } })
+  expect(k3).toEqual({ supported: true, canDisable: false, efforts: ['low', 'high', 'max'], defaultEffort: 'max' })
+  const set = liveReasoningLevels(k3, 'provider')!
+  expect(selectableEfforts(set)).toEqual(['low', 'high', 'max'])
+  expect(set.defaultEffort).toBe('max')
+  expect(set.provenance).toBe('provider_reported')
+  expect(reportedReasoning({ id: 'x', supports_thinking_type: 'both' })).toMatchObject({ supported: true, canDisable: true, efforts: [] })
+  expect(reportedReasoning({ id: 'x', supports_thinking_type: 'no', supports_reasoning: true })).toEqual({ supported: false, canDisable: false, efforts: [] })
+  // OpenRouter states support through its supported parameters.
+  expect(reportedReasoning({ id: 'x', supported_parameters: ['tools', 'reasoning'] })).toMatchObject({ supported: true, canDisable: true })
+  // A bare id says nothing.
+  expect(reportedReasoning({ id: 'glm-4.6', owned_by: 'z-ai' })).toBeUndefined()
+})
+
+test('resolveEffort refuses only against reported levels; an unreported model takes what was set', () => {
   const gpt5 = catalogReasoningLevels('openai/gpt-5', 'openai')!
-  expect(resolveEffort(gpt5, 'xhigh')).toBeUndefined()
   expect(resolveEffort(gpt5, 'HIGH')).toBe('high')
-  // gpt-5's map marks off: null — the model cannot disable thinking, so off
-  // neither resolves nor appears among the selectable efforts.
-  expect(gpt5.canDisable).toBe(false)
-  expect(selectableEfforts(gpt5)).toEqual(['minimal', 'low', 'medium', 'high'])
+  expect(resolveEffort(gpt5, 'xhigh')).toBeUndefined()
   expect(resolveEffort(gpt5, 'off')).toBeUndefined()
-  // gpt-5.1 maps off to 'none': disabling is a real choice there.
-  const gpt51 = catalogReasoningLevels('openai/gpt-5.1', 'openai')!
-  expect(gpt51.canDisable).toBe(true)
-  expect(selectableEfforts(gpt51)[0]).toBe('off')
-  expect(resolveEffort(gpt51, 'off')).toBe('off')
+  expect(resolveEffort(catalogReasoningLevels('gpt-5.1', 'openai')!, 'off')).toBe('off')
+  expect(resolveEffort(fallbackReasoningLevels('custom'), 'high')).toBe('high')
 })
 
-test('reasoning provenance distinguishes bundled data from live provider declarations', () => {
+test('provenance says where the levels came from', () => {
   expect(catalogReasoningLevels('gpt-5', 'openai')?.provenance).toBe('bundled_catalog')
   expect(fallbackReasoningLevels('kimi').provenance).toBe('provider_fallback')
   expect(providerReasoningLevels([{ effort: 'high' }], 'high').provenance).toBe('provider_reported')

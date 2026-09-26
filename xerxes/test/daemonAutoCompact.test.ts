@@ -22,6 +22,10 @@ import type {
   LlmDelta,
 } from "../src/llms/client.js";
 import type { DaemonEvent, DaemonSession, TurnRunner } from "../src/daemon/runtime.js";
+import { seedModelsDev } from './fixtures/modelsDev.js'
+
+// Model capabilities come from models.dev at runtime; tests use its fixture.
+seedModelsDev()
 
 interface Frame {
   readonly error?: {

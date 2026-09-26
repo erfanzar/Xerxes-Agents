@@ -320,12 +320,17 @@ export class ToolRegistry implements ToolExecutor {
     if (!this.deferredToolLoading) {
       return this.definitions(agentId)
     }
-    const revealed = revealedToolNames(messages)
-    return [...this.entries.values()]
+    // The core in registration order, then loaded tools in the order they
+    // were loaded: a new load appends to the tools array instead of landing
+    // mid-list, which changed the cached prefix from that point on.
+    const picked = [...this.entries.values()]
       .map(entries => this.pick(entries, agentId))
-      .filter((entry): entry is RegisteredTool =>
-        entry !== undefined && (!entry.capabilities.defer || revealed.has(entry.definition.function.name)))
-      .map(entry => entry.definition)
+      .filter((entry): entry is RegisteredTool => entry !== undefined)
+    const deferred = new Map(picked.filter(entry => entry.capabilities.defer).map(entry => [entry.definition.function.name, entry.definition]))
+    return [
+      ...picked.filter(entry => !entry.capabilities.defer).map(entry => entry.definition),
+      ...[...revealedToolNames(messages)].flatMap(name => deferred.get(name) ?? []),
+    ]
   }
 
   /**
@@ -416,10 +421,18 @@ function makeRegistered(
  * the system prompt, and an unchanged surface renders byte-identically, so the
  * provider's prefix cache survives.
  */
+/**
+ * Guidance text shared by several tools (WriteFile and FileEditTool carry the
+ * same write rules) renders once, under all of their names, instead of once
+ * per tool on every turn.
+ */
 export function renderToolGuidance(segments: readonly ToolGuidanceSegment[]): string {
-  return segments
-    .map(segment => `[Tool usage: ${segment.name}]\n${segment.text.trim()}`)
-    .join('\n\n')
+  const byText = new Map<string, string[]>()
+  for (const segment of segments) {
+    const text = segment.text.trim()
+    byText.set(text, [...(byText.get(text) ?? []), segment.name])
+  }
+  return [...byText].map(([text, names]) => `[Tool usage: ${names.join(', ')}]\n${text}`).join('\n\n')
 }
 
 function oneLine(description: string): string {

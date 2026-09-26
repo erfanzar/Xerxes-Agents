@@ -13,7 +13,8 @@
  */
 
 import type { AgentMember, Block, ToolItem } from './types.js'
-import { transcriptContent } from './transcriptContent.js'
+import { harnessOriginOf } from './types.js'
+import { transcriptContent, isLegacyHarnessPrompt } from './transcriptContent.js'
 
 /** One contiguous run of same-kind scratch events inside an active turn. */
 interface ToolRun {
@@ -575,6 +576,8 @@ export function blocksFromStoredMessages(messages: unknown, hydration: StoredHyd
     const content = transcriptContent(record)
     if (typeof content === 'string') {
       if (!content.trim()) { emitCalls(); continue }
+      // The harness wrote it (goal round, monitor, reminder): not shown.
+      if (role === 'user' && (harnessOriginOf(record.origin) || isLegacyHarnessPrompt(content))) { emitCalls(); continue }
       if (role === 'user') builder.pushUser(content, record.xerxes_compaction_summary === true)
       else if (role === 'assistant') builder.push('text_part', { text: content })
       else if (role !== 'system') builder.push('think_part', { think: content })
@@ -613,7 +616,7 @@ export function blocksFromStoredMessages(messages: unknown, hydration: StoredHyd
         else builder.push('text_part', { text })
       }
     }
-    if (userParts.length) builder.pushUser(userParts.join('\n'), record.xerxes_compaction_summary === true)
+    if (userParts.length && !harnessOriginOf(record.origin)) builder.pushUser(userParts.join('\n'), record.xerxes_compaction_summary === true)
     emitCalls()
   }
   return [...builder.all()]

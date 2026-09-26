@@ -27,6 +27,7 @@ import { PlanStateManager } from './plans.js'
 import { PtySessionManager } from './pty.js'
 import { SpawnedAgentManager, type SpawnedAgentDescriptor, type SpawnedAgentSnapshot } from './subagents.js'
 import { UserPromptManager } from './userPrompt.js'
+import { ASK_USER_POLICY } from '../tools/askUserPolicy.js'
 
 export interface OperatorStateOptions {
   readonly agentResolver?: (agentId: string | undefined) => SpawnedAgentDescriptor | undefined
@@ -270,7 +271,7 @@ export class OperatorState {
         },
       },
       {
-        definition: definition('ask_user', 'Pause the run and ask the user a clarification question.', {
+        definition: definition('ask_user', ASK_USER_POLICY + ' Pauses the run until they answer.', {
           question: stringSchema('Question shown to the user.'),
           options: stringArraySchema('Optional selectable choices.'),
           allow_freeform: booleanSchema('Whether custom text answers are allowed.'),

@@ -547,3 +547,47 @@ function sseResponse(events: readonly Record<string, unknown>[]): Response {
   const body = `${events.map(event => `data: ${JSON.stringify(event)}\n\n`).join('')}data: [DONE]\n\n`
   return new Response(body, { headers: { 'Content-Type': 'text/event-stream' } })
 }
+
+test('OpenRouter marks cache breakpoints only for models billed with a cache-write price', async () => {
+  const { reportModelCapability, clearReportedCapabilities } = await import('../src/llms/modelsDev.js')
+  const send = async (model: string) => {
+    let payload: Record<string, unknown> | undefined
+    const client = new OpenAiCompatibleClient({
+      providerName: 'openrouter', apiKey: 'test-key', baseUrl: 'https://openrouter.ai/api/v1',
+      fetchImplementation: async (_input, init) => { payload = JSON.parse(String(init?.body)) as Record<string, unknown>; return sseResponse([]) },
+    })
+    await collect(client.stream({ model, messages: [
+      { role: 'system', content: 'You are Xerxes.' },
+      { role: 'user', content: 'Read a.ts' },
+      { role: 'assistant', content: '', tool_calls: [{ id: 'c1', type: 'function', function: { name: 'read', arguments: { path: 'a.ts' } } }] },
+      { role: 'tool', tool_call_id: 'c1', name: 'read', content: 'export {}' },
+    ] }))
+    return payload!.messages as Record<string, unknown>[]
+  }
+  try {
+    // What OpenRouter's /models said: an explicit cache-write price.
+    reportModelCapability('openrouter', 'anthropic/claude-sonnet-5', { cost: { input: 3, cacheWrite: 3.75, cacheRead: 0.3 } })
+    const marked = await send('anthropic/claude-sonnet-5')
+    expect(marked[0]).toEqual({ role: 'system', content: [{ type: 'text', text: 'You are Xerxes.', cache_control: { type: 'ephemeral' } }] })
+    expect(marked.at(-1)).toMatchObject({ role: 'tool', content: [{ type: 'text', text: 'export {}', cache_control: { type: 'ephemeral' } }] })
+    // Messages in between are untouched, so the next step's prefix matches.
+    expect(marked[1]).toEqual({ role: 'user', content: 'Read a.ts' })
+    // Automatic-caching upstreams (no cache-write price) get the plain request.
+    reportModelCapability('openrouter', 'deepseek/deepseek-v4', { cost: { input: 0.3, cacheRead: 0.03 } })
+    const plain = await send('deepseek/deepseek-v4')
+    expect(JSON.stringify(plain)).not.toContain('cache_control')
+  } finally { clearReportedCapabilities() }
+})
+
+test('a zero in one cached-token field cannot hide a real cache read in another', async () => {
+  const client = new OpenAiCompatibleClient({
+    providerName: 'deepseek', apiKey: 'test-key', baseUrl: 'https://api.deepseek.com',
+    fetchImplementation: async () => sseResponse([
+      { choices: [{ index: 0, delta: { content: 'ok' }, finish_reason: 'stop' }] },
+      { choices: [], usage: { prompt_tokens: 600, completion_tokens: 2, prompt_tokens_details: { cached_tokens: 0 }, prompt_cache_hit_tokens: 500 } },
+    ]),
+  })
+  const events = await collect(client.stream({ model: 'deepseek-chat', messages: [{ role: 'user', content: 'hi' }] }))
+  const usage = events.find(event => 'usage' in event && event.usage)?.usage
+  expect(usage?.cacheReadTokens).toBe(500)
+})

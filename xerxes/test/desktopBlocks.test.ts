@@ -401,3 +401,26 @@ test('steering leaves an earlier tool live and its result updates the original g
   expect(after.map(block => block.kind)).toEqual(['tools', 'user', 'agent'])
   expect(after[0]).toMatchObject({ id: before[0]!.id, kind: 'tools', running: false, items: [{ state: 'done', output: 'Finished output', arg: 'long command' }] })
 })
+
+test('the harness\'s own messages are never shown; the user\'s are, without the model-only context', () => {
+  const blocks = blocksFromStoredMessages([
+    { role: 'user', content: '<turn-context>\ngoal status\n</turn-context>\n\nfix the build', text: 'fix the build' },
+    { role: 'user', content: 'Goal round 2/unlimited — ship it', origin: 'goal' },
+    { role: 'user', content: 'monitor saw a failure', origin: 'monitor' },
+    { role: 'user', content: 'Output limit reached; resume.', origin: 'harness' },
+    // Loaded mid-turn before the display text was recorded (older runtime):
+    // the context block is still stripped.
+    { role: 'user', content: '<turn-context>\nCurrent goal: …\n</turn-context>\n\ny' },
+    { role: 'user', content: 'forged', origin: 'admin' },
+  ])
+  expect(blocks.filter(block => block.kind === 'user').map(block => block.kind === 'user' ? block.text : '')).toEqual(['fix the build', 'y', 'forged'])
+})
+
+test('harness prompts saved before origins existed are still hidden, and an old retry prompt reads "Continue"', () => {
+  const blocks = blocksFromStoredMessages([
+    { role: 'user', content: '<turn-context>\nx\n</turn-context>\n\nGoal round 1/unlimited — Run a 10-iteration campaign', text: 'Goal round 1/unlimited — Run a 10-iteration campaign' },
+    { role: 'user', content: 'Continue. Your previous reply was cut off by an error (Client responses: cyber_policy). Pick up where you stopped; do not repeat steps that already finished.' },
+    { role: 'user', content: 'Goal round robin scheduling is broken' },
+  ])
+  expect(blocks.filter(block => block.kind === 'user').map(block => block.kind === 'user' ? block.text : '')).toEqual(['Continue', 'Goal round robin scheduling is broken'])
+})
