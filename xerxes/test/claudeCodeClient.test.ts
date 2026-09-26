@@ -1,6 +1,8 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { existsSync, readFileSync } from 'node:fs'
+
 import { expect, test } from 'bun:test'
 
 import { profileLabel } from '../src/bridge/profiles.js'
@@ -97,9 +99,10 @@ test('history keeps the JSON form for a value that would break the tags, and rol
 })
 
 test('the CLI runs isolated: no Claude Code tools, settings, MCP or session files, and Xerxes’s system prompt', () => {
-  const argv = claudeCodeArgv('/bin/claude', { model: 'claude-code/opus', messages: [], thinking: { effort: 'HIGH' } }, 'SYSTEM')
+  // The prompt goes by file: Linux refuses a single argument over 128 KiB (E2BIG).
+  const argv = claudeCodeArgv('/bin/claude', { model: 'claude-code/opus', messages: [], thinking: { effort: 'HIGH' } }, '/tmp/system.md')
   expect(argv).toEqual(['/bin/claude', '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
-    '--no-session-persistence', '--disable-slash-commands', '--tools', '', '--setting-sources', '', '--strict-mcp-config', '--system-prompt', 'SYSTEM',
+    '--no-session-persistence', '--disable-slash-commands', '--tools', '', '--setting-sources', '', '--strict-mcp-config', '--system-prompt-file', '/tmp/system.md',
     '--model', 'opus', '--effort', 'high'])
   expect(claudeCodeArgv('/bin/claude', { model: 'claude-code/default', messages: [], thinking: { effort: 'minimal' } }, 'S')).not.toContain('--model')
   expect(['claude-code/default', 'claude-code/auto', 'claude-code/sonnet', 'claude-opus-4-5'].map(claudeCodeModel)).toEqual([undefined, undefined, 'sonnet', 'claude-opus-4-5'])
@@ -119,8 +122,16 @@ test('a step streams visible text, returns parsed tool calls and the real usage'
     JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'Checking the file.' }] } }),
     result(),
   ])
-  const client = new ClaudeCodeClient({ executable: '/bin/claude', launch: fake.launch, workingDirectory: '/tmp/x', environment: { PATH: '/bin' } })
+  // Read the prompt file while the call is live; it is removed when the call ends.
+  let system = '', promptFile = ''
+  const launch: typeof fake.launch = (argv, options) => {
+    promptFile = argv[argv.indexOf('--system-prompt-file') + 1]!
+    system = readFileSync(promptFile, 'utf8')
+    return fake.launch(argv, options)
+  }
+  const client = new ClaudeCodeClient({ executable: '/bin/claude', launch, workingDirectory: '/tmp/x', environment: { PATH: '/bin' } })
   const { text, deltas } = await collect(client.stream({ model: 'claude-code/sonnet', tools, messages: [{ role: 'system', content: 'Be Xerxes.' }, { role: 'user', content: 'read a.ts' }] }))
+  expect(existsSync(promptFile)).toBe(false)
   expect(text).toBe('Checking the file.\n')
   expect(deltas.find(delta => delta.thinking)?.thinking).toBe('hmm')
   expect(deltas.find(delta => delta.usage)?.usage).toEqual({ inputTokens: 12, outputTokens: 34, cacheReadTokens: 5000, cacheCreationTokens: 40, reasoningTokens: 7 })
@@ -129,7 +140,6 @@ test('a step streams visible text, returns parsed tool calls and the real usage'
   expect(last.toolCalls?.map(call => call.function)).toEqual([{ name: 'read_file', arguments: { path: 'src/a.ts' } }])
   const call = fake.calls[0]!
   expect(call.cwd).toBe('/tmp/x')
-  const system = call.argv[call.argv.indexOf('--system-prompt') + 1]!
   expect(system.startsWith('Be Xerxes.\n\n# How this conversation works')).toBe(true)
   expect(system).toContain('"name":"read_file"')
   // The transcript's last block is a cache entry the next step extends.

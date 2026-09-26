@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { modelsDev } from "./llms/modelsDev.js";
+import { maintainClaudeCode } from "./llms/claudeCodeMaintenance.js";
 import { DaemonWorkspaces, type WorkspaceResources } from './daemon/workspaceResources.js';
 import { assertLegacyDaemonReleased } from './daemon/legacyDaemon.js';
 import { WorkspaceTurnRunner } from './daemon/workspaceTurnRunner.js';
@@ -1174,6 +1175,11 @@ async function runDaemonOwned(
     // Model capabilities come from providers and models.dev at runtime
     // (nothing is bundled); warm the shared catalog in the background.
     void modelsDev.load();
+    // Keep the Claude Code CLI current (or installed) when a profile uses it.
+    void maintainClaudeCode({ inUse: profileStore.list().some(profile => profile.provider === 'claude-code') }).then(outcome => {
+      if (outcome.action === 'failed') console.error(`Claude Code update failed: ${outcome.error}`);
+      else if (outcome.action !== 'skipped') console.error(`Claude Code ${outcome.action}: ${outcome.output}`);
+    });
     await channelManager.startConfigured();
   } catch (error) {
     // Cleanup must not replace the startup error or skip the remaining owners.

@@ -18,7 +18,9 @@
  * reuses the unchanged prefix from step to step instead of re-reading it.
  */
 
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { parseStreamingJson } from '@earendil-works/pi-ai'
@@ -433,7 +435,12 @@ export function claudeCodeEffort(request: Pick<CompletionRequest, 'thinking' | '
   return effort
 }
 
-export function claudeCodeArgv(executable: string, request: CompletionRequest, system: string, effortLevels?: readonly string[]): string[] {
+/**
+ * `systemPromptFile` is a path, not the prompt: Linux caps one argument at
+ * 128 KiB (MAX_ARG_STRLEN), and a system prompt with the tool protocol
+ * passes that — the launch failed with E2BIG before Claude Code started.
+ */
+export function claudeCodeArgv(executable: string, request: CompletionRequest, systemPromptFile: string, effortLevels?: readonly string[]): string[] {
   const argv = [
     executable, '-p',
     '--input-format', 'stream-json',
@@ -445,7 +452,7 @@ export function claudeCodeArgv(executable: string, request: CompletionRequest, s
     '--tools', '',
     '--setting-sources', '',
     '--strict-mcp-config',
-    '--system-prompt', system,
+    '--system-prompt-file', systemPromptFile,
   ]
   const model = claudeCodeModel(request.model)
   if (model) argv.push('--model', model)
@@ -562,11 +569,20 @@ export class ClaudeCodeClient implements LlmClient {
     ].filter(Boolean).join('\n\n')
     const input = JSON.stringify({ type: 'user', message: { role: 'user', content: withTranscriptCacheMark(claudeCodeTranscript(request.messages)) } }) + '\n'
     const known = claudeCodeCatalog.find(request.model)
-    const child = this.launch(claudeCodeArgv(this.executable(), request, system, known?.effortLevels), {
-      env: claudeCodeEnvironment(this.environment, request.maxTokens, claudeCodeThinkingOff(request)),
-      cwd: this.cwd(),
-      input,
-    })
+    // Owner-only, one per call, removed when the call ends.
+    const systemPromptFile = join(tmpdir(), `xerxes-claude-code-system-${randomUUID()}.md`)
+    writeFileSync(systemPromptFile, system, { mode: 0o600 })
+    let child: ReturnType<typeof this.launch>
+    try {
+      child = this.launch(claudeCodeArgv(this.executable(), request, systemPromptFile, known?.effortLevels), {
+        env: claudeCodeEnvironment(this.environment, request.maxTokens, claudeCodeThinkingOff(request)),
+        cwd: this.cwd(),
+        input,
+      })
+    } catch (error) {
+      rmSync(systemPromptFile, { force: true })
+      throw error
+    }
     const abort = () => child.kill()
     signal?.addEventListener('abort', abort, { once: true })
     const extractor = new FunctionCallExtractor(toolParameterTypes(request.tools ?? []))
@@ -651,6 +667,7 @@ export class ClaudeCodeClient implements LlmClient {
     } finally {
       signal?.removeEventListener('abort', abort)
       child.kill()
+      rmSync(systemPromptFile, { force: true })
     }
   }
 }

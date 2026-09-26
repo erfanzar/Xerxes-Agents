@@ -134,6 +134,12 @@ OpenAI-compatible base URL.
 Do not commit credentials. Tests and embedding hosts should pass a provider client or a synthetic
 environment map rather than reading ambient secrets.
 
+When any profile uses the `claude-code` provider, each runtime start (local, or on an SSH host)
+runs `claude update` in the background, or installs Claude Code with Anthropic's official
+installer when the CLI is missing. Startup never waits for it, and the outcome is written to the
+runtime log. Set `XERXES_CLAUDE_CODE_AUTOUPDATE=0` to turn this off. The Codex provider needs no
+CLI: Xerxes calls the ChatGPT backend directly and only reads the Codex CLI's saved sign-in.
+
 ## Daemon settings
 
 The daemon reads `$XERXES_HOME/daemon/config.json` when it exists. Its top-level native sections
