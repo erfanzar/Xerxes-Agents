@@ -22,6 +22,15 @@ const applyTheme = (): void => {
 }
 applyBackdrop(loadBackdrop())
 restoreDisplayPrefs()
+// Pause every animation while the window is not focused (see atelier.css):
+// a turn can run for an hour behind another app, redrawing spinners nobody sees.
+const setFocused = (focused: boolean): void => {
+  if (focused) root.removeAttribute('data-window-unfocused')
+  else root.setAttribute('data-window-unfocused', '')
+}
+window.addEventListener('focus', () => setFocused(true))
+window.addEventListener('blur', () => setFocused(false))
+setFocused(document.hasFocus())
 // Covered by another workspace view in the same window: draw nothing, so a
 // transparent view on top does not show this page through it.
 const setOccluded = (occluded: boolean): void => {

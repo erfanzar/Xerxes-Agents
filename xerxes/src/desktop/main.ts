@@ -10,6 +10,7 @@
 
 import { app, BrowserWindow, WebContentsView, dialog, ipcMain, nativeImage, Notification, shell, Menu, screen, type IpcMainInvokeEvent } from 'electron'
 import { existsSync, readFileSync } from 'node:fs'
+import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -456,6 +457,14 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
   })
   handle('desktop:workspace', () => selectedWorkspace)
   handle('desktop:occluded', () => occludedSurfaces.has(id))
+  // A bundled background as a data URL. Pixels read from a file:// image
+  // taint a canvas, so the renderer could not bake its blur; only the
+  // shipped backgrounds folder is readable, by exact name.
+  handle('desktop:background-data', async (_event, name: unknown) => {
+    if (typeof name !== 'string' || !/^backgrounds\/background-\d+\.jpg$/.test(name)) throw new TypeError('Invalid background')
+    const bytes = await readFile(join(here, 'renderer', name))
+    return `data:image/jpeg;base64,${bytes.toString('base64')}`
+  })
   // Transparent background with blur off: remove the native material so the
   // window is clear glass; any other choice puts it back. Verified on
   // Electron 44: removing it leaves the window clear, not black.

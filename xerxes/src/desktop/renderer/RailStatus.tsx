@@ -23,13 +23,8 @@ import { store, type Snapshot } from './store.js'
 import { Icon } from './Icon.js'
 import { toolPhrase } from './activityPhrase.js'
 import { SessionDiagnostics } from './SessionDiagnostics.js'
+import { elapsedOf } from './duration.js'
 
-/** 43 → "43s", 255 → "4m 15s". Matches the composer's clock. */
-export function elapsedOf(seconds: number): string {
-  if (seconds < 60) return `${seconds}s`
-  const minutes = Math.floor(seconds / 60)
-  return `${minutes}m ${seconds % 60}s`
-}
 
 const compact = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 })
 

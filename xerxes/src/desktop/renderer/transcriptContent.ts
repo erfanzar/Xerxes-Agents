@@ -17,7 +17,12 @@ export function withoutTurnContext(text: string): string {
  * round's prompt. Never shown.
  */
 export function isLegacyHarnessPrompt(text: string): boolean {
-  return /^Goal round \d+\/(?:\d+|unlimited) — /.test(text.trimStart())
+  const head = text.trimStart()
+  if (/^Goal round \d+\/(?:\d+|unlimited) — /.test(head)) return true
+  // Context the runtime injects (finished subagents, newly loaded tools, the
+  // todo list, outside file changes), bare or wrapped in <system-reminder>.
+  const body = head.startsWith('<system-reminder>') ? head.slice('<system-reminder>'.length).trimStart() : head
+  return /^\[(?:sub-agent events|restored context|tools now available|files changed outside this session|todo list|Workspace guard|Objective gate)\]/.test(body)
 }
 
 /** The retry button's prompt, saved before its short display text was kept. */

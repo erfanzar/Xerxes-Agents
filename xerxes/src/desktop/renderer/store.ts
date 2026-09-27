@@ -153,11 +153,11 @@ export function spawnMembersOf(name: unknown, args: unknown, callId: string): Ag
   if (Array.isArray(raw) && raw.length) {
     return raw.slice(0, 24).map((item, index) => {
       const record = (item && typeof item === 'object' ? item : {}) as Record<string, unknown>
-      return { key: `${callId}:${index}`, title: label(record, index), status: 'working', baseAgent: str(record.agent) || str(record.subagent_type), prompt: str(record.prompt), model: str(record.model), providerProfile: str(record.provider_profile) }
+      return { key: `${callId}:${index}`, title: label(record, index), status: 'working', baseAgent: str(record.agent) || str(record.subagent_type), prompt: str(record.prompt), model: str(record.model), providerProfile: str(record.provider_profile), reasoningEffort: str(record.reasoning_effort) }
     })
   }
   if (!isSpawnTool(name)) return []
-  return [{ key: `${callId}:0`, title: label(parsed, 0), status: 'working', baseAgent: str(parsed.subagent_type) || str(parsed.target_agent) || str(parsed.agent), prompt: str(parsed.prompt), model: str(parsed.model), providerProfile: str(parsed.provider_profile) }]
+  return [{ key: `${callId}:0`, title: label(parsed, 0), status: 'working', baseAgent: str(parsed.subagent_type) || str(parsed.target_agent) || str(parsed.agent), prompt: str(parsed.prompt), model: str(parsed.model), providerProfile: str(parsed.provider_profile), reasoningEffort: str(parsed.reasoning_effort) }]
 }
 
 function agentReceiptRows(value: unknown): Record<string, unknown>[] {
@@ -1223,6 +1223,13 @@ export class Store {
       // state; treat it as a move rather than resurrecting stale captures.
       return true
     }
+  }
+
+  /** A new task in `cwd`: this view for the current folder, a fresh view for another. */
+  newChatIn(cwd: string): void {
+    if (!cwd || cwd === this.frame.cwd) { this.newChat(); return }
+    if (!this.bridge.openWorkspaceWindow) { this.enterWorkspace(cwd); return }
+    void this.bridge.openWorkspaceWindow(cwd, undefined, { fresh: true }).catch(error => this.fail(error))
   }
 
   newChat(): void {

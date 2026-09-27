@@ -98,7 +98,13 @@ test('persistent surfaces never use a live backdrop-filter over a background', a
   // Live blur re-rasterized the whole surface on every repaint inside it
   // (spinners, streamed tokens) and kept the GPU busy for the whole turn.
   const css = await Bun.file(new URL('../src/desktop/renderer/atelier.css', import.meta.url)).text()
-  expect(css).toContain(':root[data-backdrop] .atelier :is(.top,.side,.chat,.desktop-rail){backdrop-filter:none;')
+  expect(css).toContain(':root[data-backdrop] .atelier :is(.top,.side,.chat,.desktop-rail,.app__body){backdrop-filter:none;')
+  // The area behind the panels is chat surface: it carries the chat layer, and
+  // the chat adds none of its own (a second tint would darken it).
+  expect(css).toContain(':root[data-backdrop] .atelier :is(.chat,.app__body){--bd-tint:var(--x-screen);')
+  expect(css).toContain(':root[data-backdrop] .atelier .chat::before{content:none}')
+  const layers = await Bun.file(new URL('../src/desktop/renderer/backdropLayers.ts', import.meta.url)).text()
+  expect(layers).toContain('.atelier .app__body')
   expect(css).not.toContain(':root[data-backdrop] .atelier .chat{backdrop-filter:var(')
   // The static layers overhang by the blur radius, which the Blur level sets.
   const tokens = deriveTheme({ kind: 'gradient', from: '#101820', to: '#203040', angle: 160, chat: 80, panels: 85, blur: 80 })!.tokens
@@ -113,4 +119,22 @@ test('a transparent background round-trips through storage with its levels', asy
   // Clear glass (system blur off) is remembered; anything else means on.
   expect(parseBackdrop({ kind: 'transparent', systemBlur: false, panels: 20 })).toEqual({ kind: 'transparent', systemBlur: false, panels: 20 })
   expect(parseBackdrop({ kind: 'transparent', systemBlur: 'no' })).toEqual({ kind: 'transparent' })
+})
+
+test('the blurred background is baked as an image the renderer CSP allows', async () => {
+  // A blob: URL was blocked by img-src, so every surface drew only its tint
+  // over the sharp picture and the blur setting did nothing in the app.
+  const html = await Bun.file(new URL('../src/desktop/renderer/index.html', import.meta.url)).text()
+  const imgSrc = /img-src ([^;]*);/.exec(html)?.[1] ?? ''
+  const source = await Bun.file(new URL('../src/desktop/renderer/backdropLayers.ts', import.meta.url)).text()
+  expect(source).toContain("toDataURL('image/jpeg'")
+  expect(source).not.toContain('createObjectURL')
+  expect(imgSrc.split(/\s+/)).toContain('data:')
+})
+
+test('in transparent mode nothing sits behind the see-through panels; the rail gutter is a chat-tinted frame', async () => {
+  const css = await Bun.file(new URL('../src/desktop/renderer/atelier.css', import.meta.url)).text()
+  expect(css).toContain(":root[data-backdrop='transparent'] .atelier .app__body::before{content:none}")
+  expect(css).toContain(":root[data-backdrop='transparent'] .atelier .chat::before{content:\"\"}")
+  expect(css).toMatch(/:root\[data-backdrop='transparent'\]\[data-layout='claude'\] \.atelier \.desktop-rail::after\{[^}]*border:solid var\(--x-screen\)/)
 })

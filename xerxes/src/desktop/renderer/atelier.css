@@ -2112,11 +2112,11 @@ html,body,#root,.app.atelier{background:transparent}
    hidden: a hidden box is still a scroll container, and the overhang would
    let a scrollIntoView nudge the whole surface. Overlays (menus, modals)
    keep live blur: they are brief. */
-:root[data-backdrop] .atelier :is(.top,.side,.chat,.desktop-rail){backdrop-filter:none;background:transparent;position:relative;isolation:isolate;overflow:clip}
-:root[data-backdrop] .atelier .chat{--bd-tint:var(--x-screen);--bd-r:var(--x-chat-r,0px);--bd-filter:var(--x-chat-blur,none)}
+:root[data-backdrop] .atelier :is(.top,.side,.chat,.desktop-rail,.app__body){backdrop-filter:none;background:transparent;position:relative;isolation:isolate;overflow:clip}
+:root[data-backdrop] .atelier :is(.chat,.app__body){--bd-tint:var(--x-screen);--bd-r:var(--x-chat-r,0px);--bd-filter:var(--x-chat-blur,none)}
 :root[data-backdrop] .atelier :is(.side,.desktop-rail){--bd-tint:var(--glass-navigation);--bd-r:var(--x-panel-r,0px);--bd-filter:var(--glass-blur,none)}
 :root[data-backdrop] .atelier .top{--bd-tint:var(--mac-toolbar);--bd-r:var(--x-panel-r,0px);--bd-filter:var(--glass-blur,none)}
-:root[data-backdrop] .atelier :is(.top,.side,.chat,.desktop-rail)::before{
+:root[data-backdrop] .atelier :is(.top,.side,.chat,.desktop-rail,.app__body)::before{
   content:"";position:absolute;z-index:-1;pointer-events:none;
   inset:calc(-1 * var(--bd-r));
   background-image:linear-gradient(var(--bd-tint),var(--bd-tint)),var(--x-backdrop-image,none),var(--x-backdrop-gradient,none);
@@ -2299,3 +2299,411 @@ html,body,#root,.app.atelier{background:transparent}
 .atelier .msg__actions .copybtn{font:var(--t-caption);padding:2px 8px}
 @media (prefers-reduced-motion:reduce){.atelier .msg__actions{transition:none}}
 @media (hover:none){.atelier .msg__actions{opacity:1}}
+
+/* The blur baked into a bitmap (backdropLayers.ts): each surface draws the
+   pre-blurred picture as a plain image — no filter, no overhang, no GPU
+   work per frame. The CSS filter path above is only the fallback while the
+   bitmap is being made, for gradients, and at 0% blur. */
+:root[data-backdrop-baked] .atelier :is(.top,.side,.chat,.desktop-rail,.app__body)::before{
+  inset:0;filter:none;transform:none;
+  background-image:linear-gradient(var(--bd-tint),var(--bd-tint)),var(--x-backdrop-baked);
+  background-size:100% 100%,var(--bd-vw,100vw) var(--bd-vh,100vh);
+  background-position:0 0,calc(-1 * var(--bd-x,0px)) calc(-1 * var(--bd-y,0px));
+}
+:root[data-backdrop-baked] .atelier.app::before{
+  inset:0;filter:none;transform:none;
+  background-image:var(--x-backdrop-baked);background-size:var(--bd-vw,100vw) var(--bd-vh,100vh);background-position:0 0;
+}
+/* The fallback filter path must not be a composited layer: a filtered layer
+   is re-blurred by the GPU every frame; unpromoted, the blur is rasterised
+   into cached tiles instead. */
+:root[data-backdrop] .atelier :is(.top,.side,.chat,.desktop-rail,.app__body)::before,:root[data-backdrop] .atelier.app::before{transform:none}
+
+/* ── Energy: looping indicators ────────────────────────────────────────
+   Indicators animate smoothly. Stepped timing (a few ticks a second) cut
+   redraws but read as lag, so it is gone; the GPU cost that mattered was
+   the backdrop blur re-running each frame, which the baked background
+   layer removed. Animations still stop while the window is unfocused. */
+
+/* Nobody is watching a window that is not focused: every animation pauses
+   (status text and counters keep updating). main.tsx sets the attribute. */
+:root[data-window-unfocused] .atelier *,
+:root[data-window-unfocused] .atelier *::before,
+:root[data-window-unfocused] .atelier *::after{animation-play-state:paused!important}
+
+/* ══ Claude layout ════════════════════════════════════════════════════
+   Settings ▸ General ▸ Layout. Modelled on Claude's desktop app: a quiet
+   list sidebar, one centred reading column, a floating composer card,
+   framed code — every Xerxes surface (rail, goals, agents, git, usage)
+   kept, only restyled. Colours still come from the theme; pair it with
+   the Claude colour theme for the full look. `classic` is the layout
+   before this one. */
+:root[data-layout='claude'] .atelier{
+  --sans:ui-sans-serif,-apple-system,BlinkMacSystemFont,'SF Pro Text','Inter','Segoe UI',system-ui,sans-serif;
+  --prose:var(--sans);
+  --mono:ui-monospace,'SF Mono','JetBrains Mono',Menlo,Consolas,monospace;
+  --conversation-width:780px;
+  --t-prose:400 15px/1.65 var(--sans);
+  --t-body:400 14px/1.5 var(--sans);
+  --t-caption:500 12px/1.45 var(--sans);
+  --card-radius:12px;
+}
+/* Sidebar: a plain list. */
+:root[data-layout='claude'] .atelier .sidebar-wordmark{display:none}
+:root[data-layout='claude'] .atelier .side__pad{padding:10px 8px 6px;gap:1px}
+:root[data-layout='claude'] .atelier .studio-segment{margin:4px 2px 10px;padding:2px;border-radius:9px}
+:root[data-layout='claude'] .atelier .studio-segment>button{height:28px;font:500 13px/1 var(--sans);border-radius:7px}
+:root[data-layout='claude'] .atelier :is(.newchat,.studio-nav,.studio-side-bottom>button,.runtime-status){
+  display:flex;align-items:center;gap:10px;height:32px;min-height:32px;padding:0 10px;border:0;border-radius:8px;
+  background:transparent;font:400 14px/1 var(--sans);color:var(--x-title);box-shadow:none}
+:root[data-layout='claude'] .atelier :is(.newchat,.studio-nav,.studio-side-bottom>button,.runtime-status):hover{background:var(--x-selected)}
+:root[data-layout='claude'] .atelier :is(.newchat,.studio-nav,.studio-side-bottom>button) svg{width:16px;height:16px;color:var(--x-secondary)}
+:root[data-layout='claude'] .atelier .newchat kbd{margin-left:auto;opacity:.55;font-size:11px}
+:root[data-layout='claude'] .atelier .side__search{height:32px;margin:8px 2px 2px;padding:0 10px;border-radius:8px;font:400 13px/1 var(--sans);background:color-mix(in srgb,var(--x-title) 5%,transparent);border:1px solid transparent}
+:root[data-layout='claude'] .atelier .side__search:focus{border-color:color-mix(in srgb,var(--x-accent) 55%,transparent);outline:none}
+:root[data-layout='claude'] .atelier .side__find{height:28px;margin:2px;font:400 12px/1 var(--sans);color:var(--x-meta);border:0;background:transparent;justify-content:flex-start;padding:0 10px}
+:root[data-layout='claude'] .atelier .side__list{padding:4px 8px}
+:root[data-layout='claude'] .atelier .wgroup{margin-top:10px}
+:root[data-layout='claude'] .atelier .wgroup__cap{height:30px;min-height:30px;padding:0 10px;font:500 12.5px/1 var(--sans);letter-spacing:0;text-transform:none;color:var(--x-meta)}
+:root[data-layout='claude'] .atelier .wgroup__cap::after{display:none}
+:root[data-layout='claude'] .atelier .sess{min-height:32px;padding:6px 10px;gap:10px;border-radius:8px;align-items:center}
+:root[data-layout='claude'] .atelier .sess:hover{background:color-mix(in srgb,var(--x-title) 5%,transparent)}
+:root[data-layout='claude'] .atelier .sess.is-current{background:var(--x-selected)}
+:root[data-layout='claude'] .atelier .sess__t{font:400 14px/1.35 var(--sans);color:var(--x-title)}
+:root[data-layout='claude'] .atelier .sess__s{font:400 11.5px/1.3 var(--sans);color:var(--x-meta)}
+:root[data-layout='claude'] .atelier .sess__age{font:400 11.5px/1 var(--sans);color:var(--x-meta)}
+/* The status dot becomes a small ring, filled only while something happens. */
+:root[data-layout='claude'] .atelier .sess__dot{width:8px;height:8px;margin-top:0;background:transparent!important;border:1.5px solid var(--x-meta);box-sizing:border-box}
+:root[data-layout='claude'] .atelier .sess:is([class]) .sess__dot{border-color:color-mix(in srgb,var(--x-meta) 80%,transparent)}
+:root[data-layout='claude'] .atelier .studio-side-bottom{padding:6px 8px 10px;gap:1px;border-top:1px solid var(--x-hairline)}
+:root[data-layout='claude'] .atelier .addws{padding:6px 10px;font:400 12.5px/1 var(--sans);color:var(--x-meta)}
+
+/* Top bar and conversation header: lighter, smaller. */
+:root[data-layout='claude'] .atelier .top{height:44px;flex-basis:44px}
+:root[data-layout='claude'] .atelier .chat__head{height:44px;min-height:44px}
+:root[data-layout='claude'] .atelier .chat__head .tab{font:500 13px/1 var(--sans)}
+
+/* The reading column. */
+:root[data-layout='claude'] .atelier .stream{padding-top:24px}
+:root[data-layout='claude'] .atelier .stream__col{gap:14px}
+:root[data-layout='claude'] .atelier .msg--agent .msg__text{font:var(--t-prose);color:var(--x-prose)}
+:root[data-layout='claude'] .atelier .msg--user{padding:10px 16px;border:0;border-radius:18px;background:var(--x-user-bubble,color-mix(in srgb,var(--x-title) 9%,transparent))}
+:root[data-layout='claude'] .atelier .msg--user .msg__text{font:400 15px/1.55 var(--sans);color:var(--x-title)}
+:root[data-layout='claude'] .atelier .activity-group>summary,:root[data-layout='claude'] .atelier .activity-group__summary{font:400 14px/1.5 var(--sans);color:var(--x-meta)}
+/* Code: framed, with a header bar; inline code tinted like Claude's. */
+:root[data-layout='claude'] .atelier .md__codewrap{margin:12px 0;border:1px solid color-mix(in srgb,var(--x-title) 12%,transparent);border-radius:10px;background:color-mix(in srgb,var(--x-title) 3%,var(--x-screen))}
+:root[data-layout='claude'] .atelier .md__codebar{height:34px;padding:0 8px 0 14px;background:color-mix(in srgb,var(--x-title) 4%,transparent);border-bottom:1px solid color-mix(in srgb,var(--x-title) 9%,transparent);font:500 12px/1 var(--sans);color:var(--x-meta)}
+:root[data-layout='claude'] .atelier .md__codewrap .md__code,:root[data-layout='claude'] .atelier .md pre{padding:12px 14px;background:transparent;border:0;border-radius:0;font:400 13px/1.6 var(--mono);color:var(--x-prose)}
+:root[data-layout='claude'] .atelier .md :not(pre)>code{padding:1px 6px;border:0;border-radius:5px;font:400 .87em/1.4 var(--mono);background:color-mix(in srgb,var(--x-title) 7%,transparent);color:color-mix(in srgb,var(--x-accent) 70%,var(--x-title))}
+
+/* The rail: flatter panels, pill tabs. */
+:root[data-layout='claude'] .atelier .desktop-rail>header button{font:500 13px/1 var(--sans);border-radius:7px;padding:6px 10px}
+:root[data-layout='claude'] .atelier .railcard{border-color:color-mix(in srgb,var(--x-title) 10%,transparent);background:color-mix(in srgb,var(--x-title) 3%,transparent);box-shadow:none}
+:root[data-layout='claude'] .atelier .railcard--status{border-left-width:1px}
+
+/* ══ Composer (Claude Code's) ═════════════════════════════════════════
+   Three stacked pieces on the reading column: the repository line
+   (folder · branch · lines changed · Git · ×), the input card with its
+   send/stop button, and a bare toolbar under it (add context, dictate,
+   approval policy, plan — then model, effort and the context ring). */
+.atelier .composer-wrap{display:flex;flex-direction:column;gap:6px}
+.atelier .repobar{display:flex;align-items:center;gap:6px;width:100%;max-width:var(--conversation-width);margin:0 auto;box-sizing:border-box;min-height:40px;padding:4px 6px 4px 14px;border-radius:12px;background:color-mix(in srgb,var(--x-title) 6%,var(--x-card));font:400 13.5px/1 var(--mono)}
+.atelier .repobar button{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 10px;border:0;border-radius:8px;background:transparent;font:inherit;color:var(--x-secondary);cursor:pointer}
+.atelier .repobar button:hover{background:var(--x-selected);color:var(--x-title)}
+.atelier .repobar__where{min-width:0;padding-left:0!important;gap:12px!important}
+.atelier .repobar__where:hover{background:transparent!important}
+.atelier .repobar__folder{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--x-secondary)}
+.atelier .repobar__branch{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--x-meta)}
+.atelier .repobar__diff{background:color-mix(in srgb,var(--x-title) 7%,transparent)!important;gap:8px!important}
+.atelier .repobar__added{color:var(--x-done)}
+.atelier .repobar__removed{color:var(--x-failed,#e5484d)}
+.atelier .repobar__action{border:1px solid color-mix(in srgb,var(--x-title) 10%,transparent)!important;font:400 13px/1 var(--sans)!important}
+.atelier .repobar__close{width:30px;padding:0!important;justify-content:center;color:var(--x-meta)!important}
+.atelier .composer-dock{max-width:var(--conversation-width);border:1px solid color-mix(in srgb,var(--x-title) 16%,transparent);border-radius:14px;background:color-mix(in srgb,var(--x-title) 4%,var(--x-card));box-shadow:none}
+.atelier .composer-dock:focus-within{border-color:color-mix(in srgb,var(--x-title) 30%,transparent);box-shadow:none}
+.atelier .composer{flex-direction:row;align-items:flex-end;gap:8px;padding:8px 8px 8px 16px}
+.atelier .composer__input{flex:1;min-width:0;min-height:30px;padding:5px 0;font:400 15px/1.45 var(--sans)}
+.atelier .composer__input::placeholder{color:var(--x-meta)}
+.atelier .composer__send{flex:none;width:30px;height:30px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center}
+.atelier .composer__send--stop{background:transparent;border:0;color:var(--x-title);box-shadow:none}
+.atelier .composer__send--stop:hover{background:var(--x-selected)}
+.atelier .composer__toolbar{display:flex;align-items:center;gap:2px;width:100%;max-width:var(--conversation-width);margin:0 auto;padding:0 4px;box-sizing:border-box;min-height:30px}
+.atelier .composer__toolbar .cchip{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 9px;border:0;border-radius:8px;background:transparent;box-shadow:none;font:400 13.5px/1 var(--sans);color:var(--x-secondary);white-space:nowrap}
+.atelier .composer__toolbar .cchip:hover{background:var(--x-selected);color:var(--x-title)}
+.atelier .composer__toolbar .cchip.is-on{color:var(--x-accent)}
+.atelier .composer__toolbar .composer__icon{width:30px;padding:0;justify-content:center}
+.atelier .composer__toolbar .dictation{display:inline-flex;align-items:center;gap:2px}
+.atelier .composer__toolbar .chipanchor{position:relative}
+.atelier .composer__toolbar .chipanchor>.cchip{max-width:min(260px,34vw);overflow:hidden;text-overflow:ellipsis}
+.atelier .composer__ring-track{fill:none;stroke:color-mix(in srgb,var(--x-title) 18%,transparent);stroke-width:2}
+.atelier .composer__ring-fill{fill:none;stroke:var(--x-secondary);stroke-width:2;stroke-linecap:round}
+.atelier .composer__ring.is-high .composer__ring-fill{stroke:var(--x-failed,#e5484d)}
+.atelier .composer-task-summary{max-width:var(--conversation-width);margin:0 auto;width:100%;box-sizing:border-box}
+@container(max-width:560px){.atelier .repobar__branch{display:none}.atelier .composer__toolbar .composer__text[aria-pressed]{display:none}}
+
+/* Group header: the folder name, and a "+" for a new task there. */
+.atelier .wgroup__head{display:flex;align-items:center;gap:2px}
+.atelier .wgroup__head>.wgroup__cap{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left}
+.atelier .wgroup__add{flex:none;display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;margin-right:2px;border:0;border-radius:7px;background:transparent;color:var(--x-meta);opacity:0;cursor:pointer}
+.atelier .wgroup:hover .wgroup__add,.atelier .wgroup__add:focus-visible{opacity:1}
+.atelier .wgroup__add:hover{background:var(--x-selected);color:var(--x-title)}
+.atelier .wgroup__head:has(>.wgroup__cap) .wgroup__add{align-self:flex-end}
+
+/* Claude's session list: folder names in muted text, one line per task
+   behind a small ring; the open task on a soft rounded fill. */
+:root[data-layout='claude'] .atelier .wgroup{margin-top:14px}
+:root[data-layout='claude'] .atelier .wgroup__add{align-self:center!important;opacity:.85}
+:root[data-layout='claude'] .atelier .wgroup__cap{height:30px;min-height:30px;padding:0 6px;font:400 14px/1 var(--sans);color:var(--x-meta)}
+:root[data-layout='claude'] .atelier .wgroup__cap:hover{background:transparent;color:var(--x-secondary)}
+:root[data-layout='claude'] .atelier :is(.wgroup__mark,.wgroup__cur,.sess__s,.sess__detail,.sess__age){display:none}
+:root[data-layout='claude'] .atelier .sess{min-height:34px;padding:0 10px 0 12px;gap:14px;border-radius:9px}
+:root[data-layout='claude'] .atelier .sess__body{min-width:0}
+:root[data-layout='claude'] .atelier .sess__t{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:400 14.5px/1.3 var(--sans);color:color-mix(in srgb,var(--x-title) 86%,transparent)}
+:root[data-layout='claude'] .atelier .sess.is-current{background:color-mix(in srgb,var(--x-title) 12%,transparent)}
+:root[data-layout='claude'] .atelier .sess.is-current .sess__t{color:var(--x-title)}
+:root[data-layout='claude'] .atelier .sess__dot{flex:none;width:8px;height:8px;border-radius:50%;background:transparent!important;border:1.5px solid color-mix(in srgb,var(--x-meta) 85%,transparent);box-sizing:border-box}
+:root[data-layout='claude'] .atelier .sess.is-current .sess__dot{background:var(--x-meta)!important;border-color:transparent}
+:root[data-layout='claude'] .atelier .sess__dot[data-status='working']{border-color:var(--x-working,var(--x-accent));background:var(--x-working,var(--x-accent))!important}
+:root[data-layout='claude'] .atelier .sess__dot[data-status='failed']{border-color:var(--x-failed,#e5484d)}
+:root[data-layout='claude'] .atelier .sess__dot[data-status='waiting'],:root[data-layout='claude'] .atelier .sess__dot[data-status='needs-input']{border-color:var(--x-accent)}
+/* Inline-code chrome never applies inside a code block. */
+.atelier .md pre code{padding:0;border:0;border-radius:0;background:transparent;font:inherit;color:inherit}
+
+/* Message actions (Claude's): bare muted icons under a finished reply;
+   always shown under the newest reply, on hover for earlier ones. */
+.atelier .msg__actions{gap:2px;margin-top:6px}
+.atelier .msg__actions--reply{margin-left:-6px}
+.atelier .msg__actions.is-latest{opacity:1}
+.atelier .copybtn--icon{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0!important;border:0;border-radius:7px;background:transparent;color:var(--x-meta);cursor:pointer;box-shadow:none}
+.atelier .copybtn--icon:hover{background:var(--x-selected);color:var(--x-title)}
+.atelier .copybtn--icon:focus-visible{outline:2px solid var(--x-focus);outline-offset:1px}
+.atelier .msg-turn--user .msg__actions{justify-content:flex-end}
+
+/* ══ Claude layout: no title bar ══════════════════════════════════════
+   One 44px top row across the window, as in Claude's app: the sidebar's
+   row holds the window buttons and the sidebar toggle; the conversation
+   header leads with the task title; the rail's tabs line up with both.
+   Each row is a window drag region; its controls are not. */
+:root[data-layout='claude'] .atelier .side__head{display:flex;align-items:center;gap:4px;height:44px;flex:none;padding:0 8px 0 78px;box-sizing:border-box;-webkit-app-region:drag}
+:root[data-layout='claude'] .atelier.app--no-traffic-lights .side__head{padding-left:8px}
+:root[data-layout='claude'] .atelier .side__head button,:root[data-layout='claude'] .atelier .chat__head :is(button,a,input,[role=tab],.chipanchor,.tabs,.top__actions,.runtime-status),:root[data-layout='claude'] .atelier .desktop-rail>header :is(button,[role=tab]){-webkit-app-region:no-drag}
+:root[data-layout='claude'] .atelier .window-toggle{display:inline-flex;align-items:center;justify-content:center;width:30px;height:28px;padding:0;border:0;border-radius:7px;background:transparent;color:var(--x-secondary)}
+:root[data-layout='claude'] .atelier .window-toggle:hover{background:var(--x-selected);color:var(--x-title)}
+:root[data-layout='claude'] .atelier .side__pad{padding-top:2px}
+:root[data-layout='claude'] .atelier .chat__head{height:44px;min-height:44px;gap:14px;padding:0 10px 0 18px;-webkit-app-region:drag}
+:root[data-layout='claude'] .atelier.atelier--focus:not(.app--no-traffic-lights) .chat__head{padding-left:78px}
+:root[data-layout='claude'] .atelier .chat__head>.window-toggle{order:-2;margin-right:-6px}
+:root[data-layout='claude'] .atelier .chat__title{display:block;order:-1;min-width:0;max-width:34%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:500 14px/1 var(--sans);color:var(--x-title)}
+:root[data-layout='claude'] .atelier .chat__workspace{padding:3px 8px;border-radius:6px;background:color-mix(in srgb,var(--x-title) 8%,transparent);font:400 12.5px/1.2 var(--sans);color:var(--x-secondary)}
+/* Plan lives in the composer's toolbar in this layout. */
+:root[data-layout='claude'] .atelier .chat__head>button.hchip--btn:not(.chat__log){display:none}
+:root[data-layout='claude'] .atelier .chat__head>.top__actions{display:flex;align-items:center;gap:2px;margin-left:4px;padding:0}
+:root[data-layout='claude'] .atelier .chat__head>.top__actions button{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 8px;border:0;border-radius:7px;background:transparent;font:400 13px/1 var(--sans);color:var(--x-secondary)}
+:root[data-layout='claude'] .atelier .chat__head>.top__actions button:hover{background:var(--x-selected);color:var(--x-title)}
+:root[data-layout='claude'] .atelier .desktop-rail>header{height:44px;min-height:44px;-webkit-app-region:drag}
+:root[data-layout='claude'] .atelier .chat__head>.top__actions,:root[data-layout='claude'] .atelier .chat__head>.runtime-status{order:10}
+:root[data-layout='claude'] .atelier .chat__head>.chat__workspace{flex:none;max-width:22ch;overflow:hidden;text-overflow:ellipsis}
+:root[data-layout='claude'] .atelier .chat__head>.chat__log{font-size:0;gap:0;padding:0 7px}
+:root[data-layout='claude'] .atelier .chat__head>.chat__log svg{width:15px;height:15px}
+:root[data-layout='claude'] .atelier .chat__head .workspace__tabs{flex:none}
+:root[data-layout='claude'] .atelier .chat__head>.top__actions>button>span{display:none}
+
+/* File view mode: Markdown rendered as a document (Claude's), front matter
+   as a quiet two-column table above it. "Source" shows the numbered text. */
+.atelier .file-document{padding:14px 20px 28px;overflow:auto;min-height:0;font:var(--t-prose, 400 14px/1.65 var(--sans));color:var(--x-prose)}
+.atelier .file-document:focus-visible{outline:2px solid var(--x-focus);outline-offset:-2px}
+.atelier .file-document__meta{display:grid;gap:10px;margin:0 0 22px;padding:0 0 18px;border-bottom:1px solid var(--x-hairline)}
+.atelier .file-document__meta>div{display:grid;grid-template-columns:minmax(80px,112px) minmax(0,1fr);gap:16px}
+.atelier .file-document__meta dt{font:400 13px/1.5 var(--sans);color:var(--x-meta);text-transform:capitalize}
+.atelier .file-document__meta dd{margin:0;font:400 13.5px/1.5 var(--sans);color:var(--x-prose);overflow-wrap:anywhere}
+.atelier .md--document h1{font:600 22px/1.3 var(--sans);margin:4px 0 14px;color:var(--x-title)}
+.atelier .md--document h2{font:600 17px/1.35 var(--sans);margin:22px 0 10px;color:var(--x-title)}
+.atelier .md--document h3{font:600 15px/1.4 var(--sans);margin:18px 0 8px;color:var(--x-title)}
+.atelier .file-browser__mode[aria-pressed="true"]{background:var(--x-selected);color:var(--x-title)}
+
+/* Claude layout: rounded surfaces. The rail floats as an inset card with
+   the window's radius; file rows and controls share the same corners. */
+:root[data-layout='claude'] .atelier .desktop-rail{margin:0 8px 8px 0;border:1px solid color-mix(in srgb,var(--x-title) 10%,transparent);border-radius:12px;overflow:hidden}
+:root[data-layout='claude'] .atelier .desktop-rail>header{border-bottom-color:color-mix(in srgb,var(--x-title) 7%,transparent)}
+:root[data-layout='claude'] .atelier .file-browser__document{border-radius:10px;overflow:hidden}
+:root[data-layout='claude'] .atelier .file-browser__selection button,:root[data-layout='claude'] .atelier .file-browser__search{border-radius:8px}
+:root[data-layout='claude'] .atelier :is(.railcard,.acard,.goalcard,.usage__section){border-radius:12px}
+:root[data-layout='claude'] .atelier .file-preview{border-radius:0 0 10px 10px}
+:root[data-layout='claude'] .atelier .desktop-rail{margin-top:6px}
+:root[data-layout='claude'] .atelier .desktop-rail>header{height:38px;min-height:38px}
+.atelier .file-document .md--document{padding:0;margin:0;border:0;background:none;box-shadow:none}
+
+/* ══ File tool rows (Claude Code's) ═══════════════════════════════════
+   Read / Write / Edit as what they did to a file: a header (verb, path
+   that opens the file, +/−, state) and, for changes, the lines themselves
+   in a rounded code card — removals red, additions green. */
+.atelier .filetool{display:grid;gap:6px;padding:6px 0;min-width:0}
+.atelier .filetool__head{display:flex;align-items:center;gap:8px;min-width:0;font:400 13.5px/1.4 var(--sans);color:var(--x-secondary)}
+.atelier .filetool__verb{display:inline-flex;align-items:center;gap:6px;flex:none;font-weight:500;color:var(--x-title)}
+.atelier .filetool__path{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:1px 6px;border:0;border-radius:6px;background:color-mix(in srgb,var(--x-title) 6%,transparent);font:400 12.5px/1.5 var(--mono);color:var(--x-secondary);cursor:pointer;direction:rtl;text-align:left}
+.atelier .filetool__path:hover{background:var(--x-selected);color:var(--x-title);text-decoration:underline}
+.atelier .filetool__toggle{display:inline-flex;align-items:center;gap:4px;padding:1px 6px;border:0;border-radius:6px;background:transparent;font:400 12.5px/1.4 var(--sans);color:var(--x-meta);cursor:pointer}
+.atelier .filetool__toggle:hover{background:var(--x-selected);color:var(--x-title)}
+.atelier .filetool__toggle[aria-expanded="true"] svg{transform:rotate(90deg)}
+.atelier .filetool__stats{display:inline-flex;gap:6px;flex:none;font:500 12.5px/1 var(--mono)}
+.atelier .filetool__stats .add{color:var(--x-done)}
+.atelier .filetool__stats .del{color:var(--x-failed,#e5484d)}
+.atelier .filetool__state{margin-left:auto;flex:none;font:400 12px/1 var(--sans);color:var(--x-meta)}
+.atelier .filetool[data-state='failed'] .filetool__state{color:var(--x-failed,#e5484d)}
+.atelier .filetool__error{margin:0;padding-left:2px;font:400 12.5px/1.45 var(--sans);color:color-mix(in srgb,var(--x-failed,#e5484d) 80%,var(--x-secondary));overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.atelier .filetool__code{border:1px solid color-mix(in srgb,var(--x-title) 10%,transparent);border-radius:10px;overflow:hidden;background:color-mix(in srgb,var(--x-title) 3%,var(--x-screen))}
+.atelier .filetool__code pre{margin:0;padding:6px 0;max-height:420px;overflow:auto;font:400 12.5px/1.6 var(--mono)}
+.atelier .filetool__line{display:grid;grid-template-columns:40px minmax(0,1fr);min-width:max-content}
+.atelier .filetool__line code{padding:0 14px 0 4px;white-space:pre;font:inherit;background:none;border:0;color:var(--x-prose)}
+.atelier .filetool__gutter{padding-right:8px;text-align:right;color:var(--x-meta);user-select:none;opacity:.8}
+.atelier .filetool__line--add{background:color-mix(in srgb,var(--x-done) 13%,transparent)}
+.atelier .filetool__line--add .filetool__gutter{color:var(--x-done)}
+.atelier .filetool__line--del{background:color-mix(in srgb,var(--x-failed,#e5484d) 13%,transparent)}
+.atelier .filetool__line--del .filetool__gutter{color:var(--x-failed,#e5484d)}
+.atelier .filetool__more{display:block;width:100%;padding:6px 14px;border:0;border-top:1px solid color-mix(in srgb,var(--x-title) 8%,transparent);background:transparent;text-align:left;font:400 12.5px/1.4 var(--sans);color:var(--x-meta);cursor:pointer}
+.atelier .filetool__more:hover{color:var(--x-title);background:var(--x-selected)}
+.atelier .filetool__actions{display:flex;justify-content:flex-end;margin-top:-4px}
+
+/* ══ File editor ══════════════════════════════════════════════════════
+   A transparent textarea exactly over a highlighted copy of the same text:
+   both use one font, line height, padding and wrapping, so every line and
+   the caret land in the same place. The body grows with the text; the
+   panel scrolls it. */
+.atelier .file-browser__preview:has(.code-editor){padding:0;overflow:auto}
+.atelier .code-editor{--gutter:52px;min-height:100%;font:400 12.5px/1.65 var(--mono);color:var(--x-prose);background:transparent}
+.atelier .code-editor__body{position:relative;min-height:100%;padding:8px 0 40vh}
+.atelier .code-editor__paint{pointer-events:none}
+.atelier .code-editor__row{display:grid;grid-template-columns:var(--gutter) minmax(0,1fr)}
+.atelier .code-editor__row code,.atelier .code-editor__input{font:inherit;white-space:pre-wrap;overflow-wrap:anywhere;word-break:normal;tab-size:4}
+.atelier .code-editor__row code{padding:0 16px 0 0;background:none;border:0;color:inherit}
+.atelier .code-editor__num{padding-right:14px;text-align:right;color:var(--x-meta);opacity:.7;user-select:none}
+.atelier .code-editor__input{position:absolute;inset:8px 0 0 0;width:100%;height:calc(100% - 8px);box-sizing:border-box;margin:0;padding:0 16px 0 var(--gutter);border:0;outline:none;resize:none;overflow:hidden;background:transparent;color:transparent;caret-color:var(--x-title);-webkit-text-fill-color:transparent}
+.atelier .code-editor__input::selection{background:color-mix(in srgb,var(--x-accent) 32%,transparent);-webkit-text-fill-color:transparent}
+.atelier .tok-comment{color:var(--x-meta);font-style:italic}
+.atelier .tok-string{color:color-mix(in srgb,var(--x-done) 75%,var(--x-prose))}
+.atelier .tok-number{color:color-mix(in srgb,var(--x-accent) 55%,#e0a860)}
+.atelier .tok-keyword{color:color-mix(in srgb,var(--x-accent) 80%,var(--x-title))}
+.atelier .file-browser__dirty{color:var(--x-accent)}
+.atelier .file-browser__save{background:var(--x-accent)!important;color:var(--x-on-accent,#fff)!important;border-color:transparent!important}
+.atelier .file-browser__saved{font:400 12px/1 var(--sans);color:var(--x-meta)}
+.atelier .file-browser__notice{display:flex;align-items:center;gap:10px;margin:6px 10px;padding:8px 12px;border-radius:8px;background:color-mix(in srgb,var(--x-failed,#e5484d) 12%,transparent);font:400 12.5px/1.45 var(--sans);color:var(--x-prose)}
+.atelier .file-browser__notice button{margin-left:auto;flex:none}
+.atelier .file-browser__notice--quiet{background:color-mix(in srgb,var(--x-title) 5%,transparent);color:var(--x-meta)}
+
+/* The Goal / To-dos summary above the composer: a rounded card like the
+   repository line under it. */
+.atelier .composer-task-summary{border:0!important;border-radius:12px;overflow:hidden;background:color-mix(in srgb,var(--x-title) 6%,var(--x-card))!important}
+.atelier .composer-task-summary>button{border-radius:0;background:transparent}
+.atelier .composer-task-summary>button+button{border-top:1px solid color-mix(in srgb,var(--x-title) 7%,transparent)}
+
+/* The window buttons end at 74 screen px whatever the UI scale. */
+:root[data-layout='claude'] .atelier .side__head{padding-left:calc(84px / var(--ui-zoom,1))}
+:root[data-layout='claude'] .atelier.atelier--focus:not(.app--no-traffic-lights) .chat__head{padding-left:calc(84px / var(--ui-zoom,1))}
+
+/* The conversation header, Claude layout: the task title and its agent
+   kind; Session edits (and a way back to the conversation) on the right. */
+:root[data-layout='claude'] .atelier .chat__head--minimal{gap:10px}
+:root[data-layout='claude'] .atelier .chat__head--minimal .chat__title{max-width:none;flex:0 1 auto;font:500 14px/1.2 var(--sans)}
+:root[data-layout='claude'] .atelier .chat__kind{flex:none;padding:3px 8px;border-radius:6px;background:color-mix(in srgb,var(--x-title) 8%,transparent);font:400 12.5px/1.2 var(--sans);color:var(--x-secondary)}
+:root[data-layout='claude'] .atelier .chat__view{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 10px;border:0;border-radius:8px;background:transparent;font:400 13px/1 var(--sans);color:var(--x-secondary);cursor:pointer;-webkit-app-region:no-drag}
+:root[data-layout='claude'] .atelier .chat__view:hover,:root[data-layout='claude'] .atelier .chat__view.is-on{background:var(--x-selected);color:var(--x-title)}
+:root[data-layout='claude'] .atelier .chat__view .pillcount{font:500 12px/1 var(--mono);background:none;padding:0}
+:root[data-layout='claude'] .atelier .chat__view .add{color:var(--x-done)}
+:root[data-layout='claude'] .atelier .chat__view .del{color:var(--x-failed,#e5484d)}
+
+/* To-dos as an Activity card. */
+.atelier .railtodos{display:grid;gap:2px;margin:6px 0 0;padding:0;list-style:none}
+.atelier .railtodos li{display:grid;grid-template-columns:18px minmax(0,1fr);gap:8px;align-items:start;padding:4px 0;font:400 13px/1.45 var(--sans);color:var(--x-prose)}
+.atelier .railtodos__mark{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;margin-top:2px;border:1.5px solid color-mix(in srgb,var(--x-meta) 80%,transparent);border-radius:50%;box-sizing:border-box;color:var(--x-on-accent,#fff)}
+.atelier .railtodos li[data-state='completed'] .railtodos__mark{background:var(--x-done);border-color:transparent}
+.atelier .railtodos li[data-state='completed'] .railtodos__text{color:var(--x-meta);text-decoration:line-through;text-decoration-color:color-mix(in srgb,var(--x-meta) 60%,transparent)}
+.atelier .railtodos li[data-state='in_progress'] .railtodos__mark{border-color:var(--x-accent);color:var(--x-accent)}
+.atelier .railtodos li[data-state='in_progress'] .railtodos__text{color:var(--x-title);font-weight:500}
+.atelier .railtodos__plan{margin-top:8px;padding:4px 10px;border:1px solid color-mix(in srgb,var(--x-title) 12%,transparent);border-radius:7px;background:transparent;font:400 12.5px/1.3 var(--sans);color:var(--x-secondary);cursor:pointer}
+.atelier .railtodos__plan:hover{background:var(--x-selected);color:var(--x-title)}
+
+/* Energy: the "Working" sheen animated background-position on clipped
+   text, which repaints the text layer every frame — 120 times a second on
+   ProMotion, for the whole turn. An opacity breath is composited: the
+   text is painted once and only faded. */
+.atelier .activity-group__working{background:none;-webkit-background-clip:border-box;background-clip:border-box;-webkit-text-fill-color:currentColor;color:var(--x-strong);animation:working-breathe 1.8s ease-in-out infinite;will-change:opacity}
+@keyframes working-breathe{0%,100%{opacity:1}50%{opacity:.5}}
+@media (prefers-reduced-motion:reduce){.atelier .activity-group__working{animation:none}}
+
+/* Behind the inset rail (its gutter and the resize divider) the window
+   itself showed through — on macOS the vibrancy material, tinted by the
+   desktop. Without a background picture that area is the conversation's
+   own colour, so the rail reads as a card on the chat. */
+:root[data-layout='claude']:not([data-backdrop]) .atelier .app__body{background:var(--x-screen)}
+
+/* ══ Subagents card ═══════════════════════════════════════════════════
+   One card per spawn: a count and a batch progress bar, then each agent
+   with a state glyph, its title and model, and why it failed. */
+.atelier .acard{display:grid;gap:0;padding:0;border:1px solid color-mix(in srgb,var(--x-title) 10%,transparent);border-radius:12px;background:color-mix(in srgb,var(--x-title) 3%,var(--x-screen));overflow:hidden}
+.atelier .acard__head{display:flex;align-items:center;gap:10px;width:100%;padding:11px 14px 9px;border:0;background:transparent;text-align:left;cursor:pointer;color:var(--x-title)}
+.atelier .acard__icon{display:inline-flex;color:var(--x-secondary)}
+.atelier .acard[data-state='working'] .acard__icon{color:var(--x-working,var(--x-accent))}
+.atelier .acard__title{font:500 13.5px/1.2 var(--sans)}
+.atelier .acard__counts{display:inline-flex;gap:10px;margin-left:auto;font:400 12px/1 var(--sans);color:var(--x-meta)}
+.atelier .acard__counts [data-tone='working']{color:var(--x-working,var(--x-accent))}
+.atelier .acard__counts [data-tone='failed']{color:var(--x-failed,#e5484d)}
+.atelier .acard__counts [data-tone='done']{color:var(--x-done)}
+.atelier .acard__chev{display:inline-flex;color:var(--x-meta);transition:transform 160ms ease}
+.atelier .acard__chev:not(.is-open){transform:rotate(-90deg)}
+.atelier .acard__progress{display:flex;gap:2px;height:3px;margin:0 14px 6px;border-radius:2px;overflow:hidden;background:color-mix(in srgb,var(--x-title) 7%,transparent)}
+.atelier .acard__progress span{min-width:3px;border-radius:2px}
+.atelier .acard__progress [data-tone='done']{background:var(--x-done)}
+.atelier .acard__progress [data-tone='failed']{background:var(--x-failed,#e5484d)}
+.atelier .acard__progress [data-tone='stopped']{background:var(--x-meta)}
+.atelier .acard__progress [data-tone='working']{background:color-mix(in srgb,var(--x-working,var(--x-accent)) 35%,transparent)}
+.atelier .acard__list{display:grid;gap:0;margin:0;padding:2px 6px 4px;list-style:none;border:0}
+.atelier .acard__list .acard__row{display:grid;grid-template-columns:20px minmax(0,1fr) auto 12px;align-items:center;gap:10px;width:100%;min-height:36px;padding:6px 8px;border:0;border-radius:8px;background:transparent;text-align:left;color:var(--x-prose);cursor:pointer}
+.atelier .acard__list .acard__row:hover,.atelier .acard__list .acard__row:focus-visible{background:var(--x-selected)}
+.atelier .acard__row>svg{color:var(--x-meta);opacity:0;transition:opacity 120ms ease}
+.atelier .acard__row:hover>svg,.atelier .acard__row:focus-visible>svg{opacity:1}
+.atelier .acard__glyph{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:50%;color:var(--x-meta)}
+.atelier .acard__row[data-tone='working'] .acard__glyph{color:var(--x-working,var(--x-accent))}
+.atelier .acard__row[data-tone='done'] .acard__glyph{background:color-mix(in srgb,var(--x-done) 18%,transparent);color:var(--x-done)}
+.atelier .acard__row[data-tone='failed'] .acard__glyph{background:color-mix(in srgb,var(--x-failed,#e5484d) 18%,transparent);color:var(--x-failed,#e5484d)}
+.atelier .acard__dash{width:8px;height:1.5px;border-radius:1px;background:var(--x-meta)}
+.atelier .acard__body{display:grid;gap:2px;min-width:0}
+.atelier .acard__t{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:400 13.5px/1.35 var(--sans);color:var(--x-title)}
+.atelier .acard__row[data-tone='done'] .acard__t,.atelier .acard__row[data-tone='stopped'] .acard__t{color:var(--x-secondary)}
+.atelier .acard__meta{display:flex;gap:8px;min-width:0;font:400 11.5px/1.3 var(--mono);color:var(--x-meta)}
+.atelier .acard__kind{flex:none}
+.atelier .acard__error{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--sans);color:color-mix(in srgb,var(--x-failed,#e5484d) 80%,var(--x-secondary))}
+.atelier .acard__s{font:400 12px/1 var(--sans);color:var(--x-meta)}
+.atelier .acard__row[data-tone='working'] .acard__s{color:var(--x-working,var(--x-accent))}
+.atelier .acard__row[data-tone='failed'] .acard__s{color:var(--x-failed,#e5484d)}
+.atelier .acard__foot{display:flex;gap:4px;padding:4px 10px 10px;border-top:1px solid color-mix(in srgb,var(--x-title) 6%,transparent)}
+.atelier .acard__foot button{padding:5px 10px;border:0;border-radius:7px;background:transparent;font:400 12.5px/1.2 var(--sans);color:var(--x-secondary);cursor:pointer}
+.atelier .acard__foot button:hover{background:var(--x-selected);color:var(--x-title)}
+
+/* Agent inspector prose: the summary as Markdown, activity as a list. */
+.atelier .agent-inspector__summary .md{font:400 13px/1.6 var(--sans);color:var(--x-prose)}
+.atelier .agent-inspector__notes ol{display:grid;gap:6px;margin:0;padding:0 0 0 18px;font:400 12.5px/1.5 var(--sans);color:var(--x-secondary)}
+.atelier .acard .acard__title{flex:1 1 auto;min-width:0}
+.atelier .acard .acard__counts{flex:none;margin-left:auto;text-align:right}
+
+/* With a background, the area behind the panels is conversation surface:
+   .app__body draws the chat's blurred, tinted layer across the whole
+   window, so the rail's gutter and the resize dividers read as chat, not
+   as the window behind. The chat itself adds no second layer (its tint
+   would double); the sidebar and rail draw their own, opaque, on top. */
+:root[data-backdrop] .atelier .chat::before{content:none}
+
+/* Transparent background: the panels are see-through tints over the
+   desktop, so nothing may sit behind them. The chat keeps its own layer;
+   the rail's gutter is drawn as a frame in the chat's tint (in this mode
+   the chat's layer is exactly that tint), and the dividers take it too. */
+:root[data-backdrop='transparent'] .atelier .app__body::before{content:none}
+:root[data-backdrop='transparent'] .atelier .chat::before{content:""}
+:root[data-backdrop='transparent'][data-layout='claude'] .atelier .desktop-rail{overflow:clip;overflow-clip-margin:10px}
+:root[data-backdrop='transparent'][data-layout='claude'] .atelier .desktop-rail::after{
+  content:"";position:absolute;z-index:-1;pointer-events:none;
+  /* The rail sits 6px from the top, 8px from the right and bottom. */
+  inset:-7px -9px -9px -1px;
+  border:solid var(--x-screen);border-width:6px 8px 8px 0;
+  border-radius:12px 20px 20px 12px / 18px 18px 20px 20px;
+}
+:root[data-backdrop='transparent'] .panel-divider{background:linear-gradient(var(--x-hairline),var(--x-hairline)),var(--x-screen)}

@@ -3,7 +3,7 @@
 
 import { GoalInspectorDisclosure } from "./GoalInspector.js"
 import { createPortal } from 'react-dom'
-import { Fragment, createContext, useContext, useLayoutEffect, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactElement } from 'react'
+import { Fragment, createContext, memo, useCallback, useContext, useLayoutEffect, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactElement } from 'react'
 
 import { CommandPalette, PickerLayer, ModelMenu, ModelPicker, ReasoningPicker, SettingsModal, bareModelName } from './Overlays.js'
 import { SessionSearch } from './SearchPanel.js'
@@ -40,6 +40,9 @@ import { Shortcuts } from './Shortcuts.js'
 import { FirstRunSetup } from './Setup.js'
 import { RemoteWorkspaceGate } from './RemoteWorkspaceGate.js'
 import { BackgroundIndicator, DesktopNavigation, DesktopSheet, DesktopPage, DesktopRail, useDesktopNavigation, type DesktopPanel, type RailPanel } from './DesktopPanels.js'
+import { desktopCall } from './desktopRpc.js'
+import { elapsedOf } from './duration.js'
+import type { ScmStatus } from '../../workspace/gitScm.js'
 
 const ActivityVisible = createContext(false)
 
@@ -106,21 +109,12 @@ function toolLabelOf(verb: string): string {
 }
 
 /** Compact turn clock for the feed status line: 43 → "43s", 255 → "4m 15s". */
-function turnDurOf(seconds: number): string {
-  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`
-}
+const turnDurOf = (seconds: number): string => elapsedOf(seconds)
 
 function ttftOf(milliseconds: number): string {
   return milliseconds < 1_000 ? `${Math.round(milliseconds)}ms` : `${(milliseconds / 1_000).toFixed(1)}s`
 }
 
-function metricDurationOf(milliseconds: number): string {
-  const seconds = Math.max(0, Math.round(milliseconds / 1_000))
-  if (seconds < 60) return `${seconds}s`
-  const minutes = Math.floor(seconds / 60)
-  const remainder = seconds % 60
-  return `${minutes}m${remainder ? `${remainder}s` : ''}`
-}
 
 function compactTokensOf(tokens: number): string {
   if (tokens < 1_000) return String(Math.round(tokens))
@@ -181,11 +175,15 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
   const [railChoice, setRail] = useState<RailPanel | null | undefined>(undefined)
   const [filesExpanded, setFilesExpanded] = useState(false)
   const [reviewPath, setReviewPath] = useState('')
+  /** A file to open in Files (a tool row's path); the count re-opens the same one. */
+  const [filesTarget, setFilesTarget] = useState({ path: '', count: 0 })
   const [selectedAgent, setSelectedAgent] = useState('')
   const contextRequiresFullWidth = windowWidth < (focused ? 0 : layout.sidebarWidth) + layout.inspectorWidth + 320
   // Show activity on entry without covering the conversation in a narrow window.
   // An explicit open/close choice survives session changes and resizing.
   const rail = railChoice === undefined ? (!snap.noWorkspace && !contextRequiresFullWidth ? 'activity' : null) : railChoice
+  const toggleSidebar = () => narrow ? setNarrowNavigation(value => !value) : setLayout({ sidebarHidden: !focused })
+  const chrome: WindowChromeState = { sidebarVisible: !focused, inspectorOpen: rail !== null, toggleSidebar }
   const [page, setPage] = useState<'agents' | 'extensions' | 'artifacts' | null>(null)
   // Which stylesheet takeovers are in effect, named once so the decision
   // dock below and the CSS cannot disagree about when .chat is gone.
@@ -199,6 +197,7 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
   const inspectorMax = Math.max(260, windowWidth - (focused ? 0 : layout.sidebarWidth) - 320)
   const navigate = (next: DesktopPanel, filePath?: string): void => {
     if (next === 'review') setReviewPath(filePath ?? '')
+    if (next === 'files' && filePath) setFilesTarget(target => ({ path: filePath, count: target.count + 1 }))
     // A link to one file's changes opens straight into the diff view.
     if (next === 'review' && filePath && !contextRequiresFullWidth) setFilesExpanded(true)
     if (next === 'activity') setSelectedAgent(filePath ?? '')
@@ -210,16 +209,17 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
   }
   useEffect(() => { setPanel(null); setPage(null); setSelectedAgent('') }, [snap.cwd, snap.sessionKey])
   return (
-    <DesktopNavigation.Provider value={navigate}><ActivityVisible.Provider value={rail === 'activity'}>
+    <DesktopNavigation.Provider value={navigate}><ActivityVisible.Provider value={rail === 'activity'}><WindowChrome.Provider value={chrome}>
     <div className={`app atelier${trafficLights ? '' : ' app--no-traffic-lights'}${focused ? ' atelier--focus' : ''}`} style={{ '--sidebar-width': `${layout.sidebarWidth}px`, '--inspector-width': `${layout.inspectorWidth}px` } as React.CSSProperties}>
-      <Topbar snap={snap} inspectorOpen={rail !== null} sidebarVisible={!focused} onFocus={() => narrow ? setNarrowNavigation(value => !value) : setLayout({ sidebarHidden: !focused })} />
+      {/* No title bar: its controls live in the sidebar's top row and the
+          conversation header — one row, as in Claude's app. */}
       <FirstRunSetup snap={snap} />
       <div className="app__body" data-context-full={chatHidden.contextFull || undefined} data-review={(rail === "review" && contextFull) || undefined}>
         <Sidebar snap={snap} page={page} />
         {!focused && <PanelDivider label="Resize sessions" value={layout.sidebarWidth} min={180} max={360} onChange={sidebarWidth => setLayout({ sidebarWidth })} />}
         {snap.noWorkspace ? snap.storageScope?.startsWith('ssh:') ? <RemoteWorkspaceGate /> : <WorkspaceGate /> : <ErrorBoundary label="This conversation"><Chat snap={snap} page={page} /></ErrorBoundary>}
         {rail && <PanelDivider label="Resize inspector" value={layout.inspectorWidth} min={260} max={inspectorMax} reverse onChange={inspectorWidth => setLayout({ inspectorWidth })} />}
-        {rail && <ErrorBoundary label={railLabel(rail)}><DesktopRail activityFocused={Boolean(selectedAgent)} panel={rail} snap={snap} close={() => setRail(null)} filesExpanded={filesExpanded} reviewPath={reviewPath} {...(!contextRequiresFullWidth ? { toggleFilesExpanded: () => setFilesExpanded(value => !value), setExpanded: setFilesExpanded } : {})} activityDetails={<ActivityDetails snap={snap} selectedAgent={selectedAgent} />} /></ErrorBoundary>}
+        {rail && <ErrorBoundary label={railLabel(rail)}><DesktopRail activityFocused={Boolean(selectedAgent)} panel={rail} snap={snap} close={() => setRail(null)} filesExpanded={filesExpanded} reviewPath={reviewPath} filesTarget={filesTarget} {...(!contextRequiresFullWidth ? { toggleFilesExpanded: () => setFilesExpanded(value => !value), setExpanded: setFilesExpanded } : {})} activityDetails={<ActivityDetails snap={snap} selectedAgent={selectedAgent} />} /></ErrorBoundary>}
 
       </div>
       {/* The review takeover and an expanded rail both hide .chat, which
@@ -251,27 +251,38 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
       </div>}
       <GlobalKeys snap={snap} closeSurface={panel || page ? () => { setPanel(null); setPage(null) } : null} />
     </div>
-    </ActivityVisible.Provider></DesktopNavigation.Provider>
+    </WindowChrome.Provider></ActivityVisible.Provider></DesktopNavigation.Provider>
   )
 }
 
 // ── Top bar ─────────────────────────────────────────────────────────────
 
-function Topbar({ snap, inspectorOpen, sidebarVisible, onFocus }: { snap: Snapshot; inspectorOpen: boolean; sidebarVisible: boolean; onFocus: () => void }): ReactElement {
+/** What the window's top row needs from the shell (it has no title bar). */
+interface WindowChromeState {
+  readonly sidebarVisible: boolean
+  readonly inspectorOpen: boolean
+  readonly toggleSidebar: () => void
+}
+
+const WindowChrome = createContext<WindowChromeState>({ sidebarVisible: true, inspectorOpen: false, toggleSidebar: () => {} })
+
+function SidebarToggle(): ReactElement {
+  const chrome = useContext(WindowChrome)
+  return <button className="studio-icon window-toggle" title="Toggle sidebar" aria-label="Toggle sidebar" aria-expanded={chrome.sidebarVisible} aria-controls="session-sidebar" onClick={chrome.toggleSidebar}><Icon name="sidebar" /></button>
+}
+
+/** Search, background work and — while the rail is closed — Git and Files. */
+function WorkspaceTools({ snap, inspectorOpen }: { snap: Snapshot; inspectorOpen: boolean }): ReactElement {
   const open = useDesktopNavigation()
-  return <div className="top">
-    <button className="studio-icon" title="Toggle sidebar" aria-label="Toggle sidebar" aria-expanded={sidebarVisible} aria-controls="session-sidebar" onClick={onFocus}><Icon name="sidebar" /></button>
-    <span className="top__name">{snap.currentTitle || 'New session'}</span>
-    {!sidebarVisible && <RuntimeStatus snap={snap} compact />}
-    <div className="top__actions" role="group" aria-label="Workspace tools">
+  return <div className="top__actions" role="group" aria-label="Workspace tools">
     <button title="Search sessions" aria-label="Search sessions" onClick={() => store.openSessionSearch()}><Icon name="search" /></button>
     <BackgroundIndicator snap={snap} />
     {!inspectorOpen && <>
     <button title="Source control" onClick={() => open('review')}><Icon name="branch" /><span>Git</span></button>
     <button title="Project files" aria-label="Project files" onClick={() => open('files')}><Icon name="sidebar" /></button></>}
-    </div>
   </div>
 }
+
 
 /** One workspace-level home for connection, version mismatch and recovery. */
 function RuntimeStatus({ snap, compact = false }: { snap: Snapshot; compact?: boolean }): ReactElement {
@@ -629,6 +640,7 @@ function SessionMenu({ menu }: { menu: Snapshot['sessionMenu'] }): ReactElement 
 
 function Sidebar({ snap, page }: { snap: Snapshot; page: 'agents' | 'extensions' | 'artifacts' | null }): ReactElement {
   const open = useDesktopNavigation()
+  const chrome = useContext(WindowChrome)
   const [filter, setFilter] = useState('')
   const needle = filter.trim().toLowerCase()
   // Match what the row DISPLAYS: enriched snippets replace raw titles, and
@@ -651,7 +663,7 @@ function Sidebar({ snap, page }: { snap: Snapshot; page: 'agents' | 'extensions'
         key: snap.sessionKey || snap.currentId,
         title: snap.currentTitle || 'New task',
         status: snap.turnActive ? 'working' : snap.turnFailed ? 'failed' : 'idle',
-        age: snap.turnActive ? `${snap.turnSeconds}s` : '',
+        age: snap.turnActive ? elapsedOf(snap.turnSeconds, true) : '',
         current: true,
         kind: 'main',
         turns: snap.turnCount,
@@ -675,6 +687,7 @@ function Sidebar({ snap, page }: { snap: Snapshot; page: 'agents' | 'extensions'
 
   return (
     <aside id="session-sidebar" className="side" aria-label="Sessions">
+      <div className="side__head"><SidebarToggle /></div>
       <div className="side__pad">
         <div className="sidebar-wordmark" aria-label="Xerxes">XERXES</div>
         {/* `page !== 'agents'` lit Sessions while Skills & tools or
@@ -721,15 +734,18 @@ function Sidebar({ snap, page }: { snap: Snapshot; page: 'agents' | 'extensions'
         ))}
         {groups.map(group => (
           <div key={group.cwd} className={`wgroup${group.cwd === snap.cwd ? ' is-home' : ''}`}>
-            <button
-              className="wgroup__cap"
-              title={group.cwd === snap.cwd ? `${group.cwd} — you are here` : `Switch to ${group.cwd}`}
-              onClick={() => { if (group.cwd !== snap.cwd) store.enterWorkspace(group.cwd) }}
-            >
-              <span className="wgroup__mark" data-here={group.cwd === snap.cwd || undefined} aria-hidden="true" />
-              {group.name}
-              {group.cwd === snap.cwd && <span className="wgroup__cur">current</span>}
-            </button>
+            <div className="wgroup__head">
+              <button
+                className="wgroup__cap"
+                title={group.cwd === snap.cwd ? `${group.cwd} — you are here` : `Switch to ${group.cwd}`}
+                onClick={() => { if (group.cwd !== snap.cwd) store.enterWorkspace(group.cwd) }}
+              >
+                <span className="wgroup__mark" data-here={group.cwd === snap.cwd || undefined} aria-hidden="true" />
+                {group.name}
+                {group.cwd === snap.cwd && <span className="wgroup__cur">current</span>}
+              </button>
+              <button className="wgroup__add" disabled={!online} title={`New task in ${group.name}`} aria-label={`New task in ${group.name}`} onClick={() => store.newChatIn(group.cwd)}><Icon name="plus" size={14} /></button>
+            </div>
             {group.rows.map(row => {
               const snippet = snap.snippets[row.id]
               return snippet === undefined
@@ -794,7 +810,7 @@ function SessionCell({
         )
       }}
     >
-      <span className="sess__dot" style={{ background: statusColor(row.status) }} />
+      <span className="sess__dot" data-status={row.status} style={{ background: statusColor(row.status) }} />
       <span className="sess__body">
         <span className="sess__t">{title}</span>
         {sub && <span className="sess__s">{sub}</span>}
@@ -808,165 +824,33 @@ function SessionCell({
 }
 // ── Chat column ─────────────────────────────────────────────────────────
 
-/**
- * Header fleet chip (dsh "N subagents ⌄"): the count is live from the
- * snapshot; clicking opens the roster — name, status dot, state label.
- * Rows are read-only status; subagents are supervised from the Fleet rail.
- */
-function FleetChip({ snap }: { snap: Snapshot }): ReactElement {
-  const navigate = useDesktopNavigation()
-  const [open, setOpen] = useState(false)
-  const fleet = snap.fleet
-  if (fleet.length === 0) return <></>
-  // The chip is the only fleet signal while the popover is closed, so it
-  // carries the working state itself: a ring spins around the icon.
-  const working = fleet.filter(row => statusColor(row.status) === C.activity).length
-  return (
-    <span className="chipanchor">
-      <button
-        className={`hchip hchip--btn fleetchip${open ? ' is-on' : ''}${working > 0 ? ' is-working' : ''}`}
-        title={working > 0 ? `${working} of ${fleet.length} subagents working` : 'Subagents spawned by this task'}
-        aria-expanded={open}
-        aria-busy={working > 0 || undefined}
-        onClick={() => setOpen(value => !value)}
-      >
-        <span className="fleetchip__icon"><Icon name="agent" size={13} /></span> {fleet.length} subagent{fleet.length === 1 ? '' : 's'} <Icon name="caretDown" size={11} />
-      </button>
-      {open && (
-        <>
-          <div className="backdrop backdrop--clear" onClick={() => setOpen(false)} />
-          <div className="fleetpop" role="menu" aria-label="Subagents">
-            <div className="cap fleetpop__cap">Subagents · {fleet.length}</div>
-            {fleet.map(row => (
-              <button key={row.id} className="fleetpop__row" role="menuitem" onClick={() => {setOpen(false);navigate('activity',row.id)}}>
-                <span className="sess__dot" style={{ background: statusColor(row.status) }} />
-                <span className="fleetpop__t agentname agentname--stack"><span className="agentname__t">{row.title}</span>{agentKindLabel(row.agentDetails) && <span className="agentname__kind">({agentKindLabel(row.agentDetails)})</span>}</span>
-                <span className="fleetpop__s">{row.status}</span>
-              </button>
-            ))}
-          </div>
-        </>
-      )}
-    </span>
-  )
-}
 
-/**
- * Header background-jobs chip (dsh "N background jobs ⌄"): daemon-
- * backgrounded turns working right now, from the event pipe + active_list.
- */
-function JobsChip({ snap }: { snap: Snapshot }): ReactElement {
-  const [open, setOpen] = useState(false)
-  const jobs = snap.backgroundJobs
-  if (jobs.length === 0) return <></>
-  return (
-    <span className="chipanchor">
-      <button
-        className={`hchip hchip--btn${open ? ' is-on' : ''}`}
-        title="Daemon-backgrounded turns running now"
-        aria-expanded={open}
-        onClick={() => setOpen(value => !value)}
-      >
-        <Icon name="stack" size={13} /> {jobs.length} background job{jobs.length === 1 ? '' : 's'} running <Icon name="caretDown" size={11} />
-      </button>
-      {open && (
-        <>
-          <div className="backdrop backdrop--clear" onClick={() => setOpen(false)} />
-          <div className="fleetpop" role="menu" aria-label="Background jobs">
-            <div className="cap fleetpop__cap">Background jobs · {jobs.length}</div>
-            {jobs.map(job => (
-              <div key={job.id} className="fleetpop__row">
-                <span className="sess__dot" style={{ background: statusColor(job.status) }} />
-                <span className="fleetpop__t">{job.title}</span>
-                <span className="fleetpop__s">{job.status}</span>
-              </div>
-            ))}
-          </div>
-        </>
-      )}
-    </span>
-  )
-}
 
 function Chat({ snap, page }: { snap: Snapshot; page: 'agents' | 'extensions' | 'artifacts' | null }): ReactElement {
   const open = useDesktopNavigation()
+  const chrome = useContext(WindowChrome)
   const changes = snap.changes
   const totals = useMemo(() => ({
     adds: changes.reduce((sum, file) => sum + file.adds, 0),
     dels: changes.reduce((sum, file) => sum + file.dels, 0),
   }), [changes])
-  const planDone = (snap.todos?.filter(item => item.status === 'completed') ?? snap.plan?.items.filter(item => item.done))?.length ?? 0
-  const planTotal = snap.todos?.length ?? snap.plan?.items.length ?? 0
   const needsInput = snap.approval !== null || snap.question !== null
 
   return (
     <main className="chat">
-      <header className="chat__head">
-        <button className="chat__workspace" onClick={() => open('workspace')}>{homeLabel(snap)}</button>
+      <header className="chat__head chat__head--minimal">
+        {!chrome.sidebarVisible && <SidebarToggle />}
         <span className="chat__title">{snap.currentTitle || (snap.connection === 'online' ? 'New task' : 'Not connected')}</span>
-        {snap.currentId && <span className="chat__id">{snap.currentId.slice(0, 8)}</span>}
-        <span className="hchip" title="Agent preset for this session · fixed after its first turn"><Icon name="spark" size={12} /> {snap.currentAgentPreset === 'creator' ? 'Creator mode' : (snap.currentAgentPreset || 'default')}</span>
-        {/* Fleet + mode ride the header as chips (dsh grammar); the fleet
-            chip opens the live subagent list, the mode chip toggles plan. */}
-        <FleetChip snap={snap} />
-        <JobsChip snap={snap} />
-        <button
-          className={`hchip hchip--btn${snap.planMode ? ' is-plan' : ''}`}
-          title={snap.planMode ? 'Plan mode on — click to act' : 'Standard mode — click to plan first'}
-          onClick={() => store.togglePlanMode()}
-        >
-          {snap.planMode ? <><Icon name="pause" size={12} /> Plan mode</> : 'Standard mode'}
-        </button>
-        <div className="chat__state">
-          {/* Needs-input outranks acting: an approval can land mid-turn, and
-              on any other tab the stream (and its card) is not mounted —
-              the header is the only place the signal survives. */}
-          {needsInput ? (
-            <>
-              <span className="badge badge--need">needs input{snap.turnActive ? ' · acting paused' : ''}</span>
-              {(snap.turnActive || snap.submissionPending) && <button className="stop" onClick={() => store.cancel()}>Stop</button>}
-            </>
-          ) : snap.turnActive || snap.submissionPending ? (
-            <>
-              {/* submissionPending covers the daemon's pre-launch window —
-                  git snapshot plus any compaction — which can run for
-                  minutes. Gating Stop on turnActive alone left the composer
-                  disabled with no control at all during it. */}
-              <span className="badge badge--live">{snap.turnActive ? 'Working' : 'Starting…'}</span>
-              <button className="stop" onClick={() => store.cancel()}>Stop</button>
-            </>
-          ) : snap.planMode ? (
-            <span className="badge badge--plan"><Icon name="pause" size={11} /> plan mode</span>
-          ) : snap.failed ? (
-            <span className="badge badge--fail">failed</span>
-          ) : (
-            <span className="badge">idle</span>
-          )}
-        </div>
-        <button
-          className="hchip hchip--btn chat__log"
-          disabled={!snap.currentId}
-          title="Export this session's transcript as markdown"
-          onClick={() => void store.exportSessionTranscript(snap.sessionKey)}
-        >
-          <Icon name="download" size={12} /> Session log
-        </button>
-      <div hidden={page !== null} className={`workspace__tabs${snap.turnCount === 0 && !snap.blocks.some(block => block.kind !== "notice") ? ' workspace__tabs--empty' : ''}`}>
-        <div className="tabs" role="tablist" aria-label="Session views">
-          <button role="tab" aria-selected={snap.tab === 'activity'} className={`tab${snap.tab === 'activity' ? ' is-on' : ''}`} onClick={() => store.setTab('activity')}>Conversation</button>
-          <button role="tab" aria-selected={snap.tab === 'plan'} className={`tab${snap.tab === 'plan' ? ' is-on' : ''}`} onClick={() => store.setTab('plan')}>
-            Plan &amp; todos{planTotal ? <> <span className="pillcount">{planDone}/{planTotal}</span></> : null}
-          </button>
-          {/* The only route to per-file undo / "Undo all" / "Keep all".
-              Nothing called setTab('changes'), so ChangesTab and the
-              changes.undo RPC shipped unreachable. Distinct from the rail's
-              "Changes", which is the git working tree, not this session. */}
-          {changes.length > 0 && <button role="tab" aria-selected={snap.tab === 'changes'} className={`tab${snap.tab === 'changes' ? ' is-on' : ''}`} onClick={() => store.setTab('changes')}>
-            Session edits <span className="pillcount">+{totals.adds} −{totals.dels}</span>
-          </button>}
-          <button role="tab" aria-selected={snap.tab === 'log'} className={`tab${snap.tab === 'log' ? ' is-on' : ''}`} onClick={() => store.setTab('log')}>Log</button>
-        </div>
-      </div>
+        <span className="hchip chat__kind" title="Agent preset for this session · fixed after its first turn">{snap.currentAgentPreset === 'creator' ? 'Creator mode' : (snap.currentAgentPreset || 'default')}</span>
+        <span className="composer__flex" />
+        {/* On Session edits or the plan, the approval card is off screen: this is the signal. */}
+        {needsInput && <button className="badge badge--need" onClick={() => store.setTab('activity')}>needs input{snap.turnActive ? ' · acting paused' : ''}</button>}
+        {page === null && snap.tab !== 'activity' && <button className="chat__view" onClick={() => store.setTab('activity')}><Icon name="chat" size={13} /> Conversation</button>}
+        {page === null && changes.length > 0 && <button className={`chat__view${snap.tab === 'changes' ? ' is-on' : ''}`} aria-pressed={snap.tab === 'changes'} onClick={() => store.setTab(snap.tab === 'changes' ? 'activity' : 'changes')}>
+          Session edits <span className="pillcount"><span className="add">+{totals.adds}</span> <span className="del">−{totals.dels}</span></span>
+        </button>}
+        {!chrome.sidebarVisible && <RuntimeStatus snap={snap} compact />}
+        {!chrome.inspectorOpen && <WorkspaceTools snap={snap} inspectorOpen={false} />}
       </header>
 
       {page && <DesktopPage panel={page} snap={snap} />}
@@ -1023,6 +907,7 @@ function Stream({ snap }: { snap: Snapshot }): ReactElement {
   const offline = snap.connection === 'offline'
   const existingWork = Boolean(parseGoal(snap.goal) || snap.fleet.length || snap.todos?.length || snap.plan)
   const empty = snap.connection === 'online' && blocks.every(block => block.kind === 'notice' && !block.error) && !snap.turnActive
+  const ends = useMemo(() => replyEnds(blocks, snap.turnActive), [blocks, snap.turnActive])
 
   // dsh: the approval attaches to the tool call it is about — render it
   // directly under the trail holding that call, not floating elsewhere.
@@ -1050,6 +935,7 @@ function Stream({ snap }: { snap: Snapshot }): ReactElement {
     // reader. Deliberately not role="log" — a polite live region over
     // token-level streaming announces continuously; the Announcer below
     // reports the transitions that actually matter instead.
+    <ReplyEnds.Provider value={ends}>
     <div className={`stream${empty && !failedCard && !snap.question && !approval ? ' stream--welcome' : ''}`} ref={ref} tabIndex={0} role="region" aria-label="Conversation">
       {empty && !failedCard && !snap.question && !approval ? <>
         {blocks.length > 0 && <div className="welcome-notices" aria-live="polite">{blocks.map(block => <BlockView key={block.id} block={block} />)}</div>}
@@ -1084,6 +970,7 @@ function Stream({ snap }: { snap: Snapshot }): ReactElement {
         </button>
       )}
     </div>
+    </ReplyEnds.Provider>
   )
 }
 
@@ -1093,41 +980,76 @@ function Stream({ snap }: { snap: Snapshot }): ReactElement {
  * Event-driven from the spawn call itself, so a batch that dies inside the
  * daemon still shows — then the daemon snapshots land terminal states.
  */
-function AgentsCard({ members }: { members: readonly AgentMember[] }): ReactElement {
+const AGENT_ROWS = 8
+
+/** An agent's state as the card draws it: a glyph and a word. */
+function memberTone(status: string): 'working' | 'done' | 'failed' | 'stopped' {
+  if (['working', 'running', 'acting', 'queued', 'pending', 'starting'].includes(status)) return 'working'
+  if (['failed', 'error', 'timeout'].includes(status)) return 'failed'
+  if (['cancelled', 'canceled', 'stopped', 'interrupted'].includes(status)) return 'stopped'
+  return 'done'
+}
+
+/**
+ * The agents a spawn started, as one card in the conversation: a progress
+ * bar over the whole batch, then each agent with its state, its model (the
+ * same `provider/model[effort]` the rail shows) and, when it failed, why.
+ * Working agents sort first; past eight, the rest fold behind "Show all".
+ */
+export function AgentsCard({ members }: { members: readonly AgentMember[] }): ReactElement {
   const navigate = useDesktopNavigation()
   const [open, setOpen] = useState(true)
-  const working = members.filter(m => m.status === 'working').length
-  const failed = members.filter(m => m.status === 'failed').length
-  const stopped = members.filter(m => m.status === 'cancelled').length
-  const counts = [
-    `${members.length} agent${members.length === 1 ? '' : 's'}`,
-    working ? `${working} working` : '',
-    failed ? `${failed} failed` : '',
-    stopped ? `${stopped} stopped` : '',
-    !working && !failed && !stopped ? 'completed' : '',
-  ].filter(Boolean).join(' · ')
+  const [all, setAll] = useState(false)
+  const tones = members.map(member => memberTone(member.status))
+  const count = (tone: string) => tones.filter(value => value === tone).length
+  const working = count('working'), failed = count('failed'), stopped = count('stopped'), done = count('done')
+  const settled = members.length - working
+  const order = { working: 0, failed: 1, stopped: 2, done: 3 } as const
+  const sorted = members.map((member, index) => ({ member, tone: tones[index]! })).sort((a, b) => order[a.tone] - order[b.tone])
+  const shown = all ? sorted : sorted.slice(0, AGENT_ROWS)
   return (
-    <div className="acard">
+    <section className="acard" data-state={working ? 'working' : failed ? 'failed' : 'done'} aria-label="Subagents">
       <button className="acard__head" onClick={() => setOpen(value => !value)} aria-expanded={open}>
-        <Icon name="agent" size={16} />
-        <span className="acard__title">Subagents</span>
-        <span className="acard__counts">{counts}</span>
-        {working > 0 && <span className="acard__spin" />}
+        <span className="acard__icon">{working ? <Icon name="spinner" size={14} /> : <Icon name="agent" size={15} />}</span>
+        <span className="acard__title">{members.length} subagent{members.length === 1 ? '' : 's'}</span>
+        <span className="acard__counts">
+          {working > 0 && <span data-tone="working">{working} working</span>}
+          {done > 0 && <span data-tone="done">{done} done</span>}
+          {failed > 0 && <span data-tone="failed">{failed} failed</span>}
+          {stopped > 0 && <span data-tone="stopped">{stopped} stopped</span>}
+        </span>
         <span className={`acard__chev${open ? ' is-open' : ''}`}><Icon name="caretDown" size={12} /></span>
       </button>
-      {open && (
-        <div className="acard__list">
-          {members.map(member => (
-            <button key={member.key} className="acard__row" onClick={() => navigate('activity', member.runtimeId || member.key)} aria-label={`Inspect agent: ${member.title}`}>
-              <span className="sess__dot" style={{ background: statusColor(member.status) }} />
-              <span className="acard__t">{member.title}</span>
-              <span className="acard__s" data-state={member.status}>{member.status}</span><Icon name="chevron" size={12}/>
+      <div className="acard__progress" role="progressbar" aria-label="Subagents finished" aria-valuemin={0} aria-valuemax={members.length} aria-valuenow={settled}>
+        {done > 0 && <span data-tone="done" style={{ flexGrow: done }} />}
+        {failed > 0 && <span data-tone="failed" style={{ flexGrow: failed }} />}
+        {stopped > 0 && <span data-tone="stopped" style={{ flexGrow: stopped }} />}
+        {working > 0 && <span data-tone="working" style={{ flexGrow: working }} />}
+      </div>
+      {open && <ul className="acard__list">
+        {shown.map(({ member, tone }) => {
+          const kind = agentKindLabel(member)
+          return <li key={member.key}>
+            <button className="acard__row" data-tone={tone} onClick={() => navigate('activity', member.runtimeId || member.key)} aria-label={`Inspect agent: ${member.title}`}>
+              <span className="acard__glyph" aria-hidden="true">{tone === 'working' ? <Icon name="spinner" size={13} /> : tone === 'done' ? <Icon name="check" size={12} /> : tone === 'failed' ? <Icon name="close" size={11} /> : <span className="acard__dash" />}</span>
+              <span className="acard__body">
+                <span className="acard__t">{member.title}</span>
+                {(kind || (tone === 'failed' && member.error)) && <span className="acard__meta">
+                  {kind && <span className="acard__kind">{kind}</span>}
+                  {tone === 'failed' && member.error && <span className="acard__error" title={member.error}>{member.error.split('\n')[0]}</span>}
+                </span>}
+              </span>
+              <span className="acard__s">{tone === 'working' ? 'Working' : tone === 'done' ? 'Done' : tone === 'failed' ? 'Failed' : 'Stopped'}</span>
+              <Icon name="chevron" size={12} />
             </button>
-          ))}
-        </div>
-      )}
-      <button className="agents-inspect" onClick={() => navigate('activity')}>Inspect agents</button>
-    </div>
+          </li>
+        })}
+      </ul>}
+      <footer className="acard__foot">
+        {open && sorted.length > AGENT_ROWS && <button onClick={() => setAll(value => !value)}>{all ? 'Show fewer' : `Show all ${sorted.length}`}</button>}
+        <button onClick={() => navigate('activity')}>Open in Activity</button>
+      </footer>
+    </section>
   )
 }
 
@@ -1289,6 +1211,40 @@ function LivePhrase({ text }: { text: string }): ReactElement {
   </span>
 }
 
+/**
+ * One action row per finished reply, under its last paragraph (Claude's):
+ * a reply streams as several agent blocks between tool calls, and a copy
+ * button under every one of them read as clutter. Maps the last agent
+ * block of each settled turn to the whole reply's text.
+ */
+export function replyEnds(blocks: Snapshot['blocks'], turnActive: boolean): ReadonlyMap<number, { readonly text: string; readonly latest: boolean }> {
+  const ends = new Map<number, { text: string; latest: boolean }>()
+  let parts: string[] = []
+  let last: number | undefined
+  const close = () => {
+    if (last !== undefined && parts.length) ends.set(last, { text: parts.join('\n\n'), latest: false })
+    parts = []
+    last = undefined
+  }
+  for (const block of blocks) {
+    if (block.kind === 'user' && !block.contextSummary) close()
+    else if (block.kind === 'agent' && !block.streaming && block.text.trim()) { parts.push(block.text.trim()); last = block.id }
+  }
+  // The running turn's reply is not finished yet.
+  if (!turnActive) close()
+  const newest = [...ends.keys()].at(-1)
+  if (newest) ends.get(newest)!.latest = true
+  return ends
+}
+
+const ReplyEnds = createContext<ReadonlyMap<number, { readonly text: string; readonly latest: boolean }>>(new Map())
+
+function ReplyActionRow({ blockId }: { blockId: number }): ReactElement | null {
+  const end = useContext(ReplyEnds).get(blockId)
+  if (!end) return null
+  return <div className={`msg__actions msg__actions--reply${end.latest ? ' is-latest' : ''}`}><CopyButton icon text={end.text} label="Copy reply" /></div>
+}
+
 function UserMessage({ text }: { text: string }): ReactElement {
   const [expanded, setExpanded] = useState(false)
   const long = text.length > 1600 || text.split('\n').length > 16
@@ -1299,11 +1255,13 @@ function UserMessage({ text }: { text: string }): ReactElement {
       <div className={`msg__text${long && !expanded ? ' msg__text--preview' : ''}`}>{text}</div>
       {long && <button className="message-expand" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>{expanded ? 'Show less' : 'Show full message'}</button>}
     </div>
-    <div className="msg__actions"><CopyButton text={text} label="Copy message" /></div>
+    <div className="msg__actions"><CopyButton icon text={text} label="Copy message" /></div>
   </div>
 }
 
-function BlockView({ block }: { block: Snapshot['blocks'][number] }): ReactElement {
+// Memoized: the turn clock re-renders the conversation every second, and an
+// unchanged block (same object) has nothing new to draw.
+const BlockView = memo(function BlockView({ block }: { block: Snapshot['blocks'][number] }): ReactElement {
   if (block.kind === 'agents') {
     return <AgentsCard members={block.members} />
   }
@@ -1320,8 +1278,7 @@ function BlockView({ block }: { block: Snapshot['blocks'][number] }): ReactEleme
         <div className="msg__text">
           <Markdown text={block.text} className="md--agent" tail={block.streaming ? CARET : undefined} />
         </div>
-        {/* The reply as written (Markdown), once it has finished streaming. */}
-        {!block.streaming && block.text.trim() && <div className="msg__actions"><CopyButton text={block.text} label="Copy reply" /></div>}
+        <ReplyActionRow blockId={block.id} />
       </section>
     )
   }
@@ -1368,7 +1325,7 @@ function BlockView({ block }: { block: Snapshot['blocks'][number] }): ReactEleme
       <span className="frow__excerpt frow__excerpt--wrap" title={block.text.length > 160 ? block.text : undefined}>{block.text}</span>
     </div>
   )
-}
+})
 
 /** Command-shaped tools read as a command; everything else as its fields. */
 const COMMAND_KEYS = ['command', 'cmd', 'script', 'shell'] as const
@@ -1872,8 +1829,9 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
       )}
       {snap.submissionPending && !snap.turnActive && <div className="streamstatus composer-status" role="status">Sending… preparing the task</div>}
       {snap.turnActive && <div className="streamstatus composer-status" role="status" aria-live="polite">{snap.networkRetrying ? 'Retrying connection…' : 'Acting…'} {turnDurOf(snap.turnSeconds)}</div>}
-      <div className="composer-dock">
       <ComposerTaskSummary snap={snap} />
+      <RepoBar snap={snap} />
+      <div className="composer-dock">
       <div className="composer">
         <textarea
           ref={ref}
@@ -1907,65 +1865,138 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
             }
           }}
         />
-        <div className="composer__bar">
-          <button className="composer__context" aria-label="Add context" onClick={() => open('files')}><Icon name="folder" size={16} /></button>
-          <Dictation sessionKey={snap.sessionKey} onText={text=>{setDraft(value=>(value ? value+" " : "")+text)}} />
-
-          <span className="composer__flex" />
-          <div className="chipanchor">
-            <button
-              className={`cchip${snap.model ? '' : ' is-custom'}`}
-              title="Model and reasoning effort — click to change"
-              onClick={() => store.toggleModelMenu()}
-            >
-              <Icon name="spark" size={12} /> {snap.model ? bareModelName(snap.model) : 'model'}
-              {snap.reasoningEffort && snap.reasoningEffort !== 'off' ? ` ${snap.reasoningEffort}` : ''}
-              {' '}<Icon name="caretDown" size={11} />
-            </button>
-            <PickerLayer>
-            {snap.modelMenuOpen && <ModelMenu snap={snap} onClose={() => store.closeModelMenu()} />}
-            {snap.pickerOpen && <ModelPicker snap={snap} onClose={() => store.closePicker()} />}
-            {snap.reasoningPickerOpen && <ReasoningPicker snap={snap} onClose={() => store.closeReasoningPicker()} />}
-            </PickerLayer>
-          </div>
+        {/* Stop while a turn runs and nothing is typed; otherwise send (or queue). */}
+        {(snap.turnActive || snap.submissionPending) && !draft.trim()
+          ? <button className="composer__send composer__send--stop" title="Stop (esc)" aria-label="Stop" onClick={() => store.cancel()}><Icon name="stop" size={18} /></button>
+          : <button
+              className="composer__send"
+              disabled={!ready || !draft.trim() || snap.submissionPending}
+              title={snap.turnActive ? 'Queue — runs when this step settles (⏎)' : 'Send (⏎ · ⇧⏎ newline)'}
+              onClick={send}
+              aria-label={snap.turnActive ? 'Queue message' : 'Send message'}
+            ><Icon name="arrowUp" size={16} /></button>}
+      </div>
+      </div>
+      <div className="composer__toolbar">
+        <button className="cchip composer__icon" title="Add files or folders as context" aria-label="Add context" onClick={() => open('files')}><Icon name="plus" size={16} /></button>
+        <Dictation compact sessionKey={snap.sessionKey} onText={text=>{setDraft(value=>(value ? value+" " : "")+text)}} />
+        <button
+          className="cchip composer__text"
+          title={`Approval policy for this task: ${snap.permissionMode || 'not configured'} — open settings`}
+          onClick={() => store.openSettings('permissions')}
+        >{permissionLabel(snap.permissionMode)}</button>
+        <button
+          className={`cchip composer__text${snap.planMode ? ' is-on' : ''}`}
+          aria-pressed={snap.planMode}
+          title={snap.planMode ? 'Planning first. Click to work directly.' : 'Click to plan before making changes.'}
+          onClick={() => store.togglePlanMode()}
+        >{snap.planMode ? 'Plan first' : 'Plan'}</button>
+        <span className="composer__flex" />
+        <div className="chipanchor">
           <button
-            className="composer__send"
-            disabled={!ready || !draft.trim() || snap.submissionPending}
-            title={snap.turnActive ? 'Queue — runs when this step settles (⏎)' : 'Send (⏎)'}
-            onClick={send}
-            aria-label={snap.turnActive ? 'Queue message' : 'Send message'}
-          ><Icon name="arrowUp" size={16} /></button>
+            className={`cchip composer__text${snap.model ? '' : ' is-custom'}`}
+            title="Model — click to change"
+            onClick={() => store.toggleModelMenu()}
+          >{snap.model ? bareModelName(snap.model) : 'Choose model'}</button>
+          <PickerLayer>
+          {snap.modelMenuOpen && <ModelMenu snap={snap} onClose={() => store.closeModelMenu()} />}
+          {snap.pickerOpen && <ModelPicker snap={snap} onClose={() => store.closePicker()} />}
+          {snap.reasoningPickerOpen && <ReasoningPicker snap={snap} onClose={() => store.closeReasoningPicker()} />}
+          </PickerLayer>
         </div>
-      </div>
-      </div>
-      <div className="composer__hints">          <button
-            className="cchip"
-            title={`Approval policy for this task: ${snap.permissionMode || 'not configured'} — open settings`}
-            onClick={() => store.openSettings('permissions')}
-          >
-            {/* The live mode used to be in the tooltip only, so the chip
-                read the same word whether every tool call was being waved
-                through or every one of them was going to ask. */}
-            <Icon name="shield" size={14} /> {snap.permissionMode || 'Permissions'} <Icon name="caretDown" size={11} />
-          </button>
-          <button
-            className={`cchip${snap.planMode ? ' is-on' : ''}`}
-            aria-pressed={snap.planMode}
-            title={snap.planMode ? 'Planning enabled. Click to work directly.' : 'Click to plan before making changes.'}
-            onClick={() => store.togglePlanMode()}
-          >
-            <Icon name="plan" size={14} /> {snap.planMode ? 'Plan first' : 'Work directly'}
-          </button>
-
-        <button className="cchip composer__workspace" title="Change workspace" onClick={() => open('workspace')}><Icon name="folder" size={14} />{homeLabel(snap)}</button>
-        <span><kbd>⏎</kbd> {snap.turnActive ? 'queue' : 'send'}</span>
-        <span><kbd>⇧⏎</kbd> newline</span>
-        <span><kbd>esc</kbd> stop / clear</span>
-        <span><kbd>⌘K</kbd> palette</span>
+        {snap.reasoningLevels.length > 0 && <button
+          className="cchip composer__text"
+          title="Reasoning effort — click to change"
+          onClick={() => store.toggleReasoningPicker()}
+        >{capitalizeWord(snap.reasoningEffort && snap.reasoningEffort !== 'off' ? snap.reasoningEffort : 'off')}</button>}
+        <ContextRing snap={snap} onOpen={() => open('usage')} />
       </div>
     </div>
   )
 }
+
+const capitalizeWord = (word: string): string => word ? word[0]!.toUpperCase() + word.slice(1) : word
+
+/** The approval policy as one short word, like Claude's "Auto". */
+function permissionLabel(mode: string): string {
+  if (!mode) return 'Permissions'
+  const words: Record<string, string> = { 'accept-all': 'Accept all', auto: 'Auto', manual: 'Ask', plan: 'Plan only' }
+  return words[mode] ?? capitalizeWord(mode.replace(/[-_]/g, ' '))
+}
+
+/** How full the context window is, as a ring; opens Usage. */
+function ContextRing({ snap, onOpen }: { snap: Snapshot; onOpen: () => void }): ReactElement {
+  const used = snap.contextTokens ?? 0
+  const max = snap.contextMax ?? 0
+  const share = max > 0 ? Math.min(1, used / max) : 0
+  const r = 7, circumference = 2 * Math.PI * r
+  const label = max > 0 ? `Context ${Math.round(share * 100)}% · ${used.toLocaleString()} of ${max.toLocaleString()} tokens — open usage` : 'Context usage — open usage'
+  return <button className={`cchip composer__icon composer__ring${share >= 0.8 ? ' is-high' : ''}`} title={label} aria-label={label} onClick={onOpen}>
+    <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true">
+      <circle cx="9" cy="9" r={r} className="composer__ring-track" />
+      <circle cx="9" cy="9" r={r} className="composer__ring-fill" strokeDasharray={`${circumference * share} ${circumference}`} transform="rotate(-90 9 9)" />
+    </svg>
+  </button>
+}
+
+/** `lines` is null on a runtime that predates line totals. */
+interface RepoSummary { readonly branch: string | null; readonly lines: { readonly added: number; readonly removed: number } | null; readonly files: number }
+
+/**
+ * The repository line above the composer (Claude's): folder, branch, lines
+ * changed. The totals open the Git panel; × hides the line for this folder
+ * until the app restarts. Outside a repository, or on a runtime without Git
+ * support, it shows the folder alone.
+ */
+function RepoBar({ snap }: { snap: Snapshot }): ReactElement | null {
+  const open = useDesktopNavigation()
+  const [repo, setRepo] = useState<RepoSummary | null>(null)
+  const [hidden, setHidden] = useState(() => hiddenRepoBars.has(snap.cwd))
+  useEffect(() => { setHidden(hiddenRepoBars.has(snap.cwd)); setRepo(null) }, [snap.cwd])
+  const refresh = useCallback(async () => {
+    if (!snap.cwd || snap.connection !== 'online') return
+    try {
+      const result = await desktopCall(window.xerxes, snap.sessionKey, 'git.status', {})
+      const status = result.repository as ScmStatus | null | undefined
+      setRepo(status ? {
+        branch: status.branch,
+        lines: status.lines ?? null,
+        files: status.counts.staged + status.counts.unstaged + status.counts.untracked + status.counts.conflicts,
+      } : null)
+    } catch {
+      // A runtime without git.status: the line shows the folder alone.
+      setRepo(null)
+    }
+  }, [snap.cwd, snap.sessionKey, snap.connection])
+  // After each turn and each file the agent changes; on focus for outside edits.
+  useEffect(() => { if (!snap.turnActive) void refresh() }, [refresh, snap.turnActive, snap.changes.length])
+  useEffect(() => {
+    const onFocus = () => { void refresh() }
+    window.addEventListener('focus', onFocus)
+    return () => window.removeEventListener('focus', onFocus)
+  }, [refresh])
+  if (hidden || !snap.cwd) return null
+  const changed = repo !== null && repo.files > 0
+  // Line totals when there are any; otherwise (only new files, or an older
+  // runtime without totals) the file count — never a misleading "+0 −0".
+  const lines = repo?.lines && repo.lines.added + repo.lines.removed > 0 ? repo.lines : null
+  return <div className="repobar">
+    <button className="repobar__where" title={`${snap.cwd} — change folder`} onClick={() => open('workspace')}>
+      <span className="repobar__folder">{homeLabel(snap)}</span>
+      {(repo?.branch ?? snap.branch) && <span className="repobar__branch">{repo?.branch ?? snap.branch}</span>}
+    </button>
+    <span className="composer__flex" />
+    {changed && <button className="repobar__diff" title={`${repo.files} changed file${repo.files === 1 ? '' : 's'} — open Git`} onClick={() => open('review')}>
+      {lines
+        ? <><span className="repobar__added">+{lines.added}</span><span className="repobar__removed">−{lines.removed}</span></>
+        : <span>{repo.files} file{repo.files === 1 ? '' : 's'}</span>}
+    </button>}
+    {repo && <button className="repobar__action" onClick={() => open('review')}>{changed ? 'Review' : 'Git'}</button>}
+    <button className="repobar__close" aria-label="Hide repository line" title="Hide until restart" onClick={() => { hiddenRepoBars.add(snap.cwd); setHidden(true) }}><Icon name="close" size={14} /></button>
+  </div>
+}
+
+const hiddenRepoBars = new Set<string>()
 
 // ── Right rail ──────────────────────────────────────────────────────────
 
@@ -1983,6 +2014,24 @@ export function ComposerTaskSummary({ snap }: { snap: Snapshot }): ReactElement 
     {visibleGoal && <button onClick={() => open('activity')} title={visibleGoal.objective}><span className="composer-task-summary__label">Goal</span><span className="composer-task-summary__text">{activityVisible ? 'View goal details' : visibleGoal.objective}</span><span className="composer-task-summary__status">{visibleGoal.phase}</span></button>}
     {todos.length > 0 && <button onClick={() => store.setTab('plan')} title={next?.content ?? 'View completed tasks'}><span className="composer-task-summary__label">{current ? 'Doing' : next ? 'Next' : 'To-dos'}</span><span className="composer-task-summary__text">{next?.content ?? 'All tasks completed'}</span><span className="composer-task-summary__status">{done}/{todos.length}</span></button>}
     {snap.queue.length > 0 && <div className="composer-queue"><div className="composer-queue__heading">Queued messages <span>{snap.queue.length}</span></div><div className="composer-queue__list">{snap.queue.map(item => <div className="composer-queue__message" key={item.id}><p>{item.text}</p><button aria-label="Hide queued message from view" title="Hide from view only — this does not cancel the queued message" onClick={() => store.dropQueued(item.id)}><Icon name="close" size={14} /></button></div>)}</div></div>}
+  </section>
+}
+
+/** The session's to-dos as an Activity card (Claude layout: no Plan tab). */
+function RailTodos({ snap }: { snap: Snapshot }): ReactElement | null {
+  const todos = snap.todos ?? snap.plan?.items.map((item, index) => ({ id: String(index), content: item.text, status: item.done ? 'completed' : 'pending' })) ?? []
+  if (!todos.length) return null
+  const done = todos.filter(item => item.status === 'completed').length
+  return <section className="railcard railcard--todos" aria-label="To-dos">
+    <header className="railcard__head"><span className="railcard__title">To-dos</span><span className="railcard__meta">{done}/{todos.length}</span></header>
+    <ol className="railtodos">
+      {todos.map((item, index) => <li key={`${item.id}:${index}`} data-state={item.status}>
+        <span className="railtodos__mark" aria-hidden="true">{item.status === 'completed' ? <Icon name="check" size={12} /> : item.status === 'in_progress' ? <Icon name="spinner" size={12} /> : null}</span>
+        <span className="railtodos__text">{item.content}</span>
+        <span className="sr-only">{item.status === 'completed' ? 'completed' : item.status === 'in_progress' ? 'in progress' : 'pending'}</span>
+      </li>)}
+    </ol>
+    {snap.plan && <button className="railtodos__plan" onClick={() => store.setTab('plan')}>Open the plan</button>}
   </section>
 }
 
@@ -2008,6 +2057,7 @@ export function ActivityDetails({ snap, selectedAgent = '' }: { snap: Snapshot; 
 
       {/* Zone 2 — only what is true right now. Each of these is absent
           unless it has something to say. */}
+      <RailTodos snap={snap} />
       {goal ? (
         <section className="railcard railcard--goal" aria-label="Goal">
           {/* A card like Agents and Touched. As a bare caption over loose

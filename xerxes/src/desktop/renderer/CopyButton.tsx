@@ -12,6 +12,7 @@
  */
 
 import { useEffect, useRef, useState, type ReactElement } from 'react'
+import { Icon } from './Icon.js'
 
 /**
  * `navigator.clipboard` needs a secure context, document focus and a
@@ -38,14 +39,15 @@ export function copyToClipboard(text: string): boolean {
   return copied
 }
 
-export function CopyButton({ text, label = 'Copy' }: { text: string; label?: string }): ReactElement {
+/** `icon`: a bare copy glyph (a tick once copied), for message action rows. */
+export function CopyButton({ text, label = 'Copy', icon = false }: { text: string; label?: string; icon?: boolean }): ReactElement {
   const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle')
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined)
   useEffect(() => () => clearTimeout(timer.current), [])
   return (
     <button
       type="button"
-      className="copybtn"
+      className={icon ? 'copybtn copybtn--icon' : 'copybtn'}
       // The transcript rows are click targets of their own (expand,
       // inspect); copying must not also toggle them.
       onClick={event => {
@@ -56,9 +58,11 @@ export function CopyButton({ text, label = 'Copy' }: { text: string; label?: str
         timer.current = setTimeout(() => setState('idle'), 1400)
       }}
       aria-label={state === 'copied' ? 'Copied' : label}
-      title={label}
+      title={state === 'failed' ? 'Copy failed — select and press ⌘C' : label}
     >
-      {state === 'copied' ? 'Copied' : state === 'failed' ? 'Press ⌘C' : label}
+      {icon
+        ? <Icon name={state === 'copied' ? 'check' : state === 'failed' ? 'warning' : 'copy'} size={15} />
+        : state === 'copied' ? 'Copied' : state === 'failed' ? 'Press ⌘C' : label}
     </button>
   )
 }

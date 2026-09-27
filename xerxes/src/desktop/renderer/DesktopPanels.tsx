@@ -33,6 +33,7 @@ import {
 } from './desktopRpc.js'
 import { store, type Snapshot } from './store.js'
 import { Markdown } from './markdown.js'
+import { CodeEditor } from './CodeEditor.js'
 import { TerminalsCard } from './TerminalsPanel.js'
 import { Icon } from './Icon.js'
 import { GitPanel } from './GitPanel.js'
@@ -130,7 +131,9 @@ export function DesktopPage({ panel, snap }: { panel: 'agents' | 'extensions' | 
 }
 
 /** Nonmodal task context: the conversation and draft remain interactive. */
-export function DesktopRail({ panel, snap, close, activityDetails, filesExpanded = false, toggleFilesExpanded, setExpanded, reviewPath = '', activityFocused = false }: {
+export function DesktopRail({ panel, snap, close, activityDetails, filesExpanded = false, toggleFilesExpanded, setExpanded, reviewPath = '', filesTarget, activityFocused = false }: {
+  /** A file to open in Files; a new `count` opens it again. */
+  filesTarget?: { readonly path: string; readonly count: number }
   panel: RailPanel; snap: Snapshot; close: () => void; activityDetails: ReactNode; filesExpanded?: boolean; toggleFilesExpanded?: () => void
   /** Present when the window is wide enough to choose between rail and full width. */
   setExpanded?: (value: boolean) => void
@@ -143,7 +146,7 @@ export function DesktopRail({ panel, snap, close, activityDetails, filesExpanded
   return <aside className={`desktop-rail studio-sheet${panel === "review" ? ` desktop-rail--git${wide ? " desktop-rail--review" : ""}` : panel === "terminal" ? " desktop-rail--terminal" : ""}`} aria-label="Task context">
     <header><nav aria-label="Task context views">{RAIL_PANELS.map(value => <button key={value} aria-pressed={panel === value} onClick={() => open(value)}>{railTabName(value)}</button>)}</nav>{toggleFilesExpanded && <button aria-label={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'terminal' ? 'Expand terminal' : panel === 'review' ? 'Show changes' : panel === 'usage' ? 'Expand usage' : 'Expand Activity workspace'} title={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'terminal' ? 'Expand terminal' : panel === 'review' ? 'Show changes' : panel === 'usage' ? 'Expand usage' : 'Expand Activity workspace'} aria-pressed={filesExpanded} onClick={toggleFilesExpanded}><Icon name={filesExpanded ? 'collapse' : 'expand'} size={15} /></button>}<button aria-label="Close task context" onClick={close}><Icon name="close" size={13} /></button></header>
     <div className="studio-sheet-content" key={`${panel}:${snap.cwd}:${snap.sessionKey}`}>
-      {panel === 'files' && <FilesPanel snap={snap} close={close} />}
+      {panel === 'files' && <FilesPanel snap={snap} close={close} {...(filesTarget ? { target: filesTarget } : {})} />}
       {panel === 'review' && <GitPanel snap={snap} initialPath={reviewPath} expanded={wide} {...(setExpanded ? { onExpand: () => setExpanded(true) } : {})} onSnapshots={() => open('snapshots')} onReviewSent={() => { setExpanded?.(false); open('activity') }} />}
       {panel === 'terminal' && <TerminalPanel snap={snap} />}
       {panel === 'usage' && <UsagePanel snap={snap} />}
@@ -998,6 +1001,8 @@ function ActivityPanel({ snap }: { snap: Snapshot }): ReactElement {
           <span>Terminals, monitors and diagnostics</span>
         </summary>
         <div className="rail-drawer__body">
+          <button className="activity-terminal" onClick={() => store.setTab('log')}><Icon name="note" size={16} /> Event log</button>
+          <button className="activity-terminal" disabled={!snap.currentId} onClick={() => void store.exportSessionTranscript(snap.sessionKey)}><Icon name="download" size={16} /> Export session log</button>
           <button className="activity-terminal"
             onClick={() => {
               store.loadTerminals()
@@ -1075,20 +1080,86 @@ function ActivityPanel({ snap }: { snap: Snapshot }): ReactElement {
   )
 }
 
-function FilesPanel({ snap, close }: { snap: Snapshot; close: () => void }): ReactElement {
-  const [selected, setSelected] = useState('')
-  const [preview, setPreview] = useState<RpcRecord | null>(null)
+/** Markdown opens rendered (Claude's view mode); anything else as source. */
+export const rendersAsDocument = (path: string): boolean => /\.(md|mdx|markdown)$/i.test(path)
+
+/**
+ * A leading YAML front matter block, split into its top-level fields (shown
+ * as a table above the rendered document, as Claude does) and the body.
+ * Nested values are kept as written. Anything that is not a closed `---`
+ * block at the very start is body.
+ */
+export function frontMatter(source: string): { fields: Array<[string, string]>; body: string } {
+  const match = /^---\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/.exec(source)
+  if (!match) return { fields: [], body: source }
+  const fields: Array<[string, string]> = []
+  for (const line of match[1]!.split(/\r?\n/)) {
+    const field = /^([A-Za-z0-9_.-]+):\s?(.*)$/.exec(line)
+    if (field) fields.push([field[1]!, field[2]!.trim()])
+    else if (fields.length && line.trim()) fields[fields.length - 1]![1] = `${fields[fields.length - 1]![1]} ${line.trim()}`.trim()
+  }
+  return { fields, body: source.slice(match[0].length) }
+}
+
+/** A tool's path as the file tree names it: `./` + workspace-relative. */
+export function workspaceFilePath(path: string, cwd: string): string {
+  const root = cwd.replace(/\/+$/, '')
+  const relative = root && path.startsWith(root + '/') ? path.slice(root.length + 1) : path
+  return relative.startsWith('/') || relative.startsWith('./') ? relative : './' + relative
+}
+
+/** The file as last read or saved: what the editor's draft is compared against. */
+interface OpenFile { readonly path: string; readonly content: string; readonly version: string | null; readonly truncated: boolean }
+
+function FilesPanel({ snap, close, target }: { snap: Snapshot; close: () => void; target?: { readonly path: string; readonly count: number } }): ReactElement {
+  const [selected, setSelectedPath] = useState(() => target?.path ? workspaceFilePath(target.path, snap.cwd) : '')
+  const [source, setSource] = useState(false)
+  const [file, setFile] = useState<OpenFile | null>(null)
+  const [draft, setDraft] = useState('')
   const [previewError, setPreviewError] = useState('')
+  const [save, setSave] = useState<{ state: 'idle' | 'saving' | 'saved' } | { state: 'error'; message: string; conflict: boolean }>({ state: 'idle' })
+  const [reload, setReload] = useState(0)
+  const dirty = file !== null && draft !== file.content
+  /** Leaving a file with unsaved edits asks first. */
+  const setSelected = (path: string): void => {
+    if (path === selected) return
+    if (dirty && !window.confirm(`Discard your unsaved changes to ${file?.path ?? selected}?`)) return
+    setSelectedPath(path)
+  }
+  useEffect(() => { if (target?.path) setSelected(workspaceFilePath(target.path, snap.cwd)) }, [target?.count])
+  useEffect(() => { setSource(false); setSave({ state: 'idle' }) }, [selected])
   useEffect(() => {
     let current = true
-    setPreview(null)
+    setFile(null)
     setPreviewError('')
     if (selected) void desktopCall(window.xerxes, snap.sessionKey, 'workspace.filePreview', { path: selected })
-      .then(value => { if (current) setPreview(value) })
+      .then(value => {
+        if (!current) return
+        const content = text(value.content)
+        setFile({ path: selected, content, version: typeof value.version === 'string' ? value.version : null, truncated: value.truncated === true })
+        setDraft(content)
+      })
       .catch(error => { if (current) setPreviewError(desktopError(error)) })
     return () => { current = false }
-  }, [selected, snap.sessionKey, snap.cwd])
+  }, [selected, snap.sessionKey, snap.cwd, reload])
+  const editable = file !== null && !file.truncated && file.version !== null
+  const readOnlyReason = file === null ? '' : file.truncated ? 'Only the first 128 KB is shown, so this file is read-only here.' : file.version === null ? 'Update the workspace runtime to edit files here.' : ''
+  const saveFile = async (): Promise<void> => {
+    if (!file || !editable || !dirty || save.state === 'saving') return
+    const content = draft
+    setSave({ state: 'saving' })
+    try {
+      const result = await desktopCall(window.xerxes, snap.sessionKey, 'workspace.fileWrite', { path: file.path, content, base_version: file.version })
+      if (result.ok === true && typeof result.version === 'string') {
+        setFile({ ...file, content, version: result.version })
+        setSave({ state: 'saved' })
+      } else setSave({ state: 'error', message: text(result.error) || 'The file could not be saved.', conflict: result.conflict === true })
+    } catch (error) {
+      setSave({ state: 'error', message: desktopError(error), conflict: false })
+    }
+  }
   const [needle, setNeedle] = useState('')
+  const isDocument = rendersAsDocument(selected)
   return (
     <div className={'file-browser' + (selected ? ' file-browser--preview' : '')}>
       <div className="file-browser__navigation">
@@ -1101,16 +1172,53 @@ function FilesPanel({ snap, close }: { snap: Snapshot; close: () => void }): Rea
         {needle && <WorkspaceFileTree key={snap.cwd + snap.sessionKey + needle} path={needle.startsWith('./') ? needle : './' + needle} sessionKey={snap.sessionKey} selected={selected} select={setSelected} />}
       </div>
       </div>
-      {selected && <div className="file-browser__document"><div className="file-browser__selection"><p title={selected}>{selected}</p><button onClick={() => { window.dispatchEvent(new CustomEvent('xerxes:add-context', { detail: '@' + JSON.stringify(selected.replace(/^@/, '')) })); close() }}>Add to message</button><button className="file-browser__close" aria-label="Close file preview" title="Close preview" onClick={() => setSelected('')}><Icon name="close" size={13} /></button></div>
-      <section className="file-browser__preview" aria-label="File preview">
-        <Feedback busy={!preview && !previewError} error={previewError} />
-        {preview && <>
-          {preview.truncated === true && <p className="studio-muted">Preview limited to the first 128 KB.</p>}
-          <pre className="file-preview" tabIndex={0} role="region" aria-label="File contents">{text(preview.content).split('\n').map((line, index) => <span className="file-preview__line" key={index}><span aria-hidden="true">{index + 1}</span><code>{line || ' '}</code></span>)}</pre>
-        </>}
+      {selected && <div className="file-browser__document"><div className="file-browser__selection">
+        <p title={selected}>{selected}{dirty && <span className="file-browser__dirty" title="Unsaved changes"> ●</span>}</p>
+        {dirty && <><button className="file-browser__save" disabled={save.state === 'saving'} title="Save (⌘S)" onClick={() => void saveFile()}>{save.state === 'saving' ? 'Saving…' : 'Save'}</button><button title="Discard your changes" onClick={() => { if (file) setDraft(file.content); setSave({ state: 'idle' }) }}>Revert</button></>}
+        {!dirty && save.state === 'saved' && <span className="file-browser__saved" role="status">Saved</span>}
+        {isDocument && <button className="file-browser__mode" aria-pressed={source} title={source ? 'Show the rendered document' : 'Edit the source'} onClick={() => setSource(value => !value)}>{source ? 'Preview' : 'Source'}</button>}
+        <button onClick={() => { window.dispatchEvent(new CustomEvent('xerxes:add-context', { detail: '@' + JSON.stringify(selected.replace(/^@/, '')) })); close() }}>Add to message</button>
+        <button className="file-browser__close" aria-label="Close file" title="Close file" onClick={() => setSelected('')}><Icon name="close" size={13} /></button>
+      </div>
+      {save.state === 'error' && <div className="file-browser__notice" role="alert"><span>{save.message}</span>{save.conflict && <button onClick={() => { setSave({ state: 'idle' }); setReload(value => value + 1) }}>Reload file</button>}</div>}
+      {readOnlyReason && <p className="file-browser__notice file-browser__notice--quiet">{readOnlyReason}</p>}
+      {/* Keyed by file and mode so each opens scrolled to its top-left. */}
+      <section key={`${selected}:${source}:${reload}`} className="file-browser__preview" aria-label="File">
+        <Feedback busy={!file && !previewError} error={previewError} />
+        {file && (isDocument && !source
+          ? <FileDocument source={draft} />
+          : <CodeEditor path={selected} value={draft} readOnly={!editable} onChange={value => { setDraft(value); if (save.state !== 'saving') setSave({ state: 'idle' }) }} onSave={() => void saveFile()} />)}
       </section></div>}
     </div>
   )
+}
+
+/**
+ * The HTML READMEs embed (centred logo blocks, badge links), as Markdown the
+ * renderer draws: the renderer never renders raw HTML and loads no remote
+ * images, so an image becomes a link to it, an anchor a link, a heading a
+ * heading; comments and layout tags go. Fenced code is left untouched.
+ */
+export function htmlToMarkdown(markdown: string): string {
+  const attribute = (tag: string, name: string): string => new RegExp(`\\b${name}\\s*=\\s*("([^"]*)"|'([^']*)')`, 'i').exec(tag)?.slice(2).find(value => value !== undefined) ?? ''
+  const entity = (text: string): string => text.replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+  return markdown.split(/(^\s*(?:```|~~~)[^\n]*\n[\s\S]*?^\s*(?:```|~~~)\s*$)/m).map((part, index) => index % 2 ? part : entity(part
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<img\b[^>]*>/gi, tag => { const src = attribute(tag, 'src'); const alt = attribute(tag, 'alt') || src.split('/').pop() || 'image'; return src ? `[${alt}](${src})` : '' })
+    .replace(/<a\b[^>]*>([\s\S]*?)<\/a>/gi, (tag, inner: string) => { const href = attribute(tag, 'href'); const label = inner.replace(/<[^>]+>/g, '').trim() || href; return href && !/\]\(/.test(inner) ? `[${label}](${href})` : inner })
+    .replace(/<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1>/gi, (_, level: string, inner: string) => `\n${'#'.repeat(Number(level))} ${inner.replace(/<[^>]+>/g, '').trim()}\n`)
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/?(p|div|center|picture|source|table|tr|td|th|tbody|thead|details|summary|span|sup|sub|b|i|strong|em)\b[^>]*>/gi, match => /^<\/?(p|div|center|table|tr|details)\b/i.test(match) ? '\n' : '')
+    .replace(/\n{3,}/g, '\n\n'))).join('')
+}
+
+function FileDocument({ source }: { source: string }): ReactElement {
+  const { fields, body: raw } = frontMatter(source)
+  const body = htmlToMarkdown(raw)
+  return <article className="file-document" tabIndex={0} aria-label="Rendered document">
+    {fields.length > 0 && <dl className="file-document__meta">{fields.map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{value}</dd></div>)}</dl>}
+    <Markdown text={body} className="md--document" />
+  </article>
 }
 
 function WorkspacePanel({ snap }: { snap: Snapshot }): ReactElement {

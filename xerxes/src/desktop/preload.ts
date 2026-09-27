@@ -146,6 +146,11 @@ const bridge = {
     if (typeof on !== 'boolean') throw new TypeError('invalid window blur')
     void ipcRenderer.invoke('desktop:window-blur', on)
   },
+  /** A bundled background as a data URL (so its blur can be baked). */
+  backgroundData(name: unknown): Promise<string> {
+    if (typeof name !== 'string' || !/^backgrounds\/background-\d+\.jpg$/.test(name)) return Promise.reject(new TypeError('invalid background'))
+    return ipcRenderer.invoke('desktop:background-data', name) as Promise<string>
+  },
   /** Asked once as the page starts: is another workspace view covering it? */
   isOccluded(): Promise<boolean> {
     return ipcRenderer.invoke('desktop:occluded') as Promise<boolean>

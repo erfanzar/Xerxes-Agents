@@ -424,3 +424,24 @@ test('harness prompts saved before origins existed are still hidden, and an old 
   ])
   expect(blocks.filter(block => block.kind === 'user').map(block => block.kind === 'user' ? block.text : '')).toEqual(['Continue', 'Goal round robin scheduling is broken'])
 })
+
+test('context the runtime injects (finished subagents, loaded tools, todos) is never shown as the user speaking', () => {
+  const blocks = blocksFromStoredMessages([
+    { role: 'user', content: 'review vnext' },
+    { role: 'user', content: '[sub-agent events]\n[agent result id="subagent_1" title="S01 review" status=completed]\nreport\n[/agent result]' },
+    { role: 'user', content: '<system-reminder>\n[tools now available]\nWebSearch\n</system-reminder>' },
+    { role: 'user', content: 'new injection', origin: 'harness' },
+  ])
+  expect(blocks.filter(block => block.kind === 'user').map(block => block.kind === 'user' ? block.text : '')).toEqual(['review vnext'])
+})
+
+test('a subagent run closing adds no transcript row; other run results still do', async () => {
+  const { BlockBuilder, isAgentRunNotice } = await import('../src/desktop/renderer/blocks.js')
+  const builder = new BlockBuilder()
+  builder.push('notification', { category: 'slash', type: 'result', title: 'Run finished', body: 'agent succeeded: R6-S7 spectrax review · attempt 2\n/runs inspect r1' })
+  builder.push('notification', { category: 'slash', type: 'result', title: 'Run finished', body: 'schedule failed: nightly\n/runs inspect r2' })
+  const notices = builder.snapshot(false).filter(block => block.kind === 'notice')
+  expect(notices.map(block => block.kind === 'notice' ? block.text : '')).toEqual([expect.stringContaining('schedule failed')])
+  expect(isAgentRunNotice({ title: 'Run finished', body: 'agent failed: x' })).toBe(true)
+  expect(isAgentRunNotice({ title: 'Something', body: 'agent failed: x' })).toBe(false)
+})

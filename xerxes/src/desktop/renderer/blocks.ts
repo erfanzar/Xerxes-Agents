@@ -158,6 +158,11 @@ export function editStatsOf(
   }
 }
 
+/** The daemon's "Run finished" notice for a subagent run. */
+export function isAgentRunNotice(payload: Readonly<Record<string, unknown>>): boolean {
+  return payload.title === 'Run finished' && typeof payload.body === 'string' && /^agent (succeeded|failed|cancelled|interrupted):/.test(payload.body)
+}
+
 export class BlockBuilder {
   private blocks: Block[] = []
   private seq = 1
@@ -337,6 +342,9 @@ export class BlockBuilder {
           (typeof payload.message === 'string' && payload.message) ||
           ''
         if (!message) break
+        // A subagent's run closing ("agent succeeded: … · attempt 2", once per
+        // revision) is already on its Subagents card; as rows it repeated.
+        if (isAgentRunNotice(payload)) break
         const severity = String(payload.severity ?? payload.level ?? 'info').toLowerCase()
         const notice: NoticeRun = { kind: 'notice', error: severity.includes('error') || severity.includes('fatal'), text: noticeText(message) }
         const id = this.nextId()

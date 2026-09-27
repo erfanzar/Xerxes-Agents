@@ -39,6 +39,9 @@ export function loadUiScale(): number {
 export function applyUiScale(percent: number, save = true): void {
   if (!(UI_SCALES as readonly number[]).includes(percent)) throw new Error(`Unsupported UI scale ${percent}%`)
   window.xerxes?.setZoomFactor?.(percent / 100)
+  // The window buttons are native and never zoom; CSS lengths do. Insets that
+  // clear them divide by this so they stay the same on screen at every scale.
+  document.documentElement.style.setProperty('--ui-zoom', String(percent / 100))
   if (save) write(SCALE_KEY, String(percent))
 }
 

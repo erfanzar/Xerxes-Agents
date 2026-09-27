@@ -11,7 +11,7 @@
  * other. Light / Dark / System picks a two-mode palette's variant; a
  * single-mode palette (Cyberpunk, Midnight…) is always its own mode.
  *
- * The palettes are Hermes Agent's desktop themes (MIT, Copyright (c) 2025
+ * Except `claude` (Xerxes's own), the palettes are Hermes Agent's desktop themes (MIT, Copyright (c) 2025
  * Nous Research), several of them forks of their VS Code originals (GitHub,
  * Catppuccin, Everforest, Solarized). Values are copied, not re-derived; keep
  * them in step with the upstream rather than hand-editing hexes.
@@ -38,6 +38,9 @@ export type Palette =
   | { readonly name: string; readonly label: string; readonly description: string; readonly only: PaletteColors }
 
 export const PALETTES: readonly Palette[] = [
+  // Xerxes's own (not a Hermes theme): the look of Claude's desktop apps —
+  // warm near-black (or cream) surfaces, off-white text, Claude orange.
+  { name: 'claude', label: 'Claude', description: 'Warm neutrals and Claude orange', light: { background: '#faf9f5', foreground: '#1f1e1d', card: '#ffffff', muted: '#f0eee6', mutedForeground: '#6b6a64', popover: '#ffffff', primary: '#c96442', primaryForeground: '#ffffff', accent: '#ece9df', border: '#e3e0d6', destructive: '#b53d31', sidebarBackground: '#f3f1ea', userBubble: '#efece3' }, dark: { background: '#1a1a19', foreground: '#f0efea', card: '#232322', muted: '#2a2a28', mutedForeground: '#9c9a92', popover: '#262624', primary: '#d97757', primaryForeground: '#141413', accent: '#2e2d2b', border: '#353531', destructive: '#e5534b', sidebarBackground: '#141413', userBubble: '#2a2a28' } },
   { name: 'nous', label: 'Nous', description: 'GitHub chrome, Nous blue accent', light: { background: '#ffffff', foreground: '#1f2328', card: '#f6f8fa', muted: '#f6f6f6', mutedForeground: '#656d76', popover: '#ffffff', primary: '#0053fd', primaryForeground: '#ffffff', accent: '#e3edff', border: '#d0d7de', destructive: '#cf222e', sidebarBackground: '#f6f8fa', userBubble: '#dae7fd' }, dark: { background: '#0d1117', foreground: '#e6edf3', card: '#010409', muted: '#1a1e24', mutedForeground: '#7d8590', popover: '#161b22', primary: '#4a84fe', primaryForeground: '#161616', accent: '#17243a', border: '#30363d', destructive: '#f85149', sidebarBackground: '#010409', userBubble: '#07162c' } },
   { name: 'github', label: 'GitHub', description: 'GitHub Light Default and Dark Default', light: { background: '#ffffff', foreground: '#1f2328', card: '#f6f8fa', muted: '#f6f6f6', mutedForeground: '#656d76', popover: '#ffffff', primary: '#196d31', primaryForeground: '#ffffff', accent: '#e3ede6', border: '#d0d7de', destructive: '#cf222e', sidebarBackground: '#f6f8fa', userBubble: '#dbe7e2' }, dark: { background: '#0d1117', foreground: '#e6edf3', card: '#010409', muted: '#1a1e24', mutedForeground: '#7d8590', popover: '#161b22', primary: '#4f9e5e', primaryForeground: '#ffffff', accent: '#192a24', border: '#30363d', destructive: '#f85149', sidebarBackground: '#010409', userBubble: '#0f2018' } },
   { name: 'catppuccin', label: 'Catppuccin', description: 'Soothing pastels — Latte and Mocha', light: { background: '#eff1f5', foreground: '#4c4f69', card: '#e6e9ef', muted: '#e8ebef', mutedForeground: '#4c4f69', popover: '#e6e9ef', primary: '#6d2ebf', primaryForeground: '#ffffff', accent: '#dfdaef', border: '#acb0be', destructive: '#d20f39', sidebarBackground: '#e6e9ef', userBubble: '#d7d3e9' }, dark: { background: '#1e1e2e', foreground: '#cdd6f4', card: '#181825', muted: '#29293a', mutedForeground: '#cdd6f4', popover: '#181825', primary: '#cba6f7', primaryForeground: '#ffffff', accent: '#3d3652', border: '#585b70', destructive: '#f38ba8', sidebarBackground: '#181825', userBubble: '#38324b' } },
@@ -53,17 +56,18 @@ export const PALETTES: readonly Palette[] = [
 
 export const PALETTE_KEY = 'xerxes.desktop.palette.v1'
 
-/** A fresh install's colour theme. */
-export const DEFAULT_PALETTE = 'nous'
-/** Stored when the user picks Xerxes's own colours, so the default does not return. */
+/** Stored when the user picks Xerxes's own colours — also what a fresh install uses. */
 const XERXES_COLOURS = 'xerxes'
 
-/** The stored palette, or undefined for Xerxes's own colours. */
+/**
+ * The stored palette, or undefined for Xerxes's own colours: a fresh
+ * install, an explicit Xerxes choice, and a stored name no longer shipped.
+ */
 export function loadPalette(): Palette | undefined {
   let name: string | null
   try { name = localStorage.getItem(PALETTE_KEY) } catch { name = null }
-  if (name === XERXES_COLOURS) return undefined
-  return PALETTES.find(palette => palette.name === (name ?? DEFAULT_PALETTE)) ?? PALETTES.find(palette => palette.name === DEFAULT_PALETTE)
+  if (name === null || name === XERXES_COLOURS) return undefined
+  return PALETTES.find(palette => palette.name === name)
 }
 
 /** Remember a palette; undefined means Xerxes's own colours (kept explicitly). */
