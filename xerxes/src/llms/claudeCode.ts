@@ -79,16 +79,11 @@ export function claudeCodeToolProtocol(tools: readonly ToolDefinition[], choice:
     ...(schemas.length && choice !== 'none' ? [
       '',
       '# Calling tools',
-      'To call tools, end your reply with one block:',
-      '<function_calls>',
-      '<invoke name="TOOL_NAME">',
-      '<parameter name="path">src/a.ts</parameter>',
-      '<parameter name="edits">[{"old": "x", "new": "y"}]</parameter>',
-      '</invoke>',
-      '</function_calls>',
-      'Write strings and numbers as-is, with no quotes or escaping; write arrays and objects as JSON. One block may hold several <invoke>s.',
-      'If a value contains </parameter> or </invoke>, write that call as <function=TOOL_NAME>{JSON arguments}</function> instead.',
-      'After </function_calls>, stop: each result arrives in the next user message as a <tool_result> block. Never write a tool\'s result or status yourself, in any tag (<tool_result>, <system>, or otherwise), and never put a call in a code fence.',
+      'Tools here are plain text. To call tools, end your reply with one line per call:',
+      '<function=TOOL_NAME>{"path": "src/a.ts", "edits": [{"old": "x", "new": "y"}]}</function>',
+      'The arguments are one JSON object. Several calls may follow one another, each on its own line.',
+      'Use only this form. Do not use <function_calls> or <invoke> blocks or any native tool-call syntax: there are no native tools here, and a native call fails the whole turn.',
+      'After your calls, stop: each result arrives in the next user message as a <tool_result> block. Never write a tool\'s result or status yourself, in any tag (<tool_result>, <system>, or otherwise), and never put a call in a code fence.',
       ...(choice === 'any' ? ['You must call at least one tool in this turn.'] : []),
       '',
       '# Tools',
@@ -99,18 +94,15 @@ export function claudeCodeToolProtocol(tools: readonly ToolDefinition[], choice:
 
 /**
  * A past call replayed in the same form the model is asked to write, so the
- * transcript it reads never contradicts the protocol. A value that would
- * break the tags falls back to the JSON form the extractor also accepts.
+ * transcript it reads never contradicts the protocol — and never shows the
+ * native `<function_calls>`/`<invoke>` syntax, which newer Claude Code
+ * parses as a real tool call and, with no tools, fails the turn ("The
+ * model's tool call could not be parsed").
  */
 function toolCallMarkup(calls: readonly ToolCall[]): string {
   if (!calls.length) return ''
-  const parameters = (call: ToolCall) => Object.entries(call.function.arguments)
-    .map(([name, value]) => [name, typeof value === 'string' ? value : JSON.stringify(value)] as const)
-  const breaksTags = (call: ToolCall) => parameters(call).some(([, text]) => /<\/(?:parameter|invoke)>/.test(text))
-  const invokes = calls.map(call => breaksTags(call)
-    ? `<function=${call.function.name}>${JSON.stringify(call.function.arguments)}</function>`
-    : [`<invoke name="${escapeAttribute(call.function.name)}">`, ...parameters(call).map(([name, text]) => `<parameter name="${escapeAttribute(name)}">${text}</parameter>`), '</invoke>'].join('\n'))
-  return ['<function_calls>', ...invokes, '</function_calls>'].join('\n')
+  // JSON escaping keeps a value containing "</function>" from closing the call early.
+  return calls.map(call => `<function=${call.function.name}>${JSON.stringify(call.function.arguments).replaceAll('</', '<\\/')}</function>`).join('\n')
 }
 
 /**
@@ -211,7 +203,14 @@ const NS = 'an' + 'tml:'
  */
 const REMINDER_OPEN = '<system-reminder'
 const REMINDER_CLOSE = '</system-reminder>'
-const OPENERS = ['<function=', '<invoke name="', `<${NS}invoke name="`, '<function_calls>', `<${NS}function_calls>`, '</function_calls>', `</${NS}function_calls>`, REMINDER_OPEN] as const
+/**
+ * The tail of a call whose opening was cut off by the output-token limit: when
+ * the model resumes, it finishes the call it was writing — a `<parameter>`
+ * with no `<invoke>` before it. It is not a call and must not read as prose.
+ */
+const ORPHAN_PARAMETER = ['<parameter name="', `<${NS}parameter name="`] as const
+const ORPHAN_CLOSE = ['</invoke>', `</${NS}invoke>`] as const
+const OPENERS = ['<function=', '<invoke name="', `<${NS}invoke name="`, '<function_calls>', `<${NS}function_calls>`, '</function_calls>', `</${NS}function_calls>`, REMINDER_OPEN, ...ORPHAN_PARAMETER, ...ORPHAN_CLOSE] as const
 const INVOKE = /^<(antml:)?invoke name="([^"]+)"\s*>([\s\S]*?)<\/(?:antml:)?invoke>$/
 /** What the model writes when it runs on past its calls and imagines their results. */
 /** Held at a chunk's end until complete: call openers, and the start of an imagined result. */
@@ -277,6 +276,7 @@ export class FunctionCallExtractor {
   private pending = ''
   private afterCall = false
   private finished = false
+  private cut = false
   private readonly seen = new Set<string>()
   private readonly found: Array<{ name: string; arguments: JsonObject }> = []
 
@@ -284,6 +284,9 @@ export class FunctionCallExtractor {
 
   /** The model has finished its calls; ignore anything it writes next. */
   get done(): boolean { return this.finished }
+
+  /** A call was still being written when the output limit cut the reply. */
+  get cutOff(): boolean { return this.cut }
 
   push(text: string): string {
     if (this.finished) return ''
@@ -312,6 +315,19 @@ export class FunctionCallExtractor {
         continue
       }
       if (opener.endsWith('function_calls>')) { this.pending = this.pending.slice(at + opener.length); continue }
+      if ((ORPHAN_CLOSE as readonly string[]).includes(opener)) {
+        // A stray close: nothing to show.
+        this.pending = this.pending.slice(at + opener.length)
+        continue
+      }
+      if ((ORPHAN_PARAMETER as readonly string[]).includes(opener)) {
+        // Drop the fragment through its closing tag; wait for it if unseen.
+        const ends = ORPHAN_CLOSE.map(close => [this.pending.indexOf(close, at), close.length] as const).filter(([index]) => index >= 0)
+        if (!ends.length) { this.pending = this.pending.slice(at); return visible }
+        const [end, length] = ends.reduce((first, next) => next[0] < first[0] ? next : first)
+        this.pending = this.pending.slice(end + length)
+        continue
+      }
       if (opener === REMINDER_OPEN) {
         const end = this.pending.indexOf(REMINDER_CLOSE, at)
         if (end < 0) { this.pending = this.pending.slice(at); return visible }
@@ -327,12 +343,18 @@ export class FunctionCallExtractor {
     }
   }
 
-  /** Flush at end of stream; an unterminated call is still a call. */
-  finish(): string {
+  /**
+   * Flush at end of stream. An unterminated call is still a call — unless
+   * the output limit cut it (`truncated`): its arguments are incomplete, and
+   * running it would, say, write half of an edit. It is dropped instead.
+   */
+  finish(truncated = false): string {
     const rest = this.pending
     this.pending = ''
     if (this.finished) return ''
     if (rest.startsWith(REMINDER_OPEN)) return ''
+    if (ORPHAN_PARAMETER.some(opener => rest.startsWith(opener))) return ''
+    if (truncated && (/^<function=[^>\s]+>/.test(rest) || /^<(antml:)?invoke name="/.test(rest))) { this.cut = true; return '' }
     if (/^<function=[^>\s]+>/.test(rest)) { this.take(rest + '</function>'); return '' }
     const invoke = /^<(antml:)?invoke name="[^"]+"\s*>/.exec(rest)
     if (invoke) { this.take(rest + (invoke[1] ? `</${NS}invoke>` : '</invoke>')); return '' }
@@ -591,6 +613,7 @@ export class ClaudeCodeClient implements LlmClient {
     let failure: ProviderError | undefined
     let sawText = false
     let fallbackText = ''
+    let stopReason = ''
     try {
       for await (const line of child.lines) {
         if (!line.trim()) continue
@@ -609,9 +632,11 @@ export class ClaudeCodeClient implements LlmClient {
             const start = usageOf(record(inner.message).usage)
             if (start) streamed = { ...start, outputTokens: 0 }
           }
-          else if (inner.type === 'message_delta' && streamed) {
-            const output = count(record(inner.usage).output_tokens)
-            if (output !== undefined) streamed = { ...streamed, outputTokens: output }
+          else if (inner.type === 'message_delta') {
+            const reason = record(inner.delta).stop_reason
+            if (typeof reason === 'string') stopReason = reason
+            const output = streamed ? count(record(inner.usage).output_tokens) : undefined
+            if (streamed && output !== undefined) streamed = { ...streamed, outputTokens: output }
           }
           if (inner.type === 'content_block_delta') {
             const delta = record(inner.delta)
@@ -650,7 +675,7 @@ export class ClaudeCodeClient implements LlmClient {
         const visible = extractor.push(fallbackText)
         if (visible) yield { content: visible }
       }
-      const rest = extractor.finish()
+      const rest = extractor.finish(stopReason === 'max_tokens')
       if (rest) yield { content: rest }
       if (code !== 0 && !usage && !extractor.done) {
         const detail = (await child.stderr).trim().split('\n').slice(-4).join('\n')
@@ -663,7 +688,9 @@ export class ClaudeCodeClient implements LlmClient {
       }))
       usage ??= streamed
       if (usage) yield { usage }
-      yield { ...(toolCalls.length ? { toolCalls } : {}), finishReason: toolCalls.length ? 'tool_calls' : 'stop' }
+      // Cut off mid-call with nothing complete: 'length', so the loop
+      // regenerates the round with a wider window instead of ending it.
+      yield { ...(toolCalls.length ? { toolCalls } : {}), finishReason: toolCalls.length ? 'tool_calls' : extractor.cutOff || stopReason === 'max_tokens' ? 'length' : 'stop' }
     } finally {
       signal?.removeEventListener('abort', abort)
       child.kill()
