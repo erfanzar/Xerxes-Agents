@@ -9,7 +9,7 @@ import { ArchiveHistory } from './archiveHistory.js';
 import { ValidationError } from '../core/errors.js';
 
 import { recordCompaction } from '../context/compactionHistory.js'
-import { previewWorkspaceFile } from './filePreview.js'
+import { previewWorkspaceFile, writeWorkspaceFile } from './filePreview.js'
 import { collectGitDiff } from '../workspace/gitDiff.js'
 import type { PtySessionManager } from '../operators/pty.js'
 
@@ -2135,6 +2135,11 @@ export class DaemonServer {
       const session = this.runtime.sessionStatus(sessionKey(connection, params));
       if (!session) return { ok: false, error: "Select a session before previewing workspace files" };
       return await previewWorkspaceFile(session.cwd, params.path);
+    }
+    if (method === "workspace.fileWrite") {
+      const session = this.runtime.sessionStatus(sessionKey(connection, params));
+      if (!session) return { ok: false, error: "Select a session before editing workspace files" };
+      return await writeWorkspaceFile(session.cwd, params.path, params.content, params.base_version);
     }
     if (method === "workspace.diff") {
       const session = this.runtime.sessionStatus(sessionKey(connection, params));

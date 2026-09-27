@@ -5,6 +5,7 @@ import { desktopCall, desktopError, record, text, type RpcRecord } from './deskt
 import { OutputViewer, readableOutput } from './OutputViewer.js'
 import { Icon } from './Icon.js'
 import { commandGist } from './commandGist.js'
+import { elapsedOf } from './duration.js'
 
 /** A bounded summary first; read only this command's retained output on expansion. */
 export function CommandActivity({ row, sessionKey, online }: {row: RpcRecord; sessionKey: string; online: boolean}): ReactElement {
@@ -17,7 +18,7 @@ export function CommandActivity({ row, sessionKey, online }: {row: RpcRecord; se
   const started = typeof row.startedAt === 'number' ? row.startedAt : null
   const ended = typeof row.endedAt === 'number' ? row.endedAt : Date.now()
   const seconds = started === null ? null : Math.max(0, Math.floor((ended - started) / 1000))
-  const elapsed = seconds === null ? '' : seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`
+  const elapsed = seconds === null ? '' : elapsedOf(seconds)
   useEffect(() => {
     if (!open || !online) return
     let current = true

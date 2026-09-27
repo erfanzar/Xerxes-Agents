@@ -3809,3 +3809,57 @@ test('cancellation during selection preflight allocates no child and reaches the
     expect(client.requests).toHaveLength(0)
   } finally { release(); await host.manager.shutdown() }
 })
+
+/** A child whose tool output outgrows the window mid-turn. */
+class GrowingChildClient implements LlmClient {
+  compactionCalls = 0
+  rounds = 0
+  async *stream(request: CompletionRequest): AsyncGenerator<LlmDelta> {
+    // A compaction request carries no tools; the child's own steps do.
+    if (!request.tools?.length) {
+      this.compactionCalls += 1
+      yield { content: 'CHILD SUMMARY' }
+      return
+    }
+    this.rounds += 1
+    // Keep reading until eight results have been seen in total, as a long
+    // review does; compaction may fold earlier ones into the summary.
+    if (this.rounds <= 8) {
+      yield { toolCalls: [toolCall('BigRead', { part: this.rounds })], usage: { inputTokens: 5, outputTokens: 2 } }
+      return
+    }
+    yield { content: 'finished after compaction', usage: { inputTokens: 5, outputTokens: 2 } }
+  }
+}
+
+test('a child whose tool output outgrows the window compacts mid-turn instead of failing', async () => {
+  // Captured: kimi k3-256k children ran one long turn of tool steps and died
+  // with "exceeded k3-256k model token limit" — children only compacted
+  // before a turn, never during one.
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-child-midturn-'))
+  const registry = new ToolRegistry()
+  registry.register({ type: 'function', function: { name: 'BigRead', description: 'huge output', parameters: { type: 'object', properties: {} } } }, () => 'line of output\n'.repeat(700))
+  const client = new GrowingChildClient()
+  const host = createNativeSubagentHost({
+    agentDefinitions: new Map([['coder', agentDefinition('coder')]]),
+    autoCompactThreshold: 0.5,
+    contextLimit: () => 20_000,
+    cwd: directory,
+    eventBus: new DaemonSubagentEventBus(),
+    llm: client,
+    model: 'test-model',
+    permissionMode: 'accept-all',
+    toolExecutor: registry,
+    tools: registry.definitions(),
+    transcriptStore: new DaemonTranscriptStore({ currentProjectDirectory: directory, directory: join(directory, 'sessions') }),
+  })
+  try {
+    const task = await host.managerPort.spawn({ message: 'read the big file', promptProfile: 'coder', sourceAgentId: 'parent-session', title: 'Growing child' })
+    const done = await host.managerPort.wait([task.id], 5_000)
+    expect(client.compactionCalls).toBeGreaterThanOrEqual(1)
+    expect(client.rounds).toBe(9)
+    expect(JSON.stringify(done)).toContain('finished after compaction')
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})

@@ -9,9 +9,12 @@ import { Icon } from './Icon.js'
 export function Dictation({
   sessionKey,
   onText,
+  compact = false,
 }: {
   sessionKey: string
   onText: (text: string) => void
+  /** A bare microphone button while idle (the composer toolbar). */
+  compact?: boolean
 }): ReactElement {
   const [state, setState] = useState<'idle' | 'starting' | 'recording' | 'transcribing'>('idle'),
     [error, setError] = useState('')
@@ -116,8 +119,9 @@ export function Dictation({
   return (
     <span className="dictation">
       <button
-        className="cchip"
+        className={compact ? 'cchip composer__icon' : 'cchip'}
         title="Dictate into the draft"
+        aria-label={state === 'recording' ? 'Stop recording' : 'Dictate'}
         disabled={state === 'starting' || state === 'transcribing'}
         onClick={() => {
           if (state === 'recording') recorder.current?.stop()
@@ -130,7 +134,7 @@ export function Dictation({
             ? 'Transcribing…'
             : state === 'starting'
               ? 'Opening microphone…'
-              : 'Dictate'}
+              : compact ? <Icon name="mic" size={16} /> : 'Dictate'}
       </button>
       {state !== 'idle' && (
         <button className="cchip" onClick={cancel}>

@@ -28,6 +28,7 @@ test('agent events keep their historical unwrapped marker byte for byte', () => 
   expect(plan.status).toBe('ready')
   expect(messages.at(-1)).toEqual({
     role: 'user',
+    origin: 'harness',
     content: '[sub-agent events]\n[agent researcher] completed source scan',
   })
 })

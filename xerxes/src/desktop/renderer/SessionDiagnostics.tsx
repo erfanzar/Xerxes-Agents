@@ -16,14 +16,9 @@
 import type { ReactElement } from 'react'
 
 import type { Snapshot } from './store.js'
+import { durationOf } from './duration.js'
 
-function metricDurationOf(milliseconds: number): string {
-  const seconds = Math.max(0, Math.round(milliseconds / 1_000))
-  if (seconds < 60) return `${seconds}s`
-  const minutes = Math.floor(seconds / 60)
-  const remainder = seconds % 60
-  return `${minutes}m${remainder ? `${remainder}s` : ''}`
-}
+const metricDurationOf = durationOf
 
 function ttftOf(milliseconds: number): string {
   return milliseconds < 1_000 ? `${Math.round(milliseconds)}ms` : `${(milliseconds / 1_000).toFixed(1)}s`

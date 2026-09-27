@@ -7,7 +7,7 @@ import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { GitScm, assertScmPath, cleanCommitMessage, commitMessagePrompt, parseScmStatus } from '../src/workspace/gitScm.js'
+import { GitScm, assertScmPath, cleanCommitMessage, commitMessagePrompt, parseNumstat, parseScmStatus } from '../src/workspace/gitScm.js'
 
 const dirs: string[] = []
 afterEach(async () => { await Promise.all(dirs.splice(0).map(dir => rm(dir, { recursive: true, force: true }))) })
@@ -267,4 +267,19 @@ test('generate and commit cover every change — unstaged and new files too — 
   const after = await scm.status()
   expect(after.counts).toEqual({ staged: 0, unstaged: 0, untracked: 0, conflicts: 0 })
   expect((await git(dir, 'ls-files')).split('\n').filter(Boolean).sort()).toEqual(['.gitignore', 'new.md', 'tracked.ts'])
+})
+
+test('status totals the lines changed against HEAD, staged and unstaged, and none before a first commit', async () => {
+  const dir = await repo()
+  await writeFile(join(dir, 'a.ts'), 'one\ntwo\nthree\n')
+  const scm = (await GitScm.open(dir))!
+  expect((await scm.status()).lines).toBeUndefined()
+  await git(dir, 'add', '.')
+  await git(dir, 'commit', '-q', '-m', 'init')
+  expect((await scm.status()).lines).toEqual({ added: 0, removed: 0 })
+  await writeFile(join(dir, 'a.ts'), 'one\n2\nthree\nfour\n')
+  await git(dir, 'add', 'a.ts')
+  await writeFile(join(dir, 'a.ts'), 'one\n2\nthree\nfour\nfive\n')
+  expect((await scm.status()).lines).toEqual({ added: 3, removed: 1 })
+  expect(parseNumstat('4\t1\ta.ts\0-\t-\timg.png\0')).toEqual({ added: 4, removed: 1 })
 })

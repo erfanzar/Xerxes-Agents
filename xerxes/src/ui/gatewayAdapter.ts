@@ -183,6 +183,7 @@ export function looksLikeInternalUserPrompt(text: string): boolean {
   if (
     [
       '[sub-agent events]',
+      '<system-reminder>',
       '[mid-turn steer from user]',
       '[steer from user]',
       '[steer from user saved for next turn]',

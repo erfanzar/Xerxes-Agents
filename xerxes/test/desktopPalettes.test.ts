@@ -7,7 +7,7 @@ import { parseTerminalFont, UI_SCALES } from '../src/desktop/renderer/displayPre
 import { PALETTES, paletteTokens, paletteVariant } from '../src/desktop/renderer/palettes.js'
 
 test('every theme has the colours the app paints, in both variants it offers', () => {
-  expect(PALETTES.map(palette => palette.name)).toEqual(['nous', 'github', 'catppuccin', 'everforest', 'solarized', 'nous-alt', 'midnight', 'ember', 'mono', 'slate', 'cyberpunk'])
+  expect(PALETTES.map(palette => palette.name)).toEqual(['claude', 'nous', 'github', 'catppuccin', 'everforest', 'solarized', 'nous-alt', 'midnight', 'ember', 'mono', 'slate', 'cyberpunk'])
   for (const palette of PALETTES) {
     for (const wanted of ['light', 'dark'] as const) {
       const { colors } = paletteVariant(palette, wanted)
@@ -48,12 +48,14 @@ test('the terminal font accepts font lists and refuses anything that could escap
   expect(UI_SCALES).toEqual([90, 100, 110, 125, 150, 175])
 })
 
-test('a fresh install uses Nous; picking Xerxes\'s own colours is remembered, not reset to the default', async () => {
+test('a fresh install uses Xerxes\'s own colours; a picked theme is remembered', async () => {
   const { loadPalette, savePalette } = await import('../src/desktop/renderer/palettes.js')
   const store = new Map<string, string>()
   const original = globalThis.localStorage
   globalThis.localStorage = { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => { store.set(k, v) }, removeItem: (k: string) => { store.delete(k) } } as unknown as Storage
   try {
+    expect(loadPalette()).toBeUndefined()
+    savePalette('nous')
     expect(loadPalette()?.name).toBe('nous')
     savePalette(undefined)
     expect(loadPalette()).toBeUndefined()

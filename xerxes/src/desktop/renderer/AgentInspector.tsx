@@ -6,6 +6,16 @@ import { desktopCall, desktopError, record, text, type RpcRecord } from './deskt
 import { OutputViewer, readableOutput } from './OutputViewer.js'
 import { ToolCallRow } from './Execution.js'
 import type { SessionRow } from './types.js'
+import { Markdown } from './markdown.js'
+
+/**
+ * An agent's own prose for display: markup-like tags it wrote to itself
+ * alone on a line (`<diagnostics>`, `</thinking>`) removed — never a `<T>` in prose —, and runs of blank lines
+ * collapsed — streamed summaries arrive padded with them.
+ */
+export function agentProse(text: string): string {
+  return text.replace(/^[ \t]*<\/?[a-z_][\w-]*>[ \t]*$/gim, '').replace(/\n{3,}/g, '\n\n').trim()
+}
 
 export function AgentInspector({ row, rows, sessionKey, online }: {row: SessionRow; rows: readonly SessionRow[]; sessionKey: string; online: boolean}): ReactElement {
   const info = row.agentDetails
@@ -48,8 +58,8 @@ export function AgentInspector({ row, rows, sessionKey, online }: {row: SessionR
     {info?.provisional && <p role="status">{state.tone === 'failed' && info.error ? 'The spawn request failed before an agent identity was confirmed. No running agent is reported for this request. Its requested settings and failure are retained below.' : state.priority < 2 ? 'Waiting for the runtime to identify this spawn request. Its assigned task is available here; controls will appear when its identity is confirmed.' : 'This request has finished. Its runtime identity was not recorded, so live details and controls are unavailable. The original task remains inspectable.'}</p>}
     {error && <div role="alert" className="studio-error"><p>{error}</p><button disabled={!online} onClick={() => setRetry(value => value+1)}>Retry agent details</button></div>}
     {info?.error && <p className="studio-error">{info.error}</p>}
-    {info?.summary && !info.provisional && <section><h3>Latest summary</h3><p>{info.summary}</p></section>}
-    {Boolean(info?.notes?.length) && <section><h3>Recent activity</h3>{info!.notes!.map((note, index) => <p key={index}>{note}</p>)}</section>}
+    {info?.summary && !info.provisional && agentProse(info.summary) && <section className="agent-inspector__summary"><h3>Latest summary</h3><Markdown text={agentProse(info.summary)} className="md--compact" /></section>}
+    {Boolean(info?.notes?.length) && <section className="agent-inspector__notes"><h3>Recent activity</h3><ol>{info!.notes!.map(agentProse).filter(Boolean).map((note, index) => <li key={index}>{note}</li>)}</ol></section>}
     {Boolean(info?.toolCalls?.length) && <section><h3>Tool calls <span>{info!.toolCalls!.length}</span></h3>{info!.toolCalls!.map(call => <ToolCallRow key={call.id} item={call} label={call.name.replaceAll('_',' ')} />)}</section>}
     {output && <><OutputViewer text={output} label="Agent output"/><p className="studio-muted">Retained output from the latest saved agent state.</p></>}
     {!output && !info?.notes?.length && !info?.toolCalls?.length && !info?.provisional && <p className="studio-muted">{detail || error ? 'No detailed activity has been recorded yet.' : 'Loading recorded activity…'}</p>}

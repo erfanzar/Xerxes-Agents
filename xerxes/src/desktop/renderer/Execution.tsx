@@ -7,6 +7,7 @@ import { OutputViewer, readableOutput } from './OutputViewer.js'
 import { Icon } from './Icon.js'
 import { StructuredResult, structuredOutput } from './StructuredResult.js'
 import { CopyButton } from './CopyButton.js'
+import { FileToolRow, fileToolOf } from './FileToolRow.js'
 
 function record(text: string): Record<string, unknown> | null {
   try {
@@ -44,6 +45,11 @@ export function executionView(item: ToolItem) {
   }
 }
 export const ToolCallRow = memo(function ToolCallRow({ item, label }: { item: ToolItem; label: string }): ReactElement {
+  const file = fileToolOf(item)
+  return file ? <FileToolRow item={item} tool={file} failed={toolHasFailed(item)} /> : <GenericToolRow item={item} label={label} />
+})
+
+const GenericToolRow = memo(function GenericToolRow({ item, label }: { item: ToolItem; label: string }): ReactElement {
   const [inspected, setInspected] = useState(false)
   const view = executionView(item)
   const failed = toolHasFailed(item)

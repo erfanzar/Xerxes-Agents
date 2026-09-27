@@ -7,9 +7,9 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
-import { Shell, ActivityDetails, SessionDiagnostics } from '../src/desktop/renderer/App.js'
+import { Shell, ActivityDetails, AgentsCard, SessionDiagnostics, replyEnds } from '../src/desktop/renderer/App.js'
 import { RailStatus } from '../src/desktop/renderer/RailStatus.js'
-import { DesktopPage, DesktopRail } from '../src/desktop/renderer/DesktopPanels.js'
+import { DesktopPage, DesktopRail, frontMatter, rendersAsDocument } from '../src/desktop/renderer/DesktopPanels.js'
 import type { Snapshot } from '../src/desktop/renderer/store.js'
 import type { SessionRow } from '../src/desktop/renderer/types.js'
 import { BlockBuilder } from '../src/desktop/renderer/blocks.js'
@@ -40,6 +40,7 @@ const snapshot = (overrides: Partial<Snapshot>): Snapshot => ({
   currentAgentPreset: 'default',
   agentPresets: [],
   models: [],
+  reasoningLevels: [],
   contextTokens: null,
   contextMax: null,
   ttftMs: null,
@@ -106,7 +107,7 @@ const render = (snap: Snapshot): string =>
 
 test('the shell renders the right state in every connectivity mode', () => {
   const cases: Array<[string, Snapshot, string[]]> = [
-    ['offline', snapshot({ connection: 'offline' }), ['Runtime offline', 'New session']],
+    ['offline', snapshot({ connection: 'offline' }), ['Runtime offline', 'Not connected']],
     ['connecting', snapshot({ connection: 'connecting' }), ['Connecting…']],
     ['online-empty', snapshot({}), ['Describe what you need']],
     [
@@ -137,7 +138,6 @@ test('a stale daemon handshake renders the actionable restart warning', () => {
   expect(html).toContain('aria-haspopup="dialog"')
   expect(html).not.toContain('Runtime update needed')
   expect(html).not.toContain('daemon connected')
-  expect(html.match(/aria-label="Activity"/g)?.length).toBe(1)
 
 })
 
@@ -212,7 +212,7 @@ test('session statistics align metrics and omit duplicate context and connection
     }),
   )
   expect(html).toContain('<dl class="session-diagnostics session-diagnostics__values" aria-label="Session statistics">')
-  for (const needle of ['<dt>Turns</dt><dd>39</dd>', '<dt>Steps</dt><dd>2106</dd>', '515m47s', '2m', '8.5s', '43.0 tokens/s', '<dt>Cache hit</dt><dd>98%</dd>', '142K', 'kimi-for-coding']) {
+  for (const needle of ['<dt>Turns</dt><dd>39</dd>', '<dt>Steps</dt><dd>2106</dd>', '<dd>8h 35m</dd>', '2m', '8.5s', '43.0 tokens/s', '<dt>Cache hit</dt><dd>98%</dd>', '142K', 'kimi-for-coding']) {
     expect(html).toContain(needle)
   }
   const acting = renderStats(snapshot({ turnActive: true }))
@@ -253,7 +253,7 @@ test('no colour is hard-coded past the generated palette', () => {
 
 // ── Workspace tabs ──────────────────────────────────────────────────────
 
-test('the tabbed workspace renders every surface with live counts', () => {
+test('session edits, the plan and the log each render as a view with a way back', () => {
   const changes = [
     { path: 'src/a.ts', adds: 12, dels: 4, isNew: false, hunks: [{ kind: 'add' as const, text: '+ new' }], turn: 1 },
   ]
@@ -265,15 +265,15 @@ test('the tabbed workspace renders every surface with live counts', () => {
       tab: 'changes',
     }),
   )
-  for (const needle of ['Activity', 'Git', 'Plan', 'Log', 'src/a.ts', 'Keep all']) {
+  for (const needle of ['Activity', 'Git', 'Session edits', 'Conversation', 'src/a.ts', 'Keep all', 'Event log']) {
     expect(tabs).toContain(needle)
   }
   expect(tabs).toContain('+12')
-  expect(tabs).toContain('1/2')
+  // The plan's to-dos are an Activity card.
+  expect(tabs).toContain('>1/2<')
 
   const plan = render(snapshot({ tab: 'plan', planMode: true, plan: { markdown: '- [ ] one', items: [{ text: 'one', done: false }], turn: 1 } }))
   expect(plan).toContain('Working plan')
-  expect(plan).toContain('plan mode')
 
   const log = render(snapshot({ tab: 'log', log: [{ id: 1, turn: 2, type: 'tool_call', summary: 'name=read' }] }))
   expect(log).toContain('tool_call')
@@ -541,22 +541,19 @@ test('nonempty plans appear only in the pinned composer summary', () => {
   expect(html).toContain('aria-label="Current task"')
   expect(html).toContain('>1/3</span>')
   expect(html).not.toContain('class="todos"')
-  expect(html.indexOf('aria-label="Current task"')).toBeGreaterThan(html.indexOf('class="composer-dock"'))
+  // Pinned inside the composer area, above the input card (Claude Code's stack).
+  expect(html.indexOf('aria-label="Current task"')).toBeGreaterThan(html.indexOf('class="composer-wrap"'))
+  expect(html.indexOf('aria-label="Current task"')).toBeLessThan(html.indexOf('class="composer-dock"'))
 })
 
-test('the header fleet chip opens the live subagent roster', () => {
+test('the live subagent roster is the Activity rail’s Agents card', () => {
   const fleet = [
     { id: 'f1', key: 'f1', title: 'Analyze libs/eyvan', status: 'working', age: '', current: false, kind: 'subagent' as const, turns: 0, messages: 0, cwd: '', untitled: false },
     { id: 'f2', key: 'f2', title: 'Analyze the OCI pipeline', status: 'completed', age: '', current: false, kind: 'subagent' as const, turns: 0, messages: 0, cwd: '', untitled: false },
   ]
   const html = render(snapshot({ currentId: 'c1', currentTitle: 'T', fleet }))
-  expect(html).toContain('2 subagents')
-  // Closed, the chip itself shows that work is under way.
-  expect(html).toContain('fleetchip is-working')
-  expect(html).toContain('1 of 2 subagents working')
-  const idle = render(snapshot({ currentId: 'c1', currentTitle: 'T', fleet: fleet.map(row => ({ ...row, status: 'completed' })) }))
-  expect(idle).toContain('2 subagents')
-  expect(idle).not.toContain('is-working')
+  expect(html).toContain('aria-label="Agents"')
+  expect(html).toContain('1 working')
   const details = renderToStaticMarkup(createElement(ActivityDetails, {snap:snapshot({fleet})}))
   expect(details).toContain('Analyze libs/eyvan')
   expect(details).toContain('Analyze the OCI pipeline')
@@ -613,7 +610,6 @@ test('spawn requests stay inside closed chat work groups and remain discoverable
       ],
     }),
   )
-  expect(html).toContain('1 background job running')
   // No turn is running: a child that outlives it is noted, not called "Working".
   expect(html).toContain('<details class="activity-group">')
   expect(html).toContain('Started 2 agents')
@@ -1013,7 +1009,6 @@ test('welcome offers draft starters while navigation retains accessible button n
   expect(html).toContain('Research a question')
   expect(html).toContain('Make a plan')
   expect(html).toContain('Build something')
-  expect(html).toContain('aria-label="Search sessions"')
   expect(html).toContain('<button aria-pressed="false">Files</button>')
   expect(html).toContain('aria-label="Toggle sidebar"')
   expect(html).toContain('aria-hidden="true"')
@@ -1258,4 +1253,82 @@ test('the model picker shows each model as its provider names it, grouped under 
   // A provider that names nothing shows its id, not an invented name.
   expect(html).toContain('>gpt-5</span>')
   expect(html).toContain('title="claude-code/claude-fable-5-1[1m]"')
+})
+
+test('a reply gets one copy row under its last paragraph, copying the whole reply, and none while it runs', () => {
+  const blocks = [
+    { id: 1, kind: 'user', text: 'first' },
+    { id: 2, kind: 'agent', text: 'Looking.', streaming: false },
+    { id: 3, kind: 'tools', items: [] },
+    { id: 4, kind: 'agent', text: 'Done.', streaming: false },
+    { id: 5, kind: 'user', text: 'second' },
+    { id: 6, kind: 'agent', text: 'Working on it', streaming: true },
+  ] as unknown as Snapshot['blocks']
+  const running = replyEnds(blocks, true)
+  expect([...running.entries()]).toEqual([[4, { text: 'Looking.\n\nDone.', latest: true }]])
+  const settled = replyEnds(blocks.map(block => block.kind === 'agent' ? { ...block, streaming: false } : block) as Snapshot['blocks'], false)
+  expect([...settled.keys()]).toEqual([4, 6])
+  expect(settled.get(4)!.latest).toBe(false)
+  expect(settled.get(6)).toEqual({ text: 'Working on it', latest: true })
+  const html = render(snapshot({ blocks: blocks.slice(0, 4) }))
+  expect(html.match(/aria-label="Copy reply"/g)?.length).toBe(1)
+  expect(html).not.toContain('>Copy reply<')
+})
+
+test('Markdown files open rendered with their front matter as a table; other files stay source', () => {
+  expect(rendersAsDocument('docs/DESIGN.md')).toBe(true)
+  expect(rendersAsDocument('README.MDX')).toBe(true)
+  expect(rendersAsDocument('src/a.ts')).toBe(false)
+  expect(frontMatter('---\nname: Xerxes Desktop\ndescription: Compact\n  workspace\ncolors:\n  x-screen: "#111"\n---\n# Title\n')).toEqual({
+    fields: [['name', 'Xerxes Desktop'], ['description', 'Compact workspace'], ['colors', 'x-screen: "#111"']],
+    body: '# Title\n',
+  })
+  expect(frontMatter('# No front matter\n---\n')).toEqual({ fields: [], body: '# No front matter\n---\n' })
+})
+
+test('the Claude layout header is the task title and agent kind, with Session edits and a needs-input signal', () => {
+  const html = render(snapshot({
+    currentTitle: 'Review vnext',
+    currentAgentPreset: 'default',
+    changes: [{ path: 'a.ts', adds: 3, dels: 1 }] as unknown as Snapshot['changes'],
+    approval: { id: 'a1', action: 'bash', description: 'rm -rf tmp/' },
+    turnActive: true,
+  }))
+  const head = html.slice(html.indexOf('chat__head--minimal'), html.indexOf('</header>', html.indexOf('chat__head--minimal')))
+  expect(head).toContain('Review vnext')
+  expect(head).toContain('chat__kind')
+  expect(head).toContain('Session edits')
+  expect(head).toContain('needs input · acting paused')
+  for (const gone of ['Plan &amp; todos', '>Log<', 'Session log', 'subagent', 'Standard mode']) expect(head).not.toContain(gone)
+})
+
+test('to-dos live in the Activity rail in the Claude layout', () => {
+  const html = render(snapshot({ todos: [
+    { id: '1', content: 'Read the diff', status: 'completed' },
+    { id: '2', content: 'Patch the guard', status: 'in_progress' },
+  ] as unknown as Snapshot['todos'] }))
+  expect(html).toContain('aria-label="To-dos"')
+  expect(html).toContain('Patch the guard')
+  expect(html).toContain('>1/2<')
+})
+
+test('the subagents card shows progress, each agent’s model kind, and why one failed', () => {
+  const html = renderToStaticMarkup(createElement(AgentsCard, { members: [
+      { key: 'c:0', title: 'S02 eSurge review', status: 'failed', model: 'k3-256k', providerProfile: 'kimi-for-coding', reasoningEffort: 'high', error: 'Subagent provider request failed\nstack' },
+      { key: 'c:1', title: 'R6-S6 layers review', status: 'working', model: 'gpt-6-sol', providerProfile: 'codex', reasoningEffort: 'high' },
+      { key: 'c:2', title: 'R6-S8 CI review', status: 'completed' },
+  ] }))
+  expect(html).toContain('3 subagents')
+  expect(html).toContain('role="progressbar"')
+  expect(html).toContain('codex/gpt-6-sol[high]')
+  expect(html).toContain('Subagent provider request failed')
+  expect(html).toContain('>Subagent provider request failed</span>')
+  // Working first, then failed, then done.
+  expect(html.indexOf('R6-S6 layers review')).toBeLessThan(html.indexOf('S02 eSurge review'))
+  expect(html.indexOf('S02 eSurge review')).toBeLessThan(html.indexOf('R6-S8 CI review'))
+})
+
+test('an agent summary drops its own stray tags and blank runs but keeps generics in prose', async () => {
+  const { agentProse } = await import('../src/desktop/renderer/AgentInspector.js')
+  expect(agentProse("I'll read the brief.\n\n\n\n\nNow the diff of Array<string>.\n<diagnostics>\n")).toBe("I'll read the brief.\n\nNow the diff of Array<string>.")
 })

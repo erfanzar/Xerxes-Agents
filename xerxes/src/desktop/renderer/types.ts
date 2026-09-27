@@ -41,6 +41,8 @@ export interface XerxesBridge {
   setZoomFactor?(factor: number): void
   /** macOS: blur what is behind the window (native material) or show it clear. */
   setWindowBlur?(on: boolean): void
+  /** A bundled background as a data URL (so its blur can be baked). */
+  backgroundData?(name: string): Promise<string>
   /** Asked once as the page starts: is another workspace view covering it? */
   isOccluded?(): Promise<boolean>
   /** Whether another workspace view covers this page. */
@@ -109,6 +111,7 @@ export interface AgentMember {
   readonly prompt?: string
   readonly model?: string
   readonly providerProfile?: string
+  readonly reasoningEffort?: string
   readonly error?: string
   readonly title: string
   /** working | completed | failed | cancelled — snapshot statuses pass through mapped. */
