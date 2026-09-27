@@ -252,7 +252,14 @@ test("workspace file preview RPC reads only active-session workspace text withou
     client.send({ jsonrpc: "2.0", id: 2, method: "initialize", params: { session_key: "preview", project_dir: directory } });
     await client.next(frame => frame.id === 2);
     client.send({ jsonrpc: "2.0", id: 3, method: "workspace.filePreview", params: { session_key: "preview", path: "source.ts" } });
-    expect((await client.next(frame => frame.id === 3)).result).toEqual({ ok: true, path: "source.ts", content: "first\n  second\n", truncated: false });
+    const preview = (await client.next(frame => frame.id === 3)).result as Record<string, unknown>;
+    expect(preview).toMatchObject({ ok: true, path: "source.ts", content: "first\n  second\n", truncated: false });
+    // A person's edit from the app saves over the version it opened; it is not a turn.
+    client.send({ jsonrpc: "2.0", id: 5, method: "workspace.fileWrite", params: { session_key: "preview", path: "source.ts", content: "edited\n", base_version: preview.version } });
+    expect((await client.next(frame => frame.id === 5)).result).toMatchObject({ ok: true, path: "source.ts" });
+    expect(await Bun.file(join(directory, "source.ts")).text()).toBe("edited\n");
+    client.send({ jsonrpc: "2.0", id: 6, method: "workspace.fileWrite", params: { session_key: "preview", path: "source.ts", content: "stale\n", base_version: preview.version } });
+    expect((await client.next(frame => frame.id === 6)).result).toMatchObject({ ok: false, conflict: true });
     expect(runtime.sessionStatus("preview")?.turnCount).toBe(0);
     client.send({ jsonrpc: "2.0", id: 4, method: "workspace.filePreview", params: { session_key: "preview", path: "missing.ts" } });
     expect((await client.next(frame => frame.id === 4)).error).toBeDefined();

@@ -148,7 +148,8 @@ export function planInjection(
   // repeats itself.
   if (usage.rendered.has(text)) return { reason: 'duplicate', status: 'skipped' }
   return {
-    message: { role: 'user', content: text },
+    // Written by the harness, not the user: clients never show it.
+    message: { role: 'user', content: text, origin: 'harness' },
     status: 'ready',
     text,
     truncated: bounded.truncated,

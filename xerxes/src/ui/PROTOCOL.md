@@ -1127,7 +1127,16 @@ with bounded conflict details. No automatic reversal runs after process death.
 canonical paths outside it (including symlinks) and non-regular files are rejected.
 UTF-8 text is limited to 128 KiB and retains whitespace; binary or invalid UTF-8
 files return errors. This read-only operation does not append messages, execute a
-tool, or call a provider. Older daemons may report an unsupported method.
+tool, or call a provider. Older daemons may report an unsupported method. A preview of
+a whole file (not `truncated`) also carries `version`, the SHA-256 of its bytes.
+
+`workspace.fileWrite` accepts `{session_key,path,content,base_version}` and saves an
+edit made by the person in a client (it is not a tool call and appends nothing to the
+conversation). The path follows the same containment rules as `workspace.filePreview`
+and must name an existing regular file; content is UTF-8 text up to 128 KiB without NUL.
+When the file's current bytes no longer hash to `base_version`, nothing is written and
+the reply is `{ok:false,conflict:true,path,error}`; otherwise `{ok:true,path,version}`
+with the new version. Older daemons may report an unsupported method.
 
 `capabilities.list` returns a read-only catalog for the attached session:
 `{ok:true,skills,total_skills,tools,tools_source,usage_scope,model,provider_profile,reasoning_effort}`.

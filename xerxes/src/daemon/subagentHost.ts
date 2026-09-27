@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { recordCompaction } from '../context/compactionHistory.js'
+import { estimateContextTokens } from '../context/windowUsage.js'
 import { isAbsolute, resolve } from 'node:path'
 import { parseWorktreeRef, parseWorktreeSource } from '../agents/worktreeOptions.js'
 import { subagentCatalogForAgent, type AgentDefinition } from '../agents/definitions.js'
@@ -34,7 +35,7 @@ import { runWithActiveSession } from '../runtime/sessionContext.js'
 import { looksLikeSessionId, type DaemonTranscriptStore } from '../session/daemonTranscript.js'
 import { FILE_READS_METADATA_KEY, fileStateTracker } from '../tools/fileState.js'
 import type { AgentState, StreamEvent } from '../streaming/events.js'
-import { runTurn } from '../streaming/loop.js'
+import { runTurn, type ContextReducer } from '../streaming/loop.js'
 import type { PermissionBroker, PermissionMode } from '../streaming/permissions.js'
 import type { ChatMessage } from '../types/messages.js'
 import type { ToolDefinition } from '../types/toolCalls.js'
@@ -1384,6 +1385,8 @@ async function runNativeSubagent(
         tools,
       })
       const maxTokens = options.maxTokens ?? options.maxOutputTokens?.(model)
+      const childSystemPrompt = [boot.systemPrompt, ...(request.config._agentPromptMode === 'replace' ? [] : [request.systemPrompt]), ...preloadedSkills].filter(Boolean).join('\n\n')
+      const midTurnCompaction = childMidTurnCompaction({ conversation, conversations, model, options, request, state }, childSystemPrompt, tools)
       const events = runTurn({
         agentId: request.task.agentDefName || request.task.id,
         ...(maxTokens === undefined ? {} : { maxTokens }),
@@ -1393,7 +1396,7 @@ async function runNativeSubagent(
         permissionMode,
         sessionId: conversation.historySessionId,
         state,
-        systemPrompt: [boot.systemPrompt, ...(request.config._agentPromptMode === 'replace' ? [] : [request.systemPrompt]), ...preloadedSkills].filter(Boolean).join('\n\n'),
+        systemPrompt: childSystemPrompt,
         ...(options.temperature === undefined ? {} : { temperature: options.temperature }),
         ...(options.topK === undefined ? {} : { topK: options.topK }),
         tools,
@@ -1404,6 +1407,7 @@ async function runNativeSubagent(
         // reaches the child between steps rather than corrupting one in
         // flight. Identical mechanism to a main session's `turn.steer`.
         drainSteer: () => request.drainSteer(),
+        ...midTurnCompaction,
         llm: options.llm,
         ...(permissionBroker === undefined ? {} : { permissionBroker }),
         toolExecutor: options.toolExecutor,
@@ -1570,6 +1574,67 @@ async function compactChildConversation(input: ChildCompactionRequest): Promise<
     publishChildCompaction(options.eventBus, request, outcome.stamp)
   } catch (error) {
     console.warn(`Could not compact subagent ${request.task.id}: ${errorText(error)}`)
+  }
+}
+
+/**
+ * Compaction inside a child's turn, not only before it. A child runs its
+ * whole task as one turn — hundreds of tool steps — so a conversation that
+ * started small grew past the model's window mid-turn and died there
+ * ("exceeded k3-256k model token limit: 262144"). The loop checks before
+ * every model round, exactly as it does for a main session. Unknown
+ * capacity leaves it off rather than inventing a window.
+ */
+function childMidTurnCompaction(
+  input: ChildCompactionRequest,
+  systemPrompt: string,
+  tools: readonly ToolDefinition[],
+): { contextCompactionDue?: (messages: readonly ChatMessage[]) => boolean; reduceContext?: ContextReducer } {
+  const { conversation, conversations, model, options, request, state } = input
+  const contextLimit = options.contextLimit?.(model)
+  const maxTokens = options.maxTokens ?? options.maxOutputTokens?.(model)
+  const thresholdTokens = compactionThresholdTokens(
+    effectiveContextLimit({
+      ...(contextLimit === undefined ? {} : { contextLimit }),
+      ...(maxTokens === undefined ? {} : { requestedOutputTokens: maxTokens }),
+    }),
+    options.autoCompactThreshold ?? DEFAULT_AUTO_COMPACT_THRESHOLD,
+  )
+  if (thresholdTokens <= 0) return {}
+  const estimate = (messages: readonly ChatMessage[]) => estimateContextTokens(messages as unknown as Record<string, unknown>[], {
+    model,
+    ...(systemPrompt ? { systemPrompt } : {}),
+    toolSchemas: tools as unknown as Record<string, unknown>[],
+  })
+  return {
+    // Only once the turn has taken a step: at its start the pre-turn pass has
+    // already compacted, and an opening prompt alone has nothing to summarize.
+    contextCompactionDue: messages => {
+      const last = messages.at(-1)
+      if (!last || last.role === 'user' || last.role === 'system') return false
+      return estimate(messages) >= thresholdTokens
+    },
+    reduceContext: async (messages, signal) => {
+      const archivePath = childArchivePath(options.transcriptStore, conversation.historySessionId)
+      const outcome = await compactMessagesIfNeeded({
+        ...(archivePath === undefined ? {} : { archivePath }),
+        completion: compactionCompletionPort(options.llm, model, undefined, signal),
+        messages: messages as unknown as ContextMessage[],
+        model,
+        reason: 'subagent',
+      })
+      if (!outcome.compacted) return { messages, tokensFreed: 0 }
+      state.metadata = { ...state.metadata }
+      recordCompaction(state.metadata, outcome.stamp)
+      // The summary no longer carries file contents: re-read before editing.
+      fileStateTracker.clearSession(conversation.historySessionId)
+      state.metadata[FILE_READS_METADATA_KEY] = []
+      publishChildCompaction(options.eventBus, request, outcome.stamp)
+      // Awaited, before the loop takes its next step: a save racing the
+      // loop's own checkpoint is rejected as a stale rewrite and fails the child.
+      await conversations.save(conversation, { ...state, messages: outcome.messages as unknown as ChatMessage[] }, 'running')
+      return { messages: outcome.messages as unknown as ChatMessage[], tokensFreed: Math.max(0, outcome.stamp.tokens_before - outcome.stamp.tokens_after) }
+    },
   }
 }
 

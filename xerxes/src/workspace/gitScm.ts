@@ -44,6 +44,8 @@ export interface ScmStatus {
   /** More entries existed than the panel budget; counts are still exact. */
   readonly truncated: boolean
   readonly counts: { readonly staged: number; readonly unstaged: number; readonly untracked: number; readonly conflicts: number }
+  /** Lines added and removed in tracked files against HEAD (staged and unstaged); absent before the first commit. */
+  readonly lines?: { readonly added: number; readonly removed: number }
 }
 
 export interface ScmBranch {
@@ -255,6 +257,18 @@ export function parseScmStatus(stdout: string, root: string, maxPerGroup = MAX_F
   return { root, branch, detached, hasHead, upstream, ahead, behind, staged, unstaged, untracked, conflicts, truncated, counts }
 }
 
+/** Totals of `git diff --numstat -z`; binary files (`-` counts) add nothing. */
+export function parseNumstat(stdout: string): { added: number; removed: number } {
+  let added = 0, removed = 0
+  for (const entry of stdout.split('\0')) {
+    const match = /^(\d+|-)\t(\d+|-)\t/.exec(entry)
+    if (!match) continue
+    if (match[1] !== '-') added += Number(match[1])
+    if (match[2] !== '-') removed += Number(match[2])
+  }
+  return { added, removed }
+}
+
 const locks = new Map<string, Promise<unknown>>()
 
 /** One git mutation at a time per repository: `index.lock` is not shareable. */
@@ -305,7 +319,10 @@ export class GitScm {
       ['--no-optional-locks', 'status', '--porcelain=v2', '-z', '--branch', '--untracked-files=all'],
       'git status failed',
     )
-    return parseScmStatus(stdout, this.root)
+    const status = parseScmStatus(stdout, this.root)
+    if (!status.hasHead) return status
+    const numstat = await this.git(['--no-optional-locks', 'diff', '--numstat', '-z', '--no-renames', '--no-ext-diff', 'HEAD', '--'], 'git diff --numstat failed')
+    return { ...status, lines: parseNumstat(numstat) }
   }
 
   /** One file's diff: the index against HEAD when `staged`, else the worktree against the index. */

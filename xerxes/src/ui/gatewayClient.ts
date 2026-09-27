@@ -1015,6 +1015,7 @@ export class GatewayClient extends EventEmitter {
       case 'terminal.inspect':
       case 'terminal.output':
       case 'workspace.filePreview':
+      case 'workspace.fileWrite':
       case 'changes.undo':
       case 'monitor.stop':
       case 'monitor.inspect':

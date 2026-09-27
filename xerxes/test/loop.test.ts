@@ -980,6 +980,7 @@ test('sub-agent events travel through the injection seam without changing their 
 
   expect(state.messages).toContainEqual({
     role: 'user',
+    origin: 'harness',
     content: '[sub-agent events]\n[agent researcher] finished',
   })
   expect(scanInjections(state.messages).counts.get('agent_events')).toBe(1)

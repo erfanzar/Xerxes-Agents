@@ -128,6 +128,7 @@ test('streaming loop injects passive sub-agent events through the explicit nativ
 
   expect(client.requests[1]?.messages).toContainEqual({
     role: 'user',
+    origin: 'harness',
     content: '[sub-agent events]\n[agent researcher] completed source scan',
   })
 })
@@ -156,6 +157,7 @@ test('streaming loop waits for detached subagents and resumes the same parent tu
   expect(requests).toHaveLength(2)
   expect(requests[1]?.messages).toContainEqual({
     role: 'user',
+    origin: 'harness',
     content:
       '[sub-agent events]\n' +
       '[agent result title="Review" status=completed]\nreview findings\n[/agent result]',
@@ -189,6 +191,7 @@ test('streaming loop persists joined subagent results before honoring a simultan
 
   expect(state.messages).toContainEqual({
     role: 'user',
+    origin: 'harness',
     content:
       '[sub-agent events]\n' +
       '[agent result title="Review" status=completed]\nfinished evidence\n[/agent result]',
@@ -232,6 +235,7 @@ test('streaming loop joins detached subagents before a final tool-turn boundary 
   expect(requests[1]?.tools).toBeUndefined()
   expect(requests[1]?.messages).toContainEqual({
     role: 'user',
+    origin: 'harness',
     content:
       '[sub-agent events]\n' +
       '[agent result title="Boundary child" status=completed]\nchild report\n[/agent result]',
