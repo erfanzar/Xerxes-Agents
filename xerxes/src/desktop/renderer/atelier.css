@@ -2327,9 +2327,13 @@ html,body,#root,.app.atelier{background:transparent}
 
 /* Nobody is watching a window that is not focused: every animation pauses
    (status text and counters keep updating). main.tsx sets the attribute. */
-:root[data-window-unfocused] .atelier *,
+:root[data-window-unfocused] .atelier *:not(.live-phrase__item):not(.studio-sheet),
 :root[data-window-unfocused] .atelier *::before,
 :root[data-window-unfocused] .atelier *::after{animation-play-state:paused!important}
+/* Only looping indicators pause. One-shot entrances must finish: a status
+   phrase that faded in while the window was unfocused stayed paused at
+   opacity 0 ("Working ·   · 1 failed") until something was clicked, and a
+   rail opened meanwhile stayed invisible. */
 
 /* ══ Claude layout ════════════════════════════════════════════════════
    Settings ▸ General ▸ Layout. Modelled on Claude's desktop app: a quiet
@@ -2707,3 +2711,21 @@ html,body,#root,.app.atelier{background:transparent}
   border-radius:12px 20px 20px 12px / 18px 18px 20px 20px;
 }
 :root[data-backdrop='transparent'] .panel-divider{background:linear-gradient(var(--x-hairline),var(--x-hairline)),var(--x-screen)}
+
+/* The spinner icon only spins when something turns it: the rail's current
+   to-do, a working subagent row and header, a running file tool. */
+.atelier .railtodos li[data-state='in_progress'] .railtodos__mark svg,
+.atelier .acard__row[data-tone='working'] .acard__glyph svg,
+.atelier .acard[data-state='working'] .acard__icon svg,
+.atelier .filetool[data-state='working'] .filetool__verb svg{animation:studio-spin .9s linear infinite;transform-origin:50% 50%}
+@media (prefers-reduced-motion:reduce){
+  .atelier .railtodos li[data-state='in_progress'] .railtodos__mark svg,
+  .atelier .acard__row[data-tone='working'] .acard__glyph svg,
+  .atelier .acard[data-state='working'] .acard__icon svg,
+  .atelier .filetool[data-state='working'] .filetool__verb svg{animation:none}
+}
+
+/* File-tool rows share the generic tool rows' inset, so Read/Edit line up
+   with Grep/Exec in a group instead of sitting on its edge. */
+.atelier .tlist>.filetool{padding:7px 8px}
+.atelier .activity-group__body .tlist>.filetool{padding:10px 14px}

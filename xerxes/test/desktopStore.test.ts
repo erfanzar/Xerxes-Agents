@@ -974,6 +974,28 @@ describe('Store workspace folds', () => {
     expect(snap.blocks.some(block => block.kind === 'notice')).toBe(false)
   })
 
+  test('a chat still running its turn after an app restart is attached to, not replaced by a new task', async () => {
+    // The app restarted mid-turn: resuming by id is refused because the turn
+    // runs under the old (gone) connection. The store used to read that as
+    // "another workspace's session" and open a New task, hiding the chat.
+    await Bun.sleep(0)
+    const running = "Error invoking remote method 'daemon:call': Error: rpc -32000: Validation error for session_id: is still running a turn under another connection; wait for it to finish before resuming it here"
+    bridge.respondWith((method, params) => {
+      if (method === 'session.active_list') return { ok: true, sessions: [{ id: 'daf5d637677b', key: 'desktop-old-rd637677b' }] }
+      if (method !== 'initialize') return { ok: true }
+      if (params.resume_session_id) return Promise.reject(new Error(running))
+      if (params.session_key === 'desktop-old-rd637677b') return { ...initializeResult, session_id: 'daf5d637677b', session: { id: 'daf5d637677b', key: 'desktop-old-rd637677b' } }
+      return { ...initializeResult, session_id: 'fresh-new-task' }
+    })
+    await store.openSession('daf5d637677b')
+    const snap = store.getSnapshot()
+    expect(snap.currentId).toBe('daf5d637677b')
+    expect(snap.error).toBeNull()
+    const inits = bridge.calls.filter(call => call.method === 'initialize')
+    expect(inits.some(call => call.params.session_key === 'desktop-old-rd637677b' && !call.params.resume_session_id)).toBe(true)
+    expect(snap.currentId).not.toBe('fresh-new-task')
+  })
+
   test('undoChanges drops undone files from the review list and reports refusals', async () => {
     bridge.push('turn_begin', { user_input: 'edit' })
     const first = editCall('src/a.ts', 'one', 'two', 'e1')

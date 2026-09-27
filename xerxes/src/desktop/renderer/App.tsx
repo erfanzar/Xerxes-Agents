@@ -1908,7 +1908,7 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
           className="cchip composer__text"
           title="Reasoning effort — click to change"
           onClick={() => store.toggleReasoningPicker()}
-        >{capitalizeWord(snap.reasoningEffort && snap.reasoningEffort !== 'off' ? snap.reasoningEffort : 'off')}</button>}
+        >{capitalizeWord(snap.reasoningEffort || 'default')}</button>}
         <ContextRing snap={snap} onOpen={() => open('usage')} />
       </div>
     </div>

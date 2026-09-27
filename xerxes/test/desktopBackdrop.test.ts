@@ -138,3 +138,11 @@ test('in transparent mode nothing sits behind the see-through panels; the rail g
   expect(css).toContain(":root[data-backdrop='transparent'] .atelier .chat::before{content:\"\"}")
   expect(css).toMatch(/:root\[data-backdrop='transparent'\]\[data-layout='claude'\] \.atelier \.desktop-rail::after\{[^}]*border:solid var\(--x-screen\)/)
 })
+
+test('an unfocused window pauses looping indicators but lets one-shot entrances finish, and spinner icons turn', async () => {
+  const css = await Bun.file(new URL('../src/desktop/renderer/atelier.css', import.meta.url)).text()
+  // Pausing a fill-mode entrance froze it at opacity 0 until the next click.
+  expect(css).toContain(':root[data-window-unfocused] .atelier *:not(.live-phrase__item):not(.studio-sheet),')
+  expect(css).not.toContain(':root[data-window-unfocused] .atelier *,\n')
+  expect(css).toMatch(/\.railtodos li\[data-state='in_progress'\] \.railtodos__mark svg,[\s\S]*?\{animation:studio-spin/)
+})

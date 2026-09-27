@@ -145,6 +145,9 @@ function agentStatusOf(status: string): string {
  * SpawnAgents carries an `agents` batch; the single-spawn tools carry one
  * title-ish field. Keys are call-local; fleet sync matches on title.
  */
+/** The daemon's refusal to resume a session whose turn is running under another connection. */
+const RUNNING_ELSEWHERE = /still running a turn under another connection/i
+
 export function spawnMembersOf(name: unknown, args: unknown, callId: string): AgentMember[] {
   const parsed = parseArgs(args)
   const label = (value: Record<string, unknown>, index: number): string =>
@@ -938,6 +941,14 @@ export class Store {
       return await this.initialize(extra)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
+      // Still running a turn with no client of ours attached (the app was
+      // restarted, or the runtime updated, mid-turn): attach to it instead of
+      // treating it as someone else's session and starting a new task — that
+      // hid a chat that was still working.
+      if (typeof extra.resume_session_id === 'string' && RUNNING_ELSEWHERE.test(message)) {
+        const attached = await this.attachRunningSession(extra.resume_session_id)
+        if (attached) return attached
+      }
       // The conversation being resumed is not on disk: a new task that never
       // got a message when the runtime restarted, or one deleted elsewhere.
       // Retrying the same id can never succeed, so open a fresh conversation
@@ -1208,6 +1219,19 @@ export class Store {
       return true
     } catch (error) {
       if (version !== this.sessionNavigationVersion) return true
+      // The chosen chat is still running its turn: watch it rather than fail.
+      if (RUNNING_ELSEWHERE.test(error instanceof Error ? error.message : String(error))) {
+        try {
+          const attached = await this.attachRunningSession(id)
+          if (attached && version === this.sessionNavigationVersion) {
+            this.sessionNavigationNeedsRestore = false
+            this.patch({ sessionOpenRevision: this.frame.sessionOpenRevision + 1 })
+            void this.refreshGoal()
+            void this.refreshSessions()
+            return true
+          }
+        } catch { /* fall through to the ordinary failure below */ }
+      }
       if (this.sessionNavigationNeedsRestore && this.frame.currentId) {
         try {
           await this.initialize({ resume_session_id: this.frame.currentId })
@@ -1223,6 +1247,19 @@ export class Store {
       // state; treat it as a move rather than resurrecting stale captures.
       return true
     }
+  }
+
+  /**
+   * Attach to a session whose turn is running on the daemon: the daemon keeps
+   * it under its own key, and an initialize with that key is an idempotent
+   * attach (the TUI's Agent View does the same). Null when it is not live.
+   */
+  private async attachRunningSession(id: string): Promise<Record<string, unknown> | null> {
+    const listed = await this.bridge.call('session.active_list', { history_limit: 0 })
+    const rows = Array.isArray(listed.sessions) ? listed.sessions as Record<string, unknown>[] : []
+    const key = str(rows.find(row => str(row.id) === id)?.key)
+    if (!key) return null
+    return this.initialize({ session_key: key })
   }
 
   /** A new task in `cwd`: this view for the current folder, a fresh view for another. */
