@@ -98,7 +98,7 @@ export function MonitorCreate({ t, onClose, onCreated }: { t: Theme; onClose: ()
   return <SettingsFormLayout t={t} title="New monitor" subtitle="Choose a source, then decide when and how to react."
     fields={visibleFields.map(id => ({ id, label: labels[id]!, value: shown[id]!, group: [0, 1, 2, 9, 10, 11].includes(id) ? 'SOURCE & MATCH' : 'REACTIONS & LIMITS' }))}
     selected={field} onSelect={setField} busy={busy ? 'Creating…' : ''} error={error}
-    editor={editable ? <textarea key={field} ref={input} focused={!busy} minHeight={1} maxHeight={2} focusedBackgroundColor={t.color.statusBg} focusedTextColor={t.color.text} onContentChange={() => {
+    editor={editable ? <textarea key={field} ref={input} focused={!busy} minHeight={1} maxHeight={2} focusedBackgroundColor={t.color.overlayBg} focusedTextColor={t.color.text} onContentChange={() => {
         const text = input.current?.plainText ?? ''
         setValues(previous => previous.map((value, index) => index === field ? text : value))
       }} /> : null}

@@ -94,7 +94,7 @@ export function ContextOverlay({ t }: { t: Theme }) {
   })
   const summary = page?.sections.find(item => item.id === page.section)
   return <box position="absolute" left={0} top={0} width="100%" height="100%" zIndex={150} backgroundColor="#000000cc" alignItems="center" justifyContent="center">
-    <Box width={size.width} height={size.height} paddingX={1} flexDirection="column" borderStyle="round" borderColor={t.color.border} backgroundColor={t.color.statusBg}>
+    <Box width={size.width} height={size.height} paddingX={1} flexDirection="column" borderStyle="round" borderColor={t.color.border} backgroundColor={t.color.overlayBg}>
       <DialogHeader t={t} title={<>Context · {loading ? 'loading…' : page?.section ?? sections[section]}</>} subtitle="Understand what the agent sees. Inspect sources and memory." />
       <Text color={t.ds.secondary} wrap="wrap">{summary ? summary.available ? `${summary.count} entries · ${page?.section === 'compaction' ? 'not in model context' : '~' + summary.estimated_tokens + ' tokens'} · ${summary.provenance}` : 'Not assembled yet' : 'Read-only inspection'}</Text>
       {error ? <Text color={t.color.warn} wrap="wrap">{error}</Text> : null}

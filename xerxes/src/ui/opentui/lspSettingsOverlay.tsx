@@ -112,7 +112,7 @@ export function LspSettingsOverlay({ t }: { t: Theme }) {
     else setEditing(true)
   })
   return <box position="absolute" left={0} top={0} width="100%" height="100%" zIndex={150} backgroundColor="#000000cc" alignItems="center" justifyContent="center">
-    <Box width={!server && !editing ? Math.min(88, size.width) : size.width} height={!server && !editing ? Math.min(24, size.height) : size.height} backgroundColor={t.color.statusBg} borderStyle="round" borderColor={t.color.border} padding={1} flexDirection="column">
+    <Box width={!server && !editing ? Math.min(88, size.width) : size.width} height={!server && !editing ? Math.min(24, size.height) : size.height} backgroundColor={t.color.overlayBg} borderStyle="round" borderColor={t.color.border} padding={1} flexDirection="column">
       <DialogHeader t={t} title="Configuration · LSP servers" subtitle="Language intelligence for your project." />
       {server || editing ? <Text wrap="wrap">{naming ? 'New server · enter name' : server ? `${creating ? 'New' : `${selected + 1}/${settings!.servers.length}`} · ${server.name}` : 'User settings'}</Text> : null}
       {!server && !editing ? <DialogEmpty t={t} title="No LSP servers configured" description="Add a language server for diagnostics and navigation." action="F2  Add server" onAction={beginNew} /> : <scrollbox ref={fieldScroll} style={{ flexGrow: 1, minHeight: 0 }} contentOptions={{ flexDirection: 'column' }}>

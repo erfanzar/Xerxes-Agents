@@ -81,9 +81,11 @@ it.each([220, 80, 40])('shows current reasoning effort beside the model and upda
     await screen.flush()
     expect(screen.captureCharFrame().replace(/\s+/g, ' ')).toContain('reasoning: low')
     expect(screen.captureCharFrame()).not.toContain('reasoning: high')
+    // Unset is the provider's default effort, never "off" (most models do not offer it).
     act(() => patchUiState(state => ({ ...state, info: { ...state.info!, reasoning_effort: undefined } })))
     await screen.flush()
-    expect(screen.captureCharFrame()).not.toContain('reasoning:')
+    expect(screen.captureCharFrame().replace(/\s+/g, ' ')).toContain('reasoning: default')
+    expect(screen.captureCharFrame()).not.toContain('reasoning: off')
   } finally { act(() => screen.renderer.destroy()) }
 })
 

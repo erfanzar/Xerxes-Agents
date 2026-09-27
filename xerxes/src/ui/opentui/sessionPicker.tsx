@@ -871,7 +871,7 @@ export function SessionPicker({ actions, currentSessionId, onCancel, t: supplied
 
   return (
     <box
-      backgroundColor={t.color.statusBg}
+      backgroundColor={t.color.overlayBg}
       flexDirection="column"
       height={height}
       left={Math.floor((terminalWidth - width) / 2)}
@@ -892,7 +892,7 @@ export function SessionPicker({ actions, currentSessionId, onCancel, t: supplied
             40-column terminal still reads the brand + name intact. */}
         <box flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
           <text fg={t.color.muted} flexShrink={0} truncate width="100%" wrapMode="none">
-            {`  ${activeSessions.length} chats · ${workingCount} working`}
+            {`  ${activeSessions.length} chat${activeSessions.length === 1 ? "" : "s"} · ${workingCount} working`}
           </text>
         </box>
         {mainSessionTitle ? (

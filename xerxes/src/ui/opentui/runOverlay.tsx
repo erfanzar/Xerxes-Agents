@@ -147,7 +147,7 @@ export function RunOverlay({ t, scheduleId, onClose }: { t: Theme; scheduleId?: 
   const selectedIndex = runs.findIndex(run => run.id === selected)
   const start = Math.max(0, selectedIndex - visibleCount + 1)
   return <box position="absolute" left={0} top={0} width="100%" height="100%" zIndex={150} backgroundColor="#000000cc" alignItems="center" justifyContent="center">
-    <Box width={!runs.length && !attentionRows.length && !nextRows.length ? Math.min(88, size.width) : size.width} height={!runs.length && !attentionRows.length && !nextRows.length ? Math.min(24, size.height) : size.height} flexDirection="column" paddingX={1} borderStyle="round" borderColor={t.color.border} backgroundColor={t.color.statusBg}>
+    <Box width={!runs.length && !attentionRows.length && !nextRows.length ? Math.min(88, size.width) : size.width} height={!runs.length && !attentionRows.length && !nextRows.length ? Math.min(24, size.height) : size.height} flexDirection="column" paddingX={1} borderStyle="round" borderColor={t.color.border} backgroundColor={t.color.overlayBg}>
       {eventsTarget ? <RunEvents key={`${eventsTarget.scope}:${eventsTarget.id}`} t={t} runId={eventsTarget.id} title={eventsTarget.title} scope={eventsTarget.scope} onClose={() => setEventsTarget(null)} /> : <>
       <DialogHeader t={t} title={<>{scheduleId ? 'Schedule history' : 'Runs'} · {workspaceScope ? 'Workspace' : 'Session'}{unread ? ' · Unread' : ''} · {runs.length} · Page {pages.length + 1}</>} subtitle="A record of your work, with results ready to review." />
       <Text color={t.ds.secondary}>K {scheduleId ? 'schedule' : kind || 'all kinds'} · S {state || 'all states'}</Text>

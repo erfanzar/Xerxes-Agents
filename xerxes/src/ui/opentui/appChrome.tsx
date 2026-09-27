@@ -322,6 +322,12 @@ export function SessionTabStrip({
  * that separates facts inside one region — it divides regions of the same
  * bar, not facts.
  */
+/** A configured model id as the header shows it: its last path segment. */
+export function configuredModelLabel(model: string): string {
+  const trimmed = model.trim()
+  return trimmed.slice(trimmed.lastIndexOf('/') + 1) || trimmed
+}
+
 export function WorkspaceFooter({
   onPanel,
   cwdLabel,
@@ -397,10 +403,12 @@ export function WorkspaceFooter({
           ) : rightLabel ? <Text color={t.ds.caption} wrap="truncate-end">{rightLabel}</Text> : null}
           {showProvider ? (
             modelConfigured ? (
-              // Configuration is not evidence of credentials or connectivity.
+              // The configured model by name. Configuration only: not evidence
+              // of credentials or connectivity. "model selected" said nothing
+              // and clipped to "mod...ected" at common widths.
               <Text wrap="truncate-end">
                 <Span color={t.ds.rule}>{`${GLYPH.sectionBreak} `}</Span>
-                <Span color={t.ds.caption}>model selected</Span>
+                <Span color={t.ds.caption}>{configuredModelLabel(providerModel ?? '')}</Span>
               </Text>
             ) : (
               <Text wrap="truncate-end">

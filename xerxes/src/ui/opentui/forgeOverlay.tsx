@@ -137,7 +137,7 @@ export function ForgeOverlay({ t, sessionId, onClose }: { t: Theme; sessionId: s
   const count = Math.max(1, Math.min(6, Math.floor(size.height / 5)))
   const start = Math.max(0, selected - count + 1)
   return <box position="absolute" width="100%" height="100%" zIndex={150} backgroundColor="#000000cc" alignItems="center" justifyContent="center">
-    <Box width={size.width} height={size.height} flexDirection="column" paddingX={1} borderStyle="round" borderColor={t.color.border} backgroundColor={t.color.statusBg}>
+    <Box width={size.width} height={size.height} flexDirection="column" paddingX={1} borderStyle="round" borderColor={t.color.border} backgroundColor={t.color.overlayBg}>
       <DialogHeader t={t} title={mode === 'browse' ? 'Forge packages' : mode === 'define' ? 'Define package' : mode === 'review' ? 'Review definition' : mode === 'parameter' ? 'Parameter' : mode === 'run' ? `Run · ${detail?.name}` : mode === 'remove' ? 'Remove package?' : 'Package output'} subtitle="Reusable text templates. No shell execution or provider call." />
       {error ? <Text color={t.color.warn} wrap="wrap">{error}</Text> : null}
       {mode === 'define' ? <RecordForm t={t} fields={definitionFields} values={definition.values} onChange={(key, value) => remember({ ...definition, values: { ...definition.values, [key]: value } })} onSubmit={() => { setMode('review'); setError('') }} onBack={() => setMode('browse')} busy={busy} submitLabel="review" />

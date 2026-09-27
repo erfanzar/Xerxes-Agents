@@ -31,7 +31,7 @@ export function RecordForm({ t, fields, values, onChange, onSubmit, onBack, busy
   return <Box flexDirection="column" flexGrow={1} minHeight={0}>
     <Text color={t.color.accent} wrap="wrap">{field.label} · {index + 1}/{fields.length}</Text>
     {field.help ? <Text color={t.ds.secondary} wrap="wrap">{field.help}</Text> : null}
-    <textarea key={field.key} ref={input} initialValue={values[field.key] ?? ''} onContentChange={() => { if (input.current) onChange(field.key, input.current.plainText) }} focused={!busy} flexGrow={1} minHeight={1} focusedBackgroundColor={t.color.statusBg} focusedTextColor={t.color.text} />
+    <textarea key={field.key} ref={input} initialValue={values[field.key] ?? ''} onContentChange={() => { if (input.current) onChange(field.key, input.current.plainText) }} focused={!busy} flexGrow={1} minHeight={1} focusedBackgroundColor={t.color.overlayBg} focusedTextColor={t.color.text} />
     <DialogFooter t={t}><Text color={t.ds.secondary} wrap="wrap">Tab / Shift+Tab fields · Ctrl+S {submitLabel} · Esc back</Text></DialogFooter>
   </Box>
 }

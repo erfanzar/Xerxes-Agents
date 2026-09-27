@@ -95,7 +95,7 @@ export function CapabilitiesOverlay({ t }: { t: Theme }) {
   const count = wide ? Math.max(1, Math.floor((size.height - 15) / 2)) : 2
   const start = Math.max(0, index - count + 1)
   return <box position="absolute" left={0} top={0} width="100%" height="100%" zIndex={180} backgroundColor="#000000cc" alignItems="center" justifyContent="center">
-    <Box width={size.width} height={size.height} paddingX={1} flexDirection="column" borderStyle="round" borderColor={t.color.border} backgroundColor={t.color.statusBg}>
+    <Box width={size.width} height={size.height} paddingX={1} flexDirection="column" borderStyle="round" borderColor={t.color.border} backgroundColor={t.color.overlayBg}>
       <DialogHeader t={t} title="Capabilities" subtitle="Discover expertise, inspect tools and configure your workspace." />
       <Box flexDirection="row" gap={2} flexShrink={0}>{['Skills', 'Tools', 'Controls'].map((label, id) => <Box key={label} onMouseDown={() => changeTab(id)}><Text bold color={tab === id ? t.color.accent : t.ds.secondary}>{label}{id < 2 ? ` ${id === 0 ? catalog?.skills.length ?? '…' : catalog?.tools.length ?? '…'}` : ''}</Text></Box>)}</Box>
       <input value={query} onInput={value => { setQuery(value); setSelected(0) }} focused placeholder="Search names, descriptions or groups…" backgroundColor={t.color.completionMetaBg} textColor={t.color.text} />

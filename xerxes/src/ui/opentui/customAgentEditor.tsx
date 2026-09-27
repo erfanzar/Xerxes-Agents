@@ -109,18 +109,18 @@ export function CustomAgentEditor({ t, onClose }: { t: Theme; onClose: () => voi
   const start = Math.max(0, selected - count + 1)
   const active = rows[selected]
   return <box position="absolute" left={0} top={0} width="100%" height="100%" zIndex={150} backgroundColor="#000000cc" alignItems="center" justifyContent="center">
-    <Box width={size.width} height={size.height} flexDirection="column" paddingX={1} borderStyle="round" borderColor={t.color.border} backgroundColor={t.color.statusBg}>
+    <Box width={size.width} height={size.height} flexDirection="column" paddingX={1} borderStyle="round" borderColor={t.color.border} backgroundColor={t.color.overlayBg}>
       <DialogHeader t={t} title={generating ? 'Generate a specialist' : draft ? `Edit agent · ${draft.id}` : 'Custom agents'} subtitle={generating ? 'Describe the job. Your current model writes the first draft.' : draft ? 'Review the instructions before saving.' : `${rows.length} specialists · this project`} />
       {error ? <Text color={t.color.warn} wrap="wrap">{error}</Text> : null}
       {generating ? <Box flexGrow={1} minHeight={0} flexDirection="column">
         <Text color={t.color.accent}>WHAT SHOULD THIS AGENT DO?</Text>
         <Text color={t.ds.secondary} wrap="wrap">Example: A JAX reviewer who finds sharding mistakes, checks shapes, and proposes focused regression tests.</Text>
-        <textarea key="description" ref={input} flexGrow={1} minHeight={1} focused={!busy} initialValue={description} focusedBackgroundColor={t.color.statusBg} focusedTextColor={t.color.text} />
+        <textarea key="description" ref={input} flexGrow={1} minHeight={1} focused={!busy} initialValue={description} focusedBackgroundColor={t.color.overlayBg} focusedTextColor={t.color.text} />
         <Text color={t.ds.secondary} wrap="wrap">Generated instructions open for review. Files are saved only with Ctrl+S.</Text>
-      </Box> : draft ? <textarea key={draft.id} ref={input} flexGrow={1} minHeight={1} focused={!busy} initialValue={draft.content} focusedBackgroundColor={t.color.statusBg} focusedTextColor={t.color.text} /> : loading ? <Box flexGrow={1}><Text color={t.ds.secondary}>Loading specialists…</Text></Box> : rows.length ? <Box flexDirection={wide ? 'row' : 'column'} flexGrow={1} minHeight={0}>
+      </Box> : draft ? <textarea key={draft.id} ref={input} flexGrow={1} minHeight={1} focused={!busy} initialValue={draft.content} focusedBackgroundColor={t.color.overlayBg} focusedTextColor={t.color.text} /> : loading ? <Box flexGrow={1}><Text color={t.ds.secondary}>Loading specialists…</Text></Box> : rows.length ? <Box flexDirection={wide ? 'row' : 'column'} flexGrow={1} minHeight={0}>
         <Box width={wide ? 34 : '100%'} flexDirection="column" paddingRight={wide ? 2 : 0} minHeight={0}>
           <Text color={t.ds.secondary}>SPECIALISTS · {selected + 1}/{rows.length}</Text>
-          {rows.slice(start, start + count).map((row, index) => <Box key={row.id} backgroundColor={start + index === selected ? t.color.completionCurrentBg : t.color.statusBg} onMouseDown={() => setSelected(start + index)}>
+          {rows.slice(start, start + count).map((row, index) => <Box key={row.id} backgroundColor={start + index === selected ? t.color.completionCurrentBg : t.color.overlayBg} onMouseDown={() => setSelected(start + index)}>
             <Text color={start + index === selected ? t.color.accent : t.color.text} wrap="truncate-end">{start + index === selected ? '▸ ' : '  '}{row.id}{row.error ? ' !' : ''}</Text>
           </Box>)}
         </Box>

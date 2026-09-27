@@ -72,7 +72,7 @@ export function WorkspaceRecovery({ t, width, height, close }: { t: Theme; width
     if (key.name === 'left' || key.name === 'right') fileScroll.current?.scrollBy({ x: key.name === 'right' ? 12 : -12, y: 0 })
   })
   const count = Math.max(1, Math.floor((height - 12) / 2)), start = Math.max(0, selected - count + 1)
-  return <Box width={width} height={height} paddingX={1} flexDirection="column" borderStyle="round" borderColor={t.color.border} backgroundColor={t.color.statusBg}>
+  return <Box width={width} height={height} paddingX={1} flexDirection="column" borderStyle="round" borderColor={t.color.border} backgroundColor={t.color.overlayBg}>
     <DialogHeader t={t} title={<> Integration recovery · Page {pages.length + 1}</>} />
     <Text color={t.ds.secondary} wrap="wrap">Restore interrupted applies. Completed applies cannot be undone here.</Text>
     {message ? <Text color={t.color.warn} wrap="wrap">{message}</Text> : null}

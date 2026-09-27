@@ -143,7 +143,7 @@ export function AgentSettingsOverlay({ t }: { t: Theme }) {
     if (event.name === 'tab') setField(value => (value + (event.shift ? 8 : 1)) % 9)
     else save()
   })
-  return <box position="absolute" left={0} top={0} width="100%" height="100%" zIndex={150} backgroundColor="#000000cc" alignItems="center" justifyContent="center"><Box width={size.width} height={size.height} backgroundColor={t.color.statusBg} borderStyle="round" borderColor={t.color.border} padding={1} flexDirection="column">
+  return <box position="absolute" left={0} top={0} width="100%" height="100%" zIndex={150} backgroundColor="#000000cc" alignItems="center" justifyContent="center"><Box width={size.width} height={size.height} backgroundColor={t.color.overlayBg} borderStyle="round" borderColor={t.color.border} padding={1} flexDirection="column">
     {noteTarget ? <RoutingNoteEditor t={t} {...noteTarget} onClose={() => setNoteTarget(null)} /> : <>
     <DialogHeader t={t} title="Configuration · Agent modes" subtitle="Match each task to the right amount of intelligence." />
     <Box flexDirection="row" gap={1} flexShrink={0}>{tiers.map((tier, i) => <Box key={tier} paddingX={1} backgroundColor={i === row ? t.color.completionCurrentBg : undefined}><Text bold={i === row} color={i === row ? t.color.accent : t.ds.secondary}>{i === row ? `[${tier.toUpperCase()}]` : tier}</Text></Box>)}</Box>

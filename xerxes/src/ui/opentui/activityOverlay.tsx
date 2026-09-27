@@ -74,7 +74,7 @@ export function ActivityOverlay({ sessionId, t }: { sessionId: string | null; t:
   const count = Math.max(1, Math.floor((size.height - 13) / 3))
   const start = Math.max(0, index - count + 1)
   return <box position="absolute" left={0} top={0} width="100%" height="100%" zIndex={150} backgroundColor="#000000cc" alignItems="center" justifyContent="center">
-    <Box width={size.width} height={size.height} paddingX={2} borderStyle="round" borderColor={t.color.border} backgroundColor={t.color.statusBg} flexDirection="column">
+    <Box width={size.width} height={size.height} paddingX={2} borderStyle="round" borderColor={t.color.border} backgroundColor={t.color.overlayBg} flexDirection="column">
       <DialogHeader t={t} title="Background activity" subtitle="Shells and watches in this chat · schedules in this workspace" />
       <Box flexDirection="row" gap={2} flexShrink={0}>{filters.map((name,i) => <Box key={name} onClick={() => setFilter(i)}><Text color={filter === i ? t.color.brandGold : t.ds.secondary}>{name === 'all' ? 'All activity' : name + 's'}</Text></Box>)}</Box>
       <Text color={t.ds.secondary}>{rows.filter(isActive).length} active · {rows.filter(row => row.state === 'scheduled').length} scheduled{omitted ? ` · ${omitted} older entries omitted` : ''}</Text>

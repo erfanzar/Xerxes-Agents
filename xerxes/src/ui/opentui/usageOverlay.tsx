@@ -84,7 +84,7 @@ export function UsageOverlay({ t, initialRefresh = false }: { t: Theme; initialR
   const inner = Math.max(30, size.width - 4)
   const status = loading && !report ? 'checking your plans…' : report ? `updated ${ago(report.fetchedAt, now)}${loading ? ' · refreshing…' : ''}` : ''
   return <box position="absolute" left={0} top={0} width="100%" height="100%" zIndex={150} backgroundColor="#000000cc" alignItems="center" justifyContent="center">
-    <Box width={size.width} height={size.height} paddingX={1} flexDirection="column" borderStyle="round" borderColor={t.color.border} backgroundColor={t.color.statusBg}>
+    <Box width={size.width} height={size.height} paddingX={1} flexDirection="column" borderStyle="round" borderColor={t.color.border} backgroundColor={t.color.overlayBg}>
       <DialogHeader t={t} title={<>Usage{status ? <span fg={t.ds.meta}>{` · ${status}`}</span> : null}</>} subtitle="This session, and the limits on every provider you have imported." />
       {error ? <Text color={t.color.warn} wrap="wrap">{error}</Text> : null}
       <scrollbox ref={scroll} style={{ flexGrow: 1, flexShrink: 1, minHeight: 0 }} contentOptions={{ flexDirection: 'column' }}>

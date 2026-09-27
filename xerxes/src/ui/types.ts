@@ -157,6 +157,8 @@ export interface Msg {
   info?: SessionInfo
   kind?: 'config' | 'diff' | 'intro' | 'panel' | 'slash' | 'trail' | 'outcome'
   outcome?: TurnOutcomeReason
+  /** Wall-clock length of the turn an outcome row closes, when it was watched live. */
+  durationMs?: number
   panelData?: PanelData
   role: Role
   subagents?: SubagentProgress[]

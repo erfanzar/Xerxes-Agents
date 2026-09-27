@@ -118,7 +118,7 @@ export function ScheduleForm({ t, initial, onClose, onSaved, followup = false, t
     fields={labels.map((label, id) => ({ id, label, value: values[id]!, group: id < 4 ? '01  TASK & TIMING' : id < 9 ? '02  EXECUTION' : id < 11 ? '03  DELIVERY' : '04  BUDGET & LIFETIME' }))}
     selected={field} onSelect={setField} busy={busy ? 'Saving…' : ''} error={error}
     compactHelp={field === 9 ? <Text color={t.ds.meta} wrap="wrap">↑/↓ {destinations.map(value => value.name).join(' · ') || destinationError || 'none'}</Text> : <Text color={t.ds.meta} wrap="wrap">{scheduleDescription(cron, timezone, intervalMode ? Number(interval) : undefined, once ? at : undefined)}</Text>}
-    editor={editable ? <textarea key={field} ref={input} focused={!busy} placeholder={field === 0 ? 'Describe the task to run…' : 'Enter a value…'} minHeight={field === 0 ? 3 : 1} maxHeight={3} focusedBackgroundColor={t.color.statusBg} focusedTextColor={t.color.text} onContentChange={() => {
+    editor={editable ? <textarea key={field} ref={input} focused={!busy} placeholder={field === 0 ? 'Describe the task to run…' : 'Enter a value…'} minHeight={field === 0 ? 3 : 1} maxHeight={3} focusedBackgroundColor={t.color.overlayBg} focusedTextColor={t.color.text} onContentChange={() => {
         const value = input.current?.plainText ?? ''
         if (field === 16) setTotalTokens(value)
         else if (field === 15) setStopCondition(value)

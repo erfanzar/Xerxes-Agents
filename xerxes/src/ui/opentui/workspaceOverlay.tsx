@@ -109,7 +109,7 @@ export function WorkspaceOverlay({ t }: { t: Theme }) {
   const start = Math.max(0, index - count + 1)
   if (recovery) return <box position="absolute" left={0} top={0} width="100%" height="100%" zIndex={150} backgroundColor="#000000cc" alignItems="center" justifyContent="center"><WorkspaceRecovery t={t} width={size.width} height={size.height} close={() => { setRecovery(false); setRefresh(value => value + 1) }} /></box>
   return <box position="absolute" left={0} top={0} width="100%" height="100%" zIndex={150} backgroundColor="#000000cc" alignItems="center" justifyContent="center">
-    <Box width={!rows.length && !confirming ? Math.min(88, size.width) : size.width} height={!rows.length && !confirming ? Math.min(24, size.height) : size.height} paddingX={1} flexDirection="column" borderStyle="round" borderColor={t.color.border} backgroundColor={t.color.statusBg}>
+    <Box width={!rows.length && !confirming ? Math.min(88, size.width) : size.width} height={!rows.length && !confirming ? Math.min(24, size.height) : size.height} paddingX={1} flexDirection="column" borderStyle="round" borderColor={t.color.border} backgroundColor={t.color.overlayBg}>
       <DialogHeader t={t} title={<>Agent workspaces · Page {pages.length + 1}</>} subtitle="Review isolated changes before bringing them into your project." />
       <Box onMouseDown={() => { if (!applying.current && !confirming) setRecovery(true) }}><Text color={t.ds.secondary}>Review changes · I recovery</Text></Box>
       {integration ? <Text color={t.color.warn} wrap="wrap">{integration}</Text> : null}

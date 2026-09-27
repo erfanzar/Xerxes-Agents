@@ -6,7 +6,7 @@ import { createGatewayEventHandler } from '../app/createGatewayEventHandler.js'
 import type { GatewayEventHandlerContext } from '../app/interfaces.js'
 import { getOverlayState, patchOverlayState, resetOverlayState } from '../app/overlayStore.js'
 import { turnController } from '../app/turnController.js'
-import { getTurnState } from '../app/turnStore.js'
+import { beginTurnPulse, endTurnPulse, getTurnState } from '../app/turnStore.js'
 import { getUiState, patchUiState, resetUiState } from '../app/uiStore.js'
 import type { GatewayClient } from '../gatewayClient.js'
 import type { GatewayEvent } from '../gatewayTypes.js'
@@ -71,6 +71,31 @@ const liveClarify = () =>
   })
 
 describe('createGatewayEventHandler', () => {
+  it('stamps a live turn’s wall-clock length on its outcome row, not the tools’ total', () => {
+    const { appended, handler } = buildHarness()
+    beginTurnPulse(Date.now() - 90_000)
+    handler({ type: 'transcript.append', payload: { outcome: 'completed' } } as unknown as GatewayEvent)
+    endTurnPulse()
+    expect(appended.find(message => message.kind === 'outcome')?.durationMs).toBeGreaterThanOrEqual(90_000)
+    // A replayed outcome (no live turn) carries no invented duration.
+    handler({ type: 'transcript.append', payload: { outcome: 'completed' } } as unknown as GatewayEvent)
+    expect(appended.at(-1)?.durationMs).toBeUndefined()
+  })
+  it('keeps an idle daemon log line out of the turn, so the home screen stays up', () => {
+    // The Claude Code update check logs to the daemon's stderr at startup;
+    // as turn activity it counted as a live turn and hid the welcome.
+    turnController.fullReset()
+    resetUiState()
+    const { handler } = buildHarness()
+    patchUiState({ busy: false })
+    handler({ type: 'gateway.stderr', payload: { line: 'Claude Code updated: Claude Code is up to date' } } as GatewayEvent)
+    expect(getTurnState().activity).toHaveLength(0)
+    patchUiState({ busy: true })
+    handler({ type: 'gateway.stderr', payload: { line: 'provider retry 1/3' } } as GatewayEvent)
+    expect(getTurnState().activity).toHaveLength(1)
+    patchUiState({ busy: false })
+    turnController.fullReset()
+  })
   it('keeps connection retry visible across attempts until provider output resumes', () => {
     const { handler } = buildHarness()
     const send = (payload: Record<string, unknown>) => {
@@ -301,7 +326,7 @@ describe('createGatewayEventHandler', () => {
     expect(write).not.toHaveBeenCalled()
   })
 
-  it('emits the bare interrupted note when a confirmed interrupt has nothing to archive', () => {
+  it('records a confirmed interrupt with nothing to archive once, as its outcome row', () => {
     const { appended, handler, sys } = buildHarness()
     const request = vi.fn().mockResolvedValue({ ok: true })
 
@@ -310,7 +335,8 @@ describe('createGatewayEventHandler', () => {
     handler({ payload: { interrupted: true }, type: 'message.complete' } as GatewayEvent)
 
     expect(appended).toEqual([{ kind: 'outcome', role: 'assistant', text: '', outcome: 'aborted' }])
-    expect(sys).toHaveBeenCalledWith('interrupted')
+    // The outcome row says "interrupted"; a system line repeating it was noise.
+    expect(sys).not.toHaveBeenCalledWith('interrupted')
   })
 
   it('renders the real final messages when a natural completion races the Esc interrupt', () => {

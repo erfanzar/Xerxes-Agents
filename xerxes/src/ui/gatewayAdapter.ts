@@ -144,7 +144,7 @@ export function sessionInfoFromInit(payload: Record<string, unknown>): SessionIn
     mode: str(payload.mode, 'code'),
     permission_mode: permissionMode(payload.permission_mode),
     profile_name: optionalStr(payload.profile_name) ?? optionalStr(payload.agent_name),
-    reasoning_effort: str(payload.reasoning_effort, 'off'),
+    reasoning_effort: str(payload.reasoning_effort),
     session_id: optionalStr(payload.session_id),
     skillDescriptions: asStringRecord(payload.skill_descriptions),
     skills: skillList.length ? { skills: skillList } : {},

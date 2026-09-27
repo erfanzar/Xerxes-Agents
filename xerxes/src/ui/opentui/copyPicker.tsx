@@ -145,7 +145,7 @@ export function CopyPicker({ copyFn, onCancel, onCopied, t: suppliedTheme }: Cop
       zIndex={200}
     >
       <box
-        backgroundColor={t.color.statusBg}
+        backgroundColor={t.color.overlayBg}
         flexDirection="column"
         flexShrink={0}
         height={panelHeight}

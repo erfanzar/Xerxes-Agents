@@ -453,6 +453,12 @@ export function useMainApp(gw: GatewayClient) {
         tally = 0
         elapsed = 0
       }
+
+      // The receipt's time is the turn's wall clock when it was watched live;
+      // the sum of tool durations (0.3s for a 90s turn) is the fallback.
+      if (row.msg.kind === 'outcome' && typeof row.msg.durationMs === 'number') {
+        row.turnSeconds = row.msg.durationMs / 1000
+      }
     }
 
     return rows

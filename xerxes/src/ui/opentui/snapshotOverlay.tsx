@@ -125,7 +125,7 @@ export function SnapshotOverlay({ t }: { t: Theme }) {
   const start = Math.max(0, index - count + 1)
   const codeWidth = Math.max(1, size.width - (wide ? 46 : 8), ...parsed.lines.map(line => Bun.stringWidth(line.text) + 18))
   return <box position="absolute" left={0} top={0} width="100%" height="100%" zIndex={150} backgroundColor="#000000cc" alignItems="center" justifyContent="center">
-    <Box width={!rows.length && !confirm && !recovery.length ? Math.min(88, size.width) : size.width} height={!rows.length && !confirm && !recovery.length ? Math.min(24, size.height) : size.height} paddingX={1} flexDirection="column" borderStyle="round" borderColor={t.color.border} backgroundColor={t.color.statusBg}>
+    <Box width={!rows.length && !confirm && !recovery.length ? Math.min(88, size.width) : size.width} height={!rows.length && !confirm && !recovery.length ? Math.min(24, size.height) : size.height} paddingX={1} flexDirection="column" borderStyle="round" borderColor={t.color.border} backgroundColor={t.color.overlayBg}>
       <DialogHeader t={t} title={<>Snapshot timeline · {rows.length}</>} subtitle="Browse saved file states and preview a restore." />
       <Text color={t.ds.secondary} wrap="truncate-end">Workspace files · conversation unchanged</Text>
       {error ? <Text color={t.color.warn} wrap="truncate-end">{error}</Text> : null}

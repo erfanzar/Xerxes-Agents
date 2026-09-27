@@ -37,7 +37,13 @@ import { catalogFromSessionSkills, mergeSkillCatalog, skillInfoFromCatalog } fro
 import { reconcileSpawnHistorySubagent } from './spawnHistoryStore.js'
 import { turnController } from './turnController.js'
 import { getUiState, patchUiState } from './uiStore.js'
-import { patchTurnState } from './turnStore.js'
+import { getTurnPulse, patchTurnState } from './turnStore.js'
+
+/** The live turn's wall-clock length so far; undefined when none was watched. */
+const liveTurnDuration = (): { durationMs?: number } => {
+  const started = getTurnPulse().startedAt
+  return started > 0 ? { durationMs: Math.max(0, Date.now() - started) } : {}
+}
 
 const NO_PROVIDER_RE = /\bNo (?:LLM|inference) provider configured\b/i
 
@@ -689,6 +695,12 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
 
         return
       case 'gateway.stderr': {
+        // A daemon log line is turn activity only while a turn runs. Idle, it
+        // stays in the client's stderr ring (diagnostics): pushed into the turn
+        // it counted as a live turn and hid the home screen after every daemon
+        // start (the Claude Code update check logs there).
+        if (!getUiState().busy) return
+
         const line = String(ev.payload.line).slice(0, 120)
 
         turnController.pushActivity(line, 'info')
@@ -1076,7 +1088,7 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
       case 'transcript.append': {
         const outcome = turnOutcomeReason(ev.payload?.outcome)
         if (outcome) {
-          appendMessage({ kind: 'outcome', role: 'assistant', text: '', outcome })
+          appendMessage({ kind: 'outcome', role: 'assistant', text: '', outcome, ...liveTurnDuration() })
           return
         }
         if (ev.payload?.text?.trim()) {
@@ -1100,11 +1112,9 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
           // The daemon confirmed the interruption (turn_end cancelled). Persist
           // the archived turn ending — but no completion bell and no 'ready'
           // flip; the controller already staged 'interrupted' + its cooldown.
+          // The outcome row below already reads "interrupted"; a system line
+          // saying it again made three copies with the status notice.
           finalMessages.forEach(appendMessage)
-
-          if (!finalMessages.length) {
-            sys('interrupted')
-          }
         } else {
           // The daemon marks a cancel that fired before any turn_begin or
           // assistant content existed (`unstarted`, from a setup abort or a
@@ -1133,7 +1143,7 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
         }
 
         const outcome = turnOutcomeReason(ev.payload?.outcome) ?? (wasInterrupted ? 'aborted' : undefined)
-        if (!ev.payload?.unstarted && outcome) appendMessage({ kind: 'outcome', role: 'assistant', text: '', outcome })
+        if (!ev.payload?.unstarted && outcome) appendMessage({ kind: 'outcome', role: 'assistant', text: '', outcome, ...liveTurnDuration() })
 
         if (ev.payload?.usage) {
           patchUiState(state => ({ ...state, usage: { ...state.usage, ...ev.payload!.usage } }))

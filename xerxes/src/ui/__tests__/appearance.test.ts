@@ -19,6 +19,10 @@ describe('local TUI appearance', () => {
       expect(transparent.ds.screen).toBe('transparent')
       expect(transparent.color.text).toBe(chrome.color.text)
       expect(transparent.color.completionBg).toBe(chrome.color.completionBg)
+      // Floating panels (Agent View, settings) stay opaque over content; a
+      // transparent ground let the screen under them show through.
+      expect(transparent.color.overlayBg).toBe(chrome.color.statusBg)
+      expect(transparent.color.overlayBg).not.toBe('transparent')
       expect(transparent.color.selectionBg).toBe(chrome.color.selectionBg)
       expect(transparent.color.diffAddedBg).toBe(chrome.color.diffAddedBg)
       expect(themeForAppearance(chrome, 'chrome')).toBe(chrome)

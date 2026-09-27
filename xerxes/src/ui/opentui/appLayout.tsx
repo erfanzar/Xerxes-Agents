@@ -630,7 +630,7 @@ function ProviderPromptOverlay({ actions }: Pick<AppLayoutProps, 'actions'>) {
       zIndex={190}
     >
       <box
-        backgroundColor={t.color.statusBg}
+        backgroundColor={t.color.overlayBg}
         flexDirection="column"
         flexShrink={0}
         paddingBottom={2}
@@ -655,7 +655,7 @@ function ProviderPromptOverlay({ actions }: Pick<AppLayoutProps, 'actions'>) {
         {typing ? (
           <>
             <box
-              backgroundColor={t.color.statusBg}
+              backgroundColor={t.color.overlayBg}
               flexDirection="row"
               flexShrink={0}
               marginTop={1}
@@ -674,7 +674,7 @@ function ProviderPromptOverlay({ actions }: Pick<AppLayoutProps, 'actions'>) {
               ) : (
                 <textarea
                   focused
-                  focusedBackgroundColor={t.color.statusBg}
+                  focusedBackgroundColor={t.color.overlayBg}
                   focusedTextColor={t.color.text}
                   keyBindings={TEXTAREA_KEY_BINDINGS}
                   maxHeight={5}
@@ -1309,8 +1309,9 @@ export function Composer({ composer }: Pick<AppLayoutProps, 'composer'>) {
             <Box onMouseDown={() => patchOverlayState({ modelPicker: true })}>
               <Text color={t.ds.meta}>{modelLabel}</Text>
             </Box>
-              {ui.info?.reasoning_effort?.trim() ? (
-                <Box onMouseDown={() => patchOverlayState({ reasoningPicker: true })}><Text color={t.ds.meta}>{' · reasoning: ' + ui.info.reasoning_effort.trim()}</Text></Box>
+              {ui.info ? (
+                // No chosen effort is the provider's default, not "off".
+                <Box onMouseDown={() => patchOverlayState({ reasoningPicker: true })}><Text color={t.ds.meta}>{' · reasoning: ' + (ui.info.reasoning_effort?.trim() || 'default')}</Text></Box>
               ) : null}
             <Text wrap="wrap">
               {narrow ? null : (
@@ -1388,7 +1389,7 @@ function PagerOverlay({ composer }: Pick<AppLayoutProps, 'composer'>) {
         zIndex={150}
       >
         <Box
-          backgroundColor={t.color.statusBg}
+          backgroundColor={t.color.overlayBg}
           flexDirection="column"
           padding={2}
           width={overlayPanelWidth(composer.cols, OVERLAY_PANEL_SPECS.pager)}
@@ -1614,13 +1615,16 @@ export function StartupWelcome({
               </text>
             ))}
           </Box>
-        ) : null}
+        ) : (
+          // Too small for the mark: the wordmark takes its place, above the
+          // question — not wedged between the tagline and START WITH.
+          <Text color={t.color.brandGold}>{DERAFSH_KAVIANI_GLYPH + ' ' + t.brand.name}</Text>
+        )}
         <Box flexDirection="column" flexShrink={0} minWidth={0}>
           <Text bold color={t.ds.title}>What are we working on?</Text>
           <Text color={t.ds.secondary} wrap="wrap">{t.brand.welcome}</Text>
         </Box>
       </Box>
-      {!showMark ? <Text color={t.color.brandGold}>{DERAFSH_KAVIANI_GLYPH + ' ' + t.brand.name}</Text> : null}
       <Text color={t.ds.caption}>START WITH</Text>
       <Box flexDirection="column" flexShrink={0} paddingTop={rows >= 40 ? 1 : 0}>
         {chips.map((chip, index) => (
@@ -1753,7 +1757,7 @@ function InfoOverlay({ kind }: { kind: 'pluginsHub' | 'skillsHub' }) {
     ['Manage', '/plugins enable <name> · disable <name>', 'Choose which installed plugins are available.'],
   ]
   return <box alignItems="center" backgroundColor="#000000cc" height="100%" justifyContent="center" left={0} position="absolute" top={0} width="100%" zIndex={180}>
-    <Box backgroundColor={t.color.statusBg} borderStyle="round" borderColor={t.color.border} flexDirection="column" paddingX={2} width={overlayPanelWidth(width, OVERLAY_PANEL_SPECS.info)} height={Math.min(height - 2, skills ? 31 : 37)}>
+    <Box backgroundColor={t.color.overlayBg} borderStyle="round" borderColor={t.color.border} flexDirection="column" paddingX={2} width={overlayPanelWidth(width, OVERLAY_PANEL_SPECS.info)} height={Math.min(height - 2, skills ? 31 : 37)}>
       <DialogHeader t={t} title={title} subtitle={skills ? 'Reusable expertise for the way you work.' : 'Extend your agent with tools of your own.'} />
       <scrollbox ref={guideScroll} flexGrow={1} minHeight={0} contentOptions={{ flexDirection: 'column' }}>
         {cards.map(([label, command, description]) => <Box key={label} flexDirection="column" flexShrink={0} padding={1} marginBottom={1} backgroundColor={t.color.completionMetaBg}>
@@ -1950,7 +1954,9 @@ export function AppLayout({
           {showStartupWelcome ? (
             <>
               <Box key="welcome" flexDirection="column" flexGrow={1} minHeight={0}>
-                <SessionHeader busy={false} sessionTitle="New session" t={t} />
+                {/* Same context and connection facts as the session header: the
+                    home screen used to say "ctx unknown" for a known model. */}
+                <SessionHeader busy={false} contextMax={usageCounts(ui.usage).max} contextUsed={usageCounts(ui.usage).used} disconnected={ui.disconnected} sessionTitle="New session" t={t} />
                 <Box flexDirection="column" flexGrow={1} minHeight={0}
                   paddingLeft={Math.max(2, Math.ceil((composer.cols - welcomeColumnWidth(composer.cols)) / 2))}
                   paddingRight={Math.max(2, Math.floor((composer.cols - welcomeColumnWidth(composer.cols)) / 2))}>

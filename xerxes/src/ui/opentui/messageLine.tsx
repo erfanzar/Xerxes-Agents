@@ -167,11 +167,19 @@ function RailGutter({ rail, t }: { rail?: TurnRail; t: Theme }) {
  * inventing them would make the receipt a decoration. So the row states what
  * it can and stays the same shape for the day the other two land.
  */
+/** 4.2 → "4.2s", 83 → "1m 23s", 7500 → "2h 5m": never thousands of seconds. */
+export function ledgerDuration(seconds: number): string {
+  if (seconds < 60) return `${seconds.toFixed(1)}s`
+  const whole = Math.round(seconds)
+  if (whole < 3600) return `${Math.floor(whole / 60)}m ${whole % 60}s`
+  return `${Math.floor(whole / 3600)}h ${Math.floor((whole % 3600) / 60)}m`
+}
+
 function TurnLedger({ seconds, tools, t, outcome }: { seconds: number; tools: number; t: Theme; outcome?: TurnOutcomeReason }) {
   const facts = [
     turnOutcomeLabel(outcome),
     tools > 0 ? `${tools} tool${tools === 1 ? '' : 's'}` : '',
-    seconds >= 0.05 ? `${seconds.toFixed(1)}s` : ''
+    seconds >= 0.05 ? ledgerDuration(seconds) : ''
   ].filter(Boolean)
 
   return (

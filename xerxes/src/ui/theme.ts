@@ -289,6 +289,13 @@ export interface ThemeColors {
   sessionBorder: string
 
   statusBg: string
+  /**
+   * Ground of floating panels (Agent View, settings, pickers). Equal to
+   * statusBg, except in transparent appearance: the canvas lets the terminal
+   * through, but a panel over content must stay opaque or the content under
+   * it shows through.
+   */
+  overlayBg: string
   statusFg: string
   statusGood: string
   statusWarn: string
@@ -562,6 +569,7 @@ function nocturneTheme(ds: NocturnePalette): Theme {
       sessionBorder: ds.hairline,
 
       statusBg: ds.screen,
+      overlayBg: ds.screen,
       statusFg: ds.title,
       statusGood: ds.done,
       statusWarn: ds.needsInput,
@@ -891,6 +899,7 @@ export function themeForMode(theme: Theme, mode?: string): Theme {
       completionMetaCurrentBg: activeSurface,
       sessionBorder: border,
       statusBg: ds.screen,
+      overlayBg: ds.screen,
       selectionBg: selection,
       shellDollar: accent
     }
@@ -967,6 +976,7 @@ export function fromSkin(
         sessionBorder: muted,
 
         statusBg: d.color.statusBg,
+        overlayBg: d.color.overlayBg,
         statusFg: d.color.statusFg,
         statusGood: r('diff_add') ?? d.color.statusGood,
         statusWarn: warn,
@@ -1021,6 +1031,7 @@ export function themeForAppearance(theme: Theme, appearance: 'chrome' | 'transpa
   return {
     ...theme,
     ds: { ...theme.ds, backdrop: 'transparent', sunken: 'transparent', screen: 'transparent', chrome: 'transparent', card: 'transparent', workingCardBg: 'transparent' },
+    // Floating panels keep the opaque ground (overlayBg is untouched).
     color: { ...theme.color, statusBg: 'transparent', userBandBg: 'transparent' }
   }
 }

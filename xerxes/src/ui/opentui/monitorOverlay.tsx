@@ -92,7 +92,7 @@ export function MonitorOverlay({ t }: { t: Theme }) {
   const count = wide ? Math.max(1, Math.floor((size.height - 13) / 2)) : 3
   const start = Math.max(0, rows.findIndex(row => row.id === selected) - count + 1)
   return <box position="absolute" left={0} top={0} width="100%" height="100%" zIndex={150} backgroundColor="#000000cc" alignItems="center" justifyContent="center">
-    <Box width={!rows.length && !creating && !editing ? Math.min(88, size.width) : size.width} height={!rows.length && !creating && !editing ? Math.min(24, size.height) : size.height} flexDirection="column" paddingX={1} borderStyle="round" borderColor={t.color.border} backgroundColor={t.color.statusBg}>
+    <Box width={!rows.length && !creating && !editing ? Math.min(88, size.width) : size.width} height={!rows.length && !creating && !editing ? Math.min(24, size.height) : size.height} flexDirection="column" paddingX={1} borderStyle="round" borderColor={t.color.border} backgroundColor={t.color.overlayBg}>
       {editing ? <MonitorPolicy t={t} monitor={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); setRefresh(value => value + 1) }} /> : creating ? <MonitorCreate t={t} onClose={() => setCreating(false)} onCreated={id => { setCreating(false); setSelected(id); setRefresh(value => value + 1) }} /> : <>
       <DialogHeader t={t} title={<>Monitors · {rows.filter(row => row.state === 'watching').length} watching</>} subtitle="Watch for changes. Keep the important events in view." />
       {error ? <Text color={t.color.warn} wrap="wrap">{error}</Text> : null}

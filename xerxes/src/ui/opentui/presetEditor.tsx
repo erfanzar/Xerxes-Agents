@@ -113,11 +113,11 @@ export function PresetEditor({ t, sessionId, onClose }: { t: Theme; sessionId: s
   const count = Math.max(1, wide ? size.height - 12 : 3)
   const start = Math.max(0, selected - count + 1)
   return <box position="absolute" width="100%" height="100%" zIndex={150} backgroundColor="#000000cc" alignItems="center" justifyContent="center">
-    <Box width={size.width} height={size.height} flexDirection="column" paddingX={1} borderStyle="round" borderColor={t.color.border} backgroundColor={t.color.statusBg}>
+    <Box width={size.width} height={size.height} flexDirection="column" paddingX={1} borderStyle="round" borderColor={t.color.border} backgroundColor={t.color.overlayBg}>
       <DialogHeader t={t} title={editing ? `Edit composition · ${active?.id}` : 'Agent compositions'} subtitle="Complete preset instructions, tools and configuration." />
       {error ? <Text color={t.color.warn} wrap="wrap">{error}</Text> : null}
       {notice ? <Text color={t.color.accent} wrap="wrap">{notice}</Text> : null}
-      {editing ? <textarea key={draftKey} ref={input} initialValue={drafts.get(draftKey)?.content ?? content} onContentChange={() => { const draft = drafts.get(draftKey); if (draft && input.current) draft.content = input.current.plainText }} focused={!busy} flexGrow={1} minHeight={1} focusedBackgroundColor={t.color.statusBg} focusedTextColor={t.color.text} /> : !rows.length ? <DialogEmpty t={t} title={busy ? 'Loading compositions…' : 'No compositions available.'} description="Press R to reload." symbol="≡" /> : <Box flexDirection={wide ? 'row' : 'column'} flexGrow={1} minHeight={0}>
+      {editing ? <textarea key={draftKey} ref={input} initialValue={drafts.get(draftKey)?.content ?? content} onContentChange={() => { const draft = drafts.get(draftKey); if (draft && input.current) draft.content = input.current.plainText }} focused={!busy} flexGrow={1} minHeight={1} focusedBackgroundColor={t.color.overlayBg} focusedTextColor={t.color.text} /> : !rows.length ? <DialogEmpty t={t} title={busy ? 'Loading compositions…' : 'No compositions available.'} description="Press R to reload." symbol="≡" /> : <Box flexDirection={wide ? 'row' : 'column'} flexGrow={1} minHeight={0}>
         <Box width={wide ? 30 : '100%'} flexDirection="column" flexShrink={0} paddingRight={1}>
           {rows.slice(start, start + count).map((row, i) => <Box key={row.id} backgroundColor={selected === start + i ? t.ds.selected : undefined} onMouseDown={() => { if (!busy) setSelected(start + i) }}><Text color={t.color.text} wrap="truncate-end">{row.name}{row.broken ? ' !' : ''}</Text></Box>)}
         </Box>
