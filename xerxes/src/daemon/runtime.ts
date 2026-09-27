@@ -1574,8 +1574,10 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
       ...(inventory.activeSubagents === undefined
         ? {}
         : { active_subagents: inventoryCount(inventory.activeSubagents) }),
+      // Unset means no effort is sent and the provider's default applies —
+      // not "off", which most models do not even offer.
       reasoning_effort:
-        stringValue(this.runtimeSettings.reasoning_effort) || "off",
+        stringValue(this.runtimeSettings.reasoning_effort),
       pid: process.pid,
       daemon_protocol: DAEMON_PROTOCOL_VERSION,
       daemon_build_id: this.options.buildId ?? BUN_DAEMON_BUILD_ID,

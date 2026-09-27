@@ -1,6 +1,27 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+/**
+ * The most recent execution in this session that can serve as evidence —
+ * optionally of one tool. Models never see provider tool-call ids (they are
+ * not in the result text), so asking for "the exact id" left every goal with
+ * criteria impossible to complete; the host resolves the call instead, so the
+ * evidence is still a real, successful execution and never model-supplied.
+ */
+export function findLatestGoalEvidenceExecution(records: readonly unknown[], toolName?: string): unknown {
+  const wanted = toolName?.trim().toLowerCase()
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const record = records[index]
+    if (!record || typeof record !== 'object' || Array.isArray(record)) continue
+    const row = record as Record<string, unknown>
+    const id = row.toolCallId ?? row.tool_call_id
+    if (typeof id !== 'string' || !id) continue
+    if (wanted && String(row.name ?? '').toLowerCase() !== wanted) continue
+    if (successfulGoalEvidence(row, id)) return row
+  }
+  return undefined
+}
+
 /** Checks execution outcome, not whether the model's relevance claim is true. */
 export function findGoalEvidenceExecution(records: readonly unknown[], toolCallId: string): unknown {
   const matches = records.filter(record => {

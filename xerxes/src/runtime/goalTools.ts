@@ -64,6 +64,8 @@ export interface GoalToolHost {
   currentRound(context: ToolExecutionContext): number | undefined
   /** A completed execution from this session, resolved by the host rather than model-supplied data. */
   evidenceExecution?(context: ToolExecutionContext, toolCallId: string): unknown
+  /** The latest successful execution in this session (of one tool when named), resolved by the host. */
+  latestEvidenceExecution?(context: ToolExecutionContext, toolName?: string): unknown
   goalCreated?(context: ToolExecutionContext, goal: GoalView): void
   tokenUsage?(context: ToolExecutionContext, goal: GoalView): unknown
   validateResume?(context: ToolExecutionContext, goal: GoalView): void
@@ -189,7 +191,8 @@ export const GOAL_TOOL_DEFINITIONS: readonly ToolDefinition[] = Object.freeze([
           current_milestone: { type: ['string', 'null'], maxLength: 1000, description: 'Current work milestone; milestone or edit action only. Null clears it. Does not change objective, budgets, evidence, or phase.' },
           criteria: criterionSchema(),
           criterion_id: { type: 'string', description: 'Criterion receiving evidence; record_evidence only.' },
-          tool_call_id: { type: 'string', description: 'Exact completed successful tool call in this session; record_evidence only.' },
+          tool_call_id: { type: ['string', 'null'], description: 'Optional exact tool call id; record_evidence only. Usually omit it: the runtime then uses the most recent successful call (of evidence_tool when set).' },
+          evidence_tool: { type: ['string', 'null'], description: 'Optional tool name; record_evidence only. Evidence is the most recent successful call of this tool, e.g. the test run you just made.' },
           evidence_summary: { type: 'string', description: 'Explain what this result establishes for the criterion. Relevance is your assessment, not an automatic certification.' },
           max_goal_rounds: { type: ['integer', 'null'], description: 'Replacement round cap; action "edit" only. Null or omitted otherwise.' },
           max_duration_ms: { type: ['integer', 'null'], minimum: GOAL_MIN_DURATION_MS, description: 'Replacement wall-time limit from original creation; action "edit" only (null or omitted otherwise). Requires human authorization.' },
@@ -215,9 +218,10 @@ export function goalPolicyPrompt(blockedAfterConsecutiveRounds: number): string 
     'the human explicitly requests that specific limit. Never invent a token budget or a safety cap.',
     'When the human requests unlimited work, use update_goal action unlimited to clear existing limits.',
     'For resume use only goal_id, revision and action. Resume never raises or removes a budget.',
-    'Declare concrete criteria when creating a goal. Attach evidence with record_evidence using the exact',
-    'tool_call_id of a successful completed call in this session and explain its relevance. Every declared',
-    'criterion needs evidence before completion. Execution success is not automatic proof of relevance.',
+    'Declare concrete criteria when creating a goal. Attach evidence with record_evidence right after the',
+    'successful call that proves a criterion: omit tool_call_id and the runtime cites your most recent',
+    'successful call (set evidence_tool to cite the latest call of one tool), then explain its relevance.',
+    'Every declared criterion needs evidence before completion. Execution success is not proof of relevance.',
     'Keep the current milestone up to date with action milestone and current_milestone. This records',
     'what you are working on; it does not prove a criterion or change the goal objective or budget.',
     'The user can accept a criterion with a decision note in F10. Such evidence is labelled user-decision',
@@ -341,8 +345,19 @@ export function registerGoalTools(
           }
           case 'record_evidence': {
             assertConcludeAuthority(host, context, 'record evidence', expectCurrentGoal(metadata, sessionId, ref))
-            const toolCallId = requiredString(inputs, 'tool_call_id')
-            if (!successfulGoalEvidence(host.evidenceExecution?.(context, toolCallId), toolCallId)) throw new GoalError('Evidence must reference a completed successful tool call in this session; missing, failed, denied or pending results cannot satisfy a criterion', 'GOAL_INVALID_TRANSITION')
+            const requested = typeof inputs.tool_call_id === 'string' ? inputs.tool_call_id.trim() : ''
+            const tool = typeof inputs.evidence_tool === 'string' ? inputs.evidence_tool.trim() : ''
+            let toolCallId = requested
+            if (!requested) {
+              // No id (the usual case — models never see provider call ids):
+              // the host names the most recent successful call itself.
+              const latest = host.latestEvidenceExecution?.(context, tool || undefined)
+              const id = latest && typeof latest === 'object' ? (latest as Record<string, unknown>).toolCallId ?? (latest as Record<string, unknown>).tool_call_id : undefined
+              if (typeof id !== 'string' || !id) throw new GoalError(tool ? `No successful ${tool} call in this session can serve as evidence; run it, then record evidence` : 'No successful tool call in this session can serve as evidence yet; run the check, then record evidence', 'GOAL_INVALID_TRANSITION')
+              toolCallId = id
+            } else if (!successfulGoalEvidence(host.evidenceExecution?.(context, requested), requested)) {
+              throw new GoalError('Evidence must reference a completed successful tool call in this session; missing, failed, denied or pending results cannot satisfy a criterion. Omit tool_call_id to cite your most recent successful call.', 'GOAL_INVALID_TRANSITION')
+            }
             return view(recordGoalEvidence(metadata, sessionId, ref, requiredString(inputs, 'criterion_id'), {
               toolCallId, summary: requiredString(inputs, 'evidence_summary'), recordedAt: now(),
             }, now()))

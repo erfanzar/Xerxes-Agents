@@ -13,9 +13,13 @@ function runner(code = 0, output = 'Claude Code is up to date (2.1.283)') {
 
 test('an installed CLI is updated at runtime start when a profile uses Claude Code', async () => {
   const r = runner()
+  // Nothing newer is not an update: no "Claude Code updated" line in any client.
   expect(await maintainClaudeCode({ inUse: true, environment: { PATH: '/bin' }, run: r.run, executable: () => '/h/.local/bin/claude' }))
-    .toEqual({ action: 'updated', output: 'Claude Code is up to date (2.1.283)' })
+    .toEqual({ action: 'current', output: 'Claude Code is up to date (2.1.283)' })
   expect(r.calls).toEqual([['/h/.local/bin/claude', 'update']])
+  const newer = runner(0, 'Successfully updated from 2.1.283 to 2.1.290')
+  expect(await maintainClaudeCode({ inUse: true, environment: {}, run: newer.run, executable: () => '/h/.local/bin/claude' }))
+    .toEqual({ action: 'updated', output: 'Successfully updated from 2.1.283 to 2.1.290' })
 })
 
 test('a missing CLI is installed with the official installer; Windows is pointed at the docs', async () => {

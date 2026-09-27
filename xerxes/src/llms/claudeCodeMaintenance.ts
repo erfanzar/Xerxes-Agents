@@ -21,6 +21,8 @@ export const CLAUDE_CODE_INSTALLER = 'https://claude.ai/install.sh'
 
 export type ClaudeCodeMaintenance =
   | { readonly action: 'skipped'; readonly reason: string }
+  /** `claude update` ran and found nothing newer: nothing to report. */
+  | { readonly action: 'current'; readonly output: string }
   | { readonly action: 'updated' | 'installed'; readonly output: string }
   | { readonly action: 'failed'; readonly error: string }
 
@@ -60,7 +62,10 @@ export async function maintainClaudeCode(options: ClaudeCodeMaintenanceOptions):
   try {
     if (executable) {
       const result = await run([executable, 'update'], env, 180_000)
-      return result.code === 0 ? { action: 'updated', output: lastLines(result.output) } : { action: 'failed', error: `claude update exited ${result.code}: ${lastLines(result.output)}` }
+      if (result.code !== 0) return { action: 'failed', error: `claude update exited ${result.code}: ${lastLines(result.output)}` }
+      // "Claude Code is up to date" is the common case; reporting it as an
+      // update put a misleading "Claude Code updated" line in every client.
+      return /\bup to date\b/i.test(result.output) ? { action: 'current', output: lastLines(result.output) } : { action: 'updated', output: lastLines(result.output) }
     }
     if (platform === 'win32') return { action: 'skipped', reason: 'Claude Code is not installed; install it from https://docs.claude.com/en/docs/claude-code/setup' }
     const result = await run(['bash', '-c', `set -o pipefail; curl -fsSL ${CLAUDE_CODE_INSTALLER} | bash`], env, 300_000)

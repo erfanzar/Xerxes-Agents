@@ -4977,9 +4977,11 @@ export class DaemonServer {
 
   private sessionReasoningEffort(session?: DaemonSession, set?: ReasoningLevelSet): string {
     if (session && Object.hasOwn(session.metadata, LOCAL_PROVIDER_BINDING)) return session.reasoningEffort || 'local default';
-    // Unset is "off" only where off exists; a model that cannot disable
-    // thinking is running at the provider's own default instead.
-    return session?.reasoningEffort || stringValue(this.runtime.status().reasoning_effort) || (set?.canDisable === false ? '' : REASONING_OFF);
+    // Unset reports the model's own default effort when it is known, "off"
+    // only where off is a real choice, and otherwise nothing — the provider's
+    // default applies. Unknown capabilities used to read as "off", which most
+    // models do not even offer.
+    return session?.reasoningEffort || stringValue(this.runtime.status().reasoning_effort) || set?.defaultEffort || (set?.canDisable === true ? REASONING_OFF : '');
   }
 
   private contextLimit(model: string, session?: DaemonSession): number {

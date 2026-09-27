@@ -1353,9 +1353,11 @@ the round is never replayed. Settled, interrupted and cancelled receipts remain
 durable for inspection, while a later explicit resume may stage a new receipt.
 
 Model goal tools accept `criteria: [{id, description}]` on create/edit and
-`update_goal` action `record_evidence` with criterion_id, tool_call_id and
-evidence_summary. Evidence resolves against a unique completed tool call in the
-same session. Failed, denied, pending and goal-management calls cannot qualify.
+`update_goal` action `record_evidence` with criterion_id, evidence_summary and
+optionally tool_call_id or evidence_tool. With tool_call_id, evidence resolves against
+that unique completed tool call in the same session. Without it, the host cites the
+session's most recent successful call (of evidence_tool when set): models do not see
+provider call ids, so an id-only contract left criteria unprovable. Failed, denied, pending and goal-management calls cannot qualify.
 The host checks execution outcome; the relevance claim remains the model's
 assessment and is labelled as such. No command-name verification whitelist is
 used. Declared criteria must have evidence before completion. Changed criteria
@@ -1930,8 +1932,9 @@ requiring its first saved transcript. A mismatched key never changes the request
 identity; workspace checks remain in force. Failed resume leaves the connection's
 current selection intact. Explicit new-session creation is unchanged.
 
-The TUI footer's **model selected** label reports configuration only. It does not
-assert credential validity, provider availability or successful connectivity.
+The TUI header's configured-model label (the model id's last path segment) reports
+configuration only. It does not assert credential validity, provider availability or
+successful connectivity.
 
 ### Remote setup review
 

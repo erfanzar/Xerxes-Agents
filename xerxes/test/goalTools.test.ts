@@ -7,6 +7,7 @@ import { ToolRegistry } from '../src/executors/toolRegistry.js'
 import type { JsonObject } from '../src/types/toolCalls.js'
 import { resetGoalActivations, getGoal, recordGoalEvidence } from '../src/runtime/goalDomain.js'
 import { goalPolicyPrompt, registerGoalTools, type GoalToolHost } from '../src/runtime/goalTools.js'
+import { findLatestGoalEvidenceExecution } from '../src/runtime/goalEvidence.js'
 import { admitGoalRound } from '../src/runtime/goalDomain.js'
 
 afterEach(() => resetGoalActivations())
@@ -86,6 +87,7 @@ function harness(options: { blockedAfter?: number; executions?: readonly unknown
     isHumanTurn: () => turn.human,
     currentRound: () => turn.round,
     evidenceExecution: (_context, id) => options.executions?.find(record => !!record && typeof record === 'object' && (record as Record<string, unknown>).toolCallId === id),
+    latestEvidenceExecution: (_context, toolName) => findLatestGoalEvidenceExecution(options.executions ?? [], toolName),
     now: () => 1_000,
     ...(options.validateResume ? { validateResume: options.validateResume } : {}),
   }
@@ -387,4 +389,29 @@ test('a status change with placeholder limits is not refused: only edit reads li
   // The limits were not applied.
   const unlimited = await harness().call('create_goal', { objective: 'ship it' })
   for (const limit of ['maxDurationMs', 'maxTotalTokens', 'maxGoalRounds'] as const) expect(blocked.goal[limit]).toEqual(unlimited.goal[limit])
+})
+
+test('evidence without a tool call id cites the latest successful call, which models can actually do', async () => {
+  // Models never see provider call ids; requiring one left every goal with
+  // criteria blocked "on evidence-ID bookkeeping".
+  const executions = [
+    { toolCallId: 'read-1', name: 'ReadFile', permitted: true, result: 'file text' },
+    { toolCallId: 'tests-ok', name: 'ExecCommand', permitted: true, result: '{"exit_code":0}' },
+    { toolCallId: 'lint-failed', name: 'ExecCommand', permitted: true, result: '{"exit_code":1}' },
+    { toolCallId: 'goal-read', name: 'get_goal', permitted: true, result: '{"ok":true}' },
+  ]
+  const h = harness({ executions })
+  await h.call('create_goal', { objective: 'ship', criteria: [{ id: 'tests', description: 'Tests pass' }, { id: 'read', description: 'Spec was read' }] })
+  // Latest successful call overall: the failed lint and the goal read are skipped.
+  const tests = await h.call('update_goal', { ...(await h.ref()), action: 'record_evidence', criterion_id: 'tests', tool_call_id: null, evidence_tool: null, evidence_summary: 'The suite exited 0' })
+  expect(tests.goal.criteria[0].evidence.toolCallId).toBe('tests-ok')
+  // Latest successful call of one tool.
+  const read = await h.call('update_goal', { ...(await h.ref()), action: 'record_evidence', criterion_id: 'read', evidence_tool: 'ReadFile', evidence_summary: 'Read the spec' })
+  expect(read.goal.criteria[1].evidence.toolCallId).toBe('read-1')
+  expect((await h.call('update_goal', { ...(await h.ref()), action: 'complete' })).goal.phase).toBe('complete')
+  // Nothing to cite is a clear refusal, not a silent pass.
+  const empty = harness({ executions: [{ toolCallId: 'x', name: 'ExecCommand', permitted: true, result: '{"exit_code":2}' }] })
+  await empty.call('create_goal', { objective: 'ship', criteria: [{ id: 'tests', description: 'Tests pass' }] })
+  const refused = await empty.call('update_goal', { ...(await empty.ref()), action: 'record_evidence', criterion_id: 'tests', evidence_summary: 'x' })
+  expect(refused.ok).toBe(false)
 })

@@ -102,7 +102,7 @@ import { CliWriter, createCliStyle, detectColorDepth } from "./runtime/cliStyle.
 import { resolveTuiEntry } from "./runtime/distribution.js";
 import { registerInteractionModeTool } from "./runtime/interactionModeTool.js";
 import { goalPolicyPrompt, registerGoalTools } from "./runtime/goalTools.js";
-import { findGoalEvidenceExecution } from './runtime/goalEvidence.js';
+import { findGoalEvidenceExecution, findLatestGoalEvidenceExecution } from './runtime/goalEvidence.js';
 import { extractAgentOption, extractOutputFormatOption, parseValueOptions, type OutputFormat } from "./runtime/commandOptions.js";
 import { ProcessRegistry } from "./runtime/processRegistry.js";
 import { TerminalRegistry } from "./runtime/terminalRegistry.js";
@@ -1178,7 +1178,7 @@ async function runDaemonOwned(
     // Keep the Claude Code CLI current (or installed) when a profile uses it.
     void maintainClaudeCode({ inUse: profileStore.list().some(profile => profile.provider === 'claude-code') }).then(outcome => {
       if (outcome.action === 'failed') console.error(`Claude Code update failed: ${outcome.error}`);
-      else if (outcome.action !== 'skipped') console.error(`Claude Code ${outcome.action}: ${outcome.output}`);
+      else if (outcome.action === 'updated' || outcome.action === 'installed') console.error(`Claude Code ${outcome.action}: ${outcome.output}`);
     });
     await channelManager.startConfigured();
   } catch (error) {
@@ -1905,6 +1905,7 @@ function daemonRuntime(
           ? context.metadata.goal_turn_round
           : undefined,
       evidenceExecution: (context, toolCallId) => findGoalEvidenceExecution(runtime?.listSessions().find(session => session.id === context.sessionId)?.toolExecutions ?? [], toolCallId),
+      latestEvidenceExecution: (context, toolName) => findLatestGoalEvidenceExecution(runtime?.listSessions().find(session => session.id === context.sessionId)?.toolExecutions ?? [], toolName),
       goalCreated: (context, goal) => host.goalTokenLedger?.initialize(String(context.sessionId ?? ''), goal.id, true),
       tokenUsage: (context, goal) => host.goalTokenLedger?.inspect(String(context.sessionId ?? ''), goal.id) ?? null,
       validateResume: (context, goal) => {
