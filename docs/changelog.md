@@ -7,6 +7,38 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.0 — 2026-09-28
+
+Desktop application
+- Claude-style layout: list sidebar, one reading column, a composer with the
+  repository bar (branch, diff, Review, Create PR), model, effort and a context ring.
+- Dotted agent status orbs for tools, reasoning, writing and waiting, on one shared
+  low-rate timer that stops when the window is unfocused, covered or settled.
+- Files open and edit in place with rendered Markdown, save conflicts and revert;
+  read, write and edit tool rows show their content inline.
+- Themes and backgrounds (Xerxes default, Claude colours), working blur, a transparent
+  mode, copy buttons on replies, chat deletion and Claude-sized type.
+- Lower energy use: covered workspace views are throttled, stream updates are
+  batched, and looping animations pause while unfocused.
+- Running chats reattach after an update or reconnect instead of opening a new task.
+
+Runtime
+- Leased clients' turns and armed goals keep running while the desktop is away
+  (a locked laptop, a dropped SSH link) and reattach on return.
+- Goal rounds lost to transient provider failures retry after 1, 3 and 10 minutes
+  instead of blocking the goal.
+- Session recovery never splices journal entries from older compaction generations
+  onto a compacted session; a live session that loses a save conflict is preserved
+  under `sessions/divergent/` before the saved copy is reloaded.
+- Claude Code: streams stay alive while a large tool call is written, tag-form tool
+  calls parse, the system prompt is passed by file and the CLI is kept current.
+- Goal evidence can cite the latest successful tool call; reasoning effort reports
+  "default" rather than a false "off"; outdated SSH runtimes update when idle.
+
+Terminal UI
+- Welcome screen, transparent-mode panels, accurate status and turn durations;
+  diff panel seeks land after layout.
+
 ## 0.5.0 — 2026-09-20
 
 - Add a selectable transparent TUI background alongside Chrome styling.
