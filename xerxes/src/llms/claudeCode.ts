@@ -664,11 +664,23 @@ export class ClaudeCodeClient implements LlmClient {
     let sawText = false
     let fallbackText = ''
     let stopReason = ''
+    // While the model writes a tool call, its text is held back until the
+    // call is complete, so nothing reaches the loop. Writing a large file
+    // streamed for minutes with no delta, the loop's inactivity watchdog read
+    // that as a dead stream, killed it and retried the same call until the
+    // turn failed. Any line from Claude Code proves it is alive; an empty
+    // delta at most once a second resets the watchdog and nothing else.
+    let lastDelta = Date.now()
+    const HEARTBEAT_MS = 1_000
     try {
       for await (const line of child.lines) {
         if (!line.trim()) continue
         let event: Json
         try { event = record(JSON.parse(line)) } catch { continue }
+        if (Date.now() - lastDelta >= HEARTBEAT_MS) {
+          lastDelta = Date.now()
+          yield {}
+        }
         if (event.type === 'stream_event') {
           const inner = record(event.event)
           // The API message's own usage: prompt tokens (fresh, cache read,
@@ -693,11 +705,11 @@ export class ClaudeCodeClient implements LlmClient {
             if (delta.type === 'text_delta' && typeof delta.text === 'string') {
               sawText = true
               const visible = extractor.push(delta.text)
-              if (visible) yield { content: visible }
+              if (visible) { lastDelta = Date.now(); yield { content: visible } }
               // The calls are complete; what follows would be imagined.
               if (extractor.done) break
             } else if (delta.type === 'thinking_delta' && typeof delta.thinking === 'string' && delta.thinking) {
-              yield { thinking: delta.thinking }
+              lastDelta = Date.now(); yield { thinking: delta.thinking }
             }
           }
         } else if (event.type === 'assistant') {

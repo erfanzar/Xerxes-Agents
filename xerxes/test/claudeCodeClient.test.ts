@@ -421,3 +421,28 @@ test('a tool name used as a tag is a call when its keys fit the schema; a made-u
   expect(text).toContain('<agent_memory_append>')
   expect(plain.calls).toEqual([])
 })
+
+test('a long tool call keeps the stream alive while its text is held back', async () => {
+  // The model spends minutes writing one large call; none of it is visible
+  // text, so the adapter must still show the loop the stream is alive.
+  const chunks = ['<function=read_file>{"path": "', 'a', '.ts', '"}</function>']
+  const launch: ClaudeCodeLauncher = () => ({
+    lines: (async function* () {
+      for (const chunk of chunks) {
+        await Bun.sleep(600)
+        yield textDelta(chunk)
+      }
+      yield result()
+    })(),
+    exited: Promise.resolve(0),
+    stderr: Promise.resolve(''),
+    kill: () => undefined,
+  })
+  const client = new ClaudeCodeClient({ executable: '/bin/claude', launch, workingDirectory: '/tmp' })
+  const { text, deltas } = await collect(client.stream({ model: 'claude-code/opus', tools, messages: [{ role: 'user', content: 'read a.ts' }] }))
+  expect(text).toBe('')
+  const beforeCall = deltas.slice(0, deltas.findIndex(delta => delta.toolCalls))
+  // Heartbeats are empty deltas: they carry no text, thinking or calls.
+  expect(beforeCall.filter(delta => Object.keys(delta).length === 0).length).toBeGreaterThanOrEqual(1)
+  expect(deltas.at(-1)?.toolCalls?.[0]?.function.name).toBe('read_file')
+}, 10_000)
