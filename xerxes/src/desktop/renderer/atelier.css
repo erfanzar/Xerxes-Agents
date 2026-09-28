@@ -2772,3 +2772,26 @@ html,body,#root,.app.atelier{background:transparent}
 .atelier .railtodos li[data-state='in_progress'] .railtodos__mark{width:20px;height:20px;margin:-1px 0 0;border:0}
 .atelier .welcome__orb{margin:0 auto 6px}
 @media(max-height:650px){.atelier .welcome__orb{display:none}}
+
+/* Usage: provider facts (credit left, spend today…) and spend by model. */
+.atelier .usage-plan__facts{display:grid;gap:5px;margin:0}
+.atelier .usage-plan__facts>div{display:flex;align-items:baseline;justify-content:space-between;gap:var(--s-2);min-width:0}
+.atelier .usage-plan__facts dt{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:var(--t-caption);color:var(--x-meta)}
+.atelier .usage-plan__facts dd{flex:none;margin:0;font:var(--t-num);color:var(--x-title);font-variant-numeric:tabular-nums}
+.atelier .usage-models{display:grid;gap:0;margin:0;padding:0;list-style:none;border:1px solid var(--x-hairline);border-radius:var(--r-md);background:var(--x-card);overflow:hidden}
+.atelier .usage-model{display:grid;gap:2px;min-width:0;padding:8px var(--s-3)}
+.atelier .usage-model+.usage-model{border-top:1px solid var(--x-hairline)}
+.atelier .usage-model__row{display:flex;align-items:baseline;justify-content:space-between;gap:var(--s-2);min-width:0}
+.atelier .usage-model__name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:var(--t-body);font-weight:500;color:var(--x-title)}
+.atelier .usage-model__cost{flex:none;font:var(--t-num);color:var(--x-title);font-variant-numeric:tabular-nums}
+.atelier .usage-model__cost[data-unknown]{font:var(--t-caption);color:var(--x-meta)}
+.atelier .usage-model__meta{font:var(--t-caption);color:var(--x-meta);font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.atelier .usage__note{margin:0;font:var(--t-caption);color:var(--x-meta)}
+.atelier .field__optional{margin-left:6px;font:var(--t-caption);font-weight:400;color:var(--x-meta)}
+
+/* Floating surfaces over a see-through window. With a background or the
+   transparent window, cards and chrome follow the panel opacity — at 0%
+   the command/skill suggestions, menus and pickers turned to clear glass
+   and the transcript read straight through them. Anything that floats
+   over the conversation takes the opaque popover colour instead. */
+:root[data-backdrop] .atelier :is(.hints,.menu,.modelpop,.ctxpop,.runtime-popover,.fleetpop,.palette){background:var(--x-popover);-webkit-backdrop-filter:none;backdrop-filter:none}

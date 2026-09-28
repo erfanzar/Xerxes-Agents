@@ -155,3 +155,14 @@ test('an unfocused or covered window pauses looping indicators but lets one-shot
   expect(css).toContain(':root[data-occluded] .atelier *:not(.live-phrase__item):not(.studio-sheet),')
   expect(css).toMatch(/\.filetool\[data-state='working'\] \.filetool__verb svg\{animation:studio-spin/)
 })
+
+test('menus and suggestion lists stay opaque over a see-through window', async () => {
+  // At 0% panels the command/skill suggestions turned to clear glass and the
+  // transcript read straight through them.
+  const css = await Bun.file(new URL('../src/desktop/renderer/atelier.css', import.meta.url)).text()
+  expect(css).toContain(':root[data-backdrop] .atelier :is(.hints,.menu,.modelpop,.ctxpop,.runtime-popover,.fleetpop,.palette){background:var(--x-popover)')
+  const { deriveTheme } = await import('../src/desktop/renderer/backdrop.js')
+  const tokens = deriveTheme({ kind: 'gradient', from: '#15171c', to: '#15171c', angle: 0, chat: 100, panels: 0 })!.tokens
+  expect(tokens['--x-popover']).toMatch(/^#[0-9a-f]{6}$/i)
+  expect(tokens['--x-card']).not.toMatch(/^#[0-9a-f]{6}$/i)
+})
