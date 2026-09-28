@@ -7,6 +7,18 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.2 — 2026-09-28
+
+- Usage: OpenRouter keys show credit left, spend today, this week, this month and
+  all time. A new "By model" section totals the last 30 days per model from the
+  runtime's own record of every task and subagent round, priced at published prices
+  ("price unknown" when none exists).
+- Providers: the model is optional when adding a provider. Left blank, the runtime
+  asks the provider which models the key can use and starts on the first; an edit
+  keeps the saved model.
+- Desktop: command and skill suggestions, menus and pickers stay opaque over a
+  transparent or image background.
+
 ## 0.6.1 — 2026-09-28
 
 - Desktop: fresh macOS installs open with the transparent window, system blur, an
