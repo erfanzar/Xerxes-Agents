@@ -165,14 +165,24 @@ describe('integration slash commands', () => {
     })
   })
 
-  it('/providers add without a model prints usage instead of calling the daemon', async () => {
+  it('/providers add without a model lets the runtime discover one', async () => {
+    const { context, request } = makeSlashContext({ ok: true })
+
+    createSlashHandler(context)('/providers add work --type openai --key k')
+    await flush()
+
+    // No model field at all: the daemon asks the provider for its models.
+    expect(request).toHaveBeenCalledWith('provider_save', { name: 'work', provider: 'openai', api_key: 'k' })
+  })
+
+  it('/providers add without a name still prints usage', async () => {
     const { context, request, sys } = makeSlashContext({ ok: true })
 
-    createSlashHandler(context)('/providers add work --type openai')
+    createSlashHandler(context)('/providers add')
     await flush()
 
     expect(request).not.toHaveBeenCalledWith('provider_save', expect.anything())
-    expect(sys[0]).toContain('usage: /providers add')
+    expect(sys[0]).toContain('usage: /providers add <name> --type <type> [--model <model>]')
   })
 
   it('/worktree create posts the action and session id', async () => {

@@ -870,7 +870,7 @@ export function ProviderForm({
   }, [editing?.name])
   // Valid when the wire's required fields are covered; base URL may fall
   // back to the registry default for a known type.
-  const valid = name.trim() !== '' && model.trim() !== '' && (baseUrl.trim() !== '' || (known?.baseUrl ?? '') !== '')
+  const valid = name.trim() !== '' && (baseUrl.trim() !== '' || (known?.baseUrl ?? '') !== '')
   const submit = async (): Promise<void> => {
     if (busy || !valid) return
     setBusy(true)
@@ -927,8 +927,8 @@ export function ProviderForm({
         />
       </div>
       <div className="field">
-        <label htmlFor={fieldId + '-model'}>Model</label>
-        <input id={fieldId + '-model'} className="palette__in" value={model} spellCheck={false} placeholder="e.g. glm-5.2" onChange={e => setModel(e.target.value)} />
+        <label htmlFor={fieldId + '-model'}>Model <span className="field__optional">optional</span></label>
+        <input id={fieldId + '-model'} className="palette__in" value={model} spellCheck={false} placeholder="Leave blank to use the first model this key offers" onChange={e => setModel(e.target.value)} />
       </div>
       {editing && (
         <div className="field provform__catalog">

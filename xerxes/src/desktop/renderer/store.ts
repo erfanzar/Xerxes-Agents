@@ -1497,19 +1497,19 @@ export class Store {
     // A registry-known type supplies its default endpoint daemon-side;
     // "Provider default" (blank) is only valid then.
     const knownDefault = this.frame.providerTypes.find(t => t.name === provider)?.baseUrl ?? ''
-    if (!name || !model || (!baseUrl && !knownDefault)) {
+    // The model is optional: left blank, the runtime asks the provider which
+    // models this key can use and starts on the first.
+    if (!name || (!baseUrl && !knownDefault)) {
       this.builder.push('notification', {
         severity: 'error',
-        message: knownDefault
-          ? 'name and model are required'
-          : 'name, base_url, and model are required',
+        message: knownDefault ? 'name is required' : 'name and base_url are required',
       })
       this.notify()
-      return knownDefault ? 'Name and model are required.' : 'Name, base URL, and model are required.'
+      return knownDefault ? 'Name is required.' : 'Name and base URL are required.'
     }
     if (this.frame.turnActive) return 'Wait for the current turn to finish before changing providers.'
     const { sessionKey, isCurrent } = this.captureSessionRequest()
-    const params: Record<string, unknown> = { name, model }
+    const params: Record<string, unknown> = { name, ...(model ? { model } : {}) }
     if (baseUrl) params.base_url = baseUrl
     if (provider) params.provider = provider
     if (profile.apiKey?.trim()) params.api_key = profile.apiKey.trim()

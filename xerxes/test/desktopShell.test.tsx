@@ -881,7 +881,7 @@ test("editing a saved provider retains an unlisted type and associates every edi
     if (providerTypes.length) expect(form).toContain('value="custom-adapter" selected="">custom-adapter (saved type)</option>')
     else expect(form).toContain('value="custom-adapter"')
     for (const label of ["Name", "Provider", "API key", "Model", "Base URL"]) {
-      const id = new RegExp('<label for="([^"]+)">' + label + '</label>').exec(form)?.[1]
+      const id = new RegExp('<label for="([^"]+)">' + label + '(?: <span class="field__optional">optional</span>)?</label>').exec(form)?.[1]
       expect(id).toBeDefined()
       expect(form).toContain('id="' + id + '"')
     }

@@ -235,15 +235,17 @@ export const integrationCommands: SlashCommand[] = [
 
       if (lower === 'add') {
         const parsed = parseProviderAdd(`add ${rest.join(' ')}`)
-        if (!parsed || !parsed.model) {
+        // --model is optional: without it the runtime asks the provider which
+        // models the key can use and starts on the first.
+        if (!parsed) {
           ctx.transcript.sys(
-            'usage: /providers add <name> --type <type> --model <model> [--key <api-key>] [--base-url <url>]'
+            'usage: /providers add <name> --type <type> [--model <model>] [--key <api-key>] [--base-url <url>]'
           )
           return
         }
         ctx.gateway
           .rpc('provider_save', {
-            model: parsed.model,
+            ...(parsed.model ? { model: parsed.model } : {}),
             name: parsed.name,
             ...(parsed.type ? { provider: parsed.type } : {}),
             ...(parsed.key ? { api_key: parsed.key } : {}),
@@ -254,7 +256,7 @@ export const integrationCommands: SlashCommand[] = [
         return
       }
 
-      ctx.transcript.sys('usage: /providers [list|use <name>|add <name> --type … --model …|remove <name>|types]')
+      ctx.transcript.sys('usage: /providers [list|use <name>|add <name> --type … [--model …]|remove <name>|types]')
     }
   },
 

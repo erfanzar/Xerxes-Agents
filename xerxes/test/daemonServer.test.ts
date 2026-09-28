@@ -3,6 +3,7 @@
 
 import { AgentSettingsStore } from '../src/agents/settingsStore.js';
 import { DeclarativeToolForge } from '../src/extensions/declarativeForge.js';
+import { closeModelUsageLedger, openModelUsageLedger, recordModelUsage } from "../src/runtime/modelUsageLedger.js";
 import { createGoal, recordGoalEvidence } from '../src/runtime/goalDomain.js';
 import { expect, test } from "bun:test";
 import { existsSync } from "node:fs";
@@ -1788,6 +1789,18 @@ test("daemon /usage and usage.report cover the session and every imported profil
     expect(profiles.map((entry) => [entry.profile, entry.status])).toEqual([["zai", "error"], ["local", "unsupported"]]);
     expect(profiles[0]).toMatchObject({ source: "zai", windows: [] });
     expect(String(profiles[0]!.message)).not.toBe("");
+    // Without a ledger (no daemon host opened one) there is no per-model section.
+    expect(report.models).toBeUndefined();
+
+    // With one, recorded rounds come back per model within the window.
+    openModelUsageLedger(join(directory, "usage", "model-usage.sqlite"));
+    recordModelUsage({ model: "glm-4.6", profile: "zai", inputTokens: 1_000, outputTokens: 200 });
+    recordModelUsage({ model: "glm-4.6", profile: "zai", inputTokens: 500, outputTokens: 100 });
+    client.send({ jsonrpc: "2.0", id: 20, method: "usage.report", params: {} });
+    const withModels = (await client.next((frame) => frame.id === 20)).result as Record<string, unknown>;
+    expect(typeof withModels.models_since).toBe("number");
+    expect(withModels.models).toMatchObject([{ model: "glm-4.6", profile: "zai", calls: 2, input_tokens: 1_500, output_tokens: 300 }]);
+    closeModelUsageLedger();
 
     client.send({
       jsonrpc: "2.0",
@@ -3513,7 +3526,7 @@ test("daemon resumes only initialize resume IDs and lists saved sessions separat
       ok: true,
       daemon_protocol: 35,
       daemon_build_id: expect.any(String),
-      daemon_version: "0.6.1",
+      daemon_version: "0.6.2",
       session: { id: firstSessionId, key: firstSessionId, messages: 2 },
     });
     await client.next(eventFrame("init_done"));
@@ -10790,6 +10803,48 @@ test("a leased client's turn keeps running in the background after its lease exp
   } finally {
     owner.close();
     await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("provider_save without a model discovers one from the provider, and saves nothing when it cannot", async () => {
+  const provider = Bun.serve({
+    port: 0,
+    fetch: (request) => new URL(request.url).pathname.endsWith("/models")
+      ? Response.json({ data: [{ id: "first-model" }, { id: "second-model" }] })
+      : new Response("not found", { status: 404 }),
+  });
+  const empty = Bun.serve({ port: 0, fetch: () => Response.json({ data: [] }) });
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-provider-discover-"));
+  const socketPath = join(directory, "daemon.sock");
+  const profileStore = new ProfileStore(join(directory, "profiles.json"));
+  const server = new DaemonServer({
+    socketPath,
+    runtime: new InMemoryDaemonRuntime(undefined, { currentProjectDirectory: directory, model: "test-model", sessionDirectory: join(directory, "sessions") }),
+    profileStore,
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({ jsonrpc: "2.0", id: 1, method: "provider_save", params: { name: "auto", base_url: `http://127.0.0.1:${provider.port}/v1`, provider: "openai", api_key: "k" } });
+    expect((await client.next((frame) => frame.id === 1)).result).toMatchObject({ ok: true, profile: { name: "auto", model: "first-model" } });
+    expect(profileStore.get("auto")?.model).toBe("first-model");
+
+    // An edit that leaves the model blank keeps the one already saved.
+    client.send({ jsonrpc: "2.0", id: 2, method: "provider_save", params: { name: "auto", base_url: `http://127.0.0.1:${provider.port}/v1`, provider: "openai" } });
+    expect((await client.next((frame) => frame.id === 2)).result).toMatchObject({ ok: true, profile: { model: "first-model" } });
+
+    // A provider that reports no models: a clear error, and no half-made profile.
+    client.send({ jsonrpc: "2.0", id: 3, method: "provider_save", params: { name: "nothing", base_url: `http://127.0.0.1:${empty.port}/v1`, provider: "openai", api_key: "k" } });
+    const refused = (await client.next((frame) => frame.id === 3)).result as Record<string, unknown>;
+    expect(refused.ok).toBe(false);
+    expect(String(refused.error)).toContain("nothing reported no models");
+    expect(profileStore.get("nothing")).toBeUndefined();
+  } finally {
+    client.close();
+    await server.stop();
+    await provider.stop(true);
+    await empty.stop(true);
     await rm(directory, { recursive: true, force: true });
   }
 });

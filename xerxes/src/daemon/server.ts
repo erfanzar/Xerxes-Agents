@@ -111,6 +111,7 @@ import {
 import { CronScheduler } from "../cron/scheduler.js";
 import { blockGoal, getGoal, pauseGoal, disarmGoal, recordGoalEvidence, GoalError } from "../runtime/goalDomain.js";
 import { classifyError } from "../runtime/errorClassifier.js";
+import { modelUsageLedger } from "../runtime/modelUsageLedger.js";
 import { GoalTimeGuard } from "../runtime/goalTimeGuard.js";
 import { GoalTokenBudget } from '../runtime/goalTokenBudget.js';
 import type { GoalTokenLedger } from '../runtime/goalTokenLedger.js';
@@ -941,6 +942,9 @@ const PRODUCTIVE_TURN_EVENTS: ReadonlySet<string> = new Set([
 ]);
 
 /** NDJSON JSON-RPC v35 Unix socket server consumed by the OpenTUI client and native hosts. */
+/** How far back the Usage view's per-model totals reach. */
+const MODEL_USAGE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+
 /** Waits before retrying a goal round lost to a transient provider failure. */
 const GOAL_TRANSIENT_RETRY_DELAYS_MS = [60_000, 180_000, 600_000] as const;
 
@@ -3923,22 +3927,50 @@ export class DaemonServer {
     const listed = this.profileStore.list().map(profile => current ? { ...profile, active: profile.name === current } : profile);
     const builtIn = new Set(listed.filter(profile => !profile.api_key && (profile.name === CLAUDE_CODE_PROFILE_NAME || profile.name === CODEX_PROFILE_NAME)).map(profile => profile.name));
     const profiles = await buildUsageReport(listed, { cache: this.usageCache, refresh, hideWhenSignedOut: builtIn });
+    const modelsSince = Date.now() - MODEL_USAGE_WINDOW_MS;
+    const ledger = modelUsageLedger();
     return {
       ok: true,
       fetched_at: Date.now(),
       profiles: profiles as unknown as JsonRpcPayload[],
       ...(session ? { session: this.sessionUsageReportPayload(session) } : {}),
+      ...(ledger ? { models_since: modelsSince, models: this.modelUsagePayload(ledger.totals(modelsSince)) } : {}),
     };
+  }
+
+  /** Recorded tokens per model, priced from published prices; a model nobody prices keeps no cost. */
+  private modelUsagePayload(totals: ReturnType<NonNullable<ReturnType<typeof modelUsageLedger>>["totals"]>): JsonRpcPayload[] {
+    return totals.map(row => {
+      const profile = row.profile ? this.profileStore.get(row.profile) : undefined;
+      const cost = this.priceTokens(profile, row.model, row.inputTokens, row.outputTokens, row.cacheReadTokens, row.cacheWriteTokens);
+      return {
+        model: row.model,
+        ...(row.profile ? { profile: row.profile } : {}),
+        calls: row.rounds,
+        input_tokens: row.inputTokens,
+        output_tokens: row.outputTokens,
+        cache_read_tokens: row.cacheReadTokens,
+        cache_write_tokens: row.cacheWriteTokens,
+        last_at: row.lastAt,
+        ...(cost === undefined ? {} : { cost_usd: cost }),
+      };
+    });
   }
 
   /** USD for the session's tokens at the prices its provider (or models.dev) publishes; undefined when none does. */
   private sessionCost(session: DaemonSession, model: string): number | undefined {
     const name = this.sessionProfileName(session);
     const profile = name ? this.profileStore.get(name) : undefined;
+    return this.priceTokens(profile, model, session.totalInputTokens, session.totalOutputTokens);
+  }
+
+  private priceTokens(profile: ProviderProfile | undefined, model: string, input: number, output: number, cacheRead = 0, cacheWrite = 0): number | undefined {
     const reported = profile?.model_capabilities?.[model]?.cost;
-    return calcCost(model, session.totalInputTokens, session.totalOutputTokens, {
+    return calcCost(model, input, output, {
       ...(profile ? { provider: profile.provider, baseUrl: profile.base_url } : {}),
       ...(reported ? { reported: { ...(reported.input === undefined ? {} : { input: reported.input }), ...(reported.output === undefined ? {} : { output: reported.output }), ...(reported.cache_read === undefined ? {} : { cacheRead: reported.cache_read }), ...(reported.cache_write === undefined ? {} : { cacheWrite: reported.cache_write }) } } : {}),
+      ...(cacheRead ? { cacheReadTokens: cacheRead } : {}),
+      ...(cacheWrite ? { cacheWriteTokens: cacheWrite } : {}),
     });
   }
 
@@ -9325,13 +9357,10 @@ export class DaemonServer {
         ? PROVIDERS[provider as keyof typeof PROVIDERS]
         : undefined;
     const baseUrl = optionalString(params.base_url) ?? known?.baseUrl;
-    const model = optionalString(params.model);
-    if (!name || !baseUrl || !model) {
+    if (!name || !baseUrl) {
       return {
         ok: false,
-        error: known
-          ? "name and model are required"
-          : "name, base_url, and model are required",
+        error: known ? "name is required" : "name and base_url are required",
       };
     }
     // An absent (or blank) api_key keeps the stored one — an edit that only
@@ -9344,6 +9373,23 @@ export class DaemonServer {
         ? params.api_key
         : undefined;
     const apiKey = typedKey ?? existing?.api_key ?? "";
+    // The model is optional. An edit keeps the saved one; a new profile asks
+    // the provider which models this key or subscription can use and starts
+    // on the first — the picker lists the rest.
+    let model = optionalString(params.model)?.trim() || existing?.model.trim() || "";
+    if (!model) {
+      this.profileStore.save({ name, baseUrl, apiKey, model: "", setActive: false, ...(provider === undefined ? {} : { provider }) });
+      const found = await this.fetchModels({ profile_name: name, refresh: true });
+      model = Array.isArray(found.models) ? String(found.models[0] ?? "").trim() : "";
+      if (!model) {
+        if (!existing) this.profileStore.delete(name);
+        const reason = typeof found.error === "string" ? found.error : typeof found.warning === "string" ? found.warning : "";
+        return {
+          ok: false,
+          error: `${name} reported no models${reason ? ` (${reason})` : ""}. Check the key and base URL, or enter a model name.`,
+        };
+      }
+    }
     const profile = this.profileStore.save({
       name,
       baseUrl,
