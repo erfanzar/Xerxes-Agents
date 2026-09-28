@@ -402,3 +402,22 @@ test('the tail of a cut-off call, resumed without its opening, is dropped rather
   const tail = new FunctionCallExtractor()
   expect(tail.push('Next.\n<parameter name="x">partial') + tail.finish()).toBe('Next.\n')
 })
+
+test('a tool name used as a tag is a call when its keys fit the schema; a made-up result after it ends the reply', () => {
+  const tools = [{ type: 'function' as const, function: { name: 'agent_memory_append', description: 'Append', parameters: { type: 'object', properties: { scope: { type: 'string' }, path: { type: 'string' }, body: { type: 'string' } } } } }]
+  const extractor = new FunctionCallExtractor(toolParameterTypes(tools))
+  let shown = extractor.push('Recording the lesson.\n<agent_memory_ap')
+  shown += extractor.push('pend>{"scope":"project","path":"EXPERIENCES.md","body":"### lesson"}</agent_memory_append>\n')
+  shown += extractor.push('<agent_memory_append> {"ok":true,"scope":"project","appended_bytes":1041}</agent_memory_append>\nThe round converged.')
+  shown += extractor.finish()
+  expect(extractor.calls).toEqual([{ name: 'agent_memory_append', arguments: { scope: 'project', path: 'EXPERIENCES.md', body: '### lesson' } }])
+  // Neither the call markup nor the imagined result reaches the transcript.
+  expect(shown.trimEnd()).toBe('Recording the lesson.')
+  expect(extractor.done).toBe(true)
+
+  // Before any call, a block that is not the tool's arguments is just text.
+  const plain = new FunctionCallExtractor(toolParameterTypes(tools))
+  const text = plain.push('Use <agent_memory_append>{"note":"x"}</agent_memory_append> to record.') + plain.finish()
+  expect(text).toContain('<agent_memory_append>')
+  expect(plain.calls).toEqual([])
+})

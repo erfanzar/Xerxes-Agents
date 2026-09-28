@@ -280,7 +280,19 @@ export class FunctionCallExtractor {
   private readonly seen = new Set<string>()
   private readonly found: Array<{ name: string; arguments: JsonObject }> = []
 
-  constructor(private readonly types: ToolParameterTypes = new Map()) {}
+  /**
+   * A known tool's name used as a tag — `<agent_memory_append>{json}</agent_memory_append>`
+   * — is the third form Claude falls back to. It counts as a call only when its
+   * JSON keys belong to that tool's schema; after a call, a same-form block that
+   * does not fit (`{"ok":true,…}`) is the model imagining the result.
+   */
+  private readonly tagOpeners: readonly string[]
+  private readonly held: readonly string[]
+
+  constructor(private readonly types: ToolParameterTypes = new Map()) {
+    this.tagOpeners = [...types.keys()].filter(name => /^[A-Za-z_][\w.-]{0,63}$/.test(name)).map(name => `<${name}>`)
+    this.held = [...HELD, ...this.tagOpeners]
+  }
 
   /** The model has finished its calls; ignore anything it writes next. */
   get done(): boolean { return this.finished }
@@ -297,9 +309,9 @@ export class FunctionCallExtractor {
       if (!found) {
         // Hold any suffix that could be the start of markup.
         let keep = 0
-        for (let length = Math.min(Math.max(...HELD.map(o => o.length)) - 1, this.pending.length); length > 0 && !keep; length -= 1) {
+        for (let length = Math.min(Math.max(...this.held.map(o => o.length)) - 1, this.pending.length); length > 0 && !keep; length -= 1) {
           const tail = this.pending.slice(-length)
-          if (HELD.some(marker => marker.startsWith(tail))) keep = length
+          if (this.held.some(marker => marker.startsWith(tail))) keep = length
         }
         visible += this.prose(this.pending.slice(0, this.pending.length - keep))
         this.pending = this.finished ? '' : this.pending.slice(this.pending.length - keep)
@@ -326,6 +338,21 @@ export class FunctionCallExtractor {
         if (!ends.length) { this.pending = this.pending.slice(at); return visible }
         const [end, length] = ends.reduce((first, next) => next[0] < first[0] ? next : first)
         this.pending = this.pending.slice(end + length)
+        continue
+      }
+      if (this.tagOpeners.includes(opener)) {
+        const name = opener.slice(1, -1)
+        const close = `</${name}>`
+        const end = this.pending.indexOf(close, at)
+        if (end < 0) { this.pending = this.pending.slice(at); return visible }
+        const block = this.pending.slice(at, end + close.length)
+        this.pending = this.pending.slice(end + close.length)
+        const call = this.tagCall(name, block.slice(opener.length, -close.length))
+        if (call) { this.record(call); if (this.finished) { this.pending = ''; return visible }; continue }
+        // Not the tool's arguments. After a call it is an imagined result:
+        // the reply ends. Before any call it is just text.
+        if (this.afterCall) { this.finished = true; this.pending = ''; return visible }
+        visible += this.prose(block)
         continue
       }
       if (opener === REMINDER_OPEN) {
@@ -358,14 +385,34 @@ export class FunctionCallExtractor {
     if (/^<function=[^>\s]+>/.test(rest)) { this.take(rest + '</function>'); return '' }
     const invoke = /^<(antml:)?invoke name="[^"]+"\s*>/.exec(rest)
     if (invoke) { this.take(rest + (invoke[1] ? `</${NS}invoke>` : '</invoke>')); return '' }
+    const tag = this.tagOpeners.find(opener => rest.startsWith(opener))
+    if (tag) {
+      // Unterminated tag-form call: complete only when not cut and it fits.
+      if (truncated) { this.cut = true; return '' }
+      const call = this.tagCall(tag.slice(1, -1), rest.slice(tag.length))
+      if (call) this.record(call)
+      return ''
+    }
     return this.prose(rest)
+  }
+
+  /** A tag-form block as a call, when its JSON keys are the tool's own parameters. */
+  private tagCall(name: string, body: string): { name: string; arguments: JsonObject } | undefined {
+    if (!body.trim().startsWith('{')) return undefined
+    const args = parseArguments(body)
+    if ('_raw' in args) return undefined
+    const fields = this.types.get(name)
+    const keys = Object.keys(args)
+    if (!fields || keys.some(key => !fields.has(key))) return undefined
+    if (!keys.length && fields.size) return undefined
+    return { name, arguments: args }
   }
 
   get calls(): readonly { name: string; arguments: JsonObject }[] { return this.found }
 
   private nextOpener(): [number, string] | undefined {
     let best: [number, string] | undefined
-    for (const opener of OPENERS) {
+    for (const opener of [...OPENERS, ...this.tagOpeners]) {
       const at = this.pending.indexOf(opener)
       if (at >= 0 && (!best || at < best[0])) best = [at, opener]
     }
@@ -394,7 +441,10 @@ export class FunctionCallExtractor {
       for (const [, name, raw] of invoke[3]!.matchAll(PARAMETER)) args[name!] = parameterValue(raw!, fields?.get(name!))
       call = { name: invoke[2]!, arguments: args }
     }
-    if (!call) return
+    if (call) this.record(call)
+  }
+
+  private record(call: { name: string; arguments: JsonObject }): void {
     // An exact repeat in the same reply is the model looping, not new work.
     const key = JSON.stringify([call.name, call.arguments])
     if (this.seen.has(key)) { this.finished = true; return }
