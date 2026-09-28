@@ -2795,3 +2795,5 @@ html,body,#root,.app.atelier{background:transparent}
    and the transcript read straight through them. Anything that floats
    over the conversation takes the opaque popover colour instead. */
 :root[data-backdrop] .atelier :is(.hints,.menu,.modelpop,.ctxpop,.runtime-popover,.fleetpop,.palette){background:var(--x-popover);-webkit-backdrop-filter:none;backdrop-filter:none}
+.atelier .dfile{scroll-margin-top:12px;transition:box-shadow 240ms ease}
+.atelier .dfile[data-focused]{box-shadow:0 0 0 2px var(--x-focus)}

@@ -1333,3 +1333,22 @@ test('an agent summary drops its own stray tags and blank runs but keeps generic
   const { agentProse } = await import('../src/desktop/renderer/AgentInspector.js')
   expect(agentProse("I'll read the brief.\n\n\n\n\nNow the diff of Array<string>.\n<diagnostics>\n")).toBe("I'll read the brief.\n\nNow the diff of Array<string>.")
 })
+
+test('the Touched card lists the biggest edits, expands in place, and opens the chosen file', async () => {
+  const { RailFiles } = await import('../src/desktop/renderer/RailLists.js')
+  const files = Array.from({ length: 9 }, (_, index) => ({ path: `src/dir/file${index}.ts`, adds: index * 10, dels: 1, hunks: [], isNew: false }))
+  const opened: string[] = []
+  const html = renderToStaticMarkup(createElement(RailFiles, { files, onOpen: (path: string) => { opened.push(path) } }))
+  // Biggest first, the rest behind an in-place "more" (it used to jump away).
+  expect(html.indexOf('file8.ts')).toBeLessThan(html.indexOf('file7.ts'))
+  expect(html).toContain('aria-expanded="false"')
+  expect(html).toMatch(/\d+ more/)
+  expect(html).toContain("show this file&#x27;s edits")
+
+  const { Store } = await import('../src/desktop/renderer/store.js')
+  const store = new Store()
+  store.openChange('src/dir/file8.ts')
+  const snap = store.getSnapshot()
+  expect(snap.tab).toBe('changes')
+  expect(snap.changesFocus?.path).toBe('src/dir/file8.ts')
+})

@@ -2111,7 +2111,7 @@ export function ActivityDetails({ snap, selectedAgent = '' }: { snap: Snapshot; 
       {/* The rows, not a summary line. A rail that only says "5 files" is
           a number you still have to go and decode; the diffs and the undo
           stay in the session-edits tab, one click away. */}
-      <RailFiles files={snap.changes} onOpen={() => store.setTab('changes')} />
+      <RailFiles files={snap.changes} onOpen={path => store.openChange(path)} />
     </aside>
   )
 }

@@ -85,13 +85,15 @@ export function RailAgents({ rows, onInspect }: {
 
 export function RailFiles({ files, onOpen }: {
   files: readonly DiffFile[]
-  onOpen: () => void
+  /** Open Session edits on this file's diff. */
+  onOpen: (path: string) => void
 }): ReactElement | null {
+  const [expanded, setExpanded] = useState(false)
   if (files.length === 0) return null
   // Biggest edits first: the file with 200 changed lines is the one worth
   // looking at, not whichever the agent happened to write last.
   const ordered = [...files].sort((a, b) => (b.adds + b.dels) - (a.adds + a.dels))
-  const shown = ordered.slice(0, VISIBLE)
+  const shown = expanded ? ordered : ordered.slice(0, VISIBLE)
   const adds = files.reduce((sum, file) => sum + file.adds, 0)
   const dels = files.reduce((sum, file) => sum + file.dels, 0)
   return (
@@ -110,13 +112,13 @@ export function RailFiles({ files, onOpen }: {
           <button
             className="railrow"
             key={file.path}
-            onClick={onOpen}
-            title={`${file.path} — open the session edits`}
+            onClick={() => onOpen(file.path)}
+            title={`${file.path} — show this file's edits`}
             // The visible text is a basename, and this repo is full of
             // colliding ones (three `types.ts`, four `index.ts`). The full
             // path used to live only in `title`, which a keyboard or screen
             // reader user never sees.
-            aria-label={`${file.path}, ${file.adds} added, ${file.dels} removed — open the session edits`}
+            aria-label={`${file.path}, ${file.adds} added, ${file.dels} removed — show this file's edits`}
           >
             <span className="railrow__name railrow__name--path">
               {parent && <span className="railrow__dir">{parent}/</span>}
@@ -127,9 +129,16 @@ export function RailFiles({ files, onOpen }: {
           </button>
         )
       })}
-      {ordered.length > VISIBLE && (
-        <button className="raillist__more" onClick={onOpen}>
-          {ordered.length - VISIBLE} more<Icon name="chevron" size={12} />
+      {/* "More" lists the rest here, like the Agents card. It used to jump to
+          Session edits, which read as a dead button from inside the rail. */}
+      {ordered.length > shown.length && (
+        <button className="raillist__more" aria-expanded={false} onClick={() => setExpanded(true)}>
+          {ordered.length - shown.length} more<Icon name="chevron" size={12} />
+        </button>
+      )}
+      {expanded && ordered.length > VISIBLE && (
+        <button className="raillist__more" aria-expanded onClick={() => setExpanded(false)}>
+          Show fewer
         </button>
       )}
     </section>

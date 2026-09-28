@@ -59,7 +59,7 @@ export function ChangesTab({ snap }: { snap: Snapshot }): ReactElement {
           Undo all
         </button>
       </div>
-      {files.map(file => <DiffFileCard key={file.path} file={file} />)}
+      {files.map(file => <DiffFileCard key={file.path} file={file} focusAt={snap.changesFocus?.path === file.path ? snap.changesFocus.at : undefined} />)}
       <p className="changes__note">
         Built from the file edits this task made. Your working tree is the source of truth — undo here asks the runtime to put a file back.
       </p>
@@ -67,10 +67,25 @@ export function ChangesTab({ snap }: { snap: Snapshot }): ReactElement {
   )
 }
 
-function DiffFileCard({ file }: { file: DiffFile }): ReactElement {
+/**
+ * One file's recorded edits. `focusAt` is set when the rail's Touched card
+ * asked for this file: the card opens, scrolls into view and is marked for a
+ * moment, so the click visibly lands on the file that was chosen.
+ */
+function DiffFileCard({ file, focusAt }: { file: DiffFile; focusAt?: number | undefined }): ReactElement {
   const [open, setOpen] = useState(true)
+  const [focused, setFocused] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (focusAt === undefined) return
+    setOpen(true)
+    setFocused(true)
+    ref.current?.scrollIntoView({ block: 'start', behavior: 'smooth' })
+    const timer = setTimeout(() => setFocused(false), 1_600)
+    return () => clearTimeout(timer)
+  }, [focusAt])
   return (
-    <div className="dfile">
+    <div className="dfile" ref={ref} data-focused={focused || undefined}>
       <div className="dfile__head">
         <span className="dot dot--done" />
         <button className="dfile__path" onClick={() => setOpen(value => !value)} title="Toggle hunks">

@@ -18,6 +18,8 @@ describe the earlier implementation and are not current setup instructions.
   keeps the saved model.
 - Desktop: command and skill suggestions, menus and pickers stay opaque over a
   transparent or image background.
+- Desktop: the rail's Touched card expands in place, and clicking a file opens
+  Session edits on that file's diff.
 
 ## 0.6.1 — 2026-09-28
 

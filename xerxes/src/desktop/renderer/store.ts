@@ -293,6 +293,8 @@ export interface Snapshot {
   readonly queue: readonly QueueItem[]
   readonly changes: readonly DiffFile[]
   readonly changesKept: boolean
+  /** The Session edits file the rail asked to show; `at` re-triggers the same file. */
+  readonly changesFocus?: { readonly path: string; readonly at: number } | null
   readonly todos: readonly TodoItem[] | null
   readonly plan: PlanState | null
   readonly log: readonly LogEntry[]
@@ -1746,6 +1748,11 @@ export class Store {
 
   setTab(tab: WorkspaceTab): void {
     this.patch({ tab })
+  }
+
+  /** Open Session edits on one file's diff (from the rail's Touched card). */
+  openChange(path: string): void {
+    this.patch({ tab: 'changes', changesFocus: { path, at: Date.now() } })
   }
 
   openSettings(tab?: SettingsTab): void {
