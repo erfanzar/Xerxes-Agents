@@ -1,9 +1,9 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 /** @jsxImportSource @opentui/react */
-import { RGBA, type ScrollBoxRenderable } from '@opentui/core'
+import { CliRenderEvents, RGBA, type CliRenderer, type ScrollBoxRenderable } from '@opentui/core'
 import { useStore } from '@nanostores/react'
-import { useKeyboard, useTerminalDimensions } from '@opentui/react'
+import { useKeyboard, useRenderer, useTerminalDimensions } from '@opentui/react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { workspaceFileDiff } from '../lib/workspaceDiffPreview.js'
 import { useOptionalGateway } from '../app/gatewayContext.js'
@@ -109,6 +109,39 @@ const DIFF_HEADER_ROWS = 1
 /** Wheel scrolling bypasses the keyboard path; this keeps following it cheap. */
 const SCROLL_FOLLOW_INTERVAL_MS = 200
 
+/**
+ * Scrolls `box` to `row`; when the current layout clamps it short, applies it
+ * again after the next frame, which lays out whatever React just committed
+ * (a remounted index, the overview replacing a file preview). A zero-delay
+ * timer is no stand-in for that pass: under load it fires first and the seek
+ * clamps against the stale layout. `onSettled` runs once the seek has landed;
+ * the returned function abandons it.
+ */
+function seekAfterLayout(
+  renderer: CliRenderer,
+  box: ScrollBoxRenderable,
+  row: number,
+  onSettled: () => void = () => {}
+): () => void {
+  box.scrollTo(row)
+
+  if (box.scrollTop === row) {
+    onSettled()
+
+    return () => {}
+  }
+
+  const settle = () => {
+    renderer.off(CliRenderEvents.FRAME, settle)
+    if (!box.isDestroyed) box.scrollTo(row)
+    onSettled()
+  }
+
+  renderer.on(CliRenderEvents.FRAME, settle)
+
+  return () => renderer.off(CliRenderEvents.FRAME, settle)
+}
+
 const lineNumber = (value: number | undefined): string =>
   value === undefined ? ' '.repeat(GUTTER_WIDTH) : String(value).padStart(GUTTER_WIDTH)
 
@@ -213,6 +246,7 @@ export function DiffPanelOverlay({
   t: Theme
 }) {
   const gateway = useOptionalGateway()
+  const renderer = useRenderer()
   const scrollRef = useRef<ScrollBoxRenderable | null>(null)
   const indexScrollRef = useRef<ScrollBoxRenderable | null>(null)
   const [result, setResult] = useState<GitDiffResult | null>(null)
@@ -224,6 +258,12 @@ export function DiffPanelOverlay({
   const generation = useRef(0)
   const untrackedLimit = useRef(50)
   const [listingError, setListingError] = useState('')
+  // An explicit seek (a [ ] jump, the way back from a file preview) lands
+  // after React commits the rows it targets. Until it has, viewport-follow
+  // stands down, or a poll tick would read the pre-seek scrollTop and undo
+  // the selection the seek is about to justify.
+  const [seek, setSeek] = useState<{ row: number } | null>(null)
+  const seeking = useRef(false)
   const { height: terminalHeight, width: terminalWidth } = useTerminalDimensions()
   useStore($panelWidthDelta)
   const { height: panelHeight, width: fittedWidth } = overlayPanelSize(
@@ -260,6 +300,18 @@ export function DiffPanelOverlay({
     reload()
     return () => { generation.current += 1 }
   }, [reload])
+
+  useEffect(() => {
+    const box = scrollRef.current
+    if (!seek || !box) return undefined
+    seeking.current = true
+    const cancel = seekAfterLayout(renderer, box, seek.row, () => { seeking.current = false })
+    return () => { seeking.current = false; cancel() }
+  }, [renderer, seek])
+  function seekTo(row: number) {
+    seeking.current = true
+    setSeek({ row })
+  }
 
   const page = 10
 
@@ -331,7 +383,7 @@ export function DiffPanelOverlay({
     if (!overview?.truncated && file.line >= 0) {
       setFileIdx(index)
       if (detailPath) { generation.current += 1; setDetailPath(''); setResult(allResult); setLoading(false) }
-      setTimeout(() => scrollRef.current?.scrollTo(file.line + DIFF_HEADER_ROWS), 0)
+      seekTo(file.line + DIFF_HEADER_ROWS)
       return
     }
     if (!detailPath) overviewScroll.current = scrollRef.current?.scrollTop ?? 0
@@ -340,7 +392,7 @@ export function DiffPanelOverlay({
   function returnToOverview() {
     generation.current += 1
     setDetailPath(''); setResult(allResult); setLoading(false)
-    setTimeout(() => scrollRef.current?.scrollTo(overviewScroll.current), 0)
+    seekTo(overviewScroll.current)
   }
   function loadMoreUntracked() {
     if (loading || listingError) return
@@ -358,10 +410,10 @@ export function DiffPanelOverlay({
   // columns the hunks need.
   const showFilePane = files.length > 1 && panelWidth >= FILE_PANE_MIN_PANEL_WIDTH
   useEffect(() => {
-    // Wait for newly loaded index rows to participate in terminal layout.
-    const timer = setTimeout(() => indexScrollRef.current?.scrollTo(Math.max(0, fileIdx - 3)), 0)
-    return () => clearTimeout(timer)
-  }, [fileIdx, files.length, showFilePane])
+    // Newly loaded index rows remount the pane; the seek waits for their layout.
+    const box = indexScrollRef.current
+    return box ? seekAfterLayout(renderer, box, Math.max(0, fileIdx - 3)) : undefined
+  }, [fileIdx, files.length, renderer, showFilePane])
   const codeWidth = Math.max(panelWidth - (showFilePane ? FILE_PANE_WIDTH + 1 : 0) - 8,
     ...((diff?.lines ?? []).map(line => Bun.stringWidth(line.text) + (GUTTER_WIDTH + 1) * 2 + 4)))
   const location = cwd?.trim() || 'current workspace'
@@ -374,7 +426,7 @@ export function DiffPanelOverlay({
   const syncSelectionFromScroll = useCallback(() => {
     const box = scrollRef.current
 
-    if (detailPath || !box || files.length === 0) {
+    if (detailPath || seeking.current || !box || files.length === 0) {
       return
     }
 

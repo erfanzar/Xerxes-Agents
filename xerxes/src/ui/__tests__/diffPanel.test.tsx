@@ -11,7 +11,7 @@ import { act } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { getPanelWidthDelta, resetPanelWidth } from '../app/panelSizeStore.js'
-import type { GitDiffResult } from '../lib/gitDiff.js'
+import { collectGitDiff, type GitDiffResult } from '../lib/gitDiff.js'
 import { blendColors, WORD_TINT_ADD, WORD_TINT_DEL } from '../lib/wordDiff.js'
 import { DiffPanelHotkey, DiffPanelOverlay, toRenderableColor } from '../opentui/diffPanel.js'
 import { DEFAULT_THEME } from '../theme.js'
@@ -97,6 +97,19 @@ afterEach(() => {
   expandedDiffResult = undefined
 })
 
+type RenderSetup = Awaited<ReturnType<typeof testRender>>
+
+// Await the load the panel started last — inside act, so its state commit
+// lands — instead of sleeping for however long a load takes under load, then
+// let the renderer paint and lay out the result.
+const settleLoad = async (setup: RenderSetup): Promise<void> => {
+  const load: unknown = vi.mocked(collectGitDiff).mock.results.at(-1)?.value
+  await act(async () => {
+    await load
+  })
+  await setup.flush()
+}
+
 describe('DiffPanelHotkey', () => {
   afterEach(() => {
     resetPanelWidth()
@@ -148,13 +161,12 @@ describe('DiffPanelOverlay', () => {
     expandedDiffResult = {...activeDiffResult, diff: {...activeDiffResult.diff, untracked: names, untrackedTruncated: false}}
     selectedDiffResult = {...DIFF_RESULT, diff: {...DIFF_RESULT.diff, lines: [{kind:'file',text:'new-64.ts'},{kind:'add',text:'+LAST_NEW_FILE',newLine:1}]}}
     const setup = await testRender(<DiffPanelOverlay onClose={() => {}} t={DEFAULT_THEME} />, {width: 120, height: 32})
-    const settle = async () => { await setup.flush(); await act(async () => { await Bun.sleep(10) }); await setup.flush() }
     try {
-      await settle();expect(setup.captureCharFrame()).toContain('FILE INDEX · 51')
-      await act(async () => { setup.mockInput.pressKey('m') });await settle()
+      await settleLoad(setup);expect(setup.captureCharFrame()).toContain('FILE INDEX · 51')
+      await act(async () => { setup.mockInput.pressKey('m') });await settleLoad(setup)
       expect(setup.captureCharFrame()).toContain('FILE INDEX · 66')
       expect(setup.captureCharFrame()).not.toContain('Load more new files')
-      for(let i=0;i<65;i++){await act(async () => {setup.mockInput.pressKey(']')});await settle()}
+      for(let i=0;i<65;i++){await act(async () => {setup.mockInput.pressKey(']')});await settleLoad(setup)}
       const frame=setup.captureCharFrame()
       expect(frame).toContain('LAST_NEW_FILE')
       expect(frame).toContain('new-63.ts')
@@ -165,16 +177,16 @@ describe('DiffPanelOverlay', () => {
     activeDiffResult = { ...DIFF_RESULT, diff: { ...DIFF_RESULT.diff, truncated: true } }
     selectedDiffResult = { ...DIFF_RESULT, diff: { ...DIFF_RESULT.diff, lines: [{kind: 'file', text: 'draft.ts'}, {kind: 'add', text: '+NEW_FILE_CONTENT', newLine: 1}] } }
     const setup = await testRender(<DiffPanelOverlay onClose={() => {}} t={DEFAULT_THEME} />, {width: 120, height: 32})
-    const settle = async () => { await act(async () => { await Bun.sleep(20) }); await setup.flush() }
     try {
-      await settle()
-      await act(async () => { setup.mockInput.pressKey(']') }); await settle()
+      await settleLoad(setup)
+      await act(async () => { setup.mockInput.pressKey(']') }); await settleLoad(setup)
       expect(setup.captureCharFrame()).toContain('NEW_FILE_CONTENT')
       selectedDiffResult = {kind: 'error', message: 'The new file was removed'}
-      await act(async () => { setup.mockInput.pressKey('r') }); await settle()
+      await act(async () => { setup.mockInput.pressKey('r') }); await settleLoad(setup)
       expect(setup.captureCharFrame()).toContain('The new file was removed')
       expect(setup.captureCharFrame()).not.toContain('NEW_FILE_CONTENT')
-      await act(async () => { setup.mockInput.pressKey('BACKSPACE') }); await settle()
+      // Returning to the overview reuses the loaded listing; nothing to await.
+      await act(async () => { setup.mockInput.pressKey('BACKSPACE') }); await setup.flush()
       expect(setup.captureCharFrame()).toContain('src/a.ts')
       expect(setup.captureCharFrame()).not.toContain('The new file was removed')
     } finally { act(() => setup.renderer.destroy()) }
@@ -184,7 +196,7 @@ describe('DiffPanelOverlay', () => {
       lines: [{ kind: 'file', text: 'tracked.ts' }, ...contextRows(1, 100), { kind: 'file', text: 'new.ts' }, { kind: 'hunk', text: '@@ -0,0 +1 @@' }, { kind: 'add', text: '+visible untracked content', newLine: 1 }] } }
     const setup = await testRender(<DiffPanelOverlay onClose={() => {}} t={DEFAULT_THEME} />, { width: 220, height: 65 })
     try {
-      await act(async () => { await Bun.sleep(10) }); await setup.flush()
+      await settleLoad(setup)
       await act(async () => { setup.mockInput.pressKey(']') }); await setup.flush()
       expect(setup.captureCharFrame()).toContain('visible untracked content')
     } finally { act(() => setup.renderer.destroy()) }
@@ -200,10 +212,7 @@ describe('DiffPanelOverlay', () => {
       width: 80
     })
 
-    await act(async () => {
-      await Bun.sleep(10)
-    })
-    await setup.flush()
+    await settleLoad(setup)
 
     try {
       const frame = setup.captureCharFrame()
@@ -236,8 +245,7 @@ describe('DiffPanelOverlay', () => {
     ] } }
     const setup = await testRender(<DiffPanelOverlay onClose={() => {}} t={DEFAULT_THEME} />, { width: 80, height: 24 })
     try {
-      await act(async () => { await Bun.sleep(10) })
-      await setup.flush()
+      await settleLoad(setup)
       expect(setup.captureCharFrame()).not.toContain('END_OF_CODE')
       await act(async () => { for (let i = 0; i < 12; i++) setup.mockInput.pressArrow('right') })
       await setup.flush()
@@ -254,10 +262,7 @@ describe('DiffPanelOverlay', () => {
       width: 80
     })
 
-    await act(async () => {
-      await Bun.sleep(10)
-    })
-    await setup.flush()
+    await settleLoad(setup)
 
     try {
       expect(getPanelWidthDelta()).toBe(0)
@@ -320,10 +325,7 @@ describe('DiffPanel file index and word highlights (mockup 07)', () => {
       height: 40,
       width: 120
     })
-    await act(async () => {
-      await Bun.sleep(10)
-    })
-    await setup.flush()
+    await settleLoad(setup)
 
     return setup
   }
@@ -472,6 +474,39 @@ describe('DiffPanel file index and word highlights (mockup 07)', () => {
 
       await sendKey(() => setup.mockInput.pressKey('['))
       expect(selected()['middleware.ts']).toBe(true)
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
+
+  it('keeps the followed file in view when loading more new files remounts the index', async () => {
+    const lines = Array.from({ length: 40 }, (_, index) => [
+      { kind: 'file' as const, text: `src/mod-${index}.ts` },
+      { kind: 'add' as const, newLine: 1, text: `+row ${index}` }
+    ]).flat()
+    activeDiffResult = { kind: 'ok', diff: { deletions: 0, files: 40, insertions: 40, lines, truncated: false, untracked: ['new-0.ts'], untrackedTruncated: true } }
+    expandedDiffResult = { ...activeDiffResult, diff: { ...activeDiffResult.diff, untracked: ['new-0.ts', 'new-1.ts'], untrackedTruncated: false } }
+    const setup = await renderWide()
+
+    try {
+      const selectedIndexRow = (): string | undefined => {
+        const line = setup.captureSpans().lines.find(row =>
+          row.spans.some(span => span.text.trim() === '▸' && hasFg(span, DEFAULT_THEME.color.accent)))
+        return line && lineText(line).match(/mod-\d+\.ts/)?.[0]
+      }
+
+      // End puts the viewport deep in the diff; the index follows it there.
+      await act(async () => { setup.mockInput.pressKey('END') })
+      await setup.flush()
+      const followed = selectedIndexRow()
+      expect(followed).toMatch(/mod-(1[5-9]|[23]\d)\.ts/)
+
+      // A longer listing remounts the index pane; its scroll must be applied
+      // after the new rows are laid out, not clamped against an empty pane.
+      await act(async () => { setup.mockInput.pressKey('m') })
+      await settleLoad(setup)
+      expect(setup.captureCharFrame()).toContain('FILE INDEX · 42')
+      expect(selectedIndexRow()).toBe(followed)
     } finally {
       act(() => setup.renderer.destroy())
     }
