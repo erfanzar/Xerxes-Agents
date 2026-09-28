@@ -7,6 +7,13 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.1 — 2026-09-28
+
+- Desktop: fresh macOS installs open with the transparent window, system blur, an
+  opaque chat column and see-through side panels; other platforms keep solid surfaces.
+- README: a real screenshot of the desktop app replaces a design render that never
+  loaded on GitHub.
+
 ## 0.6.0 — 2026-09-28
 
 Desktop application
