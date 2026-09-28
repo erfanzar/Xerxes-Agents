@@ -87,8 +87,32 @@ test('pay-as-you-go keys report their balance or spend limit from the provider',
   expect(seen.sort()).toEqual([
     'https://api.deepseek.com/user/balance Bearer ds-key',
     'https://api.moonshot.cn/v1/users/me/balance Bearer ms-key',
+    'https://openrouter.ai/api/v1/credits Bearer or-key',
     'https://openrouter.ai/api/v1/key Bearer or-key',
   ])
+})
+
+test('OpenRouter reports credit left and spend today, this week, this month and all time', async () => {
+  const fetchImplementation = async (url: string) => new Response(JSON.stringify(url.endsWith('/credits')
+    ? { data: { total_credits: 115, total_usage: 86.97 } }
+    : { data: { usage: 86.97, usage_daily: 0.0155, usage_weekly: 0.42, usage_monthly: 64.1, limit: null, is_free_tier: false } }), { status: 200 })
+  const [entry] = await buildUsageReport([profile('or', 'openrouter', { api_key: 'or-key' })], { fetchImplementation })
+  expect(entry).toMatchObject({ status: 'ok', balance: '$28.03 left', windows: [] })
+  expect(entry!.facts).toEqual([
+    { label: 'Credit left', value: '$28.03 of $115.00' },
+    { label: 'Spent today', value: '$0.02' },
+    { label: 'This week', value: '$0.42' },
+    { label: 'This month', value: '$64.10' },
+    { label: 'All time (this key)', value: '$86.97' },
+  ])
+
+  // A key that cannot read account credits still reports its own spend.
+  const keyOnly = async (url: string) => url.endsWith('/credits')
+    ? new Response('{}', { status: 403 })
+    : new Response(JSON.stringify({ data: { usage: 3.5, usage_daily: 1 } }), { status: 200 })
+  const [limited] = await buildUsageReport([profile('or', 'openrouter', { api_key: 'other-key' })], { fetchImplementation: keyOnly })
+  expect(limited).toMatchObject({ status: 'ok', balance: '$3.50 spent' })
+  expect(limited!.facts).toEqual([{ label: 'Spent today', value: '$1.00' }, { label: 'All time (this key)', value: '$3.50' }])
 })
 
 test('built-in profiles the user never signed into are left out unless active', async () => {

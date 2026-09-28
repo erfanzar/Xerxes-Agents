@@ -6,7 +6,9 @@
 // per-model), its API balance, or the reason there is nothing to show.
 import {
   compactTokens,
+  modelUsageSummary,
   resetIn,
+  usd,
   sessionUsageRows,
   usageSourceLabel,
   windowLabel,
@@ -39,7 +41,7 @@ export function usagePanelSections(report: UsageReportView, now = Date.now()): P
 
   if (!report.profiles.length) {
     sections.push({ title: 'Plans & keys', text: 'No provider profiles imported yet. Add one with /provider.' })
-    return sections
+    return withModelSpend(sections, report)
   }
 
   sections.push({ title: 'Plans & keys', count: String(report.profiles.length) })
@@ -63,8 +65,27 @@ export function usagePanelSections(report: UsageReportView, now = Date.now()): P
           ...(reset ? { right: `resets in ${reset}` } : {})
         }
       }),
+      ...(profile.facts?.length ? { rows: profile.facts.map(fact => [fact.label, fact.value] as [string, string]) } : {}),
       ...(profile.status === 'error' && profile.message ? { text: profile.message } : {})
     })
   }
+  return withModelSpend(sections, report)
+}
+
+/** Spend by model, from the runtime's own record; absent on runtimes that do not keep one. */
+function withModelSpend(sections: PanelSection[], report: UsageReportView): PanelSection[] {
+  const models = report.models
+  if (!models) return sections
+  if (!models.length) {
+    sections.push({ title: 'By model · last 30 days', text: 'No model calls recorded yet.' })
+    return sections
+  }
+  const priced = models.filter(model => model.costUsd !== undefined)
+  const total = priced.reduce((sum, model) => sum + (model.costUsd ?? 0), 0)
+  const ordered = [...models].sort((a, b) => (b.costUsd ?? -1) - (a.costUsd ?? -1) || (b.input + b.output) - (a.input + a.output))
+  sections.push({
+    heading: { label: 'By model', notes: ['last 30 days'], ...(priced.length ? { right: usd(total) } : {}), state: 'idle' },
+    rows: ordered.map(model => [model.model, `${model.costUsd === undefined ? 'price unknown' : usd(model.costUsd)} · ${modelUsageSummary(model)}`] as [string, string])
+  })
   return sections
 }

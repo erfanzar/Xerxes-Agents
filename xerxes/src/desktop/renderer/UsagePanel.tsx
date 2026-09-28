@@ -12,11 +12,14 @@
 import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
 
 import {
+  modelUsageSummary,
   parseUsageReport,
   resetIn,
+  usd,
   usageSourceLabel,
   windowLabel,
   windowNote,
+  type ModelUsageView,
   type UsageProfileView,
   type UsageReportView,
   type UsageWindowView,
@@ -64,10 +67,38 @@ export function ProfileCard({ profile, now }: { profile: UsageProfileView; now: 
       {profile.balance && <span className="usage-plan__balance">{profile.balance}</span>}
     </div>
     {profile.windows.length > 0 && <div className="usage-plan__windows">{profile.windows.map(window => windowMeter(window, profile, now))}</div>}
+    {profile.facts && profile.facts.length > 0 && <dl className="usage-plan__facts">{profile.facts.map(fact => <div key={fact.label}><dt>{fact.label}</dt><dd>{fact.value}</dd></div>)}</dl>}
     {profile.status === 'error' && <p className="usage-plan__message" role="status">{profile.message || 'Usage is unavailable right now.'}</p>}
     {profile.status === 'unsupported' && <p className="usage-plan__message usage-plan__message--quiet">This provider doesn't publish usage limits or a balance.</p>}
-    {profile.status === 'ok' && !profile.windows.length && !profile.balance && <p className="usage-plan__message usage-plan__message--quiet">No limits reported for this plan.</p>}
+    {profile.status === 'ok' && !profile.windows.length && !profile.balance && !profile.facts?.length && <p className="usage-plan__message usage-plan__message--quiet">No limits reported for this plan.</p>}
   </li>
+}
+
+/**
+ * Spend by model over the report window, from the runtime's own record of
+ * every provider round — tasks and subagents alike. A model nobody publishes
+ * a price for shows its tokens and "price unknown", never an invented $0.
+ */
+export function ModelSpend({ models, since }: { models: readonly ModelUsageView[]; since: number | undefined }): ReactElement {
+  const priced = models.filter(model => model.costUsd !== undefined)
+  const total = priced.reduce((sum, model) => sum + (model.costUsd ?? 0), 0)
+  const ordered = [...models].sort((a, b) => (b.costUsd ?? -1) - (a.costUsd ?? -1) || (b.input + b.output) - (a.input + a.output))
+  const days = since ? Math.max(1, Math.round((Date.now() - since) / 86_400_000)) : 30
+  return <section className="usage__section" aria-labelledby="usage-models">
+    <header className="usage__head">
+      <h3 id="usage-models">By model</h3>
+      <span className="usage__sub">Last {days} days{priced.length ? ` · ${usd(total)}` : ''}</span>
+    </header>
+    {!models.length && <p className="usage__empty">No model calls recorded yet. Totals appear here as tasks run.</p>}
+    {models.length > 0 && <ul className="usage-models">{ordered.map(model => <li key={model.model + (model.profile ?? '')} className="usage-model">
+      <div className="usage-model__row">
+        <strong className="usage-model__name" title={model.profile ? `${model.model} · ${model.profile}` : model.model}>{model.model}</strong>
+        <span className="usage-model__cost" data-unknown={model.costUsd === undefined || undefined}>{model.costUsd === undefined ? 'price unknown' : usd(model.costUsd)}</span>
+      </div>
+      <div className="usage-model__meta">{modelUsageSummary(model)}</div>
+    </li>)}</ul>}
+    <p className="usage__note">Estimated by Xerxes from the tokens it sent, at each model's published price.</p>
+  </section>
 }
 
 export function UsagePanel({ snap }: { snap: Snapshot }): ReactElement {
@@ -117,5 +148,6 @@ export function UsagePanel({ snap }: { snap: Snapshot }): ReactElement {
       {report && !profiles.length && <p className="usage__empty">No provider profiles yet. Add one from the model picker to see its limits here.</p>}
       {profiles.length > 0 && <ul className="usage-plans">{profiles.map(profile => <ProfileCard key={profile.profile} profile={profile} now={now} />)}</ul>}
     </section>
+    {report?.models && <ModelSpend models={report.models} since={report.modelsSince} />}
   </div>
 }

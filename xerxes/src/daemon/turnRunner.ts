@@ -78,6 +78,7 @@ import {
   type SubagentTurnCoordinator,
 } from './subagentCoordinator.js'
 import type { DaemonSubagentEventSource } from './subagentEvents.js'
+import { recordModelUsage } from '../runtime/modelUsageLedger.js'
 
 export interface AgentTurnRunnerOptions {
   readonly remoteProviderBindings?: RemoteProviderBindings
@@ -1641,6 +1642,14 @@ function accumulateSessionTelemetry(session: DaemonSession, event: StreamEvent):
     ttftTotalMs: finite('ttftTotalMs'),
   }
   if (event.type === 'usage_update') {
+    recordModelUsage({
+      model: event.model,
+      profile: typeof session.metadata.provider_profile === 'string' ? session.metadata.provider_profile : undefined,
+      inputTokens: event.usage.inputTokens,
+      outputTokens: event.usage.outputTokens,
+      cacheReadTokens: event.usage.cacheReadTokens,
+      cacheWriteTokens: event.usage.cacheCreationTokens,
+    })
     telemetry.llmSteps += 1
     telemetry.llmDurationMs += Math.max(0, event.durationMs ?? 0)
     if (event.tokensPerSecond !== undefined) telemetry.tokensPerSecond = Math.max(0, event.tokensPerSecond)

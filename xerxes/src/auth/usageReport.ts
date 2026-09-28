@@ -44,8 +44,15 @@ export interface UsageProfileEntry {
   readonly windows: readonly UsageWindow[]
   /** Pay-as-you-go keys: money left (or spent), e.g. "$12.40 left". */
   readonly balance?: string
+  /** Label/value rows the provider reports beyond windows, e.g. spend today or credit left. */
+  readonly facts?: readonly UsageFact[]
   readonly message?: string
   readonly fetchedAt?: number
+}
+
+export interface UsageFact {
+  readonly label: string
+  readonly value: string
 }
 
 /** Pay-as-you-go APIs that publish a key balance or spend limit. */
@@ -113,19 +120,40 @@ async function getJson(url: string, apiKey: string, options: UsageRequestOptions
 }
 
 /** Balance or key limit for a pay-as-you-go API key; windows only when the key has a spend cap. */
-export async function fetchApiBalance(source: ApiBalanceSource, profile: UsageProfile, options: UsageRequestOptions = {}): Promise<ProviderUsageReport & { balance?: string }> {
+export async function fetchApiBalance(source: ApiBalanceSource, profile: UsageProfile, options: UsageRequestOptions = {}): Promise<SourceReport> {
   const apiKey = profile.api_key?.trim()
   if (!apiKey) throw new Error('This profile has no API key saved.')
   const fetchedAt = Date.now()
   if (source === 'openrouter') {
-    const data = (await getJson('https://openrouter.ai/api/v1/key', apiKey, options)).data as Record<string, unknown> | undefined
+    // The key's own spend, then the account's credits. Credits are optional:
+    // a key without account scope still reports its spend.
+    const [key, credits] = await Promise.all([
+      getJson('https://openrouter.ai/api/v1/key', apiKey, options),
+      getJson('https://openrouter.ai/api/v1/credits', apiKey, options).catch(() => undefined),
+    ])
+    const data = key.data as Record<string, unknown> | undefined
     const used = numberOf(data?.usage) ?? 0
     const limit = numberOf(data?.limit)
     const free = data?.is_free_tier === true
+    const account = credits?.data as Record<string, unknown> | undefined
+    const purchased = numberOf(account?.total_credits)
+    const consumed = numberOf(account?.total_usage)
+    const remaining = purchased !== undefined && consumed !== undefined ? Math.max(0, purchased - consumed) : undefined
+    const facts: UsageFact[] = []
+    if (remaining !== undefined) facts.push({ label: 'Credit left', value: `${money(remaining, 'USD')} of ${money(purchased!, 'USD')}` })
+    for (const [field, label] of [['usage_daily', 'Spent today'], ['usage_weekly', 'This week'], ['usage_monthly', 'This month']] as const) {
+      const amount = numberOf(data?.[field])
+      if (amount !== undefined) facts.push({ label, value: money(amount, 'USD') })
+    }
+    facts.push({ label: 'All time (this key)', value: money(used, 'USD') })
+    if (consumed !== undefined && Math.abs(consumed - used) >= 0.005) facts.push({ label: 'All time (account)', value: money(consumed, 'USD') })
     return {
       provider: source, fetchedAt, ...(free ? { planType: 'free tier' } : {}),
       windows: limit && limit > 0 ? [{ label: 'Key limit', usedPercent: Math.min(100, (used / limit) * 100), detail: `${money(used, 'USD')} of ${money(limit, 'USD')}` }] : [],
-      balance: limit && limit > 0 ? `${money(Math.max(0, limit - used), 'USD')} left` : `${money(used, 'USD')} spent`,
+      balance: limit && limit > 0
+        ? `${money(Math.max(0, limit - used), 'USD')} left`
+        : remaining !== undefined ? `${money(remaining, 'USD')} left` : `${money(used, 'USD')} spent`,
+      facts,
     }
   }
   if (source === 'deepseek') {
@@ -142,7 +170,7 @@ export async function fetchApiBalance(source: ApiBalanceSource, profile: UsagePr
   return { provider: source, fetchedAt, windows: [], balance: `${money(available, cn ? 'CNY' : 'USD')} left` }
 }
 
-type SourceReport = ProviderUsageReport & { readonly balance?: string }
+type SourceReport = ProviderUsageReport & { readonly balance?: string; readonly facts?: readonly UsageFact[] }
 
 interface CacheEntry {
   readonly at: number
@@ -216,6 +244,7 @@ export async function buildUsageReport(
         ...(report.planType ? { plan: report.planType } : {}),
         windows: report.windows,
         ...(report.balance ? { balance: report.balance } : {}),
+        ...(report.facts?.length ? { facts: report.facts } : {}),
         fetchedAt: report.fetchedAt,
       }
     } catch (error) {

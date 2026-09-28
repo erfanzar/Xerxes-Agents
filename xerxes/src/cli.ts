@@ -109,6 +109,7 @@ import { TerminalRegistry } from "./runtime/terminalRegistry.js";
 import { ReactionMailbox } from "./runtime/reactionMailbox.js";
 import { RunHistory } from "./runtime/runHistory.js";
 import { GoalTokenLedger } from './runtime/goalTokenLedger.js';
+import { closeModelUsageLedger, openModelUsageLedger } from './runtime/modelUsageLedger.js';
 import { restoreRecoveredModelCallScopes } from './runtime/recoveredModelCallScopes.js';
 import { resolveSubagentRetryRequest } from './daemon/subagentRetryOwnership.js';
 import { TerminalMonitors } from "./runtime/terminalMonitors.js";
@@ -1043,6 +1044,7 @@ async function runDaemonOwned(
   // be a second, permanently empty view of the same shells.
   const runHistory = new RunHistory(join(xerxesHome(), "runs", "history.sqlite"));
   const goalTokenLedger = new GoalTokenLedger(join(xerxesHome(), 'runs', 'goal-tokens.sqlite'));
+  openModelUsageLedger(join(xerxesHome(), 'usage', 'model-usage.sqlite'));
   const goalTokenOwner = crypto.randomUUID();
   const reactionMailbox = new ReactionMailbox(join(xerxesHome(), "runs", "reactions.sqlite"));
   const monitorWebhookHub = daemonMonitorWebhookHub(config, process.env);
@@ -1190,6 +1192,7 @@ async function runDaemonOwned(
       () => reactionMailbox.close(),
       () => runHistory.close(),
       () => goalTokenLedger.close(),
+      () => closeModelUsageLedger(),
     ]) {
       try { await cleanup(); }
       catch (cleanupError) { console.error("Daemon startup cleanup failed:", cleanupError); }
@@ -1212,6 +1215,7 @@ async function runDaemonOwned(
     reactionMailbox.close();
     runHistory.close();
     goalTokenLedger.close();
+    closeModelUsageLedger();
   }
 }
 

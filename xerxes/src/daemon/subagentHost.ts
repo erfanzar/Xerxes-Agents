@@ -60,6 +60,7 @@ import {
 import { DaemonSubagentEventBus } from './subagentEvents.js'
 import { resolveOwnedSubagentRetry } from './subagentRetryOwnership.js'
 import type { DurableTaskBridge } from '../tasks/durableTaskBridge.js'
+import { recordModelUsage } from '../runtime/modelUsageLedger.js'
 
 export type SourceProviderClient = Pick<NativeSubagentHostOptions, 'llm' | 'contextLimit' | 'maxTokens' | 'maxOutputTokens' | 'temperature' | 'topK' | 'topP'> & { readonly route: string; readonly profile?: string }
 
@@ -1710,6 +1711,13 @@ function reportNativeSubagentEvent(event: StreamEvent, request: SubagentTaskRunR
       })
       return ''
     case 'usage_update':
+      recordModelUsage({
+        model: event.model,
+        inputTokens: event.usage.inputTokens,
+        outputTokens: event.usage.outputTokens,
+        cacheReadTokens: event.usage.cacheReadTokens,
+        cacheWriteTokens: event.usage.cacheCreationTokens,
+      })
       // Children report while they work, not only when they finish: a subagent
       // running for minutes would otherwise show "no tokens yet" throughout.
       request.report.usage({

@@ -28,8 +28,23 @@ export interface UsageProfileView {
   readonly plan?: string
   readonly windows: readonly UsageWindowView[]
   readonly balance?: string
+  /** Label/value rows beyond windows: credit left, spend today, this month… */
+  readonly facts?: readonly { readonly label: string; readonly value: string }[]
   readonly message?: string
   readonly fetchedAt?: number
+}
+
+/** Tokens the runtime recorded for one model over the report window. */
+export interface ModelUsageView {
+  readonly model: string
+  readonly profile?: string
+  readonly calls: number
+  readonly input: number
+  readonly output: number
+  readonly cacheRead: number
+  readonly cacheWrite: number
+  /** USD at published prices; absent when no one publishes a price for the model. */
+  readonly costUsd?: number
 }
 
 export interface SessionUsageView {
@@ -53,6 +68,9 @@ export interface UsageReportView {
   readonly fetchedAt: number
   readonly profiles: readonly UsageProfileView[]
   readonly session?: SessionUsageView
+  /** Per-model totals the runtime recorded since `modelsSince`; absent on older runtimes. */
+  readonly models?: readonly ModelUsageView[]
+  readonly modelsSince?: number
 }
 
 const SOURCE_NAMES: Readonly<Record<string, string>> = {
@@ -100,6 +118,9 @@ function profileOf(value: unknown): UsageProfileView | null {
   const status = item.status === 'ok' || item.status === 'error' ? item.status : 'unsupported'
   const optional = (key: 'source' | 'plan' | 'balance' | 'message') => { const text = str(item[key]); return text ? { [key]: text } : {} }
   const fetchedAt = num(item.fetchedAt)
+  const facts = Array.isArray(item.facts)
+    ? item.facts.map(record).flatMap(fact => { const label = str(fact.label); const value = str(fact.value); return label && value ? [{ label, value }] : [] })
+    : []
   return {
     profile,
     label: str(item.label) ?? profile,
@@ -109,6 +130,7 @@ function profileOf(value: unknown): UsageProfileView | null {
     status,
     windows: Array.isArray(item.windows) ? item.windows.map(windowOf).filter((entry): entry is UsageWindowView => entry !== null) : [],
     ...optional('source'), ...optional('plan'), ...optional('balance'), ...optional('message'),
+    ...(facts.length ? { facts } : {}),
     ...(fetchedAt === undefined ? {} : { fetchedAt }),
   }
 }
@@ -135,15 +157,48 @@ function sessionOf(value: unknown): SessionUsageView | undefined {
   } as SessionUsageView
 }
 
+function modelOf(value: unknown): ModelUsageView | null {
+  const item = record(value)
+  const model = str(item.model)
+  if (!model) return null
+  const profile = str(item.profile)
+  const cost = num(item.cost_usd)
+  return {
+    model,
+    ...(profile ? { profile } : {}),
+    calls: num(item.calls) ?? 0,
+    input: num(item.input_tokens) ?? 0,
+    output: num(item.output_tokens) ?? 0,
+    cacheRead: num(item.cache_read_tokens) ?? 0,
+    cacheWrite: num(item.cache_write_tokens) ?? 0,
+    ...(cost === undefined ? {} : { costUsd: cost }),
+  }
+}
+
 /** Normalize a `usage.report` result; malformed entries are dropped, never guessed. */
 export function parseUsageReport(value: unknown): UsageReportView {
   const item = record(value)
   const session = sessionOf(item.session)
+  const modelsSince = num(item.models_since)
   return {
     fetchedAt: num(item.fetched_at) ?? Date.now(),
     profiles: Array.isArray(item.profiles) ? item.profiles.map(profileOf).filter((entry): entry is UsageProfileView => entry !== null) : [],
     ...(session ? { session } : {}),
+    ...(Array.isArray(item.models) ? { models: item.models.map(modelOf).filter((entry): entry is ModelUsageView => entry !== null) } : {}),
+    ...(modelsSince === undefined ? {} : { modelsSince }),
   }
+}
+
+/** "$1.24", "$0.0031" — precise below a cent, rounded above. */
+export function usd(amount: number): string {
+  return `$${amount.toFixed(amount > 0 && amount < 0.01 ? 4 : 2)}`
+}
+
+/** One model's line: "412 calls · 1.2M in · 88K out" plus cache reads when there were any. */
+export function modelUsageSummary(model: ModelUsageView): string {
+  const parts = [`${model.calls} ${model.calls === 1 ? 'call' : 'calls'}`, `${compactTokens(model.input)} in`, `${compactTokens(model.output)} out`]
+  if (model.cacheRead > 0) parts.push(`${compactTokens(model.cacheRead)} cached`)
+  return parts.join(' · ')
 }
 
 /** Time until a window resets, as "3d 23h", "4h 12m" or "18m"; undefined when unknown. */
@@ -239,12 +294,18 @@ export function formatUsageText(report: UsageReportView, now = Date.now()): stri
       const head = [profile.label, usageSourceLabel(profile.source, profile.provider), profile.plan].filter(Boolean).join(' · ')
       lines.push(`${profile.active ? '●' : '○'} ${head}${profile.balance ? `  —  ${profile.balance}` : ''}`)
       if (profile.status !== 'ok') lines.push(`    ${profile.status === 'unsupported' ? 'No usage limits published' : profile.message ?? 'Unavailable'}`)
+      for (const fact of profile.facts ?? []) lines.push(`    ${fact.label.padEnd(18)}${fact.value}`)
       for (const window of profile.windows) {
         const reset = resetIn(window, profile.fetchedAt, now)
         const note = windowNote(window)
         lines.push(`    ${windowLabel(window).padEnd(18)}${textBar(window.usedPercent)} ${String(Math.round(window.usedPercent)).padStart(3)}%${note ? `  ${note}` : ''}${reset ? `  resets in ${reset}` : ''}`)
       }
     }
+  }
+  if (report.models?.length) {
+    if (lines.length) lines.push('')
+    lines.push('By model · last 30 days')
+    for (const model of report.models) lines.push(`  ${model.model.padEnd(28)}${(model.costUsd === undefined ? 'price unknown' : usd(model.costUsd)).padEnd(15)}${modelUsageSummary(model)}`)
   }
   return lines.join('\n') || 'No usage recorded yet.'
 }
