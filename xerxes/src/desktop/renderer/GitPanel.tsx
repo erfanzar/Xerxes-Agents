@@ -50,6 +50,23 @@ export function statusLabel(file: ScmFile, group: ScmGroupKey): string {
  * so the agent reviews what you are about to commit, not the whole repo, and
  * it asks for findings rather than edits.
  */
+/**
+ * The instruction behind "Create PR": the agent does the work — it can read
+ * the repository's conventions, write the description and recover from a
+ * missing `gh` login — instead of the app guessing a title and branch name.
+ */
+export function pullRequestPrompt(branch: string | null): string {
+  return [
+    `Open a pull request for the work in this repository${branch ? ` (current branch \`${branch}\`)` : ''}.`,
+    '',
+    '1. Check `gh auth status` and the remote. If `gh` is missing or not signed in, stop and tell me exactly what to run.',
+    '2. Look at the uncommitted changes (respect .gitignore). If there are any, commit them in logical commits following this repository\'s commit-message conventions (read recent `git log` and any AGENTS.md or CONTRIBUTING notes).',
+    '3. If the current branch is the default branch, create a new branch named after the change first, so the pull request has a head branch. Never force-push and never rewrite published history.',
+    '4. Push the branch, then run `gh pr create` (not a draft) with a clear title and a body covering what changed, why, and how it was tested. Follow the repository\'s pull request template if it has one.',
+    '5. Reply with the pull request URL.',
+  ].join('\n')
+}
+
 export function reviewPrompt(status: Pick<ScmStatus, 'branch' | 'hasHead'>): string {
   const read = status.hasHead
     ? '`git diff HEAD` (staged and unstaged together) plus the untracked files from `git ls-files --others --exclude-standard`'

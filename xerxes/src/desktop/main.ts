@@ -203,7 +203,20 @@ function activateSurface(id: number): void {
   if (!surface || surface.host.isDestroyed()) return
   for (const [otherId, other] of workspaceSurfaces) {
     if (other.host !== surface.host) continue
-    if (other.view) other.view.setVisible(otherId === id)
+    if (other.view) {
+      const shown = otherId === id
+      other.view.setVisible(shown)
+      // Views are created unthrottled so the shown one stays live behind
+      // other apps, but in Electron that also pins the Page Visibility API to
+      // "visible". Every retained workspace kept running its timers, polls
+      // and animations at full rate while covered — ten hidden pages were
+      // most of the app's energy use. Covered views throttle like a
+      // background tab; socket and IPC events still arrive.
+      if (!other.view.webContents.isDestroyed()) {
+        other.view.webContents.setBackgroundThrottling(!shown)
+        other.view.webContents.send('desktop:occluded', !shown)
+      }
+    }
     // The window's own page cannot be hidden like a view. With a transparent
     // background the view on top is see-through, so a covered base page
     // showed through it (two workspaces drawn over each other); it hides

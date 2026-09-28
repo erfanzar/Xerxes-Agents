@@ -49,6 +49,21 @@ function basename(path: string): string {
   return path.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || path
 }
 
+/**
+ * Which orb animation matches one running call. Lookups scan a globe, edits
+ * reshape an outline, agent traffic wires a constellation; commands and
+ * anything unrecognised read as generic work.
+ */
+export function toolOrbState(item: Pick<ToolItem, 'name' | 'verb'>): 'working' | 'searching' | 'shaping' | 'connecting' | 'solving' {
+  switch (familyOf(item.name || item.verb)) {
+    case 'read': case 'search': case 'web': return 'searching'
+    case 'edit': return 'shaping'
+    case 'spawn': case 'message': case 'wait': case 'agents': return 'connecting'
+    case 'plan': return 'solving'
+    default: return 'working'
+  }
+}
+
 /** Present-tense phrase for one running call: "Running pytest tests/". */
 export function toolPhrase(item: Pick<ToolItem, 'name' | 'verb' | 'arg' | 'path'>): string {
   const target = item.path || item.arg

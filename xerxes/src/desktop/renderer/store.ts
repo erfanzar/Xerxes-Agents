@@ -145,6 +145,9 @@ function agentStatusOf(status: string): string {
  * SpawnAgents carries an `agents` batch; the single-spawn tools carry one
  * title-ish field. Keys are call-local; fleet sync matches on title.
  */
+/** Minimum spacing of routine (streaming) store updates: 20 a second. */
+const STREAM_FRAME_MS = 50
+
 /** The daemon's refusal to resume a session whose turn is running under another connection. */
 const RUNNING_ELSEWHERE = /still running a turn under another connection/i
 
@@ -2019,6 +2022,28 @@ export class Store {
       if (pending && this.frame.sessionMenu === pending) {
         this.patch({ sessionMenu: { ...pending, pending: false, error: desktopError(error) } })
       } else if (!anchor) this.fail(new Error(`Rename failed: ${desktopError(error)}`))
+    }
+  }
+
+  /**
+   * Permanently delete a saved chat (the runtime refuses one whose turn is
+   * running). Deleting the chat on screen opens a fresh task in its place.
+   */
+  async deleteSession(id: string): Promise<void> {
+    const anchor = this.frame.sessionMenu
+    if (anchor?.pending) return
+    const pending = anchor ? { ...anchor, pending: true, error: '' } : null
+    if (pending) this.patch({ sessionMenu: pending })
+    try {
+      const result = await this.bridge.call('session.delete', { session_id: id })
+      if (result.ok === false) throw new Error(str(result.error) || 'The chat could not be deleted')
+      if (!pending || this.frame.sessionMenu === pending) this.patch({ sessionMenu: null })
+      if (id === this.frame.currentId && this.frame.connection === 'online') await this.beginFreshTask()
+      this.refreshSessions()
+    } catch (error) {
+      // Keep the menu (and its error) only while it is still the one we opened.
+      if (pending && this.frame.sessionMenu === pending) this.patch({ sessionMenu: { ...pending, pending: false, error: desktopError(error) } })
+      else this.fail(new Error(`Delete failed: ${desktopError(error)}`))
     }
   }
 
@@ -3911,20 +3936,30 @@ export class Store {
    * listener fan-out waits for the next frame. A pending frame is flushed
    * immediately on any event that changes more than the streaming tail.
    */
-  private emitScheduled: number | null = null
+  private emitScheduled: ReturnType<typeof setTimeout> | null = null
+  private lastEmitAt = 0
 
   private emit(immediate = false): void {
     if (immediate) {
-      if (this.emitScheduled !== null) { cancelAnimationFrame(this.emitScheduled); this.emitScheduled = null }
+      if (this.emitScheduled !== null) { clearTimeout(this.emitScheduled); this.emitScheduled = null }
+      this.lastEmitAt = Date.now()
       for (const listener of this.listeners) listener()
       return
     }
     if (this.emitScheduled !== null) return
+    // No frames outside a page (tests, SSR): nothing to pace against.
     if (typeof requestAnimationFrame !== 'function') { for (const listener of this.listeners) listener(); return }
-    this.emitScheduled = requestAnimationFrame(() => {
+    // At most one routine update per STREAM_FRAME_MS. Once per animation
+    // frame was 120 full re-renders a second on a ProMotion display while a
+    // reply streamed (each re-parsing the growing Markdown) — the renderer
+    // and GPU spikes behind "Using Significant Energy". Text still reads as
+    // live at 20 updates a second; anything urgent emits immediately.
+    const wait = Math.max(0, STREAM_FRAME_MS - (Date.now() - this.lastEmitAt))
+    this.emitScheduled = setTimeout(() => {
       this.emitScheduled = null
+      this.lastEmitAt = Date.now()
       for (const listener of this.listeners) listener()
-    })
+    }, wait)
   }
 }
 

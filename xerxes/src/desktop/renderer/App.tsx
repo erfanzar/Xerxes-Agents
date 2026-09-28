@@ -30,7 +30,8 @@ import { RailAgents, RailFiles } from './RailLists.js'
 import { AgentInspector } from './AgentInspector.js'
 import { OutputViewer } from './OutputViewer.js'
 import { Icon } from './Icon.js'
-import { RailStatus } from './RailStatus.js'
+import { RailStatus, currentActionOf, orbStateOf } from './RailStatus.js'
+import { AgentOrb } from './AgentOrb.js'
 // Re-exported: it moved into its own module so the rail's diagnostics
 // drawer (DesktopPanels) can import it without a cycle through App.
 export { SessionDiagnostics } from './SessionDiagnostics.js'
@@ -41,6 +42,7 @@ import { FirstRunSetup } from './Setup.js'
 import { RemoteWorkspaceGate } from './RemoteWorkspaceGate.js'
 import { BackgroundIndicator, DesktopNavigation, DesktopSheet, DesktopPage, DesktopRail, useDesktopNavigation, type DesktopPanel, type RailPanel } from './DesktopPanels.js'
 import { desktopCall } from './desktopRpc.js'
+import { pullRequestPrompt } from './GitPanel.js'
 import { elapsedOf } from './duration.js'
 import type { ScmStatus } from '../../workspace/gitScm.js'
 
@@ -110,6 +112,13 @@ function toolLabelOf(verb: string): string {
 
 /** Compact turn clock for the feed status line: 43 → "43s", 255 → "4m 15s". */
 const turnDurOf = (seconds: number): string => elapsedOf(seconds)
+
+/** The composer's one-line status: the running tool, else what the model is doing. */
+function composerPhraseOf(snap: Snapshot): string {
+  if (snap.networkRetrying) return 'Retrying connection…'
+  if (snap.approval || snap.question) return 'Waiting for you'
+  return currentActionOf(snap)?.verb ?? 'Thinking…'
+}
 
 function ttftOf(milliseconds: number): string {
   return milliseconds < 1_000 ? `${Math.round(milliseconds)}ms` : `${(milliseconds / 1_000).toFixed(1)}s`
@@ -626,6 +635,13 @@ function SessionMenu({ menu }: { menu: Snapshot['sessionMenu'] }): ReactElement 
             <button role="menuitem" className="menu__item" onClick={() => { void store.exportSessionTranscript(menu.key) }}>
               <Icon name="download" size={13} /> Export as Markdown
             </button>
+            <div className="menu__sep" />
+            <button role="menuitem" className="menu__item menu__item--danger" disabled={menu.pending} onClick={() => {
+              // Permanent: the saved transcript is removed, not archived.
+              if (window.confirm(`Delete “${menu.title || 'this chat'}”? Its saved history is removed permanently.`)) void store.deleteSession(menu.id)
+            }}>
+              <Icon name="trash" size={13} /> {menu.pending ? 'Deleting…' : 'Delete…'}
+            </button>
           </>
         )}
         {menu.error && <p className="session-menu-error" role="alert">{menu.error}</p>}
@@ -1086,6 +1102,7 @@ function Welcome({ snap }: { snap: Snapshot }): ReactElement {
   const place = workspaceLabel(here)
 
   return <div className="welcome">
+    <AgentOrb className="welcome__orb" size={64} state="breathing" settleMs={9000} />
     <h1 className="welcome__wordmark">XERXES</h1>
 
     {place ? (
@@ -1827,8 +1844,8 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
           <div className="hints__keys"><span>Type to filter</span><kbd>↵</kbd> / <kbd>tab</kbd> complete <kbd>↑↓</kbd> pick <kbd>esc</kbd> dismiss</div>
         </div>
       )}
-      {snap.submissionPending && !snap.turnActive && <div className="streamstatus composer-status" role="status">Sending… preparing the task</div>}
-      {snap.turnActive && <div className="streamstatus composer-status" role="status" aria-live="polite">{snap.networkRetrying ? 'Retrying connection…' : 'Acting…'} {turnDurOf(snap.turnSeconds)}</div>}
+      {snap.submissionPending && !snap.turnActive && <div className="streamstatus composer-status" role="status"><AgentOrb size={20} state="connecting" /><span className="streamstatus__phrase">Sending…</span></div>}
+      {snap.turnActive && <div className="streamstatus composer-status" role="status" aria-live="polite"><AgentOrb size={20} state={orbStateOf(snap)} /><span className="streamstatus__phrase">{composerPhraseOf(snap)}</span><span className="streamstatus__clock">{turnDurOf(snap.turnSeconds)}</span></div>}
       <ComposerTaskSummary snap={snap} />
       <RepoBar snap={snap} />
       <div className="composer-dock">
@@ -1992,6 +2009,12 @@ function RepoBar({ snap }: { snap: Snapshot }): ReactElement | null {
         : <span>{repo.files} file{repo.files === 1 ? '' : 's'}</span>}
     </button>}
     {repo && <button className="repobar__action" onClick={() => open('review')}>{changed ? 'Review' : 'Git'}</button>}
+    {repo && <button
+      className="repobar__action repobar__pr"
+      disabled={snap.connection !== 'online' || snap.turnActive || snap.submissionPending}
+      title={snap.turnActive ? 'Available when the current turn finishes' : 'Ask the agent to commit, push and open a pull request with gh'}
+      onClick={() => void store.submit(pullRequestPrompt(repo.branch ?? snap.branch ?? null), 'Create a pull request')}
+    >Create PR</button>}
     <button className="repobar__close" aria-label="Hide repository line" title="Hide until restart" onClick={() => { hiddenRepoBars.add(snap.cwd); setHidden(true) }}><Icon name="close" size={14} /></button>
   </div>
 }
@@ -2026,7 +2049,7 @@ function RailTodos({ snap }: { snap: Snapshot }): ReactElement | null {
     <header className="railcard__head"><span className="railcard__title">To-dos</span><span className="railcard__meta">{done}/{todos.length}</span></header>
     <ol className="railtodos">
       {todos.map((item, index) => <li key={`${item.id}:${index}`} data-state={item.status}>
-        <span className="railtodos__mark" aria-hidden="true">{item.status === 'completed' ? <Icon name="check" size={12} /> : item.status === 'in_progress' ? <Icon name="spinner" size={12} /> : null}</span>
+        <span className="railtodos__mark" aria-hidden="true">{item.status === 'completed' ? <Icon name="check" size={12} /> : item.status === 'in_progress' ? <AgentOrb size={20} state={snap.turnActive ? orbStateOf(snap) : 'breathing'} live={snap.turnActive} /> : null}</span>
         <span className="railtodos__text">{item.content}</span>
         <span className="sr-only">{item.status === 'completed' ? 'completed' : item.status === 'in_progress' ? 'in progress' : 'pending'}</span>
       </li>)}

@@ -41,3 +41,15 @@ test('the main button follows the next useful step once there is nothing to comm
   expect(primaryAction({ ...repo, ahead: 3, detached: true, branch: null }, 0).kind).toBe('commit')
   expect(primaryAction({ ...repo, upstream: null, hasHead: false }, 0).kind).toBe('commit')
 })
+
+test('Create PR asks the agent to commit, branch off the default branch, push and open a non-draft PR', async () => {
+  const { pullRequestPrompt } = await import('../src/desktop/renderer/GitPanel.js')
+  const prompt = pullRequestPrompt('main')
+  expect(prompt).toContain('current branch `main`')
+  expect(prompt).toContain('gh auth status')
+  expect(prompt).toContain('default branch, create a new branch')
+  expect(prompt).toContain('Never force-push')
+  expect(prompt).toContain('gh pr create')
+  expect(prompt).toContain('not a draft')
+  expect(pullRequestPrompt(null)).not.toContain('(current branch')
+})

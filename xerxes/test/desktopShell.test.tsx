@@ -121,7 +121,7 @@ test('the shell renders the right state in every connectivity mode', () => {
           { kind: 'agent', id: 3, text: 'here it is', streaming: true },
         ],
       }),
-      ['Working', 'Stop', 'map the repo', 'here it is', 'Acting… 12s', 'Searching for x'],
+      ['Working', 'Stop', 'map the repo', 'here it is', 'streamstatus__clock">12s<', 'streamstatus__phrase">Searching for x<', 'data-state="searching"'],
     ],
   ]
   for (const [label, snap, needles] of cases) {
@@ -439,8 +439,10 @@ test('the feed groups live reasoning and tools without constructing collapsed ex
   expect(html).not.toContain('and cleared, end to end.')
   expect(html).not.toContain('grep -rn caret src/')
   expect(html).not.toContain('execution-row')
-  // The live status line carries the turn clock at the end of the feed.
-  expect(html).toContain('Acting… 1m 15s')
+  // The live status line names what the model is doing and carries the turn clock.
+  expect(html).toContain('streamstatus__phrase">Thinking…<')
+  expect(html).toContain('streamstatus__clock">1m 15s<')
+  expect(html).toContain('<span class="agent-orb" data-state="solving"')
 })
 
 test('the first tool call has a collapsed section before any result or later activity arrives', () => {
@@ -659,15 +661,14 @@ test('session rows show active state without repetitive idle turn counts', () =>
 
 // ── Session context menu (mockup 08) ────────────────────────────────────
 
-test('the session context menu offers open, rename and copy id', () => {
+test('the session context menu offers open, rename, copy id and delete', () => {
   const html = render(
     snapshot({ sessionMenu: { id: 'aa19f402', key: 'aa19f402', title: 'Ship loop', x: 40, y: 60 } }),
   )
-  for (const needle of ['Session actions', 'Open', 'Rename…', 'Copy ID', 'Export as Markdown']) {
+  for (const needle of ['Session actions', 'Open', 'Rename…', 'Copy ID', 'Export as Markdown', 'Delete…']) {
     expect(html).toContain(needle)
   }
-  // Items with no wire capability are deliberately absent.
-  expect(html).not.toContain('Delete')
+  // Delete is backed by session.delete; items with no wire capability stay absent.
   expect(html).not.toContain('Move to worktree')
 })
 

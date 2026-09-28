@@ -1546,24 +1546,6 @@ html,body,#root,.app.atelier{background:transparent}
   z-index:6;
 }
 
-/* ── Working spinner ───────────────────────────────────────────────
-   Shown in place of the status dot while a turn is genuinely in
-   flight. The elapsed clock beside it already proves time is passing,
-   but a clock only updates once a second — the spinner is what makes
-   the card feel alive between ticks.
-
-   The global reduced-motion rule at the top of this file stops the
-   rotation, which is why the glyph is a notched ring rather than a
-   bare arc: stopped, it still reads as a deliberate indicator instead
-   of a half-drawn circle. */
-/* `--x-working`, not `--x-activity`: the card's left edge already marks
-   this state in the working colour, and the inherited dot rule used the
-   activity purple — one state wearing two colours an inch apart. */
-.atelier .railstatus__spinner{
-  display:inline-flex;flex:none;color:var(--x-working);
-  animation:railspin 900ms linear infinite;
-}
-@keyframes railspin{to{transform:rotate(360deg)}}
 .atelier .railstatus[data-tone='working'] .railstatus__dot{background:var(--x-working)}
 
 /* ── Discovered models ─────────────────────────────────────────────
@@ -1919,7 +1901,7 @@ html,body,#root,.app.atelier{background:transparent}
 .atelier .term__view{flex:1;min-height:0;padding:8px 4px 4px 10px;background:var(--x-screen)}
 .atelier .term__view[hidden]{display:none}
 .atelier .term__view .xterm{height:100%}
-.atelier .term__view .xterm-viewport{scrollbar-width:thin}
+.atelier .term__view .xterm-viewport::-webkit-scrollbar{width:9px}
 .atelier .term__error{margin:var(--s-2) var(--s-3);padding:6px var(--s-2);border-radius:var(--r-sm);background:var(--x-failed-bg);color:var(--x-failed-text);font:var(--t-caption)}
 .atelier .term__empty{display:grid;justify-items:center;align-content:center;gap:8px;flex:1;color:var(--x-meta);font:var(--t-caption)}
 .atelier .term__empty p{margin:0}
@@ -2076,12 +2058,9 @@ html,body,#root,.app.atelier{background:transparent}
 
 /* Seams over a chosen background: a 1px divider painted with a translucent
    hairline let the raw image glitter through it. It is an opaque tinted
-   line instead, with the hairline laid over it. Scrollbar thumbs become a
-   soft tint of the text colour so they sit in the palette. */
+   line instead, with the hairline laid over it. */
 :root[data-backdrop] .panel-divider{background:linear-gradient(var(--x-hairline),var(--x-hairline)),var(--x-seam)}
 :root[data-backdrop] .panel-divider:hover,:root[data-backdrop] .panel-divider:focus-visible{background:var(--x-focus)}
-:root[data-backdrop] ::-webkit-scrollbar-thumb{background:color-mix(in srgb,var(--x-title) 20%,transparent);border:2px solid transparent;border-radius:8px;background-clip:padding-box}
-:root[data-backdrop] ::-webkit-scrollbar-thumb:hover{background:color-mix(in srgb,var(--x-title) 34%,transparent);background-clip:padding-box}
 
 .atelier .backdrop-levels{display:grid;grid-template-columns:auto minmax(120px,1fr) 3.5ch;align-items:center;gap:6px 12px;font:var(--t-caption);color:var(--x-secondary)}
 .atelier .backdrop-levels input[type="range"]{width:100%;accent-color:var(--x-accent)}
@@ -2329,7 +2308,10 @@ html,body,#root,.app.atelier{background:transparent}
    (status text and counters keep updating). main.tsx sets the attribute. */
 :root[data-window-unfocused] .atelier *:not(.live-phrase__item):not(.studio-sheet),
 :root[data-window-unfocused] .atelier *::before,
-:root[data-window-unfocused] .atelier *::after{animation-play-state:paused!important}
+:root[data-window-unfocused] .atelier *::after,
+:root[data-occluded] .atelier *:not(.live-phrase__item):not(.studio-sheet),
+:root[data-occluded] .atelier *::before,
+:root[data-occluded] .atelier *::after{animation-play-state:paused!important}
 /* Only looping indicators pause. One-shot entrances must finish: a status
    phrase that faded in while the window was unfocused stayed paused at
    opacity 0 ("Working ·   · 1 failed") until something was clicked, and a
@@ -2712,14 +2694,12 @@ html,body,#root,.app.atelier{background:transparent}
 }
 :root[data-backdrop='transparent'] .panel-divider{background:linear-gradient(var(--x-hairline),var(--x-hairline)),var(--x-screen)}
 
-/* The spinner icon only spins when something turns it: the rail's current
-   to-do, a working subagent row and header, a running file tool. */
-.atelier .railtodos li[data-state='in_progress'] .railtodos__mark svg,
+/* The spinner icon only spins when something turns it: a working
+   subagent row and header, a running file tool. */
 .atelier .acard__row[data-tone='working'] .acard__glyph svg,
 .atelier .acard[data-state='working'] .acard__icon svg,
 .atelier .filetool[data-state='working'] .filetool__verb svg{animation:studio-spin .9s linear infinite;transform-origin:50% 50%}
 @media (prefers-reduced-motion:reduce){
-  .atelier .railtodos li[data-state='in_progress'] .railtodos__mark svg,
   .atelier .acard__row[data-tone='working'] .acard__glyph svg,
   .atelier .acard[data-state='working'] .acard__icon svg,
   .atelier .filetool[data-state='working'] .filetool__verb svg{animation:none}
@@ -2729,3 +2709,66 @@ html,body,#root,.app.atelier{background:transparent}
    with Grep/Exec in a group instead of sitting on its edge. */
 .atelier .tlist>.filetool{padding:7px 8px}
 .atelier .activity-group__body .tlist>.filetool{padding:10px 14px}
+.atelier .repobar button:disabled{opacity:.45;cursor:default}
+.atelier .repobar button:disabled:hover{background:transparent;color:var(--x-secondary)}
+
+/* The rail is a step lighter than the conversation, as in Claude's app
+   (#1a1a1a beside #151515): halfway to the card colour, in every theme.
+   With a background picture its own tinted layer draws instead. */
+:root[data-layout='claude']:not([data-backdrop]) .atelier .desktop-rail{background:color-mix(in srgb,var(--x-screen) 50%,var(--x-card))}
+.atelier .menu__item--danger{color:var(--x-failed,#e5484d)}
+.atelier .menu__item--danger:hover{background:color-mix(in srgb,var(--x-failed,#e5484d) 14%,transparent)}
+
+/* ══ Claude-sized type ════════════════════════════════════════════════
+   Measured against Claude's desktop app at the same UI scale: transcript
+   lines ~20px apart (14px text), session rows ~28px, nav rows ~26px. The
+   first pass was ~25% larger everywhere (15px/1.65 prose, 34px rows). */
+:root[data-layout='claude'] .atelier{
+  --t-prose:400 14px/1.45 var(--sans);
+  --t-body:400 13px/1.45 var(--sans);
+  --t-caption:500 11.5px/1.4 var(--sans);
+}
+:root[data-layout='claude'] .atelier .msg--agent .msg__text{font:var(--t-prose)}
+:root[data-layout='claude'] .atelier .msg--user{padding:8px 14px;border-radius:16px}
+:root[data-layout='claude'] .atelier .msg--user .msg__text{font:400 14px/1.45 var(--sans)}
+:root[data-layout='claude'] .atelier .stream__col{gap:12px}
+/* Sidebar. */
+:root[data-layout='claude'] .atelier :is(.newchat,.studio-nav,.studio-side-bottom>button,.runtime-status){height:28px;min-height:28px;font-size:13.5px;gap:9px}
+:root[data-layout='claude'] .atelier .studio-segment>button{height:26px;font-size:12.5px}
+:root[data-layout='claude'] .atelier .side__search{height:28px;font-size:12.5px}
+:root[data-layout='claude'] .atelier .wgroup{margin-top:10px}
+:root[data-layout='claude'] .atelier .wgroup__cap{height:26px;min-height:26px;font-size:13px}
+:root[data-layout='claude'] .atelier .sess{min-height:28px;gap:12px}
+:root[data-layout='claude'] .atelier .sess__t{font-size:13.5px}
+/* Header, composer and repository line. */
+:root[data-layout='claude'] .atelier .chat__head--minimal .chat__title{font-size:13px}
+:root[data-layout='claude'] .atelier .chat__kind,:root[data-layout='claude'] .atelier .chat__view{font-size:12px}
+:root[data-layout='claude'] .atelier .composer__input{font-size:14px;line-height:1.45}
+:root[data-layout='claude'] .atelier .composer__toolbar .cchip{font-size:13px;height:26px}
+:root[data-layout='claude'] .atelier .repobar{min-height:36px;font-size:12.5px}
+:root[data-layout='claude'] .atelier .repobar button{height:27px}
+:root[data-layout='claude'] .atelier .composer-task-summary{font-size:12.5px}
+/* Tool rows and cards. */
+:root[data-layout='claude'] .atelier .activity-group>summary,:root[data-layout='claude'] .atelier .activity-group__summary{font-size:13px}
+:root[data-layout='claude'] .atelier .filetool__head{font-size:13px}
+:root[data-layout='claude'] .atelier .filetool__code pre{font-size:12px}
+:root[data-layout='claude'] .atelier .md__codewrap .md__code,:root[data-layout='claude'] .atelier .md pre{font-size:12.5px}
+:root[data-layout='claude'] .atelier .acard__t{font-size:13px}
+:root[data-layout='claude'] .atelier .desktop-rail>header button{font-size:12.5px}
+
+/* ── Agent orb ─────────────────────────────────────────────────────
+   The status mark (AgentOrb.tsx) replaces the pulsing dot, the rail
+   spinner and the to-do spinner. It draws on a canvas from one shared
+   capped-rate timer, so none of these carry a CSS animation any more. */
+.atelier .agent-orb{display:inline-block;flex:none;position:relative;vertical-align:middle}
+.atelier .agent-orb canvas{display:block;width:100%;height:100%}
+.atelier .streamstatus{align-items:center;gap:7px;color:var(--x-secondary);font:400 13px/1.4 var(--sans)}
+.atelier .streamstatus::before{content:none}
+.atelier .streamstatus__phrase{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--x-prose)}
+.atelier .streamstatus__clock{flex:none;color:var(--x-meta);font-variant-numeric:tabular-nums}
+.atelier .railstatus__orb{margin:0 0 0 -2px}
+.atelier .railtodos li{grid-template-columns:20px minmax(0,1fr)}
+.atelier .railtodos__mark{justify-self:center}
+.atelier .railtodos li[data-state='in_progress'] .railtodos__mark{width:20px;height:20px;margin:-1px 0 0;border:0}
+.atelier .welcome__orb{margin:0 auto 6px}
+@media(max-height:650px){.atelier .welcome__orb{display:none}}

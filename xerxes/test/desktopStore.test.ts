@@ -107,6 +107,43 @@ describe('Store workspace folds', () => {
     expect(store.getSnapshot().blocks.filter(block => block.kind === 'user' && block.text === 'review this')).toHaveLength(2)
   })
 
+  test('streaming text re-renders at most about 20 times a second, not once per display frame', async () => {
+    // Per-frame updates were 120 full re-renders a second on a ProMotion
+    // display while a reply streamed.
+    const raf = (globalThis as { requestAnimationFrame?: unknown }).requestAnimationFrame
+    ;(globalThis as { requestAnimationFrame?: unknown }).requestAnimationFrame = (callback: (time: number) => void) => setTimeout(() => callback(0), 8)
+    try {
+      await Bun.sleep(0)
+      bridge.push('turn_begin', { text: 'go' })
+      await Bun.sleep(80)
+      let renders = 0
+      const unsub = store.subscribe(() => renders++)
+      const started = Date.now()
+      while (Date.now() - started < 200) { bridge.push('text_part', { text: 'x' }); await Bun.sleep(4) }
+      await Bun.sleep(60)
+      unsub()
+      // ~200ms of tokens every 4ms (≈50 deltas): a handful of renders, not 50.
+      expect(renders).toBeGreaterThan(0)
+      expect(renders).toBeLessThanOrEqual(6)
+      expect(store.getSnapshot().blocks.some(block => block.kind === 'agent' && block.text.length >= 40)).toBe(true)
+    } finally { (globalThis as { requestAnimationFrame?: unknown }).requestAnimationFrame = raf }
+  })
+
+  test('deleting a chat removes it through the runtime; a refusal stays visible in the menu', async () => {
+    await Bun.sleep(0)
+    bridge.respondWith((method, params) => {
+      if (method === 'session.delete') return params.session_id === 'busy1' ? { ok: false, error: 'cannot delete a session with an active turn' } : { ok: true }
+      return { ok: true }
+    })
+    store.openSessionMenu({ id: 'old123', key: 'old123', title: 'Old chat' }, 10, 10)
+    await store.deleteSession('old123')
+    expect(bridge.calls.some(call => call.method === 'session.delete' && call.params.session_id === 'old123')).toBe(true)
+    expect(store.getSnapshot().sessionMenu).toBeNull()
+    store.openSessionMenu({ id: 'busy1', key: 'busy1', title: 'Running chat' }, 10, 10)
+    await store.deleteSession('busy1')
+    expect(store.getSnapshot().sessionMenu?.error).toContain('active turn')
+  })
+
   test('missing session previews have bounded concurrency and retries without empty redraws', async () => {
     await Bun.sleep(0)
     const rows: SessionRow[] = Array.from({ length: 60 }, (_, i) => ({ id: `preview-${i}`, key: `preview-${i}`, title: '', status: '', age: '', current: false, kind: 'main', turns: 1, messages: 2, cwd: '/repo', untitled: true }))
