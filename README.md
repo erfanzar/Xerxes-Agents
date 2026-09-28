@@ -32,9 +32,9 @@ branding, neutral charcoal surfaces, an amber signal color, and mode accents for
 research, planning, and objectives.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/erfanzar/Xerxes-Agents/main/design/desktop/renders/06-fleet-subagents.png" width="100%" alt="Xerxes multi-agent fleet view" />
+  <img src="https://raw.githubusercontent.com/erfanzar/Xerxes-Agents/main/assets/screenshots/desktop-0.6.0.png" width="100%" alt="Xerxes desktop app after fixing a failing test suite" />
   <br />
-  <sub>One task, multiple specialists: live activity, tool calls, elapsed time, token usage, and review state.</sub>
+  <sub>The desktop app after a real task: grouped tool activity, the plan's to-dos, touched files with their diffs, and the repository bar with Review and Create PR.</sub>
 </p>
 
 ## Quick start

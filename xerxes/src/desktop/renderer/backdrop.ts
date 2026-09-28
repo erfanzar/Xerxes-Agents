@@ -327,12 +327,14 @@ export function applyBackdrop(backdrop: Backdrop, root: HTMLElement = document.d
 const opacityOf = (value: number | undefined, fallback: number) => Math.max(0, Math.min(100, value ?? fallback)) / 100
 
 /**
- * What a fresh install shows: no background — solid surfaces in the default
- * colour theme (Nous, see palettes.ts). Any choice, including None, is
+ * What a fresh install shows. On macOS: the transparent window with the
+ * system blur, an opaque chat column and fully see-through side panels —
+ * the look the project's own daily setup uses. Elsewhere the window cannot
+ * be see-through, so surfaces stay solid. Any choice, including None, is
  * remembered explicitly.
  */
 export function defaultBackdrop(): Backdrop {
-  return { kind: 'none' }
+  return transparencySupported() ? { kind: 'transparent', chat: 100, panels: 0, blur: 0 } : { kind: 'none' }
 }
 
 export function loadBackdrop(): Backdrop {

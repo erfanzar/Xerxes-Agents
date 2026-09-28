@@ -73,18 +73,26 @@ test('every bundled background ships in the repo, is stored by path, and derives
   expect(parseBackdrop({ kind: 'image', src: '../../etc/passwd', from: '#000', to: '#fff' })).toEqual({ kind: 'none' })
 })
 
-test('a fresh install opens with no background at 70% / 75% levels; choosing None is remembered', async () => {
+test('a fresh install opens transparent on macOS and solid elsewhere; choosing None is remembered', async () => {
   const { loadBackdrop, saveBackdrop, BACKDROP_KEY, DEFAULT_CHAT_OPACITY, DEFAULT_PANEL_OPACITY } = await import('../src/desktop/renderer/backdrop.js')
   const store = new Map<string, string>()
   const original = globalThis.localStorage
+  const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
+  const platform = (value: string) => Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { platform: value, userAgent: value } })
   globalThis.localStorage = { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => { store.set(k, v) }, removeItem: (k: string) => { store.delete(k) } } as unknown as Storage
   try {
     expect([DEFAULT_CHAT_OPACITY, DEFAULT_PANEL_OPACITY]).toEqual([70, 75])
+    platform('MacIntel')
+    expect(loadBackdrop()).toEqual({ kind: 'transparent', chat: 100, panels: 0, blur: 0 })
+    platform('Win32')
     expect(loadBackdrop()).toEqual({ kind: 'none' })
     saveBackdrop({ kind: 'none' })
     expect(store.get(BACKDROP_KEY)).toBe('{"kind":"none"}')
     expect(loadBackdrop()).toEqual({ kind: 'none' })
-  } finally { globalThis.localStorage = original }
+  } finally {
+    globalThis.localStorage = original
+    if (originalNavigator) Object.defineProperty(globalThis, 'navigator', originalNavigator)
+  }
 })
 
 test('a surface\'s static blur layer lines up with the window background under cover', () => {
