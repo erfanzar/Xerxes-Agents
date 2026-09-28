@@ -46,6 +46,13 @@ Keep this credential in client memory only. After a transport drops, call
 `connection.lease {token, project_dir}` on its replacement **before** resuming
 the saved session with `initialize`. Only a detached connection in the same
 workspace can be reclaimed; a connected owner cannot be taken over.
+A lease that expires (no reclaim within `grace_ms`, or more missed events than
+the replay journal holds) does not cancel the owner's work: its running turns
+and armed goal continue in the background, and the client reattaches to the
+live session through `session.active_list` and `initialize {session_key}`.
+The exception is a turn waiting on that owner's approval or answer, which is
+cancelled. A connection that never took a lease keeps the older behaviour:
+its disconnect cancels the turns it submitted.
 Initialization returns `pending_interactions` (type/payload pairs) for unanswered
 permission/question requests owned by the connection. After a reclaimed lease,
 `reconnect_events` contains ordered missed event frames: retain the current

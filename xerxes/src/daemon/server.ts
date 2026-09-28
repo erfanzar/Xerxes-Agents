@@ -110,6 +110,7 @@ import {
 } from "../cron/lease.js";
 import { CronScheduler } from "../cron/scheduler.js";
 import { blockGoal, getGoal, pauseGoal, disarmGoal, recordGoalEvidence, GoalError } from "../runtime/goalDomain.js";
+import { classifyError } from "../runtime/errorClassifier.js";
 import { GoalTimeGuard } from "../runtime/goalTimeGuard.js";
 import { GoalTokenBudget } from '../runtime/goalTokenBudget.js';
 import type { GoalTokenLedger } from '../runtime/goalTokenLedger.js';
@@ -774,6 +775,10 @@ export interface DaemonServerOptions {
    * `auto_compact_threshold` overrides it per daemon, and 0 disables it.
    */
   readonly autoCompactThreshold?: number;
+  /** Reconnect window for a leased connection before its ownership expires (default 30s). */
+  readonly connectionLeaseGraceMs?: number;
+  /** Waits before retrying goal rounds lost to transient provider failures (default 1, 3, 10 min). */
+  readonly goalTransientRetryDelaysMs?: readonly number[];
   /**
    * Generate a model-written session title after the first exchange. Defaults
    * on; a runtime setting of `auto_title` set to false disables it. Generation
@@ -936,6 +941,9 @@ const PRODUCTIVE_TURN_EVENTS: ReadonlySet<string> = new Set([
 ]);
 
 /** NDJSON JSON-RPC v35 Unix socket server consumed by the OpenTUI client and native hosts. */
+/** Waits before retrying a goal round lost to a transient provider failure. */
+const GOAL_TRANSIENT_RETRY_DELAYS_MS = [60_000, 180_000, 600_000] as const;
+
 export class DaemonServer {
   private readonly agentDefinitionLoader: (
     cwd: string,
@@ -948,6 +956,11 @@ export class DaemonServer {
   private readonly sessionOperations = new SessionOperationQueue();
   private readonly goalWakeDispatches = new Map<string, Promise<void>>();
   private readonly disconnectedGoalOwners = new WeakSet<DaemonTransportConnection>();
+  /** Consecutive goal rounds lost to transient provider failures, per session. */
+  private readonly goalTransientFailures = new Map<string, number>();
+  /** Delay before the next goal round after a transient failure, per session. */
+  private readonly goalRetryDelays = new Map<string, number>();
+  private readonly goalTransientRetryDelaysMs: readonly number[];
   private readonly sessionOwnedClients = new WeakSet<DaemonTransportConnection>();
   private readonly sessionTurnOwners = new WeakSet<DaemonTransportConnection>();
   private readonly sessionObservers = new Set<DaemonTransportConnection>();
@@ -1081,7 +1094,7 @@ export class DaemonServer {
   private transcriptSearchHydration: Promise<void> | undefined;
   private readonly toolCatalog: DaemonToolCatalogPort | undefined;
   private readonly turnOwners = new Map<string, DaemonTransportConnection>();
-  private readonly connectionLeases = new ConnectionLeases(owner => this.disconnectOwner(owner));
+  private readonly connectionLeases: ConnectionLeases;
   private readonly pendingInteractionFrames = new Map<string, { owner: DaemonTransportConnection; type: string; payload: JsonRpcPayload }>();
   private readonly uiControl: DaemonUiControlPort | undefined;
   private readonly websocketOptions: DaemonWebSocketGatewayOptions | undefined;
@@ -1116,6 +1129,10 @@ export class DaemonServer {
     this.projectDirectory = options.projectDirectory
       ? resolveProjectDirectory(options.projectDirectory)
       : undefined;
+    // A leased client asked to keep its work across disconnects: when the
+    // lease runs out, that work continues in the background (see disconnectOwner).
+    this.connectionLeases = new ConnectionLeases(owner => this.disconnectOwner(owner, true), options.connectionLeaseGraceMs);
+    this.goalTransientRetryDelaysMs = options.goalTransientRetryDelaysMs ?? GOAL_TRANSIENT_RETRY_DELAYS_MS;
     this.autoCompactThreshold = normalizeCompactionThreshold(
       options.autoCompactThreshold ?? DEFAULT_AUTO_COMPACT_THRESHOLD,
     );
@@ -10200,8 +10217,43 @@ export class DaemonServer {
     void tracked.then(() => {
       this.goalWakeDispatches.delete(sessionKey);
       this.inFlightTurns.delete(tracked);
-      if (retry) this.kickGoalWake(sessionKey, emit, owner);
+      if (!retry) return;
+      const delay = this.goalRetryDelays.get(sessionKey);
+      this.goalRetryDelays.delete(sessionKey);
+      if (delay === undefined) { this.kickGoalWake(sessionKey, emit, owner); return; }
+      const timer = setTimeout(() => this.kickGoalWake(sessionKey, emit, owner), delay);
+      timer.unref?.();
     }).catch(error => console.error(`Could not dispatch goal continuation: ${errorMessage(error)}`));
+  }
+
+  /**
+   * Keep an autonomous goal going through a transient provider failure.
+   *
+   * One stalled stream or overloaded API used to block the goal outright, so
+   * a run left overnight stopped at the first hiccup and waited for a person.
+   * A retryable failure instead schedules the next round after a growing
+   * delay; a fourth consecutive one, or any non-retryable failure, blocks as
+   * before. A productive round resets the count.
+   */
+  private deferTransientGoalRound(
+    sessionKey: string,
+    round: number,
+    message: string,
+    emit: (event: DaemonEvent) => void,
+  ): boolean {
+    if (!classifyError(new Error(message)).retryable) return false;
+    const failures = (this.goalTransientFailures.get(sessionKey) ?? 0) + 1;
+    const delay = this.goalTransientRetryDelaysMs[failures - 1];
+    if (delay === undefined) return false;
+    this.goalTransientFailures.set(sessionKey, failures);
+    this.goalRetryDelays.set(sessionKey, delay);
+    const session = this.runtime.sessionStatus(sessionKey);
+    emit({ type: "notification", payload: {
+      level: "warning",
+      message: `Goal round ${round} hit a temporary provider failure (${message}). Retrying in ${Math.max(1, Math.round(delay / 60_000))} min (${failures} of ${this.goalTransientRetryDelaysMs.length}).`,
+      ...(session ? { session_id: session.id } : {}),
+    } });
+    return true;
   }
 
   private submitTrackedTurn(
@@ -10332,10 +10384,16 @@ export class DaemonServer {
         }
       };
       await this.runtime.submitTurn(sessionKey, text, forward, options);
+      if (options.goalRound !== undefined && round_.error === undefined && round_.productive) {
+        this.goalTransientFailures.delete(sessionKey);
+      }
       if (options.goalRound !== undefined) {
         if (this.runtime.sessionStatus(sessionKey)?.cancelRequested) {
           this.pauseGoalAfterInterrupt(sessionKey);
+        } else if (round_.error !== undefined && this.deferTransientGoalRound(sessionKey, options.goalRound, round_.error, emit)) {
+          // Retried after a delay; see deferTransientGoalRound.
         } else if (round_.error !== undefined || !round_.productive) {
+          this.goalTransientFailures.delete(sessionKey);
           this.blockGoalForFailure(sessionKey,
             round_.error === undefined ? "round-produced-nothing" : "round-failed",
             round_.error === undefined
@@ -10508,16 +10566,26 @@ export class DaemonServer {
     this.disconnectOwner(connection);
   }
 
-  private disconnectOwner(connection: DaemonTransportConnection): void {
+  private disconnectOwner(connection: DaemonTransportConnection, leaseExpired = false): void {
+    // A client that took a connection lease (the desktop app) asked for its
+    // work to outlive its transport. Once the reconnect window has passed,
+    // cancelling here stopped every run the moment a laptop locked long enough
+    // for its SSH link to drop: turns died and armed goals were disarmed, so
+    // a task left running overnight simply stopped. Its turns and goal now
+    // keep running; the client reattaches to the live session when it
+    // returns. A turn waiting on this client's approval or answer cannot
+    // progress without it, so that one is still cancelled.
+    const awaitingOwner = [...this.approvalOwners.values(), ...this.questionOwners.values()].includes(connection);
+    const background = leaseExpired && !awaitingOwner;
     this.sessionObservers.delete(connection);
     this.providerRelays.disconnect(connection);
-    this.disconnectedGoalOwners.add(connection);
+    if (!background) this.disconnectedGoalOwners.add(connection);
     this.lspSettingsUpdates.get(connection)?.abort();
     this.mcpSettingsUpdates.get(connection)?.abort();
     // Only cancel turns this connection actually submitted: on a shared
     // session key, another client's disconnect must not kill a live turn.
     for (const [key, owner] of this.turnOwners) {
-      if (owner !== connection) {
+      if (owner !== connection || background) {
         continue;
       }
       this.cancelTrackedTurn(key);

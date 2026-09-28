@@ -10754,3 +10754,42 @@ test('subagent.inspect scopes retained evidence to the parent across reconnect a
     }
   }finally{client.close();await server.stop();await rm(directory,{recursive:true,force:true})}
 });
+
+test("a leased client's turn keeps running in the background after its lease expires", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-lease-background-"));
+  const socketPath = join(directory, "daemon.sock");
+  const runner = new AbortGateRunner();
+  const runtime = new InMemoryDaemonRuntime(runner, {
+    currentProjectDirectory: directory,
+    model: "gate-model",
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const server = new DaemonServer({
+    cronStoreFactory: () => new JobStore(join(directory, "cron", "jobs.json")),
+    runtime,
+    socketPath,
+    connectionLeaseGraceMs: 20,
+  });
+  await server.start();
+  const owner = await SocketTestClient.connect(socketPath);
+  try {
+    owner.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { session_key: "background-turn", project_dir: directory } });
+    await owner.next((frame) => frame.id === 1);
+    owner.send({ jsonrpc: "2.0", id: 2, method: "connection.lease", params: {} });
+    expect((await owner.next((frame) => frame.id === 2)).result?.ok).toBe(true);
+    owner.send({ jsonrpc: "2.0", id: 3, method: "turn.submit", params: { session_key: "background-turn", text: "overnight work" } });
+    await owner.next((frame) => frame.id === 3);
+    await waitFor(() => runner.runs === 1);
+
+    // The laptop sleeps: the transport drops and never comes back within the
+    // reconnect window. The work it started must not be cancelled.
+    owner.close();
+    await Bun.sleep(200);
+    expect(runtime.sessionStatus("background-turn")?.activeTurnId).not.toBe("");
+    expect(runtime.sessionStatus("background-turn")?.cancelRequested).toBe(false);
+  } finally {
+    owner.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});

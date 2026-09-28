@@ -56,7 +56,7 @@ class GoalScriptRunner implements TurnRunner {
       session: DaemonSession,
       turn: TurnRecord,
       index: number,
-    ) => "silent" | "failed" | void,
+    ) => "silent" | "failed" | "stalled" | void,
   ) {}
 
   async *run(
@@ -74,6 +74,10 @@ class GoalScriptRunner implements TurnRunner {
     this.turns.push(record);
     const outcome = this.script(session, record, index);
     if (outcome === "silent") return;
+    if (outcome === "stalled") {
+      yield { type: "notification", payload: { level: "error", message: "Provider stream stalled: no chunk received within 120000ms (stream inactivity timeout)" } };
+      return;
+    }
     if (outcome === "failed") {
       // Exactly how the runtime reports a provider failure: an error
       // notification, and then the failure rendered as assistant text.
@@ -89,6 +93,7 @@ async function withServer(
   prefix: string,
   runner: TurnRunner,
   body: (client: SocketTestClient, runtime: InMemoryDaemonRuntime, directory: string) => Promise<void>,
+  serverOptions: Partial<ConstructorParameters<typeof DaemonServer>[0]> = {},
 ): Promise<void> {
   resetGoalActivations();
   const directory = await mkdtemp(join(tmpdir(), prefix));
@@ -99,7 +104,7 @@ async function withServer(
     sessionDirectory: join(directory, "sessions"),
   });
   const goalTokenLedger = new GoalTokenLedger(join(directory, 'goal-tokens.sqlite'));
-  const server = new DaemonServer({ socketPath, runtime, goalTokenLedger, autoTitle: false });
+  const server = new DaemonServer({ socketPath, runtime, goalTokenLedger, autoTitle: false, ...serverOptions });
   await server.start();
   const client = await SocketTestClient.connect(socketPath);
   try {
@@ -708,4 +713,53 @@ test('explicit goal resume clears a prior idle cancellation before scheduling th
     expect(runner.turns[0]?.goalRound).toBe(1);
     await waitFor(() => getGoal(session.metadata, session.id)?.phase === 'complete');
   });
+});
+
+test("a transient provider failure retries the goal round instead of blocking the goal", async () => {
+  const runner = new GoalScriptRunner((session, _turn, index) => {
+    if (index === 0) {
+      createGoal(session.metadata, session.id, { objective: "survive a stall", maxGoalRounds: 24 }, 1_000);
+      return;
+    }
+    // Round 1 stalls (a dead-looking stream); round 2 works.
+    if (index === 1) return "stalled";
+  });
+
+  await withServer("xerxes-goal-transient-", runner, async (client, runtime) => {
+    client.send({ jsonrpc: "2.0", id: 2, method: "turn.submit", params: { text: "start" } });
+    await client.next((frame) => frame.id === 2);
+    const noticeText = (frame: Record<string, unknown>): string => {
+      const params = (frame.params ?? {}) as { type?: unknown; payload?: { message?: unknown } };
+      return frame.method === "event" && params.type === "notification" ? String(params.payload?.message ?? "") : "";
+    };
+    const warning = await client.next((frame) => noticeText(frame).includes("Retrying in"));
+    expect(noticeText(warning)).toContain("1 of 3");
+    await waitFor(() => runner.turns.length >= 3);
+    expect(runner.turns.map((turn) => turn.goalRound).slice(0, 3)).toEqual([undefined, 1, 2]);
+    const session = runtime.sessionStatus("goal-session")!;
+    expect(getGoal(session.metadata, session.id)?.phase).not.toBe("blocked");
+  }, { goalTransientRetryDelaysMs: [20, 20, 20] });
+});
+
+test("repeated transient failures still block the goal once the retries run out", async () => {
+  const runner = new GoalScriptRunner((session, _turn, index) => {
+    if (index === 0) {
+      createGoal(session.metadata, session.id, { objective: "provider is down", maxGoalRounds: 24 }, 1_000);
+      return;
+    }
+    return "stalled";
+  });
+
+  await withServer("xerxes-goal-transient-exhausted-", runner, async (client, runtime) => {
+    client.send({ jsonrpc: "2.0", id: 2, method: "turn.submit", params: { text: "start" } });
+    await client.next((frame) => frame.id === 2);
+    await waitFor(() => {
+      const session = runtime.sessionStatus("goal-session");
+      return Boolean(session && getGoal(session.metadata, session.id)?.phase === "blocked");
+    });
+    // One original attempt plus two retries (the delays list has two entries).
+    expect(runner.turns.map((turn) => turn.goalRound)).toEqual([undefined, 1, 2, 3]);
+    const session = runtime.sessionStatus("goal-session")!;
+    expect(getGoal(session.metadata, session.id)?.blockedReason?.code).toBe("round-failed");
+  }, { goalTransientRetryDelaysMs: [20, 20] });
 });
