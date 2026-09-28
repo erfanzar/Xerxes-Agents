@@ -819,6 +819,19 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
           if (session.activeTurnId || !message.includes("conflicts with persisted history")) {
             throw error;
           }
+          // Disk is not always the newer side. Keep the live copy before
+          // dropping it, so work done since the last good save survives.
+          const preserved = await this.transcriptStore.preserveDivergent(session.id, {
+            key: session.sessionKey,
+            cwd: session.cwd,
+            turn_count: session.turnCount,
+            transcript_generation: session.transcriptGeneration ?? 0,
+            messages: session.messages,
+            metadata: session.metadata,
+            tool_executions: session.toolExecutions,
+            thinking_content: session.thinkingContent,
+          }, message);
+          console.warn(`Session ${session.id} conflicted with its saved transcript (${message}); kept the live copy at ${preserved} and reloaded the saved one`);
           this.evictSession(session.sessionKey);
         }
       }),

@@ -11,6 +11,7 @@ import {
   DAEMON_SESSION_FORMAT,
   INTERRUPTED_TOOL_RESULT,
   DaemonTranscriptStore,
+  journalContinuation,
   normalizeDaemonTranscript,
   repairToolPairs,
   transcriptHasHistory,
@@ -867,4 +868,65 @@ test('journal appends stay constant-time as the log grows', async () => {
   } finally {
     await rm(directory, { recursive: true, force: true })
   }
+})
+
+test('a compacted snapshot never absorbs journal entries from an older compaction generation', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-transcript-generations-'))
+  try {
+    const sessionId = 'c0ffeec0ffeec0ff'
+    const store = new DaemonTranscriptStore({ directory, currentProjectDirectory: '/project' })
+    // Generation one: six messages, journalled at indexes 0..5.
+    const old = ['old ask', 'old answer', 'old continue', 'old reply', 'old fix it', 'old result']
+    for (const [index, content] of old.entries()) {
+      await store.appendMessage(sessionId, { role: index % 2 ? 'assistant' : 'user', content }, index)
+    }
+    // Compaction restarts the numbering: a summary plus the retained tail,
+    // then the live exchange journalled at 2 and 3.
+    const compacted = [
+      { role: 'user', content: 'summary of the old turns' },
+      { role: 'assistant', content: 'old result' },
+      { role: 'user', content: 'latest ask' },
+      { role: 'assistant', content: 'latest answer' },
+    ]
+    await store.appendMessage(sessionId, compacted[2]!, 2)
+    await store.appendMessage(sessionId, compacted[3]!, 3)
+    // The snapshot covers the whole live generation but, as in the field,
+    // never advanced its byte watermark past the start of the journal.
+    await Bun.write(store.pathFor(sessionId), JSON.stringify({
+      generation: 9, event_log_offset: 0, messages: compacted, session_id: sessionId, turn_count: 2,
+    }))
+
+    // Before the fix the first append at index 4 and 5 ("old fix it", "old
+    // result") was spliced after "latest answer".
+    expect((await store.load(sessionId))?.messages.map(message => message.content)).toEqual(compacted.map(message => message.content))
+
+    // A crash in the live generation still recovers: its entries continue
+    // from the newest append that matches the snapshot's last message.
+    await store.appendMessage(sessionId, { role: 'user', content: 'unsaved follow-up' }, 4)
+    await store.appendMessage(sessionId, { role: 'assistant', content: 'unsaved reply' }, 5)
+    expect((await store.load(sessionId))?.messages.map(message => message.content)).toEqual([
+      ...compacted.map(message => message.content), 'unsaved follow-up', 'unsaved reply',
+    ])
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('journal continuation needs a run at the snapshot end or a matching anchor', () => {
+  const user = (content: string) => ({ role: 'user', content })
+  const snapshot = [user('a'), user('b')]
+  // A run starting exactly at the snapshot's length continues it.
+  expect(journalContinuation([{ index: 2, message: user('c') }], snapshot)).toBe(0)
+  // Otherwise only after the newest append that reproduces the last message.
+  expect(journalContinuation([
+    { index: 1, message: user('b') }, { index: 2, message: user('stale') },
+    { index: 1, message: user('b') }, { index: 2, message: user('c') },
+  ], snapshot)).toBe(3)
+  // An older generation's row at the same index is not an anchor.
+  expect(journalContinuation([{ index: 1, message: user('other') }, { index: 2, message: user('stale') }], snapshot)).toBe(-1)
+  // A tool result is matched by the invocation it answers.
+  expect(journalContinuation(
+    [{ index: 0, message: { role: 'tool', tool_call_id: 'call_1', content: 'pruned' } }, { index: 1, message: user('next') }],
+    [{ role: 'tool', tool_call_id: 'call_1', content: 'full output' }],
+  )).toBe(1)
 })

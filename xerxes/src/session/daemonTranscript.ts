@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { appendFile, mkdir, open, readdir, readFile, rename, rm, stat, utimes } from 'node:fs/promises'
-import { basename, dirname, resolve, sep } from 'node:path'
+import { basename, dirname, join, resolve, sep } from 'node:path'
 
 import { ValidationError } from '../core/errors.js'
 import { foldGoalChanges, readGoalChanges } from '../runtime/goalDomain.js'
@@ -425,6 +425,23 @@ export class DaemonTranscriptStore {
       .sort((left, right) => right.modifiedAtMillis - left.modifiedAtMillis)
   }
 
+  /**
+   * Keep a live copy that lost a save conflict before the daemon drops it.
+   *
+   * The daemon evicts a session whose save conflicts with disk and reloads
+   * the disk copy. When the disk copy is the stale one, that eviction threw
+   * away every message since — a remote session lost an hour of work and
+   * reopened as it stood before its last compaction. The copy lands beside
+   * the transcripts, outside the listing, so it can be restored by hand.
+   */
+  async preserveDivergent(sessionId: string, record: Record<string, unknown>, reason: string): Promise<string> {
+    const directory = join(this.directory, 'divergent')
+    await mkdir(directory, { recursive: true })
+    const path = join(directory, `${sessionId}-${new Date().toISOString().replace(/[:.]/g, '-')}.json`)
+    await atomicJsonWrite(path, { ...record, session_id: sessionId, divergent_reason: reason, preserved_at: new Date().toISOString() })
+    return path
+  }
+
   /** Sidecar holding messages persisted since the last full save. */
   journalPathFor(sessionId: string): string {
     return `${this.pathFor(sessionId)}l`
@@ -767,33 +784,81 @@ export class DaemonTranscriptStore {
     const safeOffset = offset <= contents.byteLength ? offset : 0
     const decoded = readTranscriptEventRecords(contents.subarray(safeOffset), sessionId, safeOffset)
 
-    // The first durable append for an index wins. A retry cannot rewrite
-    // logical history merely by appending another row with the same index.
-    const pending = new Map<number, { readonly endOffset: number; readonly message: RawMessage }>()
-    for (const record of decoded.records) {
-      if (record.event.type !== 'message_appended') continue
-      if (!pending.has(record.event.index)) {
-        pending.set(record.event.index, { endOffset: record.endOffset, message: { ...record.event.message } })
-      }
-    }
+    const appends = decoded.records.flatMap(record => record.event.type === 'message_appended'
+      ? [{ index: record.event.index, endOffset: record.endOffset, message: record.event.message }]
+      : [])
+    const start = journalContinuation(appends, raw.messages as RawMessage[])
+    if (start < 0) return
 
     // Indexes are absolute positions in the message list. The watermark moves
     // only through the contiguous records actually projected into messages;
     // gaps, malformed lines, and torn tails stay uncovered for later repair.
-    let next = raw.messages.length
+    const base = raw.messages.length
+    let next = base
     let replayed = 0
     let coveredOffset = safeOffset
-    for (let record = pending.get(next); record !== undefined; record = pending.get(next)) {
-      raw.messages.push(record.message)
-      coveredOffset = record.endOffset
-      replayed += 1
-      next += 1
+    for (const record of appends.slice(start)) {
+      if (record.index === next) {
+        raw.messages.push({ ...record.message })
+        coveredOffset = record.endOffset
+        replayed += 1
+        next += 1
+        continue
+      }
+      // The first durable append for an index wins. A retry cannot rewrite
+      // logical history merely by appending another row with the same index.
+      if (record.index >= base && record.index < next) continue
+      // A gap, or indexes restarting lower: that is a later compaction
+      // generation, which this snapshot is not the base of.
+      break
     }
     if (replayed > 0) {
       raw.event_log_offset = coveredOffset
       console.warn(`Recovered ${replayed} unsaved message(s) for session ${sessionId} from its event log`)
     }
   }
+}
+
+/**
+ * Where, in the journal's message appends, the snapshot's history continues;
+ * -1 when nothing provably does.
+ *
+ * The journal is never truncated, and compaction restarts message indexes
+ * lower, so one index names a different message in every compaction
+ * generation. Taking the first append at each index past the snapshot's end
+ * spliced messages from older generations onto the compacted session — a
+ * restart turned a 200-message session into 384, burying the latest exchange
+ * under stale turns. A continuation must instead start where the snapshot
+ * provably ends: a run that begins exactly at its length when the whole
+ * scanned tail lies past the covered watermark, or the newest append that
+ * reproduces its last message.
+ */
+export function journalContinuation(
+  appends: ReadonlyArray<{ readonly index: number; readonly message: RawMessage }>,
+  messages: readonly RawMessage[],
+): number {
+  const length = messages.length
+  if (!appends.length) return -1
+  if (appends[0]!.index === length) return 0
+  const last = messages[length - 1]
+  if (!last) return -1
+  for (let position = appends.length - 1; position >= 0; position -= 1) {
+    const append = appends[position]!
+    if (append.index === length - 1 && sameMessage(append.message, last)) return position + 1
+  }
+  return -1
+}
+
+/** One logical message, allowing for the marker stripping a resume applies. */
+function sameMessage(left: RawMessage, right: RawMessage): boolean {
+  if (JSON.stringify(left) === JSON.stringify(right)) return true
+  if (left.role !== right.role) return false
+  // A tool call ID names exactly one invocation and its result.
+  if (left.role === 'tool' && typeof left.tool_call_id === 'string') return left.tool_call_id === right.tool_call_id
+  const calls = (message: RawMessage): string => (Array.isArray(message.tool_calls) ? message.tool_calls : [])
+    .map(call => isRecord(call) ? String(call.id ?? '') : '').join('\n')
+  if (calls(left) || calls(right)) return calls(left) === calls(right)
+  return messagesEqual(normalizedPrefix([left]), normalizedPrefix([right]))
 }
 
 function messagesEqual(left: readonly RawMessage[], right: readonly RawMessage[]): boolean {
