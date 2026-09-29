@@ -7,6 +7,16 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.3 — 2026-09-29
+
+- Desktop: much lower energy use. Every workspace page a window has opened kept
+  listing all saved and live sessions every five seconds, even when hidden; with
+  several workspaces open that polling dominated the runtime's CPU. Hidden or covered
+  pages now skip it and catch up when shown, an unfocused window refreshes its lists
+  every thirty seconds, and background output, agent and run pollers pause while hidden.
+- Runtime: an idle-only runtime update no longer restarts while a goal is armed; a
+  restart silently disarmed the goal and stopped autonomous work at its next round.
+
 ## 0.6.2 — 2026-09-28
 
 - Usage: OpenRouter keys show credit left, spend today, this week, this month and

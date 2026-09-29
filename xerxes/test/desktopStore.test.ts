@@ -61,7 +61,7 @@ const initializeResult = {
   branch: 'main',
   context_limit: 262_000,
   daemon_protocol: 35,
-  daemon_version: '0.6.2',
+  daemon_version: '0.6.3',
   daemon_build_id: 'current-build',
 }
 
@@ -541,7 +541,7 @@ describe('Store workspace folds', () => {
     expect(store.getSnapshot().connection).toBe('online')
     expect(store.getSnapshot().model).toBe('kimi-for-coding')
     const initialize = bridge.calls.find(call => call.method === 'initialize')
-    expect(initialize?.params).toMatchObject({ client_protocol: 35, client_version: '0.6.2' })
+    expect(initialize?.params).toMatchObject({ client_protocol: 35, client_version: '0.6.3' })
     expect(store.getSnapshot().daemonWarning).toBeNull()
   })
 
@@ -2303,4 +2303,40 @@ test('reopening a task refolds its edits from stored history', async () => {
   const store = new Store(); store.start(bridge); await Bun.sleep(10)
   const paths = store.getSnapshot().changes.map(file => file.path).sort()
   expect(paths).toEqual(['src/a.ts', 'src/b.ts'])
+})
+
+test('a hidden or covered workspace page skips its heartbeat and catches up when shown', async () => {
+  // Every workspace a window opened keeps its own page; each listed every
+  // session every five seconds whether seen or not, and that polling was
+  // most of the app's energy use.
+  const bridge = new FakeBridge(method => {
+    if (method === 'initialize') return initializeResult
+    if (method === 'session.list' || method === 'session.active_list') return { ok: true, sessions: [] }
+    return { ok: true }
+  })
+  const originalDocument = (globalThis as { document?: unknown }).document
+  let hidden = true
+  const listeners: Array<() => void> = []
+  ;(globalThis as { document?: unknown }).document = {
+    get visibilityState() { return hidden ? 'hidden' : 'visible' },
+    documentElement: { hasAttribute: () => false },
+    addEventListener: (_type: string, listener: () => void) => { listeners.push(listener) },
+  }
+  const store = new Store()
+  withWindow(bridge)
+  try {
+    store.start(bridge)
+    await Bun.sleep(10)
+    const lists = () => bridge.calls.filter(call => call.method === 'session.list').length
+    const before = lists()
+    await (store as unknown as { beat: () => Promise<void> }).beat()
+    expect(lists()).toBe(before)
+
+    hidden = false
+    for (const listener of listeners) listener()
+    await Bun.sleep(10)
+    expect(lists()).toBe(before + 1)
+  } finally {
+    ;(globalThis as { document?: unknown }).document = originalDocument
+  }
 })
