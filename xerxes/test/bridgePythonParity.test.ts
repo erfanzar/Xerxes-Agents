@@ -317,7 +317,7 @@ test('bridge modes reach the native runtime, plan mode wins, and init emits the 
     session_id: 'feedface',
     skill_descriptions: {},
     skills: [],
-    version: '0.6.10',
+    version: '0.6.11',
   })
 
   await submitAndWait(server, 'research')
