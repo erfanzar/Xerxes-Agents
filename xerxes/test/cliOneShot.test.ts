@@ -91,7 +91,7 @@ test('one-shot CLI exposes native subagents and their catalog to the main model'
         && (message as { role?: unknown }).role === 'system'
         && typeof (message as { content?: unknown }).content === 'string'
     ))
-    expect(system?.content).toContain('On non-trivial turns, delegate only independent work that materially helps')
+    expect(system?.content).toContain('On non-trivial turns, delegate independent work that materially helps without being asked')
     expect(system?.content).toContain('Available subagent types:')
     expect(system?.content).toContain('- reviewer: Independent read-only code review')
     expect(system?.content).toContain('demo-skill: Demonstrate live skill discovery.')

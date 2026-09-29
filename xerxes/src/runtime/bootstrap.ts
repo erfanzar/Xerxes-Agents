@@ -346,19 +346,25 @@ export function buildBootstrapSystemPrompt(
       '- Do not final-answer in objective mode while acceptance criteria are unmet; continue iterating or report a concrete blocker with evidence.',
     )
   }
-  if (['Agent', 'AgentTool', 'SpawnAgents'].some(name => toolNames.has(name))) {
+  if (['Agent', 'AgentTool', 'SpawnAgents', 'Workflow'].some(name => toolNames.has(name))) {
     const subagents = availableSubagents(subagentDefinitions)
     sections.push(
       '',
       '# Multi-Agent Orchestration',
-      '- Delegate when a listed type fits, when work splits into independent parts, or when an answer needs reading across many files: the child reads, and you keep only its conclusion. For a known file, symbol, or single fact, search directly.',
-      '- Prefer separate research, implementation, and review paths when parallelism helps.',
+      '- Delegate on your own initiative; the user does not need to ask for agents. Delegate when a listed type fits, when work splits into independent parts, when an answer needs reading across many files, or when a claim deserves an independent check before you rely on it: the child reads, and you keep only its conclusion. For a known file, symbol, or single fact, search directly.',
+      '- Prefer separate research, implementation, and review paths when parallelism helps, and run independent paths at the same time rather than one after another.',
+      '- Match the model to the job: a fast, cheap model for mechanical reading, search, extraction and classification; your strongest for judgement, subtle verification and synthesis. Set model (and profile) per agent; the models section lists what the configured providers offer.',
       '- Choose a specialist from the available subagent types by its description when its expertise fits the task. Pass its exact name as subagent_type; the user does not need to name it first.',
       '- Track spawned work without waiting for a user reminder. Do not final-answer while required agents are queued or running; await all required results, then verify and synthesize them in the current turn. Do not redo delegated work yourself.',
     )
+    if (toolNames.has('Workflow')) {
+      sections.push(
+        '- Use Workflow for fan-outs and staged work: many slices, find-then-verify, several angles on one question, sweeps over many files or items. One script starts any number of agents, runs them concurrently, and hands back only what it returns. Prefer it to a chain of separate spawn calls once there are more than a few agents or more than one stage.',
+      )
+    }
     if (toolNames.has('SpawnAgents')) {
       sections.push(
-        '- Spawn at most 32 agents per batch. Registration is concurrency-limited. Choose the count for independent work; never add redundant agents just to increase it. Use configured intelligence tiers when appropriate; the tool description lists available model mappings.',
+        `- Spawn at most 32 agents per batch${toolNames.has('Workflow') ? '; for more, or for stages, use Workflow' : ''}. Registration is concurrency-limited. Choose the count for independent work; never add redundant agents just to increase it. Use configured intelligence tiers when appropriate; the tool description lists available model mappings.`,
       )
     }
     if (subagents.length) {

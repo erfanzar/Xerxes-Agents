@@ -43,6 +43,8 @@ export interface ContextAssemblyInput {
   readonly modeHint: string
   /** Subagent join contract when a coordinator is attached. */
   readonly subagentJoin: string
+  /** Models delegated agents can run on, from the configured providers' own reports. */
+  readonly delegationModels?: string
   /** That long conversations are summarized, when the host compacts automatically. */
   readonly compaction?: string
   /** Persistent memory as it stood when the session started. */
@@ -69,6 +71,7 @@ export function assembleContextLayers(input: ContextAssemblyInput): SystemPrompt
     { name: 'deferred_catalog', text: input.deferredCatalog ?? '' },
     { name: 'mode_hint', text: input.modeHint },
     { name: 'subagent_join', text: input.subagentJoin },
+    { name: 'delegation_models', text: input.delegationModels ?? '' },
     { name: 'compaction', text: input.compaction ?? '' },
     { name: 'memory', text: input.memory ?? '' },
     { name: 'self_memory', text: input.selfMemory ?? '' },

@@ -15,6 +15,7 @@ import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseAgentIntelligenceConfig } from "./agents/intelligence.js";
+import { renderDelegationModels } from "./agents/delegationModels.js";
 import { getActiveSession } from "./runtime/sessionContext.js";
 import { AcpAgentRunner } from "./acp/runner.js";
 import {
@@ -34,6 +35,7 @@ import {
 } from "./channels/discordGateway.js";
 import { FetchDiscordApplicationRestPort } from "./channels/discordApplications.js";
 import {
+  canonicalProfileName,
   resolvedProfileContextLimit,
   resolvedProfileMaxOutputTokens,
   ProfileStore,
@@ -2118,6 +2120,12 @@ function daemonRuntime(
         ? {}
         : { reasoningEffort: connection.reasoningEffort }),
       subagentCoordinator: subagentHost.turnCoordinator,
+      delegationModels: session => renderDelegationModels(
+        profileStore.list(),
+        typeof session.metadata.provider_profile === "string"
+          ? canonicalProfileName(session.metadata.provider_profile)
+          : profileStore.active()?.name,
+      ),
       subagentEvents,
       ...(connection.temperature !== undefined
         ? { temperature: connection.temperature }

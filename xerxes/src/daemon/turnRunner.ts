@@ -174,6 +174,11 @@ export interface AgentTurnRunnerOptions {
   readonly subagentEvents?: DaemonSubagentEventSource
   /** Joins explicitly detached child work back into the creating parent turn. */
   readonly subagentCoordinator?: SubagentTurnCoordinator
+  /**
+   * The models delegated agents can run on, rendered from the configured
+   * providers. Shown once per session when the agent can delegate.
+   */
+  readonly delegationModels?: (session: DaemonSession) => string
   readonly toolExecutor?: ToolExecutor
   /** Per-tool execution axes, normally `registry.capabilities` bound to the tool registry. */
   readonly toolCapabilities?: (
@@ -235,6 +240,8 @@ export type BootstrapSystemPromptProvider = (
  * provider cache on its next message. The host creates one and passes it to
  * every runner it builds.
  */
+const DELEGATING_TOOLS = new Set(['AgentTool', 'SpawnAgents', 'TaskCreateTool', 'Workflow'])
+
 export class SessionPromptSnapshots {
   readonly bootstrapPrompts = new Map<string, Promise<string>>()
   /** Per session: memory as first rendered, and what has been delivered since. */
@@ -244,12 +251,15 @@ export class SessionPromptSnapshots {
   /** Per session: the local day its prompt was dated, and whether it compacts. */
   readonly promptDay = new Map<string, string>()
   readonly compaction = new Map<string, boolean>()
+  /** Per session: the delegated-agent model list as first rendered (kept stable for the prompt cache). */
+  readonly delegationModels = new Map<string, string>()
 
   drop(sessionId: string): void {
     this.memorySnapshots.delete(sessionId)
     this.deliveredGoalStatus.delete(sessionId)
     this.promptDay.delete(sessionId)
     this.compaction.delete(sessionId)
+    this.delegationModels.delete(sessionId)
     for (const key of this.bootstrapPrompts.keys()) {
       if (key.startsWith(sessionId + '\u0000')) this.bootstrapPrompts.delete(key)
     }
@@ -480,6 +490,7 @@ export class AgentTurnRunner implements TurnRunner {
       subagentJoin: this.options.subagentCoordinator
         ? 'Background subagents are joined before the parent turn ends. Integrate their delivered results in this turn; do not promise synthesis in a later turn.'
         : '',
+      delegationModels: this.delegationModelsFor(session, tools),
       // Deferred loading hides most of the surface from the request. Without
       // this the model is simply told it has sixteen tools and concludes the
       // rest do not exist — it answered "I can't use AgentTool, it's not in my
@@ -848,6 +859,19 @@ export class AgentTurnRunner implements TurnRunner {
    * the previewer and the off-transcript store — were written and tested
    * already; this is the call site they were missing.
    */
+  /** The session's delegated-agent model list, only where the agent can delegate. */
+  private delegationModelsFor(session: DaemonSession, tools: readonly ToolDefinition[] | undefined): string {
+    if (!this.options.delegationModels) return ''
+    if (!tools?.some(tool => DELEGATING_TOOLS.has(tool.function.name))) return ''
+    const cached = this.snapshots.delegationModels.get(session.id)
+    if (cached !== undefined) return cached
+    let rendered = ''
+    try { rendered = this.options.delegationModels(session) }
+    catch (error) { console.error(`Could not list models for delegated agents: ${error instanceof Error ? error.message : String(error)}`) }
+    this.snapshots.delegationModels.set(session.id, rendered)
+    return rendered
+  }
+
   private toolResultPersister(session: DaemonSession): (toolName: string, content: string) => string {
     const directory = this.options.toolResultDirectory
     if (!directory) return (_toolName, content) => content

@@ -378,3 +378,15 @@ test('the skills index renders as its own section with the rule for activating a
   expect(prompt).toContain('- deploy: ship the service')
   expect(prompt).not.toContain('# Supplemental Context')
 })
+
+test('with Workflow available the prompt asks for proactive, model-matched fan-out', () => {
+  const tool = (name: string) => ({ type: 'function' as const, function: { name, description: name, parameters: { type: 'object', properties: {} } } })
+  const prompt = buildBootstrapSystemPrompt({ cwd: '/workspace' }, '', [tool('SpawnAgents'), tool('Workflow')])
+  expect(prompt).toContain('Delegate on your own initiative; the user does not need to ask for agents.')
+  expect(prompt).toContain('Use Workflow for fan-outs and staged work')
+  expect(prompt).toContain('Spawn at most 32 agents per batch; for more, or for stages, use Workflow')
+  expect(prompt).toContain('Match the model to the job')
+  const workflowOnly = buildBootstrapSystemPrompt({ cwd: '/workspace' }, '', [tool('Workflow')])
+  expect(workflowOnly).toContain('# Multi-Agent Orchestration')
+  expect(workflowOnly).not.toContain('Spawn at most 32 agents per batch')
+})

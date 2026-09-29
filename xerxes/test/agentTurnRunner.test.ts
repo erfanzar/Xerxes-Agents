@@ -2005,3 +2005,54 @@ test('a prompt carries its display text from the moment it is appended, not only
     expect(seenMidTurn.at(-1)!.origin).toBe('goal')
   } finally { await runtime.shutdown(); await rm(directory, { recursive: true, force: true }) }
 })
+
+class RecordingTextClient implements LlmClient {
+  readonly requests: CompletionRequest[] = []
+  async *stream(request: CompletionRequest): AsyncGenerator<LlmDelta> {
+    this.requests.push(request)
+    yield { content: 'ok', usage: { inputTokens: 3, outputTokens: 1 } }
+  }
+}
+
+test('a delegating agent is shown the models its providers offer, once per session', async () => {
+  const client = new RecordingTextClient()
+  let rendered = 0
+  const runner = new AgentTurnRunner({
+    llm: client,
+    model: 'claude-code/sonnet',
+    permissionMode: 'accept-all',
+    tools: [{ type: 'function', function: { name: 'Workflow', description: '', parameters: {} } }],
+    delegationModels: () => { rendered += 1; return `# Models for delegated agents\n- claude-code (this conversation): claude-code/sonnet, claude-code/haiku (call ${rendered})` },
+  })
+  const session: DaemonSession = {
+    activeTurnId: '', agentId: 'default', cancelRequested: false, cwd: process.cwd(), extra: {},
+    id: 'delegation-models-session', interactionMode: 'default', sessionKey: 'delegation-models', lastActive: 0,
+    messages: [], metadata: {}, model: '', planMode: false, status: 'working', thinkingContent: [],
+    toolExecutions: [], totalInputTokens: 0, totalOutputTokens: 0, turnCount: 0, workspace: process.cwd(),
+  }
+  for await (const _event of runner.run(session, 'first', new AbortController().signal)) {}
+  for await (const _event of runner.run(session, 'second', new AbortController().signal)) {}
+  const prompts = client.requests.map(request => String(request.messages[0]?.content))
+  expect(prompts[0]).toContain('# Models for delegated agents')
+  expect(prompts[0]).toContain('claude-code/haiku (call 1)')
+  // Rendered once and reused, so the cached prompt prefix stays identical.
+  expect(prompts.at(-1)).toContain('claude-code/haiku (call 1)')
+  expect(rendered).toBe(1)
+})
+
+test('an agent that cannot delegate is not shown the delegated-agent models', async () => {
+  const client = new RecordingTextClient()
+  const runner = new AgentTurnRunner({
+    llm: client, model: 'm', permissionMode: 'accept-all',
+    tools: [{ type: 'function', function: { name: 'ReadFile', description: '', parameters: {} } }],
+    delegationModels: () => '# Models for delegated agents\n- x: y',
+  })
+  const session: DaemonSession = {
+    activeTurnId: '', agentId: 'default', cancelRequested: false, cwd: process.cwd(), extra: {},
+    id: 'no-delegation-session', interactionMode: 'default', sessionKey: 'no-delegation', lastActive: 0,
+    messages: [], metadata: {}, model: '', planMode: false, status: 'working', thinkingContent: [],
+    toolExecutions: [], totalInputTokens: 0, totalOutputTokens: 0, turnCount: 0, workspace: process.cwd(),
+  }
+  for await (const _event of runner.run(session, 'go', new AbortController().signal)) {}
+  expect(String(client.requests[0]?.messages[0]?.content)).not.toContain('Models for delegated agents')
+})
