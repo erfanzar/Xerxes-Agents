@@ -7,6 +7,12 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.10 — 2026-09-29
+
+- Desktop: a workflow agent's full output shows in the inspector. Agents in a workflow used to be saved with only their first 2,000 characters; they now keep up to 16,000 like any agent, and only the oldest agents of a very large run are trimmed. Trimmed output is labelled as such.
+- Desktop: an agent's structured result (a workflow schema answer) shows as labelled fields instead of one line of JSON, and its output is pretty-printed.
+- Desktop: workflow phase headings line up with their agents, and the inspector's "All activity" link points back.
+
 ## 0.6.9 — 2026-09-29
 
 - Desktop: the Files panel lists dot folders and files (.github, .vscode, .env.example…); only .git and .DS_Store stay hidden.

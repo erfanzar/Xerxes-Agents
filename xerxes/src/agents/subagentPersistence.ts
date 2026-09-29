@@ -10,10 +10,13 @@ export const SUBAGENT_DELIVERY_METADATA_KEY = 'xerxes_subagent_deliveries_v1'
 const MAX_ARCHIVED_TEXT_CHARS = 16_000
 /**
  * A workflow can run thousands of agents, and every one of them is rewritten
- * into the session file on each save. Its own result already carries what the
- * script kept, so a grouped agent keeps a shorter excerpt here.
+ * into the session file on each save. Each keeps its full text (up to the
+ * per-agent cap, so the inspector can show it) while the grouped agents'
+ * text stays under a session-wide budget; past it, the oldest are cut to a
+ * short excerpt and marked as trimmed.
  */
 const MAX_ARCHIVED_GROUPED_TEXT_CHARS = 2_000
+const MAX_ARCHIVED_GROUPED_TEXT_BUDGET = 1_000_000
 const MAX_ARCHIVED_FILES = 1_000
 const MAX_ARCHIVED_DELIVERIES = 2_000
 
@@ -53,7 +56,7 @@ export function replacePersistedSubagentSnapshots(
   metadata: Record<string, unknown>,
   snapshots: readonly SpawnedAgentSnapshot[],
 ): void {
-  metadata[SUBAGENT_SNAPSHOT_METADATA_KEY] = snapshots.map(archivedSnapshotWire)
+  metadata[SUBAGENT_SNAPSHOT_METADATA_KEY] = withinGroupedTextBudget(snapshots.map(archivedSnapshotWire))
 }
 
 /** Merge terminal progress observed outside a tool call into the durable manifest. */
@@ -68,7 +71,7 @@ export function mergePersistedSubagentSnapshots(
     if (id) byId.set(id, value)
   }
   for (const snapshot of snapshots) byId.set(snapshot.id, archivedSnapshotWire(snapshot))
-  metadata[SUBAGENT_SNAPSHOT_METADATA_KEY] = [...byId.values()]
+  metadata[SUBAGENT_SNAPSHOT_METADATA_KEY] = withinGroupedTextBudget([...byId.values()])
 }
 
 export function persistedSubagentSnapshotValues(
@@ -126,8 +129,9 @@ function archivedSnapshotWire(snapshot: SpawnedAgentSnapshot): Record<string, un
     ...(snapshot.workspace === undefined ? {} : { workspace: snapshot.workspace }),
     prompt_profile: snapshot.promptProfile,
     source_agent_id: snapshot.sourceAgentId ?? null,
-    last_input: boundedText(snapshot.lastInput, snapshot.group ? MAX_ARCHIVED_GROUPED_TEXT_CHARS : MAX_ARCHIVED_TEXT_CHARS) ?? null,
-    last_output: boundedText(snapshot.lastOutput, snapshot.group ? MAX_ARCHIVED_GROUPED_TEXT_CHARS : MAX_ARCHIVED_TEXT_CHARS) ?? null,
+    last_input: boundedText(snapshot.lastInput, MAX_ARCHIVED_TEXT_CHARS) ?? null,
+    last_output: boundedText(snapshot.lastOutput, MAX_ARCHIVED_TEXT_CHARS) ?? null,
+    ...((snapshot.lastOutput?.length ?? 0) > MAX_ARCHIVED_TEXT_CHARS ? { last_output_truncated: true } : {}),
     error: boundedText(snapshot.error, 2_000) ?? null,
     queue_size: snapshot.queueSize,
     closed: snapshot.closed,
@@ -143,4 +147,34 @@ function archivedModelCallBinding(binding: ModelCallBinding): Record<string, unk
 function boundedText(value: string | undefined, limit: number): string | undefined {
   if (!value) return undefined
   return value.length <= limit ? value : `${value.slice(0, limit - 1)}…`
+}
+
+/**
+ * Keep grouped agents' saved text under the session-wide budget. The newest
+ * agents keep their text whole; once the budget is spent, older ones are cut
+ * to a short excerpt and flagged, so the inspector can say the rest is gone.
+ */
+function withinGroupedTextBudget(rows: readonly Readonly<Record<string, unknown>>[]): Record<string, unknown>[] {
+  const size = (row: Readonly<Record<string, unknown>>) =>
+    (typeof row.last_input === 'string' ? row.last_input.length : 0) + (typeof row.last_output === 'string' ? row.last_output.length : 0)
+  const newestFirst = rows
+    .filter(row => typeof row.group === 'object' && row.group !== null)
+    .sort((left, right) => String(right.updated_at ?? '').localeCompare(String(left.updated_at ?? '')))
+  const trimmed = new Set<Readonly<Record<string, unknown>>>()
+  let spent = 0
+  for (const row of newestFirst) {
+    if (spent + size(row) <= MAX_ARCHIVED_GROUPED_TEXT_BUDGET) spent += size(row)
+    else { trimmed.add(row); spent += Math.min(size(row), MAX_ARCHIVED_GROUPED_TEXT_CHARS * 2) }
+  }
+  return rows.map(row => {
+    if (!trimmed.has(row)) return { ...row }
+    const input = typeof row.last_input === 'string' ? row.last_input : undefined
+    const output = typeof row.last_output === 'string' ? row.last_output : undefined
+    return {
+      ...row,
+      last_input: boundedText(input, MAX_ARCHIVED_GROUPED_TEXT_CHARS) ?? null,
+      last_output: boundedText(output, MAX_ARCHIVED_GROUPED_TEXT_CHARS) ?? null,
+      ...(output !== undefined && output.length > MAX_ARCHIVED_GROUPED_TEXT_CHARS ? { last_output_truncated: true } : {}),
+    }
+  })
 }

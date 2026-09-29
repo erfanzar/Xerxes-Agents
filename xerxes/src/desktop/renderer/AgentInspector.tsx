@@ -8,6 +8,7 @@ import { OutputViewer, readableOutput } from './OutputViewer.js'
 import { ToolCallRow } from './Execution.js'
 import type { SessionRow } from './types.js'
 import { Markdown } from './markdown.js'
+import { agentResult, resultLabel } from './agentResult.js'
 
 /**
  * An agent's own prose for display: markup-like tags it wrote to itself
@@ -45,7 +46,13 @@ export function AgentInspector({ row, rows, sessionKey, online }: {row: SessionR
   const parent = info?.parentId || text(detail?.parent_id) || text(detail?.creator_id)
   const prompt = info?.goal || text(detail?.prompt)
   const model = info?.model || text(detail?.model)
-  const output = readableOutput(text(detail?.output))
+  const rawOutput = text(detail?.output)
+  // A schema answer (or, before its output loads, the summary excerpt of one)
+  // reads as labelled fields rather than a line of JSON.
+  const fromOutput = agentResult(rawOutput)
+  const result = fromOutput ?? (info?.summary ? agentResult(info.summary) : null)
+  const output = fromOutput?.complete ? JSON.stringify(fromOutput.fields, null, 2) : readableOutput(rawOutput)
+  const outputTrimmed = detail?.output_truncated === true || fromOutput?.complete === false
   return <article aria-label="Agent inspector" data-state={state.tone}>
     <header className="agent-inspector__heading"><h2>{row.title}</h2><span>{state.label}</span></header>
     <dl className="agent-inspector__identity">
@@ -60,14 +67,30 @@ export function AgentInspector({ row, rows, sessionKey, online }: {row: SessionR
     {info?.provisional && <p role="status">{state.tone === 'failed' && info.error ? 'The spawn request failed before an agent identity was confirmed. No running agent is reported for this request. Its requested settings and failure are retained below.' : state.priority < 2 ? 'Waiting for the runtime to identify this spawn request. Its assigned task is available here; controls will appear when its identity is confirmed.' : 'This request has finished. Its runtime identity was not recorded, so live details and controls are unavailable. The original task remains inspectable.'}</p>}
     {error && <div role="alert" className="studio-error"><p>{error}</p><button disabled={!online} onClick={() => setRetry(value => value+1)}>Retry agent details</button></div>}
     {info?.error && <p className="studio-error">{info.error}</p>}
-    {info?.summary && !info.provisional && agentProse(info.summary) && <section className="agent-inspector__summary"><h3>Latest summary</h3><Markdown text={agentProse(info.summary)} className="md--compact" /></section>}
+    {result && <AgentResultFields result={result} />}
+    {!result && info?.summary && !info.provisional && agentProse(info.summary) && <section className="agent-inspector__summary"><h3>Latest summary</h3><Markdown text={agentProse(info.summary)} className="md--compact" /></section>}
     {Boolean(info?.notes?.length) && <section className="agent-inspector__notes"><h3>Recent activity</h3><ol>{info!.notes!.map(agentProse).filter(Boolean).map((note, index) => <li key={index}>{note}</li>)}</ol></section>}
     {Boolean(info?.toolCalls?.length) && <section><h3>Tool calls <span>{info!.toolCalls!.length}</span></h3>{info!.toolCalls!.map(call => <ToolCallRow key={call.id} item={call} label={call.name.replaceAll('_',' ')} />)}</section>}
-    {output && <><OutputViewer text={output} label="Agent output"/><p className="studio-muted">Retained output from the latest saved agent state.</p></>}
+    {output && <><OutputViewer text={output} label="Agent output"/><p className="studio-muted">{outputTrimmed ? 'Only the beginning of this output was saved; the rest was not kept.' : 'Retained output from the latest saved agent state.'}</p></>}
     {!output && !info?.notes?.length && !info?.toolCalls?.length && !info?.provisional && <p className="studio-muted">{detail || error ? 'No detailed activity has been recorded yet.' : 'Loading recorded activity…'}</p>}
     {Boolean(info?.thinking?.length) && <details><summary>Reasoning</summary>{info!.thinking!.map((line,index)=><p key={index}>{line}</p>)}</details>}
     {info && [['Files read', info.filesRead], ['Files changed', info.filesWritten]].map(([label, paths]) => Array.isArray(paths) && paths.length > 0 ? <section key={String(label)}><h3>{label}</h3><ul>{paths.map(path => <li key={path}><code>{path}</code></li>)}</ul></section> : null)}
     <details className="agent-inspector__metadata"><summary>Runtime details</summary><dl><dt>Agent ID</dt><dd>{info?.provisional ? state.priority < 2 ? 'Not assigned yet' : 'Not recorded' : row.id}</dd>{info?.toolCount !== undefined && <><dt>Tools</dt><dd>{info.toolCount}</dd></>}{info?.inputTokens !== undefined && <><dt>Input tokens</dt><dd>{info.inputTokens.toLocaleString()}</dd></>}{info?.outputTokens !== undefined && <><dt>Output tokens</dt><dd>{info.outputTokens.toLocaleString()}</dd></>}</dl></details>
     {!info?.provisional && <fieldset disabled={!online} className="agent-inspector__controls"><AgentControls id={row.id} active={state.priority < 2}/></fieldset>}
   </article>
+}
+
+/** A structured result, one labelled section per field. */
+function AgentResultFields({ result }: { result: NonNullable<ReturnType<typeof agentResult>> }): ReactElement {
+  return <section className="agent-inspector__result">
+    <h3>Result</h3>
+    <dl>{Object.entries(result.fields).map(([key, value]) => <div key={key}>
+      <dt>{resultLabel(key)}</dt>
+      <dd>{typeof value === 'string' ? <Markdown text={agentProse(value)} className="md--compact" />
+        : Array.isArray(value) && value.every(item => typeof item === 'string' || typeof item === 'number') ? <ul>{value.map((item, index) => <li key={index}>{String(item)}</li>)}</ul>
+        : value !== null && typeof value === 'object' ? <pre>{JSON.stringify(value, null, 2)}</pre>
+        : <p>{String(value)}</p>}</dd>
+    </div>)}</dl>
+    {!result.complete && <p className="studio-muted">The saved result was cut short; fields after these were not kept.</p>}
+  </section>
 }

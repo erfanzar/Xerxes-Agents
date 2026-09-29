@@ -10751,6 +10751,10 @@ test('subagent.inspect scopes retained evidence to the parent across reconnect a
     parent.metadata.xerxes_subagent_snapshots_v1=[{id:'child',status:'running',agent_id:'reviewer',model:'fixture',provider_profile:'work',reasoning_effort:'high',last_input:'Review the change',last_output:'Reading files\n',private_config:'must not be returned'}];
     let result=await rpc('subagent.inspect',{task:'child'});
     expect(result.result?.agent).toMatchObject({id:'child',agent_id:'reviewer',provider_profile:'work',reasoning_effort:'high',prompt:'Review the change',output:'Reading files\n'});
+    expect(result.result?.agent).not.toHaveProperty('output_truncated');
+    parent.metadata.xerxes_subagent_snapshots_v1=[{id:'child',status:'completed',agent_id:'reviewer',last_output:'The first part…',last_output_truncated:true}];
+    expect((await rpc('subagent.inspect',{task:'child'})).result?.agent).toMatchObject({output:'The first part…',output_truncated:true});
+    parent.metadata.xerxes_subagent_snapshots_v1=[{id:'child',status:'running',agent_id:'reviewer',model:'fixture',provider_profile:'work',reasoning_effort:'high',last_input:'Review the change',last_output:'Reading files\n',private_config:'must not be returned'}];
     expect(JSON.stringify(result)).not.toContain('must not be returned');
     const status=await rpc('session.status');
     expect(JSON.stringify(status)).not.toContain('Review the change');

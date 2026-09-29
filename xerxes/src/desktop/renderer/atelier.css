@@ -2734,12 +2734,12 @@ html,body,#root,.app.atelier{background:transparent}
 .atelier .railflow[data-state='working'] .railflow__head .railrow__meta{color:var(--x-working,var(--x-accent))}
 .atelier .railflow[data-state='failed'] .railflow__head .railrow__meta{color:var(--x-failed,#e5484d)}
 .atelier .railflow__phase{display:grid;gap:0;padding-left:10px;margin-left:8px;border-left:1px solid color-mix(in srgb,var(--x-title) 12%,transparent)}
-.atelier .railflow__phasename{padding:6px 8px 2px;font:500 12px/1.2 var(--sans);color:var(--x-secondary)}
+.atelier .railflow__phasename{padding:8px 0 2px;font:500 12px/1.2 var(--sans);color:var(--x-secondary)}
 .atelier .railflow__phasename span{font-weight:400;color:var(--x-meta)}
 .atelier .railflow__rest{padding:2px 8px;font:400 12px/1.4 var(--sans);color:var(--x-meta)}
 
 /* Agent inspector prose: the summary as Markdown, activity as a list. */
-.atelier .agent-inspector__summary .md{font:400 13px/1.6 var(--sans);color:var(--x-prose)}
+.atelier .agent-inspector__summary .md{font:400 13px/1.6 var(--sans);color:var(--x-prose);padding:0;max-height:none;overflow:visible}
 .atelier .agent-inspector__notes ol{display:grid;gap:6px;margin:0;padding:0 0 0 18px;font:400 12.5px/1.5 var(--sans);color:var(--x-secondary)}
 .atelier .acard .acard__title{flex:1 1 auto;min-width:0}
 .atelier .acard .acard__counts{flex:none;margin-left:auto;text-align:right}
@@ -2912,3 +2912,19 @@ html,body,#root,.app.atelier{background:transparent}
 /* Runtime popover: what keeps a queued update waiting, and restarting anyway. */
 .atelier .runtime-popover__blockers,.runtime-popover__blockers{margin:0;padding-left:18px;font:400 12.5px/1.5 var(--sans);color:var(--x-secondary)}
 .runtime-popover .runtime-popover__danger{color:var(--x-failed,#e5484d)}
+
+/* Workflow phases: headings line up with their rows, a gap between phases. */
+.atelier .railflow__phase+.railflow__phase{margin-top:6px}
+.atelier .railflow__rest{padding:2px 0}
+
+/* Agent inspector: the back link points back; a structured result is one
+   labelled section per field instead of a line of JSON. */
+.atelier .agent-inspector__back{display:inline-flex;align-items:center;gap:6px}
+.atelier .agent-inspector__back svg{transform:scaleX(-1)}
+.atelier .agent-inspector__result dl{display:grid;grid-template-columns:minmax(0,1fr);gap:14px;font-size:inherit}
+.atelier .agent-inspector__result dt{font:500 12px/1.4 var(--sans);color:var(--x-meta);margin-bottom:4px}
+.atelier .agent-inspector__result dd{color:var(--x-prose)}
+.atelier .agent-inspector__result .md{font:400 13px/1.6 var(--sans);color:var(--x-prose);padding:0;max-height:none;overflow:visible}
+.atelier .agent-inspector__result ul{display:grid;gap:4px;margin:0;padding-left:18px;font:400 12px/1.5 var(--mono);color:var(--x-secondary)}
+.atelier .agent-inspector__result pre{margin:0;padding:10px 12px;overflow:auto;max-height:320px;border-radius:8px;background:color-mix(in srgb,var(--x-title) 4%,transparent);font:400 12px/1.5 var(--mono);color:var(--x-secondary)}
+.atelier .agent-inspector__result p{margin:0}

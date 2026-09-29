@@ -3110,6 +3110,8 @@ export class DaemonServer {
       return { ok: true, agent: { ...panel,
         prompt: typeof saved.last_input === 'string' ? saved.last_input.slice(0, 16_000) : '',
         output: typeof saved.last_output === 'string' ? saved.last_output.slice(0, 16_000) : '',
+        // The saved text is an excerpt: the agent's output ran past what is kept.
+        ...(saved.last_output_truncated === true || (typeof saved.last_output === 'string' && saved.last_output.length > 16_000) ? { output_truncated: true } : {}),
         retained: true,
       } };
     }
