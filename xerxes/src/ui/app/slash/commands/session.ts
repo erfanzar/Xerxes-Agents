@@ -337,6 +337,12 @@ export const sessionCommands: SlashCommand[] = [
   },
 
   {
+    help: 'how eagerly this task uses agents and workflows: /delegate off|auto|eager (auto by default)',
+    name: 'delegate',
+    run: (arg, ctx) => runNativeSlash(ctx, `delegate ${arg}`.trim(), 'Agents')
+  },
+
+  {
     help: 'toggle accept-all tool approvals for the live daemon',
     name: 'yolo',
     run: (_arg, ctx) => runNativeSlash(ctx, 'yolo', 'YOLO')

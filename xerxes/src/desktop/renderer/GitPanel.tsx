@@ -62,8 +62,17 @@ export function pullRequestPrompt(branch: string | null): string {
     '1. Check `gh auth status` and the remote. If `gh` is missing or not signed in, stop and tell me exactly what to run.',
     '2. Look at the uncommitted changes (respect .gitignore). If there are any, commit them in logical commits following this repository\'s commit-message conventions (read recent `git log` and any AGENTS.md or CONTRIBUTING notes).',
     '3. If the current branch is the default branch, create a new branch named after the change first, so the pull request has a head branch. Never force-push and never rewrite published history.',
-    '4. Push the branch, then run `gh pr create` (not a draft) with a clear title and a body covering what changed, why, and how it was tested. Follow the repository\'s pull request template if it has one.',
-    '5. Reply with the pull request URL.',
+    '4. Understand the whole change before writing about it: read `git log` and `git diff` from the merge base with the default branch. If it spans many files or areas and agents are available (not turned off for this conversation), summarize it with a Workflow: one agent per area, each returning what changed, why, user-visible effects and risks.',
+    '5. Run the project\'s own checks that cover the change (its test, lint and type-check commands from the README, AGENTS.md or package scripts) and keep the exact commands and results. If something fails, say so in the pull request; do not hide it.',
+    '6. Push the branch, then run `gh pr create` (not a draft). Title: the repository\'s commit convention if it has one, otherwise a short imperative summary. Follow the repository\'s pull request template if it has one; otherwise write the body with these sections:',
+    '   - **Summary** — two or three sentences on what this does and why.',
+    '   - **Changes** — grouped by area, with the key files and what changed in each.',
+    '   - **Behaviour changes** — anything a user or caller will notice, including breaking changes, migrations and new settings or defaults.',
+    '   - **How it was tested** — the commands you ran and their results, plus any manual checks.',
+    '   - **Risks and rollback** — what could go wrong, what to watch after merging, and how to back it out.',
+    '   - **Follow-ups** — known gaps left for later, if any.',
+    '   Link related issues when the commits or branch name reference them. Keep it factual: only claim what you verified.',
+    '7. Reply with the pull request URL and a one-line summary.',
   ].join('\n')
 }
 
@@ -74,9 +83,12 @@ export function reviewPrompt(status: Pick<ScmStatus, 'branch' | 'hasHead'>): str
   return [
     `Do a deep code review of all uncommitted changes${status.branch ? ` on branch \`${status.branch}\`` : ''} — staged, unstaged and new files alike. Respect .gitignore: files it matches are not part of the change, so leave them out.`,
     '',
-    `Read them yourself with ${read}. Open the surrounding code wherever a change's correctness depends on it, and check the callers of anything whose behavior changed.`,
+    `Start by sizing the change with ${read} (\`git diff HEAD --stat\` for the numbers).`,
     '',
-    'Report findings most severe first: correctness bugs, regressions, security problems, races, unhandled errors, and missing or weakened tests. For each, give file:line, what goes wrong and when, and a concrete fix. Skip style nits. If you find nothing serious, say so plainly.',
+    '- Small change (a handful of files): review it yourself. Open the surrounding code wherever a change\'s correctness depends on it, and check the callers of anything whose behavior changed.',
+    '- Larger change (roughly more than 8 files or 400 changed lines), when agents are available and not turned off for this conversation: run the review as a Workflow so it is faster and more thorough. Phase "Review": split the change into slices by module or directory (about 10 files each) and give each slice to a reviewer agent with a findings schema (file, line, severity, problem, when it goes wrong, fix); tell each reviewer to read surrounding code and callers, not just the diff. Phase "Verify": give every finding of medium severity or above to an independent skeptic agent told to refute it by reading the code; keep only findings the skeptic confirms. Use a fast model for slicing and a strong model for reviewing and verifying.',
+    '',
+    'Report findings most severe first: correctness bugs, regressions, security problems, races, unhandled errors, and missing or weakened tests. For each, give file:line, what goes wrong and when, and a concrete fix. Skip style nits. If you find nothing serious, say so plainly. If a workflow ran, say how many findings were raised and how many survived verification.',
     '',
     'Do not modify any files.',
   ].join('\n')

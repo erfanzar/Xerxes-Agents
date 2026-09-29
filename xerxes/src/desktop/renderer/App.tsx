@@ -5,7 +5,7 @@ import { GoalInspectorDisclosure } from "./GoalInspector.js"
 import { createPortal } from 'react-dom'
 import { Fragment, createContext, memo, useCallback, useContext, useLayoutEffect, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactElement } from 'react'
 
-import { CommandPalette, PickerLayer, ModelMenu, ModelPicker, ReasoningPicker, SettingsModal, bareModelName } from './Overlays.js'
+import { CommandPalette, PickerLayer, DelegationMenu, ModelMenu, ModelPicker, ReasoningPicker, SettingsModal, bareModelName } from './Overlays.js'
 import { SessionSearch } from './SearchPanel.js'
 import { useTranscriptScroll } from './transcriptScroll.js'
 import { store, type Snapshot, isPlanReview } from './store.js'
@@ -1834,6 +1834,18 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
           title={snap.planMode ? 'Planning first. Click to work directly.' : 'Click to plan before making changes.'}
           onClick={() => store.togglePlanMode()}
         >{snap.planMode ? 'Plan first' : 'Plan'}</button>
+        <div className="chipanchor">
+          <button
+            className={`cchip composer__text delegation-chip${snap.delegationMode === 'auto' ? '' : ' is-on'}`}
+            aria-haspopup="dialog"
+            aria-expanded={snap.delegationMenuOpen}
+            title="How eagerly this task uses agents and workflows — click to change"
+            onClick={() => store.toggleDelegationMenu()}
+          ><Icon name="agent" size={13} />Agents · {snap.delegationMode === 'off' ? 'Off' : snap.delegationMode === 'eager' ? 'Eager' : 'Auto'}</button>
+          <PickerLayer>
+          {snap.delegationMenuOpen && <DelegationMenu snap={snap} onClose={() => store.closeDelegationMenu()} />}
+          </PickerLayer>
+        </div>
         <span className="composer__flex" />
         <div className="chipanchor">
           <button
@@ -2131,6 +2143,11 @@ function GlobalKeys({ snap, closeSurface }: { snap: Snapshot; closeSurface: (() 
           store.closeReasoningPicker()
           return
         }
+        if (snap.delegationMenuOpen) {
+          event.preventDefault()
+          store.closeDelegationMenu()
+          return
+        }
         if (snap.modelMenuOpen) {
           event.preventDefault()
           store.closeModelMenu()
@@ -2186,6 +2203,6 @@ function GlobalKeys({ snap, closeSurface }: { snap: Snapshot; closeSurface: (() 
     // Every overlay flag the handler branches on must be a dep — a stale
     // closure here swallowed Escape after the task modal closed (the old
     // snap still claimed taskModalOpen, so settings could never dismiss).
-  }, [snap.approval, snap.paletteOpen, snap.searchOpen, snap.taskModalOpen, snap.settingsOpen, snap.pickerOpen, snap.reasoningPickerOpen, snap.modelMenuOpen, snap.contextMenuOpen, snap.wsMenuOpen, snap.sessionMenu, snap.turnActive, closeSurface])
+  }, [snap.approval, snap.paletteOpen, snap.searchOpen, snap.taskModalOpen, snap.settingsOpen, snap.pickerOpen, snap.reasoningPickerOpen, snap.modelMenuOpen, snap.delegationMenuOpen, snap.contextMenuOpen, snap.wsMenuOpen, snap.sessionMenu, snap.turnActive, closeSurface])
   return null
 }

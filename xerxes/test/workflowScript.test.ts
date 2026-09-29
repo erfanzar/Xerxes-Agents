@@ -219,3 +219,9 @@ test('a script handed over as a function is called rather than rejected', async 
     expect(String(result.result)).toStartWith('ran ')
   }
 })
+
+test('a run totals its published-price cost and counts agents without a price', async () => {
+  const port = fakePort((_request, index) => index === 2 ? { output: 'x' } : { output: 'x', costUsd: 0.125 })
+  const result = await runWorkflowScript({ name: 'Priced', concurrency: 3, maxAgents: 10, port, script: `return await parallel([1, 2, 3].map(i => () => agent('n' + i)))` })
+  expect(result.cost).toEqual({ usd: 0.25, unpriced: 1 })
+})

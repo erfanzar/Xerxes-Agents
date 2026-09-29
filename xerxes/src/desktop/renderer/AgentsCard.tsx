@@ -187,6 +187,7 @@ export function AgentsCard({ members }: { members: readonly AgentMember[] }): Re
   const phases = useMemo(() => phasesOf(rows), [rows])
   const now = useNow(tally.working > 0)
   const label = members.find(member => member.group?.label)?.group?.label
+  const costed = members.find(member => member.group?.costUsd !== undefined)?.group
   const settled = members.length - tally.working
   const starts = members.map(member => member.startedAt).filter((value): value is number => value !== undefined)
   const first = starts.length ? Math.min(...starts) : undefined
@@ -204,6 +205,7 @@ export function AgentsCard({ members }: { members: readonly AgentMember[] }): Re
     models.length > 0 && models.length <= 3 ? models.map(shortModel).join(', ') : models.length > 3 ? `${models.length} models` : '',
     uses(totalUses),
     tokensLabel(totalTokens),
+    costed?.costUsd !== undefined ? `${costed.costPartial ? 'at least ' : ''}$${costed.costUsd < 0.01 ? costed.costUsd.toFixed(4) : costed.costUsd.toFixed(2)}` : '',
   ].filter(Boolean).join(' · ')
   return (
     <section className="acard" data-state={tally.working ? 'working' : tally.failed ? 'failed' : 'done'} aria-label={label ? `Workflow: ${label}` : 'Subagents'}>

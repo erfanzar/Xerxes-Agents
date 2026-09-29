@@ -16,6 +16,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseAgentIntelligenceConfig } from "./agents/intelligence.js";
 import { renderDelegationModels } from "./agents/delegationModels.js";
+import { calcCost } from "./llms/providerRegistry.js";
 import { getActiveSession } from "./runtime/sessionContext.js";
 import { AcpAgentRunner } from "./acp/runner.js";
 import {
@@ -2034,6 +2035,16 @@ function daemonRuntime(
       intelligence: new AgentSettingsStore(join(xerxesHome(), "daemon", "agent-settings.sqlite")).read().settings ?? parseAgentIntelligenceConfig(config.runtime.agent_intelligence),
       backgroundAgents: subagentHost.turnCoordinator,
       manager: subagentHost.managerPort,
+      estimateCostUsd: (model, usage, providerProfile) => {
+        const profile = providerProfile ? profileStore.get(providerProfile) : undefined;
+        const reported = profile?.model_capabilities?.[model]?.cost;
+        return calcCost(model, usage.input, usage.output, {
+          ...(profile ? { provider: profile.provider, baseUrl: profile.base_url } : {}),
+          ...(reported ? { reported: { ...(reported.input === undefined ? {} : { input: reported.input }), ...(reported.output === undefined ? {} : { output: reported.output }), ...(reported.cache_read === undefined ? {} : { cacheRead: reported.cache_read }), ...(reported.cache_write === undefined ? {} : { cacheWrite: reported.cache_write }) } } : {}),
+          ...(usage.cacheRead ? { cacheReadTokens: usage.cacheRead } : {}),
+          ...(usage.cacheWrite ? { cacheWriteTokens: usage.cacheWrite } : {}),
+        });
+      },
     });
     // Deterministic multi-agent orchestration: PlanTool decomposes an explicit
     // objective into dependency-ordered steps and executes them through the

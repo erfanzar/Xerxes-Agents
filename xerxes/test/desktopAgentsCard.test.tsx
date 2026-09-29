@@ -121,3 +121,17 @@ test('workflow runs get their own panel card, grouped by phase, apart from other
   expect(html).toContain('softmax_f16')
   expect(html).not.toContain('Map native core')
 })
+
+test('a finished run shows its cost in the card header', () => {
+  const g = { id: 'wf_c', label: 'Review', phase: 'Find', costUsd: 0.4217 }
+  const html = renderToStaticMarkup(createElement(AgentsCard, { members: [
+    { key: 'a', runtimeId: 'a', title: 'slice 1', status: 'completed', group: g },
+    { key: 'b', runtimeId: 'b', title: 'slice 2', status: 'completed', group: { ...g, costPartial: true } },
+  ] }))
+  expect(html).toContain('$0.42')
+})
+
+test('the Agents chip menu lists off, auto and eager with auto as the default', async () => {
+  const { DELEGATION_CHOICES } = await import('../src/desktop/renderer/Overlays.js')
+  expect(DELEGATION_CHOICES.map(choice => choice.mode)).toEqual(['off', 'auto', 'eager'])
+})

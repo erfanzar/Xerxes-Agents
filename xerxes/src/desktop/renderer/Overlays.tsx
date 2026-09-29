@@ -1341,6 +1341,54 @@ export function ModelPicker({ snap, onClose }: { snap: Snapshot; onClose: () => 
  * into its own picker (models, reasoning levels). Mirrors the reference
  * shell: label left, current value right, chevron affording the drill-down.
  */
+/** The Agents chip's choices, in the order the menu lists them. */
+export const DELEGATION_CHOICES = [
+  { mode: 'off', label: 'Off', detail: 'Works alone. No agents or workflows unless you ask for them.' },
+  { mode: 'auto', label: 'Auto', detail: 'Fans out when work splits: reviews, sweeps, migrations, verification. Asks before a run of more than about 10 agents: budget or thorough.' },
+  { mode: 'eager', label: 'Eager', detail: 'Delegates whenever work can split, with a verify step. Fastest and most thorough; uses the most tokens and plan quota.' },
+] as const
+
+export function DelegationMenu({ snap, onClose }: { snap: Snapshot; onClose: () => void }): ReactElement {
+  const current = DELEGATION_CHOICES.findIndex(choice => choice.mode === snap.delegationMode)
+  const [cursor, setCursor] = useState(Math.max(0, current))
+  const ref = useRef<HTMLDivElement>(null)
+  useAnchoredPicker(ref)
+  useEffect(() => { ref.current?.focus() }, [])
+  const choose = (at: number): void => { void store.setDelegationMode(DELEGATION_CHOICES[at]!.mode) }
+  const onKey = (event: React.KeyboardEvent): void => {
+    if (event.key === 'ArrowDown') { event.preventDefault(); setCursor(value => Math.min(value + 1, DELEGATION_CHOICES.length - 1)) }
+    else if (event.key === 'ArrowUp') { event.preventDefault(); setCursor(value => Math.max(value - 1, 0)) }
+    else if (event.key === 'Enter') { if (event.target instanceof HTMLButtonElement) return; event.preventDefault(); choose(cursor) }
+    else if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onClose() }
+  }
+  return (
+    <>
+      <div className="backdrop backdrop--clear" onClick={onClose} />
+      <div ref={ref} className="modelpop modelpop--menu delegation-menu" role="dialog" aria-label="Agents" tabIndex={-1} onKeyDown={onKey}>
+        <div className="palette__list" role="listbox" aria-label="Agents">
+          {DELEGATION_CHOICES.map((choice, at) => (
+            <button
+              key={choice.mode}
+              role="option"
+              aria-selected={choice.mode === snap.delegationMode}
+              className={`mrow delegation-menu__row${at === cursor ? ' is-hover' : ''}`}
+              onClick={() => choose(at)}
+              onMouseEnter={() => setCursor(at)}
+            >
+              <span className="delegation-menu__mark" aria-hidden="true">{choice.mode === snap.delegationMode ? <Icon name="check" size={13} /> : null}</span>
+              <span className="delegation-menu__text">
+                <span className="delegation-menu__label">{choice.label}{choice.mode === 'auto' && <span className="delegation-menu__default"> · default</span>}</span>
+                <span className="delegation-menu__detail">{choice.detail}</span>
+              </span>
+            </button>
+          ))}
+        </div>
+        <div className="delegation-menu__foot">This conversation only · also <code>/delegate off|auto|eager</code></div>
+      </div>
+    </>
+  )
+}
+
 export function ModelMenu({ snap, onClose }: { snap: Snapshot; onClose: () => void }): ReactElement {
   const rows = [
     { key: 'model' as const, label: 'Model', value: snap.model ? bareModelName(snap.model) : '—' },

@@ -141,6 +141,11 @@ const GOAL_WRITE_TOOLS = new Set(['create_goal', 'update_goal'])
  * SpawnAgents carries an `agents` batch; the single-spawn tools carry one
  * title-ish field. Keys are call-local; fleet sync matches on title.
  */
+/** The daemon's delegation mode; an older runtime without one is auto. */
+function delegationModeValue(value: unknown): 'off' | 'auto' | 'eager' {
+  return value === 'off' || value === 'eager' ? value : 'auto'
+}
+
 /** Minimum spacing of routine (streaming) store updates: 20 a second. */
 const STREAM_FRAME_MS = 50
 
@@ -311,6 +316,9 @@ export interface Snapshot {
   readonly pickerOpen: boolean
   /** The single model/effort chip's dropdown — rows drill into the pickers. */
   readonly modelMenuOpen: boolean
+  /** How eagerly this conversation fans out to agents (the composer's Agents chip). */
+  readonly delegationMode: 'off' | 'auto' | 'eager'
+  readonly delegationMenuOpen: boolean
   /** Context-usage popover with the estimated token split. */
   readonly contextMenuOpen: boolean
   readonly contextBreakdown: ContextBreakdown | null
@@ -840,6 +848,8 @@ export class Store {
       paletteOpen: false,
       pickerOpen: false,
       modelMenuOpen: false,
+      delegationMode: 'auto',
+      delegationMenuOpen: false,
       contextMenuOpen: false,
       contextBreakdown: null,
       contextBreakdownLoading: false,
@@ -1789,6 +1799,30 @@ export class Store {
 
   togglePlanMode(): void {
     this.setPlanMode(!this.frame.planMode)
+  }
+
+  toggleDelegationMenu(): void {
+    this.patch({ delegationMenuOpen: !this.frame.delegationMenuOpen, modelMenuOpen: false, pickerOpen: false, reasoningPickerOpen: false })
+  }
+
+  closeDelegationMenu(): void {
+    this.patch({ delegationMenuOpen: false })
+  }
+
+  /** Off, auto or eager for this conversation; the daemon's status echo is authoritative. */
+  async setDelegationMode(mode: 'off' | 'auto' | 'eager'): Promise<void> {
+    const previous = this.frame.delegationMode
+    const sessionKey = this.sessionKey
+    this.patch({ delegationMode: mode, delegationMenuOpen: false })
+    try {
+      const result = await this.bridge.call('slash', { command: `/delegate ${mode}` })
+      if (result.ok !== true && this.sessionKey === sessionKey) {
+        this.patch({ delegationMode: previous })
+        this.fail(new Error(str(result.error) || 'The runtime did not accept the agents setting'))
+      }
+    } catch (error) {
+      if (this.sessionKey === sessionKey) { this.patch({ delegationMode: previous }); this.fail(error) }
+    }
   }
 
   // ── Overlay + tab actions ────────────────────────────────────────────
@@ -2905,6 +2939,7 @@ export class Store {
       cwd: str(result.cwd ?? session.cwd),
       model: str(result.model ?? session.model),
       planMode: (result.plan_mode ?? session.plan_mode) === true,
+      delegationMode: delegationModeValue(result.delegation_mode ?? session.delegation_mode),
       ...(str(result.reasoning_effort)
         ? { reasoningEffort: str(result.reasoning_effort) }
         : {}),
@@ -3014,6 +3049,25 @@ export class Store {
    * previous turn's terminal snapshots must not open a stale card at the
    * next turn's start.
    */
+  /** A finished Workflow reports its cost; the run's card shows it in the header. */
+  private foldWorkflowResult(value: unknown): void {
+    let result: unknown = value
+    if (typeof result === 'string') { try { result = JSON.parse(result) } catch { return } }
+    if (!result || typeof result !== 'object') return
+    const run = result as Record<string, unknown>
+    const id = str(run.workflow_id)
+    const known = typeof run.cost_usd === 'number' ? run.cost_usd : typeof run.cost_usd_known === 'number' ? run.cost_usd_known : undefined
+    if (!id || known === undefined) return
+    const partial = typeof run.unpriced_agents === 'number' && run.unpriced_agents > 0
+    let touched = false
+    for (const [key, member] of this.agentMembers) {
+      if (member.group?.id !== id) continue
+      this.agentMembers.set(key, { ...member, group: { ...member.group, costUsd: known, ...(partial ? { costPartial: true } : {}) } })
+      touched = true
+    }
+    if (touched) { this.builder.pushAgents([...this.agentMembers.values()]); this.notify() }
+  }
+
   private syncAgentMembersFromFleet(fleet: readonly SessionRow[]): void {
     if (!syncAgentMembers(this.agentMembers, fleet)) return
     const members = [...this.agentMembers.values()]
@@ -3419,6 +3473,7 @@ export class Store {
         // showing "blocked · Rounds 0/1" for a goal the agent had already
         // resumed with no limits.
         if (type === 'tool_result' && GOAL_WRITE_TOOLS.has(str(payload.name))) void this.refreshGoal()
+        if (type === 'tool_result' && /(^|[.:])workflow$/i.test(str(payload.name))) this.foldWorkflowResult(payload.return_value ?? payload.result)
         if (type === 'tool_result' && payload.permitted !== false && !payload.error && Array.isArray(payload.display_blocks)) {
           for (const block of payload.display_blocks) {
             if (block?.type !== 'todo') continue
@@ -3643,6 +3698,7 @@ export class Store {
         if (typeof payload.cost_usd === 'number') patch.costUsd = payload.cost_usd
         // The daemon logs plan-mode flips; its status echo is authoritative.
         if (typeof payload.plan_mode === 'boolean') patch.planMode = payload.plan_mode
+        if (payload.delegation_mode === 'off' || payload.delegation_mode === 'auto' || payload.delegation_mode === 'eager') patch.delegationMode = payload.delegation_mode
         // The daemon echoes effort flips here; session pinning means the
         // picker may not have been the one to change it.
         if (typeof payload.reasoning_effort === 'string' && payload.reasoning_effort) {

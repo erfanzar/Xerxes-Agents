@@ -232,6 +232,11 @@ export interface ClaudeAgentToolsOptions {
    * capped at 32 agents regardless of this setting.
    */
   readonly spawnConcurrency?: number
+  /**
+   * Published-price cost of one agent's usage, for workflow totals. Undefined
+   * when no price is published — reported as unpriced, never as $0.
+   */
+  readonly estimateCostUsd?: (model: string, usage: { readonly input: number; readonly output: number; readonly cacheRead: number; readonly cacheWrite: number }, providerProfile?: string) => number | undefined
   /** Associates explicitly detached work with the active parent turn. */
   readonly backgroundAgents?: {
     consume(snapshots: readonly SpawnedAgentSnapshot[]): void
@@ -410,10 +415,22 @@ const WORKFLOW_CAPABILITIES: Partial<ToolCapabilities> = {
 }
 
 const WORKFLOW_GUIDANCE = [
-  'Reach for Workflow on your own whenever a task fans out; the user does not need to ask for it. Good fits: review or audit across many files (one agent per slice, then a verifier per finding), migrations across many call sites, research from several angles, "find all X" sweeps, and checking a claim with independent skeptics before you rely on it.',
+  'Choose the shape by how the work splits; the user does not need to ask.',
+  '- Work alone: one file or symbol, a single fact, a small edit, or steps where each depends on the last (debugging a hypothesis, then the next one). Agents start from zero and would re-read what you already know.',
+  '- AgentTool: one self-contained side task whose reading would flood your context (map a subsystem, survey an unfamiliar library) while you continue.',
+  '- SpawnAgents: a handful (2–8) of independent, similar-sized tasks with no later stage.',
+  '- Workflow: many independent pieces, or any job with stages. Typical shapes:',
+  '  · Review or audit: slice the diff or tree (by module, ~10–25 files each) → one reviewer per slice with a findings schema → one skeptic per finding told to refute it → return only survivors, most severe first.',
+  '  · Find all X / sweep: one agent per directory or pattern → dedupe in the script → return the list.',
+  '  · Migration or mechanical edit across many files: one agent per disjoint file group (isolation: "worktree" when groups could collide) → a verify agent runs the tests.',
+  '  · Research: several angles in parallel (docs, code, issues, benchmarks) → one synthesis agent with the strongest model.',
+  '  · Check a claim before relying on it: 3 independent skeptics; accept only if most cannot refute it.',
+  '  · Debugging with competing theories: one agent per hypothesis, each told to prove or kill it with a concrete experiment.',
+  '  · Benchmarks or test matrices: one agent per configuration → a table.',
   'Shape: phase("Find"); const found = await parallel(slices.map(s => () => agent(prompt(s), { label: s.name, model: FAST, schema })));  then phase("Verify") over the flattened findings with a stronger model, then return a compact summary. pipeline() lets each item move to the next stage without waiting for the slowest one.',
   'Set model on every agent deliberately — agents without one inherit this conversation\'s model, often the most expensive. Use a fast, cheap model from the models list (or list_available_models) for mechanical reading, search, extraction and classification, and your strongest model for design decisions, verification of subtle claims, and the final synthesis.',
-  'Return only what you need from the script; agents\' full outputs stay in the agent panel. Read the returned failures and logs before concluding.',
+  'Costs to weigh: every agent re-reads its inputs and pays its own prompt, so total tokens rise even as your context stays small, and parallel agents drain plan quotas faster. Do not fan out work you could finish in a few tool calls. Give each agent a self-contained prompt with scope, paths, constraints and the exact output wanted.',
+  'Return only what you need from the script; agents\' full outputs stay in the agent panel. Read the returned failures, logs and cost before concluding, and report the cost when it is known.',
 ].join('\n')
 
 /** Advertise only configured choices, including the nested swarm item schema. */
@@ -897,7 +914,7 @@ export class ClaudeAgentTools {
         return { id, status: 'failed', output: '', error: `Agent timed out after ${Math.round(timeoutMs / 1000)}s`, tokens: snapshotTokens(snapshot) }
       }
       live.delete(id)
-      return workflowOutcome(snapshot)
+      return this.priced(workflowOutcome(snapshot), snapshot)
     }
     const port: WorkflowAgentPort = {
       run: async (request, runSignal) => {
@@ -934,6 +951,17 @@ export class ClaudeAgentTools {
       clearInterval(heartbeat)
       this.capture()
     }
+  }
+
+  private priced(outcome: WorkflowAgentOutcome, snapshot: SpawnedAgentSnapshot): WorkflowAgentOutcome {
+    if (!this.options.estimateCostUsd || !snapshot.model) return outcome
+    const costUsd = this.options.estimateCostUsd(snapshot.model, {
+      input: snapshot.inputTokens ?? 0,
+      output: snapshot.outputTokens ?? 0,
+      cacheRead: snapshot.cacheReadTokens ?? 0,
+      cacheWrite: snapshot.cacheCreationTokens ?? 0,
+    }, snapshot.providerProfile)
+    return costUsd === undefined ? outcome : { ...outcome, costUsd }
   }
 
   private resolveSpec(spec: ClaudeAgentSpec): ClaudeAgentSpec {
@@ -1503,6 +1531,9 @@ function workflowWire(runId: string, result: WorkflowRunResult): Record<string, 
     ...(result.error ? { error: result.error } : {}),
     agents: result.agents,
     tokens: result.tokens,
+    ...(result.cost.unpriced === 0 && result.agents.started > 0 ? { cost_usd: Math.round(result.cost.usd * 10_000) / 10_000 } : {}),
+    ...(result.cost.unpriced > 0 && result.cost.usd > 0 ? { cost_usd_known: Math.round(result.cost.usd * 10_000) / 10_000 } : {}),
+    ...(result.cost.unpriced > 0 ? { unpriced_agents: result.cost.unpriced } : {}),
     duration_seconds: Math.round(result.durationMs / 100) / 10,
     ...(result.phases.length ? { phases: result.phases } : {}),
     ...(result.failures.length ? { failures: result.failures } : {}),

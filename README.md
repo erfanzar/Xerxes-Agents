@@ -203,6 +203,7 @@ Useful commands:
 /tools                inspect the active tool registry
 /permissions          inspect or change permission policy
 /yolo                 toggle accept-all tool execution
+/delegate             agents and workflows: off, auto (default) or eager
 /cron                 manage scheduled work
 /remove-memory        wipe all Xerxes memory after confirmation
 /remove-history       wipe saved chats and snapshots after confirmation

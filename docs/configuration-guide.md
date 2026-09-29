@@ -166,6 +166,13 @@ Interactive sessions start in YOLO mode (`accept-all`). The TUI shows `YOLO ON`
 beside the active model while it is enabled; `/yolo` switches between `accept-all`
 and `auto`. Explicit tool-policy denials remain final in every permission mode.
 
+`/delegate off|auto|eager` sets how eagerly a conversation fans out to agents and
+workflows (the desktop's Agents chip beside Plan). `auto`, the default, delegates
+when work splits and asks before a run of more than about ten agents whether to be
+budget-minded or thorough; `eager` delegates whenever work can split, with a
+verify step; `off` works alone unless you ask for agents. The choice is stored per
+conversation and reaches the model as an instruction, not a hard switch.
+
 `/ultra` toggles session ultra mode: every turn runs the maximum thinking
 directive (32k token budget, high effort) until `/ultra off`. One-shot prompts
 can escalate a single turn instead with the thinking keywords `think`,

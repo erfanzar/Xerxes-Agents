@@ -602,6 +602,17 @@ describe('Store workspace folds', () => {
     expect(store.getSnapshot().turnActive).toBe(true)
   })
 
+  test('the Agents chip sets the conversation mode through /delegate and follows the runtime echo', async () => {
+    expect(store.getSnapshot().delegationMode).toBe('auto')
+    store.toggleDelegationMenu()
+    expect(store.getSnapshot().delegationMenuOpen).toBe(true)
+    await store.setDelegationMode('eager')
+    expect(bridge.calls.some(call => call.method === 'slash' && call.params.command === '/delegate eager')).toBe(true)
+    expect(store.getSnapshot()).toMatchObject({ delegationMode: 'eager', delegationMenuOpen: false })
+    bridge.push('status_update', { delegation_mode: 'off' })
+    expect(store.getSnapshot().delegationMode).toBe('off')
+  })
+
   test('identical steers remain separate messages and rejected steers never appear', async () => {
     bridge.push('turn_begin', { user_input: 'start' })
     bridge.respondWith((method, params) => {

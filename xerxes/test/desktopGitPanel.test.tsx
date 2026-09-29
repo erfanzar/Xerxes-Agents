@@ -53,3 +53,24 @@ test('Create PR asks the agent to commit, branch off the default branch, push an
   expect(prompt).toContain('not a draft')
   expect(pullRequestPrompt(null)).not.toContain('(current branch')
 })
+
+test('a large review runs as a find-then-verify workflow unless agents are off', () => {
+  const prompt = reviewPrompt({ branch: 'vnext', hasHead: true })
+  expect(prompt).toContain('git diff HEAD --stat')
+  expect(prompt).toContain('Small change (a handful of files): review it yourself')
+  expect(prompt).toContain('run the review as a Workflow')
+  expect(prompt).toContain('not turned off for this conversation')
+  expect(prompt).toContain('Phase "Verify"')
+  expect(prompt).toContain('how many survived verification')
+})
+
+test('a pull request describes the change in sections and reports the checks it ran', async () => {
+  const { pullRequestPrompt } = await import('../src/desktop/renderer/GitPanel.js')
+  const prompt = pullRequestPrompt('feature/x')
+  for (const section of ['**Summary**', '**Changes**', '**Behaviour changes**', '**How it was tested**', '**Risks and rollback**', '**Follow-ups**']) {
+    expect(prompt).toContain(section)
+  }
+  expect(prompt).toContain("Run the project's own checks")
+  expect(prompt).toContain('summarize it with a Workflow')
+  expect(prompt).toContain('only claim what you verified')
+})

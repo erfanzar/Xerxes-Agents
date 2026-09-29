@@ -93,6 +93,7 @@ import {
   type ChannelWebhookServerOptions,
 } from "../channels/webhookServer.js";
 import { subagentGroupOf } from "../agents/subagentManager.js";
+import { DELEGATION_MODE_METADATA_KEY, delegationModeOf, isDelegationMode } from "../agents/delegationMode.js";
 import { contextCalibrationRatio, estimateContextTokens } from "../context/windowUsage.js";
 import { isNamedPipePath } from "../core/hostPlatform.js";
 import {
@@ -513,6 +514,7 @@ const HANDLED_CANONICAL_COMMANDS: ReadonlySet<string> = new Set([
   "paste",
   "personality",
   "permissions",
+  "delegate",
   "platforms",
   "plugins",
   "provider",
@@ -5433,6 +5435,29 @@ export class DaemonServer {
         return this.selectProvider(connection, args);
       case "skill-create":
         return this.openSkillCreate(connection, args);
+      case "delegate": {
+        // The composer's Agents chip and /delegate: how eagerly this
+        // conversation fans out to agents and workflows.
+        const session = this.runtime.sessionStatus(connection.activeSessionKey);
+        if (!session) return { ok: false, error: "no active session" };
+        const current = delegationModeOf(session.metadata);
+        if (!args) {
+          this.emitSlash(connection, `Agents: \`${current}\` (off, auto or eager).`);
+          return { ok: true, delegation_mode: current };
+        }
+        const requested = args.trim().toLowerCase();
+        if (!isDelegationMode(requested)) {
+          this.emitSlash(connection, "Agents must be `off`, `auto` or `eager`.", "warning");
+          return { ok: false, error: "invalid delegation mode" };
+        }
+        if (requested === "auto") delete session.metadata[DELEGATION_MODE_METADATA_KEY];
+        else session.metadata[DELEGATION_MODE_METADATA_KEY] = requested;
+        await this.runtime.flushSessions();
+        this.emitStatus(connection, session);
+        this.notifySessionStateChanged(session.id);
+        this.emitSlash(connection, `Agents: \`${requested}\`.`);
+        return { ok: true, delegation_mode: requested };
+      }
       case "permissions": {
         const current = runtimePermissionMode(
           this.runtime.sessionStatus(key)?.permissionMode ?? this.runtime.status().permission_mode,
@@ -9821,6 +9846,7 @@ export class DaemonServer {
       mode: session.interactionMode,
       plan_mode: session.planMode,
       ultra_mode: session.ultraMode === true,
+      delegation_mode: delegationModeOf(session.metadata),
       // Session-first: with two sessions open the daemon-wide value names an
       // effort this session may not be running at.
       reasoning_effort: this.sessionReasoningEffort(session),
@@ -11663,6 +11689,7 @@ function initPayload(
     mode: session.interactionMode,
     plan_mode: session.planMode,
     ultra_mode: session.ultraMode === true,
+    delegation_mode: delegationModeOf(session.metadata),
     reasoning_effort: reasoningEffort,
     permission_mode: permissionMode,
     skills: [],
@@ -11709,6 +11736,7 @@ function statusUpdatePayload(
     ...sessionRuntimeTelemetryPayload(session.extra.runtime_telemetry),
     plan_mode: session.planMode,
     ultra_mode: session.ultraMode === true,
+    delegation_mode: delegationModeOf(session.metadata),
     mode: session.interactionMode,
     reasoning_effort: reasoningEffort,
     permission_mode: permissionMode,

@@ -107,6 +107,9 @@ export interface AgentGroupInfo {
   readonly id: string
   readonly label?: string
   readonly phase?: string
+  /** A finished run's published-price cost; `costPartial` when some agents had no price. */
+  readonly costUsd?: number
+  readonly costPartial?: boolean
 }
 
 /** One spawned subagent inside a turn's agents card (dsh in-chat batch). */

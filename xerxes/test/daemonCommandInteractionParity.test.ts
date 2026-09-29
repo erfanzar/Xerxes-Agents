@@ -634,3 +634,27 @@ test('an update waits for a running goal round without stalling it, then install
     expect(restarts).toBe(1)
   } finally { client.close(); await server.stop(); await rm(root, { recursive: true, force: true }) }
 })
+
+test('/delegate stores the conversation\'s agents preference and reports it', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-delegate-'))
+  const runtime = new InMemoryDaemonRuntime({ async *run() {} }, { currentProjectDirectory: root, sessionDirectory: join(root, 'sessions') })
+  const server = new DaemonServer({ socketPath: join(root, 'daemon.sock'), runtime })
+  await server.start()
+  const client = await DaemonParityClient.connect(join(root, 'daemon.sock'))
+  try {
+    client.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { project_dir: root } })
+    const init = (await client.next(frame => frame.id === 1)).result as Record<string, unknown>
+    expect(init.delegation_mode).toBe('auto')
+    const session = runtime.listSessions()[0]!
+    client.send({ jsonrpc: '2.0', id: 2, method: 'slash', params: { command: '/delegate eager' } })
+    expect((await client.next(frame => frame.id === 2)).result).toMatchObject({ ok: true, delegation_mode: 'eager' })
+    expect(session.metadata.delegation_mode).toBe('eager')
+    client.send({ jsonrpc: '2.0', id: 3, method: 'slash', params: { command: '/delegate sometimes' } })
+    expect((await client.next(frame => frame.id === 3)).result).toMatchObject({ ok: false })
+    expect(session.metadata.delegation_mode).toBe('eager')
+    // Auto is the default and is stored as absence.
+    client.send({ jsonrpc: '2.0', id: 4, method: 'slash', params: { command: '/delegate auto' } })
+    expect((await client.next(frame => frame.id === 4)).result).toMatchObject({ ok: true, delegation_mode: 'auto' })
+    expect(session.metadata.delegation_mode).toBeUndefined()
+  } finally { client.close(); await server.stop(); await rm(root, { recursive: true, force: true }) }
+})

@@ -82,7 +82,9 @@ function enrich(member: AgentMember, row: SessionRow, status: string): AgentMemb
   const { activity: _activity, summary: _summary, finishedAt: _finished, recentTools: _recent, toolUses: _uses, ...rest } = member
   return {
     ...rest,
-    ...(details.group ? { group: details.group } : {}),
+    // The run's cost arrives on the member from the Workflow result; events
+    // only carry the id and phase, so merge rather than replace.
+    ...(details.group ? { group: { ...member.group, ...details.group } } : {}),
     ...(details.model && !member.model ? { model: details.model } : {}),
     ...(details.providerProfile && !member.providerProfile ? { providerProfile: details.providerProfile } : {}),
     ...(details.reasoningEffort && !member.reasoningEffort ? { reasoningEffort: details.reasoningEffort } : {}),

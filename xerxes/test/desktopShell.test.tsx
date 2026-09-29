@@ -1353,3 +1353,10 @@ test('the Touched card lists the biggest edits, expands in place, and opens the 
   expect(snap.tab).toBe('changes')
   expect(snap.changesFocus?.path).toBe('src/dir/file8.ts')
 })
+
+test('the composer shows the Agents chip beside Plan, auto by default', () => {
+  const html = render(snapshot({ currentId: 'c1', currentTitle: 'T' }))
+  expect(html).toContain('Agents · Auto')
+  expect(html.indexOf('>Plan<')).toBeLessThan(html.indexOf('Agents · Auto'))
+  expect(render(snapshot({ currentId: 'c1', currentTitle: 'T', delegationMode: 'eager' }))).toContain('Agents · Eager')
+})

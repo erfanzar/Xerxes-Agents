@@ -2224,3 +2224,16 @@ default 16) bounds how many run at once. The tool result is
 failures?, logs?}`. Cancelling the turn kills the script and closes every agent
 it started. Workflow is gated like `exec_command` and is not available to
 subagents.
+
+### Delegation preference
+
+`initialize` and `status_update` carry `delegation_mode: "off" | "auto" |
+"eager"` (default `auto`; older runtimes omit it, which clients read as `auto`).
+`slash {command: "/delegate <mode>"}` sets it for the attached conversation and
+replies `{ok, delegation_mode}`; a bare `/delegate` reports it. The mode is stored
+as session metadata `delegation_mode` (absent means auto) and reaches the model as
+a per-turn instruction; it does not add or remove tools.
+
+The `Workflow` result also reports cost at published prices: `cost_usd` when every
+agent's model has a published price, otherwise `cost_usd_known` (the priced part)
+and `unpriced_agents`.

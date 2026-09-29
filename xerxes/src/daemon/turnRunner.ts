@@ -17,6 +17,7 @@ import {
   renderTurnContext,
 } from '../context/assembly.js'
 import { ToolResultStorage } from '../context/toolResultStorage.js'
+import { delegationModeOf, delegationModePrompt } from '../agents/delegationMode.js'
 import { CONTEXT_CALIBRATION_METADATA_KEY, contextCalibrationRatio, estimateContextTokens, promptCalibration } from '../context/windowUsage.js'
 import { ValidationError } from '../core/errors.js'
 import { classify, ErrorKind } from '../runtime/errorClassifier.js'
@@ -491,6 +492,10 @@ export class AgentTurnRunner implements TurnRunner {
         ? 'Background subagents are joined before the parent turn ends. Integrate their delivered results in this turn; do not promise synthesis in a later turn.'
         : '',
       delegationModels: this.delegationModelsFor(session, tools),
+      // Read every turn, not cached: the chip can change it mid-conversation.
+      delegationMode: tools?.some(tool => DELEGATING_TOOLS.has(tool.function.name))
+        ? delegationModePrompt(delegationModeOf(session.metadata))
+        : '',
       // Deferred loading hides most of the surface from the request. Without
       // this the model is simply told it has sixteen tools and concludes the
       // rest do not exist — it answered "I can't use AgentTool, it's not in my

@@ -7,6 +7,23 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## Unreleased
+
+- Agents: an **Agents** chip beside Plan in the composer (and `/delegate`):
+  **Off** works alone, **Auto** (default) fans out when work splits and asks
+  once before a run of more than about ten agents whether to be budget-minded or
+  thorough, **Eager** delegates whenever work can split, with a verify step.
+- Agents: the model gets a playbook for choosing between working alone, one
+  agent, a batch and a Workflow — reviews, sweeps, migrations, research,
+  claim-checking, competing debugging theories and benchmark matrices each have
+  a shape, and the costs of fanning out are spelled out.
+- Workflows report their cost at published prices; the run's card shows it.
+- Git: **Review** runs large changes as a find-then-verify workflow (a reviewer
+  per slice, a skeptic per finding) and reports how many findings survived.
+  **Create PR** runs the project's checks and writes a sectioned description:
+  summary, changes by area, behaviour changes, how it was tested, risks and
+  rollback, follow-ups.
+
 ## 0.6.6 — 2026-09-29
 
 - Desktop: agents and workflows stay visible in the conversation. They used to

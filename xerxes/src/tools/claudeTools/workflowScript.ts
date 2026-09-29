@@ -44,6 +44,8 @@ export interface WorkflowAgentOutcome {
   readonly output: string
   readonly error?: string
   readonly tokens: number
+  /** Published-price cost of this agent's usage; undefined when no price is published. */
+  readonly costUsd?: number
 }
 
 /**
@@ -81,6 +83,8 @@ export interface WorkflowRunResult {
   readonly error?: string
   readonly agents: { readonly started: number; readonly completed: number; readonly failed: number; readonly cancelled: number }
   readonly tokens: number
+  /** Summed published-price cost, and how many agents had no published price. */
+  readonly cost: { readonly usd: number; readonly unpriced: number }
   readonly durationMs: number
   readonly phases: readonly string[]
   readonly logs: readonly string[]
@@ -199,6 +203,12 @@ export async function runWorkflowScript(options: WorkflowRunOptions): Promise<Wo
   const failures: { label: string; error: string }[] = []
   const counts = { started: 0, completed: 0, failed: 0, cancelled: 0 }
   let tokens = 0
+  const cost = { usd: 0, unpriced: 0 }
+  const charge = (outcome: WorkflowAgentOutcome) => {
+    tokens += outcome.tokens
+    if (outcome.costUsd === undefined) { if (outcome.tokens > 0) cost.unpriced += 1 }
+    else cost.usd += outcome.costUsd
+  }
   const controller = new AbortController()
   const cancel = () => controller.abort(options.signal?.reason ?? new Error('Workflow cancelled'))
   if (options.signal?.aborted) cancel()
@@ -263,13 +273,13 @@ export async function runWorkflowScript(options: WorkflowRunOptions): Promise<Wo
     }
     try {
       let outcome = await options.port.run(request, controller.signal)
-      tokens += outcome.tokens
+      charge(outcome)
       let value: unknown = outcome.output
       if (outcome.status === 'completed' && request.schema) {
         let parsed = structuredValue(outcome.output, request.schema)
         if (!parsed.ok) {
           const correction = await options.port.correct(outcome.id, schemaCorrection(parsed.error, request.schema), request, controller.signal)
-          tokens += correction.tokens
+          charge(correction)
           outcome = correction
           parsed = correction.status === 'completed' ? structuredValue(correction.output, request.schema) : parsed
         }
@@ -331,7 +341,7 @@ export async function runWorkflowScript(options: WorkflowRunOptions): Promise<Wo
   try {
     const outcome = await Promise.race([finished, aborted])
     const agents = { ...counts }
-    const base = { name: options.name, agents, tokens, durationMs: Date.now() - started, phases, logs, failures }
+    const base = { name: options.name, agents, tokens, cost: { ...cost }, durationMs: Date.now() - started, phases, logs, failures }
     if (outcome === 'aborted') return { ...base, status: 'cancelled', error: errorText(controller.signal.reason) }
     if (!outcome.ok) return { ...base, status: 'failed', error: outcome.error }
     return { ...base, status: 'completed', result: boundedResult(outcome.value) }

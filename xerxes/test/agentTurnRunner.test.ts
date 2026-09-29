@@ -2056,3 +2056,27 @@ test('an agent that cannot delegate is not shown the delegated-agent models', as
   for await (const _event of runner.run(session, 'go', new AbortController().signal)) {}
   expect(String(client.requests[0]?.messages[0]?.content)).not.toContain('Models for delegated agents')
 })
+
+test('the conversation\'s agents preference reaches the model every turn', async () => {
+  const client = new RecordingTextClient()
+  const runner = new AgentTurnRunner({
+    llm: client, model: 'm', permissionMode: 'accept-all',
+    tools: [{ type: 'function', function: { name: 'Workflow', description: '', parameters: {} } }],
+  })
+  const session: DaemonSession = {
+    activeTurnId: '', agentId: 'default', cancelRequested: false, cwd: process.cwd(), extra: {},
+    id: 'delegation-mode-session', interactionMode: 'default', sessionKey: 'delegation-mode', lastActive: 0,
+    messages: [], metadata: {}, model: '', planMode: false, status: 'working', thinkingContent: [],
+    toolExecutions: [], totalInputTokens: 0, totalOutputTokens: 0, turnCount: 0, workspace: process.cwd(),
+  }
+  for await (const _event of runner.run(session, 'one', new AbortController().signal)) {}
+  session.metadata.delegation_mode = 'eager'
+  for await (const _event of runner.run(session, 'two', new AbortController().signal)) {}
+  session.metadata.delegation_mode = 'off'
+  for await (const _event of runner.run(session, 'three', new AbortController().signal)) {}
+  const prompts = client.requests.map(request => String(request.messages[0]?.content))
+  expect(prompts[0]).toContain('# Delegation: auto')
+  expect(prompts[0]).toContain('ask the user once with AskUserQuestionTool')
+  expect(prompts[1]).toContain('# Delegation: eager')
+  expect(prompts.at(-1)).toContain('# Delegation: off')
+})
