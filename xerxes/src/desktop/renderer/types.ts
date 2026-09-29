@@ -102,8 +102,25 @@ export type Block =
   | { kind: 'checkpoint'; id: number; turn: number; adds: number; dels: number }
   | { kind: 'agents'; id: number; members: readonly AgentMember[] }
 
+/** The workflow run and phase an agent was started in (daemon `group`). */
+export interface AgentGroupInfo {
+  readonly id: string
+  readonly label?: string
+  readonly phase?: string
+}
+
 /** One spawned subagent inside a turn's agents card (dsh in-chat batch). */
 export interface AgentMember {
+  readonly group?: AgentGroupInfo
+  /** What it is doing right now ("Reading kda.py"), while it works. */
+  readonly activity?: string
+  /** Epoch ms it started, and when it settled; the row's clock. */
+  readonly startedAt?: number
+  readonly finishedAt?: number
+  /** Fresh input + output tokens so far. */
+  readonly tokens?: number
+  /** First line of its result, once done. */
+  readonly summary?: string
   /** Store-local identity: spawn call id + index, or the daemon snapshot id. */
   readonly key: string
   readonly runtimeId?: string
@@ -176,6 +193,7 @@ export interface SessionRow {
   readonly untitled: boolean
   /** Optional details reported by the parent daemon's subagent snapshot. */
   readonly agentDetails?: {
+    readonly group?: AgentGroupInfo
     readonly provisional?: boolean
     readonly requestKey?: string
     readonly baseAgent?: string

@@ -1,12 +1,21 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import type { SessionRow, ToolItem } from './types.js'
+import type { AgentGroupInfo, SessionRow, ToolItem } from './types.js'
 const text = (value: unknown): string => typeof value === 'string' ? value : ''
 const record = (value: unknown): Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 const count = (value: unknown): number | undefined => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
 const strings = (value: unknown, fallback: readonly string[]): readonly string[] => Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : fallback
 const append = (values: readonly string[] = [], value: string): readonly string[] => value ? [...values, value].slice(-40) : values
+
+/** The daemon's `group` on an agent event or snapshot, validated. */
+export function agentGroupOf(value: unknown): AgentGroupInfo | undefined {
+  const group = record(value)
+  const id = text(group.id).trim()
+  if (!id) return undefined
+  const label = text(group.label).trim(), phase = text(group.phase).trim()
+  return { id, ...(label ? { label } : {}), ...(phase ? { phase } : {}) }
+}
 
 /** Decode the existing recursive v35 subagent_event envelope; never mix child output into main chat. */
 export function foldAgentEvent(rows: readonly SessionRow[], envelope: Record<string, unknown>, now = Date.now(), depth = 0): readonly SessionRow[] {
@@ -46,6 +55,7 @@ export function foldAgentEvent(rows: readonly SessionRow[], envelope: Record<str
     status,
     agentDetails: {
       ...old,
+      ...(agentGroupOf(envelope.group) ?? old?.group ? { group: (agentGroupOf(envelope.group) ?? old?.group)! } : {}),
       summary: text(envelope.summary) || text(payload.summary) || (kind === 'turn_begin' ? '' : old?.summary) || '',
       error: text(payload.error) || (kind === 'turn_begin' ? '' : old?.error) || '', model: text(envelope.model) || old?.model || '',
       baseAgent: text(envelope.subagent_type) || text(envelope.agent_name) || old?.baseAgent || '',

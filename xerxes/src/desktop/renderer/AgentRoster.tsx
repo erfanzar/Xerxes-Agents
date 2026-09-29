@@ -36,6 +36,16 @@ export function agentState(status: string): { label: string; priority: number; t
 /** Keep requests visible while a daemon snapshot is pending; never invent a controllable agent id. */
 export function activityFleetRows(rows: readonly SessionRow[], blocks: readonly Block[]): readonly SessionRow[] {
   const result = [...rows]
+  // Indexed once: a workflow's thousands of members must not scan the whole
+  // fleet each (a first-match index, like the findIndex it replaces).
+  const byId = new Map<string, number>(), byRequest = new Map<string, number>(), byTitle = new Map<string, number>()
+  const index = (row: SessionRow, at: number) => {
+    if (!byId.has(row.id)) byId.set(row.id, at)
+    const request = row.agentDetails?.requestKey
+    if (request && !byRequest.has(request)) byRequest.set(request, at)
+    if (!byTitle.has(row.title)) byTitle.set(row.title, at)
+  }
+  result.forEach(index)
   const failures = new Map<string, string>()
   for (const block of blocks) {
     if (block.kind === 'user') failures.clear()
@@ -48,12 +58,16 @@ export function activityFleetRows(rows: readonly SessionRow[], blocks: readonly 
     for (const original of block.members) {
     const error = !original.runtimeId ? failures.get(original.key.slice(0, original.key.lastIndexOf(':'))) : ''
     const member = error && original.status === 'working' ? {...original,status:'failed',error} : original
-    const matched = result.findIndex(row => member.runtimeId ? row.id === member.runtimeId : row.id === member.key || row.agentDetails?.requestKey === member.key || row.title === member.title)
-    if (matched >= 0) {
+    const matched = member.runtimeId
+      ? byId.get(member.runtimeId) ?? -1
+      : Math.min(byId.get(member.key) ?? Infinity, byRequest.get(member.key) ?? Infinity, byTitle.get(member.title) ?? Infinity)
+    if (matched >= 0 && Number.isFinite(matched)) {
       const row = result[matched]!
       result[matched] = {...row, agentDetails: {summary:'',error:'',model:'',filesRead:[],filesWritten:[],...row.agentDetails,requestKey:member.key,baseAgent:row.agentDetails?.baseAgent || member.baseAgent || "",goal:row.agentDetails?.goal || member.prompt || ""}}
+      if (!byRequest.has(member.key)) byRequest.set(member.key, matched)
       continue
     }
+    index({ id: member.key, title: member.title } as SessionRow, result.length)
     result.push({id:member.key,key:member.key,title:member.title,status:member.status === 'working' ? 'starting' : member.status,age:'',current:false,kind:'subagent',turns:0,messages:0,cwd:'',untitled:false,
       agentDetails:{provisional:true,baseAgent:member.baseAgent || "",goal:member.prompt || "",summary:agentState(member.status).priority < 2 ? 'The spawn request is visible in the conversation. Waiting for the runtime to report this agent’s identity and state.' : 'This request has finished. Its runtime details were not recorded; the original request is retained.',error:member.error || '',model:member.model || '',providerProfile:member.providerProfile || '',filesRead:[],filesWritten:[]}})
     }

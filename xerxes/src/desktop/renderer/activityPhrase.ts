@@ -22,7 +22,7 @@ const FAMILIES: ReadonlyArray<readonly [Family, RegExp]> = [
   ['read', /^(read_?file|read|list_?dir|ls|view)$/],
   ['search', /^(grep|glob|search|find|lsp|tool_?search|search_?history)$/],
   ['web', /^(web_?scraper|web_?fetch|web_?search|google_?search|duck_?duck_?go_?search|api_?client|url_?analyzer|rss_?reader|browser\w*)$/],
-  ['spawn', /^(agent|spawn_?agents|task_?create|handoff)$/],
+  ['spawn', /^(agent|spawn_?agents|task_?create|handoff|workflow)$/],
   ['message', /^(send_?message)$/],
   ['wait', /^(await_?agents)$/],
   ['agents', /^(check_?agent_?messages|peek_?agent|task_?(get|list|output|stop|update)|reset_?agent)$/],
@@ -73,7 +73,7 @@ export function toolPhrase(item: Pick<ToolItem, 'name' | 'verb' | 'arg' | 'path'
     case 'read': return target ? `Reading ${basename(target)}` : 'Reading files'
     case 'search': return item.arg ? `Searching for ${clip(item.arg, 40)}` : 'Searching the code'
     case 'web': return item.arg ? `Looking up ${clip(item.arg, 44)}` : 'Searching the web'
-    case 'spawn': return 'Spawning agents'
+    case 'spawn': return /workflow/i.test(item.name || item.verb) ? 'Running a workflow' : 'Spawning agents'
     case 'message': return item.arg ? `Messaging ${clip(item.arg, 32)}` : 'Messaging an agent'
     case 'wait': return 'Waiting on agents'
     case 'agents': return 'Checking on agents'

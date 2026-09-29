@@ -2664,6 +2664,35 @@ html,body,#root,.app.atelier{background:transparent}
 .atelier .acard__foot{display:flex;gap:4px;padding:4px 10px 10px;border-top:1px solid color-mix(in srgb,var(--x-title) 6%,transparent)}
 .atelier .acard__foot button{padding:5px 10px;border:0;border-radius:7px;background:transparent;font:400 12.5px/1.2 var(--sans);color:var(--x-secondary);cursor:pointer}
 .atelier .acard__foot button:hover{background:var(--x-selected);color:var(--x-title)}
+.atelier .acard__heading{display:grid;gap:2px;min-width:0}
+.atelier .acard__sub{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:400 11.5px/1.25 var(--sans);color:var(--x-meta)}
+.atelier .acard__sub:empty{display:none}
+.atelier .acard__clock{font-family:var(--mono);font-size:11.5px;color:var(--x-meta)}
+.atelier .acard__phase{display:grid;gap:2px;padding:2px 0 4px}
+.atelier .acard__phase+.acard__phase{border-top:1px solid color-mix(in srgb,var(--x-title) 6%,transparent)}
+.atelier .acard__phasehead{display:flex;align-items:center;gap:8px;padding:8px 14px 2px;font:500 12px/1.2 var(--sans);color:var(--x-secondary)}
+.atelier .acard__phaseicon{display:inline-flex;width:14px;justify-content:center;color:var(--x-done)}
+.atelier .acard__phase[data-state='working'] .acard__phaseicon{color:var(--x-working,var(--x-accent))}
+.atelier .acard__phase[data-state='failed'] .acard__phaseicon{color:var(--x-failed,#e5484d)}
+.atelier .acard__phasename{color:var(--x-title)}
+.atelier .acard__phasemeta{font-weight:400;color:var(--x-meta)}
+.atelier .acard__act{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--sans);color:var(--x-secondary)}
+.atelier .acard__row[data-tone='working'] .acard__act{color:var(--x-working,var(--x-accent))}
+.atelier .acard__s{display:inline-flex;align-items:baseline;gap:8px}
+.atelier .acard__time,.atelier .acard__tok{font-family:var(--mono);font-size:11.5px}
+.atelier .acard__tok{color:var(--x-meta)}
+.atelier .acard__grid{display:flex;flex-wrap:wrap;gap:3px;padding:6px 14px 4px}
+.atelier .acard__dot{width:8px;height:8px;padding:0;border:0;border-radius:2px;background:color-mix(in srgb,var(--x-title) 18%,transparent);cursor:pointer}
+.atelier .acard__dot[data-tone='done']{background:var(--x-done)}
+.atelier .acard__dot[data-tone='failed']{background:var(--x-failed,#e5484d)}
+.atelier .acard__dot[data-tone='working']{background:var(--x-working,var(--x-accent));animation:acard-pulse 1.6s ease-in-out infinite}
+.atelier .acard__dot:hover,.atelier .acard__dot:focus-visible{outline:2px solid var(--x-focus);outline-offset:1px}
+@keyframes acard-pulse{50%{opacity:.45}}
+:root[data-occluded] .atelier .acard__dot,:root[data-window-unfocused] .atelier .acard__dot{animation:none}
+@media (prefers-reduced-motion:reduce){.atelier .acard__dot{animation:none}}
+.atelier .acard__more{display:flex;gap:4px;padding:0 10px 4px}
+.atelier .acard__more button{padding:4px 8px;border:0;border-radius:7px;background:transparent;font:400 12px/1.2 var(--sans);color:var(--x-secondary);cursor:pointer}
+.atelier .acard__more button:hover{background:var(--x-selected);color:var(--x-title)}
 
 /* Agent inspector prose: the summary as Markdown, activity as a list. */
 .atelier .agent-inspector__summary .md{font:400 13px/1.6 var(--sans);color:var(--x-prose)}

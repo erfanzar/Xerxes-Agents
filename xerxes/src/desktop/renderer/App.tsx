@@ -32,6 +32,7 @@ import { OutputViewer } from './OutputViewer.js'
 import { Icon } from './Icon.js'
 import { RailStatus, currentActionOf, orbStateOf } from './RailStatus.js'
 import { AgentOrb } from './AgentOrb.js'
+import { AgentsCard } from './AgentsCard.js'
 // Re-exported: it moved into its own module so the rail's diagnostics
 // drawer (DesktopPanels) can import it without a cycle through App.
 export { SessionDiagnostics } from './SessionDiagnostics.js'
@@ -990,84 +991,7 @@ function Stream({ snap }: { snap: Snapshot }): ReactElement {
   )
 }
 
-/**
- * The turn's spawned subagents as an in-chat card (dsh batch grammar):
- * header counts by state, one row per member with a status dot and label.
- * Event-driven from the spawn call itself, so a batch that dies inside the
- * daemon still shows — then the daemon snapshots land terminal states.
- */
-const AGENT_ROWS = 8
-
-/** An agent's state as the card draws it: a glyph and a word. */
-function memberTone(status: string): 'working' | 'done' | 'failed' | 'stopped' {
-  if (['working', 'running', 'acting', 'queued', 'pending', 'starting'].includes(status)) return 'working'
-  if (['failed', 'error', 'timeout'].includes(status)) return 'failed'
-  if (['cancelled', 'canceled', 'stopped', 'interrupted'].includes(status)) return 'stopped'
-  return 'done'
-}
-
-/**
- * The agents a spawn started, as one card in the conversation: a progress
- * bar over the whole batch, then each agent with its state, its model (the
- * same `provider/model[effort]` the rail shows) and, when it failed, why.
- * Working agents sort first; past eight, the rest fold behind "Show all".
- */
-export function AgentsCard({ members }: { members: readonly AgentMember[] }): ReactElement {
-  const navigate = useDesktopNavigation()
-  const [open, setOpen] = useState(true)
-  const [all, setAll] = useState(false)
-  const tones = members.map(member => memberTone(member.status))
-  const count = (tone: string) => tones.filter(value => value === tone).length
-  const working = count('working'), failed = count('failed'), stopped = count('stopped'), done = count('done')
-  const settled = members.length - working
-  const order = { working: 0, failed: 1, stopped: 2, done: 3 } as const
-  const sorted = members.map((member, index) => ({ member, tone: tones[index]! })).sort((a, b) => order[a.tone] - order[b.tone])
-  const shown = all ? sorted : sorted.slice(0, AGENT_ROWS)
-  return (
-    <section className="acard" data-state={working ? 'working' : failed ? 'failed' : 'done'} aria-label="Subagents">
-      <button className="acard__head" onClick={() => setOpen(value => !value)} aria-expanded={open}>
-        <span className="acard__icon">{working ? <Icon name="spinner" size={14} /> : <Icon name="agent" size={15} />}</span>
-        <span className="acard__title">{members.length} subagent{members.length === 1 ? '' : 's'}</span>
-        <span className="acard__counts">
-          {working > 0 && <span data-tone="working">{working} working</span>}
-          {done > 0 && <span data-tone="done">{done} done</span>}
-          {failed > 0 && <span data-tone="failed">{failed} failed</span>}
-          {stopped > 0 && <span data-tone="stopped">{stopped} stopped</span>}
-        </span>
-        <span className={`acard__chev${open ? ' is-open' : ''}`}><Icon name="caretDown" size={12} /></span>
-      </button>
-      <div className="acard__progress" role="progressbar" aria-label="Subagents finished" aria-valuemin={0} aria-valuemax={members.length} aria-valuenow={settled}>
-        {done > 0 && <span data-tone="done" style={{ flexGrow: done }} />}
-        {failed > 0 && <span data-tone="failed" style={{ flexGrow: failed }} />}
-        {stopped > 0 && <span data-tone="stopped" style={{ flexGrow: stopped }} />}
-        {working > 0 && <span data-tone="working" style={{ flexGrow: working }} />}
-      </div>
-      {open && <ul className="acard__list">
-        {shown.map(({ member, tone }) => {
-          const kind = agentKindLabel(member)
-          return <li key={member.key}>
-            <button className="acard__row" data-tone={tone} onClick={() => navigate('activity', member.runtimeId || member.key)} aria-label={`Inspect agent: ${member.title}`}>
-              <span className="acard__glyph" aria-hidden="true">{tone === 'working' ? <Icon name="spinner" size={13} /> : tone === 'done' ? <Icon name="check" size={12} /> : tone === 'failed' ? <Icon name="close" size={11} /> : <span className="acard__dash" />}</span>
-              <span className="acard__body">
-                <span className="acard__t">{member.title}</span>
-                {(kind || (tone === 'failed' && member.error)) && <span className="acard__meta">
-                  {kind && <span className="acard__kind">{kind}</span>}
-                  {tone === 'failed' && member.error && <span className="acard__error" title={member.error}>{member.error.split('\n')[0]}</span>}
-                </span>}
-              </span>
-              <span className="acard__s">{tone === 'working' ? 'Working' : tone === 'done' ? 'Done' : tone === 'failed' ? 'Failed' : 'Stopped'}</span>
-              <Icon name="chevron" size={12} />
-            </button>
-          </li>
-        })}
-      </ul>}
-      <footer className="acard__foot">
-        {open && sorted.length > AGENT_ROWS && <button onClick={() => setAll(value => !value)}>{all ? 'Show fewer' : `Show all ${sorted.length}`}</button>}
-        <button onClick={() => navigate('activity')}>Open in Activity</button>
-      </footer>
-    </section>
-  )
-}
+export { AgentsCard }
 
 function TaskContinuation({ snap }: { snap: Snapshot }): ReactElement {
   const open = useDesktopNavigation()

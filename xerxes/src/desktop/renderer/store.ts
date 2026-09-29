@@ -30,7 +30,8 @@ import { selectedSession, rememberSession } from './sessionPreference.js'
 import { historyBlocks, readHistoryPage, type HistoryPage } from './history.js'
 import { connectionFailureKind } from './connectionFailure.js'
 import { desktopCall, desktopError, text } from './desktopRpc.js'
-import { foldAgentEvent } from './agentEvents.js'
+import { agentGroupOf, foldAgentEvent } from './agentEvents.js'
+import { agentStatusOf, syncAgentMembers } from './agentMembers.js'
 import type {
   AgentMember,
   AgentPreset,
@@ -101,6 +102,7 @@ const FLEET_POLL_MS = 2_000
 const AGENT_FAMILY_TOOLS = new Set([
   'agent', 'agenttool',
   'spawnagents',
+  'workflow',
   'handoff', 'handofftool',
   'sendmessage', 'sendmessagetool',
   'taskcreate', 'taskcreatetool',
@@ -119,6 +121,7 @@ function isAgentFamilyTool(name: unknown): boolean {
 const SPAWN_TOOLS = new Set([
   'agent', 'agenttool',
   'spawnagents',
+  'workflow',
   'taskcreate', 'taskcreatetool',
   'handoff', 'handofftool',
 ])
@@ -132,14 +135,6 @@ function isSpawnTool(name: unknown): boolean {
 /** Tools whose success changes the session goal. */
 const GOAL_WRITE_TOOLS = new Set(['create_goal', 'update_goal'])
 
-function agentStatusOf(status: string): string {
-  const s = status.toLowerCase()
-  if (s === 'working' || s === 'running' || s === 'starting' || s === 'waiting') return 'working'
-  if (s === 'completed' || s === 'done' || s === 'closed') return 'completed'
-  if (s === 'error' || s === 'failed') return 'failed'
-  if (s === 'cancelled' || s === 'interrupted') return 'cancelled'
-  return s || 'working'
-}
 
 /**
  * Members a spawn call opens on the agents card, parsed from its arguments.
@@ -157,8 +152,11 @@ export function spawnMembersOf(name: unknown, args: unknown, callId: string): Ag
   const label = (value: Record<string, unknown>, index: number): string =>
     str(value.title) || str(value.name) || str(value.description) || str(value.prompt).slice(0, 60) || `agent ${index + 1}`
   const raw = parsed.agents
+  // A workflow's agents are unknown until its script starts them; they join
+  // the card from their own events, tagged with the run and phase.
+  if (typeof name === 'string' && /(^|[.:])workflow$/i.test(name)) return []
   if (Array.isArray(raw) && raw.length) {
-    return raw.slice(0, 24).map((item, index) => {
+    return raw.map((item, index) => {
       const record = (item && typeof item === 'object' ? item : {}) as Record<string, unknown>
       return { key: `${callId}:${index}`, title: label(record, index), status: 'working', baseAgent: str(record.agent) || str(record.subagent_type), prompt: str(record.prompt), model: str(record.model), providerProfile: str(record.provider_profile), reasoningEffort: str(record.reasoning_effort) }
     })
@@ -2962,12 +2960,13 @@ export class Store {
 
   private adoptFleet(session: Readonly<Record<string, unknown>>, requestedAt = Date.now()): void {
     const raw = Array.isArray(session.subagent_snapshots) ? session.subagent_snapshots : []
+    const previousById = new Map(this.frame.fleet.map(agent => [agent.id, agent] as const))
     const fleet = raw
       .map(item => {
         const row = (item && typeof item === 'object' ? item : {}) as Record<string, unknown>
         const id = str(row.id)
         if (!id) return null
-        const previous = this.frame.fleet.find(agent => agent.id === id)
+        const previous = previousById.get(id)
         const updatedAt = Date.parse(str(row.updated_at))
         const liveWins = (previous?.agentDetails?.lastEventAt !== undefined && (!Number.isFinite(updatedAt) || updatedAt <= previous.agentDetails.lastEventAt)) || (previous?.agentDetails?.lastReceiptAt !== undefined && requestedAt <= previous.agentDetails.lastReceiptAt)
         const label = str(row.title) || str(row.name) || str(row.agent_id) || `#${id.slice(0, 6)}`
@@ -2986,7 +2985,8 @@ export class Store {
           cwd: '',
           untitled: false,
           agentDetails: {
-            ...this.frame.fleet.find(agent => agent.id === id)?.agentDetails,
+            ...previous?.agentDetails,
+            ...(agentGroupOf(row.group) ?? previous?.agentDetails?.group ? { group: (agentGroupOf(row.group) ?? previous?.agentDetails?.group)! } : {}),
             summary: str(row.summary), error: str(row.error), model: str(row.model),
             baseAgent: str(row.agent_id) || previous?.agentDetails?.baseAgent || '',
             parentId: str(row.parent_id) || str(row.creator_id),
@@ -3013,32 +3013,7 @@ export class Store {
    * next turn's start.
    */
   private syncAgentMembersFromFleet(fleet: readonly SessionRow[]): void {
-    if (fleet.length === 0) return
-    let touched = false
-    for (const row of fleet) {
-      const status = agentStatusOf(row.status)
-      // A child is matched to its card row by id once known; before that, by
-      // title — but only to a row still waiting for its agent, newest first.
-      // Two spawns with the same title (a failed one, then its retry) used
-      // to bind the live child to the FAILED row, reviving it as "working"
-      // beside the retry's own row.
-      const members = [...this.agentMembers.values()]
-      const key = members.find(member => member.runtimeId === row.id)?.key
-        ?? members.findLast(member => !member.runtimeId && member.status === 'working' && member.title === row.title)?.key
-      if (key) {
-        const member = this.agentMembers.get(key)
-        if (member && (member.status !== status || member.runtimeId !== row.id)) {
-          this.agentMembers.set(key, { ...member, runtimeId: row.id, status })
-          touched = true
-        }
-        continue
-      }
-      if (!this.agentMembers.has(row.id) && status === 'working') {
-        this.agentMembers.set(row.id, { key: row.id, runtimeId: row.id, title: row.title, status })
-        touched = true
-      }
-    }
-    if (!touched) return
+    if (!syncAgentMembers(this.agentMembers, fleet)) return
     const members = [...this.agentMembers.values()]
     this.builder.pushAgents(members)
     if (members.some(m => m.status === 'working')) this.startFleetPoll()
