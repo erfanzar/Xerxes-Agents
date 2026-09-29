@@ -7,6 +7,20 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.6 — 2026-09-29
+
+- Desktop: agents and workflows stay visible in the conversation. They used to
+  fold away with the tool calls around them; now only the tool calls fold.
+- Desktop: the agents card follows Claude Code's shape — "Running 4 agents…"
+  over a tree, one branch per agent with its model, tool uses, tokens and
+  time, and under it what it is doing now or "Done (15 tool uses · 23.4K
+  tokens · 1m 13s)"; "+N more tool uses" opens its latest calls in place.
+  Workflows keep their phases, progress bar and dot grid for large runs.
+- Desktop: workflow runs get their own card in the Activity panel, by phase;
+  the Agents list keeps the agents started outside a workflow.
+- Agents' live activity reads as a command line ("Running env
+  JAX_PLATFORMS=cpu,mps python bench.py") instead of "cmd=env, args=…".
+
 ## 0.6.5 — 2026-09-29
 
 - Runtime: an update no longer waits forever behind an armed goal. It holds
