@@ -2765,13 +2765,14 @@ html,body,#root,.app.atelier{background:transparent}
   border:solid var(--x-screen);border-width:6px 8px 8px 0;
   /* Square where it meets the chat, rounded at the window's corners. A
      rounded outer edge on the chat side left a wedge of bare desktop under
-     the rail's own rounded corners; the two 13px patches fill exactly the
-     area outside those corners instead. The clip margin leaves room for
+     the rail's own rounded corners; the two 12px patches fill exactly the
+     area outside those corners instead (this box starts at the rail's
+     border edge, so a patch any larger covers the rail's own edge line). The clip margin leaves room for
      them past the rail's rounded clip. */
   border-radius:0 20px 20px 0 / 0 18px 20px 0;
   background:
-    radial-gradient(circle at 100% 100%,transparent 12px,var(--x-screen) 12.75px) 0 0/13px 13px no-repeat,
-    radial-gradient(circle at 100% 0,transparent 12px,var(--x-screen) 12.75px) 0 100%/13px 13px no-repeat;
+    radial-gradient(circle at 100% 100%,transparent 12px,var(--x-screen) 12.75px) 0 0/12px 12px no-repeat,
+    radial-gradient(circle at 100% 0,transparent 12px,var(--x-screen) 12.75px) 0 100%/12px 12px no-repeat;
 }
 :root[data-backdrop='transparent'] .panel-divider{background:linear-gradient(var(--x-hairline),var(--x-hairline)),var(--x-screen)}
 
@@ -2928,3 +2929,11 @@ html,body,#root,.app.atelier{background:transparent}
 .atelier .agent-inspector__result ul{display:grid;gap:4px;margin:0;padding-left:18px;font:400 12px/1.5 var(--mono);color:var(--x-secondary)}
 .atelier .agent-inspector__result pre{margin:0;padding:10px 12px;overflow:auto;max-height:320px;border-radius:8px;background:color-mix(in srgb,var(--x-title) 4%,transparent);font:400 12px/1.5 var(--mono);color:var(--x-secondary)}
 .atelier .agent-inspector__result p{margin:0}
+
+/* The rail is a card with its own edge, so the resize divider beside it
+   draws no hairline: running the window's full height, it showed in the
+   gaps above and below the card, past its rounded corners, and doubled the
+   card's edge. It still highlights on hover and focus. With a transparent
+   background it takes the chat's tint so no bare desktop shows through. */
+:root[data-layout='claude'] .atelier .panel-divider:has(+.desktop-rail):not(:hover):not(:focus-visible){background:transparent}
+:root[data-backdrop='transparent'][data-layout='claude'] .atelier .panel-divider:has(+.desktop-rail):not(:hover):not(:focus-visible){background:var(--x-screen)}

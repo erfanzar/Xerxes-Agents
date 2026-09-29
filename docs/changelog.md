@@ -7,6 +7,10 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.11 — 2026-09-30
+
+- Desktop: the side panel's edge runs unbroken around its rounded corners, and the resize divider beside it no longer draws a second line through the gaps above and below the panel (it still highlights on hover).
+
 ## 0.6.10 — 2026-09-29
 
 - Desktop: a workflow agent's full output shows in the inspector. Agents in a workflow used to be saved with only their first 2,000 characters; they now keep up to 16,000 like any agent, and only the oldest agents of a very large run are trimmed. Trimmed output is labelled as such.
