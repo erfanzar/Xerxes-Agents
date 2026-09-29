@@ -446,3 +446,22 @@ test('a long tool call keeps the stream alive while its text is held back', asyn
   expect(beforeCall.filter(delta => Object.keys(delta).length === 0).length).toBeGreaterThanOrEqual(1)
   expect(deltas.at(-1)?.toolCalls?.[0]?.function.name).toBe('read_file')
 }, 10_000)
+
+test('a bare <function> block with the name on its own line is a call, split across chunks or not', () => {
+  const types = new Map([['Workflow', new Map([['name', ['string']], ['script', ['string']]])]]) as unknown as ConstructorParameters<typeof FunctionCallExtractor>[0]
+  const block = '<function>\nWorkflow\n{\n  "name": "Count words",\n  "script": "phase(\'Read\');\\nreturn await agent(\\"x\\")"\n}\n</function>'
+  const whole = new FunctionCallExtractor(types)
+  expect(whole.push(`I'll run it.\n${block}`)).toBe("I'll run it.\n")
+  expect(whole.calls).toEqual([{ name: 'Workflow', arguments: { name: 'Count words', script: 'phase(\'Read\');\nreturn await agent("x")' } }])
+
+  const split = new FunctionCallExtractor(types)
+  let visible = ''
+  for (let index = 0; index < block.length; index += 7) visible += split.push(block.slice(index, index + 7))
+  visible += split.finish()
+  expect(visible).toBe('')
+  expect(split.calls.map(call => call.name)).toEqual(['Workflow'])
+
+  const prose = new FunctionCallExtractor(types)
+  expect(prose.push('Use <function> tags like this.</function> ok') + prose.finish()).toBe('Use <function> tags like this.</function> ok')
+  expect(prose.calls).toEqual([])
+})

@@ -210,7 +210,14 @@ const REMINDER_CLOSE = '</system-reminder>'
  */
 const ORPHAN_PARAMETER = ['<parameter name="', `<${NS}parameter name="`] as const
 const ORPHAN_CLOSE = ['</invoke>', `</${NS}invoke>`] as const
-const OPENERS = ['<function=', '<invoke name="', `<${NS}invoke name="`, '<function_calls>', `<${NS}function_calls>`, '</function_calls>', `</${NS}function_calls>`, REMINDER_OPEN, ...ORPHAN_PARAMETER, ...ORPHAN_CLOSE] as const
+/**
+ * A fourth form, seen from Haiku: `<function>` with the tool name on its own
+ * line and the JSON arguments after it. Missed, the whole call leaked into
+ * the reply as text and nothing ran.
+ */
+const BARE_FUNCTION = '<function>'
+const BARE_FUNCTION_BODY = /^\s*([A-Za-z_][\w.-]{0,63})\s*(\{[\s\S]*\})\s*$/
+const OPENERS = ['<function=', BARE_FUNCTION, '<invoke name="', `<${NS}invoke name="`, '<function_calls>', `<${NS}function_calls>`, '</function_calls>', `</${NS}function_calls>`, REMINDER_OPEN, ...ORPHAN_PARAMETER, ...ORPHAN_CLOSE] as const
 const INVOKE = /^<(antml:)?invoke name="([^"]+)"\s*>([\s\S]*?)<\/(?:antml:)?invoke>$/
 /** What the model writes when it runs on past its calls and imagines their results. */
 /** Held at a chunk's end until complete: call openers, and the start of an imagined result. */
@@ -355,6 +362,17 @@ export class FunctionCallExtractor {
         visible += this.prose(block)
         continue
       }
+      if (opener === BARE_FUNCTION) {
+        const end = this.pending.indexOf('</function>', at)
+        if (end < 0) { this.pending = this.pending.slice(at); return visible }
+        const block = this.pending.slice(at, end + '</function>'.length)
+        this.pending = this.pending.slice(end + '</function>'.length)
+        const bare = BARE_FUNCTION_BODY.exec(block.slice(BARE_FUNCTION.length, -'</function>'.length))
+        if (bare) { this.take(`<function=${bare[1]}>${bare[2]}</function>`); if (this.finished) { this.pending = ''; return visible }; continue }
+        if (this.afterCall) { this.finished = true; this.pending = ''; return visible }
+        visible += this.prose(block)
+        continue
+      }
       if (opener === REMINDER_OPEN) {
         const end = this.pending.indexOf(REMINDER_CLOSE, at)
         if (end < 0) { this.pending = this.pending.slice(at); return visible }
@@ -383,6 +401,11 @@ export class FunctionCallExtractor {
     if (ORPHAN_PARAMETER.some(opener => rest.startsWith(opener))) return ''
     if (truncated && (/^<function=[^>\s]+>/.test(rest) || /^<(antml:)?invoke name="/.test(rest))) { this.cut = true; return '' }
     if (/^<function=[^>\s]+>/.test(rest)) { this.take(rest + '</function>'); return '' }
+    if (rest.startsWith(BARE_FUNCTION)) {
+      if (truncated) { this.cut = true; return '' }
+      const bare = BARE_FUNCTION_BODY.exec(rest.slice(BARE_FUNCTION.length))
+      if (bare) { this.take(`<function=${bare[1]}>${bare[2]}</function>`); return '' }
+    }
     const invoke = /^<(antml:)?invoke name="[^"]+"\s*>/.exec(rest)
     if (invoke) { this.take(rest + (invoke[1] ? `</${NS}invoke>` : '</invoke>')); return '' }
     const tag = this.tagOpeners.find(opener => rest.startsWith(opener))
