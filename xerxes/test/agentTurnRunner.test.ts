@@ -1,6 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import type { JsonObject } from '../src/types/toolCalls.js'
 import { expect, test } from 'bun:test'
 import { mkdtemp, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -207,6 +208,8 @@ class GatedClient implements LlmClient {
 }
 
 class AskUserClient implements LlmClient {
+  constructor(private readonly args: JsonObject = { question: 'Continue?' }) {}
+
   async *stream(request: CompletionRequest): AsyncGenerator<LlmDelta> {
     if (request.messages.some(message => message.role === 'tool')) {
       yield { content: 'Thanks for the answer.' }
@@ -216,7 +219,7 @@ class AskUserClient implements LlmClient {
       toolCalls: [{
         id: 'ask-1',
         type: 'function',
-        function: { name: 'AskUserQuestionTool', arguments: { question: 'Continue?' } },
+        function: { name: 'AskUserQuestionTool', arguments: this.args },
       }],
     }
   }
@@ -1346,6 +1349,43 @@ test('agent turn runner routes AskUserQuestionTool through the native daemon rep
       toolSteps: 1,
       toolDurationMs: expect.any(Number),
     })
+  } finally {
+    release()
+  }
+})
+
+test('a plain AskUserQuestionTool call carries its choices to the client as clickable options', async () => {
+  const board = new DaemonInteractionBoard()
+  const session: DaemonSession = {
+    activeTurnId: 'ask-turn', agentId: 'default', cancelRequested: false, cwd: process.cwd(), extra: {}, id: 'ask-options',
+    interactionMode: 'code', sessionKey: 'ask-options', lastActive: 0, messages: [], metadata: {}, model: 'gpt-4o', planMode: false,
+    status: 'working', thinkingContent: [], toolExecutions: [], totalInputTokens: 0, totalOutputTokens: 0, turnCount: 0,
+    workspace: '/tmp/agents/default',
+  }
+  const requests: DaemonEvent[] = []
+  const release = board.bind(session.id, event => {
+    if (event.type !== 'question_request') return
+    requests.push(event)
+    queueMicrotask(() => board.respondQuestion(String(event.payload.id), { answer: 'Run the script, then the tests (Recommended)' }))
+  })
+  try {
+    const runner = new AgentTurnRunner({
+      interactions: board,
+      llm: new AskUserClient({
+        question: 'D-F7 is the last unapplied fix and the file is too large for the edit tool. How should it land?',
+        options: ['Run the script, then the tests (Recommended)', 'You apply it yourself', ' ', 'Leave D-F7 open and revert the test rewrite'],
+      }),
+      model: 'gpt-4o',
+      tools: [{ type: 'function', function: { name: 'AskUserQuestionTool', description: 'ask', parameters: { type: 'object' } } }],
+    })
+    for await (const _event of runner.run(session, 'finish r8', new AbortController().signal)) { /* drain */ }
+    const question = (requests[0]?.payload.questions as Array<Record<string, unknown>>)[0]
+    // Blank choices are dropped; the user can still type their own answer.
+    expect(question).toMatchObject({
+      options: ['Run the script, then the tests (Recommended)', 'You apply it yourself', 'Leave D-F7 open and revert the test rewrite'],
+      allow_free_form: true,
+    })
+    expect(session.messages.find(message => message.role === 'tool')?.content).toContain('Run the script, then the tests')
   } finally {
     release()
   }

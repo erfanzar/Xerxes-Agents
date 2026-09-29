@@ -2953,3 +2953,9 @@ html,body,#root,.app.atelier{background:transparent}
 .atelier .desktop-rail>header nav[data-hidden='end']{-webkit-mask-image:linear-gradient(to right,#000 calc(100% - 18px),transparent);mask-image:linear-gradient(to right,#000 calc(100% - 18px),transparent)}
 .atelier .desktop-rail>header nav[data-hidden='start']{-webkit-mask-image:linear-gradient(to left,#000 calc(100% - 18px),transparent);mask-image:linear-gradient(to left,#000 calc(100% - 18px),transparent)}
 .atelier .desktop-rail>header nav[data-hidden='start end']{-webkit-mask-image:linear-gradient(to right,transparent,#000 18px,#000 calc(100% - 18px),transparent);mask-image:linear-gradient(to right,transparent,#000 18px,#000 calc(100% - 18px),transparent)}
+
+/* A question's text is Markdown now: no box or height cap of its own, and it
+   keeps the question's type. */
+.atelier .qcard__q .md{padding:0;max-height:none;overflow:visible;font:inherit;color:inherit;background:none;border:0}
+.atelier .qcard__q .md p{margin:0 0 6px}
+.atelier .qcard__q .md p:last-child{margin-bottom:0}

@@ -1444,7 +1444,9 @@ function QuestionCard({
         const picked = selections[item.id] ?? []
         return (
           <div key={item.id} style={{ display: 'grid', gap: 6 }}>
-            <div className="qcard__q">{question.items.length > 1 ? `${qi + 1}. ` : ''}{item.question}</div>
+            {/* The question is the agent's prose: paths in backticks and short
+                lists read as they were written, not as raw markup. */}
+            <div className="qcard__q"><Markdown text={`${question.items.length > 1 ? `${qi + 1}. ` : ''}${item.question}`} className="md--compact" /></div>
             {item.options.length > 0 && (
               <div className="optlist">
                 {item.options.map((option, oi) => {
@@ -1456,13 +1458,9 @@ function QuestionCard({
                       aria-pressed={on}
                       onClick={() => {
                         setOthers(prev => ({ ...prev, [item.id]: '' }))
-                        setSelections(prev => {
-                          const current = prev[item.id] ?? []
-                          return {
-                            ...prev,
-                            [item.id]: on ? current.filter(x => x !== option) : [...current, option],
-                          }
-                        })
+                        // One answer per question: a second click moves the
+                        // choice instead of sending "A, B".
+                        setSelections(prev => ({ ...prev, [item.id]: on ? [] : [option] }))
                       }}
                     >
                       <span className="opt__label">{option}</span>

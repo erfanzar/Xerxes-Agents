@@ -194,12 +194,15 @@ test('write_file defaults to no overwrite and skips the diff preview for oversiz
   })
 })
 
-test('read_file rejects files beyond the byte cap with an actionable error', async () => {
+test('read_file refuses a whole-file read past the cap but reads a window of the same file', async () => {
   await inWorkspace(async (workspace, paths) => {
-    await Bun.write(join(workspace, 'huge.txt'), 'x'.repeat(DEFAULT_MAX_READ_FILE_BYTES + 1))
-    await expect(readFile({ file_path: 'huge.txt' }, paths)).rejects.toThrow(
-      String(DEFAULT_MAX_READ_FILE_BYTES) + '-byte read_file limit',
+    const body = Array.from({ length: 12_000 }, (_, index) => `line ${index} ${'x'.repeat(20)}`).join('\n')
+    expect(body.length).toBeGreaterThan(DEFAULT_MAX_READ_FILE_BYTES)
+    await Bun.write(join(workspace, 'huge.txt'), body)
+    await expect(readFile({ file_path: 'huge.txt', end_line: -1 }, paths)).rejects.toThrow(
+      String(DEFAULT_MAX_READ_FILE_BYTES) + '-byte limit for a whole-file read_file read; read it in windows (start_line and end_line)',
     )
+    expect(await readFile({ file_path: 'huge.txt', start_line: 9_001, end_line: 9_002 }, paths)).toContain('line 9000 ')
   })
 })
 

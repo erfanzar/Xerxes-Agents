@@ -14,8 +14,37 @@ import { WorkspacePathError, WorkspacePathResolver } from './pathSafety.js'
 
 export const DEFAULT_READ_LINE_LIMIT = 400
 export const DEFAULT_MAX_RESULTS = 500
-/** Byte ceiling for a single read before any operator override; see resolveMaxReadFileBytes. */
+/** Byte ceiling for a whole-file read before any operator override; see resolveMaxReadFileBytes. */
 export const DEFAULT_MAX_READ_FILE_BYTES = 262_144
+/**
+ * Largest file a windowed read will open. A window's output is already bounded
+ * by MAX_READ_WINDOW_CHARS, so the whole-file ceiling above has no business
+ * here: applied to every read it made a 333 KB source file unreadable in any
+ * window, and FileEditTool (which requires a read first) could never edit it.
+ * This bound only keeps one read from loading an arbitrarily large file.
+ */
+export const MAX_WINDOWED_READ_FILE_BYTES = 33_554_432
+
+/**
+ * The size rule every read tool applies: a whole-file read stays within the
+ * configured ceiling, a windowed read may open any file up to
+ * MAX_WINDOWED_READ_FILE_BYTES. Returns the refusal, or undefined when allowed.
+ */
+export function readSizeRefusal(size: number, wholeFile: boolean, names: {
+  readonly tool: string
+  /** How this tool spells a windowed read, for the refusal's advice. */
+  readonly window: string
+}): string | undefined {
+  const wholeCeiling = resolveMaxReadFileBytes()
+  if (wholeFile && size > wholeCeiling) {
+    return 'is ' + size + ' bytes, over the ' + wholeCeiling + '-byte limit for a whole-file ' + names.tool
+      + ' read; read it in windows (' + names.window + ') or find the part you need with GrepTool'
+  }
+  if (size > Math.max(wholeCeiling, MAX_WINDOWED_READ_FILE_BYTES)) {
+    return 'is ' + size + ' bytes, too large for ' + names.tool + '; find the part you need with GrepTool'
+  }
+  return undefined
+}
 /**
  * Characters a single read may return, whichever line window produced them.
  *
@@ -36,8 +65,9 @@ export const READ_FILE_DEFINITION: ToolDefinition = {
       + 'inside the workspace also resolves, anything outside it is refused. Output is the file text verbatim with no '
       + 'line-number prefix, so it can be pasted straight back into FileEditTool old_string. Defaults to '
       + `${DEFAULT_READ_LINE_LIMIT} lines from offset 0 and reports the offset to continue from; limit=-1 means a `
-      + `deliberate whole-file read. One call returns at most ${MAX_READ_WINDOW_CHARS} characters and files over `
-      + `${DEFAULT_MAX_READ_FILE_BYTES} bytes are refused outright; both are errors, not truncation. A file with very `
+      + `deliberate whole-file read. One call returns at most ${MAX_READ_WINDOW_CHARS} characters; a whole-file read `
+      + `(limit=-1) of a file over ${DEFAULT_MAX_READ_FILE_BYTES} bytes is refused, so read a large file in windows `
+      + `(any size up to ${MAX_WINDOWED_READ_FILE_BYTES} bytes). Both are errors, not truncation. A file with very `
       + 'long lines (minified bundles, single-line JSON, lockfiles) can exceed the character ceiling even at limit=1 '
       + 'because it is one line: locate what you need with GrepTool, or set max_chars to cap the return. A missing '
       + 'file is a normal recoverable outcome — confirm the path with GlobTool instead of retrying the same read. '
@@ -287,15 +317,8 @@ export async function readFile(
   const target = await paths.resolveReadable(filePath)
   await requireRegularFile(target, filePath)
   const fileInfo = await stat(target)
-  const maxBytes = resolveMaxReadFileBytes()
-  if (fileInfo.size > maxBytes) {
-    throw new ValidationError(
-      'file_path',
-      'is ' + fileInfo.size + ' bytes, exceeding the ' + maxBytes
-        + '-byte ReadFile limit; search it with GrepTool or split it into smaller files first',
-      filePath,
-    )
-  }
+  const tooLarge = readSizeRefusal(fileInfo.size, limit === -1, { tool: 'ReadFile', window: 'offset and limit' })
+  if (tooLarge) throw new ValidationError('file_path', tooLarge, filePath)
   const text = await Bun.file(target).text()
   // An explicit max_chars is itself bounded by the window ceiling: a caller
   // passing max_chars=1_000_000 over a 60k-character window used to skip

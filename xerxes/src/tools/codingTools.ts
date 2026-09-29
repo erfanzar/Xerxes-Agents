@@ -14,7 +14,7 @@ import {
   DEFAULT_MAX_READ_FILE_BYTES,
   enforceReadWindowCeiling,
   MAX_READ_WINDOW_CHARS,
-  resolveMaxReadFileBytes,
+  readSizeRefusal,
 } from './fileTools.js'
 import {
   optionalBoolean,
@@ -44,8 +44,9 @@ export const CODING_READ_FILE_DEFINITION = codingDefinition(
     + 'its right-aligned line number, a space, a pipe, and a space ("   12 | code"); strip that prefix before reusing '
     + 'the text as a search string or as replacement content. Defaults to '
     + DEFAULT_READ_LINE_LIMIT + ' lines from start_line and reports the start_line to continue from; end_line=-1 '
-    + 'means a deliberate whole-file read. One call returns at most ' + MAX_READ_WINDOW_CHARS + ' characters and '
-    + 'files over ' + DEFAULT_MAX_READ_FILE_BYTES + ' bytes are refused outright; both are errors, not truncation. '
+    + 'means a deliberate whole-file read. One call returns at most ' + MAX_READ_WINDOW_CHARS + ' characters; a '
+    + 'whole-file read of a file over ' + DEFAULT_MAX_READ_FILE_BYTES + ' bytes is refused, so read a large file in '
+    + 'line windows. Both are errors, not truncation. '
     + 'A file with very long lines (minified bundles, single-line JSON, lockfiles) can exceed the character ceiling '
     + 'on a single line, so locate what you need with GrepTool instead of paging. A missing file is a normal '
     + 'recoverable outcome — confirm the path with list_directory rather than retrying the same read. A directory is '
@@ -302,17 +303,10 @@ export async function readFile(
   const target = await paths.resolve(filePath)
   await requireRegularFile(target, filePath)
   const fileInfo = await stat(target)
-  // Shares ReadFile's ceiling on purpose: this lower-case surface is registered
+  // Shares ReadFile's rule on purpose: this lower-case surface is registered
   // alongside it, so a laxer cap here would just be the bypass a model finds first.
-  const maxBytes = resolveMaxReadFileBytes()
-  if (fileInfo.size > maxBytes) {
-    throw new ValidationError(
-      'file_path',
-      'is ' + fileInfo.size + ' bytes, exceeding the ' + maxBytes
-        + '-byte read_file limit; search it with GrepTool or split it into smaller files first',
-      filePath,
-    )
-  }
+  const tooLarge = readSizeRefusal(fileInfo.size, requestedEnd === -1, { tool: 'read_file', window: 'start_line and end_line' })
+  if (tooLarge) throw new ValidationError('file_path', tooLarge, filePath)
   const text = await Bun.file(target).text()
   const lines = splitTextLines(text)
   const fullFile = requestedEnd === -1

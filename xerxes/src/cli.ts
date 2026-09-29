@@ -176,7 +176,7 @@ import { runBundledSkillCli } from "./skills/cli.js";
 import { AuthCommandError, runAuthCommand } from "./auth/command.js";
 import { bridgeDurableTaskLifecycle } from "./tasks/durableTaskBridge.js";
 import { DurableTaskRuntime } from "./tasks/durableTaskRuntime.js";
-import { ASK_USER_POLICY } from "./tools/askUserPolicy.js";
+import { ASK_USER_OPTIONS_SCHEMA, ASK_USER_POLICY } from "./tools/askUserPolicy.js";
 
 /**
  * Command list for `--help`, grouped by what the reader is trying to do.
@@ -2443,6 +2443,7 @@ function registerDaemonQuestionTool(registry: ToolRegistry): void {
               type: "string",
               description: "Question shown to the user.",
             },
+            options: ASK_USER_OPTIONS_SCHEMA,
           },
           required: ["question"],
         },

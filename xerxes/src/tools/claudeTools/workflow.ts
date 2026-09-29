@@ -28,7 +28,7 @@ import type { AgentDefinition } from '../../agents/definitions.js'
 import type { JsonObject, JsonValue, ToolDefinition } from '../../types/toolCalls.js'
 import { optionalBoolean, optionalString, optionalStringArray, requiredString } from '../inputs.js'
 import { collectChildOutput } from '../processOutput.js'
-import { ASK_USER_POLICY } from '../askUserPolicy.js'
+import { ASK_USER_OPTIONS_SCHEMA, ASK_USER_POLICY } from '../askUserPolicy.js'
 
 export type { InteractionMode } from '../../runtime/interactionModes.js'
 
@@ -272,6 +272,7 @@ export const CLAUDE_WORKFLOW_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
   }, ['todos']),
   definition('AskUserQuestionTool', ASK_USER_POLICY + ' The turn blocks until they answer.', {
     question: stringSchema('Question shown to the user.'),
+    options: ASK_USER_OPTIONS_SCHEMA,
   }, ['question']),
   definition('EnterPlanModeTool', 'Enter plan mode; hosts can use this state to gate mutations.', {}),
   definition('ExitPlanModeTool', 'Leave plan mode and resume normal execution.', {}),
@@ -487,7 +488,10 @@ export class ClaudeWorkflowTools {
     if (manager === undefined) {
       throw new ClientError('user_prompt', 'no UserPromptManager is attached to this Claude workflow session')
     }
-    const answer = await manager.request({ question: requiredString(inputs, 'question') }, signal)
+    const options = Array.isArray(inputs.options)
+      ? inputs.options.filter((option): option is string => typeof option === 'string' && option.trim() !== '').map(option => option.trim())
+      : []
+    const answer = await manager.request({ question: requiredString(inputs, 'question'), ...(options.length ? { options } : {}) }, signal)
     return answer.answer
   }
 

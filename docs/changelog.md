@@ -7,6 +7,12 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.13 — 2026-09-30
+
+- Tools: a large file can be read and edited. ReadFile refused any file over 256 KB, even a 50-line window of it, and since an edit needs a read first, such a file could not be edited at all. Windows of any file up to 32 MB now read normally; only a whole-file read (limit=-1) keeps the 256 KB limit.
+- Agents ask with clickable choices. AskUserQuestionTool takes `options` (recommended first); the desktop shows them as buttons with number keys plus a field for your own answer, and the question text renders as Markdown. The daemon used to drop options from the plain question form.
+- Desktop: a question's options are single-choice; a second click moves the choice instead of sending both.
+
 ## 0.6.12 — 2026-09-30
 
 - Desktop: a new task no longer shows the task it replaced. After switching, a window could keep asking the runtime about the previous task, so the new one showed that task's goal, background jobs and model time. It now always uses the task the runtime says it opened, ignores answers meant for the task it left, and a finished turn's totals only reach the window still showing that task.

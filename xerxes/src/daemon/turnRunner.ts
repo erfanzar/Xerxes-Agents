@@ -1204,7 +1204,10 @@ function questionFromToolCall(call: ToolCall): DaemonQuestion | undefined {
   }
   const directQuestion = stringInput(inputs.question)
   if (directQuestion) {
-    return { question: directQuestion }
+    // The plain form carries its choices too; dropping them left the user a
+    // text box under a paragraph that listed (A), (B) and (C) to type out.
+    const options = stringArrayInput(inputs.options).map(option => option.trim()).filter(Boolean)
+    return { question: directQuestion, ...(options.length ? { options } : {}) }
   }
   const first = Array.isArray(inputs.questions) ? inputs.questions[0] : undefined
   if (!isRecord(first)) return undefined

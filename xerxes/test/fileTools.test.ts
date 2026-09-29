@@ -88,11 +88,29 @@ test('ReadFile refuses an oversized whole-file read and names the line limit tha
   })
 })
 
+test('a file over the whole-file ceiling is read in windows, and a window is enough to edit it', async () => {
+  await inWorkspace(async (workspace, paths) => {
+    // 333 KB of source, like the trainer module the ceiling used to lock out.
+    const body = Array.from({ length: 6_000 }, (_, index) => `def step_${index}(state):  # ${'pad'.repeat(12)}\n`).join('')
+    expect(body.length).toBeGreaterThan(DEFAULT_MAX_READ_FILE_BYTES)
+    await Bun.write(join(workspace, 'trainer.py'), body)
+    await expect(readFile({ file_path: 'trainer.py', limit: -1 }, paths)).rejects.toThrow(
+      'over the ' + DEFAULT_MAX_READ_FILE_BYTES + '-byte limit for a whole-file ReadFile read; read it in windows',
+    )
+    const context = { sessionId: 'session-large' }
+    const window = await readFile({ file_path: 'trainer.py', offset: 4_200, limit: 5 }, paths, context)
+    expect(window).toContain('def step_4200(state):')
+    const edited = await editFile({ file_path: 'trainer.py', old_string: 'def step_4201(state):', new_string: 'def step_4201(state, resume=False):' }, paths, context)
+    expect(edited).toContain('Applied 1 replacement(s)')
+    expect(await Bun.file(join(workspace, 'trainer.py')).text()).toContain('def step_4201(state, resume=False):')
+  })
+})
+
 test('ReadFile byte ceiling defaults low and resolves environment over runtime setting', async () => {
   await inWorkspace(async (workspace, paths) => {
     await Bun.write(join(workspace, 'huge.txt'), 'x'.repeat(DEFAULT_MAX_READ_FILE_BYTES + 1))
-    await expect(readFile({ file_path: 'huge.txt' }, paths)).rejects.toThrow(
-      String(DEFAULT_MAX_READ_FILE_BYTES) + '-byte ReadFile limit',
+    await expect(readFile({ file_path: 'huge.txt', limit: -1 }, paths)).rejects.toThrow(
+      String(DEFAULT_MAX_READ_FILE_BYTES) + '-byte limit for a whole-file ReadFile read',
     )
 
     expect(resolveMaxReadFileBytes({})).toBe(DEFAULT_MAX_READ_FILE_BYTES)

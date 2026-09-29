@@ -52,12 +52,15 @@ test('ReadFile and read_file treat JSON null chunk arguments as omitted defaults
   })
 })
 
-test('ReadFile and read_file reject files beyond the byte cap with an actionable error', async () => {
+test('ReadFile and read_file refuse a whole-file read past the cap, and any read past the windowed bound', async () => {
   await inTemporaryDirectory(async directory => {
     const paths = new WorkspacePathResolver(directory)
     await Bun.write(join(directory, 'huge.txt'), 'x'.repeat(10_000_001))
-    await expect(standaloneReadFile({ file_path: 'huge.txt' }, paths)).rejects.toThrow('ReadFile limit')
-    await expect(codingReadFile({ file_path: 'huge.txt' }, paths)).rejects.toThrow('read_file limit')
+    await expect(standaloneReadFile({ file_path: 'huge.txt', limit: -1 }, paths)).rejects.toThrow('whole-file ReadFile read')
+    await expect(codingReadFile({ file_path: 'huge.txt', end_line: -1 }, paths)).rejects.toThrow('whole-file read_file read')
+    await Bun.write(join(directory, 'enormous.txt'), 'x'.repeat(33_554_433))
+    await expect(standaloneReadFile({ file_path: 'enormous.txt' }, paths)).rejects.toThrow('too large for ReadFile')
+    await expect(codingReadFile({ file_path: 'enormous.txt' }, paths)).rejects.toThrow('too large for read_file')
   })
 })
 

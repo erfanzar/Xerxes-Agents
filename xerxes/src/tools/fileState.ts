@@ -297,9 +297,8 @@ export interface GuardedWriteResult {
  * checked and the bytes that get overwritten.
  *
  * Blocking I/O is the price: there is no way to hold the check and the write together
- * across an await. The exposure is bounded in practice because ReadFile refuses files
- * over its byte ceiling, so a file large enough for the sync read to matter is one the
- * caller could not have read in the first place.
+ * across an await. The exposure is bounded because an edit needs a read first, and the
+ * read tools open files only up to MAX_WINDOWED_READ_FILE_BYTES (32 MiB).
  */
 export function guardedWrite(
   request: GuardedWriteRequest,
