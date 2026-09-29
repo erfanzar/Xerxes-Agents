@@ -37,6 +37,7 @@ agent:
     - computer_use
     - AgentTool
     - SpawnAgents
+    - Workflow
     - SendMessageTool
     - TaskGetTool
     - TaskListTool
@@ -75,6 +76,7 @@ agent:
     - computer_use
     - AgentTool
     - SpawnAgents
+    - Workflow
     - SendMessageTool
     - TaskGetTool
     - TaskListTool

@@ -92,6 +92,7 @@ import {
   ChannelWebhookServer,
   type ChannelWebhookServerOptions,
 } from "../channels/webhookServer.js";
+import { subagentGroupOf } from "../agents/subagentManager.js";
 import { contextCalibrationRatio, estimateContextTokens } from "../context/windowUsage.js";
 import { isNamedPipePath } from "../core/hostPlatform.js";
 import {
@@ -11383,6 +11384,8 @@ function subagentSnapshotPanelPayloads(
         row[key] = field.filter((item): item is string => typeof item === "string");
       }
     }
+    const group = subagentGroupOf(value.group);
+    if (group) row.group = { ...group };
     if (value.closed === true) row.closed = true;
     rows.push(row);
   }

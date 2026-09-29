@@ -3,7 +3,7 @@
 
 import type { PersistedSubagentDelivery } from '../agents/subagentPersistence.js'
 import { isAbsolute } from 'node:path'
-import type { SubAgentManager } from '../agents/subagentManager.js'
+import { subagentGroupOf, type SubAgentManager } from '../agents/subagentManager.js'
 import type { ModelCallBinding } from '../llms/callBudget.js'
 import type {
   SpawnedAgentSnapshot,
@@ -407,6 +407,7 @@ function recoveredSnapshot(
     ...(historySessionId ? { historySessionId } : {}),
     name,
     title: stringValue(value.title) || previous?.title || name,
+    ...(subagentGroupOf(value.group) ?? previous?.group ? { group: (subagentGroupOf(value.group) ?? previous?.group)! } : {}),
     ...(creatorAgentId ? { creatorAgentId } : {}),
     ...(parentAgentId ? { parentAgentId } : {}),
     ...(model ? { model } : {}),

@@ -40,6 +40,7 @@ export const SUBAGENT_BLOCKED_TOOLS = Object.freeze(new Set([
   'TaskOutputTool',
   'TaskStopTool',
   'TaskUpdateTool',
+  'Workflow',
 ]))
 
 const READ_FILE_TOOLS = new Set(['ReadFile', 'read_file', 'analyze_code_structure'])
@@ -319,7 +320,35 @@ export type SubagentTaskRunner = (
   request: SubagentTaskRunRequest,
 ) => Promise<SubagentTaskRunResult | string> | SubagentTaskRunResult | string
 
+/**
+ * The fan-out an agent belongs to: a workflow run (`id`), its name
+ * (`label`) and the phase the agent ran in. Carried on the task config as
+ * `_agentGroup` so it reaches every event, snapshot and saved record, which
+ * is how a client draws one workflow's agents together.
+ */
+export interface SubAgentGroup {
+  readonly id: string
+  readonly label?: string
+  readonly phase?: string
+}
+
+/** Config key holding a task's {@link SubAgentGroup}. */
+export const SUBAGENT_GROUP_CONFIG_KEY = '_agentGroup'
+
+/** A validated group from untrusted input (config, persisted records, wire payloads). */
+export function subagentGroupOf(value: unknown): SubAgentGroup | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const record = value as Record<string, unknown>
+  const text = (field: unknown, limit: number) => typeof field === 'string' && field.trim() ? field.trim().slice(0, limit) : undefined
+  const id = text(record.id, 128)
+  if (!id) return undefined
+  const label = text(record.label, 200)
+  const phase = text(record.phase, 200)
+  return Object.freeze({ id, ...(label ? { label } : {}), ...(phase ? { phase } : {}) })
+}
+
 export interface SubAgentEvent {
+  readonly group?: SubAgentGroup
   readonly providerProfile?: string
   readonly reasoningEffort?: string
   readonly agent: string
@@ -1040,7 +1069,9 @@ export class SubAgentManager {
   /** Append a bounded lifecycle event and notify asynchronous waiters. */
   postEvent(task: SubAgentTask, type: string, data: Readonly<Record<string, unknown>> = {}): void {
     const config = this.runtimes.get(task.id)?.config ?? this.archivedTerminalTasks.get(task.id)?.config
+    const group = subagentGroupOf(config?.[SUBAGENT_GROUP_CONFIG_KEY])
     const event = Object.freeze({
+      ...(group ? { group } : {}),
       ...(typeof config?.providerProfile === 'string' ? { providerProfile: config.providerProfile } : {}),
       ...(typeof config?.reasoningEffort === 'string' ? { reasoningEffort: config.reasoningEffort } : {}),
       sequence: ++this.sequence,

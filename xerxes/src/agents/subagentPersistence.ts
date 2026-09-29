@@ -8,6 +8,12 @@ export const SUBAGENT_SNAPSHOT_METADATA_KEY = 'xerxes_subagent_snapshots_v1'
 export const SUBAGENT_DELIVERY_METADATA_KEY = 'xerxes_subagent_deliveries_v1'
 
 const MAX_ARCHIVED_TEXT_CHARS = 16_000
+/**
+ * A workflow can run thousands of agents, and every one of them is rewritten
+ * into the session file on each save. Its own result already carries what the
+ * script kept, so a grouped agent keeps a shorter excerpt here.
+ */
+const MAX_ARCHIVED_GROUPED_TEXT_CHARS = 2_000
 const MAX_ARCHIVED_FILES = 1_000
 const MAX_ARCHIVED_DELIVERIES = 2_000
 
@@ -90,6 +96,7 @@ function archivedSnapshotWire(snapshot: SpawnedAgentSnapshot): Record<string, un
       : {}),
     name: snapshot.name,
     title: snapshot.title,
+    ...(snapshot.group ? { group: { ...snapshot.group } } : {}),
     agent_id: snapshot.agentId,
     creator_id: snapshot.creatorAgentId ?? null,
     parent_id: snapshot.parentAgentId ?? null,
@@ -119,8 +126,8 @@ function archivedSnapshotWire(snapshot: SpawnedAgentSnapshot): Record<string, un
     ...(snapshot.workspace === undefined ? {} : { workspace: snapshot.workspace }),
     prompt_profile: snapshot.promptProfile,
     source_agent_id: snapshot.sourceAgentId ?? null,
-    last_input: boundedText(snapshot.lastInput, MAX_ARCHIVED_TEXT_CHARS) ?? null,
-    last_output: boundedText(snapshot.lastOutput, MAX_ARCHIVED_TEXT_CHARS) ?? null,
+    last_input: boundedText(snapshot.lastInput, snapshot.group ? MAX_ARCHIVED_GROUPED_TEXT_CHARS : MAX_ARCHIVED_TEXT_CHARS) ?? null,
+    last_output: boundedText(snapshot.lastOutput, snapshot.group ? MAX_ARCHIVED_GROUPED_TEXT_CHARS : MAX_ARCHIVED_TEXT_CHARS) ?? null,
     error: boundedText(snapshot.error, 2_000) ?? null,
     queue_size: snapshot.queueSize,
     closed: snapshot.closed,

@@ -27,7 +27,20 @@ import {
 } from '../../operators/subagents.js'
 import type { JsonObject, JsonValue, ToolDefinition } from '../../types/toolCalls.js'
 import type { PermissionMode } from '../../streaming/permissions.js'
-import { optionalBoolean, optionalString, requiredString } from '../inputs.js'
+import { optionalBoolean, optionalInteger, optionalString, requiredString } from '../inputs.js'
+import type { SubAgentGroup } from '../../agents/subagentManager.js'
+import type { ToolCapabilities } from '../../executors/toolRegistry.js'
+import {
+  DEFAULT_WORKFLOW_CONCURRENCY,
+  DEFAULT_WORKFLOW_MAX_AGENTS,
+  MAX_WORKFLOW_CONCURRENCY,
+  runWorkflowScript,
+  schemaInstruction,
+  type WorkflowAgentOutcome,
+  type WorkflowAgentPort,
+  type WorkflowAgentRequest,
+  type WorkflowRunResult,
+} from './workflowScript.js'
 
 const DEFAULT_WAIT_SECONDS = 120
 
@@ -69,6 +82,8 @@ const MAX_WIRE_OUTPUT_CHARS = 8_000
 const TERMINAL_STATUSES = new Set(['cancelled', 'closed', 'completed', 'error', 'interrupted'])
 
 export interface ClaudeAgentSpec {
+  /** Workflow run and phase this agent belongs to. */
+  readonly group?: SubAgentGroup | undefined
   readonly isolation?: 'worktree' | undefined
   readonly worktreeRef?: string | undefined
   readonly worktreeSource?: 'working-tree' | undefined
@@ -262,7 +277,7 @@ export const CLAUDE_AGENT_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     name: stringSchema('Stable subagent name.'),
     subagent_type: stringSchema('Agent definition to run.'),
   }, ['prompt', 'title']),
-  definition('SpawnAgents', 'Run several independent subagents in one call instead of repeated AgentTool calls. Split by independent slice (per module or question), not by steps of one sequential chain. Agents share no context with you or each other, so each prompt must stand alone. Do not give two agents edits to the same files unless each uses isolation=worktree. Agents still running at the timeout are not failed: collect them with AwaitAgents.', {
+  definition('SpawnAgents', 'Run several independent subagents in one call instead of repeated AgentTool calls. Split by independent slice (per module or question), not by steps of one sequential chain. Agents share no context with you or each other, so each prompt must stand alone. Do not give two agents edits to the same files unless each uses isolation=worktree. Agents still running at the timeout are not failed: collect them with AwaitAgents. For more than 32 agents, or work in stages (find, then verify), use Workflow.', {
     agents: {
       description: `JSON array of {title, prompt, name?, subagent_type?, provider_profile?, model?, reasoning_effort?, intelligence?}. Every agent needs a short title. One batch accepts at most ${MAX_SPAWN_BATCH_SIZE} agents; spawn registrations run through a bounded concurrency pool.`,
       type: 'array',
@@ -329,6 +344,21 @@ export const CLAUDE_AGENT_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     target: stringSchema('Subagent id or stable name.'),
     new_prompt: stringSchema('Replacement task; defaults to its last input.'),
   }, ['target']),
+  definition('Workflow', [
+    'Run a JavaScript orchestration script that fans work out to many subagents and combines what they return: reviews, audits, migrations, broad searches, multi-angle verification, anything with independent parts or stages.',
+    'Prefer it to a series of AgentTool/SpawnAgents calls once work splits into more than a few pieces or needs stages (find, then verify, then synthesize). There is no limit on how many agents a script starts; concurrency only bounds how many run at once.',
+    'The script is the body of an async function. Globals: agent(prompt, opts) resolves to the agent\'s final text, or a parsed value when opts.schema is given, and rejects on failure; parallel([functions or promises]) waits for all and turns failures into null; pipeline(items, ...stages) sends each item through the stages independently, stage(previous, item, index), a throwing stage drops that item to null; phase(title) groups the agents that follow; log(...values); args; budget.spent() and budget.remaining(). return the value you want back.',
+    'agent opts: label, phase, model, profile (provider profile), intelligence, effort, type (subagent type), isolation: "worktree", schema (JSON Schema for a structured reply), timeout_ms.',
+    'Every agent starts with no context, so each prompt must stand alone. The script itself has no files, shell or network; agents do the work. Choose a model per agent: a fast, cheap model for mechanical reading, search and classification, a stronger one for judgement and synthesis.',
+  ].join(' '), {
+    script: stringSchema('JavaScript body of an async function using agent, parallel, pipeline, phase, log, args and budget. return the result.'),
+    name: stringSchema('Short name shown for this run, e.g. "Review vnext".'),
+    args: { description: 'Any JSON value, available to the script as args.' },
+    concurrency: { type: 'integer', minimum: 1, maximum: MAX_WORKFLOW_CONCURRENCY, description: `Agents running at once (default ${DEFAULT_WORKFLOW_CONCURRENCY}). Not a limit on the total.` },
+    max_agents: { type: 'integer', minimum: 1, description: `Runaway guard on agents started in total (default ${DEFAULT_WORKFLOW_MAX_AGENTS}).` },
+    token_budget: { type: 'integer', minimum: 1, description: 'Stop starting agents once they have used this many tokens; also budget.total in the script.' },
+    timeout_minutes: numberSchema('Stop the whole run after this many minutes.'),
+  }, ['script']),
   definition('HandoffTool', 'Hand work to a specialist agent type with a reason and context summary; it waits and returns the specialist\'s output to you, like AgentTool with subagent_type.', {
     target_agent: stringSchema('Agent type receiving the handoff.'),
     reason: stringSchema('Why the handoff is needed.'),
@@ -350,14 +380,41 @@ export function registerClaudeAgentTools(
   const catalog = options.availableAgents?.length
     ? '\nAvailable subagent types (choose by description, or use the exact type requested by the user):\n' + options.availableAgents.map(agent => `- ${agent.name}: ${agent.description}`).join('\n')
     : ''
-  const definitions = CLAUDE_AGENT_TOOL_DEFINITIONS.map(tool => ['AgentTool', 'TaskCreateTool', 'SpawnAgents'].includes(tool.function.name)
+  const definitions = CLAUDE_AGENT_TOOL_DEFINITIONS.map(tool => ['AgentTool', 'TaskCreateTool', 'SpawnAgents', 'Workflow'].includes(tool.function.name)
     ? { ...tool, function: { ...tool.function, parameters: configuredIntelligenceSchema(tool.function.parameters, config), description: `${tool.function.description} Intelligence default: ${config.default ?? 'inherit'}. Configured tiers: ${tiers || 'none; omit intelligence and inherit, or specify model'}.${catalog}` } }
     : tool)
   for (const tool of definitions) {
-    registry.replace(tool, (inputs, context, signal) => adapter.execute(tool.function.name, inputs, context, signal), agentId)
+    const workflow = tool.function.name === 'Workflow'
+    registry.replace(
+      tool,
+      (inputs, context, signal) => adapter.execute(tool.function.name, inputs, context, signal),
+      agentId,
+      workflow ? WORKFLOW_CAPABILITIES : undefined,
+      workflow ? WORKFLOW_GUIDANCE : undefined,
+    )
   }
   return definitions
 }
+
+/**
+ * The script runs as the user in its own process, so the tool is gated like
+ * `exec_command`; stopping the turn stops the script and every agent it started.
+ */
+const WORKFLOW_CAPABILITIES: Partial<ToolCapabilities> = {
+  concurrencySafe: false,
+  defer: false,
+  destructive: true,
+  interruptBehavior: 'cancel',
+  openWorld: true,
+  readOnly: false,
+}
+
+const WORKFLOW_GUIDANCE = [
+  'Reach for Workflow on your own whenever a task fans out; the user does not need to ask for it. Good fits: review or audit across many files (one agent per slice, then a verifier per finding), migrations across many call sites, research from several angles, "find all X" sweeps, and checking a claim with independent skeptics before you rely on it.',
+  'Shape: phase("Find"); const found = await parallel(slices.map(s => () => agent(prompt(s), { label: s.name, model: FAST, schema })));  then phase("Verify") over the flattened findings with a stronger model, then return a compact summary. pipeline() lets each item move to the next stage without waiting for the slowest one.',
+  'Set model on every agent deliberately — agents without one inherit this conversation\'s model, often the most expensive. Use a fast, cheap model from the models list (or list_available_models) for mechanical reading, search, extraction and classification, and your strongest model for design decisions, verification of subtle claims, and the final synthesis.',
+  'Return only what you need from the script; agents\' full outputs stay in the agent panel. Read the returned failures and logs before concluding.',
+].join('\n')
 
 /** Advertise only configured choices, including the nested swarm item schema. */
 function configuredIntelligenceSchema(schema: Readonly<Record<string, unknown>>, config: AgentIntelligenceConfig): Record<string, unknown> {
@@ -430,6 +487,7 @@ export class ClaudeAgentTools {
         case 'PeekAgent': return this.taskGet(requiredString(inputs, 'target'), context)
         case 'ResetAgent': return await this.resetAgent(inputs, context)
         case 'HandoffTool': return await this.handoff(inputs, context, signal)
+        case 'Workflow': return await this.workflow(inputs, context, signal)
         default: throw new ValidationError('tool', 'is not handled by ClaudeAgentTools', name)
       }
     } finally {
@@ -807,6 +865,77 @@ export class ClaudeAgentTools {
     }
   }
 
+  /**
+   * Run a workflow script. Its agents are ordinary owned subagents — same
+   * spawn path, models, permissions, manifest and events — tagged with the
+   * run's group so clients can draw them together by phase.
+   */
+  private async workflow(inputs: JsonObject, context: ToolExecutionContext, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    const script = requiredString(inputs, 'script')
+    const name = optionalString(inputs, 'name')?.trim().slice(0, 120) || 'Workflow'
+    const concurrency = optionalInteger(inputs, 'concurrency', DEFAULT_WORKFLOW_CONCURRENCY)
+    if (concurrency < 1 || concurrency > MAX_WORKFLOW_CONCURRENCY) throw new ValidationError('concurrency', `must be between 1 and ${MAX_WORKFLOW_CONCURRENCY}`, concurrency)
+    const maxAgents = optionalInteger(inputs, 'max_agents', DEFAULT_WORKFLOW_MAX_AGENTS)
+    if (maxAgents < 1) throw new ValidationError('max_agents', 'must be a positive integer', maxAgents)
+    const tokenBudget = inputs.token_budget === undefined ? undefined : optionalInteger(inputs, 'token_budget', 0)
+    if (tokenBudget !== undefined && tokenBudget < 1) throw new ValidationError('token_budget', 'must be a positive integer', tokenBudget)
+    const timeoutMinutes = inputs.timeout_minutes
+    if (timeoutMinutes !== undefined && (typeof timeoutMinutes !== 'number' || !Number.isFinite(timeoutMinutes) || timeoutMinutes <= 0)) {
+      throw new ValidationError('timeout_minutes', 'must be a positive number', timeoutMinutes)
+    }
+    const runId = `wf_${crypto.randomUUID().replaceAll('-', '').slice(0, 12)}`
+    const live = new Set<string>()
+    // One manifest refresh for the whole run instead of one timer per agent.
+    const heartbeat = setInterval(() => { try { this.persistContext(context) } catch { /* best-effort */ } }, this.manifestHeartbeatMs)
+    const settle = async (id: string, timeoutMs: number, runSignal: AbortSignal): Promise<WorkflowAgentOutcome> => {
+      const result = await abortable(this.options.manager.wait([id], timeoutMs), runSignal)
+      this.capture()
+      const snapshot = [...result.completed, ...result.pending].find(candidate => candidate.id === id)
+      if (!snapshot || result.pending.some(candidate => candidate.id === id)) {
+        try { this.options.manager.close(id) } catch { /* already gone */ }
+        live.delete(id)
+        return { id, status: 'failed', output: '', error: `Agent timed out after ${Math.round(timeoutMs / 1000)}s`, tokens: snapshotTokens(snapshot) }
+      }
+      live.delete(id)
+      return workflowOutcome(snapshot)
+    }
+    const port: WorkflowAgentPort = {
+      run: async (request, runSignal) => {
+        const snapshot = await this.spawnSpec(workflowSpec(request, runId, name, this.intelligence), context, runSignal)
+        live.add(snapshot.id)
+        return settle(snapshot.id, request.timeoutMs ?? WORKFLOW_AGENT_TIMEOUT_MS, runSignal)
+      },
+      correct: async (id, message, request, runSignal) => {
+        const snapshot = await this.options.manager.sendInput(id, { message })
+        live.add(snapshot.id)
+        return settle(snapshot.id, request.timeoutMs ?? WORKFLOW_AGENT_TIMEOUT_MS, runSignal)
+      },
+      closeAll: () => {
+        for (const id of live) {
+          try { this.options.manager.close(id) } catch { /* already terminal */ }
+        }
+        live.clear()
+      },
+    }
+    try {
+      const result = await runWorkflowScript({
+        script,
+        name,
+        ...(inputs.args === undefined ? {} : { args: inputs.args }),
+        concurrency,
+        maxAgents,
+        ...(tokenBudget === undefined ? {} : { tokenBudget }),
+        ...(typeof timeoutMinutes === 'number' ? { timeoutMs: timeoutMinutes * 60_000 } : {}),
+        port,
+        ...(signal ? { signal } : {}),
+      })
+      return workflowWire(runId, result)
+    } finally {
+      clearInterval(heartbeat)
+      this.capture()
+    }
+  }
+
   private resolveSpec(spec: ClaudeAgentSpec): ClaudeAgentSpec {
     if ((spec.providerProfile || spec.reasoningEffort) && !spec.model?.trim()) throw new ValidationError('model', 'explicit provider/reasoning selectors require model', spec.model)
     if (spec.worktreeSource === 'working-tree' && spec.worktreeRef === 'HEAD') spec = { ...spec, worktreeRef: undefined }
@@ -846,6 +975,7 @@ export class ClaudeAgentTools {
       ...(context.sessionId ? { sourceAgentId: context.sessionId } : context.agentId ? { sourceAgentId: context.agentId } : {}),
       ...(context.agentId ? { creatorAgentId: context.agentId, parentAgentId: context.agentId } : {}),
       ...(spec.name?.trim() ? { nickname: spec.name.trim() } : {}),
+      ...(spec.group ? { group: spec.group } : {}),
     }
     const snapshot = await this.options.manager.spawn(request)
     if (signal?.aborted) { this.closeAfterAbort([snapshot.id], signal.reason); signal.throwIfAborted() }
@@ -1295,6 +1425,7 @@ function agentSnapshotWire(snapshot: SpawnedAgentSnapshot): Record<string, unkno
     ...(snapshot.attempt === undefined ? {} : { attempt: snapshot.attempt }),
     name: snapshot.name,
     title: snapshot.title,
+    ...(snapshot.group ? { group: { ...snapshot.group } } : {}),
     agent_id: snapshot.agentId,
     creator_id: snapshot.creatorAgentId ?? null,
     parent_id: snapshot.parentAgentId ?? null,
@@ -1321,6 +1452,61 @@ function agentSnapshotWire(snapshot: SpawnedAgentSnapshot): Record<string, unkno
     queue_size: snapshot.queueSize,
     queued_preview: snapshot.queuedPreview ?? null,
     closed: snapshot.closed,
+  }
+}
+
+/** A workflow agent without its own timeout gets this long before it is stopped. */
+const WORKFLOW_AGENT_TIMEOUT_MS = 6 * 60 * 60 * 1000
+
+function workflowSpec(request: WorkflowAgentRequest, runId: string, name: string, intelligence: AgentIntelligenceConfig): ClaudeAgentSpec {
+  const level = request.intelligence === undefined ? undefined : parseAgentIntelligence(request.intelligence)
+  if (level && !request.model && !intelligence[level]) {
+    throw new ValidationError('intelligence', `tier ${level} is not configured; pass a model instead (list_available_models shows what your providers offer)`, request.intelligence)
+  }
+  const title = normalizeAgentTitle((request.label ?? request.prompt.split('\n')[0] ?? '').trim().slice(0, MAX_AGENT_TITLE_LENGTH) || 'Workflow agent')
+  return {
+    prompt: request.schema ? request.prompt + schemaInstruction(request.schema) : request.prompt,
+    title,
+    ...(request.type ? { subagentType: request.type } : {}),
+    ...(request.model ? { model: request.model } : {}),
+    ...(level ? { intelligence: level } : {}),
+    ...(request.profile ? { providerProfile: request.profile } : {}),
+    ...(request.effort ? { reasoningEffort: request.effort } : {}),
+    ...(request.isolation ? { isolation: request.isolation } : {}),
+    group: { id: runId, label: name, ...(request.phase ? { phase: request.phase } : {}) },
+  }
+}
+
+function snapshotTokens(snapshot: SpawnedAgentSnapshot | undefined): number {
+  if (!snapshot) return 0
+  // Fresh work only: cache reads are cheap re-reads of a prompt already paid for.
+  return (snapshot.inputTokens ?? 0) + (snapshot.outputTokens ?? 0) + (snapshot.cacheCreationTokens ?? 0)
+}
+
+function workflowOutcome(snapshot: SpawnedAgentSnapshot): WorkflowAgentOutcome {
+  const status = snapshot.status === 'completed' ? 'completed' : snapshot.status === 'cancelled' || snapshot.status === 'closed' ? 'cancelled' : 'failed'
+  return {
+    id: snapshot.id,
+    status,
+    output: snapshot.lastOutput ?? '',
+    ...(snapshot.error ? { error: snapshot.error } : status === 'failed' ? { error: `Agent ended ${snapshot.status}` } : {}),
+    tokens: snapshotTokens(snapshot),
+  }
+}
+
+function workflowWire(runId: string, result: WorkflowRunResult): Record<string, unknown> {
+  return {
+    workflow_id: runId,
+    name: result.name,
+    status: result.status,
+    ...(result.result === undefined ? {} : { result: result.result }),
+    ...(result.error ? { error: result.error } : {}),
+    agents: result.agents,
+    tokens: result.tokens,
+    duration_seconds: Math.round(result.durationMs / 100) / 10,
+    ...(result.phases.length ? { phases: result.phases } : {}),
+    ...(result.failures.length ? { failures: result.failures } : {}),
+    ...(result.logs.length ? { logs: result.logs.slice(-60) } : {}),
   }
 }
 

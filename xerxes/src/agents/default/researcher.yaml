@@ -30,6 +30,7 @@ agent:
     - update_goal
     - AgentTool
     - SpawnAgents
+    - Workflow
     - AskUserQuestionTool
     - WriteFile
     - FileEditTool

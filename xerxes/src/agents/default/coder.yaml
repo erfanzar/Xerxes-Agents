@@ -33,6 +33,7 @@ agent:
   exclude_tools:
     - AgentTool
     - SpawnAgents
+    - Workflow
     - AskUserQuestionTool
     - TodoWriteTool
     - SkillTool

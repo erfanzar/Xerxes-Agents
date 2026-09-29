@@ -3,6 +3,7 @@
 
 import { ValidationError } from '../core/errors.js'
 import type { ModelCallBinding } from '../llms/callBudget.js'
+import type { SubAgentGroup } from '../agents/subagentManager.js'
 
 export const MAX_AGENT_TITLE_LENGTH = 48
 
@@ -53,6 +54,8 @@ export type SubagentRunner = (
 ) => Promise<SubagentRunResponse | string>
 
 export interface SpawnedAgentSnapshot {
+  /** The workflow run and phase this agent belongs to, when it was spawned by one. */
+  readonly group?: SubAgentGroup
   readonly providerProfile?: string
   /** Nonsecret provider routing fingerprint used to validate recovered retries. */
   readonly providerRoute?: string
@@ -110,6 +113,8 @@ export interface SpawnedAgentManagerOptions {
 export interface SpawnAgentOptions {
   /** Allocation cancellation only; never persisted or used as the child lifetime. */
   readonly signal?: AbortSignal
+  /** Workflow run and phase, carried to every event and snapshot of the child. */
+  readonly group?: SubAgentGroup
   readonly isolation?: 'worktree'
   readonly worktreeRef?: string
   readonly worktreeSource?: 'working-tree'
@@ -143,6 +148,7 @@ interface ActiveRun {
 
 interface SpawnedAgentHandle {
   active: ActiveRun | undefined
+  readonly group?: SubAgentGroup
   readonly agent: SpawnedAgentDescriptor
   closed: boolean
   readonly creatorAgentId: string | undefined
@@ -245,6 +251,7 @@ export class SpawnedAgentManager implements SpawnedAgentManagerPort {
     const createdAt = this.now().toISOString()
     const handle: SpawnedAgentHandle = {
       id,
+      ...(options.group?.id ? { group: options.group } : {}),
       agent,
       name: agent.name ?? id,
       title,
@@ -421,6 +428,7 @@ export class SpawnedAgentManager implements SpawnedAgentManagerPort {
   private snapshot(handle: SpawnedAgentHandle): SpawnedAgentSnapshot {
     return Object.freeze({
       id: handle.id,
+      ...(handle.group ? { group: handle.group } : {}),
       name: handle.name,
       title: handle.title,
       agentId: handle.agent.id,

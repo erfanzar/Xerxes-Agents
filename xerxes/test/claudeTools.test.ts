@@ -1513,3 +1513,38 @@ test('agent tool boundaries treat empty optional refs as omitted and reject malf
   }
   expect(seen).toHaveLength(6)
 })
+
+test('Workflow runs its agents through the owned spawn path, tagged by run and phase', async () => {
+  let count = 0
+  const manager = new SpawnedAgentManager({
+    idFactory: () => `wf-agent-${++count}`,
+    runner: async request => ({ content: request.input.includes('JSON Schema') ? '{"ok":true}' : `done:${request.input}` }),
+  })
+  const registry = new ToolRegistry()
+  registerClaudeAgentTools(registry, { manager })
+  const metadata: Record<string, unknown> = {}
+  const result = await registry.execute(toolCall('Workflow', {
+    name: 'Tiny review',
+    script: `
+      phase('Scan')
+      const scans = await parallel(['a', 'b'].map(s => () => agent('scan ' + s, { label: 'Scan ' + s })))
+      phase('Check')
+      const verdict = await agent('check', { schema: { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'] } })
+      return { scans, verdict }
+    `,
+  }), { metadata, sessionId: 'session-1', agentId: 'default' })
+  const wire = (typeof result === 'string' ? JSON.parse(result) : result) as Record<string, unknown>
+  expect(wire).toMatchObject({
+    name: 'Tiny review',
+    status: 'completed',
+    result: { scans: ['done:scan a', 'done:scan b'], verdict: { ok: true } },
+    agents: { started: 3, completed: 3, failed: 0, cancelled: 0 },
+    phases: ['Scan', 'Check'],
+  })
+  const runId = String(wire.workflow_id)
+  expect(runId).toMatch(/^wf_/)
+  const saved = persistedSubagentSnapshotValues(metadata)
+  expect(saved.map(row => (row.group as { phase?: string } | undefined)?.phase)).toEqual(['Scan', 'Scan', 'Check'])
+  expect(saved.every(row => (row.group as { id?: string; label?: string }).id === runId && (row.group as { label?: string }).label === 'Tiny review')).toBeTrue()
+  expect(saved.map(row => row.title)).toEqual(['Scan a', 'Scan b', 'check'])
+})

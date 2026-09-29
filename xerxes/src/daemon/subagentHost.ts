@@ -8,6 +8,9 @@ import { parseWorktreeRef, parseWorktreeSource } from '../agents/worktreeOptions
 import { subagentCatalogForAgent, type AgentDefinition } from '../agents/definitions.js'
 import {
   SUBAGENT_BLOCKED_TOOLS,
+  SUBAGENT_GROUP_CONFIG_KEY,
+  subagentGroupOf,
+  type SubAgentGroup,
   SubAgentManager,
   type SubAgentEvent,
   type SubAgentTask,
@@ -339,6 +342,7 @@ export function createNativeSubagentHost(options: NativeSubagentHostOptions): Na
 }
 
 interface HandleMetadata {
+  readonly group?: SubAgentGroup
   readonly providerProfile?: string
   readonly reasoningEffort?: string
   readonly agentId: string
@@ -496,6 +500,7 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
       ...(options.sourceAgentId ? { sourceAgentId: options.sourceAgentId } : {}),
       ...(options.creatorAgentId ? { creatorAgentId: options.creatorAgentId } : {}),
       ...(options.parentAgentId ? { parentAgentId: options.parentAgentId } : {}),
+      ...(subagentGroupOf(options.group) ? { group: subagentGroupOf(options.group)! } : {}),
     })
     return this.snapshot(task)
   }
@@ -503,6 +508,7 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
   /** Shared spawn core used by fresh spawns and identity-preserving retry respawns. */
   private async spawnResolved(resolved: {
     readonly signal?: AbortSignal
+    readonly group?: SubAgentGroup
     readonly isolation?: 'worktree'
     readonly worktreeRef?: string
     readonly worktreeSource?: 'working-tree'
@@ -543,6 +549,7 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
     if (worktreeSource && (worktreeRef || (resolved.isolation ?? definition.isolation) !== 'worktree')) throw new ValidationError('worktree_source', 'requires isolation=worktree and no worktree_ref', worktreeSource)
     if (worktreeRef && (resolved.isolation ?? definition.isolation) !== 'worktree') throw new ValidationError('worktree_ref', 'requires isolation=worktree', worktreeRef)
     const config = {
+      ...(resolved.group ? { [SUBAGENT_GROUP_CONFIG_KEY]: resolved.group } : {}),
       ...(resolved.providerProfile ? { providerProfile: resolved.providerProfile } : {}),
       ...(resolved.reasoningEffort ? { reasoningEffort: resolved.reasoningEffort } : {}),
       model,
@@ -598,6 +605,7 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
       generation,
       historySessionId: this.historySessionIds.get(task.id),
       lastInput: resolved.input,
+      ...(resolved.group ? { group: resolved.group } : {}),
       parentAgentId: resolved.parentAgentId ?? resolved.creatorAgentId,
       permissionMode,
       promptProfile: definition.name,
@@ -707,6 +715,7 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
       ...(snapshot.creatorAgentId ? { creatorAgentId: snapshot.creatorAgentId } : {}),
       ...(snapshot.parentAgentId ? { parentAgentId: snapshot.parentAgentId } : {}),
       ...(snapshot.sourceAgentId ? { sourceAgentId: snapshot.sourceAgentId } : {}),
+      ...(snapshot.group ? { group: snapshot.group } : {}),
     }))
     return this.snapshot(task)
   }
@@ -989,6 +998,7 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
     const updatedAt = new Date(task.lastActivityAt ?? Date.now()).toISOString()
     return Object.freeze({
       agentId: metadata.agentId,
+      ...(metadata.group ? { group: metadata.group } : {}),
       modelCallBindings: task.modelCallBindings,
       ...(task.providerRoute === undefined ? {} : { providerRoute: task.providerRoute }),
       ...(task.workspace === undefined ? {} : { workspace: task.workspace }),
@@ -1804,6 +1814,7 @@ function daemonEventFromSubagent(
   const base = {
     agent_id: event.taskId,
     agent_name: event.agent,
+    ...(event.group ? { group: { ...event.group } } : {}),
     title: event.title,
     creator_id: event.creatorId || null,
     depth: event.depth,
