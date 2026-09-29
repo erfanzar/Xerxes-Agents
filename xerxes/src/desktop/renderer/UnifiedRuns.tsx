@@ -1,6 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 import { useEffect, useRef, useState, type ReactElement } from 'react'
+import { pageIsBackground } from './pageVisibility.js'
 import { acknowledgeRun, cancelRun, inspectRun, listRunPage, type RunDetail } from '../../ui/lib/runs.js'
 import type { GatewayRpc } from '../../ui/app/interfaces.js'
 import { desktopError, scheduleTime } from './desktopRpc.js'
@@ -18,7 +19,7 @@ export function UnifiedRuns({snap,close}:{snap:Snapshot;close():void}):ReactElem
     let current=true;const version=++epoch.current;let timer:ReturnType<typeof setTimeout>|undefined
     setPage(null);setDetail(null);setBusy(true);setError('')
     const load=async()=>{
-      if(pending.current){if(current)timer=setTimeout(load,2000);return}
+      if(pending.current||pageIsBackground()){if(current)timer=setTimeout(load,2000);return}
       try{const next=await listRunPage(rpc,unread,scope,undefined,before,{...(kind?{kind}:{}),...(state?{state}:{})});if(current&&version===epoch.current){setPage(next);setError('')}}catch(failure){if(current)setError(desktopError(failure))}
       finally{if(current){setBusy(false);timer=setTimeout(load,2000)}}
     };void load();return()=>{current=false;epoch.current++;if(timer)clearTimeout(timer)}

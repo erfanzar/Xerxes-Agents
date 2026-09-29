@@ -1,6 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 import { useEffect, useState, type ReactElement } from 'react'
+import { pageIsBackground } from './pageVisibility.js'
 import { AgentControls, agentState } from './AgentRoster.js'
 import { desktopCall, desktopError, record, text, type RpcRecord } from './desktopRpc.js'
 import { OutputViewer, readableOutput } from './OutputViewer.js'
@@ -29,6 +30,7 @@ export function AgentInspector({ row, rows, sessionKey, online }: {row: SessionR
     let timer: ReturnType<typeof setTimeout> | undefined
     const load = async () => {
       try {
+        if (pageIsBackground()) { if (current && state.priority < 2) timer = setTimeout(() => void load(), 3000); return }
         const result = await desktopCall(window.xerxes, sessionKey, 'subagent.inspect', {task:row.id})
         const agent = record(result.agent)
         if (text(agent.id) !== row.id) throw new Error('The daemon returned a different agent. Refresh to try again.')

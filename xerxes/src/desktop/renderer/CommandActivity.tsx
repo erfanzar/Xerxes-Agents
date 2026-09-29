@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 import { useEffect, useState, type ReactElement } from 'react'
 import { desktopCall, desktopError, record, text, type RpcRecord } from './desktopRpc.js'
+import { pageIsBackground } from './pageVisibility.js'
 import { OutputViewer, readableOutput } from './OutputViewer.js'
 import { Icon } from './Icon.js'
 import { commandGist } from './commandGist.js'
@@ -24,6 +25,7 @@ export function CommandActivity({ row, sessionKey, online }: {row: RpcRecord; se
     let current = true
     let timer: ReturnType<typeof setTimeout> | undefined
     const load = async () => {
+      if (pageIsBackground()) { if (current && running) timer = setTimeout(() => void load(), 2000); return }
       try {
         const result = await desktopCall(window.xerxes, sessionKey, 'terminal.inspect', {terminal_id: row.id, max_output_chars: 24000})
         if (current) {setDetail(record(result.terminal));setError('')}

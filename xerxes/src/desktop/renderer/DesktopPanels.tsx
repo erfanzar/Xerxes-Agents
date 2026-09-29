@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { WorkspaceFileTree } from './WorkspaceFileTree.js'
+import { pageIsBackground } from './pageVisibility.js'
 import { RemoteProviders } from './RemoteProviders.js'
 import { DiffPreview } from './DiffPreview.js'
 import { WorkspaceReview } from "./WorkspaceReview.js"
@@ -934,7 +935,10 @@ function ActivityPanel({ snap }: { snap: Snapshot }): ReactElement {
           setLoaded(true)
         }
       }
-      if (silent) await fetchRows().catch(() => {})
+      // Out of sight, a background refresh skips the runtime call and only
+      // keeps the timer going.
+      if (silent && pageIsBackground()) { /* skipped while hidden */ }
+      else if (silent) await fetchRows().catch(() => {})
       else await request.run(fetchRows)
       if (active) {
         if (timer) clearTimeout(timer)
@@ -1508,7 +1512,7 @@ export function BackgroundIndicator({ snap }: { snap: Snapshot }): ReactElement 
         setCompacting('')
     })
     void load()
-    const timer = setInterval(() => void load(), 5000)
+    const timer = setInterval(() => { if (!pageIsBackground()) void load() }, 5000)
     return () => {
       active = false
       clearInterval(timer)

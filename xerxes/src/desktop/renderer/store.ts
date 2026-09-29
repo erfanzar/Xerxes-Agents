@@ -16,6 +16,7 @@
  */
 
 import { todoItemsOf, todosFromResult, type TodoItem } from './todoState.js'
+import { pageIsBackground } from './pageVisibility.js'
 import type { WorkspaceContext } from '../main/contextNavigation.js'
 import { BlockBuilder, blocksFromStoredMessages, editStatsOf, parseArgs, toolFailureText } from './blocks.js'
 import {
@@ -694,6 +695,9 @@ export function isPlanReview(question: import('./types.js').TaskQuestion): boole
 const LOG_CAP = 400
 const SNIPPET_CAP = 64
 const HEARTBEAT_MS = 5_000
+/** A visible but unfocused window refreshes its session lists this often. */
+const UNFOCUSED_LIST_REFRESH_MS = 30_000
+
 
 /** Compact one-line summary of an event for the Log tab. */
 function summarize(type: string, payload: Readonly<Record<string, unknown>>): string {
@@ -893,6 +897,16 @@ export class Store {
     void this.refreshContexts()
     this.heartbeat = setInterval(() => void this.beat(), HEARTBEAT_MS)
     this.heartbeat.unref?.()
+    // A covered workspace skips its heartbeat (see beat()); catch up the
+    // moment it is shown again instead of waiting for the next tick.
+    if (typeof document !== 'undefined') {
+      const catchUp = () => { if (!pageIsBackground()) void this.beat(true) }
+      document.addEventListener('visibilitychange', catchUp)
+      // A covered base page is marked by the main process, not by visibility.
+      if (typeof MutationObserver !== 'undefined') {
+        new MutationObserver(catchUp).observe(document.documentElement, { attributes: true, attributeFilter: ['data-occluded'] })
+      }
+    }
   }
 
   private initializeLive(workspace: string): void {
@@ -921,6 +935,8 @@ export class Store {
   }
 
   private refreshingContexts = false
+  /** When the heartbeat last refreshed the session lists (see beat()). */
+  private lastListRefresh = 0
   private async refreshContexts(): Promise<void> {
     if (!this.bridge.getContexts || this.refreshingContexts) return
     this.refreshingContexts = true
@@ -2619,7 +2635,24 @@ export class Store {
   }
 
   /** Cheap liveness probe; also heals the badge after a daemon restart. */
-  private async beat(): Promise<void> {
+  /**
+   * Keep the sidebar and connection current.
+   *
+   * Every workspace the window has opened keeps its own page and runtime
+   * connection. Each used to list every saved and live session every five
+   * seconds whether or not it could be seen — nine pages made the runtime
+   * re-read the session lists nearly twice a second, and that polling was
+   * most of the app's energy use. A hidden or covered page now skips the
+   * beat (and catches up when shown); a visible but unfocused window
+   * refreshes its lists every thirty seconds. Live events still arrive as
+   * they happen either way.
+   */
+  private async beat(shown = false): Promise<void> {
+    if (!shown && pageIsBackground()) return
+    const now = Date.now()
+    const unfocused = typeof document !== 'undefined' && document.documentElement.hasAttribute('data-window-unfocused')
+    if (!shown && unfocused && now - this.lastListRefresh < UNFOCUSED_LIST_REFRESH_MS && this.frame.connection === 'online') return
+    this.lastListRefresh = now
     void this.refreshContexts()
     if (this.frame.noWorkspace) return
     void this.bridge.getWorkspaceDirectories?.().then(workspaceDirectories => this.patch({ workspaceDirectories })).catch(error => this.patch({ workspaceError: desktopError(error) }))
@@ -3120,6 +3153,7 @@ export class Store {
         this.stopFleetPoll()
         return
       }
+      if (pageIsBackground()) return
       this.refreshFleet()
     }, FLEET_POLL_MS)
   }
