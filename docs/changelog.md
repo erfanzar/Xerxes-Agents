@@ -7,6 +7,18 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.5 — 2026-09-29
+
+- Runtime: an update no longer waits forever behind an armed goal. It holds
+  the next goal round, installs when the current one ends, and the fresh
+  runtime re-arms the same goal and carries on. 0.6.3 had stopped restarts
+  while a goal was armed, so a long-running goal kept the old runtime (and
+  new tools such as Workflow) indefinitely. The sidebar says "Update after
+  this goal round" meanwhile.
+- Desktop: a steer leaves "Queued messages" as soon as the model receives it.
+  It used to stay there until the turn ended, which in a goal round can be
+  hours after the model had already answered it.
+
 ## 0.6.4 — 2026-09-29
 
 - Agents: a `Workflow` tool. The model writes a short script with `agent()`,
