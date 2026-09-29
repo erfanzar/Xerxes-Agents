@@ -3532,6 +3532,20 @@ export class Store {
         }
         break
       }
+      case 'steer_applied': {
+        // The model has the steer now: it is no longer queued. Match by text,
+        // one queued entry per applied steer, oldest first.
+        const contents = Array.isArray(payload.contents) ? payload.contents.filter((value): value is string => typeof value === 'string') : []
+        if (!contents.length) break
+        let queue = this.queue
+        for (const content of contents) {
+          const index = queue.findIndex(item => item.text === content.trim())
+          if (index >= 0) queue = [...queue.slice(0, index), ...queue.slice(index + 1)]
+          for (const [id, steer] of this.pendingSteers) if (steer.session === this.sessionKey && steer.text === content.trim()) { this.pendingSteers.delete(id); break }
+        }
+        if (queue !== this.queue) { this.queue = queue; this.patch({ queue }) }
+        break
+      }
       case 'steer_input': {
         // Acceptance echo, not consumption: the daemon emits this the moment
         // it queues the text, and offers no "consumed" signal — steers drain

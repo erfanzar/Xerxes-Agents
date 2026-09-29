@@ -587,6 +587,21 @@ describe('Store workspace folds', () => {
     expect(store.getSnapshot().blocks.filter(block => block.kind === 'user' && block.text === 'also cover the replay path')).toHaveLength(1)
   })
 
+  test('a steer leaves the queue the moment the model receives it, not at turn end', async () => {
+    bridge.push('turn_begin', { user_input: 'keep improving overnight' })
+    await store.submit('the runtime has workflow now, use it')
+    await store.submit('also rerun the sort suite')
+    bridge.push('steer_input', { content: 'the runtime has workflow now, use it' })
+    expect(store.getSnapshot().queue).toHaveLength(2)
+    // A goal round is one long turn: without this the steer read as queued
+    // for hours after the model had already answered it.
+    bridge.push('steer_applied', { contents: ['the runtime has workflow now, use it'], count: 1 })
+    expect(store.getSnapshot().queue.map(item => item.text)).toEqual(['also rerun the sort suite'])
+    bridge.push('steer_applied', { contents: ['also rerun the sort suite'], count: 1 })
+    expect(store.getSnapshot().queue).toHaveLength(0)
+    expect(store.getSnapshot().turnActive).toBe(true)
+  })
+
   test('identical steers remain separate messages and rejected steers never appear', async () => {
     bridge.push('turn_begin', { user_input: 'start' })
     bridge.respondWith((method, params) => {

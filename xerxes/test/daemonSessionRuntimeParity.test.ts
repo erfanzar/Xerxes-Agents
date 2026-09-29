@@ -681,6 +681,28 @@ test('active-turn steering is bounded and rejects overflow without dropping acce
   }
 })
 
+test('applying steers is announced to clients so they stop showing them as queued', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-daemon-steer-applied-'))
+  const runner = new BoundedSteerRunner()
+  const runtime = new InMemoryDaemonRuntime(runner, { currentProjectDirectory: directory, sessionDirectory: join(directory, 'sessions') })
+  try {
+    const session = await runtime.openSession('tui:steer-applied')
+    const events: DaemonEvent[] = []
+    const turn = runtime.submitTurn(session.sessionKey, 'begin', event => { events.push(event) })
+    await runner.waiting
+    expect(runtime.steerTurn(session.sessionKey, 'use the workflow tool')).toBe(true)
+    runner.release()
+    await turn
+    const applied = events.filter(event => event.type === 'steer_applied')
+    expect(applied).toHaveLength(1)
+    expect(applied[0]!.payload).toMatchObject({ contents: ['use the workflow tool'], count: 1 })
+    // Applied before the turn's own output, not at its end.
+    expect(events.findIndex(event => event.type === 'steer_applied')).toBeLessThan(events.findIndex(event => event.type === 'text_part'))
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
 test('concurrent openSession calls share one initialization and one session object', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'xerxes-daemon-open-race-'))
   const store = new CountingLoadStore({

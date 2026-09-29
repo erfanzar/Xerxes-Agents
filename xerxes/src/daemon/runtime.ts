@@ -1774,7 +1774,13 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
         providerText,
         controller.signal,
         {
-          drainSteer: () => this.drainSteers(sessionKey),
+          // Clients show a steer as queued until it is applied; this is the
+          // moment it is (a goal round can run for hours before turn_end).
+          drainSteer: () => {
+            const drained = this.drainSteers(sessionKey);
+            if (drained.length) emitSessionEvent({ type: "steer_applied", payload: { contents: [...drained], count: drained.length } });
+            return drained;
+          },
           displayText,
           journal: this.messageJournal(session.id),
           ...(images.length ? { images } : {}),
