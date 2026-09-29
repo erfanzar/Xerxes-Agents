@@ -129,11 +129,17 @@ test('daemon completion preserves command and path semantics while native skills
     await initialize(client, 1, 'completion', directory)
     await mkdir(join(directory, 'folder with spaces'))
     await writeFile(join(directory, 'folder with spaces', 'notes.txt'), 'notes')
+    await mkdir(join(directory, '.git'))
     client.send({ jsonrpc: '2.0', id: 101, method: 'complete', params: { path_prefix: './' } })
-    expect((await client.next(frame => frame.id === 101)).result?.completions).toEqual(expect.arrayContaining([
+    const browsed = (await client.next(frame => frame.id === 101)).result?.completions as Array<{ label: string }>
+    expect(browsed).toEqual(expect.arrayContaining([
       { value: './alpha.txt', label: 'alpha.txt', meta: 'file' },
       { value: './folder with spaces/', label: 'folder with spaces/', meta: 'dir' },
+      // Browsing shows dot entries, but not the repository database.
+      { value: './.hidden', label: '.hidden', meta: 'file' },
     ]))
+    expect(browsed.map(entry => entry.label)).not.toContain('.git/')
+
     client.send({ jsonrpc: '2.0', id: 102, method: 'complete', params: { path_prefix: './folder with spaces/' } })
     expect((await client.next(frame => frame.id === 102)).result?.completions).toEqual([
       { value: './folder with spaces/notes.txt', label: 'notes.txt', meta: 'file' },
@@ -194,6 +200,7 @@ test('daemon completion preserves command and path semantics while native skills
 
     client.send({ jsonrpc: '2.0', id: 7, method: 'complete', params: { text: './.' } })
     expect((await client.next(frame => frame.id === 7)).result?.completions).toEqual([
+      { value: './.git/', label: '.git/', meta: 'dir' },
       { value: './.hidden', label: '.hidden', meta: 'file' },
     ])
 

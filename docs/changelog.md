@@ -7,6 +7,12 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.9 — 2026-09-29
+
+- Desktop: the Files panel lists dot folders and files (.github, .vscode, .env.example…); only .git and .DS_Store stay hidden.
+- Desktop: a rendered Markdown file fills the preview and scrolls as one page; it was capped at 380px, which cut long files off at the first big code block.
+- Desktop: with a transparent background, the side panel's corners no longer show a sliver of bare desktop beside the conversation.
+
 ## 0.6.8 — 2026-09-29
 
 - Desktop: "Restart workspace runtime" works while the runtime is busy. The popover names what is still running and offers Restart now; an active goal picks up again on the new runtime (older runtimes are shut down and the goal is resumed).

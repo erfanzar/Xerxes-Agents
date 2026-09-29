@@ -11995,6 +11995,8 @@ function booleanValue(value: unknown, fallback: boolean): boolean {
   return typeof value === "boolean" ? value : fallback;
 }
 
+const BROWSE_HIDDEN = new Set([".git", ".DS_Store"]);
+
 async function completePath(
   text: string,
   cwd: string,
@@ -12047,7 +12049,14 @@ async function completePath(
   try {
     const entries = await readdir(directory, { withFileTypes: true });
     return entries
-      .filter((entry) => base.startsWith(".") || !entry.name.startsWith("."))
+      // A file browser shows dot entries (.github, .vscode, .env.example); a
+      // typed completion only offers them once the user types the dot. The
+      // repository database and Finder metadata are never worth browsing.
+      .filter((entry) =>
+        directoryBrowse
+          ? base.startsWith(".") || !BROWSE_HIDDEN.has(entry.name)
+          : base.startsWith(".") || !entry.name.startsWith("."),
+      )
       .filter(
         (entry) =>
           !base || entry.name.toLowerCase().startsWith(base.toLowerCase()),

@@ -2501,7 +2501,7 @@ html,body,#root,.app.atelier{background:transparent}
 
 /* File view mode: Markdown rendered as a document (Claude's), front matter
    as a quiet two-column table above it. "Source" shows the numbered text. */
-.atelier .file-document{padding:14px 20px 28px;overflow:auto;min-height:0;font:var(--t-prose, 400 14px/1.65 var(--sans));color:var(--x-prose)}
+.atelier .file-document{flex:1;padding:14px 20px 28px;overflow:auto;min-height:0;font:var(--t-prose, 400 14px/1.65 var(--sans));color:var(--x-prose)}
 .atelier .file-document:focus-visible{outline:2px solid var(--x-focus);outline-offset:-2px}
 .atelier .file-document__meta{display:grid;gap:10px;margin:0 0 22px;padding:0 0 18px;border-bottom:1px solid var(--x-hairline)}
 .atelier .file-document__meta>div{display:grid;grid-template-columns:minmax(80px,112px) minmax(0,1fr);gap:16px}
@@ -2522,7 +2522,7 @@ html,body,#root,.app.atelier{background:transparent}
 :root[data-layout='claude'] .atelier .file-preview{border-radius:0 0 10px 10px}
 :root[data-layout='claude'] .atelier .desktop-rail{margin-top:6px}
 :root[data-layout='claude'] .atelier .desktop-rail>header{height:38px;min-height:38px}
-.atelier .file-document .md--document{padding:0;margin:0;border:0;background:none;box-shadow:none}
+.atelier .file-document .md--document{padding:0;margin:0;border:0;background:none;box-shadow:none;max-height:none;overflow:visible}
 
 /* ══ File tool rows (Claude Code's) ═══════════════════════════════════
    Read / Write / Edit as what they did to a file: a header (verb, path
@@ -2757,13 +2757,21 @@ html,body,#root,.app.atelier{background:transparent}
    the chat's layer is exactly that tint), and the dividers take it too. */
 :root[data-backdrop='transparent'] .atelier .app__body::before{content:none}
 :root[data-backdrop='transparent'] .atelier .chat::before{content:""}
-:root[data-backdrop='transparent'][data-layout='claude'] .atelier .desktop-rail{overflow:clip;overflow-clip-margin:10px}
+:root[data-backdrop='transparent'][data-layout='claude'] .atelier .desktop-rail{overflow:clip;overflow-clip-margin:20px}
 :root[data-backdrop='transparent'][data-layout='claude'] .atelier .desktop-rail::after{
   content:"";position:absolute;z-index:-1;pointer-events:none;
   /* The rail sits 6px from the top, 8px from the right and bottom. */
   inset:-7px -9px -9px -1px;
   border:solid var(--x-screen);border-width:6px 8px 8px 0;
-  border-radius:12px 20px 20px 12px / 18px 18px 20px 20px;
+  /* Square where it meets the chat, rounded at the window's corners. A
+     rounded outer edge on the chat side left a wedge of bare desktop under
+     the rail's own rounded corners; the two 13px patches fill exactly the
+     area outside those corners instead. The clip margin leaves room for
+     them past the rail's rounded clip. */
+  border-radius:0 20px 20px 0 / 0 18px 20px 0;
+  background:
+    radial-gradient(circle at 100% 100%,transparent 12px,var(--x-screen) 12.75px) 0 0/13px 13px no-repeat,
+    radial-gradient(circle at 100% 0,transparent 12px,var(--x-screen) 12.75px) 0 100%/13px 13px no-repeat;
 }
 :root[data-backdrop='transparent'] .panel-divider{background:linear-gradient(var(--x-hairline),var(--x-hairline)),var(--x-screen)}
 
