@@ -144,8 +144,31 @@ export function DesktopRail({ panel, snap, close, activityDetails, filesExpanded
   const open = useDesktopNavigation()
   // Without the toggle the window is too narrow for a side rail: it is already full width.
   const wide = filesExpanded || !toggleFilesExpanded
+  // In a rail too narrow for every tab the row scrolls; keep the open one in view.
+  const tabs = useRef<HTMLElement>(null)
+  // Which edges have tabs scrolled out of sight; only those fade.
+  const [hidden, setHidden] = useState('')
+  const measureTabs = () => {
+    const nav = tabs.current
+    if (!nav) return
+    const more = nav.scrollWidth - nav.clientWidth
+    setHidden(more <= 1 ? '' : [nav.scrollLeft > 1 ? 'start' : '', nav.scrollLeft < more - 1 ? 'end' : ''].filter(Boolean).join(' '))
+  }
+  useEffect(() => {
+    const reveal = () => {
+      tabs.current?.querySelector('[aria-pressed="true"]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+      measureTabs()
+    }
+    reveal()
+    const nav = tabs.current
+    if (!nav || typeof ResizeObserver === 'undefined') return
+    // Narrowing the rail must not push the open tab out of sight.
+    const observer = new ResizeObserver(reveal)
+    observer.observe(nav)
+    return () => observer.disconnect()
+  }, [panel])
   return <aside className={`desktop-rail studio-sheet${panel === "review" ? ` desktop-rail--git${wide ? " desktop-rail--review" : ""}` : panel === "terminal" ? " desktop-rail--terminal" : ""}`} aria-label="Task context">
-    <header><nav aria-label="Task context views">{RAIL_PANELS.map(value => <button key={value} aria-pressed={panel === value} onClick={() => open(value)}>{railTabName(value)}</button>)}</nav>{toggleFilesExpanded && <button aria-label={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'terminal' ? 'Expand terminal' : panel === 'review' ? 'Show changes' : panel === 'usage' ? 'Expand usage' : 'Expand Activity workspace'} title={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'terminal' ? 'Expand terminal' : panel === 'review' ? 'Show changes' : panel === 'usage' ? 'Expand usage' : 'Expand Activity workspace'} aria-pressed={filesExpanded} onClick={toggleFilesExpanded}><Icon name={filesExpanded ? 'collapse' : 'expand'} size={15} /></button>}<button aria-label="Close task context" onClick={close}><Icon name="close" size={13} /></button></header>
+    <header><nav ref={tabs} onScroll={measureTabs} data-hidden={hidden || undefined} aria-label="Task context views">{RAIL_PANELS.map(value => <button key={value} aria-pressed={panel === value} onClick={() => open(value)}>{railTabName(value)}</button>)}</nav>{toggleFilesExpanded && <button aria-label={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'terminal' ? 'Expand terminal' : panel === 'review' ? 'Show changes' : panel === 'usage' ? 'Expand usage' : 'Expand Activity workspace'} title={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'terminal' ? 'Expand terminal' : panel === 'review' ? 'Show changes' : panel === 'usage' ? 'Expand usage' : 'Expand Activity workspace'} aria-pressed={filesExpanded} onClick={toggleFilesExpanded}><Icon name={filesExpanded ? 'collapse' : 'expand'} size={15} /></button>}<button aria-label="Close task context" onClick={close}><Icon name="close" size={13} /></button></header>
     <div className="studio-sheet-content" key={`${panel}:${snap.cwd}:${snap.sessionKey}`}>
       {panel === 'files' && <FilesPanel snap={snap} close={close} {...(filesTarget ? { target: filesTarget } : {})} />}
       {panel === 'review' && <GitPanel snap={snap} initialPath={reviewPath} expanded={wide} {...(setExpanded ? { onExpand: () => setExpanded(true) } : {})} onSnapshots={() => open('snapshots')} onReviewSent={() => { setExpanded?.(false); open('activity') }} />}

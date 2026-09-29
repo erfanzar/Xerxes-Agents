@@ -7,6 +7,11 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.12 — 2026-09-30
+
+- Desktop: a new task no longer shows the task it replaced. After switching, a window could keep asking the runtime about the previous task, so the new one showed that task's goal, background jobs and model time. It now always uses the task the runtime says it opened, ignores answers meant for the task it left, and a finished turn's totals only reach the window still showing that task.
+- Desktop: the side panel's tabs no longer overlap when it is narrow. They keep their width and scroll, the open tab stays in view, and only an edge with hidden tabs fades.
+
 ## 0.6.11 — 2026-09-30
 
 - Desktop: the side panel's edge runs unbroken around its rounded corners, and the resize divider beside it no longer draws a second line through the gaps above and below the panel (it still highlights on hover).

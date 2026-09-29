@@ -2937,3 +2937,19 @@ html,body,#root,.app.atelier{background:transparent}
    background it takes the chat's tint so no bare desktop shows through. */
 :root[data-layout='claude'] .atelier .panel-divider:has(+.desktop-rail):not(:hover):not(:focus-visible){background:transparent}
 :root[data-backdrop='transparent'][data-layout='claude'] .atelier .panel-divider:has(+.desktop-rail):not(:hover):not(:focus-visible){background:var(--x-screen)}
+
+/* Rail tabs never overlap. Shrinking them squeezed each label under the next
+   ("GitTerminalActivity") once the rail was narrower than all five; now they
+   keep their width, tighten their padding in a narrow rail, and the row
+   scrolls sideways if it still does not fit. */
+.atelier .desktop-rail>header nav{overflow-x:auto;scrollbar-width:none;overscroll-behavior-x:contain}
+.atelier .desktop-rail>header nav::-webkit-scrollbar{display:none}
+.atelier .desktop-rail>header nav>button{flex:0 0 auto;white-space:nowrap}
+@container (max-width:380px){
+  :root[data-layout='claude'] .atelier .desktop-rail>header nav>button{padding:6px 7px}
+}
+/* An edge with tabs scrolled out of sight fades, so it reads as more to
+   scroll; a fully visible end stays crisp. */
+.atelier .desktop-rail>header nav[data-hidden='end']{-webkit-mask-image:linear-gradient(to right,#000 calc(100% - 18px),transparent);mask-image:linear-gradient(to right,#000 calc(100% - 18px),transparent)}
+.atelier .desktop-rail>header nav[data-hidden='start']{-webkit-mask-image:linear-gradient(to left,#000 calc(100% - 18px),transparent);mask-image:linear-gradient(to left,#000 calc(100% - 18px),transparent)}
+.atelier .desktop-rail>header nav[data-hidden='start end']{-webkit-mask-image:linear-gradient(to right,transparent,#000 18px,#000 calc(100% - 18px),transparent);mask-image:linear-gradient(to right,transparent,#000 18px,#000 calc(100% - 18px),transparent)}

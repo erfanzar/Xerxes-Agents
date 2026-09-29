@@ -4287,25 +4287,34 @@ export class DaemonServer {
     });
   }
 
+  /**
+   * Send a session's full status. `scoped` tags it with the session id, for a
+   * connection that may have moved on to another session since (a turn it
+   * started settling later): clients apply it only if that session is still
+   * the one on screen. Untagged, a finished goal round's totals, model and
+   * modes were applied to whatever new task the window had opened meanwhile.
+   */
   private emitStatus(
     connection: DaemonTransportConnection,
     session: DaemonSession,
+    options: { readonly scoped?: boolean } = {},
   ): void {
     const model = session.model || stringValue(this.runtime.status().model);
+    const payload = statusUpdatePayload(
+      session,
+      model,
+      this.contextLimit(model, session),
+      this.channelStatusData(),
+      this.sessionReasoningEffort(session),
+      runtimePermissionMode(
+        session.permissionMode ?? this.runtime.status().permission_mode,
+      ),
+      this.mcpStatusRecord(session),
+    );
     this.emit(
       connection,
       "status_update",
-      statusUpdatePayload(
-        session,
-        model,
-        this.contextLimit(model, session),
-        this.channelStatusData(),
-        this.sessionReasoningEffort(session),
-        runtimePermissionMode(
-          session.permissionMode ?? this.runtime.status().permission_mode,
-        ),
-        this.mcpStatusRecord(session),
-      ),
+      options.scoped ? { ...payload, session_id: session.id } : payload,
     );
   }
 
@@ -10667,7 +10676,7 @@ export class DaemonServer {
       // this, clients show init-time counters until the next slash command.
       const settled = this.runtime.sessionStatus(sessionKey);
       if (owner && settled) {
-        this.emitStatus(owner, settled);
+        this.emitStatus(owner, settled, { scoped: true });
       }
       // A turn that ends or is cancelled without an answer must not leak its
       // approval/question ownership entries into later requests.

@@ -1035,7 +1035,9 @@ export class Store {
       // in this workspace instead of stranding the window on an error.
       if (extra.resume_session_id && /saved conversation is missing/i.test(message)) {
         const hadConversation = this.builder.all().some(block => block.kind === 'user' || block.kind === 'agent')
-        this.patch({ currentId: '' })
+        // A fresh key: the old one may still name a live session elsewhere.
+        this.sessionKey = `desktop-${Math.random().toString(36).slice(2, 10)}`
+        this.patch({ currentId: '', sessionKey: this.sessionKey })
         this.builder.reset()
         const result = await this.initialize({})
         if (hadConversation) {
@@ -2954,8 +2956,13 @@ export class Store {
     const session = this.sessionOf(result)
     const replay = Array.isArray(result.reconnect_events) ? result.reconnect_events : null
     const preserveLiveTranscript = !explicitNavigation && replay !== null && this.frame.currentId === str(result.session_id ?? session.id)
-    if (!extra.resume_session_id && typeof extra.session_key === 'string' && extra.session_key !== this.sessionKey) {
-      this.sessionKey = str(session.key) || extra.session_key
+    // The key every session-scoped call uses must be the one the daemon bound
+    // to the session now on screen, whatever this view asked for. Adopting it
+    // only when a key was passed left a plain initialize showing one session
+    // while goal, background and status calls still addressed another.
+    const adoptedKey = str(session.key) || (typeof extra.session_key === 'string' ? extra.session_key : '')
+    if (!extra.resume_session_id && adoptedKey && adoptedKey !== this.sessionKey) {
+      this.sessionKey = adoptedKey
       this.resetWorkspaceFolds()
       this.patch({ goal: '', approval: null, question: null, failed: null })
     }
@@ -3198,8 +3205,13 @@ export class Store {
   }
 
   private async refreshGoal(): Promise<void> {
+    const key = this.sessionKey
     try {
-      const result = await this.bridge.call('session.goal', { session_key: this.sessionKey, input: '' })
+      const result = await this.bridge.call('session.goal', { session_key: key, input: '' })
+      // A reply for the session this view has since left belongs to that
+      // session: applied here, a goal round ending as New task was pressed
+      // put the old goal on the new, empty task.
+      if (key !== this.sessionKey) return
       this.patch({ goal: str(result.text) })
     } catch {
       // Best-effort view; absence renders an empty goal card.
@@ -3430,10 +3442,11 @@ export class Store {
 
   private async setGoal(input: string): Promise<{ ok: boolean; text: string }> {
     try {
-      const result = await this.bridge.call('session.goal', { session_key: this.sessionKey, input })
+      const key = this.sessionKey
+      const result = await this.bridge.call('session.goal', { session_key: key, input })
       const ok = result.ok === true
       const text = str(result.text) || (ok ? 'ok' : 'command failed')
-      this.patch({ goal: ok ? text : this.frame.goal })
+      if (key === this.sessionKey) this.patch({ goal: ok ? text : this.frame.goal })
       this.builder.push('notification', { severity: ok ? 'info' : 'error', message: text })
       this.notify()
       return { ok, text }

@@ -107,6 +107,48 @@ describe('Store workspace folds', () => {
     expect(store.getSnapshot().blocks.filter(block => block.kind === 'user' && block.text === 'review this')).toHaveLength(2)
   })
 
+  test('a new task never shows the session it left: a late goal reply and that session\'s totals stay out', async () => {
+    await Bun.sleep(0)
+    const oldGoal = Promise.withResolvers<Record<string, unknown>>()
+    let freshKey = ''
+    bridge.respondWith((method, params) => {
+      if (method === 'session.goal') return params.session_key === freshKey ? { ok: true, text: 'No goal is currently set.' } : oldGoal.promise
+      if (method === 'initialize') {
+        freshKey = String(params.session_key)
+        return { ...initializeResult, session_id: 'fresh01', session: { id: 'fresh01', key: freshKey, title: '', cwd: '/repo', plan_mode: false } }
+      }
+      return { ok: true, sessions: [] }
+    })
+    // A goal round of the old session ends: its goal is asked for...
+    bridge.push('turn_end', {})
+    // ...and New task is pressed before the answer arrives.
+    store.newChat()
+    await Bun.sleep(0)
+    expect(store.getSnapshot().currentId).toBe('fresh01')
+    oldGoal.resolve({ ok: true, text: 'Goal\nObjective: keep improving\nStatus: paused' })
+    await Bun.sleep(0)
+    expect(store.getSnapshot().goal).not.toContain('keep improving')
+    // The old session's settled-turn status, tagged with its id, is not this task's.
+    bridge.push('status_update', { session_id: 'aa19f402', llm_steps: 2645, llm_duration_ms: 44_147_912, turn_count: 36, model: 'claude-code/opus', permission_mode: 'accept-all' })
+    expect(store.getSnapshot().llmSteps).toBe(0)
+    expect(store.getSnapshot().llmDurationMs).toBe(0)
+    expect(store.getSnapshot().model).toBe('kimi-for-coding')
+  })
+
+  test('the session key is the one the daemon bound, even when a plain initialize is answered with another', async () => {
+    await Bun.sleep(0)
+    bridge.respondWith(method => method === 'initialize'
+      ? { ...initializeResult, session_id: 'rebound1', session: { id: 'rebound1', key: 'desktop-bound', title: '', cwd: '/repo', plan_mode: false } }
+      : { ok: true, sessions: [] })
+    await (store as unknown as { initialize(extra: Record<string, unknown>): Promise<unknown> }).initialize({})
+    expect(store.getSnapshot().currentId).toBe('rebound1')
+    expect(store.getSnapshot().sessionKey).toBe('desktop-bound')
+    bridge.calls.length = 0
+    bridge.push('turn_end', {})
+    await Bun.sleep(0)
+    expect(bridge.calls.find(call => call.method === 'session.goal')?.params.session_key).toBe('desktop-bound')
+  })
+
   test('streaming text re-renders at most about 20 times a second, not once per display frame', async () => {
     // Per-frame updates were 120 full re-renders a second on a ProMotion
     // display while a reply streamed.

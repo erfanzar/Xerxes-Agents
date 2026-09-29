@@ -10747,6 +10747,10 @@ test('subagent.inspect scopes retained evidence to the parent across reconnect a
     await rpc('initialize',{session_key:'parent'});
     await rpc('turn.submit',{text:'Inspect the child'});
     await client.next(eventFrame('turn_end'));
+    // The settled turn's full status names its session: the client that
+    // started the turn may have opened another task since.
+    const settledStatus=await client.next(frame=>eventFrame('status_update')(frame)&&(frame.params?.payload as Record<string,unknown>|undefined)?.turn_count===1);
+    expect((settledStatus.params?.payload as Record<string,unknown>).session_id).toBe(runtime.sessionStatus('parent')!.id);
     const parent=runtime.sessionStatus('parent')!;
     parent.metadata.xerxes_subagent_snapshots_v1=[{id:'child',status:'running',agent_id:'reviewer',model:'fixture',provider_profile:'work',reasoning_effort:'high',last_input:'Review the change',last_output:'Reading files\n',private_config:'must not be returned'}];
     let result=await rpc('subagent.inspect',{task:'child'});
