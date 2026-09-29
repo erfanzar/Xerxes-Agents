@@ -613,6 +613,26 @@ describe('Store workspace folds', () => {
     expect(store.getSnapshot().delegationMode).toBe('off')
   })
 
+  test('restart now forces the runtime and resumes the goal an older runtime could not carry over', async () => {
+    let restartParams: Record<string, unknown> | undefined
+    const calls: Array<[string, Record<string, unknown>]> = []
+    const original = bridge.call.bind(bridge)
+    bridge.call = async (method: string, params: Record<string, unknown> = {}) => {
+      calls.push([method, params])
+      if (method === 'desktop.restartRuntime') {
+        restartParams = params
+        return params.force === true ? { ok: true, legacy_forced: true } : { ok: false, busy: true, blockers: ['Goal round in “jax-metallib”'] }
+      }
+      return original(method, params)
+    }
+    ;(store as unknown as { patch(value: Record<string, unknown>): void }).patch({ daemonWarning: 'Daemon is older than the app — restart it.', goal: 'Goal\nObjective: keep improving\nStatus: active' })
+    await store.restartDaemon(false)
+    expect(store.getSnapshot()).toMatchObject({ runtimeUpdate: 'waiting', runtimeBlockers: ['Goal round in “jax-metallib”'] })
+    await store.restartRuntimeNow()
+    expect(restartParams).toMatchObject({ force: true })
+    expect(calls.some(([method, params]) => (method === 'turn.submit' || method === 'slash' || method === 'session.goal') && JSON.stringify(params).includes('resume'))).toBe(true)
+  })
+
   test('identical steers remain separate messages and rejected steers never appear', async () => {
     bridge.push('turn_begin', { user_input: 'start' })
     bridge.respondWith((method, params) => {

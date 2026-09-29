@@ -2076,10 +2076,24 @@ export class DaemonServer {
       // round, let the current one finish, and carry the arming across the
       // restart in a durable marker the fresh process honours.
       const armed = sessions.filter(session => { const goal = getGoal(session.metadata, session.id); return goal?.phase === 'active' && goal.activation === 'armed'; });
+      // An explicit "restart now" from the person: stop what is running
+      // (shutdown drains it) instead of waiting; armed goals still re-arm.
+      const force = params.force === true;
       // Hold goal rounds only when they are all that stands in the way; with
       // other work still running, holding them would just stall the goals.
-      if (armed.length && !otherWork) this.drainGoalsForRestart();
-      if (busy) return { ok: false, busy: true, ...(armed.length && !otherWork ? { waiting_for_goal_round: true } : {}) };
+      if (!force && armed.length && !otherWork) this.drainGoalsForRestart();
+      if (busy && !force) {
+        const titled = (session: DaemonSession) => `“${stringValue(session.metadata.title) || session.id}”`;
+        const blockers = [
+          ...sessions.filter(session => goalSessions.has(session.sessionKey)).map(session => `Goal round in ${titled(session)}`),
+          ...sessions.filter(session => !goalSessions.has(session.sessionKey) && inUse(session)).map(session => `Work in ${titled(session)}`),
+          ...(activeSubagents ? [`${numberValue(this.runtime.status().active_subagents)} running agent(s)`] : []),
+          ...(this.activeScheduleRuns.size > 0 ? ['A scheduled job'] : []),
+          ...(this.providerRelays.hasLiveGrants() ? ['Local provider access shared with a remote task'] : []),
+          ...(this.channelStatusData().configured ? ['Messaging channels are connected'] : []),
+        ].slice(0, 12);
+        return { ok: false, busy: true, force_supported: true, blockers, ...(armed.length && !otherWork ? { waiting_for_goal_round: true } : {}) };
+      }
       if (armed.length) {
         for (const session of armed) {
           const goal = getGoal(session.metadata, session.id)!;
@@ -10233,6 +10247,9 @@ export class DaemonServer {
 
   /** Pause a goal whose round the user interrupted, leaving it resumable. */
   private pauseGoalAfterInterrupt(sessionKey: string): void {
+    // A restart the person asked for stops the round, but the goal is meant
+    // to carry on in the new runtime (its re-arm marker is already written).
+    if (this.desktopRestartPending) return;
     const session = this.runtime.sessionStatus(sessionKey);
     if (!session) return;
     const goal = getGoal(session.metadata, session.id);

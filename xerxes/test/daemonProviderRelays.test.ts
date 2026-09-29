@@ -173,7 +173,7 @@ test('idle restart cannot discard a live grant between remote provider requests'
   try {
     const owner = await host.open(), other = await host.open()
     await owner.request('provider.relay.authorize', consent())
-    expect(await other.request('runtime.restart_if_idle')).toEqual({ ok: false, busy: true })
+    expect(await other.request('runtime.restart_if_idle')).toMatchObject({ ok: false, busy: true })
   } finally { await host.close() }
 })
 

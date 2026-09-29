@@ -31,6 +31,7 @@ import { historyBlocks, readHistoryPage, type HistoryPage } from './history.js'
 import { connectionFailureKind } from './connectionFailure.js'
 import { desktopCall, desktopError, text } from './desktopRpc.js'
 import { agentGroupOf, foldAgentEvent } from './agentEvents.js'
+import { parseGoal } from './goalText.js'
 import { agentStatusOf, syncAgentMembers } from './agentMembers.js'
 import type {
   AgentMember,
@@ -269,6 +270,8 @@ export interface Snapshot {
   readonly daemonWarning: string | null
   readonly runtimeUpdate?: 'checking' | 'waiting' | 'restarting' | 'failed'
   readonly runtimeUpdateMessage?: string
+  /** What keeps a queued runtime update waiting, as the runtime names it. */
+  readonly runtimeBlockers?: readonly string[]
   /** Session cost estimate from the daemon wire (USD); null when unpriced. */
   readonly costUsd: number | null
   /** MCP server statuses from the daemon; empty until fetched or without servers. */
@@ -1210,21 +1213,32 @@ export class Store {
   }
 
   /** Ask the attached process to exit; DaemonRpc reconnects and launches this build. */
-  async restartDaemon(allowLegacy = true): Promise<void> {
+  /**
+   * The person asked to restart now: running work stops (armed goals re-arm
+   * in the new runtime). A runtime too old to re-arm is shut down instead,
+   * and this conversation's goal is resumed once the new one is up.
+   */
+  restartRuntimeNow(): Promise<void> {
+    return this.restartDaemon(true, true)
+  }
+
+  async restartDaemon(allowLegacy = true, force = false): Promise<void> {
     if (this.updatingRuntime) return
     if (this.frame.daemonWarning?.startsWith('The app is older')) {
       this.patch({ runtimeUpdate: 'failed', runtimeUpdateMessage: 'Update and relaunch the desktop app. Its bundled runtime is older than the running runtime.' })
       return
     }
     this.updatingRuntime = true
-    this.patch({ runtimeUpdate: 'checking', runtimeUpdateMessage: 'Checking for running work…' })
+    this.patch({ runtimeUpdate: 'checking', runtimeUpdateMessage: force ? 'Stopping running work and restarting…' : 'Checking for running work…' })
+    const goalWasActive = force && parseGoal(this.frame.goal)?.phase === 'active'
     try {
-      const result = await this.bridge.call('desktop.restartRuntime', { session_key: this.sessionKey, allow_legacy: allowLegacy })
+      const result = await this.bridge.call('desktop.restartRuntime', { session_key: this.sessionKey, allow_legacy: allowLegacy, ...(force ? { force: true } : {}) })
       if (result.ok !== true) {
         if (result.busy === true) {
+          const blockers = Array.isArray(result.blockers) ? result.blockers.filter((item): item is string => typeof item === 'string') : []
           this.patch(result.waiting_for_goal_round === true
-            ? { runtimeUpdate: 'waiting', runtimeUpdateMessage: 'Update queued. It installs when the current goal round ends, and the goal continues after the restart.' }
-            : { runtimeUpdate: 'waiting', runtimeUpdateMessage: 'Update queued. It will install automatically when all running work finishes.' })
+            ? { runtimeUpdate: 'waiting', runtimeBlockers: blockers, runtimeUpdateMessage: 'Update queued. It installs when the current goal round ends, and the goal continues after the restart.' }
+            : { runtimeUpdate: 'waiting', runtimeBlockers: blockers, runtimeUpdateMessage: 'Update queued. It will install automatically when all running work finishes.' })
           return
         }
         throw new Error(str(result.error) || 'This runtime cannot update automatically. Restart the workspace runtime from its terminal, then reopen the app.')
@@ -1232,7 +1246,9 @@ export class Store {
       this.patch({ runtimeUpdate: 'restarting', runtimeUpdateMessage: 'Reconnecting to the updated runtime…' })
       await this.initialize(this.frame.currentId ? { resume_session_id: this.frame.currentId } : {})
       if (this.frame.daemonWarning) throw new Error('The runtime restarted, but its build still differs. Quit and relaunch the latest app; check any custom runtime path.')
-      this.patch({ runtimeUpdate: undefined, runtimeUpdateMessage: undefined })
+      this.patch({ runtimeUpdate: undefined, runtimeUpdateMessage: undefined, runtimeBlockers: [] })
+      // The old runtime could not carry the goal across; pick it back up.
+      if (result.legacy_forced === true && goalWasActive) await this.submit('/goal resume')
     } catch (error) {
       this.patch({ runtimeUpdate: 'failed', runtimeUpdateMessage: error instanceof Error ? error.message : String(error) })
     } finally {

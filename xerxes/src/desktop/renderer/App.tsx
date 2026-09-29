@@ -33,6 +33,7 @@ import { Icon } from './Icon.js'
 import { RailStatus, currentActionOf, orbStateOf } from './RailStatus.js'
 import { AgentOrb } from './AgentOrb.js'
 import { AgentsCard } from './AgentsCard.js'
+import { parseGoal } from './goalText.js'
 import { AppUpdatePrompt } from './AppUpdatePrompt.js'
 // Re-exported: it moved into its own module so the rail's diagnostics
 // drawer (DesktopPanels) can import it without a cycle through App.
@@ -133,27 +134,7 @@ function compactTokensOf(tokens: number): string {
   return `${(tokens / 1_000_000).toFixed(1)}M`
 }
 
-/** Parse the daemon's rendered goal text into card fields. */
-export function parseGoal(
-  text: string,
-): { objective: string; phase: string; rounds: string; activation: string } | null {
-  if (!text || text.startsWith('No goal')) return null
-  const pick = (prefix: string): string => {
-    for (const line of text.split('\n')) {
-      const trimmed = line.trim()
-      if (trimmed.startsWith(prefix)) return trimmed.slice(prefix.length).trim()
-    }
-    return ''
-  }
-  const objective = pick('Objective:')
-  if (!objective) return null
-  return {
-    objective,
-    phase: pick('Status:'),
-    rounds: pick('Rounds:'),
-    activation: pick('Activation:'),
-  }
-}
+export { parseGoal }
 
 export function App(): ReactElement {
   const snap = useSyncExternalStore(store.subscribe, store.getSnapshot)
@@ -337,7 +318,14 @@ function RuntimeStatus({ snap, compact = false }: { snap: Snapshot; compact?: bo
       <p role="status" aria-live="polite">{snap.connection === 'online' ? 'Connected to this workspace' : label}</p>
       {snap.daemonWarning && <><strong>App and runtime versions differ</strong><p>{snap.daemonWarning}</p></>}
       {snap.runtimeUpdateMessage && <p role="status">{snap.runtimeUpdateMessage}</p>}
-      {snap.daemonWarning && <><p>The current runtime keeps your tasks running. Review activity before restarting.</p><div className="runtime-popover__actions"><button onClick={() => { setExpanded(false); navigate('activity') }}>Review activity</button><button disabled={snap.turnActive || busy} onClick={() => void store.restartDaemon()}>Restart workspace runtime</button></div></>}
+      {snap.daemonWarning && snap.runtimeUpdate === 'waiting' ? <>
+        {(snap.runtimeBlockers?.length ?? 0) > 0 && <><p>Still running:</p><ul className="runtime-popover__blockers">{snap.runtimeBlockers!.map(item => <li key={item}>{item}</li>)}</ul></>}
+        <p>Restarting now stops that work. Goals pick up again in the new runtime.</p>
+        <div className="runtime-popover__actions">
+          <button onClick={() => { setExpanded(false); navigate('activity') }}>Review activity</button>
+          <button className="runtime-popover__danger" disabled={busy} onClick={() => void store.restartRuntimeNow()}>Restart now</button>
+        </div>
+      </> : snap.daemonWarning && <><p>The current runtime keeps your tasks running. Review activity before restarting.</p><div className="runtime-popover__actions"><button onClick={() => { setExpanded(false); navigate('activity') }}>Review activity</button><button disabled={busy} onClick={() => void store.restartDaemon()}>Restart workspace runtime</button></div></>}
       {!snap.daemonWarning && snap.connection !== 'online' && <button onClick={() => { setExpanded(false); navigate('workspace') }}>Open workspace settings</button>}
     </div>, document.body)}
   </>
@@ -1843,7 +1831,7 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
             aria-expanded={snap.delegationMenuOpen}
             title="How eagerly this task uses agents and workflows — click to change"
             onClick={() => store.toggleDelegationMenu()}
-          ><Icon name="agent" size={13} />Agents · {snap.delegationMode === 'off' ? 'Off' : snap.delegationMode === 'eager' ? 'Eager' : 'Auto'}</button>
+          ><Icon name="agents" size={14} />Agents · {snap.delegationMode === 'off' ? 'Off' : snap.delegationMode === 'eager' ? 'Eager' : 'Auto'}</button>
           <PickerLayer>
           {snap.delegationMenuOpen && <DelegationMenu snap={snap} onClose={() => store.closeDelegationMenu()} />}
           </PickerLayer>

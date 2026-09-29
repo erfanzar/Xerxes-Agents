@@ -527,19 +527,19 @@ test('idle-only runtime restart rejects active work and closes admission before 
   const client = await DaemonParityClient.connect(join(root, 'daemon.sock'))
   try {
     client.send({ jsonrpc: '2.0', id: 1, method: 'runtime.restart_if_idle', params: {} })
-    expect((await client.next(frame => frame.id === 1)).result).toEqual({ ok: false, busy: true })
+    expect((await client.next(frame => frame.id === 1)).result).toMatchObject({ ok: false, busy: true })
     expect(restarts).toBe(0)
     activeSubagents = 0
     const session = await runtime.openSession("busy", undefined, { cwd: root })
     session.status = "working"
     client.send({ jsonrpc: "2.0", id: 4, method: "runtime.restart_if_idle", params: {} })
-    expect((await client.next(frame => frame.id === 4)).result).toEqual({ ok: false, busy: true })
+    expect((await client.next(frame => frame.id === 4)).result).toMatchObject({ ok: false, busy: true })
     expect(restarts).toBe(0)
     // An armed goal whose session is busy with other work: the update waits,
     // and does not hold the goal back for it.
     createGoal(session.metadata, session.id, { objective: "keep improving overnight" }, 1_000)
     client.send({ jsonrpc: "2.0", id: 5, method: "runtime.restart_if_idle", params: {} })
-    expect((await client.next(frame => frame.id === 5)).result).toEqual({ ok: false, busy: true })
+    expect((await client.next(frame => frame.id === 5)).result).toMatchObject({ ok: false, busy: true })
     expect(restarts).toBe(0)
     // At the round boundary it restarts and carries the arming across in a
     // durable marker instead of waiting forever.
@@ -619,7 +619,7 @@ test('an update waits for a running goal round without stalling it, then install
     await client.next(frame => frame.id === 1)
     await running
     client.send({ jsonrpc: '2.0', id: 2, method: 'runtime.restart_if_idle', params: {} })
-    expect((await client.next(frame => frame.id === 2)).result).toEqual({ ok: false, busy: true, waiting_for_goal_round: true })
+    expect((await client.next(frame => frame.id === 2)).result).toMatchObject({ ok: false, busy: true, waiting_for_goal_round: true })
     expect(restarts).toBe(0)
     release()
     let result: unknown
@@ -690,5 +690,29 @@ test('a client attaching mid-turn sees everything the running turn has done so f
     release()
     await turn
     expect(runtime.liveTurnMessages(session)).toBeUndefined()
+  } finally { client.close(); await server.stop(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('a busy runtime names what it is waiting on, and restarts now when told to', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-force-restart-'))
+  let restarts = 0
+  const runtime = new InMemoryDaemonRuntime({ async *run() {} }, { currentProjectDirectory: root, sessionDirectory: join(root, 'sessions') })
+  const busy = await runtime.openSession('busy-work', undefined, { cwd: root })
+  busy.metadata.title = 'Port the kernels'
+  busy.status = 'working'
+  const goal = createGoal(busy.metadata, busy.id, { objective: 'keep going' }, Date.now())
+  const server = new DaemonServer({ socketPath: join(root, 'daemon.sock'), runtime, onRestart: () => { restarts += 1 } })
+  await server.start()
+  const client = await DaemonParityClient.connect(join(root, 'daemon.sock'))
+  try {
+    client.send({ jsonrpc: '2.0', id: 1, method: 'runtime.restart_if_idle', params: {} })
+    expect((await client.next(frame => frame.id === 1)).result).toMatchObject({ ok: false, busy: true, force_supported: true, blockers: ['Work in “Port the kernels”'] })
+    expect(restarts).toBe(0)
+    client.send({ jsonrpc: '2.0', id: 2, method: 'runtime.restart_if_idle', params: { force: true } })
+    expect((await client.next(frame => frame.id === 2)).result).toEqual({ ok: true })
+    // The armed goal is marked to carry on in the new runtime.
+    expect(busy.metadata.goal_rearm_after_restart).toMatchObject({ goal_id: goal.id })
+    await Bun.sleep(40)
+    expect(restarts).toBe(1)
   } finally { client.close(); await server.stop(); await rm(root, { recursive: true, force: true }) }
 })

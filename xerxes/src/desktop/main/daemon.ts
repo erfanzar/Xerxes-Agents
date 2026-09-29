@@ -178,12 +178,19 @@ export class DaemonRpc extends EventEmitter {
   }
 
   /** Replace only an idle local runtime, then wait for a fresh connection. */
-  async restartRuntime(allowLegacy = false): Promise<Record<string, unknown>> {
+  async restartRuntime(allowLegacy = false, force = false): Promise<Record<string, unknown>> {
     if (this.externalSocket && this.remoteUpdate) return this.remoteUpdate()
     if (this.externalSocket) return { ok: false, error: 'Update the runtime on the remote machine, then reconnect this workspace.' }
     await this.ensure()
     const previous = this.socket
-    let result = await this.send<Record<string, unknown>>('runtime.restart_if_idle', {})
+    let result = await this.send<Record<string, unknown>>('runtime.restart_if_idle', force ? { force: true } : {})
+    let legacyForced = false
+    if (force && result.ok !== true && result.busy === true && result.force_supported !== true) {
+      // A runtime older than "restart now": its shutdown stops the running
+      // work. The person confirmed that in the app before this was sent.
+      result = await this.send<Record<string, unknown>>('shutdown', {})
+      legacyForced = result.ok === true
+    }
     if (result.ok !== true && typeof result.error === 'string' && result.error.startsWith('Unknown method') && allowLegacy) {
       // Only an explicit click may migrate a runtime without atomic idle restart.
       // Read every session, including work owned by other connected clients.
@@ -215,7 +222,7 @@ export class DaemonRpc extends EventEmitter {
       await new Promise<void>(resolve => setTimeout(resolve, POLL_MS))
     }
     await this.ensure()
-    return { ok: true }
+    return legacyForced ? { ok: true, legacy_forced: true } : { ok: true }
   }
 
   /** Stop reconnecting and drop the socket; a launched daemon keeps running. */

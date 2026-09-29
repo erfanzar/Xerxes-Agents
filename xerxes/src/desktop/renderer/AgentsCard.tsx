@@ -210,7 +210,7 @@ export function AgentsCard({ members }: { members: readonly AgentMember[] }): Re
   return (
     <section className="acard" data-state={tally.working ? 'working' : tally.failed ? 'failed' : 'done'} aria-label={label ? `Workflow: ${label}` : 'Subagents'}>
       <button className="acard__head" onClick={() => setOpen(value => !value)} aria-expanded={open}>
-        <span className="acard__icon">{tally.working ? <AgentOrb size={20} state="connecting" /> : <Icon name="agent" size={15} />}</span>
+        <span className="acard__icon">{tally.working ? <AgentOrb size={20} state="connecting" /> : <Icon name="agents" size={15} />}</span>
         <span className="acard__heading">
           <span className="acard__title">{title}</span>
           {sub && <span className="acard__sub">{sub}</span>}

@@ -548,3 +548,25 @@ test('private provider frames bypass desktop events, bound concurrency, and sani
     expect(aborted).toBe(false)
   }finally{release();rpc.dispose();fake.close()}
 })
+
+test('restart now asks an older busy runtime to shut down; a newer one is forced directly', async () => {
+  const daemon = new FakeDaemon(socketPath)
+  await daemon.listen()
+  const rpc = client()
+  try {
+    const legacy = rpc.restartRuntime(false, true)
+    await until(() => daemon.requests.length === 1, 'forced restart request')
+    expect(daemon.requests[0]).toMatchObject({ method: 'runtime.restart_if_idle', params: { force: true } })
+    // No force_supported: this runtime ignores force, so its shutdown is used.
+    daemon.reply(daemon.requests[0]!.id, { ok: false, busy: true })
+    await until(() => daemon.requests.length === 2, 'shutdown request')
+    expect(daemon.requests[1]!.method).toBe('shutdown')
+    daemon.reply(daemon.requests[1]!.id, { ok: false, error: 'kept running for the test' })
+    expect(await legacy).toMatchObject({ ok: false })
+    const modern = rpc.restartRuntime(false, true)
+    await until(() => daemon.requests.length === 3, 'modern forced restart')
+    daemon.reply(daemon.requests[2]!.id, { ok: false, busy: true, force_supported: true, blockers: ['x'] })
+    expect(await modern).toMatchObject({ ok: false, busy: true, blockers: ['x'] })
+    expect(daemon.requests.map(row => row.method)).toEqual(['runtime.restart_if_idle', 'shutdown', 'runtime.restart_if_idle'])
+  } finally { rpc.dispose(); daemon.close() }
+})

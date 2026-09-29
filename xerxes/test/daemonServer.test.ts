@@ -10373,7 +10373,7 @@ test('a user shell waiting at its prompt does not hold back a runtime update, bu
     expect(await call('background.status')).toMatchObject({ ok: true, shells: 0 });
     await call('terminal.control', { terminal_id: terminalId, action: 'write', chars: 'sleep 20\r' });
     await Bun.sleep(600);
-    expect(await call('runtime.restart_if_idle')).toEqual({ ok: false, busy: true });
+    expect(await call('runtime.restart_if_idle')).toMatchObject({ ok: false, busy: true });
     await call('terminal.control', { terminal_id: terminalId, action: 'write', chars: '\x03' });
     await call('terminal.control', { terminal_id: terminalId, action: 'write', chars: 'echo back-$((3+3))\r' });
     expect(await until(/back-6/)).toBe(true);

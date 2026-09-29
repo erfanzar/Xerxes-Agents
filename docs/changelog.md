@@ -7,6 +7,11 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.8 — 2026-09-29
+
+- Desktop: "Restart workspace runtime" works while the runtime is busy. The popover names what is still running and offers Restart now; an active goal picks up again on the new runtime (older runtimes are shut down and the goal is resumed).
+- Desktop: a clearer icon for the Agents chip and card, and the Tasks / Agents switch is a proper segmented control instead of a bent underline.
+
 ## 0.6.7 — 2026-09-29
 
 - Desktop: the app updates itself from GitHub releases, with your permission.
