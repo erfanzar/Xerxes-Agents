@@ -27,6 +27,8 @@ export interface ActivityItem {
 export type SubagentStatus = 'completed' | 'error' | 'failed' | 'interrupted' | 'queued' | 'running' | 'timeout'
 
 export interface SubagentProgress {
+  /** The workflow run and phase it was started in. */
+  group?: { id: string; label?: string; phase?: string }
   providerProfile?: string
   reasoningEffort?: string
   agentType?: string

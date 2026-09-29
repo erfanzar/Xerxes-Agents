@@ -16,6 +16,13 @@ export function summarizeToolStartDisplay(name: string, context: string, verbose
     return summarizeSpawnAgents(context, verboseArgs)
   }
 
+  if (toolName === 'workflow') {
+    // Never the script: only the run's name, which the roster keys on.
+    const parsed = parseObject(verboseArgs || context) ?? parseObject(context)
+    const label = typeof parsed?.name === 'string' && parsed.name.trim() ? parsed.name.trim().slice(0, 80) : 'Workflow'
+    return { context: `run: ${label}` }
+  }
+
   const fileOperation = summarizeFileOperation(toolName, context, verboseArgs)
   if (fileOperation) {
     return fileOperation
@@ -205,6 +212,12 @@ export function spawnRosterFromLine(line: string): { extra: number; names: strin
   const body = line.replace(/ [✓✗]$/u, '')
   const match = body.match(/^Spawn Agents\("(\d+ agents?: .*)"\)/u)
   return match ? spawnRosterFromSummary(match[1]!) : null
+}
+
+/** The run name out of a Workflow transcript line: `Workflow("run: Review vnext") ✓`. */
+export function workflowRunFromLine(line: string): string | null {
+  const match = line.replace(/ [✓✗]$/u, '').match(/^Workflow\("run: (.*)"\)/u)
+  return match ? match[1]! : null
 }
 
 function summarizeSpawnAgents(context: string, verboseArgs?: string): ToolStartDisplay {

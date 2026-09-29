@@ -99,8 +99,13 @@ const subagentMetadata = (...sources: Record<string, unknown>[]): Partial<Subage
   const title = stringField('title')
   const toolCount = numberField('tool_count')
   const toolsets = listField('toolsets')
+  const groupRow = asRecord(firstDefined(sources, 'group'))
+  const groupId = optionalStr(groupRow.id)
+  const groupLabel = optionalStr(groupRow.label)
+  const groupPhase = optionalStr(groupRow.phase)
 
   return {
+    ...(groupId ? { group: { id: groupId, ...(groupLabel ? { label: groupLabel } : {}), ...(groupPhase ? { phase: groupPhase } : {}) } } : {}),
     ...(agentName ? { agent_name: agentName } : {}),
     ...(agentType ? { agent_type: agentType } : {}),
     ...(apiCalls !== undefined ? { api_calls: apiCalls } : {}),

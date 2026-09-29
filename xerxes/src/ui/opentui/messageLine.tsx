@@ -26,7 +26,7 @@ import { sectionMode } from '../domain/details.js'
 import { GLYPH } from '../domain/nocturne.js'
 import { VOICE } from '../domain/roles.js'
 import { messageHasVisibleDetails, trailHasRenderableContent } from '../lib/liveProgress.js'
-import { reconcileSpawnRoster, spawnRosterFromLine } from '../lib/toolStartDisplay.js'
+import { reconcileSpawnRoster, spawnRosterFromLine, workflowRunFromLine } from '../lib/toolStartDisplay.js'
 import { subagentCardAccent, subagentCardModel } from '../lib/subagentCards.js'
 import { fmtDuration, subagentElapsedSeconds } from '../lib/subagentElapsed.js'
 import { groupToolRun, toolRunSpawnRoster, type ToolRunGroup } from '../lib/toolRun.js'
@@ -36,6 +36,7 @@ import type { Theme } from '../theme.js'
 import type { Msg, SubagentProgress } from '../types.js'
 
 import { PanelMessage } from './panelView.js'
+import { WorkflowRoster } from './workflowRoster.js'
 import { Box, Span, Text } from './primitives.js'
 import { getSyntaxStyle } from './syntax.js'
 
@@ -448,6 +449,7 @@ function ToolStep({
   const voice = VOICE.tool(t)
 
   const roster = spawnRosterFromLine(line)
+  const workflowRun = workflowRunFromLine(line)
 
   if (!parsed) {
     // In-flight / transient call line ("drafting …", a bare tool name). No
@@ -459,6 +461,7 @@ function ToolStep({
           <Span color={t.color.muted}>{voice.glyph} </Span>
           {line}
         </Text>
+        {workflowRun !== null ? <WorkflowRoster archived={archived ?? []} label={workflowRun} t={t} /> : null}
         {roster ? (
           <>
             <SpawnFleetRoster archived={archived ?? []} names={roster.names} t={t} />
@@ -553,6 +556,7 @@ function ToolStep({
           ) : null}
         </Box>
       ) : null}
+      {workflowRun !== null ? <WorkflowRoster archived={archived ?? []} label={workflowRun} t={t} /> : null}
       {roster ? (
         <>
           <SpawnFleetRoster archived={archived ?? []} names={roster.names} t={t} />

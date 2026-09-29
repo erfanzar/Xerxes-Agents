@@ -363,7 +363,7 @@ terminal turn events by that identity instead of the currently selected tab.
 | `AgentPresetSelected` | `agent_preset_selected` | `session_id, agent_preset`                                                           |
 | `Notification`     | `notification`        | `id, category, type, severity, title, body, payload`                                    |
 | `PlanDisplay`      | `plan_display` *(bridge only)* | `content, file_path?`                                                                   |
-| `SubagentEvent`    | `subagent_event`      | `parent_tool_call_id?, agent_id?, subagent_type?, event: WireEvent` (nested, recursive) |
+| `SubagentEvent`    | `subagent_event`      | `parent_tool_call_id?, agent_id?, subagent_type?, group?: {id, label?, phase?}, event: WireEvent` (nested, recursive). `group` marks agents started by a `Workflow` run (`id` is the run, `label` its name, `phase` the script's current `phase()`); the same object appears on the agent's `subagent_snapshots` row. |
 
 These eight have no PascalCase bridge alias — they exist only on the daemon
 socket. They are broadcast or connection-scoped notices about work that is not
@@ -2197,3 +2197,19 @@ renderer events or diagnostics. There are at most 16 concurrent pulls and a
 the workspace view or losing either daemon connection revokes local authority.
 Reconnecting never silently renews it. A retained requirement reports unavailable
 access until explicitly reviewed again; it never falls back to remote keys.
+
+### Workflow runs
+
+The `Workflow` tool runs a model-written JavaScript orchestration script in a
+separate Bun process (scrubbed environment, no daemon access) that asks the
+runtime for agents with `agent(prompt, opts)`, `parallel()`, `pipeline()` and
+`phase()`. Each agent is an ordinary owned subagent: it emits `subagent_event`
+and persists in `subagent_snapshots` like any other, tagged with
+`group: {id, label, phase}`. The total number of agents is bounded only by the
+optional `max_agents` runaway guard (default 10000); `concurrency` (1–64,
+default 16) bounds how many run at once. The tool result is
+`{workflow_id, name, status: completed|failed|cancelled, result?, error?, agents:
+{started, completed, failed, cancelled}, tokens, duration_seconds, phases?,
+failures?, logs?}`. Cancelling the turn kills the script and closes every agent
+it started. Workflow is gated like `exec_command` and is not available to
+subagents.

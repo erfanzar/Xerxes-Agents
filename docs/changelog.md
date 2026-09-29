@@ -9,6 +9,21 @@ describe the earlier implementation and are not current setup instructions.
 
 ## Unreleased
 
+- Agents: a `Workflow` tool. The model writes a short script with `agent()`,
+  `parallel()`, `pipeline()` and `phase()` to fan work out to as many
+  subagents as the job needs (reviews, audits, migrations, find-then-verify),
+  picking a model per agent and getting structured results back. The script
+  runs in its own process without provider keys; stopping the task stops the
+  script and every agent it started.
+- Agents: the model delegates on its own initiative and matches the model to
+  the job, using a new prompt section that lists the models each configured
+  provider reports (with published prices) so mechanical work can go to
+  cheaper, faster models.
+- Desktop: the in-chat agents card is rebuilt for one agent to thousands. A
+  workflow shows its name, phases, each agent's model, what it is doing right
+  now and its clock; large phases draw as a dot grid with rows only for agents
+  still running or failed. Spawn batches are no longer cut at 24 in the card.
+- TUI: a Workflow row shows its run's phases, tallies and live or failed agents.
 - Runtime: compaction now fires on the provider's real prompt size. The context
   estimate ran about 1.8x low on code-heavy Claude transcripts, so a 1M window the
   meter put near half full was rejected as full and auto-compaction never started.

@@ -271,6 +271,7 @@ export interface SessionInflightTurn {
 
 /** Persisted manifest row for a subagent the session spawned (daemon subagent_snapshots). */
 export interface SubagentSnapshotPayload {
+  group?: SubagentGroupPayload
   provider_profile?: string
   reasoning_effort?: string
   agent_id?: string
@@ -661,7 +662,15 @@ export interface RollbackRestoreResponse {
 
 // ── Subagent events ──────────────────────────────────────────────────
 
+/** The workflow run and phase a subagent was started in. */
+export interface SubagentGroupPayload {
+  id: string
+  label?: string
+  phase?: string
+}
+
 export interface SubagentEventPayload {
+  group?: SubagentGroupPayload
   provider_profile?: string
   reasoning_effort?: string
   agent_name?: string
