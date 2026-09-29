@@ -75,6 +75,7 @@ import {
   CODEX_PROFILE_NAME,
   ProfileStore,
   profileLabel,
+  importProfiles,
   resolvedProfileMaxOutputTokens,
   reportedModelCost,
   reportedModelReasoning,
@@ -3363,6 +3364,13 @@ export class DaemonServer {
     }
     if (method === "provider_save") {
       return this.saveProvider(connection, params);
+    }
+    if (method === "provider.import") {
+      // The desktop copies the Mac's key-based profiles to an SSH workspace
+      // host on connect. Additive; the host's active selection is unchanged.
+      const outcome = importProfiles(this.profileStore, params.profiles);
+      if (outcome.imported.length) await this.emitProviderInit(connection);
+      return { ok: true, imported: [...outcome.imported], skipped: outcome.skipped.map(item => ({ ...item })) };
     }
     if (method === "provider_select") {
       return this.selectProvider(connection, optionalString(params.name) ?? "");

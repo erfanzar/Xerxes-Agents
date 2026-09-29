@@ -221,6 +221,7 @@ params fall back to per-connection defaults.
 | `fetch_models` / `provider_models`   | `{ profile_name }`                             | `{ ok, models, catalog?, source, warning? }`                    | Catalog rows may carry effective `context_limit`, `max_output_tokens`, provenance sources, and `overridden`; credentials never leave the daemon. |
 | `provider_model_override`            | `{ profile_name, model, context_limit?, max_output_tokens? }` | `{ ok, model }`                          | Positive safe integers set per-model user overrides; `null` clears a field. Precedence: user override → provider metadata → generated Pi catalog → unknown. Explicit runtime/profile `max_tokens` still wins for requests. |
 | `provider_list`                      | `{}`                                           | `{ ok, profiles }`                                             |                                                                                   |
+| `provider.import`                    | `{ profiles: [{ name, provider, base_url, api_key, model, sampling? }] }` | `{ ok, imported, skipped }` + emits `InitDone` when any imported | Adds or replaces key-based profiles without changing the active one; used by the desktop on SSH connect. |
 | `provider_save`                      | `{ name, base_url, api_key, model?, provider }` | `{ ok, profile }` + emits `InitDone`                           | `model` is optional: an edit keeps the saved model; a new profile without one discovers the models its key can use and starts on the first, or fails with the provider's reason (and nothing is saved). |
 | `provider_select`                    | `{ name }`                                     | `{ ok }` + emits `InitDone`                                    |                                                                                   |
 | `provider_delete`                    | `{ name }`                                     | `{ ok }` + emits `InitDone`                                    |                                                                                   |
@@ -2164,8 +2165,18 @@ The desktop workspace panel and Models & Providers settings expose the same
 memory-only local provider authority as the TUI. One explicit review authorizes
 up to 32 selected local profiles/configured models for the selected SSH session
 and its delegated provider work. Local requests resolve saved same-route keys
-on each new request; no credential store is copied to SSH. Existing remote
-profiles remain managed explicitly on the workspace host.
+on each new request.
+
+Separately, on every SSH connect the desktop copies the Mac's key-based
+profiles to the workspace host with `provider.import { profiles }`, so they
+also work there as the host's own profiles. Each item is `{ name, provider,
+base_url, api_key, model, sampling? }`; the reply is `{ ok, imported,
+skipped: [{ name, reason }] }` and, when anything was imported, an `InitDone`.
+A same-named host profile is replaced, other host profiles and the host's
+active selection are unchanged, and sign-in providers (`claude-code`,
+`openai-codex`) and keyless profiles are skipped: the host signs in itself.
+The keys are then stored in the host's `profiles.json` (mode 0600). A host
+runtime without the method leaves the connection unaffected.
 
 `session.status` additionally returns `provider_binding_session_guard_supported`
 and `provider_binding_busy`. The latter includes admitted turns and session

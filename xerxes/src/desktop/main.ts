@@ -24,6 +24,7 @@ import { desktopMachineCommand } from './main/machines.js'
 import { xerxesHome } from '../daemon/paths.js'
 import { DaemonRpc } from './main/daemon.js'
 import { DesktopProviderForwarding } from './main/providerForwarding.js'
+import { copyProfilesToRemote } from './main/profileSync.js'
 import { registerDaemonBridge, detachDaemon } from './main/ipc.js'
 import { dictationPort, transcribeDictation } from './main/voice.js'
 import { loadDesktopWorkspaces, saveDesktopWorkspace } from './main/workspaceSettings.js'
@@ -577,6 +578,11 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
       daemon?.dispose()
       daemon = rpc
       attach(rpc)
+      // The Mac's keyed providers work on the host too. Best effort, after
+      // attach so the provider list the host re-sends reaches this window.
+      void copyProfilesToRemote((method, args) => rpc.call(method, args), join(xerxesHome(), 'profiles.json')).then(result => {
+        if (result.error) console.warn(`Could not copy provider profiles to ${machine.alias}: ${result.error}`)
+      })
       remote = next
       remoteMachine = machine
       selectedWorkspace = next.projectDir

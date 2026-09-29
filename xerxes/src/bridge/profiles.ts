@@ -630,3 +630,63 @@ function guessProvider(baseUrl: string): string {
   }
   return 'custom'
 }
+
+/** Providers whose credential is a sign-in on the machine itself, not a key a profile can carry. */
+const SIGN_IN_PROVIDERS = new Set(['claude-code', 'openai-codex'])
+const MAX_IMPORTED_PROFILES = 64
+const PROFILE_NAME = /^[A-Za-z0-9._-]{1,64}$/
+
+export interface ProfileImportOutcome {
+  readonly imported: readonly string[]
+  readonly skipped: readonly { readonly name: string; readonly reason: string }[]
+}
+
+/**
+ * Copy key-based profiles into this store, as the desktop does from the Mac to
+ * an SSH workspace host so its providers work there too. A same-named profile
+ * is replaced; the store's active selection is left alone. Sign-in providers
+ * are skipped: their credential lives in the other machine's keychain or
+ * login file, and the host has to sign in itself.
+ */
+export function importProfiles(store: ProfileStore, candidates: unknown): ProfileImportOutcome {
+  const imported: string[] = []
+  const skipped: { name: string; reason: string }[] = []
+  if (!Array.isArray(candidates)) return { imported, skipped: [{ name: '', reason: 'profiles must be a list' }] }
+  for (const value of candidates.slice(0, MAX_IMPORTED_PROFILES)) {
+    const name = isRecord(value) && typeof value.name === 'string' ? value.name.trim() : ''
+    if (!isRecord(value) || !PROFILE_NAME.test(name)) {
+      skipped.push({ name, reason: 'invalid profile name' })
+      continue
+    }
+    const provider = typeof value.provider === 'string' ? value.provider.trim().toLowerCase() : ''
+    const baseUrl = typeof value.base_url === 'string' ? value.base_url.trim() : ''
+    const apiKey = typeof value.api_key === 'string' ? value.api_key : ''
+    const model = typeof value.model === 'string' ? value.model.trim() : ''
+    if (SIGN_IN_PROVIDERS.has(provider)) {
+      skipped.push({ name, reason: 'signs in on each machine' })
+      continue
+    }
+    if (!apiKey.trim()) {
+      skipped.push({ name, reason: 'no key to copy' })
+      continue
+    }
+    if (!/^https?:\/\/[^\s/]+/i.test(baseUrl)) {
+      skipped.push({ name, reason: 'invalid base_url' })
+      continue
+    }
+    store.save({
+      name,
+      baseUrl,
+      apiKey,
+      model,
+      ...(provider ? { provider } : {}),
+      ...(isRecord(value.sampling) ? { sampling: value.sampling } : {}),
+      setActive: false,
+    })
+    imported.push(name)
+  }
+  for (const value of candidates.slice(MAX_IMPORTED_PROFILES)) {
+    skipped.push({ name: isRecord(value) && typeof value.name === 'string' ? value.name : '', reason: 'too many profiles' })
+  }
+  return { imported, skipped }
+}
