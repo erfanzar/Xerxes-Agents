@@ -275,6 +275,13 @@ export class AgentTurnRunner implements TurnRunner {
   private get memorySnapshots() { return this.snapshots.memorySnapshots }
   private get deliveredGoalStatus() { return this.snapshots.deliveredGoalStatus }
   private readonly states = new Map<string, AgentState>()
+
+  liveMessages(session: DaemonSession): DaemonSession['messages'] | undefined {
+    if (!session.activeTurnId) return undefined
+    const state = this.states.get(session.id)
+    if (!state || state.messages.length <= session.messages.length) return undefined
+    return sessionMessagesOf(state)
+  }
   private readonly toolResultStores = new Map<string, ToolResultStorage>()
 
   constructor(private readonly options: AgentTurnRunnerOptions) {
@@ -1513,15 +1520,20 @@ function synchronizeLiveSubagentMetadata(session: DaemonSession, state: AgentSta
   }
 }
 
-function synchronizeSessionState(session: DaemonSession, state: AgentState): void {
-  session.apiCallsComplete = state.apiCallsComplete
-  session.messages = state.messages.map(message => {
+/** State messages in the form the session stores them. */
+function sessionMessagesOf(state: AgentState): DaemonSession['messages'] {
+  return state.messages.map(message => {
     const outcome = getTurnOutcome(message)
     const presentation = outcome ? { turn_outcome: outcome } : {}
     if (message.role !== 'user' || !message.displayText) return { ...message, ...presentation }
     const { displayText, ...providerMessage } = message
     return { ...providerMessage, text: displayText, ...presentation }
   })
+}
+
+function synchronizeSessionState(session: DaemonSession, state: AgentState): void {
+  session.apiCallsComplete = state.apiCallsComplete
+  session.messages = sessionMessagesOf(state)
   const mergedDeltas = mergeContextDeltas(state.metadata, session.metadata)
   // The picker can change the next turn's route while this turn is streaming.
   // Its session binding must survive the finishing turn's metadata snapshot.

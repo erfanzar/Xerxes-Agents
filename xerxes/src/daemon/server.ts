@@ -7460,7 +7460,12 @@ export class DaemonServer {
   private readonly archiveHistory = new ArchiveHistory();
 
   private async historySession(session: DaemonSession): Promise<DaemonSession> {
-    const messages = await this.archiveHistory.messages(await this.precompactArchivePath(session.id), session.messages);
+    // Mid-turn, the session's messages stop where the turn began; a client
+    // that (re)attaches then would lose everything the turn has done so far —
+    // hours of a goal round, after the app was closed and reopened.
+    const live = this.runtime.liveTurnMessages?.(session);
+    const current = live && live.length > session.messages.length ? live as DaemonSession['messages'] : session.messages;
+    const messages = await this.archiveHistory.messages(await this.precompactArchivePath(session.id), current);
     return { ...session, messages, thinkingContent: messages.length === session.messages.length ? session.thinkingContent : [] };
   }
 

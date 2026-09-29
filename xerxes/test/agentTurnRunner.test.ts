@@ -2080,3 +2080,39 @@ test('the conversation\'s agents preference reaches the model every turn', async
   expect(prompts[1]).toContain('# Delegation: eager')
   expect(prompts.at(-1)).toContain('# Delegation: off')
 })
+
+test('the runner exposes a running turn\'s messages before the session catches up', async () => {
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  let calls = 0
+  let paused!: () => void
+  const pausedAt = new Promise<void>(resolve => { paused = resolve })
+  const registry = new ToolRegistry()
+  registry.register({ type: 'function', function: { name: 'ReadFile', description: 'read', parameters: { type: 'object', properties: {} } } }, async () => 'file body')
+  const runner = new AgentTurnRunner({
+    model: 'm', permissionMode: 'accept-all', toolExecutor: registry, tools: registry.definitions(),
+    llm: { async *stream() {
+      calls += 1
+      if (calls === 1) { yield { toolCalls: [{ id: 'r1', type: 'function', function: { name: 'ReadFile', arguments: {} } }] }; return }
+      paused()
+      await gate
+      yield { content: 'finished' }
+    } },
+  })
+  const session: DaemonSession = {
+    activeTurnId: 'turn-1', agentId: 'default', cancelRequested: false, cwd: process.cwd(), extra: {},
+    id: 'live-messages-session', interactionMode: 'default', sessionKey: 'live-messages', lastActive: 0,
+    messages: [], metadata: {}, model: '', planMode: false, status: 'working', thinkingContent: [],
+    toolExecutions: [], totalInputTokens: 0, totalOutputTokens: 0, turnCount: 0, workspace: process.cwd(),
+  }
+  const turn = (async () => { for await (const _event of runner.run(session, 'read it', new AbortController().signal)) {} })()
+  await pausedAt
+  const live = runner.liveMessages(session)!
+  expect(session.messages).toHaveLength(0)
+  expect(live.map(message => message.role)).toEqual(['user', 'assistant', 'tool'])
+  release()
+  await turn
+  session.activeTurnId = ''
+  expect(runner.liveMessages(session)).toBeUndefined()
+  expect(session.messages.length).toBeGreaterThanOrEqual(4)
+})

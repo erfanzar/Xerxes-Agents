@@ -230,6 +230,13 @@ export interface RuntimeToolInventoryEntry {
 
 export interface TurnRunner {
   toolInventory?(session: DaemonSession): readonly RuntimeToolInventoryEntry[];
+  /**
+   * The running turn's messages so far, in session form — a superset of
+   * `session.messages`, which only catches up when the turn ends. A client
+   * that attaches mid-turn (the app was closed and reopened during an
+   * hours-long goal round) needs these to show what the turn already did.
+   */
+  liveMessages?(session: DaemonSession): readonly RawMessage[] | undefined;
   /** True when the runner synchronizes complete agent state onto the session. */
   readonly managesSessionState?: boolean;
   /** Release cached per-session state when the daemon evicts the session. */
@@ -325,6 +332,8 @@ export interface DaemonRuntime {
   lspHealth?(sessionKey: string): Promise<readonly LspServerHealth[] | undefined>;
   cancelAllTurns(): number;
   cancelTurn(sessionKey: string): boolean;
+  /** The running turn's messages so far (see TurnRunner.liveMessages); undefined when idle. */
+  liveTurnMessages?(session: DaemonSession): readonly DaemonTranscriptMessage[] | undefined;
   /**
    * Optional first-class retry of a terminal subagent task under its stable
    * identity. Kept optional so test fakes and custom hosts stay
@@ -649,6 +658,10 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
 
   dropWorkspace(cwd: string): void {
     this.turnRunner.dropWorkspace?.(cwd);
+  }
+
+  liveTurnMessages(session: DaemonSession): readonly DaemonTranscriptMessage[] | undefined {
+    return this.turnRunner.liveMessages?.(session) as readonly DaemonTranscriptMessage[] | undefined;
   }
 
   cancelTurn(sessionKey: string): boolean {

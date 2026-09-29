@@ -658,3 +658,37 @@ test('/delegate stores the conversation\'s agents preference and reports it', as
     expect(session.metadata.delegation_mode).toBeUndefined()
   } finally { client.close(); await server.stop(); await rm(root, { recursive: true, force: true }) }
 })
+
+test('a client attaching mid-turn sees everything the running turn has done so far', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-live-history-'))
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  let started!: () => void
+  const running = new Promise<void>(resolve => { started = resolve })
+  let live: unknown[] | undefined
+  const runner = {
+    async *run(session: { messages: unknown[] }) {
+      live = [...session.messages, { role: 'user', content: 'keep going' }, { role: 'assistant', content: 'Round one: profiled softmax_f16.' }, { role: 'assistant', content: 'Round two: patched the reduce.' }]
+      started()
+      await gate
+      yield { type: 'text_part' as const, payload: { text: 'done' } }
+    },
+    liveMessages: (session: { activeTurnId: string }) => session.activeTurnId ? live as never : undefined,
+  }
+  const runtime = new InMemoryDaemonRuntime(runner as never, { currentProjectDirectory: root, sessionDirectory: join(root, 'sessions') })
+  const session = await runtime.openSession('goal-round', undefined, { cwd: root })
+  const turn = runtime.submitTurn(session.sessionKey, 'keep going', () => {})
+  await running
+  const server = new DaemonServer({ socketPath: join(root, 'daemon.sock'), runtime })
+  await server.start()
+  const client = await DaemonParityClient.connect(join(root, 'daemon.sock'))
+  try {
+    client.send({ jsonrpc: '2.0', id: 1, method: 'session.history', params: { session_key: session.sessionKey, history_limit: 50 } })
+    const during = JSON.stringify((await client.next(frame => frame.id === 1)).result)
+    expect(during).toContain('Round one: profiled softmax_f16.')
+    expect(during).toContain('Round two: patched the reduce.')
+    release()
+    await turn
+    expect(runtime.liveTurnMessages(session)).toBeUndefined()
+  } finally { client.close(); await server.stop(); await rm(root, { recursive: true, force: true }) }
+})
