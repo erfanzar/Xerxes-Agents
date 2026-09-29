@@ -338,6 +338,7 @@ terminal turn events by that identity instead of the currently selected tab.
 | `StepEnd`          | `step_end` *(bridge only)* | `n`                                                                                     |
 | `StepInterrupted`  | `step_interrupted` *(bridge only)* | —                                                                                       |
 | `SteerInput`       | `steer_input`         | `content`                                                                               |
+| `SteerApplied`     | `steer_applied`       | `contents: string[], count` — the steers just handed to the model at a step boundary; clients stop showing them as queued (a long goal round may not reach `turn_end` for hours). |
 | `CompactionBegin`  | `compaction_begin` *(bridge only)* | —                                                                                       |
 | `CompactionEnd`    | `compaction_end` *(bridge only)* | —                                                                                       |
 | `HookTriggered`    | `hook_triggered` *(bridge only)* | `hook_name, trigger_type`                                                               |
@@ -1750,6 +1751,16 @@ all active sessions, terminals, and monitors; unavailable activity checks block
 the restart. This legacy check is advisory rather than atomic across clients.
 The desktop attempts replacement once per app instance; busy work defers
 it, while failures remain visible and require retry rather than a restart loop.
+
+An armed goal no longer blocks replacement forever. The first request while a
+goal is armed holds its next round; the reply is `{ok:false, busy:true,
+waiting_for_goal_round:true}` until the running round ends. The restart then
+writes `goal_rearm_after_restart: {goal_id, revision, at}` to that session, and
+the fresh runtime re-arms and continues the same goal when the session is
+reopened (`initialize` with `resume_session_id`, or `session.open`). A marker
+for a different goal, a changed phase, or older than six hours is dropped
+unhonoured. If the client stops asking for two minutes, the hold lapses and the
+held rounds run.
 
 ### Shared local daemon ownership
 

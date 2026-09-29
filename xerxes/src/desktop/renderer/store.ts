@@ -1174,7 +1174,9 @@ export class Store {
       const result = await this.bridge.call('desktop.restartRuntime', { session_key: this.sessionKey, allow_legacy: allowLegacy })
       if (result.ok !== true) {
         if (result.busy === true) {
-          this.patch({ runtimeUpdate: 'waiting', runtimeUpdateMessage: 'Update queued. It will install automatically when all running work finishes.' })
+          this.patch(result.waiting_for_goal_round === true
+            ? { runtimeUpdate: 'waiting', runtimeUpdateMessage: 'Update queued. It installs when the current goal round ends, and the goal continues after the restart.' }
+            : { runtimeUpdate: 'waiting', runtimeUpdateMessage: 'Update queued. It will install automatically when all running work finishes.' })
           return
         }
         throw new Error(str(result.error) || 'This runtime cannot update automatically. Restart the workspace runtime from its terminal, then reopen the app.')

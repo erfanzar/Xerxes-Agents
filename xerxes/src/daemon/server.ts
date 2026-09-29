@@ -111,7 +111,7 @@ import {
   releaseCronLease,
 } from "../cron/lease.js";
 import { CronScheduler } from "../cron/scheduler.js";
-import { blockGoal, getGoal, pauseGoal, disarmGoal, recordGoalEvidence, GoalError } from "../runtime/goalDomain.js";
+import { blockGoal, getGoal, pauseGoal, disarmGoal, recordGoalEvidence, resumeGoal, GoalError } from "../runtime/goalDomain.js";
 import { classifyError } from "../runtime/errorClassifier.js";
 import { modelUsageLedger } from "../runtime/modelUsageLedger.js";
 import { GoalTimeGuard } from "../runtime/goalTimeGuard.js";
@@ -782,6 +782,8 @@ export interface DaemonServerOptions {
   readonly connectionLeaseGraceMs?: number;
   /** Waits before retrying goal rounds lost to transient provider failures (default 1, 3, 10 min). */
   readonly goalTransientRetryDelaysMs?: readonly number[];
+  /** How long a queued update holds armed goals without the app asking again (default 2 min). */
+  readonly goalDrainLapseMs?: number;
   /**
    * Generate a model-written session title after the first exchange. Defaults
    * on; a runtime setting of `auto_title` set to false disables it. Generation
@@ -948,6 +950,12 @@ const PRODUCTIVE_TURN_EVENTS: ReadonlySet<string> = new Set([
 const MODEL_USAGE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
 /** Waits before retrying a goal round lost to a transient provider failure. */
+/** Session metadata marking a goal armed when an update restart drained it. */
+const GOAL_REARM_AFTER_RESTART_KEY = "goal_rearm_after_restart";
+/** A marker older than this is stale (the update never came back) and is dropped, not honoured. */
+const GOAL_REARM_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+/** The app re-asks for a queued update every few seconds while visible. */
+const GOAL_DRAIN_LAPSE_MS = 2 * 60 * 1000;
 const GOAL_TRANSIENT_RETRY_DELAYS_MS = [60_000, 180_000, 600_000] as const;
 
 export class DaemonServer {
@@ -967,10 +975,22 @@ export class DaemonServer {
   /** Delay before the next goal round after a transient failure, per session. */
   private readonly goalRetryDelays = new Map<string, number>();
   private readonly goalTransientRetryDelaysMs: readonly number[];
+  private readonly goalDrainLapseMs: number;
   private readonly sessionOwnedClients = new WeakSet<DaemonTransportConnection>();
   private readonly sessionTurnOwners = new WeakSet<DaemonTransportConnection>();
   private readonly sessionObservers = new Set<DaemonTransportConnection>();
   private stoppingGoalWakes = false;
+  /**
+   * A queued runtime update draining armed goals: no new goal round starts,
+   * the running one finishes, then the restart re-arms them. Lapses when the
+   * app stops asking (a hidden or closed window), so goals never stall on an
+   * update nobody is waiting for.
+   */
+  private goalDrainTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Turns that are goal rounds, so an update can tell them from other work. */
+  private readonly goalTurnsInFlight = new Set<Promise<unknown>>();
+  /** Goal kicks skipped while draining, replayed if the drain lapses. */
+  private readonly heldGoalKicks = new Map<string, { readonly emit: (event: DaemonEvent) => void; readonly owner: DaemonTransportConnection | undefined }>();
   /** Consecutive auto-compaction failures per session; reset by any deliberate history change. */
   private readonly autoCompactFailures = new Map<string, number>();
   /** Sessions already told that auto-compaction is off while their window fills. */
@@ -1139,6 +1159,7 @@ export class DaemonServer {
     // lease runs out, that work continues in the background (see disconnectOwner).
     this.connectionLeases = new ConnectionLeases(owner => this.disconnectOwner(owner, true), options.connectionLeaseGraceMs);
     this.goalTransientRetryDelaysMs = options.goalTransientRetryDelaysMs ?? GOAL_TRANSIENT_RETRY_DELAYS_MS;
+    this.goalDrainLapseMs = options.goalDrainLapseMs ?? GOAL_DRAIN_LAPSE_MS;
     this.autoCompactThreshold = normalizeCompactionThreshold(
       options.autoCompactThreshold ?? DEFAULT_AUTO_COMPACT_THRESHOLD,
     );
@@ -2025,24 +2046,47 @@ export class DaemonServer {
     if (this.desktopRestartPending) return { ok: false, error: 'Runtime is restarting. Reconnect to continue.' };
     if (method === 'runtime.restart_if_idle') {
       const sessions = this.runtime.listSessions();
-      const busy = this.inFlightTurns.size > 0 || this.activeScheduleRuns.size > 0
+      const goalDispatches = new Set<Promise<unknown>>(this.goalWakeDispatches.values());
+      const goalSessions = new Set(this.goalWakeDispatches.keys());
+      const inUse = (session: DaemonSession): boolean => Boolean(session.activeTurnId || session.status !== 'idle'
+        || this.sessionOperations.has(session.sessionKey)
+        // A person's shell idling at its prompt is not work: the update may
+        // close it (the Terminal tab reopens one). A command running in it is.
+        || (this.terminalRegistry?.list(session.id) ?? []).some(terminal => terminal.running
+          && !(terminal.label === USER_SHELL_LABEL && this.ptySessions?.isAtPrompt(terminal.id)))
+        || (this.monitors?.list(session.id) ?? []).some(monitor => monitor.state === 'watching')
+        || subagentSnapshotPanelPayloads(session.metadata).some(agent => agent.status === 'running' || agent.status === 'queued'));
+      const activeSubagents = numberValue(this.runtime.status().active_subagents) > 0;
+      // Work an update must wait out and never hold back: a person's turn,
+      // schedules, shells, channels, and sessions without a goal round.
+      const otherWork = [...this.inFlightTurns].some(turn => !goalDispatches.has(turn) && !this.goalTurnsInFlight.has(turn))
+        || this.activeScheduleRuns.size > 0
         || this.providerRelays.hasLiveGrants()
-        || this.goalWakeDispatches.size > 0 || this.agentPresetSwitches.size > 0
+        || this.agentPresetSwitches.size > 0
         || this.channelStatusData().configured
-        || numberValue(this.runtime.status().active_subagents) > 0
-        // An armed goal is autonomous work between rounds. Arming lives only in
-        // this process, so a restart would silently disarm it and the run left
-        // overnight would stop at its next round.
-        || sessions.some(session => { const goal = getGoal(session.metadata, session.id); return goal?.phase === 'active' && goal.activation === 'armed'; })
-        || sessions.some(session => session.activeTurnId || session.status !== 'idle'
-          || this.sessionOperations.has(session.sessionKey)
-          // A person's shell idling at its prompt is not work: the update may
-          // close it (the Terminal tab reopens one). A command running in it is.
-          || (this.terminalRegistry?.list(session.id) ?? []).some(terminal => terminal.running
-            && !(terminal.label === USER_SHELL_LABEL && this.ptySessions?.isAtPrompt(terminal.id)))
-          || (this.monitors?.list(session.id) ?? []).some(monitor => monitor.state === 'watching')
-          || subagentSnapshotPanelPayloads(session.metadata).some(agent => agent.status === 'running' || agent.status === 'queued'));
-      if (busy) return { ok: false, busy: true };
+        || (activeSubagents && goalSessions.size === 0)
+        || sessions.some(session => !goalSessions.has(session.sessionKey) && inUse(session));
+      const goalWork = goalSessions.size > 0 || activeSubagents
+        || sessions.some(session => goalSessions.has(session.sessionKey) && inUse(session));
+      const busy = otherWork || goalWork;
+      // An armed goal is autonomous work that only this process may continue.
+      // Instead of waiting for it forever (it never idles), hold its next
+      // round, let the current one finish, and carry the arming across the
+      // restart in a durable marker the fresh process honours.
+      const armed = sessions.filter(session => { const goal = getGoal(session.metadata, session.id); return goal?.phase === 'active' && goal.activation === 'armed'; });
+      // Hold goal rounds only when they are all that stands in the way; with
+      // other work still running, holding them would just stall the goals.
+      if (armed.length && !otherWork) this.drainGoalsForRestart();
+      if (busy) return { ok: false, busy: true, ...(armed.length && !otherWork ? { waiting_for_goal_round: true } : {}) };
+      if (armed.length) {
+        for (const session of armed) {
+          const goal = getGoal(session.metadata, session.id)!;
+          session.metadata[GOAL_REARM_AFTER_RESTART_KEY] = { goal_id: goal.id, revision: goal.revision, at: Date.now() };
+        }
+        await this.runtime.flushSessions();
+      }
+      if (this.goalDrainTimer) { clearTimeout(this.goalDrainTimer); this.goalDrainTimer = undefined; }
+      this.heldGoalKicks.clear();
       this.desktopRestartPending = true;
       this.stoppingGoalWakes = true;
       this.cronScheduler.stop();
@@ -2052,6 +2096,8 @@ export class DaemonServer {
           this.desktopRestartPending = false;
           this.stoppingGoalWakes = false;
           if (this.cronSchedulerStarted) this.cronScheduler.start();
+          for (const session of this.runtime.listSessions()) delete session.metadata[GOAL_REARM_AFTER_RESTART_KEY];
+          void this.rearmHeldGoals();
           this.broadcast('notification', { level: 'error', message: `Runtime restart failed: ${errorMessage(error)}` });
         });
       }, 25);
@@ -2095,6 +2141,7 @@ export class DaemonServer {
       const session = await this.runtime.openSession(key, preset.id, { cwd, preserveProject: true });
       connection.activeSessionKey = key;
       this.recoverMonitorReactions(session);
+      await this.rearmGoalAfterRestart(key, connection);
       // Drain notices that settled while no client was attached (background
       // tasks above). At-most-once: the attaching client receives them here,
       // never again.
@@ -9752,6 +9799,7 @@ export class DaemonServer {
         'The previous goal round has an unknown outcome after restart. Review the session before resuming.');
       await this.runtime.flushSessions();
     }
+    await this.rearmGoalAfterRestart(key, connection);
     await this.refreshSkills(session);
     const skills = this.skillRegistry
       .all()
@@ -10203,8 +10251,60 @@ export class DaemonServer {
     return wake?.goalId === getGoal(session.metadata, session.id)?.id ? wake : null;
   }
 
+  /** Hold new goal rounds for a pending update; see {@link goalDrainTimer}. */
+  private drainGoalsForRestart(): void {
+    this.stoppingGoalWakes = true;
+    if (this.goalDrainTimer) clearTimeout(this.goalDrainTimer);
+    this.goalDrainTimer = setTimeout(() => {
+      this.goalDrainTimer = undefined;
+      if (this.desktopRestartPending || this.stopPromise) return;
+      this.stoppingGoalWakes = false;
+      void this.rearmHeldGoals();
+    }, this.goalDrainLapseMs);
+    this.goalDrainTimer.unref?.();
+  }
+
+  /** Replay the goal rounds a lapsed or failed drain held back. */
+  private async rearmHeldGoals(): Promise<void> {
+    const held = [...this.heldGoalKicks];
+    this.heldGoalKicks.clear();
+    for (const [key, { emit, owner }] of held) this.kickGoalWake(key, emit, owner);
+  }
+
+  /**
+   * The fresh process after an update restart: a session whose goal was armed
+   * when the old one drained comes back armed and continues. Only the goal
+   * that was armed, at the phase it had; anything changed since is left alone.
+   */
+  private async rearmGoalAfterRestart(sessionKey: string, connection: DaemonTransportConnection): Promise<void> {
+    const session = this.runtime.sessionStatus(sessionKey);
+    if (!session || !Object.hasOwn(session.metadata, GOAL_REARM_AFTER_RESTART_KEY)) return;
+    const marker = session.metadata[GOAL_REARM_AFTER_RESTART_KEY];
+    delete session.metadata[GOAL_REARM_AFTER_RESTART_KEY];
+    const record = marker && typeof marker === 'object' && !Array.isArray(marker) ? marker as Record<string, unknown> : {};
+    const goal = getGoal(session.metadata, session.id);
+    const fresh = typeof record.at === 'number' && Date.now() - record.at < GOAL_REARM_MAX_AGE_MS;
+    if (!goal || !fresh || goal.id !== record.goal_id || goal.phase !== 'active' || goal.activation === 'armed') {
+      await this.runtime.flushSessions();
+      return;
+    }
+    try {
+      resumeGoal(session.metadata, session.id, { id: goal.id, revision: goal.revision }, Date.now());
+    } catch (error) {
+      await this.runtime.flushSessions();
+      this.emit(connection, 'notification', { level: 'warning', message: `The goal was not resumed after the runtime update: ${errorMessage(error)}`, session_id: session.id });
+      return;
+    }
+    if (!session.activeTurnId && session.status === 'idle') session.cancelRequested = false;
+    await this.runtime.flushSessions();
+    this.notifySessionStateChanged(session.id);
+    await this.stageGoalWake(sessionKey);
+    this.kickGoalWake(sessionKey, event => this.emit(connection, event.type, event.payload), connection);
+  }
+
   /** Share loop/monitor admission, but retain native goal-round tool authority. */
   private kickGoalWake(sessionKey: string, emit: (event: DaemonEvent) => void, owner: DaemonTransportConnection | undefined): void {
+    if (this.stoppingGoalWakes && this.goalDrainTimer && !this.desktopRestartPending) { this.heldGoalKicks.set(sessionKey, { emit, owner }); return; }
     if (this.stoppingGoalWakes || this.goalWakeDispatches.has(sessionKey)) return;
     const session = this.runtime.sessionStatus(sessionKey);
     if (!session) return;
@@ -10217,7 +10317,10 @@ export class DaemonServer {
     // operation. A human request received at this boundary gets first place.
     const dispatch = new Promise<void>(resolve => setTimeout(resolve, 0)).then(() =>
       this.withSessionOperation(sessionKey, async () => {
-        if (this.stoppingGoalWakes) return;
+        if (this.stoppingGoalWakes) {
+          if (this.goalDrainTimer && !this.desktopRestartPending) this.heldGoalKicks.set(sessionKey, { emit, owner });
+          return;
+        }
         if (owner && this.disconnectedGoalOwners.has(owner)) { disarmGoal(session.id); return; }
         const live = this.runtime.sessionStatus(sessionKey);
         if (!live || live.id !== session.id) return;
@@ -10501,8 +10604,10 @@ export class DaemonServer {
     const turnPromise = alreadyAdmitted ? executeWithTimeLimit() : this.withSessionOperation(sessionKey, executeWithTimeLimit);
     const tracked = turnPromise.catch(() => undefined);
     this.inFlightTurns.add(tracked);
+    if (options.goalRound !== undefined) this.goalTurnsInFlight.add(tracked);
     void tracked.then(() => {
       this.inFlightTurns.delete(tracked);
+      this.goalTurnsInFlight.delete(tracked);
       if (owner && this.turnOwners.get(sessionKey) === owner) {
         this.turnOwners.delete(sessionKey);
       }

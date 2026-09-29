@@ -15,7 +15,7 @@ import { ToolRegistry } from '../src/executors/toolRegistry.js'
 import { registerFileTools } from '../src/tools/fileTools.js'
 import { registerProjectSetupTool } from '../src/tools/projectSetup.js'
 import { WorkspacePathResolver } from '../src/tools/pathSafety.js'
-import { createGoal, disarmGoal } from '../src/runtime/goalDomain.js'
+import { createGoal, getGoal, resetGoalActivations } from '../src/runtime/goalDomain.js'
 
 test('startup loads existing commands, init adds workflows, and shell preprocessing requires explicit trust', async () => {
   const root = await mkdtemp(join(tmpdir(), 'xerxes-init-workflows-'))
@@ -535,18 +535,102 @@ test('idle-only runtime restart rejects active work and closes admission before 
     client.send({ jsonrpc: "2.0", id: 4, method: "runtime.restart_if_idle", params: {} })
     expect((await client.next(frame => frame.id === 4)).result).toEqual({ ok: false, busy: true })
     expect(restarts).toBe(0)
-    session.status = "idle"
-    // An armed goal between rounds is still autonomous work: a restart would disarm it.
+    // An armed goal whose session is busy with other work: the update waits,
+    // and does not hold the goal back for it.
     createGoal(session.metadata, session.id, { objective: "keep improving overnight" }, 1_000)
     client.send({ jsonrpc: "2.0", id: 5, method: "runtime.restart_if_idle", params: {} })
     expect((await client.next(frame => frame.id === 5)).result).toEqual({ ok: false, busy: true })
     expect(restarts).toBe(0)
-    disarmGoal(session.id)
+    // At the round boundary it restarts and carries the arming across in a
+    // durable marker instead of waiting forever.
+    session.status = "idle"
     client.send({ jsonrpc: '2.0', id: 2, method: 'runtime.restart_if_idle', params: {} })
     expect((await client.next(frame => frame.id === 2)).result).toEqual({ ok: true })
+    expect(session.metadata.goal_rearm_after_restart).toMatchObject({ goal_id: getGoal(session.metadata, session.id)!.id })
     client.send({ jsonrpc: '2.0', id: 3, method: 'initialize', params: { session_key: 'late' } })
     expect((await client.next(frame => frame.id === 3)).result).toMatchObject({ ok: false, error: expect.stringContaining('restarting') })
     await new Promise(resolve => setTimeout(resolve, 40))
+    expect(restarts).toBe(1)
+  } finally { client.close(); await server.stop(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('a goal armed when an update restart drained it comes back armed in the fresh process', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-goal-rearm-'))
+  const runtime = new InMemoryDaemonRuntime({ async *run() {} }, { currentProjectDirectory: root, sessionDirectory: join(root, 'sessions') })
+  const session = await runtime.openSession('overnight', undefined, { cwd: root })
+  const goal = createGoal(session.metadata, session.id, { objective: 'keep improving overnight' }, Date.now())
+  session.metadata.goal_rearm_after_restart = { goal_id: goal.id, revision: goal.revision, at: Date.now() }
+  // A fresh process: arming is process-local and starts empty.
+  resetGoalActivations()
+  expect(getGoal(session.metadata, session.id)?.activation).toBe('disarmed')
+  const server = new DaemonServer({ socketPath: join(root, 'daemon.sock'), runtime })
+  await server.start()
+  const client = await DaemonParityClient.connect(join(root, 'daemon.sock'))
+  try {
+    client.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { resume_session_id: session.id, project_dir: root } })
+    expect((await client.next(frame => frame.id === 1)).result).toMatchObject({ ok: true })
+    // Re-armed and continued: a goal round started on its own (this fake
+    // provider produces nothing, so that round then blocks the goal).
+    for (let tries = 0; tries < 100 && (getGoal(session.metadata, session.id)?.roundsStarted ?? 0) < 1; tries++) await Bun.sleep(20)
+    expect(getGoal(session.metadata, session.id)?.roundsStarted).toBe(1)
+    expect(session.metadata.goal_changes).toEqual(expect.arrayContaining([expect.objectContaining({ operation: 'resume' })]))
+    expect(session.metadata.goal_rearm_after_restart).toBeUndefined()
+  } finally { client.close(); await server.stop(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('a stale or mismatched re-arm marker is dropped without arming anything', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-goal-stale-'))
+  const runtime = new InMemoryDaemonRuntime({ async *run() {} }, { currentProjectDirectory: root, sessionDirectory: join(root, 'sessions') })
+  const session = await runtime.openSession('stale', undefined, { cwd: root })
+  const goal = createGoal(session.metadata, session.id, { objective: 'old work' }, Date.now())
+  session.metadata.goal_rearm_after_restart = { goal_id: goal.id, revision: goal.revision, at: Date.now() - 7 * 60 * 60 * 1000 }
+  resetGoalActivations()
+  const server = new DaemonServer({ socketPath: join(root, 'daemon.sock'), runtime })
+  await server.start()
+  const client = await DaemonParityClient.connect(join(root, 'daemon.sock'))
+  try {
+    client.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { resume_session_id: session.id, project_dir: root } })
+    await client.next(frame => frame.id === 1)
+    expect(getGoal(session.metadata, session.id)?.activation).toBe('disarmed')
+    expect(session.metadata.goal_rearm_after_restart).toBeUndefined()
+  } finally { client.close(); await server.stop(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('an update waits for a running goal round without stalling it, then installs', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-goal-drain-'))
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  let started!: () => void
+  const running = new Promise<void>(resolve => { started = resolve })
+  let restarts = 0
+  const runtime = new InMemoryDaemonRuntime({ async *run() { started(); await gate; yield { type: 'text_part', payload: { text: 'round done' } } } }, {
+    currentProjectDirectory: root, sessionDirectory: join(root, 'sessions'),
+  })
+  const session = await runtime.openSession('drain', undefined, { cwd: root })
+  const goal = createGoal(session.metadata, session.id, { objective: 'keep improving overnight' }, Date.now())
+  session.metadata.goal_rearm_after_restart = { goal_id: goal.id, revision: goal.revision, at: Date.now() }
+  resetGoalActivations()
+  const server = new DaemonServer({ socketPath: join(root, 'daemon.sock'), runtime, onRestart: () => { restarts += 1 } })
+  await server.start()
+  const client = await DaemonParityClient.connect(join(root, 'daemon.sock'))
+  try {
+    // Re-armed on open, so a goal round starts and blocks on the gate.
+    client.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { resume_session_id: session.id, project_dir: root } })
+    await client.next(frame => frame.id === 1)
+    await running
+    client.send({ jsonrpc: '2.0', id: 2, method: 'runtime.restart_if_idle', params: {} })
+    expect((await client.next(frame => frame.id === 2)).result).toEqual({ ok: false, busy: true, waiting_for_goal_round: true })
+    expect(restarts).toBe(0)
+    release()
+    let result: unknown
+    for (let tries = 0; tries < 100; tries++) {
+      client.send({ jsonrpc: '2.0', id: 100 + tries, method: 'runtime.restart_if_idle', params: {} })
+      result = (await client.next(frame => frame.id === 100 + tries)).result
+      if ((result as { ok?: boolean }).ok) break
+      await Bun.sleep(20)
+    }
+    expect(result).toEqual({ ok: true })
+    await Bun.sleep(40)
     expect(restarts).toBe(1)
   } finally { client.close(); await server.stop(); await rm(root, { recursive: true, force: true }) }
 })
