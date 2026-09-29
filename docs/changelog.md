@@ -7,7 +7,7 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
-## Unreleased
+## 0.6.7 — 2026-09-29
 
 - Desktop: the app updates itself from GitHub releases, with your permission.
   It checks at startup and every six hours (and from Xerxes Agents › Check for
