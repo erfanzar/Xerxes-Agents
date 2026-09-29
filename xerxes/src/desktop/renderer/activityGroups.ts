@@ -3,9 +3,14 @@
 
 import type { Block } from './types.js'
 
-/** Pure conversation stays in the feed; operational events share a disclosure. */
+/**
+ * Pure conversation stays in the feed; operational events share a disclosure.
+ * Agents do too — they stay in the feed. A workflow or a batch of agents is
+ * work the reader follows, and Claude Code never folds it behind the tool
+ * calls around it: collapsing "Ran 3 commands" must not hide what is running.
+ */
 export function isGroupedActivity(block: Block, approvalToolId?: string): boolean {
-  return block.kind !== 'user' && block.kind !== 'agent'
+  return block.kind !== 'user' && block.kind !== 'agent' && block.kind !== 'agents'
 }
 
 /**

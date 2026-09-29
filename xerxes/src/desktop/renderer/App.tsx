@@ -26,7 +26,7 @@ import { keyedActivityGroups, isDisclosedActivity } from "./activityGroups.js"
 import { activitySummary, approvalTitle, liveActivityPhrase } from './activityPhrase.js'
 import { ToolCallRow, toolHasFailed } from "./Execution.js"
 import { activityFleetRows, agentState, agentKindLabel } from './AgentRoster.js'
-import { RailAgents, RailFiles } from './RailLists.js'
+import { RailAgents, RailFiles, RailWorkflows } from './RailLists.js'
 import { AgentInspector } from './AgentInspector.js'
 import { OutputViewer } from './OutputViewer.js'
 import { Icon } from './Icon.js'
@@ -2032,7 +2032,8 @@ export function ActivityDetails({ snap, selectedAgent = '' }: { snap: Snapshot; 
         </section>
       ) : null}
 
-      <RailAgents rows={fleet} onInspect={id => navigate('activity', id)} />
+      <RailWorkflows rows={fleet} onInspect={id => navigate('activity', id)} />
+      <RailAgents rows={fleet.filter(row => !row.agentDetails?.group)} onInspect={id => navigate('activity', id)} />
 
       {/* The rows, not a summary line. A rail that only says "5 files" is
           a number you still have to go and decode; the diffs and the undo

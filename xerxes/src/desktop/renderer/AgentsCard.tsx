@@ -2,12 +2,14 @@
 // Licensed under the Apache License, Version 2.0.
 
 /**
- * The agents a turn started, drawn in the conversation: one agent or a
- * workflow of thousands. A header with the run's name, live clock and a
- * segmented progress bar; then the agents grouped by workflow phase, each
- * with its model, what it is doing right now, and its clock. Past a few
- * dozen agents a phase becomes a dot grid (one dot per agent, click to
- * inspect) with rows kept for the ones still running or failed.
+ * The agents a turn started, drawn in the conversation the way Claude Code
+ * draws them — "Running 3 agents…" over a tree, one branch per agent with its
+ * tool uses, tokens and time, and under it (⎿) what it is doing now, or
+ * "Done (12 tool uses · 23.4K tokens · 1m 3s)". "+N more tool uses" opens its
+ * latest calls in place. On top of that: the model each agent runs on, a
+ * workflow's name and phases, a progress bar, live clocks, and — for a phase
+ * of dozens or thousands — a dot grid with branches only for agents still
+ * running or failed. The card never folds away with the tool calls around it.
  */
 
 import { useEffect, useMemo, useState, type ReactElement } from 'react'
@@ -22,11 +24,11 @@ import type { AgentMember } from './types.js'
 
 type Tone = 'working' | 'done' | 'failed' | 'stopped'
 
-/** Rows shown per phase before "Show all". */
+/** Branches shown per phase before "Show all". */
 const ROWS = 8
-/** A phase this large draws as a dot grid, with rows only for live and failed agents. */
+/** A phase this large draws as a dot grid, with branches only for live and failed agents. */
 const DENSE_AT = 60
-/** Rows rendered per page once "Show all" is open, so thousands never mount at once. */
+/** Branches rendered per page once "Show all" is open, so thousands never mount at once. */
 const PAGE = 200
 
 /** An agent's state as the card draws it. */
@@ -79,9 +81,16 @@ function clock(member: AgentMember, now: number): string {
   return elapsedOf(Math.max(0, (end - member.startedAt) / 1_000))
 }
 
-function tokensLabel(tokens: number | undefined): string {
+/** "8.1K tokens" — Claude Code's unit, one decimal under a million. */
+export function tokensLabel(tokens: number | undefined, unit = 'tokens'): string {
   if (!tokens) return ''
-  return tokens >= 1_000_000 ? `${(tokens / 1_000_000).toFixed(1)}M tok` : tokens >= 1_000 ? `${Math.round(tokens / 1_000)}K tok` : `${tokens} tok`
+  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M ${unit}`
+  if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(1)}K ${unit}`
+  return `${tokens} ${unit}`
+}
+
+function uses(count: number | undefined): string {
+  return count ? `${count} tool use${count === 1 ? '' : 's'}` : ''
 }
 
 function Glyph({ tone }: { tone: Tone }): ReactElement {
@@ -91,24 +100,34 @@ function Glyph({ tone }: { tone: Tone }): ReactElement {
   return <span className="acard__dash" />
 }
 
-function AgentRow({ row, now, open }: { row: Row; now: number; open: (id: string) => void }): ReactElement {
+/** One branch: the agent, then ⎿ its current action or outcome, then (opened) its latest calls. */
+function AgentBranch({ row, now, open }: { row: Row; now: number; open: (id: string) => void }): ReactElement {
   const { member, tone } = row
+  const [opened, setOpened] = useState(false)
   const kind = agentKindLabel(member)
-  const detail = tone === 'working' ? member.activity : tone === 'failed' ? member.error?.split('\n')[0] : member.summary
   const time = clock(member, now)
-  return <li>
+  const stats = [uses(member.toolUses), tokensLabel(member.tokens), time].filter(Boolean).join(' · ')
+  const recent = member.recentTools ?? []
+  const hidden = Math.max(0, (member.toolUses ?? recent.length) - (opened ? recent.length : 1))
+  return <li className="acard__node" data-tone={tone}>
     <button className="acard__row" data-tone={tone} onClick={() => open(member.runtimeId || member.key)} aria-label={`Inspect agent: ${member.title}`}>
       <span className="acard__glyph" aria-hidden="true"><Glyph tone={tone} /></span>
-      <span className="acard__body">
-        <span className="acard__t">{member.title}</span>
-        {(kind || detail) && <span className="acard__meta">
-          {kind && <span className="acard__kind">{kind}</span>}
-          {detail && <span className={tone === 'failed' ? 'acard__error' : 'acard__act'} title={tone === 'failed' ? member.error : detail}>{detail}</span>}
-        </span>}
-      </span>
-      <span className="acard__s">{time ? <span className="acard__time">{time}</span> : null}{tone === 'working' && member.tokens ? <span className="acard__tok">{tokensLabel(member.tokens)}</span> : null}{!time && WORD[tone]}</span>
-      <Icon name="chevron" size={12} />
+      <span className="acard__t">{member.title}</span>
+      {kind && <span className="acard__kind">{kind}</span>}
+      <span className="acard__stats">{stats}</span>
     </button>
+    <div className="acard__trail">
+      <span className="acard__elbow" aria-hidden="true">⎿</span>
+      {tone === 'working' && <span className="acard__act">{member.activity ?? (recent.at(-1) || 'Starting')}</span>}
+      {tone === 'done' && <span className="acard__outcome">Done{stats ? ` (${stats})` : ''}</span>}
+      {tone === 'stopped' && <span className="acard__outcome">Stopped{stats ? ` (${stats})` : ''}</span>}
+      {tone === 'failed' && <><span className="acard__outcome acard__outcome--failed">Failed:</span><span className="acard__error" title={member.error}>{member.error?.split('\n')[0] ?? 'the agent ended with an error'}</span></>}
+      {!opened && recent.length > 1 && hidden > 0 && <button className="acard__more-tools" aria-expanded={false} onClick={() => setOpened(true)}>+{hidden} more tool use{hidden === 1 ? '' : 's'}</button>}
+      {opened && hidden > 0 && <button className="acard__more-tools" onClick={() => open(member.runtimeId || member.key)}>{hidden} earlier in its activity</button>}
+      {opened && <button className="acard__more-tools" aria-expanded onClick={() => setOpened(false)}>Hide</button>}
+    </div>
+    {tone === 'done' && member.summary && <p className="acard__summary">{member.summary}</p>}
+    {opened && <ol className="acard__tools">{recent.map((line, index) => <li key={index}>{line}</li>)}</ol>}
   </li>
 }
 
@@ -150,7 +169,7 @@ function PhaseSection({ phase, index, total, now, open, expanded, onExpand }: {
       </span>
     </div>}
     {dense && !expanded && <DotGrid rows={phase.rows} open={open} />}
-    {listed.length > 0 && <ul className="acard__list">{listed.map(row => <AgentRow key={row.member.key} row={row} now={now} open={open} />)}</ul>}
+    {listed.length > 0 && <ul className="acard__tree">{listed.map(row => <AgentBranch key={row.member.key} row={row} now={now} open={open} />)}</ul>}
     {(hidden > 0 || expanded) && <div className="acard__more">
       {!expanded && hidden > 0 && <button onClick={onExpand}>Show all {phase.rows.length}</button>}
       {expanded && phase.rows.length > page * PAGE && <button onClick={() => setPage(value => value + 1)}>Show {Math.min(PAGE, phase.rows.length - page * PAGE)} more</button>}
@@ -173,21 +192,26 @@ export function AgentsCard({ members }: { members: readonly AgentMember[] }): Re
   const first = starts.length ? Math.min(...starts) : undefined
   const last = tally.working ? now : Math.max(0, ...members.map(member => member.finishedAt ?? 0))
   const elapsed = first !== undefined && last > first ? elapsedOf((last - first) / 1_000) : ''
+  const totalTokens = members.reduce((sum, member) => sum + (member.tokens ?? 0), 0)
+  const totalUses = members.reduce((sum, member) => sum + (member.toolUses ?? 0), 0)
   const models = [...new Set(members.map(member => member.model).filter((model): model is string => Boolean(model)))]
   const inspect = (id: string) => navigate('activity', id)
-  const title = label ?? `${members.length} subagent${members.length === 1 ? '' : 's'}`
+  const n = members.length
+  const title = label ?? (tally.working ? `Running ${n} agent${n === 1 ? '' : 's'}…` : `${n} agent${n === 1 ? '' : 's'} finished`)
+  const sub = [
+    label ? `${n} agent${n === 1 ? '' : 's'}` : '',
+    phases.length > 1 ? `${phases.length} phases` : '',
+    models.length > 0 && models.length <= 3 ? models.map(shortModel).join(', ') : models.length > 3 ? `${models.length} models` : '',
+    uses(totalUses),
+    tokensLabel(totalTokens),
+  ].filter(Boolean).join(' · ')
   return (
     <section className="acard" data-state={tally.working ? 'working' : tally.failed ? 'failed' : 'done'} aria-label={label ? `Workflow: ${label}` : 'Subagents'}>
       <button className="acard__head" onClick={() => setOpen(value => !value)} aria-expanded={open}>
         <span className="acard__icon">{tally.working ? <AgentOrb size={20} state="connecting" /> : <Icon name="agent" size={15} />}</span>
         <span className="acard__heading">
           <span className="acard__title">{title}</span>
-          <span className="acard__sub">
-            {label && `${members.length} agent${members.length === 1 ? '' : 's'}`}
-            {phases.length > 1 && `${label ? ' · ' : ''}${phases.length} phases`}
-            {models.length > 0 && models.length <= 3 && `${label || phases.length > 1 ? ' · ' : ''}${models.map(shortModel).join(', ')}`}
-            {models.length > 3 && `${label || phases.length > 1 ? ' · ' : ''}${models.length} models`}
-          </span>
+          {sub && <span className="acard__sub">{sub}</span>}
         </span>
         <span className="acard__counts">
           {tally.working > 0 && <span data-tone="working">{tally.working} working</span>}

@@ -593,7 +593,7 @@ test('the rail separates legacy template-forge traces from Creator mode', () => 
   expect(html).toContain('data-state="ok"')
 })
 
-test('spawn requests stay inside closed chat work groups and remain discoverable in the agent panel', () => {
+test('agents stay visible in the conversation when the tool calls around them are folded', () => {
   const html = render(
     snapshot({
       currentId: 'c1',
@@ -612,13 +612,14 @@ test('spawn requests stay inside closed chat work groups and remain discoverable
       ],
     }),
   )
-  // No turn is running: a child that outlives it is noted, not called "Working".
+  // The spawn call folds into its work group; the agents it started do not.
+  // Claude Code never hides running agents behind a collapsed tool list.
   expect(html).toContain('<details class="activity-group">')
   expect(html).toContain('Started 2 agents')
-  expect(html).toContain('1 agent still running')
-  expect(html).toContain('1 failed')
-  expect(html.slice(0, html.indexOf('</main>'))).not.toContain('Map entry points')
-  expect(html).toContain('Map entry points')
+  const conversation = html.slice(0, html.indexOf('</main>'))
+  expect(conversation).toContain('Map entry points')
+  expect(conversation.indexOf('Map entry points')).toBeGreaterThan(conversation.indexOf('</details>'))
+  expect(conversation).toContain('Running 2 agents…')
   // The rail lists agents as flat rows sorted by urgency, so a provisional
   // spawn is still named and a finished one never outranks a live one.
   expect(html).toContain('awaiting runtime status')
@@ -1319,7 +1320,7 @@ test('the subagents card shows progress, each agent’s model kind, and why one 
       { key: 'c:1', title: 'R6-S6 layers review', status: 'working', model: 'gpt-6-sol', providerProfile: 'codex', reasoningEffort: 'high' },
       { key: 'c:2', title: 'R6-S8 CI review', status: 'completed' },
   ] }))
-  expect(html).toContain('3 subagents')
+  expect(html).toContain('Running 3 agents…')
   expect(html).toContain('role="progressbar"')
   expect(html).toContain('codex/gpt-6-sol[high]')
   expect(html).toContain('Subagent provider request failed')

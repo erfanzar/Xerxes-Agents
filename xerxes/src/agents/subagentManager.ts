@@ -1913,7 +1913,8 @@ function appendThinkingTail(burst: ThinkingBurst, text: string): void {
 function previewToolInput(inputs: Readonly<Record<string, unknown>>): string {
   const pieces: string[] = []
   for (const [key, value] of Object.entries(inputs)) {
-    const text = String(value)
+    // An argv reads as a command line; String() would join it with commas.
+    const text = Array.isArray(value) ? value.map(String).join(' ') : String(value)
     pieces.push(`${key}=${text.length > 60 ? `${text.slice(0, 57)}…` : text}`)
     if (pieces.join(', ').length > 200) break
   }

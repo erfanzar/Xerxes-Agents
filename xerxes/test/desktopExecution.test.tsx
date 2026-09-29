@@ -154,8 +154,11 @@ test('reasoning owns the work group before tools, notices and agents arrive', ()
   builder.push('notification', { message: 'Background agent completed' })
   builder.pushAgents([{ key: 'child', title: 'Reviewer', status: 'working' }])
   const during = builder.snapshot(true)
-  expect(keyedActivityGroups(during)).toHaveLength(1)
-  expect(keyedActivityGroups(during)[0]!.key).toBe(initial)
+  // The work group keeps its identity; the agents stand on their own so they
+  // stay visible when that group is folded.
+  const groups = keyedActivityGroups(during)
+  expect(groups[0]!.key).toBe(initial)
+  expect(groups.filter(group => group.blocks.some(block => block.kind === 'agents'))).toEqual([expect.objectContaining({ blocks: [expect.objectContaining({ kind: 'agents' })] })])
   expect(during.find(block => block.kind === 'tools')?.kind === 'tools' && (during.find(block => block.kind === 'tools') as Extract<typeof during[number], { kind: 'tools' }>).items[0]?.state).toBe('working')
   builder.push('tool_result', { tool_call_id: 'slow-call', return_value: 'kept result' })
   expect(builder.snapshot(true).filter(block => block.kind === 'tools')).toHaveLength(1)

@@ -83,6 +83,92 @@ export function RailAgents({ rows, onInspect }: {
   )
 }
 
+interface WorkflowRun {
+  readonly id: string
+  readonly label: string
+  readonly phases: readonly { readonly name: string; readonly rows: readonly SessionRow[] }[]
+  readonly rows: readonly SessionRow[]
+}
+
+/** The fleet's workflow runs, newest first, each with its agents by phase. */
+export function workflowRuns(rows: readonly SessionRow[]): WorkflowRun[] {
+  const runs = new Map<string, { label: string; phases: Map<string, SessionRow[]>; rows: SessionRow[] }>()
+  for (const row of rows) {
+    const group = row.agentDetails?.group
+    if (!group) continue
+    let run = runs.get(group.id)
+    if (!run) { run = { label: group.label ?? 'Workflow', phases: new Map(), rows: [] }; runs.set(group.id, run) }
+    run.rows.push(row)
+    const phase = group.phase ?? ''
+    const bucket = run.phases.get(phase) ?? []
+    bucket.push(row)
+    run.phases.set(phase, bucket)
+  }
+  return [...runs.entries()]
+    .map(([id, run]) => ({ id, label: run.label, rows: run.rows, phases: [...run.phases.entries()].map(([name, phaseRows]) => ({ name, rows: phaseRows })) }))
+    .reverse()
+}
+
+/**
+ * Workflow runs get their own card: a run is one unit of work with phases,
+ * and mixed into the flat agent list its dozens of agents buried everything
+ * else. A running workflow opens to its live agents; a finished one is a
+ * single line with its tally until opened.
+ */
+export function RailWorkflows({ rows, onInspect }: {
+  rows: readonly SessionRow[]
+  onInspect: (id: string) => void
+}): ReactElement | null {
+  const runs = workflowRuns(rows)
+  const [toggled, setToggled] = useState<ReadonlySet<string>>(() => new Set())
+  if (runs.length === 0) return null
+  return (
+    <section className="railcard" aria-label="Workflows">
+      <header className="railcard__head">
+        <span className="railcard__title">Workflows</span>
+        <span className="railcard__meta">{runs.length}</span>
+      </header>
+      {runs.map(run => {
+        const tones = run.rows.map(row => agentState(row.status).tone)
+        const working = tones.filter(tone => tone === 'working').length
+        const failed = tones.filter(tone => tone === 'failed').length
+        const done = tones.filter(tone => tone === 'done').length
+        const open = toggled.has(run.id) ? working === 0 : working > 0
+        return (
+          <div className="railflow" key={run.id} data-state={working ? 'working' : failed ? 'failed' : 'done'}>
+            <button className="railflow__head" aria-expanded={open} onClick={() => setToggled(current => {
+              const next = new Set(current)
+              if (next.has(run.id)) next.delete(run.id)
+              else next.add(run.id)
+              return next
+            })}>
+              <span className="railflow__text"><span className="railflow__name">{run.label}</span>
+              <span className="railrow__meta">{[working ? `${working} working` : '', done ? `${done} done` : '', failed ? `${failed} failed` : ''].filter(Boolean).join(' · ')}</span></span>
+              <Icon name="chevron" size={12} />
+            </button>
+            {open && run.phases.map(phase => (
+              <div className="railflow__phase" key={phase.name || 'agents'}>
+                {(phase.name || run.phases.length > 1) && <div className="railflow__phasename">{phase.name || 'Agents'} <span>{phase.rows.length}</span></div>}
+                {[...phase.rows].sort(byUrgency).slice(0, 12).map(row => {
+                  const state = agentState(row.status)
+                  const kind = agentKindLabel(row.agentDetails)
+                  return (
+                    <button className="railrow" key={row.id} data-state={state.tone} onClick={() => onInspect(row.id)} title={`Inspect ${row.title}${kind ? ` (${kind})` : ''}`}>
+                      <span className="railrow__name agentname agentname--stack"><span className="agentname__t">{row.title}</span>{kind && <span className="agentname__kind">({kind})</span>}</span>
+                      <span className="railrow__meta">{state.label.toLowerCase()}</span>
+                    </button>
+                  )
+                })}
+                {phase.rows.length > 12 && <div className="railflow__rest">{phase.rows.length - 12} more in this phase</div>}
+              </div>
+            ))}
+          </div>
+        )
+      })}
+    </section>
+  )
+}
+
 export function RailFiles({ files, onOpen }: {
   files: readonly DiffFile[]
   /** Open Session edits on this file's diff. */

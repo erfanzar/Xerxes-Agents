@@ -121,6 +121,9 @@ export interface AgentMember {
   readonly tokens?: number
   /** First line of its result, once done. */
   readonly summary?: string
+  /** Tool calls made so far, and the latest few as readable phrases (newest last). */
+  readonly toolUses?: number
+  readonly recentTools?: readonly string[]
   /** Store-local identity: spawn call id + index, or the daemon snapshot id. */
   readonly key: string
   readonly runtimeId?: string

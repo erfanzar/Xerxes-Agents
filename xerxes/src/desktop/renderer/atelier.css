@@ -2693,6 +2693,45 @@ html,body,#root,.app.atelier{background:transparent}
 .atelier .acard__more{display:flex;gap:4px;padding:0 10px 4px}
 .atelier .acard__more button{padding:4px 8px;border:0;border-radius:7px;background:transparent;font:400 12px/1.2 var(--sans);color:var(--x-secondary);cursor:pointer}
 .atelier .acard__more button:hover{background:var(--x-selected);color:var(--x-title)}
+/* Agent tree (Claude Code's shape): a branch per agent, ⎿ its action or outcome. */
+.atelier .acard__tree{display:grid;gap:0;margin:0;padding:2px 12px 6px 22px;list-style:none}
+.atelier .acard__node{position:relative;display:grid;gap:1px;padding:2px 0 4px 14px}
+.atelier .acard__node::before{content:'';position:absolute;left:0;top:0;bottom:0;border-left:1px solid color-mix(in srgb,var(--x-title) 16%,transparent)}
+.atelier .acard__node:last-child::before{bottom:auto;height:17px}
+.atelier .acard__node::after{content:'';position:absolute;left:0;top:17px;width:9px;border-top:1px solid color-mix(in srgb,var(--x-title) 16%,transparent)}
+.atelier .acard__tree .acard__row{display:grid;grid-template-columns:18px minmax(0,auto) auto 1fr;align-items:center;gap:8px;width:100%;min-height:30px;padding:3px 8px 3px 4px;border:0;border-radius:7px;background:transparent;text-align:left;color:var(--x-prose);cursor:pointer}
+.atelier .acard__tree .acard__row:hover,.atelier .acard__tree .acard__row:focus-visible{background:var(--x-selected)}
+.atelier .acard__tree .acard__t{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:500 13.5px/1.3 var(--sans);color:var(--x-title)}
+.atelier .acard__tree .acard__row[data-tone='done'] .acard__t,.atelier .acard__tree .acard__row[data-tone='stopped'] .acard__t{font-weight:400;color:var(--x-secondary)}
+.atelier .acard__tree .acard__kind{font:400 11.5px/1.2 var(--mono);color:var(--x-meta);white-space:nowrap}
+.atelier .acard__stats{justify-self:end;font:400 11.5px/1.2 var(--mono);color:var(--x-meta);white-space:nowrap}
+.atelier .acard__row[data-tone='working'] .acard__stats{color:var(--x-working,var(--x-accent))}
+.atelier .acard__trail{display:flex;align-items:baseline;gap:6px;min-width:0;padding:0 8px 0 30px;font:400 12.5px/1.45 var(--sans);color:var(--x-secondary)}
+.atelier .acard__elbow{flex:none;color:var(--x-meta);font-family:var(--mono)}
+.atelier .acard__trail>.acard__more-tools:first-of-type{margin-left:auto}
+.atelier .acard__trail .acard__act{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--x-working,var(--x-accent))}
+.atelier .acard__outcome{flex:none;color:var(--x-done)}
+.atelier .acard__outcome--failed{color:var(--x-failed,#e5484d)}
+.atelier .acard__trail .acard__error{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.atelier .acard__more-tools{flex:none;padding:0 6px;border:0;border-radius:5px;background:transparent;font:400 12px/1.5 var(--sans);color:var(--x-meta);cursor:pointer}
+.atelier .acard__more-tools:hover{background:var(--x-selected);color:var(--x-title)}
+.atelier .acard__summary{margin:0;padding:0 8px 0 52px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:400 12.5px/1.45 var(--sans);color:var(--x-meta)}
+.atelier .acard__tools{display:grid;gap:1px;margin:2px 0 2px;padding:0 8px 0 52px;list-style:none;font:400 12px/1.5 var(--mono);color:var(--x-secondary)}
+.atelier .acard__tools li{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.atelier .railflow{display:grid;gap:2px;padding:2px 0 6px}
+.atelier .railflow+.railflow{border-top:1px solid color-mix(in srgb,var(--x-title) 6%,transparent)}
+.atelier .railflow__text{display:grid;gap:2px;min-width:0}
+.atelier .railflow__head{display:grid;grid-template-columns:minmax(0,1fr) 12px;align-items:center;gap:10px;width:100%;min-height:34px;padding:6px 8px;border:0;border-radius:8px;background:transparent;text-align:left;color:var(--x-title);cursor:pointer}
+.atelier .railflow__head:hover{background:var(--x-selected)}
+.atelier .railflow__head>svg{color:var(--x-meta);transition:transform 160ms ease}
+.atelier .railflow__head[aria-expanded='true']>svg{transform:rotate(90deg)}
+.atelier .railflow__name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:500 13.5px/1.3 var(--sans)}
+.atelier .railflow[data-state='working'] .railflow__head .railrow__meta{color:var(--x-working,var(--x-accent))}
+.atelier .railflow[data-state='failed'] .railflow__head .railrow__meta{color:var(--x-failed,#e5484d)}
+.atelier .railflow__phase{display:grid;gap:0;padding-left:10px;margin-left:8px;border-left:1px solid color-mix(in srgb,var(--x-title) 12%,transparent)}
+.atelier .railflow__phasename{padding:6px 8px 2px;font:500 12px/1.2 var(--sans);color:var(--x-secondary)}
+.atelier .railflow__phasename span{font-weight:400;color:var(--x-meta)}
+.atelier .railflow__rest{padding:2px 8px;font:400 12px/1.4 var(--sans);color:var(--x-meta)}
 
 /* Agent inspector prose: the summary as Markdown, activity as a list. */
 .atelier .agent-inspector__summary .md{font:400 13px/1.6 var(--sans);color:var(--x-prose)}

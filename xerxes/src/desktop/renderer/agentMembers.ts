@@ -76,7 +76,10 @@ function enrich(member: AgentMember, row: SessionRow, status: string): AgentMemb
   const activity = working ? agentActivity(details) : undefined
   const summary = !working ? firstLine(details.summary) : undefined
   const finishedAt = working ? undefined : member.finishedAt ?? details.lastEventAt
-  const { activity: _activity, summary: _summary, finishedAt: _finished, ...rest } = member
+  const calls = details.toolCalls ?? []
+  const toolUses = Math.max(details.toolCount ?? 0, calls.length)
+  const recentTools = calls.slice(-RECENT_TOOLS).map(call => toolPhrase(readableCall(call)))
+  const { activity: _activity, summary: _summary, finishedAt: _finished, recentTools: _recent, toolUses: _uses, ...rest } = member
   return {
     ...rest,
     ...(details.group ? { group: details.group } : {}),
@@ -90,6 +93,8 @@ function enrich(member: AgentMember, row: SessionRow, status: string): AgentMemb
     ...(tokens > 0 ? { tokens } : {}),
     ...(activity ? { activity } : {}),
     ...(summary ? { summary } : {}),
+    ...(toolUses ? { toolUses } : {}),
+    ...(recentTools.length ? { recentTools } : {}),
   }
 }
 
@@ -99,6 +104,7 @@ function sameMember(left: AgentMember, right: AgentMember): boolean {
     && left.model === right.model && left.startedAt === right.startedAt && left.finishedAt === right.finishedAt
     && left.group?.id === right.group?.id && left.group?.phase === right.group?.phase && left.group?.label === right.group?.label
     && left.providerProfile === right.providerProfile && left.baseAgent === right.baseAgent
+    && left.toolUses === right.toolUses && (left.recentTools ?? []).join('\n') === (right.recentTools ?? []).join('\n')
 }
 
 /** What a working agent is doing now: its running tool, else what it last wrote or thought. */
@@ -110,15 +116,35 @@ export function agentActivity(details: NonNullable<SessionRow['agentDetails']>):
   return undefined
 }
 
-/** A child's tool arguments arrive as raw JSON; pull out the part a person reads. */
-function readableCall(call: ToolItem): ToolItem {
-  let args: Record<string, unknown> = {}
-  try {
-    const parsed: unknown = JSON.parse(call.input || call.arg || '{}')
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) args = parsed as Record<string, unknown>
-  } catch {
-    return call
+/** The last few tool uses a row can expand to, like Claude Code's "+N more tool uses". */
+const RECENT_TOOLS = 5
+
+/**
+ * A child's tool arguments arrive as the runtime's bounded preview —
+ * `cmd=env, args=A=1,B=2, workdir=.` — or, from older runtimes, as JSON.
+ * Either way, pull out the part a person reads.
+ */
+export function previewArguments(raw: string): Record<string, unknown> {
+  const text = raw.trim()
+  if (!text) return {}
+  if (text.startsWith('{')) {
+    try {
+      const parsed: unknown = JSON.parse(text)
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as Record<string, unknown>
+    } catch { /* a truncated JSON preview falls through to the key=value form */ }
   }
+  const args: Record<string, unknown> = {}
+  for (const piece of text.split(/, (?=[A-Za-z_][\w]*=)/)) {
+    const equals = piece.indexOf('=')
+    if (equals <= 0) continue
+    args[piece.slice(0, equals)] = piece.slice(equals + 1)
+  }
+  return args
+}
+
+function readableCall(call: ToolItem): ToolItem {
+  const args = previewArguments(call.input || call.arg || '')
+  if (!Object.keys(args).length) return call
   const pick = (...keys: string[]) => {
     for (const key of keys) {
       const value = args[key]
