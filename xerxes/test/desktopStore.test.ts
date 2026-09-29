@@ -4,7 +4,7 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 
 import { daemonCompatibilityWarning } from '../src/desktop/renderer/buildInfo.js'
-import { Store, type XerxesLike } from '../src/desktop/renderer/store.js'
+import { STOP_CONFIRM_MS, Store, type XerxesLike } from '../src/desktop/renderer/store.js'
 import type { DaemonEvent, SessionRow } from '../src/desktop/renderer/types.js'
 
 /**
@@ -2251,6 +2251,29 @@ describe('pending interactions are bounded by their turn', () => {
     expect(store.getSnapshot().approval).toBeNull()
     expect(bridge.calls.some(call => call.method === 'turn.cancel')).toBe(true)
   })
+
+  test('one stray escape arms the stop instead of cancelling the task and its agents', async () => {
+    const { bridge, store } = await start()
+    bridge.push('turn_begin', { text: 'go' })
+    store.escapeStop()
+    expect(store.getSnapshot().stopArmed).toBe(true)
+    expect(bridge.calls.some(call => call.method === 'turn.cancel')).toBe(false)
+    store.escapeStop()
+    expect(store.getSnapshot().stopArmed).toBe(false)
+    expect(bridge.calls.filter(call => call.method === 'turn.cancel')).toHaveLength(1)
+  })
+
+  test('an armed escape lapses, so a later single press only arms again', async () => {
+    const { bridge, store } = await start()
+    bridge.push('turn_begin', { text: 'go' })
+    store.escapeStop()
+    await Bun.sleep(STOP_CONFIRM_MS + 50)
+    expect(store.getSnapshot().stopArmed).toBe(false)
+    store.escapeStop()
+    expect(bridge.calls.some(call => call.method === 'turn.cancel')).toBe(false)
+    store.cancel()
+    expect(store.getSnapshot().stopArmed).toBe(false)
+  }, 10_000)
 
   test('dismissing hides the card without answering the daemon', async () => {
     const { bridge, store } = await start()

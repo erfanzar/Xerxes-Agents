@@ -1619,7 +1619,7 @@ export function CommandPalette({ snap }: { snap: Snapshot }): ReactElement | nul
         run: () => store.togglePlanMode(),
       },
       ...(snap.turnActive
-        ? [{ id: 'stop', icon: 'stop', label: 'Stop the running task', hint: 'esc', run: () => store.cancel() } satisfies PaletteAction]
+        ? [{ id: 'stop', icon: 'stop', label: 'Stop the running task', hint: 'esc esc', run: () => store.cancel() } satisfies PaletteAction]
         : []),
       {
         id: 'goal',

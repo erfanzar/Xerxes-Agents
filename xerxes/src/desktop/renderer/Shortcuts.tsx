@@ -46,7 +46,8 @@ const GROUPS: readonly { readonly title: string; readonly items: readonly Bindin
     items: [
       { keys: '⏎', label: 'Send — or queue as steering while the agent acts' },
       { keys: '⇧⏎', label: 'Newline' },
-      { keys: 'esc', label: 'Close what is open, or stop the running task' },
+      { keys: 'esc', label: 'Close what is open' },
+      { keys: 'esc esc', label: 'Stop the running task and its agents' },
     ],
   },
   {

@@ -1845,7 +1845,9 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
         </div>
       )}
       {snap.submissionPending && !snap.turnActive && <div className="streamstatus composer-status" role="status"><AgentOrb size={20} state="connecting" /><span className="streamstatus__phrase">Sending…</span></div>}
-      {snap.turnActive && <div className="streamstatus composer-status" role="status" aria-live="polite"><AgentOrb size={20} state={orbStateOf(snap)} /><span className="streamstatus__phrase">{composerPhraseOf(snap)}</span><span className="streamstatus__clock">{turnDurOf(snap.turnSeconds)}</span></div>}
+      {snap.turnActive && <div className={`streamstatus composer-status${snap.stopArmed ? ' streamstatus--armed' : ''}`} role="status" aria-live="polite"><AgentOrb size={20} state={orbStateOf(snap)} />{snap.stopArmed
+        ? <span className="streamstatus__phrase">Press <kbd>esc</kbd> again to stop this task and its agents</span>
+        : <span className="streamstatus__phrase">{composerPhraseOf(snap)}</span>}<span className="streamstatus__clock">{turnDurOf(snap.turnSeconds)}</span></div>}
       <ComposerTaskSummary snap={snap} />
       <RepoBar snap={snap} />
       <div className="composer-dock">
@@ -1884,7 +1886,7 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
         />
         {/* Stop while a turn runs and nothing is typed; otherwise send (or queue). */}
         {(snap.turnActive || snap.submissionPending) && !draft.trim()
-          ? <button className="composer__send composer__send--stop" title="Stop (esc)" aria-label="Stop" onClick={() => store.cancel()}><Icon name="stop" size={18} /></button>
+          ? <button className="composer__send composer__send--stop" title="Stop (esc esc)" aria-label="Stop" onClick={() => store.cancel()}><Icon name="stop" size={18} /></button>
           : <button
               className="composer__send"
               disabled={!ready || !draft.trim() || snap.submissionPending}
@@ -2235,7 +2237,9 @@ function GlobalKeys({ snap, closeSurface }: { snap: Snapshot; closeSurface: (() 
         }
         if (snap.turnActive) {
           event.preventDefault()
-          store.cancel()
+          // Two presses: one stray Escape must not cancel the turn and every
+          // agent it spawned. The Stop button stays a single click.
+          store.escapeStop()
         }
         return
       }

@@ -2765,6 +2765,8 @@ html,body,#root,.app.atelier{background:transparent}
 .atelier .streamstatus{align-items:center;gap:7px;color:var(--x-secondary);font:400 13px/1.4 var(--sans)}
 .atelier .streamstatus::before{content:none}
 .atelier .streamstatus__phrase{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--x-prose)}
+.atelier .streamstatus--armed .streamstatus__phrase{color:var(--x-needs-text)}
+.atelier .streamstatus--armed kbd{font:inherit;font-family:var(--x-mono,ui-monospace,monospace);font-size:.92em;padding:0 5px;border:1px solid var(--x-needs-border);border-radius:5px}
 .atelier .streamstatus__clock{flex:none;color:var(--x-meta);font-variant-numeric:tabular-nums}
 .atelier .railstatus__orb{margin:0 0 0 -2px}
 .atelier .railtodos li{grid-template-columns:20px minmax(0,1fr)}

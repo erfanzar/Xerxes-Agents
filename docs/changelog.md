@@ -7,6 +7,32 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## Unreleased
+
+- Runtime: compaction now fires on the provider's real prompt size. The context
+  estimate ran about 1.8x low on code-heavy Claude transcripts, so a 1M window the
+  meter put near half full was rejected as full and auto-compaction never started.
+  Each round's reported prompt tokens now calibrate the estimate, which is kept on
+  the session for the pre-turn check and the context meter.
+- Runtime: a long goal round can overflow and compact more than once. The
+  compact-and-retry was spent once per turn, so the second overflow in an
+  hours-long round blocked the goal.
+- Runtime: Stop takes effect at once. A tool that ignored the stop (a
+  `check_command` waiting up to a minute on a background build) held the turn
+  open; interruptible tools are no longer awaited after a stop, and
+  `check_command`'s wait ends on it.
+- Desktop: Escape needs a second press within two seconds to stop a running task.
+  One stray press (reaching for a screenshot shortcut) cancelled the task and every
+  agent it had spawned; it now shows "Press esc again to stop". The Stop button is
+  still one click.
+- Desktop: connecting to an SSH workspace copies this Mac's key-based provider
+  profiles (OpenRouter, Z.ai, Kimi and the like) to the host, so they work there
+  without re-entering keys. The host's own profiles and selection are kept;
+  Claude Code and ChatGPT sign-ins stay per machine.
+- Providers: the built-in Claude Code profile is now `claude-code` instead of
+  `cc`. Saved profiles and selections migrate on load, and `cc` still resolves
+  for older sessions, `/provider cc` and `cc/<model>` ids.
+
 ## 0.6.3 — 2026-09-29
 
 - Desktop: much lower energy use. Every workspace page a window has opened kept

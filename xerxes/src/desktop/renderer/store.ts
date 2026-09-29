@@ -300,6 +300,12 @@ export interface Snapshot {
   readonly plan: PlanState | null
   readonly log: readonly LogEntry[]
   readonly failed: FailedTurn | null
+  /**
+   * Escape pressed once over a running turn. A second press inside
+   * {@link STOP_CONFIRM_MS} stops it; a stray one (reaching for a screenshot
+   * shortcut) only shows the hint instead of cancelling every agent.
+   */
+  readonly stopArmed: boolean
   // ── overlays ──
   readonly settingsOpen: boolean
   readonly settingsTab: SettingsTab
@@ -697,6 +703,8 @@ const SNIPPET_CAP = 64
 const HEARTBEAT_MS = 5_000
 /** A visible but unfocused window refreshes its session lists this often. */
 const UNFOCUSED_LIST_REFRESH_MS = 30_000
+/** How long a first Escape over a running turn waits for the second that stops it. */
+export const STOP_CONFIRM_MS = 2_000
 
 
 /** Compact one-line summary of an event for the Log tab. */
@@ -828,6 +836,7 @@ export class Store {
       todos: null,
       log: [],
       failed: null,
+      stopArmed: false,
       settingsOpen: false,
       settingsTab: 'general',
       paletteOpen: false,
@@ -937,6 +946,7 @@ export class Store {
   private refreshingContexts = false
   /** When the heartbeat last refreshed the session lists (see beat()). */
   private lastListRefresh = 0
+  private stopArmTimer: ReturnType<typeof setTimeout> | undefined
   private async refreshContexts(): Promise<void> {
     if (!this.bridge.getContexts || this.refreshingContexts) return
     this.refreshingContexts = true
@@ -1113,7 +1123,28 @@ export class Store {
     this.patch({ queue: this.queue })
   }
 
+  /** Escape over a running turn: arm on the first press, stop on the second. */
+  escapeStop(): void {
+    if (this.stopArmTimer !== undefined) clearTimeout(this.stopArmTimer)
+    if (this.frame.stopArmed) {
+      this.stopArmTimer = undefined
+      this.patch({ stopArmed: false })
+      this.cancel()
+      return
+    }
+    this.patch({ stopArmed: true })
+    this.stopArmTimer = setTimeout(() => {
+      this.stopArmTimer = undefined
+      this.patch({ stopArmed: false })
+    }, STOP_CONFIRM_MS)
+  }
+
   cancel(): void {
+    if (this.stopArmTimer !== undefined) {
+      clearTimeout(this.stopArmTimer)
+      this.stopArmTimer = undefined
+    }
+    if (this.frame.stopArmed) this.patch({ stopArmed: false })
     // Cancelling force-rejects any pending approval/question daemon-side.
     // Leaving the card up would offer buttons that can only answer
     // "refused" while keeping the header stuck on "needs input".
