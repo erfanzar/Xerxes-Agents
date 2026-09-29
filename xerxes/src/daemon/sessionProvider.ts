@@ -1,6 +1,6 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
-import type { ProfileStore, ProviderProfile } from '../bridge/profiles.js'
+import { canonicalProfileName, type ProfileStore, type ProviderProfile } from '../bridge/profiles.js'
 import { claudeCodeCatalog } from '../llms/claudeCodeCatalog.js'
 import { bareModel, resolveProvider } from '../llms/providerRegistry.js'
 
@@ -59,7 +59,7 @@ export function sessionProvider(profiles: Pick<ProfileStore, 'get' | 'list' | 'a
  */
 export function profileOwningModel(profiles: readonly ProviderProfile[], model: string): ProviderProfile | undefined {
   const slash = model.indexOf('/')
-  const prefix = slash > 0 ? model.slice(0, slash).toLowerCase() : ''
+  const prefix = slash > 0 ? canonicalProfileName(model.slice(0, slash).toLowerCase()) : ''
   const owners = profiles.filter(profile =>
     (prefix && (profile.name.toLowerCase() === prefix || profile.provider.toLowerCase() === prefix))
     || profile.model === model

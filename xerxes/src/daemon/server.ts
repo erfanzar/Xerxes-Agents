@@ -5859,7 +5859,7 @@ export class DaemonServer {
     const profile = profileOverride ?? this.profileStore.active();
     const providerName = resolveProviderSafely(model, profile);
 
-    // Only a Claude Code model asks Claude Code; the built-in `cc` profile is
+    // Only a Claude Code model asks Claude Code; the built-in `claude-code` profile is
     // merely the fallback for sessions whose model is something else.
     if (providerName === "claude-code" && /^claude[-_]code\//i.test(model)) {
       // What Claude Code reports for this model: its effort levels, and

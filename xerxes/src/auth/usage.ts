@@ -530,9 +530,9 @@ export async function fetchSubscriptionUsage(
   const profile = profiles.find(p => PROVIDER_ALIASES[p.provider] === provider)
 
   if (provider === 'claude') {
-    // The `cc` profile runs the Claude Code CLI on its own sign-in, so its
+    // The `claude-code` profile runs the Claude Code CLI on its own sign-in, so its
     // plan windows come from that login; every other Claude profile uses
-    // Xerxes' Anthropic session. Only `cc` ever reads Claude Code's login.
+    // Xerxes' Anthropic session. Only `claude-code` ever reads Claude Code's login.
     if (profile?.provider === 'claude-code') {
       const login = await (options.claudeCodeLogin ?? claudeCodeLogin)({ environment })
       const report = await fetchClaudeUsage(login.accessToken, { ...options, environment })

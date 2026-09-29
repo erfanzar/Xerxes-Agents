@@ -8,15 +8,23 @@ import { dirname, join } from 'node:path'
 import { xerxesHome } from '../daemon/paths.js'
 import { modelsDev, type LiveCost, type LiveReasoning } from '../llms/modelsDev.js'
 
-export const CLAUDE_CODE_PROFILE_NAME = 'cc'
-
+export const CLAUDE_CODE_PROFILE_NAME = 'claude-code'
 /**
- * What people see for a profile. The id stays as stored (`cc` is in saved
- * sessions and `/provider cc`); only the built-in Claude Code profile has a
- * friendlier name.
+ * The built-in Claude Code profile's id before it was renamed. Saved
+ * sessions, `profiles.json`, and muscle memory (`/provider cc`) still carry
+ * it, so it resolves to the current id everywhere a profile is named.
  */
+export const LEGACY_CLAUDE_CODE_PROFILE_NAME = 'cc'
+
+/** The stored id a profile name refers to: the renamed built-in, or the name itself. */
+export function canonicalProfileName(name: string): string {
+  const clean = name.trim()
+  return clean === LEGACY_CLAUDE_CODE_PROFILE_NAME ? CLAUDE_CODE_PROFILE_NAME : clean
+}
+
+/** What people see for a profile; only the built-in Claude Code profile has a friendlier name. */
 export function profileLabel(name: string): string {
-  return name === CLAUDE_CODE_PROFILE_NAME ? 'Claude Code' : name
+  return canonicalProfileName(name) === CLAUDE_CODE_PROFILE_NAME ? 'Claude Code' : name
 }
 
 export const CODEX_PROFILE_NAME = 'codex'
@@ -117,15 +125,18 @@ export class ProfileStore {
 
   /** Resolve one exact profile without changing the process-wide active selection. */
   get(name: string): ProviderProfile | undefined {
-    const clean = name.trim()
-    if (!clean) {
+    const exact = name.trim()
+    if (!exact) {
       return undefined
     }
     const profiles = this.merged(this.load())
+    if (Object.hasOwn(profiles, exact)) return profiles[exact]
+    const clean = canonicalProfileName(exact)
     return Object.hasOwn(profiles, clean) ? profiles[clean] : undefined
   }
 
   save(input: SaveProfileInput): ProviderProfile {
+    input = { ...input, name: canonicalProfileName(input.name) }
     const document = this.load()
     const existing = Object.hasOwn(document.profiles, input.name) ? document.profiles[input.name] : undefined
     const baseUrl = input.baseUrl.replace(/\/+$/, '')
@@ -152,6 +163,7 @@ export class ProfileStore {
   }
 
   updateSampling(name: string, updates: Record<string, unknown>): ProviderProfile | undefined {
+    name = canonicalProfileName(name)
     const document = this.load()
     const profile = this.ensureWritable(document, name)
     if (!profile) {
@@ -192,6 +204,7 @@ export class ProfileStore {
     name: string,
     capabilities: Readonly<Record<string, ProviderModelCapabilities>>,
   ): ProviderProfile | undefined {
+    name = canonicalProfileName(name)
     const document = this.load()
     const profile = this.ensureWritable(document, name)
     if (!profile) return undefined
@@ -226,6 +239,7 @@ export class ProfileStore {
     model: string,
     updates: ModelCapabilityUpdates,
   ): ProviderProfile | undefined {
+    name = canonicalProfileName(name)
     const document = this.load()
     const profile = this.ensureWritable(document, name)
     const id = model.trim()
@@ -243,6 +257,7 @@ export class ProfileStore {
   }
 
   delete(name: string): boolean {
+    name = canonicalProfileName(name)
     const document = this.load()
     if (!Object.hasOwn(document.profiles, name)) {
       return false
@@ -256,6 +271,7 @@ export class ProfileStore {
   }
 
   setActive(name: string): boolean {
+    name = canonicalProfileName(name)
     const document = this.load()
     if (!Object.hasOwn(this.merged(document), name)) {
       return false
@@ -292,7 +308,7 @@ export class ProfileStore {
       provider: 'claude-code',
       sampling: {},
     }
-    // Subscription-backed like `cc`: the credential is an OAuth session rather
+    // Subscription-backed like Claude Code: the credential is an OAuth session rather
     // than a stored key, so the profile carries no api_key and is listed
     // whether or not the user has signed in yet. Selecting it without a
     // session fails with the sign-in command instead of hiding the option.
@@ -336,8 +352,19 @@ export class ProfileStore {
             if (profile) profiles[name] = profile
           }
         }
+        // A store written before the rename keeps the built-in under `cc`.
+        // Carry it (and the selection) to the current id; the next write
+        // persists that. A user profile that merely happens to be called
+        // `cc` but is not Claude Code is left alone.
+        const legacy = profiles[LEGACY_CLAUDE_CODE_PROFILE_NAME]
+        const renamed = legacy?.provider === 'claude-code'
+        if (renamed) {
+          delete profiles[LEGACY_CLAUDE_CODE_PROFILE_NAME]
+          if (!Object.hasOwn(profiles, CLAUDE_CODE_PROFILE_NAME)) profiles[CLAUDE_CODE_PROFILE_NAME] = { ...legacy, name: CLAUDE_CODE_PROFILE_NAME }
+        }
+        const active = typeof parsed.active === 'string' ? parsed.active : null
         return {
-          active: typeof parsed.active === 'string' ? parsed.active : null,
+          active: renamed && active === LEGACY_CLAUDE_CODE_PROFILE_NAME ? CLAUDE_CODE_PROFILE_NAME : active,
           profiles,
         }
       }

@@ -1872,7 +1872,7 @@ export class GatewayClient extends EventEmitter {
         return {
           configured_model: (profile.provider === 'kimi-code' && !/^(kimi|k[0-9])(?:[-./]|$)/i.test(String(profile.model ?? ''))) ? '' : String(profile.model ?? ''),
           is_current: Boolean(currentName && profileName === currentName),
-          // Shown name ("Claude Code"); the slug stays the stored id (`cc`).
+          // Shown name ("Claude Code"); the slug stays the stored id (`claude-code`).
           name: String(profile.label ?? '').trim() || profileName,
           provider_type: String(profile.provider ?? ''),
           slug: profileName

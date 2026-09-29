@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 /**
- * Read-only access to the Claude Code CLI's own sign-in, so the `cc`
+ * Read-only access to the Claude Code CLI's own sign-in, so the `claude-code`
  * profile's plan windows can be shown without a separate Xerxes login.
  *
  * Claude Code keeps its OAuth credential in the macOS keychain (service

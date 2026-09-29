@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 /**
- * Claude Code as a Xerxes model provider (the built-in `cc` profile).
+ * Claude Code as a Xerxes model provider (the built-in `claude-code` profile).
  *
  * Each model step runs the local `claude` CLI in print mode on the user's own
  * Claude sign-in (Pro/Max plan). Claude Code is used as the MODEL only: its

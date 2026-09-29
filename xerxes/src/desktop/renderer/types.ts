@@ -317,7 +317,7 @@ export interface CachedModel {
 
 export interface ProviderRow {
   readonly name: string
-  /** Display name ("Claude Code" for `cc`); `name` is the stored id. */
+  /** Display name ("Claude Code" for `claude-code`); `name` is the stored id. */
   readonly label: string
   readonly provider: string
   readonly model: string

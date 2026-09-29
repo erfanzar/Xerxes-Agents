@@ -122,7 +122,7 @@ test('a delegated agent asking for another profile\'s model runs there, not on t
     profiles.setActive('zai')
     const parent = { metadata: { provider_profile: 'zai' } as Record<string, unknown> }
     // The z.ai parent accepts any id, but it listed its models and this is not one.
-    expect(agentProvider(profiles, parent, 'claude-code/opus')?.name).toBe('cc')
+    expect(agentProvider(profiles, parent, 'claude-code/opus')?.name).toBe('claude-code')
     // Its own models stay on it.
     expect(agentProvider(profiles, parent, 'glm-5.2')?.name).toBe('zai')
     // A gateway parent that has not listed models keeps a vendor-prefixed id.

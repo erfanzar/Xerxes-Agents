@@ -32,7 +32,7 @@ import {
 
 export interface UsageProfileEntry {
   readonly profile: string
-  /** Display name ("Claude Code" for `cc`). */
+  /** Display name ("Claude Code" for `claude-code`). */
   readonly label: string
   readonly provider: string
   readonly model: string
@@ -201,7 +201,7 @@ export interface BuildUsageReportOptions extends UsageRequestOptions {
   readonly fetchBalance?: typeof fetchApiBalance
   /**
    * Profiles listed whether or not the user ever signed in (the built-in
-   * `cc` and `codex`). When they are not active and have no session, they
+   * `claude-code` and `codex`). When they are not active and have no session, they
    * are left out instead of reporting "not signed in" for an account the
    * user never set up.
    */
