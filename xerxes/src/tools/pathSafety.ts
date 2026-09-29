@@ -23,7 +23,12 @@ export class WorkspacePathError extends ValidationError {
 export class WorkspacePathResolver {
   private readonly fallbackRoot: string
 
-  constructor(root: string = process.cwd(), private readonly activeRoot?: () => string | undefined) {
+  /**
+   * `readOnlyRoots` are host-owned directories a read may also reach — the
+   * runtime's spilled tool results, which it tells the model to read back.
+   * Only {@link resolveReadable} honours them; writes stay inside the workspace.
+   */
+  constructor(root: string = process.cwd(), private readonly activeRoot?: () => string | undefined, private readonly readOnlyRoots: readonly string[] = []) {
     if (!root.trim()) {
       throw new ValidationError('workspace_root', 'must not be empty', root)
     }
@@ -45,6 +50,22 @@ export class WorkspacePathResolver {
       throw new WorkspacePathError(candidate, `resolves outside workspace root ${workspaceRoot}`)
     }
     return physicalTarget
+  }
+
+  /** Like {@link resolve}, but an absolute path inside a read-only root is also accepted. */
+  async resolveReadable(candidate: string): Promise<string> {
+    const normalized = validateCandidate(candidate)
+    if (isAbsolute(normalized) && this.readOnlyRoots.length) {
+      const lexicalTarget = resolve(normalized)
+      for (const root of this.readOnlyRoots) {
+        const lexicalRoot = resolve(root)
+        if (!isWithin(lexicalRoot, lexicalTarget)) continue
+        const physicalRoot = await resolveExistingAncestor(lexicalRoot)
+        const physicalTarget = await resolveExistingAncestor(lexicalTarget)
+        if (isWithin(physicalRoot, physicalTarget)) return physicalTarget
+      }
+    }
+    return this.resolve(candidate)
   }
 
   async relative(candidate: string): Promise<string> {

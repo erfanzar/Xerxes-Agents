@@ -284,7 +284,7 @@ export async function readFile(
     requireRange(maxChars, 'max_chars', 0, Number.MAX_SAFE_INTEGER)
   }
 
-  const target = await paths.resolve(filePath)
+  const target = await paths.resolveReadable(filePath)
   await requireRegularFile(target, filePath)
   const fileInfo = await stat(target)
   const maxBytes = resolveMaxReadFileBytes()

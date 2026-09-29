@@ -1859,6 +1859,9 @@ function daemonRuntime(
       ...(host.modelInventory ? { modelInventory: host.modelInventory } : {}),
       workspaceRoot,
       activeWorkspaceRoot: () => getActiveSession<{ cwd: string }>()?.cwd,
+      // Oversized tool results spill here and the model is told to read them
+      // back; without this ReadFile refused its own runtime's file.
+      readOnlyRoots: [join(xerxesHome(), "tool-results")],
       backgroundCommands,
       ptySessions,
       generateImageTool: generateImageToolOptions(workspaceRoot),

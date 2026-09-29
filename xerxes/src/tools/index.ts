@@ -150,6 +150,8 @@ export interface CoreToolsOptions {
   readonly workspaceRoot?: string
   /** Trusted host resolver for concurrent sessions sharing one tool registry. */
   readonly activeWorkspaceRoot?: () => string | undefined
+  /** Host directories ReadFile may also read (the spilled tool-result store). */
+  readonly readOnlyRoots?: readonly string[]
 }
 
 /**
@@ -167,7 +169,7 @@ export function registerCoreTools(registry: ToolRegistry, options: CoreToolsOpti
     )
   }
   if (options.modelInventory) registerModelInventoryTool(registry, options.modelInventory)
-  const paths = new WorkspacePathResolver(options.workspaceRoot ?? process.cwd(), options.activeWorkspaceRoot)
+  const paths = new WorkspacePathResolver(options.workspaceRoot ?? process.cwd(), options.activeWorkspaceRoot, options.readOnlyRoots)
   registerFileTools(registry, paths)
   registerProjectSetupTool(registry, paths)
   if (options.includeAiTools ?? true) {
