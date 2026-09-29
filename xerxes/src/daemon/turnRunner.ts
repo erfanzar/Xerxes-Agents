@@ -17,7 +17,7 @@ import {
   renderTurnContext,
 } from '../context/assembly.js'
 import { ToolResultStorage } from '../context/toolResultStorage.js'
-import { estimateContextTokens } from '../context/windowUsage.js'
+import { CONTEXT_CALIBRATION_METADATA_KEY, contextCalibrationRatio, estimateContextTokens, promptCalibration } from '../context/windowUsage.js'
 import { ValidationError } from '../core/errors.js'
 import { classify, ErrorKind } from '../runtime/errorClassifier.js'
 import { instructionFileUpdateLayer } from '../runtime/instructionFreshness.js'
@@ -585,6 +585,7 @@ export class AgentTurnRunner implements TurnRunner {
         // Claude Code likewise thinks by default, so off has to be said.
         const thinkingRequest = thinking ? { budgetTokens: thinking.budgetTokens, effort: thinking.effort }
           : (requiresLocal || /^claude[-_]code\//i.test(attemptModel)) && sessionEffort ? { effort: 'none' } : undefined
+        const calibration = promptCalibration(contextCalibrationRatio(session.metadata, attemptModel))
         const turnEvents = withActiveSession(session, runTurn({
         turnId: session.activeTurnId,
         agentId: promptAgent?.name ?? session.agentId,
@@ -649,17 +650,23 @@ export class AgentTurnRunner implements TurnRunner {
             }
           }
         } } : {}),
-        contextCompactionDue: messages => {
+        contextCompactionDue: (messages, observedPromptTokens) => {
           const limit = contextLimit
           if (!limit || limit <= 0) return false
           const threshold = this.options.autoCompactThreshold?.() ?? 0.8
           if (threshold <= 0) return false
           const output = this.options.maxTokens ?? routedProvider?.maxOutputTokens?.(attemptModel) ?? this.options.maxOutputTokens?.(attemptModel) ?? 8192
-          return estimateContextTokens(messages as unknown as Record<string, unknown>[], {
+          const projected = calibration.project(estimateContextTokens(messages as unknown as Record<string, unknown>[], {
             model: attemptModel,
             ...(systemPrompt ? { systemPrompt } : {}),
             ...(session.requestScaffold?.toolSchemas ? { toolSchemas: session.requestScaffold.toolSchemas } : {}),
-          }) >= Math.max(4096, limit - output) * Math.min(1, threshold)
+          }), observedPromptTokens)
+          // Kept on the session so the pre-turn check and the context meter
+          // start from the measured ratio instead of the raw heuristic.
+          if (observedPromptTokens !== undefined) {
+            state.metadata[CONTEXT_CALIBRATION_METADATA_KEY] = { model: attemptModel, ratio: Math.round(calibration.ratio * 1000) / 1000 }
+          }
+          return projected >= Math.max(4096, limit - output) * Math.min(1, threshold)
         },
         persistToolResult: this.toolResultPersister(session),
         // Declared per tool at registration. Absent, the loop stays strictly
@@ -1755,7 +1762,7 @@ function daemonEventFromStream(
         },
       }
     case 'turn_done': {
-      const contextTokens = estimateContextTokens(
+      const contextTokens = contextCalibrationRatio(state.metadata, event.model) * estimateContextTokens(
         state.messages as unknown as Record<string, unknown>[],
         {
           model: event.model,
@@ -1780,7 +1787,7 @@ function daemonEventFromStream(
           input_tokens: state.totalInputTokens,
           output_tokens: state.totalOutputTokens,
           total_tokens: state.totalInputTokens + state.totalOutputTokens,
-          context_tokens: contextTokens,
+          context_tokens: Math.ceil(contextTokens),
           ...(typeof contextLimit === 'number' && contextLimit > 0 ? { max_context: contextLimit } : {}),
           mode: session.interactionMode,
           plan_mode: session.planMode,

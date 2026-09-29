@@ -351,12 +351,17 @@ export interface TurnDependencies {
   readonly persistToolResult?: (toolName: string, content: string) => string
   readonly policy?: ToolPolicy
   /**
-   * Relieve a context overflow once per turn. Absent it the loop can only
+   * Relieve a context overflow once per overflowing round. Absent it the loop can only
    * report the overflow, because it has no compaction policy of its own.
    */
   readonly reduceContext?: ContextReducer
-  /** Host-owned threshold checked before every model round, including tool continuations. */
-  readonly contextCompactionDue?: (messages: readonly ChatMessage[]) => boolean
+  /**
+   * Host-owned threshold checked before every model round, including tool
+   * continuations. `observedPromptTokens` is the provider's own count of the
+   * previous round's request, when it reported one and the history it counted
+   * is still the one being sent; hosts calibrate their estimate against it.
+   */
+  readonly contextCompactionDue?: (messages: readonly ChatMessage[], observedPromptTokens?: number) => boolean
   readonly retryDelays?: readonly number[]
   /**
    * Ceiling for provider-suggested Retry-After waits (ms). Route-owned via the
@@ -492,8 +497,14 @@ export async function* runTurn(
   /** Set when a round ends without post-processing: a terminal provider failure or a caller abort. */
   let terminalProviderFailure = false
   let stopReason: TurnStopReason = signal?.aborted ? 'aborted' : 'tool_budget_exhausted'
-  /** One-shot per turn: a reducer that already ran cannot free the same tokens twice. */
+  /**
+   * One reduction per overflowing request: a reducer that already ran cannot
+   * free the same tokens twice. Re-armed by every round that completes, since
+   * a goal round can run for hours and outgrow the window more than once.
+   */
   let contextReductionAttempted = false
+  /** The provider's count of the last completed round's prompt; see `contextCompactionDue`. */
+  let observedPromptTokens: number | undefined
   // The client in use; swapped when a used-up account is replaced mid-turn.
   let llm = dependencies.llm
   let credentialSwitchAttempted = false
@@ -517,7 +528,9 @@ export async function* runTurn(
           })
         }
       }
-      if (dependencies.reduceContext && dependencies.contextCompactionDue?.(state.messages)) {
+      const observedForRound = observedPromptTokens
+      observedPromptTokens = undefined
+      if (dependencies.reduceContext && dependencies.contextCompactionDue?.(state.messages, observedForRound)) {
         yield { type: 'compaction', active: true }
         let reduced: Awaited<ReturnType<ContextReducer>>
         try { reduced = await dependencies.reduceContext(state.messages, signal) }
@@ -538,6 +551,8 @@ export async function* runTurn(
       let thinkingSignature: string | undefined
       let roundToolCalls: readonly ToolCall[] = []
       let lastUsage: TokenUsage | undefined
+      /** A mid-round reduction: this round's usage no longer measures what the host estimated. */
+      let roundHistoryReplaced = false
       let finishReason: string | undefined
       let streamCompleted = false
       let roundStartedAt = 0
@@ -694,6 +709,7 @@ export async function* runTurn(
             finally { yield { type: 'compaction', active: false } }
             if (reduction !== undefined && reduction.tokensFreed > 0) {
               state.messages.splice(0, state.messages.length, ...reduction.messages)
+              roundHistoryReplaced = true
               yield {
                 type: 'provider_retry',
                 error: errorMessage(error),
@@ -800,6 +816,11 @@ export async function* runTurn(
       }
       if (!streamCompleted) {
         throw new Error('LLM stream exited without completion or error')
+      }
+      contextReductionAttempted = false
+      if (lastUsage && !roundHistoryReplaced) {
+        const measured = lastUsage.inputTokens + (lastUsage.cacheReadTokens ?? 0) + (lastUsage.cacheCreationTokens ?? 0)
+        if (measured > 0) observedPromptTokens = measured
       }
 
       if (lastUsage === undefined) {
@@ -1208,7 +1229,7 @@ export async function* runTurn(
           const startedAt = performance.now()
           try {
             const output = dependencies.toolExecutor
-              ? await dependencies.toolExecutor.execute(effectiveCall, memberContext, memberSignal)
+              ? await untilAborted(dependencies.toolExecutor.execute(effectiveCall, memberContext, memberSignal), memberSignal)
               : `Tool ${effectiveCall.function.name} is unavailable.`
             return { kind: 'success' as const, context: memberContext, metadataWrites, member, output, startedAt }
           } catch (error) {
@@ -1610,6 +1631,40 @@ function completionRequest(
     // place that maps it onto wire-specific fields.
     ...(request.thinking !== undefined ? { thinking: request.thinking } : {}),
   }
+}
+
+/** How long a stopped tool may take to settle on its own before the turn stops waiting. */
+const TOOL_ABORT_GRACE_MS = 2_000
+
+/**
+ * Stop waiting on an interruptible tool shortly after the turn is aborted. A
+ * handler that ignores its signal (a 60s `check_command` wait did) otherwise
+ * holds the stop for as long as it takes to return on its own. The grace lets
+ * a tool that honours the signal report what it has — a killed command's
+ * partial output, or a result that was landing as the stop arrived. Tools
+ * declared `interruptBehavior: "block"` receive no signal and are awaited in full.
+ */
+function untilAborted<Value>(work: Promise<Value>, signal: AbortSignal | undefined): Promise<Value> {
+  if (!signal) return work
+  return new Promise<Value>((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const stop = () => {
+      timer = setTimeout(() => {
+        work.catch(() => undefined)
+        reject(new DOMException('Tool interrupted: the turn was cancelled.', 'AbortError'))
+      }, TOOL_ABORT_GRACE_MS)
+    }
+    const settle = () => {
+      signal.removeEventListener('abort', stop)
+      if (timer !== undefined) clearTimeout(timer)
+    }
+    if (signal.aborted) stop()
+    else signal.addEventListener('abort', stop, { once: true })
+    work.then(
+      value => { settle(); resolve(value) },
+      error => { settle(); reject(error) },
+    )
+  })
 }
 
 /**

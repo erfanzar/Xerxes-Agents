@@ -270,14 +270,26 @@ export class BackgroundCommandManager {
     procId: string,
     maxOutputChars: number,
     waitMs = 0,
+    /** Ends the wait early: a stopped turn must not sit out a minute-long poll. */
+    signal?: AbortSignal,
   ): Promise<BackgroundCheckResult> {
     const entry = this.require(procId, owner)
-    if (waitMs > 0) {
-      await raceBounded(
-        entry.process.exited.then(() => undefined, () => undefined),
-        Math.min(waitMs, MAX_CHECK_WAIT_MS),
-      )
+    if (waitMs > 0 && !signal?.aborted) {
+      let release: (() => void) | undefined
+      const aborted = new Promise<void>(resolve => {
+        release = () => resolve()
+        signal?.addEventListener('abort', release, { once: true })
+      })
+      try {
+        await raceBounded(
+          Promise.race([entry.process.exited.then(() => undefined, () => undefined), aborted]),
+          Math.min(waitMs, MAX_CHECK_WAIT_MS),
+        )
+      } finally {
+        if (release) signal?.removeEventListener('abort', release)
+      }
     }
+    signal?.throwIfAborted()
     // terminalExitCode, not a bare exitCode read: a signal-killed child keeps
     // exitCode null forever in Bun and would poll as running for its whole
     // (already over) lifetime.

@@ -250,11 +250,12 @@ export function registerProcessTools(
   // normal case and must not serialize behind an approval gate.
   registry.register(
     CHECK_COMMAND_DEFINITION,
-    async (inputs, context) => background.checkForOwner(
+    async (inputs, context, signal) => background.checkForOwner(
       requiredOwnerSessionId(context.sessionId),
       requiredString(inputs, 'proc_id'),
       requireRange(optionalInteger(inputs, 'max_output_chars', DEFAULT_MAX_OUTPUT_CHARS), 'max_output_chars', 1, 1_000_000),
       requireRange(optionalInteger(inputs, 'wait_ms', 0), 'wait_ms', 0, MAX_CHECK_WAIT_MS),
+      signal,
     ),
     'default',
     { concurrencySafe: true, defer: false, destructive: false, openWorld: false, readOnly: true },

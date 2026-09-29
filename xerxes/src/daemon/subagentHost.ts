@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { recordCompaction } from '../context/compactionHistory.js'
-import { estimateContextTokens } from '../context/windowUsage.js'
+import { estimateContextTokens, promptCalibration } from '../context/windowUsage.js'
 import { isAbsolute, resolve } from 'node:path'
 import { parseWorktreeRef, parseWorktreeSource } from '../agents/worktreeOptions.js'
 import { subagentCatalogForAgent, type AgentDefinition } from '../agents/definitions.js'
@@ -1590,7 +1590,7 @@ function childMidTurnCompaction(
   input: ChildCompactionRequest,
   systemPrompt: string,
   tools: readonly ToolDefinition[],
-): { contextCompactionDue?: (messages: readonly ChatMessage[]) => boolean; reduceContext?: ContextReducer } {
+): { contextCompactionDue?: (messages: readonly ChatMessage[], observedPromptTokens?: number) => boolean; reduceContext?: ContextReducer } {
   const { conversation, conversations, model, options, request, state } = input
   const contextLimit = options.contextLimit?.(model)
   const maxTokens = options.maxTokens ?? options.maxOutputTokens?.(model)
@@ -1607,13 +1607,14 @@ function childMidTurnCompaction(
     ...(systemPrompt ? { systemPrompt } : {}),
     toolSchemas: tools as unknown as Record<string, unknown>[],
   })
+  const calibration = promptCalibration()
   return {
     // Only once the turn has taken a step: at its start the pre-turn pass has
     // already compacted, and an opening prompt alone has nothing to summarize.
-    contextCompactionDue: messages => {
+    contextCompactionDue: (messages, observedPromptTokens) => {
       const last = messages.at(-1)
       if (!last || last.role === 'user' || last.role === 'system') return false
-      return estimate(messages) >= thresholdTokens
+      return calibration.project(estimate(messages), observedPromptTokens) >= thresholdTokens
     },
     reduceContext: async (messages, signal) => {
       const archivePath = childArchivePath(options.transcriptStore, conversation.historySessionId)

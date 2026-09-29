@@ -91,7 +91,7 @@ import {
   ChannelWebhookServer,
   type ChannelWebhookServerOptions,
 } from "../channels/webhookServer.js";
-import { estimateContextTokens } from "../context/windowUsage.js";
+import { contextCalibrationRatio, estimateContextTokens } from "../context/windowUsage.js";
 import { isNamedPipePath } from "../core/hostPlatform.js";
 import {
   createChannelMessage,
@@ -5816,13 +5816,15 @@ export class DaemonServer {
     }
     const model = session.model || stringValue(this.runtime.status().model) || "";
     const scaffold = sessionContextScaffold(session);
+    // Same provider-measured scale as the total, so the parts still add up.
+    const ratio = contextCalibrationRatio(session.metadata, model);
     const systemPromptTokens = scaffold.systemPrompt
-      ? estimateContextTokens([], { model, systemPrompt: scaffold.systemPrompt })
+      ? Math.ceil(ratio * estimateContextTokens([], { model, systemPrompt: scaffold.systemPrompt }))
       : 0;
     const toolsTokens = scaffold.toolSchemas?.length
-      ? estimateContextTokens([], { model, toolSchemas: scaffold.toolSchemas })
+      ? Math.ceil(ratio * estimateContextTokens([], { model, toolSchemas: scaffold.toolSchemas }))
       : 0;
-    const messagesTokens = estimateContextTokens(session.messages, { model });
+    const messagesTokens = Math.ceil(ratio * estimateContextTokens(session.messages, { model }));
     return {
       ok: true,
       model,
@@ -11623,15 +11625,16 @@ function sessionContextScaffold(session: DaemonSession): {
   };
 }
 
+/** The session's prompt size, scaled by the provider-measured ratio the last turn recorded. */
 function sessionContextTokens(session: DaemonSession, model: string): number {
   const scaffold = sessionContextScaffold(session);
-  return estimateContextTokens(session.messages, {
+  return Math.ceil(contextCalibrationRatio(session.metadata, model) * estimateContextTokens(session.messages, {
     model,
     ...(scaffold.systemPrompt ? { systemPrompt: scaffold.systemPrompt } : {}),
     ...(scaffold.toolSchemas?.length
       ? { toolSchemas: scaffold.toolSchemas }
       : {}),
-  });
+  }));
 }
 
 function channelStatusPayload(status: ManagedChannelStatus): JsonRpcPayload {

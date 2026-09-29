@@ -592,3 +592,23 @@ test('an unconfirmed stop retains the process and terminal for a later retry', a
     } finally { registry.deny = false; await manager.disposeAll() }
   })
 })
+
+test('a stopped turn ends a waiting check instead of sitting out the wait', async () => {
+  await inTemporaryWorkspace(async root => {
+    const background = new BackgroundCommandManager()
+    try {
+      const { procId } = background.startForOwner('owner-session', { command: 'sleep', args: ['30'], cwd: root, name: 'sleep 30' })
+      const controller = new AbortController()
+      setTimeout(() => controller.abort(), 100)
+      const started = Date.now()
+      const check = background.checkForOwner('owner-session', procId, 1_000, 60_000, controller.signal)
+      await expect(check).rejects.toThrow()
+      expect(Date.now() - started).toBeLessThan(5_000)
+      // The stop ends the wait, not the command: it is still the model's to inspect or kill.
+      const after = await background.checkForOwner('owner-session', procId, 1_000, 0)
+      expect(after.running).toBe(true)
+    } finally {
+      await background.disposeAll()
+    }
+  })
+}, 15_000)

@@ -604,7 +604,7 @@ test('an injected reducer relieves a context overflow and retries without spendi
   expect(events.at(-1)).toMatchObject({ type: 'turn_done', reason: 'completed' })
 })
 
-test('a reducer runs at most once per turn and a repeat overflow reports the remedy', async () => {
+test('a reducer runs at most once per overflowing request and a repeat overflow reports the remedy', async () => {
   class AlwaysOverflowingClient implements LlmClient {
     calls = 0
 
@@ -738,4 +738,140 @@ test('provider wait is visible before a silent request and cleared on failure', 
   release.resolve()
   await pending
   expect(events.filter(event => event.type === 'provider_wait')).toEqual([{ type: 'provider_wait', active: true }, { type: 'provider_wait', active: false }])
+})
+
+test('a later overflow in the same turn is relieved again after a round completes', async () => {
+  // A goal round runs for hours: the history it compacted once outgrows the
+  // window again, and a turn-wide one-shot reducer left that second overflow
+  // to end the goal as blocked.
+  let calls = 0
+  let reductions = 0
+  const overflowOn = new Set([1, 3])
+  const events = await collect(runTurn(
+    { model: 'gpt-4o', state: createAgentState(), userMessage: 'keep going', tools: [READ_FILE], permissionMode: 'accept-all' },
+    {
+      llm: { async *stream() {
+        calls += 1
+        if (overflowOn.has(calls)) throw new Error('prompt is too long: 1001487 tokens > 1000000 maximum')
+        if (calls === 2) yield { toolCalls: [{ id: 'read-1', type: 'function', function: { name: 'ReadFile', arguments: { path: 'file' } } }] }
+        else yield { content: 'done' }
+      } },
+      retryDelays: [],
+      toolExecutor: { execute: async () => 'tool output' },
+      reduceContext: async (messages): Promise<ContextReduction> => {
+        reductions += 1
+        return { messages, tokensFreed: 5_000 }
+      },
+    },
+  ))
+
+  expect(reductions).toBe(2)
+  expect(calls).toBe(4)
+  expect(events.at(-1)).toMatchObject({ type: 'turn_done', reason: 'completed' })
+})
+
+test('the compaction check sees the provider count of the previous round prompt', async () => {
+  let calls = 0
+  const observed: Array<number | undefined> = []
+  await collect(runTurn(
+    { model: 'gpt-4o', state: createAgentState(), userMessage: 'keep going', tools: [READ_FILE], permissionMode: 'accept-all' },
+    {
+      llm: { async *stream() {
+        calls += 1
+        const usage = { inputTokens: 10, outputTokens: 5, cacheReadTokens: 900, cacheCreationTokens: 90 }
+        if (calls < 3) yield { toolCalls: [{ id: `read-${calls}`, type: 'function', function: { name: 'ReadFile', arguments: { path: 'file' } } }], usage }
+        else yield { content: 'done', usage }
+      } },
+      toolExecutor: { execute: async () => 'tool output' },
+      contextCompactionDue: (_messages, observedPromptTokens) => {
+        observed.push(observedPromptTokens)
+        return false
+      },
+      reduceContext: async (messages): Promise<ContextReduction> => ({ messages, tokensFreed: 0 }),
+    },
+  ))
+
+  // Fresh input, cache reads, and cache writes together are the whole prompt.
+  expect(observed).toEqual([undefined, 1_000, 1_000])
+})
+
+test('a mid-round reduction withholds that round count from the next compaction check', async () => {
+  let calls = 0
+  const observed: Array<number | undefined> = []
+  await collect(runTurn(
+    { model: 'gpt-4o', state: createAgentState(), userMessage: 'keep going', tools: [READ_FILE], permissionMode: 'accept-all' },
+    {
+      llm: { async *stream() {
+        calls += 1
+        if (calls === 1) throw new Error('prompt is too long: 1001487 tokens > 1000000 maximum')
+        const usage = { inputTokens: 40, outputTokens: 5 }
+        if (calls === 2) yield { toolCalls: [{ id: 'read-1', type: 'function', function: { name: 'ReadFile', arguments: { path: 'file' } } }], usage }
+        else yield { content: 'done', usage }
+      } },
+      retryDelays: [],
+      toolExecutor: { execute: async () => 'tool output' },
+      contextCompactionDue: (_messages, observedPromptTokens) => {
+        observed.push(observedPromptTokens)
+        return false
+      },
+      reduceContext: async (messages): Promise<ContextReduction> => ({ messages, tokensFreed: 5_000 }),
+    },
+  ))
+
+  // Round one's count measured the reduced history, not the one the host estimated.
+  expect(observed).toEqual([undefined, undefined])
+})
+
+test('stopping a turn does not wait for a tool that ignores its signal', async () => {
+  const controller = new AbortController()
+  let toolStarted!: () => void
+  const started = new Promise<void>(resolve => { toolStarted = resolve })
+  let release!: () => void
+  const stalled = new Promise<string>(resolve => { release = () => resolve('late output') })
+  const turn = collect(runTurn(
+    { model: 'gpt-4o', state: createAgentState(), userMessage: 'wait on the build', tools: [READ_FILE], permissionMode: 'accept-all' },
+    {
+      llm: { async *stream() {
+        yield { toolCalls: [{ id: 'read-1', type: 'function', function: { name: 'ReadFile', arguments: { path: 'file' } } }] }
+      } },
+      toolExecutor: { execute: async () => {
+        toolStarted()
+        return stalled
+      } },
+    },
+    controller.signal,
+  ))
+  await started
+  controller.abort()
+  const outcome = await Promise.race([turn.then(() => 'settled'), Bun.sleep(4_000).then(() => 'still waiting')])
+  release()
+  expect(outcome).toBe('settled')
+  expect((await turn).at(-1)).toMatchObject({ type: 'turn_done', reason: 'aborted' })
+})
+
+test('a tool that must finish is still awaited after a stop', async () => {
+  const controller = new AbortController()
+  let toolStarted!: () => void
+  const started = new Promise<void>(resolve => { toolStarted = resolve })
+  let finished = false
+  const turn = collect(runTurn(
+    { model: 'gpt-4o', state: createAgentState(), userMessage: 'write it', tools: [READ_FILE], permissionMode: 'accept-all' },
+    {
+      llm: { async *stream() {
+        yield { toolCalls: [{ id: 'read-1', type: 'function', function: { name: 'ReadFile', arguments: { path: 'file' } } }] }
+      } },
+      capabilities: () => ({ concurrencySafe: false, interruptBehavior: 'block' }),
+      toolExecutor: { execute: async () => {
+        toolStarted()
+        await Bun.sleep(100)
+        finished = true
+        return 'written'
+      } },
+    },
+    controller.signal,
+  ))
+  await started
+  controller.abort()
+  await turn
+  expect(finished).toBe(true)
 })
