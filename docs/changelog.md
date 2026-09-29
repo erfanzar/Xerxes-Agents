@@ -7,7 +7,7 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
-## Unreleased
+## 0.6.4 — 2026-09-29
 
 - Agents: a `Workflow` tool. The model writes a short script with `agent()`,
   `parallel()`, `pipeline()` and `phase()` to fan work out to as many
