@@ -90,6 +90,19 @@ const bridge = {
       return Promise.reject(new Error('Unknown dictation action'))
     return ipcRenderer.invoke('desktop:voice', action, cleanParams(params))
   },
+  /** The app's own update: check, install (after the person agrees), skip, dismiss, open-release, state. */
+  appUpdate(action: string): Promise<unknown> {
+    if (!['state', 'check', 'install', 'skip', 'dismiss', 'open-release'].includes(action)) return Promise.reject(new Error('Unknown update action'))
+    return ipcRenderer.invoke('desktop:app-update', action)
+  },
+  onAppUpdate(handler: unknown): () => void {
+    if (typeof handler !== 'function') throw new TypeError('handler must be a function')
+    const listener = (_event: Electron.IpcRendererEvent, state: unknown): void => {
+      try { (handler as (state: unknown) => void)(state) } catch { /* a renderer fault must not break the bridge */ }
+    }
+    ipcRenderer.on('desktop:app-update-state', listener)
+    return () => ipcRenderer.removeListener('desktop:app-update-state', listener)
+  },
   remote(action: string, params: unknown = {}): Promise<unknown> {
     if (
       !['list', 'hosts', 'browse', 'save', 'remove', 'connect', 'cancel', 'status', 'provider-review', 'provider-share', 'provider-revoke'].includes(action)

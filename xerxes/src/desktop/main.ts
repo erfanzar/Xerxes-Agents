@@ -25,6 +25,7 @@ import { xerxesHome } from '../daemon/paths.js'
 import { DaemonRpc } from './main/daemon.js'
 import { DesktopProviderForwarding } from './main/providerForwarding.js'
 import { copyProfilesToRemote } from './main/profileSync.js'
+import { startAppUpdates } from './main/appUpdateController.js'
 import { registerDaemonBridge, detachDaemon } from './main/ipc.js'
 import { dictationPort, transcribeDictation } from './main/voice.js'
 import { loadDesktopWorkspaces, saveDesktopWorkspace } from './main/workspaceSettings.js'
@@ -761,6 +762,8 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
 
 void app.whenReady().then(async () => {
   app.setAboutPanelOptions({ applicationName: APP_NAME })
+  // Offers new releases from GitHub; installs only when the person says so.
+  const appUpdates = startAppUpdates({ settingsDirectory: xerxesHome(), version: app.getVersion() })
   // The dock/taskbar icon is the phoenix mark; on macOS the running app's
   // dock tile only changes through app.dock.
   const icon = appIcon()
@@ -778,6 +781,7 @@ void app.whenReady().then(async () => {
     label: APP_NAME,
     submenu: [
       { role: 'about' as const },
+      { label: 'Check for Updates…', click: () => { void appUpdates.check() } },
       { type: 'separator' as const },
       { label: 'Settings…', accelerator: 'CmdOrCtrl+,', click: toFocused('settings') },
       { type: 'separator' as const },

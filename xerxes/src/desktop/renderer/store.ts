@@ -141,6 +141,38 @@ const GOAL_WRITE_TOOLS = new Set(['create_goal', 'update_goal'])
  * SpawnAgents carries an `agents` batch; the single-spawn tools carry one
  * title-ish field. Keys are call-local; fleet sync matches on title.
  */
+/** What the update prompt shows; the main process's state, validated. */
+export interface AppUpdateView {
+  readonly phase: 'checking' | 'available' | 'downloading' | 'restarting' | 'error'
+  readonly version?: string
+  readonly notes?: string
+  readonly pageUrl?: string
+  readonly publishedAt?: string
+  readonly installable?: boolean
+  readonly reason?: string
+  readonly received?: number
+  readonly total?: number
+  readonly message?: string
+}
+
+export function appUpdateView(value: unknown): AppUpdateView | null {
+  if (!value || typeof value !== 'object') return null
+  const state = value as Record<string, unknown>
+  const phase = state.phase
+  if (phase !== 'checking' && phase !== 'available' && phase !== 'downloading' && phase !== 'restarting' && phase !== 'error') return null
+  const release = state.release && typeof state.release === 'object' ? state.release as Record<string, unknown> : {}
+  const text = (field: unknown) => typeof field === 'string' ? field : undefined
+  const count = (field: unknown) => typeof field === 'number' && Number.isFinite(field) ? field : undefined
+  const view: Record<string, unknown> = { phase }
+  for (const [key, field] of [['version', text(release.version)], ['notes', text(release.notes)], ['pageUrl', text(release.pageUrl)], ['publishedAt', text(release.publishedAt)], ['reason', text(state.reason)], ['message', text(state.message)]] as const) {
+    if (field !== undefined) view[key] = field
+  }
+  if (typeof state.installable === 'boolean') view.installable = state.installable
+  if (count(state.received) !== undefined) view.received = count(state.received)
+  if (count(state.total) !== undefined) view.total = count(state.total)
+  return view as unknown as AppUpdateView
+}
+
 /** The daemon's delegation mode; an older runtime without one is auto. */
 function delegationModeValue(value: unknown): 'off' | 'auto' | 'eager' {
   return value === 'off' || value === 'eager' ? value : 'auto'
@@ -316,6 +348,8 @@ export interface Snapshot {
   readonly pickerOpen: boolean
   /** The single model/effort chip's dropdown — rows drill into the pickers. */
   readonly modelMenuOpen: boolean
+  /** A newer desktop release, and where installing it has got to (null when current). */
+  readonly appUpdate: AppUpdateView | null
   /** How eagerly this conversation fans out to agents (the composer's Agents chip). */
   readonly delegationMode: 'off' | 'auto' | 'eager'
   readonly delegationMenuOpen: boolean
@@ -850,6 +884,7 @@ export class Store {
       modelMenuOpen: false,
       delegationMode: 'auto',
       delegationMenuOpen: false,
+      appUpdate: null,
       contextMenuOpen: false,
       contextBreakdown: null,
       contextBreakdownLoading: false,
@@ -899,6 +934,9 @@ export class Store {
     this.started = true
     if (bridge) this.bridge = bridge
     this.unsubEvents = window.xerxes.onEvent(event => this.onEvent(event))
+    // The app's own updates come from the main process, not the runtime.
+    this.bridge.onAppUpdate?.(state => this.patch({ appUpdate: appUpdateView(state) }))
+    void this.bridge.appUpdate?.('state').then(state => this.patch({ appUpdate: appUpdateView(state) })).catch(() => undefined)
     // Workspace gate: no folder, no daemon, no initialize — the shell asks
     // for one instead of inventing a target the user never chose.
     const gate = (this.bridge as XerxesLike & { getWorkspace?: () => Promise<string | null> })
@@ -1799,6 +1837,16 @@ export class Store {
 
   togglePlanMode(): void {
     this.setPlanMode(!this.frame.planMode)
+  }
+
+  /** Relay the person's choice on the update prompt to the main process. */
+  async appUpdateAction(action: 'check' | 'install' | 'skip' | 'dismiss' | 'open-release'): Promise<void> {
+    try {
+      const state = await this.bridge.appUpdate?.(action)
+      if (state !== undefined) this.patch({ appUpdate: appUpdateView(state) })
+    } catch (error) {
+      this.patch({ appUpdate: { phase: 'error', message: desktopError(error) } })
+    }
   }
 
   toggleDelegationMenu(): void {
@@ -4084,6 +4132,9 @@ export class Store {
 
 /** Shape the store actually needs from the bridge (matches types.ts). */
 export interface XerxesLike {
+  /** The app's own GitHub-release update (main process); absent in test bridges. */
+  appUpdate?(action: 'state' | 'check' | 'install' | 'skip' | 'dismiss' | 'open-release'): Promise<unknown>
+  onAppUpdate?(handler: (state: unknown) => void): () => void
   getContextScope?(): Promise<string>
   getContexts?(): Promise<WorkspaceContext[]>
   activateContext?(id: number, sessionId?: string): Promise<void>

@@ -2237,3 +2237,13 @@ a per-turn instruction; it does not add or remove tools.
 The `Workflow` result also reports cost at published prices: `cost_usd` when every
 agent's model has a published price, otherwise `cost_usd_known` (the priced part)
 and `unpriced_agents`.
+
+### History during a running turn
+
+A session's stored messages catch up only when a turn ends. While a turn runs,
+`initialize` (its replay and `session.messages`), `session.open` and
+`session.history` serve the running turn's messages so far instead, so a client
+that attaches mid-turn — after the app was closed and reopened during a long
+goal round — shows everything the turn has already done. Nothing is persisted
+differently; the runner's live state is read, and the stored transcript is
+unchanged until the turn completes.

@@ -9,6 +9,19 @@ describe the earlier implementation and are not current setup instructions.
 
 ## Unreleased
 
+- Desktop: the app updates itself from GitHub releases, with your permission.
+  It checks at startup and every six hours (and from Xerxes Agents › Check for
+  Updates…), shows the new version and its release notes, and asks: Install and
+  restart, Not now, or Skip this version. On yes it downloads the installer,
+  checks it against GitHub's published SHA-256, verifies the app's signature,
+  and swaps it in when the app quits, then relaunches. Development builds and
+  unwritable Applications folders get the release page instead.
+- Desktop: reopening the app during a long turn no longer hides what that turn
+  already did. The conversation only catches up when a turn ends, so a goal
+  round that ran for hours looked like it had lost its last several steps
+  until it finished; the runtime now serves the running turn's messages to a
+  client that attaches mid-turn.
+
 - Agents: an **Agents** chip beside Plan in the composer (and `/delegate`):
   **Off** works alone, **Auto** (default) fans out when work splits and asks
   once before a run of more than about ten agents whether to be budget-minded or

@@ -2880,3 +2880,18 @@ html,body,#root,.app.atelier{background:transparent}
 .atelier .delegation-menu__detail{font:400 12px/1.45 var(--sans);color:var(--x-secondary);white-space:normal}
 .atelier .delegation-menu__foot{padding:8px 12px 6px;border-top:1px solid color-mix(in srgb,var(--x-title) 8%,transparent);font:400 12px/1.4 var(--sans);color:var(--x-meta)}
 .atelier .delegation-menu__foot code{font-family:var(--mono);font-size:11.5px}
+
+/* App update consent (GitHub releases): asks before it downloads anything. */
+.atelier .appupdate{position:fixed;inset:0;z-index:80;display:grid;place-items:center;padding:24px}
+.atelier .appupdate__scrim{position:absolute;inset:0;background:rgba(0,0,0,.42)}
+.atelier .appupdate__card{position:relative;display:grid;gap:14px;width:min(560px,100%);max-height:min(640px,calc(100vh - 48px));padding:20px 22px 16px;border:1px solid var(--glass-edge);border-radius:14px;background:var(--x-popover,var(--x-card));box-shadow:0 18px 60px rgba(0,0,0,.35);overflow:hidden}
+.atelier .appupdate__head{display:grid;grid-template-columns:32px minmax(0,1fr);gap:12px;align-items:start}
+.atelier .appupdate__icon{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:50%;background:color-mix(in srgb,var(--x-accent) 16%,transparent);color:var(--x-accent)}
+.atelier .appupdate__head h2{margin:0 0 4px;font:600 16px/1.3 var(--sans);color:var(--x-title)}
+.atelier .appupdate__head p{margin:0;font:400 13px/1.5 var(--sans);color:var(--x-secondary)}
+.atelier .appupdate__progress{height:6px;border-radius:999px;background:color-mix(in srgb,var(--x-title) 10%,transparent);overflow:hidden}
+.atelier .appupdate__progress span{display:block;height:100%;border-radius:999px;background:var(--x-accent);transition:width 200ms ease}
+.atelier .appupdate__notes{min-height:0;overflow:auto;padding:10px 12px;border-radius:10px;background:color-mix(in srgb,var(--x-title) 4%,transparent)}
+.atelier .appupdate__notes h3{margin:0 0 6px;font:600 12px/1.3 var(--sans);letter-spacing:.02em;color:var(--x-meta);text-transform:uppercase}
+.atelier .appupdate__notes .md{font:400 13px/1.55 var(--sans);color:var(--x-prose)}
+.atelier .appupdate__actions{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end}
