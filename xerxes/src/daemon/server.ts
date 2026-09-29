@@ -2028,6 +2028,10 @@ export class DaemonServer {
         || this.goalWakeDispatches.size > 0 || this.agentPresetSwitches.size > 0
         || this.channelStatusData().configured
         || numberValue(this.runtime.status().active_subagents) > 0
+        // An armed goal is autonomous work between rounds. Arming lives only in
+        // this process, so a restart would silently disarm it and the run left
+        // overnight would stop at its next round.
+        || sessions.some(session => { const goal = getGoal(session.metadata, session.id); return goal?.phase === 'active' && goal.activation === 'armed'; })
         || sessions.some(session => session.activeTurnId || session.status !== 'idle'
           || this.sessionOperations.has(session.sessionKey)
           // A person's shell idling at its prompt is not work: the update may

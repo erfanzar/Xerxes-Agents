@@ -15,6 +15,7 @@ import { ToolRegistry } from '../src/executors/toolRegistry.js'
 import { registerFileTools } from '../src/tools/fileTools.js'
 import { registerProjectSetupTool } from '../src/tools/projectSetup.js'
 import { WorkspacePathResolver } from '../src/tools/pathSafety.js'
+import { createGoal, disarmGoal } from '../src/runtime/goalDomain.js'
 
 test('startup loads existing commands, init adds workflows, and shell preprocessing requires explicit trust', async () => {
   const root = await mkdtemp(join(tmpdir(), 'xerxes-init-workflows-'))
@@ -535,6 +536,12 @@ test('idle-only runtime restart rejects active work and closes admission before 
     expect((await client.next(frame => frame.id === 4)).result).toEqual({ ok: false, busy: true })
     expect(restarts).toBe(0)
     session.status = "idle"
+    // An armed goal between rounds is still autonomous work: a restart would disarm it.
+    createGoal(session.metadata, session.id, { objective: "keep improving overnight" }, 1_000)
+    client.send({ jsonrpc: "2.0", id: 5, method: "runtime.restart_if_idle", params: {} })
+    expect((await client.next(frame => frame.id === 5)).result).toEqual({ ok: false, busy: true })
+    expect(restarts).toBe(0)
+    disarmGoal(session.id)
     client.send({ jsonrpc: '2.0', id: 2, method: 'runtime.restart_if_idle', params: {} })
     expect((await client.next(frame => frame.id === 2)).result).toEqual({ ok: true })
     client.send({ jsonrpc: '2.0', id: 3, method: 'initialize', params: { session_key: 'late' } })
