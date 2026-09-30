@@ -7,6 +7,10 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.14 — 2026-09-30
+
+- Compaction: a long session's summary no longer grows until compaction cannot make room. Each pass used to keep the previous summary word for word and add the new one after it; a goal session reached a 25K-token summary against a 2K budget and its turns failed with "Automatic compaction could not make room". Once the carried summary and the new one pass twice the budget, they are folded into one summary. The full history stays in the pre-compaction archive.
+
 ## 0.6.13 — 2026-09-30
 
 - Tools: a large file can be read and edited. ReadFile refused any file over 256 KB, even a 50-line window of it, and since an edit needs a read first, such a file could not be edited at all. Windows of any file up to 32 MB now read normally; only a whole-file read (limit=-1) keeps the 256 KB limit.

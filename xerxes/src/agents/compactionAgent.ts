@@ -228,7 +228,21 @@ export class CompactionAgent {
     if (!provision.compacted || compactable === undefined) return original
     const summary = await this.summarizeContext(renderMessagesForSummary(compactable))
     if (!summary.trim()) return original
-    const replaced = provision.messages.map(message => replaceSummaryPlaceholder(message, summary))
+    let replaced = provision.messages.map(message => replaceSummaryPlaceholder(message, summary))
+    // An iterative pass keeps the previous summary verbatim and appends the new
+    // one, so a long-running session's summary only ever grew: one goal session
+    // carried a 25K-token summary against a 2K budget, and compaction could no
+    // longer make room. Past twice the budget, fold both into one summary.
+    const carried = provision.messages.map(carriedSummaryOf).find((text): text is string => text !== undefined)
+    if (carried !== undefined && this.tokenCounter.countTokens(carried) + this.tokenCounter.countTokens(summary) > this.summaryMaxTokens * 2) {
+      const consolidated = await this.summarizeContext(
+        `Earlier summary of this session:\n\n${carried}\n\n--- What happened after that ---\n\n${summary}`,
+      )
+      if (consolidated.trim()) {
+        const merged = provision.messages.map(message => consolidateSummary(message, consolidated))
+        if (this.tokenCounter.countTokens(merged) < this.tokenCounter.countTokens(replaced)) replaced = merged
+      }
+    }
     if (this.tokenCounter.countTokens(replaced) >= currentTokens) return original
     return replaced
   }
@@ -265,6 +279,29 @@ function describeShape(response: unknown): string {
   if (typeof response !== 'object') return typeof response
   const keys = Object.keys(response).sort().slice(0, 8)
   return keys.length ? `object with keys ${keys.join(', ')}` : 'object with no keys'
+}
+
+/**
+ * The previous summary an iterative pass carried into the placeholder message,
+ * without its reference prefixes (each pass used to nest another one).
+ */
+function carriedSummaryOf(message: ContextMessage): string | undefined {
+  if (typeof message.content !== 'string' || !message.content.includes(COMPACTION_PROMPT_PLACEHOLDER)) return undefined
+  const before = message.content.slice(0, message.content.indexOf(COMPACTION_PROMPT_PLACEHOLDER))
+  const carried = stripSummaryPrefixes(before).replace(/\n*---\s*$/u, '').trim()
+  return carried || undefined
+}
+
+function stripSummaryPrefixes(text: string): string {
+  let rest = text.trimStart()
+  while (rest.startsWith(COMPACTION_SUMMARY_PREFIX)) rest = rest.slice(COMPACTION_SUMMARY_PREFIX.length).trimStart()
+  return rest
+}
+
+/** The placeholder message rewritten as one consolidated summary. */
+function consolidateSummary(message: ContextMessage, summary: string): ContextMessage {
+  if (typeof message.content !== 'string' || !message.content.includes(COMPACTION_PROMPT_PLACEHOLDER)) return message
+  return { ...message, content: `${COMPACTION_SUMMARY_PREFIX}\n\n${summary.trim()}` }
 }
 
 function replaceSummaryPlaceholder(message: ContextMessage, summary: string): ContextMessage {

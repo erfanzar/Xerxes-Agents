@@ -206,3 +206,53 @@ test('a failed parallel segment drains its siblings before returning failure', a
   expect(active).toBe(0);
   expect(calls).toBe(3);
 });
+
+test('a carried summary past twice the budget is folded into one, instead of growing every pass', async () => {
+  const counter = new SmartTokenCounter()
+  const requests: CompactionCompletionRequest[] = []
+  const agent = new CompactionAgent({
+    model: 'gpt-test',
+    maxContextTokens: 200_000,
+    summaryMaxTokens: 2_048,
+    completion: request => {
+      requests.push(request)
+      return request.prompt.includes('Earlier summary of this session')
+        ? 'CONSOLIDATED: goal, open work and recovery references.'
+        : 'NEW: what happened this pass.'
+    },
+  })
+  // Nineteen passes of appending left a ~25K-token summary (live session, 2026-09-30).
+  const carried = '[CONTEXT COMPACTION — REFERENCE ONLY]\n\n' + 'OLD-DETAIL established fact. '.repeat(9_000)
+  const messages: Array<Record<string, unknown>> = [
+    { role: 'user', content: carried },
+    ...Array.from({ length: 40 }, (_, index) => ({ role: index % 2 ? 'assistant' : 'user', content: `step ${index} `.repeat(400) })),
+    { role: 'user', content: 'latest request' },
+  ]
+  const compacted = await agent.summarizeMessages(messages)
+  const summaries = compacted.filter(message => typeof message.content === 'string' && message.content.startsWith('[CONTEXT COMPACTION'))
+  expect(summaries).toHaveLength(1)
+  const summary = String(summaries[0]!.content)
+  expect(summary).toContain('CONSOLIDATED')
+  expect(summary).not.toContain('OLD-DETAIL')
+  // One reference prefix, not one nested per pass.
+  expect(summary.split('[CONTEXT COMPACTION').length).toBe(2)
+  expect(counter.countTokens(summary)).toBeLessThan(2_048)
+  // The consolidation saw the earlier summary without its prefix.
+  const merge = requests.find(request => request.prompt.includes('Earlier summary of this session'))
+  expect(merge?.prompt).toContain('OLD-DETAIL')
+})
+
+test('a small carried summary is kept and extended, not re-summarized', async () => {
+  const requests: CompactionCompletionRequest[] = []
+  const agent = new CompactionAgent({ model: 'gpt-test', summaryMaxTokens: 2_048, completion: request => { requests.push(request); return 'NEW: this pass.' } })
+  const messages: Array<Record<string, unknown>> = [
+    { role: 'user', content: '[CONTEXT COMPACTION — REFERENCE ONLY]\n\nEARLIER: a short summary.' },
+    ...Array.from({ length: 20 }, (_, index) => ({ role: index % 2 ? 'assistant' : 'user', content: `step ${index} `.repeat(300) })),
+    { role: 'user', content: 'latest request' },
+  ]
+  const compacted = await agent.summarizeMessages(messages)
+  const summary = String(compacted.find(message => String(message.content).startsWith('[CONTEXT COMPACTION'))?.content)
+  expect(summary).toContain('EARLIER: a short summary.')
+  expect(summary).toContain('NEW: this pass.')
+  expect(requests.some(request => request.prompt.includes('Earlier summary of this session'))).toBe(false)
+})
