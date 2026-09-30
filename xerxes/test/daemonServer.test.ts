@@ -3526,7 +3526,7 @@ test("daemon resumes only initialize resume IDs and lists saved sessions separat
       ok: true,
       daemon_protocol: 35,
       daemon_build_id: expect.any(String),
-      daemon_version: "0.6.13",
+      daemon_version: "0.6.14",
       session: { id: firstSessionId, key: firstSessionId, messages: 2 },
     });
     await client.next(eventFrame("init_done"));
