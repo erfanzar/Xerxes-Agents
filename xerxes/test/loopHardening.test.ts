@@ -6,7 +6,7 @@ import { expect, test } from 'bun:test'
 import { HookRunner } from '../src/extensions/hooks.js'
 import type { CompletionRequest, LlmClient, LlmDelta } from '../src/llms/client.js'
 import { createAgentState, type StreamEvent } from '../src/streaming/events.js'
-import { MAX_UNCONFIGURED_ONLY_ROUNDS, runTurn } from '../src/streaming/loop.js'
+import { EMPTY_REPLY_NUDGE, MAX_EMPTY_REPLY_NUDGES, MAX_UNCONFIGURED_ONLY_ROUNDS, runTurn } from '../src/streaming/loop.js'
 import type { ToolCall, ToolDefinition } from '../src/types/toolCalls.js'
 
 const READ_FILE: ToolDefinition = {
@@ -507,4 +507,61 @@ test('the cross-round deduper stays linear and exact on large replayed text', as
   expect(secondRoundText).toBe(`${repeated} NEW`)
   const assistants = state.messages.filter(message => message.role === 'assistant')
   expect(assistants.map(message => message.content)).toEqual([repeated, ' NEW'])
+})
+
+function readCall(id: string): ToolCall {
+  return { id, type: 'function', function: { name: 'ReadFile', arguments: { path: 'ok.ts' } } }
+}
+
+test('an empty reply after tool work is asked again instead of ending the turn with no answer', async () => {
+  let calls = 0
+  const requests: CompletionRequest[] = []
+  const state = createAgentState()
+  const events = await collect(runTurn({
+    model: 'gpt-4o', permissionMode: 'accept-all', state, tools: [READ_FILE], userMessage: 'review the diff',
+  }, {
+    llm: {
+      async *stream(request: CompletionRequest): AsyncGenerator<LlmDelta> {
+        requests.push(request)
+        calls += 1
+        // A call, then a reply the harness could not read (whitespace only), then the answer.
+        if (calls === 1) { yield { toolCalls: [readCall('call-read')] }; return }
+        if (calls === 2) { yield { content: '\n' }; return }
+        yield { content: 'The diff is safe to merge.' }
+      },
+    },
+    toolExecutor: { async execute(): Promise<string> { return 'diff body' } },
+  }))
+  expect(calls).toBe(3)
+  expect(JSON.stringify(requests[2]?.messages)).toContain('no tool call the harness could')
+  expect(events.filter(event => event.type === 'text').map(event => event.text).join('')).toContain('The diff is safe to merge.')
+  expect(state.messages.some(message => message.content === EMPTY_REPLY_NUDGE)).toBe(true)
+})
+
+test('empty replies are re-asked a bounded number of times', async () => {
+  let calls = 0
+  const events = await collect(runTurn({
+    model: 'gpt-4o', permissionMode: 'accept-all', state: createAgentState(), tools: [READ_FILE], userMessage: 'review',
+  }, {
+    llm: {
+      async *stream(): AsyncGenerator<LlmDelta> {
+        calls += 1
+        if (calls === 1) { yield { toolCalls: [readCall('call-read')] }; return }
+        yield { content: ' ' }
+      },
+    },
+    toolExecutor: { async execute(): Promise<string> { return 'body' } },
+  }))
+  expect(calls).toBe(2 + MAX_EMPTY_REPLY_NUDGES)
+  expect(events.at(-1)).toMatchObject({ type: 'turn_done' })
+})
+
+test('a first reply with no tool work is not re-asked', async () => {
+  let calls = 0
+  await collect(runTurn({
+    model: 'gpt-4o', permissionMode: 'accept-all', state: createAgentState(), tools: [READ_FILE], userMessage: 'hi',
+  }, {
+    llm: { async *stream(): AsyncGenerator<LlmDelta> { calls += 1; yield { content: '' } } },
+  }))
+  expect(calls).toBe(1)
 })

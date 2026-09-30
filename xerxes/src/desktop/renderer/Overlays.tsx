@@ -26,6 +26,7 @@ import { TerminalsCard } from './TerminalsPanel.js'
 import { store, type Snapshot } from './store.js'
 import type { CachedModel, ModelChoice, PermissionMode, ProviderRow, SettingsTab } from './types.js'
 import { RemoteProviders } from './RemoteProviders.js'
+import { AgentIntelligenceCard } from './AgentIntelligenceCard.js'
 import { Icon, type IconName } from './Icon.js'
 
 // ── Settings modal ──────────────────────────────────────────────────────
@@ -33,6 +34,7 @@ import { Icon, type IconName } from './Icon.js'
 const SETTINGS_TABS: ReadonlyArray<{ id: SettingsTab; label: string }> = [
   { id: 'general', label: 'General' },
   { id: 'models', label: 'Models & Providers' },
+  { id: 'intelligence', label: 'Agent intelligence' },
   { id: 'agents', label: 'Agent presets' },
   { id: 'permissions', label: 'Permissions' },
   { id: 'channels', label: 'Channels' },
@@ -68,6 +70,7 @@ export function SettingsModal({ snap }: { snap: Snapshot }): ReactElement | null
         <div className="modal__main">
           {snap.settingsTab === 'general' && <GeneralCard snap={snap} />}
           {snap.settingsTab === 'models' && <ModelsCard snap={snap} />}
+          {snap.settingsTab === 'intelligence' && <AgentIntelligenceCard snap={snap} />}
           {snap.settingsTab === 'agents' && <AgentPresetsCard snap={snap} />}
           {snap.settingsTab === 'permissions' && <PermissionsCard snap={snap} />}
           {snap.settingsTab === 'channels' && <ChannelsCard snap={snap} />}

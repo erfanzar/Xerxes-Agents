@@ -2959,3 +2959,16 @@ html,body,#root,.app.atelier{background:transparent}
 .atelier .qcard__q .md{padding:0;max-height:none;overflow:visible;font:inherit;color:inherit;background:none;border:0}
 .atelier .qcard__q .md p{margin:0 0 6px}
 .atelier .qcard__q .md p:last-child{margin-bottom:0}
+
+/* Settings → Agent intelligence: one card per tier, three fields in a row
+   (stacked when the modal is narrow). */
+.atelier .tierlist{display:grid;gap:12px;margin:4px 0 20px}
+.atelier .tiercard{border:1px solid var(--x-hairline);border-radius:10px;padding:12px 14px;background:color-mix(in srgb,var(--x-title) 3%,transparent)}
+.atelier .tiercard__head{display:flex;align-items:baseline;gap:10px;margin-bottom:10px}
+.atelier .tiercard__name{font:600 13.5px/1.3 var(--sans);color:var(--x-title)}
+.atelier .tiercard__hint{flex:1;min-width:0;font:400 12px/1.4 var(--sans);color:var(--x-meta)}
+.atelier .tiercard__fields{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.4fr) minmax(0,.8fr);gap:10px}
+.atelier .tiercard__fields .field{display:grid;gap:4px;margin:0}
+.atelier .tiercard__fields .field>span,.atelier .tierdefault>span{font:500 11.5px/1.3 var(--sans);color:var(--x-secondary)}
+.atelier .tierdefault{display:grid;gap:4px;max-width:360px}
+@media (max-width:900px){.atelier .tiercard__fields{grid-template-columns:minmax(0,1fr)}}

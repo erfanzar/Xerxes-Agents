@@ -75,6 +75,12 @@ const MAX_THROUGHPUT_TOKENS_PER_SECOND = 100_000
  * loops one provider call per round forever (maxToolTurns is unbounded).
  */
 export const MAX_UNCONFIGURED_ONLY_ROUNDS = 3
+/** Times one turn re-asks after a reply with no text and no readable call. */
+export const MAX_EMPTY_REPLY_NUDGES = 2
+/** What the model is told after such a reply; it names both ways to continue. */
+export const EMPTY_REPLY_NUDGE = '[harness] Your last reply had no visible text and no tool call the harness could '
+  + 'read, so nothing was run and nothing was answered. Continue the task: call the next tool in the exact tool-call '
+  + 'form your instructions give, or, if the work is done, write your final answer as plain text.'
 /**
  * Output ceiling used after a first `finish_reason: length`, when the caller
  * pinned no maxTokens of its own. A truncation means the model wanted more
@@ -441,6 +447,8 @@ export async function* runTurn(
   let turnServiceTier: string | undefined
   let apiCallsCount = 0
   let objectiveGuardRetries = 0
+  /** Empty replies answered with a nudge this turn; see EMPTY_REPLY_NUDGE. */
+  let emptyReplyNudges = 0
   const objectiveToolExecutions: ObjectiveToolExecutionEvidence[] = []
   let toolCallsCount = 0
   let forceToolFreeSummary = false
@@ -1047,6 +1055,17 @@ export async function* runTurn(
             type: 'text',
             text: renderIntervention({ kind: 'steer-note', content }),
           }
+        }
+        // A reply with no visible text and no call we could read, after the turn
+        // has already worked, is not an answer (raw text: a reply that only
+        // repeats the last round is deduplicated to nothing, but it did answer): ending there reported workflow
+        // agents as "completed without a final response" (Claude Code writing a
+        // call in a form the harness could not parse). Ask again, twice at most.
+        if (!rawAssistantText.trim() && toolTurn > 0 && emptyReplyNudges < MAX_EMPTY_REPLY_NUDGES) {
+          emptyReplyNudges += 1
+          state.messages.push({ role: 'user', content: EMPTY_REPLY_NUDGE, origin: 'harness' })
+          if (toolTurn + 1 >= turnLimit) turnLimit += 1
+          continue
         }
         // A session holding a live goal is driven by that goal, not by reading
         // its own prose: the turn ends here and the round driver decides at

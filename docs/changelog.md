@@ -7,6 +7,12 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.15 — 2026-09-30
+
+- Agents: a reply with no text and no readable tool call no longer ends an agent as "completed without a final response". After tool work, the agent is asked again (twice at most) to call a tool in the required form or give its answer. Workflow agents on Claude Code hit this after large tool results.
+- Settings → Agent intelligence: point the light, balanced and smart tiers at any provider, any model (from the provider's list or typed in) and any reasoning effort that model supports, and choose which tier new agents use.
+- Updates: the app checks for a new version every five minutes. "Check for Updates…" now says when you are up to date instead of showing nothing, and "Not now" keeps a version from reappearing until you ask or relaunch.
+
 ## 0.6.14 — 2026-09-30
 
 - Compaction: a long session's summary no longer grows until compaction cannot make room. Each pass used to keep the previous summary word for word and add the new one after it; a goal session reached a 25K-token summary against a 2K budget and its turns failed with "Automatic compaction could not make room". Once the carried summary and the new one pass twice the budget, they are folded into one summary. The full history stays in the pre-compaction archive.

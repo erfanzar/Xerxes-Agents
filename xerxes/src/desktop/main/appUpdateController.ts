@@ -3,7 +3,7 @@
 
 /**
  * The app-wide update flow around `appUpdate.ts`: check at startup and every
- * few hours, remember a skipped version, broadcast the state to every window,
+ * five minutes, remember a skipped version, broadcast the state to every window,
  * and install only when a renderer relays the person's click.
  */
 
@@ -18,18 +18,25 @@ import { appBundleOf, checkForAppUpdate, installAppUpdate, type AvailableRelease
 export type AppUpdateState =
   | { readonly phase: 'idle' }
   | { readonly phase: 'checking' }
+  /** Answer to an explicit check: this version is the latest. */
+  | { readonly phase: 'current'; readonly version: string }
   | { readonly phase: 'available'; readonly release: AvailableRelease; readonly installable: boolean; readonly reason?: string }
   | { readonly phase: 'downloading'; readonly release: AvailableRelease; readonly received: number; readonly total: number }
   | { readonly phase: 'restarting'; readonly release: AvailableRelease }
   | { readonly phase: 'error'; readonly message: string; readonly release?: AvailableRelease }
 
 const FIRST_CHECK_DELAY_MS = 20_000
-const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000
+/** GitHub allows 60 unauthenticated requests an hour; this is 12. */
+const CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 export function startAppUpdates(options: { readonly settingsDirectory: string; readonly version: string }): { readonly check: () => Promise<AppUpdateState> } {
   const settingsFile = join(options.settingsDirectory, 'desktop-update.json')
   let state: AppUpdateState = { phase: 'idle' }
   let installing = false
+  // "Not now" holds for the rest of this run: a routine check every five
+  // minutes must not reopen the same prompt. A newer release, or an explicit
+  // check, still shows.
+  let dismissed: string | undefined
   const broadcast = () => {
     for (const contents of webContents.getAllWebContents()) {
       if (!contents.isDestroyed()) contents.send('desktop:app-update-state', state)
@@ -53,7 +60,9 @@ export function startAppUpdates(options: { readonly settingsDirectory: string; r
     if (manual) set({ phase: 'checking' })
     try {
       const result = await checkForAppUpdate({ currentVersion: options.version, platform: process.platform, arch: process.arch, fetch: (url, init) => fetch(url, init) })
-      if (result.kind === 'current') { set({ phase: 'idle' }); return state }
+      // An explicit check always answers; saying nothing read as a dead menu item.
+      if (result.kind === 'current') { set(manual ? { phase: 'current', version: result.version } : { phase: 'idle' }); return state }
+      if (!manual && dismissed === result.release.version) return state
       // A version the person chose to skip stays quiet until a newer one, or
       // until they ask explicitly.
       if (!manual && (await skipped()) === result.release.version) { set({ phase: 'idle' }); return state }
@@ -107,6 +116,7 @@ export function startAppUpdates(options: { readonly settingsDirectory: string; r
         set({ phase: 'idle' })
         return state
       case 'dismiss':
+        if (state.phase === 'available') dismissed = state.release.version
         if (!installing) set({ phase: 'idle' })
         return state
       case 'open-release': {

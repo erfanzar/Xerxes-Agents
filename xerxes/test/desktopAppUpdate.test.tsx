@@ -121,3 +121,13 @@ test('the prompt asks before installing and falls back to the release page when 
   expect(downloading).not.toContain('Not now')
   expect(appUpdateView({ phase: 'idle' })).toBeNull()
 })
+
+test('an explicit check that finds nothing newer says so instead of showing nothing', () => {
+  const view = appUpdateView({ phase: 'current', version: '0.6.14' })
+  expect(view).toMatchObject({ phase: 'current', version: '0.6.14' })
+  const shown = renderToStaticMarkup(createElement(AppUpdatePrompt, { update: view }))
+  expect(shown).toContain('Xerxes Agents is up to date')
+  expect(shown).toContain('0.6.14 is the latest version.')
+  expect(shown).toContain('>OK<')
+  expect(shown).not.toContain('Install and restart')
+})

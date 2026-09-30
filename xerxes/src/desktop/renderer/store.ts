@@ -144,7 +144,7 @@ const GOAL_WRITE_TOOLS = new Set(['create_goal', 'update_goal'])
  */
 /** What the update prompt shows; the main process's state, validated. */
 export interface AppUpdateView {
-  readonly phase: 'checking' | 'available' | 'downloading' | 'restarting' | 'error'
+  readonly phase: 'checking' | 'current' | 'available' | 'downloading' | 'restarting' | 'error'
   readonly version?: string
   readonly notes?: string
   readonly pageUrl?: string
@@ -160,12 +160,12 @@ export function appUpdateView(value: unknown): AppUpdateView | null {
   if (!value || typeof value !== 'object') return null
   const state = value as Record<string, unknown>
   const phase = state.phase
-  if (phase !== 'checking' && phase !== 'available' && phase !== 'downloading' && phase !== 'restarting' && phase !== 'error') return null
+  if (phase !== 'checking' && phase !== 'current' && phase !== 'available' && phase !== 'downloading' && phase !== 'restarting' && phase !== 'error') return null
   const release = state.release && typeof state.release === 'object' ? state.release as Record<string, unknown> : {}
   const text = (field: unknown) => typeof field === 'string' ? field : undefined
   const count = (field: unknown) => typeof field === 'number' && Number.isFinite(field) ? field : undefined
   const view: Record<string, unknown> = { phase }
-  for (const [key, field] of [['version', text(release.version)], ['notes', text(release.notes)], ['pageUrl', text(release.pageUrl)], ['publishedAt', text(release.publishedAt)], ['reason', text(state.reason)], ['message', text(state.message)]] as const) {
+  for (const [key, field] of [['version', text(release.version) ?? text(state.version)], ['notes', text(release.notes)], ['pageUrl', text(release.pageUrl)], ['publishedAt', text(release.publishedAt)], ['reason', text(state.reason)], ['message', text(state.message)]] as const) {
     if (field !== undefined) view[key] = field
   }
   if (typeof state.installable === 'boolean') view.installable = state.installable

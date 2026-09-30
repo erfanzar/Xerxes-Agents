@@ -435,7 +435,7 @@ export interface SessionSearchStats {
 
 // ── Settings ────────────────────────────────────────────────────────────
 
-export type SettingsTab = 'general' | 'models' | 'agents' | 'permissions' | 'mcp' | 'channels' | 'terminals' | 'lsp'
+export type SettingsTab = 'general' | 'models' | 'intelligence' | 'agents' | 'permissions' | 'mcp' | 'channels' | 'terminals' | 'lsp'
 
 /** One MCP server's redacted status, straight from the daemon wire. */
 export interface McpServerStatus {

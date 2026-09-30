@@ -21,6 +21,25 @@ function megabytes(bytes: number | undefined): string {
 
 export function AppUpdatePrompt({ update }: { update: AppUpdateView | null }): ReactElement | null {
   if (!update || update.phase === 'checking') return null
+  if (update.phase === 'current') {
+    return (
+      <div className="appupdate" role="dialog" aria-modal="true" aria-labelledby="appupdate-title">
+        <div className="appupdate__scrim" onClick={() => void store.appUpdateAction('dismiss')} />
+        <section className="appupdate__card">
+          <header className="appupdate__head">
+            <span className="appupdate__icon" aria-hidden="true"><Icon name="check" size={16} /></span>
+            <div>
+              <h2 id="appupdate-title">Xerxes Agents is up to date</h2>
+              <p>{update.version ? `${update.version} is the latest version.` : 'You have the latest version.'} It checks again every five minutes.</p>
+            </div>
+          </header>
+          <footer className="appupdate__actions">
+            <button className="btn btn--solid" autoFocus onClick={() => void store.appUpdateAction('dismiss')}>OK</button>
+          </footer>
+        </section>
+      </div>
+    )
+  }
   const version = update.version ? `Xerxes Agents ${update.version}` : 'A new version'
   const busy = update.phase === 'downloading' || update.phase === 'restarting'
   const percent = update.total ? Math.min(100, Math.round(((update.received ?? 0) / update.total) * 100)) : 0
