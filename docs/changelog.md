@@ -7,6 +7,10 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.16 — 2026-10-01
+
+- Claude Code: a reply rejected with "The model's tool call could not be parsed" is retried (twice at most) with a note telling the model it used the native <invoke> syntax and must call tools as <function=NAME>{json}</function>. Sonnet slips into the native form in long, tool-heavy agent runs, and each slip used to fail the whole agent. Text already shown is not repeated.
+
 ## 0.6.15 — 2026-09-30
 
 - Agents: a reply with no text and no readable tool call no longer ends an agent as "completed without a final response". After tool work, the agent is asked again (twice at most) to call a tool in the required form or give its answer. Workflow agents on Claude Code hit this after large tool results.

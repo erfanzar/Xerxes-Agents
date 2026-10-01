@@ -19,6 +19,8 @@ import {
   FunctionCallExtractor,
   withTranscriptCacheMark,
   toolParameterTypes,
+  MAX_NATIVE_CALL_RETRIES,
+  NATIVE_CALL_CORRECTION,
   type ClaudeCodeLauncher,
 } from '../src/llms/claudeCode.js'
 import { createLlmClient, type LlmDelta } from '../src/llms/client.js'
@@ -464,4 +466,54 @@ test('a bare <function> block with the name on its own line is a call, split acr
   const prose = new FunctionCallExtractor(types)
   expect(prose.push('Use <function> tags like this.</function> ok') + prose.finish()).toBe('Use <function> tags like this.</function> ok')
   expect(prose.calls).toEqual([])
+})
+
+/** A launcher whose Nth run replays the Nth script. */
+function scriptedLauncher(scripts: ReadonlyArray<readonly string[]>) {
+  const inputs: string[] = []
+  const launch: ClaudeCodeLauncher = (_argv, spawn) => {
+    const lines = scripts[Math.min(inputs.length, scripts.length - 1)]!
+    inputs.push(spawn.input)
+    return {
+      lines: (async function* () { for (const line of lines) yield line })(),
+      exited: Promise.resolve(0),
+      stderr: Promise.resolve(''),
+      kill: () => {},
+    }
+  }
+  return { launch, inputs }
+}
+
+const nativeCallRejected = [
+  textDelta('Checking the diff for S02. '),
+  result({ is_error: true, result: "The model's tool call could not be parsed (retry also failed)." }),
+]
+
+test('a reply Claude Code rejects for native tool-call syntax is retried with a correction, not failed', async () => {
+  const fake = scriptedLauncher([
+    nativeCallRejected,
+    [textDelta('Checking the diff for S02. '), textDelta('<function=read_file>{"path": "kernels/ragged.py"}</function>'), result()],
+  ])
+  const { text, deltas } = await collect(new ClaudeCodeClient({ executable: '/bin/claude', launch: fake.launch, workingDirectory: '/tmp' }).stream({ model: 'claude-code/sonnet', tools, messages: [{ role: 'user', content: 'review S02' }] }))
+  expect(fake.inputs).toHaveLength(2)
+  // The retry carries the correction after the transcript; the first did not.
+  expect(fake.inputs[0]).not.toContain('native <function_calls>')
+  expect(JSON.parse(fake.inputs[1]!).message.content.at(-1).text).toBe(NATIVE_CALL_CORRECTION)
+  // The text the failed attempt showed is not shown a second time.
+  expect(text).toBe('Checking the diff for S02. ')
+  expect(deltas.flatMap(delta => delta.toolCalls ?? [])).toEqual([expect.objectContaining({ function: { name: 'read_file', arguments: { path: 'kernels/ragged.py' } } })])
+})
+
+test('native-call rejections are retried a bounded number of times, then reported', async () => {
+  const fake = scriptedLauncher([nativeCallRejected])
+  const failure = await collect(new ClaudeCodeClient({ executable: '/bin/claude', launch: fake.launch, workingDirectory: '/tmp' }).stream({ model: 'claude-code/sonnet', tools, messages: [{ role: 'user', content: 'review' }] })).catch(error => error)
+  expect(failure).toBeInstanceOf(ProviderError)
+  expect(String(failure.message)).toContain('could not be parsed')
+  expect(fake.inputs).toHaveLength(1 + MAX_NATIVE_CALL_RETRIES)
+})
+
+test('other Claude Code failures are not retried here', async () => {
+  const fake = scriptedLauncher([[result({ is_error: true, result: 'Claude AI usage limit reached|1790000000', api_error_status: 429 })]])
+  await collect(new ClaudeCodeClient({ executable: '/bin/claude', launch: fake.launch, workingDirectory: '/tmp' }).stream({ model: 'claude-code/sonnet', messages: [{ role: 'user', content: 'hi' }] })).catch(() => undefined)
+  expect(fake.inputs).toHaveLength(1)
 })

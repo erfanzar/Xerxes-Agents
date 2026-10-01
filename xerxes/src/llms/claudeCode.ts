@@ -608,6 +608,19 @@ function usageOf(value: unknown): TokenUsage | undefined {
 }
 
 /** What went wrong, with the fix when the cause is the sign-in. */
+/** Retries of one request after Claude Code rejected a native-syntax call. */
+export const MAX_NATIVE_CALL_RETRIES = 2
+/** Appended to the transcript for a retry, so the model knows why its reply was rejected. */
+export const NATIVE_CALL_CORRECTION = '[harness] Your previous reply to this turn was rejected before anyone saw it: it '
+  + 'called a tool with native <function_calls>/<invoke> syntax, which cannot run here and fails the whole turn. '
+  + 'Write the reply again. Call tools only as lines of the form <function=TOOL_NAME>{"arg": "value"}</function>, '
+  + 'one per call, or answer in plain text.'
+
+/** Claude Code failed the turn because the model wrote a native tool call. */
+export function isNativeCallRejection(error: unknown): boolean {
+  return error instanceof ProviderError && /tool call could not be parsed/i.test(error.message)
+}
+
 export function claudeCodeFailure(message: string, status?: number): ProviderError {
   const text = message.trim() || 'Claude Code returned an error without a message.'
   const hint = /invalid (authentication|api key)|failed to authenticate|not logged in|please run \/login|oauth token has expired/i.test(text)
@@ -656,13 +669,53 @@ export class ClaudeCodeClient implements LlmClient {
     } catch { return undefined }
   }
 
+  /**
+   * One request, retried when Claude Code rejects the reply because the model
+   * fell back to the native `<function_calls>`/`<invoke>` syntax (it has no
+   * native tools here, so the turn fails with "The model's tool call could not
+   * be parsed"). Sonnet does this in long, tool-heavy transcripts, and each
+   * time the whole agent failed. The retry tells the model what went wrong.
+   * Text the failed attempt already showed is not shown twice.
+   */
   async *stream(request: CompletionRequest, signal?: AbortSignal): AsyncIterable<LlmDelta> {
+    let shown = ''
+    for (let attempt = 0; ; attempt += 1) {
+      let retraced = ''
+      let released = attempt === 0
+      try {
+        for await (const delta of this.attempt(request, signal, attempt > 0 ? NATIVE_CALL_CORRECTION : undefined)) {
+          const text = delta.content
+          if (!text || released) {
+            if (text) shown += text
+            yield delta
+            continue
+          }
+          // A retry usually starts by rewriting what is already on screen.
+          retraced += text
+          if (shown.startsWith(retraced)) continue
+          let common = 0
+          while (common < shown.length && common < retraced.length && shown[common] === retraced[common]) common += 1
+          released = true
+          const novel = retraced.slice(common)
+          shown += novel
+          if (novel) yield { ...delta, content: novel }
+        }
+        return
+      } catch (error) {
+        if (attempt >= MAX_NATIVE_CALL_RETRIES || signal?.aborted || !isNativeCallRejection(error)) throw error
+      }
+    }
+  }
+
+  private async *attempt(request: CompletionRequest, signal: AbortSignal | undefined, correction: string | undefined): AsyncIterable<LlmDelta> {
     signal?.throwIfAborted()
     const system = [
       request.messages.filter(message => message.role === 'system').map(messageText).join('\n\n').trim(),
       claudeCodeToolProtocol(request.tools ?? [], request.toolChoice),
     ].filter(Boolean).join('\n\n')
-    const input = JSON.stringify({ type: 'user', message: { role: 'user', content: withTranscriptCacheMark(claudeCodeTranscript(request.messages)) } }) + '\n'
+    const transcript = claudeCodeTranscript(request.messages)
+    if (correction) transcript.push({ type: 'text', text: correction })
+    const input = JSON.stringify({ type: 'user', message: { role: 'user', content: withTranscriptCacheMark(transcript) } }) + '\n'
     const known = claudeCodeCatalog.find(request.model)
     // Owner-only, one per call, removed when the call ends.
     const systemPromptFile = join(tmpdir(), `xerxes-claude-code-system-${randomUUID()}.md`)
