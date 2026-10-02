@@ -5,7 +5,8 @@ import type { WorkspaceResources } from './workspaceResources.js';
 import { readTurnOutcome, turnOutcomeLabel } from '../types/turnOutcome.js';
 import { ConnectionLeases } from './connectionLease.js';
 import { historyLimit, sessionHistoryPage } from './historyPage.js';
-import { ArchiveHistory } from './archiveHistory.js';
+import { ArchiveHistory, type ArchivedHistory } from './archiveHistory.js';
+import { isCompactionSummaryMessage } from '../context/compressor.js';
 import { ValidationError } from '../core/errors.js';
 
 import { recordCompaction } from '../context/compactionHistory.js'
@@ -120,7 +121,7 @@ import { GoalTokenBudget } from '../runtime/goalTokenBudget.js';
 import type { GoalTokenLedger } from '../runtime/goalTokenLedger.js';
 import { withModelCallBudget } from '../llms/callBudget.js';
 import { SessionOperationQueue } from '../runtime/sessionOperationQueue.js';
-import { readGoalWake, queueGoalWake, claimGoalWake, finishGoalWake, cancelGoalWake, recoverGoalWake } from '../runtime/goalWake.js';
+import { readGoalWake, queueGoalWake, claimGoalWake, finishGoalWake, cancelGoalWake, recoverGoalWake, GOAL_REARM_AFTER_RESTART_KEY } from '../runtime/goalWake.js';
 import { runGoalCommand } from "./goalCommand.js";
 import { machineArguments, runMachineCommand } from "./machineCommand.js";
 import {
@@ -810,6 +811,12 @@ export interface DaemonServerOptions {
   readonly terminalRegistry?: TerminalRegistry;
   /** Where the agent-command memory limit is saved, and how a change reaches the running guard. */
   readonly memoryGuard?: { readonly settingsFile: string; readonly applied: (settings: MemoryGuardSettings) => void };
+  /**
+   * Where an update restart lists the sessions whose armed goals the next
+   * process resumes at startup. Without it a goal continues only when a client
+   * happens to reopen its session.
+   */
+  readonly goalRearmFile?: string;
   /** Interactive PTYs; enables the desktop terminal tab (terminal.open / resize). */
   readonly ptySessions?: PtySessionManager;
   readonly runHistory?: RunHistory;
@@ -955,8 +962,6 @@ const PRODUCTIVE_TURN_EVENTS: ReadonlySet<string> = new Set([
 const MODEL_USAGE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
 /** Waits before retrying a goal round lost to a transient provider failure. */
-/** Session metadata marking a goal armed when an update restart drained it. */
-const GOAL_REARM_AFTER_RESTART_KEY = "goal_rearm_after_restart";
 /** A marker older than this is stale (the update never came back) and is dropped, not honoured. */
 const GOAL_REARM_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 /** The app re-asks for a queued update every few seconds while visible. */
@@ -1101,6 +1106,7 @@ export class DaemonServer {
   private readonly socketPath: string;
   private readonly terminalRegistry: TerminalRegistry | undefined;
   private readonly memoryGuard: DaemonServerOptions["memoryGuard"];
+  private readonly goalRearmFile: string | undefined;
   private readonly ptySessions: PtySessionManager | undefined;
   /** Live output subscriptions per client: terminal id → unsubscribe. */
   private readonly terminalWatches = new Map<DaemonTransportConnection, Map<string, () => void>>();
@@ -1308,6 +1314,7 @@ export class DaemonServer {
     this.browserManager = options.browserManager ?? new BrowserManager();
     this.terminalRegistry = options.terminalRegistry;
     this.memoryGuard = options.memoryGuard;
+    this.goalRearmFile = options.goalRearmFile;
     this.ptySessions = options.ptySessions;
     this.runHistory = options.runHistory;
     this.goalTokenLedger = options.goalTokenLedger;
@@ -1381,6 +1388,7 @@ export class DaemonServer {
       this.installCrashHandlers();
       this.startCronSchedulerIfOwned();
       this.pruneSnapshotStore();
+      this.resumeGoalsAfterRestart();
     } catch (error) {
       try {
         await this.stop();
@@ -2039,7 +2047,13 @@ export class DaemonServer {
       const result = resources
         ? await this.workspaceContext.run(resources, () => this.dispatch(connection, request))
         : await this.dispatch(connection, request);
-      responseConnection.send(jsonRpcSuccess(request.id, result));
+      // Journaling ends in the same synchronous step as the reply: ending it
+      // any earlier lets newer live frames overtake the reply, and the client
+      // would then replay the older journal on top of them.
+      const reconnectEvents = request.method === 'initialize' && result.ok === true
+        ? this.connectionLeases.takeReplay(connection)
+        : undefined;
+      responseConnection.send(jsonRpcSuccess(request.id, reconnectEvents ? { ...result, reconnect_events: reconnectEvents } : result));
     } catch (error) {
       responseConnection.send(jsonRpcFailure(request.id, -32000, errorMessage(error)));
     }
@@ -2105,6 +2119,10 @@ export class DaemonServer {
           session.metadata[GOAL_REARM_AFTER_RESTART_KEY] = { goal_id: goal.id, revision: goal.revision, at: Date.now() };
         }
         await this.runtime.flushSessions();
+        if (this.goalRearmFile) {
+          await mkdir(dirname(this.goalRearmFile), { recursive: true });
+          await writeFile(this.goalRearmFile, `${JSON.stringify({ version: 1, sessions: armed.map(session => ({ id: session.id, cwd: session.cwd })) })}\n`, 'utf8');
+        }
       }
       if (this.goalDrainTimer) { clearTimeout(this.goalDrainTimer); this.goalDrainTimer = undefined; }
       this.heldGoalKicks.clear();
@@ -2118,6 +2136,7 @@ export class DaemonServer {
           this.stoppingGoalWakes = false;
           if (this.cronSchedulerStarted) this.cronScheduler.start();
           for (const session of this.runtime.listSessions()) delete session.metadata[GOAL_REARM_AFTER_RESTART_KEY];
+          if (this.goalRearmFile) void rm(this.goalRearmFile, { force: true }).catch(removeError => console.error('Could not remove the goal re-arm list:', errorMessage(removeError)));
           void this.rearmHeldGoals();
           this.broadcast('notification', { level: 'error', message: `Runtime restart failed: ${errorMessage(error)}` });
         });
@@ -5395,6 +5414,22 @@ export class DaemonServer {
         );
         return { ok: true };
       case "new": {
+        // /new evicts the session it leaves, and eviction aborts its turn,
+        // cancels its agents and strands an armed goal. Refuse while it works
+        // instead of destroying that work as a side effect of a fresh start.
+        const leaving = this.runtime.sessionStatus(key);
+        const working = leaving && (leaving.activeTurnId || this.turnOwners.has(key)
+          || subagentSnapshotPanelPayloads(leaving.metadata).some(agent => agent.status === 'running' || agent.status === 'queued')
+          || (() => { const goal = getGoal(leaving.metadata, leaving.id); return goal?.phase === 'active' && goal.activation === 'armed'; })());
+        if (working) {
+          const error = "This session is still working (a turn, agents, or an armed goal). Stop or pause it before starting a new one.";
+          this.emitSlash(connection, error, "warning");
+          return { ok: false, error };
+        }
+        // Another client still showing the session keeps it; only this
+        // connection moves to the fresh one.
+        const shared = [...this.connections, ...this.sessionObservers]
+          .some(other => this.connectionLeases.owner(other) !== connection && other.activeSessionKey === key);
         // Flush before evicting so unpersisted edits survive the reset.
         await this.runtime.flushSessions();
         // A resumed connection holds the persisted hex id as its session key,
@@ -5403,10 +5438,12 @@ export class DaemonServer {
         // non-hex slot key exactly like a new attach does, so /new always
         // opens an empty conversation; the old transcript is left untouched.
         const previousKey = key;
-        this.forgetAcceptedSubmissions([previousKey]);
-        this.endSessionLifetime([previousKey]);
-        this.runtime.evictSession(previousKey);
-        this.clearAutoCompactFailures(previousKey);
+        if (!shared) {
+          this.forgetAcceptedSubmissions([previousKey]);
+          this.endSessionLifetime([previousKey]);
+          this.runtime.evictSession(previousKey);
+          this.clearAutoCompactFailures(previousKey);
+        }
         const freshKey = `tui:${newConnectionKey()}`;
         connection.activeSessionKey = freshKey;
         const fresh = await this.runtime.openSession(freshKey);
@@ -7406,7 +7443,7 @@ export class DaemonServer {
       // A compaction that worked — by hand or automatically — retires the
       // failure evidence, so `/compact` is a way back from the bail-out.
       this.clearAutoCompactFailures(sessionKey);
-      await this.runtime.flushSessions("rewrite");
+      await this.runtime.flushSessions("rewrite", sessionKey);
       if (notify) {
         const replaced = outcome.originalCount - outcome.messages.length;
         const body = `${verb} ${replaced} message(s): ${outcome.stamp.tokens_before} → ${outcome.stamp.tokens_after} tokens.`;
@@ -7513,12 +7550,25 @@ export class DaemonServer {
   private readonly archiveHistory = new ArchiveHistory();
 
   private async historySession(session: DaemonSession): Promise<DaemonSession> {
+    let archived: ArchivedHistory | undefined;
+    try {
+      archived = await this.archiveHistory.archived(await this.precompactArchivePath(session.id));
+    } catch (error) {
+      // The archive only adds older turns to the view. Throwing here made the
+      // session unopenable and failed active_list for every session with it.
+      console.error(`Older history for session ${session.id} is unavailable: ${errorMessage(error)}`);
+    }
     // Mid-turn, the session's messages stop where the turn began; a client
     // that (re)attaches then would lose everything the turn has done so far —
-    // hours of a goal round, after the app was closed and reopened.
+    // hours of a goal round, after the app was closed and reopened. Read the
+    // live tail only after the archive await: events the running turn streams
+    // during the read reach the client before this snapshot, and a tail taken
+    // earlier would erase them when the client adopts the snapshot. Taken
+    // whenever the turn has one, even when shorter: a mid-turn compaction
+    // shrinks the live window, and the archive stitches the rest.
     const live = this.runtime.liveTurnMessages?.(session);
-    const current = live && live.length > session.messages.length ? live as DaemonSession['messages'] : session.messages;
-    const messages = await this.archiveHistory.messages(await this.precompactArchivePath(session.id), current);
+    const current = live ? live as DaemonSession['messages'] : session.messages;
+    const messages = archived ? archived.stitch(current) : [...current];
     return { ...session, messages, thinkingContent: messages.length === session.messages.length ? session.thinkingContent : [] };
   }
 
@@ -8417,7 +8467,7 @@ export class DaemonServer {
     const dropped = discardLastUserTurn(session.messages);
     if (!dropped) {
       if (notify) {
-        this.emitSlash(connection, "Nothing to undo.");
+        this.emitSlash(connection, "Nothing to undo past the last compaction summary.");
       }
       return { ok: true, dropped: 0 };
     }
@@ -8425,7 +8475,7 @@ export class DaemonServer {
     // The window just shrank, so the condition that kept failing is no longer
     // the one the counter was recording.
     this.clearAutoCompactFailures(session.sessionKey);
-    await this.runtime.flushSessions("rewrite");
+    await this.runtime.flushSessions("rewrite", session.sessionKey);
     if (session.messages.length === 0 && session.turnCount === 0) {
       // The store's empty-save path used to delete the transcript here
       // implicitly. Routine saves never delete anymore, so removing the
@@ -9875,13 +9925,7 @@ export class DaemonServer {
     connection.activeSessionKey = key;
     this.sessionObservers.add(connection);
     if (params.session_owned_turns === true) this.sessionOwnedClients.add(connection);
-    const previousWake = readGoalWake(session.metadata, session.id);
-    const recoveredWake = recoverGoalWake(session.metadata, session.id, this.goalTokenOwner, Date.now());
-    if (previousWake?.state !== recoveredWake?.state) {
-      if (recoveredWake?.state === 'interrupted') this.blockGoalForFailure(key, 'continuation-interrupted',
-        'The previous goal round has an unknown outcome after restart. Review the session before resuming.');
-      await this.runtime.flushSessions();
-    }
+    await this.recoverGoalWakeAfterRestart(key);
     await this.rearmGoalAfterRestart(key, connection);
     await this.refreshSkills(session);
     const skills = this.skillRegistry
@@ -9957,13 +10001,14 @@ export class DaemonServer {
     // provider answers, every context surface remains explicitly unknown.
     this.refreshActiveModelCapabilities(connection);
     this.recoverMonitorReactions(session);
-    const reconnectEvents = this.connectionLeases.takeReplay(connection);
+    // Await the history first so the snapshot and everything after it are
+    // built in one synchronous step; the lease replay is taken at send time.
+    const history = requestedHistory === 0 ? session : await this.historySession(session);
     return {
       ...this.runtimeStatusWithChannels(),
       ...initPayload,
       ok: true,
-      session: sessionPayload(session, contextLimit, this.mcpStatusRecord(session), requestedHistory, requestedHistory === 0 ? session : await this.historySession(session)),
-      ...(reconnectEvents ? { reconnect_events: reconnectEvents } : {}),
+      session: sessionPayload(session, contextLimit, this.mcpStatusRecord(session), requestedHistory, history),
       pending_interactions: [...this.pendingInteractionFrames.values()]
         .filter(frame => this.canAnswerInteraction(frame.owner, connection))
         .map(({ type, payload }) => ({ type, payload })),
@@ -10363,9 +10408,12 @@ export class DaemonServer {
    * when the old one drained comes back armed and continues. Only the goal
    * that was armed, at the phase it had; anything changed since is left alone.
    */
-  private async rearmGoalAfterRestart(sessionKey: string, connection: DaemonTransportConnection): Promise<void> {
+  private async rearmGoalAfterRestart(sessionKey: string, connection: DaemonTransportConnection | undefined): Promise<void> {
     const session = this.runtime.sessionStatus(sessionKey);
     if (!session || !Object.hasOwn(session.metadata, GOAL_REARM_AFTER_RESTART_KEY)) return;
+    const emit = connection
+      ? (event: DaemonEvent) => this.emit(connection, event.type, event.payload)
+      : this.sessionViewerEmitter(session.id);
     const marker = session.metadata[GOAL_REARM_AFTER_RESTART_KEY];
     delete session.metadata[GOAL_REARM_AFTER_RESTART_KEY];
     const record = marker && typeof marker === 'object' && !Array.isArray(marker) ? marker as Record<string, unknown> : {};
@@ -10379,14 +10427,82 @@ export class DaemonServer {
       resumeGoal(session.metadata, session.id, { id: goal.id, revision: goal.revision }, Date.now());
     } catch (error) {
       await this.runtime.flushSessions();
-      this.emit(connection, 'notification', { level: 'warning', message: `The goal was not resumed after the runtime update: ${errorMessage(error)}`, session_id: session.id });
+      emit({ type: 'notification', payload: { level: 'warning', message: `The goal was not resumed after the runtime update: ${errorMessage(error)}`, session_id: session.id } });
       return;
     }
     if (!session.activeTurnId && session.status === 'idle') session.cancelRequested = false;
     await this.runtime.flushSessions();
     this.notifySessionStateChanged(session.id);
     await this.stageGoalWake(sessionKey);
-    this.kickGoalWake(sessionKey, event => this.emit(connection, event.type, event.payload), connection);
+    this.kickGoalWake(sessionKey, emit, connection);
+  }
+
+  /**
+   * A goal round whose owner vanished across a restart has an unknown outcome
+   * and blocks the goal for review, unless the update restart the person
+   * forced is what stopped it: its re-arm marker says so, and the goal goes on.
+   */
+  private async recoverGoalWakeAfterRestart(sessionKey: string): Promise<void> {
+    const session = this.runtime.sessionStatus(sessionKey);
+    if (!session) return;
+    const previousWake = readGoalWake(session.metadata, session.id);
+    const recoveredWake = recoverGoalWake(session.metadata, session.id, this.goalTokenOwner, Date.now());
+    if (previousWake?.state === recoveredWake?.state) return;
+    const marker = session.metadata[GOAL_REARM_AFTER_RESTART_KEY];
+    const stoppedByRestart = isRecord(marker) && marker.goal_id === recoveredWake?.goalId;
+    if (recoveredWake?.state === 'interrupted' && !stoppedByRestart) this.blockGoalForFailure(sessionKey, 'continuation-interrupted',
+      'The previous goal round has an unknown outcome after restart. Review the session before resuming.');
+    await this.runtime.flushSessions();
+  }
+
+  /** Every client currently showing the session, resolved per event. */
+  private sessionViewerEmitter(sessionId: string): (event: DaemonEvent) => void {
+    const accepts = (connection: DaemonTransportConnection): boolean => this.runtime.sessionStatus(connection.activeSessionKey)?.id === sessionId;
+    return event => {
+      for (const connection of this.connections) if (accepts(connection)) this.emit(connection, event.type, event.payload);
+      this.websocketGateway?.broadcast(event.type, event.payload, accepts);
+    };
+  }
+
+  /**
+   * The fresh process after an update restart resumes every goal the old one
+   * listed, not only the one a client happens to reopen; a session nobody
+   * opened for six hours would otherwise lose its marker as stale.
+   */
+  private resumeGoalsAfterRestart(): void {
+    const file = this.goalRearmFile;
+    if (!file) return;
+    const recovery = (async () => {
+      const text = await readFile(file, 'utf8').catch((error: NodeJS.ErrnoException) => {
+        if (error.code === 'ENOENT') return undefined;
+        throw error;
+      });
+      if (text === undefined) return;
+      // The markers in each session are the authority; this list only says
+      // where to look, so it is consumed once whatever happens next.
+      await rm(file, { force: true });
+      const parsed: unknown = JSON.parse(text);
+      const sessions = isRecord(parsed) && Array.isArray(parsed.sessions) ? parsed.sessions : [];
+      for (const entry of sessions) {
+        if (!isRecord(entry) || typeof entry.id !== 'string' || typeof entry.cwd !== 'string' || !looksLikeSessionId(entry.id)) continue;
+        const id = entry.id, cwd = entry.cwd;
+        try {
+          const resources = await this.workspaceResources?.(cwd);
+          if (resources) this.workspaceCatalog.set(resolveProjectDirectory(cwd), resources);
+          const resume = async (): Promise<void> => {
+            const key = this.runtime.listSessions().find(session => session.id === id)?.sessionKey
+              ?? (await this.runtime.openSession(id, undefined, { cwd, preserveProject: true, resume: true })).sessionKey;
+            await this.recoverGoalWakeAfterRestart(key);
+            await this.rearmGoalAfterRestart(key, undefined);
+          };
+          await (resources ? this.workspaceContext.run(resources, resume) : resume());
+        } catch (error) {
+          console.error(`Could not resume the goal in session ${id} after the runtime update:`, errorMessage(error));
+        }
+      }
+    })().catch(error => { console.error('Could not read the goal re-arm list:', errorMessage(error)); });
+    this.inFlightTurns.add(recovery);
+    void recovery.then(() => this.inFlightTurns.delete(recovery));
   }
 
   /** Share loop/monitor admission, but retain native goal-round tool authority. */
@@ -10924,35 +11040,41 @@ function sessionHasHistory(session: DaemonSession): boolean {
   return session.messages.length > 0 || transcriptHasHistory(session);
 }
 
+/**
+ * Index of the message that opened the last user turn, or -1 when there is
+ * none to take back.
+ *
+ * A compaction summary is written as a user message but is not a turn: a long
+ * turn that compacted mid-way can leave it as the only user message, and
+ * treating it as the prompt made /undo erase the whole conversation (and
+ * /retry resubmit the summary as a new prompt). Nothing is taken back past it.
+ * Harness reminders injected mid-turn are part of the turn they interrupt.
+ */
+function lastUserTurnIndex(
+  messages: readonly DaemonSession["messages"][number][],
+): number {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role.toLowerCase() !== "user" || message.origin === "harness") {
+      continue;
+    }
+    return isCompactionSummaryMessage(message) ? -1 : index;
+  }
+  // A window with no user message at all is still one undoable unit.
+  return messages.length ? 0 : -1;
+}
+
 function lastUserMessage(
   messages: readonly DaemonSession["messages"][number][],
 ): string {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (message?.role.toLowerCase() !== "user") {
-      continue;
-    }
-    const text = messageText(message).trim();
-    if (text) {
-      return text;
-    }
-  }
-  return "";
+  const index = lastUserTurnIndex(messages);
+  const message = index < 0 ? undefined : messages[index];
+  return message?.role.toLowerCase() === "user" ? messageText(message).trim() : "";
 }
 
 function discardLastUserTurn(messages: DaemonSession["messages"]): number {
-  let dropped = 0;
-  while (messages.length) {
-    const message = messages.pop();
-    if (!message) {
-      break;
-    }
-    dropped += 1;
-    if (message.role.toLowerCase() === "user") {
-      return dropped;
-    }
-  }
-  return dropped;
+  const index = lastUserTurnIndex(messages);
+  return index < 0 ? 0 : messages.splice(index).length;
 }
 
 function toolExecutionName(value: unknown): string {

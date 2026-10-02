@@ -31,7 +31,7 @@ export function remoteTarget(value: unknown): RemoteTarget {
     throw new Error('Invalid SSH alias, target, or absolute project folder')
   return { alias: row.alias, target: row.target, workspacePath: row.workspacePath }
 }
-export function remoteAddress(output: string): { socketPath: string; projectDir: string; expectedBuildId?: string; busy?: boolean } {
+export function remoteAddress(output: string): { socketPath: string; projectDir: string; expectedBuildId?: string; busy?: boolean; blockers?: string[]; waitingForGoalRound?: boolean } {
   const line = output.split('\n').find((value) => value.startsWith('XERXES_REMOTE_READY '))
   if (!line) throw new Error('Remote setup did not return a daemon address')
   const value: unknown = JSON.parse(line.slice('XERXES_REMOTE_READY '.length))
@@ -47,9 +47,15 @@ export function remoteAddress(output: string): { socketPath: string; projectDir:
   )
     throw new Error('Invalid remote daemon address')
   if (row.expectedBuildId !== undefined && (typeof row.expectedBuildId !== 'string' || !/^[a-f0-9]{16,64}$/.test(row.expectedBuildId))) throw new Error('Invalid remote build identity')
+  // Shown in the update popover: plain one-line strings only, bounded.
+  const blockers = Array.isArray(row.blockers)
+    ? row.blockers.filter((item): item is string => typeof item === 'string' && item.length <= 200 && !/[\x00-\x1f\x7f]/.test(item)).slice(0, 12)
+    : []
   return { socketPath: row.socketPath, projectDir: row.projectDir,
     ...(typeof row.expectedBuildId === 'string' ? { expectedBuildId: row.expectedBuildId } : {}),
     ...(row.busy === true ? { busy: true } : {}),
+    ...(row.busy === true && blockers.length ? { blockers } : {}),
+    ...(row.busy === true && row.waitingForGoalRound === true ? { waitingForGoalRound: true } : {}),
   }
 }
 export function runCaptured(
@@ -104,7 +110,7 @@ export interface RemoteConnection {
   socketPath: string
   projectDir: string
   expectedBuildId?: string | undefined
-  update(): Promise<Record<string, unknown>>
+  update(force?: boolean): Promise<Record<string, unknown>>
   reconnect(signal: AbortSignal, onFailure: (error: Error) => void): Promise<RemoteConnection>
   close(): Promise<void>
 }
@@ -222,13 +228,15 @@ export async function openRemote(
     let reconnectAddress = address
     const connection: RemoteConnection = { socketPath, projectDir: address.projectDir, expectedBuildId: address.expectedBuildId, close,
       reconnect: (retrySignal, retryFailure) => openRemote(machine, retrySignal, retryFailure, reconnectAddress),
-      async update() {
+      async update(force = false) {
         const updated = remoteAddress(await runCaptured('ssh', [...ssh, '-T', '--', machine.target,
-          'exec sh -c ' + quote(remoteBootstrapScript(machine.workspacePath, 'daemon'))], updateController.signal, 300000))
+          'exec sh -c ' + quote(remoteBootstrapScript(machine.workspacePath, 'daemon', { force }))], updateController.signal, 300000))
         if (updated.socketPath !== address.socketPath || updated.projectDir !== address.projectDir) throw new Error('Remote daemon address changed; reconnect this workspace.')
         reconnectAddress = updated
         connection.expectedBuildId = updated.expectedBuildId
-        return updated.busy ? { ok: false, busy: true } : { ok: true }
+        return updated.busy
+          ? { ok: false, busy: true, blockers: updated.blockers ?? [], ...(updated.waitingForGoalRound ? { waiting_for_goal_round: true } : {}) }
+          : { ok: true }
       },
     }
     // A reused runtime skipped setup, so nothing compared it with the newest

@@ -145,6 +145,19 @@ test('live tasks with retained handles still block until they settle', async () 
   }
 })
 
+test('a fractional timeout bounds the wait of a live task instead of failing it', async () => {
+  const manager = new SubAgentManager({ runner: cancellableRun })
+  try {
+    await manager.spawn({ id: 'slow', name: 'slow', prompt: 'block' })
+    // A workflow computes timeouts (minutes * 60e3, 0.1 * 60000 = 6000.000000000001).
+    const pending = await manager.waitAll(['slow'], 20.5)
+    expect(pending.pending.map(snapshot => snapshot.id)).toEqual(['slow'])
+    expect(pending.completed).toEqual([])
+  } finally {
+    await manager.close()
+  }
+})
+
 test('genuinely unknown ids keep their existing behavior', async () => {
   const manager = new SubAgentManager({ runner: cancellableRun })
   try {

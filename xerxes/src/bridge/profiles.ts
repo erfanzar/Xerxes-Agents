@@ -643,10 +643,12 @@ export interface ProfileImportOutcome {
 
 /**
  * Copy key-based profiles into this store, as the desktop does from the Mac to
- * an SSH workspace host so its providers work there too. A same-named profile
- * is replaced; the store's active selection is left alone. Sign-in providers
- * are skipped: their credential lives in the other machine's keychain or
- * login file, and the host has to sign in itself.
+ * an SSH workspace host so its providers work there too. Additive: a name the
+ * store already has is skipped, because the desktop sends its profiles on
+ * every connect and replacing would undo the host's own endpoint, key, model
+ * and tuned limits each time. The store's active selection is left alone.
+ * Sign-in providers are skipped: their credential lives in the other
+ * machine's keychain or login file, and the host has to sign in itself.
  */
 export function importProfiles(store: ProfileStore, candidates: unknown): ProfileImportOutcome {
   const imported: string[] = []
@@ -672,6 +674,10 @@ export function importProfiles(store: ProfileStore, candidates: unknown): Profil
     }
     if (!/^https?:\/\/[^\s/]+/i.test(baseUrl)) {
       skipped.push({ name, reason: 'invalid base_url' })
+      continue
+    }
+    if (store.get(name)) {
+      skipped.push({ name, reason: 'already on host' })
       continue
     }
     store.save({

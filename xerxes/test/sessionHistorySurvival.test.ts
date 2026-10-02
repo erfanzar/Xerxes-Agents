@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from 'bun:test'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, symlink } from 'node:fs/promises'
 import { connect, type Socket } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -372,4 +372,131 @@ test('GUI history pages restore archived turns after a daemon restart without ex
       } finally { client.close(); await server.stop(); await runtime.shutdown() }
     }
   })
+})
+
+test('an unloadable conversation archive still lets the session open and the active list load', async () => {
+  await withTempDirectory(async directory => {
+    const runtime = runtimeFor(directory, 'history-test-model')
+    const socketPath = join(directory, 'rpc.sock')
+    const server = new DaemonServer({ autoTitle: false, runtime, socketPath, sessionArchiveDirectory: join(directory, 'sessions'), cronLeasePath: join(directory, 'cron.lease') })
+    await server.start()
+    const client = await HistoryTestClient.connect(socketPath)
+    const errors: string[] = []
+    const consoleError = console.error
+    console.error = (...values: unknown[]) => { errors.push(values.map(String).join(' ')) }
+    try {
+      client.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { session_key: 'tui:bad-archive', project_dir: directory } })
+      const sessionId = String((await client.next(frame => frame.id === 1)).result?.session_id ?? '')
+      const session = runtime.listSessions().find(row => row.id === sessionId)!
+      session.messages = [{ role: 'user', content: 'kept question' }, { role: 'assistant', content: 'kept answer' }]
+      session.turnCount = 1
+      await mkdir(join(directory, 'sessions'), { recursive: true })
+      // Not a regular file: the reader refuses it, which used to fail the RPC.
+      await symlink(join(directory, 'elsewhere.jsonl'), join(directory, 'sessions', `${sessionId}.precompact.jsonl`))
+      client.send({ jsonrpc: '2.0', id: 2, method: 'session.history', params: { history_limit: 100 } })
+      const history = (await client.next(frame => frame.id === 2)).result?.history as { actions: Array<{ messages: Array<{ content: string }> }> }
+      expect(history.actions.flatMap(action => action.messages.map(message => message.content))).toEqual(['kept question', 'kept answer'])
+      client.send({ jsonrpc: '2.0', id: 3, method: 'session.active_list', params: {} })
+      const listed = (await client.next(frame => frame.id === 3)).result
+      expect(listed?.ok).toBe(true)
+      expect(errors.some(line => line.includes(sessionId) && line.includes('regular file'))).toBe(true)
+    } finally {
+      console.error = consoleError
+      client.close()
+      await server.stop()
+      await runtime.shutdown()
+    }
+  })
+})
+
+test('history read during a turn that compacted mid-way shows the turn\'s work, not just its prompt', async () => {
+  await withTempDirectory(async directory => {
+    const before = [
+      { role: 'user', content: 'q0' }, { role: 'assistant', content: 'r0' },
+      { role: 'user', content: 'q1' }, { role: 'assistant', content: 'r1' },
+      { role: 'user', content: 'goal' },
+    ]
+    const work = [{ role: 'assistant', content: 'step1' }, { role: 'assistant', content: 'step2' }, { role: 'assistant', content: 'step3' }]
+    const paused = Promise.withResolvers<void>(), release = Promise.withResolvers<void>()
+    let active = false
+    const runner: TurnRunner = {
+      managesSessionState: true,
+      // The live window after the compaction: shorter than the pre-turn session.
+      liveMessages: () => active ? [{ role: 'user', content: '[CONTEXT COMPACTION — REFERENCE ONLY] s', xerxes_compaction_summary: true }, work[2]!, { role: 'assistant', content: 'step4' }] : undefined,
+      async *run() { active = true; paused.resolve(); await release.promise; active = false },
+    }
+    const runtime = new InMemoryDaemonRuntime(runner, { currentProjectDirectory: directory, model: 'history-test-model', sessionDirectory: join(directory, 'sessions') })
+    const socketPath = join(directory, 'rpc.sock')
+    const server = new DaemonServer({ autoTitle: false, runtime, socketPath, sessionArchiveDirectory: join(directory, 'sessions'), cronLeasePath: join(directory, 'cron.lease') })
+    await server.start()
+    const client = await HistoryTestClient.connect(socketPath)
+    try {
+      client.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { session_key: 'tui:live-compacted', project_dir: directory } })
+      const sessionId = String((await client.next(frame => frame.id === 1)).result?.session_id ?? '')
+      const session = runtime.listSessions().find(row => row.id === sessionId)!
+      session.messages = before.slice(0, 4)
+      session.turnCount = 2
+      await Bun.write(join(directory, 'sessions', `${sessionId}.precompact.jsonl`), JSON.stringify({ messages: [...before, ...work] }) + '\n')
+      client.send({ jsonrpc: '2.0', id: 2, method: 'turn.submit', params: { text: 'goal' } })
+      await client.next(frame => frame.id === 2)
+      await paused.promise
+      client.send({ jsonrpc: '2.0', id: 3, method: 'session.history', params: { history_limit: 100 } })
+      const history = (await client.next(frame => frame.id === 3)).result?.history as { actions: Array<{ messages: Array<{ content: string }> }> }
+      const shown = history.actions.flatMap(action => action.messages.map(message => message.content))
+      expect(shown).toEqual(['q0', 'r0', 'q1', 'r1', 'goal', 'step1', 'step2', 'step3', 'step4'])
+    } finally {
+      release.resolve()
+      client.close()
+      await server.stop()
+      await runtime.shutdown()
+    }
+  })
+})
+
+test('undo and retry after a mid-turn compaction never take the compaction summary for the user turn', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-history-undo-compacted-'))
+  const socketPath = join(directory, 'daemon.sock')
+  const runtime = runtimeFor(directory, 'history-test-model')
+  const server = new DaemonServer({ autoTitle: false, socketPath, runtime })
+  await server.start()
+  const client = await HistoryTestClient.connect(socketPath)
+  try {
+    client.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { session_key: 'tui:undo-compacted', project_dir: directory } })
+    const init = await client.next(frame => frame.id === 1)
+    const sessionId = String(init.result?.session_id ?? '')
+    const session = runtime.listSessions().find(row => row.id === sessionId)!
+    // A long turn compacted mid-way: its prompt was summarized away, so the
+    // summary is the only user-role message left in the window.
+    const compacted = [
+      { role: 'user', content: '[CONTEXT COMPACTION — REFERENCE ONLY] earlier work', xerxes_compaction_summary: true },
+      { role: 'assistant', content: '', tool_calls: [{ id: 'call-1', type: 'function', function: { name: 'ReadFile', arguments: '{}' } }] },
+      { role: 'tool', tool_call_id: 'call-1', content: 'file body' },
+      { role: 'user', content: 'Output limit reached; resume.', origin: 'harness' },
+      { role: 'assistant', content: 'finished' },
+    ]
+    session.messages = structuredClone(compacted)
+    session.turnCount = 3
+    await runtime.flushSessions('rewrite')
+
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session.undo', params: {} })
+    expect((await client.next(frame => frame.id === 2)).result).toMatchObject({ ok: true, dropped: 0 })
+    expect(session.messages).toEqual(compacted)
+    expect(session.turnCount).toBe(3)
+    expect((await Bun.file(join(directory, 'sessions', `${sessionId}.json`)).json()).messages).toHaveLength(compacted.length)
+
+    client.send({ jsonrpc: '2.0', id: 3, method: 'slash', params: { command: '/retry' } })
+    expect((await client.next(frame => frame.id === 3)).result).toMatchObject({ ok: true, retried: false })
+    expect(session.messages).toEqual(compacted)
+
+    // A real turn after the summary is still undoable, back to the summary.
+    session.messages.push({ role: 'user', content: 'next question' }, { role: 'assistant', content: 'next answer' })
+    session.turnCount = 4
+    client.send({ jsonrpc: '2.0', id: 4, method: 'session.undo', params: {} })
+    expect((await client.next(frame => frame.id === 4)).result).toMatchObject({ ok: true, dropped: 2 })
+    expect(session.messages).toEqual(compacted)
+  } finally {
+    client.close()
+    await server.stop()
+    await rm(directory, { recursive: true, force: true })
+  }
 })

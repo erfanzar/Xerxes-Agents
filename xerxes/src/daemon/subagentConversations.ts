@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { compactionHistory } from '../context/compactionHistory.js'
+import { COMPACTION_SUMMARY_MARKER } from '../context/compressor.js'
 import type { PermissionMode } from '../streaming/permissions.js'
 import { createAgentState, type AgentState } from '../streaming/events.js'
 import type { ChatMessage, MessageContent } from '../types/messages.js'
@@ -285,6 +286,7 @@ function rawMessageToChatMessage(message: RawMessage): ChatMessage[] {
       role,
       content,
       ...(typeof message.text === 'string' ? { displayText: message.text } : {}),
+      ...(message[COMPACTION_SUMMARY_MARKER] === true ? { [COMPACTION_SUMMARY_MARKER]: true as const } : {}),
     }]
   }
   if (role === 'tool' && typeof content === 'string' && typeof message.tool_call_id === 'string') {

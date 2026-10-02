@@ -86,3 +86,45 @@ test('an old runtime without a reported pid uses a confirmed pid file, or is lef
   await expect(prepareManagedRuntime(unconfirmed.create, 'new', unconfirmed.wait, { pidFallback: async () => undefined })).rejects.toThrow('identity is unavailable')
   expect(unconfirmed.calls).not.toContain('shutdown')
 })
+
+function scriptedFixture(replies: Record<string, Record<string, unknown>>) {
+  const calls: string[] = []
+  const create = (verify: boolean): ManagedRuntimeClient => ({
+    async start() { calls.push(`start:${verify}`) },
+    async request<T>(method: string, params: Record<string, unknown>) {
+      calls.push(Object.keys(params).length ? `${method} ${JSON.stringify(params)}` : method)
+      if (verify && method === 'runtime.status') return { pid: 43, daemon_build_id: 'new' } as T
+      return (replies[method] ?? {}) as T
+    },
+    close() { calls.push('close') },
+  })
+  const wait = async (pid: number) => { calls.push(`exited:${pid}`) }
+  return { calls, create, wait }
+}
+
+test('restart now forces a busy runtime and reports blockers when it is not forced', async () => {
+  const forced = scriptedFixture({ 'runtime.status': { pid: 42, daemon_build_id: 'old' }, 'runtime.restart_if_idle': { ok: true } })
+  expect(await prepareManagedRuntime(forced.create, 'new', forced.wait, {}, { force: true })).toEqual({ busy: false })
+  expect(forced.calls).toEqual(['start:false', 'runtime.status', 'runtime.restart_if_idle {"force":true}', 'close', 'exited:42', 'start:true', 'runtime.status', 'close'])
+  const queued = scriptedFixture({ 'runtime.status': { pid: 42, daemon_build_id: 'old' },
+    'runtime.restart_if_idle': { ok: false, busy: true, force_supported: true, blockers: ['Messaging channels are connected'], waiting_for_goal_round: true } })
+  expect(await prepareManagedRuntime(queued.create, 'new', queued.wait, {})).toEqual({ busy: true, blockers: ['Messaging channels are connected'], waitingForGoalRound: true })
+  expect(queued.calls).toContain('runtime.restart_if_idle')
+  // A runtime older than "restart now" ignores force: the confirmed restart uses its shutdown.
+  const older = scriptedFixture({ 'runtime.status': { pid: 42, daemon_build_id: 'old' }, 'runtime.restart_if_idle': { ok: false, busy: true }, shutdown: { ok: true } })
+  expect(await prepareManagedRuntime(older.create, 'new', older.wait, {}, { force: true })).toEqual({ busy: false })
+  expect(older.calls).toContain('shutdown')
+  expect(older.calls).toContain('exited:42')
+})
+
+test('a runtime another client is already restarting is waited for, not reported as a failure', async () => {
+  const restarting = { ok: false, error: 'Runtime is restarting. Reconnect to continue.' }
+  // Reached during shutdown: even runtime.status is refused, so the pid file identifies it.
+  const during = scriptedFixture({ 'runtime.status': restarting })
+  expect(await prepareManagedRuntime(during.create, 'new', during.wait, { pidFallback: async () => 42 })).toEqual({ busy: false })
+  expect(during.calls).toEqual(['start:false', 'runtime.status', 'close', 'exited:42', 'start:true', 'runtime.status', 'close'])
+  // Lost the race to restart_if_idle: the other client's restart is the same restart.
+  const raced = scriptedFixture({ 'runtime.status': { pid: 42, daemon_build_id: 'old' }, 'runtime.restart_if_idle': restarting })
+  expect(await prepareManagedRuntime(raced.create, 'new', raced.wait, {})).toEqual({ busy: false })
+  expect(raced.calls).toContain('exited:42')
+})

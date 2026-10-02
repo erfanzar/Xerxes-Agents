@@ -273,3 +273,89 @@ for (const outcome of ['open', 'cancel', 'disconnect', 'failure'] as const) it(`
   expect(close).toHaveBeenCalledTimes(outcome==='failure'?0:1)
   expect(tunnel.kill).toHaveBeenCalled()
 })
+
+/**
+ * A live remote workspace whose tunnels the test drops; resolves once
+ * `tunnelsWanted` tunnels were started. A tunnel whose index `forwards`
+ * rejects never gets its local socket, so it never reports ready.
+ */
+async function droppedTunnelSession(tunnelsWanted: number, drop: (tunnel: ReturnType<typeof child>, index: number) => void,
+  { forwards = () => true, budgetMs = 9000 }: { forwards?: (index: number) => boolean; budgetMs?: number } = {}) {
+  const setup = child(), local = child()
+  const tunnels: ReturnType<typeof child>[] = []
+  const statuses: string[] = []
+  let statusFile = ''
+  const launch = vi.fn((binary: string, args: string[], options?: { env?: NodeJS.ProcessEnv }) => {
+    if (args.includes('-O')) return forwardReply()
+    if (args.includes('-M')) {
+      const socket = tunnelAddress(args).split(':')[0]!
+      if (forwards(tunnels.length)) writeFileSync(socket, '')
+      const tunnel = child()
+      tunnels.push(tunnel)
+      // The first tunnel drops only once the renderer runs: before that a drop is a setup failure.
+      if (tunnels.length > 1) drop(tunnel, tunnels.length - 1)
+      return tunnel
+    }
+    if (binary === 'ssh') {
+      queueMicrotask(() => { setup.stdout.emit('data', 'XERXES_REMOTE_READY {"socketPath":"/remote/rpc.sock","projectDir":"/remote"}\n'); setup.emit('close', 0) })
+      return setup
+    }
+    statusFile = options!.env!.XERXES_REMOTE_STATUS_FILE!
+    drop(tunnels[0]!, 0)
+    return local
+  })
+  const run = connectRemoteMachine(machine, { spawnProcess: launch as unknown as typeof spawn, suspend: action => action() })
+  const deadline = Date.now() + budgetMs
+  while (tunnels.length < tunnelsWanted) {
+    if (statusFile && existsSync(statusFile)) {
+      const status = readFileSync(statusFile, 'utf8')
+      if (statuses.at(-1) !== status) statuses.push(status)
+      if (status.includes('"failed"')) break
+    }
+    if (Date.now() > deadline) break
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  const started = tunnels.length
+  local.emit('close', 0)
+  await run.catch(() => {})
+  return { started, statuses }
+}
+
+it('a tunnel that came back starts a fresh retry budget: the fourth drop of a session still reconnects', async () => {
+  // Each tunnel comes up (its socket forwards), then drops a little later.
+  const { started, statuses } = await droppedTunnelSession(5, (tunnel, index) => {
+    if (index < 4) setTimeout(() => tunnel.emit('close', 255), 120)
+  })
+  expect(statuses.join('\n')).not.toContain('"failed"')
+  expect(started).toBe(5)
+}, 10000)
+
+it('one outage keeps retrying while ssh fails at once, past the old three attempts', async () => {
+  // The first tunnel drops; while the network is down every replacement dies
+  // before its socket forwards, so none comes up and only the outage's time
+  // budget (not a fresh count) keeps the session reconnecting.
+  const { started, statuses } = await droppedTunnelSession(5, (tunnel, index) => {
+    if (index === 0) setTimeout(() => tunnel.emit('close', 255), 120)
+    else if (index < 4) queueMicrotask(() => tunnel.emit('close', 255))
+  }, { forwards: index => index === 0 || index >= 4, budgetMs: 13000 })
+  expect(statuses.join('\n')).not.toContain('"failed"')
+  expect(started).toBe(5)
+}, 16000)
+
+it('an outage that outlasts its recovery window stops reconnecting and says so', async () => {
+  const now = Date.now
+  let skew = 0
+  const clock = vi.spyOn(Date, 'now').mockImplementation(() => now() + skew)
+  try {
+    const { started, statuses } = await droppedTunnelSession(3, (tunnel, index) => {
+      if (index === 0) setTimeout(() => tunnel.emit('close', 255), 120)
+      else {
+        // Half a minute passes while the first replacement is still failing.
+        skew = 31_000
+        queueMicrotask(() => tunnel.emit('close', 255))
+      }
+    }, { forwards: index => index === 0 })
+    expect(statuses.at(-1)).toContain('"failed"')
+    expect(started).toBe(2)
+  } finally { clock.mockRestore() }
+}, 10000)

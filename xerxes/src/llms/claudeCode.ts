@@ -227,15 +227,121 @@ const HELD = [...OPENERS, '<tool_result', '<function_results', `<${NS}function_r
 const IMAGINED_RESULT = /<(?:antml:)?(?:tool_result|function_results|system(?=[\s>]))/
 const PARAMETER = /<(?:antml:)?parameter name="([^"]+)"\s*>([\s\S]*?)<\/(?:antml:)?parameter>/g
 
-function parseArguments(body: string): JsonObject {
+const FUNCTION_HEADER = /<function=([^>\s]+)>/y
+/** A `<function=NAME` header still arriving: nothing yet rules it out. */
+const PARTIAL_FUNCTION_HEADER = /<function=[^>\s]*$/y
+const INVOKE_HEADER = /<(?:antml:)?invoke name="[^"\n<>]+"\s*>/y
+const PARTIAL_INVOKE_HEADER = /<(?:antml:)?invoke name="[^"\n<>]*(?:"\s*)?$/y
+const PARAMETER_HEADER = /<(?:antml:)?parameter name="[^"\n<>]{1,64}"\s*>/y
+const PARTIAL_PARAMETER_HEADER = /<(?:antml:)?parameter name="[^"\n<>]{0,64}(?:"\s*)?$/y
+const PARAMETER_CLOSE = ['</parameter>', `</${NS}parameter>`] as const
+/** What may follow an `<invoke>` header, or a resumed call's `</parameter>`: more of the call. */
+const INVOKE_BODY = [...ORPHAN_PARAMETER, ...ORPHAN_CLOSE] as const
+/** Openers that start a call. One arriving before a held tag's close shows that tag was mentioned. */
+const CALL_OPENERS = ['<function=', BARE_FUNCTION, '<invoke name="', `<${NS}invoke name="`, '<function_calls>', `<${NS}function_calls>`] as const
+/** Before a call's JSON object: blank space, or the opening of a code fence. */
+const JSON_LEAD = /^\s*(?:`{1,2}|```(?:j|js|jso|json)?\s*)?$/
+/** Before a bare `<function>` call's JSON object: its tool name. */
+const BARE_LEAD = /^\s*(?:[A-Za-z_][\w.-]{0,63}\s*)?$/
+
+/** `text` starts with one of `tokens`, or could still become one: markup worth waiting on. */
+function continuesWith(text: string, tokens: readonly string[]): boolean {
+  return tokens.some(token => text.startsWith(token) || token.startsWith(text))
+}
+
+/** Where a scan of a call's body stopped, so the next chunk resumes there instead of rescanning a long call. */
+interface BodyScan {
+  /** Where the close starts; -1 while it has not arrived; NOT_A_CALL when the body is not a call's. */
+  readonly index: number
+  readonly position: number
+  readonly inString: boolean
+  /** Nesting inside the JSON object: 0 before it opens and after it closes. */
+  readonly depth: number
+  readonly opened: boolean
+}
+
+const NOT_A_CALL = -2
+
+/**
+ * Finds a JSON-bodied call's close: the first `close` outside a JSON string.
+ * The arguments need not escape "/", so a value may contain the close tag
+ * itself. Outside the object only `lead` may come before it, and blank space
+ * or a closing fence after it; anything else means the opener was a tag
+ * mentioned in prose. That is decided as soon as it shows: holding the rest of
+ * the reply for a close that never came hid the call after the mention until
+ * the stream ended, so the early stop never fired. Stops early where the next
+ * chunk could change the answer: a backslash whose escaped character has not
+ * arrived, or a partial close.
+ */
+function scanCallBody(text: string, from: number, close: string, lead: RegExp, resume?: Omit<BodyScan, 'index'>): BodyScan {
+  let inString = resume?.inString ?? false
+  let depth = resume?.depth ?? 0
+  let opened = resume?.opened ?? false
+  let index = resume?.position ?? from
+  const stop = (at: number): BodyScan => ({ index: at, position: index, inString, depth, opened })
+  for (; index < text.length; index += 1) {
+    const char = text[index]!
+    if (inString) {
+      if (char === '\\') {
+        if (index + 1 >= text.length) break
+        index += 1
+      } else if (char === '"') inString = false
+      continue
+    }
+    if (char === close[0]) {
+      if (text.startsWith(close, index)) return stop(index)
+      if (index + close.length > text.length && close.startsWith(text.slice(index))) break
+    }
+    if (depth > 0) {
+      if (char === '"') inString = true
+      else if (char === '{' || char === '[') depth += 1
+      else if (char === '}' || char === ']') depth -= 1
+      continue
+    }
+    if (!opened && char === '{') { opened = true; depth = 1; continue }
+    if (opened ? !/[\s`]/.test(char) : !lead.test(text.slice(from, index + 1))) return stop(NOT_A_CALL)
+  }
+  return stop(-1)
+}
+
+/**
+ * Where a resumed call's fragment ends: after its `</invoke>`, or after its
+ * last `</parameter>` when prose follows. -1 while more of it may come.
+ */
+function fragmentEnd(text: string, from: number): number {
+  let position = from
+  for (;;) {
+    const closes = PARAMETER_CLOSE.map(close => [text.indexOf(close, position), close.length] as const).filter(([index]) => index >= 0)
+    if (!closes.length) return -1
+    const [index, length] = closes.reduce((first, next) => next[0] < first[0] ? next : first)
+    const after = index + length
+    const rest = text.slice(after).trimStart()
+    const restAt = text.length - rest.length
+    const close = ORPHAN_CLOSE.find(token => rest.startsWith(token))
+    if (close) return restAt + close.length
+    if (!rest || !continuesWith(rest, INVOKE_BODY)) return rest ? after : -1
+    // Another parameter of the same call: its close comes next.
+    if (!ORPHAN_PARAMETER.some(open => rest.startsWith(open))) return -1
+    position = restAt + 1
+  }
+}
+
+/**
+ * A call's arguments, or undefined when they are not a JSON object: a body
+ * that was never one is not run with its text as `_raw`. Only a body
+ * `scanCallBody` accepted gets here, so repair fixes the model's sloppy JSON
+ * inside a call it closed, never prose that ran on to a later close or an
+ * object the stream cut.
+ */
+function parseArguments(body: string): JsonObject | undefined {
   const trimmed = body.trim().replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '')
   if (!trimmed) return {}
   try {
     const parsed: unknown = JSON.parse(trimmed)
     if (isJsonObject(parsed)) return parsed
-  } catch { /* Repair below: truncated or trailing-comma JSON is common. */ }
+  } catch { /* Repair below: trailing-comma or unclosed JSON is common. */ }
   const repaired: unknown = parseStreamingJson(trimmed)
-  return isJsonObject(repaired) ? repaired : { _raw: trimmed }
+  return isJsonObject(repaired) ? repaired : undefined
 }
 
 /** Tool name → the JSON type each argument's schema declares, for `<parameter>` values (always text). */
@@ -284,6 +390,10 @@ export class FunctionCallExtractor {
   private afterCall = false
   private finished = false
   private cut = false
+  /** The body scan of the call held at the start of `pending`, resumed by the next chunk. */
+  private closeScan: (Omit<BodyScan, 'index'> & { readonly opener: string }) | undefined
+  /** The last character before `pending`: an opener right after a backtick is quoted, not markup. */
+  private last = ''
   private readonly seen = new Set<string>()
   private readonly found: Array<{ name: string; arguments: JsonObject }> = []
 
@@ -310,125 +420,217 @@ export class FunctionCallExtractor {
   push(text: string): string {
     if (this.finished) return ''
     this.pending += text
+    return this.scan()
+  }
+
+  /**
+   * Flush at end of stream. An unterminated call whose arguments are whole is
+   * still a call — unless the output limit cut it (`truncated`) or its
+   * arguments are not: running it would, say, write half of an edit. It is
+   * dropped instead. Any other opener whose close never came was a tag
+   * mentioned in the text, and is shown as text.
+   */
+  finish(truncated = false): string {
+    if (this.finished) { this.pending = ''; return '' }
+    const visible = this.scan({ truncated })
+    this.pending = ''
+    this.closeScan = undefined
+    return visible
+  }
+
+  /**
+   * `end` is set for the flush at end of stream: nothing more is coming, so
+   * an opener still waiting for its close is decided instead of held.
+   */
+  private scan(end?: { readonly truncated: boolean }): string {
     let visible = ''
     for (;;) {
+      const resume = this.closeScan
+      this.closeScan = undefined
       const found = this.nextOpener()
       if (!found) {
         // Hold any suffix that could be the start of markup.
         let keep = 0
-        for (let length = Math.min(Math.max(...this.held.map(o => o.length)) - 1, this.pending.length); length > 0 && !keep; length -= 1) {
+        for (let length = end ? 0 : Math.min(Math.max(...this.held.map(o => o.length)) - 1, this.pending.length); length > 0 && !keep; length -= 1) {
           const tail = this.pending.slice(-length)
           if (this.held.some(marker => marker.startsWith(tail))) keep = length
         }
         visible += this.prose(this.pending.slice(0, this.pending.length - keep))
-        this.pending = this.finished ? '' : this.pending.slice(this.pending.length - keep)
+        if (this.finished) this.pending = ''
+        else this.advance(this.pending.length - keep)
         return visible
       }
       const [at, opener] = found
+      const before = at > 0 ? this.pending[at - 1]! : this.last
       visible += this.prose(this.pending.slice(0, at))
       if (this.finished) { this.pending = ''; return visible }
+      const resumed = at === 0 && resume?.opener === opener ? resume : undefined
+      const hold = (scan?: BodyScan): string => {
+        this.advance(at)
+        if (scan) this.closeScan = { opener, position: scan.position - at, inString: scan.inString, depth: scan.depth, opened: scan.opened }
+        return visible
+      }
+      const cutOff = (): string => { this.cut = true; this.pending = ''; return visible }
+      // The opener was a tag mentioned in the text, not markup. Only the
+      // opener is shown and scanning resumes right after it: swallowing up to
+      // the next close tag hid a real call that followed the mention, and
+      // waiting for a close that never came held back the rest of the reply.
+      const mentioned = () => {
+        visible += this.prose(opener)
+        this.advance(at + opener.length)
+      }
       if (opener.startsWith('</')) {
         // The call block closed: this is where the API would have stopped.
         if (this.found.length) { this.finished = true; this.pending = ''; return visible }
-        this.pending = this.pending.slice(at + opener.length)
+        this.advance(at + opener.length)
         continue
       }
-      if (opener.endsWith('function_calls>')) { this.pending = this.pending.slice(at + opener.length); continue }
-      if ((ORPHAN_CLOSE as readonly string[]).includes(opener)) {
-        // A stray close: nothing to show.
-        this.pending = this.pending.slice(at + opener.length)
-        continue
-      }
+      // In backticks, markup is being written about, not written.
+      if (before === '`') { mentioned(); continue }
+      if (opener.endsWith('function_calls>')) { this.advance(at + opener.length); continue }
       if ((ORPHAN_PARAMETER as readonly string[]).includes(opener)) {
-        // Drop the fragment through its closing tag; wait for it if unseen.
-        const ends = ORPHAN_CLOSE.map(close => [this.pending.indexOf(close, at), close.length] as const).filter(([index]) => index >= 0)
-        if (!ends.length) { this.pending = this.pending.slice(at); return visible }
-        const [end, length] = ends.reduce((first, next) => next[0] < first[0] ? next : first)
-        this.pending = this.pending.slice(end + length)
-        continue
-      }
-      if (this.tagOpeners.includes(opener)) {
-        const name = opener.slice(1, -1)
-        const close = `</${name}>`
-        const end = this.pending.indexOf(close, at)
-        if (end < 0) { this.pending = this.pending.slice(at); return visible }
-        const block = this.pending.slice(at, end + close.length)
-        this.pending = this.pending.slice(end + close.length)
-        const call = this.tagCall(name, block.slice(opener.length, -close.length))
-        if (call) { this.record(call); if (this.finished) { this.pending = ''; return visible }; continue }
-        // Not the tool's arguments. After a call it is an imagined result:
-        // the reply ends. Before any call it is just text.
-        if (this.afterCall) { this.finished = true; this.pending = ''; return visible }
-        visible += this.prose(block)
-        continue
-      }
-      if (opener === BARE_FUNCTION) {
-        const end = this.pending.indexOf('</function>', at)
-        if (end < 0) { this.pending = this.pending.slice(at); return visible }
-        const block = this.pending.slice(at, end + '</function>'.length)
-        this.pending = this.pending.slice(end + '</function>'.length)
-        const bare = BARE_FUNCTION_BODY.exec(block.slice(BARE_FUNCTION.length, -'</function>'.length))
-        if (bare) { this.take(`<function=${bare[1]}>${bare[2]}</function>`); if (this.finished) { this.pending = ''; return visible }; continue }
-        if (this.afterCall) { this.finished = true; this.pending = ''; return visible }
-        visible += this.prose(block)
-        continue
+        PARAMETER_HEADER.lastIndex = at
+        if (!PARAMETER_HEADER.test(this.pending)) {
+          PARTIAL_PARAMETER_HEADER.lastIndex = at
+          if (!end && PARTIAL_PARAMETER_HEADER.test(this.pending)) return hold()
+          mentioned()
+          continue
+        }
+        // Drop the fragment through its end; wait for it if unseen.
+        const stop = fragmentEnd(this.pending, at)
+        if (stop >= 0) { this.advance(stop); continue }
+        // A `</parameter>` marks a real fragment. Before one arrives, a normal
+        // end of stream shows the tag was mentioned, and so does a call
+        // opening after one in mid-sentence. A fragment starts a line, and its
+        // value may hold call markup (a file about this protocol): released
+        // as prose, that markup would run.
+        const closed = PARAMETER_CLOSE.some(close => this.pending.includes(close, at))
+        const lead = this.pending.slice(0, at)
+        const startsLine = /\n[ \t]*$/.test(lead) || (/^[ \t]*$/.test(lead) && (this.last === '' || this.last === '\n'))
+        if (!closed && ((!startsLine && this.callOpenerAfter(at + opener.length) >= 0) || (end && !end.truncated))) { mentioned(); continue }
+        if (!end) return hold()
+        this.pending = ''
+        return visible
       }
       if (opener === REMINDER_OPEN) {
-        const end = this.pending.indexOf(REMINDER_CLOSE, at)
-        if (end < 0) { this.pending = this.pending.slice(at); return visible }
-        this.pending = this.pending.slice(end + REMINDER_CLOSE.length)
+        const next = this.pending[at + opener.length]
+        if (next !== undefined && !/[\s>]/.test(next)) { mentioned(); continue }
+        const stop = this.pending.indexOf(REMINDER_CLOSE, at)
+        const call = this.callOpenerAfter(at + opener.length)
+        if (stop >= 0 && (call < 0 || stop < call)) { this.advance(stop + REMINDER_CLOSE.length); continue }
+        // Only a whole reminder is dropped. One a call opening interrupts, or
+        // that never closes, was the tag mentioned in prose.
+        if (call >= 0 || end) { mentioned(); continue }
+        return hold()
+      }
+      const legacy = opener === '<function='
+      if (legacy || opener === BARE_FUNCTION || this.tagOpeners.includes(opener)) {
+        let name = opener.slice(1, -1)
+        let bodyStart = at + opener.length
+        if (legacy) {
+          FUNCTION_HEADER.lastIndex = at
+          const header = FUNCTION_HEADER.exec(this.pending)
+          if (!header) {
+            PARTIAL_FUNCTION_HEADER.lastIndex = at
+            if (!end && PARTIAL_FUNCTION_HEADER.test(this.pending)) return hold()
+            mentioned()
+            continue
+          }
+          name = header[1]!
+          bodyStart = at + header[0].length
+        }
+        const bare = opener === BARE_FUNCTION
+        const close = legacy || bare ? '</function>' : `</${name}>`
+        const asCall = (body: string): { name: string; arguments: JsonObject } | undefined => {
+          if (!legacy && !bare) return this.tagCall(name, body)
+          const parts = bare ? BARE_FUNCTION_BODY.exec(body) : undefined
+          if (bare && !parts) return undefined
+          const args = parseArguments(parts ? parts[2]! : body)
+          return args ? { name: parts ? parts[1]! : name, arguments: args } : undefined
+        }
+        // The close counts only outside a JSON string: a value containing
+        // "</function>" (code under test, this protocol itself) ended the call
+        // there, and the truncated arguments were repaired and run.
+        const scan = scanCallBody(this.pending, bodyStart, close, bare ? BARE_LEAD : JSON_LEAD, resumed)
+        if (scan.index === -1) {
+          if (!end) return hold(scan)
+          // Arguments the limit cut, or that stop mid-object, are incomplete.
+          if (end.truncated || scan.depth > 0 || scan.inString) return cutOff()
+          const call = scan.opened ? asCall(this.pending.slice(bodyStart)) : undefined
+          if (call) { this.record(call); this.pending = ''; return visible }
+        } else if (scan.index >= 0) {
+          const call = asCall(this.pending.slice(bodyStart, scan.index))
+          if (call) {
+            this.advance(scan.index + close.length)
+            this.record(call)
+            if (this.finished) { this.pending = ''; return visible }
+            continue
+          }
+        }
+        // Not a call. After a call, a tool-name tag that does not fit is an
+        // imagined result: the reply ends. Otherwise it is just text.
+        if (this.afterCall && !legacy) { this.finished = true; this.pending = ''; return visible }
+        mentioned()
         continue
       }
-      const close = opener === '<function=' ? '</function>' : opener.startsWith(`<${NS}`) ? `</${NS}invoke>` : '</invoke>'
-      const end = this.pending.indexOf(close, at)
-      if (end < 0) { this.pending = this.pending.slice(at); return visible }
-      this.take(this.pending.slice(at, end + close.length))
-      this.pending = this.finished ? '' : this.pending.slice(end + close.length)
-      if (this.finished) return visible
+      const close = opener.startsWith(`<${NS}`) ? `</${NS}invoke>` : '</invoke>'
+      INVOKE_HEADER.lastIndex = at
+      const header = INVOKE_HEADER.exec(this.pending)
+      if (!header) {
+        PARTIAL_INVOKE_HEADER.lastIndex = at
+        if (!end && PARTIAL_INVOKE_HEADER.test(this.pending)) return hold()
+        mentioned()
+        continue
+      }
+      // A call's parameters or its close follow the header; prose means the
+      // tag was mentioned, and waiting on it held the rest of the reply.
+      const body = this.pending.slice(at + header[0].length)
+      const lead = body.trimStart()
+      if (lead && !continuesWith(lead, INVOKE_BODY)) { mentioned(); continue }
+      const stop = this.pending.indexOf(close, at)
+      if (stop < 0) {
+        if (!end) return hold()
+        if (end.truncated) return cutOff()
+        // Unclosed at the end, it is a call only when it holds whole
+        // parameters and nothing more: a bare header was a mention, and a
+        // parameter still open is incomplete.
+        if (body.replace(PARAMETER, '').trim()) return cutOff()
+        if (!lead) { mentioned(); continue }
+        this.take(this.pending.slice(at) + close)
+        this.pending = ''
+        return visible
+      }
+      this.take(this.pending.slice(at, stop + close.length))
+      if (this.finished) { this.pending = ''; return visible }
+      this.advance(stop + close.length)
     }
-  }
-
-  /**
-   * Flush at end of stream. An unterminated call is still a call — unless
-   * the output limit cut it (`truncated`): its arguments are incomplete, and
-   * running it would, say, write half of an edit. It is dropped instead.
-   */
-  finish(truncated = false): string {
-    const rest = this.pending
-    this.pending = ''
-    if (this.finished) return ''
-    if (rest.startsWith(REMINDER_OPEN)) return ''
-    if (ORPHAN_PARAMETER.some(opener => rest.startsWith(opener))) return ''
-    if (truncated && (/^<function=[^>\s]+>/.test(rest) || /^<(antml:)?invoke name="/.test(rest))) { this.cut = true; return '' }
-    if (/^<function=[^>\s]+>/.test(rest)) { this.take(rest + '</function>'); return '' }
-    if (rest.startsWith(BARE_FUNCTION)) {
-      if (truncated) { this.cut = true; return '' }
-      const bare = BARE_FUNCTION_BODY.exec(rest.slice(BARE_FUNCTION.length))
-      if (bare) { this.take(`<function=${bare[1]}>${bare[2]}</function>`); return '' }
-    }
-    const invoke = /^<(antml:)?invoke name="[^"]+"\s*>/.exec(rest)
-    if (invoke) { this.take(rest + (invoke[1] ? `</${NS}invoke>` : '</invoke>')); return '' }
-    const tag = this.tagOpeners.find(opener => rest.startsWith(opener))
-    if (tag) {
-      // Unterminated tag-form call: complete only when not cut and it fits.
-      if (truncated) { this.cut = true; return '' }
-      const call = this.tagCall(tag.slice(1, -1), rest.slice(tag.length))
-      if (call) this.record(call)
-      return ''
-    }
-    return this.prose(rest)
   }
 
   /** A tag-form block as a call, when its JSON keys are the tool's own parameters. */
   private tagCall(name: string, body: string): { name: string; arguments: JsonObject } | undefined {
     if (!body.trim().startsWith('{')) return undefined
     const args = parseArguments(body)
-    if ('_raw' in args) return undefined
+    if (!args) return undefined
     const fields = this.types.get(name)
     const keys = Object.keys(args)
     if (!fields || keys.some(key => !fields.has(key))) return undefined
     if (!keys.length && fields.size) return undefined
     return { name, arguments: args }
+  }
+
+  private advance(to: number): void {
+    if (to > 0) this.last = this.pending[to - 1]!
+    this.pending = this.pending.slice(to)
+  }
+
+  /** Where the first call opening after `from` starts, or -1. */
+  private callOpenerAfter(from: number): number {
+    let first = -1
+    for (const opener of [...CALL_OPENERS, ...this.tagOpeners]) {
+      const at = this.pending.indexOf(opener, from)
+      if (at >= 0 && (first < 0 || at < first)) first = at
+    }
+    return first
   }
 
   get calls(): readonly { name: string; arguments: JsonObject }[] { return this.found }
@@ -454,17 +656,12 @@ export class FunctionCallExtractor {
   }
 
   private take(markup: string): void {
-    let call: { name: string; arguments: JsonObject } | undefined
-    const legacy = /^<function=([^>\s]+)>([\s\S]*)<\/function>$/.exec(markup)
-    if (legacy) call = { name: legacy[1]!, arguments: parseArguments(legacy[2]!) }
-    const invoke = legacy ? null : INVOKE.exec(markup)
-    if (invoke) {
-      const fields = this.types.get(invoke[2]!)
-      const args: JsonObject = {}
-      for (const [, name, raw] of invoke[3]!.matchAll(PARAMETER)) args[name!] = parameterValue(raw!, fields?.get(name!))
-      call = { name: invoke[2]!, arguments: args }
-    }
-    if (call) this.record(call)
+    const invoke = INVOKE.exec(markup)
+    if (!invoke) return
+    const fields = this.types.get(invoke[2]!)
+    const args: JsonObject = {}
+    for (const [, name, raw] of invoke[3]!.matchAll(PARAMETER)) args[name!] = parameterValue(raw!, fields?.get(name!))
+    this.record({ name: invoke[2]!, arguments: args })
   }
 
   private record(call: { name: string; arguments: JsonObject }): void {
@@ -693,10 +890,13 @@ export class ClaudeCodeClient implements LlmClient {
           // A retry usually starts by rewriting what is already on screen.
           retraced += text
           if (shown.startsWith(retraced)) continue
-          let common = 0
-          while (common < shown.length && common < retraced.length && shown[common] === retraced[common]) common += 1
           released = true
-          const novel = retraced.slice(common)
+          // Only a retry that repeats all of the shown text continues it. One
+          // that rephrases it is written out whole after a break: splicing it
+          // in at the first differing character could not take back the rest
+          // of the shown text, so the saved reply read "I'll update the config
+          // file now. will update the config file now."
+          const novel = retraced.startsWith(shown) ? retraced.slice(shown.length) : `${shown && !shown.endsWith('\n') ? '\n\n' : ''}${retraced}`
           shown += novel
           if (novel) yield { ...delta, content: novel }
         }

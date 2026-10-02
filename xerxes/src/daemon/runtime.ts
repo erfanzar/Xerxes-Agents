@@ -186,6 +186,11 @@ export interface OpenSessionOptions {
   readonly model?: string;
   /** Only explicit resume requests may rehydrate a persisted transcript. */
   readonly resume?: boolean;
+  /**
+   * The persisted id to resume under a slot key that is not itself an id
+   * (`desktop-…`, `tui:…`). Without it such a key always starts fresh.
+   */
+  readonly resumeSessionId?: string;
   /** Ephemeral trusted system context supplied by a host boundary. */
   readonly systemPromptAddendum?: string;
 }
@@ -373,7 +378,12 @@ export interface DaemonRuntime {
    */
   removeSavedTranscript?(sessionId: string): Promise<boolean>;
   evictSession(sessionKey: string): void;
-  flushSessions(mode?: 'append' | 'rewrite'): Promise<void>;
+  /**
+   * Save every live session. A `rewrite` applies only to `rewriteSessionKey`
+   * when one is named — the session whose history was actually replaced —
+   * and every other session is appended.
+   */
+  flushSessions(mode?: 'append' | 'rewrite', rewriteSessionKey?: string): Promise<void>;
   saveSessionContextControls?(sessionKey: string, controls: ContextControls): Promise<void>;
   /** Reset optimistic persistence baselines after the saved store is wiped. */
   resetSavedTranscriptState?(): void;
@@ -815,11 +825,18 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     finally { this.exclusiveSessionWrites.delete(session.id); }
   }
 
-  async flushSessions(mode: 'append' | 'rewrite' = 'append'): Promise<void> {
+  async flushSessions(mode: 'append' | 'rewrite' = 'append', rewriteSessionKey?: string): Promise<void> {
     await Promise.all(
       [...this.sessions.values()].map(async (session) => {
+        // Rewriting a session claims its whole journal as saved. One session's
+        // /compact or /undo used to rewrite every live session, so another
+        // session's running turn — present only in its journal — was marked
+        // saved and lost if the daemon stopped before that turn's own save.
+        const sessionMode = mode === 'rewrite' && rewriteSessionKey !== undefined && session.sessionKey !== rewriteSessionKey
+          ? 'append'
+          : mode;
         try {
-          await this.saveSession(session, mode);
+          await this.saveSession(session, sessionMode);
         } catch (error) {
           // A session whose in-memory state diverges from disk (transcripts
           // removed or restored under a live daemon) must never wedge the
@@ -844,8 +861,22 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
             tool_executions: session.toolExecutions,
             thinking_content: session.thinkingContent,
           }, message);
-          console.warn(`Session ${session.id} conflicted with its saved transcript (${message}); kept the live copy at ${preserved} and reloaded the saved one`);
           this.evictSession(session.sessionKey);
+          // Reload the saved copy under the same key. A window still shows this
+          // session by that key, and a slot key (`desktop-…`, `tui:…`) is not an
+          // id: left evicted, the window's next message opened a brand-new,
+          // empty session whose replies were routed away from the window.
+          try {
+            await this.openSession(session.sessionKey, session.agentId, {
+              cwd: sessionProjectDirectory(session),
+              resume: true,
+              resumeSessionId: session.id,
+            });
+          } catch (reloadError) {
+            console.warn(`Session ${session.id} conflicted with its saved transcript (${message}); kept the live copy at ${preserved}, but could not reload the saved one: ${errorMessage(reloadError)}`);
+            return;
+          }
+          console.warn(`Session ${session.id} conflicted with its saved transcript (${message}); kept the live copy at ${preserved} and reloaded the saved one`);
         }
       }),
     );
@@ -1037,15 +1068,16 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     }
 
     const cwd = resolve(options.cwd ?? this.currentProjectDirectory);
-    const shouldResume = options.resume ?? looksLikeSessionId(key);
-    if (shouldResume && [...this.sessions.values()].some(session => session.id === key && session.activeTurnId)) {
+    const transcriptId = options.resumeSessionId ?? key;
+    const shouldResume = options.resume ?? looksLikeSessionId(transcriptId);
+    if (shouldResume && [...this.sessions.values()].some(session => session.id === transcriptId && session.activeTurnId)) {
       throw new ValidationError(
         "session_id",
         "is still running a turn under another connection; wait for it to finish before resuming it here",
         key,
       );
     }
-    if (shouldResume && isSubagentConversationActive(key)) {
+    if (shouldResume && isSubagentConversationActive(transcriptId)) {
       throw new ValidationError(
         "session_id",
         "is still owned by a running subagent; wait for it to finish before resuming its history",
@@ -1053,7 +1085,7 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
       );
     }
     const loadResult = shouldResume
-      ? await this.transcriptStore.loadResult(key, {
+      ? await this.transcriptStore.loadResult(transcriptId, {
           currentProjectDirectory: cwd,
           workspaceRoot: this.workspaceRoot,
         })
@@ -1164,7 +1196,7 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
           );
         }
         this.evictSession(otherKey);
-        const reloaded = await this.transcriptStore.load(key, {
+        const reloaded = await this.transcriptStore.load(transcriptId, {
           currentProjectDirectory: cwd,
           workspaceRoot: this.workspaceRoot,
         });
@@ -1905,10 +1937,38 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
       delete session.inflightTodoResult;
       // An evicted session may already have a replacement turn registered;
       // only release the controller this turn actually owns.
+      let lateSteers: readonly string[] = [];
       if (this.abortControllers.get(sessionKey) === controller) {
         this.abortControllers.delete(sessionKey);
+        // steerTurn queues while the controller exists, and the drain above
+        // ran before the awaited save and turn_end. A steer sent in that
+        // window was acknowledged but never applied or saved, and its queued
+        // entry made every later goal round refuse to start. Drained in the
+        // same tick the controller is released, so any later steer takes the
+        // idle path instead.
+        lateSteers = this.drainSteers(sessionKey);
+        for (const steer of lateSteers) {
+          session.messages.push({ role: "user", content: `[steer from user saved for next turn]\n${steer}` });
+        }
       }
       releaseInteractions?.();
+      if (lateSteers.length) {
+        emitSessionEvent({
+          type: "notification",
+          payload: {
+            level: "info",
+            message: `Saved ${lateSteers.length} steer${lateSteers.length === 1 ? "" : "s"} for the next turn.`,
+          },
+        });
+        try {
+          await this.saveSession(session);
+        } catch (error) {
+          emitSessionEvent({
+            type: "notification",
+            payload: { level: "error", message: `Could not save session: ${errorMessage(error)}` },
+          });
+        }
+      }
     }
   }
 
@@ -2006,6 +2066,9 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
       workspace: session.workspace,
     }, {
       mode,
+      // A running turn's messages exist only in the journal until its own
+      // turn-end save; an idle session's messages include all of them.
+      coversEventLog: !session.activeTurnId,
       expectedGeneration: session.transcriptGeneration ?? 0,
       expectedMessageCount: session.persistedMessageCount ?? 0,
       onSavedGeneration: generation => {

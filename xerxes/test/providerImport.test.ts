@@ -51,6 +51,26 @@ test('the Mac\'s keyed profiles reach the host; sign-in profiles and the host se
   })
 })
 
+test('a same-named host profile keeps its own endpoint, key, model and tuned limits on every connect', async () => {
+  await inTemporaryHome(async root => {
+    const hostFile = join(root, 'host-profiles.json')
+    const hostOwn = { name: 'openrouter', provider: 'openrouter', base_url: 'https://openrouter.ai/api/v1/host', api_key: 'host-key', model: 'host/model',
+      model_capabilities: { 'host/model': { context_limit: 64000 } }, model_overrides: { 'host/model': { max_output_tokens: 4096 } }, sampling: { temperature: 0.7 } }
+    await writeFile(hostFile, JSON.stringify({ active: 'openrouter', profiles: { openrouter: hostOwn } }))
+    const host = new ProfileStore(hostFile)
+    const before = host.get('openrouter')
+    expect(before).toMatchObject({ base_url: 'https://openrouter.ai/api/v1/host', api_key: 'host-key', model: 'host/model', sampling: { temperature: 0.7 },
+      model_capabilities: { 'host/model': { context_limit: 64000 } }, model_overrides: { 'host/model': { max_output_tokens: 4096 } } })
+    for (let connect = 0; connect < 2; connect++) {
+      const outcome = importProfiles(host, Object.values(mac.profiles))
+      expect(outcome.imported).toEqual(connect === 0 ? ['zai'] : [])
+      expect(outcome.skipped).toContainEqual({ name: 'openrouter', reason: 'already on host' })
+    }
+    expect(host.get('openrouter')).toEqual(before)
+    expect(host.get('zai')?.api_key).toBe('zai-key')
+  })
+})
+
 test('the host rejects malformed and sign-in profiles with a reason', async () => {
   await inTemporaryHome(async root => {
     const host = new ProfileStore(join(root, 'profiles.json'))

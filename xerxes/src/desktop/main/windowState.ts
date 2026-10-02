@@ -18,9 +18,20 @@ export interface SavedWindow {
   fullscreen: boolean
 }
 
+/** The most rows one layout file holds; parseWindowLayout rejects more. */
+export const MAX_SAVED_WINDOWS = 100
+/**
+ * Views one window brings back on launch. Every view is a renderer process
+ * and a daemon connection, and navigation opens a new one whenever no view
+ * shows the requested session, so an uncapped layout grew across launches
+ * until, past MAX_SAVED_WINDOWS, it stopped saving at all. The least recently
+ * shown views beyond this are not restored; their sessions stay in the sidebar.
+ */
+export const MAX_RESTORED_VIEWS = 10
+
 export function parseWindowLayout(value: unknown): SavedWindow[] {
   if (!value || typeof value !== 'object' || !('version' in value) || value.version !== 1
-    || !('windows' in value) || !Array.isArray(value.windows) || value.windows.length > 100) throw new Error('Invalid saved window layout')
+    || !('windows' in value) || !Array.isArray(value.windows) || value.windows.length > MAX_SAVED_WINDOWS) throw new Error('Invalid saved window layout')
   return value.windows.map((value: unknown) => {
     if (!value || typeof value !== 'object') throw new Error('Invalid saved window')
     const row = value as Record<string, unknown>, bounds = row.bounds as Record<string, unknown> | undefined
@@ -63,4 +74,56 @@ export function saveWindowLayout(file: string, windows: readonly SavedWindow[]):
     writeFileSync(temporary, JSON.stringify({ version: 1, windows: validated }) + '\n', { mode: 0o600 })
     renameSync(temporary, file)
   } finally { rmSync(temporary, { force: true }) }
+}
+
+interface RecordedSurface { read: () => SavedWindow; usedAt: number }
+
+/**
+ * The layout the app writes: every open surface, ranked by when it was last
+ * shown. It also remembers the last window to close, because the live set is
+ * already empty when the app quits after that window closed (the normal quit
+ * on Windows and Linux), and writing it as-is erased the whole layout.
+ */
+export class WindowLayoutRecorder {
+  private readonly live = new Map<number, RecordedSurface>()
+  private lastClosed: SavedWindow[] | null = null
+  private clock = 0
+
+  set(id: number, read: () => SavedWindow): void {
+    this.live.set(id, { read, usedAt: ++this.clock })
+    // A window opened afterwards is the new layout; the closed one is not.
+    this.lastClosed = null
+  }
+  get(id: number): (() => SavedWindow) | undefined { return this.live.get(id)?.read }
+  delete(id: number): void { this.live.delete(id) }
+  /** Record that a surface was shown, for restore ranking and close fallback. */
+  used(id: number): void {
+    const entry = this.live.get(id)
+    if (entry) entry.usedAt = ++this.clock
+  }
+  /** The most recently shown of `ids`, or undefined when none is recorded. */
+  mostRecent(ids: Iterable<number>): number | undefined {
+    let best: number | undefined, bestAt = -1
+    for (const id of ids) {
+      const usedAt = this.live.get(id)?.usedAt
+      if (usedAt !== undefined && usedAt > bestAt) { best = id; bestAt = usedAt }
+    }
+    return best
+  }
+  /** Call while the window still exists, before its surfaces are torn down. */
+  closing(windowGroup: string): void {
+    this.lastClosed = this.rows().filter(row => row.windowGroup === windowGroup)
+  }
+  rows(): SavedWindow[] {
+    if (!this.live.size) return this.lastClosed ?? []
+    const entries = [...this.live.values()].map(entry => ({ row: entry.read(), usedAt: entry.usedAt }))
+    type Entry = typeof entries[number]
+    const rank = (a: Entry, b: Entry) => Number(b.row.active === true) - Number(a.row.active === true) || b.usedAt - a.usedAt
+    const groups = new Map<string | undefined, Entry[]>()
+    for (const entry of entries) groups.set(entry.row.windowGroup, [...groups.get(entry.row.windowGroup) ?? [], entry])
+    const kept = new Set([...groups.values()].flatMap(group => group.sort(rank).slice(0, MAX_RESTORED_VIEWS))
+      .sort(rank).slice(0, MAX_SAVED_WINDOWS))
+    // Creation order is restoration order; ranking only decides what is kept.
+    return entries.filter(entry => kept.has(entry)).map(entry => entry.row)
+  }
 }

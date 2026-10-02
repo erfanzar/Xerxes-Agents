@@ -1,14 +1,14 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { appendFile as appendTextFile, lstat, mkdir, readdir, stat } from 'node:fs/promises'
+import { lstat, mkdir, readdir, stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 
 import { ValidationError } from '../core/errors.js'
 import { ToolRegistry } from '../executors/toolRegistry.js'
 import type { JsonObject, ToolDefinition } from '../types/toolCalls.js'
 import type { FileToolContext } from './fileState.js'
-import { guardedCreate, guardedWrite, recordFileRead, withStaleNotice } from './fileState.js'
+import { guardedCreate, guardedWrite, recordedAppend, recordFileRead, withStaleNotice } from './fileState.js'
 import { optionalBoolean, optionalInteger, optionalString, requireRange, requiredString } from './inputs.js'
 import { WorkspacePathError, WorkspacePathResolver } from './pathSafety.js'
 
@@ -291,7 +291,7 @@ const FILE_WRITE_GUIDANCE =
 export function registerFileTools(registry: ToolRegistry, paths: WorkspacePathResolver): void {
   registry.register(READ_FILE_DEFINITION, (inputs, context) => readFile(inputs, paths, context), 'default', READ_ONLY_FILE_CAPABILITIES)
   registry.register(WRITE_FILE_DEFINITION, (inputs, context) => writeFile(inputs, paths, context), 'default', FILE_WRITE_CAPABILITIES, FILE_WRITE_GUIDANCE)
-  registry.register(APPEND_FILE_DEFINITION, inputs => appendFile(inputs, paths), 'default', FILE_WRITE_CAPABILITIES)
+  registry.register(APPEND_FILE_DEFINITION, (inputs, context) => appendFile(inputs, paths, context), 'default', FILE_WRITE_CAPABILITIES)
   registry.register(LIST_DIR_DEFINITION, inputs => listDirectory(inputs, paths), 'default', READ_ONLY_FILE_CAPABILITIES)
   registry.register(GLOB_TOOL_DEFINITION, inputs => globFiles(inputs, paths), 'default', READ_ONLY_FILE_CAPABILITIES)
   registry.register(GREP_TOOL_DEFINITION, inputs => grepFiles(inputs, paths), 'default', READ_ONLY_FILE_CAPABILITIES)
@@ -471,7 +471,11 @@ export async function writeFile(
 }
 
 /** Append text to a workspace file while preserving the same path-containment boundary as WriteFile. */
-export async function appendFile(inputs: JsonObject, paths: WorkspacePathResolver): Promise<string> {
+export async function appendFile(
+  inputs: JsonObject,
+  paths: WorkspacePathResolver,
+  context?: FileToolContext,
+): Promise<string> {
   const filePath = requiredString(inputs, 'file_path')
   const lines = requiredContent(inputs, 'lines')
   const newline = optionalString(inputs, 'newline') ?? '\n'
@@ -487,7 +491,7 @@ export async function appendFile(inputs: JsonObject, paths: WorkspacePathResolve
   }
   const relativePath = await paths.relative(target)
   const checked = await paths.recheck(target)
-  await appendTextFile(checked, lines + newline, 'utf8')
+  recordedAppend({ absolutePath: checked, sessionId: context?.sessionId, text: lines + newline })
   return 'Appended ' + lines.length + ' characters to ' + relativePath + '.'
 }
 

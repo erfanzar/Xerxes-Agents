@@ -5,6 +5,8 @@
 
 export const GOAL_WAKE_KEY = 'goal_wake'
 export const GOAL_WAKE_VERSION = 1
+/** Session marker an update restart leaves on each armed goal for the next process. */
+export const GOAL_REARM_AFTER_RESTART_KEY = 'goal_rearm_after_restart'
 const MAX_ID_CHARS = 200
 const MAX_REASON_CHARS = 2_000
 

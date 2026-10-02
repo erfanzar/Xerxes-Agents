@@ -1016,3 +1016,59 @@ test('an identical sub-agent batch is injected once and does not extend the turn
     .toHaveLength(1)
   expect(events.at(-1)).toMatchObject({ type: 'turn_done' })
 })
+
+test('the tool call an output-token truncation cut off is answered with an error, never run', async () => {
+  class TruncatedCallClient implements LlmClient {
+    readonly requests: CompletionRequest[] = []
+
+    async *stream(request: CompletionRequest): AsyncGenerator<LlmDelta> {
+      this.requests.push(request)
+      if (this.requests.length === 1) {
+        // The adapters repair the cut-off arguments into a well-formed object
+        // holding half the file; only the finish reason says it was cut.
+        yield {
+          toolCalls: [
+            { id: 'call_read', type: 'function', function: { name: 'ReadFile', arguments: { path: 'a.ts' } } },
+            { id: 'call_write', type: 'function', function: { name: 'WriteFile', arguments: { path: 'a.ts', content: 'first half of the fi' } } },
+          ],
+          finishReason: 'length',
+        }
+        return
+      }
+      yield { content: 'Re-issued in smaller pieces.' }
+    }
+  }
+
+  const registry = new ToolRegistry()
+  const writes: unknown[] = []
+  registry.register(readFile, () => 'export {}')
+  registry.register(writeFile, args => { writes.push(args); return 'written' })
+  const client = new TruncatedCallClient()
+  const state = createAgentState()
+  const events = []
+
+  for await (const event of runTurn({
+    model: 'claude-fixture',
+    permissionMode: 'accept-all',
+    state,
+    tools: registry.definitions(),
+    userMessage: 'rewrite a.ts',
+  }, { llm: client, toolExecutor: registry })) {
+    events.push(event)
+  }
+
+  expect(writes).toEqual([])
+  const results = state.messages.filter(message => message.role === 'tool')
+  // Every tool_use keeps its paired result; the completed call before it still ran.
+  expect(results.map(message => message.tool_call_id)).toEqual(['call_read', 'call_write'])
+  expect(results[0]?.content).toBe('export {}')
+  expect(String(results[1]?.content)).toContain('output limit')
+  // A failure, not a refusal: agents count a permitted:false result as a denied call.
+  const cut = events.find(event => event.type === 'tool_end' && event.result.toolCallId === 'call_write')
+  expect(cut).toMatchObject({ result: { permitted: true } })
+  expect(cut?.type === 'tool_end' && cut.result.result.startsWith('Tool execution failed:')).toBe(true)
+  expect(events.filter(event => event.type === 'tool_start').map(event => event.call.id)).toEqual(['call_read'])
+  // The re-issue gets a real window, as a truncated text round does.
+  expect(client.requests[1]?.maxTokens).toBe(OUTPUT_LIMIT_RETRY_MAX_TOKENS)
+  expect(events.at(-1)).toMatchObject({ type: 'turn_done', reason: 'completed' })
+})

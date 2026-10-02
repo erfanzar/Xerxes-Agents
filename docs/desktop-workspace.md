@@ -172,9 +172,15 @@ inside the same native window. Each view keeps its own daemon connection, draft,
 and live response while hidden. Returning to it does not reload it. **Open Workspace in New Window**
 is the explicit alternative for another native window.
 
+**File → Close** (Cmd/Ctrl+W) closes the workspace view on screen and shows the one you used
+before it; its session keeps running in the daemon and stays in the sidebar. When the window's own
+page is on screen, it closes the window.
+
 Explicitly opened local folders remain in `desktop.json` even without chats. Workspace views and
-the active selection are restored together on relaunch. Older saved workspace windows migrate
-into one window. New explicitly opened windows retain separate window groups.
+the active selection are restored together on relaunch; each window brings back its active view
+and its most recently shown ones, up to ten. Quitting by closing the last window (the usual quit on
+Windows and Linux) restores that window. Older saved workspace windows migrate into one window. New
+explicitly opened windows retain separate window groups.
 
 The sidebar refreshes live session state every five seconds, including tasks in other workspaces.
 Running tasks use blue; a failed refresh preserves the last known state instead of declaring them idle.

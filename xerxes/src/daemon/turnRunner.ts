@@ -9,6 +9,7 @@ import { readContextControls, type ContextControls } from '../context/controls.j
 import type { AgentDefinition } from '../agents/definitions.js'
 import type { AuditEmitter } from '../audit/emitter.js'
 import { compressToolResult } from '../context/headroom.js'
+import { COMPACTION_SUMMARY_MARKER } from '../context/compressor.js'
 import {
   assembleContextLayers,
   assembleTurnContext,
@@ -47,6 +48,7 @@ import type { LlmClient } from '../llms/client.js'
 import { DEFAULT_RETRY_POLICY, type ProviderOverrides, retryPolicyForModel } from '../llms/providerRegistry.js'
 import { agentNameForMode, modeSwitchHint, normalizeInteractionMode } from '../runtime/interactionModes.js'
 import { DEFAULT_MAX_GOAL_ROUNDS, GOAL_CHANGES_KEY, getGoal, type GoalView } from '../runtime/goalDomain.js'
+import { GOAL_REARM_AFTER_RESTART_KEY } from '../runtime/goalWake.js'
 import { DEFAULT_BLOCKED_AFTER_CONSECUTIVE_ROUNDS, goalPolicyPrompt } from '../runtime/goalTools.js'
 import {
   mergeContextDeltas,
@@ -276,11 +278,18 @@ export class AgentTurnRunner implements TurnRunner {
   private get deliveredGoalStatus() { return this.snapshots.deliveredGoalStatus }
   private readonly states = new Map<string, AgentState>()
 
+  /**
+   * The state of the turn running now, apart from `states`, which also keeps
+   * the previous turn's state. Length is no evidence of which is newer: a
+   * mid-turn compaction makes the live window shorter than the session's
+   * pre-turn messages, and a length test hid the whole running turn.
+   */
+  private readonly liveStates = new Map<string, AgentState>()
+
   liveMessages(session: DaemonSession): DaemonSession['messages'] | undefined {
     if (!session.activeTurnId) return undefined
-    const state = this.states.get(session.id)
-    if (!state || state.messages.length <= session.messages.length) return undefined
-    return sessionMessagesOf(state)
+    const state = this.liveStates.get(session.id)
+    return state ? sessionMessagesOf(state) : undefined
   }
   private readonly toolResultStores = new Map<string, ToolResultStorage>()
 
@@ -314,6 +323,8 @@ export class AgentTurnRunner implements TurnRunner {
     signal: AbortSignal,
     controls: TurnRunControls = {},
   ): AsyncGenerator<DaemonEvent> {
+    // A turn that failed before its finally must not leak into this one.
+    this.liveStates.delete(session.id)
     const selectedModel = this.options.agentDefinitions?.get(session.agentId)?.model || session.model || this.options.model
     const requiresLocal = Object.hasOwn(session.metadata, LOCAL_PROVIDER_BINDING)
     const localClient = this.options.remoteProviderBindings?.client(session, selectedModel)
@@ -356,6 +367,7 @@ export class AgentTurnRunner implements TurnRunner {
       state.totalCacheCreationTokens = previous.totalCacheCreationTokens
     }
     this.states.set(session.id, state)
+    this.liveStates.set(session.id, state)
     installMessageJournal(state, controls.journal)
     const projectRoot = sessionProjectRoot(session)
     // Anchor the pre-mutation baseline before any tool runs. Non-blocking:
@@ -844,6 +856,7 @@ export class AgentTurnRunner implements TurnRunner {
       }
       recordLatestUserDisplayText(state, providerText, displayText, harnessOrigin(controls))
       synchronizeSessionState(session, state)
+      if (this.liveStates.get(session.id) === state) this.liveStates.delete(session.id)
     }
   }
 
@@ -854,6 +867,7 @@ export class AgentTurnRunner implements TurnRunner {
   dropSession(sessionId: string): void {
     this.snapshots.drop(sessionId)
     this.states.delete(sessionId)
+    this.liveStates.delete(sessionId)
     this.toolResultStores.delete(sessionId)
     // Otherwise only the tracker's LRU bounds a long-lived daemon, and a file
     // read in an evicted session keeps pinning a freshness entry forever.
@@ -1473,6 +1487,14 @@ function sessionProjectRoot(session: DaemonSession): string {
  * Wire the per-message crash journal into the mutable state message buffer.
  * Only messages appended after this call are recorded; existing history is
  * already persisted in the snapshot the state was built from.
+ *
+ * Journal indexes are positions in the persisted history, which a mid-turn
+ * compaction does not touch: it replaces only the in-memory window, and is not
+ * journalled. Indexing by the compacted length restarted the numbering inside
+ * the turn, so a crash replayed the pre-compaction rounds and then stopped at
+ * (or spliced around) the lower indexes, losing the post-compaction work.
+ * Keeping the persisted numbering means a crash recovers the full,
+ * uncompacted turn; the clean turn-end save writes the compacted history.
  */
 function installMessageJournal(
   state: AgentState,
@@ -1480,15 +1502,29 @@ function installMessageJournal(
 ): void {
   if (!journal) return
   const target = state.messages
+  // Persisted position minus in-memory position, grown by each replacement.
+  let replacedOffset = 0
   const originalPush = target.push.bind(target)
   target.push = function journalPush(...items: ChatMessage[]): number {
-    const startIndex = target.length
+    const startIndex = target.length + replacedOffset
     const result = originalPush(...items)
     for (let index = 0; index < items.length; index += 1) {
       journal(items[index] as unknown as RawMessage, startIndex + index)
     }
     return result
   }
+  const originalSplice = target.splice.bind(target)
+  target.splice = function journalSplice(start: number, deleteCount?: number, ...items: ChatMessage[]): ChatMessage[] {
+    const before = target.length
+    const removed = deleteCount === undefined ? originalSplice(start) : originalSplice(start, deleteCount, ...items)
+    // Only a whole-history replacement (compaction) keeps the numbering.
+    // Removing a message this turn pushed — a fallback retry dropping its
+    // prompt — still frees its index for the message that replaces it.
+    if (start === 0 && removed.length === before && items.length > 0) {
+      replacedOffset += before - target.length
+    }
+    return removed
+  } as typeof target.splice
 }
 
 function stateFromSession(session: DaemonSession): AgentState {
@@ -1551,12 +1587,18 @@ function synchronizeSessionState(session: DaemonSession, state: AgentState): voi
   // wakes, so restoring a superseded one self-heals.)
   const preservedTitle = session.metadata.title
   const preservedGoalWake = session.metadata.goal_wake
+  // A forced update restart writes this marker while the turn it then aborts
+  // is still unwinding; restoring the turn-start snapshot over it would make
+  // the next process leave the armed goal stopped.
+  const preservedRearm = session.metadata[GOAL_REARM_AFTER_RESTART_KEY]
   const hadTitleDerived = Object.hasOwn(session.metadata, 'title_derived')
   const preservedTitleDerived = session.metadata.title_derived
   session.metadata = { ...state.metadata }
   if (providerProfile !== undefined) session.metadata.provider_profile = providerProfile
   if (preservedTitle !== undefined) session.metadata.title = preservedTitle
   if (preservedGoalWake !== undefined) session.metadata.goal_wake = preservedGoalWake
+  if (preservedRearm !== undefined) session.metadata[GOAL_REARM_AFTER_RESTART_KEY] = preservedRearm
+  else delete session.metadata[GOAL_REARM_AFTER_RESTART_KEY]
   if (hadTitleDerived) session.metadata.title_derived = preservedTitleDerived
   else delete session.metadata.title_derived
   if (mergedDeltas.length) session.metadata.context_deltas = mergedDeltas
@@ -1614,6 +1656,8 @@ function providerMessagesFromTranscript(message: DaemonSession['messages'][numbe
       content,
       ...(typeof message.text === 'string' ? { displayText: message.text } : {}),
       ...(isHarnessOrigin(message.origin) ? { origin: message.origin } : {}),
+      // Dropping it saved the summary back as a long message the user never typed.
+      ...(message[COMPACTION_SUMMARY_MARKER] === true ? { [COMPACTION_SUMMARY_MARKER]: true as const } : {}),
     }]
   }
   if (role === 'tool' && typeof content === 'string' && typeof message.tool_call_id === 'string') {

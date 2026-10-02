@@ -35,6 +35,21 @@ const DEFAULT_DEADLINE_MS = 120_000
 const POLL_MS = 25
 const RETRY_BASE_MS = 250
 const RETRY_MAX_MS = 5_000
+// An SSH tunnel accepts a connection before it opens the channel to the
+// remote socket, so a dead remote daemon looks like a connect followed by a
+// close with nothing received. After this many of those in a row the tunnel
+// proves nothing: rebuild it (probe, then bootstrap) instead of re-attaching.
+const SILENT_CLOSE_WINDOW_MS = 5_000
+const SILENT_CLOSE_LIMIT = 2
+// Each remote update check is a whole SSH bootstrap (git ls-remote, maybe a
+// build) and the renderer heartbeat asks every few seconds while work runs.
+const REMOTE_BUSY_RECHECK_MS = 120_000
+// A host waiting only for a goal round holds that goal's next round until
+// asked again, and drops the hold after two minutes of silence
+// (GOAL_DRAIN_LAPSE_MS in daemon/server.ts). Asking again well inside that
+// keeps the hold alive across ssh and bootstrap latency, so the update lands
+// when the round ends instead of the goal resuming and holding off forever.
+const REMOTE_GOAL_ROUND_RECHECK_MS = 20_000
 
 interface Waiter {
   method: string
@@ -51,7 +66,8 @@ export interface DaemonRpcOptions {
   /** Injectable startup boundary for deterministic desktop transport tests. */
   launch?: typeof launchDaemon
   startupTimeoutMs?: number
-  remoteUpdate?: () => Promise<Record<string, unknown>>
+  /** `force` is the person's confirmed "restart now": running work on the host stops. */
+  remoteUpdate?: (force: boolean) => Promise<Record<string, unknown>>
   reconnectRemote?: (signal: AbortSignal) => Promise<string>
   expectedRemoteBuildId?: () => string | undefined
   /** Main-process-only authority. Private provider frames never reach the renderer. */
@@ -72,6 +88,10 @@ export class DaemonRpc extends EventEmitter {
   private connecting: Promise<void> | null = null
   private retryTimer: NodeJS.Timeout | null = null
   private retries = 0
+  private attachedAt = 0
+  private heardSinceAttach = false
+  private silentCloses = 0
+  private remoteUpdatesInFlight = 0
   private previouslyConnected = false
   private connectionLeaseToken: string | undefined
   private connectionLeaseAttached = false
@@ -85,6 +105,7 @@ export class DaemonRpc extends EventEmitter {
   private readonly expectedRemoteBuildId: DaemonRpcOptions['expectedRemoteBuildId']
   private readonly providerRelay: DaemonRpcOptions['providerRelay']
   private privateRelayCalls = 0
+  private remoteBusy: { result: Record<string, unknown>; until: number } | undefined
 
   constructor(options: DaemonRpcOptions = {}) {
     super()
@@ -179,7 +200,23 @@ export class DaemonRpc extends EventEmitter {
 
   /** Replace only an idle local runtime, then wait for a fresh connection. */
   async restartRuntime(allowLegacy = false, force = false): Promise<Record<string, unknown>> {
-    if (this.externalSocket && this.remoteUpdate) return this.remoteUpdate()
+    if (this.externalSocket && this.remoteUpdate) {
+      // A busy host is re-checked every couple of minutes, not on every
+      // heartbeat; the person's "restart now" always goes through.
+      if (!force && this.remoteBusy && Date.now() < this.remoteBusy.until) return { ...this.remoteBusy.result }
+      this.remoteUpdatesInFlight += 1
+      let result: Record<string, unknown>
+      try {
+        result = await this.remoteUpdate(force)
+      } finally {
+        this.remoteUpdatesInFlight -= 1
+      }
+      // The bootstrap just reached the host's daemon: closes seen before it say nothing now.
+      this.silentCloses = 0
+      const recheckMs = result.waiting_for_goal_round === true ? REMOTE_GOAL_ROUND_RECHECK_MS : REMOTE_BUSY_RECHECK_MS
+      this.remoteBusy = result.ok !== true && result.busy === true ? { result, until: Date.now() + recheckMs } : undefined
+      return result
+    }
     if (this.externalSocket) return { ok: false, error: 'Update the runtime on the remote machine, then reconnect this workspace.' }
     await this.ensure()
     const previous = this.socket
@@ -260,11 +297,13 @@ export class DaemonRpc extends EventEmitter {
 
   private async open(): Promise<void> {
     if (this.externalSocket) {
-      if (!await this.tryAttach(this.externalSocket)) {
+      const tunnelSuspect = this.reconnectRemote !== undefined && this.remoteUpdatesInFlight === 0 && this.silentCloses >= SILENT_CLOSE_LIMIT
+      if (tunnelSuspect || !await this.tryAttach(this.externalSocket)) {
         if (!this.reconnectRemote) throw new Error('SSH transport unavailable. Reconnect from Workspace.')
         const replacement = await this.reconnectRemote(this.lifecycle.signal)
         this.lifecycle.signal.throwIfAborted()
         this.externalSocket = replacement
+        this.silentCloses = 0
         if (!await this.tryAttach(replacement)) throw new Error('SSH reconnected but the remote runtime is unavailable. Retry the connection.')
       }
       this.announce(true); return
@@ -342,6 +381,8 @@ export class DaemonRpc extends EventEmitter {
     this.socket = sock
     this.connectionLeaseAttached = false
     this.buffer = ''
+    this.attachedAt = Date.now()
+    this.heardSinceAttach = false
     sock.setEncoding('utf8')
     sock.on('data', (chunk: string) => this.onData(chunk))
     sock.on('error', error => this.emit('protocol_error', { message: String((error as Error).message ?? error) }))
@@ -350,6 +391,11 @@ export class DaemonRpc extends EventEmitter {
       this.socket = null
       this.failWaiters(new Error('connection closed'))
       if (this.stopped) return
+      // A remote update restarts the host's daemon, so the tunnel goes silent
+      // on purpose; rebuilding it then would race the update's own bootstrap
+      // and, by replacing the connection, cancel that update mid-flight.
+      if (this.externalSocket && this.remoteUpdatesInFlight === 0 && !this.heardSinceAttach
+        && Date.now() - this.attachedAt < SILENT_CLOSE_WINDOW_MS) this.silentCloses += 1
       this.announce(false)
       this.scheduleRetry()
     })
@@ -367,7 +413,9 @@ export class DaemonRpc extends EventEmitter {
   }
 
   private announce(online: boolean): void {
-    if (online) this.retries = 0
+    // A remote connect proves only that the local tunnel listens, so its
+    // backoff resets once the daemon behind it sends something (onData).
+    if (online && !this.externalSocket) this.retries = 0
     this.emit('connection', online)
     if (this.previouslyConnected) this.emit('event', 'desktop_connection', { online })
     if (online) this.previouslyConnected = true
@@ -376,6 +424,11 @@ export class DaemonRpc extends EventEmitter {
   // ── Framing ──────────────────────────────────────────────────────────
 
   private onData(chunk: string): void {
+    if (!this.heardSinceAttach) {
+      this.heardSinceAttach = true
+      this.retries = 0
+      this.silentCloses = 0
+    }
     this.buffer += chunk
     let nl = this.buffer.indexOf('\n')
     while (nl !== -1) {

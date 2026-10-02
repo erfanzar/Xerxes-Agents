@@ -138,6 +138,8 @@ function reasoningBeforeCall(
 type ToolDecision =
   | { readonly call: ToolCall; readonly effectiveCall: ToolCall; readonly kind: 'allowed' }
   | { readonly call: ToolCall; readonly kind: 'cancelled' }
+  /** The call the output limit cut off mid-arguments: answered with an error, never run. */
+  | { readonly call: ToolCall; readonly kind: 'truncated' }
   | {
     readonly call: ToolCall
     readonly detail?: string
@@ -937,7 +939,12 @@ export async function* runTurn(
       // A truncated round that still asked for tools keeps its ordinary path:
       // the model continues on the next round regardless, and diverting here
       // would leave the persisted tool_use blocks without the tool_result
-      // blocks Anthropic requires them to be paired with.
+      // blocks Anthropic requires them to be paired with. Its last call is the
+      // one being written when the limit hit, and every adapter repairs the
+      // partial arguments into a well-formed object (half a file's content),
+      // so that call is answered with an error instead of run.
+      const truncatedCall = finishReason === 'length' ? providerToolCalls.at(-1) : undefined
+      if (truncatedCall && request.maxTokens === undefined) outputTokenOverride = OUTPUT_LIMIT_RETRY_MAX_TOKENS
       if (finishReason === 'length' && providerToolCalls.length === 0) {
         if (toolTurn + 1 >= maxModelTurns) break
         if (outputLimitEscalations >= MAX_OUTPUT_LIMIT_ESCALATIONS) {
@@ -1127,6 +1134,10 @@ export async function* runTurn(
           decisions.push({ call, kind: 'cancelled' })
           continue
         }
+        if (call === truncatedCall) {
+          decisions.push({ call, kind: 'truncated' })
+          continue
+        }
         const beforeResult = await dispatchHook(hookRunner, 'before_tool_call', {
           ...(request.agentId ? { agentId: request.agentId } : {}),
           arguments: call.function.arguments,
@@ -1274,6 +1285,11 @@ export async function* runTurn(
           if (decision.kind === 'cancelled') {
             denialBudget.record('cancelled', decision.call.function.name)
             const result = await recordToolResult(cancelledToolResult(decision.call), decision.call)
+            yield { type: 'tool_end', result }
+            continue
+          }
+          if (decision.kind === 'truncated') {
+            const result = await recordToolResult(truncatedToolResult(decision.call), decision.call)
             yield { type: 'tool_end', result }
             continue
           }
@@ -1873,6 +1889,19 @@ function cancelledToolResult(call: ToolCall): ToolResult {
     name: call.function.name,
     result: 'Cancelled before execution.',
     permitted: false,
+    toolCallId: call.id,
+    durationMs: 0,
+  }
+}
+
+// Permitted, with the failure prefix every consumer reads: nothing refused the call,
+// and a `permitted: false` result is counted as a permission denial (cortex
+// agents, the audit log), which an output-limit cut is not.
+function truncatedToolResult(call: ToolCall): ToolResult {
+  return {
+    name: call.function.name,
+    result: `Tool execution failed: not run. The output limit cut this ${call.function.name} call off while its arguments were still being written, so they are incomplete. Issue it again; split large content across several smaller calls.`,
+    permitted: true,
     toolCallId: call.id,
     durationMs: 0,
   }

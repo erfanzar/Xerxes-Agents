@@ -485,8 +485,19 @@ export class BlockBuilder {
     this.blocks = [...blocks, ...this.blocks]
   }
 
+  /** Finalizes, then returns the fold — a turn end, never a read mid-turn. */
   all(): readonly Block[] {
     return this.finalize(), this.blocks
+  }
+
+  /**
+   * Read-only probe over committed blocks and live runs. Asking "is there a
+   * user message yet?" through `all()` finalized the running turn: its working
+   * tools turned failed, their results opened duplicate rows and the reply
+   * split into two bubbles.
+   */
+  some(predicate: (block: Block) => boolean): boolean {
+    return this.snapshot(true).some(predicate)
   }
 }
 

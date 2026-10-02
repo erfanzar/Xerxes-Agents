@@ -348,6 +348,53 @@ test('the tracker bounds itself, keeps sessions apart, and exposes the session r
   })
 })
 
+test('other sessions reading or hydrating past the cap never evict a live session\'s reads', async () => {
+  await inWorkspace(workspace => {
+    const path = join(workspace, 'parent.ts')
+    writeFileSync(path, 'const parent = 1\n')
+    const tracker = new FileStateTracker()
+    recordCurrent(tracker, path)
+
+    // A workflow's subagents each read their own files under their own session ids.
+    for (let child = 0; child < 6; child += 1) {
+      for (let file = 0; file < 50; file += 1) {
+        tracker.record(`subagent-${child}`, `/work/child-${child}/${file}.ts`, 'x', { mtimeMs: 1, partialView: false, size: 1 })
+      }
+    }
+    // Opening a saved session restores a full cap of records for it.
+    const saved = Array.from({ length: 200 }, (_value, index) => ({
+      path: `/saved/${index}.ts`, digest: 'd' + index, mtime_ms: 1, partial: false, size: 1,
+    }))
+    expect(hydrateFileReadsFromMetadata('resumed-session', { file_reads: saved }, tracker)).toBe(200)
+
+    expect(fileReadsForMetadata(SESSION, tracker).map(entry => entry.path)).toEqual([path])
+    expect(() => guardedWrite({
+      absolutePath: path,
+      displayPath: 'parent.ts',
+      mode: 'targeted',
+      sessionId: SESSION,
+      toolName: 'FileEditTool',
+      transform: current => current.replace('1', '2'),
+    }, tracker)).not.toThrow()
+    expect(readFileSync(path, 'utf8')).toBe('const parent = 2\n')
+  })
+})
+
+test('the process-wide ceiling drops whole idle sessions, never the active one', () => {
+  const tracker = new FileStateTracker({ maxEntries: 2, maxTotalEntries: 4 })
+  const read = (session: string, path: string): void =>
+    tracker.record(session, path, path, { mtimeMs: 1, partialView: false, size: 1 })
+  read('idle', '/a')
+  read('idle', '/b')
+  read('busy', '/c')
+  read('busy', '/d')
+  read('newest', '/e')
+  expect(tracker.pathsForSession('idle')).toEqual([])
+  expect(tracker.pathsForSession('busy')).toEqual(['/c', '/d'])
+  expect(tracker.pathsForSession('newest')).toEqual(['/e'])
+  expect(tracker.size).toBe(3)
+})
+
 test('describeChange trims the common head and tail and caps a long side', () => {
   expect(describeChange('a\nb\nc\n', 'a\nB\nc\n')).toBe('at line 2: -1 +1\n-b\n+B')
 

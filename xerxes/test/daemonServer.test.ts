@@ -4487,6 +4487,126 @@ test('connection lease preserves a waiting turn and replays only pending interac
   }
 });
 
+/** Streams one text_part per step, holding each next step until released. */
+class SteppedRunner implements TurnRunner {
+  private readonly gates: Array<() => void> = [];
+  private readonly steps = [0, 1, 2].map(() => new Promise<void>(resolve => { this.gates.push(resolve); }));
+
+  private readonly streamed: string[] = [];
+
+  release(step: number): void {
+    this.gates[step]?.();
+  }
+
+  liveMessages(session: DaemonSession): DaemonSession["messages"] {
+    return [...session.messages, { role: "assistant", content: this.streamed.join(" ") }];
+  }
+
+  async *run(): AsyncGenerator<DaemonEvent> {
+    const texts = ["before", "missed", "live", "after"];
+    for (const [index, text] of texts.entries()) {
+      this.streamed.push(text);
+      yield { type: "text_part", payload: { text } };
+      if (index < this.steps.length) await this.steps[index];
+    }
+  }
+}
+
+test('a lease reconnect gets its initialize reply and missed events before frames streamed during the history read', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-lease-order-'));
+  const socketPath = join(directory, 'daemon.sock');
+  const runner = new SteppedRunner();
+  const runtime = new InMemoryDaemonRuntime(runner, {
+    currentProjectDirectory: directory, model: 'stepped-model', sessionDirectory: join(directory, 'sessions'),
+  });
+  const server = new DaemonServer({ socketPath, runtime });
+  await server.start();
+  const clients: SocketTestClient[] = [];
+  let id = 0;
+  const rpc = async (client: SocketTestClient, method: string, params: Record<string, unknown> = {}) => {
+    const requestId = ++id;
+    client.send({ jsonrpc: '2.0', id: requestId, method, params });
+    return client.next(frame => frame.id === requestId);
+  };
+  const textEvent = (text: string) => (frame: Frame) => eventFrame('text_part')(frame) && frame.params?.payload?.text === text;
+  try {
+    const first = await SocketTestClient.connect(socketPath); clients.push(first);
+    const initialized = await rpc(first, 'initialize', { session_key: 'leased', project_dir: directory });
+    const sessionId = initialized.result?.session_id;
+    const token = (await rpc(first, 'connection.lease')).result?.token;
+    await rpc(first, 'turn.submit', { text: 'stream' });
+    await first.next(textEvent('before'));
+    first.close();
+    await Bun.sleep(30);
+    runner.release(0);
+    await Bun.sleep(20);
+
+    // A running turn keeps streaming while initialize awaits the archive read.
+    const archives = server as unknown as { precompactArchivePath(sessionId: string): Promise<string | undefined> };
+    const archivePath = archives.precompactArchivePath.bind(server);
+    archives.precompactArchivePath = async sessionId => { runner.release(1); await Bun.sleep(30); return archivePath(sessionId); };
+
+    const second = await SocketTestClient.connect(socketPath); clients.push(second);
+    expect((await rpc(second, 'connection.lease', { token, project_dir: directory })).result?.ok).toBe(true);
+    const reopened = await rpc(second, 'initialize', { resume_session_id: sessionId, history_limit: 100 });
+    runner.release(2);
+    await second.next(eventFrame('turn_end'));
+    // The client applies the replay when the reply lands, then live frames in
+    // arrival order; together they must read in the order the turn streamed.
+    const texts = (frames: Frame[]) => frames.filter(eventFrame('text_part')).map(frame => frame.params?.payload?.text);
+    const replyAt = second.received.indexOf(reopened);
+    expect(replyAt).toBeGreaterThanOrEqual(0);
+    expect(texts(second.received.slice(0, replyAt))).toEqual([]);
+    expect([...texts(reopened.result?.reconnect_events as Frame[]), ...texts(second.received.slice(replyAt + 1))])
+      .toEqual(['missed', 'live', 'after']);
+  } finally {
+    runner.release(1); runner.release(2);
+    clients.forEach(client => client.close());
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('an attach snapshot includes what the running turn streamed while initialize read the archive', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-attach-snapshot-'));
+  const socketPath = join(directory, 'daemon.sock');
+  const runner = new SteppedRunner();
+  const runtime = new InMemoryDaemonRuntime(runner, {
+    currentProjectDirectory: directory, model: 'stepped-model', sessionDirectory: join(directory, 'sessions'),
+  });
+  const server = new DaemonServer({ socketPath, runtime });
+  await server.start();
+  const clients: SocketTestClient[] = [];
+  let id = 0;
+  const rpc = async (client: SocketTestClient, method: string, params: Record<string, unknown> = {}) => {
+    const requestId = ++id;
+    client.send({ jsonrpc: '2.0', id: requestId, method, params });
+    return client.next(frame => frame.id === requestId);
+  };
+  try {
+    const first = await SocketTestClient.connect(socketPath); clients.push(first);
+    const sessionId = (await rpc(first, 'initialize', { session_key: 'watched', project_dir: directory, session_owned_turns: true })).result?.session_id;
+    await rpc(first, 'turn.submit', { text: 'stream' });
+    await first.next(eventFrame('text_part'));
+    const archives = server as unknown as { precompactArchivePath(sessionId: string): Promise<string | undefined> };
+    const archivePath = archives.precompactArchivePath.bind(server);
+    archives.precompactArchivePath = async sessionId => { runner.release(0); await Bun.sleep(30); return archivePath(sessionId); };
+
+    const second = await SocketTestClient.connect(socketPath); clients.push(second);
+    const attached = await rpc(second, 'initialize', { resume_session_id: sessionId, project_dir: directory, history_limit: 100, session_owned_turns: true });
+    // The window adopts this snapshot over whatever it folded before the
+    // reply, so the snapshot must already hold the frame that arrived first.
+    const replyAt = second.received.indexOf(attached);
+    expect(second.received.slice(0, replyAt).some(frame => eventFrame('text_part')(frame) && frame.params?.payload?.text === 'missed')).toBe(true);
+    expect(JSON.stringify(attached.result?.session)).toContain('before missed');
+  } finally {
+    runner.release(0); runner.release(1); runner.release(2);
+    clients.forEach(client => client.close());
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("disconnecting an interaction owner cancels approval and question waits", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-disconnect-"));
   const socketPath = join(directory, "daemon.sock");
@@ -5332,6 +5452,50 @@ test("/new after /resume starts an empty session instead of re-adopting the tran
   }
 });
 
+test("/new refuses to evict a session that is still working, and leaves a shared one to its other client", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-new-busy-"));
+  const socketPath = join(directory, "daemon.sock");
+  const runner = new AbortGateRunner();
+  const runtime = new InMemoryDaemonRuntime(runner, {
+    currentProjectDirectory: directory,
+    model: "gate-model",
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const server = new DaemonServer({ socketPath, runtime, autoTitle: false });
+  await server.start();
+  const first = await SocketTestClient.connect(socketPath);
+  const second = await SocketTestClient.connect(socketPath);
+  let id = 0;
+  const rpc = async (client: SocketTestClient, method: string, params: Record<string, unknown> = {}) => {
+    const requestId = ++id;
+    client.send({ jsonrpc: "2.0", id: requestId, method, params });
+    return client.next((frame) => frame.id === requestId);
+  };
+  try {
+    await rpc(first, "initialize", { session_key: "working" });
+    await rpc(first, "turn.submit", { text: "keep going" });
+    await first.next(eventFrame("text_part"));
+    const refused = await rpc(first, "slash", { command: "/new" });
+    expect(refused.result).toMatchObject({ ok: false });
+    expect(runtime.sessionStatus("working")?.activeTurnId).not.toBe("");
+    expect(runtime.sessionStatus("working")?.cancelRequested).toBe(false);
+    expect(runner.runs).toBe(1);
+
+    await rpc(first, "turn.cancel");
+    await first.next(eventFrame("turn_end"));
+    await waitFor(() => runtime.sessionStatus("working")?.activeTurnId === "");
+    const workingId = runtime.sessionStatus("working")!.id;
+    await rpc(second, "initialize", { resume_session_id: workingId });
+    expect((await rpc(first, "slash", { command: "/new" })).result?.ok).toBe(true);
+    expect(runtime.sessionStatus("working")?.id).toBe(workingId);
+  } finally {
+    first.close();
+    second.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("concurrent opens of one persisted id fold into exactly one live session", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-open-claim-"));
   const sessionId = "feedface01";
@@ -5783,6 +5947,8 @@ async function waitFor(
 }
 
 class SocketTestClient {
+  /** Every frame in arrival order, for asserting what reached the wire first. */
+  readonly received: Frame[] = [];
   private buffer = "";
   private readonly frames: Frame[] = [];
   private readonly waiters: Array<{
@@ -5853,6 +6019,7 @@ class SocketTestClient {
   }
 
   private handle(frame: Frame): void {
+    this.received.push(frame);
     const waiterIndex = this.waiters.findIndex((waiter) =>
       waiter.predicate(frame),
     );

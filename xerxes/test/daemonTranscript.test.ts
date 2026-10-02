@@ -930,3 +930,130 @@ test('journal continuation needs a run at the snapshot end or a matching anchor'
     [{ role: 'tool', tool_call_id: 'call_1', content: 'full output' }],
   )).toBe(1)
 })
+
+test('a crash journal recovers the running turn although the snapshot decorates the messages it anchors on', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-transcript-anchor-'))
+  try {
+    const sessionId = 'abcdef0123456789'
+    const store = new DaemonTranscriptStore({ directory, currentProjectDirectory: '/project' })
+    // The journal holds the raw loop messages; the turn-end snapshot adds
+    // presentation fields (the typed text, the turn outcome) the journal never
+    // saw, and an append save never moved the byte watermark off zero.
+    await store.appendMessage(sessionId, { role: 'user', content: 'provider prompt' }, 0)
+    await store.appendMessage(sessionId, { role: 'assistant', content: 'first answer' }, 1)
+    await Bun.write(store.pathFor(sessionId), JSON.stringify({
+      session_id: sessionId, generation: 1, event_log_offset: 0, turn_count: 1,
+      messages: [
+        { role: 'user', content: 'provider prompt', text: 'typed prompt', origin: { kind: 'goal' } },
+        { role: 'assistant', content: 'first answer', turn_outcome: { version: 1, reason: 'completed', turn_id: 'abcdef12' } },
+      ],
+    }))
+    // The second turn ran until the daemon died.
+    await store.appendMessage(sessionId, { role: 'user', content: 'second prompt', displayText: 'typed second' }, 2)
+    await store.appendMessage(sessionId, {
+      role: 'assistant', content: '', tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'Read', arguments: '{}' } }],
+    }, 3)
+    await store.appendMessage(sessionId, { role: 'tool', tool_call_id: 'call_1', content: 'file body' }, 4)
+
+    const recovered = await store.load(sessionId)
+    expect(recovered?.messages.map(message => message.role)).toEqual(['user', 'assistant', 'user', 'assistant', 'tool'])
+    // A replayed prompt takes the stored shape, not the loop's in-memory one.
+    expect(recovered?.messages[2]).toEqual({ role: 'user', content: 'second prompt', text: 'typed second' })
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('a save that covers every journalled message advances the watermark so the next turn replays from it', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-transcript-covered-'))
+  try {
+    const sessionId = 'abcdef0123456780'
+    const store = new DaemonTranscriptStore({ directory, currentProjectDirectory: '/project' })
+    await store.appendMessage(sessionId, { role: 'user', content: 'ask' }, 0)
+    await store.appendMessage(sessionId, { role: 'assistant', content: 'answer' }, 1)
+    // The idle turn-end snapshot ends in a message the journal never carried
+    // (a steer saved for the next turn), so no journal row can anchor it.
+    const transcript = normalizeDaemonTranscript({
+      session_id: sessionId, turn_count: 1,
+      messages: [
+        { role: 'user', content: 'ask' },
+        { role: 'assistant', content: 'answer' },
+        { role: 'user', content: '[steer from user saved for next turn]\nlater' },
+      ],
+    }, { requestedSessionKey: sessionId, currentProjectDirectory: '/project' })
+    if (!transcript) throw new Error('expected transcript to normalize')
+    await store.save(transcript, { mode: 'append', expectedGeneration: 0, expectedMessageCount: 0, coversEventLog: true })
+    await store.appendMessage(sessionId, { role: 'user', content: 'next ask' }, 3)
+    await store.appendMessage(sessionId, { role: 'assistant', content: 'next answer' }, 4)
+
+    expect((await store.load(sessionId))?.messages.map(message => message.content)).toEqual([
+      'ask', 'answer', '[steer from user saved for next turn]\nlater', 'next ask', 'next answer',
+    ])
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('a save made while a turn is in flight never covers that turn\'s journal, even as a rewrite', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-transcript-inflight-rewrite-'))
+  try {
+    const sessionId = 'abcdef0123456781'
+    const store = new DaemonTranscriptStore({ directory, currentProjectDirectory: '/project' })
+    const transcript = normalizeDaemonTranscript({
+      session_id: sessionId, turn_count: 1,
+      messages: [{ role: 'user', content: 'ask' }, { role: 'assistant', content: 'answer' }],
+    }, { requestedSessionKey: sessionId, currentProjectDirectory: '/project' })
+    if (!transcript) throw new Error('expected transcript to normalize')
+    await store.save(transcript)
+    await store.appendMessage(sessionId, { role: 'user', content: 'running ask' }, 2)
+    await store.appendMessage(sessionId, { role: 'assistant', content: 'running work' }, 3)
+
+    // The live copy still holds the pre-turn history; a rewrite of it must
+    // leave the in-flight journal replayable.
+    await store.save(transcript, { mode: 'rewrite', expectedGeneration: 1, expectedMessageCount: 2, coversEventLog: false })
+    expect((await store.load(sessionId))?.messages.map(message => message.content)).toEqual([
+      'ask', 'answer', 'running ask', 'running work',
+    ])
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('a first turn that never reached a snapshot reopens from its orphaned journal', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-transcript-orphan-'))
+  try {
+    const sessionId = 'abcdef0123456782'
+    const store = new DaemonTranscriptStore({ directory, currentProjectDirectory: '/project' })
+    await store.appendMessage(sessionId, { role: 'user', content: 'first prompt', displayText: 'typed first' }, 0)
+    await store.appendMessage(sessionId, { role: 'assistant', content: 'first answer' }, 1)
+    expect(await Bun.file(store.pathFor(sessionId)).exists()).toBeFalse()
+
+    const result = await store.loadResult(sessionId)
+    expect(result.kind).toBe('loaded')
+    if (result.kind !== 'loaded') throw new Error('expected the orphaned journal to load')
+    expect(result.transcript.sessionId).toBe(sessionId)
+    expect(result.transcript.messages).toEqual([
+      { role: 'user', content: 'first prompt', text: 'typed first' },
+      { role: 'assistant', content: 'first answer' },
+    ])
+    // The session lists, and a listing can read it.
+    expect((await store.listEntries()).map(entry => entry.sessionId)).toEqual([sessionId])
+    expect((await store.readHeader(sessionId)).kind).toBe('truncated')
+    expect((await store.list()).map(transcript => transcript.sessionId)).toEqual([sessionId])
+
+    // Its first save adopts the recovered history without duplicating it.
+    await store.save(result.transcript)
+    expect((await store.load(sessionId))?.messages).toHaveLength(2)
+
+    // A prompt that died before any reply is still not a session.
+    const phantomId = 'abcdef0123456783'
+    await store.appendMessage(phantomId, { role: 'user', content: 'never answered' }, 0)
+    expect((await store.list()).map(transcript => transcript.sessionId)).toEqual([sessionId])
+
+    // Removing an orphan-only session reports that it removed something.
+    expect(await store.remove(phantomId)).toBeTrue()
+    expect((await store.loadResult(phantomId)).kind).toBe('missing')
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})

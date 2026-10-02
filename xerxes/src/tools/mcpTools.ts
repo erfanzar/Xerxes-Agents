@@ -12,6 +12,11 @@ export function mcpRuntimeToolName(server: string, tool: string): string {
   return `mcp__${clean(server, 18)}__${clean(tool, 22)}_${hash}`
 }
 
+/** Whether a tool name was minted by {@link mcpRuntimeToolName}. */
+export function isMcpRuntimeToolName(name: string): boolean {
+  return name.startsWith('mcp__')
+}
+
 /** Publish connected server schemas through the ordinary validation, policy and execution path. */
 export function registerMcpTools(registry: ToolRegistry, manager: MCPManager): string[] {
   const names: string[] = []

@@ -1569,6 +1569,48 @@ test('agent catalog changes invalidate old handles before they can resume', asyn
   }
 })
 
+test('MCP and LSP connectivity changes leave running children alive and retryable', async () => {
+  const client = new ReloadGenerationChildClient('connectivity-provider', true)
+  const registry = new ToolRegistry()
+  const eventBus = new DaemonSubagentEventBus()
+  const coder = agentDefinition('coder')
+  const builtinCreator: AgentDefinition = { ...creatorDefinition('coder'), source: 'built-in' }
+  const options = (creator: AgentDefinition) => ({
+    agentDefinitions: new Map([['coder', coder], ['default', creator]]),
+    cwd: process.cwd(),
+    eventBus,
+    llm: client,
+    model: 'test-model',
+    permissionMode: 'accept-all' as const,
+    toolExecutor: registry,
+    tools: registry.definitions(),
+  })
+  const host = createNativeSubagentHost(options(builtinCreator))
+
+  try {
+    const task = await host.managerPort.spawn({
+      creatorAgentId: 'default',
+      message: 'keep working through a reconnect',
+      promptProfile: 'coder',
+      title: 'Connectivity worker',
+    })
+    await client.started.promise
+    // An MCP server connects and LSP gets configured: the runner rebuild
+    // folds their tools into the shipped profile.
+    host.reconfigure(options({ ...builtinCreator, tools: [...builtinCreator.tools, 'mcp__docs__search_0123456789ab', 'LSPTool'] }))
+    expect(host.managerPort.listHandles().find(snapshot => snapshot.id === task.id)?.status).toBe('running')
+    client.release()
+    const done = await host.managerPort.wait([task.id], 5_000)
+    expect(done.completed[0]?.lastOutput).toContain('keep working through a reconnect')
+    // The server drops again; the finished child stays retryable.
+    host.reconfigure(options(builtinCreator))
+    expect(() => host.managerPort.resume(task.id)).not.toThrow()
+  } finally {
+    client.release()
+    await host.manager.shutdown()
+  }
+})
+
 test('removing a parent session cancels and invalidates its background children', async () => {
   const client = new ReloadGenerationChildClient('background-provider', true)
   const registry = new ToolRegistry()
@@ -3863,3 +3905,73 @@ test('a child whose tool output outgrows the window compacts mid-turn instead of
     await rm(directory, { recursive: true, force: true })
   }
 })
+
+/** Big reads until the child compacts mid-turn, then two small steps and a slow final reply. */
+class CompactThenStreamClient implements LlmClient {
+  compacted = false
+  smallRounds = 0
+  blocked = false
+  private readonly released = Promise.withResolvers<void>()
+  release(): void { this.released.resolve() }
+  async *stream(request: CompletionRequest): AsyncGenerator<LlmDelta> {
+    if (!request.tools?.length) {
+      this.compacted = true
+      yield { content: 'CHILD SUMMARY' }
+      return
+    }
+    if (!this.compacted) {
+      yield { content: 'reading before compaction ' }
+      yield { toolCalls: [toolCall('BigRead', {})], usage: { inputTokens: 5, outputTokens: 2 } }
+      return
+    }
+    if (this.smallRounds < 2) {
+      this.smallRounds += 1
+      yield { content: `step-${this.smallRounds} already committed ` }
+      yield { toolCalls: [toolCall('SmallRead', {})], usage: { inputTokens: 5, outputTokens: 2 } }
+      return
+    }
+    yield { content: 'final-A ' }
+    // Past the one-second cadence, so this chunk takes a timed checkpoint.
+    await Bun.sleep(1_100)
+    yield { content: 'final-B' }
+    this.blocked = true
+    await this.released.promise
+    yield { content: ' done', usage: { inputTokens: 5, outputTokens: 2 } }
+  }
+}
+
+test('a crash checkpoint after mid-turn compaction holds only the reply still being written', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-child-partial-compaction-'))
+  const registry = new ToolRegistry()
+  registry.register({ type: 'function', function: { name: 'BigRead', description: 'huge output', parameters: { type: 'object', properties: {} } } }, () => 'line of output\n'.repeat(700))
+  registry.register({ type: 'function', function: { name: 'SmallRead', description: 'small output', parameters: { type: 'object', properties: {} } } }, () => 'ok')
+  const client = new CompactThenStreamClient()
+  const transcripts = new DaemonTranscriptStore({ currentProjectDirectory: directory, directory: join(directory, 'sessions') })
+  const host = createNativeSubagentHost({
+    agentDefinitions: new Map([['coder', agentDefinition('coder')]]),
+    autoCompactThreshold: 0.5,
+    contextLimit: () => 20_000,
+    cwd: directory,
+    eventBus: new DaemonSubagentEventBus(),
+    llm: client,
+    model: 'test-model',
+    permissionMode: 'accept-all',
+    toolExecutor: registry,
+    tools: registry.definitions(),
+    transcriptStore: transcripts,
+  })
+  try {
+    const task = await host.managerPort.spawn({ message: 'read then answer', promptProfile: 'coder', sourceAgentId: 'parent-session', title: 'Compacting child' })
+    await waitFor(() => client.blocked, 10_000)
+    const saved = await transcripts.load(task.historySessionId!, { currentProjectDirectory: directory })
+    const partial = saved?.messages.at(-1) as Record<string, unknown> | undefined
+    expect(partial?.checkpoint_partial).toBe(true)
+    expect(partial?.content).toBe('final-A final-B')
+    client.release()
+    await host.managerPort.wait([task.id], 5_000)
+  } finally {
+    client.release()
+    await host.manager.shutdown()
+    await rm(directory, { recursive: true, force: true })
+  }
+}, 20_000)

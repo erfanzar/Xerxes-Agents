@@ -234,6 +234,11 @@ export class BackgroundCommandManager {
       throw error
     }
     if (terminal) onTerminal?.(terminal)
+    // The foreground buffers were sized from that call's max_output_chars
+    // (8 characters at max_output_chars:1); a background job is read in
+    // check_command pages and is promised the full retained tail.
+    options.stdout.growCapacity(OUTPUT_CAPACITY_CHARS)
+    options.stderr.growCapacity(OUTPUT_CAPACITY_CHARS)
     this.entries.set(procId, {
       command: options.command,
       completion: finishTerminal(options.child, options.drains, terminal),

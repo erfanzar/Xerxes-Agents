@@ -1,7 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 import { expect, it } from 'vitest'
-import { mkdtemp, mkdir, chmod, rm, stat } from 'node:fs/promises'
+import { mkdtemp, mkdir, chmod, rm, stat, utimes } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { remoteBootstrapScript } from '../lib/remoteBootstrap.js'
@@ -57,6 +57,52 @@ if [ "$1" != install ] && [ "$1" != run ] && [ "\${2:-}" != --help ]; then print
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
+it('prunes releases nothing uses, keeping the current, the previous and any a running process started from', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-prune-'))
+  const bin = join(root, 'bin'), home = join(root, 'home'), project = join(root, 'project')
+  await Promise.all([mkdir(bin), mkdir(home), mkdir(project)])
+  const revisionFile = join(root, 'revision')
+  const runtime = join(home, '.xerxes/remote-runtime')
+  const executable = async (name: string, content: string) => { const file = join(bin, name); await Bun.write(file, '#!/bin/sh\nset -eu\n' + content); await chmod(file, 0o755) }
+  await executable('git', 'if [ "$1" = ls-remote ]; then printf "%s\\trefs/heads/main\\n" "$(cat "$REVISION")"; fi\n')
+  await executable('bun', `if [ "$1" = -e ]; then case "$2" in *renameSync*) exec "$REAL_BUN" "$@" ;; esac; fi
+if [ "$1" = run ]; then mkdir -p xerxes/dist/ui; touch xerxes/dist/cli.js xerxes/dist/ui/entry.js; fi
+`)
+  const revisions = ['1', '2', '3', '4', '5'].map(digit => digit.repeat(40))
+  const exists = (revision: string) => Bun.file(join(runtime, revision, '.ready')).exists()
+  let holder: ReturnType<typeof Bun.spawn> | undefined
+  const publish = async (index: number) => {
+    await Bun.write(revisionFile, revisions[index]!)
+    const child = Bun.spawn(['sh', '-c', remoteBootstrapScript(project)], { env: { ...process.env, HOME: home, PATH: bin + ':/usr/bin:/bin', REVISION: revisionFile, REAL_BUN: process.execPath }, stdout: 'pipe', stderr: 'pipe' })
+    expect(await child.exited, await new Response(child.stderr).text()).toBe(0)
+    // Deterministic publication order for ls -t, independent of clock resolution.
+    const at = new Date(Date.UTC(2026, 0, 1, 0, index))
+    await utimes(join(runtime, revisions[index]!, '.ready'), at, at)
+  }
+  try {
+    for (const index of [0, 1, 2]) await publish(index)
+    expect(await exists(revisions[0]!)).toBe(false)
+    expect(await exists(revisions[1]!)).toBe(true)
+    expect(await exists(revisions[2]!)).toBe(true)
+    // A daemon or TUI still running from release 3 keeps it after it is two behind.
+    holder = Bun.spawn([process.execPath, '-e', 'setInterval(() => {}, 1000)', join(runtime, revisions[2]!, 'xerxes/dist/cli.js'), 'daemon'], { stdout: 'ignore', stderr: 'ignore' })
+    for (const index of [3, 4]) await publish(index)
+    expect(await exists(revisions[1]!)).toBe(false)
+    expect(await exists(revisions[2]!)).toBe(true)
+    expect(await exists(revisions[3]!)).toBe(true)
+    expect(await exists(revisions[4]!)).toBe(true)
+  } finally {
+    holder?.kill('SIGKILL')
+    await holder?.exited
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+it('passes a confirmed restart-now to the remote runtime preparation', () => {
+  expect(remoteBootstrapScript('/work', 'daemon', { force: true })).toContain('{ force: true }')
+  expect(remoteBootstrapScript('/work', 'daemon')).toContain('{ force: false }')
+})
+
 // Exercise the actual OS lock and shell bootstrap, including crash boundaries.
 async function setupFixture() {
   const root = await mkdtemp(join(tmpdir(), 'xerxes-setup-lock-'))
@@ -70,7 +116,16 @@ async function setupFixture() {
   }
   await executable('git', `if [ "$1" = ls-remote ]; then printf '${revision}\\trefs/heads/main\\n'; fi\n`)
   await executable('bun', `
-if [ "$1" = -e ]; then case "$2" in *renameSync*) exec "$REAL_BUN" "$@" ;; esac; exit 0; fi
+if [ "$1" = -e ]; then case "$2" in
+  *renameSync*) exec "$REAL_BUN" "$@" ;;
+  *XERXES_REMOTE_READY*)
+    echo prepare >> "$HOME/prepare-calls"
+    touch "$HOME/preparing"
+    if [ "\${HOLD_PREPARE:-0}" = 1 ]; then while [ ! -f "$HOME/prepared" ]; do sleep 0.05; done; fi
+    # A prepare step may leave a daemon running; it must not keep the lock.
+    if [ "\${SPAWN_DAEMON:-0}" = 1 ]; then (sleep 3 </dev/null >/dev/null 2>&1 &); fi
+    echo 'XERXES_REMOTE_READY {}' ;;
+esac; exit 0; fi
 if [ "$1" = install ]; then
   echo install >> "$HOME/calls"
   touch "$HOME/entered"
@@ -85,9 +140,9 @@ if [ "$1" = run ]; then
 fi
 `)
   const children: ReturnType<typeof Bun.spawn>[] = []
-  const start = (extra: Record<string, string> = {}, shortWait = false) => {
+  const start = (extra: Record<string, string> = {}, shortWait = false, mode: 'tui' | 'daemon' = 'tui') => {
     // Shorten only the lock deadline for the timeout regression.
-    const script = remoteBootstrapScript(project)
+    const script = remoteBootstrapScript(project, mode)
     const child = Bun.spawn(['sh', '-c', shortWait ? script.replaceAll(' 240 ', ' 1 ') : script], {
       env: { ...process.env, HOME: home, PATH: bin + ':/usr/bin:/bin', REAL_BUN: process.execPath, ...extra },
       stdout: 'pipe', stderr: 'pipe', detached: true,
@@ -194,6 +249,34 @@ it('bounds a lock wait and offers reconnect without stealing the active setup', 
     await f.finish()
     expect((await first.result).code).toBe(0)
     expect((await f.start().result).code).toBe(0)
+  } finally { await f.cleanup() }
+})
+
+it('prepares one connection at a time so a second one never meets the runtime mid-restart', async () => {
+  const f = await setupFixture()
+  try {
+    expect((await f.start().result).code).toBe(0)
+    const first = f.start({ HOLD_PREPARE: '1' }, false, 'daemon')
+    const deadline = Date.now() + 5000
+    while (!await Bun.file(join(f.home, 'preparing')).exists()) {
+      if (Date.now() >= deadline) throw new Error('Fixture did not enter prepare')
+      await Bun.sleep(10)
+    }
+    const second = f.start({}, false, 'daemon')
+    await Bun.sleep(200)
+    expect(second.child.exitCode).toBeNull()
+    expect(await Bun.file(join(f.home, 'prepare-calls')).text()).toBe('prepare\n')
+    await Bun.write(join(f.home, 'prepared'), '')
+    const results = [await first.result, await second.result]
+    for (const result of results) {
+      expect(result.code, result.error).toBe(0)
+      expect(result.output).toContain('XERXES_REMOTE_READY')
+    }
+    expect(await Bun.file(join(f.home, 'prepare-calls')).text()).toBe('prepare\nprepare\n')
+    // A daemon the step leaves behind does not hold the lock for the next connection.
+    expect((await f.start({ SPAWN_DAEMON: '1' }, false, 'daemon').result).code).toBe(0)
+    const next = await f.start({}, true, 'daemon').result
+    expect(next.code, next.error).toBe(0)
   } finally { await f.cleanup() }
 })
 

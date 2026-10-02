@@ -16,6 +16,8 @@ export function startSshSocketTunnel(options: {
   localSocket: string
   remoteSocket: string
   onFailure: (error: Error) => void
+  /** The local socket is forwarding: this tunnel came up. */
+  onReady?: () => void
   spawnProcess?: typeof spawn
   startupTimeoutMs?: number
 }): { close(): void } {
@@ -67,6 +69,7 @@ export function startSshSocketTunnel(options: {
       if (Date.now() >= deadline) { fail(new Error('SSH tunnel startup timed out.')); return }
       await delay(25)
     }
+    if (!closed && !failed) options.onReady?.()
   })().catch(() => fail(new Error('Could not open the private SSH socket. Reconnect with /machine.')))
   return { close }
 }

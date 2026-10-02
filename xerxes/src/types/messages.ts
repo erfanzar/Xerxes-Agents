@@ -44,6 +44,12 @@ export interface UserMessage {
    * mid-turn. Absent means the human typed it. Clients never show these.
    */
   readonly origin?: HarnessOrigin
+  /**
+   * Provider-omitted mark of a compaction summary (the compressor's
+   * COMPACTION_SUMMARY_MARKER). Clients render the summary by it, so every
+   * rebuild of a stored message must carry it through.
+   */
+  readonly xerxes_compaction_summary?: true
 }
 
 export interface AssistantMessage {

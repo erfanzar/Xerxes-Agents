@@ -1137,6 +1137,7 @@ async function runDaemonOwned(
   let memoryGuardSettings = await readMemoryGuardSettings(memoryGuardFile);
   const daemon = new DaemonServer({
     memoryGuard: { settingsFile: memoryGuardFile, applied: settings => { memoryGuardSettings = settings; } },
+    goalRearmFile: join(xerxesHome(), "daemon", "goal-rearm.json"),
     remoteProviderBindings,
     workspaceResources: cwd => workspaces.get(cwd),
     workspaceRelease: cwd => workspaces.release(cwd),
@@ -2042,6 +2043,7 @@ function daemonRuntime(
       tools: tools.definitions(),
       ...(connection.topP === undefined ? {} : { topP: connection.topP }),
       transcriptStore,
+      disposeProcessOwner: processLifecycle.disposeOwner,
     };
     if (subagentHost) {
       subagentHost.reconfigure(subagentOptions);

@@ -39,3 +39,34 @@ test('a live session that loses a save conflict is preserved before the daemon r
     await rm(directory, { recursive: true, force: true })
   }
 })
+
+test('a session evicted for a save conflict is reloaded under the slot key its window still uses', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-divergent-reload-'))
+  const sessionDirectory = join(directory, 'sessions')
+  const store = new DaemonTranscriptStore({ directory: sessionDirectory, currentProjectDirectory: directory })
+  const runtime = new InMemoryDaemonRuntime(undefined, { currentProjectDirectory: directory, transcriptStore: store })
+  try {
+    // A New-task slot key is not an id, so it can never resume by itself.
+    const session = await runtime.openSession('desktop-ab12xyz9')
+    session.messages.push({ role: 'user', content: 'first ask' }, { role: 'assistant', content: 'first answer' })
+    await runtime.flushSessions()
+
+    const path = store.pathFor(session.id)
+    const disk = await Bun.file(path).json() as Record<string, unknown>
+    await Bun.write(path, JSON.stringify({ ...disk, generation: (disk.generation as number) + 5, messages: [{ role: 'user', content: 'saved ask' }, { role: 'assistant', content: 'saved answer' }] }))
+    session.messages.push({ role: 'user', content: 'diverged ask' }, { role: 'assistant', content: 'diverged answer' })
+    await runtime.flushSessions()
+
+    // The window's next message must reach the same conversation, not a new one.
+    const reopened = await runtime.openSession('desktop-ab12xyz9')
+    expect(reopened.id).toBe(session.id)
+    expect(reopened.messages.map(message => message.content)).toEqual(['saved ask', 'saved answer'])
+    // And it saves cleanly against the reloaded generation.
+    reopened.messages.push({ role: 'user', content: 'next ask' }, { role: 'assistant', content: 'next answer' })
+    await runtime.flushSessions()
+    expect((await store.load(session.id))?.messages.map(message => message.content)).toEqual(['saved ask', 'saved answer', 'next ask', 'next answer'])
+  } finally {
+    await runtime.shutdown()
+    await rm(directory, { recursive: true, force: true })
+  }
+})

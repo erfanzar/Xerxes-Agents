@@ -5,7 +5,7 @@ import { expect, test } from 'bun:test'
 import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { loadWindowLayout, parseWindowLayout, saveWindowLayout, visibleWindowBounds, type SavedWindow } from '../src/desktop/main/windowState.js'
+import { loadWindowLayout, MAX_RESTORED_VIEWS, MAX_SAVED_WINDOWS, parseWindowLayout, saveWindowLayout, visibleWindowBounds, WindowLayoutRecorder, type SavedWindow } from '../src/desktop/main/windowState.js'
 
 const first: SavedWindow = { workspace: '/one', sessionId: 'session-one', remote: null, bounds: { x: 20, y: 40, width: 900, height: 700 }, maximized: false, fullscreen: false }
 test('window layout round-trips separate sessions even in the same workspace', () => {
@@ -42,4 +42,60 @@ test('workspace views retain their shared window and active selection on restora
   const views=[{...first,windowGroup:'one',active:false},{...first,workspace:'/two',sessionId:'two',windowGroup:'one',active:true}]
   expect(parseWindowLayout({version:1,windows:views})).toEqual(views)
   expect(()=>parseWindowLayout({version:1,windows:[{...first,windowGroup:'invalid group'}]})).toThrow('group')
+})
+
+test('quitting after the last window closed restores that window instead of an empty layout', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'xerxes-window-state-')), file = join(directory, 'windows.json')
+  try {
+    const layout = new WindowLayoutRecorder()
+    const base = { ...first, windowGroup: '1', active: false }, view = { ...first, sessionId: 'goal', windowGroup: '1', active: true }
+    const other = { ...first, workspace: '/other', windowGroup: '2', active: true }
+    layout.set(1, () => base)
+    layout.set(2, () => view)
+    layout.set(3, () => other)
+    // Closing one of two windows forgets it: that close was deliberate.
+    layout.closing('2')
+    layout.delete(3)
+    expect(layout.rows()).toEqual([base, view])
+    // The last window's 'closed' teardown empties the live set before quit.
+    layout.closing('1')
+    layout.delete(1)
+    layout.delete(2)
+    saveWindowLayout(file, layout.rows())
+    expect(loadWindowLayout(file)).toEqual([base, view])
+    // A window opened afterwards (a macOS dock click) is the new layout.
+    const reopened = { ...first, workspace: '/reopened', windowGroup: '9' }
+    layout.set(9, () => reopened)
+    expect(layout.rows()).toEqual([reopened])
+  } finally { rmSync(directory, { recursive: true, force: true }) }
+})
+
+test('a window that accumulated views keeps saving its active and most recently shown ones', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'xerxes-window-state-')), file = join(directory, 'windows.json')
+  try {
+    const layout = new WindowLayoutRecorder()
+    let active = 0
+    for (let id = 0; id < 150; id++) layout.set(id, () => ({ ...first, sessionId: `s${id}`, windowGroup: 'host', active: id === active }))
+    layout.used(3)
+    active = 7
+    const rows = layout.rows()
+    expect(rows).toHaveLength(MAX_RESTORED_VIEWS)
+    expect(rows.map(row => row.sessionId)).toEqual(['s3', 's7', ...Array.from({ length: MAX_RESTORED_VIEWS - 2 }, (_, index) => `s${150 - MAX_RESTORED_VIEWS + 2 + index}`)])
+    // Past MAX_SAVED_WINDOWS rows the write threw, and the file froze for good.
+    saveWindowLayout(file, rows)
+    expect(loadWindowLayout(file)).toEqual(rows)
+    expect(layout.mostRecent([1, 3, 2])).toBe(3)
+    for (let group = 0; group < 15; group++) for (let id = 0; id < MAX_RESTORED_VIEWS; id++)
+      layout.set(1000 + group * 100 + id, () => ({ ...first, windowGroup: `g${group}` }))
+    expect(layout.rows()).toHaveLength(MAX_SAVED_WINDOWS)
+    saveWindowLayout(file, layout.rows())
+  } finally { rmSync(directory, { recursive: true, force: true }) }
+})
+
+test('main.ts snapshots a closing window and lets File > Close retire a single view', () => {
+  const main = readFileSync(join(import.meta.dir, '..', 'src', 'desktop', 'main.ts'), 'utf8')
+  expect(main).toContain("window.once('close', () => windowStates.closing(String(window.id)))")
+  expect(main).toContain("click: closeActiveSurface")
+  expect(main).not.toContain("{ role: 'close' }")
+  expect(main).toContain('window.contentView.removeChildView(view)')
 })

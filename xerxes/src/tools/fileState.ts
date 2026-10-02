@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { createHash } from 'node:crypto'
-import { chmodSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 
 import { ValidationError } from '../core/errors.js'
@@ -58,9 +58,12 @@ export function hydrateFileReadsFromMetadata(
 }
 
 export interface FileStateTrackerOptions {
+  /** Records kept per session before that session's least recently touched one is dropped. */
   readonly maxEntries?: number
   /** Files larger than this are tracked but not snapshotted, so drift reports stay bounded. */
   readonly maxSnapshotBytes?: number
+  /** Records kept across every session before the least recently active whole session is dropped. */
+  readonly maxTotalEntries?: number
 }
 
 export interface RecordFileReadOptions {
@@ -70,6 +73,7 @@ export interface RecordFileReadOptions {
 }
 
 const DEFAULT_MAX_ENTRIES = 200
+const DEFAULT_MAX_TOTAL_ENTRIES = DEFAULT_MAX_ENTRIES * 20
 const DEFAULT_MAX_SNAPSHOT_BYTES = 64 * 1_024
 const MAX_REPORTED_LINES = 12
 const MAX_REPORTED_LINE_CHARS = 160
@@ -81,71 +85,80 @@ const MAX_REPORTED_LINE_CHARS = 160
  * a path another session read tells this one nothing about what it is editing.
  * Recency is maintained the same way as ToolOutputCache — delete-then-set on every
  * touch, evict from the head — so a long session cannot grow the heap without limit.
+ *
+ * The cap is per session rather than one LRU shared by the daemon: with a single
+ * shared cap a workflow's subagents, or merely opening a saved session (which
+ * hydrates up to a full cap of records), pushed a live session's reads out and
+ * its next edit was refused as never-read. The process-wide ceiling is only a
+ * memory backstop, and it drops whole idle sessions, never the active one.
  */
 export class FileStateTracker {
-  private readonly entries = new Map<string, FileReadRecord>()
+  /** Session id to that session's records; both levels are kept in recency order. */
+  private readonly sessions = new Map<string, Map<string, FileReadRecord>>()
   private readonly maxEntries: number
   private readonly maxSnapshotBytes: number
+  private readonly maxTotalEntries: number
+  private total = 0
 
   constructor(options: FileStateTrackerOptions = {}) {
     this.maxEntries = positiveInteger(options.maxEntries, DEFAULT_MAX_ENTRIES)
     this.maxSnapshotBytes = positiveInteger(options.maxSnapshotBytes, DEFAULT_MAX_SNAPSHOT_BYTES)
+    this.maxTotalEntries = Math.max(this.maxEntries, positiveInteger(options.maxTotalEntries, DEFAULT_MAX_TOTAL_ENTRIES))
   }
 
   get size(): number {
-    return this.entries.size
+    return this.total
   }
 
   /** Latest record for one session's view of a path, refreshing its recency. */
   peek(sessionId: string, absolutePath: string): FileReadRecord | undefined {
-    const key = entryKey(sessionId, absolutePath)
-    const record = this.entries.get(key)
-    if (record === undefined) {
+    const records = this.sessions.get(sessionId)
+    const record = records?.get(absolutePath)
+    if (records === undefined || record === undefined) {
       return undefined
     }
-    this.entries.delete(key)
-    this.entries.set(key, record)
+    records.delete(absolutePath)
+    records.set(absolutePath, record)
+    this.touchSession(sessionId, records)
     return record
   }
 
   record(sessionId: string, absolutePath: string, content: string, options: RecordFileReadOptions): void {
-    const key = entryKey(sessionId, absolutePath)
-    this.entries.delete(key)
-    this.entries.set(key, {
+    this.store(sessionId, absolutePath, {
       digest: digestOf(content),
       mtimeMs: options.mtimeMs,
       partialView: options.partialView,
       size: options.size,
       snapshot: this.snapshotOf(content, options.partialView),
     })
-    while (this.entries.size > this.maxEntries) {
-      const oldest = this.entries.keys().next().value
-      if (oldest === undefined) {
-        return
-      }
-      this.entries.delete(oldest)
-    }
+    this.enforceTotal(sessionId)
   }
 
   forget(sessionId: string, absolutePath: string): boolean {
-    return this.entries.delete(entryKey(sessionId, absolutePath))
+    const records = this.sessions.get(sessionId)
+    if (records === undefined || !records.delete(absolutePath)) {
+      return false
+    }
+    this.total -= 1
+    if (records.size === 0) {
+      this.sessions.delete(sessionId)
+    }
+    return true
   }
 
   clearSession(sessionId: string): number {
-    const prefix = entryKey(sessionId, '')
-    let removed = 0
-    for (const key of this.entries.keys()) {
-      if (!key.startsWith(prefix)) {
-        continue
-      }
-      this.entries.delete(key)
-      removed += 1
+    const records = this.sessions.get(sessionId)
+    if (records === undefined) {
+      return 0
     }
-    return removed
+    this.sessions.delete(sessionId)
+    this.total -= records.size
+    return records.size
   }
 
   clear(): void {
-    this.entries.clear()
+    this.sessions.clear()
+    this.total = 0
   }
 
   /**
@@ -158,12 +171,10 @@ export class FileStateTracker {
    * lost, and its fallback simply asks the model to re-read.
    */
   serializeSession(sessionId: string): readonly PersistedFileRead[] {
-    const prefix = entryKey(sessionId, '')
     const entries: PersistedFileRead[] = []
-    for (const [key, record] of this.entries) {
-      if (!key.startsWith(prefix)) continue
+    for (const [path, record] of this.sessions.get(sessionId) ?? []) {
       entries.push({
-        path: key.slice(prefix.length),
+        path,
         digest: record.digest,
         mtime_ms: record.mtimeMs,
         partial: record.partialView,
@@ -192,9 +203,7 @@ export class FileStateTracker {
         || typeof size !== 'number' || !Number.isFinite(size)) {
         continue
       }
-      const key = entryKey(sessionId, path)
-      this.entries.delete(key)
-      this.entries.set(key, {
+      this.store(sessionId, path, {
         digest,
         mtimeMs,
         partialView: record.partial !== false,
@@ -205,11 +214,7 @@ export class FileStateTracker {
       })
       restored += 1
     }
-    while (this.entries.size > this.maxEntries) {
-      const oldest = this.entries.keys().next().value
-      if (oldest === undefined) break
-      this.entries.delete(oldest)
-    }
+    this.enforceTotal(sessionId)
     return restored
   }
 
@@ -220,14 +225,37 @@ export class FileStateTracker {
    * @-mention dedup and turn-boundary diffing both need exactly this list.
    */
   pathsForSession(sessionId: string): string[] {
-    const prefix = entryKey(sessionId, '')
-    const paths: string[] = []
-    for (const key of this.entries.keys()) {
-      if (key.startsWith(prefix)) {
-        paths.push(key.slice(prefix.length))
-      }
+    return [...(this.sessions.get(sessionId)?.keys() ?? [])]
+  }
+
+  /** Insert or refresh one record, evicting only from the same session. */
+  private store(sessionId: string, absolutePath: string, record: FileReadRecord): void {
+    const records = this.sessions.get(sessionId) ?? new Map<string, FileReadRecord>()
+    this.touchSession(sessionId, records)
+    if (records.delete(absolutePath)) {
+      this.total -= 1
     }
-    return paths
+    records.set(absolutePath, record)
+    this.total += 1
+    while (records.size > this.maxEntries) {
+      const oldest = records.keys().next().value
+      if (oldest === undefined) break
+      records.delete(oldest)
+      this.total -= 1
+    }
+  }
+
+  private touchSession(sessionId: string, records: Map<string, FileReadRecord>): void {
+    this.sessions.delete(sessionId)
+    this.sessions.set(sessionId, records)
+  }
+
+  /** Drop whole least-recently-active sessions, never `activeSessionId`, until under the ceiling. */
+  private enforceTotal(activeSessionId: string): void {
+    for (const sessionId of [...this.sessions.keys()]) {
+      if (this.total <= this.maxTotalEntries) return
+      if (sessionId !== activeSessionId) this.clearSession(sessionId)
+    }
   }
 
   /**
@@ -378,6 +406,62 @@ export function guardedCreate(
   })
 }
 
+export interface RecordedAppendRequest {
+  readonly absolutePath: string
+  readonly sessionId: string | undefined
+  readonly text: string
+}
+
+/**
+ * Append to a file and keep the session's read record in step with its own write.
+ *
+ * Appending stays blind — it needs no prior read — but without this the
+ * session's next edit of the file saw the append as drift and refused it, or
+ * blamed it on another writer. The record is refreshed only when it was
+ * current before the append (or the append created the file), so an outside
+ * change made since the read is still reported rather than laundered. Like
+ * guardedWrite, the check, the append and the record share one synchronous
+ * region so nothing can land between them.
+ */
+export function recordedAppend(
+  request: RecordedAppendRequest,
+  tracker: FileStateTracker = fileStateTracker,
+): void {
+  const session = request.sessionId
+  let before: string | undefined
+  if (session !== undefined && session !== '') {
+    const stats = statOrUndefined(request.absolutePath)
+    if (stats === undefined) {
+      before = ''
+    } else {
+      const prior = tracker.peek(session, request.absolutePath)
+      if (prior !== undefined) {
+        const current = readFileSync(request.absolutePath, 'utf8')
+        if (assessDrift(prior, stats, current) === undefined) before = current
+      }
+    }
+  }
+  appendFileSync(request.absolutePath, request.text, 'utf8')
+  if (session === undefined || session === '' || before === undefined) {
+    return
+  }
+  const written = statSync(request.absolutePath)
+  tracker.record(session, request.absolutePath, before + request.text, {
+    mtimeMs: written.mtimeMs,
+    partialView: false,
+    size: written.size,
+  })
+}
+
+function statOrUndefined(path: string): { readonly mtimeMs: number; readonly size: number } | undefined {
+  try {
+    return statSync(path)
+  } catch (error) {
+    if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT') return undefined
+    throw error
+  }
+}
+
 /** Put the drift report ahead of the tool's own summary so the model reads it first. */
 export function withStaleNotice(notice: string | undefined, message: string): string {
   return notice === undefined ? message : notice + '\n\n' + message
@@ -526,11 +610,6 @@ function isAlreadyExists(error: unknown): boolean {
 
 function digestOf(content: string): string {
   return createHash('sha256').update(content, 'utf8').digest('hex').slice(0, 32)
-}
-
-/** NUL separates the halves because no path may contain one, so no prefix scan can straddle them. */
-function entryKey(sessionId: string, absolutePath: string): string {
-  return sessionId + '\u0000' + absolutePath
 }
 
 function booleanFlag(raw: string | undefined): boolean | undefined {

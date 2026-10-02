@@ -28,6 +28,7 @@ const GROUPS: readonly { readonly title: string; readonly items: readonly Bindin
       { keys: '⌥⌘N', label: 'New task, choosing preset, worktree and model' },
       { keys: '⇧⌘N', label: 'New window' },
       { keys: '⇧⌘O', label: 'Open another workspace in a new window' },
+      { keys: '⌘W', label: 'Close the shown workspace view, or the window' },
       { keys: '⌘E', label: 'Export this transcript as markdown' },
     ],
   },

@@ -7,6 +7,17 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.18 — 2026-10-02
+
+Reliability release: 46 bugs found by a whole-codebase review, each confirmed by an independent check, fixed with a test that fails without the fix.
+
+- Messages and sessions: a turn that was running when the app quit, crashed or updated is recovered on reopen, including a brand-new session's first turn. /undo and /retry after a compaction no longer wipe the session. Opening a chat mid-turn, or reconnecting, no longer hides, duplicates or reorders messages. A save conflict no longer leaves a window on a hidden empty session. A damaged pre-compaction archive no longer makes a session unopenable.
+- Goals: after a runtime update every armed goal continues, not only the session you reopen. A steer sent while a turn is saving is applied. A forced restart no longer drops the goal.
+- Agents and workflows: agents are not lost or merged after a restart, and retries keep their settings and count correctly. Reconnecting an MCP server or changing LSP settings no longer kills running agents. Workflows no longer fail at a hidden 100-agent cap, and an agent's background commands end with it.
+- Claude Code: tool calls are no longer cut at a literal "</function>" inside their arguments, a reply is no longer swallowed after markup mentioned in prose, and a call cut off by the output limit is not run half-written.
+- App and SSH: windows can be closed, reloading a window keeps its own session, and windows restore on Windows and Linux. A dead remote runtime is restarted instead of reconnecting forever, and connecting no longer overwrites the server's own provider settings.
+- Tools: large command output keeps its beginning and its final error lines. An agent's own file append no longer blocks its next edit, and agents no longer evict each other's read-before-edit records.
+
 ## 0.6.17 — 2026-10-02
 
 - Memory guard: an agent command, with everything it starts, is stopped once it uses more than a limit (default: half the computer's memory; GPU memory counts on macOS). The agent is told why and how to run less at once. Set the limit, or turn it off, in Settings → General.

@@ -37,6 +37,12 @@ export class WorkspaceTurnRunner implements TurnRunner {
     return runner.toolInventory?.(session) ?? []
   }
 
+  liveMessages(session: DaemonSession) {
+    // Only a cached runner can be running this session's turn. Without this
+    // forward the daemon never saw a running turn's messages at all.
+    return this.runners.get(resolve(session.cwd))?.liveMessages?.(session)
+  }
+
   dropSession(sessionId: string): void {
     for (const runner of this.runners.values()) runner.dropSession?.(sessionId)
   }

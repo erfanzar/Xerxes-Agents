@@ -21,7 +21,7 @@ import { findGoalEvidenceExecution } from '../src/runtime/goalEvidence.js'
 import { BUILTIN_AGENTS, type AgentDefinition } from '../src/agents/definitions.js'
 import { AuditEmitter, InMemoryCollector } from '../src/index.js'
 import type { DaemonEvent, DaemonSession } from '../src/daemon/runtime.js'
-import type { RawMessage, TranscriptMessageJournalAppend } from '../src/session/daemonTranscript.js'
+import { DaemonTranscriptStore, type RawMessage, type TranscriptMessageJournalAppend } from '../src/session/daemonTranscript.js'
 import type { CompletionRequest, LlmClient, LlmDelta } from '../src/llms/client.js'
 import type { ToolDefinition } from '../src/types/toolCalls.js'
 
@@ -1417,6 +1417,36 @@ test('agent turn runner preserves a mode delta appended while its turn is active
   }
 })
 
+test('a goal re-arm marker written while a turn runs survives that turn being aborted by a forced restart', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-agent-rearm-race-'))
+  const llm = new GatedClient()
+  const runtime = new InMemoryDaemonRuntime(new AgentTurnRunner({ llm, model: 'gpt-4o' }), {
+    currentProjectDirectory: directory,
+    model: 'gpt-4o',
+    sessionDirectory: join(directory, 'sessions'),
+  })
+  try {
+    const active = runtime.submitTurn('tui:rearm-race', 'goal round', () => {})
+    await waitForCondition(() => llm.started)
+    const session = runtime.sessionStatus('tui:rearm-race')
+    if (!session) throw new Error('expected a live session')
+    const marker = { goal_id: 'goal-1', revision: 1, at: Date.now() }
+    session.metadata.goal_rearm_after_restart = marker
+    await runtime.flushSessions()
+    runtime.cancelAllTurns()
+    llm.release()
+    await active
+    await runtime.flushSessions()
+
+    expect(session.metadata.goal_rearm_after_restart).toEqual(marker)
+    const saved = await new DaemonTranscriptStore({ directory: join(directory, 'sessions') }).load(session.id)
+    expect(saved?.metadata.goal_rearm_after_restart).toEqual(marker)
+  } finally {
+    llm.release()
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
 test('agent turn runner consumes a queued context delta exactly once', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'xerxes-agent-mode-once-'))
   const llm = new CapturingClient()
@@ -1669,6 +1699,47 @@ test('agent turn runner persists per-message journal entries for crash recovery'
     { index: 1, role: 'assistant' },
   ])
   expect(session.messages.map(message => message.role)).toEqual(['user', 'assistant'])
+})
+
+test('a mid-turn compaction keeps journal indexes continuing the saved snapshot so a crash recovers the turn', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-midturn-compaction-journal-'))
+  try {
+    const store = new DaemonTranscriptStore({ directory, currentProjectDirectory: '/project' })
+    const sessionId = 'abcdefabcdef0011'
+    const history: DaemonSession['messages'] = [
+      { role: 'user', content: 'historical output '.repeat(50_000) },
+      { role: 'assistant', content: 'historical answer' },
+    ]
+    // The snapshot on disk is the pre-turn history; nothing saves again until
+    // the turn ends, which the crash below prevents.
+    await Bun.write(store.pathFor(sessionId), JSON.stringify({ session_id: sessionId, generation: 1, turn_count: 1, messages: history }))
+    const session: DaemonSession = {
+      activeTurnId: '', agentId: 'default', cancelRequested: false, cwd: process.cwd(), extra: {},
+      id: sessionId, interactionMode: 'code', sessionKey: sessionId, lastActive: 0,
+      messages: history.map(message => ({ ...message })), metadata: {}, model: 'gpt-test', planMode: false, status: 'working',
+      thinkingContent: [], toolExecutions: [], totalInputTokens: 0, totalOutputTokens: 0, turnCount: 1,
+      workspace: '/tmp/agents/default',
+    }
+    const runner = new AgentTurnRunner({
+      model: 'gpt-test', llm: new TextClient(), contextLimit: 100_000, maxTokens: 1000,
+      // Replaces the history in place before the first model round.
+      reduceContext: async messages => ({ messages: messages.slice(-1), tokensFreed: 150_000 }),
+    })
+    const journalled: Array<{ readonly message: RawMessage; readonly index: number }> = []
+    const journal: TranscriptMessageJournalAppend = (message, index) => { journalled.push({ message, index }) }
+    for await (const _event of runner.run(session, 'continue', new AbortController().signal, { journal })) {
+      // Consume the turn so every append has been recorded.
+    }
+    for (const entry of journalled) await store.appendMessage(sessionId, entry.message, entry.index)
+
+    // The daemon dies before the turn-end save: the journal must carry the
+    // reply, not restart it at the compacted history's length.
+    const recovered = await store.load(sessionId)
+    expect(recovered?.messages.map(message => message.role)).toEqual(['user', 'assistant', 'user', 'assistant'])
+    expect(recovered?.messages.slice(2).map(message => message.content)).toEqual(['continue', 'Hello from the real loop.'])
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
 })
 
 test('deferred tool loading sends the core surface, not every registered schema', async () => {
@@ -2155,4 +2226,57 @@ test('the runner exposes a running turn\'s messages before the session catches u
   session.activeTurnId = ''
   expect(runner.liveMessages(session)).toBeUndefined()
   expect(session.messages.length).toBeGreaterThanOrEqual(4)
+})
+
+test('a running turn that compacted mid-way still exposes its live window, though shorter than the session', async () => {
+  const release = Promise.withResolvers<void>()
+  const paused = Promise.withResolvers<void>()
+  const summary = { role: 'user' as const, content: '[CONTEXT COMPACTION — REFERENCE ONLY] earlier', xerxes_compaction_summary: true as const }
+  const runner = new AgentTurnRunner({
+    model: 'gpt-test', contextLimit: 100_000, maxTokens: 1000,
+    reduceContext: async messages => ({ messages: [summary, messages.at(-1)!], tokensFreed: 150_000 }),
+    llm: { async *stream() {
+      paused.resolve()
+      await release.promise
+      yield { content: 'finished' }
+    } },
+  })
+  const session: DaemonSession = {
+    activeTurnId: 'turn-1', agentId: 'default', cancelRequested: false, cwd: process.cwd(), extra: {},
+    id: 'live-compacted-session', interactionMode: 'default', sessionKey: 'live-compacted', lastActive: 0,
+    messages: [
+      { role: 'user', content: 'historical output '.repeat(50_000) },
+      { role: 'assistant', content: 'old answer' },
+      { role: 'user', content: 'older question' },
+      { role: 'assistant', content: 'older answer' },
+    ],
+    metadata: {}, model: '', planMode: false, status: 'working', thinkingContent: [],
+    toolExecutions: [], totalInputTokens: 0, totalOutputTokens: 0, turnCount: 2, workspace: process.cwd(),
+  }
+  const turn = (async () => { for await (const _event of runner.run(session, 'keep going', new AbortController().signal)) {} })()
+  await paused.promise
+  expect(session.messages).toHaveLength(4)
+  expect(runner.liveMessages(session)?.map(message => message.content)).toEqual([summary.content, 'keep going'])
+  release.resolve()
+  await turn
+  session.activeTurnId = ''
+  expect(runner.liveMessages(session)).toBeUndefined()
+})
+
+test('a compaction summary keeps its typed marker through the next turn', async () => {
+  const runner = new AgentTurnRunner({ model: 'test-model', llm: new TextClient() })
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-summary-marker-'))
+  try {
+    const runtime = new InMemoryDaemonRuntime(runner, { sessionDirectory: join(directory, 'sessions') })
+    const session = await runtime.openSession('summary-marker')
+    session.messages = [
+      { role: 'user', content: '[CONTEXT COMPACTION — REFERENCE ONLY] earlier work', xerxes_compaction_summary: true },
+      { role: 'assistant', content: 'retained answer' },
+    ]
+    session.turnCount = 1
+    await runtime.submitTurn(session.sessionKey, 'next question', () => {})
+    expect(session.messages[0]).toMatchObject({ role: 'user', xerxes_compaction_summary: true })
+    expect(session.messages.filter(message => message.xerxes_compaction_summary === true)).toHaveLength(1)
+    await runtime.shutdown()
+  } finally { await rm(directory, { recursive: true, force: true }) }
 })

@@ -164,6 +164,18 @@ export class NativeSubagentTurnCoordinator implements SubagentTurnCoordinator {
     return Object.freeze([...cohort.ids])
   }
 
+  /**
+   * Whether an open parent turn still waits to receive this task. The host
+   * keeps such tasks out of terminal-task eviction: a cohort member missing
+   * from the listing reads as settled, and its result was silently dropped.
+   */
+  holds(taskId: string): boolean {
+    for (const cohort of this.active.values()) {
+      if (!cohort.closed && cohort.ids.has(taskId)) return true
+    }
+    return false
+  }
+
   private close(cohort: ActiveCohort): void {
     cohort.closed = true
     if (this.active.get(cohort.sourceId) === cohort) {
@@ -288,18 +300,29 @@ export function recoverSubagentSnapshots(
  * state. Resumed transcripts can therefore contain several historical ids for
  * one logical task name. Keep exact-id updates above, then restore only the
  * newest generation so name-based lookups cannot select an older tombstone.
+ *
+ * Only a name the caller chose is a stable identity. An unnamed task is
+ * named from its id prefix, and every daemon id starts `subagent_`, so all
+ * unnamed tasks share the name "subagent": collapsing on it kept one agent
+ * of a whole workflow and the next manifest write erased the rest.
  */
 function newestSnapshotsByStableName(
   snapshots: Iterable<SpawnedAgentSnapshot>,
 ): SpawnedAgentSnapshot[] {
   const newest = new Map<string, SpawnedAgentSnapshot>()
   for (const snapshot of snapshots) {
-    const previous = newest.get(snapshot.name)
+    const key = hasChosenName(snapshot) ? `name\u0000${snapshot.name}` : `id\u0000${snapshot.id}`
+    const previous = newest.get(key)
     if (previous === undefined || snapshotIsNewer(snapshot, previous)) {
-      newest.set(snapshot.name, snapshot)
+      newest.set(key, snapshot)
     }
   }
   return [...newest.values()]
+}
+
+/** Mirrors SubAgentTask's default name (the id's first eight characters). */
+function hasChosenName(snapshot: SpawnedAgentSnapshot): boolean {
+  return snapshot.name !== snapshot.id && snapshot.name !== snapshot.id.slice(0, 8)
 }
 
 function snapshotIsNewer(

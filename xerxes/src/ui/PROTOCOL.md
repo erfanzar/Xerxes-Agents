@@ -83,7 +83,15 @@ session ownership when the window, terminal or transport closes. Expiring or
 overflowing the reconnect journal releases transport state without cancelling
 that work. Reopen the same session to load its transcript/inflight snapshot and
 receive subsequent events. Short reconnects retain the existing bounded journal.
+Reclaiming a lease stops its outage deadline; a journal that then overflows, or
+an `initialize` that never arrives within the grace period, drops only the
+replay, so the reply carries no `reconnect_events` and the client rebuilds from
+its history snapshot. Journaling ends in the same step as the `initialize`
+reply, so `reconnect_events` always precede newer live frames.
 Explicit `turn.cancel`, session eviction and daemon shutdown still stop work.
+Slash `/new` therefore refuses while the session it leaves is still working (a
+turn, agents, or an armed goal), and leaves a session another client still
+shows in place.
 This does not promise execution through daemon/process failure, reboot or host
 sleep; saved sessions and recovery rules remain unchanged.
 
@@ -221,7 +229,7 @@ params fall back to per-connection defaults.
 | `fetch_models` / `provider_models`   | `{ profile_name }`                             | `{ ok, models, catalog?, source, warning? }`                    | Catalog rows may carry effective `context_limit`, `max_output_tokens`, provenance sources, and `overridden`; credentials never leave the daemon. |
 | `provider_model_override`            | `{ profile_name, model, context_limit?, max_output_tokens? }` | `{ ok, model }`                          | Positive safe integers set per-model user overrides; `null` clears a field. Precedence: user override → provider metadata → generated Pi catalog → unknown. Explicit runtime/profile `max_tokens` still wins for requests. |
 | `provider_list`                      | `{}`                                           | `{ ok, profiles }`                                             |                                                                                   |
-| `provider.import`                    | `{ profiles: [{ name, provider, base_url, api_key, model, sampling? }] }` | `{ ok, imported, skipped }` + emits `InitDone` when any imported | Adds or replaces key-based profiles without changing the active one; used by the desktop on SSH connect. |
+| `provider.import`                    | `{ profiles: [{ name, provider, base_url, api_key, model, sampling? }] }` | `{ ok, imported, skipped }` + emits `InitDone` when any imported | Adds key-based profiles the host does not have (a same-named host profile is kept) without changing the active one; used by the desktop on SSH connect. |
 | `provider_save`                      | `{ name, base_url, api_key, model?, provider }` | `{ ok, profile }` + emits `InitDone`                           | `model` is optional: an edit keeps the saved model; a new profile without one discovers the models its key can use and starts on the first, or fails with the provider's reason (and nothing is saved). |
 | `provider_select`                    | `{ name }`                                     | `{ ok }` + emits `InitDone`                                    |                                                                                   |
 | `provider_delete`                    | `{ name }`                                     | `{ ok }` + emits `InitDone`                                    |                                                                                   |
@@ -1767,12 +1775,18 @@ it, while failures remain visible and require retry rather than a restart loop.
 An armed goal no longer blocks replacement forever. The first request while a
 goal is armed holds its next round; the reply is `{ok:false, busy:true,
 waiting_for_goal_round:true}` until the running round ends. The restart then
-writes `goal_rearm_after_restart: {goal_id, revision, at}` to that session, and
-the fresh runtime re-arms and continues the same goal when the session is
-reopened (`initialize` with `resume_session_id`, or `session.open`). A marker
-for a different goal, a changed phase, or older than six hours is dropped
-unhonoured. If the client stops asking for two minutes, the hold lapses and the
-held rounds run.
+writes `goal_rearm_after_restart: {goal_id, revision, at}` to that session and
+lists the session in the daemon's goal re-arm file. The fresh runtime reopens
+every listed session at startup and re-arms and continues the same goal without
+waiting for a client; a session reopened first (`initialize` with
+`resume_session_id`, or `session.open`) re-arms there instead. A marker for a
+different goal, a changed phase, or older than six hours is dropped
+unhonoured. A round that a forced restart stopped mid-way continues rather than
+blocking the goal as an unknown outcome. If the client stops asking for two
+minutes, the hold lapses and the held rounds run. On an SSH workspace each ask
+is a whole remote bootstrap, so the desktop re-checks a busy host only every two
+minutes, except one replying `waiting_for_goal_round`, which it asks again
+every 20 seconds to keep the hold alive until the round ends.
 
 ### Shared local daemon ownership
 
@@ -2195,9 +2209,11 @@ profiles to the workspace host with `provider.import { profiles }`, so they
 also work there as the host's own profiles. Each item is `{ name, provider,
 base_url, api_key, model, sampling? }`; the reply is `{ ok, imported,
 skipped: [{ name, reason }] }` and, when anything was imported, an `InitDone`.
-A same-named host profile is replaced, other host profiles and the host's
-active selection are unchanged, and sign-in providers (`claude-code`,
-`openai-codex`) and keyless profiles are skipped: the host signs in itself.
+The import is additive: a name the host already has is skipped with reason
+`already on host`, so the host's own endpoint, key, model and tuned limits
+survive every reconnect. The host's active selection is unchanged, and
+sign-in providers (`claude-code`, `openai-codex`) and keyless profiles are
+skipped: the host signs in itself.
 The keys are then stored in the host's `profiles.json` (mode 0600). A host
 runtime without the method leaves the connection unaffected.
 

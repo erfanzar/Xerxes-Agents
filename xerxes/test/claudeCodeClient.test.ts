@@ -320,9 +320,10 @@ test('a system reminder the model writes itself is dropped from the reply and ca
   for (let i = 0; i < reply.length; i += 5) visible += extractor.push(reply.slice(i, i + 5))
   visible += extractor.finish()
   expect(visible).toBe('The diff files are written.\n\nChecking the untracked files.')
-  // An unterminated one at the end is dropped too.
+  // Only a whole reminder is dropped: one that never closes was the tag
+  // mentioned, and dropping it lost the rest of the reply, even at the limit.
   const cut = new FunctionCallExtractor()
-  expect(cut.push('Done. <system-reminder>half') + cut.finish()).toBe('Done. ')
+  expect(cut.push('Done. <system-reminder>half') + cut.finish(true)).toBe('Done. <system-reminder>half')
   const [block] = claudeCodeTranscript([{ role: 'assistant', content: 'quoted <system-reminder>x</system-reminder>' }])
   expect((block as { text: string }).text).toBe('<assistant>\nquoted &lt;system-reminder>x&lt;/system-reminder>\n</assistant>')
 })
@@ -400,9 +401,20 @@ test('the tail of a cut-off call, resumed without its opening, is dropped rather
   shown += extractor.finish()
   expect(shown).toBe('Resuming the edit.\n\nDone with that part.')
   expect(extractor.calls).toEqual([])
-  // Unclosed at the end of the stream: still hidden.
+  // Unclosed when the output limit cut the stream: still hidden.
   const tail = new FunctionCallExtractor()
-  expect(tail.push('Next.\n<parameter name="x">partial') + tail.finish()).toBe('Next.\n')
+  expect(tail.push('Next.\n<parameter name="x">partial') + tail.finish(true)).toBe('Next.\n')
+  // Its `</parameter>` marks a fragment even with no `</invoke>` at a normal end.
+  const orphan = new FunctionCallExtractor()
+  expect(orphan.push('Next.\n<parameter name="content">partial</parameter>') + orphan.finish()).toBe('Next.\n')
+  expect(orphan.calls).toEqual([])
+  // Call markup inside a fragment's value is part of what is dropped, never run.
+  const markup = new FunctionCallExtractor()
+  const resumed = 'Resuming.\n<parameter name="content">Write <function=read_file>{"path":"x"}</function> to call it.</parameter>\n</invoke>\nDone.'
+  shown = ''
+  for (let i = 0; i < resumed.length; i += 7) shown += markup.push(resumed.slice(i, i + 7))
+  expect(shown + markup.finish()).toBe('Resuming.\n\nDone.')
+  expect(markup.calls).toEqual([])
 })
 
 test('a tool name used as a tag is a call when its keys fit the schema; a made-up result after it ends the reply', () => {
@@ -516,4 +528,135 @@ test('other Claude Code failures are not retried here', async () => {
   const fake = scriptedLauncher([[result({ is_error: true, result: 'Claude AI usage limit reached|1790000000', api_error_status: 429 })]])
   await collect(new ClaudeCodeClient({ executable: '/bin/claude', launch: fake.launch, workingDirectory: '/tmp' }).stream({ model: 'claude-code/sonnet', messages: [{ role: 'user', content: 'hi' }] })).catch(() => undefined)
   expect(fake.inputs).toHaveLength(1)
+})
+
+test('a "</function>" inside a JSON string value does not end the call; the whole argument is kept', () => {
+  const tools = [{ type: 'function' as const, function: { name: 'write_file', description: 'Write', parameters: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } } } } }]
+  const reply = 'Writing the test.\n<function=write_file>{"path":"t.test.ts","content":"expect(x).toBe(\'<function=x>{}</function>\')\\nmore \\"q\\" \\\\"}</function>'
+  for (const size of [reply.length, 7, 1]) {
+    const extractor = new FunctionCallExtractor(toolParameterTypes(tools))
+    let visible = ''
+    for (let i = 0; i < reply.length; i += size) visible += extractor.push(reply.slice(i, i + size))
+    visible += extractor.finish()
+    expect(visible).toBe('Writing the test.\n')
+    expect(extractor.calls).toEqual([{ name: 'write_file', arguments: { path: 't.test.ts', content: 'expect(x).toBe(\'<function=x>{}</function>\')\nmore "q" \\' } }])
+  }
+  // A call whose arguments stop inside a string at the end of the stream is
+  // incomplete: it is dropped, not repaired into half a file and run.
+  const open = new FunctionCallExtractor(toolParameterTypes(tools))
+  open.push('<function=write_file>{"path":"a.ts","content":"line1\\nfunc')
+  expect(open.finish()).toBe('')
+  expect(open.calls).toEqual([])
+  expect(open.cutOff).toBe(true)
+})
+
+test('markup mentioned in prose never swallows the rest of the reply or the call after it', () => {
+  const tools = [{ type: 'function' as const, function: { name: 'read_file', description: 'Read', parameters: { type: 'object', properties: { path: { type: 'string' } } } } }]
+  const run = (reply: string) => {
+    const extractor = new FunctionCallExtractor(toolParameterTypes(tools))
+    let visible = ''
+    for (let i = 0; i < reply.length; i += 7) visible += extractor.push(reply.slice(i, i + 7))
+    visible += extractor.finish()
+    return { visible, calls: extractor.calls }
+  }
+  const call = '\n<function=read_file>{"path":"a.ts"}</function>'
+  const read = [{ name: 'read_file', arguments: { path: 'a.ts' } }]
+  for (const prose of [
+    'The loop escapes every `<system-reminder>` tag before replay. Next I will read the file.',
+    'Mention of `<read_file>` here. Now:',
+    'Use the `<function>` tag. Now:',
+    'Use `<parameter name="x">` syntax. Then:',
+    'Use `<invoke name="Bash">` blocks. Then:',
+    'Use `<function=read_file>` calls. Then:',
+  ]) {
+    expect(run(prose + call)).toEqual({ visible: `${prose}\n`, calls: read })
+    // A plain final answer that only mentions the tag is shown whole.
+    expect(run(prose + ' Done.')).toEqual({ visible: prose + ' Done.', calls: [] })
+  }
+})
+
+// Unquoted mentions as well as quoted ones: each is decided while the reply
+// streams, not held until it ends.
+const MENTIONS = [
+  'The loop escapes `<system-reminder>` tags. Reading.',
+  'The loop escapes <system-reminder> tags. Reading.',
+  'Use `<parameter name="x">` syntax. Reading.',
+  'Use <parameter name="x"> syntax. Reading.',
+  'Use <invoke name="Bash"> blocks. Reading.',
+  'Use <function=read_file> with a "path. Reading.',
+  'Call <function=read_file> to read it. Reading.',
+  'Mention of <read_file> here. Reading.',
+  'Use the <function> tag. Reading.',
+]
+
+test('a call after a mention is found while the reply streams, so the early stop fires before the end', () => {
+  const tools = [{ type: 'function' as const, function: { name: 'read_file', description: 'Read', parameters: { type: 'object', properties: { path: { type: 'string' } } } } }]
+  const after = '\n<function=read_file>{"path":"a.ts"}</function>\n<function_results>imagined</function_results>\n<function=read_file>{"path":"b.ts"}</function>'
+  for (const prose of MENTIONS) {
+    const extractor = new FunctionCallExtractor(toolParameterTypes(tools))
+    const reply = prose + after
+    let visible = ''
+    for (let i = 0; i < reply.length; i += 7) visible += extractor.push(reply.slice(i, i + 7))
+    // Before finish(): the caller stops the process on `done`.
+    expect({ prose, done: extractor.done, calls: extractor.calls }).toEqual({ prose, done: true, calls: [{ name: 'read_file', arguments: { path: 'a.ts' } }] })
+    expect(visible).toBe(`${prose}\n\n`)
+    // A run-on that then hits the output limit keeps the call.
+    expect(extractor.finish(true)).toBe('')
+    expect(extractor.calls).toEqual([{ name: 'read_file', arguments: { path: 'a.ts' } }])
+  }
+})
+
+test('a reply the output limit cuts after a mention keeps its call and its text', () => {
+  const tools = [{ type: 'function' as const, function: { name: 'read_file', description: 'Read', parameters: { type: 'object', properties: { path: { type: 'string' } } } } }]
+  for (const prose of MENTIONS) {
+    const extractor = new FunctionCallExtractor(toolParameterTypes(tools))
+    const reply = `${prose}\n<function=read_file>{"path":"a.ts"}</function>\nThen I will`
+    let visible = ''
+    for (let i = 0; i < reply.length; i += 7) visible += extractor.push(reply.slice(i, i + 7))
+    // Found live, not only at the end.
+    expect({ prose, calls: extractor.calls }).toEqual({ prose, calls: [{ name: 'read_file', arguments: { path: 'a.ts' } }] })
+    visible += extractor.finish(true)
+    expect(visible).toBe(`${prose}\n\nThen I will`)
+    expect(extractor.cutOff).toBe(false)
+  }
+  // Mention and prose only, cut by the limit: all of it is shown.
+  const cut = new FunctionCallExtractor()
+  expect(cut.push('The <system-reminder> tag wraps notices and') + cut.finish(true)).toBe('The <system-reminder> tag wraps notices and')
+})
+
+test('a tag mentioned without a close never becomes a call with empty arguments', () => {
+  const extractor = new FunctionCallExtractor()
+  const reply = 'Wrap the command in <invoke name="Bash">'
+  expect(extractor.push(reply) + extractor.finish()).toBe(reply)
+  expect(extractor.calls).toEqual([])
+  const legacy = new FunctionCallExtractor()
+  expect(legacy.push('Then send <function=read_file>') + legacy.finish()).toBe('Then send <function=read_file>')
+  expect(legacy.calls).toEqual([])
+  // A whole object with no close at a normal end is still a call.
+  const unclosed = new FunctionCallExtractor()
+  unclosed.push('<function=read_file>{"path":"a.ts"}')
+  expect(unclosed.finish()).toBe('')
+  expect(unclosed.calls).toEqual([{ name: 'read_file', arguments: { path: 'a.ts' } }])
+  // An unclosed call whose last parameter is still open is incomplete: dropped, not run without it.
+  const open = new FunctionCallExtractor()
+  open.push('Writing.\n<invoke name="write_file">\n<parameter name="path">a.ts</parameter>\n<parameter name="content">half')
+  expect(open.finish()).toBe('')
+  expect(open.calls).toEqual([])
+  expect(open.cutOff).toBe(true)
+})
+
+test('a retry that rephrases the text already shown is not spliced into it mid-word', async () => {
+  const fake = scriptedLauncher([
+    [textDelta("I'll update the config file now."), result({ is_error: true, result: "The model's tool call could not be parsed." })],
+    [textDelta('I will update the config file now.\n'), textDelta('<function=read_file>{"path": "config.ts"}</function>'), result()],
+  ])
+  const { text, deltas } = await collect(new ClaudeCodeClient({ executable: '/bin/claude', launch: fake.launch, workingDirectory: '/tmp' }).stream({ model: 'claude-code/sonnet', tools, messages: [{ role: 'user', content: 'update it' }] }))
+  expect(text).toBe("I'll update the config file now.\n\nI will update the config file now.\n")
+  expect(deltas.flatMap(delta => delta.toolCalls ?? []).map(call => call.function.arguments)).toEqual([{ path: 'config.ts' }])
+  // A retry that extends the shown text shows only what is new.
+  const extending = scriptedLauncher([
+    [textDelta('Checking the '), result({ is_error: true, result: "The model's tool call could not be parsed." })],
+    [textDelta('Checking the diff.'), result()],
+  ])
+  expect((await collect(new ClaudeCodeClient({ executable: '/bin/claude', launch: extending.launch, workingDirectory: '/tmp' }).stream({ model: 'claude-code/sonnet', messages: [{ role: 'user', content: 'go' }] }))).text).toBe('Checking the diff.')
 })

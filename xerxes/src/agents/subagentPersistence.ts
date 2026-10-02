@@ -59,16 +59,22 @@ export function replacePersistedSubagentSnapshots(
   metadata[SUBAGENT_SNAPSHOT_METADATA_KEY] = withinGroupedTextBudget(snapshots.map(archivedSnapshotWire))
 }
 
-/** Merge terminal progress observed outside a tool call into the durable manifest. */
+/**
+ * Merge the current view into the durable manifest. Rows the live view no
+ * longer lists stay: the manager evicts old terminal tasks and a restart
+ * restores only some, but the session still owns those agents' records.
+ * `removedIds` drops rows that must not survive (a rolled-back batch).
+ */
 export function mergePersistedSubagentSnapshots(
   metadata: Record<string, unknown>,
   snapshots: readonly SpawnedAgentSnapshot[],
+  removedIds: ReadonlySet<string> = new Set(),
 ): void {
   const existing = persistedSubagentSnapshotValues(metadata)
   const byId = new Map<string, Record<string, unknown>>()
   for (const value of existing) {
     const id = typeof value.id === 'string' ? value.id : ''
-    if (id) byId.set(id, value)
+    if (id && !removedIds.has(id)) byId.set(id, value)
   }
   for (const snapshot of snapshots) byId.set(snapshot.id, archivedSnapshotWire(snapshot))
   metadata[SUBAGENT_SNAPSHOT_METADATA_KEY] = withinGroupedTextBudget([...byId.values()])

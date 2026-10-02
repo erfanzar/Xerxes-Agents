@@ -4,6 +4,13 @@
 /** Navigation activates an existing view; it never reloads or rebinds its session. */
 export interface WorkspaceView {
   readonly workspace: string | null
+  /**
+   * The folder the daemon resolved the view to (its git root, symlinks
+   * resolved). Sidebar rows carry this form, not the folder the person
+   * picked, so matching `workspace` alone opened another view each time a
+   * subfolder or symlinked workspace was entered again.
+   */
+  readonly cwd?: string | null
   readonly sessionId: string | null
   readonly remote: unknown
   isDestroyed(): boolean
@@ -14,7 +21,7 @@ export interface WorkspaceView {
 }
 
 export function activateWorkspaceView(views: readonly WorkspaceView[], workspace: string, sessionId?: string): boolean {
-  const view = views.find(candidate => !candidate.remote && candidate.workspace === workspace &&
+  const view = views.find(candidate => !candidate.remote && (candidate.workspace === workspace || candidate.cwd === workspace) &&
     (!sessionId || candidate.sessionId === sessionId) && !candidate.isDestroyed())
   if (!view) return false
   if (view.isMinimized()) view.restore()

@@ -109,6 +109,14 @@ export interface TranscriptSaveOptions {
   readonly expectedGeneration: number
   /** Message count at that generation; append treats everything after it as the caller's suffix. */
   readonly expectedMessageCount?: number
+  /**
+   * Whether `messages` holds every message journalled so far, so the snapshot
+   * may claim the whole event log. Defaults to true for a rewrite and false
+   * for an append. A caller must pass false while a turn is in flight: its
+   * messages live only in the journal, and covering them makes a crash before
+   * the turn's own save unrecoverable.
+   */
+  readonly coversEventLog?: boolean
   /** Receives the committed generation while the write is still serialized. */
   readonly onSavedGeneration?: (generation: number) => void
 }
@@ -339,17 +347,8 @@ export class DaemonTranscriptStore {
     if (!looksLikeSessionId(sessionKey)) {
       return undefined
     }
-    const path = this.pathFor(sessionKey)
-    let raw: unknown
-    try {
-      raw = JSON.parse(await readFile(path, 'utf8')) as unknown
-    } catch {
-      return undefined
-    }
-    // Replay before normalization so journalled messages go through the same
-    // resume repair as persisted ones: a crash between two tool calls leaves
-    // an unanswered call in the journal exactly as it would in the snapshot.
-    await this.replayMessageJournal(sessionKey, raw)
+    const raw = await this.readReplayedRecord(sessionKey)
+    if (raw === undefined) return undefined
     const workspaceRoot = options.workspaceRoot ?? this.workspaceRoot
     return normalizeDaemonTranscript(raw, {
       currentProjectDirectory: options.currentProjectDirectory ?? this.currentProjectDirectory,
@@ -392,7 +391,10 @@ export class DaemonTranscriptStore {
       } finally {
         await handle.close()
       }
-    } catch {
+    } catch (error) {
+      // A session whose first turn never reached a snapshot exists only as its
+      // journal; the full load can still answer for it.
+      if (isMissing(error) && await this.hasEventLog(sessionId)) return { kind: 'truncated' }
       return { kind: 'unreadable' }
     }
     return this.parseHeader(head, sessionId)
@@ -406,12 +408,18 @@ export class DaemonTranscriptStore {
     } catch {
       return []
     }
+    const snapshots = new Set(entries.filter(entry => entry.endsWith('.json')).map(entry => basename(entry, '.json')))
+    // A journal with no snapshot beside it is a session whose first turn never
+    // finished saving; it lists through its journal until the first save.
+    const orphanedJournals = entries
+      .filter(entry => entry.endsWith('.jsonl') && !snapshots.has(basename(entry, '.jsonl')))
+      .map(entry => basename(entry, '.jsonl'))
+      .filter(looksLikeSessionId)
     const stats = await Promise.all(
-      entries
-        .filter(entry => entry.endsWith('.json') && looksLikeSessionId(basename(entry, '.json')))
-        .map(async (entry): Promise<DaemonTranscriptEntry | undefined> => {
-          const sessionId = basename(entry, '.json')
-          const path = this.pathFor(sessionId)
+      [...[...snapshots].filter(looksLikeSessionId).map(sessionId => ({ sessionId, orphaned: false })),
+        ...orphanedJournals.map(sessionId => ({ sessionId, orphaned: true }))]
+        .map(async ({ sessionId, orphaned }): Promise<DaemonTranscriptEntry | undefined> => {
+          const path = orphaned ? this.journalPathFor(sessionId) : this.pathFor(sessionId)
           try {
             const info = await stat(path)
             return { modifiedAtMillis: info.mtimeMs, path, sessionId, sizeBytes: info.size }
@@ -521,7 +529,16 @@ export class DaemonTranscriptStore {
       const inheritedOffset = Math.max(persisted.eventLogOffset, transcript.eventLogOffset ?? 0)
       // Keep the journal until snapshot and journal reclamation can be committed
       // together. Clearing it first loses recovered messages if this save fails.
-      const coveredOffset = options.mode === 'rewrite'
+      //
+      // An append that merged another writer's history cannot vouch for that
+      // writer's journal rows, so only a save against the generation it read
+      // may cover the log. Leaving the watermark behind after an ordinary
+      // turn-end save forced every later crash recovery onto the anchor
+      // search, which fails whenever the snapshot's last message was never
+      // journalled (a steer saved for the next turn, a failed setup's prompt).
+      const coversEventLog = (options.coversEventLog ?? options.mode === 'rewrite')
+        && persisted.generation === options.expectedGeneration
+      const coveredOffset = coversEventLog
         ? await this.eventLogSize(transcript.sessionId)
         : inheritedOffset
       await atomicJsonWrite(
@@ -543,13 +560,8 @@ export class DaemonTranscriptStore {
    * stale slot key.
    */
   async loadForListing(sessionId: string): Promise<DaemonTranscript | undefined> {
-    let raw: unknown
-    try {
-      raw = JSON.parse(await readFile(this.pathFor(sessionId), 'utf8')) as unknown
-    } catch {
-      return undefined
-    }
-    await this.replayMessageJournal(sessionId, raw)
+    const raw = await this.readReplayedRecord(sessionId)
+    if (raw === undefined) return undefined
     const workspaceRoot = this.workspaceRoot
     return normalizeDaemonTranscript(raw, {
       currentProjectDirectory: this.currentProjectDirectory,
@@ -593,13 +605,15 @@ export class DaemonTranscriptStore {
     return this.serializeTranscriptWrite(sessionId, async () => {
       const path = this.pathFor(sessionId)
       // An orphaned journal would resurrect the deleted history the next time
-      // this id is opened, so it goes with the snapshot.
+      // this id is opened, so it goes with the snapshot. A journal alone is a
+      // session too (one whose first turn never saved), so removing it counts.
+      const hadJournal = await this.hasEventLog(sessionId)
       await rm(this.journalPathFor(sessionId), { force: true })
       try {
         await rm(path)
         return true
       } catch (error) {
-        if (isMissing(error)) return false
+        if (isMissing(error)) return hadJournal
         throw error
       }
     })
@@ -610,6 +624,44 @@ export class DaemonTranscriptStore {
       throw new ValidationError('session_id', 'must be an 8-32 character hexadecimal resume ID', sessionId)
     }
     return resolve(this.directory, `${sessionId}.json`)
+  }
+
+  /**
+   * The persisted record with its uncovered journal spliced on, or undefined
+   * when there is neither a readable snapshot nor journalled history.
+   *
+   * A session's first snapshot is written only once its first turn ends: the
+   * store refuses to persist history without a reply, and a runner-managed
+   * turn leaves the session empty until then. A crash, quit or restart during
+   * that first turn — which a goal round can keep running for hours — left the
+   * prompt and all completed work in a journal nothing read, and the session
+   * vanished. With no snapshot, the journal alone is the record.
+   */
+  private async readReplayedRecord(sessionId: string): Promise<unknown> {
+    let raw: unknown
+    let orphaned = false
+    try {
+      raw = JSON.parse(await readFile(this.pathFor(sessionId), 'utf8')) as unknown
+    } catch (error) {
+      if (!isMissing(error) || !(await this.hasEventLog(sessionId))) return undefined
+      raw = { session_id: sessionId, messages: [] }
+      orphaned = true
+    }
+    // Replay before normalization so journalled messages go through the same
+    // resume repair as persisted ones: a crash between two tool calls leaves
+    // an unanswered call in the journal exactly as it would in the snapshot.
+    await this.replayMessageJournal(sessionId, raw)
+    if (orphaned && isRecord(raw) && Array.isArray(raw.messages) && raw.messages.length === 0) return undefined
+    return raw
+  }
+
+  private async hasEventLog(sessionId: string): Promise<boolean> {
+    try {
+      return (await stat(this.journalPathFor(sessionId))).isFile()
+    } catch (error) {
+      if (isMissing(error)) return false
+      throw error
+    }
   }
 
   private async readPersistedState(
@@ -799,7 +851,7 @@ export class DaemonTranscriptStore {
     let coveredOffset = safeOffset
     for (const record of appends.slice(start)) {
       if (record.index === next) {
-        raw.messages.push({ ...record.message })
+        raw.messages.push(storedMessage(record.message))
         coveredOffset = record.endOffset
         replayed += 1
         next += 1
@@ -849,8 +901,40 @@ export function journalContinuation(
   return -1
 }
 
-/** One logical message, allowing for the marker stripping a resume applies. */
-function sameMessage(left: RawMessage, right: RawMessage): boolean {
+/**
+ * Fields the daemon adds to a stored message after the loop pushed it, and so
+ * after the journal recorded it: the turn outcome, the typed text of a
+ * rewritten prompt, its harness origin, a subagent checkpoint flag.
+ */
+const PRESENTATION_FIELDS = ['turn_outcome', 'text', 'displayText', 'origin', 'checkpoint_partial'] as const
+
+function withoutPresentation(message: RawMessage): RawMessage {
+  const stripped = { ...message }
+  for (const field of PRESENTATION_FIELDS) delete stripped[field]
+  return stripped
+}
+
+/**
+ * A journalled loop message in the shape a stored transcript holds it.
+ *
+ * The loop keeps a prompt's typed text as `displayText`; the transcript stores
+ * it as `text`, and only `text` is read back when a session resumes.
+ */
+function storedMessage(message: RawMessage): RawMessage {
+  if (message.role !== 'user' || typeof message.displayText !== 'string') return { ...message }
+  const { displayText, ...rest } = message
+  return { ...rest, text: displayText }
+}
+
+/**
+ * One logical message, allowing for the marker stripping a resume applies and
+ * for the presentation fields only the stored copy carries. Comparing those
+ * fields made every turn-end snapshot unmatchable — its last message carries a
+ * turn outcome its journal row never had — so a crash lost the running turn.
+ */
+function sameMessage(journalled: RawMessage, stored: RawMessage): boolean {
+  const left = withoutPresentation(journalled)
+  const right = withoutPresentation(stored)
   if (JSON.stringify(left) === JSON.stringify(right)) return true
   if (left.role !== right.role) return false
   // A tool call ID names exactly one invocation and its result.

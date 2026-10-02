@@ -12,8 +12,8 @@ import {
 } from '../../agents/intelligence.js'
 import { ValidationError } from '../../core/errors.js'
 import {
+  mergePersistedSubagentSnapshots,
   replacePersistedSubagentDeliveries,
-  replacePersistedSubagentSnapshots,
   type PersistedSubagentDelivery,
 } from '../../agents/subagentPersistence.js'
 import { ToolRegistry, type ToolExecutionContext } from '../../executors/toolRegistry.js'
@@ -28,7 +28,7 @@ import {
 import type { JsonObject, JsonValue, ToolDefinition } from '../../types/toolCalls.js'
 import type { PermissionMode } from '../../streaming/permissions.js'
 import { optionalBoolean, optionalInteger, optionalString, requiredString } from '../inputs.js'
-import type { SubAgentGroup } from '../../agents/subagentManager.js'
+import { SpawnBudgetExhaustedError, type SubAgentGroup } from '../../agents/subagentManager.js'
 import type { ToolCapabilities } from '../../executors/toolRegistry.js'
 import {
   DEFAULT_WORKFLOW_CONCURRENCY,
@@ -57,6 +57,8 @@ const MAX_INLINE_BATCH_RECEIPT_AGENTS = 8
 const DEFAULT_TASK_LIST_PAGE_SIZE = 50
 const MAX_TASK_LIST_PAGE_SIZE = 50
 const POLL_INTERVAL_MS = 25
+/** How often a workflow agent refused by a full live-agent cap asks again. */
+const SPAWN_BUDGET_RETRY_MS = 250
 
 /**
  * Hard cap on one SpawnAgents batch. Without it a single tool call could spawn
@@ -166,6 +168,13 @@ export class AgentEventMailbox {
         })
       }
       this.observed.set(snapshot.id, snapshot)
+    }
+    // Callers pass the manager's complete current view. An agent missing from
+    // it has been evicted, and its last snapshot (with unbounded output) would
+    // otherwise stay here for the life of the runner.
+    const present = new Set(snapshots.map(snapshot => snapshot.id))
+    for (const id of this.observed.keys()) {
+      if (!present.has(id)) this.observed.delete(id)
     }
   }
 
@@ -918,7 +927,7 @@ export class ClaudeAgentTools {
     }
     const port: WorkflowAgentPort = {
       run: async (request, runSignal) => {
-        const snapshot = await this.spawnSpec(workflowSpec(request, runId, name, this.intelligence), context, runSignal)
+        const snapshot = await this.spawnWhenBudgetAllows(workflowSpec(request, runId, name, this.intelligence), context, runSignal)
         live.add(snapshot.id)
         return settle(snapshot.id, request.timeoutMs ?? WORKFLOW_AGENT_TIMEOUT_MS, runSignal)
       },
@@ -971,6 +980,23 @@ export class ClaudeAgentTools {
     if (spec.worktreeRef && spec.isolation !== 'worktree') throw new ValidationError('worktree_ref', 'requires isolation=worktree', spec.worktreeRef)
     const selected = resolveAgentIntelligenceSettings(this.intelligence, spec.intelligence, spec.model)
     return { ...spec, intelligence: undefined, model: selected?.model, providerProfile: selected?.provider_profile ?? spec.providerProfile, reasoningEffort: selected?.reasoning_effort ?? spec.reasoningEffort }
+  }
+
+  /**
+   * The live-agent cap is shared by every session in the workspace, so a
+   * workflow can be refused while another run holds the slots. Its agents are
+   * already queued work: wait for a slot (until the run is stopped) instead of
+   * recording a failure for an agent that would have run moments later.
+   */
+  private async spawnWhenBudgetAllows(spec: ClaudeAgentSpec, context: ToolExecutionContext, signal: AbortSignal): Promise<SpawnedAgentSnapshot> {
+    for (;;) {
+      try {
+        return await this.spawnSpec(spec, context, signal)
+      } catch (error) {
+        if (!(error instanceof SpawnBudgetExhaustedError)) throw error
+      }
+      await abortable(sleep(SPAWN_BUDGET_RETRY_MS), signal)
+    }
   }
 
   private async spawnSpec(spec: ClaudeAgentSpec, context: ToolExecutionContext, signal?: AbortSignal): Promise<SpawnedAgentSnapshot> {
@@ -1124,7 +1150,10 @@ export class ClaudeAgentTools {
   }
 
   private persistContext(context: ToolExecutionContext): void {
-    replacePersistedSubagentSnapshots(context.metadata, this.ownedHandles(context))
+    // Merge, never replace: the manager retains only a bounded number of
+    // terminal tasks and a restart restores only the agents it can, so the
+    // live view is partial and a replace erased every agent it had dropped.
+    mergePersistedSubagentSnapshots(context.metadata, this.ownedHandles(context), this.rolledBackIds)
     const delivered = this.options.backgroundAgents?.deliveredState?.()
     if (delivered !== undefined) replacePersistedSubagentDeliveries(context.metadata, delivered)
   }

@@ -58,6 +58,38 @@ test('AppendFile rechecks the destination immediately before mutation', async ()
   })
 })
 
+test('AppendFile counts as a fresh read, so the session can edit or rewrite the file afterwards', async () => {
+  await inWorkspace(async (workspace, paths) => {
+    const context = { sessionId: 'session-append' }
+    await Bun.write(join(workspace, 'CHANGELOG.md'), '# Changes\n')
+    await readFile({ file_path: 'CHANGELOG.md' }, paths, context)
+    await appendFile({ file_path: 'CHANGELOG.md', lines: '- entry' }, paths, context)
+
+    const edited = await editFile({ file_path: 'CHANGELOG.md', old_string: '- entry', new_string: '- fixed entry' }, paths, context)
+    expect(edited).not.toContain('[stale-read]')
+    await expect(writeFile({ file_path: 'CHANGELOG.md', content: '# Rewritten\n', overwrite: true }, paths, context)).resolves.toContain('overwrote')
+
+    // A file AppendFile created is the session's own and editable without a read.
+    await appendFile({ file_path: 'notes/new.md', lines: 'first' }, paths, context)
+    await expect(editFile({ file_path: 'notes/new.md', old_string: 'first', new_string: 'second' }, paths, context)).resolves.toBeString()
+    expect(await Bun.file(join(workspace, 'notes/new.md')).text()).toBe('second\n')
+  })
+})
+
+test('AppendFile does not launder an outside change made after the session\'s read', async () => {
+  await inWorkspace(async (workspace, paths) => {
+    const context = { sessionId: 'session-append-drift' }
+    const path = join(workspace, 'shared.md')
+    await Bun.write(path, 'one\n')
+    await readFile({ file_path: 'shared.md' }, paths, context)
+    await externalWrite(path, 'one\nfrom elsewhere\n')
+    await appendFile({ file_path: 'shared.md', lines: 'mine' }, paths, context)
+
+    await expect(writeFile({ file_path: 'shared.md', content: 'replaced\n', overwrite: true }, paths, context))
+      .rejects.toThrow('changed on disk after you read it')
+  })
+})
+
 test('ReadFile refuses a one-line minified window that the line limit cannot bound', async () => {
   await inWorkspace(async (workspace, paths) => {
     await Bun.write(join(workspace, 'bundle.min.js'), 'a'.repeat(MAX_READ_WINDOW_CHARS + 1))

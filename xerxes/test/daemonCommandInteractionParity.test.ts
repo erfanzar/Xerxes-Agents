@@ -16,6 +16,7 @@ import { registerFileTools } from '../src/tools/fileTools.js'
 import { registerProjectSetupTool } from '../src/tools/projectSetup.js'
 import { WorkspacePathResolver } from '../src/tools/pathSafety.js'
 import { createGoal, getGoal, resetGoalActivations } from '../src/runtime/goalDomain.js'
+import { claimGoalWake, queueGoalWake } from '../src/runtime/goalWake.js'
 
 test('startup loads existing commands, init adds workflows, and shell preprocessing requires explicit trust', async () => {
   const root = await mkdtemp(join(tmpdir(), 'xerxes-init-workflows-'))
@@ -582,6 +583,63 @@ test('a goal armed when an update restart drained it comes back armed in the fre
     expect(getGoal(session.metadata, session.id)?.roundsStarted).toBe(1)
     expect(session.metadata.goal_changes).toEqual(expect.arrayContaining([expect.objectContaining({ operation: 'resume' })]))
     expect(session.metadata.goal_rearm_after_restart).toBeUndefined()
+  } finally { client.close(); await server.stop(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('an update restart resumes every armed goal at startup, not only the session a client reopens', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-goal-sweep-'))
+  const goalRearmFile = join(root, 'daemon', 'goal-rearm.json')
+  const sessionDirectory = join(root, 'sessions')
+  const before = new InMemoryDaemonRuntime({ async *run() {} }, { currentProjectDirectory: root, sessionDirectory })
+  const first = await before.openSession('first-goal', undefined, { cwd: root })
+  const second = await before.openSession('second-goal', undefined, { cwd: root })
+  createGoal(first.metadata, first.id, { objective: 'port the kernels' }, Date.now())
+  createGoal(second.metadata, second.id, { objective: 'tune the scheduler' }, Date.now())
+  const old = new DaemonServer({ socketPath: join(root, 'old.sock'), runtime: before, goalRearmFile, onRestart: () => {} })
+  await old.start()
+  const client = await DaemonParityClient.connect(join(root, 'old.sock'))
+  try {
+    client.send({ jsonrpc: '2.0', id: 1, method: 'runtime.restart_if_idle', params: {} })
+    expect((await client.next(frame => frame.id === 1)).result).toEqual({ ok: true })
+  } finally { client.close(); await old.stop() }
+
+  // The fresh process: nothing is armed and no client reopens either session.
+  resetGoalActivations()
+  const after = new InMemoryDaemonRuntime({ async *run() {} }, { currentProjectDirectory: root, sessionDirectory })
+  const fresh = new DaemonServer({ socketPath: join(root, 'new.sock'), runtime: after, goalRearmFile })
+  await fresh.start()
+  try {
+    const started = (id: string) => {
+      const session = after.listSessions().find(candidate => candidate.id === id)
+      return session ? getGoal(session.metadata, session.id)?.roundsStarted ?? 0 : 0
+    }
+    for (let tries = 0; tries < 100 && (started(first.id) < 1 || started(second.id) < 1); tries++) await Bun.sleep(20)
+    expect(started(first.id)).toBe(1)
+    expect(started(second.id)).toBe(1)
+    expect(await Bun.file(goalRearmFile).exists()).toBe(false)
+  } finally { await fresh.stop(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('a goal round a forced restart cut short continues in the fresh process instead of blocking for review', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-goal-forced-'))
+  const runtime = new InMemoryDaemonRuntime({ async *run() {} }, { currentProjectDirectory: root, sessionDirectory: join(root, 'sessions') })
+  const session = await runtime.openSession('forced', undefined, { cwd: root })
+  const goal = createGoal(session.metadata, session.id, { objective: 'keep improving overnight' }, Date.now())
+  // The old process forced the restart while this round ran, and the round
+  // outlived the shutdown drain, so its wake was saved still running.
+  const wake = queueGoalWake(session.metadata, session.id, goal.id, goal.revision, Date.now())
+  claimGoalWake(session.metadata, session.id, wake.id, 'old-process', 1, Date.now())
+  session.metadata.goal_rearm_after_restart = { goal_id: goal.id, revision: goal.revision, at: Date.now() }
+  resetGoalActivations()
+  const server = new DaemonServer({ socketPath: join(root, 'daemon.sock'), runtime })
+  await server.start()
+  const client = await DaemonParityClient.connect(join(root, 'daemon.sock'))
+  try {
+    client.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { resume_session_id: session.id, project_dir: root } })
+    expect((await client.next(frame => frame.id === 1)).result).toMatchObject({ ok: true })
+    for (let tries = 0; tries < 100 && (getGoal(session.metadata, session.id)?.roundsStarted ?? 0) < 1; tries++) await Bun.sleep(20)
+    expect(getGoal(session.metadata, session.id)?.roundsStarted).toBe(1)
+    expect(getGoal(session.metadata, session.id)?.blockedReason?.code).not.toBe('continuation-interrupted')
   } finally { client.close(); await server.stop(); await rm(root, { recursive: true, force: true }) }
 })
 

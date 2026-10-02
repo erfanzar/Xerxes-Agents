@@ -32,9 +32,18 @@ const DEFAULT_CAPACITY = 1_000_000
 export class BoundedOutputBuffer {
   private chunks: string[] = []
   private droppedChars = 0
+  private head = ''
   private length = 0
+  private observedChars = 0
 
-  constructor(private readonly capacity: number = DEFAULT_CAPACITY) {}
+  constructor(
+    private capacity: number = DEFAULT_CAPACITY,
+    /**
+     * Leading characters kept apart from the tail, for {@link summarize}. The
+     * tail alone cannot answer "how did this start" once the front is dropped.
+     */
+    private readonly headCapacity = 0,
+  ) {}
 
   /** Whether any output was discarded to stay within capacity. */
   get dropped(): boolean {
@@ -45,8 +54,17 @@ export class BoundedOutputBuffer {
     return this.length
   }
 
+  /** Raise the retained tail, as when a foreground buffer becomes a background job's. */
+  growCapacity(capacity: number): void {
+    this.capacity = Math.max(this.capacity, capacity)
+  }
+
   append(text: string): void {
     if (!text) return
+    if (this.head.length < this.headCapacity) {
+      this.head += text.slice(0, this.headCapacity - this.head.length)
+    }
+    this.observedChars += text.length
     this.chunks.push(text)
     this.length += text.length
     while (this.length > this.capacity && this.chunks.length > 0) {
@@ -88,6 +106,26 @@ export class BoundedOutputBuffer {
     return joined.length <= maxChars
       ? { text: joined, truncated: false }
       : { text: joined.slice(0, maxChars), truncated: true }
+  }
+
+  /**
+   * The whole stream within `maxChars`, for a final result: its start and its
+   * end, with the size of the gap between them stated.
+   *
+   * A head-only cut lost a test run's failure summary and final error, and once
+   * the front had been dropped the head of the retained tail was a slice from
+   * the middle that claimed only its end was missing. The start comes from the
+   * separately kept head, so it is real even after the tail dropped it.
+   */
+  summarize(maxChars: number): { readonly text: string; readonly truncated: boolean } {
+    const joined = this.chunks.join('')
+    if (!this.dropped && joined.length <= maxChars) {
+      return { text: joined, truncated: false }
+    }
+    const head = this.head.slice(0, Math.floor(maxChars / 2))
+    const tail = joined.slice(-(maxChars - head.length))
+    const omitted = this.observedChars - head.length - tail.length
+    return { text: `${head}\n…[${omitted} chars omitted]…\n${tail}`, truncated: true }
   }
 }
 

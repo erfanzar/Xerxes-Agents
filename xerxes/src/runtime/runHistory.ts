@@ -339,6 +339,20 @@ export class RunHistory {
     return record
   }
 
+  /**
+   * Forget a running record whose work continues under another run, without
+   * completing it: a foreground command adopted as a background job is still
+   * running, so finishing its record in any state would report an outcome that
+   * never happened.
+   */
+  discard(owner: string, id: string): void {
+    this.db.transaction(() => {
+      const changed = this.db.query("DELETE FROM run_history WHERE id=? AND owner=? AND state='running'").run(id, owner)
+      if (!changed.changes) throw new Error('Unknown or completed run')
+      this.db.query('DELETE FROM terminal_output WHERE run_id=?').run(id)
+    }).immediate()
+  }
+
   /** Small status projection: dashboard polling must not load archived output. */
   latestOutcome(owner: string, sourceId: string, kind: RunKind): RunOutcome | null {
     const row = this.db.query('SELECT id,state,started,ended FROM run_history WHERE owner=? AND source=? AND kind=? ORDER BY started DESC,id DESC LIMIT 1')

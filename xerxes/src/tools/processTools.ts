@@ -17,7 +17,7 @@ import {
   type BackgroundStartResult,
   MAX_CHECK_WAIT_MS,
 } from './backgroundCommands.js'
-import { BoundedOutputBuffer, capOutput, drainStream, type StreamDrain } from './processOutput.js'
+import { BoundedOutputBuffer, drainStream, type StreamDrain } from './processOutput.js'
 
 export type CommandCompletionWatch = (owner: string, terminalId: string) => { readonly id: string; readonly expiresAt: number }
 
@@ -50,7 +50,8 @@ export const EXEC_COMMAND_DEFINITION: ToolDefinition = {
       + 'so long builds, servers and training runs are safe to launch without run_in_background, and work is never '
       + 'lost to the ceiling. Where no background host exists the timeout kills instead and returns timedOut:true, '
       + 'so check the flags before trusting empty output. stdout and stderr are capped independently at '
-      + `max_output_chars (default ${DEFAULT_MAX_OUTPUT_CHARS}) with truncated:true set. No cwd, environment `
+      + `max_output_chars (default ${DEFAULT_MAX_OUTPUT_CHARS}): a longer stream keeps its start and its end around a `
+      + '"…[N chars omitted]…" marker, with truncated:true set. No cwd, environment '
       + 'variable, or shell state carries into the next invocation. Keeping a live shell open across calls — an '
       + 'SSH session you keep sending commands to, a REPL, an interactive installer — uses the pty_open/pty_write '
       + 'tools, where the host enables them. For work you KNOW will outlast the timeout, pass '
@@ -391,8 +392,8 @@ export async function executeCommand(
     requestTermination('SIGTERM')
   }, timeout)
 
-  const stdoutBuffer = new BoundedOutputBuffer(maxOutputChars * 8)
-  const stderrBuffer = new BoundedOutputBuffer(maxOutputChars * 8)
+  const stdoutBuffer = new BoundedOutputBuffer(maxOutputChars * 8, maxOutputChars)
+  const stderrBuffer = new BoundedOutputBuffer(maxOutputChars * 8, maxOutputChars)
   let stdoutDrain: StreamDrain | undefined
   let stderrDrain: StreamDrain | undefined
   let observedExit: number | null = null
@@ -469,11 +470,16 @@ export async function executeCommand(
             name: [command, ...args].join(' ').slice(0, 60),
           },
           handle => {
+            // Seeded and repointed in one synchronous step, so no chunk lands
+            // between the two terminals or in both.
+            handle.append(mirror?.handOff() ?? '')
             appendSink = text => handle.append(text)
           },
         )
         adoptedByBackground = true
-        mirror?.close(null)
+        // Handed off, not closed: closing with no exit code reported the still
+        // running command as interrupted and notified every attached client.
+        mirror?.handOff()
         return {
           backgrounded: true,
           timedOut: true,
@@ -495,8 +501,8 @@ export async function executeCommand(
     // would drop the last line of every fast command.
     await settleDrains([stdoutDrain, stderrDrain], OUTPUT_SETTLE_MS)
 
-    const stdoutResult = capOutput(stdoutBuffer.peek(maxOutputChars + 1).text, maxOutputChars)
-    const stderrResult = capOutput(stderrBuffer.peek(maxOutputChars + 1).text, maxOutputChars)
+    const stdoutResult = stdoutBuffer.summarize(maxOutputChars)
+    const stderrResult = stderrBuffer.summarize(maxOutputChars)
     if (signal?.aborted && !timedOut) {
       // Cancellation is an execution outcome, not invalid model arguments.
       // Preserve the evidence already emitted by the child for replay/inspection.

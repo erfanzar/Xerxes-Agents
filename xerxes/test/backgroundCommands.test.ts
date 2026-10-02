@@ -55,6 +55,33 @@ test('a command that backgrounds a child still returns, instead of waiting for a
   })
 })
 
+test('a foreground command that overflows its cap keeps the true start and end and counts the gap', async () => {
+  await inTemporaryWorkspace(async (_root, paths) => {
+    // Far past the retained window (8x the cap), so the oldest output is dropped
+    // while it streams: the result must still open on line 1 and close on the
+    // last line, not on a slice from the middle.
+    const overflowing = await executeCommand({ cmd: 'seq', args: ['1', '200000'], max_output_chars: 1_000 }, paths)
+    const stdout = 'stdout' in overflowing ? overflowing.stdout : ''
+    expect(stdout.startsWith('1\n2\n3\n')).toBe(true)
+    expect(stdout.endsWith('199999\n200000\n')).toBe(true)
+    const omitted = /…\[(\d+) chars omitted\]…/.exec(stdout)
+    expect(omitted).not.toBeNull()
+    // Every printed character is either shown or counted as omitted.
+    const total = Array.from({ length: 200_000 }, (_value, index) => String(index + 1).length + 1).reduce((a, b) => a + b, 0)
+    expect(stdout.length - (omitted?.[0].length ?? 0) - 2 + Number(omitted?.[1])).toBe(total)
+    expect(overflowing).toMatchObject({ truncated: true })
+
+    // Inside the retained window the summary and final lines are kept too.
+    const moderate = await executeCommand({ cmd: 'seq', args: ['1', '1000'], max_output_chars: 1_000 }, paths)
+    const moderateOut = 'stdout' in moderate ? moderate.stdout : ''
+    expect(moderateOut.startsWith('1\n2\n')).toBe(true)
+    expect(moderateOut.endsWith('999\n1000\n')).toBe(true)
+
+    const fits = await executeCommand({ cmd: 'seq', args: ['1', '3'], max_output_chars: 1_000 }, paths)
+    expect(fits).toMatchObject({ stdout: '1\n2\n3\n', truncated: false })
+  })
+})
+
 test('a slow foreground command is still bounded by its own timeout', async () => {
   await inTemporaryWorkspace(async (_root, paths) => {
     const started = Date.now()
@@ -132,6 +159,55 @@ test('a foreground command that hits its timeout is adopted into the background 
       expect(killed.signalled).toBe(true)
     } finally {
       await background.disposeAll()
+    }
+  })
+}, 15_000)
+
+test('timeout adoption hands the foreground terminal over instead of reporting it interrupted', async () => {
+  await inTemporaryWorkspace(async (root, paths) => {
+    const history = new RunHistory(join(root, 'runs.sqlite'))
+    const notified: RunRecord[] = []
+    history.subscribe(run => notified.push(run))
+    const terminals = new TerminalRegistry({ runHistory: history })
+    const background = new BackgroundCommandManager(undefined, terminals)
+    try {
+      const result = await executeCommand(
+        // max_output_chars:1 gave the adopted job an 8-character buffer, so
+        // everything it printed after the handoff was reduced to its last 8.
+        { cmd: '/bin/sh', args: ['-c', 'echo before-ceiling; sleep 1; echo after-the-handoff-output; sleep 30'], timeout_ms: 300, max_output_chars: 1 },
+        paths,
+        undefined,
+        background,
+        terminals,
+        'owner-session',
+      )
+      expect(result).toMatchObject({ backgrounded: true, running: true })
+      const procId = 'procId' in result ? result.procId : ''
+      await Bun.sleep(100)
+
+      // The command is alive: no "Run finished — terminal interrupted" notice,
+      // and no interrupted foreground run left behind in history.
+      expect(notified).toEqual([])
+      expect(history.list('owner-session').filter(run => run.state !== 'running')).toEqual([])
+
+      // One terminal, the background job, carrying what printed before the handoff.
+      const listed = terminals.list('owner-session')
+      expect(listed.map(entry => entry.id)).toEqual([procId])
+      expect(terminals.inspect('owner-session', procId)?.output).toContain('before-ceiling')
+
+      const deadline = Date.now() + 5_000
+      let stdout = ''
+      while (!stdout.includes('after-the-handoff-output') && Date.now() < deadline) {
+        stdout += (await background.checkForOwner('owner-session', procId, 1_000, 0)).stdout
+        await Bun.sleep(50)
+      }
+      expect(stdout).toContain('after-the-handoff-output')
+      expect(terminals.inspect('owner-session', procId)?.output).toContain('before-ceiling\nafter-the-handoff-output')
+
+      await background.killForOwner('owner-session', procId, 'SIGKILL')
+    } finally {
+      await background.disposeAll()
+      history.close()
     }
   })
 }, 15_000)

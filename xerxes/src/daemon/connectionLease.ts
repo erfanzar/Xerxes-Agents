@@ -53,7 +53,13 @@ export class ConnectionLeases {
         if (!this.tokens.has(lease.token)) return
         const encoded = JSON.stringify(frame)
         const bytes = Buffer.byteLength(encoded)
-        if (lease.bytes + bytes > 1024 * 1024) { this.release(lease); return }
+        if (lease.bytes + bytes > 1024 * 1024) {
+          // Releasing under a reattached transport would orphan it: the
+          // in-flight initialize keeps using the dead owner and the window
+          // never sees the running turn again. Give up only on the replay.
+          if (lease.transport) { this.abandonRestore(lease); lease.transport.send(frame) } else this.release(lease)
+          return
+        }
         lease.frames.push(JSON.parse(encoded) as object); lease.bytes += bytes
       } },
     }
@@ -72,6 +78,12 @@ export class ConnectionLeases {
     if (this.transports.has(transport)) throw new Error('Transport already owns a connection lease.')
     lease.restoring = true
     this.bind(lease, transport)
+    // The outage timer must not outlive the reconnect: firing while initialize
+    // is still awaiting would release the owner under the new transport. A
+    // fresh deadline bounds only how long the journal waits for initialize.
+    if (lease.timer) clearTimeout(lease.timer)
+    lease.timer = setTimeout(() => { if (lease.transport === transport) this.abandonRestore(lease) }, this.graceMs)
+    lease.timer.unref?.()
     return lease.owner
   }
 
@@ -85,6 +97,15 @@ export class ConnectionLeases {
     const frames = lease.frames
     lease.frames = []; lease.bytes = 0
     return frames
+  }
+
+  /** Deliver live frames without a replay; initialize then reports none, so
+   * the client rebuilds from the history snapshot instead of a partial journal. */
+  private abandonRestore(lease: Lease): void {
+    lease.restoring = false
+    if (lease.timer) clearTimeout(lease.timer)
+    delete lease.timer
+    lease.frames = []; lease.bytes = 0
   }
 
   /** Returns true when the lease, rather than the caller, owns cleanup. */

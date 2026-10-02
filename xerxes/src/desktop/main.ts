@@ -17,7 +17,8 @@ import { fileURLToPath } from 'node:url'
 
 import { activateWorkspaceView } from './main/workspaceNavigation.js'
 import { contextScope, contextSessions, sameRemote, type WorkspaceContext } from './main/contextNavigation.js'
-import { loadWindowLayout, saveWindowLayout, visibleWindowBounds, type SavedWindow } from './main/windowState.js'
+import { loadWindowLayout, saveWindowLayout, visibleWindowBounds, WindowLayoutRecorder, type SavedWindow } from './main/windowState.js'
+import { SurfaceSession } from './main/surfaceSession.js'
 import { WindowRoutes } from './main/windowRoutes.js'
 import { windowRecovery } from './main/windowRecovery.js'
 import { desktopMachineCommand } from './main/machines.js'
@@ -193,6 +194,9 @@ const cleanupWindows = new Set<() => void>()
 const workspaceSurfaces = new Map<number, { host: BrowserWindow; view: WebContentsView | null }>()
 const activeSurfaces = new Map<number, number>()
 const contextReaders = new Map<number, () => Promise<WorkspaceContext>>()
+const surfaceSessions = new Map<number, SurfaceSession>()
+/** Views that can be closed on their own; a window's own page closes with the window. */
+const viewClosers = new Map<number, () => void>()
 /**
  * Base pages (a window's own page, not a view) currently covered by another
  * workspace view. Kept here, not only pushed: at startup the push arrives
@@ -233,6 +237,7 @@ function activateSurface(id: number): void {
   // bring it above the other retained workspaces as well as make it visible.
   if (surface.view) surface.host.contentView.addChildView(surface.view)
   activeSurfaces.set(surface.host.id, id)
+  windowStates.used(id)
   const contents = surface.view?.webContents ?? surface.host.webContents
   contents.focus()
   const state = windowStates.get(id)?.()
@@ -242,14 +247,14 @@ function activateSurface(id: number): void {
   scheduleWindowSave()
 }
 
-const windowStates = new Map<number, () => SavedWindow>()
+const windowStates = new WindowLayoutRecorder()
 let quitting = false
 let saveTimer: ReturnType<typeof setTimeout> | undefined
 const layoutFile = () => join(xerxesHome(), 'desktop-windows.json')
 function persistWindows(): void {
   if (saveTimer) clearTimeout(saveTimer)
   saveTimer = undefined
-  try { saveWindowLayout(layoutFile(), [...windowStates.values()].map(read => read())) }
+  try { saveWindowLayout(layoutFile(), windowStates.rows()) }
   catch (error) { console.error('Could not save desktop windows:', error) }
 }
 function scheduleWindowSave(): void {
@@ -261,11 +266,30 @@ function scheduleWindowSave(): void {
 function openWorkspaceView(host: BrowserWindow, directory: string, sessionId?: string): void {
   const views = [...workspaceSurfaces].flatMap(([id, surface]) => {
     const state = windowStates.get(id)?.()
-    return state && surface.host === host ? [{ ...state, isDestroyed: () => host.isDestroyed(),
+    return state && surface.host === host ? [{ ...state, cwd: surfaceSessions.get(id)?.cwd ?? null, isDestroyed: () => host.isDestroyed(),
       isMinimized: () => host.isMinimized(), restore: () => host.restore(),
       show: () => host.show(), focus: () => { host.focus(); activateSurface(id) } }] : []
   })
   if (!activateWorkspaceView(views, directory, sessionId)) createWorkspaceWindow(directory, undefined, sessionId, host)
+}
+
+/**
+ * File > Close. Navigation and mid-turn tasks open views, and nothing else
+ * ever closed one: each kept a renderer and a daemon connection for the life
+ * of the window and was restored on every launch. Closing the shown view
+ * leaves its session in the daemon and the sidebar; the window itself closes
+ * only when its own page is what is shown.
+ */
+function closeActiveSurface(): void {
+  const window = BrowserWindow.getFocusedWindow()
+  if (!window) return
+  const active = activeSurfaces.get(window.id)
+  const close = active === undefined ? undefined : viewClosers.get(active)
+  if (!close) { window.close(); return }
+  close()
+  const remaining = [...workspaceSurfaces].filter(([, surface]) => surface.host === window).map(([id]) => id)
+  const next = windowStates.mostRecent(remaining) ?? remaining[0]
+  if (next !== undefined) activateSurface(next)
 }
 
 function openRemoteView(host: BrowserWindow, machine: RemoteTarget, sessionId?: string): void {
@@ -296,8 +320,7 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     localProviderDaemon = null
   }
   let selectedWorkspace: string | null = null
-  let resumeSession: string | null = initialSessionId ?? saved?.sessionId ?? null
-  let currentSession: string | null = resumeSession
+  const session = new SurfaceSession(initialSessionId ?? saved?.sessionId ?? null)
 
 
   // Recording the workspace in the recents list is bookkeeping, not a
@@ -342,7 +365,6 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
       return result.response === 0
     },
     reload: async () => {
-      resumeSession = currentSession
       await contents.loadFile(join(here, 'renderer', 'index.html'))
       if (!window.isDestroyed()) {
         window.show()
@@ -361,14 +383,10 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
   })
   const id = contents.id
   workspaceSurfaces.set(id, { host: window, view })
+  surfaceSessions.set(id, session)
   activateSurface(id)
   const attach = (next?: DaemonRpc) => registerDaemonBridge(contents, next, (type, payload) => maybeNotify(window, type, payload), (method, result) => {
-    if (method !== 'initialize' && method !== 'session.open') return
-    const session = result.session as Record<string, unknown> | undefined
-    if (session && typeof session.id === 'string' && /^[a-zA-Z0-9_-]{1,256}$/.test(session.id)) {
-      currentSession = session.id
-      scheduleWindowSave()
-    }
+    if (session.observe(method, result)) scheduleWindowSave()
   })
   const handle = <Args extends unknown[], Result>(channel: string, handler: (event: IpcMainInvokeEvent, ...args: Args) => Result): void => {
     windowRoutes.bind(id, channel, handler)
@@ -396,8 +414,7 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     remoteError = ''
     selectedWorkspace = directory
     window.setTitle(`${basename(directory)} — ${APP_NAME}`)
-    resumeSession = sessionId
-    currentSession = sessionId
+    session.bind(sessionId)
     scheduleWindowSave()
     const next = new DaemonRpc({ projectDir: directory })
     const previous = daemon
@@ -488,11 +505,10 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     if (process.platform !== 'darwin' || window.isDestroyed()) return
     window.setVibrancy(on ? 'under-window' : null, { animationDuration: 0 })
   })
-  handle('desktop:resume', () => {
-    const selected = resumeSession
-    resumeSession = null
-    return selected
-  })
+  // Every load asks, not only the first: a reload the renderer starts itself
+  // (the error screen, View > Reload) must come back to this surface's own
+  // session, not the workspace-wide preference another view last wrote.
+  handle('desktop:resume', () => session.current)
   // Asked once at startup: a window opened for a fresh task must not resume
   // the workspace's remembered chat (that is the one still running a turn).
   let startsFresh = startFresh
@@ -535,7 +551,7 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
       let forwarding: DesktopProviderForwarding
       const rpc = new DaemonRpc({ projectDir: next.projectDir, socketPath: next.socketPath,
         providerRelay: (binding, frame, signal) => forwarding.relay(binding, frame, signal),
-        remoteUpdate: () => next.update(), expectedRemoteBuildId: () => next.expectedBuildId,
+        remoteUpdate: force => next.update(force), expectedRemoteBuildId: () => next.expectedBuildId,
         reconnectRemote: async signal => {
           const replacement = await next.reconnect(signal, error => { remoteError = error.message })
           if (signal.aborted || replacement.projectDir !== next.projectDir) {
@@ -565,13 +581,13 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
         await next.close()
         throw error
       }
-      resumeSession =
+      session.bind(
         (remoteMachine ?? saved?.remote)?.target === machine.target &&
         (remoteMachine ?? saved?.remote)?.workspacePath === machine.workspacePath &&
         typeof params.resume_session_id === 'string' &&
         /^[a-zA-Z0-9_-]{1,128}$/.test(params.resume_session_id)
           ? params.resume_session_id
-          : null
+          : null)
       const previous = remote
       closeProviderForwarding()
       providerForwarding = forwarding
@@ -587,7 +603,6 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
       remote = next
       remoteMachine = machine
       selectedWorkspace = next.projectDir
-      currentSession = resumeSession
       scheduleWindowSave()
       if (activeSurfaces.get(window.id) === id) window.setTitle(`${machine.alias} · ${basename(next.projectDir)} — ${APP_NAME}`)
       await previous?.close()
@@ -617,7 +632,7 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
           machine: remoteMachine ?? saved?.remote ?? null,
           connected: Boolean(remote && daemon?.online),
           connecting: Boolean(remoteAttempt),
-          resume_session_id: resumeSession ?? currentSession,
+          resume_session_id: session.current,
           error: remoteError,
         }
       if (action === 'cancel') {
@@ -702,11 +717,19 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     else createWorkspaceWindow(picked)
     return picked
   })
+  const layoutEvents = ['move', 'resize', 'maximize', 'unmaximize', 'enter-full-screen', 'leave-full-screen'] as const
   const cleanup = () => {
     occludedSurfaces.delete(id)
     contextReaders.delete(id)
+    surfaceSessions.delete(id)
+    viewClosers.delete(id)
     workspaceSurfaces.delete(id)
     if (activeSurfaces.get(window.id) === id) activeSurfaces.delete(window.id)
+    if (view && !window.isDestroyed()) {
+      // A view closed on its own leaves a live window behind.
+      window.contentView.removeChildView(view)
+      for (const event of layoutEvents) window.removeListener(event as 'move', scheduleWindowSave)
+    }
     if (view && !contents.isDestroyed()) contents.close()
     windowStates.delete(id)
     if (!quitting) scheduleWindowSave()
@@ -721,11 +744,19 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
   }
   cleanupWindows.add(cleanup)
   window.once('closed', cleanup)
+  if (view) viewClosers.set(id, () => {
+    window.removeListener('closed', cleanup)
+    cleanup()
+  })
+  // Snapshot while the window and its views still exist: the 'closed'
+  // teardown below empties the layout before the quit that follows the last
+  // window closing, and saving that wiped every window from the next launch.
+  else window.once('close', () => windowStates.closing(String(window.id)))
   windowStates.set(id, () => ({
     workspace: remoteMachine || saved?.remote && !selectedWorkspace ? null : selectedWorkspace,
     remote: remoteMachine ?? (selectedWorkspace ? null : saved?.remote ?? null),
     windowGroup: String(window.id), active: activeSurfaces.get(window.id) === id,
-    sessionId: currentSession, bounds: window.getNormalBounds(), maximized: window.isMaximized(), fullscreen: window.isFullScreen(),
+    sessionId: session.current, bounds: window.getNormalBounds(), maximized: window.isMaximized(), fullscreen: window.isFullScreen(),
   }))
   let cachedSessions: WorkspaceContext['sessions'] = []
   let pendingSessions: Promise<void> | undefined
@@ -745,12 +776,7 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     return { id, label: machine ? `${machine.alias} · SSH` : 'This Mac',
       workspace: selectedWorkspace ?? machine?.workspacePath ?? '', remote: Boolean(machine), sessions: cachedSessions }
   })
-  window.on('move', scheduleWindowSave)
-  window.on('resize', scheduleWindowSave)
-  window.on('maximize', scheduleWindowSave)
-  window.on('unmaximize', scheduleWindowSave)
-  window.on('enter-full-screen', scheduleWindowSave)
-  window.on('leave-full-screen', scheduleWindowSave)
+  for (const event of layoutEvents) window.on(event as 'move', scheduleWindowSave)
   scheduleWindowSave()
   // The retained SSH view reads status and offers retry/cancel inline. A modal
   // on the host can interrupt a different, healthy workspace during restoration.
@@ -802,7 +828,7 @@ void app.whenReady().then(async () => {
       { label: 'Open Workspace in New Window…', accelerator: 'CmdOrCtrl+Shift+O', click: () => { void pickWorkspace().then(directory => { if (directory) createWorkspaceWindow(directory) }) } },
       { type: 'separator' as const },
       { label: 'Export Transcript…', accelerator: 'CmdOrCtrl+E', click: toFocused('export') },
-      { type: 'separator' }, { role: 'close' },
+      { type: 'separator' }, { label: 'Close', accelerator: 'CmdOrCtrl+W', click: closeActiveSurface },
     ] },
     { label: 'Edit', submenu: [
       { role: 'undo' as const }, { role: 'redo' as const },

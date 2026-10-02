@@ -67,6 +67,12 @@ export interface TerminalHandle {
   append(text: string): void
   /** Mark the process finished. The entry survives as history. */
   close(exitCode: number | null): void
+  /**
+   * Retire this entry because its still-running process now belongs to another
+   * terminal, returning the retained output for that terminal to start from.
+   * Nothing is recorded as finished and no completion notice is sent.
+   */
+  handOff(): string
   readonly id: string
 }
 
@@ -263,6 +269,25 @@ export class TerminalRegistry {
           else finish()
         }
         this.trim()
+      },
+      handOff: () => {
+        if (!entry.running) return ''
+        entry.running = false
+        if (checkpoint !== undefined) clearTimeout(checkpoint)
+        checkpoint = undefined
+        const output = entry.mirror.tail(this.mirrorCapacity).text
+        if (this.entries.get(id) === entry) this.entries.delete(id)
+        if (run) {
+          try { this.runHistory?.discard(ownerSessionId, run.id) }
+          catch (error) { this.onPersistenceError(error) }
+        }
+        // Observers learn their source ended only once the entry is gone, so a
+        // completion watch on it fails for missing evidence rather than
+        // reporting an exit that never happened.
+        this.observe(entry, { text: '', closed: true, exitCode: null })
+        entry.observers.clear()
+        this.activityChanges.notify()
+        return output
       },
     }
   }

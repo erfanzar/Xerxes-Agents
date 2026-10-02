@@ -1037,7 +1037,7 @@ export class Store {
       // Retrying the same id can never succeed, so open a fresh conversation
       // in this workspace instead of stranding the window on an error.
       if (extra.resume_session_id && /saved conversation is missing/i.test(message)) {
-        const hadConversation = this.builder.all().some(block => block.kind === 'user' || block.kind === 'agent')
+        const hadConversation = this.builder.some(block => block.kind === 'user' || block.kind === 'agent')
         // A fresh key: the old one may still name a live session elsewhere.
         this.sessionKey = `desktop-${Math.random().toString(36).slice(2, 10)}`
         this.patch({ currentId: '', sessionKey: this.sessionKey })
@@ -1115,6 +1115,15 @@ export class Store {
       if (!rest || rest === 'off') return this.setPlanMode(!this.frame.planMode)
       else return this.steer(rest)
     }
+    // The daemon's /new and /resume re-key this connection behind the window's
+    // back: the window kept submitting under its old key, and the reply landed
+    // in a session it never showed. Use the window's own navigation instead.
+    const [command = '', ...args] = trimmed.split(/\s+/)
+    if (command === '/new' || command === '/reset') {
+      this.newChat()
+      return true
+    }
+    if (command === '/resume' && args.length) return this.resumeMatching(args.join(' '))
     const sessionKey = this.sessionKey
     const previousResult = this.slashResult
     const alreadyReported = (text: string) => {
@@ -1273,8 +1282,14 @@ export class Store {
     const pending = this.sessionNavigation.then(async () => {
       if (version !== this.sessionNavigationVersion) return
       let navigated = false
-      try { navigated = await this.openSessionNow(id, version) }
-      finally {
+      try {
+        navigated = await this.openSessionNow(id, version)
+        // A superseded click whose initialize the daemon accepted left the
+        // connection bound to that chat. A click that hands off to another
+        // window or workspace never re-binds it, so slash commands and the
+        // other chat's events kept landing in this one until the next move.
+        if (!navigated && version === this.sessionNavigationVersion) await this.restoreSupersededNavigation()
+      } finally {
         if (version === this.sessionNavigationVersion) {
           // Not every click navigates: opening the already-current session
           // mid-turn is a no-op, and a busy or cross-workspace target is
@@ -1294,6 +1309,19 @@ export class Store {
     })
     this.sessionNavigation = pending
     return pending
+  }
+
+  /** Re-bind the connection to the chat on screen after a superseded click bound it elsewhere. */
+  private async restoreSupersededNavigation(): Promise<void> {
+    if (!this.sessionNavigationNeedsRestore || !this.frame.currentId) return
+    try {
+      await this.initialize({ resume_session_id: this.frame.currentId })
+      this.sessionNavigationNeedsRestore = false
+    } catch (error) {
+      // Rejecting here would break the navigation chain every later click
+      // waits on; the failure is shown instead, as the catch path does.
+      this.fail(error)
+    }
   }
 
   /** Resolves true only when this store's own session actually changed. */
@@ -1381,6 +1409,22 @@ export class Store {
     const key = str(rows.find(row => str(row.id) === id)?.key)
     if (!key) return null
     return this.initialize({ session_key: key })
+  }
+
+  /** `/resume <id|name>`: the same id-prefix, key or title match the daemon applies. */
+  private async resumeMatching(query: string): Promise<boolean> {
+    const needle = query.toLowerCase()
+    const matches = [...this.frame.live, ...this.frame.sessions].filter(row =>
+      row.id.toLowerCase().startsWith(needle) || row.key.toLowerCase() === needle || row.title.toLowerCase() === needle)
+    const unique = [...new Map(matches.map(row => [row.id, row])).values()]
+    if (unique.length !== 1) {
+      this.fail(new Error(unique.length
+        ? `Multiple sessions match \`${query}\`; use a longer id prefix.`
+        : `No saved session matches \`${query}\`.`))
+      return false
+    }
+    await this.openSession(unique[0]!.id)
+    return true
   }
 
   /** A new task in `cwd`: this view for the current folder, a fresh view for another. */
@@ -2901,7 +2945,7 @@ export class Store {
     const generation = this.historyGeneration
     for (let page = 0; page < REVEAL_USER_MESSAGE_MAX_PAGES; page++) {
       if (generation !== this.historyGeneration || this.frame.historyError || !this.frame.historyMore) return
-      if (this.builder.all().some(block => block.kind === 'user')) return
+      if (this.builder.some(block => block.kind === 'user')) return
       await this.loadOlderHistory()
     }
   }

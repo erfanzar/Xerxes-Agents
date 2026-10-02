@@ -19,13 +19,32 @@ export interface LegacyRuntimeMigration {
   pidFallback?: () => Promise<number | undefined>
 }
 
+export interface ManagedRuntimeOutcome {
+  busy: boolean
+  /** What the busy runtime is waiting for, as the daemon reported it. */
+  blockers?: string[]
+  waitingForGoalRound?: boolean
+}
+
+export interface ManagedRuntimeOptions {
+  /** The person confirmed "restart now": running work stops instead of being waited out. */
+  force?: boolean
+}
+
 /** Upgrade through the daemon's atomic idle guard, never by killing a process. */
 export async function prepareManagedRuntime(
   create: (verifyBuild: boolean) => ManagedRuntimeClient,
   expectedBuildId: string,
   waitForExit: (pid: number) => Promise<void>,
   legacy?: LegacyRuntimeMigration,
-): Promise<{ busy: boolean }> {
+  options: ManagedRuntimeOptions = {},
+): Promise<ManagedRuntimeOutcome> {
+  // Self-contained on purpose: this function is inlined into the script the
+  // remote host runs, so these helpers cannot live at module level.
+  const restarting = (reply: Record<string, unknown>) => reply.ok === false && /^Runtime is restarting/i.test(String(reply.error ?? ''))
+  const busy = (reply: Record<string, unknown>): ManagedRuntimeOutcome => ({ busy: true,
+    ...(Array.isArray(reply.blockers) ? { blockers: (reply.blockers as unknown[]).filter((item): item is string => typeof item === 'string') } : {}),
+    ...(reply.waiting_for_goal_round === true ? { waitingForGoalRound: true } : {}) })
   let client = create(false)
   try {
     await client.start()
@@ -34,8 +53,16 @@ export async function prepareManagedRuntime(
     let pid = Number.isSafeInteger(status.pid) && Number(status.pid) > 0 ? Number(status.pid) : undefined
     if (pid === undefined && legacy?.pidFallback) pid = await legacy.pidFallback()
     if (pid === undefined) throw new Error('Remote runtime identity is unavailable; left it running.')
-    let result = await client.request<Record<string, unknown>>('runtime.restart_if_idle', {})
-    if (result.busy === true) return { busy: true }
+    // Another client (a second window on this host, a TUI) may already have
+    // asked this runtime to restart; it then refuses every request. That is
+    // the restart this one wants too: wait for it instead of failing.
+    let result = restarting(status) ? status : await client.request<Record<string, unknown>>('runtime.restart_if_idle', options.force ? { force: true } : {})
+    if (options.force && result.busy === true && result.force_supported !== true) {
+      // A runtime older than "restart now" ignores force; its shutdown stops
+      // the running work, which the person confirmed before this was sent.
+      result = await client.request<Record<string, unknown>>('shutdown', {})
+    }
+    if (result.busy === true) return busy(result)
     if (result.ok !== true && legacy && /^Unknown method/i.test(String(result.error ?? ''))) {
       // Self-contained on purpose: this function is inlined into the script
       // the remote host runs, so it cannot call helpers from this module.
@@ -57,8 +84,8 @@ export async function prepareManagedRuntime(
       }
       result = await client.request<Record<string, unknown>>('shutdown', {})
     }
-    if (result.busy === true) return { busy: true }
-    if (result.ok !== true) throw new Error(String(result.error || 'Remote runtime cannot restart safely; left it running.'))
+    if (result.busy === true) return busy(result)
+    if (result.ok !== true && !restarting(result)) throw new Error(String(result.error || 'Remote runtime cannot restart safely; left it running.'))
     client.close()
     await waitForExit(pid)
     client = create(true)

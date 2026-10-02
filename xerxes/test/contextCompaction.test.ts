@@ -158,12 +158,19 @@ test('compaction archives the transcript it replaces before returning it', async
 
     const record = JSON.parse((await readFile(archivePath, 'utf8')).trim()) as {
       readonly messages: readonly Record<string, unknown>[]
+      readonly retained_messages: number
       readonly tokens_before: number
     }
     // The whole pre-compaction transcript, not a summary of it: this file is
     // the only surviving copy once the session is flushed.
     expect(record.messages).toEqual(messages)
     expect(record.tokens_before).toBe(outcome.stamp.tokens_before)
+    // The tail kept after the summary, which history views align on.
+    const summaryIndex = outcome.messages.findLastIndex(message => message.xerxes_compaction_summary === true)
+    expect(summaryIndex).toBeGreaterThanOrEqual(0)
+    expect(record.retained_messages).toBe(outcome.messages.length - summaryIndex - 1)
+    expect(record.retained_messages).toBeGreaterThan(0)
+    expect(record.messages.slice(-record.retained_messages)).toEqual(outcome.messages.slice(summaryIndex + 1))
   })
 })
 

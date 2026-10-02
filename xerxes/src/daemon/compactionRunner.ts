@@ -12,7 +12,7 @@ import {
   type CompactionCompletionPort,
 } from "../agents/compactionAgent.js";
 import { DEFAULT_COMPACTION_SUMMARY_MAX_TOKENS } from "../context/compactionProvisioner.js";
-import type { ContextMessage } from "../context/compressor.js";
+import { isCompactionSummaryMessage, type ContextMessage } from "../context/compressor.js";
 import { estimateContextTokens } from "../context/windowUsage.js";
 import {
   closeLlmClient,
@@ -384,6 +384,7 @@ export async function compactMessagesIfNeeded(
       }),
       model: request.model,
       reason: request.reason,
+      ...retainedTail(compacted),
       tokens_after: tokensAfter,
       tokens_before: tokensBefore,
     });
@@ -433,8 +434,20 @@ interface PreCompactionRecord {
   readonly messages: readonly ContextMessage[];
   readonly model: string;
   readonly reason: string;
+  /**
+   * Messages kept after the summary. History views align the next window on
+   * exactly this tail: without it, an undo inside the tail followed by a new
+   * turn could not be told apart from new messages, and the undone turn came
+   * back (duplicated) in the stitched history.
+   */
+  readonly retained_messages?: number;
   readonly tokens_after: number;
   readonly tokens_before: number;
+}
+
+function retainedTail(compacted: readonly ContextMessage[]): { readonly retained_messages?: number } {
+  const summary = compacted.findLastIndex(isCompactionSummaryMessage);
+  return summary < 0 ? {} : { retained_messages: compacted.length - summary - 1 };
 }
 
 /**

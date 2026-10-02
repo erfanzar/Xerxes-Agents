@@ -68,6 +68,18 @@ export const DEFAULT_MAX_SPAWNED_AGENTS = 100
 /** Terminal tasks retained for inspection before the oldest are evicted. */
 export const DEFAULT_MAX_RETAINED_TERMINAL_TASKS = 128
 
+/**
+ * The live-agent cap was full when a spawn was asked for. Nothing was
+ * registered, so a caller that can wait (a workflow queueing its agents) may
+ * retry once a live task finishes; callers that cannot wait surface it.
+ */
+export class SpawnBudgetExhaustedError extends Error {
+  constructor(readonly maxSpawnedAgents: number) {
+    super(`Spawned-agent budget (${maxSpawnedAgents}) reached: cannot spawn another subagent until a live task finishes`)
+    this.name = 'SpawnBudgetExhaustedError'
+  }
+}
+
 export type SubAgentStatus = 'cancelled' | 'completed' | 'failed' | 'pending' | 'running'
 
 export interface SubAgentTaskSnapshot {
@@ -396,7 +408,17 @@ export interface SubAgentManagerOptions {
   readonly maxRetainedTerminalHandles?: number
   readonly now?: () => Date
   readonly onEvent?: (event: SubAgentEvent) => void
+  /**
+   * Called after terminal tasks were evicted from the live set, so a host can
+   * drop per-task state it keeps beside the manager for tasks that are gone.
+   */
+  readonly onTerminalTasksEvicted?: () => void
   readonly pathResolver?: (rawPath: string) => string | undefined
+  /**
+   * Terminal tasks a host still has to read in full, such as results a parent
+   * turn is waiting to receive. Eviction skips them until the host lets go.
+   */
+  readonly retainTerminalTask?: (taskId: string) => boolean
   readonly runner: SubagentTaskRunner
   /** Maximum cadence for live reasoning previews from each agent. */
   readonly thinkingFlushIntervalMs?: number
@@ -405,6 +427,12 @@ export interface SubAgentManagerOptions {
 
 export interface SpawnSubAgentOptions {
   readonly agentDefinition?: AgentDefinition
+  /**
+   * Execution generation to start at. A respawn of a task recovered after a
+   * restart continues its persisted attempt count; restarting at zero would
+   * reuse a generation the parent already received and drop the new result.
+   */
+  readonly attempt?: number
   readonly config?: Readonly<Record<string, unknown>>
   readonly creatorId?: string
   readonly depth?: number
@@ -544,6 +572,8 @@ export class SubAgentManager {
   private readonly maxRetainedTerminalTasks: number
   private sequence = 0
   private readonly now: () => Date
+  private readonly onTerminalTasksEvicted: () => void
+  private readonly retainTerminalTask: (taskId: string) => boolean
   private readonly pathResolver: (rawPath: string) => string | undefined
   private runner: SubagentTaskRunner
   private readonly runtimes = new Map<string, TaskRuntime>()
@@ -580,6 +610,8 @@ export class SubAgentManager {
     this.now = options.now ?? (() => new Date())
     this.idFactory = options.idFactory ?? (() => `subagent_${crypto.randomUUID().replaceAll('-', '').slice(0, 12)}`)
     this.eventSink = options.onEvent ?? (() => undefined)
+    this.onTerminalTasksEvicted = options.onTerminalTasksEvicted ?? (() => undefined)
+    this.retainTerminalTask = options.retainTerminalTask ?? (() => false)
     this.pathResolver = options.pathResolver ?? (rawPath => rawPath)
     this.thinkingFlushIntervalMs = positiveInteger(
       options.thinkingFlushIntervalMs ?? DEFAULT_THINKING_FLUSH_INTERVAL_MS,
@@ -643,16 +675,14 @@ export class SubAgentManager {
     const liveTasks = [...this.tasks.values()].filter(
       task => !TERMINAL_STATUSES.has(task.status) || this.setups.has(task.id),
     ).length
-    if (liveTasks >= this.maxSpawnedAgents) {
-      throw new Error(
-        `Spawned-agent budget (${this.maxSpawnedAgents}) reached: cannot spawn another subagent until a live task finishes`,
-      )
-    }
+    if (liveTasks >= this.maxSpawnedAgents) throw new SpawnBudgetExhaustedError(this.maxSpawnedAgents)
     // Depth is derived server-side from the tracked parent task so a nested spawn
     // path that forgets to thread depth cannot reset the chain and bypass maxDepth.
     const parentTask = this.resolveTask(options.parentId ?? options.creatorId ?? '')
     const depth = parentTask !== undefined ? parentTask.depth + 1 : (options.depth ?? 0)
     const depthLimit = effectiveMaxDepth(options.agentDefinition, this.maxDepth)
+    const attempt = options.attempt ?? 0
+    if (!Number.isSafeInteger(attempt) || attempt < 0) throw new ValidationError('attempt', 'must be a non-negative integer', attempt)
     const taskId = options.id === undefined ? this.nextTaskId() : this.claimTaskId(options.id)
     const isolation = options.isolation?.trim() || options.agentDefinition?.isolation || ''
     const config = effectiveConfig(options.config ?? {}, options.agentDefinition)
@@ -687,6 +717,7 @@ export class SubAgentManager {
       ...(options.creatorId === undefined ? {} : { creatorId: options.creatorId }),
       ...(options.parentId === undefined ? {} : { parentId: options.parentId }),
     })
+    task.attempt = attempt
     this.tasks.set(task.id, task)
     if (options.name?.trim()) this.tasksByName.set(options.name.trim(), task.id)
     if (this.durableTaskBridge !== undefined) {
@@ -714,7 +745,7 @@ export class SubAgentManager {
       systemPrompt,
       toolInputs: new Map(),
       worktree: undefined,
-      attempt: 0,
+      attempt,
       cleanup: undefined,
       currentAttemptId: undefined,
       emittedSpawn: false,
@@ -794,7 +825,9 @@ export class SubAgentManager {
     if (!Number.isFinite(waitMilliseconds) || waitMilliseconds < 0) {
       throw new TypeError('timeoutMs must be a non-negative finite number')
     }
-    const deadline = Date.now() + waitMilliseconds
+    // Whole milliseconds: the handle layer accepts only integer timeouts, and a
+    // computed float (minutes * 60e3) otherwise failed the wait of a live agent.
+    const deadline = Date.now() + Math.ceil(waitMilliseconds)
     const setup = this.setups.get(task.id)
     if (setup !== undefined) {
       const remaining = Math.max(0, deadline - Date.now())
@@ -1424,9 +1457,11 @@ export class SubAgentManager {
       if (TERMINAL_STATUSES.has(task.status)) terminal += 1
     }
     if (terminal <= this.maxRetainedTerminalTasks) return
+    let evicted = false
     for (const [id, task] of this.tasks) {
-      if (terminal <= this.maxRetainedTerminalTasks) return
+      if (terminal <= this.maxRetainedTerminalTasks) break
       if (!TERMINAL_STATUSES.has(task.status)) continue
+      if (this.retainTerminalTask(id)) continue
       // Keep a bounded descriptor so a dead agent stays retryable by its
       // stable id or name after live-state eviction.
       this.archiveTerminalTask(task)
@@ -1443,7 +1478,9 @@ export class SubAgentManager {
       }
       this.tasks.delete(id)
       terminal -= 1
+      evicted = true
     }
+    if (evicted) this.onTerminalTasksEvicted()
   }
 
   private archiveTerminalTask(task: SubAgentTask): void {

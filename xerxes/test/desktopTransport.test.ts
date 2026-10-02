@@ -7,7 +7,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { afterEach, beforeEach, expect, test } from 'bun:test'
+import { afterEach, beforeEach, expect, setSystemTime, test } from 'bun:test'
 
 import { DaemonRpc, MAX_FRAME_BYTES } from '../src/desktop/main/daemon.js'
 
@@ -570,3 +570,108 @@ test('restart now asks an older busy runtime to shut down; a newer one is forced
     expect(daemon.requests.map(row => row.method)).toEqual(['runtime.restart_if_idle', 'shutdown', 'runtime.restart_if_idle'])
   } finally { rpc.dispose(); daemon.close() }
 })
+
+test('a live SSH tunnel in front of a dead remote daemon is rebuilt instead of re-attached forever', async () => {
+  // ssh accepts the local connection, then closes it when the channel to the
+  // dead remote socket fails: a connect followed by a close, nothing received.
+  const tunnelPath = join(dir, 'tunnel.sock')
+  let tunnelConnections = 0
+  const tunnel = createServer(socket => { tunnelConnections++; socket.on('error', () => {}); setTimeout(() => socket.destroy(), 20) })
+  await new Promise<void>(resolve => tunnel.listen(tunnelPath, resolve))
+  const fake = new FakeDaemon(socketPath, ['runtime.status']); await fake.listen()
+  let reconnects = 0
+  const online: boolean[] = []
+  const rpc = new DaemonRpc({ projectDir: '/remote/project', socketPath: tunnelPath, deadlineMs: 2000,
+    launch: () => { throw new Error('Must not launch locally') },
+    reconnectRemote: async () => { reconnects++; return socketPath },
+  })
+  rpc.onConnection(value => online.push(value))
+  try {
+    await expect(rpc.call('runtime.status')).rejects.toThrow('connection closed')
+    await until(() => reconnects === 1, 'remote rebuild after silent closes')
+    expect(await rpc.call<Record<string, unknown>>('runtime.status')).toEqual({ ok: true })
+    expect(tunnelConnections).toBe(2)
+    await new Promise(resolve => setTimeout(resolve, 300))
+    expect(reconnects).toBe(1)
+    expect(online.at(-1)).toBe(true)
+  } finally { rpc.dispose(); fake.close(); tunnel.close() }
+})
+
+test('restart now reaches the SSH host with force; a busy host is not re-bootstrapped on every heartbeat', async () => {
+  const forced: boolean[] = []
+  const rpc = new DaemonRpc({ projectDir: '/remote', socketPath,
+    remoteUpdate: async force => { forced.push(force); return { ok: false, busy: true, blockers: ['Messaging channels are connected'] } },
+  })
+  try {
+    expect(await rpc.restartRuntime()).toEqual({ ok: false, busy: true, blockers: ['Messaging channels are connected'] })
+    expect(await rpc.restartRuntime()).toEqual({ ok: false, busy: true, blockers: ['Messaging channels are connected'] })
+    expect(forced).toEqual([false])
+    await rpc.restartRuntime(true, true)
+    expect(forced).toEqual([false, true])
+  } finally { rpc.dispose() }
+})
+
+test('a host waiting on a goal round is asked again well inside its two-minute hold; a busy host only after minutes', async () => {
+  const calls: number[] = []
+  let goalRound = true
+  const rpc = new DaemonRpc({ projectDir: '/remote', socketPath,
+    remoteUpdate: async () => {
+      calls.push(Date.now())
+      return goalRound
+        ? { ok: false, busy: true, blockers: ['Goal round in “Ship it”'], waiting_for_goal_round: true }
+        : { ok: false, busy: true, blockers: ['Work in “Ship it”'] }
+    },
+  })
+  const start = Date.now()
+  try {
+    await rpc.restartRuntime()
+    setSystemTime(new Date(start + 10_000))
+    expect(await rpc.restartRuntime()).toMatchObject({ busy: true, waiting_for_goal_round: true })
+    expect(calls).toHaveLength(1)
+    // The host drops the hold two minutes after the last request: renew it
+    // long before that, leaving room for ssh and the bootstrap itself.
+    setSystemTime(new Date(start + 30_000))
+    await rpc.restartRuntime()
+    expect(calls).toHaveLength(2)
+    goalRound = false
+    setSystemTime(new Date(start + 60_000))
+    await rpc.restartRuntime()
+    expect(calls).toHaveLength(3)
+    setSystemTime(new Date(start + 120_000))
+    await rpc.restartRuntime()
+    expect(calls).toHaveLength(3)
+    setSystemTime(new Date(start + 181_000))
+    await rpc.restartRuntime()
+    expect(calls).toHaveLength(4)
+  } finally { setSystemTime(); rpc.dispose() }
+})
+
+test('a remote update does not rebuild the tunnel while the host daemon restarts behind it', async () => {
+  const before = new FakeDaemon(socketPath, ['runtime.status']); await before.listen()
+  let after: FakeDaemon | undefined
+  let reconnects = 0
+  let tunnelConnections = 0
+  const rpc = new DaemonRpc({ projectDir: '/remote/project', socketPath, deadlineMs: 2000,
+    launch: () => { throw new Error('Must not launch locally') },
+    reconnectRemote: async () => { reconnects++; return socketPath },
+    remoteUpdate: async () => {
+      // The old daemon exits; until the new one listens, ssh accepts each
+      // local connection and drops it with nothing sent.
+      before.close(); rmSync(socketPath, { force: true })
+      const tunnel = createServer(socket => { tunnelConnections++; socket.on('error', () => {}); setTimeout(() => socket.destroy(), 20) })
+      await new Promise<void>(resolve => tunnel.listen(socketPath, resolve))
+      await until(() => tunnelConnections >= 3, 'reattaching through the update', 6000)
+      await new Promise<void>(resolve => tunnel.close(() => resolve()))
+      rmSync(socketPath, { force: true })
+      after = new FakeDaemon(socketPath, ['runtime.status']); await after.listen()
+      return { ok: true }
+    },
+  })
+  try {
+    expect(await rpc.call<Record<string, unknown>>('runtime.status')).toEqual({ ok: true })
+    expect(await rpc.restartRuntime()).toEqual({ ok: true })
+    expect(reconnects).toBe(0)
+    expect(await rpc.call<Record<string, unknown>>('runtime.status')).toEqual({ ok: true })
+    expect(reconnects).toBe(0)
+  } finally { rpc.dispose(); before.close(); after?.close() }
+}, 10000)

@@ -69,6 +69,13 @@ test('remote boundary rejects option injection, controls and invalid socket forw
   ).toThrow()
   expect(() => remoteAddress('setup failed')).toThrow()
 })
+
+test('a busy remote runtime reports what it waits for, bounded to plain one-line text', () => {
+  const ready = (extra: Record<string, unknown>) => `XERXES_REMOTE_READY ${JSON.stringify({ socketPath: '/tmp/daemon.sock', projectDir: '/repo', ...extra })}\n`
+  expect(remoteAddress(ready({ busy: true, blockers: ['Messaging channels are connected', 'bad\nline', 7, 'x'.repeat(201)], waitingForGoalRound: true })))
+    .toEqual({ socketPath: '/tmp/daemon.sock', projectDir: '/repo', busy: true, blockers: ['Messaging channels are connected'], waitingForGoalRound: true })
+  expect(remoteAddress(ready({ busy: false, blockers: ['stale'] }))).toEqual({ socketPath: '/tmp/daemon.sock', projectDir: '/repo' })
+})
 test('remote subprocess calls report exit failure, cancellation, and deadline', async () => {
   const controller = new AbortController()
   await expect(

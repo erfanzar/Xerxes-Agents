@@ -37,6 +37,8 @@ import type { RunHistory } from '../runtime/runHistory.js'
 import { runWithActiveSession } from '../runtime/sessionContext.js'
 import { looksLikeSessionId, type DaemonTranscriptStore } from '../session/daemonTranscript.js'
 import { FILE_READS_METADATA_KEY, fileStateTracker } from '../tools/fileState.js'
+import { LSP_RUNTIME_TOOL_NAME } from '../tools/lspTools.js'
+import { isMcpRuntimeToolName } from '../tools/mcpTools.js'
 import type { AgentState, StreamEvent } from '../streaming/events.js'
 import { runTurn, type ContextReducer } from '../streaming/loop.js'
 import type { PermissionBroker, PermissionMode } from '../streaming/permissions.js'
@@ -95,6 +97,13 @@ export interface NativeSubagentHostOptions {
   /** Immutable factory; each allocation uses its captured host generation cwd. */
   readonly worktreeForWorkspace?: (cwd: string) => SubagentWorktreePort
   readonly runHistory?: RunHistory
+  /**
+   * Terminate background commands and PTYs owned by one process owner. A
+   * child's shell tools own their jobs under its history session id, which no
+   * daemon session eviction ever reaches, so the host releases them when the
+   * child's run ends.
+   */
+  readonly disposeProcessOwner?: (owner: string) => Promise<void>
   /**
    * Durable record of subagent attempts, so a crash mid-fan-out leaves a
    * readable account of what ran. Optional: hosts that do not want the sidecar
@@ -236,6 +245,14 @@ export function createNativeSubagentHost(options: NativeSubagentHostOptions): Na
     },
     ...(options.durableTaskBridge === undefined ? {} : { durableTaskBridge: options.durableTaskBridge }),
     onEvent: event => publishSubagentEvent(options.eventBus, event, historySessionIds.get(event.taskId)),
+    // The manager shares one terminal-task bound across every session in the
+    // workspace; a large workflow elsewhere must not evict a result a parent
+    // turn is still waiting to receive.
+    retainTerminalTask: (taskId: string): boolean => turnCoordinator.holds(taskId),
+    onTerminalTasksEvicted: (): void => {
+      liveManagerPort.forgetUnretainedHandles()
+      pruneGenerationOptions()
+    },
     pathResolver: rawPath => rawPath,
     runner: async request => {
       const generation = nativeHostGeneration(request.config) ?? taskGenerations.get(request.task.id)
@@ -439,6 +456,23 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
     return this.manager.listRetryTasks()
   }
 
+  /**
+   * Drop handle state for tasks the manager no longer retains, live or
+   * archived. Nothing can read or retry them any more, and in a long-lived
+   * daemon running large workflows these entries (each holding a full prompt)
+   * otherwise accumulate for the life of the process.
+   */
+  forgetUnretainedHandles(): void {
+    const retained = new Set(this.manager.listRetryTasks().map(task => task.id))
+    for (const id of this.handles.keys()) {
+      if (retained.has(id)) continue
+      this.handles.delete(id)
+      this.historySessionIds.delete(id)
+      this.invalidatedHandles.delete(id)
+      this.pendingResume.delete(id)
+    }
+  }
+
   /** Generations still pinned by a task that has not reached a terminal state. */
   liveGenerations(): Set<number> {
     const generations = new Set<number>()
@@ -507,6 +541,7 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
 
   /** Shared spawn core used by fresh spawns and identity-preserving retry respawns. */
   private async spawnResolved(resolved: {
+    readonly attempt?: number
     readonly signal?: AbortSignal
     readonly group?: SubAgentGroup
     readonly isolation?: 'worktree'
@@ -590,6 +625,7 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
       ...(resolved.parentAgentId ? { parentId: resolved.parentAgentId } : {}),
       ...(childDepth === undefined ? {} : { depth: childDepth }),
       ...(resolved.taskId ? { id: resolved.taskId } : {}),
+      ...(resolved.attempt === undefined ? {} : { attempt: resolved.attempt }),
       model,
       rules,
       toolsets,
@@ -707,6 +743,10 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
       ...(providerRoute === undefined ? {} : { providerRoute }),
       permissionMode,
       ...(mode === 'retry' ? { taskId: snapshot.id } : {}),
+      // A retry is the next generation of the same identity. Delivery markers
+      // are keyed by id plus attempt and survive the restart, so starting the
+      // respawn at attempt 0 again made its result look already delivered.
+      ...(mode === 'retry' ? { attempt: (snapshot.attempt ?? 0) + 1 } : {}),
       ...(snapshot.providerProfile ? { providerProfile: snapshot.providerProfile } : {}),
       ...(snapshot.reasoningEffort ? { reasoningEffort: snapshot.reasoningEffort } : {}),
       ...(mode === 'retry' && snapshot.historySessionId ? { historySessionId: snapshot.historySessionId } : {}),
@@ -1437,7 +1477,11 @@ async function runNativeSubagent(
           partialBaseMessageCount = state.messages.length
         }
         const checkpoint = async (event: StreamEvent): Promise<void> => {
-          if (state.messages.length > partialBaseMessageCount) {
+          // Any change re-anchors, not only growth: mid-turn compaction
+          // shrinks the conversation in place, and a base left at the old
+          // length kept every later committed reply in the partial buffer, so
+          // a crash checkpoint ended with all of them again as one fake reply.
+          if (state.messages.length !== partialBaseMessageCount) {
             partialAssistantContent = ''
             partialAssistantThinking = ''
             partialBaseMessageCount = state.messages.length
@@ -1523,6 +1567,12 @@ async function runNativeSubagent(
     return { content: latestAssistantText(state.messages) || output }
   } finally {
     runningChildDepths.delete(request.task.id)
+    // A build or dev server the child left running (adopted past its timeout
+    // or started in the background) has no reader once the run ends: the
+    // parent cannot see or kill another owner's jobs.
+    await options.disposeProcessOwner?.(conversation.historySessionId).catch(error => {
+      console.warn(`Could not stop background processes of subagent ${request.task.id}: ${errorText(error)}`)
+    })
     releaseConversation()
   }
 }
@@ -1994,7 +2044,7 @@ function agentDefinitionsFingerprint(definitions: ReadonlyMap<string, AgentDefin
       permissionMode: definition.permissionMode,
       model: definition.model,
       source: definition.source,
-      tools: definition.tools,
+      tools: catalogTools(definition),
       allowedTools: definition.allowedTools,
       excludeTools: definition.excludeTools,
       maxDepth: definition.maxDepth,
@@ -2008,6 +2058,18 @@ function agentDefinitionsFingerprint(definitions: ReadonlyMap<string, AgentDefin
           resolvedProfile: spec.resolvedProfile,
         })),
     })))
+}
+
+/**
+ * A built-in profile's tools minus the MCP and LSP tools folded into it from
+ * whatever is connected when a runner is built. Those track connectivity, not
+ * catalog policy: an MCP server that drops, reconnects or is added changed
+ * the fingerprint and cancelled every running child in the workspace. Each
+ * child already carries the tool whitelist it was spawned with.
+ */
+function catalogTools(definition: AgentDefinition): readonly string[] {
+  if (definition.source !== 'built-in') return definition.tools
+  return definition.tools.filter(tool => tool !== LSP_RUNTIME_TOOL_NAME && !isMcpRuntimeToolName(tool))
 }
 
 /**

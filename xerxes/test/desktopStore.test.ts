@@ -282,6 +282,37 @@ describe('Store workspace folds', () => {
     expect(store.getSnapshot().blocks.some(block => block.kind === 'notice' && block.text === 'Authentication required')).toBe(true)
   })
 
+  test('/new and /resume use the window\'s own navigation instead of re-keying the connection through the slash table', async () => {
+    await Bun.sleep(0)
+    const row = (id: string, title: string) => ({ id, key: id, title, status: 'idle', age: '', current: false, kind: 'main', turns: 2, messages: 4, cwd: '/repo' })
+    bridge.respondWith((method, params) => {
+      if (method === 'initialize') {
+        const id = String(params.resume_session_id ?? 'fresh01')
+        return { ...initializeResult, session_id: id, session: { id, key: String(params.session_key ?? id), title: '', cwd: '/repo', plan_mode: false } }
+      }
+      if (method === 'session.list') return { ok: true, sessions: [row('bead0001', 'Port kernels'), row('cafe0002', 'Tune scheduler')] }
+      return { ok: true, sessions: [] }
+    })
+    await (store as unknown as { refreshSessions(): Promise<void> }).refreshSessions()
+    bridge.calls.length = 0
+
+    expect(await store.submit('/new')).toBe(true)
+    await Bun.sleep(0)
+    expect(bridge.calls.some(call => call.method === 'slash')).toBe(false)
+    const fresh = bridge.calls.find(call => call.method === 'initialize')
+    expect(String(fresh?.params.session_key)).toMatch(/^desktop-/)
+    expect(fresh?.params.resume_session_id).toBeUndefined()
+
+    bridge.calls.length = 0
+    expect(await store.submit('/resume cafe')).toBe(true)
+    expect(bridge.calls.some(call => call.method === 'slash')).toBe(false)
+    expect(bridge.calls.find(call => call.method === 'initialize')?.params.resume_session_id).toBe('cafe0002')
+    expect(store.getSnapshot().currentId).toBe('cafe0002')
+
+    expect(await store.submit('/resume nothing-like-this')).toBe(false)
+    expect(bridge.calls.some(call => call.method === 'slash')).toBe(false)
+  })
+
   test('late command rejection cannot add an error to another session', async () => {
     await Bun.sleep(0)
     const reply = Promise.withResolvers<Record<string, unknown>>()
@@ -2121,6 +2152,35 @@ describe('rapid session navigation', () => {
     expect(store.getSnapshot().sessionKey).toBe(refused ? before : 'second')
     expect(store.getSnapshot().connection).toBe('online')
   })
+
+  test('a superseded click that bound the connection is undone when the next click opens another workspace', async () => {
+    const elsewhere = { id: 'elsewhere', title: 'Other project', cwd: '/other-project', message_count: 2 }
+    const bridge = new FakeBridge(method => method === 'initialize' ? initializeResult : { ok: true, sessions: method === 'session.list' ? [elsewhere] : [] })
+    const switches: unknown[][] = []
+    Object.assign(bridge, { useWorkspace: async (...args: unknown[]) => { switches.push(args) } })
+    withWindow(bridge)
+    const store = new Store(); store.start(bridge); await Bun.sleep(10)
+    expect(store.getSnapshot().sessions.some(row => row.id === 'elsewhere')).toBe(true)
+    const before = store.getSnapshot().currentId
+    const pending: Array<{ id: string; resolve: (value: Record<string, unknown>) => void }> = []
+    bridge.respondWith((method, params) => method === 'initialize'
+      ? new Promise(resolve => pending.push({ id: String(params.resume_session_id), resolve })) : { ok: true, sessions: method === 'session.list' ? [elsewhere] : [] })
+    const first = store.openSession('first')
+    await Bun.sleep(0)
+    const second = store.openSession('elsewhere')
+    await Bun.sleep(0)
+    // The daemon accepted 'first' and bound this connection to it; the view
+    // never adopted it because the person had already clicked on.
+    pending[0]!.resolve({ ...initializeResult, session_id: 'first', session: { id: 'first', key: 'first' } })
+    await first
+    for (let i = 0; i < 20 && pending.length < 2; i++) await Bun.sleep(1)
+    expect(switches).toEqual([['/other-project', 'elsewhere']])
+    expect(pending.map(row => row.id)).toEqual(['first', before])
+    pending[1]!.resolve(initializeResult)
+    await second
+    expect(store.getSnapshot().currentId).toBe(before)
+    expect(store.getSnapshot().connection).toBe('online')
+  })
 })
 
 describe('session controls follow selection', () => {
@@ -2473,5 +2533,38 @@ test('opening a chat pages back until the person\'s latest message is on screen'
     // Two pages back, and no further once the message was found.
     expect(bridge.calls.filter(call => call.method === 'session.history').map(call => call.params.before)).toEqual(['page-200', 'page-100'])
     expect(current.getSnapshot().historyMore).toBe(true)
+  } finally { delete (globalThis as { window?: unknown }).window }
+})
+
+test('paging back to the person\'s message never finalizes the turn running live under it', async () => {
+  // A running goal session opened at startup: its newest pages hold no message
+  // from the person, and the turn keeps streaming while those pages load.
+  const work = (i: number) => ({ id: String(i), messages: [{ role: 'assistant', content: `Step ${i}` }], executions: [], thinking: [] })
+  const firstPage = Promise.withResolvers<Record<string, unknown>>()
+  const secondPage = Promise.withResolvers<Record<string, unknown>>()
+  const bridge = new FakeBridge((method, params) => {
+    if (method === 'initialize') return { ...initializeResult, session: { ...initializeResult.session, active_turn_id: 'turn-9', history: { actions: Array.from({ length: 100 }, (_, i) => work(i + 200)), has_more: true, before: 'page-200' } } }
+    if (method === 'session.history') return params.before === 'page-200' ? firstPage.promise : secondPage.promise
+    return { ok: true }
+  })
+  withWindow(bridge)
+  try {
+    const current = new Store(); current.start(bridge)
+    const historyCalls = () => bridge.calls.filter(call => call.method === 'session.history').length
+    for (let i = 0; i < 50 && historyCalls() < 1; i++) await Bun.sleep(2)
+    expect(current.getSnapshot().turnActive).toBe(true)
+    bridge.push('tool_call', { tool_call_id: 'x', name: 'ReadFile', arguments: '{}' })
+    bridge.push('text_part', { text: 'Reading the ' })
+    firstPage.resolve({ ok: true, history: { actions: Array.from({ length: 100 }, (_, i) => work(i + 100)), has_more: true, before: 'page-100' } })
+    for (let i = 0; i < 50 && historyCalls() < 2; i++) await Bun.sleep(2)
+    expect(historyCalls()).toBe(2)
+    const tools = () => current.getSnapshot().blocks.flatMap(block => block.kind === 'tools' ? block.items : [])
+    expect(tools().map(tool => [tool.id, tool.state])).toEqual([['x', 'working']])
+    bridge.push('tool_result', { tool_call_id: 'x', name: 'ReadFile', duration_ms: 5, return_value: 'ok' })
+    bridge.push('text_part', { text: 'file now.' })
+    expect(tools().map(tool => [tool.id, tool.state])).toEqual([['x', 'done']])
+    const live = current.getSnapshot().blocks.flatMap(block => block.kind === 'agent' && !block.text.startsWith('Step ') ? [block.text] : [])
+    expect(live).toEqual(['Reading the file now.'])
+    secondPage.resolve({ ok: true, history: { actions: [], has_more: false, before: null } })
   } finally { delete (globalThis as { window?: unknown }).window }
 })

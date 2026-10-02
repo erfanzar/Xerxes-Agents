@@ -19,6 +19,7 @@ import {
 } from '../src/agents/subagentPersistence.js'
 import { MCPClient } from '../src/mcp/client.js'
 import { SpawnedAgentManager } from '../src/operators/subagents.js'
+import { SpawnBudgetExhaustedError } from '../src/agents/subagentManager.js'
 import { UserPromptManager } from '../src/operators/userPrompt.js'
 import { JobStore } from '../src/cron/jobs.js'
 import {
@@ -1547,4 +1548,34 @@ test('Workflow runs its agents through the owned spawn path, tagged by run and p
   expect(saved.map(row => (row.group as { phase?: string } | undefined)?.phase)).toEqual(['Scan', 'Scan', 'Check'])
   expect(saved.every(row => (row.group as { id?: string; label?: string }).id === runId && (row.group as { label?: string }).label === 'Tiny review')).toBeTrue()
   expect(saved.map(row => row.title)).toEqual(['Scan a', 'Scan b', 'check'])
+})
+
+test('a Workflow agent refused by a full live-agent cap waits for a slot instead of failing', async () => {
+  let count = 0
+  const native = new SpawnedAgentManager({
+    idFactory: () => `wf-budget-${++count}`,
+    runner: async request => ({ content: `done:${request.input}` }),
+  })
+  // Another session's run holds every live slot for the first two attempts.
+  let refusals = 2
+  const manager: SpawnedAgentManagerPort = {
+    close: id => native.close(id),
+    listHandles: () => native.listHandles(),
+    resume: id => native.resume(id),
+    sendInput: (id, options) => native.sendInput(id, options),
+    spawn: async options => {
+      if (refusals > 0) { refusals -= 1; throw new SpawnBudgetExhaustedError(100) }
+      return native.spawn(options)
+    },
+    wait: (ids, timeoutMs) => native.wait(ids, timeoutMs),
+  }
+  const registry = new ToolRegistry()
+  registerClaudeAgentTools(registry, { manager })
+  const result = await registry.execute(toolCall('Workflow', {
+    name: 'Queued fan-out',
+    script: `return await agent('scan', { label: 'Scan' })`,
+  }), { metadata: {}, sessionId: 'session-1', agentId: 'default' })
+  const wire = (typeof result === 'string' ? JSON.parse(result) : result) as Record<string, unknown>
+  expect(wire).toMatchObject({ status: 'completed', result: 'done:scan', agents: { started: 1, completed: 1, failed: 0 } })
+  expect(refusals).toBe(0)
 })

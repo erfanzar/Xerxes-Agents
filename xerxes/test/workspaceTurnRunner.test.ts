@@ -81,3 +81,24 @@ test('a released load finishing late cannot replace a reopened workspace', async
     await rm(home, { recursive: true, force: true })
   }
 })
+
+test('a running turn\'s live messages reach the daemon through the workspace wrapper', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'xws-live-'))
+  const resources = new DaemonWorkspaces({ home, allowWorkspace: false, report() {} })
+  const runtime = new InMemoryDaemonRuntime(undefined, { sessionDirectory: join(home, 'sessions') })
+  try {
+    const session = await runtime.openSession('live', 'default', { cwd: home })
+    const paused = Promise.withResolvers<void>(), release = Promise.withResolvers<void>()
+    const live = [{ role: 'user', content: 'summary', xerxes_compaction_summary: true }]
+    const runner = new WorkspaceTurnRunner(resources, (): TurnRunner => ({
+      liveMessages: () => live,
+      async *run() { paused.resolve(); await release.promise },
+    }))
+    expect(runner.liveMessages(session)).toBeUndefined()
+    const turn = (async () => { for await (const _event of runner.run(session, 'go', new AbortController().signal)) { /* consume */ } })()
+    await paused.promise
+    expect(runner.liveMessages(session)).toBe(live)
+    release.resolve()
+    await turn
+  } finally { await resources.close(); await runtime.shutdown(); await rm(home, { recursive: true, force: true }) }
+})

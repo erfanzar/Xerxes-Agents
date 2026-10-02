@@ -19,3 +19,11 @@ test('exact sessions, remote identity and closed windows are not interchangeable
  expect(activateWorkspaceView(views,'/alpha','one')).toBe(true)
  expect(calls).toEqual(['show','focus'])
 })
+test('a view picked as a subfolder is found again by the folder the daemon resolved',()=>{
+ // Sidebar rows carry the daemon's git-root cwd, not the folder the person picked.
+ const calls:string[]=[]
+ const picked=view('/repo/packages/app','one',calls,{cwd:'/repo'})
+ expect(activateWorkspaceView([picked],'/repo','one')).toBe(true)
+ expect(calls).toEqual(['show','focus'])
+ expect(activateWorkspaceView([picked],'/repo','other')).toBe(false)
+})

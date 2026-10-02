@@ -46,6 +46,12 @@ export function parseRemoteMachine(value: unknown): RemoteMachine {
 
 const quoteShell = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`
 
+// A tunnel that comes back starts a fresh budget; one outage gets as long as
+// the renderer's gateway waits for the socket (30s), because ssh fails within
+// milliseconds while the network is down and a count alone ran out in ~3s.
+const TUNNEL_RETRY_WAITS_MS = [250, 1000, 2000, 5000] as const
+const TUNNEL_RECOVERY_WINDOW_MS = 30_000
+
 /** A renderer already owned this workspace. Never replace it in an outer retry. */
 class RemoteSessionEndedError extends Error {}
 
@@ -136,6 +142,7 @@ export async function connectRemoteMachine(
     const preparationAbort = new AbortController()
     let retryTimer: ReturnType<typeof setTimeout> | undefined
     let retries = 0
+    let outageStarted: number | undefined
     const status = (state: 'reconnecting' | 'failed', message: string) => {
       // Only fixed user-facing diagnostics, never raw SSH/remote output.
       writeFileSync(statusFile, JSON.stringify({ state, message }), { mode: 0o600 })
@@ -153,8 +160,9 @@ export async function connectRemoteMachine(
         // A stale socket must not be mistaken for a ready replacement.
         rmSync(socket, { force: true })
         if (!local || options.signal?.aborted) return
-        if (retries < 3 && retryableRemoteFailure(error)) {
-          const wait = [250, 1000, 2000][retries++]!
+        outageStarted ??= Date.now()
+        if (retryableRemoteFailure(error) && Date.now() - outageStarted < TUNNEL_RECOVERY_WINDOW_MS) {
+          const wait = TUNNEL_RETRY_WAITS_MS[Math.min(retries++, TUNNEL_RETRY_WAITS_MS.length - 1)]!
           status('reconnecting', 'SSH disconnected; reconnecting to the same workspace…')
           retryTimer = setTimeout(startTunnel, wait)
           retryTimer.unref?.()
@@ -165,7 +173,8 @@ export async function connectRemoteMachine(
         }
       }
       tunnel = startSshSocketTunnel({ ssh, target: machine.target, controlPath: join(directory, 'control.sock'),
-        localSocket: socket, remoteSocket: remote.socketPath as string, onFailure: failed, spawnProcess: launch })
+        localSocket: socket, remoteSocket: remote.socketPath as string, onFailure: failed, spawnProcess: launch,
+        onReady: () => { if (!settled) { retries = 0; outageStarted = undefined } } })
     }
     const abort = () => { failure = new Error('Remote connection cancelled'); clearTimeout(retryTimer); tunnel?.close(); local?.kill('SIGTERM') }
     startTunnel()
