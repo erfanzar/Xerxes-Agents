@@ -292,6 +292,16 @@ export class TerminalRegistry {
     return [...archived.map(archivedTerminal), ...live]
   }
 
+  /** Pids of running terminals with this label, across every session (the memory guard spares a person's own shells). */
+  pidsLabelled(label: string): Set<number> {
+    const pids = new Set<number>()
+    for (const entry of this.entries.values()) {
+      const summary = summarize(entry)
+      if (summary.running && summary.label === label && summary.pid !== undefined) pids.add(summary.pid)
+    }
+    return pids
+  }
+
   /** Internal lifecycle detail; terminal wire summaries keep their existing shape. */
   wasCancelled(ownerSessionId: string, id: string): boolean {
     const entry = this.entries.get(id)

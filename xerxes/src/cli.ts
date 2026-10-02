@@ -109,6 +109,7 @@ import { findGoalEvidenceExecution, findLatestGoalEvidenceExecution } from './ru
 import { extractAgentOption, extractOutputFormatOption, parseValueOptions, type OutputFormat } from "./runtime/commandOptions.js";
 import { ProcessRegistry } from "./runtime/processRegistry.js";
 import { TerminalRegistry } from "./runtime/terminalRegistry.js";
+import { formatBytes, hostMemoryGuardPorts, MemoryGuard, memoryGuardSupported, readMemoryGuardSettings, resolveMemoryLimitBytes } from "./runtime/memoryGuard.js";
 import { ReactionMailbox } from "./runtime/reactionMailbox.js";
 import { RunHistory } from "./runtime/runHistory.js";
 import { GoalTokenLedger } from './runtime/goalTokenLedger.js';
@@ -1131,7 +1132,11 @@ async function runDaemonOwned(
   // status is real (session.status.mcp_status) and /reload-mcp works.
   // Per-server failures are recorded on the manager and logged — one broken
   // server must not stop the daemon.
+  // The limit one agent command's process tree may reach before it is stopped.
+  const memoryGuardFile = join(xerxesHome(), "daemon", "memory-guard.json");
+  let memoryGuardSettings = await readMemoryGuardSettings(memoryGuardFile);
   const daemon = new DaemonServer({
+    memoryGuard: { settingsFile: memoryGuardFile, applied: settings => { memoryGuardSettings = settings; } },
     remoteProviderBindings,
     workspaceResources: cwd => workspaces.get(cwd),
     workspaceRelease: cwd => workspaces.release(cwd),
@@ -1177,6 +1182,20 @@ async function runDaemonOwned(
   announceMonitorEvent = (monitor, event) => daemon.notifyMonitorEvent(monitor, event);
   try {
     await daemon.start();
+    // Stop any agent command whose process tree outgrows the memory limit: a
+    // leaking test suite once took a 16 GB Mac past 17 GB and froze it.
+    if (memoryGuardSupported()) {
+      new MemoryGuard({
+        rootPid: process.pid,
+        limitBytes: () => resolveMemoryLimitBytes(memoryGuardSettings),
+        ports: hostMemoryGuardPorts(),
+        exclude: () => terminals.pidsLabelled("User shell"),
+        onStop: stop => daemon.broadcast("notification", {
+          level: "warning",
+          message: `Memory guard stopped \`${stop.command.slice(0, 160)}\`: it used ${formatBytes(stop.bytes)}, over the ${formatBytes(stop.limitBytes)} limit. Change the limit in Settings → General.`,
+        }),
+      }).start();
+    }
     // Model capabilities come from providers and models.dev at runtime
     // (nothing is bundled); warm the shared catalog in the background.
     void modelsDev.load();

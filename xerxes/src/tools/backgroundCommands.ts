@@ -17,6 +17,7 @@
 // and its exit status. The model starts it, does something else, and polls.
 
 import { ValidationError } from '../core/errors.js'
+import { memoryGuardNote } from '../runtime/memoryGuard.js'
 import { ProcessRegistry, sweepProcessGroupAfterExit, terminalExitCode, type ProcessRecord } from '../runtime/processRegistry.js'
 import type { TerminalHandle, TerminalRegistry } from '../runtime/terminalRegistry.js'
 
@@ -305,6 +306,7 @@ export class BackgroundCommandManager {
     }
     const outText = entry.stdout.take(maxOutputChars)
     const errText = entry.stderr.take(maxOutputChars)
+    const guardNote = running ? undefined : memoryGuardNote(entry.process.pid)
     const dropped = entry.stdout.dropped || entry.stderr.dropped
     return {
       procId,
@@ -312,7 +314,7 @@ export class BackgroundCommandManager {
       running,
       exitCode,
       stdout: capOutput(outText.text, maxOutputChars).text,
-      stderr: capOutput(errText.text, maxOutputChars).text,
+      stderr: capOutput(errText.text, maxOutputChars).text + (guardNote ? (errText.text ? '\n' : '') + guardNote : ''),
       truncated: outText.truncated || errText.truncated,
       ...(dropped ? { droppedOutput: true as const } : {}),
     }

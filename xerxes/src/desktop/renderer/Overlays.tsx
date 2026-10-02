@@ -27,6 +27,7 @@ import { store, type Snapshot } from './store.js'
 import type { CachedModel, ModelChoice, PermissionMode, ProviderRow, SettingsTab } from './types.js'
 import { RemoteProviders } from './RemoteProviders.js'
 import { AgentIntelligenceCard } from './AgentIntelligenceCard.js'
+import { MemoryGuardSetting } from './MemoryGuardSetting.js'
 import { Icon, type IconName } from './Icon.js'
 
 // ── Settings modal ──────────────────────────────────────────────────────
@@ -523,6 +524,7 @@ function GeneralCard({ snap }: { snap: Snapshot }): ReactElement {
           onClick={() => store.setPlanMode(!snap.planMode)}
         />
       </div>
+      <MemoryGuardSetting snap={snap} />
     </>
   )
 }

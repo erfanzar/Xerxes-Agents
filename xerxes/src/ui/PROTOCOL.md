@@ -865,6 +865,18 @@ atomic persistence; stale revisions fail. The TUI `/config` overlay preserves
 the transcript/draft and closes with Escape. `config runtime` retains the native
 text configuration view. Newly spawned native children carry profile and effort
 through their run configuration and retry snapshots.
+
+`memory_guard.get` returns `{ok, supported, limit_mb, effective_mb, default_mb,
+total_mb, environment_override}` for the guard that stops an agent command's
+process tree once its physical footprint (GPU memory included on macOS) passes
+the limit. `limit_mb` is the saved value, `null` for the default (half of
+`total_mb`) and `0` for off; `effective_mb` is what applies after
+`XERXES_COMMAND_MEMORY_LIMIT_MB`, which overrides the saved value when set.
+`memory_guard.save` takes `{limit_mb}` (a whole number of megabytes, `0`, or
+`null` for the default), applies it to the running guard and returns the same
+shape. A stopped command's tool result carries a `[memory guard] Stopped` note
+in its stderr, and every client receives a warning `notification`. A person's
+own terminal shells are never stopped.
 The `subagent.retry` response also includes optional `provider_profile` and
 `reasoning_effort` fields alongside `model`. Resetting a recovered child and
 sending new input retains these settings; rejected empty input does not consume

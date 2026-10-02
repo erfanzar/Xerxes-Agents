@@ -33,7 +33,7 @@ import { selectBranchTurn } from '../session/branchSelection.js';
 import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
-import { homedir } from "node:os";
+import { homedir, totalmem } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import {
@@ -220,6 +220,7 @@ import { MCPManager } from "../mcp/manager.js";
 import { McpSettingsStore, replaceMcpSettings } from "../mcp/settingsStore.js";
 import { BrowserManager } from "../operators/browser.js";
 import type { TerminalRegistry } from "../runtime/terminalRegistry.js";
+import { defaultMemoryLimitBytes, memoryGuardSupported, readMemoryGuardSettings, resolveMemoryLimitBytes, saveMemoryGuardSettings, type MemoryGuardSettings } from "../runtime/memoryGuard.js";
 import { ReactionDispatcher } from "../runtime/reactionDispatcher.js";
 import { AgentSettingsStore } from "../agents/settingsStore.js";
 import { AGENT_INTELLIGENCE_LEVELS, parseAgentIntelligenceConfig } from "../agents/intelligence.js";
@@ -807,6 +808,8 @@ export interface DaemonServerOptions {
    * be complete.
    */
   readonly terminalRegistry?: TerminalRegistry;
+  /** Where the agent-command memory limit is saved, and how a change reaches the running guard. */
+  readonly memoryGuard?: { readonly settingsFile: string; readonly applied: (settings: MemoryGuardSettings) => void };
   /** Interactive PTYs; enables the desktop terminal tab (terminal.open / resize). */
   readonly ptySessions?: PtySessionManager;
   readonly runHistory?: RunHistory;
@@ -1097,6 +1100,7 @@ export class DaemonServer {
   private server: Server | undefined;
   private readonly socketPath: string;
   private readonly terminalRegistry: TerminalRegistry | undefined;
+  private readonly memoryGuard: DaemonServerOptions["memoryGuard"];
   private readonly ptySessions: PtySessionManager | undefined;
   /** Live output subscriptions per client: terminal id → unsubscribe. */
   private readonly terminalWatches = new Map<DaemonTransportConnection, Map<string, () => void>>();
@@ -1303,6 +1307,7 @@ export class DaemonServer {
     this.websocketOptions = options.websocket;
     this.browserManager = options.browserManager ?? new BrowserManager();
     this.terminalRegistry = options.terminalRegistry;
+    this.memoryGuard = options.memoryGuard;
     this.ptySessions = options.ptySessions;
     this.runHistory = options.runHistory;
     this.goalTokenLedger = options.goalTokenLedger;
@@ -2884,6 +2889,29 @@ export class DaemonServer {
     }
     if (method === "channel.disable") {
       return this.disableChannel(params);
+    }
+    if (method === "memory_guard.get" || method === "memory_guard.save") {
+      const guard = this.memoryGuard;
+      if (!guard) return { ok: false, error: "This runtime has no memory guard" };
+      if (method === "memory_guard.save") {
+        const raw = params.limit_mb;
+        if (raw !== null && raw !== undefined && (typeof raw !== "number" || !Number.isSafeInteger(raw) || raw < 0)) {
+          throw new ValidationError("limit_mb", "must be a whole number of megabytes (0 turns the guard off), or null for the default", raw);
+        }
+        await saveMemoryGuardSettings(guard.settingsFile, typeof raw === "number" ? raw : undefined);
+      }
+      const settings = await readMemoryGuardSettings(guard.settingsFile);
+      if (method === "memory_guard.save") guard.applied(settings);
+      const mb = (bytes: number) => Math.round(bytes / 1048576);
+      return {
+        ok: true,
+        supported: memoryGuardSupported(),
+        limit_mb: settings.limitMb ?? null,
+        effective_mb: mb(resolveMemoryLimitBytes(settings)),
+        default_mb: mb(defaultMemoryLimitBytes()),
+        total_mb: mb(totalmem()),
+        environment_override: /^\d+$/.test(process.env.XERXES_COMMAND_MEMORY_LIMIT_MB?.trim() ?? ""),
+      };
     }
     if (method === "agent.settings.options") {
       const profileName = stringValue(params.provider_profile).trim();

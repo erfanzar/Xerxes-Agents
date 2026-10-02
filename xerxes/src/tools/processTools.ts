@@ -1,6 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { memoryGuardNote } from '../runtime/memoryGuard.js'
 import { parseTerminalOutputCursor } from '../runtime/terminalOutput.js'
 import { stat } from 'node:fs/promises'
 
@@ -508,12 +509,14 @@ export async function executeCommand(
         ...(stdoutResult.truncated || stderrResult.truncated ? ['Output truncated.'] : []),
       ].join('\n'), 'AbortError')
     }
+    // Ended by the memory guard: say so, or the agent sees only a killed process.
+    const guardNote = memoryGuardNote(child?.pid)
     return {
       command: [command, ...args],
       cwd: await paths.relative(cwd),
       exitCode,
       stdout: stdoutResult.text,
-      stderr: stderrResult.text,
+      stderr: guardNote ? (stderrResult.text ? stderrResult.text + '\n' : '') + guardNote : stderrResult.text,
       timedOut,
       truncated: stdoutResult.truncated || stderrResult.truncated,
     }
