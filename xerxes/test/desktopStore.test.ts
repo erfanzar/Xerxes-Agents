@@ -2451,3 +2451,27 @@ test('a hidden or covered workspace page skips its heartbeat and catches up when
     ;(globalThis as { document?: unknown }).document = originalDocument
   }
 })
+
+test('opening a chat pages back until the person\'s latest message is on screen', async () => {
+  // A goal session: hundreds of tool actions after the last thing the person said.
+  const work = (i: number) => ({ id: String(i), messages: [{ role: 'assistant', content: `Step ${i}` }], executions: [], thinking: [] })
+  const said = (i: number) => ({ id: String(i), messages: [{ role: 'user', content: 'please fix the repair budget' }], executions: [], thinking: [] })
+  const pages: Record<string, { actions: unknown[]; has_more: boolean; before: string | null }> = {
+    'page-200': { actions: Array.from({ length: 100 }, (_, i) => work(i + 100)), has_more: true, before: 'page-100' },
+    'page-100': { actions: [said(0), ...Array.from({ length: 99 }, (_, i) => work(i + 1))], has_more: true, before: 'page-0' },
+  }
+  const bridge = new FakeBridge((method, params) => {
+    if (method === 'initialize') return { ...initializeResult, session: { ...initializeResult.session, history: { actions: Array.from({ length: 100 }, (_, i) => work(i + 200)), has_more: true, before: 'page-200' } } }
+    if (method === 'session.history') return { ok: true, history: pages[String(params.before)] }
+    return { ok: true }
+  })
+  withWindow(bridge)
+  try {
+    const current = new Store(); current.start(bridge)
+    for (let i = 0; i < 50 && !current.getSnapshot().blocks.some(block => block.kind === 'user'); i++) await Bun.sleep(5)
+    expect(current.getSnapshot().blocks.some(block => block.kind === 'user' && block.text === 'please fix the repair budget')).toBe(true)
+    // Two pages back, and no further once the message was found.
+    expect(bridge.calls.filter(call => call.method === 'session.history').map(call => call.params.before)).toEqual(['page-200', 'page-100'])
+    expect(current.getSnapshot().historyMore).toBe(true)
+  } finally { delete (globalThis as { window?: unknown }).window }
+})

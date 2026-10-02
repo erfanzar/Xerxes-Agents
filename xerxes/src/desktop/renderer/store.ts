@@ -179,6 +179,9 @@ function delegationModeValue(value: unknown): 'off' | 'auto' | 'eager' {
   return value === 'off' || value === 'eager' ? value : 'auto'
 }
 
+/** How far back (in 100-action pages) opening a chat looks for the person's last message. */
+const REVEAL_USER_MESSAGE_MAX_PAGES = 20
+
 /** Minimum spacing of routine (streaming) store updates: 20 a second. */
 const STREAM_FRAME_MS = 50
 
@@ -2883,6 +2886,24 @@ export class Store {
     }
     this.patch({ historyMore: Boolean(this.historyBefore || this.legacyHistory.length), historyLoading: false, historyError: null })
     if (!preserve) this.refoldChangesFromHistory(session)
+    if (!preserve) void this.revealLatestUserMessage()
+  }
+
+  /**
+   * Page back until the person's own latest message is on screen. A chat opens
+   * on its newest 100 actions, and a goal or workflow session can run hundreds
+   * of tool actions after the last thing the person said: the opened chat was
+   * tool output and a question with no trace of the conversation, which read as
+   * the whole chat having been lost. Bounded, and harness-written prompts (goal
+   * rounds) do not count.
+   */
+  private async revealLatestUserMessage(): Promise<void> {
+    const generation = this.historyGeneration
+    for (let page = 0; page < REVEAL_USER_MESSAGE_MAX_PAGES; page++) {
+      if (generation !== this.historyGeneration || this.frame.historyError || !this.frame.historyMore) return
+      if (this.builder.all().some(block => block.kind === 'user')) return
+      await this.loadOlderHistory()
+    }
   }
 
   /**

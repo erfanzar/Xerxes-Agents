@@ -7,6 +7,11 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.17 — 2026-10-02
+
+- Memory guard: an agent command, with everything it starts, is stopped once it uses more than a limit (default: half the computer's memory; GPU memory counts on macOS). The agent is told why and how to run less at once. Set the limit, or turn it off, in Settings → General.
+- Desktop: opening a chat shows your latest message. A chat opened on its newest 100 actions, and a goal or workflow session can run hundreds of tool actions after the last thing you said, so the conversation looked lost. It now pages back until your last message is on screen; the button reads "Show earlier conversation".
+
 ## 0.6.16 — 2026-10-01
 
 - Claude Code: a reply rejected with "The model's tool call could not be parsed" is retried (twice at most) with a note telling the model it used the native <invoke> syntax and must call tools as <function=NAME>{json}</function>. Sonnet slips into the native form in long, tool-heavy agent runs, and each slip used to fail the whole agent. Text already shown is not repeated.

@@ -950,7 +950,7 @@ function Stream({ snap }: { snap: Snapshot }): ReactElement {
       </> : (
         <div className="stream__col">
           {(snap.historyMore || snap.historyError) && <div className="history-pager">
-            <button className="btn" disabled={snap.historyLoading} onClick={() => void loadOlder()}>{snap.historyLoading ? 'Loading older history…' : snap.historyError ? 'Retry older history' : 'Load 100 older actions'}</button>
+            <button className="btn" disabled={snap.historyLoading} onClick={() => void loadOlder()}>{snap.historyLoading ? 'Loading earlier conversation…' : snap.historyError ? 'Retry loading earlier conversation' : 'Show earlier conversation'}</button>
             {snap.historyError && <p role="alert">{snap.historyError}</p>}
           </div>}
           {keyedActivityGroups(blocks, approval?.toolCallId).map(({ key, blocks: group }, index, groups) => (
