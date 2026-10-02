@@ -709,3 +709,22 @@ Do the scan.`,
   // past both transcript filters; it must never come back.
   expect(withRequest.split("\n")[0]).not.toContain("[Skill:");
 });
+
+test("YAML block-scalar descriptions keep their text instead of the indicator", async () => {
+  const folded = parseSkillMarkdown(
+    "---\nname: folded\ndescription: >-\n  Spawns a swarm of agents\n  to analyze: the project.\n\n  Second paragraph.\nversion: \"2\"\n---\nBody.",
+    "/virtual/folded/SKILL.md",
+  );
+  expect(folded.metadata.description).toBe("Spawns a swarm of agents to analyze: the project.\nSecond paragraph.");
+  expect(folded.metadata.version).toBe("2");
+  const literal = parseSkillMarkdown(
+    "---\nname: literal\ndescription: |\n  Line one\n  Line two\ntags: [a, b]\n---\nBody.",
+    "/virtual/literal/SKILL.md",
+  );
+  expect(literal.metadata.description).toBe("Line one\nLine two");
+  expect(literal.metadata.tags).toEqual(["a", "b"]);
+  const registry = new SkillRegistry();
+  await registry.discover(BUNDLED_SKILLS_DIRECTORY);
+  expect(registry.get("deepscan")?.metadata.description).toContain("Spawns a swarm of specialized agents");
+  for (const skill of registry.all()) expect(skill.metadata.description).not.toMatch(/^[>|][+-]?$/);
+});

@@ -9,7 +9,10 @@ import { withFileLock } from '../session/daemonTranscript.js'
 import type { ToolRegistry } from '../executors/toolRegistry.js'
 
 interface InstalledModule { path: string; enabled: boolean; names: string[] }
-interface LoadedModule extends InstalledModule { registry: PluginRegistry; fingerprint?: string }
+// `error` marks an enabled entry whose module could not be loaded at startup.
+// It stays enabled in the manifest, so fixing the file and restarting brings it
+// back, but it registers nothing until then.
+interface LoadedModule extends InstalledModule { registry: PluginRegistry; fingerprint?: string; error?: string }
 /** Explicit local module opt-in, persisted separately from automatic workspace discovery. */
 export class ManagedPlugins {
   private modules: LoadedModule[] = []
@@ -29,18 +32,29 @@ export class ManagedPlugins {
     return parsed
   }
   private async fingerprint(path: string): Promise<string> { return createHash('sha256').update(await readFile(path)).digest('hex') }
-  async load(): Promise<void> { return this.hydrate() }
-  private async hydrate(disableValue?: string): Promise<void> {
+  // Startup is fault tolerant per module: one moved, broken or renamed module
+  // used to throw out of the daemon's boot, and with no daemon running
+  // `/plugins disable` could not reach it either.
+  async load(): Promise<void> { return this.hydrate(undefined, true) }
+  private async hydrate(disableValue?: string, tolerateBroken = false): Promise<void> {
     const loaded: LoadedModule[] = []
     for (const stored of await this.readManifest()) {
       const item = disableValue && (stored.path === disableValue || stored.names.includes(disableValue)) ? { ...stored, enabled: false } : stored
       const previous = this.modules.find(entry => entry.path === item.path)
       if (!item.enabled) { loaded.push({ ...item, registry: previous?.registry ?? new PluginRegistry(), ...(previous?.fingerprint ? { fingerprint: previous.fingerprint } : {}) }); continue }
-      const fingerprint = await this.fingerprint(item.path)
-      if (previous?.fingerprint && previous.fingerprint !== fingerprint) throw new Error('Plugin source changed. Restart Xerxes to load the updated module.')
-      const registry = previous?.registry.pluginNames.length ? previous.registry : await this.readModule(item.path)
-      if (registry.pluginNames.slice().sort().join('\0') !== item.names.slice().sort().join('\0')) throw new Error('Plugin registration names changed; restore the module or remove its manifest entry before reinstalling')
-      loaded.push({ ...item, registry, fingerprint })
+      // A module that failed at startup stays failed until it is re-enabled or
+      // the daemon restarts, so it cannot block changes to the other modules.
+      if (previous?.error) { loaded.push({ ...item, registry: previous.registry, error: previous.error }); continue }
+      try {
+        const fingerprint = await this.fingerprint(item.path)
+        if (previous?.fingerprint && previous.fingerprint !== fingerprint) throw new Error('Plugin source changed. Restart Xerxes to load the updated module.')
+        const registry = previous?.registry.pluginNames.length ? previous.registry : await this.readModule(item.path)
+        if (registry.pluginNames.slice().sort().join('\0') !== item.names.slice().sort().join('\0')) throw new Error('Plugin registration names changed; restore the module or remove its manifest entry before reinstalling')
+        loaded.push({ ...item, registry, fingerprint })
+      } catch (error) {
+        if (!tolerateBroken) throw error
+        loaded.push({ ...item, registry: new PluginRegistry(), error: error instanceof Error ? error.message : String(error) })
+      }
     }
     this.validate(loaded)
     this.modules = loaded
@@ -48,13 +62,13 @@ export class ManagedPlugins {
   private validate(modules: LoadedModule[]): void {
     const names = modules.flatMap(item => item.names)
     if (new Set(names).size !== names.length) throw new Error('Plugin name conflicts with another installed module')
-    const toolNames = modules.filter(item => item.enabled).flatMap(item => Object.keys(item.registry.getAllTools()))
+    const toolNames = modules.filter(item => item.enabled && !item.error).flatMap(item => Object.keys(item.registry.getAllTools()))
     if (new Set(toolNames).size !== toolNames.length) throw new Error('Plugin tool names conflict')
   }
-  inventory(): Array<PluginInventoryEntry & { enabled: boolean; module: string }> {
+  inventory(): Array<PluginInventoryEntry & { enabled: boolean; module: string; loadError?: string }> {
     return this.modules.flatMap(item => item.registry.inventory().length
       ? item.registry.inventory().map(plugin => ({ ...plugin, enabled: item.enabled, module: item.path }))
-      : item.names.map(name => ({ name, version: '', description: 'Disabled module', source: { kind: 'module' as const, path: item.path }, tools: [], hooks: [], channels: [], providers: [], dependencies: [], enabled: false, module: item.path })))
+      : item.names.map(name => ({ name, version: '', description: item.error ? `Failed to load: ${item.error}` : 'Disabled module', source: { kind: 'module' as const, path: item.path }, tools: [], hooks: [], channels: [], providers: [], dependencies: [], enabled: false, module: item.path, ...(item.error ? { loadError: item.error } : {}) })))
   }
   private async readModule(path: string): Promise<PluginRegistry> {
     if (!/\.(?:[cm]?js|ts)$/.test(path) || !(await stat(path)).isFile()) throw new Error('Install expects a local native .ts/.js module exporting register(registry)')
@@ -84,7 +98,7 @@ export class ManagedPlugins {
         const registry = action === 'enable' && !item.registry.pluginNames.length ? await this.readModule(item.path) : item.registry
         if (action === 'enable' && registry.pluginNames.slice().sort().join('\0') !== item.names.slice().sort().join('\0')) throw new Error('Plugin registration names changed; restore the original module')
         const fingerprint = action === 'enable' ? await this.fingerprint(item.path) : item.fingerprint
-        this.modules = this.modules.map(entry => entry === item ? { ...entry, registry, ...(fingerprint ? { fingerprint } : {}), enabled: action === 'enable' } : entry)
+        this.modules = this.modules.map(entry => entry === item ? { path: entry.path, names: entry.names, registry, ...(fingerprint ? { fingerprint } : {}), enabled: action === 'enable' } : entry)
       }
       try {
         this.validate(this.modules)
@@ -102,7 +116,7 @@ export class ManagedPlugins {
   }
   registerTools(tools: ToolRegistry): void {
     for (const item of this.modules) {
-      if (!item.enabled) continue
+      if (!item.enabled || item.error) continue
       for (const [name, callback] of Object.entries(item.registry.getAllTools())) {
         const toolName = `plugin_${name}`
         if (!/^[a-zA-Z0-9_-]{1,64}$/.test(toolName)) throw new Error(`Invalid plugin tool name: ${name}`)

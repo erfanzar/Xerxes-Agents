@@ -23,6 +23,7 @@ import {
   type ChannelMessage,
   type InboundHandler,
 } from '../src/channels/index.js'
+import { DaemonInteractionBoard } from '../src/daemon/interactions.js'
 import type {
   DaemonEvent,
   DaemonRuntime,
@@ -30,6 +31,7 @@ import type {
   OpenSessionOptions,
 } from '../src/daemon/runtime.js'
 import type { JsonRpcPayload } from '../src/protocol/jsonRpc.js'
+import type { PermissionRequest } from '../src/streaming/events.js'
 
 class RecordingChannel implements Channel {
   readonly name = 'telegram'
@@ -328,6 +330,190 @@ test('channel /stop bypasses a queued active turn', async () => {
   expect(channel.sent.at(-1)?.text).toBe('Cancellation requested.')
   runtime.releases[0]?.()
   await active
+})
+
+test('channel commands addressed to the bot run instead of being rejected', async () => {
+  const channel = new RecordingChannel()
+  const runtime = new ControlledRuntime()
+  const manager = new ChannelManager({ channels: [['telegram', channel]] })
+  const router = new ChannelTurnRouter({ channels: manager, runtime, streamPreviews: false })
+  manager.setInboundHandler(message => router.handle(message))
+  await manager.enable('telegram')
+  const inbound = (text: string) => createChannelMessage({
+    channel: 'telegram',
+    channelUserId: 'user-1',
+    direction: MessageDirection.INBOUND,
+    metadata: { chat_type: 'supergroup' },
+    roomId: '-100',
+    text,
+  })
+
+  const active = channel.receive(inbound('/xerxes summarize the thread'))
+  while (runtime.submitted.length === 0) await Bun.sleep(1)
+  expect(runtime.submitted[0]?.prompt.endsWith('\nsummarize the thread')).toBeTrue()
+  // Telegram's group command menu appends the bot name; /stop must still
+  // bypass the queue and reach the running turn.
+  await channel.receive(inbound('/stop@Xerxes_Bot'))
+
+  expect(runtime.cancelled).toEqual(['telegram:chat:-100:thread:main'])
+  expect(channel.sent.map(message => message.text)).toEqual(['Cancellation requested.'])
+  runtime.releases[0]?.()
+  await active
+  expect(channel.sent.map(message => message.text)).not.toContain('Unsupported channel command: /xerxes')
+})
+
+/** Asks through the real interaction board, as a schedule, send_message or AskUserQuestionTool turn does. */
+class AskingRuntime extends RecordingRuntime {
+  cancelled = 0
+  private controller = new AbortController()
+
+  constructor(
+    private readonly board: DaemonInteractionBoard,
+    private readonly opening: 'approval' | 'question' = 'approval',
+  ) {
+    super()
+  }
+
+  override cancelTurn(_sessionKey: string): boolean {
+    this.cancelled += 1
+    this.controller.abort()
+    return true
+  }
+
+  override async submitTurn(sessionKey: string, text: string, emit: (event: DaemonEvent) => void): Promise<void> {
+    this.submitted.push({ key: sessionKey, prompt: text })
+    this.controller = new AbortController()
+    const signal = this.controller.signal
+    const session = this.sessionStatus(sessionKey)!
+    const release = this.board.bind(session.id, emit)
+    try {
+      if (this.opening === 'approval') {
+        const request: PermissionRequest = {
+          requestId: 'approval-1',
+          description: 'Create a schedule every morning at 9.',
+          inputs: {},
+          toolCall: { id: 'schedule-1', type: 'function', function: { name: 'manage_schedule', arguments: { action: 'create' } } },
+        }
+        emit({ type: 'approval_request', payload: { id: request.requestId, request_id: request.requestId, description: request.description } })
+        const decision = await this.board.permissionBroker(session.id).request(request, signal)
+        emit({ type: 'text_part', payload: { text: 'approval:' + decision } })
+        if (decision !== 'approve') return
+      }
+      const answer = await this.board.ask(session.id, { question: 'Which build?', options: ['nightly', 'release'], allowFreeform: false }, signal)
+      emit({ type: 'text_part', payload: { text: ' answer:' + answer } })
+    } finally {
+      release()
+    }
+  }
+}
+
+test('a channel turn that asks for approval or an answer is answered from the chat instead of hanging', async () => {
+  const channel = new RecordingChannel()
+  const board = new DaemonInteractionBoard()
+  const runtime = new AskingRuntime(board)
+  const manager = new ChannelManager({ channels: [['telegram', channel]] })
+  const router = new ChannelTurnRouter({ channels: manager, runtime, streamPreviews: false, interactions: board })
+  manager.setInboundHandler(message => router.handle(message))
+  await manager.enable('telegram')
+  const inbound = (user: string, text: string) => createChannelMessage({
+    channel: 'telegram',
+    channelUserId: user,
+    direction: MessageDirection.INBOUND,
+    metadata: { chat_type: 'group' },
+    roomId: 'room-1',
+    text,
+  })
+  const sentText = async (fragment: string) => {
+    for (let tries = 0; tries < 200 && !channel.sent.some(sent => sent.text.includes(fragment)); tries++) await Bun.sleep(2)
+    return channel.sent.find(sent => sent.text.includes(fragment))?.text
+  }
+
+  const active = channel.receive(inbound('owner', 'remind me every morning at 9 to check the build'))
+  expect(await sentText('Approval needed')).toContain('Create a schedule every morning at 9.')
+  // Another member of the group cannot approve the requester's tool call.
+  await channel.receive(inbound('bystander', '/approve'))
+  expect(channel.sent.at(-1)?.text).toBe('Only the person who started this turn can answer it.')
+  expect(board.pendingPermissionIds()).toEqual(['approval-1'])
+  await channel.receive(inbound('owner', '/approve'))
+  expect(await sentText('Which build?')).toContain('2. release')
+  await channel.receive(inbound('owner', '2'))
+  await active
+  expect(channel.sent.at(-1)?.text).toBe('approval:approve answer:release')
+  expect(runtime.submitted).toHaveLength(1)
+  expect(runtime.cancelled).toBe(0)
+})
+
+test('approval and answer commands addressed to the bot answer a waiting channel turn', async () => {
+  const channel = new RecordingChannel()
+  const board = new DaemonInteractionBoard()
+  const runtime = new AskingRuntime(board)
+  const manager = new ChannelManager({ channels: [['telegram', channel]] })
+  const router = new ChannelTurnRouter({ channels: manager, runtime, streamPreviews: false, interactions: board })
+  manager.setInboundHandler(message => router.handle(message))
+  await manager.enable('telegram')
+  const inbound = (text: string) => createChannelMessage({
+    channel: 'telegram',
+    channelUserId: 'owner',
+    direction: MessageDirection.INBOUND,
+    metadata: { chat_type: 'supergroup' },
+    roomId: '-100',
+    text,
+  })
+  const sentText = async (fragment: string) => {
+    for (let tries = 0; tries < 200 && !channel.sent.some(sent => sent.text.includes(fragment)); tries++) await Bun.sleep(2)
+    return channel.sent.find(sent => sent.text.includes(fragment))?.text
+  }
+
+  const active = channel.receive(inbound('/xerxes remind me every morning at 9'))
+  expect(await sentText('Approval needed')).toContain('Create a schedule every morning at 9.')
+  // Telegram's group command menu sends '/approve@Bot'; it must reach the wait.
+  await channel.receive(inbound('/approve@Xerxes_Bot'))
+  expect(await sentText('Which build?')).toContain('1. nightly')
+  await channel.receive(inbound('/answer@Xerxes_Bot 1'))
+  await active
+  expect(channel.sent.at(-1)?.text).toBe('approval:approve answer:nightly')
+  expect(runtime.submitted).toHaveLength(1)
+  expect(runtime.cancelled).toBe(0)
+})
+
+test('a channel without an interaction port stops a turn that asks and says why', async () => {
+  const channel = new RecordingChannel()
+  const board = new DaemonInteractionBoard()
+  const runtime = new AskingRuntime(board)
+  const manager = new ChannelManager({ channels: [['telegram', channel]] })
+  const router = new ChannelTurnRouter({ channels: manager, runtime, streamPreviews: false })
+  manager.setInboundHandler(message => router.handle(message))
+  await manager.enable('telegram')
+  await channel.receive(createChannelMessage({
+    channel: 'telegram',
+    channelUserId: 'owner',
+    direction: MessageDirection.INBOUND,
+    text: 'send the report',
+  }))
+  expect(runtime.cancelled).toBe(1)
+  expect(board.pendingPermissionIds()).toEqual([])
+  expect(channel.sent.map(sent => sent.text)).toContain('This turn needs an approval that this channel cannot give, so it was stopped.')
+})
+
+test('a channel turn that calls AskUserQuestionTool with no interaction port is stopped instead of waiting forever', async () => {
+  const channel = new RecordingChannel()
+  const board = new DaemonInteractionBoard()
+  const runtime = new AskingRuntime(board, 'question')
+  const manager = new ChannelManager({ channels: [['telegram', channel]] })
+  const router = new ChannelTurnRouter({ channels: manager, runtime, streamPreviews: false })
+  manager.setInboundHandler(message => router.handle(message))
+  await manager.enable('telegram')
+
+  await channel.receive(createChannelMessage({
+    channel: 'telegram',
+    channelUserId: 'user-1',
+    direction: MessageDirection.INBOUND,
+    text: 'deploy it',
+  }))
+
+  expect(runtime.cancelled).toBe(1)
+  expect(board.pendingQuestionIds()).toEqual([])
+  expect(channel.sent.map(sent => sent.text)).toContain('This turn needs an answer that this channel cannot give, so it was stopped.')
 })
 
 test('channel turn router surfaces queue overflow as retryable failure', async () => {
@@ -647,9 +833,13 @@ function todayNote(workspace: string): string {
 
 class OversizedPreviewRuntime extends RecordingRuntime {
   override async submitTurn(_sessionKey: string, _text: string, emit: (event: DaemonEvent) => void): Promise<void> {
-    emit({ type: 'text_part', payload: { text: 'START-SENTINEL' + 'x'.repeat(5_000) + 'END-SENTINEL' } })
+    emit({ type: 'text_part', payload: { text: OVERSIZED_ANSWER } })
+    // Long enough for the rate-limited streaming edit to land before the turn ends.
+    await Bun.sleep(20)
   }
 }
+
+const OVERSIZED_ANSWER = 'START-SENTINEL' + 'x'.repeat(5_000) + 'END-SENTINEL'
 
 test('channel turn router previews keep the head of oversized output and mark the truncation', async () => {
   const channel = new PreviewRecordingChannel()
@@ -673,12 +863,41 @@ test('channel turn router previews keep the head of oversized output and mark th
     text: 'stream something huge',
   }))
 
-  const finalEdit = [...channel.previews].reverse().find(preview => preview.kind === 'edit')
-  expect(finalEdit).toBeDefined()
-  // The head is preserved and the cut is visible, instead of keeping the tail
-  // with no marker.
-  expect(finalEdit!.text.startsWith('START-SENTINEL')).toBeTrue()
-  expect(finalEdit!.text.endsWith('…[truncated]')).toBeTrue()
-  expect(finalEdit!.text.length).toBeLessThanOrEqual(4_096)
-  expect(finalEdit!.text).not.toContain('END-SENTINEL')
+  const streamingEdit = channel.previews.find(preview => preview.kind === 'edit')
+  expect(streamingEdit).toBeDefined()
+  // While streaming, the head is preserved and the cut is visible, instead of
+  // keeping the tail with no marker.
+  expect(streamingEdit!.text.startsWith('START-SENTINEL')).toBeTrue()
+  expect(streamingEdit!.text.endsWith('…[truncated]')).toBeTrue()
+  expect(streamingEdit!.text.length).toBeLessThanOrEqual(4_096)
+  expect(streamingEdit!.text).not.toContain('END-SENTINEL')
+})
+
+test('channel turn router delivers the whole final answer when it outgrows one preview message', async () => {
+  const channel = new PreviewRecordingChannel()
+  const runtime = new OversizedPreviewRuntime()
+  const manager = new ChannelManager({ channels: [['telegram', channel]] })
+  const router = new ChannelTurnRouter({ channels: manager, previewInterval: 1, runtime, typingInterval: 1 })
+  manager.setInboundHandler(message => router.handle(message))
+  await manager.enable('telegram')
+
+  await channel.receive(createChannelMessage({
+    channel: 'telegram',
+    channelUserId: 'user-7',
+    direction: MessageDirection.INBOUND,
+    platformMessageId: 'incoming-1',
+    roomId: 'chat-7',
+    text: 'answer at length',
+  }))
+
+  const finalEditIndex = channel.previews.findLastIndex(preview => preview.kind === 'edit')
+  const finalEdit = channel.previews[finalEditIndex]!
+  const followUps = channel.previews.slice(finalEditIndex + 1)
+  expect(finalEdit.text.length).toBeLessThanOrEqual(4_096)
+  expect(finalEdit.text).not.toContain('…[truncated]')
+  expect(followUps.length).toBeGreaterThan(0)
+  expect(followUps.every(preview => preview.kind === 'send' && preview.chatId === 'chat-7')).toBeTrue()
+  // Nothing is lost: the placeholder plus its follow-ups carry the full answer.
+  expect([finalEdit, ...followUps].map(preview => preview.text).join('')).toBe(OVERSIZED_ANSWER)
+  expect(channel.sent).toEqual([])
 })

@@ -1672,9 +1672,14 @@ function childMidTurnCompaction(
     // Only once the turn has taken a step: at its start the pre-turn pass has
     // already compacted, and an opening prompt alone has nothing to summarize.
     contextCompactionDue: (messages, observedPromptTokens) => {
+      // Projected every round, the skipped ones too: the provider's count must
+      // pair with the estimate of the request it measured. Skipping a round
+      // that opens on a steer divided the next count by a stale estimate, and
+      // everything added in between inflated the ratio into an early compaction.
+      const projected = calibration.project(estimate(messages), observedPromptTokens)
       const last = messages.at(-1)
       if (!last || last.role === 'user' || last.role === 'system') return false
-      return calibration.project(estimate(messages), observedPromptTokens) >= thresholdTokens
+      return projected >= thresholdTokens
     },
     reduceContext: async (messages, signal) => {
       const archivePath = childArchivePath(options.transcriptStore, conversation.historySessionId)

@@ -220,6 +220,23 @@ test('a script handed over as a function is called rather than rejected', async 
   }
 })
 
+test('a script that opens with a helper function runs as written, and a self-invoked one is not called twice', async () => {
+  for (const script of [
+    `function summarize(xs) {\n  return xs.join('|')\n}\nconst results = await parallel([() => agent('a'), () => agent('b')])\nreturn summarize(results)`,
+    `function label(x) { return 'p-' + x }\nconst out = []\nfor (const x of ['a', 'b']) {\n  out.push(await agent(label(x)))\n}`,
+    `(async () => { return await agent('c') })()`,
+  ]) {
+    const result = await runWorkflowScript({ name: 'Helpers', concurrency: 2, maxAgents: 5, port: fakePort(request => ({ output: `ran ${request.prompt}` })), script })
+    expect({ status: result.status, error: result.error }).toEqual({ status: 'completed', error: undefined })
+  }
+  const helper = await runWorkflowScript({ name: 'Helpers', concurrency: 2, maxAgents: 5, port: fakePort(request => ({ output: `ran ${request.prompt}` })),
+    script: `function summarize(xs) {\n  return xs.join('|')\n}\nconst results = await parallel([() => agent('a'), () => agent('b')])\nreturn summarize(results)` })
+  expect(helper.result).toBe('ran a|ran b')
+  const invoked = await runWorkflowScript({ name: 'Invoked', concurrency: 1, maxAgents: 5, port: fakePort(request => ({ output: `ran ${request.prompt}` })),
+    script: `(async () => { return await agent('c') })()` })
+  expect(invoked.result).toBe('ran c')
+})
+
 test('a run totals its published-price cost and counts agents without a price', async () => {
   const port = fakePort((_request, index) => index === 2 ? { output: 'x' } : { output: 'x', costUsd: 0.125 })
   const result = await runWorkflowScript({ name: 'Priced', concurrency: 3, maxAgents: 10, port, script: `return await parallel([1, 2, 3].map(i => () => agent('n' + i)))` })

@@ -203,7 +203,7 @@ params fall back to per-connection defaults.
 | `turn.steer` / `steer`               | `{ session_key?, content }`                    | `{ ok }`                                                       | Inject steer text into the active turn.                                           |
 | `turn.cancel` / `cancel`             | `{ session_key? }`                             | `{ ok }`                                                       | Cancel this connection's turn.                                                    |
 | `cancel_all`                         | `{}`                                           | `{ ok, cancelled }`                                            | Cancel every session.                                                             |
-| `session.open`                       | `{ session_key?, agent_id?, project_dir? }`    | `{ ok, session }`                                              | Open/attach a session within the active or explicit project boundary. `agent_id` is the DSH-style agent preset; changing it is rejected after the first transcript message. Mid-turn, `session.inflight` additively carries `started_at` (epoch seconds), `thinking`, and `tools: [{ id?, name, arguments?, ok?, duration_ms?, error? }]` — the turn's work so far, since the transcript only covers completed turns. The session payload also carries cumulative `llm_duration_ms`, `llm_steps`, `tool_duration_ms`, `tool_steps`, `ttft_total_ms`, `ttft_samples`, and `ttft_avg_ms` when observed. Attaching also drains that session's pending background-completion notices as `notification` events (at-most-once; they accumulate while no client is attached). |
+| `session.open`                       | `{ session_key?, agent_id?, project_dir? }`    | `{ ok, session, pending_interactions }`                                              | Open/attach a session within the active or explicit project boundary. `agent_id` is the DSH-style agent preset; changing it is rejected after the first transcript message. Mid-turn, `session.inflight` additively carries `started_at` (epoch seconds), `thinking`, and `tools: [{ id?, name, arguments?, ok?, duration_ms?, error? }]` — the turn's work so far, since the transcript only covers completed turns. The session payload also carries cumulative `llm_duration_ms`, `llm_steps`, `tool_duration_ms`, `tool_steps`, `ttft_total_ms`, `ttft_samples`, and `ttft_avg_ms` when observed. Attaching also drains that session's pending background-completion notices as `notification` events (at-most-once; they accumulate while no client is attached). `pending_interactions` (`[{ type, payload }]`, same shape as `initialize`) re-offers the approvals and questions this session's turn raised while the connection was in front of another session, which were routed only to that session's observers. |
 | `agentPreset.list`                   | `{}`                                           | `{ ok, presets, default_id, authorable, has_document }`         | Uncached roster of built-in, user, and project agent compositions; broken presets remain visible with a reason. |
 | `agentPreset.select`                 | `{ agent_preset, session_key? }`                | `{ ok, agent_preset }`                                         | Recompose a blank session only. A started session returns `agent-preset-locked`. |
 | `agentPreset.read`                   | `{ agent_preset }`                              | `{ ok, preset, content, guarded_write }`                       | Read the exact `agent.yaml` composition; advertises optimistic editing support. |
@@ -212,7 +212,7 @@ params fall back to per-connection defaults.
 | `agentPreset.setDefault`             | `{ agent_preset }`                              | `{ ok, preset, default_id }`                                   | Changes only the default for sessions created later. |
 | `agentPreset.openDocument` / `agentPreset.remove` | `{ agent_preset }`                    | `{ ok, path? }`                                                | User presets only; running sessions are unaffected. |
 | `session.active_list`                | `{}`                                           | `{ ok, sessions }`                                             | List live top-level and subagent sessions. Agent View filters subagents into their parent and polls this for live state. |
-| `session.list`                       | `{}`                                           | `{ ok, sessions }`                                             | For `/resume` picker.                                                             |
+| `session.list`                       | `{ kind?, scope?, project_dir?, limit?, query? }` | `{ ok, sessions }`                                          | For `/resume` picker. `query` keeps only the `/resume <id\|name>` matches (id prefix, or exact key or title, case-insensitive) across every saved session before `limit` applies. |
 | `goal.inspect`                       | `{}`                                           | `{ ok, session_id, goal, token_usage, continuation }`            | Reads the connection's active goal, evidence and durable continuation receipt. |
 | `goal.decision`                      | `{ session_id, goal_id, revision, criterion_id, summary }` | `{ ok, session_id?, goal?, token_usage?, continuation?, error? }` | Records a user acceptance note against the displayed criterion; requires an idle session and matching revision. |
 | `session.status`                     | `{ session_key? }`                             | `{ ok, session: { ..., profile_name } \| null }`                | `profile_name` is the exact matching stored profile or `null` for an overridden/unmatched runtime. |
@@ -241,7 +241,7 @@ params fall back to per-connection defaults.
 | ----------------------- | ----------------------------------------------------------- | ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `session.usage`         | `{ session_key? }`                                           | `{ ok, ... }` or `{ ok: false }`                            | Token/telemetry totals for one session, with the resolved context limit.                                                                           |
 | `usage.report`          | `{ session_key?, refresh? }`                                 | `{ ok, fetched_at, profiles[], session?, models?, models_since? }` | Session statistics plus every imported provider profile: `status` `ok` (plan `windows[]` with `usedPercent`/`resetsAt`/`resetAfterSeconds`, or an API `balance`, plus optional `facts[]` label/value rows such as OpenRouter credit left and spend today/this week/this month/all time), `unsupported`, or `error` with `message`. `models[]` (when the daemon keeps a usage ledger) totals the rounds recorded since `models_since` (30 days) per model and profile: `calls`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, and `cost_usd` only when a published price exists. Cached per credential for 60s; `refresh` bypasses it. |
-| `session.title`         | `{ session_key?, title \| value }`                            | `{ ok, ... }`                                              | Rename the attached session; also emits `session_title`.                                                                                           |
+| `session.title`         | `{ session_key?, title \| value }`                            | `{ ok, ... }`                                              | Rename the named (default: attached) session; also emits `session_title`. Like `session.save`, `session.undo`, `session.compress`, `changes.undo` and `workspace.worktree`, it never re-binds the connection to `session_key`. |
 | `session.save`          | `{ session_key?, title? }`                                   | `{ ok, ... }`                                              | Persist the active session under an explicit title.                                                                                                |
 | `session.undo`          | `{ session_key? }`                                           | `{ ok, ... }`                                              | Discard the last completed turn from the transcript. Not a filesystem undo — see `changes.undo`.                                                   |
 | `session.delete`        | `{ session_id \| id \| key }`                                 | `{ ok, ... }`                                              | Delete a saved session; a live session is evicted first.                                                                                           |
@@ -455,7 +455,10 @@ provider-flow `QuestionRequest`s; the masked editor is a client concern.
 
 `ApprovalResponse` / `QuestionResponse` are defined as wire events too (the
 daemon may echo them), but the **client answers via the RPC methods**
-(`permission_response` / `question_response`), not by emitting events.
+(`permission_response` / `question_response`), not by emitting events. The
+echo goes to every connection the request reached (for a session-owned turn,
+each client attached to that session), so a surface that did not answer can
+drop its card.
 
 ## Durable run history (optional host capability)
 
@@ -633,10 +636,12 @@ completion and restores the chat.
 `schedule.run` accept `schedule_id`. Unknown or other-project jobs return
 `{ok:false,error}`. Legacy jobs with no project association are not included in
 this workspace API; existing `/cron` management remains available.
-Schedule RPCs optionally accept `expected_project_directory` as a caller-side
-assertion. A mismatch with the connection's canonical project rejects the
-request before reading or changing jobs; this field cannot select another
-project. The CLI supplies it to detect a mismatched explicit socket.
+Schedule RPCs optionally accept `expected_project_directory`. On a connection
+without an open session (the `xerxes schedule` CLI talking to the shared
+daemon), it names the project whose jobs the request reads or changes. On a
+connection with an open session it is a caller-side assertion: a mismatch with
+the session's canonical project rejects the request before reading or changing
+jobs, and the field cannot select another project.
 
 Inspection and pause/resume return `{ok,job}`. Job fields include the existing
 cron payload plus `project_root`, `metadata`, and `execution_state` (`idle`,

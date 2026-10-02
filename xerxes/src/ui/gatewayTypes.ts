@@ -308,6 +308,9 @@ export interface SessionActivateResponse {
   info?: SessionInfo
   message_count?: number
   messages: GatewayTranscriptMessage[]
+  // Events that arrived during the switch are held until the caller has
+  // reset and hydrated the view; it must then call finishSessionRecovery.
+  recovery_pending?: boolean
   running?: boolean
   session_id: string
   session_key?: string

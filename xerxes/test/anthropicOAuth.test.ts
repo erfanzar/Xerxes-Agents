@@ -20,6 +20,7 @@ import {
   toClaudeCodeToolName,
 } from '../src/auth/anthropicOAuth.js'
 import { AnthropicMessagesClient } from '../src/llms/anthropic.js'
+import { createLlmClient } from '../src/llms/client.js'
 import type { ToolDefinition } from '../src/types/toolCalls.js'
 
 async function inTemporaryHome(run: (home: string) => Promise<void>): Promise<void> {
@@ -283,4 +284,108 @@ test('without an OAuth token the transport keeps the API-key request untouched',
   // No system prompt was configured, so none is sent — and never an OAuth
   // identity array on the API-key path.
   expect(payload.system).toBeUndefined()
+})
+
+async function storeAnthropicCredential(home: string, credential: Record<string, unknown>): Promise<void> {
+  const { mkdir, writeFile } = await import('node:fs/promises')
+  await mkdir(join(home, 'auth'), { recursive: true })
+  await writeFile(join(home, 'auth', 'anthropic-oauth.json'), `${JSON.stringify(credential)}\n`, 'utf8')
+}
+
+test('the stored subscription token only authenticates Anthropic itself, never a profile key or another host', async () => {
+  await inTemporaryHome(async home => {
+    await storeAnthropicCredential(home, { access: 'sk-ant-oat01-SUBSCRIPTION', refresh: 'refresh-1', expires: NOW + 3_600 })
+    const session = new AnthropicOAuthSession({ xerxesHome: home, environment: {}, now: () => NOW })
+    const sent = async (model: string, overrides: Record<string, unknown>): Promise<{ url: string; headers: Record<string, string>; body: string }> => {
+      const requests: { url: string; init?: RequestInit }[] = []
+      const client = createLlmClient(model, overrides, {
+        anthropicOAuthSession: session,
+        fetchImplementation: async (input, init) => {
+          requests.push({ url: String(input), ...(init === undefined ? {} : { init }) })
+          return new Response(JSON.stringify({
+            content: [{ type: 'text', text: 'ok' }],
+            stop_reason: 'end_turn',
+            usage: { input_tokens: 1, output_tokens: 1 },
+          }))
+        },
+      })
+      await client.complete!({ model, messages: [{ role: 'user', content: 'hi' }] })
+      return {
+        url: requests[0]?.url ?? '',
+        headers: requests[0]?.init?.headers as Record<string, string>,
+        body: String(requests[0]?.init?.body),
+      }
+    }
+
+    const minimax = await sent('MiniMax-M2', {
+      provider: 'minimax-cn',
+      api_key: 'minimax-key',
+      base_url: 'https://api.minimaxi.com/anthropic',
+    })
+    expect(minimax.url).toStartWith('https://api.minimaxi.com/anthropic/')
+    expect(minimax.headers['x-api-key']).toBe('minimax-key')
+    expect(minimax.headers.Authorization).toBeUndefined()
+    expect(minimax.body).not.toContain('Claude Code')
+    expect(JSON.stringify(minimax.headers)).not.toContain('SUBSCRIPTION')
+
+    // A key the profile names is the account the user chose to bill.
+    const keyed = await sent('claude-sonnet-4-6', { provider: 'anthropic', api_key: 'sk-ant-api03-profile' })
+    expect(keyed.headers['x-api-key']).toBe('sk-ant-api03-profile')
+    expect(keyed.headers.Authorization).toBeUndefined()
+
+    // A proxy in front of Anthropic is another host. With no key of its own
+    // the profile is refused (or takes an ambient API key), never the token.
+    const proxied = await sent('claude-sonnet-4-6', { provider: 'anthropic', api_key: '', base_url: 'https://proxy.example.test' })
+      .catch((error: unknown) => error)
+    expect(proxied instanceof Error ? proxied.message : JSON.stringify(proxied)).not.toContain('SUBSCRIPTION')
+  })
+})
+
+test('a signed-in Anthropic profile with no key of its own still uses the subscription', async () => {
+  await inTemporaryHome(async home => {
+    await storeAnthropicCredential(home, { access: 'sk-ant-oat01-SUBSCRIPTION', refresh: 'refresh-1', expires: NOW + 3_600 })
+    const requests: { init?: RequestInit }[] = []
+    const client = createLlmClient('claude-sonnet-4-6', { provider: 'anthropic', api_key: '' }, {
+      anthropicOAuthSession: new AnthropicOAuthSession({ xerxesHome: home, environment: {}, now: () => NOW }),
+      fetchImplementation: async (_input, init) => {
+        requests.push(init === undefined ? {} : { init })
+        return new Response(JSON.stringify({
+          content: [{ type: 'text', text: 'ok' }],
+          stop_reason: 'end_turn',
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }))
+      },
+    })
+    await client.complete!({ model: 'claude-sonnet-4-6', messages: [{ role: 'user', content: 'hi' }] })
+    expect((requests[0]?.init?.headers as Record<string, string>).Authorization).toBe('Bearer sk-ant-oat01-SUBSCRIPTION')
+  })
+})
+
+test('separate sessions on one credential file share a single refresh of the rotating token', async () => {
+  await inTemporaryHome(async home => {
+    await storeAnthropicCredential(home, { access: 'sk-ant-oat01-expired', refresh: 'refresh-1', expires: NOW - 1_000 })
+    const refreshTokensPosted: string[] = []
+    const fetchImplementation = async (_url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const body = JSON.parse(String(init?.body)) as Record<string, string>
+      refreshTokensPosted.push(body.refresh_token ?? '')
+      await new Promise(resolve => setTimeout(resolve, 10))
+      // The provider rotates the token: a second use of refresh-1 is refused.
+      if (refreshTokensPosted.filter(token => token === 'refresh-1').length > 1) {
+        return new Response(JSON.stringify({ error: 'invalid_grant' }), { status: 400 })
+      }
+      return new Response(JSON.stringify({ access_token: 'sk-ant-oat01-fresh', refresh_token: 'refresh-2', expires_in: 3_600 }))
+    }
+    // One session per LLM client, as createLlmClient builds them for parallel subagents.
+    const sessions = Array.from({ length: 3 }, () => new AnthropicOAuthSession({
+      xerxesHome: home,
+      environment: {},
+      now: () => NOW,
+      fetchImplementation,
+    }))
+
+    const credentials = await Promise.all(sessions.map(session => session.credential()))
+
+    expect(refreshTokensPosted).toEqual(['refresh-1'])
+    expect(credentials.map(credential => credential.access)).toEqual(Array(3).fill('sk-ant-oat01-fresh'))
+  })
 })

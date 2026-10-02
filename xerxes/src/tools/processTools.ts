@@ -356,6 +356,7 @@ export async function executeCommand(
   // and memoized, so a timer firing mid-spawn or duplicate requests converge on
   // one escalation sequence.
   let child: Bun.Subprocess | undefined
+  let childStartedAt = Date.now()
   let cancelRequested = false
   let termination: Promise<void> | undefined
   const requestTermination = (initialSignal: ProcessSignal): void => {
@@ -426,6 +427,7 @@ export async function executeCommand(
     // what makes the tree-wide kills above possible. The cost is that the child
     // no longer dies with us — which the normal path already accounts for by
     // reaping via `process.exited` and cancelling the drains unconditionally.
+    childStartedAt = Date.now()
     const process = Bun.spawn([command, ...args], {
       cwd,
       stdin: 'ignore',
@@ -468,6 +470,7 @@ export async function executeCommand(
             stdout: stdoutBuffer,
             stderr: stderrBuffer,
             name: [command, ...args].join(' ').slice(0, 60),
+            startedAt: childStartedAt,
           },
           handle => {
             // Seeded and repointed in one synchronous step, so no chunk lands
@@ -516,7 +519,7 @@ export async function executeCommand(
       ].join('\n'), 'AbortError')
     }
     // Ended by the memory guard: say so, or the agent sees only a killed process.
-    const guardNote = memoryGuardNote(child?.pid)
+    const guardNote = memoryGuardNote(child?.pid, childStartedAt)
     return {
       command: [command, ...args],
       cwd: await paths.relative(cwd),

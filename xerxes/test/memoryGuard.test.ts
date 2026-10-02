@@ -1,7 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { expect, test } from 'bun:test'
+import { expect, setSystemTime, test } from 'bun:test'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -9,6 +9,7 @@ import { join } from 'node:path'
 import {
   defaultMemoryLimitBytes,
   hostMemoryGuardPorts,
+  linuxFootprint,
   MemoryGuard,
   memoryGuardNote,
   memoryGuardSupported,
@@ -53,12 +54,74 @@ test('a child tree over the limit is stopped deepest first, and its tools are to
   expect(stops).toHaveLength(1)
   // Deepest first; the git command, the person's own shell and unrelated apps are untouched.
   expect(signals).toEqual([[202, 'SIGTERM'], [201, 'SIGTERM'], [200, 'SIGTERM']])
-  for (const pid of [200, 201, 202]) expect(memoryGuardNote(pid)).toContain('over the 8.0 GB limit')
-  expect(memoryGuardNote(300)).toBeUndefined()
+  for (const pid of [200, 201, 202]) expect(memoryGuardNote(pid, 0)).toContain('over the 8.0 GB limit')
+  expect(memoryGuardNote(300, 0)).toBeUndefined()
   // A tree being stopped is not stopped again on the next pass.
   expect(await guard.tick()).toHaveLength(0)
   await Bun.sleep(40)
   expect(signals.filter(([, signal]) => signal === 'SIGKILL').map(([pid]) => pid)).toEqual([202, 201, 200])
+})
+
+test('a forked worker pool is measured by what it holds, not once per worker for the pages it shares', async () => {
+  // daemon 100 → python 200 (6 GB) → 8 forked workers sharing its pages copy-on-write.
+  const workers = [201, 202, 203, 204, 205, 206, 207, 208]
+  const rows: ProcessRow[] = [{ pid: 200, ppid: 100, command: 'python train.py' }, ...workers.map(pid => ({ pid, ppid: 200, command: 'python train.py' }))]
+  const kb = (bytes: number) => Math.round(bytes / 1024)
+  // VmRSS bills every worker for the 6 GB it shares; PSS splits each shared page among the 9 mappers.
+  const proc: Record<string, string> = {}
+  for (const pid of [200, ...workers]) {
+    const own = pid === 200 ? 0.5 * GB : 0.1 * GB
+    proc[`/proc/${pid}/status`] = `Name:\tpython\nVmRSS:\t${kb(6 * GB + own)} kB\nRssAnon:\t${kb(6 * GB + own)} kB\n`
+    proc[`/proc/${pid}/smaps_rollup`] = `Rss:            ${kb(6 * GB + own)} kB\nPss:            ${kb(6 * GB / 9 + own)} kB\n`
+  }
+  const read = (path: string) => {
+    if (!(path in proc)) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+    return proc[path]!
+  }
+  const signals: Array<[number, string]> = []
+  const ports: MemoryGuardPorts = { listProcesses: async () => rows, footprintBytes: pid => linuxFootprint(pid, read), kill: (pid, signal) => { signals.push([pid, signal]) } }
+  // Half a 64 GB host: the job really holds about 7 GB.
+  expect(await new MemoryGuard({ rootPid: 100, limitBytes: () => 32 * GB, ports, graceMs: 10 }).tick()).toHaveLength(0)
+  expect(signals).toEqual([])
+  expect(linuxFootprint(200, read)).toBe(kb(6 * GB / 9 + 0.5 * GB) * 1024)
+  // An old kernel without smaps_rollup still does not count mapped files.
+  expect(linuxFootprint(1, () => { throw new Error('ENOENT') })).toBeUndefined()
+  expect(linuxFootprint(9, path => path.endsWith('status') ? 'VmRSS:\t900 kB\nRssAnon:\t100 kB\n' : (() => { throw new Error('ENOENT') })())).toBe(100 * 1024)
+})
+
+test('a stop note is not handed to a later process that reuses the pid', async () => {
+  const realNow = Date.now()
+  setSystemTime(new Date(realNow - 60_000))
+  try {
+    const { ports } = fakePorts([{ pid: 777_001, ppid: 100, command: 'pytest -n 40' }], { 777_001: 20 * GB })
+    expect(await new MemoryGuard({ rootPid: 100, limitBytes: () => 8 * GB, ports, graceMs: 10 }).tick()).toHaveLength(1)
+  } finally {
+    setSystemTime()
+  }
+  // The process the guard stopped started before the stop; a new one with that pid started after it.
+  expect(memoryGuardNote(777_001, realNow - 120_000)).toContain('[memory guard] Stopped')
+  expect(memoryGuardNote(777_001, realNow)).toBeUndefined()
+})
+
+test('a background command that exits normally on a pid the guard once stopped is not reported as stopped', async () => {
+  const { BackgroundCommandManager } = await import('../src/tools/backgroundCommands.js')
+  const manager = new BackgroundCommandManager()
+  const started = manager.start({ command: process.execPath, args: ['-e', 'console.error("fine")'], cwd: tmpdir() })
+  // An earlier stop recorded for this pid, before this process existed.
+  setSystemTime(new Date(Date.now() - 60_000))
+  try {
+    const { ports } = fakePorts([{ pid: started.pid, ppid: 100, command: 'old job' }], { [started.pid]: 20 * GB })
+    expect(await new MemoryGuard({ rootPid: 100, limitBytes: () => 8 * GB, ports, graceMs: 10 }).tick()).toHaveLength(1)
+  } finally {
+    setSystemTime()
+  }
+  try {
+    const result = await manager.check(started.procId, 10_000, 10_000)
+    expect(result).toMatchObject({ running: false, exitCode: 0 })
+    expect(result.stderr).not.toContain('[memory guard]')
+  } finally {
+    await manager.disposeAll()
+  }
 })
 
 test('an off guard, or trees under the limit, stop nothing', async () => {
@@ -92,6 +155,7 @@ test('the limit is the environment override, else the saved setting, else half t
 
 test.skipIf(!memoryGuardSupported())('a real command that outgrows the limit is stopped and noted', async () => {
   // A child that holds ~300 MB until it is killed.
+  const spawnedAt = Date.now()
   const child = Bun.spawn([process.execPath, '-e', 'const keep = Buffer.alloc(300 * 1024 * 1024, 1); setInterval(() => keep[0]++, 50)'], { stdout: 'ignore', stderr: 'ignore' })
   try {
     const ports = hostMemoryGuardPorts()
@@ -105,7 +169,7 @@ test.skipIf(!memoryGuardSupported())('a real command that outgrows the limit is 
     const stopped = await guard.tick()
     expect(stopped.map(stop => stop.rootPid)).toContain(child.pid)
     expect(await child.exited).not.toBe(0)
-    expect(memoryGuardNote(child.pid)).toContain('[memory guard] Stopped')
+    expect(memoryGuardNote(child.pid, spawnedAt)).toContain('[memory guard] Stopped')
   } finally {
     child.kill('SIGKILL')
   }

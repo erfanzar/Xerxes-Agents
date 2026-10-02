@@ -47,7 +47,7 @@ import {
 } from "./daemon/channels.js";
 import { loadSystemDaemonConfig, type DaemonConfig } from "./daemon/config.js";
 import type { DaemonInteractionBoard } from "./daemon/interactions.js";
-import { daemonPaths, xerxesHome } from "./daemon/paths.js";
+import { daemonPaths, recallMemoryDirectory, xerxesHome } from "./daemon/paths.js";
 import { createProductionInteractionBoard } from "./daemon/productionInteractions.js";
 import { agentProvider, profileAcceptsModel, sessionProvider } from './daemon/sessionProvider.js';
 import { RemoteProviderBindings } from "./daemon/remoteProviderBindings.js";
@@ -85,7 +85,6 @@ import type { SpawnedAgentSnapshot } from "./operators/subagents.js";
 import { mergePersistedSubagentSnapshots } from "./agents/subagentPersistence.js";
 import { AgentMemory } from "./memory/agentMemory.js";
 import { getAgentSelfMemory } from "./memory/agentSelfMemory.js";
-import { ContextualMemory } from "./memory/contextualMemory.js";
 import {
   BrowserManager,
   registerBrowserManagerTools,
@@ -170,7 +169,7 @@ import {
   registerClaudeWorkflowTools,
   registerCoreTools,
 } from "./tools/index.js";
-import type { MemoryToolContext } from "./tools/memoryTools.js";
+import { createMemoryToolContextResolver, type MemoryToolContextResolver } from "./tools/memoryToolContext.js";
 import { createAgentState } from "./streaming/events.js";
 import { runTurn } from "./streaming/loop.js";
 import { runBundledSkillCli } from "./skills/cli.js";
@@ -1040,7 +1039,17 @@ async function runDaemonOwned(
   });
   const { mcpManager, skillRegistry, agentPresetRoster } = await workspaces.get(projectDirectory ?? config.projectDirectory);
   const managedPlugins = new ManagedPlugins(join(xerxesHome(), "managed-plugins.json"));
-  await managedPlugins.load();
+  // A bad plugin manifest or module must not keep the daemon from starting:
+  // with no daemon, `/plugins disable` cannot reach it and every session is
+  // stuck until the manifest is hand-edited.
+  try {
+    await managedPlugins.load();
+    for (const entry of managedPlugins.inventory()) {
+      if (entry.loadError) console.error(`Managed plugin ${entry.name} (${entry.module}) was not loaded: ${entry.loadError}`);
+    }
+  } catch (error) {
+    console.error(`Managed plugins were not loaded: ${errorMessage(error)}`);
+  }
   const declarativeForge = new DeclarativeToolForge();
 
   // Shared by the tool registry that starts the processes and the RPC surface
@@ -1121,6 +1130,7 @@ async function runDaemonOwned(
       webSocket: new BunDiscordGatewayWebSocketPort(),
     },
     environment: process.env,
+    interactions,
     ...(projectDirectory === undefined ? {} : { projectDirectory }),
   });
   let finishDaemon: (() => void) | undefined;
@@ -1739,7 +1749,7 @@ function daemonRuntime(
     workspaceRoot: join(home, "agents"),
   });
   const agentMemories = new Map<string, AgentMemory>();
-  const memoryToolContext = memoryToolContextResolver();
+  const memoryToolContext = memoryToolContextResolver(workspaceRoot);
   const memoryForProject = (root: string): AgentMemory => {
     const normalizedRoot = resolve(root);
     const existing = agentMemories.get(normalizedRoot);
@@ -1901,8 +1911,13 @@ function daemonRuntime(
             typeof projectRoot === "string" ? projectRoot : workspaceRoot,
           );
         },
-        resolveSelfMemory: (context) =>
-          getAgentSelfMemory(context.agentId ?? "default"),
+        resolveSelfMemory: (context) => {
+          const projectRoot = context.metadata.project_root;
+          return getAgentSelfMemory(
+            context.agentId ?? "default",
+            typeof projectRoot === "string" ? projectRoot : workspaceRoot,
+          );
+        },
       },
       memoryTools: { resolveContext: memoryToolContext.resolve },
     });
@@ -1921,7 +1936,7 @@ function daemonRuntime(
       registerDaemonQuestionTool(tools);
     }
     if (resources.skillRegistry) {
-      registerClaudeSkillTool(tools, resources.skillRegistry);
+      registerClaudeSkillTool(tools, resources.skillRegistry, "default", () => getActiveSession<{ cwd: string }>()?.cwd ?? workspaceRoot);
     }
     // Same-session goals: the model states lifecycle through typed calls
     // instead of the runtime inferring it from English phrases in the prose.
@@ -2122,7 +2137,16 @@ function daemonRuntime(
           ? session.metadata.project_root
           : session.cwd,
       ),
-      agentSelfMemory: (session) => getAgentSelfMemory(session.agentId),
+      // Same project root the turn hands its tools as metadata.project_root,
+      // so the notes agent_memory_sync_context writes are the ones read back.
+      agentSelfMemory: (session) => getAgentSelfMemory(
+        session.agentId,
+        session.metadata.session_kind === "subagent" &&
+        typeof session.metadata.project_root === "string" &&
+        session.metadata.project_root.trim()
+          ? session.metadata.project_root
+          : session.cwd,
+      ),
       bootstrapSystemPrompt: ({ agentId, session, model, tools: runnerTools }) =>
         bootstrap({
           cwd: session.cwd,
@@ -2503,7 +2527,7 @@ async function acpServer(
   registerConfiguredLspTool(tools, lspManager, () => getActiveSession<{ cwd: string }>()?.cwd ?? workspaceRoot);
   const skillRegistry = new SkillRegistry({ workspaceTrust: trustedHashWorkspaceSkills() });
   await skillRegistry.refresh(...defaultSkillDiscoveryRoots({ cwd: workspaceRoot }));
-  const memoryToolContext = memoryToolContextResolver();
+  const memoryToolContext = memoryToolContextResolver(workspaceRoot);
   const acpComputerUseTool = createMacOSComputerUseToolOptions(config.runtime);
   registerCoreTools(tools, {
     modelInventory: profileInventoryHost(profileStore, new AgentSettingsStore(join(xerxesHome(), 'daemon', 'agent-settings.sqlite'))),
@@ -2514,7 +2538,7 @@ async function acpServer(
     agentMemoryTools: {
       memory: new AgentMemory({ projectRoot: workspaceRoot }),
       resolveSelfMemory: (context) =>
-        getAgentSelfMemory(context.agentId ?? "default"),
+        getAgentSelfMemory(context.agentId ?? "default", typeof context.metadata.project_root === "string" ? context.metadata.project_root : workspaceRoot),
     },
     memoryTools: { resolveContext: memoryToolContext.resolve },
   });
@@ -2527,7 +2551,7 @@ async function acpServer(
   addModelInventoryToBuiltinAgents(definitions);
   const agent = definitions.get("default");
   const agentId = agent?.name ?? "default";
-  const selfMemory = getAgentSelfMemory(agentId);
+  const selfMemory = getAgentSelfMemory(agentId, workspaceRoot);
   const model = agent?.model || connection.model;
   const maxTokens = connection.maxTokens;
   const maxOutputTokens = (candidate: string): number | undefined =>
@@ -2690,7 +2714,7 @@ async function runOneShot(
   registerConfiguredLspTool(tools, lspManager, () => getActiveSession<{ cwd: string }>()?.cwd ?? workspaceRoot);
   const skillRegistry = new SkillRegistry({ workspaceTrust: trustedHashWorkspaceSkills() });
   await skillRegistry.refresh(...defaultSkillDiscoveryRoots({ cwd: workspaceRoot }));
-  const memoryToolContext = memoryToolContextResolver();
+  const memoryToolContext = memoryToolContextResolver(workspaceRoot);
   const agentMemory = new AgentMemory({ projectRoot: workspaceRoot });
   const computerUseTool = createMacOSComputerUseToolOptions(config.runtime);
   registerCoreTools(tools, {
@@ -2702,7 +2726,7 @@ async function runOneShot(
     agentMemoryTools: {
       memory: agentMemory,
       resolveSelfMemory: (context) =>
-        getAgentSelfMemory(context.agentId ?? "default"),
+        getAgentSelfMemory(context.agentId ?? "default", typeof context.metadata.project_root === "string" ? context.metadata.project_root : workspaceRoot),
     },
     memoryTools: { resolveContext: memoryToolContext.resolve },
   });
@@ -2723,7 +2747,7 @@ async function runOneShot(
           builtinDefinitions: definitions,
           cwd: workspaceRoot,
         });
-  const selfMemory = getAgentSelfMemory(agent?.name ?? "default");
+  const selfMemory = getAgentSelfMemory(agent?.name ?? "default", workspaceRoot);
   const model = agent?.model || connection.model;
   const maxTokens = connection.maxTokens;
   const maxOutputTokens = (candidate: string): number | undefined =>
@@ -2986,27 +3010,9 @@ function joinSystemPrompts(
   return prompt || undefined;
 }
 
-function memoryToolContextResolver(): {
-  readonly prune: (sessionId: string) => void;
-  readonly resolve: (context: ToolExecutionContext) => MemoryToolContext;
-} {
-  const memories = new Map<string, ContextualMemory>();
-  return {
-    prune(sessionId) {
-      const prefix = `${sessionId}:`;
-      for (const key of memories.keys()) {
-        if (key.startsWith(prefix)) memories.delete(key);
-      }
-    },
-    resolve(context) {
-      const agentId = context.agentId ?? "default";
-      const key = (context.sessionId ?? "sessionless") + ":" + agentId;
-      let memory = memories.get(key);
-      if (!memory) {
-        memory = new ContextualMemory();
-        memories.set(key, memory);
-      }
-      return { agentId, memory };
-    },
-  };
+function memoryToolContextResolver(defaultProjectRoot: string): MemoryToolContextResolver {
+  return createMemoryToolContextResolver({
+    directory: recallMemoryDirectory(),
+    defaultProjectRoot,
+  });
 }

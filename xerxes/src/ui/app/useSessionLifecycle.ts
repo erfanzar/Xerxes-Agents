@@ -148,18 +148,27 @@ const seedTurnClock = (
   setTurnStartedAt?.(startedMs)
 }
 
-const trimTail = (items: Msg[]) => {
-  const q = [...items]
+/**
+ * Drop the exchange the daemon just undid: its user row and everything the
+ * turn rendered after it. Trimming by role from the tail stopped at the
+ * `/undo` echo (and at a turn's role:'system' tool trail), so nothing was
+ * removed while the session the model sees had already lost it. The echo of
+ * the command being run is kept.
+ */
+export const trimLastExchange = (items: Msg[]): Msg[] => {
+  const start = items.findLastIndex(item => item.role === 'user')
 
-  while (q.at(-1)?.role === 'assistant' || q.at(-1)?.role === 'tool') {
-    q.pop()
+  if (start < 0) {
+    return items
   }
 
-  if (q.at(-1)?.role === 'user') {
-    q.pop()
+  let keepFrom = items.length
+
+  while (keepFrom > start + 1 && items[keepFrom - 1]?.kind === 'slash') {
+    keepFrom--
   }
 
-  return q
+  return [...items.slice(0, start), ...items.slice(keepFrom)]
 }
 
 export interface UseSessionLifecycleOptions {
@@ -214,6 +223,20 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
 
     return queued
   }, [])
+  // `sid` names the session being left until a switch commits. Hold composer
+  // submissions for that whole window; only the newest generation releases.
+  const beginSwitch = useCallback(() => {
+    patchUiState({ switching: true })
+
+    return ++switchGenerationRef.current
+  }, [])
+  const settleSwitch = useCallback((generation: number) => {
+    if (generation !== switchGenerationRef.current) return
+    // A committed switch already carried its held prompts over; one that
+    // failed leaves them queued on the session the user is still in.
+    composerActions.releaseSwitchHold()
+    if (getUiState().switching) patchUiState({ switching: false })
+  }, [composerActions])
 
   // Native sessions are durable records rather than closeable daemon handles.
   // Keep callers' lifecycle sequencing intact without sending the retired
@@ -253,9 +276,8 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
     [composerActions, setHistoryItems, setLastUserMsg, setStickyPrompt]
   )
 
-  const startNewSession = useCallback(
-    async (msg?: string, title?: string, keepCurrent = false, agentPreset?: string) => {
-      const generation = ++switchGenerationRef.current
+  const createSessionFor = useCallback(
+    async (generation: number, msg?: string, title?: string, keepCurrent = false, agentPreset?: string) => {
       const setup = await rpc<SetupStatusResponse>('setup.status', {})
       if (generation !== switchGenerationRef.current) return null
 
@@ -297,6 +319,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
         info,
         sid: r.session_id,
         status: info?.version ? 'ready' : 'starting agent…',
+        switching: false,
         usage: usageFrom(info)
       })
 
@@ -345,6 +368,18 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
     [closeSession, colsRef, panel, resetSession, rpc, runClientSwitch, setHistoryItems, setSessionStartedAt, sys]
   )
 
+  const startNewSession = useCallback(
+    async (msg?: string, title?: string, keepCurrent = false, agentPreset?: string) => {
+      const generation = beginSwitch()
+      try {
+        return await createSessionFor(generation, msg, title, keepCurrent, agentPreset)
+      } finally {
+        settleSwitch(generation)
+      }
+    },
+    [beginSwitch, createSessionFor, settleSwitch]
+  )
+
   const newSession = useCallback(
     (msg?: string, title?: string, agentPreset?: string) => startNewSession(msg, title, false, agentPreset),
     [startNewSession]
@@ -370,21 +405,33 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
         return
       }
 
-      const generation = ++switchGenerationRef.current
+      const generation = beginSwitch()
       patchUiState({ status: 'switching session…' })
+      // Set while this switch holds the target's stream at the transport.
+      let held: null | string = null
 
       runClientSwitch(generation, () =>
         gw.request<SessionActivateResponse>('session.activate', { session_id: id })
       )
         .then(raw => {
-          if (generation !== switchGenerationRef.current) return
           const r = asRpcResult<SessionActivateResponse>(raw)
+          if (generation !== switchGenerationRef.current) {
+            // Superseded: this view will never be shown, and its held events
+            // must not stay armed and swallow the next session's stream.
+            if (r?.recovery_pending) gw.discardSessionRecovery(r.session_id)
+            return
+          }
 
           if (!r) {
+            // No session id to match, but this is the newest switch, so any
+            // hold is its own; left armed it would buffer every later event.
+            gw.discardSessionRecovery()
             sys('error: invalid response: session.activate')
 
             return patchUiState({ status: 'ready' })
           }
+
+          if (r.recovery_pending) held = r.session_id
 
           const info = r.info ?? null
           const running = Boolean(r.running || r.status === 'working' || r.status === 'waiting')
@@ -406,24 +453,34 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
             info,
             sid: r.session_id,
             status: statusFromLiveSession(r.status, running),
+            switching: false,
             usage: usageFrom(info)
           })
           hydrateLiveSessionInflight(r.inflight)
           turnController.recordTodos(r.todos)
+          // Only now may the stream that arrived during the switch (deltas,
+          // turn_end, drained notices, pending approvals) land on this view;
+          // applied earlier, resetSession() above wiped it.
+          held = null
+          if (r.recovery_pending) gw.finishSessionRecovery(r.session_id)
           setTimeout(() => scrollRef.current?.scrollToBottom(), 0)
         })
         .catch((e: Error) => {
+          // The view never committed, so there is nothing to replay onto; an
+          // armed hold would otherwise swallow every later event.
+          if (held) gw.discardSessionRecovery(held)
           if (generation !== switchGenerationRef.current) return
           sys(`error: ${e.message}`)
           patchUiState({ status: 'ready' })
         })
+        .finally(() => settleSwitch(generation))
     },
-    [gw, resetSession, runClientSwitch, scrollRef, setHistoryItems, setSessionStartedAt, setTurnStartedAt, sys]
+    [beginSwitch, gw, resetSession, runClientSwitch, scrollRef, setHistoryItems, setSessionStartedAt, setTurnStartedAt, settleSwitch, sys]
   )
 
   const resumeById = useCallback(
     (id: string, options: { keepCurrent?: boolean; preserveView?: boolean } = {}) => {
-      const generation = ++switchGenerationRef.current
+      const generation = beginSwitch()
       patchOverlayState({ sessions: false })
       patchUiState({ status: 'resuming…' })
 
@@ -437,19 +494,26 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
         }
 
         const previousSid = getUiState().sid
+        let held: null | string = null
 
-        runClientSwitch(generation, () =>
+        return runClientSwitch(generation, () =>
           gw.request<SessionResumeResponse>('session.resume', { cols: colsRef.current, session_id: id, ...(options.preserveView ? { preserve_view: true } : {}) })
         )
           .then(raw => {
-            if (generation !== switchGenerationRef.current) return
             const r = asRpcResult<SessionResumeResponse>(raw)
+            if (generation !== switchGenerationRef.current) {
+              if (r?.recovery_pending) gw.discardSessionRecovery(r.session_id)
+              return
+            }
 
             if (!r) {
+              gw.discardSessionRecovery()
               sys('error: invalid response: session.resume')
 
               return patchUiState({ status: 'ready' })
             }
+
+            if (r.recovery_pending) held = r.session_id
 
             const info = r.info ?? null
             const running = Boolean(r.running || r.status === 'working' || r.status === 'waiting')
@@ -481,12 +545,14 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
               info,
               sid: r.session_id,
               status: statusFromLiveSession(r.status, running),
+              switching: false,
               usage: usageFrom(info)
             })
             if (!replaying) {
               hydrateLiveSessionInflight(r.inflight)
               turnController.recordTodos(r.todos)
             }
+            held = null
             if (r.recovery_pending) gw.finishSessionRecovery(r.session_id)
             if (recovering) patchTurnState(state => ({ ...state,
               activity: state.activity.filter(item => item.text !== 'gateway connection lost · recovering session…')
@@ -507,13 +573,14 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
             }, 0)
           })
           .catch((e: Error) => {
+            if (held) gw.discardSessionRecovery(held)
             if (generation !== switchGenerationRef.current) return
             sys(`error: ${e.message}`)
             patchUiState({ status: 'ready' })
           })
-      })
+      }).finally(() => settleSwitch(generation))
     },
-    [closeSession, colsRef, gw, panel, resetSession, rpc, runClientSwitch, scrollRef, setHistoryItems, setSessionStartedAt, setTurnStartedAt, sys]
+    [beginSwitch, closeSession, colsRef, gw, panel, resetSession, rpc, runClientSwitch, scrollRef, setHistoryItems, setSessionStartedAt, setTurnStartedAt, settleSwitch, sys]
   )
 
   /** Agent View attach: promote saved history without replacing live work. */
@@ -545,6 +612,6 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
     resetSession,
     resetVisibleHistory,
     resumeById,
-    trimLastExchange: trimTail
+    trimLastExchange
   }
 }

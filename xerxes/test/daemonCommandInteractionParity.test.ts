@@ -11,6 +11,7 @@ import { COMPACTION_REFERENCE_PREFIX } from '../src/context/compressor.js'
 import { DaemonInteractionBoard } from '../src/daemon/interactions.js'
 import { InMemoryDaemonRuntime, type DaemonEvent, type DaemonSession, type TurnRunControls, type TurnRunner } from '../src/daemon/runtime.js'
 import { DaemonServer } from '../src/daemon/server.js'
+import type { PermissionRequest } from '../src/streaming/events.js'
 import { ToolRegistry } from '../src/executors/toolRegistry.js'
 import { registerFileTools } from '../src/tools/fileTools.js'
 import { registerProjectSetupTool } from '../src/tools/projectSetup.js'
@@ -620,6 +621,80 @@ test('an update restart resumes every armed goal at startup, not only the sessio
   } finally { await fresh.stop(); await rm(root, { recursive: true, force: true }) }
 })
 
+test('a goal resumed after an update restart can ask a leased window, and a window opened later still sees the wait', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-goal-ownerless-'))
+  const goalRearmFile = join(root, 'daemon', 'goal-rearm.json')
+  const sessionDirectory = join(root, 'sessions')
+  const before = new InMemoryDaemonRuntime({ async *run() {} }, { currentProjectDirectory: root, sessionDirectory })
+  const goalSession = await before.openSession('ownerless-goal', undefined, { cwd: root })
+  createGoal(goalSession.metadata, goalSession.id, { objective: 'send the nightly report' }, Date.now())
+  const old = new DaemonServer({ socketPath: join(root, 'old.sock'), runtime: before, goalRearmFile, onRestart: () => {} })
+  await old.start()
+  const restarter = await DaemonParityClient.connect(join(root, 'old.sock'))
+  try {
+    restarter.send({ jsonrpc: '2.0', id: 1, method: 'runtime.restart_if_idle', params: {} })
+    expect((await restarter.next(frame => frame.id === 1)).result).toEqual({ ok: true })
+  } finally { restarter.close(); await old.stop() }
+
+  resetGoalActivations()
+  const interactions = new DaemonInteractionBoard()
+  const gate = Promise.withResolvers<void>()
+  let rounds = 0
+  const runner: TurnRunner = {
+    async *run(session, _text, signal) {
+      if (++rounds > 1) return
+      await gate.promise
+      const request: PermissionRequest = { requestId: 'goal-approval', description: 'Send the report.', inputs: {}, toolCall: { id: 'send-1', type: 'function', function: { name: 'send_message', arguments: {} } } }
+      yield { type: 'approval_request', payload: { id: request.requestId, request_id: request.requestId, description: request.description } }
+      yield { type: 'text_part', payload: { text: 'approval:' + await interactions.permissionBroker(session.id).request(request, signal) } }
+      const answer = await interactions.ask(session.id, { question: 'Which channel?', options: ['email', 'chat'], allowFreeform: false }, signal)
+      yield { type: 'text_part', payload: { text: 'answer:' + answer } }
+    },
+  }
+  const after = new InMemoryDaemonRuntime(runner, { currentProjectDirectory: root, sessionDirectory, interactions })
+  const socketPath = join(root, 'new.sock')
+  const fresh = new DaemonServer({ socketPath, runtime: after, goalRearmFile, interactions })
+  await fresh.start()
+  const clients: DaemonParityClient[] = []
+  let id = 0
+  const rpc = async (client: DaemonParityClient, method: string, params: Record<string, unknown> = {}) => {
+    const request = ++id
+    client.send({ jsonrpc: '2.0', id: request, method, params })
+    return client.next(frame => frame.id === request)
+  }
+  const event = (type: string) => (frame: Frame) => frame.method === 'event' && frame.params?.type === type
+  try {
+    for (let tries = 0; tries < 100 && rounds < 1; tries++) await Bun.sleep(20)
+    expect(rounds).toBe(1)
+    // The desktop reconnects with a lease, so its answers arrive as the lease owner.
+    const window = await DaemonParityClient.connect(socketPath)
+    clients.push(window)
+    expect((await rpc(window, 'initialize', { resume_session_id: goalSession.id, project_dir: root, session_owned_turns: true })).result?.ok).toBe(true)
+    expect((await rpc(window, 'connection.lease')).result?.ok).toBe(true)
+    gate.resolve()
+    await window.next(event('approval_request'))
+    expect((await rpc(window, 'permission_response', { request_id: 'goal-approval', response: 'approve' })).result).toEqual({ ok: true })
+    expect((await window.next(event('text_part'))).params?.payload).toMatchObject({ text: 'approval:approve' })
+
+    const question = await window.next(event('question_request'))
+    const questionId = question.params?.payload?.id
+    // A second window opened after the question was asked replays and answers it.
+    const later = await DaemonParityClient.connect(socketPath)
+    clients.push(later)
+    const reopened = await rpc(later, 'initialize', { resume_session_id: goalSession.id, project_dir: root, session_owned_turns: true })
+    expect(reopened.result?.pending_interactions).toMatchObject([{ type: 'question_request', payload: { id: questionId } }])
+    expect((await rpc(later, 'question_response', { request_id: questionId, answers: { answer: 'chat' } })).result).toEqual({ ok: true })
+    // The first window learns the question was answered elsewhere.
+    expect((await window.next(event('question_response'))).params?.payload).toEqual({ id: questionId, answers: { answer: 'chat' } })
+    expect((await window.next(event('text_part'))).params?.payload).toMatchObject({ text: 'answer:chat' })
+  } finally {
+    gate.resolve()
+    clients.forEach(client => client.close())
+    await fresh.stop()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('a goal round a forced restart cut short continues in the fresh process instead of blocking for review', async () => {
   const root = await mkdtemp(join(tmpdir(), 'xerxes-goal-forced-'))
   const runtime = new InMemoryDaemonRuntime({ async *run() {} }, { currentProjectDirectory: root, sessionDirectory: join(root, 'sessions') })
@@ -756,6 +831,50 @@ test('a client attaching mid-turn sees everything the running turn has done so f
     await turn
     expect(runtime.liveTurnMessages(session)).toBeUndefined()
   } finally { client.close(); await server.stop(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('a reload during a running turn keeps that turn visible to clients that reopen the session', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-live-reload-'))
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  let started!: () => void
+  const running = new Promise<void>(resolve => { started = resolve })
+  // Each factory call is a fresh runner with its own per-session state, like
+  // the daemon's WorkspaceTurnRunner.
+  const createRunner = (label: string) => {
+    const live = new Map<string, unknown[]>()
+    return {
+      async *run(session: DaemonSession) {
+        live.set(session.id, [{ role: 'user', content: 'keep going' }, { role: 'assistant', content: `Round one on ${label}.` }])
+        started()
+        await gate
+        live.delete(session.id)
+        yield { type: 'text_part' as const, payload: { text: 'done' } }
+      },
+      liveMessages: (session: DaemonSession) => live.get(session.id) as never,
+      toolInventory: () => [{ name: `tool_from_${label}`, exposure: 'loaded' as const, reason: 'test' }],
+    }
+  }
+  let generation = 0
+  const runtime = new InMemoryDaemonRuntime(createRunner('initial') as never, {
+    currentProjectDirectory: root,
+    sessionDirectory: join(root, 'sessions'),
+    turnRunnerFactory: () => createRunner(`reload-${++generation}`) as never,
+  })
+  try {
+    runtime.reload({})
+    const session = await runtime.openSession('long-goal', undefined, { cwd: root })
+    const turn = runtime.submitTurn(session.sessionKey, 'keep going', () => {})
+    await running
+    runtime.reload({})
+    expect(JSON.stringify(runtime.liveTurnMessages(session))).toContain('Round one on reload-1.')
+    // The running turn can still only call the tools of the runner it started on.
+    expect(runtime.toolInventory(session.sessionKey)?.map(entry => entry.name)).toEqual(['tool_from_reload-1'])
+    release()
+    await turn
+    expect(runtime.liveTurnMessages(session)).toBeUndefined()
+    expect(runtime.toolInventory(session.sessionKey)?.map(entry => entry.name)).toEqual(['tool_from_reload-2'])
+  } finally { release(); await rm(root, { recursive: true, force: true }) }
 })
 
 test('a busy runtime names what it is waiting on, and restarts now when told to', async () => {

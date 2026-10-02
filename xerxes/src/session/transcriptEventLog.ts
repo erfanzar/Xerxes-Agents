@@ -12,6 +12,12 @@ interface TranscriptEventBase extends TranscriptEventIdentity {
 }
 
 export interface TranscriptMessageAppendedEvent {
+  /**
+   * The session's project directory when the message was written. A journal
+   * with no snapshot beside it is the whole record of a first turn, and
+   * without this a recovered session took the daemon's own directory.
+   */
+  readonly cwd?: string
   readonly eventId?: string
   readonly eventSchemaVersion: typeof TRANSCRIPT_EVENT_SCHEMA_VERSION
   readonly index: number
@@ -78,11 +84,11 @@ export interface TranscriptEventRecordReadResult extends TranscriptEventReadResu
 }
 
 export function transcriptMessageAppendedEvent(
-  sessionId: string, index: number, message: TranscriptEventMessage, identity?: TranscriptEventIdentity,
+  sessionId: string, index: number, message: TranscriptEventMessage, identity?: TranscriptEventIdentity, cwd?: string,
 ): TranscriptMessageAppendedEvent {
   if (!sessionId || !Number.isSafeInteger(index) || index < 0 || !isRecord(message)
     || (identity !== undefined && !validIdentity(identity))) throw new TypeError('invalid transcript message event')
-  return { ...(identity ?? {}), eventSchemaVersion: 1, index, message: { ...message }, sessionId, type: 'message_appended' }
+  return { ...(identity ?? {}), ...(cwd ? { cwd } : {}), eventSchemaVersion: 1, index, message: { ...message }, sessionId, type: 'message_appended' }
 }
 
 export function transcriptTurnStartedEvent(
@@ -145,7 +151,7 @@ export function encodeTranscriptEvent(event: TranscriptEvent): string {
     ...(event.sequence === undefined ? {} : { sequence: event.sequence }),
   }
   return `${JSON.stringify(event.type === 'message_appended'
-    ? { ...common, index: event.index, message: event.message }
+    ? { ...common, index: event.index, ...(event.cwd ? { cwd: event.cwd } : {}), message: event.message }
     : { ...common, turn_id: event.turnId, details: event.details })}\n`
 }
 
@@ -159,7 +165,9 @@ export function parseTranscriptEvent(raw: unknown, expectedSessionId: string): T
   if (raw.type === 'message_appended') {
     if (!validMessage(raw)) return undefined
     if (!identity && ('event_id' in raw || 'sequence' in raw)) return undefined
-    return transcriptMessageAppendedEvent(expectedSessionId, Number(raw.index), raw.message, identity)
+    // Older rows carry no cwd; a malformed one is ignored rather than failing the row.
+    const cwd = typeof raw.cwd === 'string' && raw.cwd ? raw.cwd : undefined
+    return transcriptMessageAppendedEvent(expectedSessionId, Number(raw.index), raw.message, identity, cwd)
   }
   if (!identity || typeof raw.turn_id !== 'string' || !raw.turn_id || !isRecord(raw.details)) return undefined
   try {

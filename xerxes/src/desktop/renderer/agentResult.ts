@@ -18,19 +18,50 @@ const MAX_REPAIRS = 32
 export function agentResult(raw: string): AgentResult | null {
   const text = raw.trim()
   if (!text.startsWith('{')) return null
-  const whole = objectOf(text)
-  if (whole) return { fields: whole, complete: true }
+  const scan = scanJson(text)
+  // The object closed: whatever follows is the agent's prose, not a cut.
+  if (scan.end !== undefined) {
+    const whole = objectOf(text.slice(0, scan.end + 1))
+    return whole ? { fields: whole, complete: true } : null
+  }
   // An excerpt ends with an ellipsis the trimming added, not the agent.
   let excerpt = text.replace(/…$/, '')
+  const commas = scanJson(excerpt).commas
   for (let attempt = 0; attempt < MAX_REPAIRS && excerpt.length > 1; attempt++) {
     const closed = objectOf(closeJson(excerpt))
     if (closed) return { fields: closed, complete: false }
-    // The tail is a key or a value cut mid-token: drop back one field.
-    const comma = excerpt.lastIndexOf(',')
-    if (comma <= 0) return null
+    // The tail is a key or a value cut mid-token: drop back one field. Only a
+    // comma between values counts; one inside a string is part of its text.
+    const comma = commas.pop()
+    if (comma === undefined || comma <= 0) return null
     excerpt = excerpt.slice(0, comma)
   }
   return null
+}
+
+/** Where the leading object closes, if it does, and the commas outside strings before that. */
+function scanJson(text: string): { end?: number; commas: number[] } {
+  const commas: number[] = []
+  let depth = 0
+  let inString = false
+  let escaped = false
+  for (let index = 0; index < text.length; index++) {
+    const char = text[index]
+    if (inString) {
+      if (escaped) escaped = false
+      else if (char === '\\') escaped = true
+      else if (char === '"') inString = false
+      continue
+    }
+    if (char === '"') inString = true
+    else if (char === ',') commas.push(index)
+    else if (char === '{' || char === '[') depth++
+    else if (char === '}' || char === ']') {
+      depth--
+      if (depth === 0) return { end: index, commas }
+    }
+  }
+  return { commas }
 }
 
 function objectOf(text: string): Record<string, unknown> | null {

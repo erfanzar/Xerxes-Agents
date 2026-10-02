@@ -11,6 +11,9 @@ import { GoalTokenLedger } from '../src/runtime/goalTokenLedger.js'
 import { GoalTokenBudget } from '../src/runtime/goalTokenBudget.js'
 import { SubAgentManager } from '../src/agents/subagentManager.js'
 import { completeLlm, type LlmClient } from '../src/llms/client.js'
+import { ProviderError } from '../src/core/errors.js'
+import { createAgentState, type StreamEvent } from '../src/streaming/events.js'
+import { runTurn } from '../src/streaming/loop.js'
 
 function fixture(work: (ledger: GoalTokenLedger) => void) {
   const directory = mkdtempSync(join(tmpdir(), 'xerxes-goal-token-scope-'))
@@ -113,5 +116,54 @@ test('provider completions account for reported cache tokens before admitting an
     })
     expect(calls).toBe(1)
     expect(ledger.inspect(session.id, goal.id)).toMatchObject({ inputTokens: 8, outputTokens: 2, measuredCalls: 1, complete: true })
+  } finally { ledger.close(); rmSync(directory, { recursive: true, force: true }) }
+})
+
+test('a request the provider rejected before streaming does not block a capped goal', async () => {
+  // Regression: the loop settled a 429 attempt as unknown spend, so the retry's
+  // admission found an unmeasured receipt and blocked the goal for good.
+  const directory = mkdtempSync(join(tmpdir(), 'xerxes-goal-rejected-'))
+  const ledger = new GoalTokenLedger(join(directory, 'ledger.sqlite'))
+  const session = { id: 'rejected-owner', metadata: {} }
+  const goal = createGoal(session.metadata, session.id, { objective: 'retry work', maxTotalTokens: 1_000 }, 1000)
+  ledger.initialize(session.id, goal.id, true)
+  let calls = 0
+  const llm: LlmClient = { async *stream() {
+    calls++
+    if (calls === 1) throw new ProviderError('anthropic', 'stream request failed (429): rate limited', undefined, { status: 429 })
+    yield { content: 'done', usage: { inputTokens: 3, outputTokens: 2 } }
+  } }
+  const budget = new GoalTokenBudget(() => session, ledger, 'owner', session.id)
+  try {
+    const events: StreamEvent[] = []
+    await withModelCallBudget(budget, async () => {
+      for await (const event of runTurn({ model: 'test', state: createAgentState(), userMessage: 'go' }, { delay: async () => undefined, llm, retryDelays: [0] })) events.push(event)
+    })
+    expect(calls).toBe(2)
+    expect(events.some(event => event.type === 'text' && event.text === 'done')).toBe(true)
+    expect(getGoal(session.metadata, session.id)?.phase).toBe('active')
+    expect(ledger.inspect(session.id, goal.id)).toMatchObject({ inputTokens: 3, outputTokens: 2, settledCalls: 2, complete: true })
+    // A later round (or /goal resume) is still admitted.
+    expect(() => ledger.assertAdmission(session.id, goal.id, 'owner', 1_000)).not.toThrow()
+  } finally { ledger.close(); rmSync(directory, { recursive: true, force: true }) }
+})
+
+test('a stream that fails after output still settles as unknown spend', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'xerxes-goal-dropped-'))
+  const ledger = new GoalTokenLedger(join(directory, 'ledger.sqlite'))
+  const session = { id: 'dropped-owner', metadata: {} }
+  const goal = createGoal(session.metadata, session.id, { objective: 'dropped work', maxTotalTokens: 1_000 }, 1000)
+  ledger.initialize(session.id, goal.id, true)
+  const llm: LlmClient = { async *stream() {
+    yield { content: 'partial' }
+    throw new ProviderError('anthropic', 'stream failed (500) mid-response', undefined, { status: 500 })
+  } }
+  const budget = new GoalTokenBudget(() => session, ledger, 'owner', session.id)
+  try {
+    await withModelCallBudget(budget, async () => {
+      for await (const _event of runTurn({ model: 'test', state: createAgentState(), userMessage: 'go' }, { delay: async () => undefined, llm, retryDelays: [0] })) { /* drain */ }
+    })
+    expect(ledger.inspect(session.id, goal.id)).toMatchObject({ complete: false })
+    expect(getGoal(session.metadata, session.id)?.phase).toBe('blocked')
   } finally { ledger.close(); rmSync(directory, { recursive: true, force: true }) }
 })

@@ -26,6 +26,7 @@ export function useQueue() {
   const queueRef = useRef<QueuedMessage[]>([])
   const activeSessionRef = useRef<null | string>(null)
   const sessionQueuesRef = useRef(new Map<string, QueuedMessage[]>())
+  const heldForSwitchRef = useRef(new Set<QueuedMessage>())
   const [queuedDisplay, setQueuedDisplay] = useState<string[]>([])
   const queueEditRef = useRef<number | null>(null)
   const [queueEditIdx, setQueueEditIdx] = useState<number | null>(null)
@@ -49,14 +50,19 @@ export function useQueue() {
   const activateSessionQueue = useCallback(
     (sessionId: string) => {
       const previousSessionId = activeSessionRef.current
+      const held = heldForSwitchRef.current
+      heldForSwitchRef.current = new Set()
 
       if (previousSessionId === sessionId) {
         return
       }
 
       if (previousSessionId) {
-        sessionQueuesRef.current.set(previousSessionId, queueRef.current)
-        queueRef.current = sessionQueuesRef.current.get(sessionId) ?? []
+        // A prompt typed while this switch was in flight was authored for
+        // the session being opened, not the one being left behind.
+        const carried = queueRef.current.filter(message => held.has(message))
+        sessionQueuesRef.current.set(previousSessionId, queueRef.current.filter(message => !held.has(message)))
+        queueRef.current = [...(sessionQueuesRef.current.get(sessionId) ?? []), ...carried]
       }
 
       activeSessionRef.current = sessionId
@@ -66,6 +72,22 @@ export function useQueue() {
     },
     [setQueueEdit, syncQueue]
   )
+
+  const holdForSwitch = useCallback(
+    (message: QueuedMessage) => {
+      heldForSwitchRef.current.add(message)
+      queueRef.current = appendQueuedMessage(queueRef.current, message)
+      syncQueue()
+    },
+    [syncQueue]
+  )
+
+  // A failed or refused switch leaves the user on the session they were in,
+  // with the held prompt visible in its queue. Still marked held, it would be
+  // carried off by whichever unrelated switch came next.
+  const releaseSwitchHold = useCallback(() => {
+    heldForSwitchRef.current = new Set()
+  }, [])
 
   const enqueue = useCallback(
     (submitText: string, displayText = submitText) => {
@@ -109,10 +131,12 @@ export function useQueue() {
     activateSessionQueue,
     dequeue,
     enqueue,
+    holdForSwitch,
     queueEditIdx,
     queueEditRef,
     queueRef,
     queuedDisplay,
+    releaseSwitchHold,
     removeQ,
     replaceQ,
     setQueueEdit,

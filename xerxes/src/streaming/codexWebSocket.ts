@@ -297,6 +297,13 @@ interface PoolEntry {
 
 const poolBySession = new Map<string, Map<string, PoolEntry>>()
 const sseFallbackSessions = new Set<string>()
+/**
+ * Connection-scoped continuations, keyed like the pool. Each holds a full
+ * request body, so it lives only while the session has a pooled socket that
+ * could honour its previous_response_id; otherwise every session that ever
+ * used Codex pinned its last transcript for the daemon's lifetime.
+ */
+const continuationBySession = new Map<string, CodexWsContinuation>()
 
 interface CodexWebSocketStats {
   connectionsCreated: number
@@ -355,14 +362,12 @@ function acquireFromPool(
   // gets its own connection, and the throwaway is never cached over it.
   if (entry.busy) return { kind: 'fresh-throwaway' }
   if (entry.handle.socket.readyState !== 1) {
-    clearIdleTimer(entry)
-    poolBySession.get(sessionKey)?.delete(accountKey)
+    discardFromPool(sessionKey, accountKey, entry.handle)
     closeSocket(entry.handle.socket, 1000, 'stale')
     return { kind: 'fresh-cacheable' }
   }
   if (Date.now() - entry.createdAt >= maxAgeMs) {
-    clearIdleTimer(entry)
-    poolBySession.get(sessionKey)?.delete(accountKey)
+    discardFromPool(sessionKey, accountKey, entry.handle)
     closeSocket(entry.handle.socket, 1000, 'evicted')
     return { kind: 'fresh-cacheable' }
   }
@@ -411,15 +416,20 @@ function discardFromPool(sessionKey: string | undefined, accountKey: string, han
     clearIdleTimer(entry)
     entries?.delete(accountKey)
   }
-  if (entries && entries.size === 0) poolBySession.delete(sessionKey)
+  if (entries && entries.size === 0) {
+    poolBySession.delete(sessionKey)
+    continuationBySession.delete(sessionKey)
+  }
 }
 
 /** Close every pooled socket for one session (or all sessions). */
 export function closeCodexWebSocketSessions(sessionId?: string): void {
   const targets = sessionId !== undefined ? [sessionId] : [...poolBySession.keys()]
+  if (sessionId === undefined) continuationBySession.clear()
   for (const sessionKey of targets) {
     const entries = poolBySession.get(sessionKey)
     poolBySession.delete(sessionKey)
+    continuationBySession.delete(sessionKey)
     for (const entry of entries?.values() ?? []) {
       clearIdleTimer(entry)
       closeSocket(entry.handle.socket, 1000, 'session_closed')
@@ -675,6 +685,24 @@ export function continuationFromResponse(
     lastResponseId: trimmed,
     lastResponseItems: [...assistantItems],
   }
+}
+
+/**
+ * Keep a session's continuation while one of its sockets is pooled. A
+ * session without a pooled socket has nothing that could extend the
+ * response, so its continuation is not kept.
+ */
+export function rememberCodexContinuation(sessionId: string, continuation: CodexWsContinuation): void {
+  const key = sessionId.trim()
+  if (key && poolBySession.has(key)) continuationBySession.set(key, continuation)
+}
+
+export function codexContinuationFor(sessionId: string): CodexWsContinuation | undefined {
+  return continuationBySession.get(sessionId.trim())
+}
+
+export function forgetCodexContinuation(sessionId: string): void {
+  continuationBySession.delete(sessionId.trim())
 }
 
 function stableValue(value: unknown): unknown {

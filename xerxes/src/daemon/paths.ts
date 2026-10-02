@@ -23,6 +23,15 @@ export function xerxesHome(environment = process.env): string {
   return resolve(configured)
 }
 
+/**
+ * Durable save_memory/search_memory recall databases, one per project. Kept
+ * out of `<home>/memory`: AgentMemory walks that tree as its global scope, so
+ * a database there was listed, searched as text and leaked across projects.
+ */
+export function recallMemoryDirectory(home = xerxesHome()): string {
+  return join(home, 'recall')
+}
+
 export function resolveProjectDirectory(projectDirectory = process.cwd()): string {
   const raw = resolve(projectDirectory)
   try {

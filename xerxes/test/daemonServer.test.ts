@@ -647,6 +647,60 @@ test("a provider switch from a second client keeps the first session's context l
   }
 });
 
+test("a session pinned to one profile keeps its window when the active profile serves the same model with another", async () => {
+  // Regression: contextLimit asked the daemon-wide active profile first. With
+  // both profiles knowing k3, a provider_select from a second client gave the
+  // pinned session the other profile's 100K, so its meter and pre-turn
+  // compaction ran against a window the turn never uses.
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-pinned-window-"));
+  const socketPath = join(directory, "daemon.sock");
+  const profileStore = new ProfileStore(join(directory, "profiles.json"));
+  profileStore.save({ apiKey: "", baseUrl: "https://api.kimi.com/coding/v1", model: "k3", name: "kimi-code", provider: "kimi-code" });
+  profileStore.save({ apiKey: "", baseUrl: "https://api.other.example/v1", model: "k3", name: "other-provider", provider: "other-provider" });
+  profileStore.updateModelCapabilities("kimi-code", "k3", { contextLimit: 262_144, maxOutputTokens: 8_192 });
+  profileStore.updateModelCapabilities("other-provider", "k3", { contextLimit: 100_000, maxOutputTokens: 32_000 });
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: directory,
+    runtimeSettings: { base_url: "https://api.kimi.com/coding/v1", model: "k3", provider: "kimi-code" },
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const server = new DaemonServer({ profileStore, runtime, socketPath });
+  await server.start();
+  const first = await SocketTestClient.connect(socketPath);
+  const second = await SocketTestClient.connect(socketPath);
+  try {
+    first.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { session_key: "pinned-to-kimi" } });
+    await first.next((frame) => frame.id === 1);
+    const pinned = runtime.sessionStatus("pinned-to-kimi");
+    if (!pinned) throw new Error("session missing");
+    pinned.model = "k3";
+    pinned.metadata.provider_profile = "kimi-code";
+
+    second.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { session_key: "switching-client" } });
+    await second.next((frame) => frame.id === 1);
+    second.send({ jsonrpc: "2.0", id: 2, method: "provider_select", params: { name: "other-provider" } });
+    expect((await second.next((frame) => frame.id === 2)).result).toMatchObject({ ok: true });
+
+    first.send({ jsonrpc: "2.0", id: 2, method: "session.status", params: { session_key: "pinned-to-kimi" } });
+    const status = (await first.next((frame) => frame.id === 2)).result?.session as
+      | { context_limit?: number }
+      | undefined;
+    expect(status?.context_limit).toBe(262_144);
+    // The auto-compaction budget is built from the pinned profile too: its
+    // window less its own reply allowance, not the active profile's.
+    first.send({ jsonrpc: "2.0", id: 3, method: "slash", params: { command: "/budget" } });
+    expect((await first.next((frame) => frame.id === 3)).result).toMatchObject({
+      context_limit: 262_144,
+      prompt_budget: 262_144 - 8_192,
+    });
+  } finally {
+    first.close();
+    second.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("session model remains selected after a session reasoning change", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-session-config-"));
   const socketPath = join(directory, "daemon.sock");
@@ -1039,6 +1093,25 @@ test("session.list scopes history to the active project and exposes additive sub
       ["aaaabbbb0001", projectDirectory],
       ["aaaabbbb0002", projectDirectory],
     ]);
+
+    // A `/resume <id|name>` lookup must reach past the newest page: the match
+    // applies before the limit, so the oldest chat still resolves.
+    client.send({
+      jsonrpc: "2.0",
+      id: 41,
+      method: "session.list",
+      params: { kind: "main", limit: 1, scope: "global", query: "AAAABBBB0002" },
+    });
+    expect(((await client.next((frame) => frame.id === 41)).result?.sessions as Array<Record<string, unknown>>)
+      .map((session) => session.id)).toEqual(["aaaabbbb0002"]);
+    client.send({
+      jsonrpc: "2.0",
+      id: 42,
+      method: "session.list",
+      params: { kind: "main", limit: 1, scope: "global", query: "regular branch" },
+    });
+    expect(((await client.next((frame) => frame.id === 42)).result?.sessions as Array<Record<string, unknown>>)
+      .map((session) => session.id)).toEqual(["aaaabbbb0002"]);
 
     client.send({
       jsonrpc: "2.0",
@@ -4599,6 +4672,50 @@ test('an attach snapshot includes what the running turn streamed while initializ
     const replyAt = second.received.indexOf(attached);
     expect(second.received.slice(0, replyAt).some(frame => eventFrame('text_part')(frame) && frame.params?.payload?.text === 'missed')).toBe(true);
     expect(JSON.stringify(attached.result?.session)).toContain('before missed');
+  } finally {
+    runner.release(0); runner.release(1); runner.release(2);
+    clients.forEach(client => client.close());
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('renaming another chat from the sidebar leaves the window bound to its own running turn', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-rename-rebind-'));
+  const socketPath = join(directory, 'daemon.sock');
+  const runner = new SteppedRunner();
+  const runtime = new InMemoryDaemonRuntime(runner, {
+    currentProjectDirectory: directory, model: 'stepped-model', sessionDirectory: join(directory, 'sessions'),
+  });
+  const server = new DaemonServer({ socketPath, runtime });
+  await server.start();
+  const clients: SocketTestClient[] = [];
+  let id = 0;
+  const rpc = async (client: SocketTestClient, method: string, params: Record<string, unknown> = {}) => {
+    const requestId = ++id;
+    client.send({ jsonrpc: '2.0', id: requestId, method, params });
+    return client.next(frame => frame.id === requestId);
+  };
+  try {
+    const window = await SocketTestClient.connect(socketPath); clients.push(window);
+    const elsewhere = await SocketTestClient.connect(socketPath); clients.push(elsewhere);
+    await rpc(window, 'initialize', { session_key: 'running', project_dir: directory, session_owned_turns: true });
+    await rpc(elsewhere, 'initialize', { session_key: 'sidebar-row', project_dir: directory, session_owned_turns: true });
+    await rpc(window, 'turn.submit', { text: 'stream' });
+    await window.next(eventFrame('text_part'));
+
+    // The person renames another row of the sidebar while this turn streams.
+    expect((await rpc(window, 'session.title', { session_key: 'sidebar-row', title: 'renamed row' })).result)
+      .toEqual({ ok: true, title: 'renamed row' });
+    expect(runtime.sessionStatus('sidebar-row')?.metadata.title).toBe('renamed row');
+
+    runner.release(0); runner.release(1); runner.release(2);
+    const ended = await Promise.race([window.next(eventFrame('turn_end')), Bun.sleep(2_000).then(() => null)]);
+    expect(ended).not.toBeNull();
+    // Unscoped calls still act on the window's own conversation.
+    expect((await rpc(window, 'session.title', { title: 'own title' })).result).toEqual({ ok: true, title: 'own title' });
+    expect(runtime.sessionStatus('running')?.metadata.title).toBe('own title');
+    expect(runtime.sessionStatus('sidebar-row')?.metadata.title).toBe('renamed row');
   } finally {
     runner.release(0); runner.release(1); runner.release(2);
     clients.forEach(client => client.close());
@@ -8573,6 +8690,45 @@ test("initialize reports the workspace git branch and session.status prices the 
   }
 });
 
+test("session cost prices the cache reads and writes beside the uncached input", async () => {
+  // Regression: the session's input total is the uncached part only, and
+  // sessionCost/session payloads priced it alone. A cached session showed a
+  // third of its spend on /cost, the rail and session.status.
+  seedModelsDev({ fixture: { id: "fixture", models: { "cached-model": { id: "cached-model", cost: { input: 1, output: 2, cache_read: 0.1, cache_write: 1.25 } } } } });
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-cache-cost-"));
+  const socketPath = join(directory, "daemon.sock");
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: directory,
+    model: "cached-model",
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const server = new DaemonServer({ socketPath, runtime });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { session_key: "cached" } });
+    await client.next((frame) => frame.id === 1);
+    const session = runtime.sessionStatus("cached");
+    if (!session) throw new Error("session missing");
+    session.totalInputTokens = 1_000_000;
+    session.totalOutputTokens = 0;
+    session.extra.runtime_telemetry = { cacheTelemetryKnown: true, inputTokens: 1_000_000, cacheReadTokens: 10_000_000, cacheWriteTokens: 800_000 };
+    // $1 fresh input + $1 of cache reads + $1 of cache writes.
+    const expected = 3;
+
+    client.send({ jsonrpc: "2.0", id: 2, method: "session.status", params: { session_key: "cached" } });
+    const status = (await client.next((frame) => frame.id === 2)).result?.session as { cost_usd?: number } | undefined;
+    expect(status?.cost_usd).toBeCloseTo(expected, 6);
+
+    client.send({ jsonrpc: "2.0", id: 3, method: "slash", params: { command: "/cost" } });
+    expect(((await client.next((frame) => frame.id === 3)).result as { cost_usd?: number } | undefined)?.cost_usd).toBeCloseTo(expected, 6);
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("session.status surfaces a connected MCP manager's redacted statuses", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-mcp-daemon-"));
   const socketPath = join(directory, "daemon.sock");
@@ -10882,6 +11038,60 @@ test('session-owned permission waits survive close and can only be answered by a
     expect((await rpc(second,'question_response',{request_id:question,answers:{answer:'yes'}})).result?.ok).toBe(true);
     await second.next(eventFrame('turn_end'));expect(runtime.sessionStatus('durable')?.cancelRequested).toBe(false);
   }finally{first.close();second.close();stranger.close();await server.stop();await rm(directory,{recursive:true,force:true})}
+});
+
+test('an answer from one window reaches every window showing the same approval or question', async () => {
+  const directory=await mkdtemp(join(tmpdir(),'xr-shared-answer-'));
+  const socketPath=join(directory,'rpc.sock');const interactions=new DaemonInteractionBoard();
+  const runtime=new InMemoryDaemonRuntime(new ReplyRunner(interactions),{model:'fixture',currentProjectDirectory:directory,sessionDirectory:join(directory,'sessions'),interactions});
+  const server=new DaemonServer({runtime,socketPath,interactions,projectDirectory:directory,cronStoreFactory:()=>new JobStore(join(directory,'cron/jobs.json'))});await server.start();
+  const first=await SocketTestClient.connect(socketPath),second=await SocketTestClient.connect(socketPath),stranger=await SocketTestClient.connect(socketPath);
+  let id=0;
+  const rpc=async(client:SocketTestClient,method:string,params:Record<string,unknown>={})=>{const request=++id;client.send({jsonrpc:'2.0',id:request,method,params});return client.next(frame=>frame.id===request)};
+  try{
+    await rpc(first,'initialize',{session_key:'shared',session_owned_turns:true});
+    await rpc(stranger,'initialize',{session_key:'unrelated',session_owned_turns:true});
+    await rpc(first,'turn.submit',{text:'ask me'});await first.next(eventFrame('approval_request'));
+    const sessionId=runtime.sessionStatus('shared')!.id;
+    // A second window opens the same running task and shows the same card.
+    const attached=await rpc(second,'initialize',{resume_session_id:sessionId,project_dir:directory,session_owned_turns:true});
+    expect(attached.result?.pending_interactions).toMatchObject([{type:'approval_request',payload:{id:'approval-1'}}]);
+    expect((await rpc(first,'permission_response',{request_id:'approval-1',response:'approve'})).result?.ok).toBe(true);
+    expect((await second.next(eventFrame('approval_response'))).params?.payload).toMatchObject({request_id:'approval-1'});
+    await first.next(eventFrame('approval_response'));
+    const asked=await second.next(eventFrame('question_request'));
+    const question=String(asked.params?.payload?.id);
+    expect((await rpc(second,'question_response',{request_id:question,answers:{answer:'yes'}})).result?.ok).toBe(true);
+    expect((await first.next(eventFrame('question_response'))).params?.payload).toMatchObject({id:question});
+    await second.next(eventFrame('question_response'));
+    await first.next(eventFrame('turn_end'));
+    // Another session's window hears nothing of it.
+    expect(stranger.seen(eventFrame('approval_response'))||stranger.seen(eventFrame('question_response'))).toBe(false);
+  }finally{first.close();second.close();stranger.close();await server.stop();await rm(directory,{recursive:true,force:true})}
+});
+
+test('an approval or question answered in one window is announced to every window on the session', async () => {
+  const directory=await mkdtemp(join(tmpdir(),'xr-shared-answer-both-'));
+  const socketPath=join(directory,'rpc.sock');const interactions=new DaemonInteractionBoard();
+  const runtime=new InMemoryDaemonRuntime(new ReplyRunner(interactions),{model:'fixture',currentProjectDirectory:directory,sessionDirectory:join(directory,'sessions'),interactions});
+  const server=new DaemonServer({runtime,socketPath,interactions,projectDirectory:directory,cronStoreFactory:()=>new JobStore(join(directory,'cron/jobs.json'))});await server.start();
+  const first=await SocketTestClient.connect(socketPath),second=await SocketTestClient.connect(socketPath);
+  let id=0;
+  const rpc=async(client:SocketTestClient,method:string,params:Record<string,unknown>={})=>{const request=++id;client.send({jsonrpc:'2.0',id:request,method,params});return client.next(frame=>frame.id===request)};
+  try{
+    await rpc(first,'initialize',{session_key:'shared',session_owned_turns:true,project_dir:directory});
+    const sessionId=runtime.sessionStatus('shared')!.id;
+    await rpc(second,'initialize',{resume_session_id:sessionId,project_dir:directory,session_owned_turns:true});
+    await rpc(first,'turn.submit',{text:'ask both windows'});
+    await first.next(eventFrame('approval_request'));await second.next(eventFrame('approval_request'));
+    expect((await rpc(second,'permission_response',{request_id:'approval-1',response:'approve'})).result?.ok).toBe(true);
+    expect((await first.next(eventFrame('approval_response'))).params?.payload).toEqual({request_id:'approval-1',response:'approve'});
+    const question=await first.next(eventFrame('question_request'));await second.next(eventFrame('question_request'));
+    const questionId=String(question.params?.payload?.id);
+    expect((await rpc(first,'question_response',{request_id:questionId,answers:{answer:'yes'}})).result?.ok).toBe(true);
+    expect((await second.next(eventFrame('question_response'))).params?.payload).toEqual({id:questionId,answers:{answer:'yes'}});
+    await first.next(eventFrame('turn_end'));
+  }finally{first.close();second.close();await server.stop();await rm(directory,{recursive:true,force:true})}
 });
 
 test('session-owned background work keeps scoped progress and completes after its parent client closes', async () => {

@@ -129,3 +129,30 @@ test('a first turn failing before output remains discoverable after restart with
     expect(resumed.messages).toEqual([{role: 'user', content: 'Keep this failed request.', turn_outcome: {version: 1, reason: 'provider_failed', turn_id: expect.any(String)}}])
   } finally {await restarted?.shutdown(); await runtime.shutdown(); await rm(directory, {recursive: true, force: true})}
 })
+
+test('a first turn recovered from its journal alone keeps the project it ran in', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xr-orphan-cwd-'))
+  const daemonDefault = join(directory, 'daemon-default')
+  const project = join(directory, 'projB')
+  const sessions = join(directory, 'sessions')
+  const makeRuntime = () => new InMemoryDaemonRuntime(new AgentTurnRunner({model: 'gpt-4o', tools: [], llm: {async *stream() {yield {content: 'Answer.'}}}}), {
+    model: 'gpt-4o', currentProjectDirectory: daemonDefault, sessionDirectory: sessions,
+  })
+  const runtime = makeRuntime()
+  let restarted: InMemoryDaemonRuntime | undefined
+  try {
+    const session = await runtime.openSession('orphan-cwd', undefined, {cwd: project})
+    await runtime.submitTurn(session.sessionKey, 'Work in projB.', () => {})
+    await runtime.shutdown()
+    // The daemon died before the first snapshot: only the journal remains.
+    await rm(join(sessions, session.id + '.json'))
+    restarted = makeRuntime()
+    const listed = (await restarted.listSavedSessions(10)).find(saved => saved.id === session.id)
+    expect(listed?.cwd).toBe(project)
+    expect((await restarted.listSavedSessions(10, {projectDirectory: project})).map(saved => saved.id)).toEqual([session.id])
+    // Opened from another project, it is refused instead of rebinding there.
+    await expect(restarted.openSession(session.id, undefined, {resume: true, cwd: daemonDefault})).rejects.toThrow('different project')
+    const resumed = await restarted.openSession(session.id, undefined, {resume: true, cwd: project})
+    expect(resumed.cwd).toBe(project)
+  } finally {await restarted?.shutdown(); await runtime.shutdown(); await rm(directory, {recursive: true, force: true})}
+})

@@ -20,6 +20,18 @@ test('a saved excerpt keeps the fields that survived and says it is incomplete',
   expect(agentResult('{"slice":"a","root_ca…')).toEqual({ fields: { slice: 'a' }, complete: false })
 })
 
+test('a complete answer followed by prose keeps every field, uncut, and is not marked incomplete', () => {
+  expect(agentResult('{"verdict":"confirmed","files":["a.ts","b.ts"],"summary":"ok"}\n\nI checked both files.'))
+    .toEqual({ fields: { verdict: 'confirmed', files: ['a.ts', 'b.ts'], summary: 'ok' }, complete: true })
+  expect(agentResult('{"summary":"The bug is in x, not y"}\nDone.'))
+    .toEqual({ fields: { summary: 'The bug is in x, not y' }, complete: true })
+  // An excerpt cut inside a value with a comma in it drops back to the field before, not mid-string.
+  expect(agentResult('{"verdict":"real","summary":"The bug is in x, not y, and z is fi…'))
+    .toEqual({ fields: { verdict: 'real', summary: 'The bug is in x, not y, and z is fi' }, complete: false })
+  expect(agentResult('{"verdict":"real","summary":"in x, not y","files":["a.ts","b…'))
+    .toEqual({ fields: { verdict: 'real', summary: 'in x, not y', files: ['a.ts', 'b'] }, complete: false })
+})
+
 test('prose, arrays and empty objects are not structured results', () => {
   expect(agentResult('The slice is fine.')).toBeNull()
   expect(agentResult('["a","b"]')).toBeNull()

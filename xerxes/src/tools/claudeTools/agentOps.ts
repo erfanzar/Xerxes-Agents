@@ -911,6 +911,7 @@ export class ClaudeAgentTools {
     }
     const runId = `wf_${crypto.randomUUID().replaceAll('-', '').slice(0, 12)}`
     const live = new Set<string>()
+    const spawned = new Set<string>()
     // One manifest refresh for the whole run instead of one timer per agent.
     const heartbeat = setInterval(() => { try { this.persistContext(context) } catch { /* best-effort */ } }, this.manifestHeartbeatMs)
     const settle = async (id: string, timeoutMs: number, runSignal: AbortSignal): Promise<WorkflowAgentOutcome> => {
@@ -923,12 +924,17 @@ export class ClaudeAgentTools {
         return { id, status: 'failed', output: '', error: `Agent timed out after ${Math.round(timeoutMs / 1000)}s`, tokens: snapshotTokens(snapshot) }
       }
       live.delete(id)
+      // The script received this result; the parent sees it in the Workflow
+      // result. Without a delivery marker the next turn's cohort reattaches
+      // every finished workflow agent and replays it as a new agent result.
+      this.options.backgroundAgents?.consume([snapshot])
       return this.priced(workflowOutcome(snapshot), snapshot)
     }
     const port: WorkflowAgentPort = {
       run: async (request, runSignal) => {
         const snapshot = await this.spawnWhenBudgetAllows(workflowSpec(request, runId, name, this.intelligence), context, runSignal)
         live.add(snapshot.id)
+        spawned.add(snapshot.id)
         return settle(snapshot.id, request.timeoutMs ?? WORKFLOW_AGENT_TIMEOUT_MS, runSignal)
       },
       correct: async (id, message, request, runSignal) => {
@@ -959,6 +965,9 @@ export class ClaudeAgentTools {
     } finally {
       clearInterval(heartbeat)
       this.capture()
+      // Timed-out, failed and cancelled agents were reported in the run's
+      // result too (counts and failures); none is news for a later turn.
+      if (spawned.size) this.options.backgroundAgents?.consume(this.options.manager.listHandles().filter(snapshot => spawned.has(snapshot.id)))
     }
   }
 

@@ -2192,6 +2192,34 @@ test('the conversation\'s agents preference reaches the model every turn', async
   expect(prompts.at(-1)).toContain('# Delegation: off')
 })
 
+test('an agents preference changed while a turn runs survives that turn\'s end', async () => {
+  let change: (() => void) | undefined
+  const client: LlmClient = {
+    async *stream() {
+      // The Agents chip / `/delegate` writes the live session mid-turn.
+      change?.()
+      yield { content: 'ok', usage: { inputTokens: 3, outputTokens: 1 } }
+    },
+  }
+  const runner = new AgentTurnRunner({
+    llm: client, model: 'm', permissionMode: 'accept-all',
+    tools: [{ type: 'function', function: { name: 'Workflow', description: '', parameters: {} } }],
+  })
+  const session: DaemonSession = {
+    activeTurnId: '', agentId: 'default', cancelRequested: false, cwd: process.cwd(), extra: {},
+    id: 'delegation-mid-turn-session', interactionMode: 'default', sessionKey: 'delegation-mid-turn', lastActive: 0,
+    messages: [], metadata: {}, model: '', planMode: false, status: 'working', thinkingContent: [],
+    toolExecutions: [], totalInputTokens: 0, totalOutputTokens: 0, turnCount: 0, workspace: process.cwd(),
+  }
+  change = () => { session.metadata.delegation_mode = 'off' }
+  for await (const _event of runner.run(session, 'one', new AbortController().signal)) {}
+  expect(session.metadata.delegation_mode).toBe('off')
+  // Back to auto mid-turn deletes the key; the turn-start 'off' must not return.
+  change = () => { delete session.metadata.delegation_mode }
+  for await (const _event of runner.run(session, 'two', new AbortController().signal)) {}
+  expect(session.metadata).not.toHaveProperty('delegation_mode')
+})
+
 test('the runner exposes a running turn\'s messages before the session catches up', async () => {
   let release!: () => void
   const gate = new Promise<void>(resolve => { release = resolve })

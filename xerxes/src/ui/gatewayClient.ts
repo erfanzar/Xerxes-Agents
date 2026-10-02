@@ -35,6 +35,7 @@ import type {
   SessionInflightTool,
   SubagentSnapshotPayload
 } from './gatewayTypes.js'
+import { normalizeEventType } from './gatewayTypes.js'
 import { controlChannelPath, isWindows } from './lib/hostPlatform.js'
 import { ImageAttachmentError, loadImageAttachment, resolveAttachmentPath } from './lib/imageAttachment.js'
 import type { SessionInfo, Usage } from './types.js'
@@ -64,6 +65,20 @@ export const DAEMON_CONNECT_RETRY_MS = 25
 // many sessions must not grow it without limit. Insertion order doubles as
 // recency, so eviction simply drops the oldest entry (simple LRU).
 const MAX_SESSION_KEYS = 200
+// Turn-stream frames a session snapshot already reproduces (its transcript,
+// inflight assistant/thinking/tools, and subagent trail). Replaying one that
+// arrived before the snapshot was answered would draw it a second time.
+const SNAPSHOT_COVERED_EVENTS: ReadonlySet<string> = new Set([
+  'turn_begin',
+  'text_part',
+  'think_part',
+  'turn_end',
+  'step_interrupted',
+  'tool_call',
+  'tool_call_part',
+  'tool_result',
+  'subagent_event'
+])
 
 // ── Path resolution (v35 daemon path contract) ───────────────────────────
 
@@ -355,6 +370,9 @@ interface Pending {
   resolve: (value: unknown) => void
   reject: (err: Error) => void
   timer: NodeJS.Timeout
+  // Runs while the response line is handled, before any later line on the
+  // socket: an awaiting caller resumes only after those were processed too.
+  onResponse?: (result: unknown) => void
 }
 
 type RpcObject = Record<string, any>
@@ -821,6 +839,7 @@ export class GatewayClient extends EventEmitter {
       }
       this.pending.delete(frame.id as number)
       clearTimeout(pending.timer)
+      if (!frame.error) pending.onResponse?.(frame.result)
       if (frame.error) {
         const error = isRecord(frame.error) ? frame.error : {}
         const code = typeof error.code === 'number' ? ` ${error.code}` : ''
@@ -1094,7 +1113,8 @@ export class GatewayClient extends EventEmitter {
   private rawRequest<T = unknown>(
     method: string,
     params: Record<string, unknown> = {},
-    timeoutMs = REQUEST_TIMEOUT_MS
+    timeoutMs = REQUEST_TIMEOUT_MS,
+    onResponse?: (result: unknown) => void
   ): Promise<T> {
     if (!this.socket) {
       return Promise.reject(new Error('gateway not connected'))
@@ -1106,7 +1126,7 @@ export class GatewayClient extends EventEmitter {
         this.pending.delete(id)
         rej(new Error(`rpc timeout: ${method} (${timeoutMs}ms)`))
       }, timeoutMs)
-      this.pending.set(id, { resolve: res as (v: unknown) => void, reject: rej, timer })
+      this.pending.set(id, { resolve: res as (v: unknown) => void, reject: rej, timer, ...(onResponse ? { onResponse } : {}) })
       this.enqueueWrite(frame).catch(error => {
         clearTimeout(timer)
         // The response may already have settled this id; only reject when the
@@ -1146,8 +1166,12 @@ export class GatewayClient extends EventEmitter {
    * inside an otherwise valid JSON-RPC response. Convert that to a rejected
    * request so UI callers never render a fabricated success state.
    */
-  private async nativeSuccess(method: string, params: Record<string, unknown>): Promise<RpcObject> {
-    const raw = (await this.rawRequest<RpcObject>(method, params)) as RpcObject
+  private async nativeSuccess(
+    method: string,
+    params: Record<string, unknown>,
+    onResponse?: (result: unknown) => void
+  ): Promise<RpcObject> {
+    const raw = (await this.rawRequest<RpcObject>(method, params, REQUEST_TIMEOUT_MS, onResponse)) as RpcObject
 
     if (raw.ok === false) {
       throw new Error(String(raw.error ?? `native daemon rejected ${method}`))
@@ -1228,11 +1252,31 @@ export class GatewayClient extends EventEmitter {
       if (type === 'notification' && isRecord(raw.params.payload) && raw.params.payload.category === 'history') continue
       this.onLine(JSON.stringify(raw))
     }
+    const restored = new Set<string>()
     for (const raw of delivery.interactions) {
       if (!isRecord(raw) || !['approval_request', 'question_request'].includes(String(raw.type)) || !isRecord(raw.payload)) continue
+      const requestId = raw.payload.id ?? raw.payload.request_id
+      if (typeof requestId === 'string') restored.add(requestId)
       this.onLine(JSON.stringify({ jsonrpc: '2.0', method: 'event', params: raw }))
     }
-    for (const raw of delivery.live) this.onLine(JSON.stringify(raw))
+    for (const raw of delivery.live) {
+      // A dialog both re-sent in the snapshot and emitted live while held
+      // would otherwise open twice.
+      if (isRecord(raw) && isRecord(raw.params) && isRecord(raw.params.payload)
+        && (raw.params.type === 'approval_request' || raw.params.type === 'question_request')) {
+        const requestId = raw.params.payload.id ?? raw.params.payload.request_id
+        if (typeof requestId === 'string' && restored.has(requestId)) continue
+      }
+      this.onLine(JSON.stringify(raw))
+    }
+  }
+
+  /** Drop a held delivery whose session switch was superseded or failed
+   * before it could be shown; leaving it armed would swallow every later
+   * event. Without an id, whatever is held is dropped: the caller's switch
+   * is the newest and its answer named no session. */
+  discardSessionRecovery(sessionId?: string): void {
+    if (sessionId === undefined || this.recoveryDelivery?.sessionId === sessionId) this.recoveryDelivery = null
   }
 
   private async reclaimConnectionLease(): Promise<boolean> {
@@ -1529,36 +1573,65 @@ export class GatewayClient extends EventEmitter {
     // target's own cwd because session.open also refreshes an existing
     // session's cwd; using the project root would silently undo a tab-local
     // directory change.
-    const raw = await this.nativeSuccess('session.open', {
-      project_dir: targetCwd,
-      session_key: nextSessionKey
-    })
-    const session = (raw.session ?? {}) as RpcObject
-    const sessionId = String(session.id ?? '').trim()
+    // session.open moves the daemon's active key before it answers, so the
+    // target's untagged turn events, drained notices and pending dialogs start
+    // flowing before the UI has reset onto it. Applied now, they would land in
+    // the view being left and be wiped by its reset; hold them until the
+    // caller has hydrated the snapshot and calls finishSessionRecovery.
+    const delivery = { sessionId: id, replay: [] as unknown[], interactions: [] as unknown[], live: [] as unknown[], bytes: 0 }
+    this.recoveryDelivery = delivery
+    try {
+      const raw = await this.nativeSuccess('session.open', {
+        project_dir: targetCwd,
+        session_key: nextSessionKey
+      }, result => {
+        // The daemon builds its snapshot after awaiting history, so turn
+        // output streamed while session.open ran is already in it; replayed
+        // too, the reply would repeat a chunk. Notices and dialogs are not
+        // in the snapshot and stay. A refused open never moved the key, and
+        // what it held is still the current view's own stream.
+        if (!isRecord(result) || result.ok === false) return
+        delivery.live = delivery.live.filter(raw => !(isRecord(raw) && isRecord(raw.params)
+          && SNAPSHOT_COVERED_EVENTS.has(normalizeEventType(String(raw.params.type ?? '')))))
+      })
+      const session = (raw.session ?? {}) as RpcObject
+      const sessionId = String(session.id ?? '').trim()
 
-    if (!sessionId) {
-      throw new Error('native daemon activation returned no session id')
-    }
+      if (!sessionId) {
+        throw new Error('native daemon activation returned no session id')
+      }
 
-    this.activeSessionKey = nextSessionKey
-    this.rememberSessionKey(sessionId, nextSessionKey)
-    const inflight = inflightFromSession(session)
-    const subagentSnapshots = subagentSnapshotsFromSession(session)
-    const messages = transcriptFromStoredMessages(session.transcript)
-    const status = liveSessionStatus(session)
-    return {
-      info: await this.sessionInfoFromInitialize(raw, session, { info: null, usage: null }),
-      inflight,
-      todos: Array.isArray(session.todos) ? session.todos : undefined,
-      message_count: Number(session.message_count ?? session.messages ?? 0),
-      // session.open returns the already-live transcript without competing
-      // with its running turn.
-      messages,
-      running: status !== 'idle',
-      session_id: sessionId,
-      session_key: nextSessionKey,
-      status,
-      ...(subagentSnapshots ? { subagent_snapshots: subagentSnapshots } : {})
+      if (this.recoveryDelivery) {
+        this.recoveryDelivery.sessionId = sessionId
+        this.recoveryDelivery.interactions = Array.isArray(raw.pending_interactions) ? raw.pending_interactions : []
+      }
+      this.activeSessionKey = nextSessionKey
+      this.rememberSessionKey(sessionId, nextSessionKey)
+      const inflight = inflightFromSession(session)
+      const subagentSnapshots = subagentSnapshotsFromSession(session)
+      const messages = transcriptFromStoredMessages(session.transcript)
+      const status = liveSessionStatus(session)
+      const info = await this.sessionInfoFromInitialize(raw, session, { info: null, usage: null })
+      return {
+        info,
+        inflight,
+        todos: Array.isArray(session.todos) ? session.todos : undefined,
+        message_count: Number(session.message_count ?? session.messages ?? 0),
+        // session.open returns the already-live transcript without competing
+        // with its running turn.
+        messages,
+        recovery_pending: this.recoveryDelivery !== null,
+        running: status !== 'idle',
+        session_id: sessionId,
+        session_key: nextSessionKey,
+        status,
+        ...(subagentSnapshots ? { subagent_snapshots: subagentSnapshots } : {})
+      }
+    } catch (error) {
+      // Release what was held to the current view rather than dropping it:
+      // the failed switch leaves the user where they were.
+      this.finishSessionRecovery(this.recoveryDelivery?.sessionId ?? id)
+      throw error
     }
   }
 

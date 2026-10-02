@@ -1,7 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { mkdtemp, rm, stat } from 'node:fs/promises'
+import { mkdtemp, realpath, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -15,8 +15,10 @@ import {
 } from '../src/extensions/skills.js'
 import {
   SUBAGENT_SNAPSHOT_METADATA_KEY,
+  persistedSubagentDeliveryValues,
   persistedSubagentSnapshotValues,
 } from '../src/agents/subagentPersistence.js'
+import { NativeSubagentTurnCoordinator } from '../src/daemon/subagentCoordinator.js'
 import { MCPClient } from '../src/mcp/client.js'
 import { SpawnedAgentManager } from '../src/operators/subagents.js'
 import { SpawnBudgetExhaustedError } from '../src/agents/subagentManager.js'
@@ -150,6 +152,24 @@ test('SkillTool preserves the registry shell-preprocessing trust decision', asyn
   const registry = new ToolRegistry()
   registerClaudeSkillTool(registry, skills)
   await expect(registry.execute(toolCall('SkillTool', { skill_name: 'project-workflow' }), { metadata: {} })).rejects.toThrow('/skills trust')
+})
+
+test('SkillTool runs !`cmd` injections in the session project, not the host process directory', async () => {
+  const project = await realpath(await mkdtemp(join(tmpdir(), 'skill-tool-cwd-')))
+  const fallback = await realpath(await mkdtemp(join(tmpdir(), 'skill-tool-fallback-')))
+  try {
+    const skills = new SkillRegistry()
+    skills.register(parseSkillMarkdown('---\nname: where\ndescription: Where am I\n---\nCwd: !`pwd`', '/virtual/where/SKILL.md'))
+    const registry = new ToolRegistry()
+    registerClaudeSkillTool(registry, skills, 'default', () => fallback)
+    const inProject = await registry.execute(toolCall('SkillTool', { skill_name: 'where' }), { metadata: { project_root: project } })
+    expect(inProject).toContain(`Cwd: ${project}`)
+    const withoutProject = await registry.execute(toolCall('SkillTool', { skill_name: 'where' }), { metadata: {} })
+    expect(withoutProject).toContain(`Cwd: ${fallback}`)
+  } finally {
+    await rm(project, { recursive: true, force: true })
+    await rm(fallback, { recursive: true, force: true })
+  }
 })
 
 test('Claude agent tools map task lifecycle, outputs, and mailbox events to SpawnedAgentManager', async () => {
@@ -1548,6 +1568,38 @@ test('Workflow runs its agents through the owned spawn path, tagged by run and p
   expect(saved.map(row => (row.group as { phase?: string } | undefined)?.phase)).toEqual(['Scan', 'Scan', 'Check'])
   expect(saved.every(row => (row.group as { id?: string; label?: string }).id === runId && (row.group as { label?: string }).label === 'Tiny review')).toBeTrue()
   expect(saved.map(row => row.title)).toEqual(['Scan a', 'Scan b', 'check'])
+})
+
+test('finished Workflow agents are not handed to the parent again as new agent results on its next turn', async () => {
+  let count = 0
+  const manager = new SpawnedAgentManager({
+    idFactory: () => `wf-delivered-${++count}`,
+    runner: async request => {
+      if (request.input.includes('slow')) await Bun.sleep(200)
+      return { content: `done:${request.input}` }
+    },
+  })
+  const coordinator = new NativeSubagentTurnCoordinator({ waitFor: async () => true }, () => manager.listHandles())
+  const registry = new ToolRegistry()
+  registerClaudeAgentTools(registry, { manager, backgroundAgents: coordinator })
+  const metadata: Record<string, unknown> = {}
+  coordinator.begin('session-1').close()
+  const result = await registry.execute(toolCall('Workflow', {
+    name: 'Fan-out',
+    // One agent finishes; one times out and is closed by the run.
+    script: `return await parallel([() => agent('scan a'), () => agent('slow scan', { timeout_ms: 20 })])`,
+  }), { metadata, sessionId: 'session-1', agentId: 'default' })
+  const wire = (typeof result === 'string' ? JSON.parse(result) : result) as Record<string, unknown>
+  expect(wire).toMatchObject({ status: 'completed', agents: { started: 2 } })
+  await Bun.sleep(250)
+  // The next turn (a new message, or the next goal round) reattaches undelivered work only.
+  coordinator.begin('session-1')
+  expect(coordinator.trackedIds('session-1')).toEqual([])
+  // And a restarted daemon, rehydrating the saved markers, does not replay them either.
+  const restarted = new NativeSubagentTurnCoordinator({ waitFor: async () => true }, () => manager.listHandles())
+  restarted.hydrateDelivered(persistedSubagentDeliveryValues(metadata))
+  restarted.begin('session-1')
+  expect(restarted.trackedIds('session-1')).toEqual([])
 })
 
 test('a Workflow agent refused by a full live-agent cap waits for a slot instead of failing', async () => {

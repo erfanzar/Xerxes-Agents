@@ -36,6 +36,7 @@ const buildUiState = (): UiState => ({
   status: 'ready',
   statusBar: 'top',
   streaming: true,
+  switching: false,
   theme: DEFAULT_THEME,
   usage: ZERO
 })

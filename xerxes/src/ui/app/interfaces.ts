@@ -199,6 +199,9 @@ export interface UiState {
   sid: null | string
   status: string
   statusBar: StatusBarMode
+  // A new/resume/activate RPC is in flight: `sid` still names the session
+  // being left, so a prompt submitted now must wait for the new one.
+  switching: boolean
   streaming: boolean
   theme: Theme
   usage: Usage
@@ -229,6 +232,11 @@ export interface ComposerActions {
   dequeue: () => QueuedMessage | undefined
   dismissCompletions: () => void
   enqueue: (submitText: string, displayText?: string) => void
+  // Queue a message that must move with the next activated session.
+  holdForSwitch: (message: QueuedMessage) => void
+  // The switch settled without activating a session: held messages stay
+  // queued where the user still is and must not ride a later switch.
+  releaseSwitchHold: () => void
   handleTextPaste: (event: PasteEvent) => MaybePromise<ComposerPasteResult | null>
   openEditor: () => Promise<void>
   pushHistory: (text: string) => void

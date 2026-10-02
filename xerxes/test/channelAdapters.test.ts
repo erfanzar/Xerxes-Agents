@@ -180,6 +180,53 @@ test('Telegram adapter parses standard and edited updates and uses Bot API JSON 
   })))).toEqual({ status: 200, body: 'ok' })
 })
 
+test('Telegram adapter delivers an edit of a recently delivered message while still dropping re-sends', async () => {
+  const channel = new TelegramChannel({
+    token: 'token',
+    acceptEditedMessages: true,
+    fetchImplementation: async () => Response.json({ ok: true, result: [] }),
+  })
+  const received: string[] = []
+  await channel.start(async message => { received.push(message.text) })
+  const chat = { id: 7, type: 'private' }
+  const from = { id: 7 }
+  const original = encoder.encode(JSON.stringify({
+    update_id: 1,
+    message: { message_id: 5, date: 1_700, text: 'deploy to staging', chat, from },
+  }))
+  const edit = encoder.encode(JSON.stringify({
+    update_id: 2,
+    edited_message: { message_id: 5, date: 1_700, edit_date: 1_760, text: 'deploy to prod', chat, from },
+  }))
+
+  await channel.handleWebhook({}, original)
+  await channel.handleWebhook({}, edit)
+  // Provider re-sends of either update are still deduplicated.
+  await channel.handleWebhook({}, original)
+  await channel.handleWebhook({}, edit)
+
+  expect(received).toEqual(['deploy to staging', 'deploy to prod'])
+})
+
+test('Telegram adapter turns the /<bot> group addressing form into an /ask command', async () => {
+  const channel = new TelegramChannel({
+    token: 'token',
+    botUsername: '@xerxes_bot',
+    fetchImplementation: async () => Response.json({ ok: true, result: [] }),
+  })
+  const received: string[] = []
+  await channel.start(async message => { received.push(message.text) })
+  const groupUpdate = (messageId: number, text: string) => encoder.encode(JSON.stringify({
+    message: { message_id: messageId, text, from: { id: 7 }, chat: { id: -100, type: 'supergroup' } },
+  }))
+
+  await channel.handleWebhook({}, groupUpdate(1, '/xerxes_bot what changed today?'))
+  await channel.handleWebhook({}, groupUpdate(2, '/xerxes_bot@xerxes_bot status please'))
+  await channel.handleWebhook({}, groupUpdate(3, '/xerxes@xerxes_bot hello'))
+
+  expect(received).toEqual(['/ask what changed today?', '/ask status please', '/xerxes@xerxes_bot hello'])
+})
+
 test('Telegram adapter secures gateway delivery and preserves safe Bot API behavior', async () => {
   const calls: Array<{ readonly body: Record<string, unknown>; readonly url: string }> = []
   const channel = new TelegramChannel({

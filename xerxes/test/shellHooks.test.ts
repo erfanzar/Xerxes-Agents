@@ -172,4 +172,19 @@ describe.skipIf(process.platform === 'win32')('native hook deadlines', () => {
     ])
     expect(Date.now() - started).toBeLessThan(2000)
   })
+
+  test('a hook that ignores stdin does not raise an unhandled EPIPE for a large payload', async () => {
+    const rejections: unknown[] = []
+    const onRejection = (reason: unknown) => { rejections.push(reason) }
+    process.on('unhandledRejection', onRejection)
+    try {
+      const runner = new HookRunner()
+      registerShellHooks(runner, parseShellHookConfig({ PostToolUse: [{ command: 'true' }] }, 'test'), { cwd: scratch() })
+      for (let attempt = 0; attempt < 3; attempt++) {
+        await runner.run('after_tool_call', { toolName: 'exec_command', result: 'x'.repeat(2_000_000) })
+      }
+      await Bun.sleep(100)
+      expect(rejections).toEqual([])
+    } finally { process.off('unhandledRejection', onRejection) }
+  })
 })

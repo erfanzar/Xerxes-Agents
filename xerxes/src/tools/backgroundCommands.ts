@@ -43,6 +43,8 @@ export interface BackgroundAdoptOptions {
   readonly name?: string
   readonly stderr: BoundedOutputBuffer
   readonly stdout: BoundedOutputBuffer
+  /** When the child was spawned (epoch ms); defaults to the adoption time. */
+  readonly startedAt?: number
 }
 
 export interface BackgroundStartOptions {
@@ -88,6 +90,8 @@ interface BackgroundEntry {
   readonly completion: Promise<void>
   readonly owner: BackgroundCommandOwner
   readonly process: Bun.Subprocess
+  /** Spawn time: scopes the memory guard's per-pid note to this process, not a pid's earlier owner. */
+  readonly startedAt: number
   readonly stderr: BoundedOutputBuffer
   readonly stdout: BoundedOutputBuffer
   readonly terminal?: TerminalHandle
@@ -124,6 +128,7 @@ export class BackgroundCommandManager {
   /** Spawn a command owned by an authenticated session scope. */
   startForOwner(owner: BackgroundCommandOwner, options: BackgroundStartOptions): BackgroundStartResult {
     const argv = [options.command, ...(options.args ?? [])]
+    const startedAt = Date.now()
     // Detached on POSIX so the child leads its own process group; kills then
     // reach the whole subtree (`cmd &` grandchildren included) instead of just
     // the direct child. The cost is that the child would outlive this process —
@@ -182,6 +187,7 @@ export class BackgroundCommandManager {
       drains,
       owner,
       process: child,
+      startedAt,
       stdout,
       stderr,
       ...(terminal ? { terminal } : {}),
@@ -245,6 +251,7 @@ export class BackgroundCommandManager {
       drains: options.drains,
       owner,
       process: options.child,
+      startedAt: options.startedAt ?? Date.now(),
       stdout: options.stdout,
       stderr: options.stderr,
       ...(terminal ? { terminal } : {}),
@@ -311,7 +318,7 @@ export class BackgroundCommandManager {
     }
     const outText = entry.stdout.take(maxOutputChars)
     const errText = entry.stderr.take(maxOutputChars)
-    const guardNote = running ? undefined : memoryGuardNote(entry.process.pid)
+    const guardNote = running ? undefined : memoryGuardNote(entry.process.pid, entry.startedAt)
     const dropped = entry.stdout.dropped || entry.stderr.dropped
     return {
       procId,

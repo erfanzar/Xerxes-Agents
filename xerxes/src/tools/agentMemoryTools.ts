@@ -392,7 +392,8 @@ async function resolveSelfMemory(
 ): Promise<AgentSelfMemory> {
   const resolved = options.selfMemory
     ?? (options.resolveSelfMemory ? await options.resolveSelfMemory(context) : undefined)
-  return resolved ?? getAgentSelfMemory(context.agentId ?? 'default')
+  const projectRoot = context.metadata.project_root
+  return resolved ?? getAgentSelfMemory(context.agentId ?? 'default', typeof projectRoot === 'string' ? projectRoot : undefined)
 }
 
 function failure(error: unknown): JsonObject {

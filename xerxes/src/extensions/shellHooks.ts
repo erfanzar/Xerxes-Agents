@@ -411,9 +411,17 @@ function defaultShellHookExecutor(cwd?: string): ShellHookExecutor {
       }, timeoutMs)
     })
     try {
-      proc.stdin.write(input)
-      proc.stdin.end()
-      const result = Promise.all([readCapped(readers[0]!), readCapped(readers[1]!), proc.exited])
+      // The sink flushes asynchronously. A notification hook that never reads
+      // stdin closes the pipe under a large payload, and that EPIPE used to
+      // surface as an unhandled rejection the daemon's crash handler exits on.
+      // A hook not consuming its input is not a failure; its exit code decides.
+      const fed = (async () => {
+        await proc.stdin.write(input)
+        await proc.stdin.end()
+      })().catch((error: unknown) => {
+        if ((error as NodeJS.ErrnoException).code !== 'EPIPE') throw error
+      })
+      const result = Promise.all([readCapped(readers[0]!), readCapped(readers[1]!), proc.exited, fed])
         .then(([stdout, stderr, code]) => timedOut ? timeout : { code, stderr, stdout })
       return await Promise.race([result, timeout])
     } catch (error) {

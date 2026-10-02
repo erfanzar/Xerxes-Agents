@@ -398,7 +398,7 @@ export interface DaemonRuntime {
    * record each persisted message as it is appended instead of relying on the
    * once-per-turn transcript write.
    */
-  messageJournal?(sessionId: string): TranscriptMessageJournalAppend;
+  messageJournal?(sessionId: string, cwd?: string): TranscriptMessageJournalAppend;
   openSession(
     sessionKey: string,
     agentId?: string,
@@ -550,6 +550,13 @@ export interface InMemoryDaemonRuntimeOptions {
  */
 export class InMemoryDaemonRuntime implements DaemonRuntime {
   private readonly abortControllers = new Map<string, AbortController>();
+  /**
+   * The runner each in-flight turn is iterating, by session id. reload()
+   * swaps this.turnRunner for a fresh one with empty per-session state, and
+   * asking that one for a running turn's messages hid everything the turn
+   * had done from any client that reopened the session until it ended.
+   */
+  private readonly inFlightTurnRunners = new Map<string, TurnRunner>();
   /** Serializes owner cleanup before a reused persisted id can own new commands. */
   private readonly backgroundOwnerCleanups = new Map<string, Promise<void>>();
   /** Children stopped by the last interrupt, reported once on the turn's settle edge. */
@@ -671,7 +678,8 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
   }
 
   liveTurnMessages(session: DaemonSession): readonly DaemonTranscriptMessage[] | undefined {
-    return this.turnRunner.liveMessages?.(session) as readonly DaemonTranscriptMessage[] | undefined;
+    const runner = this.inFlightTurnRunners.get(session.id) ?? this.turnRunner;
+    return runner.liveMessages?.(session) as readonly DaemonTranscriptMessage[] | undefined;
   }
 
   cancelTurn(sessionKey: string): boolean {
@@ -754,6 +762,8 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
       () => this.options.onSessionEvict?.(sessionId),
     );
     this.turnRunner.dropSession?.(sessionId);
+    const inFlightRunner = this.inFlightTurnRunners.get(sessionId);
+    if (inFlightRunner && inFlightRunner !== this.turnRunner) inFlightRunner.dropSession?.(sessionId);
     this.steerQueues.delete(sessionKey);
     this.pendingDefaultSessions.delete(sessionKey);
     this.cancelledSubagents.delete(sessionKey);
@@ -977,8 +987,8 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
    * storage. A per-turn crash otherwise loses the entire turn: the transcript
    * is written once, in the turn's `finally`.
    */
-  messageJournal(sessionId: string): TranscriptMessageJournalAppend {
-    return this.transcriptStore.journalAppender(sessionId);
+  messageJournal(sessionId: string, cwd?: string): TranscriptMessageJournalAppend {
+    return this.transcriptStore.journalAppender(sessionId, cwd);
   }
 
   listSessions(): readonly DaemonSession[] {
@@ -1523,7 +1533,11 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
 
   toolInventory(sessionKey: string): readonly RuntimeToolInventoryEntry[] | undefined {
     const session = this.sessionStatus(sessionKey);
-    return session ? this.turnRunner.toolInventory?.(session) : undefined;
+    if (!session) return undefined;
+    // A running turn keeps the tools of the runner it started on even after
+    // a reload swapped this.turnRunner; report what that turn can call.
+    const runner = this.inFlightTurnRunners.get(session.id) ?? this.turnRunner;
+    return runner.toolInventory?.(session);
   }
 
   inspectHooks(sessionKey: string): WorkspaceHookInspection | undefined {
@@ -1729,7 +1743,8 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     this.cancelledSubagents.delete(sessionKey);
     session.activeTurnId = newSessionId();
     session.lastActive = Date.now();
-    const runnerManagesState = this.turnRunner.managesSessionState === true;
+    const turnRunner = this.turnRunner;
+    const runnerManagesState = turnRunner.managesSessionState === true;
     const assistantParts: string[] = [];
     const thinkingParts: string[] = [];
     let outcomeReason: TurnOutcomeReason | undefined;
@@ -1792,7 +1807,7 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
       // journal carries it until the next full save subsumes it.
       const index = session.messages.length - 1;
       const message = session.messages[index];
-      if (message) this.messageJournal(session.id)(message, index);
+      if (message) this.messageJournal(session.id, session.cwd)(message, index);
     }
     emitSessionEvent({
       type: "turn_begin",
@@ -1813,8 +1828,9 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
       session.id,
       emitSessionEvent,
     );
+    this.inFlightTurnRunners.set(session.id, turnRunner);
     try {
-      for await (const event of this.turnRunner.run(
+      for await (const event of turnRunner.run(
         session,
         providerText,
         controller.signal,
@@ -1827,7 +1843,7 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
             return drained;
           },
           displayText,
-          journal: this.messageJournal(session.id),
+          journal: this.messageJournal(session.id, session.cwd),
           ...(images.length ? { images } : {}),
           ...(options.goalRound === undefined ? {} : { goalRound: options.goalRound }),
           ...(options.origin === undefined ? {} : { origin: options.origin }),
@@ -1845,6 +1861,11 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
         payload: { level: "error", message: errorMessage(error) },
       });
     } finally {
+      // Released first: the runner has synchronized session.messages by now,
+      // and a throw from the awaited settle work below must not pin a
+      // superseded runner (and its per-session state) until the next turn.
+      // Only this turn's own entry; a replacement turn may own the slot.
+      if (this.inFlightTurnRunners.get(session.id) === turnRunner) this.inFlightTurnRunners.delete(session.id);
       if (!runnerManagesState && assistantParts.length) {
         session.messages.push({
           role: "assistant",

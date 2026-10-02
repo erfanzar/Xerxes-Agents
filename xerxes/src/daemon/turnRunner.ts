@@ -18,7 +18,7 @@ import {
   renderTurnContext,
 } from '../context/assembly.js'
 import { ToolResultStorage } from '../context/toolResultStorage.js'
-import { delegationModeOf, delegationModePrompt } from '../agents/delegationMode.js'
+import { DELEGATION_MODE_METADATA_KEY, delegationModeOf, delegationModePrompt } from '../agents/delegationMode.js'
 import { CONTEXT_CALIBRATION_METADATA_KEY, contextCalibrationRatio, estimateContextTokens, promptCalibration } from '../context/windowUsage.js'
 import { ValidationError } from '../core/errors.js'
 import { classify, ErrorKind } from '../runtime/errorClassifier.js'
@@ -1593,7 +1593,14 @@ function synchronizeSessionState(session: DaemonSession, state: AgentState): voi
   const preservedRearm = session.metadata[GOAL_REARM_AFTER_RESTART_KEY]
   const hadTitleDerived = Object.hasOwn(session.metadata, 'title_derived')
   const preservedTitleDerived = session.metadata.title_derived
+  // The Agents chip (/delegate) is not disabled while a turn runs; an Off or
+  // Eager picked during a long goal round must outlive that round's restore.
+  // Choosing auto deletes the key, so presence is carried too.
+  const hadDelegationMode = Object.hasOwn(session.metadata, DELEGATION_MODE_METADATA_KEY)
+  const preservedDelegationMode = session.metadata[DELEGATION_MODE_METADATA_KEY]
   session.metadata = { ...state.metadata }
+  if (hadDelegationMode) session.metadata[DELEGATION_MODE_METADATA_KEY] = preservedDelegationMode
+  else delete session.metadata[DELEGATION_MODE_METADATA_KEY]
   if (providerProfile !== undefined) session.metadata.provider_profile = providerProfile
   if (preservedTitle !== undefined) session.metadata.title = preservedTitle
   if (preservedGoalWake !== undefined) session.metadata.goal_wake = preservedGoalWake

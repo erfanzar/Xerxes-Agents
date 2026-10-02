@@ -248,6 +248,39 @@ test('Responses API translator surfaces incomplete responses with a mapped finis
   expect(filtered).toEqual([{ finishReason: 'content_filter', usage: { inputTokens: 0, outputTokens: 0 } }])
 })
 
+test("Codex's response.done ends the stream and flushes the recorded tool calls", () => {
+  const deltas = [...new ResponsesEventTranslator().translateAll([
+    { type: 'response.created', response: { id: 'resp_1' } },
+    { type: 'response.output_text.delta', delta: 'Running tests' },
+    {
+      type: 'response.output_item.done',
+      item: { type: 'function_call', id: 'fc_1', call_id: 'call_1', name: 'exec_command', arguments: '{"cmd":"bun test"}' },
+    },
+    { type: 'response.done', response: { status: 'completed', usage: { input_tokens: 5, output_tokens: 3 } } },
+  ])]
+
+  expect(deltas).toEqual([
+    { content: 'Running tests' },
+    {
+      finishReason: 'tool_calls',
+      usage: { inputTokens: 5, outputTokens: 3 },
+      toolCalls: [{ id: 'call_1', type: 'function', function: { name: 'exec_command', arguments: { cmd: 'bun test' } } }],
+    },
+  ])
+})
+
+test('an incomplete response.done keeps the truncation finish reason', () => {
+  const deltas = [...new ResponsesEventTranslator().translateAll([
+    { type: 'response.output_text.delta', delta: 'cut' },
+    {
+      type: 'response.done',
+      response: { status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' } },
+    },
+  ])]
+
+  expect(deltas.at(-1)?.finishReason).toBe('length')
+})
+
 test('cached prompt tokens are reported apart from fresh ones, not counted twice', () => {
   // The Responses API reports `input_tokens` as the whole prompt with
   // `cached_tokens` a subset of it — the opposite of Anthropic, where the two

@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import type { TelegramUpdatesOptions } from './telegram.js'
-import type { WebhookHeaders, WebhookResponse } from './webhooks.js'
+import type { WebhookAcceptance, WebhookHeaders, WebhookResponse } from './webhooks.js'
 
 const DEFAULT_POLLING_RETRY_DELAY = 2_000
 const DEFAULT_POLLING_TIMEOUT = 30
@@ -18,8 +18,10 @@ export interface TelegramPollingChannel {
    * Internal ingest for polled updates. Polling is authenticated by the bot
    * token, so adapters use this to bypass webhook-only credentials such as
    * Telegram's secret-token header. Falls back to handleWebhook when absent.
+   * It may return as soon as the update is accepted and carry the turn's
+   * outcome in `settled`, which the loop reports without waiting on it.
    */
-  ingestPolledUpdate?(body: Uint8Array): Promise<WebhookResponse>
+  ingestPolledUpdate?(body: Uint8Array): Promise<WebhookAcceptance>
 }
 
 export interface TelegramPollingLoopOptions {
@@ -90,6 +92,7 @@ export class TelegramPollingLoop {
           if (this.abort.signal.aborted) return
           const updateId = integer(update.update_id)
           const delivered = await ingestPolledUpdate(this.channel, update)
+          if (delivered.settled) this.watchTurn(updateId, delivered.settled)
           if (delivered.status >= 400) {
             const attempts = this.registerDeliveryFailure(updateId, delivered.status)
             if (attempts !== 0) {
@@ -143,6 +146,24 @@ export class TelegramPollingLoop {
     return 0
   }
 
+  /**
+   * Report the outcome of an accepted update's turn without blocking polling.
+   *
+   * Its offset is already acknowledged, so a failed turn is not re-fetched:
+   * re-running it would repeat whatever side effects it had already caused.
+   */
+  private watchTurn(updateId: number | undefined, settled: Promise<WebhookResponse>): void {
+    const label = updateId === undefined ? 'without an update_id' : String(updateId)
+    settled.then(
+      outcome => {
+        if (outcome.status >= 400) {
+          this.report(new Error(`Telegram update ${label} failed while handling its turn (${outcome.status})`))
+        }
+      },
+      error => { this.report(error) },
+    )
+  }
+
   /** Capped exponential delay before the next polling cycle after a failure. */
   private nextBackoffDelay(): number {
     return Math.min(this.retryDelay * 2 ** Math.min(this.backoffStep, 30), MAX_POLLING_BACKOFF_MS)
@@ -168,7 +189,7 @@ function updates(response: Readonly<Record<string, unknown>>): readonly Record<s
 function ingestPolledUpdate(
   channel: TelegramPollingChannel,
   update: Record<string, unknown>,
-): Promise<WebhookResponse> {
+): Promise<WebhookAcceptance> {
   const body = new TextEncoder().encode(JSON.stringify(update))
   return channel.ingestPolledUpdate ? channel.ingestPolledUpdate(body) : channel.handleWebhook({}, body)
 }

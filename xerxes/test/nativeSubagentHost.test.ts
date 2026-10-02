@@ -29,6 +29,7 @@ import {
   INTERRUPTED_TOOL_RESULT,
 } from '../src/session/daemonTranscript.js'
 import { AgentTurnRunner, formatSubagentResults } from '../src/daemon/turnRunner.js'
+import { estimateContextTokens } from '../src/context/windowUsage.js'
 import { ToolRegistry } from '../src/executors/toolRegistry.js'
 import { RunHistory } from '../src/runtime/runHistory.js'
 import { SkillRegistry } from '../src/extensions/skills.js'
@@ -3902,6 +3903,82 @@ test('a child whose tool output outgrows the window compacts mid-turn instead of
     expect(client.rounds).toBe(9)
     expect(JSON.stringify(done)).toContain('finished after compaction')
   } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+/**
+ * Reports an honest prompt count for every round, steers itself once while a
+ * big read is in flight, and records how often the child asked to compact.
+ */
+class SteeredChildClient implements LlmClient {
+  compactionCalls = 0
+  rounds = 0
+  readonly taskId = Promise.withResolvers<string>()
+  constructor(private readonly steer: (taskId: string) => void) {}
+  async *stream(request: CompletionRequest): AsyncGenerator<LlmDelta> {
+    if (!request.tools?.length) {
+      this.compactionCalls += 1
+      yield { content: 'CHILD SUMMARY' }
+      return
+    }
+    this.rounds += 1
+    const usage = { inputTokens: estimateContextTokens(request.messages as unknown as Record<string, unknown>[], { model: 'test-model', toolSchemas: request.tools as unknown as Record<string, unknown>[] }), outputTokens: 2 }
+    if (this.rounds === 1) {
+      yield { toolCalls: [toolCall('SizedRead', { chars: 400 })], usage }
+      return
+    }
+    if (this.rounds === 2) {
+      // The steer lands while this round's big read runs, so round 3 opens on
+      // a user message and the compaction check returns before measuring.
+      this.steer(await this.taskId.promise)
+      yield { toolCalls: [toolCall('SizedRead', { chars: 24_000 })], usage }
+      return
+    }
+    if (this.rounds === 3) {
+      yield { toolCalls: [toolCall('SizedRead', { chars: 400 })], usage }
+      return
+    }
+    yield { content: 'finished', usage }
+  }
+}
+
+test('a steer between rounds does not pair a later provider count with an earlier estimate', async () => {
+  // Regression: a user-terminated round skipped calibration.project, so the
+  // next round divided round 3's provider count by round 2's estimate. The big
+  // read in between inflated the ratio and compacted the child at a fraction
+  // of its window.
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-child-steer-calibration-'))
+  const registry = new ToolRegistry()
+  registry.register(
+    { type: 'function', function: { name: 'SizedRead', description: 'sized output', parameters: { type: 'object', properties: { chars: { type: 'number' } } } } },
+    args => 'x '.repeat(Math.floor(Number(args.chars) / 2)),
+  )
+  let host: ReturnType<typeof createNativeSubagentHost> | undefined
+  const client = new SteeredChildClient(taskId => { expect(host?.manager.steer(taskId, 'also check the tests')).toBe(true) })
+  host = createNativeSubagentHost({
+    agentDefinitions: new Map([['coder', agentDefinition('coder')]]),
+    autoCompactThreshold: 0.5,
+    contextLimit: () => 40_000,
+    cwd: directory,
+    eventBus: new DaemonSubagentEventBus(),
+    llm: client,
+    model: 'test-model',
+    permissionMode: 'accept-all',
+    toolExecutor: registry,
+    tools: registry.definitions(),
+    transcriptStore: new DaemonTranscriptStore({ currentProjectDirectory: directory, directory: join(directory, 'sessions') }),
+  })
+  try {
+    const task = await host.managerPort.spawn({ message: 'read the files', promptProfile: 'coder', sourceAgentId: 'parent-session', title: 'Steered child' })
+    client.taskId.resolve(task.id)
+    const done = await host.managerPort.wait([task.id], 5_000)
+    expect(JSON.stringify(done)).toContain('finished')
+    expect(client.rounds).toBe(4)
+    // The whole conversation stays near 8K of a 20K threshold: nothing to compact.
+    expect(client.compactionCalls).toBe(0)
+  } finally {
+    await host.manager.shutdown()
     await rm(directory, { recursive: true, force: true })
   }
 })

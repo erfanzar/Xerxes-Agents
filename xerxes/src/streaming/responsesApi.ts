@@ -3,7 +3,7 @@
 
 import { parseStreamingJson } from '@earendil-works/pi-ai'
 
-import { ProviderError } from '../core/errors.js'
+import { ProviderError, StreamTruncatedError } from '../core/errors.js'
 import type { LlmDelta, TokenUsage } from '../llms/client.js'
 import { isJsonObject, parseToolArguments, type ToolCall } from '../types/toolCalls.js'
 
@@ -135,12 +135,17 @@ export class ResponsesEventTranslator {
       this.completeFunctionCall(item)
       return []
     }
-    if (type === 'response.completed') {
+    // The Codex backend can end a response with `response.done` (pi-ai maps
+    // it onto response.completed). Its status says whether the reply finished
+    // or was cut short. Skipping it dropped the recorded tool calls and then
+    // failed the stream for lacking a terminal event.
+    const doneStatus = type === 'response.done' ? stringValue(recordValue(event.response).status) : undefined
+    if (type === 'response.completed' || (type === 'response.done' && doneStatus !== 'incomplete')) {
       this.completeUsage(recordValue(event.response))
       this.terminal = true
       return [this.completionDelta()]
     }
-    if (type === 'response.incomplete') {
+    if (type === 'response.incomplete' || type === 'response.done') {
       this.completeUsage(recordValue(event.response))
       this.usage = { ...this.usage, finishReason: incompleteFinishReason(recordValue(event.response)) }
       this.terminal = true
@@ -160,7 +165,7 @@ export class ResponsesEventTranslator {
   /** Validate that a finite transport ended after a terminal provider event. */
   finish(): void {
     if (!this.terminal) {
-      throw new ProviderError('responses', 'Responses API stream ended before a terminal response event')
+      throw new StreamTruncatedError('responses', 'Responses API stream ended before a terminal response event')
     }
   }
 

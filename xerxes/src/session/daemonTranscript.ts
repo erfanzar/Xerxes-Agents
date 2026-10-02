@@ -462,8 +462,8 @@ export class DaemonTranscriptStore {
    * the price of a `write(2)`, not to survive power loss. A torn final line is
    * expected and is discarded on replay.
    */
-  async appendMessage(sessionId: string, message: RawMessage, index: number): Promise<void> {
-    await this.appendEvent(sessionId, identity => transcriptMessageAppendedEvent(sessionId, index, message, identity))
+  async appendMessage(sessionId: string, message: RawMessage, index: number, cwd?: string): Promise<void> {
+    await this.appendEvent(sessionId, identity => transcriptMessageAppendedEvent(sessionId, index, message, identity, cwd))
   }
 
   /** Append any typed session event with one lock-authorized identity. */
@@ -491,9 +491,9 @@ export class DaemonTranscriptStore {
    * daemon storage, and swallowing so a failing sidecar can never abort the
    * turn whose durability it exists to improve.
    */
-  journalAppender(sessionId: string): TranscriptMessageJournalAppend {
+  journalAppender(sessionId: string, cwd?: string): TranscriptMessageJournalAppend {
     return (message, index) => {
-      void this.appendMessage(sessionId, message, index).catch((error: unknown) => {
+      void this.appendMessage(sessionId, message, index, cwd).catch((error: unknown) => {
         console.warn(`Could not journal message ${index} of session ${sessionId}: ${errorText(error)}`)
       })
     }
@@ -837,7 +837,7 @@ export class DaemonTranscriptStore {
     const decoded = readTranscriptEventRecords(contents.subarray(safeOffset), sessionId, safeOffset)
 
     const appends = decoded.records.flatMap(record => record.event.type === 'message_appended'
-      ? [{ index: record.event.index, endOffset: record.endOffset, message: record.event.message }]
+      ? [{ index: record.event.index, endOffset: record.endOffset, message: record.event.message, cwd: record.event.cwd }]
       : [])
     const start = journalContinuation(appends, raw.messages as RawMessage[])
     if (start < 0) return
@@ -849,9 +849,11 @@ export class DaemonTranscriptStore {
     let next = base
     let replayed = 0
     let coveredOffset = safeOffset
+    let cwd: string | undefined
     for (const record of appends.slice(start)) {
       if (record.index === next) {
         raw.messages.push(storedMessage(record.message))
+        cwd = record.cwd ?? cwd
         coveredOffset = record.endOffset
         replayed += 1
         next += 1
@@ -864,6 +866,11 @@ export class DaemonTranscriptStore {
       // generation, which this snapshot is not the base of.
       break
     }
+    // A record with no directory of its own (a journal with no snapshot) takes
+    // the one its messages were written in. Left blank, it fell back to the
+    // daemon's default project: listed under the wrong workspace and rebound
+    // to whichever directory opened it.
+    if (cwd && !stringValue(raw.cwd) && !stringValue(raw.project_dir)) raw.cwd = cwd
     if (replayed > 0) {
       raw.event_log_offset = coveredOffset
       console.warn(`Recovered ${replayed} unsaved message(s) for session ${sessionId} from its event log`)

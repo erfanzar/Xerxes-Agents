@@ -319,6 +319,12 @@ export interface Snapshot {
   readonly goal: string
   readonly approval: Approval | null
   readonly question: import('./types.js').TaskQuestion | null
+  /**
+   * The person hid the pending approval or question card. The request is
+   * still pending and still shown as "needs input"; only the card is folded
+   * away until they reopen it or a new request arrives.
+   */
+  readonly interactionHidden: boolean
   readonly planMode: boolean
   readonly turnActive: boolean
   readonly networkRetrying?: boolean
@@ -867,6 +873,7 @@ export class Store {
       goal: '',
       approval: null,
       question: null,
+      interactionHidden: false,
       planMode: false,
       turnActive: false, networkRetrying: false,
       turnFailed: false,
@@ -1081,7 +1088,11 @@ export class Store {
       this.preparingSubmissions.set(sessionKey, optimistic)
       this.notify()
       try {
-        const result = await this.bridge.call('turn.submit', { session_key: sessionKey, text: trimmed, ...(shown === trimmed ? {} : { display_text: shown }) })
+        // A submission id makes a busy session (a goal round, monitor or
+        // schedule preparing its turn before turn_begin) refuse the submit
+        // up front. Without one the daemon acknowledged it {ok:true} and only
+        // then dropped it, so the bubble looked delivered and the draft was gone.
+        const result = await this.bridge.call('turn.submit', { session_key: sessionKey, text: trimmed, submission_id: crypto.randomUUID(), ...(shown === trimmed ? {} : { display_text: shown }) })
         if (result.ok === false) throw new Error(str(result.error) || 'Submission refused')
         if (this.sessionKey === sessionKey) this.cameOnline()
         return true
@@ -1165,8 +1176,16 @@ export class Store {
       if (result.ok === true) {
         if (this.sessionKey === sessionKey) {
           if (!pending.shown) { this.builder.pushUser(cleaned); pending.shown = true }
-          this.queue = [...this.queue, { id: this.seq++, text: cleaned }]
-          this.patch({ queue: this.queue })
+          if (this.frame.turnActive) {
+            this.queue = [...this.queue, { id: this.seq++, text: cleaned }]
+            this.patch({ queue: this.queue })
+          } else {
+            // The turn ended while this steer was in flight; turn_end came
+            // first. The daemon kept the text for the next turn but started
+            // none, so a "queued" entry would wait for a reply forever.
+            this.builder.push('notification', { severity: 'info', message: 'The task finished before this message reached it. It is saved and goes with your next message.' })
+            this.notify()
+          }
         }
         return true
       } else {
@@ -1218,12 +1237,17 @@ export class Store {
   }
 
   /**
-   * Drop a decision card without answering it. The request stays pending in
-   * the daemon (and re-appears on reconnect); this only clears the surface
-   * for a user who wants the transcript back while they think.
+   * Fold a decision card away without answering it. The request stays
+   * pending in the daemon, so it stays in the snapshot too: clearing it left
+   * the turn parked on an approval nothing could bring back, with the
+   * "needs input" badge gone. `showInteraction` reopens it.
    */
   dismissInteraction(): void {
-    this.patch({ approval: null, question: null })
+    if (this.frame.approval || this.frame.question) this.patch({ interactionHidden: true })
+  }
+
+  showInteraction(): void {
+    if (this.frame.interactionHidden) this.patch({ interactionHidden: false })
   }
 
   /** Ask the attached process to exit; DaemonRpc reconnects and launches this build. */
@@ -1275,7 +1299,8 @@ export class Store {
   private openingSession = false
   private sessionNavigationNeedsRestore = false
 
-  openSession(id: string): Promise<void> {
+  /** `known` is a row the caller already resolved beyond the sidebar's page (a `/resume` lookup). */
+  openSession(id: string, known?: SessionRow): Promise<void> {
     const previousVersion = this.sessionNavigationVersion
     const version = ++this.sessionNavigationVersion
     this.openingSession = true
@@ -1283,7 +1308,7 @@ export class Store {
       if (version !== this.sessionNavigationVersion) return
       let navigated = false
       try {
-        navigated = await this.openSessionNow(id, version)
+        navigated = await this.openSessionNow(id, version, known)
         // A superseded click whose initialize the daemon accepted left the
         // connection bound to that chat. A click that hands off to another
         // window or workspace never re-binds it, so slash commands and the
@@ -1325,9 +1350,9 @@ export class Store {
   }
 
   /** Resolves true only when this store's own session actually changed. */
-  private async openSessionNow(id: string, version: number): Promise<boolean> {
+  private async openSessionNow(id: string, version: number, known?: SessionRow): Promise<boolean> {
     try {
-      const row = [...this.frame.sessions, ...this.frame.live].find(session => session.id === id)
+      const row = [...this.frame.sessions, ...this.frame.live].find(session => session.id === id) ?? known
       if (this.frame.turnActive) {
         if (id === this.frame.currentId) return false
         if (!this.bridge.openWorkspaceWindow) throw new Error('This desktop build cannot open another session window. Relaunch the updated app.')
@@ -1411,19 +1436,51 @@ export class Store {
     return this.initialize({ session_key: key })
   }
 
-  /** `/resume <id|name>`: the same id-prefix, key or title match the daemon applies. */
+  /**
+   * `/resume <id|name>`: the same id-prefix, key or title match the daemon
+   * applies, over every saved chat. The sidebar lists hold only the newest
+   * page and leave out the current chat, so matching them alone reported "no
+   * match" for an older chat the daemon's own /resume used to open.
+   */
   private async resumeMatching(query: string): Promise<boolean> {
-    const needle = query.toLowerCase()
-    const matches = [...this.frame.live, ...this.frame.sessions].filter(row =>
-      row.id.toLowerCase().startsWith(needle) || row.key.toLowerCase() === needle || row.title.toLowerCase() === needle)
-    const unique = [...new Map(matches.map(row => [row.id, row])).values()]
-    if (unique.length !== 1) {
-      this.fail(new Error(unique.length
-        ? `Multiple sessions match \`${query}\`; use a longer id prefix.`
-        : `No saved session matches \`${query}\`.`))
+    const needle = query.trim().toLowerCase()
+    const currentId = this.frame.currentId
+    let saved: SessionRow[]
+    try {
+      const listed = await this.bridge.call('session.list', { kind: 'main', scope: 'global', query: needle })
+      if (listed.ok === false) throw new Error(str(listed.error) || 'Saved sessions could not be listed')
+      saved = normalize(listed.sessions, currentId)
+    } catch (error) {
+      this.fail(error)
       return false
     }
-    await this.openSession(unique[0]!.id)
+    // Matching here too keeps an older daemon, which ignores `query` and
+    // returns every saved chat, from resuming an unrelated row.
+    const matches = new Map<string, SessionRow | undefined>()
+    for (const row of [...this.frame.live, ...saved]) {
+      if (row.id.toLowerCase().startsWith(needle) || row.key.toLowerCase() === needle || row.title.toLowerCase() === needle) matches.set(row.id, row)
+    }
+    // A chat that has not been saved yet is still the one on screen.
+    if (currentId && currentId.toLowerCase().startsWith(needle) && !matches.has(currentId)) matches.set(currentId, undefined)
+    if (matches.size !== 1) {
+      // Reported directly, not through fail(): the message quotes what the
+      // user typed, and fail() reads words like "connect" or "closed" as a
+      // transport failure and takes the whole view offline.
+      const message = matches.size
+        ? `Multiple sessions match \`${query}\`; use a longer id prefix.`
+        : `No saved session matches \`${query}\`.`
+      this.patch({ error: message })
+      this.builder.push('notification', { severity: 'error', message })
+      this.notify()
+      return false
+    }
+    const [id, row] = [...matches][0]!
+    if (id === currentId) {
+      this.builder.push('notification', { severity: 'info', message: 'Already in this session.' })
+      this.notify()
+      return true
+    }
+    await this.openSession(id, row)
     return true
   }
 
@@ -3879,6 +3936,7 @@ export class Store {
             ...(str(payload.cwd) ? { cwd: str(payload.cwd) } : {}),
             ...(str(payload.reason) ? { reason: str(payload.reason) } : {}),
           },
+          interactionHidden: false,
         })
         break
       }
@@ -3901,17 +3959,25 @@ export class Store {
           toolCallId: str(payload.tool_call_id),
           items,
         }
-        this.patch({ question })
+        this.patch({ question, interactionHidden: false })
         // A plan review captures the proposal as the session's working plan.
         if (isPlanReview(question) && this.agentText.trim()) {
           this.capturePlan(this.agentText)
         }
         break
       }
+      // Every window showing the request hears its answer, including one
+      // answered from another window or the TUI: the card is dead from then on.
       case 'question_response': {
-        // The answerer's own connection gets the echo; other surfaces drop it.
         const id = str(payload.id)
         if (this.frame.question?.requestId === id) this.patch({ question: null })
+        break
+      }
+      case 'approval_response': {
+        // Answered here or in another window on the same session: the card can
+        // no longer be answered, so it must not keep saying it waits for you.
+        const id = str(payload.request_id) || str(payload.id)
+        if (id && this.frame.approval?.id === id) this.patch({ approval: null })
         break
       }
       case 'turn_end': {

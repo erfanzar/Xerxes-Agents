@@ -7,6 +7,20 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.19 — 2026-10-02
+
+Reliability release, round 2: 55 more bugs, each confirmed by an independent check and fixed with a test that fails without the fix, including two regressions from 0.6.18.
+
+- Messages and sessions: a message sent between goal rounds is no longer dropped. Renaming, saving, compressing or undoing another chat no longer switches this window to it. Unsaved edits in the Files editor are no longer lost when the panel closes or changes. Session cost now counts cached tokens.
+- Approvals and questions: a hidden approval card can be brought back instead of leaving the turn waiting forever. Approvals from goals resumed after an update, monitor reactions and schedules can be answered, and an answer clears the card in every window.
+- Channels: Telegram turns can ask and be answered (/approve, /deny, /answer, or a plain reply; in a group, address the bot, e.g. /approve@YourBot). /stop reaches a running turn, long replies are sent in full, context survives restarts, and group commands addressed to the bot work.
+- Startup and extensions: a broken managed plugin no longer stops the runtime from starting. Reloading skills or plugins no longer hides a running turn, skill commands run in the session's workspace, and block-scalar skill descriptions parse.
+- Schedules: one running job no longer blocks the others, cancelling a one-shot run no longer reschedules it, and follow-ups no longer time out while queued behind your own turn.
+- Terminal UI: a prompt sent while switching sessions goes to the right one, a pending approval shows when you switch to its tab, and /undo removes the undone exchange.
+- Providers: Codex turns retry a dropped connection and handle its final event. A stored Anthropic subscription token is no longer sent to other Anthropic-compatible providers. Unknown finish reasons are no longer fatal, and parallel agents no longer race on OAuth refreshes.
+- Context: compaction and limits follow the profile the session runs on, images are no longer counted as huge text, and a token-capped goal is not blocked by one transient failure.
+- This week's features: finished workflow agents are not delivered twice, the memory guard no longer over-counts shared memory on Linux or reports a reused process id as stopped, and structured agent results keep every field.
+
 ## 0.6.18 — 2026-10-02
 
 Reliability release: 46 bugs found by a whole-codebase review, each confirmed by an independent check, fixed with a test that fails without the fix.

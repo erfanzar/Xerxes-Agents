@@ -220,7 +220,11 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
           unanswerable. Float it above the takeover instead. */}
       {chatHidden.any && (snap.approval || snap.question) && (
         <div className="decision-dock">
-          {snap.approval
+          {/* The chat header (and its badge) is hidden here too, so a hidden
+              card keeps a way back in the dock. */}
+          {snap.interactionHidden
+            ? <button className="badge badge--need" title="Show the request waiting for you" onClick={() => store.showInteraction()}>needs input{snap.turnActive ? ' · acting paused' : ''}</button>
+            : snap.approval
             ? <ApprovalCard approval={snap.approval} policy={snap.permissionMode} />
             : snap.question ? <QuestionCard key={`dock:${snap.question.requestId}`} question={snap.question} plan={snap.plan} /> : null}
         </div>
@@ -851,7 +855,7 @@ function Chat({ snap, page }: { snap: Snapshot; page: 'agents' | 'extensions' | 
         <span className="hchip chat__kind" title="Agent preset for this session · fixed after its first turn">{snap.currentAgentPreset === 'creator' ? 'Creator mode' : (snap.currentAgentPreset || 'default')}</span>
         <span className="composer__flex" />
         {/* On Session edits or the plan, the approval card is off screen: this is the signal. */}
-        {needsInput && <button className="badge badge--need" onClick={() => store.setTab('activity')}>needs input{snap.turnActive ? ' · acting paused' : ''}</button>}
+        {needsInput && <button className="badge badge--need" title={snap.interactionHidden ? 'Show the request waiting for you' : undefined} onClick={() => { store.showInteraction(); store.setTab('activity') }}>needs input{snap.turnActive ? ' · acting paused' : ''}</button>}
         {page === null && snap.tab !== 'activity' && <button className="chat__view" onClick={() => store.setTab('activity')}><Icon name="chat" size={13} /> Conversation</button>}
         {page === null && changes.length > 0 && <button className={`chat__view${snap.tab === 'changes' ? ' is-on' : ''}`} aria-pressed={snap.tab === 'changes'} onClick={() => store.setTab(snap.tab === 'changes' ? 'activity' : 'changes')}>
           Session edits <span className="pillcount"><span className="add">+{totals.adds}</span> <span className="del">−{totals.dels}</span></span>
@@ -918,7 +922,9 @@ function Stream({ snap }: { snap: Snapshot }): ReactElement {
 
   // dsh: the approval attaches to the tool call it is about — render it
   // directly under the trail holding that call, not floating elsewhere.
-  const approval = snap.approval
+  // A hidden card is still pending: the header badge reopens it.
+  const approval = snap.interactionHidden ? null : snap.approval
+  const question = snap.interactionHidden ? null : snap.question
   let approvalIndex = -1
   if (approval?.toolCallId) {
     approvalIndex = blocks.findIndex(
@@ -929,7 +935,7 @@ function Stream({ snap }: { snap: Snapshot }): ReactElement {
   const floatApproval = approval !== null && !inlineApproval
   const failedCard = snap.failed && !snap.turnActive ? <FailedCard failed={snap.failed} /> : null
 
-  if (offline && blocks.length === 0 && !snap.question) {
+  if (offline && blocks.length === 0 && !question) {
     return <div className="stream" ref={ref}><Offline cwd={snap.cwd} error={snap.error} /></div>
   }
 
@@ -943,8 +949,8 @@ function Stream({ snap }: { snap: Snapshot }): ReactElement {
     // token-level streaming announces continuously; the Announcer below
     // reports the transitions that actually matter instead.
     <ReplyEnds.Provider value={ends}>
-    <div className={`stream${empty && !failedCard && !snap.question && !approval ? ' stream--welcome' : ''}`} ref={ref} tabIndex={0} role="region" aria-label="Conversation">
-      {empty && !failedCard && !snap.question && !approval ? <>
+    <div className={`stream${empty && !failedCard && !question && !approval ? ' stream--welcome' : ''}`} ref={ref} tabIndex={0} role="region" aria-label="Conversation">
+      {empty && !failedCard && !question && !approval ? <>
         {blocks.length > 0 && <div className="welcome-notices" aria-live="polite">{blocks.map(block => <BlockView key={block.id} block={block} />)}</div>}
         {existingWork ? <TaskContinuation snap={snap} /> : <Welcome snap={snap} />}
       </> : (
@@ -963,9 +969,9 @@ function Stream({ snap }: { snap: Snapshot }): ReactElement {
         </div>
       )}
       {floatApproval && <div className="stream__col"><ApprovalCard approval={approval} policy={snap.permissionMode} /></div>}
-      {snap.question && (
+      {question && (
         <div className="stream__col">
-          <QuestionCard key={`${snap.currentId}:${snap.question.requestId}`} question={snap.question} plan={snap.plan} />
+          <QuestionCard key={`${snap.currentId}:${question.requestId}`} question={question} plan={snap.plan} />
         </div>
       )}
       {/* Scrolling up silently unpins the tail; without this the only way

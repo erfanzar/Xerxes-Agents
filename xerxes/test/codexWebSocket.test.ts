@@ -11,12 +11,14 @@ import {
   buildCachedWebSocketRequestBody,
   clearCodexWebSocketFallback,
   closeCodexWebSocketSessions,
+  codexContinuationFor,
   codexWebSocketFallbackActive,
   compressRequestBodyZstd,
   continuationFromResponse,
   getCodexWebSocketDebugStats,
   isCodexRetryableWebSocketError,
   recordCodexWebSocketFallback,
+  rememberCodexContinuation,
   resolveCodexWebSocketUrl,
   streamCodexWebSocket,
   type WebSocketEventLike,
@@ -421,6 +423,24 @@ test('an idle pooled socket closes itself after the idle window', async () => {
   await Bun.sleep(80)
   expect(sockets[0]!.closeCalls.some(call => call.reason === 'idle_timeout')).toBe(true)
   closeCodexWebSocketSessions(sessionId)
+})
+
+test("a session's continuation is released with its last pooled socket", async () => {
+  const sessionId = 'ws-idle-continuation'
+  const { factory } = harness(socket => socket.messageJson(terminal('resp_idle')))
+  const continuation = continuationFromResponse(simpleBody(), 'resp_idle', [])!
+
+  // Nothing pooled for the session: there is no socket to extend, so the
+  // full request body is not kept.
+  rememberCodexContinuation(sessionId, continuation)
+  expect(codexContinuationFor(sessionId)).toBeUndefined()
+
+  await collect(streamCodexWebSocket(simpleBody(), baseOptions({ sessionId, poolIdleTimeoutMs: 20, webSocketFactory: factory })))
+  rememberCodexContinuation(sessionId, continuation)
+  expect(codexContinuationFor(sessionId)).toBe(continuation)
+
+  await Bun.sleep(80)
+  expect(codexContinuationFor(sessionId)).toBeUndefined()
 })
 
 test('closeCodexWebSocketSessions closes pooled sockets for one session or all', async () => {

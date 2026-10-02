@@ -575,6 +575,28 @@ test('markup mentioned in prose never swallows the rest of the reply or the call
   }
 })
 
+test('a call with a stray closing brace or a second object still runs, not shown as markup', () => {
+  for (const [reply, args] of [
+    ['Running.\n<function=Bash>{"command":"ls"}}</function>', { command: 'ls' }],
+    ['Running.\n<function=Bash>{"command":"ls"}]</function>', { command: 'ls' }],
+    ['Running.\n<function=Bash>{"a":1}{"b":"}</function>"}</function>', { a: 1 }],
+    ['Running.\n<function>Bash {"command":"ls"}}</function>', { command: 'ls' }],
+  ] as const) {
+    for (const size of [reply.length, 1]) {
+      const extractor = new FunctionCallExtractor()
+      let visible = ''
+      for (let i = 0; i < reply.length; i += size) visible += extractor.push(reply.slice(i, i + size))
+      visible += extractor.finish()
+      expect({ reply, size, visible, calls: extractor.calls }).toEqual({ reply, size, visible: 'Running.\n', calls: [{ name: 'Bash', arguments: args }] })
+    }
+  }
+  // Prose after the object is still a mention, decided as it streams.
+  const mention = new FunctionCallExtractor()
+  const prose = 'Send <function=Bash>{"command":"ls"}} and wait.'
+  expect(mention.push(prose) + mention.finish()).toBe(prose)
+  expect(mention.calls).toEqual([])
+})
+
 // Unquoted mentions as well as quoted ones: each is decided while the reply
 // streams, not held until it ends.
 const MENTIONS = [

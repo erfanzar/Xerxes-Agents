@@ -176,11 +176,22 @@ async function run(script, args) {
   try {
     const AsyncFunction = (async () => {}).constructor
     let body = script.replace(/^\s*export\s+const\s+meta\s*=/m, 'const meta =')
-    // Models sometimes hand over the whole script as a function; call it.
+    const params = ['agent', 'parallel', 'pipeline', 'phase', 'log', 'args', 'budget']
+    // Models sometimes hand over the whole script as a function; call it. Only
+    // when the script is that one expression: a script that merely opens with
+    // a helper function is a statement list, and wrapping it is a SyntaxError.
+    // An already-invoked function yields its promise, which is awaited as is.
     if (/^\s*(async\s+)?(function\b|\([^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)/.test(body) && /[}\)]\s*;?\s*$/.test(body)) {
-      body = 'return await (' + body.trim().replace(/;\s*$/, '') + ')()'
+      const wrapped = 'const __workflowMain = (' + body.trim().replace(/;\s*$/, '') + '\n);\n'
+        + 'return await (typeof __workflowMain === "function" ? __workflowMain() : __workflowMain)'
+      try {
+        new AsyncFunction(...params, wrapped)
+        body = wrapped
+      } catch {
+        // Not a single expression: run it as the statements it is.
+      }
     }
-    const value = await new AsyncFunction('agent', 'parallel', 'pipeline', 'phase', 'log', 'args', 'budget', body)(agent, parallel, pipeline, phase, log, args, budget)
+    const value = await new AsyncFunction(...params, body)(agent, parallel, pipeline, phase, log, args, budget)
     out({ t: 'done', value: value === undefined ? null : value })
   } catch (error) {
     out({ t: 'error', message: error && error.message ? error.message : String(error), stack: error && error.stack ? String(error.stack).split('\n').slice(0, 6).join('\n') : undefined })

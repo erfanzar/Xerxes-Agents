@@ -59,18 +59,24 @@ const DEFAULT_GRACE_MS = 3_000
 const DEFAULT_INTERVAL_MS = 2_000
 const MAX_NOTES = 512
 
-/** Why a process was stopped, by pid, for the tool that started it. */
-const notes = new Map<number, string>()
+/** Why a process was stopped, and when, by pid, for the tool that started it. */
+const notes = new Map<number, { readonly note: string; readonly at: number }>()
 
-/** The guard's note for a process it stopped (or one in a tree it stopped). */
-export function memoryGuardNote(pid: number | undefined): string | undefined {
-  return pid === undefined ? undefined : notes.get(pid)
+/**
+ * The guard's note for a process it stopped (or one in a tree it stopped).
+ * `startedAt` is when the caller spawned that process: pids are reused, and a
+ * stop recorded before this process existed was for another one, so a later
+ * command that happened to get the same pid is not told it was killed.
+ */
+export function memoryGuardNote(pid: number | undefined, startedAt: number): string | undefined {
+  const entry = pid === undefined ? undefined : notes.get(pid)
+  return entry && entry.at >= startedAt ? entry.note : undefined
 }
 
-function rememberNote(pids: readonly number[], note: string): void {
+function rememberNote(pids: readonly number[], note: string, at: number): void {
   for (const pid of pids) {
     notes.delete(pid)
-    notes.set(pid, note)
+    notes.set(pid, { note, at })
   }
   while (notes.size > MAX_NOTES) notes.delete(notes.keys().next().value!)
 }
@@ -142,7 +148,7 @@ export class MemoryGuard {
 
   private stopTree(stop: MemoryGuardStop): void {
     this.stopping.add(stop.rootPid)
-    rememberNote(stop.pids, memoryGuardStopNote(stop))
+    rememberNote(stop.pids, memoryGuardStopNote(stop), stop.at)
     // Deepest first, so a parent cannot respawn a child it just lost.
     for (const pid of [...stop.pids].reverse()) this.options.ports.kill(pid, 'SIGTERM')
     const escalate = setTimeout(() => {
@@ -225,7 +231,7 @@ export function hostMemoryGuardPorts(platform: NodeJS.Platform = process.platfor
       }
       return rows
     },
-    footprintBytes: platform === 'darwin' ? darwinFootprint() : platform === 'linux' ? linuxFootprint : () => undefined,
+    footprintBytes: platform === 'darwin' ? darwinFootprint() : platform === 'linux' ? pid => linuxFootprint(pid) : () => undefined,
     kill(pid, signal) {
       try { process.kill(pid, signal) } catch { /* Already gone. */ }
     },
@@ -255,12 +261,24 @@ function darwinFootprint(): (pid: number) => number | undefined {
   }
 }
 
-/** Linux: resident memory from /proc (GPU memory is not counted there). */
-function linuxFootprint(pid: number): number | undefined {
-  try {
-    const match = /^VmRSS:\s+(\d+)\s+kB/m.exec(readFileSync(`/proc/${pid}/status`, 'utf8'))
-    return match ? Number(match[1]) * 1024 : undefined
-  } catch {
-    return undefined
+/**
+ * Linux: proportional resident memory from /proc (GPU memory is not counted
+ * there). Not VmRSS: a forked worker shares its parent's pages copy-on-write
+ * and VmRSS bills each worker for all of them, so a 6 GB job with 8 forked
+ * DataLoader workers summed to 54 GB and was killed. PSS splits a shared page
+ * between the processes mapping it, so a tree's sum is what it really holds.
+ * Kernels without smaps_rollup (before 4.14) fall back to the process's own
+ * anonymous pages, which still double-counts copy-on-write but not file maps.
+ */
+export function linuxFootprint(pid: number, read: (path: string) => string = path => readFileSync(path, 'utf8')): number | undefined {
+  const kilobytes = (path: string, pattern: RegExp): number | undefined => {
+    try {
+      const match = pattern.exec(read(path))
+      return match ? Number(match[1]) * 1024 : undefined
+    } catch {
+      return undefined
+    }
   }
+  return kilobytes(`/proc/${pid}/smaps_rollup`, /^Pss:\s+(\d+)\s+kB/m)
+    ?? kilobytes(`/proc/${pid}/status`, /^RssAnon:\s+(\d+)\s+kB/m)
 }

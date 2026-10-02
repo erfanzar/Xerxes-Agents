@@ -73,7 +73,9 @@ const PATTERNS: ReadonlyArray<readonly [ErrorKind, readonly RegExp[]]> = [
   [ErrorKind.PROVIDER_DOWN, [/\b(?:50[0-4]|529)\b/, /service unavailable/i, /overloaded/i, /bad gateway/i]],
   [ErrorKind.TIMEOUT, [/timeout/i, /timed out/i, /\b408\b/]],
   [ErrorKind.BAD_REQUEST, [/\b400\b/, /invalid request/i, /malformed/i]],
-  [ErrorKind.TRANSIENT, [/transient/i, /temporarily/i]],
+  // `stream ended before` is StreamTruncatedError's wording. Goal rounds
+  // classify the failure from its message alone, so the words must carry it.
+  [ErrorKind.TRANSIENT, [/transient/i, /temporarily/i, /stream ended before/i]],
 ]
 
 const CONNECTION_CODES = new Set([
@@ -109,9 +111,9 @@ export class ErrorClassifier {
     ) {
       return classified(ErrorKind.TIMEOUT, error, details.message, retryAfter)
     }
-    // A corrupt stream frame is a transport fault, not a verdict on the
-    // request: its dump of raw JSON must not be read for status words.
-    if (details.name === 'StreamFrameError') {
+    // A corrupt or cut-short stream is a transport fault, not a verdict on
+    // the request: its dump of raw JSON must not be read for status words.
+    if (details.name === 'StreamFrameError' || details.name === 'StreamTruncatedError') {
       return classified(ErrorKind.TRANSIENT, error, details.message, retryAfter)
     }
     if (details.name === 'ConfigurationError') {

@@ -14,6 +14,8 @@
 import { readdir, rm, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 
+import { recallMemoryDirectory } from './paths.js'
+
 export interface WipeCounts {
   bytes: number
   files: number
@@ -69,12 +71,13 @@ async function removeTree(path: string): Promise<WipeCounts> {
 
 /**
  * Every directory that holds agent memory: the cross-project global store, the
- * per-agent self-memory root, every known project memory root, and the SQLite
+ * per-agent self-memory root, every known project memory root, the durable
+ * save_memory recall databases, and the SQLite
  * tiers (`.xerxes_memory/memory.db`, `.xerxes_memory/vectors.db`) beside each
  * of those roots and under the current project.
  */
 export function memoryWipePaths(home: string, projectRoot: string | undefined): string[] {
-  const paths = [join(home, 'memory'), join(home, 'agent_memory'), join(home, 'projects')]
+  const paths = [join(home, 'memory'), join(home, 'agent_memory'), join(home, 'projects'), recallMemoryDirectory(home)]
 
   const sqliteRoots = [home]
   if (projectRoot) sqliteRoots.push(projectRoot)

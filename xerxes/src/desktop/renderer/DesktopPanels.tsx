@@ -1136,13 +1136,39 @@ export function workspaceFilePath(path: string, cwd: string): string {
 }
 
 /** The file as last read or saved: what the editor's draft is compared against. */
-interface OpenFile { readonly path: string; readonly content: string; readonly version: string | null; readonly truncated: boolean }
+export interface OpenFile { readonly path: string; readonly content: string; readonly version: string | null; readonly truncated: boolean }
+
+/**
+ * Unsaved Files edits, by workspace and path. The rail remounts the panel on
+ * every tab switch, close, "Add to message" and chat change, and edits held
+ * only in its state vanished with it. The kept base version still guards the
+ * save, so a file changed on disk meanwhile is a conflict, not an overwrite.
+ */
+const unsavedFiles = new Map<string, { readonly file: OpenFile; readonly draft: string }>()
+const unsavedKey = (cwd: string, path: string): string => `${cwd}\u0000${path}`
+
+export function keepUnsavedFile(cwd: string, file: OpenFile, draft: string): void {
+  const key = unsavedKey(cwd, file.path)
+  unsavedFiles.delete(key)
+  if (draft !== file.content) unsavedFiles.set(key, { file, draft })
+}
+
+export function unsavedFile(cwd: string, path: string): { readonly file: OpenFile; readonly draft: string } | undefined {
+  return unsavedFiles.get(unsavedKey(cwd, path))
+}
+
+/** The most recently edited unsaved file of a workspace, to reopen on remount. */
+function lastUnsavedPath(cwd: string): string {
+  let path = ''
+  for (const [key, { file }] of unsavedFiles) if (key === unsavedKey(cwd, file.path)) path = file.path
+  return path
+}
 
 function FilesPanel({ snap, close, target }: { snap: Snapshot; close: () => void; target?: { readonly path: string; readonly count: number } }): ReactElement {
-  const [selected, setSelectedPath] = useState(() => target?.path ? workspaceFilePath(target.path, snap.cwd) : '')
+  const [selected, setSelectedPath] = useState(() => target?.path ? workspaceFilePath(target.path, snap.cwd) : lastUnsavedPath(snap.cwd))
   const [source, setSource] = useState(false)
-  const [file, setFile] = useState<OpenFile | null>(null)
-  const [draft, setDraft] = useState('')
+  const [file, setFile] = useState<OpenFile | null>(() => unsavedFile(snap.cwd, selected)?.file ?? null)
+  const [draft, setDraft] = useState(() => unsavedFile(snap.cwd, selected)?.draft ?? '')
   const [previewError, setPreviewError] = useState('')
   const [save, setSave] = useState<{ state: 'idle' | 'saving' | 'saved' } | { state: 'error'; message: string; conflict: boolean }>({ state: 'idle' })
   const [reload, setReload] = useState(0)
@@ -1151,14 +1177,23 @@ function FilesPanel({ snap, close, target }: { snap: Snapshot; close: () => void
   const setSelected = (path: string): void => {
     if (path === selected) return
     if (dirty && !window.confirm(`Discard your unsaved changes to ${file?.path ?? selected}?`)) return
+    if (file) keepUnsavedFile(snap.cwd, file, file.content)
     setSelectedPath(path)
   }
   useEffect(() => { if (target?.path) setSelected(workspaceFilePath(target.path, snap.cwd)) }, [target?.count])
   useEffect(() => { setSource(false); setSave({ state: 'idle' }) }, [selected])
+  useEffect(() => { if (file) keepUnsavedFile(snap.cwd, file, draft) }, [file, draft, snap.cwd])
   useEffect(() => {
     let current = true
-    setFile(null)
     setPreviewError('')
+    // Reopened with edits still unsaved: show those, not the file on disk.
+    const kept = selected ? unsavedFile(snap.cwd, selected) : undefined
+    if (kept) {
+      setFile(kept.file)
+      setDraft(kept.draft)
+      return
+    }
+    setFile(null)
     if (selected) void desktopCall(window.xerxes, snap.sessionKey, 'workspace.filePreview', { path: selected })
       .then(value => {
         if (!current) return
@@ -1204,10 +1239,10 @@ function FilesPanel({ snap, close, target }: { snap: Snapshot; close: () => void
         {dirty && <><button className="file-browser__save" disabled={save.state === 'saving'} title="Save (⌘S)" onClick={() => void saveFile()}>{save.state === 'saving' ? 'Saving…' : 'Save'}</button><button title="Discard your changes" onClick={() => { if (file) setDraft(file.content); setSave({ state: 'idle' }) }}>Revert</button></>}
         {!dirty && save.state === 'saved' && <span className="file-browser__saved" role="status">Saved</span>}
         {isDocument && <button className="file-browser__mode" aria-pressed={source} title={source ? 'Show the rendered document' : 'Edit the source'} onClick={() => setSource(value => !value)}>{source ? 'Preview' : 'Source'}</button>}
-        <button onClick={() => { window.dispatchEvent(new CustomEvent('xerxes:add-context', { detail: '@' + JSON.stringify(selected.replace(/^@/, '')) })); close() }}>Add to message</button>
+        <button onClick={() => { window.dispatchEvent(new CustomEvent('xerxes:add-context', { detail: '@' + JSON.stringify(selected.replace(/^@/, '')) })); if (!dirty) close() }} title={dirty ? 'Unsaved changes stay open here; the message reads the file as saved' : undefined}>Add to message</button>
         <button className="file-browser__close" aria-label="Close file" title="Close file" onClick={() => setSelected('')}><Icon name="close" size={13} /></button>
       </div>
-      {save.state === 'error' && <div className="file-browser__notice" role="alert"><span>{save.message}</span>{save.conflict && <button onClick={() => { setSave({ state: 'idle' }); setReload(value => value + 1) }}>Reload file</button>}</div>}
+      {save.state === 'error' && <div className="file-browser__notice" role="alert"><span>{save.message}</span>{save.conflict && <button onClick={() => { if (file) keepUnsavedFile(snap.cwd, file, file.content); setSave({ state: 'idle' }); setReload(value => value + 1) }}>Reload file</button>}</div>}
       {readOnlyReason && <p className="file-browser__notice file-browser__notice--quiet">{readOnlyReason}</p>}
       {/* Keyed by file and mode so each opens scrolled to its top-left. */}
       <section key={`${selected}:${source}:${reload}`} className="file-browser__preview" aria-label="File">

@@ -490,6 +490,29 @@ export function useSubmission(opts: UseSubmissionOptions) {
         return
       }
 
+      if (live.switching) {
+        // `sid` still names the session being left. Submitting now would run
+        // the prompt there and the switch would then wipe its bubble from view.
+        const editing = composerRefs.queueEditRef.current
+        const previous = editing === null ? undefined : composerRefs.queueRef.current[editing]
+        composerActions.clearIn()
+
+        if (editing !== null && previous) {
+          // Finish the edit in place: the item stays queued where it was
+          // authored. Held as a new message, it would leave the original
+          // behind and the two copies would go to different sessions.
+          composerRefs.queueRef.current[editing] = { ...message, images: [...(previous.images ?? []), ...(message.images ?? [])] }
+          composerActions.setQueueEdit(null)
+
+          return composerActions.syncQueue()
+        }
+
+        composerActions.pushHistory(full)
+        composerActions.holdForSwitch(message)
+
+        return
+      }
+
       const editIdx = composerRefs.queueEditRef.current
       composerActions.clearIn()
 
@@ -563,7 +586,7 @@ export function useSubmission(opts: UseSubmissionOptions) {
           return turnController.interruptTurn({ gw, sid: live.sid, sys })
         }
 
-        if (decision.kind === 'drain' && live.sid) {
+        if (decision.kind === 'drain' && live.sid && !live.switching) {
           const next = composerActions.dequeue()
 
           composerActions.syncQueue()

@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 import { assertOutputTokenLimit } from './outputTokenLimit.js'
 
-import { ConfigurationError, ProviderError } from '../core/errors.js'
+import { ConfigurationError, ProviderError, StreamTruncatedError } from '../core/errors.js'
 import { deterministicToolCallId } from '../streaming/toolCallIds.js'
 import type { ChatMessage, ContentPart, MessageContent } from '../types/messages.js'
 import type { JsonObject, JsonSchema, ToolCall, ToolDefinition } from '../types/toolCalls.js'
@@ -385,7 +385,7 @@ export class GeminiClient implements LlmClient {
       }
     }
     if (!receivedTerminalEvent) {
-      throw new ProviderError('gemini', 'stream ended before a finish reason or [DONE]')
+      throw new StreamTruncatedError('gemini', 'stream ended before a finish reason or [DONE]')
     }
     if (!emittedToolCalls && pendingToolCalls.size) {
       yield { toolCalls: [...pendingToolCalls.values()] }

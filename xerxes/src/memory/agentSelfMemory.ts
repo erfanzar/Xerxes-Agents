@@ -1,6 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { createHash } from 'node:crypto'
 import { appendFile, mkdir, open, readFile, readdir, rename, rm, stat } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 
@@ -29,6 +30,9 @@ const KEY_FILES: Readonly<Record<AgentSelfMemoryKey, string>> = Object.freeze({
   self_reflection: 'self_reflection.md',
   tool_usage_patterns: 'tool_usage_patterns.md',
 })
+
+/** Where the old per-agent (all projects) project notes are moved; never read into a prompt. */
+const LEGACY_PROJECT_CONTEXT_FILE = 'project_context.legacy.md'
 
 const DEFAULT_CONTENT: Readonly<Record<AgentSelfMemoryKey, string>> = Object.freeze({
   user_taste: '# User Taste Profile\n\n## Communication Style\n-\n\n## Preferred Tools\n-\n\n## Common Workflows\n-\n\n## Frustrations / Avoid\n-\n\n## Notes\n\n',
@@ -69,7 +73,31 @@ export class AgentSelfMemory {
 
   async ensure(): Promise<void> {
     await mkdir(this.directory, { recursive: true })
+    await this.retireLegacyProjectContext()
     for (const key of AGENT_SELF_MEMORY_KEYS) await this.ensureKey(key)
+  }
+
+  /**
+   * The per-agent `project_context.md` from before notes were keyed by
+   * project mixes whichever projects last synced, so it cannot be attributed
+   * to one. Move it aside rather than leave it silently orphaned: the text is
+   * kept, it never reaches a prompt again, and the log says how to rebuild.
+   */
+  private async retireLegacyProjectContext(): Promise<void> {
+    if (retiredLegacyDirectories.has(this.directory)) return
+    retiredLegacyDirectories.add(this.directory)
+    const legacy = join(this.directory, KEY_FILES.project_context)
+    const retired = join(this.directory, LEGACY_PROJECT_CONTEXT_FILE)
+    try {
+      await rename(legacy, retired)
+    } catch (error) {
+      if (isMissing(error)) return
+      throw error
+    }
+    console.error(
+      `Agent ${this.agentId}: project notes are now kept per project; the old shared ${legacy} was moved to ${retired}. `
+        + 'Run agent_memory_sync_context in a project to rebuild its notes.',
+    )
   }
 
   async read(key: AgentSelfMemoryKey | string): Promise<string> {
@@ -117,6 +145,10 @@ export class AgentSelfMemory {
 
   async syncProjectContext(projectRoot = this.projectRoot): Promise<void> {
     const root = resolve(projectRoot)
+    if (root !== this.projectRoot) {
+      await new AgentSelfMemory({ agentId: this.agentId, directory: this.directory, projectRoot: root }).syncProjectContext(root)
+      return
+    }
     const sections = ['# Project Context']
     for (const name of ['AGENTS.md', 'XERXES.md', 'USER.md', 'SOUL.md']) {
       const content = await readProjectFile(root, name)
@@ -234,7 +266,14 @@ export class AgentSelfMemory {
       + MEMORY_STALENESS_RULE + '\n\n' + parts.join('\n\n')
   }
 
+  // Project notes are keyed by project root. One per-agent file used to carry
+  // project A's AGENTS.md into every session of the same agent in project B
+  // as its "[Project Notes]". The agent-wide keys stay shared.
   private pathFor(key: AgentSelfMemoryKey): string {
+    if (key === 'project_context') {
+      const project = createHash('sha256').update(this.projectRoot).digest('hex').slice(0, 16)
+      return join(this.directory, 'projects', project, KEY_FILES[key])
+    }
     return join(this.directory, KEY_FILES[key])
   }
 
@@ -248,6 +287,7 @@ export class AgentSelfMemory {
    */
   private async ensureKey(key: AgentSelfMemoryKey): Promise<void> {
     const path = this.pathFor(key)
+    await mkdir(dirname(path), { recursive: true })
     try {
       const handle = await open(path, 'wx')
       try {
@@ -336,20 +376,28 @@ export class AgentSelfMemory {
 const AgentSelfMemoryKeyProjectContext: AgentSelfMemoryKey = 'project_context'
 const MAX_SELF_MEMORY_CACHE_ENTRIES = 256
 const memories = new Map<string, AgentSelfMemory>()
+/** Directories whose pre-project-keyed `project_context.md` was already checked this process. */
+const retiredLegacyDirectories = new Set<string>()
 const selfMemoryLocks = new Map<string, Map<AgentSelfMemoryKey, Promise<void>>>()
 
-/** Return a process-local per-agent self-memory instance. */
-export function getAgentSelfMemory(agentId = 'default'): AgentSelfMemory {
+/**
+ * Return a process-local self-memory instance for one agent in one project.
+ * The agent-wide notes are shared; `project_context` follows `projectRoot`
+ * (the process directory when omitted).
+ */
+export function getAgentSelfMemory(agentId = 'default', projectRoot?: string): AgentSelfMemory {
   const normalized = normalizeAgentId(agentId)
-  const existing = memories.get(normalized)
+  const root = resolve(projectRoot ?? process.cwd())
+  const cacheKey = normalized + '\0' + root
+  const existing = memories.get(cacheKey)
   if (existing) {
     // Refresh recency so the bounded cache below behaves as a simple LRU.
-    memories.delete(normalized)
-    memories.set(normalized, existing)
+    memories.delete(cacheKey)
+    memories.set(cacheKey, existing)
     return existing
   }
-  const memory = new AgentSelfMemory({ agentId: normalized })
-  memories.set(normalized, memory)
+  const memory = new AgentSelfMemory({ agentId: normalized, projectRoot: root })
+  memories.set(cacheKey, memory)
   if (memories.size > MAX_SELF_MEMORY_CACHE_ENTRIES) {
     const oldest = memories.keys().next()
     if (!oldest.done) memories.delete(oldest.value)

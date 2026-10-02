@@ -9,7 +9,7 @@ import { join } from 'node:path'
 
 import { Shell, ActivityDetails, AgentsCard, SessionDiagnostics, replyEnds } from '../src/desktop/renderer/App.js'
 import { RailStatus } from '../src/desktop/renderer/RailStatus.js'
-import { DesktopPage, DesktopRail, frontMatter, rendersAsDocument } from '../src/desktop/renderer/DesktopPanels.js'
+import { DesktopPage, DesktopRail, frontMatter, keepUnsavedFile, rendersAsDocument, unsavedFile } from '../src/desktop/renderer/DesktopPanels.js'
 import type { Snapshot } from '../src/desktop/renderer/store.js'
 import type { SessionRow } from '../src/desktop/renderer/types.js'
 import { BlockBuilder } from '../src/desktop/renderer/blocks.js'
@@ -70,6 +70,7 @@ const snapshot = (overrides: Partial<Snapshot>): Snapshot => ({
   goal: '',
   approval: null,
   question: null,
+  interactionHidden: false,
   planMode: false,
   turnActive: false,
   turnFailed: false,
@@ -981,6 +982,23 @@ test('skills and agents are durable pages, task context is nonmodal', () => {
     expect(html).not.toContain('aria-modal')
     expect(html).toContain('Close task context')
   }
+})
+
+test('unsaved Files edits survive the rail closing, switching tab or changing chat', () => {
+  // What the editor keeps as the person types; the rail then unmounts.
+  const file = { path: './src/notes.md', content: 'saved line\n', version: 'v1', truncated: false }
+  keepUnsavedFile('/work/drafts', file, 'saved line\nedited line\n')
+  // Reopened later, from another chat in the same workspace.
+  const html = renderToStaticMarkup(createElement(DesktopRail, { panel: 'files', snap: snapshot({ cwd: '/work/drafts', sessionKey: 'another-chat' }), close() {}, activityDetails: null }))
+  expect(html).toContain('./src/notes.md')
+  expect(html).toContain('title="Unsaved changes"')
+  expect(html).toContain('>Save<')
+  expect(unsavedFile('/work/drafts', './src/notes.md')?.draft).toBe('saved line\nedited line\n')
+  // Another workspace's rail does not inherit it, and a revert forgets it.
+  const elsewhere = renderToStaticMarkup(createElement(DesktopRail, { panel: 'files', snap: snapshot({ cwd: '/work/other' }), close() {}, activityDetails: null }))
+  expect(elsewhere).not.toContain('./src/notes.md')
+  keepUnsavedFile('/work/drafts', file, file.content)
+  expect(unsavedFile('/work/drafts', './src/notes.md')).toBeUndefined()
 })
 
 test("agents page exposes its project scope and workspace switch", () => {

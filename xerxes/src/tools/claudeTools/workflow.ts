@@ -418,10 +418,11 @@ export function registerClaudeSkillTool(
   registry: ToolRegistry,
   skillRegistry: SkillRegistry,
   agentId = 'default',
+  defaultCwd: () => string = () => process.cwd(),
 ): ToolDefinition {
   registry.replace(
     SKILL_TOOL_DEFINITION,
-    inputs => renderSkill(skillRegistry, inputs),
+    (inputs, context) => renderSkill(skillRegistry, inputs, skillCommandCwd(context, defaultCwd)),
     agentId,
     CLAUDE_WORKFLOW_TOOL_CAPABILITIES.SkillTool,
   )
@@ -473,7 +474,7 @@ export class ClaudeWorkflowTools {
       case 'EnterWorktreeTool': return this.enterWorktree(inputs)
       case 'ExitWorktreeTool': return this.exitWorktree(inputs)
       case 'ToolSearchTool': return this.searchTools(inputs, context)
-      case 'SkillTool': return this.skill(inputs)
+      case 'SkillTool': return this.skill(inputs, context)
       case 'PlanTool': return this.plan(inputs, signal)
       default: throw new ValidationError('tool', 'is not handled by ClaudeWorkflowTools', name)
     }
@@ -570,12 +571,12 @@ export class ClaudeWorkflowTools {
     })
   }
 
-  private skill(inputs: JsonObject): Promise<string> {
+  private skill(inputs: JsonObject, context: ToolExecutionContext): Promise<string> {
     const registry = this.options.skillRegistry
     if (registry === undefined) {
       throw new ClientError('skills', 'no SkillRegistry is attached to this Claude workflow session')
     }
-    return renderSkill(registry, inputs)
+    return renderSkill(registry, inputs, skillCommandCwd(context, () => this.options.workspaceRoot ?? process.cwd()))
   }
 
   private async plan(inputs: JsonObject, signal?: AbortSignal): Promise<Record<string, unknown>> {
@@ -645,7 +646,15 @@ export class ClaudeWorkflowTools {
   }
 }
 
-async function renderSkill(registry: SkillRegistry, inputs: JsonObject): Promise<string> {
+// The daemon is global and never chdirs, so its process cwd is whatever
+// directory launched it. `!`cmd`` injections (`git diff`, `git status`) must
+// run in the calling session's project or worktree instead.
+function skillCommandCwd(context: ToolExecutionContext, fallback: () => string): string {
+  const projectRoot = context.metadata?.project_root
+  return typeof projectRoot === 'string' && projectRoot ? projectRoot : fallback()
+}
+
+async function renderSkill(registry: SkillRegistry, inputs: JsonObject, cwd: string): Promise<string> {
   const skillName = optionalString(inputs, 'skill_name')?.trim()
   if (!skillName) {
     if (optionalString(inputs, 'args')?.trim()) {
@@ -663,7 +672,7 @@ async function renderSkill(registry: SkillRegistry, inputs: JsonObject): Promise
   const instructions = await expandSkillInstructions(skill.instructions, {
     allowCommandExecution: skill.allowCommandExecution !== false,
     ...(args ? { args } : {}),
-    cwd: process.cwd(),
+    cwd,
   })
   // Same canonical framing as /skill activation, so the daemon and TUI
   // classifiers recognize this expansion as private runtime context too.

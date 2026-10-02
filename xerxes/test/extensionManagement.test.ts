@@ -129,3 +129,44 @@ test('broken enabled modules can still be disabled without reading their edited 
     }
   } finally { await rm(root, { recursive: true, force: true }) }
 })
+
+test('a missing, broken or renamed enabled module does not stop startup and leaves the manifest untouched', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'managed-plugin-startup-'))
+  try {
+    const manifest = join(root, 'plugins.json')
+    const good = join(root, 'good.ts')
+    const broken = join(root, 'broken.ts')
+    const renamed = join(root, 'renamed.ts')
+    await writeFile(good, `export function register(r) { r.registerTool('good', () => 'good', {name: 'good'}); }`)
+    await writeFile(broken, `throw new Error('import exploded')`)
+    await writeFile(renamed, `export function register(r) { r.registerTool('other', () => 'x', {name: 'other'}); }`)
+    const entries = [
+      { path: join(root, 'gone.ts'), enabled: true, names: ['gone'] },
+      { path: broken, enabled: true, names: ['broken'] },
+      { path: renamed, enabled: true, names: ['renamed'] },
+      { path: good, enabled: true, names: ['good'] },
+    ]
+    await writeFile(manifest, JSON.stringify(entries))
+    const manager = new ManagedPlugins(manifest)
+    await expect(manager.load()).resolves.toBeUndefined()
+    const inventory = manager.inventory()
+    expect(inventory.find(item => item.name === 'good')?.enabled).toBe(true)
+    for (const name of ['gone', 'broken', 'renamed']) {
+      const entry = inventory.find(item => item.name === name)
+      expect(entry?.enabled).toBe(false)
+      expect(entry?.loadError).toBeTruthy()
+    }
+    const tools = new ToolRegistry()
+    manager.registerTools(tools)
+    expect(await tools.execute({ id: '1', type: 'function', function: { name: 'plugin_good', arguments: { args: [] } } }, { metadata: {} })).toBe('good')
+    expect(JSON.parse(await readFile(manifest, 'utf8'))).toEqual(entries)
+    // Changing another module still works while one failed to load, and the
+    // failed entry keeps its enabled intent in the manifest.
+    await expect(manager.change('disable', 'good')).resolves.toContain('Disabled')
+    expect(JSON.parse(await readFile(manifest, 'utf8')).find((item: { names: string[] }) => item.names[0] === 'gone').enabled).toBe(true)
+    await expect(manager.change('disable', 'gone')).resolves.toContain('Disabled')
+    await writeFile(join(root, 'gone.ts'), `export function register(r) { r.registerTool('gone', () => 'back', {name: 'gone'}); }`)
+    await expect(manager.change('enable', 'gone')).resolves.toContain('Enabled')
+    expect(manager.inventory().find(item => item.name === 'gone')).toMatchObject({ enabled: true })
+  } finally { await rm(root, { recursive: true, force: true }) }
+})

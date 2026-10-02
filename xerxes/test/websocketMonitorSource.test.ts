@@ -119,3 +119,24 @@ test('websocket monitor reports refused reconnect exhaustion and aborts after co
   connected.close()
   second.server.stop(true)
 }, { timeout: 10_000 })
+
+test('websocket monitor survives more disconnects than its retry budget when every reconnect succeeds', async () => {
+  const sockets: Bun.ServerWebSocket<unknown>[] = []
+  const { url, server } = localServer(socket => sockets.push(socket))
+  const events: WebSocketMonitorEvent[] = []
+  const errors: unknown[] = []
+  const monitor = await nativeWebSocketMonitorSource.open(url, event => events.push(event), () => undefined, error => errors.push(error))
+  try {
+    // Each drop reconnects on the first attempt; the budget bounds consecutive
+    // failures, so a long watch outlives any number of healthy reconnects.
+    for (let drop = 0; drop < 5; drop += 1) {
+      await waitFor(() => sockets[drop])
+      sockets[drop]?.close(1000, `drop ${drop}`)
+      await waitFor(() => events.filter(event => event.kind === 'gap')[drop])
+    }
+    await waitFor(() => sockets[5])
+    sockets[5]?.send('still watching')
+    await waitFor(() => events.find(event => event.text === 'still watching'))
+    expect(errors).toEqual([])
+  } finally { monitor.close(); server.stop(true) }
+})

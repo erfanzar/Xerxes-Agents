@@ -3,7 +3,7 @@
 
 import { expect, test } from 'bun:test'
 
-import { ProviderError } from '../src/core/errors.js'
+import { ProviderError, StreamTruncatedError } from '../src/core/errors.js'
 import {
   CompletionDeadlineError,
   OpenAiCompatibleClient,
@@ -245,6 +245,50 @@ test('chat-completions SSE requires an explicit terminal finish event', async ()
   await expect(collect(client.stream(request()))).rejects.toThrow(
     'stream ended before a terminal completion event',
   )
+})
+
+test('a stream cut short before its terminal event is a retryable transport fault', async () => {
+  const encoder = new TextEncoder()
+  const client = openAiClient(async () => new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'))
+      controller.close()
+    },
+  })))
+
+  const failure = await collect(client.stream(request())).then(() => undefined, (error: unknown) => error)
+
+  expect(failure).toBeInstanceOf(StreamTruncatedError)
+  expect(classifyError(failure)).toMatchObject({ kind: 'transient', retryable: true })
+  // Goal rounds classify the failure from its message text alone.
+  expect(classifyError(new Error((failure as Error).message)).retryable).toBe(true)
+})
+
+test('documented provider finish reasons map onto the neutral vocabulary instead of failing the reply', async () => {
+  const finishWith = (reason: string) => openAiClient(async () => sseResponse([
+    { choices: [{ delta: { content: 'Hello' } }] },
+    { choices: [{ delta: { content: ' world' }, finish_reason: reason }] },
+  ]))
+
+  // Together ends a finished completion with `eos`.
+  expect(await collect(finishWith('eos').stream(request()))).toEqual([
+    { content: 'Hello' },
+    { content: ' world', finishReason: 'stop' },
+  ])
+  expect(await collect(finishWith('model_context_window_exceeded').stream(request()))).toContainEqual({
+    content: ' world',
+    finishReason: 'length',
+  })
+
+  // A server that gave up mid-reply asks for a retry.
+  for (const reason of ['insufficient_system_resource', 'network_error']) {
+    const failure = await collect(finishWith(reason).stream(request())).then(() => undefined, (error: unknown) => error)
+    expect(classifyError(failure).retryable).toBe(true)
+    expect(classifyError(new Error((failure as Error).message)).retryable).toBe(true)
+  }
+
+  // A refusal stays a failure.
+  await expect(collect(finishWith('content_filter').stream(request()))).rejects.toThrow('provider finish_reason: content_filter')
 })
 
 /** A client whose completion never settles, ignoring whatever signal it is handed. */

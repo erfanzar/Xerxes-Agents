@@ -107,3 +107,29 @@ test('the openrouter factory injects the session bearer over the API-key path', 
   const headers = requests[0]?.init?.headers as Record<string, string>
   expect(headers.Authorization).toBe('Bearer or-session-key')
 })
+
+test("a profile's own key or host keeps the stored OpenRouter session out of the request", async () => {
+  const session = {
+    credential: async () => ({ access: 'or-session-key', refresh: '', expires: Number.MAX_SAFE_INTEGER }),
+  }
+  const sent = async (overrides: Record<string, unknown>): Promise<{ url: string; headers: Record<string, string> }> => {
+    const requests: { url: string; init?: RequestInit }[] = []
+    const client = createLlmClient('openrouter/openai/gpt-5', overrides, {
+      openrouterOAuthSession: session as never,
+      fetchImplementation: async (input, init) => {
+        requests.push({ url: String(input), ...(init === undefined ? {} : { init }) })
+        return new Response(JSON.stringify({ choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }] }))
+      },
+    })
+    await client.complete!({ model: 'openrouter/openai/gpt-5', messages: [{ role: 'user', content: 'hi' }] })
+    return { url: requests[0]?.url ?? '', headers: requests[0]?.init?.headers as Record<string, string> }
+  }
+
+  // The profile names the account to bill.
+  expect((await sent({ provider: 'openrouter', api_key: 'profile-key' })).headers.Authorization)
+    .toBe('Bearer profile-key')
+  // A proxy in front of OpenRouter never receives the subscription key.
+  const proxied = await sent({ provider: 'openrouter', base_url: 'https://proxy.example.test/v1' })
+  expect(proxied.url).toStartWith('https://proxy.example.test/')
+  expect(proxied.headers.Authorization).not.toBe('Bearer or-session-key')
+})

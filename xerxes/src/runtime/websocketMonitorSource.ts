@@ -141,6 +141,9 @@ const nativeWebSocketMonitorSource: WebSocketMonitorSource = {
         opened = true
         clearTimer()
         everOpened = true
+        // The budget bounds consecutive failed reconnects. Without this reset a
+        // healthy long watch failed on its fourth disconnect of all time.
+        retries = 0
         if (!initialSettled) {
           initialSettled = true
           resolveInitial?.()

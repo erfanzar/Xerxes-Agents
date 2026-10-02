@@ -36,6 +36,9 @@ async function mountSubmission(request: ReturnType<typeof vi.fn>) {
     enqueue: vi.fn((submitText: string, displayText = submitText) => {
       queueRef.current.push(queuedMessage(displayText, submitText))
     }),
+    holdForSwitch: vi.fn((message: ReturnType<typeof queuedMessage>) => {
+      queueRef.current.push(message)
+    }),
     pushHistory: vi.fn(),
     setInput: vi.fn(),
     setInputBuf: vi.fn(),
@@ -45,7 +48,7 @@ async function mountSubmission(request: ReturnType<typeof vi.fn>) {
   const composerRefs = {
     historyDraftRef: { current: '' },
     historyRef: { current: [] },
-    queueEditRef: { current: null },
+    queueEditRef: { current: null as null | number },
     queueRef,
     submitRef
   } satisfies ComposerRefs
@@ -87,7 +90,7 @@ async function mountSubmission(request: ReturnType<typeof vi.fn>) {
   await rendered.flush()
   if (!submission) throw new Error('submission hook did not mount')
 
-  return { composerActions, messages, queueRef, rendered, setLastUserMsg, submission, sys }
+  return { composerActions, composerRefs, messages, queueRef, rendered, setLastUserMsg, submission, sys }
 }
 
 afterEach(() => {
@@ -319,5 +322,40 @@ it('queues a bang command while the model is working instead of racing its follo
     expect(request).not.toHaveBeenCalled()
     expect(fixture.queueRef.current[0]?.submitText).toBe('!ls')
     expect(getUiState().busy).toBe(true)
+  } finally { act(() => fixture.rendered.renderer.destroy()) }
+})
+
+it('holds a prompt typed while /new or a tab switch is in flight instead of sending it to the session being left', async () => {
+  const request = vi.fn().mockResolvedValue({ ok: true })
+  patchUiState({ busy: false, sid: 'old-session', switching: true })
+  const fixture = await mountSubmission(request)
+  try {
+    act(() => fixture.submission.dispatchSubmission('first prompt for the new chat'))
+    await fixture.rendered.flush()
+
+    expect(request).not.toHaveBeenCalled()
+    expect(fixture.messages).toEqual([])
+    expect(getUiState().busy).toBe(false)
+    expect(fixture.composerActions.holdForSwitch).toHaveBeenCalledWith(
+      expect.objectContaining({ submitText: 'first prompt for the new chat' })
+    )
+    expect(fixture.queueRef.current.map(message => message.submitText)).toEqual(['first prompt for the new chat'])
+  } finally { act(() => fixture.rendered.renderer.destroy()) }
+})
+
+it('finishes a queue edit in place during a session switch instead of holding a second copy', async () => {
+  const request = vi.fn().mockResolvedValue({ ok: true })
+  patchUiState({ busy: false, sid: 'old-session', switching: true })
+  const fixture = await mountSubmission(request)
+  try {
+    fixture.queueRef.current.push(queuedMessage('draft follow-up'))
+    fixture.composerRefs.queueEditRef.current = 0
+    act(() => fixture.submission.dispatchSubmission('edited follow-up'))
+    await fixture.rendered.flush()
+
+    expect(request).not.toHaveBeenCalled()
+    expect(fixture.composerActions.holdForSwitch).not.toHaveBeenCalled()
+    expect(fixture.composerActions.setQueueEdit).toHaveBeenCalledWith(null)
+    expect(fixture.queueRef.current.map(message => message.submitText)).toEqual(['edited follow-up'])
   } finally { act(() => fixture.rendered.renderer.destroy()) }
 })

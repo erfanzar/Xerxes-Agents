@@ -9,7 +9,7 @@ import type { ComposerActions, GatewayRpc } from '../app/interfaces.js'
 import { turnController } from '../app/turnController.js'
 import { getTurnState, patchTurnState } from '../app/turnStore.js'
 import { getUiState, patchUiState, resetUiState } from '../app/uiStore.js'
-import { hydrateLiveSessionInflight, liveSessionInflightMessages, useSessionLifecycle } from '../app/useSessionLifecycle.js'
+import { hydrateLiveSessionInflight, liveSessionInflightMessages, trimLastExchange, useSessionLifecycle } from '../app/useSessionLifecycle.js'
 import { clearSpawnHistory, getSpawnHistory } from '../app/spawnHistoryStore.js'
 import { subagentProgressFromSnapshot } from '../domain/subagentProgress.js'
 import type { GatewayClient } from '../gatewayClient.js'
@@ -38,7 +38,7 @@ it('retains live buffers and manual transcript position before applying a reclai
   const rpc = vi.fn(async () => ({ provider_configured: true })) as GatewayRpc
   let lifecycle!: ReturnType<typeof useSessionLifecycle>
   const Probe = () => {
-    lifecycle = useSessionLifecycle({ colsRef: { current: 120 }, composerActions: { activateSessionQueue: vi.fn(), setPasteSnips: vi.fn() } as unknown as ComposerActions,
+    lifecycle = useSessionLifecycle({ colsRef: { current: 120 }, composerActions: { activateSessionQueue: vi.fn(), releaseSwitchHold: vi.fn(), setPasteSnips: vi.fn() } as unknown as ComposerActions,
       gw, panel: vi.fn(), rpc, scrollRef: { current: scroll as unknown as ScrollBoxHandle }, setHistoryItems: history,
       setLastUserMsg: vi.fn(), setSessionStartedAt: vi.fn(), setStickyPrompt: vi.fn(), setVoiceProcessing: vi.fn(), setVoiceRecording: vi.fn(), sys })
     return null
@@ -76,7 +76,7 @@ describe('useSessionLifecycle', () => {
     const Probe = () => {
       lifecycle = useSessionLifecycle({
         colsRef: { current: 120 },
-        composerActions: { activateSessionQueue: vi.fn(), setPasteSnips: vi.fn() } as unknown as ComposerActions,
+        composerActions: { activateSessionQueue: vi.fn(), releaseSwitchHold: vi.fn(), setPasteSnips: vi.fn() } as unknown as ComposerActions,
         gw,
         panel: vi.fn(),
         rpc: vi.fn() as GatewayRpc,
@@ -132,7 +132,7 @@ describe('useSessionLifecycle', () => {
     const Probe = () => {
       lifecycle = useSessionLifecycle({
         colsRef: { current: 120 },
-        composerActions: { activateSessionQueue: vi.fn(), setPasteSnips: vi.fn() } as unknown as ComposerActions,
+        composerActions: { activateSessionQueue: vi.fn(), releaseSwitchHold: vi.fn(), setPasteSnips: vi.fn() } as unknown as ComposerActions,
         gw,
         panel: vi.fn(),
         rpc,
@@ -190,7 +190,7 @@ describe('useSessionLifecycle', () => {
     const Probe = () => {
       lifecycle = useSessionLifecycle({
         colsRef: { current: 80 },
-        composerActions: { activateSessionQueue, setPasteSnips: vi.fn() } as unknown as ComposerActions,
+        composerActions: { activateSessionQueue, releaseSwitchHold: vi.fn(), setPasteSnips: vi.fn() } as unknown as ComposerActions,
         gw: {} as GatewayClient,
         panel: vi.fn(),
         rpc,
@@ -254,7 +254,7 @@ describe('useSessionLifecycle', () => {
     const Probe = () => {
       lifecycle = useSessionLifecycle({
         colsRef: { current: 80 },
-        composerActions: { activateSessionQueue, setPasteSnips: vi.fn() } as unknown as ComposerActions,
+        composerActions: { activateSessionQueue, releaseSwitchHold: vi.fn(), setPasteSnips: vi.fn() } as unknown as ComposerActions,
         gw,
         panel: vi.fn(),
         rpc,
@@ -330,7 +330,7 @@ describe('useSessionLifecycle', () => {
     const Probe = () => {
       lifecycle = useSessionLifecycle({
         colsRef: { current: 80 },
-        composerActions: { activateSessionQueue, setPasteSnips: vi.fn() } as unknown as ComposerActions,
+        composerActions: { activateSessionQueue, releaseSwitchHold: vi.fn(), setPasteSnips: vi.fn() } as unknown as ComposerActions,
         gw,
         panel: vi.fn(),
         rpc,
@@ -487,7 +487,7 @@ describe('useSessionLifecycle', () => {
     const Probe = () => {
       lifecycle = useSessionLifecycle({
         colsRef: { current: 80 },
-        composerActions: { activateSessionQueue: vi.fn(), setPasteSnips: vi.fn() } as unknown as ComposerActions,
+        composerActions: { activateSessionQueue: vi.fn(), releaseSwitchHold: vi.fn(), setPasteSnips: vi.fn() } as unknown as ComposerActions,
         gw,
         panel: vi.fn(),
         rpc: vi.fn() as GatewayRpc,
@@ -549,7 +549,7 @@ describe('useSessionLifecycle', () => {
     const Probe = () => {
       lifecycle = useSessionLifecycle({
         colsRef: { current: 80 },
-        composerActions: { activateSessionQueue: vi.fn(), setPasteSnips: vi.fn() } as unknown as ComposerActions,
+        composerActions: { activateSessionQueue: vi.fn(), releaseSwitchHold: vi.fn(), setPasteSnips: vi.fn() } as unknown as ComposerActions,
         gw,
         panel: vi.fn(),
         rpc: vi.fn() as GatewayRpc,
@@ -593,7 +593,7 @@ it.each([false, true])('restores todos and messages after visiting another chat 
   const gw = { request: vi.fn(async (_method: string, params: { session_id: string }) => ({ session_id: params.session_id, messages: params.session_id === 'original' ? messages : [], todos: params.session_id === 'original' ? todos : [], running: params.session_id === 'original' && running })) } as unknown as GatewayClient
   let lifecycle!: ReturnType<typeof useSessionLifecycle>
   const Probe = () => {
-    lifecycle = useSessionLifecycle({ colsRef: { current: 120 }, composerActions: { activateSessionQueue: vi.fn(), setPasteSnips: vi.fn() } as unknown as ComposerActions, gw, panel: vi.fn(), rpc: vi.fn() as GatewayRpc, scrollRef: { current: null }, setHistoryItems: history, setLastUserMsg: vi.fn(), setSessionStartedAt: vi.fn(), setStickyPrompt: vi.fn(), setVoiceProcessing: vi.fn(), setVoiceRecording: vi.fn(), sys: vi.fn() })
+    lifecycle = useSessionLifecycle({ colsRef: { current: 120 }, composerActions: { activateSessionQueue: vi.fn(), releaseSwitchHold: vi.fn(), setPasteSnips: vi.fn() } as unknown as ComposerActions, gw, panel: vi.fn(), rpc: vi.fn() as GatewayRpc, scrollRef: { current: null }, setHistoryItems: history, setLastUserMsg: vi.fn(), setSessionStartedAt: vi.fn(), setStickyPrompt: vi.fn(), setVoiceProcessing: vi.fn(), setVoiceRecording: vi.fn(), sys: vi.fn() })
     return null
   }
   const screen = await testRender(createElement(Probe), { width: 120, height: 30 })
@@ -610,4 +610,159 @@ it.each([false, true])('restores todos and messages after visiting another chat 
     turnController.recordTodos([])
     expect(getTurnState().todos).toHaveLength(0)
   } finally { act(() => screen.renderer.destroy()); turnController.fullReset(); resetUiState() }
+})
+
+describe('session switch delivery', () => {
+  const mount = async (gw: GatewayClient, rpc: GatewayRpc = vi.fn(async () => ({ provider_configured: true })) as GatewayRpc,
+    setHistoryItems: (...args: unknown[]) => void = vi.fn()) => {
+    let lifecycle: ReturnType<typeof useSessionLifecycle> | undefined
+    const composerActions = { activateSessionQueue: vi.fn(), releaseSwitchHold: vi.fn(), setPasteSnips: vi.fn() }
+    const sys = vi.fn()
+    const Probe = () => {
+      lifecycle = useSessionLifecycle({ colsRef: { current: 80 }, composerActions: composerActions as unknown as ComposerActions,
+        gw, panel: vi.fn(), rpc, scrollRef: { current: null }, setHistoryItems, setLastUserMsg: vi.fn(),
+        setSessionStartedAt: vi.fn(), setStickyPrompt: vi.fn(), setVoiceProcessing: vi.fn(), setVoiceRecording: vi.fn(), sys })
+      return null
+    }
+    const setup = await testRender(createElement(Probe), { height: 6, width: 40 })
+    await setup.flush()
+    if (!lifecycle) throw new Error('lifecycle hook did not mount')
+    return { composerActions, lifecycle, setup, sys }
+  }
+
+  it('marks the composer as switching until a tab switch or /new commits or fails', async () => {
+    resetUiState(); turnController.fullReset()
+    patchUiState({ sid: 'old' })
+    const activate = deferred<SessionActivateResponse>()
+    const create = deferred<null | SessionCreateResponse>()
+    const gw = { request: vi.fn(() => activate.promise) } as unknown as GatewayClient
+    const rpc = vi.fn((method: string) => method === 'session.create' ? create.promise : Promise.resolve({ provider_configured: true })) as GatewayRpc
+    const { lifecycle, setup } = await mount(gw, rpc)
+    try {
+      lifecycle.activateLiveSession('next')
+      expect(getUiState()).toMatchObject({ sid: 'old', switching: true })
+      activate.resolve({ messages: [], session_id: 'next' })
+      await vi.waitFor(() => expect(getUiState()).toMatchObject({ sid: 'next', switching: false }))
+
+      const creating = lifecycle.newSession()
+      await setup.flush()
+      expect(getUiState()).toMatchObject({ sid: 'next', switching: true })
+      create.resolve(null)
+      await creating
+      expect(getUiState()).toMatchObject({ sid: 'next', switching: false })
+    } finally { act(() => setup.renderer.destroy()); turnController.fullReset(); resetUiState() }
+  })
+
+  it('releases the stream held during activation only after resetting onto the new session', async () => {
+    resetUiState(); turnController.fullReset()
+    patchUiState({ sid: 'old' })
+    turnController.bufRef = 'old view text'
+    const finishSessionRecovery = vi.fn(() => {
+      expect(getUiState().sid).toBe('next')
+      expect(turnController.bufRef).toBe('one ')
+      // A delta held during the switch now appends to the hydrated snapshot.
+      turnController.recordMessageDelta({ text: 'two' })
+    })
+    const gw = { request: vi.fn(async () => ({ messages: [], session_id: 'next', recovery_pending: true, running: true, status: 'working',
+      inflight: { assistant: 'one ', streaming: true } })), finishSessionRecovery } as unknown as GatewayClient
+    const { lifecycle, setup } = await mount(gw)
+    try {
+      lifecycle.activateLiveSession('next')
+      await vi.waitFor(() => expect(finishSessionRecovery).toHaveBeenCalledWith('next'))
+      expect(turnController.bufRef).toBe('one two')
+    } finally { act(() => setup.renderer.destroy()); turnController.fullReset(); resetUiState() }
+  })
+
+  it('discards the held stream of an activation superseded before it could be shown', async () => {
+    resetUiState(); turnController.fullReset()
+    patchUiState({ sid: 'old' })
+    const first = deferred<SessionActivateResponse>()
+    const finishSessionRecovery = vi.fn(), discardSessionRecovery = vi.fn()
+    const gw = { request: vi.fn((_method: string, params: { session_id: string }) => params.session_id === 'first'
+      ? first.promise
+      : Promise.resolve({ messages: [], session_id: 'second', recovery_pending: true })), finishSessionRecovery, discardSessionRecovery } as unknown as GatewayClient
+    const { lifecycle, setup } = await mount(gw)
+    try {
+      lifecycle.activateLiveSession('first')
+      await vi.waitFor(() => expect(gw.request).toHaveBeenCalledTimes(1))
+      lifecycle.activateLiveSession('second')
+      first.resolve({ messages: [], session_id: 'first', recovery_pending: true })
+      await vi.waitFor(() => expect(finishSessionRecovery).toHaveBeenCalledWith('second'))
+      expect(discardSessionRecovery).toHaveBeenCalledWith('first')
+      expect(finishSessionRecovery).not.toHaveBeenCalledWith('first')
+      expect(getUiState()).toMatchObject({ sid: 'second', switching: false })
+    } finally { act(() => setup.renderer.destroy()); turnController.fullReset(); resetUiState() }
+  })
+
+  it.each(['activate', 'resume'] as const)('disarms the transport hold when committing a %s fails', async kind => {
+    resetUiState(); turnController.fullReset()
+    patchUiState({ sid: 'old' })
+    const finishSessionRecovery = vi.fn(), discardSessionRecovery = vi.fn()
+    const gw = { request: vi.fn(async () => ({ messages: [], session_id: 'next', recovery_pending: true })),
+      finishSessionRecovery, discardSessionRecovery } as unknown as GatewayClient
+    const { lifecycle, setup, sys } = await mount(gw, undefined, () => { throw new Error('render failed') })
+    try {
+      if (kind === 'activate') lifecycle.activateLiveSession('next')
+      else lifecycle.resumeById('next')
+      await vi.waitFor(() => expect(sys).toHaveBeenCalledWith('error: render failed'))
+      // Left armed, the hold would buffer every later event until the 1 MiB
+      // cap destroyed the socket.
+      expect(discardSessionRecovery).toHaveBeenCalledWith('next')
+      expect(finishSessionRecovery).not.toHaveBeenCalled()
+      expect(getUiState().switching).toBe(false)
+    } finally { act(() => setup.renderer.destroy()); turnController.fullReset(); resetUiState() }
+  })
+
+  it('disarms the transport hold when the switch answer is not a session', async () => {
+    resetUiState(); turnController.fullReset()
+    patchUiState({ sid: 'old' })
+    const discardSessionRecovery = vi.fn()
+    const gw = { request: vi.fn(async () => 'garbage'), discardSessionRecovery } as unknown as GatewayClient
+    const { lifecycle, setup, sys } = await mount(gw)
+    try {
+      lifecycle.activateLiveSession('next')
+      await vi.waitFor(() => expect(sys).toHaveBeenCalledWith('error: invalid response: session.activate'))
+      expect(discardSessionRecovery).toHaveBeenCalledWith()
+      expect(getUiState()).toMatchObject({ sid: 'old', switching: false })
+    } finally { act(() => setup.renderer.destroy()); turnController.fullReset(); resetUiState() }
+  })
+
+  it('releases prompts held for a switch that never commits', async () => {
+    resetUiState(); turnController.fullReset()
+    patchUiState({ sid: 'old' })
+    const rpc = vi.fn(async (method: string) => method === 'session.create' ? null : { provider_configured: true }) as GatewayRpc
+    const { composerActions, lifecycle, setup } = await mount({ request: vi.fn() } as unknown as GatewayClient, rpc)
+    try {
+      await lifecycle.newSession()
+      expect(composerActions.activateSessionQueue).not.toHaveBeenCalled()
+      expect(composerActions.releaseSwitchHold).toHaveBeenCalledTimes(1)
+      expect(getUiState()).toMatchObject({ sid: 'old', switching: false })
+    } finally { act(() => setup.renderer.destroy()); turnController.fullReset(); resetUiState() }
+  })
+})
+
+describe('trimLastExchange', () => {
+  it('removes the undone exchange even behind the /undo echo and a tool trail', () => {
+    const items: Msg[] = [
+      { role: 'user', text: 'earlier' },
+      { role: 'assistant', text: 'earlier reply' },
+      { role: 'user', text: 'run the tests' },
+      { kind: 'trail', role: 'system', text: '', tools: ['bash'] },
+      { role: 'assistant', text: 'all green' },
+      { kind: 'outcome', role: 'assistant', text: 'done' },
+      { kind: 'slash', role: 'system', text: '/undo' }
+    ]
+
+    expect(trimLastExchange(items)).toEqual([
+      { role: 'user', text: 'earlier' },
+      { role: 'assistant', text: 'earlier reply' },
+      { kind: 'slash', role: 'system', text: '/undo' }
+    ])
+  })
+
+  it('leaves a transcript with no user prompt untouched', () => {
+    const items: Msg[] = [{ kind: 'intro', role: 'system', text: '' }, { kind: 'slash', role: 'system', text: '/undo' }]
+
+    expect(trimLastExchange(items)).toEqual(items)
+  })
 })

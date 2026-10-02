@@ -112,7 +112,7 @@ import {
   readCronLease,
   releaseCronLease,
 } from "../cron/lease.js";
-import { CronScheduler } from "../cron/scheduler.js";
+import { CronScheduler, type JobClock } from "../cron/scheduler.js";
 import { blockGoal, getGoal, pauseGoal, disarmGoal, recordGoalEvidence, resumeGoal, GoalError } from "../runtime/goalDomain.js";
 import { classifyError } from "../runtime/errorClassifier.js";
 import { modelUsageLedger } from "../runtime/modelUsageLedger.js";
@@ -1229,7 +1229,7 @@ export class DaemonServer {
     );
     this.cronScheduler = new CronScheduler(
       this.cronStore,
-      (job, signal) => this.runScheduledCronJob(job, signal),
+      (job, signal, clock) => this.runScheduledCronJob(job, signal, clock),
       {
         // The lease is re-checked on every tick, not just at start: a daemon
         // that loses or releases it mid-run must stop firing immediately.
@@ -2191,9 +2191,19 @@ export class DaemonServer {
           message: notice.message,
         });
       }
+      const history = requestedHistory === 0 ? session : await this.historySession(session);
       return {
         ok: true,
-        session: sessionPayload(session, this.contextLimit(session.model, session), this.mcpStatusRecord(session), requestedHistory, requestedHistory === 0 ? session : await this.historySession(session)),
+        session: this.sessionWirePayload(session, this.contextLimit(session.model, session), this.mcpStatusRecord(session), requestedHistory, history),
+        // A session-owned turn routes its approvals and questions only to
+        // observers already in front of it. One raised while this connection
+        // watched another tab never reached it, and nothing re-sends it, so
+        // the turn would wait forever on a dialog nobody can see.
+        pending_interactions: [...this.pendingInteractionFrames.values()]
+          .filter(frame => this.sessionTurnOwners.has(frame.owner)
+            && frame.owner.activeSessionKey === key
+            && this.canAnswerInteraction(frame.owner, connection))
+          .map(({ type, payload }) => ({ type, payload })),
       };
     }
     if (method === "session.active_list") {
@@ -2203,7 +2213,7 @@ export class DaemonServer {
         sessions: await Promise.all(this.runtime
           .listSessions()
           .map(async (session) =>
-            sessionPayload(session, this.contextLimit(session.model, session), this.mcpStatusRecord(session), requestedHistory, requestedHistory === 0 ? session : await this.historySession(session)),
+            this.sessionWirePayload(session, this.contextLimit(session.model, session), this.mcpStatusRecord(session), requestedHistory, requestedHistory === 0 ? session : await this.historySession(session)),
           )),
       };
     }
@@ -2236,13 +2246,21 @@ export class DaemonServer {
             "project-scoped session.list needs an active session or project_dir; pass scope \"global\" to list every project",
         };
       }
-      const sessions = await this.runtime.listSavedSessions(limit, {
+      // `query` applies the `/resume <id|name>` match before the limit: a
+      // client resolving a name must reach every saved chat, not only the
+      // newest page its sidebar happens to hold.
+      const query = optionalString(params.query)?.trim().toLowerCase() ?? "";
+      const listed = await this.runtime.listSavedSessions(query ? 0 : limit, {
         ...(typeof params.include_subagents === "boolean"
           ? { includeSubagents: params.include_subagents }
           : {}),
         ...(kind ? { kind } : {}),
         ...(projectDirectory ? { projectDirectory } : {}),
       });
+      const matched = query
+        ? listed.filter((candidate) => savedSessionMatches(candidate, query))
+        : listed;
+      const sessions = query && limit > 0 ? matched.slice(0, limit) : matched;
       return { ok: true, sessions: sessions.map(savedSessionPayload) };
     }
     if (method === "workspace.filePreview") {
@@ -2282,7 +2300,7 @@ export class DaemonServer {
         } : {}),
         session: session
           ? {
-              ...sessionPayload(session, this.contextLimit(session.model, session), this.mcpStatusRecord(session), requestedHistory, requestedHistory === 0 ? session : await this.historySession(session)),
+              ...this.sessionWirePayload(session, this.contextLimit(session.model, session), this.mcpStatusRecord(session), requestedHistory, requestedHistory === 0 ? session : await this.historySession(session)),
               // This is intentionally an identity only. The picker can use it
               // to select the exact stored profile without receiving the live
               // endpoint or credential that proved the match.
@@ -2308,9 +2326,12 @@ export class DaemonServer {
           }
         : { ok: false, error: "no active session" };
     }
+    // Rename, save, undo, compact and worktree act on the session they name
+    // without re-binding the connection: the desktop renames any sidebar row
+    // from a window whose own turn is still streaming, and a re-bind sent
+    // that turn's frames (and its approvals) to nobody.
     if (method === "session.title") {
       const key = sessionKey(connection, params);
-      connection.activeSessionKey = key;
       return this.setSessionTitle(
         connection,
         this.runtime.sessionStatus(key),
@@ -2320,7 +2341,6 @@ export class DaemonServer {
     }
     if (method === "changes.undo") {
       const key = sessionKey(connection, params);
-      connection.activeSessionKey = key;
       return this.undoChanges(
         this.runtime.sessionStatus(key),
         optionalString(params.path) ?? "",
@@ -2328,7 +2348,6 @@ export class DaemonServer {
     }
     if (method === "workspace.worktree") {
       const key = sessionKey(connection, params);
-      connection.activeSessionKey = key;
       if (optionalString(params.action) !== "create") {
         return { ok: false, error: "unsupported workspace.worktree action" };
       }
@@ -2429,8 +2448,7 @@ export class DaemonServer {
         token_usage: goal ? this.goalTokenLedger?.inspect(session.id, goal.id) ?? null : null, continuation: this.goalContinuation(session) };
     }
     if (method === "session.compress") {
-      connection.activeSessionKey = sessionKey(connection, params);
-      return this.compactSession(connection, false);
+      return this.compactSession(connection, false, sessionKey(connection, params));
     }
     if (method === "session.search") {
       const query = optionalString(params.query) ?? optionalString(params.text) ?? "";
@@ -2451,7 +2469,6 @@ export class DaemonServer {
     }
     if (method === "session.save") {
       const key = sessionKey(connection, params);
-      connection.activeSessionKey = key;
       return this.saveActiveSession(
         connection,
         this.runtime.sessionStatus(key),
@@ -2461,7 +2478,6 @@ export class DaemonServer {
     }
     if (method === "session.undo") {
       const key = sessionKey(connection, params);
-      connection.activeSessionKey = key;
       return this.undoLastTurn(
         connection,
         this.runtime.sessionStatus(key),
@@ -2762,9 +2778,16 @@ export class DaemonServer {
       return { ok: true, monitor: { ...watch, events: watch.events.slice(-20), omittedEvents: watch.droppedEvents + Math.max(0, watch.events.length - 20) } };
     }
     if (["schedule.options", "schedule.preview", "schedule.list", "schedule.inspect", "schedule.pause", "schedule.resume", "schedule.cancel", "schedule.run", "schedule.create", "schedule.update", "schedule.remove", "schedule.deliveries", "schedule.delivery.inspect", "schedule.delivery.resolve", "schedule.delivery.send"].includes(method)) {
-      const project = this.cronProjectRoot(connection);
-      if (params.expected_project_directory !== undefined && (typeof params.expected_project_directory !== 'string'
-        || resolveProjectDirectory(params.expected_project_directory) !== project)) {
+      if (params.expected_project_directory !== undefined && (typeof params.expected_project_directory !== 'string' || !params.expected_project_directory)) {
+        return { ok: false, error: 'Invalid expected_project_directory' };
+      }
+      const expected = params.expected_project_directory === undefined ? undefined : resolveProjectDirectory(params.expected_project_directory);
+      // The daemon is shared by every project, so a session-less control
+      // connection (the `xerxes schedule` CLI) names its project here. Falling
+      // back to the daemon's launch directory refused every other workspace.
+      // A connection with an open session stays bound to that session's project.
+      const project = expected !== undefined && !this.runtime.sessionStatus(connection.activeSessionKey) ? expected : this.cronProjectRoot(connection);
+      if (expected !== undefined && expected !== project) {
         return { ok: false, error: 'Daemon project does not match the requested project; select the correct --socket or --project-dir' };
       }
       return this.manageProjectSchedule(project, method, params, job => this.runCronJob(connection, [job.id], false), this.runtime.sessionStatus(connection.activeSessionKey));
@@ -4084,9 +4107,26 @@ export class DaemonServer {
 
   /** USD for the session's tokens at the prices its provider (or models.dev) publishes; undefined when none does. */
   private sessionCost(session: DaemonSession, model: string): number | undefined {
-    const name = this.sessionProfileName(session);
+    // Resolved on a metadata copy: pricing a payload must not pin an unpinned
+    // session to whichever profile happens to be active, as sessionProvider does.
+    const name = this.sessionProfileName({ ...session, metadata: { ...session.metadata } });
     const profile = name ? this.profileStore.get(name) : undefined;
-    return this.priceTokens(profile, model, session.totalInputTokens, session.totalOutputTokens);
+    // The input total is the uncached part only; on a cached Claude session
+    // pricing it alone showed a fraction of the real spend.
+    const cache = sessionCacheTokens(session);
+    return this.priceTokens(profile, model, session.totalInputTokens, session.totalOutputTokens, cache.read, cache.write);
+  }
+
+  /** The wire session payload, priced like `/cost` and the Usage views. */
+  private sessionWirePayload(
+    session: DaemonSession,
+    contextLimit: number,
+    mcpStatus?: Record<string, unknown>,
+    requestedHistory?: number,
+    historySession?: DaemonSession,
+  ): JsonRpcPayload {
+    const cost = session.model ? this.sessionCost(session, session.model) : undefined;
+    return sessionPayload(session, contextLimit, cost, mcpStatus, requestedHistory, historySession);
   }
 
   private priceTokens(profile: ProviderProfile | undefined, model: string, input: number, output: number, cacheRead = 0, cacheWrite = 0): number | undefined {
@@ -4357,6 +4397,7 @@ export class DaemonServer {
         session.permissionMode ?? this.runtime.status().permission_mode,
       ),
       this.mcpStatusRecord(session),
+      model ? this.sessionCost(session, model) : undefined,
     );
     this.emit(
       connection,
@@ -5170,6 +5211,15 @@ export class DaemonServer {
   private contextLimit(model: string, session?: DaemonSession): number {
     // Local provider capacity has not been negotiated. Never substitute a remote profile window.
     if (session && Object.hasOwn(session.metadata, LOCAL_PROVIDER_BINDING)) return 0;
+    // The turn runs on the session's pinned profile, so that is the window to
+    // meter and compact against. Asking the daemon-wide active profile first
+    // gave a session pinned to a 262K window another client's 100K for the
+    // same model id, and pre-turn compaction then refused its turns.
+    const pinned = this.pinnedProfileName(session);
+    if (pinned) {
+      const own = this.contextLimitForProfile(pinned, model);
+      if (own > 0) return own;
+    }
     const activeName = this.activeRuntimeProfileName();
     const direct = this.contextLimitForProfile(activeName, model);
     if (direct > 0) return direct;
@@ -5196,7 +5246,18 @@ export class DaemonServer {
     return discovered ?? resolved.contextLimit ?? 0;
   }
 
-  private maxOutputTokens(model: string): number | undefined {
+  /** The profile a session is pinned to. Never infers one, which would pin the session as a side effect of a read. */
+  private pinnedProfileName(session?: DaemonSession): string | null {
+    const pinned = session?.metadata.provider_profile;
+    return typeof pinned === "string" && pinned && this.profileStore.get(pinned) ? pinned : null;
+  }
+
+  private maxOutputTokens(model: string, session?: DaemonSession): number | undefined {
+    const pinned = this.pinnedProfileName(session);
+    if (pinned) {
+      const own = resolvedProfileMaxOutputTokens(this.profileStore.get(pinned), model);
+      if (own !== undefined) return own;
+    }
     const activeName = this.activeRuntimeProfileName();
     const direct = resolvedProfileMaxOutputTokens(
       activeName ? this.profileStore.get(activeName) : undefined,
@@ -5224,7 +5285,7 @@ export class DaemonServer {
     const status = this.runtime.status();
     const requestedOutputTokens = typeof status.max_tokens === "number"
       ? status.max_tokens
-      : this.maxOutputTokens(model);
+      : this.maxOutputTokens(model, session);
     return effectiveContextLimit({
       contextLimit: this.contextLimit(model, session),
       ...(requestedOutputTokens === undefined ? {} : { requestedOutputTokens }),
@@ -5452,7 +5513,7 @@ export class DaemonServer {
         this.emitStatus(connection, fresh);
         return {
           ok: true,
-          session: sessionPayload(fresh, this.contextLimit(fresh.model, fresh), this.mcpStatusRecord(fresh)),
+          session: this.sessionWirePayload(fresh, this.contextLimit(fresh.model, fresh), this.mcpStatusRecord(fresh)),
         };
       }
       case "stop": {
@@ -6164,7 +6225,7 @@ export class DaemonServer {
     if (!this.pluginRegistryConfigured && !this.managedPlugins) lines.push('No native plugin registry supplied by this host. Plugin loading and management are not configured.');
     lines.push(
       ...(plugins.length
-        ? inventory.map((entry) => `  \`${entry.name}\`${"enabled" in entry ? entry.enabled ? " · enabled" : " · disabled" : ""}`)
+        ? inventory.map((entry) => `  \`${entry.name}\`${"loadError" in entry && entry.loadError ? ` · failed to load: ${entry.loadError}` : "enabled" in entry ? entry.enabled ? " · enabled" : " · disabled" : ""}`)
         : ["  (no plugins loaded)"]),
     );
     if (slashCommands.length) {
@@ -6523,7 +6584,7 @@ export class DaemonServer {
           session.status === "waiting" ||
           session.status === "working",
       )
-      .map((session) => sessionPayload(session, this.contextLimit(session.model, session)));
+      .map((session) => this.sessionWirePayload(session, this.contextLimit(session.model, session)));
     if (!sessions.length) {
       this.emitSlash(connection, "No native background turns running.");
       return { ok: true, sessions: [] };
@@ -7280,21 +7341,22 @@ export class DaemonServer {
   private async compactSession(
     connection: DaemonTransportConnection,
     notify = true,
+    key = connection.activeSessionKey,
   ): Promise<JsonRpcPayload> {
     // Preserve the command's immediate refusal semantics instead of queueing a
     // manual compaction behind a live turn.
-    const active = this.runtime.sessionStatus(connection.activeSessionKey);
+    const active = this.runtime.sessionStatus(key);
     const result = active?.activeTurnId
       ? await this.compactSessionByKeyUnlocked(
-        connection.activeSessionKey,
+        key,
         notify ? connection : undefined,
       )
       : await this.compactSessionByKey(
-        connection.activeSessionKey,
+        key,
         notify ? connection : undefined,
       );
     if (result.ok === true && result.compacted === true) {
-      const session = this.runtime.sessionStatus(connection.activeSessionKey);
+      const session = this.runtime.sessionStatus(key);
       if (session) {
         this.emitStatus(connection, session);
       }
@@ -8225,15 +8287,7 @@ export class DaemonServer {
       );
       return { ok: true, sessions };
     }
-    const matches = saved.filter((candidate) => {
-      const title = candidate.title.toLowerCase();
-      const key = candidate.key.toLowerCase();
-      return (
-        candidate.id.toLowerCase().startsWith(needle) ||
-        key === needle ||
-        title === needle
-      );
-    });
+    const matches = saved.filter((candidate) => savedSessionMatches(candidate, needle));
     if (!matches.length) {
       this.emitSlash(
         connection,
@@ -8295,7 +8349,7 @@ export class DaemonServer {
     this.indexSessionForSearch(target.id);
     return {
       ok: true,
-      session: sessionPayload(session, this.contextLimit(session.model, session), this.mcpStatusRecord(session), undefined, await this.historySession(session)),
+      session: this.sessionWirePayload(session, this.contextLimit(session.model, session), this.mcpStatusRecord(session), undefined, await this.historySession(session)),
     };
   }
 
@@ -8414,7 +8468,7 @@ export class DaemonServer {
       ok: true,
       session: persisted
         ? savedSessionPayload(persisted)
-        : sessionPayload(branch, this.contextLimit(branch.model, branch), this.mcpStatusRecord(branch)),
+        : this.sessionWirePayload(branch, this.contextLimit(branch.model, branch), this.mcpStatusRecord(branch)),
     };
   }
 
@@ -8779,12 +8833,12 @@ export class DaemonServer {
       if (fromActiveTool && session.activeTurnId && (job.targetSessionId === session.id || (!job.targetSessionId && job.workspaceId === session.sessionKey))) {
         throw new Error('Cannot immediately run a follow-up inside its own active conversation. Create or resume a future schedule, or run it from /schedules after this turn finishes.');
       }
-      return this.cronScheduler.runNow(job, async runSignal => {
+      return this.cronScheduler.runNow(job, async (runSignal, clock) => {
         const cancel = () => this.cronScheduler.cancel(job.id);
         signal?.addEventListener("abort", cancel, { once: true });
         try {
           signal?.throwIfAborted();
-          const output = await this.runScheduledCronJob(job, runSignal);
+          const output = await this.runScheduledCronJob(job, runSignal, clock);
           const archivePath = await this.deliverCronOutput(job, output);
           runSignal.throwIfAborted();
           const updated = this.cronStore.update(job.id, { lastRunAt: new Date().toISOString() });
@@ -8937,7 +8991,7 @@ export class DaemonServer {
       this.emitSlash(connection, `No cron job named \`${id}\`.`, "warning");
       return { ok: false, error: "cron job not found" };
     }
-    const { result, archivePath } = await this.cronScheduler.runNow(job, async (signal) => {
+    const { result, archivePath } = await this.cronScheduler.runNow(job, async (signal, clock) => {
       if (streamToCaller) this.emitSlash(connection, `Running cron job \`${job.id}\`.`);
       const result = await this.runCronJobTurn(
         job,
@@ -8949,6 +9003,7 @@ export class DaemonServer {
           });
         },
         signal,
+        clock,
       );
       const archivePath = await this.deliverCronOutput(job, result.output);
       signal.throwIfAborted();
@@ -8970,14 +9025,14 @@ export class DaemonServer {
     };
   }
 
-  private async runScheduledCronJob(job: CronJob, signal: AbortSignal): Promise<string> {
+  private async runScheduledCronJob(job: CronJob, signal: AbortSignal, clock?: JobClock): Promise<string> {
     const result = await this.runCronJobTurn(job, `cron:${job.id}`, (event) => {
       this.broadcast("cron_event", {
         job_id: job.id,
         event_type: event.type,
         payload: event.payload,
       });
-    }, signal);
+    }, signal, clock);
     this.broadcast("cron_run", {
       job_id: job.id,
       session_key: result.sessionKey,
@@ -8989,6 +9044,7 @@ export class DaemonServer {
     job: CronJob, fallbackSessionKey: string,
     emit: (event: { readonly payload: JsonRpcPayload; readonly type: string }) => void,
     signal?: AbortSignal,
+    clock?: JobClock,
   ): Promise<{ readonly output: string; readonly sessionKey: string }> {
     let activeRun: RunRecord | undefined;
     const admitted = this.cronStore.get(job.id);
@@ -9009,7 +9065,11 @@ export class DaemonServer {
     try {
       const targetKey = job.targetSessionId ? this.runtime.listSessions().find(session => session.id === job.targetSessionId)?.sessionKey ?? job.targetSessionId : undefined;
       const execute = () => withIndependentModelCallBudget(budget, () => this.runCronJobTurnBody(job, targetKey ?? fallbackSessionKey, emit, run => { activeRun = run; }, finish => { finishRun = finish; }, signal));
-      return await (targetKey ? this.withSessionOperation(targetKey, execute, 'background') : execute());
+      if (!targetKey) return await execute();
+      // Waiting behind the conversation's own turn is not this job's run
+      // time; counting it timed follow-ups in busy chats out before they ran.
+      clock?.pause();
+      return await this.withSessionOperation(targetKey, () => { clock?.resume(); return execute(); }, 'background');
     } finally {
       budget.close();
       let failure = budget.persistenceError ?? budget.tokenFailure;
@@ -9447,12 +9507,26 @@ export class DaemonServer {
     const ok = this.interactions.respondPermission(requestId, response);
     if (ok) {
       this.approvalOwners.delete(requestId);
-      this.emit(connection, "approval_response", {
+      this.emit(this.interactionAudience(owner, connection), "approval_response", {
         request_id: requestId,
         response,
       });
     }
     return { ok };
+  }
+
+  /**
+   * Who learns that an interaction was answered: every surface the request
+   * itself reached. A session-owned turn's request went to all windows
+   * observing the session; echoing the answer only to the one that clicked
+   * left the others with a dead card that could only answer "refused".
+   * canAnswerInteraction already proved the answerer is among them.
+   */
+  private interactionAudience(
+    owner: DaemonTransportConnection | undefined,
+    connection: DaemonTransportConnection,
+  ): DaemonTransportConnection {
+    return owner && this.sessionTurnOwners.has(owner) ? owner : connection;
   }
 
   private async questionResponse(
@@ -9485,7 +9559,7 @@ export class DaemonServer {
     const ok = this.interactions.respondQuestion(requestId, answers);
     if (ok) {
       this.questionOwners.delete(requestId);
-      this.emit(connection, "question_response", { id: requestId, answers });
+      this.emit(this.interactionAudience(owner, connection), "question_response", { id: requestId, answers });
     }
     return { ok };
   }
@@ -9988,6 +10062,7 @@ export class DaemonServer {
         this.sessionReasoningEffort(session),
         runtimePermissionMode(session.permissionMode ?? this.runtime.status().permission_mode),
         this.mcpStatusRecord(session),
+        model ? this.sessionCost(session, model) : undefined,
       ),
     );
     if (session.messages.length) {
@@ -10008,7 +10083,7 @@ export class DaemonServer {
       ...this.runtimeStatusWithChannels(),
       ...initPayload,
       ok: true,
-      session: sessionPayload(session, contextLimit, this.mcpStatusRecord(session), requestedHistory, history),
+      session: this.sessionWirePayload(session, contextLimit, this.mcpStatusRecord(session), requestedHistory, history),
       pending_interactions: [...this.pendingInteractionFrames.values()]
         .filter(frame => this.canAnswerInteraction(frame.owner, connection))
         .map(({ type, payload }) => ({ type, payload })),
@@ -10212,21 +10287,7 @@ export class DaemonServer {
     type: string,
     payload: JsonRpcPayload,
   ): void {
-    if (type === "approval_request") {
-      const requestId =
-        optionalString(payload.id) ?? optionalString(payload.request_id);
-      if (requestId) {
-        this.approvalOwners.set(requestId, connection);
-        this.pendingInteractionFrames.set(requestId, { owner: connection, type, payload });
-      }
-    }
-    if (type === "question_request") {
-      const requestId = optionalString(payload.id);
-      if (requestId) {
-        this.questionOwners.set(requestId, connection);
-        this.pendingInteractionFrames.set(requestId, { owner: connection, type, payload });
-      }
-    }
+    this.recordInteractionOwner(connection, type, payload);
     if (type === 'approval_response' || type === 'question_response') {
       const requestId = optionalString(payload.request_id) ?? optionalString(payload.id);
       if (requestId) this.pendingInteractionFrames.delete(requestId);
@@ -10688,6 +10749,7 @@ export class DaemonServer {
       this.turnOwners.set(sessionKey, owner);
     }
     const interactionIds = new Set<string>();
+    const interactionOwner = owner ? undefined : this.ownerlessInteractionOwner(sessionKey);
     // Named before the first token streams, not after the turn ends.
     this.seedProvisionalTitle(sessionKey, options.displayText ?? text);
     // Before compaction, so the capture reflects the tree the user is looking
@@ -10738,6 +10800,8 @@ export class DaemonServer {
         }
         this.rememberTurnInteraction(event, interactionIds);
         emit(event);
+        // After the emitter, which records whichever raw socket it reached.
+        if (interactionOwner) this.recordInteractionOwner(interactionOwner, event.type, event.payload);
         const live = ["turn_begin", "tool_result", "status_update", "turn_end"].includes(event.type)
           ? this.runtime.sessionStatus(sessionKey) : undefined;
         if (live) {
@@ -10853,6 +10917,44 @@ export class DaemonServer {
         ids.add(requestId);
       }
     }
+  }
+
+  /** Who may answer an approval or question, and the frame a reopened client replays. */
+  private recordInteractionOwner(owner: DaemonTransportConnection, type: string, payload: JsonRpcPayload): void {
+    if (type === "approval_request") {
+      const requestId =
+        optionalString(payload.id) ?? optionalString(payload.request_id);
+      if (requestId) {
+        this.approvalOwners.set(requestId, owner);
+        this.pendingInteractionFrames.set(requestId, { owner, type, payload });
+      }
+    }
+    if (type === "question_request") {
+      const requestId = optionalString(payload.id);
+      if (requestId) {
+        this.questionOwners.set(requestId, owner);
+        this.pendingInteractionFrames.set(requestId, { owner, type, payload });
+      }
+    }
+  }
+
+  /**
+   * The session-scoped owner of a turn no client owns: a goal resumed after an
+   * update restart, a monitor reaction, a schedule aimed at a session. Their
+   * emitters address raw sockets, which a leased window never answers from,
+   * and record nothing while no window is open, so the turn's approvals and
+   * questions could neither be answered nor replayed and the turn waited
+   * forever. Any client attached to the session answers through this owner.
+   */
+  private ownerlessInteractionOwner(sessionKey: string): DaemonTransportConnection {
+    const owner: DaemonTransportConnection = {
+      activeSessionKey: sessionKey,
+      send: frame => {
+        for (const observer of this.sessionObservers) if (observer.activeSessionKey === sessionKey) observer.send(frame);
+      },
+    };
+    this.sessionTurnOwners.add(owner);
+    return owner;
   }
 
   private releaseTurnInteractions(ids: Set<string>): void {
@@ -11478,6 +11580,7 @@ function projectedHistoryPage(session: DaemonSession, limit: number, before?: un
 function sessionPayload(
   session: DaemonSession,
   contextLimit: number,
+  costUsd: number | undefined,
   mcpStatus: Record<string, unknown> = {},
   requestedHistory?: number,
   historySession: DaemonSession = session,
@@ -11565,10 +11668,7 @@ function sessionPayload(
     // Same estimate the /cost slash reports, from published prices only: a
     // model nobody prices (or a session without a model) omits the field
     // rather than implying a free run.
-    ...(() => {
-      const cost = session.model ? calcCost(session.model, session.totalInputTokens, session.totalOutputTokens) : undefined;
-      return cost === undefined ? {} : { cost_usd: cost };
-    })(),
+    ...(costUsd === undefined ? {} : { cost_usd: costUsd }),
     mcp_status: mcpStatus,
     context_tokens: contextTokens,
     context_limit: contextLimit,
@@ -11585,6 +11685,18 @@ function sessionPayload(
     last_active: session.lastActive / 1000,
     status: session.status,
   };
+}
+
+/** Cache reads and writes the session's turns reported, kept beside (not inside) its input total. */
+function sessionCacheTokens(session: DaemonSession): { readonly read: number; readonly write: number } {
+  const value = session.extra.runtime_telemetry;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return { read: 0, write: 0 };
+  const record = value as Record<string, unknown>;
+  const metric = (key: string): number => {
+    const candidate = record[key];
+    return typeof candidate === 'number' && Number.isFinite(candidate) && candidate >= 0 ? candidate : 0;
+  };
+  return { read: metric('cacheReadTokens'), write: metric('cacheWriteTokens') };
 }
 
 function sessionRuntimeTelemetryPayload(value: unknown): JsonRpcPayload {
@@ -11746,6 +11858,15 @@ function sessionHistoryPayload(session: DaemonSession): JsonRpcPayload {
   };
 }
 
+/** The `/resume <id|name>` match: an id prefix, or the exact key or title (`needle` is lower-cased). */
+function savedSessionMatches(session: SavedDaemonSession, needle: string): boolean {
+  return (
+    session.id.toLowerCase().startsWith(needle) ||
+    session.key.toLowerCase() === needle ||
+    session.title.toLowerCase() === needle
+  );
+}
+
 function savedSessionPayload(session: SavedDaemonSession): JsonRpcPayload {
   return {
     id: session.id,
@@ -11890,6 +12011,7 @@ function statusUpdatePayload(
   reasoningEffort = "off",
   permissionMode = DEFAULT_PERMISSION_MODE,
   mcpStatus: Record<string, unknown> = {},
+  costUsd?: number,
 ): JsonRpcPayload {
   const calls = exactSessionApiCalls(session);
   const goal = getGoal(session.metadata, session.id);
@@ -11901,10 +12023,7 @@ function statusUpdatePayload(
     max_context: contextLimit,
     input_tokens: session.totalInputTokens,
     output_tokens: session.totalOutputTokens,
-    ...(() => {
-      const cost = model ? calcCost(model, session.totalInputTokens, session.totalOutputTokens) : undefined;
-      return cost === undefined ? {} : { cost_usd: cost };
-    })(),
+    ...(costUsd === undefined ? {} : { cost_usd: costUsd }),
     ...(calls === undefined ? {} : { calls }),
     calls_complete: calls !== undefined,
     ...(calls === undefined && session.totalApiCalls !== undefined

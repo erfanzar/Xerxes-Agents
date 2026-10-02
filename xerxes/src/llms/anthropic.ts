@@ -11,7 +11,7 @@ import {
   isAnthropicOAuthToken,
   toClaudeCodeToolName,
 } from '../auth/anthropicOAuth.js'
-import { ConfigurationError, ProviderError, StreamFrameError } from '../core/errors.js'
+import { ConfigurationError, ProviderError, StreamFrameError, StreamTruncatedError } from '../core/errors.js'
 import {
   cacheableSystemPrompt,
   markLastMessageForCache,
@@ -529,7 +529,7 @@ export class AnthropicMessagesClient implements LlmClient {
       }
     }
     if (!receivedMessageStop) {
-      throw new ProviderError('anthropic', 'stream ended before message_stop')
+      throw new StreamTruncatedError('anthropic', 'stream ended before message_stop')
     }
   }
 }
@@ -818,7 +818,10 @@ function anthropicFinishReason(stopReason: string, explanation = ''): string {
   if (stopReason === 'end_turn' || stopReason === 'stop_sequence') {
     return 'stop'
   }
-  if (stopReason === 'max_tokens') {
+  // Sonnet 4.5+ stops with model_context_window_exceeded when prompt plus
+  // max_tokens overruns the window. The reply is cut off exactly as with
+  // max_tokens, so a half-written tool call must not run as if finished.
+  if (stopReason === 'max_tokens' || stopReason === 'model_context_window_exceeded') {
     return 'length'
   }
   if (stopReason === 'tool_use') {

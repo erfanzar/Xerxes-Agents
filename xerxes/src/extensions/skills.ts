@@ -864,7 +864,9 @@ function parseFrontmatter(content: string): Record<string, FrontmatterValue> {
   const fields: Record<string, FrontmatterValue> = Object.create(null);
   const seenKeys = new Set<string>();
   let listKey: string | undefined;
-  for (const [index, rawLine] of content.split(/\r?\n/).entries()) {
+  const lines = content.split(/\r?\n/);
+  for (let index = 0; index < lines.length; index += 1) {
+    const rawLine = lines[index] ?? "";
     const lineNumber = index + 1;
     const line = rawLine.trim();
     if (!line || line.startsWith("#")) {
@@ -894,6 +896,25 @@ function parseFrontmatter(content: string): Record<string, FrontmatterValue> {
     }
     seenKeys.add(key);
     const value = line.slice(separator + 1).trim();
+    // YAML block scalars (`description: >-` and friends, common in
+    // Claude-style skills) used to store the bare indicator, so the skill
+    // index showed `>-` instead of when to use the skill.
+    const blockScalar = /^([>|])[+-]?\d*$/.exec(value);
+    if (blockScalar) {
+      const keyIndent = rawLine.length - rawLine.trimStart().length;
+      const body: string[] = [];
+      while (index + 1 < lines.length) {
+        const next = lines[index + 1] ?? "";
+        if (next.trim() && next.length - next.trimStart().length <= keyIndent) break;
+        body.push(next.trim());
+        index += 1;
+      }
+      listKey = undefined;
+      fields[key] = blockScalar[1] === "|"
+        ? body.join("\n").trim()
+        : body.reduce((folded, part) => !part ? `${folded}\n` : folded && !folded.endsWith("\n") ? `${folded} ${part}` : `${folded}${part}`, "").trim();
+      continue;
+    }
     listKey = value ? undefined : key;
     fields[key] =
       value.startsWith("[") && value.endsWith("]")

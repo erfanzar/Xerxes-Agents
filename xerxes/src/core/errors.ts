@@ -145,3 +145,11 @@ export class ProviderError extends ClientError {}
  * usually succeeds, so it is retried like a dropped connection.
  */
 export class StreamFrameError extends ProviderError {}
+
+/**
+ * A stream that stopped before the provider's terminal event: a proxy idle
+ * cutoff that ends the body cleanly, or a WebSocket that closes mid-reply
+ * on a network change or server deploy. The request itself was fine, so it
+ * is retried like a dropped connection.
+ */
+export class StreamTruncatedError extends ProviderError {}

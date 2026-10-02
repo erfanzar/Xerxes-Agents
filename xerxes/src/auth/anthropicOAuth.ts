@@ -28,6 +28,7 @@ import {
   oauthCallbackHtml,
   type OAuthFlowCredential,
   readJsonObject,
+  sharedCredentialFlight,
 } from './oauthFlows.js'
 
 export const ANTHROPIC_OAUTH_PROVIDER = 'anthropic'
@@ -426,7 +427,6 @@ export class AnthropicOAuthSession {
   private readonly fetchImplementation: OAuthFetch | undefined
   private readonly home: string
   private readonly now: () => number
-  private pending: Promise<OAuthFlowCredential> | undefined
 
   constructor(options: AnthropicOAuthSessionOptions = {}) {
     this.environment = options.environment ?? process.env
@@ -444,13 +444,9 @@ export class AnthropicOAuthSession {
    * explicit bearer tokens still reach the OAuth request path.
    */
   async credential(signal?: AbortSignal): Promise<OAuthFlowCredential> {
-    if (this.pending) return this.pending
-    const flight = this.resolve(signal)
-    const tracked = flight.finally(() => {
-      if (this.pending === tracked) this.pending = undefined
-    })
-    this.pending = tracked
-    return tracked
+    // Shared with every session on this file: Anthropic rotates the refresh
+    // token, so parallel refreshes from separate instances refused all but one.
+    return sharedCredentialFlight(this.credentialPath(), () => this.resolve(), signal)
   }
 
   /** Re-mint the access token from the stored refresh token. */
@@ -516,10 +512,10 @@ export class AnthropicOAuthSession {
     return undefined
   }
 
-  private async resolve(signal?: AbortSignal): Promise<OAuthFlowCredential> {
+  private async resolve(): Promise<OAuthFlowCredential> {
     const stored = await this.loadStored()
     if (stored && !this.isExpired(stored.expires)) return stored
-    if (stored) return this.refresh(stored, signal)
+    if (stored) return this.refresh(stored)
     const ambient = this.environmentToken()
     if (ambient) {
       return { access: ambient, refresh: '', expires: Number.MAX_SAFE_INTEGER }

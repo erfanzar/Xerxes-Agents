@@ -4,7 +4,7 @@
 import { expect, test } from 'bun:test'
 
 import { HookRunner } from '../src/extensions/hooks.js'
-import type { CompletionRequest, LlmClient, LlmDelta } from '../src/llms/client.js'
+import { OpenAiCompatibleClient, type CompletionRequest, type LlmClient, type LlmDelta } from '../src/llms/client.js'
 import { classifyError } from '../src/runtime/errorClassifier.js'
 import { createAgentState, type StreamEvent } from '../src/streaming/events.js'
 import {
@@ -188,6 +188,42 @@ test('a retried provider attempt drops partial text, thinking, and stale tool ca
   expect(assistant[0]).not.toHaveProperty('tool_calls')
   expect(state.messages.some(message => message.role === 'tool')).toBe(false)
   expect(state.thinkingContent).toEqual([''])
+  expect(events.at(-1)).toMatchObject({ type: 'turn_done' })
+})
+
+test('a provider stream that ends before its terminal event is retried, not failed', async () => {
+  const encoder = new TextEncoder()
+  let calls = 0
+  const llm = new OpenAiCompatibleClient({
+    providerName: 'openai',
+    apiKey: 'test-key',
+    baseUrl: 'https://api.openai.com/v1',
+    fetchImplementation: async () => {
+      calls += 1
+      const frames = calls === 1
+        // A proxy idle cutoff: the body ends cleanly mid-reply.
+        ? ['data: {"choices":[{"delta":{"content":"Half an"}}]}\n\n']
+        : ['data: {"choices":[{"delta":{"content":"Half an answer."},"finish_reason":"stop"}]}\n\n', 'data: [DONE]\n\n']
+      return new Response(new ReadableStream({
+        start(controller) {
+          for (const frame of frames) controller.enqueue(encoder.encode(frame))
+          controller.close()
+        },
+      }))
+    },
+  })
+  const state = createAgentState()
+
+  const events = await collect(runTurn(
+    { model: 'gpt-4o', state, userMessage: 'hi' },
+    { delay: async () => undefined, llm, retryDelays: [0, 0] },
+  ))
+
+  expect(calls).toBe(2)
+  expect(events.filter(event => event.type === 'provider_retry')).toEqual([
+    expect.objectContaining({ attempt: 1, final: false }),
+  ])
+  expect(state.messages.at(-1)).toMatchObject({ role: 'assistant', content: 'Half an answer.' })
   expect(events.at(-1)).toMatchObject({ type: 'turn_done' })
 })
 

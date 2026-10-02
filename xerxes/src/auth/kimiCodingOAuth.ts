@@ -17,6 +17,7 @@ import {
   pollDeviceCodeFlow,
   positiveNumberField,
   readJsonObject,
+  sharedCredentialFlight,
   stringField,
   type OAuthFlowCredential,
 } from './oauthFlows.js'
@@ -306,7 +307,6 @@ export class KimiCodingOAuthSession {
   private readonly home: string
   private readonly now: () => number
   private readonly sleep: (ms: number) => Promise<void>
-  private pending: Promise<OAuthFlowCredential> | undefined
 
   constructor(options: KimiCodingOAuthSessionOptions = {}) {
     this.environment = options.environment ?? process.env
@@ -318,13 +318,9 @@ export class KimiCodingOAuthSession {
 
   /** Return a usable credential, refreshing when at or near expiry. */
   async credential(signal?: AbortSignal): Promise<OAuthFlowCredential> {
-    if (this.pending) return this.pending
-    const flight = this.resolve(signal)
-    const tracked = flight.finally(() => {
-      if (this.pending === tracked) this.pending = undefined
-    })
-    this.pending = tracked
-    return tracked
+    // Shared with every session on this file: Kimi rotates the refresh
+    // token, so parallel refreshes from separate instances refused all but one.
+    return sharedCredentialFlight(this.credentialPath(), () => this.resolve(), signal)
   }
 
   /** Re-mint the access token from the stored refresh token. */
@@ -401,10 +397,10 @@ export class KimiCodingOAuthSession {
     return expires - KIMI_CODE_REFRESH_SKEW_SECONDS <= this.now()
   }
 
-  private async resolve(signal?: AbortSignal): Promise<OAuthFlowCredential> {
+  private async resolve(): Promise<OAuthFlowCredential> {
     const stored = await this.loadStored()
     if (stored && !this.isExpired(stored.expires)) return stored
-    if (stored) return this.refresh(stored, signal)
+    if (stored) return this.refresh(stored)
     throw new ConfigurationError(
       'kimi_code_oauth',
       "No Kimi Code subscription session found. Run 'xerxes auth login kimi'.",

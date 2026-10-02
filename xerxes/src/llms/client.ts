@@ -22,7 +22,7 @@ import { KimiCodingOAuthSession } from '../auth/kimiCodingOAuth.js'
 import { OpenRouterOAuthSession } from '../auth/openrouterOAuth.js'
 import { XaiOAuthSession } from '../auth/xaiOAuth.js'
 import { isGradedEffort } from './reasoningLevels.js'
-import { ConfigurationError, ProviderError, StreamFrameError } from '../core/errors.js'
+import { ConfigurationError, ProviderError, StreamFrameError, StreamTruncatedError } from '../core/errors.js'
 import { isPluginLlmProviderFactory } from '../extensions/plugins.js'
 import type {
   PluginLlmProviderFactory,
@@ -32,15 +32,17 @@ import type {
 import { ResponsesEventTranslator } from '../streaming/responsesApi.js'
 import {
   buildCachedWebSocketRequestBody,
+  codexContinuationFor,
   codexWebSocketFallbackActive,
   CODEX_SSE_COMPRESSION_HEADER,
   compressRequestBodyZstd,
   continuationFromResponse,
   CodexWsApiError,
+  forgetCodexContinuation,
   isCodexRetryableWebSocketError,
   recordCodexWebSocketFallback,
+  rememberCodexContinuation,
   streamCodexWebSocket,
-  type CodexWsContinuation,
 } from '../streaming/codexWebSocket.js'
 import { deterministicToolCallId } from '../streaming/toolCallIds.js'
 import { SSEParser } from '../streaming/sse.js'
@@ -441,7 +443,9 @@ export class OpenAiCompatibleClient implements LlmClient {
     const pendingToolCalls = new Map<number, PendingToolCall>()
     let emittedToolCalls = false
     let terminal = false
+    let frames = 0
     for await (const data of sseData(response.body)) {
+      frames += 1
       if (data === '[DONE]') {
         terminal = true
         break
@@ -488,7 +492,15 @@ export class OpenAiCompatibleClient implements LlmClient {
     }
 
     if (!terminal) {
-      throw new ProviderError(this.providerName, 'stream ended before a terminal completion event')
+      // Only a real event stream that stopped early is a transport fault worth
+      // retrying. A reply that never was one (a whole JSON body with no
+      // content) has a shape that will never parse: retrying it only resends
+      // the full window.
+      const eventStream = /text\/event-stream/i.test(response.headers.get('content-type') ?? '')
+      if (frames > 0 || eventStream) {
+        throw new StreamTruncatedError(this.providerName, 'stream ended before a terminal completion event')
+      }
+      throw new ProviderError(this.providerName, 'stream request returned a response with no event stream and no completion')
     }
     if (!emittedToolCalls && pendingToolCalls.size) {
       yield { toolCalls: completedToolCalls(pendingToolCalls, grammarProperties) }
@@ -636,9 +648,25 @@ export class ResponsesApiClient implements LlmClient {
         }
         return
       } catch (error) {
-        // A failure after the first event cannot be retried or downgraded:
-        // the consumer already saw output the retry would duplicate.
-        if (emitted) throw error
+        // A cancelled attempt says nothing about the transport. Recording a
+        // fallback here pinned the session to SSE for the daemon's lifetime.
+        if (signal?.aborted) throw error
+        // A failure after the first event cannot be retried or downgraded
+        // here: the consumer already saw output the retry would duplicate.
+        // A socket that dropped mid-reply is still a transport fault, so it
+        // is surfaced as a truncated stream the turn loop retries.
+        if (emitted) {
+          if (error instanceof CodexWsApiError
+            && (error.code === 'websocket_closed' || error.code === 'websocket_error')) {
+            const closeCode = error.closeCode === undefined ? '' : ` code ${error.closeCode}`
+            throw new StreamTruncatedError(
+              this.providerName,
+              `stream ended before a terminal event (Codex WebSocket ${error.code}${closeCode})`,
+              error,
+            )
+          }
+          throw error
+        }
         if (isCodexRetryableWebSocketError(error) && !retriedConnectionLimit) {
           retriedConnectionLimit = true
           continue
@@ -647,7 +675,7 @@ export class ResponsesApiClient implements LlmClient {
           && error.code === 'previous_response_not_found'
           && !retriedMissingPrevious) {
           retriedMissingPrevious = true
-          if (sessionId) codexContinuations.delete(sessionId)
+          if (sessionId) forgetCodexContinuation(sessionId)
           continue
         }
         if (sessionId) recordCodexWebSocketFallback(sessionId)
@@ -680,7 +708,7 @@ export class ResponsesApiClient implements LlmClient {
     }
     const body = responsesPayload(request, this.providerName, true)
     const useCachedContext = transport === 'auto' || transport === 'websocket-cached'
-    const continuation = sessionId && useCachedContext ? codexContinuations.get(sessionId) : undefined
+    const continuation = sessionId && useCachedContext ? codexContinuationFor(sessionId) : undefined
     const prepared = continuation
       ? buildCachedWebSocketRequestBody(body, continuation)
       : { body, usedDelta: false }
@@ -717,7 +745,7 @@ export class ResponsesApiClient implements LlmClient {
       // The continuation anchors on the FULL body: the next prefix check
       // compares against the complete input, not this turn's delta view.
       const next = continuationFromResponse(body, responseId, assistantItems)
-      if (next) codexContinuations.set(sessionId, next)
+      if (next) rememberCodexContinuation(sessionId, next)
     }
   }
 
@@ -760,9 +788,6 @@ export class ResponsesApiClient implements LlmClient {
 
 /** pi-ai's WebSocket-only beta flag; the SSE path keeps `responses=experimental`. */
 const CODEX_WEBSOCKET_BETA_HEADER = 'responses_websockets=2026-02-06'
-
-/** Connection-scoped Codex continuations keyed by session id. */
-const codexContinuations = new Map<string, CodexWsContinuation>()
 
 /**
  * Rebuild the assistant turn's Responses input items exactly as
@@ -845,18 +870,24 @@ export function createLlmClient(
     : typeof overrides.custom_base_url === 'string'
       ? overrides.custom_base_url
       : options.baseUrl
+  const subscriptionAuth = subscriptionAuthApplies(providerConfig.baseUrl, configuredApiKey, configuredBaseUrl)
   if (providerConfig.transport === 'anthropic') {
     // The subscription session is consulted per request; a missing session
     // falls back to the ordinary API-key path untouched (pi-ai resolution
     // order: stored OAuth credential → ANTHROPIC_AUTH_TOKEN → API key).
-    const anthropicOAuth = options.anthropicOAuthSession ?? new AnthropicOAuthSession()
+    // Only Anthropic itself takes the Claude subscription: MiniMax, Vercel
+    // and other Anthropic-protocol hosts were sent the user's sk-ant-oat
+    // token in place of their own key.
+    const anthropicOAuth = providerConfig.name === 'anthropic' && subscriptionAuth
+      ? options.anthropicOAuthSession ?? new AnthropicOAuthSession()
+      : undefined
     return new AnthropicMessagesClient({
       ...(configuredApiKey ? { apiKey: configuredApiKey } : {}),
       ...(configuredBaseUrl ? { baseUrl: configuredBaseUrl } : {}),
       ...(options.fetchImplementation ? { fetchImplementation: options.fetchImplementation } : {}),
       ...(options.promptCaching === undefined ? {} : { promptCaching: options.promptCaching }),
       providerName: providerConfig.name,
-      resolveOAuthToken: async signal => {
+      ...(anthropicOAuth ? { resolveOAuthToken: async (signal?: AbortSignal) => {
         try {
           const credential = await anthropicOAuth.credential(signal)
           // Only subscription tokens take the OAuth surface (pi-ai parity);
@@ -869,7 +900,7 @@ export function createLlmClient(
           if (error instanceof ConfigurationError) return undefined
           throw error
         }
-      },
+      } } : {}),
     })
   }
   if (providerConfig.transport === 'claude-code') {
@@ -1007,14 +1038,22 @@ export function createLlmClient(
   }
   // Subscription-backed providers: a stored OAuth credential provides the
   // Bearer header; without one the ordinary API-key path is kept untouched.
-  if (providerName === 'kimi-code') {
-    const session = options.kimiOAuthSession ?? new KimiCodingOAuthSession()
+  if (providerName === 'kimi-code' || providerName === 'openrouter' || providerName === 'xai') {
+    // An explicit key in the profile names the account to bill, and a
+    // subscription token never goes to a host other than its issuer's.
+    const session = !subscriptionAuth
+      ? undefined
+      : providerName === 'kimi-code'
+        ? options.kimiOAuthSession ?? new KimiCodingOAuthSession()
+        : providerName === 'openrouter'
+          ? options.openrouterOAuthSession ?? new OpenRouterOAuthSession()
+          : options.xaiOAuthSession ?? new XaiOAuthSession()
     return new OpenAiCompatibleClient({
       ...options,
       providerName,
       ...(configuredApiKey ? { apiKey: configuredApiKey } : {}),
       ...(configuredBaseUrl ? { baseUrl: configuredBaseUrl } : {}),
-      resolveAuthHeaders: async signal => {
+      ...(session ? { resolveAuthHeaders: async (signal?: AbortSignal) => {
         try {
           const credential = await session.credential(signal)
           return { Authorization: `Bearer ${credential.access}` }
@@ -1022,43 +1061,7 @@ export function createLlmClient(
           if (error instanceof ConfigurationError) return {}
           throw error
         }
-      },
-    })
-  }
-  if (providerName === 'openrouter') {
-    const session = options.openrouterOAuthSession ?? new OpenRouterOAuthSession()
-    return new OpenAiCompatibleClient({
-      ...options,
-      providerName,
-      ...(configuredApiKey ? { apiKey: configuredApiKey } : {}),
-      ...(configuredBaseUrl ? { baseUrl: configuredBaseUrl } : {}),
-      resolveAuthHeaders: async signal => {
-        try {
-          const credential = await session.credential(signal)
-          return { Authorization: `Bearer ${credential.access}` }
-        } catch (error) {
-          if (error instanceof ConfigurationError) return {}
-          throw error
-        }
-      },
-    })
-  }
-  if (providerName === 'xai') {
-    const session = options.xaiOAuthSession ?? new XaiOAuthSession()
-    return new OpenAiCompatibleClient({
-      ...options,
-      providerName,
-      ...(configuredApiKey ? { apiKey: configuredApiKey } : {}),
-      ...(configuredBaseUrl ? { baseUrl: configuredBaseUrl } : {}),
-      resolveAuthHeaders: async signal => {
-        try {
-          const credential = await session.credential(signal)
-          return { Authorization: `Bearer ${credential.access}` }
-        } catch (error) {
-          if (error instanceof ConfigurationError) return {}
-          throw error
-        }
-      },
+      } } : {}),
     })
   }
   if (providerName === 'gemini') {
@@ -1082,6 +1085,27 @@ export function createLlmClient(
     ...(configuredApiKey ? { apiKey: configuredApiKey } : {}),
     ...(configuredBaseUrl ? { baseUrl: configuredBaseUrl } : {}),
   })
+}
+
+/**
+ * Whether a stored subscription session may authenticate this client: only
+ * when the profile names no key of its own and the request goes to the
+ * provider's own host. A subscription token is a credential for its issuer
+ * and must not reach a proxy or another vendor.
+ */
+function subscriptionAuthApplies(
+  providerBaseUrl: string | undefined,
+  configuredApiKey: string | undefined,
+  configuredBaseUrl: string | undefined,
+): boolean {
+  if (configuredApiKey) return false
+  if (!configuredBaseUrl) return true
+  if (!providerBaseUrl) return false
+  try {
+    return new URL(configuredBaseUrl).origin === new URL(providerBaseUrl).origin
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -2202,6 +2226,22 @@ function completedToolCalls(
 
 function validatedOpenAiFinishReason(reason: string | undefined, providerName: ProviderName): string | undefined {
   if (reason === undefined || ['stop', 'end', 'length', 'function_call', 'tool_calls'].includes(reason)) return reason
+  // Documented provider spellings of the neutral reasons. Together ends a
+  // finished reply with `eos`; failing it threw away a complete answer.
+  if (reason === 'eos') return 'stop'
+  // Cut off by the context window: truncated, so a half-written tool call
+  // must not run as if finished.
+  if (reason === 'model_context_window_exceeded') return 'length'
+  // DeepSeek's `insufficient_system_resource` and Z.ai's `network_error`
+  // mean the server gave up mid-reply and the request should be retried.
+  if (reason === 'insufficient_system_resource' || reason === 'network_error') {
+    throw new ProviderError(
+      providerName,
+      `provider finish_reason: ${reason}; the server is temporarily unable to finish the reply`,
+      undefined,
+      { status: 503 },
+    )
+  }
   throw new ProviderError(providerName, `provider finish_reason: ${reason}`)
 }
 

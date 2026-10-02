@@ -1,7 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { ConfigurationError, ProviderError } from '../core/errors.js'
+import { ConfigurationError, ProviderError, StreamTruncatedError } from '../core/errors.js'
 import { deterministicToolCallId } from '../streaming/toolCallIds.js'
 import type { ChatMessage, MessageContent } from '../types/messages.js'
 import type { JsonObject, ToolCall } from '../types/toolCalls.js'
@@ -196,7 +196,7 @@ export class OllamaClient implements LlmClient {
       }
     }
     if (!receivedDone) {
-      throw new ProviderError('ollama', 'chat stream ended before done:true')
+      throw new StreamTruncatedError('ollama', 'chat stream ended before done:true')
     }
   }
 }

@@ -15,6 +15,12 @@ export interface WebhookResponse {
   readonly status: number
 }
 
+/** A response returned once a payload is accepted, while its inbound turns may still be running. */
+export interface WebhookAcceptance extends WebhookResponse {
+  /** Settles with the final delivery outcome once every accepted message has been handled. */
+  readonly settled?: Promise<WebhookResponse>
+}
+
 /** A channel that exposes a raw webhook endpoint in addition to the base transport contract. */
 export interface WebhookCapableChannel extends Channel {
   handleWebhook(
@@ -178,22 +184,63 @@ export abstract class WebhookChannel implements WebhookCapableChannel {
     let failed = false
     for (const message of messages) {
       // Reserve the id before awaiting dispatch so simultaneous provider
-      // retries cannot both enter the inbound handler. Failures that happen
-      // before turn completion release the reservation for a provider retry;
-      // reply delivery failures keep it because retrying would repeat the turn.
+      // retries cannot both enter the inbound handler.
       if (!this.reserveDelivery(message)) continue
-      const outcome = await this.dispatchInbound(message)
-      if (outcome === 'retryable_failure') {
-        this.forgetDelivery(message)
-        failed = true
-      } else if (outcome === 'completed_delivery_failure') {
-        failed = true
-      }
+      if (await this.deliverReserved(message)) failed = true
     }
     return { status: failed ? 500 : 200, body: 'ok' }
   }
 
-  private deliveryKey(message: ChannelMessage): string | undefined {
+  /**
+   * Accept a payload and start its inbound turns without waiting for them.
+   *
+   * A transport that pulls updates (Telegram long polling) must keep pulling
+   * while a turn runs: awaiting the whole turn kept the next getUpdates from
+   * being issued, so `/stop` never reached the running turn and every other
+   * chat on the bot waited behind it. Handlers are invoked in payload order
+   * before this returns, so per-conversation ordering is kept by the router.
+   * The status reflects acceptance only; `settled` carries the turn outcome.
+   */
+  protected async acceptWebhook(
+    headers: WebhookHeaders,
+    body: Uint8Array,
+  ): Promise<WebhookAcceptance> {
+    if (!this.handler) {
+      return { status: 503, body: 'channel not started' }
+    }
+    let messages: readonly ChannelMessage[]
+    try {
+      messages = await this.parseInbound(headers, body)
+    } catch (error) {
+      this.report({ channel: this.name, error, source: 'parse' })
+      return { status: 400, body: 'invalid payload' }
+    }
+    const deliveries = messages
+      .filter(message => this.reserveDelivery(message))
+      .map(message => this.deliverReserved(message))
+    const settled = Promise.all(deliveries).then(failures => ({
+      status: failures.some(Boolean) ? 500 : 200,
+      body: 'ok',
+    }))
+    return { status: 200, body: 'accepted', settled }
+  }
+
+  /**
+   * Dispatch one reserved message and report whether it failed. Failures that
+   * happen before turn completion release the reservation for a provider
+   * retry; reply delivery failures keep it because retrying would repeat the turn.
+   */
+  private async deliverReserved(message: ChannelMessage): Promise<boolean> {
+    const outcome = await this.dispatchInbound(message)
+    if (outcome === 'retryable_failure') {
+      this.forgetDelivery(message)
+      return true
+    }
+    return outcome === 'completed_delivery_failure'
+  }
+
+  /** Identity used to drop provider re-sends of an already delivered message. */
+  protected deliveryKey(message: ChannelMessage): string | undefined {
     const platformMessageId = message.platformMessageId
     if (!platformMessageId) {
       return undefined

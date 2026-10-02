@@ -166,3 +166,54 @@ export function positiveNumberField(record: Record<string, unknown> | undefined,
   const value = record?.[key]
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined
 }
+
+/**
+ * Process-global single-flight credential resolution, keyed by credential
+ * file. A session object is minted per LLM client, so parallel subagents
+ * hold separate instances that read the same stored refresh token. With an
+ * instance-scoped guard each POSTed its own refresh of that token, and a
+ * provider that rotates it on use refused every loser (CodexSession has the
+ * same registry for the same reason).
+ */
+const credentialFlightsByPath = new Map<string, Promise<OAuthFlowCredential>>()
+
+/**
+ * Join the resolution in flight for `credentialPath`, or start one with
+ * `resolve`. The flight belongs to every caller that joined it, so no
+ * caller's signal is bound into it: an aborted caller stops waiting while
+ * the refresh still persists the rotated credential for the others.
+ */
+export function sharedCredentialFlight(
+  credentialPath: string,
+  resolve: () => Promise<OAuthFlowCredential>,
+  signal?: AbortSignal,
+): Promise<OAuthFlowCredential> {
+  let flight = credentialFlightsByPath.get(credentialPath)
+  if (!flight) {
+    const created = resolve()
+    credentialFlightsByPath.set(credentialPath, created)
+    // A settled flight is dropped so the next expiry re-reads the store; the
+    // catch keeps a failed flight from surfacing as an unhandled rejection.
+    void created.catch(() => undefined).finally(() => {
+      if (credentialFlightsByPath.get(credentialPath) === created) credentialFlightsByPath.delete(credentialPath)
+    })
+    flight = created
+  }
+  if (!signal) return flight
+  if (signal.aborted) return Promise.reject(signal.reason)
+  const joined = flight
+  return new Promise<OAuthFlowCredential>((resolveCaller, rejectCaller) => {
+    const onAbort = (): void => rejectCaller(signal.reason)
+    signal.addEventListener('abort', onAbort, { once: true })
+    joined.then(
+      credential => {
+        signal.removeEventListener('abort', onAbort)
+        resolveCaller(credential)
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', onAbort)
+        rejectCaller(error)
+      },
+    )
+  })
+}

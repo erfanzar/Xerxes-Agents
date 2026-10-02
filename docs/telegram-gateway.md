@@ -48,7 +48,17 @@ one edited preview by default; set `stream_previews` to `false` to send only the
 ```
 
 `preview_interval` is in seconds. Long-polling clears an existing Telegram webhook before it
-receives updates. The allowlist is fail-closed when `require_allowed_sender` is enabled.
+receives updates, and keeps fetching while a turn runs, so `/stop` and other chats are not held
+behind it. The allowlist is fail-closed when `require_allowed_sender` is enabled.
+
+Each conversation's daemon session id is recorded in `channel-sessions.json` inside the channel
+workspace, so a conversation continues its saved session after a daemon restart, a runtime update,
+or idle eviction until someone sends `/new`. In groups, `/xerxes <prompt>` and `/<bot_username>
+<prompt>` run a turn, and menu commands such as `/stop@<bot_username>` are accepted. When a turn
+asks a question or needs a tool approval, Xerxes posts it in the chat and only the person who
+started the turn can answer it: `/approve` or `/deny` for approvals, and for questions the next reply
+(an option number or text) or `/answer <text>`; `/stop` cancels the turn. A channel host without the
+daemon interaction board stops such a turn and says why instead of waiting.
 
 Treat inbound channel content as untrusted. The configured runtime still applies policy,
 permissions, prompt scanning, path safety, and the selected tool sandbox before executing a turn.

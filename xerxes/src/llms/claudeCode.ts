@@ -265,8 +265,8 @@ const NOT_A_CALL = -2
 /**
  * Finds a JSON-bodied call's close: the first `close` outside a JSON string.
  * The arguments need not escape "/", so a value may contain the close tag
- * itself. Outside the object only `lead` may come before it, and blank space
- * or a closing fence after it; anything else means the opener was a tag
+ * itself. Outside the object only `lead` may come before it, and blank space,
+ * a closing fence or stray JSON punctuation after it; anything else means the opener was a tag
  * mentioned in prose. That is decided as soon as it shows: holding the rest of
  * the reply for a close that never came hid the call after the mention until
  * the stream ended, so the early stop never fired. Stops early where the next
@@ -299,7 +299,15 @@ function scanCallBody(text: string, from: number, close: string, lead: RegExp, r
       continue
     }
     if (!opened && char === '{') { opened = true; depth = 1; continue }
-    if (opened ? !/[\s`]/.test(char) : !lead.test(text.slice(from, index + 1))) return stop(NOT_A_CALL)
+    if (opened) {
+      // A stray close or a second object is the model's slip inside a call,
+      // not prose: rejecting it showed the whole call as text and never ran
+      // it. parseArguments keeps the first object. A word still means a mention.
+      if (char === '{' || char === '[') depth = 1
+      else if (!/[\s`}\],]/.test(char)) return stop(NOT_A_CALL)
+      continue
+    }
+    if (!lead.test(text.slice(from, index + 1))) return stop(NOT_A_CALL)
   }
   return stop(-1)
 }

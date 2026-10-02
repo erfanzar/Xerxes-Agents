@@ -1,10 +1,15 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { join } from 'node:path'
+
 import {
   ChannelTurnRouter,
   ConfiguredChannelManager,
+  JsonChannelSessionIndex,
   MarkdownAgentWorkspace,
+  type ChannelInteractionPort,
+  type ChannelSessionIndex,
   type ConfiguredChannelFactory,
   type DiscordApplicationRestPort,
   type DiscordGatewayPorts,
@@ -12,6 +17,9 @@ import {
 import type { ChannelWebhookServerOptions } from '../channels/webhookServer.js'
 import { daemonChannels, type DaemonConfig, type DaemonEnvironment } from './config.js'
 import type { DaemonRuntime } from './runtime.js'
+
+/** Lives beside the channel journal; the workspace loads only its Markdown files as context. */
+const CHANNEL_SESSION_INDEX_FILE = 'channel-sessions.json'
 
 export interface DaemonChannelManagerOptions {
   /** Explicit REST port for Discord command registration and interaction acknowledgement. */
@@ -22,8 +30,12 @@ export interface DaemonChannelManagerOptions {
   readonly environment: DaemonEnvironment
   /** Optional application-specific adapter constructor for injected transport ports. */
   readonly factory?: ConfiguredChannelFactory
+  /** Answers the approvals and questions channel turns wait on; without it such a turn is stopped. */
+  readonly interactions?: ChannelInteractionPort
   /** Workspace applied to daemon sessions created by channel conversations. */
   readonly projectDirectory?: string
+  /** Conversation-to-session map; defaults to `channel-sessions.json` in the channel workspace. */
+  readonly sessionIndex?: ChannelSessionIndex
   /** Optional explicit Markdown workspace used for channel journaling and system context. */
   readonly workspace?: MarkdownAgentWorkspace
 }
@@ -48,8 +60,10 @@ export function createDaemonChannelManager(
   const router = new ChannelTurnRouter({
     channels: manager,
     cwd: options.projectDirectory ?? config.projectDirectory,
+    ...(options.interactions === undefined ? {} : { interactions: options.interactions }),
     previewInterval: message => channelPreviewInterval(config, message.channel),
     runtime,
+    sessionIndex: options.sessionIndex ?? new JsonChannelSessionIndex(join(workspace.path, CHANNEL_SESSION_INDEX_FILE)),
     streamPreviews: message => channelPreviewsEnabled(config, message.channel),
     workspace,
   })

@@ -598,6 +598,8 @@ export async function* runTurn(
         let attemptCredential: string | undefined
         let recordUsage: ReturnType<typeof chargeModelCall>
         let attemptCompleted = false
+        let attemptStreamed = false
+        let attemptRejected = false
         try {
           attemptSignal.controller.signal.throwIfAborted()
           if (dependencies.refreshLlm && !credentialSwitchAttempted) {
@@ -625,6 +627,7 @@ export async function* runTurn(
               streamInactivityTimeoutMs,
               attemptSignal,
             )) {
+              attemptStreamed = true
               const hasStreamToken = Boolean(delta.content || delta.thinking)
               if (awaitingOutput && hasModelOutput(delta)) {
                 awaitingOutput = false
@@ -693,6 +696,7 @@ export async function* runTurn(
           // successful-round usage as a complete total for the turn.
           usageComplete = false
           reasoningUsageComplete = false
+          attemptRejected = !attemptStreamed && providerRejectedRequest(error)
           const classified = classifyError(error)
           await dispatchHook(hookRunner, 'on_error', {
             ...(request.agentId ? { agentId: request.agentId } : {}),
@@ -816,7 +820,10 @@ export async function* runTurn(
           }
           await (dependencies.delay ?? defaultDelay)(delay, signal)
         } finally {
-          try { recordUsage?.(lastUsage, attemptCompleted) }
+          // A request the provider refused outright billed nothing. Settling it
+          // as unknown spend blocked a token-capped goal for good on its first
+          // 429, since unmeasured receipts fail every later admission closed.
+          try { recordUsage?.(attemptRejected ? REJECTED_REQUEST_USAGE : lastUsage, attemptCompleted || attemptRejected) }
           finally { attemptSignal.release() }
         }
       }
@@ -1988,6 +1995,22 @@ function defaultDelay(
       { once: true },
     )
   })
+}
+
+const REJECTED_REQUEST_USAGE = { inputTokens: 0, outputTokens: 0 } as const
+
+/**
+ * An HTTP error response received before any stream output: the provider
+ * refused the request (rate limit, overload, 5xx, auth) and generated nothing.
+ * A dropped stream, a timeout or an abort may still have been billed, so those
+ * stay unknown spend.
+ */
+function providerRejectedRequest(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  const record = error as unknown as Record<string, unknown>
+  const details = record.details && typeof record.details === 'object' ? record.details as Record<string, unknown> : undefined
+  const status = details?.status ?? record.status ?? record.statusCode
+  return typeof status === 'number' && Number.isInteger(status) && status >= 400 && status <= 599
 }
 
 /** Raised when a provider stream yields no chunk inside the inactivity budget. */

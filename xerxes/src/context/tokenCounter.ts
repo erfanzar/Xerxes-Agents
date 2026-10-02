@@ -9,7 +9,8 @@ export class ProviderTokenCounter {
     const text = typeof input === 'string' ? input : this.messagesToText(input)
     const resolved = provider ?? (model ? this.detectProvider(model) : undefined)
     const fallback = estimateTokens(text)
-    return resolved === 'google' ? Math.ceil(fallback * 1.1) : fallback
+    const images = typeof input === 'string' ? 0 : countImageParts(input) * TOKENS_PER_IMAGE
+    return (resolved === 'google' ? Math.ceil(fallback * 1.1) : fallback) + images
   }
 
   /** No model-name guessing: only an explicit `provider/model` prefix names the provider. */
@@ -67,11 +68,43 @@ export class SmartTokenCounter {
   }
 }
 
+/**
+ * Estimated tokens for one image part, whatever its encoded size.
+ *
+ * Providers bill an image by its pixels after their own downscaling, not by
+ * its base64 payload: Anthropic caps an image near 1.15 MP (~1,600 tokens) and
+ * OpenAI's high-detail tiling stays below that. Counting the data URL as text
+ * priced a 300 KB screenshot at ~100K tokens, so the compaction check failed
+ * every turn that carried one and calibration collapsed to its floor.
+ */
+const TOKENS_PER_IMAGE = 1_600
+
+const IMAGE_PART_PLACEHOLDER = '[image]'
+
+/** OpenAI `image_url`/`input_image` and Anthropic/MCP `image` content parts. */
+function isImagePart(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const type = (value as Record<string, unknown>).type
+  return type === 'image_url' || type === 'image' || type === 'input_image'
+}
+
+function countImageParts(value: unknown): number {
+  if (isImagePart(value)) return 1
+  if (Array.isArray(value)) return value.reduce((total: number, item) => total + countImageParts(item), 0)
+  if (!value || typeof value !== 'object') return 0
+  let total = 0
+  for (const item of Object.values(value)) total += countImageParts(item)
+  return total
+}
+
 function contentToText(value: unknown): string {
   if (typeof value === 'string') return value
+  if (isImagePart(value)) return IMAGE_PART_PLACEHOLDER
   if (Array.isArray(value)) return value.map(contentToText).join(' ')
   if (value === undefined || value === null) return ''
-  return JSON.stringify(value)
+  // Image parts nested in a structured value (a tool result's content array)
+  // are priced by countImageParts, so their payload must not be counted again.
+  return JSON.stringify(value, (_key, item: unknown) => isImagePart(item) ? IMAGE_PART_PLACEHOLDER : item)
 }
 
 /**

@@ -268,6 +268,7 @@ test('Anthropic streaming maps stop reasons onto the neutral finish vocabulary',
     ['end_turn', 'stop'],
     ['stop_sequence', 'stop'],
     ['max_tokens', 'length'],
+    ['model_context_window_exceeded', 'length'],
     ['tool_use', 'tool_calls'],
     ['pause_turn', 'stop'],
   ] as const

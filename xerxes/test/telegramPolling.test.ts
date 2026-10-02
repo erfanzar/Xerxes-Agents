@@ -80,6 +80,55 @@ test('telegram polling delivers updates even when a webhook secret token is conf
   await loop.stop()
 })
 
+test('telegram polling keeps fetching updates while an accepted turn is still running', async () => {
+  const received: string[] = []
+  const errors: unknown[] = []
+  const releaseTurn = Promise.withResolvers<void>()
+  let polls = 0
+  const update = (updateId: number, text: string) => ({
+    update_id: updateId,
+    message: { message_id: updateId, text, from: { id: 7 }, chat: { id: 7, type: 'private' } },
+  })
+  const telegram = new TelegramChannel({
+    token: 'token',
+    fetchImplementation: async (_input, init) => {
+      polls += 1
+      if (polls === 1) return new Response(JSON.stringify({ ok: true, result: [update(41, 'long goal')] }))
+      if (polls === 2) return new Response(JSON.stringify({ ok: true, result: [update(42, '/stop')] }))
+      await new Promise<void>(resolve => {
+        init?.signal?.addEventListener('abort', () => resolve(), { once: true })
+      })
+      return new Response(JSON.stringify({ ok: true, result: [] }))
+    },
+  })
+  await telegram.start(async message => {
+    received.push(message.text)
+    if (message.text === 'long goal') {
+      await releaseTurn.promise
+      throw new Error('turn failed after it was accepted')
+    }
+  })
+  const loop = new TelegramPollingLoop({
+    channel: telegram,
+    timeout: 0,
+    retryDelay: 0,
+    onError: error => { errors.push(error) },
+  })
+  try {
+    // The first turn is still running, yet /stop is fetched and delivered.
+    await eventually(() => received.includes('/stop'))
+    expect(received).toEqual(['long goal', '/stop'])
+    // Shutdown must not wait on a turn the loop does not own.
+    await loop.stop()
+  } finally {
+    releaseTurn.resolve()
+  }
+  // A turn failing after acceptance is still observable, and is not re-fetched.
+  await eventually(() => errors.length === 1)
+  expect(String(errors[0])).toContain('Telegram update 41 failed while handling its turn (500)')
+  expect(received).toEqual(['long goal', '/stop'])
+})
+
 test('telegram polling acknowledges the offset only after successful delivery', async () => {
   const channel = new FlakyPollingChannel()
   const errors: unknown[] = []

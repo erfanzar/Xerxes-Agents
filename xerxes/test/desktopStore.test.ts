@@ -252,6 +252,42 @@ describe('Store workspace folds', () => {
     expect(store.getSnapshot().error || store.getSnapshot().blocks.map(block => block.kind === 'notice' ? block.text : '').join(' ')).toContain('Audit refusal')
   })
 
+  test('a steer answered after the turn ended is not left queued for a reply that never comes', async () => {
+    await Bun.sleep(0)
+    const reply = Promise.withResolvers<Record<string, unknown>>()
+    bridge.respondWith(method => method === 'turn.steer' ? reply.promise : { ok: true })
+    bridge.push('turn_begin', { text: 'existing task' })
+    const steering = store.submit('also update the docs')
+    // turn_end is on the wire before the daemon reaches the steer.
+    bridge.push('turn_end', {})
+    reply.resolve({ ok: true })
+    expect(await steering).toBe(true)
+    expect(store.getSnapshot().queue).toEqual([])
+    expect(store.getSnapshot().blocks.some(block => block.kind === 'notice' && block.text.includes('goes with your next message'))).toBe(true)
+  })
+
+  test('a message sent while a goal round prepares its turn is refused, not shown as sent and dropped', async () => {
+    await Bun.sleep(0)
+    // The daemon as it is: a busy session refuses a submit up front only when
+    // it carries a submission id. Without one it acknowledges, then announces
+    // an unstarted turn_end and drops the text.
+    bridge.respondWith((method, params) => {
+      if (method !== 'turn.submit') return { ok: true }
+      if (typeof params.submission_id === 'string') return { ok: false, code: 'turn-active', error: 'a turn is already active for this session' }
+      queueMicrotask(() => {
+        bridge.push('turn_end', { cancelled: true, unstarted: true })
+        bridge.push('notification', { level: 'error', message: 'a turn is already active for this session' })
+      })
+      return { ok: true }
+    })
+    bridge.push('turn_end', {})
+    expect(store.getSnapshot().turnActive).toBe(false)
+    // false keeps the composer draft.
+    expect(await store.submit('actually, use the other API')).toBe(false)
+    await Bun.sleep(0)
+    expect(store.getSnapshot().blocks.some(block => block.kind === 'user' && block.text === 'actually, use the other API')).toBe(false)
+  })
+
   test.each([false, true])('slash rejection renders one notice when the event accompanies the RPC result (throws=%s)', async (throws) => {
     await Bun.sleep(0)
     bridge.respondWith(method => {
@@ -310,6 +346,44 @@ describe('Store workspace folds', () => {
     expect(store.getSnapshot().currentId).toBe('cafe0002')
 
     expect(await store.submit('/resume nothing-like-this')).toBe(false)
+    expect(bridge.calls.some(call => call.method === 'slash')).toBe(false)
+  })
+
+  test('/resume <id|name> reaches chats past the sidebar page, no-ops on the current chat, and a miss never reads as offline', async () => {
+    await Bun.sleep(0)
+    const row = (id: string, title: string) => ({ id, key: id, title, status: 'idle', kind: 'main', turn_count: 2, messages: 4, cwd: '/repo' })
+    // The sidebar page holds only the newest chats; the daemon answers a
+    // `query` across every saved one, the current chat included.
+    const page = [row('bead0001', 'Port kernels')]
+    const everything = [...page, row('aa19f402', 'This chat'), row('dead0099', 'My old task')]
+    bridge.respondWith((method, params) => {
+      if (method === 'initialize') {
+        const id = String(params.resume_session_id ?? 'fresh01')
+        return { ...initializeResult, session_id: id, session: { id, key: String(params.session_key ?? id), title: '', cwd: '/repo', plan_mode: false } }
+      }
+      if (method === 'session.list') {
+        const needle = typeof params.query === 'string' ? params.query : ''
+        if (!needle) return { ok: true, sessions: page }
+        return { ok: true, sessions: everything.filter(candidate => candidate.id.startsWith(needle) || candidate.title.toLowerCase() === needle) }
+      }
+      return { ok: true, sessions: [] }
+    })
+    await (store as unknown as { refreshSessions(): Promise<void> }).refreshSessions()
+    await Bun.sleep(0)
+    expect(store.getSnapshot().currentId).toBe('aa19f402')
+    bridge.calls.length = 0
+
+    expect(await store.submit('/resume aa19')).toBe(true)
+    expect(bridge.calls.some(call => call.method === 'initialize')).toBe(false)
+    expect(store.getSnapshot().currentId).toBe('aa19f402')
+
+    expect(await store.submit('/resume reconnect fix')).toBe(false)
+    expect(store.getSnapshot().connection).toBe('online')
+    expect(store.getSnapshot().error).toBe('No saved session matches `reconnect fix`.')
+
+    expect(await store.submit('/resume My old task')).toBe(true)
+    expect(bridge.calls.find(call => call.method === 'initialize')?.params.resume_session_id).toBe('dead0099')
+    expect(store.getSnapshot().currentId).toBe('dead0099')
     expect(bridge.calls.some(call => call.method === 'slash')).toBe(false)
   })
 
@@ -1279,6 +1353,14 @@ describe('Store workspace folds', () => {
     store.approve('ap1', 'deny')
     const responses = bridge.calls.filter(call => call.method === 'permission_response').map(call => call.params.response)
     expect(responses).toEqual(['approve', 'approve_for_session', 'reject'])
+  })
+
+  test('an approval answered in another window clears this window\'s card', () => {
+    bridge.push('approval_request', { id: 'ap-other', tool_name: 'send_message', description: 'send it' })
+    bridge.push('approval_response', { request_id: 'unrelated', response: 'approve' })
+    expect(store.getSnapshot().approval?.id).toBe('ap-other')
+    bridge.push('approval_response', { request_id: 'ap-other', response: 'approve' })
+    expect(store.getSnapshot().approval).toBeNull()
   })
 
   test('selecting a provider switches the profile and adopts its model', async () => {
@@ -2391,6 +2473,17 @@ describe('pending interactions are bounded by their turn', () => {
     expect(store.getSnapshot().question).toBeNull()
   })
 
+  test('an answer given in another window clears this window\'s card and its needs-input state', async () => {
+    const { bridge, store } = await start()
+    bridge.push('turn_begin', { text: 'go' })
+    bridge.push('approval_request', { id: 'req-7', tool_name: 'ExecCommandTool' })
+    bridge.push('approval_response', { request_id: 'someone-else', response: 'approve' })
+    expect(store.getSnapshot().approval?.id).toBe('req-7')
+    bridge.push('approval_response', { request_id: 'req-7', response: 'approve' })
+    expect(store.getSnapshot().approval).toBeNull()
+    expect(store.getSnapshot().turnActive).toBe(true)
+  })
+
   test('cancelling drops the card before the daemon answers', async () => {
     const { bridge, store } = await start()
     bridge.push('turn_begin', { text: 'go' })
@@ -2423,12 +2516,23 @@ describe('pending interactions are bounded by their turn', () => {
     expect(store.getSnapshot().stopArmed).toBe(false)
   }, 10_000)
 
-  test('dismissing hides the card without answering the daemon', async () => {
+  test('hiding a card keeps the pending request, its needs-input state and a way back', async () => {
     const { bridge, store } = await start()
+    bridge.push('turn_begin', { text: 'go' })
     bridge.push('approval_request', { id: 'req-3', tool_name: 'ExecCommandTool' })
     store.dismissInteraction()
-    expect(store.getSnapshot().approval).toBeNull()
     expect(bridge.calls.some(call => call.method === 'permission_response')).toBe(false)
+    // The daemon still waits on req-3; the window must still know about it.
+    expect(store.getSnapshot().interactionHidden).toBe(true)
+    expect(store.getSnapshot().approval?.id).toBe('req-3')
+    store.showInteraction()
+    expect(store.getSnapshot().interactionHidden).toBe(false)
+    store.approve('req-3', 'allow_once')
+    expect(bridge.calls.find(call => call.method === 'permission_response')?.params).toMatchObject({ request_id: 'req-3' })
+    // A new request is never born hidden.
+    store.dismissInteraction()
+    bridge.push('question_request', { id: 'q-4', questions: [{ id: 'a', question: 'Which one?', options: ['x', 'y'] }] })
+    expect(store.getSnapshot().interactionHidden).toBe(false)
   })
 })
 

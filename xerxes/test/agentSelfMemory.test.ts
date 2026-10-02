@@ -153,6 +153,56 @@ test('agent self-memory serializes same-key mutations across instances sharing a
   })
 })
 
+test('project context synced in one project never reaches sessions of the same agent in another project', async () => {
+  await inTemporaryDirectory(async directory => {
+    const projectA = join(directory, 'project-a')
+    const projectB = join(directory, 'project-b')
+    await mkdir(projectA, { recursive: true })
+    await mkdir(projectB, { recursive: true })
+    await Bun.write(join(projectA, 'AGENTS.md'), 'Project A rule: always use tabs.')
+    const memories = join(directory, 'memories', 'shared-agent')
+    const inA = new AgentSelfMemory({ agentId: 'shared-agent', directory: memories, projectRoot: projectA })
+    const inB = new AgentSelfMemory({ agentId: 'shared-agent', directory: memories, projectRoot: projectB })
+    const registry = new ToolRegistry()
+    registerAgentMemoryTools(registry, { resolveSelfMemory: context => context.metadata.project_root === projectA ? inA : inB })
+    await registry.execute(call('agent_memory_sync_context', {}), { agentId: 'shared-agent', metadata: { project_root: projectA } })
+
+    expect(await inA.systemPromptAddendum()).toContain('Project A rule: always use tabs.')
+    expect(await inB.read('project_context')).not.toContain('Project A rule')
+    expect(await inB.systemPromptAddendum()).not.toContain('Project A rule')
+    // A memory bound to B that is asked to sync A writes A's notes, not its own.
+    await inB.syncProjectContext(projectA)
+    expect(await inB.read('project_context')).not.toContain('Project A rule')
+    // Agent-wide notes stay shared across projects.
+    await inA.learn('Prefers terse replies', 'user_taste')
+    expect(await inB.read('user_taste')).toContain('Prefers terse replies')
+  })
+})
+
+test('the old shared project_context.md is moved aside instead of being silently orphaned', async () => {
+  await inTemporaryDirectory(async directory => {
+    const memories = join(directory, 'memories', 'legacy-agent')
+    await mkdir(memories, { recursive: true })
+    await Bun.write(join(memories, 'project_context.md'), '# Project Context\n\nHand-written legacy note\n')
+    const memory = new AgentSelfMemory({ agentId: 'legacy-agent', directory: memories, projectRoot: join(directory, 'project') })
+
+    expect(await memory.read('project_context')).not.toContain('Hand-written legacy note')
+    expect(await memory.systemPromptAddendum()).not.toContain('Hand-written legacy note')
+    expect(await Bun.file(join(memories, 'project_context.md')).exists()).toBe(false)
+    expect(await Bun.file(join(memories, 'project_context.legacy.md')).text()).toContain('Hand-written legacy note')
+  })
+})
+
+test('the process-wide self-memory cache is keyed by project as well as agent', () => {
+  clearAgentSelfMemoryCache()
+  const first = getAgentSelfMemory('cache-project-agent', '/tmp/project-one')
+  const second = getAgentSelfMemory('cache-project-agent', '/tmp/project-two')
+  expect(first).not.toBe(second)
+  expect(first.directory).toBe(second.directory)
+  expect(getAgentSelfMemory('cache-project-agent', '/tmp/project-one')).toBe(first)
+  clearAgentSelfMemoryCache()
+})
+
 test('process-wide self-memory cache stays bounded like a simple LRU', () => {
   clearAgentSelfMemoryCache()
   const evicted = getAgentSelfMemory('cache-agent-0')
@@ -280,7 +330,7 @@ test('ensure seeds templates in one exclusive step and heals crashed creators', 
     })
 
     // A foreign-created file is respected: no template is ever laid over it.
-    const foreign = join(memory.directory, 'project_context.md')
+    const foreign = join(memory.directory, 'skill_journal.md')
     await mkdir(memory.directory, { recursive: true })
     await Bun.write(foreign, 'CUSTOM CONTEXT')
     await memory.ensure()

@@ -70,3 +70,29 @@ test('provider adjustment and message serialization stay consistent for CJK payl
   expect(wrapped).toBeGreaterThanOrEqual(540)
   expect(wrapped).toBeLessThanOrEqual(545)
 })
+
+test('an image part is priced as one image, not as its base64 payload', () => {
+  // Regression: a 300 KB screenshot's data URL went through the char/4
+  // heuristic and estimated near 100K tokens, so the in-turn compaction check
+  // failed every turn that carried it.
+  const data = 'iVBORw0KGgo'.repeat(30_000)
+  const openai = [{ role: 'user', content: [
+    { type: 'text', text: 'what is on screen?' },
+    { type: 'image_url', image_url: { url: `data:image/png;base64,${data}` } },
+  ] }]
+  const anthropic = [{ role: 'user', content: [
+    { type: 'image', source: { type: 'base64', media_type: 'image/png', data } },
+  ] }]
+  const nested = [{ role: 'tool', tool_call_id: 'shot', content: [
+    { type: 'image_url', image_url: { url: `data:image/png;base64,${data}` } },
+  ] }, { role: 'assistant', content: 'done', meta: { parts: [{ type: 'image', data, mimeType: 'image/png' }] } }]
+  const textOnly = ProviderTokenCounter.countTokensForProvider([{ role: 'user', content: 'what is on screen?' }], 'openai')
+
+  const withImage = ProviderTokenCounter.countTokensForProvider(openai, 'openai')
+  expect(withImage).toBeGreaterThan(textOnly + 1_000)
+  expect(withImage).toBeLessThan(textOnly + 2_000)
+  expect(ProviderTokenCounter.countTokensForProvider(anthropic, 'anthropic')).toBeLessThan(2_000)
+  // Nested in a structured field the payload is not counted a second time.
+  expect(ProviderTokenCounter.countTokensForProvider(nested, 'openai')).toBeLessThan(4_000)
+  expect(ProviderTokenCounter.messagesToText(openai)).not.toContain(data.slice(0, 64))
+})

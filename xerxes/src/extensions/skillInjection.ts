@@ -33,6 +33,8 @@ export interface SkillExpansionOptions {
   readonly cwd: string
   /** Injectable executor for tests; defaults to the platform shell. */
   readonly run?: (command: string) => Promise<{ readonly code: number; readonly stdout: string; readonly stderr: string }>
+  /** Per-command deadline for the default executor; defaults to 10s. */
+  readonly timeoutMs?: number
 }
 
 /** Substitute $ARGUMENTS/$N and execute `` !`cmd` `` injections. */
@@ -48,7 +50,7 @@ export async function expandSkillInstructions(
     throw new Error('This project workflow uses shell preprocessing. Review it and run /skills trust <name> to enable command expansion.')
   }
 
-  const run = options.run ?? defaultSkillCommandExecutor(options.cwd)
+  const run = options.run ?? defaultSkillCommandExecutor(options.cwd, options.timeoutMs ?? INJECTION_TIMEOUT_MS)
   const replacements: { readonly replacement: string; readonly span: string }[] = []
   let count = 0
   for (const match of expanded.matchAll(INJECTION_PATTERN)) {
@@ -90,23 +92,56 @@ export function substituteArguments(instructions: string, args?: string): string
     })
 }
 
-function defaultSkillCommandExecutor(cwd: string): NonNullable<SkillExpansionOptions['run']> {
+function defaultSkillCommandExecutor(cwd: string, timeoutMs: number): NonNullable<SkillExpansionOptions['run']> {
   return async command => {
-    const shell = process.platform === 'win32' ? 'cmd.exe' : '/bin/sh'
-    const args = process.platform === 'win32' ? ['/d', '/s', '/c', command] : ['-c', command]
+    // Own a process group on POSIX: killing only the shell left a compound
+    // command's child (`cd web && npm run build`) holding the pipes, and the
+    // activation waited for it however long it ran.
+    const grouped = process.platform !== 'win32'
+    const shell = grouped ? '/bin/sh' : 'cmd.exe'
+    const args = grouped ? ['-c', command] : ['/d', '/s', '/c', command]
     const proc = Bun.spawn([shell, ...args], {
       cwd,
       stdin: 'ignore',
       stdout: 'pipe',
       stderr: 'pipe',
+      ...(grouped ? { detached: true } : {}),
     })
-    const killer = setTimeout(() => proc.kill(), INJECTION_TIMEOUT_MS)
+    const stdoutText = new Response(proc.stdout).text()
+    const stderrText = new Response(proc.stderr).text()
+    // Kill failures run inside a timer, where a throw would be uncaught; they
+    // are reported in the timeout error instead.
+    const killErrors: string[] = []
+    const signal = (name: 'SIGTERM' | 'SIGKILL') => {
+      try {
+        if (grouped) process.kill(-proc.pid, name)
+        else proc.kill(name)
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') killErrors.push(String(error))
+      }
+    }
+    const timedOutError = () => new Error(`timed out after ${timeoutMs}ms${killErrors.length ? '; cleanup: ' + killErrors.join('; ') : ''}`)
+    let timedOut = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        timedOut = true
+        signal('SIGTERM')
+        // A descendant may ignore TERM; bound cleanup as well as execution.
+        timer = setTimeout(() => {
+          signal('SIGKILL')
+          void proc.stdout.cancel().catch(() => {})
+          void proc.stderr.cancel().catch(() => {})
+          reject(timedOutError())
+        }, 200)
+      }, timeoutMs)
+    })
     try {
-      const [stdout, stderr, code] = await Promise.all([
-        new Response(proc.stdout).text(),
-        new Response(proc.stderr).text(),
-        proc.exited,
+      const [stdout, stderr, code] = await Promise.race([
+        Promise.all([stdoutText, stderrText, proc.exited]),
+        timeout,
       ])
+      if (timedOut) throw timedOutError()
       return {
         code,
         stdout: stdout.length > INJECTION_OUTPUT_CAP
@@ -115,7 +150,7 @@ function defaultSkillCommandExecutor(cwd: string): NonNullable<SkillExpansionOpt
         stderr,
       }
     } finally {
-      clearTimeout(killer)
+      clearTimeout(timer)
     }
   }
 }

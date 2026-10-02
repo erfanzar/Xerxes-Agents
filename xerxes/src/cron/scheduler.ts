@@ -6,7 +6,31 @@ import { CronJob, JobStore, nextFireAt } from './jobs.js'
 import { DeliveryError } from './delivery.js'
 import { scheduleTokenState } from './tokenUsage.js'
 
-export type JobRunner = (job: CronJob, signal: AbortSignal) => string | Promise<string>
+/**
+ * Lets a runner keep time it spends queued behind work it does not control
+ * (its target conversation's own turn) out of the job timeout. Without it a
+ * follow-up in a busy chat timed out, unrun, while still waiting its turn.
+ */
+export interface JobClock {
+  /** Stop the timeout while the run waits for admission. */
+  pause(): void
+  /** Start a fresh full timeout once the run is admitted and real work begins. */
+  resume(): void
+}
+
+export type JobRunner = (job: CronJob, signal: AbortSignal, clock: JobClock) => string | Promise<string>
+
+/**
+ * The scheduler itself aborted the run: an operator cancel or a scheduler
+ * stop. Neither is a failure of the job, so neither earns an automatic retry
+ * that would replay the work the operator just stopped.
+ */
+export class CronRunInterrupted extends Error {
+  constructor(readonly interruption: 'operator' | 'shutdown', message: string) {
+    super(message)
+    this.name = 'CronRunInterrupted'
+  }
+}
 export type JobCompletion = (
   job: CronJob,
   output: string,
@@ -85,7 +109,7 @@ export class CronScheduler {
     if (this.interval) clearInterval(this.interval)
     this.interval = undefined
     for (const controller of this.active.values()) {
-      controller.abort(new Error('scheduler stopped'))
+      controller.abort(new CronRunInterrupted('shutdown', 'scheduler stopped'))
     }
   }
 
@@ -100,7 +124,7 @@ export class CronScheduler {
   cancel(jobId: string): boolean {
     const controller = this.active.get(jobId)
     if (!controller) return false
-    controller.abort(new Error(`job ${jobId} cancelled by operator`))
+    controller.abort(new CronRunInterrupted('operator', `job ${jobId} cancelled by operator`))
     return true
   }
 
@@ -110,7 +134,7 @@ export class CronScheduler {
   }
 
   /** Manual and scheduled execution share admission, cancellation and limits. */
-  async runNow<T>(job: CronJob, runner: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  async runNow<T>(job: CronJob, runner: (signal: AbortSignal, clock: JobClock) => Promise<T>): Promise<T> {
     if (!this.owns()) throw new Error('Cron scheduling belongs to another daemon; run this job on its owner')
     if (this.active.has(job.id)) throw new Error(`job ${job.id} is already running or cancelling`)
     if (!this.hasCapacity(job)) throw new Error('Cron concurrency limit reached; retry when a running job finishes')
@@ -153,6 +177,7 @@ export class CronScheduler {
     // the lease that advanced `next_run_at` would consume the lease holder's
     // fire time and the job would silently never run.
     if (!this.owns()) return []
+    const pending: Promise<string | undefined>[] = []
     this.ticking = true
     try {
       const current = new Date(now)
@@ -162,15 +187,19 @@ export class CronScheduler {
         .filter((job) => !this.active.has(job.id) && !job.paused && this.withinExpiry(job, now) && this.withinRunLimit(job) && this.withinTokenBudget(job) && this.isDue(job, current))
       // Due jobs run concurrently with a per-job timeout so one hung or failing
       // job can neither block the queue nor starve later jobs.
-      const pending: Promise<string | undefined>[] = []
       for (const job of due) {
         if (this.hasCapacity(job)) pending.push(this.runDue(job, current))
       }
-      const outcomes = await Promise.all(pending)
-      return outcomes.flatMap((id) => (id ? [id] : []))
     } finally {
+      // The guard covers selection and admission only. `runOwned` records each
+      // admitted job in `active` synchronously, which already stops a later
+      // tick from firing it twice. Holding the guard until runs finish made
+      // one long job silence every poll, so other due jobs ran late and
+      // `skip` jobs past their grace were dropped.
       this.ticking = false
     }
+    const outcomes = await Promise.all(pending)
+    return outcomes.flatMap((id) => (id ? [id] : []))
   }
 
   /**
@@ -190,13 +219,15 @@ export class CronScheduler {
 
   private async runDue(job: CronJob, now: Date): Promise<string | undefined> {
     let phase: 'admission' | 'execution' | 'completion' = 'admission'
-    return this.runOwned(job, async (signal) => {
+    let runSignal: AbortSignal | undefined
+    return this.runOwned(job, async (signal, clock) => {
+      runSignal = signal
       // Commit intent before calling the model. An unfinished receipt after
       // restart requires review: external effects cannot safely be replayed.
       const receipt = { state: 'running', occurrence: job.nextRunAt, started_at: now.toISOString() }
       if (!this.store.update(job.id, { metadata: { ...job.metadata, execution_receipt: receipt } })) throw new Error('Schedule removed before execution')
       phase = 'execution'
-      const output = await this.runJob(job, signal)
+      const output = await this.runJob(job, signal, clock)
       phase = 'completion'
       signal.throwIfAborted()
       const persisted = this.store.get(job.id)
@@ -230,7 +261,11 @@ export class CronScheduler {
       return job.id
     }, now).catch(error => {
       this.reportError(`job ${job.id} failed`, error)
-      if (phase === 'execution') this.handleFailure(job, now, error)
+      // Judge by why the signal was aborted, not by what the runner threw: a
+      // cancelled turn surfaces as many different errors.
+      const interruption = runSignal?.aborted && runSignal.reason instanceof CronRunInterrupted ? runSignal.reason : undefined
+      if (phase === 'execution' && interruption) this.handleInterrupted(job, now, interruption)
+      else if (phase === 'execution') this.handleFailure(job, now, error)
       else if (phase === 'completion') {
         // Do not convert bookkeeping/delivery failures into model retries.
         // If this write also fails, the intent receipt still fences next tick.
@@ -250,7 +285,7 @@ export class CronScheduler {
     } })
   }
 
-  private async runOwned<T>(job: CronJob, runner: (signal: AbortSignal) => Promise<T>, now = new Date()): Promise<T> {
+  private async runOwned<T>(job: CronJob, runner: (signal: AbortSignal, clock: JobClock) => Promise<T>, now = new Date()): Promise<T> {
     const current = this.store.get(job.id)
     if (current) {
       if (current.metadata.followup_completion != null) throw new Error('Follow-up condition was reported met; explicitly resume before running again')
@@ -265,9 +300,10 @@ export class CronScheduler {
     controller.signal.addEventListener('abort', () => this.activityChanges.notify(), { once: true })
     this.activityChanges.notify()
     this.activeProjects.set(job.id, job.projectRoot ?? '')
+    const deadline = this.deadline(job.id, controller, job.timeoutMs ?? this.jobTimeout)
     const result = Promise.resolve().then(() => {
       controller.signal.throwIfAborted()
-      return runner(controller.signal)
+      return runner(controller.signal, deadline.clock)
     }).finally(() => {
       if (this.active.get(job.id) === controller) {
         this.active.delete(job.id)
@@ -277,35 +313,48 @@ export class CronScheduler {
       this.settling.delete(result)
     })
     this.settling.add(result)
-    return this.withTimeout(result, job.id, controller, job.timeoutMs ?? this.jobTimeout)
+    try {
+      return await Promise.race([result, deadline.expired])
+    } finally {
+      deadline.settle()
+    }
   }
 
-  private async withTimeout<T>(
-    result: Promise<T>,
-    jobId: string,
-    controller: AbortController,
-    timeout: number,
-  ): Promise<T> {
-    if (!Number.isFinite(timeout) || timeout <= 0) return await result
+  /** A per-run timeout the runner may pause while it waits for admission. */
+  private deadline(jobId: string, controller: AbortController, timeout: number): {
+    readonly clock: JobClock
+    readonly expired: Promise<never>
+    readonly settle: () => void
+  } {
+    const enabled = Number.isFinite(timeout) && timeout > 0
     let timer: ReturnType<typeof setTimeout> | undefined
-    try {
-      return await Promise.race([
-        result,
-        new Promise<never>((_resolve, reject) => {
-          timer = setTimeout(() => {
-            const error = new Error(`job ${jobId} timed out after ${timeout}ms`)
-            controller.abort(error)
-            reject(error)
-          }, timeout)
-          // NOTE: no unref() here. On Windows, an unref'd timer that is the
-          // only pending handle never fires (the event loop sleeps), which
-          // would let a hung job wedge the scheduler forever. The timer is
-          // always cleared in `finally` once the race settles, so keeping it
-          // referenced costs nothing.
-        }),
-      ])
-    } finally {
+    let settled = false
+    let expire!: (error: Error) => void
+    const expired = new Promise<never>((_resolve, reject) => { expire = reject })
+    const disarm = (): void => {
       if (timer) clearTimeout(timer)
+      timer = undefined
+    }
+    const arm = (): void => {
+      disarm()
+      if (!enabled || settled || controller.signal.aborted) return
+      timer = setTimeout(() => {
+        timer = undefined
+        const error = new Error(`job ${jobId} timed out after ${timeout}ms`)
+        controller.abort(error)
+        expire(error)
+      }, timeout)
+      // NOTE: no unref() here. On Windows, an unref'd timer that is the
+      // only pending handle never fires (the event loop sleeps), which
+      // would let a hung job wedge the scheduler forever. The timer is
+      // always cleared once the race settles, so keeping it referenced
+      // costs nothing.
+    }
+    arm()
+    return {
+      clock: { pause: disarm, resume: arm },
+      expired,
+      settle: () => { settled = true; disarm() },
     }
   }
 
@@ -356,6 +405,24 @@ export class CronScheduler {
       nextRunAt: new Date(now.getTime() + delay).toISOString(),
       metadata: { ...metadata, retry_count: attempts },
     })
+  }
+
+  private handleInterrupted(job: CronJob, now: Date, interruption: CronRunInterrupted): void {
+    if (interruption.interruption === 'shutdown') {
+      // A one-shot stopped mid-run may already have had external effects;
+      // replaying it automatically after the restart is not safe. A recurring
+      // job's next occurrence is new work, so its cadence continues.
+      if (job.oneshot) this.requireReview(job.id, interruption)
+      else this.handleFailure(job, now, interruption)
+      return
+    }
+    // The operator stopped this run on purpose. Record that, without the
+    // running receipt (it would fence a later resume), and never retry it.
+    const { execution_receipt: _receipt, ...currentMetadata } = this.store.get(job.id)?.metadata ?? job.metadata
+    const metadata: Record<string, unknown> = { ...currentMetadata, last_cancelled_at: now.toISOString() }
+    if (metadata.followup_completion != null) this.store.update(job.id, { paused: true, nextRunAt: null, metadata })
+    else if (job.oneshot) this.store.update(job.id, { paused: true, metadata })
+    else this.scheduleNext(job, now, false, metadata)
   }
 
   private isDue(job: CronJob, now: Date): boolean {

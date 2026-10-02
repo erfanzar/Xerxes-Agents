@@ -1,15 +1,18 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import type { DaemonEvent, DaemonRuntime, DaemonSession } from '../daemon/runtime.js'
+import { ValidationError } from '../core/errors.js'
+import type { DaemonEvent, DaemonRuntime, DaemonSession, OpenSessionOptions } from '../daemon/runtime.js'
 import { scanContextContent } from '../security/promptScanner.js'
 import { ChannelManager } from './manager.js'
+import type { ChannelSessionIndex } from './sessionIndex.js'
 import {
   createSessionResetPolicy,
   shouldReset,
   type SessionResetPolicy,
   type SessionResetPolicyInput,
 } from './sessionReset.js'
+import { chunkText } from './textChunking.js'
 import { createChannelMessage, MessageDirection, type ChannelMessage } from './types.js'
 
 const DEFAULT_TYPING_INTERVAL = 8_000
@@ -37,6 +40,23 @@ export type ChannelPreviewPolicy = boolean | ((message: ChannelMessage) => boole
 /** Sets preview edit cadence globally or per normalized inbound message, in milliseconds. */
 export type ChannelPreviewInterval = number | ((message: ChannelMessage) => number)
 
+/** Answers the approvals and questions a channel turn waits on (the daemon interaction board). */
+export interface ChannelInteractionPort {
+  respondPermission(requestId: string, response: string): boolean
+  respondQuestion(requestId: string, answers: Readonly<Record<string, string>>): boolean
+}
+
+/** An approval or question a channel turn is parked on, and who may answer it. */
+type ChannelWait =
+  | { readonly kind: 'approval'; readonly requestId: string; readonly requester: string | undefined }
+  | {
+    readonly kind: 'question'
+    readonly requestId: string
+    readonly questionId: string
+    readonly options: readonly string[]
+    readonly requester: string | undefined
+  }
+
 export interface ChannelTurnRouterOptions {
   /** Agent selected for channel-originated conversations. */
   readonly agentId?: string
@@ -46,6 +66,11 @@ export interface ChannelTurnRouterOptions {
   readonly cwd?: string
   /** Evict inactive router/session bookkeeping after this many milliseconds. */
   readonly idleSessionTtlMs?: number
+  /**
+   * Answers approvals and questions from the chat. Without it a turn that asks
+   * is stopped with a reply saying why, rather than waiting forever.
+   */
+  readonly interactions?: ChannelInteractionPort
   /** Maximum active plus queued messages retained for one conversation. */
   readonly maxPendingPerSession?: number
   /** Receives contained delivery/turn errors without exposing channel credentials. */
@@ -54,6 +79,8 @@ export interface ChannelTurnRouterOptions {
   readonly previewInterval?: ChannelPreviewInterval
   /** Optional automatic reset policy for a channel conversation. */
   readonly sessionResetPolicy?: SessionResetPolicy | SessionResetPolicyInput
+  /** Remembers which saved session each conversation continues across restarts and eviction. */
+  readonly sessionIndex?: ChannelSessionIndex
   /** Native daemon runtime used for session and turn lifecycle. */
   readonly runtime: DaemonRuntime
   /** Enable native streamed previews for adapters with sendText/editText support. */
@@ -80,6 +107,7 @@ export class ChannelTurnRouter {
   private readonly clock: () => Date
   private readonly cwd: string | undefined
   private readonly idleSessionTtlMs: number
+  private readonly interactions: ChannelInteractionPort | undefined
   private readonly maxPendingPerSession: number
   private readonly onError: ((error: unknown, message: ChannelMessage) => void) | undefined
   private readonly pendingBySession = new Map<string, Promise<void>>()
@@ -88,8 +116,10 @@ export class ChannelTurnRouter {
   private readonly resetPolicy: SessionResetPolicy
   private readonly resetState = new Map<string, ChannelSessionActivity>()
   private readonly runtime: DaemonRuntime
+  private readonly sessionIndex: ChannelSessionIndex | undefined
   private readonly streamPreviews: ChannelPreviewPolicy
   private readonly typingInterval: number
+  private readonly waits = new Map<string, ChannelWait>()
   private readonly workspace: ChannelWorkspace | undefined
 
   constructor(options: ChannelTurnRouterOptions) {
@@ -98,6 +128,7 @@ export class ChannelTurnRouter {
     this.clock = options.clock ?? (() => new Date())
     this.cwd = nonBlank(options.cwd)
     this.idleSessionTtlMs = nonNegativeFinite(options.idleSessionTtlMs ?? DEFAULT_IDLE_SESSION_TTL_MS, 'idleSessionTtlMs')
+    this.interactions = options.interactions
     this.maxPendingPerSession = positiveInteger(
       options.maxPendingPerSession ?? DEFAULT_MAX_PENDING_PER_SESSION,
       'maxPendingPerSession',
@@ -109,6 +140,7 @@ export class ChannelTurnRouter {
     }
     this.resetPolicy = createSessionResetPolicy(options.sessionResetPolicy)
     this.runtime = options.runtime
+    this.sessionIndex = options.sessionIndex
     this.streamPreviews = options.streamPreviews ?? true
     this.typingInterval = positiveInteger(options.typingInterval ?? DEFAULT_TYPING_INTERVAL, 'typingInterval')
     this.workspace = options.workspace
@@ -128,6 +160,14 @@ export class ChannelTurnRouter {
     if (slash?.name === 'stop' || slash?.name === 'cancel') {
       await this.journalInbound(message)
       await this.handleCommand(message, key, slash)
+      return
+    }
+    // The waiting turn holds this conversation's queue, so its answer must not
+    // queue behind it.
+    const wait = this.waits.get(key)
+    if (wait && (!slash || slash.name === 'approve' || slash.name === 'deny' || slash.name === 'answer')) {
+      await this.journalInbound(message)
+      await this.answerWait(message, key, wait, slash)
       return
     }
     this.evictIdleBookkeeping(validDate(this.clock()))
@@ -196,7 +236,13 @@ export class ChannelTurnRouter {
         '/context — show channel session token usage',
         '/new — start a fresh channel session',
         '/stop — cancel the active channel turn',
+        '/approve, /deny — answer a pending tool approval',
+        '/answer <text> — answer a pending question',
       ].join('\n'))
+      return
+    }
+    if (command.name === 'approve' || command.name === 'deny' || command.name === 'answer') {
+      await this.reply(message, 'Nothing is waiting for an answer.')
       return
     }
     if (command.name === 'new' || command.name === 'reset') {
@@ -232,6 +278,8 @@ export class ChannelTurnRouter {
         const chunk = streamedText(event)
         if (chunk) preview?.push(chunk)
         collectOutput(output, event)
+        const wait = channelWait(event, message.channelUserId)
+        if (wait) this.holdForAnswer(message, sessionKey, wait, event.payload)
       })
     } catch (error) {
       // Finish the placeholder (which also cancels its pending edit timer) so a
@@ -239,11 +287,12 @@ export class ChannelTurnRouter {
       await preview?.finish(TURN_FAILED_TEXT)
       throw error
     } finally {
+      this.waits.delete(sessionKey)
       await typing.stop()
     }
     const response = output.join('').trim() || NO_RESPONSE_TEXT
-    const previewDelivered = await preview?.finish(response) ?? false
     try {
+      const previewDelivered = await preview?.finish(response) ?? false
       if (!previewDelivered) await this.reply(message, response)
     } catch (error) {
       // The agent turn is already durably complete. Expose the delivery failure
@@ -252,6 +301,73 @@ export class ChannelTurnRouter {
       throw new ChannelTurnDeliveryError(message.channel, error)
     }
     await this.journalAssistant(message, response)
+  }
+
+  /**
+   * Put the turn's approval or question in front of the person in the chat.
+   * The turn is parked until it is answered, so a prompt nobody can see or
+   * answer stops the turn instead of hanging the conversation.
+   */
+  private holdForAnswer(message: ChannelMessage, sessionKey: string, wait: ChannelWait, payload: Readonly<Record<string, unknown>>): void {
+    const stop = (text: string): void => {
+      this.runtime.cancelTurn(sessionKey)
+      void this.reply(message, text).catch(error => this.report(error, message))
+    }
+    const needs = wait.kind === 'approval' ? 'an approval' : 'an answer'
+    if (!this.interactions) {
+      stop('This turn needs ' + needs + ' that this channel cannot give, so it was stopped.')
+      return
+    }
+    this.waits.set(sessionKey, wait)
+    void this.reply(message, waitPrompt(wait, payload)).catch(error => {
+      this.report(error, message)
+      if (this.waits.get(sessionKey) !== wait) return
+      this.waits.delete(sessionKey)
+      stop('This turn needs ' + needs + ' but the request could not be delivered, so it was stopped.')
+    })
+  }
+
+  private async answerWait(
+    message: ChannelMessage,
+    sessionKey: string,
+    wait: ChannelWait,
+    command: ChannelCommand | undefined,
+  ): Promise<void> {
+    // In a group chat only the person whose message started the turn decides.
+    if (wait.requester !== undefined && message.channelUserId !== wait.requester) {
+      await this.reply(message, 'Only the person who started this turn can answer it.')
+      return
+    }
+    const interactions = this.interactions
+    if (!interactions) return
+    if (wait.kind === 'approval') {
+      if (command?.name !== 'approve' && command?.name !== 'deny') {
+        await this.reply(message, 'A tool is waiting for approval. Reply /approve or /deny; /stop cancels the turn.')
+        return
+      }
+      if (!interactions.respondPermission(wait.requestId, command.name === 'approve' ? 'approve' : 'reject')) {
+        if (this.waits.get(sessionKey) === wait) this.waits.delete(sessionKey)
+        await this.reply(message, 'That approval is no longer waiting.')
+        return
+      }
+      if (this.waits.get(sessionKey) === wait) this.waits.delete(sessionKey)
+      await this.reply(message, command.name === 'approve' ? 'Approved.' : 'Denied.')
+      return
+    }
+    if (command && command.name !== 'answer') {
+      await this.reply(message, 'A question is waiting. Reply with your answer; /stop cancels the turn.')
+      return
+    }
+    const text = (command ? command.arguments : message.text).trim()
+    const index = /^\d+$/.test(text) ? Number.parseInt(text, 10) - 1 : -1
+    const answer = wait.options[index] ?? text
+    if (!answer || !interactions.respondQuestion(wait.requestId, { [wait.questionId]: answer })) {
+      await this.reply(message, wait.options.length
+        ? 'That answer was not accepted. Choose one of:\n' + numberedOptions(wait.options)
+        : 'That answer was not accepted.')
+      return
+    }
+    if (this.waits.get(sessionKey) === wait) this.waits.delete(sessionKey)
   }
 
   private async reply(message: ChannelMessage, text: string): Promise<void> {
@@ -272,7 +388,13 @@ export class ChannelTurnRouter {
 
   private async openSessionForTurn(sessionKey: string, message: ChannelMessage): Promise<void> {
     const now = validDate(this.clock())
-    const prior = this.resetState.get(sessionKey)
+    const workspacePrompt = await this.workspacePrompt(message)
+    const options: OpenSessionOptions = {
+      ...this.sessionOptions(),
+      ...(workspacePrompt ? { systemPromptAddendum: workspacePrompt } : {}),
+    }
+    let prior = this.resetState.get(sessionKey)
+      ?? await this.resumeSavedSession(sessionKey, options, message)
     if (shouldReset(this.resetPolicy, {
       messageCount: (prior?.messageCount ?? 0) + 1,
       ...(prior === undefined ? {} : { lastMessageAt: prior.lastMessageAt }),
@@ -280,23 +402,49 @@ export class ChannelTurnRouter {
     })) {
       this.runtime.evictSession(sessionKey)
       this.resetState.delete(sessionKey)
+      prior = undefined
     }
-    const workspacePrompt = await this.workspacePrompt(message)
-    await this.runtime.openSession(sessionKey, this.agentId, {
-      ...this.sessionOptions(),
-      ...(workspacePrompt ? { systemPromptAddendum: workspacePrompt } : {}),
-    })
-    const active = this.resetState.get(sessionKey)
+    const session = await this.runtime.openSession(sessionKey, this.agentId, options)
+    await this.sessionIndex?.set(sessionKey, session.id)
     this.resetState.set(sessionKey, {
       lastMessageAt: now,
-      messageCount: (active?.messageCount ?? 0) + 1,
+      messageCount: (prior?.messageCount ?? 0) + 1,
     })
+  }
+
+  /**
+   * Reopen the saved session this conversation last used when the runtime no
+   * longer holds it (daemon restart, runtime update, idle eviction), and
+   * return its activity so the reset policy still applies to it.
+   */
+  private async resumeSavedSession(
+    sessionKey: string,
+    options: OpenSessionOptions,
+    message: ChannelMessage,
+  ): Promise<ChannelSessionActivity | undefined> {
+    if (!this.sessionIndex || this.runtime.sessionStatus(sessionKey) !== undefined) return undefined
+    const savedId = await this.sessionIndex.get(sessionKey)
+    if (!savedId) return undefined
+    let session: DaemonSession
+    try {
+      session = await this.runtime.openSession(sessionKey, this.agentId, { ...options, resumeSessionId: savedId })
+    } catch (error) {
+      // The saved conversation belongs to another project or is busy
+      // elsewhere. Report it and start fresh rather than wedge the chat.
+      if (!(error instanceof ValidationError)) throw error
+      this.report(error, message)
+      return undefined
+    }
+    return session.turnCount > 0
+      ? { lastMessageAt: new Date(session.lastActive), messageCount: session.turnCount }
+      : undefined
   }
 
   private async resetSession(sessionKey: string): Promise<void> {
     this.runtime.evictSession(sessionKey)
     this.resetState.delete(sessionKey)
-    await this.runtime.openSession(sessionKey, this.agentId, this.sessionOptions())
+    const session = await this.runtime.openSession(sessionKey, this.agentId, this.sessionOptions())
+    await this.sessionIndex?.set(sessionKey, session.id)
   }
 
   private startTyping(message: ChannelMessage): Stoppable {
@@ -527,15 +675,29 @@ class ChannelPreview {
     this.scheduleEdit()
   }
 
+  /**
+   * Put the final answer in the placeholder and report whether all of it
+   * reached the chat; false asks the caller to send the answer itself.
+   *
+   * An answer longer than one message used to be edited in truncated and
+   * still reported as delivered, so its tail (often the conclusion) never
+   * arrived. The placeholder now takes the first chunk and the rest follows
+   * as new messages.
+   */
   async finish(text: string): Promise<boolean> {
     if (this.scheduled !== undefined) {
       clearTimeout(this.scheduled)
       this.scheduled = undefined
     }
-    this.pendingText = text
+    const [head = '', ...rest] = chunkText(text, MAX_PREVIEW_CHARS)
+    this.pendingText = head
     this.enqueueEdit()
     await this.editQueue
-    return !this.failed && Boolean(this.messageId) && this.lastText === previewText(text)
+    if (this.failed || !this.messageId || this.lastText !== head) return false
+    for (const chunk of rest) {
+      await this.channel.sendText(this.chatId, chunk)
+    }
+    return true
   }
 
   private scheduleEdit(): void {
@@ -586,13 +748,62 @@ function streamedText(event: DaemonEvent): string {
   return event.type === 'text_part' ? rawStringPayload(event.payload, 'text') : ''
 }
 
+function channelWait(event: DaemonEvent, requester: string | undefined): ChannelWait | undefined {
+  if (event.type === 'approval_request') {
+    const requestId = stringPayload(event.payload, 'id') || stringPayload(event.payload, 'request_id')
+    return requestId ? { kind: 'approval', requestId, requester } : undefined
+  }
+  if (event.type !== 'question_request') return undefined
+  const requestId = stringPayload(event.payload, 'id')
+  const item = firstQuestion(event.payload)
+  if (!requestId || !item) return undefined
+  return {
+    kind: 'question',
+    requestId,
+    questionId: stringPayload(item, 'id') || 'answer',
+    options: Array.isArray(item.options) ? item.options.filter((option): option is string => typeof option === 'string') : [],
+    requester,
+  }
+}
+
+function firstQuestion(payload: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> | undefined {
+  const questions = payload.questions
+  const first: unknown = Array.isArray(questions) ? questions[0] : undefined
+  return typeof first === 'object' && first !== null && !Array.isArray(first) ? first as Record<string, unknown> : undefined
+}
+
+function waitPrompt(wait: ChannelWait, payload: Readonly<Record<string, unknown>>): string {
+  if (wait.kind === 'approval') {
+    const action = stringPayload(payload, 'description') || stringPayload(payload, 'tool_name') || stringPayload(payload, 'name') || 'a tool call'
+    return [
+      'Approval needed: ' + action.slice(0, JOURNAL_RESPONSE_MAX_CHARS),
+      'Reply /approve to allow it or /deny to refuse; /stop cancels the turn.',
+    ].join('\n')
+  }
+  const question = stringPayload(firstQuestion(payload) ?? {}, 'question')
+  return [
+    question,
+    ...(wait.options.length ? [numberedOptions(wait.options)] : []),
+    wait.options.length
+      ? 'Reply with your answer or its number; /stop cancels the turn.'
+      : 'Reply with your answer; /stop cancels the turn.',
+  ].join('\n')
+}
+
+function numberedOptions(options: readonly string[]): string {
+  return options.map((option, index) => String(index + 1) + '. ' + option).join('\n')
+}
+
 function parseChannelCommand(text: string): ChannelCommand | undefined {
   const raw = text.trim()
   if (!raw.startsWith('/')) return undefined
   const [head, ...tail] = raw.slice(1).trim().split(/\s+/)
-  const name = head?.toLowerCase()
+  // Telegram clients send menu commands in groups as '/stop@BotName'; without
+  // dropping the address '/stop' missed its fast path and was rejected.
+  const name = head?.toLowerCase().replace(/@.*$/, '')
   if (!name) return undefined
-  return { name, arguments: tail.join(' ').trim() }
+  // '/xerxes <prompt>' is the addressing form group adapters admit.
+  return { name: name === 'xerxes' ? 'ask' : name, arguments: tail.join(' ').trim() }
 }
 
 function channelStatus(status: Readonly<Record<string, unknown>>): string {

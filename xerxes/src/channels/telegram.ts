@@ -9,6 +9,7 @@ import { createChannelMessage, MessageDirection, type ChannelMessage } from './t
 import {
   parseJsonBody,
   WebhookChannel,
+  type WebhookAcceptance,
   type WebhookHeaders,
 } from './webhooks.js'
 import { chunkText } from './textChunking.js'
@@ -118,13 +119,15 @@ export class TelegramChannel extends WebhookChannel {
    *
    * Polling is already authenticated by the bot token, so this path bypasses
    * the webhook-only secret-token check while retaining the shared parser and
-   * inbound error containment.
+   * inbound error containment. It returns once the update is accepted, not
+   * when its turn ends, so the poll loop keeps fetching `/stop` and other
+   * chats while a turn runs.
    */
-  async ingestPolledUpdate(body: Uint8Array): Promise<import('./webhooks.js').WebhookResponse> {
+  async ingestPolledUpdate(body: Uint8Array): Promise<WebhookAcceptance> {
     if (body.byteLength > this.maxWebhookBodyBytes) {
       return { status: 413, body: 'payload too large' }
     }
-    return super.handleWebhook({}, body)
+    return this.acceptWebhook({}, body)
   }
 
   /** Long-poll Telegram updates when a deployment does not expose a webhook. */
@@ -233,7 +236,7 @@ export class TelegramChannel extends WebhookChannel {
     }
     return [createChannelMessage({
       channel: this.name,
-      text: scanContextContent(rawText, 'telegram:inbound'),
+      text: scanContextContent(this.withoutBotCommandAddress(rawText), 'telegram:inbound'),
       direction: MessageDirection.INBOUND,
       channelUserId: userId,
       roomId: stringOrEmpty(chat.id),
@@ -245,8 +248,19 @@ export class TelegramChannel extends WebhookChannel {
         chat_type: chatType,
         chat_title: stringOrEmpty(chat.title),
         thread_id: stringOrEmpty(envelope.message_thread_id),
+        ...(envelope === message ? {} : { edit_date: stringOrEmpty(envelope.edit_date) }),
       },
     })]
+  }
+
+  /**
+   * An edit keeps the original message_id, so keying edits by it alone made
+   * the dedup drop every edit of a recent message as a re-send of the original.
+   */
+  protected override deliveryKey(message: ChannelMessage): string | undefined {
+    const key = super.deliveryKey(message)
+    const editDate = typeof message.metadata.edit_date === 'string' ? message.metadata.edit_date : ''
+    return key !== undefined && editDate ? key + ' edit:' + editDate : key
   }
 
   protected async sendOutbound(message: ChannelMessage): Promise<void> {
@@ -275,6 +289,20 @@ export class TelegramChannel extends WebhookChannel {
     if (bot && normalized.includes(`@${bot}`)) return false
     if (bot && (normalized.startsWith(`/${bot}`) || normalized.startsWith(`/xerxes@${bot}`))) return false
     return !(normalized === '/xerxes' || normalized.startsWith('/xerxes '))
+  }
+
+  /**
+   * Rewrite the '/<bot> <prompt>' addressing form that group filtering admits
+   * into '/ask <prompt>', because the router cannot know the bot's username
+   * and otherwise answered it with 'Unsupported channel command'.
+   */
+  private withoutBotCommandAddress(text: string): string {
+    const bot = this.botUsername
+    if (!bot) return text
+    const match = /^\s*\/(\S+)(?:\s+([\s\S]*))?$/.exec(text)
+    const command = match?.[1]?.toLowerCase().replace(/@.*$/, '')
+    if (command !== bot) return text
+    return ('/ask ' + (match?.[2] ?? '')).trimEnd()
   }
 
   private async request(method: string, body: unknown, signal: AbortSignal | undefined = undefined): Promise<unknown> {

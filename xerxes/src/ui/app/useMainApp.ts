@@ -925,6 +925,7 @@ export function useMainApp(gw: GatewayClient) {
     if (
       !ui.sid ||
       ui.busy ||
+      ui.switching ||
       composerRefs.queueEditRef.current !== null ||
       composerRefs.queueRef.current.length === 0
     ) {
@@ -936,7 +937,7 @@ export function useMainApp(gw: GatewayClient) {
     if (next) {
       dispatchQueuedSubmission(next)
     }
-  }, [ui.sid, ui.busy, composerActions, composerRefs, dispatchQueuedSubmission])
+  }, [ui.sid, ui.busy, ui.switching, composerActions, composerRefs, dispatchQueuedSubmission])
 
   const { pagerPageSize } = useInputHandlers({
     actions: {

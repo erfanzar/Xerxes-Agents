@@ -58,4 +58,13 @@ describe('expandSkillInstructions', () => {
     })
     expect(expanded).toBe('value: injected-arg')
   })
+
+  test.skipIf(process.platform === 'win32')('the timeout kills the whole command tree, not just the shell', async () => {
+    const started = Date.now()
+    const expanded = await expandSkillInstructions('A !`cd . && sleep 5; echo done` B', { cwd: process.cwd(), timeoutMs: 100 })
+    expect(Date.now() - started).toBeLessThan(2000)
+    expect(expanded).toContain('[injected command failed:')
+    expect(expanded).toContain('timed out')
+    expect(expanded).not.toContain('done')
+  })
 })
