@@ -7,6 +7,13 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.21 — 2026-10-03
+
+Remote workspaces set up on servers without curl.
+
+- Remote setup installs Bun itself instead of running Bun's curl-only installer. It picks the official build for the server (Linux or macOS, x64 or ARM, musl, CPUs without AVX2, Rosetta), downloads it with curl or wget, checks it against Bun's published SHA-256 sums, and unpacks it with unzip or bsdtar.
+- When something essential is missing, the connection error names the one tool to install.
+
 ## 0.6.20 — 2026-10-03
 
 Remote workspaces on a non-standard SSH port.

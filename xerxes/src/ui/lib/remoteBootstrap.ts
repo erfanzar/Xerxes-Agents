@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { prepareManagedRuntime } from './managedRuntime.js'
+import { remoteBunInstallScript } from './remoteBun.js'
 
 /** Executed by SSH on the selected host. Installs only in a dedicated user-owned directory. */
 export function remoteBootstrapScript(workspacePath: string, mode: 'tui' | 'daemon' = 'tui', options: { force?: boolean } = {}): string {
@@ -89,13 +90,9 @@ prune_releases() {
     rm -rf "$root/$name" || :
   done
 }
-if ! bun_ready; then
+${remoteBunInstallScript()}if ! bun_ready; then
   printf 'Xerxes · installing/updating Bun in ~/.bun…\\n'
-  for tool in curl bash unzip; do command -v "$tool" >/dev/null 2>&1 || fail "Install $tool on this host, then reconnect."; done
-  stage=$(mktemp -d "$root/setup.XXXXXX")
-  curl --connect-timeout 15 --max-time 120 -fsSL https://bun.sh/install -o "$stage/bun-install.sh" >/dev/null 2>&1 || fail 'Could not download Bun.'
-  BUN_INSTALL="$HOME/.bun" bash "$stage/bun-install.sh" >/dev/null 2>&1 || fail 'Bun installation failed.'
-  rm -rf "$stage"; stage=''
+  bun_failure=$(xerxes_install_bun 2>/dev/null) || fail "\${bun_failure:-Bun installation failed.}"
   bun_ready || fail 'Bun 1.3+ is still unavailable after installation.'
 fi
 if [ ! -f "$release/.ready" ]; then

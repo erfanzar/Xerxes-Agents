@@ -5,6 +5,8 @@ import { mkdtemp, mkdir, chmod, rm, stat, utimes } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { remoteBootstrapScript } from '../lib/remoteBootstrap.js'
+import { remoteBunInstallScript } from '../lib/remoteBun.js'
+import { createHash } from 'node:crypto'
 
 it('installs missing remote Xerxes, skips unchanged builds, updates and preserves previous releases', async () => {
   const root = await mkdtemp(join(tmpdir(), 'xerxes-bootstrap-'))
@@ -43,14 +45,18 @@ if [ "$1" != install ] && [ "$1" != run ] && [ "\${2:-}" != --help ]; then print
     expect((await run()).code).toBe(0)
     expect(await Bun.file(join(home, '.xerxes/remote-runtime', first, '.ready')).exists()).toBe(true)
     expect(await Bun.file(join(home, '.xerxes/remote-runtime', second, '.ready')).exists()).toBe(true)
-    // Simulate a host without Bun; the bootstrap must fetch an installer and
-    // explicitly add its user-owned binary to PATH in the same SSH session.
-    await Bun.write(join(root, 'bun-fixture'), await Bun.file(join(bin, 'bun')).text())
+    // Simulate a host without Bun; the bootstrap must download this host's
+    // official build, check it, and use its user-owned binary in the same SSH session.
+    const asset = Bun.spawnSync(['sh', '-c', remoteBunInstallScript() + '\nxerxes_bun_asset'], { env: { ...process.env, PATH: bin + ':/usr/bin:/bin' } }).stdout.toString()
+    const releases = join(root, 'releases')
+    await mkdir(join(releases, asset), { recursive: true })
+    await Bun.write(join(releases, asset, 'bun'), await Bun.file(join(bin, 'bun')).text())
     await rm(join(bin, 'bun'))
-    await executable('curl', 'while [ "$1" != -o ]; do shift; done; cp "$INSTALLER_FIXTURE" "$2"\n')
-    await executable('unzip', 'exit 0\n')
-    await Bun.write(join(root, 'installer'), 'mkdir -p "$BUN_INSTALL/bin"\ncp "$BUN_FIXTURE" "$BUN_INSTALL/bin/bun"\nchmod +x "$BUN_INSTALL/bin/bun"\n')
-    const installed = await run({ INSTALLER_FIXTURE: join(root, 'installer'), BUN_FIXTURE: join(root, 'bun-fixture') })
+    expect(Bun.spawnSync(['zip', '-qr', asset + '.zip', asset], { cwd: releases }).exitCode).toBe(0)
+    const digest = createHash('sha256').update(new Uint8Array(await Bun.file(join(releases, asset + '.zip')).arrayBuffer())).digest('hex')
+    await Bun.write(join(releases, 'SHASUMS256.txt'), digest + '  ' + asset + '.zip\n')
+    await executable('curl', 'while [ "$1" != -o ]; do url=$1; shift; done; cp "$RELEASES/$(basename "$url")" "$2"\n')
+    const installed = await run({ RELEASES: releases })
     expect(installed.code).toBe(0)
     expect(installed.output).toContain('installing/updating Bun')
     expect(await Bun.file(join(home, '.bun/bin/bun')).exists()).toBe(true)
