@@ -38,7 +38,8 @@ export interface XerxesBridge {
   /** Present the folder picker; open independently of the current workspace. */
   chooseWorkspace?(): Promise<unknown>
   getWorkspaceDirectories?(): Promise<string[]>
-  openWorkspaceWindow?(dir?: string, resumeSessionId?: string, options?: { fresh?: boolean }): Promise<unknown>
+  /** existingOnly: bring forward a view already showing the session, else open nothing (resolves null). */
+  openWorkspaceWindow?(dir?: string, resumeSessionId?: string, options?: { fresh?: boolean; existingOnly?: boolean }): Promise<unknown>
   /** True once, for a window opened to start a fresh task. */
   startsFresh?(): Promise<boolean>
   /** UI scale: zoom this window's page (0.5–3). */

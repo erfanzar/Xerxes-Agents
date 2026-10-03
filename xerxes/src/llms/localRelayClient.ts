@@ -41,7 +41,7 @@ export class LocalRelayClient implements LlmClient {
       }
     } catch (error) {
       if (signal?.aborted) throw new LocalProviderRelayError('cancelled')
-      if (error instanceof LocalProviderRelayError) throw new LocalProviderRelayError(error.code)
+      if (error instanceof LocalProviderRelayError) throw new LocalProviderRelayError(error.code, { restorable: error.restorable })
       throw new LocalProviderRelayError('provider_failed')
     } finally {
       // Explicit cancellation is best effort on a failed transport; the local

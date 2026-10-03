@@ -1226,6 +1226,30 @@ describe('Store workspace folds', () => {
     expect(snap.currentId).not.toBe('fresh-new-task')
   })
 
+  test('on an SSH workspace, a chat running in another view is brought forward there, not pulled into this view', async () => {
+    // Pulling it in made this view the busy one, so every next click handed
+    // off again and the window rebuilt an SSH view (new connection, reload).
+    await Bun.sleep(0)
+    ;(store as unknown as { patch(merge: Record<string, unknown>): void }).patch({ storageScope: 'ssh:softnu-local:' })
+    const running = "Error invoking remote method 'daemon:call': Error: rpc -32000: Validation error for session_id: is still running a turn under another connection; wait for it to finish before resuming it here"
+    const opened: Array<{ dir: string | undefined; id: string | undefined; options: Record<string, unknown> | undefined }> = []
+    ;(bridge as unknown as { openWorkspaceWindow?: (dir?: string, id?: string, options?: Record<string, unknown>) => Promise<unknown> }).openWorkspaceWindow = async (dir, id, options) => {
+      opened.push({ dir, id, options })
+      return options?.existingOnly ? dir : null
+    }
+    bridge.respondWith((method, params) => {
+      if (method !== 'initialize') return { ok: true }
+      if (params.resume_session_id === 'running0001') return Promise.reject(new Error(running))
+      return initializeResult
+    })
+    const before = store.getSnapshot().currentId
+    await store.openSession('running0001')
+    expect(opened).toEqual([{ dir: '/repo', id: 'running0001', options: { existingOnly: true } }])
+    // Not attached here: no keyed initialize for the running chat, and this view keeps its own.
+    expect(bridge.calls.some(call => call.method === 'initialize' && !call.params.resume_session_id && call.params.session_key !== undefined && String(call.params.session_key).includes('running'))).toBe(false)
+    expect(store.getSnapshot().currentId).toBe(before)
+  })
+
   test('undoChanges drops undone files from the review list and reports refusals', async () => {
     bridge.push('turn_begin', { user_input: 'edit' })
     const first = editCall('src/a.ts', 'one', 'two', 'e1')

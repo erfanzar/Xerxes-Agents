@@ -41,8 +41,8 @@ export function RemoteProviders({remote, relay, changed}: {remote?: XerxesBridge
   const needsControlled = review?.profiles.some(profile=>selected.includes(profile.name)&&profile.providerControlledOutput)
   return <section className="remote-providers" aria-label="SSH provider source">
     <h3>Provider source for this conversation</h3>
-    {relay && <div className="remote-providers__activity" data-live={relay.live} role="status">
-      <strong>{relay.live ? 'Prompts run on this computer' : 'Access to this computer ended'}</strong>
+    {relay && <div className="remote-providers__activity" data-live={relay.live || relay.reconnecting === true} role="status">
+      <strong>{relay.live ? 'Prompts run on this computer' : relay.reconnecting ? 'Reconnecting to this computer…' : 'This computer is not connected'}</strong>
       {relaySummary(relay).split('\n').slice(0, -1).map(line => <p key={line}>{line}</p>)}
     </div>}
     {error && <p className="studio-error" role="alert">{error} <button className="btn" disabled={busy} onClick={()=>void act(()=>read(true))}>Refresh setup</button></p>}

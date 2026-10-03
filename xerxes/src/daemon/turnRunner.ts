@@ -85,6 +85,8 @@ import { recordModelUsage } from '../runtime/modelUsageLedger.js'
 
 export interface AgentTurnRunnerOptions {
   readonly remoteProviderBindings?: RemoteProviderBindings
+  /** Retries for a turn served by the desktop's provider; its lapses wait for the desktop to bind again. Tests shorten it. */
+  readonly localProviderRetryPolicy?: typeof DEFAULT_RETRY_POLICY
   /** Definitions loaded from built-in, user, and project agent specs. */
   readonly agentDefinitions?: ReadonlyMap<string, AgentDefinition>
   /** Optional project-aware persistent memory injected into session startup context. */
@@ -614,7 +616,7 @@ export class AgentTurnRunner implements TurnRunner {
       let fallbackAttempted = false
       for (;;) {
         const maxTokens = requiresLocal ? undefined : this.options.maxTokens ?? (routedProvider?.maxOutputTokens ?? this.options.maxOutputTokens)?.(attemptModel)
-        const retryPolicy = requiresLocal ? DEFAULT_RETRY_POLICY : retryPolicyForModel(attemptModel, routedProvider?.providerOverrides ?? this.options.providerOverrides)
+        const retryPolicy = requiresLocal ? this.options.localProviderRetryPolicy ?? DEFAULT_RETRY_POLICY : retryPolicyForModel(attemptModel, routedProvider?.providerOverrides ?? this.options.providerOverrides)
         // An explicit off effort must cross the relay, otherwise absence
         // would correctly mean "use the local profile's thinking default".
         // Claude Code likewise thinks by default, so off has to be said.

@@ -20,7 +20,7 @@ import { seedModelsDev } from './fixtures/modelsDev.js'
 seedModelsDev()
 
 async function until(check:()=>boolean) { for(let i=0;i<300;i++){if(check())return;await Bun.sleep(10)}throw new Error('Timed out') }
-async function fixture(preferred?: () => Promise<string | undefined>) {
+async function fixture(preferred?: () => Promise<string | undefined>, options: { revokeOnDrop?: boolean } = {}) {
   const dir=await realpath(await mkdtemp(join(tmpdir(),'xpf-'))), bindings=new RemoteProviderBindings(2000)
   const profiles=new ProfileStore(join(dir,'local-profiles.json')), seen:string[]=[], events:unknown[]=[]
   let fallback=0, hold=false, aborted=false
@@ -33,7 +33,7 @@ async function fixture(preferred?: () => Promise<string | undefined>) {
       if(hold){await new Promise<void>(resolve=>{if(signal?.aborted)resolve();else signal?.addEventListener('abort',()=>resolve(),{once:true})});aborted=true;return}
       yield {content:'LOCAL_REPLY'}
     }})})
-  const runner=new AgentTurnRunner({model:'gpt-4o',tools:[],remoteProviderBindings:bindings,llm:{async *stream(){fallback++;yield {content:'UNAPPROVED'}}}})
+  const runner=new AgentTurnRunner({model:'gpt-4o',tools:[],remoteProviderBindings:bindings,localProviderRetryPolicy:{delaysMs:[200,200,200],maxSuggestedDelayMs:200},llm:{async *stream(){fallback++;yield {content:'UNAPPROVED'}}}})
   const remoteRuntime=new InMemoryDaemonRuntime(runner,{currentProjectDirectory:dir,sessionDirectory:join(dir,'remote-sessions'),model:'gpt-4o'})
   const remoteServer=new DaemonServer({cronLeasePath:join(dir,'remote-cron.lease'),cronStoreFactory:()=>new JobStore(join(dir,'remote-jobs.json')),runtime:remoteRuntime,socketPath:join(dir,'r.sock'),projectDirectory:dir,remoteProviderBindings:bindings,profileStore:new ProfileStore(join(dir,'remote-profiles.json'))})
   await localServer.start();await remoteServer.start()
@@ -41,13 +41,14 @@ async function fixture(preferred?: () => Promise<string | undefined>) {
   let forwarding:DesktopProviderForwarding
   const remote=new DaemonRpc({socketPath:join(dir,'r.sock'),projectDir:dir,deadlineMs:3000,providerRelay:(binding,frame,signal)=>forwarding.relay(binding,frame,signal)})
   forwarding=new DesktopProviderForwarding((method,params)=>local.call(method,params),(method,params)=>remote.call(method,params),'verified-host',dir,preferred)
-  remote.onConnection(online=>{if(!online)void forwarding.disconnect()});local.onConnection(online=>{if(!online)void forwarding.disconnect()})
+  // The desktop waits out the runtime's reattach window before revoking; tests of that pass revokeOnDrop:false.
+  remote.onConnection(online=>{if(!online&&options.revokeOnDrop!==false)void forwarding.disconnect()});local.onConnection(online=>{if(!online)void forwarding.disconnect()})
   remote.onEvent((type,payload)=>events.push({type,payload}));remote.on('protocol_error',value=>events.push(value))
   const initialized=await remote.call('initialize',{})
   const created={session_id:(initialized.session as {id:string}).id}
   const authorize=async()=>{const review=await forwarding.inspect();await forwarding.authorize({review:review.review,consent:true,profiles:['local-api'],profile:'local-api',minutes:60});return review}
   const turn=async()=>{const count=remoteRuntime.listSessions().find(s=>s.id===created.session_id)!.messages.length;const submitted=await remote.call('turn.submit',{text:'Reply locally',submission_id:crypto.randomUUID()});expect(submitted).toMatchObject({ok:true});await until(()=>{const s=remoteRuntime.listSessions().find(s=>s.id===created.session_id)!;return s.messages.length>count&&!s.activeTurnId});for(let i=0;i<300;i++){if((await remote.call('session.status',{history_limit:0})).provider_binding_busy===false)return;await Bun.sleep(10)}throw new Error('Turn did not settle')}
-  return {dir,profiles,save,seen,events,local,remote,forwarding,remoteRuntime,created,authorize,turn,hold:()=>{hold=true},aborted:()=>aborted,fallback:()=>fallback,
+  return {dir,profiles,save,seen,events,local,remote,forwarding,remoteRuntime,created,authorize,turn,hold:()=>{hold=true},release:()=>{hold=false},aborted:()=>aborted,fallback:()=>fallback,
     async close(){await forwarding.disconnect();local.dispose();remote.dispose();await localServer.stop();await remoteServer.stop();await localRuntime.shutdown();await remoteRuntime.shutdown();bindings.close();await rm(dir,{recursive:true,force:true})}}
 }
 
@@ -244,5 +245,55 @@ test('switching an SSH task to a provider on this computer sticks through renewa
     expect(await f.forwarding.follow()).toEqual({status:'bound'})
     expect((await f.forwarding.inspect()).sharedProfiles[0]).toBe('local-api')
     await expect(f.forwarding.useLocal('missing')).rejects.toThrow('no missing profile')
+  }finally{await f.close()}
+},20000)
+
+test('a brief drop of the link to the host does not end access: the next turn still runs through this computer',async()=>{
+  const f=await fixture(async()=>'local-signin',{revokeOnDrop:false})
+  try {
+    signIn(f.profiles)
+    expect(await f.forwarding.follow()).toEqual({status:'bound'})
+    const {sessionKey}=await f.forwarding.inspect()
+    await f.turn()
+    const before=f.seen.length
+    // Drop the transport; the client reattaches to its connection lease.
+    const transport=f.remote as unknown as {socket:{destroy():void}|null}
+    const dropped=transport.socket
+    dropped?.destroy()
+    await until(()=>transport.socket!==dropped)
+    // As the window does after a reconnect: reopen the same conversation.
+    await f.remote.call('initialize',{session_key:sessionKey,resume_session_id:f.created.session_id})
+    // The window's reconnect hook: the host dropped its binding with the link, so it is bound again.
+    expect((await f.forwarding.inspect()).source).toBe('local-unavailable')
+    expect(await f.forwarding.follow()).toEqual({status:'bound'})
+    await f.turn()
+    expect(f.seen.length).toBeGreaterThan(before)
+    expect(f.fallback()).toBe(0)
+    expect(JSON.stringify(f.events)).not.toContain('grant is unavailable')
+  }finally{await f.close()}
+},20000)
+
+test('a link that drops mid-turn is restored while the turn runs, and the turn finishes through this computer',async()=>{
+  const f=await fixture(async()=>'local-signin',{revokeOnDrop:false})
+  try {
+    signIn(f.profiles)
+    expect(await f.forwarding.follow()).toEqual({status:'bound'})
+    const {sessionKey}=await f.forwarding.inspect()
+    f.hold()
+    await f.remote.call('turn.submit',{text:'Long answer',submission_id:crypto.randomUUID()})
+    await until(()=>f.seen.length>0)
+    f.release()
+    const transport=f.remote as unknown as {socket:{destroy():void}|null}
+    const dropped=transport.socket
+    dropped?.destroy()
+    await until(()=>transport.socket!==dropped)
+    await f.remote.call('initialize',{session_key:sessionKey,resume_session_id:f.created.session_id})
+    const session=()=>f.remoteRuntime.listSessions().find(s=>s.id===f.created.session_id)!
+    // Still working: the restore happens under the running turn, not after it.
+    expect(session().activeTurnId).not.toBe('')
+    expect(await f.forwarding.follow()).toEqual({status:'bound'})
+    await until(()=>!session().activeTurnId)
+    expect(session().messages.at(-1)).toMatchObject({role:'assistant',content:'LOCAL_REPLY'})
+    expect(f.fallback()).toBe(0)
   }finally{await f.close()}
 },20000)

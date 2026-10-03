@@ -2298,6 +2298,8 @@ export class DaemonServer {
         ...(session ? {
           provider_binding_session_guard_supported: Boolean(this.remoteProviderBindings),
           provider_binding_busy: Boolean(session.activeTurnId || session.status !== 'idle' || this.turnOwners.has(session.sessionKey) || this.sessionOperations.has(session.sessionKey)),
+          // Saved as running on the desktop's provider, but its link dropped and nothing serves it yet.
+          provider_binding_lost: this.remoteProviderBindings?.lost(session) === true,
         } : {}),
         session: session
           ? {
@@ -3431,15 +3433,31 @@ export class DaemonServer {
         if (method === 'provider.remote.bind') {
           if (params.session_key !== undefined && params.session_key !== connection.activeSessionKey) return {ok:false,error:'The selected session changed. Review local provider setup again.'};
           const session = this.runtime.sessionStatus(connection.activeSessionKey);
-          if (!session || session.activeTurnId || session.status !== 'idle' || this.turnOwners.has(session.sessionKey) || this.sessionOperations.has(session.sessionKey)) return { ok: false, error: 'Choose an idle session before binding a local provider.' };
+          if (!session) return { ok: false, error: 'Choose an idle session before binding a local provider.' };
           if (params.consent !== true || typeof params.source !== 'string' || typeof params.profile !== 'string' || typeof params.model !== 'string') throw new LocalProviderRelayError('invalid_request');
+          // A working session can be bound again only to restore the route its
+          // dropped link served: same profile and model, so its running turn
+          // (which retries meanwhile) continues unchanged. Any other change
+          // still waits for the session to be idle.
+          const saved = session.metadata[LOCAL_PROVIDER_BINDING];
+          const restoring = bindings.lost(session) && isRecord(saved) && saved.profile === params.profile && saved.model === params.model;
+          const busy = Boolean(session.activeTurnId) || session.status !== 'idle' || this.turnOwners.has(session.sessionKey) || this.sessionOperations.has(session.sessionKey);
+          if (busy && !restoring) return { ok: false, error: 'Choose an idle session before binding a local provider.' };
           let capabilities;
           try { capabilities = parseLocalProviderCapabilities(params.capabilities, params.model); }
           catch { throw new LocalProviderRelayError('invalid_request'); }
           if (params.alternatives !== undefined && !Array.isArray(params.alternatives)) throw new LocalProviderRelayError('invalid_request');
           const binding = bindings.bind(connection, session, { source: params.source, profile: params.profile, model: params.model, ...(capabilities ? {capabilities} : {}),
             ...(params.alternatives ? {alternatives: params.alternatives as LocalProviderSelection[]} : {}) },
-            request => this.connectionLeases.sendPrivate(connection, { jsonrpc: '2.0', method: 'provider.remote.request', params: request }));
+            request => this.connectionLeases.sendPrivate(connection, { jsonrpc: '2.0', method: 'provider.remote.request', params: request }),
+            // The desktop binds a session again by itself after a dropped link;
+            // only then does a lapse wait for it rather than end the turn.
+            { restorable: params.restorable === true });
+          if (busy) {
+            // Restored under a running turn: model and effort are unchanged.
+            await this.emitProviderInit(connection);
+            return { ok: true, binding };
+          }
           try {
             await this.runtime.setSessionModel?.(connection.activeSessionKey, binding.model);
             // Keep explicit session effort, but don't persist an inherited
@@ -10061,6 +10079,7 @@ export class DaemonServer {
       remote_provider_binding_supported: Boolean(this.remoteProviderBindings),
       remote_provider_bundle_supported: Boolean(this.remoteProviderBindings),
       local_provider_label: localProviderLabel(session.metadata),
+    ...localProviderRoutePayload(session.metadata),
       daemon_protocol: DAEMON_PROTOCOL_VERSION,
       daemon_build_id: this.daemonBuildId(),
     };
@@ -11629,6 +11648,7 @@ function sessionPayload(
     ...(goal ? { goal: goal.objective, goal_phase: goal.phase } : {}),
     agent_id: session.agentId,
     local_provider_label: localProviderLabel(session.metadata),
+    ...localProviderRoutePayload(session.metadata),
     workspace: session.workspace,
     cwd: session.cwd,
     active_turn_id: session.activeTurnId,
@@ -12000,6 +12020,7 @@ function initPayload(
   return {
     session_id: session.id,
     local_provider_label: localProviderLabel(session.metadata),
+    ...localProviderRoutePayload(session.metadata),
     model,
     cwd: session.cwd,
     context_limit: contextLimit,
@@ -12607,6 +12628,13 @@ function profileOverrides(
     // the vendor) so the selected profile's provider always travels with it.
     provider: profile.provider,
   };
+}
+
+/** The route a session's saved local requirement names, so the desktop can restore exactly it after a dropped link. */
+function localProviderRoutePayload(metadata: Record<string, unknown>): JsonRpcPayload {
+  const marker = metadata[LOCAL_PROVIDER_BINDING];
+  if (!isRecord(marker) || typeof marker.profile !== 'string' || typeof marker.model !== 'string') return {};
+  return { local_provider_route: { profile: marker.profile, model: marker.model } };
 }
 
 function profilePayload(

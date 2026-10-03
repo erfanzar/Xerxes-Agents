@@ -192,6 +192,9 @@ export interface ProviderRelayView {
   readonly lastAt?: number
   readonly lastError?: string
   readonly expiresAt?: number
+  /** Not live, and this window is binding it again (retrying until it is). */
+  readonly reconnecting?: boolean
+  readonly lastFailure?: string
 }
 
 /**
@@ -213,7 +216,7 @@ export function providerRowState(frame: Pick<Snapshot, 'storageScope' | 'provide
   const relay = frame.providerRelay
   if (relay?.bound) {
     const carrying = relay.profile === row.name
-    if (carrying) return { inUse: true, viaMac: true, chip: relay.live ? 'via this Mac' : 'Mac access ended', status: relay.live ? 'in use' : 'needs this computer' }
+    if (carrying) return { inUse: true, viaMac: true, chip: relay.live ? 'via this Mac' : relay.reconnecting ? 'reconnecting' : 'Mac not connected', status: relay.live ? 'in use' : relay.reconnecting ? 'reconnecting to this computer' : 'needs this computer' }
     return { inUse: false, viaMac, chip: row.active ? 'host default' : null, status: viaMac ? 'runs on this Mac' : 'saved' }
   }
   if (row.active && !viaMac) return { inUse: true, viaMac: false, chip: 'active', status: 'in use' }
@@ -227,7 +230,8 @@ export function providerRelayView(value: unknown): ProviderRelayView | null {
   const text = (field: unknown) => typeof field === 'string' && field ? field : undefined
   const count = (field: unknown) => typeof field === 'number' && Number.isFinite(field) && field >= 0 ? field : undefined
   const view: Record<string, unknown> = { bound: true, live: row.live === true, requests: count(row.requests) ?? 0, inFlight: count(row.inFlight) ?? 0 }
-  for (const [key, field] of [['destination', text(row.destination)], ['profile', text(row.profile)], ['model', text(row.model)], ['lastError', text(row.lastError)]] as const) if (field) view[key] = field
+  for (const [key, field] of [['destination', text(row.destination)], ['profile', text(row.profile)], ['model', text(row.model)], ['lastError', text(row.lastError)], ['lastFailure', text(row.lastFailure)]] as const) if (field) view[key] = field
+  if (row.reconnecting === true && row.live !== true) view.reconnecting = true
   for (const [key, field] of [['lastAt', count(row.lastAt)], ['expiresAt', count(row.expiresAt)]] as const) if (field !== undefined) view[key] = field
   return view as unknown as ProviderRelayView
 }
@@ -1457,6 +1461,20 @@ export class Store {
       if (version !== this.sessionNavigationVersion) return true
       // The chosen chat is still running its turn: watch it rather than fail.
       if (RUNNING_ELSEWHERE.test(error instanceof Error ? error.message : String(error))) {
+        // A view of this window already runs it (it was handed off there):
+        // go to that view. Pulling it in here made this view the busy one, so
+        // the next click handed off again and an SSH window rebuilt a view
+        // (new connection, full reload) every time.
+        try {
+          const row = [...this.frame.sessions, ...this.frame.live].find(session => session.id === id) ?? known
+          if (this.frame.storageScope?.startsWith('ssh:') && await this.bridge.openWorkspaceWindow?.(row?.cwd || this.frame.cwd, id, { existingOnly: true })) {
+            if (this.sessionNavigationNeedsRestore && this.frame.currentId) {
+              await this.initialize({ resume_session_id: this.frame.currentId })
+              this.sessionNavigationNeedsRestore = false
+            }
+            return false
+          }
+        } catch { /* attach in place below */ }
         try {
           const attached = await this.attachRunningSession(id)
           if (attached && version === this.sessionNavigationVersion) {
@@ -4408,7 +4426,7 @@ export interface XerxesLike {
   /** Present on the real preload bridge; test bridges may omit it. */
   chooseWorkspace?(): Promise<unknown>
   getWorkspaceDirectories?(): Promise<string[]>
-  openWorkspaceWindow?(dir?: string, resumeSessionId?: string, options?: { fresh?: boolean }): Promise<unknown>
+  openWorkspaceWindow?(dir?: string, resumeSessionId?: string, options?: { fresh?: boolean; existingOnly?: boolean }): Promise<unknown>
   useWorkspace?(dir: string, resumeSessionId?: string): Promise<unknown>
   getWorkspace?(): Promise<string | null>
   getResumeSession?(): Promise<string | null>

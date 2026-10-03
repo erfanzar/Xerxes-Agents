@@ -731,7 +731,7 @@ function ModelsCard({ snap }: { snap: Snapshot }): ReactElement {
       {snap.providers.map(provider => {
         const row = providerRowState(snap, provider)
         const name = provider.label || provider.name
-        const tone = row.chip === 'Mac access ended' ? 'needs' : row.chip === 'host default' ? 'quiet' : 'accent'
+        const tone = row.chip === 'Mac not connected' ? 'needs' : row.chip === 'host default' ? 'quiet' : 'accent'
         return (
         <div key={provider.name} className={`provcard${row.inUse ? ' is-current' : ''}`}>
           <button

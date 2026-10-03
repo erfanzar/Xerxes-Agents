@@ -45,6 +45,8 @@ async function followLocalProviders(forwarding: DesktopProviderForwarding): Prom
 }
 
 const APP_NAME = 'Xerxes Agents'
+/** Longer than the runtime's 30 s connection-lease grace, so a reattach always wins. */
+const REATTACH_GRACE_MS = 35_000
 const here = dirname(fileURLToPath(import.meta.url))
 // Prefer the packaged runtime while preserving explicit developer overrides.
 const bundledBun = join(here, '..', 'bun')
@@ -298,14 +300,18 @@ function closeActiveSurface(): void {
   if (next !== undefined) activateSurface(next)
 }
 
-function openRemoteView(host: BrowserWindow, machine: RemoteTarget, sessionId?: string): void {
+/** The view in this window already showing that SSH workspace (and session, when given). */
+function remoteViewOf(host: BrowserWindow, machine: RemoteTarget, sessionId?: string): number | undefined {
   for (const [id, surface] of workspaceSurfaces) {
     const state = windowStates.get(id)?.()
-    if (surface.host === host && sameRemote(state?.remote, machine) && (!sessionId || state?.sessionId === sessionId)) {
-      activateSurface(id)
-      return
-    }
+    if (surface.host === host && sameRemote(state?.remote, machine) && (!sessionId || state?.sessionId === sessionId)) return id
   }
+  return undefined
+}
+
+function openRemoteView(host: BrowserWindow, machine: RemoteTarget, sessionId?: string): void {
+  const existing = remoteViewOf(host, machine, sessionId)
+  if (existing !== undefined) { activateSurface(existing); return }
   createWorkspaceWindow(null, { workspace: null, remote: machine, sessionId: sessionId ?? null,
     bounds: host.getNormalBounds(), maximized: host.isMaximized(), fullscreen: host.isFullScreen(),
   }, undefined, host)
@@ -398,7 +404,13 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
   workspaceSurfaces.set(id, { host: window, view })
   surfaceSessions.set(id, session)
   activateSurface(id)
-  const attach = (next?: DaemonRpc) => registerDaemonBridge(contents, next, (type, payload) => maybeNotify(window, type, payload), (method, result) => {
+  const attach = (next?: DaemonRpc) => registerDaemonBridge(contents, next, (type, payload) => {
+    maybeNotify(window, type, payload)
+    // A turn that ended (perhaps because access was lost while it ran, after
+    // an app restart) leaves the conversation idle: bind it again now, so a
+    // Retry works instead of failing the same way.
+    if (type === 'turn_end' && remote && providerForwarding) void followLocalProviders(providerForwarding)
+  }, (method, result) => {
     if (session.observe(method, result)) scheduleWindowSave()
     // Opening or starting a conversation on an SSH host: keep it on this
     // computer's sign-in provider (ChatGPT, Claude Code), whose login stays here.
@@ -591,7 +603,15 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
         () => localActiveProfile(join(xerxesHome(), 'profiles.json')))
       // Access ends with the transport; the open conversation follows this
       // computer's sign-in provider again once it is back.
-      rpc.onConnection(online => { if (!online) void forwarding.disconnect(); else void followLocalProviders(forwarding) })
+      // A brief drop must not end access: the runtime keeps this window's
+      // bindings while it reattaches, so the grants here wait as long. Only a
+      // link that stays down past that window revokes them.
+      let dropped: ReturnType<typeof setTimeout> | undefined
+      rpc.onConnection(online => {
+        clearTimeout(dropped)
+        if (!online) dropped = setTimeout(() => { void forwarding.disconnect() }, REATTACH_GRACE_MS)
+        else void followLocalProviders(forwarding)
+      })
       // The window shows when this conversation's prompts run on this computer.
       forwarding.onChange(() => { if (!contents.isDestroyed()) contents.send('desktop:provider-relay') })
       localProviders.onConnection(online => { if (!online) void forwarding.disconnect() })
@@ -737,14 +757,29 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     }
     return (await shell.openPath(candidate)) === ''
   })
-  handle('desktop:new-window', async (_event, directory?: unknown, sessionId?: unknown, fresh?: unknown) => {
+  handle('desktop:new-window', async (_event, directory?: unknown, sessionId?: unknown, fresh?: unknown, existingOnly?: unknown) => {
     if (sessionId !== undefined && (typeof sessionId !== 'string' || !sessionId || sessionId.length > 256 || /[\x00-\x1f]/.test(sessionId))) throw new TypeError('Invalid session identity')
     if (fresh !== undefined && typeof fresh !== 'boolean') throw new TypeError('Invalid new-window option')
     if (fresh === true && sessionId !== undefined) throw new TypeError('A fresh task window cannot also resume a session')
     if (directory !== undefined && (typeof directory !== 'string' || !isAbsolute(directory) || /[\x00-\x1f]/.test(directory))) throw new TypeError('Invalid workspace directory')
+    if (existingOnly === true) {
+      // Only bring forward a view that already shows this session; the caller
+      // attaches in place when there is none (no new view, connection or reload).
+      if (!remoteMachine || typeof directory !== 'string' || directory !== selectedWorkspace || typeof sessionId !== 'string') return null
+      const existing = remoteViewOf(window, { ...remoteMachine, workspacePath: directory }, sessionId)
+      if (existing === undefined || existing === id) return null
+      activateSurface(existing)
+      return directory
+    }
     const picked = typeof directory === 'string' ? directory : await pickWorkspace()
     if (!picked || window.isDestroyed()) return null
-    if (remoteMachine && picked === selectedWorkspace) {
+    if (remoteMachine && picked === selectedWorkspace && typeof sessionId === 'string' && fresh !== true) {
+      // Opening a task of this SSH workspace while another one runs: bring
+      // forward a view that already shows it. Building a new view each time
+      // meant a new SSH connection and a full reload on every click, and the
+      // views piled up on the running task.
+      openRemoteView(window, { ...remoteMachine, workspacePath: picked }, sessionId)
+    } else if (remoteMachine && picked === selectedWorkspace) {
       const savedWindow = windowStates.get(id)?.()
       if (!savedWindow) throw new Error('Remote workspace is not ready')
       createWorkspaceWindow(null, { ...savedWindow, sessionId: typeof sessionId === 'string' ? sessionId : null }, undefined, window, fresh === true)

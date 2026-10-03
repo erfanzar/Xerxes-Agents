@@ -161,7 +161,8 @@ const bridge = {
     if (dir !== undefined && (typeof dir !== 'string' || !dir || /[\x00-\x1f]/.test(dir))) return Promise.reject(new TypeError('invalid workspace dir'))
     if (resumeSessionId !== undefined && (typeof resumeSessionId !== 'string' || !resumeSessionId || resumeSessionId.length > 256 || /[\x00-\x1f]/.test(resumeSessionId))) return Promise.reject(new TypeError('invalid session identity'))
     const fresh = options !== null && typeof options === 'object' && (options as { fresh?: unknown }).fresh === true
-    return ipcRenderer.invoke('desktop:new-window', dir, resumeSessionId, fresh || undefined) as Promise<unknown>
+    const existingOnly = options !== null && typeof options === 'object' && (options as { existingOnly?: unknown }).existingOnly === true
+    return ipcRenderer.invoke('desktop:new-window', dir, resumeSessionId, fresh || undefined, existingOnly || undefined) as Promise<unknown>
   },
   /** macOS: blur what is behind the window (native material) or show it clear. */
   setWindowBlur(on: unknown): void {

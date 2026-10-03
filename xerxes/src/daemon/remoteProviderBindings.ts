@@ -43,6 +43,7 @@ export function localProviderSelections(metadata: Record<string, unknown>): read
 export interface RemoteProviderRequest { binding: string; request_id: string; frame: ProviderRelayRequest }
 interface Pending { settle(value: unknown): void; reject(error: Error): void }
 interface Binding {
+  restorable?: boolean
   alternatives?: Binding[]
   owner: object
   marker: Marker
@@ -57,10 +58,12 @@ interface Binding {
  */
 export class RemoteProviderBindings {
   private readonly bindings = new Map<string, Binding>()
+  /** Sessions whose binding dropped with its link, bound by a client that binds again by itself. */
+  private readonly restorable = new Set<string>()
   constructor(private readonly timeoutMs = 60_000) {}
 
   bind(owner: object, session: Session, selection: LocalProviderSelection,
-    send: Binding['send']): Marker {
+    send: Binding['send'], options: { restorable?: boolean } = {}): Marker {
     if (selection.alternatives !== undefined && (!Array.isArray(selection.alternatives) || selection.alternatives.length > 31)) throw new LocalProviderRelayError('invalid_request')
     const choices = [selection, ...(selection.alternatives ?? [])]
     const markers = choices.map((choice,index): Marker => {
@@ -80,6 +83,8 @@ export class RemoteProviderBindings {
     if (routes.length > 1) { primary.alternatives = routes.slice(1); primary.marker.alternatives = markers.slice(1) }
     if (old) for (const route of this.group(old)) this.cancelStreams(route)
     this.bindings.set(session.id, primary)
+    primary.restorable = options.restorable === true
+    this.restorable.delete(session.id)
     session.metadata[LOCAL_PROVIDER_BINDING] = structuredClone(primary.marker)
     session.metadata.local_provider_profile = primary.marker.profile
     return structuredClone(primary.marker)
@@ -98,8 +103,15 @@ export class RemoteProviderBindings {
     const selected = candidates.find(route => route.marker.profile === preferred) ?? (!explicitProfile && candidates.length === 1 ? candidates[0] : undefined)
     if (!selected) throw new LocalProviderRelayError('route_mismatch')
     return new LocalRelayClient((frame, signal) => {
-      if (this.bindings.get(session.id) !== binding) return Promise.reject(new LocalProviderRelayError('grant_unavailable'))
-      return this.call(selected, frame, signal)
+      // Each request uses the session's binding as it is now. A link that
+      // dropped mid-turn ends the old binding; once the desktop binds the
+      // session again (explicitly, after reconnecting), the running turn's
+      // retries reach the same profile and model through the new one.
+      const current = this.bindings.get(session.id)
+      if (!current) return Promise.reject(new LocalProviderRelayError('grant_unavailable', { restorable: this.restorable.has(session.id) }))
+      const route = current === binding ? selected : this.group(current).find(item => item.marker.profile === selected.marker.profile && item.marker.model === selected.marker.model)
+      if (!route) return Promise.reject(new LocalProviderRelayError('route_changed'))
+      return this.call(route, frame, signal)
     })
   }
 
@@ -126,12 +138,18 @@ export class RemoteProviderBindings {
     pending.settle(value)
   }
 
+  /** The session saved a local requirement but no live binding serves it (its transport dropped). */
+  lost(session: Session): boolean {
+    return Object.hasOwn(session.metadata, LOCAL_PROVIDER_BINDING) && !this.bindings.has(session.id)
+  }
+
   /** Explicit user selection of a remote profile removes the local requirement.
    * Refuse to invalidate an active provider request. */
   useRemote(session: Session): void {
     const binding = this.bindings.get(session.id)
     if (binding && this.group(binding).some(route => route.pending.size || route.streams.size)) throw new LocalProviderRelayError('concurrency_limit')
     this.bindings.delete(session.id)
+    this.restorable.delete(session.id)
     delete session.metadata[LOCAL_PROVIDER_BINDING]
     delete session.metadata.local_provider_profile
   }
@@ -139,9 +157,11 @@ export class RemoteProviderBindings {
   disconnect(owner: object): void {
     for (const [id, binding] of this.bindings) if (binding.owner === owner) {
       this.bindings.delete(id)
+      if (binding.restorable) this.restorable.add(id)
+      while (this.restorable.size > 1024) this.restorable.delete(this.restorable.values().next().value!)
       for (const route of this.group(binding)) {
         this.cancelStreams(route)
-        for (const pending of [...route.pending.values()]) pending.reject(new LocalProviderRelayError('grant_unavailable'))
+        for (const pending of [...route.pending.values()]) pending.reject(new LocalProviderRelayError('grant_unavailable', { restorable: binding.restorable === true }))
       }
     }
   }

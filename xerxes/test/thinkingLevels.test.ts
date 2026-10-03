@@ -256,3 +256,31 @@ test('Anthropic adaptive models take thinking: adaptive plus output_config effor
 function sse(payload: string): string {
   return payload
 }
+
+test('OpenRouter sends an off effort only when the model reports one (a route taking low/high/max rejected none)', async () => {
+  const send = async (model: string, thinking?: CompletionRequest['thinking']) => {
+    let body: Record<string, unknown> = {}
+    const client = new OpenAiCompatibleClient({
+      apiKey: 'test-key', baseUrl: 'https://openrouter.test/api/v1', providerName: 'openrouter',
+      fetchImplementation: async (_url, init) => {
+        body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
+        return new Response(sse('data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n'), { headers: { 'Content-Type': 'text/event-stream' } })
+      },
+    })
+    for await (const _ of client.stream({ model, messages: [{ role: 'user', content: 'hi' }], ...(thinking ? { thinking } : {}) })) void _
+    return body
+  }
+  clearReportedCapabilities()
+  try {
+    // Nothing reported: no reasoning field at all, whatever the off/on state.
+    expect(await send('xpl/glm-5.3-flash-abliterated')).not.toHaveProperty('reasoning')
+    expect(await send('xpl/glm-5.3-flash-abliterated', { effort: 'off' })).not.toHaveProperty('reasoning')
+    // A model that reports `none` gets it for off, and its chosen effort for on.
+    reportModelCapability('openrouter', 'vendor/reasoner', { reasoning: { supported: true, canDisable: true, efforts: ['none', 'low', 'high'], offEffort: 'none' } })
+    expect((await send('vendor/reasoner', { effort: 'off' })).reasoning).toEqual({ effort: 'none' })
+    expect((await send('vendor/reasoner', { effort: 'high' })).reasoning).toEqual({ effort: 'high' })
+    // Levels but no off word: off sends nothing rather than a guess.
+    reportModelCapability('openrouter', 'vendor/levels', { reasoning: { supported: true, canDisable: true, efforts: ['low', 'high', 'max'] } })
+    expect(await send('vendor/levels', { effort: 'off' })).not.toHaveProperty('reasoning')
+  } finally { clearReportedCapabilities() }
+})

@@ -35,7 +35,7 @@ const FAILURE_TEXT: Record<RelayFailureCode, string> = {
   output_limit: 'Provider output settings exceed the authorized limit. Lower reasoning or explicitly authorize a larger output limit.',
   output_limit_unsupported: 'This provider cannot enforce a per-request output limit. Explicitly consent to provider-controlled output in local setup, or select a provider with output limits.',
   context_overflow: 'The local provider context window was exceeded. Compact the conversation before retrying.',
-  grant_unavailable: 'Local provider grant is unavailable for this connection. Review local setup before retrying.',
+  grant_unavailable: 'Local provider grant is unavailable: the computer this task\'s provider runs on is not connected. Once the desktop app is connected again it picks the task back up; press Retry.',
   grant_expired: 'Local provider grant expired. Renew it explicitly in local setup.',
   grant_revoked: 'Local provider access was revoked. Choose a provider explicitly before continuing.',
   request_limit: 'Local provider grant reached its request limit. Review usage before renewing.',
@@ -50,7 +50,11 @@ export function isRelayFailureCode(value: unknown): value is RelayFailureCode {
   return typeof value === 'string' && Object.hasOwn(FAILURE_TEXT, value)
 }
 export class LocalProviderRelayError extends Error {
-  constructor(readonly code: RelayFailureCode) { super(FAILURE_TEXT[code]); this.name = 'LocalProviderRelayError' }
+  /** A lapse the client that bound this route restores on its own (the desktop); retried, not final. */
+  readonly restorable: boolean
+  constructor(readonly code: RelayFailureCode, options: { restorable?: boolean } = {}) {
+    super(FAILURE_TEXT[code]); this.name = 'LocalProviderRelayError'; this.restorable = options.restorable === true
+  }
 }
 interface GrantState {
   readonly peer: RelayPeer

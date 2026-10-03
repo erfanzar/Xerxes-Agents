@@ -31,6 +31,13 @@ const MAX_ACTIVITY = 128
 export type FollowResult =
   | { readonly status: 'bound' }
   | { readonly status: 'skipped' | 'failed'; readonly reason: string }
+/** The profile and model a session's saved local requirement names (restored exactly after a dropped link). */
+const savedRoute = (session: Record<string, unknown>): { profile: string; model: string } | undefined => {
+  const route = record(session.local_provider_route)
+  return typeof route.profile === 'string' && typeof route.model === 'string' ? { profile: route.profile, model: route.model } : undefined
+}
+/** Retry delays while restoring a lost binding: quick at first, then every 15 s, for as long as the window is connected. */
+const RESTORE_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 15_000]
 const working = (session: Record<string, unknown>) => session.status !== 'idle' || Boolean(session.active_turn_id) ||
   Array.isArray(session.subagent_snapshots) && session.subagent_snapshots.some(raw => ['working','running','starting','waiting'].includes(String(record(raw).status)))
 
@@ -43,9 +50,14 @@ export class DesktopProviderForwarding {
   private lifetime = new AbortController()
   private busy = false
   private following: Promise<FollowResult> | undefined
+  private restoreTimer: ReturnType<typeof setTimeout> | undefined
+  private restoreAttempt = 0
+  private restoreFailure: string | undefined
   private followAgain = false
   private renewal: ReturnType<typeof setTimeout> | undefined
   private readonly bindingOwners = new Map<string, { sessionKey: string; profile: string }>()
+  /** Bindings the person revoked; their requests fail as revoked, not as a lapse to retry. */
+  private readonly revoked = new Set<string>()
   private readonly activity = new Map<string, ActivityState>()
   /** The profile each conversation was put on; survives transport loss so renewal keeps it. */
   private readonly chosen = new Map<string, string>()
@@ -68,8 +80,10 @@ export class DesktopProviderForwarding {
     return {ok:true, review:review.id, destination:this.destination, workspace:this.workspace, sessionKey:session.key,
       profiles, running, remoteProfile:session.profile_name, model:session.model,
       turns: typeof session.turn_count === 'number' ? session.turn_count : undefined,
-      source:session.local_provider_label ? access && Date.now() < access.expiresAt ? 'local' : 'local-unavailable' : 'remote',
-      expiresAt:access?.expiresAt, sharedProfiles:access?.profiles ?? []}
+      // A grant held here does not help if the host's binding dropped with its link.
+      source:session.local_provider_label ? access && Date.now() < access.expiresAt && response.provider_binding_lost !== true ? 'local' : 'local-unavailable' : 'remote',
+      expiresAt:access?.expiresAt, sharedProfiles:access?.profiles ?? [],
+      ...(savedRoute(session) ? { savedRoute: savedRoute(session)! } : {})}
   }
 
   async authorize(params: Record<string, unknown>) {
@@ -90,7 +104,10 @@ export class DesktopProviderForwarding {
     try {
       const status = await this.remote('session.status', {history_limit:0})
       const current = record(status.session)
-      if (current.key !== review.sessionKey || current.cwd !== this.workspace || working(current) || status.provider_binding_busy === true) throw new Error('The conversation changed or is working. Review setup when it is idle.')
+      // Restoring the exact route a dropped link served is allowed mid-turn
+      // (the runtime checks it is the same profile and model); anything else waits.
+      const restoring = params.restore === true && status.provider_binding_lost === true
+      if (current.key !== review.sessionKey || current.cwd !== this.workspace || (!restoring && (working(current) || status.provider_binding_busy === true))) throw new Error('The conversation changed or is working. Review setup when it is idle.')
       if (!this.sessions.has(review.sessionKey) && this.sessions.size >= 128) throw new Error('This window already shares providers with 128 tasks. Revoke unused access first.')
       const fresh = shareableLocalProfiles(await this.local('provider.relay.inventory', {}))
       if (profiles.some(profile => !fresh.some(value => JSON.stringify(value) === JSON.stringify(profile)))) throw new Error('Local provider configuration changed. Review it again.')
@@ -105,7 +122,7 @@ export class DesktopProviderForwarding {
       signal.throwIfAborted()
       const choices = profiles.map((profile,index) => ({source:'local workstation (this desktop window)', profile:profile!.name, model:profile!.model,
         ...(brokers[index]!.capabilities ? {capabilities:brokers[index]!.capabilities} : {})}))
-      const bound = await this.remote('provider.remote.bind', {consent:true, session_key:review.sessionKey, ...choices[0],
+      const bound = await this.remote('provider.remote.bind', {consent:true, restorable:true, session_key:review.sessionKey, ...choices[0],
         ...(choices.length > 1 ? {alternatives:choices.slice(1)} : {})})
       const marker = record(bound.binding)
       const markers = [marker, ...(Array.isArray(marker.alternatives) ? marker.alternatives.map(record) : [])]
@@ -143,7 +160,23 @@ export class DesktopProviderForwarding {
    */
   follow(): Promise<FollowResult> {
     if (this.following) { this.followAgain = true; return this.following }
-    this.following = this.followOnce().finally(() => {
+    this.following = this.followOnce().then(result => {
+      // A conversation that should run here but could not be bound again keeps
+      // being retried until it is; nothing waits for the person to notice.
+      clearTimeout(this.restoreTimer)
+      if (result.status === 'failed') {
+        this.restoreFailure = result.reason
+        const delay = RESTORE_BACKOFF_MS[Math.min(this.restoreAttempt, RESTORE_BACKOFF_MS.length - 1)]!
+        this.restoreAttempt += 1
+        this.restoreTimer = setTimeout(() => { void this.follow() }, delay)
+        this.restoreTimer.unref?.()
+      } else {
+        this.restoreAttempt = 0
+        this.restoreFailure = undefined
+      }
+      this.changed?.()
+      return result
+    }).finally(() => {
       this.following = undefined
       if (this.followAgain) { this.followAgain = false; void this.follow() }
     })
@@ -161,9 +194,10 @@ export class DesktopProviderForwarding {
       const followsHere = review.source !== 'remote'
       let primary: ShareableLocalProfile | undefined
       if (followsHere) {
-        // Renewing: keep the profile this conversation was put on (a switch to
-        // Claude Code stays Claude Code), else this computer's active one.
-        const chosen = this.chosen.get(review.sessionKey) ?? await this.preferred()
+        // Renewing or restoring: the route the session saved (exactly what its
+        // dropped link served), else the profile it was put on here (a switch
+        // to Claude Code stays Claude Code), else this computer's active one.
+        const chosen = review.savedRoute?.profile ?? this.chosen.get(review.sessionKey) ?? await this.preferred()
         primary = review.profiles.find(profile => profile.name === chosen && profile.supported)
         if (!primary) return { status: 'skipped', reason: 'the profile this conversation used is no longer shareable from this computer' }
       } else {
@@ -172,8 +206,11 @@ export class DesktopProviderForwarding {
         primary = review.profiles.find(profile => profile.name === name)
         if (!primary || !primary.supported || primary.credentialSource !== SIGN_IN_CREDENTIAL) return { status: 'skipped', reason: 'this computer\'s active profile is copied to the host' }
       }
-      if (review.running) return { status: 'skipped', reason: 'the conversation is working' }
-      await this.bindPrimary(review, primary)
+      // A working conversation whose link dropped is restored at once — its
+      // turn is retrying meanwhile. Any other change waits for it to finish.
+      const restore = followsHere && review.running
+      if (review.running && !restore) return { status: 'skipped', reason: 'the conversation is working' }
+      await this.bindPrimary(review, primary, restore)
       return { status: 'bound' }
     } catch (error) {
       return { status: 'failed', reason: error instanceof Error ? error.message : String(error) }
@@ -197,9 +234,9 @@ export class DesktopProviderForwarding {
     return { ok: true }
   }
 
-  private async bindPrimary(review: Awaited<ReturnType<DesktopProviderForwarding['inspect']>>, primary: ShareableLocalProfile): Promise<void> {
+  private async bindPrimary(review: Awaited<ReturnType<DesktopProviderForwarding['inspect']>>, primary: ShareableLocalProfile, restore = false): Promise<void> {
     const profiles = [primary, ...review.profiles.filter(profile => profile.supported && profile.name !== primary.name)].slice(0, 32)
-    await this.authorize({ consent: true, review: review.review, profiles: profiles.map(profile => profile.name), profile: primary.name,
+    await this.authorize({ consent: true, restore, review: review.review, profiles: profiles.map(profile => profile.name), profile: primary.name,
       minutes: FOLLOW_MINUTES, providerControlledOutput: profiles.some(profile => profile.providerControlledOutput) })
     this.chosen.set(review.sessionKey, primary.name)
     while (this.chosen.size > MAX_ACTIVITY) this.chosen.delete(this.chosen.keys().next().value!)
@@ -214,7 +251,9 @@ export class DesktopProviderForwarding {
 
   relay(binding: string, frame: Readonly<Record<string, unknown>>, signal: AbortSignal): Promise<unknown> {
     const broker = this.routes.get(binding)
-    if (!broker) return Promise.resolve({error:'grant_unavailable'})
+    // Revoked on purpose: final. Unknown (its access lapsed with a dropped
+    // link): unavailable, which the host retries while this window restores it.
+    if (!broker) return Promise.resolve({error:this.revoked.has(binding) ? 'grant_revoked' : 'grant_unavailable'})
     const owner = this.bindingOwners.get(binding)
     const id = typeof frame.id === 'string' ? frame.id : ''
     const state = owner ? this.activityOf(owner.sessionKey) : undefined
@@ -263,7 +302,12 @@ export class DesktopProviderForwarding {
     const session = record(response.session)
     if (response.ok !== true || typeof session.key !== 'string') return { ok: true, bound: false }
     const bound = typeof session.local_provider_label === 'string' && session.local_provider_label !== ''
-    return { ok: true, bound, sessionKey: session.key, destination: this.destination, ...this.activityFor(session.key) }
+    const activity = this.activityFor(session.key)
+    const route = savedRoute(session)
+    return { ok: true, bound, sessionKey: session.key, destination: this.destination, ...activity,
+      ...(!activity.profile && route ? { profile: route.profile, model: route.model } : {}),
+      // Not live but bound: this window is restoring it and retries until it is back.
+      ...(bound && !activity.live ? { reconnecting: true, ...(this.restoreFailure ? { lastFailure: this.restoreFailure } : {}) } : {}) }
   }
 
   private activityOf(sessionKey: string): ActivityState {
@@ -278,6 +322,8 @@ export class DesktopProviderForwarding {
 
   async revoke(sessionKey: unknown) {
     if (typeof sessionKey !== 'string') throw new Error('Choose a conversation before revoking access.')
+    for (const binding of this.sessions.get(sessionKey)?.bindings ?? []) this.revoked.add(binding)
+    while (this.revoked.size > 1024) this.revoked.delete(this.revoked.values().next().value!)
     await this.revokeSession(sessionKey)
     return {ok:true}
   }
@@ -292,6 +338,7 @@ export class DesktopProviderForwarding {
   }
   /** Called on either transport loss and surface closure. Only follow() authorizes again. */
   async disconnect() {
+    clearTimeout(this.restoreTimer)
     clearTimeout(this.renewal)
     this.renewal = undefined
     this.review = undefined

@@ -34,8 +34,16 @@ test('the badge says where prompts run, pulses while one is in flight, and warns
   const ended = { ...live, live: false, inFlight: 0, lastError: 'grant_expired' }
   const markup = renderToStaticMarkup(createElement(RelayBadge, { relay: ended }))
   expect(markup).toContain('data-state="ended"')
-  expect(markup).toContain('Mac access ended')
-  expect(relaySummary(ended)).toContain('its access has ended. It resumes when this window reconnects.')
+  expect(markup).toContain('Mac not connected')
+  expect(relaySummary(ended)).toContain('which is not connected to it right now. It continues once this window reconnects.')
+  // While this window is restoring the link, it says so instead of giving up.
+  const restoring = { ...ended, reconnecting: true, lastFailure: 'The conversation changed or is working.' }
+  const reconnecting = renderToStaticMarkup(createElement(RelayBadge, { relay: restoring }))
+  expect(reconnecting).toContain('data-state="reconnecting"')
+  expect(reconnecting).toContain('Reconnecting to this Mac…')
+  expect(reconnecting).toContain('relaybadge__dot')
+  expect(relaySummary(restoring)).toContain('this window is restoring it and retries until it is back')
+  expect(relaySummary({ ...restoring, profile: undefined })).toContain('runs through its provider on this computer')
   expect(relaySummary(ended)).toContain('Last error: grant_expired.')
 })
 
@@ -84,7 +92,8 @@ test('Settings rows say which provider an SSH task really uses', async () => {
   // Running through this computer: that row is in use, the host's active one is only its default.
   expect(providerRowState({ ...ssh, providerRelay: relay }, { name: 'codex', active: false, signsIn: true })).toEqual({ inUse: true, viaMac: true, chip: 'via this Mac', status: 'in use' })
   expect(providerRowState({ ...ssh, providerRelay: relay }, { name: 'zai', active: true, signsIn: false })).toEqual({ inUse: false, viaMac: false, chip: 'host default', status: 'saved' })
-  expect(providerRowState({ ...ssh, providerRelay: { ...relay, live: false } }, { name: 'codex', active: false, signsIn: true })).toMatchObject({ inUse: true, chip: 'Mac access ended' })
+  expect(providerRowState({ ...ssh, providerRelay: { ...relay, live: false } }, { name: 'codex', active: false, signsIn: true })).toMatchObject({ inUse: true, chip: 'Mac not connected' })
+  expect(providerRowState({ ...ssh, providerRelay: { ...relay, live: false, reconnecting: true } }, { name: 'codex', active: false, signsIn: true })).toMatchObject({ inUse: true, chip: 'reconnecting' })
   // On the host's own providers: the active keyed one is in use; sign-in ones run on this Mac when picked.
   expect(providerRowState({ ...ssh, providerRelay: null }, { name: 'kimi', active: true, signsIn: false })).toEqual({ inUse: true, viaMac: false, chip: 'active', status: 'in use' })
   expect(providerRowState({ ...ssh, providerRelay: null }, { name: 'claude-code', active: false, signsIn: true })).toEqual({ inUse: false, viaMac: true, chip: null, status: 'runs on this Mac' })

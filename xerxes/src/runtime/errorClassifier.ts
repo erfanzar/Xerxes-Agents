@@ -116,6 +116,12 @@ export class ErrorClassifier {
     if (details.name === 'StreamFrameError' || details.name === 'StreamTruncatedError') {
       return classified(ErrorKind.TRANSIENT, error, details.message, retryAfter)
     }
+    // The desktop carrying this task's provider is reconnecting; it binds the
+    // task again on its own, so the request is retried (on the bounded
+    // schedule, about 40 s) rather than failed at the first attempt.
+    if (isLostRelay(error, details)) {
+      return classified(ErrorKind.TRANSIENT, error, details.message, retryAfter)
+    }
     if (details.name === 'ConfigurationError') {
       return classified(ErrorKind.FATAL, error, details.message, retryAfter)
     }
@@ -268,6 +274,12 @@ function numberProperty(value: Record<string, unknown>, ...keys: readonly string
     if (typeof candidate === 'number' && Number.isFinite(candidate)) return candidate
   }
   return undefined
+}
+
+/** A local-provider relay whose binding is gone: a connection fault, not a verdict on the request. */
+function isLostRelay(error: unknown, details: ErrorDetails): boolean {
+  return details.name === 'LocalProviderRelayError' && details.code === 'grant_unavailable'
+    && isRecord(error) && error.restorable === true
 }
 
 /** Retry connectivity and TLS verification failures without weakening TLS checks. */

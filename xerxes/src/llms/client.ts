@@ -2010,12 +2010,14 @@ function addSampling(
       payload.reasoning_effort = reasoningEffort
     }
   } else if (providerName === 'openrouter') {
-    // An explicit off is the model's own off word (`none`); on without a
+    // Off goes out only as the model's own reported off word; on without a
     // graded effort leaves the field out so the provider default applies.
+    // Assuming `none` for a model that reports nothing failed routes that
+    // accept only low/high/max: OpenRouter answered 400 and the turn died.
     if (thinkingEnabled && reasoningEffort) {
       payload.reasoning = { effort: reasoningEffort }
-    } else if (!thinkingEnabled && canDisable) {
-      payload.reasoning = { effort: reasoning?.offEffort ?? 'none' }
+    } else if (!thinkingEnabled && canDisable && reasoning?.offEffort) {
+      payload.reasoning = { effort: reasoning.offEffort }
     }
   } else if (providerName === 'qwen') {
     payload.enable_thinking = thinkingEnabled || !canDisable
