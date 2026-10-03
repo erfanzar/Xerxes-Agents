@@ -2915,6 +2915,10 @@ export class Store {
     // Passthrough — the wrapper must forward EVERY preload method or the
     // optional calls silently do nothing.
     getWorkspaceDirectories: () => window.xerxes.getWorkspaceDirectories?.() ?? Promise.resolve([]),
+    // Without these two the menu's Check for Updates… and the update prompt
+    // never reached the window: the check ran and its answer was dropped.
+    appUpdate: action => window.xerxes.appUpdate?.(action) ?? Promise.reject(new Error('Update the desktop app to check for updates.')),
+    onAppUpdate: handler => window.xerxes.onAppUpdate?.(handler) ?? (() => {}),
     openWorkspaceWindow: (directory, resumeSessionId, options) => {
       if (!window.xerxes.openWorkspaceWindow) return Promise.reject(new Error('This desktop build cannot open additional windows. Relaunch the updated app.'))
       return window.xerxes.openWorkspaceWindow(directory, resumeSessionId, options)

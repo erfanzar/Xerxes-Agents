@@ -7,6 +7,13 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.22 — 2026-10-03
+
+Check for Updates works again.
+
+- Check for Updates… and the automatic update prompt never reached the window: the check ran in the background and its answer was dropped, so clicking it showed nothing and a new version was never offered. Both now show, and a desktop build without the update channel says so instead of staying silent.
+- Installed 0.6.21 or earlier? Install this version once from the release page; later updates are offered in the app.
+
 ## 0.6.21 — 2026-10-03
 
 Remote workspaces set up on servers without curl.

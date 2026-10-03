@@ -29,6 +29,9 @@ export interface XerxesBridge {
   getResumeSession?(): Promise<string | null>
   voice?(action: string, params?: Record<string, unknown>): Promise<unknown>
   remote?(action: string, params?: Record<string, unknown>): Promise<unknown>
+  /** The app's own update flow in the main process (see appUpdateController.ts). */
+  appUpdate?(action: 'state' | 'check' | 'install' | 'skip' | 'dismiss' | 'open-release'): Promise<unknown>
+  onAppUpdate?(handler: (state: unknown) => void): () => void
   call<T = Record<string, unknown>>(method: string, params?: Record<string, unknown>): Promise<T>
   onEvent(handler: (event: DaemonEvent) => void): () => void
   /** Present the folder picker; open independently of the current workspace. */
