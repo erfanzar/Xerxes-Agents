@@ -13,7 +13,7 @@ SSH tasks that keep running through your Mac when the link drops, and task switc
 
 - A task running through the Mac's provider is re-linked automatically after a dropped SSH link or an app restart, even mid-turn, and the desktop keeps retrying until it is back. The running turn waits (about 40 s of retries) and continues instead of failing. The server still discards a dropped binding; only an explicit re-link of the same provider and model restores it, and a revoke still stops at once.
 - The badge shows "Reconnecting to this Mac…" while it restores the link instead of "access ended", and names the provider.
-- OpenRouter: thinking off sends an off effort only when the model reports one. Models that report nothing got  and failed with 400 on routes taking only low/high/max.
+- OpenRouter: thinking off sends an off effort only when the model reports one. Models that report nothing got `effort: none` and failed with 400 on routes taking only low/high/max.
 - Switching between tasks of an SSH workspace while one runs brings forward the view already showing the task instead of opening a new view, a new SSH connection and a full reload each time.
 
 ## 0.6.24 — 2026-10-03
