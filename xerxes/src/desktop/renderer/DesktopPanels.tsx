@@ -1295,6 +1295,7 @@ function WorkspacePanel({ snap }: { snap: Snapshot }): ReactElement {
   const [adding, setAdding] = useState(false),
     [alias, setAlias] = useState(''),
     [target, setTarget] = useState(''),
+    [port, setPort] = useState(''),
     [path, setPath] = useState(''),
     [folders, setFolders] = useState<string[]>([]),
     [browsing, setBrowsing] = useState(false),
@@ -1331,8 +1332,10 @@ function WorkspacePanel({ snap }: { snap: Snapshot }): ReactElement {
     })
     return () => { active = false }
   }, [adding])
+  // A port typed into its own field joins the host the way ssh targets carry it: user@host:port.
+  const destination = port.trim() && !/:[0-9]+$/.test(target.trim()) ? `${target.trim()}:${port.trim()}` : target.trim()
   const browse = async (folder: string) => {
-    const result = await native('browse', { target, path: folder })
+    const result = await native('browse', { target: destination, path: folder })
     if (request.alive.current) {
       setPath(text(result.path))
       setFolders(Array.isArray(result.directories) ? result.directories.map(text) : [])
@@ -1446,13 +1449,27 @@ function WorkspacePanel({ snap }: { snap: Snapshot }): ReactElement {
                 setFolders([])
                 setBrowsing(false)
               }}
-              placeholder="Choose an SSH alias or user@host"
+              placeholder="SSH alias, user@host or user@host:port"
             />
             <datalist id="ssh-hosts">
               {hosts.map((host) => (
                 <option key={host} value={host} />
               ))}
             </datalist>
+          </label>
+          <label>
+            Port
+            <input
+              inputMode="numeric"
+              value={port}
+              onChange={(e) => {
+                setPort(e.target.value.replace(/[^0-9]/g, '').slice(0, 5))
+                setPath('')
+                setFolders([])
+                setBrowsing(false)
+              }}
+              placeholder="22, or the port from your SSH config"
+            />
           </label>
           {hostsLoading && <p className="studio-muted" role="status">Loading SSH aliases. You can also enter a host directly.</p>}
           {hostsError && <p className="studio-error" role="alert">{hostsError} You can enter an SSH alias or user@host directly.</p>}
@@ -1507,7 +1524,7 @@ function WorkspacePanel({ snap }: { snap: Snapshot }): ReactElement {
               disabled={request.busy || !alias || !target || !path}
               onClick={() =>
                 void request.run(async () => {
-                  await native('save', { machine: { alias, target, workspacePath: path } })
+                  await native('save', { machine: { alias, target: destination, workspacePath: path } })
                   if (request.alive.current) {
                     setAdding(false)
                     await load()

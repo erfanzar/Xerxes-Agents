@@ -7,6 +7,13 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.20 — 2026-10-03
+
+Remote workspaces on a non-standard SSH port.
+
+- The remote workspace form has a Port field, and an SSH host may be written as `user@host:port`; `/machine add` in the terminal accepts the same. Folder browsing, setup, the tunnel and runtime updates all use the port.
+- Connections still use key-based login and a known host key. To set up a password-only server once, run `ssh-copy-id -p <port> user@host`.
+
 ## 0.6.19 — 2026-10-02
 
 Reliability release, round 2: 55 more bugs, each confirmed by an independent check and fixed with a test that fails without the fix, including two regressions from 0.6.18.

@@ -8,6 +8,7 @@ import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { remoteBootstrapScript } from '../../ui/lib/remoteBootstrap.js'
 import { remoteResumeProgram } from './remoteResume.js'
+import { isSshTarget, sshDestination } from '../../daemon/sshTarget.js'
 
 export interface RemoteTarget {
   alias: string
@@ -20,9 +21,7 @@ export function remoteTarget(value: unknown): RemoteTarget {
   if (
     typeof row.alias !== 'string' ||
     !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(row.alias) ||
-    typeof row.target !== 'string' ||
-    row.target.length > 255 ||
-    !/^(?:[a-zA-Z0-9_][a-zA-Z0-9_.-]*@)?[a-zA-Z0-9_][a-zA-Z0-9_.-]*$/.test(row.target) ||
+    !isSshTarget(row.target) ||
     typeof row.workspacePath !== 'string' ||
     !row.workspacePath.startsWith('/') ||
     row.workspacePath.length > 4096 ||
@@ -122,6 +121,7 @@ export async function openRemote(
   previousAddress?: ReturnType<typeof remoteAddress>,
 ): Promise<RemoteConnection> {
   const machine = remoteTarget(value)
+  const destination = sshDestination(machine.target)
   const ssh = [
     '-o',
     'BatchMode=yes',
@@ -138,7 +138,7 @@ export async function openRemote(
   let address: ReturnType<typeof remoteAddress> | undefined
   let reused = false
   if (previousAddress) {
-    const probe = await runCaptured('ssh', [...ssh, '-T', '--', machine.target,
+    const probe = await runCaptured('ssh', [...ssh, '-T', '--', destination,
       'exec sh -c ' + quote('PATH="$HOME/.bun/bin:$HOME/.local/bin:$PATH"; export PATH; exec bun -e ' + quote(remoteResumeProgram(previousAddress.socketPath)))], signal, 20000)
     if (probe.split('\n').includes('XERXES_REMOTE_ALIVE')) { address = previousAddress; reused = true }
     else if (!probe.split('\n').includes('XERXES_REMOTE_MISSING')) throw new Error('Remote runtime probe did not return a valid status.')
@@ -150,7 +150,7 @@ export async function openRemote(
         ...ssh,
         '-T',
         '--',
-        machine.target,
+        destination,
         'exec sh -c ' + quote(remoteBootstrapScript(machine.workspacePath, 'daemon')),
       ],
       signal,
@@ -198,7 +198,7 @@ export async function openRemote(
         '-L',
         `${socketPath}:${address.socketPath}`,
         '--',
-        machine.target,
+        destination,
       ],
       { stdio: ['ignore', 'ignore', 'pipe'] },
     )
@@ -229,7 +229,7 @@ export async function openRemote(
     const connection: RemoteConnection = { socketPath, projectDir: address.projectDir, expectedBuildId: address.expectedBuildId, close,
       reconnect: (retrySignal, retryFailure) => openRemote(machine, retrySignal, retryFailure, reconnectAddress),
       async update(force = false) {
-        const updated = remoteAddress(await runCaptured('ssh', [...ssh, '-T', '--', machine.target,
+        const updated = remoteAddress(await runCaptured('ssh', [...ssh, '-T', '--', destination,
           'exec sh -c ' + quote(remoteBootstrapScript(machine.workspacePath, 'daemon', { force }))], updateController.signal, 300000))
         if (updated.socketPath !== address.socketPath || updated.projectDir !== address.projectDir) throw new Error('Remote daemon address changed; reconnect this workspace.')
         reconnectAddress = updated

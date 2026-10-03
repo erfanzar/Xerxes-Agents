@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path'
 import { spawn, type SpawnOptions, type ChildProcess } from 'node:child_process'
 import { sshFailure } from '../security/sshDiagnostics.js'
 import { writeSshConnectionConfig } from '../security/sshConnectionConfig.js'
+import { isSshTarget, sshDestination } from './sshTarget.js'
 
 export interface RemoteFolders { path: string; directories: string[]; truncated: boolean }
 export interface MachineDiscovery {
@@ -76,14 +77,14 @@ export function remoteFolderCommand(path: string): string {
 }
 
 export async function browseSshFolders(target: string, path: string, options: { signal?: AbortSignal; spawnProcess?: (file: string, args: readonly string[], options: SpawnOptions) => ChildProcess; timeoutMs?: number } = {}): Promise<RemoteFolders> {
-  if (!/^(?:[a-zA-Z0-9_][a-zA-Z0-9_.-]*@)?[a-zA-Z0-9_][a-zA-Z0-9_.-]*$/.test(target) || target.length > 255) return Promise.reject(new Error('Choose an SSH alias or user@hostname'))
+  if (!isSshTarget(target)) return Promise.reject(new Error('Choose an SSH alias, user@hostname or user@hostname:port'))
   const command = remoteFolderCommand(path)
   const directory = await mkdtemp(join(tmpdir(), 'xr-browse-'))
   try {
     const config = await writeSshConnectionConfig(directory)
     return await new Promise<RemoteFolders>((accept, reject) => {
       if (options.signal?.aborted) { reject(new Error('Folder browse cancelled')); return }
-      const child = (options.spawnProcess ?? spawn)('ssh', ['-F', config, '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'ForwardAgent=no', '-o', 'ForwardX11=no', '-o', 'ConnectTimeout=10', '--', target, command], { stdio: ['ignore', 'pipe', 'pipe'] })
+      const child = (options.spawnProcess ?? spawn)('ssh', ['-F', config, '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'ForwardAgent=no', '-o', 'ForwardX11=no', '-o', 'ConnectTimeout=10', '--', sshDestination(target), command], { stdio: ['ignore', 'pipe', 'pipe'] })
       const output: Buffer[] = [], errors: Buffer[] = []
       let bytes = 0, settled = false
       const finish = (error?: Error, value?: RemoteFolders) => {

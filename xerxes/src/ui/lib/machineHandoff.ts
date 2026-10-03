@@ -33,6 +33,11 @@ export interface RemoteMachine {
   workspacePath: string
 }
 
+/** A target with a port (`user@host:2222`) is passed to ssh as an `ssh://` URI. Mirrors daemon/sshTarget.ts; the TUI bundle does not import the daemon. */
+export function sshDestination(target: string): string {
+  return /:[0-9]+$/.test(target) ? `ssh://${target}` : target
+}
+
 export function parseRemoteMachine(value: unknown): RemoteMachine {
   if (!value || typeof value !== 'object') throw new Error('Invalid remote machine response')
   const row = value as Record<string, unknown>
@@ -97,7 +102,7 @@ export async function connectRemoteMachine(
     ssh.unshift('-F', await writeSshConnectionConfig(directory))
     options.onProgress?.("Checking remote runtime…")
     const output = await new Promise<string>((resolve, reject) => {
-      const child = launch('ssh', [...ssh, '-T', '--', machine.target, command], { stdio: ['ignore', 'pipe', 'pipe'] })
+      const child = launch('ssh', [...ssh, '-T', '--', sshDestination(machine.target), command], { stdio: ['ignore', 'pipe', 'pipe'] })
       let stdout = '', stderr = ''
       let killTimer: ReturnType<typeof setTimeout> | undefined
       const stop = (error: Error) => {
@@ -172,7 +177,7 @@ export async function connectRemoteMachine(
           status('failed', remoteFailureHint(error))
         }
       }
-      tunnel = startSshSocketTunnel({ ssh, target: machine.target, controlPath: join(directory, 'control.sock'),
+      tunnel = startSshSocketTunnel({ ssh, target: sshDestination(machine.target), controlPath: join(directory, 'control.sock'),
         localSocket: socket, remoteSocket: remote.socketPath as string, onFailure: failed, spawnProcess: launch,
         onReady: () => { if (!settled) { retries = 0; outageStarted = undefined } } })
     }
@@ -250,7 +255,7 @@ export async function reconnectRemoteMachine(
   for (let attempt = 0; ; attempt++) {
     options.signal?.throwIfAborted()
     try {
-      await connect(machine, { ...options, resumeSessionId, onSessionId: id => { resumeSessionId = id; options.onSessionId?.(id) } })
+      await connect(machine, { ...options, ...(resumeSessionId === undefined ? {} : { resumeSessionId }), onSessionId: id => { resumeSessionId = id; options.onSessionId?.(id) } })
       return
     } catch (error) {
       if (options.signal?.aborted || attempt >= 3 || !retryableRemoteFailure(error)) throw error

@@ -5,6 +5,7 @@ import { mkdir, readFile, rename, rm } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { withFileLock } from '../session/daemonTranscript.js'
 import { machineDiscovery, type MachineDiscovery } from './machineDiscovery.js'
+import { isSshTarget } from './sshTarget.js'
 
 export interface MachineWorkspace {
   readonly alias: string
@@ -18,7 +19,7 @@ function validateMachine(value: unknown): MachineWorkspace {
   if (!value || typeof value !== 'object') throw new Error('Invalid machine entry')
   const row = value as Record<string, unknown>
   if (typeof row.alias !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(row.alias)) throw new Error('Machine name must contain letters, numbers, underscores or hyphens')
-  if (typeof row.target !== 'string' || row.target.length > 255 || !/^(?:[a-zA-Z0-9_][a-zA-Z0-9_.-]*@)?[a-zA-Z0-9_][a-zA-Z0-9_.-]*$/.test(row.target)) throw new Error('Use an SSH config alias or user@hostname; configure ports and identity files in ~/.ssh/config')
+  if (!isSshTarget(row.target)) throw new Error('Use an SSH config alias, user@hostname or user@hostname:port; configure identity files in ~/.ssh/config')
   if (typeof row.workspacePath !== 'string' || !row.workspacePath.startsWith('/') || /[\x00-\x1f\x7f]/.test(row.workspacePath) || row.workspacePath.length > 4096) throw new Error('Remote workspace must be an absolute path without control characters')
   return { alias: row.alias, target: row.target, workspacePath: row.workspacePath }
 }

@@ -56,7 +56,7 @@ test('specialist discovery does not turn broken records into an empty catalog', 
 test('remote boundary rejects option injection, controls and invalid socket forwarding', () => {
   const machine = { alias: 'gpu', target: 'me@host', workspacePath: '/home/me/project with spaces' }
   expect(remoteTarget(machine)).toEqual(machine)
-  for (const target of ['-oProxyCommand=evil', 'host;echo bad', 'me@host\nother', 'host:22'])
+  for (const target of ['-oProxyCommand=evil', 'host;echo bad', 'me@host\nother', 'host:0', 'host:22:22', 'host:/srv'])
     expect(() => remoteTarget({ ...machine, target })).toThrow()
   expect(() => remoteTarget({ ...machine, workspacePath: '/tmp/x\n' })).toThrow()
   expect(
