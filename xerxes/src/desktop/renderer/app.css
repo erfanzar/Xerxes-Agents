@@ -1346,6 +1346,9 @@ details[open] > summary::marker { content: "▾\00a0\00a0"; }
 .remote-providers { margin-block: 20px; overflow-wrap: anywhere; }
 .remote-providers h3 { margin-block: 0 10px; }
 .remote-providers p { margin-block: 10px; line-height: 1.5; }
+.remote-providers__activity { border: 1px solid var(--x-accent, currentColor); background: var(--x-accent-soft, transparent); border-radius: 8px; padding: 10px 12px; margin-block: 0 14px; }
+.remote-providers__activity[data-live="false"] { border-color: var(--x-needs-border, currentColor); background: var(--x-needs-bg, transparent); }
+.remote-providers .remote-providers__activity p { margin-block: 4px; }
 .remote-providers fieldset { min-width: 0; border: 0; padding: 0; margin-block: 16px; }
 .remote-providers legend { font-weight: 600; }
 .remote-providers__list { max-height: 240px; overflow-y: auto; margin-block: 12px; }

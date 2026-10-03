@@ -574,6 +574,12 @@ html,body,#root,.app.atelier{background:transparent}
 .atelier .composer__context{display:grid;place-items:center;width:28px;height:28px;padding:4px;border:0;border-radius:4px;background:none;color:var(--x-secondary)}
 .atelier .composer__send{flex:none;width:32px;height:32px;border:0;border-radius:8px;background:var(--x-accent);color:var(--x-on-accent)}
 .atelier .composer__bar .cchip{max-width:min(320px,40vw);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:var(--ui-font) var(--sans)}
+/* An SSH task whose prompts run on this computer: never silent. */
+.atelier .cchip.relaybadge{display:inline-flex;align-items:center;gap:5px;color:var(--x-accent);background:var(--x-accent-soft)}
+.atelier .cchip.relaybadge:hover{color:var(--x-accent-bright)}
+.atelier .cchip.relaybadge[data-state="ended"]{color:var(--x-needs-text);background:var(--x-needs-bg)}
+.atelier .relaybadge__dot{width:6px;height:6px;border-radius:50%;background:currentColor;animation:relay-pulse 1.2s ease-in-out infinite}
+@keyframes relay-pulse{0%,100%{opacity:.35}50%{opacity:1}}
 .atelier .composer__hints{display:flex;align-items:center;gap:8px;flex-wrap:wrap;max-width:var(--conversation-width);margin:6px auto 0;font:var(--ui-small) var(--sans)}
 /* These four spans are the only on-screen documentation of ⏎/⇧⏎/esc/⌘K.
    Hiding them made the command palette undiscoverable. */

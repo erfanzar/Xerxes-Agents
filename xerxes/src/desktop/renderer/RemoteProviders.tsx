@@ -4,13 +4,15 @@ import { useEffect, useRef, useState } from 'react'
 import type { ShareableLocalProfile } from '../../protocol/shareableLocalProfiles.js'
 import type { XerxesBridge } from './types.js'
 import { desktopError } from './desktopRpc.js'
+import { relaySummary } from './RelayBadge.js'
+import type { ProviderRelayView } from './store.js'
 
 interface Review {
   review: string; destination: string; workspace: string; sessionKey: string;
   profiles: readonly ShareableLocalProfile[]; running: boolean; remoteProfile: string; model: string;
   source: string; expiresAt?: number; sharedProfiles: string[];
 }
-export function RemoteProviders({remote, changed}: {remote?: XerxesBridge['remote']; changed?: () => void}) {
+export function RemoteProviders({remote, relay, changed}: {remote?: XerxesBridge['remote']; relay?: ProviderRelayView | null; changed?: () => void}) {
   const [review,setReview] = useState<Review | null>(null)
   const [error,setError] = useState(''), [busy,setBusy] = useState(false), [editing,setEditing] = useState(false)
   const [selected,setSelected] = useState<string[]>([]), [primary,setPrimary] = useState('')
@@ -39,12 +41,16 @@ export function RemoteProviders({remote, changed}: {remote?: XerxesBridge['remot
   const needsControlled = review?.profiles.some(profile=>selected.includes(profile.name)&&profile.providerControlledOutput)
   return <section className="remote-providers" aria-label="SSH provider source">
     <h3>Provider source for this conversation</h3>
+    {relay && <div className="remote-providers__activity" data-live={relay.live} role="status">
+      <strong>{relay.live ? 'Prompts run on this computer' : 'Access to this computer ended'}</strong>
+      {relaySummary(relay).split('\n').slice(0, -1).map(line => <p key={line}>{line}</p>)}
+    </div>}
     {error && <p className="studio-error" role="alert">{error} <button className="btn" disabled={busy} onClick={()=>void act(()=>read(true))}>Refresh setup</button></p>}
     {!review ? <p role="status">{error ? 'Provider setup could not be loaded.' : 'Reading local provider setup…'}</p> : <>
       <button className="btn" disabled={busy} onClick={()=>void act(()=>read())}>Refresh provider status</button>
       <p><strong>{review.source==='remote' ? 'Remote credentials' : review.source==='local' && (review.expiresAt ?? 0)>Date.now() ? 'Local credentials · access enabled' : 'Local credentials · access needs renewal'}</strong><br/>
         Code and tools: {review.destination} · {review.workspace}</p>
-      <p className="studio-muted">{review.source==='remote' ? `This task uses the remote host’s saved setup (${review.remoteProfile || 'no profile reported'}). Local key changes do not update it. Choose local access below, or use the remote provider controls to keep that setup.` : `Provider requests and authentication run on this computer. Access ends ${review.expiresAt ? new Date(review.expiresAt).toLocaleString() : 'when disconnected'}, or when this workspace view closes. Reconnect requires review; remote credentials are never used as a fallback.`}</p>
+      <p className="studio-muted">{review.source==='remote' ? `This task uses the remote host’s saved setup (${review.remoteProfile || 'no profile reported'}). Keyed providers from this computer are copied there on connect, and new tasks follow this computer’s sign-in provider (ChatGPT, Claude Code) automatically. Choose local access below to move this task too.` : `Provider requests and authentication run on this computer. Access runs until ${review.expiresAt ? new Date(review.expiresAt).toLocaleString() : 'this window disconnects'}, renews while this window stays connected, and resumes when it reconnects. Remote credentials are never used as a fallback.`}</p>
       {!editing ? <div className="row__actions">
         <button className="btn" disabled={busy} onClick={()=>void act(async()=>{await read(true);setEditing(true)})}>Review local provider access</button>
         {review.source==='local' && <button className="btn" disabled={busy} onClick={()=>void act(()=>remote!('provider-revoke',{sessionKey:review.sessionKey}))}>Revoke local access</button>}

@@ -50,7 +50,7 @@ const MAP: ReadonlyArray<readonly [local: string, phosphor: string]> = [
   ['bug', 'bug'], ['flask', 'flask'], ['lightning', 'lightning'], ['stack', 'stack-simple'],
   ['tree', 'tree-structure'], ['archive', 'archive'], ['pin', 'push-pin'], ['eye', 'eye'],
   ['brain', 'brain'], ['note', 'note-pencil'], ['hourglass', 'hourglass'],
-  ['arrowDown', 'arrow-down'], ['retry', 'arrow-clockwise'], ['half', 'square-half'], ['spinner', 'circle-notch'], ['agents', 'users-three'],
+  ['arrowDown', 'arrow-down'], ['retry', 'arrow-clockwise'], ['half', 'square-half'], ['spinner', 'circle-notch'], ['agents', 'users-three'], ['laptop', 'laptop'],
 ]
 
 /**

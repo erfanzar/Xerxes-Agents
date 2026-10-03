@@ -6,7 +6,11 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { connect } from 'node:net'
+
 import { importProfiles, ProfileStore } from '../src/bridge/profiles.js'
+import { InMemoryDaemonRuntime } from '../src/daemon/runtime.js'
+import { DaemonServer } from '../src/daemon/server.js'
 import { copyProfilesToRemote, localKeyedProfiles } from '../src/desktop/main/profileSync.js'
 
 async function inTemporaryHome(body: (root: string) => Promise<void>): Promise<void> {
@@ -64,7 +68,7 @@ test('a same-named host profile keeps its own endpoint, key, model and tuned lim
     for (let connect = 0; connect < 2; connect++) {
       const outcome = importProfiles(host, Object.values(mac.profiles))
       expect(outcome.imported).toEqual(connect === 0 ? ['zai'] : [])
-      expect(outcome.skipped).toContainEqual({ name: 'openrouter', reason: 'already on host' })
+      expect(outcome.skipped).toContainEqual({ name: 'openrouter', reason: 'host uses a different endpoint' })
     }
     expect(host.get('openrouter')).toEqual(before)
     expect(host.get('zai')?.api_key).toBe('zai-key')
@@ -93,5 +97,86 @@ test('an older host runtime without the method leaves the connection alone', asy
     const result = await copyProfilesToRemote(async () => { throw new Error('Unknown method: provider.import') }, macFile)
     expect(result).toEqual({ imported: [], error: 'Unknown method: provider.import' })
     expect(await localKeyedProfiles(join(root, 'missing.json'))).toEqual([])
+  })
+})
+
+test('a key rotated on the Mac replaces the copy on the host; its model and tuned limits stay', async () => {
+  await inTemporaryHome(async root => {
+    const host = new ProfileStore(join(root, 'host-profiles.json'))
+    expect(importProfiles(host, Object.values(mac.profiles)).imported).toEqual(['openrouter', 'zai'])
+    host.updateModelCapabilities('zai', 'glm-5.3', { contextLimit: 200_000 })
+    const rotated = Object.values(mac.profiles).map(profile => profile.name === 'zai' ? { ...profile, api_key: 'zai-new-key', model: 'mac/other' } : profile)
+    const outcome = importProfiles(host, rotated)
+    expect(outcome).toMatchObject({ imported: [], updated: ['zai'] })
+    expect(outcome.skipped).toContainEqual({ name: 'openrouter', reason: 'already on host' })
+    expect(host.get('zai')).toMatchObject({ api_key: 'zai-new-key', model: 'glm-5.3', sampling: { temperature: 0.2 } })
+    expect(host.get('zai')?.model_overrides).toMatchObject({ 'glm-5.3': { context_limit: 200_000 } })
+    expect(importProfiles(host, rotated).updated).toEqual([])
+  })
+})
+
+/** One request at a time over the daemon socket; events are skipped. */
+async function daemonCall(socketPath: string): Promise<{ call: (method: string, params: Record<string, unknown>) => Promise<Record<string, unknown>>; close: () => void }> {
+  const socket = connect({ path: socketPath })
+  await new Promise<void>((resolve, reject) => { socket.once('connect', resolve); socket.once('error', reject) })
+  socket.setEncoding('utf8')
+  let buffer = '', id = 0
+  const pending = new Map<number, (result: Record<string, unknown>) => void>()
+  socket.on('data', chunk => {
+    buffer += String(chunk)
+    for (let newline = buffer.indexOf('\n'); newline >= 0; newline = buffer.indexOf('\n')) {
+      const frame = JSON.parse(buffer.slice(0, newline)) as { id?: number; result?: Record<string, unknown>; error?: unknown }
+      buffer = buffer.slice(newline + 1)
+      if (typeof frame.id === 'number') pending.get(frame.id)?.(frame.result ?? { error: frame.error })
+    }
+  })
+  return {
+    call: (method, params) => new Promise(resolve => { id += 1; pending.set(id, resolve); socket.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n') }),
+    close: () => socket.destroy(),
+  }
+}
+
+async function withHostDaemon(hostDocument: unknown, body: (call: (method: string, params: Record<string, unknown>) => Promise<Record<string, unknown>>, host: ProfileStore) => Promise<void>): Promise<void> {
+  await inTemporaryHome(async root => {
+    const hostFile = join(root, 'profiles.json')
+    if (hostDocument) await writeFile(hostFile, JSON.stringify(hostDocument))
+    const profileStore = new ProfileStore(hostFile)
+    const runtime = new InMemoryDaemonRuntime(undefined, { currentProjectDirectory: root, sessionDirectory: join(root, 'sessions') })
+    const socketPath = join(root, 'daemon.sock')
+    const server = new DaemonServer({ profileStore, runtime, socketPath })
+    await server.start()
+    const client = await daemonCall(socketPath)
+    try {
+      await client.call('initialize', { session_key: 'ssh-task' })
+      await body(client.call, profileStore)
+    } finally { client.close(); await server.stop() }
+  })
+}
+
+test('a fresh SSH host starts on the Mac\'s active profile, so its model list is not empty', async () => {
+  await withHostDaemon(undefined, async (call, host) => {
+    expect(host.chosenActive()).toBeUndefined()
+    const result = await call('provider.import', { profiles: Object.values(mac.profiles), active: 'zai' })
+    expect(result).toMatchObject({ ok: true, imported: ['openrouter', 'zai'], selected: 'zai' })
+    expect(host.chosenActive()).toBe('zai')
+    expect((await call('session.status', { session_key: 'ssh-task' })).session).toMatchObject({ model: 'glm-5.3' })
+  })
+})
+
+test('when the Mac\'s active profile is a sign-in one, a fresh host starts on the first copied profile', async () => {
+  await withHostDaemon(undefined, async (call, host) => {
+    const result = await call('provider.import', { profiles: Object.values(mac.profiles), active: 'codex' })
+    expect(result).toMatchObject({ ok: true, selected: 'openrouter' })
+    expect(host.chosenActive()).toBe('openrouter')
+  })
+})
+
+test('a host that already chose a provider keeps it', async () => {
+  const own = { name: 'own', provider: 'openai', base_url: 'https://api.example.test/v1', api_key: 'host-key', model: 'own-model', model_capabilities: {}, sampling: {} }
+  await withHostDaemon({ active: 'own', profiles: { own } }, async (call, host) => {
+    const result = await call('provider.import', { profiles: Object.values(mac.profiles), active: 'zai' })
+    expect(result).toMatchObject({ ok: true, imported: ['openrouter', 'zai'] })
+    expect(result.selected).toBeUndefined()
+    expect(host.chosenActive()).toBe('own')
   })
 })

@@ -7,6 +7,14 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.23 — 2026-10-03
+
+Your providers work on SSH workspaces automatically, and you can always see when a task runs through your Mac.
+
+- Keyed providers: a host that never chose a provider now starts on the Mac's active one (or the first copied one that works) instead of an empty model list. A key rotated on the Mac replaces the copy on the host; the host's own model and limits stay.
+- ChatGPT/Codex and Claude Code: their logins are not copied (a copy would sign one machine out, or live in the Mac's keychain). New SSH tasks automatically send their model requests through the Mac's own sign-in, renewed before the eight-hour limit and resumed after a reconnect. Tasks already run on the host's providers are left alone. Claude Code can now use this route, running on the Mac as a model only with its tools off.
+- A composer badge shows "via this Mac" while a task runs through your Mac, pulses while a request is in flight, and turns into "Mac access ended" when the connection is gone. Hover for the provider, model, request count and last error; click to inspect or stop it.
+
 ## 0.6.22 — 2026-10-03
 
 Check for Updates works again.

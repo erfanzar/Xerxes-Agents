@@ -1392,7 +1392,7 @@ function WorkspacePanel({ snap }: { snap: Snapshot }): ReactElement {
           Recent workspaces
         </button>
       </div>
-      {remoteStatus?.machine && <RemoteProviders key={snap.sessionKey} remote={window.xerxes.remote} changed={()=>store.loadModels(true)}/>}
+      {remoteStatus?.machine && <RemoteProviders key={snap.sessionKey} remote={window.xerxes.remote} relay={snap.providerRelay} changed={()=>store.loadModels(true)}/>}
       <h3 className="workspace-section-title">Saved connections</h3>
       <p className="studio-muted">
         Connect to a project on another machine over SSH.

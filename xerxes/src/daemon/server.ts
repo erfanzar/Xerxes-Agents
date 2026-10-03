@@ -3503,10 +3503,23 @@ export class DaemonServer {
     }
     if (method === "provider.import") {
       // The desktop copies the Mac's key-based profiles to an SSH workspace
-      // host on connect. Additive; the host's active selection is unchanged.
+      // host on connect, refreshing keys rotated on the Mac.
       const outcome = importProfiles(this.profileStore, params.profiles);
-      if (outcome.imported.length) await this.emitProviderInit(connection);
-      return { ok: true, imported: [...outcome.imported], skipped: outcome.skipped.map(item => ({ ...item })) };
+      // A host that never chose a provider falls back to the built-in Claude
+      // Code profile, which an SSH host rarely has, so its model list stayed
+      // empty even with the Mac's keys copied. Adopt the Mac's active profile,
+      // else the first copied one that works. A choice the host made is kept.
+      let selected: string | undefined;
+      if (!this.profileStore.chosenActive()) {
+        const offered = Array.isArray(params.profiles) ? params.profiles.map(value => isRecord(value) && typeof value.name === 'string' ? value.name.trim() : '') : [];
+        const candidates = [...new Set([optionalString(params.active) ?? '', ...offered])].filter(name => name && this.profileStore.get(name)?.api_key.trim());
+        for (const name of candidates) {
+          const chosen = await this.selectProvider(connection, name).catch(() => ({ ok: false }));
+          if (chosen.ok === true) { selected = name; break; }
+        }
+      }
+      if (!selected && (outcome.imported.length || outcome.updated.length)) await this.emitProviderInit(connection);
+      return { ok: true, imported: [...outcome.imported], updated: [...outcome.updated], skipped: outcome.skipped.map(item => ({ ...item })), ...(selected ? { selected } : {}) };
     }
     if (method === "provider_select") {
       return this.selectProvider(connection, optionalString(params.name) ?? "");

@@ -260,3 +260,23 @@ test('repeated revoked grants release authority and retain only bounded owner-sc
     expect(await other.request('provider.relay.status',{id:last})).toMatchObject({ok:false,code:'grant_unavailable'})
   }finally{await host.close()}
 })
+
+test('Claude Code goes through the relay as a model whose output length it controls, with explicit consent', async () => {
+  let calls = 0
+  const host = await fixture({ async *stream() { calls++; yield { content: 'claude code reply' } } })
+  try {
+    host.profiles.save({ name: 'claude-code', provider: 'claude-code', model: 'claude-code/opus', baseUrl: 'claude-code://local', apiKey: '', setActive: false })
+    const owner = await host.open()
+    const params = { ...consent(), profile: 'claude-code', model: 'claude-code/opus' }
+    const inventory = await owner.request('provider.relay.inventory')
+    expect(inventory.profiles).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'claude-code', supported: true, output_limit_mode: 'provider-controlled',
+      credential_source: 'local provider authentication or environment' })]))
+    expect(await owner.request('provider.relay.authorize', params)).toMatchObject({ ok: false, code: 'output_limit_unsupported' })
+    expect(await owner.request('provider.relay.authorize', { ...params, max_output_tokens: null })).toMatchObject({ ok: false, code: 'invalid_request' })
+    const grant = await owner.request('provider.relay.authorize', { ...params, max_output_tokens: null, consent_provider_controlled_output: true })
+    expect(grant).toMatchObject({ ok: true, grant: { maxOutputTokens: null, outputLimitMode: 'provider-controlled' } })
+    const reply = await owner.request('provider.relay.next', { id: grantId(grant), frame: { ...frame, request: { ...frame.request, model: 'claude-code/opus' } } })
+    expect(reply).toMatchObject({ ok: true, reply: { deltas: [{ content: 'claude code reply' }] } })
+    expect(calls).toBe(1)
+  } finally { await host.close() }
+})

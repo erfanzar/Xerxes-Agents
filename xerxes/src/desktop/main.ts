@@ -25,7 +25,7 @@ import { desktopMachineCommand } from './main/machines.js'
 import { xerxesHome } from '../daemon/paths.js'
 import { DaemonRpc } from './main/daemon.js'
 import { DesktopProviderForwarding } from './main/providerForwarding.js'
-import { copyProfilesToRemote } from './main/profileSync.js'
+import { copyProfilesToRemote, localActiveProfile } from './main/profileSync.js'
 import { startAppUpdates } from './main/appUpdateController.js'
 import { registerDaemonBridge, detachDaemon } from './main/ipc.js'
 import { dictationPort, transcribeDictation } from './main/voice.js'
@@ -37,6 +37,12 @@ import {
   type RemoteTarget,
 } from './main/remote.js'
 import { notificationFor } from './main/notify.js'
+
+/** Keep an SSH conversation on this computer's sign-in provider; a failure is logged, never thrown. */
+async function followLocalProviders(forwarding: DesktopProviderForwarding): Promise<void> {
+  const result = await forwarding.follow()
+  if (result.status === 'failed') console.warn(`Could not use this computer's sign-in provider on the SSH host: ${result.reason}`)
+}
 
 const APP_NAME = 'Xerxes Agents'
 const here = dirname(fileURLToPath(import.meta.url))
@@ -387,6 +393,9 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
   activateSurface(id)
   const attach = (next?: DaemonRpc) => registerDaemonBridge(contents, next, (type, payload) => maybeNotify(window, type, payload), (method, result) => {
     if (session.observe(method, result)) scheduleWindowSave()
+    // Opening or starting a conversation on an SSH host: keep it on this
+    // computer's sign-in provider (ChatGPT, Claude Code), whose login stays here.
+    if ((method === 'initialize' || method === 'session.open') && remote && providerForwarding) void followLocalProviders(providerForwarding)
   })
   const handle = <Args extends unknown[], Result>(channel: string, handler: (event: IpcMainInvokeEvent, ...args: Args) => Result): void => {
     windowRoutes.bind(id, channel, handler)
@@ -568,8 +577,13 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
         },
       })
       forwarding = new DesktopProviderForwarding((method, args) => localProviders.call(method,args),
-        (method,args) => rpc.call(method,args), machine.target, next.projectDir)
-      rpc.onConnection(online => { if (!online) void forwarding.disconnect() })
+        (method,args) => rpc.call(method,args), machine.target, next.projectDir,
+        () => localActiveProfile(join(xerxesHome(), 'profiles.json')))
+      // Access ends with the transport; the open conversation follows this
+      // computer's sign-in provider again once it is back.
+      rpc.onConnection(online => { if (!online) void forwarding.disconnect(); else void followLocalProviders(forwarding) })
+      // The window shows when this conversation's prompts run on this computer.
+      forwarding.onChange(() => { if (!contents.isDestroyed()) contents.send('desktop:provider-relay') })
       localProviders.onConnection(online => { if (!online) void forwarding.disconnect() })
       try {
         await rpc.call('runtime.status')
@@ -638,6 +652,10 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
       if (action === 'cancel') {
         remoteAttempt?.abort()
         return { ok: true }
+      }
+      if (action === 'provider-activity') {
+        if (!remote || !daemon?.online || !providerForwarding) return { ok: true, bound: false }
+        return providerForwarding.current()
       }
       if (action === 'provider-review' || action === 'provider-share' || action === 'provider-revoke') {
         if (!remote || !daemon?.online || !providerForwarding) throw new Error('Reconnect the SSH workspace before reviewing local provider access.')

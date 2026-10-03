@@ -103,9 +103,18 @@ const bridge = {
     ipcRenderer.on('desktop:app-update-state', listener)
     return () => ipcRenderer.removeListener('desktop:app-update-state', listener)
   },
+  /** Fires when an SSH conversation's prompts start or stop running through this computer. */
+  onProviderRelay(handler: unknown): () => void {
+    if (typeof handler !== 'function') throw new TypeError('handler must be a function')
+    const listener = (): void => {
+      try { (handler as () => void)() } catch { /* a renderer fault must not break the bridge */ }
+    }
+    ipcRenderer.on('desktop:provider-relay', listener)
+    return () => ipcRenderer.removeListener('desktop:provider-relay', listener)
+  },
   remote(action: string, params: unknown = {}): Promise<unknown> {
     if (
-      !['list', 'hosts', 'browse', 'save', 'remove', 'connect', 'cancel', 'status', 'provider-review', 'provider-share', 'provider-revoke'].includes(action)
+      !['list', 'hosts', 'browse', 'save', 'remove', 'connect', 'cancel', 'status', 'provider-activity', 'provider-review', 'provider-share', 'provider-revoke'].includes(action)
     )
       return Promise.reject(new Error('Unknown remote action'))
     return ipcRenderer.invoke('desktop:remote', action, cleanParams(params))

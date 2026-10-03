@@ -30,6 +30,7 @@ import { RailAgents, RailFiles, RailWorkflows } from './RailLists.js'
 import { AgentInspector } from './AgentInspector.js'
 import { OutputViewer } from './OutputViewer.js'
 import { Icon } from './Icon.js'
+import { RelayBadge } from './RelayBadge.js'
 import { RailStatus, currentActionOf, orbStateOf } from './RailStatus.js'
 import { AgentOrb } from './AgentOrb.js'
 import { AgentsCard } from './AgentsCard.js'
@@ -1841,6 +1842,7 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
           </PickerLayer>
         </div>
         <span className="composer__flex" />
+        {snap.providerRelay && <RelayBadge relay={snap.providerRelay} />}
         <div className="chipanchor">
           <button
             className={`cchip composer__text${snap.model ? '' : ' is-custom'}`}

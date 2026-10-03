@@ -13,6 +13,8 @@ export type ProfileImportCall = (method: string, params: Record<string, unknown>
 
 export interface ProfileCopyResult {
   readonly imported: readonly string[]
+  /** The profile the host started using because it had none of its own. */
+  readonly selected?: string
   /** Why nothing was copied; the connection itself is unaffected. */
   readonly error?: string
 }
@@ -47,14 +49,30 @@ export async function localKeyedProfiles(profilesFile: string): Promise<Record<s
   })
 }
 
+/** This Mac's chosen profile, which a host with no choice of its own adopts. */
+export async function localActiveProfile(profilesFile: string): Promise<string | undefined> {
+  try {
+    const document: unknown = JSON.parse(await readFile(profilesFile, 'utf8'))
+    const active = document && typeof document === 'object' && !Array.isArray(document) ? (document as Record<string, unknown>).active : undefined
+    return typeof active === 'string' && active.trim() ? active.trim() : undefined
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    throw error
+  }
+}
+
 /** Send the keyed profiles to the host's runtime; failures are reported, never thrown. */
 export async function copyProfilesToRemote(call: ProfileImportCall, profilesFile: string): Promise<ProfileCopyResult> {
   try {
     const profiles = await localKeyedProfiles(profilesFile)
     if (!profiles.length) return { imported: [] }
-    const result = await call('provider.import', { profiles })
+    const active = await localActiveProfile(profilesFile)
+    const result = await call('provider.import', { profiles, ...(active ? { active } : {}) })
     if (result.ok !== true) return { imported: [], error: typeof result.error === 'string' ? result.error : 'The host runtime refused the profiles.' }
-    return { imported: Array.isArray(result.imported) ? result.imported.filter((name): name is string => typeof name === 'string') : [] }
+    return {
+      imported: Array.isArray(result.imported) ? result.imported.filter((name): name is string => typeof name === 'string') : [],
+      ...(typeof result.selected === 'string' ? { selected: result.selected } : {}),
+    }
   } catch (error) {
     return { imported: [], error: error instanceof Error ? error.message : String(error) }
   }

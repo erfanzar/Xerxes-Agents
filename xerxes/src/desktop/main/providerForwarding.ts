@@ -8,6 +8,29 @@ type Rpc = (method: string, params: Record<string, unknown>) => Promise<Record<s
 const record = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 interface Review { id: string; sessionKey: string; profiles: readonly ShareableLocalProfile[] }
 interface Access { brokers: LocalProviderBroker[]; bindings: string[]; expiresAt: number; profiles: string[] }
+/** What the local daemon reports for a profile with no saved key: a sign-in or environment credential. */
+const SIGN_IN_CREDENTIAL = 'local provider authentication or environment'
+/** Following access is renewed this long before it would expire. */
+const RENEW_BEFORE_MS = 10 * 60_000
+const FOLLOW_MINUTES = 480
+/**
+ * What has gone through this computer for one SSH conversation, so the person
+ * can see that its prompts run here rather than on the host. Counts outlive
+ * the access (a revoked or expired grant still shows what it carried).
+ */
+export interface RelayActivity {
+  readonly requests: number
+  readonly inFlight: number
+  readonly profile?: string
+  readonly model?: string
+  readonly lastAt?: number
+  readonly lastError?: string
+}
+interface ActivityState { requests: number; inFlight: Set<string>; profile?: string; model?: string; lastAt?: number; lastError?: string }
+const MAX_ACTIVITY = 128
+export type FollowResult =
+  | { readonly status: 'bound' }
+  | { readonly status: 'skipped' | 'failed'; readonly reason: string }
 const working = (session: Record<string, unknown>) => session.status !== 'idle' || Boolean(session.active_turn_id) ||
   Array.isArray(session.subagent_snapshots) && session.subagent_snapshots.some(raw => ['working','running','starting','waiting'].includes(String(record(raw).status)))
 
@@ -19,8 +42,16 @@ export class DesktopProviderForwarding {
   private review: Review | undefined
   private lifetime = new AbortController()
   private busy = false
+  private following: Promise<FollowResult> | undefined
+  private followAgain = false
+  private renewal: ReturnType<typeof setTimeout> | undefined
+  private readonly bindingOwners = new Map<string, { sessionKey: string; profile: string }>()
+  private readonly activity = new Map<string, ActivityState>()
+  private changed: (() => void) | undefined
+  /** `preferred` names this computer's active profile; without it nothing is followed automatically. */
   constructor(private readonly local: Rpc, private readonly remote: Rpc,
-    private readonly destination: string, private readonly workspace: string) {}
+    private readonly destination: string, private readonly workspace: string,
+    private readonly preferred?: () => Promise<string | undefined>) {}
 
   async inspect() {
     const response = await this.remote('session.status', { history_limit: 0 })
@@ -34,6 +65,7 @@ export class DesktopProviderForwarding {
     const running = working(session) || response.provider_binding_busy === true
     return {ok:true, review:review.id, destination:this.destination, workspace:this.workspace, sessionKey:session.key,
       profiles, running, remoteProfile:session.profile_name, model:session.model,
+      turns: typeof session.turn_count === 'number' ? session.turn_count : undefined,
       source:session.local_provider_label ? access && Date.now() < access.expiresAt ? 'local' : 'local-unavailable' : 'remote',
       expiresAt:access?.expiresAt, sharedProfiles:access?.profiles ?? []}
   }
@@ -82,8 +114,12 @@ export class DesktopProviderForwarding {
       await this.revokeSession(review.sessionKey)
       signal.throwIfAborted()
       const bindings = markers.map(value => String(value.binding))
-      bindings.forEach((binding,index) => this.routes.set(binding,brokers[index]!))
+      bindings.forEach((binding,index) => {
+        this.routes.set(binding,brokers[index]!)
+        this.bindingOwners.set(binding,{sessionKey:review.sessionKey, profile:profiles[index]!.name})
+      })
       this.sessions.set(review.sessionKey,{brokers,bindings,expiresAt,profiles:profiles.map(profile=>profile!.name)})
+      this.changed?.()
       return {ok:true}
     } catch (error) {
       await Promise.all(brokers.map(broker => broker.close()))
@@ -91,9 +127,119 @@ export class DesktopProviderForwarding {
     } finally { this.busy = false }
   }
 
+  /**
+   * Keep the open SSH conversation on this computer's sign-in provider with no
+   * manual review. ChatGPT and Claude Code logins cannot be copied to a host:
+   * they live in this computer's keychain or are replaced on every refresh, so
+   * a copy would sign one machine out. Their requests run here instead, with
+   * every other shareable profile offered as an alternative. Applies when this
+   * computer's active profile is such a provider: to a new conversation, and to
+   * one already following it after a reconnect or near expiry. A conversation
+   * already run on the host's own providers is left as it is. Keyed profiles
+   * are copied to the host on connect and need none of this.
+   * Calls arriving while one runs are coalesced into one more pass.
+   */
+  follow(): Promise<FollowResult> {
+    if (this.following) { this.followAgain = true; return this.following }
+    this.following = this.followOnce().finally(() => {
+      this.following = undefined
+      if (this.followAgain) { this.followAgain = false; void this.follow() }
+    })
+    return this.following
+  }
+
+  private async followOnce(): Promise<FollowResult> {
+    if (!this.preferred) return { status: 'skipped', reason: 'automatic provider access is off' }
+    try {
+      const name = await this.preferred()
+      const review = await this.inspect()
+      const primary = review.profiles.find(profile => profile.name === name)
+      if (!primary || !primary.supported || primary.credentialSource !== SIGN_IN_CREDENTIAL) return { status: 'skipped', reason: 'this computer\'s active profile is copied to the host' }
+      const followsHere = review.source !== 'remote'
+      if (!followsHere && review.turns !== 0) return { status: 'skipped', reason: 'this conversation uses the host\'s providers' }
+      if (review.source === 'local' && review.sharedProfiles[0] === primary.name && (review.expiresAt ?? 0) - Date.now() > RENEW_BEFORE_MS) {
+        this.scheduleRenewal(review.expiresAt!)
+        return { status: 'skipped', reason: 'already following' }
+      }
+      if (review.running) return { status: 'skipped', reason: 'the conversation is working' }
+      const profiles = [primary, ...review.profiles.filter(profile => profile.supported && profile.name !== primary.name)].slice(0, 32)
+      await this.authorize({ consent: true, review: review.review, profiles: profiles.map(profile => profile.name), profile: primary.name,
+        minutes: FOLLOW_MINUTES, providerControlledOutput: profiles.some(profile => profile.providerControlledOutput) })
+      this.scheduleRenewal(Date.now() + FOLLOW_MINUTES * 60_000)
+      return { status: 'bound' }
+    } catch (error) {
+      return { status: 'failed', reason: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+  private scheduleRenewal(expiresAt: number) {
+    clearTimeout(this.renewal)
+    this.renewal = setTimeout(() => { void this.follow() }, Math.max(1000, expiresAt - Date.now() - RENEW_BEFORE_MS + 1000))
+    this.renewal.unref?.()
+  }
+
   relay(binding: string, frame: Readonly<Record<string, unknown>>, signal: AbortSignal): Promise<unknown> {
     const broker = this.routes.get(binding)
-    return broker ? requestLocalProviderBroker(broker.path,frame,signal) : Promise.resolve({error:'grant_unavailable'})
+    if (!broker) return Promise.resolve({error:'grant_unavailable'})
+    const owner = this.bindingOwners.get(binding)
+    const id = typeof frame.id === 'string' ? frame.id : ''
+    const state = owner ? this.activityOf(owner.sessionKey) : undefined
+    // A request starts with the frame that carries it; later pulls stream it.
+    if (state && frame.op === 'next' && frame.request && typeof frame.request === 'object') {
+      const request = frame.request as Record<string, unknown>
+      state.requests += 1
+      state.inFlight.add(id)
+      state.lastAt = Date.now()
+      state.profile = owner!.profile
+      if (typeof request.model === 'string') state.model = request.model
+      this.changed?.()
+    }
+    const settle = (error?: string) => {
+      if (!state || !state.inFlight.delete(id)) return
+      if (error) state.lastError = error
+      this.changed?.()
+    }
+    if (frame.op === 'cancel') settle()
+    return requestLocalProviderBroker(broker.path,frame,signal).then(reply => {
+      const value = record(reply)
+      if (typeof value.error === 'string') settle(value.error)
+      else if (value.done === true) settle()
+      return reply
+    }, error => { settle(error instanceof Error ? error.message : String(error)); throw error })
+  }
+
+  /** Called whenever access or relayed traffic changes; one listener. */
+  onChange(listener: () => void): void { this.changed = listener }
+
+  /** Relayed traffic for one conversation, and whether its access is live now. */
+  activityFor(sessionKey: string): RelayActivity & { readonly live: boolean; readonly expiresAt?: number; readonly profiles: readonly string[] } {
+    const state = this.activity.get(sessionKey)
+    const access = this.sessions.get(sessionKey)
+    const live = Boolean(access && Date.now() < access.expiresAt)
+    const profile = state?.profile ?? access?.profiles[0]
+    return { live, profiles: access?.profiles ?? [], ...(access ? { expiresAt: access.expiresAt } : {}),
+      requests: state?.requests ?? 0, inFlight: state?.inFlight.size ?? 0,
+      ...(profile ? { profile } : {}),
+      ...(state?.model ? { model: state.model } : {}), ...(state?.lastAt ? { lastAt: state.lastAt } : {}), ...(state?.lastError ? { lastError: state.lastError } : {}) }
+  }
+
+  /** The open conversation's routing: bound to this computer, live, and what it carried. */
+  async current() {
+    const response = await this.remote('session.status', { history_limit: 0 })
+    const session = record(response.session)
+    if (response.ok !== true || typeof session.key !== 'string') return { ok: true, bound: false }
+    const bound = typeof session.local_provider_label === 'string' && session.local_provider_label !== ''
+    return { ok: true, bound, sessionKey: session.key, destination: this.destination, ...this.activityFor(session.key) }
+  }
+
+  private activityOf(sessionKey: string): ActivityState {
+    let state = this.activity.get(sessionKey)
+    if (!state) {
+      state = { requests: 0, inFlight: new Set() }
+      this.activity.set(sessionKey, state)
+      while (this.activity.size > MAX_ACTIVITY) this.activity.delete(this.activity.keys().next().value!)
+    }
+    return state
   }
 
   async revoke(sessionKey: unknown) {
@@ -105,11 +251,15 @@ export class DesktopProviderForwarding {
     const access = this.sessions.get(key)
     if (!access) return
     this.sessions.delete(key)
-    access.bindings.forEach(binding => this.routes.delete(binding))
+    access.bindings.forEach(binding => { this.routes.delete(binding); this.bindingOwners.delete(binding) })
+    this.activity.get(key)?.inFlight.clear()
+    this.changed?.()
     await Promise.all(access.brokers.map(broker => broker.close()))
   }
-  /** Called on either transport loss and surface closure. No automatic reauthorization. */
+  /** Called on either transport loss and surface closure. Only follow() authorizes again. */
   async disconnect() {
+    clearTimeout(this.renewal)
+    this.renewal = undefined
     this.review = undefined
     this.lifetime.abort()
     this.lifetime = new AbortController()

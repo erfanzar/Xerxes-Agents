@@ -690,7 +690,7 @@ function ModelsCard({ snap }: { snap: Snapshot }): ReactElement {
   return (
     <>
       <h2 className="modal__title">Models & Providers</h2>
-      {snap.storageScope?.startsWith('ssh:') && <RemoteProviders key={snap.sessionKey} remote={window.xerxes.remote} changed={()=>store.loadModels(true)}/>}
+      {snap.storageScope?.startsWith('ssh:') && <RemoteProviders key={snap.sessionKey} remote={window.xerxes.remote} relay={snap.providerRelay} changed={()=>store.loadModels(true)}/>}
       <p className="modal__sub">
         Change the session model from the composer. Select a provider to make it active. Profiles are stored in <code>~/.xerxes/profiles.json</code> on the workspace host.
       </p>

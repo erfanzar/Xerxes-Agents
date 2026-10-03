@@ -229,7 +229,7 @@ params fall back to per-connection defaults.
 | `fetch_models` / `provider_models`   | `{ profile_name }`                             | `{ ok, models, catalog?, source, warning? }`                    | Catalog rows may carry effective `context_limit`, `max_output_tokens`, provenance sources, and `overridden`; credentials never leave the daemon. |
 | `provider_model_override`            | `{ profile_name, model, context_limit?, max_output_tokens? }` | `{ ok, model }`                          | Positive safe integers set per-model user overrides; `null` clears a field. Precedence: user override → provider metadata → generated Pi catalog → unknown. Explicit runtime/profile `max_tokens` still wins for requests. |
 | `provider_list`                      | `{}`                                           | `{ ok, profiles }`                                             |                                                                                   |
-| `provider.import`                    | `{ profiles: [{ name, provider, base_url, api_key, model, sampling? }] }` | `{ ok, imported, skipped }` + emits `InitDone` when any imported | Adds key-based profiles the host does not have (a same-named host profile is kept) without changing the active one; used by the desktop on SSH connect. |
+| `provider.import`                    | `{ profiles: [{ name, provider, base_url, api_key, model, sampling? }], active? }` | `{ ok, imported, updated, skipped, selected? }` + emits `InitDone` when anything changed | Used by the desktop on SSH connect. Adds key-based profiles the host does not have; a same-named profile on the same endpoint takes a rotated key (`updated`) and keeps its model and limits, one on another endpoint is kept. A host that never chose a provider selects `active` (the sender's active profile) or else the first usable copied profile, reported as `selected`; a host choice is never changed. |
 | `provider_save`                      | `{ name, base_url, api_key, model?, provider }` | `{ ok, profile }` + emits `InitDone`                           | `model` is optional: an edit keeps the saved model; a new profile without one discovers the models its key can use and starts on the first, or fails with the provider's reason (and nothing is saved). |
 | `provider_select`                    | `{ name }`                                     | `{ ok }` + emits `InitDone`                                    |                                                                                   |
 | `provider_delete`                    | `{ name }`                                     | `{ ok }` + emits `InitDone`                                    |                                                                                   |
@@ -1882,8 +1882,9 @@ A renderer must not read local profile files or provider keys to use this API.
   thinking expansion or minimum-output floors. Exceeding the approved limit
   fails with `output_limit` before submitting that request; lower reasoning or
   explicitly authorize a larger limit before retrying.
-  Codex subscription does not accept an output cap. Numeric grants for that
-  transport fail with `output_limit_unsupported`. It requires the separate
+  Codex subscription and Claude Code (a subprocess run as a model only, tools
+  off) do not accept an output cap. Numeric grants for those
+  transports fail with `output_limit_unsupported`. It requires the separate
   policy `{max_output_tokens:null, consent_provider_controlled_output:true}`
   after explicit consent to provider-controlled output. Omitting the numeric
   field or the extra consent flag is not consent. Other transports cannot use
@@ -2209,16 +2210,28 @@ up to 32 selected local profiles/configured models for the selected SSH session
 and its delegated provider work. Local requests resolve saved same-route keys
 on each new request.
 
+The desktop also authorizes this without a review when the Mac's active
+profile is a sign-in provider (`openai-codex`, `claude-code`), whose login
+cannot be copied: it lives in the Mac's keychain or is replaced on every
+refresh. Opening a conversation (`initialize`/`session.open`) or reconnecting
+binds it to that profile, with the other shareable profiles as alternatives,
+when it is new or already bound to the Mac; one already run on the host's own
+providers is left alone. Access lasts eight hours, is renewed ten minutes
+before it ends while the window stays connected, and ends with the transport.
+
 Separately, on every SSH connect the desktop copies the Mac's key-based
-profiles to the workspace host with `provider.import { profiles }`, so they
-also work there as the host's own profiles. Each item is `{ name, provider,
-base_url, api_key, model, sampling? }`; the reply is `{ ok, imported,
-skipped: [{ name, reason }] }` and, when anything was imported, an `InitDone`.
-The import is additive: a name the host already has is skipped with reason
-`already on host`, so the host's own endpoint, key, model and tuned limits
-survive every reconnect. The host's active selection is unchanged, and
-sign-in providers (`claude-code`, `openai-codex`) and keyless profiles are
-skipped: the host signs in itself.
+profiles to the workspace host with `provider.import { profiles, active }`, so
+they also work there as the host's own profiles. Each item is `{ name,
+provider, base_url, api_key, model, sampling? }`; the reply is `{ ok, imported,
+updated, skipped: [{ name, reason }], selected? }` and, when anything changed,
+an `InitDone`. A name the host already has keeps its model and tuned limits:
+on the same endpoint a rotated key replaces the old one (`updated`), on
+another endpoint the host profile is kept (`host uses a different endpoint`).
+A host that never chose a provider selects `active`, the Mac's active profile,
+or else the first copied profile that works (`selected`); without this its
+fallback was the built-in Claude Code profile and the model list stayed empty.
+A host's own choice is never changed. Sign-in providers and keyless profiles
+are not copied.
 The keys are then stored in the host's `profiles.json` (mode 0600). A host
 runtime without the method leaves the connection unaffected.
 

@@ -20,7 +20,7 @@ import { seedModelsDev } from './fixtures/modelsDev.js'
 seedModelsDev()
 
 async function until(check:()=>boolean) { for(let i=0;i<300;i++){if(check())return;await Bun.sleep(10)}throw new Error('Timed out') }
-async function fixture() {
+async function fixture(preferred?: () => Promise<string | undefined>) {
   const dir=await realpath(await mkdtemp(join(tmpdir(),'xpf-'))), bindings=new RemoteProviderBindings(2000)
   const profiles=new ProfileStore(join(dir,'local-profiles.json')), seen:string[]=[], events:unknown[]=[]
   let fallback=0, hold=false, aborted=false
@@ -40,7 +40,7 @@ async function fixture() {
   const local=new DaemonRpc({socketPath:join(dir,'l.sock'),projectDir:dir,deadlineMs:3000})
   let forwarding:DesktopProviderForwarding
   const remote=new DaemonRpc({socketPath:join(dir,'r.sock'),projectDir:dir,deadlineMs:3000,providerRelay:(binding,frame,signal)=>forwarding.relay(binding,frame,signal)})
-  forwarding=new DesktopProviderForwarding((method,params)=>local.call(method,params),(method,params)=>remote.call(method,params),'verified-host',dir)
+  forwarding=new DesktopProviderForwarding((method,params)=>local.call(method,params),(method,params)=>remote.call(method,params),'verified-host',dir,preferred)
   remote.onConnection(online=>{if(!online)void forwarding.disconnect()});local.onConnection(online=>{if(!online)void forwarding.disconnect()})
   remote.onEvent((type,payload)=>events.push({type,payload}));remote.on('protocol_error',value=>events.push(value))
   const initialized=await remote.call('initialize',{})
@@ -164,3 +164,66 @@ test('expired access is reported unavailable and cannot fall back to remote cred
     await f.turn();expect(f.seen).toHaveLength(0);expect(f.fallback()).toBe(0)
   }finally{Date.now=originalNow;await f.close()}
 })
+
+// A sign-in profile (ChatGPT, Claude Code) has no key to copy; the fixture's
+// stand-in is a keyless profile, which the local daemon reports the same way.
+const signIn = (profiles: ProfileStore) => profiles.save({name:'local-signin',provider:'openai',model:'gpt-4o',apiKey:'',baseUrl:'https://fixture.invalid',setActive:false})
+
+test('a new SSH conversation follows this computer\'s sign-in provider with no review, and renews after a reconnect',async()=>{
+  let active='local-signin'
+  const f=await fixture(async()=>active)
+  try {
+    signIn(f.profiles)
+    let changes=0
+    f.forwarding.onChange(()=>{changes++})
+    expect(await f.forwarding.current()).toMatchObject({bound:false})
+    expect(await f.forwarding.follow()).toEqual({status:'bound'})
+    expect(changes).toBeGreaterThan(0)
+    const bound=await f.forwarding.inspect()
+    expect(bound.source).toBe('local')
+    expect(bound.sharedProfiles).toEqual(['local-signin','local-api'])
+    await f.turn()
+    expect(f.seen.at(-1)).toBe('')
+    expect(f.fallback()).toBe(0)
+    // What the composer badge and the workspace panel show.
+    const shown=await f.forwarding.current()
+    expect(shown).toMatchObject({bound:true,live:true,destination:'verified-host',profile:'local-signin',model:'gpt-4o'})
+    // The turn, plus the session title the host asks for afterwards: both run here.
+    expect((shown as {requests:number}).requests).toBeGreaterThanOrEqual(1)
+    expect(typeof (shown as {lastAt?:number}).lastAt).toBe('number')
+    expect(await f.forwarding.follow()).toEqual({status:'skipped',reason:'already following'})
+    // Transport loss ends access; the saved requirement makes the next pass renew it.
+    await f.forwarding.disconnect()
+    expect((await f.forwarding.inspect()).source).toBe('local-unavailable')
+    // Still bound on the host, no longer carried here: the badge turns into a warning.
+    const ended=await f.forwarding.current() as {bound:boolean;live:boolean;requests:number;inFlight:number}
+    expect(ended).toMatchObject({bound:true,live:false,inFlight:0})
+    expect(ended.requests).toBeGreaterThanOrEqual(1)
+    expect(await f.forwarding.follow()).toEqual({status:'bound'})
+    await f.turn()
+    expect(f.fallback()).toBe(0)
+    // A keyed active profile is copied to the host instead.
+    active='local-api'
+    expect((await f.forwarding.follow()).status).toBe('skipped')
+  }finally{await f.close()}
+},20000)
+
+test('a conversation already run on the host\'s providers is not taken over',async()=>{
+  const f=await fixture(async()=>'local-signin')
+  try {
+    signIn(f.profiles)
+    await f.turn()
+    expect(f.fallback()).toBe(1)
+    expect(await f.forwarding.follow()).toEqual({status:'skipped',reason:'this conversation uses the host\'s providers'})
+    expect((await f.forwarding.inspect()).source).toBe('remote')
+  }finally{await f.close()}
+},20000)
+
+test('without a preferred profile nothing is followed automatically',async()=>{
+  const f=await fixture()
+  try {
+    signIn(f.profiles)
+    expect(await f.forwarding.follow()).toEqual({status:'skipped',reason:'automatic provider access is off'})
+    expect((await f.forwarding.inspect()).source).toBe('remote')
+  }finally{await f.close()}
+},20000)

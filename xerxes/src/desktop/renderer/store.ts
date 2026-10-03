@@ -174,6 +174,38 @@ export function appUpdateView(value: unknown): AppUpdateView | null {
   return view as unknown as AppUpdateView
 }
 
+/**
+ * An SSH conversation whose prompts run through this computer (the Mac's
+ * ChatGPT or Claude Code sign-in) instead of on the host. Shown on the
+ * composer so it is never silent; details live in the workspace panel.
+ */
+export interface ProviderRelayView {
+  /** The host saved this conversation as running on this computer. */
+  readonly bound: boolean
+  /** This computer is carrying its requests now (false: access ended). */
+  readonly live: boolean
+  readonly destination?: string
+  readonly profile?: string
+  readonly model?: string
+  readonly requests: number
+  readonly inFlight: number
+  readonly lastAt?: number
+  readonly lastError?: string
+  readonly expiresAt?: number
+}
+
+export function providerRelayView(value: unknown): ProviderRelayView | null {
+  if (!value || typeof value !== 'object') return null
+  const row = value as Record<string, unknown>
+  if (row.ok !== true || row.bound !== true) return null
+  const text = (field: unknown) => typeof field === 'string' && field ? field : undefined
+  const count = (field: unknown) => typeof field === 'number' && Number.isFinite(field) && field >= 0 ? field : undefined
+  const view: Record<string, unknown> = { bound: true, live: row.live === true, requests: count(row.requests) ?? 0, inFlight: count(row.inFlight) ?? 0 }
+  for (const [key, field] of [['destination', text(row.destination)], ['profile', text(row.profile)], ['model', text(row.model)], ['lastError', text(row.lastError)]] as const) if (field) view[key] = field
+  for (const [key, field] of [['lastAt', count(row.lastAt)], ['expiresAt', count(row.expiresAt)]] as const) if (field !== undefined) view[key] = field
+  return view as unknown as ProviderRelayView
+}
+
 /** The daemon's delegation mode; an older runtime without one is auto. */
 function delegationModeValue(value: unknown): 'off' | 'auto' | 'eager' {
   return value === 'off' || value === 'eager' ? value : 'auto'
@@ -362,6 +394,8 @@ export interface Snapshot {
   readonly modelMenuOpen: boolean
   /** A newer desktop release, and where installing it has got to (null when current). */
   readonly appUpdate: AppUpdateView | null
+  /** Set while an SSH conversation's prompts run through this computer. */
+  readonly providerRelay: ProviderRelayView | null
   /** How eagerly this conversation fans out to agents (the composer's Agents chip). */
   readonly delegationMode: 'off' | 'auto' | 'eager'
   readonly delegationMenuOpen: boolean
@@ -898,6 +932,7 @@ export class Store {
       delegationMode: 'auto',
       delegationMenuOpen: false,
       appUpdate: null,
+      providerRelay: null,
       contextMenuOpen: false,
       contextBreakdown: null,
       contextBreakdownLoading: false,
@@ -950,6 +985,7 @@ export class Store {
     // The app's own updates come from the main process, not the runtime.
     this.bridge.onAppUpdate?.(state => this.patch({ appUpdate: appUpdateView(state) }))
     void this.bridge.appUpdate?.('state').then(state => this.patch({ appUpdate: appUpdateView(state) })).catch(() => undefined)
+    window.xerxes.onProviderRelay?.(() => this.refreshProviderRelay())
     // Workspace gate: no folder, no daemon, no initialize — the shell asks
     // for one instead of inventing a target the user never chose.
     const gate = (this.bridge as XerxesLike & { getWorkspace?: () => Promise<string | null> })
@@ -1962,6 +1998,25 @@ export class Store {
   }
 
   /** Relay the person's choice on the update prompt to the main process. */
+  private relayPending = false
+  private relayAgain = false
+  /** Ask the desktop whether this SSH conversation runs through this computer; calls coalesce. */
+  refreshProviderRelay(): void {
+    if (!this.frame.storageScope?.startsWith('ssh:') || !window.xerxes.remote) {
+      if (this.frame.providerRelay) this.patch({ providerRelay: null })
+      return
+    }
+    if (this.relayPending) { this.relayAgain = true; return }
+    this.relayPending = true
+    void window.xerxes.remote('provider-activity', {})
+      .then(value => this.patch({ providerRelay: providerRelayView(value) }))
+      .catch(() => undefined)
+      .finally(() => {
+        this.relayPending = false
+        if (this.relayAgain) { this.relayAgain = false; this.refreshProviderRelay() }
+      })
+  }
+
   async appUpdateAction(action: 'check' | 'install' | 'skip' | 'dismiss' | 'open-release'): Promise<void> {
     try {
       const state = await this.bridge.appUpdate?.(action)
@@ -3841,6 +3896,7 @@ export class Store {
         break
       }
       case 'status_update': {
+        this.refreshProviderRelay()
         if (payload.kind === 'network_retry') this.patch({ networkRetrying: true })
         if (payload.kind === 'provider_ready') this.patch({ networkRetrying: false })
         const patch: Record<string, unknown> = {}

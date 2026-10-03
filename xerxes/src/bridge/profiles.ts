@@ -123,6 +123,16 @@ export class ProfileStore {
     return profiles[this.activeName(document, profiles)]
   }
 
+  /**
+   * The profile this store's owner explicitly chose, if it still exists.
+   * Undefined means nothing was ever chosen and active() is only the built-in
+   * fallback — on an SSH host that fallback usually has no models.
+   */
+  chosenActive(): string | undefined {
+    const document = this.load()
+    return document.active && Object.hasOwn(this.merged(document), document.active) ? document.active : undefined
+  }
+
   /** Resolve one exact profile without changing the process-wide active selection. */
   get(name: string): ProviderProfile | undefined {
     const exact = name.trim()
@@ -638,22 +648,27 @@ const PROFILE_NAME = /^[A-Za-z0-9._-]{1,64}$/
 
 export interface ProfileImportOutcome {
   readonly imported: readonly string[]
+  /** Profiles copied earlier whose key changed on the sending machine. */
+  readonly updated: readonly string[]
   readonly skipped: readonly { readonly name: string; readonly reason: string }[]
 }
 
 /**
  * Copy key-based profiles into this store, as the desktop does from the Mac to
- * an SSH workspace host so its providers work there too. Additive: a name the
- * store already has is skipped, because the desktop sends its profiles on
- * every connect and replacing would undo the host's own endpoint, key, model
- * and tuned limits each time. The store's active selection is left alone.
+ * an SSH workspace host so its providers work there too. A name the store
+ * already has keeps the host's own model and tuned limits, because the desktop
+ * sends its profiles on every connect; only a new key for the same provider and
+ * endpoint is taken, so a key rotated on the Mac does not leave the host on a
+ * revoked one. A different endpoint under the same name is the host's own and
+ * is left alone. The store's active selection is left alone.
  * Sign-in providers are skipped: their credential lives in the other
  * machine's keychain or login file, and the host has to sign in itself.
  */
 export function importProfiles(store: ProfileStore, candidates: unknown): ProfileImportOutcome {
   const imported: string[] = []
+  const updated: string[] = []
   const skipped: { name: string; reason: string }[] = []
-  if (!Array.isArray(candidates)) return { imported, skipped: [{ name: '', reason: 'profiles must be a list' }] }
+  if (!Array.isArray(candidates)) return { imported, updated, skipped: [{ name: '', reason: 'profiles must be a list' }] }
   for (const value of candidates.slice(0, MAX_IMPORTED_PROFILES)) {
     const name = isRecord(value) && typeof value.name === 'string' ? value.name.trim() : ''
     if (!isRecord(value) || !PROFILE_NAME.test(name)) {
@@ -676,8 +691,15 @@ export function importProfiles(store: ProfileStore, candidates: unknown): Profil
       skipped.push({ name, reason: 'invalid base_url' })
       continue
     }
-    if (store.get(name)) {
-      skipped.push({ name, reason: 'already on host' })
+    const existing = store.get(name)
+    if (existing) {
+      const sameEndpoint = existing.base_url === baseUrl.replace(/\/+$/, '') && (!provider || existing.provider === provider)
+      if (sameEndpoint && existing.api_key !== apiKey) {
+        store.save({ name, baseUrl: existing.base_url, apiKey, model: existing.model, provider: existing.provider, setActive: false })
+        updated.push(name)
+      } else {
+        skipped.push({ name, reason: sameEndpoint ? 'already on host' : 'host uses a different endpoint' })
+      }
       continue
     }
     store.save({
@@ -694,5 +716,5 @@ export function importProfiles(store: ProfileStore, candidates: unknown): Profil
   for (const value of candidates.slice(MAX_IMPORTED_PROFILES)) {
     skipped.push({ name: isRecord(value) && typeof value.name === 'string' ? value.name : '', reason: 'too many profiles' })
   }
-  return { imported, skipped }
+  return { imported, updated, skipped }
 }

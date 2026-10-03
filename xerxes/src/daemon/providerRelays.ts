@@ -34,12 +34,12 @@ export class DaemonProviderRelays {
     return this.profiles.list().filter(profile => profile.model.trim() !== '').map(profile => {
       const provider = relayProvider(profile, profile.model)
       return { name: profile.name, provider: profile.provider, model: profile.model,
-      supported: provider !== undefined && provider !== 'claude-code',
-      output_limit_mode: provider === 'openai-codex' ? 'provider-controlled' : 'request-bound',
+      supported: provider !== undefined,
+      output_limit_mode: providerControlsOutput(provider) ? 'provider-controlled' : 'request-bound',
       credential_source: profile.api_key ? 'local saved profile' : 'local provider authentication or environment',
       readiness: 'configured; not verified with a provider call',
       ...(provider === undefined ? { setup: 'Correct the provider route in this local profile before sharing it.' } : {}),
-      ...(provider === 'claude-code' ? { setup: 'Use an API or subscription provider profile; the Claude Code subprocess cannot use this relay.' } : {}),
+      ...(provider === 'claude-code' ? { setup: 'Claude Code runs on this computer as a model only, with its own tools off, and controls output length. Request, concurrency and expiry limits still apply.' } : {}),
       ...(provider === 'openai-codex' ? { setup: 'Codex subscription controls output length. Explicit consent to provider-controlled output is required; request, concurrency and expiry limits still apply.' } : {}),
     } })
   }
@@ -57,11 +57,11 @@ export class DaemonProviderRelays {
     const profile = this.profiles.get(policy.profile)
     if (!profile || !profileAcceptsModel(profile, policy.model)) throw new LocalProviderRelayError('route_mismatch')
     const provider = relayProvider(profile, policy.model)
-    if (provider === undefined || provider === 'claude-code') throw new LocalProviderRelayError('route_mismatch')
-    if (provider === 'openai-codex' && policy.maxOutputTokens !== null) throw new LocalProviderRelayError('output_limit_unsupported')
+    if (provider === undefined) throw new LocalProviderRelayError('route_mismatch')
+    if (providerControlsOutput(provider) && policy.maxOutputTokens !== null) throw new LocalProviderRelayError('output_limit_unsupported')
     // Null is not an omitted/default cap. It is a separate, explicit consent
     // policy, allowed only for the native transport that cannot send a cap.
-    if (policy.maxOutputTokens === null && (provider !== 'openai-codex' || params.consent_provider_controlled_output !== true)) throw new LocalProviderRelayError('invalid_request')
+    if (policy.maxOutputTokens === null && (!providerControlsOutput(provider) || params.consent_provider_controlled_output !== true)) throw new LocalProviderRelayError('invalid_request')
     const identity = providerRouteIdentity(policy.model, { provider: profile.provider, baseUrl: profile.base_url })
     const defaults = profileDefaults(profile)
     const peer = Object.freeze({ destination: params.destination, workspace: params.workspace })
@@ -141,6 +141,15 @@ export class DaemonProviderRelays {
     if (!relay || relay.owner !== owner) throw new LocalProviderRelayError('grant_unavailable')
     return relay
   }
+}
+
+/**
+ * Transports that cannot send an output cap. Codex's subscription backend sets
+ * its own; Claude Code runs as a subprocess (tools off, neutral working folder
+ * on this computer) and accepts none. Both need explicit consent instead.
+ */
+function providerControlsOutput(provider: ProviderName | undefined): boolean {
+  return provider === 'openai-codex' || provider === 'claude-code'
 }
 
 function relayProvider(profile: ProviderProfile, model: string): ProviderName | undefined {
