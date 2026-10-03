@@ -28,6 +28,7 @@ import { parseStreamingJson } from '@earendil-works/pi-ai'
 import { claudeCodeLogin, claudeExecutable } from '../auth/claudeCodeLogin.js'
 import { ConfigurationError, ProviderError } from '../core/errors.js'
 import { xerxesHome } from '../daemon/paths.js'
+import { ensureClaudeCode } from '../runtime/companionInstall.js'
 import type { ChatMessage, ContentPart } from '../types/messages.js'
 import { messageText } from '../types/messages.js'
 import type { JsonObject, JsonValue, ToolCall, ToolDefinition } from '../types/toolCalls.js'
@@ -835,12 +836,20 @@ export function claudeCodeFailure(message: string, status?: number): ProviderErr
 }
 
 /** The `claude` executable: `CLAUDE_CODE_CLI`, then PATH and the installers' locations. */
-export function claudeCodeExecutable(environment: Readonly<Record<string, string | undefined>>): string {
-  const found = environment.CLAUDE_CODE_CLI?.trim() || claudeExecutable(environment)
-  if (!found) {
-    throw new ConfigurationError(CLAUDE_CODE_PROVIDER, "Claude Code is not installed. Install it with 'xerxes install --claude-code' (or from claude.com/code), sign in with 'claude', then retry. Set CLAUDE_CODE_CLI if it lives somewhere unusual.")
+/**
+ * The `claude` command for a request the person chose Claude Code for,
+ * installed automatically when missing (see ensureClaudeCode). CLAUDE_CODE_CLI
+ * still wins. A failed install surfaces as the same configuration error.
+ */
+export async function resolveClaudeCode(environment: Readonly<Record<string, string | undefined>>): Promise<string> {
+  const pinned = environment.CLAUDE_CODE_CLI?.trim()
+  if (pinned) return pinned
+  try {
+    const result = await ensureClaudeCode({ environment, find: () => claudeExecutable(environment), stateFile: join(xerxesHome(), 'claude-code', 'update.json') })
+    return result.path
+  } catch (error) {
+    throw new ConfigurationError(CLAUDE_CODE_PROVIDER, error instanceof Error ? error.message : String(error))
   }
-  return found
 }
 
 export class ClaudeCodeClient implements LlmClient {
@@ -854,10 +863,6 @@ export class ClaudeCodeClient implements LlmClient {
     this.launch = options.launch ?? launchClaudeCode
     this.executableOverride = options.executable
     this.workingDirectory = options.workingDirectory
-  }
-
-  private executable(): string {
-    return this.executableOverride ?? claudeCodeExecutable(this.environment)
   }
 
   private cwd(): string {
@@ -930,7 +935,7 @@ export class ClaudeCodeClient implements LlmClient {
     writeFileSync(systemPromptFile, system, { mode: 0o600 })
     let child: ReturnType<typeof this.launch>
     try {
-      child = this.launch(claudeCodeArgv(this.executable(), request, systemPromptFile, known?.effortLevels), {
+      child = this.launch(claudeCodeArgv(this.executableOverride ?? await resolveClaudeCode(this.environment), request, systemPromptFile, known?.effortLevels), {
         env: claudeCodeEnvironment(this.environment, request.maxTokens, claudeCodeThinkingOff(request)),
         cwd: this.cwd(),
         input,

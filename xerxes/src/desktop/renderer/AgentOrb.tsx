@@ -111,6 +111,9 @@ export class OrbEngine {
 
 const mounted = new Set<OrbEngine>()
 let timer: ReturnType<typeof setTimeout> | undefined
+/** When a frame was requested and not yet run; a dropped one must not stop the ticker for good. */
+let framePending = 0
+const FRAME_LOST_MS = 1000
 let lastTick = 0
 let watching = false
 
@@ -121,7 +124,7 @@ function paused(): boolean {
 }
 
 function tick(now: number): void {
-  timer = undefined
+  framePending = 0
   if (paused()) { lastTick = 0; return }
   const dt = lastTick ? Math.min((now - lastTick) / 1000, 0.1) : 1 / ORB_FPS
   lastTick = now
@@ -131,13 +134,20 @@ function tick(now: number): void {
 
 /** Arms one timer if any orb has frames to draw. Idempotent. */
 export function wake(): void {
-  if (timer !== undefined || paused()) return
+  // A frame requested while the window was hidden can be dropped; once it is
+  // long overdue it no longer holds the ticker.
+  if (framePending && performance.now() - framePending > FRAME_LOST_MS) framePending = 0
+  if (timer !== undefined || framePending || paused()) return
   let any = false
   for (const engine of mounted) if (engine.wantsFrames()) { any = true; break }
   if (!any) { lastTick = 0; return }
   // A timer, not a rAF loop: rAF would wake the renderer at the display rate
   // even on the frames this skips.
-  timer = setTimeout(() => requestAnimationFrame(tick), 1000 / ORB_FPS)
+  timer = setTimeout(() => {
+    timer = undefined
+    framePending = performance.now()
+    requestAnimationFrame(tick)
+  }, 1000 / ORB_FPS)
 }
 
 function watchEnvironment(): void {

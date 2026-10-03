@@ -227,3 +227,22 @@ test('without a preferred profile nothing is followed automatically',async()=>{
     expect((await f.forwarding.inspect()).source).toBe('remote')
   }finally{await f.close()}
 },20000)
+
+test('switching an SSH task to a provider on this computer sticks through renewals, even for a task that ran on the host',async()=>{
+  const f=await fixture(async()=>'local-signin')
+  try {
+    signIn(f.profiles)
+    await f.turn()
+    expect(f.fallback()).toBe(1)
+    // Settings → switch: the person's explicit choice applies to a used conversation.
+    expect(await f.forwarding.useLocal('local-api')).toEqual({ok:true})
+    expect((await f.forwarding.inspect()).sharedProfiles[0]).toBe('local-api')
+    await f.turn()
+    expect(f.seen.at(-1)).toBe('fixture-old-key')
+    // After transport loss, renewal keeps local-api rather than the Mac's active local-signin.
+    await f.forwarding.disconnect()
+    expect(await f.forwarding.follow()).toEqual({status:'bound'})
+    expect((await f.forwarding.inspect()).sharedProfiles[0]).toBe('local-api')
+    await expect(f.forwarding.useLocal('missing')).rejects.toThrow('no missing profile')
+  }finally{await f.close()}
+},20000)

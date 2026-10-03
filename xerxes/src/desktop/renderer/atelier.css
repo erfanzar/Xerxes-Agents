@@ -46,7 +46,7 @@
      expected, not a bug, and it is why chrome must be checked in the
      packaged build rather than the harness. */
   --mac-control:#ffffff0e;--mac-toolbar:#14171da8;
-  --glass-navigation:#14171dbb;--glass-overlay:#1b1f27e6;--glass-edge:#ffffff1f;
+  --glass-navigation:#14171dbb;--glass-overlay:#1b1f27e6;--x-dialog:#1b1f27;--glass-edge:#ffffff1f;
   --glass-highlight:#ffffff12;--glass-blur:blur(40px) saturate(180%);
   --glass-control:linear-gradient(180deg,#ffffff0d,#ffffff04);
   --glass-shadow:inset 0 1px 0 var(--glass-highlight),0 8px 24px #00000020;
@@ -79,7 +79,7 @@
   --x-lit:#ffffff;
   --x-elev:0 1px 2px #1a23400f,0 6px 20px #1a234012;
   --mac-control:#00000008;--mac-toolbar:#fafbfca8;
-  --glass-navigation:#f7f8fabb;--glass-overlay:#ffffffe6;--glass-edge:#ffffffcc;
+  --glass-navigation:#f7f8fabb;--glass-overlay:#ffffffe6;--x-dialog:#ffffff;--glass-edge:#ffffffcc;
   --glass-highlight:#ffffffe6;
   --glass-control:linear-gradient(180deg,#ffffffb3,#ffffff40);
   --glass-shadow:inset 0 1px 0 var(--glass-highlight),0 8px 24px #1a234012;
@@ -120,6 +120,9 @@ summary:focus-visible,a:focus-visible,[tabindex]:not([tabindex='-1']):focus-visi
 .atelier .msg,.atelier .agent-msg{font:14px/1.75 var(--sans)}
 .atelier .trail,.atelier .plan,.atelier .acard{border-radius:9px;border-color:var(--x-hairline);background:var(--mac-control);box-shadow:none}
 .atelier :is(.modal,.menu,.modelpicker,.modelpop,.palette){border-radius:16px;background:var(--glass-overlay);border:1px solid var(--glass-edge);box-shadow:var(--mac-shadow);backdrop-filter:var(--glass-blur)}
+/* Dialogs are solid: through glass, the conversation and the wordmark behind
+   Settings read through its text. A custom background supplies --x-popover. */
+.atelier .modal{background:var(--x-popover,var(--x-dialog));-webkit-backdrop-filter:none;backdrop-filter:none}
 .atelier .modal__side{background:var(--mac-control)}
 .atelier .modal__title{font-weight:600}
 .atelier .row{border-color:var(--x-hairline)}
@@ -2983,3 +2986,41 @@ html,body,#root,.app.atelier{background:transparent}
 .atelier .memguard{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .atelier .memguard__field{display:flex;align-items:center;gap:8px;font:400 13px/1.4 var(--sans);color:var(--x-secondary)}
 .atelier .memguard__field input{width:80px;background:var(--x-screen);border:1px solid var(--x-hairline);border-radius:6px;color:var(--x-title);padding:4px 8px;font:inherit}
+
+/* Provider cards (Settings → Models & Providers): a card per profile with a
+   monogram, its model in plain type, one clear action, and quiet icon tools.
+   The current one carries the accent; nothing relies on a 6px dot alone. */
+.atelier .provgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(420px,1fr));gap:8px;margin:var(--s-2) 0 var(--s-4)}
+.atelier .provgrid>.row{grid-column:1/-1}
+.atelier .provcard{position:relative;display:flex;flex-direction:column;min-width:0;border:1px solid var(--x-hairline);border-radius:12px;background:var(--mac-control);transition:border-color 140ms ease,background 140ms ease}
+.atelier .provcard:hover{border-color:var(--x-separator,var(--x-meta))}
+.atelier .provcard.is-current{border-color:color-mix(in srgb,var(--x-accent) 60%,transparent);background:var(--x-accent-soft)}
+.atelier .provcard__main{display:flex;align-items:flex-start;gap:12px;width:100%;min-width:0;padding:14px 14px 12px;border:0;background:none;text-align:left;font:inherit;color:inherit;cursor:pointer;border-radius:12px}
+.atelier .provcard__main:disabled{cursor:default;opacity:1}
+.atelier .provcard__main:focus-visible{outline:2px solid var(--x-focus);outline-offset:-2px}
+.atelier .provcard__avatar{flex:0 0 34px;display:grid;place-items:center;width:34px;height:34px;border-radius:10px;background:var(--x-chip,var(--mac-control));border:1px solid var(--x-hairline);font:600 14px/1 var(--sans);color:var(--x-title)}
+.atelier .provcard.is-current .provcard__avatar{background:var(--x-accent);border-color:transparent;color:var(--x-on-accent,#fff)}
+.atelier .provcard__text{display:flex;flex-direction:column;gap:3px;min-width:0;flex:1 1 auto}
+.atelier .provcard__title{display:flex;align-items:center;gap:8px;min-width:0}
+.atelier .provcard__name{font:500 13.5px/1.3 var(--sans);color:var(--x-title);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.atelier .provcard__model{font:var(--t-body);font-size:12.5px;color:var(--x-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.atelier .provcard__meta{font:var(--t-caption);color:var(--x-meta);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.atelier .provcard__badge{flex:0 0 auto;padding:1px 7px;border-radius:999px;font:500 10.5px/16px var(--sans);white-space:nowrap}
+.atelier .provcard__badge--accent{color:var(--x-accent);background:var(--x-accent-soft);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--x-accent) 35%,transparent)}
+.atelier .provcard__badge--quiet{color:var(--x-meta);background:var(--mac-control);box-shadow:inset 0 0 0 1px var(--x-hairline)}
+.atelier .provcard__badge--needs{color:var(--x-needs-text);background:var(--x-needs-bg);box-shadow:inset 0 0 0 1px var(--x-needs-border,transparent)}
+.atelier .provcard__use{flex:0 0 auto;align-self:flex-start;padding:4px 10px;border-radius:7px;font:500 11.5px/1.2 var(--sans);color:var(--x-title);background:var(--x-chip,var(--mac-control));border:1px solid var(--x-hairline);opacity:.85;transition:opacity 140ms ease}
+.atelier .provcard__main:hover .provcard__use{opacity:1;border-color:var(--x-accent);color:var(--x-accent)}
+.atelier .provcard__tools{position:absolute;right:10px;bottom:8px;display:flex;align-items:center;gap:2px}
+/* The tools sit in the corner under the action; reserve room when there is no action. */
+.atelier .provcard.is-current .provcard__main{padding-right:80px}
+.atelier .provcard__tool{display:grid;place-items:center;width:28px;height:26px;border:0;border-radius:6px;background:none;color:var(--x-meta);cursor:pointer;opacity:.7;transition:opacity 140ms ease,background 140ms ease,color 140ms ease}
+.atelier .provcard:hover .provcard__tool,.atelier .provcard__tool:focus-visible{opacity:1}
+.atelier .provcard__tool:hover:not(:disabled){background:var(--x-chip,var(--mac-control));color:var(--x-title)}
+.atelier .provcard__tool--danger:hover:not(:disabled){color:var(--x-danger,var(--x-failed-text))}
+.atelier .provcard__tool:disabled{opacity:.35;cursor:default}
+.atelier .provcard__confirm{border:0;border-radius:6px;padding:4px 9px;background:var(--x-failed-bg,var(--x-needs-bg));color:var(--x-failed-text,var(--x-danger));font:500 11.5px/1.2 var(--sans);cursor:pointer}
+.atelier .provcard__keep{border:0;border-radius:6px;padding:4px 9px;background:none;color:var(--x-secondary);font:500 11.5px/1.2 var(--sans);cursor:pointer}
+.atelier .provcard--add{flex-direction:row;align-items:center;gap:12px;padding:14px;border-style:dashed;background:transparent;text-align:left;font:inherit;color:inherit;cursor:pointer}
+.atelier .provcard--add:hover:not(:disabled){background:var(--mac-control);border-color:var(--x-meta)}
+.atelier .provcard--add:disabled{opacity:.5;cursor:default}

@@ -342,14 +342,14 @@ test('the settings modal opens on its cards and reads daemon state', () => {
   expect(models).toContain('z-ai/glm-5.2')
   // Provider rows are live switches, not a static list.
   expect(models).toContain('Providers</div>')
-  expect(models).toContain('switch')
+  expect(models).toContain('<span class="provcard__use">Use</span>')
   expect(models).toContain('title="make zai the active profile"')
   // TUI parity: the profile CRUD surface the /provider flow offers.
   expect(models).toContain('Add provider')
-  expect(models).toContain('title="delete zai"')
+  expect(models).toContain('title="Delete zai"')
   // The active profile offers Edit but no Delete — switch away first.
-  expect(models).toContain('title="edit kimi"')
-  expect(models).not.toContain('title="delete kimi"')
+  expect(models).toContain('title="Edit kimi"')
+  expect(models).not.toContain('title="Delete kimi"')
   const unavailable = render(snapshot({ settingsOpen: true, settingsTab: 'models', providerError: 'Profile file is unreadable' }))
   expect(unavailable).toContain('Profile file is unreadable')
   expect(unavailable).toContain('Retry loading providers')
@@ -816,13 +816,13 @@ test('feed rows are scoped (.frow) and provider rows stack name over detail', as
       providers: [{ name: 'zai', provider: 'zhipu', model: 'glm-5.2', active: true, baseUrl: 'https://api.z.ai/api/coding/paas/v4' }],
     }),
   )
-  // Provider cards (Codex grammar): stacked name/sub, Edit action, no
-  // Delete on the active profile.
-  expect(models).toContain('pcard__main')
-  expect(models).toContain('zai')
+  // Provider cards: name over model over detail, Edit, and no Delete on the
+  // active profile.
+  expect(models).toContain('provcard__main')
+  expect(models).toContain('<span class="provcard__model">glm-5.2</span>')
   expect(models).toContain('in use')
-  expect(models).toContain('Edit')
-  expect(models).not.toContain('pcard__del')
+  expect(models).toContain('title="Edit zai"')
+  expect(models).not.toContain('title="Delete zai"')
 })
 
 test('the provider form is wire-fed: registry dropdown, env fallback, default endpoint', async () => {

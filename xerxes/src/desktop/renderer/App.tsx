@@ -1023,7 +1023,9 @@ function Welcome({ snap }: { snap: Snapshot }): ReactElement {
   const place = workspaceLabel(here)
 
   return <div className="welcome">
-    <AgentOrb className="welcome__orb" size={64} state="breathing" settleMs={9000} />
+    {/* No settle time: it stopped after nine seconds and read as frozen. The
+        ticker still pauses it while the window is hidden, unfocused or covered. */}
+    <AgentOrb className="welcome__orb" size={64} state="breathing" />
     <h1 className="welcome__wordmark">XERXES</h1>
 
     {place ? (

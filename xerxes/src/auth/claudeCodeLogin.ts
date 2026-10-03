@@ -75,7 +75,9 @@ async function keychainCredential(): Promise<SourceRead> {
 /** The `claude` executable, from PATH or where its installers put it. */
 export function claudeExecutable(environment: Readonly<Record<string, string | undefined>>): string | undefined {
   const home = environment.HOME?.trim() || homedir()
-  const extra = [join(home, '.local', 'bin'), join(home, '.claude', 'local'), '/opt/homebrew/bin', '/usr/local/bin']
+  // Bun's global bin is where Xerxes installs Claude Code itself.
+  const bunBin = join(environment.BUN_INSTALL?.trim() || join(home, '.bun'), 'bin')
+  const extra = [join(home, '.local', 'bin'), join(home, '.claude', 'local'), bunBin, '/opt/homebrew/bin', '/usr/local/bin']
   const path = [environment.PATH ?? '', ...extra].filter(Boolean).join(':')
   return Bun.which('claude', { PATH: path }) ?? undefined
 }

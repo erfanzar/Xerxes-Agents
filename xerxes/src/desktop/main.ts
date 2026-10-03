@@ -25,7 +25,7 @@ import { desktopMachineCommand } from './main/machines.js'
 import { xerxesHome } from '../daemon/paths.js'
 import { DaemonRpc } from './main/daemon.js'
 import { DesktopProviderForwarding } from './main/providerForwarding.js'
-import { copyProfilesToRemote, localActiveProfile } from './main/profileSync.js'
+import { copyProfilesToRemote, localActiveProfile, watchProfiles } from './main/profileSync.js'
 import { startAppUpdates } from './main/appUpdateController.js'
 import { registerDaemonBridge, detachDaemon } from './main/ipc.js'
 import { dictationPort, transcribeDictation } from './main/voice.js'
@@ -319,7 +319,14 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
   let remoteError = ''
   let providerForwarding: DesktopProviderForwarding | null = null
   let localProviderDaemon: DaemonRpc | null = null
+  // Copies this Mac's keyed profiles to the connected SSH host; null when local.
+  let syncProfiles: (() => void) | null = null
+  let stopProfileWatch: (() => void) | null = null
+  let lastProfileSync = 0
   const closeProviderForwarding = () => {
+    stopProfileWatch?.()
+    stopProfileWatch = null
+    syncProfiles = null
     void providerForwarding?.disconnect()
     providerForwarding = null
     localProviderDaemon?.dispose()
@@ -396,6 +403,9 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     // Opening or starting a conversation on an SSH host: keep it on this
     // computer's sign-in provider (ChatGPT, Claude Code), whose login stays here.
     if ((method === 'initialize' || method === 'session.open') && remote && providerForwarding) void followLocalProviders(providerForwarding)
+    // Opening a task (or reloading the window) re-sends the profiles too, in
+    // case the watch missed a change; at most every 15 seconds.
+    if ((method === 'initialize' || method === 'session.open') && syncProfiles && Date.now() - lastProfileSync > 15_000) syncProfiles()
   })
   const handle = <Args extends unknown[], Result>(channel: string, handler: (event: IpcMainInvokeEvent, ...args: Args) => Result): void => {
     windowRoutes.bind(id, channel, handler)
@@ -611,9 +621,16 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
       attach(rpc)
       // The Mac's keyed providers work on the host too. Best effort, after
       // attach so the provider list the host re-sends reaches this window.
-      void copyProfilesToRemote((method, args) => rpc.call(method, args), join(xerxesHome(), 'profiles.json')).then(result => {
-        if (result.error) console.warn(`Could not copy provider profiles to ${machine.alias}: ${result.error}`)
-      })
+      const profilesFile = join(xerxesHome(), 'profiles.json')
+      syncProfiles = () => {
+        lastProfileSync = Date.now()
+        void copyProfilesToRemote((method, args) => rpc.call(method, args), profilesFile).then(result => {
+          if (result.error) console.warn(`Could not copy provider profiles to ${machine.alias}: ${result.error}`)
+        })
+      }
+      syncProfiles()
+      // A provider added or a key changed on this Mac reaches the host at once.
+      stopProfileWatch = watchProfiles(profilesFile, () => syncProfiles?.())
       remote = next
       remoteMachine = machine
       selectedWorkspace = next.projectDir
@@ -652,6 +669,10 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
       if (action === 'cancel') {
         remoteAttempt?.abort()
         return { ok: true }
+      }
+      if (action === 'provider-use-local') {
+        if (!remote || !daemon?.online || !providerForwarding) throw new Error('Reconnect the SSH workspace before choosing a provider on this computer.')
+        return providerForwarding.useLocal(params.profile)
       }
       if (action === 'provider-activity') {
         if (!remote || !daemon?.online || !providerForwarding) return { ok: true, bound: false }

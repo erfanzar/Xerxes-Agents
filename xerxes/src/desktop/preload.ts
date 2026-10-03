@@ -114,7 +114,7 @@ const bridge = {
   },
   remote(action: string, params: unknown = {}): Promise<unknown> {
     if (
-      !['list', 'hosts', 'browse', 'save', 'remove', 'connect', 'cancel', 'status', 'provider-activity', 'provider-review', 'provider-share', 'provider-revoke'].includes(action)
+      !['list', 'hosts', 'browse', 'save', 'remove', 'connect', 'cancel', 'status', 'provider-activity', 'provider-use-local', 'provider-review', 'provider-share', 'provider-revoke'].includes(action)
     )
       return Promise.reject(new Error('Unknown remote action'))
     return ipcRenderer.invoke('desktop:remote', action, cleanParams(params))

@@ -23,7 +23,7 @@ import { useDialogFocus } from './dialogFocus.js'
 import { ChannelsCard } from './ChannelsPanel.js'
 import { LspCard } from "./LspPanel.js"
 import { TerminalsCard } from './TerminalsPanel.js'
-import { store, type Snapshot } from './store.js'
+import { providerRowState, store, type Snapshot } from './store.js'
 import type { CachedModel, ModelChoice, PermissionMode, ProviderRow, SettingsTab } from './types.js'
 import { RemoteProviders } from './RemoteProviders.js'
 import { AgentIntelligenceCard } from './AgentIntelligenceCard.js'
@@ -714,7 +714,7 @@ function ModelsCard({ snap }: { snap: Snapshot }): ReactElement {
       {snap.providerSwitching && <p role="status">Switching to {snap.providerSwitching}…</p>}
       {snap.providerSwitchError && <p role="alert" className="studio-error">{snap.providerSwitchError}</p>}
       {snap.providerError && <div role="alert" className="studio-error">{snap.providerError}<button onClick={() => void store.loadProviders()}>Retry loading providers</button></div>}
-      <div className="pcardlist">
+      <div className="provgrid">
       {/* "No saved provider profiles" is a claim, and it used to be made
           before provider_list had answered — so a configured user was told
           they had nothing, and Retry cleared the error first and showed the
@@ -728,76 +728,72 @@ function ModelsCard({ snap }: { snap: Snapshot }): ReactElement {
           </div>
         </div>
       )}
-      {snap.providers.map(provider => (
-        <div
-          key={provider.name}
-          className={`pcard${provider.active ? ' is-active' : ''}`}
-        >
+      {snap.providers.map(provider => {
+        const row = providerRowState(snap, provider)
+        const name = provider.label || provider.name
+        const tone = row.chip === 'Mac access ended' ? 'needs' : row.chip === 'host default' ? 'quiet' : 'accent'
+        return (
+        <div key={provider.name} className={`provcard${row.inUse ? ' is-current' : ''}`}>
           <button
-            className="pcard__main"
-            disabled={provider.active || snap.turnActive || !!snap.providerSwitching}
+            className="provcard__main"
+            disabled={row.inUse || snap.turnActive || !!snap.providerSwitching}
             title={
-              provider.active
-                ? 'active profile — new tasks start here'
+              row.inUse
+                ? row.viaMac ? 'this task runs on this computer through this profile' : 'active profile — new tasks start here'
                 : snap.turnActive
                   ? 'wait for the running turn to finish'
-                  : `make ${(provider.label || provider.name)} the active profile`
+                  : row.viaMac
+                    ? `run this task through ${name} on this computer`
+                    : `make ${name} the active profile`
             }
             onClick={() => store.selectProvider(provider.name)}
           >
-            <span className={`dot ${provider.active ? 'dot--live' : 'dot--idle'}`} />
-            <span className="pcard__text">
-              <span className="pcard__name">
-                {(provider.label || provider.name)}
-                {provider.active ? <span className="chipbtn" style={{ marginLeft: 6 }}>active</span> : null}
+            <span className="provcard__avatar" aria-hidden="true">{row.viaMac ? <Icon name="laptop" size={15} /> : name.slice(0, 1).toUpperCase()}</span>
+            <span className="provcard__text">
+              <span className="provcard__title">
+                <span className="provcard__name">{name}</span>
+                {row.chip ? <span className={`provcard__badge provcard__badge--${tone}`}>{row.chip}</span> : null}
               </span>
-              <span className="pcard__sub">
-                {provider.provider}{provider.model ? ` · ${provider.model}` : ''} · {provider.active ? 'in use' : 'saved'}
-              </span>
+              <span className="provcard__model">{provider.model || 'Model chosen when used'}</span>
+              <span className="provcard__meta">{provider.provider} · {row.status}</span>
             </span>
-            {!provider.active && !snap.turnActive
-              ? <span className="row__go">switch <Icon name="chevron" size={11} /></span>
+            {!row.inUse && !snap.turnActive
+              ? <span className="provcard__use">{row.viaMac ? 'Use via Mac' : 'Use'}</span>
               : null}
           </button>
-          <span className="pcard__actions">
-            <button
-              className="chipbtn"
-              disabled={snap.turnActive}
-              title={`edit ${(provider.label || provider.name)}`}
-              onClick={() => setForm(provider.name)}
-            >Edit</button>
-            {/* This app confirms killing a terminal; deleting a stored
-                credential profile was a single unguarded click. */}
-            {!provider.active && (
-              confirmDelete === provider.name ? (
-                <>
-                  <button className="pcard__del" onClick={() => { setConfirmDelete(null); store.deleteProvider(provider.name) }}>Delete for good</button>
-                  <button onClick={() => setConfirmDelete(null)}>Keep</button>
-                </>
-              ) : (
-                <button
-                  className="pcard__del"
-                  disabled={snap.turnActive}
-                  title={`delete ${(provider.label || provider.name)}`}
-                  onClick={() => setConfirmDelete(provider.name)}
-                >Delete</button>
-              )
+          <span className="provcard__tools">
+            {confirmDelete === provider.name ? (
+              <>
+                <button className="provcard__confirm" onClick={() => { setConfirmDelete(null); store.deleteProvider(provider.name) }}>Delete for good</button>
+                <button className="provcard__keep" onClick={() => setConfirmDelete(null)}>Keep</button>
+              </>
+            ) : (
+              <>
+                <button className="provcard__tool" disabled={snap.turnActive} title={`Edit ${name}`} aria-label={`Edit ${name}`} onClick={() => setForm(provider.name)}><Icon name="note" size={14} /></button>
+                {/* This app confirms killing a terminal; deleting a stored
+                    credential profile was a single unguarded click. */}
+                {!provider.active && (
+                  <button className="provcard__tool provcard__tool--danger" disabled={snap.turnActive} title={`Delete ${name}`} aria-label={`Delete ${name}`} onClick={() => setConfirmDelete(provider.name)}><Icon name="trash" size={14} /></button>
+                )}
+              </>
             )}
           </span>
         </div>
-      ))}
+      )})}
+      {form === false && (
+        <button className="provcard provcard--add" disabled={snap.turnActive} onClick={() => setForm(true)}>
+          <span className="provcard__avatar" aria-hidden="true"><Icon name="plus" size={15} /></span>
+          <span className="provcard__text"><span className="provcard__name">Add provider</span><span className="provcard__meta">An API key, a local endpoint or a sign-in</span></span>
+        </button>
+      )}
       </div>
 
-      {form !== false ? (
+      {form !== false && (
         <ProviderForm
           snap={snap}
           editing={editing}
           onCancel={() => setForm(false)}
         />
-      ) : (
-        <button className="btn" disabled={snap.turnActive} onClick={() => setForm(true)}>
-          <Icon name="plus" size={12} /> Add provider
-        </button>
       )}
 
       <div className="row__t settings-section">Discovered models{snap.models.length > 0 && <span className="settings-section__count">{snap.models.length}</span>}</div>

@@ -7,7 +7,9 @@
  * rules are testable headlessly; main.ts runs it after each SSH connect.
  */
 
+import { watch } from 'node:fs'
 import { readFile } from 'node:fs/promises'
+import { basename, dirname } from 'node:path'
 
 export type ProfileImportCall = (method: string, params: Record<string, unknown>) => Promise<Record<string, unknown>>
 
@@ -76,4 +78,27 @@ export async function copyProfilesToRemote(call: ProfileImportCall, profilesFile
   } catch (error) {
     return { imported: [], error: error instanceof Error ? error.message : String(error) }
   }
+}
+
+/**
+ * Call `changed` shortly after this Mac's profiles file is written, so a
+ * provider added or a key changed here reaches a connected SSH host without
+ * reconnecting. The folder is watched, not the file: saves replace the file
+ * by rename, which ends a watch on the old one. Returns the stop function.
+ */
+export function watchProfiles(profilesFile: string, changed: () => void, debounceMs = 500): () => void {
+  const name = basename(profilesFile)
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let watcher: ReturnType<typeof watch> | undefined
+  try {
+    watcher = watch(dirname(profilesFile), (_event, file) => {
+      if (file !== null && file !== name) return
+      clearTimeout(timer)
+      timer = setTimeout(changed, debounceMs)
+    })
+    watcher.on('error', error => console.warn(`Stopped watching ${profilesFile}: ${error instanceof Error ? error.message : String(error)}`))
+  } catch (error) {
+    console.warn(`Cannot watch ${profilesFile}; profiles reach the host on each connect and task open: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  return () => { clearTimeout(timer); watcher?.close() }
 }

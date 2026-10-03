@@ -18,4 +18,7 @@ import { join } from 'node:path'
 
 const home = mkdtempSync(join(tmpdir(), 'xerxes-test-home-'))
 process.env.XERXES_HOME = home
+// Choosing Claude Code installs it when missing; a test must never reach the
+// network or the developer's Bun globals. Installer tests inject their runner.
+process.env.XERXES_AUTO_INSTALL_CLAUDE_CODE = '0'
 process.on('exit', () => { rmSync(home, { recursive: true, force: true }) })

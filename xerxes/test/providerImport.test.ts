@@ -11,7 +11,8 @@ import { connect } from 'node:net'
 import { importProfiles, ProfileStore } from '../src/bridge/profiles.js'
 import { InMemoryDaemonRuntime } from '../src/daemon/runtime.js'
 import { DaemonServer } from '../src/daemon/server.js'
-import { copyProfilesToRemote, localKeyedProfiles } from '../src/desktop/main/profileSync.js'
+import { copyProfilesToRemote, localKeyedProfiles, watchProfiles } from '../src/desktop/main/profileSync.js'
+import { rename } from 'node:fs/promises'
 
 async function inTemporaryHome(body: (root: string) => Promise<void>): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), 'xerxes-import-'))
@@ -178,5 +179,40 @@ test('a host that already chose a provider keeps it', async () => {
     expect(result).toMatchObject({ ok: true, imported: ['openrouter', 'zai'] })
     expect(result.selected).toBeUndefined()
     expect(host.chosenActive()).toBe('own')
+  })
+})
+
+test('a provider saved on the Mac (written by rename) triggers one sync; other files do not', async () => {
+  await inTemporaryHome(async root => {
+    const file = join(root, 'profiles.json')
+    await writeFile(file, JSON.stringify(mac))
+    let calls = 0
+    const stop = watchProfiles(file, () => { calls++ }, 50)
+    try {
+      // macOS can report the setup write above late; start counting after it settles.
+      await Bun.sleep(400)
+      calls = 0
+      await writeFile(join(root, 'other.json'), '{}')
+      await Bun.sleep(200)
+      expect(calls).toBe(0)
+      // ProfileStore saves through a temporary file and a rename, twice here.
+      for (let save = 0; save < 2; save++) {
+        await writeFile(join(root, 'profiles.json.tmp'), JSON.stringify({ ...mac, active: 'zai' }))
+        await rename(join(root, 'profiles.json.tmp'), file)
+      }
+      for (let i = 0; i < 50 && calls === 0; i++) await Bun.sleep(20)
+      await Bun.sleep(150)
+      expect(calls).toBe(1)
+    } finally { stop() }
+  })
+})
+
+test('the host marks sign-in profiles, so an SSH window runs them on the Mac', async () => {
+  await withHostDaemon(undefined, async call => {
+    await call('provider.import', { profiles: Object.values(mac.profiles), active: 'zai' })
+    const listed = (await call('provider_list', {})).profiles as Array<{ name: string; provider: string; signs_in: boolean }>
+    expect(listed.find(row => row.provider === 'claude-code')?.signs_in).toBe(true)
+    expect(listed.find(row => row.provider === 'openai-codex')?.signs_in).toBe(true)
+    expect(listed.find(row => row.name === 'zai')?.signs_in).toBe(false)
   })
 })

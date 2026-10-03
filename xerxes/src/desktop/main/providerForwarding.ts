@@ -47,6 +47,8 @@ export class DesktopProviderForwarding {
   private renewal: ReturnType<typeof setTimeout> | undefined
   private readonly bindingOwners = new Map<string, { sessionKey: string; profile: string }>()
   private readonly activity = new Map<string, ActivityState>()
+  /** The profile each conversation was put on; survives transport loss so renewal keeps it. */
+  private readonly chosen = new Map<string, string>()
   private changed: (() => void) | undefined
   /** `preferred` names this computer's active profile; without it nothing is followed automatically. */
   constructor(private readonly local: Rpc, private readonly remote: Rpc,
@@ -151,25 +153,57 @@ export class DesktopProviderForwarding {
   private async followOnce(): Promise<FollowResult> {
     if (!this.preferred) return { status: 'skipped', reason: 'automatic provider access is off' }
     try {
-      const name = await this.preferred()
       const review = await this.inspect()
-      const primary = review.profiles.find(profile => profile.name === name)
-      if (!primary || !primary.supported || primary.credentialSource !== SIGN_IN_CREDENTIAL) return { status: 'skipped', reason: 'this computer\'s active profile is copied to the host' }
-      const followsHere = review.source !== 'remote'
-      if (!followsHere && review.turns !== 0) return { status: 'skipped', reason: 'this conversation uses the host\'s providers' }
-      if (review.source === 'local' && review.sharedProfiles[0] === primary.name && (review.expiresAt ?? 0) - Date.now() > RENEW_BEFORE_MS) {
+      if (review.source === 'local' && (review.expiresAt ?? 0) - Date.now() > RENEW_BEFORE_MS) {
         this.scheduleRenewal(review.expiresAt!)
         return { status: 'skipped', reason: 'already following' }
       }
+      const followsHere = review.source !== 'remote'
+      let primary: ShareableLocalProfile | undefined
+      if (followsHere) {
+        // Renewing: keep the profile this conversation was put on (a switch to
+        // Claude Code stays Claude Code), else this computer's active one.
+        const chosen = this.chosen.get(review.sessionKey) ?? await this.preferred()
+        primary = review.profiles.find(profile => profile.name === chosen && profile.supported)
+        if (!primary) return { status: 'skipped', reason: 'the profile this conversation used is no longer shareable from this computer' }
+      } else {
+        if (review.turns !== 0) return { status: 'skipped', reason: 'this conversation uses the host\'s providers' }
+        const name = await this.preferred()
+        primary = review.profiles.find(profile => profile.name === name)
+        if (!primary || !primary.supported || primary.credentialSource !== SIGN_IN_CREDENTIAL) return { status: 'skipped', reason: 'this computer\'s active profile is copied to the host' }
+      }
       if (review.running) return { status: 'skipped', reason: 'the conversation is working' }
-      const profiles = [primary, ...review.profiles.filter(profile => profile.supported && profile.name !== primary.name)].slice(0, 32)
-      await this.authorize({ consent: true, review: review.review, profiles: profiles.map(profile => profile.name), profile: primary.name,
-        minutes: FOLLOW_MINUTES, providerControlledOutput: profiles.some(profile => profile.providerControlledOutput) })
-      this.scheduleRenewal(Date.now() + FOLLOW_MINUTES * 60_000)
+      await this.bindPrimary(review, primary)
       return { status: 'bound' }
     } catch (error) {
       return { status: 'failed', reason: error instanceof Error ? error.message : String(error) }
     }
+  }
+
+  /**
+   * Put the open SSH conversation on one of this computer's profiles because
+   * the person chose it (Settings → switch on ChatGPT/Codex or Claude Code).
+   * Unlike follow(), this applies to a conversation that already ran on the
+   * host's providers, and the choice is kept through renewals.
+   */
+  async useLocal(name: unknown): Promise<{ ok: true }> {
+    if (typeof name !== 'string' || !name) throw new Error('Choose a provider profile to run on this computer.')
+    const review = await this.inspect()
+    const primary = review.profiles.find(profile => profile.name === name)
+    if (!primary) throw new Error(`This computer has no ${name} profile to share. Set it up in a local workspace's Models & Providers settings.`)
+    if (!primary.supported) throw new Error(primary.setup || `${name} cannot run through this computer.`)
+    if (review.running) throw new Error('This task or its agents are working. Wait until they finish before changing its provider.')
+    await this.bindPrimary(review, primary)
+    return { ok: true }
+  }
+
+  private async bindPrimary(review: Awaited<ReturnType<DesktopProviderForwarding['inspect']>>, primary: ShareableLocalProfile): Promise<void> {
+    const profiles = [primary, ...review.profiles.filter(profile => profile.supported && profile.name !== primary.name)].slice(0, 32)
+    await this.authorize({ consent: true, review: review.review, profiles: profiles.map(profile => profile.name), profile: primary.name,
+      minutes: FOLLOW_MINUTES, providerControlledOutput: profiles.some(profile => profile.providerControlledOutput) })
+    this.chosen.set(review.sessionKey, primary.name)
+    while (this.chosen.size > MAX_ACTIVITY) this.chosen.delete(this.chosen.keys().next().value!)
+    this.scheduleRenewal(Date.now() + FOLLOW_MINUTES * 60_000)
   }
 
   private scheduleRenewal(expiresAt: number) {

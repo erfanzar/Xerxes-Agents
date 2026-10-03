@@ -67,3 +67,9 @@ test('the orb follows the turn: tools, streaming reply, reasoning, waiting', () 
   expect(orbStateOf({ ...base, approval: {} } as unknown as Snapshot)).toBe('breathing')
   expect(orbStateOf({ ...base, turnActive: false, submissionPending: true } as unknown as Snapshot)).toBe('connecting')
 })
+
+test('an orb with no settle time keeps moving (the welcome mark used to stop after nine seconds)', () => {
+  const engine = new OrbEngine(fakeCanvas(), 64, { state: 'breathing', live: true })
+  for (let second = 0; second < 600; second++) engine.step(1)
+  expect(engine.wantsFrames()).toBe(true)
+})

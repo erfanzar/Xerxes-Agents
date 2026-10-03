@@ -82,6 +82,7 @@ import {
   reportedModelReasoning,
   resolvedProfileModelCapabilities,
   SAMPLING_PARAMS,
+  signsInPerMachine,
   type ProviderModelCapabilities,
   type ProviderProfile,
 } from "../bridge/profiles.js";
@@ -12619,6 +12620,9 @@ function profilePayload(
     provider: profile.provider,
     sampling: { ...profile.sampling },
     active: profile.active,
+    // A sign-in lives on one machine: the desktop runs these through its own
+    // login when this daemon is an SSH workspace host.
+    signs_in: signsInPerMachine(profile.provider),
   };
 }
 

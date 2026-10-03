@@ -13,7 +13,7 @@
  */
 
 import { ConfigurationError } from '../core/errors.js'
-import { claudeCodeEnvironment, claudeCodeExecutable } from './claudeCode.js'
+import { claudeCodeEnvironment, resolveClaudeCode } from './claudeCode.js'
 import { REASONING_ON, type ReasoningLevelSet } from './reasoningLevels.js'
 
 export interface ClaudeCodeModelInfo {
@@ -110,7 +110,7 @@ async function initializeThroughCli(argv: readonly string[], env: Record<string,
 /** Ask the local Claude Code which models this sign-in can use. */
 export async function discoverClaudeCodeModels(options: ClaudeCodeCatalogOptions = {}): Promise<ClaudeCodeModelInfo[]> {
   const environment = options.environment ?? process.env
-  const executable = options.executable ?? claudeCodeExecutable(environment)
+  const executable = options.executable ?? await resolveClaudeCode(environment)
   const argv = [executable, '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
     '--no-session-persistence', '--tools', '', '--setting-sources', '', '--strict-mcp-config']
   const env = claudeCodeEnvironment(environment)

@@ -643,6 +643,10 @@ function guessProvider(baseUrl: string): string {
 
 /** Providers whose credential is a sign-in on the machine itself, not a key a profile can carry. */
 const SIGN_IN_PROVIDERS = new Set(['claude-code', 'openai-codex'])
+/** True when a profile's credential is a sign-in on each machine, so it cannot be copied to another. */
+export function signsInPerMachine(provider: string): boolean {
+  return SIGN_IN_PROVIDERS.has(provider.trim().toLowerCase())
+}
 const MAX_IMPORTED_PROFILES = 64
 const PROFILE_NAME = /^[A-Za-z0-9._-]{1,64}$/
 

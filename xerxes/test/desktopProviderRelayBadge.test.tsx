@@ -76,3 +76,18 @@ test('a local window never asks and never shows the badge', async () => {
   expect(desktop.asked).not.toContain('provider-activity')
   expect(store.getSnapshot().providerRelay).toBeNull()
 })
+
+test('Settings rows say which provider an SSH task really uses', async () => {
+  const { providerRowState } = await import('../src/desktop/renderer/store.js')
+  const ssh = { storageScope: 'ssh:softnu-local:' }
+  const relay = { bound: true, live: true, profile: 'codex', requests: 1, inFlight: 0 }
+  // Running through this computer: that row is in use, the host's active one is only its default.
+  expect(providerRowState({ ...ssh, providerRelay: relay }, { name: 'codex', active: false, signsIn: true })).toEqual({ inUse: true, viaMac: true, chip: 'via this Mac', status: 'in use' })
+  expect(providerRowState({ ...ssh, providerRelay: relay }, { name: 'zai', active: true, signsIn: false })).toEqual({ inUse: false, viaMac: false, chip: 'host default', status: 'saved' })
+  expect(providerRowState({ ...ssh, providerRelay: { ...relay, live: false } }, { name: 'codex', active: false, signsIn: true })).toMatchObject({ inUse: true, chip: 'Mac access ended' })
+  // On the host's own providers: the active keyed one is in use; sign-in ones run on this Mac when picked.
+  expect(providerRowState({ ...ssh, providerRelay: null }, { name: 'kimi', active: true, signsIn: false })).toEqual({ inUse: true, viaMac: false, chip: 'active', status: 'in use' })
+  expect(providerRowState({ ...ssh, providerRelay: null }, { name: 'claude-code', active: false, signsIn: true })).toEqual({ inUse: false, viaMac: true, chip: null, status: 'runs on this Mac' })
+  // A local window is unchanged.
+  expect(providerRowState({ storageScope: '', providerRelay: null }, { name: 'codex', active: true, signsIn: true })).toEqual({ inUse: true, viaMac: false, chip: 'active', status: 'in use' })
+})

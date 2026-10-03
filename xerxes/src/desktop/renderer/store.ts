@@ -194,6 +194,32 @@ export interface ProviderRelayView {
   readonly expiresAt?: number
 }
 
+/**
+ * A profile whose login lives on each machine (the host reports `signs_in`).
+ * In an SSH window it runs on this computer, through the relay, not on the host.
+ */
+export function runsOnThisComputer(frame: { readonly storageScope?: string }, row: { readonly signsIn: boolean } | undefined): boolean {
+  return Boolean(frame.storageScope?.startsWith('ssh:') && row?.signsIn)
+}
+
+/**
+ * How a Settings provider row reads. In an SSH task that runs through this
+ * computer, the profile carrying it is the one in use ("via this Mac") and the
+ * host's active profile is only its default for other tasks; without that,
+ * the list said "zai active · in use" while the task ran on ChatGPT here.
+ */
+export function providerRowState(frame: Pick<Snapshot, 'storageScope' | 'providerRelay'>, row: { readonly name: string; readonly active: boolean; readonly signsIn: boolean }): { inUse: boolean; viaMac: boolean; chip: string | null; status: string } {
+  const viaMac = runsOnThisComputer(frame, row)
+  const relay = frame.providerRelay
+  if (relay?.bound) {
+    const carrying = relay.profile === row.name
+    if (carrying) return { inUse: true, viaMac: true, chip: relay.live ? 'via this Mac' : 'Mac access ended', status: relay.live ? 'in use' : 'needs this computer' }
+    return { inUse: false, viaMac, chip: row.active ? 'host default' : null, status: viaMac ? 'runs on this Mac' : 'saved' }
+  }
+  if (row.active && !viaMac) return { inUse: true, viaMac: false, chip: 'active', status: 'in use' }
+  return { inUse: false, viaMac, chip: row.active ? 'host default' : null, status: viaMac ? 'runs on this Mac' : 'saved' }
+}
+
 export function providerRelayView(value: unknown): ProviderRelayView | null {
   if (!value || typeof value !== 'object') return null
   const row = value as Record<string, unknown>
@@ -1951,6 +1977,9 @@ export class Store {
     if (this.frame.turnActive || this.frame.providerSwitching) return
     const target = this.frame.providers.find(row => row.name === name)
     if (!target || target.active) return
+    // On an SSH host a sign-in provider runs on this computer, through its
+    // own login; the host's copy of that profile has no login to use.
+    if (runsOnThisComputer(this.frame, target)) { this.useLocalProvider(name); return }
     const { isCurrent } = this.captureSessionRequest()
     this.patch({ providerSwitching: name, providerSwitchError: null })
     void this.bridge
@@ -1964,6 +1993,22 @@ export class Store {
         // Reinitializing here would discard loaded history and could bind a
         // different chat if navigation happened while the request was pending.
         if (isCurrent() && target.model) this.patch({ model: target.model })
+        void this.loadProviders()
+        this.loadModels(true)
+      })
+      .catch(error => { this.patch({ providerSwitchError: desktopError(error) }) })
+      .finally(() => { this.patch({ providerSwitching: null }) })
+  }
+
+  /** Put this SSH task on one of this computer's sign-in providers. */
+  useLocalProvider(name: string): void {
+    if (this.frame.turnActive || this.frame.providerSwitching || !window.xerxes.remote) return
+    this.patch({ providerSwitching: name, providerSwitchError: null })
+    void window.xerxes.remote('provider-use-local', { profile: name })
+      .then(result => {
+        const row = result && typeof result === 'object' ? result as Record<string, unknown> : {}
+        if (row.ok === false) { this.patch({ providerSwitchError: str(row.error) || 'Could not use that provider on this computer.' }); return }
+        this.refreshProviderRelay()
         void this.loadProviders()
         this.loadModels(true)
       })
@@ -2802,6 +2847,7 @@ export class Store {
               name,
               label: str(row.label) || name,
               provider: str(row.provider),
+              signsIn: row.signs_in === true,
               model: str(row.model),
               active: row.active === true,
               baseUrl: str(row.base_url),

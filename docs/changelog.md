@@ -7,6 +7,17 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.24 — 2026-10-03
+
+SSH providers that work as expected, Claude Code installed automatically, and a cleaner Providers list.
+
+- On an SSH workspace, ChatGPT/Codex and Claude Code are marked "runs on this Mac"; choosing one moves the task onto the Mac's sign-in instead of the host's empty copy, and renewals keep that choice. The list shows the provider a task really uses ("via this Mac") and the host's own default separately.
+- A provider added or changed on the Mac reaches a connected SSH host within a second, and opening a task re-syncs as a backstop.
+- Choosing Claude Code installs it through Bun when it is missing; a copy Xerxes installed is updated at most daily (Anthropic's own installer updates itself). Set XERXES_AUTO_INSTALL_CLAUDE_CODE=0 to turn this off.
+- The Providers list is a set of cards: name and status, model, one Use action, and quiet edit/delete tools.
+- Settings and other dialogs are solid instead of see-through.
+- The welcome ring keeps moving instead of stopping after nine seconds, and a frame dropped while the window was hidden can no longer stop it for good.
+
 ## 0.6.23 — 2026-10-03
 
 Your providers work on SSH workspaces automatically, and you can always see when a task runs through your Mac.

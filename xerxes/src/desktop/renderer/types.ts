@@ -352,6 +352,8 @@ export interface ProviderRow {
   readonly active: boolean
   /** Stored endpoint — the Edit form prefills it; '' when none was sent. */
   readonly baseUrl: string
+  /** The credential is a sign-in on each machine (ChatGPT/Codex, Claude Code), not a copyable key. */
+  readonly signsIn: boolean
 }
 
 /**
