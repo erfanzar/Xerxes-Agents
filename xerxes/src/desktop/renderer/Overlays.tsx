@@ -50,7 +50,8 @@ export function SettingsModal({ snap }: { snap: Snapshot }): ReactElement | null
   useDialogFocus(ref, snap.settingsOpen)
   if (!snap.settingsOpen) return null
   // VS Code: one page with what a coding panel needs — models and providers,
-  // then approvals. No section tabs; the rest belongs to the desktop app.
+  // how hard agents think, then approvals. No section tabs; the rest belongs
+  // to the desktop app.
   if (isVscodeHost()) return (
     <div className="backdrop">
       <div className="modal modal--single" ref={ref} role="dialog" aria-modal="true" aria-label="Settings">
@@ -60,6 +61,7 @@ export function SettingsModal({ snap }: { snap: Snapshot }): ReactElement | null
         </header>
         <div className="modal__main">
           <ModelsCard snap={snap} />
+          <AgentIntelligenceCard snap={snap} />
           <PermissionsCard snap={snap} />
         </div>
       </div>

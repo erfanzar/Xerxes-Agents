@@ -130,7 +130,7 @@ html[data-host='vscode'] body{background:var(--x-screen);color:var(--fg);font:va
 :root[data-host='vscode'] .atelier.xv .stream--welcome{padding:16px 14px}
 
 /* ── Composer: one bordered box holding the input and its toolbar ──── */
-:root[data-host='vscode'] .atelier.xv .composer-wrap{gap:0;padding:6px 10px 10px;background:var(--x-screen)}
+:root[data-host='vscode'] .atelier.xv .composer-wrap{gap:6px;padding:6px 10px 10px;background:var(--x-screen)}
 :root[data-host='vscode'] .atelier.xv .composer-dock{max-width:none;border:1px solid var(--vscode-input-border,var(--x-hairline));border-bottom:0;border-radius:6px 6px 0 0;background:var(--vscode-input-background);transition:none}
 :root[data-host='vscode'] .atelier.xv .composer-dock:focus-within{border-color:var(--x-focus);box-shadow:none}
 :root[data-host='vscode'] .atelier.xv .composer{flex-direction:row;align-items:flex-end;gap:6px;padding:8px 8px 2px 10px}
@@ -139,14 +139,17 @@ html[data-host='vscode'] body{background:var(--x-screen);color:var(--fg);font:va
 :root[data-host='vscode'] .atelier.xv .composer__send{width:26px;height:26px;border-radius:4px;background:var(--vscode-button-background);color:var(--vscode-button-foreground)}
 :root[data-host='vscode'] .atelier.xv .composer__send:hover:not(:disabled){background:var(--vscode-button-hoverBackground)}
 :root[data-host='vscode'] .atelier.xv .composer__send:disabled{background:transparent;color:var(--x-meta);opacity:.6}
-:root[data-host='vscode'] .atelier.xv .composer__toolbar{max-width:none;min-height:28px;padding:0 4px 3px;flex-wrap:nowrap;overflow:hidden;background:var(--vscode-input-background);border:1px solid var(--vscode-input-border,var(--x-hairline));border-top:0;border-radius:0 0 6px 6px}
+/* The toolbar joins the input into one box; the wrap's gap still spaces the to-dos, status and hints above it. */
+:root[data-host='vscode'] .atelier.xv .composer__toolbar{margin-top:-6px;max-width:none;min-height:28px;padding:0 4px 3px;flex-wrap:nowrap;overflow:hidden;background:var(--vscode-input-background);border:1px solid var(--vscode-input-border,var(--x-hairline));border-top:0;border-radius:0 0 6px 6px}
 :root[data-host='vscode'] .atelier.xv .composer-wrap:focus-within :is(.composer-dock,.composer__toolbar){border-color:var(--x-focus)}
 :root[data-host='vscode'] .atelier.xv .composer__toolbar .cchip{height:22px;padding:0 6px;gap:4px;border-radius:4px;font:400 var(--ui-small)/1 var(--sans);color:var(--x-meta)}
 :root[data-host='vscode'] .atelier.xv .composer__toolbar .cchip:hover{background:var(--vscode-toolbar-hoverBackground,var(--x-selected));color:var(--fg)}
 :root[data-host='vscode'] .atelier.xv .composer__toolbar .composer__icon{width:24px}
 :root[data-host='vscode'] .atelier.xv .composer__toolbar .chipanchor>.cchip{max-width:46vw}
 :root[data-host='vscode'] .atelier.xv .composer-status,:root[data-host='vscode'] .atelier.xv .streamstatus{font-size:var(--ui-small)}
-:root[data-host='vscode'] .atelier.xv .composer-task-summary{max-width:none}
+/* To-dos and the queue: the box's width, corners and text inset, so their labels line up with the message. */
+:root[data-host='vscode'] .atelier.xv .composer-task-summary{max-width:none;padding:2px 9px;border-radius:6px !important;background:var(--x-card) !important;font-size:var(--ui-font)}
+:root[data-host='vscode'] .atelier.xv .composer-task-summary>button{padding:5px 2px}
 /* Narrow sidebar: drop the labels that have another home first. */
 @container (max-width:420px){:root[data-host='vscode'] .atelier.xv .composer__toolbar .delegation-chip{display:none}}
 

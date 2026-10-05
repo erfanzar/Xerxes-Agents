@@ -55,12 +55,14 @@ test('renders one conversation column with a history title, not the desktop side
   expect(html).not.toContain('desktop-rail')
 })
 
-test('in VS Code, settings is one page of providers and approvals with no section tabs', () => {
+test('in VS Code, settings is one page of providers, agent intelligence and approvals with no section tabs', () => {
   ;(globalThis as { document?: unknown }).document = { documentElement: { dataset: { host: 'vscode' } } }
   const html = renderToStaticMarkup(createElement(SettingsModal, { snap: snapshot({ settingsOpen: true }) }))
   expect(html).toContain('modal--single')
   expect(html).toContain('Models')
   expect(html).toContain('Permissions')
+  expect(html.indexOf('Agent intelligence')).toBeGreaterThan(html.indexOf('Models'))
+  expect(html.indexOf('Agent intelligence')).toBeLessThan(html.lastIndexOf('Permissions'))
   expect(html).not.toContain('mtab')
   expect(html).not.toContain('Channels')
   expect(html).not.toContain('Language servers')
