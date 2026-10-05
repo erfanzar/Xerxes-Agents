@@ -48,6 +48,7 @@ bun run --cwd xerxes test:ui
 bun run --cwd xerxes check:vscode
 bun run --cwd xerxes build:vscode
 bun xerxes/scripts/buildVscode.ts --all
+bun run --cwd xerxes publish:vscode   # build all, Marketplace + GitHub release
 
 # Full repository gate
 bun run check && bun run test && bun run build

@@ -35,6 +35,7 @@
     "build:desktop": "bun run build:runtime && bun scripts/buildDesktop.ts && bun scripts/packageDesktopMac.ts",
     "build:installer": "bun run build:desktop && bun scripts/buildDesktopInstaller.ts",
     "build:vscode": "bun run build:runtime && bun scripts/buildDesktop.ts && bun scripts/buildVscode.ts",
+    "publish:vscode": "bun scripts/publishVscode.ts",
     "desktop": "bun run build:desktop && bun scripts/runDesktop.ts",
     "check:desktop": "bunx --bun --no-install tsc --noEmit -p tsconfig.desktop.json",
     "check:vscode": "bunx --bun --no-install tsc --noEmit -p tsconfig.vscode.json"
