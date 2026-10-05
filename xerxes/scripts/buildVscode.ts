@@ -57,7 +57,7 @@ function manifest(extensionVersion: string): Record<string, unknown> {
     displayName: 'Xerxes Agents',
     description: 'Multi-agent coding with Xerxes: tasks, agents, goals, approvals and providers in VS Code, with the runtime built in.',
     version: extensionVersion,
-    publisher: 'xsimurgh',
+    publisher: 'erfanzar',
     license: 'Apache-2.0',
     icon: 'media/icon.png',
     repository: { type: 'git', url: 'https://github.com/erfanzar/Xerxes-Agents' },
