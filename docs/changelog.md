@@ -7,6 +7,16 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.26 — 2026-10-05
+
+Xerxes in VS Code: a chat in the sidebar, on the Visual Studio Marketplace.
+
+- The **Xerxes Agents** extension (`erfanzar.xerxes-agents`) is a chat view like Claude Code's or Codex's: the task title is a searchable history, the message box holds the add-files, approval, plan, model and context controls, and the colours and fonts follow your VS Code theme.
+- Files open in the editor, a file's changes in VS Code's diff, and Git in Source Control; **+** adds files through VS Code's file picker. New task, history and settings are the view's title-bar buttons; activity and usage are in its menu. Settings is one page: providers, models and approvals.
+- The Bun runtime ships inside the extension, one package per platform (macOS, Linux and Windows), and under Remote-SSH it runs on the remote machine.
+- If another copy of the extension is installed (an earlier build under a different ID), its buttons no longer just appear twice: the extension names it and offers to uninstall it.
+- `bun run publish:vscode` builds every platform, publishes to the Marketplace and attaches the packages to the GitHub release.
+
 ## 0.6.25 — 2026-10-03
 
 SSH tasks that keep running through your Mac when the link drops, and task switching without reloads.
