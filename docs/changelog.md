@@ -7,6 +7,11 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.28 — 2026-10-06
+
+- VS Code: the to-dos and queue bar sits a step above the message box instead of touching it, with the box's corners and its text in line with the message.
+- VS Code: Settings has Agent intelligence (the light, balanced and smart tiers) between Models & Providers and Permissions.
+
 ## 0.6.27 — 2026-10-06
 
 - The agents card's batch header spins while its agents run, instead of showing a still icon above spinning rows. It stops with the rest when reduced motion is on.
