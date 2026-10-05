@@ -2786,12 +2786,14 @@ html,body,#root,.app.atelier{background:transparent}
 :root[data-backdrop='transparent'] .panel-divider{background:linear-gradient(var(--x-hairline),var(--x-hairline)),var(--x-screen)}
 
 /* The spinner icon only spins when something turns it: a working
-   subagent row and header, a running file tool. */
+   subagent row, batch and header, a running file tool. */
 .atelier .acard__row[data-tone='working'] .acard__glyph svg,
+.atelier .acard__phase[data-state='working'] .acard__phaseicon svg,
 .atelier .acard[data-state='working'] .acard__icon svg,
 .atelier .filetool[data-state='working'] .filetool__verb svg{animation:studio-spin .9s linear infinite;transform-origin:50% 50%}
 @media (prefers-reduced-motion:reduce){
   .atelier .acard__row[data-tone='working'] .acard__glyph svg,
+  .atelier .acard__phase[data-state='working'] .acard__phaseicon svg,
   .atelier .acard[data-state='working'] .acard__icon svg,
   .atelier .filetool[data-state='working'] .filetool__verb svg{animation:none}
 }

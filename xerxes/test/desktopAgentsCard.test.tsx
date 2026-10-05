@@ -135,3 +135,20 @@ test('the Agents chip menu lists off, auto and eager with auto as the default', 
   const { DELEGATION_CHOICES } = await import('../src/desktop/renderer/Overlays.js')
   expect(DELEGATION_CHOICES.map(choice => choice.mode)).toEqual(['off', 'auto', 'eager'])
 })
+
+test('a running batch spins its header icon with the agents in it, and a finished one stops', async () => {
+  const now = Date.now()
+  const running: AgentMember[] = [
+    { key: 'p', runtimeId: 'p', title: 'Plan', status: 'completed', group: group('Plan'), startedAt: now - 9_000, finishedAt: now - 8_000 },
+    { key: 'w', runtimeId: 'w', title: 'Write', status: 'working', group: group('Write'), startedAt: now - 5_000 },
+  ]
+  const html = renderToStaticMarkup(createElement(AgentsCard, { members: running }))
+  expect(html).toMatch(/class="acard__phase" data-state="working"><div class="acard__phasehead"><span class="acard__phaseicon" aria-hidden="true"><svg/)
+  expect(html).toContain('class="acard__phase" data-state="done"')
+  // The icon only turns when a rule names it; the batch header was the one spinner left out.
+  const css = await Bun.file(new URL('../src/desktop/renderer/atelier.css', import.meta.url)).text()
+  const spin = css.slice(css.indexOf('/* The spinner icon only spins'), css.indexOf('@media (prefers-reduced-motion:reduce)', css.indexOf('/* The spinner icon only spins')))
+  expect(spin).toContain(".acard__phase[data-state='working'] .acard__phaseicon svg")
+  expect(spin).toContain(".acard__row[data-tone='working'] .acard__glyph svg")
+  expect(spin).toContain('animation:studio-spin')
+})
