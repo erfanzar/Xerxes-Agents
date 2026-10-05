@@ -18,6 +18,7 @@ import * as vscode from 'vscode'
 
 import { DaemonRpc } from '../desktop/main/daemon.js'
 import type { PushFrame, ResultFrame } from './messages.js'
+import { otherCopies } from './otherCopies.js'
 import { PanelHost, type PanelOptions, type PanelPorts } from './panelHost.js'
 
 const VIEW = 'xerxes.chat'
@@ -30,6 +31,7 @@ const SHEETS = ['activity', 'usage'] as const
 export function activate(extension: vscode.ExtensionContext): void {
   context = extension
   useBundledRuntime(extension.extensionPath)
+  void offerToRemoveOtherCopies(extension.extension.id)
   extension.subscriptions.push(
     vscode.window.registerWebviewViewProvider(VIEW, { resolveWebviewView: view => mount(view.webview, () => view.visible, view.onDidDispose) }, { webviewOptions: { retainContextWhenHidden: true } }),
     vscode.commands.registerCommand('xerxes.newTask', () => menu('new-task')),
@@ -46,6 +48,21 @@ export function activate(extension: vscode.ExtensionContext): void {
 export function deactivate(): void {
   for (const entry of hosts) entry.host.dispose()
   hosts.clear()
+}
+
+/**
+ * Another installed copy of this extension (an earlier publisher ID, a
+ * side-loaded .vsix) contributes the same view, so every title-bar button
+ * shows twice. Say which one it is and offer to remove it.
+ */
+async function offerToRemoveOtherCopies(self: string): Promise<void> {
+  for (const id of otherCopies(self, VIEW, vscode.extensions.all)) {
+    const choice = await vscode.window.showWarningMessage(`Another copy of Xerxes Agents (${id}) is installed, so its buttons appear twice.`, 'Uninstall it')
+    if (choice !== 'Uninstall it') continue
+    await vscode.commands.executeCommand('workbench.extensions.uninstallExtension', id)
+    await vscode.commands.executeCommand('workbench.action.reloadWindow')
+    return
+  }
 }
 
 /** Point the runtime launcher at the Bun and CLI inside the extension, unless the person set their own. */
