@@ -12,6 +12,8 @@
     "build": "bun run --cwd xerxes build",
     "build:runtime": "bun run --cwd xerxes build:runtime",
     "build:ui": "bun run --cwd xerxes build:ui",
+    "build:vscode": "bun run --cwd xerxes build:vscode",
+    "publish:vscode": "bun run --cwd xerxes publish:vscode",
     "check": "bun run repo:check && bun run typecheck",
     "dev": "bun run --cwd xerxes dev",
     "docs:build": "bun run --cwd xerxes docs:build",
