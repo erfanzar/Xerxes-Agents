@@ -7,6 +7,10 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.27 — 2026-10-06
+
+- The agents card's batch header spins while its agents run, instead of showing a still icon above spinning rows. It stops with the rest when reduced motion is on.
+
 ## 0.6.26 — 2026-10-05
 
 Xerxes in VS Code: a chat in the sidebar, on the Visual Studio Marketplace.
