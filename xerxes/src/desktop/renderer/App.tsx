@@ -31,6 +31,7 @@ import { AgentInspector } from './AgentInspector.js'
 import { OutputViewer } from './OutputViewer.js'
 import { Icon } from './Icon.js'
 import { RelayBadge } from './RelayBadge.js'
+import { isVscodeHost } from './host.js'
 import { RailStatus, currentActionOf, orbStateOf } from './RailStatus.js'
 import { AgentOrb } from './AgentOrb.js'
 import { AgentsCard } from './AgentsCard.js'
@@ -176,6 +177,9 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
   // An explicit open/close choice survives session changes and resizing.
   const rail = railChoice === undefined ? (!snap.noWorkspace && !contextRequiresFullWidth ? 'activity' : null) : railChoice
   const toggleSidebar = () => narrow ? setNarrowNavigation(value => !value) : setLayout({ sidebarHidden: !focused })
+  // In a narrow window (the VS Code sidebar, a small app window) the task
+  // list is a drawer over the conversation: picking a task closes it.
+  useEffect(() => { setNarrowNavigation(false) }, [snap.currentId])
   const chrome: WindowChromeState = { sidebarVisible: !focused, inspectorOpen: rail !== null, toggleSidebar }
   const [page, setPage] = useState<'agents' | 'extensions' | 'artifacts' | null>(null)
   // Which stylesheet takeovers are in effect, named once so the decision
@@ -203,12 +207,13 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
   useEffect(() => { setPanel(null); setPage(null); setSelectedAgent('') }, [snap.cwd, snap.sessionKey])
   return (
     <DesktopNavigation.Provider value={navigate}><ActivityVisible.Provider value={rail === 'activity'}><WindowChrome.Provider value={chrome}>
-    <div className={`app atelier${trafficLights ? '' : ' app--no-traffic-lights'}${focused ? ' atelier--focus' : ''}`} style={{ '--sidebar-width': `${layout.sidebarWidth}px`, '--inspector-width': `${layout.inspectorWidth}px` } as React.CSSProperties}>
+    <div className={`app atelier${trafficLights ? '' : ' app--no-traffic-lights'}${focused ? ' atelier--focus' : ''}${narrow ? ' app--narrow' : ''}`} style={{ '--sidebar-width': `${layout.sidebarWidth}px`, '--inspector-width': `${layout.inspectorWidth}px` } as React.CSSProperties}>
       {/* No title bar: its controls live in the sidebar's top row and the
           conversation header — one row, as in Claude's app. */}
       <FirstRunSetup snap={snap} />
       <div className="app__body" data-context-full={chatHidden.contextFull || undefined} data-review={(rail === "review" && contextFull) || undefined}>
         <Sidebar snap={snap} page={page} />
+        {narrow && narrowNavigation && <div className="side-scrim" aria-hidden="true" onClick={() => setNarrowNavigation(false)} />}
         {!focused && <PanelDivider label="Resize sessions" value={layout.sidebarWidth} min={180} max={360} onChange={sidebarWidth => setLayout({ sidebarWidth })} />}
         {snap.noWorkspace ? snap.storageScope?.startsWith('ssh:') ? <RemoteWorkspaceGate /> : <WorkspaceGate /> : <ErrorBoundary label="This conversation"><Chat snap={snap} page={page} /></ErrorBoundary>}
         {rail && <PanelDivider label="Resize inspector" value={layout.inspectorWidth} min={260} max={inspectorMax} reverse onChange={inspectorWidth => setLayout({ inspectorWidth })} />}
@@ -989,6 +994,8 @@ function Stream({ snap }: { snap: Snapshot }): ReactElement {
 }
 
 export { AgentsCard }
+/** The conversation pieces the VS Code chat view composes around its own header. */
+export { Stream, Composer, ConnectionBanner, Announcer, GlobalKeys, TaskModal }
 
 function TaskContinuation({ snap }: { snap: Snapshot }): ReactElement {
   const open = useDesktopNavigation()
@@ -1021,6 +1028,21 @@ function Welcome({ snap }: { snap: Snapshot }): ReactElement {
   const adds = snap.changes.reduce((sum, file) => sum + file.adds, 0)
   const dels = snap.changes.reduce((sum, file) => sum + file.dels, 0)
   const place = workspaceLabel(here)
+
+  // VS Code: a compact start, like its other chat views; no wordmark.
+  if (isVscodeHost()) return <div className="welcome welcome--compact">
+    <AgentOrb className="welcome__orb" size={32} state="breathing" />
+    <h1 className="welcome__compact-title">What should Xerxes do{place ? <> in <b>{place}</b></> : ''}?</h1>
+    {dirty > 0 && <p className="welcome__dirty">{dirty} uncommitted {dirty === 1 ? 'file' : 'files'} <b>+{adds}</b> <i>−{dels}</i></p>}
+    {resumable.length > 0 && <section className="welcome__resume" aria-label="Recent tasks here">
+      <h2>Recent</h2>
+      {resumable.map(row => <button className="resumerow" key={row.id} onClick={() => void store.openSession(row.id)}>
+        <span className="resumerow__dot" data-state={agentState(row.status).tone} aria-hidden="true" />
+        <span className="resumerow__name">{row.title}</span>
+        <span className="resumerow__age">{row.age}</span>
+      </button>)}
+    </section>}
+  </div>
 
   return <div className="welcome">
     {/* No settle time: it stopped after nine seconds and read as frozen. The
@@ -1640,7 +1662,7 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
     ref.current?.focus()
   }, [key, workspace, snap.currentId, draft])
   useEffect(() => {
-    const add = (event: Event) => { const detail = (event as CustomEvent<unknown>).detail; if (typeof detail === 'string') { setDraft(value => value + ' ' + detail); ref.current?.focus() } }
+    const add = (event: Event) => { const detail = (event as CustomEvent<unknown>).detail; if (typeof detail === 'string') { setDraft(value => value ? value + ' ' + detail : detail); ref.current?.focus() } }
     const insert = (event: Event) => { const detail = (event as CustomEvent<unknown>).detail; if (typeof detail === 'string') { setDraft(value => applyCompletion(detail) + value); setHints(null); ref.current?.focus() } }
     window.addEventListener('xerxes:add-context', add)
     window.addEventListener('xerxes:insert-command', insert)
@@ -1736,6 +1758,8 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
         : snap.planMode
           ? 'Planning — describe the outcome, or /plan <msg> to steer'
           : 'Describe what you need'
+  // VS Code has Source Control for the repo line, and no dictation in a webview.
+  const vscode = isVscodeHost()
 
   return (
     <div className="composer-wrap">
@@ -1770,7 +1794,7 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
         ? <span className="streamstatus__phrase">Press <kbd>esc</kbd> again to stop this task and its agents</span>
         : <span className="streamstatus__phrase">{composerPhraseOf(snap)}</span>}<span className="streamstatus__clock">{turnDurOf(snap.turnSeconds)}</span></div>}
       <ComposerTaskSummary snap={snap} />
-      <RepoBar snap={snap} />
+      {!vscode && <RepoBar snap={snap} />}
       <div className="composer-dock">
       <div className="composer">
         <textarea
@@ -1819,7 +1843,7 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
       </div>
       <div className="composer__toolbar">
         <button className="cchip composer__icon" title="Add files or folders as context" aria-label="Add context" onClick={() => open('files')}><Icon name="plus" size={16} /></button>
-        <Dictation compact sessionKey={snap.sessionKey} onText={text=>{setDraft(value=>(value ? value+" " : "")+text)}} />
+        {!vscode && <Dictation compact sessionKey={snap.sessionKey} onText={text=>{setDraft(value=>(value ? value+" " : "")+text)}} />}
         <button
           className="cchip composer__text"
           title={`Approval policy for this task: ${snap.permissionMode || 'not configured'} — open settings`}

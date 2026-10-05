@@ -933,17 +933,19 @@ test('the event channel ships one frame object the preload can parse', async () 
   // ipc sends; preload's cleanEvent validates a single {type, payload} frame.
   // Sending (type, payload) as two args once made cleanEvent parse the type
   // STRING as a frame and silently drop every daemon event.
-  const [ipc, preload] = await Promise.all([read('main/ipc.ts'), read('preload.ts')])
+  // The bridge methods live in bridgeApi.ts, shared by the preload and the VS Code webview.
+  const [ipc, bridge] = await Promise.all([read('main/ipc.ts'), read('bridgeApi.ts')])
   expect(ipc).toMatch(/send\('daemon:event',\s*\{\s*type,\s*payload\s*\}\)/)
-  expect(preload).toContain('const { type, payload } = frame as')
+  expect(bridge).toContain('const { type, payload } = frame as')
 })
 
 test('the preload exposes narrow validated capabilities, never raw ipcRenderer', async () => {
-  const [preload, main] = await Promise.all([read('preload.ts'), read('main.ts')])
-  expect(preload).toContain("contextBridge.exposeInMainWorld('xerxes'")
-  expect(preload).toContain('call(')
-  expect(preload).toContain('onEvent(')
-  expect(preload).toContain('openPath(path: unknown)')
+  const [preload, bridge, main] = await Promise.all([read('preload.ts'), read('bridgeApi.ts'), read('main.ts')])
+  expect(preload).toContain("contextBridge.exposeInMainWorld('xerxes', createBridge(")
+  expect(bridge).toContain('call<')
+  expect(bridge).toContain('onEvent(')
+  expect(bridge).toContain('openPath(path: unknown)')
+  expect(bridge).not.toContain('ipcRenderer')
   expect(main).toContain("handle('native:preset:open-path'")
   expect(main).toContain("relative(root, candidate)")
   expect(preload).not.toMatch(/exposeInMainWorld\(\s*'xerxes'\s*,\s*ipcRenderer/)

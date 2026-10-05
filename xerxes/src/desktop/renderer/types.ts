@@ -33,6 +33,11 @@ export interface XerxesBridge {
   appUpdate?(action: 'state' | 'check' | 'install' | 'skip' | 'dismiss' | 'open-release'): Promise<unknown>
   onAppUpdate?(handler: (state: unknown) => void): () => void
   onProviderRelay?(handler: () => void): () => void
+  /** VS Code host only. */
+  openInEditor?(path: string, line?: number): Promise<boolean>
+  openDiff?(path: string): Promise<boolean>
+  pickFiles?(): Promise<string[]>
+  showSourceControl?(): Promise<boolean>
   call<T = Record<string, unknown>>(method: string, params?: Record<string, unknown>): Promise<T>
   onEvent(handler: (event: DaemonEvent) => void): () => void
   /** Present the folder picker; open independently of the current workspace. */

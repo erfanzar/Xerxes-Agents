@@ -3024,3 +3024,15 @@ html,body,#root,.app.atelier{background:transparent}
 .atelier .provcard--add{flex-direction:row;align-items:center;gap:12px;padding:14px;border-style:dashed;background:transparent;text-align:left;font:inherit;color:inherit;cursor:pointer}
 .atelier .provcard--add:hover:not(:disabled){background:var(--mac-control);border-color:var(--x-meta)}
 .atelier .provcard--add:disabled{opacity:.5;cursor:default}
+
+/* Narrow windows (the VS Code sidebar, a small app window): the task list is a
+   drawer over the conversation instead of a column that squeezes it. */
+.atelier.app--narrow .app__body{position:relative}
+.atelier.app--narrow:not(.atelier--focus) .side{position:absolute;inset:0 auto 0 0;z-index:70;width:min(300px,86vw);background:var(--x-popover,var(--x-dialog));box-shadow:0 0 0 1px var(--x-hairline),12px 0 40px rgba(0,0,0,.35)}
+.atelier.app--narrow .side-scrim{position:absolute;inset:0;z-index:65;background:rgba(0,0,0,.35)}
+/* The composer's controls wrap rather than run off the edge, and the header
+   keeps room for the task title: the agent chip and the runtime label go
+   (the status dot and its tooltip stay). */
+.atelier.app--narrow .composer__toolbar{flex-wrap:wrap;row-gap:4px}
+.atelier.app--narrow .chat__head .chat__kind{display:none}
+.atelier.app--narrow .chat__head .runtime-status--compact>span:last-child{display:none}

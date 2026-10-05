@@ -44,6 +44,11 @@ bun run --cwd xerxes test:runtime
 bun run --cwd xerxes check:ui
 bun run --cwd xerxes test:ui
 
+# VS Code extension (one .vsix per platform, Bun bundled)
+bun run --cwd xerxes check:vscode
+bun run --cwd xerxes build:vscode
+bun xerxes/scripts/buildVscode.ts --all
+
 # Full repository gate
 bun run check && bun run test && bun run build
 git diff --check
@@ -75,7 +80,8 @@ xerxes/
 │   ├── channels/           # Messaging adapters and gateways
 │   ├── api-server/         # OpenAI-compatible HTTP service
 │   ├── extensions/         # Skills, hooks, plugins, authoring
-│   └── ui/                 # React + OpenTUI terminal client
+│   ├── ui/                 # React + OpenTUI terminal client
+│   └── vscode/             # VS Code extension: sidebar chat view (ui/) and host
 ├── test/                   # Bun contract and integration tests
 └── skills/                 # Bundled SKILL.md content and safe assets
 

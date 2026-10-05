@@ -29,6 +29,7 @@ import { RemoteProviders } from './RemoteProviders.js'
 import { AgentIntelligenceCard } from './AgentIntelligenceCard.js'
 import { MemoryGuardSetting } from './MemoryGuardSetting.js'
 import { Icon, type IconName } from './Icon.js'
+import { isVscodeHost } from './host.js'
 
 // ── Settings modal ──────────────────────────────────────────────────────
 
@@ -48,6 +49,22 @@ export function SettingsModal({ snap }: { snap: Snapshot }): ReactElement | null
   const ref=useRef<HTMLDivElement>(null)
   useDialogFocus(ref, snap.settingsOpen)
   if (!snap.settingsOpen) return null
+  // VS Code: one page with what a coding panel needs — models and providers,
+  // then approvals. No section tabs; the rest belongs to the desktop app.
+  if (isVscodeHost()) return (
+    <div className="backdrop">
+      <div className="modal modal--single" ref={ref} role="dialog" aria-modal="true" aria-label="Settings">
+        <header className="modal__head">
+          <strong>Settings</strong>
+          <button className="chipbtn" aria-label="Close settings" onClick={() => store.closeSettings()}><Icon name="close" size={13} /></button>
+        </header>
+        <div className="modal__main">
+          <ModelsCard snap={snap} />
+          <PermissionsCard snap={snap} />
+        </div>
+      </div>
+    </div>
+  )
   return (
     <div className="backdrop">
       <div className="modal" ref={ref} role="dialog" aria-modal="true" aria-label="Settings">

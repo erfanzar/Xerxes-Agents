@@ -10,7 +10,7 @@
     "exactOptionalPropertyTypes": true,
     "skipLibCheck": true,
     "noEmit": true,
-    "types": ["bun", "node"]
+    "types": ["node", "vscode"]
   },
-  "include": ["src/desktop/**/*.ts", "src/desktop/**/*.tsx", "src/vscode/ui/**/*.tsx"]
+  "include": ["src/vscode/*.ts"]
 }

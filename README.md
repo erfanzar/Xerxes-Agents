@@ -146,6 +146,17 @@ On first launch, enter `/provider` to create or select a provider profile and ch
 a model. The live `/help` catalogue is authoritative because installed plugins and
 project skills can extend it.
 
+### VS Code
+
+The **Xerxes Agents** extension is a Xerxes chat in the VS Code sidebar: tasks with
+their agents, goals, approvals and questions. Files, diffs and Git open in VS Code's
+own editor, diff view and Source Control. It works on the open folder, ships its own Bun runtime, and shares tasks
+and providers with the desktop app and `xerxes` on the same machine. Install the
+`.vsix` for your platform from a GitHub release with **Extensions → … → Install from
+VSIX…**, then click the Xerxes icon in the activity bar. **Send Selection to Xerxes**
+(`⌘⌥X` / `Ctrl+Alt+X`) adds the selected code to the message box. For another
+machine, open its folder with VS Code Remote-SSH; the extension runs there.
+
 ## What you actually get
 
 | Capability             | What it does                                                                                                            |
