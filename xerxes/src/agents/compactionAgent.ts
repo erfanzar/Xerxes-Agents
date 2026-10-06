@@ -225,7 +225,12 @@ export class CompactionAgent {
       },
     }).compact(original, { force: true })
 
-    if (!provision.compacted || compactable === undefined) return original
+    if (!provision.compacted) return original
+    // Made room without a summary slot (the oldest tool results were shed):
+    // nothing to ask the model. The summarizer may still have been offered an
+    // empty window that was then dropped, so check the result, not the call.
+    const awaitsSummary = provision.messages.some(message => JSON.stringify(message.content ?? '').includes(COMPACTION_PROMPT_PLACEHOLDER))
+    if (compactable === undefined || !awaitsSummary) return [...provision.messages]
     const summary = await this.summarizeContext(renderMessagesForSummary(compactable))
     if (!summary.trim()) return original
     let replaced = provision.messages.map(message => replaceSummaryPlaceholder(message, summary))

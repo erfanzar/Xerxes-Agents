@@ -88,3 +88,44 @@ function truncateText(content: string, headLines: number, tailLines: number, max
   const omitted = content.length - headCharacters - tailCharacters
   return `${content.slice(0, headCharacters)}\n\n[... ${omitted} chars omitted by pre-pruning ...]\n\n${content.slice(-tailCharacters)}`
 }
+
+export interface ToolResultShedOptions<T> {
+  /** Stop once the conversation is at or under this many tokens. */
+  readonly budgetTokens: number
+  /** The newest tool results kept verbatim: the next round still reads them. */
+  readonly keepRecent: number
+  readonly count: (messages: readonly T[]) => number
+}
+
+/**
+ * Replace the oldest tool results with a one-line note until the conversation
+ * fits. A single round can be larger than any window — one assistant message
+ * carried 1,176 calls and 1.25M tokens of results — and such a round can be
+ * neither summarized apart from its calls nor trimmed small enough per
+ * result. Each call keeps its result message, so pairing stays valid; only
+ * the oldest outputs lose their text, and user and assistant messages are
+ * never touched.
+ */
+export function shedToolResults<T extends Record<string, unknown>>(
+  messages: readonly T[],
+  options: ToolResultShedOptions<T>,
+): { readonly messages: T[]; readonly shedCount: number } {
+  const output = [...messages]
+  const toolIndexes = output.flatMap((message, index) => message.role === 'tool' ? [index] : [])
+  const sheddable = toolIndexes.slice(0, Math.max(0, toolIndexes.length - options.keepRecent))
+  let total = options.count(output)
+  let shedCount = 0
+  for (const index of sheddable) {
+    if (total <= options.budgetTokens) break
+    const message = output[index]!
+    const text = typeof message.content === 'string' ? message.content : JSON.stringify(message.content ?? '')
+    if (text.startsWith(SHED_PREFIX)) continue
+    const replacement = copyTurnOutcome(message, { ...message, content: `${SHED_PREFIX} (${text.length.toLocaleString('en-US')} characters)]` } as T)
+    total -= options.count([message]) - options.count([replacement])
+    output[index] = replacement
+    shedCount += 1
+  }
+  return { messages: output, shedCount }
+}
+
+const SHED_PREFIX = '[result omitted to fit the context window'

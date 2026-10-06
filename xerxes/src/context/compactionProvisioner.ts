@@ -9,6 +9,10 @@ import {
 } from './compressor.js'
 import { SmartTokenCounter } from './tokenCounter.js'
 import { repairToolMessageSequence } from './toolPairRepair.js'
+import { shedToolResults } from './toolResultPruner.js'
+
+/** Tool results kept verbatim when older ones are shed to fit the window. */
+const SHED_KEEP_RECENT_TOOL_RESULTS = 8
 
 export { repairToolMessageSequence } from './toolPairRepair.js'
 
@@ -248,6 +252,35 @@ export class CompactionProvisioner {
 
   /** Replace compactable history with a model-written reference summary. */
   compact(messages: readonly ContextMessage[], options: CompactOptions = {}): CompactionProvision {
+    const provision = this.summarizeOrPrune(messages, options)
+    // A summary failure is reported as it is, never papered over.
+    if (provision.error) return provision
+    const tokens = provision.compacted ? provision.tokensAfter : provision.tokensBefore
+    if (tokens <= this.maxContextTokens) return provision
+    // Still larger than the window: the oldest tool results give way. This is
+    // what makes room when one tool round is itself bigger than the window,
+    // which the summary path cannot split.
+    const shed = shedToolResults(provision.compacted ? provision.messages : [...messages], {
+      budgetTokens: this.targetTokens,
+      keepRecent: SHED_KEEP_RECENT_TOOL_RESULTS,
+      count: candidate => this.countTokens(candidate),
+    })
+    if (shed.shedCount === 0) return provision
+    const tokensAfter = this.countTokens(shed.messages)
+    if (tokensAfter >= provision.tokensBefore) return provision
+    return {
+      compacted: true,
+      messages: shed.messages,
+      tokensBefore: provision.tokensBefore,
+      tokensAfter,
+      summarizedCount: provision.compacted ? provision.summarizedCount : 0,
+      keptCount: provision.keptCount,
+      reason: provision.compacted ? provision.reason : 'pruned',
+      error: '',
+    }
+  }
+
+  private summarizeOrPrune(messages: readonly ContextMessage[], options: CompactOptions): CompactionProvision {
     const original = [...messages]
     const tokensBefore = this.countTokens(original)
     if (!options.force && tokensBefore < this.thresholdTokens) {
