@@ -70,3 +70,22 @@ test('a turn-end checkpoint folds into its turn, so the transcript ends on the a
     ['checkpoint'],
   ])
 })
+
+test('a long run counts every call even when the provider reuses call ids across rounds', () => {
+  // Claude Code numbers calls per round, so the same id recurs; each round is its own tools block.
+  // Restored history can also give every round the same block id.
+  const round = (_id: number, ...items: ToolItem[]): Block => ({ kind: 'tools', id: -1, running: false, items })
+  const reused = (name: string, arg: string, path?: string): ToolItem => ({ ...tool(name, arg, 'done', path), id: 'toolu_1' })
+  const blocks = Array.from({ length: 40 }, (_, index) => round(index + 1,
+    reused('exec_command', `pytest -k case${index}`),
+    reused('ReadFile', `src/m${index % 5}.py`, `src/m${index % 5}.py`),
+  ))
+  expect(activitySummary(blocks)).toBe('Ran 40 commands and read 5 files 40 times')
+})
+
+test('a file read over and over says how many times, not just "read 1 file"', () => {
+  const reads = Array.from({ length: 1091 }, () => tool('ReadFile', 'core.py', 'done', 'core.py'))
+  expect(activitySummary([tools(...reads, tool('exec_command', 'make'))])).toBe('Read 1 file 1,091 times and ran 1 command')
+  // Ordinary re-reading stays quiet.
+  expect(activitySummary([tools(tool('ReadFile', 'a.py', 'done', 'a.py'), tool('ReadFile', 'a.py', 'done', 'a.py'), tool('ReadFile', 'b.py', 'done', 'b.py'))])).toBe('Read 2 files')
+})

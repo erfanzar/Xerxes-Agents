@@ -3,6 +3,11 @@
 
 import { useCallback, useLayoutEffect, useRef, useState, type RefObject } from 'react'
 
+/** Pages one click may fetch while older history stays folded out of sight. */
+const MAX_INVISIBLE_PAGES = 10
+/** Growth that counts as something new on screen, not a summary line's reflow. */
+const VISIBLE_GROWTH_PX = 24
+
 /** A newly attached session starts at its tail; reading older content pauses following. */
 export function useTranscriptScroll(sessionId: string | null, options: { more?: boolean; loading?: boolean; automatic?: boolean; load: () => Promise<void> }): { ref: RefObject<HTMLDivElement | null>; loadOlder: () => Promise<void>; following: boolean; scrollToLatest: () => void } {
   const ref = useRef<HTMLDivElement>(null)
@@ -17,6 +22,8 @@ export function useTranscriptScroll(sessionId: string | null, options: { more?: 
   const currentOptions = useRef(options)
   currentOptions.current = options
   const pending = useRef(false)
+  /** The session whose too-short transcript was already topped up once on open. */
+  const filledFor = useRef<string | null>(null)
   const scrollToLatest = useCallback((): void => {
     const element = ref.current
     if (!element) return
@@ -39,9 +46,21 @@ export function useTranscriptScroll(sessionId: string | null, options: { more?: 
     const height = element.scrollHeight
     const scroll = element.scrollTop
     try {
-      await currentOptions.current.load()
-      await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
-      if (identity !== session.current) return
+      // A page of older tool calls folds into the activity group already on
+      // screen, so one page can add nothing visible: the button "did
+      // nothing" and the transcript still had no room to scroll. Keep paging
+      // until the transcript actually grows, the history ends, or a load
+      // fails — bounded, so a session of thousands of tool calls is not
+      // fetched in one click.
+      for (let page = 0; page < MAX_INVISIBLE_PAGES; page++) {
+        await currentOptions.current.load()
+        // The store notifies on the next frame; let React commit before measuring.
+        await new Promise<void>(resolve => setTimeout(resolve, 32))
+        await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+        if (identity !== session.current) return
+        const grew = element.scrollHeight - height >= VISIBLE_GROWTH_PX
+        if (grew || !currentOptions.current.more || currentOptions.current.automatic === false) break
+      }
       const retained = anchorId ? [...element.querySelectorAll<HTMLElement>('[data-history-anchor]')].find(node => node.dataset.historyAnchor === anchorId) : undefined
       element.scrollTop = retained ? element.scrollTop + retained.getBoundingClientRect().top - element.getBoundingClientRect().top - offset : scroll + element.scrollHeight - height
     } finally { pending.current = false }
@@ -79,6 +98,14 @@ export function useTranscriptScroll(sessionId: string | null, options: { more?: 
     }
     // Measure after React commits the replay, not before its height is known.
     follow()
+    // Older history loads on scrolling near the top, but a transcript that
+    // fits the view has no scrolling: it stayed stuck on its newest page with
+    // nothing to scroll up to. Fetch earlier history once on open instead.
+    if (filledFor.current !== sessionId && element.clientHeight > 0 && element.scrollHeight <= element.clientHeight + 1
+      && currentOptions.current.more && !currentOptions.current.loading && currentOptions.current.automatic !== false) {
+      filledFor.current = sessionId
+      void loadOlder()
+    }
     element.addEventListener('scroll', onScroll, { passive: true })
     // Markdown, fonts, and window resizing can change height after that commit.
     const observer = new ResizeObserver(follow)

@@ -126,7 +126,10 @@ const PAST: Record<Family, (count: number) => string> = {
  * is one edited file. The three largest families lead; the rest collapse.
  */
 export function activitySummary(blocks: readonly Block[]): string {
-  const tools = blocks.flatMap(block => block.kind === 'tools' ? block.items : [])
+  // Each call is its own entry, by position: call IDs are only unique within
+  // a round (Claude Code reuses the same few) and restored history can share
+  // block ids, so counting by either turned 1,176 calls into "ran 3 commands".
+  const tools = blocks.flatMap(block => block.kind === 'tools' ? block.items : []).map((item, index) => ({ item, key: String(index) }))
   if (tools.length === 0) {
     const spawned = blocks.reduce((total, block) => total + (block.kind === 'agents' ? block.members.length : 0), 0)
     if (spawned > 0) return spawned === 1 ? 'Started an agent' : `Started ${spawned} agents`
@@ -134,14 +137,17 @@ export function activitySummary(blocks: readonly Block[]): string {
     return blocks.some(block => block.kind === 'notice' && block.error) ? 'Runtime error' : 'Runtime notice'
   }
   const counts = new Map<Family, Set<string>>()
+  /** Calls per family: files count once however often they are opened. */
+  const calls = new Map<Family, number>()
   // A batch call names its size ("8 agents"); the card itself now sits
   // outside the group, so the call is where the count comes from.
   let spawnedByCalls = 0
-  for (const item of tools) {
+  for (const { item, key } of tools) {
     if (familyOf(item.name || item.verb) === 'spawn') spawnedByCalls += Number(/^(\d+) agents?\b/.exec(item.arg)?.[1] ?? 1)
     const family = familyOf(item.name || item.verb)
+    calls.set(family, (calls.get(family) ?? 0) + 1)
     const bucket = counts.get(family) ?? new Set<string>()
-    bucket.add(family === 'edit' || family === 'read' ? (item.path || item.arg || item.id) : item.id)
+    bucket.add(family === 'edit' || family === 'read' ? (item.path || item.arg || key) : key)
     counts.set(family, bucket)
   }
   // One SpawnAgents call can start many agents; the card knows how many.
@@ -149,7 +155,13 @@ export function activitySummary(blocks: readonly Block[]): string {
   const ranked = [...counts.entries()]
     .map(([family, ids]) => [family, family === 'spawn' ? Math.max(ids.size, members, spawnedByCalls) : ids.size] as const)
     .sort((a, b) => (a[0] === 'other' ? 1 : b[0] === 'other' ? -1 : b[1] - a[1]))
-  const shown = ranked.slice(0, 3).map(([family, count]) => PAST[family](count))
+  // Files count once, so a model stuck re-reading one file a thousand times
+  // read as "Read 1 file". Far more calls than files is worth saying.
+  const shown = ranked.slice(0, 3).map(([family, count]) => {
+    const made = calls.get(family) ?? count
+    const repeated = (family === 'read' || family === 'edit') && made >= 10 && made >= count * 5
+    return PAST[family](count) + (repeated ? ` ${made.toLocaleString('en-US')} times` : '')
+  })
   const rest = ranked.slice(3).reduce((total, [, count]) => total + count, 0)
   if (rest > 0) shown.push(`${rest} more`)
   const sentence = shown.length > 1 ? `${shown.slice(0, -1).join(', ')} and ${shown.at(-1)}` : shown[0]!

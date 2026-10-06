@@ -10,7 +10,7 @@
  * extension, so nothing else needs installing.
  */
 
-import { existsSync } from 'node:fs'
+import { existsSync, statSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { isAbsolute, join, relative } from 'node:path'
 
@@ -143,8 +143,15 @@ function mount(webview: vscode.Webview, visible: () => boolean, onDispose: vscod
 /** The chat view's page, with VS Code's content-security policy. An editor tab sits on the editor background, the view on the sidebar's. */
 function html(webview: vscode.Webview, surface: 'view' | 'panel'): string {
   const media = vscode.Uri.joinPath(context.extensionUri, 'media')
-  const asset = (path: string) => webview.asWebviewUri(vscode.Uri.joinPath(media, path)).toString()
-  const base = asset('renderer/')
+  // Stamped with the file's build time: VS Code's webview keeps a resource
+  // cache across restarts keyed by URL, so a rebuilt file at the same path
+  // could be served stale.
+  const asset = (path: string) => {
+    const file = vscode.Uri.joinPath(media, path)
+    const stamp = existsSync(file.fsPath) ? Math.round(statSync(file.fsPath).mtimeMs).toString(36) : ''
+    return webview.asWebviewUri(file).toString() + (stamp ? `?v=${stamp}` : '')
+  }
+  const base = webview.asWebviewUri(vscode.Uri.joinPath(media, 'renderer/')).toString()
   const source = webview.cspSource
   return `<!doctype html>
 <html lang="en" data-layout="claude" data-host="vscode" data-surface="${surface}">
