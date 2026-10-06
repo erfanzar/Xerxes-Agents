@@ -7,6 +7,18 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.29 — 2026-10-06
+
+Claude Code tasks that compact before they overflow, and long histories you can scroll back through.
+
+- Claude Code reports each model's window on every reply; Xerxes now uses it, so a plain alias such as `opus` compacts ahead of time instead of running into "Prompt is too long". A size you set yourself still wins.
+- When the conversation does not fit and automatic compaction cannot make room, the stop message says why instead of dropping the reason.
+- A failed run notice names its failure ("Monitor reaction stopped before completion: …") instead of its id.
+- "Show earlier conversation" keeps loading until something new appears: a stretch of tool calls folds into one line, so a page of them used to change nothing on screen. A task that fits the view loads earlier history when it opens, so there is something to scroll back to.
+- The folded tool line counts every call (Claude Code reuses call ids) and says when one file was read over and over ("Read 1 file 1,091 times").
+- Scrolling up while a reply streams stops following the newest text at once.
+- VS Code: the view's files carry a build stamp, so an updated extension never shows a cached old view.
+
 ## 0.6.28 — 2026-10-06
 
 - VS Code: the to-dos and queue bar sits a step above the message box instead of touching it, with the box's corners and its text in line with the message.
