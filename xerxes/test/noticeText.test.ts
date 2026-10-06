@@ -24,3 +24,13 @@ test('a notice that is only the command still renders something', () => {
   // Stripping everything would leave a blank row, which reads as a bug.
   expect(noticeText('/runs inspect abc123')).toBe('/runs inspect abc123')
 })
+
+test('a failed run notice names why it failed instead of repeating its title', async () => {
+  const { runNoticeBody } = await import('../src/daemon/server.js')
+  expect(runNoticeBody({ kind: 'monitor', state: 'failed', title: 'Monitor reaction: 148a91c8', error: 'Monitor reaction stopped before completion: context_overflow', id: 'r1' }))
+    .toBe('monitor failed: Monitor reaction stopped before completion: context_overflow\n/runs inspect r1')
+  expect(runNoticeBody({ kind: 'schedule', state: 'succeeded', title: 'nightly', error: null, id: 'r2' }))
+    .toBe('schedule succeeded: nightly\n/runs inspect r2')
+  expect(runNoticeBody({ kind: 'terminal', state: 'failed', title: 'git', error: null, id: 'r3' }))
+    .toBe('terminal failed: git\n/runs inspect r3')
+})

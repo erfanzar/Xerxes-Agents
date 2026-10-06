@@ -6,6 +6,7 @@ import { expect, test } from 'bun:test'
 import { HookRunner } from '../src/extensions/hooks.js'
 import { OpenAiCompatibleClient, type CompletionRequest, type LlmClient, type LlmDelta } from '../src/llms/client.js'
 import { classifyError } from '../src/runtime/errorClassifier.js'
+import { renderContextOverflowStopGuard } from '../src/runtime/interventions.js'
 import { createAgentState, type StreamEvent } from '../src/streaming/events.js'
 import {
   CONTEXT_OVERFLOW_STOP_TEXT,
@@ -668,7 +669,7 @@ test('a reducer runs at most once per overflowing request and a repeat overflow 
   expect(reductions).toBe(1)
   expect(client.calls).toBe(2)
   expect(events.filter(event => event.type === 'text').map(event => event.text)).toEqual([
-    CONTEXT_OVERFLOW_STOP_TEXT,
+    renderContextOverflowStopGuard('the compacted conversation still did not fit'),
   ])
   expect(events.at(-1)).toMatchObject({ type: 'turn_done', reason: 'context_overflow' })
 })
@@ -713,8 +714,34 @@ test('a reducer that frees nothing falls through to the overflow remedy', async 
 
   expect(client.calls).toBe(1)
   expect(events.filter(event => event.type === 'text').map(event => event.text)).toEqual([
-    CONTEXT_OVERFLOW_STOP_TEXT,
+    renderContextOverflowStopGuard('it freed no space'),
   ])
+  expect(events.at(-1)).toMatchObject({ type: 'turn_done', reason: 'context_overflow' })
+})
+
+test('a compaction that fails is named in the overflow stop instead of being dropped', async () => {
+  class OverflowingClient implements LlmClient {
+    calls = 0
+
+    async *stream(): AsyncGenerator<LlmDelta> {
+      this.calls += 1
+      throw new Error('Client claude-code: Prompt is too long')
+    }
+  }
+
+  const client = new OverflowingClient()
+  const events = await collect(runTurn(
+    { model: 'claude-code/opus', state: createAgentState(), userMessage: 'keep going' },
+    {
+      llm: client,
+      retryDelays: [],
+      reduceContext: async () => { throw new Error('Automatic context compaction failed: Client claude-code: Prompt is too long. Original conversation retained.') },
+    },
+  ))
+
+  expect(client.calls).toBe(1)
+  const [text] = events.filter(event => event.type === 'text').map(event => event.text)
+  expect(text).toStartWith('[Stopped: the conversation no longer fits in this model\'s context window. Automatic compaction could not make room: Automatic context compaction failed: Client claude-code: Prompt is too long. Original conversation retained. Run /compact')
   expect(events.at(-1)).toMatchObject({ type: 'turn_done', reason: 'context_overflow' })
 })
 

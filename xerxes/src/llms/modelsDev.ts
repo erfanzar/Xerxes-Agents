@@ -320,6 +320,11 @@ export function reportModelCapability(provider: string, model: string, capabilit
   reported.set(key, { ...reported.get(key), ...capability })
 }
 
+/** What the provider itself reported about a model, if anything (no models.dev fill-in). */
+export function reportedModelCapability(provider: string, model: string): LiveModelCapability | undefined {
+  return reported.get(reportKey(provider, model))
+}
+
 /** Forget reported capabilities (tests). */
 export function clearReportedCapabilities(): void {
   reported.clear()

@@ -36,6 +36,7 @@ import { isJsonObject } from '../types/toolCalls.js'
 import type { CompletionRequest, LlmClient, LlmDelta, TokenUsage } from './client.js'
 import { claudeCodeCatalog } from './claudeCodeCatalog.js'
 import { credentialFingerprint } from './credentialFingerprint.js'
+import { reportModelCapability } from './modelsDev.js'
 
 export const CLAUDE_CODE_PROVIDER = 'claude-code'
 
@@ -827,6 +828,24 @@ export function isNativeCallRejection(error: unknown): boolean {
   return error instanceof ProviderError && /tool call could not be parsed/i.test(error.message)
 }
 
+/**
+ * The window and output cap Claude Code reports for the model that served a
+ * request (`modelUsage[model].contextWindow` / `maxOutputTokens` on every
+ * result). Side calls Claude Code makes on a smaller model read less of the
+ * prompt, so the entry that read the most is the request's own model.
+ */
+export function claudeCodeModelLimits(modelUsage: unknown): { contextLimit?: number; maxOutputTokens?: number } | undefined {
+  const read = (entry: Record<string, unknown>): number =>
+    (count(entry.inputTokens) ?? 0) + (count(entry.cacheReadInputTokens) ?? 0) + (count(entry.cacheCreationInputTokens) ?? 0)
+  const served = Object.values(record(modelUsage)).map(record)
+    .filter(entry => (count(entry.contextWindow) ?? 0) > 0)
+    .sort((left, right) => read(right) - read(left))[0]
+  if (!served) return undefined
+  const contextLimit = count(served.contextWindow)
+  const maxOutputTokens = count(served.maxOutputTokens)
+  return { ...(contextLimit ? { contextLimit } : {}), ...(maxOutputTokens ? { maxOutputTokens } : {}) }
+}
+
 export function claudeCodeFailure(message: string, status?: number): ProviderError {
   const text = message.trim() || 'Claude Code returned an error without a message.'
   const hint = /invalid (authentication|api key)|failed to authenticate|not logged in|please run \/login|oauth token has expired/i.test(text)
@@ -1010,6 +1029,11 @@ export class ClaudeCodeClient implements LlmClient {
           }
         } else if (event.type === 'result') {
           usage = usageOf(event.usage)
+          // Claude Code's own statement of the window and output cap. Without
+          // it a plain alias (`opus`) has no known window, so nothing
+          // compacts ahead of time and an overflow is the first sign.
+          const limits = claudeCodeModelLimits(event.modelUsage)
+          if (limits) reportModelCapability(CLAUDE_CODE_PROVIDER, request.model, limits)
           if (event.is_error === true) {
             failure = claudeCodeFailure(typeof event.result === 'string' ? event.result : 'Claude Code reported an error.', count(event.api_error_status))
           }

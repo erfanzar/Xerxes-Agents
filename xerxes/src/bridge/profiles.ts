@@ -6,7 +6,7 @@ import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync }
 import { dirname, join } from 'node:path'
 
 import { xerxesHome } from '../daemon/paths.js'
-import { modelsDev, type LiveCost, type LiveReasoning } from '../llms/modelsDev.js'
+import { modelsDev, reportedModelCapability, type LiveCost, type LiveReasoning } from '../llms/modelsDev.js'
 
 export const CLAUDE_CODE_PROFILE_NAME = 'claude-code'
 /**
@@ -568,15 +568,17 @@ export function resolvedProfileModelCapabilities(
 ): ResolvedModelCapabilities {
   const override = modelRecord(profile?.model_overrides, model)
   const cached = modelRecord(profile?.model_capabilities, model)
-  // Nothing reported by the provider: what models.dev says (Kimi Code's approach).
+  // What the provider stated while serving this model (Claude Code reports
+  // its window on every reply), then what models.dev says (Kimi Code's approach).
+  const live = profile?.provider ? reportedModelCapability(profile.provider, model) : undefined
   const catalog = modelsDev.find({ model, ...(profile?.provider ? { provider: profile.provider } : {}), ...(profile?.base_url ? { baseUrl: profile.base_url } : {}) })
-  const contextLimit = override?.context_limit ?? cached?.context_limit ?? catalog?.contextLimit
-  const maxOutputTokens = override?.max_output_tokens ?? cached?.max_output_tokens ?? catalog?.maxOutputTokens
+  const contextLimit = override?.context_limit ?? cached?.context_limit ?? live?.contextLimit ?? catalog?.contextLimit
+  const maxOutputTokens = override?.max_output_tokens ?? cached?.max_output_tokens ?? live?.maxOutputTokens ?? catalog?.maxOutputTokens
   return {
     ...(contextLimit === undefined ? {} : { contextLimit }),
     contextSource: override?.context_limit !== undefined
       ? 'override'
-      : cached?.context_limit !== undefined
+      : cached?.context_limit !== undefined || live?.contextLimit !== undefined
         ? 'provider'
         : catalog?.contextLimit !== undefined
           ? 'catalog'
@@ -584,7 +586,7 @@ export function resolvedProfileModelCapabilities(
     ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }),
     outputSource: override?.max_output_tokens !== undefined
       ? 'override'
-      : cached?.max_output_tokens !== undefined
+      : cached?.max_output_tokens !== undefined || live?.maxOutputTokens !== undefined
         ? 'provider'
         : catalog?.maxOutputTokens !== undefined
           ? 'catalog'

@@ -513,6 +513,8 @@ export async function* runTurn(
    * a goal round can run for hours and outgrow the window more than once.
    */
   let contextReductionAttempted = false
+  /** Why this round's automatic compaction made no room; named in the stop text. */
+  let contextReductionFailure: string | undefined
   /** The provider's count of the last completed round's prompt; see `contextCompactionDue`. */
   let observedPromptTokens: number | undefined
   // The client in use; swapped when a used-up account is replaced mid-turn.
@@ -721,7 +723,8 @@ export async function* runTurn(
             let reduction: Awaited<ReturnType<typeof reduceContextSafely>>
             try { reduction = await reduceContextSafely(dependencies.reduceContext, state.messages, signal) }
             finally { yield { type: 'compaction', active: false } }
-            if (reduction !== undefined && reduction.tokensFreed > 0) {
+            contextReductionFailure = reduction.failure
+            if (reduction.failure === undefined) {
               state.messages.splice(0, state.messages.length, ...reduction.messages)
               roundHistoryReplaced = true
               yield {
@@ -812,7 +815,7 @@ export async function* runTurn(
             const overflow = classified.kind === ErrorKind.CONTEXT_OVERFLOW
             yield {
               type: 'text',
-              text: overflow ? CONTEXT_OVERFLOW_STOP_TEXT : `[Error: ${errorMessage(error)}]`,
+              text: overflow ? renderContextOverflowStopGuard(contextReductionFailure ?? (contextReductionAttempted ? 'the compacted conversation still did not fit' : undefined)) : `[Error: ${errorMessage(error)}]`,
             }
             terminalProviderFailure = true
             stopReason = overflow ? 'context_overflow' : 'provider_failed'
@@ -835,6 +838,7 @@ export async function* runTurn(
         throw new Error('LLM stream exited without completion or error')
       }
       contextReductionAttempted = false
+      contextReductionFailure = undefined
       if (lastUsage && !roundHistoryReplaced) {
         const measured = lastUsage.inputTokens + (lastUsage.cacheReadTokens ?? 0) + (lastUsage.cacheCreationTokens ?? 0)
         if (measured > 0) observedPromptTokens = measured
@@ -1714,16 +1718,24 @@ function untilAborted<Value>(work: Promise<Value>, signal: AbortSignal | undefin
  * about: a reducer that throws must still leave the turn reporting the overflow
  * and its remedy, not the reducer's own internal error.
  */
+/**
+ * Overflow recovery's compaction. A failure does not end the round here — the
+ * overflow stop does — but its reason is kept for that stop's text instead of
+ * being dropped, so "it stopped" always comes with why compaction did not help.
+ */
 async function reduceContextSafely(
   reduce: ContextReducer,
   messages: readonly ChatMessage[],
   signal: AbortSignal | undefined,
-): Promise<ContextReduction | undefined> {
+): Promise<{ readonly messages: ChatMessage[]; readonly failure?: undefined } | { readonly failure: string }> {
+  let reduction: ContextReduction
   try {
-    return await reduce(messages, signal)
-  } catch {
-    return undefined
+    reduction = await reduce(messages, signal)
+  } catch (error) {
+    return { failure: errorMessage(error) }
   }
+  if (reduction.tokensFreed <= 0) return { failure: 'it freed no space' }
+  return { messages: [...reduction.messages] }
 }
 
 function ensureSystemPrompt(

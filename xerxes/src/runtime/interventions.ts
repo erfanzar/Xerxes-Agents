@@ -60,6 +60,8 @@ export type Intervention =
     readonly attempts?: number
     /** Grounds reported by the guarding subsystem (`objective-guard-exhausted`). */
     readonly reason?: string
+    /** Why automatic compaction could not make room (`context-overflow`). */
+    readonly compaction?: string
     readonly variant: StopGuardVariant
   }
 
@@ -72,10 +74,14 @@ export function renderOutputLimitResumeDirective(): string {
  * Terminal wording for a context overflow no reducer could relieve. The
  * provider's own string names a token count the user cannot act on, so echoing
  * it leaves the session repeating an identical failure; these three commands
- * are the actual remedies.
+ * are the actual remedies. When automatic compaction ran and could not make
+ * room, its reason is named: without it the stop looked like nothing had
+ * been tried.
  */
-export function renderContextOverflowStopGuard(): string {
+export function renderContextOverflowStopGuard(compaction?: string): string {
+  const tried = compaction?.trim()
   return '[Stopped: the conversation no longer fits in this model\'s context window. '
+    + (tried ? `Automatic compaction could not make room: ${tried.replace(/[\s.]+$/, '')}. ` : '')
     + 'Run /compact to summarize it, /clear to start over, or /branch to keep this '
     + 'history and continue in a fresh session.]'
 }
@@ -119,7 +125,7 @@ function renderStopGuard(
 ): string {
   switch (intervention.variant) {
     case 'context-overflow':
-      return renderContextOverflowStopGuard()
+      return renderContextOverflowStopGuard(intervention.compaction)
     case 'output-limit-escalated':
       return `\n[Stopped: the model hit the output token limit in `
         + `${intervention.attempts ?? 0} consecutive rounds; ending the turn instead of `

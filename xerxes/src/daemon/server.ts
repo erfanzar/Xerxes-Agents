@@ -1881,7 +1881,7 @@ export class DaemonServer {
     const payload: JsonRpcPayload = {
       id: `run:${run.id}:${run.revision}`, category: "slash", type: "result",
       severity: run.state === "succeeded" ? "info" : "warning", title: "Run finished",
-      body: `${run.kind} ${run.state}: ${run.title.slice(0, 160)}\n/runs inspect ${run.id}`,
+      body: runNoticeBody(run),
       payload: { run_id: run.id, revision: run.revision, session_id: run.ownerSessionId },
     };
     for (const connection of this.connections) {
@@ -12782,4 +12782,13 @@ async function closeServer(server: Server | undefined): Promise<void> {
 function monitorEvidenceInWorkspace(workspace: string, evidenceDirectory: string): boolean {
   const path = relative(resolveProjectDirectory(workspace), resolveProjectDirectory(evidenceDirectory));
   return path === "" || (path !== ".." && !path.startsWith(".." + sep) && !isAbsolute(path));
+}
+
+/**
+ * The "Run finished" notice. A run that did not succeed names why; its title
+ * ("Monitor reaction: <id>") told you nothing about what went wrong.
+ */
+export function runNoticeBody(run: Pick<RunRecord, "kind" | "state" | "title" | "error" | "id">): string {
+  const detail = run.state !== "succeeded" && run.error ? run.error : run.title;
+  return `${run.kind} ${run.state}: ${detail.slice(0, 160)}\n/runs inspect ${run.id}`;
 }
