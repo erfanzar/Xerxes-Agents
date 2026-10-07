@@ -81,9 +81,11 @@ export function claudeCodeToolProtocol(tools: readonly ToolDefinition[], choice:
     ...(schemas.length && choice !== 'none' ? [
       '',
       '# Calling tools',
-      'Tools here are plain text. To call tools, end your reply with one line per call:',
+      'Tools here are plain text. To call tools, end your reply with one <tool_calls> block, one call per line, and close it:',
+      '<tool_calls>',
       '<function=TOOL_NAME>{"path": "src/a.ts", "edits": [{"old": "x", "new": "y"}]}</function>',
-      'The arguments are one JSON object. Several calls may follow one another, each on its own line.',
+      '</tool_calls>',
+      'The arguments are one JSON object. Put every call this step needs in that one block; closing it ends your reply.',
       'Use only this form. Do not use <function_calls> or <invoke> blocks or any native tool-call syntax: there are no native tools here, and a native call fails the whole turn.',
       'After your calls, stop: each result arrives in the next user message as a <tool_result> block. Never write a tool\'s result or status yourself, in any tag (<tool_result>, <system>, or otherwise), and never put a call in a code fence.',
       ...(choice === 'any' ? ['You must call at least one tool in this turn.'] : []),
@@ -104,7 +106,8 @@ export function claudeCodeToolProtocol(tools: readonly ToolDefinition[], choice:
 function toolCallMarkup(calls: readonly ToolCall[]): string {
   if (!calls.length) return ''
   // JSON escaping keeps a value containing "</function>" from closing the call early.
-  return calls.map(call => `<function=${call.function.name}>${JSON.stringify(call.function.arguments).replaceAll('</', '<\\/')}</function>`).join('\n')
+  const lines = calls.map(call => `<function=${call.function.name}>${JSON.stringify(call.function.arguments).replaceAll('</', '<\\/')}</function>`)
+  return [CALL_BLOCK_OPEN, ...lines, CALL_BLOCK_CLOSE].join('\n')
 }
 
 /**
@@ -219,7 +222,15 @@ const ORPHAN_CLOSE = ['</invoke>', `</${NS}invoke>`] as const
  */
 const BARE_FUNCTION = '<function>'
 const BARE_FUNCTION_BODY = /^\s*([A-Za-z_][\w.-]{0,63})\s*(\{[\s\S]*\})\s*$/
-const OPENERS = ['<function=', BARE_FUNCTION, '<invoke name="', `<${NS}invoke name="`, '<function_calls>', `<${NS}function_calls>`, '</function_calls>', `</${NS}function_calls>`, REMINDER_OPEN, ...ORPHAN_PARAMETER, ...ORPHAN_CLOSE] as const
+/**
+ * The call block the protocol asks for. With the API, generation stops at the
+ * end of a call block; `claude -p` has no stop sequences, so without a close
+ * to stop at, one reply ran on past its calls for 135,461 tokens. Its close is
+ * where the reply ends.
+ */
+const CALL_BLOCK_OPEN = '<tool_calls>'
+const CALL_BLOCK_CLOSE = '</tool_calls>'
+const OPENERS = [CALL_BLOCK_OPEN, CALL_BLOCK_CLOSE, '<function=', BARE_FUNCTION, '<invoke name="', `<${NS}invoke name="`, '<function_calls>', `<${NS}function_calls>`, '</function_calls>', `</${NS}function_calls>`, REMINDER_OPEN, ...ORPHAN_PARAMETER, ...ORPHAN_CLOSE] as const
 const INVOKE = /^<(antml:)?invoke name="([^"]+)"\s*>([\s\S]*?)<\/(?:antml:)?invoke>$/
 /** What the model writes when it runs on past its calls and imagines their results. */
 /** Held at a chunk's end until complete: call openers, and the start of an imagined result. */
@@ -497,7 +508,7 @@ export class FunctionCallExtractor {
       }
       // In backticks, markup is being written about, not written.
       if (before === '`') { mentioned(); continue }
-      if (opener.endsWith('function_calls>')) { this.advance(at + opener.length); continue }
+      if (opener.endsWith('function_calls>') || opener === CALL_BLOCK_OPEN) { this.advance(at + opener.length); continue }
       if ((ORPHAN_PARAMETER as readonly string[]).includes(opener)) {
         PARAMETER_HEADER.lastIndex = at
         if (!PARAMETER_HEADER.test(this.pending)) {
@@ -980,6 +991,12 @@ export class ClaudeCodeClient implements LlmClient {
     // delta at most once a second resets the watchdog and nothing else.
     let lastDelta = Date.now()
     const HEARTBEAT_MS = 1_000
+    // One request is one model response. When a response stops at the output
+    // limit, Claude Code quietly asks the model to continue and streams that
+    // as a second response — one run produced 135,461 output tokens and 1,176
+    // calls that way. The harness asked for one reply; it ends there.
+    let responseEnded = false
+    let continued = false
     try {
       for await (const line of child.lines) {
         if (!line.trim()) continue
@@ -998,6 +1015,8 @@ export class ClaudeCodeClient implements LlmClient {
           // message_start's output count is a placeholder (1); the real one
           // arrives with message_delta. A reply cut off before it reports 0,
           // unknown, rather than a 1-token reply that reads as ~2 tokens/s.
+          if (inner.type === 'message_stop') responseEnded = true
+          if (inner.type === 'message_start' && responseEnded) { continued = true; break }
           if (inner.type === 'message_start') {
             const start = usageOf(record(inner.message).usage)
             if (start) streamed = { ...start, outputTokens: 0 }
@@ -1043,7 +1062,7 @@ export class ClaudeCodeClient implements LlmClient {
       // Stop the model where its calls end. Waiting for the exit instead would
       // let it keep generating — imagined results and repeated calls — and
       // every one of those tokens is billed to the plan.
-      if (extractor.done) child.kill()
+      if (extractor.done || continued) child.kill()
       const code = await child.exited
       if (failure) throw failure
       if (!sawText && fallbackText) {
@@ -1052,7 +1071,7 @@ export class ClaudeCodeClient implements LlmClient {
       }
       const rest = extractor.finish(stopReason === 'max_tokens')
       if (rest) yield { content: rest }
-      if (code !== 0 && !usage && !extractor.done) {
+      if (code !== 0 && !usage && !extractor.done && !continued) {
         const detail = (await child.stderr).trim().split('\n').slice(-4).join('\n')
         throw claudeCodeFailure(detail || `Claude Code exited with status ${code}.`)
       }
