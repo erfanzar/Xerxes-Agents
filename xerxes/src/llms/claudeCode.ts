@@ -36,7 +36,7 @@ import { isJsonObject } from '../types/toolCalls.js'
 import type { CompletionRequest, LlmClient, LlmDelta, TokenUsage } from './client.js'
 import { claudeCodeCatalog } from './claudeCodeCatalog.js'
 import { credentialFingerprint } from './credentialFingerprint.js'
-import { reportModelCapability } from './modelsDev.js'
+import { reportedModelCapability, reportModelCapability } from './modelsDev.js'
 
 export const CLAUDE_CODE_PROVIDER = 'claude-code'
 
@@ -703,7 +703,7 @@ export class FunctionCallExtractor {
  * parent Claude Code session sets would make it think it is nested.
  * `XERXES_CLAUDE_CODE_USE_API_ENV=1` keeps the ANTHROPIC_* ones.
  */
-export function claudeCodeEnvironment(source: Readonly<Record<string, string | undefined>>, maxTokens?: number, thinkingOff = false): Record<string, string> {
+export function claudeCodeEnvironment(source: Readonly<Record<string, string | undefined>>, maxTokens?: number, thinkingOff = false, modelOutputLimit?: number): Record<string, string> {
   const keepApiEnv = source.XERXES_CLAUDE_CODE_USE_API_ENV === '1'
   const keepClaudeCode = new Set(['CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX'])
   const env: Record<string, string> = {}
@@ -715,7 +715,14 @@ export function claudeCodeEnvironment(source: Readonly<Record<string, string | u
   }
   env.DISABLE_AUTOUPDATER = '1'
   env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1'
-  if (maxTokens && maxTokens > 0) env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = String(Math.floor(maxTokens))
+  // Claude Code's output cap covers thinking as well as the reply. With
+  // thinking on, a cap meant for the reply (2,048 for a compaction summary)
+  // left opus nothing to write after it thought, and every summary ended at
+  // the limit. Then the model's own reported limit stands, as anthropic.ts
+  // raises max_tokens past the thinking budget; unknown, Claude Code's own.
+  const cap = maxTokens && maxTokens > 0 ? Math.floor(maxTokens) : undefined
+  if (cap !== undefined && (thinkingOff || (modelOutputLimit !== undefined && cap >= modelOutputLimit))) env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = String(cap)
+  else if (cap !== undefined && modelOutputLimit !== undefined) env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = String(modelOutputLimit)
   // Claude Code has no thinking flag; a zero budget is how it turns thinking off.
   if (thinkingOff) env.MAX_THINKING_TOKENS = '0'
   return env
@@ -966,7 +973,7 @@ export class ClaudeCodeClient implements LlmClient {
     let child: ReturnType<typeof this.launch>
     try {
       child = this.launch(claudeCodeArgv(this.executableOverride ?? await resolveClaudeCode(this.environment), request, systemPromptFile, known?.effortLevels), {
-        env: claudeCodeEnvironment(this.environment, request.maxTokens, claudeCodeThinkingOff(request)),
+        env: claudeCodeEnvironment(this.environment, request.maxTokens, claudeCodeThinkingOff(request), reportedModelCapability(CLAUDE_CODE_PROVIDER, request.model)?.maxOutputTokens),
         cwd: this.cwd(),
         input,
       })

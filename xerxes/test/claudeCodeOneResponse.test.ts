@@ -89,3 +89,17 @@ test('the protocol asks for one closed block of calls', async () => {
   expect(protocol).toContain('<tool_calls>\n<function=TOOL_NAME>')
   expect(protocol).toContain('</tool_calls>\nThe arguments are one JSON object. Put every call this step needs in that one block; closing it ends your reply.')
 })
+
+test('with thinking on, a small reply cap does not starve the model: its own reported limit stands', async () => {
+  const { claudeCodeEnvironment } = await import('../src/llms/claudeCode.js')
+  const cap = (maxTokens: number | undefined, thinkingOff: boolean, limit?: number) => claudeCodeEnvironment({}, maxTokens, thinkingOff, limit).CLAUDE_CODE_MAX_OUTPUT_TOKENS
+  // A compaction summary's 2,048 with opus thinking: the model's 32,000 applies.
+  expect(cap(2_048, false, 32_000)).toBe('32000')
+  // Limit not reported yet: Claude Code's own default, never the small cap.
+  expect(cap(2_048, false)).toBeUndefined()
+  // A cap at or above the model's limit is the caller asking for more room.
+  expect(cap(64_000, false, 32_000)).toBe('64000')
+  // Thinking off: the reply is all there is, so the cap is exact.
+  expect(cap(2_048, true, 32_000)).toBe('2048')
+  expect(cap(undefined, false, 32_000)).toBeUndefined()
+})

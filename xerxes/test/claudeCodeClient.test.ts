@@ -117,8 +117,8 @@ test('the CLI runs isolated: no Claude Code tools, settings, MCP or session file
 })
 
 test('API keys and model routing never leak into the CLI; a parent Claude Code session is not inherited', () => {
-  const env = claudeCodeEnvironment({ PATH: '/bin', HOME: '/h', ANTHROPIC_API_KEY: 'k', ANTHROPIC_BASE_URL: 'u', ANTHROPIC_DEFAULT_HAIKU_MODEL: 'glm', CLAUDECODE: '1', CLAUDE_CODE_ENTRYPOINT: 'x', CLAUDE_CODE_OAUTH_TOKEN: 'tok', CLAUDE_CONFIG_DIR: '/c' }, 8000)
-  expect(env).toEqual({ PATH: '/bin', HOME: '/h', CLAUDE_CODE_OAUTH_TOKEN: 'tok', CLAUDE_CONFIG_DIR: '/c', DISABLE_AUTOUPDATER: '1', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', CLAUDE_CODE_MAX_OUTPUT_TOKENS: '8000' })
+  const env = claudeCodeEnvironment({ PATH: '/bin', HOME: '/h', ANTHROPIC_API_KEY: 'k', ANTHROPIC_BASE_URL: 'u', ANTHROPIC_DEFAULT_HAIKU_MODEL: 'glm', CLAUDECODE: '1', CLAUDE_CODE_ENTRYPOINT: 'x', CLAUDE_CODE_OAUTH_TOKEN: 'tok', CLAUDE_CONFIG_DIR: '/c' }, 8000, true)
+  expect(env).toEqual({ PATH: '/bin', HOME: '/h', CLAUDE_CODE_OAUTH_TOKEN: 'tok', CLAUDE_CONFIG_DIR: '/c', DISABLE_AUTOUPDATER: '1', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', CLAUDE_CODE_MAX_OUTPUT_TOKENS: '8000', MAX_THINKING_TOKENS: '0' })
   expect(claudeCodeEnvironment({ ANTHROPIC_API_KEY: 'k', XERXES_CLAUDE_CODE_USE_API_ENV: '1' }).ANTHROPIC_API_KEY).toBe('k')
 })
 
