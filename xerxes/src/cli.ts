@@ -78,7 +78,7 @@ import { recordCompaction } from "./context/compactionHistory.js";
 import { FILE_READS_METADATA_KEY, fileStateTracker } from "./tools/fileState.js";
 import { AuditEmitter } from "./audit/emitter.js";
 import { JSONLSinkCollector } from "./audit/collector.js";
-import { estimateContextTokens } from "./context/windowUsage.js";
+import { contextCalibrationRatio, estimateContextTokens } from "./context/windowUsage.js";
 import { createLlmClient } from "./llms/client.js";
 import type { ChatMessage } from "./types/messages.js";
 import type { SpawnedAgentSnapshot } from "./operators/subagents.js";
@@ -2236,7 +2236,8 @@ function daemonRuntime(
           summaryBudgets: [OVERFLOW_SUMMARY_MAX_TOKENS],
           messages: priced,
           reason: "mid-turn-auto-compact",
-          ...(contextWindow ? { maxContextTokens: Math.max(4096, contextWindow - OVERFLOW_SUMMARY_MAX_TOKENS) } : {}),
+          // In compaction's units: the plain estimate, before the calibration the turn's meter applies.
+          ...(contextWindow ? { maxContextTokens: Math.max(4096, Math.floor((contextWindow - OVERFLOW_SUMMARY_MAX_TOKENS) / (active ? contextCalibrationRatio(active.metadata, model) : 1))) } : {}),
           ...(active ? { archivePath: precompactArchivePath(transcriptStore.pathFor(active.id)) } : {}),
         });
         // `ContextMessage` is deliberately `Record<string, unknown>` so

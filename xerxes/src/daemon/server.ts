@@ -7492,7 +7492,7 @@ export class DaemonServer {
         messages: session.messages,
         model,
         reason,
-        maxContextTokens: this.promptBudget(model, session) || 64_000,
+        maxContextTokens: compactionBudget(this.promptBudget(model, session) || 64_000, session, model),
       });
       signal?.throwIfAborted();
       if (!outcome.compacted) {
@@ -12107,6 +12107,23 @@ function sessionContextScaffold(session: DaemonSession): {
 }
 
 /** The session's prompt size, scaled by the provider-measured ratio the last turn recorded. */
+/**
+ * The prompt budget in the units compaction counts with: the plain message
+ * estimate, before the calibration the context meter applies and without the
+ * system prompt and tool schemas it adds. Given the raw budget, compaction of
+ * a task calibrated at 3.8x judged 437K tokens to fit while the meter read
+ * 206%, so it shed nothing and every turn stopped.
+ */
+export function compactionBudget(budget: number, session: DaemonSession, model: string): number {
+  const scaffold = sessionContextScaffold(session);
+  const overhead = estimateContextTokens([], {
+    model,
+    ...(scaffold.systemPrompt ? { systemPrompt: scaffold.systemPrompt } : {}),
+    ...(scaffold.toolSchemas?.length ? { toolSchemas: scaffold.toolSchemas } : {}),
+  });
+  return Math.max(4096, Math.floor(budget / contextCalibrationRatio(session.metadata, model)) - overhead);
+}
+
 function sessionContextTokens(session: DaemonSession, model: string): number {
   const scaffold = sessionContextScaffold(session);
   return Math.ceil(contextCalibrationRatio(session.metadata, model) * estimateContextTokens(session.messages, {
