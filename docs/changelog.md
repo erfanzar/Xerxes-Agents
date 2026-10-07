@@ -7,6 +7,10 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.33 — 2026-10-08
+
+- Claude Code compaction finishes. Claude Code's output cap covers thinking as well as the reply, so a compaction summary's 2,048-token cap left opus nothing to write after it thought, and compaction failed with "summary did not finish (length)". With thinking on, the model's own reported output limit now stands, as the Anthropic path raises its cap past the thinking budget; with thinking off, the cap is exact.
+
 ## 0.6.32 — 2026-10-08
 
 - Compaction aims at what the context meter will measure. The meter scales its estimate by each task's measured calibration and adds the system prompt and tools; compaction was given the raw budget, so a task calibrated at 3.8x read 206% full while compaction judged it to fit, shed nothing, and every turn stopped with "Context remains above the automatic compaction threshold".
