@@ -756,7 +756,7 @@ function anthropicHeaders(apiKey: string, version: string, accept: string): Reco
   return {
     Accept: accept,
     'Content-Type': 'application/json',
-    'User-Agent': 'xerxes-agents/0.6.31',
+    'User-Agent': 'xerxes-agents/0.6.32',
     'anthropic-version': version,
     'x-api-key': apiKey,
   }

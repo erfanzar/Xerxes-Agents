@@ -7,6 +7,10 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.32 — 2026-10-08
+
+- Compaction aims at what the context meter will measure. The meter scales its estimate by each task's measured calibration and adds the system prompt and tools; compaction was given the raw budget, so a task calibrated at 3.8x read 206% full while compaction judged it to fit, shed nothing, and every turn stopped with "Context remains above the automatic compaction threshold".
+
 ## 0.6.31 — 2026-10-07
 
 Claude Code replies that end where their tool calls end.
