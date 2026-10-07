@@ -7,6 +7,13 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.31 — 2026-10-07
+
+Claude Code replies that end where their tool calls end.
+
+- Claude Code is asked to put a step's calls in one `<tool_calls>` block and close it, and the reply ends at the close — what the API's stop sequence does, which `claude -p` lacks. One reply had run on past its calls for 135,461 tokens and 1,176 reads of one file, which filled the context and broke the task.
+- A request is one model response. When a response hits the output limit, Claude Code quietly asks the model to continue; Xerxes no longer takes that continuation as part of the reply.
+
 ## 0.6.30 — 2026-10-06
 
 - Compaction makes room when a single tool round is bigger than the model's window. One Claude Code task held 1,176 calls in one round (1.25M tokens); summarizing could not split the round from its calls, so `/compact` answered "Nothing to compact" and every turn overflowed. The oldest tool results now give way to a one-line note ("result omitted to fit the context window"), each call keeps its result, and the newest results and every user message stay as they were — 1.25M tokens down to about 96K for that task.
