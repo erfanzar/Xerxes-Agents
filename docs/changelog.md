@@ -7,6 +7,14 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.34 — 2026-10-08
+
+- Compaction is visible: the composer shows its progress ("Compacting: summary request 2…") with the working ring, and says the task will take messages when it finishes. It used to show nothing while the task was busy, and a send went nowhere.
+- VS Code: the working and compacting status line lines up with the message box in a wide view instead of drifting into a centred column.
+- A request stays alive while the runtime keeps reporting progress. A multi-minute `/compact` failed with "rpc timeout: slash (120000ms)" and dropped the connection, which cancelled the compaction; a runtime that goes quiet still times out at the deadline.
+- VS Code: one conversation column — replies, your messages, status, to-dos and the message box share its width and edges, full width in a sidebar and a centred column in a wide view, instead of 760px replies beside full-width everything else.
+- VS Code: a wide view (a full window or wide editor tab) shows the task's activity beside the conversation — status, steps, context, to-dos, goal and agents.
+
 ## 0.6.33 — 2026-10-08
 
 - Claude Code compaction finishes. Claude Code's output cap covers thinking as well as the reply, so a compaction summary's 2,048-token cap left opus nothing to write after it thought, and compaction failed with "summary did not finish (length)". With thinking on, the model's own reported output limit now stands, as the Anthropic path raises its cap past the thinking budget; with thinking off, the cap is exact.
