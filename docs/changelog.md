@@ -7,6 +7,10 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.39 — 2026-10-08
+
+- VS Code: the runtime update notice is readable. It used the theme's warning fill without the text colour paired with it, so light text sat on a pale yellow; it now uses the editor widget surface and text, with the warning colour as its edge.
+
 ## 0.6.38 — 2026-10-08
 
 - VS Code shows when the runtime it is talking to is older than the extension. The runtime is shared, so reloading a window reconnects to the one an earlier install launched, and an update that was waiting on running work was invisible: a 0.6.33 runtime kept serving after 0.6.37 was installed, and none of the fixes in between ran. The view now says the update is pending, what it waits for, and offers Restart now.
