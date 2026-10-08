@@ -71,7 +71,9 @@ https://marketplace.visualstudio.com/manage/publishers/${manifest.publisher}
 `)
     process.exit(1)
   }
-  must([process.execPath, vsce, 'publish', '--skip-duplicate', '--packagePath', ...packages], 'Marketplace publish')
+  // The preload lifts vsce's three-minute request timeout, which a slow
+  // uplink outlasts while one platform package uploads; see vsceRequestTimeout.ts.
+  must([process.execPath, '--preload', join(import.meta.dir, 'vsceRequestTimeout.ts'), vsce, 'publish', '--skip-duplicate', '--packagePath', ...packages], 'Marketplace publish')
   console.log(`Marketplace: https://marketplace.visualstudio.com/items?itemName=${manifest.publisher}.${manifest.name}`)
 }
 
