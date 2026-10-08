@@ -7,6 +7,10 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.43 — 2026-10-09
+
+- An attached image shows whole above your message, at a readable size, instead of as a small cropped thumbnail inside the bubble.
+
 ## 0.6.42 — 2026-10-09
 
 - An image you attach shows in your message, in the desktop app and VS Code: when you send it, and when the task reloads. History keeps a screenshot up to 256 KB inline; a larger one shows as "[image omitted: N KB]" after a reload, while the model always received the full image.
