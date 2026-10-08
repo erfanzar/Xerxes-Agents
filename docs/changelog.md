@@ -7,6 +7,10 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.35 — 2026-10-08
+
+- Compaction during a turn reaches the provider the task uses. It resolved the provider implicitly, found none on that path, and fell back to the default connection, which read an OpenRouter vendor (`mistralai/mistral-large-4-0`) as a provider prefix and failed with "unknown provider prefix 'mistralai'". The turn now hands compaction its own session.
+
 ## 0.6.34 — 2026-10-08
 
 - Compaction is visible: the composer shows its progress ("Compacting: summary request 2…") with the working ring, and says the task will take messages when it finishes. It used to show nothing while the task was busy, and a send went nowhere.
