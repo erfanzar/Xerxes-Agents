@@ -1166,7 +1166,7 @@ export class Store {
       const sessionKey = this.sessionKey
       if (this.preparingSubmissions.has(sessionKey)) return false
       this.lastUser = shown
-      const optimistic = { text: shown, id: this.builder.pushUser(shown), acknowledged: false }
+      const optimistic = { text: shown, id: this.builder.pushUser(shown, false, images.map(image => `data:${image.mediaType};base64,${image.data}`)), acknowledged: false }
       this.optimisticSubmissions.set(sessionKey, optimistic)
       this.preparingSubmissions.set(sessionKey, optimistic)
       this.notify()

@@ -358,10 +358,10 @@ export class BlockBuilder {
   }
 
   /** A user line lands at the fold's end (submit ordering, replays). */
-  pushUser(text: string, contextSummary = false): number {
+  pushUser(text: string, contextSummary = false, images: readonly string[] = []): number {
     this.commitRuns(false)
     const id = this.nextId()
-    this.blocks.push({ kind: 'user', id, text, ...(contextSummary ? { contextSummary: true } : {}) })
+    this.blocks.push({ kind: 'user', id, text, ...(contextSummary ? { contextSummary: true } : {}), ...(images.length ? { images } : {}) })
     return id
   }
 
@@ -607,9 +607,14 @@ export function blocksFromStoredMessages(messages: unknown, hydration: StoredHyd
     // Parts fold sequentially — a [think, text] assistant message replays as
     // a thinking block then an agent block, matching the live run grammar.
     const userParts: string[] = []
+    const userImages: string[] = []
     for (const part of content) {
       if (!part || typeof part !== 'object') continue
       const p = part as Record<string, unknown>
+      // The image a person attached: shown in their bubble, as sent. Only
+      // inline data and web URLs render; anything else is not displayable.
+      if (role === 'user' && p.type === 'image_url' && isRecord(p.image_url) && typeof p.image_url.url === 'string'
+        && /^(data:image\/|https?:\/\/)/.test(p.image_url.url)) { userImages.push(p.image_url.url); continue }
       if (p.type === 'tool_use') {
         builder.push('tool_call', {
           id: typeof p.id === 'string' && p.id ? p.id : `stored-use-${executionIndex++}`,
@@ -635,7 +640,7 @@ export function blocksFromStoredMessages(messages: unknown, hydration: StoredHyd
         else builder.push('text_part', { text })
       }
     }
-    if (userParts.length && !harnessOriginOf(record.origin)) builder.pushUser(userParts.join('\n'), record.xerxes_compaction_summary === true)
+    if ((userParts.length || userImages.length) && !harnessOriginOf(record.origin)) builder.pushUser(userParts.join('\n'), record.xerxes_compaction_summary === true, userImages)
     emitCalls()
   }
   return [...builder.all()]

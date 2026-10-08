@@ -3042,3 +3042,6 @@ html,body,#root,.app.atelier{background:transparent}
 .atelier .composer__image{position:relative;width:64px;height:64px;border:1px solid var(--x-divider);border-radius:6px;overflow:hidden;background:var(--x-screen)}
 .atelier .composer__image img{width:100%;height:100%;object-fit:cover;display:block}
 .atelier .composer__image button{position:absolute;top:2px;right:2px;display:grid;place-items:center;width:18px;height:18px;padding:0;border:0;border-radius:50%;background:rgba(0,0,0,.65);color:#fff;cursor:pointer}
+.atelier .msg__images{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px}
+.atelier .msg__images a{display:block;line-height:0}
+.atelier .msg__images img{max-width:220px;max-height:160px;border-radius:6px;border:1px solid var(--x-divider);object-fit:cover}

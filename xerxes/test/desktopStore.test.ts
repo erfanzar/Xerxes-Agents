@@ -111,6 +111,8 @@ describe('Store workspace folds', () => {
     expect(await store.submit('what is wrong here?', undefined, [image])).toBe(true)
     const submit = bridge.calls.find(call => call.method === 'turn.submit')
     expect(submit?.params).toMatchObject({ text: 'what is wrong here?', images: [{ media_type: 'image/png', data: 'iVBORw0KGgo=' }] })
+    // The bubble shows the image as sent, before the runtime echoes anything.
+    expect(store.getSnapshot().blocks.find(block => block.kind === 'user' && block.text === 'what is wrong here?')).toMatchObject({ images: ['data:image/png;base64,iVBORw0KGgo='] })
     bridge.push('turn_begin', { text: 'what is wrong here?' })
     // While a step runs, text steers; an image cannot ride a steer, so the
     // submit is refused and the composer keeps it for the next message.

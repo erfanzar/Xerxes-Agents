@@ -104,7 +104,7 @@ export function harnessOriginOf(value: unknown): HarnessOrigin | undefined {
 }
 
 export type Block =
-  | { kind: 'user'; id: number; text: string; contextSummary?: boolean }
+  | { kind: 'user'; id: number; text: string; contextSummary?: boolean; images?: readonly string[] }
   | { kind: 'agent'; id: number; text: string; streaming: boolean }
   | { kind: 'thinking'; id: number; text: string; streaming: boolean }
   | { kind: 'tools'; id: number; items: readonly ToolItem[]; running: boolean }

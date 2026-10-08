@@ -445,3 +445,18 @@ test('a subagent run closing adds no transcript row; other run results still do'
   expect(isAgentRunNotice({ title: 'Run finished', body: 'agent failed: x' })).toBe(true)
   expect(isAgentRunNotice({ title: 'Something', body: 'agent failed: x' })).toBe(false)
 })
+
+test('a stored message with an attached image replays the image in the person\'s bubble', () => {
+  const png = 'data:image/png;base64,iVBORw0KGgo='
+  const blocks = blocksFromStoredMessages([
+    { role: 'user', content: [{ type: 'text', text: 'trash tbh' }, { type: 'image_url', image_url: { url: png } }] },
+    { role: 'user', content: [{ type: 'image_url', image_url: { url: png } }] },
+    // An image the history projection omitted arrives as its placeholder text.
+    { role: 'user', content: [{ type: 'text', text: 'look' }, { type: 'text', text: '[image omitted: 2400 KB]' }] },
+  ])
+  const users = blocks.filter(block => block.kind === 'user')
+  expect(users[0]).toMatchObject({ text: 'trash tbh', images: [png] })
+  expect(users[1]).toMatchObject({ text: '', images: [png] })
+  expect(users[2]).toMatchObject({ text: 'look\n[image omitted: 2400 KB]' })
+  expect(users[2]).not.toHaveProperty('images')
+})

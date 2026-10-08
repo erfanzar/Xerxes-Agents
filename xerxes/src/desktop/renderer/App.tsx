@@ -1207,14 +1207,15 @@ function ReplyActionRow({ blockId }: { blockId: number }): ReactElement | null {
   return <div className={`msg__actions msg__actions--reply${end.latest ? ' is-latest' : ''}`}><CopyButton icon text={end.text} label="Copy reply" /></div>
 }
 
-function UserMessage({ text }: { text: string }): ReactElement {
+function UserMessage({ text, images = [] }: { text: string; images?: readonly string[] }): ReactElement {
   const [expanded, setExpanded] = useState(false)
   const long = text.length > 1600 || text.split('\n').length > 16
   // The wrapper carries the bubble's right alignment so the copy row can sit
   // under the bubble rather than inside it.
   return <div className="msg-turn msg-turn--user">
     <div className="msg msg--user">
-      <div className={`msg__text${long && !expanded ? ' msg__text--preview' : ''}`}>{text}</div>
+      {images.length > 0 && <div className="msg__images">{images.map((url, index) => <a key={index} href={url} target="_blank" rel="noreferrer" title="Open image"><img src={url} alt={`Attached image ${index + 1}`} /></a>)}</div>}
+      {text && <div className={`msg__text${long && !expanded ? ' msg__text--preview' : ''}`}>{text}</div>}
       {long && <button className="message-expand" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>{expanded ? 'Show less' : 'Show full message'}</button>}
     </div>
     <div className="msg__actions"><CopyButton icon text={text} label="Copy message" /></div>
@@ -1229,7 +1230,7 @@ const BlockView = memo(function BlockView({ block }: { block: Snapshot['blocks']
   }
   if (block.kind === 'user') {
     if (block.contextSummary) return <details className="context-summary"><summary>Earlier conversation summary</summary><Markdown text={block.text} /></details>
-    return <UserMessage text={block.text} />
+    return <UserMessage text={block.text} {...(block.images ? { images: block.images } : {})} />
   }
   if (block.kind === 'agent') {
     return (
