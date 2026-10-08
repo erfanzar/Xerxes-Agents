@@ -7,6 +7,10 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.41 — 2026-10-09
+
+- A monitor reaction runs until its watch ends, not 60 seconds. A reacting watch without an explicit timeout, including "tell me when this command finishes", cancelled its reaction turn after 60 seconds ("Reaction deadline exceeded"), so on a large-context model the turn was stopped before its first round finished. A reaction is a turn, bounded by the turn's own limits, Stop and the watch's lifetime; an explicit timeout can now be up to the watch's 24 hours instead of 2 minutes.
+
 ## 0.6.40 — 2026-10-09
 
 - Paste or drop images into the message box, in the desktop app and VS Code. A screenshot shows as a thumbnail you can remove and is sent with the message; the runtime already accepted images, but the message box never sent any. While a step is running, images wait for it to finish, because a steer carries text only.
