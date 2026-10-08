@@ -221,6 +221,33 @@ test.each([false, true])('completion watch records one durable reaction when att
   } finally { monitors.close(); mailbox.close(); history.close() }
 })
 
+test('a reaction without a timeout may run until its watch expires, not 60 seconds', () => {
+  // A reaction is a turn. A fixed 60s default cancelled every reaction on a
+  // large-context model ("Reaction deadline exceeded") before it finished.
+  const history = new RunHistory(':memory:')
+  const mailbox = new ReactionMailbox(':memory:')
+  const terminals = new TerminalRegistry()
+  const terminal = terminals.open({ ownerSessionId: 'owner', id: 'build', cwd: '/repo', command: 'build', kind: 'background' })
+  const monitors = new TerminalMonitors(terminals, history, (watch, event) => { mailbox.offer(watch.owner, watch.id, event.sequence) }, undefined, mailbox)
+  try {
+    const startedAt = Date.now()
+    const watch = monitors.start('owner', { terminalId: 'build', trigger: 'completion', durationMs: 86_400_000, reaction: { maxReactions: 1 } })
+    terminal.close(0)
+    const claim = mailbox.claim('owner')!
+    expect(claim.deadline).toBeGreaterThan(startedAt + 86_400_000 - 5_000)
+    expect(claim.deadline).toBeLessThanOrEqual(watch.expiresAt)
+    mailbox.settle(claim, 'completed')
+    // An explicit timeout is still honoured, and may exceed the old 10-minute ceiling.
+    const second = terminals.open({ ownerSessionId: 'owner', id: 'second', cwd: '/repo', command: 'test', kind: 'background' })
+    monitors.start('owner', { terminalId: 'second', trigger: 'completion', durationMs: 86_400_000, reaction: { maxReactions: 1, maxDurationMs: 3_600_000 } })
+    second.close(0)
+    const timed = mailbox.claim('owner')!
+    expect(timed.deadline - Date.now()).toBeGreaterThan(3_600_000 - 5_000)
+    expect(timed.deadline - Date.now()).toBeLessThanOrEqual(3_600_000)
+    mailbox.settle(timed, 'completed')
+  } finally { monitors.close(); mailbox.close(); history.close() }
+})
+
 test('stopping a completion watch revokes follow-up and captures no exit event', () => {
   const f = fixture()
   try {

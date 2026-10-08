@@ -72,7 +72,7 @@ export async function monitorAction(rpc: GatewayRpc, id: string, action: 'inspec
   return watch
 }
 
-export interface MonitorSettings { max_total_tokens?: number; terminal_id?: string; source_kind?: 'file' | 'websocket' | 'webhook'; file_path?: string; websocket_url?: string; webhook_name?: string; trigger?: 'output' | 'completion' | 'change'; match?: string; duration_seconds: number; react: boolean; max_reactions: number; reaction_timeout_seconds: number }
+export interface MonitorSettings { max_total_tokens?: number; terminal_id?: string; source_kind?: 'file' | 'websocket' | 'webhook'; file_path?: string; websocket_url?: string; webhook_name?: string; trigger?: 'output' | 'completion' | 'change'; match?: string; duration_seconds: number; react: boolean; max_reactions: number; reaction_timeout_seconds?: number }
 export async function createMonitor(rpc: GatewayRpc, settings: MonitorSettings): Promise<MonitorView> {
   const response = await rpc<Response>('monitor.create', { ...settings })
   if (!response?.ok) throw new Error(response?.error || 'Could not create monitor')

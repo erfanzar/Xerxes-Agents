@@ -106,7 +106,7 @@ export class ReactionMailbox {
     if (!policy.owner.trim() || !policy.runId.trim() || policy.owner.length > 8192 || policy.runId.length > 8192 ||
         !Number.isSafeInteger(policy.expiresAt) || policy.expiresAt <= this.now() || policy.expiresAt > this.now() + 86_400_000 ||
         !Number.isSafeInteger(policy.maxReactions) || policy.maxReactions < 1 || policy.maxReactions > 100 ||
-        !Number.isSafeInteger(policy.maxDurationMs) || policy.maxDurationMs < 100 || policy.maxDurationMs > 600_000) {
+        !Number.isSafeInteger(policy.maxDurationMs) || policy.maxDurationMs < 100 || policy.maxDurationMs > 86_400_000) {
       throw new Error('Invalid reaction policy')
     }
     if (policy.maxTotalTokens !== undefined && (!Number.isSafeInteger(policy.maxTotalTokens) || policy.maxTotalTokens < 1)) throw new Error('Invalid reaction token threshold')
@@ -135,7 +135,7 @@ export class ReactionMailbox {
   /** Edit limits atomically without rearming cancellation or erasing consumed evidence. */
   updatePolicy(owner: string, runId: string, edit: ReactionPolicyEdit): void {
     if (typeof edit.revision !== 'string' || !edit.revision || !Number.isSafeInteger(edit.maxReactions) || edit.maxReactions < 1 || edit.maxReactions > 100
-      || !Number.isSafeInteger(edit.maxDurationMs) || edit.maxDurationMs < 100 || edit.maxDurationMs > 600000
+      || !Number.isSafeInteger(edit.maxDurationMs) || edit.maxDurationMs < 100 || edit.maxDurationMs > 86_400_000
       || (edit.maxTotalTokens !== null && (!Number.isSafeInteger(edit.maxTotalTokens) || edit.maxTotalTokens < 1))) throw new Error('Invalid reaction policy edit')
     this.db.transaction(() => {
       const row = this.db.query<PolicyRow, [string, string]>('SELECT * FROM reaction_policies WHERE owner=? AND run_id=?').get(owner, runId)

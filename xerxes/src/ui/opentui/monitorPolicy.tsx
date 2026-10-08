@@ -23,8 +23,8 @@ export function MonitorPolicy({ t, monitor, onClose, onSaved }: { t: Theme; moni
   const save = () => {
     if (!gateway || pending.current) return
     const attempts = Number(values[0]), timeout = Number(values[1]), tokens = values[2]!.trim() ? Number(values[2]) : null
-    if (!Number.isSafeInteger(attempts) || attempts < 1 || attempts > 10 || !Number.isSafeInteger(timeout) || timeout < 1 || timeout > 120 || (tokens !== null && (!Number.isSafeInteger(tokens) || tokens < 1))) {
-      setError('Attempts 1–10; timeout 1–120 seconds; tokens positive or blank.'); return
+    if (!Number.isSafeInteger(attempts) || attempts < 1 || attempts > 10 || !Number.isSafeInteger(timeout) || timeout < 1 || timeout > 86400 || (tokens !== null && (!Number.isSafeInteger(tokens) || tokens < 1))) {
+      setError('Attempts 1–10; timeout 1–86400 seconds; tokens positive or blank.'); return
     }
     pending.current = true; setBusy(true); setError('')
     void gateway.rpc<{ ok: boolean; error?: string }>('monitor.update', { monitor_id: monitor.id, revision: policy.revision, max_reactions: attempts, reaction_timeout_seconds: timeout, max_total_tokens: tokens })

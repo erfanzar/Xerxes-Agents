@@ -27,7 +27,7 @@ it.each([[150, 40], [40, 18]])('creates a notification watch from the form at %i
     act(() => screen.mockInput.pressKey('RETURN'))
     await screen.flush()
     await vi.waitFor(() => expect(created).toHaveBeenCalledWith('new'))
-    expect(rpc).toHaveBeenCalledWith('monitor.create', { terminal_id: 'build', trigger: 'output', match: 'error', duration_seconds: 3600, react: false, max_reactions: 3, reaction_timeout_seconds: 60 })
+    expect(rpc).toHaveBeenCalledWith('monitor.create', { terminal_id: 'build', trigger: 'output', match: 'error', duration_seconds: 3600, react: false, max_reactions: 3 })
   } finally { act(() => screen.renderer.destroy()) }
 })
 it('does not send a create request without a live source', async () => {
@@ -74,7 +74,7 @@ it('preserves settings after a rejected reaction request and permits retry', asy
     act(() => screen.mockInput.pressKey('RETURN'))
     await screen.flush()
     await vi.waitFor(() => expect(created).toHaveBeenCalledWith('new'))
-    expect(rpc).toHaveBeenLastCalledWith('monitor.create', { terminal_id: 'build', trigger: 'output', match: 'error', duration_seconds: 3600, react: true, max_reactions: 3, reaction_timeout_seconds: 60 })
+    expect(rpc).toHaveBeenLastCalledWith('monitor.create', { terminal_id: 'build', trigger: 'output', match: 'error', duration_seconds: 3600, react: true, max_reactions: 3 })
   } finally { act(() => screen.renderer.destroy()) }
 })
 
@@ -131,7 +131,7 @@ it('creates a file-change monitor without terminal-only fields', async () => {
     act(() => screen.mockInput.pressKey('TAB')); await screen.flush()
     act(() => screen.mockInput.pressKey('RETURN')); await screen.flush()
     await vi.waitFor(() => expect(created).toHaveBeenCalledWith('file-watch'))
-    expect(rpc).toHaveBeenCalledWith('monitor.create', { source_kind: 'file', file_path: 'src/app.ts', trigger: 'change', duration_seconds: 3600, react: false, max_reactions: 3, reaction_timeout_seconds: 60 })
+    expect(rpc).toHaveBeenCalledWith('monitor.create', { source_kind: 'file', file_path: 'src/app.ts', trigger: 'change', duration_seconds: 3600, react: false, max_reactions: 3 })
   } finally { act(() => screen.renderer.destroy()) }
 })
 
@@ -157,7 +157,7 @@ it('creates a websocket monitor with text matching and a token threshold', async
     act(() => screen.mockInput.pressKey('TAB')); await screen.flush()
     act(() => screen.mockInput.pressKey('RETURN')); await screen.flush()
     await vi.waitFor(() => expect(created).toHaveBeenCalledWith('socket-watch'))
-    expect(rpc).toHaveBeenCalledWith('monitor.create', { source_kind: 'websocket', websocket_url: 'wss://events.example/ws', trigger: 'output', match: 'failure', duration_seconds: 3600, react: true, max_reactions: 3, reaction_timeout_seconds: 60, max_total_tokens: 2000 })
+    expect(rpc).toHaveBeenCalledWith('monitor.create', { source_kind: 'websocket', websocket_url: 'wss://events.example/ws', trigger: 'output', match: 'failure', duration_seconds: 3600, react: true, max_reactions: 3, max_total_tokens: 2000 })
   } finally { act(() => screen.renderer.destroy()) }
 })
 
@@ -199,7 +199,7 @@ it('discovers a configured webhook and submits its name without secrets', async 
     await act(async () => screen.mockInput.typeText('failure')); await screen.flush()
     act(() => screen.mockInput.pressKey('RETURN')); await screen.flush()
     await vi.waitFor(() => expect(created).toHaveBeenCalledWith('webhook-watch'))
-    expect(rpc).toHaveBeenCalledWith('monitor.create', { source_kind: 'webhook', webhook_name: 'deploy-events', trigger: 'output', match: 'failure', duration_seconds: 3600, react: false, max_reactions: 3, reaction_timeout_seconds: 60 })
+    expect(rpc).toHaveBeenCalledWith('monitor.create', { source_kind: 'webhook', webhook_name: 'deploy-events', trigger: 'output', match: 'failure', duration_seconds: 3600, react: false, max_reactions: 3 })
   } finally { act(() => screen.renderer.destroy()) }
 })
 

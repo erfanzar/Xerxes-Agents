@@ -9,6 +9,17 @@ import type { WebhookMonitorSource } from './webhookMonitorSource.js'
 import type { TerminalInspection, TerminalRegistry } from './terminalRegistry.js'
 
 export interface MonitorReaction { readonly maxTotalTokens?: number; readonly maxReactions: number; readonly maxDurationMs: number }
+/**
+ * A reaction as requested: without a timeout it may run until the watch
+ * expires. A reaction is a turn, already bounded by the turn's own limits,
+ * the person's Stop and the watch's lifetime; a fixed 60s default cancelled
+ * every reaction on a large-context model before its first round finished.
+ */
+export interface MonitorReactionRequest { readonly maxTotalTokens?: number; readonly maxReactions: number; readonly maxDurationMs?: number }
+
+function resolvedReaction(reaction: MonitorReactionRequest, expiresAt: number): MonitorReaction {
+  return { ...reaction, maxDurationMs: reaction.maxDurationMs ?? Math.max(100, expiresAt - Date.now()) }
+}
 export interface MonitorEvent { readonly sequence: number; readonly text: string; readonly at: number }
 export interface MonitorSummary {
   readonly source?: NonNullable<MonitorConfiguration['source']>
@@ -47,7 +58,7 @@ export class TerminalMonitors {
     return this.webhooks?.source.list() ?? []
   }
 
-  async startWebhook(owner: string, options: { name: string; match: string; durationMs?: number; maxEvents?: number; reaction?: MonitorReaction; signal?: AbortSignal }): Promise<MonitorSummary> {
+  async startWebhook(owner: string, options: { name: string; match: string; durationMs?: number; maxEvents?: number; reaction?: MonitorReactionRequest; signal?: AbortSignal }): Promise<MonitorSummary> {
     if (!this.webhooks) throw new Error('Webhook monitoring is unavailable on this host')
     if (!owner.trim()) throw new Error('Monitor requires a session owner')
     if (options.reaction && !this.reactionMailbox) throw new Error('Automatic monitor reactions are unavailable on this host')
@@ -87,10 +98,10 @@ export class TerminalMonitors {
       const source = { kind: 'webhook' as const, name: subscription.name }, expiresAt = Date.now() + duration
       const run = this.history.startMonitor({ ownerSessionId: owner, workspace, kind: 'monitor', sourceId: source.name, title: `Watch Webhook ${source.name}` }, { trigger: 'output', match, expiresAt, source })
       watch = { source, trigger: 'output', id: run.id, terminalId: '', owner, match, state: 'watching', events: [], expiresAt,
-        ...(options.reaction ? { reaction: { ...options.reaction } } : {}), droppedEvents: 0, sequence: 0, partial: '', prefixOmitted: false, suffixOmitted: false, seen: new Set(), maxEvents, unsubscribe: subscription.close, sourceStatus: 'Watching webhook messages' }
+        ...(options.reaction ? { reaction: resolvedReaction(options.reaction, expiresAt) } : {}), droppedEvents: 0, sequence: 0, partial: '', prefixOmitted: false, suffixOmitted: false, seen: new Set(), maxEvents, unsubscribe: subscription.close, sourceStatus: 'Watching webhook messages' }
       this.watches.set(watch.id, watch)
     this.activityChanges.notify()
-      if (options.reaction) this.reactionMailbox!.configure({ owner, runId: watch.id, expiresAt, ...options.reaction })
+      if (watch.reaction) this.reactionMailbox!.configure({ owner, runId: watch.id, expiresAt, ...watch.reaction })
       const active = watch
       watch.timer = setTimeout(() => this.finish(active, 'expired'), duration)
       watch.timer.unref?.()
@@ -103,7 +114,7 @@ export class TerminalMonitors {
     } finally { this.opening.delete(pending); options.signal?.removeEventListener('abort', abort) }
   }
 
-  async startWebSocket(owner: string, options: { url: string; match: string; durationMs?: number; maxEvents?: number; reaction?: MonitorReaction; signal?: AbortSignal }): Promise<MonitorSummary> {
+  async startWebSocket(owner: string, options: { url: string; match: string; durationMs?: number; maxEvents?: number; reaction?: MonitorReactionRequest; signal?: AbortSignal }): Promise<MonitorSummary> {
     if (!this.websockets) throw new Error('WebSocket monitoring is unavailable on this host')
     if (!owner.trim()) throw new Error('Monitor requires a session owner')
     if (options.reaction && !this.reactionMailbox) throw new Error('Automatic monitor reactions are unavailable on this host')
@@ -146,10 +157,10 @@ export class TerminalMonitors {
       const source = { kind: 'websocket' as const, url: subscription.url }, expiresAt = Date.now() + duration
       const run = this.history.startMonitor({ ownerSessionId: owner, workspace, kind: 'monitor', sourceId: source.url, title: `Watch WebSocket ${source.url}` }, { trigger: 'output', match, expiresAt, source })
       watch = { source, trigger: 'output', id: run.id, terminalId: '', owner, match, state: 'watching', events: [], expiresAt,
-        ...(options.reaction ? { reaction: { ...options.reaction } } : {}), droppedEvents: 0, sequence: 0, partial: '', prefixOmitted: false, suffixOmitted: false, seen: new Set(), maxEvents, unsubscribe: subscription.close, sourceStatus: status }
+        ...(options.reaction ? { reaction: resolvedReaction(options.reaction, expiresAt) } : {}), droppedEvents: 0, sequence: 0, partial: '', prefixOmitted: false, suffixOmitted: false, seen: new Set(), maxEvents, unsubscribe: subscription.close, sourceStatus: status }
       this.watches.set(watch.id, watch)
     this.activityChanges.notify()
-      if (options.reaction) this.reactionMailbox!.configure({ owner, runId: watch.id, expiresAt, ...options.reaction })
+      if (watch.reaction) this.reactionMailbox!.configure({ owner, runId: watch.id, expiresAt, ...watch.reaction })
       const active = watch
       watch.timer = setTimeout(() => this.finish(active, 'expired'), duration)
       watch.timer.unref?.()
@@ -162,7 +173,7 @@ export class TerminalMonitors {
     } finally { this.opening.delete(pending); options.signal?.removeEventListener('abort', abort) }
   }
 
-  async startFile(owner: string, options: { path: string; durationMs?: number; maxEvents?: number; reaction?: MonitorReaction; signal?: AbortSignal }): Promise<MonitorSummary> {
+  async startFile(owner: string, options: { path: string; durationMs?: number; maxEvents?: number; reaction?: MonitorReactionRequest; signal?: AbortSignal }): Promise<MonitorSummary> {
     if (!this.files) throw new Error('File monitoring is unavailable on this host')
     if (!owner.trim()) throw new Error('Monitor requires a session owner')
     if (options.reaction && !this.reactionMailbox) throw new Error('Automatic monitor reactions are unavailable on this host')
@@ -197,11 +208,11 @@ export class TerminalMonitors {
       const expiresAt = Date.now() + duration
       const run = this.history.startMonitor({ ownerSessionId: owner, workspace: source.workspace, kind: 'monitor', sourceId: source.path, title: `Watch file ${source.path}` }, { trigger: 'change', match: 'File metadata changes', expiresAt, source })
       watch = { source, trigger: 'change', id: run.id, terminalId: '', owner, match: 'File metadata changes', state: 'watching', events: [], expiresAt,
-        ...(options.reaction ? { reaction: { ...options.reaction } } : {}), droppedEvents: 0, sequence: 0, partial: '', prefixOmitted: false, suffixOmitted: false, seen: new Set(), maxEvents, unsubscribe: subscription.close,
+        ...(options.reaction ? { reaction: resolvedReaction(options.reaction, expiresAt) } : {}), droppedEvents: 0, sequence: 0, partial: '', prefixOmitted: false, suffixOmitted: false, seen: new Set(), maxEvents, unsubscribe: subscription.close,
         sourceStatus: 'Watching file metadata changes. Rapid changes may coalesce; file contents are not read.' }
       this.watches.set(watch.id, watch)
     this.activityChanges.notify()
-      if (options.reaction) this.reactionMailbox!.configure({ owner, runId: watch.id, expiresAt, ...options.reaction })
+      if (watch.reaction) this.reactionMailbox!.configure({ owner, runId: watch.id, expiresAt, ...watch.reaction })
       const active = watch
       watch.timer = setTimeout(() => this.finish(active, 'expired'), duration)
       watch.timer.unref?.()
@@ -220,7 +231,7 @@ export class TerminalMonitors {
     if (active.length + this.opening.size >= 128) throw new Error('Host monitor limit reached')
   }
 
-  start(owner: string, options: { terminalId: string; match?: string; trigger?: 'output' | 'completion'; durationMs?: number; maxEvents?: number; reaction?: MonitorReaction }): MonitorSummary {
+  start(owner: string, options: { terminalId: string; match?: string; trigger?: 'output' | 'completion'; durationMs?: number; maxEvents?: number; reaction?: MonitorReactionRequest }): MonitorSummary {
     if (options.reaction && !this.reactionMailbox) throw new Error('Automatic monitor reactions are unavailable on this host')
     if (!owner.trim()) throw new Error('Monitor requires a session owner')
     const trigger = options.trigger ?? 'output'
@@ -237,11 +248,11 @@ export class TerminalMonitors {
     const expiresAt = Date.now() + duration
     const run = this.history.startMonitor({ ownerSessionId: owner, workspace: terminal.cwd, kind: 'monitor', sourceId: terminal.id, title: `Watch ${terminal.label}: ${match}` }, { trigger, match, expiresAt })
     const watch: Watch = { trigger, id: run.id, terminalId: terminal.id, owner, match, state: 'watching', events: [], expiresAt,
-      ...(options.reaction ? { reaction: { ...options.reaction } } : {}), droppedEvents: 0, sequence: 0, partial: '', prefixOmitted: false, suffixOmitted: false, seen: new Set(), maxEvents, unsubscribe: () => {} }
+      ...(options.reaction ? { reaction: resolvedReaction(options.reaction, expiresAt) } : {}), droppedEvents: 0, sequence: 0, partial: '', prefixOmitted: false, suffixOmitted: false, seen: new Set(), maxEvents, unsubscribe: () => {} }
     this.watches.set(watch.id, watch)
     this.activityChanges.notify()
     try {
-      if (options.reaction) this.reactionMailbox!.configure({ owner, runId: watch.id, expiresAt: watch.expiresAt, ...options.reaction })
+      if (watch.reaction) this.reactionMailbox!.configure({ owner, runId: watch.id, expiresAt: watch.expiresAt, ...watch.reaction })
       if (trigger === 'completion' && !terminal.running) {
         this.completeCommand(watch, terminal)
         return this.snapshot(watch)

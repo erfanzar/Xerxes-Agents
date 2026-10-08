@@ -2745,7 +2745,7 @@ export class DaemonServer {
         const attempts = params.max_reactions ?? 3;
         const tokens = params.max_total_tokens;
         if (tokens !== undefined && (params.react !== true || typeof tokens !== "number" || !Number.isSafeInteger(tokens) || tokens < 1)) return { ok: false, error: "Token threshold requires automatic reactions and a positive safe integer" };
-        const timeout = params.reaction_timeout_seconds ?? 60;
+        const timeout = params.reaction_timeout_seconds;
         if (!webhook && params.webhook_name !== undefined) return { ok: false, error: 'Unexpected webhook source name' };
         const invalidSource = webhook
           ? !webhookName || !/^[a-zA-Z0-9_-]{1,64}$/.test(webhookName) || trigger !== 'output' || !match || params.terminal_id !== undefined || params.file_path !== undefined || params.websocket_url !== undefined
@@ -2756,9 +2756,9 @@ export class DaemonServer {
         if (invalidSource || (params.react !== undefined && typeof params.react !== "boolean")
           || typeof duration !== "number" || !Number.isSafeInteger(duration) || duration < 1 || duration > 86400
           || typeof attempts !== "number" || !Number.isSafeInteger(attempts) || attempts < 1 || attempts > 10
-          || typeof timeout !== "number" || !Number.isSafeInteger(timeout) || timeout < 1 || timeout > 120) return { ok: false, error: "Invalid monitor settings" };
+          || (timeout !== undefined && (typeof timeout !== "number" || !Number.isSafeInteger(timeout) || timeout < 1 || timeout > 86400))) return { ok: false, error: "Invalid monitor settings" };
         const common = { durationMs: duration * 1000,
-          ...(params.react === true ? { reaction: { ...(tokens === undefined ? {} : { maxTotalTokens: tokens as number }), maxReactions: attempts, maxDurationMs: timeout * 1000 } } : {}) };
+          ...(params.react === true ? { reaction: { ...(tokens === undefined ? {} : { maxTotalTokens: tokens as number }), maxReactions: attempts, ...(timeout === undefined ? {} : { maxDurationMs: (timeout as number) * 1000 }) } } : {}) };
         const watch = webhook ? await this.monitors.startWebhook(owner, { name: webhookName!, match: match!, ...common })
           : file ? await this.monitors.startFile(owner, { path: filePath!, ...common })
           : websocket ? await this.monitors.startWebSocket(owner, { url: websocketUrl!, match: match!, ...common })
@@ -2771,7 +2771,7 @@ export class DaemonServer {
       if (method === 'monitor.update') {
         const attempts = params.max_reactions, seconds = params.reaction_timeout_seconds, tokens = params.max_total_tokens;
         if (typeof params.revision !== 'string' || typeof attempts !== 'number' || !Number.isSafeInteger(attempts) || attempts < 1 || attempts > 10
-          || typeof seconds !== 'number' || !Number.isSafeInteger(seconds) || seconds < 1 || seconds > 120
+          || typeof seconds !== 'number' || !Number.isSafeInteger(seconds) || seconds < 1 || seconds > 86400
           || (tokens !== null && (typeof tokens !== 'number' || !Number.isSafeInteger(tokens) || tokens < 1))) return { ok: false, error: 'Invalid reaction policy settings' };
         const monitor = this.monitors.updateReaction(owner, id, { revision: params.revision, maxReactions: attempts, maxDurationMs: seconds * 1000, maxTotalTokens: tokens });
         void this.reactionDispatcher?.dispatch(owner).catch(error => { console.error('Monitor reaction after policy edit failed:', errorMessage(error)); });

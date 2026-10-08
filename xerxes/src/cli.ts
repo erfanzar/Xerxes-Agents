@@ -1901,7 +1901,7 @@ function daemonRuntime(
       ...(host.terminals === undefined ? {} : { terminals: host.terminals }),
       ...(host.monitors ? { completionWatch: (owner: string, terminalId: string) => host.monitors!.start(owner, {
         terminalId, trigger: "completion", durationMs: 86_400_000, maxEvents: 1,
-        reaction: { maxReactions: 1, maxDurationMs: 60_000 },
+        reaction: { maxReactions: 1 },
       }) } : {}),
       ...(computerUseTool === undefined ? {} : { computerUseTool }),
       agentMemoryTools: {

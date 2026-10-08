@@ -16,7 +16,7 @@ export function MonitorCreate({ t, onClose, onCreated }: { t: Theme; onClose: ()
   const [terminals, setTerminals] = useState<TerminalSummary[]>([])
   const [terminalIndex, setTerminalIndex] = useState(0)
   const [field, setField] = useState(0)
-  const [values, setValues] = useState(['terminal', '', '', '3600', '', '3', '60', '', '', '', '', ''])
+  const [values, setValues] = useState(['terminal', '', '', '3600', '', '3', '', '', '', '', '', ''])
   const [sourceKind, setSourceKind] = useState<'terminal' | 'file' | 'websocket' | 'webhook'>('terminal')
   const [webhooks, setWebhooks] = useState<string[]>([])
   const [webhookIndex, setWebhookIndex] = useState(0)
@@ -57,9 +57,9 @@ export function MonitorCreate({ t, onClose, onCreated }: { t: Theme; onClose: ()
     if (sourceKind === 'webhook' && (!webhooks[webhookIndex] || !values[2]?.trim())) { setError(webhooks.length ? 'Enter a literal match.' : 'No configured webhook sources are available.'); return }
     const tokens = values[8]?.trim() ? Number(values[8]) : undefined
     if (tokens !== undefined && (!react || !Number.isSafeInteger(tokens) || tokens < 1)) { setError('Token threshold requires automatic reactions and a positive whole number.'); return }
-    const duration = Number(values[3]), attempts = Number(values[5]), timeout = Number(values[6])
-    if (!Number.isSafeInteger(duration) || duration < 1 || duration > 86400 || !Number.isSafeInteger(attempts) || attempts < 1 || attempts > 10 || !Number.isSafeInteger(timeout) || timeout < 1 || timeout > 120) {
-      setError('Duration: 1–86400; attempts: 1–10; timeout: 1–120 seconds.'); return
+    const duration = Number(values[3]), attempts = Number(values[5]), timeout = values[6].trim() ? Number(values[6]) : undefined
+    if (!Number.isSafeInteger(duration) || duration < 1 || duration > 86400 || !Number.isSafeInteger(attempts) || attempts < 1 || attempts > 10 || (timeout !== undefined && (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 86400))) {
+      setError('Duration: 1–86400; attempts: 1–10; timeout: blank or 1–86400 seconds.'); return
     }
     setBusy(true); setError('')
     const settings = { ...(tokens === undefined ? {} : { max_total_tokens: tokens }), ...(sourceKind === 'file'
@@ -68,7 +68,7 @@ export function MonitorCreate({ t, onClose, onCreated }: { t: Theme; onClose: ()
         ? { source_kind: 'websocket' as const, websocket_url: values[10].trim(), trigger: 'output' as const, match: values[2].trim() }
         : sourceKind === 'webhook'
           ? { source_kind: 'webhook' as const, webhook_name: webhooks[webhookIndex]!, trigger: 'output' as const, match: values[2].trim() }
-        : { terminal_id: source!.id, trigger: completion ? 'completion' as const : 'output' as const, match: values[2].trim() }), duration_seconds: duration, react, max_reactions: attempts, reaction_timeout_seconds: timeout }
+        : { terminal_id: source!.id, trigger: completion ? 'completion' as const : 'output' as const, match: values[2].trim() }), duration_seconds: duration, react, max_reactions: attempts, ...(timeout === undefined ? {} : { reaction_timeout_seconds: timeout }) }
     void createMonitor(gateway.rpc, settings)
       .then(watch => { if (alive.current) onCreated(watch.id) })
       .catch(failure => { if (alive.current) setError(String(failure)) })
@@ -94,7 +94,7 @@ export function MonitorCreate({ t, onClose, onCreated }: { t: Theme; onClose: ()
     }
   })
   const labels = ['Source', 'Terminal', 'Match', 'Duration seconds', 'Automatic reactions', 'Max reactions', 'Reaction timeout seconds', 'Trigger', 'Lifetime token threshold', 'File path', 'Websocket URL', 'Webhook name']
-  const shown = [sourceKind === 'file' ? 'File changes' : sourceKind === 'websocket' ? 'Websocket server push' : sourceKind === 'webhook' ? 'Configured webhook' : 'Terminal output', terminals[terminalIndex]?.label ?? 'No terminals', sourceKind === 'terminal' && completion ? '(unused for completion)' : values[2] || '(required)', values[3], react ? 'Enabled' : 'Notifications only', values[5], values[6], sourceKind === 'terminal' && completion ? 'Command completion' : sourceKind === 'file' ? 'Metadata changes' : 'Output match', values[8] || 'unlimited', values[9] || '(required)', values[10] || '(required)', webhooks[webhookIndex] || (sourceKind === 'webhook' ? '(no configured webhooks)' : '(required)')]
+  const shown = [sourceKind === 'file' ? 'File changes' : sourceKind === 'websocket' ? 'Websocket server push' : sourceKind === 'webhook' ? 'Configured webhook' : 'Terminal output', terminals[terminalIndex]?.label ?? 'No terminals', sourceKind === 'terminal' && completion ? '(unused for completion)' : values[2] || '(required)', values[3], react ? 'Enabled' : 'Notifications only', values[5], values[6] || 'until the watch ends', sourceKind === 'terminal' && completion ? 'Command completion' : sourceKind === 'file' ? 'Metadata changes' : 'Output match', values[8] || 'unlimited', values[9] || '(required)', values[10] || '(required)', webhooks[webhookIndex] || (sourceKind === 'webhook' ? '(no configured webhooks)' : '(required)')]
   return <SettingsFormLayout t={t} title="New monitor" subtitle="Choose a source, then decide when and how to react."
     fields={visibleFields.map(id => ({ id, label: labels[id]!, value: shown[id]!, group: [0, 1, 2, 9, 10, 11].includes(id) ? 'SOURCE & MATCH' : 'REACTIONS & LIMITS' }))}
     selected={field} onSelect={setField} busy={busy ? 'Creating…' : ''} error={error}
