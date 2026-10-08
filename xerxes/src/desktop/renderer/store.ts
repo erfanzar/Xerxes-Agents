@@ -647,6 +647,15 @@ function searchStatsOf(value: unknown): SessionSearchStats | null {
   }
 }
 
+/** An image pasted or dropped into the message box: base64 bytes for `turn.submit`'s `images`. */
+export interface ComposerImage {
+  readonly id: string
+  readonly mediaType: string
+  /** Base64 without the `data:` prefix, as the runtime's image validator expects. */
+  readonly data: string
+  readonly name: string
+}
+
 function clientHandshake(): Record<string, unknown> {
   return {
     client_version: DESKTOP_VERSION,
@@ -1144,11 +1153,13 @@ export class Store {
    * idle it is a normal `turn.submit`. `display` is what the transcript
    * shows when it differs from what the model is sent.
    */
-  async submit(text: string, display?: string): Promise<boolean> {
+  async submit(text: string, display?: string, images: readonly ComposerImage[] = []): Promise<boolean> {
     const trimmed = text.trim()
     if (!trimmed) return false
     const shown = display?.trim() || trimmed
+    // A steer carries text only; images wait for the next submit.
     if (this.frame.turnActive && !trimmed.startsWith('/')) {
+      if (images.length) return false
       return this.steer(trimmed)
     }
     if (!trimmed.startsWith('/')) {
@@ -1164,7 +1175,7 @@ export class Store {
         // schedule preparing its turn before turn_begin) refuse the submit
         // up front. Without one the daemon acknowledged it {ok:true} and only
         // then dropped it, so the bubble looked delivered and the draft was gone.
-        const result = await this.bridge.call('turn.submit', { session_key: sessionKey, text: trimmed, submission_id: crypto.randomUUID(), ...(shown === trimmed ? {} : { display_text: shown }) })
+        const result = await this.bridge.call('turn.submit', { session_key: sessionKey, text: trimmed, submission_id: crypto.randomUUID(), ...(shown === trimmed ? {} : { display_text: shown }), ...(images.length ? { images: images.map(image => ({ media_type: image.mediaType, data: image.data })) } : {}) })
         if (result.ok === false) throw new Error(str(result.error) || 'Submission refused')
         if (this.sessionKey === sessionKey) this.cameOnline()
         return true

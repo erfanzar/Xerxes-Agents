@@ -8,7 +8,7 @@ import { Fragment, createContext, memo, useCallback, useContext, useLayoutEffect
 import { CommandPalette, PickerLayer, DelegationMenu, ModelMenu, ModelPicker, ReasoningPicker, SettingsModal, bareModelName } from './Overlays.js'
 import { SessionSearch } from './SearchPanel.js'
 import { useTranscriptScroll } from './transcriptScroll.js'
-import { store, type Snapshot, isPlanReview } from './store.js'
+import { store, type ComposerImage, type Snapshot, isPlanReview } from './store.js'
 import { connectionFailureKind } from './connectionFailure.js'
 import { failureView } from './turnFailure.js'
 import type { AgentMember, Block } from './types.js'
@@ -1638,6 +1638,22 @@ function PlanReviewCard({
 
 // ── Composer ────────────────────────────────────────────────────────────
 
+/** Image files from a paste or drop, read as base64 for `turn.submit`. */
+export async function composerImages(files: Iterable<File>): Promise<ComposerImage[]> {
+  const images: ComposerImage[] = []
+  for (const file of files) {
+    if (!file.type.startsWith('image/')) continue
+    const bytes = new Uint8Array(await file.arrayBuffer())
+    let binary = ''
+    for (let offset = 0; offset < bytes.length; offset += 0x8000) binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000))
+    images.push({ id: crypto.randomUUID(), mediaType: file.type, data: btoa(binary), name: file.name || 'Pasted image' })
+  }
+  return images
+}
+
+/** What a message with only images says, since a turn needs text. */
+export const IMAGE_ONLY_MESSAGE = 'See the attached image.'
+
 function Composer({ snap }: { snap: Snapshot }): ReactElement {
   const open = useDesktopNavigation()
   // The RPC binding key may change on resume; drafts belong to the durable session.
@@ -1645,6 +1661,10 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
   const key = draftKey(workspace, snap.currentId || snap.sessionKey)
   const [draft, setDraft] = useState(() => readDraft(key))
   const [hints, setHints] = useState<{ items: HintItem[]; index: number } | null>(null)
+  const [images, setImages] = useState<ComposerImage[]>([])
+  const attach = (files: Iterable<File>): void => {
+    void composerImages(files).then(added => { if (added.length) setImages(current => [...current, ...added]) })
+  }
   const ref = useRef<HTMLTextAreaElement>(null)
   const hintSeq = useRef(0)
   const draftSession = useRef({ key, workspace, sessionId: snap.currentId })
@@ -1696,14 +1716,18 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
       else setHints({items: [], index: 0})
       return
     }
-    if (!draft.trim() || snap.connection !== 'online' || store.getSnapshot().submissionPending || sendingDraft.current) return
+    if ((!draft.trim() && !images.length) || snap.connection !== 'online' || store.getSnapshot().submissionPending || sendingDraft.current) return
+    // A steer carries text only: images wait for this step to finish.
+    if (images.length && snap.turnActive) return
     open(null)
     const origin = latestDraft.current.identity
     const sent = draft
+    const attached = images
     writeDraft(origin.key, sent)
     sendingDraft.current = true
     try {
-      if (await store.submit(sent)) {
+      if (await store.submit(sent.trim() || IMAGE_ONLY_MESSAGE, undefined, attached)) {
+        setImages(current => current.filter(image => !attached.includes(image)))
         const current = latestDraft.current
         const next = acceptedDraft(origin, current.identity, sent, current.text)
         if (next !== current.text) setDraft(next)
@@ -1799,7 +1823,13 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
       <ComposerTaskSummary snap={snap} />
       {!vscode && <RepoBar snap={snap} />}
       <div className="composer-dock">
-      <div className="composer">
+      <div className="composer" onDragOver={e => { if (Array.from(e.dataTransfer.items).some(item => item.type.startsWith('image/'))) e.preventDefault() }} onDrop={e => { const files = Array.from(e.dataTransfer.files).filter(file => file.type.startsWith('image/')); if (files.length) { e.preventDefault(); attach(files) } }}>
+        {images.length > 0 && <div className="composer__images" aria-label="Attached images">
+          {images.map(image => <div key={image.id} className="composer__image">
+            <img src={`data:${image.mediaType};base64,${image.data}`} alt={image.name} />
+            <button type="button" aria-label={`Remove ${image.name}`} title="Remove" onClick={() => setImages(current => current.filter(item => item.id !== image.id))}><Icon name="close" size={11} /></button>
+          </div>)}
+        </div>}
         <textarea
           ref={ref}
           className="composer__input"
@@ -1809,6 +1839,13 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
           placeholder={placeholder}
           spellCheck={false}
           onChange={e => { hintSeq.current += 1; setHints(null); setDraft(e.target.value); grow() }}
+          onPaste={e => {
+            // A screenshot arrives as a file; text in the same paste still pastes.
+            const files = Array.from(e.clipboardData.files).filter(file => file.type.startsWith('image/'))
+            if (!files.length) return
+            if (!e.clipboardData.getData('text/plain')) e.preventDefault()
+            attach(files)
+          }}
           onKeyDown={e => {
             if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() }
             else if (hints && hints.items.length > 0 && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
@@ -1833,12 +1870,12 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
           }}
         />
         {/* Stop while a turn runs and nothing is typed; otherwise send (or queue). */}
-        {(snap.turnActive || snap.submissionPending) && !draft.trim()
+        {(snap.turnActive || snap.submissionPending) && !draft.trim() && !images.length
           ? <button className="composer__send composer__send--stop" title="Stop (esc esc)" aria-label="Stop" onClick={() => store.cancel()}><Icon name="stop" size={18} /></button>
           : <button
               className="composer__send"
-              disabled={!ready || !draft.trim() || snap.submissionPending}
-              title={snap.turnActive ? 'Queue — runs when this step settles (⏎)' : 'Send (⏎ · ⇧⏎ newline)'}
+              disabled={!ready || (!draft.trim() && !images.length) || snap.submissionPending || (images.length > 0 && snap.turnActive)}
+              title={images.length > 0 && snap.turnActive ? 'Images send when this step finishes' : snap.turnActive ? 'Queue — runs when this step settles (⏎)' : 'Send (⏎ · ⇧⏎ newline)'}
               onClick={send}
               aria-label={snap.turnActive ? 'Queue message' : 'Send message'}
             ><Icon name="arrowUp" size={16} /></button>}

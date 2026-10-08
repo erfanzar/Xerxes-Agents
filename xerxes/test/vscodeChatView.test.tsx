@@ -9,6 +9,7 @@ import { SettingsModal } from '../src/desktop/renderer/Overlays.js'
 import type { Snapshot } from '../src/desktop/renderer/store.js'
 import type { SessionRow } from '../src/desktop/renderer/types.js'
 import { historyRows, navigateInVscode, VscodeChat } from '../src/vscode/ui/VscodeApp.js'
+import { composerImages } from '../src/desktop/renderer/App.js'
 
 /**
  * The VS Code chat view: one conversation column with VS Code's own homes
@@ -142,4 +143,12 @@ test('history lists main tasks in this folder, the open one included, newest fir
   expect(historyRows(snap, '').map(entry => entry.id)).toEqual(['new', 'open', 'old'])
   expect(historyRows(snap, '').find(entry => entry.id === 'open')?.title).toBe('Open task')
   expect(historyRows(snap, 'PARSER').map(entry => entry.id)).toEqual(['old'])
+})
+
+test('a pasted screenshot becomes base64 for the runtime, and other files are ignored', async () => {
+  const png = new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], 'shot.png', { type: 'image/png' })
+  const text = new File(['hello'], 'notes.txt', { type: 'text/plain' })
+  const images = await composerImages([png, text])
+  expect(images).toHaveLength(1)
+  expect(images[0]).toMatchObject({ mediaType: 'image/png', data: 'iVBORw==', name: 'shot.png' })
 })

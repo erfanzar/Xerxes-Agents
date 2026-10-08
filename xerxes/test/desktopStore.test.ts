@@ -105,6 +105,20 @@ describe('Store workspace folds', () => {
     expect(store.getSnapshot().compacting).toBeUndefined()
   })
 
+  test('a pasted image travels with the message on turn.submit, and a steer never drops it', async () => {
+    await Bun.sleep(0)
+    const image = { id: 'i1', mediaType: 'image/png', data: 'iVBORw0KGgo=', name: 'Pasted image' }
+    expect(await store.submit('what is wrong here?', undefined, [image])).toBe(true)
+    const submit = bridge.calls.find(call => call.method === 'turn.submit')
+    expect(submit?.params).toMatchObject({ text: 'what is wrong here?', images: [{ media_type: 'image/png', data: 'iVBORw0KGgo=' }] })
+    bridge.push('turn_begin', { text: 'what is wrong here?' })
+    // While a step runs, text steers; an image cannot ride a steer, so the
+    // submit is refused and the composer keeps it for the next message.
+    const before = bridge.calls.length
+    expect(await store.submit('and this one', undefined, [image])).toBe(false)
+    expect(bridge.calls.slice(before).some(call => call.method === 'turn.steer' || call.method === 'turn.submit')).toBe(false)
+  })
+
   test('slow submission remains visible and a preparation warning does not duplicate its echo', async () => {
     await Bun.sleep(0)
     const reply = Promise.withResolvers<Record<string, unknown>>()
