@@ -55,6 +55,30 @@ test('renders one conversation column with a history title, not the desktop side
   expect(html).not.toContain('desktop-rail')
 })
 
+test('an older shared runtime is visible, with what its update waits for and a restart', () => {
+  // The runtime is shared, so a reloaded window reconnects to the one an older
+  // install launched. An update that waited on running work was invisible here,
+  // and every fix in the new extension silently never ran.
+  const waiting = renderToStaticMarkup(createElement(VscodeChat, { snap: snapshot({
+    connection: 'online', daemonWarning: 'Daemon is older than the app — restart it.',
+    runtimeUpdate: 'waiting', runtimeUpdateMessage: 'Update queued. It will install automatically when all running work finishes.',
+    runtimeBlockers: ['Work in “Fix the parser”'],
+  }) }))
+  expect(waiting).toContain('class="xv-runtime"')
+  expect(waiting).toContain('Update queued.')
+  expect(waiting).toContain('Waiting for: Work in “Fix the parser”')
+  expect(waiting).toContain('Restart now')
+
+  const newer = renderToStaticMarkup(createElement(VscodeChat, { snap: snapshot({
+    connection: 'online', daemonWarning: 'The app is older than the daemon — update and restart Xerxes.',
+  }) }))
+  expect(newer).toContain('Update the extension')
+  expect(newer).not.toContain('Restart now')
+
+  const current = renderToStaticMarkup(createElement(VscodeChat, { snap: snapshot({ connection: 'online', daemonWarning: null }) }))
+  expect(current).not.toContain('xv-runtime')
+})
+
 test('in VS Code, settings is one page of providers, agent intelligence and approvals with no section tabs', () => {
   ;(globalThis as { document?: unknown }).document = { documentElement: { dataset: { host: 'vscode' } } }
   const html = renderToStaticMarkup(createElement(SettingsModal, { snap: snapshot({ settingsOpen: true }) }))

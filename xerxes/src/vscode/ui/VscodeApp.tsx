@@ -52,6 +52,26 @@ export function VscodeApp(): ReactElement {
   return <VscodeChat snap={snap} />
 }
 
+/**
+ * A runtime from an older install keeps serving after the extension updates:
+ * the runtime is shared, so a window reload reconnects to it. The store
+ * replaces it once nothing is running; this says that is pending, what it
+ * waits for, and lets the person restart now. Without it a busy or failed
+ * update was invisible, and fixes in the new extension never took effect.
+ */
+function RuntimeUpdate({ snap }: { snap: Snapshot }): ReactElement {
+  const working = snap.runtimeUpdate === 'checking' || snap.runtimeUpdate === 'restarting'
+  const appOlder = snap.daemonWarning?.startsWith('The app is older') === true
+  const blockers = snap.runtimeUpdate === 'waiting' ? snap.runtimeBlockers ?? [] : []
+  const text = snap.runtimeUpdateMessage || (appOlder
+    ? 'The running runtime is newer than this extension. Update the extension, then reload the window.'
+    : 'The running runtime is older than this extension. It is replaced when nothing is running.')
+  return <div className="xv-runtime" role="status" aria-live="polite">
+    <span className="xv-runtime__text">{text}{blockers.length > 0 && <> Waiting for: {blockers.join(', ')}. Restarting now stops that work.</>}</span>
+    {!appOlder && <button disabled={working} onClick={() => void store.restartRuntimeNow()}>{working ? 'Restarting…' : 'Restart now'}</button>}
+  </div>
+}
+
 /** Presentational over the snapshot, like the desktop Shell. */
 export function VscodeChat({ snap }: { snap: Snapshot }): ReactElement {
   const [sheet, setSheet] = useState<Sheet | null>(null)
@@ -75,6 +95,7 @@ export function VscodeChat({ snap }: { snap: Snapshot }): ReactElement {
         <div className="xv-body">
           {snap.noWorkspace ? <NoFolder /> : <ErrorBoundary label="This conversation"><main className="chat xv-chat">
             {snap.connection !== 'online' && snap.blocks.length > 0 && <ConnectionBanner snap={snap} />}
+            {snap.connection === 'online' && snap.daemonWarning && <RuntimeUpdate snap={snap} />}
             {snap.tab === 'changes' ? <div className="workspace"><ChangesTab snap={snap} /></div>
               : snap.tab === 'plan' ? <div className="workspace"><PlanTab snap={snap} /></div>
               : <Stream snap={snap} />}
