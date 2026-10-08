@@ -7,6 +7,11 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.40 — 2026-10-09
+
+- Paste or drop images into the message box, in the desktop app and VS Code. A screenshot shows as a thumbnail you can remove and is sent with the message; the runtime already accepted images, but the message box never sent any. While a step is running, images wait for it to finish, because a steer carries text only.
+- The VS Code release build keeps each verified Bun download, so a dropped connection costs one file instead of the whole build.
+
 ## 0.6.39 — 2026-10-08
 
 - VS Code: the runtime update notice is readable. It used the theme's warning fill without the text colour paired with it, so light text sat on a pale yellow; it now uses the editor widget surface and text, with the warning colour as its edge.
