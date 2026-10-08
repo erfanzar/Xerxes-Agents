@@ -56,6 +56,8 @@ interface Waiter {
   resolve: (value: Record<string, unknown>) => void
   reject: (error: Error) => void
   timer: NodeJS.Timeout
+  /** Restart the deadline: the runtime just showed it is alive and working. */
+  rearm: () => void
 }
 
 export interface DaemonRpcOptions {
@@ -535,6 +537,11 @@ export class DaemonRpc extends EventEmitter {
       // Slash-command replay outside initialization remains available.
       if (type === 'notification' && payload.category === 'history'
         && [...this.waiters.values()].some(waiter => waiter.method === 'initialize')) return
+      // The deadline is for a runtime that went quiet. One still sending
+      // events — a compaction reporting "summary request 2…" — is working
+      // on the call; a multi-minute /compact used to fail at 120 s and drop
+      // the connection, which cancelled the compaction it was waiting for.
+      for (const waiter of this.waiters.values()) waiter.rearm()
       this.emit('event', type, payload)
       return
     }
@@ -549,18 +556,20 @@ export class DaemonRpc extends EventEmitter {
     const id = this.seq++
     const frame = `${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`
     return new Promise<T>((resolveCall, rejectCall) => {
-      const timer = setTimeout(() => {
+      const expire = () => {
         this.waiters.delete(id)
         rejectCall(new Error(`rpc timeout: ${method} (${this.deadlineMs}ms)`))
-      }, this.deadlineMs)
-      this.waiters.set(id, {
+      }
+      const waiter: Waiter = {
         method,
         resolve: resolveCall as (value: Record<string, unknown>) => void,
         reject: rejectCall,
-        timer,
-      })
+        timer: setTimeout(expire, this.deadlineMs),
+        rearm: () => { clearTimeout(waiter.timer); waiter.timer = setTimeout(expire, this.deadlineMs) },
+      }
+      this.waiters.set(id, waiter)
       this.write(sock, frame).catch(error => {
-        clearTimeout(timer)
+        clearTimeout(waiter.timer)
         if (this.waiters.delete(id)) {
           rejectCall(error instanceof Error ? error : new Error(String(error)))
         }

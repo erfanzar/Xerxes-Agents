@@ -675,3 +675,24 @@ test('a remote update does not rebuild the tunnel while the host daemon restarts
     expect(reconnects).toBe(0)
   } finally { rpc.dispose(); before.close(); after?.close() }
 }, 10000)
+
+test('a call stays alive while the runtime keeps sending events, and times out once it goes quiet', async () => {
+  const daemon = new FakeDaemon(socketPath)
+  await daemon.listen()
+  const rpc = client(150)
+  // A compaction: the reply arrives after three deadlines, with progress in between.
+  const compacting = rpc.call<{ ok: boolean }>('slash', { command: '/compact' })
+  await until(() => daemon.requests.length === 1, 'slash frame')
+  for (let step = 0; step < 6; step++) {
+    await new Promise(resolve => setTimeout(resolve, 75))
+    daemon.event('status_update', { kind: 'compressing', text: `Compacting: summary request ${step + 1}…` })
+  }
+  daemon.reply(daemon.requests[0]!.id, { ok: true })
+  expect(await compacting).toEqual({ ok: true })
+  // A runtime that says nothing still times out at the deadline.
+  const quiet = rpc.call('slash', { command: '/compact' })
+  await until(() => daemon.requests.length === 2, 'second slash frame')
+  await expect(quiet).rejects.toThrow('rpc timeout: slash (150ms)')
+  rpc.dispose()
+  daemon.close()
+})
