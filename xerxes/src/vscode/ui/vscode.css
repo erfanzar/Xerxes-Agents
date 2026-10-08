@@ -196,7 +196,7 @@ html:root[data-host='vscode'][data-surface='panel']{--x-screen:var(--vscode-edit
 :root[data-host='vscode'] .atelier.xv .xv-body{flex:1 1 auto;min-height:0;display:flex}
 :root[data-host='vscode'] .atelier.xv .xv-body>.xv-chat,:root[data-host='vscode'] .atelier.xv .xv-body>.xv-empty{flex:1 1 auto;min-width:0}
 :root[data-host='vscode'] .atelier.xv .xv-activity{flex:0 0 340px;min-width:0;overflow:auto;border-left:1px solid var(--x-divider);background:var(--x-screen)}
-:root[data-host='vscode'] .atelier.xv .xv-runtime{display:flex;align-items:center;gap:10px;width:100%;max-width:var(--xv-column);margin:6px auto 0;box-sizing:border-box;padding:6px 10px;border:1px solid var(--vscode-inputValidation-warningBorder,var(--x-divider));border-radius:6px;background:var(--vscode-inputValidation-warningBackground,transparent);font-size:12px}
+:root[data-host='vscode'] .atelier.xv .xv-runtime{display:flex;align-items:center;gap:10px;width:100%;max-width:var(--xv-column);margin:6px auto 0;box-sizing:border-box;padding:6px 10px;border:1px solid var(--x-divider);border-left:3px solid var(--vscode-editorWarning-foreground,var(--x-divider));border-radius:6px;background:var(--vscode-editorWidget-background,var(--x-screen));color:var(--vscode-editorWidget-foreground,var(--vscode-foreground));font-size:12px}
 :root[data-host='vscode'] .atelier.xv .xv-runtime__text{flex:1 1 auto;min-width:0}
 :root[data-host='vscode'] .atelier.xv .xv-runtime button{flex:0 0 auto;padding:3px 10px;border:0;border-radius:4px;background:var(--vscode-button-background);color:var(--vscode-button-foreground);cursor:pointer}
 :root[data-host='vscode'] .atelier.xv .xv-runtime button:disabled{opacity:.6;cursor:default}
