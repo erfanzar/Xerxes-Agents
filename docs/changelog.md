@@ -7,6 +7,10 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.38 — 2026-10-08
+
+- VS Code shows when the runtime it is talking to is older than the extension. The runtime is shared, so reloading a window reconnects to the one an earlier install launched, and an update that was waiting on running work was invisible: a 0.6.33 runtime kept serving after 0.6.37 was installed, and none of the fixes in between ran. The view now says the update is pending, what it waits for, and offers Restart now.
+
 ## 0.6.37 — 2026-10-08
 
 - Compaction works for OpenRouter models with a vendor prefix (`mistralai/mistral-large-4-0`) on every path — `/compact`, the check before a turn, and subagents — not only mid-turn. The summary request asked the bare provider registry which provider owns the model id, only to choose a reasoning hint, and `mistralai` is an OpenRouter vendor, not a provider; every compaction failed with "unknown provider prefix 'mistralai'". The client is already routed by the session's profile, so an id the registry cannot place now goes without the hint.
