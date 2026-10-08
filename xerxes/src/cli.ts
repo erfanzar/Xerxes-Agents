@@ -2233,7 +2233,7 @@ function daemonRuntime(
         const contextWindow = localClient ? undefined : resolvedProfileContextLimit(profile ?? profileStore.active(), model);
         const outcome = await compactMessagesIfNeeded({
           model,
-          completion: compactionCompletionPort(compactionLlm, model, undefined, signal),
+          completion: compactionCompletionPort(compactionLlm, model, undefined, signal, localClient ? undefined : profile?.provider),
           summaryBudgets: [OVERFLOW_SUMMARY_MAX_TOKENS],
           messages: priced,
           reason: "mid-turn-auto-compact",

@@ -334,6 +334,63 @@ test("daemon auto-compacts before submitting a turn once usage crosses the thres
   }
 });
 
+test("pre-turn auto-compaction reaches OpenRouter for a vendor-prefixed model id", async () => {
+  // Regression: the compaction port asked the bare registry which provider
+  // `mistralai/mistral-large-4-0` belongs to, only to pick a reasoning hint.
+  // `mistralai` is an OpenRouter vendor, not a provider prefix, so every
+  // compaction failed with "unknown provider prefix 'mistralai'".
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-autocompact-vendor-"));
+  const socketPath = join(directory, "daemon.sock");
+  const profileStore = new ProfileStore(join(directory, "profiles.json"));
+  const model = "mistralai/mistral-large-4-0";
+  profileStore.save({
+    name: "openrouter",
+    apiKey: "fake-api-key",
+    baseUrl: "https://openrouter.test/api/v1",
+    model,
+    provider: "openrouter",
+    setActive: true,
+  });
+  profileStore.replaceModelCapabilities("openrouter", { [model]: { context_limit: 128_000 } });
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: directory,
+    model,
+    runtimeSettings: { base_url: "https://openrouter.test/api/v1", provider: "openrouter" },
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const server = new DaemonServer({ autoCompactThreshold: 0.01, autoTitle: false, socketPath, runtime, profileStore });
+  const nativeFetch = globalThis.fetch;
+  const requests: unknown[] = [];
+  globalThis.fetch = fakeOpenAiFetch(requests) as typeof globalThis.fetch;
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { session_key: "vendor-model", project_dir: directory } });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+    seedTranscript(runtime, "vendor-model");
+    const session = runtime.sessionStatus("vendor-model");
+    if (!session) throw new Error("session missing");
+    session.model = model;
+    session.metadata.provider_profile = "openrouter";
+
+    client.send({ jsonrpc: "2.0", id: 2, method: "turn.submit", params: { text: "hello" } });
+    await client.next((frame) => frame.id === 2);
+    await client.next(notificationWith("auto-compacting"));
+    await client.next(notificationWith("Auto-compacted"));
+    await client.next(eventFrame("turn_end"));
+    expect(requests.length).toBe(1);
+    expect(requests[0]).toMatchObject({ model });
+    expect(JSON.stringify(session.messages)).toContain("durable auto-compact summary");
+  } finally {
+    globalThis.fetch = nativeFetch;
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("cancel during pre-turn auto-compaction prevents the admitted turn from launching", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-autocompact-cancel-"));
   const socketPath = join(directory, "daemon.sock");

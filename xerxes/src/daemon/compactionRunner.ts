@@ -22,7 +22,8 @@ import {
 } from "../llms/client.js";
 import { classifyError, ErrorKind } from "../runtime/errorClassifier.js";
 import { catalogReasoningLevels, fallbackReasoningLevels } from "../llms/reasoningLevels.js";
-import { detectProvider } from "../llms/providerRegistry.js";
+import { detectProvider, isProviderName, type ProviderName } from "../llms/providerRegistry.js";
+import { ConfigurationError } from "../core/errors.js";
 
 /** Auto-compact once the estimated context usage reaches this fraction of the prompt budget. */
 export const DEFAULT_AUTO_COMPACT_THRESHOLD = 0.8;
@@ -98,11 +99,13 @@ export function compactionCompletionPort(
   timeoutMs: number = COMPACTION_COMPLETION_TIMEOUT_MS,
   /** External cancellation owned by the command or turn invoking compaction. */
   signal?: AbortSignal,
+  /** The routed profile's provider, when the caller knows it; see {@link compactionHintProvider}. */
+  provider?: string,
 ): CompactionCompletionPort {
   return async (request) => {
     throwIfCancelled(signal)
-    const provider = detectProvider(model);
-    const levels = catalogReasoningLevels(model, provider) ?? fallbackReasoningLevels(provider);
+    const hintProvider = compactionHintProvider(model, provider);
+    const levels = catalogReasoningLevels(model, hintProvider) ?? fallbackReasoningLevels(hintProvider);
     const thinking = levels.shape === 'effort' && levels.levels.some(level => level.effort === 'low')
       ? { effort: 'low' } : undefined;
     const completionSignal = combinedCompletionSignal(timeoutMs, signal)
@@ -240,6 +243,23 @@ function compactionTimeoutError(timeoutMs: number): Error {
  * other provider error. The factory runs at most once; its rejection is cached so
  * a retry loop cannot turn one misconfiguration into repeated construction.
  */
+/**
+ * The provider whose reasoning levels shape the summary's low-effort hint. The
+ * client is already routed — by the session's profile — so this only picks a
+ * hint. A model id the bare registry cannot route (an OpenRouter vendor id like
+ * `mistralai/mistral-large-4-0`) failed every compaction with "unknown provider
+ * prefix"; it now goes without a hint, and the provider applies its default.
+ */
+function compactionHintProvider(model: string, provider: string | undefined): ProviderName | undefined {
+  if (provider !== undefined) return isProviderName(provider) ? provider : undefined;
+  try {
+    return detectProvider(model);
+  } catch (error) {
+    if (error instanceof ConfigurationError) return undefined;
+    throw error;
+  }
+}
+
 export function lazyCompactionCompletionPort(
   createClient: () => LlmClient,
   model: string,
