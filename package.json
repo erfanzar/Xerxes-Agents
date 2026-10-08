@@ -1,6 +1,6 @@
 {
   "name": "@xsimurgh/xerxes-agents",
-  "version": "0.6.36",
+  "version": "0.6.37",
   "private": true,
   "type": "module",
   "description": "Bun-native coding agent with OpenTUI, persistent sessions, policy-controlled tools, MCP, and live multi-agent orchestration.",

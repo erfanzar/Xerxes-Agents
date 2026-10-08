@@ -7,6 +7,10 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.37 — 2026-10-08
+
+- Compaction works for OpenRouter models with a vendor prefix (`mistralai/mistral-large-4-0`) on every path — `/compact`, the check before a turn, and subagents — not only mid-turn. The summary request asked the bare provider registry which provider owns the model id, only to choose a reasoning hint, and `mistralai` is an OpenRouter vendor, not a provider; every compaction failed with "unknown provider prefix 'mistralai'". The client is already routed by the session's profile, so an id the registry cannot place now goes without the hint.
+
 ## 0.6.36 — 2026-10-08
 
 - Compaction waits for the threshold the context meter shows. It reserved the model's whole output ceiling before applying the threshold, and for a model whose ceiling is half its window (Mistral Large 4: 262K of 524K) that compacted a task at 40% full, every round. The threshold is now a share of the window, and each round's `max_tokens` is fitted to the room the window has left, so a long prompt no longer makes a request that exceeds the window. Only a `max_tokens` you pin is still reserved.
