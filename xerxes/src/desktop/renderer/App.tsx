@@ -1212,12 +1212,14 @@ function UserMessage({ text, images = [] }: { text: string; images?: readonly st
   const long = text.length > 1600 || text.split('\n').length > 16
   // The wrapper carries the bubble's right alignment so the copy row can sit
   // under the bubble rather than inside it.
+  // Attached images sit above the bubble, whole and readable, as the person
+  // pasted them; the bubble holds only what they typed.
   return <div className="msg-turn msg-turn--user">
-    <div className="msg msg--user">
-      {images.length > 0 && <div className="msg__images">{images.map((url, index) => <a key={index} href={url} target="_blank" rel="noreferrer" title="Open image"><img src={url} alt={`Attached image ${index + 1}`} /></a>)}</div>}
-      {text && <div className={`msg__text${long && !expanded ? ' msg__text--preview' : ''}`}>{text}</div>}
+    {images.length > 0 && <div className="msg__images">{images.map((url, index) => <a key={index} href={url} target="_blank" rel="noreferrer" title="Open image"><img src={url} alt={`Attached image ${index + 1}`} /></a>)}</div>}
+    {text && <div className="msg msg--user">
+      <div className={`msg__text${long && !expanded ? ' msg__text--preview' : ''}`}>{text}</div>
       {long && <button className="message-expand" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>{expanded ? 'Show less' : 'Show full message'}</button>}
-    </div>
+    </div>}
     <div className="msg__actions"><CopyButton icon text={text} label="Copy message" /></div>
   </div>
 }

@@ -200,3 +200,4 @@ html:root[data-host='vscode'][data-surface='panel']{--x-screen:var(--vscode-edit
 :root[data-host='vscode'] .atelier.xv .xv-runtime__text{flex:1 1 auto;min-width:0}
 :root[data-host='vscode'] .atelier.xv .xv-runtime button{flex:0 0 auto;padding:3px 10px;border:0;border-radius:4px;background:var(--vscode-button-background);color:var(--vscode-button-foreground);cursor:pointer}
 :root[data-host='vscode'] .atelier.xv .xv-runtime button:disabled{opacity:.6;cursor:default}
+:root[data-host='vscode'] .atelier.xv .msg-turn--user .msg__images{justify-content:flex-start}

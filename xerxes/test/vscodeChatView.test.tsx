@@ -152,3 +152,14 @@ test('a pasted screenshot becomes base64 for the runtime, and other files are ig
   expect(images).toHaveLength(1)
   expect(images[0]).toMatchObject({ mediaType: 'image/png', data: 'iVBORw==', name: 'shot.png' })
 })
+
+test('an attached image shows whole above the message bubble, not inside it', () => {
+  const png = 'data:image/png;base64,iVBORw0KGgo='
+  const html = renderToStaticMarkup(createElement(VscodeChat, { snap: snapshot({
+    blocks: [{ kind: 'user', id: 1, text: 'trash tbh', images: [png] }] as unknown as Snapshot['blocks'],
+  }) }))
+  const image = html.indexOf('class="msg__images"'), bubble = html.indexOf('class="msg msg--user"')
+  expect(image).toBeGreaterThan(-1)
+  expect(bubble).toBeGreaterThan(image)
+  expect(html.slice(bubble)).not.toContain('<img')
+})
