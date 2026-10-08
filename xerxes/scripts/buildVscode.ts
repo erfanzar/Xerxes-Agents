@@ -16,7 +16,7 @@
  */
 
 import { createHash } from 'node:crypto'
-import { chmod, cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, cp, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { DAEMON_PROTOCOL_VERSION } from '../src/daemon/fingerprint.js'
@@ -26,6 +26,8 @@ import { copyDesktopRuntimeAssets } from './packageDesktopMac.js'
 const packageDirectory = join(import.meta.dir, '..')
 const distDirectory = join(packageDirectory, 'dist')
 const repoRoot = join(packageDirectory, '..')
+/** Tries per download before a build gives up on a flaky connection. */
+const DOWNLOAD_ATTEMPTS = 4
 
 /** VS Code platform target → the official Bun build for it. */
 const TARGETS: Readonly<Record<string, string>> = {
@@ -135,13 +137,23 @@ async function bunBinary(target: string, destination: string): Promise<void> {
   }
   const asset = TARGETS[target]!
   const base = `https://github.com/oven-sh/bun/releases/download/bun-v${Bun.version}`
-  const [archive, sums] = await Promise.all([
-    fetch(`${base}/${asset}.zip`).then(response => { if (!response.ok) throw new Error(`Bun ${asset} download failed (${response.status})`); return response.arrayBuffer() }),
-    fetch(`${base}/SHASUMS256.txt`).then(response => { if (!response.ok) throw new Error(`Bun checksums download failed (${response.status})`); return response.text() }),
-  ])
+  // Kept per Bun version and re-verified on every use, so a dropped connection
+  // costs one download, not every target of every release.
+  const cache = join(distDirectory, 'bun-cache', `bun-v${Bun.version}`)
+  await mkdir(cache, { recursive: true })
+  const sums = new TextDecoder().decode(await cachedDownload(join(cache, 'SHASUMS256.txt'), `${base}/SHASUMS256.txt`, 'Bun checksums'))
   const expected = sums.split('\n').find(line => line.endsWith(` ${asset}.zip`))?.split(' ')[0]
-  const actual = createHash('sha256').update(new Uint8Array(archive)).digest('hex')
-  if (!expected || expected !== actual) throw new Error(`Bun ${asset} did not match its published checksum`)
+  if (!expected) throw new Error(`Bun's published checksums do not list ${asset}`)
+  const verified = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex') === expected
+  const cached = join(cache, `${asset}.zip`)
+  let archive = await cachedDownload(cached, `${base}/${asset}.zip`, `Bun ${asset}`)
+  if (!verified(archive)) {
+    // A cached copy that no longer matches is replaced once; a fresh download
+    // that does not match is refused.
+    await rm(cached, { force: true })
+    archive = await cachedDownload(cached, `${base}/${asset}.zip`, `Bun ${asset}`)
+    if (!verified(archive)) { await rm(cached, { force: true }); throw new Error(`Bun ${asset} did not match its published checksum`) }
+  }
   const work = join(distDirectory, `vscode-bun-${asset}`)
   await rm(work, { recursive: true, force: true })
   await mkdir(work, { recursive: true })
@@ -150,6 +162,27 @@ async function bunBinary(target: string, destination: string): Promise<void> {
   if (unzip.exitCode !== 0) throw new Error(`Could not unpack ${asset}: ${unzip.stderr.toString()}`)
   await cp(join(work, asset, target.startsWith('win32') ? 'bun.exe' : 'bun'), destination)
   await rm(work, { recursive: true, force: true })
+}
+
+/** The file at `path`, downloading it first when absent; transient network failures are retried. */
+async function cachedDownload(path: string, url: string, what: string): Promise<Uint8Array> {
+  const file = Bun.file(path)
+  if (await file.exists()) return new Uint8Array(await file.arrayBuffer())
+  let failure: unknown
+  for (let attempt = 1; attempt <= DOWNLOAD_ATTEMPTS; attempt += 1) {
+    try {
+      const response = await fetch(url)
+      if (!response.ok) throw new Error(`${what} download failed (${response.status})`)
+      const bytes = new Uint8Array(await response.arrayBuffer())
+      await Bun.write(path + '.part', bytes)
+      await rename(path + '.part', path)
+      return bytes
+    } catch (error) {
+      failure = error
+      if (attempt < DOWNLOAD_ATTEMPTS) await Bun.sleep(attempt * 5_000)
+    }
+  }
+  throw new Error(`${what} download failed after ${DOWNLOAD_ATTEMPTS} attempts: ${failure instanceof Error ? failure.message : String(failure)}`)
 }
 
 async function build(target: string): Promise<string> {
