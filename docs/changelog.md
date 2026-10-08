@@ -7,6 +7,10 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.42 — 2026-10-09
+
+- An image you attach shows in your message, in the desktop app and VS Code: when you send it, and when the task reloads. History keeps a screenshot up to 256 KB inline; a larger one shows as "[image omitted: N KB]" after a reload, while the model always received the full image.
+
 ## 0.6.41 — 2026-10-09
 
 - A monitor reaction runs until its watch ends, not 60 seconds. A reacting watch without an explicit timeout, including "tell me when this command finishes", cancelled its reaction turn after 60 seconds ("Reaction deadline exceeded"), so on a large-context model the turn was stopped before its first round finished. A reaction is a turn, bounded by the turn's own limits, Stop and the watch's lifetime; an explicit timeout can now be up to the watch's 24 hours instead of 2 minutes.
