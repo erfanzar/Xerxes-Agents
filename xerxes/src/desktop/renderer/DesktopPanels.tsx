@@ -937,7 +937,7 @@ export function BackgroundActivity({ rows, renderRow }: {
   </>
 }
 
-function ActivityPanel({ snap }: { snap: Snapshot }): ReactElement {
+export function ActivityPanel({ snap }: { snap: Snapshot }): ReactElement {
   const request = useRequest(snap),
     [rows, setRows] = useState<RpcRecord[]>([]),
     [loaded, setLoaded] = useState(false),

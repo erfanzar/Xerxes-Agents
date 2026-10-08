@@ -178,3 +178,21 @@ html:root[data-host='vscode'][data-surface='panel']{--x-screen:var(--vscode-edit
 /* The working/compacting status line spans the box it sits on; the desktop's
    centred 780px column left it drifting right of the box in a wide view. */
 :root[data-host='vscode'] .atelier.xv :is(.composer-status,.hints){max-width:none;margin-left:0;margin-right:0}
+
+/* One conversation column. Every block shares its width and left edge: the
+   full width in a sidebar, a centred reading column in a wide editor or a
+   full window. Mixed caps left replies at 760px beside full-width messages,
+   to-dos and composer. */
+:root[data-host='vscode']{--xv-column:880px}
+:root[data-host='vscode'] .atelier.xv :is(.stream__col,.composer-dock,.composer__toolbar,.composer-status,.composer-task-summary,.hints){width:100%;max-width:var(--xv-column);margin-left:auto;margin-right:auto;box-sizing:border-box}
+:root[data-host='vscode'] .atelier.xv .msg--agent{max-width:none}
+/* Same edges above and below: the conversation's scrollbar takes a fixed
+   10px on both sides, and the composer area is inset by the same amount. */
+:root[data-host='vscode'] .atelier.xv .stream{scrollbar-gutter:stable both-edges;padding-left:10px;padding-right:10px}
+:root[data-host='vscode'] .atelier.xv .stream::-webkit-scrollbar{width:10px}
+:root[data-host='vscode'] .atelier.xv .composer-wrap{padding-left:20px;padding-right:20px}
+
+/* Wide view: the conversation and, beside it, the task's activity. */
+:root[data-host='vscode'] .atelier.xv .xv-body{flex:1 1 auto;min-height:0;display:flex}
+:root[data-host='vscode'] .atelier.xv .xv-body>.xv-chat,:root[data-host='vscode'] .atelier.xv .xv-body>.xv-empty{flex:1 1 auto;min-width:0}
+:root[data-host='vscode'] .atelier.xv .xv-activity{flex:0 0 340px;min-width:0;overflow:auto;border-left:1px solid var(--x-divider);background:var(--x-screen)}

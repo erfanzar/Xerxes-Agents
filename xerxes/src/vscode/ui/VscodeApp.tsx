@@ -14,7 +14,7 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactElement } from 'react'
 
 import { ActivityDetails, Announcer, Composer, ConnectionBanner, GlobalKeys, Stream, TaskModal } from '../../desktop/renderer/App.js'
-import { DesktopNavigation, DesktopSheet, type DesktopPanel } from '../../desktop/renderer/DesktopPanels.js'
+import { ActivityPanel, DesktopNavigation, DesktopSheet, type DesktopPanel } from '../../desktop/renderer/DesktopPanels.js'
 import { ErrorBoundary } from '../../desktop/renderer/ErrorBoundary.js'
 import { FindBar } from '../../desktop/renderer/FindBar.js'
 import { Icon } from '../../desktop/renderer/Icon.js'
@@ -29,6 +29,20 @@ import { ChangesTab, PlanTab } from '../../desktop/renderer/Workspaces.js'
 
 type Sheet = Exclude<DesktopPanel, null>
 
+/** Wide enough for the conversation column and the activity column side by side. */
+const ACTIVITY_COLUMN_MIN_WIDTH = 1_320
+
+/** True while the view is at least `min` pixels wide, following resizes. */
+function useWideView(min: number): boolean {
+  const [wide, setWide] = useState(() => typeof window !== 'undefined' && window.innerWidth >= min)
+  useEffect(() => {
+    const update = () => setWide(window.innerWidth >= min)
+    window.addEventListener('resize', update)
+    return () => window.removeEventListener('resize', update)
+  }, [min])
+  return wide
+}
+
 /** Overflow-menu commands the extension pushes (`panel:<name>`) → the sheet they open. */
 const SHEETS: ReadonlySet<string> = new Set<Sheet>(['activity', 'usage'])
 
@@ -42,7 +56,12 @@ export function VscodeApp(): ReactElement {
 export function VscodeChat({ snap }: { snap: Snapshot }): ReactElement {
   const [sheet, setSheet] = useState<Sheet | null>(null)
   const [history, setHistory] = useState(false)
-  const navigate = (panel: DesktopPanel, path?: string): void => { void navigateInVscode(window.xerxes, setSheet, panel, path) }
+  // A full window or a wide editor tab has room to keep activity in view.
+  const activityColumn = useWideView(ACTIVITY_COLUMN_MIN_WIDTH) && !snap.noWorkspace
+  const navigate = (panel: DesktopPanel, path?: string): void => {
+    if (panel === 'activity' && activityColumn) { document.querySelector('.xv-activity')?.scrollTo({ top: 0 }); return }
+    void navigateInVscode(window.xerxes, setSheet, panel, path)
+  }
   useEffect(() => { setSheet(null); setHistory(false) }, [snap.cwd, snap.sessionKey])
   useEffect(() => window.xerxes.onMenuCommand?.(command => {
     if (command === 'history') setHistory(open => !open)
@@ -53,13 +72,19 @@ export function VscodeChat({ snap }: { snap: Snapshot }): ReactElement {
       <div className="app atelier xv">
         <FirstRunSetup snap={snap} />
         <Header snap={snap} history={history} setHistory={setHistory} />
-        {snap.noWorkspace ? <NoFolder /> : <ErrorBoundary label="This conversation"><main className="chat xv-chat">
-          {snap.connection !== 'online' && snap.blocks.length > 0 && <ConnectionBanner snap={snap} />}
-          {snap.tab === 'changes' ? <div className="workspace"><ChangesTab snap={snap} /></div>
-            : snap.tab === 'plan' ? <div className="workspace"><PlanTab snap={snap} /></div>
-            : <Stream snap={snap} />}
-          <Composer snap={snap} />
-        </main></ErrorBoundary>}
+        <div className="xv-body">
+          {snap.noWorkspace ? <NoFolder /> : <ErrorBoundary label="This conversation"><main className="chat xv-chat">
+            {snap.connection !== 'online' && snap.blocks.length > 0 && <ConnectionBanner snap={snap} />}
+            {snap.tab === 'changes' ? <div className="workspace"><ChangesTab snap={snap} /></div>
+              : snap.tab === 'plan' ? <div className="workspace"><PlanTab snap={snap} /></div>
+              : <Stream snap={snap} />}
+            <Composer snap={snap} />
+          </main></ErrorBoundary>}
+          {activityColumn && <ErrorBoundary label="Activity"><aside className="xv-activity desktop-rail" aria-label="Activity">
+            <ActivityDetails snap={snap} />
+            <ActivityPanel snap={snap} />
+          </aside></ErrorBoundary>}
+        </div>
         <FindBar />
         <Shortcuts />
         <Announcer snap={snap} />
