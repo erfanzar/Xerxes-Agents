@@ -5315,9 +5315,10 @@ export class DaemonServer {
     if (session && Object.hasOwn(session.metadata, LOCAL_PROVIDER_BINDING)) return 0;
     if (!model.trim()) return 0;
     const status = this.runtime.status();
-    const requestedOutputTokens = typeof status.max_tokens === "number"
-      ? status.max_tokens
-      : this.maxOutputTokens(model, session);
+    // Only a pinned `max_tokens` is reserved. The model's own output ceiling
+    // can be half its window (Mistral Large 4: 262K of 524K), which compacted
+    // a session at 40% full; the turn loop fits it to the room left per round.
+    const requestedOutputTokens = typeof status.max_tokens === "number" ? status.max_tokens : undefined;
     return effectiveContextLimit({
       contextLimit: this.contextLimit(model, session),
       ...(requestedOutputTokens === undefined ? {} : { requestedOutputTokens }),
@@ -7962,7 +7963,7 @@ export class DaemonServer {
             ? `Context window: unknown (provider reported no capacity for \`${model}\`)`
             : "Context window: unknown (model not configured)",
         promptBudget && promptBudget < contextLimit
-          ? `Prompt budget: ${promptBudget.toLocaleString()} (window minus the reply this model may emit)`
+          ? `Prompt budget: ${promptBudget.toLocaleString()} (window minus the pinned max_tokens)`
           : "",
         promptBudget
           ? `Used: ${used.toLocaleString()} (${percent.toFixed(1)}%) · Remaining: ${remaining.toLocaleString()}`

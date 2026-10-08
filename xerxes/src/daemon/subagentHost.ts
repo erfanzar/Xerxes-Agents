@@ -1602,7 +1602,9 @@ async function compactChildConversation(input: ChildCompactionRequest): Promise<
   // Unknown provider capacity disables speculative child compaction rather
   // than enforcing a model window Xerxes invented locally.
   const contextLimit = options.contextLimit?.(model)
-  const maxTokens = options.maxTokens ?? options.maxOutputTokens?.(model)
+  // Only a pinned ceiling is reserved: the model's own output ceiling can be
+  // half its window, and the loop fits it to the room left each round.
+  const maxTokens = options.maxTokens
   const thresholdTokens = compactionThresholdTokens(
     effectiveContextLimit({
       ...(contextLimit === undefined ? {} : { contextLimit }),
@@ -1650,10 +1652,12 @@ function childMidTurnCompaction(
   input: ChildCompactionRequest,
   systemPrompt: string,
   tools: readonly ToolDefinition[],
-): { contextCompactionDue?: (messages: readonly ChatMessage[], observedPromptTokens?: number) => boolean; reduceContext?: ContextReducer } {
+): { contextCompactionDue?: (messages: readonly ChatMessage[], observedPromptTokens?: number) => boolean; reduceContext?: ContextReducer; roundOutputRoom?: () => number | undefined } {
   const { conversation, conversations, model, options, request, state } = input
   const contextLimit = options.contextLimit?.(model)
-  const maxTokens = options.maxTokens ?? options.maxOutputTokens?.(model)
+  // Only a pinned ceiling is reserved: the model's own output ceiling can be
+  // half its window, and the loop fits it to the room left each round.
+  const maxTokens = options.maxTokens
   const thresholdTokens = compactionThresholdTokens(
     effectiveContextLimit({
       ...(contextLimit === undefined ? {} : { contextLimit }),
@@ -1668,7 +1672,9 @@ function childMidTurnCompaction(
     toolSchemas: tools as unknown as Record<string, unknown>[],
   })
   const calibration = promptCalibration()
+  let projectedPrompt: number | undefined
   return {
+    roundOutputRoom: () => contextLimit !== undefined && projectedPrompt !== undefined ? contextLimit - projectedPrompt : undefined,
     // Only once the turn has taken a step: at its start the pre-turn pass has
     // already compacted, and an opening prompt alone has nothing to summarize.
     contextCompactionDue: (messages, observedPromptTokens) => {
@@ -1677,6 +1683,7 @@ function childMidTurnCompaction(
       // that opens on a steer divided the next count by a stale estimate, and
       // everything added in between inflated the ratio into an early compaction.
       const projected = calibration.project(estimate(messages), observedPromptTokens)
+      projectedPrompt = projected
       const last = messages.at(-1)
       if (!last || last.role === 'user' || last.role === 'system') return false
       return projected >= thresholdTokens

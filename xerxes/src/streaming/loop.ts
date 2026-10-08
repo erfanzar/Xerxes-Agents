@@ -370,6 +370,13 @@ export interface TurnDependencies {
    * is still the one being sent; hosts calibrate their estimate against it.
    */
   readonly contextCompactionDue?: (messages: readonly ChatMessage[], observedPromptTokens?: number) => boolean
+  /**
+   * Tokens the context window still has free for this round's reply, as the
+   * host measured it in `contextCompactionDue`. A model's advertised output
+   * ceiling can be half its window; sent as-is, it makes a request whose prompt
+   * plus `max_tokens` exceeds the window, which strict providers reject.
+   */
+  readonly roundOutputRoom?: () => number | undefined
   readonly retryDelays?: readonly number[]
   /**
    * Ceiling for provider-suggested Retry-After waits (ms). Route-owned via the
@@ -623,6 +630,7 @@ export async function* runTurn(
                   state.messages,
                   forceToolFreeSummary ? [] : request.tools,
                   outputTokenOverride,
+                  dependencies.roundOutputRoom?.(),
                 ),
                 attemptSignal.controller.signal,
               ),
@@ -1649,10 +1657,14 @@ function completionRequest(
   messages: readonly ChatMessage[],
   tools: readonly ToolDefinition[] | undefined,
   maxTokensOverride?: number,
+  outputRoom?: number,
 ) {
   // The override only exists when the caller pinned nothing, so a user-chosen
   // ceiling is never silently widened by truncation recovery.
-  const maxTokens = request.maxTokens ?? maxTokensOverride
+  const ceiling = request.maxTokens ?? maxTokensOverride
+  const maxTokens = ceiling !== undefined && outputRoom !== undefined && outputRoom > 0
+    ? Math.min(ceiling, Math.floor(outputRoom))
+    : ceiling
   return {
     model: request.model,
     messages: request.systemPromptRequestOnly && request.systemPrompt

@@ -14,6 +14,7 @@ import { ToolRegistry } from '../src/executors/toolRegistry.js'
 import { AgentMemory } from '../src/memory/agentMemory.js'
 import { AgentSelfMemory } from '../src/memory/agentSelfMemory.js'
 import { appendContextDelta, readContextDeltas } from '../src/runtime/contextDeltas.js'
+import { estimateContextTokens } from '../src/context/windowUsage.js'
 import { registerInteractionModeTool } from '../src/runtime/interactionModeTool.js'
 import { createGoal, editGoal, getGoal } from '../src/runtime/goalDomain.js'
 import { registerGoalTools } from '../src/runtime/goalTools.js'
@@ -100,6 +101,45 @@ test('compaction is handed the turn\'s own session, so it reaches the provider t
   mine.messages = [{ role: 'user', content: 'historical output '.repeat(50_000) }]
   await runtime.submitTurn(mine.sessionKey, 'continue', () => {})
   expect(seen).toEqual([mine.id + ':openrouter'])
+})
+
+test('a model whose output ceiling is half its window is not compacted at 40% full, and its reply is fitted to the room left', async () => {
+  // Mistral Large 4 reports a 524,288 window and a 262,144 output ceiling.
+  // Reserving that whole ceiling put the 80% trigger at 209,715 tokens, so a
+  // session at 211K (40% of the window) compacted every round.
+  const window = 524_288
+  const ceiling = 262_144
+  const requested: (number | undefined)[] = []
+  let reductions = 0
+  const runner = new AgentTurnRunner({
+    model: 'mistral-large-4', contextLimit: window, maxOutputTokens: () => ceiling,
+    llm: { async *stream(request: CompletionRequest) { requested.push(request.maxTokens); yield { content: 'done' } } },
+    reduceContext: async messages => { reductions += 1; return { messages, tokensFreed: 0 } },
+  })
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-output-room-'))
+  try {
+    const runtime = new InMemoryDaemonRuntime(runner, { model: 'mistral-large-4', sessionDirectory: join(directory, 'sessions') })
+    const session = await runtime.openSession('half-window-output')
+    const chunk = 'historical output line with some words '
+    const perChunk = estimateContextTokens([{ role: 'user', content: chunk.repeat(1000) }], { model: 'mistral-large-4' }) / 1000
+    session.messages = [{ role: 'user', content: chunk.repeat(Math.ceil(window * 0.4 / perChunk)) }]
+    await runtime.submitTurn(session.sessionKey, 'continue', () => {})
+    expect(reductions).toBe(0)
+    expect(requested).toHaveLength(1)
+    // Room left is about 60% of the window: more than the ceiling, so the
+    // ceiling is sent unchanged.
+    expect(requested[0]).toBe(ceiling)
+
+    // At 70% the room (about 157K) is below the ceiling: max_tokens shrinks to
+    // fit instead of the request exceeding the window.
+    session.messages = [{ role: 'user', content: chunk.repeat(Math.ceil(window * 0.7 / perChunk)) }]
+    await runtime.submitTurn(session.sessionKey, 'continue', () => {})
+    expect(reductions).toBe(0)
+    expect(requested[1]).toBeLessThan(ceiling)
+    expect(requested[1]).toBeGreaterThan(window * 0.25)
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
 })
 
 test('goal evidence resolves a real completed tool call before the next provider inference', async () => {

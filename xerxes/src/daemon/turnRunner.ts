@@ -626,6 +626,7 @@ export class AgentTurnRunner implements TurnRunner {
         const thinkingRequest = thinking ? { budgetTokens: thinking.budgetTokens, effort: thinking.effort }
           : (requiresLocal || /^claude[-_]code\//i.test(attemptModel)) && sessionEffort ? { effort: 'none' } : undefined
         const calibration = promptCalibration(contextCalibrationRatio(session.metadata, attemptModel))
+        let projectedPrompt: number | undefined
         const turnEvents = withActiveSession(session, runTurn({
         turnId: session.activeTurnId,
         agentId: promptAgent?.name ?? session.agentId,
@@ -695,7 +696,6 @@ export class AgentTurnRunner implements TurnRunner {
           if (!limit || limit <= 0) return false
           const threshold = this.options.autoCompactThreshold?.() ?? 0.8
           if (threshold <= 0) return false
-          const output = this.options.maxTokens ?? routedProvider?.maxOutputTokens?.(attemptModel) ?? this.options.maxOutputTokens?.(attemptModel) ?? 8192
           const projected = calibration.project(estimateContextTokens(messages as unknown as Record<string, unknown>[], {
             model: attemptModel,
             ...(systemPrompt ? { systemPrompt } : {}),
@@ -706,8 +706,16 @@ export class AgentTurnRunner implements TurnRunner {
           if (observedPromptTokens !== undefined) {
             state.metadata[CONTEXT_CALIBRATION_METADATA_KEY] = { model: attemptModel, ratio: Math.round(calibration.ratio * 1000) / 1000 }
           }
-          return projected >= Math.max(4096, limit - output) * Math.min(1, threshold)
+          projectedPrompt = projected
+          // Same scale as the context meter: a share of the window. The model's
+          // output ceiling is not subtracted here — it can be half the window
+          // (Mistral Large 4: 262K of 524K), which compacted at 40% full. The
+          // reply's room is reserved per round by `roundOutputRoom` instead.
+          return projected >= limit * Math.min(1, threshold)
         },
+        roundOutputRoom: () => contextLimit && contextLimit > 0 && projectedPrompt !== undefined
+          ? contextLimit - projectedPrompt
+          : undefined,
         persistToolResult: this.toolResultPersister(session),
         // Declared per tool at registration. Absent, the loop stays strictly
         // sequential, so an undeclared tool can never be run concurrently by
