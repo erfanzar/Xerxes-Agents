@@ -686,12 +686,13 @@ test("a session pinned to one profile keeps its window when the active profile s
       | { context_limit?: number }
       | undefined;
     expect(status?.context_limit).toBe(262_144);
-    // The auto-compaction budget is built from the pinned profile too: its
-    // window less its own reply allowance, not the active profile's.
+    // The auto-compaction budget is built from the pinned profile's window
+    // too, not the active profile's. Its own reply allowance is not reserved:
+    // the turn loop fits max_tokens to the room left each round.
     first.send({ jsonrpc: "2.0", id: 3, method: "slash", params: { command: "/budget" } });
     expect((await first.next((frame) => frame.id === 3)).result).toMatchObject({
       context_limit: 262_144,
-      prompt_budget: 262_144 - 8_192,
+      prompt_budget: 262_144,
     });
   } finally {
     first.close();
@@ -3599,7 +3600,7 @@ test("daemon resumes only initialize resume IDs and lists saved sessions separat
       ok: true,
       daemon_protocol: 35,
       daemon_build_id: expect.any(String),
-      daemon_version: "0.6.35",
+      daemon_version: "0.6.36",
       session: { id: firstSessionId, key: firstSessionId, messages: 2 },
     });
     await client.next(eventFrame("init_done"));

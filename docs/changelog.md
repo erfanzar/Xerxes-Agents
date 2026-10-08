@@ -7,6 +7,10 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.36 — 2026-10-08
+
+- Compaction waits for the threshold the context meter shows. It reserved the model's whole output ceiling before applying the threshold, and for a model whose ceiling is half its window (Mistral Large 4: 262K of 524K) that compacted a task at 40% full, every round. The threshold is now a share of the window, and each round's `max_tokens` is fitted to the room the window has left, so a long prompt no longer makes a request that exceeds the window. Only a `max_tokens` you pin is still reserved.
+
 ## 0.6.35 — 2026-10-08
 
 - Compaction during a turn reaches the provider the task uses. It resolved the provider implicitly, found none on that path, and fell back to the default connection, which read an OpenRouter vendor (`mistralai/mistral-large-4-0`) as a provider prefix and failed with "unknown provider prefix 'mistralai'". The turn now hands compaction its own session.

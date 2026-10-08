@@ -15,7 +15,7 @@
     },
     "xerxes": {
       "name": "@xerxes/runtime",
-      "version": "0.6.35",
+      "version": "0.6.36",
       "dependencies": {
         "@aws-sdk/client-bedrock-runtime": "3.1048.0",
         "@earendil-works/pi-ai": "^0.84.2",
