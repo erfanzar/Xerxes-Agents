@@ -145,9 +145,12 @@ export interface AgentTurnRunnerOptions {
   /**
    * Relieve a mid-turn context overflow. The loop detects the overflow and can
    * retry the round, but owns no compaction policy — without this the turn can
-   * only report the failure and stop.
+   * only report the failure and stop. It is handed the turn's own session:
+   * resolving it implicitly found none on this path, and compaction fell back
+   * to the default connection, which read an OpenRouter vendor
+   * (`mistralai/…`) as a provider prefix and failed.
    */
-  readonly reduceContext?: ContextReducer
+  readonly reduceContext?: (messages: Parameters<ContextReducer>[0], signal: Parameters<ContextReducer>[1], session: DaemonSession) => ReturnType<ContextReducer>
   readonly autoCompactThreshold?: () => number
   /** Per-session prompt state shared across runner rebuilds; see SessionPromptSnapshots. */
   readonly promptSnapshots?: SessionPromptSnapshots
@@ -678,7 +681,7 @@ export class AgentTurnRunner implements TurnRunner {
         ...(toolExecutor ? { toolExecutor } : {}),
         ...(this.options.reduceContext ? { reduceContext: async (messages, signal) => {
           try {
-            return await this.options.reduceContext!(messages, signal)
+            return await this.options.reduceContext!(messages, signal, session)
           } finally {
             // The host records archive/failure metadata on the session. Keep it
             // in the turn state too, which replaces session metadata on save.

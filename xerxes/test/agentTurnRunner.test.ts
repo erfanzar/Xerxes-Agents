@@ -81,6 +81,27 @@ test('proactive compaction metadata survives turn synchronization and blocks ove
   expect(session.messages.some(message => String(message.content).includes('historical output'))).toBe(false)
 })
 
+test('compaction is handed the turn\'s own session, so it reaches the provider that session uses', async () => {
+  const seen: string[] = []
+  const runner = new AgentTurnRunner({
+    model: 'gpt-test', llm: new TextClient(), contextLimit: 100_000, maxTokens: 1000,
+    reduceContext: async (messages, _signal, owner) => {
+      seen.push(owner.id + ':' + String(owner.metadata.provider_profile))
+      return { messages: messages.slice(-1), tokensFreed: 150_000 }
+    },
+  })
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-compaction-owner-'))
+  const runtime = new InMemoryDaemonRuntime(runner, { sessionDirectory: join(directory, 'sessions') })
+  // Two tasks on different providers; only the second one overflows.
+  const other = await runtime.openSession('claude-code-task')
+  other.metadata.provider_profile = 'claude-code'
+  const mine = await runtime.openSession('openrouter-task')
+  mine.metadata.provider_profile = 'openrouter'
+  mine.messages = [{ role: 'user', content: 'historical output '.repeat(50_000) }]
+  await runtime.submitTurn(mine.sessionKey, 'continue', () => {})
+  expect(seen).toEqual([mine.id + ':openrouter'])
+})
+
 test('goal evidence resolves a real completed tool call before the next provider inference', async () => {
   const root = await mkdtemp(join(tmpdir(), 'xerxes-goal-evidence-'))
   try {

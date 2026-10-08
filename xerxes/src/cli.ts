@@ -2212,14 +2212,15 @@ function daemonRuntime(
       // loop can retry an overflowed round once, but only if something is
       // willing to shrink the history for it.
       autoCompactThreshold: () => Number(runtime?.status().auto_compact_threshold ?? 0.8),
-      reduceContext: async (messages, signal) => {
-        const active = getActiveSession<DaemonSession>();
+      reduceContext: async (messages, signal, session) => {
+        // The turn's own session decides the provider, exactly as it does for the turn.
+        const active = session;
         const model = active?.model || connection.model;
         const localClient = active ? host.remoteProviderBindings?.client(active, model) : undefined;
         const profile = !localClient && active && (active.metadata.provider_profile || !(config.runtime.provider || config.runtime.base_url || config.runtime.api_key)) ? sessionProvider(profileStore, active, model) : undefined;
         const compactionLlm = localClient ?? (profile ? createLlmClient(model, { provider: profile.provider, api_key: profile.api_key, base_url: profile.base_url, ...(connection.responsesApi ? { responses_api: true } : {}) }) : llm);
         // PreCompact hook before any message is dropped (Claude Code parity).
-        const hookRunner = hooksForWorkspace(getActiveSession<{ cwd: string }>()?.cwd ?? workspaceRoot);
+        const hookRunner = hooksForWorkspace(active.cwd || workspaceRoot);
         if (hookRunner.hasHooks("on_compact")) {
           await hookRunner.run("on_compact", {
             message_count: messages.length,
