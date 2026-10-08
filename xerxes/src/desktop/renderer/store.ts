@@ -390,6 +390,12 @@ export interface Snapshot {
   readonly planMode: boolean
   readonly turnActive: boolean
   readonly networkRetrying?: boolean
+  /**
+   * The runtime is compacting this task's history: its latest progress line.
+   * The task is busy and takes no new turn until it finishes, but nothing
+   * said so — the view showed no activity and a send went nowhere.
+   */
+  readonly compacting?: string
   readonly turnFailed: boolean
   readonly turnSeconds: number
   readonly blocks: readonly Block[]
@@ -3209,7 +3215,7 @@ export class Store {
     if (!extra.resume_session_id && adoptedKey && adoptedKey !== this.sessionKey) {
       this.sessionKey = adoptedKey
       this.resetWorkspaceFolds()
-      this.patch({ goal: '', approval: null, question: null, failed: null })
+      this.patch({ goal: '', approval: null, question: null, failed: null, compacting: undefined })
     }
     // A resume binds the session under the session id, not our requested
     // key — every session-scoped call below must target what the daemon
@@ -3961,6 +3967,10 @@ export class Store {
       }
       case 'status_update': {
         this.refreshProviderRelay()
+        // Progress while compacting; the full status echo that follows
+        // (it carries turn_count) is sent once the task is free again.
+        if (payload.kind === 'compressing') this.patch({ compacting: str(payload.text) || 'Compacting the conversation…' })
+        else if (this.frame.compacting && payload.turn_count !== undefined) this.patch({ compacting: undefined })
         if (payload.kind === 'network_retry') this.patch({ networkRetrying: true })
         if (payload.kind === 'provider_ready') this.patch({ networkRetrying: false })
         const patch: Record<string, unknown> = {}

@@ -1749,13 +1749,15 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
       ?.scrollIntoView({ block: 'nearest' })
   }, [hints?.index, hints?.items.length])
 
-  const ready = snap.connection === 'online'
+  const ready = snap.connection === 'online' && !snap.compacting
   const placeholder =
     snap.connection !== 'online'
       ? 'Connect to a daemon first…'
       : snap.turnActive
         ? 'Steer now — queued until this step settles'
-        : snap.planMode
+        : snap.compacting
+          ? 'Compacting the conversation — you can send when it finishes'
+          : snap.planMode
           ? 'Planning — describe the outcome, or /plan <msg> to steer'
           : 'Describe what you need'
   // VS Code has Source Control for the repo line, and no dictation in a webview.
@@ -1789,6 +1791,7 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
           <div className="hints__keys"><span>Type to filter</span><kbd>↵</kbd> / <kbd>tab</kbd> complete <kbd>↑↓</kbd> pick <kbd>esc</kbd> dismiss</div>
         </div>
       )}
+      {snap.compacting && !snap.turnActive && <div className="streamstatus composer-status" role="status" aria-live="polite"><AgentOrb size={20} state="working" /><span className="streamstatus__phrase">{snap.compacting}</span></div>}
       {snap.submissionPending && !snap.turnActive && <div className="streamstatus composer-status" role="status"><AgentOrb size={20} state="connecting" /><span className="streamstatus__phrase">Sending…</span></div>}
       {snap.turnActive && <div className={`streamstatus composer-status${snap.stopArmed ? ' streamstatus--armed' : ''}`} role="status" aria-live="polite"><AgentOrb size={20} state={orbStateOf(snap)} />{snap.stopArmed
         ? <span className="streamstatus__phrase">Press <kbd>esc</kbd> again to stop this task and its agents</span>

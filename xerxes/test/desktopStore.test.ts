@@ -88,6 +88,23 @@ describe('Store workspace folds', () => {
     store.start(bridge)
   })
 
+  test('compaction shows its progress until the task is free, and the composer says why it waits', async () => {
+    await Bun.sleep(0)
+    expect(store.getSnapshot().compacting).toBeUndefined()
+    // The busy echo comes first, then progress lines while summaries are requested.
+    bridge.push('status_update', { turn_count: 4, llm_steps: 9 })
+    bridge.push('status_update', { kind: 'compressing', text: 'Compacting 796 message(s) with claude-code/opus…' })
+    expect(store.getSnapshot().compacting).toBe('Compacting 796 message(s) with claude-code/opus…')
+    bridge.push('status_update', { kind: 'compressing', text: 'Compacting: summary request 2…' })
+    expect(store.getSnapshot().compacting).toBe('Compacting: summary request 2…')
+    // A per-round usage delta is not the end of compaction.
+    bridge.push('status_update', { context_tokens: 500_000 })
+    expect(store.getSnapshot().compacting).toBe('Compacting: summary request 2…')
+    // The full status echo sent once the task is free clears it.
+    bridge.push('status_update', { turn_count: 4, llm_steps: 9 })
+    expect(store.getSnapshot().compacting).toBeUndefined()
+  })
+
   test('slow submission remains visible and a preparation warning does not duplicate its echo', async () => {
     await Bun.sleep(0)
     const reply = Promise.withResolvers<Record<string, unknown>>()
