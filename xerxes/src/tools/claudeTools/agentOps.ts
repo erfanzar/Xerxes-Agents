@@ -10,6 +10,7 @@ import {
   type AgentIntelligence,
   type AgentIntelligenceConfig,
 } from '../../agents/intelligence.js'
+import { createHash } from 'node:crypto'
 import { ValidationError } from '../../core/errors.js'
 import {
   mergePersistedSubagentSnapshots,
@@ -274,7 +275,7 @@ export const CLAUDE_AGENT_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     wait: booleanSchema('Wait for the subagent to finish.', true),
     timeout: numberSchema('Maximum seconds to wait.'),
   }, ['prompt']),
-  definition('SendMessageTool', 'Send follow-up work to a subagent. Running agents queue it; finished or interrupted agents continue under the same id with their saved conversation and configuration. Returns after accepting input without waiting for completion. Explicitly closed agents must be resumed with AgentTool first. Prefer this over a new spawn when that agent already has the needed context.', {
+  definition('SendMessageTool', 'Send follow-up work to a subagent. Running agents queue it; finished, failed or interrupted agents (including ones from earlier turns or before a runtime restart) continue under the same id with their saved conversation and configuration, so a failed agent is retried this way rather than respawned. Returns after accepting input without waiting for completion. Explicitly closed agents must be resumed with AgentTool first. Prefer this over a new spawn when that agent already has the needed context.', {
     target: stringSchema('Subagent id or stable name.'),
     message: stringSchema('Message for the subagent.'),
   }, ['target', 'message']),
@@ -363,6 +364,7 @@ export const CLAUDE_AGENT_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     'Prefer it to a series of AgentTool/SpawnAgents calls once work splits into more than a few pieces or needs stages (find, then verify, then synthesize). There is no limit on how many agents a script starts; concurrency only bounds how many run at once.',
     'The script is the body of an async function. Globals: agent(prompt, opts) resolves to the agent\'s final text, or a parsed value when opts.schema is given, and rejects on failure; parallel([functions or promises]) waits for all and turns failures into null; pipeline(items, ...stages) sends each item through the stages independently, stage(previous, item, index), a throwing stage drops that item to null; phase(title) groups the agents that follow; log(...values); args; budget.spent() and budget.remaining(). return the value you want back.',
     'agent opts: label, phase, model, profile (provider profile), intelligence, effort, type (subagent type), isolation: "worktree", schema (JSON Schema for a structured reply), timeout_ms.',
+    'A run that failed, timed out or was stopped can be resumed with resume=<workflow_id>; nothing it finished is redone.',
     'Every agent starts with no context, so each prompt must stand alone. The script itself has no files, shell or network; agents do the work. Choose a model per agent: a fast, cheap model for mechanical reading, search and classification, a stronger one for judgement and synthesis.',
   ].join(' '), {
     script: stringSchema('JavaScript body of an async function using agent, parallel, pipeline, phase, log, args and budget. return the result.'),
@@ -372,7 +374,8 @@ export const CLAUDE_AGENT_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     max_agents: { type: 'integer', minimum: 1, description: `Runaway guard on agents started in total (default ${DEFAULT_WORKFLOW_MAX_AGENTS}).` },
     token_budget: { type: 'integer', minimum: 1, description: 'Stop starting agents once they have used this many tokens; also budget.total in the script.' },
     timeout_minutes: numberSchema('Stop the whole run after this many minutes.'),
-  }, ['script']),
+    resume: stringSchema('Resume an earlier run by its workflow_id instead of starting over: agents that finished return their saved results at once, agents that failed, were stopped or cut off continue in their own conversation, and only new work starts new agents. Omit script to rerun the saved one; pass it to rerun an edited script.'),
+  }, []),
   definition('HandoffTool', 'Hand work to a specialist agent type with a reason and context summary; it waits and returns the specialist\'s output to you, like AgentTool with subagent_type.', {
     target_agent: stringSchema('Agent type receiving the handoff.'),
     reason: stringSchema('Why the handoff is needed.'),
@@ -897,8 +900,18 @@ export class ClaudeAgentTools {
    * run's group so clients can draw them together by phase.
    */
   private async workflow(inputs: JsonObject, context: ToolExecutionContext, signal?: AbortSignal): Promise<Record<string, unknown>> {
-    const script = requiredString(inputs, 'script')
-    const name = optionalString(inputs, 'name')?.trim().slice(0, 120) || 'Workflow'
+    const resume = optionalString(inputs, 'resume')?.trim()
+    const runs = savedWorkflowRuns(context.metadata)
+    const saved = resume ? runs[resume] : undefined
+    const earlier = resume ? this.ownedHandles(context).filter(snapshot => snapshot.group?.id === resume) : []
+    if (resume && !saved && !earlier.length) {
+      const known = Object.keys(runs).slice(-10)
+      throw new ValidationError('resume', `no earlier workflow run with this id in this task${known.length ? `; recent runs: ${known.join(', ')}` : ''}`, resume)
+    }
+    const script = optionalString(inputs, 'script') ?? saved?.script
+    if (!script) throw new ValidationError('script', resume ? 'the earlier run saved no script; pass it again' : 'is required', undefined)
+    if (inputs.args === undefined && saved?.args !== undefined) inputs = { ...inputs, args: saved.args }
+    const name = optionalString(inputs, 'name')?.trim().slice(0, 120) || saved?.name || 'Workflow'
     const concurrency = optionalInteger(inputs, 'concurrency', DEFAULT_WORKFLOW_CONCURRENCY)
     if (concurrency < 1 || concurrency > MAX_WORKFLOW_CONCURRENCY) throw new ValidationError('concurrency', `must be between 1 and ${MAX_WORKFLOW_CONCURRENCY}`, concurrency)
     const maxAgents = optionalInteger(inputs, 'max_agents', DEFAULT_WORKFLOW_MAX_AGENTS)
@@ -909,7 +922,17 @@ export class ClaudeAgentTools {
     if (timeoutMinutes !== undefined && (typeof timeoutMinutes !== 'number' || !Number.isFinite(timeoutMinutes) || timeoutMinutes <= 0)) {
       throw new ValidationError('timeout_minutes', 'must be a positive number', timeoutMinutes)
     }
-    const runId = `wf_${crypto.randomUUID().replaceAll('-', '').slice(0, 12)}`
+    const runId = resume ?? `wf_${crypto.randomUUID().replaceAll('-', '').slice(0, 12)}`
+    rememberWorkflowRun(context.metadata, runId, { name, script, ...(inputs.args === undefined ? {} : { args: inputs.args }) })
+    // An earlier run's agents, oldest first, by request: the same call in the
+    // rerun takes its result (finished) or its conversation (interrupted).
+    const prior = new Map<string, SpawnedAgentSnapshot[]>()
+    for (const snapshot of [...earlier].sort((left, right) => left.createdAt.localeCompare(right.createdAt))) {
+      const key = snapshot.group?.key
+      if (key) prior.set(key, [...(prior.get(key) ?? []), snapshot])
+    }
+    let reused = 0
+    let continued = 0
     const live = new Set<string>()
     const spawned = new Set<string>()
     // One manifest refresh for the whole run instead of one timer per agent.
@@ -932,7 +955,24 @@ export class ClaudeAgentTools {
     }
     const port: WorkflowAgentPort = {
       run: async (request, runSignal) => {
-        const snapshot = await this.spawnWhenBudgetAllows(workflowSpec(request, runId, name, this.intelligence), context, runSignal)
+        const key = workflowRequestKey(request)
+        const previous = prior.get(key)?.shift()
+        if (previous?.status === 'completed') {
+          reused += 1
+          return this.priced(workflowOutcome(previous), previous)
+        }
+        if (previous) {
+          try {
+            const resumed = await this.options.manager.sendInput(previous.id, { message: WORKFLOW_RESUME_MESSAGE })
+            continued += 1
+            live.add(resumed.id)
+            spawned.add(resumed.id)
+            return settle(resumed.id, request.timeoutMs ?? WORKFLOW_AGENT_TIMEOUT_MS, runSignal)
+          } catch {
+            // Closed or gone: the request starts over below.
+          }
+        }
+        const snapshot = await this.spawnWhenBudgetAllows(workflowSpec(request, runId, name, this.intelligence, key), context, runSignal)
         live.add(snapshot.id)
         spawned.add(snapshot.id)
         return settle(snapshot.id, request.timeoutMs ?? WORKFLOW_AGENT_TIMEOUT_MS, runSignal)
@@ -961,7 +1001,7 @@ export class ClaudeAgentTools {
         port,
         ...(signal ? { signal } : {}),
       })
-      return workflowWire(runId, result)
+      return { ...workflowWire(runId, result), ...(resume ? { resumed: { reused_results: reused, continued_agents: continued } } : {}) }
     } finally {
       clearInterval(heartbeat)
       this.capture()
@@ -1524,7 +1564,54 @@ function agentSnapshotWire(snapshot: SpawnedAgentSnapshot): Record<string, unkno
 /** A workflow agent without its own timeout gets this long before it is stopped. */
 const WORKFLOW_AGENT_TIMEOUT_MS = 6 * 60 * 60 * 1000
 
-function workflowSpec(request: WorkflowAgentRequest, runId: string, name: string, intelligence: AgentIntelligenceConfig): ClaudeAgentSpec {
+/** What a resumed workflow agent is told: its conversation is intact, the work is not. */
+const WORKFLOW_RESUME_MESSAGE = 'Your previous run of this task stopped before you finished (it failed, timed out or was stopped). Continue from where you left off and complete the task you were given.'
+
+/** Session metadata key holding recent workflow runs' scripts, for resume. */
+const WORKFLOW_RUNS_METADATA_KEY = 'xerxes_workflow_runs_v1'
+/** Runs whose scripts a session keeps; older ones can still resume by passing the script. */
+const MAX_SAVED_WORKFLOW_RUNS = 20
+
+interface SavedWorkflowRun { readonly name: string; readonly script: string; readonly args?: JsonValue }
+
+function savedWorkflowRuns(metadata: Record<string, unknown>): Record<string, SavedWorkflowRun> {
+  const raw = metadata[WORKFLOW_RUNS_METADATA_KEY]
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
+  const runs: Record<string, SavedWorkflowRun> = {}
+  for (const [id, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!value || typeof value !== 'object') continue
+    const run = value as Record<string, unknown>
+    if (typeof run.script !== 'string' || typeof run.name !== 'string') continue
+    runs[id] = { name: run.name, script: run.script, ...(run.args === undefined ? {} : { args: run.args as JsonValue }) }
+  }
+  return runs
+}
+
+function rememberWorkflowRun(metadata: Record<string, unknown>, id: string, run: SavedWorkflowRun): void {
+  const runs = savedWorkflowRuns(metadata)
+  delete runs[id]
+  runs[id] = run
+  const ids = Object.keys(runs)
+  for (const old of ids.slice(0, Math.max(0, ids.length - MAX_SAVED_WORKFLOW_RUNS))) delete runs[old]
+  metadata[WORKFLOW_RUNS_METADATA_KEY] = runs
+}
+
+/** The fingerprint of one agent() call: the same call in a rerun has the same key. */
+export function workflowRequestKey(request: WorkflowAgentRequest): string {
+  const { timeoutMs: _timeout, ...identity } = request
+  return createHash('sha256').update(stableJson(identity)).digest('hex').slice(0, 24)
+}
+
+/** JSON with object keys sorted at every depth, so equal values always serialize alike. */
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().filter(key => (value as Record<string, unknown>)[key] !== undefined).map(key => `${JSON.stringify(key)}:${stableJson((value as Record<string, unknown>)[key])}`).join(',')}}`
+  }
+  return JSON.stringify(value) ?? 'null'
+}
+
+function workflowSpec(request: WorkflowAgentRequest, runId: string, name: string, intelligence: AgentIntelligenceConfig, key = workflowRequestKey(request)): ClaudeAgentSpec {
   const level = request.intelligence === undefined ? undefined : parseAgentIntelligence(request.intelligence)
   if (level && !request.model && !intelligence[level]) {
     throw new ValidationError('intelligence', `tier ${level} is not configured; pass a model instead (list_available_models shows what your providers offer)`, request.intelligence)
@@ -1539,7 +1626,7 @@ function workflowSpec(request: WorkflowAgentRequest, runId: string, name: string
     ...(request.profile ? { providerProfile: request.profile } : {}),
     ...(request.effort ? { reasoningEffort: request.effort } : {}),
     ...(request.isolation ? { isolation: request.isolation } : {}),
-    group: { id: runId, label: name, ...(request.phase ? { phase: request.phase } : {}) },
+    group: { id: runId, label: name, ...(request.phase ? { phase: request.phase } : {}), key },
   }
 }
 

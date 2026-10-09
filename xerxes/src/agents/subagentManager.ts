@@ -342,6 +342,8 @@ export interface SubAgentGroup {
   readonly id: string
   readonly label?: string
   readonly phase?: string
+  /** A workflow agent's request fingerprint, so a resumed run finds the agent it already started. */
+  readonly key?: string
 }
 
 /** Config key holding a task's {@link SubAgentGroup}. */
@@ -356,7 +358,8 @@ export function subagentGroupOf(value: unknown): SubAgentGroup | undefined {
   if (!id) return undefined
   const label = text(record.label, 200)
   const phase = text(record.phase, 200)
-  return Object.freeze({ id, ...(label ? { label } : {}), ...(phase ? { phase } : {}) })
+  const key = text(record.key, 64)
+  return Object.freeze({ id, ...(label ? { label } : {}), ...(phase ? { phase } : {}), ...(key ? { key } : {}) })
 }
 
 export interface SubAgentEvent {

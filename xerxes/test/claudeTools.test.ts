@@ -1570,6 +1570,42 @@ test('Workflow runs its agents through the owned spawn path, tagged by run and p
   expect(saved.map(row => row.title)).toEqual(['Scan a', 'Scan b', 'check'])
 })
 
+test('a Workflow run resumes by id: finished agents keep their results, a failed one continues its own conversation', async () => {
+  let count = 0
+  const inputs: string[] = []
+  const manager = new SpawnedAgentManager({
+    idFactory: () => `wf-resume-${++count}`,
+    runner: async request => {
+      inputs.push(request.input)
+      // The provider drops on this agent's first run; its retry succeeds.
+      if (request.input === 'flaky b' ) throw new Error('Provider stream stalled')
+      return { content: request.input.startsWith('Your previous run') ? 'done:flaky b (continued)' : `done:${request.input}` }
+    },
+  })
+  const registry = new ToolRegistry()
+  registerClaudeAgentTools(registry, { manager })
+  const metadata: Record<string, unknown> = {}
+  const context = { metadata, sessionId: 'session-1', agentId: 'default' }
+  const script = `return await parallel([() => agent('scan a'), () => agent('flaky b')])`
+  const first = JSON.parse(String(await registry.execute(toolCall('Workflow', { name: 'Flaky', script }), context))) as Record<string, any>
+  expect(first.result).toEqual(['done:scan a', null])
+  expect(first.agents).toMatchObject({ started: 2, completed: 1, failed: 1 })
+
+  // Resumed without the script: the saved one runs again.
+  const second = JSON.parse(String(await registry.execute(toolCall('Workflow', { resume: first.workflow_id }), context))) as Record<string, any>
+  expect(second.workflow_id).toBe(first.workflow_id)
+  expect(second.status).toBe('completed')
+  expect(second.result).toEqual(['done:scan a', 'done:flaky b (continued)'])
+  expect(second.resumed).toEqual({ reused_results: 1, continued_agents: 1 })
+  // 'scan a' ran once; the failed agent got a continue message, not a fresh spawn.
+  expect(inputs.filter(input => input === 'scan a')).toHaveLength(1)
+  expect(inputs.at(-1)).toStartWith('Your previous run of this task stopped')
+  expect(count).toBe(2)
+
+  // An unknown run is refused with the runs that exist.
+  await expect(registry.execute(toolCall('Workflow', { resume: 'wf_nope' }), context)).rejects.toThrow(first.workflow_id)
+})
+
 test('finished Workflow agents are not handed to the parent again as new agent results on its next turn', async () => {
   let count = 0
   const manager = new SpawnedAgentManager({
