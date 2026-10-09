@@ -7,6 +7,10 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.46 — 2026-10-09
+
+- Claude Code models call tools natively. Xerxes declares its tools to `claude -p` over a loopback MCP endpoint, so a call is a real tool_use and the API itself ends the reply there. With the text protocol, a reply ended only when the model wrote the block close, and `claude -p` has no stop sequences: one subagent wrote 1,336 calls and 2,673 blank lines in a single 23-minute reply, and two more ran away the same way. Xerxes still runs every tool itself, through its own permissions and policy; Claude Code runs with `--permission-mode dontAsk` and never executes them. If Claude Code cannot reach the endpoint, that request falls back to the text protocol.
+
 ## 0.6.45 — 2026-10-09
 
 - An attached image reaches the model. A detailed render pasted as a 7.6 MB PNG was over the API's 5 MB image limit, and the model saw only a placeholder. An image still over the limit after scaling to 2000px is now sent as a JPEG small enough to fit.
