@@ -352,37 +352,56 @@ test('the inactivity watchdog aborts a stalled stream and the retry starts clean
   expect(classifyError(new StreamInactivityError(25)).retryable).toBe(true)
 })
 
-test('a permanently stalled stream fails the round with a visible timeout error', async () => {
+test('a stalled stream waits for the network past the attempt limit, and recovers when it returns', async () => {
+  // A dropped connection reads as silence: a half-open socket, or Claude Code
+  // retrying the API by itself. Five tries and a failed task was too little;
+  // it now waits like a refused connection does, until the provider answers.
+  class StallsThenAnswers implements LlmClient {
+    calls = 0
+    async *stream(_request: CompletionRequest, signal?: AbortSignal): AsyncGenerator<LlmDelta> {
+      this.calls += 1
+      if (this.calls <= 6) {
+        await new Promise<void>((resolve) => { signal?.addEventListener('abort', () => resolve(), { once: true }) })
+        return
+      }
+      yield { content: 'back online', usage: { inputTokens: 1, outputTokens: 1 } }
+    }
+  }
+  const client = new StallsThenAnswers()
+  const state = createAgentState()
+  const waits: number[] = []
+  const events = await collect(runTurn(
+    { model: 'gpt-4o', state, userMessage: 'keep going' },
+    { llm: client, retryDelays: [10], streamInactivityTimeoutMs: 25, delay: async (ms: number) => { waits.push(ms) } },
+  ))
+  expect(client.calls).toBe(7)
+  const retries = events.filter(event => event.type === 'provider_retry')
+  expect(retries).toHaveLength(6)
+  // Network retries carry no attempt ceiling and back off.
+  expect(retries.every(event => (event as { maxAttempts?: number }).maxAttempts === 0 && !(event as { final?: boolean }).final)).toBe(true)
+  expect(waits).toEqual([1_000, 2_000, 4_000, 8_000, 16_000, 30_000])
+  expect(state.messages.filter(message => message.role === 'assistant')).toEqual([expect.objectContaining({ content: 'back online' })])
+})
+
+test('a stream that stays stalled waits until the person stops the task, without a fabricated error', async () => {
   class AlwaysStalledClient implements LlmClient {
     calls = 0
-
     async *stream(_request: CompletionRequest, signal?: AbortSignal): AsyncGenerator<LlmDelta> {
       this.calls += 1
       yield { content: 'partial ' }
-      await new Promise<void>((resolve) => {
-        signal?.addEventListener('abort', () => resolve(), { once: true })
-      })
+      await new Promise<void>((resolve) => { signal?.addEventListener('abort', () => resolve(), { once: true }) })
     }
   }
-
   const client = new AlwaysStalledClient()
   const state = createAgentState()
+  const stop = new AbortController()
   const events = await collect(runTurn(
     { model: 'gpt-4o', state, userMessage: 'stall forever' },
-    { llm: client, retryDelays: [], streamInactivityTimeoutMs: 25 },
+    { llm: client, retryDelays: [], streamInactivityTimeoutMs: 25, delay: async () => { if (client.calls >= 5) stop.abort() } },
+    stop.signal,
   ))
-
-  expect(client.calls).toBe(1)
-  expect(events.filter(event => event.type === 'provider_retry')).toEqual([
-    expect.objectContaining({ attempt: 1, final: true }),
-  ])
-  const texts = events.filter(event => event.type === 'text').map(event => event.text)
-  expect(texts.at(-1)).toContain('stream inactivity timeout')
-  // Received output survives the terminal timeout; the diagnostic remains an
-  // event rather than fabricated provider history.
-  expect(state.messages.filter(message => message.role === 'assistant')).toEqual([
-    { role: 'assistant', content: 'partial ' },
-  ])
+  expect(client.calls).toBeGreaterThanOrEqual(5)
+  expect(events.filter(event => event.type === 'text').some(event => String(event.text).includes('[Error'))).toBe(false)
   expect(events.at(-1)).toMatchObject({ type: 'turn_done' })
 })
 

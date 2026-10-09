@@ -902,7 +902,13 @@ export function claudeCodeFailure(message: string, status?: number): ProviderErr
   const hint = /invalid (authentication|api key)|failed to authenticate|not logged in|please run \/login|oauth token has expired/i.test(text)
     ? " Run 'claude' in a terminal and sign in with your Claude plan, then retry."
     : ''
-  return new ProviderError(CLAUDE_CODE_PROVIDER, `${text}${hint}`, undefined, status === undefined ? {} : { status })
+  // Claude Code retries a dropped connection itself (ten tries, about three
+  // minutes) and then reports it as text: "API Error: Connection refused …
+  // (ECONNREFUSED)". The code is kept as the cause, so the loop waits for the
+  // network to come back rather than failing the task.
+  const network = status === undefined ? /\b(ECONNREFUSED|ECONNRESET|ECONNABORTED|ENOTFOUND|ETIMEDOUT|EAI_AGAIN|ENETDOWN|ENETUNREACH|EHOSTUNREACH|EPIPE)\b/.exec(text)?.[1] : undefined
+  const cause = network ? Object.assign(new Error(text), { code: network }) : undefined
+  return new ProviderError(CLAUDE_CODE_PROVIDER, `${text}${hint}`, cause, status === undefined ? {} : { status })
 }
 
 /** The `claude` executable: `CLAUDE_CODE_CLI`, then PATH and the installers' locations. */

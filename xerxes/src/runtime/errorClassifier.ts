@@ -288,7 +288,13 @@ export function isRecoverableNetworkError(error: unknown, depth = 0): boolean {
   const details = describeError(error)
   if (details.name === 'AbortError' || details.name === 'ConfigurationError') return false
   if (details.status !== undefined) return false
+  // A stream that went silent is what a dropped network looks like from here:
+  // a half-open connection sends nothing, and Claude Code retrying the API by
+  // itself prints nothing between its attempts. It cost nothing, so it waits
+  // for the network like a refused connection does, instead of failing the
+  // task after five tries.
   return details.name === 'ConnectionError'
+    || details.name === 'StreamInactivityError'
     || (details.code !== undefined && CONNECTION_CODES.has(details.code))
     || isFetchNetworkFailure(error, details.message)
     || /Unable to connect\. Is the computer able to access the url\?/i.test(details.message)

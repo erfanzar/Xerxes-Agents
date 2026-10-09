@@ -12,6 +12,7 @@ import { runtimeConnection } from '../src/daemon/runtimeConnection.js'
 import {
   ClaudeCodeClient,
   claudeCodeArgv,
+  claudeCodeFailure,
   claudeCodeEnvironment,
   claudeCodeModel,
   claudeCodeThinkingOff,
@@ -764,4 +765,14 @@ test('when Claude Code cannot reach the tool server, the request falls back to t
   expect(launches[0]).toContain('--mcp-config')
   expect(launches[1]).not.toContain('--mcp-config')
   expect(prompt).toContain('"name":"read_file"')
+})
+
+test('Claude Code giving up on a dropped connection waits for the network, like any connection failure', async () => {
+  const { isRecoverableNetworkError } = await import('../src/runtime/errorClassifier.js')
+  // What claude -p printed after ten of its own retries with the network down.
+  expect(isRecoverableNetworkError(claudeCodeFailure('API Error: Connection refused — a firewall or proxy may be blocking it (ECONNREFUSED)'))).toBe(true)
+  expect(isRecoverableNetworkError(claudeCodeFailure('API Error: getaddrinfo ENOTFOUND api.anthropic.com'))).toBe(true)
+  // A real answer from the API is not a network failure.
+  expect(isRecoverableNetworkError(claudeCodeFailure('API Error: 500 Internal server error', 500))).toBe(false)
+  expect(isRecoverableNetworkError(claudeCodeFailure('Invalid API key'))).toBe(false)
 })
