@@ -7,6 +7,10 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.45 — 2026-10-09
+
+- An attached image reaches the model. A detailed render pasted as a 7.6 MB PNG was over the API's 5 MB image limit, and the model saw only a placeholder. An image still over the limit after scaling to 2000px is now sent as a JPEG small enough to fit.
+
 ## 0.6.44 — 2026-10-09
 
 - Claude Code keeps its prompt cache. A task with a pasted screenshot fell to a 26% cache hit: every round re-wrote the whole conversation (500K tokens) and read back only the system prompt. Two causes, both measured through `claude -p`:
