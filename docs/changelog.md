@@ -7,6 +7,11 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.47 — 2026-10-10
+
+- A task waits for the network to come back instead of failing. A stalled stream ("no chunk received within 120000ms") got five tries and then failed the agent; it is now treated like a refused connection and retried, 1s, 2s, 4s, 8s, 16s and then every 30s, until the provider answers or you stop the task. A dropped connection reads as silence: a half-open socket, or Claude Code retrying the API by itself.
+- Claude Code giving up on a connection ("API Error: Connection refused … (ECONNREFUSED)", after ten of its own tries) is treated the same way.
+
 ## 0.6.46 — 2026-10-09
 
 - Claude Code models call tools natively. Xerxes declares its tools to `claude -p` over a loopback MCP endpoint, so a call is a real tool_use and the API itself ends the reply there. With the text protocol, a reply ended only when the model wrote the block close, and `claude -p` has no stop sequences: one subagent wrote 1,336 calls and 2,673 blank lines in a single 23-minute reply, and two more ran away the same way. Xerxes still runs every tool itself, through its own permissions and policy; Claude Code runs with `--permission-mode dontAsk` and never executes them. If Claude Code cannot reach the endpoint, that request falls back to the text protocol.
