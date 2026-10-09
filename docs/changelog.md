@@ -7,6 +7,11 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.48 — 2026-10-10
+
+- The agent can resume a workflow run instead of starting it over: `Workflow` with `resume=<workflow_id>`. Agents that finished return their saved results at once, agents that failed, were stopped or timed out continue in their own conversation, and only new work starts new agents. The run's script is saved with the task, so a resume can omit it, or pass an edited one.
+- A failed agent is retried with `SendMessageTool` under the same id, keeping its conversation, including agents from earlier turns or from before a runtime restart; the tool now says so.
+
 ## 0.6.47 — 2026-10-10
 
 - A task waits for the network to come back instead of failing. A stalled stream ("no chunk received within 120000ms") got five tries and then failed the agent; it is now treated like a refused connection and retried, 1s, 2s, 4s, 8s, 16s and then every 30s, until the provider answers or you stop the task. A dropped connection reads as silence: a half-open socket, or Claude Code retrying the API by itself.
