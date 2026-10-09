@@ -1650,14 +1650,20 @@ function PlanReviewCard({
  */
 export const MAX_IMAGE_EDGE = 2000
 
+/**
+ * Largest image the Anthropic API accepts: 5 MB of base64, which is 3.75 MB of
+ * bytes. A pasted 3024px render was 7.6 MB, and the model never saw it.
+ */
+export const MAX_IMAGE_BYTES = 3_750_000
+
 /** `file` at most MAX_IMAGE_EDGE on its longest side; unchanged when it fits or cannot be decoded here. */
 async function fittedImage(file: File): Promise<Blob> {
   if (typeof createImageBitmap !== 'function' || typeof document === 'undefined') return file
   let bitmap: ImageBitmap
   try { bitmap = await createImageBitmap(file) } catch { return file }
   try {
-    const scale = MAX_IMAGE_EDGE / Math.max(bitmap.width, bitmap.height)
-    if (scale >= 1) return file
+    const scale = Math.min(1, MAX_IMAGE_EDGE / Math.max(bitmap.width, bitmap.height))
+    if (scale >= 1 && file.size <= MAX_IMAGE_BYTES) return file
     const canvas = document.createElement('canvas')
     canvas.width = Math.max(1, Math.round(bitmap.width * scale))
     canvas.height = Math.max(1, Math.round(bitmap.height * scale))
@@ -1665,9 +1671,16 @@ async function fittedImage(file: File): Promise<Blob> {
     if (!context) return file
     context.imageSmoothingQuality = 'high'
     context.drawImage(bitmap, 0, 0, canvas.width, canvas.height)
-    // PNG keeps screenshot text sharp; a photo stays a JPEG.
-    const type = file.type === 'image/jpeg' ? 'image/jpeg' : 'image/png'
-    return await new Promise<Blob>(resolve => canvas.toBlob(blob => resolve(blob ?? file), type, 0.92))
+    const encode = (type: string, quality?: number) => new Promise<Blob | null>(resolve => canvas.toBlob(resolve, type, quality))
+    // PNG keeps screenshot text sharp; a photo stays a JPEG. A PNG still over
+    // the API's limit (a detailed render) becomes a JPEG, at falling quality.
+    const first = await encode(file.type === 'image/jpeg' ? 'image/jpeg' : 'image/png', 0.92)
+    if (first && first.size <= MAX_IMAGE_BYTES) return first
+    for (const quality of [0.9, 0.8, 0.7, 0.6]) {
+      const jpeg = await encode('image/jpeg', quality)
+      if (jpeg && jpeg.size <= MAX_IMAGE_BYTES) return jpeg
+    }
+    return first ?? file
   } finally { bitmap.close() }
 }
 

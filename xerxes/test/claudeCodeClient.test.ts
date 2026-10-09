@@ -686,7 +686,7 @@ test('a retry that rephrases the text already shown is not spliced into it mid-w
 test('one step\'s tool results share a block, so a wide step stays inside the cache lookback', () => {
   // The API looks back 20 blocks from a cache marker. One block per result made
   // a 19-call step add 20 blocks, and the next round read no cache at all.
-  const calls = Array.from({ length: 25 }, (_, index) => ({ id: `c${index}`, type: 'function' as const, function: { name: 'ReadFile', arguments: '{}' } }))
+  const calls = Array.from({ length: 25 }, (_, index) => ({ id: `c${index}`, type: 'function' as const, function: { name: 'ReadFile', arguments: {} } }))
   const before = claudeCodeTranscript([{ role: 'user', content: 'go' }])
   const after = claudeCodeTranscript([
     { role: 'user', content: 'go' },
