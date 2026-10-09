@@ -131,11 +131,16 @@ test('a step streams visible text, returns parsed tool calls and the real usage'
     result(),
   ])
   // Read the prompt file while the call is live; it is removed when the call ends.
-  let system = '', promptFile = ''
+  let system = '', promptFile = '', mcpFile = '', declared: unknown
   const launch: typeof fake.launch = (argv, options) => {
     promptFile = argv[argv.indexOf('--system-prompt-file') + 1]!
     system = readFileSync(promptFile, 'utf8')
-    return fake.launch(argv, options)
+    mcpFile = argv[argv.indexOf('--mcp-config') + 1]!
+    const url = JSON.parse(readFileSync(mcpFile, 'utf8')).mcpServers.xerxes.url as string
+    declared = fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }) }).then(response => response.json())
+    // Claude Code lists the tools at start-up, while the request is live.
+    const child = fake.launch(argv, options)
+    return { ...child, lines: (async function* () { await declared; yield* child.lines })() }
   }
   const client = new ClaudeCodeClient({ executable: '/bin/claude', launch, workingDirectory: '/tmp/x', environment: { PATH: '/bin' } })
   const { text, deltas } = await collect(client.stream({ model: 'claude-code/sonnet', tools, messages: [{ role: 'system', content: 'Be Xerxes.' }, { role: 'user', content: 'read a.ts' }] }))
@@ -149,7 +154,12 @@ test('a step streams visible text, returns parsed tool calls and the real usage'
   const call = fake.calls[0]!
   expect(call.cwd).toBe('/tmp/x')
   expect(system.startsWith('Be Xerxes.\n\n# How this conversation works')).toBe(true)
-  expect(system).toContain('"name":"read_file"')
+  // The tools reach Claude Code as native tools, declared over MCP; it may not run them.
+  expect(system).toContain('mcp__xerxes__<name>')
+  expect(call.argv).toContain('--permission-mode')
+  expect(call.argv[call.argv.indexOf('--permission-mode') + 1]).toBe('dontAsk')
+  expect(((await declared) as { result: { tools: Array<{ name: string }> } }).result.tools.map(tool => tool.name)).toEqual(['read_file'])
+  expect(existsSync(mcpFile)).toBe(false)
   // The transcript's last block is a cache entry the next step extends.
   expect(JSON.parse(call.input)).toEqual({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: '<user>\nread a.ts\n</user>', cache_control: { type: 'ephemeral', ttl: '1h' } }] } })
   expect(fake.killed()).toBe(1)
@@ -699,4 +709,59 @@ test('one step\'s tool results share a block, so a wide step stays inside the ca
   const results = after[before.length + 1]!
   expect(results.type === 'text' && results.text.match(/<tool_result /g)?.length).toBe(25)
   expect(results.type === 'text' && results.text).toContain('<tool_result name="ReadFile" id="c24">\nresult c24\n</tool_result>')
+})
+
+
+test('a native tool call ends the reply at its tool_use, before Claude Code refuses it and asks again', async () => {
+  // Claude Code has no stop sequences: a text-protocol reply that never closed
+  // its block ran on to the output limit (1,336 calls in one reply). Native
+  // calls end where the API ends them.
+  const fake = fakeLauncher([
+    JSON.stringify({ type: 'system', subtype: 'init', mcp_servers: [{ name: 'xerxes', status: 'connected' }] }),
+    streamEvent({ type: 'message_start', message: { usage: { input_tokens: 10, output_tokens: 1 } } }),
+    streamEvent({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }),
+    streamEvent({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Reading both.' } }),
+    streamEvent({ type: 'content_block_stop', index: 0 }),
+    streamEvent({ type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 'toolu_1', name: 'mcp__xerxes__read_file', input: {} } }),
+    streamEvent({ type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '{"path": "a' } }),
+    streamEvent({ type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '.ts"}' } }),
+    streamEvent({ type: 'content_block_stop', index: 1 }),
+    streamEvent({ type: 'content_block_start', index: 2, content_block: { type: 'tool_use', id: 'toolu_2', name: 'mcp__xerxes__read_file', input: {} } }),
+    streamEvent({ type: 'content_block_delta', index: 2, delta: { type: 'input_json_delta', partial_json: '{"path": "b.ts"}' } }),
+    streamEvent({ type: 'content_block_stop', index: 2 }),
+    streamEvent({ type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 40 } }),
+    // What Claude Code does next must never be read: its refusal and a new reply.
+    JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', content: 'Permission denied' }] } }),
+    streamEvent({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Both reads were denied.' } }),
+  ])
+  const client = new ClaudeCodeClient({ executable: '/bin/claude', launch: fake.launch, workingDirectory: '/tmp', environment: {} })
+  const { text, deltas } = await collect(client.stream({ model: 'claude-code/opus', tools, messages: [{ role: 'user', content: 'read a and b' }] }))
+  expect(text).toBe('Reading both.')
+  // The reply's output is counted although it was cut off before Claude Code's result.
+  expect(deltas.find(delta => delta.usage)?.usage).toMatchObject({ inputTokens: 10, outputTokens: 40 })
+  const last = deltas.at(-1)!
+  expect(last.finishReason).toBe('tool_calls')
+  expect(last.toolCalls).toEqual([
+    { id: 'toolu_1', type: 'function', function: { name: 'read_file', arguments: { path: 'a.ts' } } },
+    { id: 'toolu_2', type: 'function', function: { name: 'read_file', arguments: { path: 'b.ts' } } },
+  ])
+  expect(fake.killed()).toBeGreaterThan(0)
+})
+
+test('when Claude Code cannot reach the tool server, the request falls back to the text protocol', async () => {
+  const launches: string[][] = []
+  let prompt = ''
+  const failing = fakeLauncher([JSON.stringify({ type: 'system', subtype: 'init', mcp_servers: [{ name: 'xerxes', status: 'failed' }] })])
+  const working = fakeLauncher(['{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"plain answer"}}}', JSON.stringify({ type: 'result', usage: { input_tokens: 1, output_tokens: 1 } })])
+  const launch: typeof failing.launch = (argv, options) => {
+    launches.push([...argv])
+    prompt = readFileSync(argv[argv.indexOf('--system-prompt-file') + 1]!, 'utf8')
+    return launches.length === 1 ? failing.launch(argv, options) : working.launch(argv, options)
+  }
+  const client = new ClaudeCodeClient({ executable: '/bin/claude', launch, workingDirectory: '/tmp', environment: {} })
+  const { text } = await collect(client.stream({ model: 'claude-code/opus', tools, messages: [{ role: 'user', content: 'hi' }] }))
+  expect(text).toBe('plain answer')
+  expect(launches[0]).toContain('--mcp-config')
+  expect(launches[1]).not.toContain('--mcp-config')
+  expect(prompt).toContain('"name":"read_file"')
 })
