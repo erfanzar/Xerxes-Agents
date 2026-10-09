@@ -7,6 +7,12 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.44 — 2026-10-09
+
+- Claude Code keeps its prompt cache. A task with a pasted screenshot fell to a 26% cache hit: every round re-wrote the whole conversation (500K tokens) and read back only the system prompt. Two causes, both measured through `claude -p`:
+  - Claude Code resizes an image wider than 2000px itself, and a resized image stops the cache from extending. Pasted and dropped images are now scaled to 2000px on their longest side before they are attached; the API scales them to 1568px anyway.
+  - The API looks back only 20 blocks from a cache marker. Each tool result was its own block, so a step with 19 or more calls re-wrote everything on the next round. One step's results now share a block.
+
 ## 0.6.43 — 2026-10-09
 
 - An attached image shows whole above your message, at a readable size, instead of as a small cropped thumbnail inside the bubble.
