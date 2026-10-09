@@ -166,16 +166,28 @@ const escapeAttribute = (value: string) => value.replace(/[&"<>]/g, char => ({ '
 /**
  * The transcript as content blocks, one per message. Earlier blocks never
  * change as the conversation grows, which is what lets the prompt cache hit.
+ *
+ * One step's tool results share a block. The API looks back only 20 blocks
+ * from a cache marker for an earlier entry; a step that ran 19 calls added 20
+ * blocks, the lookback found nothing and the next round re-wrote the whole
+ * conversation. Measured through `claude -p`: +3 blocks read the cache,
+ * +26 read none.
  */
 export function claudeCodeTranscript(messages: readonly ChatMessage[]): InputBlock[] {
   const blocks: InputBlock[] = []
+  let results: string[] = []
+  const flushResults = (): void => {
+    if (results.length) blocks.push({ type: 'text', text: results.join('\n') })
+    results = []
+  }
   for (const message of messages) {
     if (message.role === 'system') continue
     if (message.role === 'tool') {
       const name = message.name ? ` name="${escapeAttribute(message.name)}"` : ''
-      blocks.push({ type: 'text', text: `<tool_result${name} id="${escapeAttribute(message.tool_call_id)}"${message.is_error ? ' error="true"' : ''}>\n${neutralizeRoleTags(String(message.content))}\n</tool_result>` })
+      results.push(`<tool_result${name} id="${escapeAttribute(message.tool_call_id)}"${message.is_error ? ' error="true"' : ''}>\n${neutralizeRoleTags(String(message.content))}\n</tool_result>`)
       continue
     }
+    flushResults()
     if (message.role === 'assistant') {
       const body = [neutralizeReminderTags(neutralizeRoleTags(withoutInventedStatus(messageText(message)).trim())), toolCallMarkup(message.tool_calls ?? [])].filter(Boolean).join('\n')
       blocks.push({ type: 'text', text: `<assistant>\n${body}\n</assistant>` })
@@ -188,6 +200,7 @@ export function claudeCodeTranscript(messages: readonly ChatMessage[]): InputBlo
       if (block) blocks.push(block)
     }
   }
+  flushResults()
   if (!blocks.length) blocks.push({ type: 'text', text: '<user>\n\n</user>' })
   return blocks
 }

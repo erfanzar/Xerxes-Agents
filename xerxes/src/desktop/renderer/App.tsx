@@ -1641,15 +1641,46 @@ function PlanReviewCard({
 
 // ── Composer ────────────────────────────────────────────────────────────
 
+/**
+ * Longest side an attached image keeps. Claude Code resizes anything larger
+ * itself, and a resized image stops its prompt cache from extending: every
+ * later round of the task re-wrote the whole conversation (measured: a
+ * 2400px image read no cache, 2000px read all of it). The API scales images
+ * to 1568px anyway, so nothing visible is lost.
+ */
+export const MAX_IMAGE_EDGE = 2000
+
+/** `file` at most MAX_IMAGE_EDGE on its longest side; unchanged when it fits or cannot be decoded here. */
+async function fittedImage(file: File): Promise<Blob> {
+  if (typeof createImageBitmap !== 'function' || typeof document === 'undefined') return file
+  let bitmap: ImageBitmap
+  try { bitmap = await createImageBitmap(file) } catch { return file }
+  try {
+    const scale = MAX_IMAGE_EDGE / Math.max(bitmap.width, bitmap.height)
+    if (scale >= 1) return file
+    const canvas = document.createElement('canvas')
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale))
+    canvas.height = Math.max(1, Math.round(bitmap.height * scale))
+    const context = canvas.getContext('2d')
+    if (!context) return file
+    context.imageSmoothingQuality = 'high'
+    context.drawImage(bitmap, 0, 0, canvas.width, canvas.height)
+    // PNG keeps screenshot text sharp; a photo stays a JPEG.
+    const type = file.type === 'image/jpeg' ? 'image/jpeg' : 'image/png'
+    return await new Promise<Blob>(resolve => canvas.toBlob(blob => resolve(blob ?? file), type, 0.92))
+  } finally { bitmap.close() }
+}
+
 /** Image files from a paste or drop, read as base64 for `turn.submit`. */
 export async function composerImages(files: Iterable<File>): Promise<ComposerImage[]> {
   const images: ComposerImage[] = []
   for (const file of files) {
     if (!file.type.startsWith('image/')) continue
-    const bytes = new Uint8Array(await file.arrayBuffer())
+    const fitted = await fittedImage(file)
+    const bytes = new Uint8Array(await fitted.arrayBuffer())
     let binary = ''
     for (let offset = 0; offset < bytes.length; offset += 0x8000) binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000))
-    images.push({ id: crypto.randomUUID(), mediaType: file.type, data: btoa(binary), name: file.name || 'Pasted image' })
+    images.push({ id: crypto.randomUUID(), mediaType: fitted.type || file.type, data: btoa(binary), name: file.name || 'Pasted image' })
   }
   return images
 }

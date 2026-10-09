@@ -682,3 +682,21 @@ test('a retry that rephrases the text already shown is not spliced into it mid-w
   ])
   expect((await collect(new ClaudeCodeClient({ executable: '/bin/claude', launch: extending.launch, workingDirectory: '/tmp' }).stream({ model: 'claude-code/sonnet', messages: [{ role: 'user', content: 'go' }] }))).text).toBe('Checking the diff.')
 })
+
+test('one step\'s tool results share a block, so a wide step stays inside the cache lookback', () => {
+  // The API looks back 20 blocks from a cache marker. One block per result made
+  // a 19-call step add 20 blocks, and the next round read no cache at all.
+  const calls = Array.from({ length: 25 }, (_, index) => ({ id: `c${index}`, type: 'function' as const, function: { name: 'ReadFile', arguments: '{}' } }))
+  const before = claudeCodeTranscript([{ role: 'user', content: 'go' }])
+  const after = claudeCodeTranscript([
+    { role: 'user', content: 'go' },
+    { role: 'assistant', content: '', tool_calls: calls },
+    ...calls.map(call => ({ role: 'tool' as const, tool_call_id: call.id, name: 'ReadFile', content: `result ${call.id}` })),
+    { role: 'assistant', content: 'done' },
+  ])
+  expect(after.slice(0, before.length)).toEqual(before)
+  expect(after.length - before.length).toBe(3)
+  const results = after[before.length + 1]!
+  expect(results.type === 'text' && results.text.match(/<tool_result /g)?.length).toBe(25)
+  expect(results.type === 'text' && results.text).toContain('<tool_result name="ReadFile" id="c24">\nresult c24\n</tool_result>')
+})
