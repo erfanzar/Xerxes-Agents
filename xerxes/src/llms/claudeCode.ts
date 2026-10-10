@@ -27,6 +27,7 @@ import { parseStreamingJson } from '@earendil-works/pi-ai'
 
 import { claudeCodeLogin, claudeExecutable } from '../auth/claudeCodeLogin.js'
 import { ConfigurationError, ProviderError } from '../core/errors.js'
+import { fitImage } from '../core/imageFit.js'
 import { xerxesHome } from '../daemon/paths.js'
 import { ensureClaudeCode } from '../runtime/companionInstall.js'
 import type { ChatMessage, ContentPart } from '../types/messages.js'
@@ -171,7 +172,12 @@ export function withTranscriptCacheMark(blocks: readonly InputBlock[]): InputBlo
 function imageBlock(part: Extract<ContentPart, { type: 'image_url' }>): InputBlock | undefined {
   const url = part.image_url.url
   const data = /^data:([^;,]+);base64,(.*)$/s.exec(url)
-  if (data) return { type: 'image', source: { type: 'base64', media_type: data[1]!, data: data[2]! } }
+  // Scaled here, deterministically: an image Claude Code resizes itself stops
+  // the prompt cache from extending, and one over 5 MB is refused.
+  if (data) {
+    const image = fitImage({ mediaType: data[1]!, data: data[2]! })
+    return { type: 'image', source: { type: 'base64', media_type: image.mediaType, data: image.data } }
+  }
   return /^https?:\/\//.test(url) ? { type: 'image', source: { type: 'url', url } } : undefined
 }
 
