@@ -7,6 +7,10 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.49 — 2026-10-10
+
+- Claude Code keeps its prompt cache in a task that already holds large screenshots. Images pasted before 0.6.44 (3600px, and one 7.6 MB) were resized by Claude Code on every request, and a task re-wrote its whole 680K conversation each round (3% cache hit). The adapter now scales any image over 2000px or the API's size limit itself, the same bytes every time, so the cache extends from round to round. It uses pure-JavaScript decoders (fast-png, jpeg-js), the same on every host.
+
 ## 0.6.48 — 2026-10-10
 
 - The agent can resume a workflow run instead of starting it over: `Workflow` with `resume=<workflow_id>`. Agents that finished return their saved results at once, agents that failed, were stopped or timed out continue in their own conversation, and only new work starts new agents. The run's script is saved with the task, so a resume can omit it, or pass an edited one.
