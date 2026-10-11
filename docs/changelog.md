@@ -7,6 +7,10 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.50 — 2026-10-11
+
+- An agent title longer than 48 characters is shortened instead of refusing the spawn. A title is a label, but the schema rejected it, and one long title in a `SpawnAgents` batch failed all six agents in it ("agents[3].title: must be at most 48 characters").
+
 ## 0.6.49 — 2026-10-10
 
 - Claude Code keeps its prompt cache in a task that already holds large screenshots. Images pasted before 0.6.44 (3600px, and one 7.6 MB) were resized by Claude Code on every request, and a task re-wrote its whole 680K conversation each round (3% cache hit). The adapter now scales any image over 2000px or the API's size limit itself, the same bytes every time, so the cache extends from round to round. It uses pure-JavaScript decoders (fast-png, jpeg-js), the same on every host.
