@@ -482,9 +482,10 @@ export function normalizeAgentTitle(value: string, field = 'title'): string {
   if (/[\p{Cc}\p{Cf}]/u.test(normalized)) {
     throw new ValidationError(field, 'must not contain control or formatting characters', value)
   }
-  if ([...normalized].length > MAX_AGENT_TITLE_LENGTH) {
-    throw new ValidationError(field, `must be at most ${MAX_AGENT_TITLE_LENGTH} characters`, value)
-  }
+  // A title is a label. A long one is shortened, never a reason to refuse:
+  // one over-long title in a SpawnAgents batch failed all six agents in it.
+  const characters = [...normalized]
+  if (characters.length > MAX_AGENT_TITLE_LENGTH) return characters.slice(0, MAX_AGENT_TITLE_LENGTH - 1).join('').trimEnd() + '…'
   return normalized
 }
 

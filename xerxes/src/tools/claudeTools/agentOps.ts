@@ -1229,7 +1229,7 @@ function stringSchema(description: string): Record<string, unknown> {
 }
 
 function titleSchema(description: string): Record<string, unknown> {
-  return { type: 'string', description, minLength: 1, maxLength: MAX_AGENT_TITLE_LENGTH }
+  return { type: 'string', description: `${description} A few words; one longer than ${MAX_AGENT_TITLE_LENGTH} characters is shortened.`, minLength: 1 }
 }
 
 function booleanSchema(description: string, defaultValue?: boolean): Record<string, unknown> {

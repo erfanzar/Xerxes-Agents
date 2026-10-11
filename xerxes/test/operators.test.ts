@@ -82,7 +82,7 @@ test('spawned agents execute queued input sequentially and expose a stable lifec
   })
 })
 
-test('spawned-agent titles normalize to one concise line and reject oversized input', async () => {
+test('spawned-agent titles normalize to one concise line and shorten oversized input', async () => {
   let nextId = 0
   const seenTitles: Array<string | undefined> = []
   const manager = new SpawnedAgentManager({
@@ -98,10 +98,12 @@ test('spawned-agent titles normalize to one concise line and reject oversized in
   expect(spawned.title).toBe('Inspect runtime')
   expect(seenTitles).toEqual(['Inspect runtime'])
 
-  await expect(manager.spawn({
-    message: 'too long',
-    title: 'x'.repeat(MAX_AGENT_TITLE_LENGTH + 1),
-  })).rejects.toBeInstanceOf(ValidationError)
+  // A title is a label: a long one is shortened, never a reason to refuse the agent.
+  const long = await manager.spawn({ message: 'too long', title: 'Design: fold DeepSeek DSpark into modules/dspark and route attention' })
+  await manager.wait([long.id], 1_000)
+  expect([...long.title]).toHaveLength(MAX_AGENT_TITLE_LENGTH)
+  expect(long.title).toEndWith('…')
+  expect(long.title).toStartWith('Design: fold DeepSeek DSpark')
 })
 
 // `sh` is a POSIX shell; Windows CI and workstations have no sh to spawn.

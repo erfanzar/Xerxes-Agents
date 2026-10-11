@@ -318,7 +318,9 @@ test('agent creation schemas accept description for single delegation and requir
   expect(properties.description?.type).toBe('string')
   expect(properties.resume?.type).toBe('string')
   expect(required('TaskCreateTool')).toContain('title')
-  expect(properties.title?.maxLength).toBe(48)
+  // No hard ceiling: one long title once failed a whole batch; it is shortened instead.
+  expect(properties.title?.maxLength).toBeUndefined()
+  expect(String(properties.title?.description)).toContain('shortened')
   expect(spawnProperties.agents?.type).toBe('array')
   expect(spawnProperties.agents?.minItems).toBe(1)
   expect(spawnProperties.agents?.maxItems).toBe(32)
