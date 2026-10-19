@@ -1753,8 +1753,14 @@ function InfoOverlay({ kind }: { kind: 'pluginsHub' | 'skillsHub' }) {
   ] : [
     ['Inspect', '/plugins', 'See installed native tools and their status.'],
     ['Create', '/plugin-creator', 'Build a tool plugin with tests and usage examples.'],
-    ['Install', '/plugins install <local-module.ts>', 'Enable a reviewed local module. Keep its source in place.'],
+    ['Install', '/plugins install <local-module.ts>', 'Enable a reviewed local module. It runs in its own process (not a sandbox).'],
+    ['From git', '/plugins install <git-url>', 'Clone and preview files, permissions and README; nothing runs until /plugins install --confirm <token>.'],
     ['Manage', '/plugins enable <name> · disable <name>', 'Choose which installed plugins are available.'],
+    ['Update', '/plugins reload <name>', 'Load edited plugin code in a fresh plugin process without restarting Xerxes.'],
+    ['Project', '/plugins trust <name>', 'Trust .xerxes/plugins/<name>/ in this workspace; editing it withdraws trust.'],
+    ['Secrets', '/plugins secret list <name>', 'See which declared secrets are set. Set values in a terminal: xerxes plugins secret set <plugin> <NAME>.'],
+    ['Share', '/plugins export <name> <new-directory>', 'Copy the plugin source and tests; secrets are never exported.'],
+    ['Remove', '/plugins uninstall <name>', 'Drop a plugin from Xerxes; its source files stay where they are.'],
   ]
   return <box alignItems="center" backgroundColor="#000000cc" height="100%" justifyContent="center" left={0} position="absolute" top={0} width="100%" zIndex={180}>
     <Box backgroundColor={t.color.overlayBg} borderStyle="round" borderColor={t.color.border} flexDirection="column" paddingX={2} width={overlayPanelWidth(width, OVERLAY_PANEL_SPECS.info)} height={Math.min(height - 2, skills ? 31 : 37)}>

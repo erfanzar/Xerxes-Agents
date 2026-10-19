@@ -245,7 +245,7 @@ const NATIVE_UNSUPPORTED_RPC_GUIDANCE: Readonly<Record<string, string>> = Object
   'delegation.status': 'Native subagent delegation status is not configured in this daemon.',
   'model.disconnect': 'Use the native /provider flow to change or remove a provider profile.',
   'model.save_key': 'Use the native /provider flow to save provider credentials.',
-  'plugins.manage': 'Use /plugins to inspect, install, enable or disable native plugins when the host supports management.',
+  'plugins.manage': 'Use /plugins to inspect, install, enable, disable, reload or uninstall native plugins when the host supports management.',
   'process.stop': 'Use /runs or /terminals to inspect and cancel background work; /stop cancels the active turn.',
   'reload.env': 'Restart the Bun daemon after changing environment values; live .env reload is unavailable.',
   'reload.mcp': 'Use /reload-mcp for native MCP reload, or /config mcp to edit server settings.',
@@ -513,7 +513,7 @@ export class GatewayClient extends EventEmitter {
     if (!process.env.XERXES_DAEMON_SOCKET) {
       const legacy = legacyProjectDaemonPaths(this.projectDir)
       if ((process.platform === 'win32' || existsSync(legacy.socketPath)) && await this.tryConnect(legacy.socketPath)) {
-        if (!await releaseIdleProjectDaemon(method => this.rawRequest<Record<string, unknown>>(method, {}, 5000))) {
+        if (!await releaseIdleProjectDaemon((method, params) => this.rawRequest<Record<string, unknown>>(method, params ?? {}, 5000))) {
           this.emitClient('gateway.ready', { socketPath: legacy.socketPath, spawned: false })
           return
         }
@@ -670,7 +670,7 @@ export class GatewayClient extends EventEmitter {
       )
     }
 
-    const restart = await this.rawRequest<Record<string, unknown>>('runtime.restart_if_idle', {})
+    const restart = await this.rawRequest<Record<string, unknown>>('runtime.restart_if_idle', { requested_by: `Xerxes TUI with build ${expectedBuildId.slice(0, 12)} (daemon had ${actualBuildId.slice(0, 12) || 'unknown'})` })
     await this.detachSocketSilently()
     if (restart.ok !== true) throw new Error(mismatch + '. The shared runtime is busy or cannot restart safely; existing work was left running.')
     const deadline = Date.now() + 5000

@@ -124,6 +124,8 @@ import { nativeFileMonitorSource } from "./runtime/fileMonitorSource.js";
 import { daemonMonitorWebhookHub } from "./daemon/monitorWebhooks.js";
 import { nativeWebSocketMonitorSource } from "./runtime/websocketMonitorSource.js";
 import { addMcpToolsToBuiltinAgents, registerMcpTools } from "./tools/mcpTools.js";
+import { addPluginToolsToBuiltinAgents, toolListAdmits } from "./agents/toolPatterns.js";
+import { registerPluginManageTool } from "./tools/pluginManage.js";
 import { MCPManager } from "./mcp/manager.js";
 import { EditFeedback } from "./runtime/editFeedback.js";
 import { LspSettingsStore } from "./lsp/settingsStore.js";
@@ -284,6 +286,7 @@ const NON_ONESHOT_COMMANDS: ReadonlySet<string> = new Set([
   "auth",
   "doctor",
   "usage",
+  "plugins",
   "install",
   "update",
   "export",
@@ -424,6 +427,13 @@ if (argument === "--help" || argument === "-h") {
     printDoctorReport(report);
   }
   process.exit(hasDoctorFailures(report) ? 1 : 0);
+} else if (argument === "plugins") {
+  const { runPluginSecretCli, readHiddenLine } = await import("./extensions/pluginSecretCli.js");
+  process.exit(await runPluginSecretCli(argumentsAfterCommand, xerxesHome(), {
+    readSecret: readHiddenLine,
+    print: line => console.log(line),
+    error: line => console.error(line),
+  }));
 } else if (argument === "usage") {
   const json = argumentsAfterCommand.includes("--json");
   const provider = argumentsAfterCommand.find((value) => !value.startsWith("-"));
@@ -1880,6 +1890,15 @@ function daemonRuntime(
       }),
     });
     host.managedPlugins?.registerTools(tools);
+    if (host.managedPlugins) {
+      registerPluginManageTool(tools, host.managedPlugins, () => getActiveSession<{ cwd: string }>()?.cwd ?? workspaceRoot);
+      // Trusted `.xerxes/plugins/<name>/` modules of this workspace only. The
+      // scan runs in the background and publishes into this registry when done.
+      host.managedPlugins.project.registerTools(tools, workspaceRoot);
+      void host.managedPlugins.project.refresh(workspaceRoot).catch(error => {
+        console.error(`Project plugins in ${workspaceRoot} were not loaded: ${errorMessage(error)}`);
+      });
+    }
     const computerUseTool = createMacOSComputerUseToolOptions({
       ...config.runtime,
       ...settings,
@@ -1986,6 +2005,9 @@ function daemonRuntime(
     addMcpToolsToBuiltinAgents(agentDefinitions, mcpTools);
     addLspToolToBuiltinAgents(agentDefinitions, lspManager);
     if (host.modelInventory) addModelInventoryToBuiltinAgents(agentDefinitions);
+    // Installed plugin tools (plugin_*) reach the shipped full-access agents;
+    // the main-session profiles may also manage plugins, with approval.
+    addPluginToolsToBuiltinAgents(agentDefinitions, { manage: host.managedPlugins !== undefined });
     const llm = nativeConnection ? createLlmClient(connection.model, {
       ...(connection.apiKey ? { api_key: connection.apiKey } : {}),
       ...(connection.baseUrl ? { base_url: connection.baseUrl } : {}),
@@ -2056,6 +2078,7 @@ function daemonRuntime(
       ...(connection.topK === undefined ? {} : { topK: connection.topK }),
       toolExecutor: tools,
       tools: tools.definitions(),
+      currentTools: () => tools.definitions(),
       ...(connection.topP === undefined ? {} : { topP: connection.topP }),
       transcriptStore,
       disposeProcessOwner: processLifecycle.disposeOwner,
@@ -2997,8 +3020,8 @@ function agentToolDefinitions(
     const name = definition.function.name;
     return (
       !excluded.has(name) &&
-      (!allowed || allowed.has(name)) &&
-      (listed.size === 0 || listed.has(name))
+      (!allowed || toolListAdmits(allowed, name)) &&
+      (listed.size === 0 || toolListAdmits(listed, name))
     );
   });
 }

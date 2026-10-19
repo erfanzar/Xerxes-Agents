@@ -79,8 +79,15 @@ export {
   unregisterSlash,
   type SlashHandler,
   type SlashPlugin,
+  type SlashPluginContext,
   type SlashPluginOptions,
 } from './extensions/slashPlugins.js'
+export {
+  MANAGED_PLUGIN_ACTIONS,
+  ManagedPlugins,
+  type ManagedPluginAction,
+  type ManagedPluginInventoryEntry,
+} from './extensions/managedPlugins.js'
 export * as SkillAuthoring from './extensions/skillAuthoring.js'
 export * from './extensions/skills.js'
 export * from './extensions/skillsGuard.js'

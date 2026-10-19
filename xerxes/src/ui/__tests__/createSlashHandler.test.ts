@@ -239,6 +239,8 @@ describe('createSlashHandler', () => {
     ['/plugins install /tmp/module.ts', 'plugins install /tmp/module.ts'],
     ['/plugins enable fixture', 'plugins enable fixture'],
     ['/plugins disable fixture', 'plugins disable fixture'],
+    ['/plugins reload fixture', 'plugins reload fixture'],
+    ['/plugins uninstall fixture', 'plugins uninstall fixture'],
     ['/skills search review', 'skills search review'],
     ['/skills install /tmp/skill', 'skills install /tmp/skill'],
     ['/tools list', 'tools'],

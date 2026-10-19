@@ -8,6 +8,7 @@ import { join } from 'node:path'
 import { ManagedPlugins } from '../src/extensions/managedPlugins.js'
 import { installLocalSkill } from '../src/extensions/localSkillInstall.js'
 import { ToolRegistry } from '../src/executors/toolRegistry.js'
+import { SlashPluginRegistry } from '../src/extensions/slashPlugins.js'
 
 test('installed native tool modules execute, disable immediately, and retain settings across restart', async () => {
   const root = await mkdtemp(join(tmpdir(), 'managed-plugins-'))
@@ -21,7 +22,9 @@ test('installed native tool modules execute, disable immediately, and retain set
     const call = { id: '1', type: 'function' as const, function: { name: 'plugin_fixture_echo', arguments: { args: ['hello', 'world'] } } }
     expect(await tools.execute(call, { metadata: {} })).toBe('hello world')
     await manager.change('disable', 'fixture')
-    await expect(tools.execute(call, { metadata: {} })).rejects.toThrow('disabled')
+    // Disabling withdraws the tool from every registry this manager filled.
+    await expect(tools.execute(call, { metadata: {} })).rejects.toThrow('not registered')
+    expect(tools.definitions().map(definition => definition.function.name)).not.toContain('plugin_fixture_echo')
     const restarted = new ManagedPlugins(join(root, 'settings.json'))
     await restarted.load()
     expect(restarted.inventory()[0]).toMatchObject({ name: 'fixture', enabled: false })
@@ -78,7 +81,111 @@ test('plugin mutations serialize across managers and repeated loads do not dupli
     await first.load()
     expect(first.inventory().find(item => item.name === 'one')?.enabled).toBe(false)
     await writeFile(join(root, 'one.ts'), `export function register(r) { r.registerTool('one', () => 'changed', {name: 'one'}); }`)
-    await expect(first.change('enable', 'one')).rejects.toThrow('Restart Xerxes')
+    // Enabling an edited module loads the code now on disk; no restart needed.
+    await expect(first.change('enable', 'one')).resolves.toContain('current code')
+    expect(await tools.execute({ id: 'call', type: 'function', function: { name: 'plugin_one', arguments: { args: [] } } }, { metadata: {} })).toBe('changed')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('structured plugin tools reach the model with their own schema and receive the turn signal', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'managed-plugin-schema-'))
+  try {
+    const path = join(root, 'weather.ts')
+    await writeFile(path, `export function register(r) {
+      r.registerPlugin({ name: 'weather', description: 'Weather helpers' })
+      r.registerTool('forecast', {
+        description: 'Forecast for a city',
+        parameters: { type: 'object', properties: { city: { type: 'string' } }, required: ['city'] },
+        execute: (input, context) => ({ city: input.city, aborted: context.signal?.aborted ?? null }),
+      }, undefined, 'weather')
+      r.registerTool('legacy', (...args) => args.length, undefined, 'weather')
+    }`)
+    const manager = new ManagedPlugins(join(root, 'plugins.json'))
+    await manager.change('install', path)
+    const tools = new ToolRegistry()
+    manager.registerTools(tools)
+    const definitions = Object.fromEntries(tools.definitions().map(definition => [definition.function.name, definition.function]))
+    expect(definitions.plugin_forecast?.description).toContain('Forecast for a city')
+    expect(definitions.plugin_forecast?.parameters).toEqual({ type: 'object', properties: { city: { type: 'string' } }, required: ['city'] })
+    expect(definitions.plugin_legacy?.description).toContain('Weather helpers')
+    expect(definitions.plugin_legacy?.parameters).toMatchObject({ required: ['args'] })
+    const controller = new AbortController()
+    const result = await tools.execute({ id: '1', type: 'function', function: { name: 'plugin_forecast', arguments: { city: 'Paris' } } }, { metadata: {} }, controller.signal)
+    expect(JSON.parse(result)).toEqual({ city: 'Paris', aborted: false })
+    expect(manager.inventory()[0]?.toolDescriptions).toEqual({ forecast: 'Forecast for a city' })
+    await writeFile(join(root, 'bad.ts'), `export function register(r) { r.registerTool('broken', { description: 'x', parameters: { type: 'array' }, execute: () => 1 }, { name: 'bad' }) }`)
+    await expect(manager.change('install', join(root, 'bad.ts'))).rejects.toThrow('type "object"')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('reload runs edited code, including edited helpers, and a failed reload keeps the working version', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'managed-plugin-reload-'))
+  try {
+    const path = join(root, 'index.ts')
+    const helper = join(root, 'helper.ts')
+    await writeFile(helper, `export const word = 'first'`)
+    await writeFile(path, `import { word } from './helper.ts'\nexport function register(r) { r.registerTool('word', () => word, {name: 'words'}); }`)
+    const manager = new ManagedPlugins(join(root, 'plugins.json'))
+    await manager.change('install', path)
+    const tools = new ToolRegistry()
+    manager.registerTools(tools)
+    const call = () => tools.execute({ id: '1', type: 'function', function: { name: 'plugin_word', arguments: { args: [] } } }, { metadata: {} })
+    expect(await call()).toBe('first')
+    await writeFile(helper, `export const word = 'second'`)
+    await manager.load()
+    expect(manager.inventory()[0]?.stale).toBeFalsy()
+    await writeFile(path, `import { word } from './helper.ts'\nexport function register(r) { r.registerTool('word', () => word + '!', {name: 'words'}); }`)
+    await manager.load()
+    expect(manager.inventory()[0]?.stale).toBe(true)
+    await expect(manager.change('reload', 'words')).resolves.toContain('Reloaded')
+    expect(await call()).toBe('second!')
+    await writeFile(path, `throw new Error('syntax trouble')`)
+    await expect(manager.change('reload', 'words')).rejects.toThrow('syntax trouble')
+    expect(await call()).toBe('second!')
+    expect(manager.inventory()[0]).toMatchObject({ name: 'words', enabled: true })
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('uninstall removes the manifest entry and refuses live calls but leaves the module file', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'managed-plugin-uninstall-'))
+  try {
+    const path = join(root, 'gone.ts')
+    await writeFile(path, `export function register(r) { r.registerTool('gone', () => 'here', {name: 'gone'}); }`)
+    const manifest = join(root, 'plugins.json')
+    const manager = new ManagedPlugins(manifest)
+    await manager.change('install', path)
+    const tools = new ToolRegistry()
+    manager.registerTools(tools)
+    await expect(manager.change('uninstall', 'gone')).resolves.toContain('Uninstalled')
+    await expect(tools.execute({ id: '1', type: 'function', function: { name: 'plugin_gone', arguments: { args: [] } } }, { metadata: {} })).rejects.toThrow('not registered')
+    expect(tools.definitions().map(definition => definition.function.name)).not.toContain('plugin_gone')
+    expect(manager.inventory()).toEqual([])
+    expect(JSON.parse(await readFile(manifest, 'utf8'))).toEqual([])
+    expect(await Bun.file(path).exists()).toBe(true)
+    await expect(manager.change('uninstall', 'gone')).rejects.toThrow('not found')
+    await expect(manager.change('install', path)).resolves.toContain('Installed')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('managed plugins publish their slash commands with arguments and withdraw them when disabled', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'managed-plugin-commands-'))
+  try {
+    const path = join(root, 'cmd.ts')
+    await writeFile(path, `export function register(r) { r.registerCommand('xshout', (args, context) => args.toUpperCase() + ' @' + context.cwd, { description: 'Shout' }, { name: 'shout' }) }`)
+    const manager = new ManagedPlugins(join(root, 'plugins.json'))
+    await manager.change('install', path)
+    const registry = new SlashPluginRegistry()
+    expect(manager.syncCommands(registry)).toEqual([])
+    const command = registry.resolve('/xshout hi there')
+    expect(command?.command.description).toBe('Shout')
+    expect(await command?.handler('hi there', { cwd: '/w' })).toBe('HI THERE @/w')
+    expect(manager.inventory()[0]?.commands).toEqual(['xshout'])
+    await manager.change('disable', 'shout')
+    await expect(command?.handler('x', {})).rejects.toThrow('disabled')
+    manager.syncCommands(registry)
+    expect(registry.resolve('/xshout')).toBeUndefined()
+    await writeFile(join(root, 'clash.ts'), `export function register(r) { r.registerCommand('help', () => 'x', {}, { name: 'clash' }) }`)
+    await expect(manager.change('install', join(root, 'clash.ts'))).rejects.toThrow('built-in')
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 

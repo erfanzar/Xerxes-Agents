@@ -121,6 +121,13 @@ export function permissionDisposition(
   ) {
     return 'prompt'
   }
+  // Installing, reloading or enabling a plugin runs new code inside Xerxes,
+  // and a saved install outlives the turn: every change asks, even in YOLO.
+  // Only list and inspect are reads.
+  if (name === 'PluginManageTool' && !['list', 'inspect'].includes(stringInput(call.function.arguments, 'action'))
+    && options?.bypassAlwaysApprove !== true) {
+    return 'prompt'
+  }
   if (mode === 'accept-all') {
     return 'allow'
   }
@@ -189,6 +196,17 @@ export function permissionDescription(call: Pick<ToolCall, 'function'>): string 
     const target = stringInput(inputs, 'target').trim() || 'subagent'
     const message = stringInput(inputs, 'message').trim()
     return message ? `Message ${target}: ${message.slice(0, 60)}` : `Message ${target}`
+  }
+  if (name === 'PluginManageTool') {
+    const action = stringInput(inputs, 'action') || 'action'
+    if (action === 'install') {
+      const scope = stringInput(inputs, 'scope') === 'permanent' ? 'permanently (saved for every future session)' : 'for this run of Xerxes only'
+      const tests = inputs.skip_tests === true
+        ? ' WITHOUT TESTS (skip_tests requested).'
+        : ' Its Bun tests run first and must pass.'
+      return `Install plugin ${stringInput(inputs, 'path')} ${scope}.${tests} It runs in its own process with your user privileges (not a sandbox); its declared permissions are shown after install.`
+    }
+    return `Plugin ${action}: ${stringInput(inputs, 'plugin')}`
   }
   if (name === 'computer_use') {
     const action = stringInput(inputs, 'action') || 'action'

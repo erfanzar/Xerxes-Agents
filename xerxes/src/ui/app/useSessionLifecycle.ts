@@ -575,12 +575,21 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
           .catch((e: Error) => {
             if (held) gw.discardSessionRecovery(held)
             if (generation !== switchGenerationRef.current) return
+            // Reconnecting after the runtime restarted: a chat that never
+            // finished a turn was never written to disk, so retrying the same
+            // id can never succeed. Open a fresh chat instead of leaving the
+            // window stuck on the error (the desktop app does the same).
+            if (options.preserveView && /saved conversation is missing/i.test(e.message)) {
+              sys('The runtime restarted and this chat had no finished turn, so it was not saved. Started a new chat; /daemon status shows why the runtime restarted.')
+              void newSession()
+              return
+            }
             sys(`error: ${e.message}`)
             patchUiState({ status: 'ready' })
           })
       }).finally(() => settleSwitch(generation))
     },
-    [beginSwitch, closeSession, colsRef, gw, panel, resetSession, rpc, runClientSwitch, scrollRef, setHistoryItems, setSessionStartedAt, setTurnStartedAt, settleSwitch, sys]
+    [beginSwitch, closeSession, colsRef, gw, newSession, panel, resetSession, rpc, runClientSwitch, scrollRef, setHistoryItems, setSessionStartedAt, setTurnStartedAt, settleSwitch, sys]
   )
 
   /** Agent View attach: promote saved history without replacing live work. */

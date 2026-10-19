@@ -8,6 +8,7 @@ import {
   type AgentSwitchTrigger,
 } from './agents/orchestrator.js'
 import type { AgentDefinition } from './agents/definitions.js'
+import { toolListAdmits } from './agents/toolPatterns.js'
 import type { AuditEmitter } from './audit/emitter.js'
 import { ConfigurationError } from './core/errors.js'
 import { ToolRegistry } from './executors/toolRegistry.js'
@@ -408,8 +409,8 @@ function toolsForAgent(available: readonly ToolDefinition[], agent: AgentDefinit
   return available.filter(tool => {
     const name = tool.function.name
     if (excluded.has(name)) return false
-    if (allowed && !allowed.has(name)) return false
-    return declared.size === 0 || declared.has(name)
+    if (allowed && !toolListAdmits(allowed, name)) return false
+    return declared.size === 0 || toolListAdmits(declared, name)
   })
 }
 

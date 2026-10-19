@@ -5,7 +5,7 @@ capability is missing. The TUI uses the v35 daemon and never delegates to Python
 
 | Legacy name | Supported workflow or actual limit |
 | --- | --- |
-| `plugins.manage` | `/plugins list`, `inspect`, `install`, `enable`, `disable`. Mutations require the injected plugin-management host. |
+| `plugins.manage` | `/plugins list`, `inspect`, `install` (local module, or `<git-url>` preview then `install --confirm <token>`), `enable`, `disable`, `reload`, `uninstall`, `export <name> <dir>`, `trust <project-plugin>`, `secret list|unset`. Secret values are set only with `xerxes plugins secret set <plugin> <NAME>` in a terminal (no RPC; values never cross the slash surface). Plugins run in their own Bun process; this is not a sandbox. Mutations require the injected plugin-management host. |
 | `skills.manage`, `skills.reload` | `/skills` refreshes discovery; inspect, diagnostics, trust, search, browse and local install are available. |
 | `reload.mcp` | `/reload-mcp`; `/config mcp` edits settings and `/mcp` inspects health/reconnects. |
 | `process.stop` | `/terminals` controls advertised writable/interruptible/killable processes; `/runs` cancels supported runs. |

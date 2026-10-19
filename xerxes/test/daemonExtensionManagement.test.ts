@@ -44,7 +44,19 @@ test('daemon installs local skills with assets and manages native plugin modules
     expect(manager.inventory()[0]).toMatchObject({ enabled: false })
     expect(await request('slash', { command: '/plugins enable greeting' })).toMatchObject({ ok: true })
     expect(await request('complete', { text: '/plugins en' })).toMatchObject({ completions: [expect.objectContaining({ value: '/plugins enable ' })] })
-  } finally { client.close(); await server.stop(); await rm(root, { recursive: true, force: true }) }
+    expect(await request('complete', { text: '/plugins re' })).toMatchObject({ completions: [expect.objectContaining({ value: '/plugins reload ' })] })
+    // A plugin command receives its argument text and the session's directory.
+    // The plugin runs in its own process, so it reports what it received through its result.
+    await writeFile(join(root, 'command.ts'), `export function register(r) { r.registerCommand('xdaemonecho', (args, context) => 'echoed ' + JSON.stringify({ args, cwd: context.cwd }), { description: 'Echo' }, { name: 'daemon-echo' }) }`)
+    expect(await request('slash', { command: '/plugins install command.ts' })).toMatchObject({ ok: true })
+    expect(await request('slash', { command: '/xdaemonecho one two' })).toMatchObject({ ok: true, plugin: 'xdaemonecho' })
+    const echoed = await client.next(frame => frame.params?.type === 'notification' && String(frame.params.payload?.body ?? '').startsWith('echoed '))
+    expect(JSON.parse(String(echoed.params?.payload?.body).slice('echoed '.length))).toEqual({ args: 'one two', cwd: expect.any(String) })
+    expect(await request('slash', { command: '/plugins reload daemon-echo' })).toMatchObject({ ok: true })
+    expect(await request('slash', { command: '/plugins uninstall daemon-echo' })).toMatchObject({ ok: true })
+    expect(manager.inventory().map(item => item.name)).toEqual(['greeting'])
+    expect(await request('slash', { command: '/xdaemonecho again' })).not.toMatchObject({ plugin: 'xdaemonecho' })
+  } finally { manager.clearCommands(); client.close(); await server.stop(); await rm(root, { recursive: true, force: true }) }
 })
 
 interface Frame {

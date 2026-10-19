@@ -32,7 +32,7 @@ function lifecycle(action: 'restart' | 'stop', ctx: SlashRunCtx) {
     danger: true, confirmLabel: action === 'restart' ? 'Restart if idle' : 'Stop all workspaces', cancelLabel: 'Cancel',
     onConfirm: () => {
       if (ctx.stale()) return
-      void ctx.gateway.rpc(action === 'restart' ? 'runtime.restart_if_idle' : 'shutdown', {}).then(ctx.guarded(result => {
+      void ctx.gateway.rpc(action === 'restart' ? 'runtime.restart_if_idle' : 'shutdown', { requested_by: `/daemon ${action} in a TUI` }).then(ctx.guarded(result => {
         if (result?.busy) { ctx.transcript.sys('Daemon is busy in one or more workspaces. Nothing was stopped. Retry when all work is idle.'); return }
         if (result?.ok !== true) throw new Error(String(result?.error ?? 'Daemon rejected the request'))
         ctx.transcript.sys('Daemon accepted shutdown. Run xerxes to reconnect when it exits; saved sessions are retained.')

@@ -11,8 +11,20 @@ import {
 
 const PLUGIN_COMMAND_NAME = /^[a-z0-9][a-z0-9_-]*$/
 
-/** A plugin-owned command callback. Invocation remains host-owned. */
-export type SlashHandler = (...arguments_: never[]) => unknown | Promise<unknown>
+/** What the host passes to a plugin command besides its argument text. */
+export interface SlashPluginContext {
+  /** The invoking connection's session key, when there is one. */
+  readonly sessionKey?: string
+  /** Working directory of the invoking session (or the daemon's project). */
+  readonly cwd?: string
+}
+
+/**
+ * A plugin-owned command callback. Invocation remains host-owned: the host
+ * passes the text after the command name and the invoking session's context.
+ * Handlers that take no arguments stay valid.
+ */
+export type SlashHandler = (args: string, context: SlashPluginContext) => unknown | Promise<unknown>
 
 /** Immutable pairing of plugin command metadata and its callback. */
 export interface SlashPlugin {

@@ -8,6 +8,7 @@ import { pathToFileURL } from 'node:url'
 import { isWindows } from '../core/hostPlatform.js'
 import { DependencyResolver, parseDependency, VersionConstraint } from './dependency.js'
 import type { HookCallback, HookPoint } from './hooks.js'
+import type { SlashHandler, SlashPluginOptions } from './slashPlugins.js'
 import type { FetchImplementation, LlmClient } from '../llms/client.js'
 import type { ProviderOverrides } from '../llms/providerRegistry.js'
 
@@ -22,6 +23,155 @@ export const PluginType = {
 
 export type PluginType = (typeof PluginType)[keyof typeof PluginType]
 export type PluginTool = (...args: unknown[]) => unknown | Promise<unknown>
+
+/** What a structured plugin tool receives with each call, beside its arguments. */
+export interface PluginToolContext {
+  /** Aborts when the turn is cancelled; long-running tools should honour it. */
+  readonly signal?: AbortSignal
+  readonly sessionId?: string
+  readonly agentId?: string
+  /**
+   * Values of the secrets the plugin declared in `permissions.secrets` and the
+   * user has set (managed plugins only). Undeclared or unset names are absent.
+   */
+  readonly secrets?: Readonly<Record<string, string>>
+}
+
+/**
+ * What a plugin says it needs, declared through `registerPlugin({ permissions })`.
+ *
+ * For managed plugins, which run in their own Bun process, `env` is enforced
+ * (the process starts with an empty environment and receives only these
+ * variables) and `network` is a guard rail on `fetch` only. `filesystem` is
+ * declared and displayed, never enforced: plugin code can still use `node:fs`,
+ * `node:net`, `Bun.spawn` and so on with the user's privileges. This is not a
+ * security sandbox.
+ */
+export interface PluginPermissions {
+  /** Hostnames `fetch` may reach; `*.example.com` admits subdomains. */
+  readonly network?: readonly string[]
+  /** Environment variable names copied into the plugin process. */
+  readonly env?: readonly string[]
+  /** Absolute path prefixes the plugin says it reads or writes (displayed, not enforced). */
+  readonly filesystem?: readonly string[]
+  /** Secret names (UPPER_SNAKE) the plugin receives as `context.secrets`. */
+  readonly secrets?: readonly string[]
+}
+
+export interface NormalizedPluginPermissions {
+  readonly network: readonly string[]
+  readonly env: readonly string[]
+  readonly filesystem: readonly string[]
+  readonly secrets: readonly string[]
+}
+
+export const PLUGIN_SECRET_NAME = /^[A-Z][A-Z0-9_]{0,63}$/
+const PLUGIN_ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/
+const PLUGIN_HOST_NAME = /^(?:\*\.)?[a-z0-9](?:[a-z0-9-]{0,62})(?:\.[a-z0-9](?:[a-z0-9-]{0,62}))*$/
+const MAX_PERMISSION_ENTRIES = 64
+const MAX_TOOL_TIMEOUT_MS = 3_600_000
+
+/** Validate a declared permissions object at the registration boundary. */
+export function normalizePluginPermissions(value: unknown, plugin: string): NormalizedPluginPermissions {
+  if (value === undefined || value === null) return Object.freeze({ network: [], env: [], filesystem: [], secrets: [] })
+  if (typeof value !== 'object' || Array.isArray(value)) throw new TypeError(`Plugin '${plugin}' permissions must be an object`)
+  const record = value as Record<string, unknown>
+  for (const key of Object.keys(record)) {
+    if (!['network', 'env', 'filesystem', 'secrets'].includes(key)) throw new TypeError(`Plugin '${plugin}' permissions has unknown key '${key}' (use network, env, filesystem or secrets)`)
+  }
+  const list = (key: string, check: (entry: string) => string | undefined): readonly string[] => {
+    const raw = record[key]
+    if (raw === undefined) return Object.freeze([])
+    if (!Array.isArray(raw) || raw.length > MAX_PERMISSION_ENTRIES) throw new TypeError(`Plugin '${plugin}' permissions.${key} must be an array of at most ${MAX_PERMISSION_ENTRIES} strings`)
+    const entries: string[] = []
+    for (const entry of raw) {
+      if (typeof entry !== 'string') throw new TypeError(`Plugin '${plugin}' permissions.${key} must contain only strings`)
+      const problem = check(entry)
+      if (problem) throw new TypeError(`Plugin '${plugin}' permissions.${key}: ${problem}`)
+      const normalized = key === 'network' ? entry.toLowerCase() : entry
+      if (!entries.includes(normalized)) entries.push(normalized)
+    }
+    return Object.freeze(entries)
+  }
+  return Object.freeze({
+    network: list('network', entry => PLUGIN_HOST_NAME.test(entry.toLowerCase()) ? undefined : `'${entry}' is not a hostname (no scheme, port or path; '*.example.com' admits subdomains)`),
+    env: list('env', entry => PLUGIN_ENV_NAME.test(entry) ? undefined : `'${entry}' is not an environment variable name`),
+    filesystem: list('filesystem', entry => entry.startsWith('/') || /^[A-Za-z]:[\\/]/.test(entry) ? undefined : `'${entry}' must be an absolute path prefix`),
+    secrets: list('secrets', entry => PLUGIN_SECRET_NAME.test(entry) ? undefined : `'${entry}' must be UPPER_SNAKE_CASE (A-Z, 0-9, _; at most 64 characters)`),
+  })
+}
+
+/**
+ * A plugin tool described the way the model sees it: its own description and a
+ * JSON-schema `parameters` object. `execute` receives the arguments object the
+ * model sent and the call context. Preferred over a bare positional function,
+ * whose arguments the model can only guess.
+ */
+export interface PluginToolDefinition {
+  readonly description: string
+  readonly parameters: Readonly<Record<string, unknown>>
+  /** Per-call time limit for managed plugins (default 60 000 ms, at most one hour). */
+  readonly timeoutMs?: number
+  execute(input: Record<string, unknown>, context: PluginToolContext): unknown | Promise<unknown>
+}
+
+/** Model-facing description of a structured tool, as validated at registration. */
+export interface PluginToolSchema {
+  readonly description: string
+  readonly parameters: Readonly<Record<string, unknown>>
+  readonly timeoutMs?: number
+}
+
+/** A plugin-owned slash command and its registration options. */
+export interface PluginCommand {
+  readonly handler: SlashHandler
+  readonly options: SlashPluginOptions
+}
+
+const MAX_TOOL_DESCRIPTION = 1_024
+const PLUGIN_COMMAND_TOKEN = /^[a-z0-9][a-z0-9_-]*$/
+/** Schemas of structured tools, keyed by the callable the registry stores. */
+const TOOL_SCHEMAS = new WeakMap<PluginTool, PluginToolSchema>()
+
+/** The schema a structured tool was registered with; undefined for positional tools. */
+export function pluginToolSchema(tool: PluginTool | undefined): PluginToolSchema | undefined {
+  return tool ? TOOL_SCHEMAS.get(tool) : undefined
+}
+
+/** Validate a structured definition at the registration boundary and adapt it to the registry's callable form. */
+function pluginToolCallable(name: string, value: PluginTool | PluginToolDefinition): PluginTool {
+  if (typeof value === 'function') return value
+  if (!value || typeof value !== 'object') throw new TypeError(`Plugin tool '${name}' must be a function or { description, parameters, execute }`)
+  const description = typeof value.description === 'string' ? value.description.trim() : ''
+  if (!description || description.length > MAX_TOOL_DESCRIPTION) {
+    throw new TypeError(`Plugin tool '${name}' needs a description of 1–${MAX_TOOL_DESCRIPTION} characters`)
+  }
+  if (typeof value.execute !== 'function') throw new TypeError(`Plugin tool '${name}' must define execute(input, context)`)
+  const raw = value.parameters as unknown
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw) || (raw as { type?: unknown }).type !== 'object') {
+    throw new TypeError(`Plugin tool '${name}' parameters must be a JSON schema with type "object"`)
+  }
+  let parameters: Readonly<Record<string, unknown>>
+  try { parameters = JSON.parse(JSON.stringify(raw)) as Record<string, unknown> }
+  catch { throw new TypeError(`Plugin tool '${name}' parameters must be JSON-serializable`) }
+  const timeoutMs = value.timeoutMs as unknown
+  if (timeoutMs !== undefined && (typeof timeoutMs !== 'number' || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_TOOL_TIMEOUT_MS)) {
+    throw new TypeError(`Plugin tool '${name}' timeoutMs must be an integer from 1 to ${MAX_TOOL_TIMEOUT_MS}`)
+  }
+  const definition = value
+  const tool: PluginTool = (input, context) => definition.execute(
+    input && typeof input === 'object' && !Array.isArray(input) ? input as Record<string, unknown> : {},
+    context && typeof context === 'object' ? context as PluginToolContext : {},
+  )
+  TOOL_SCHEMAS.set(tool, Object.freeze({ description, parameters: Object.freeze(parameters), ...(timeoutMs === undefined ? {} : { timeoutMs }) }))
+  return tool
+}
+
+function pluginCommandToken(name: string): string {
+  const token = typeof name === 'string' ? name.trim().replace(/^\/+/, '').toLowerCase() : ''
+  if (!PLUGIN_COMMAND_TOKEN.test(token)) throw new TypeError('Plugin command names may contain only letters, numbers, hyphens, or underscores')
+  return token
+}
 
 /** Settings that the host passes through when it asks a plugin for an LLM client. */
 export interface PluginLlmProviderOptions {
@@ -68,11 +218,14 @@ export interface PluginMeta {
   readonly pluginType?: PluginType
   readonly version?: string
   readonly versionConstraints?: Readonly<Record<string, string>>
+  /** What the plugin needs; see {@link PluginPermissions} for what is and is not enforced. */
+  readonly permissions?: PluginPermissions
 }
 
 export interface RegisteredPlugin {
   readonly sourcePath?: string
   readonly channels: Map<string, unknown>
+  readonly commands: Map<string, PluginCommand>
   readonly hooks: Map<string, HookCallback>
   readonly meta: RequiredPluginMeta
   provider: PluginLlmProviderFactory | undefined
@@ -89,6 +242,12 @@ export interface PluginInventoryEntry {
   readonly channels: readonly string[]
   readonly providers: readonly string[]
   readonly dependencies: readonly string[]
+  /** Slash commands the plugin contributes, without the leading slash. */
+  readonly commands: readonly string[]
+  /** Descriptions of the plugin's structured tools (positional tools have none). */
+  readonly toolDescriptions: Readonly<Record<string, string>>
+  /** Declared permissions (empty lists when none were declared). */
+  readonly permissions: NormalizedPluginPermissions
 }
 
 interface RequiredPluginMeta {
@@ -99,6 +258,7 @@ interface RequiredPluginMeta {
   readonly pluginType: PluginType
   readonly version: string
   readonly versionConstraints: Readonly<Record<string, string>>
+  readonly permissions: NormalizedPluginPermissions
 }
 
 export class PluginConflictError extends Error {
@@ -131,6 +291,7 @@ export interface PluginDiscoveryOptions {
 /** Point-in-time view of every capability index, used to roll back a failed plugin registration. */
 interface PluginRegistrationSnapshot {
   readonly channels: ReadonlySet<string>
+  readonly commands: ReadonlySet<string>
   readonly hooks: ReadonlyMap<string, number>
   readonly plugins: ReadonlySet<string>
   readonly providers: ReadonlySet<string>
@@ -140,6 +301,7 @@ interface PluginRegistrationSnapshot {
 /** Owns plugin capability indexes and validates dependency-compatible load order. */
 export class PluginRegistry {
   private readonly channels = new Map<string, { readonly owner: string; readonly value: unknown }>()
+  private readonly commands = new Map<string, { readonly owner: string; readonly value: PluginCommand }>()
   private readonly hooks = new Map<string, Array<{ readonly callback: HookCallback; readonly owner: string }>>()
   private readonly plugins = new Map<string, RegisteredPlugin>()
   private readonly providers = new Map<string, { readonly owner: string; readonly value: PluginLlmProviderFactory }>()
@@ -166,6 +328,12 @@ export class PluginRegistry {
       tools: [...plugin.tools.keys()], hooks: [...plugin.hooks.keys()], channels: [...plugin.channels.keys()],
       providers: [...this.providers].filter(([, entry]) => entry.owner === plugin.meta.name).map(([name]) => name),
       dependencies: [...plugin.meta.dependencies],
+      commands: [...plugin.commands.keys()],
+      toolDescriptions: Object.fromEntries([...plugin.tools].flatMap(([name, tool]) => {
+        const schema = TOOL_SCHEMAS.get(tool)
+        return schema ? [[name, schema.description]] : []
+      })),
+      permissions: plugin.meta.permissions,
     }))
   }
 
@@ -240,9 +408,44 @@ export class PluginRegistry {
     return discovered
   }
 
+  /**
+   * Run a synchronous registration as if the module at `path` performed it,
+   * with the same staging, ownership and conflict rules as discovery. Used to
+   * rebuild registrations a plugin made in its own process; nothing is
+   * imported here. Throws (leaving this registry untouched) on any failure.
+   */
+  registerFromModule(path: string, register: (registry: PluginRegistry) => void): string[] {
+    this.assertRegistrationOpen()
+    if (this.activeDiscovery) throw new Error('Nested plugin registration is unsupported')
+    const staged = this.registrationStage(path)
+    try {
+      const snapshot = staged.registrationSnapshot()
+      register(staged)
+      staged.registrationClosed = true
+      const added = this.commitRegistration(staged, snapshot)
+      staged.committedRegistry = this
+      return added
+    } finally {
+      staged.registrationClosed = true
+      staged.activeDiscovery = undefined
+      staged.releaseRegistrationStage()
+    }
+  }
+
   getAllChannels(): Record<string, unknown> {
     if (this.committedRegistry) return this.committedRegistry.getAllChannels()
     return Object.fromEntries([...this.channels].map(([name, entry]) => [name, entry.value]))
+  }
+
+  getAllCommands(): Record<string, PluginCommand> {
+    if (this.committedRegistry) return this.committedRegistry.getAllCommands()
+    return Object.fromEntries([...this.commands].map(([name, entry]) => [name, entry.value]))
+  }
+
+  /** The plugin that owns a tool, for model-facing descriptions. */
+  toolOwner(name: string): string | undefined {
+    if (this.committedRegistry) return this.committedRegistry.toolOwner(name)
+    return this.tools.get(name)?.owner
   }
 
   getAllTools(): Record<string, PluginTool> {
@@ -308,7 +511,7 @@ export class PluginRegistry {
     this.activeDiscovery?.names.add(meta.name)
     const plugin: RegisteredPlugin = {
       ...(this.activeDiscovery ? { sourcePath: resolve(this.activeDiscovery.path) } : {}),
-      meta: normalizeMeta(meta), tools: new Map(), hooks: new Map(), channels: new Map(), provider: undefined,
+      meta: normalizeMeta(meta), tools: new Map(), hooks: new Map(), channels: new Map(), commands: new Map(), provider: undefined,
     }
     this.plugins.set(meta.name, plugin)
     return plugin
@@ -325,11 +528,31 @@ export class PluginRegistry {
     if (plugin) plugin.provider = provider
   }
 
-  registerTool(name: string, tool: PluginTool, meta?: PluginMeta, pluginName?: string): void {
+  /**
+   * Register a tool: either a positional function (legacy; the model passes
+   * `{ args: [...] }`) or a {@link PluginToolDefinition} with its own
+   * description and JSON-schema parameters, validated here.
+   */
+  registerTool(name: string, tool: PluginTool | PluginToolDefinition, meta?: PluginMeta, pluginName?: string): void {
     this.assertRegistrationOpen()
+    const callable = pluginToolCallable(name, tool)
     const owner = this.resolveOwner(meta, pluginName)
-    this.registerUnique(this.tools, `tool:${name}`, name, tool, owner)
-    this.plugins.get(owner)?.tools.set(name, tool)
+    this.registerUnique(this.tools, `tool:${name}`, name, callable, owner)
+    this.plugins.get(owner)?.tools.set(name, callable)
+  }
+
+  /**
+   * Register a slash command. The host decides whether to expose it; the
+   * handler receives the argument text and the invoking session's context.
+   */
+  registerCommand(name: string, handler: SlashHandler, options: SlashPluginOptions = {}, meta?: PluginMeta, pluginName?: string): void {
+    this.assertRegistrationOpen()
+    if (typeof handler !== 'function') throw new TypeError(`Plugin command '${name}' handler must be a function`)
+    const token = pluginCommandToken(name)
+    const owner = this.resolveOwner(meta, pluginName)
+    const command: PluginCommand = Object.freeze({ handler, options: Object.freeze({ ...options }) })
+    this.registerUnique(this.commands, `command:${token}`, token, command, owner)
+    this.plugins.get(owner)?.commands.set(token, command)
   }
 
   unregisterPlugin(name: string): void {
@@ -342,6 +565,7 @@ export class PluginRegistry {
     for (const [tool, entry] of this.tools) if (entry.owner === name) this.tools.delete(tool)
     for (const [provider, entry] of this.providers) if (entry.owner === name) this.providers.delete(provider)
     for (const [channel, entry] of this.channels) if (entry.owner === name) this.channels.delete(channel)
+    for (const [command, entry] of this.commands) if (entry.owner === name) this.commands.delete(command)
     for (const [hook, entries] of this.hooks) {
       const retained = entries.filter(entry => entry.owner !== name)
       if (retained.length) this.hooks.set(hook, retained)
@@ -402,6 +626,7 @@ export class PluginRegistry {
       tools: new Set(this.tools.keys()),
       providers: new Set(this.providers.keys()),
       channels: new Set(this.channels.keys()),
+      commands: new Set(this.commands.keys()),
       hooks: new Map([...this.hooks].map(([name, entries]) => [name, entries.length])),
     }
   }
@@ -411,6 +636,7 @@ export class PluginRegistry {
     this.tools.clear()
     this.providers.clear()
     this.channels.clear()
+    this.commands.clear()
     this.hooks.clear()
   }
 
@@ -423,11 +649,12 @@ export class PluginRegistry {
     const stage = new PluginRegistry()
     for (const [name, plugin] of this.plugins) stage.plugins.set(name, {
       ...plugin, meta: normalizeMeta(plugin.meta), tools: new Map(plugin.tools),
-      hooks: new Map(plugin.hooks), channels: new Map(plugin.channels),
+      hooks: new Map(plugin.hooks), channels: new Map(plugin.channels), commands: new Map(plugin.commands),
     })
     for (const [name, entry] of this.tools) stage.tools.set(name, entry)
     for (const [name, entry] of this.providers) stage.providers.set(name, entry)
     for (const [name, entry] of this.channels) stage.channels.set(name, entry)
+    for (const [name, entry] of this.commands) stage.commands.set(name, entry)
     for (const [name, entries] of this.hooks) stage.hooks.set(name, [...entries])
     stage.activeDiscovery = { names: new Set(), path }
     return stage
@@ -439,7 +666,9 @@ export class PluginRegistry {
     const tools = [...stage.tools].filter(([name]) => !before.tools.has(name))
     const providers = [...stage.providers].filter(([name]) => !before.providers.has(name))
     const channels = [...stage.channels].filter(([name]) => !before.channels.has(name))
+    const commands = [...stage.commands].filter(([name]) => !before.commands.has(name))
     for (const [name] of plugins) if (this.plugins.has(name)) throw new PluginConflictError(name, name)
+    for (const [name] of commands) { const existing = this.commands.get(name); if (existing) throw new PluginConflictError('command:' + name, existing.owner) }
     for (const [name] of tools) { const existing = this.tools.get(name); if (existing) throw new PluginConflictError('tool:' + name, existing.owner) }
     for (const [name] of providers) { const existing = this.providers.get(name); if (existing) throw new PluginConflictError('provider:' + name, existing.owner) }
     for (const [name] of channels) { const existing = this.channels.get(name); if (existing) throw new PluginConflictError('channel:' + name, existing.owner) }
@@ -447,6 +676,7 @@ export class PluginRegistry {
     for (const [name, entry] of tools) this.tools.set(name, entry)
     for (const [name, entry] of providers) this.providers.set(name, entry)
     for (const [name, entry] of channels) this.channels.set(name, entry)
+    for (const [name, entry] of commands) this.commands.set(name, entry)
     for (const [name, entries] of stage.hooks) {
       const added = entries.slice(before.hooks.get(name) ?? 0)
       if (added.length) this.hooks.set(name, [...(this.hooks.get(name) ?? []), ...added])
@@ -483,7 +713,7 @@ export class PluginRegistry {
  * discovery roots (per-user profile directories) instead, so this check reports
  * "not world-writable" rather than pretending to an answer it cannot compute.
  */
-function isWorldWritable(path: string, platform: NodeJS.Platform = process.platform): boolean {
+export function isWorldWritable(path: string, platform: NodeJS.Platform = process.platform): boolean {
   if (isWindows(platform)) {
     return false
   }
@@ -505,6 +735,7 @@ function normalizeMeta(meta: PluginMeta): RequiredPluginMeta {
     author: meta.author ?? '',
     dependencies: [...(meta.dependencies ?? [])],
     versionConstraints: { ...(meta.versionConstraints ?? {}) },
+    permissions: normalizePluginPermissions(meta.permissions, meta.name),
   }
 }
 

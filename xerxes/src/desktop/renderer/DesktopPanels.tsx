@@ -478,7 +478,8 @@ function ExtensionsPanel({ snap }: { snap: Snapshot }): ReactElement {
     [needle, setNeedle] = useState(''),
     [selectedSkill, setSelectedSkill] = useState(''),
     [path, setPath] = useState(''),
-    [plugins, setPlugins] = useState<RpcRecord[]>([])
+    [plugins, setPlugins] = useState<RpcRecord[]>([]),
+    [confirmUninstall, setConfirmUninstall] = useState('')
   useEffect(() => {
     void request.run(async () => {
       const result = await request.call('capabilities.list')
@@ -557,7 +558,38 @@ function ExtensionsPanel({ snap }: { snap: Snapshot }): ReactElement {
                   {plugin.enabled ? 'Disable' : 'Enable'}
                 </button>
               )}
-              <button onClick={() => setDetail(JSON.stringify(plugin, null, 2))}>Inspect</button>
+              {typeof plugin.enabled === 'boolean' && (
+                <button
+                  disabled={request.busy}
+                  title="Load the plugin's current code from disk"
+                  onClick={() => void request.run(async () => {
+                    const result = await request.call('slash', { command: '/plugins reload ' + pluginArgument(text(plugin.name)) })
+                    if (request.alive.current) setDetail(text(result.output) || 'Plugin reloaded.')
+                    await loadPlugins()
+                  })}
+                >
+                  Reload
+                </button>
+              )}
+              {typeof plugin.enabled === 'boolean' && (
+                <button
+                  disabled={request.busy}
+                  title="Remove from Xerxes; the module file is not deleted"
+                  onClick={() => {
+                    const name = text(plugin.name)
+                    if (confirmUninstall !== name) { setConfirmUninstall(name); return }
+                    setConfirmUninstall('')
+                    void request.run(async () => {
+                      const result = await request.call('slash', { command: '/plugins uninstall ' + pluginArgument(name) })
+                      if (request.alive.current) setDetail(text(result.output) || 'Plugin uninstalled.')
+                      await loadPlugins()
+                    })
+                  }}
+                >
+                  {confirmUninstall === text(plugin.name) ? 'Confirm uninstall' : 'Uninstall'}
+                </button>
+              )}
+              <button onClick={() => setDetail(pluginDetail(plugin))}>Inspect</button>
             </div>
           ))}
           <p>Install a local plugin module or create a bundle in Creator mode.</p>
@@ -1549,6 +1581,43 @@ function WorkspacePanel({ snap }: { snap: Snapshot }): ReactElement {
     </>}
     </div>
   )
+}
+
+/** A plugin's inventory entry as readable Markdown: state, tools with their descriptions, commands. */
+function pluginDetail(plugin: RpcRecord): string {
+  const list = (value: unknown): string[] => Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
+  const descriptions = plugin.toolDescriptions && typeof plugin.toolDescriptions === 'object' && !Array.isArray(plugin.toolDescriptions)
+    ? plugin.toolDescriptions as Record<string, unknown> : {}
+  const tools = list(plugin.tools)
+  const commands = list(plugin.commands)
+  const state = text(plugin.loadError) ? `Failed to load: ${text(plugin.loadError)}`
+    : plugin.enabled === false ? 'Disabled' : plugin.stale === true ? 'Enabled — the file on disk changed; Reload to apply it' : 'Enabled'
+  const record = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
+  const usage = record(plugin.usage)
+  const used = (tool: string): string => {
+    const stats = record(usage[tool])
+    const calls = typeof stats.calls === 'number' ? stats.calls : 0
+    if (!calls) return Object.keys(stats).length ? ' · not called yet' : ''
+    return ` · ${calls} call${calls === 1 ? '' : 's'}, ${String(stats.failures ?? 0)} failed, mean ${String(stats.meanMs ?? 0)} ms`
+      + (text(stats.lastUsedAt) ? `, last ${text(stats.lastUsedAt)}` : '')
+      + (text(stats.lastError) ? `, last error: ${text(stats.lastError)}` : '')
+  }
+  const permissions = record(plugin.permissions)
+  const declared = (['network', 'env', 'filesystem', 'secrets'] as const)
+    .map(key => [key, list(permissions[key])] as const)
+    .filter(([, values]) => values.length)
+  const notes: Record<string, string> = { network: 'fetch guard rail', env: 'only these reach its process', filesystem: 'declared, not enforced', secrets: 'set from a terminal' }
+  return [
+    `**${text(plugin.name)}**${text(plugin.version) ? ` · ${text(plugin.version)}` : ''}${text(plugin.scope) ? ` · ${text(plugin.scope)}` : ''}`,
+    text(plugin.description),
+    `State: ${plugin.trusted === false ? `Untrusted — review it, then run /plugins trust ${text(plugin.name)}` : state}${typeof plugin.running === 'boolean' ? ` · process ${plugin.running ? 'running' : 'idle'}` : ''}`,
+    text(plugin.module) ? `Module: \`${text(plugin.module)}\`` : '',
+    tools.length ? ['Tools:', ...tools.map(tool => `- \`plugin_${tool}\` — ${typeof descriptions[tool] === 'string' ? descriptions[tool] : 'positional arguments ({"args": [...]})'}${used(tool)}`)].join('\n') : 'Tools: none',
+    commands.length ? `Commands: ${commands.map(command => `\`/${command}\``).join(', ')}` : '',
+    declared.length
+      ? ['Declared permissions:', ...declared.map(([key, values]) => `- ${key}: ${values.join(', ')} (${notes[key]})`), 'Plugins run in their own process with your user privileges; this is not a sandbox.'].join('\n')
+      : 'Declared permissions: none',
+  ].filter(Boolean).join('\n\n')
 }
 
 function pluginArgument(value: string): string {

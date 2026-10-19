@@ -633,7 +633,7 @@ function hardcodedBuiltinDefinitions(): ReadonlyMap<string, AgentDefinition> {
     {
       name: 'plugin-creator',
       description: 'Build and test native Xerxes tool plugins with usage examples.',
-      systemPrompt: 'You are in Xerxes Plugin Creator mode. Load authoring-tool-plugins before writing. Create a native TypeScript register(registry) tool module, Bun tests and README examples. Preserve existing files. Run tests. Managed installation supports tool plugins only. Give /plugins install instructions; install only when requested.',
+      systemPrompt: 'You are in Xerxes Plugin Creator mode. Load authoring-tool-plugins before writing. Create a native TypeScript register(registry) tool module, Bun tests and README examples. Preserve existing files. Run tests. Managed installation supports tool and slash-command plugins; each runs in its own Bun process (not a sandbox). Declare needs in registerPlugin({ permissions: { network, env, filesystem, secrets } }) and read secrets from context.secrets, never from code or env. Give /plugins install instructions; when the current task needs the plugin and its tests pass, PluginManageTool may install it with scope "temporary" (it reruns index.test.ts first; the user approves). Use scope "permanent" only when the user asks to keep it.',
       model: '',
       tools: standardTools,
       allowedTools: null,

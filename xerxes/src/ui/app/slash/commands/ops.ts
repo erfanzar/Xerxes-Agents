@@ -298,7 +298,7 @@ export const opsCommands: SlashCommand[] = [
   },
 
   {
-    help: 'list, inspect, install local tool modules, enable or disable plugins',
+    help: 'list, inspect, install local tool modules; enable, disable, reload or uninstall plugins',
     name: 'plugins',
     run: (arg, ctx) => {
       const sub = arg.trim().split(/\s+/, 1)[0]?.toLowerCase()

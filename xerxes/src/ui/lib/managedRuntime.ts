@@ -56,7 +56,7 @@ export async function prepareManagedRuntime(
     // Another client (a second window on this host, a TUI) may already have
     // asked this runtime to restart; it then refuses every request. That is
     // the restart this one wants too: wait for it instead of failing.
-    let result = restarting(status) ? status : await client.request<Record<string, unknown>>('runtime.restart_if_idle', options.force ? { force: true } : {})
+    let result = restarting(status) ? status : await client.request<Record<string, unknown>>('runtime.restart_if_idle', { requested_by: 'Xerxes desktop remote setup (build ' + String(expectedBuildId).slice(0, 12) + ')', ...(options.force ? { force: true } : {}) })
     if (options.force && result.busy === true && result.force_supported !== true) {
       // A runtime older than "restart now" ignores force; its shutdown stops
       // the running work, which the person confirmed before this was sent.

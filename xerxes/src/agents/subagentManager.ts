@@ -30,6 +30,8 @@ export const SUBAGENT_BLOCKED_TOOLS = Object.freeze(new Set([
   'CheckAgentMessages',
   'HandoffTool',
   'PeekAgent',
+  // Delegated agents use plugins; only the user-facing session installs them.
+  'PluginManageTool',
   'ResetAgent',
   'SendMessageTool',
   'SetInteractionModeTool',

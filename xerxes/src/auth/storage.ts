@@ -282,6 +282,18 @@ export class CredentialStorage {
   }
 }
 
+/**
+ * The 256-bit key credentials are encrypted with: `XERXES_CREDENTIAL_KEY` when
+ * set, otherwise the `0600` key file beside the credentials directory (created
+ * on first use). Other at-rest secret stores reuse it rather than inventing a
+ * second key.
+ */
+export async function credentialEncryptionKey(options: CredentialStorageOptions & { readonly home?: string } = {}): Promise<Buffer> {
+  const configured = options.credentialKey ?? nonEmptyEnvironmentKey()
+  if (configured !== undefined) return createHash('sha256').update(configured).digest()
+  return readOrCreateKey(resolve(options.keyPath ?? join(options.home ?? xerxesHome(), '.credential_key')))
+}
+
 let defaultStorage: CredentialStorage | undefined
 
 export function defaultCredentialStorage(): CredentialStorage {

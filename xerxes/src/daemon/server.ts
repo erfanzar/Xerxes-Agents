@@ -33,6 +33,7 @@ import { inventoryCapabilities } from '../runtime/inventoryCapabilities.js';
 import { selectBranchTurn } from '../session/branchSelection.js';
 import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
+import { describeDaemonExit, lastDaemonExit, recordDaemonExit, type DaemonExitRecord } from "./exitLog.js";
 import { createServer, type Server, type Socket } from "node:net";
 import { homedir, totalmem } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -153,7 +154,7 @@ import {
   getDefaultSlashPluginRegistry,
   type SlashPluginRegistry,
 } from "../extensions/slashPlugins.js";
-import { ManagedPlugins } from "../extensions/managedPlugins.js";
+import { MANAGED_PLUGIN_ACTIONS, ManagedPlugins, type ManagedPluginAction } from "../extensions/managedPlugins.js";
 import { installLocalSkill } from "../extensions/localSkillInstall.js";
 import { SkillsHub } from "../extensions/skillsHub.js";
 import { PluginRegistry } from "../extensions/plugins.js";
@@ -868,6 +869,8 @@ export interface DaemonServerOptions {
   readonly memoryFactory?: (session: DaemonSession | undefined) => AgentMemory;
   /** Called for `/restart`; without it the daemon performs a graceful native shutdown. */
   readonly onRestart?: () => void | Promise<void>;
+  /** Where the reason for each restart, shutdown or crash is appended (default `<xerxes home>/daemon/exits.jsonl`). */
+  readonly exitLogPath?: string;
   /** Called for RPC `shutdown`; the process host remains responsible for final cleanup. */
   readonly onShutdown?: () => void | Promise<void>;
   readonly pidPath?: string;
@@ -1030,6 +1033,8 @@ export class DaemonServer {
   private readonly cronStoreFactory: () => JobStore;
   private crashHandler: ((error: unknown) => void) | undefined;
   private readonly crashHandlersEnabled: boolean;
+  private readonly exitLogPath: string;
+  private exitNoted = false;
   private readonly interactions: DaemonInteractionBoard;
   private readonly declarativeForge: DeclarativeToolForge;
   private readonly default_agentPresetRoster: AgentPresetRoster;
@@ -1290,6 +1295,7 @@ export class DaemonServer {
         new AgentMemory(session?.cwd ? { projectRoot: session.cwd } : {}));
     this.onRestart = options.onRestart;
     this.onShutdown = options.onShutdown;
+    this.exitLogPath = options.exitLogPath ?? join(xerxesHome(), "daemon", "exits.jsonl");
     this.managedPlugins = options.managedPlugins;
     this.pluginRegistry = options.pluginRegistry ?? new PluginRegistry();
     this.pluginRegistryConfigured = options.pluginRegistry !== undefined;
@@ -1302,6 +1308,16 @@ export class DaemonServer {
       new SkillRegistry({ workspaceTrust: trustedHashWorkspaceSkills({ skillsDirectory: this.skillDirectory }) });
     this.slashPluginRegistry =
       options.slashPluginRegistry ?? getDefaultSlashPluginRegistry();
+    // Managed plugins' slash commands join the registry the dispatcher reads.
+    for (const problem of this.managedPlugins?.syncCommands(this.slashPluginRegistry) ?? []) {
+      console.error(`Managed plugin command not registered: ${problem}`);
+    }
+    // Changes made by the model (PluginManageTool) republish commands too.
+    this.managedPlugins?.onChange(() => {
+      for (const problem of this.managedPlugins?.syncCommands(this.slashPluginRegistry) ?? []) {
+        console.error(`Managed plugin command not registered: ${problem}`);
+      }
+    });
     this.snapshotManagerFactory =
       options.snapshotManagerFactory ??
       ((workspaceDirectory) => new SnapshotManager(workspaceDirectory));
@@ -1568,11 +1584,43 @@ export class DaemonServer {
     }
     const handler = (error: unknown): void => {
       console.error("Xerxes daemon crashed:", error);
+      this.noteExit("crash", undefined, errorMessage(error));
       void this.flushBeforeExit();
     };
     this.crashHandler = handler;
     process.on("uncaughtException", handler);
     process.on("unhandledRejection", handler);
+  }
+
+  /**
+   * Record why this process is about to stop and tell every connected client
+   * first. A client otherwise only sees its socket close, and a chat that
+   * never finished a turn is not on disk, so it cannot be reopened afterwards.
+   * Written once per process; never throws.
+   */
+  private noteExit(reason: DaemonExitRecord["reason"], requestedBy?: string, detail?: string): void {
+    if (this.exitNoted) return;
+    this.exitNoted = true;
+    try {
+      const isSubagent = (metadata: Readonly<Record<string, unknown>>) =>
+        String(metadata.session_kind ?? "").toLowerCase() === "subagent" || typeof metadata.subagent_id === "string";
+      const sessions = this.runtime.listSessions().filter(session => !isSubagent(session.metadata));
+      const unsaved = sessions.filter(session => !session.activeTurnId && !sessionHasHistory(session)).length;
+      const record: DaemonExitRecord = {
+        at: new Date().toISOString(),
+        reason,
+        pid: process.pid,
+        build: this.daemonBuildId(),
+        ...(requestedBy ? { requested_by: requestedBy } : {}),
+        sessions: sessions.length,
+        unsaved_sessions: unsaved,
+        ...(detail ? { detail } : {}),
+      };
+      recordDaemonExit(this.exitLogPath, record);
+      this.broadcast("notification", { level: reason === "crash" ? "error" : "warning", message: describeDaemonExit(record) });
+    } catch (error) {
+      console.error(`Could not announce the daemon exit: ${errorMessage(error)}`);
+    }
   }
 
   private removeCrashHandlers(): void {
@@ -2127,6 +2175,8 @@ export class DaemonServer {
       }
       if (this.goalDrainTimer) { clearTimeout(this.goalDrainTimer); this.goalDrainTimer = undefined; }
       this.heldGoalKicks.clear();
+      // Every other client is about to lose its socket: say why, and keep a record.
+      this.noteExit("restart", optionalString(params.requested_by) ?? "a client running another Xerxes build", force ? "forced restart" : undefined);
       this.desktopRestartPending = true;
       this.stoppingGoalWakes = true;
       this.cronScheduler.stop();
@@ -3562,6 +3612,7 @@ export class DaemonServer {
         : { ok: false, error: "no active session", trace: [] };
     }
     if (method === "shutdown") {
+      this.noteExit("shutdown", optionalString(params.requested_by) ?? "a client (shutdown request)");
       queueMicrotask(() => {
         const shutdown = this.onShutdown ? this.onShutdown() : this.stop();
         void Promise.resolve(shutdown).catch((error) =>
@@ -3697,9 +3748,11 @@ export class DaemonServer {
       .filter(action => action.startsWith(configAction[1] ?? ''))
       .map(action => ({ value: `/config ${action} `, label: action, meta: 'Settings' })) };
     const pluginAction = /^\/plugins\s+(\S*)$/.exec(text);
-    if (pluginAction) return { ok: true, kind: 'slash', completions: ['list', 'inspect', 'install', 'enable', 'disable'].filter(action => action.startsWith(pluginAction[1] ?? '')).map(action => ({ value: '/plugins ' + action + ' ', label: action, meta: 'Native tool plugins' })) };
-    const pluginInspect = /^\/plugins\s+(inspect|enable|disable)\s+(\S*)$/.exec(text);
-    if (pluginInspect) return { ok: true, kind: 'slash', completions: [...this.pluginRegistry.pluginNames, ...(this.managedPlugins?.inventory().map(item => item.name) ?? [])].sort()
+    if (pluginAction) return { ok: true, kind: 'slash', completions: ['list', 'inspect', ...MANAGED_PLUGIN_ACTIONS, 'export', 'trust', 'secret'].filter(action => action.startsWith(pluginAction[1] ?? '')).map(action => ({ value: '/plugins ' + action + ' ', label: action, meta: 'Native tool plugins' })) };
+    const pluginSecret = /^\/plugins\s+secret\s+(\S*)$/.exec(text);
+    if (pluginSecret) return { ok: true, kind: 'slash', completions: ['list', 'unset'].filter(action => action.startsWith(pluginSecret[1] ?? '')).map(action => ({ value: `/plugins secret ${action} `, label: action, meta: 'Plugin secrets (names only)' })) };
+    const pluginInspect = /^\/plugins\s+(inspect|enable|disable|reload|uninstall|export|trust|secret list|secret unset)\s+(\S*)$/.exec(text);
+    if (pluginInspect) return { ok: true, kind: 'slash', completions: [...new Set([...this.pluginRegistry.pluginNames, ...(this.managedPlugins?.inventory().map(item => item.name) ?? []), ...(this.managedPlugins?.project.inventory(this.runtime.sessionStatus(sessionKey(connection, params))?.cwd ?? this.projectDirectory ?? process.cwd()).map(item => item.name) ?? [])])].sort()
       .filter(name => name.toLowerCase().startsWith((pluginInspect[2] ?? '').toLowerCase()))
       .map(name => ({ value: `/plugins ${pluginInspect[1]} ${name} `, label: name, meta: 'Registered plugin' })) };
     const skillsAction = /^\/skills\s+(\S*)$/.exec(text);
@@ -5364,7 +5417,10 @@ export class DaemonServer {
     const plugin = this.slashPluginRegistry.resolve(command);
     if (plugin) {
       try {
-        const result = await plugin.handler();
+        const result = await plugin.handler(args, {
+          ...(key ? { sessionKey: key } : {}),
+          cwd: session?.cwd ?? this.projectDirectory ?? process.cwd(),
+        });
         const body =
           typeof result === "string" && result.trim()
             ? result
@@ -6227,38 +6283,117 @@ export class DaemonServer {
     let parsed: string[];
     try { parsed = machineArguments(args); } catch { return { ok: false, error: 'Unclosed quote in extension command' }; }
     const [action = 'list', ...parts] = parsed;
-    if (action === "install" || action === "enable" || action === "disable") {
-      if (!parts.length) return { ok: false, error: "Usage: /plugins install <local-module.ts> | enable <name-or-path> | disable <name-or-path>" };
-      if (!this.managedPlugins) return { ok: false, error: "This embedding host has not configured plugin management" };
+    const cwd = session?.cwd ?? this.projectDirectory ?? process.cwd();
+    const usage = 'Usage: /plugins [list | inspect <name> | install <local-module.ts> | install <git-url> | install --confirm <token> | enable|disable|reload|uninstall <name> | export <name> <new-directory> | trust <project-plugin> | secret list <plugin> | secret unset <plugin> <NAME>]';
+    const managed = this.managedPlugins;
+    // Republish slash commands and rebuild the tool registry for the next turn.
+    const changed = (output: string): JsonRpcPayload => {
+      const problems = managed?.syncCommands(this.slashPluginRegistry) ?? [];
+      this.runtime.reload({});
+      this.emitSlash(connection, problems.length ? `${output}\nCommands not registered:\n${problems.map(problem => `  ${problem}`).join("\n")}` : output, problems.length ? "warning" : undefined);
+      return { ok: true, output, ...(problems.length ? { command_conflicts: problems } : {}) };
+    };
+    if ((MANAGED_PLUGIN_ACTIONS as readonly string[]).includes(action) || action === 'export' || action === 'trust' || action === 'secret') {
+      if (!parts.length) return { ok: false, error: usage };
+      if (!managed) return { ok: false, error: "This embedding host has not configured plugin management" };
       try {
-        const output = await this.managedPlugins.change(action, action === "install" ? resolve(session?.cwd ?? process.cwd(), parts.join(" ")) : parts.join(" "));
-        this.runtime.reload({});
-        this.emitSlash(connection, output);
-        return { ok: true };
+        if (action === 'install') {
+          if (parts[0] === '--confirm') {
+            if (parts.length !== 2) return { ok: false, error: 'Usage: /plugins install --confirm <token>' };
+            return changed(await managed.installFromSource(parts[1]!));
+          }
+          const target = parts.join(' ');
+          if (ManagedPlugins.isGitSource(target)) {
+            // Review first: the clone is never loaded until the token is confirmed.
+            const { text, preview } = await managed.previewSource(target);
+            this.emitSlash(connection, text);
+            return { ok: true, output: text, preview: { url: preview.url, entry: preview.entry, files: preview.files.map(file => ({ ...file })), ...(preview.declaredPermissions ? { declared_permissions: preview.declaredPermissions } : {}), token: preview.token, expires_at: preview.expiresAt } };
+          }
+          return changed(await managed.change('install', resolve(cwd, target)));
+        }
+        if (action === 'export') {
+          if (parts.length !== 2) return { ok: false, error: 'Usage: /plugins export <name> <new-directory>' };
+          const destination = resolve(cwd, parts[1]!);
+          const copied = await managed.exportPlugin(parts[0]!, destination);
+          const output = [`Exported ${parts[0]} to ${destination} (${copied.length} file${copied.length === 1 ? '' : 's'}; secrets are never exported):`, ...copied.map(file => `  ${file}`)].join('\n');
+          this.emitSlash(connection, output);
+          return { ok: true, output, files: copied };
+        }
+        if (action === 'trust') {
+          if (parts.length !== 1) return { ok: false, error: 'Usage: /plugins trust <project-plugin>' };
+          const output = await managed.project.trust(cwd, parts[0]!);
+          this.runtime.reload({});
+          this.emitSlash(connection, output);
+          return { ok: true, output };
+        }
+        if (action === 'secret') {
+          const [sub, plugin, name] = parts;
+          if (sub === 'list' && plugin && parts.length === 2) {
+            await managed.project.refresh(cwd);
+            const status = await managed.secretStatus(plugin, cwd);
+            const names = [...new Set([...status.declared, ...status.set])].sort();
+            const output = names.length
+              ? [`Secrets of ${plugin} (values are never shown):`, ...names.map(secret => `  ${secret} · ${status.set.includes(secret) ? 'set' : 'not set'}${status.declared.includes(secret) ? '' : ' · no longer declared'}`), 'Set one from a terminal: xerxes plugins secret set ' + plugin + ' <NAME>'].join('\n')
+              : `${plugin} declares no secrets.`;
+            this.emitSlash(connection, output);
+            return { ok: true, output, plugin, declared: [...status.declared], set: [...status.set] };
+          }
+          if (sub === 'unset' && plugin && name && parts.length === 3) {
+            const removed = await managed.unsetSecret(plugin, name);
+            const output = removed ? `Removed secret ${name} of ${plugin}.` : `${plugin} had no stored secret ${name}.`;
+            this.emitSlash(connection, output);
+            return { ok: true, output, removed };
+          }
+          if (sub === 'set') {
+            return { ok: false, error: `Secret values are never accepted in a slash command, which would be echoed and kept in history. From a terminal run: xerxes plugins secret set ${plugin ?? '<plugin>'} ${name ?? '<NAME>'} (the value is read without echo).` };
+          }
+          return { ok: false, error: 'Usage: /plugins secret list <plugin> | secret unset <plugin> <NAME>' };
+        }
+        return changed(await managed.change(action as ManagedPluginAction, parts.join(' ')));
       } catch (error) { return { ok: false, error: errorMessage(error) }; }
     }
-    const inventory = [...this.pluginRegistry.inventory(), ...(this.managedPlugins?.inventory() ?? [])];
+    if (managed && (action === 'list' || action === 'inspect')) {
+      try { await managed.project.refresh(cwd); }
+      catch (error) { console.error(`Project plugins in ${cwd} could not be read: ${errorMessage(error)}`); }
+    }
+    const inventory = [...this.pluginRegistry.inventory(), ...(managed?.inventory() ?? []), ...(managed?.project.inventory(cwd) ?? [])];
     const source = this.pluginRegistryConfigured ? 'host-registry' : this.managedPlugins ? 'managed-modules' : 'unconfigured';
     if (action === 'inspect' && parts.length === 1) {
       const plugin = inventory.find(entry => entry.name === parts[0]);
       if (!plugin) return { ok: false, error: 'Plugin is not registered; use /plugins to inspect current registrations' };
+      const permissions = ManagedPlugins.describePermissions(plugin.permissions);
       this.emitSlash(connection, [
-        `Plugin: ${plugin.name} · ${plugin.version}`,
+        `Plugin: ${plugin.name} · ${plugin.version}${'scope' in plugin ? ` · ${plugin.scope}` : ''}`,
         `Source: ${plugin.source.kind === 'module' ? plugin.source.path : 'registered by embedding host'}`,
         plugin.description,
-        ...(['tools', 'hooks', 'channels', 'providers', 'dependencies'] as const).map(key => `${key}: ${plugin[key].join(', ') || 'none'}`),
-        'enabled' in plugin ? `State: ${plugin.enabled ? 'enabled for subsequent turns' : 'disabled'}. Native tools use the plugin_ prefix.` : 'Execution readiness has not been checked. Registered capabilities may require additional host wiring.',
+        plugin.tools.length
+          ? ['tools:', ...plugin.tools.map(tool => {
+            const stats = ManagedPlugins.isManagedEntry(plugin) ? plugin.usage[tool] : undefined;
+            const used = stats && stats.calls
+              ? ` · ${stats.calls} call${stats.calls === 1 ? '' : 's'}, ${stats.failures} failed, mean ${stats.meanMs} ms, total ${stats.totalMs} ms${stats.lastUsedAt ? `, last ${stats.lastUsedAt}` : ''}${stats.lastError ? `, last error: ${stats.lastError}` : ''}`
+              : stats ? ' · not called yet' : '';
+            return `  plugin_${tool}${plugin.toolDescriptions[tool] ? ` — ${plugin.toolDescriptions[tool]}` : ' — positional ({"args": [...]})'}${used}`;
+          })].join('\n')
+          : 'tools: none',
+        `commands: ${plugin.commands.map(command => `/${command}`).join(', ') || 'none'}`,
+        ...(['hooks', 'channels', 'providers', 'dependencies'] as const).map(key => `${key}: ${plugin[key].join(', ') || 'none'}`),
+        `permissions: ${permissions || 'none declared'}`,
+        ...('scope' in plugin ? ['  (runs in its own process; env is limited to what it declares, network is a fetch guard rail, filesystem is not enforced — not a sandbox)'] : []),
+        ...('running' in plugin ? [`process: ${plugin.running ? 'running' : 'idle (starts on the next call)'}`] : []),
+        'enabled' in plugin
+          ? `State: ${plugin.enabled ? 'enabled for subsequent turns' : 'trusted' in plugin && plugin.trusted === false ? `untrusted — review it, then /plugins trust ${plugin.name}` : 'disabled'}${'stale' in plugin && plugin.stale ? '; the file on disk changed — run /plugins reload ' + plugin.name : ''}.`
+          : 'Execution readiness has not been checked. Registered capabilities may require additional host wiring.',
       ].join('\n'));
       return { ok: true, source, plugin: { ...plugin }, execution_readiness: 'enabled' in plugin ? plugin.enabled ? 'registered' : 'disabled' : 'not_checked' };
     }
-    if (action !== 'list' || parts.length) return { ok: false, error: 'Usage: /plugins [list|inspect <name>|install <local-module.ts>|enable <name>|disable <name>]'  };
+    if (action !== 'list' || parts.length) return { ok: false, error: usage };
     const plugins = inventory.map(entry => entry.name).sort();
     const slashCommands = this.slashPluginRegistry.list();
     const lines = ["Native plugins:"];
     if (!this.pluginRegistryConfigured && !this.managedPlugins) lines.push('No native plugin registry supplied by this host. Plugin loading and management are not configured.');
     lines.push(
       ...(plugins.length
-        ? inventory.map((entry) => `  \`${entry.name}\`${"loadError" in entry && entry.loadError ? ` · failed to load: ${entry.loadError}` : "enabled" in entry ? entry.enabled ? " · enabled" : " · disabled" : ""}`)
+        ? inventory.map((entry) => `  \`${entry.name}\`${"scope" in entry && entry.scope === 'project' ? " · project" : ""}${"loadError" in entry && entry.loadError ? ` · failed to load: ${entry.loadError}` : ManagedPlugins.isManagedEntry(entry) && entry.trusted === false ? ` · untrusted — review ${entry.module}, then /plugins trust ${entry.name}` : "enabled" in entry ? entry.enabled ? " · enabled" : " · disabled" : ""}${"stale" in entry && entry.stale ? " · source changed, /plugins reload to apply" : ""}${"temporary" in entry && entry.temporary ? " · temporary (until restart; /plugins install <path> keeps it)" : ""}`)
         : ["  (no plugins loaded)"]),
     );
     if (slashCommands.length) {
@@ -6973,6 +7108,7 @@ export class DaemonServer {
       connection,
       "Restarting native daemon — re-run `xerxes` after it shuts down.",
     );
+    this.noteExit("restart", "/restart");
     queueMicrotask(() => {
       const restart = this.onRestart ? this.onRestart() : this.stop();
       void Promise.resolve(restart).catch((error) =>
@@ -10296,6 +10432,11 @@ export class DaemonServer {
       channels: Array.isArray(status.channels) ? status.channels : [],
       channels_available: status.channels_available === true,
       channels_configured: status.channels_configured === true,
+      // Why the previous runtime stopped, so `/daemon status` can explain a disconnect.
+      ...(() => {
+        const last = lastDaemonExit(this.exitLogPath);
+        return last ? { last_exit: describeDaemonExit(last) } : {};
+      })(),
     };
   }
 

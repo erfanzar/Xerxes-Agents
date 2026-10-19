@@ -35,6 +35,6 @@ test('documented example installs and executes through the managed tool boundary
     expect(JSON.parse(String(await call([''])))).toEqual({ characters: 0, words: 0, lines: 0 })
     await expect(call([42])).rejects.toThrow('exactly one string')
     await manager.change('disable', 'text-statistics')
-    await expect(call(['hello'])).rejects.toThrow('disabled')
+    await expect(call(['hello'])).rejects.toThrow('not registered')
   } finally { await rm(home, { recursive: true, force: true }) }
 })

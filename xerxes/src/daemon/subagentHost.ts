@@ -44,6 +44,7 @@ import { runTurn, type ContextReducer } from '../streaming/loop.js'
 import type { PermissionBroker, PermissionMode } from '../streaming/permissions.js'
 import type { ChatMessage } from '../types/messages.js'
 import type { ToolDefinition } from '../types/toolCalls.js'
+import { isPluginToolName, toolListAdmits, withPluginTools } from '../agents/toolPatterns.js'
 import {
   compactMessagesIfNeeded,
   compactionCompletionPort,
@@ -129,6 +130,12 @@ export interface NativeSubagentHostOptions {
   readonly temperature?: number
   readonly toolExecutor: ToolExecutor
   readonly tools: readonly ToolDefinition[]
+  /**
+   * The registry's current definitions, read before each child step so a
+   * plugin installed while the child runs reaches it (still filtered by the
+   * child's own tool policy). Absent: the spawn-time `tools` snapshot stays.
+   */
+  readonly currentTools?: () => readonly ToolDefinition[]
   readonly topK?: number
   readonly topP?: number
   /** Shared daemon store; omitted hosts keep child conversations in memory only. */
@@ -1459,6 +1466,12 @@ async function runNativeSubagent(
         // flight. Identical mechanism to a main session's `turn.steer`.
         drainSteer: () => request.drainSteer(),
         ...midTurnCompaction,
+        ...(options.currentTools ? {
+          refreshTools: (current: readonly ToolDefinition[] | undefined) => withPluginTools(
+            current,
+            subagentTools(options.currentTools!().filter(tool => isPluginToolName(tool.function.name)), request.config),
+          ),
+        } : {}),
         llm: options.llm,
         ...(permissionBroker === undefined ? {} : { permissionBroker }),
         toolExecutor: options.toolExecutor,
@@ -1854,8 +1867,8 @@ function subagentTools(
   return definitions.filter(definition => {
     const name = definition.function.name
     if (SUBAGENT_BLOCKED_TOOLS.has(name) || excluded.has(name)) return false
-    if (whitelist.length && !whitelist.includes(name)) return false
-    return !Array.isArray(config._toolsAllowed) || allowed.includes(name)
+    if (whitelist.length && !toolListAdmits(whitelist, name)) return false
+    return !Array.isArray(config._toolsAllowed) || toolListAdmits(allowed, name)
   })
 }
 

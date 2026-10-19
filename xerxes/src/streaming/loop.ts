@@ -317,6 +317,12 @@ export interface TurnDependencies {
    * edited API key.
    */
   readonly refreshLlm?: () => LlmClient | undefined
+  /**
+   * Re-read the tool list before each model step, given the one in use.
+   * Return the same array when nothing changed (keeps the request byte-stable
+   * for prompt caching). Lets a plugin installed mid-turn be called at once.
+   */
+  readonly refreshTools?: (current: readonly ToolDefinition[] | undefined) => readonly ToolDefinition[] | undefined
   /** How long a used-up plan waits for such a credential change (default 8s). */
   readonly credentialSwitchWaitMs?: number
   /** Monotonic millisecond clock for provider telemetry; Date.now by default. */
@@ -527,6 +533,8 @@ export async function* runTurn(
   // The client in use; swapped when a used-up account is replaced mid-turn.
   let llm = dependencies.llm
   let credentialSwitchAttempted = false
+  // The tools offered this step; refreshed between steps (see refreshTools).
+  let turnTools = request.tools
   let outputLimitEscalations = 0
   let outputTokenOverride: number | undefined
   // A terminally interrupted attempt still owns the output already shown to
@@ -538,6 +546,9 @@ export async function* runTurn(
   try {
     for (let toolTurn = 0; !signal?.aborted && toolTurn < turnLimit && toolTurn < maxModelTurns; toolTurn += 1) {
       appendAgentEventMessage(state, dependencies.drainAgentEvents?.())
+      if (dependencies.refreshTools) {
+        try { turnTools = dependencies.refreshTools(turnTools) } catch { /* keep the previous list */ }
+      }
       for (const steer of dependencies.drainSteer?.() ?? []) {
         const content = steer.trim()
         if (content) {
@@ -628,7 +639,7 @@ export async function* runTurn(
                 completionRequest(
                   request,
                   state.messages,
-                  forceToolFreeSummary ? [] : request.tools,
+                  forceToolFreeSummary ? [] : turnTools,
                   outputTokenOverride,
                   dependencies.roundOutputRoom?.(),
                 ),
@@ -922,7 +933,7 @@ export async function* runTurn(
       for (const visible of deduplication.events) yield visible
       const assistantText = rawAssistantText.slice(deduplication.suppressedPrefix)
       const providerToolCalls = roundToolCalls
-      const visibleTools = forceToolFreeSummary ? [] : request.tools
+      const visibleTools = forceToolFreeSummary ? [] : turnTools
       const { exposed, unconfigured } = partitionToolCalls(providerToolCalls, visibleTools)
       roundToolCalls = exposed
       const assistant: ChatMessage = {

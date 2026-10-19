@@ -10,13 +10,13 @@ function processAlive(pid: number): boolean {
 
 /** Both clients use the server's atomic idle check; neither kills a shared process. */
 export async function releaseIdleProjectDaemon(
-  request: (method: string) => Promise<Reply>,
+  request: (method: string, params?: Record<string, unknown>) => Promise<Reply>,
   isAlive: (pid: number) => boolean = processAlive,
 ): Promise<boolean> {
   const status = await request('runtime.status')
   if (typeof status.pid !== 'number' || !Number.isSafeInteger(status.pid) || status.pid <= 0) return false
   let result: Reply
-  try { result = await request('runtime.restart_if_idle') }
+  try { result = await request('runtime.restart_if_idle', { requested_by: 'xerxes client migrating a project daemon' }) }
   catch (error) {
     // Older servers cannot prove idle atomically. Preserve their ownership.
     if (error instanceof Error && /unknown method|method not found/i.test(error.message)) return false

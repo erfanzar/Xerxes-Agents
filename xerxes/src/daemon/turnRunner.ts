@@ -24,6 +24,7 @@ import { ValidationError } from '../core/errors.js'
 import { classify, ErrorKind } from '../runtime/errorClassifier.js'
 import { instructionFileUpdateLayer } from '../runtime/instructionFreshness.js'
 import { appendSkillSuggestion } from '../extensions/skillSuggestions.js'
+import { detectRepeatedCommand, pluginSuggestionMessage } from '../extensions/pluginSuggestions.js'
 import type { HookRunner } from '../extensions/hooks.js'
 import {
   renderToolGuidance,
@@ -40,6 +41,7 @@ import {
   SUBAGENT_SNAPSHOT_METADATA_KEY,
 } from '../agents/subagentPersistence.js'
 import { SUBAGENT_BLOCKED_TOOLS } from '../agents/subagentManager.js'
+import { isPluginToolName, toolListAdmits, withPluginTools } from '../agents/toolPatterns.js'
 import type { AgentSelfMemory } from '../memory/agentSelfMemory.js'
 import { makeTurnIndexerHook } from '../memory/turnIndexer.js'
 import type { Memory } from '../memory/base.js'
@@ -606,6 +608,8 @@ export class AgentTurnRunner implements TurnRunner {
       ? [{ type: 'text', text: providerText }, ...imageUrlContentParts(images)]
       : providerText
     let pendingAgentEventSnapshots: readonly SpawnedAgentSnapshot[] = []
+    // This turn's tool calls, for the repeated-command plugin suggestion.
+    const turnToolCalls: ToolCall[] = []
     try {
       // Fallback model chain (Claude Code fallback-model parity): when the
       // primary provider fails terminally with an overload-class error before
@@ -675,6 +679,18 @@ export class AgentTurnRunner implements TurnRunner {
         // live profile so the loop can compare and retry as the new identity.
         ...(!requiresLocal && this.options.resolveSessionProvider ? {
           refreshLlm: () => this.options.resolveSessionProvider?.(session, attemptModel)?.llm,
+        } : {}),
+        // A plugin installed or removed mid-turn (by the user or, with
+        // approval, the model) changes the tool list from the next step,
+        // under the same agent, mode and delegation filters as at turn start.
+        ...(this.options.toolRegistry ? {
+          refreshTools: (current: readonly ToolDefinition[] | undefined) => {
+            const registry = this.options.toolRegistry!
+            const registered = registry.deferredToolLoading ? registry.definitionsForTranscript(state.messages) : registry.definitions()
+            const plugins = registered.filter(tool => isPluginToolName(tool.function.name))
+            const permitted = toolsForAgent(toolsForAgent(plugins, agent), modeAgent) ?? []
+            return withPluginTools(current, resumedSubagent ? toolsForResumedSubagent(permitted, session.metadata) ?? [] : permitted)
+          },
         } : {}),
         ...((this.options.hookRunnerForSession || this.options.hookRunner) ? { hookRunner: this.options.hookRunnerForSession?.(session) ?? this.options.hookRunner } : {}),
         ...(permissionBroker ? { permissionBroker } : {}),
@@ -747,6 +763,7 @@ export class AgentTurnRunner implements TurnRunner {
           // Evidence references must resolve before the next provider round,
           // while the runner still owns the transcript's final synchronization.
           if (event.type === 'tool_end') session.toolExecutions = [...state.toolExecutions]
+          if (event.type === 'tool_start') turnToolCalls.push(event.call)
           accumulateSessionTelemetry(session, event)
           auditStreamEvent(this.options.auditEmitter, event, auditContext, state)
           auditTurnEnded ||= event.type === 'turn_done'
@@ -804,6 +821,14 @@ export class AgentTurnRunner implements TurnRunner {
         }
         if (!restartWithFallback) {
           for (const buffered of preContent) yield decorate(buffered)
+          // Non-blocking hint only: it never creates or installs anything.
+          const repeated = signal.aborted ? undefined : detectRepeatedCommand(turnToolCalls)
+          if (repeated) {
+            yield {
+              type: 'notification',
+              payload: { level: 'info', message: pluginSuggestionMessage(repeated), plugin_suggestion: { ...repeated } },
+            }
+          }
           break
         }
         fallbackAttempted = true
@@ -1413,8 +1438,8 @@ function toolsForAgent(
   return available.filter(tool => {
     const name = tool.function.name
     if (excluded.has(name)) return false
-    if (allowed && !allowed.has(name)) return false
-    return declared.size === 0 || declared.has(name)
+    if (allowed && !toolListAdmits(allowed, name)) return false
+    return declared.size === 0 || toolListAdmits(declared, name)
   })
 }
 
@@ -1455,9 +1480,11 @@ function toolsForResumedSubagent(
   return tools.filter(tool => {
     const name = tool.function.name
     if (SUBAGENT_BLOCKED_TOOLS.has(name) || excluded.has(name)) return false
-    if (delegatedSurface && !delegatedSurface.has(name)) return false
-    if (whitelist.size && !whitelist.has(name)) return false
-    return !allowed.size || allowed.has(name)
+    if (whitelist.size && !toolListAdmits(whitelist, name)) return false
+    // The delegated surface lists concrete names from spawn time; plugin tools
+    // installed since then pass on the whitelist pattern alone.
+    if (delegatedSurface && !delegatedSurface.has(name) && !(isPluginToolName(name) && whitelist.size)) return false
+    return !allowed.size || toolListAdmits(allowed, name)
   })
 }
 

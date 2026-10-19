@@ -222,7 +222,7 @@ export class DaemonRpc extends EventEmitter {
     if (this.externalSocket) return { ok: false, error: 'Update the runtime on the remote machine, then reconnect this workspace.' }
     await this.ensure()
     const previous = this.socket
-    let result = await this.send<Record<string, unknown>>('runtime.restart_if_idle', force ? { force: true } : {})
+    let result = await this.send<Record<string, unknown>>('runtime.restart_if_idle', { requested_by: 'Xerxes desktop app (runtime update)', ...(force ? { force: true } : {}) })
     let legacyForced = false
     if (force && result.ok !== true && result.busy === true && result.force_supported !== true) {
       // A runtime older than "restart now": its shutdown stops the running
@@ -313,7 +313,7 @@ export class DaemonRpc extends EventEmitter {
     // Keep existing project work attached until its old runtime exits.
     const legacy = legacyProjectDaemonPaths(this.projectDir, this.env).socketPath
     if (!this.env.XERXES_DAEMON_SOCKET && (process.platform === 'win32' || existsSync(legacy)) && await this.tryAttach(legacy)) {
-      if (!await releaseIdleProjectDaemon(method => this.send(method, {}))) {
+      if (!await releaseIdleProjectDaemon((method, params) => this.send(method, params ?? {}))) {
         this.announce(true)
         return
       }
