@@ -7,6 +7,15 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.51 — 2026-10-20
+
+- Plugins: tools carry their own description and JSON-schema parameters; `/plugins uninstall` and `/plugins reload` (no restart needed); plugins can add slash commands; installed plugin tools now actually reach the main session and the full-access subagents (`plugin_*` in agent tool lists).
+- The model can manage plugins with `PluginManageTool`. Every change asks for approval, even in accept-all; installs are temporary unless kept; the plugin's own tests must pass first. A plugin installed mid-turn is callable at the next step.
+- Plugins run in their own `bun` process: a hung or crashed plugin is restarted and never takes Xerxes down. Declared `env` is enforced (plus `PATH`, `TMPDIR`, `LANG`); `network` guards `fetch` only; `filesystem` is shown, not enforced. This is a guard rail, not a sandbox.
+- Encrypted per-plugin secrets, set from a terminal (`xerxes plugins secret set`) or the desktop Plugins tab, never through chat. Trusted project plugins under `.xerxes/plugins/` (`/plugins trust`), loaded before the first turn. Per-tool usage numbers, `/plugins export`, and git installs that preview before a one-time confirmation. Xerxes suggests `/plugin-creator` when the model repeats the same shell command.
+- A conventional `<workspace>/plugins` folder is no longer loaded without a trust decision.
+- Disconnects: the runtime records why it restarted, shut down or crashed (`~/.xerxes/daemon/exits.jsonl`), warns every client first, and `/daemon status` shows the last reason. A TUI whose chat had no finished turn when the runtime restarted opens a new chat instead of stopping on "saved conversation is missing".
+
 ## 0.6.50 — 2026-10-11
 
 - An agent title longer than 48 characters is shortened instead of refusing the spawn. A title is a label, but the schema rejected it, and one long title in a `SpawnAgents` batch failed all six agents in it ("agents[3].title: must be at most 48 characters").
