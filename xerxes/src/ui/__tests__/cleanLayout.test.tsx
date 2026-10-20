@@ -309,7 +309,7 @@ describe('clean terminal layout', () => {
       expect(s.captureCharFrame()).toContain(kind === 'skillsHub' ? 'Discover' : 'Inspect')
       act(() => s.mockInput.pressKey('END'))
       await s.flush()
-      expect(s.captureCharFrame()).toContain(kind === 'skillsHub' ? 'Use it' : 'Manage')
+      expect(s.captureCharFrame()).toContain(kind === 'skillsHub' ? 'Use it' : 'Remove')
       act(() => s.mockInput.pressKey('F10'))
       expect(getOverlayState().goal).toBe(false)
       act(() => s.mockInput.pressKey('q'))

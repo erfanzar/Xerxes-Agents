@@ -105,11 +105,11 @@ function scriptedFixture(replies: Record<string, Record<string, unknown>>) {
 test('restart now forces a busy runtime and reports blockers when it is not forced', async () => {
   const forced = scriptedFixture({ 'runtime.status': { pid: 42, daemon_build_id: 'old' }, 'runtime.restart_if_idle': { ok: true } })
   expect(await prepareManagedRuntime(forced.create, 'new', forced.wait, {}, { force: true })).toEqual({ busy: false })
-  expect(forced.calls).toEqual(['start:false', 'runtime.status', 'runtime.restart_if_idle {"force":true}', 'close', 'exited:42', 'start:true', 'runtime.status', 'close'])
+  expect(forced.calls).toEqual(['start:false', 'runtime.status', 'runtime.restart_if_idle {"requested_by":"Xerxes desktop remote setup (build new)","force":true}', 'close', 'exited:42', 'start:true', 'runtime.status', 'close'])
   const queued = scriptedFixture({ 'runtime.status': { pid: 42, daemon_build_id: 'old' },
     'runtime.restart_if_idle': { ok: false, busy: true, force_supported: true, blockers: ['Messaging channels are connected'], waiting_for_goal_round: true } })
   expect(await prepareManagedRuntime(queued.create, 'new', queued.wait, {})).toEqual({ busy: true, blockers: ['Messaging channels are connected'], waitingForGoalRound: true })
-  expect(queued.calls).toContain('runtime.restart_if_idle')
+  expect(queued.calls).toContain('runtime.restart_if_idle {"requested_by":"Xerxes desktop remote setup (build new)"}')
   // A runtime older than "restart now" ignores force: the confirmed restart uses its shutdown.
   const older = scriptedFixture({ 'runtime.status': { pid: 42, daemon_build_id: 'old' }, 'runtime.restart_if_idle': { ok: false, busy: true }, shutdown: { ok: true } })
   expect(await prepareManagedRuntime(older.create, 'new', older.wait, {}, { force: true })).toEqual({ busy: false })
