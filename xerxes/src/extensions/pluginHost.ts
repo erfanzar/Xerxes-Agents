@@ -195,6 +195,19 @@ const ABORT_GRACE_MS = 2_000
 const DEFAULT_LOAD_TIMEOUT_MS = 30_000
 const STDERR_TAIL_CHARS = 2_000
 
+/** Variables every plugin process gets without declaring them: enough to run programs by name and write temp files. */
+export const PLUGIN_BASELINE_ENV = Object.freeze(['PATH', 'TMPDIR', 'LANG'] as const)
+
+/** The daemon's values of {@link PLUGIN_BASELINE_ENV}; HOME and everything else must be declared. */
+export function pluginBaselineEnvironment(source: Readonly<Record<string, string | undefined>> = process.env): Record<string, string> {
+  const env: Record<string, string> = {}
+  for (const key of PLUGIN_BASELINE_ENV) {
+    const value = source[key]
+    if (typeof value === 'string' && value) env[key] = value
+  }
+  return env
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
@@ -225,7 +238,9 @@ export class PluginProcess {
     const timeout = this.options.loadTimeoutMs ?? DEFAULT_LOAD_TIMEOUT_MS
     const child = Bun.spawn([this.options.executable ?? process.execPath, '--no-env-file', harness()], {
       cwd: dirname(this.options.path),
-      env: { ...(this.options.env ?? {}) },
+      // A minimal baseline so a plugin can run programs by name and use a temp
+      // directory; everything else (HOME included) must be declared.
+      env: { ...pluginBaselineEnvironment(), ...(this.options.env ?? {}) },
       stdin: 'ignore',
       stdout: 'pipe',
       stderr: 'pipe',

@@ -244,6 +244,37 @@ test('project plugins load only after their exact content is trusted, and editin
   } finally { await cleanup() }
 })
 
+test('every plugin process can run programs by name: PATH and TMPDIR are given, HOME still has to be declared', async () => {
+  const { root, manager, call, cleanup } = await fixture('plugin-iso-path-')
+  try {
+    const path = join(root, 'which.ts')
+    await writeFile(path, `export function register(r) {
+      r.registerPlugin({ name: 'iso' })
+      ${structured('which', `() => ({ path: process.env.PATH ?? null, home: process.env.HOME ?? null, bun: Bun.which('bun') !== null || Bun.which(process.execPath) !== null })`)}
+    }`)
+    await manager.change('install', path)
+    const seen = JSON.parse(await call('plugin_which'))
+    expect(seen.path).toBe(process.env.PATH ?? null)
+    expect(seen.home).toBeNull()
+  } finally { await cleanup() }
+})
+
+test('a turn can wait for the workspace scan: untrusted and trusted project plugins are known once it resolves', async () => {
+  const { root, manager, cleanup } = await fixture('plugin-iso-ready-')
+  try {
+    const workspace = join(root, 'ws')
+    const folder = join(workspace, '.xerxes', 'plugins', 'early')
+    await mkdir(folder, { recursive: true })
+    await writeFile(join(folder, 'index.ts'), `export function register(r) { r.registerPlugin({ name: 'early' }); r.registerTool('early_hi', { description: 'hi', parameters: { type: 'object' }, execute: () => 'early' }, undefined, 'early') }`)
+    expect(manager.project.inventory(workspace)).toEqual([])
+    await manager.project.whenReady(workspace)
+    expect(manager.project.inventory(workspace)[0]).toMatchObject({ name: 'early', trusted: false })
+    // Already scanned: resolves immediately, and an empty workspace resolves too.
+    await manager.project.whenReady(workspace, 1)
+    await expect(manager.project.whenReady(join(root, 'empty'))).resolves.toBeUndefined()
+  } finally { await cleanup() }
+})
+
 test('git installs preview without running anything, need a one-time token, and reject unsafe URLs; export never overwrites', async () => {
   const gitCalls: string[][] = []
   const git: GitRunner = async args => {

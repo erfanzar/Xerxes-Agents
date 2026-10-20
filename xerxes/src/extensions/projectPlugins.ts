@@ -81,6 +81,23 @@ export class ProjectPlugins {
     return tracked
   }
 
+  /**
+   * Resolve once this workspace has been scanned at least once, waiting at
+   * most `timeoutMs` (a slow scan must not stall a turn). Starts the scan when
+   * none is running. Never throws: a failed scan is logged by its starter.
+   */
+  async whenReady(workspace: string, timeoutMs = 5_000): Promise<void> {
+    const root = resolve(workspace)
+    if (this.workspaces.has(root) && !this.loading.has(root)) return
+    const pending = this.loading.get(root) ?? this.refresh(root)
+    let timer: ReturnType<typeof setTimeout> | undefined
+    await Promise.race([
+      pending.then(() => undefined, () => undefined),
+      new Promise<void>(done => { timer = setTimeout(done, timeoutMs) }),
+    ])
+    if (timer) clearTimeout(timer)
+  }
+
   private async scan(root: string): Promise<WorkspaceState> {
     const previous = this.workspaces.get(root)
     const trust = await this.readTrust()

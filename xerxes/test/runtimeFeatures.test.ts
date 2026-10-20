@@ -161,9 +161,28 @@ required_tools: [native_tool]
 Inspect native runtime state.
 `, 'utf8')
 
+    // A conventional `<workspace>/plugins` folder is never probed: repository
+    // code must not run without a trust decision.
+    const unconfigured = await composeRuntimeFeatures({
+      enabled: true,
+      workspaceRoot: workspace,
+      workspaceSkillTrust: { isTrusted: () => true },
+    }, {
+      // The skill below needs native_tool; without the plugin it is supplied here.
+      toolLookup: { hasTool: () => true },
+    })
+    try {
+      expect(unconfigured.discovery.pluginDirectories).toEqual([])
+      expect(unconfigured.discovery.pluginNames).toEqual([])
+      expect(unconfigured.pluginRegistry.getTool('native_tool')).toBeUndefined()
+    } finally {
+      await unconfigured.close()
+    }
+
     const state = await composeRuntimeFeatures({
       enabled: true,
       workspaceRoot: workspace,
+      pluginDirectories: ['plugins'],
       enabledSkills: ['inspect'],
       workspaceSkillTrust: { isTrusted: () => true },
     })

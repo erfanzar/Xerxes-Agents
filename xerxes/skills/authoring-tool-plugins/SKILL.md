@@ -80,12 +80,12 @@ registry.registerPlugin({
 
 What is actually enforced — say this honestly in READMEs:
 
-- `env`: enforced. The process starts with an empty environment (no `.env` loading) and receives only declared variables.
+- `env`: enforced. The process starts without the daemon's environment (no `.env` loading) and receives only `PATH`, `TMPDIR` and `LANG` (so programs can be run by name) plus declared variables. `HOME` must be declared.
 - `network`: a guard rail on `fetch` only. `node:http`, `node:net`, `Bun.fetch` and child processes are not intercepted.
 - `filesystem`: declared and shown to the user, not enforced.
 - The plugin runs with the user's privileges. This is **not** a security sandbox.
 
-Secrets: read them from `context.secrets.WEATHER_API_KEY` inside `execute`; only declared names that the user has set are present. The user sets a value in a terminal with `xerxes plugins secret set weather WEATHER_API_KEY` (input hidden; stored encrypted, mode 0600). `/plugins secret list weather` shows names and set/unset only; `/plugins secret unset weather WEATHER_API_KEY` removes one. Never ask for a secret in chat, never log it, never put it in code or tests.
+Secrets: read them from `context.secrets.WEATHER_API_KEY` inside `execute`; only declared names that the user has set are present. The user sets a value in a terminal with `xerxes plugins secret set weather WEATHER_API_KEY` (input hidden; stored encrypted, mode 0600), or in the desktop app's Plugins tab (a password field that calls the `plugins.secret.set` RPC). `/plugins secret list weather` shows names and set/unset only; `/plugins secret unset weather WEATHER_API_KEY` removes one. Never ask for a secret in chat, never log it, never put it in code or tests.
 
 ## Installing, sharing and project plugins
 

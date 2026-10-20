@@ -2767,6 +2767,37 @@ export class DaemonServer {
         } catch (error) { return { ok: false, error: errorMessage(error) }; }
       });
     }
+    if (method === "plugins.secret.set") {
+      // A value set here never enters a transcript, a slash echo or a log:
+      // it goes straight to the encrypted store, and the reply names only
+      // the secret. Clients send it from a password field.
+      if (!this.managedPlugins) return { ok: false, error: "This embedding host has not configured plugin management" };
+      const plugin = optionalString(params.plugin);
+      const name = optionalString(params.name);
+      const value = typeof params.value === "string" ? params.value : "";
+      if (!plugin || !name) return { ok: false, error: "plugin and name are required" };
+      if (!value) return { ok: false, error: "No value given; nothing was stored." };
+      if (value.length > 16_384) return { ok: false, error: "Secret value is too long (16 KB maximum)." };
+      const cwd = this.runtime.sessionStatus(sessionKey(connection, params))?.cwd ?? this.projectDirectory ?? process.cwd();
+      try {
+        await this.managedPlugins.setSecret(plugin, name, value, cwd);
+        return { ok: true, plugin, name, stored: true };
+      } catch (error) {
+        return { ok: false, error: errorMessage(error) };
+      }
+    }
+    if (method === "plugins.secret.status") {
+      if (!this.managedPlugins) return { ok: false, error: "This embedding host has not configured plugin management" };
+      const plugin = optionalString(params.plugin);
+      if (!plugin) return { ok: false, error: "plugin is required" };
+      const cwd = this.runtime.sessionStatus(sessionKey(connection, params))?.cwd ?? this.projectDirectory ?? process.cwd();
+      try {
+        const status = await this.managedPlugins.secretStatus(plugin, cwd);
+        return { ok: true, plugin, declared: [...status.declared], set: [...status.set] };
+      } catch (error) {
+        return { ok: false, error: errorMessage(error) };
+      }
+    }
     if (method === "runtime.status") {
       return this.runtimeStatusPayload();
     }

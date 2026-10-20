@@ -41,7 +41,7 @@ export interface RuntimeFeaturesConfig {
   readonly workspaceRoot?: string
   readonly pluginDirectories?: readonly string[]
   readonly skillDirectories?: readonly string[]
-  /** Also probe `<workspaceRoot>/plugins` and `<workspaceRoot>/skills` when they exist. Defaults to true. */
+  /** Also probe `<workspaceRoot>/skills` when it exists. Defaults to true. Plugins are never discovered by convention. */
   readonly discoverConventionalExtensions?: boolean
   readonly guardrails?: readonly string[]
   readonly policy?: ToolPolicy
@@ -140,7 +140,10 @@ export async function resolveRuntimeExtensionDirectories(
   const pluginDirectories = resolveConfiguredDirectories(config.pluginDirectories ?? [], workspaceRoot, filesystem)
   const skillDirectories = resolveConfiguredDirectories(config.skillDirectories ?? [], workspaceRoot, filesystem)
   if ((config.discoverConventionalExtensions ?? true) && workspaceRoot !== undefined) {
-    await appendConventionalDirectory(pluginDirectories, workspaceRoot, 'plugins', filesystem)
+    // Only skills are probed by convention. A conventional `<workspace>/plugins`
+    // folder would run whatever code a repository ships without a trust check;
+    // workspace plugins load through `.xerxes/plugins/` and `/plugins trust`
+    // (projectPlugins.ts). Plugin directories here must be configured explicitly.
     await appendConventionalDirectory(skillDirectories, workspaceRoot, 'skills', filesystem)
   }
   return Object.freeze({
@@ -354,7 +357,7 @@ function resolveConfiguredDirectories(
 async function appendConventionalDirectory(
   directories: string[],
   workspaceRoot: string,
-  name: 'plugins' | 'skills',
+  name: 'skills',
   filesystem: RuntimeFeatureFilesystem,
 ): Promise<void> {
   const candidate = filesystem.resolve(filesystem.join(workspaceRoot, name))

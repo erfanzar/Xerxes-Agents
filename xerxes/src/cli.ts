@@ -225,6 +225,7 @@ const HELP_GROUPS: readonly {
       ["xerxes install --cloud-code [--force] [--dry-run]", "install a companion integration"],
       ["xerxes export [session]", "write a session transcript to disk"],
       ["xerxes skill <skill> [arguments]", "run a bundled skill"],
+      ["xerxes plugins secret set|unset|list <plugin> [NAME]", "store a plugin secret (read without echo) or list names only"],
       ["xerxes setup [--provider <p>] [--model <m>] [--api-key <k>] [--permission-mode <mode>]", "create an initial provider configuration"],
       ["xerxes workspace create|exec|read|write|destroy --id <id>", "manage a local sandbox workspace"],
       ["xerxes schedule create|fire|list --project-dir <path> [--socket <path>]", "manage jobs in the running project's /schedules daemon"],
@@ -2128,8 +2129,12 @@ function daemonRuntime(
     // the full registry would hide the very thing this setting changes.
     activeToolCount = tools.definitionsForTranscript([]).length;
     const contextLimit = resolvedProfileContextLimit(profileStore.active(), connection.model);
+    const managedPluginHost = host.managedPlugins;
     return new AgentTurnRunner({
       promptSnapshots,
+      // The project-plugin scan starts in the background when this runner is
+      // built; a turn waits briefly for it so its first step can call them.
+      ...(managedPluginHost ? { beforeTurn: (session: DaemonSession) => managedPluginHost.project.whenReady(session.cwd || workspaceRoot) } : {}),
       ...(host.remoteProviderBindings ? { remoteProviderBindings: host.remoteProviderBindings } : {}),
       resolveSessionProvider: (session, model) => {
         if (!session.metadata.provider_profile && (config.runtime.provider || config.runtime.base_url || config.runtime.api_key)) return { llm };

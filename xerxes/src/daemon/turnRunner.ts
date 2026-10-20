@@ -163,6 +163,12 @@ export interface AgentTurnRunnerOptions {
    */
   readonly toolRegistry?: ToolRegistry
   /**
+   * Awaited once at the start of each turn, before its tools are read. The
+   * host uses it to let a workspace's trusted project plugins finish loading
+   * so the very first turn can call them. Must be bounded; failures are ignored.
+   */
+  readonly beforeTurn?: (session: DaemonSession) => Promise<void>
+  /**
    * Session default effort hint for reasoning APIs. This is only the base
    * layer of per-turn resolution: ultra mode and escalation keywords in the
    * prompt override it for that turn, so a value here never forces a
@@ -332,6 +338,10 @@ export class AgentTurnRunner implements TurnRunner {
   ): AsyncGenerator<DaemonEvent> {
     // A turn that failed before its finally must not leak into this one.
     this.liveStates.delete(session.id)
+    if (this.options.beforeTurn) {
+      try { await this.options.beforeTurn(session) } catch { /* bounded host preparation; never fails the turn */ }
+      signal.throwIfAborted()
+    }
     const selectedModel = this.options.agentDefinitions?.get(session.agentId)?.model || session.model || this.options.model
     const requiresLocal = Object.hasOwn(session.metadata, LOCAL_PROVIDER_BINDING)
     const localClient = this.options.remoteProviderBindings?.client(session, selectedModel)

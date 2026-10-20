@@ -479,7 +479,8 @@ function ExtensionsPanel({ snap }: { snap: Snapshot }): ReactElement {
     [selectedSkill, setSelectedSkill] = useState(''),
     [path, setPath] = useState(''),
     [plugins, setPlugins] = useState<RpcRecord[]>([]),
-    [confirmUninstall, setConfirmUninstall] = useState('')
+    [confirmUninstall, setConfirmUninstall] = useState(''),
+    [secretDrafts, setSecretDrafts] = useState<Record<string, { secret: string; value: string }>>({})
   useEffect(() => {
     void request.run(async () => {
       const result = await request.call('capabilities.list')
@@ -590,6 +591,42 @@ function ExtensionsPanel({ snap }: { snap: Snapshot }): ReactElement {
                 </button>
               )}
               <button onClick={() => setDetail(pluginDetail(plugin))}>Inspect</button>
+              {pluginSecretNames(plugin).length > 0 && (
+                <form
+                  className="plugin-secret"
+                  onSubmit={event => {
+                    event.preventDefault()
+                    const name = text(plugin.name)
+                    const draft = secretDrafts[name] ?? { secret: pluginSecretNames(plugin)[0]!, value: '' }
+                    if (!draft.value) return
+                    void request.run(async () => {
+                      // The value goes only to plugins.secret.set: never a slash command, the transcript or the detail pane.
+                      const result = await request.call('plugins.secret.set', { plugin: name, name: draft.secret, value: draft.value })
+                      if (request.alive.current) {
+                        setSecretDrafts(drafts => ({ ...drafts, [name]: { secret: draft.secret, value: '' } }))
+                        setDetail(result.ok === true ? `Stored secret ${draft.secret} for ${name}.` : text(result.error) || 'The secret was not stored.')
+                      }
+                    })
+                  }}
+                >
+                  <select
+                    aria-label={`Secret of ${text(plugin.name)}`}
+                    value={secretDrafts[text(plugin.name)]?.secret ?? pluginSecretNames(plugin)[0]}
+                    onChange={event => { const name = text(plugin.name); const secret = event.target.value; setSecretDrafts(drafts => ({ ...drafts, [name]: { secret, value: drafts[name]?.value ?? '' } })) }}
+                  >
+                    {pluginSecretNames(plugin).map(secret => <option key={secret} value={secret}>{secret}</option>)}
+                  </select>
+                  <input
+                    type="password"
+                    autoComplete="off"
+                    aria-label="Secret value"
+                    placeholder="value (never shown again)"
+                    value={secretDrafts[text(plugin.name)]?.value ?? ''}
+                    onChange={event => { const name = text(plugin.name); const value = event.target.value; setSecretDrafts(drafts => ({ ...drafts, [name]: { secret: drafts[name]?.secret ?? pluginSecretNames(plugin)[0]!, value } })) }}
+                  />
+                  <button type="submit" disabled={request.busy || !(secretDrafts[text(plugin.name)]?.value)}>Set secret</button>
+                </form>
+              )}
             </div>
           ))}
           <p>Install a local plugin module or create a bundle in Creator mode.</p>
@@ -1618,6 +1655,13 @@ function pluginDetail(plugin: RpcRecord): string {
       ? ['Declared permissions:', ...declared.map(([key, values]) => `- ${key}: ${values.join(', ')} (${notes[key]})`), 'Plugins run in their own process with your user privileges; this is not a sandbox.'].join('\n')
       : 'Declared permissions: none',
   ].filter(Boolean).join('\n\n')
+}
+
+/** Secret names a plugin declares in `permissions.secrets`, from its inventory row. */
+function pluginSecretNames(plugin: RpcRecord): string[] {
+  const permissions = plugin.permissions && typeof plugin.permissions === 'object' && !Array.isArray(plugin.permissions)
+    ? plugin.permissions as Record<string, unknown> : {}
+  return Array.isArray(permissions.secrets) ? permissions.secrets.filter((name): name is string => typeof name === 'string' && name.length > 0) : []
 }
 
 function pluginArgument(value: string): string {

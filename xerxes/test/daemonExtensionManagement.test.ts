@@ -9,6 +9,7 @@ import { join } from 'node:path'
 import { DaemonServer } from '../src/daemon/server.js'
 import { InMemoryDaemonRuntime } from '../src/daemon/runtime.js'
 import { ManagedPlugins } from '../src/extensions/managedPlugins.js'
+import { PluginSecretStore } from '../src/extensions/pluginSecrets.js'
 
 test('daemon installs local skills with assets and manages native plugin modules through slash', async () => {
   const root = await mkdtemp(join(tmpdir(), 'extension-rpc-'))
@@ -57,6 +58,44 @@ test('daemon installs local skills with assets and manages native plugin modules
     expect(manager.inventory().map(item => item.name)).toEqual(['greeting'])
     expect(await request('slash', { command: '/xdaemonecho again' })).not.toMatchObject({ plugin: 'xdaemonecho' })
   } finally { manager.clearCommands(); client.close(); await server.stop(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('plugin secrets are set over RPC without the value ever appearing in a reply or notification', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'plugin-secret-rpc-'))
+  const secretsPath = join(root, 'home', 'plugin-secrets.json')
+  const manager = new ManagedPlugins(join(root, 'home', 'plugins.json'), {
+    secrets: new PluginSecretStore(secretsPath, { key: async () => Buffer.alloc(32, 9) }),
+    projectTrustFile: join(root, 'home', 'trust.json'),
+    sourcesDirectory: join(root, 'home', 'sources'),
+  })
+  const runtime = new InMemoryDaemonRuntime(undefined, { currentProjectDirectory: root, sessionDirectory: join(root, 'sessions') })
+  const server = new DaemonServer({ socketPath: join(root, 'daemon.sock'), runtime, managedPlugins: manager, exitLogPath: join(root, 'exits.jsonl') })
+  await writeFile(join(root, 'vault.ts'), `export function register(r) {
+    r.registerPlugin({ name: 'vault', permissions: { secrets: ['API_TOKEN'] } })
+    r.registerTool('vault_peek', { description: 'peek', parameters: { type: 'object' }, execute: (_input, context) => context.secrets?.API_TOKEN === 'super-secret-value' ? 'match' : 'missing' }, undefined, 'vault')
+  }`)
+  await server.start()
+  const client = await DaemonParityClient.connect(join(root, 'daemon.sock'))
+  const frames: string[] = []
+  let id = 0
+  const request = async (method: string, params: Record<string, unknown>) => {
+    const current = ++id
+    client.send({ jsonrpc: '2.0', id: current, method, params })
+    const frame = await client.next(candidate => candidate.id === current)
+    frames.push(JSON.stringify(frame))
+    return frame.result
+  }
+  try {
+    await request('initialize', { session_key: 'secrets', project_dir: root })
+    expect(await request('slash', { command: '/plugins install vault.ts' })).toMatchObject({ ok: true })
+    expect(await request('plugins.secret.status', { plugin: 'vault' })).toEqual({ ok: true, plugin: 'vault', declared: ['API_TOKEN'], set: [] })
+    expect(await request('plugins.secret.set', { plugin: 'vault', name: 'OTHER', value: 'x' })).toMatchObject({ ok: false, error: expect.stringContaining('does not declare') })
+    expect(await request('plugins.secret.set', { plugin: 'vault', name: 'API_TOKEN', value: '' })).toMatchObject({ ok: false })
+    expect(await request('plugins.secret.set', { plugin: 'vault', name: 'API_TOKEN', value: 'super-secret-value' })).toEqual({ ok: true, plugin: 'vault', name: 'API_TOKEN', stored: true })
+    expect(await request('plugins.secret.status', { plugin: 'vault' })).toMatchObject({ set: ['API_TOKEN'] })
+    expect(frames.join('\n')).not.toContain('super-secret-value')
+    expect(await Bun.file(secretsPath).text()).not.toContain('super-secret-value')
+  } finally { manager.close(); client.close(); await server.stop(); await rm(root, { recursive: true, force: true }) }
 })
 
 interface Frame {
