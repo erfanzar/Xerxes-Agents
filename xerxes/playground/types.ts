@@ -83,6 +83,8 @@ export interface EvaluationSubmitRequest {
 export interface EvaluationSessionPort {
   approve(requestId: string): Promise<void>
   close(): Promise<void>
+  /** Optional measured, cumulative count for the active session. Never infer this from token counts. */
+  getCompactionCount?(): number | Promise<number>
   reset(): Promise<void>
   start(request: EvaluationStartRequest): Promise<EvaluationStartResult>
   submit(request: EvaluationSubmitRequest): AsyncIterable<EvaluationEvent> | Promise<AsyncIterable<EvaluationEvent>>

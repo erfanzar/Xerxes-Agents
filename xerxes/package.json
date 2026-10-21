@@ -23,6 +23,7 @@
     "playground:warmup": "bun ./playground/cli.ts",
     "playground:hard": "bun ./playground/hardCli.ts",
     "playground:improve": "bun ./playground/improveCli.ts",
+    "playground:recall": "bun ./playground/recallCli.ts",
     "real-use": "bun ./scripts/realUseCheck.ts",
     "remove-docstrings": "bun ./src/maintenance/removeDocstrings.ts",
     "smoke:ui": "bun ./scripts/smokeTuiGateway.ts && bun ./scripts/smokeTuiComplete.ts",

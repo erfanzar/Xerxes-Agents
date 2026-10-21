@@ -126,6 +126,15 @@ return { value: chosen.value, fallback: chosen.fallback, reason: chosen.reason }
 
 Wrapper metadata stays hidden from the judge; letters A–Z are shuffled. An optional `score(value)` runs only after commitment. Invalid judge replies, failed selected scoring, or a score below the baseline cause an explicit baseline fallback. Judge agents count toward Workflow budgets and `expect_agents`.
 
+### Measure long-session recall after compaction
+
+```sh
+bun run --cwd xerxes playground:recall -- --dry-run --facts 10 --seed 42 --filler-tokens 384000
+bun run --cwd xerxes playground:recall -- --transport /absolute/path/to/transport.ts --facts 10 --seed 42 --filler-tokens 384000
+```
+
+Like `playground:hard` and `playground:improve`, the transport explicitly exports `createEvaluationSessionPort(context)` and owns provider configuration; no credentials are discovered. RECALL plants seeded synthetic keys, paths, thresholds, decisions and reasons, adds generated CI log-review turns, then asks exact-answer questions in the **same session**. Answers match only after case/whitespace normalization (no LLM judge). Increase `--filler-tokens` for larger context windows: this character-based estimate does **not** guarantee compaction. The report gives per-fact results, recall rate, wall time and measured pre-recall compactions if the port implements `getCompactionCount()` (a cumulative active-session counter); otherwise it says **unknown**, never inferring compaction from token counts. Dry-run imports no transport. No `session_search` tool is required; available memory/search behavior remains part of the agent being measured. SIGINT cancels execution and closes the private session.
+
 ## Models and intelligence
 
 Open `/config`, then choose provider, model and reasoning effort for **light**, **balanced** and **smart**. Ask “List available models and reasoning levels; use a light agent to locate tests and a smart agent to review concurrency.” Choose configured models, not guessed names.
