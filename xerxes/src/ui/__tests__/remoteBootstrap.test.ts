@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import { remoteBootstrapScript } from '../lib/remoteBootstrap.js'
 import { remoteBunInstallScript } from '../lib/remoteBun.js'
 import { createHash } from 'node:crypto'
+import { storedZip } from './support/zipArchive.js'
 
 it('installs missing remote Xerxes, skips unchanged builds, updates and preserves previous releases', async () => {
   const root = await mkdtemp(join(tmpdir(), 'xerxes-bootstrap-'))
@@ -49,10 +50,11 @@ if [ "$1" != install ] && [ "$1" != run ] && [ "\${2:-}" != --help ]; then print
     // official build, check it, and use its user-owned binary in the same SSH session.
     const asset = Bun.spawnSync(['sh', '-c', remoteBunInstallScript() + '\nxerxes_bun_asset'], { env: { ...process.env, PATH: bin + ':/usr/bin:/bin' } }).stdout.toString()
     const releases = join(root, 'releases')
-    await mkdir(join(releases, asset), { recursive: true })
-    await Bun.write(join(releases, asset, 'bun'), await Bun.file(join(bin, 'bun')).text())
+    await mkdir(releases, { recursive: true })
+    const stub = await Bun.file(join(bin, 'bun')).text()
     await rm(join(bin, 'bun'))
-    expect(Bun.spawnSync(['zip', '-qr', asset + '.zip', asset], { cwd: releases }).exitCode).toBe(0)
+    // Written in-process: many Linux hosts (and CI images) have no `zip` binary.
+    await Bun.write(join(releases, asset + '.zip'), storedZip([{ path: asset + '/' }, { path: asset + '/bun', content: stub, mode: 0o755 }]))
     const digest = createHash('sha256').update(new Uint8Array(await Bun.file(join(releases, asset + '.zip')).arrayBuffer())).digest('hex')
     await Bun.write(join(releases, 'SHASUMS256.txt'), digest + '  ' + asset + '.zip\n')
     await executable('curl', 'while [ "$1" != -o ]; do url=$1; shift; done; cp "$RELEASES/$(basename "$url")" "$2"\n')

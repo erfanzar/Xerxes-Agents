@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { remoteBunInstallScript } from '../lib/remoteBun.js'
+import { storedZip } from './support/zipArchive.js'
 
 // Only these host tools are visible to the script, so a host without curl
 // (or without wget, unzip, a hashing tool) is simulated by leaving it out.
@@ -33,11 +34,8 @@ const host = (system: string, machine: string) => executable('uname', `case "$1"
 
 /** A real Bun release archive layout: `<asset>/bun` inside `<asset>.zip`, listed in SHASUMS256.txt. */
 async function release(asset: string, binary = '#!/bin/sh\necho 1.3.99\n', sum?: string): Promise<void> {
-  const stage = join(root, 'stage')
-  await mkdir(join(stage, asset), { recursive: true })
-  await Bun.write(join(stage, asset, 'bun'), binary)
-  const zipped = Bun.spawnSync(['zip', '-qr', join(fixtures, `${asset}.zip`), asset], { cwd: stage })
-  if (zipped.exitCode !== 0) throw new Error(zipped.stderr.toString())
+  // Written in-process: many Linux hosts (and CI images) have no `zip` binary.
+  await Bun.write(join(fixtures, `${asset}.zip`), storedZip([{ path: `${asset}/` }, { path: `${asset}/bun`, content: binary, mode: 0o755 }]))
   const digest = sum ?? createHash('sha256').update(new Uint8Array(await Bun.file(join(fixtures, `${asset}.zip`)).arrayBuffer())).digest('hex')
   await Bun.write(join(fixtures, 'SHASUMS256.txt'), `${'0'.repeat(64)}  bun-other.zip\n${digest}  ${asset}.zip\n`)
 }
@@ -93,8 +91,24 @@ it('refuses a download that does not match its checksum and leaves the existing 
   expect(await Bun.file(join(home, '.bun/bin/bun')).text()).toBe('old')
 })
 
+/**
+ * The real bsdtar when the host has one; otherwise (GitHub's Ubuntu runner has
+ * no libarchive-tools) a stand-in that takes bsdtar's `-xf <zip> -C <dir>` and
+ * unpacks with the host's unzip, so the fallback path is exercised everywhere.
+ */
+const bsdtar = async () => {
+  if (which('bsdtar')) return tools(['bsdtar'])
+  const unzip = which('unzip')
+  if (!unzip) throw new Error('this test needs bsdtar or unzip on the host')
+  await executable('bsdtar', `archive=''; dir=''
+while [ $# -gt 0 ]; do case "$1" in -xf) archive=$2; shift 2 ;; -C) dir=$2; shift 2 ;; *) shift ;; esac; done
+exec '${unzip}' -oq "$archive" -d "$dir"
+`)
+}
+
 it('unpacks with bsdtar when unzip is missing', async () => {
-  await tools(['bsdtar', 'shasum'])
+  await bsdtar()
+  await tools(['shasum'])
   await downloader('wget')
   await release('bun-linux-x64')
   expect((await install()).code).toBe(0)
