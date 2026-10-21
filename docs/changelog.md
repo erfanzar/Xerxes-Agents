@@ -7,6 +7,19 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.52 — 2026-10-21
+
+- `/xerxes` reviews what Xerxes learned. The desktop has a Learned panel (Proposals and Lessons tabs), in-chat proposal cards and a pending badge; in the TUI, `/xerxes` alone opens a review overlay, a "to review" chip shows pending items, and proposal notices stay until dismissed. Typed subcommands: `proposals`, `show <id>` (readable, or `--json`), `approve`, `reject`, `lessons [cue]`, `lessons approve|reject|rollback`, `improve` (budget preview only).
+- Lessons need evidence: `lesson_record` cites a successful tool call (checked by the host) or a reported test result. Approved lessons that match the task are added to the turn context, bounded and with their evidence.
+- When a goal finishes or is blocked, Xerxes may propose one skill, agent or plugin-idea improvement that quotes the transcript as evidence. Nothing is applied until a human approves it. Set `runtime.reflection` or `XERXES_REFLECTION` to `goals` (default), `all` (also long turns) or `off`.
+- `/skills lint` and `skill_manage` report every authoring problem at once; skill bundle writes are all-or-nothing. All bundled skills now pass lint (64 fixed at the source); a user copy that overrides a bundled skill shows as one info note.
+- Workflow: `expect_agents` ledger with duplicate-label checks, preflight before large runs (daemon, ACP and one-shot), and a blind `select()` helper. Opt-in `playground:improve` evaluates harness edits against the hard-task battery with a declared budget.
+- One `[ACTION]/[OBSERVATION]/[ERROR]` transcript format for compaction, titles and reflection; a clipped preview says it was clipped and gives the original size. An always-on prompt budget warns once per chat and never truncates.
+- Fix: a TUI on a host with one very long chat lost its connection every 1.5 s. Session lists now ask for summaries only, and an oversized reply fails only that request instead of closing the connection.
+- Fix: nested git repositories and generated review/report files under `.xerxes/` are no longer sent as project context on every turn.
+- Fix (Linux): providers saved by rename now sync, and the file monitor notices same-size writes. The release CI passes on Linux again.
+- Theme and appearance changes now apply to every desktop window and SSH view. Large session files are much smaller: subagent snapshots, workflow runs and goal history move to an append-only metadata sidecar (nothing is dropped).
+
 ## 0.6.51 — 2026-10-20
 
 - Plugins: tools carry their own description and JSON-schema parameters; `/plugins uninstall` and `/plugins reload` (no restart needed); plugins can add slash commands; installed plugin tools now actually reach the main session and the full-access subagents (`plugin_*` in agent tool lists).
