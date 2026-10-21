@@ -9,6 +9,7 @@ import { ToolRegistry } from '../executors/toolRegistry.js'
 import type { JsonObject, ToolDefinition } from '../types/toolCalls.js'
 import type { FileToolContext } from './fileState.js'
 import { guardedCreate, guardedWrite, recordedAppend, recordFileRead, withStaleNotice } from './fileState.js'
+import { GitignoreMatcher } from './gitignore.js'
 import { optionalBoolean, optionalInteger, optionalString, requireRange, requiredString } from './inputs.js'
 import { WorkspacePathError, WorkspacePathResolver } from './pathSafety.js'
 
@@ -54,7 +55,7 @@ export function readSizeRefusal(size: number, wholeFile: boolean, names: {
  * and teaches the caller to narrow the read; succeeding costs the context window.
  */
 export const MAX_READ_WINDOW_CHARS = 40_000
-const MAX_GREP_FILE_BYTES = 1_000_000
+const MAX_GREP_FILE_BYTES = 8_388_608
 const MAX_TOOL_RESULTS = 5_000
 
 export const READ_FILE_DEFINITION: ToolDefinition = {
@@ -160,7 +161,7 @@ export const GLOB_TOOL_DEFINITION: ToolDefinition = {
   type: 'function',
   function: {
     name: 'GlobTool',
-    description: 'Find paths by name pattern (Bun glob, e.g. `**/*.test.ts`, `src/**/index.ts`, `*.{json,yaml}`); use GrepTool to search contents. Returns sorted workspace-relative paths, directories included. .gitignore is not honored, so anchor with path (e.g. path="src"). "... result limit reached" means an arbitrary subset: narrow the pattern rather than raising max_results.',
+    description: 'Find paths by name pattern (Bun glob, e.g. `**/*.test.ts`, `src/**/index.ts`, `*.{json,yaml}`); use GrepTool to search contents. Returns sorted workspace-relative paths, directories included. In Git work trees, respects workspace-contained .gitignore files and .git/info/exclude by default; include_ignored=true bypasses ignore rules. Always skips .git directories. "... result limit reached" means an arbitrary subset: narrow the pattern rather than raising max_results.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -168,6 +169,7 @@ export const GLOB_TOOL_DEFINITION: ToolDefinition = {
         pattern: { type: 'string', description: 'Glob pattern such as **/*.ts.' },
         path: { type: 'string', default: '.', description: 'Workspace-relative directory to search.' },
         include_hidden: { type: 'boolean', default: false, description: 'Allow glob matches beginning with a period.' },
+        include_ignored: { type: 'boolean', default: false, description: 'Include paths excluded by Git ignore rules; .git directories stay excluded.' },
         max_results: { type: 'integer', default: DEFAULT_MAX_RESULTS, description: 'Maximum paths to return.' },
       },
       required: ['pattern'],
@@ -179,7 +181,7 @@ export const GREP_TOOL_DEFINITION: ToolDefinition = {
   type: 'function',
   function: {
     name: 'GrepTool',
-    description: `Find where a symbol, string or error appears in file contents (JavaScript regex, matched per line; no multiline). Escape metacharacters for literal text (e.g. \`parseFrame\\(\`) and scope with path/glob (glob="src/**/*.ts"). .gitignore is not honored, so "." also walks dependency and build folders. "... result limit reached" means incomplete. "No matches found." is not proof of absence: dotfiles, binary files and files over ${MAX_GREP_FILE_BYTES / 1_000_000} MB are skipped.`,
+    description: `Find where a symbol, string or error appears in file contents (JavaScript regex, matched per line; no multiline). Escape metacharacters for literal text (e.g. \`parseFrame\\(\`) and scope with path/glob (glob="src/**/*.ts"). In Git work trees, respects workspace-contained .gitignore files and .git/info/exclude by default; include_ignored=true bypasses ignore rules. Always skips .git directories. "... result limit reached" means incomplete. Dotfiles and binary files are skipped; files over ${MAX_GREP_FILE_BYTES} bytes (8 MiB) are skipped with a count and limit in the output.`,
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -194,6 +196,7 @@ export const GREP_TOOL_DEFINITION: ToolDefinition = {
           description: 'files_with_matches (default): paths only. content: path:line:text, with context for surrounding lines. count: path:n.',
         },
         case_insensitive: { type: 'boolean', default: false, description: 'Search without case sensitivity.' },
+        include_ignored: { type: 'boolean', default: false, description: 'Include paths excluded by Git ignore rules; .git directories stay excluded.' },
         context: { type: 'integer', default: 0, description: 'Lines before and after each match; content mode only.' },
         max_results: {
           type: 'integer',
@@ -553,6 +556,7 @@ export async function globFiles(inputs: JsonObject, paths: WorkspacePathResolver
   validateGlobPattern(pattern)
   const directoryPath = optionalString(inputs, 'path') ?? '.'
   const includeHidden = optionalBoolean(inputs, 'include_hidden', false)
+  const includeIgnored = optionalBoolean(inputs, 'include_ignored', false)
   const maxResults = requireRange(
     optionalInteger(inputs, 'max_results', DEFAULT_MAX_RESULTS),
     'max_results',
@@ -566,19 +570,14 @@ export async function globFiles(inputs: JsonObject, paths: WorkspacePathResolver
 
   const matches: string[] = []
   let truncated = false
-  const glob = new Bun.Glob(pattern)
-  for await (const match of glob.scan({ cwd: target, dot: includeHidden, followSymlinks: false, onlyFiles: false })) {
+  for await (const match of searchMatches(target, pattern, paths, includeIgnored, includeHidden)) {
     if (matches.length >= maxResults) {
       truncated = true
       break
     }
-    const resolvedMatch = await resolveScannedPath(paths, join(target, match))
-    if (!resolvedMatch) {
-      continue
-    }
     // Tool results use POSIX separators on every host so model-visible paths
     // round-trip through search/replace and patch tooling unchanged.
-    matches.push((await paths.relative(resolvedMatch)).replaceAll('\\', '/'))
+    matches.push((await paths.relative(match)).replaceAll('\\', '/'))
   }
   matches.sort((left, right) => left.localeCompare(right))
   if (truncated) {
@@ -597,6 +596,7 @@ export async function grepFiles(inputs: JsonObject, paths: WorkspacePathResolver
     throw new ValidationError('output_mode', 'must be files_with_matches, count, or content', outputMode)
   }
   const caseInsensitive = optionalBoolean(inputs, 'case_insensitive', false)
+  const includeIgnored = optionalBoolean(inputs, 'include_ignored', false)
   const context = requireRange(optionalInteger(inputs, 'context', 0), 'context', 0, 100)
   const maxResults = requireRange(
     optionalInteger(inputs, 'max_results', DEFAULT_MAX_RESULTS),
@@ -620,9 +620,10 @@ export async function grepFiles(inputs: JsonObject, paths: WorkspacePathResolver
     )
   }
 
-  const files = await grepCandidates(target, globPattern, paths)
+  const files = await grepCandidates(target, globPattern, paths, includeIgnored)
   const results: string[] = []
   let truncated = false
+  let skippedForSize = 0
 
   for (const file of files) {
     if (results.length >= maxResults) {
@@ -631,6 +632,7 @@ export async function grepFiles(inputs: JsonObject, paths: WorkspacePathResolver
     }
     const fileStats = await stat(file)
     if (fileStats.size > MAX_GREP_FILE_BYTES) {
+      skippedForSize += 1
       continue
     }
     const text = await Bun.file(file).text()
@@ -685,10 +687,13 @@ export async function grepFiles(inputs: JsonObject, paths: WorkspacePathResolver
   }
 
   if (results.length === 0) {
-    return 'No matches found.'
+    results.push('No matches found.')
   }
   if (truncated) {
     results.push(`... (${maxResults} result limit reached)`)
+  }
+  if (skippedForSize > 0) {
+    results.push(`[GrepTool] Skipped ${skippedForSize} file${skippedForSize === 1 ? '' : 's'} exceeding the ${MAX_GREP_FILE_BYTES}-byte (8 MiB) per-file limit.`)
   }
   return results.join('\n')
 }
@@ -1090,19 +1095,85 @@ async function grepCandidates(
   directoryOrFile: string,
   pattern: string,
   paths: WorkspacePathResolver,
+  includeIgnored: boolean,
 ): Promise<string[]> {
   if (await isRegularFile(directoryOrFile)) {
-    return [directoryOrFile]
+    if (await isGitMetadata(directoryOrFile, paths)) return []
+    const matcher = includeIgnored ? undefined : await GitignoreMatcher.create(dirname(directoryOrFile), paths)
+    return await matcher?.isIgnored(directoryOrFile, false) ? [] : [directoryOrFile]
   }
   const files: string[] = []
-  const glob = new Bun.Glob(pattern)
-  for await (const match of glob.scan({ cwd: directoryOrFile, followSymlinks: false, onlyFiles: true })) {
-    const resolvedMatch = await resolveScannedPath(paths, join(directoryOrFile, match))
-    if (resolvedMatch && await isRegularFile(resolvedMatch)) {
-      files.push(resolvedMatch)
-    }
+  for await (const match of searchMatches(directoryOrFile, pattern, paths, includeIgnored, false, true)) {
+    if (await isRegularFile(match)) files.push(match)
   }
   return files.sort((left, right) => left.localeCompare(right))
+}
+
+/** Prune ignored directories before descent, rather than filtering a full dependency/build scan. */
+async function* searchMatches(
+  target: string,
+  pattern: string,
+  paths: WorkspacePathResolver,
+  includeIgnored: boolean,
+  includeHidden: boolean,
+  onlyFiles = false,
+): AsyncGenerator<string> {
+  if (await isGitMetadata(target, paths)) return
+  const matcher = includeIgnored ? undefined : await GitignoreMatcher.create(target, paths)
+  if (!matcher) {
+    // Retain Bun's scan semantics outside repositories and for an explicit ignore override.
+    const glob = new Bun.Glob(pattern)
+    for await (const match of glob.scan({ cwd: target, dot: includeHidden, followSymlinks: false, onlyFiles })) {
+      if (match.replaceAll('\\', '/').split('/').includes('.git')) continue
+      const resolved = await resolveScannedPath(paths, join(target, match))
+      if (resolved && !(await isGitMetadata(resolved, paths))) yield resolved
+    }
+    return
+  }
+  if (await matcher.isIgnored(target, true)) return
+  const normalizedPattern = pattern.replace(/^(?:\.\/)+/, '')
+  const directoriesOnly = normalizedPattern.endsWith('/')
+  // Bun.scan treats a final **/ as one directory component, unlike a middle **/.
+  const matchPattern = directoriesOnly ? normalizedPattern.slice(0, -1).replace(/(^|\/)\*\*$/, '$1*') : normalizedPattern
+  const glob = new Bun.Glob(matchPattern)
+  const patternSegments = matchPattern.split('/')
+  const recursivePattern = matchPattern.includes('**')
+  const literalPrefix: string[] = []
+  for (const segment of patternSegments) {
+    if (/[?*{[!\\]/.test(segment)) break
+    literalPrefix.push(segment)
+  }
+  // Bun.scan(dot=false) accepts exact hidden paths, but wildcard traversal skips them.
+  const literalPattern = literalPrefix.length === patternSegments.length
+  const walk = async function* (directory: string, prefix: string): AsyncGenerator<string> {
+    const children = await readdir(directory, { withFileTypes: true })
+    for (const child of children) {
+      if (child.name === '.git') continue
+      const relativePath = prefix ? `${prefix}/${child.name}` : child.name
+      const segments = relativePath.split('/')
+      // A literal prefix cannot match a sibling. Do not visit that sibling's subtree.
+      if (literalPrefix.some((part, index) => index < segments.length && segments[index] !== part)) continue
+      if (!includeHidden && child.name.startsWith('.') && !literalPattern) continue
+      const candidate = join(directory, child.name)
+      const directoryEntry = child.isDirectory()
+      if (await matcher.isIgnored(candidate, directoryEntry)) continue
+      const resolved = await resolveScannedPath(paths, candidate)
+      if (!resolved || await isGitMetadata(resolved, paths)) continue
+      if ((!onlyFiles || !directoryEntry) && (!directoriesOnly || directoryEntry) && glob.match(relativePath)) {
+        yield resolved
+      }
+      // Never descend through a symlink, including one resolving inside the workspace.
+      // Brace alternatives may contain separators, so leave their depth to Bun's matcher.
+      if (directoryEntry && (recursivePattern || normalizedPattern.includes('{') || segments.length < patternSegments.length)) {
+        yield* walk(resolved, relativePath)
+      }
+    }
+  }
+  yield* walk(target, '')
+}
+
+async function isGitMetadata(candidate: string, paths: WorkspacePathResolver): Promise<boolean> {
+  return (await paths.relative(candidate)).replaceAll('\\', '/').split('/').includes('.git')
 }
 
 function validateGlobPattern(pattern: string): void {
