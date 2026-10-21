@@ -7,6 +7,13 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.7.0 — 2026-10-21
+
+- Steer with screenshots: a message sent while a task runs can now carry images. They reach the model at its next step with your text (an image alone works too), use the same checks and size limits as a normal send, are kept with a steer saved for the next turn, and show in the chat with their thumbnails. `turn.steer` accepts optional `images`; text-only steers are unchanged.
+- An agent's tool calls fold behind one "Tool calls" header, closed by default, with how many are running or failed. A busy agent's hundreds of calls no longer push its summary and output out of view.
+- The agents card header keeps "2 working · 36s" at the right edge instead of mid-card.
+- Pasted images get their own full-width row above the message text and scroll sideways, instead of pushing the text further right with every paste.
+
 ## 0.6.53 — 2026-10-21
 
 - Same product code as 0.6.52, released so the Linux `.tgz` package can be attached. The remote Bun install tests now build their fixture archives in-process instead of calling `zip` and `bsdtar`, which GitHub's Ubuntu runner and many Linux hosts don't have. The full check passes on Linux, macOS and Windows.
