@@ -48,9 +48,13 @@ it('ignores stale reviews, handles paging and closes on Escape', async () => {
     act(() => screen.mockInput.pressArrow('down'))
     await screen.flush(); await screen.flush()
     old.resolve({ ok: true, review: { ...detail, diff: '+STALE RESULT' } })
-    await screen.flush(); await screen.flush()
+    // Wait for the current review to land rather than a fixed number of
+    // flushes: on a slow runner the frame was still "Loading review…".
+    await vi.waitFor(async () => {
+      await screen.flush()
+      expect(screen.captureCharFrame()).toContain('current result')
+    })
     expect(screen.captureCharFrame()).not.toContain('STALE RESULT')
-    expect(screen.captureCharFrame()).toContain('current result')
     act(() => screen.mockInput.pressKey('n'))
     await vi.waitFor(async () => {
       await screen.flush()
@@ -58,8 +62,10 @@ it('ignores stale reviews, handles paging and closes on Escape', async () => {
       expect(screen.captureCharFrame()).toContain('Third task')
     })
     act(() => screen.mockInput.pressKey('p'))
-    await screen.flush(); await screen.flush()
-    expect(screen.captureCharFrame()).toContain('Page 1')
+    await vi.waitFor(async () => {
+      await screen.flush()
+      expect(screen.captureCharFrame()).toContain('Page 1')
+    })
     act(() => screen.mockInput.pressEscape())
     await vi.waitFor(() => expect(getOverlayState().workspaces).toBe(false))
   } finally { old.resolve({}); act(() => screen.renderer.destroy()) }
