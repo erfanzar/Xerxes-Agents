@@ -234,7 +234,7 @@ export class DaemonRpc extends EventEmitter {
       // Only an explicit click may migrate a runtime without atomic idle restart.
       // Read every session, including work owned by other connected clients.
       const status = await this.send<Record<string, unknown>>('runtime.status', {})
-      const list = await this.send<Record<string, unknown>>('session.active_list', {})
+      const list = await this.send<Record<string, unknown>>('session.active_list', { history_limit: 0 })
       if (status.ok !== true || list.ok !== true || !Array.isArray(list.sessions)) return { ok: false, error: 'Could not check running work. Runtime was left connected.' }
       if (status.active_subagents !== 0 || status.channels_configured !== false) return { ok: false, busy: true }
       for (const value of list.sessions) {

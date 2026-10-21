@@ -1780,7 +1780,22 @@ export class DaemonServer {
     const encoded = `${JSON.stringify(frame)}\n`;
     const bytes = Buffer.byteLength(encoded, "utf8");
     if (bytes > this.maxSocketOutputBytes) {
-      console.error("Xerxes daemon dropping slow client: response exceeds the socket output limit");
+      // One oversized reply is a fault of that request, not of the client.
+      // Dropping the connection for it turned a single large poll answer
+      // into a reconnect loop for every TUI polling the same method. Answer
+      // the request with a correlated error and keep the connection; only a
+      // frame with no id to fail (an event) still closes it.
+      const id = (frame as { id?: unknown }).id;
+      if (typeof id === "number" || (typeof id === "string" && id.length > 0)) {
+        const failure = jsonRpcFailure(id as JsonRpcId, -32000, "response exceeds socket output limit; request less (for session lists pass history_limit: 0)");
+        // The error must itself fit, or resending it would recurse forever.
+        if (Buffer.byteLength(`${JSON.stringify(failure)}\n`, "utf8") <= this.maxSocketOutputBytes) {
+          console.error(`Xerxes daemon refused a ${bytes}-byte response: it exceeds the ${this.maxSocketOutputBytes}-byte socket output limit`);
+          this.sendSocketFrame(connection, failure);
+          return;
+        }
+      }
+      console.error("Xerxes daemon dropping client: event exceeds the socket output limit");
       this.destroyWithOutputErrorFrame(connection, frame);
       return;
     }

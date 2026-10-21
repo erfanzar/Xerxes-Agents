@@ -85,7 +85,7 @@ async function startedServer(maxSocketOutputBytes: number): Promise<{
   };
 }
 
-test("an oversized response frame delivers a correlated JSON-RPC error instead of a silent destroy", async () => {
+test("an oversized response fails only that request: a correlated error, and the connection stays open", async () => {
   const { server, dispose } = await startedServer(256);
   try {
     const socket = new FakeSocket();
@@ -104,9 +104,13 @@ test("an oversized response frame delivers a correlated JSON-RPC error instead o
     };
     expect(failure.jsonrpc).toBe("2.0");
     expect(failure.id).toBe(7);
-    expect(failure.error?.message).toBe("response exceeds socket output limit");
+    expect(failure.error?.message).toContain("response exceeds socket output limit");
     expect(typeof failure.error?.code).toBe("number");
-    expect(socket.destroyed).toBe(true);
+    expect(socket.destroyed).toBe(false);
+    // The next ordinary request on the same connection still gets through.
+    frameSender(server)(connection, { jsonrpc: "2.0", id: 8, ok: true });
+    expect(socket.written).toHaveLength(2);
+    expect(socket.destroyed).toBe(false);
   } finally {
     await dispose();
   }
@@ -149,12 +153,13 @@ test("frames under the cap still flow normally through write and queue", async (
     expect(connection.outputQueue).toHaveLength(1);
     expect(connection.queuedOutputBytes).toBeGreaterThan(0);
 
-    // Queued bytes beyond the cap trigger the same belt-and-braces error.
+    // A frame that fits alone but overflows the queue is a stalled client:
+    // that still disconnects (with the correlated error).
     send(connection, {
       jsonrpc: "2.0",
       id: 4,
       ok: true,
-      result: { blob: "z".repeat(600) },
+      result: { blob: "z".repeat(440) },
     });
     expect(socket.destroyed).toBe(true);
     expect(socket.written.at(-1)).toContain("response exceeds socket output limit");

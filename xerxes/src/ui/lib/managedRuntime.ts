@@ -68,7 +68,8 @@ export async function prepareManagedRuntime(
       // the remote host runs, so it cannot call helpers from this module.
       if (status.active_subagents !== undefined && status.active_subagents !== 0) return { busy: true }
       if (status.channels_configured === true) return { busy: true }
-      const list = await client.request<Record<string, unknown>>('session.active_list', {})
+      // Status and keys only; full transcripts can exceed the socket limit.
+      const list = await client.request<Record<string, unknown>>('session.active_list', { history_limit: 0 })
       if (list.ok !== true || !Array.isArray(list.sessions)) throw new Error('Could not check running work on the old runtime; left it running.')
       for (const value of list.sessions as unknown[]) {
         const session = value && typeof value === 'object' ? value as Record<string, unknown> : undefined

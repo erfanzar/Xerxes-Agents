@@ -613,7 +613,7 @@ export class GatewayClient extends EventEmitter {
     const pidFilePid = pidFromFile(pidPath)
     const activity = await this.rawRequest<RpcObject>(
       'session.active_list',
-      {},
+      { history_limit: 0 },
       DAEMON_IDENTITY_TIMEOUT_MS
     ).catch(() => null)
     const sessions = activity && Array.isArray(activity.sessions) ? activity.sessions : null
@@ -1636,7 +1636,11 @@ export class GatewayClient extends EventEmitter {
   }
 
   private async sessionActiveList(params: Record<string, unknown>): Promise<RpcObject> {
-    const raw = await this.nativeSuccess('session.active_list', params)
+    // Only summary fields are read below. Without history_limit: 0 the daemon
+    // embeds every live session's full transcript (archive included) in each
+    // row; one long session pushed this 1.5 s poll past the 16 MB socket limit
+    // and the daemon dropped the connection on every tick.
+    const raw = await this.nativeSuccess('session.active_list', { ...params, history_limit: 0 })
     const rows = Array.isArray(raw.sessions) ? raw.sessions : []
     const sessions = rows.map((row: RpcObject) => {
       const id = String(row.id ?? row.session_id ?? row.key ?? '')

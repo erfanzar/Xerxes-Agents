@@ -146,7 +146,8 @@ describe('GatewayClient session lifecycle', () => {
     privateClient.rawRequest = async (method, params) => {
       calls.push(method)
       if (method === 'session.active_list') {
-        expect(params).toEqual({ current_session_id: 'live1' })
+        // Summaries only: full transcripts in a poll can exceed the socket limit.
+        expect(params).toEqual({ current_session_id: 'live1', history_limit: 0 })
         return {
           ok: true,
           sessions: [{
@@ -379,7 +380,7 @@ describe('GatewayClient session lifecycle', () => {
       status: 'working'
     })
     expect(calls).toEqual([
-      { method: 'session.active_list', params: {} },
+      { method: 'session.active_list', params: { history_limit: 0 } },
       { method: 'session.status', params: { session_key: 'daemon:other' } }
     ])
     expect(calls.some(call => call.method === 'session.open')).toBe(false)
