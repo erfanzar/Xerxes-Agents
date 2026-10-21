@@ -47,6 +47,7 @@ import { FirstRunSetup } from './Setup.js'
 import { RemoteWorkspaceGate } from './RemoteWorkspaceGate.js'
 import { BackgroundIndicator, DesktopNavigation, DesktopSheet, DesktopPage, DesktopRail, useDesktopNavigation, type DesktopPanel, type RailPanel } from './DesktopPanels.js'
 import { desktopCall } from './desktopRpc.js'
+import { ConnectedReflectionCard, LearnedBadge } from './LearnedPanel.js'
 import { pullRequestPrompt } from './GitPanel.js'
 import { elapsedOf } from './duration.js'
 import type { ScmStatus } from '../../workspace/gitScm.js'
@@ -201,10 +202,11 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
     if (next === 'activity') requestAnimationFrame(() => document.querySelector('.desktop-rail .studio-sheet-content')?.scrollTo({ top: 0 }))
     if (next === 'files' || next === 'review' || next === 'terminal' || next === 'activity' || next === 'usage') setRail(next)
     else if (next === 'agents' || next === 'extensions' || next === 'artifacts') { setPage(next); setPanel(null) }
-    else if (next === null) { setPage(null); setPanel(null) }
+    else if (next === null) { setPage(null); setPanel(null); store.closeLearning() }
     else setPanel(next)
   }
   useEffect(() => { setPanel(null); setPage(null); setSelectedAgent('') }, [snap.cwd, snap.sessionKey])
+  useEffect(() => { if (snap.learningOpen) { setPage('extensions'); setPanel(null); setFilesExpanded(false); if (contextRequiresFullWidth) setRail(null) } }, [snap.learningOpenRevision])
   return (
     <DesktopNavigation.Provider value={navigate}><ActivityVisible.Provider value={rail === 'activity'}><WindowChrome.Provider value={chrome}>
     <div className={`app atelier${trafficLights ? '' : ' app--no-traffic-lights'}${focused ? ' atelier--focus' : ''}${narrow ? ' app--narrow' : ''}`} style={{ '--sidebar-width': `${layout.sidebarWidth}px`, '--inspector-width': `${layout.inspectorWidth}px` } as React.CSSProperties}>
@@ -716,7 +718,7 @@ function Sidebar({ snap, page }: { snap: Snapshot; page: 'agents' | 'extensions'
           onClick={() => { if (!snap.turnActive) open(null); store.newChat() }}
           title={homeLabel(snap) ? `Start a new task in ${homeLabel(snap)} (⌘N, or ⇧⌘N to choose a preset and worktree)` : 'Start a new task (⌘N)'}
         ><Icon name="plus" /><span>New task</span><kbd>⌘ N</kbd></button>
-        <button className={`studio-nav${page === "extensions" ? " is-selected" : ""}`} aria-pressed={page === 'extensions'} disabled={!online} onClick={() => open('extensions')}><Icon name="tools" /><span>Skills & tools</span></button>
+        <button className={`studio-nav${page === "extensions" ? " is-selected" : ""}`} aria-pressed={page === 'extensions'} disabled={!online} onClick={() => open('extensions')}><Icon name="tools" /><span>Skills & tools</span><LearnedBadge snap={snap} /></button>
         <button className={`studio-nav${page === "artifacts" ? " is-selected" : ""}`} aria-pressed={page === 'artifacts'} disabled={!online} onClick={() => open('artifacts')}><Icon name="folder" /><span>Artifacts</span></button>
         <button className="studio-nav" disabled={!online} onClick={() => open('schedules')}><Icon name="clock" /><span>Scheduled jobs</span></button>
         <input
@@ -1227,6 +1229,7 @@ function UserMessage({ text, images = [] }: { text: string; images?: readonly st
 // Memoized: the turn clock re-renders the conversation every second, and an
 // unchanged block (same object) has nothing new to draw.
 const BlockView = memo(function BlockView({ block }: { block: Snapshot['blocks'][number] }): ReactElement {
+  if (block.kind === 'reflection') return <ConnectedReflectionCard reflection={block.reflection} />
   if (block.kind === 'agents') {
     return <AgentsCard members={block.members} />
   }

@@ -6,7 +6,8 @@ import { dirname, join, resolve } from 'node:path'
 
 import { ValidationError } from '../core/errors.js'
 import { ToolRegistry, type ToolExecutionContext } from '../executors/toolRegistry.js'
-import { parseSkillMarkdown, type Skill, type SkillRegistry } from '../extensions/skills.js'
+import { lintHarness, renderLintReport, type HarnessLintFinding } from '../extensions/harnessLint.js'
+import { isStrictDescendant, parseSkillMarkdown, type Skill, type SkillRegistry } from '../extensions/skills.js'
 import type { SearchHit, SearchOptions } from '../session/search.js'
 import type { JsonObject, ToolDefinition } from '../types/toolCalls.js'
 import { optionalBoolean, optionalInteger, optionalString, optionalStringArray, requiredString } from './inputs.js'
@@ -176,6 +177,8 @@ export interface SkillCatalog {
 export interface SkillManageRequest {
   readonly action: string
   readonly description: string
+  /** Additional UTF-8 bundle files, keyed by paths relative to SKILL.md. */
+  readonly files?: Readonly<Record<string, string>>
   readonly instructions: string
   readonly name: string
   readonly tags: readonly string[]
@@ -250,12 +253,25 @@ export class SkillBundleStore implements SkillManagementStore {
     if (request.action !== 'create' && request.action !== 'update') {
       return { ok: false, error: 'unknown action ' + JSON.stringify(request.action) }
     }
-    if (!request.instructions) {
-      return { ok: false, error: 'instructions required for create/update' }
-    }
-
     const content = skillMarkdown(request)
-    await atomicWrite(await this.paths.recheck(path), content)
+    const findings = lintHarness([{ path, content, bundleFiles: Object.keys(request.files ?? {}), includeInstalledFiles: true }])
+    const files: Array<{ path: string; content: string }> = []
+    for (const [file, body] of Object.entries(request.files ?? {})) {
+      // Collect every containment error before writing anything, including symlinks into sibling bundles.
+      try {
+        const target = await this.paths.resolve(join(request.name, file))
+        if (!isStrictDescendant(dirname(path), target) || target === path) throw new Error('not inside this skill bundle')
+        files.push({ path: target, content: body })
+      } catch (error) {
+        findings.push({ code: 'bundle-file-invalid', severity: 'fail', path, message: `Cannot ship '${file}': ${errorMessage(error)}`, fixHint: 'Use regular files contained by this skill bundle, not traversal paths or escaping symlinks.' })
+      }
+    }
+    if (findings.some(finding => finding.severity === 'fail')) return rejectedSkillLint(findings)
+    const targets: Array<{ path: string; content: string }> = []
+    for (const file of files) targets.push({ path: await this.paths.recheck(file.path), content: file.content })
+    // SKILL.md last: until it lands, the installed instructions never point at a half-written bundle.
+    targets.push({ path: await this.paths.recheck(path), content })
+    await writeBundle(targets)
     const result: JsonObject = { ok: true, name: request.name, path, action: request.action }
     if (this.registry !== undefined) {
       try {
@@ -266,7 +282,7 @@ export class SkillBundleStore implements SkillManagementStore {
         result.registry_error = errorMessage(error)
       }
     }
-    return result
+    return skillLintSuccess(result, findings)
   }
 
   private pathFor(name: string): string {
@@ -341,11 +357,12 @@ export const SKILL_VIEW_DEFINITION: ToolDefinition = toolDefinition(
 
 export const AGENT_META_SKILL_MANAGE_DEFINITION: ToolDefinition = toolDefinition(
   'skill_manage',
-  'Create, update, or delete a skill only through a host-provided writable skill store.',
+  'Create, update, or delete a skill only through a host-provided writable skill store. Create/update lint the full proposed bundle first; fix every failure in the returned report. Warnings accompany success.',
   {
     action: { type: 'string', enum: ['create', 'update', 'delete'] },
     name: { type: 'string' },
     instructions: { type: 'string' },
+    files: { type: 'object', description: 'Additional UTF-8 files keyed by paths relative to SKILL.md, such as scripts/check.ts.', additionalProperties: { type: 'string' } },
     description: { type: 'string' },
     version: { type: 'string', default: '0.1.0' },
     tags: { type: 'array', items: { type: 'string' } },
@@ -460,14 +477,47 @@ export async function skillManageTool(inputs: JsonObject, options: AgentMetaTool
   const instructions = optionalString(inputs, 'instructions')
   const description = optionalString(inputs, 'description')
   const version = optionalString(inputs, 'version')
-  return options.skillStore.manage({
+  const files = skillBundleFiles(inputs.files)
+  const request: SkillManageRequest = {
     action: requiredString(inputs, 'action'),
     name: requiredString(inputs, 'name'),
     instructions: instructions ?? '',
     description: description ?? '',
     version: version ?? '0.1.0',
     tags: optionalStringArray(inputs, 'tags'),
-  })
+    ...(files === undefined ? {} : { files }),
+  }
+  if (request.action !== 'create' && request.action !== 'update') return options.skillStore.manage(request)
+  // The concrete file store validates using the installed bundle too. Custom host stores still
+  // pass authoring lint before manage() can commit, using only the files explicitly supplied.
+  if (options.skillStore instanceof SkillBundleStore) return options.skillStore.manage(request)
+  assertValidSkillName(request.name)
+  const findings = lintHarness([{
+    path: join(request.name, 'SKILL.md'), content: skillMarkdown(request), bundleFiles: Object.keys(files ?? {}),
+  }])
+  if (findings.some(finding => finding.severity === 'fail')) return rejectedSkillLint(findings)
+  return skillLintSuccess(await options.skillStore.manage(request), findings)
+}
+
+function skillBundleFiles(value: unknown): Readonly<Record<string, string>> | undefined {
+  if (value === undefined) return undefined
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new ValidationError('files', 'must be an object of relative file paths to UTF-8 contents', value)
+  const files = new Map<string, string>()
+  for (const [path, content] of Object.entries(value)) {
+    if (typeof content !== 'string') throw new ValidationError('files', `file '${path}' must have string contents`, content)
+    files.set(path, content)
+  }
+  return Object.fromEntries(files)
+}
+
+function rejectedSkillLint(findings: readonly HarnessLintFinding[]): JsonObject {
+  const report = renderLintReport(findings)
+  return { ok: false, error: 'harness_lint_failed', report, findings: findings.map(finding => ({ ...finding })) }
+}
+
+function skillLintSuccess(result: JsonObject, findings: readonly HarnessLintFinding[]): JsonObject {
+  if (result.ok !== true || !findings.length) return result
+  return { ...result, warnings: findings.filter(finding => finding.severity === 'warn').map(finding => ({ ...finding })), report: renderLintReport(findings) }
 }
 
 function resolveSkillCatalog(options: AgentMetaToolsOptions): SkillCatalog | undefined {
@@ -601,7 +651,45 @@ function isValidSkillName(name: string): boolean {
   return Boolean(name) && !name.includes('/') && !name.includes('\\') && !name.includes('..') && !name.startsWith('.')
 }
 
-async function atomicWrite(path: string, content: string): Promise<void> {
+/**
+ * All-or-nothing bundle write. Every file is staged beside its target first,
+ * so a full disk or permission error leaves the bundle untouched. Swaps then
+ * run in order; if one fails, every file already swapped gets its previous
+ * content back (or is removed when it was new), so a failed update never
+ * leaves new helper scripts beside the old SKILL.md.
+ */
+async function writeBundle(targets: readonly { readonly path: string; readonly content: string }[]): Promise<void> {
+  const staged: Array<{ path: string; temporary: string }> = []
+  try {
+    for (const target of targets) {
+      await mkdir(dirname(target.path), { recursive: true })
+      const temporary = join(dirname(target.path), '.' + crypto.randomUUID() + '.tmp')
+      staged.push({ path: target.path, temporary })
+      await Bun.write(temporary, target.content)
+    }
+    const swapped: Array<{ path: string; previous: Buffer | undefined }> = []
+    try {
+      for (const { path, temporary } of staged) {
+        const previous = await readFile(path).catch((error: NodeJS.ErrnoException) => {
+          if (error.code === 'ENOENT') return undefined
+          throw error
+        })
+        await rename(temporary, path)
+        swapped.push({ path, previous })
+      }
+    } catch (error) {
+      for (const { path, previous } of swapped.reverse()) {
+        if (previous === undefined) await rm(path, { force: true })
+        else await atomicWrite(path, previous)
+      }
+      throw error
+    }
+  } finally {
+    for (const { temporary } of staged) await rm(temporary, { force: true })
+  }
+}
+
+async function atomicWrite(path: string, content: string | Buffer): Promise<void> {
   await mkdir(dirname(path), { recursive: true })
   const temporary = join(dirname(path), '.' + crypto.randomUUID() + '.tmp')
   try {

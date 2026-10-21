@@ -31,6 +31,9 @@ import type {
   AnyEvent,
   GatewayTranscriptMessage,
   LiveSessionStatus,
+  LearningListResponse,
+  LearningReviewParams,
+  LearningReviewResponse,
   SessionInflightTurn,
   SessionInflightTool,
   SubagentSnapshotPayload
@@ -935,6 +938,9 @@ export class GatewayClient extends EventEmitter {
   // ── Requests ────────────────────────────────────────────────────────
 
   /** Send a JSON-RPC request and await its result. */
+  request(method: 'learning.list', params?: { session_key?: string }): Promise<LearningListResponse>
+  request(method: 'learning.review', params: LearningReviewParams): Promise<LearningReviewResponse>
+  request<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T>
   request<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
     return this.requestCompat<T>(method, params)
   }
@@ -1026,6 +1032,10 @@ export class GatewayClient extends EventEmitter {
           session_key: this.keyFor(params.session_id),
           text: String(params.text ?? '')
         }) as Promise<T>
+
+      case 'learning.list':
+      case 'learning.review':
+        return this.rawRequest<T>(method, { ...params, session_key: this.keyFor(params.session_key ?? params.session_id) })
 
       case 'tool.inventory':
       case 'background.status':

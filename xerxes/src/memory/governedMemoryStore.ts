@@ -4,6 +4,7 @@
 import { appendFile, mkdir, readFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { parseJsonlEventLog, truncateTornTail } from '../core/jsonlEventLog.js'
+import type { JsonObject } from '../types/toolCalls.js'
 
 export type ReviewStatus = 'pending' | 'approved' | 'rejected'
 export type SensitivityLevel = 'public' | 'internal' | 'confidential' | 'restricted'
@@ -20,6 +21,8 @@ export interface MemoryRecord {
   readonly expiresAt?: number
   readonly correctionOf?: string
   readonly correctionReason?: string
+  /** Optional structured projection data; legacy records omit it. */
+  readonly payload?: JsonObject
 }
 
 export interface GovernedMemoryState {
@@ -41,6 +44,8 @@ export interface RecordMemoryOptions {
   expiresAt?: number
   readonly correctionOf?: string
   readonly correctionReason?: string
+  /** Optional structured projection data; legacy records omit it. */
+  readonly payload?: JsonObject
 }
 
 export class GovernedMemoryStore {
@@ -67,15 +72,15 @@ export class GovernedMemoryStore {
     return persisted
   }
 
-  async review(id: string, status: ReviewStatus): Promise<void> {
-    await this.append({ type: 'reviewed', id, status, reviewedAt: this.now() })
+  async review(id: string, status: ReviewStatus, reason?: string): Promise<void> {
+    await this.append({ type: 'reviewed', id, status, reviewedAt: this.now(), ...(reason === undefined ? {} : { reason }) })
   }
 
   async classify(id: string, sensitivity: SensitivityLevel): Promise<void> {
     await this.append({ type: 'classified', id, sensitivity, classifiedAt: this.now() })
   }
 
-  async correct(options: { readonly originalId: string; readonly newId: string; readonly content: string; readonly reason: string }): Promise<MemoryRecord> {
+  async correct(options: { readonly originalId: string; readonly newId: string; readonly content: string; readonly reason: string; readonly payload?: JsonObject }): Promise<MemoryRecord> {
     const original = (await this.load()).records.get(options.originalId)
     if (original === undefined) throw new Error('original memory record not found')
     const recordOptions: RecordMemoryOptions = {
@@ -89,11 +94,12 @@ export class GovernedMemoryStore {
     }
     if (original.turnId !== undefined) recordOptions.turnId = original.turnId
     if (original.expiresAt !== undefined) recordOptions.expiresAt = original.expiresAt
-    return this.record(recordOptions)
+    const payload = options.payload ?? original.payload
+    return this.record({ ...recordOptions, ...(payload === undefined ? {} : { payload }) })
   }
 
-  async expire(id: string): Promise<void> {
-    await this.append({ type: 'expired', id, expiredAt: this.now() })
+  async expire(id: string, reason?: string): Promise<void> {
+    await this.append({ type: 'expired', id, expiredAt: this.now(), ...(reason === undefined ? {} : { reason }) })
   }
 
   private async append(event: GovernedMemoryEvent): Promise<void> {
@@ -121,9 +127,9 @@ export class GovernedMemoryStore {
 
 type GovernedMemoryEvent =
   | { readonly type: 'recorded'; readonly record: MemoryRecord }
-  | { readonly type: 'reviewed'; readonly id: string; readonly status: ReviewStatus; readonly reviewedAt: number }
+  | { readonly type: 'reviewed'; readonly id: string; readonly status: ReviewStatus; readonly reviewedAt: number; readonly reason?: string }
   | { readonly type: 'classified'; readonly id: string; readonly sensitivity: SensitivityLevel; readonly classifiedAt: number }
-  | { readonly type: 'expired'; readonly id: string; readonly expiredAt: number }
+  | { readonly type: 'expired'; readonly id: string; readonly expiredAt: number; readonly reason?: string }
 
 function buildRecord(options: RecordMemoryOptions, now: number): MemoryRecord {
   const base = {
@@ -135,11 +141,12 @@ function buildRecord(options: RecordMemoryOptions, now: number): MemoryRecord {
     reviewStatus: 'pending' as const,
     sensitivity: options.sensitivity ?? 'internal' as SensitivityLevel,
   }
-  const extras: { turnId?: string; expiresAt?: number; correctionOf?: string; correctionReason?: string } = {}
+  const extras: { turnId?: string; expiresAt?: number; correctionOf?: string; correctionReason?: string; payload?: JsonObject } = {}
   if (options.turnId !== undefined) extras.turnId = options.turnId
   if (options.expiresAt !== undefined) extras.expiresAt = options.expiresAt
   if (options.correctionOf !== undefined) extras.correctionOf = options.correctionOf
   if (options.correctionReason !== undefined) extras.correctionReason = options.correctionReason
+  if (options.payload !== undefined) extras.payload = options.payload
   return { ...base, ...extras } as MemoryRecord
 }
 

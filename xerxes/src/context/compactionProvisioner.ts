@@ -10,6 +10,7 @@ import {
 import { SmartTokenCounter } from './tokenCounter.js'
 import { repairToolMessageSequence } from './toolPairRepair.js'
 import { shedToolResults } from './toolResultPruner.js'
+import { renderTrajectory } from './trajectory.js'
 
 /** Tool results kept verbatim when older ones are shed to fit the window. */
 const SHED_KEEP_RECENT_TOOL_RESULTS = 8
@@ -399,32 +400,9 @@ export function messageContentToText(content: unknown): string {
   return content === undefined || content === null ? '' : String(content)
 }
 
-/**
- * Render full messages into the explicit, deterministic prompt input supplied to a model port.
- *
- * Tool traffic collapses into one `called name(args) -> outcome` line per call. Dumping raw
- * `tool_calls` JSON next to a separate result message spent most of the summarizer's input on
- * argument scaffolding and call ids — the budget the summary needs for file state and decisions.
- */
+/** Render model-readable summary input through the shared, explicitly clipped trajectory grammar. */
 export function renderMessagesForSummary(messages: readonly ContextMessage[]): string {
-  const resultsById = toolResultsById(messages)
-  const folded = new Set<string>()
-  const rendered: string[] = []
-  for (const message of messages) {
-    const role = typeof message.role === 'string' ? message.role.toUpperCase() : 'UNKNOWN'
-    const callLines = renderToolCalls(message.tool_calls, resultsById, folded)
-    const identifier = typeof message.tool_call_id === 'string' ? message.tool_call_id : ''
-    // The result already appears inside its caller's line; repeating it here would restore
-    // exactly the duplication this rendering exists to remove.
-    if (role === 'TOOL' && folded.has(identifier)) continue
-    const lines = [`Message ${rendered.length + 1} [${role}]`]
-    const content = messageContentToText(message.content)
-    if (content) lines.push(content)
-    lines.push(...callLines)
-    if (message.tool_call_id) lines.push(`tool_call_id=${String(message.tool_call_id)}`)
-    rendered.push(lines.join('\n'))
-  }
-  return rendered.join('\n\n')
+  return renderTrajectory(messages, { maxArgumentChars: 200, maxObservationChars: 400 })
 }
 
 export interface CompactionPromptOptions {
@@ -579,75 +557,6 @@ function failure(
   error: unknown,
 ): CompactionProvision {
   return { ...unchanged(messages, tokens, reason), error: errorMessage(error) }
-}
-
-const TOOL_ARGUMENT_PREVIEW_LIMIT = 200
-const TOOL_OUTCOME_PREVIEW_LIMIT = 400
-
-function toolResultsById(messages: readonly ContextMessage[]): Map<string, ContextMessage> {
-  const results = new Map<string, ContextMessage>()
-  for (const message of messages) {
-    if (message.role !== 'tool') continue
-    const identifier = typeof message.tool_call_id === 'string' ? message.tool_call_id : ''
-    if (!identifier || results.has(identifier)) continue
-    results.set(identifier, message)
-  }
-  return results
-}
-
-function renderToolCalls(
-  toolCalls: unknown,
-  resultsById: ReadonlyMap<string, ContextMessage>,
-  folded: Set<string>,
-): string[] {
-  if (toolCalls === undefined || toolCalls === null) return []
-  // Unknown shapes still have to reach the summarizer; falling back to the old dump is lossy
-  // in prompt budget but never lossy in content.
-  if (!Array.isArray(toolCalls)) return [`tool_calls=${stableJson(toolCalls)}`]
-  return toolCalls.map(call => {
-    if (!isRecord(call)) return `called ${truncatePreview(String(call), TOOL_ARGUMENT_PREVIEW_LIMIT)}`
-    const fn = isRecord(call.function) ? call.function : undefined
-    const name = firstText(fn?.name, call.name, call.tool_name) || 'unknown_tool'
-    const identifier = firstText(call.id, call.tool_call_id)
-    const result = identifier ? resultsById.get(identifier) : undefined
-    if (identifier && result !== undefined) folded.add(identifier)
-    return `called ${name}(${shortArguments(fn?.arguments ?? call.arguments ?? call.input ?? call.args)}) `
-      + `-> ${toolOutcome(result)}`
-  })
-}
-
-function toolOutcome(result: ContextMessage | undefined): string {
-  if (result === undefined) return '(no result in this slice)'
-  const failed = result.is_error === true || result.isError === true || result.status === 'error'
-  const text = collapseWhitespace(messageContentToText(result.content))
-  if (!text) return failed ? 'error (no output)' : 'ok (no output)'
-  const preview = truncatePreview(text, TOOL_OUTCOME_PREVIEW_LIMIT)
-  return failed ? `error: ${preview}` : preview
-}
-
-function shortArguments(value: unknown): string {
-  if (value === undefined || value === null) return ''
-  const text = collapseWhitespace(typeof value === 'string' ? value : stableJson(value))
-  return truncatePreview(text, TOOL_ARGUMENT_PREVIEW_LIMIT)
-}
-
-function collapseWhitespace(text: string): string {
-  return text.replace(/\s+/g, ' ').trim()
-}
-
-function truncatePreview(text: string, limit: number): string {
-  if (text.length <= limit) return text
-  // A preview is sent back to the provider, whose JSON decoder can reject
-  // isolated UTF-16 surrogates. Keep supplementary characters together.
-  const end = /[\uD800-\uDBFF]/u.test(text[limit - 1]!) ? limit - 1 : limit
-  return `${text.slice(0, end)}… (+${text.length - end} chars)`
-}
-
-function firstText(...candidates: readonly unknown[]): string {
-  for (const candidate of candidates) {
-    if (typeof candidate === 'string' && candidate.trim()) return candidate.trim()
-  }
-  return ''
 }
 
 function stableJson(value: unknown): string {

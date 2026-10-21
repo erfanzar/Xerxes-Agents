@@ -127,8 +127,8 @@ export function completionRequestForInput(
 
   // These argument candidates are owned by the daemon, including package
   // versions and preset IDs. Keep the complete command in the replacement.
-  if (/^\/(?:forge|presets?|config|plugins|skills)\s+\S*$/.test(input)
-    || /^\/(?:forge\s+inspect|presets?\s+(?:use|default|copy|remove)|plugins\s+(?:inspect|enable|disable)|skills\s+inspect)\s+\S*(?:\s+\S*)?$/.test(input)) {
+  if (/^\/(?:forge|presets?|config|plugins|skills|xerxes)\s+\S*$/.test(input)
+    || /^\/(?:forge\s+inspect|presets?\s+(?:use|default|copy|remove)|plugins\s+(?:inspect|enable|disable)|skills\s+inspect|xerxes\s+(?:show|approve|reject))\s+\S*(?:\s+\S*)?$/.test(input)) {
     return { method: 'complete.slash', params: { text: input }, replaceFrom: 1 }
   }
   const fileArg = input.match(/^\/file\s+(.*)$/)

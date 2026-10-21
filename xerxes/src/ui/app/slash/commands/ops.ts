@@ -265,7 +265,17 @@ export const opsCommands: SlashCommand[] = [
   },
 
   {
-    help: 'list, search, install local skills, inspect or trust skills and commands',
+    group: 'skills',
+    help: 'open the review overlay; /xerxes help lists typed subcommands',
+    name: 'xerxes',
+    run: (arg, ctx) => {
+      if (!arg.trim()) { patchOverlayState({ learning: true }); return }
+      return runNativeSlash(ctx, `xerxes ${arg.trim()}`, 'Xerxes review')
+    }
+  },
+
+  {
+    help: 'list, search, install local skills, inspect, lint or trust skills and commands',
     name: 'skills',
     run: (arg, ctx) => {
       const [sub = '', ...rest] = arg.trim().split(/\s+/).filter(Boolean)
@@ -285,15 +295,15 @@ export const opsCommands: SlashCommand[] = [
         return runNativeSlash(ctx, `skills diagnostics ${rest.join(' ')}`.trim(), 'Skill diagnostics')
       }
 
-      if (lower === 'search' || lower === 'install' || lower === 'browse') {
+      if (lower === 'search' || lower === 'install' || lower === 'browse' || lower === 'lint') {
         return runNativeSlash(ctx, `skills ${arg.trim()}`, 'Skills')
       }
 
       if (rest.length) {
-        return ctx.transcript.sys('usage: /skills [list|inspect <name>|diagnostics|trust <name>]  (activate with /skill <name>)')
+        return ctx.transcript.sys('usage: /skills [list|inspect <name>|diagnostics|lint|trust <name>]  (activate with /skill <name>)')
       }
 
-      ctx.transcript.sys('usage: /skills [list|inspect <name>|diagnostics|trust <name>]  (activate with /skill <name>)')
+      ctx.transcript.sys('usage: /skills [list|inspect <name>|diagnostics|lint|trust <name>]  (activate with /skill <name>)')
     }
   },
 

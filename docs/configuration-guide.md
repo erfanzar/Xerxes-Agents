@@ -1,5 +1,61 @@
 # Configuration guide
 
+## Xerxes learning controls
+
+The integration is Bun-native and adopts ideas, not upstream runners or published benchmark claims.
+
+Set the reflection policy in the normal daemon configuration:
+
+```yaml
+runtime:
+  reflection: goals
+```
+
+`reflection` accepts **`goals`** (default: reflect only when a goal transitions to complete/blocked during a successful turn), **`all`** (also reflect after at least 25 tool calls or 20 minutes), or **`off`** (no automatic reflection). `XERXES_REFLECTION=goals|all|off` overrides configuration at startup. The live `runtime.reload` settings path also accepts `reflection`; `runtime.status` and `/config` show it. The additive v35 `learning.list` and `learning.review` RPCs share the slash review implementation; workspace-scoped `learning_changed` events refresh clients after stored proposals, reviews and lesson-tool mutations.
+
+Reflection uses the owning session's auxiliary provider path, with a 90-second request timeout and a 4096-token output ceiling. It starts only after persistence and `turn_end`, never delays the terminal event, and is cancelled with the turn/session/daemon lifetime. Errors are logged without failing the turn. Aborted/errored turns and subagent sessions are excluded. Ordinary turns do not incur this extra call under the default policy. A terminal goal is reflected on its transition, not on every later chat turn.
+
+### Shared review and lesson stores
+
+- Proposals: `<XERXES_HOME>/reflection/reflection-proposals.jsonl`; append-only review history, filtered by active workspace.
+- Lessons: the shared governed-memory store under `<XERXES_HOME>/governed-memory`, keyed by canonical workspace and retrieval cue. `lesson_record` needs successful host-resolved tool-call evidence or explicitly reported test evidence, plus confidence. `lesson_recall` excludes rejected/expired lessons and ranks approved before pending. `lesson_review` approves/rejects/rolls back with a reason through the normal permission gate; automatic turns cannot approve lessons for future injection. Rendered Markdown is a view, not the store.
+- `reflection_list` / `reflection_review` share the same proposal store and applier as human slash review. Automatic goal rounds cannot approve their own proposals. Nothing is automatically applied.
+
+```text
+/xerxes [help]
+/xerxes proposals
+/xerxes show <id> [--json]
+/xerxes approve <id> [reason]
+/xerxes reject <id> <reason>
+/xerxes lessons [cue]
+/xerxes lessons approve <id> [reason]
+/xerxes lessons reject <id> <reason>
+/xerxes lessons rollback <id> <reason>
+/xerxes improve --proposals <file> --max-candidates N --max-task-runs N [options]
+```
+
+The desktop has a **Learned** panel with **Proposals** and **Lessons** tabs and in-chat proposal cards. In the TUI, typing `/xerxes` alone opens a review overlay; a status chip shows how many items need review. Bare `/xerxes` returns help to headless clients. A stored proposal sends a structured `notification` with `category: reflection`, `type: proposal`, `session_id` and `reflection: { id, kind, target, rationale, evidence_count }`, where rationale is the first line. Its message is “Reflection proposal <id>: <kind> <target>. Nothing was changed. Review it with /xerxes.”
+
+`show` is readable by default: kind/target, status, trigger/objective, rationale, quoted evidence, exact proposed skill description/instructions and bundle file contents with byte sizes, agent YAML or plugin description, plus reviewed outcomes/hints. `show <id> --json` returns the original full JSON record. Lesson listings show cue, text, confidence, review status and tool/test evidence provenance; reported test evidence is labelled as such. Proposal lists include id/status/kind/target/rationale/evidence count. A typed `approve` is explicit human authority and can apply a pending proposal only once. Skill writes use the linted `SkillBundleStore` under `<XERXES_HOME>/skills`; updates preserve an existing user skill's version/tags; when no user copy exists, the approved full content creates a user-directory override with default metadata. Agent YAML is schema-validated, must match the approved target, and is atomically written only to a regular/new `.xerxes/agents/<name>.yaml` in the active workspace; escaping names and symlink targets/directories are refused. Use `/reload` after approved agent edits. Lint findings and failed outcomes remain visible. Plugin ideas only acknowledge the suggestion and direct you to `/plugin-creator`; no plugin code is written.
+
+### Approved lessons in turn context
+
+Lessons begin pending. The user approves them through the review UI or `/xerxes lessons approve <id> [reason]`; reject and rollback require a reason. At the start of each turn, the shared lesson store recalls up to five matches for the current user message in that session's workspace. Only approved, active, non-superseded records are injected. This is a named **turn-context** layer, never a change to the cached system prompt. Its maximum is 2,000 characters with explicit `[clipped]` markers, cues, evidence provenance and a reminder that lessons are reviewed guidance, not instructions overriding the user. No match adds nothing. Recall errors are logged and the turn continues.
+
+`learning.list` returns every proposal status newest first and pending/approved lessons (approved first, then newest), with pending counts. `learning.review` is a human client action: proposals can be approved once or rejected; lessons can be approved/rejected or rolled back. Missing reasons for reject/rollback, invalid targets/actions, absent/non-pending proposals and failed applies return an observable `{ ok: false, report, error }`, not simulated success. Rollback is lessons-only. `learning_changed` carries the workspace and both pending counts only to clients actively viewing that workspace.
+
+### Bounded experiments and blind Workflow selection
+
+`/xerxes improve` without arguments shows CLI usage. With arguments it invokes the native `playground:improve` planner with **`--dry-run` forced**, captures all plan/errors, and prints the real command:
+
+```sh
+bun run --cwd xerxes playground:improve -- --transport <module> --proposals <file> --max-candidates N --max-task-runs N
+```
+
+The daemon never imports the transport or runs models for this subcommand. Resolve proposal/xerxes files against the active workspace; when executing the CLI, use absolute file paths and set the working directory appropriately (`--cwd xerxes` must point to the installed/source package). Proposals are INV/DOM full-file edits; the same hard tasks evaluate baseline, candidates and conditional composition in private workspaces. The declared budgets include baseline/composition task runs. Optional `--keyword`, `--max-tokens` (reported context tokens, not billing), `--max-wall-ms` and `--run-root` bound selection and execution. The transport must be explicitly supplied and own provider credentials/cancellation. No recommendation modifies the source repository.
+
+Workflow scripts expose `select(candidates, { judge, baseline?, judgeOptions?, score?, seed? })`. Supply 1–26 values, optionally wrapped as `{ value, ...privateMetadata }`. The judge sees anonymous shuffled letters and only the wrapped values, never metadata or scores. Selection commits before optional scoring. Invalid judge output, failed selected scoring or regression below baseline yields a reported baseline fallback. A single candidate needs no judge call. Judge calls use normal Workflow admission/budgets/ledger, including `expect_agents`; scoring is not a way to bypass permissions or grant transport access.
+
 ## Accepting goal criteria
 
 Open F10 to inspect the current goal and its acceptance criteria. Use Tab to
@@ -1824,6 +1880,7 @@ local bundle, or pass its `SKILL.md` path. Assets and references are copied, whi
 existing names, unsupported filesystem entries, oversized bundles and failed
 skill scans are rejected. Use `/skills inspect <name>` to inspect the result and
 `/skill <name>` to invoke it. Shell preprocessing still requires `/skills trust`.
+`/skills lint` reports every skill authoring problem, including shadowed sources and missing bundled scripts.
 
 `/plugins install /absolute/path/plugin.ts` registers and enables a local native
 tool module exporting `register(registry)`. Its path and enabled state persist;

@@ -139,6 +139,9 @@ export function useSubmission(opts: UseSubmissionOptions) {
       const images = message.images ?? []
       const userMessage = queuedUserMessage(message)
 
+      // The durable transcript breadcrumb remains; a new user turn dismisses
+      // the review notice without clearing unrelated sticky account notices.
+      turnController.clearNotice('reflection')
       turnController.clearStatusTimer()
       maybeGoodVibes(message.submitText)
       setLastUserMsg(message.displayText)

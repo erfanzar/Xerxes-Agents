@@ -533,6 +533,14 @@ export function adaptDaemonEvent(type: string, payload: Record<string, unknown>)
     case 'question_request':
       return [clarifyRequest(payload)]
 
+    case 'learning_changed': {
+      const counts = asRecord(payload.counts)
+      return [{ type: 'learning.changed', payload: {
+        workspace: str(payload.workspace),
+        counts: { pending_proposals: Math.max(0, Math.floor(num(counts.pending_proposals))), pending_lessons: Math.max(0, Math.floor(num(counts.pending_lessons))) }
+      } }]
+    }
+
     case 'notification':
       return notificationEvents(payload)
 
@@ -646,6 +654,18 @@ function notificationEvents(payload: Record<string, unknown>): AnyEvent[] {
   // Without the second spelling those notices — turn errors, saved steers,
   // stopped delegated agents — reached the TUI as a blank info toast.
   const body = firstNonEmptyStr(payload.body, payload.title, payload.message)
+
+  if (category === 'reflection' && kind === 'proposal') {
+    const reflection = asRecord(payload.reflection)
+    const line = `Reflection proposal ${str(reflection.id, 'unknown')}: ${str(reflection.kind, 'proposal')} ${str(reflection.target)} — /xerxes to review`
+    return [
+      { type: 'notification.show', payload: {
+        id: str(reflection.id), key: 'reflection', kind: 'sticky', level: 'info',
+        text: `${body || line}${body ? ' — /xerxes to review' : ''}`
+      } },
+      { type: 'transcript.append', payload: { role: 'system', text: line } }
+    ]
+  }
 
   if (category === 'subagent_stream') {
     return subagentStreamEvents(payload, body)

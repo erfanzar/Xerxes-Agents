@@ -42,6 +42,7 @@ import { TerminalPanel } from './TerminalPanel.js'
 import { UsagePanel } from './UsagePanel.js'
 import { useDialogFocus } from './dialogFocus.js'
 import { RunHistory, type RunHistoryPage } from './RunHistory.js'
+import { LearnedBadge, LearnedPanel } from './LearnedPanel.js'
 
 export type DesktopPanel =
   | 'artifacts'
@@ -473,7 +474,7 @@ function ExtensionsPanel({ snap }: { snap: Snapshot }): ReactElement {
   const open = useDesktopNavigation()
   const request = useRequest(snap),
     [catalog, setCatalog] = useState<RpcRecord | null>(null),
-    [tab, setTab] = useState<'skills' | 'tools' | 'plugins'>('skills'),
+    [tab, setTab] = useState<'skills' | 'tools' | 'plugins' | 'learned'>(snap.learningOpen ? 'learned' : 'skills'),
     [detail, setDetail] = useState(''),
     [needle, setNeedle] = useState(''),
     [selectedSkill, setSelectedSkill] = useState(''),
@@ -481,6 +482,7 @@ function ExtensionsPanel({ snap }: { snap: Snapshot }): ReactElement {
     [plugins, setPlugins] = useState<RpcRecord[]>([]),
     [confirmUninstall, setConfirmUninstall] = useState(''),
     [secretDrafts, setSecretDrafts] = useState<Record<string, { secret: string; value: string }>>({})
+  useEffect(() => { if (snap.learningOpen) setTab('learned') }, [snap.learningOpenRevision])
   useEffect(() => {
     void request.run(async () => {
       const result = await request.call('capabilities.list')
@@ -499,16 +501,16 @@ function ExtensionsPanel({ snap }: { snap: Snapshot }): ReactElement {
   // panel now degrades to its own error state instead.
   let list: RpcRecord[] = []
   let catalogError = ''
-  try { list = catalog && tab !== 'plugins' ? records(catalog[tab] ?? []) : [] }
+  try { list = catalog && tab !== 'plugins' && tab !== 'learned' ? records(catalog[tab] ?? []) : [] }
   catch (failure) { catalogError = desktopError(failure) }
   const skillCount = ((): number | null => {
     try { return catalog ? records(catalog.skills).length : null } catch { return null }
   })()
   return (
-    <div className={"studio-form catalog-form" + (tab === "plugins" ? " catalog-form--plugins" : "")}>
+    <div className={"studio-form catalog-form" + (tab === "plugins" || tab === "learned" ? " catalog-form--plugins" : "")}>
       {catalogError && <p className="studio-error" role="alert">This runtime returned a {tab} catalog this app build does not understand. {catalogError}</p>}
       <div className="studio-tabs">
-        {(['skills', 'tools', 'plugins'] as const).map((name) => (
+        {(['skills', 'tools', 'plugins', 'learned'] as const).map((name) => (
           <button
             className={name === tab ? 'is-selected' : ''}
             key={name}
@@ -517,9 +519,11 @@ function ExtensionsPanel({ snap }: { snap: Snapshot }): ReactElement {
               setDetail('')
               setSelectedSkill('')
               setNeedle('')
+              if (name === 'learned') store.openLearning()
             }}
+            aria-pressed={name === tab}
           >
-            {name}{name === 'skills' && skillCount !== null ? ' · ' + skillCount : ''}
+            {name}{name === 'skills' && skillCount !== null ? ' · ' + skillCount : ''}{name === 'learned' && <LearnedBadge snap={snap} />}
           </button>
         ))}
         <button
@@ -532,7 +536,7 @@ function ExtensionsPanel({ snap }: { snap: Snapshot }): ReactElement {
         </button>
       </div>
       <Feedback {...request} />
-      {tab === 'plugins' ? (
+      {tab === 'learned' ? <LearnedPanel snap={snap} /> : tab === 'plugins' ? (
         <>
           {plugins.map((plugin) => (
             <div className="studio-item" key={text(plugin.name)}>

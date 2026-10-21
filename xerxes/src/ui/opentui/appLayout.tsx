@@ -94,6 +94,7 @@ import { rebasePasteResult } from './pasteRebase.js'
 import { ReasoningPicker } from './reasoningPicker.js'
 import { Box, Span, Text } from './primitives.js'
 import { SessionPicker } from './sessionPicker.js'
+import { LearningOverlay } from './learningOverlay.js'
 
 const TEXTAREA_KEY_BINDINGS: KeyBinding[] = [
   { name: 'return', action: 'submit' },
@@ -496,7 +497,7 @@ function NoticeBanner({ notice, t }: { notice: Notice | null; t: Theme }) {
       <Box backgroundColor={color} flexShrink={0} width={1} />
       <Box backgroundColor={t.color.completionBg} flexDirection="column" flexGrow={1} flexShrink={1} paddingX={1} onClick={open}>
         {lines.slice(0, Math.max(1, Math.min(4, Math.floor(height / 6)))).map((line, index) => <Text key={index} color={color} wrap="wrap">{line}</Text>)}
-        <Text color={t.color.muted}>Alt+N · full notice</Text>
+        <Text color={t.color.muted}>{notice.key === 'reflection' ? 'Alt+N · full notice; next message dismisses' : 'Alt+N · full notice'}</Text>
       </Box>
     </Box>
   )
@@ -1749,6 +1750,7 @@ function InfoOverlay({ kind }: { kind: 'pluginsHub' | 'skillsHub' }) {
   const cards = skills ? [
     ['Discover', '/skills', 'Find instructions and workflows available to this session.'],
     ['Add a skill', '/skills install <local-path>', 'Install a local bundle with its examples and reference files.'],
+    ['Validate', '/skills lint', 'Report every authoring problem, including missing helper scripts and shadowed skills.'],
     ['Use it', '/skill <name>', 'Activate a skill for the work in front of you.'],
   ] : [
     ['Inspect', '/plugins', 'See installed native tools and their status.'],
@@ -2090,6 +2092,7 @@ export function AppLayout({
       {overlay.modelPicker ? <ModelPicker onSelect={actions.onModelSelect} /> : null}
       {overlay.reasoningPicker ? <ReasoningPicker onSelect={actions.onReasoningSelect} /> : null}
       {overlay.sessions ? <SessionPicker actions={actions} /> : null}
+      {overlay.learning ? <LearningOverlay /> : null}
       {overlay.copyPicker ? <CopyPicker onCopied={actions.sys} /> : null}
       {overlay.diff ? (
         <DiffPanelOverlay cwd={ui.info?.cwd} onClose={() => patchOverlayState({ diff: false })} t={t} />

@@ -13,6 +13,7 @@
  */
 
 import type { AgentMember, Block, ToolItem } from './types.js'
+import { reflectionNotice, type ReflectionNotice } from './learning.js'
 import { harnessOriginOf } from './types.js'
 import { transcriptContent, isLegacyHarnessPrompt } from './transcriptContent.js'
 
@@ -49,7 +50,8 @@ export function noticeText(message: string): string {
     .join('\n')
     .trim() || message.trim()
 }
-type Run = ToolRun | TextRun | ThinkingRun | NoticeRun
+interface ReflectionRun { readonly kind: 'reflection'; readonly reflection: ReflectionNotice }
+type Run = ToolRun | TextRun | ThinkingRun | NoticeRun | ReflectionRun
 
 /** Coarse duration label from a wire millisecond count. */
 function dur(ms: unknown): string {
@@ -214,7 +216,7 @@ export class BlockBuilder {
    * freshly opened one — this is what makes think→tools→think produce two
    * thinking blocks instead of appending to the first.
    */
-  private openRun(kind: Exclude<Run['kind'], 'notice'>): Run {
+  private openRun(kind: 'tools' | 'text' | 'thinking'): Run {
     const last = this.runs[this.runs.length - 1]
     if (last && last.kind === kind) return last
     const run: Run =
@@ -308,6 +310,16 @@ export class BlockBuilder {
         break
       }
       case 'notification': {
+        if (payload.category === 'reflection' && payload.type === 'proposal') {
+          const reflection = reflectionNotice(payload.reflection)
+          if (reflection) {
+            if (this.blocks.some(block => block.kind === 'reflection' && block.reflection.id === reflection.id) || this.runs.some(run => run.kind === 'reflection' && run.reflection.id === reflection.id)) break
+            const run: ReflectionRun = { kind: 'reflection', reflection }, id = this.nextId()
+            if (this.runs.length) { this.runIds.set(run, id); this.runs.push(run) }
+            else this.blocks.push({ ...run, id })
+            break
+          }
+        }
         // Slash-command resume emits history notifications rather than live
         // tool events. Keep their semantics without pretending the bounded
         // replay payload contains the original output.
@@ -414,7 +426,7 @@ export class BlockBuilder {
   private runBlock(run: Run, index: number, streaming: boolean): Block {
     // Allocate identity at first activity and retain it through finalization.
     const id = this.runIds.get(run)!
-    if (run.kind === 'notice') return { ...run, id }
+    if (run.kind === 'notice' || run.kind === 'reflection') return { ...run, id }
     if (run.kind === 'tools') {
       const items = run.order.map(itemId => this.tools.get(itemId)).filter((t): t is ToolItem => t !== undefined)
       // `running` follows the items, not the caret: a still-working tool is
@@ -446,7 +458,7 @@ export class BlockBuilder {
       if (block.kind === 'tools') this.blocks.push(block)
       else if (block.kind === 'thinking') this.blocks.push({ ...block, streaming: false })
       else if (block.kind === 'agent') this.blocks.push({ ...block, streaming: false })
-      else if (block.kind === 'notice') this.blocks.push(block)
+      else if (block.kind === 'notice' || block.kind === 'reflection') this.blocks.push(block)
       if (run === this.agentsAnchor) {
         const card = this.agentsBlock()
         if (card) this.blocks.push(card)

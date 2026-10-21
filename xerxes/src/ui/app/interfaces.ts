@@ -102,6 +102,7 @@ export interface OverlayState {
   copyPicker: CopyPickerState | null
   diff: boolean
   goal: boolean
+  learning: boolean
   loops: boolean
   schedules: boolean
   agentSettings: boolean
@@ -184,6 +185,9 @@ export interface UiState {
   detailsModeCommandOverride: boolean
   info: null | SessionInfo
   liveSessionCount: number
+  learningWorkspace: null | string
+  pendingProposals: number
+  pendingLessons: number
   inlineDiffs: boolean
   mouseTracking: MouseTrackingMode
   notice: Notice | null

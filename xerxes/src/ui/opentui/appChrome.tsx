@@ -4,10 +4,12 @@
 // Compact workspace and session chrome above the transcript.
 // Model, mode, and permission metadata stay with the composer.
 import { useTerminalDimensions } from '@opentui/react'
+import { useStore } from '@nanostores/react'
+import { $uiReviewCount } from '../app/uiStore.js'
 import type { SessionTab } from '../app/interfaces.js'
 import type { LiveSessionStatus } from '../gatewayTypes.js'
 import { GLYPH } from '../domain/nocturne.js'
-import { patchOverlayState } from '../app/overlayStore.js'
+import { getOverlayState, overlayBlocksBackgroundHotkeys, patchOverlayState } from '../app/overlayStore.js'
 import { ctxBarColor, ctxMeterBar } from '../domain/statusFormat.js'
 import { fmtK } from '../lib/text.js'
 import { branchLabel, type RepoPulse } from '../lib/repoPulse.js'
@@ -77,6 +79,7 @@ export function SessionHeader({
   t: Theme
 }) {
   const { height } = useTerminalDimensions()
+  const reviewCount = useStore($uiReviewCount)
   const title = sessionTitle?.trim()
   const id = sessionId?.trim()
   // A short handle, not the whole id: enough to tell two chats apart at a
@@ -135,6 +138,11 @@ export function SessionHeader({
           </Text>
         </Box>
       </Box>
+      {reviewCount > 0 ? <Box flexShrink={0} onClick={() => {
+        if (!overlayBlocksBackgroundHotkeys(getOverlayState())) patchOverlayState({ learning: true })
+      }}>
+        <Text color={t.color.warn} wrap="truncate-end">{`${reviewCount} to review · /xerxes`}</Text>
+      </Box> : null}
       <SessionFollowups t={t} sessionId={sessionId} />
       {goal ? (
         <Box flexDirection="row" flexShrink={0} marginTop={1} overflow="hidden" width="100%">

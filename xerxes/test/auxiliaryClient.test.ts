@@ -89,7 +89,7 @@ test('summarize renders messages under a compaction instruction and honors its b
   expect(captured?.messages[0]).toMatchObject({ role: 'system', content: expect.stringContaining('Summarize') })
   expect(captured?.messages[1]).toMatchObject({
     role: 'user',
-    content: '[user] hi\n[assistant] there',
+    content: '[USER] hi\n[ASSISTANT] there',
   })
 })
 
@@ -104,9 +104,29 @@ test('summarize preserves non-string content and rejects malformed message roles
 
   await client.summarize([{ role: 'user', content: null }])
 
-  expect(captured?.messages[1]).toMatchObject({ role: 'user', content: '[user] null' })
+  expect(captured?.messages[1]).toMatchObject({ role: 'user', content: '[USER] null' })
   const malformedMessage = { role: 7 } as unknown as AuxiliaryMessage
-  await expect(client.summarize([malformedMessage])).rejects.toThrow('role must be a string')
+  await expect(client.summarize([malformedMessage])).rejects.toThrow('auxiliary message 0 role must be a string')
+  await expect(client.summarize([null as unknown as AuxiliaryMessage])).rejects.toThrow('auxiliary message 0 must be an object')
+  await expect(client.summarize(null as unknown as readonly AuxiliaryMessage[])).rejects.toThrow('auxiliary messages must be an array')
+})
+
+test('summary and title helpers use shared action/result grammar and disclose tool preview clipping', async () => {
+  const requests: AuxiliaryBackendRequest[] = []
+  const client = new AuxiliaryClient({ backend: request => { requests.push(request); return 'S' } })
+  const messages = [
+    { role: 'assistant', tool_calls: [{ id: 'r', name: 'ReadFile', input: { path: '/repo/a' } }] },
+    { role: 'tool', tool_call_id: 'r', content: 'x'.repeat(2_100) },
+    { role: 'tool', tool_call_id: 'orphan', content: '{"ok":false}' },
+  ]
+  await client.summarize(messages)
+  await client.title(messages)
+  const rendered = requests[0]?.messages[1]?.content
+  expect(requests[1]?.messages[1]?.content).toBe(rendered)
+  expect(rendered).toContain('[ACTION] ReadFile({"path":"/repo/a"}) call_id="r"')
+  expect(rendered).toContain('[OBSERVATION] call_id="r" ')
+  expect(rendered).toContain('[preview clipped by the renderer: showing 2000 of 2100 chars;')
+  expect(rendered).toContain('[ERROR] call_id="orphan" {"ok":false}')
 })
 
 test('title strips display delimiters and extract preserves the caller instruction', async () => {
@@ -154,7 +174,7 @@ test('summarize caps oversized transcripts with an explicit head+tail truncation
   expect(text.length).toBeLessThanOrEqual(MAX_RENDERED_TRANSCRIPT_CHARS)
   expect(text.length).toBeGreaterThan(MAX_RENDERED_TRANSCRIPT_CHARS / 2)
   expect(text).toContain('transcript truncated')
-  expect(text.startsWith('[user] ' + 'H'.repeat(100))).toBe(true)
+  expect(text.startsWith('[USER] ' + 'H'.repeat(100))).toBe(true)
   expect(text.endsWith('T'.repeat(100))).toBe(true)
   // The middle turns are what get omitted.
   expect(text).not.toContain('turn 100')
@@ -171,7 +191,7 @@ test('short transcripts pass through to the auxiliary model unclipped', async ()
 
   await client.summarize([{ role: 'user', content: 'small' }])
 
-  expect(captured?.messages[1]).toMatchObject({ role: 'user', content: '[user] small' })
+  expect(captured?.messages[1]).toMatchObject({ role: 'user', content: '[USER] small' })
 })
 
 test('every built-in helper tags its backend request with its own housekeeping source', async () => {

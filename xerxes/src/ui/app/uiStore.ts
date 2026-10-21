@@ -22,6 +22,9 @@ const buildUiState = (): UiState => ({
   indicatorStyle: DEFAULT_INDICATOR_STYLE,
   info: null,
   liveSessionCount: 0,
+  learningWorkspace: null,
+  pendingProposals: 0,
+  pendingLessons: 0,
   inlineDiffs: true,
   mouseTracking: MOUSE_TRACKING,
   notice: null,
@@ -63,6 +66,7 @@ export const $uiTheme = computed([$uiState, $appearance], (state, appearance) =>
   return cachedTheme
 })
 export const $uiSessionId = computed($uiState, state => state.sid)
+export const $uiReviewCount = computed($uiState, state => state.pendingProposals + state.pendingLessons)
 // A primitive snapshot prevents transcript rows from re-rendering on every
 // unrelated status/usage tick while still making /details changes immediate.
 export const $uiDetailVisibility = computed($uiState, state =>

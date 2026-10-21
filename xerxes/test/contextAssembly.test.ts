@@ -60,6 +60,14 @@ describe("context assembly", () => {
     expect(renderTurnContext(assembleTurnContext({ contextDeltas: "reasoning: high", instructionUpdates: "AGENTS.md changed", memoryChanges: "## Memory written since this conversation began", recoveredSubagents: "1 delegated task handle(s) were recovered" }))).toBe(text);
   });
 
+  test("approved lessons are a named turn layer and empty recall adds nothing", () => {
+    expect(assembleTurnContext({ approvedLessons: "" })).toEqual([]);
+    const text = "## Approved lessons for this workspace\nReviewed fixture guidance";
+    expect(assembleTurnContext({ approvedLessons: text })).toEqual([{ name: "approved_lessons", text }]);
+    expect(renderTurnContext(assembleTurnContext({ approvedLessons: text }))).toContain(text);
+    expect(assembleContextLayers(fullInput).some(layer => layer.name === "approved_lessons")).toBe(false);
+  });
+
   test("identical inputs assemble byte-identically (cache-parity contract)", () => {
     const first = joinSystemSegments(assembleContextLayers(fullInput));
     const second = joinSystemSegments(assembleContextLayers({ ...fullInput }));

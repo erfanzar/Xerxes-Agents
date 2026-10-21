@@ -59,6 +59,19 @@ const attachFakeSocket = (client: GatewayClient, socket: Socket) => {
 }
 
 describe('GatewayClient session lifecycle', () => {
+  it('routes learning calls with an explicit or current daemon session key and preserves review errors', async () => {
+    const client = new GatewayClient({ projectDir: process.cwd(), sessionKey: 'attached-session' })
+    const raw = vi.fn(async () => ({ ok: false, error: 'Review refused', report: 'Validation failed' }))
+    ;(client as unknown as { rawRequest: typeof raw }).rawRequest = raw
+    await client.request('learning.list')
+    expect(raw).toHaveBeenLastCalledWith('learning.list', { session_key: 'attached-session' })
+    const response = await client.request('learning.review', { session_key: 'selected-session', target: 'proposal', id: 'p1', action: 'approve' })
+    expect(raw).toHaveBeenLastCalledWith('learning.review', { session_key: 'selected-session', target: 'proposal', id: 'p1', action: 'approve' })
+    expect(response).toMatchObject({ ok: false, error: 'Review refused', report: 'Validation failed' })
+    ;(client as unknown as { rememberSessionKey: (id: string, key: string) => void }).rememberSessionKey('saved-id', 'daemon-key')
+    await client.request('learning.list', { session_key: 'saved-id' })
+    expect(raw).toHaveBeenLastCalledWith('learning.list', { session_key: 'daemon-key' })
+  })
   it('binds file, recorded-edit and terminal output requests to their requested session', async () => {
     const client = new GatewayClient({ projectDir: process.cwd(), sessionKey: 'attached-session' })
     const raw = vi.fn(async () => ({ ok: true }))

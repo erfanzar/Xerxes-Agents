@@ -1,6 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { renderTrajectory } from '../context/trajectory.js'
 import type { QuerySource } from '../llms/client.js'
 
 export const DEFAULT_AUXILIARY_MODEL = 'claude-haiku-4-5'
@@ -36,12 +37,6 @@ const TITLE_INSTRUCTION = 'Generate a short, descriptive title (max 8 words) for
  * marker so the model knows the middle was omitted.
  */
 export const MAX_RENDERED_TRANSCRIPT_CHARS = 120_000
-
-const TRANSCRIPT_TRUNCATION_MARKER = [
-  '',
-  '[... transcript truncated: middle portion omitted to fit the auxiliary-model context ...]',
-  '',
-].join('\n')
 
 export interface AuxiliaryMessage {
   readonly content?: unknown
@@ -317,36 +312,15 @@ function renderMessages(
   if (!Array.isArray(messages)) {
     throw new TypeError('auxiliary messages must be an array')
   }
-  const rendered = messages.map((message, index) => {
+  for (const [index, message] of messages.entries()) {
     if (!isRecord(message)) {
       throw new TypeError(`auxiliary message ${index} must be an object`)
     }
     if (message.role !== undefined && typeof message.role !== 'string') {
       throw new TypeError(`auxiliary message ${index} role must be a string`)
     }
-    const role = message.role ?? 'user'
-    const content = message.content === undefined ? '' : message.content
-    return `[${role}] ${typeof content === 'string' ? content : String(content)}`
-  }).join('\n')
-  return clipRenderedTranscript(rendered, maximumChars)
-}
-
-/**
- * Bound a rendered transcript to a character budget, keeping the head and
- * tail (newest turns are usually the most relevant) joined by an explicit
- * truncation marker. A non-positive or non-finite budget disables clipping.
- */
-function clipRenderedTranscript(rendered: string, maximumChars: number): string {
-  if (!Number.isFinite(maximumChars) || maximumChars <= 0 || rendered.length <= maximumChars) {
-    return rendered
   }
-  if (maximumChars <= TRANSCRIPT_TRUNCATION_MARKER.length + 2) {
-    return rendered.slice(0, maximumChars)
-  }
-  const available = maximumChars - TRANSCRIPT_TRUNCATION_MARKER.length
-  const headLength = Math.ceil(available / 2)
-  const tailLength = available - headLength
-  return rendered.slice(0, headLength) + TRANSCRIPT_TRUNCATION_MARKER + rendered.slice(rendered.length - tailLength)
+  return renderTrajectory(messages, { maxChars: maximumChars })
 }
 
 function stripTitleDelimiters(text: string): string {

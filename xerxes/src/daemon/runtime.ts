@@ -265,6 +265,8 @@ export interface TurnRunner {
 export type TurnOrigin = 'human' | 'schedule' | 'monitor';
 
 export interface TurnRunControls {
+  /** Queue non-blocking host work until persistence and the terminal event have finished. */
+  readonly afterTurn?: (start: () => void) => void;
   /** Host-provided origin; background turns never inherit human authority. */
   readonly origin?: TurnOrigin;
   /** Drain user steering received since the last provider/tool boundary. */
@@ -1276,6 +1278,10 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
   }
 
   reload(overrides: JsonRpcPayload = {}): JsonRpcPayload {
+    if (overrides.reflection !== undefined && overrides.reflection !== null
+      && !['goals', 'all', 'off'].includes(String(overrides.reflection))) {
+      throw new ValidationError('reflection', 'must be goals, all or off', overrides.reflection);
+    }
     for (const [key, value] of Object.entries(overrides)) {
       if (value === undefined || value === "") {
         continue;
@@ -1641,6 +1647,7 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
             : [],
         ),
       ),
+      reflection: this.runtimeSettings.reflection === 'all' || this.runtimeSettings.reflection === 'off' ? this.runtimeSettings.reflection : 'goals',
       tools: inventoryCount(inventory.tools),
       skills: inventoryCount(inventory.skills),
       ...(inventory.activeSubagents === undefined
@@ -1828,6 +1835,7 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
       session.id,
       emitSessionEvent,
     );
+    const afterTurn: Array<() => void> = [];
     this.inFlightTurnRunners.set(session.id, turnRunner);
     try {
       for await (const event of turnRunner.run(
@@ -1843,6 +1851,7 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
             return drained;
           },
           displayText,
+          afterTurn: start => { afterTurn.push(start); },
           journal: this.messageJournal(session.id, session.cwd),
           ...(images.length ? { images } : {}),
           ...(options.goalRound === undefined ? {} : { goalRound: options.goalRound }),
@@ -1989,6 +1998,10 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
             payload: { level: "error", message: `Could not save session: ${errorMessage(error)}` },
           });
         }
+      }
+      // No await: auxiliary reviews must never delay the terminal event or turn settlement.
+      for (const start of afterTurn) {
+        try { start(); } catch (error) { console.error('Post-turn work failed:', errorMessage(error)); }
       }
     }
   }

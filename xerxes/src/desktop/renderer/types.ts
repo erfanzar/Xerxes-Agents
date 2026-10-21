@@ -11,6 +11,7 @@
 
 // ── Bridge (preload ↔ main ↔ renderer) ──────────────────────────────────
 import type { WorkspaceContext } from '../main/contextNavigation.js'
+import type { ReflectionNotice } from './learning.js'
 
 /** A daemon event push after bridge sanitization. Payload is frozen. */
 export interface DaemonEvent {
@@ -109,6 +110,7 @@ export type Block =
   | { kind: 'thinking'; id: number; text: string; streaming: boolean }
   | { kind: 'tools'; id: number; items: readonly ToolItem[]; running: boolean }
   | { kind: 'notice'; id: number; error: boolean; text: string }
+  | { kind: 'reflection'; id: number; reflection: ReflectionNotice }
   | { kind: 'checkpoint'; id: number; turn: number; adds: number; dels: number }
   | { kind: 'agents'; id: number; members: readonly AgentMember[] }
 

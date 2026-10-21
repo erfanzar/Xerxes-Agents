@@ -18,6 +18,7 @@ import { parseAgentIntelligenceConfig } from "./agents/intelligence.js";
 import { renderDelegationModels } from "./agents/delegationModels.js";
 import { calcCost } from "./llms/providerRegistry.js";
 import { getActiveSession } from "./runtime/sessionContext.js";
+import type { WorkflowPreflightPorts } from "./runtime/preflight.js";
 import { AcpAgentRunner } from "./acp/runner.js";
 import {
   ACP_HELP,
@@ -104,7 +105,15 @@ import { CliWriter, createCliStyle, detectColorDepth } from "./runtime/cliStyle.
 import { resolveTuiEntry } from "./runtime/distribution.js";
 import { registerInteractionModeTool } from "./runtime/interactionModeTool.js";
 import { goalPolicyPrompt, registerGoalTools } from "./runtime/goalTools.js";
-import { findGoalEvidenceExecution, findLatestGoalEvidenceExecution } from './runtime/goalEvidence.js';
+import { findGoalEvidenceExecution, findLatestGoalEvidenceExecution, successfulGoalEvidence } from './runtime/goalEvidence.js';
+import { GovernedMemoryStore } from './memory/governedMemoryStore.js';
+import { LessonStore, renderApprovedLessonsForTurn } from './memory/lessons.js';
+import { registerLessonTools } from './tools/lessonTools.js';
+import { registerReflectionTools } from './tools/reflectionTools.js';
+import { ReflectionProposalStore, type ReflectionApplier } from './runtime/reflection.js';
+import { createReflectionApplier } from './runtime/reflectionApplier.js';
+import { SkillBundleStore } from './tools/agentMetaTools.js';
+import type { TurnReflectionInput } from './daemon/turnRunner.js';
 import { extractAgentOption, extractOutputFormatOption, parseValueOptions, type OutputFormat } from "./runtime/commandOptions.js";
 import { ProcessRegistry } from "./runtime/processRegistry.js";
 import { TerminalRegistry } from "./runtime/terminalRegistry.js";
@@ -399,6 +408,27 @@ function generateImageToolOptions(workspaceRoot: string): {
   return {
     resolveApiKey: () => process.env.OPENROUTER_API_KEY?.trim() ?? "",
     workspaceRoot,
+  };
+}
+
+/**
+ * Real observations for large-workflow preflight, shared by the daemon, ACP
+ * and one-shot agent-tool setups so the three cannot drift apart. Quota is not
+ * wired: preflight reports it as skipped rather than guessing.
+ */
+function workflowPreflightPorts(profileStore: ProfileStore, workspaceRoot: string): WorkflowPreflightPorts {
+  return {
+    // Worktree isolation allocates git worktrees (nativeSubagentWorktrees),
+    // which needs the active workspace to be inside a git checkout.
+    worktreeAvailable: () => {
+      const cwd = getActiveSession<{ cwd: string }>()?.cwd ?? workspaceRoot;
+      const probe = Bun.spawnSync(["git", "-C", cwd, "rev-parse", "--is-inside-work-tree"], { stdout: "pipe", stderr: "ignore" });
+      return probe.exitCode === 0 && probe.stdout.toString().trim() === "true";
+    },
+    resolveModel: (profile?: string) => {
+      if (!profile) return "ok";
+      return profileStore.get(profile) ? "ok" : `no provider profile named ${JSON.stringify(profile)} is configured (see /provider list)`;
+    },
   };
 }
 
@@ -1107,6 +1137,7 @@ async function runDaemonOwned(
   // The runtime builds the one PTY manager; the server needs it for the
   // desktop's interactive terminal tab (terminal.open / resize).
   let ptySessions: PtySessionManager | undefined;
+  const learning = createLearningServices(projectDirectory ?? config.projectDirectory, skillRegistry);
   const runtime = daemonRuntime(
     config,
     projectDirectory,
@@ -1116,6 +1147,8 @@ async function runDaemonOwned(
     {
       ...(buildId ? { buildId } : {}),
       remoteProviderBindings,
+      learning,
+      reflection: input => daemon.reflectAfterTurn(input),
       onSessionModeChange: (sessionId) => announceModeChange?.(sessionId),
       exposePtySessions: (manager) => { ptySessions = manager; },
       workspaces,
@@ -1157,6 +1190,7 @@ async function runDaemonOwned(
   const memoryGuardFile = join(xerxesHome(), "daemon", "memory-guard.json");
   let memoryGuardSettings = await readMemoryGuardSettings(memoryGuardFile);
   const daemon = new DaemonServer({
+    learning,
     memoryGuard: { settingsFile: memoryGuardFile, applied: settings => { memoryGuardSettings = settings; } },
     goalRearmFile: join(xerxesHome(), "daemon", "goal-rearm.json"),
     remoteProviderBindings,
@@ -1715,6 +1749,18 @@ function mcpHostOptions(workspace: string) {
   };
 }
 
+function createLearningServices(workspaceRoot: string, registry?: SkillRegistry): {
+  store: ReflectionProposalStore; applier: ReflectionApplier; lessons: LessonStore;
+} {
+  const activeWorkspace = () => getActiveSession<{ cwd: string }>()?.cwd ?? workspaceRoot;
+  const skills = new SkillBundleStore({ directory: join(xerxesHome(), 'skills'), ...(registry ? { registry } : {}) });
+  return {
+    store: new ReflectionProposalStore({ directory: join(xerxesHome(), 'reflection') }),
+    applier: createReflectionApplier({ skills, activeWorkspace }),
+    lessons: new LessonStore({ memory: new GovernedMemoryStore({ directory: join(xerxesHome(), 'governed-memory') }) }),
+  };
+}
+
 function daemonRuntime(
   config: DaemonConfig,
   projectDirectory: string | undefined,
@@ -1723,6 +1769,8 @@ function daemonRuntime(
   browserManager?: BrowserManager,
   host: {
     readonly remoteProviderBindings?: RemoteProviderBindings;
+    readonly learning?: ReturnType<typeof createLearningServices>;
+    readonly reflection?: (input: TurnReflectionInput) => Promise<{ id: string; summary: string } | undefined>;
     readonly workspaces?: DaemonWorkspaces;
     readonly buildId?: string;
     /** Announce a model-driven interaction-mode change to attached clients. */
@@ -1745,6 +1793,7 @@ function daemonRuntime(
   } = {},
 ): InMemoryDaemonRuntime {
   const workspaceRoot = projectDirectory ?? config.projectDirectory;
+  const learning = host.learning ?? createLearningServices(workspaceRoot, host.skillRegistry);
   const lspManager = loadConfiguredLsp(xerxesHome());
   const lspSettingsStore = new LspSettingsStore(join(xerxesHome(), "lsp.json"));
   const hooksForWorkspace = workspaceShellHooks({
@@ -1771,9 +1820,14 @@ function daemonRuntime(
   };
   const initialConnection = runtimeConnection(config, profileStore.active(), { claudeCodeChosen: profileStore.activeIsExplicit() });
   const initialProfile = profileStore.active();
+  const reflection = process.env.XERXES_REFLECTION?.trim() || config.runtime.reflection || 'goals';
+  if (reflection !== 'goals' && reflection !== 'all' && reflection !== 'off') {
+    throw new ConfigurationError('reflection', 'runtime.reflection / XERXES_REFLECTION must be goals, all or off');
+  }
   const initialSettings: Record<string, unknown> = {
     provider_profile: initialProfile && initialConnection && profileAcceptsModel(initialProfile, initialConnection.model) && !(config.runtime.provider || config.runtime.base_url || config.runtime.api_key) ? initialProfile.name : undefined,
     ...config.runtime,
+    reflection,
     ...(initialConnection
       ? {
           model: initialConnection.model,
@@ -1979,6 +2033,26 @@ function daemonRuntime(
         host.goalTokenLedger.assertAdmission(String(context.sessionId ?? ''), goal.id, host.goalTokenOwner, goal.maxTotalTokens);
       },
     });
+    // Evidence-gated lessons: the same governed log the
+    // `xerxes memory` command reviews, isolated per workspace by the store.
+    // Tool-call evidence is verified with the goal-evidence rule, never trusted
+    // from the model.
+    registerReflectionTools(tools, {
+      store: learning.store, applier: learning.applier,
+      activeWorkspace: () => getActiveSession<{ cwd: string }>()?.cwd ?? workspaceRoot,
+    });
+    registerLessonTools(tools, {
+      store: () => learning.lessons,
+      activeWorkspace: () => getActiveSession<{ cwd: string }>()?.cwd ?? workspaceRoot,
+      resolveToolCall: (sessionId, toolCallId) => {
+        const executions = runtime?.listSessions().find(session => session.id === sessionId)?.toolExecutions ?? [];
+        const row = (toolCallId ? findGoalEvidenceExecution(executions, toolCallId) : findLatestGoalEvidenceExecution(executions)) as Record<string, unknown> | undefined;
+        if (!row) return undefined;
+        const id = String(row.toolCallId ?? row.tool_call_id ?? "");
+        const result = typeof row.result === "string" ? row.result : "";
+        return { id, name: String(row.name ?? ""), ok: successfulGoalEvidence(row, id), summary: result.length > 500 ? `${result.slice(0, 500)}… [${result.length} chars]` : result };
+      },
+    });
     registerInteractionModeTool(tools, {
       async setMode({ context, mode }) {
         const activeRuntime = runtime;
@@ -2095,6 +2169,7 @@ function daemonRuntime(
       intelligence: new AgentSettingsStore(join(xerxesHome(), "daemon", "agent-settings.sqlite")).read().settings ?? parseAgentIntelligenceConfig(config.runtime.agent_intelligence),
       backgroundAgents: subagentHost.turnCoordinator,
       manager: subagentHost.managerPort,
+      workflowPreflight: workflowPreflightPorts(profileStore, workspaceRoot),
       estimateCostUsd: (model, usage, providerProfile) => {
         const profile = providerProfile ? profileStore.get(providerProfile) : undefined;
         const reported = profile?.model_capabilities?.[model]?.cost;
@@ -2131,6 +2206,18 @@ function daemonRuntime(
     const contextLimit = resolvedProfileContextLimit(profileStore.active(), connection.model);
     const managedPluginHost = host.managedPlugins;
     return new AgentTurnRunner({
+      lessonsForTurn: async (session, userText, signal) => {
+        signal.throwIfAborted();
+        if (!userText.trim()) return '';
+        const lessons = await learning.lessons.recall(userText, session.cwd, { limit: 5 });
+        signal.throwIfAborted();
+        return renderApprovedLessonsForTurn(lessons);
+      },
+      ...(host.reflection ? { reflection: host.reflection } : {}),
+      reflectionMode: () => {
+        const value = runtime?.status().reflection ?? settings.reflection;
+        return value === 'all' || value === 'off' ? value : 'goals';
+      },
       promptSnapshots,
       // The project-plugin scan starts in the background when this runner is
       // built; a turn waits briefly for it so its first step can call them.
@@ -2625,6 +2712,7 @@ async function acpServer(
     intelligence: new AgentSettingsStore(join(xerxesHome(), "daemon", "agent-settings.sqlite")).read().settings ?? parseAgentIntelligenceConfig(config.runtime.agent_intelligence),
     backgroundAgents: subagentHost.turnCoordinator,
     manager: subagentHost.managerPort,
+    workflowPreflight: workflowPreflightPorts(profileStore, workspaceRoot),
   });
   const selectedTools = agentToolDefinitions(tools.definitions(), agent);
   const boot = await bootstrap({
@@ -2821,6 +2909,7 @@ async function runOneShot(
     intelligence: new AgentSettingsStore(join(xerxesHome(), "daemon", "agent-settings.sqlite")).read().settings ?? parseAgentIntelligenceConfig(config.runtime.agent_intelligence),
     backgroundAgents: subagentHost.turnCoordinator,
     manager: subagentHost.managerPort,
+    workflowPreflight: workflowPreflightPorts(profileStore, workspaceRoot),
   });
   const selectedTools = agentToolDefinitions(tools.definitions(), agent);
   const boot = await bootstrap({

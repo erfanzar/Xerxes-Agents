@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 import { describe, expect, it } from 'vitest'
 
-import { mergeCompletionItems, slashCompletionsFromCatalog, tuiSlashCompletions } from '../hooks/useCompletion.js'
+import { completionRequestForInput, mergeCompletionItems, slashCompletionsFromCatalog, tuiSlashCompletions } from '../hooks/useCompletion.js'
 import { rankCompletionItems } from '../lib/completion.js'
 import type { SlashCatalog } from '../types.js'
 
@@ -37,12 +37,16 @@ const catalog: SlashCatalog = {
 const ranked = (input: string) => rankCompletionItems(slashCompletionsFromCatalog(input, catalog), input.slice(1))
 
 describe('slash catalog completions', () => {
+  it.each(['/xerxes ', '/xerxes pr', '/xerxes show ', '/xerxes approve abc', '/xerxes reject abc'])('requests daemon-owned argument completion for %s', input => {
+    expect(completionRequestForInput(input)).toEqual({ method: 'complete.slash', params: { text: input }, replaceFrom: 1 })
+  })
+
   it.each([null, catalog])('keeps activity panels in the first menu page with a missing or older catalog', oldCatalog => {
     const rows = rankCompletionItems(tuiSlashCompletions('/', oldCatalog), '')
     expect(rows.slice(0, 7).map(row => row.display)).toEqual(['activity', 'agents', 'goal', 'loop', 'monitors', 'runs', 'schedules'])
   })
 
-  it.each(['agents', 'goal', 'loop', 'monitors', 'runs', 'schedules', 'terminals', 'config', 'context', 'snapshots', 'workspaces', 'machine', 'custom-agents'])('finds the local %s command by prefix without daemon discovery', name => {
+  it.each(['agents', 'goal', 'loop', 'monitors', 'runs', 'schedules', 'terminals', 'config', 'context', 'snapshots', 'workspaces', 'machine', 'custom-agents', 'xerxes'])('finds the local %s command by prefix without daemon discovery', name => {
     const input = '/' + name.slice(0, 3)
     expect(tuiSlashCompletions(input, null)).toContainEqual(expect.objectContaining({ text: '/' + name }))
   })

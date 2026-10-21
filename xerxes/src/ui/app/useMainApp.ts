@@ -65,6 +65,7 @@ import { useComposerState } from './useComposerState.js'
 import { useConfigSync } from './useConfigSync.js'
 import { useInputHandlers } from './useInputHandlers.js'
 import { useLongRunToolCharms } from './useLongRunToolCharms.js'
+import { useLearningSync } from './useLearningSync.js'
 import { useSessionLifecycle } from './useSessionLifecycle.js'
 import { useSubmission } from './useSubmission.js'
 
@@ -149,6 +150,7 @@ export async function startPromptLiveSession({
 }
 
 export function useMainApp(gw: GatewayClient) {
+  useLearningSync(gw)
   const { exit } = useApp()
   const { stdout } = useStdout()
   const [terminalCols, setTerminalCols] = useState(stdout?.columns ?? 80)

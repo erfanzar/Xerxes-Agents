@@ -23,6 +23,7 @@ test('bridge command registry preserves canonical metadata, aliases, categories,
   expect(resolveCommand('/file README.md')).toMatchObject({ name: 'file', argsHint: '<path>' })
   expect(resolveCommand('/undo-edits --all')).toMatchObject({ name: 'undo-edits', category: 'tools' })
   expect(resolveCommand('/features')).toMatchObject({ name: 'features', category: 'info' })
+  expect(resolveCommand('/xerxes')).toMatchObject({ name: 'xerxes', description: 'Review what Xerxes learned: reflection proposals and lessons', aliases: [], argsHint: expect.stringContaining('lessons') })
   expect(resolveCommand('/mcp status')).toMatchObject({ name: 'mcp', category: 'tools' })
   expect(resolveCommand('/compress now')).toMatchObject({ name: 'compact', aliases: ['compress'] })
   expect(resolveCommand('/thinking high')).toMatchObject({ name: 'reasoning', argsHint: '[level]' })

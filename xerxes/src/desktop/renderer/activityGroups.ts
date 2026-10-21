@@ -10,7 +10,7 @@ import type { Block } from './types.js'
  * calls around it: collapsing "Ran 3 commands" must not hide what is running.
  */
 export function isGroupedActivity(block: Block, approvalToolId?: string): boolean {
-  return block.kind !== 'user' && block.kind !== 'agent' && block.kind !== 'agents'
+  return block.kind !== 'user' && block.kind !== 'agent' && block.kind !== 'agents' && block.kind !== 'reflection'
 }
 
 /**

@@ -100,6 +100,21 @@ afterEach(() => {
 })
 
 describe('steer submission acknowledgement', () => {
+  it('dismisses only the reflection sticky notice on the next submitted message', async () => {
+    const request = vi.fn().mockResolvedValue({ ok: true })
+    patchUiState({ busy: false, sid: 'session-a' })
+    const fixture = await mountSubmission(request)
+    try {
+      turnController.showNotice({ key: 'reflection', kind: 'sticky', text: 'Review proposal' })
+      expect(getUiState().notice?.kind).toBe('sticky')
+      act(() => fixture.submission.dispatchSubmission('Next message'))
+      expect(getUiState().notice).toBeNull()
+      patchUiState({ busy: false })
+      turnController.showNotice({ key: 'credits', kind: 'sticky', text: 'Credits need attention' })
+      act(() => fixture.submission.dispatchSubmission('Another message'))
+      expect(getUiState().notice?.key).toBe('credits')
+    } finally { act(() => fixture.rendered.renderer.destroy()) }
+  })
   it('keeps rejected busy submissions paired with their images for retry', async () => {
     const request = vi.fn().mockRejectedValueOnce(new Error('session busy')).mockResolvedValue({ ok: true })
     patchUiState({ busy: false, sid: 'session-a' })

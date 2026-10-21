@@ -148,7 +148,7 @@ test('the analysis scratchpad is stripped, including from a response truncated i
   expect(stripCompactionAnalysis('## Decisions\nnone')).toBe('## Decisions\nnone')
 })
 
-test('tool traffic renders as one call line carrying its own outcome', () => {
+test('tool traffic renders as linked actions and outcomes without duplicated results', () => {
   const rendered = renderMessagesForSummary([
     { role: 'user', content: 'read the config' },
     {
@@ -163,12 +163,14 @@ test('tool traffic renders as one call line carrying its own outcome', () => {
     { role: 'tool', tool_call_id: 'call-2', content: '1 fail', is_error: true },
   ])
 
-  expect(rendered).toContain('called ReadFile({"path": "/repo/a.ts"}) -> export const port = 4_000')
-  expect(rendered).toContain('called Bash({"command": "bun test"}) -> error: 1 fail')
+  expect(rendered).toContain('[ACTION] ReadFile({"path":"/repo/a.ts"}) call_id="call-1"')
+  expect(rendered).toContain('[OBSERVATION] call_id="call-1" export const port = 4_000')
+  expect(rendered).toContain('[ACTION] Bash({"command":"bun test"}) call_id="call-2"')
+  expect(rendered).toContain('[ERROR] call_id="call-2" 1 fail')
   expect(rendered).not.toContain('tool_calls=')
-  // Both results are folded into their call lines, so only the user and assistant turns remain.
-  expect(rendered).toContain('Message 2 [ASSISTANT]')
-  expect(rendered).not.toContain('Message 3')
+  expect(rendered).toContain('[ASSISTANT] Reading it now.')
+  expect(rendered.match(/export const port = 4_000/g)).toHaveLength(1)
+  expect(rendered.match(/1 fail/g)).toHaveLength(1)
 })
 
 test('rendering keeps unpaired tool results and truncates oversized call payloads', () => {
@@ -177,12 +179,10 @@ test('rendering keeps unpaired tool results and truncates oversized call payload
     { role: 'assistant', tool_calls: [{ id: 'call-9', name: 'WriteFile', input: { body: 'x'.repeat(400) } }] },
   ])
 
-  expect(rendered).toContain('Message 1 [TOOL]')
-  expect(rendered).toContain('result from before this window')
-  expect(rendered).toContain('tool_call_id=orphan-1')
-  expect(rendered).toContain('called WriteFile(')
-  expect(rendered).toContain('-> (no result in this slice)')
-  expect(rendered).toContain('chars)')
+  expect(rendered).toContain('[OBSERVATION] call_id="orphan-1" result from before this window')
+  expect(rendered).toContain('[ACTION] WriteFile(')
+  expect(rendered).toContain('(no result in this slice)')
+  expect(rendered).toContain('[argument preview clipped by the renderer: showing 200 of 411 chars; original arguments unchanged]')
   expect(rendered.length).toBeLessThan(500)
 })
 
@@ -247,7 +247,7 @@ test('summary rendering and strategy selection are stable and model-backed smart
     { role: 'assistant', content: { z: 1, a: 2 }, tool_calls: [{ id: 'call-1', name: 'ReadFile' }] },
   ])
   expect(rendered).toContain('{"a":2,"z":1}')
-  expect(rendered).toContain('called ReadFile() -> (no result in this slice)')
+  expect(rendered).toContain('[ACTION] ReadFile() call_id="call-1" (no result in this slice)')
 
   const options = {
     model: 'gpt-4o',
@@ -277,7 +277,9 @@ test('tool previews keep emoji whole at both compaction truncation boundaries', 
   const before = JSON.stringify(history)
   const prompt = renderMessagesForSummary(history)
   expect(prompt.isWellFormed()).toBe(true)
-  expect(prompt).toContain('a'.repeat(199) + '… (+6 chars)')
-  expect(prompt).toContain('b'.repeat(399) + '… (+6 chars)')
+  expect(prompt).toContain('a'.repeat(199))
+  expect(prompt).toContain('[argument preview clipped by the renderer: showing 199 of 205 chars; original arguments unchanged]')
+  expect(prompt).toContain('b'.repeat(399))
+  expect(prompt).toContain('[preview clipped by the renderer: showing 399 of 405 chars;')
   expect(JSON.stringify(history)).toBe(before)
 })

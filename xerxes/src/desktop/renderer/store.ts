@@ -30,6 +30,7 @@ import { selectedSession, rememberSession } from './sessionPreference.js'
 import { historyBlocks, readHistoryPage, type HistoryPage } from './history.js'
 import { connectionFailureKind } from './connectionFailure.js'
 import { desktopCall, desktopError, text } from './desktopRpc.js'
+import { learningCounts, readLearningList, type LearningAction, type LearningCounts, type LearningList, type LearningResult, type LearningTarget } from './learning.js'
 import { agentGroupOf, foldAgentEvent } from './agentEvents.js'
 import { parseGoal } from './goalText.js'
 import { agentStatusOf, syncAgentMembers } from './agentMembers.js'
@@ -304,6 +305,15 @@ export interface ContextBreakdown {
 }
 
 export interface Snapshot {
+  readonly learning?: LearningList | null
+  readonly learningCounts?: LearningCounts
+  readonly learningLoading?: boolean
+  readonly learningError?: string
+  readonly learningReviewBusy?: boolean
+  readonly learningResults?: Readonly<Record<string, LearningResult>>
+  readonly learningOpen?: boolean
+  readonly learningOpenRevision?: number
+  readonly learningProposalId?: string
   readonly connection: Connection
   /** True before any workspace folder is chosen — the shell shows the gate. */
   readonly noWorkspace: boolean
@@ -857,6 +867,8 @@ export class Store {
   private heartbeat: NodeJS.Timeout | null = null
   private updatingRuntime = false
   private terminalsLoadVersion = 0
+  private learningLoadVersion = 0
+  private learningReviewToken: object | null = null
   /** In-flight agent-family tool calls; the fleet poll lives while any do. */
   private readonly pendingAgentCalls = new Set<string>()
   private fleetPoll: NodeJS.Timeout | null = null
@@ -1021,6 +1033,58 @@ export class Store {
   getSnapshot = (): Snapshot => this.frame
 
   // ── Actions ──────────────────────────────────────────────────────────
+
+  openLearning(proposalId = ''): void {
+    this.patch({ learningOpen: true, learningProposalId: proposalId, learningOpenRevision: (this.frame.learningOpenRevision ?? 0) + 1 })
+  }
+
+  closeLearning(): void { this.patch({ learningOpen: false }) }
+
+  /** Latest request wins; session switches and workspace broadcasts invalidate old replies. */
+  async refreshLearning(): Promise<void> {
+    const key = this.sessionKey, revision = this.frame.sessionOpenRevision, version = ++this.learningLoadVersion
+    const current = () => key === this.sessionKey && revision === this.frame.sessionOpenRevision && version === this.learningLoadVersion
+    this.patch({ learningLoading: true, learningError: '' })
+    try {
+      const result = readLearningList(await this.bridge.call('learning.list', { session_key: key }))
+      if (current()) this.patch({ learning: result, learningCounts: result.counts })
+    } catch (error) {
+      if (current()) this.patch({ learningError: desktopError(error) })
+    } finally {
+      if (current()) this.patch({ learningLoading: false })
+    }
+  }
+
+  /** Only explicit UI clicks call this; a reason and status are checked before any write RPC. */
+  async reviewLearning(target: LearningTarget, id: string, action: LearningAction, reason = ''): Promise<void> {
+    if (this.learningReviewToken) return
+    const resultKey = `${target}:${id}`
+    const show = (result: LearningResult) => this.patch({ learningResults: { ...this.frame.learningResults, [resultKey]: result } })
+    const proposal = this.frame.learning?.proposals.find(row => row.id === id)
+    const lesson = this.frame.learning?.lessons.find(row => row.id === id)
+    if (action !== 'approve' && !reason.trim()) { show({ report: '', error: 'A reason is required.' }); return }
+    if (action === 'rollback' && (target !== 'lesson' || lesson?.reviewStatus !== 'approved')) { show({ report: '', error: 'Only an approved lesson can be rolled back.' }); return }
+    if (target === 'proposal' && proposal?.status !== 'pending') { show({ report: '', error: 'This proposal is not pending in the current workspace. Refresh to see its outcome.' }); return }
+    if (target === 'lesson' && action !== 'rollback' && lesson?.reviewStatus !== 'pending') { show({ report: '', error: 'Only pending lessons can be approved or rejected.' }); return }
+    const token = {}, key = this.sessionKey, revision = this.frame.sessionOpenRevision
+    this.learningReviewToken = token
+    const current = () => token === this.learningReviewToken && key === this.sessionKey && revision === this.frame.sessionOpenRevision
+    this.patch({ learningReviewBusy: true })
+    show({ report: '', error: '' })
+    try {
+      // Do not use desktopCall: a refusal can carry a report with every lint finding.
+      const result = await this.bridge.call('learning.review', { session_key: key, target, id, action, ...(action === 'approve' ? {} : { reason: reason.trim() }) })
+      if (typeof result.report !== 'string') throw new Error(text(result.error) || 'The runtime did not return a review report. Refresh to check the outcome before reviewing again.')
+      if (current()) show({ report: result.report, error: result.ok === true ? '' : text(result.error) || 'The review was not accepted.' })
+    } catch (error) {
+      if (current()) show({ report: '', error: desktopError(error) })
+    } finally {
+      if (current()) {
+        await this.refreshLearning()
+        if (current()) { this.learningReviewToken = null; this.patch({ learningReviewBusy: false }) }
+      }
+    }
+  }
 
   start(bridge?: XerxesLike): void {
     if (this.started || typeof window === 'undefined') return
@@ -1217,6 +1281,7 @@ export class Store {
       this.newChat()
       return true
     }
+    if (command === '/xerxes' && !args.length) { this.openLearning(); return true }
     if (command === '/resume' && args.length) return this.resumeMatching(args.join(' '))
     const sessionKey = this.sessionKey
     const previousResult = this.slashResult
@@ -3308,6 +3373,10 @@ export class Store {
     }
     this.loadSkillSuggestions()
     this.loadCreatorTrace()
+    this.learningReviewToken = null
+    this.learningLoadVersion++
+    this.patch({ learning: null, learningCounts: { pending_proposals: 0, pending_lessons: 0 }, learningResults: {}, learningReviewBusy: false, learningOpen: false })
+    void this.refreshLearning()
     return result
   }
 
@@ -3729,6 +3798,14 @@ export class Store {
       return
     }
     this.pushLog(type, payload)
+    // Learning is workspace-scoped even when another session made the change.
+    if (type === 'learning_changed') {
+      if (str(payload.workspace) !== (this.frame.learning?.workspace ?? this.frame.cwd)) return
+      try { this.patch({ learningCounts: learningCounts(payload.counts) }) }
+      catch (error) { this.patch({ learningError: desktopError(error) }) }
+      void this.refreshLearning()
+      return
+    }
     // Background turns (bg-* sessions) share this connection's event pipe
     // with a session_id tag. They must never touch the foreground fold —
     // the TUI applies the same filter. They drive the jobs chip instead.
@@ -3821,6 +3898,7 @@ export class Store {
           }
         }
         if (type === 'notification') {
+          if (payload.category === 'reflection' && payload.type === 'proposal') void this.refreshLearning()
           if (payload.category === 'slash' && payload.type === 'result') {
             this.slashResult = { sessionKey: this.sessionKey, text: str(payload.body) || str(payload.message) }
           }

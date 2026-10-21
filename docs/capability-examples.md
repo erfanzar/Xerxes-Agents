@@ -59,9 +59,72 @@ Inspect changed code. Check invalid inputs, cancellation and persistence.
 Report confirmed bugs with a reproduction, or say none were found.
 ```
 
-Run `/skills install "/absolute/path/to/review-checklist"`, then `/skills search review-checklist`. Ask “Use review-checklist on my changes.” Referenced assets belong inside the skill directory. Shell preprocessing requires explicit skill trust.
+Run `/skills install "/absolute/path/to/review-checklist"`, then `/skills search review-checklist`. Ask “Use review-checklist on my changes.” Referenced assets belong inside the skill directory. Shell preprocessing requires explicit skill trust. Run `/skills lint` to see all authoring problems at once.
 
 For a complete agent preset, run `/creator` and ask “Create a testing-focused coding preset with examples of when to use it.” `/preset list` lists presets; `/preset use <id>` selects one before the first turn. `/reload` refreshes externally edited project definitions. `/` completion and `/help` show commands actually available in your session.
+
+## Review what Xerxes learned
+
+These native Bun/TypeScript features retain evidence and let you review improvements before they change anything.
+
+### Evidence-backed lessons
+
+Ask: “Use `lesson_record` to retain the reusable lesson from that successful tool call, with a short cue and confidence.” The host resolves the latest successful call, or verifies an explicit `evidence_tool_call_id`. Alternatively, `test_evidence` records a reported command, exit code and summary; it is not labelled host-verified. Missing/failed tool-call evidence is refused. `lesson_recall` matches cues within the active workspace, and `lesson_review` requests approval, rejection or rollback of an exact id with a reason through the normal permission gate; automatic turns cannot approve their own lessons. Corrections and rollback retain governed history; rendered INSIGHTS-style Markdown is only a view.
+
+```text
+/xerxes lessons
+/xerxes lessons Bun fixtures
+/xerxes lessons approve <id> Reviewed the evidence
+/xerxes lessons reject <id> Not generally useful
+/xerxes lessons rollback <id> Guidance is now outdated
+```
+
+Lessons start **pending**. Approve a lesson yourself after checking its evidence; reject and rollback require a reason. At the start of each later turn, up to five approved lessons matching your message are attached to the turn context, not the cached system prompt. The block is bounded to 2,000 characters, clips with `[clipped]`, includes cues and evidence provenance, and identifies lessons as reviewed guidance that cannot override your instructions. Pending, rejected, expired and superseded lessons are not automatically injected; no match means no added context. Recall failures are logged without failing your turn.
+
+### Review reflection proposals before changing anything
+
+By default, a goal transitioning to complete or blocked can request one background reflection using the session's provider. The turn ends first. Aborted/errored turns and subagent sessions do not reflect. The model must cite exact `[ACTION]`, `[OBSERVATION]` or `[ERROR]` lines from the shared trajectory, and may return no proposal. A clipped preview is not proof of failure. Configure `runtime.reflection: goals | all | off` (default `goals`); `all` also permits long-turn reflection at 25 tool calls or 20 minutes. `XERXES_REFLECTION` overrides the startup setting.
+
+```text
+/xerxes
+/xerxes help
+/xerxes proposals
+/xerxes show <id>
+/xerxes show <id> --json
+/xerxes approve <id> Reviewed evidence and full content
+/xerxes reject <id> Too specific to this task
+```
+
+The desktop has a **Learned** panel with **Proposals** and **Lessons** tabs and in-chat proposal cards. In the TUI, typing `/xerxes` alone opens a review overlay; a status chip shows how many items need review. Headless clients receive readable help for the bare command. A new proposal sends a structured reflection notification: “Reflection proposal <id>: <kind> <target>. Nothing was changed. Review it with /xerxes.” Its fields include the id, kind, target, first rationale line and evidence count. `show` reads like a review document: status, trigger/objective, rationale, quoted evidence and exact proposed content, including bundle file sizes and contents. Add `--json` for the full stored record.
+
+`reflection_list` exposes the same stored proposals to the model; `reflection_review` requires human authority to approve and cannot self-approve from an automatic goal round. A typed `/xerxes approve` is a human decision. Skills pass through the linted bundle writer in the user skills directory, preserving version/tags on update. Agent YAML must validate and match the approved name before atomic writing under the active project's `.xerxes/agents`. Invalid proposals/lint refusals never partially write. Plugin ideas only return a `/plugin-creator` hint. Run `/reload` after approved agent edits to refresh definitions.
+
+### Preview a declared improvement budget
+
+```text
+/xerxes improve
+/xerxes improve --proposals proposals.json --max-candidates 3 --max-task-runs 64
+```
+
+The daemon **always forces `--dry-run`**, never imports a transport, and prints the declared candidate/task budget plus the real CLI command. Run that command yourself only after reviewing the plan:
+
+```sh
+bun run --cwd xerxes playground:improve -- --transport /absolute/path/to/transport.ts --proposals /absolute/path/to/proposals.json --max-candidates 3 --max-task-runs 64
+```
+
+Candidates declare INV (general) or DOM (domain) full-file edits. Baseline, individual candidates and any conditional composition use the same selected hard tasks in private workspaces; budgets count all runs. `--keyword`, `--max-tokens`, `--max-wall-ms` and `--dry-run` further bound the experiment. Transports are explicit host ports; no credentials or provider are discovered. Recommendations never apply themselves to the source harness.
+
+Inside a `Workflow` script, blind `select()` compares anonymous values before optional scoring:
+
+```js
+const chosen = await select(
+  [{ value: baselineText, model: 'hidden-baseline' }, { value: candidateText, model: 'hidden-candidate' }],
+  { judge: 'Prefer correctness, clear evidence and a minimal change.', baseline: 0 }
+)
+return { value: chosen.value, fallback: chosen.fallback, reason: chosen.reason }
+```
+
+Wrapper metadata stays hidden from the judge; letters A–Z are shuffled. An optional `score(value)` runs only after commitment. Invalid judge replies, failed selected scoring, or a score below the baseline cause an explicit baseline fallback. Judge agents count toward Workflow budgets and `expect_agents`.
 
 ## Models and intelligence
 

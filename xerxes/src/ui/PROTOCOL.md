@@ -217,7 +217,9 @@ params fall back to per-connection defaults.
 | `goal.decision`                      | `{ session_id, goal_id, revision, criterion_id, summary }` | `{ ok, session_id?, goal?, token_usage?, continuation?, error? }` | Records a user acceptance note against the displayed criterion; requires an idle session and matching revision. |
 | `session.status`                     | `{ session_key? }`                             | `{ ok, session: { ..., profile_name } \| null }`                | `profile_name` is the exact matching stored profile or `null` for an overridden/unmatched runtime. |
 | `runtime.status`                     | `{}`                                           | `{ ok, runtime_ready, pid, daemon_protocol, daemon_build_id, active_subagents?, channels, ... }` | Liveness probe; `runtime_ready` reports configured-provider readiness and `active_subagents` protects live child work during upgrades. |
-| `runtime.reload`                     | `{ ... }`                                      | `{ ok, ... }`                                                  | Reload runtime config; re-emits status.                                           |
+| `runtime.reload`                     | `{ reflection?: "goals" \| "all" \| "off", ... }` | `{ ok, reflection, ... }`                                      | Reload runtime config; re-emits status. `reflection` defaults to `goals`; `all` also enables long-turn background review and `off` disables it. `runtime.status` reports the same policy. `/xerxes` and the additive learning methods below share review behavior. |
+| `learning.list`                      | `{ session_key?: string }`                     | `{ ok: true, workspace: string, proposals: StoredReflectionProposal[], lessons: Lesson[], counts: { pending_proposals: number, pending_lessons: number } }` or `{ ok: false, error }` | Read-only and concurrency-safe. Workspace is the named/active session's cwd. Every proposal status, newest first; lessons are pending/approved only (no rejected, expired or superseded records), approved first then newest. Unconfigured services refuse explicitly. |
+| `learning.review`                    | `{ session_key?: string, target: 'proposal' \| 'lesson', id: string, action: 'approve' \| 'reject' \| 'rollback', reason?: string }` | `{ ok: boolean, report: string, proposal?: StoredReflectionProposal, lesson?: Lesson, error?: string }` | Human authority, shared with typed `/xerxes` review. Reason is required for reject/rollback; rollback is lessons-only and expires the lesson while returning its prior record. Proposal approve invokes the shared applier in the active session. Validation, not-found/not-pending and failed applies return ok false, not exceptions. |
 | `browser.manage`                     | `{ action?, cdp_url? }`                        | `{ ok, status?, pages?, error? }`                              | `connect` attaches to an explicitly supplied, already-running Chromium CDP endpoint; `disconnect` only detaches. |
 | `slash`                              | `{ command }`                                  | `{ ok }`                                                       | Native daemon slash dispatch; unsupported commands report an explicit result. Client-side controls (`/paste`, `/queue`, `/skin`, `/statusbar`, `/voice`) additionally return `handled: boolean` — see below. |
 | `set_plan_mode`                      | `{ enabled \| plan_mode, mode? }`              | `{ ok }`                                                       | Re-emits `StatusUpdate`.                                                          |
@@ -376,7 +378,7 @@ terminal turn events by that identity instead of the currently selected tab.
 | `PlanDisplay`      | `plan_display` *(bridge only)* | `content, file_path?`                                                                   |
 | `SubagentEvent`    | `subagent_event`      | `parent_tool_call_id?, agent_id?, subagent_type?, group?: {id, label?, phase?}, event: WireEvent` (nested, recursive). `group` marks agents started by a `Workflow` run (`id` is the run, `label` its name, `phase` the script's current `phase()`); the same object appears on the agent's `subagent_snapshots` row. |
 
-These eight have no PascalCase bridge alias — they exist only on the daemon
+The following have no PascalCase bridge alias — they exist only on the daemon
 socket. They are broadcast or connection-scoped notices about work that is not
 part of the attached turn's stream, so a client may ignore any of them without
 losing turn output.
@@ -386,11 +388,25 @@ losing turn output.
 | `session_title`      | broadcast  | `session_id, title` — the model-written title, once per session. Both clients rename the tab on this. |
 | `channel_status`     | broadcast  | Channel roster after an enable/disable. |
 | `background_changed` | broadcast  | `{}` — invalidation ping; re-read `background.activity` / `session.active_list` rather than trusting a cached count. |
+| `learning_changed` | workspace broadcast | `{ workspace: string, counts: { pending_proposals: number, pending_lessons: number } }` — emitted after a proposal is stored or reviewed and after lesson record/review/rollback/correction, including shared-store tool calls. Only clients whose active session is in that workspace receive it. Refresh `learning.list` for records. |
 | `cron_run`           | broadcast  | `job_id, session_key` — a scheduled job started a turn. |
 | `cron_event`         | broadcast  | `job_id, event_type, payload` — one nested turn event from a job that is not streaming to a caller. |
 | `cron_complete`      | broadcast  | `job_id, deliver, recipient, archive_path`. |
 | `background.complete`| connection | `task_id, text` — a `turn.background` task settled. Dot-separated by history; it is not a namespace. |
 | `ui_command`         | connection | `action, argument, session_key` — a control only a UI can perform (`paste`, `queue`, `skin`, `statusbar`, `voice`). A headless client may ignore it; the daemon still reports the slash outcome separately. |
+
+**Reflection proposal notifications.** The native `notification` payload for a new stored proposal is exactly:
+
+```ts
+{
+  level: 'info', category: 'reflection', type: 'proposal',
+  message: 'Reflection proposal <id>: <kind> <target>. Nothing was changed. Review it with /xerxes.',
+  session_id: string,
+  reflection: { id: string, kind: string, target: string, rationale: string, evidence_count: number }
+}
+```
+
+`rationale` is the first line, not the full proposal text. `session_id` routes the in-chat card to the originating session; this notice does not apply anything. The workspace `learning_changed` event independently updates review counts on every active client in that workspace. `StoredReflectionProposal` and `Lesson` retain their native JSON fields (camelCase within records), including full proposal content/evidence and lesson cue/text/evidence/confidence/reviewStatus.
 
 **Client-side controls are the client's job.** For those five commands the daemon
 emits `ui_command`, calls a host `DaemonUiControlPort` if one is installed, and

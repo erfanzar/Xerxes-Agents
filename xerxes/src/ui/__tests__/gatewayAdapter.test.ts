@@ -5,6 +5,24 @@ import { describe, expect, it } from 'vitest'
 import { adaptDaemonEvent, sessionInfoFromInit, transcriptFromStoredMessages, usageFromStatus } from '../gatewayAdapter.js'
 
 describe('gatewayAdapter', () => {
+  it('keeps reflection proposals sticky and records a transcript breadcrumb, leaving ordinary notices transient', () => {
+    const events = adaptDaemonEvent('notification', {
+      category: 'reflection', type: 'proposal', message: 'Review a proposed skill',
+      reflection: { id: 'p1', kind: 'skill_create', target: 'safe-build', rationale: 'Evidence', evidence_count: 1 }
+    })
+    expect(events).toEqual([
+      { type: 'notification.show', payload: expect.objectContaining({ key: 'reflection', kind: 'sticky', text: expect.stringContaining('/xerxes') }) },
+      { type: 'transcript.append', payload: { role: 'system', text: 'Reflection proposal p1: skill_create safe-build — /xerxes to review' } }
+    ])
+    expect(events[0]?.payload).not.toHaveProperty('ttl_ms')
+    expect(adaptDaemonEvent('notification', { message: 'ordinary notice' })[0]?.payload).toMatchObject({ kind: 'ttl', ttl_ms: 8000 })
+  })
+
+  it('adapts workspace learning count broadcasts as typed app events', () => {
+    expect(adaptDaemonEvent('learning_changed', { workspace: '/repo', counts: { pending_proposals: 2, pending_lessons: 3 } })).toEqual([
+      { type: 'learning.changed', payload: { workspace: '/repo', counts: { pending_proposals: 2, pending_lessons: 3 } } }
+    ])
+  })
   it('maps init payloads into session info', () => {
     const info = sessionInfoFromInit({
       agent_name: 'xerxes',

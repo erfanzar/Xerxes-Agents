@@ -8,6 +8,9 @@ import { historyLimit, sessionHistoryPage } from './historyPage.js';
 import { ArchiveHistory, type ArchivedHistory } from './archiveHistory.js';
 import { isCompactionSummaryMessage } from '../context/compressor.js';
 import { ValidationError } from '../core/errors.js';
+import { xerxesCommand, XERXES_SUBCOMMANDS, LESSON_REVIEW_ACTIONS, listLearning, reviewLearning, type LearningServices } from './xerxesCommand.js';
+import { proposeReflection } from '../runtime/reflection.js';
+import type { TurnReflectionInput } from './turnRunner.js';
 
 import { recordCompaction } from '../context/compactionHistory.js'
 import { previewWorkspaceFile, writeWorkspaceFile } from './filePreview.js'
@@ -408,6 +411,7 @@ export const QUEUE_BYPASS_METHODS: ReadonlySet<string> = new Set([
   "run.inspect",
   "run.list",
   "runtime.status",
+  "learning.list",
   "schedule.list",
 ]);
 
@@ -501,6 +505,7 @@ const HANDLED_CANONICAL_COMMANDS: ReadonlySet<string> = new Set([
   "feedback",
   "history",
   "goal",
+  "xerxes",
   "help",
   "features",
   "machine",
@@ -673,6 +678,7 @@ const RUNTIME_OVERRIDE_KEYS = new Set([
   "presence_penalty",
   "provider",
   "reasoning_effort",
+  "reflection",
   "repetition_penalty",
   "responses_api",
   "service_tier",
@@ -689,6 +695,7 @@ const DISPLAYED_RUNTIME_CONFIG_KEYS = [
   "model",
   "permission_mode",
   "provider",
+  "reflection",
   "responses_api",
   "temperature",
   "top_k",
@@ -745,6 +752,8 @@ export interface DaemonToolCatalogPort {
 }
 
 export interface DaemonServerOptions {
+  /** Shared with lesson/reflection model tools; absent hosts refuse review, never fake it. */
+  readonly learning?: LearningServices;
   /** Must be the same instance used by the native runner. Hosts opt in only
    * after routing all model-producing paths through this authority. */
   readonly remoteProviderBindings?: RemoteProviderBindings;
@@ -801,6 +810,8 @@ export interface DaemonServerOptions {
   readonly titleClientFactory?: TitleClientFactory;
   /** Host-injected provider port for authoring unsaved project agents. */
   readonly projectAgentClientFactory?: (model: string, profile: ProviderProfile | undefined) => LlmClient;
+  /** Optional auxiliary-client seam; session provider/relay authority is still resolved first. */
+  readonly reflectionClientFactory?: (model: string, profile: ProviderProfile | undefined) => LlmClient;
   /** Browser state shared with native operator tools; `/browser` never invents a browser backend. */
   readonly browserManager?: BrowserManager;
   /**
@@ -973,6 +984,9 @@ const GOAL_DRAIN_LAPSE_MS = 2 * 60 * 1000;
 const GOAL_TRANSIENT_RETRY_DELAYS_MS = [60_000, 180_000, 600_000] as const;
 
 export class DaemonServer {
+  private readonly learning: LearningServices | undefined;
+  private readonly learningSubscriptions: readonly (() => void)[];
+  private readonly reflectionLifetime = new AbortController();
   private readonly agentDefinitionLoader: (
     cwd: string,
   ) => readonly AgentDefinition[];
@@ -1013,6 +1027,7 @@ export class DaemonServer {
   private readonly autoTitle: boolean;
   private readonly titleClientFactory: TitleClientFactory | undefined;
   private readonly projectAgentClientFactory: DaemonServerOptions['projectAgentClientFactory'];
+  private readonly reflectionClientFactory: DaemonServerOptions['reflectionClientFactory'];
   private readonly browserManager: BrowserManager;
   private readonly channelManager: ChannelManager | undefined;
   private readonly channelWebhookServer: ChannelWebhookServer | undefined;
@@ -1156,6 +1171,11 @@ export class DaemonServer {
   }
 
   constructor(options: DaemonServerOptions) {
+    this.learning = options.learning;
+    this.learningSubscriptions = this.learning ? [
+      this.learning.store.subscribe(workspace => this.learningChanged(workspace)),
+      this.learning.lessons.subscribe(workspace => this.learningChanged(workspace)),
+    ] : [];
     this.machineSettingsPath = options.machineSettingsPath ?? join(xerxesHome(), 'machines.json');
     this.codexModelCatalog = options.codexModelCatalog ?? (async (profile, signal) => {
       const credential = await new CodexSession().credential(signal);
@@ -1184,6 +1204,7 @@ export class DaemonServer {
     this.autoTitle = options.autoTitle ?? true;
     this.titleClientFactory = options.titleClientFactory;
     this.projectAgentClientFactory = options.projectAgentClientFactory;
+    this.reflectionClientFactory = options.reflectionClientFactory;
     this.channelManager = options.channelManager;
     this.monitorWebhookServer = options.monitorWebhookServer;
     this.channelWebhookServer =
@@ -1668,6 +1689,8 @@ export class DaemonServer {
   }
 
   private async stopOnce(): Promise<void> {
+    this.reflectionLifetime.abort();
+    for (const unsubscribe of this.learningSubscriptions) unsubscribe();
     this.stoppingGoalWakes = true;
     this.providerRelays.close();
     this.remoteProviderBindings?.close();
@@ -2754,6 +2777,17 @@ export class DaemonServer {
         } finally { this.mcpSettingsUpdates.delete(connection); }
       } catch { return { ok: false, error: "MCP settings could not be read or saved; refresh settings and check file validity, lock ownership and server connection health" }; }
     }
+    if (method === "learning.list" || method === "learning.review") {
+      if (params.session_key !== undefined && (typeof params.session_key !== 'string' || !params.session_key.trim())) {
+        return { ok: false, report: 'session_key must be non-empty text.', error: 'session_key must be non-empty text.' };
+      }
+      const session = this.runtime.sessionStatus(sessionKey(connection, params));
+      if (params.session_key !== undefined && !session) return { ok: false, report: 'Session was not found.', error: 'Session was not found.' };
+      const workspace = session?.cwd ?? this.projectDirectory ?? process.cwd();
+      return method === "learning.list"
+        ? listLearning(workspace, this.learning)
+        : reviewLearning(params, workspace, this.learning, session);
+    }
     if (method === "context.inspect") {
       const active = this.runtime.listSessions().find(session => session.sessionKey === connection.activeSessionKey);
       if (!active) return { ok: false, error: "No active session" };
@@ -3801,10 +3835,34 @@ export class DaemonServer {
     if (pluginInspect) return { ok: true, kind: 'slash', completions: [...new Set([...this.pluginRegistry.pluginNames, ...(this.managedPlugins?.inventory().map(item => item.name) ?? []), ...(this.managedPlugins?.project.inventory(this.runtime.sessionStatus(sessionKey(connection, params))?.cwd ?? this.projectDirectory ?? process.cwd()).map(item => item.name) ?? [])])].sort()
       .filter(name => name.toLowerCase().startsWith((pluginInspect[2] ?? '').toLowerCase()))
       .map(name => ({ value: `/plugins ${pluginInspect[1]} ${name} `, label: name, meta: 'Registered plugin' })) };
+    const learningAction = /^\/xerxes\s+(\S*)$/.exec(text);
+    if (learningAction) return { ok: true, kind: 'slash', completions: XERXES_SUBCOMMANDS
+      .filter(action => action.startsWith(learningAction[1] ?? ''))
+      .map(action => ({ value: `/xerxes ${action} `, label: action, meta: 'Review what Xerxes learned' })) };
+    const proposalId = /^\/xerxes\s+(show|approve|reject)\s+(\S*)$/.exec(text);
+    if (proposalId && this.learning) {
+      const session = this.runtime.sessionStatus(sessionKey(connection, params));
+      const proposals = await this.learning.store.list(session?.cwd ?? this.projectDirectory ?? process.cwd());
+      return { ok: true, kind: 'slash', completions: proposals
+        .filter(record => record.id.startsWith(proposalId[2] ?? '') && (proposalId[1] === 'show' || record.status === 'pending'))
+        .map(record => ({ value: `/xerxes ${proposalId[1]} ${record.id} `, label: record.id, meta: `${record.status}: ${record.proposal.kind} ${record.proposal.target}` })) };
+    }
+    const lessonAction = /^\/xerxes\s+lessons\s+(\S*)$/.exec(text);
+    if (lessonAction) return { ok: true, kind: 'slash', completions: LESSON_REVIEW_ACTIONS
+      .filter(action => action.startsWith(lessonAction[1] ?? ''))
+      .map(action => ({ value: `/xerxes lessons ${action} `, label: action, meta: 'Review a lesson' })) };
+    const lessonId = /^\/xerxes\s+lessons\s+(approve|reject|rollback)\s+(\S*)$/.exec(text);
+    if (lessonId && this.learning) {
+      const session = this.runtime.sessionStatus(sessionKey(connection, params));
+      const lessons = await this.learning.lessons.list(session?.cwd ?? this.projectDirectory ?? process.cwd());
+      return { ok: true, kind: 'slash', completions: lessons
+        .filter(lesson => lesson.id.startsWith(lessonId[2] ?? '') && (lessonId[1] !== 'approve' || lesson.reviewStatus === 'pending'))
+        .map(lesson => ({ value: `/xerxes lessons ${lessonId[1]} ${lesson.id} `, label: lesson.id, meta: `${lesson.reviewStatus}: ${lesson.cue}` })) };
+    }
     const skillsAction = /^\/skills\s+(\S*)$/.exec(text);
     if (skillsAction) {
       const prefix = (skillsAction[1] ?? '').toLowerCase();
-      return { ok: true, kind: 'slash', completions: ['list', 'inspect', 'diagnostics', 'trust', 'search', 'browse', 'install']
+      return { ok: true, kind: 'slash', completions: ['list', 'inspect', 'diagnostics', 'lint', 'trust', 'search', 'browse', 'install']
         .filter(action => action.startsWith(prefix))
         .map(action => ({ value: `/skills ${action} `, label: action, meta: 'Local skill discovery' })) };
     }
@@ -4281,6 +4339,76 @@ export class DaemonServer {
     const client = this.remoteProviderBindings?.client(session, model);
     if (!client) throw new LocalProviderRelayError('grant_unavailable');
     return client;
+  }
+
+  /** Workspace invalidation reaches all active clients, not just the writer's session. */
+  private async learningChanged(workspace: string): Promise<void> {
+    const result = await listLearning(workspace, this.learning);
+    if (result.ok !== true) {
+      console.error('Learning change counts unavailable:', result.error);
+      return;
+    }
+    for (const connection of new Set([...this.connections, ...this.sessionObservers])) {
+      const active = this.runtime.sessionStatus(connection.activeSessionKey);
+      if (active && resolve(active.cwd) === resolve(workspace)) {
+        this.emit(connection, 'learning_changed', { workspace: active.cwd, counts: result.counts });
+      }
+    }
+  }
+
+  /** Invoked by the runner only after runtime terminal emission. Never awaited by a turn. */
+  reflectAfterTurn(input: TurnReflectionInput): Promise<{ id: string; summary: string } | undefined> {
+    const signal = AbortSignal.any([input.signal, this.sessionSignal(input.session.sessionKey), this.reflectionLifetime.signal]);
+    const work = this.generateReflection(input, signal).catch(error => {
+      if (!signal.aborted) console.error('Reflection failed:', errorMessage(error));
+      return undefined;
+    });
+    const tracked = work.then(() => undefined);
+    this.inFlightTurns.add(tracked);
+    void tracked.then(() => this.inFlightTurns.delete(tracked));
+    return work;
+  }
+
+  private async generateReflection(input: TurnReflectionInput, signal: AbortSignal): Promise<{ id: string; summary: string } | undefined> {
+    const services = this.learning;
+    const session = input.session;
+    if (!services || signal.aborted || session.metadata.session_kind === 'subagent') return;
+    const mode = this.runtime.status().reflection ?? 'goals';
+    if (mode === 'off' || (input.trigger === 'long_turn' && mode !== 'all')) return;
+    const goal = getGoal(session.metadata, session.id);
+    const objective = goal?.objective ?? 'Review the completed long turn for a reusable improvement.';
+    await this.refreshSkills(session);
+    signal.throwIfAborted();
+    const client = this.sessionAuxiliaryClient(session, session.model, this.reflectionClientFactory);
+    try {
+      const result = await proposeReflection({
+        objective, ...(goal?.criteria ? { criteria: goal.criteria } : {}),
+        ...(goal?.blockedReason ? { evidenceSummary: goal.blockedReason.message } : {}),
+        trigger: input.trigger, messages: input.messages,
+        existingSkillNames: this.skillRegistry.all().map(skill => skill.metadata.name),
+        existingAgentNames: this.agentDefinitionLoader(session.cwd).map(agent => agent.name),
+      }, { complete: async (prompt, requestSignal) => {
+        const completion = await completeLlm(client, { model: session.model, messages: [{ role: 'user', content: prompt }], maxTokens: 4096 }, requestSignal, { timeoutMs: 90_000 });
+        return completion.content ?? '';
+      } }, signal);
+      signal.throwIfAborted();
+      if (result.type !== 'proposal') {
+        if (result.type === 'invalid') console.error('Reflection proposal refused:', result.reason);
+        return;
+      }
+      const record = await services.store.propose({ workspace: session.cwd, proposal: result.proposal, objective, trigger: input.trigger, sessionId: session.id });
+      if (signal.aborted) return;
+      const summary = `${record.proposal.kind} ${record.proposal.target}`;
+      const message = `Reflection proposal ${record.id}: ${summary}. Nothing was changed. Review it with /xerxes.`;
+      for (const connection of new Set([...this.connections, ...this.sessionObservers])) {
+        if (this.runtime.sessionStatus(connection.activeSessionKey)?.id === session.id) {
+          this.emit(connection, 'notification', { level: 'info', category: 'reflection', type: 'proposal', message, session_id: session.id,
+            reflection: { id: record.id, kind: record.proposal.kind, target: record.proposal.target,
+              rationale: record.proposal.rationale.split('\n')[0] ?? '', evidence_count: record.proposal.evidence.length } });
+        }
+      }
+      return { id: record.id, summary };
+    } finally { await closeLlmClient(client); }
   }
 
   /** Auxiliary calls inherit the session's authority just like the turn.
@@ -5544,6 +5672,11 @@ export class DaemonServer {
         return this.listPlatforms(connection);
       case "plugins":
         return this.listPlugins(connection, args, session);
+      case "xerxes": {
+        const result = await xerxesCommand(args, session?.cwd ?? this.projectDirectory ?? process.cwd(), this.learning, session);
+        this.emitSlash(connection, String(result.report ?? result.error ?? ''), result.ok === true ? 'info' : 'error');
+        return result;
+      }
       case "skills":
         return this.listSkills(connection, session, args);
       case "skill":
@@ -6522,6 +6655,23 @@ export class DaemonServer {
       this.emitSlash(connection, `Trusted the current contents of ${skill.sourcePath}. Invoke /${skill.metadata.name}; edits require trusting the new contents again.`);
       return { ok: true, name: skill.metadata.name, path: skill.sourcePath };
     }
+    if (action === 'lint' && !parts.length) {
+      // Authoring validation is only loaded on demand; it never activates or executes the inspected skills.
+      const { lintDiscoveredHarness, renderLintReport } = await import('../extensions/harnessLint.js');
+      // The registered tools (plugin_* included) let agent definitions be
+      // checked for tool names that do not exist; without an inventory that
+      // check is skipped rather than guessed.
+      const inventory = this.toolCatalog ? await this.toolCatalog.listTools() : session ? this.runtime.toolInventory?.(session.sessionKey) : undefined;
+      const findings = await lintDiscoveredHarness(this.skillRegistry.all(), {
+        // Only skill documents: notes for directories or flat command files are not SKILL.md.
+        additionalPaths: this.skillRegistry.discoveryNotes.map(note => note.path).filter(path => path.endsWith('SKILL.md')),
+        agents: listAgentDefinitions({ cwd: session?.cwd ?? process.cwd() }),
+        ...(inventory ? { knownToolNames: new Set(inventory.map(tool => tool.name)) } : {}),
+      });
+      const report = renderLintReport(findings);
+      this.emitSlash(connection, report);
+      return { ok: true, findings: findings.map(finding => ({ ...finding })), report };
+    }
     if (action === 'diagnostics' && !parts.length) {
       const notes = this.skillRegistry.discoveryNotes;
       const diagnostics = notes.slice(0, 200).map(note => ({ ...note, detail: note.detail.slice(0, 1000) }));
@@ -6554,7 +6704,7 @@ export class DaemonServer {
         execution_readiness: 'not_checked', instructions, truncated,
       } };
     }
-    if (action !== 'list' || parts.length) return { ok: false, error: 'Usage: /skills [list|search <query>|install <path>|inspect <name>|diagnostics|trust <name>]'  };
+    if (action !== 'list' || parts.length) return { ok: false, error: 'Usage: /skills [list|search <query>|install <path>|inspect <name>|diagnostics|lint|trust <name>]'  };
     const skills = this.skillRegistry
       .all()
       .filter((skill) => skillMatchesPlatform(skill));

@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import type { SystemPromptSegment } from '../streaming/promptCaching.js'
+import type { PromptBudgetReport, PromptSize } from './promptBudget.js'
 
 /**
  * The layered prompt assembler.
@@ -96,6 +97,8 @@ export interface TurnContextInput {
   readonly selfMemoryChanges?: string
   /** Change-driven constraint deltas emitted since the previous turn. */
   readonly contextDeltas?: string
+  /** Approved matching lessons, retrieved afresh for the current user message. */
+  readonly approvedLessons?: string
   /** Fresh content of instruction files that changed since the last turn. */
   readonly instructionUpdates?: string
 }
@@ -109,6 +112,7 @@ export function assembleTurnContext(input: TurnContextInput): SystemPromptSegmen
     { name: 'context_deltas', text: input.contextDeltas ?? '' },
     { name: 'memory_changes', text: input.memoryChanges ?? '' },
     { name: 'self_memory_changes', text: input.selfMemoryChanges ?? '' },
+    { name: 'approved_lessons', text: input.approvedLessons ?? '' },
   ].filter(segment => segment.text.trim() !== '')
 }
 
@@ -165,6 +169,8 @@ const ASSEMBLY_PROVENANCE_KEY = 'context_assembly'
 /** One turn's assembled-layer fingerprint, recorded before the request fires. */
 export interface AssemblyProvenance {
   readonly layers: readonly LayerDigest[]
+  /** Always-on layer sizes and advisory overages; absent on older records. */
+  readonly budget?: PromptBudgetReport
   readonly recordedAt: number
   readonly turnId?: string
 }
@@ -203,4 +209,26 @@ function isAssemblyProvenance(value: unknown): value is AssemblyProvenance {
       typeof layer === 'object' && layer !== null
       && typeof (layer as Record<string, unknown>).name === 'string'
       && typeof (layer as Record<string, unknown>).hash === 'string')
+    && (candidate.budget === undefined || isPromptBudgetReport(candidate.budget))
+}
+
+function isPromptBudgetReport(value: unknown): value is PromptBudgetReport {
+  if (typeof value !== 'object' || value === null) return false
+  const report = value as Record<string, unknown>
+  return typeof report.ok === 'boolean'
+    && isPromptSize(report.total)
+    && Array.isArray(report.layers)
+    && report.layers.every(layer => isPromptSize(layer) && typeof layer.name === 'string')
+    && Array.isArray(report.overages)
+    && report.overages.every(overage => isPromptSize(overage)
+      && typeof overage.layer === 'string'
+      && typeof overage.budget === 'number' && Number.isFinite(overage.budget) && overage.budget >= 0
+      && typeof overage.reason === 'string')
+}
+
+function isPromptSize(value: unknown): value is PromptSize & Record<string, unknown> {
+  if (typeof value !== 'object' || value === null) return false
+  const size = value as Record<string, unknown>
+  return typeof size.chars === 'number' && Number.isSafeInteger(size.chars) && size.chars >= 0
+    && typeof size.estimatedTokens === 'number' && Number.isFinite(size.estimatedTokens) && size.estimatedTokens >= 0
 }

@@ -12,6 +12,7 @@ import {
 } from '../../agents/intelligence.js'
 import { createHash } from 'node:crypto'
 import { ValidationError } from '../../core/errors.js'
+import { preflightWorkflow, workflowPreflightPlan, type WorkflowPreflightPorts } from '../../runtime/preflight.js'
 import {
   mergePersistedSubagentSnapshots,
   replacePersistedSubagentDeliveries,
@@ -247,6 +248,8 @@ export interface ClaudeAgentToolsOptions {
    * when no price is published — reported as unpriced, never as $0.
    */
   readonly estimateCostUsd?: (model: string, usage: { readonly input: number; readonly output: number; readonly cacheRead: number; readonly cacheWrite: number }, providerProfile?: string) => number | undefined
+  /** Workflow-only host observations; unavailable checks are explicitly reported as skipped. */
+  readonly workflowPreflight?: WorkflowPreflightPorts
   /** Associates explicitly detached work with the active parent turn. */
   readonly backgroundAgents?: {
     consume(snapshots: readonly SpawnedAgentSnapshot[]): void
@@ -363,8 +366,10 @@ export const CLAUDE_AGENT_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     'Run a JavaScript orchestration script that fans work out to many subagents and combines what they return: reviews, audits, migrations, broad searches, multi-angle verification, anything with independent parts or stages.',
     'Prefer it to a series of AgentTool/SpawnAgents calls once work splits into more than a few pieces or needs stages (find, then verify, then synthesize). There is no limit on how many agents a script starts; concurrency only bounds how many run at once.',
     'The script is the body of an async function. Globals: agent(prompt, opts) resolves to the agent\'s final text, or a parsed value when opts.schema is given, and rejects on failure; parallel([functions or promises]) waits for all and turns failures into null; pipeline(items, ...stages) sends each item through the stages independently, stage(previous, item, index), a throwing stage drops that item to null; phase(title) groups the agents that follow; log(...values); args; budget.spent() and budget.remaining(). return the value you want back.',
+    'select(candidates, { judge, baseline: 0, score?, judgeOptions?, seed? }) blindly shuffles 1–26 values or { value, label? } candidates, commits one anonymous judge choice before scoring, and explicitly falls back to baseline on judge or chosen-score failure/regression; one candidate needs no judge.',
     'agent opts: label, phase, model, profile (provider profile), intelligence, effort, type (subagent type), isolation: "worktree", schema (JSON Schema for a structured reply), timeout_ms.',
     'A run that failed, timed out or was stopped can be resumed with resume=<workflow_id>; nothing it finished is redone.',
+    'Set expect_agents for an exact run-count ledger (duplicate labels are reported before count mismatches); expect_agents or explicit max_agents above 10 triggers preflight before any agents start, with unavailable checks noted.',
     'Every agent starts with no context, so each prompt must stand alone. The script itself has no files, shell or network; agents do the work. Choose a model per agent: a fast, cheap model for mechanical reading, search and classification, a stronger one for judgement and synthesis.',
   ].join(' '), {
     script: stringSchema('JavaScript body of an async function using agent, parallel, pipeline, phase, log, args and budget. return the result.'),
@@ -372,6 +377,7 @@ export const CLAUDE_AGENT_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     args: { description: 'Any JSON value, available to the script as args.' },
     concurrency: { type: 'integer', minimum: 1, maximum: MAX_WORKFLOW_CONCURRENCY, description: `Agents running at once (default ${DEFAULT_WORKFLOW_CONCURRENCY}). Not a limit on the total.` },
     max_agents: { type: 'integer', minimum: 1, description: `Runaway guard on agents started in total (default ${DEFAULT_WORKFLOW_MAX_AGENTS}).` },
+    expect_agents: { type: 'integer', minimum: 1, description: 'Exact number of agent() calls expected to start, including completed results reused on resume. Duplicate labels and mismatches are reported without discarding results.' },
     token_budget: { type: 'integer', minimum: 1, description: 'Stop starting agents once they have used this many tokens; also budget.total in the script.' },
     timeout_minutes: numberSchema('Stop the whole run after this many minutes.'),
     resume: stringSchema('Resume an earlier run by its workflow_id instead of starting over: agents that finished return their saved results at once, agents that failed, were stopped or cut off continue in their own conversation, and only new work starts new agents. Omit script to rerun the saved one; pass it to rerun an edited script.'),
@@ -916,6 +922,8 @@ export class ClaudeAgentTools {
     if (concurrency < 1 || concurrency > MAX_WORKFLOW_CONCURRENCY) throw new ValidationError('concurrency', `must be between 1 and ${MAX_WORKFLOW_CONCURRENCY}`, concurrency)
     const maxAgents = optionalInteger(inputs, 'max_agents', DEFAULT_WORKFLOW_MAX_AGENTS)
     if (maxAgents < 1) throw new ValidationError('max_agents', 'must be a positive integer', maxAgents)
+    const expectAgents = inputs.expect_agents === undefined ? saved?.expectAgents : optionalInteger(inputs, 'expect_agents', 0)
+    if (expectAgents !== undefined && (!Number.isSafeInteger(expectAgents) || expectAgents < 1)) throw new ValidationError('expect_agents', 'must be a positive integer', expectAgents)
     const tokenBudget = inputs.token_budget === undefined ? undefined : optionalInteger(inputs, 'token_budget', 0)
     if (tokenBudget !== undefined && tokenBudget < 1) throw new ValidationError('token_budget', 'must be a positive integer', tokenBudget)
     const timeoutMinutes = inputs.timeout_minutes
@@ -923,7 +931,20 @@ export class ClaudeAgentTools {
       throw new ValidationError('timeout_minutes', 'must be a positive number', timeoutMinutes)
     }
     const runId = resume ?? `wf_${crypto.randomUUID().replaceAll('-', '').slice(0, 12)}`
-    rememberWorkflowRun(context.metadata, runId, { name, script, ...(inputs.args === undefined ? {} : { args: inputs.args }) })
+    // The generic manager/agentResolver ports do not expose worktree ownership,
+    // provider credentials or quota. Only explicit host observations can verify
+    // those checks; missing observations are returned as skipped, not guessed.
+    const preflight = (expectAgents ?? 0) > 10 || (inputs.max_agents !== undefined && maxAgents > 10)
+      ? await preflightWorkflow(workflowPreflightPlan({ script, ...(inputs.args === undefined ? {} : { args: inputs.args }), ...(expectAgents === undefined ? {} : { expected: expectAgents }) }), this.options.workflowPreflight ?? {})
+      : undefined
+    signal?.throwIfAborted()
+    if (preflight && !preflight.ok) return {
+      workflow_id: runId, name, status: 'failed', error_code: 'WORKFLOW_PREFLIGHT_FAILED',
+      error: `Workflow preflight refused to start agents: ${preflight.problems.join(' ')}`,
+      preflight, agents: { started: 0, completed: 0, failed: 0, cancelled: 0 }, tokens: 0,
+      ledger: { ...(expectAgents === undefined ? {} : { expected: expectAgents }), started: 0, completed: 0, failed: 0, resumed: 0, duplicateLabels: [], ok: false, problems: preflight.problems },
+    }
+    rememberWorkflowRun(context.metadata, runId, { name, script, ...(inputs.args === undefined ? {} : { args: inputs.args }), ...(expectAgents === undefined ? {} : { expectAgents }) })
     // An earlier run's agents, oldest first, by request: the same call in the
     // rerun takes its result (finished) or its conversation (interrupted).
     const prior = new Map<string, SpawnedAgentSnapshot[]>()
@@ -959,7 +980,7 @@ export class ClaudeAgentTools {
         const previous = prior.get(key)?.shift()
         if (previous?.status === 'completed') {
           reused += 1
-          return this.priced(workflowOutcome(previous), previous)
+          return { ...workflowOutcome(previous), cached: true }
         }
         if (previous) {
           try {
@@ -996,12 +1017,13 @@ export class ClaudeAgentTools {
         ...(inputs.args === undefined ? {} : { args: inputs.args }),
         concurrency,
         maxAgents,
+        ...(expectAgents === undefined ? {} : { expectAgents }),
         ...(tokenBudget === undefined ? {} : { tokenBudget }),
         ...(typeof timeoutMinutes === 'number' ? { timeoutMs: timeoutMinutes * 60_000 } : {}),
         port,
         ...(signal ? { signal } : {}),
       })
-      return { ...workflowWire(runId, result), ...(resume ? { resumed: { reused_results: reused, continued_agents: continued } } : {}) }
+      return { ...workflowWire(runId, result), ...(preflight ? { preflight } : {}), ...(resume ? { resumed: { reused_results: reused, continued_agents: continued } } : {}) }
     } finally {
       clearInterval(heartbeat)
       this.capture()
@@ -1572,7 +1594,7 @@ const WORKFLOW_RUNS_METADATA_KEY = 'xerxes_workflow_runs_v1'
 /** Runs whose scripts a session keeps; older ones can still resume by passing the script. */
 const MAX_SAVED_WORKFLOW_RUNS = 20
 
-interface SavedWorkflowRun { readonly name: string; readonly script: string; readonly args?: JsonValue }
+interface SavedWorkflowRun { readonly name: string; readonly script: string; readonly args?: JsonValue; readonly expectAgents?: number }
 
 function savedWorkflowRuns(metadata: Record<string, unknown>): Record<string, SavedWorkflowRun> {
   const raw = metadata[WORKFLOW_RUNS_METADATA_KEY]
@@ -1582,7 +1604,7 @@ function savedWorkflowRuns(metadata: Record<string, unknown>): Record<string, Sa
     if (!value || typeof value !== 'object') continue
     const run = value as Record<string, unknown>
     if (typeof run.script !== 'string' || typeof run.name !== 'string') continue
-    runs[id] = { name: run.name, script: run.script, ...(run.args === undefined ? {} : { args: run.args as JsonValue }) }
+    runs[id] = { name: run.name, script: run.script, ...(run.args === undefined ? {} : { args: run.args as JsonValue }), ...(typeof run.expectAgents === 'number' && Number.isSafeInteger(run.expectAgents) && run.expectAgents > 0 ? { expectAgents: run.expectAgents } : {}) }
   }
   return runs
 }
@@ -1655,6 +1677,7 @@ function workflowWire(runId: string, result: WorkflowRunResult): Record<string, 
     ...(result.result === undefined ? {} : { result: result.result }),
     ...(result.error ? { error: result.error } : {}),
     agents: result.agents,
+    ledger: result.ledger,
     tokens: result.tokens,
     ...(result.cost.unpriced === 0 && result.agents.started > 0 ? { cost_usd: Math.round(result.cost.usd * 10_000) / 10_000 } : {}),
     ...(result.cost.unpriced > 0 && result.cost.usd > 0 ? { cost_usd_known: Math.round(result.cost.usd * 10_000) / 10_000 } : {}),

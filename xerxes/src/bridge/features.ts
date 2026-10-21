@@ -34,6 +34,7 @@ export const FEATURES_GUIDE = [
   '/machine      Open saved remote workspaces over SSH; exit to return to this chat.',
   '/custom-agents Create or edit .xerxes/agents specialists. N new · Enter edit · Ctrl+S save.',
   '/skills       List skills; search <query> or install <local-directory-or-SKILL.md>.',
+  '/xerxes       Review what Xerxes learned: proposals and lessons; approve/reject/rollback exact ids. improve previews only.',
   '/plugins      List plugins; install <local-module.ts|git-url>, enable|disable|reload|uninstall|export <name>, trust <project-plugin>, secret list|unset.',
   '/plugin-creator Start a plugin authoring chat. Try: build a text-statistics tool with tests.',
   '/browser      Connect to an already-running Chromium CDP endpoint.',

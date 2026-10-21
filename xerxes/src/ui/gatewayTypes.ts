@@ -1,5 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
+import type { Lesson } from '../memory/lessons.js'
+import type { StoredReflectionProposal } from '../runtime/reflection.js'
 import type { TurnOutcomeReason } from '../types/turnOutcome.js'
 import type { SessionInfo, SlashCategory, SubagentStatus, Usage } from './types.js'
 
@@ -187,6 +189,33 @@ export interface NativeUpdateStatusResponse {
   }
   next_steps?: string[]
   summary?: string
+}
+
+// ── Human-reviewed learning ──────────────────────────────────────────
+
+export interface LearningCounts {
+  pending_proposals: number
+  pending_lessons: number
+}
+
+export type LearningListResponse =
+  | { ok: true; workspace: string; proposals: StoredReflectionProposal[]; lessons: Lesson[]; counts: LearningCounts }
+  | { ok: false; error: string }
+
+export type LearningReviewParams = {
+  session_key?: string
+  target: 'proposal' | 'lesson'
+  id: string
+  action: 'approve' | 'reject' | 'rollback'
+  reason?: string
+}
+
+export interface LearningReviewResponse {
+  ok: boolean
+  report: string
+  proposal?: StoredReflectionProposal
+  lesson?: Lesson
+  error?: string
 }
 
 // ── Session lifecycle ────────────────────────────────────────────────
@@ -767,6 +796,7 @@ export interface SpawnTreeLoadResponse {
 }
 
 export type GatewayEvent =
+  | { payload: { workspace: string; counts: LearningCounts }; type: 'learning.changed'; session_id?: string }
   | { payload?: { skin?: GatewaySkin }; session_id?: string; type: 'gateway.ready' }
   | { payload?: GatewaySkin; session_id?: string; type: 'skin.changed' }
   | { payload: SessionInfo; session_id?: string; type: 'session.info' }

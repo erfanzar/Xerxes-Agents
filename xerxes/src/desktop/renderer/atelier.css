@@ -3045,3 +3045,22 @@ html,body,#root,.app.atelier{background:transparent}
 .atelier .msg__images{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px;max-width:100%;margin-bottom:8px}
 .atelier .msg__images a{display:block;line-height:0;max-width:100%}
 .atelier .msg__images img{display:block;max-width:min(100%,540px);max-height:360px;width:auto;height:auto;border-radius:10px;border:1px solid var(--x-divider);object-fit:contain;background:var(--x-screen)}
+
+/* Human-reviewed learning uses the same card, source and feedback surfaces as Activity. */
+.learned-badge{display:inline-flex;align-items:center;justify-content:center;min-width:18px;padding:1px 5px;margin-left:7px;border-radius:9px;background:var(--x-accent-soft);color:var(--x-accent);font:var(--ui-small)/1.4 var(--mono)}
+.learned-panel{min-width:0;overflow-wrap:anywhere}
+.learned-card{margin:12px 0;min-width:0;overflow-wrap:anywhere}
+.learned-card h3{font:var(--t-title);margin:8px 0}
+.learned-card h4{font:var(--t-caption);color:var(--x-secondary);margin:14px 0 6px}
+.learned-card .railcard__head{flex-wrap:wrap}
+.learning-prose{white-space:pre-wrap}
+.learning-preview>summary{cursor:pointer;padding:10px 0;outline-offset:3px;font:var(--t-body)}
+.learning-review{display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap;margin-top:12px}
+.learning-reason{display:flex;align-items:flex-end;gap:8px;flex:1;min-width:180px}
+.learning-reason label{flex:1;min-width:0;margin:0!important;font:var(--ui-small)/1.5 var(--sans)}
+.learning-reason input{display:block;box-sizing:border-box;width:100%;margin-top:5px;border:1px solid var(--x-hairline);border-radius:6px;padding:7px 9px;background:var(--x-screen);color:var(--x-title);font:var(--ui-font)/1.5 var(--sans)}
+.learned-notice{border-left:3px solid var(--x-accent);padding:14px;color:var(--x-secondary)}
+.learned-notice .studio-source{margin:10px 0}
+.learned-card .studio-source{max-width:100%;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere}
+.learning-report{font-size:var(--ui-font)}
+@media(max-width:500px){.catalog-form>.studio-tabs{flex-wrap:wrap}.learning-reason{flex-basis:100%}}

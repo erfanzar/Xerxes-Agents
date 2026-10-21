@@ -17,6 +17,7 @@ import {
   recordAssemblyProvenance,
   renderTurnContext,
 } from '../context/assembly.js'
+import { evaluateBudget, measureLayers } from '../context/promptBudget.js'
 import { ToolResultStorage } from '../context/toolResultStorage.js'
 import { DELEGATION_MODE_METADATA_KEY, delegationModeOf, delegationModePrompt } from '../agents/delegationMode.js'
 import { CONTEXT_CALIBRATION_METADATA_KEY, contextCalibrationRatio, estimateContextTokens, promptCalibration } from '../context/windowUsage.js'
@@ -25,6 +26,8 @@ import { classify, ErrorKind } from '../runtime/errorClassifier.js'
 import { instructionFileUpdateLayer } from '../runtime/instructionFreshness.js'
 import { appendSkillSuggestion } from '../extensions/skillSuggestions.js'
 import { detectRepeatedCommand, pluginSuggestionMessage } from '../extensions/pluginSuggestions.js'
+import { reflectionTrigger, type ReflectionTrigger } from '../runtime/reflection.js'
+import type { TrajectoryMessage } from '../context/trajectory.js'
 import type { HookRunner } from '../extensions/hooks.js'
 import {
   renderToolGuidance,
@@ -85,7 +88,19 @@ import {
 import type { DaemonSubagentEventSource } from './subagentEvents.js'
 import { recordModelUsage } from '../runtime/modelUsageLedger.js'
 
+export interface TurnReflectionInput {
+  readonly session: DaemonSession
+  readonly trigger: ReflectionTrigger
+  readonly messages: readonly TrajectoryMessage[]
+  readonly signal: AbortSignal
+}
+
 export interface AgentTurnRunnerOptions {
+  /** Reviewed workspace guidance for this user message; injected into turn context only. */
+  readonly lessonsForTurn?: (session: DaemonSession, userText: string, signal: AbortSignal) => Promise<string>
+  /** Host owns provider authority, lifetime tracking, storage and session notification. */
+  readonly reflection?: (input: TurnReflectionInput) => Promise<{ id: string; summary: string } | undefined>
+  readonly reflectionMode?: () => 'goals' | 'all' | 'off'
   readonly remoteProviderBindings?: RemoteProviderBindings
   /** Retries for a turn served by the desktop's provider; its lapses wait for the desktop to bind again. Tests shorten it. */
   readonly localProviderRetryPolicy?: typeof DEFAULT_RETRY_POLICY
@@ -336,6 +351,8 @@ export class AgentTurnRunner implements TurnRunner {
     signal: AbortSignal,
     controls: TurnRunControls = {},
   ): AsyncGenerator<DaemonEvent> {
+    const turnStartedAt = Date.now()
+    const goalBefore = getGoal(session.metadata, session.id)
     // A turn that failed before its finally must not leak into this one.
     this.liveStates.delete(session.id)
     if (this.options.beforeTurn) {
@@ -495,7 +512,14 @@ export class AgentTurnRunner implements TurnRunner {
     const today = localDay(new Date())
     const promptDay = this.snapshots.promptDay.get(session.id)
     this.snapshots.promptDay.set(session.id, today)
+    let approvedLessons = ''
+    if (this.options.lessonsForTurn) {
+      try { approvedLessons = await this.options.lessonsForTurn(session, displayText, signal) }
+      catch (error) { if (!signal.aborted) console.error('Approved lesson recall failed:', error) }
+      signal.throwIfAborted()
+    }
     const turnSegments = assembleTurnContext({
+      approvedLessons,
       ...(promptDay && promptDay !== today ? { dateChange: `Today's date is now ${today}.` } : {}),
       ...(goalChanged ? { goalStatus } : {}),
       contextDeltas: renderContextDeltas(contextDeltas),
@@ -555,13 +579,21 @@ export class AgentTurnRunner implements TurnRunner {
         )
         : '',
     })
+    // Measure only the always-on system layers: turn context and conversation
+    // have their own window accounting. This report never rewrites prompt text.
+    const promptBudget = evaluateBudget(measureLayers(systemSegments))
     // Fingerprint the assembled layers before the request fires: any later
     // "why did this turn behave differently?" is a metadata diff, not a guess.
-    recordAssemblyProvenance(session.metadata, {
+    const provenance = {
       ...(session.activeTurnId ? { turnId: session.activeTurnId } : {}),
       layers: [...layerDigests(systemSegments), ...layerDigests(turnSegments).map(digest => ({ ...digest, name: 'turn:' + digest.name }))],
+      budget: promptBudget,
       recordedAt: Date.now(),
-    })
+    }
+    recordAssemblyProvenance(session.metadata, provenance)
+    // The loop snapshots metadata before assembly and replaces the session's
+    // copy on synchronization; keep the new record in both, including errors.
+    recordAssemblyProvenance(state.metadata, provenance)
     const systemPrompt = systemSegments.map(segment => segment.text).join('\n\n')
     const permissionBroker = this.options.interactions?.permissionBroker(session.id) ?? this.options.permissionBroker
     // Publish the request scaffolding the daemon's context meter cannot see.
@@ -620,7 +652,35 @@ export class AgentTurnRunner implements TurnRunner {
     let pendingAgentEventSnapshots: readonly SpawnedAgentSnapshot[] = []
     // This turn's tool calls, for the repeated-command plugin suggestion.
     const turnToolCalls: ToolCall[] = []
+    let turnErrored = false
+    let turnFinished = false
     try {
+      if (!promptBudget.ok) {
+        // Identity is the set of exceeded caps, not their changing sizes or
+        // order. Session metadata survives runner rebuilds and transcript resume.
+        const warningKey = 'context_prompt_budget_warnings'
+        const rawWarnings = session.metadata[warningKey]
+        const warnedSets = Array.isArray(rawWarnings)
+          ? rawWarnings.filter((value): value is string => typeof value === 'string')
+          : []
+        const overageSet = JSON.stringify(promptBudget.overages.map(overage => overage.layer).sort())
+        if (!warnedSets.includes(overageSet)) {
+          const nextWarnings = [...warnedSets, overageSet]
+          session.metadata[warningKey] = nextWarnings
+          state.metadata[warningKey] = nextWarnings
+          const details = promptBudget.overages.map(overage =>
+            `${overage.layer}: ${overage.chars} chars / ~${overage.estimatedTokens} tokens (budget ${overage.budget} tokens). ${overage.reason}`,
+          ).join(' ')
+          yield {
+            type: 'notification',
+            payload: {
+              level: 'warning',
+              message: `Always-on prompt budget exceeded. ${details} Prompt content is unchanged; nothing was truncated.`,
+              prompt_budget: promptBudget,
+            },
+          }
+        }
+      }
       // Fallback model chain (Claude Code fallback-model parity): when the
       // primary provider fails terminally with an overload-class error before
       // any content streamed, the turn restarts once on the configured
@@ -777,6 +837,9 @@ export class AgentTurnRunner implements TurnRunner {
           accumulateSessionTelemetry(session, event)
           auditStreamEvent(this.options.auditEmitter, event, auditContext, state)
           auditTurnEnded ||= event.type === 'turn_done'
+          turnErrored ||= (event.type === 'provider_retry' && event.final)
+            || (event.type === 'turn_done' && (event.reason === 'provider_failed' || event.reason === 'turn_failed'))
+          turnFinished ||= event.type === 'turn_done'
           return daemonEventFromStream(
             event,
             state,
@@ -870,6 +933,7 @@ export class AgentTurnRunner implements TurnRunner {
         }
       }
     } catch (error) {
+      turnErrored = true
       if (resumedSubagent) resumedSubagentOutcome = signal.aborted ? 'cancelled' : 'error'
       this.options.auditEmitter?.emitError({
         ...auditContext,
@@ -905,6 +969,31 @@ export class AgentTurnRunner implements TurnRunner {
       recordLatestUserDisplayText(state, providerText, displayText, harnessOrigin(controls))
       synchronizeSessionState(session, state)
       if (this.liveStates.get(session.id) === state) this.liveStates.delete(session.id)
+      // Like the repeated-command suggestion, this is only a proposal, never an edit.
+      // The runtime starts it AFTER its terminal event, and the host tracks its lifetime.
+      if (this.options.reflection && controls.afterTurn && turnFinished
+        && !turnErrored && !signal.aborted && !resumedSubagent) {
+        const completedSession = { ...session, metadata: { ...session.metadata } }
+        const durationMs = Date.now() - turnStartedAt
+        controls.afterTurn(() => {
+          // Preparation, too, is outside terminal-producing work: a bad host
+          // setting or snapshot must never turn a successful task into a failure.
+          void Promise.resolve().then(() => {
+            if (signal.aborted) return
+            const mode = this.options.reflectionMode?.() ?? 'goals'
+            if (mode === 'off') return
+            const goalAfter = getGoal(completedSession.metadata, completedSession.id)
+            const transitioned = goalAfter && (goalAfter.id !== goalBefore?.id || goalAfter.phase !== goalBefore?.phase)
+            const trigger = reflectionTrigger({
+              ...(transitioned ? { goalPhase: goalAfter.phase } : {}),
+              toolCallCount: turnToolCalls.length, turnDurationMs: durationMs,
+            })
+            if (!trigger || (trigger === 'long_turn' && mode !== 'all')) return
+            return this.options.reflection!({ session: completedSession, trigger,
+              messages: state.messages.map(message => ({ ...message })), signal })
+          }).catch(error => { if (!signal.aborted) console.error('Reflection failed:', error instanceof Error ? error.message : String(error)) })
+        })
+      }
     }
   }
 

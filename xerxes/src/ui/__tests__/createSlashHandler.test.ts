@@ -91,6 +91,29 @@ function makeContext(request: ReturnType<typeof vi.fn>, catalog: null | SlashCat
 }
 
 describe('createSlashHandler', () => {
+  it('opens /xerxes review without clearing the transcript or sending a turn', () => {
+    patchUiState({ sid: 's1' })
+    const request = vi.fn()
+    const { context, send } = makeContext(request)
+    createSlashHandler(context)('/xerxes')
+    expect(getOverlayState().learning).toBe(true)
+    expect(request).not.toHaveBeenCalled()
+    expect(send).toEqual([])
+    expect(context.session.resetVisibleHistory).not.toHaveBeenCalled()
+    expect(context.transcript.setHistoryItems).not.toHaveBeenCalled()
+  })
+  it.each(['/xerxes help', '/xerxes proposals', '/xerxes approve proposal-id Reviewed', '/xerxes improve --proposals proposals.json'])('forwards %s without resetting or replacing the conversation', async input => {
+    patchUiState({ sid: 's1' })
+    const request = vi.fn().mockResolvedValue({})
+    const { context, send } = makeContext(request)
+    createSlashHandler(context)(input)
+    await flush()
+    expect(request).toHaveBeenCalledWith('slash.exec', { command: input.slice(1), session_id: 's1' })
+    expect(send).toEqual([])
+    expect(context.session.resetVisibleHistory).not.toHaveBeenCalled()
+    expect(context.transcript.setHistoryItems).not.toHaveBeenCalled()
+  })
+
   it.each(['/custom-agents', '/agents edit'])('opens project specialist editing with %s without resetting chat', async input => {
     patchUiState({ sid: 's1' })
     const request = vi.fn()

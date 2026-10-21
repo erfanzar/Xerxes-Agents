@@ -89,6 +89,27 @@ it.each([220, 80, 40])('shows current reasoning effort beside the model and upda
   } finally { act(() => screen.renderer.destroy()) }
 })
 
+it.each([[80, 24], [40, 18]])('restores the draft and prior transcript after /xerxes detail and close at %ix%i', async (width, height) => {
+  patchUiState({ sid: 'review-session' })
+  const rpc = vi.fn(async () => ({ ok: true, workspace: '/repo', proposals: [], lessons: [], counts: { pending_proposals: 0, pending_lessons: 0 } }))
+  const p = props(width)
+  p.transcript.historyItems = [{ role: 'user', text: 'Preserve this transcript' }]
+  p.transcript.virtualRows = [{ index: 0, key: 'kept', leadGap: false, rail: 'none', turnTools: 0, turnSeconds: 0, msg: p.transcript.historyItems[0]! }]
+  p.transcript.virtualHistory.end = 1
+  const screen = await testRender(<GatewayProvider value={{ rpc } as never}><AppLayout {...p} /></GatewayProvider>, { width, height, kittyKeyboard: true })
+  try {
+    await screen.flush()
+    act(() => findSlashCommand('xerxes')!.run('', {} as never, '/xerxes'))
+    await screen.flush()
+    expect(screen.captureCharFrame()).toContain('What Xerxes learned')
+    act(() => screen.mockInput.pressKey('ESCAPE'))
+    await screen.flush()
+    expect(screen.captureCharFrame()).not.toContain('What Xerxes learned')
+    expect(screen.captureCharFrame()).toContain('cancellation behavior')
+    expect(p.transcript.historyItems).toEqual([{ role: 'user', text: 'Preserve this transcript' }])
+  } finally { act(() => screen.renderer.destroy()) }
+})
+
 it.each([
   ['runs', 'Runs · Workspace', 'run.list'],
   ['monitors', 'Monitors · 0 watching', 'monitor.list'],
