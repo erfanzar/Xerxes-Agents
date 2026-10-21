@@ -40,6 +40,12 @@ export interface ProviderConfig {
    * subscription does not pay.
    */
   readonly modelsDevVendor?: string
+  /**
+   * `subscription` when a plan pays for the calls (an OAuth or plan login),
+   * so published per-token prices are not what the person is charged and
+   * cost views say "included in plan" instead of a dollar figure.
+   */
+  readonly billing?: 'subscription'
 }
 
 const provider = (
@@ -65,6 +71,7 @@ export const PROVIDERS = {
   'openai-codex': provider('openai-codex', 'openai', {
     baseUrl: 'https://chatgpt.com/backend-api/codex',
     modelsDevVendor: 'openai',
+    billing: 'subscription',
   }),
   // Subscription-backed like Codex: the GitHub OAuth device flow mints a
   // short-lived proxy token, and the api host derives from that token's
@@ -72,6 +79,7 @@ export const PROVIDERS = {
   'github-copilot': provider('github-copilot', 'openai', {
     apiKeyEnv: 'COPILOT_GITHUB_TOKEN',
     baseUrl: 'https://api.individual.githubcopilot.com',
+    billing: 'subscription',
   }),
   // Deployment-scoped: the base URL comes from AZURE_OPENAI_RESOURCE_NAME or
   // base_url and the model id maps to a deployment name, so there is no
@@ -199,6 +207,7 @@ export const PROVIDERS = {
   'claude-code': provider('claude-code', 'claude-code', {
     baseUrl: 'claude-code://local',
     modelsDevVendor: 'anthropic',
+    billing: 'subscription',
   }),
   gemini: provider('gemini', 'openai', {
     apiKeyEnv: 'GEMINI_API_KEY',
@@ -479,6 +488,20 @@ export interface CostSource {
   readonly reported?: LiveCost
   readonly cacheReadTokens?: number
   readonly cacheWriteTokens?: number
+}
+
+/**
+ * True when a plan, not per-token billing, pays for this provider's calls.
+ * An `anthropic` profile without an API key signs in with a Claude Pro/Max
+ * subscription session, so it counts as a plan too.
+ */
+export function providerBilledBySubscription(provider: string | undefined, options: { readonly apiKey?: string } = {}): boolean {
+  if (!provider) return false
+  if (provider === 'anthropic') return !options.apiKey?.trim()
+  const config = Object.prototype.hasOwnProperty.call(PROVIDERS, provider)
+    ? PROVIDERS[provider as keyof typeof PROVIDERS] as ProviderConfig
+    : undefined
+  return config?.billing === 'subscription'
 }
 
 /**

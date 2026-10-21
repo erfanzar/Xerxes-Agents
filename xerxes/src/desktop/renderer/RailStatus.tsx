@@ -102,7 +102,7 @@ export function RailStatus({ snap }: { snap: Snapshot }): ReactElement {
           : <AgentOrb className="railstatus__orb" size={20} state={orbStateOf(snap)} live={state.tone === 'working' || state.tone === 'needs'} />}
         <strong>{state.label}</strong>
         {stoppable && <span className="railstatus__clock">{elapsedOf(snap.turnSeconds)}</span>}
-        {snap.costUsd != null && snap.costUsd > 0 && !stoppable && (
+        {snap.costBasis !== 'subscription' && snap.costUsd != null && snap.costUsd > 0 && !stoppable && (
           <span className="railstatus__cost">${snap.costUsd.toFixed(snap.costUsd < 0.01 ? 4 : 2)}</span>
         )}
         {stoppable && <button className="railstatus__stop" onClick={() => store.cancel()}>Stop</button>}

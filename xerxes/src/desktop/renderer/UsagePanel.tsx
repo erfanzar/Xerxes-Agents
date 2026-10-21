@@ -12,6 +12,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
 
 import {
+  costLabel,
   modelUsageSummary,
   parseUsageReport,
   resetIn,
@@ -80,7 +81,9 @@ export function ProfileCard({ profile, now }: { profile: UsageProfileView; now: 
  * a price for shows its tokens and "price unknown", never an invented $0.
  */
 export function ModelSpend({ models, since }: { models: readonly ModelUsageView[]; since: number | undefined }): ReactElement {
-  const priced = models.filter(model => model.costUsd !== undefined)
+  // A plan-paid model's dollar figure is what API prices would charge, not
+  // spend, so it never joins the total.
+  const priced = models.filter(model => model.costUsd !== undefined && model.costBasis !== 'subscription')
   const total = priced.reduce((sum, model) => sum + (model.costUsd ?? 0), 0)
   const ordered = [...models].sort((a, b) => (b.costUsd ?? -1) - (a.costUsd ?? -1) || (b.input + b.output) - (a.input + a.output))
   const days = since ? Math.max(1, Math.round((Date.now() - since) / 86_400_000)) : 30
@@ -93,11 +96,11 @@ export function ModelSpend({ models, since }: { models: readonly ModelUsageView[
     {models.length > 0 && <ul className="usage-models">{ordered.map(model => <li key={model.model + (model.profile ?? '')} className="usage-model">
       <div className="usage-model__row">
         <strong className="usage-model__name" title={model.profile ? `${model.model} · ${model.profile}` : model.model}>{model.model}</strong>
-        <span className="usage-model__cost" data-unknown={model.costUsd === undefined || undefined}>{model.costUsd === undefined ? 'price unknown' : usd(model.costUsd)}</span>
+        <span className="usage-model__cost" data-unknown={(model.costUsd === undefined && model.costBasis !== 'subscription') || undefined} data-plan={model.costBasis === 'subscription' || undefined} title={model.costBasis === 'subscription' && model.costUsd !== undefined ? `At API prices: ${usd(model.costUsd)}` : undefined}>{costLabel(model.costUsd, model.costBasis)}</span>
       </div>
       <div className="usage-model__meta">{modelUsageSummary(model)}</div>
     </li>)}</ul>}
-    <p className="usage__note">Estimated by Xerxes from the tokens it sent, at each model's published price.</p>
+    <p className="usage__note">Estimated by Xerxes from the tokens it sent, at each model's published price. Models on a subscription plan are included in the plan and not counted in the total.</p>
   </section>
 }
 

@@ -45,6 +45,18 @@ export interface ModelUsageView {
   readonly cacheWrite: number
   /** USD at published prices; absent when no one publishes a price for the model. */
   readonly costUsd?: number
+  /** `subscription` when a plan pays for these calls; costUsd is then only what API prices would charge. */
+  readonly costBasis?: 'subscription'
+}
+
+/**
+ * The one cost label every view shows: "Included in plan" when a plan pays,
+ * the published-price estimate otherwise, and "price unknown" when nobody
+ * publishes a price. Never an invented $0.
+ */
+export function costLabel(costUsd: number | undefined, costBasis: 'subscription' | undefined | null): string {
+  if (costBasis === 'subscription') return 'Included in plan'
+  return costUsd === undefined ? 'price unknown' : usd(costUsd)
 }
 
 export interface SessionUsageView {
@@ -62,6 +74,7 @@ export interface SessionUsageView {
   readonly contextUsed: number
   readonly contextMax: number
   readonly costUsd?: number
+  readonly costBasis?: 'subscription'
 }
 
 export interface UsageReportView {
@@ -154,6 +167,7 @@ function sessionOf(value: unknown): SessionUsageView | undefined {
     ...(num(item.cache_hit_rate) === undefined ? {} : { cacheHitRate: num(item.cache_hit_rate)! }),
     ...(num(item.calls) === undefined ? {} : { calls: num(item.calls)! }),
     ...optional('cost_usd', 'costUsd'),
+    ...(item.cost_basis === 'subscription' ? { costBasis: 'subscription' } : {}),
   } as SessionUsageView
 }
 
@@ -172,6 +186,7 @@ function modelOf(value: unknown): ModelUsageView | null {
     cacheRead: num(item.cache_read_tokens) ?? 0,
     cacheWrite: num(item.cache_write_tokens) ?? 0,
     ...(cost === undefined ? {} : { costUsd: cost }),
+    ...(item.cost_basis === 'subscription' ? { costBasis: 'subscription' as const } : {}),
   }
 }
 
@@ -266,7 +281,8 @@ export function sessionUsageRows(session: SessionUsageView): [string, string][] 
   if (session.cacheHitRate !== undefined) rows.push(['Cache hit', `${Math.round(session.cacheHitRate * 100)}%`])
   rows.push(['Tokens', `${compactTokens(session.input)} in · ${compactTokens(session.output)} out`])
   if (session.calls !== undefined && session.calls > 0) rows.push(['API calls', String(session.calls)])
-  if (session.costUsd !== undefined) rows.push(['Cost', `$${session.costUsd.toFixed(session.costUsd < 0.01 ? 4 : 2)}`])
+  if (session.costBasis === 'subscription') rows.push(['Cost', costLabel(session.costUsd, session.costBasis)])
+  else if (session.costUsd !== undefined) rows.push(['Cost', `$${session.costUsd.toFixed(session.costUsd < 0.01 ? 4 : 2)}`])
   return rows
 }
 
@@ -305,7 +321,7 @@ export function formatUsageText(report: UsageReportView, now = Date.now()): stri
   if (report.models?.length) {
     if (lines.length) lines.push('')
     lines.push('By model · last 30 days')
-    for (const model of report.models) lines.push(`  ${model.model.padEnd(28)}${(model.costUsd === undefined ? 'price unknown' : usd(model.costUsd)).padEnd(15)}${modelUsageSummary(model)}`)
+    for (const model of report.models) lines.push(`  ${model.model.padEnd(28)}${costLabel(model.costUsd, model.costBasis).padEnd(17)}${modelUsageSummary(model)}`)
   }
   return lines.join('\n') || 'No usage recorded yet.'
 }

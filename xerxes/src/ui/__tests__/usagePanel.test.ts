@@ -40,6 +40,24 @@ describe('usagePanelSections', () => {
     expect(sections[5]).toMatchObject({ heading: { label: 'local', notes: ['ollama'], right: 'no limits published', state: 'idle' } })
   })
 
+  it('labels plan-paid cost as included in plan and keeps it out of the spend total', () => {
+    const plan = parseUsageReport({
+      fetched_at: now,
+      session: { model: 'opus', turn_count: 1, input: 10, output: 5, context_used: 1, context_max: 10, cost_usd: 3.21, cost_basis: 'subscription' },
+      profiles: [],
+      models: [
+        { model: 'opus', profile: 'claude-code', calls: 4, input_tokens: 1_000, output_tokens: 100, cache_read_tokens: 0, cache_write_tokens: 0, cost_usd: 3.21, cost_basis: 'subscription' },
+        { model: 'gpt-4o', profile: 'openai', calls: 2, input_tokens: 1_000, output_tokens: 100, cache_read_tokens: 0, cache_write_tokens: 0, cost_usd: 0.5 },
+      ],
+    })
+    const sections = usagePanelSections(plan, now)
+    expect(sections[0]).toMatchObject({ heading: { label: 'This session', right: 'Included in plan' } })
+    const byModel = sections.at(-1)!
+    expect(byModel).toMatchObject({ heading: { label: 'By model', right: '$0.50' } })
+    expect(byModel.rows?.find(([name]) => name === 'opus')?.[1]).toMatch(/^Included in plan/)
+    expect(byModel.rows?.find(([name]) => name === 'gpt-4o')?.[1]).toMatch(/^\$0\.50/)
+  })
+
   it('says how to add a provider when none are imported', () => {
     expect(usagePanelSections(parseUsageReport({ profiles: [] }), now)).toEqual([
       { title: 'Plans & keys', text: 'No provider profiles imported yet. Add one with /provider.' }

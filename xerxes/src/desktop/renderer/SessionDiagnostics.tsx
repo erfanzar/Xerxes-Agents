@@ -51,7 +51,8 @@ export function sessionMetrics(snap: Snapshot): [string, string][] {
   if (snap.cacheReadTokens != null && snap.cacheReadTokens > 0) metrics.push(['Cache read', compactTokensOf(snap.cacheReadTokens)])
   if (snap.cacheWriteTokens != null && snap.cacheWriteTokens > 0) metrics.push(['Cache written', compactTokensOf(snap.cacheWriteTokens)])
   if (snap.inputTokens > 0) metrics.push(['Uncached input', compactTokensOf(snap.inputTokens)])
-  if (snap.costUsd != null && snap.costUsd > 0) metrics.push(['Cost', '$' + snap.costUsd.toFixed(snap.costUsd < 0.01 ? 4 : 2)])
+  if (snap.costBasis === 'subscription') metrics.push(['Cost', 'Included in plan'])
+  else if (snap.costUsd != null && snap.costUsd > 0) metrics.push(['Cost', '$' + snap.costUsd.toFixed(snap.costUsd < 0.01 ? 4 : 2)])
   if (snap.model) metrics.push(['Model', snap.model])
   if (snap.branch) metrics.push(['Branch', snap.branch])
   return metrics

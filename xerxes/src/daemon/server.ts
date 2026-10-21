@@ -175,6 +175,7 @@ import {
   calcCost,
   effectiveContextLimit,
   PROVIDERS,
+  providerBilledBySubscription,
   resolveProvider,
   type ProviderName,
 } from "../llms/providerRegistry.js";
@@ -251,8 +252,8 @@ import {
   compactionCompletionPort,
   lazyCompactionCompletionPort,
   compactionThresholdTokens,
-  DEFAULT_AUTO_COMPACT_THRESHOLD,
   compactionSummaryBudgets,
+  DEFAULT_AUTO_COMPACT_THRESHOLD,
   normalizeCompactionThreshold,
   precompactArchivePathFor,
 } from "./compactionRunner.js";
@@ -4264,6 +4265,7 @@ export class DaemonServer {
       turn_count: session.turnCount,
       ...sessionRuntimeTelemetryPayload(session.extra.runtime_telemetry),
       ...(() => { const cost = session.model ? this.sessionCost(session, session.model) : undefined; return cost === undefined ? {} : { cost_usd: cost }; })(),
+      ...(this.sessionCostBasis(session) ? { cost_basis: this.sessionCostBasis(session) } : {}),
     };
   }
 
@@ -4299,6 +4301,7 @@ export class DaemonServer {
         cache_write_tokens: row.cacheWriteTokens,
         last_at: row.lastAt,
         ...(cost === undefined ? {} : { cost_usd: cost }),
+        ...(profileCostBasis(profile) ? { cost_basis: profileCostBasis(profile) } : {}),
       };
     });
   }
@@ -4315,6 +4318,17 @@ export class DaemonServer {
     return this.priceTokens(profile, model, session.totalInputTokens, session.totalOutputTokens, cache.read, cache.write);
   }
 
+  /**
+   * `subscription` when the session's provider is paid for by a plan: the
+   * dollar figure is then what the tokens would cost at API prices, not a
+   * charge, and clients label it "included in plan".
+   */
+  private sessionCostBasis(session: DaemonSession): "subscription" | undefined {
+    const name = this.sessionProfileName({ ...session, metadata: { ...session.metadata } });
+    const profile = name ? this.profileStore.get(name) : undefined;
+    return profileCostBasis(profile);
+  }
+
   /** The wire session payload, priced like `/cost` and the Usage views. */
   private sessionWirePayload(
     session: DaemonSession,
@@ -4324,7 +4338,9 @@ export class DaemonServer {
     historySession?: DaemonSession,
   ): JsonRpcPayload {
     const cost = session.model ? this.sessionCost(session, session.model) : undefined;
-    return sessionPayload(session, contextLimit, cost, mcpStatus, requestedHistory, historySession);
+    const basis = this.sessionCostBasis(session);
+    const payload = sessionPayload(session, contextLimit, cost, mcpStatus, requestedHistory, historySession);
+    return basis ? { ...payload, cost_basis: basis } : payload;
   }
 
   private priceTokens(profile: ProviderProfile | undefined, model: string, input: number, output: number, cacheRead = 0, cacheWrite = 0): number | undefined {
@@ -4667,10 +4683,12 @@ export class DaemonServer {
       this.mcpStatusRecord(session),
       model ? this.sessionCost(session, model) : undefined,
     );
+    const basis = this.sessionCostBasis(session);
+    const priced = basis ? { ...payload, cost_basis: basis } : payload;
     this.emit(
       connection,
       "status_update",
-      options.scoped ? { ...payload, session_id: session.id } : payload,
+      options.scoped ? { ...priced, session_id: session.id } : priced,
     );
   }
 
@@ -7835,6 +7853,13 @@ export class DaemonServer {
         model,
         reason,
         maxContextTokens: compactionBudget(this.promptBudget(model, session) || 64_000, session, model),
+        summaryBudgets: compactionSummaryBudgets(this.promptBudget(model, session) || undefined, {
+          ...(this.maxOutputTokens(model, session) === undefined ? {} : { maxOutputTokens: this.maxOutputTokens(model, session)! }),
+        }),
+        // Automatic passes shed old tool outputs (archived first) when the
+        // summary fails, instead of pausing the session. An explicit /compact
+        // reports the failure so the person sees it.
+        deterministicFallback: reason === "auto-compact",
       });
       signal?.throwIfAborted();
       if (!outcome.compacted) {
@@ -7853,13 +7878,6 @@ export class DaemonServer {
       // The summary call above can take tens of seconds while this method
       // holds only the session-operation queue for THIS key. A concurrent
       // session.open / resume of the same persisted id under another key
-        summaryBudgets: compactionSummaryBudgets(this.promptBudget(model, session) || undefined, {
-          ...(this.maxOutputTokens(model, session) === undefined ? {} : { maxOutputTokens: this.maxOutputTokens(model, session)! }),
-        }),
-        // Automatic passes shed old tool outputs (archived first) when the
-        // summary fails, instead of pausing the session. An explicit /compact
-        // reports the failure so the person sees it.
-        deterministicFallback: reason === "auto-compact",
       // folds and evicts this exact object — the fold's only guard is
       // activeTurnId, and compaction is not a turn. If that happened, the
       // swap below would mutate an orphan that flushSessions no longer sees:
@@ -7897,6 +7915,13 @@ export class DaemonServer {
           outcome.stamp.tokens_after,
           reason === "auto-compact",
         );
+        if (outcome.stamp.fallback === "shed-tool-results") {
+          this.emitSlash(
+            notify,
+            `The compaction summary failed (${outcome.stamp.summary_error ?? "unknown error"}), so older tool outputs were shortened instead. The full history is archived and searchable with session_search.`,
+            "warning",
+          );
+        }
         if (outcome.stamp.archive_error !== undefined) {
           // The user never asked for auto-compaction, so a silently
           // unrecoverable transcript is not an acceptable outcome of it.
@@ -7915,13 +7940,6 @@ export class DaemonServer {
           // discovered after the fact.
           this.emitSlash(
             notify,
-        if (outcome.stamp.fallback === "shed-tool-results") {
-          this.emitSlash(
-            notify,
-            `The compaction summary failed (${outcome.stamp.summary_error ?? "unknown error"}), so older tool outputs were shortened instead. The full history is archived and searchable with session_search.`,
-            "warning",
-          );
-        }
             "Note: no pre-compaction archive was available, so the replaced history cannot be recovered if the summary went wrong.",
             "warning",
           );
@@ -8344,15 +8362,19 @@ export class DaemonServer {
     }
     const model = session.model || stringValue(this.runtime.status().model);
     const cost = this.sessionCost(session, model);
+    const basis = this.sessionCostBasis(session);
     this.emitSlash(
       connection,
-      cost === undefined
-        ? `No published price for \`${model || "(not configured)"}\`, so the cost is unknown.`
-        : `Estimated cost: \`$${cost.toFixed(4)}\` (model: \`${model || "(not configured)"}\`).`,
+      basis === "subscription"
+        ? `Included in your plan (model: \`${model || "(not configured)"}\`).${cost === undefined ? "" : ` At API prices these tokens would cost \`$${cost.toFixed(4)}\`.`}`
+        : cost === undefined
+          ? `No published price for \`${model || "(not configured)"}\`, so the cost is unknown.`
+          : `Estimated cost: \`$${cost.toFixed(4)}\` (model: \`${model || "(not configured)"}\`).`,
     );
     return {
       ok: true,
       ...(cost === undefined ? {} : { cost_usd: cost }),
+      ...(basis ? { cost_basis: basis } : {}),
       model,
       input_tokens: session.totalInputTokens,
       output_tokens: session.totalOutputTokens,
@@ -10440,19 +10462,23 @@ export class DaemonServer {
       daemon_build_id: this.daemonBuildId(),
     };
     this.emit(connection, "init_done", initPayload);
+    const initBasis = this.sessionCostBasis(session);
     this.emit(
       connection,
       "status_update",
-      statusUpdatePayload(
-        session,
-        model,
-        contextLimit,
-        this.channelStatusData(),
-        this.sessionReasoningEffort(session),
-        runtimePermissionMode(session.permissionMode ?? this.runtime.status().permission_mode),
-        this.mcpStatusRecord(session),
-        model ? this.sessionCost(session, model) : undefined,
-      ),
+      {
+        ...statusUpdatePayload(
+          session,
+          model,
+          contextLimit,
+          this.channelStatusData(),
+          this.sessionReasoningEffort(session),
+          runtimePermissionMode(session.permissionMode ?? this.runtime.status().permission_mode),
+          this.mcpStatusRecord(session),
+          model ? this.sessionCost(session, model) : undefined,
+        ),
+        ...(initBasis ? { cost_basis: initBasis } : {}),
+      },
     );
     if (session.messages.length) {
       if (requestedHistory === undefined) this.replaySessionHistory(connection, await this.historySession(session));
@@ -12972,6 +12998,14 @@ function agentDefinitionPayload(definition: AgentDefinition): JsonRpcPayload {
     max_depth: definition.maxDepth,
     isolation: definition.isolation,
   };
+}
+
+/** `subscription` when a plan pays for this profile's calls; undefined for per-token billing or no profile. */
+function profileCostBasis(profile: ProviderProfile | undefined): "subscription" | undefined {
+  if (!profile) return undefined;
+  return providerBilledBySubscription(profile.provider, { ...(profile.api_key ? { apiKey: profile.api_key } : {}) })
+    ? "subscription"
+    : undefined;
 }
 
 function profileOverrides(

@@ -349,6 +349,8 @@ export interface Snapshot {
   readonly runtimeBlockers?: readonly string[]
   /** Session cost estimate from the daemon wire (USD); null when unpriced. */
   readonly costUsd: number | null
+  /** `subscription` when a plan pays for this session's calls: views say "Included in plan", not a dollar figure. */
+  readonly costBasis: 'subscription' | null
   /** MCP server statuses from the daemon; empty until fetched or without servers. */
   readonly mcpStatus: Readonly<Record<string, McpServerStatus>>
   readonly models: readonly ModelChoice[]
@@ -934,6 +936,7 @@ export class Store {
       branch: '',
       daemonWarning: null,
       costUsd: null,
+      costBasis: null,
       mcpStatus: {},
       models: [],
       contextTokens: null,
@@ -3343,6 +3346,7 @@ export class Store {
       branch: str(result.branch),
       daemonWarning: daemonCompatibilityWarning(result),
       costUsd: typeof result.cost_usd === 'number' ? result.cost_usd : null,
+      costBasis: (result.cost_basis ?? session.cost_basis) === 'subscription' ? 'subscription' : null,
       contextMax: contextLimit,
       approval: null,
       ...(this.frame.currentId !== str(result.session_id ?? session.id) ? { question: null, goal: '' } : {}),
@@ -4116,6 +4120,8 @@ export class Store {
         }
         // Live cost estimate rides the same echo the ctx counter uses.
         if (typeof payload.cost_usd === 'number') patch.costUsd = payload.cost_usd
+        // Every status echo states the basis; its absence means per-token billing.
+        if ('model' in payload) patch.costBasis = payload.cost_basis === 'subscription' ? 'subscription' : null
         // The daemon logs plan-mode flips; its status echo is authoritative.
         if (typeof payload.plan_mode === 'boolean') patch.planMode = payload.plan_mode
         if (payload.delegation_mode === 'off' || payload.delegation_mode === 'auto' || payload.delegation_mode === 'eager') patch.delegationMode = payload.delegation_mode

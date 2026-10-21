@@ -6,6 +6,7 @@
 // per-model), its API balance, or the reason there is nothing to show.
 import {
   compactTokens,
+  costLabel,
   modelUsageSummary,
   resetIn,
   usd,
@@ -22,7 +23,9 @@ export function usagePanelSections(report: UsageReportView, now = Date.now()): P
   const session = report.session
 
   if (session) {
-    const cost = session.costUsd !== undefined ? `$${session.costUsd.toFixed(session.costUsd < 0.01 ? 4 : 2)}` : undefined
+    const cost = session.costBasis === 'subscription'
+      ? 'Included in plan'
+      : session.costUsd !== undefined ? `$${session.costUsd.toFixed(session.costUsd < 0.01 ? 4 : 2)}` : undefined
     const rows = sessionUsageRows(session).filter(([label]) => label !== 'Cost')
     sections.push({
       heading: { label: 'This session', notes: session.model ? [session.model] : [], ...(cost ? { right: cost } : {}), state: 'active' },
@@ -80,12 +83,13 @@ function withModelSpend(sections: PanelSection[], report: UsageReportView): Pane
     sections.push({ title: 'By model · last 30 days', text: 'No model calls recorded yet.' })
     return sections
   }
-  const priced = models.filter(model => model.costUsd !== undefined)
+  // Plan-paid models are not spend; they stay out of the total.
+  const priced = models.filter(model => model.costUsd !== undefined && model.costBasis !== 'subscription')
   const total = priced.reduce((sum, model) => sum + (model.costUsd ?? 0), 0)
   const ordered = [...models].sort((a, b) => (b.costUsd ?? -1) - (a.costUsd ?? -1) || (b.input + b.output) - (a.input + a.output))
   sections.push({
     heading: { label: 'By model', notes: ['last 30 days'], ...(priced.length ? { right: usd(total) } : {}), state: 'idle' },
-    rows: ordered.map(model => [model.model, `${model.costUsd === undefined ? 'price unknown' : usd(model.costUsd)} · ${modelUsageSummary(model)}`] as [string, string])
+    rows: ordered.map(model => [model.model, `${costLabel(model.costUsd, model.costBasis)} · ${modelUsageSummary(model)}`] as [string, string])
   })
   return sections
 }
