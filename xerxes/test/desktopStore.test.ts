@@ -193,14 +193,21 @@ describe('Store workspace folds', () => {
       await Bun.sleep(80)
       let renders = 0
       const unsub = store.subscribe(() => renders++)
+      // A fixed number of deltas, and a bound derived from the time that
+      // actually passed: a wall-clock loop fits fewer deltas on a loaded
+      // machine and made this test fail without any change in behavior.
+      const deltas = 50
       const started = Date.now()
-      while (Date.now() - started < 200) { bridge.push('text_part', { text: 'x' }); await Bun.sleep(4) }
+      for (let i = 0; i < deltas; i++) { bridge.push('text_part', { text: 'x' }); await Bun.sleep(4) }
       await Bun.sleep(60)
+      const elapsed = Date.now() - started
       unsub()
-      // ~200ms of tokens every 4ms (≈50 deltas): a handful of renders, not 50.
+      // At most one routine emit per 50 ms window (plus the trailing one and
+      // one of slack), never one per delta.
       expect(renders).toBeGreaterThan(0)
-      expect(renders).toBeLessThanOrEqual(6)
-      expect(store.getSnapshot().blocks.some(block => block.kind === 'agent' && block.text.length >= 40)).toBe(true)
+      expect(renders).toBeLessThanOrEqual(Math.floor(elapsed / 50) + 2)
+      expect(renders).toBeLessThan(deltas)
+      expect(store.getSnapshot().blocks.some(block => block.kind === 'agent' && block.text.length >= deltas)).toBe(true)
     } finally { (globalThis as { requestAnimationFrame?: unknown }).requestAnimationFrame = raf }
   })
 
