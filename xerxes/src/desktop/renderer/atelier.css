@@ -741,6 +741,18 @@ html,body,#root,.app.atelier{background:transparent}
 .execution-row{padding:3px 0}
 .execution-row>summary{padding:7px 8px;border-radius:6px}
 .execution-row>summary{display:grid;grid-template-columns:16px minmax(0,1fr) auto;gap:3px 8px;align-items:center;cursor:pointer;list-style:none;font-size:var(--ui-font)}
+/* An agent's tool calls, folded behind one header (closed by default). */
+.toolcalls{margin:16px 0 0}
+.toolcalls>summary{display:flex;align-items:center;gap:8px;padding:8px 0;list-style:none;cursor:pointer;font-size:13px;font-weight:500;color:var(--x-title)}
+.toolcalls>summary::-webkit-details-marker{display:none}
+.toolcalls>summary:hover{color:var(--x-strong,var(--x-title))}
+.toolcalls__chev{display:inline-flex;color:var(--x-meta);transition:transform 150ms ease}
+.toolcalls[open] .toolcalls__chev{transform:rotate(90deg)}
+.toolcalls__count{font-weight:400;color:var(--x-meta)}
+.toolcalls__tone{font-weight:400;font-size:12px}
+.toolcalls__tone[data-tone='working']{color:var(--x-working,var(--x-accent))}
+.toolcalls__tone[data-tone='failed']{color:var(--x-failed,#e5484d)}
+.toolcalls__list{display:grid;gap:2px}
 .execution-row__disclosure{display:flex;align-items:center;color:var(--x-meta)}
 .execution-row[open] .execution-row__disclosure{transform:rotate(90deg)}
 .execution-row__label>.app-icon{color:var(--x-meta);flex-shrink:0}
@@ -2751,7 +2763,12 @@ html,body,#root,.app.atelier{background:transparent}
 .atelier .agent-inspector__summary .md{font:400 13px/1.6 var(--sans);color:var(--x-prose);padding:0;max-height:none;overflow:visible}
 .atelier .agent-inspector__notes ol{display:grid;gap:6px;margin:0;padding:0 0 0 18px;font:400 12.5px/1.5 var(--sans);color:var(--x-secondary)}
 .atelier .acard .acard__title{flex:1 1 auto;min-width:0}
+/* The heading takes the free space, so the counts and clock sit at the right
+   edge next to the chevron. app.css also gave the chevron margin-left:auto,
+   which split the free space and left "2 working · 36s" mid-card. */
+.atelier .acard .acard__heading{flex:1 1 auto}
 .atelier .acard .acard__counts{flex:none;margin-left:auto;text-align:right}
+.atelier .acard .acard__counts+.acard__chev{margin-left:0}
 
 /* With a background, the area behind the panels is conversation surface:
    .app__body draws the chat's blurred, tinted layer across the whole
@@ -3038,7 +3055,12 @@ html,body,#root,.app.atelier{background:transparent}
 .atelier.app--narrow .composer__toolbar{flex-wrap:wrap;row-gap:4px}
 .atelier.app--narrow .chat__head .chat__kind{display:none}
 .atelier.app--narrow .chat__head .runtime-status--compact>span:last-child{display:none}
-.atelier .composer__images{display:flex;flex-wrap:wrap;gap:8px}
+/* Attached images get their own row above the text, full width, and scroll
+   sideways when there are many. As a flex item beside the textarea the strip
+   widened with every paste and pushed the text to the right. */
+.atelier .composer{flex-wrap:wrap}
+.atelier .composer__images{display:flex;flex:1 0 100%;flex-wrap:nowrap;gap:8px;min-width:0;max-width:100%;overflow-x:auto;padding:2px 0 4px;order:-1}
+.atelier .composer__image{flex:none}
 .atelier .composer__image{position:relative;width:64px;height:64px;border:1px solid var(--x-divider);border-radius:6px;overflow:hidden;background:var(--x-screen)}
 .atelier .composer__image img{width:100%;height:100%;object-fit:cover;display:block}
 .atelier .composer__image button{position:absolute;top:2px;right:2px;display:grid;place-items:center;width:18px;height:18px;padding:0;border:0;border-radius:50%;background:rgba(0,0,0,.65);color:#fff;cursor:pointer}

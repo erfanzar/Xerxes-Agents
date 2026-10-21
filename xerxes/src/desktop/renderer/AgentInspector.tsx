@@ -5,7 +5,7 @@ import { pageIsBackground } from './pageVisibility.js'
 import { AgentControls, agentState } from './AgentRoster.js'
 import { desktopCall, desktopError, record, text, type RpcRecord } from './desktopRpc.js'
 import { OutputViewer, readableOutput } from './OutputViewer.js'
-import { ToolCallRow } from './Execution.js'
+import { ToolCallsSection } from './Execution.js'
 import type { SessionRow } from './types.js'
 import { Markdown } from './markdown.js'
 import { agentResult, resultLabel } from './agentResult.js'
@@ -70,7 +70,7 @@ export function AgentInspector({ row, rows, sessionKey, online }: {row: SessionR
     {result && <AgentResultFields result={result} />}
     {!result && info?.summary && !info.provisional && agentProse(info.summary) && <section className="agent-inspector__summary"><h3>Latest summary</h3><Markdown text={agentProse(info.summary)} className="md--compact" /></section>}
     {Boolean(info?.notes?.length) && <section className="agent-inspector__notes"><h3>Recent activity</h3><ol>{info!.notes!.map(agentProse).filter(Boolean).map((note, index) => <li key={index}>{note}</li>)}</ol></section>}
-    {Boolean(info?.toolCalls?.length) && <section><h3>Tool calls <span>{info!.toolCalls!.length}</span></h3>{info!.toolCalls!.map(call => <ToolCallRow key={call.id} item={call} label={call.name.replaceAll('_',' ')} />)}</section>}
+    {Boolean(info?.toolCalls?.length) && <ToolCallsSection items={info!.toolCalls!} />}
     {output && <><OutputViewer text={output} label="Agent output"/><p className="studio-muted">{outputTrimmed ? 'Only the beginning of this output was saved; the rest was not kept.' : 'Retained output from the latest saved agent state.'}</p></>}
     {!output && !info?.notes?.length && !info?.toolCalls?.length && !info?.provisional && <p className="studio-muted">{detail || error ? 'No detailed activity has been recorded yet.' : 'Loading recorded activity…'}</p>}
     {Boolean(info?.thinking?.length) && <details><summary>Reasoning</summary>{info!.thinking!.map((line,index)=><p key={index}>{line}</p>)}</details>}

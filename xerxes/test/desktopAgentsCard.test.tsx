@@ -131,6 +131,16 @@ test('a finished run shows its cost in the card header', () => {
   expect(html).toContain('$0.42')
 })
 
+test('card counts sit at the right edge and composer images get their own row', async () => {
+  const css = await Bun.file(new URL('../src/desktop/renderer/atelier.css', import.meta.url)).text()
+  // The heading takes the free space; the chevron no longer splits it with the counts.
+  expect(css).toContain('.atelier .acard .acard__heading{flex:1 1 auto}')
+  expect(css).toContain('.atelier .acard .acard__counts+.acard__chev{margin-left:0}')
+  // Images span the full composer width above the text instead of sitting beside it.
+  expect(css).toContain('.atelier .composer{flex-wrap:wrap}')
+  expect(css).toMatch(/\.atelier \.composer__images\{[^}]*flex:1 0 100%[^}]*overflow-x:auto[^}]*order:-1/)
+})
+
 test('the Agents chip menu lists off, auto and eager with auto as the default', async () => {
   const { DELEGATION_CHOICES } = await import('../src/desktop/renderer/Overlays.js')
   expect(DELEGATION_CHOICES.map(choice => choice.mode)).toEqual(['off', 'auto', 'eager'])

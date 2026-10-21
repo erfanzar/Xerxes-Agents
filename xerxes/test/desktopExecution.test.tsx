@@ -83,6 +83,23 @@ test('agent roster puts active work first and collapses failed and completed his
   expect(html).toContain('4 tools')
   expect(html).not.toContain('0 turns')
 })
+test('an agent\'s tool calls are folded behind one closed header and not rendered until opened', async () => {
+  const { ToolCallsSection } = await import('../src/desktop/renderer/Execution.js')
+  const calls: ToolItem[] = Array.from({ length: 100 }, (_, index) => ({ ...item, id: `c${index}`, arg: `unique-target-${index}` }))
+  calls[3] = { ...calls[3]!, state: 'working' }
+  const html = renderToStaticMarkup(createElement(ToolCallsSection, { items: calls }))
+  expect(html).toContain('<details class="toolcalls">')
+  expect(html).not.toContain('<details class="toolcalls" open')
+  expect(html).toContain('Tool calls')
+  expect(html).toContain('>100<')
+  expect(html).toContain('1 running')
+  expect(html).not.toContain('unique-target-0')
+  // The inspector and roster both use the folded section.
+  const row: SessionRow = { id: 'a', key: 'a', title: 'Busy agent', status: 'running', age: '', current: false, kind: 'subagent', turns: 0, messages: 0, cwd: '', untitled: false, agentDetails: { toolCalls: calls } }
+  const inspector = renderToStaticMarkup(createElement(AgentInspector, { row, rows: [row], sessionKey: 'parent', online: true }))
+  expect(inspector).toContain('class="toolcalls"')
+  expect(inspector).not.toContain('unique-target-0')
+})
 test('execution decodes output line breaks and safely displays argument boundaries', () => {
   const view = executionView(item)
   expect(view.command).toBe("sed -n 10,20p 'path with spaces/file.ts'")

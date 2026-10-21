@@ -44,6 +44,27 @@ export function executionView(item: ToolItem) {
     cwd: typeof output?.cwd === 'string' ? output.cwd : null,
   }
 }
+/**
+ * An agent's tool calls folded behind one header, closed by default. A busy
+ * agent makes hundreds of calls; listing them all pushed its summary and
+ * output far below. Rows are built only once the section is first opened.
+ */
+export function ToolCallsSection({ items, label = 'Tool calls' }: { items: readonly ToolItem[]; label?: string }): ReactElement {
+  const [opened, setOpened] = useState(false)
+  const running = items.filter(item => item.state === 'working').length
+  const failed = items.filter(toolHasFailed).length
+  return <details className="toolcalls" onToggle={event => { if (event.currentTarget.open) setOpened(true) }}>
+    <summary>
+      <span className="toolcalls__chev"><Icon name="chevron" size={12} /></span>
+      <span className="toolcalls__title">{label}</span>
+      <span className="toolcalls__count">{items.length}</span>
+      {running > 0 && <span className="toolcalls__tone" data-tone="working">{running} running</span>}
+      {failed > 0 && <span className="toolcalls__tone" data-tone="failed">{failed} failed</span>}
+    </summary>
+    {opened && <div className="toolcalls__list">{items.map(item => <ToolCallRow key={item.id} item={item} label={item.name.replaceAll('_', ' ')} />)}</div>}
+  </details>
+}
+
 export const ToolCallRow = memo(function ToolCallRow({ item, label }: { item: ToolItem; label: string }): ReactElement {
   const file = fileToolOf(item)
   return file ? <FileToolRow item={item} tool={file} failed={toolHasFailed(item)} /> : <GenericToolRow item={item} label={label} />

@@ -4,7 +4,7 @@
 import { useState, type ReactElement } from 'react'
 import type { Block, SessionRow } from './types.js'
 import { Icon } from './Icon.js'
-import { ToolCallRow } from './Execution.js'
+import { ToolCallsSection } from './Execution.js'
 import { store } from './store.js'
 import { desktopError } from './desktopRpc.js'
 import { toolFailureText } from './blocks.js'
@@ -100,7 +100,7 @@ export function AgentRoster({ rows, onInspect }: { rows: readonly SessionRow[]; 
         {info?.error && info.summary && <p>{info.summary}</p>}
         {info && (info.inputTokens !== undefined || info.outputTokens !== undefined) && <dl>{info.inputTokens !== undefined && <><dt>Input tokens</dt><dd>{info.inputTokens.toLocaleString()}</dd></>}{info.outputTokens !== undefined && <><dt>Output tokens</dt><dd>{info.outputTokens.toLocaleString()}</dd></>}</dl>}
         {info && [['Files read', info.filesRead], ['Files changed', info.filesWritten]].map(([label, paths]) => Array.isArray(paths) && paths.length > 0 ? <div key={String(label)}><strong>{label}</strong><ul>{paths.map(path => <li key={path}><code>{path}</code></li>)}</ul></div> : null)}
-        {info?.toolCalls && info.toolCalls.length > 0 && <section aria-label={`${row.title} tool calls`}><strong>Tool calls</strong>{info.toolCalls.map(item=><ToolCallRow key={item.id} item={item} label={item.name.replaceAll('_',' ')} />)}</section>}
+        {info?.toolCalls && info.toolCalls.length > 0 && <ToolCallsSection items={info.toolCalls} />}
         {info?.thinking && info.thinking.length > 0 && <details><summary>Reasoning</summary>{info.thinking.map((line,index)=><p key={index}>{line}</p>)}</details>}
         {info?.notes && info.notes.length > 0 && <details><summary>Progress</summary>{info.notes.map((line,index)=><p key={index}>{line}</p>)}</details>}
         {!info?.provisional && <AgentControls id={row.id} active={state.tone === 'working'} />}
