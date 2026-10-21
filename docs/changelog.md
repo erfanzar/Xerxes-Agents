@@ -7,6 +7,15 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.7.1 — 2026-10-21
+
+- Long sessions remember more. The model can search its own full history with `session_search`, including turns that compaction summarized away (they are archived verbatim); the summary tells it the search exists. The summarizer now sees 1,200 characters of each tool result and 4,000 of each failure (was 400), and summary size grows with the context window (8K–32K before a turn, 2K–8K mid-turn, capped by the model's output limit).
+- A failed automatic compaction no longer pauses the session: the full transcript is archived, then the oldest tool outputs are shortened (the newest 8 stay whole), with a warning naming why the summary failed. A manual `/compact` still reports the failure.
+- GrepTool and GlobTool skip files listed in `.gitignore` (pass `include_ignored: true` to search them). Grep handles files up to 8 MiB and says how many larger files it skipped.
+- Notebook editing (`NotebookEditTool`) is available by default.
+- Sessions on a plan (Claude Code, Codex, GitHub Copilot, Anthropic signed in without an API key) show "Included in plan" instead of a dollar figure, and plan-paid models stay out of spend totals. `cost_basis: "subscription"` marks them on the wire.
+- New `bun run --cwd xerxes playground:recall` measures whether facts stated early in a session survive several compactions.
+
 ## 0.7.0 — 2026-10-21
 
 - Steer with screenshots: a message sent while a task runs can now carry images. They reach the model at its next step with your text (an image alone works too), use the same checks and size limits as a normal send, are kept with a steer saved for the next turn, and show in the chat with their thumbnails. `turn.steer` accepts optional `images`; text-only steers are unchanged.
