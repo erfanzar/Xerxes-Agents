@@ -34,6 +34,7 @@ import {
 } from "../tools/fileState.js";
 import { processAtMentions } from "./atMentions.js";
 import { imageUrlContentParts, type TurnImage } from "./images.js";
+import { steerContent, steerText, type SteerInput } from "../streaming/steer.js";
 import { resolveProjectDirectory, xerxesHome } from "./paths.js";
 import { displayTitle } from "./titleGenerator.js";
 import type { DaemonInteractionBoard } from "./interactions.js";
@@ -269,8 +270,8 @@ export interface TurnRunControls {
   readonly afterTurn?: (start: () => void) => void;
   /** Host-provided origin; background turns never inherit human authority. */
   readonly origin?: TurnOrigin;
-  /** Drain user steering received since the last provider/tool boundary. */
-  drainSteer?(): readonly string[];
+  /** Drain user steering (text, optionally with images) received since the last provider/tool boundary. */
+  drainSteer?(): readonly SteerInput[];
   /** Text authored by the user before hidden attachment expansion. */
   readonly displayText?: string;
   /** Validated image attachments carried into the user message as content parts. */
@@ -455,7 +456,8 @@ export interface DaemonRuntime {
   inspectHooks?(sessionKey: string): WorkspaceHookInspection | undefined;
   /** Release host-owned resources such as native delegated-agent managers. */
   shutdown?(): Promise<void>;
-  steerTurn(sessionKey: string, content: string): boolean;
+  /** Images are validated attachments (see `validateTurnImages`); a steer may be images alone. */
+  steerTurn(sessionKey: string, content: string, images?: readonly TurnImage[]): boolean;
   /**
    * True when steering text is queued and not yet folded into the transcript.
    *
@@ -589,7 +591,7 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
   // turn's settle edge, after the final save.
   private readonly pendingDefaultSessions = new Set<string>();
   private shutdownPromise: Promise<void> | undefined;
-  private readonly steerQueues = new Map<string, string[]>();
+  private readonly steerQueues = new Map<string, SteerInput[]>();
   private readonly transcriptStore: DaemonTranscriptStore;
   private turnRunner: TurnRunner;
   private readonly workspaceRoot: string;
@@ -1574,24 +1576,27 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     }
   }
 
-  steerTurn(sessionKey: string, content: string): boolean {
+  steerTurn(sessionKey: string, content: string, images: readonly TurnImage[] = []): boolean {
     const session = this.sessions.get(sessionKey);
     const cleaned = content.trim();
-    if (!session || !cleaned) {
+    if (!session || (!cleaned && !images.length)) {
       return false;
     }
+    // Text-only steers stay plain strings: the queue, the steer_applied echo
+    // and every existing consumer keep their shape.
+    const steer: SteerInput = images.length ? { text: cleaned, images: imageUrlContentParts(images) } : cleaned;
     if (this.abortControllers.has(sessionKey)) {
       const queue = this.steerQueues.get(sessionKey) ?? [];
       if (queue.length >= MAX_ACTIVE_TURN_STEERS) {
         return false;
       }
-      queue.push(cleaned);
+      queue.push(steer);
       this.steerQueues.set(sessionKey, queue);
       return true;
     }
     session.messages.push({
       role: "user",
-      content: `[steer from user]\n${cleaned}`,
+      content: steerContent("[steer from user]", steer)!,
     });
     session.lastActive = Date.now();
     return true;
@@ -1847,7 +1852,7 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
           // moment it is (a goal round can run for hours before turn_end).
           drainSteer: () => {
             const drained = this.drainSteers(sessionKey);
-            if (drained.length) emitSessionEvent({ type: "steer_applied", payload: { contents: [...drained], count: drained.length } });
+            if (drained.length) emitSessionEvent({ type: "steer_applied", payload: { contents: drained.map(steerText), count: drained.length } });
             return drained;
           },
           displayText,
@@ -1902,10 +1907,8 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
       session.lastActive = Date.now();
       const pendingSteers = this.drainSteers(sessionKey);
       for (const steer of pendingSteers) {
-        session.messages.push({
-          role: "user",
-          content: `[steer from user saved for next turn]\n${steer}`,
-        });
+        const content = steerContent("[steer from user saved for next turn]", steer);
+        if (content) session.messages.push({ role: "user", content });
       }
       if (pendingSteers.length) {
         emitSessionEvent({
@@ -1967,7 +1970,7 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
       delete session.inflightTodoResult;
       // An evicted session may already have a replacement turn registered;
       // only release the controller this turn actually owns.
-      let lateSteers: readonly string[] = [];
+      let lateSteers: readonly SteerInput[] = [];
       if (this.abortControllers.get(sessionKey) === controller) {
         this.abortControllers.delete(sessionKey);
         // steerTurn queues while the controller exists, and the drain above
@@ -1978,7 +1981,8 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
         // idle path instead.
         lateSteers = this.drainSteers(sessionKey);
         for (const steer of lateSteers) {
-          session.messages.push({ role: "user", content: `[steer from user saved for next turn]\n${steer}` });
+          const content = steerContent("[steer from user saved for next turn]", steer);
+          if (content) session.messages.push({ role: "user", content });
         }
       }
       releaseInteractions?.();
@@ -2010,7 +2014,7 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     return (this.steerQueues.get(sessionKey)?.length ?? 0) > 0;
   }
 
-  private drainSteers(sessionKey: string): readonly string[] {
+  private drainSteers(sessionKey: string): readonly SteerInput[] {
     const queued = this.steerQueues.get(sessionKey) ?? [];
     this.steerQueues.delete(sessionKey);
     return queued;

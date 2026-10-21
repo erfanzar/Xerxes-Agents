@@ -36,6 +36,8 @@ import type { ChatMessage, MessageContent, HarnessOrigin } from '../types/messag
 import { setTurnOutcome } from '../types/turnOutcome.js'
 import { isJsonObject, type ToolCall, type ToolDefinition } from '../types/toolCalls.js'
 import { appendInjection } from './attachments.js'
+import { steerContent, steerText, type SteerInput } from './steer.js'
+export type { SteerInput } from './steer.js'
 import type {
   AgentState,
   PermissionRequest,
@@ -303,8 +305,8 @@ export interface TurnDependencies {
   readonly delay?: (milliseconds: number, signal?: AbortSignal) => Promise<void>
   /** Supplies passive sub-agent status lines at safe provider/tool boundaries. */
   readonly drainAgentEvents?: () => readonly string[]
-  /** Supplies steering text at safe provider/tool boundaries for daemon turns. */
-  readonly drainSteer?: () => readonly string[]
+  /** Supplies steering (text, optionally with images) at safe provider/tool boundaries for daemon turns. */
+  readonly drainSteer?: () => readonly SteerInput[]
   /** Optional plugin hook dispatch surface; when absent the turn dispatches no hooks. */
   readonly hookRunner?: HookRunner
   readonly llm: LlmClient
@@ -550,13 +552,8 @@ export async function* runTurn(
         try { turnTools = dependencies.refreshTools(turnTools) } catch { /* keep the previous list */ }
       }
       for (const steer of dependencies.drainSteer?.() ?? []) {
-        const content = steer.trim()
-        if (content) {
-          state.messages.push({
-            role: 'user',
-            content: `[steer from user]\n${content}`,
-          })
-        }
+        const content = steerContent('[steer from user]', steer)
+        if (content) state.messages.push({ role: 'user', content })
       }
       const observedForRound = observedPromptTokens
       observedPromptTokens = undefined
@@ -1082,15 +1079,12 @@ export async function* runTurn(
           continue
         }
         for (const steer of dependencies.drainSteer?.() ?? []) {
-          const content = steer.trim()
+          const content = steerContent('[steer from user saved for next turn]', steer)
           if (!content) continue
-          state.messages.push({
-            role: 'user',
-            content: `[steer from user saved for next turn]\n${content}`,
-          })
+          state.messages.push({ role: 'user', content })
           yield {
             type: 'text',
-            text: renderIntervention({ kind: 'steer-note', content }),
+            text: renderIntervention({ kind: 'steer-note', content: steerText(steer).trim() || 'image' }),
           }
         }
         // A reply with no visible text and no call we could read, after the turn

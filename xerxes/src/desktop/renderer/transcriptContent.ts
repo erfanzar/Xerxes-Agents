@@ -33,6 +33,12 @@ function shownUserText(text: string): string {
   return LEGACY_RETRY.test(clean) ? 'Continue' : clean
 }
 
+const STEER_PREFIX = /^\[(?:mid-turn steer from user|steer from user(?: saved for next turn)?)\](?:\r?\n|$)/
+
+function withoutSteerPrefix(text: string): string {
+  return text.replace(STEER_PREFIX, '')
+}
+
 /** The daemon's user-facing text can differ from the expanded provider input. */
 export function transcriptContent(message: Record<string, unknown>): unknown {
   if (message.role === 'user') {
@@ -41,11 +47,13 @@ export function transcriptContent(message: Record<string, unknown>): unknown {
     }
   }
   if (message.role === 'user' && typeof message.content === 'string') {
-    return shownUserText(message.content).replace(/^\[(?:mid-turn steer from user|steer from user(?: saved for next turn)?)\]\r?\n/, '')
+    return withoutSteerPrefix(shownUserText(message.content))
   }
   if (message.role === 'user' && Array.isArray(message.content)) {
+    // A steer that carried a screenshot is stored as parts; its text part
+    // holds the same framing prefix as a plain-text steer.
     return message.content.map(part => part && typeof part === 'object' && typeof (part as { text?: unknown }).text === 'string'
-      ? { ...part, text: shownUserText((part as { text: string }).text) } : part)
+      ? { ...part, text: withoutSteerPrefix(shownUserText((part as { text: string }).text)) } : part)
   }
   return message.content
 }

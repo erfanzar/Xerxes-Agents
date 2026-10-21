@@ -86,6 +86,27 @@ test('streaming loop inserts drained steering before the following provider requ
   })
 })
 
+test('streaming loop sends a steer that carries an image as text plus image parts', async () => {
+  const client = new ToolThenTextClient()
+  const part = { type: 'image_url' as const, image_url: { url: 'data:image/png;base64,iVBORw0KGgo=' } }
+  const batches = [[], [{ text: 'this screenshot shows the bug', images: [part] }], []]
+  await collect(runTurn({
+    model: 'gpt-4o',
+    permissionMode: 'accept-all',
+    state: createAgentState(),
+    tools: [READ_FILE],
+    userMessage: 'inspect the project',
+  }, {
+    drainSteer: () => batches.shift() ?? [],
+    llm: client,
+    toolExecutor: successfulExecutor,
+  }))
+  expect(client.requests[1]?.messages).toContainEqual({
+    role: 'user',
+    content: [{ type: 'text', text: '[steer from user]\nthis screenshot shows the bug' }, part],
+  })
+})
+
 test('streaming loop saves a steer that arrives with a terminal text response for the next turn', async () => {
   const state = createAgentState()
   const batches = [[], ['make a follow-up todo']] as string[][]

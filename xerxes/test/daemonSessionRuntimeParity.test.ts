@@ -14,6 +14,7 @@ import {
   type TurnRunner,
 } from '../src/daemon/runtime.js'
 import { DaemonTranscriptStore } from '../src/session/daemonTranscript.js'
+import type { SteerInput } from '../src/streaming/steer.js'
 import { claimSubagentConversation } from '../src/daemon/subagentConversations.js'
 
 test('daemon runtime disposes session-owned background commands on eviction', async () => {
@@ -681,6 +682,34 @@ test('active-turn steering is bounded and rejects overflow without dropping acce
   }
 })
 
+test('a steer can carry images: queued as content parts, announced by its text, saved with its images', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-daemon-steer-images-'))
+  const runner = new BoundedSteerRunner()
+  const runtime = new InMemoryDaemonRuntime(runner, { currentProjectDirectory: directory, sessionDirectory: join(directory, 'sessions') })
+  const image = { mediaType: 'image/png', data: 'iVBORw0KGgo=' }
+  try {
+    const session = await runtime.openSession('tui:steer-images')
+    const events: DaemonEvent[] = []
+    const turn = runtime.submitTurn(session.sessionKey, 'begin', event => { events.push(event) })
+    await runner.waiting
+    expect(runtime.steerTurn(session.sessionKey, 'look at this', [image])).toBe(true)
+    // An image alone is a steer too; nothing at all is not.
+    expect(runtime.steerTurn(session.sessionKey, '', [image])).toBe(true)
+    expect(runtime.steerTurn(session.sessionKey, '  ')).toBe(false)
+    runner.release()
+    await turn
+    const part = { type: 'image_url' as const, image_url: { url: 'data:image/png;base64,iVBORw0KGgo=' } }
+    expect(runner.drained).toEqual([{ text: 'look at this', images: [part] }, { text: '', images: [part] }])
+    expect(events.find(event => event.type === 'steer_applied')?.payload).toMatchObject({ contents: ['look at this', ''], count: 2 })
+
+    // Idle: the steer is saved into the transcript with its image parts.
+    expect(runtime.steerTurn(session.sessionKey, 'for later', [image])).toBe(true)
+    expect(session.messages.at(-1)).toEqual({ role: 'user', content: [{ type: 'text', text: '[steer from user]\nfor later' }, part] })
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
 test('applying steers is announced to clients so they stop showing them as queued', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'xerxes-daemon-steer-applied-'))
   const runner = new BoundedSteerRunner()
@@ -788,7 +817,7 @@ class BoundedSteerRunner implements TurnRunner {
   private releaseWaiting: (() => void) | undefined
   readonly waiting = new Promise<void>(resolve => { this.markWaiting = resolve })
   private readonly released = new Promise<void>(resolve => { this.releaseWaiting = resolve })
-  drained: readonly string[] = []
+  drained: readonly SteerInput[] = []
 
   release(): void {
     this.releaseWaiting?.()
@@ -798,7 +827,7 @@ class BoundedSteerRunner implements TurnRunner {
     _session: DaemonSession,
     _text: string,
     _signal: AbortSignal,
-    controls?: { drainSteer?(): readonly string[] },
+    controls?: { drainSteer?(): readonly SteerInput[] },
   ): AsyncGenerator<DaemonEvent> {
     this.markWaiting?.()
     await this.released

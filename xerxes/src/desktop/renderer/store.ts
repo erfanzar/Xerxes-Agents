@@ -1221,11 +1221,9 @@ export class Store {
     const trimmed = text.trim()
     if (!trimmed) return false
     const shown = display?.trim() || trimmed
-    // A steer carries text only; images wait for the next submit.
-    if (this.frame.turnActive && !trimmed.startsWith('/')) {
-      if (images.length) return false
-      return this.steer(trimmed)
-    }
+    // While a turn runs a message steers it, images included: they reach the
+    // model at the next step boundary, like the text.
+    if (this.frame.turnActive && !trimmed.startsWith('/')) return this.steer(trimmed, images)
     if (!trimmed.startsWith('/')) {
       const sessionKey = this.sessionKey
       if (this.preparingSubmissions.has(sessionKey)) return false
@@ -1312,18 +1310,18 @@ export class Store {
   }
 
   /** Queue steering text daemon-side; mirror it locally until consumed. */
-  async steer(text: string): Promise<boolean> {
+  async steer(text: string, images: readonly ComposerImage[] = []): Promise<boolean> {
     const cleaned = text.trim()
-    if (!cleaned) return false
+    if (!cleaned && !images.length) return false
     const sessionKey = this.sessionKey
     const steerId = crypto.randomUUID()
     const pending = { session: sessionKey, text: cleaned, shown: false, echoed: false }
     this.pendingSteers.set(steerId, pending)
     try {
-      const result = await this.bridge.call('turn.steer', { session_key: sessionKey, content: cleaned, client_steer_id: steerId })
+      const result = await this.bridge.call('turn.steer', { session_key: sessionKey, content: cleaned, client_steer_id: steerId, ...(images.length ? { images: images.map(image => ({ media_type: image.mediaType, data: image.data })) } : {}) })
       if (result.ok === true) {
         if (this.sessionKey === sessionKey) {
-          if (!pending.shown) { this.builder.pushUser(cleaned); pending.shown = true }
+          if (!pending.shown) { this.builder.pushUser(cleaned, false, images.map(image => `data:${image.mediaType};base64,${image.data}`)); pending.shown = true }
           if (this.frame.turnActive) {
             this.queue = [...this.queue, { id: this.seq++, text: cleaned }]
             this.patch({ queue: this.queue })

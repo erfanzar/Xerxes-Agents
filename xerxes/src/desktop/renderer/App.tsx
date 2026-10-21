@@ -1767,8 +1767,6 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
       return
     }
     if ((!draft.trim() && !images.length) || snap.connection !== 'online' || store.getSnapshot().submissionPending || sendingDraft.current) return
-    // A steer carries text only: images wait for this step to finish.
-    if (images.length && snap.turnActive) return
     open(null)
     const origin = latestDraft.current.identity
     const sent = draft
@@ -1924,8 +1922,8 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
           ? <button className="composer__send composer__send--stop" title="Stop (esc esc)" aria-label="Stop" onClick={() => store.cancel()}><Icon name="stop" size={18} /></button>
           : <button
               className="composer__send"
-              disabled={!ready || (!draft.trim() && !images.length) || snap.submissionPending || (images.length > 0 && snap.turnActive)}
-              title={images.length > 0 && snap.turnActive ? 'Images send when this step finishes' : snap.turnActive ? 'Queue — runs when this step settles (⏎)' : 'Send (⏎ · ⇧⏎ newline)'}
+              disabled={!ready || (!draft.trim() && !images.length) || snap.submissionPending}
+              title={snap.turnActive ? 'Queue — runs when this step settles (⏎)' : 'Send (⏎ · ⇧⏎ newline)'}
               onClick={send}
               aria-label={snap.turnActive ? 'Queue message' : 'Send message'}
             ><Icon name="arrowUp" size={16} /></button>}

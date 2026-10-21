@@ -3386,13 +3386,21 @@ export class DaemonServer {
       const session = this.runtime.sessionStatus(key);
       const clientSteerId = optionalString(params.client_steer_id);
       if (clientSteerId && !/^[a-zA-Z0-9-]{1,80}$/.test(clientSteerId)) throw new ValidationError('client_steer_id', 'invalid steering identity', undefined);
-      const processed = session
+      // Same attachment contract as turn.submit: validated, never truncated.
+      let images: readonly TurnImage[];
+      try {
+        images = validateTurnImages(params.images);
+      } catch (error) {
+        return { ok: false, error: errorMessage(error) };
+      }
+      const processed = session && content.trim()
         ? await processAtMentions(content, session.cwd)
         : { enhancedMessage: content, mentionedFiles: [] };
-      const ok = this.runtime.steerTurn(key, processed.enhancedMessage);
+      const ok = this.runtime.steerTurn(key, processed.enhancedMessage, images);
       if (ok) {
         this.emit(connection, "steer_input", {
           content,
+          ...(images.length ? { image_count: images.length } : {}),
           ...(clientSteerId ? { client_steer_id: clientSteerId } : {}),
           ...(processed.mentionedFiles.length
             ? { mentioned_files: processed.mentionedFiles }
@@ -12536,7 +12544,7 @@ function messageText(message: DaemonSession["messages"][number]): string {  if (
     return (message.role === 'user' ? content.replace(/^\[(?:mid-turn steer from user|steer from user(?: saved for next turn)?)\]\r?\n/, '') : content).trim();
   }
   if (Array.isArray(content)) {
-    return content
+    const joined = content
       .map((part) => {
         if (typeof part === "string") {
           return part;
@@ -12546,8 +12554,9 @@ function messageText(message: DaemonSession["messages"][number]): string {  if (
           : "";
       })
       .filter(Boolean)
-      .join("\n")
-      .trim();
+      .join("\n");
+    // A steer that carried images is stored as parts with the same framing.
+    return (message.role === 'user' ? joined.replace(/^\[(?:mid-turn steer from user|steer from user(?: saved for next turn)?)\](?:\r?\n|$)/, '') : joined).trim();
   }
   return isRecord(content)
     ? stringValue(content.text) || stringValue(content.content)

@@ -114,11 +114,13 @@ describe('Store workspace folds', () => {
     // The bubble shows the image as sent, before the runtime echoes anything.
     expect(store.getSnapshot().blocks.find(block => block.kind === 'user' && block.text === 'what is wrong here?')).toMatchObject({ images: ['data:image/png;base64,iVBORw0KGgo='] })
     bridge.push('turn_begin', { text: 'what is wrong here?' })
-    // While a step runs, text steers; an image cannot ride a steer, so the
-    // submit is refused and the composer keeps it for the next message.
+    // While a step runs, a message steers it, and its image goes with it.
     const before = bridge.calls.length
-    expect(await store.submit('and this one', undefined, [image])).toBe(false)
-    expect(bridge.calls.slice(before).some(call => call.method === 'turn.steer' || call.method === 'turn.submit')).toBe(false)
+    expect(await store.submit('and this one', undefined, [image])).toBe(true)
+    const steer = bridge.calls.slice(before).find(call => call.method === 'turn.steer')
+    expect(steer?.params).toMatchObject({ content: 'and this one', images: [{ media_type: 'image/png', data: 'iVBORw0KGgo=' }] })
+    expect(bridge.calls.slice(before).some(call => call.method === 'turn.submit')).toBe(false)
+    expect(store.getSnapshot().blocks.find(block => block.kind === 'user' && block.text === 'and this one')).toMatchObject({ images: ['data:image/png;base64,iVBORw0KGgo='] })
   })
 
   test('slow submission remains visible and a preparation warning does not duplicate its echo', async () => {
