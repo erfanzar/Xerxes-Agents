@@ -7,6 +7,10 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.6.53 — 2026-10-21
+
+- Same product code as 0.6.52, released so the Linux `.tgz` package can be attached. The remote Bun install tests now build their fixture archives in-process instead of calling `zip` and `bsdtar`, which GitHub's Ubuntu runner and many Linux hosts don't have. The full check passes on Linux, macOS and Windows.
+
 ## 0.6.52 — 2026-10-21
 
 - `/xerxes` reviews what Xerxes learned. The desktop has a Learned panel (Proposals and Lessons tabs), in-chat proposal cards and a pending badge; in the TUI, `/xerxes` alone opens a review overlay, a "to review" chip shows pending items, and proposal notices stay until dismissed. Typed subcommands: `proposals`, `show <id>` (readable, or `--json`), `approve`, `reject`, `lessons [cue]`, `lessons approve|reject|rollback`, `improve` (budget preview only).
