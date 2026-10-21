@@ -61,6 +61,9 @@ test('loads existing .xerxes notes and repo map, keeping specialist and workflow
       'agents/specialist.md': 'SPECIALIST BODY',
       'skills/audit/SKILL.md': 'SKILL BODY',
       'commands/review.md': 'COMMAND BODY',
+      'review/release-notes-0.1.0.md': 'GENERATED REVIEW BODY',
+      'reports/review-changes/2026-01-01.md': 'GENERATED REPORT BODY',
+      'plugins/tool/README.md': 'PLUGIN BODY',
       'private.json': '{"private":"not context"}',
     }
     const setup = join(root, '.xerxes')
@@ -76,7 +79,7 @@ test('loads existing .xerxes notes and repo map, keeping specialist and workflow
     expect(context.prompt).toContain('## .xerxes/README.md')
     expect(context.prompt).toContain('entrypoint: src/main.ts')
     expect(context.prompt).toContain('The active milestone.')
-    for (const body of ['SPECIALIST BODY', 'SKILL BODY', 'COMMAND BODY', 'ESCAPED BODY', 'not context']) expect(context.prompt).not.toContain(body)
+    for (const body of ['SPECIALIST BODY', 'SKILL BODY', 'COMMAND BODY', 'GENERATED REVIEW BODY', 'GENERATED REPORT BODY', 'PLUGIN BODY', 'ESCAPED BODY', 'not context']) expect(context.prompt).not.toContain(body)
     for (const [path, content] of Object.entries(files)) expect(await readFile(join(setup, path), 'utf8')).toBe(content)
     await writeFile(join(setup, 'README.md'), 'Updated setup overview.')
     await mkdir(join(root, '.agents'))
@@ -207,6 +210,33 @@ test('discovers every markdown file recursively, keeping skills and non-markdown
     expect(deployIndex).toBeGreaterThan(opsIndex)
     // Discovered files sort deterministically by path.
     expect(deployIndex).toBeLessThan(notesIndex)
+  })
+})
+
+test('a nested repository under .xerxes or .agents is never injected as project context', async () => {
+  await inTemporaryDirectory(async root => {
+    // A clone keeps a .git directory; a submodule or linked worktree keeps a .git file.
+    // Under a folder that is still loaded (plans/), so only the nested-repo rule can exclude it.
+    const clone = join(root, '.xerxes', 'plans', 'vendor-src', 'repo')
+    const submodule = join(root, '.agents', 'projects', 'linked')
+    await mkdir(join(clone, '.git'), { recursive: true })
+    await mkdir(join(clone, 'docs'), { recursive: true })
+    await mkdir(submodule, { recursive: true })
+    await writeFile(join(clone, 'README.md'), 'FOREIGN CLONE README\n')
+    await writeFile(join(clone, 'docs', 'guide.md'), 'FOREIGN CLONE GUIDE\n')
+    await writeFile(join(submodule, '.git'), 'gitdir: ../../../.git/modules/linked\n')
+    await writeFile(join(submodule, 'NOTES.md'), 'FOREIGN SUBMODULE NOTES\n')
+    await writeFile(join(root, '.xerxes', 'plans', 'notes.md'), 'own review notes\n')
+    await writeFile(join(root, '.agents', 'projects', 'plan.md'), 'own project plan\n')
+
+    const context = await loadProjectAgentWorkspace(root)
+
+    expect(context.prompt).toContain('own review notes')
+    expect(context.prompt).toContain('own project plan')
+    expect(context.prompt).not.toContain('FOREIGN CLONE README')
+    expect(context.prompt).not.toContain('FOREIGN CLONE GUIDE')
+    expect(context.prompt).not.toContain('FOREIGN SUBMODULE NOTES')
+    expect(context.loadedFiles.some(path => path.includes('vendor-src') || path.includes('linked'))).toBe(false)
   })
 })
 

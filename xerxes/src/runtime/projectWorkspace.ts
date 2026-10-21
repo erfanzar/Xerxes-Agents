@@ -35,7 +35,11 @@ export const PROJECT_AGENT_CONTEXT_FILES = [
  */
 const CONTEXT_ROOTS = [
   { name: '.agents', excluded: ['skills'], priority: PROJECT_AGENT_CONTEXT_FILES },
-  { name: '.xerxes', excluded: ['agents', 'skills', 'commands'], priority: ['AGENTS.md', 'README.md', 'repo-map.yaml', 'repo-map.yml', 'ops/OPS.md', 'projects/README.md'] },
+  // `review/` and `reports/` hold generated artifacts (diff reviews, release
+  // notes, test logs) written by review and release workflows; they describe
+  // past work, not how to work here, and were re-sent on every turn.
+  // `plugins/` loads through its own trust decision, like skills.
+  { name: '.xerxes', excluded: ['agents', 'skills', 'commands', 'plugins', 'review', 'reports'], priority: ['AGENTS.md', 'README.md', 'repo-map.yaml', 'repo-map.yml', 'ops/OPS.md', 'projects/README.md'] },
 ] as const
 /**
  * Hard cap on discovered Markdown files. Bounds bootstrap latency and prompt
@@ -215,6 +219,12 @@ async function discoverMarkdownFiles(agentsDir: string, excluded: readonly strin
     } catch {
       return
     }
+    // A nested repository (a clone, submodule or vendored checkout kept under
+    // `.xerxes/` or `.agents/`) is someone else's project, not this one's
+    // operating context. Injecting its README and docs every turn cost tens of
+    // thousands of prompt characters and presented foreign instructions as
+    // project-owned. Its files stay readable with normal file tools.
+    if (depth > 0 && entries.some(entry => entry.name === '.git')) return
     for (const entry of entries) {
       if (discovered.length >= MAX_DISCOVERED_CONTEXT_FILES) return
       const candidate = join(directory, entry.name)
