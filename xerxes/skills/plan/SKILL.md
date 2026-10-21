@@ -3,14 +3,16 @@ name: plan
 description: Plan mode for Xerxes — inspect context, write a markdown plan into `~/xerxes-agent/plans/`, and do not execute the work.
 version: 1.0.0
 author: Xerxes Agent
-license: MIT
-metadata:
-  tags: [planning, plan-mode, implementation, workflow]
-  related_skills: []
-  builtin: true
+tags: [planning, plan-mode, implementation, workflow]
 ---
 
 # Plan Mode
+
+## Metadata
+
+- License: MIT
+- Related skills: none declared
+- Built-in: true
 
 Use this skill when the user wants a plan instead of execution.
 

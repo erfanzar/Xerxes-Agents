@@ -1,17 +1,18 @@
 ---
-name: modal-serverless-gpu
+name: modal
 description: Serverless GPU cloud platform for running ML workloads. Use when you need on-demand GPU access without infrastructure management, deploying ML models as APIs, or running batch jobs with automatic scaling.
 version: 1.0.0
 author: Orchestra Research
-license: MIT
 dependencies: [modal>=0.64.0]
-metadata:
-  xerxes:
-    tags: [Infrastructure, Serverless, GPU, Cloud, Deployment, Modal]
-
+tags: [Infrastructure, Serverless, GPU, Cloud, Deployment, Modal]
 ---
 
 # Modal Serverless GPU
+
+## Metadata
+
+- License: MIT
+- Previous skill name: modal-serverless-gpu
 
 Comprehensive guide to running ML workloads on Modal's serverless GPU cloud platform.
 

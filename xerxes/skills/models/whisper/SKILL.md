@@ -3,15 +3,15 @@ name: whisper
 description: OpenAI's general-purpose speech recognition model. Supports 99 languages, transcription, translation to English, and language identification. Six model sizes from tiny (39M params) to large (1550M params). Use for speech-to-text, podcast transcription, or multilingual audio processing. Best for robust, multilingual ASR.
 version: 1.0.0
 author: Orchestra Research
-license: MIT
 dependencies: [openai-whisper, transformers, torch]
-metadata:
-  xerxes:
-    tags: [Whisper, Speech Recognition, ASR, Multimodal, Multilingual, OpenAI, Speech-To-Text, Transcription, Translation, Audio Processing]
-
+tags: [Whisper, Speech Recognition, ASR, Multimodal, Multilingual, OpenAI, Speech-To-Text, Transcription, Translation, Audio Processing]
 ---
 
 # Whisper - Robust Speech Recognition
+
+## Metadata
+
+- License: MIT
 
 OpenAI's multilingual speech recognition model.
 

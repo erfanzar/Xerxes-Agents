@@ -3,14 +3,15 @@ name: github-issues
 description: Create, manage, triage, and close GitHub issues. Search existing issues, add labels, assign people, and link to PRs. Works with gh CLI or falls back to git + GitHub REST API via curl.
 version: 1.1.0
 author: Xerxes Agent
-license: MIT
-metadata:
-  xerxes:
-    tags: [GitHub, Issues, Project-Management, Bug-Tracking, Triage]
-    related_skills: [github-auth, github-pr-workflow]
+tags: [GitHub, Issues, Project-Management, Bug-Tracking, Triage]
 ---
 
 # GitHub Issues Management
+
+## Metadata
+
+- License: MIT
+- Related skills: github-auth, github-pr-workflow
 
 Create, search, triage, and manage GitHub issues. Each section shows `gh` first, then the `curl` fallback.
 

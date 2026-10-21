@@ -3,20 +3,23 @@ name: llm-wiki
 description: "Karpathy's LLM Wiki — build and maintain a persistent, interlinked markdown knowledge base. Ingest sources, query compiled knowledge, and lint for consistency."
 version: 2.0.0
 author: Xerxes Agent
-license: MIT
-metadata:
-  xerxes:
-    tags: [wiki, knowledge-base, research, notes, markdown, rag-alternative]
-    category: research
-    related_skills: [obsidian, arxiv, agentic-research-ideas]
-    config:
-      - key: wiki.path
-        detail: Path to the LLM Wiki knowledge base directory
-        default: "~/wiki"
-        prompt: Wiki directory path
+tags: [wiki, knowledge-base, research, notes, markdown, rag-alternative]
 ---
 
 # Karpathy's LLM Wiki
+
+## Metadata
+
+- License: MIT
+- Category: research
+- Related skills: obsidian, arxiv, agentic-research-ideas
+
+## Configuration
+
+- Key: `wiki.path`
+- Detail: Path to the LLM Wiki knowledge base directory
+- Default: `~/wiki`
+- Prompt: Wiki directory path
 
 Build and maintain a persistent, compounding knowledge base as interlinked markdown files.
 Based on [Andrej Karpathy's LLM Wiki pattern](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f).

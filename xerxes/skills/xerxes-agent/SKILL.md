@@ -3,14 +3,16 @@ name: xerxes-agent
 description: Multi-agent delegation skill for Xerxes. Instructs the model on when and how to spawn sub-agents, delegate parallel tasks, manage background jobs, and coordinate multi-agent workflows using Xerxes's built-in agent spawning tools.
 version: 3.0.0
 author: Xerxes Agent
-license: MIT
-metadata:
-  tags: [xerxes, multi-agent, delegation, spawning, subagent, cortex, parallel]
-  homepage: https://github.com/erfanzar/Xerxes-Agents
-  related_skills: [claude-code, codex, deepscan]
+tags: [xerxes, multi-agent, delegation, spawning, subagent, cortex, parallel]
 ---
 
 # Xerxes Multi-Agent Delegation
+
+## Metadata
+
+- License: MIT
+- Homepage: https://github.com/erfanzar/Xerxes-Agents
+- Related skills: claude-code, codex, deepscan
 
 You are running inside Xerxes, a multi-agent orchestration framework. You have access to agent-spawning tools that let you delegate work to specialized sub-agents. **Use them aggressively.** Do not try to do everything yourself in a single monolithic response.
 

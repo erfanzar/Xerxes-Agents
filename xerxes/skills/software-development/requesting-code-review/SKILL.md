@@ -1,19 +1,17 @@
 ---
 name: requesting-code-review
-description: >
-  Pre-commit verification pipeline — static security scan, baseline-aware
-  quality gates, independent reviewer subagent, and auto-fix loop. Use after
-  code changes and before committing, pushing, or opening a PR.
+description: Pre-commit verification pipeline — static security scan, baseline-aware quality gates, independent reviewer subagent, and auto-fix loop. Use after code changes and before committing, pushing, or opening a PR.
 version: 2.0.0
 author: Xerxes Agent (adapted from obra/superpowers + MorAlekss)
-license: MIT
-metadata:
-  xerxes:
-    tags: [code-review, security, verification, quality, pre-commit, auto-fix]
-    related_skills: [subagent-driven-development, writing-plans, test-driven-development, github-code-review]
+tags: [code-review, security, verification, quality, pre-commit, auto-fix]
 ---
 
 # Pre-Commit Code Verification
+
+## Metadata
+
+- License: MIT
+- Related skills: subagent-driven-development, writing-plans, test-driven-development, github-code-review
 
 Automated verification pipeline before code lands. Static scans, baseline-aware
 quality gates, an independent reviewer subagent, and an auto-fix loop.

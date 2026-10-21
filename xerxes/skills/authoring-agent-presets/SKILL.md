@@ -3,12 +3,14 @@ name: authoring-agent-presets
 description: Create or repair Xerxes agent presets in Creator mode. Use when the user asks to build, duplicate, customize, validate, or troubleshoot an agent preset.
 version: 1.0.0
 author: Xerxes-Agents
-license: Apache-2.0
-metadata:
-  tags: [xerxes, creator, agent, preset, authoring]
+tags: [xerxes, creator, agent, preset, authoring]
 ---
 
 # Authoring Xerxes Agent Presets
+
+## Metadata
+
+- License: Apache-2.0
 
 An agent preset is a directory under `${XERXES_HOME:-$HOME/.xerxes}/agents/<id>/` containing:
 

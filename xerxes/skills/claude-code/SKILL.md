@@ -3,14 +3,15 @@ name: claude-code
 description: Delegate coding tasks to Claude Code (Anthropic's CLI agent). Use for building features, refactoring, PR reviews, and iterative coding. Requires the claude CLI installed.
 version: 2.2.0
 author: Xerxes Agent + Teknium
-license: MIT
-metadata:
-  xerxes:
-    tags: [Coding-Agent, Claude, Anthropic, Code-Review, Refactoring, PTY, Automation]
-    related_skills: [codex, xerxes-agent, opencode]
+tags: [Coding-Agent, Claude, Anthropic, Code-Review, Refactoring, PTY, Automation]
 ---
 
 # Claude Code — Xerxes orchestration Guide
+
+## Metadata
+
+- License: MIT
+- Related skills: codex, xerxes-agent, opencode
 
 Delegate coding tasks to [Claude Code](https://code.claude.com/docs/en/cli-reference) (Anthropic's autonomous coding agent CLI) via the Xerxes terminal. Claude Code v2.x can read files, write code, run shell commands, spawn subagents, and manage git workflows autonomously.
 

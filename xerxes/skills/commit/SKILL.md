@@ -3,14 +3,15 @@ name: commit
 description: Stage the relevant changes and create a git commit with a well-written message derived from the actual diff. Use when the user asks to commit, save work, or write a commit message.
 version: 1.0.0
 author: Xerxes Agent
-license: MIT
-metadata:
-  xerxes:
-    tags: [Git, Commit, Version-Control]
-    related_skills: [github-pr-workflow]
+tags: [Git, Commit, Version-Control]
 ---
 
 # Commit
+
+## Metadata
+
+- License: MIT
+- Related skills: github-pr-workflow
 
 Create a git commit from the current working tree. The message must describe the
 **diff**, not the conversation.

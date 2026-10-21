@@ -241,7 +241,11 @@ it('preflight omits history on the actual wire while ordinary child resume still
     expect(inspected?.localRequirement).toContain('p'.repeat(512))
     expect(wire).not.toContain('history-only-sentinel')
     expect(wire).not.toContain('replay_assistant')
-    expect(Buffer.byteLength(wire)).toBeLessThan(64*1024)
+    // The bound proves no history (~400 KB seeded above) reached the wire. The
+    // skill catalog rides on init_done and the initialize reply by contract and
+    // grows with the bundled skills, so it is excluded from this budget.
+    const withoutCatalog=wire.split('\n').filter(Boolean).map(line=>JSON.stringify(JSON.parse(line),(key,value)=>key==='skill_descriptions'||key==='skills'?undefined:value)).join('\n')
+    expect(Buffer.byteLength(withoutCatalog)).toBeLessThan(64*1024)
     expect(f.rpc.mock.calls.some(c=>c[0]==='provider.relay.authorize')).toBe(false)
     const renderer=await f.attach(prepared)
     const resumed=await renderer.request<{messages:{text?:string}[];message_count:number}>('session.resume',{session_id:seed.id})

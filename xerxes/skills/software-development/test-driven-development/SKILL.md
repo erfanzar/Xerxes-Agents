@@ -3,14 +3,15 @@ name: test-driven-development
 description: Use when implementing any feature or bugfix, before writing implementation code. Enforces RED-GREEN-REFACTOR cycle with test-first approach.
 version: 1.1.0
 author: Xerxes Agent (adapted from obra/superpowers)
-license: MIT
-metadata:
-  xerxes:
-    tags: [testing, tdd, development, quality, red-green-refactor]
-    related_skills: [systematic-debugging, writing-plans, subagent-driven-development]
+tags: [testing, tdd, development, quality, red-green-refactor]
 ---
 
 # Test-Driven Development (TDD)
+
+## Metadata
+
+- License: MIT
+- Related skills: systematic-debugging, writing-plans, subagent-driven-development
 
 ## Overview
 

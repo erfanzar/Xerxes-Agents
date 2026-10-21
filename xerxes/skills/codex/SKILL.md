@@ -3,14 +3,15 @@ name: codex
 description: Delegate coding tasks to OpenAI Codex CLI agent. Use for building features, refactoring, PR reviews, and batch issue fixing. Requires the codex CLI and a git repository.
 version: 1.0.0
 author: Xerxes Agent
-license: MIT
-metadata:
-  xerxes:
-    tags: [Coding-Agent, Codex, OpenAI, Code-Review, Refactoring]
-    related_skills: [claude-code, xerxes-agent]
+tags: [Coding-Agent, Codex, OpenAI, Code-Review, Refactoring]
 ---
 
 # Codex CLI
+
+## Metadata
+
+- License: MIT
+- Related skills: claude-code, xerxes-agent
 
 Delegate coding tasks to [Codex](https://github.com/openai/codex) via the Xerxes terminal. Codex is OpenAI's autonomous coding agent CLI.
 

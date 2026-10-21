@@ -3,14 +3,15 @@ name: github-code-review
 description: Review code changes by analyzing git diffs, leaving inline comments on PRs, and performing thorough pre-push review. Works with gh CLI or falls back to git + GitHub REST API via curl.
 version: 1.1.0
 author: Xerxes Agent
-license: MIT
-metadata:
-  xerxes:
-    tags: [GitHub, Code-Review, Pull-Requests, Git, Quality]
-    related_skills: [github-auth, github-pr-workflow]
+tags: [GitHub, Code-Review, Pull-Requests, Git, Quality]
 ---
 
 # GitHub Code Review
+
+## Metadata
+
+- License: MIT
+- Related skills: github-auth, github-pr-workflow
 
 Perform code reviews on local changes before pushing, or review open PRs on GitHub. Most of this skill uses plain `git` — the `gh`/`wget` split only matters for PR-level interactions.
 

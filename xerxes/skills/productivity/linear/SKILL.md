@@ -3,16 +3,17 @@ name: linear
 description: Manage Linear issues, projects, and teams via the GraphQL API. Create, update, search, and organize issues. Uses API key auth (no OAuth needed). All operations via curl — no dependencies.
 version: 1.0.0
 author: Xerxes Agent
-license: MIT
-prerequisites:
-  env_vars: [LINEAR_API_KEY]
-  commands: [curl]
-metadata:
-  xerxes:
-    tags: [Linear, Project Management, Issues, GraphQL, API, Productivity]
+tags: [Linear, Project Management, Issues, GraphQL, API, Productivity]
+config_vars: [LINEAR_API_KEY]
 ---
 
 # Linear — Issue & Project Management
+
+## Metadata
+
+- License: MIT
+- Prerequisite environment variables: LINEAR_API_KEY
+- Prerequisite commands: curl
 
 Manage Linear issues, projects, and teams directly via the GraphQL API using `curl`. No MCP server, no OAuth flow, no extra dependencies.
 

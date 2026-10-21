@@ -3,16 +3,16 @@ name: mcporter
 description: Use the mcporter CLI to list, configure, auth, and call MCP servers/tools directly (HTTP or stdio), including ad-hoc servers, config edits, and CLI/type generation.
 version: 1.0.0
 author: community
-license: MIT
-metadata:
-  xerxes:
-    tags: [MCP, Tools, API, Integrations, Interop]
-    homepage: https://mcporter.dev
-prerequisites:
-  commands: [npx]
+tags: [MCP, Tools, API, Integrations, Interop]
 ---
 
 # mcporter
+
+## Metadata
+
+- License: MIT
+- Homepage: https://mcporter.dev
+- Prerequisite commands: npx
 
 Use `mcporter` to discover, call, and manage [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) servers and tools directly from the terminal.
 

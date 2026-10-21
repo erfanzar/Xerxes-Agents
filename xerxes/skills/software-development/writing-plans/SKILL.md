@@ -3,14 +3,15 @@ name: writing-plans
 description: Use when you have a spec or requirements for a multi-step task. Creates comprehensive implementation plans with bite-sized tasks, exact file paths, and complete code examples.
 version: 1.1.0
 author: Xerxes Agent (adapted from obra/superpowers)
-license: MIT
-metadata:
-  xerxes:
-    tags: [planning, design, implementation, workflow, documentation]
-    related_skills: [subagent-driven-development, test-driven-development, requesting-code-review]
+tags: [planning, design, implementation, workflow, documentation]
 ---
 
 # Writing Implementation Plans
+
+## Metadata
+
+- License: MIT
+- Related skills: subagent-driven-development, test-driven-development, requesting-code-review
 
 ## Overview
 

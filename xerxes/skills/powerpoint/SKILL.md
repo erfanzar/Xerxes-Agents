@@ -3,13 +3,16 @@ name: powerpoint
 description: Safely edit and repack caller-provided OOXML presentation and document directories with Xerxes' Bun-native Office commands.
 version: 1.0.0
 author: Xerxes Agents
-license: Apache-2.0
 tags: [powerpoint, pptx, ooxml, office, bun]
 required_tools: [exec_command]
 platforms: [macos, linux, windows]
 ---
 
 # PowerPoint and OOXML
+
+## Metadata
+
+- License: Apache-2.0
 
 Use this skill when a user asks Xerxes to make a structural change to a PowerPoint presentation or another Office Open XML package. The executable behavior lives in Xerxes' native TypeScript runtime; this bundle supplies only the operating workflow.
 

@@ -3,14 +3,15 @@ name: code-review
 description: Review the current changes (working tree, staged, or a branch vs its base) for correctness, bugs, and maintainability. Use when the user asks for a review before committing, pushing, or opening a PR.
 version: 1.0.0
 author: Xerxes Agent
-license: MIT
-metadata:
-  xerxes:
-    tags: [Code-Review, Quality, Git]
-    related_skills: [github-code-review, security-review]
+tags: [Code-Review, Quality, Git]
 ---
 
 # Code Review
+
+## Metadata
+
+- License: MIT
+- Related skills: github-code-review, security-review
 
 Review changes like a strong senior engineer: findings first, ranked by severity,
 each with file:line and a concrete fix. No summary padding, no compliments.

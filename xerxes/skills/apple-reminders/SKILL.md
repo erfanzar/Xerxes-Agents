@@ -3,16 +3,16 @@ name: apple-reminders
 description: Manage Apple Reminders via remindctl CLI (list, add, complete, delete).
 version: 1.0.0
 author: Xerxes Agent
-license: MIT
 platforms: [macos]
-metadata:
-  xerxes:
-    tags: [Reminders, tasks, todo, macOS, Apple]
-prerequisites:
-  commands: [remindctl]
+tags: [Reminders, tasks, todo, macOS, Apple]
 ---
 
 # Apple Reminders
+
+## Metadata
+
+- License: MIT
+- Prerequisite commands: remindctl
 
 Use `remindctl` to manage Apple Reminders directly from the terminal. Tasks sync across all Apple devices via iCloud.
 

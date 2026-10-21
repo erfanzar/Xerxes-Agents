@@ -3,15 +3,16 @@ name: architecture-diagram
 description: Generate professional dark-themed system architecture diagrams as standalone HTML/SVG files. Self-contained output with no external dependencies. Based on Cocoon AI's architecture-diagram-generator (MIT).
 version: 1.0.0
 author: Cocoon AI (hello@cocoon-ai.com), ported by Xerxes Agent
-license: MIT
 dependencies: []
-metadata:
-  xerxes:
-    tags: [architecture, diagrams, SVG, HTML, visualization, infrastructure, cloud]
-    related_skills: [excalidraw]
+tags: [architecture, diagrams, SVG, HTML, visualization, infrastructure, cloud]
 ---
 
 # Architecture Diagram Skill
+
+## Metadata
+
+- License: MIT
+- Related skills: excalidraw
 
 Generate professional, dark-themed technical architecture diagrams as standalone HTML files with inline SVG graphics. No external tools, no API keys, no rendering libraries — just write the HTML file and open it in a browser.
 

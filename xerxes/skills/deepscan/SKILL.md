@@ -1,9 +1,6 @@
 ---
 name: deepscan
-description: >-
-  Spawns a swarm of specialized agents to deeply analyze the current project
-  and compile comprehensive findings into project-scoped agent memory.
-  ALWAYS runs agents in parallel — sequential analysis is unacceptable.
+description: Spawns a swarm of specialized agents to deeply analyze the current project and compile comprehensive findings into project-scoped agent memory. ALWAYS runs agents in parallel — sequential analysis is unacceptable.
 version: "2.2"
 tags: [analysis, swarm, project, deepscan, multi-agent, parallel]
 required_tools: [SpawnAgents, agent_memory_status, agent_memory_read, agent_memory_write, agent_memory_append, agent_memory_journal]

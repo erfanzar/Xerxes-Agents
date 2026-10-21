@@ -3,16 +3,16 @@ name: songsee
 description: Generate spectrograms and audio feature visualizations (mel, chroma, MFCC, tempogram, etc.) from audio files via CLI. Useful for audio analysis, music production debugging, and visual documentation.
 version: 1.0.0
 author: community
-license: MIT
-metadata:
-  xerxes:
-    tags: [Audio, Visualization, Spectrogram, Music, Analysis]
-    homepage: https://github.com/steipete/songsee
-prerequisites:
-  commands: [songsee]
+tags: [Audio, Visualization, Spectrogram, Music, Analysis]
 ---
 
 # songsee
+
+## Metadata
+
+- License: MIT
+- Homepage: https://github.com/steipete/songsee
+- Prerequisite commands: songsee
 
 Generate spectrograms and multi-panel audio feature visualizations from audio files.
 

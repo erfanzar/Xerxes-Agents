@@ -3,16 +3,17 @@ name: gif-search
 description: Search and download GIFs from Tenor using wget. No dependencies beyond curl and jq. Useful for finding reaction GIFs, creating visual content, and sending GIFs in chat.
 version: 1.1.0
 author: Xerxes Agent
-license: MIT
-prerequisites:
-  env_vars: [TENOR_API_KEY]
-  commands: [curl, jq]
-metadata:
-  xerxes:
-    tags: [GIF, Media, Search, Tenor, API]
+tags: [GIF, Media, Search, Tenor, API]
+config_vars: [TENOR_API_KEY]
 ---
 
 # GIF Search (Tenor API)
+
+## Metadata
+
+- License: MIT
+- Prerequisite environment variables: TENOR_API_KEY
+- Prerequisite commands: curl, jq
 
 Search and download GIFs directly via the Tenor API using wget. No extra tools needed.
 

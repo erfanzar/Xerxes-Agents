@@ -1,22 +1,21 @@
 ---
 name: research-paper-writing
-title: Research Paper Writing Pipeline
 description: End-to-end pipeline for writing ML/AI research papers — from experiment design through analysis, drafting, revision, and submission. Covers NeurIPS, ICML, ICLR, ACL, AAAI, COLM. Integrates automated experiment monitoring, statistical analysis, iterative writing, and citation verification.
 version: 1.1.0
 author: Orchestra Research
-license: MIT
 dependencies: [semanticscholar, arxiv, habanero, requests, scipy, numpy, matplotlib, SciencePlots]
 platforms: [linux, macos]
-metadata:
-  xerxes:
-    tags: [Research, Paper Writing, Experiments, ML, AI, NeurIPS, ICML, ICLR, ACL, AAAI, COLM, LaTeX, Citations, Statistical Analysis]
-    category: research
-    related_skills: [arxiv, ml-paper-writing, subagent-driven-development, plan]
-    requires_toolsets: [terminal, files]
-
+tags: [Research, Paper Writing, Experiments, ML, AI, NeurIPS, ICML, ICLR, ACL, AAAI, COLM, LaTeX, Citations, Statistical Analysis]
 ---
 
 # Research Paper Writing Pipeline
+
+## Metadata
+
+- License: MIT
+- Category: research
+- Related skills: arxiv, ml-paper-writing, subagent-driven-development, plan
+- Required toolsets: terminal, files
 
 End-to-end pipeline for producing publication-ready ML/AI research papers targeting **NeurIPS, ICML, ICLR, ACL, AAAI, and COLM**. This skill covers the full research lifecycle: experiment design, execution, monitoring, analysis, paper writing, review, revision, and submission.
 
@@ -1896,8 +1895,10 @@ Official implementation of "[Paper Title]" (Venue Year).
 [Exact commands to set up environment]
 
 ## Reproduction
-To reproduce Table 1: `bash scripts/reproduce_table1.sh`
-To reproduce Figure 2: `python scripts/make_figure2.py`
+Set `RESEARCH_PROJECT` to the absolute root of your research checkout. The following are example helpers in that user-owned project, not files supplied by the writing skill. Replace them with the project's actual, inspected reproduction commands; do not assume they exist.
+
+To reproduce Table 1: `bash "$RESEARCH_PROJECT/scripts/reproduce_table1.sh"`
+To reproduce Figure 2: `python "$RESEARCH_PROJECT/scripts/make_figure2.py"`
 
 ## Citation
 [BibTeX entry]

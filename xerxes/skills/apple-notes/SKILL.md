@@ -3,17 +3,17 @@ name: apple-notes
 description: Manage Apple Notes via the memo CLI on macOS (create, view, search, edit).
 version: 1.0.0
 author: Xerxes Agent
-license: MIT
 platforms: [macos]
-metadata:
-  xerxes:
-    tags: [Notes, Apple, macOS, note-taking]
-    related_skills: [obsidian]
-prerequisites:
-  commands: [memo]
+tags: [Notes, Apple, macOS, note-taking]
 ---
 
 # Apple Notes
+
+## Metadata
+
+- License: MIT
+- Related skills: obsidian
+- Prerequisite commands: memo
 
 Use `memo` to manage Apple Notes directly from the terminal. Notes sync across all Apple devices via iCloud.
 

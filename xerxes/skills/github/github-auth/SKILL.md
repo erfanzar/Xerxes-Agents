@@ -3,14 +3,15 @@ name: github-auth
 description: Use GitHub authentication that the user or host has explicitly supplied through gh, an injected host integration, SSH, or the current process environment.
 version: 1.2.0
 author: Xerxes Agent
-license: MIT
-metadata:
-  xerxes:
-    tags: [GitHub, Authentication, Git, gh-cli, SSH, Setup]
-    related_skills: [github-pr-workflow, github-code-review, github-issues, github-repo-management]
+tags: [GitHub, Authentication, Git, gh-cli, SSH, Setup]
 ---
 
 # GitHub Authentication
+
+## Metadata
+
+- License: MIT
+- Related skills: github-pr-workflow, github-code-review, github-issues, github-repo-management
 
 Use only authentication that the user or host has deliberately made available. Authentication discovery is read-only and must never turn into credential-file discovery.
 

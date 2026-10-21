@@ -3,16 +3,17 @@ name: notion
 description: Notion API for creating and managing pages, databases, and blocks via curl. Search, create, update, and query Notion workspaces directly from the terminal.
 version: 1.0.0
 author: community
-license: MIT
-metadata:
-  xerxes:
-    tags: [Notion, Productivity, Notes, Database, API]
-    homepage: https://developers.notion.com
-prerequisites:
-  env_vars: [NOTION_API_KEY]
+tags: [Notion, Productivity, Notes, Database, API]
+config_vars: [NOTION_API_KEY]
 ---
 
 # Notion API
+
+## Metadata
+
+- License: MIT
+- Homepage: https://developers.notion.com
+- Prerequisite environment variables: NOTION_API_KEY
 
 Use the Notion API via curl to create, read, update pages, databases (data sources), and blocks. No extra tools needed — just curl and a Notion API key.
 

@@ -3,14 +3,15 @@ name: security-review
 description: Security-focused review of pending changes — injection, auth, secrets, unsafe deserialization, dependency risk. Use when the user asks for a security scan or before shipping code touching auth, network, files, or shell execution.
 version: 1.0.0
 author: Xerxes Agent
-license: MIT
-metadata:
-  xerxes:
-    tags: [Security, Review, OWASP, Git]
-    related_skills: [code-review, bug-bounty-hunter]
+tags: [Security, Review, OWASP, Git]
 ---
 
 # Security Review
+
+## Metadata
+
+- License: MIT
+- Related skills: code-review, bug-bounty-hunter
 
 Adversarial review of the pending changes. Assume the reviewed code will handle
 hostile input. Findings are exploitable-or-not: each must name the attack

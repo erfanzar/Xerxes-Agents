@@ -1,17 +1,18 @@
 ---
-name: segment-anything-model
+name: segment-anything
 description: Foundation model for image segmentation with zero-shot transfer. Use when you need to segment any object in images using points, boxes, or masks as prompts, or automatically generate all object masks in an image.
 version: 1.0.0
 author: Orchestra Research
-license: MIT
 dependencies: [segment-anything, transformers>=4.30.0, torch>=1.7.0]
-metadata:
-  xerxes:
-    tags: [Multimodal, Image Segmentation, Computer Vision, SAM, Zero-Shot]
-
+tags: [Multimodal, Image Segmentation, Computer Vision, SAM, Zero-Shot]
 ---
 
 # Segment Anything Model (SAM)
+
+## Metadata
+
+- License: MIT
+- Previous skill name: segment-anything-model
 
 Comprehensive guide to using Meta AI's Segment Anything Model for zero-shot image segmentation.
 
@@ -328,8 +329,10 @@ for point in points:
 
 ### Export model
 
+The export helper belongs to the user's upstream Segment Anything checkout, not this skill bundle. Set `SAM_REPOSITORY` to that checkout's absolute root, verify the helper exists there, and use the project's already-configured environment. If it is absent, stop and report the missing upstream helper; this skill does not ship or install it.
+
 ```bash
-python scripts/export_onnx_model.py \
+python "$SAM_REPOSITORY/scripts/export_onnx_model.py" \
     --checkpoint sam_vit_h_4b8939.pth \
     --model-type vit_h \
     --output sam_onnx.onnx \

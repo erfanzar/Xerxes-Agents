@@ -3,14 +3,15 @@ name: opencode
 description: Delegate coding tasks to OpenCode CLI agent for feature implementation, refactoring, PR review, and long-running autonomous sessions. Requires the opencode CLI installed and authenticated.
 version: 1.2.0
 author: Xerxes Agent
-license: MIT
-metadata:
-  xerxes:
-    tags: [Coding-Agent, OpenCode, Autonomous, Refactoring, Code-Review]
-    related_skills: [claude-code, codex, xerxes-agent]
+tags: [Coding-Agent, OpenCode, Autonomous, Refactoring, Code-Review]
 ---
 
 # OpenCode CLI
+
+## Metadata
+
+- License: MIT
+- Related skills: claude-code, codex, xerxes-agent
 
 Use [OpenCode](https://opencode.ai) as an autonomous coding worker orchestrated by Xerxes terminal/process tools. OpenCode is a provider-agnostic, open-source AI coding agent with a TUI and CLI.
 
